@@ -752,6 +752,9 @@ export function chatWorkRequestLines(scope: Pick<ChatScope, 'kind' | 'repos'>, o
 export interface ChatStatementOptions {
   /** The chat runs a read-only analysis workflow (`analyze`): no `PLAN+` work proposals. */
   analysis?: boolean;
+  /** (program DES-LEARN §3.3) The personality's voice block (`persona/voice.ts`): how to talk, never what
+   *  may be done. Absent = no personality saved for this chat's scope. */
+  voice?: string;
 }
 
 export function chatScopeStatement(
@@ -897,6 +900,8 @@ export function chatScopeStatement(
   if (scope.projectId !== undefined) {
     lines.push('## Project', '', `This chat is filed into project \`${scope.projectId}\`.`, '');
   }
+  // DES-LEARN §3.3: last, so it reads as how to say all of the above, never as a new permission.
+  if (opts.voice !== undefined && opts.voice.trim() !== '') lines.push(opts.voice.trimEnd(), '');
   return `${lines.join('\n')}\n`;
 }
 

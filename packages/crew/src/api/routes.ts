@@ -134,7 +134,7 @@ import {
   STEERING_TYPES,
   registerGovernanceSteeringRoutes,
 } from './governance-steering.js';
-import { isSteeringAuthorRun, landSteeringProposal } from './steering-landing.js';
+import { atProposeGate, draftedSteeringRules, isSteeringAuthorRun, landSteeringProposal, type SteeringProposalSnapshot } from './steering-landing.js';
 import { inventoryComplete, parseInventoryClaims, type InventoryClaim } from '../core/inventory-claim.js';
 import type { RejudgeOffer, RunInventoryResponse, RunLearningsResponse, SkipQeOffer } from 'wicked-crew-api-types';
 import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, FileProposalSchema, registerCaptureRoutes } from './capture.js';
@@ -874,7 +874,15 @@ export const GateSchema = z.object({
   /** (api-types 0.156.0, DES-VOICE) The person answered by voice and confirmed it on screen: recorded on the
    *  `gate.decided` audit line and the decided-gate history ("by voice, confirmed"). It grants nothing. */
   input: z.literal('voice').optional(),
+  /** (program DES-LEARN §3.1, api-types 0.160.0) On a steering-author propose gate: the drafted rule ids
+   *  (`GET /governance/steering/author/:runId/draft`) the person keeps. Only those land; the rest are
+   *  declined. Absent = every drafted rule lands, as before. 409 `no_draft` unless the run waits at its
+   *  steering-author propose gate with a readable draft; 400 with anything but a plain approve. */
+  keepRules: z.array(z.string().min(1).max(256)).max(500).optional(),
 }).strict().refine(
+  (b) => b.keepRules === undefined || (b.approve && (b.action === undefined || b.action === 'approve') && b.plan === undefined),
+  { message: 'keepRules goes with a plain approve (no action other than approve, no plan) of a steering-author propose gate', path: ['keepRules'] },
+).refine(
   (b) => b.action === undefined
     || (b.action === 'approve' || b.action === 'edit_plan' || b.action === 'amend_intent' || b.action === OPERATOR_JUDGMENT_ACTION || b.action === SKIP_QE_ACTION || isEscalationAction(b.action)) === b.approve,
   { message: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve, edit_plan, amend_intent, operator_judgment, skip_qe, extend, targeted, accept_partial, accept_suggestion, rejudge and consent:<id> require approve: true', path: ['action'] },
@@ -1088,6 +1096,9 @@ export interface RegisteredRoutes {
 }
 
 export interface RuntimeDeps {
+  /** (program DES-LEARN §3.3) The voice block of the personality a chat in this project uses (the project's
+   *  override, else the person's), or null when none is saved; absent = no personalities on this daemon. */
+  personaVoice?: (projectId: string | null) => string | null;
   /** DES-RUNS-REVIEW-001: prepare a `review-recent-work` launch (snapshot, write root, one seat); absent = launched as-is.
    *  Its coverage is the review schedule's projects, wherever it was launched from (the run is still filed under the
    *  caller's project). */
@@ -1486,6 +1497,11 @@ export function registerRoutes(
   const guidanceIndex = runtime.guidanceIndex ?? new GuidanceIndex();
   const chatScopes = runtime.chatScopes ?? new ChatScopeIndex();
   const chatTurns = runtime.chatTurns ?? new ChatTurnIndex();
+  // DES-LEARN §3.3: the voice a chat in this project is told (the project's override, else the person's).
+  const voiceFor = (projectId: string | null | undefined): { voice?: string } => {
+    const v = runtime.personaVoice?.(projectId ?? null) ?? null;
+    return v === null ? {} : { voice: v };
+  };
   const askPaths = runtime.askPaths ?? new AskPathIndex();
   const chatTranscripts = runtime.chatTranscripts;
   const chatAttachments = runtime.chatAttachments ?? new ChatAttachmentStore();
@@ -3351,6 +3367,33 @@ export function registerRoutes(
     },
   );
 
+  // (program DES-LEARN §3.1) A steering-author run's DRAFTED rules, read before the person decides: the
+  // same sources and the same normalization the landing uses, so the ids a person keeps are the ids
+  // `POST /runs/:id/gate {keepRules}` names. `ready: false` until the propose step has run and its gate
+  // is the run's open gate. Read-only.
+  app.get(
+    `${V}/governance/steering/author/:runId/draft`,
+    { config: { manifest: { responseType: 'SteeringDraftResponse', statusCodes: [200, 404, 500] } } },
+    async (req, reply) => {
+      const { runId } = req.params as { runId: string };
+      const views = await adapter.sessionsDetail();
+      const run = views.find((v) => v.session.id === runId);
+      if (!run) return reply.code(404).send({ error: 'Run not found' });
+      if (!isSteeringAuthorRun(run)) return reply.code(404).send({ error: `run ${runId} is not a steering-author run`, code: 'not_steering_author' });
+      const open = run.session.status === 'awaiting_human' ? await gateOfRecord(run, undefined) : null;
+      const prompt = open !== null && !('refusal' in open) ? open.prompt : undefined;
+      const draft = await draftedSteeringRules(adapter, run, prompt);
+      if (draft !== null && 'unreadable' in draft) return reply.code(500).send({ error: draft.unreadable });
+      const waiting = open !== null && !('refusal' in open) && atProposeGate(run);
+      return {
+        runId,
+        ready: draft !== null && waiting,
+        rules: draft?.rules ?? [],
+        ...(draft !== null ? { source: draft.source } : {}),
+      };
+    },
+  );
+
   // ── Inventory claims (crew#721) — whether each enumerating step's list is complete ──
   // A step that lists things a later step acts on ends its reply with a `wicked-inventory` block
   // (wicked-garden core/refs/inventory-report.md). This reads them off every unit's captured
@@ -3868,7 +3911,7 @@ export function registerRoutes(
         if (!chatScopes.owns(chatId, token)) {
           return reply.code(409).send({ error: `chat ${chatId} was closed while it was being opened; open it again` });
         }
-        prepareChatScratch(chatId, scope, inForceAtOpen, statementOpts);
+        prepareChatScratch(chatId, scope, inForceAtOpen, { ...statementOpts, ...voiceFor(scope.projectId) });
       } catch (err) {
         // The helper removes only what it created itself (a pre-existing root is preserved) —
         // nothing more is removed here (codex on #808 r4, 3).
@@ -4291,7 +4334,7 @@ export function registerRoutes(
       }
       if (storedScope !== undefined && scope !== undefined && engine !== undefined &&
         (JSON.stringify(scope) !== JSON.stringify(storedScope) || JSON.stringify(engine) !== JSON.stringify(chatScopes.engineOf(id)))) {
-        prepareChatScratch(id, scope, rules, { analysis: path.workflow !== undefined });
+        prepareChatScratch(id, scope, rules, { analysis: path.workflow !== undefined, ...voiceFor(scope.projectId) });
         if (chatScopes.refresh(id, storedScope, scope, engine)) {
           chatTranscripts?.registerRoots(id, scope.repos.map((r) => ({ absRoot: resolve(r.rootPath), name: r.name })));
         }
@@ -4320,7 +4363,7 @@ export function registerRoutes(
       // chat (crew#1157) never delivers: it is bound to its repository read-only, with no deliver.
       const repoRef = scope?.kind === 'repos' && scope.repos.length === 1 ? scope.repos[0]!.id : undefined;
       const delivers = repoRef !== undefined && path.workflow === undefined;
-      const statementOpts = { analysis: path.workflow !== undefined };
+      const statementOpts = { analysis: path.workflow !== undefined, ...voiceFor(scope?.projectId) };
       const projectId = scope?.projectId;
       if (path.runId === undefined) {
         const stepId = 'answer-1';
@@ -5396,6 +5439,21 @@ export function registerRoutes(
       const steeringPropose =
         parsed.data.approve && isSteeringAuthorRun(run);
       const gatePrompt = steeringPropose ? decided.prompt : undefined;
+      // DES-LEARN §3.1: `keepRules` names drafted rules: on a steering-author propose gate only, and only
+      // ids of THIS draft. A draft that changed since the person read it is a 409, the gate left open.
+      let keptSnapshot: SteeringProposalSnapshot | undefined;
+      if (parsed.data.keepRules !== undefined) {
+        const draft = steeringPropose && atProposeGate(run) ? await draftedSteeringRules(adapter, run, gatePrompt) : null;
+        if (draft === null || 'unreadable' in draft) {
+          return { code: 409, body: { error: 'keepRules answers a steering-author propose gate with a readable draft; this gate has none', code: 'no_draft' } };
+        }
+        const ids = new Set(draft.rules.map((r) => r.id));
+        const unknown = parsed.data.keepRules.filter((k) => !ids.has(k));
+        if (unknown.length > 0) {
+          return { code: 409, body: { error: `the draft changed since it was read (no drafted rule ${unknown.join(', ')}): read it again`, code: 'draft_changed' } };
+        }
+        keptSnapshot = draft.snapshot;
+      }
     try {
         // All five positionals, explicit `undefined` for the absent ones (DES-L1 PR-2; the
         // gate-arms tripwire pins the arity). An engine refusal (no creator to send back to,
@@ -5459,7 +5517,10 @@ export function registerRoutes(
         // text (an operator who wants different rules rejects and re-authors). A reject lands
         // nothing — the run cancels and the proposal stays an artifact.
         const landing = steeringPropose
-          ? await landSteeringProposal({ adapter, audit, actor }, run, gatePrompt)
+          ? await landSteeringProposal({ adapter, audit, actor }, run, gatePrompt, {
+            ...(parsed.data.keepRules !== undefined ? { keep: parsed.data.keepRules } : {}),
+            ...(keptSnapshot !== undefined ? { snapshot: keptSnapshot } : {}),
+          })
           : undefined;
         return {
           code: 200,

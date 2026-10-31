@@ -106,6 +106,9 @@ export interface SteeringLandingResult {
   alreadyLanded?: boolean;
   /** Present iff `outcome: "failed"` — the loud, operator-readable reason. */
   error?: string;
+  /** (program DES-LEARN §3.1) The drafted rules the person did NOT keep (the approve named `keepRules`):
+   *  never landed, audited as `governance.steering.declined`. Absent when the approve kept every rule. */
+  declinedIds?: string[];
 }
 
 /** True when this run IS a steering-author run — its NAME, as the engine recorded it
@@ -313,6 +316,8 @@ interface LandedMarker {
   at: string;
   /** sha256 of the landed proposal's canonical rules (absent on markers from before core#649 M8). */
   digest?: string;
+  /** The drafted rules the person did not keep (DES-LEARN §3.1). */
+  declinedIds?: string[];
 }
 
 /** JSON with every object's keys sorted, so the same rules always hash the same. */
@@ -345,50 +350,17 @@ async function readIfExists(path: string): Promise<string | null> {
 }
 
 /**
- * Perform the landing for an APPROVED steering-author propose gate. Called AFTER
- * `confirmGate` resolved — the gate decision is already durable; this function's only job is
- * the write the doctrine promised. Never throws: every failure is folded into a loud
- * `outcome: "failed"` result (and the audit trail), because a landing error must not turn an
- * already-successful gate approval into an HTTP 500.
- *
- * `gatePrompt` is the cached gate prompt captured BEFORE the confirm (terminal events prune
- * the cache) — the last-resort proposal source.
+ * The drafted rules of a steering-author run, from the same sources the landing reads, in its order:
+ * the deliverable file, the propose unit's stored transcript (stored on approval), then the gate
+ * prompt core composed from that output. `rules: null` = no source yielded a JSON rule array;
+ * `unreadable` = a present deliverable could not be read (never silently skipped).
  */
-export async function landSteeringProposal(
-  deps: SteeringLandingDeps,
-  run: SessionView,
-  gatePrompt?: string,
-): Promise<SteeringLandingResult | undefined> {
-  const runId = run.session.id;
-  const { adapter, audit, actor } = deps;
-
-  // ── Only an approve that follows the propose step lands (core#649 M8) ─────────
-  // Since `steering-author` is a preset, the run is PA-scoped and floor-filled: it can pause at
-  // a plan-approval gate BEFORE propose runs, and floor phases can gate AFTER it. A unit's status
-  // cannot tell: the engine marks every unit `distributed` when it assigns seats, before any runs.
-  // The run's cursor can: `unit_ix` is the index of the NEXT unit to execute (0-based over the
-  // units in ord order), so propose has run exactly when its index is below it. Approving a gate
-  // before that approves no proposal: nothing lands and the route sends no `landing`. (`run` is
-  // the view taken before the confirm.)
-  const ordered = [...run.units].sort((a, b) => a.ord - b.ord);
-  const proposeIx = ordered.findIndex((u) => u.id === `${runId}:propose` || u.id.endsWith(':propose'));
-  if (proposeIx < 0 || proposeIx >= run.session.unit_ix) return undefined;
-  const proposeUnit = ordered[proposeIx]!;
-
-  const failed = (error: string, landedIds: string[] = [], source?: SteeringProposalSource): SteeringLandingResult => {
-    audit.record('governance.steering.landing_failed', actor, {
-      runId,
-      detail: { error, ...(landedIds.length > 0 ? { landedRuleIds: landedIds } : {}) },
-    });
-    return {
-      outcome: 'failed',
-      ruleIds: landedIds,
-      ...(source !== undefined ? { source } : {}),
-      error,
-    };
-  };
-
-  // ── Read the proposal: deliverable file → stored transcript → cached gate prompt ──
+export async function readSteeringProposal(
+  adapter: Pick<CoreAdapter, 'workOutput'>,
+  runId: string,
+  proposeUnit: SessionView['units'][number],
+  gatePrompt: string | undefined,
+): Promise<{ rules: RawRule[] | null; source: SteeringProposalSource | undefined } | { unreadable: string }> {
   let rawRules: RawRule[] | null = null;
   let source: SteeringProposalSource | undefined;
 
@@ -398,9 +370,9 @@ export async function landSteeringProposal(
   } catch (err) {
     // A present-but-unreadable deliverable (EACCES, EIO) must NOT silently fall back to the
     // transcript — that would mask an operational failure. Fail the landing loudly instead.
-    return failed(
-      `the run's proposal deliverable exists but could not be read: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    return {
+      unreadable: `the run's proposal deliverable exists but could not be read: ${err instanceof Error ? err.message : String(err)}`,
+    };
   }
   if (fileText !== null) {
     rawRules = extractProposedRules(fileText);
@@ -427,6 +399,113 @@ export async function landSteeringProposal(
     rawRules = extractProposedRules(gatePrompt);
     if (rawRules !== null) source = 'gate-prompt';
   }
+  return { rules: rawRules, source };
+}
+
+function proposeIndex(run: SessionView): { ordered: SessionView['units']; ix: number } {
+  const runId = run.session.id;
+  const ordered = [...run.units].sort((a, b) => a.ord - b.ord);
+  return { ordered, ix: ordered.findIndex((u) => u.id === `${runId}:propose` || u.id.endsWith(':propose')) };
+}
+
+/** The propose unit of a steering-author run, once it has run (`unit_ix` is past it), else null. */
+export function proposeUnitOf(run: SessionView): SessionView['units'][number] | null {
+  const { ordered, ix } = proposeIndex(run);
+  if (ix < 0 || ix >= run.session.unit_ix) return null;
+  return ordered[ix]!;
+}
+
+/**
+ * (program DES-LEARN §3.1) The run waits at its PROPOSE gate: it is awaiting a person and propose is the last
+ * unit that ran (the cursor sits right after it). A plan-approval pause before propose, or a floor phase's gate
+ * after it, is not — `keepRules` and a ready draft belong to the propose gate only.
+ */
+export function atProposeGate(run: SessionView): boolean {
+  const { ix } = proposeIndex(run);
+  return run.session.status === 'awaiting_human' && ix >= 0 && ix === run.session.unit_ix - 1;
+}
+
+/** A proposal read before the confirm, handed to the landing so it lands exactly what was validated. */
+export interface SteeringProposalSnapshot {
+  rules: RawRule[];
+  source: SteeringProposalSource;
+}
+
+/**
+ * (program DES-LEARN §3.1) The drafted rules of a run waiting at its propose gate, normalized exactly as
+ * the landing will land them — so the ids a person keeps are the ids `keepRules` names. `null` when the
+ * propose step has not run, or nothing parseable was found.
+ */
+export async function draftedSteeringRules(
+  adapter: Pick<CoreAdapter, 'workOutput'>,
+  run: SessionView,
+  gatePrompt: string | undefined,
+): Promise<{ rules: ConformanceRule[]; source: SteeringProposalSource; snapshot: SteeringProposalSnapshot } | { unreadable: string } | null> {
+  const unit = proposeUnitOf(run);
+  if (unit === null) return null;
+  const read = await readSteeringProposal(adapter, run.session.id, unit, gatePrompt);
+  if ('unreadable' in read) return read;
+  if (read.rules === null || read.source === undefined) return null;
+  const defaultType = steeringTypeFromProblem(run.session.problem);
+  return {
+    rules: read.rules.map((r) => normalizeProposedRule(r, defaultType, [])),
+    source: read.source,
+    snapshot: { rules: read.rules, source: read.source },
+  };
+}
+
+/**
+ * Perform the landing for an APPROVED steering-author propose gate. Called AFTER
+ * `confirmGate` resolved — the gate decision is already durable; this function's only job is
+ * the write the doctrine promised. Never throws: every failure is folded into a loud
+ * `outcome: "failed"` result (and the audit trail), because a landing error must not turn an
+ * already-successful gate approval into an HTTP 500.
+ *
+ * `gatePrompt` is the cached gate prompt captured BEFORE the confirm (terminal events prune
+ * the cache) — the last-resort proposal source.
+ */
+export async function landSteeringProposal(
+  deps: SteeringLandingDeps,
+  run: SessionView,
+  gatePrompt?: string,
+  /** (program DES-LEARN §3.1) `keep`: the drafted rule ids the person kept (absent = every drafted rule).
+   *  `snapshot`: the proposal the route read and validated `keep` against BEFORE the confirm — landed as is,
+   *  never re-read, so what lands is what was checked. */
+  opts: { keep?: readonly string[]; snapshot?: SteeringProposalSnapshot } = {},
+): Promise<SteeringLandingResult | undefined> {
+  const { keep, snapshot } = opts;
+  const runId = run.session.id;
+  const { adapter, audit, actor } = deps;
+
+  // ── Only an approve that follows the propose step lands (core#649 M8) ─────────
+  // Since `steering-author` is a preset, the run is PA-scoped and floor-filled: it can pause at
+  // a plan-approval gate BEFORE propose runs, and floor phases can gate AFTER it. A unit's status
+  // cannot tell: the engine marks every unit `distributed` when it assigns seats, before any runs.
+  // The run's cursor can: `unit_ix` is the index of the NEXT unit to execute (0-based over the
+  // units in ord order), so propose has run exactly when its index is below it. Approving a gate
+  // before that approves no proposal: nothing lands and the route sends no `landing`. (`run` is
+  // the view taken before the confirm.)
+  const proposeUnit = proposeUnitOf(run);
+  if (proposeUnit === null) return undefined;
+
+  const failed = (error: string, landedIds: string[] = [], source?: SteeringProposalSource): SteeringLandingResult => {
+    audit.record('governance.steering.landing_failed', actor, {
+      runId,
+      detail: { error, ...(landedIds.length > 0 ? { landedRuleIds: landedIds } : {}) },
+    });
+    return {
+      outcome: 'failed',
+      ruleIds: landedIds,
+      ...(source !== undefined ? { source } : {}),
+      error,
+    };
+  };
+
+  // ── Read the proposal: deliverable file → stored transcript → cached gate prompt ──
+  const read = snapshot ?? await readSteeringProposal(adapter, runId, proposeUnit, gatePrompt);
+  if ('unreadable' in read) return failed(read.unreadable);
+  const rawRules = read.rules;
+  const source = read.source;
 
   if (rawRules === null || source === undefined) {
     return failed(
@@ -444,7 +523,11 @@ export async function landSteeringProposal(
   // send the run back to propose, and the revised proposal it then approves must land. A marker
   // from before M8 carries no digest, so it cannot prove THIS proposal landed: it is ignored and
   // the proposal is upserted (by rule id, so a same-content replay rewrites identical rules).
-  const digest = proposalDigest(rawRules);
+  // DES-LEARN §3.1: the decision is the proposal AND the selection: a replay of the same pick re-lands nothing,
+  // while a different pick of the same proposal (after a send-back) is a new decision and lands.
+  const digest = keep === undefined
+    ? proposalDigest(rawRules)
+    : createHash('sha256').update(`${proposalDigest(rawRules)}\nkeep:${canonicalJson([...new Set(keep)].sort())}`).digest('hex');
   let markerText: string | null = null;
   try {
     markerText = await readIfExists(steeringLandedMarkerPath(runId));
@@ -461,6 +544,7 @@ export async function landSteeringProposal(
           ruleIds: marker.ruleIds,
           source: marker.source,
           alreadyLanded: true,
+          ...(Array.isArray(marker.declinedIds) && marker.declinedIds.length > 0 ? { declinedIds: marker.declinedIds } : {}),
         };
       }
     } catch {
@@ -470,7 +554,12 @@ export async function landSteeringProposal(
 
   const defaultType = steeringTypeFromProblem(run.session.problem);
   const coercions: string[] = [];
-  const rules = rawRules.map((r) => normalizeProposedRule(r, defaultType, coercions));
+  const drafted = rawRules.map((r) => normalizeProposedRule(r, defaultType, coercions));
+  // DES-LEARN §3.1: the person picked which drafted rules to keep; the rest are declined, never landed.
+  const keepSet = keep === undefined ? null : new Set(keep);
+  const rules = keepSet === null ? drafted : drafted.filter((r) => keepSet.has(r.id));
+  const declinedIds = keepSet === null ? [] : drafted.filter((r) => !keepSet.has(r.id)).map((r) => r.id);
+  const declined = declinedIds.length > 0 ? { declinedIds } : {};
 
   // ── The same pre-steering-engine guard as POST /governance/rules ─────────────
   if (!adapter.steeringSupported()) {
@@ -485,6 +574,10 @@ export async function landSteeringProposal(
           `re-author.`,
       );
     }
+  }
+
+  if (declinedIds.length > 0) {
+    audit.record('governance.steering.declined', actor, { runId, detail: { ruleIds: declinedIds, via: STEERING_AUTHOR_WORKFLOW } });
   }
 
   // ── Land, auditing each write exactly as the doctrine documents ──────────────
@@ -526,11 +619,11 @@ export async function landSteeringProposal(
   // ── Durable marker (best-effort — the upsert is idempotent even without it) ──
   try {
     await fsp.mkdir(steeringInboxDir(runId), { recursive: true });
-    const marker: LandedMarker = { ruleIds: landedIds, source, at: new Date().toISOString(), digest };
+    const marker: LandedMarker = { ruleIds: landedIds, source, at: new Date().toISOString(), digest, ...declined };
     await fsp.writeFile(steeringLandedMarkerPath(runId), JSON.stringify(marker, null, 2), 'utf8');
   } catch {
     /* a missing marker degrades to a re-upsert of identical content, never a duplicate */
   }
 
-  return { outcome: 'landed', ruleIds: landedIds, source };
+  return { outcome: 'landed', ruleIds: landedIds, source, ...declined };
 }

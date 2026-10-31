@@ -2428,6 +2428,14 @@ export interface GateDecision {
    * `gate.decided` audit line and {@link DecidedGate.input}; it grants nothing a typed answer does not.
    */
   input?: 'voice';
+  /**
+   * (api-types 0.160.0, program DES-LEARN §3.1) On a steering-author propose gate: the drafted rule ids
+   * (`SteeringDraftResponse.rules[].id`) the person keeps. Only those land; the rest are declined
+   * (`SteeringLandingResult.declinedIds`, audited `governance.steering.declined`). Absent = every drafted
+   * rule lands. With a plain approve only (400 otherwise); **409** `no_draft` on a gate with no readable
+   * draft, **409** `draft_changed` when an id is not in the draft as it reads now (the gate stays open).
+   */
+  keepRules?: string[];
 }
 
 /**
@@ -4566,6 +4574,91 @@ export interface SteeringLandingResult {
   alreadyLanded?: boolean;
   /** Present iff `outcome: "failed"` — the loud, operator-readable reason. */
   error?: string;
+  /** (api-types 0.160.0) The drafted rules the approve's `keepRules` left out: never landed. */
+  declinedIds?: string[];
+}
+
+/**
+ * `GET /governance/steering/author/:runId/draft` (api-types 0.160.0, program DES-LEARN §3.1): a
+ * steering-author run's drafted rules, normalized exactly as the landing lands them. `ready` is true once
+ * the propose step has run and the run waits at a gate; until then `rules` may be empty. 404 for an
+ * unknown run or one that is not steering-author (`code: "not_steering_author"`).
+ */
+export interface SteeringDraftResponse {
+  runId: string;
+  ready: boolean;
+  rules: ConformanceRule[];
+  source?: SteeringProposalSource;
+}
+
+// ── Personality (api-types 0.160.0, program DES-LEARN §3.3) ──────────────────────────────────────
+
+/** 0 = the left word, 2 = the right word: length short..thorough, warmth plain..warm, pushback goes
+ *  along..challenges, initiative asks first..just starts. */
+export type PersonaDial = 0 | 1 | 2;
+export type PersonaHabit = 'says-unchecked' | 'tables' | 'cites' | 'names';
+
+/** `PUT /persona`'s `persona`: how the orchestrator talks. Tone only: never read by a gate, review, QE or rule. */
+export interface PersonaInput {
+  /** 1..40 characters. */
+  name: string;
+  /** `#rrggbb`. */
+  colour: string;
+  dials: { length: PersonaDial; warmth: PersonaDial; pushback: PersonaDial; initiative: PersonaDial };
+  habits: PersonaHabit[];
+  /** At most 500 characters, about tone. */
+  notes?: string;
+}
+
+export interface Persona extends PersonaInput {
+  /** 1 on the first save of a scope, one more on each save. */
+  version: number;
+  /** Unix ms. */
+  updatedAt: number;
+}
+
+/** `user`, or `project:<id>` for one project's override. */
+export type PersonaScope = 'user' | `project:${string}`;
+
+/** `GET /persona`: the person's own, every project override, and the voice block each adds to what a chat
+ *  seat is told (the project's override, else the person's, rides every chat's scope statement). */
+export interface PersonaResponse {
+  user: Persona | null;
+  projects: Record<string, Persona>;
+  voice: { user: string | null; projects: Record<string, string> };
+}
+
+/** `PUT /persona` body: a person only (403 otherwise); 404 for an unknown project. */
+export interface PersonaPutBody {
+  scope: PersonaScope;
+  persona: PersonaInput;
+}
+
+export interface PersonaSaved {
+  scope: PersonaScope;
+  persona: Persona;
+  voice: string;
+}
+
+/** `DELETE /persona?scope=project:<id>`: removes a project's override (a person only). */
+export interface PersonaRemoved {
+  removed: true;
+  scope: PersonaScope;
+}
+
+// ── First run (api-types 0.160.0, program DES-LEARN §4) ──────────────────────────────────────────
+
+/** `GET /setup/known` (operator trust): what studio shows before it asks. A fact that cannot be read is
+ *  `null` or empty, never guessed. */
+export interface SetupKnown {
+  /** The global git identity; null when neither name nor email is set. */
+  git: { name: string | null; email: string | null } | null;
+  /** Tracked source files by language across the registered repositories (`git ls-files`), at most 6. */
+  languages: Array<{ name: string; files: number; share: number }>;
+  filesCounted: number;
+  /** Git checkouts one level under the home's code folders and the registered repositories' folders,
+   *  not registered yet (at most 24). `path` is absolute: register with `POST /repos {name, rootPath}`. */
+  nearby: Array<{ name: string; path: string }>;
 }
 
 // ── Skills — the daemon-owned garden plugin root, published as immutable snapshots (api-types 0.28.0) ──
