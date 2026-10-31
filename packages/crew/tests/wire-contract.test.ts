@@ -40,6 +40,7 @@ import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import type { GateCacheEntry } from '../src/api/gate-cache.js';
 import type { ElicitationEntry } from '../src/api/elicitation-cache.js';
 import type { RequirementDetail, RequirementsPage } from '../src/api/requirements.js';
+import { REQUIREMENTS_NOT_GENERATED } from '../src/api/requirements.js';
 import type { ChatOpenSchema, GateSchema, GuidanceSchema, LaunchSchema, OpenPathSchema, OpenTerminalSchema, RepoGraphReply, RetireMemorySchema } from '../src/api/routes.js';
 import type { SteeringAuthorSchema, SteeringImportSchema } from '../src/api/governance-steering.js';
 import type {
@@ -891,6 +892,8 @@ respondsWith<Wire.GovernanceWikiMeta['scoreboard_available'], ReturnType<CoreAda
 // GET/PATCH /repos/:id/requirements — server-side search + overrides.
 respondsWith<Wire.RequirementsPage, RequirementsPage>();
 respondsWith<Wire.RequirementDetail, RequirementDetail>();
+// The not-generated 404 is typed (0.154.0): `code` is the discriminator, never the sentence.
+respondsWith<Wire.RequirementsNotGenerated, typeof REQUIREMENTS_NOT_GENERATED>();
 
 // GET/PUT /settings — persisted system settings (defaults applied server-side). Checked twice:
 // the compiled-in defaults, and the adapter's read shape (defaults + persisted patch), which
