@@ -2923,7 +2923,7 @@ export interface CliUsageEvent {
 }
 
 /**
- * (0.153.0) `/ws` frame (and logged with the run): a working seat's running token TOTAL for one unit attempt, live from
+ * (0.155.0) `/ws` frame (and logged with the run): a working seat's running token TOTAL for one unit attempt, live from
  * its own stream (wicked-core: claude per assistant message, pi per `message_end`, codex per `turn.completed`). Fresh +
  * cache input, as {@link CliUsageEvent} counts it; sent when it changed, at most one per 3 s. `costUsd` only where the
  * seat's stream states one (pi), else `null`. The attempt's `cliUsage` at its end stays the record.
@@ -6719,12 +6719,12 @@ export interface RunLearningsResponse {
   }>;
 }
 
-/** (0.153.0) The in-flight check's verdict on a working step. */
+/** (0.155.0) The in-flight check's verdict on a working step. */
 export type UnitInspectVerdict = 'progressing' | 'looping' | 'stuck' | 'wasteful';
-/** (0.153.0) The one action a check recommends; the person chooses, nothing is done for them. */
+/** (0.155.0) The one action a check recommends; the person chooses, nothing is done for them. */
 export type UnitInspectAction = 'let_run' | 'steer' | 'stop';
 
-/** (0.153.0) Crew's own deterministic reading of a working step's newest attempt (crew src/inspect/reading.ts). */
+/** (0.155.0) Crew's own deterministic reading of a working step's newest attempt (crew src/inspect/reading.ts). */
 export interface UnitInspectReading {
   ord: number;
   attempt: number;
@@ -6745,7 +6745,7 @@ export interface UnitInspectReading {
 }
 
 /**
- * (0.153.0) One "Is this going well?" check on a working step (`POST /runs/:id/units/:ord/inspect`). A seat that is not
+ * (0.155.0) One "Is this going well?" check on a working step (`POST /runs/:id/units/:ord/inspect`). A seat that is not
  * the step's own reads the step's record (one read-only `inspect-unit` run, bounded by time and budget) and answers;
  * when none can, or it fails, times out or reaches its budget, `source: 'crew'` and `why` says so and the answer is
  * crew's own reading. It never steers, stops or edits the run it looks at.
@@ -6783,18 +6783,18 @@ export interface UnitInspection {
   cost: { inputTokens: number; outputTokens: number; costUsd: number | null } | null;
 }
 
-/** (0.153.0) `POST /runs/:id/units/:ord/inspect` → 202. 403 for anyone but a human operator; 409 `not_working` when the
+/** (0.155.0) `POST /runs/:id/units/:ord/inspect` → 202. 403 for anyone but a human operator; 409 `not_working` when the
  *  step is not working now. A check already running on the step is answered as it is. */
 export interface UnitInspectionResponse {
   inspection: UnitInspection;
 }
 
-/** (0.153.0) `GET /runs/:id/units/:ord/inspections`: the step's checks, newest first. */
+/** (0.155.0) `GET /runs/:id/units/:ord/inspections`: the step's checks, newest first. */
 export interface UnitInspectionsResponse {
   inspections: UnitInspection[];
 }
 
-/** (0.153.0) `/ws` frame: a check started, its budget moved, or it answered. */
+/** (0.155.0) `/ws` frame: a check started, its budget moved, or it answered. */
 export interface UnitInspectionEvent {
   type: 'unitInspection';
   session: string;
@@ -7546,7 +7546,7 @@ export interface ChatScope {
    *  0.35.0, F-2R2-008) names the UI action that would change a `bound: false` outcome, when one
    *  would: `projects.graph.refresh` = build the project graph from the project page. */
   graph: { bound: boolean; reason: string; repoLabel?: string; action?: ProjectGraphAction };
-  /** `crew.repo` members of the project whose registry record is gone — named, not readable. (0.153.0) Also
+  /** `crew.repo` members of the project whose registry record is gone — named, not readable. (0.155.0) Also
    *  any repo in scope (project or `everything`) whose folder is missing (`repo_folder_missing`). */
   dangling: string[];
 }
@@ -9414,7 +9414,7 @@ export type SystemInfraKey =
   | 'seat_floor'
   | 'disk'
   | 'load'
-  /** (0.153.0) The registered repositories' folders: `down` while any is missing (moved or deleted),
+  /** (0.155.0) The registered repositories' folders: `down` while any is missing (moved or deleted),
    *  naming each with its path; `details.missing` lists `{ id, name, path }`. ABSENT before. */
   | 'repos';
 

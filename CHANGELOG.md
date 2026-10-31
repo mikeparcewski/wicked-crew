@@ -27,7 +27,7 @@ mentioned only where a daemon release depends on them.
   after 4 min or at $0.25 / 400k tokens and answers with its own reading, saying why; with no other signed-in seat,
   a refused launch or an unreadable reply it does the same. The record says whose answer it is and what the check
   cost; `GET /runs/:id/units/:ord/inspections` reads them back, and a `/ws` frame `unitInspection` carries each
-  change. api-types 0.153.0: `UnitInspection*`, and `UsageProgressEvent` (the engine's live `usageProgress` token
+  change. api-types 0.155.0: `UnitInspection*`, and `UsageProgressEvent` (the engine's live `usageProgress` token
   total, wicked-core#1212).
 - **Every run proposes what it learned to the approve queue.** Over the 7 days to 2026-10-30 the rig ran 37 runs and
   filed 0 proposals: only the separate capture-learnings preset and onboarding's chain ever proposed anything, and the
