@@ -25,6 +25,8 @@ import { RetryIndex } from './retry-index.js';
 import { GroupIndex } from './group-index.js';
 import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
 import { OnboardingCaptureChain } from './onboarding-capture.js';
+import { INSPECT_WORKFLOW, InspectService, loadInspectWorkflow } from '../inspect/service.js';
+import { registerInspectRoutes } from '../inspect/routes.js';
 import { DISTILL_WORKFLOW, RunLearningsService, defaultLearningsDir, loadDistillWorkflow, runLearningsMode } from '../learnings/service.js';
 import { memoryContents, proposalRows, submitLearning } from '../learnings/estate.js';
 import { recallLearnings } from '../learnings/recall.js';
@@ -77,6 +79,7 @@ import { TestSetIndex, registerTestSetForRun } from '../qe/test-sets.js';
 import { DocGroundingStore } from '../interactive/doc-grounding.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { crewStateHome } from '../projects/state-home.js';
+import { coreUnitId } from './evidence.js';
 import { homedir } from 'node:os';
 import { discoverMcpServers } from '../mcp/discovery.js';
 import { probeMcpServer } from '../mcp/probe.js';
@@ -1397,6 +1400,42 @@ export async function createServer(
   // A run whose end was interrupted by a restart (its handoff written, its distil run finished while the daemon was
   // down, a submit that failed) is finished now, off the boot path.
   void runLearnings.recover();
+  // The in-flight check (src/inspect): a person asks "is this going well?" about a working step; one seat that is not
+  // the step's own reads its record, read-only, bounded, and says so. It never touches the run it looks at.
+  const INSPECT_ACTOR: Actor = { id: 'unit-inspect', kind: 'system', trust: 'operator' };
+  const unitInspect = new InspectService({
+    adapter: {
+      sessionsDetail: () => adapter.sessionsDetail(),
+      runEvents: (id) => adapter.runEvents(id),
+      seatsForWorkflow: (id) => adapter.seatsForWorkflow(id),
+      launchRun: (input) => adapter.launchRun(input),
+      cancelRun: (id) => adapter.cancelRun(id),
+    },
+    replyOf: async (checkRunId) => {
+      const view = (await adapter.sessionsDetail()).find((v) => v.session.id === checkRunId);
+      const unit = view?.units.find((u) => u.ord === 1) ?? view?.units[0];
+      return view !== undefined && unit !== undefined ? adapter.workOutput(coreUnitId(checkRunId, unit)) : null;
+    },
+    dir: join(crewStateHome(), 'inspections'),
+    broadcast: (frame) => broadcast(frame as unknown as CoreEvent),
+    launched: (checkRunId, sourceRunId) => {
+      try {
+        recordRunLaunched(audit, runTimingIndex, INSPECT_ACTOR, checkRunId, { workflow: INSPECT_WORKFLOW, chainedFrom: sourceRunId, deliver: 'none' });
+      } catch (err) {
+        app.log.warn(`[inspect] ${checkRunId} launched, but its bookkeeping failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+    log: (m) => app.log.info(m),
+    newId: () => randomUUID(),
+  });
+  if (typeof (adapter as Partial<CoreAdapter>).registerWorkflow === 'function') {
+    try {
+      await adapter.registerWorkflow(loadInspectWorkflow());
+    } catch (err) {
+      app.log.warn(`[inspect] could not register the '${INSPECT_WORKFLOW}' workflow — checks answer with crew's own reading: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  registerInspectRoutes(app, { service: unitInspect, audit });
   // DES-DEFAULT-EVALS-001 §7: the default evals as a workflow (`workflows/run-evals.json`). Every launch is prepared
   // by the daemon, which runs the evals in-process (`runEvalsPrepare`, bound once the routes are registered below);
   // the Tool step only reads the report copy back.
@@ -2179,6 +2218,7 @@ export async function createServer(
     // crew#552: an onboarding completion queues its capture; a chained capture's end frees the slot.
     onboardingCapture.onEvent(event);
     runLearnings.onEvent(event);
+    unitInspect.onEvent(event as unknown as Record<string, unknown>);
     if (event.type === 'sessionCompleted' && session !== undefined) {
       const onboardedRepo = adapter.onboardedRepoOf(session);
       if (onboardedRepo !== undefined) {

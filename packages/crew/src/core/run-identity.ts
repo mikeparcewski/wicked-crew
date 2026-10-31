@@ -41,6 +41,8 @@ export const SYSTEM_WORKFLOWS: ReadonlySet<string> = new Set([
   // crew#1157: the read-only analysis a chat runs (`POST /chats {workflow}`, studio's Understand
   // › Ask); it delivers nothing and has its own entry point.
   'analyze',
+  // The in-flight check on a working step (src/inspect): crew's own one-turn, read-only run.
+  'inspect-unit',
   'onboarding',
   'capture-learnings',
   'steering-author',

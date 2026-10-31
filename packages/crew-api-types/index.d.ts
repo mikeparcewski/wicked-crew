@@ -2922,6 +2922,24 @@ export interface CliUsageEvent {
   costUsd: number | null;
 }
 
+/**
+ * (0.153.0) `/ws` frame (and logged with the run): a working seat's running token TOTAL for one unit attempt, live from
+ * its own stream (wicked-core: claude per assistant message, pi per `message_end`, codex per `turn.completed`). Fresh +
+ * cache input, as {@link CliUsageEvent} counts it; sent when it changed, at most one per 3 s. `costUsd` only where the
+ * seat's stream states one (pi), else `null`. The attempt's `cliUsage` at its end stays the record.
+ */
+export interface UsageProgressEvent {
+  type: 'usageProgress';
+  session: string;
+  ord: number;
+  attempt: number;
+  /** Unix ms. */
+  at: number;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number | null;
+}
+
 /** §3 B4 — the data files a unit's CLI touched. */
 export interface DataUsedEvent {
   type: 'dataUsed';
@@ -6699,6 +6717,89 @@ export interface RunLearningsResponse {
     /** Unix seconds. */
     createdAt: number | null;
   }>;
+}
+
+/** (0.153.0) The in-flight check's verdict on a working step. */
+export type UnitInspectVerdict = 'progressing' | 'looping' | 'stuck' | 'wasteful';
+/** (0.153.0) The one action a check recommends; the person chooses, nothing is done for them. */
+export type UnitInspectAction = 'let_run' | 'steer' | 'stop';
+
+/** (0.153.0) Crew's own deterministic reading of a working step's newest attempt (crew src/inspect/reading.ts). */
+export interface UnitInspectReading {
+  ord: number;
+  attempt: number;
+  startedAt: number | null;
+  elapsedMs: number | null;
+  calls: number;
+  openCalls: Array<{ tool: string; target: string | null; forMs: number }>;
+  byKind: Record<string, number>;
+  edits: Array<{ path: string; count: number }>;
+  said: { deltas: number; chars: number; lastAt: number | null; newest: string | null };
+  usage: { inputTokens: number; outputTokens: number; costUsd: number | null; source: 'live' | 'final' } | null;
+  lastSignAt: number | null;
+  verdict: UnitInspectVerdict;
+  evidence: string[];
+  doing: string | null;
+  action: UnitInspectAction;
+  note: string | null;
+}
+
+/**
+ * (0.153.0) One "Is this going well?" check on a working step (`POST /runs/:id/units/:ord/inspect`). A seat that is not
+ * the step's own reads the step's record (one read-only `inspect-unit` run, bounded by time and budget) and answers;
+ * when none can, or it fails, times out or reaches its budget, `source: 'crew'` and `why` says so and the answer is
+ * crew's own reading. It never steers, stops or edits the run it looks at.
+ */
+export interface UnitInspection {
+  id: string;
+  runId: string;
+  ord: number;
+  attempt: number;
+  state: 'checking' | 'done';
+  /** The actor id who asked. */
+  requestedBy: string;
+  /** Unix ms. */
+  requestedAt: number;
+  finishedAt: number | null;
+  /** The step's own seat. */
+  workerSeat: string | null;
+  /** The seat that checked (never the step's own); null when none could. */
+  seat: string | null;
+  /** The check's own run (workflow `inspect-unit`); null when none was launched. */
+  checkRunId: string | null;
+  source: 'seat' | 'crew' | null;
+  why: string | null;
+  verdict: UnitInspectVerdict | null;
+  /** What the step is doing, one sentence. */
+  doing: string | null;
+  /** Roughly how far along it is (the seat's estimate), one sentence. */
+  progress: string | null;
+  evidence: string[];
+  action: UnitInspectAction | null;
+  /** For `action: 'steer'`: the note it suggests sending the step's seat (the person may edit it before sending). */
+  note: string | null;
+  reading: UnitInspectReading;
+  /** What the check itself spent, when its seat reported it. */
+  cost: { inputTokens: number; outputTokens: number; costUsd: number | null } | null;
+}
+
+/** (0.153.0) `POST /runs/:id/units/:ord/inspect` → 202. 403 for anyone but a human operator; 409 `not_working` when the
+ *  step is not working now. A check already running on the step is answered as it is. */
+export interface UnitInspectionResponse {
+  inspection: UnitInspection;
+}
+
+/** (0.153.0) `GET /runs/:id/units/:ord/inspections`: the step's checks, newest first. */
+export interface UnitInspectionsResponse {
+  inspections: UnitInspection[];
+}
+
+/** (0.153.0) `/ws` frame: a check started, its budget moved, or it answered. */
+export interface UnitInspectionEvent {
+  type: 'unitInspection';
+  session: string;
+  ord: number;
+  inspection: UnitInspection;
 }
 
 /**
