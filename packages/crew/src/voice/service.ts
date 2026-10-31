@@ -23,6 +23,7 @@ import { createHash } from 'node:crypto';
 import { createWriteStream, existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { homedir, platform as osPlatform } from 'node:os';
 import { delimiter, join } from 'node:path';
@@ -168,7 +169,7 @@ export function whisperSupported(version: string | null): boolean {
 
 function runVersion(bin: string): string | null {
   try {
-    const r = spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 5000, windowsHide: true });
+    const r = spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 5000, windowsHide: true, env: childEnvWithBootEstateDb(process.env) });
     return r.status === 0 ? `${r.stdout ?? ''}${r.stderr ?? ''}` : null;
   } catch {
     return null;
@@ -419,7 +420,7 @@ export class VoiceService {
     // nothing: 1.9.5, seen live). No file is written. An older engine would write `-.txt`, so it never gets here.
     const args = ['-m', this.modelPath(), '-f', '-', '-otxt', '-nt', '-np', '-l', 'en', '-t', String(TRANSCRIBE_THREADS)];
     return new Promise<string>((resolve, reject) => {
-      const child = this.spawnImpl(bin, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+      const child = this.spawnImpl(bin, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: childEnvWithBootEstateDb(this.env) });
       let out = '';
       let err = '';
       let settled = false;
