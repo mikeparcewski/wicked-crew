@@ -1,5 +1,5 @@
 // wicked-core#406 follow-up: every repo surface that opens a repo's code graph answers **503** —
-// (since crew#548 the requirements surfaces read the repo-root artifact only and are not among them) —
+// (the requirements surfaces included: they read the graph from the repo's estate store) —
 // the shared `codeGraphErrorStatus` — when a CURRENT engine resolved no repo-graph root
 // (`code_graph_root_unresolvable`), instead of letting `codeGraphDb()`'s throw fall through to
 // Fastify's generic 500. The remedy is the daemon's environment, and the response says so.
@@ -73,23 +73,16 @@ describe('repo surfaces — a current engine with no repo-graph root answers 503
     });
   }
 
-  it('the requirements surfaces no longer open the code graph (crew#548): with no repo-graph root they answer from the artifact — 404 when none is generated, PATCH included — never 503', async () => {
-    // Until 0.7.35 `api/requirements.ts` read the LIVE store first (a second SQLite library on the
-    // code-graph file — the F-E2E-021 class), so a missing graph root surfaced here as the 503 above.
-    // The artifact lives under the REPO root (`.wicked-estate/requirements/`), a different path
-    // family, so the graph root is irrelevant to it now.
-    for (const url of ['/api/v1/repos/r/requirements', '/api/v1/repos/r/requirements/some-key']) {
-      const res = await app.inject({ method: 'GET', url });
-      expect(res.statusCode, url).toBe(404);
-      expect((res.json() as { error: string }).error).not.toMatch(/no repo-graph root resolves/);
+  it('the requirements surfaces read the graph from estate (operator ruling 2026-10-31): with no repo-graph root they answer 503 with the diagnosis, PATCH included', async () => {
+    for (const [method, url] of [
+      ['GET', '/api/v1/repos/r/requirements'],
+      ['GET', '/api/v1/repos/r/requirements/some-key'],
+      ['PATCH', '/api/v1/repos/r/requirements/some-key'],
+    ] as const) {
+      const res = await app.inject({ method, url, ...(method === 'PATCH' ? { payload: { risk: true } } : {}) });
+      expect(res.statusCode, url).toBe(503);
+      expect((res.json() as { error: string }).error).toMatch(/no repo-graph root resolves/);
     }
-    const patch = await app.inject({
-      method: 'PATCH',
-      url: '/api/v1/repos/r/requirements/some-key',
-      // A body ReqPatchSchema accepts, so the parse passes and the artifact lookup is what answers.
-      payload: { risk: true },
-    });
-    expect(patch.statusCode).toBe(404);
   });
 
   it('a repo whose graph is merely not indexed yet keeps its pre-existing answers — and /graph now SAYS it is not indexed (F-2R2-005)', async () => {

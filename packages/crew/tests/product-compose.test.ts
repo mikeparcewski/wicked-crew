@@ -19,10 +19,11 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
   beforeAll(async () => {
     base = mkdtempSync(join(tmpdir(), 'product-compose-'));
     const root = join(base, 'alpha');
-    mkdirSync(join(root, '.wicked-estate', 'requirements'), { recursive: true });
-    writeFileSync(
-      join(root, '.wicked-estate', 'requirements', 'requirements_graph.json'),
-      JSON.stringify({
+    // The repo's requirements graph as the engine reads it from its estate store (operator ruling
+    // 2026-10-31: never a file in the repo).
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, 'estate.db'), '');
+    const estateGraph = {
         metadata: { schema_version: '1.0.0', migration_mode: 'x' },
         domains: {
           billing: {
@@ -33,13 +34,16 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
             entities: {},
           },
         },
-      }),
-    );
-    const repos = [{ id: 'alpha', name: 'alpha', root_path: root }, { id: 'outsider', name: 'outsider', root_path: root }];
+      };
+    const repos = [
+      { id: 'alpha', name: 'alpha', root_path: root, code_graph_db: join(root, 'estate.db') },
+      { id: 'outsider', name: 'outsider', root_path: root, code_graph_db: join(root, 'estate.db') },
+    ];
     const adapter = {
       projectGet: vi.fn(async (id: string) => (id === 'p1' ? { id } : null)),
       projectMembers: vi.fn(async () => [{ member_kind: 'crew.repo', member_ref: 'alpha' }]),
       listRepos: vi.fn(async () => repos),
+      getRequirementsGraphForRepo: vi.fn(async (ref: string) => ({ graph: ref === 'alpha' ? estateGraph : null, coverage: null })),
     };
     app = Fastify({ logger: false });
     app.post('/api/v1/runs', async (req, reply) => {

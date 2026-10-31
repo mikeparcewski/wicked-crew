@@ -5,7 +5,7 @@ import { vaultBinWarning, vaultDiagnostics } from '../core/vault-bin.js';
 import { PlanSchema, toLaunchPlan } from './plan-schema.js';
 import type { RecordedStallFrame } from './stall-frame-index.js';
 import { z } from 'zod';
-import { listRequirements, getRequirement, patchRequirement, REQUIREMENTS_NOT_GENERATED } from './requirements.js';
+import { listRequirements, getRequirement, patchRequirement, readRequirementsGraph, REQUIREMENTS_NOT_GENERATED } from './requirements.js';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { readFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -14,7 +14,7 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { videoPalette } from '../appearance/video-palette.js';
 import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, settingsFilePath } from '../core/adapter.js';
-import { codeGraphDb, codeGraphErrorStatus, repoFolderMissing, repoFolderMissingBody, requirementsGraph } from '../core/repoPaths.js';
+import { codeGraphDb, codeGraphErrorStatus, repoFolderMissing, repoFolderMissingBody } from '../core/repoPaths.js';
 import type {
   ConformanceRule,
   CodeGraphData,
@@ -6922,8 +6922,9 @@ export function registerRoutes(
   });
 
   // ── Per-repo domain graph ─────────────────────────────────────────────────
-  // Reads requirements_graph.json from the repo root. Coverage stats come from
-  // the live estate store via `wicked-core coverage --json` (not a cached file).
+  // The graph is read from the repo's estate store through the engine (operator ruling 2026-10-31:
+  // never a JSON file in the repo). Coverage stats come from the live estate store via
+  // `wicked-core coverage --json` (not a cached file).
 
   app.get(`${V}/repos/:id/domain-graph`, async (req, reply) => {
     const { id } = req.params as { id: string };
@@ -6932,7 +6933,6 @@ export function registerRoutes(
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
     if (refusedMissingFolder(repo, reply)) return reply;
 
-    const graphPath = requirementsGraph(repo);
     const dbPath = codeGraphDbOr503(repo, reply);
     if (dbPath === null) return reply;
 
@@ -6964,11 +6964,11 @@ export function registerRoutes(
     }
 
     try {
-      const content = await fsp.readFile(graphPath, 'utf8');
-      return { graph: JSON.parse(content) as unknown, coverage };
+      const read = await readRequirementsGraph(repo, adapter);
+      return { graph: read.graph, coverage };
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { graph: null, coverage };
-      return reply.code(500).send({ error: message(err) });
+      const status = codeGraphErrorStatus(err);
+      return reply.code(status ?? 500).send({ error: message(err) });
     }
   });
 
@@ -6997,7 +6997,7 @@ export function registerRoutes(
     }
     let page: Awaited<ReturnType<typeof listRequirements>>;
     try {
-      page = await listRequirements(repo, parsed.data);
+      page = await listRequirements(repo, parsed.data, adapter);
     } catch (err) {
       // wicked-core#406: a CURRENT engine with no repo-graph root is a 503, not a 500.
       const status = codeGraphErrorStatus(err);
@@ -7033,7 +7033,7 @@ export function registerRoutes(
     }
     let detail: Awaited<ReturnType<typeof getRequirement>>;
     try {
-      detail = await getRequirement(repo, decoded);
+      detail = await getRequirement(repo, decoded, adapter);
     } catch (err) {
       // wicked-core#406: a CURRENT engine with no repo-graph root is a 503, not a 500.
       const status = codeGraphErrorStatus(err);
@@ -7074,7 +7074,7 @@ export function registerRoutes(
     }
     let detail: Awaited<ReturnType<typeof patchRequirement>>;
     try {
-      detail = await patchRequirement(repo, decodedKey, parsed.data);
+      detail = await patchRequirement(repo, decodedKey, parsed.data, adapter);
     } catch (err) {
       // wicked-core#406: a CURRENT engine with no repo-graph root is a 503, not a 500.
       const status = codeGraphErrorStatus(err);

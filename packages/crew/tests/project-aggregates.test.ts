@@ -10,8 +10,10 @@ import { projectCoverage, registerProjectAggregateRoutes } from '../src/api/proj
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { ProjectsUnsupportedError } from '../src/core/adapter.js';
 
-function writeGraph(root: string, domains: Record<string, { reqs: string[]; entities?: string[]; description?: string }>): void {
-  mkdirSync(join(root, '.wicked-estate', 'requirements'), { recursive: true });
+/** What the engine reads back from each repo's estate store (operator ruling 2026-10-31: the graph
+ * lives in estate, never a file in the repo), by repo id. */
+const estateGraphs = new Map<string, unknown>();
+function writeGraph(id: string, domains: Record<string, { reqs: string[]; entities?: string[]; description?: string }>): void {
   const graph = {
     metadata: { schema_version: '1.0.0', migration_mode: 'x' },
     domains: Object.fromEntries(
@@ -25,7 +27,7 @@ function writeGraph(root: string, domains: Record<string, { reqs: string[]; enti
       ]),
     ),
   };
-  writeFileSync(join(root, '.wicked-estate', 'requirements', 'requirements_graph.json'), JSON.stringify(graph));
+  estateGraphs.set(id, graph);
 }
 
 const report = (behavior: number, resolved: number) => ({
@@ -36,7 +38,7 @@ const report = (behavior: number, resolved: number) => ({
 describe('project aggregates (crew#371)', () => {
   let base: string;
   let app: FastifyInstance;
-  const repos: Array<{ id: string; name: string; root_path: string }> = [];
+  const repos: Array<{ id: string; name: string; root_path: string; code_graph_db: string }> = [];
   const adapter = {
     projectGet: vi.fn(async (id: string) => (id === 'p1' || id === 'empty' ? { id } : null)),
     projectMembers: vi.fn(async (id: string) =>
@@ -51,6 +53,7 @@ describe('project aggregates (crew#371)', () => {
       if (ref === 'gamma') return null;
       throw new Error(`no registered repo '${ref}'`);
     }),
+    getRequirementsGraphForRepo: vi.fn(async (ref: string) => ({ graph: estateGraphs.get(ref) ?? null, coverage: null })),
   };
 
   beforeAll(async () => {
@@ -58,11 +61,13 @@ describe('project aggregates (crew#371)', () => {
     for (const id of ['alpha', 'beta', 'gamma']) {
       const root = join(base, id);
       mkdirSync(root, { recursive: true });
-      repos.push({ id, name: `${id}-name`, root_path: root });
+      // Every member is indexed (its code graph exists); what estate holds for it is the engine's read.
+      writeFileSync(join(root, 'estate.db'), '');
+      repos.push({ id, name: `${id}-name`, root_path: root, code_graph_db: join(root, 'estate.db') });
     }
-    writeGraph(join(base, 'alpha'), { billing: { reqs: ['a1', 'a2', 'a3'], entities: ['Invoice'], description: 'Money' }, auth: { reqs: ['a4'] } });
-    writeGraph(join(base, 'beta'), { billing: { reqs: ['b1', 'b2'], entities: ['Invoice', 'Ledger'] } });
-    // gamma: no artifact -> absent. gone: a member with no registry record -> dangling.
+    writeGraph('alpha', { billing: { reqs: ['a1', 'a2', 'a3'], entities: ['Invoice'], description: 'Money' }, auth: { reqs: ['a4'] } });
+    writeGraph('beta', { billing: { reqs: ['b1', 'b2'], entities: ['Invoice', 'Ledger'] } });
+    // gamma: no graph in estate -> absent. gone: a member with no registry record -> dangling.
     app = Fastify({ logger: false });
     registerProjectAggregateRoutes(app, adapter as unknown as CoreAdapter);
     await app.ready();
@@ -85,7 +90,7 @@ describe('project aggregates (crew#371)', () => {
     expect(body.rows[0].total).toBe(4);
     expect(body.rows[0].items.map((i: { reqId: string }) => i.reqId)).toHaveLength(2);
     expect(body.rows[1].items.map((i: { reqId: string }) => i.reqId)).toEqual(['b1']);
-    expect(body.rows[2].reason).toMatch(/not generated/);
+    expect(body.rows[2].reason).toMatch(/no requirements graph/);
     expect(body.rows[3]).toMatchObject({ repo: { id: 'gone', name: null }, items: [] });
   });
 
