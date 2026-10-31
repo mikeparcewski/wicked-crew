@@ -1895,6 +1895,11 @@ export class CoreAdapter {
         throw new Error('power mode needs a wicked-core-ts that carries it (Core.supportsPowerMode); this addon would run the launch phased');
       }
       opts.power = true;
+      // wicked-core#1216: the person's voice rides a power launch only (the orchestrator's brief).
+      // Tone only, so an addon that drops the field loses nothing a gate depends on.
+      if (input.voice !== undefined && input.voice.trim() !== '') {
+        (opts as LaunchOptions & { voice?: string }).voice = input.voice;
+      }
     }
     // The daemon's QE acceptance setting (`qeAcceptance: 'off'`, core/qe-acceptance-setting.ts): a
     // launch of a workflow that requires QE acceptance, and that neither skips nor forces it, is
