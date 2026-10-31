@@ -149,7 +149,7 @@ export function clock(ms: number): string {
 }
 
 const GATE_WORDS: Record<string, string> = {
-  plan_approval: 'Approve the plan', escalation: 'A failed check or review', deliver: 'Deliver', consent: 'Install consent',
+  plan_approval: 'Approve the plan', escalation: 'A failed check or review', deliver: 'Deliver', consent: 'Install consent', repeat: 'Keep going?',
   phase_review: 'Review a step', question: 'A question',
 };
 export function gateWord(kind: string): string {

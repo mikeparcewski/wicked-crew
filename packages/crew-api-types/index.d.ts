@@ -2543,6 +2543,13 @@ export interface CoreEvent {
   /** `awaitingHuman{gateKind: 'consent'}` (core#820): why no write targets are listed (no dry run
    *  ran before the gate, or it printed no plan); the gate is then a plain approve / reject. */
   writeTargetsMissing?: string;
+  /**
+   * `awaitingHuman{gateKind: 'repeat'}` (api-types 0.163.0, domain-graph-3): a loop step's ask —
+   * its command's progress line ("Mapping wicked-crew · 3% → 23% · target 80% · page 21 · budget
+   * reached …"). The ask's answers ride `choices` (`consent:<id>`…, `reject` = stop, the run ends
+   * and what it did is kept), `choiceLabels` and `recommended`, as on a consent gate.
+   */
+  repeatLine?: string;
   /** PTY terminal frames (`terminalOpened`/`terminalOutput`/`terminalExited`): the terminal id. */
   id?: string;
   /**
@@ -4134,6 +4141,23 @@ export interface WorkflowSelectedEvent {
   workflowId: string;
   unitCount: number;
 }
+
+/**
+ * (api-types 0.163.0, domain-graph-3) A loop step sent the run back for another pass: every unit
+ * from `fromOrd` through `ord` was re-armed at a fresh attempt and the run goes on from `fromOrd`.
+ * `pass` counts the passes the loop has sent back (1 after the first); `line` is the step's own
+ * progress line ("Mapping wicked-crew · 3% → 12% → 19% · target 80% · page 4 · about 2 h left"),
+ * possibly empty. One per loop rewind: a page that reaches the target, or stops at a budget ask
+ * (whose `awaitingHuman.repeatLine` carries the line), emits none.
+ */
+export type StepRepeatedEvent = {
+  type: 'stepRepeated';
+  session: string;
+  ord: number;
+  fromOrd: number;
+  pass: number;
+  line: string;
+};
 
 /** P2 — a human approved a gate with an amendment text that was injected into the unit's description
  *  before re-dispatch. Fires after the amendment is persisted, before Resumed. Only emitted when
@@ -6491,7 +6515,20 @@ export interface SystemSettings {
    * minimum M%" and keeps the mapping for the next run. The daemon exports it as
    * `WICKED_REQUIREMENTS_MIN_COVERAGE_PCT` at boot and on every change. Absent = the default.
    */
-  requirementsGraph?: { minCoveragePct?: number };
+  requirementsGraph?: {
+    minCoveragePct?: number;
+    /**
+     * (api-types 0.163.0, domain-graph-3) A domain-extraction run maps page after page until the
+     * target; its budget per grant — `maxPages` (1..200, default 20) or `maxMinutes` (1..1440,
+     * default 240), whichever is spent first — ends in an ask: map more, lower the target for the
+     * repository, or stop. `pageSize` (50..2000, default 500) is how many behaviours one page
+     * maps. Exported as `WICKED_DOMAIN_MAX_PAGES` / `WICKED_DOMAIN_MAX_MINUTES` /
+     * `WICKED_DOMAIN_PAGE_SIZE`. Absent = the defaults.
+     */
+    maxPages?: number;
+    maxMinutes?: number;
+    pageSize?: number;
+  };
   /*
    * There is NO skills setting (skills keystone, api-types 0.28.0). The daemon-owned skills root is
    * `<state home>/skills` — the directory holding `manifest.json`, `baseline/<hash>/`, `effective/`,
@@ -6780,6 +6817,12 @@ export interface RequirementsNotGenerated {
   error: string;
   code: 'notGenerated';
   workflow: string;
+  /**
+   * (api-types 0.163.0, domain-graph-3) How much is mapped so far, against the repository's target
+   * ("3% of behaviours mapped · target 80%"): present when the repository has a store to count.
+   * `minPct` is the target in force (the repository's own when lowered, else the daemon's).
+   */
+  coverage?: RequirementsCoverage;
 }
 
 export interface RequirementPatch {

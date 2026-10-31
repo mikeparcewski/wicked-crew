@@ -120,6 +120,7 @@ respondsWith<Wire.CoreEvent, Wire.GateEvidenceEvent>();
 // CoreEvent-typed seams unchanged (codex on #1201).
 respondsWith<Wire.CoreEvent, Wire.PowerIntakePlannedEvent>();
 respondsWith<Wire.CoreEvent, Wire.RigorRescoredEvent>();
+respondsWith<Wire.CoreEvent, Wire.StepRepeatedEvent>();
 respondsWith<Wire.CoreEvent, Wire.PowerCheckpointEvent>();
 respondsWith<Wire.CoreEvent, Wire.PowerTurnStartedEvent>();
 respondsWith<Wire.CoreEvent, Wire.PowerTurnCompletedEvent>();
