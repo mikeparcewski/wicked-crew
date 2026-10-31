@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.159.0",
+  "apiTypesVersion": "0.160.0",
   "endpoints": [
     {
       "method": "GET",
@@ -522,6 +522,17 @@
       ]
     },
     {
+      "method": "GET",
+      "path": "/api/v1/governance/steering/author/:runId/draft",
+      "requestType": null,
+      "responseType": "SteeringDraftResponse",
+      "statusCodes": [
+        200,
+        404,
+        500
+      ]
+    },
+    {
       "method": "POST",
       "path": "/api/v1/governance/steering/import",
       "requestType": "SteeringImportBody",
@@ -1009,6 +1020,41 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/persona",
+      "requestType": null,
+      "responseType": "PersonaRemoved",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        500
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/persona",
+      "requestType": null,
+      "responseType": "PersonaResponse",
+      "statusCodes": [
+        200
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/persona",
+      "requestType": "PersonaPutBody",
+      "responseType": "PersonaSaved",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        500
+      ]
     },
     {
       "method": "POST",
@@ -2131,6 +2177,16 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/setup/known",
+      "requestType": null,
+      "responseType": "SetupKnown",
+      "statusCodes": [
+        200,
+        403
+      ]
     },
     {
       "method": "GET",

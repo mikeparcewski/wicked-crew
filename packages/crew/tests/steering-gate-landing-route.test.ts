@@ -44,6 +44,8 @@ let upserted: ConformanceRule[] = [];
 let confirmCalls: { runId: string; approve: boolean; amend?: string }[] = [];
 let transcript: string | null = null;
 let transcriptReads: string[] = [];
+/** Runs inside the stubbed confirm: a source that changes between the validation and the landing. */
+let onConfirm: (() => void) | null = null;
 
 const PROBLEM =
   "Author steering rules for the 'operations' steering type (use it as the default steering_type for every proposed rule without a better fit).\n\nOperator intent:\nnever deploy on friday";
@@ -123,6 +125,7 @@ beforeAll(async () => {
   adapter.steeringSupported = () => true;
   adapter.confirmGate = async (runId: string, approve: boolean, amend?: string) => {
     confirmCalls.push({ runId, approve, ...(amend !== undefined ? { amend } : {}) });
+    onConfirm?.();
     const run = views.find((v) => v.session.id === runId);
     if (run) run.session.status = approve ? 'completed' : 'cancelled';
     return approve ? 'completed' : 'cancelled';
@@ -151,6 +154,7 @@ beforeEach(() => {
   confirmCalls = [];
   transcript = null;
   transcriptReads = [];
+  onConfirm = null;
 });
 
 afterAll(async () => {
@@ -417,5 +421,130 @@ describe('POST /runs/:id/resume on a gated steering-author run (no side door)', 
     expect(body['landing']).toMatchObject({ outcome: 'landed', ruleIds: ['POL-0001'] });
     expect(upserted).toHaveLength(1);
     expect(upserted[0]!.provenance.source).toBe('chat');
+  });
+});
+
+// program DES-LEARN §3.1: Learn reads the drafted rules before the person decides, and the approve names
+// the ones kept. Only those land; the rest are declined (audited), and a stale pick never lands.
+describe('steering-author draft read + keepRules (DES-LEARN §3.1)', () => {
+  const TWO = [
+    PROPOSAL[0]!,
+    { ...PROPOSAL[0]!, id: 'POL-0002', statement: 'every pull request links an issue', steering_type: 'development' },
+  ];
+
+  it('GET /governance/steering/author/:runId/draft answers the normalized draft, ready at the gate', async () => {
+    const RUN = 'draft-read-1';
+    views = [steeringRun(RUN)];
+    writeProposalFile(RUN, JSON.stringify(TWO));
+    const { status, body } = await send('GET', `/governance/steering/author/${RUN}/draft`);
+    expect(status).toBe(200);
+    expect(body['ready']).toBe(true);
+    expect(body['source']).toBe('deliverable');
+    const rules = body['rules'] as ConformanceRule[];
+    expect(rules.map((r) => r.id)).toEqual(['POL-0001', 'POL-0002']);
+    // The same normalization the landing applies: chat provenance forced.
+    expect(rules.every((r) => r.provenance.source === 'chat')).toBe(true);
+    expect(upserted).toHaveLength(0);
+    expect(confirmCalls).toHaveLength(0);
+  });
+
+  it('the draft of a run before propose ran is not ready; another workflow is a 404', async () => {
+    const RUN = 'draft-early-1';
+    const run = steeringRun(RUN);
+    run.session.unit_ix = 1;
+    views = [run, featureRun('draft-feature-1')];
+    const early = await send('GET', `/governance/steering/author/${RUN}/draft`);
+    expect(early.status).toBe(200);
+    expect(early.body).toMatchObject({ ready: false, rules: [] });
+    const other = await send('GET', '/governance/steering/author/draft-feature-1/draft');
+    expect(other.status).toBe(404);
+    expect(other.body['code']).toBe('not_steering_author');
+  });
+
+  it('APPROVE with keepRules lands only the kept rules and audits the declined ones', async () => {
+    const RUN = 'keep-subset-1';
+    views = [steeringRun(RUN)];
+    writeProposalFile(RUN, JSON.stringify(TWO));
+    const { status, body } = await send('POST', `/runs/${RUN}/gate`, { approve: true, keepRules: ['POL-0002'] });
+    expect(status).toBe(200);
+    expect(body['landing']).toMatchObject({ outcome: 'landed', ruleIds: ['POL-0002'], declinedIds: ['POL-0001'] });
+    expect(upserted.map((r) => r.id)).toEqual(['POL-0002']);
+    const declined = await auditEntries(RUN, 'governance.steering.declined');
+    expect(declined).toHaveLength(1);
+    expect(declined[0]!['detail']).toMatchObject({ ruleIds: ['POL-0001'] });
+  });
+
+  it('keepRules: [] approves the gate and lands nothing', async () => {
+    const RUN = 'keep-none-1';
+    views = [steeringRun(RUN)];
+    writeProposalFile(RUN, JSON.stringify(TWO));
+    const { status, body } = await send('POST', `/runs/${RUN}/gate`, { approve: true, keepRules: [] });
+    expect(status).toBe(200);
+    expect(body['landing']).toMatchObject({ outcome: 'landed', ruleIds: [], declinedIds: ['POL-0001', 'POL-0002'] });
+    expect(upserted).toHaveLength(0);
+  });
+
+  it('a kept id the draft no longer has is a 409 draft_changed: the gate stays open, nothing lands', async () => {
+    const RUN = 'keep-stale-1';
+    views = [steeringRun(RUN)];
+    writeProposalFile(RUN, JSON.stringify(TWO));
+    const { status, body } = await send('POST', `/runs/${RUN}/gate`, { approve: true, keepRules: ['POL-0009'] });
+    expect(status).toBe(409);
+    expect(body['code']).toBe('draft_changed');
+    expect(confirmCalls).toHaveLength(0);
+    expect(upserted).toHaveLength(0);
+  });
+
+  it('keepRules on another workflow\'s gate is a 409 no_draft; with a reject it is a 400', async () => {
+    const RUN = 'keep-feature-1';
+    views = [featureRun(RUN)];
+    const wrongGate = await send('POST', `/runs/${RUN}/gate`, { approve: true, keepRules: ['X'] });
+    expect(wrongGate.status).toBe(409);
+    expect(wrongGate.body['code']).toBe('no_draft');
+    const withReject = await send('POST', `/runs/${RUN}/gate`, { approve: false, action: 'reject', keepRules: ['X'] });
+    expect(withReject.status).toBe(400);
+    expect(confirmCalls).toHaveLength(0);
+  });
+
+  it('keepRules at a later gate of a steering-author run (a floor phase after propose) is a 409 no_draft', async () => {
+    const RUN = 'keep-later-gate-1';
+    const run = steeringRun(RUN);
+    run.units = [...run.units, { id: `${RUN}:review`, ord: 3, session_id: RUN, status: 'done' }] as unknown as SessionView['units'];
+    run.session.unit_ix = 3;
+    views = [run];
+    writeProposalFile(RUN, JSON.stringify(TWO));
+    const draft = await send('GET', `/governance/steering/author/${RUN}/draft`);
+    expect(draft.body['ready']).toBe(false);
+    const res = await send('POST', `/runs/${RUN}/gate`, { approve: true, keepRules: ['POL-0001'] });
+    expect(res.status).toBe(409);
+    expect(res.body['code']).toBe('no_draft');
+    expect(confirmCalls).toHaveLength(0);
+  });
+
+  it('lands the proposal it validated: a source that changes during the confirm is not re-read', async () => {
+    const RUN = 'keep-snapshot-1';
+    views = [steeringRun(RUN)];
+    writeProposalFile(RUN, JSON.stringify(TWO));
+    onConfirm = () => writeProposalFile(RUN, JSON.stringify([{ ...TWO[1]!, statement: 'REPLACED after validation' }]));
+    const { body } = await send('POST', `/runs/${RUN}/gate`, { approve: true, keepRules: ['POL-0002'] });
+    expect(body['landing']).toMatchObject({ outcome: 'landed', ruleIds: ['POL-0002'] });
+    expect(upserted.map((r) => r.statement)).toEqual(['every pull request links an issue']);
+  });
+
+  it('a different pick of the same proposal after a send-back lands; the same pick replayed does not', async () => {
+    const RUN = 'keep-repick-1';
+    views = [steeringRun(RUN)];
+    writeProposalFile(RUN, JSON.stringify(TWO));
+    await send('POST', `/runs/${RUN}/gate`, { approve: true, keepRules: ['POL-0001'] });
+    expect(upserted.map((r) => r.id)).toEqual(['POL-0001']);
+    views = [steeringRun(RUN)];
+    const replay = await send('POST', `/runs/${RUN}/gate`, { approve: true, keepRules: ['POL-0001'] });
+    expect(replay.body['landing']).toMatchObject({ alreadyLanded: true, ruleIds: ['POL-0001'] });
+    expect(upserted).toHaveLength(1);
+    views = [steeringRun(RUN)];
+    const repick = await send('POST', `/runs/${RUN}/gate`, { approve: true, keepRules: ['POL-0002'] });
+    expect(repick.body['landing']).toMatchObject({ outcome: 'landed', ruleIds: ['POL-0002'], declinedIds: ['POL-0001'] });
+    expect(repick.body['landing']).not.toHaveProperty('alreadyLanded');
+    expect(upserted.map((r) => r.id)).toEqual(['POL-0001', 'POL-0002']);
   });
 });

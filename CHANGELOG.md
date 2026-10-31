@@ -84,6 +84,24 @@ mentioned only where a daemon release depends on them.
   `content: {values}` for it: distinct options, `min..=max` of them, forwarded as the JSON array of the picks in option
   order. `values` on a single-choice question, and `response` on a multi-select one, are a 400 that keeps the question
   open. Needs the wicked-core release that carries ask `multi`; an older engine refuses a multi ask as `bad_request`.
+- **What Learn and the first run need from crew (program DES-LEARN).** (1) **Personality:** `GET /persona`, `PUT /persona
+  {scope: "user" | "project:<id>", persona}` and `DELETE /persona?scope=project:<id>` (removes an override) keep how the
+  orchestrator talks to the person, with an optional per-project override, in one `daemon-persona.json` under the
+  state home's `daemon-` prefix. A save is a person's (403 for a seat or a system actor), versioned and audited
+  (`persona.saved`); a name is one line of text. Its voice block (length, warmth, pushback, initiative, ticked habits, a one-line note) is the last
+  section of every chat's scope statement, the system chat's included: the project's override, else the person's. It
+  says first that it changes tone only, and nothing reads it but the seat. (2) **First run:** `GET /setup/known`
+  (operator trust) answers the global git identity (`git config --global`), the registered repositories' languages
+  (tracked source files by extension, `git ls-files`, bounded) and the git checkouts (a worktree's `.git` file counts)
+  one level under the home's code folders and the registered repositories' folders that are not registered yet. Paths
+  are compared canonically, so a symlink never takes the scan outside the home or onto the home itself, and the scan
+  stops after 2,000 entries or 1.5 s. (3) **Pick which drafted rules to keep:**
+  `GET /governance/steering/author/:runId/draft` reads a steering-author run's drafted rules before the person
+  decides, normalized as the landing lands them, and `POST /runs/:id/gate {approve: true, keepRules: [...]}` lands only
+  those, exactly as validated before the confirm (the rest are declined, audited `governance.steering.declined`; a
+  stale id is a 409 `draft_changed` and any gate but the propose gate a 409 `no_draft`, the gate left open). A
+  different pick of the same proposal after a send-back lands; a replay of the same pick lands nothing. api-types 0.160.0: `Persona*`, `SetupKnown`, `SteeringDraftResponse`, `GateDecision.keepRules`,
+  `SteeringLandingResult.declinedIds`.
 
 - **Every run proposes what it learned to the approve queue.** Over the 7 days to 2026-10-30 the rig ran 37 runs and
   filed 0 proposals: only the separate capture-learnings preset and onboarding's chain ever proposed anything, and the

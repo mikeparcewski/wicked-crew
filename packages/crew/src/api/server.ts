@@ -31,6 +31,10 @@ import { DISTILL_WORKFLOW, RunLearningsService, defaultLearningsDir, loadDistill
 import { memoryContents, proposalRows, submitLearning } from '../learnings/estate.js';
 import { recallLearnings } from '../learnings/recall.js';
 import { registerLearnRoutes } from '../learn/routes.js';
+import { registerPersonaRoutes } from '../persona/routes.js';
+import { PersonaStore } from '../persona/store.js';
+import { registerSetupRoutes } from '../setup/routes.js';
+import { voiceBlock } from '../persona/voice.js';
 import { registerInsightsRoutes } from '../insights/routes.js';
 import { ReviewService } from '../insights/review-service.js';
 import { InsightsStore } from '../insights/store.js';
@@ -1296,6 +1300,13 @@ export async function createServer(
   // tick that indexes merged knowledge and launches at most one due `learn` refresh at a time.
   const learnSchedules = new LearnScheduleStore();
   registerLearnRoutes(app, { store: learnSchedules, adapter, audit });
+
+  // program DES-LEARN §3.3: the orchestrator's personality — the person's and per-project overrides, one
+  // `daemon-persona.json`; its voice block rides every chat's scope statement (personaVoice below).
+  const personas = new PersonaStore({ log: (m) => app.log.warn(m) });
+  registerPersonaRoutes(app, { store: personas, adapter, audit });
+  // DES-LEARN §4: the first run's facts (git identity, languages, nearby checkouts), read-only.
+  registerSetupRoutes(app, { adapter });
   const learnScheduler = new LearnScheduler({
     store: learnSchedules,
     adapter,
@@ -2437,6 +2448,10 @@ export async function createServer(
       stallFrames: (runId) => stallFrameIndex.framesFor(runId),
       // DES-SYSTEM-VIEW: the watchdog's evidence of life (relay frames, busy children) for `GET /system`.
       runEvidence: (runId) => stallWatchdog.evidence(runId),
+      personaVoice: (projectId) => {
+        const p = personas.effective(projectId);
+        return p === null ? null : voiceBlock(p.persona);
+      },
       // The SAME standing accessor the seams and the adapter launch with (F-RECON-002/003).
       rosterWithStanding,
       retryIndex,
