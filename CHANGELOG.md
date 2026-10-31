@@ -12,6 +12,15 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **An editor says how it looks on studio's Plugins page** (program DES-LEARN §2). A studio-bundle editor's
+  `editor.json` may declare `description` (one line) and `visuals` (`icon`, `color`, `preview` as one file or
+  `{light, dark}`, `live`), naming `.svg` / `.png` / `.webp` files beside it. The registry reads each once, bounded
+  (icon 16 KB, preview 200 KB), never through a link (checked, then opened with O_NOFOLLOW and matched to the checked
+  inode) or out of its directory, checks it is the image its name says, and puts it on `GET /editors` as a `data:` URL:
+  `EditorView.description` and `EditorView.visuals` (api-types 0.157.0 `EditorVisuals`). No path and no remote URL
+  reaches the browser, and no image is served from crew's origin. A bad image is left out with a logged reason; the
+  editor is still served. Pack editors carry neither yet: garden's pack gate refuses both keys (PK060).
+
 - **Voice mode, phase 1: speech to text on this machine** (program DES-VOICE). Studio's voice mode records speech in
   the browser and posts it as a 16 kHz mono WAV to `POST /voice/transcribe`; crew hands the bytes to whisper.cpp's CLI on
   stdin and answers `{text, ms, model}`. The audio is held in memory for the call and dropped: never written to disk,
@@ -78,7 +87,7 @@ mentioned only where a daemon release depends on them.
   repo and a chat naming it answer 409 `repo_folder_missing` in the finding's words: "This repository's folder is
   missing: <path>. Re-link it: register it again under the same name at its folder's new place, or put the folder
   back." Testing recon/author and campaign fans refuse a repo whose folder is missing before any member launches; a
-  project or `everything` chat names such a repo in `dangling` instead of reading it. The Nerve Center gains a `repos` row (api-types 0.153.0), `down` while any folder is missing, so Needs-you
+  project or `everything` chat names such a repo in `dangling` instead of reading it. The Nerve Center gains a `repos` row (api-types 0.155.0), `down` while any folder is missing, so Needs-you
   carries it as an item with that fix. `execCapped` names a missing cwd (`ExecCwdMissing`) instead of ENOENT; a
   missing binary is still ENOENT.
 - **Crew writes the working document's event-derived lines itself, so a run nobody views gets them.** On rig run ea73afc0

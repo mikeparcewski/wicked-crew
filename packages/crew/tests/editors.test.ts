@@ -17,6 +17,7 @@ import { BUNDLE_CSP_BASE, bundleHeaders, requestOrigin, shellCsp } from '../src/
 import { CONFORMANCE_CASES, gardenConformance, gardenPackCheck, installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from '../src/editors/pack-install.js';
 import { EditorRegistry, EDITORS_STATE_FILENAME, discoverStudioEditors, externalReferences, readCapped, sha256Of } from '../src/editors/registry.js';
 import { registerEditorRoutes, serveBundle } from '../src/editors/routes.js';
+import { readNoFollow } from '../src/editors/visuals.js';
 
 const scratches: string[] = [];
 afterEach(() => {
@@ -196,7 +197,7 @@ describe('the two policies (§8.2), pinned to the letter', () => {
 const EDITOR_HTML = '<!doctype html><html><body><p>terms</p><script>parent.postMessage(1, "*")</script></body></html>';
 
 /** A pack directory: editor-only by default, with its entry on disk and its true hash pinned. */
-function makePack(opts: { name?: string; id?: string; html?: string; blocks?: boolean; skills?: string[]; version?: string; permissions?: Array<{ id: string; why: string }> } = {}): string {
+function makePack(opts: { name?: string; id?: string; html?: string; blocks?: boolean; skills?: string[]; version?: string; permissions?: Array<{ id: string; why: string }>; editorExtra?: Record<string, unknown> } = {}): string {
   const root = mkdtempSync(join(tmpdir(), 'editors-pack-'));
   scratches.push(root);
   const id = opts.id ?? 'acme-terms';
@@ -210,7 +211,7 @@ function makePack(opts: { name?: string; id?: string; html?: string; blocks?: bo
       name: opts.name ?? 'acme-terms',
       vendor: 'acme',
       version: opts.version ?? '0.1.0',
-      editors: [{ id, title: 'Terms checker', version: opts.version ?? '0.1.0', protocol: [1], kinds: ['document'], entry: `editors/${id}/index.html`, sha256: sha256Of(Buffer.from(html)), sizes: ['inline', 'pane'], permissions: opts.permissions ?? [{ id: 'artifact.read', why: 'to read the document' }] }],
+      editors: [{ id, title: 'Terms checker', version: opts.version ?? '0.1.0', protocol: [1], kinds: ['document'], entry: `editors/${id}/index.html`, sha256: sha256Of(Buffer.from(html)), sizes: ['inline', 'pane'], permissions: opts.permissions ?? [{ id: 'artifact.read', why: 'to read the document' }], ...opts.editorExtra }],
       ...(opts.blocks === true ? { blocks: [{ id: 'acme-terms-review', label: 'Check our terms', preset: 'presets/terms-review.json', produces_kind: 'document', skills: ['acme-terms-checker'] }], skills_dir: 'skills' } : {}),
     }),
   );
@@ -266,6 +267,14 @@ describe('pack install: the gate, crew\'s conformance run, then the registry', (
     const again = new EditorRegistry({ stateHome: home });
     expect(again.get('acme-terms')).toMatchObject({ source: 'pack', firstParty: false, enabled: true });
     expect(again.get('acme-terms')!.entryPath).toBe(join(root, 'editors', 'acme-terms', 'index.html'));
+  });
+
+  it('a pack editor carries no visuals yet (garden’s gate refuses the keys): its digest and wire view are as before', async () => {
+    const { reg } = registry();
+    const root = makePack();
+    const res = await installPack(root, undefined, { check: passCheck, conformance: conformant(), registry: reg });
+    expect(res.editors[0]).not.toHaveProperty('visuals');
+    expect(res.editors[0]).not.toHaveProperty('description');
   });
 
   it('a failed or impossible conformance run installs nothing (422), naming the cases that did not pass', async () => {
@@ -688,5 +697,84 @@ describe('the routes', () => {
     const res = await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot } });
     expect(res.statusCode).toBe(422);
     expect(res.json()).toMatchObject({ check: { ok: false, errors: [{ code: 'editor-entry-outside' }] } });
+  });
+});
+
+describe('visuals: how an editor looks on the Plugins page (program DES-LEARN §2)', () => {
+  const SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/></svg>';
+  const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(24)]);
+
+  function withVisuals(visuals: unknown, files: Record<string, string | Buffer>, extra: Record<string, unknown> = {}): string {
+    const root = mkdtempSync(join(tmpdir(), 'editors-visuals-'));
+    scratches.push(root);
+    const dir = join(root, 'editors', 'wicked-page');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'editor.json'), JSON.stringify(manifest('wicked-page', { visuals, ...extra })));
+    writeFileSync(join(dir, 'index.html'), PAGE_HTML);
+    for (const [name, body] of Object.entries(files)) {
+      mkdirSync(join(dir, name, '..'), { recursive: true });
+      writeFileSync(join(dir, name), body);
+    }
+    return root;
+  }
+
+  it('reads the icon and previews beside the manifest into data: URLs, with the colour and one line, onto the wire view', () => {
+    const root = withVisuals({ icon: 'icon.svg', color: '#7c3aed', preview: { light: 'shots/light.png', dark: 'shots/dark.png' }, live: true },
+      { 'icon.svg': SVG, 'shots/light.png': PNG, 'shots/dark.png': PNG }, { description: '  Opens pages:\n point at any element.  ' });
+    const reg = new EditorRegistry({ stateHome: mkdtempSync(join(tmpdir(), 'editors-home-')), studioRoot: root });
+    const view = EditorRegistry.view(reg.get('wicked-page')!);
+    expect(view.description).toBe('Opens pages: point at any element.');
+    expect(view.visuals).toEqual({
+      icon: `data:image/svg+xml;base64,${Buffer.from(SVG).toString('base64')}`,
+      color: '#7c3aed',
+      preview: { light: `data:image/png;base64,${PNG.toString('base64')}`, dark: `data:image/png;base64,${PNG.toString('base64')}` },
+      live: true,
+    });
+    // No path is on the wire.
+    expect(JSON.stringify(view)).not.toContain(root);
+  });
+
+  it('a missing, oversized, linked, mistyped or escaping image is left out with a reason; the editor is still served', () => {
+    const outside = mkdtempSync(join(tmpdir(), 'editors-outside-'));
+    scratches.push(outside);
+    writeFileSync(join(outside, 'x.svg'), SVG);
+    const root = withVisuals({ icon: 'linked.svg', preview: { light: 'big.png', dark: 'fake.png' }, color: 'purple' },
+      { 'big.png': Buffer.concat([PNG, Buffer.alloc(201 * 1024)]), 'fake.png': '<html>not a png</html>' });
+    symlinkSync(join(outside, 'x.svg'), join(root, 'editors', 'wicked-page', 'linked.svg'));
+    const logs: string[] = [];
+    const found = discoverStudioEditors(root, (m) => logs.push(m));
+    expect(found.map((r) => r.manifest.id)).toEqual(['wicked-page']);
+    expect(found[0]!.visuals).toBeUndefined();
+    expect(logs.find((l) => l.includes('linked.svg'))).toMatch(/symlink/);
+    expect(logs.find((l) => l.includes('big.png'))).toMatch(/over its 204800-byte cap/);
+    expect(logs.find((l) => l.includes('fake.png'))).toMatch(/not a png image/);
+    // codex on crew#1234: what was checked is what is read. A link at the open is refused (O_NOFOLLOW), and a file
+    // replaced after its check (another inode) is not read.
+    const dir = mkdtempSync(join(tmpdir(), 'editors-swap-'));
+    scratches.push(dir);
+    writeFileSync(join(dir, 'a.svg'), SVG);
+    symlinkSync(join(outside, 'x.svg'), join(dir, 'link.svg'));
+    expect(() => readNoFollow(join(dir, 'link.svg'), 1024)).toThrow(/ELOOP|EMLINK/);
+    const checked = statSync(join(dir, 'a.svg'));
+    rmSync(join(dir, 'a.svg'));
+    writeFileSync(join(dir, 'b.tmp'), SVG);
+    writeFileSync(join(dir, 'a.svg'), SVG);
+    rmSync(join(dir, 'b.tmp'));
+    expect(readNoFollow(join(dir, 'a.svg'), 1024, checked)).toBeNull();
+    expect(readNoFollow(join(dir, 'a.svg'), 1024)?.toString()).toBe(SVG);
+    // A path out of the directory, a remote URL or an unknown type is never even tried.
+    const escaping = withVisuals({ icon: '../../index.html', preview: 'https://cdn.example/p.png', color: '#123456' }, {});
+    const r = discoverStudioEditors(escaping)[0]!;
+    expect(r.visuals).toEqual({ color: '#123456' });
+  });
+
+  it('a malformed visuals value is dropped, never a reason to refuse the editor; a manifest without one has none on the wire', () => {
+    const root = withVisuals('icon.svg', {}, { description: 42 });
+    const reg = new EditorRegistry({ stateHome: mkdtempSync(join(tmpdir(), 'editors-home-')), studioRoot: root });
+    const view = EditorRegistry.view(reg.get('wicked-page')!);
+    expect(view).not.toHaveProperty('visuals');
+    expect(view).not.toHaveProperty('description');
+    const plain = EditorRegistry.view(new EditorRegistry({ stateHome: mkdtempSync(join(tmpdir(), 'editors-home-')), studioRoot: studioRoot() }).get('wicked-page')!);
+    expect(Object.keys(plain)).not.toContain('visuals');
   });
 });
