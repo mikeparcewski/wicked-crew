@@ -652,18 +652,28 @@ export class RunCostCache {
 }
 
 /** Whether the seat images row is one "Rebuild seat images" fixes: a roster image or the floor image
- *  is missing, or an image is not yet held (a rebuild builds and holds them). Not a missing base with
- *  no recipe, an operator's own image, or a full disk: a rebuild cannot fix those. */
+ *  is missing, an image is not yet held, or the base is missing and has a recipe (a rebuild builds
+ *  and holds them). Not while a rebuild runs, not with the VM disk past the warning line (a rebuild
+ *  writes gigabytes; the disk comes first), and not when a missing image cannot be built (an operator
+ *  base with no recipe, an operator's own image). */
 export function seatImagesRebuildFixes(row: SystemInfraRow): boolean {
   if (row.key !== 'seat_images' || (row.state !== 'down' && row.state !== 'degraded')) return false;
   const d = row.details as {
     missing?: unknown;
     unheld?: unknown;
+    disk?: { usedPct?: unknown } | null;
+    rebuild?: { running?: unknown } | null;
     images?: { floor?: { present?: unknown }; base?: { present?: unknown } | null; baseRecipe?: unknown; seats?: Array<{ present?: unknown; operatorImage?: unknown }> };
   };
-  const baseUnbuildable = d.images?.base?.present === false && d.images?.baseRecipe !== true;
-  const operatorMissing = (d.images?.seats ?? []).some((x) => x.present === false && x.operatorImage === true);
-  if (baseUnbuildable || operatorMissing) return false;
+  if (d.rebuild?.running === true) return false;
+  if (typeof d.disk?.usedPct === 'number' && d.disk.usedPct >= SEAT_DISK_WARN_PCT) return false;
   const n = (v: unknown): number => (Array.isArray(v) ? v.length : 0);
-  return n(d.missing) > 0 || n(d.unheld) > 0 || d.images?.floor?.present === false;
+  const baseGone = d.images?.base?.present === false;
+  const baseRebuildable = baseGone && d.images?.baseRecipe === true;
+  if (baseGone && !baseRebuildable && n(d.missing) > 0) return false;
+  if ((d.images?.seats ?? []).some((x) => x.present === false && x.operatorImage === true)) return false;
+  return n(d.missing) > 0 || n(d.unheld) > 0 || d.images?.floor?.present === false || baseRebuildable;
 }
+
+/** VM disk used, % (seat-images.ts `SEAT_DISK_WARN_PCT`), from which a rebuild is not offered. */
+const SEAT_DISK_WARN_PCT = 75;

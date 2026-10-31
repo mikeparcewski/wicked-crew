@@ -278,7 +278,7 @@ import {
   type RosterSeatLike,
   type RunEvidence,
 } from './system-snapshot.js';
-import { parseSeatImageStatus, probeSeatImages, SEAT_IMAGES_TIMEOUT_MS, SeatImageRebuilder, type SeatImageStatus } from './seat-images.js';
+import { parseSeatImageStatus, probeSeatImages, SeatImageRebuilder, type SeatImageStatus } from './seat-images.js';
 import { RunCostCache } from './needs.js';
 import { governanceStoreFix, legacyHomeOutboxPath } from '../core/governance-store.js';
 import { UsageError, replayOutboxInto } from '../cli/governance.js';
@@ -8759,36 +8759,29 @@ export function registerRoutes(
   // The seat images row (`seat_images`) and its fix: the engine's `seat-image status --json`, read
   // per request, and one background `seat-image build` at a time.
   const coreExe = (): string | null => process.env['WICKED_CORE_EXE'] || null;
-  const engineRun = async (file: string, args: string[], opts: { timeout: number }): Promise<{ rc: number; stdout: string; stderr: string }> => {
-    try {
-      return { rc: 0, ...(await execCapped(file, args, opts)) };
-    } catch (err) {
-      const e = err as { code?: unknown; stdout?: unknown; stderr?: unknown; message?: string };
-      return {
-        rc: typeof e.code === 'number' && e.code !== 0 ? e.code : 1,
-        stdout: typeof e.stdout === 'string' ? e.stdout : '',
-        stderr: typeof e.stderr === 'string' && e.stderr !== '' ? e.stderr : (e.message ?? 'failed'),
-      };
-    }
-  };
-  const seatImageRebuilder = runtime.seatImageRebuilder ?? new SeatImageRebuilder(coreExe, engineRun);
+  const seatImageRebuilder = runtime.seatImageRebuilder ?? new SeatImageRebuilder(coreExe);
   const seatImageStatus =
     runtime.seatImageStatus ??
-    (async () => {
+    (async (): Promise<SeatImageStatus | null> => {
       const exe = coreExe();
       if (exe === null) throw new Error('WICKED_CORE_EXE is not set');
-      const r = await engineRun(exe, ['seat-image', 'status', '--json'], { timeout: SEAT_IMAGES_TIMEOUT_MS });
-      if (r.rc !== 0) throw new Error(loginDetail(r.stderr) || `exit ${r.rc}`);
-      return parseSeatImageStatus(r.stdout);
+      try {
+        const out = await execCapped(exe, ['seat-image', 'status', '--json'], { timeout: PROBE_TIMEOUT_MS });
+        return parseSeatImageStatus(out.stdout);
+      } catch (err) {
+        const e = err as { stderr?: unknown; message?: string };
+        throw new Error(loginDetail(typeof e.stderr === 'string' && e.stderr !== '' ? e.stderr : (e.message ?? 'failed')));
+      }
     });
-  // The roster's container seats: the images that matter on this daemon.
-  const containerSeatClis = (): string[] => {
+  // The roster's seats (on the container floor every seat runs in an image); `null` when unreadable.
+  const rosterSeatClis = (): string[] | null => {
     try {
-      return rosterWithStanding().map((r) => String(r.key)).filter((k) => isContainerLoginCli(k));
+      return rosterWithStanding().map((r) => String(r.key));
     } catch {
-      return [];
+      return null;
     }
   };
+
   // ── POST /system/seat-images/rebuild — the seat images row's fix (api-types 0.162.0) ──
   // A person's only: it builds images in the container runtime for minutes. One at a time; the
   // progress reads on the `seat_images` row.
@@ -8801,7 +8794,16 @@ export function registerRoutes(
         const out: RebuildSeatImagesResponse = { started: false, reason: 'seats run on the host floor: there are no seat images to rebuild', rebuild: null };
         return reply.code(503).send(out);
       }
-      const r = seatImageRebuilder.start(containerSeatClis());
+      // The roster's seats the engine has a seat image for (it refuses a name it does not know).
+      const roster = rosterSeatClis() ?? [];
+      const st = await settleWithin(seatImageStatus, PROBE_TIMEOUT_MS);
+      if (st.kind !== 'ok' || st.value === null) {
+        const why = st.kind === 'timeout' ? 'the engine did not answer its seat image status in time' : st.kind === 'error' ? st.error : 'the engine gave no seat image status';
+        const out: RebuildSeatImagesResponse = { started: false, reason: why, rebuild: seatImageRebuilder.current() };
+        return reply.code(503).send(out);
+      }
+      const known = new Set(st.value.seats.map((x) => x.cli));
+      const r = await seatImageRebuilder.start(roster.filter((c) => known.has(c)));
       if (r.started) {
         audit.record('system.seat_images.rebuild', actorOf(req), { detail: { clis: r.state.clis } });
         const out: RebuildSeatImagesResponse = { started: true, rebuild: r.state };
@@ -8907,7 +8909,7 @@ export function registerRoutes(
         }),
         probeVault({ vault: adapter.vaultBin != null ? vaultDiagnostics(adapter.vaultBin) : null, exec: systemExec }),
         diskRow(stateHome),
-        probeSeatImages({ containerFloor, clis: containerSeatClis(), status: seatImageStatus, rebuild: seatImageRebuilder.current() }),
+        probeSeatImages({ containerFloor, clis: rosterSeatClis(), status: seatImageStatus, rebuild: seatImageRebuilder.current() }),
       ]);
 
       const [views, settings, openGates, diag, ping, rules, gatesByYou, infraProbed, reposRead] = await Promise.all([

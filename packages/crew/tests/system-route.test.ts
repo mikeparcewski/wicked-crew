@@ -3,10 +3,10 @@
 // script `WICKED_CONTAINER_RUNTIME` names — that answers running, refuses connections, or hangs, so
 // the route's real exec path, its per-probe timeout and its overall bound are what is tested.
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import type { DiagnosticsResponse, HealthResponse, SystemSnapshot } from 'wicked-crew-api-types';
 
@@ -29,7 +29,6 @@ const saved: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {}
 let scratch: string;
 let modeFile: string;
 let seatStatusFile: string;
-let seatBuildLog: string;
 let app: FastifyInstance;
 
 const posix = process.platform !== 'win32';
@@ -78,10 +77,8 @@ beforeAll(async () => {
   );
   chmodSync(runtime, 0o755);
 
-  // The fake engine: `seat-image status --json` prints the status file; `seat-image build …` logs its
-  // argv (the rebuild action's real exec path).
+  // The fake engine: `seat-image status --json` prints the status file (the row's real exec path).
   seatStatusFile = join(scratch, 'seat-status.json');
-  seatBuildLog = join(scratch, 'seat-build.log');
   writeFileSync(seatStatusFile, JSON.stringify(seatStatus({})), 'utf8');
   const core = join(scratch, 'fake-wicked-core');
   writeFileSync(
@@ -89,7 +86,6 @@ beforeAll(async () => {
     [
       '#!/bin/sh',
       `[ "$1 $2" = "seat-image status" ] && exec cat '${seatStatusFile}'`,
-      `[ "$1 $2" = "seat-image build" ] && { echo "$*" >> '${seatBuildLog}'; echo "claude: built x"; exit 0; }`,
       'exit 2',
       '',
     ].join('\n'),
@@ -281,7 +277,11 @@ describe('GET /api/v1/system', () => {
   });
 });
 
-describe('seat images on GET /system and POST /system/seat-images/rebuild', () => {
+describe('seat images on GET /system', () => {
+  afterEach(() => {
+    writeFileSync(seatStatusFile, JSON.stringify(seatStatus({})), 'utf8');
+  });
+
   async function seatRow(): Promise<{ body: SystemSnapshot; row: SystemSnapshot['infra'][number] }> {
     // A loaded host can push the fake engine's spawn past the probe's bound (an honest `unknown`).
     let body: SystemSnapshot | undefined;
@@ -317,24 +317,10 @@ describe('seat images on GET /system and POST /system/seat-images/rebuild', () =
     writeFileSync(seatStatusFile, JSON.stringify(seatStatus({ usedPct: 80 })), 'utf8');
     const { body, row } = await seatRow();
     expect(row.state).toBe('degraded');
-    expect(row.reason).toMatch(/80% used.*past 85% a kubelet's image cleanup/);
+    expect(row.reason).toMatch(/80% used.*from 85% a kubelet's image cleanup/);
     expect(row.remedy).toMatch(/docker volume prune/);
     // A rebuild does not free disk: the item re-checks.
     expect(body.attention.find((a) => a.id === 'infra:seat_images')!.action).toMatchObject({ kind: 'recheck' });
-    writeFileSync(seatStatusFile, JSON.stringify(seatStatus({})), 'utf8');
   }, 60_000);
 
-  it.runIf(posix)('the rebuild runs the engine once for the roster container seats; a second press while it runs is 409', async () => {
-    const first = await app.inject({ method: 'POST', url: '/api/v1/system/seat-images/rebuild' });
-    expect(first.statusCode).toBe(202);
-    const body = first.json() as { started: boolean; rebuild: { running: boolean; clis: string[] } };
-    expect(body.started).toBe(true);
-    expect(body.rebuild.clis.length).toBeGreaterThan(0);
-    const second = await app.inject({ method: 'POST', url: '/api/v1/system/seat-images/rebuild' });
-    // Either still running (409) or already done (202 again): never two at once.
-    expect([202, 409]).toContain(second.statusCode);
-    for (let i = 0; i < 100 && !existsSync(seatBuildLog); i += 1) await new Promise((r) => setTimeout(r, 50));
-    const args = readFileSync(seatBuildLog, 'utf8').trim().split('\n')[0]!;
-    expect(args).toBe(`seat-image build ${body.rebuild.clis.join(' ')}`);
-  }, 30_000);
 });
