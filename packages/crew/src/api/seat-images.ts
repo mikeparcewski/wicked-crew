@@ -15,6 +15,7 @@
 import { spawn } from 'node:child_process';
 import { basename } from 'node:path';
 
+import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import type { SystemInfraRow } from '../core/types.js';
 import { homeless } from './seat-standing.js';
 import { infraRow, PROBE_TIMEOUT_MS, settleWithin } from './system-snapshot.js';
@@ -265,7 +266,8 @@ export type SpawnLines = (
 
 /** The real runner: `spawn`, lines as they come (stdout and stderr), killed at `timeout`. */
 export const spawnLines: SpawnLines = (file, args, opts) => {
-  const child = spawn(file, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  // The daemon's boot governance store, never one a caller exported (crew#495).
+  const child = spawn(file, args, { stdio: ['ignore', 'pipe', 'pipe'], env: childEnvWithBootEstateDb(process.env) });
   const started = new Promise<void>((resolve, reject) => {
     child.once('spawn', () => resolve());
     child.once('error', reject);
