@@ -1875,6 +1875,29 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/api/v1/runs/:id/units/:ord/inspect",
+      "requestType": null,
+      "responseType": "UnitInspectionResponse",
+      "statusCodes": [
+        202,
+        400,
+        403,
+        404,
+        409
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/:id/units/:ord/inspections",
+      "requestType": null,
+      "responseType": "UnitInspectionsResponse",
+      "statusCodes": [
+        200,
+        400
+      ]
+    },
+    {
       "method": "GET",
       "path": "/api/v1/runs/:id/units/:unitKey/considered",
       "requestType": null,

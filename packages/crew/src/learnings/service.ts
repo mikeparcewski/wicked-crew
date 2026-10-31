@@ -46,6 +46,7 @@ export const MAX_LEARNING_CHARS = 1500;
 /** Runs whose own record is not a source of learnings: they capture, review or set up. */
 export const NO_LEARNINGS_WORKFLOWS: ReadonlySet<string> = new Set([
   DISTILL_WORKFLOW,
+  'inspect-unit',
   'capture-learnings',
   'review-recent-work',
   'run-evals',

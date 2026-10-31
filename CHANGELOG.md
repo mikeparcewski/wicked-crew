@@ -24,8 +24,25 @@ mentioned only where a daemon release depends on them.
   it is kept on the `gate.decided` audit line and `GET /gates/decided` says it (`DecidedGate.input`); it grants nothing.
   `GET|PUT /voice/dashboard` keeps each person's voice-dashboard layout and the metric widgets they made (declarative
   user plugins in the `voice-dashboard` panel slot) in `daemon-voice-dashboard.json`. Every voice route is the human
-  operator's alone and loopback only. `capabilities.voice` says the routes are served (api-types 0.155.0 `VoiceStatus`,
+  operator's alone and loopback only. `capabilities.voice` says the routes are served (api-types 0.156.0 `VoiceStatus`,
   `VoiceTranscribeResponse`, `VoiceDashboard`, `VoiceWidgetManifest`).
+- **"Is this going well?": an in-flight check on a working step** (operator 2026-10-30: "if it's been running long you
+  can have an agent analyze right there, to make sure no tokens are wasted and no problems are occurring").
+  `POST /runs/:id/units/:ord/inspect` (a human operator only, audited `unit.inspected`; 409 `not_working` for a step
+  that is not working now) reads the step's newest attempt off the run's own log (`src/inspect/reading.ts`: its tool
+  calls, edits, words and live tokens) into crew's own reading: **stuck** (a call open 10 min, or nothing at all for
+  5 min), **looping** (the same call 4 times, the same failing command 3 times, the same file edited 6 times; with the
+  evidence), **wasteful** (400k tokens since its last new words or edit, 3 min ago or more) or **progressing**. It
+  then hands that reading and the step's recent activity to ONE seat that is not the step's own, on a new
+  `inspect-unit` system run: one turn, no repository, no write or read roots, one neutral phase that executes no code
+  (the engine's read-only posture), the record inline. Its reply is one JSON verdict (what it is doing, roughly how
+  far along, evidence, and one recommended action: let it run, steer with a note, or stop). Nothing is done for the
+  person: the check never steers, stops or edits the run it looks at. Its own cost is bounded: crew stops ITS run
+  after 4 min or at $0.25 / 400k tokens and answers with its own reading, saying why; with no other signed-in seat,
+  a refused launch or an unreadable reply it does the same. The record says whose answer it is and what the check
+  cost; `GET /runs/:id/units/:ord/inspections` reads them back, and a `/ws` frame `unitInspection` carries each
+  change. api-types 0.155.0: `UnitInspection*`, and `UsageProgressEvent` (the engine's live `usageProgress` token
+  total, wicked-core#1212).
 - **Every run proposes what it learned to the approve queue.** Over the 7 days to 2026-10-30 the rig ran 37 runs and
   filed 0 proposals: only the separate capture-learnings preset and onboarding's chain ever proposed anything, and the
   engine's per-run memory is an "it completed" line in its own store. Now a run's record is read at its checkpoints
