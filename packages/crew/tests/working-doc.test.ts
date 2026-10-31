@@ -16,7 +16,7 @@ import type { Actor, CoreEvent } from '../src/core/types.js';
 import { readDocHead, foreignKindAskMessage, chatSeamAnswers, WORKING_DOC_REFUSED_MESSAGE } from '../src/interactive/chat-events.js';
 import { eventDocumentId } from '../src/interactive/proxy-routes.js';
 import { anchorOf, changedSections, initialHtml, sectionsOf, type SectionId } from '../src/working-doc/sections.js';
-import { NO_GATE_LINE, UndeterminedWriteError, WorkingDocService, steerMarker, workingDocName, type DocBackend, type RunFacts } from '../src/working-doc/service.js';
+import { NO_GATE_LINE, UndeterminedWriteError, WorkingDocService, goalFrom, steerMarker, workingDocName, type DocBackend, type RunFacts } from '../src/working-doc/service.js';
 import { WorkingDocStore, WORKING_DOC_KIND, isWorkingDocDir, writeSidecar } from '../src/working-doc/store.js';
 import { registerWorkingDocRoutes } from '../src/working-doc/routes.js';
 import { registerAuthHooks } from '../src/api/auth.js';
@@ -105,6 +105,35 @@ describe('sections', () => {
     expect(sectionsOf(html)).toMatchObject({ goal: 'Make <it> right & quick', constraints: 'Keep /v1\nworking', approach: '' });
     expect(html).toContain(`data-wid="${anchorOf('goal')}"`);
     expect(changedSections({ goal: 'a', next: '' }, { goal: 'a', next: 'b' } as Partial<Record<SectionId, string>>)).toEqual(['next']);
+  });
+});
+
+describe('goalFrom', () => {
+  it('leaves a text that fits unchanged', () => {
+    expect(goalFrom('  Fix it.\r\nNow. ')).toBe('Fix it.\nNow.');
+    expect(goalFrom('x'.repeat(1_500))).toBe('x'.repeat(1_500));
+  });
+  it('strips the linked-issues marker and everything after it', () => {
+    expect(goalFrom('Do the thing.\n\n<!-- wicked-crew:linked-issues -->\n## Linked\n<!-- /wicked-crew:linked-issues -->')).toBe('Do the thing.');
+  });
+  it('cuts a long text at a word boundary and ends it with an ellipsis, within 1,500 characters', () => {
+    const out = goalFrom('word '.repeat(600));
+    expect(out.endsWith('word…')).toBe(true);
+    expect(out.length).toBeLessThanOrEqual(1_500);
+    expect(goalFrom('a'.repeat(2_000))).toBe(`${'a'.repeat(1_499)}…`);
+  });
+  it('backs up to any Unicode space, and never splits a surrogate pair', () => {
+    expect(goalFrom('planet\u2003'.repeat(300))).toMatch(/planet…$/u);
+    expect(goalFrom('line\u2028'.repeat(400))).toMatch(/line…$/u);
+    const emoji = goalFrom('😀'.repeat(800));
+    expect(emoji).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u);
+    expect(emoji.length).toBeLessThanOrEqual(1_500);
+    expect(goalFrom(`${'a'.repeat(1_498)}🚀${'b'.repeat(10)}`)).toBe(`${'a'.repeat(1_498)}…`);
+  });
+  it('never shows a cut piece of the marker', () => {
+    const out = goalFrom(`${'word '.repeat(298)}\n\n<!-- wicked-crew:linked-issues -->\nmore`);
+    expect(out).not.toContain('<!--');
+    expect(out).not.toContain('…');
   });
 });
 
@@ -391,6 +420,13 @@ describe('the orchestrator’s own notes (power mode)', () => {
     const w = await t.service.view('run-1');
     expect(w.sections?.approach).toBe('Plan B');
     expect(w.sections?.decisions).toBe('- A 60 s cache. Why: the walk is slow (claude, turn 1)\n- Keep the route (claude, turn 2)');
+    // An agent's text that already ends in terminal punctuation gets no second period.
+    t.service.onEvent(notes({ turn: 3, approach: 'Plan B', decisions: [{ text: 'Add a summary line.', why: 'it helps' }, { text: 'Is it safe?', why: 'checked' }, { text: 'Ship it!', why: 'ready' }] }));
+    await settle();
+    const x = await t.service.view('run-1');
+    expect(x.sections?.decisions).toContain('- Add a summary line. Why: it helps (claude, turn 3)');
+    expect(x.sections?.decisions).toContain('- Is it safe? Why: checked (claude, turn 3)');
+    expect(x.sections?.decisions).toContain('- Ship it! Why: ready (claude, turn 3)');
     expect(t.injected).toHaveLength(0);
   });
 

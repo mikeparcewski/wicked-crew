@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+
+- Working document: an agent decision whose text already ends in `.`, `!` or `?` no longer gets a second period before "Why:"; Goal drops the hidden linked-issues block and, when too long, is cut at a word boundary with an ellipsis (#1240).
+
 ### Changed
 
 - **`test-related` words the cross-repo line like the network line (#1244).** It now reads "left out the tests

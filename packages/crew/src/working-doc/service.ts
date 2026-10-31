@@ -139,6 +139,32 @@ export function standingNote(version: number, by: string, text: string, marker: 
 /** Every note's second line. */
 export const NO_GATE_LINE = 'It adds to your brief. It does not answer, skip or change any gate, check, review or QE step.';
 
+const GOAL_MAX_CHARS = 1_500;
+const LINKED_ISSUES_MARKER = '<!-- wicked-crew:linked-issues -->';
+
+/** The run's problem as Goal text: the hidden linked-issues block dropped, cut at a word boundary with an ellipsis if too long. */
+export function goalFrom(problem: string): string {
+  const text = problem.replace(/\r\n?/g, '\n');
+  const at = text.indexOf(LINKED_ISSUES_MARKER);
+  const body = (at === -1 ? text : text.slice(0, at)).trim();
+  if (body.length <= GOAL_MAX_CHARS) return body;
+  // Room for the ellipsis inside the cap; back up to the last whitespace (any Unicode space, the
+  // same `\s` as the boundary test) unless the cut already fell on one.
+  const room = GOAL_MAX_CHARS - 1;
+  let end = room;
+  if (!/\s/u.test(body[room] ?? '')) {
+    const head = body.slice(0, room);
+    let space = head.length - 1;
+    while (space > 0 && !/\s/u.test(head[space] ?? '')) space -= 1;
+    if (space > 0) end = space;
+  }
+  // Never between the two halves of a surrogate pair (an emoji, a long unbroken token).
+  const last = body.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  const kept = body.slice(0, end).trimEnd();
+  return `${kept}…`;
+}
+
 function blankSections(): Record<SectionId, string> {
   return { goal: '', approach: '', decisions: '', constraints: '', questions: '', next: '' };
 }
@@ -236,7 +262,7 @@ export class WorkingDocService {
       const run = await this.d.run(runId);
       if (run === null) return false;
       const docId = workingDocName(runId);
-      const html = initialHtml(run.title, { goal: run.problem.replace(/\r\n?/g, '\n').trim().slice(0, 1_500) });
+      const html = initialHtml(run.title, { goal: goalFrom(run.problem) });
       const { head } = await this.d.backend.create(run.projectId, docId, runId, html);
       const rec: WorkingDocRecord = {
         runId, projectId: run.projectId, docId, createdAt: this.now(),
@@ -355,7 +381,7 @@ export class WorkingDocService {
           const text = d.text.trim();
           if (text === '') continue;
           const why = d.why?.trim() ?? '';
-          lines.push(`- ${text}${why !== '' ? `. Why: ${why}` : ''} (${tag})`);
+          lines.push(`- ${text}${why !== '' ? `${/[.!?]$/u.test(text) ? '' : '.'} Why: ${why}` : ''} (${tag})`);
         }
         if (lines.length > 0) {
           // The newest lines are kept when the section is full: the oldest are dropped first.
