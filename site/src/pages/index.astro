@@ -14,8 +14,10 @@
  *
  * ACCURACY (crew main, 2026-11-01), each from README.md / CHANGELOG.md / packages/crew-api-types:
  *  - Sandbox images: Claude Code, Codex, Copilot, OpenCode, Pi. Antigravity has none; a local
- *    model or custom binary needs your own image (WICKED_SEAT_IMAGE_<CLI>), offline only. Only the
- *    worktree is mounted; the model gateway is the only egress; keys stay in a credential broker.
+ *    model or custom binary needs your own image (WICKED_SEAT_IMAGE_<CLI>), offline only. The
+ *    worktree is the only repo path mounted writable; the repository boundary is mounted read-only
+ *    (wicked-core src/container_floor.rs mount_plan); the model gateway is the only egress; keys
+ *    stay in a credential broker.
  *  - Gates resolve deny-dominates on the layers that ran (evidence floor, repo checks, policies,
  *    an evaluator on a distinct agent, a judge that can reject but never approve alone). An
  *    ungated phase reads "approved by default, not verified"; a gate with no distinct judge is
@@ -76,7 +78,7 @@ const LAYERS = [
   { name: 'Your checks and policies', does: 'Your repo’s own typecheck, lint and tests, plus the rules you approved.', can: 'sends it back or stops the job' },
   { name: 'Evaluator', does: 'A different agent reviews the work.', can: 'can send it back' },
   { name: 'Judge', does: 'An AI judge reads the evidence cold.', can: 'can fail a gate, never approve alone' },
-  { name: 'QE acceptance', does: 'Garden’s QE pipeline, read from the QE ledger.', can: 'only an attributed PASS delivers' },
+  { name: 'QE acceptance', does: 'Garden’s QE pipeline, read from the QE ledger; a low-impact change may waive it.', can: 'when required, only an attributed PASS delivers' },
 ];
 
 const LABELS = [
@@ -92,7 +94,7 @@ const WORKFLOWS = [
   { name: 'migration', steps: 'plan → execute → cutover → verify → cleanup' },
   { name: 'mcp-server', steps: 'build an MCP server, install it on consent' },
   { name: 'editor-plugin', steps: 'build and test an editor, install on consent' },
-  { name: 'domain-extraction', steps: 'map code to requirements until 80% are real' },
+  { name: 'domain-extraction', steps: 'cover code with real requirements (default 80%)' },
 ];
 
 // Injected at build time from packages/crew/package.json via astro.config.mjs (DT-7).
@@ -144,7 +146,7 @@ const crewVersion = __WICKED_CREW_VERSION__;
           <p class="sec-sub">crew drives each agent’s own headless mode in a hardened container, on your accounts and plans. No billing, no reselling.</p>
         </div>
         <ul class="facts" role="list">
-          <li>Only the job’s worktree is mounted.</li>
+          <li>The job writes only its worktree. Your repo is mounted read-only.</li>
           <li>The model gateway is the only way out.</li>
           <li>Keys stay in a broker. The container sees placeholders.</li>
           <li>Sign each agent in once, on studio’s Agents tab.</li>
@@ -220,7 +222,7 @@ const crewVersion = __WICKED_CREW_VERSION__;
         </table>
       </div>
       <ul class="facts facts--cards" role="list">
-        <li><b>Power mode by default.</b> When a job changes your code, one agent builds the whole change in checkpointed turns, its rigor re-scored from the diff; the hand-off runs the review and QE that rigor calls for.</li>
+        <li><b>Power mode by default.</b> For a preset or plan on a repo, one agent builds the whole change in checkpointed turns, its rigor re-scored from the diff; the hand-off runs the review and QE that rigor calls for.</li>
         <li><b>Crash-resumable.</b> A daemon that dies mid-job resumes it at boot, at the step it was on.</li>
         <li><b>One open API.</b> Studio ships inside crew and uses the same <code>/api/v1</code> and <code>/ws</code> your tools can.</li>
         <li><b>Headless too.</b> <code>wicked-crew start</code>, the REST API, or <code>wicked-crew mcp</code> for agents.</li>
@@ -310,7 +312,7 @@ wicked-crew serve   <span class="c"># opens studio on 127.0.0.1:7701</span></cod
         { p: 0, t: 'run.launched · workflow <b>feature</b>' },
         { p: 0, t: 'plan proposed · 4 steps' },
         { p: 0, t: 'plan confirmed by you', gate: 0 },
-        { p: 1, t: 'container started · <b>Claude Code</b> · only the worktree mounted' },
+        { p: 1, t: 'container started · <b>Claude Code</b> · only the worktree writable' },
         { p: 1, t: 'egress: the model gateway only · keys stay in the broker' },
         { p: 1, t: 'writing the change · usage 41k in / 6k out' },
         { p: 1, t: 'diff captured · 3 files' },
