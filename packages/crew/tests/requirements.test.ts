@@ -447,6 +447,14 @@ describe('requirements service — coverage label + corroboration (domain-model 
     // wicked-core#1233: an older engine's label counted placeholders as mapped ("100% mapped" with 3
     // real requirements of 120): it is never read as the real share.
     expect(coverageOf({ mapped_pct: 100, min_pct: 80, behavior_bearing: 120, mapped: 120, resolved: 3, unmapped: 0 } as never)).toBeNull();
+    // codex on #1252: a share its counts do not support, or buckets that do not sum to the
+    // denominator, is no label; the empty denominator reads 100, as the engine says.
+    const ok = { real_pct: 2, min_pct: 80, behavior_bearing: 120, real: 3, placeholders: 117, unmapped: 0, not_product: 0 };
+    expect(coverageOf(ok)).toMatchObject({ realPct: 2, placeholders: 117 });
+    expect(coverageOf({ ...ok, real_pct: 100 })).toBeNull();
+    expect(coverageOf({ ...ok, placeholders: 116 })).toBeNull();
+    expect(coverageOf({ ...ok, real_pct: 100, behavior_bearing: 0, real: 0, placeholders: 0, not_product: 117 })).toMatchObject({ realPct: 100 });
+    expect(coverageOf({ ...ok, real_pct: 0, behavior_bearing: 0, real: 0, placeholders: 0 })).toBeNull();
   });
 
   it('a graph built before the fields reads null and 0/0, never a guess', async () => {

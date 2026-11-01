@@ -233,11 +233,15 @@ export function coverageOf(raw: ArtifactCoverage | undefined): RequirementsCover
     unmapped: count(raw.unmapped),
     notProduct: count(raw.not_product),
   };
-  // Every field present and an integer, percentages in range —
-  // or no label at all.
+  // Every field present and an integer, percentages in range, the buckets summing to the
+  // denominator and the share the engine's own floor of them (100 on an empty denominator) — or no
+  // label at all: a label whose share its counts do not support is never shown (codex on #1252).
   if (Object.values(out).some((v) => v === null)) return null;
   const c = out as RequirementsCoverage;
   if (c.realPct > 100 || c.minPct < 1 || c.minPct > 100) return null;
+  if (c.real + c.placeholders + c.unmapped !== c.behaviorBearing) return null;
+  const share = c.behaviorBearing === 0 ? 100 : Math.floor((c.real * 100) / c.behaviorBearing);
+  if (c.realPct !== share) return null;
   return c;
 }
 

@@ -23,7 +23,7 @@ mentioned only where a daemon release depends on them.
   counted; tests, data, manifests and documents are out of `behaviorBearing` (`notProduct`). `mappedPct`,
   `mapped` and `resolved` are gone (they counted placeholders as mapped: pi-governance read "100% mapped" with 3
   real requirements of 120). An older engine's `mapped_pct` label is never shown as the real share. The
-  domain-extraction coverage step's pinned validator is `a607b67a07d026cd` (the reworded criterion).
+  domain-extraction coverage step's pinned validator is `9fddcc159580ed33` (the reworded criterion).
 - **`test-related` words the cross-repo line like the network line (#1244).** It now reads "left out the tests
   tagged `cross-repo` (N in the repository, in …; only those this run selected were affected): no sibling
   wicked-core checkout; CI runs them (crew#1173)". The count and files were always the repository's, so a targeted

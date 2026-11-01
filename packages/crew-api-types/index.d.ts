@@ -6748,7 +6748,9 @@ export interface RequirementCorroboration {
  * .minCoveragePct`): label it "23% real requirements · 4397 placeholders · minimum 80%".
  *
  * - `realPct` is the one number the minimum is checked against: `floor(real * 100 /
- *   behaviorBearing)`, floored so it never reads above the minimum it was compared to.
+ *   behaviorBearing)`, floored so it never reads above the minimum it was compared to; 100 when
+ *   `behaviorBearing` is 0 (nothing in product code to map). `real + placeholders + unmapped ===
+ *   behaviorBearing`; a label that breaks either is not sent.
  * - `real`: behaviours resolved to a stated, sourced business rule.
  * - `placeholders`: behaviours carrying only a risk-flagged placeholder (an empty statement, a rule
  *   under the confidence threshold, one written unconfirmed). Shown in the graph as unconfirmed,
