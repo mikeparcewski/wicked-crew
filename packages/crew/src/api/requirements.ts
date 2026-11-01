@@ -252,16 +252,20 @@ export function coverageOf(raw: ArtifactCoverage | undefined): RequirementsCover
 export function categoryOf(file: string): RequirementCategory {
   // A component names a symbol in its file ("package.json#devDependencies"): classify by the FILE, or every
   // manifest field reads as product code (studio 2026-11-01: Functional opened on package.json's fields).
-  // The engine writes `file#name` (wicked-core domain_model node_ref), and a name is free text (a doc
-  // heading can hold "#" or "/": "README.md#C# support"), so the file ends at the FIRST "#". A source
-  // path holding "#" ("src/c#/Parser.cs#Parse" -> "src/c") or with no extension ("bin/crew#main") has no
-  // config extension before it and stays functional; only a "#"-prefix that itself ends in one
-  // ("notes.md#2/x.ts") would class as config, and no repo layout here has one.
-  const f = file.toLowerCase().split('#')[0]!;
+  // The engine writes `file#name` (wicked-core domain_model node_ref), and both halves may hold "#" (a
+  // source directory "src/c#/", a doc heading "C# support"), so any "#" may be the separator. Config and
+  // data only when EVERY reading names a config file: real product code never leaves Functional
+  // ("src/cache.json#v2/main.ts#run" stays functional). A doc heading holding "#" errs to functional.
+  const f = file.toLowerCase();
+  const parts = f.split('#');
+  const readings = parts.length === 1 ? [f] : parts.slice(1).map((_, i) => parts.slice(0, i + 1).join('#'));
+  return readings.every(isConfigFile) ? 'config-data' : 'functional';
+}
+
+function isConfigFile(f: string): boolean {
   const base = f.slice(f.lastIndexOf('/') + 1);
-  if (/\.(json|ya?ml|lock|toml|ini|env|md|mdx|txt|csv)$/.test(base)) return 'config-data';
-  if (base.includes('pnpm-lock') || base.includes('package-lock')) return 'config-data';
-  return 'functional';
+  if (/\.(json|ya?ml|lock|toml|ini|env|md|mdx|txt|csv)$/.test(base)) return true;
+  return base.includes('pnpm-lock') || base.includes('package-lock');
 }
 
 export interface RequirementSummary {
@@ -296,6 +300,8 @@ interface IndexEntry {
   summary: RequirementSummary;
   haystack: string; // lowercased searchable text
   source: ArtifactRequirement;
+  /** The engine would count it real ({@link isRealRequirement}); the list opens on these. */
+  real: boolean;
 }
 
 interface RepoIndex {
@@ -383,6 +389,11 @@ async function buildIndexRead(
     return { index: cached, coverage: cached.coverage };
   }
   const overrides = await readOverrides(repo);
+  // A graph whose build label counts what is not product code (wicked-core#1234, `not_product`) was built
+  // from product behaviour only: tests, data, manifests and docs are left out, and what remains in a
+  // data-extension file is an extracted rule (a cloud policy's JSON), which is product behaviour. Its
+  // items are all functional; the file-extension guess is for graphs built before that.
+  const productOnly = typeof graph.metadata?.coverage?.not_product === 'number';
 
   const entries: IndexEntry[] = [];
   const byKey = new Map<string, IndexEntry>();
@@ -411,7 +422,7 @@ async function buildIndexRead(
         domain,
         reqId,
         title,
-        category: categoryOf(firstComponent ?? ''),
+        category: productOnly ? 'functional' : categoryOf(firstComponent ?? ''),
         statement: statements[0] ?? '',
         status: ov?.status ?? req.status ?? 'active',
         risk,
@@ -422,7 +433,7 @@ async function buildIndexRead(
       // Statements are part of the haystack: searching the requirements means
       // searching the actual rule text, not just titles and ids.
       const haystack = `${reqId} ${domain} ${title} ${req.description ?? ''} ${statements.join(' ')} ${ov?.notes ?? ''}`.toLowerCase();
-      const entry: IndexEntry = { summary, haystack, source: req };
+      const entry: IndexEntry = { summary, haystack, source: req, real: isRealRequirement(req) };
       entries.push(entry);
       byKey.set(key, entry);
     }
@@ -523,13 +534,31 @@ export function isPlaceholderStatement(statement: string): boolean {
   return /^\[RISK\]/u.test(statement.trim());
 }
 
+/** wicked-core's `DEFAULT_RESOLVE_THRESHOLD`: a business rule at or above it resolves its behaviour. */
+const RESOLVE_THRESHOLD = 0.75;
+
 /**
- * The list's order: real requirements first, then placeholders, then config and data; the graph's order within each.
- * A requirement with no statement at all states nothing either, so it sorts with the placeholders, never first.
+ * Whether the engine counts this requirement REAL (wicked-core `classify_node`, as far as the document
+ * shows it): a validated requirement (`status: active`) with a stated rule, or a business rule at or above
+ * the resolve threshold whose statement is not the risk floor. A plain rule under the threshold, a
+ * risk-floor statement or no statement at all is a placeholder. A rule with no numeric confidence (an
+ * older document) is judged on its statement.
  */
-export function listRank(s: Pick<RequirementSummary, 'category' | 'statement'>): number {
-  if (s.category === 'config-data') return 2;
-  return s.statement.trim() === '' || isPlaceholderStatement(s.statement) ? 1 : 0;
+export function isRealRequirement(req: { status?: string; business_rules?: unknown[] }): boolean {
+  const stated = (req.business_rules ?? []).flatMap((r) => {
+    const { statement, confidence } = (r ?? {}) as { statement?: unknown; confidence?: unknown };
+    return typeof statement === 'string' && statement.trim() !== '' && !isPlaceholderStatement(statement)
+      ? [typeof confidence === 'number' ? confidence : null]
+      : [];
+  });
+  if (req.status === 'active' && stated.length > 0) return true;
+  return stated.some((c) => c === null || c >= RESOLVE_THRESHOLD);
+}
+
+/** The list's order: real requirements first, then placeholders, then config and data; the graph's order within each. */
+function listRank(e: IndexEntry): number {
+  if (e.summary.category === 'config-data') return 2;
+  return e.real ? 0 : 1;
 }
 
 function pageOf(index: RepoIndex, query: RequirementsQuery): RequirementsPage {
@@ -538,14 +567,14 @@ function pageOf(index: RepoIndex, query: RequirementsQuery): RequirementsPage {
     .split(/\s+/)
     .filter((t) => t.length > 0);
   const domainFilter = query.domain?.toLowerCase();
-  const matched: RequirementSummary[] = [];
+  const matched: IndexEntry[] = [];
   for (const e of index.entries) {
     if (query.category !== undefined && e.summary.category !== query.category) continue;
     if (query.risk === 'risk' && !e.summary.risk) continue;
     if (query.risk === 'no-risk' && e.summary.risk) continue;
     if (domainFilter !== undefined && !e.summary.domain.toLowerCase().includes(domainFilter)) continue;
     if (terms.length > 0 && !terms.every((t) => e.haystack.includes(t))) continue;
-    matched.push(e.summary);
+    matched.push(e);
   }
   // Stable: Array.prototype.sort keeps the graph's order within a rank.
   matched.sort((a, b) => listRank(a) - listRank(b));
@@ -554,7 +583,7 @@ function pageOf(index: RepoIndex, query: RequirementsQuery): RequirementsPage {
     corpus: index.total,
     offset: query.offset,
     limit: query.limit,
-    items: matched.slice(query.offset, query.offset + query.limit),
+    items: matched.slice(query.offset, query.offset + query.limit).map((e) => e.summary),
     source: 'store',
     orphanedOverrides: index.orphanedOverrides,
     coverage: index.coverage,

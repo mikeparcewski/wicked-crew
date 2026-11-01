@@ -13,12 +13,15 @@ mentioned only where a daemon release depends on them.
 ### Fixed
 
 - **The requirements list opens on real requirements, and Functional holds no manifest field.** A component names a
-  symbol in its file (`package.json#devDependencies`), and the category was read off the whole string, so no
-  manifest, config or doc entry ever classed as config and data: Functional held 7,285 of wicked-crew's 7,300 items,
-  opening on `package.json`'s fields. The category is now read off the file. The list orders real requirements first,
-  then placeholders (a statement on the engine's `[RISK]` floor, or none at all), then config and data, keeping the
-  graph's order within each. The file is the part of `file#name` before the first `#` (a name is free text, such as a
-  doc heading), so a source path holding `#` or with no extension stays functional.
+  symbol in its file (`package.json#devDependencies`), and the category was read off the whole string, so a manifest,
+  config or doc entry with a symbol classed as functional; only `package-lock` entries, matched by name, did not.
+  Functional held 7,285 of wicked-crew's 7,300 items, opening on `package.json`'s fields. The category is now read off
+  the file: config and data only when every reading of `file#name` names a config file, so a source path holding `#`
+  or with no extension stays functional. A graph built from product behaviour only (its label counts `not_product`,
+  wicked-core#1234) lists every item as functional, so an extracted rule in a JSON policy file stays there. The list
+  orders real requirements first (a stated rule at or above the engine's 0.75 resolve threshold, or a validated
+  requirement), then placeholders (the `[RISK]` floor, a plain rule under the threshold, or no statement), then config
+  and data, keeping the graph's order within each.
 - **An end-of-run learnings distil never waits on you (#1251).** A distil seat that rightly found nothing could
   reply in under 200 characters, fail the engine's substance floor and park as "Waiting on you". The distil's
   outcome is its report file, so crew now stops a distil run at any gate it reaches and files from the report:
