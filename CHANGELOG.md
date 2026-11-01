@@ -10,6 +10,21 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+
+- **The workflows are a catalog: `GET /api/v1/workflows/catalog` (api-types 0.168.0).** It serves the categories
+  (Create, Resolve, Analyze, Test, More, and Your workflows once you have saved presets) and one entry per thing you
+  can start: what you get, what it needs, the inputs it asks for, a time and cost hint, tags and synonyms for search,
+  its status (available, coming soon, or unavailable on an older engine) and how to launch it (a run, a document
+  style, the demo, draft epics or a chat). Each entry carries YOUR usage: launches, last used and median time, from
+  the runs whose `run.launched` trail entry names the requesting principal (runs a schedule or the daemon launched
+  are not counted, nor are retries), optionally for one project (`?projectId=`), and `top` lists your six most used.
+  The metadata lives in one data module (`src/workflow-catalog/catalog-data.ts`); a workflow's title, summary and
+  use-when stay on its def. A served workflow with no catalog entry still appears under More. Create (the working
+  name for what was Vibe) and Studio phase plugin are listed as coming soon. The engine's new `docs`,
+  `validate-docs`, `test-plan` and `test-analysis` workflows (wicked-core) fill Documentation, Validate
+  documentation, Test planning and Test analysis. `health.capabilities.workflowCatalog` says the route is served.
+
 ### Fixed
 
 - **The requirements list agrees with its header, or says why not (api-types 0.167.0, wicked-core req-reconcile).**

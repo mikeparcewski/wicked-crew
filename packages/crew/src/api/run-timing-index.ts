@@ -62,6 +62,8 @@ export class RunTimingIndex {
   private readonly runToChatId = new Map<string, string>();
   /** crew#854: runs an ask launched (the `run.launched` entry's `askPath`). */
   private readonly askPathRuns = new Set<string>();
+  /** wf-catalog: run → the principal its `run.launched` entry names (`Actor.id`), for per-operator usage. */
+  private readonly runToPrincipal = new Map<string, string>();
   /** crew#1157: runs an ANALYSIS chat launched → its workflow (the entry's `chatWorkflow`). */
   private readonly runToChatWorkflow = new Map<string, string>();
   /** crew#552: chained run → the onboarding run it was launched from (`detail.chainedFrom`). */
@@ -85,6 +87,8 @@ export class RunTimingIndex {
       }
       const runId = entry.runId;
       if (typeof runId !== 'string') continue;
+      const principal = (entry.actor as { id?: unknown } | undefined)?.id;
+      if (typeof principal === 'string' && principal.length > 0) this.runToPrincipal.set(runId, principal);
       const detail = entry.detail as Record<string, unknown> | undefined;
       const ch = detail?.['channel'];
       if (ch === 'studio' || ch === 'cli' || ch === 'api') this.runToChannel.set(runId, ch);
@@ -153,6 +157,16 @@ export class RunTimingIndex {
   /** Record the launch actor string for a run (crew#632). */
   setLaunchActor(runId: string, actor: string): void {
     this.runToLaunchActor.set(runId, actor);
+  }
+
+  /** wf-catalog: record the principal that launched a run (the live half of the hydrate above). */
+  setPrincipal(runId: string, actorId: string): void {
+    if (actorId.length > 0) this.runToPrincipal.set(runId, actorId);
+  }
+
+  /** The principal (`Actor.id`) the run's `run.launched` entry names, or `undefined` when there is none. */
+  principalFor(runId: string): string | undefined {
+    return this.runToPrincipal.get(runId);
   }
 
   /** The launch actor string, or `undefined` (ABSENT when the launch did not name one). */
@@ -346,6 +360,7 @@ export function recordRunLaunched(
 ): number {
   const ts = audit.record('run.launched', actor, { runId, detail });
   if (ts > 0) runTimingIndex?.set(runId, ts);
+  runTimingIndex?.setPrincipal(runId, actor.id);
   // crew#632: also stamp channel/actor into the index for live serving (same posture as created_at).
   const ch = detail['channel'];
   if ((ch === 'studio' || ch === 'cli' || ch === 'api') && runTimingIndex !== undefined) {

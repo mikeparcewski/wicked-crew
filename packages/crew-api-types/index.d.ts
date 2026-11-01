@@ -359,6 +359,11 @@ export interface HealthCapabilities {
    * the model are on this machine) is {@link VoiceStatus.ready}. ABSENT on an older daemon: read as `false`.
    */
   voice?: boolean;
+  /**
+   * (api-types 0.168.0) `GET /workflows/catalog` is served: the categorised workflow catalog with the
+   * requesting operator's usage ({@link WorkflowCatalogResponse}). ABSENT on an older daemon: read as `false`.
+   */
+  workflowCatalog?: boolean;
 }
 
 // ── A run's working document (program DES-POWER-MODE §8.3, §9; api-types 0.148.0) ──────────────────
@@ -7293,6 +7298,112 @@ export interface PresetListResponse {
 /** `GET /presets/:name`, `PUT /presets/:name`. */
 export interface PresetResponse {
   preset: Preset;
+}
+
+// ── The workflow catalog (api-types 0.168.0, lane wf-catalog) ───────────────────────────────────
+
+/** A catalog category id. `yours` is listed only when the operator has saved presets. */
+export type WorkflowCatalogCategoryId = 'create' | 'resolve' | 'analyze' | 'test' | 'more' | 'yours';
+
+/** One category of the catalog, in display order, with its ordered subcategories (`[]` for `more` and `yours`). */
+export interface WorkflowCatalogCategory {
+  id: WorkflowCatalogCategoryId;
+  title: string;
+  /** One line under the heading. */
+  summary: string;
+  subcategories: { id: string; title: string }[];
+}
+
+/** What a catalog entry needs before it can start. */
+export type WorkflowCatalogNeed = 'repo' | 'project' | 'running_app' | 'requirements' | 'document' | 'runs' | 'nothing';
+
+/** One field the launch asks for, in order. */
+export interface WorkflowCatalogInput {
+  id: string;
+  label: string;
+  kind: 'text' | 'repo' | 'project' | 'url' | 'requirements' | 'seats';
+  required: boolean;
+}
+
+/**
+ * How a client starts an entry: `run` = `POST /runs {workflow}`; `demo` = `POST /projects/:id/demo`;
+ * `compose` = `POST /projects/:id/product/compose` (draft epics); `document` = a new interactive document
+ * of that style (its draft run); `chat` = a chat on its own page; `none` = nothing to launch (coming soon).
+ */
+export type WorkflowCatalogLaunch =
+  | { kind: 'run'; workflow: string }
+  | { kind: 'demo' }
+  | { kind: 'compose' }
+  | { kind: 'document'; style: 'web' | 'doc' | 'ppt' | 'brochure' }
+  | { kind: 'chat' }
+  | { kind: 'none' };
+
+/** The requesting operator's use of an entry (scope: {@link WorkflowCatalogResponse.usage}). */
+export interface WorkflowCatalogUsage {
+  /** Runs this operator launched under the entry's workflow (a retry is not a new launch). */
+  launches: number;
+  /** ISO 8601 launch time of the newest such run, or null. */
+  lastUsedAt: string | null;
+  /** Median wall time in minutes of those runs that COMPLETED, or null when none did. */
+  medianMinutes: number | null;
+}
+
+/** One card of the catalog. */
+export interface WorkflowCatalogEntry {
+  /** Unique card id. For `launch.kind === 'run'` it equals `launch.workflow`. */
+  id: string;
+  category: WorkflowCatalogCategoryId;
+  /** A subcategory id of its category, or null. */
+  subcategory: string | null;
+  title: string;
+  /** What it does, one line. */
+  summary: string;
+  /** What you get, one line. */
+  outcome: string;
+  /** 0–4 short phrases saying when to pick it. */
+  useWhen: string[];
+  needs: WorkflowCatalogNeed[];
+  inputs: WorkflowCatalogInput[];
+  /** Static hint in minutes `[low, high]` from observed runs; null = not known. */
+  typicalMinutes: [number, number] | null;
+  /** Relative cost hint (agent phases and seats); null = not known. */
+  cost: 'low' | 'medium' | 'high' | null;
+  /** Shown as chips; searchable. */
+  tags: string[];
+  /** Searchable only. */
+  synonyms: string[];
+  status: 'available' | 'coming_soon' | 'unavailable';
+  /** Why coming soon or unavailable; null when available. */
+  statusNote: string | null;
+  launch: WorkflowCatalogLaunch;
+  /** The workflow requires QE acceptance before it delivers. */
+  requiresQe: boolean;
+  delivers: 'pr' | 'document' | 'video' | 'report' | 'answer' | 'none';
+  /** Where the definition lives: the engine's built-in preset, a crew workflow, the operator's saved preset, studio's own flow, or none yet. */
+  source: 'builtin' | 'crew' | 'saved' | 'studio' | 'none';
+  usage: WorkflowCatalogUsage;
+}
+
+/**
+ * `GET /workflows/catalog[?projectId=]` (api-types 0.168.0): the workflows as a categorised catalog with
+ * the requesting operator's usage, derived from the runs the daemon already records (the `run.launched`
+ * trail's principal, the run's resolved workflow). Additive: `GET /workflows` is unchanged.
+ */
+export interface WorkflowCatalogResponse {
+  categories: WorkflowCatalogCategory[];
+  /** By category order, then subcategory order, then catalog order. */
+  entries: WorkflowCatalogEntry[];
+  /** "Your top": up to 6 available entry ids with launches, by launches then most recent. */
+  top: string[];
+  usage: {
+    /** `operator`: every run this principal launched; `project`: only those filed in `projectId`. */
+    scope: 'operator' | 'project';
+    projectId: string | null;
+    /** The principal the usage is for (`Actor.id`; `local` on a loopback daemon). */
+    actorId: string;
+    /** Runs counted across every entry. */
+    launches: number;
+  };
 }
 
 // ── Projects (DES-PROJECT-001) — the experience-plane keystone ─────────────────
