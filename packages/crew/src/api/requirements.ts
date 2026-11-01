@@ -83,11 +83,14 @@ export interface EstateRequirementsGraph {
   domains?: Record<string, ArtifactDomain>;
 }
 
-/** What the engine answers for one repository: its graph (null until a build reached the minimum)
- * and the coverage label from the store's own counts (present either way). */
+/** What the engine answers for one repository: its graph (null until a build reached the minimum),
+ * the coverage label from the store's own counts (present either way), and which build the graph is:
+ * its generation and the label that build persisted (wicked-core 2026-11-01; ABSENT from an older
+ * engine, null when nothing is built). */
 export interface EstateRequirementsRead {
   graph: EstateRequirementsGraph | null;
   coverage: ArtifactCoverage | null;
+  build?: { generation?: unknown; coverage?: ArtifactCoverage | null } | null;
 }
 
 /** The one read this module needs from the engine — `CoreAdapter.getRequirementsGraphForRepo`. */
@@ -182,6 +185,43 @@ export interface RequirementsCoverage {
   placeholders: number;
   unmapped: number;
   notProduct: number;
+}
+
+/**
+ * The graph the list holds, as it was BUILT. The list's rows are the last `domain-graph` build; the page's
+ * `coverage` counts the store NOW, which moves on whenever a run maps more without building (a run stopped at
+ * its repeat ask, or one below the minimum, where the build refuses). `behind` says the rows are not what the
+ * header counts (req-list-stale 2026-11-01: 1,383 real listed under a header counting 3,585).
+ */
+export interface RequirementsGraphBuild {
+  /** The build's generation in the store (1 = the first build). */
+  generation: number;
+  /** The label the build persisted; `null` when it carried none or an older engine's `mapped_pct` one
+   *  (built before real requirements were counted). */
+  coverage: RequirementsCoverage | null;
+  /** The store's counts differ from the build's, or the build's are unknown: the header counts requirements
+   *  the list does not hold (yet). False only when every count agrees. */
+  behind: boolean;
+}
+
+/** The counts that say what the store held; `minPct` is a setting, not a count, and `realPct` follows them. */
+const BUILD_COUNTS = ['behaviorBearing', 'real', 'placeholders', 'unmapped', 'notProduct'] as const;
+
+/**
+ * Which build the list is, from the engine's `build` beside the live label: `null` when the engine does not
+ * say (an older engine: the list is never claimed current on a read that cannot tell) or sent no usable
+ * generation. With no live label there is nothing for the rows to disagree with.
+ */
+export function graphBuildOf(
+  raw: EstateRequirementsRead['build'],
+  live: RequirementsCoverage | null,
+): RequirementsGraphBuild | null {
+  if (raw === undefined || raw === null || typeof raw !== 'object') return null;
+  const generation = count(raw.generation);
+  if (generation === null) return null;
+  const built = coverageOf(raw.coverage ?? undefined);
+  const behind = live !== null && (built === null || BUILD_COUNTS.some((k) => built[k] !== live[k]));
+  return { generation, coverage: built, behind };
 }
 
 /** A count as the artifact must carry it: a finite, non-negative integer — else `null`. */
@@ -330,6 +370,8 @@ interface RepoIndex {
   /** Override keys that matched NO row — stale after a re-index/migration (module header). */
   orphanedOverrides: number;
   coverage: RequirementsCoverage | null;
+  /** Which build the rows are ({@link graphBuildOf}). */
+  graphBuild: RequirementsGraphBuild | null;
   validated: number;
   unconfirmed: number;
 }
@@ -399,6 +441,7 @@ async function buildIndexRead(
   const token = createHash('sha1')
     .update(JSON.stringify(graph))
     .update(JSON.stringify(read.coverage ?? null))
+    .update(JSON.stringify(read.build ?? null))
     .digest('hex');
   const cached = cache.get(repoKey(repo));
   if (cached && cached.sourceToken === token && cached.overridesMtimeMs === ovMtime) {
@@ -447,6 +490,9 @@ async function buildIndexRead(
       byKey.set(key, entry);
     }
   }
+  // The label from the store's own counts at read time (a later run that maps more shows up
+  // without a rebuild); the build's own label only when an engine sent none.
+  const coverage = coverageOf(read.coverage ?? graph.metadata?.coverage);
   const index: RepoIndex = {
     entries,
     byKey,
@@ -454,9 +500,8 @@ async function buildIndexRead(
     overridesMtimeMs: ovMtime,
     total: entries.length,
     orphanedOverrides: countOrphanedOverrides(overrides, byKey),
-    // The label from the store's own counts at read time (a later run that maps more shows up
-    // without a rebuild); the build's own label only when an engine sent none.
-    coverage: coverageOf(read.coverage ?? graph.metadata?.coverage),
+    coverage,
+    graphBuild: graphBuildOf(read.build, coverage),
     validated: entries.filter((e) => e.summary.corroboration?.status === 'validated').length,
     unconfirmed: entries.filter((e) => e.summary.corroboration?.status === 'unconfirmed').length,
   };
@@ -498,6 +543,12 @@ export interface RequirementsPage {
    * absent, an older engine's `mapped_pct` label, or one its counts do not support.
    */
   coverage: RequirementsCoverage | null;
+  /**
+   * Which build the rows are: the list is the last graph build, `coverage` is the store now. When `behind`, the
+   * header counts requirements the list does not hold; a client says so ("N real requirements mapped since the
+   * last graph build; build the graph to list them"). `null` when the engine does not say.
+   */
+  graphBuild: RequirementsGraphBuild | null;
   /** How many requirements of the whole corpus are validated / unconfirmed (0/0 on an older artifact). */
   corroboration: { validated: number; unconfirmed: number };
 }
@@ -597,6 +648,7 @@ function pageOf(index: RepoIndex, query: RequirementsQuery): RequirementsPage {
     source: 'store',
     orphanedOverrides: index.orphanedOverrides,
     coverage: index.coverage,
+    graphBuild: index.graphBuild,
     corroboration: { validated: index.validated, unconfirmed: index.unconfirmed },
   };
 }

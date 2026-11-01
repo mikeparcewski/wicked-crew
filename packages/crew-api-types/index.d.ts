@@ -6772,6 +6772,21 @@ export interface RequirementsCoverage {
   notProduct: number;
 }
 
+/**
+ * (0.165.0) The graph a requirements page lists, as it was built. When `behind`, the header (`coverage`, the store
+ * now) counts requirements the list does not hold: say so, e.g. "2,202 real requirements mapped since the last
+ * graph build; build the graph to list them" (or, with `coverage` null, "built before real requirements were
+ * counted").
+ */
+export interface RequirementsGraphBuild {
+  /** The build's generation in the store (1 = the first build). */
+  generation: number;
+  /** The label the build persisted; `null` when it carried none or an older engine's `mapped_pct` label. */
+  coverage: RequirementsCoverage | null;
+  /** False only when every count of the build's label equals the page's `coverage`. */
+  behind: boolean;
+}
+
 export interface RequirementSummary {
   key: string;
   domain: string;
@@ -6821,6 +6836,12 @@ export interface RequirementsPage {
    *  older engine's `mapped_pct` label, or one its counts do not support; ABSENT from an older
    *  daemon. */
   coverage?: RequirementsCoverage | null;
+  /**
+   * (0.165.0) Which build the rows are. The list is the last graph BUILD; `coverage` counts the store NOW,
+   * which moves on when a run maps more without building (stopped at its repeat ask, or below the minimum,
+   * where the build refuses). `null` when the engine does not say; ABSENT from an older daemon.
+   */
+  graphBuild?: RequirementsGraphBuild | null;
   /** (0.159.0) How many requirements of the whole corpus are validated / unconfirmed. */
   corroboration?: { validated: number; unconfirmed: number };
 }
