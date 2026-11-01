@@ -28,7 +28,7 @@ garden supplies the skills, estate holds the record, and crew runs each job betw
   (`feature`, `bug`, `migration`, `mcp-server`, `editor-plugin`) are not delivered until QE acceptance
   reads an attributed PASS, unless the run's own diff score waives it or you skip it with a reason,
   and either is labelled; a plan you compose yourself requires none. A gate says what it checked, a
-  failed check sends the work back (in power mode, up to three times, then it asks you) or retries,
+  failed check sends the work back (in power mode, for up to three hand-off attempts in all, then it asks you) or retries,
   escalates or stops a phased job, and "done" is re-derived from evidence, never asserted. Jobs are
   durable workflows defined as data, crash-resumable, and exportable as evidence.
 
@@ -47,7 +47,7 @@ Requires Node.js ≥ 22 and a container runtime (Rancher Desktop, Docker, Podman
 governed agents run each CLI's headless mode in a hardened seat container (crew builds the seat images
 on first use), and you sign each agent in once from studio's Agents tab, in a login container.
 Seat images ship for Claude Code, Codex, GitHub Copilot, OpenCode and Pi. Antigravity's image is
-defined but its seat is benched (no online credential route yet), and a local model or custom
+defined but its seat is benched by default, and a local model or custom
 binary needs your own image (`WICKED_SEAT_IMAGE_<CLI>`, offline seats only). `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead; there, only
 claude and codex are given governed work.
 
@@ -198,7 +198,7 @@ assessor and test strategist can only raise the engine's own band, and the engin
 actual diff at each checkpoint. The hand-off then runs the evaluator steps that rigor calls for
 (review on a distinct seat, security review at the highest band, QE acceptance when required) and
 the build's own floor. An evaluator's NOT-PASS, or a red floor check, goes back to the same
-orchestrator, up to three rounds, and then the run asks you; a floor check that timed out, or that
+orchestrator for up to three hand-off attempts in all, and then the run asks you; a floor check that timed out, or that
 fails on the base too, asks you at once. A power run skips the run-level plan approval, though a high-risk plan, or a
 revision that turns high-risk, still asks you first. Gates the workflow itself authors still pause
 (feature's adversarial-review confirmation, migration's cutover, an install's consent), and delivery
