@@ -10,7 +10,11 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   corroborationOf,
+  categoryOf,
+  categoryOfComponents,
   coverageOf,
+  isPlaceholderStatement,
+  isRealRequirement,
   listRequirements,
   getRequirement,
   patchRequirement,
@@ -550,5 +554,173 @@ describe('requirements service — one source, one SQLite library (crew#548)', (
     }
     await walk(srcRoot);
     expect(offenders, 'a second SQLite library in the daemon (F-E2E-021 class)').toEqual([]);
+  });
+});
+
+describe('requirements list: what Functional holds and the order it opens in (studio 2026-11-01)', () => {
+  const req = (title: string, statement: string, component: string) => ({
+    title, description: '', status: statement.startsWith('[RISK]') ? 'review' : 'active',
+    business_rules: [{ id: 'RULE-1', statement, confidence: statement.startsWith('[RISK]') ? 0 : 0.9 }],
+    legacy_components: [component], data_access: [], dependencies: [], validations: [], error_paths: [],
+  });
+  async function repoWith(): Promise<string> {
+    forgetRequirementsReads();
+    const root = await mkdtemp(join(tmpdir(), 'req-order-'));
+    const graph = {
+      metadata: { schema_version: '1.0.0' },
+      domains: {
+        '(root)': {
+          description: '(root)',
+          requirements: {
+            'REQ-001': req('devDependencies', '[RISK] devDependencies: empty statement (model could not state a rule)', 'package.json#devDependencies'),
+            'REQ-002': req('engines', 'The workspace requires Node.js 22.12.0 or newer.', 'package.json#engines'),
+            'REQ-003': req('lockfileVersion', '[RISK] lockfileVersion: empty statement (model could not state a rule)', 'package-lock.json#lockfileVersion'),
+          },
+        },
+        billing: {
+          description: 'Billing',
+          requirements: {
+            'REQ-001': req('charge', '[RISK] charge: empty statement (model could not state a rule)', 'src/billing.ts#charge'),
+            'REQ-002': req('refund', 'A refund over the limit waits for approval.', 'src/billing.ts#refund'),
+            'REQ-003': req('tax', 'Tax is applied per jurisdiction.', 'src/tax.ts'),
+          },
+        },
+      },
+    };
+    await markIndexed(root);
+    await writeFile(join(root, ESTATE_STANDIN), JSON.stringify(graph), 'utf8');
+    return root;
+  }
+
+  it('classifies a component by its file, not its symbol', () => {
+    expect(categoryOf('package.json#devDependencies')).toBe('config-data');
+    expect(categoryOf('config/app.yaml#port')).toBe('config-data');
+    expect(categoryOf('src/billing.ts#refund')).toBe('functional');
+    expect(categoryOf('src/billing.ts')).toBe('functional');
+  });
+
+  it('real product code never leaves Functional, whatever "#" or extension its path has', () => {
+    // threat model: any "#" may be the file#name separator; config only when every reading is a config file
+    expect(categoryOf('src/c#/Parser.cs#Parse')).toBe('functional');
+    expect(categoryOf('src/c#/Parser.cs')).toBe('functional');
+    expect(categoryOf('lib/F#Interop/Main.fs#run')).toBe('functional');
+    expect(categoryOf('src/cache.json#v2/main.ts#run')).toBe('functional'); // codex r1: a config-looking prefix
+    expect(categoryOf('src/a.json#b.ts#run')).toBe('functional');
+    expect(categoryOf('src/package-lock#v2/main.ts#run')).toBe('functional'); // Copilot r1
+    expect(categoryOf('src/c#/package.json#name')).toBe('functional'); // a reading as "src/c": errs to functional
+    expect(categoryOf('lib/Parser.cs')).toBe('functional');
+    // codex r3/r4: in the engine's form (file#name) the true file is always one of the readings, so a "#"
+    // directory after a config-looking prefix stays code whatever the file
+    expect(categoryOf('src/cache.json#v2/Makefile#all')).toBe('functional');
+    expect(categoryOf('src/cache.json#v2/bin/crew#main')).toBe('functional');
+    expect(categoryOf('src/cache.json#v2/my app/Makefile#all')).toBe('functional');
+    expect(categoryOf('src/cache.json#v2/schema.sql#users')).toBe('functional');
+    // …and a NAME ending like a source file is still the manifest's or doc's (codex r6)
+    expect(categoryOf('package.json#decimal.js')).toBe('config-data');
+    expect(categoryOf('package.json#./index.js')).toBe('config-data');
+    expect(categoryOf('package.json#@types/node.js')).toBe('config-data');
+    expect(categoryOf('docs/guide.md#Using Node.js')).toBe('config-data');
+    // the engine's own form always carries the name, and the true file is then one of the readings
+    expect(categoryOf('bin/tool.json#v2#main')).toBe('functional');
+    expect(categoryOf('src/widget.json#v2.vue#Widget')).toBe('functional');
+    expect(categoryOf('config/app.yaml#server.port')).toBe('config-data');
+    expect(categoryOf('bin/wicked-crew#main')).toBe('functional');
+    expect(categoryOf('bin/wicked-crew')).toBe('functional');
+    expect(categoryOf('Makefile#build')).toBe('functional');
+    expect(categoryOf('src/package-lock-parser.ts#parse')).toBe('functional'); // agy r5
+    expect(categoryOf('package-lock.json#lockfileVersion')).toBe('config-data');
+    expect(categoryOf('pnpm-lock.yaml#importers')).toBe('config-data');
+    expect(categoryOf('src/billing.ts#Ledger.#secret')).toBe('functional');
+    expect(categoryOf('')).toBe('functional');
+    // a name may hold "/": a scoped package, a heading (Copilot on #1254)
+    expect(categoryOf('packages/crew/package.json#@types/node')).toBe('config-data');
+    expect(categoryOf('docs/guide.md#Install / setup')).toBe('config-data');
+    expect(categoryOf('docs/guide.md#Install')).toBe('config-data');
+    expect(categoryOf('config/c#/app.json#port')).toBe('functional'); // a reading as "config/c": errs to functional
+    expect(categoryOf('README.md#C# support')).toBe('functional'); // ambiguous: errs to functional, never hides code
+  });
+
+  it('a requirement is real as the engine counts it: a stated rule at or above 0.75, or validated', () => {
+    const rule = (statement: string, confidence?: number) => ({ id: 'RULE-1', statement, confidence });
+    expect(isRealRequirement({ business_rules: [rule('A refund over the limit waits.', 0.9)] })).toBe(true);
+    expect(isRealRequirement({ business_rules: [rule('A refund over the limit waits.', 0.75)] })).toBe(true);
+    // codex r1: a plain rule under the threshold is a placeholder too, though it has no "[RISK]" prefix
+    expect(isRealRequirement({ business_rules: [rule('Refunds may require approval.', 0.4)] })).toBe(false);
+    expect(isRealRequirement({ status: 'active', business_rules: [rule('Validated by the operator.', 0.5)] })).toBe(true);
+    // codex r2: a validated requirement is real whatever fallback rule the builder kept beside it
+    expect(isRealRequirement({ status: 'active', business_rules: [rule('[RISK] x: residual note', 0)] })).toBe(true);
+    expect(isRealRequirement({ status: 'review', business_rules: [rule('[RISK] x: empty statement', 0)] })).toBe(false);
+    expect(isRealRequirement({ business_rules: [rule('[RISK] x: below confidence threshold', 0.9)] })).toBe(false);
+    expect(isRealRequirement({ business_rules: [rule('RISK: approval threshold unverified', 0.8)] })).toBe(true);
+    expect(isRealRequirement({ business_rules: [rule('', 0.9), rule('   ', 0.9)] })).toBe(false);
+    expect(isRealRequirement({ business_rules: [] })).toBe(false);
+    expect(isRealRequirement({})).toBe(false);
+    expect(isRealRequirement({ business_rules: [rule('An older document states it.')] })).toBe(true);
+    // Copilot r1: every rule counts, not the first statement shown
+    expect(isRealRequirement({ business_rules: [rule('[RISK] x: empty statement', 0), rule('A refund waits.', 0.9)] })).toBe(true);
+  });
+
+  it('a plain rule under the threshold, or no statement, lists after the real requirements', async () => {
+    forgetRequirementsReads();
+    const root = await mkdtemp(join(tmpdir(), 'req-low-'));
+    const graph = {
+      metadata: { schema_version: '1.0.0' },
+      domains: {
+        billing: {
+          description: 'Billing',
+          requirements: {
+            'REQ-001': { ...req('guess', 'Refunds may require approval.', 'src/billing.ts#guess'), status: 'review',
+              business_rules: [{ id: 'RULE-1', statement: 'Refunds may require approval.', confidence: 0.4 }] },
+            'REQ-002': { ...req('blank', 'x', 'src/billing.ts#blank'), status: 'review', business_rules: [] },
+            'REQ-003': req('refund', 'A refund over the limit waits for approval.', 'src/billing.ts#refund'),
+          },
+        },
+      },
+    };
+    await markIndexed(root);
+    await writeFile(join(root, ESTATE_STANDIN), JSON.stringify(graph), 'utf8');
+    const page = await listRequirements(repoAt(root), { offset: 0, limit: 50 }, estateAt(root));
+    expect(page!.items.map((i) => i.title)).toEqual(['refund', 'guess', 'blank']);
+  });
+
+  it('a requirement is config only when every component it names is (codex r2: an older document lists several)', async () => {
+    expect(categoryOfComponents(['config/app.yaml#port', 'src/server.ts#start'])).toBe('functional');
+    expect(categoryOfComponents(['config/app.yaml#port', 'package.json#engines'])).toBe('config-data');
+    expect(categoryOfComponents([])).toBe('functional');
+    expect(categoryOfComponents(['src/cache.json#v2/Makefile#all'])).toBe('functional');
+    expect(categoryOfComponents(['package.json#@types/node', 'package.json#engines'])).toBe('config-data');
+    forgetRequirementsReads();
+    const root = await mkdtemp(join(tmpdir(), 'req-mixed-'));
+    const mixed = { ...req('port', 'The server listens on the configured port.', 'config/app.yaml#port'),
+      legacy_components: ['config/app.yaml#port', 'src/server.ts#start'] };
+    await markIndexed(root);
+    await writeFile(join(root, ESTATE_STANDIN), JSON.stringify({ metadata: { schema_version: '1.0.0' },
+      domains: { server: { description: 'server', requirements: { 'REQ-001': mixed } } } }), 'utf8');
+    const page = await listRequirements(repoAt(root), { category: 'functional', offset: 0, limit: 50 }, estateAt(root));
+    expect(page!.items.map((i) => i.title)).toEqual(['port']);
+  });
+
+  it('Functional holds no manifest field, and opens on real requirements, then placeholders', async () => {
+    const root = await repoWith();
+    const page = await listRequirements(repoAt(root), { category: 'functional', offset: 0, limit: 50 }, estateAt(root));
+    expect(page!.items.map((i) => i.title)).toEqual(['refund', 'tax', 'charge']);
+  });
+
+  it('Config & data holds the manifest fields; All opens real, then placeholders, then config', async () => {
+    const root = await repoWith();
+    const config = await listRequirements(repoAt(root), { category: 'config-data', offset: 0, limit: 50 }, estateAt(root));
+    expect(config!.items.map((i) => i.title)).toEqual(['devDependencies', 'engines', 'lockfileVersion']);
+    const all = await listRequirements(repoAt(root), { offset: 0, limit: 50 }, estateAt(root));
+    expect(all!.items.map((i) => i.title)).toEqual(['refund', 'tax', 'charge', 'devDependencies', 'engines', 'lockfileVersion']);
+    // the order holds across pages
+    const p2 = await listRequirements(repoAt(root), { offset: 2, limit: 2 }, estateAt(root));
+    expect(p2!.items.map((i) => i.title)).toEqual(['charge', 'devDependencies']);
+  });
+
+  it('a placeholder is a statement on the risk floor', () => {
+    expect(isPlaceholderStatement('[RISK] x: empty statement (model could not state a rule)')).toBe(true);
+    expect(isPlaceholderStatement('  [RISK] x: below confidence threshold — y')).toBe(true);
+    expect(isPlaceholderStatement('RISK: approval threshold unverified')).toBe(false);
+    expect(isPlaceholderStatement('Tax is applied per jurisdiction.')).toBe(false);
   });
 });

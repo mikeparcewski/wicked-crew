@@ -250,11 +250,38 @@ export function coverageOf(raw: ArtifactCoverage | undefined): RequirementsCover
  * those assets but are NOT product behavior — they class as config-data so the
  * default view can focus on the product. */
 export function categoryOf(file: string): RequirementCategory {
+  // A component names a symbol in its file ("package.json#devDependencies"): classify by the FILE, or every
+  // manifest field reads as product code (studio 2026-11-01: Functional opened on package.json's fields).
+  // The engine writes `file#name` (wicked-core domain_model node_ref), and both halves may hold "#" (a
+  // source directory "src/c#/", a doc heading "C# support"), so any "#" may be the separator. Config and
+  // data only when EVERY reading names a config file: real product code never leaves Functional
+  // ("src/cache.json#v2/main.ts#run" stays functional). A doc heading holding "#" errs to functional.
   const f = file.toLowerCase();
+  const parts = f.split('#');
+  const readings = parts.length === 1 ? [f] : parts.slice(1).map((_, i) => parts.slice(0, i + 1).join('#'));
+  // The whole string is no reading: the engine always writes `file#name` (wicked-core domain_model
+  // `node_ref`, persisted as is), so the true file is one of the prefixes, and a name may hold "/" (a scoped
+  // package "package.json#@types/node", Copilot on #1254). Residual: a bare path holding "#" after a config
+  // extension, which no engine writes, classes as config.
+  return readings.every(isConfigFile) ? 'config-data' : 'functional';
+}
+
+const SOURCE_FILE =
+  /\.(?:[cm]?[jt]sx?|vue|svelte|py|rs|go|java|kts?|cs|fs|rb|php|swift|scala|c|cc|cpp|h|hpp|m|mm|sh|ps1|sql|lua|dart|exs?|erl|clj|hs|ml|r|pl|groovy)$/u;
+
+/** A requirement is config and data only when every component it names is: one naming product code keeps
+ * it functional (an older document can list several). None at all reads as functional. */
+export function categoryOfComponents(components: readonly string[]): RequirementCategory {
+  return components.length > 0 && components.every((c) => categoryOf(c) === 'config-data')
+    ? 'config-data'
+    : 'functional';
+}
+
+function isConfigFile(f: string): boolean {
   const base = f.slice(f.lastIndexOf('/') + 1);
-  if (/\.(json|ya?ml|lock|toml|ini|env|md|mdx|txt|csv)$/.test(base)) return 'config-data';
-  if (base.includes('pnpm-lock') || base.includes('package-lock')) return 'config-data';
-  return 'functional';
+  if (/\.(json|ya?ml|lock|toml|ini|env|md|mdx|txt|csv)$/.test(base)) return true;
+  // a lockfile by name, never a source file named after one ("src/package-lock-parser.ts#parse")
+  return !SOURCE_FILE.test(base) && (base.includes('pnpm-lock') || base.includes('package-lock'));
 }
 
 export interface RequirementSummary {
@@ -289,6 +316,8 @@ interface IndexEntry {
   summary: RequirementSummary;
   haystack: string; // lowercased searchable text
   source: ArtifactRequirement;
+  /** The engine would count it real ({@link isRealRequirement}); the list opens on these. */
+  real: boolean;
 }
 
 interface RepoIndex {
@@ -396,15 +425,13 @@ async function buildIndexRead(
           return typeof st === 'string' ? st.trim() : '';
         })
         .filter((st) => st !== '');
-      const firstComponent = (req.legacy_components ?? []).find((c) => typeof c === 'string') as
-        | string
-        | undefined;
+      const components = (req.legacy_components ?? []).filter((c): c is string => typeof c === 'string');
       const summary: RequirementSummary = {
         key,
         domain,
         reqId,
         title,
-        category: categoryOf(firstComponent ?? ''),
+        category: categoryOfComponents(components),
         statement: statements[0] ?? '',
         status: ov?.status ?? req.status ?? 'active',
         risk,
@@ -415,7 +442,7 @@ async function buildIndexRead(
       // Statements are part of the haystack: searching the requirements means
       // searching the actual rule text, not just titles and ids.
       const haystack = `${reqId} ${domain} ${title} ${req.description ?? ''} ${statements.join(' ')} ${ov?.notes ?? ''}`.toLowerCase();
-      const entry: IndexEntry = { summary, haystack, source: req };
+      const entry: IndexEntry = { summary, haystack, source: req, real: isRealRequirement(req) };
       entries.push(entry);
       byKey.set(key, entry);
     }
@@ -508,27 +535,65 @@ export async function listRequirementsRead(
   return { page: pageOf(index, query), coverage };
 }
 
+/**
+ * A listed requirement that is a placeholder, not a real requirement: its statement is the engine's risk floor
+ * ("[RISK] <title>: empty statement (model could not state a rule)", or a statement below the confidence threshold).
+ */
+export function isPlaceholderStatement(statement: string): boolean {
+  return /^\[RISK\]/u.test(statement.trim());
+}
+
+/** wicked-core's `DEFAULT_RESOLVE_THRESHOLD`: a business rule at or above it resolves its behaviour. */
+const RESOLVE_THRESHOLD = 0.75;
+
+/**
+ * Whether the engine counts this requirement REAL (wicked-core `classify_node`, as far as the document
+ * shows it): a validated requirement (`status: active`, whatever fallback rule the builder kept beside it),
+ * or a business rule at or above the resolve threshold whose statement is not the risk floor. A plain
+ * rule under the threshold, a risk-floor statement or no statement at all is a placeholder. A rule with
+ * no numeric confidence (an older document) is judged on its statement.
+ */
+export function isRealRequirement(req: { status?: string; business_rules?: unknown[] }): boolean {
+  const stated = (req.business_rules ?? []).flatMap((r) => {
+    const { statement, confidence } = (r ?? {}) as { statement?: unknown; confidence?: unknown };
+    return typeof statement === 'string' && statement.trim() !== '' && !isPlaceholderStatement(statement)
+      ? [typeof confidence === 'number' ? confidence : null]
+      : [];
+  });
+  if (req.status === 'active') return true;
+  return stated.some((c) => c === null || c >= RESOLVE_THRESHOLD);
+}
+
+/** The list's order: real requirements first, then placeholders, then config and data; the graph's order within each. */
+function listRank(e: IndexEntry): number {
+  if (e.summary.category === 'config-data') return 2;
+  return e.real ? 0 : 1;
+}
+
 function pageOf(index: RepoIndex, query: RequirementsQuery): RequirementsPage {
   const terms = (query.q ?? '')
     .toLowerCase()
     .split(/\s+/)
     .filter((t) => t.length > 0);
   const domainFilter = query.domain?.toLowerCase();
-  const matched: RequirementSummary[] = [];
+  const matched: IndexEntry[] = [];
   for (const e of index.entries) {
     if (query.category !== undefined && e.summary.category !== query.category) continue;
     if (query.risk === 'risk' && !e.summary.risk) continue;
     if (query.risk === 'no-risk' && e.summary.risk) continue;
     if (domainFilter !== undefined && !e.summary.domain.toLowerCase().includes(domainFilter)) continue;
     if (terms.length > 0 && !terms.every((t) => e.haystack.includes(t))) continue;
-    matched.push(e.summary);
+    matched.push(e);
   }
+  // Stable: Array.prototype.sort keeps the graph's order within a rank. A count-only read (limit 0, the
+  // project aggregates' first pass over every member repository) returns no items: nothing to order.
+  if (query.limit > 0) matched.sort((a, b) => listRank(a) - listRank(b));
   return {
     total: matched.length,
     corpus: index.total,
     offset: query.offset,
     limit: query.limit,
-    items: matched.slice(query.offset, query.offset + query.limit),
+    items: matched.slice(query.offset, query.offset + query.limit).map((e) => e.summary),
     source: 'store',
     orphanedOverrides: index.orphanedOverrides,
     coverage: index.coverage,
