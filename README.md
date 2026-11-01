@@ -198,13 +198,14 @@ assessor and test strategist can only raise the engine's own band, and the engin
 actual diff at each checkpoint. The hand-off then runs the evaluator steps that rigor calls for
 (review on a distinct seat, security review at the highest band, QE acceptance when required) and
 the build's own floor. An evaluator's NOT-PASS, or a red floor check, goes back to the same
-orchestrator for up to three hand-off attempts in all, and then the run asks you; a floor check that timed out, or that
-fails on the base too, asks you at once. A power run skips the run-level plan approval, though a high-risk plan, or a
-revision that turns high-risk, still asks you first. Gates the workflow itself authors still pause
-(feature's adversarial-review confirmation, migration's cutover, an install's consent), and delivery
-waits at its own deliver gate unless the launch asked for `deliverGate: "auto"` (refused for a
-workflow that requires QE acceptance unless the launch or the daemon's setting skips it). Any other
-launch, or an engine without power mode, runs **phased**, and the launch answer says so.
+orchestrator for up to three hand-off attempts in all, and then the run asks you; a floor check that
+timed out, or whose failure the base shares and the floor cannot set aside, asks you at once. A
+power run skips the run-level plan approval, though a high-risk plan, or a revision that turns
+high-risk, still asks you first. Gates the workflow itself authors still pause (feature's
+adversarial-review confirmation, migration's cutover, an install's consent), and delivery waits at
+its own deliver gate unless the launch asked for `deliverGate: "auto"` (refused for a workflow that
+requires QE acceptance unless the launch or the daemon's setting skips it). Any other launch, or an
+engine without power mode, runs **phased**, and the launch answer says so.
 
 Phased, one run token moves through the workflow's phases with a gate between every one — e.g. for
 `feature`:
