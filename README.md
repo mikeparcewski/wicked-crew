@@ -17,18 +17,20 @@ garden supplies the skills, estate holds the record, and crew runs each job betw
 
 - **Your agents, sandboxed.** The coding-agent CLIs you already use (Claude Code, Codex, GitHub
   Copilot, OpenCode, Pi) run as workers in hardened containers, on your own accounts and plans.
-  Your keys stay in a credential broker; a container only ever sees placeholders. No billing, no
-  accounts, no model reselling.
-- **A different agent reviews the work.** Review goes to an agent other than the one that built
-  it, against your rules. When only the builder could review it, the job stops and waits, unless
+  Your keys stay in a credential broker and a container sees placeholders, with one exception: a
+  Claude Code seat signed in with a Claude subscription receives that sign-in token, and a guard
+  checks every unit's diff and the delivery for it. No billing, no accounts, no model reselling.
+- **A different agent reviews the work.** By default, review goes to an agent other than the one
+  that built it, against your rules (a saved workflow can declare a weaker assurance contract). When only the builder could review it, the job stops and waits, unless
   you launch it explicitly as "reduced assurance", which is labelled on the job, every gate and the
   delivery. crew never turns that on for you.
-- **Tested before delivery, with the evidence.** Jobs that change your app (`feature`, `bug`,
-  `migration`, `mcp-server`) are not delivered until QE acceptance reads an attributed PASS, unless
-  the run's own diff score waives it or you skip it with a reason, and either is labelled. A gate
-  says what it checked, a failed check sends the work back or stops the job, and "done" is
-  re-derived from evidence, never asserted. Jobs are durable workflows defined as data, crash-resumable, and exportable as
-  evidence.
+- **Tested before delivery, with the evidence.** The built-in workflows that change your app
+  (`feature`, `bug`, `migration`, `mcp-server`, `editor-plugin`) are not delivered until QE acceptance
+  reads an attributed PASS, unless the run's own diff score waives it or you skip it with a reason,
+  and either is labelled; a plan you compose yourself requires none. A gate says what it checked, a
+  failed check sends the work back (in power mode, up to three times, then it asks you) or retries,
+  escalates or stops a phased job, and "done" is re-derived from evidence, never asserted. Jobs are
+  durable workflows defined as data, crash-resumable, and exportable as evidence.
 
 Under the hood it's a daemon (`wicked-crew serve`) plus CLI and the bundled studio console. The
 engine underneath is **wicked-core**. (In the API and the code a job is a *run*, and an agent is a
@@ -98,8 +100,8 @@ answer says so (`assuranceNotice`). To proceed with one CLI, opt in explicitly:
 `"reducedAssurance": true` on `POST /runs`, or `wicked-crew start --reduced-assurance`. The creator's
 seat then evaluates its own work, and every receipt says `reduced`. crew never turns it on for you.
 
-**QE acceptance.** A run that makes application changes (`feature`, `bug`, `migration`,
-`mcp-server`) requires real functional QE acceptance: garden's three-agent `wicked-garden-qe accept`
+**QE acceptance.** A run of a built-in workflow that makes application changes (`feature`, `bug`,
+`migration`, `mcp-server`, `editor-plugin`) requires real functional QE acceptance: garden's three-agent `wicked-garden-qe accept`
 pipeline, whose verdict lands in the QE ledger stamped with the run. Delivery is refused (`409
 qe_acceptance_required`) unless the ledger holds a PASS attributed to the run. The engine decides at
 the run's QE phase, from the run's actual diff, whether it is `required` or `waived`. A waiver needs
@@ -223,21 +225,22 @@ the base skill. Phases, gates, roles, and any phase skill are all **data** on th
 
 **Requirements: what the code does, and how much of it is mapped.** The `domain-extraction` workflow
 maps a repository's behaviours to stated business rules, extracting, critiquing and applying one
-page of behaviours at a time until **real** requirements reach the minimum: 80% of the behaviour-bearing product code by default (Settings →
-`requirementsGraph.minCoveragePct`, 1..100).
-A risk-flagged placeholder (an empty statement, or a rule under the confidence threshold) is shown but
+page of behaviours at a time until **real** requirements reach the minimum: 80% of the
+behaviour-bearing product code by default (Settings → `requirementsGraph.minCoveragePct`, 1..100). A
+risk-flagged placeholder (an empty statement, or a rule under the confidence threshold) is shown but
 never counted, and tests, data, manifests and documents are left out of the denominator. When the
-run's budget is spent (`maxPages`, `maxMinutes`, `pageSize` beside the minimum) it asks you: map more,
-lower the minimum for that repository, or stop. Then a coverage step checks the share and
+run's budget is spent (`maxPages`, `maxMinutes`, `pageSize` beside the minimum) it asks you: map
+more, lower the minimum for that repository, or stop. Then a coverage step checks the share and
 `wicked-core domain-graph` builds the graph into the repository's estate store; nothing is written
 into the checkout. `GET /api/v1/repos/:id/requirements` lists it, with `coverage` (`realPct` against
 `minPct`, real, placeholders, unmapped) and `graphBuild` (whether the listed build is behind the
 header: its counts differ, or its rows' verdicts do not add up to them). Each item carries its
-`placeholder` flag, `uncounted` when the share does not count it (a TypeScript shape, outside product
-code, or no longer indexed), and `corroboration` (validated by independent sources, or unconfirmed
-and why; `null` on an uncounted row or a graph built before the field); the page's `uncounted` totals say why the list holds more rows than the header. The list
-opens on real requirements, then placeholders, then uncounted rows, then config and data. A repository with no graph yet answers a typed 404
-(`code: "notGenerated"`) that names the workflow to run.
+`placeholder` flag, `uncounted` when the share does not count it (a TypeScript shape, outside
+product code, or no longer indexed), and `corroboration` (validated by independent sources, or
+unconfirmed and why; `null` on an uncounted row or a graph built before the field); the page's
+`uncounted` totals say why the list holds more rows than the header. The list opens on real
+requirements, then placeholders, then uncounted rows, then config and data. A repository with no
+graph yet answers a typed 404 (`code: "notGenerated"`) that names the workflow to run.
 
 **Every run proposes what it learned.** At its checkpoints, a test that failed and then passed on
 its identical retry, or a check its sandbox could not start, is proposed at once, worded from the
