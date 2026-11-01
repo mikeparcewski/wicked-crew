@@ -612,6 +612,13 @@ describe('requirements list: what Functional holds and the order it opens in (st
     expect(categoryOf('src/cache.json#v2/main.ts')).toBe('functional');
     expect(categoryOf('src/a.json#b.ts')).toBe('functional');
     expect(categoryOf('lib/Parser.cs')).toBe('functional');
+    // codex r3: a bare path past the "#" with no source extension, or an unlisted one
+    expect(categoryOf('src/cache.json#v2/Makefile')).toBe('functional');
+    expect(categoryOf('src/cache.json#v2/bin/crew')).toBe('functional');
+    expect(categoryOf('src/cache.json#v2/schema.sql')).toBe('functional');
+    expect(categoryOf('src/cache.json#v2/App.vue')).toBe('functional');
+    expect(categoryOf('config/c#/app.json')).toBe('functional'); // errs to functional
+    expect(categoryOf('config/app.yaml#server.port')).toBe('config-data');
     expect(categoryOf('bin/wicked-crew#main')).toBe('functional');
     expect(categoryOf('bin/wicked-crew')).toBe('functional');
     expect(categoryOf('Makefile#build')).toBe('functional');
@@ -670,6 +677,7 @@ describe('requirements list: what Functional holds and the order it opens in (st
     expect(categoryOfComponents(['config/app.yaml#port', 'src/server.ts#start'])).toBe('functional');
     expect(categoryOfComponents(['config/app.yaml#port', 'package.json#engines'])).toBe('config-data');
     expect(categoryOfComponents([])).toBe('functional');
+    expect(categoryOfComponents(['src/cache.json#v2/Makefile'])).toBe('functional');
     forgetRequirementsReads();
     const root = await mkdtemp(join(tmpdir(), 'req-mixed-'));
     const mixed = { ...req('port', 'The server listens on the configured port.', 'config/app.yaml#port'),

@@ -261,6 +261,9 @@ export function categoryOf(file: string): RequirementCategory {
   if (SOURCE_FILE.test(f)) return 'functional';
   const parts = f.split('#');
   const readings = parts.length === 1 ? [f] : parts.slice(1).map((_, i) => parts.slice(0, i + 1).join('#'));
+  // …and one whose last "#" is followed by a path ("src/cache.json#v2/Makefile", "#v2/bin/crew") may be a
+  // bare path whole: that reading counts too. A heading ("Install / setup") holds spaces, so it is no path.
+  if (parts.length > 1 && /^[^\s]*\/[^\s]*$/u.test(parts[parts.length - 1]!)) readings.push(f);
   return readings.every(isConfigFile) ? 'config-data' : 'functional';
 }
 
