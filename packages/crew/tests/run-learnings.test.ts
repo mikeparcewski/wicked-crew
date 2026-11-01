@@ -5,7 +5,7 @@
 // approved learning rides in the next matching launch's brief and never in its PR text.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Fastify from 'fastify';
@@ -433,7 +433,15 @@ describe('RunLearningsService under overlap, failure and restart (xreview on cre
     const before = h.submitted.length;
     writeFileSync(
       join(h.dir, 'run-1', OUT_DIR, REPORT_FILE),
-      JSON.stringify({ learnings: [], checked: [{ evidence: 'e1', kept: false, why: 'already proposed' }, { evidence: 'e2', kept: false, why: 'only true of this change' }] }),
+      JSON.stringify({
+        learnings: [],
+        checked: [
+          { evidence: 'e1', kept: false, why: 'already proposed' },
+          { evidence: 'e2', kept: false, why: 'only true of this change' },
+          { evidence: 'e2', kept: false, why: 'the same item again' },
+          { evidence: 'e99', kept: false, why: 'an item the handoff never held' },
+        ],
+      }),
     );
     h.svc.onEvent({
       type: 'awaitingHuman',
@@ -448,6 +456,9 @@ describe('RunLearningsService under overlap, failure and restart (xreview on cre
     expect(filed).toMatchObject({ distilled: true, distillRunId: 'distill-1', seat: 'codex', filed: 0, found: 0, noneFound: true, checked: 2 });
     expect(String(filed['stopped'])).toMatch(/^stopped at escalation: Unit 1 failed its deterministic floor \(substance\)/u);
     expect((await h.svc.view('run-1')).distilling).toBe(false);
+    // The record was replaced whole (no temp file left), and still names its run.
+    expect(readdirSync(join(h.dir, 'run-1')).filter((f) => f.endsWith('.tmp'))).toEqual([]);
+    expect(JSON.parse(readFileSync(join(h.dir, 'run-1', 'distill.json'), 'utf8'))).toMatchObject({ distillRunId: 'distill-1', seat: 'codex' });
     // The stop's own end frame files nothing more.
     h.svc.onEvent({ type: 'runCancelled', session: 'distill-1' });
     await settle();
@@ -547,8 +558,26 @@ describe('the distil workflow and its report', () => {
     expect(text).toMatch(/one checked entry for EVERY evidence item/u);
     expect(text).toContain('one line per evidence item, "<id> (<what it says, in a few words>): kept|dropped: <why, in one sentence>"');
     expect(text).toMatch(/naming the source run by its title/u);
-    expect(checkedCount({ checked: [{ evidence: 'e1', kept: false, why: 'already proposed' }, { evidence: 'e2', kept: true }, { evidence: ' ', kept: false, why: 'x' }, { evidence: 'e3', kept: false, why: ' ' }, 'junk'] })).toBe(1);
+    expect(checkedCount({ checked: [{ evidence: 'e1', kept: false, why: 'already proposed' }, { evidence: 'e2', kept: true }, { evidence: ' ', kept: false, why: 'x' }, { evidence: 'e3', kept: false, why: ' ' }, { evidence: 'e1', kept: true, why: 'twice' }, 'junk'] })).toBe(1);
     expect(checkedCount({ learnings: [] })).toBe(0);
+    const checked = { checked: [{ evidence: 'e1', kept: false, why: 'a' }, { evidence: 'e1', kept: true, why: 'b' }, { evidence: 'e7', kept: false, why: 'c' }] };
+    expect(checkedCount(checked, new Set(['e1', 'e2']))).toBe(1);
+    expect(checkedCount(checked)).toBe(2);
+  });
+
+  it('an update to the stop record that cannot be written leaves the run\'s identity whole (xreview r3 on #1253)', async () => {
+    const h = harness();
+    h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
+    await settle();
+    const record = join(h.dir, 'run-1', 'distill.json');
+    const before = readFileSync(record, 'utf8');
+    // The replacement cannot be written (its temp path is taken): the record is never truncated or half-written.
+    mkdirSync(`${record}.${process.pid}.tmp`);
+    h.svc.onEvent({ type: 'awaitingHuman', session: 'distill-1', gateKind: 'escalation', prompt: 'substance' } as never);
+    await settle();
+    expect(readFileSync(record, 'utf8')).toBe(before);
+    expect(h.cancels).toEqual(['distill-1']);
+    expect(existsSync(join(h.dir, 'run-1', FILED_FILE))).toBe(true);
   });
 
   it('keeps known kinds, sane lengths, at most five', () => {

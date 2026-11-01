@@ -22,7 +22,7 @@
  * Never throws into the event pump: every failure is logged and the run is left as it was.
  */
 
-import { mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -161,11 +161,25 @@ export function learningsOfRun(runId: string, rows: readonly ProposalRow[]): Run
     }));
 }
 
-/** How many evidence items the distil seat accounted for (`checked[]`, kept or dropped with a reason). */
-export function checkedCount(raw: unknown): number {
+/** Replace a record whole or not at all: a crash mid-write never leaves a truncated `distill.json` (the run's identity). */
+function writeJsonAtomic(path: string, value: unknown): void {
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(value), 'utf8');
+  renameSync(tmp, path);
+}
+
+/** How many distinct evidence items the distil seat accounted for (`checked[]`, kept or dropped with a reason). */
+export function checkedCount(raw: unknown, evidenceIds?: ReadonlySet<string>): number {
   if (!isRecord(raw) || !Array.isArray(raw['checked'])) return 0;
-  const text = (v: unknown): boolean => typeof v === 'string' && v.trim() !== '';
-  return raw['checked'].filter((c) => isRecord(c) && text(c['evidence']) && typeof c['kept'] === 'boolean' && text(c['why'])).length;
+  const text = (v: unknown): v is string => typeof v === 'string' && v.trim() !== '';
+  const ids = new Set<string>();
+  for (const c of raw['checked']) {
+    if (!isRecord(c) || !text(c['evidence']) || typeof c['kept'] !== 'boolean' || !text(c['why'])) continue;
+    const id = c['evidence'].trim();
+    // Only an item the handoff actually held: the report is the seat's, not evidence of what it read.
+    if (evidenceIds === undefined || evidenceIds.has(id)) ids.add(id);
+  }
+  return ids.size;
 }
 
 /**
@@ -470,7 +484,7 @@ export class RunLearningsService {
       return launched;
     } catch (err) {
       this.distills.delete(distillRunId);
-      writeFileSync(join(dir, DISTILL_FILE), JSON.stringify({ ...record, distillRunId: null, refused: err instanceof Error ? err.message : String(err) }), 'utf8');
+      writeJsonAtomic(join(dir, DISTILL_FILE), { ...record, distillRunId: null, refused: err instanceof Error ? err.message : String(err) });
       this.deps.log(`[learnings] distill launch for ${sourceRunId} refused (${err instanceof Error ? err.message : String(err)}); filing the evidence as it is`);
       return null;
     }
@@ -496,6 +510,13 @@ export class RunLearningsService {
     }
   }
 
+  /** The evidence ids the distil seat was handed (`e1`…), as crew wrote them. */
+  private handoffEvidenceIds(dir: string): Set<string> {
+    const handoff = this.readJson(join(dir, HANDOFF_FILE));
+    const evidence = isRecord(handoff) && Array.isArray(handoff['evidence']) ? handoff['evidence'] : [];
+    return new Set(evidence.filter(isRecord).map((e) => e['id']).filter((id): id is string => typeof id === 'string'));
+  }
+
   private readJson(path: string): unknown {
     if (!existsSync(path)) return null;
     try {
@@ -519,7 +540,7 @@ export class RunLearningsService {
     this.deps.log(`[learnings] distill-learnings ${distillRunId} for ${sourceRunId} ${stopped}; crew stops it and files from its report`);
     try {
       const rec = this.readJson(join(dir, DISTILL_FILE));
-      if (isRecord(rec)) writeFileSync(join(dir, DISTILL_FILE), JSON.stringify({ ...rec, stopped }), 'utf8');
+      if (isRecord(rec)) writeJsonAtomic(join(dir, DISTILL_FILE), { ...rec, stopped });
     } catch (err) {
       this.deps.log(`[learnings] could not record why ${distillRunId} stopped: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -564,7 +585,7 @@ export class RunLearningsService {
         known.add(normalizeLearning(l.content));
       }
       // "None found" is a recorded outcome, with how many evidence items the seat said it checked.
-      if (failed === 0) this.markFiled(sourceRunId, { distilled: true, distillRunId, seat, filed, found: report.length, noneFound: report.length === 0, checked: checkedCount(raw), ...stopped });
+      if (failed === 0) this.markFiled(sourceRunId, { distilled: true, distillRunId, seat, filed, found: report.length, noneFound: report.length === 0, checked: checkedCount(raw, this.handoffEvidenceIds(dir)), ...stopped });
       else this.deps.log(`[learnings] ${sourceRunId}: ${failed} distilled learning(s) could not be proposed; retried at the next recovery`);
     } catch (err) {
       this.deps.log(`[learnings] reconciling distill-learnings ${distillRunId} failed: ${err instanceof Error ? err.message : String(err)}`);
