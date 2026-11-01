@@ -53,8 +53,8 @@ engine cannot store dead-letter to
 `WICKED_APPS_EMIT_DEADLETTER` is honoured), are counted on
 `GET /api/v1/diagnostics` → `governance` (a `governance.deadletter` finding), and are drained back
 with `wicked-crew governance replay <outbox>`. The interactive document bridge is spawned on demand
-as `npx wicked-interactive@^0.12.0` (0.12.0: export asset reads confined to the document's own and
-approved roots); `WICKED_INTERACTIVE_SPEC` overrides the range (semver range
+as `npx wicked-interactive@^0.14.1` (0.14.1 carries the demo import crew's demo runs use; 0.12.0
+confined export asset reads to the document's own and approved roots); `WICKED_INTERACTIVE_SPEC` overrides the range (semver range
 only, validated; invalid values are named on the boot line and ignored, a floor below crew's need
 is warned about).
 
@@ -73,16 +73,20 @@ curl -X POST http://127.0.0.1:7701/api/v1/runs \
 # 3. Watch it move through the workflow's phases; approve or reject at the gates.
 ```
 
-One run token moves through the workflow's phases with a gate between every one — e.g. for
-`feature`: clarify → design → build → adversarial-review → test → review. Each phase is executed
+A launch of a preset workflow or a plan on a repository runs in **power mode** by default: a
+workflow's `build` step is one orchestrator seat building the whole change in checkpointed turns, rigor is re-scored from the
+actual diff, and the hand-off runs the review, security and QE steps that rigor calls for. Phased (`power: false`, or a launch power mode
+cannot run, such as one with no repository), one run token moves through the workflow's phases with a gate between every one — e.g.
+for `feature`: clarify → design → build → adversarial-review → test → review. Each phase is executed
 by a versioned skill on an assigned CLI worker; the gates decide, and every decision is audited.
 
 ## The governed-run model
 
 - **You own the workflow; the agent owns the work.** The orchestrator sequences phases and holds
   the gates; the agent does the coding inside a phase.
-- **Workflows are data.** `feature` / `bug` / `migration` ship built-in; new ones are drop-in JSON
-  files, not code.
+- **Workflows are data.** `feature`, `bug` and `migration` ship built-in, beside `domain-extraction`
+  (requirements), `mcp-server`, `editor-plugin`, `analyze` and others; new ones are drop-in JSON files,
+  not code.
 - **Gates are real, and they say what they checked.** A gated transition resolves
   **deny-dominates** on the layers that ran — a deterministic floor, repo checks, policies, an
   evaluator seat that reads cold evidence only — and a model may fail a gate, never solely approve
@@ -109,7 +113,7 @@ is a real answer about the gate, not an error); `?qeRun=<id>` pins the read to o
 ## CLI
 
 ```
-wicked-crew serve|start|resume|gate|status|mcp
+wicked-crew serve|start|resume|gate|status|mcp|governance|version
 ```
 
 | command | what it does |
@@ -120,6 +124,8 @@ wicked-crew serve|start|resume|gate|status|mcp
 | `gate` | answer a pending human gate from the terminal |
 | `status` | inspect run state |
 | `mcp` | stdio MCP server — crew-as-a-tool for coding agents |
+| `governance` | `governance replay <outbox>` drains governance events the engine could not store |
+| `version` | the versions of this install (wicked-crew, wicked-core-ts, the bundled studio) |
 
 ## Links
 
