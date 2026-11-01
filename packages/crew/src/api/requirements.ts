@@ -341,6 +341,9 @@ export interface RequirementSummary {
   edited: boolean;
   /** Validated (with its source count) or unconfirmed (with why); `null` on an older artifact. */
   corroboration: RequirementCorroboration | null;
+  /** The engine would NOT count it real ({@link isRealRequirement}): a placeholder, unconfirmed whatever its
+   *  corroboration says, so a client never shows it as validated. */
+  placeholder: boolean;
 }
 
 export interface RequirementDetail extends RequirementSummary {
@@ -472,6 +475,7 @@ async function buildIndexRead(
         })
         .filter((st) => st !== '');
       const components = (req.legacy_components ?? []).filter((c): c is string => typeof c === 'string');
+      const real = isRealRequirement(req);
       const summary: RequirementSummary = {
         key,
         domain,
@@ -484,11 +488,12 @@ async function buildIndexRead(
         riskSource,
         edited: ov !== undefined,
         corroboration: corroborationOf(req.corroboration),
+        placeholder: !real,
       };
       // Statements are part of the haystack: searching the requirements means
       // searching the actual rule text, not just titles and ids.
       const haystack = `${reqId} ${domain} ${title} ${req.description ?? ''} ${statements.join(' ')} ${ov?.notes ?? ''}`.toLowerCase();
-      const entry: IndexEntry = { summary, haystack, source: req, real: isRealRequirement(req) };
+      const entry: IndexEntry = { summary, haystack, source: req, real };
       entries.push(entry);
       byKey.set(key, entry);
     }
