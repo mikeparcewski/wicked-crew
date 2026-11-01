@@ -3,8 +3,8 @@
  * Fixture-driven: a small graph served by an estate stand-in (the engine's read); overrides written by
  * the service itself (atomic sidecar), never into the graph.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { mkdtemp, mkdir, readdir, writeFile, readFile, utimes } from 'node:fs/promises';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdtemp, mkdir, readdir, writeFile, readFile, rm, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +13,7 @@ import {
   categoryOf,
   categoryOfComponents,
   coverageOf,
+  graphBuildOf,
   isPlaceholderStatement,
   isRealRequirement,
   listRequirements,
@@ -518,6 +519,121 @@ describe('requirements service — the graph comes from estate (operator ruling 
       },
     };
     expect(await listRequirements(repoAt(root), { offset: 0, limit: 10 }, none)).toBeNull();
+  });
+});
+
+/**
+ * req-list-stale (2026-11-01): the list is the last graph BUILD, the header the store NOW. On the rig wicked-crew
+ * listed the 04:59 build (1,383 real, an old `mapped_pct` label) under "3,585 real": a run mapped 2,223 more and was
+ * stopped at its repeat ask before the build. The page says which build the rows are, so a client can say why the
+ * two differ instead of showing numbers that cannot agree.
+ */
+describe('requirements service — the page says which build it lists (req-list-stale)', () => {
+  const live = { real_pct: 61, min_pct: 80, behavior_bearing: 5786, real: 3585, placeholders: 2174, unmapped: 27, not_product: 2380 };
+  const graph = {
+    metadata: { coverage: live },
+    domains: { src: { requirements: { 'REQ-001': { title: 'sum', business_rules: [{ id: 'RULE-1', statement: 'the sum of every element', confidence: 0.9 }] } } } },
+  };
+  const roots: string[] = [];
+  afterEach(async () => {
+    await Promise.all(roots.splice(0).map((r) => rm(r, { recursive: true, force: true })));
+  });
+  async function indexedRoot(): Promise<string> {
+    const root = await mkdtemp(join(tmpdir(), 'req-build-'));
+    roots.push(root);
+    await markIndexed(root);
+    return root;
+  }
+  async function pageWith(build: EstateRequirementsRead['build'], coverage: unknown = live) {
+    const root = await indexedRoot();
+    const engine: RequirementsGraphReader = {
+      async getRequirementsGraphForRepo() {
+        const read = { graph, coverage: coverage as EstateRequirementsRead['coverage'] };
+        return build === undefined ? read : { ...read, build };
+      },
+    };
+    return listRequirements(repoAt(root), { offset: 0, limit: 10 }, engine);
+  }
+  /** `live` with `n` moved from bucket `from` to bucket `to`: the denominator holds, so only those two counts differ. */
+  function moved(from: 'real' | 'placeholders' | 'unmapped', to: 'real' | 'placeholders' | 'unmapped', n = 1) {
+    const c: Record<string, number> = { ...live, [from]: live[from] - n, [to]: live[to] + n };
+    c['real_pct'] = Math.floor((c['real']! * 100) / c['behavior_bearing']!);
+    return c;
+  }
+
+  it('a build older than the store is behind, with the label it was built at', async () => {
+    const builtAt = { real_pct: 23, min_pct: 80, behavior_bearing: 5786, real: 1362, placeholders: 4397, unmapped: 27, not_product: 2380 };
+    const page = await pageWith({ generation: 2, coverage: builtAt });
+    expect(page!.coverage).toMatchObject({ real: 3585 });
+    expect(page!.graphBuild).toEqual({
+      generation: 2,
+      coverage: { realPct: 23, minPct: 80, behaviorBearing: 5786, real: 1362, placeholders: 4397, unmapped: 27, notProduct: 2380 },
+      behind: true,
+    });
+  });
+
+  it("a build at the store's counts is not behind, whatever minimum the store holds it to now", async () => {
+    const page = await pageWith({ generation: 3, coverage: { ...live, min_pct: 60 } });
+    expect(page!.graphBuild).toMatchObject({ generation: 3, behind: false });
+  });
+
+  it("the rig's case: a build labelled before real requirements were counted is behind, its label null", async () => {
+    const page = await pageWith({ generation: 2, coverage: { behavior_bearing: 8166, mapped: 7300, mapped_pct: 89, min_pct: 80, resolved: 1383, unmapped: 866 } as never });
+    expect(page!.graphBuild).toEqual({ generation: 2, coverage: null, behind: true });
+  });
+
+  it('a build that persisted no label is behind: nothing vouches that the rows are what the header counts', async () => {
+    expect((await pageWith({ generation: 1, coverage: null }))!.graphBuild).toEqual({ generation: 1, coverage: null, behind: true });
+  });
+
+  it('a graph persisted before the engine kept a build record (generation 0) is still a build', async () => {
+    expect((await pageWith({ generation: 0, coverage: null }))!.graphBuild).toEqual({ generation: 0, coverage: null, behind: true });
+  });
+
+  it('an engine that does not say which build is no claim either way (null)', async () => {
+    expect((await pageWith(undefined))!.graphBuild).toBeNull();
+    expect((await pageWith(null))!.graphBuild).toBeNull();
+    expect((await pageWith({ generation: -1, coverage: live }))!.graphBuild).toBeNull();
+  });
+
+  it("no live label is no claim: the graph's own label is never compared with the build (codex + agy on #1255)", async () => {
+    // The graph document carries the build's label; with no live one, falling back to it compared a build with itself.
+    const page = await pageWith({ generation: 2, coverage: live }, null);
+    expect(page!.coverage).toMatchObject({ real: 3585 }); // the header still falls back, as before
+    expect(page!.graphBuild).toBeNull();
+    // An older engine's live label is no label either.
+    expect((await pageWith({ generation: 2, coverage: live }, { mapped_pct: 89, min_pct: 80 }))!.graphBuild).toBeNull();
+    expect(graphBuildOf({ generation: 2, coverage: null }, null)).toBeNull();
+  });
+
+  it('every count is compared on its own (agy on #1255: each transfer keeps the denominator)', () => {
+    const now = coverageOf(live)!;
+    const cases: Array<[string, Record<string, number>]> = [
+      ['real and placeholders', moved('placeholders', 'real')],
+      ['real and unmapped', moved('unmapped', 'real')],
+      ['placeholders and unmapped', moved('unmapped', 'placeholders')],
+      ['notProduct alone', { ...live, not_product: live.not_product + 1 }],
+      ['behaviorBearing (with unmapped)', { ...live, behavior_bearing: live.behavior_bearing + 1, unmapped: live.unmapped + 1, real_pct: Math.floor((live.real * 100) / (live.behavior_bearing + 1)) }],
+    ];
+    for (const [name, c] of cases) {
+      expect(coverageOf(c as never), name).not.toBeNull();
+      expect(graphBuildOf({ generation: 2, coverage: c as never }, now)?.behind, name).toBe(true);
+    }
+  });
+
+  it('a build that lands under the same rows and label shows past the read window (the index follows the build)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const root = await indexedRoot();
+      let build: NonNullable<EstateRequirementsRead['build']> = { generation: 1, coverage: moved('real', 'placeholders', 100) as never };
+      const engine: RequirementsGraphReader = { async getRequirementsGraphForRepo() { return { graph, coverage: live, build }; } };
+      expect((await listRequirements(repoAt(root), { offset: 0, limit: 10 }, engine))!.graphBuild).toMatchObject({ generation: 1, behind: true });
+      build = { generation: 2, coverage: live };
+      vi.setSystemTime(Date.now() + REQUIREMENTS_READ_TTL_MS + 1);
+      expect((await listRequirements(repoAt(root), { offset: 0, limit: 10 }, engine))!.graphBuild).toMatchObject({ generation: 2, behind: false });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

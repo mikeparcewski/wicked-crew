@@ -6772,6 +6772,24 @@ export interface RequirementsCoverage {
   notProduct: number;
 }
 
+/**
+ * (0.165.0) The graph a requirements page lists, as it was built. When `behind`, the header (`coverage`, the store
+ * now) does not count what the list holds: say so. When this `coverage.real` is below the header's: "2,202 real
+ * requirements mapped since the last graph build; build the graph to list them". With `coverage` null: "built
+ * before real requirements were counted; build the graph to list the N real requirements mapped now". Otherwise
+ * (only another count moved, or `real` fell): "the repository changed since this graph was built".
+ */
+export interface RequirementsGraphBuild {
+  /** The build's generation in the store (1 = the first build; 0 = a graph persisted before the engine kept a
+   *  build record). */
+  generation: number;
+  /** The label the build persisted; `null` when it carried none or an older engine's `mapped_pct` label. */
+  coverage: RequirementsCoverage | null;
+  /** True when any count of the build's label differs from the page's `coverage` (or the label is null). False
+   *  says the counts agree, not that every statement is unchanged. */
+  behind: boolean;
+}
+
 export interface RequirementSummary {
   key: string;
   domain: string;
@@ -6821,6 +6839,12 @@ export interface RequirementsPage {
    *  older engine's `mapped_pct` label, or one its counts do not support; ABSENT from an older
    *  daemon. */
   coverage?: RequirementsCoverage | null;
+  /**
+   * (0.165.0) Which build the rows are. The list is the last graph BUILD; `coverage` counts the store NOW,
+   * which moves on when a run maps more without building (stopped at its repeat ask, or below the minimum,
+   * where the build refuses). `null` when the engine does not say; ABSENT from an older daemon.
+   */
+  graphBuild?: RequirementsGraphBuild | null;
   /** (0.159.0) How many requirements of the whole corpus are validated / unconfirmed. */
   corroboration?: { validated: number; unconfirmed: number };
 }
