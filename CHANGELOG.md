@@ -12,6 +12,13 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **An end-of-run learnings distil never waits on you (#1251).** A distil seat that rightly found nothing could
+  reply in under 200 characters, fail the engine's substance floor and park as "Waiting on you". The distil's
+  outcome is its report file, so crew now stops a distil run at any gate it reaches and files from the report:
+  an empty list is recorded as "none found" (`filed.json` `noneFound`, `checked`, `stopped`), and a missing report
+  (a crashed seat) files the evidence raw as before. The distil seat now writes `checked` (each evidence item, kept
+  or dropped and why) and says the same in its reply, so "none found" is a reviewable answer. A distil already
+  parked when the daemon starts is left for the operator.
 - Working document: an agent decision whose text already ends in `.`, `!` or `?` no longer gets a second period before "Why:"; Goal drops the hidden linked-issues block and, when too long, is cut at a word boundary with an ellipsis (#1240).
 
 ### Changed

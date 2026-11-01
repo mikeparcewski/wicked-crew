@@ -1369,6 +1369,12 @@ export async function createServer(
       runEvents: (id) => adapter.runEvents(id),
       seatsForWorkflow: (id) => adapter.seatsForWorkflow(id),
       launchRun: (input) => adapter.launchRun(input),
+      // A distil run that stops at a gate is crew's to end, never the operator's: on the record as run-learnings.
+      cancelRun: async (runId) => {
+        const status = await adapter.cancelRun(runId);
+        audit.record('run.cancelled', LEARNINGS_ACTOR, { runId, detail: { status, reason: 'a learnings distil stopped at a gate; crew files from its report' } });
+        return status;
+      },
     },
     submit: submitLearning,
     listProposals: async () => proposalRows(await callEstateTool('proposal.list', {})),
