@@ -269,16 +269,23 @@ export class RunLearningsService {
       const views = new Map((await this.deps.adapter.sessionsDetail()).map((v) => [v.session.id, v] as const));
       for (const name of readdirSync(this.deps.learningsDir)) {
         const dir = join(this.deps.learningsDir, name);
-        if (existsSync(join(dir, FILED_FILE))) continue;
         const rec = this.readJson(join(dir, DISTILL_FILE));
         const child = isRecord(rec) && typeof rec['distillRunId'] === 'string' ? rec['distillRunId'] : null;
+        // A distil crew stopped at a gate whose stop did not take (the engine refused it) is stopped again, filed or
+        // not: crew owns that run's gate. A distil parked before crew stopped any (no `stopped` record) is left alone.
+        const childStatus = child !== null ? views.get(child)?.session.status : undefined;
+        if (child !== null && isRecord(rec) && typeof rec['stopped'] === 'string' && childStatus !== undefined && !TERMINAL.has(childStatus)) {
+          await this.deps.adapter.cancelRun(child).catch((err: unknown) => {
+            this.deps.log(`[learnings] stopping distill-learnings ${child} again failed: ${err instanceof Error ? err.message : String(err)}`);
+          });
+        }
+        if (existsSync(join(dir, FILED_FILE))) continue;
         if (child === null) {
           if (views.has(name)) await this.sweepOnce(name, 'end');
           continue;
         }
         this.distills.set(child, name);
-        const status = views.get(child)?.session.status;
-        if (status === undefined || TERMINAL.has(status)) await this.reconcileDistill(child, name);
+        if (childStatus === undefined || TERMINAL.has(childStatus)) await this.reconcileDistill(child, name);
       }
     });
   }
@@ -515,7 +522,7 @@ export class RunLearningsService {
     try {
       await this.deps.adapter.cancelRun(distillRunId);
     } catch (err) {
-      // Filed below either way: a run crew could not stop is still filed, and its end frame then finds it filed.
+      // Filed below either way: its `stopped` record makes the next recovery stop it again, without filing twice.
       this.deps.log(`[learnings] stopping distill-learnings ${distillRunId} failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     await this.reconcileDistill(distillRunId, sourceRunId);

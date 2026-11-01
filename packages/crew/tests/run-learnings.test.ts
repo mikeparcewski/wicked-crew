@@ -147,13 +147,14 @@ describe('extractLearnings: what a run\'s record says it learned', () => {
   });
 });
 
-function harness(opts: { seats?: unknown[]; mode?: 'distill' | 'extract'; proposals?: ProposalRow[]; memories?: string[]; launchFails?: boolean; cancelFails?: boolean; view?: SessionView } = {}) {
+function harness(opts: { seats?: unknown[]; mode?: 'distill' | 'extract'; proposals?: ProposalRow[]; memories?: string[]; launchFails?: boolean; cancelFails?: number; view?: SessionView } = {}) {
   const dir = scratch();
   const view = opts.view ?? runView();
   const submitted: Array<{ runId: string; agent: string; args: SubmitArgs }> = [];
   const queue: ProposalRow[] = [...(opts.proposals ?? [])];
   const launches: LaunchRunInput[] = [];
   const cancels: string[] = [];
+  let refusals = opts.cancelFails ?? 0;
   let n = 0;
   const views: SessionView[] = [view];
   const svc = new RunLearningsService({
@@ -168,7 +169,10 @@ function harness(opts: { seats?: unknown[]; mode?: 'distill' | 'extract'; propos
       },
       cancelRun: async (runId) => {
         cancels.push(runId);
-        if (opts.cancelFails) throw new Error('the engine refused the stop');
+        if (refusals > 0) {
+          refusals -= 1;
+          throw new Error('the engine refused the stop');
+        }
         return 'cancelled';
       },
     },
@@ -451,7 +455,7 @@ describe('RunLearningsService under overlap, failure and restart (xreview on cre
   });
 
   it('a distil whose seat crashed before writing a report is stopped too, and the evidence is filed raw', async () => {
-    const h = harness({ cancelFails: true });
+    const h = harness({ cancelFails: 1 });
     h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
     await settle();
     h.svc.onEvent({ type: 'awaitingHuman', session: 'distill-1', gateKind: 'escalation', prompt: 'worker failed' } as never);
@@ -460,6 +464,27 @@ describe('RunLearningsService under overlap, failure and restart (xreview on cre
     expect(h.submitted.slice(1)).toHaveLength(MAX_END_LEARNINGS);
     expect(h.submitted.slice(1).every((s) => s.agent === 'crew')).toBe(true);
     expect(JSON.parse(readFileSync(join(h.dir, 'run-1', FILED_FILE), 'utf8'))).toMatchObject({ distilled: false, stopped: 'stopped at escalation: worker failed' });
+
+    // xreview on #1253: the refused stop is not abandoned. The run is still parked, so the next recovery stops it
+    // again and files nothing twice; once it is terminal, recovery leaves it be.
+    const filed = h.submitted.length;
+    h.views.push({ session: { id: 'distill-1', status: 'awaiting_human', workflow_id: DISTILL_WORKFLOW, problem: 'p' }, units: [] } as unknown as SessionView);
+    await h.svc.recover();
+    expect(h.cancels).toEqual(['distill-1', 'distill-1']);
+    expect(h.submitted.length).toBe(filed);
+    (h.views[h.views.length - 1]!.session as unknown as Record<string, unknown>)['status'] = 'cancelled';
+    await h.svc.recover();
+    expect(h.cancels).toHaveLength(2);
+  });
+
+  it('recovery never stops a distil that was parked before crew stopped any (it stays the operator\'s)', async () => {
+    const h = harness();
+    h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
+    await settle();
+    h.views.push({ session: { id: 'distill-1', status: 'awaiting_human', workflow_id: DISTILL_WORKFLOW, problem: 'p' }, units: [] } as unknown as SessionView);
+    await h.svc.recover();
+    expect(h.cancels).toEqual([]);
+    expect(existsSync(join(h.dir, 'run-1', FILED_FILE))).toBe(false);
   });
 
   it('a gate on any run that is not a distil is never touched', async () => {
