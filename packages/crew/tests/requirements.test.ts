@@ -298,11 +298,11 @@ describe('requirements service', () => {
       const rebuilt = await listRequirements(repo, { offset: 0, limit: 50 }, estateAt(root));
       expect(rebuilt!.items.map((i) => i.title)).toContain('Rebuilt title');
       // A label-only change (a later page mapped more) shows too.
-      graph.metadata['coverage'] = { mapped_pct: 50, min_pct: 80, behavior_bearing: 2, mapped: 1, resolved: 1, unmapped: 1 };
+      graph.metadata['coverage'] = { real_pct: 50, min_pct: 80, behavior_bearing: 2, real: 1, placeholders: 0, unmapped: 1, not_product: 0 };
       await writeFile(path, JSON.stringify(graph), 'utf8');
       vi.setSystemTime(Date.now() + REQUIREMENTS_READ_TTL_MS + 1);
       const relabelled = await listRequirements(repo, { offset: 0, limit: 50 }, estateAt(root));
-      expect(relabelled!.coverage).toMatchObject({ mappedPct: 50 });
+      expect(relabelled!.coverage).toMatchObject({ realPct: 50 });
       // And a graph that is gone answers null, not the old index.
       await writeFile(path, 'gone', 'utf8');
       vi.setSystemTime(Date.now() + REQUIREMENTS_READ_TTL_MS + 1);
@@ -366,7 +366,7 @@ describe('requirements service — coverage label + corroboration (domain-model 
       metadata: {
         schema_version: '1.1.0',
         migration_mode: 'functional',
-        coverage: { mapped_pct: 82, min_pct: 80, behavior_bearing: 100, mapped: 82, resolved: 70, unmapped: 18 },
+        coverage: { real_pct: 70, min_pct: 80, behavior_bearing: 100, real: 70, placeholders: 12, unmapped: 18, not_product: 9 },
       },
       domains: {
         src: {
@@ -410,7 +410,7 @@ describe('requirements service — coverage label + corroboration (domain-model 
   it('carries the coverage label and the corpus-wide validated / unconfirmed counts', async () => {
     const r_ = await coreShapedRepo();
     const page = await listRequirements(repoAt(r_), { offset: 0, limit: 50 }, estateAt(r_));
-    expect(page?.coverage).toEqual({ mappedPct: 82, minPct: 80, behaviorBearing: 100, mapped: 82, resolved: 70, unmapped: 18 });
+    expect(page?.coverage).toEqual({ realPct: 70, minPct: 80, behaviorBearing: 100, real: 70, placeholders: 12, unmapped: 18, notProduct: 9 });
     expect(page?.corroboration).toEqual({ validated: 1, unconfirmed: 1 });
   });
 
@@ -442,8 +442,19 @@ describe('requirements service — coverage label + corroboration (domain-model 
   });
 
   it('a coverage label with a missing or out-of-range field is no label', () => {
-    expect(coverageOf({ mapped_pct: 82, min_pct: 80 })).toBeNull();
-    expect(coverageOf({ mapped_pct: 182, min_pct: 80, behavior_bearing: 1, mapped: 1, resolved: 1, unmapped: 0 })).toBeNull();
+    expect(coverageOf({ real_pct: 82, min_pct: 80 })).toBeNull();
+    expect(coverageOf({ real_pct: 182, min_pct: 80, behavior_bearing: 1, real: 1, placeholders: 0, unmapped: 0, not_product: 0 })).toBeNull();
+    // wicked-core#1233: an older engine's label counted placeholders as mapped ("100% mapped" with 3
+    // real requirements of 120): it is never read as the real share.
+    expect(coverageOf({ mapped_pct: 100, min_pct: 80, behavior_bearing: 120, mapped: 120, resolved: 3, unmapped: 0 } as never)).toBeNull();
+    // codex on #1252: a share its counts do not support, or buckets that do not sum to the
+    // denominator, is no label; the empty denominator reads 100, as the engine says.
+    const ok = { real_pct: 2, min_pct: 80, behavior_bearing: 120, real: 3, placeholders: 117, unmapped: 0, not_product: 0 };
+    expect(coverageOf(ok)).toMatchObject({ realPct: 2, placeholders: 117 });
+    expect(coverageOf({ ...ok, real_pct: 100 })).toBeNull();
+    expect(coverageOf({ ...ok, placeholders: 116 })).toBeNull();
+    expect(coverageOf({ ...ok, real_pct: 100, behavior_bearing: 0, real: 0, placeholders: 0, not_product: 117 })).toMatchObject({ realPct: 100 });
+    expect(coverageOf({ ...ok, real_pct: 0, behavior_bearing: 0, real: 0, placeholders: 0 })).toBeNull();
   });
 
   it('a graph built before the fields reads null and 0/0, never a guess', async () => {
@@ -472,7 +483,7 @@ describe('requirements service — the graph comes from estate (operator ruling 
         calls.push(repoRef);
         return {
           graph: {
-            metadata: { coverage: { mapped_pct: 100, min_pct: 80, behavior_bearing: 1, mapped: 1, resolved: 1, unmapped: 0 } },
+            metadata: { coverage: { real_pct: 100, min_pct: 80, behavior_bearing: 1, real: 1, placeholders: 0, unmapped: 0, not_product: 0 } },
             domains: {
               src: {
                 requirements: {
@@ -483,7 +494,7 @@ describe('requirements service — the graph comes from estate (operator ruling 
           },
           // The engine's label is recomputed from the store's counts at read time and wins over
           // the one the build stored.
-          coverage: { mapped_pct: 3, min_pct: 80, behavior_bearing: 100, mapped: 3, resolved: 1, unmapped: 97 },
+          coverage: { real_pct: 1, min_pct: 80, behavior_bearing: 100, real: 1, placeholders: 2, unmapped: 97, not_product: 0 },
         };
       },
     };
@@ -491,7 +502,7 @@ describe('requirements service — the graph comes from estate (operator ruling 
     expect(calls).toEqual(['tiny-math']);
     expect(page!.source).toBe('store');
     expect(page!.items.map((i) => [i.key, i.statement])).toEqual([['src::REQ-001', 'the sum of every element']]);
-    expect(page!.coverage).toMatchObject({ mappedPct: 3, minPct: 80 });
+    expect(page!.coverage).toMatchObject({ realPct: 1, placeholders: 2, minPct: 80 });
   });
 
   it('answers null (not generated) when estate holds no graph, whatever files sit in the repo', async () => {
@@ -499,7 +510,7 @@ describe('requirements service — the graph comes from estate (operator ruling 
     await markIndexed(root);
     const none: RequirementsGraphReader = {
       async getRequirementsGraphForRepo() {
-        return { graph: null, coverage: { mapped_pct: 3, min_pct: 80, behavior_bearing: 100, mapped: 3, resolved: 1, unmapped: 97 } };
+        return { graph: null, coverage: { real_pct: 1, min_pct: 80, behavior_bearing: 100, real: 1, placeholders: 2, unmapped: 97, not_product: 0 } };
       },
     };
     expect(await listRequirements(repoAt(root), { offset: 0, limit: 10 }, none)).toBeNull();

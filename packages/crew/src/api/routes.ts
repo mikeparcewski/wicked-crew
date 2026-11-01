@@ -7022,8 +7022,8 @@ export function registerRoutes(
     }
     if (page === null) {
       // Not generated yet is a state, typed by `code`, not a refusal (lane repo-page). It says how
-      // much is mapped so far (domain-graph-3: "3% of behaviours mapped · target 80%"), from the
-      // very engine read the page used, when the repository has a store to count.
+      // far the repository is ("23% real requirements · 4397 placeholders · target 80%";
+      // wicked-core#1233), from the very engine read the page used, when it has a store to count.
       return reply
         .code(404)
         .send(coverage === null ? REQUIREMENTS_NOT_GENERATED : { ...REQUIREMENTS_NOT_GENERATED, coverage });

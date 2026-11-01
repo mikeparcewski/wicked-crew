@@ -6510,9 +6510,10 @@ export interface SystemSettings {
   /**
    * (api-types 0.159.0, operator ruling 2026-10-31) The requirements graph's minimum coverage:
    * `minCoveragePct`, a whole percentage 1..100, default 80. A repository's requirements graph is
-   * built, and shown labelled with its share ("82% of behaviours mapped"), once at least this share
-   * of its behaviour-bearing code is mapped; below it the `domain-extraction` run says "N% mapped,
-   * minimum M%" and keeps the mapping for the next run. The daemon exports it as
+   * built, and shown labelled with its share, once REAL requirements (0.164.0: placeholders never
+   * count) reach this share of its behaviour-bearing product code; below it the
+   * `domain-extraction` run says "N% real requirements, minimum M%" and keeps the mapping for the
+   * next run. The daemon exports it as
    * `WICKED_REQUIREMENTS_MIN_COVERAGE_PCT` at boot and on every change. Absent = the default.
    */
   requirementsGraph?: {
@@ -6742,17 +6743,33 @@ export interface RequirementCorroboration {
 }
 
 /**
- * (0.159.0) The share of behaviour-bearing code a requirements graph maps, and the minimum it was
- * built at (`SystemSettings.requirementsGraph.minCoveragePct`): label the graph "82% of behaviours
- * mapped". `mappedPct` is floored, so it never reads above the minimum it was compared to.
+ * (0.164.0, operator decision 2026-11-01, wicked-core#1233) How much of a repository's product code
+ * is REAL requirements, and the minimum the graph is held to (`SystemSettings.requirementsGraph
+ * .minCoveragePct`): label it "23% real requirements · 4397 placeholders · minimum 80%".
+ *
+ * - `realPct` is the one number the minimum is checked against: `floor(real * 100 /
+ *   behaviorBearing)`, floored so it never reads above the minimum it was compared to; 100 when
+ *   `behaviorBearing` is 0 (nothing in product code to map). `real + placeholders + unmapped ===
+ *   behaviorBearing`; a label that breaks either is not sent.
+ * - `real`: behaviours resolved to a stated, sourced business rule.
+ * - `placeholders`: behaviours carrying only a risk-flagged placeholder (an empty statement, a rule
+ *   under the confidence threshold, one written unconfirmed). Shown in the graph as unconfirmed,
+ *   NEVER counted toward the minimum.
+ * - `unmapped`: behaviours with nothing recorded yet.
+ * - `behaviorBearing`: the denominator, product code only. `notProduct` counts the behaviour-kind
+ *   nodes left out because their file is a test, data, manifest or document file.
+ *
+ * Replaces 0.159.0's `mappedPct` / `mapped` / `resolved`, which counted placeholders as mapped (a
+ * repository with 3 real requirements and 117 placeholders read "100% mapped").
  */
 export interface RequirementsCoverage {
-  mappedPct: number;
+  realPct: number;
   minPct: number;
   behaviorBearing: number;
-  mapped: number;
-  resolved: number;
+  real: number;
+  placeholders: number;
   unmapped: number;
+  notProduct: number;
 }
 
 export interface RequirementSummary {
@@ -6800,8 +6817,9 @@ export interface RequirementsPage {
    * row is showing — re-apply or delete the stale keys.
    */
   orphanedOverrides?: number;
-  /** (0.159.0) The graph's coverage label; `null` on a graph built before the field, ABSENT from an
-   *  older daemon. */
+  /** (0.159.0; real requirements since 0.164.0) The graph's coverage label; `null` when absent, an
+   *  older engine's `mapped_pct` label, or one its counts do not support; ABSENT from an older
+   *  daemon. */
   coverage?: RequirementsCoverage | null;
   /** (0.159.0) How many requirements of the whole corpus are validated / unconfirmed. */
   corroboration?: { validated: number; unconfirmed: number };
@@ -6818,8 +6836,9 @@ export interface RequirementsNotGenerated {
   code: 'notGenerated';
   workflow: string;
   /**
-   * (api-types 0.163.0, domain-graph-3) How much is mapped so far, against the repository's target
-   * ("3% of behaviours mapped · target 80%"): present when the repository has a store to count.
+   * (api-types 0.163.0, domain-graph-3; real requirements since 0.164.0) How far the repository
+   * is, against its target ("23% real requirements · 4397 placeholders · target 80%"): present
+   * when the repository has a store to count.
    * `minPct` is the target in force (the repository's own when lowered, else the daemon's).
    */
   coverage?: RequirementsCoverage;

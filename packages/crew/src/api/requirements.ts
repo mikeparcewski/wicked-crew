@@ -50,12 +50,13 @@ interface ArtifactCorroboration {
 }
 
 interface ArtifactCoverage {
-  mapped_pct?: unknown;
+  real_pct?: unknown;
   min_pct?: unknown;
   behavior_bearing?: unknown;
-  mapped?: unknown;
-  resolved?: unknown;
+  real?: unknown;
+  placeholders?: unknown;
   unmapped?: unknown;
+  not_product?: unknown;
 }
 
 interface ArtifactRequirement {
@@ -168,14 +169,19 @@ export interface RequirementCorroboration {
   why?: { code: string; text: string };
 }
 
-/** The share of behaviours the graph maps (domain-model 1.1.0 `metadata.coverage`). */
+/**
+ * How much of the repository's product code is REAL requirements (domain-model 1.1.0
+ * `metadata.coverage`, schema bundle 1.3.0; wicked-core#1233). `realPct` is the one number the
+ * minimum is checked against; `placeholders` are shown, never counted.
+ */
 export interface RequirementsCoverage {
-  mappedPct: number;
+  realPct: number;
   minPct: number;
   behaviorBearing: number;
-  mapped: number;
-  resolved: number;
+  real: number;
+  placeholders: number;
   unmapped: number;
+  notProduct: number;
 }
 
 /** A count as the artifact must carry it: a finite, non-negative integer — else `null`. */
@@ -211,21 +217,31 @@ export function corroborationOf(raw: ArtifactCorroboration | undefined): Require
   return out;
 }
 
-/** The artifact's coverage label in wire shape, or `null` on a pre-1.1.0 artifact. */
+/**
+ * The engine's coverage label in wire shape, or `null` when absent or not the bundle-1.3.0 shape (an
+ * older engine's `mapped_pct` label counted placeholders as mapped, so it is never shown as the real
+ * share).
+ */
 export function coverageOf(raw: ArtifactCoverage | undefined): RequirementsCoverage | null {
   if (raw === undefined || raw === null || typeof raw !== 'object') return null;
   const out = {
-    mappedPct: count(raw.mapped_pct),
+    realPct: count(raw.real_pct),
     minPct: count(raw.min_pct),
     behaviorBearing: count(raw.behavior_bearing),
-    mapped: count(raw.mapped),
-    resolved: count(raw.resolved),
+    real: count(raw.real),
+    placeholders: count(raw.placeholders),
     unmapped: count(raw.unmapped),
+    notProduct: count(raw.not_product),
   };
-  // Every field present and an integer, percentages in range — or no label at all.
+  // Every field present and an integer, percentages in range, the buckets summing to the
+  // denominator and the share the engine's own floor of them (100 on an empty denominator) — or no
+  // label at all: a label whose share its counts do not support is never shown (codex on #1252).
   if (Object.values(out).some((v) => v === null)) return null;
   const c = out as RequirementsCoverage;
-  if (c.mappedPct > 100 || c.minPct < 1 || c.minPct > 100) return null;
+  if (c.realPct > 100 || c.minPct < 1 || c.minPct > 100) return null;
+  if (c.real + c.placeholders + c.unmapped !== c.behaviorBearing) return null;
+  const share = c.behaviorBearing === 0 ? 100 : Math.floor((c.real * 100) / c.behaviorBearing);
+  if (c.realPct !== share) return null;
   return c;
 }
 
@@ -450,8 +466,9 @@ export interface RequirementsPage {
    */
   orphanedOverrides: number;
   /**
-   * The share of behaviours the graph maps and the minimum it was built at ("82% of behaviours
-   * mapped"); `null` on an artifact built before domain-model 1.1.0.
+   * The share of product behaviours that are REAL requirements, the placeholders apart, and the
+   * minimum ("23% real requirements · 4397 placeholders · minimum 80%"); `null` when the label is
+   * absent, an older engine's `mapped_pct` label, or one its counts do not support.
    */
   coverage: RequirementsCoverage | null;
   /** How many requirements of the whole corpus are validated / unconfirmed (0/0 on an older artifact). */
