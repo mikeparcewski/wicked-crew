@@ -13,8 +13,10 @@ protocol, where things live) are in the parent `../CLAUDE.md`.
 ## Layout (npm workspace)
 
 - `packages/crew` — the product: daemon (`/api/v1` REST + `/ws` CoreEvent frames) and CLI.
-  Source in `src/{api,cli,core,events,interactive,projects,qe,types}`; tests in `tests/`
-  (vitest). The QE acceptance assessment reads the repo's wicked-ledger store via `src/qe/`.
+  Source in `src/`, one directory per surface (`api`, `cli`, `core`, `events`, `interactive`,
+  `projects`, `qe`, and newer ones such as `voice`, `learnings`, `persona`, `inspect`,
+  `working-doc`); tests in `tests/` (vitest). The QE acceptance assessment reads the repo's
+  wicked-ledger store via `src/qe/`.
   `build:with-studio` bundles wicked-studio's dist as the default local UI.
 - `packages/crew-api-types` — the published wire contract of `/api/v1` + `/ws` (types only,
   zero runtime); wicked-studio builds against this, never against crew internals.

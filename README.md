@@ -139,7 +139,7 @@ deliver phase then pushes with `GH_ACCOUNT`'s own gh token (read from gh's keyri
 `wicked-crew status` with no daemon answering exits 1 with one line: start it with
 `wicked-crew serve` (or `--install-service`), or, when the service is installed, read its log.
 
-The CLI surface is `wicked-crew serve|start|resume|gate|status|mcp|governance` — `mcp` runs a
+The CLI surface is `wicked-crew serve|start|resume|gate|status|mcp|governance|version` — `mcp` runs a
 stdio MCP server (crew-as-a-tool for coding agents), `gate` answers a pending human gate from the
 terminal, `governance replay <outbox>` drains governance events the engine could not store.
 
@@ -170,8 +170,9 @@ pay for instead of replacing them.
 
 - **You own the workflow; the agent owns the work.** The orchestrator sequences phases and holds the
   gates; the agent does the coding inside a phase.
-- **Workflows are data.** feature / bug / migration ship built-in; new ones are drop-in JSON files, not
-  code. (The engine — `wicked-core` — validates and drives them.)
+- **Workflows are data.** `feature`, `bug` and `migration` ship built-in, beside `domain-extraction`,
+  `mcp-server`, `editor-plugin`, `analyze` and others; new ones are drop-in JSON files, not code. (The
+  engine — `wicked-core` — validates and drives them.)
 - **Gates are real, and they say what they checked.** A gated transition resolves
   **deny-dominates** on the layers that actually ran — a deterministic floor, repo checks,
   policies, an evaluator seat that reads cold evidence only. A transition with none of them is
@@ -197,19 +198,54 @@ prompt every run. A phase runs a task-specific skill only when its definition na
 built-in `domain-extraction` and `mcp-server` workflows do; `feature`, `bug` and `migration` rely on
 the base skill. Phases, gates, roles, and any phase skill are all **data** on the workflow definition.
 
+## Requirements, learnings and voice
+
+**Requirements: what the code does, and how much of it is mapped.** The `domain-extraction` workflow
+maps a repository's behaviours to stated business rules: it surveys and analyzes the repository, then
+extracts, critiques and applies one page of behaviours at a time until **real** requirements reach the
+minimum: 80% of the behaviour-bearing product code by default (Settings →
+`requirementsGraph.minCoveragePct`, 1..100).
+A risk-flagged placeholder (an empty statement, or a rule under the confidence threshold) is shown but
+never counted, and tests, data, manifests and documents are left out of the denominator. When the
+run's budget is spent (`maxPages`, `maxMinutes`, `pageSize` beside the minimum) it asks you: map more,
+lower the minimum for that repository, or stop. Then a coverage step checks the share and
+`wicked-core domain-graph` builds the graph into the repository's estate store; nothing is written
+into the checkout. `GET /api/v1/repos/:id/requirements` lists it, with `coverage` (`realPct` against
+`minPct`, real, placeholders, unmapped), `graphBuild` (whether the listed build is behind the store's
+numbers), and on each item its `placeholder` flag and `corroboration` (validated by independent
+sources, or unconfirmed and why). A repository with no graph yet answers a typed 404
+(`code: "notGenerated"`) that names the workflow to run.
+
+**Every run proposes what it learned.** At its checkpoints and at its end, crew reads the run's
+record: a test that failed and then passed on its identical retry, your rulings with their reasons, a
+reviewer's findings. One seat that neither led nor built the run distils them into at most five
+learnings. Each one is a `memory` proposal attributed to the run (and faceted by repo, project and,
+when it is about one, seat); nothing is stored until a person approves it. A distil that finds
+nothing records "none found" instead of waiting on you. `GET /api/v1/runs/:id/learnings` answers a
+run's count; `WICKED_CREW_RUN_LEARNINGS=off|extract|distill` (default `distill`) turns it down.
+
+**Voice (optional).** Studio's voice mode posts speech to `POST /api/v1/voice/transcribe`, which
+hands it to [whisper.cpp](https://github.com/ggml-org/whisper.cpp) on this machine: `whisper-cli` on
+PATH, or `WICKED_CREW_WHISPER_BIN`. Crew does not install it; `GET /api/v1/voice/status` names the
+install command for your platform. The model (`ggml-base.en.bin`, 142 MiB) is downloaded only when you
+consent, and the audio is held in memory for that one call: never written to disk, never kept with a
+run.
+
 ## Gates: generated, grounded, dual validators *(built — `wicked-core`, DES-EXEC-001 rev0.4)*
 
-> **Built + live-verified** in the [`wicked-core`](../wicked-core) engine: a test-strategy skill authors
+> **Built + live-verified** in the [`wicked-core`](https://github.com/mikeparcewski/wicked-core) engine: a test-strategy skill authors
 > a grounded deterministic check (`provision-validator`), a human/council approves it (`approve-validator`,
 > distinct content-hash pin), and the gate re-verifies that pinned script against the worktree
 > (deny-dominates, no LLM at gate time) alongside an independent agent judge that can reject but never
 > lone-approve. The security controls (approval gate, fail-closed parse, denylist) survived a 14-finding
 > adversarial review. **Caveat:** the shipped feature/bug/migration workflows pin only the built-in
 > **evidence floor** (`e2e7af1db9e48454` — "the run left a change in its worktree"; it proves a change
-> exists, not that the change is correct) on their code and verification phases (feature `build` +
-> `adversarial-review` + `test`, bug `fix` + `verify`, migration `execute` + `verify`); every other
-> phase ships `validator_pin: null` and engages the full
-> gate only once an operator authors, approves, and pins a task-specific validator into the def.
+> exists, not that the change is correct) on their code-writing and verifying phases. On those phases
+> the engine also runs the **repo checks floor**: the repository's own typecheck, lint and tests (from
+> `.wicked/checks.json`, else detected from `package.json` or `Cargo.toml`), compared with the same
+> checks on the run's base, so a new failure is told apart from one the base already had. Phases
+> without a pin engage the full gate only once an operator authors, approves, and pins a task-specific
+> validator into the def.
 
 The deterministic gate check is not a generic precanned assertion. A **test-strategy agent authors a
 grounded validation script** for that specific phase/task — stored as the phase's **evidence
@@ -415,13 +451,13 @@ typecheck if the daemon's responses ever stop satisfying it.
 
 ## Where things are
 
-- `.product/` — requirements, design, and evidence:
-  - `REQ-001-application-overview.md`, `DES-001-technical-design.md`
-  - `DES-CAMPAIGN-001-parallel-scheduler.md`, `DES-STUDIO-*`, `DES-TERMINAL-001`, `DES-RELEASE-001`
-- **The execution engine is [`wicked-core`](../wicked-core)** — the single-writer runtime that owns the
-  workflow-as-data model, data-driven planning, skills-driven invocation, and the gate ladder. See
-  `wicked-core/.product/DES-EXEC-001-event-driven-workflow-execution.md` for the engine design (the two
-  laws, the gate model, the skills seam).
+- `.product/` — requirements and design notes (REQ-*, DES-*). Gitignored and in no commit, so a fresh
+  clone has none; a `.product/…` path cited in a source comment may not exist where you read it.
+- `docs/` — operator docs: [auth](docs/auth.md), [seats](docs/seats.md),
+  [campaign budgets](docs/campaign-budgets.md).
+- **The execution engine is [`wicked-core`](https://github.com/mikeparcewski/wicked-core)** — the
+  single-writer runtime that owns the workflow-as-data model, data-driven planning, skills-driven
+  invocation, and the gate ladder. Its `README.md` and `DESIGN.md` describe the engine.
 - `site/` — the wicked-crew site (wc.wickedagile.com).
 
 ## Status
@@ -430,8 +466,8 @@ Active build. **Built + verified in `wicked-core`** (each layer adversarially re
 → data-driven planning → per-phase gate + role/artifact-passing → skills-driven invocation → the
 dual-validator gate (author→approve→pin→re-verify) → the validator vault → the Rust↔wicked-bus bridge →
 the napi bridge ([`wicked-core-ts`](https://github.com/mikeparcewski/wicked-core/tree/main/crates/wicked-core-ts),
-a crate inside the wicked-core repo, published to npm — this daemon depends on `^0.7.1` and embeds the
-engine through it). Remaining: an OS sandbox around validator execution (today's containment is a
+a crate inside the wicked-core repo, published to npm — this daemon embeds the engine through it, at the
+range `packages/crew/package.json` pins). Remaining: an OS sandbox around validator execution (today's containment is a
 denylist-screened parse + minimal env — defense-in-depth, not a hermetic sandbox), and (honestly) the
 shipped workflows pin only the built-in evidence floor on their verification phases — the full
 authored-validator gate engages per phase only once an operator pins one. See `wicked-core/README.md`

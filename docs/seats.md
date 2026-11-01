@@ -34,7 +34,7 @@ The engine runs every seat under its own configuration home inside the worker ho
 | opencode | `XDG_DATA_HOME=<worker home>/opencode/data` | `opencode/auth.json` |
 
 Each seat's roster record carries `login_invocation`, the exact command that signs that seat in
-under its own home. The System page runs it in a terminal.
+under its own home. Studio's Agents page shows it with a Copy button.
 
 ### Claude: the keychain entry is keyed by the config dir
 
@@ -120,3 +120,15 @@ Review and test units are unaffected: the evaluator-distinct rule moves them off
 and they run with a read-only write posture. If no eligible seat that enforces governance admits a
 build unit, it is still routed, and its `unitDistributed.degradedReason` names the unit and the
 ungoverned seat, so the operator sees it at the intake gate.
+
+## Seat images
+
+On the container floor each seat runs in its own image, which crew builds on first use (a unit
+that needs a missing image waits minutes while it builds). `GET /api/v1/system` reports them in the
+`seat_images` infra row, read from the engine's `seat-image status --json`: whether each roster
+seat's image, the floor image and the operator's base are present and held against the container
+runtime's image cleanup, plus the runtime VM's disk. The row is degraded when an image is missing or
+not yet held, the base is missing, or the VM disk reaches 75%; it is down when a missing image
+cannot be built or the disk reaches 92%. A missing or unheld image is a needs-you item whose action
+is `rebuild_seat_images` ("Rebuild seat images"). That calls `POST /api/v1/system/seat-images/rebuild`:
+a person's only, one rebuild at a time, its live output on the row.
