@@ -59,7 +59,7 @@ const SUBLINE = 'Claude Code, Codex, Copilot, OpenCode and Pi run your jobs in s
 
 const title = 'wicked-crew — the harness for the coding agents you already use';
 const description =
-  'wicked-crew runs the coding agents you already use (Claude Code, Codex, GitHub Copilot, OpenCode, Pi) through gated jobs in sandboxed containers. Every gate says what it checked, a different agent reviews the work, app changes need QE acceptance before delivery, and "done" is re-derived from evidence. Jobs are durable workflows that resume after a crash, on your own machine and your own plans.';
+  'wicked-crew runs the coding agents you already use (Claude Code, Codex, GitHub Copilot, OpenCode, Pi) through gated jobs in sandboxed containers. Every gate says what it checked, a different agent reviews the work by default, the built-in app-changing workflows need QE acceptance before delivery (or a labelled waiver or skip), and "done" is re-derived from evidence. Jobs are durable workflows that resume after a crash, on your own machine and your own plans.';
 const repo = 'https://github.com/mikeparcewski/wicked-crew';
 
 const PHASES = ['Plan', 'Build', 'Review', 'QE', 'Deliver'];
@@ -149,7 +149,7 @@ const crewVersion = __WICKED_CREW_VERSION__;
         <ul class="facts" role="list">
           <li>Your repo is read-only. The job writes its worktree and its git state.</li>
           <li>The model gateway is the only way out.</li>
-          <li>Keys stay in a broker. The container sees placeholders.</li>
+          <li>Keys stay in a broker; the container sees placeholders. A Claude subscription seat gets its sign-in token, guarded out of every diff.</li>
           <li>Sign each agent in once, on studio’s Agents page.</li>
         </ul>
       </div>
