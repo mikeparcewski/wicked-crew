@@ -33,7 +33,7 @@ const EVALUATOR_CODE_DEF = {
   id: 'domain-extraction',
   phases: [
     { id: 'extract', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
-    { id: 'coverage', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: true, verified_evidence: true, required_deliverables: ['coverage-report.json'], depends_on: ['extract'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: '313df7270f380e53' },
+    { id: 'coverage', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: true, verified_evidence: true, required_deliverables: ['coverage-report.json'], depends_on: ['extract'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: 'a607b67a07d026cd' },
   ],
 } as unknown as WorkflowDef;
 

@@ -1,6 +1,7 @@
 // The requirements-graph minimum coverage (operator ruling 2026-10-31): a repository's requirements
-// graph is built, and shown labelled with its share ("82% of behaviours mapped"), once at least
-// this percentage of its behaviour-bearing code is mapped. Default 80, adjustable in Settings
+// graph is built, and shown labelled with its share, once REAL requirements reach this percentage
+// of its behaviour-bearing product code (operator decision 2026-11-01, wicked-core#1233:
+// risk-flagged placeholders never count). Default 80, adjustable in Settings
 // (`requirementsGraph.minCoveragePct`, an integer 1..100).
 //
 // One mechanism, the same as the council settings: the daemon exports the persisted value as env at

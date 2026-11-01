@@ -16,6 +16,14 @@ mentioned only where a daemon release depends on them.
 
 ### Changed
 
+- **The requirements minimum counts real requirements only** (api-types 0.164.0, operator decision
+  2026-11-01, wicked-core#1233). `RequirementsCoverage` on `GET /repos/:id/requirements` (the page and the
+  `notGenerated` 404) is now `{ realPct, minPct, behaviorBearing, real, placeholders, unmapped, notProduct }`:
+  `realPct` is the one number the minimum is checked against; risk-flagged `placeholders` are shown but never
+  counted; tests, data, manifests and documents are out of `behaviorBearing` (`notProduct`). `mappedPct`,
+  `mapped` and `resolved` are gone (they counted placeholders as mapped: pi-governance read "100% mapped" with 3
+  real requirements of 120). An older engine's `mapped_pct` label is never shown as the real share. The
+  domain-extraction coverage step's pinned validator is `a607b67a07d026cd` (the reworded criterion).
 - **`test-related` words the cross-repo line like the network line (#1244).** It now reads "left out the tests
   tagged `cross-repo` (N in the repository, in …; only those this run selected were affected): no sibling
   wicked-core checkout; CI runs them (crew#1173)". The count and files were always the repository's, so a targeted

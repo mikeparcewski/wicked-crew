@@ -41,12 +41,12 @@ describe('CoreAdapter.getRequirementsGraphForRepo', () => {
       asked.push(repoRef);
       return JSON.stringify({
         graph: { metadata: { schema_version: '1.1.0' }, domains: { src: { requirements: {}, entities: {} } } },
-        coverage: { mapped_pct: 3, min_pct: 80, behavior_bearing: 8109, mapped: 300, resolved: 99, unmapped: 7809 },
+        coverage: { real_pct: 23, min_pct: 80, behavior_bearing: 5786, real: 1362, placeholders: 4397, unmapped: 27, not_product: 2380 },
       });
     };
     const read = await adapter.getRequirementsGraphForRepo('wicked-crew');
     expect(asked).toEqual(['wicked-crew']);
-    expect(read.coverage).toMatchObject({ mapped_pct: 3, min_pct: 80 });
+    expect(read.coverage).toMatchObject({ real_pct: 23, min_pct: 80 });
     expect(read.graph?.domains).toHaveProperty('src');
   });
 });

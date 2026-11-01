@@ -49,7 +49,7 @@ describe('GET /repos/:id/requirements — not generated yet, with the share mapp
 
   it('carries the coverage beside the typed notGenerated state, from one engine read', async () => {
     const read = await build({
-      mapped_pct: 3, min_pct: 80, behavior_bearing: 8109, mapped: 300, resolved: 99, unmapped: 7809,
+      real_pct: 23, min_pct: 80, behavior_bearing: 5786, real: 1362, placeholders: 4397, unmapped: 27, not_product: 2380,
     });
     const res = await app!.inject({ method: 'GET', url: '/api/v1/repos/wicked-crew/requirements' });
     expect(res.statusCode).toBe(404);
@@ -57,14 +57,14 @@ describe('GET /repos/:id/requirements — not generated yet, with the share mapp
       error: 'No requirements graph yet for this repository',
       code: 'notGenerated',
       workflow: 'domain-extraction',
-      coverage: { mappedPct: 3, minPct: 80, behaviorBearing: 8109, mapped: 300, resolved: 99, unmapped: 7809 },
+      coverage: { realPct: 23, minPct: 80, behaviorBearing: 5786, real: 1362, placeholders: 4397, unmapped: 27, notProduct: 2380 },
     });
     expect(read).toHaveBeenCalledTimes(1);
   });
 
   it('each answer carries the coverage of its own read, never another request\'s (codex r2 on #1250)', async () => {
     const read = await build(null);
-    const cov = (pct: number) => ({ mapped_pct: pct, min_pct: 80, behavior_bearing: 1000, mapped: pct * 10, resolved: 1, unmapped: 1000 - pct * 10 });
+    const cov = (pct: number) => ({ real_pct: pct, min_pct: 80, behavior_bearing: 1000, real: pct * 10, placeholders: 1, unmapped: 999 - pct * 10, not_product: 0 });
     let resolveA: (v: unknown) => void = () => {};
     let resolveB: (v: unknown) => void = () => {};
     read.mockReset();
@@ -79,8 +79,8 @@ describe('GET /repos/:id/requirements — not generated yet, with the share mapp
     resolveA({ graph: null, coverage: cov(3) });
     resolveB({ graph: null, coverage: cov(23) });
     const [ra, rb] = await Promise.all([a, b]);
-    expect(ra.json().coverage.mappedPct).toBe(3);
-    expect(rb.json().coverage.mappedPct).toBe(23);
+    expect(ra.json().coverage.realPct).toBe(3);
+    expect(rb.json().coverage.realPct).toBe(23);
   });
 
   it('says nothing about coverage the engine could not count', async () => {
