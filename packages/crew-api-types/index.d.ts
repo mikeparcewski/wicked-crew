@@ -6805,12 +6805,13 @@ export interface RequirementSummary {
    *  ABSENT from an older daemon. */
   corroboration?: RequirementCorroboration | null;
   /** (0.166.0) The engine would not count it a real requirement (a validated requirement, or a business rule at or
-   *  above the resolve threshold, 0.75): a placeholder, unconfirmed whatever its corroboration says. ABSENT from an
-   *  older daemon. */
+   *  above the resolve threshold, 0.75): a placeholder, unconfirmed whatever its corroboration says. (0.167.0) The
+   *  engine's own verdict when it gives one, else read off the document. ABSENT from an older daemon. */
   placeholder?: boolean;
   /** (0.167.0) The coverage share does not count this row, and why: its unit is not a behaviour (`structural`, a
    *  TypeScript shape or signature), is outside product code (`not_product`), or is no longer indexed (`unindexed`).
-   *  Such a row is neither a real requirement nor a placeholder of the header's, sorts after them, and carries
+   *  Such a row is neither a real requirement nor a placeholder of the header's (its `placeholder` says only whether
+   *  a rule was stated there), sorts after them, and carries
    *  `corroboration: null` (a type has no callers; "dead code" would be wrong). `null` when it counts or the engine
    *  does not say; ABSENT from an older daemon. */
   uncounted?: 'structural' | 'not_product' | 'unindexed' | null;
@@ -6859,12 +6860,13 @@ export interface RequirementsPage {
    *  not count are in neither. */
   corroboration?: { validated: number; unconfirmed: number };
   /**
-   * (0.167.0) Rows of the whole corpus the coverage share does not count (items with `uncounted`), split as the list
-   * marks them: why the list holds more rows than the header. With `graphBuild.behind` false, the rows that are neither
-   * placeholders nor uncounted number exactly `coverage.real`. `null` when the engine does not say; ABSENT from an
-   * older daemon.
+   * (0.167.0) Rows of the whole corpus the coverage share does not count (items with `uncounted`), split stated /
+   * placeholder: why the list holds more rows than the header. When this is not `null` and `graphBuild.behind` is
+   * false, the rows that are neither placeholders nor uncounted number exactly `coverage.real` (except a row from a
+   * build before the engine recorded its unit, judged from the document). `null` when the engine gives no verdicts
+   * (an older engine): no such claim. ABSENT from an older daemon.
    */
-  uncounted?: { real: number; placeholders: number } | null;
+  uncounted?: { stated: number; placeholders: number } | null;
   /** (0.167.0) How many rows of the whole corpus are in each category, so a client can leave out an empty filter.
    *  ABSENT from an older daemon. */
   categories?: { functional: number; configData: number };
