@@ -223,7 +223,7 @@ const crewVersion = __WICKED_CREW_VERSION__;
         </table>
       </div>
       <ul class="facts facts--cards" role="list">
-        <li><b>Power mode by default.</b> For a preset or plan on a repo, one agent builds the whole change in checkpointed turns, its rigor re-scored from the diff; the hand-off runs the review and QE that rigor calls for.</li>
+        <li><b>Power mode by default.</b> For a preset or plan on a repo, the step that builds code runs as one agent in checkpointed turns, its rigor re-scored from the diff; the hand-off runs the review and QE that rigor calls for.</li>
         <li><b>Crash-resumable.</b> A daemon that dies mid-job resumes it at boot, at the step it was on.</li>
         <li><b>One open API.</b> Studio ships inside crew and uses the same <code>/api/v1</code> and <code>/ws</code> your tools can.</li>
         <li><b>Headless too.</b> <code>wicked-crew start</code>, the REST API, or <code>wicked-crew mcp</code> for agents.</li>
