@@ -44,9 +44,9 @@ engine underneath is **wicked-core**. (In the API and the code a job is a *run*,
 Requires Node.js ≥ 22 and a container runtime (Rancher Desktop, Docker, Podman, Colima or OrbStack):
 governed agents run each CLI's headless mode in a hardened seat container (crew builds the seat images
 on first use), and you sign each agent in once from studio's Agents tab, in a login container.
-Seat images ship for Claude Code, Codex, GitHub Copilot, OpenCode and Pi. Antigravity has no seat
-image, and a local model or custom binary needs your own image (`WICKED_SEAT_IMAGE_<CLI>`, offline
-seats only). `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead; there, only
+Seat images ship for Claude Code, Codex, GitHub Copilot, OpenCode and Pi. Antigravity's image is
+defined but its seat is benched (no online credential route yet), and a local model or custom
+binary needs your own image (`WICKED_SEAT_IMAGE_<CLI>`, offline seats only). `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead; there, only
 claude and codex are given governed work.
 
 ```bash
