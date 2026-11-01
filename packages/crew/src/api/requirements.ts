@@ -190,17 +190,20 @@ export interface RequirementsCoverage {
 /**
  * The graph the list holds, as it was BUILT. The list's rows are the last `domain-graph` build; the page's
  * `coverage` counts the store NOW, which moves on whenever a run maps more without building (a run stopped at
- * its repeat ask, or one below the minimum, where the build refuses). `behind` says the rows are not what the
- * header counts (req-list-stale 2026-11-01: 1,383 real listed under a header counting 3,585).
+ * its repeat ask, or one below the minimum, where the build refuses). `behind` says the header's counts are not
+ * the rows' (req-list-stale 2026-11-01: 1,383 real listed under a header counting 3,585).
  */
 export interface RequirementsGraphBuild {
-  /** The build's generation in the store (1 = the first build). */
+  /** The build's generation in the store (1 = the first build; 0 = a graph persisted before the engine kept a
+   *  build record). */
   generation: number;
   /** The label the build persisted; `null` when it carried none or an older engine's `mapped_pct` one
    *  (built before real requirements were counted). */
   coverage: RequirementsCoverage | null;
-  /** The store's counts differ from the build's, or the build's are unknown: the header counts requirements
-   *  the list does not hold (yet). False only when every count agrees. */
+  /** The header's counts are not the counts this build was built at, or the build's are unknown. ANY count may
+   *  differ (a reindex can move `notProduct`, or lower `real`), so "N more real" holds only when `coverage.real`
+   *  is below the header's. False says the counts agree: the header counts what the list holds, which is not a
+   *  claim that every statement is unchanged. */
   behind: boolean;
 }
 
@@ -208,19 +211,19 @@ export interface RequirementsGraphBuild {
 const BUILD_COUNTS = ['behaviorBearing', 'real', 'placeholders', 'unmapped', 'notProduct'] as const;
 
 /**
- * Which build the list is, from the engine's `build` beside the live label: `null` when the engine does not
- * say (an older engine: the list is never claimed current on a read that cannot tell) or sent no usable
- * generation. With no live label there is nothing for the rows to disagree with.
+ * Which build the list is, from the engine's `build` and the engine's LIVE label (`read.coverage`, never the
+ * graph's own): `null` when the engine does not say (an older engine), sent no usable generation, or sent no
+ * usable live label. With nothing to compare, no claim either way (codex + agy on #1255).
  */
 export function graphBuildOf(
   raw: EstateRequirementsRead['build'],
   live: RequirementsCoverage | null,
 ): RequirementsGraphBuild | null {
-  if (raw === undefined || raw === null || typeof raw !== 'object') return null;
+  if (raw === undefined || raw === null || typeof raw !== 'object' || live === null) return null;
   const generation = count(raw.generation);
   if (generation === null) return null;
   const built = coverageOf(raw.coverage ?? undefined);
-  const behind = live !== null && (built === null || BUILD_COUNTS.some((k) => built[k] !== live[k]));
+  const behind = built === null || BUILD_COUNTS.some((k) => built[k] !== live[k]);
   return { generation, coverage: built, behind };
 }
 
@@ -501,7 +504,8 @@ async function buildIndexRead(
     total: entries.length,
     orphanedOverrides: countOrphanedOverrides(overrides, byKey),
     coverage,
-    graphBuild: graphBuildOf(read.build, coverage),
+    // The live label only: the graph's own fallback label would compare a build with itself.
+    graphBuild: graphBuildOf(read.build, coverageOf(read.coverage ?? undefined)),
     validated: entries.filter((e) => e.summary.corroboration?.status === 'validated').length,
     unconfirmed: entries.filter((e) => e.summary.corroboration?.status === 'unconfirmed').length,
   };
@@ -545,8 +549,9 @@ export interface RequirementsPage {
   coverage: RequirementsCoverage | null;
   /**
    * Which build the rows are: the list is the last graph build, `coverage` is the store now. When `behind`, the
-   * header counts requirements the list does not hold; a client says so ("N real requirements mapped since the
-   * last graph build; build the graph to list them"). `null` when the engine does not say.
+   * header's counts are not the list's; a client says so ("N real requirements mapped since the last graph build;
+   * build the graph to list them" when the build's `real` is below the header's, else "the store changed since
+   * this graph was built"). `null` when the engine does not say.
    */
   graphBuild: RequirementsGraphBuild | null;
   /** How many requirements of the whole corpus are validated / unconfirmed (0/0 on an older artifact). */

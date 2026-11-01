@@ -6774,16 +6774,19 @@ export interface RequirementsCoverage {
 
 /**
  * (0.165.0) The graph a requirements page lists, as it was built. When `behind`, the header (`coverage`, the store
- * now) counts requirements the list does not hold: say so, e.g. "2,202 real requirements mapped since the last
- * graph build; build the graph to list them" (or, with `coverage` null, "built before real requirements were
- * counted").
+ * now) does not count what the list holds: say so. When this `coverage.real` is below the header's: "2,202 real
+ * requirements mapped since the last graph build; build the graph to list them". With `coverage` null: "built
+ * before real requirements were counted; build the graph to list the N real requirements mapped now". Otherwise
+ * (only another count moved, or `real` fell): "the repository changed since this graph was built".
  */
 export interface RequirementsGraphBuild {
-  /** The build's generation in the store (1 = the first build). */
+  /** The build's generation in the store (1 = the first build; 0 = a graph persisted before the engine kept a
+   *  build record). */
   generation: number;
   /** The label the build persisted; `null` when it carried none or an older engine's `mapped_pct` label. */
   coverage: RequirementsCoverage | null;
-  /** False only when every count of the build's label equals the page's `coverage`. */
+  /** True when any count of the build's label differs from the page's `coverage` (or the label is null). False
+   *  says the counts agree, not that every statement is unchanged. */
   behind: boolean;
 }
 

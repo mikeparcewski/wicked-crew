@@ -17,10 +17,12 @@ mentioned only where a daemon release depends on them.
   built under the old placeholder-counting gate) under "3,585 real": a run had mapped 2,223 more and was stopped at
   its repeat ask, before the graph build (which refuses below the minimum anyway). The page now carries `graphBuild:
   { generation, coverage, behind }` from the engine's read: the label the listed build persisted (null when it
-  carried none or an older engine's `mapped_pct` one) and `behind`, true unless every count matches the header's.
-  A client says "N real requirements mapped since the last graph build; build the graph to list them" instead of
-  showing two numbers that cannot agree. `graphBuild` is null on an engine that does not say. Rows and header are
-  unchanged: unbuilt rules are never listed as part of the graph, and mapped work is never hidden.
+  carried none or an older engine's `mapped_pct` one) and `behind`, true unless every count matches the header's
+  (counts, which is what the header shows; not a claim that every statement is unchanged). A client says "N real
+  requirements mapped since the last graph build; build the graph to list them" instead of showing two numbers that
+  cannot agree. `graphBuild` is null when the engine does not say or sent no live label (the graph's own label is
+  never compared with its build). Rows and header are unchanged: unbuilt rules are never listed as part of the
+  graph, and mapped work is never hidden.
 - **The requirements list opens on real requirements, and Functional holds no manifest field.** A component names a
   symbol in its file (`package.json#devDependencies`), and the category was read off the whole string, so a manifest,
   config or doc entry with a symbol classed as functional; only `package-lock` entries, matched by name, did not.
