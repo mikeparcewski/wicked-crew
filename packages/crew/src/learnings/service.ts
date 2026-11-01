@@ -164,7 +164,8 @@ export function learningsOfRun(runId: string, rows: readonly ProposalRow[]): Run
 /** How many evidence items the distil seat accounted for (`checked[]`, kept or dropped with a reason). */
 export function checkedCount(raw: unknown): number {
   if (!isRecord(raw) || !Array.isArray(raw['checked'])) return 0;
-  return raw['checked'].filter((c) => isRecord(c) && typeof c['evidence'] === 'string' && typeof c['kept'] === 'boolean').length;
+  const text = (v: unknown): boolean => typeof v === 'string' && v.trim() !== '';
+  return raw['checked'].filter((c) => isRecord(c) && text(c['evidence']) && typeof c['kept'] === 'boolean' && text(c['why'])).length;
 }
 
 /**
@@ -274,7 +275,8 @@ export class RunLearningsService {
         // A distil crew stopped at a gate whose stop did not take (the engine refused it) is stopped again, filed or
         // not: crew owns that run's gate. A distil parked before crew stopped any (no `stopped` record) is left alone.
         const childStatus = child !== null ? views.get(child)?.session.status : undefined;
-        if (child !== null && isRecord(rec) && typeof rec['stopped'] === 'string' && childStatus !== undefined && !TERMINAL.has(childStatus)) {
+        const stopped = isRecord(rec) && typeof rec['stopped'] === 'string';
+        if (child !== null && stopped && childStatus !== undefined && !TERMINAL.has(childStatus)) {
           await this.deps.adapter.cancelRun(child).catch((err: unknown) => {
             this.deps.log(`[learnings] stopping distill-learnings ${child} again failed: ${err instanceof Error ? err.message : String(err)}`);
           });
@@ -285,7 +287,9 @@ export class RunLearningsService {
           continue;
         }
         this.distills.set(child, name);
-        if (childStatus === undefined || TERMINAL.has(childStatus)) await this.reconcileDistill(child, name);
+        // A stopped distil is filed from its report whatever its status, as the live stop files it whether or not the
+        // stop took (its end frame may have been sent before this daemon listened).
+        if (stopped || childStatus === undefined || TERMINAL.has(childStatus)) await this.reconcileDistill(child, name);
       }
     });
   }

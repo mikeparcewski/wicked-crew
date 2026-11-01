@@ -477,6 +477,29 @@ describe('RunLearningsService under overlap, failure and restart (xreview on cre
     expect(h.cancels).toHaveLength(2);
   });
 
+  it('recovery files a stopped distil that was not filed yet, whether its second stop takes or is refused (xreview r2 on #1253)', async () => {
+    for (const refusedAgain of [false, true]) {
+      // The stop was recorded, then filing failed (estate down) and the daemon restarted with the run still parked.
+      const h = harness({ cancelFails: refusedAgain ? 2 : 1 });
+      const svc = h.svc as unknown as { deps: { submit: (...a: unknown[]) => Promise<string | null> } };
+      const real = svc.deps.submit;
+      h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
+      await settle();
+      writeFileSync(join(h.dir, 'run-1', OUT_DIR, REPORT_FILE), JSON.stringify({ learnings: [{ kind: 'gotcha', content: 'In acme-core, the seat_login tests time out when the host is loaded; re-run before debugging.' }] }));
+      svc.deps.submit = async () => Promise.reject(new Error('estate down'));
+      h.svc.onEvent({ type: 'awaitingHuman', session: 'distill-1', gateKind: 'escalation', prompt: 'substance' } as never);
+      await settle();
+      expect(existsSync(join(h.dir, 'run-1', FILED_FILE))).toBe(false);
+      svc.deps.submit = real;
+      // No end frame reaches this daemon: the parked status is all recovery sees.
+      h.views.push({ session: { id: 'distill-1', status: 'awaiting_human', workflow_id: DISTILL_WORKFLOW, problem: 'p' }, units: [] } as unknown as SessionView);
+      await h.svc.recover();
+      expect(h.cancels).toEqual(['distill-1', 'distill-1']);
+      expect(h.submitted.filter((x) => x.agent === 'codex')).toHaveLength(1);
+      expect(JSON.parse(readFileSync(join(h.dir, 'run-1', FILED_FILE), 'utf8'))).toMatchObject({ distilled: true, filed: 1, stopped: 'stopped at escalation: substance' });
+    }
+  });
+
   it('recovery never stops a distil that was parked before crew stopped any (it stays the operator\'s)', async () => {
     const h = harness();
     h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
@@ -522,8 +545,9 @@ describe('the distil workflow and its report', () => {
   it('asks for a reviewable record: every evidence item checked, and the reply says what was kept and dropped', () => {
     const text = String(loadDistillWorkflow().phases[0]!.instructions);
     expect(text).toMatch(/one checked entry for EVERY evidence item/u);
-    expect(text).toContain('one line per evidence item, "<id>: kept|dropped: <why, in one sentence>"');
-    expect(checkedCount({ checked: [{ evidence: 'e1', kept: false, why: 'x' }, { evidence: 'e2' }, 'junk'] })).toBe(1);
+    expect(text).toContain('one line per evidence item, "<id> (<what it says, in a few words>): kept|dropped: <why, in one sentence>"');
+    expect(text).toMatch(/naming the source run by its title/u);
+    expect(checkedCount({ checked: [{ evidence: 'e1', kept: false, why: 'already proposed' }, { evidence: 'e2', kept: true }, { evidence: ' ', kept: false, why: 'x' }, { evidence: 'e3', kept: false, why: ' ' }, 'junk'] })).toBe(1);
     expect(checkedCount({ learnings: [] })).toBe(0);
   });
 
