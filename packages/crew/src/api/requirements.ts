@@ -284,7 +284,8 @@ export function categoryOfComponents(components: readonly string[]): Requirement
 function isConfigFile(f: string): boolean {
   const base = f.slice(f.lastIndexOf('/') + 1);
   if (/\.(json|ya?ml|lock|toml|ini|env|md|mdx|txt|csv)$/.test(base)) return true;
-  return base.includes('pnpm-lock') || base.includes('package-lock');
+  // a lockfile by name, never a source file named after one ("src/package-lock-parser.ts#parse")
+  return !SOURCE_FILE.test(base) && (base.includes('pnpm-lock') || base.includes('package-lock'));
 }
 
 export interface RequirementSummary {

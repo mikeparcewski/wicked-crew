@@ -630,6 +630,9 @@ describe('requirements list: what Functional holds and the order it opens in (st
     expect(categoryOf('bin/wicked-crew#main')).toBe('functional');
     expect(categoryOf('bin/wicked-crew')).toBe('functional');
     expect(categoryOf('Makefile#build')).toBe('functional');
+    expect(categoryOf('src/package-lock-parser.ts#parse')).toBe('functional'); // agy r5
+    expect(categoryOf('package-lock.json#lockfileVersion')).toBe('config-data');
+    expect(categoryOf('pnpm-lock.yaml#importers')).toBe('config-data');
     expect(categoryOf('src/billing.ts#Ledger.#secret')).toBe('functional');
     expect(categoryOf('')).toBe('functional');
     // a heading holding "/" after the one "#" could be a bare path: errs to functional
