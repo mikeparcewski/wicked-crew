@@ -6862,9 +6862,9 @@ export interface RequirementsPage {
   /**
    * (0.167.0) Rows of the whole corpus the coverage share does not count (items with `uncounted`), split stated /
    * placeholder: why the list holds more rows than the header. When this is not `null` and `graphBuild.behind` is
-   * false, the rows that are neither placeholders nor uncounted number exactly `coverage.real` (except a row from a
-   * build before the engine recorded its unit, judged from the document). `null` when the engine gives no verdicts
-   * (an older engine): no such claim. ABSENT from an older daemon.
+   * false, the rows that are neither placeholders nor uncounted number exactly `coverage.real`. `null` when the engine
+   * did not judge every row (an older engine, a build before it recorded each row's unit, a malformed verdict): those
+   * rows are read off the document, and there is no such claim. ABSENT from an older daemon.
    */
   uncounted?: { stated: number; placeholders: number } | null;
   /** (0.167.0) How many rows of the whole corpus are in each category, so a client can leave out an empty filter.

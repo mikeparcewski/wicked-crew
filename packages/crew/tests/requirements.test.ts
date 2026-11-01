@@ -978,6 +978,19 @@ describe('the list agrees with its header, or says why not (req-reconcile, api-t
     expect(p!.items[0]!.title).toBe('ChatAttachmentError');
   });
 
+  it('a partial or empty verdict map is no claim: the page says nothing about uncounted rows (codex r2)', async () => {
+    const partial = structuredClone(rows) as Record<string, Record<string, unknown>>;
+    delete partial['src']!['REQ-004']; // the confident risk note, now judged from the document: real
+    const p = await page(partial);
+    expect(p!.uncounted).toBeNull();
+    expect(p!.items.find((i) => i.title === 'refund')).toMatchObject({ placeholder: false, uncounted: null });
+    expect(p!.items.find((i) => i.title === 'Wire')!.uncounted).toBe('structural'); // the verdicts it has still label
+    const malformed = structuredClone(rows) as Record<string, Record<string, unknown>>;
+    malformed['src']!['REQ-001'] = { real: 'yes', uncounted: null };
+    expect((await page(malformed))!.uncounted).toBeNull();
+    expect((await page({}))!.uncounted).toBeNull();
+  });
+
   it('a verdict that is malformed, unknown or on an inherited key is no verdict', () => {
     expect(engineRowOf({ src: { 'REQ-001': { real: true, uncounted: 'shape' } } }, 'src', 'REQ-001')).toBeNull();
     expect(engineRowOf({ src: { 'REQ-001': { real: 'yes', uncounted: null } } }, 'src', 'REQ-001')).toBeNull();

@@ -412,6 +412,8 @@ interface IndexEntry {
   /** The engine resolves it (its verdict, else {@link isRealRequirement} on the document); the list opens on the
    *  counted ones. */
   real: boolean;
+  /** The engine gave its verdict on this row (else it was read off the document). */
+  judged: boolean;
 }
 
 /** Rows the share leaves out, split as the list marks them: with a stated rule, or a placeholder. */
@@ -555,7 +557,7 @@ async function buildIndexRead(
       // Statements are part of the haystack: searching the requirements means
       // searching the actual rule text, not just titles and ids.
       const haystack = `${reqId} ${domain} ${title} ${req.description ?? ''} ${statements.join(' ')} ${ov?.notes ?? ''}`.toLowerCase();
-      const entry: IndexEntry = { summary, haystack, source: req, real };
+      const entry: IndexEntry = { summary, haystack, source: req, real, judged: verdict !== null };
       entries.push(entry);
       byKey.set(key, entry);
     }
@@ -575,9 +577,11 @@ async function buildIndexRead(
     graphBuild: graphBuildOf(read.build, coverageOf(read.coverage ?? undefined)),
     validated: entries.filter((e) => e.summary.corroboration?.status === 'validated').length,
     unconfirmed: entries.filter((e) => e.summary.corroboration?.status === 'unconfirmed').length,
-    // Only when the engine gave verdicts: an older engine's silence is no claim that every row counts.
+    // Only when the engine judged EVERY row: an older engine's silence, or a row it gave no verdict on (a build
+    // before `code_symbol`, a malformed entry), is read off the document, so the page claims nothing about it
+    // (codex r2 on #1257: a partial map must not read as a reconciled list).
     uncounted:
-      read.rows !== undefined && read.rows !== null && typeof read.rows === 'object'
+      typeof read.rows === 'object' && read.rows !== null && entries.every((e) => e.judged)
         ? {
             stated: entries.filter((e) => e.summary.uncounted !== null && e.real).length,
             placeholders: entries.filter((e) => e.summary.uncounted !== null && !e.real).length,
@@ -640,8 +644,8 @@ export interface RequirementsPage {
    * Rows of the whole corpus the coverage share does not count (`uncounted` on the item), split stated / placeholder:
    * why the list holds more rows than the header ("441 stated rules on type shapes are not counted"). When this is
    * not `null` and the build is not `behind`, the rows that are neither placeholders nor uncounted are exactly
-   * `coverage.real` (a row from a build before the engine recorded its unit is judged from the document and is the
-   * one exception). `null` when the engine gives no verdicts (an older engine): then the list makes no such claim.
+   * `coverage.real`. `null` when the engine did not judge every row (an older engine, a build before it recorded
+   * each row's unit, a malformed verdict): those rows are read off the document, and the page makes no such claim.
    */
   uncounted: RequirementsUncountedRows | null;
   /** How many rows of the whole corpus are in each category, so a client can leave out an empty filter. */
