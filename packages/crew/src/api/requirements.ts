@@ -91,6 +91,10 @@ export interface EstateRequirementsRead {
   graph: EstateRequirementsGraph | null;
   coverage: ArtifactCoverage | null;
   build?: { generation?: unknown; coverage?: ArtifactCoverage | null } | null;
+  /** The listed requirements whose code unit the coverage share does not count, by domain then
+   * requirement id, with why (wicked-core req-reconcile 2026-11-01; decided in the same pass as
+   * `coverage`). ABSENT from an older engine, null when nothing is built. */
+  uncounted?: Record<string, Record<string, unknown> | null | undefined> | null;
 }
 
 /** The one read this module needs from the engine — `CoreAdapter.getRequirementsGraphForRepo`. */
@@ -327,6 +331,28 @@ function isConfigFile(f: string): boolean {
   return !SOURCE_FILE.test(base) && (base.includes('pnpm-lock') || base.includes('package-lock'));
 }
 
+/**
+ * Why the coverage share leaves a listed requirement out, as the engine decides it: its unit is not a
+ * behaviour (`structural`: a type shape or a signature), is outside product code (`not_product`), or is
+ * no longer in the index (`unindexed`).
+ */
+export type RequirementUncounted = 'structural' | 'not_product' | 'unindexed';
+
+const UNCOUNTED: ReadonlySet<string> = new Set<RequirementUncounted>(['structural', 'not_product', 'unindexed']);
+
+/** The engine's reason for one row, or `null` when it counts the row (or sent nothing readable for it). */
+export function uncountedOf(
+  map: EstateRequirementsRead['uncounted'],
+  domain: string,
+  reqId: string,
+): RequirementUncounted | null {
+  if (map === undefined || map === null || typeof map !== 'object') return null;
+  const reqs = Object.hasOwn(map, domain) ? map[domain] : undefined;
+  if (reqs === undefined || reqs === null || typeof reqs !== 'object') return null;
+  const why = Object.hasOwn(reqs, reqId) ? reqs[reqId] : undefined;
+  return typeof why === 'string' && UNCOUNTED.has(why) ? (why as RequirementUncounted) : null;
+}
+
 export interface RequirementSummary {
   key: string; // `${domain}::${reqId}`
   domain: string;
@@ -344,6 +370,11 @@ export interface RequirementSummary {
   /** The engine would NOT count it real ({@link isRealRequirement}): a placeholder, unconfirmed whatever its
    *  corroboration says, so a client never shows it as validated. */
   placeholder: boolean;
+  /** The coverage share does not count this row, and why ({@link RequirementUncounted}); `null` when it counts or
+   *  the engine does not say. Such a row is never one of the header's real requirements or placeholders, and it
+   *  carries no corroboration: corroboration says how well a behaviour is supported, and the engine counts no
+   *  behaviour here (a type has no callers, so "dead code" would be wrong). */
+  uncounted: RequirementUncounted | null;
 }
 
 export interface RequirementDetail extends RequirementSummary {
@@ -366,6 +397,12 @@ interface IndexEntry {
   real: boolean;
 }
 
+/** Rows the share leaves out, split as the list marks them. */
+export interface RequirementsUncountedRows {
+  real: number;
+  placeholders: number;
+}
+
 interface RepoIndex {
   entries: IndexEntry[];
   byKey: Map<string, IndexEntry>;
@@ -380,6 +417,9 @@ interface RepoIndex {
   graphBuild: RequirementsGraphBuild | null;
   validated: number;
   unconfirmed: number;
+  /** `null` when the engine does not say which rows it counts. */
+  uncounted: RequirementsUncountedRows | null;
+  categories: { functional: number; configData: number };
 }
 
 /** Keys in the overrides sidecar that no corpus row claimed — counted, never dropped silently. */
@@ -391,8 +431,6 @@ function countOrphanedOverrides(
   for (const key of Object.keys(overrides)) if (!byKey.has(key)) orphaned += 1;
   return orphaned;
 }
-
-const RISK_RE = /risk/i;
 
 // Paths come from `repoPaths` — this module used to spell the code-graph path itself, which is
 // one of the five copies FINDING-069 was made of. It takes the whole `RepoEntry` rather than a
@@ -448,6 +486,7 @@ async function buildIndexRead(
     .update(JSON.stringify(graph))
     .update(JSON.stringify(read.coverage ?? null))
     .update(JSON.stringify(read.build ?? null))
+    .update(JSON.stringify(read.uncounted ?? null))
     .digest('hex');
   const cached = cache.get(repoKey(repo));
   if (cached && cached.sourceToken === token && cached.overridesMtimeMs === ovMtime) {
@@ -461,9 +500,11 @@ async function buildIndexRead(
     for (const [reqId, req] of Object.entries(dom.requirements ?? {})) {
       const key = `${domain}::${reqId}`;
       const ov = overrides[key];
-      // Data-derived risk: any business rule whose serialized form names risk (the
-      // extraction harness's RESOLVED-or-RISK floor surfaces here at current fidelity).
-      const dataRisk = (req.business_rules ?? []).some((r) => RISK_RE.test(JSON.stringify(r)));
+      const real = isRealRequirement(req);
+      // Data-derived risk is the engine's: an accounted behaviour it does not resolve is "risk flagged", which is
+      // what a placeholder is. (It was a /risk/i match over each rule's JSON, which also flagged real rules that
+      // merely say "risk": 16 on wicked-crew, so the "No risk" filter was not the real rows.)
+      const dataRisk = !real;
       const risk = ov?.risk !== undefined ? ov.risk : dataRisk;
       const riskSource: RequirementSummary['riskSource'] =
         ov?.risk !== undefined ? 'operator' : dataRisk ? 'data' : null;
@@ -475,7 +516,7 @@ async function buildIndexRead(
         })
         .filter((st) => st !== '');
       const components = (req.legacy_components ?? []).filter((c): c is string => typeof c === 'string');
-      const real = isRealRequirement(req);
+      const uncounted = uncountedOf(read.uncounted, domain, reqId);
       const summary: RequirementSummary = {
         key,
         domain,
@@ -487,8 +528,9 @@ async function buildIndexRead(
         risk,
         riskSource,
         edited: ov !== undefined,
-        corroboration: corroborationOf(req.corroboration),
+        corroboration: uncounted === null ? corroborationOf(req.corroboration) : null,
         placeholder: !real,
+        uncounted,
       };
       // Statements are part of the haystack: searching the requirements means
       // searching the actual rule text, not just titles and ids.
@@ -513,6 +555,18 @@ async function buildIndexRead(
     graphBuild: graphBuildOf(read.build, coverageOf(read.coverage ?? undefined)),
     validated: entries.filter((e) => e.summary.corroboration?.status === 'validated').length,
     unconfirmed: entries.filter((e) => e.summary.corroboration?.status === 'unconfirmed').length,
+    // Only when the engine said which rows it counts: an older engine's silence is no claim that all count.
+    uncounted:
+      read.uncounted !== undefined && read.uncounted !== null && typeof read.uncounted === 'object'
+        ? {
+            real: entries.filter((e) => e.summary.uncounted !== null && e.real).length,
+            placeholders: entries.filter((e) => e.summary.uncounted !== null && !e.real).length,
+          }
+        : null,
+    categories: {
+      functional: entries.filter((e) => e.summary.category === 'functional').length,
+      configData: entries.filter((e) => e.summary.category === 'config-data').length,
+    },
   };
   cache.set(repoKey(repo), index);
   return { index, coverage: index.coverage };
@@ -559,8 +613,18 @@ export interface RequirementsPage {
    * this graph was built"). `null` when the engine does not say.
    */
   graphBuild: RequirementsGraphBuild | null;
-  /** How many requirements of the whole corpus are validated / unconfirmed (0/0 on an older artifact). */
+  /** How many requirements of the whole corpus are validated / unconfirmed (0/0 on an older artifact). Rows the
+   *  share does not count carry no corroboration and are in neither. */
   corroboration: { validated: number; unconfirmed: number };
+  /**
+   * Rows of the whole corpus the coverage share does not count (`uncounted` on the item), split real / placeholder:
+   * why the list holds more rows than the header ("441 stated rules on type shapes are not counted"). With the
+   * build not `behind`, the rows that are neither placeholders nor uncounted are exactly `coverage.real`. `null`
+   * when the engine does not say.
+   */
+  uncounted: RequirementsUncountedRows | null;
+  /** How many rows of the whole corpus are in each category, so a client can leave out an empty filter. */
+  categories: { functional: number; configData: number };
 }
 
 /**
@@ -625,10 +689,11 @@ export function isRealRequirement(req: { status?: string; business_rules?: unkno
   return stated.some((c) => c === null || c >= RESOLVE_THRESHOLD);
 }
 
-/** The list's order: real requirements first, then placeholders, then config and data; the graph's order within each. */
+/** The list's order: real requirements first, then placeholders, then the rows the share does not count (stated, then
+ * placeholders), then config and data; the graph's order within each. */
 function listRank(e: IndexEntry): number {
-  if (e.summary.category === 'config-data') return 2;
-  return e.real ? 0 : 1;
+  if (e.summary.category === 'config-data') return 4;
+  return (e.summary.uncounted === null ? 0 : 2) + (e.real ? 0 : 1);
 }
 
 function pageOf(index: RepoIndex, query: RequirementsQuery): RequirementsPage {
@@ -660,6 +725,8 @@ function pageOf(index: RepoIndex, query: RequirementsQuery): RequirementsPage {
     coverage: index.coverage,
     graphBuild: index.graphBuild,
     corroboration: { validated: index.validated, unconfirmed: index.unconfirmed },
+    uncounted: index.uncounted,
+    categories: index.categories,
   };
 }
 

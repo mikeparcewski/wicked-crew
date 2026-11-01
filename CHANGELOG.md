@@ -12,6 +12,16 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **The requirements list agrees with its header, or says why not (api-types 0.167.0, wicked-core req-reconcile).**
+  On the rig wicked-crew listed 3,917 non-placeholder rows under a header of 3,476 real. Every one of the 1,458 extra
+  rows (441 stated, 1,017 placeholders) sits on a TypeScript shape, which the engine stopped counting as behaviour
+  (core#1238) after an extraction page had annotated it. The engine now says which listed rows its share leaves out,
+  from the same pass as the header, and each item carries `uncounted` (`structural` | `not_product` | `unindexed`):
+  such rows sort after the counted ones, carry no corroboration (a type has no callers, so "dead code" was wrong) and
+  are counted on the page (`uncounted: { real, placeholders }`). Functional now opens on behaviour rules instead of
+  crew-api-types wire types. Data risk is the placeholder verdict, not a `/risk/i` match over rule text, which flagged
+  16 real rules that merely say "risk". The page also counts its categories (`categories`), so a client can leave out
+  the Config & data filter when it is empty.
 - **Each listed requirement says whether it is a placeholder (api-types 0.166.0).** The list already ordered real
   requirements first by the engine's rule (a validated requirement, or a business rule at or above 0.75), but a
   client could only guess from the statement's `[RISK]` prefix, which misses plain rules under the threshold: six on

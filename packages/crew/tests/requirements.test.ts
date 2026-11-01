@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  uncountedOf,
   corroborationOf,
   categoryOf,
   categoryOfComponents,
@@ -116,7 +117,8 @@ async function fixtureRepo(): Promise<string> {
           'REQ-002': {
             title: 'Refunds require approval',
             description: 'Manual approval gate for refunds over threshold',
-            status: 'active',
+            // under review at 0.5: a placeholder, so risk-flagged as the engine counts it
+            status: 'review',
             business_rules: [
               { id: 'RULE-2', statement: 'RISK: approval threshold unverified', confidence: 0.5 },
             ],
@@ -204,7 +206,7 @@ describe('requirements service', () => {
     expect(none!.total).toBe(0); // AND semantics — terms in different requirements don't match
   });
 
-  it('risk filter surfaces data-derived risk from business rules', async () => {
+  it('risk filter surfaces data-derived risk: the placeholders', async () => {
     const risky = await listRequirements(repoAt(root), { risk: 'risk', offset: 0, limit: 10 }, estateAt(root));
     expect(risky!.items.map((i) => i.reqId)).toEqual(['REQ-002']);
     expect(risky!.items[0]!.riskSource).toBe('data');
@@ -870,5 +872,104 @@ describe('each listed item says whether it is a placeholder (api-types 0.166.0)'
     expect(Object.fromEntries(page!.items.map((i) => [i.title, i.placeholder]))).toEqual({ limits: false, approved: false, rigor: true, floor: true });
     const detail = await getRequirement(repoAt(root), 'api::REQ-001', estateAt(root));
     expect(detail!.placeholder).toBe(true);
+  });
+});
+
+describe('the list agrees with its header, or says why not (req-reconcile, api-types 0.167.0)', () => {
+  // The rig (2026-11-01): 3,917 non-placeholder rows under a header of 3,476 real. Every extra row sat on a
+  // TypeScript shape the engine no longer counts (core#1238), and crew-api-types sorted first, so Functional opened
+  // on wire types marked "dead code". 16 real rules that merely say "risk" were in the Risk filter.
+  const req = (title: string, statement: string, confidence: number, status = 'review', corroboration?: object) => ({
+    title, description: '', status, business_rules: [{ id: 'RULE-1', statement, confidence }],
+    legacy_components: [`src/${title}.ts#${title}`], data_access: [], dependencies: [], validations: [], error_paths: [],
+    ...(corroboration === undefined ? {} : { corroboration }),
+  });
+  const deadCode = {
+    status: 'unconfirmed', sources: 0, call_sites: 0, tests: 0, docs: 0, extra_extractors: 0,
+    why: { code: 'dead_code', text: 'No caller, test or doc refers to it in the indexed code: dead code, or an entry point reached only from outside the repository.' },
+  };
+  const graph: EstateRequirementsGraph = {
+    metadata: {},
+    domains: {
+      // sorts first, as packages/crew-api-types does on the rig
+      'a-api-types': {
+        requirements: {
+          'REQ-001': req('ChatAttachmentError', 'Attachment refusals must use one of five codes.', 0.9, 'review', deadCode),
+          'REQ-002': req('Wire', '[RISK] Wire: empty statement (model could not state a rule)', 0, 'review', deadCode),
+        },
+      },
+      src: {
+        requirements: {
+          'REQ-001': req('pageOf', 'A result must satisfy every category, risk and domain filter.', 0.9, 'review', deadCode),
+          'REQ-002': req('floor', '[RISK] floor: empty statement (model could not state a rule)', 0),
+          'REQ-003': req('Old', 'An old rule holds.', 0.9),
+        },
+      },
+    },
+  };
+  const uncounted = { 'a-api-types': { 'REQ-001': 'structural', 'REQ-002': 'structural' }, src: { 'REQ-003': 'unindexed' } };
+  const roots: string[] = [];
+  afterEach(async () => {
+    await Promise.all(roots.splice(0).map((r) => rm(r, { recursive: true, force: true })));
+  });
+  async function page(map: unknown, query: Partial<{ risk: 'risk' | 'no-risk' }> = {}) {
+    forgetRequirementsReads();
+    const root = await mkdtemp(join(tmpdir(), 'req-reconcile-'));
+    roots.push(root);
+    await markIndexed(root);
+    const engine: RequirementsGraphReader = {
+      async getRequirementsGraphForRepo(): Promise<EstateRequirementsRead> {
+        const read: EstateRequirementsRead = { graph, coverage: null };
+        if (map !== undefined) read.uncounted = map as NonNullable<EstateRequirementsRead['uncounted']>;
+        return read;
+      },
+    };
+    return listRequirements(repoAt(root), { offset: 0, limit: 50, ...query }, engine);
+  }
+
+  it('rows the engine does not count are labelled, sort after the counted ones, and carry no "dead code"', async () => {
+    const p = await page(uncounted);
+    expect(p!.items.map((i) => [i.title, i.uncounted])).toEqual([
+      ['pageOf', null],
+      ['floor', null],
+      ['ChatAttachmentError', 'structural'],
+      ['Old', 'unindexed'],
+      ['Wire', 'structural'],
+    ]);
+    const byTitle = Object.fromEntries(p!.items.map((i) => [i.title, i]));
+    expect(byTitle['ChatAttachmentError']!.corroboration).toBeNull();
+    expect(byTitle['pageOf']!.corroboration?.why?.code).toBe('dead_code');
+    expect(p!.uncounted).toEqual({ real: 2, placeholders: 1 });
+    expect(p!.corroboration).toEqual({ validated: 0, unconfirmed: 1 });
+    // real and counted = the header's real (here: one)
+    expect(p!.items.filter((i) => !i.placeholder && i.uncounted === null).length).toBe(1);
+  });
+
+  it('an engine that does not say counts nothing as left out, and claims nothing (null)', async () => {
+    const p = await page(undefined);
+    expect(p!.uncounted).toBeNull();
+    expect(p!.items.every((i) => i.uncounted === null)).toBe(true);
+    expect(p!.items[0]!.title).toBe('ChatAttachmentError');
+  });
+
+  it('an unknown reason, or one on an inherited key, is no label', () => {
+    expect(uncountedOf({ src: { 'REQ-001': 'shape' } }, 'src', 'REQ-001')).toBeNull();
+    expect(uncountedOf({ src: { 'REQ-001': 'structural' } }, 'src', 'REQ-001')).toBe('structural');
+    expect(uncountedOf({ src: {} }, 'src', 'toString')).toBeNull();
+    expect(uncountedOf({}, '__proto__', 'REQ-001')).toBeNull();
+    expect(uncountedOf(null, 'src', 'REQ-001')).toBeNull();
+  });
+
+  it('data risk is the placeholder verdict: a real rule that says "risk" is not risk', async () => {
+    const risky = await page(uncounted, { risk: 'risk' });
+    expect(risky!.items.map((i) => i.title).sort()).toEqual(['Wire', 'floor']);
+    const calm = await page(uncounted, { risk: 'no-risk' });
+    expect(calm!.items.every((i) => !i.placeholder)).toBe(true);
+    expect(calm!.total).toBe(3);
+  });
+
+  it('the page counts its categories, so an empty filter can be left out', async () => {
+    const p = await page(uncounted);
+    expect(p!.categories).toEqual({ functional: 5, configData: 0 });
   });
 });

@@ -6808,6 +6808,12 @@ export interface RequirementSummary {
    *  above the resolve threshold, 0.75): a placeholder, unconfirmed whatever its corroboration says. ABSENT from an
    *  older daemon. */
   placeholder?: boolean;
+  /** (0.167.0) The coverage share does not count this row, and why: its unit is not a behaviour (`structural`, a
+   *  TypeScript shape or signature), is outside product code (`not_product`), or is no longer indexed (`unindexed`).
+   *  Such a row is neither a real requirement nor a placeholder of the header's, sorts after them, and carries
+   *  `corroboration: null` (a type has no callers; "dead code" would be wrong). `null` when it counts or the engine
+   *  does not say; ABSENT from an older daemon. */
+  uncounted?: 'structural' | 'not_product' | 'unindexed' | null;
 }
 
 export interface RequirementDetail extends RequirementSummary {
@@ -6849,8 +6855,19 @@ export interface RequirementsPage {
    * where the build refuses). `null` when the engine does not say; ABSENT from an older daemon.
    */
   graphBuild?: RequirementsGraphBuild | null;
-  /** (0.159.0) How many requirements of the whole corpus are validated / unconfirmed. */
+  /** (0.159.0) How many requirements of the whole corpus are validated / unconfirmed. (0.167.0) Rows the share does
+   *  not count are in neither. */
   corroboration?: { validated: number; unconfirmed: number };
+  /**
+   * (0.167.0) Rows of the whole corpus the coverage share does not count (items with `uncounted`), split as the list
+   * marks them: why the list holds more rows than the header. With `graphBuild.behind` false, the rows that are neither
+   * placeholders nor uncounted number exactly `coverage.real`. `null` when the engine does not say; ABSENT from an
+   * older daemon.
+   */
+  uncounted?: { real: number; placeholders: number } | null;
+  /** (0.167.0) How many rows of the whole corpus are in each category, so a client can leave out an empty filter.
+   *  ABSENT from an older daemon. */
+  categories?: { functional: number; configData: number };
 }
 
 /**
