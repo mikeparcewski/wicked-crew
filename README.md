@@ -200,8 +200,9 @@ orchestrator, up to three rounds, and then the run asks you; a floor check that 
 fails on the base too, asks you at once. A power run skips the run-level plan approval, though a high-risk plan, or a
 revision that turns high-risk, still asks you first. Gates the workflow itself authors still pause
 (feature's adversarial-review confirmation, migration's cutover, an install's consent), and delivery
-waits at its own deliver gate unless the launch asked for `deliverGate: "auto"`. Any other launch, or
-an engine without power mode, runs **phased**, and the launch answer says so.
+waits at its own deliver gate unless the launch asked for `deliverGate: "auto"` (refused for a
+workflow that requires QE acceptance unless the launch or the daemon's setting skips it). Any other
+launch, or an engine without power mode, runs **phased**, and the launch answer says so.
 
 Phased, one run token moves through the workflow's phases with a gate between every one — e.g. for
 `feature`:
@@ -234,7 +235,7 @@ into the checkout. `GET /api/v1/repos/:id/requirements` lists it, with `coverage
 header: its counts differ, or its rows' verdicts do not add up to them). Each item carries its
 `placeholder` flag, `uncounted` when the share does not count it (a TypeScript shape, outside product
 code, or no longer indexed), and `corroboration` (validated by independent sources, or unconfirmed
-and why); the page's `uncounted` totals say why the list holds more rows than the header. The list
+and why; `null` on an uncounted row or a graph built before the field); the page's `uncounted` totals say why the list holds more rows than the header. The list
 opens on real requirements, then placeholders, then uncounted rows, then config and data. A repository with no graph yet answers a typed 404
 (`code: "notGenerated"`) that names the workflow to run.
 
