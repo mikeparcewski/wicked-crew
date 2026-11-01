@@ -4,7 +4,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../src/core/adapter.js';
@@ -13,7 +13,8 @@ import { RunTimingIndex, recordRunLaunched } from '../src/api/run-timing-index.j
 import { AuditLog } from '../src/api/audit.js';
 import { buildWorkflowCatalog, TOP_MAX, type CatalogRun } from '../src/workflow-catalog/build.js';
 import { CATALOG_CATEGORIES, CATALOG_EXCLUDED, CATALOG_SEEDS } from '../src/workflow-catalog/catalog-data.js';
-import type { Preset, WorkflowCatalogResponse, WorkflowDef } from '../src/core/types.js';
+import { isSystemWorkflow } from '../src/core/run-identity.js';
+import type { Preset, SessionView, WorkflowCatalogResponse, WorkflowDef } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
 
 const def = (id: string, extra: Partial<WorkflowDef> = {}): WorkflowDef => ({
@@ -100,28 +101,74 @@ describe('buildWorkflowCatalog', () => {
   });
 
   it('never loses a launchable workflow: an unseeded non-system def joins more; system and excluded ones do not', () => {
-    const { defs, presets } = served([def('brand-new'), def('chat', { is_system: true }), def('distill-learnings')]);
+    const { defs, presets } = served([
+      def('brand-new'),
+      def('chat', { is_system: true }),
+      def('distill-learnings'),
+      def('constructor'),
+      def('toString'),
+    ]);
     expect(CATALOG_EXCLUDED['distill-learnings']).toBeDefined();
-    const out = buildWorkflowCatalog({ defs, presets, runs: [], actorId: 'local', projectId: null });
+    const withSaved = [...presets, { name: 'hasOwnProperty', scope: 'global', steps: [{ catalog: 'understand', id: 'u' }], created_by: 'api', updated_at: 2 } as Preset];
+    const out = buildWorkflowCatalog({ defs, presets: withSaved, runs: [], actorId: 'local', projectId: null });
     const fresh = out.entries.find((e) => e.id === 'brand-new')!;
     expect([fresh.category, fresh.title, fresh.launch]).toEqual(['more', 'T brand-new', { kind: 'run', workflow: 'brand-new' }]);
-    expect(out.entries.some((e) => e.id === 'chat' || e.id === 'distill-learnings')).toBe(false);
+    expect(out.entries.some((e) => ['chat', 'distill-learnings'].includes(e.id))).toBe(false);
+    // codex/agy r1: names inherited from Object.prototype are not "excluded".
+    expect(out.entries.filter((e) => ['constructor', 'toString', 'hasOwnProperty'].includes(e.id)).map((e) => e.id)).toEqual(['constructor', 'toString', 'hasOwnProperty']);
+    // codex r1: the document seams' own runs are machine-owned (no card, no wizard row).
+    expect(['interactive-review', 'interactive-theme'].every((n) => isSystemWorkflow(n))).toBe(true);
   });
 
-  it('lists saved presets under yours (only then is the category served); a saved row shadowing a card is not doubled', () => {
+  it('lists saved presets under yours (only then is the category served); a project row wins over a global one of its name', () => {
     const { defs, presets } = served();
     const none = buildWorkflowCatalog({ defs, presets, runs: [], actorId: 'local', projectId: null });
     expect(none.categories.map((c) => c.id)).toEqual(['create', 'resolve', 'analyze', 'test', 'more']);
     const saved = [
       ...presets,
-      { name: 'my-flow', scope: 'global', steps: [{ catalog: 'build', id: 'b' }], created_by: 'api', updated_at: 2 } as Preset,
-      { name: 'feature', scope: 'project:p', steps: [{ catalog: 'understand', id: 'u' }], created_by: 'api', updated_at: 2 } as Preset,
+      { name: 'my-flow', scope: 'global', steps: [{ catalog: 'understand', id: 'u' }], created_by: 'api', updated_at: 2 } as Preset,
+      { name: 'my-flow', scope: 'project:p', steps: [{ catalog: 'build', id: 'b' }], created_by: 'api', updated_at: 3 } as Preset,
     ];
     const out = buildWorkflowCatalog({ defs, presets: saved, runs: [], actorId: 'local', projectId: 'p' });
     expect(out.categories.map((c) => c.id)).toContain('yours');
     const mine = out.entries.filter((e) => e.category === 'yours');
     expect(mine.map((e) => [e.id, e.source, e.delivers])).toEqual([['my-flow', 'saved', 'pr']]);
-    expect(out.entries.filter((e) => e.id === 'feature')).toHaveLength(1);
+  });
+
+  it('describes what a launch runs: a saved preset shadowing a card makes the card the saved one (codex r1)', () => {
+    const { defs, presets } = served();
+    defs[defs.findIndex((d) => d.id === 'feature')] = def('feature', { required_instruments: ['qe_acceptance'] });
+    // The engine's project listing, resolved by name: the project row replaces the built-in `feature`.
+    const inProject = [
+      ...presets.filter((p) => p.name !== 'feature'),
+      { name: 'feature', scope: 'project:p', steps: [{ catalog: 'understand', id: 'u' }], created_by: 'api', updated_at: 2 } as Preset,
+    ];
+    const out = buildWorkflowCatalog({ defs, presets: inProject, runs: [], actorId: 'local', projectId: 'p' });
+    const feature = out.entries.filter((e) => e.launch.kind === 'run' && e.launch.workflow === 'feature');
+    expect(feature).toHaveLength(1);
+    expect([feature[0]!.category, feature[0]!.source, feature[0]!.requiresQe, feature[0]!.delivers, feature[0]!.status]).toEqual(['create', 'saved', false, 'report', 'available']);
+    // A seeded name the engine does not serve but the operator saved is launchable, not unavailable.
+    const onlySaved = buildWorkflowCatalog({
+      defs: defs.filter((d) => d.id !== 'docs'),
+      presets: [...presets.filter((p) => p.name !== 'docs'), { name: 'docs', scope: 'global', steps: [{ catalog: 'produce', id: 'w' }], created_by: 'api', updated_at: 2 } as Preset],
+      runs: [],
+      actorId: 'local',
+      projectId: null,
+    });
+    const docs = onlySaved.entries.find((e) => e.id === 'docs')!;
+    expect([docs.status, docs.source]).toEqual(['available', 'saved']);
+  });
+
+  it('keeps every card id unique: a run named like a studio card gets run:<name> and still launches by name', () => {
+    const { defs, presets } = served([def('presentation')]);
+    const saved = [...presets, { name: 'demo-video', scope: 'global', steps: [{ catalog: 'understand', id: 'u' }], created_by: 'api', updated_at: 2 } as Preset];
+    const out = buildWorkflowCatalog({ defs, presets: saved, runs: [run('demo-video')], actorId: 'local', projectId: null });
+    const ids = out.entries.map((e) => e.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(out.entries.find((e) => e.id === 'run:presentation')!.launch).toEqual({ kind: 'run', workflow: 'presentation' });
+    expect(out.entries.find((e) => e.id === 'run:demo-video')!.launch).toEqual({ kind: 'run', workflow: 'demo-video' });
+    expect(out.entries.find((e) => e.id === 'presentation')!.launch.kind).toBe('document');
+    expect(out.top).toEqual(['run:demo-video']);
   });
 
   it('orders entries by category, then subcategory, then catalog order', () => {
@@ -174,6 +221,15 @@ describe('buildWorkflowCatalog', () => {
 });
 
 describe('the launch principal (the usage key)', () => {
+  it('is never a system launcher, whatever its id (codex r1)', () => {
+    const idx = new RunTimingIndex();
+    recordRunLaunched(AuditLog.noop(), idx, { id: 'daemon', kind: 'system', trust: 'admin' } as never, 'run-s', {});
+    idx.hydrateFromLaunchEntries([
+      { ts: 1, action: 'run.launched', actor: { id: 'local', kind: 'system', trust: 'admin' }, runId: 'run-t' } as never,
+    ]);
+    expect([idx.principalFor('run-s'), idx.principalFor('run-t')]).toEqual([undefined, undefined]);
+  });
+
   it('is recorded live by recordRunLaunched and rehydrated from the trail', () => {
     const idx = new RunTimingIndex();
     recordRunLaunched(AuditLog.noop(), idx, { id: 'alice', kind: 'human', trust: 'admin' } as never, 'run-a', {});
@@ -219,5 +275,25 @@ describe('GET /workflows/catalog (booted daemon)', () => {
     expect(bad.statusCode).toBe(400);
     // `/workflows/:id` still answers its own route.
     expect((await app.inject({ method: 'GET', url: '/api/v1/workflows/feature' })).statusCode).toBe(200);
+    // An unknown project still lists the global presets (built-in attribution holds).
+    const scoped = (await app.inject({ method: 'GET', url: '/api/v1/workflows/catalog?projectId=nope' })).json() as WorkflowCatalogResponse;
+    expect([scoped.usage.scope, scoped.entries.find((e) => e.id === 'feature')!.source]).toEqual(['project', 'builtin']);
+  });
+
+  it("counts the principal's runs, dated from the event log when the trail has no run.ended (first read)", async () => {
+    const auditPath = join(dir, 'audit.log');
+    const t0 = 1_800_000_000_000;
+    const launched = (runId: string, id: string, kind: string): string =>
+      JSON.stringify({ ts: t0, action: 'run.launched', actor: { id, kind, trust: 'admin' }, runId, detail: {} }) + '\n';
+    writeFileSync(auditPath, launched('r-mine', 'local', 'human') + launched('r-sched', 'local', 'system'));
+    const view = (id: string): SessionView =>
+      ({ session: { id, status: 'completed', workflow_id: 'bug', problem: 'p', run_identity: { kind: 'preset', name: 'bug', user_plan: false, system: false } }, units: [] }) as unknown as SessionView;
+    await adapter.loadBuiltinCatalog(() => {});
+    (adapter as unknown as { sessionsDetail: () => Promise<SessionView[]> }).sessionsDetail = async () => [view('r-mine'), view('r-sched')];
+    (adapter as unknown as { runEvents: (id: string) => Promise<unknown[]> }).runEvents = async () => [{ type: 'sessionCompleted', ts: t0 + 12 * 60_000 }];
+    app = await createServer(adapter, { auditPath });
+    const body = (await app.inject({ method: 'GET', url: '/api/v1/workflows/catalog' })).json() as WorkflowCatalogResponse;
+    expect(body.entries.find((e) => e.id === 'bug')!.usage).toEqual({ launches: 1, lastUsedAt: new Date(t0).toISOString(), medianMinutes: 12 });
+    expect(body.top).toEqual(['bug']);
   });
 });

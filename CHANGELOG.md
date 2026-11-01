@@ -24,6 +24,9 @@ mentioned only where a daemon release depends on them.
   name for what was Vibe) and Studio phase plugin are listed as coming soon. The engine's new `docs`,
   `validate-docs`, `test-plan` and `test-analysis` workflows (wicked-core) fill Documentation, Validate
   documentation, Test planning and Test analysis. `health.capabilities.workflowCatalog` says the route is served.
+  A saved preset that shares a card's name is described as what it is (it is what a launch of that name runs), a
+  run card named like a studio card is `run:<name>` so ids stay unique, and the document review and theme-learning
+  seams (`interactive-review`, `interactive-theme`) are now system workflows, so they are no longer offered by hand.
 
 ### Fixed
 

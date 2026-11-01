@@ -6900,9 +6900,14 @@ export function registerRoutes(
     try {
       presets = await adapter.listPresets(projectId ?? undefined);
     } catch {
-      // An engine without presets (or an unknown project) lists the served defs only.
+      // An unknown project: the global presets (built-in attribution and saved ones still hold, agy r1).
+      // An engine without presets lists the served defs only.
+      if (projectId !== null) presets = await adapter.listPresets().catch(() => []);
     }
     const views = await adapter.sessionsDetail();
+    // codex r1: date terminal runs that have no `run.ended` entry from their event log, as GET /runs
+    // does, so the median does not depend on which read came first.
+    await backfillEndedAt(views);
     const runs: CatalogRun[] = views.map((view) => ({
       id: view.session.id,
       workflow: runIdentityOf(view).name,

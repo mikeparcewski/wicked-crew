@@ -80,15 +80,31 @@ const GENERIC_INPUTS: WorkflowCatalogInput[] = [
 ];
 
 const requiresQe = (def: WorkflowDef | undefined): boolean => (def?.required_instruments ?? []).includes('qe_acceptance');
+const presetRequiresQe = (p: Preset): boolean =>
+  Array.isArray(p['required_instruments']) && (p['required_instruments'] as unknown[]).includes('qe_acceptance');
+const presetDelivers = (p: Preset): WorkflowCatalogEntry['delivers'] => (p.steps.some((s) => s.catalog === 'build') ? 'pr' : 'report');
+const savedSummary = (p: Preset): string => `Your saved steps: ${p.steps.map((s) => s.id || s.catalog).join(', ')}.`;
+const isExcluded = (name: string): boolean => Object.hasOwn(CATALOG_EXCLUDED, name);
 
 export function buildWorkflowCatalog(input: CatalogInputs): WorkflowCatalogResponse {
   const defs = new Map(input.defs.map((d) => [d.id, d]));
   const builtinNames = new Set(input.presets.filter((p) => p.created_by === 'builtin').map((p) => p.name));
+  // The operator's saved presets by name, as a launch resolves them: a project row wins over a global one.
+  const savedByName = new Map<string, Preset>();
+  for (const p of input.presets) {
+    if (p.created_by === 'builtin' || p.system === true) continue;
+    const held = savedByName.get(p.name);
+    if (held === undefined || (held.scope === 'global' && p.scope !== 'global')) savedByName.set(p.name, p);
+  }
   const mine = input.runs.filter(
     (r) => r.principal === input.actorId && r.retryOf === undefined && (input.projectId === null || r.projectId === input.projectId),
   );
   const entries: WorkflowCatalogEntry[] = [];
+  /** Workflow names a card already launches. */
   const claimed = new Set<string>();
+  /** Card ids in use: a run card whose name a studio card holds is `run:<name>` (ids stay unique). */
+  const ids = new Set<string>(CATALOG_SEEDS.filter((s) => s.launch.kind !== 'run').map((s) => s.id));
+  const runCardId = (name: string): string => (ids.has(name) ? `run:${name}` : name);
 
   for (const seed of CATALOG_SEEDS) {
     const { title, summary, useWhen, status, statusNote, ...rest } = seed;
@@ -96,7 +112,26 @@ export function buildWorkflowCatalog(input: CatalogInputs): WorkflowCatalogRespo
     if (seed.launch.kind === 'run') {
       const name = seed.launch.workflow;
       claimed.add(name);
+      ids.add(seed.id);
       const def = defs.get(name);
+      // A saved preset of this name is what a launch runs (codex r1): describe IT, not the shadowed def.
+      const saved = savedByName.get(name);
+      if (saved !== undefined) {
+        entries.push({
+          ...rest,
+          title: saved.title ?? def?.title ?? name,
+          summary: saved.summary ?? savedSummary(saved),
+          outcome: 'What your saved steps produce.',
+          useWhen: saved.use_when ?? [],
+          status: 'available',
+          statusNote: null,
+          requiresQe: presetRequiresQe(saved),
+          delivers: presetDelivers(saved),
+          source: 'saved',
+          usage: usageOf(key, mine),
+        });
+        continue;
+      }
       entries.push({
         ...rest,
         title: def?.title ?? name,
@@ -124,12 +159,15 @@ export function buildWorkflowCatalog(input: CatalogInputs): WorkflowCatalogRespo
     });
   }
 
-  // Never lose a launchable workflow: a served non-system def nobody seeded joins `more`.
+  // Never lose a launchable workflow: a served non-system def nobody seeded joins `more`, unless a saved
+  // preset of its name shadows it (that one joins `yours` below, as what a launch runs).
   for (const def of input.defs) {
-    if (def.is_system === true || claimed.has(def.id) || def.id in CATALOG_EXCLUDED) continue;
+    if (def.is_system === true || claimed.has(def.id) || isExcluded(def.id) || savedByName.has(def.id)) continue;
     claimed.add(def.id);
+    const id = runCardId(def.id);
+    ids.add(id);
     entries.push({
-      id: def.id,
+      id,
       category: 'more',
       subcategory: null,
       title: def.title ?? def.id,
@@ -152,18 +190,20 @@ export function buildWorkflowCatalog(input: CatalogInputs): WorkflowCatalogRespo
     });
   }
 
-  // The operator's saved presets (a project row shadowing a listed name launches under that name's card).
-  const saved = input.presets
-    .filter((p) => p.created_by !== 'builtin' && p.system !== true && !claimed.has(p.name) && !(p.name in CATALOG_EXCLUDED))
+  // The operator's saved presets that no card launches yet.
+  const saved = [...savedByName.values()]
+    .filter((p) => !claimed.has(p.name) && !isExcluded(p.name))
     .sort((a, b) => a.name.localeCompare(b.name));
   for (const p of saved) {
     claimed.add(p.name);
+    const id = runCardId(p.name);
+    ids.add(id);
     entries.push({
-      id: p.name,
+      id,
       category: 'yours',
       subcategory: null,
       title: p.title ?? p.name,
-      summary: p.summary ?? `Your saved steps: ${p.steps.map((s) => s.id || s.catalog).join(', ')}.`,
+      summary: p.summary ?? savedSummary(p),
       outcome: 'What your saved steps produce.',
       useWhen: p.use_when ?? [],
       needs: [],
@@ -175,8 +215,8 @@ export function buildWorkflowCatalog(input: CatalogInputs): WorkflowCatalogRespo
       status: 'available',
       statusNote: null,
       launch: { kind: 'run', workflow: p.name },
-      requiresQe: Array.isArray(p['required_instruments']) && (p['required_instruments'] as unknown[]).includes('qe_acceptance'),
-      delivers: p.steps.some((s) => s.catalog === 'build') ? 'pr' : 'report',
+      requiresQe: presetRequiresQe(p),
+      delivers: presetDelivers(p),
       source: 'saved',
       usage: usageOf(p.name, mine),
     });
