@@ -612,20 +612,20 @@ describe('requirements list: what Functional holds and the order it opens in (st
     expect(categoryOf('src/cache.json#v2/main.ts')).toBe('functional');
     expect(categoryOf('src/a.json#b.ts')).toBe('functional');
     expect(categoryOf('lib/Parser.cs')).toBe('functional');
-    // codex r3: a bare path past the "#" with no source extension, or an unlisted one
-    expect(categoryOf('src/cache.json#v2/Makefile')).toBe('functional');
-    expect(categoryOf('src/cache.json#v2/bin/crew')).toBe('functional');
-    expect(categoryOf('src/cache.json#v2/schema.sql')).toBe('functional');
+    // codex r3/r4: in the engine's form (file#name) the true file is always one of the readings, so a "#"
+    // directory after a config-looking prefix stays code whatever the file
+    expect(categoryOf('src/cache.json#v2/Makefile#all')).toBe('functional');
+    expect(categoryOf('src/cache.json#v2/bin/crew#main')).toBe('functional');
+    expect(categoryOf('src/cache.json#v2/my app/Makefile#all')).toBe('functional');
+    expect(categoryOf('src/cache.json#v2/schema.sql#users')).toBe('functional');
+    // a bare path ending in a source extension is code too
     expect(categoryOf('src/cache.json#v2/App.vue')).toBe('functional');
-    // codex r4: a bare path with spaces, and bare filenames whose extension is a source one
-    expect(categoryOf('src/cache.json#v2/my app/Makefile')).toBe('functional');
     expect(categoryOf('src/cache.json#v2/My Component.vue')).toBe('functional');
     expect(categoryOf('src/widget.json#v2.vue')).toBe('functional');
     expect(categoryOf('src/schema.json#v2.sql')).toBe('functional');
     // the engine's own form always carries the name, and the true file is then one of the readings
     expect(categoryOf('bin/tool.json#v2#main')).toBe('functional');
     expect(categoryOf('src/widget.json#v2.vue#Widget')).toBe('functional');
-    expect(categoryOf('config/c#/app.json')).toBe('functional'); // errs to functional
     expect(categoryOf('config/app.yaml#server.port')).toBe('config-data');
     expect(categoryOf('bin/wicked-crew#main')).toBe('functional');
     expect(categoryOf('bin/wicked-crew')).toBe('functional');
@@ -635,8 +635,9 @@ describe('requirements list: what Functional holds and the order it opens in (st
     expect(categoryOf('pnpm-lock.yaml#importers')).toBe('config-data');
     expect(categoryOf('src/billing.ts#Ledger.#secret')).toBe('functional');
     expect(categoryOf('')).toBe('functional');
-    // a heading holding "/" after the one "#" could be a bare path: errs to functional
-    expect(categoryOf('docs/guide.md#Install / setup')).toBe('functional');
+    // a name may hold "/": a scoped package, a heading (Copilot on #1254)
+    expect(categoryOf('packages/crew/package.json#@types/node')).toBe('config-data');
+    expect(categoryOf('docs/guide.md#Install / setup')).toBe('config-data');
     expect(categoryOf('docs/guide.md#Install')).toBe('config-data');
     expect(categoryOf('config/c#/app.json#port')).toBe('functional'); // a reading as "config/c": errs to functional
     expect(categoryOf('README.md#C# support')).toBe('functional'); // ambiguous: errs to functional, never hides code
@@ -689,8 +690,8 @@ describe('requirements list: what Functional holds and the order it opens in (st
     expect(categoryOfComponents(['config/app.yaml#port', 'src/server.ts#start'])).toBe('functional');
     expect(categoryOfComponents(['config/app.yaml#port', 'package.json#engines'])).toBe('config-data');
     expect(categoryOfComponents([])).toBe('functional');
-    expect(categoryOfComponents(['src/cache.json#v2/Makefile'])).toBe('functional');
-    expect(categoryOfComponents(['src/cache.json#v2/my app/Makefile'])).toBe('functional');
+    expect(categoryOfComponents(['src/cache.json#v2/Makefile#all'])).toBe('functional');
+    expect(categoryOfComponents(['package.json#@types/node', 'package.json#engines'])).toBe('config-data');
     forgetRequirementsReads();
     const root = await mkdtemp(join(tmpdir(), 'req-mixed-'));
     const mixed = { ...req('port', 'The server listens on the configured port.', 'config/app.yaml#port'),

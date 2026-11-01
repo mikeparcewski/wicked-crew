@@ -261,12 +261,10 @@ export function categoryOf(file: string): RequirementCategory {
   if (SOURCE_FILE.test(f)) return 'functional';
   const parts = f.split('#');
   const readings = parts.length === 1 ? [f] : parts.slice(1).map((_, i) => parts.slice(0, i + 1).join('#'));
-  // …and one whose last "#" is followed by a path ("src/cache.json#v2/Makefile", "#v2/my app/Makefile") may
-  // be a bare path whole: that reading counts too (a heading holding "/" then errs to functional).
-  // Residual: the engine always writes `file#name` (wicked-core domain_model `node_ref`), so a bare path is
-  // an older document's; one whose FILENAME holds "#" after a config extension ("widget.json#v2.vue") reads
-  // exactly like "package.json#devDependencies" and classes as config unless its extension is a source one.
-  if (parts.length > 1 && parts[parts.length - 1]!.includes('/')) readings.push(f);
+  // The whole string is no reading: the engine always writes `file#name` (wicked-core domain_model
+  // `node_ref`, persisted as is), so the true file is one of the prefixes, and a name may hold "/" (a scoped
+  // package "package.json#@types/node", Copilot on #1254). Residual: a bare path holding "#" after a config
+  // extension, which no engine writes, classes as config unless it ends in a source extension.
   return readings.every(isConfigFile) ? 'config-data' : 'functional';
 }
 
