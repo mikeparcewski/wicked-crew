@@ -840,3 +840,35 @@ describe('requirements list: what Functional holds and the order it opens in (st
     expect(isPlaceholderStatement('Tax is applied per jurisdiction.')).toBe(false);
   });
 });
+
+describe('each listed item says whether it is a placeholder (api-types 0.166.0)', () => {
+  it('a plain rule under 0.75 is a placeholder on the wire; a validated one or one at 0.75 is not', async () => {
+    forgetRequirementsReads();
+    const root = await mkdtemp(join(tmpdir(), 'req-ph-'));
+    const req = (title: string, statement: string, confidence: number, status: string) => ({
+      title, description: '', status, business_rules: [{ id: 'RULE-1', statement, confidence }],
+      legacy_components: [`src/${title}.ts#${title}`], data_access: [], dependencies: [], validations: [], error_paths: [],
+    });
+    const graph = {
+      metadata: { schema_version: '1.0.0' },
+      domains: {
+        api: {
+          description: 'API',
+          requirements: {
+            // the rig's six: a plain statement at 0.7 under review, no "[RISK]" prefix
+            'REQ-001': req('rigor', 'Raising rigor is refused unless the actor is a human operator.', 0.7, 'review'),
+            'REQ-002': req('limits', 'Validation issues are summarized as at most three named issues.', 0.75, 'review'),
+            'REQ-003': req('approved', 'An approved rule stands.', 0.5, 'active'),
+            'REQ-004': req('floor', '[RISK] floor: empty statement (model could not state a rule)', 0, 'review'),
+          },
+        },
+      },
+    };
+    await markIndexed(root);
+    await writeFile(join(root, ESTATE_STANDIN), JSON.stringify(graph), 'utf8');
+    const page = await listRequirements(repoAt(root), { offset: 0, limit: 50 }, estateAt(root));
+    expect(Object.fromEntries(page!.items.map((i) => [i.title, i.placeholder]))).toEqual({ limits: false, approved: false, rigor: true, floor: true });
+    const detail = await getRequirement(repoAt(root), 'api::REQ-001', estateAt(root));
+    expect(detail!.placeholder).toBe(true);
+  });
+});

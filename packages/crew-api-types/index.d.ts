@@ -6804,6 +6804,10 @@ export interface RequirementSummary {
   /** (0.159.0) Validated or unconfirmed (with why). `null` on a graph built before the field;
    *  ABSENT from an older daemon. */
   corroboration?: RequirementCorroboration | null;
+  /** (0.166.0) The engine would not count it a real requirement (a validated requirement, or a business rule at or
+   *  above the resolve threshold, 0.75): a placeholder, unconfirmed whatever its corroboration says. ABSENT from an
+   *  older daemon. */
+  placeholder?: boolean;
 }
 
 export interface RequirementDetail extends RequirementSummary {

@@ -12,6 +12,10 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **Each listed requirement says whether it is a placeholder (api-types 0.166.0).** The list already ordered real
+  requirements first by the engine's rule (a validated requirement, or a business rule at or above 0.75), but a
+  client could only guess from the statement's `[RISK]` prefix, which misses plain rules under the threshold: six on
+  wicked-crew showed no placeholder mark. `RequirementSummary.placeholder` (and the detail's) carries the verdict.
 - **The requirements page says which graph build it lists** (api-types 0.165.0, wicked-core 2026-11-01). The list is
   the last graph build; its header counts the store now. On the rig wicked-crew listed the 04:59 build (1,383 real,
   built under the old placeholder-counting gate) under "3,585 real": a run had mapped 2,223 more and was stopped at
