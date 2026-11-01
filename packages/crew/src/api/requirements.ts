@@ -250,7 +250,9 @@ export function coverageOf(raw: ArtifactCoverage | undefined): RequirementsCover
  * those assets but are NOT product behavior — they class as config-data so the
  * default view can focus on the product. */
 export function categoryOf(file: string): RequirementCategory {
-  const f = file.toLowerCase();
+  // A component names a symbol in its file ("package.json#devDependencies"): classify by the FILE, or every
+  // manifest field reads as product code (studio 2026-11-01: Functional opened on package.json's fields).
+  const f = file.toLowerCase().split('#')[0]!;
   const base = f.slice(f.lastIndexOf('/') + 1);
   if (/\.(json|ya?ml|lock|toml|ini|env|md|mdx|txt|csv)$/.test(base)) return 'config-data';
   if (base.includes('pnpm-lock') || base.includes('package-lock')) return 'config-data';
@@ -508,6 +510,20 @@ export async function listRequirementsRead(
   return { page: pageOf(index, query), coverage };
 }
 
+/**
+ * A listed requirement that is a placeholder, not a real requirement: its statement is the engine's risk floor
+ * ("[RISK] <title>: empty statement (model could not state a rule)", or a statement below the confidence threshold).
+ */
+export function isPlaceholderStatement(statement: string): boolean {
+  return /^\[RISK\]/u.test(statement.trim());
+}
+
+/** The list's order: real requirements first, then placeholders, then config and data; the graph's order within each. */
+function listRank(s: RequirementSummary): number {
+  if (s.category === 'config-data') return 2;
+  return isPlaceholderStatement(s.statement) ? 1 : 0;
+}
+
 function pageOf(index: RepoIndex, query: RequirementsQuery): RequirementsPage {
   const terms = (query.q ?? '')
     .toLowerCase()
@@ -523,6 +539,8 @@ function pageOf(index: RepoIndex, query: RequirementsQuery): RequirementsPage {
     if (terms.length > 0 && !terms.every((t) => e.haystack.includes(t))) continue;
     matched.push(e.summary);
   }
+  // Stable: Array.prototype.sort keeps the graph's order within a rank.
+  matched.sort((a, b) => listRank(a) - listRank(b));
   return {
     total: matched.length,
     corpus: index.total,

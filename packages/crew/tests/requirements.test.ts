@@ -10,7 +10,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   corroborationOf,
+  categoryOf,
   coverageOf,
+  isPlaceholderStatement,
   listRequirements,
   getRequirement,
   patchRequirement,
@@ -550,5 +552,72 @@ describe('requirements service — one source, one SQLite library (crew#548)', (
     }
     await walk(srcRoot);
     expect(offenders, 'a second SQLite library in the daemon (F-E2E-021 class)').toEqual([]);
+  });
+});
+
+describe('requirements list: what Functional holds and the order it opens in (studio 2026-11-01)', () => {
+  const req = (title: string, statement: string, component: string) => ({
+    title, description: '', status: statement.startsWith('[RISK]') ? 'review' : 'active',
+    business_rules: [{ id: 'RULE-1', statement, confidence: statement.startsWith('[RISK]') ? 0 : 0.9 }],
+    legacy_components: [component], data_access: [], dependencies: [], validations: [], error_paths: [],
+  });
+  async function repoWith(): Promise<string> {
+    forgetRequirementsReads();
+    const root = await mkdtemp(join(tmpdir(), 'req-order-'));
+    const graph = {
+      metadata: { schema_version: '1.0.0' },
+      domains: {
+        '(root)': {
+          description: '(root)',
+          requirements: {
+            'REQ-001': req('devDependencies', '[RISK] devDependencies: empty statement (model could not state a rule)', 'package.json#devDependencies'),
+            'REQ-002': req('engines', 'The workspace requires Node.js 22.12.0 or newer.', 'package.json#engines'),
+            'REQ-003': req('lockfileVersion', '[RISK] lockfileVersion: empty statement (model could not state a rule)', 'package-lock.json#lockfileVersion'),
+          },
+        },
+        billing: {
+          description: 'Billing',
+          requirements: {
+            'REQ-001': req('charge', '[RISK] charge: empty statement (model could not state a rule)', 'src/billing.ts#charge'),
+            'REQ-002': req('refund', 'A refund over the limit waits for approval.', 'src/billing.ts#refund'),
+            'REQ-003': req('tax', 'Tax is applied per jurisdiction.', 'src/tax.ts'),
+          },
+        },
+      },
+    };
+    await markIndexed(root);
+    await writeFile(join(root, ESTATE_STANDIN), JSON.stringify(graph), 'utf8');
+    return root;
+  }
+
+  it('classifies a component by its file, not its symbol', () => {
+    expect(categoryOf('package.json#devDependencies')).toBe('config-data');
+    expect(categoryOf('config/app.yaml#port')).toBe('config-data');
+    expect(categoryOf('src/billing.ts#refund')).toBe('functional');
+    expect(categoryOf('src/billing.ts')).toBe('functional');
+  });
+
+  it('Functional holds no manifest field, and opens on real requirements, then placeholders', async () => {
+    const root = await repoWith();
+    const page = await listRequirements(repoAt(root), { category: 'functional', offset: 0, limit: 50 }, estateAt(root));
+    expect(page!.items.map((i) => i.title)).toEqual(['refund', 'tax', 'charge']);
+  });
+
+  it('Config & data holds the manifest fields; All opens real, then placeholders, then config', async () => {
+    const root = await repoWith();
+    const config = await listRequirements(repoAt(root), { category: 'config-data', offset: 0, limit: 50 }, estateAt(root));
+    expect(config!.items.map((i) => i.title)).toEqual(['devDependencies', 'engines', 'lockfileVersion']);
+    const all = await listRequirements(repoAt(root), { offset: 0, limit: 50 }, estateAt(root));
+    expect(all!.items.map((i) => i.title)).toEqual(['refund', 'tax', 'charge', 'devDependencies', 'engines', 'lockfileVersion']);
+    // the order holds across pages
+    const p2 = await listRequirements(repoAt(root), { offset: 2, limit: 2 }, estateAt(root));
+    expect(p2!.items.map((i) => i.title)).toEqual(['charge', 'devDependencies']);
+  });
+
+  it('a placeholder is a statement on the risk floor', () => {
+    expect(isPlaceholderStatement('[RISK] x: empty statement (model could not state a rule)')).toBe(true);
+    expect(isPlaceholderStatement('  [RISK] x: below confidence threshold — y')).toBe(true);
+    expect(isPlaceholderStatement('RISK: approval threshold unverified')).toBe(false);
+    expect(isPlaceholderStatement('Tax is applied per jurisdiction.')).toBe(false);
   });
 });
