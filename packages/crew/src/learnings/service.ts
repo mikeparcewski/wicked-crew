@@ -8,6 +8,11 @@
  *    checks) goes to ONE cheap seat that did not build the run: a `distill-learnings` run, one seat,
  *    one turn, no repository. Crew files what it writes. When no such seat can run (none signed in,
  *    the launch refused, it wrote nothing usable), the evidence is filed raw, trimmed and capped.
+ *  - The distil run is never a person's to answer (wicked-crew#1251 follow-up: a codex distil that
+ *    rightly found nothing replied in under 200 characters, failed the engine's substance floor and
+ *    sat in the operator's queue as "Waiting on you"). Its outcome is its report file, read here, so
+ *    whatever gate it stops at (a short reply, a crashed seat), crew stops the run and files from
+ *    the report: an empty one is recorded as "none found", a missing one files the evidence raw.
  *
  * Everything filed is a PROPOSAL of kind `memory` in estate's queue, attributed to the SOURCE run
  * (`provenance.run_id`), faceted by repo, project and seat. Nothing is written without a person's
@@ -57,6 +62,8 @@ export const NO_LEARNINGS_WORKFLOWS: ReadonlySet<string> = new Set([
 const TERMINAL: ReadonlySet<string> = new Set(['completed', 'failed', 'cancelled']);
 const CHECKPOINT_EVENTS: ReadonlySet<string> = new Set(['powerCheckpointReached', 'unitDone', 'gateDecided']);
 const END_EVENTS: ReadonlySet<string> = new Set(['sessionCompleted', 'sessionFailed', 'runCancelled']);
+/** A run stopped at a gate for a person. On a distil run, crew answers it by stopping the run. */
+const PARKED_EVENT = 'awaitingHuman';
 
 export type RunLearningsMode = 'off' | 'extract' | 'distill';
 
@@ -114,6 +121,8 @@ export interface RunLearningsDeps {
     runEvents(runId: string): Promise<LooseEvent[] | null>;
     seatsForWorkflow(workflowId: string): Promise<unknown[]>;
     launchRun(input: LaunchRunInput): Promise<string>;
+    /** Stop a run (a distil run that parked at a gate: its outcome is read from its report, never asked of a person). */
+    cancelRun(runId: string): Promise<unknown>;
   };
   /** File one proposal attributed to `runId` (its provenance), as `agent`. Returns the proposal id. */
   submit(runId: string, agent: string, args: SubmitArgs): Promise<string | null>;
@@ -150,6 +159,12 @@ export function learningsOfRun(runId: string, rows: readonly ProposalRow[]): Run
       agent: typeof r.provenance['run_agent'] === 'string' ? r.provenance['run_agent'] : null,
       createdAt: typeof r.created_at === 'number' ? r.created_at : null,
     }));
+}
+
+/** How many evidence items the distil seat accounted for (`checked[]`, kept or dropped with a reason). */
+export function checkedCount(raw: unknown): number {
+  if (!isRecord(raw) || !Array.isArray(raw['checked'])) return 0;
+  return raw['checked'].filter((c) => isRecord(c) && typeof c['evidence'] === 'string' && typeof c['kept'] === 'boolean').length;
 }
 
 /**
@@ -218,6 +233,10 @@ export class RunLearningsService {
     if (typeof session !== 'string' || session === '') return;
     if (END_EVENTS.has(event.type)) {
       void this.enqueue(`end:${session}`, () => this.onEnd(session));
+    } else if (event.type === PARKED_EVENT) {
+      this.loadDistills();
+      const source = this.distills.get(session);
+      if (source !== undefined) void this.enqueue(`parked:${session}`, () => this.stopParkedDistill(session, source, event as Record<string, unknown>));
     } else if (CHECKPOINT_EVENTS.has(event.type)) {
       void this.enqueue(`checkpoint:${session}`, () => this.sweepOnce(session, 'checkpoint'));
     }
@@ -338,7 +357,7 @@ export class RunLearningsService {
   /** No distil seat: the evidence as it is, trimmed and capped, for a person to edit or reject. */
   /** `failedBefore`: submits of this end that already failed. The run is marked filed only when none did, so a
    *  failed submit is retried on the next recovery (the dedupe keeps what landed from landing twice). */
-  private async fileRaw(view: SessionView, material: readonly LearningCandidate[], failedBefore = 0): Promise<void> {
+  private async fileRaw(view: SessionView, material: readonly LearningCandidate[], failedBefore = 0, note: Record<string, unknown> = {}): Promise<void> {
     const ordered = material
       .filter((c) => c.content.length >= MIN_LEARNING_CHARS)
       .sort((a, b) => (FALLBACK_ORDER[a.source] ?? 9) - (FALLBACK_ORDER[b.source] ?? 9))
@@ -349,7 +368,7 @@ export class RunLearningsService {
       if ((await this.file(view, CREW_AGENT, c.kind, c.content, c.cli)) !== null) filed += 1;
       else failed += 1;
     }
-    if (failed === 0) this.markFiled(view.session.id, { distilled: false, filed });
+    if (failed === 0) this.markFiled(view.session.id, { distilled: false, filed, ...note });
     else this.deps.log(`[learnings] ${view.session.id}: ${failed} learning(s) could not be proposed; retried at the next recovery`);
   }
 
@@ -475,6 +494,33 @@ export class RunLearningsService {
     }
   }
 
+  /**
+   * A distil run stopped at a gate. It is never a person's to answer: crew stops it and files from its report (the
+   * seat's judgment, even when it is "none found"), or files the evidence raw when the seat wrote nothing usable.
+   * Only a live frame does this; a distil already parked when the daemon starts is left as it is.
+   */
+  private async stopParkedDistill(distillRunId: string, sourceRunId: string, event: Record<string, unknown>): Promise<void> {
+    const dir = this.dirOf(sourceRunId);
+    if (existsSync(join(dir, FILED_FILE))) return;
+    const prompt = typeof event['prompt'] === 'string' ? event['prompt'].replace(/\s+/gu, ' ').trim().slice(0, 300) : '';
+    const gate = typeof event['gateKind'] === 'string' ? event['gateKind'] : 'a gate';
+    const stopped = `stopped at ${gate}${prompt !== '' ? `: ${prompt}` : ''}`;
+    this.deps.log(`[learnings] distill-learnings ${distillRunId} for ${sourceRunId} ${stopped}; crew stops it and files from its report`);
+    try {
+      const rec = this.readJson(join(dir, DISTILL_FILE));
+      if (isRecord(rec)) writeFileSync(join(dir, DISTILL_FILE), JSON.stringify({ ...rec, stopped }), 'utf8');
+    } catch (err) {
+      this.deps.log(`[learnings] could not record why ${distillRunId} stopped: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    try {
+      await this.deps.adapter.cancelRun(distillRunId);
+    } catch (err) {
+      // Filed below either way: a run crew could not stop is still filed, and its end frame then finds it filed.
+      this.deps.log(`[learnings] stopping distill-learnings ${distillRunId} failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    await this.reconcileDistill(distillRunId, sourceRunId);
+  }
+
   /** A distil run ended: file what it wrote under the source run, or the raw evidence when it wrote nothing usable. */
   async reconcileDistill(distillRunId: string, sourceRunId: string): Promise<void> {
     const dir = this.dirOf(sourceRunId);
@@ -484,12 +530,14 @@ export class RunLearningsService {
       if (view === null) return;
       const rec = this.readJson(join(dir, DISTILL_FILE));
       const seat = isRecord(rec) && typeof rec['seat'] === 'string' ? rec['seat'] : CREW_AGENT;
-      const report = parseDistillReport(this.readJson(join(dir, OUT_DIR, REPORT_FILE)));
+      const raw = this.readJson(join(dir, OUT_DIR, REPORT_FILE));
+      const report = parseDistillReport(raw);
+      const stopped = isRecord(rec) && typeof rec['stopped'] === 'string' ? { stopped: rec['stopped'] } : {};
       if (report === null) {
         this.deps.log(`[learnings] distill-learnings ${distillRunId} wrote no usable report for ${sourceRunId}; filing the evidence as it is`);
         const events = (await this.deps.adapter.runEvents(sourceRunId)) ?? [];
         const known = await this.knownTexts();
-        await this.fileRaw(view, extractLearnings(view, events).filter((c) => c.form === 'material' && !known.has(normalizeLearning(c.content))));
+        await this.fileRaw(view, extractLearnings(view, events).filter((c) => c.form === 'material' && !known.has(normalizeLearning(c.content))), 0, stopped);
         return;
       }
       const known = await this.knownTexts();
@@ -504,7 +552,8 @@ export class RunLearningsService {
         filed += 1;
         known.add(normalizeLearning(l.content));
       }
-      if (failed === 0) this.markFiled(sourceRunId, { distilled: true, distillRunId, seat, filed });
+      // "None found" is a recorded outcome, with how many evidence items the seat said it checked.
+      if (failed === 0) this.markFiled(sourceRunId, { distilled: true, distillRunId, seat, filed, found: report.length, noneFound: report.length === 0, checked: checkedCount(raw), ...stopped });
       else this.deps.log(`[learnings] ${sourceRunId}: ${failed} distilled learning(s) could not be proposed; retried at the next recovery`);
     } catch (err) {
       this.deps.log(`[learnings] reconciling distill-learnings ${distillRunId} failed: ${err instanceof Error ? err.message : String(err)}`);

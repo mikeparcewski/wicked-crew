@@ -19,6 +19,7 @@ import {
   OUT_DIR,
   REPORT_FILE,
   RunLearningsService,
+  checkedCount,
   loadDistillWorkflow,
   parseDistillReport,
   runLearningsMode,
@@ -146,12 +147,13 @@ describe('extractLearnings: what a run\'s record says it learned', () => {
   });
 });
 
-function harness(opts: { seats?: unknown[]; mode?: 'distill' | 'extract'; proposals?: ProposalRow[]; memories?: string[]; launchFails?: boolean; view?: SessionView } = {}) {
+function harness(opts: { seats?: unknown[]; mode?: 'distill' | 'extract'; proposals?: ProposalRow[]; memories?: string[]; launchFails?: boolean; cancelFails?: boolean; view?: SessionView } = {}) {
   const dir = scratch();
   const view = opts.view ?? runView();
   const submitted: Array<{ runId: string; agent: string; args: SubmitArgs }> = [];
   const queue: ProposalRow[] = [...(opts.proposals ?? [])];
   const launches: LaunchRunInput[] = [];
+  const cancels: string[] = [];
   let n = 0;
   const views: SessionView[] = [view];
   const svc = new RunLearningsService({
@@ -163,6 +165,11 @@ function harness(opts: { seats?: unknown[]; mode?: 'distill' | 'extract'; propos
         if (opts.launchFails) throw new Error('no capacity');
         launches.push(input);
         return input.sessionId;
+      },
+      cancelRun: async (runId) => {
+        cancels.push(runId);
+        if (opts.cancelFails) throw new Error('the engine refused the stop');
+        return 'cancelled';
       },
     },
     submit: async (runId, agent, args) => {
@@ -178,7 +185,7 @@ function harness(opts: { seats?: unknown[]; mode?: 'distill' | 'extract'; propos
     log: () => undefined,
     newRunId: () => `distill-${++n}`,
   });
-  return { svc, dir, submitted, queue, launches, views };
+  return { svc, dir, submitted, queue, launches, views, cancels };
 }
 
 describe('RunLearningsService: proposals, never writes', () => {
@@ -413,6 +420,57 @@ describe('RunLearningsService under overlap, failure and restart (xreview on cre
     expect(h.submitted.slice(1)).toHaveLength(MAX_END_LEARNINGS);
   });
 
+  // The rig's 467eed15: a codex distil rightly wrote {"learnings": []} with a 183-character reply, the engine's
+  // substance floor (200) rejected the step, and the run sat in the operator's queue as "Waiting on you".
+  it('a distil run that stops at a gate is stopped by crew and filed from its report: "none found" is recorded, nobody is asked', async () => {
+    const h = harness();
+    h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
+    await settle();
+    const before = h.submitted.length;
+    writeFileSync(
+      join(h.dir, 'run-1', OUT_DIR, REPORT_FILE),
+      JSON.stringify({ learnings: [], checked: [{ evidence: 'e1', kept: false, why: 'already proposed' }, { evidence: 'e2', kept: false, why: 'only true of this change' }] }),
+    );
+    h.svc.onEvent({
+      type: 'awaitingHuman',
+      session: 'distill-1',
+      gateKind: 'escalation',
+      prompt: 'Unit 1 failed its deterministic floor (substance): phase produced no reviewable substance',
+    } as never);
+    await settle();
+    expect(h.cancels).toEqual(['distill-1']);
+    expect(h.submitted.length).toBe(before); // nothing raw: the seat's empty list is its judgment
+    const filed = JSON.parse(readFileSync(join(h.dir, 'run-1', FILED_FILE), 'utf8')) as Record<string, unknown>;
+    expect(filed).toMatchObject({ distilled: true, distillRunId: 'distill-1', seat: 'codex', filed: 0, found: 0, noneFound: true, checked: 2 });
+    expect(String(filed['stopped'])).toMatch(/^stopped at escalation: Unit 1 failed its deterministic floor \(substance\)/u);
+    expect((await h.svc.view('run-1')).distilling).toBe(false);
+    // The stop's own end frame files nothing more.
+    h.svc.onEvent({ type: 'runCancelled', session: 'distill-1' });
+    await settle();
+    expect(h.submitted.length).toBe(before);
+  });
+
+  it('a distil whose seat crashed before writing a report is stopped too, and the evidence is filed raw', async () => {
+    const h = harness({ cancelFails: true });
+    h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
+    await settle();
+    h.svc.onEvent({ type: 'awaitingHuman', session: 'distill-1', gateKind: 'escalation', prompt: 'worker failed' } as never);
+    await settle();
+    expect(h.cancels).toEqual(['distill-1']); // a refused stop is logged; the run is filed either way
+    expect(h.submitted.slice(1)).toHaveLength(MAX_END_LEARNINGS);
+    expect(h.submitted.slice(1).every((s) => s.agent === 'crew')).toBe(true);
+    expect(JSON.parse(readFileSync(join(h.dir, 'run-1', FILED_FILE), 'utf8'))).toMatchObject({ distilled: false, stopped: 'stopped at escalation: worker failed' });
+  });
+
+  it('a gate on any run that is not a distil is never touched', async () => {
+    const h = harness();
+    h.svc.onEvent({ type: 'awaitingHuman', session: 'run-1', gateKind: 'escalation' } as never);
+    h.svc.onEvent({ type: 'awaitingHuman', session: 'someone-else', gateKind: 'plan_approval' } as never);
+    await settle();
+    expect(h.cancels).toEqual([]);
+    expect(h.submitted).toHaveLength(0);
+  });
+
   it('an unreadable learnings directory is logged, never thrown into the event pump', async () => {
     const file = join(scratch(), 'not-a-dir');
     writeFileSync(file, 'x');
@@ -434,6 +492,14 @@ describe('the distil workflow and its report', () => {
     expect(def.phases[0]).toMatchObject({ executes_code: false, gate: 'auto' });
     expect((def as unknown as { required_instruments: unknown[] }).required_instruments).toEqual([]);
     expect(def as unknown as Record<string, unknown>).not.toHaveProperty('$comment');
+  });
+
+  it('asks for a reviewable record: every evidence item checked, and the reply says what was kept and dropped', () => {
+    const text = String(loadDistillWorkflow().phases[0]!.instructions);
+    expect(text).toMatch(/one checked entry for EVERY evidence item/u);
+    expect(text).toContain('one line per evidence item, "<id>: kept|dropped: <why, in one sentence>"');
+    expect(checkedCount({ checked: [{ evidence: 'e1', kept: false, why: 'x' }, { evidence: 'e2' }, 'junk'] })).toBe(1);
+    expect(checkedCount({ learnings: [] })).toBe(0);
   });
 
   it('keeps known kinds, sane lengths, at most five', () => {
