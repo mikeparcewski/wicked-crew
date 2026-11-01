@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import {
   corroborationOf,
   categoryOf,
+  categoryOfComponents,
   coverageOf,
   isPlaceholderStatement,
   isRealRequirement,
@@ -605,6 +606,12 @@ describe('requirements list: what Functional holds and the order it opens in (st
     expect(categoryOf('lib/F#Interop/Main.fs#run')).toBe('functional');
     expect(categoryOf('src/cache.json#v2/main.ts#run')).toBe('functional'); // codex r1: a config-looking prefix
     expect(categoryOf('src/a.json#b.ts#run')).toBe('functional');
+    expect(categoryOf('src/package-lock#v2/main.ts#run')).toBe('functional'); // Copilot r1
+    expect(categoryOf('src/c#/package.json#name')).toBe('functional'); // a reading as "src/c": errs to functional
+    // codex r2: an older document's bare path, a config-looking prefix before its "#"
+    expect(categoryOf('src/cache.json#v2/main.ts')).toBe('functional');
+    expect(categoryOf('src/a.json#b.ts')).toBe('functional');
+    expect(categoryOf('lib/Parser.cs')).toBe('functional');
     expect(categoryOf('bin/wicked-crew#main')).toBe('functional');
     expect(categoryOf('bin/wicked-crew')).toBe('functional');
     expect(categoryOf('Makefile#build')).toBe('functional');
@@ -623,13 +630,17 @@ describe('requirements list: what Functional holds and the order it opens in (st
     // codex r1: a plain rule under the threshold is a placeholder too, though it has no "[RISK]" prefix
     expect(isRealRequirement({ business_rules: [rule('Refunds may require approval.', 0.4)] })).toBe(false);
     expect(isRealRequirement({ status: 'active', business_rules: [rule('Validated by the operator.', 0.5)] })).toBe(true);
-    expect(isRealRequirement({ status: 'active', business_rules: [rule('[RISK] x: empty statement', 0)] })).toBe(false);
+    // codex r2: a validated requirement is real whatever fallback rule the builder kept beside it
+    expect(isRealRequirement({ status: 'active', business_rules: [rule('[RISK] x: residual note', 0)] })).toBe(true);
+    expect(isRealRequirement({ status: 'review', business_rules: [rule('[RISK] x: empty statement', 0)] })).toBe(false);
     expect(isRealRequirement({ business_rules: [rule('[RISK] x: below confidence threshold', 0.9)] })).toBe(false);
     expect(isRealRequirement({ business_rules: [rule('RISK: approval threshold unverified', 0.8)] })).toBe(true);
     expect(isRealRequirement({ business_rules: [rule('', 0.9), rule('   ', 0.9)] })).toBe(false);
     expect(isRealRequirement({ business_rules: [] })).toBe(false);
     expect(isRealRequirement({})).toBe(false);
     expect(isRealRequirement({ business_rules: [rule('An older document states it.')] })).toBe(true);
+    // Copilot r1: every rule counts, not the first statement shown
+    expect(isRealRequirement({ business_rules: [rule('[RISK] x: empty statement', 0), rule('A refund waits.', 0.9)] })).toBe(true);
   });
 
   it('a plain rule under the threshold, or no statement, lists after the real requirements', async () => {
@@ -655,30 +666,19 @@ describe('requirements list: what Functional holds and the order it opens in (st
     expect(page!.items.map((i) => i.title)).toEqual(['refund', 'guess', 'blank']);
   });
 
-  it('a graph built from product behaviour only lists every item as functional, a JSON policy rule included', async () => {
+  it('a requirement is config only when every component it names is (codex r2: an older document lists several)', async () => {
+    expect(categoryOfComponents(['config/app.yaml#port', 'src/server.ts#start'])).toBe('functional');
+    expect(categoryOfComponents(['config/app.yaml#port', 'package.json#engines'])).toBe('config-data');
+    expect(categoryOfComponents([])).toBe('functional');
     forgetRequirementsReads();
-    const root = await mkdtemp(join(tmpdir(), 'req-product-'));
-    const coverage = { real_pct: 100, min_pct: 80, behavior_bearing: 2, real: 2, placeholders: 0, unmapped: 0, not_product: 3 };
-    const domains = {
-      policies: {
-        description: 'policies',
-        requirements: {
-          'REQ-001': req('deny-public-buckets', 'A bucket is never public.', 'policies/storage.json#deny-public-buckets'),
-          'REQ-002': req('charge', 'A charge needs a card.', 'src/billing.ts#charge'),
-        },
-      },
-    };
+    const root = await mkdtemp(join(tmpdir(), 'req-mixed-'));
+    const mixed = { ...req('port', 'The server listens on the configured port.', 'config/app.yaml#port'),
+      legacy_components: ['config/app.yaml#port', 'src/server.ts#start'] };
     await markIndexed(root);
-    await writeFile(join(root, ESTATE_STANDIN), JSON.stringify({ metadata: { schema_version: '1.1.0', coverage }, domains }), 'utf8');
+    await writeFile(join(root, ESTATE_STANDIN), JSON.stringify({ metadata: { schema_version: '1.0.0' },
+      domains: { server: { description: 'server', requirements: { 'REQ-001': mixed } } } }), 'utf8');
     const page = await listRequirements(repoAt(root), { category: 'functional', offset: 0, limit: 50 }, estateAt(root));
-    expect(page!.items.map((i) => i.title)).toEqual(['deny-public-buckets', 'charge']);
-    // the same item in a graph built before wicked-core#1234 (no not_product): the extension decides
-    forgetRequirementsReads();
-    const legacy = await mkdtemp(join(tmpdir(), 'req-legacy-'));
-    await markIndexed(legacy);
-    await writeFile(join(legacy, ESTATE_STANDIN), JSON.stringify({ metadata: { schema_version: '1.0.0' }, domains }), 'utf8');
-    const old = await listRequirements(repoAt(legacy), { category: 'config-data', offset: 0, limit: 50 }, estateAt(legacy));
-    expect(old!.items.map((i) => i.title)).toEqual(['deny-public-buckets']);
+    expect(page!.items.map((i) => i.title)).toEqual(['port']);
   });
 
   it('Functional holds no manifest field, and opens on real requirements, then placeholders', async () => {

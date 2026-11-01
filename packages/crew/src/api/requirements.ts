@@ -257,9 +257,21 @@ export function categoryOf(file: string): RequirementCategory {
   // data only when EVERY reading names a config file: real product code never leaves Functional
   // ("src/cache.json#v2/main.ts#run" stays functional). A doc heading holding "#" errs to functional.
   const f = file.toLowerCase();
+  // An older document may name a bare path ("src/cache.json#v2/main.ts"): one ending in a source file is code.
+  if (SOURCE_FILE.test(f)) return 'functional';
   const parts = f.split('#');
   const readings = parts.length === 1 ? [f] : parts.slice(1).map((_, i) => parts.slice(0, i + 1).join('#'));
   return readings.every(isConfigFile) ? 'config-data' : 'functional';
+}
+
+const SOURCE_FILE = /\.(?:[cm]?[jt]sx?|py|rs|go|java|kts?|cs|fs|rb|php|swift|scala|c|cc|cpp|h|hpp|sh)$/u;
+
+/** A requirement is config and data only when every component it names is: one naming product code keeps
+ * it functional (an older document can list several). None at all reads as functional. */
+export function categoryOfComponents(components: readonly string[]): RequirementCategory {
+  return components.length > 0 && components.every((c) => categoryOf(c) === 'config-data')
+    ? 'config-data'
+    : 'functional';
 }
 
 function isConfigFile(f: string): boolean {
@@ -389,11 +401,6 @@ async function buildIndexRead(
     return { index: cached, coverage: cached.coverage };
   }
   const overrides = await readOverrides(repo);
-  // A graph whose build label counts what is not product code (wicked-core#1234, `not_product`) was built
-  // from product behaviour only: tests, data, manifests and docs are left out, and what remains in a
-  // data-extension file is an extracted rule (a cloud policy's JSON), which is product behaviour. Its
-  // items are all functional; the file-extension guess is for graphs built before that.
-  const productOnly = typeof graph.metadata?.coverage?.not_product === 'number';
 
   const entries: IndexEntry[] = [];
   const byKey = new Map<string, IndexEntry>();
@@ -414,15 +421,13 @@ async function buildIndexRead(
           return typeof st === 'string' ? st.trim() : '';
         })
         .filter((st) => st !== '');
-      const firstComponent = (req.legacy_components ?? []).find((c) => typeof c === 'string') as
-        | string
-        | undefined;
+      const components = (req.legacy_components ?? []).filter((c): c is string => typeof c === 'string');
       const summary: RequirementSummary = {
         key,
         domain,
         reqId,
         title,
-        category: productOnly ? 'functional' : categoryOf(firstComponent ?? ''),
+        category: categoryOfComponents(components),
         statement: statements[0] ?? '',
         status: ov?.status ?? req.status ?? 'active',
         risk,
@@ -539,10 +544,10 @@ const RESOLVE_THRESHOLD = 0.75;
 
 /**
  * Whether the engine counts this requirement REAL (wicked-core `classify_node`, as far as the document
- * shows it): a validated requirement (`status: active`) with a stated rule, or a business rule at or above
- * the resolve threshold whose statement is not the risk floor. A plain rule under the threshold, a
- * risk-floor statement or no statement at all is a placeholder. A rule with no numeric confidence (an
- * older document) is judged on its statement.
+ * shows it): a validated requirement (`status: active`, whatever fallback rule the builder kept beside it),
+ * or a business rule at or above the resolve threshold whose statement is not the risk floor. A plain
+ * rule under the threshold, a risk-floor statement or no statement at all is a placeholder. A rule with
+ * no numeric confidence (an older document) is judged on its statement.
  */
 export function isRealRequirement(req: { status?: string; business_rules?: unknown[] }): boolean {
   const stated = (req.business_rules ?? []).flatMap((r) => {
@@ -551,7 +556,7 @@ export function isRealRequirement(req: { status?: string; business_rules?: unkno
       ? [typeof confidence === 'number' ? confidence : null]
       : [];
   });
-  if (req.status === 'active' && stated.length > 0) return true;
+  if (req.status === 'active') return true;
   return stated.some((c) => c === null || c >= RESOLVE_THRESHOLD);
 }
 
@@ -576,8 +581,9 @@ function pageOf(index: RepoIndex, query: RequirementsQuery): RequirementsPage {
     if (terms.length > 0 && !terms.every((t) => e.haystack.includes(t))) continue;
     matched.push(e);
   }
-  // Stable: Array.prototype.sort keeps the graph's order within a rank.
-  matched.sort((a, b) => listRank(a) - listRank(b));
+  // Stable: Array.prototype.sort keeps the graph's order within a rank. A count-only read (limit 0, the
+  // project aggregates' first pass over every member repository) returns no items: nothing to order.
+  if (query.limit > 0) matched.sort((a, b) => listRank(a) - listRank(b));
   return {
     total: matched.length,
     corpus: index.total,
