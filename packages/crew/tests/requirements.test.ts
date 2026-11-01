@@ -991,6 +991,17 @@ describe('the list agrees with its header, or says why not (req-reconcile, api-t
     expect((await page({}))!.uncounted).toBeNull();
   });
 
+  it('verdicts that do not add up to the header mark the list behind, whatever the labels say (codex r3)', async () => {
+    // A unit removed and another mapped since the build: every count is equal, but the one real row is now unindexed.
+    const replaced = structuredClone(rows) as Record<string, Record<string, unknown>>;
+    replaced['src']!['REQ-001'] = { real: false, uncounted: 'unindexed' };
+    const p = await page(replaced);
+    expect(p!.graphBuild?.behind).toBe(true);
+    expect(p!.items.filter((i) => !i.placeholder && i.uncounted === null).length).toBe(0);
+    expect(p!.corpus).toBe(6);
+    expect((await page(rows))!.graphBuild?.behind).toBe(false);
+  });
+
   it('a verdict that is malformed, unknown or on an inherited key is no verdict', () => {
     expect(engineRowOf({ src: { 'REQ-001': { real: true, uncounted: 'shape' } } }, 'src', 'REQ-001')).toBeNull();
     expect(engineRowOf({ src: { 'REQ-001': { real: 'yes', uncounted: null } } }, 'src', 'REQ-001')).toBeNull();

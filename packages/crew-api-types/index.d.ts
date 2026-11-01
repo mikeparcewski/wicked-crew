@@ -6785,8 +6785,9 @@ export interface RequirementsGraphBuild {
   generation: number;
   /** The label the build persisted; `null` when it carried none or an older engine's `mapped_pct` label. */
   coverage: RequirementsCoverage | null;
-  /** True when any count of the build's label differs from the page's `coverage` (or the label is null). False
-   *  says the counts agree, not that every statement is unchanged. */
+  /** True when any count of the build's label differs from the page's `coverage` (or the label is null), or
+   *  (0.167.0) when the engine judged every listed row and the counted rows' verdicts are not the header's real and
+   *  placeholders. False says the counts agree, not that every statement is unchanged. */
   behind: boolean;
 }
 

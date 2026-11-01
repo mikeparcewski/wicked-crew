@@ -218,17 +218,24 @@ const BUILD_COUNTS = ['behaviorBearing', 'real', 'placeholders', 'unmapped', 'no
 /**
  * Which build the list is, from the engine's `build` and the engine's LIVE label (`read.coverage`, never the
  * graph's own): `null` when the engine does not say (an older engine), sent no usable generation, or sent no
- * usable live label. With nothing to compare, no claim either way (codex + agy on #1255).
+ * usable live label. With nothing to compare, no claim either way (codex + agy on #1255). `rows`, when the engine
+ * judged every listed row, is what those verdicts add up to among the counted rows: the list is behind too when
+ * they are not the header's real and placeholders, whatever the labels say (a unit removed and another mapped since
+ * the build leave every count equal; codex r3 on #1257).
  */
 export function graphBuildOf(
   raw: EstateRequirementsRead['build'],
   live: RequirementsCoverage | null,
+  rows: { real: number; placeholders: number } | null = null,
 ): RequirementsGraphBuild | null {
   if (raw === undefined || raw === null || typeof raw !== 'object' || live === null) return null;
   const generation = count(raw.generation);
   if (generation === null) return null;
   const built = coverageOf(raw.coverage ?? undefined);
-  const behind = built === null || BUILD_COUNTS.some((k) => built[k] !== live[k]);
+  const behind =
+    built === null ||
+    BUILD_COUNTS.some((k) => built[k] !== live[k]) ||
+    (rows !== null && (rows.real !== live.real || rows.placeholders !== live.placeholders));
   return { generation, coverage: built, behind };
 }
 
@@ -565,6 +572,12 @@ async function buildIndexRead(
   // The label from the store's own counts at read time (a later run that maps more shows up
   // without a rebuild); the build's own label only when an engine sent none.
   const coverage = coverageOf(read.coverage ?? graph.metadata?.coverage);
+  // Only when the engine judged EVERY row: an older engine's silence, or a row it gave no verdict on (a build
+  // before `code_symbol`, a malformed entry), is read off the document, so the page claims nothing about it
+  // (codex r2 on #1257: a partial map must not read as a reconciled list).
+  const judgedAll = typeof read.rows === 'object' && read.rows !== null && entries.every((e) => e.judged);
+  const counted = (real: boolean) => entries.filter((e) => e.summary.uncounted === null && e.real === real).length;
+  const left = (real: boolean) => entries.filter((e) => e.summary.uncounted !== null && e.real === real).length;
   const index: RepoIndex = {
     entries,
     byKey,
@@ -574,19 +587,14 @@ async function buildIndexRead(
     orphanedOverrides: countOrphanedOverrides(overrides, byKey),
     coverage,
     // The live label only: the graph's own fallback label would compare a build with itself.
-    graphBuild: graphBuildOf(read.build, coverageOf(read.coverage ?? undefined)),
+    graphBuild: graphBuildOf(
+      read.build,
+      coverageOf(read.coverage ?? undefined),
+      judgedAll ? { real: counted(true), placeholders: counted(false) } : null,
+    ),
     validated: entries.filter((e) => e.summary.corroboration?.status === 'validated').length,
     unconfirmed: entries.filter((e) => e.summary.corroboration?.status === 'unconfirmed').length,
-    // Only when the engine judged EVERY row: an older engine's silence, or a row it gave no verdict on (a build
-    // before `code_symbol`, a malformed entry), is read off the document, so the page claims nothing about it
-    // (codex r2 on #1257: a partial map must not read as a reconciled list).
-    uncounted:
-      typeof read.rows === 'object' && read.rows !== null && entries.every((e) => e.judged)
-        ? {
-            stated: entries.filter((e) => e.summary.uncounted !== null && e.real).length,
-            placeholders: entries.filter((e) => e.summary.uncounted !== null && !e.real).length,
-          }
-        : null,
+    uncounted: judgedAll ? { stated: left(true), placeholders: left(false) } : null,
     categories: {
       functional: entries.filter((e) => e.summary.category === 'functional').length,
       configData: entries.filter((e) => e.summary.category === 'config-data').length,
