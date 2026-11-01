@@ -25,7 +25,7 @@ garden supplies the skills, estate holds the record, and crew runs each job betw
   delivery. crew never turns that on for you.
 - **Tested before delivery, with the evidence.** Jobs that change your app (`feature`, `bug`,
   `migration`, `mcp-server`) are not delivered until QE acceptance reads an attributed PASS, unless
-  the change scores in the lowest band or you skip it with a reason, and either is labelled. A gate
+  the run's own diff score waives it or you skip it with a reason, and either is labelled. A gate
   says what it checked, a failed check sends the work back or stops the job, and "done" is
   re-derived from evidence, never asserted. Jobs are durable workflows defined as data, crash-resumable, and exportable as
   evidence.
@@ -186,16 +186,19 @@ pay for instead of replacing them.
 ## The governed lifecycle
 
 **Power mode is the default.** A launch on a repository (`repoRef`) of a preset workflow (the
-built-ins are presets) or a plan runs as one long-lived orchestrator session: one seat builds the
-whole change in checkpointed turns (the launch's `power`, else Settings → `powerModeDefault`, on
-when unset). The PA's scope step sizes
-the rigor at intake, where garden's QE risk assessor and test strategist can only raise the engine's
-own band, and the engine re-scores the actual diff at each checkpoint. The hand-off then runs the
-evaluator steps that rigor calls for (review on a distinct seat, security review at the highest
-band, QE acceptance when required) and the build's own floor. A NOT-PASS goes back to the same
-orchestrator, up to three rounds, and then the run asks you. A power run has no plan-approval gate:
-its human gate is deliver, plus whatever policy requires. Any other launch, or an engine without
-power mode, runs **phased**, and the launch answer says so.
+built-ins are presets) or a plan runs in power mode (the launch's `power`, else Settings →
+`powerModeDefault`, on when unset). The plan drops its understand, test-plan and design steps
+(unless a rule or the QE plan puts one back), and its `build` step runs as one long-lived
+orchestrator session: one seat builds the whole change in checkpointed turns. A workflow whose
+creator step is not `build` (such as `domain-extraction`) gets no orchestrator; its other steps
+dispatch as they would phased. The PA's scope step sizes the rigor at intake, where garden's QE risk
+assessor and test strategist can only raise the engine's own band, and the engine re-scores the
+actual diff at each checkpoint. The hand-off then runs the evaluator steps that rigor calls for
+(review on a distinct seat, security review at the highest band, QE acceptance when required) and
+the build's own floor. A NOT-PASS goes back to the same orchestrator, up to three rounds, and then
+the run asks you. A power run skips the routine plan-approval gate: its human gate is deliver,
+though a high-risk plan, or a revision that turns high-risk, still asks you first. Any other launch,
+or an engine without power mode, runs **phased**, and the launch answer says so.
 
 Phased, one run token moves through the workflow's phases with a gate between every one — e.g. for
 `feature`:
@@ -215,9 +218,8 @@ the base skill. Phases, gates, roles, and any phase skill are all **data** on th
 ## Requirements, learnings and voice
 
 **Requirements: what the code does, and how much of it is mapped.** The `domain-extraction` workflow
-maps a repository's behaviours to stated business rules: it surveys and analyzes the repository, then
-extracts, critiques and applies one page of behaviours at a time until **real** requirements reach the
-minimum: 80% of the behaviour-bearing product code by default (Settings →
+maps a repository's behaviours to stated business rules, extracting, critiquing and applying one
+page of behaviours at a time until **real** requirements reach the minimum: 80% of the behaviour-bearing product code by default (Settings →
 `requirementsGraph.minCoveragePct`, 1..100).
 A risk-flagged placeholder (an empty statement, or a rule under the confidence threshold) is shown but
 never counted, and tests, data, manifests and documents are left out of the denominator. When the
@@ -230,10 +232,11 @@ numbers), and on each item its `placeholder` flag and `corroboration` (validated
 sources, or unconfirmed and why). A repository with no graph yet answers a typed 404
 (`code: "notGenerated"`) that names the workflow to run.
 
-**Every run proposes what it learned.** At its checkpoints and at its end, crew reads the run's
-record: a test that failed and then passed on its identical retry, your rulings with their reasons, a
-reviewer's findings. One seat that neither led nor built the run distils them into at most five
-learnings. Each one is a `memory` proposal attributed to the run (and faceted by repo, project and,
+**Every run proposes what it learned.** At its checkpoints, a test that failed and then passed on
+its identical retry, or a check its sandbox could not start, is proposed at once, worded from the
+record. The rest (your rulings with their reasons, standing steers, a reviewer's findings) goes at
+the end to one seat that neither led nor built the run, which keeps at most five; with no such seat,
+the evidence is filed as it is, capped at five. Each learning is a `memory` proposal attributed to the run (and faceted by repo, project and,
 when it is about one, seat); nothing is stored until a person approves it. A distil that finds
 nothing records "none found" instead of waiting on you. `GET /api/v1/runs/:id/learnings` answers a
 run's count; `WICKED_CREW_RUN_LEARNINGS=off|extract|distill` (default `distill`) turns it down.
@@ -255,9 +258,11 @@ run.
 > adversarial review. **Caveat:** the shipped feature/bug/migration workflows pin only the built-in
 > **evidence floor** (`e2e7af1db9e48454` — "the run left a change in its worktree"; it proves a change
 > exists, not that the change is correct) on their code-writing and verifying phases. On those phases
-> the engine also runs the **repo checks floor**: the repository's own typecheck, lint and tests (from
-> `.wicked/checks.json`, else detected from `package.json` or `Cargo.toml`), compared with the same
-> checks on the run's base, so a new failure is told apart from one the base already had. Phases
+> the engine also runs the **repo checks floor**: the repository's own typecheck, lint and tests. They
+> come from the base commit's build guide (`.wicked/build-guide.json`) for the directories it covers
+> (a stale guide runs its checks and the detected ones together), else from `.wicked/checks.json` and
+> what `package.json` or `Cargo.toml` declare. A failing check is compared with the same check on the
+> run's base, so a new failure is told apart from one the base already had. Phases
 > without a pin engage the full gate only once an operator authors, approves, and pins a task-specific
 > validator into the def.
 
