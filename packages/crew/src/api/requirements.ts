@@ -261,13 +261,17 @@ export function categoryOf(file: string): RequirementCategory {
   if (SOURCE_FILE.test(f)) return 'functional';
   const parts = f.split('#');
   const readings = parts.length === 1 ? [f] : parts.slice(1).map((_, i) => parts.slice(0, i + 1).join('#'));
-  // …and one whose last "#" is followed by a path ("src/cache.json#v2/Makefile", "#v2/bin/crew") may be a
-  // bare path whole: that reading counts too. A heading ("Install / setup") holds spaces, so it is no path.
-  if (parts.length > 1 && /^[^\s]*\/[^\s]*$/u.test(parts[parts.length - 1]!)) readings.push(f);
+  // …and one whose last "#" is followed by a path ("src/cache.json#v2/Makefile", "#v2/my app/Makefile") may
+  // be a bare path whole: that reading counts too (a heading holding "/" then errs to functional).
+  // Residual: the engine always writes `file#name` (wicked-core domain_model `node_ref`), so a bare path is
+  // an older document's; one whose FILENAME holds "#" after a config extension ("widget.json#v2.vue") reads
+  // exactly like "package.json#devDependencies" and classes as config unless its extension is a source one.
+  if (parts.length > 1 && parts[parts.length - 1]!.includes('/')) readings.push(f);
   return readings.every(isConfigFile) ? 'config-data' : 'functional';
 }
 
-const SOURCE_FILE = /\.(?:[cm]?[jt]sx?|py|rs|go|java|kts?|cs|fs|rb|php|swift|scala|c|cc|cpp|h|hpp|sh)$/u;
+const SOURCE_FILE =
+  /\.(?:[cm]?[jt]sx?|vue|svelte|py|rs|go|java|kts?|cs|fs|rb|php|swift|scala|c|cc|cpp|h|hpp|m|mm|sh|ps1|sql|lua|dart|exs?|erl|clj|hs|ml|r|pl|groovy)$/u;
 
 /** A requirement is config and data only when every component it names is: one naming product code keeps
  * it functional (an older document can list several). None at all reads as functional. */

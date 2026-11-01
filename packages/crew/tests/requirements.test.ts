@@ -617,6 +617,14 @@ describe('requirements list: what Functional holds and the order it opens in (st
     expect(categoryOf('src/cache.json#v2/bin/crew')).toBe('functional');
     expect(categoryOf('src/cache.json#v2/schema.sql')).toBe('functional');
     expect(categoryOf('src/cache.json#v2/App.vue')).toBe('functional');
+    // codex r4: a bare path with spaces, and bare filenames whose extension is a source one
+    expect(categoryOf('src/cache.json#v2/my app/Makefile')).toBe('functional');
+    expect(categoryOf('src/cache.json#v2/My Component.vue')).toBe('functional');
+    expect(categoryOf('src/widget.json#v2.vue')).toBe('functional');
+    expect(categoryOf('src/schema.json#v2.sql')).toBe('functional');
+    // the engine's own form always carries the name, and the true file is then one of the readings
+    expect(categoryOf('bin/tool.json#v2#main')).toBe('functional');
+    expect(categoryOf('src/widget.json#v2.vue#Widget')).toBe('functional');
     expect(categoryOf('config/c#/app.json')).toBe('functional'); // errs to functional
     expect(categoryOf('config/app.yaml#server.port')).toBe('config-data');
     expect(categoryOf('bin/wicked-crew#main')).toBe('functional');
@@ -624,8 +632,9 @@ describe('requirements list: what Functional holds and the order it opens in (st
     expect(categoryOf('Makefile#build')).toBe('functional');
     expect(categoryOf('src/billing.ts#Ledger.#secret')).toBe('functional');
     expect(categoryOf('')).toBe('functional');
-    // a heading or key holding "/" after the one "#" is still the doc's
-    expect(categoryOf('docs/guide.md#Install / setup')).toBe('config-data');
+    // a heading holding "/" after the one "#" could be a bare path: errs to functional
+    expect(categoryOf('docs/guide.md#Install / setup')).toBe('functional');
+    expect(categoryOf('docs/guide.md#Install')).toBe('config-data');
     expect(categoryOf('config/c#/app.json#port')).toBe('functional'); // a reading as "config/c": errs to functional
     expect(categoryOf('README.md#C# support')).toBe('functional'); // ambiguous: errs to functional, never hides code
   });
@@ -678,6 +687,7 @@ describe('requirements list: what Functional holds and the order it opens in (st
     expect(categoryOfComponents(['config/app.yaml#port', 'package.json#engines'])).toBe('config-data');
     expect(categoryOfComponents([])).toBe('functional');
     expect(categoryOfComponents(['src/cache.json#v2/Makefile'])).toBe('functional');
+    expect(categoryOfComponents(['src/cache.json#v2/my app/Makefile'])).toBe('functional');
     forgetRequirementsReads();
     const root = await mkdtemp(join(tmpdir(), 'req-mixed-'));
     const mixed = { ...req('port', 'The server listens on the configured port.', 'config/app.yaml#port'),
