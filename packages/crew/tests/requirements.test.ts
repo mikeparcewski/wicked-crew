@@ -608,9 +608,6 @@ describe('requirements list: what Functional holds and the order it opens in (st
     expect(categoryOf('src/a.json#b.ts#run')).toBe('functional');
     expect(categoryOf('src/package-lock#v2/main.ts#run')).toBe('functional'); // Copilot r1
     expect(categoryOf('src/c#/package.json#name')).toBe('functional'); // a reading as "src/c": errs to functional
-    // codex r2: an older document's bare path, a config-looking prefix before its "#"
-    expect(categoryOf('src/cache.json#v2/main.ts')).toBe('functional');
-    expect(categoryOf('src/a.json#b.ts')).toBe('functional');
     expect(categoryOf('lib/Parser.cs')).toBe('functional');
     // codex r3/r4: in the engine's form (file#name) the true file is always one of the readings, so a "#"
     // directory after a config-looking prefix stays code whatever the file
@@ -618,11 +615,11 @@ describe('requirements list: what Functional holds and the order it opens in (st
     expect(categoryOf('src/cache.json#v2/bin/crew#main')).toBe('functional');
     expect(categoryOf('src/cache.json#v2/my app/Makefile#all')).toBe('functional');
     expect(categoryOf('src/cache.json#v2/schema.sql#users')).toBe('functional');
-    // a bare path ending in a source extension is code too
-    expect(categoryOf('src/cache.json#v2/App.vue')).toBe('functional');
-    expect(categoryOf('src/cache.json#v2/My Component.vue')).toBe('functional');
-    expect(categoryOf('src/widget.json#v2.vue')).toBe('functional');
-    expect(categoryOf('src/schema.json#v2.sql')).toBe('functional');
+    // …and a NAME ending like a source file is still the manifest's or doc's (codex r6)
+    expect(categoryOf('package.json#decimal.js')).toBe('config-data');
+    expect(categoryOf('package.json#./index.js')).toBe('config-data');
+    expect(categoryOf('package.json#@types/node.js')).toBe('config-data');
+    expect(categoryOf('docs/guide.md#Using Node.js')).toBe('config-data');
     // the engine's own form always carries the name, and the true file is then one of the readings
     expect(categoryOf('bin/tool.json#v2#main')).toBe('functional');
     expect(categoryOf('src/widget.json#v2.vue#Widget')).toBe('functional');

@@ -257,14 +257,12 @@ export function categoryOf(file: string): RequirementCategory {
   // data only when EVERY reading names a config file: real product code never leaves Functional
   // ("src/cache.json#v2/main.ts#run" stays functional). A doc heading holding "#" errs to functional.
   const f = file.toLowerCase();
-  // An older document may name a bare path ("src/cache.json#v2/main.ts"): one ending in a source file is code.
-  if (SOURCE_FILE.test(f)) return 'functional';
   const parts = f.split('#');
   const readings = parts.length === 1 ? [f] : parts.slice(1).map((_, i) => parts.slice(0, i + 1).join('#'));
   // The whole string is no reading: the engine always writes `file#name` (wicked-core domain_model
   // `node_ref`, persisted as is), so the true file is one of the prefixes, and a name may hold "/" (a scoped
   // package "package.json#@types/node", Copilot on #1254). Residual: a bare path holding "#" after a config
-  // extension, which no engine writes, classes as config unless it ends in a source extension.
+  // extension, which no engine writes, classes as config.
   return readings.every(isConfigFile) ? 'config-data' : 'functional';
 }
 
