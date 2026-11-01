@@ -196,9 +196,11 @@ assessor and test strategist can only raise the engine's own band, and the engin
 actual diff at each checkpoint. The hand-off then runs the evaluator steps that rigor calls for
 (review on a distinct seat, security review at the highest band, QE acceptance when required) and
 the build's own floor. A NOT-PASS goes back to the same orchestrator, up to three rounds, and then
-the run asks you. A power run skips the routine plan-approval gate: its human gate is deliver,
-though a high-risk plan, or a revision that turns high-risk, still asks you first. Any other launch,
-or an engine without power mode, runs **phased**, and the launch answer says so.
+the run asks you. A power run skips the run-level plan approval, though a high-risk plan, or a
+revision that turns high-risk, still asks you first. Gates the workflow itself authors still pause
+(feature's adversarial-review confirmation, migration's cutover, an install's consent), and delivery
+waits at its own deliver gate unless the launch asked for `deliverGate: "auto"`. Any other launch, or
+an engine without power mode, runs **phased**, and the launch answer says so.
 
 Phased, one run token moves through the workflow's phases with a gate between every one — e.g. for
 `feature`:
