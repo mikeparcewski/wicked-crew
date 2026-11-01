@@ -6817,8 +6817,9 @@ export interface RequirementsPage {
    * row is showing — re-apply or delete the stale keys.
    */
   orphanedOverrides?: number;
-  /** (0.159.0) The graph's coverage label; `null` on a graph built before the field, ABSENT from an
-   *  older daemon. */
+  /** (0.159.0; real requirements since 0.164.0) The graph's coverage label; `null` when absent, an
+   *  older engine's `mapped_pct` label, or one its counts do not support; ABSENT from an older
+   *  daemon. */
   coverage?: RequirementsCoverage | null;
   /** (0.159.0) How many requirements of the whole corpus are validated / unconfirmed. */
   corroboration?: { validated: number; unconfirmed: number };

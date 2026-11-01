@@ -466,8 +466,9 @@ export interface RequirementsPage {
    */
   orphanedOverrides: number;
   /**
-   * The share of behaviours the graph maps and the minimum it was built at ("82% of behaviours
-   * mapped"); `null` on an artifact built before domain-model 1.1.0.
+   * The share of product behaviours that are REAL requirements, the placeholders apart, and the
+   * minimum ("23% real requirements · 4397 placeholders · minimum 80%"); `null` when the label is
+   * absent, an older engine's `mapped_pct` label, or one its counts do not support.
    */
   coverage: RequirementsCoverage | null;
   /** How many requirements of the whole corpus are validated / unconfirmed (0/0 on an older artifact). */
