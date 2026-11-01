@@ -13,6 +13,7 @@ import {
   categoryOf,
   coverageOf,
   isPlaceholderStatement,
+  listRank,
   listRequirements,
   getRequirement,
   patchRequirement,
@@ -595,6 +596,30 @@ describe('requirements list: what Functional holds and the order it opens in (st
     expect(categoryOf('config/app.yaml#port')).toBe('config-data');
     expect(categoryOf('src/billing.ts#refund')).toBe('functional');
     expect(categoryOf('src/billing.ts')).toBe('functional');
+  });
+
+  it('a source path holding "#", or with no extension, stays functional; a doc heading with "#" stays config', () => {
+    // threat model: the file/name split must never move real product code out of Functional
+    expect(categoryOf('src/c#/Parser.cs#Parse')).toBe('functional');
+    expect(categoryOf('src/c#/Parser.cs')).toBe('functional');
+    expect(categoryOf('lib/F#Interop/Main.fs#run')).toBe('functional');
+    expect(categoryOf('bin/wicked-crew#main')).toBe('functional');
+    expect(categoryOf('bin/wicked-crew')).toBe('functional');
+    expect(categoryOf('Makefile#build')).toBe('functional');
+    expect(categoryOf('src/billing.ts#Ledger.#secret')).toBe('functional');
+    expect(categoryOf('')).toBe('functional');
+    // the name is free text: a heading may hold "#" or "/", and the file is still the doc
+    expect(categoryOf('README.md#C# support')).toBe('config-data');
+    expect(categoryOf('docs/guide.md#Install / setup')).toBe('config-data');
+    expect(categoryOf('tests/fixtures/frames.json#gate#2')).toBe('config-data');
+  });
+
+  it('a requirement with no statement sorts with the placeholders, not first', () => {
+    expect(listRank({ category: 'functional', statement: 'A refund over the limit waits.' })).toBe(0);
+    expect(listRank({ category: 'functional', statement: '' })).toBe(1);
+    expect(listRank({ category: 'functional', statement: '   ' })).toBe(1);
+    expect(listRank({ category: 'functional', statement: '[RISK] x: empty statement' })).toBe(1);
+    expect(listRank({ category: 'config-data', statement: 'Node 22 or newer.' })).toBe(2);
   });
 
   it('Functional holds no manifest field, and opens on real requirements, then placeholders', async () => {

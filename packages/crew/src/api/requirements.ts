@@ -252,6 +252,11 @@ export function coverageOf(raw: ArtifactCoverage | undefined): RequirementsCover
 export function categoryOf(file: string): RequirementCategory {
   // A component names a symbol in its file ("package.json#devDependencies"): classify by the FILE, or every
   // manifest field reads as product code (studio 2026-11-01: Functional opened on package.json's fields).
+  // The engine writes `file#name` (wicked-core domain_model node_ref), and a name is free text (a doc
+  // heading can hold "#" or "/": "README.md#C# support"), so the file ends at the FIRST "#". A source
+  // path holding "#" ("src/c#/Parser.cs#Parse" -> "src/c") or with no extension ("bin/crew#main") has no
+  // config extension before it and stays functional; only a "#"-prefix that itself ends in one
+  // ("notes.md#2/x.ts") would class as config, and no repo layout here has one.
   const f = file.toLowerCase().split('#')[0]!;
   const base = f.slice(f.lastIndexOf('/') + 1);
   if (/\.(json|ya?ml|lock|toml|ini|env|md|mdx|txt|csv)$/.test(base)) return 'config-data';
@@ -518,10 +523,13 @@ export function isPlaceholderStatement(statement: string): boolean {
   return /^\[RISK\]/u.test(statement.trim());
 }
 
-/** The list's order: real requirements first, then placeholders, then config and data; the graph's order within each. */
-function listRank(s: RequirementSummary): number {
+/**
+ * The list's order: real requirements first, then placeholders, then config and data; the graph's order within each.
+ * A requirement with no statement at all states nothing either, so it sorts with the placeholders, never first.
+ */
+export function listRank(s: Pick<RequirementSummary, 'category' | 'statement'>): number {
   if (s.category === 'config-data') return 2;
-  return isPlaceholderStatement(s.statement) ? 1 : 0;
+  return s.statement.trim() === '' || isPlaceholderStatement(s.statement) ? 1 : 0;
 }
 
 function pageOf(index: RepoIndex, query: RequirementsQuery): RequirementsPage {

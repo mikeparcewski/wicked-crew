@@ -16,8 +16,9 @@ mentioned only where a daemon release depends on them.
   symbol in its file (`package.json#devDependencies`), and the category was read off the whole string, so no
   manifest, config or doc entry ever classed as config and data: Functional held 7,285 of wicked-crew's 7,300 items,
   opening on `package.json`'s fields. The category is now read off the file. The list orders real requirements first,
-  then placeholders (a statement on the engine's `[RISK]` floor), then config and data, keeping the graph's order
-  within each.
+  then placeholders (a statement on the engine's `[RISK]` floor, or none at all), then config and data, keeping the
+  graph's order within each. The file is the part of `file#name` before the first `#` (a name is free text, such as a
+  doc heading), so a source path holding `#` or with no extension stays functional.
 - **An end-of-run learnings distil never waits on you (#1251).** A distil seat that rightly found nothing could
   reply in under 200 characters, fail the engine's substance floor and park as "Waiting on you". The distil's
   outcome is its report file, so crew now stops a distil run at any gate it reaches and files from the report:
