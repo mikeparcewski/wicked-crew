@@ -6785,8 +6785,9 @@ export interface RequirementsGraphBuild {
   generation: number;
   /** The label the build persisted; `null` when it carried none or an older engine's `mapped_pct` label. */
   coverage: RequirementsCoverage | null;
-  /** True when any count of the build's label differs from the page's `coverage` (or the label is null). False
-   *  says the counts agree, not that every statement is unchanged. */
+  /** True when any count of the build's label differs from the page's `coverage` (or the label is null), or
+   *  (0.167.0) when the engine judged every listed row and the counted rows' verdicts are not the header's real and
+   *  placeholders. False says the counts agree, not that every statement is unchanged. */
   behind: boolean;
 }
 
@@ -6805,9 +6806,16 @@ export interface RequirementSummary {
    *  ABSENT from an older daemon. */
   corroboration?: RequirementCorroboration | null;
   /** (0.166.0) The engine would not count it a real requirement (a validated requirement, or a business rule at or
-   *  above the resolve threshold, 0.75): a placeholder, unconfirmed whatever its corroboration says. ABSENT from an
-   *  older daemon. */
+   *  above the resolve threshold, 0.75): a placeholder, unconfirmed whatever its corroboration says. (0.167.0) The
+   *  engine's own verdict when it gives one, else read off the document. ABSENT from an older daemon. */
   placeholder?: boolean;
+  /** (0.167.0) The coverage share does not count this row, and why: its unit is not a behaviour (`structural`, a
+   *  TypeScript shape or signature), is outside product code (`not_product`), or is no longer indexed (`unindexed`).
+   *  Such a row is neither a real requirement nor a placeholder of the header's (its `placeholder` says only whether
+   *  a rule was stated there), sorts after them, and carries
+   *  `corroboration: null` (a type has no callers; "dead code" would be wrong). `null` when it counts or the engine
+   *  does not say; ABSENT from an older daemon. */
+  uncounted?: 'structural' | 'not_product' | 'unindexed' | null;
 }
 
 export interface RequirementDetail extends RequirementSummary {
@@ -6849,8 +6857,20 @@ export interface RequirementsPage {
    * where the build refuses). `null` when the engine does not say; ABSENT from an older daemon.
    */
   graphBuild?: RequirementsGraphBuild | null;
-  /** (0.159.0) How many requirements of the whole corpus are validated / unconfirmed. */
+  /** (0.159.0) How many requirements of the whole corpus are validated / unconfirmed. (0.167.0) Rows the share does
+   *  not count are in neither. */
   corroboration?: { validated: number; unconfirmed: number };
+  /**
+   * (0.167.0) Rows of the whole corpus the coverage share does not count (items with `uncounted`), split stated /
+   * placeholder: why the list holds more rows than the header. When this is not `null` and `graphBuild.behind` is
+   * false, the rows that are neither placeholders nor uncounted number exactly `coverage.real`. `null` when the engine
+   * did not judge every row (an older engine, a build before it recorded each row's unit, a malformed verdict): those
+   * rows are read off the document, and there is no such claim. ABSENT from an older daemon.
+   */
+  uncounted?: { stated: number; placeholders: number } | null;
+  /** (0.167.0) How many rows of the whole corpus are in each category, so a client can leave out an empty filter.
+   *  ABSENT from an older daemon. */
+  categories?: { functional: number; configData: number };
 }
 
 /**
