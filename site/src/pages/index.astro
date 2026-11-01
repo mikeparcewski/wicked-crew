@@ -13,7 +13,7 @@
  * durability) → the family map → get it.
  *
  * ACCURACY (crew main, 2026-11-01), each from README.md / CHANGELOG.md / packages/crew-api-types:
- *  - Sandbox images: Claude Code, Codex, Copilot, OpenCode, Pi. Antigravity has none; a local
+ *  - Sandbox images: Claude Code, Codex, Copilot, OpenCode, Pi. Antigravity's is defined, its seat benched; a local
  *    model or custom binary needs your own image (WICKED_SEAT_IMAGE_<CLI>), offline only. The
  *    worktree is the only repo path mounted writable; the repository boundary is mounted read-only
  *    (wicked-core src/container_floor.rs mount_plan); the model gateway is the only egress; keys
@@ -40,7 +40,8 @@
  *  - Power mode is the default launch for a repo-scoped preset or plan (routes.ts powerModeDefault):
  *    one orchestrator seat builds in checkpointed turns, rigor re-scored from the diff, and the
  *    hand-off runs review / security / QE; a NOT-PASS goes back up to 3 rounds, then asks.
- *  - A failed check sends the work back (power hand-off, a send-back) or stops the job.
+ *  - A NEW failure sends the work back (power hand-off, a send-back) or stops the job; a failure the base
+ *    shares is excluded only when the build guide can separate it (repo_checks.rs pass_excluded).
  *  - Repo checks: the repository's own typecheck, lint and tests (build guide, .wicked/checks.json,
  *    or package.json / Cargo.toml), compared with the run's base (wicked-core src/repo_checks.rs).
  *  - Needs wicked-garden >= 12.40.0 (the governed-worker base skill), Node >= 22, a container runtime.
@@ -69,13 +70,13 @@ const AGENTS = [
   { name: 'GitHub Copilot', image: 'yes' },
   { name: 'OpenCode', image: 'yes' },
   { name: 'Pi', image: 'yes' },
-  { name: 'Antigravity', image: 'no image yet' },
+  { name: 'Antigravity', image: 'image defined, seat benched for now' },
   { name: 'A local model, or your own binary', image: 'your own image, offline' },
 ];
 
 const LAYERS = [
   { name: 'Evidence floor', does: 'The job changed its worktree.', can: 'a pass with no judge reads “floor only”' },
-  { name: 'Your checks and policies', does: 'Your repo’s own typecheck, lint and tests, plus the rules you approved.', can: 'sends it back or stops the job' },
+  { name: 'Your checks and policies', does: 'Your repo’s own typecheck, lint and tests, plus the rules you approved.', can: 'a new failure sends it back or stops the job' },
   { name: 'Evaluator', does: 'A different agent reviews the work.', can: 'can send it back' },
   { name: 'Judge', does: 'An AI judge reads the evidence cold.', can: 'can fail a gate, never approve alone' },
   { name: 'QE acceptance', does: 'Garden’s QE pipeline, read from the QE ledger; a low-impact change may waive it.', can: 'when required, only an attributed PASS delivers' },
@@ -146,10 +147,10 @@ const crewVersion = __WICKED_CREW_VERSION__;
           <p class="sec-sub">crew drives each agent’s own headless mode in a hardened container, on your accounts and plans. No billing, no reselling.</p>
         </div>
         <ul class="facts" role="list">
-          <li>The job writes only its worktree. Your repo is mounted read-only.</li>
+          <li>Your repo is read-only. The job writes its worktree and its git state.</li>
           <li>The model gateway is the only way out.</li>
           <li>Keys stay in a broker. The container sees placeholders.</li>
-          <li>Sign each agent in once, on studio’s Agents tab.</li>
+          <li>Sign each agent in once, on studio’s Agents page.</li>
         </ul>
       </div>
       <table class="tbl" aria-label="Which agents have a sandbox image">
@@ -168,7 +169,7 @@ const crewVersion = __WICKED_CREW_VERSION__;
     <div class="wrap">
       <div class="sec-head">
         <h2 id="gates-h">Every gate says what it checked.</h2>
-        <p class="sec-sub">A gate decides on the layers that actually ran. A failed check sends the work back or stops the job, and no model can approve on its own.</p>
+        <p class="sec-sub">A gate decides on the layers that actually ran. A new failure sends the work back or stops the job, and no model can approve on its own.</p>
       </div>
       <table class="tbl tbl--layers">
         <thead><tr><th scope="col">Layer</th><th scope="col">What it checks</th><th scope="col">Its power</th></tr></thead>
@@ -312,7 +313,7 @@ wicked-crew serve   <span class="c"># opens studio on 127.0.0.1:7701</span></cod
         { p: 0, t: 'run.launched · workflow <b>feature</b>' },
         { p: 0, t: 'plan proposed · 4 steps' },
         { p: 0, t: 'plan confirmed by you', gate: 0 },
-        { p: 1, t: 'container started · <b>Claude Code</b> · only the worktree writable' },
+        { p: 1, t: 'container started · <b>Claude Code</b> · repo read-only, worktree writable' },
         { p: 1, t: 'egress: the model gateway only · keys stay in the broker' },
         { p: 1, t: 'writing the change · usage 41k in / 6k out' },
         { p: 1, t: 'diff captured · 3 files' },
