@@ -12,7 +12,7 @@
  * daemon and watch the job resume) → four proofs (sandboxes, gates, the council, workflows +
  * durability) → the family map → get it.
  *
- * ACCURACY (crew 0.14.1), each from README.md / CHANGELOG.md / packages/crew-api-types:
+ * ACCURACY (crew main, 2026-11-01), each from README.md / CHANGELOG.md / packages/crew-api-types:
  *  - Sandbox images: Claude Code, Codex, Copilot, OpenCode, Pi. Antigravity has none; a local
  *    model or custom binary needs your own image (WICKED_SEAT_IMAGE_<CLI>), offline only. Only the
  *    worktree is mounted; the model gateway is the only egress; keys stay in a credential broker.
@@ -31,8 +31,16 @@
  *    send-backs a review_adjudication gate asks the operator.
  *  - Crash: a daemon that dies mid-run resumes the orphaned run at boot (crew#830), re-entering the
  *    unit it was on, audited run.resumed {via: 'boot'}. One machine today; no remote runner.
- *  - Workflows are data: built-ins feature / bug / migration / mcp-server / editor-plugin; your own
- *    is a preset saved with PUT /api/v1/presets/:name.
+ *  - Workflows are data: built-ins feature / bug / migration / mcp-server / editor-plugin /
+ *    domain-extraction (wicked-core src/catalog.rs); your own is a preset saved with
+ *    PUT /api/v1/presets/:name. domain-extraction loops page by page until REAL requirements reach
+ *    the minimum (requirementsGraph.minCoveragePct, default 80; placeholders never count).
+ *  - Power mode is the default launch for a repo-scoped preset or plan (routes.ts powerModeDefault):
+ *    one orchestrator seat builds in checkpointed turns, rigor re-scored from the diff, and the
+ *    hand-off runs review / security / QE; a NOT-PASS goes back up to 3 rounds, then asks.
+ *  - A failed check sends the work back (power hand-off, a send-back) or stops the job.
+ *  - Repo checks: the repository's own typecheck, lint and tests (build guide, .wicked/checks.json,
+ *    or package.json / Cargo.toml), compared with the run's base (wicked-core src/repo_checks.rs).
  *  - Needs wicked-garden >= 12.40.0 (the governed-worker base skill), Node >= 22, a container runtime.
  * The demo is scripted and says so. Never hardcode a version in prose (build-injected stamp only).
  */
@@ -65,7 +73,7 @@ const AGENTS = [
 
 const LAYERS = [
   { name: 'Evidence floor', does: 'The job changed its worktree.', can: 'a pass with no judge reads “floor only”' },
-  { name: 'Your checks and policies', does: 'Deterministic rules you approved, re-run against the worktree.', can: 'one failure stops the job' },
+  { name: 'Your checks and policies', does: 'Your repo’s own typecheck, lint and tests, plus the rules you approved.', can: 'sends it back or stops the job' },
   { name: 'Evaluator', does: 'A different agent reviews the work.', can: 'can send it back' },
   { name: 'Judge', does: 'An AI judge reads the evidence cold.', can: 'can fail a gate, never approve alone' },
   { name: 'QE acceptance', does: 'Garden’s QE pipeline, read from the QE ledger.', can: 'only an attributed PASS delivers' },
@@ -82,8 +90,9 @@ const WORKFLOWS = [
   { name: 'feature', steps: 'clarify → design → build → adversarial-review → test → review' },
   { name: 'bug', steps: 'triage → reproduce → fix → verify' },
   { name: 'migration', steps: 'plan → execute → cutover → verify → cleanup' },
-  { name: 'mcp-server', steps: 'build an MCP server, then install it after your consent' },
-  { name: 'editor-plugin', steps: 'scaffold a studio editor, test it, install it after your consent' },
+  { name: 'mcp-server', steps: 'build an MCP server, install it on consent' },
+  { name: 'editor-plugin', steps: 'build and test an editor, install on consent' },
+  { name: 'domain-extraction', steps: 'map code to requirements until 80% are real' },
 ];
 
 // Injected at build time from packages/crew/package.json via astro.config.mjs (DT-7).
@@ -157,7 +166,7 @@ const crewVersion = __WICKED_CREW_VERSION__;
     <div class="wrap">
       <div class="sec-head">
         <h2 id="gates-h">Every gate says what it checked.</h2>
-        <p class="sec-sub">A gate decides on the layers that actually ran. One failed check stops the job, and no model can approve on its own.</p>
+        <p class="sec-sub">A gate decides on the layers that actually ran. A failed check sends the work back or stops the job, and no model can approve on its own.</p>
       </div>
       <table class="tbl tbl--layers">
         <thead><tr><th scope="col">Layer</th><th scope="col">What it checks</th><th scope="col">Its power</th></tr></thead>
@@ -211,6 +220,7 @@ const crewVersion = __WICKED_CREW_VERSION__;
         </table>
       </div>
       <ul class="facts facts--cards" role="list">
+        <li><b>Power mode by default.</b> When a job changes your code, one agent builds the whole change in checkpointed turns, its rigor re-scored from the diff; the hand-off runs the review and QE that rigor calls for.</li>
         <li><b>Crash-resumable.</b> A daemon that dies mid-job resumes it at boot, at the step it was on.</li>
         <li><b>One open API.</b> Studio ships inside crew and uses the same <code>/api/v1</code> and <code>/ws</code> your tools can.</li>
         <li><b>Headless too.</b> <code>wicked-crew start</code>, the REST API, or <code>wicked-crew mcp</code> for agents.</li>
