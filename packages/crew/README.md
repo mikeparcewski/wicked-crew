@@ -73,8 +73,11 @@ curl -X POST http://127.0.0.1:7701/api/v1/runs \
 # 3. Watch it move through the workflow's phases; approve or reject at the gates.
 ```
 
-One run token moves through the workflow's phases with a gate between every one — e.g. for
-`feature`: clarify → design → build → adversarial-review → test → review. Each phase is executed
+A launch on a repository runs in **power mode** by default: one orchestrator seat builds the whole
+change in checkpointed turns, rigor is re-scored from the actual diff, and the hand-off runs the
+review, security and QE steps that rigor calls for. Phased (`power: false`, or a launch power mode
+cannot run, such as one with no repository), one run token moves through the workflow's phases with a gate between every one — e.g.
+for `feature`: clarify → design → build → adversarial-review → test → review. Each phase is executed
 by a versioned skill on an assigned CLI worker; the gates decide, and every decision is audited.
 
 ## The governed-run model

@@ -24,9 +24,10 @@ garden supplies the skills, estate holds the record, and crew runs each job betw
   you launch it explicitly as "reduced assurance", which is labelled on the job, every gate and the
   delivery. crew never turns that on for you.
 - **Tested before delivery, with the evidence.** Jobs that change your app (`feature`, `bug`,
-  `migration`, `mcp-server`) are not delivered until QE acceptance reads an attributed PASS. A gate
-  says what it checked, one failed check stops the job, and "done" is re-derived from evidence,
-  never asserted. Jobs are durable workflows defined as data, crash-resumable, and exportable as
+  `migration`, `mcp-server`) are not delivered until QE acceptance reads an attributed PASS, unless
+  the change scores in the lowest band or you skip it with a reason, and either is labelled. A gate
+  says what it checked, a failed check sends the work back or stops the job, and "done" is
+  re-derived from evidence, never asserted. Jobs are durable workflows defined as data, crash-resumable, and exportable as
   evidence.
 
 Under the hood it's a daemon (`wicked-crew serve`) plus CLI and the bundled studio console. The
@@ -184,7 +185,20 @@ pay for instead of replacing them.
 
 ## The governed lifecycle
 
-One run token moves through the workflow's phases with a gate between every one — e.g. for `feature`:
+**Power mode is the default.** A launch on a repository (`repoRef`) of a preset workflow (the
+built-ins are presets) or a plan runs as one long-lived orchestrator session: one seat builds the
+whole change in checkpointed turns (the launch's `power`, else Settings → `powerModeDefault`, on
+when unset). The PA's scope step sizes
+the rigor at intake, where garden's QE risk assessor and test strategist can only raise the engine's
+own band, and the engine re-scores the actual diff at each checkpoint. The hand-off then runs the
+evaluator steps that rigor calls for (review on a distinct seat, security review at the highest
+band, QE acceptance when required) and the build's own floor. A NOT-PASS goes back to the same
+orchestrator, up to three rounds, and then the run asks you. A power run has no plan-approval gate:
+its human gate is deliver, plus whatever policy requires. Any other launch, or an engine without
+power mode, runs **phased**, and the launch answer says so.
+
+Phased, one run token moves through the workflow's phases with a gate between every one — e.g. for
+`feature`:
 
 ```
 clarify → design → build → adversarial-review → test → review
