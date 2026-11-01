@@ -125,13 +125,15 @@ ungoverned seat, so the operator sees it at the intake gate.
 
 On the container floor each seat runs in its own image. The engine builds a missing image on first
 use (a unit that needs it waits minutes while it builds); an operator's own image
-(`WICKED_SEAT_IMAGE_<CLI>`) is never built, so a missing one is yours to rebuild or pull. `GET /api/v1/system` reports them in the
-`seat_images` infra row, read from the engine's `seat-image status --json`: whether each roster
-seat's image, the floor image and the operator's base are present and held against the container
-runtime's image cleanup, plus the runtime VM's disk. The row is degraded when an image is missing or
-not yet held, the base is missing, or the VM disk reaches 75%; it is down when a missing image
+(`WICKED_SEAT_IMAGE_<CLI>`) is never built, so a missing one is yours to rebuild or pull. `GET
+/api/v1/system` reports them in the `seat_images` infra row, read from the engine's `seat-image
+status --json`: whether each roster seat's image, the floor image and the operator's base are
+present and held against the container runtime's image cleanup, plus the runtime VM's disk. The row
+is degraded when an image is missing, not yet held on a runtime that can hold images
+(`holdSupported`), the base is missing, or the VM disk reaches 75%; it is down when a missing image
 cannot be built or the disk reaches 92%. A missing or unheld image the engine can build is a
 needs-you item whose action is `rebuild_seat_images` ("Rebuild seat images"); the action is not
 offered while a rebuild runs, while the VM disk is at or past 75% (free the disk first), or when a
-missing image cannot be built (an operator's own image, or a base with no recipe). That calls `POST /api/v1/system/seat-images/rebuild`:
-a person's only, one rebuild at a time, its live output on the row.
+missing image cannot be built (an operator's own image, or a base with no recipe). That calls `POST
+/api/v1/system/seat-images/rebuild`: a person's only, one rebuild at a time, its live output on the
+row.

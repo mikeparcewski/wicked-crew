@@ -195,8 +195,9 @@ dispatch as they would phased. The PA's scope step sizes the rigor at intake, wh
 assessor and test strategist can only raise the engine's own band, and the engine re-scores the
 actual diff at each checkpoint. The hand-off then runs the evaluator steps that rigor calls for
 (review on a distinct seat, security review at the highest band, QE acceptance when required) and
-the build's own floor. A NOT-PASS goes back to the same orchestrator, up to three rounds, and then
-the run asks you. A power run skips the run-level plan approval, though a high-risk plan, or a
+the build's own floor. An evaluator's NOT-PASS, or a red floor check, goes back to the same
+orchestrator, up to three rounds, and then the run asks you; a floor check that timed out, or that
+fails on the base too, asks you at once. A power run skips the run-level plan approval, though a high-risk plan, or a
 revision that turns high-risk, still asks you first. Gates the workflow itself authors still pause
 (feature's adversarial-review confirmation, migration's cutover, an install's consent), and delivery
 waits at its own deliver gate unless the launch asked for `deliverGate: "auto"`. Any other launch, or
@@ -229,9 +230,12 @@ run's budget is spent (`maxPages`, `maxMinutes`, `pageSize` beside the minimum) 
 lower the minimum for that repository, or stop. Then a coverage step checks the share and
 `wicked-core domain-graph` builds the graph into the repository's estate store; nothing is written
 into the checkout. `GET /api/v1/repos/:id/requirements` lists it, with `coverage` (`realPct` against
-`minPct`, real, placeholders, unmapped), `graphBuild` (whether the listed build is behind the store's
-numbers), and on each item its `placeholder` flag and `corroboration` (validated by independent
-sources, or unconfirmed and why). A repository with no graph yet answers a typed 404
+`minPct`, real, placeholders, unmapped) and `graphBuild` (whether the listed build is behind the
+header: its counts differ, or its rows' verdicts do not add up to them). Each item carries its
+`placeholder` flag, `uncounted` when the share does not count it (a TypeScript shape, outside product
+code, or no longer indexed), and `corroboration` (validated by independent sources, or unconfirmed
+and why); the page's `uncounted` totals say why the list holds more rows than the header. The list
+opens on real requirements, then placeholders, then uncounted rows, then config and data. A repository with no graph yet answers a typed 404
 (`code: "notGenerated"`) that names the workflow to run.
 
 **Every run proposes what it learned.** At its checkpoints, a test that failed and then passed on
@@ -263,10 +267,10 @@ run.
 > the engine also runs the **repo checks floor**: the repository's own typecheck, lint and tests. They
 > come from the base commit's build guide (`.wicked/build-guide.json`) for the directories it covers
 > (a stale guide runs its checks and the detected ones together), else from `.wicked/checks.json` and
-> what `package.json` or `Cargo.toml` declare. A failing check is compared with the same check on the
-> run's base, so a new failure is told apart from one the base already had. Phases
-> without a pin engage the full gate only once an operator authors, approves, and pins a task-specific
-> validator into the def.
+> what `package.json` or `Cargo.toml` declare. A failing check (other than the dependency install and
+> the formatter) is compared with the same check on the run's base, so a new failure is told apart
+> from one the base already had. Phases without a pin engage the full gate only once an operator
+> authors, approves, and pins a task-specific validator into the def.
 
 The deterministic gate check is not a generic precanned assertion. A **test-strategy agent authors a
 grounded validation script** for that specific phase/task — stored as the phase's **evidence
