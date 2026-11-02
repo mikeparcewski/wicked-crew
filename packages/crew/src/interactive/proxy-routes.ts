@@ -495,6 +495,28 @@ export async function prepareDocCreate(
   };
 }
 
+/** The destinations a browser names for loading a document into a frame (Fetch `Sec-Fetch-Dest`). */
+const FRAME_DESTINATIONS = new Set(['iframe', 'frame', 'embed', 'object', 'fencedframe']);
+
+/**
+ * Whether this request loads a document into a frame for a page of another site. Studio's own frames are same-origin;
+ * an editor plugin's frame is sandboxed with an opaque origin, so a navigation it starts is always `cross-site`. A
+ * document served here runs with its own policy, not an editor bundle's WebRTC guard (`editors/webrtc-guard.ts`), and
+ * studio's shell lets any of its frames point here, so an editor frame could otherwise navigate itself to a document
+ * and run that document's scripts in a fresh realm. A browser sends `Sec-Fetch-*` only to a trustworthy origin
+ * (localhost, https); without them the request is let through.
+ */
+export function isCrossSiteFrameLoad(headers: IncomingHttpHeaders): boolean {
+  const one = (name: string): string => {
+    const v = headers[name];
+    return (Array.isArray(v) ? v[0] : v)?.toLowerCase() ?? '';
+  };
+  return one('sec-fetch-mode') === 'navigate' && one('sec-fetch-site') === 'cross-site' && FRAME_DESTINATIONS.has(one('sec-fetch-dest'));
+}
+
+/** The words a refused frame shows. */
+export const CROSS_SITE_FRAME_REFUSED = 'This document opens only in studio, not from inside another page or an editor plugin.';
+
 export function registerInteractiveProxy(app: FastifyInstance, adapter: CoreAdapter, deps: InteractiveProxyDeps): void {
   const { settings, pool } = deps;
   // Strips exactly the mount prefix off the RAW url, leaving the remainder + query untouched.
@@ -516,6 +538,11 @@ export function registerInteractiveProxy(app: FastifyInstance, adapter: CoreAdap
     /** One proxied request — the wildcard and the typed create route share it. */
     const serve = async (req: FastifyRequest, reply: FastifyReply): Promise<FastifyReply> => {
       const { projectId } = req.params as { projectId: string };
+      // An editor plugin's frame navigating itself here would run a document's scripts outside its WebRTC guard.
+      if (isCrossSiteFrameLoad(req.headers)) {
+        deps.log?.(`interactive ${req.method} ${req.url}: refused, a frame of another site (an editor plugin's or another page's) asked for it`);
+        return reply.code(403).type('text/plain; charset=utf-8').send(CROSS_SITE_FRAME_REFUSED);
+      }
       const prefix = `${API_PREFIX}/projects/${encodeURIComponent(projectId)}/interactive`;
 
       const root = await rootFor(projectId);

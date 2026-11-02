@@ -28,8 +28,8 @@
  * compute, so it doesn't run. The editor breaks visibly, and nothing runs without the prelude. A first-party bundle
  * keeps `'unsafe-inline'` (it is studio's own code), so there the prelude is only where the scanner finds a script.
  *
- * Every distinct script adds a hash to one response header, so a third-party bundle may hold at most
- * {@link MAX_SCRIPT_HASHES} distinct inline scripts; past that crew refuses to serve it, with the reason.
+ * Every script gains the prelude and a hash in one response header, so a third-party bundle may hold at most
+ * {@link MAX_INLINE_SCRIPTS} inline scripts; past that crew refuses to serve it, with the reason.
  */
 
 import { createHash } from 'node:crypto';
@@ -69,36 +69,60 @@ export const WEBRTC_PRELUDE =
   'for(i=0;i!==n.length;i++){o.defineProperty(w,n[i],{value:void 0,writable:false,configurable:false});' +
   'if(w[n[i]]!==void 0)throw ' + JSON.stringify(WEBRTC_PRELUDE_REFUSAL) + '}})(window,({}).constructor);\n';
 
-/** The most distinct inline scripts a third-party bundle may hold: each is one hash in the response's policy header. */
-export const MAX_SCRIPT_HASHES = 200;
+/** The most inline scripts a third-party bundle may hold: each gains the prelude and is one hash in the policy header. */
+export const MAX_INLINE_SCRIPTS = 200;
 
 const LINE_END = /[\n\r\u2028\u2029]/;
 const SPACE = /\s/;
+const IDENTIFIER_PART = /[\w$\u0080-\uFFFF]/;
+
+/**
+ * Whether a directive with no `;` ends before `text[i]` by automatic semicolon insertion: a line ended after it, and
+ * what follows cannot continue the expression (end of text, a statement-starting word other than `in`/`instanceof`, a
+ * number, a string or a block). Any operator, bracket, dot or template continues it, so it does not count.
+ */
+function endsByAsi(text: string, i: number): boolean {
+  if (i >= text.length) return true;
+  const c = text[i]!;
+  if (c === '"' || c === "'" || c === '{' || /[0-9]/.test(c)) return true;
+  if (!IDENTIFIER_PART.test(c)) return false;
+  let j = i;
+  while (j < text.length && IDENTIFIER_PART.test(text[j]!)) j++;
+  const word = text.slice(i, j);
+  return word !== 'in' && word !== 'instanceof';
+}
 
 /**
  * Where the prelude goes in a script's text, read the way a JavaScript lexer reads it: past a hashbang line and a
- * directive prologue (each directive a string literal ended by its own `;`), with whitespace and comments between.
- * No regular expression does this: a backtracking pattern can be made to end a comment early or late. Here a block
- * comment ends at its first `*\/` and a line comment at the end of its line, exactly as in JavaScript, so the place
- * found is never inside a comment or a string, and nothing before it is code. Anything else ends the prologue.
+ * directive prologue (string-literal statements, each ended by its own `;` or by automatic semicolon insertion), with
+ * whitespace and comments between. No regular expression does this: a backtracking pattern can be made to end a
+ * comment early or late. Here a block comment ends at its first `*\/` and a line comment at the end of its line, exactly
+ * as in JavaScript, so nothing before the place found is code. `semicolon` says the last directive ended by insertion,
+ * so the prelude must be written after a `;` of its own.
  */
-export function prologueEnd(text: string): { at: number; afterHashbang: boolean } {
+export function prologueEnd(text: string): { at: number; afterHashbang: boolean; semicolon: boolean } {
   const n = text.length;
   let i = 0;
   let at = 0;
   let afterHashbang = false;
+  let semicolon = false;
   if (text.startsWith('#!')) {
     while (i < n && !LINE_END.test(text[i]!)) i++;
     at = i;
     afterHashbang = true;
   }
-  /** Past whitespace and whole comments; false at a block comment that never closes. */
+  let crossed = false;
+  /** Past whitespace and whole comments (noting a line end); false at a block comment that never closes. */
   const skip = (): boolean => {
     for (;;) {
-      while (i < n && SPACE.test(text[i]!)) i++;
+      while (i < n && SPACE.test(text[i]!)) {
+        if (LINE_END.test(text[i]!)) crossed = true;
+        i++;
+      }
       if (text.startsWith('/*', i)) {
         const close = text.indexOf('*/', i + 2);
         if (close < 0) return false;
+        if (LINE_END.test(text.slice(i, close))) crossed = true;
         i = close + 2;
       } else if (text.startsWith('//', i)) {
         while (i < n && !LINE_END.test(text[i]!)) i++;
@@ -120,19 +144,30 @@ export function prologueEnd(text: string): { at: number; afterHashbang: boolean 
       j += 1;
     }
     if (!closed) break;
+    const end = j;
     i = j;
-    if (!skip() || text[i] !== ';') break;
-    i += 1;
-    at = i;
+    crossed = false;
+    if (!skip()) break;
+    if (text[i] === ';') {
+      i += 1;
+      at = i;
+      semicolon = false;
+    } else if ((crossed || i >= n) && endsByAsi(text, i)) {
+      at = end;
+      semicolon = true;
+    } else {
+      break;
+    }
     afterHashbang = false;
   }
-  return { at, afterHashbang };
+  return { at, afterHashbang, semicolon };
 }
 
-/** `text` with the prelude before its first statement (see {@link prologueEnd}); after a lone hashbang, on its own line. */
+/** `text` with the prelude before its first statement (see {@link prologueEnd}): after a `;` of its own when the last
+ *  directive ended by insertion, and on its own line after a lone hashbang. */
 export function withPrelude(text: string): string {
-  const { at, afterHashbang } = prologueEnd(text);
-  return text.slice(0, at) + (afterHashbang ? '\n' : '') + WEBRTC_PRELUDE + text.slice(at);
+  const { at, afterHashbang, semicolon } = prologueEnd(text);
+  return text.slice(0, at) + (semicolon ? ';' : '') + (afterHashbang ? '\n' : '') + WEBRTC_PRELUDE + text.slice(at);
 }
 
 /** One served bundle: its bytes with the prelude in every inline script, and those scripts' sha256 (base64). */
@@ -140,6 +175,8 @@ export interface GuardedBundle {
   body: Buffer;
   /** base64 sha256 of each prefixed script's text, as the browser hashes it; in document order. */
   scriptHashes: string[];
+  /** Set (and nothing built) when the bundle holds more running inline scripts than the limit allowed. */
+  tooMany?: number;
 }
 
 /** The essences HTML runs as a classic script (HTML "JavaScript MIME type essence match"). */
@@ -238,6 +275,13 @@ export function inlineScripts(html: string): InlineScript[] {
   };
 
   /** Where a script's text ends (the `<` of its end tag, or end of file), from `p` just after its start tag. */
+  // The next `-->`, `--!>` from where the scan is: found once and kept while it is still ahead, so a long run of `<`
+  // after an open `<!--` costs one search, not one per `<` (the scan stays linear in the bundle's size).
+  const ahead = { close: -2, bang: -2 };
+  const nextFrom = (key: 'close' | 'bang', needle: string, from: number): number => {
+    if (ahead[key] === -2 || (ahead[key] !== -1 && ahead[key] < from)) ahead[key] = s.indexOf(needle, from);
+    return ahead[key];
+  };
   const scriptTextEnd = (p: number): number => {
     let state: 'data' | 'escaped' | 'double' = 'data';
     let i = p;
@@ -251,7 +295,7 @@ export function inlineScripts(html: string): InlineScript[] {
         continue;
       }
       const lt = s.indexOf('<', i);
-      const close = s.indexOf('-->', i);
+      const close = nextFrom('close', '-->', i);
       if (close >= 0 && (lt < 0 || close < lt)) { state = 'data'; i = close + 3; continue; }
       if (lt < 0) return n;
       if (at(lt, '</script') && delimited(lt + 8)) {
@@ -277,8 +321,8 @@ export function inlineScripts(html: string): InlineScript[] {
     if (at(lt, '<!--')) {
       if (s[lt + 4] === '>') { i = lt + 5; continue; }
       if (s.startsWith('->', lt + 4)) { i = lt + 6; continue; }
-      const a = s.indexOf('-->', lt + 4);
-      const b = s.indexOf('--!>', lt + 4);
+      const a = nextFrom('close', '-->', lt + 4);
+      const b = nextFrom('bang', '--!>', lt + 4);
       const end = a < 0 ? (b < 0 ? -1 : b + 4) : b < 0 || a < b ? a + 3 : b + 4;
       if (end < 0) break;
       i = end;
@@ -345,13 +389,15 @@ export function inlineScripts(html: string): InlineScript[] {
  * Newlines are normalized first (the HTML parser turns CRLF and CR into LF before anything else, so the DOM is the same
  * and a script's text is what crew hashes). A NUL in a script's text reaches the parser as U+FFFD, so crew writes it so.
  */
-export function guardBundle(bytes: Buffer): GuardedBundle {
+export function guardBundle(bytes: Buffer, maxScripts = Number.POSITIVE_INFINITY): GuardedBundle {
   const html = bytes.toString('utf8').replace(/\r\n?/g, '\n');
+  const scripts = inlineScripts(html).filter((x) => x.runs);
+  // Counted before anything is built: each script gains the prelude, so many small ones would multiply the body.
+  if (scripts.length > maxScripts) return { body: Buffer.alloc(0), scriptHashes: [], tooMany: scripts.length };
   const parts: string[] = [];
   const scriptHashes: string[] = [];
   let last = 0;
-  for (const script of inlineScripts(html)) {
-    if (!script.runs) continue;
+  for (const script of scripts) {
     const text = withPrelude(html.slice(script.start, script.end).replace(/\0/g, '\uFFFD'));
     parts.push(html.slice(last, script.start), text);
     last = script.end;

@@ -13,7 +13,7 @@ import { describe, expect, it } from 'vitest';
 import { bundleHeaders } from '../src/editors/csp.js';
 import { sha256Of, type EditorRecord } from '../src/editors/registry.js';
 import { serveBundle } from '../src/editors/routes.js';
-import { decodeAttribute, guardBundle, inlineScripts, MAX_SCRIPT_HASHES, withPrelude, WEBRTC_GLOBALS, WEBRTC_PRELUDE, WEBRTC_PRELUDE_REFUSAL } from '../src/editors/webrtc-guard.js';
+import { decodeAttribute, guardBundle, inlineScripts, MAX_INLINE_SCRIPTS, withPrelude, WEBRTC_GLOBALS, WEBRTC_PRELUDE, WEBRTC_PRELUDE_REFUSAL } from '../src/editors/webrtc-guard.js';
 
 const P = WEBRTC_PRELUDE;
 const b64 = (t: string): string => createHash('sha256').update(t, 'utf8').digest('base64');
@@ -99,7 +99,12 @@ describe('guardBundle: the prelude goes first in every inline script that runs, 
     // A hashbang alone: the prelude goes on the next line, never into the hashbang's comment.
     expect(withPrelude('#!/usr/bin/env node\ny()')).toBe(`#!/usr/bin/env node\n${P}\ny()`);
     // Without its own `;` a directive is not skipped (ASI could join it to the next line): the prelude goes first.
-    expect(withPrelude('"use strict"\nb()')).toBe(`${P}"use strict"\nb()`);
+    // Ended by automatic semicolon insertion (a line ends, a statement follows): kept first, with crew's own `;`.
+    expect(withPrelude('"use strict"\nb()')).toBe(`"use strict";${P}\nb()`);
+    // A line that continues the expression ("(", "in", an operator): no insertion there, the prelude goes first.
+    expect(withPrelude('"use strict"\n(b)')).toBe(`${P}"use strict"\n(b)`);
+    expect(withPrelude('"use strict"\nin b')).toBe(`${P}"use strict"\nin b`);
+    expect(withPrelude('"a" b')).toBe(`${P}"a" b`);
     // A string that starts an expression is not a directive.
     expect(withPrelude("'use strict';\n'x'+y")).toBe(`'use strict';${P}\n'x'+y`);
     const { body, hashes } = guard('<script>"use strict";x</script>');
@@ -208,6 +213,12 @@ describe('the prelude: WebRTC is gone from the window, for good, before the edit
     expect(withPrelude('/* never closed')).toBe(`${P}/* never closed`);
   });
 
+  it('a directive ended by automatic semicolon insertion keeps strict mode, and the prelude still runs first', () => {
+    const ctx = fakeWindow();
+    runInContext(withPrelude('"use strict"\nwindow.strict = (function(){ return this })() === undefined; window.seen = typeof RTCPeerConnection;'), ctx);
+    expect(runInContext('window.strict + " " + window.seen', ctx)).toBe('true undefined');
+  });
+
   it('a script with a hashbang and no directive still runs the prelude first (it is not swallowed by the hashbang)', () => {
     const ctx = fakeWindow();
     runInContext(withPrelude('#!/usr/bin/env node\nwindow.seen = typeof RTCPeerConnection;'), ctx);
@@ -280,18 +291,32 @@ describe('the policy header has a budget: a third-party bundle with too many dis
   };
   const scripts = (count: number): string => Array.from({ length: count }, (_, i) => `<script>s${i}()</script>`).join('');
 
-  it(`${MAX_SCRIPT_HASHES} distinct scripts are served; one more is a 409 that says why; repeats count once`, () => {
-    expect(serve(scripts(MAX_SCRIPT_HASHES), false).code).toBe(200);
-    const over = serve(scripts(MAX_SCRIPT_HASHES + 1), false);
+  it(`${MAX_INLINE_SCRIPTS} scripts are served; one more is a 409 that says why; repeats count (each gains the prelude); the header lists each hash once`, () => {
+    expect(serve(scripts(MAX_INLINE_SCRIPTS), false).code).toBe(200);
+    const over = serve(scripts(MAX_INLINE_SCRIPTS + 1), false);
     expect(over.code).toBe(409);
     expect(over.body).toMatchObject({ code: 'bundle_too_many_scripts' });
     expect(String((over.body as { error: string }).error)).toMatch(/at most 200/);
-    const repeated = serve(scripts(MAX_SCRIPT_HASHES) + '<script>s0()</script>'.repeat(50), false);
+    // Many copies of one tiny script would otherwise multiply the body by the prelude's size.
+    expect(serve('<script></script>'.repeat(MAX_INLINE_SCRIPTS + 1), false).code).toBe(409);
+    const repeated = serve('<script>s0()</script>'.repeat(10), false);
     expect(repeated.code).toBe(200);
-    expect(repeated.headers['Content-Security-Policy']!.match(/'sha256-/g)).toHaveLength(MAX_SCRIPT_HASHES);
+    expect(repeated.headers['Content-Security-Policy']!.match(/'sha256-/g)).toHaveLength(1);
+  });
+
+  it('scanning is linear: a script that opens "<!--" and then holds a megabyte of "<" is guarded quickly', () => {
+    const big = `<script>var t="<!--${'<'.repeat(1_000_000)}";</script>`;
+    const started = Date.now();
+    const g = guardBundle(Buffer.from(big));
+    expect(g.scriptHashes).toHaveLength(1);
+    expect(Date.now() - started).toBeLessThan(3000); // quadratic took ~9 s here; linear takes milliseconds
+    const comments = `${'<!-- c -->'.repeat(100_000)}<script>x()</script>`;
+    const t2 = Date.now();
+    expect(guardBundle(Buffer.from(comments)).scriptHashes).toHaveLength(1);
+    expect(Date.now() - t2).toBeLessThan(3000);
   });
 
   it('a first-party bundle has no hash list, so no budget', () => {
-    expect(serve(scripts(MAX_SCRIPT_HASHES + 1), true).code).toBe(200);
+    expect(serve(scripts(MAX_INLINE_SCRIPTS + 1), true).code).toBe(200);
   });
 });

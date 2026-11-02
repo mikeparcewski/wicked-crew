@@ -15,6 +15,7 @@
  * browser, the probe is skipped and says why.
  */
 import { createSocket, type Socket } from 'node:dgram';
+import { createServer as createHttpServer, type Server } from 'node:http';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -25,6 +26,10 @@ import type { Browser } from 'playwright';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { registerFrameGuard } from '../src/api/frame-guard.js';
+import type { InteractiveBridgePool, LiveBridge } from '../src/interactive/bridge-pool.js';
+import { registerInteractiveProxy } from '../src/interactive/proxy-routes.js';
+import type { ProjectSettingsStore } from '../src/projects/settings.js';
+import type { CoreAdapter } from '../src/core/adapter.js';
 import { requestOrigin, shellCsp } from '../src/editors/csp.js';
 import { sha256Of, type EditorRecord } from '../src/editors/registry.js';
 import { serveBundle } from '../src/editors/routes.js';
@@ -72,7 +77,7 @@ const MODULE_ALONE_IN_CHILD =
 /** What the guard says when it stops a script (`WEBRTC_PRELUDE_REFUSAL`), as the console shows it. */
 const REFUSED = 'WebRTC is not available in an editor frame';
 
-const ATTEMPTS: Record<string, { code: string; childMustReport?: string; extra?: string; consoleMust?: string }> = {
+const ATTEMPTS: Record<string, { code: string; childMustReport?: string; extra?: string; consoleMust?: string; consoleTimes?: number; mustNotSay?: string }> = {
   direct: { code: "rtc(window,'direct')" },
   restore: { code: "try{delete window.RTCPeerConnection}catch(e){};Object.getOwnPropertyNames(window).forEach(function(k){if(/RTC/.test(k)&&typeof window[k]==='function')report('found:'+k)});rtc(window,'restore')" },
   'srcdoc-copy': { code: "var f=document.createElement('iframe');f.srcdoc=CHILD;document.body.appendChild(f)", childMustReport: 'child:no-ctor' },
@@ -89,7 +94,11 @@ const ATTEMPTS: Record<string, { code: string; childMustReport?: string; extra?:
   'navigate-refresh': { code: "var m=document.createElement('meta');m.httpEquiv='refresh';m.content='0;url='+URL.createObjectURL(new Blob([CHILD],{type:'text/html'}));document.head.appendChild(m)", childMustReport: 'child:no-ctor' },
   'navigate-fresh': { code: "location.href=URL.createObjectURL(new Blob([FRESH],{type:'text/html'}))" },
   'navigate-javascript': { code: "location.href='javascript:'+JSON.stringify(CHILD)" },
-  'module-shadow': { code: MODULE_ALONE_IN_CHILD, extra: SHADOWING_MODULE, consoleMust: REFUSED },
+  // The guard must stop the module twice: in the bundle's realm, and alone in the child's.
+  'module-shadow': { code: MODULE_ALONE_IN_CHILD, extra: SHADOWING_MODULE, consoleMust: REFUSED, consoleTimes: 2 },
+  // Studio's shell lets a frame point at crew's interactive proxy; a document there runs its own scripts (the stand-in
+  // upstream below serves one that tries WebRTC). The proxy must refuse the editor frame's navigation.
+  'navigate-proxy': { code: "location.href='/api/v1/projects/default/interactive/d/x/doc/1?port='+U", mustNotSay: 'proxy-doc-ran' },
 };
 
 /** A well-behaved bundle with awkward scripts: every one must run under the guard, with no policy violation. */
@@ -156,6 +165,8 @@ describe('editor frames: zero WebRTC egress from a hostile plugin (Chromium, cre
   const records = new Map<string, EditorRecord>();
   const control = new Map<string, string>();
   const agentDocs = new Map<string, string>();
+  /** The interactive bridge's stand-in: every document it serves runs a script that tries WebRTC (port from the query). */
+  let docUpstream: Server | null = null;
 
   const record = (id: string, html: string, firstParty: boolean): void => {
     const entryPath = join(dir, `${id}.html`);
@@ -215,17 +226,30 @@ describe('editor frames: zero WebRTC egress from a hostile plugin (Chromium, cre
       if (r === undefined) return reply.code(404).send({});
       return serveBundle(r, reply);
     });
+    docUpstream = createHttpServer((req, res) => {
+      const port = new URL(req.url ?? '/', 'http://x').searchParams.get('port') ?? '0';
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end(`<!doctype html><script>top.postMessage({probe:'proxy-doc-ran'},'*');try{var pc=new RTCPeerConnection({iceServers:[{urls:'stun:127.0.0.1:${Number(port)}'}]});pc.createDataChannel('x');pc.createOffer().then(function(o){return pc.setLocalDescription(o)})}catch(e){}</script>`);
+    });
+    await new Promise<void>((r) => docUpstream!.listen(0, '127.0.0.1', r));
+    const upstreamPort = (docUpstream.address() as { port: number }).port;
+    registerInteractiveProxy(app, {} as unknown as CoreAdapter, {
+      pool: { ensure: async (): Promise<LiveBridge> => ({ host: '127.0.0.1', port: upstreamPort, pid: 0 }) } as unknown as InteractiveBridgePool,
+      settings: { get: () => ({}) } as unknown as ProjectSettingsStore,
+      stateHome: dir,
+    });
     origin = await app.listen({ port: 0, host: '127.0.0.1' });
   });
 
   afterAll(async () => {
     await browser?.close();
     await app?.close();
+    await new Promise<void>((r) => (docUpstream === null ? r() : docUpstream.close(() => r())));
     rmSync(dir, { recursive: true, force: true });
   });
 
   /** One frame load: what the frames reported, the policy refusals in the console, and the packets the sink got. */
-  async function load(src: string, sink: Sink, settleMs = 1500, waitFor?: string): Promise<{ said: string[]; refused: string[]; logs: string[]; packets: number }> {
+  async function load(src: string, sink: Sink, settleMs = 1500, waitFor?: string, logged?: { text: string; times: number }): Promise<{ said: string[]; refused: string[]; logs: string[]; packets: number }> {
     const page = await browser!.newPage();
     const refused: string[] = [];
     const logs: string[] = [];
@@ -241,6 +265,8 @@ describe('editor frames: zero WebRTC egress from a hostile plugin (Chromium, cre
       // A new realm reports later than the plugin itself (a navigation, a child frame): wait for it on a busy runner.
       if (waitFor !== undefined) await page.waitForFunction((m) => (window as unknown as { R: string[] }).R.includes(m), waitFor, { timeout: 10_000 }).catch(() => undefined);
       await page.waitForTimeout(settleMs);
+      // A refusal is logged by whichever realm it happened in, so wait (bounded) until each one has been.
+      for (let waited = 0; logged !== undefined && logs.filter((l) => l.includes(logged.text)).length < logged.times && waited < 8000; waited += 250) await page.waitForTimeout(250);
       const said = (await page.evaluate('window.R')) as string[];
       return { said, refused, logs, packets: sink.packets() };
     } finally {
@@ -277,7 +303,9 @@ describe('editor frames: zero WebRTC egress from a hostile plugin (Chromium, cre
         const sink = await udpSink();
         try {
           record(`acme-${name}`, hostile(ATTEMPTS[name]!.code, sink.port, ATTEMPTS[name]!.extra), false);
-          results[name] = await load(`/api/v1/editors/acme-${name}/1.0.0/entry`, sink, 1500, ATTEMPTS[name]!.childMustReport);
+          const a = ATTEMPTS[name]!;
+          const logged = a.consoleMust !== undefined ? { text: a.consoleMust, times: a.consoleTimes ?? 1 } : undefined;
+          results[name] = await load(`/api/v1/editors/acme-${name}/1.0.0/entry`, sink, 1500, a.childMustReport, logged);
         } finally {
           sink.close();
         }
@@ -291,8 +319,13 @@ describe('editor frames: zero WebRTC egress from a hostile plugin (Chromium, cre
       expect(r.said.filter((m) => /rtc-created|offer-set|^found:|^module-ran|^shadow-called/.test(m)), name).toEqual([]);
       const must = ATTEMPTS[name]!.childMustReport;
       if (must !== undefined) expect(r.said, `${name}: the new realm ran and found no constructor`).toContain(must);
+      const forbidden = ATTEMPTS[name]!.mustNotSay;
+      if (forbidden !== undefined) expect(r.said, `${name}: never ran`).not.toContain(forbidden);
       const stopped = ATTEMPTS[name]!.consoleMust;
-      if (stopped !== undefined) expect(r.logs.some((l) => l.includes(stopped)), `${name}: the guard stopped the script (${JSON.stringify(r.logs)})`).toBe(true);
+      if (stopped !== undefined) {
+        const times = ATTEMPTS[name]!.consoleTimes ?? 1;
+        expect(r.logs.filter((l) => l.includes(stopped)).length, `${name}: the guard stopped the script in each realm (${JSON.stringify(r.logs)})`).toBeGreaterThanOrEqual(times);
+      }
     }
   }, 120_000);
 

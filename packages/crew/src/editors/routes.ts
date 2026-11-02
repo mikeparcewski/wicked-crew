@@ -33,7 +33,7 @@ import type { Actor, ConformanceRule, EditorGrantsResponse, ListEditorsResponse 
 import { bundleHeaders } from './csp.js';
 import { installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from './pack-install.js';
 import { EDITOR_ID, EDITOR_VERSION, EditorRegistry, HOST_BUNDLE_CAP_BYTES, notRealEntry, readCapped, type EditorRecord } from './registry.js';
-import { guardBundle, MAX_SCRIPT_HASHES } from './webrtc-guard.js';
+import { guardBundle, MAX_INLINE_SCRIPTS, type GuardedBundle } from './webrtc-guard.js';
 
 const V = '/api/v1';
 
@@ -268,6 +268,19 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
   );
 }
 
+/** The guarded form of each pinned bundle, built once per hash (a few entries: one per installed editor build). */
+const guardedByHash = new Map<string, GuardedBundle>();
+const GUARDED_KEPT = 32;
+function guardedFor(record: EditorRecord, buf: Buffer): GuardedBundle {
+  const key = `${record.firstParty ? '1' : '3'}:${record.sha256}`;
+  const kept = guardedByHash.get(key);
+  if (kept !== undefined) return kept;
+  const built = guardBundle(buf, record.firstParty ? Number.POSITIVE_INFINITY : MAX_INLINE_SCRIPTS);
+  if (guardedByHash.size >= GUARDED_KEPT) guardedByHash.delete(guardedByHash.keys().next().value!);
+  guardedByHash.set(key, built);
+  return built;
+}
+
 /** Re-hash on every serve: a bundle that changed on disk is refused, never served. */
 export function serveBundle(record: EditorRecord, reply: FastifyReply, log?: (msg: string) => void): FastifyReply {
   // The same fence as discovery, re-applied per serve (codex r1): an entry swapped for a link after
@@ -294,13 +307,13 @@ export function serveBundle(record: EditorRecord, reply: FastifyReply, log?: (ms
     return reply.code(409).send({ code: 'bundle_hash_mismatch', error: `the ${record.manifest.id} bundle on disk no longer matches its pinned hash; restart the daemon to re-pin it` });
   }
   // The prelude goes into every inline script, and a third-party bundle may run only those (`webrtc-guard.ts`). Each
-  // distinct script is one hash in the policy header: past the budget the header would be refused by the browser, so
-  // crew refuses first and says why.
-  const guarded = guardBundle(buf);
-  const distinct = new Set(guarded.scriptHashes).size;
-  if (!record.firstParty && distinct > MAX_SCRIPT_HASHES) {
-    log?.(`[editors] ${record.manifest.id}@${record.manifest.version}: ${distinct} distinct inline scripts, over ${MAX_SCRIPT_HASHES}; refused`);
-    return reply.code(409).send({ code: 'bundle_too_many_scripts', error: `the ${record.manifest.id} bundle has ${distinct} distinct inline scripts; an editor bundle may have at most ${MAX_SCRIPT_HASHES} (merge them into fewer scripts)` });
+  // script gains the prelude and a hash in the policy header: past the budget crew refuses, and says why, rather than
+  // build a body many times the pinned size or a header the browser refuses. The bytes are pinned by their hash, so
+  // the guarded form is kept per hash and built once.
+  const guarded = guardedFor(record, buf);
+  if (guarded.tooMany !== undefined) {
+    log?.(`[editors] ${record.manifest.id}@${record.manifest.version}: ${guarded.tooMany} inline scripts, over ${MAX_INLINE_SCRIPTS}; refused`);
+    return reply.code(409).send({ code: 'bundle_too_many_scripts', error: `the ${record.manifest.id} bundle has ${guarded.tooMany} inline scripts; an editor bundle may have at most ${MAX_INLINE_SCRIPTS} (merge them into fewer scripts)` });
   }
   for (const [k, v] of Object.entries(bundleHeaders(record, guarded.scriptHashes))) reply.header(k, v);
   return reply.type('text/html; charset=utf-8').send(guarded.body);
