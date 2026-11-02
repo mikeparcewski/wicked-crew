@@ -89,8 +89,8 @@ describe('guardBundle: the prelude goes first in every inline script that runs, 
 
   it('newlines are normalized the way the parser does, and a NUL in script text is written as U+FFFD', () => {
     const { body, hashes } = guard('<p>a\r\nb\rc</p><script>x=1;\r\ny=2\u0000</script>');
-    expect(body).toBe(`<p>a\nb\nc</p><script>${P}x=1;\ny=2�</script>`);
-    expect(hashes).toEqual([b64(`${P}x=1;\ny=2�`)]);
+    expect(body).toBe(`<p>a\nb\nc</p><script>${P}x=1;\ny=2\uFFFD</script>`);
+    expect(hashes).toEqual([b64(`${P}x=1;\ny=2\uFFFD`)]);
   });
 
   it('a directive prologue and a hashbang stay first (strict mode is kept); the prelude goes before the first statement', () => {
@@ -115,6 +115,9 @@ describe('guardBundle: the prelude goes first in every inline script that runs, 
     expect(withPrelude('"a"\n.length')).toBe(`${P}"a"\n.length`);
     // An identifier that starts like `in` but goes on with an escape is a name, not the operator.
     expect(withPrelude('"use strict"\nin\\u0078 = 1')).toBe(`"use strict";${P}\nin\\u0078 = 1`);
+    // Unicode whitespace (NBSP, LS) ends a name: `in` followed by one is still the operator, so no insertion there.
+    expect(withPrelude('"a"\nin' + String.fromCharCode(0xa0) + 'x')).toBe(`${P}"a"\nin` + String.fromCharCode(0xa0) + 'x');
+    expect(withPrelude('"a"\nin' + String.fromCharCode(0x2028) + 'x')).toBe(`${P}"a"\nin` + String.fromCharCode(0x2028) + 'x');
     // A string that starts an expression is not a directive.
     expect(withPrelude("'use strict';\n'x'+y")).toBe(`'use strict';${P}\n'x'+y`);
     const { body, hashes } = guard('<script>"use strict";x</script>');

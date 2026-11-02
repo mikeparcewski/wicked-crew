@@ -530,7 +530,9 @@ export function fromFramingPage(referer: string | string[] | undefined, frameGua
   } catch {
     return false;
   }
-  if (url.origin === 'null' || isOwnAuthority(url, ownOrigin)) return false;
+  // A page under the daemon's API (an editor bundle asking for its own URL as Referer) is never a framing page, whatever
+  // Host a reverse proxy forwards; and neither is the daemon's own authority.
+  if (url.origin === 'null' || url.pathname.startsWith('/api/') || isOwnAuthority(url, ownOrigin)) return false;
   const origin = url.origin;
   const csp = Array.isArray(frameGuard) ? frameGuard.join(', ') : typeof frameGuard === 'string' ? frameGuard : '';
   const listed = /frame-ancestors([^;,]*)/i.exec(csp)?.[1]?.trim().split(/\s+/) ?? [];

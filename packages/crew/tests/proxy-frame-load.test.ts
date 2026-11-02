@@ -91,6 +91,9 @@ describe('the interactive proxy refuses a cross-site frame load before the bridg
     expect(await as('localhost:80', 'http://localhost/x')).toBe(403);
     expect(await as('localhost:4200', 'http://localhost:4200/x')).toBe(403); // the daemon on the dev port: still itself
     expect(await as('localhost:7701', 'http://localhost:4200/projects')).toBe(200); // studio's dev server on its own port
+    // An allowed origin's page under /api/ (an editor bundle asking for its own URL as Referer, behind a proxy that
+    // rewrites Host) is never a framing page.
+    expect(await as('127.0.0.1:7701', 'http://localhost:4200/api/v1/editors/acme/1.0.0/entry')).toBe(403);
     expect(await as('127.0.0.1:7701', 'not a url')).toBe(403);
     await a.close();
   });
