@@ -49,16 +49,20 @@ function parseAttrs(raw: string): Record<string, string> {
   return attrs;
 }
 
+/** A tag's attribute run: unquoted characters up to the next `<` or `>`, or quoted values (which may hold `<`, `>` or
+ *  `/>`) of bounded length, so a scan from one opening never runs past a few KiB without a decision. */
+const ATTRS = `(?:[^<>"']|"[^"]{0,4096}"|'[^']{0,4096}')*`;
+
 /**
- * `html` without comments and raw-text bodies (scripts, styles, templates, noscript, svg), in ONE linear pass: each
- * opening is closed with `indexOf`, and an opening that is never closed drops the rest of the document. A lazy regex
- * here would rescan to the end once per unclosed opening (quadratic on a hostile document).
+ * `html` without comments and raw-text bodies (scripts, styles, templates, noscript, svg), in one forward pass over the
+ * document as written (a lower-cased copy can differ in length: `İ` lower-cases to two units). An opening's own `>` is
+ * found with its quoted attributes; only an `<svg … />` closes itself (a `<script />` does not, as in HTML); an `svg`
+ * or `template` nests, so its close is the one that matches it; a raw block ends only at its own close tag, never a
+ * longer name (`</scriptlet>`). An opening that is never closed drops the rest of the document.
  */
 export function stripRaw(html: string): string {
   const out: string[] = [];
-  // Every search runs on `html` itself (a lower-cased copy can differ in length: `İ` lower-cases to two units).
-  // An opening's own `>` is found first: a self-closing `<svg … />` has no body to drop.
-  const open = /<!--|<(script|style|template|noscript|svg)(?=[\s>/])[^<>]*>/gi;
+  const open = new RegExp(`<!--|<(script|style|template|noscript|svg)(?=[\\s>/])(${ATTRS})>`, 'gi');
   let from = 0;
   for (;;) {
     open.lastIndex = from;
@@ -71,16 +75,26 @@ export function stripRaw(html: string): string {
       from = end + 3;
       continue;
     }
-    if (/\/\s*>$/.test(m[0])) {
+    const tag = m[1].toLowerCase();
+    const nests = tag === 'svg' || tag === 'template';
+    if (tag === 'svg' && /\/\s*$/.test(m[2] ?? '')) {
       from = m.index + m[0].length;
       continue;
     }
-    // The close must be the tag itself (`</script>`, `</script >`), never a longer name (`</scriptlet>`).
-    const close = new RegExp(`</${m[1]}(?=[\\s>/])[^<>]*>`, 'gi');
-    close.lastIndex = m.index + m[0].length;
-    const c = close.exec(html);
-    if (c === null) return out.join('');
-    from = c.index + c[0].length;
+    const edge = new RegExp(`<(/?)${tag}(?=[\\s>/])(${ATTRS})>`, 'gi');
+    edge.lastIndex = m.index + m[0].length;
+    let depth = 1;
+    let closedAt = -1;
+    for (let e = edge.exec(html); e !== null; e = edge.exec(html)) {
+      if (e[1] === '/') depth -= 1;
+      else if (nests && !(tag === 'svg' && /\/\s*$/.test(e[2] ?? ''))) depth += 1;
+      if (depth === 0) {
+        closedAt = e.index + e[0].length;
+        break;
+      }
+    }
+    if (closedAt === -1) return out.join('');
+    from = closedAt;
   }
   out.push(html.slice(from));
   return out.join('');
@@ -93,9 +107,9 @@ export function parseHtml(html: string): HtmlNode {
   let depth = 0;
   const src = stripRaw(html);
   // Linear by construction: the tag name ends where name characters end (the lookahead stops it giving characters
-  // back to the attribute run), and the attribute run, quoted values included, stops at the next `<`. A tag that never
-  // closes costs at most the distance to the next tag, never the rest of the document.
-  for (const m of src.matchAll(/<(\/?)([a-zA-Z][\w:-]*)(?![\w:-])((?:[^<>"']|"[^"<]*"|'[^'<]*')*)>|([^<]+)|</g)) {
+  // back to the attribute run), the unquoted attribute run stops at the next `<`, and a quoted value is bounded. A tag
+  // that never closes costs at most a few KiB of scanning, never the rest of the document.
+  for (const m of src.matchAll(new RegExp(`<(\\/?)([a-zA-Z][\\w:-]*)(?![\\w:-])(${ATTRS})>|([^<]+)|<`, 'g'))) {
     if (m[4] !== undefined) {
       cur.children.push(decodeEntities(m[4]));
       continue;

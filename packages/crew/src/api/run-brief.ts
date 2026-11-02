@@ -15,7 +15,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync } from 'node:fs';
+import { closeSync, constants as fsConstants, fstatSync, lstatSync, opendirSync, openSync, readSync, realpathSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 
 import type { SessionView, WorkUnit } from '../core/types.js';
@@ -156,30 +156,44 @@ interface EvidenceFile {
  * budget; text files at or under {@link BRIEF_EVIDENCE_INLINE_MAX} carry their text while the inline budget lasts.
  * A file that changes or disappears during the walk is listed as not read, never a failure of the brief.
  */
-export function readEvidence(root: string): { files: EvidenceFile[]; more: boolean } {
+export function readEvidence(root: string): { files: EvidenceFile[]; more: boolean; deeper: boolean } {
   let realRoot: string;
   try {
     const st = lstatSync(root);
-    if (st.isSymbolicLink() || !st.isDirectory()) return { files: [], more: false };
+    if (st.isSymbolicLink() || !st.isDirectory()) return { files: [], more: false, deeper: false };
     realRoot = realpathSync(root);
   } catch {
-    return { files: [], more: false };
+    return { files: [], more: false, deeper: false };
   }
   const found: Array<{ path: string; size: number }> = [];
   let visited = 0;
   let more = false;
+  let deeper = false;
   const walk = (dir: string, depth: number): void => {
-    let names: string[];
+    // Read entry by entry, and stop at the budget: a directory of a million entries costs the budget, not the million.
+    // Within one directory the entries read are sorted; only past the budget does which ones were read depend on the
+    // file system (and the brief says more were left).
+    const names: string[] = [];
+    let handle;
     try {
-      names = readdirSync(dir);
+      handle = opendirSync(dir);
     } catch {
       return;
     }
-    if (visited + names.length > BRIEF_EVIDENCE_ENTRIES_MAX) {
-      more = true;
-      names = names.slice(0, Math.max(0, BRIEF_EVIDENCE_ENTRIES_MAX - visited));
+    try {
+      for (let e = handle.readSync(); e !== null; e = handle.readSync()) {
+        if (visited >= BRIEF_EVIDENCE_ENTRIES_MAX) {
+          more = true;
+          break;
+        }
+        visited += 1;
+        names.push(e.name);
+      }
+    } catch {
+      /* an unreadable directory lists what was read */
+    } finally {
+      handle.closeSync();
     }
-    visited += names.length;
     for (const name of names.sort()) {
       if (found.length >= BRIEF_EVIDENCE_FILES_MAX) {
         more = true;
@@ -194,7 +208,9 @@ export function readEvidence(root: string): { files: EvidenceFile[]; more: boole
       }
       if (st.isSymbolicLink()) continue;
       if (st.isDirectory()) {
-        if (depth < EVIDENCE_DEPTH_MAX) walk(path, depth + 1);
+        if (depth < EVIDENCE_DEPTH_MAX && visited < BRIEF_EVIDENCE_ENTRIES_MAX) walk(path, depth + 1);
+        else if (depth >= EVIDENCE_DEPTH_MAX) deeper = true;
+        else more = true;
       } else if (st.isFile()) {
         found.push({ path, size: st.size });
       }
@@ -240,7 +256,7 @@ export function readEvidence(root: string): { files: EvidenceFile[]; more: boole
       });
     }
   }
-  return { files, more };
+  return { files, more, deeper };
 }
 
 /** Build one run's brief from crew's records. Never throws for an unreadable output: it says it was not readable. */
@@ -278,16 +294,17 @@ export async function buildRunBrief(view: SessionView, deps: RunBriefDeps): Prom
   lines.push(`- Repository: ${s.repo_ref !== null && s.repo_ref !== '' ? oneLine(s.repo_ref, 120) : 'none'}`);
   lines.push(`- Workflow: ${oneLine(s.workflow_id, 120)}`);
   if (typeof s.delivery === 'string') lines.push(`- Delivery: ${oneLine(s.delivery, 40)}`);
+  // The acceptance line can carry a QE reviewer's reason (agent text): fenced, below.
+  let acceptance: string | null = null;
   if (deps.acceptanceLine !== undefined) {
-    let line: string | null = null;
     try {
-      line = await deps.acceptanceLine(view);
+      acceptance = await deps.acceptanceLine(view);
     } catch {
-      line = 'not readable';
+      acceptance = 'not readable';
     }
-    if (line !== null && line !== '') lines.push(`- Acceptance: ${oneLine(line, 300)}`);
   }
   const problem = cutAtParagraph(String(s.problem ?? ''), PROBLEM_CAP);
+  if (acceptance !== null && acceptance !== '') lines.push('', '## Acceptance, as the QE record states it', '', fenced(oneLine(acceptance, 600)));
   lines.push('', '## Title and what was asked', '', fenced(`${title}\n\n${problem.text}${problem.cut ? '\n[cut]' : ''}`));
 
   const units = [...(view.units ?? [])].sort((a, b) => a.ord - b.ord);
@@ -322,14 +339,15 @@ export async function buildRunBrief(view: SessionView, deps: RunBriefDeps): Prom
   if (typeof s.evidence_root === 'string' && s.evidence_root !== '') {
     const ev = readEvidence(s.evidence_root);
     lines.push('', '## Evidence', '');
-    if (ev.files.length === 0) lines.push('No evidence files.');
+    if (ev.files.length === 0) lines.push(ev.more || ev.deeper ? 'No evidence files within the limits this brief reads.' : 'No evidence files.');
     for (const [i, f] of ev.files.entries()) {
       // A file's name is the run's too: it rides inside the fence, with its contents.
       const head = `file ${i + 1}: ${oneLine(f.rel, 200)} (${f.bytes} bytes${f.sha256 !== null ? `, sha256 ${f.sha256}` : ''})`;
       if (f.text !== null) lines.push(fenced(`${head}\n\n${f.text}`), '');
       else lines.push(fenced(`${head}: not included, ${f.why ?? 'not read'}`), '');
     }
-    if (ev.more) lines.push(`- More files are in the evidence root; only the first ${BRIEF_EVIDENCE_FILES_MAX} are listed.`);
+    if (ev.more) lines.push(`- The evidence root holds more than this brief reads (at most ${BRIEF_EVIDENCE_FILES_MAX} files out of ${BRIEF_EVIDENCE_ENTRIES_MAX} entries); ${ev.files.length} listed.`);
+    if (ev.deeper) lines.push(`- Some files sit deeper than ${EVIDENCE_DEPTH_MAX} folders down and are not listed.`);
   }
 
   const markdown = `${lines.join('\n').trimEnd()}\n`;

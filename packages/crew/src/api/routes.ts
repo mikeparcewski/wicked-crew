@@ -3884,6 +3884,10 @@ export function registerRoutes(
       const requestedRefs = [...(b.repoRef !== undefined ? [b.repoRef] : []), ...(b.repoRefs ?? [])];
       // The scope kind as the open resolves it: the request's, unless an Ask-about-this seed names the repositories.
       let scopeKind = b.scopeKind;
+      // A named scope's SHAPE first (studio#323 R4, codex on #664): a body whose kind refuses its own
+      // projectId/repoRefs is a 400 — never masked by the project lookup's 404/409 below, nor by a seed's reads.
+      const shape = namedKindRefusal(scopeKind, b.projectId, [...new Set(requestedRefs)]);
+      if (shape !== null) return reply.code(400).send({ error: shape.error });
       // DES-CHAT-ARTIFACTS-001 §6.3 (A1): "Ask about this" on a document no open chat holds. Access first (a person,
       // a document that exists), then the scope rule: a chat in no project, or a project chat whose project is the
       // document's mount and holds every repository the document was made about. Only then are the chat's
@@ -3923,16 +3927,19 @@ export function registerRoutes(
           }
         }
         // Seeded: the chat reads the repositories the document was made about, unless the request named its own or a
-        // kind that reads every repository (`everything`) or names its repositories by project (`project`).
-        if (requestedRefs.length === 0 && bound.length > 0 && scopeKind !== 'everything' && scopeKind !== 'project') {
+        // kind that reads every repository (`everything`) or names its repositories by project (`project`). A chat in
+        // no project that asked for no repository (`system`, `none`) becomes the document's repository scope; a
+        // project chat keeps the kind it asked for.
+        const seedable = b.projectId === undefined
+          ? scopeKind === undefined || scopeKind === 'repo' || scopeKind === 'repos' || scopeKind === 'system' || scopeKind === 'none'
+          : scopeKind === undefined || scopeKind === 'repo' || scopeKind === 'repos';
+        if (requestedRefs.length === 0 && bound.length > 0 && seedable) {
           requestedRefs.push(...bound);
           if (scopeKind === 'system' || scopeKind === 'none') scopeKind = undefined;
+          const reshaped = namedKindRefusal(scopeKind, b.projectId, [...new Set(requestedRefs)]);
+          if (reshaped !== null) return reply.code(400).send({ error: reshaped.error });
         }
       }
-      // A named scope's SHAPE first (studio#323 R4, codex on #664): a body whose kind refuses its own
-      // projectId/repoRefs is a 400 — never masked by the project lookup's 404/409 below.
-      const shape = namedKindRefusal(scopeKind, b.projectId, [...new Set(requestedRefs)]);
-      if (shape !== null) return reply.code(400).send({ error: shape.error });
       // Validate the project BEFORE opening seats: a chat has no launch record for the engine to
       // attach against atomically (chats are an in-memory seat pool), so the route validates
       // up-front and attaches right after open — the one non-atomic attach, documented in the ADR
@@ -4471,13 +4478,11 @@ export function registerRoutes(
       let publishContext: () => void = () => undefined;
       if (scope !== undefined && contextAllowed) {
         try {
-          const opened = chatHistory?.entry(id)?.createdAt;
           const built = await buildTurnContext(
             {
               chatId: id,
               scratchRoot: scope.cwd,
               projectId: scope.projectId ?? null,
-              chatOpenedAt: opened !== undefined && Number.isFinite(Date.parse(opened)) ? Date.parse(opened) : null,
               text,
               context: msgContext,
               records: chatTranscripts?.read(id) ?? [],

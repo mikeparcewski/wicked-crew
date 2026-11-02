@@ -91,7 +91,7 @@ describe('run brief (crew records, verbatim, fenced)', () => {
     expect(md).toContain('- Took: 10 min');
     expect(md).toContain('- Project: mikes');
     expect(md).toContain('- Delivery: none');
-    expect(md).toContain('- Acceptance: QE acceptance: not required');
+    expect(md).toContain('## Acceptance, as the QE record states it\n\n```text\nQE acceptance: not required\n```');
     expect(md).toMatch(/1\. 29bbbfb1-0000-4000-8000-000000000001:u1: scope it · seat codex · done/);
     expect(md).toMatch(/2\. .*measure · seat claude · running/);
     expect(md).toContain('Coverage was 61% after the run.');
@@ -139,13 +139,17 @@ describe('run tokens', () => {
     const toks = runTokensOf('Compare runs 29bbbfb1, 679ca85b and run:57443b2b, also run:release-check. Commit deadbeef.', page);
     expect(toks.map((t) => [t.token, t.explicit])).toEqual([
       // every id in a "runs a, b and c" list is said as a run; a bare hex word is not
-      ['29bbbfb1', true], ['679ca85b', true], ['57443b2b', true], ['deadbeef', false],
-      // `run:<id>` takes any run id
-      ['release-check', true],
+      ['29bbbfb1', true], ['679ca85b', true], ['deadbeef', false],
+      // `run:<id>` takes any run id (read after the hex ids)
+      ['57443b2b', true], ['release-check', true],
       // the page's own run is looked up silently (a chat's page is not a run); a chip is said as a run
       ['9b43ee44-0000-4000-8000-000000000000', false], ['11111111-0000-4000-8000-000000000000', true],
     ]);
     expect(runTokensOf('see /s/abc', 'where: Chat (/s/7c1d2e3f-0000-4000-8000-000000000000)').map((t) => t.explicit)).toEqual([false]);
+    // An Oxford comma keeps the list going; a hex part inside `run:<id>` is not a second id; a uuid's first groups are one id.
+    expect(runTokensOf('runs 29bbbfb1, 679ca85b, and 57443b2b', undefined).map((t) => [t.token, t.explicit])).toEqual([['29bbbfb1', true], ['679ca85b', true], ['57443b2b', true]]);
+    expect(runTokensOf('see run:deadbeef-v1 please', undefined).map((t) => [t.token, t.explicit])).toEqual([['deadbeef-v1', true]]);
+    expect(runTokensOf('run 29bbbfb1-1111 then', undefined).map((t) => [t.token, t.explicit])).toEqual([['29bbbfb1-1111', true]]);
   });
 });
 
@@ -166,7 +170,7 @@ describe('buildTurnContext', () => {
   };
 
   const input = (over: Partial<TurnContextInput>): TurnContextInput => ({
-    chatId: 'chat-1', scratchRoot: join(scratch, 'chat-root'), projectId: 'mikes', chatOpenedAt: 1_790_000_000_000, text: 'hello', records: [], attachmentIds: [], ...over,
+    chatId: 'chat-1', scratchRoot: join(scratch, 'chat-root'), projectId: 'mikes', text: 'hello', records: [], attachmentIds: [], ...over,
   });
   /** Build and publish, as the route does once its last check passed. */
   const built = async (over: Partial<TurnContextInput>) => {
@@ -226,19 +230,17 @@ describe('buildTurnContext', () => {
     expect(ctx.block).toContain('Named but not given to you');
   });
 
-  it('lets a project chat read an Unfiled document only when it was made in this chat', async () => {
+  it('keeps a project chat to its project: an Unfiled document is read from a chat in no project', async () => {
     writeDoc('default', 'release-note', { 1: '<h1>Release note</h1><p>v1</p>' });
-    const ask = { context: { artifact: { ref: '_unfiled/release-note', version: 1 } } };
-    expect((await built(ask)).binding?.refused[0]?.reason).toMatch(/Unfiled and was not made in this chat/);
-    // A run of an EARLIER chat under the same (reused) id does not count.
-    runs.push(view('eeeeeeee-6666-4000-8000-000000000006', { document_id: 'release-note', chat_id: 'chat-1', project_id: null, created_at: 1_700_000_000 }));
-    expect((await built(ask)).binding?.refused[0]?.reason).toMatch(/not made in this chat/);
+    // Even a run of this very chat that answered the document does not open it to a project chat: the exception for
+    // documents a chat makes comes with the durable binding that records it (slice A3), never inferred from runs.
     runs.push(view('dddddddd-5555-4000-8000-000000000005', { document_id: 'release-note', chat_id: 'chat-1', project_id: null }));
-    const ok = await built(ask);
-    expect(ok.binding?.artifact).toMatchObject({ ref: '_unfiled/release-note', projectId: null, viewed: 1, head: 1, copies: ['open/_unfiled__release-note-v1.html'] });
+    const ask = { context: { artifact: { ref: '_unfiled/release-note', version: 1 } } };
+    expect((await built(ask)).binding?.refused[0]?.reason).toBe('it is Unfiled and this chat is in project mikes; ask about it from a chat in no project');
+    expect(existsSync(join(scratch, 'chat-root', 'open'))).toBe(false);
     // A chat in no project reads it (and `default/…`, studio's mount alias, is the same ref).
     const anywhere = await built({ projectId: null, chatId: 'chat-2', context: { artifact: { ref: 'default/release-note', version: 1 } } });
-    expect(anywhere.binding?.artifact?.ref).toBe('_unfiled/release-note');
+    expect(anywhere.binding?.artifact).toMatchObject({ ref: '_unfiled/release-note', projectId: null, viewed: 1, head: 1, copies: ['open/_unfiled__release-note-v1.html'] });
   });
 
   it('contains every read: a linked document directory, a linked version file and a manifest path are refused', async () => {
@@ -279,10 +281,12 @@ describe('buildTurnContext', () => {
   it('briefs each run named in the words from crew’s records, and the figures are the records’', async () => {
     const ctx = await built({ text: 'Write it up from runs 29bbbfb1, 679ca85b and 57443b2b.' });
     expect(ctx.binding?.runs.map((r) => [r.id.slice(0, 8), r.status, r.brief])).toEqual([
-      ['29bbbfb1', 'completed', 'context/run-29bbbfb1-1111-4000-8000-000000000001.md'],
-      ['679ca85b', 'completed', 'context/run-679ca85b-2222-4000-8000-000000000002.md'],
-      ['57443b2b', 'failed', 'context/run-57443b2b-3333-4000-8000-000000000003.md'],
+      ['29bbbfb1', 'completed', expect.stringMatching(/^context\/run-29bbbfb1-1111-4000-8000-000000000001-[0-9a-f]{8}\.md$/)],
+      ['679ca85b', 'completed', expect.stringMatching(/^context\/run-679ca85b-2222-4000-8000-000000000002-[0-9a-f]{8}\.md$/)],
+      ['57443b2b', 'failed', expect.stringMatching(/^context\/run-57443b2b-3333-4000-8000-000000000003-[0-9a-f]{8}\.md$/)],
     ]);
+    // Named by content: the file's name carries the start of the sha256 the binding records.
+    for (const r of ctx.binding!.runs) expect(r.brief).toContain(r.sha256.slice(0, 8));
     // A script matches every figure: each brief file holds exactly its run's own output.
     for (const r of ctx.binding!.runs) {
       const file = readFileSync(join(scratch, 'chat-root', r.brief), 'utf8');
@@ -311,6 +315,9 @@ describe('buildTurnContext', () => {
     runs.push(view('29bbbfb1-9999-4000-8000-000000000009', { project_id: 'mikes' }));
     const ctx = await built({ text: 'run 12345678 and 29bbbfb1 (commit deadbeef)' });
     expect(ctx.binding?.refused.map((r) => r.reason)).toEqual(['no such run on this daemon', 'matches 2 runs; use more of the id']);
+    // "Use more of the id" works: the uuid's next group tells them apart.
+    const more = await built({ text: 'run 29bbbfb1-9999' });
+    expect(more.binding?.runs.map((r) => r.id)).toEqual(['29bbbfb1-9999-4000-8000-000000000009']);
   });
 
   it('adds nothing to a plain message, and keeps the named sets across turns', async () => {
@@ -340,15 +347,19 @@ describe('buildTurnContext', () => {
     expect(existsSync(join(scratch, 'chat-root', 'context'))).toBe(false);
     ctx.publish();
     expect(readFileSync(join(scratch, 'chat-root', 'open', 'mikes__deck-v1.html'), 'utf8')).toBe(DECK_V1);
-    expect(existsSync(join(scratch, 'chat-root', 'context', 'run-29bbbfb1-1111-4000-8000-000000000001.md'))).toBe(true);
+    expect(readdirSync(join(scratch, 'chat-root', 'context'))).toEqual([expect.stringMatching(/^run-29bbbfb1-1111-4000-8000-000000000001-[0-9a-f]{8}\.md$/)]);
   });
 
-  it('refuses publication into a scratch directory that was swapped for a link', async () => {
-    const ctx = await buildTurnContext(input({ text: 'run 29bbbfb1' }), deps);
+  it('refuses a scratch directory swapped for a link: before the build (a refusal), and between build and publish (no write)', async () => {
     const elsewhere = join(scratch, 'elsewhere');
     mkdirSync(elsewhere);
+    const ctx = await buildTurnContext(input({ text: 'run 29bbbfb1' }), deps);
     symlinkSync(elsewhere, join(scratch, 'chat-root', 'context'));
     expect(() => ctx.publish()).toThrow(/not a real directory/);
+    expect(readdirSync(elsewhere)).toEqual([]);
+    const again = await built({ text: 'run 29bbbfb1' });
+    expect(again.binding?.runs).toEqual([]);
+    expect(again.binding?.refused[0]?.reason).toMatch(/something other than crew's folder/);
     expect(readdirSync(elsewhere)).toEqual([]);
   });
 
@@ -388,21 +399,53 @@ describe('buildTurnContext', () => {
     expect(ctx.binding?.refused[0]?.reason).toBe('its versions.json is not a regular file');
   });
 
-  it('carries what the chat named into a follow-up, re-checked: earlier briefs by path, a moved run dropped', async () => {
+  it('carries what the chat named into a follow-up, re-checked: an intact earlier brief by path, a moved run dropped, a changed brief refused', async () => {
+    const first = await built({ text: 'run 29bbbfb1 and run 57443b2b' });
     const records = [
       { at: 1, turnId: 't1', kind: 'user', text: 'x', seats: [] },
-      {
-        at: 2, turnId: 't1', kind: 'context', refused: [], page: false,
-        runs: [{ id: '29bbbfb1-1111-4000-8000-000000000001', status: 'completed', brief: 'context/run-29bbbfb1-1111-4000-8000-000000000001.md', sha256: 'x' }],
-        named: { runs: ['29bbbfb1-1111-4000-8000-000000000001', '679ca85b-2222-4000-8000-000000000002'], docs: [] },
-      },
+      { at: 2, turnId: 't1', kind: 'context', ...first.binding!, named: { runs: [...first.binding!.named.runs, '679ca85b-2222-4000-8000-000000000002'], docs: [] } },
     ] as unknown as ChatTranscriptRecord[];
-    // 679ca85b moved to another project since it was named.
+    // 679ca85b moved to another project since it was named; 57443b2b's earlier brief was changed in the scratch root.
     runs[1] = view('679ca85b-2222-4000-8000-000000000002', { project_id: 'other' });
+    const changed = first.binding!.runs.find((r) => r.id.startsWith('57443b2b'))!;
+    const changedPath = join(scratch, 'chat-root', changed.brief);
+    rmSync(changedPath, { force: true });
+    writeFileSync(changedPath, '# Run 57443b2b\n- Status: completed\nCoverage moved to 99%.');
     const ctx = await built({ text: 'How long did that take?', records });
-    expect(ctx.binding?.named.runs).toEqual(['29bbbfb1-1111-4000-8000-000000000001']);
-    expect(ctx.block).toContain(`Briefs written earlier in this chat (as the runs stood then): ${join(scratch, 'chat-root', 'context', 'run-29bbbfb1-1111-4000-8000-000000000001.md')}`);
+    expect(ctx.binding?.named.runs).toEqual(['29bbbfb1-1111-4000-8000-000000000001', '57443b2b-3333-4000-8000-000000000003']);
+    const intact = first.binding!.runs.find((r) => r.id.startsWith('29bbbfb1'))!;
+    expect(ctx.block).toContain(`Briefs written earlier in this chat (as the runs stood then): ${join(scratch, 'chat-root', intact.brief)}`);
+    expect(ctx.block).not.toContain(changedPath);
+    expect(ctx.binding?.refused).toContainEqual({ token: 'brief:57443b2b-3333-4000-8000-000000000003', reason: expect.stringMatching(/no longer holds what crew wrote/) });
     expect(ctx.block).not.toContain('679ca85b');
+  });
+
+  it('a later brief of the same run is a new file: the bytes an earlier turn was given stay', async () => {
+    const one = await built({ text: 'run 29bbbfb1' });
+    outputs.set('29bbbfb1-1111-4000-8000-000000000001:u1', 'Coverage moved from 23% to 64%.');
+    const two = await built({ text: 'run 29bbbfb1 again' });
+    expect(two.binding!.runs[0]!.brief).not.toBe(one.binding!.runs[0]!.brief);
+    expect(readFileSync(join(scratch, 'chat-root', one.binding!.runs[0]!.brief), 'utf8')).toContain('23% to 61%');
+    expect(readFileSync(join(scratch, 'chat-root', two.binding!.runs[0]!.brief), 'utf8')).toContain('23% to 64%');
+  });
+
+  it('keeps the version they asked about on record when it is missing, and falls back to the latest when it cannot be copied', async () => {
+    writeDoc('mikes', 'two', { 1: DECK_V1, 2: DECK_V2 });
+    const missing = await built({ context: { artifact: { ref: 'mikes/two', version: 3, anchors: ['slide-3-heading-1'] } } });
+    expect(missing.binding?.artifact).toMatchObject({ viewed: 3, head: 2, copies: ['open/mikes__two-v2.html'] });
+    expect(missing.block).toContain('They are looking at version 3, which this document does not have. The copy below is the latest, version 2');
+    expect(missing.block).toContain('as version 2 has them');
+    expect(missing.block).not.toContain('the latest. Say which');
+    const dir = writeDoc('mikes', 'gone-v1', { 1: DECK_V1, 2: DECK_V2 });
+    rmSync(join(dir, '_v1.html'));
+    const fell = await built({ context: { artifact: { ref: 'mikes/gone-v1', version: 1 } } });
+    expect(fell.binding?.artifact).toMatchObject({ viewed: 1, head: 2, copies: ['open/mikes__gone-v1-v2.html'] });
+    expect(fell.block).toContain('Version 1, the one they are looking at, was not copied: version 1 is missing.');
+  });
+
+  it('fences the refusals: an id or a reason never becomes a line of crew’s own', async () => {
+    const ctx = await built({ text: 'what about run 0bad0bad?' });
+    expect(ctx.block).toMatch(/### Named but not given to you\n\nTell the person plainly[^\n]*\n\n```text\nrun:0bad0bad/);
   });
 
   it('looks at a bounded number of ids per message and names the rest', async () => {
@@ -433,7 +476,7 @@ describe('run brief keeps every agent-written field inside a fence', () => {
     const v = view('cccccccc-0000-4000-8000-000000000007', { problem: 'INJECTED TITLE', status: 'completed\n# fake', evidence_root: root }, [
       { description: 'INJECTED STEP', status: 'rejected', denial_reason: 'INJECTED REFUSAL', assigned_cli: 'codex\n# fake seat' },
     ]);
-    const brief = await buildRunBrief(v, { workOutput: async () => 'INJECTED OUTPUT' });
+    const brief = await buildRunBrief(v, { workOutput: async () => 'INJECTED OUTPUT', acceptanceLine: async () => 'FAIL: INJECTED REVIEWER REASON' });
     removeScratch(root);
     const crew = outsideFences(brief.markdown);
     for (const word of ['INJECTED', 'IGNORE-PREVIOUS', 'fake']) expect(crew, word).not.toContain(word);
@@ -441,7 +484,7 @@ describe('run brief keeps every agent-written field inside a fence', () => {
     expect(brief.markdown).toContain('INJECTED STEP');
   });
 
-  it.skipIf(process.platform === 'win32')('lists a FIFO or an over-1 MB evidence file without reading it', async () => {
+  it.skipIf(process.platform === 'win32')('skips a FIFO and lists an over-1 MB evidence file without reading either', async () => {
     const root = mkdtempSync(join(tmpdir(), 'brief-fifo-'));
     execFileSync('mkfifo', [join(root, 'pipe.txt')]);
     writeFileSync(join(root, 'huge.bin'), Buffer.alloc(1024 * 1024 + 1));
@@ -455,6 +498,26 @@ describe('run brief keeps every agent-written field inside a fence', () => {
 });
 
 describe('artifact outline, hostile and odd markup', () => {
+  it('strips raw blocks whose attributes hold < or />, and nested svg, and parses a tag with < in a quoted value', () => {
+    expect(stripRaw('<style media="(width < 600px)">LEAK1{}</style><p>a</p>')).toBe('<p>a</p>');
+    expect(stripRaw('<script data-x="/>">LEAK2</script><p>b</p>')).toBe('<p>b</p>');
+    expect(stripRaw('<svg><svg><text>LEAK3</text></svg><text>LEAK4</text></svg><p>c</p>')).toBe('<p>c</p>');
+    expect(stripRaw('<script />LEAK5</script><p>d</p>')).toBe('<p>d</p>');
+    const o = outlineOf('<section class="wi-slide" data-slide-id="s1" title="a < b"><h2>One</h2></section><section class="wi-slide" data-slide-id="s2"><h2>Two</h2></section>');
+    expect(o.items.map((i) => i.text)).toEqual(['One', 'Two']);
+  });
+
+  it('says when evidence sits deeper than it reads, never "no evidence"', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'brief-deep-'));
+    mkdirSync(join(root, 'a', 'b', 'c', 'd'), { recursive: true });
+    writeFileSync(join(root, 'a', 'b', 'c', 'd', 'deep.txt'), 'deep');
+    const md = (await buildRunBrief(view('eeeeeeee-0000-4000-8000-000000000009', { evidence_root: root }), { workOutput: async () => null })).markdown;
+    removeScratch(root);
+    expect(md).not.toContain('No evidence files.');
+    expect(md).toContain('No evidence files within the limits this brief reads.');
+    expect(md).toContain('Some files sit deeper than 3 folders down and are not listed.');
+  });
+
   it('stays linear on an unterminated tag with a long name, and keeps a document after a self-closing svg', () => {
     for (const hostile of ['<' + 'a'.repeat(400_000), ('<' + 'a'.repeat(1_000) + ' ').repeat(400), `<p x="${'a'.repeat(400_000)}`]) {
       const t0 = Date.now();

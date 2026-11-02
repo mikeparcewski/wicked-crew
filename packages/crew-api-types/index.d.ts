@@ -8576,15 +8576,19 @@ export interface ChatContextBinding {
     head: number;
     /** `null` for an Unfiled document. */
     projectId: string | null;
-    /** The copies the seat read: `open/<mount>__<doc>-v<n>.html`. */
+    /** The copies the seat read: `open/<mount>__<doc>-v<n>.html`. When the version they look at is missing or could
+     *  not be copied, only the latest's copy is here, and `viewed` still says what they asked about. */
     copies: string[];
     anchors: string[];
   };
-  /** The run briefs the seat was given: `context/run-<id>.md`, with the sha256 of the brief as written. */
+  /** The run briefs the seat was given: `context/run-<id>-<sha8>.md` (named by content, so a later brief of the same
+   *  run never replaces these bytes), with the sha256 of the brief as written. */
   runs: Array<{ id: string; status: string; brief: string; sha256: string }>;
   /** What was named but not read, and why ("not in this chat's project", "no such run on this daemon"). */
   refused: Array<{ token: string; reason: string }>;
-  /** Every run and document the person has named in this chat up to this turn (each re-checked on later turns). */
+  /** Every run and document the person has named in this chat up to this turn. On later turns a run is kept while it
+   *  is still on this daemon and in the chat's scope, a document while it is in the chat's scope; an earlier brief is
+   *  offered again only while its file still holds the bytes its sha256 records. */
   named: { runs: string[]; docs: string[] };
   /** Studio's page summary rode as `context.page` (true), never mixed into the person's words. */
   page: boolean;

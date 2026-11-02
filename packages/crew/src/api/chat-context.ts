@@ -7,14 +7,18 @@
  * and studio's page summary. Crew then, for every turn:
  *
  *  1. checks the SCOPE before anything is read or copied (the caller has already checked the chat's owner): a chat
- *     filed in a project sees that project's documents and runs, plus the Unfiled documents made in this chat; any
- *     other chat sees what is on this daemon. What fails is named in the block with its reason, never read;
+ *     filed in a project sees that project's documents and runs; any other chat sees what is on this daemon. What
+ *     fails is named in the block with its reason, never read. (DES §4.1 also lets a project chat read the Unfiled
+ *     documents it made; no chat makes documents before slice A3, which brings the durable per-document binding that
+ *     records it — so until then that exception has nothing to admit, and it is not inferred from run records.);
  *  2. copies the viewed version and the latest into the chat's scratch root (`open/<mount>__<doc>-v<n>.html`): ids are
  *     validated against their grammar, file names come from ids, the document directory must be a real directory
  *     inside the project's docs root, each file is opened without following a link or blocking, capped, and written
  *     exclusively read-only; a different content already under a copy's name is an error, never an overwrite;
- *  3. writes a run brief (`context/run-<id>.md`, `run-brief.ts`) for each run the person names in this message: an id
- *     in their words that resolves on this daemon, a run chip, or the run page the chat is on;
+ *  3. writes a run brief (`context/run-<id>-<sha8>.md`, named by its content like the source packet's run briefs, so
+ *     a later turn's brief never replaces the bytes an earlier turn was given; `run-brief.ts`) for each run the person
+ *     names in this message: an id in their words that resolves on this daemon, a run chip, or the run page the chat
+ *     is on;
  *  4. lists the ids the seat may use: recent turns, attachments, and the runs and documents named in this chat;
  *  5. labels everything as data: the person's words stay theirs, studio's page summary is studio's, and artifact
  *     content and run outputs are fenced data the seat must never take instructions from.
@@ -29,7 +33,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { lstatSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { z } from 'zod';
 
@@ -147,9 +151,6 @@ export interface TurnContextInput {
   scratchRoot: string;
   /** The project the chat is filed in; `null` = none. */
   projectId: string | null;
-  /** When THIS chat (this instance of its id) was opened, ms; `null` = unknown. An Unfiled document counts as made in
-   *  the chat only when a run of the chat that answered it started after this (a reused id's past runs never do). */
-  chatOpenedAt: number | null;
   /** The person's typed words. */
   text: string;
   context?: ParsedChatMessageContext | undefined;
@@ -195,12 +196,12 @@ class ContextRefusal extends Error {}
 
 const refusalOf = (err: unknown): string | null => (err instanceof ContextRefusal || err instanceof FileRefusal ? err.message : null);
 
+/** A file crew writes once, read-only, named by what it holds: the same bytes already there are kept; anything else
+ *  under its name is refused, never overwritten. */
 interface PendingWrite {
   dir: string;
   name: string;
   data: Buffer;
-  /** `once`: a copy of an immutable version (kept if the same bytes are there); `replace`: a brief, rewritten. */
-  mode: 'once' | 'replace';
 }
 
 /**
@@ -221,6 +222,17 @@ function existingCopy(path: string, name: string, data: Buffer): boolean {
   return true;
 }
 
+/** Why a directory crew writes into cannot be used now (a link or a non-directory planted there), or `null`. Absent is
+ *  fine: publication makes it. */
+function dirUnusable(dir: string): string | null {
+  try {
+    const st = lstatSync(dir);
+    return st.isSymbolicLink() || !st.isDirectory() ? "this chat's scratch root holds something other than crew's folder where its copies go" : null;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? null : "this chat's scratch root could not be read";
+  }
+}
+
 function publishWrites(scratchRoot: string, writes: readonly PendingWrite[]): void {
   if (writes.length === 0) return;
   const root = lstatSync(scratchRoot);
@@ -228,11 +240,7 @@ function publishWrites(scratchRoot: string, writes: readonly PendingWrite[]): vo
   for (const dir of new Set(writes.map((w) => w.dir))) ensureRealDir(dir);
   for (const w of writes) {
     const path = join(w.dir, w.name);
-    if (w.mode === 'once') {
-      if (existingCopy(path, w.name, w.data)) continue;
-    } else {
-      rmSync(path, { force: true }); // removes a planted link itself, never its target
-    }
+    if (existingCopy(path, w.name, w.data)) continue;
     writeFileSync(path, w.data, { flag: 'wx', mode: 0o444 });
   }
 }
@@ -300,14 +308,13 @@ async function readArtifact(
   ref: ParsedRef,
   viewed: number,
   anchors: readonly string[],
-  madeHere: () => Promise<boolean>,
 ): Promise<ArtifactRead> {
   // Scope first: nothing of a document outside the chat's scope is resolved, read or copied.
   const mine = chatMount(input.projectId);
-  if (mine !== null && ref.mount !== mine && !(ref.mount === UNFILED_MOUNT && (await madeHere()))) {
+  if (mine !== null && ref.mount !== mine) {
     throw new ContextRefusal(
       ref.mount === UNFILED_MOUNT
-        ? `it is Unfiled and was not made in this chat; this chat is in project ${input.projectId}`
+        ? `it is Unfiled and this chat is in project ${input.projectId}; ask about it from a chat in no project`
         : `it is not in this chat's project (${input.projectId})`,
     );
   }
@@ -316,6 +323,8 @@ async function readArtifact(
   const docDir = realDocDir(root, ref.doc);
   const manifest = readManifest(docDir);
   const openDir = contextReadRoots(input.scratchRoot).open;
+  const unusable = dirUnusable(openDir);
+  if (unusable !== null) throw new ContextRefusal(unusable);
   const nameOf = (v: number): string => `${ref.mount}__${ref.doc}-v${v}.html`;
   const writes: PendingWrite[] = [];
   const copies: string[] = [];
@@ -324,16 +333,22 @@ async function readArtifact(
     if (file === undefined) throw new ContextRefusal(`it has no version ${v} (the latest is ${manifest.head})`);
     const data = readNoFollow(join(docDir, file), ARTIFACT_COPY_MAX, `version ${v}`);
     existingCopy(join(openDir, nameOf(v)), nameOf(v), data); // a different copy already there is refused now
-    writes.push({ dir: openDir, name: nameOf(v), data, mode: 'once' });
+    writes.push({ dir: openDir, name: nameOf(v), data });
     copies.push(`open/${nameOf(v)}`);
     return data;
   };
   const notes: string[] = [];
   let viewedHtml: Buffer | null = null;
   if (viewed > manifest.head || !manifest.files.has(viewed)) {
-    notes.push(`Studio said they are looking at version ${viewed}, which this document does not have; the latest is ${manifest.head}.`);
+    notes.push(`They are looking at version ${viewed}, which this document does not have. The copy below is the latest, version ${manifest.head}: say so if you answer from it.`);
   } else {
-    viewedHtml = copy(viewed);
+    try {
+      viewedHtml = copy(viewed);
+    } catch (err) {
+      const why = refusalOf(err);
+      if (why === null || viewed === manifest.head) throw err;
+      notes.push(`Version ${viewed}, the one they are looking at, was not copied: ${why}. The copy below is the latest, version ${manifest.head}: say so if you answer from it.`);
+    }
   }
   let headHtml: Buffer | null = viewed === manifest.head ? viewedHtml : null;
   if (headHtml === null) {
@@ -360,18 +375,18 @@ async function readArtifact(
     '',
     fenced(title),
     '',
-    viewedHtml !== null && viewed !== manifest.head
-      ? `- They are looking at version ${viewed}; the latest is version ${manifest.head}. Answer about version ${viewed} unless they ask about the latest, and say which version you read.`
-      : `- They are looking at version ${shownVersion}, the latest. Say which version you read.`,
-    ...notes.map((n) => `- ${n}`),
   ];
+  if (viewedHtml !== null && viewed === manifest.head) lines.push(`- They are looking at version ${viewed}, the latest. Say which version you read.`);
+  else if (viewedHtml !== null && headHtml !== null) {
+    lines.push(`- They are looking at version ${viewed}; the latest is version ${manifest.head}. Answer about version ${viewed} unless they ask about the latest, and say which version you read.`);
+  } else lines.push('- Say which version you read.');
+  lines.push(...notes.map((n) => `- ${n}`));
   if (viewedHtml !== null) lines.push(`- Version ${viewed}: ${join(openDir, nameOf(viewed))}`);
-  if (headHtml !== null && shownVersion !== manifest.head) lines.push(`- Version ${manifest.head} (latest): ${join(openDir, nameOf(manifest.head))}`);
-  if (viewedHtml === null && headHtml !== null) lines.push(`- Version ${manifest.head} (latest): ${join(openDir, nameOf(manifest.head))}`);
+  if (headHtml !== null && (viewedHtml === null || viewed !== manifest.head)) lines.push(`- Version ${manifest.head} (latest): ${join(openDir, nameOf(manifest.head))}`);
   lines.push('');
   const picked = anchors.length > 0 ? anchorTexts(shownHtml, anchors) : [];
   if (picked.length > 0) {
-    lines.push('They selected these parts (their question is about them):', '');
+    lines.push(`They selected these parts (their question is about them), as version ${shownVersion} has them:`, '');
     const body = picked
       .map((a) => (a.found ? `${a.slide !== null ? `slide ${a.slide} · ` : ''}${a.tag ?? ''} [data-wid ${a.wid}]: ${a.text}` : `[data-wid ${a.wid}]: not in version ${shownVersion}`))
       .join('\n');
@@ -390,7 +405,7 @@ async function readArtifact(
       ref: ref.ref,
       title,
       kind,
-      viewed: shownVersion,
+      viewed,
       head: manifest.head,
       projectId: ref.mount === UNFILED_MOUNT ? null : ref.mount,
       copies,
@@ -408,10 +423,11 @@ interface RunToken {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-/** A run-shaped hex id: a full uuid, or a prefix of 8 to 32 hex digits. */
-const HEX_ID = /\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8,32})\b/gi;
-/** `run <ids>` / `runs <id>, <id> and <id>`: every id in the list is said as a run. */
-const RUN_LIST = /\bruns?\b[\s#:]*((?:[0-9a-f][0-9a-f-]{7,35})(?:\s*(?:,|\band\b|&|\/)\s*(?:runs?\s+)?[0-9a-f][0-9a-f-]{7,35})*)/gi;
+/** A run-shaped hex id: a uuid or a prefix of one (8 hex digits, then any hyphenated groups), or 8 to 32 hex digits. */
+const HEX_ID = /\b([0-9a-f]{8}(?:-[0-9a-f]{1,12}){1,4}(?![0-9a-f])|[0-9a-f]{8,32})\b/gi;
+/** `run <ids>` / `runs <id>, <id>, and <id>`: every id in the list is said as a run. */
+const LIST_SEP = String.raw`(?:\s*(?:,\s*(?:(?:and|or)\b\s*)?|\b(?:and|or)\b\s*|&\s*|\/\s*)(?:runs?\s+)?)`;
+const RUN_LIST = new RegExp(String.raw`\bruns?\b[\s#:]*((?:[0-9a-f][0-9a-f-]{7,35})(?:${LIST_SEP}[0-9a-f][0-9a-f-]{7,35})*)`, 'gi');
 /** `run:<id>`: any run id, said explicitly. */
 const RUN_COLON = /\brun:([A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?)/gi;
 
@@ -425,7 +441,7 @@ export function runTokensOf(text: string, page: string | undefined): RunToken[] 
   const out: RunToken[] = [];
   const seen = new Map<string, RunToken>();
   const add = (token: string, explicit: boolean): void => {
-    const t = UUID.test(token) || /^[0-9a-f]+$/i.test(token) ? token.toLowerCase() : token;
+    const t = /^[0-9a-f-]+$/i.test(token) ? token.toLowerCase() : token;
     const had = seen.get(t);
     if (had !== undefined) {
       had.explicit ||= explicit;
@@ -435,11 +451,13 @@ export function runTokensOf(text: string, page: string | undefined): RunToken[] 
     seen.set(t, tok);
     out.push(tok);
   };
-  const said = new Set<string>();
-  for (const m of text.matchAll(RUN_LIST)) for (const h of m[1]!.matchAll(HEX_ID)) said.add(h[1]!.toLowerCase());
+  // `run:<id>` first, and its span masked, so a hex part inside it (`run:deadbeef-v1`) is never a second id.
   const colon = [...text.matchAll(RUN_COLON)].map((m) => m[1]!);
-  // In the order they are written: hex ids, then `run:` ids that are not hex.
-  for (const m of text.matchAll(HEX_ID)) add(m[1]!, said.has(m[1]!.toLowerCase()) || colon.some((c) => c.toLowerCase() === m[1]!.toLowerCase()));
+  const rest = text.replace(RUN_COLON, (m) => ' '.repeat(m.length));
+  const said = new Set<string>();
+  for (const m of rest.matchAll(RUN_LIST)) for (const h of m[1]!.matchAll(HEX_ID)) said.add(h[1]!.toLowerCase());
+  // In the order they are written: hex ids, then the `run:` ids.
+  for (const m of rest.matchAll(HEX_ID)) add(m[1]!, said.has(m[1]!.toLowerCase()));
   for (const c of colon) add(c, true);
   if (page !== undefined) {
     for (const line of page.split('\n')) {
@@ -468,7 +486,8 @@ export function runTokensOf(text: string, page: string | undefined): RunToken[] 
 function resolveToken(token: string, runs: readonly SessionView[]): { run: SessionView } | { ambiguous: number } | null {
   const exact = runs.find((v) => v.session.id === token || v.session.id.toLowerCase() === token);
   if (exact !== undefined) return { run: exact };
-  if (UUID.test(token) || !/^[0-9a-f]{8,}$/.test(token)) return null;
+  // A prefix: 8+ hex digits, or a uuid's first groups (`29bbbfb1-1111`) — never a whole uuid, which is exact or nothing.
+  if (UUID.test(token) || !/^(?:[0-9a-f]{8,32}|[0-9a-f]{8}(?:-[0-9a-f]{1,12}){1,4})$/.test(token)) return null;
   const hits = runs.filter((v) => v.session.id.toLowerCase().startsWith(token));
   if (hits.length === 1) return { run: hits[0]! };
   if (hits.length > 1) return { ambiguous: hits.length };
@@ -476,18 +495,32 @@ function resolveToken(token: string, runs: readonly SessionView[]): { run: Sessi
 }
 
 /** The named sets, and the briefs written, that the chat's earlier `context` records carry. */
-function priorNamed(records: readonly ChatTranscriptRecord[]): { runs: string[]; docs: string[]; briefs: Map<string, string> } {
+function priorNamed(records: readonly ChatTranscriptRecord[]): { runs: string[]; docs: string[]; briefs: Map<string, { brief: string; sha256: string }> } {
   const runs = new Set<string>();
   const docs = new Set<string>();
-  const briefs = new Map<string, string>();
+  const briefs = new Map<string, { brief: string; sha256: string }>();
   for (const r of records) {
     if (r.kind !== 'context') continue;
-    const c = r as { named?: { runs?: unknown[]; docs?: unknown[] }; runs?: Array<{ id?: unknown; brief?: unknown }> };
+    const c = r as { named?: { runs?: unknown[]; docs?: unknown[] }; runs?: Array<{ id?: unknown; brief?: unknown; sha256?: unknown }> };
     for (const id of c.named?.runs ?? []) if (typeof id === 'string') runs.add(id);
     for (const ref of c.named?.docs ?? []) if (typeof ref === 'string') docs.add(ref);
-    for (const b of c.runs ?? []) if (typeof b?.id === 'string' && typeof b.brief === 'string') briefs.set(b.id, b.brief);
+    for (const b of c.runs ?? []) {
+      if (typeof b?.id === 'string' && typeof b.brief === 'string' && typeof b.sha256 === 'string') briefs.set(b.id, { brief: b.brief, sha256: b.sha256 });
+    }
   }
   return { runs: [...runs], docs: [...docs], briefs };
+}
+
+/** An earlier brief, offered again only while it still holds exactly what crew wrote (the seat can write its scratch
+ *  root): a regular file under `context/`, read without following, whose sha256 is the one recorded. */
+function earlierBriefIntact(scratchRoot: string, b: { brief: string; sha256: string }): boolean {
+  const m = /^context\/(run-[A-Za-z0-9._-]{1,200}\.md)$/.exec(b.brief);
+  if (m === null || dirUnusable(join(scratchRoot, 'context')) !== null) return false;
+  try {
+    return sha256Hex(readNoFollow(join(scratchRoot, 'context', m[1]!), 4 * 1024 * 1024, 'the brief')) === b.sha256;
+  } catch {
+    return false;
+  }
 }
 
 /** Build the turn's block and binding in memory; `publish()` writes its files. Throws only on a fault of crew itself. */
@@ -514,16 +547,8 @@ export async function buildTurnContext(input: TurnContextInput, deps: ChatContex
     if (ref === null) {
       refuse(`doc:${ctx.artifact.ref}`, 'not an artifact ref');
     } else {
-      // Made in THIS chat: a run of this chat answered the document, started after this chat (this instance of its
-      // id) opened. A reused id's earlier runs never count.
-      const madeHere = async (): Promise<boolean> =>
-        input.chatOpenedAt !== null &&
-        (await allRuns()).some((v) => {
-          const s = v.session as { document_id?: string | null; chat_id?: string; created_at?: number };
-          return s.document_id === ref.doc && s.chat_id === input.chatId && typeof s.created_at === 'number' && s.created_at * 1000 >= input.chatOpenedAt! - 1000;
-        });
       try {
-        const read = await readArtifact(input, deps, ref, ctx.artifact.version, ctx.artifact.anchors ?? [], madeHere);
+        const read = await readArtifact(input, deps, ref, ctx.artifact.version, ctx.artifact.anchors ?? []);
         artifact = read.binding;
         named.docs.add(ref.ref);
         sections.push(...read.lines);
@@ -578,9 +603,24 @@ export async function buildTurnContext(input: TurnContextInput, deps: ChatContex
         refuse(`run:${id}`, 'its id cannot name a file');
         continue;
       }
+      const unusable = dirUnusable(contextDir);
+      if (unusable !== null) {
+        refuse(`run:${id}`, unusable);
+        continue;
+      }
       const brief = await buildRunBrief(run, { workOutput: deps.workOutput, ...(deps.acceptanceLine !== undefined ? { acceptanceLine: deps.acceptanceLine } : {}) });
-      const name = `run-${id}.md`;
-      writes.push({ dir: contextDir, name, data: Buffer.from(brief.markdown, 'utf8'), mode: 'replace' });
+      // Named by content: a later brief of the same run is a new file; the bytes an earlier turn was given stay.
+      const name = `run-${id}-${brief.sha256.slice(0, 8)}.md`;
+      const data = Buffer.from(brief.markdown, 'utf8');
+      try {
+        existingCopy(join(contextDir, name), name, data);
+      } catch (err) {
+        const why = refusalOf(err);
+        if (why === null) throw err;
+        refuse(`run:${id}`, why);
+        continue;
+      }
+      writes.push({ dir: contextDir, name, data });
       named.runs.add(id);
       briefed.push({ id, status: brief.status, brief: `context/${name}`, sha256: brief.sha256 });
       const inline = brief.markdown.length <= BRIEF_INLINE_MAX && brief.markdown.length <= budget;
@@ -601,16 +641,7 @@ export async function buildTurnContext(input: TurnContextInput, deps: ChatContex
     );
   }
 
-  if (refused.length > 0) {
-    sections.push(
-      '### Named but not given to you',
-      '',
-      'Tell the person plainly that you could not read these, and why. Do not guess what they say.',
-      '',
-      ...refused.map((r) => `- ${r.token}: ${r.reason}`),
-      '',
-    );
-  }
+  // (Earlier briefs that no longer hold what crew wrote are refused below, so this section is assembled after them.)
 
   // ── what this chat named before: re-checked, and carried forward so a follow-up can use it ─────────────────────
   // Earlier names first, in the order they were named; a run no longer on this daemon or in the chat's scope drops.
@@ -631,7 +662,24 @@ export async function buildTurnContext(input: TurnContextInput, deps: ChatContex
   }
   for (const id of thisTurn.runs) named.runs.add(id);
   for (const ref of thisTurn.docs) named.docs.add(ref);
-  const earlierBriefs = [...named.runs].filter((id) => !briefed.some((b) => b.id === id) && prior.briefs.has(id));
+  const earlierBriefs: string[] = [];
+  for (const id of named.runs) {
+    const b = prior.briefs.get(id);
+    if (b === undefined || briefed.some((x) => x.id === id)) continue;
+    if (earlierBriefIntact(input.scratchRoot, b)) earlierBriefs.push(join(input.scratchRoot, b.brief));
+    else refuse(`brief:${id}`, 'the brief written earlier in this chat no longer holds what crew wrote; name the run again for a fresh one');
+  }
+  if (refused.length > 0) {
+    // Fenced: ids and reasons can carry what a run or a project was named.
+    sections.push(
+      '### Named but not given to you',
+      '',
+      'Tell the person plainly that you could not read these, and why. Do not guess what they say.',
+      '',
+      fenced(refused.map((r) => `${r.token}: ${r.reason}`).join('\n')),
+      '',
+    );
+  }
 
   const hasPage = ctx?.page !== undefined && ctx.page.trim() !== '';
   const hasAppearance = ctx?.appearance !== undefined && Object.keys(ctx.appearance).length > 0;
@@ -646,9 +694,7 @@ export async function buildTurnContext(input: TurnContextInput, deps: ChatContex
     `- Attachments: ${input.attachmentIds.length > 0 ? input.attachmentIds.join(', ') : 'none'}`,
     `- Runs named in this chat: ${named.runs.size > 0 ? [...named.runs].join(', ') : 'none'}`,
     `- Documents named in this chat: ${named.docs.size > 0 ? [...named.docs].join(', ') : 'none'}`,
-    ...(earlierBriefs.length > 0
-      ? [`- Briefs written earlier in this chat (as the runs stood then): ${earlierBriefs.map((id) => join(input.scratchRoot, prior.briefs.get(id)!)).join(', ')}`]
-      : []),
+    ...(earlierBriefs.length > 0 ? [`- Briefs written earlier in this chat (as the runs stood then): ${earlierBriefs.join(', ')}`] : []),
   ];
 
   const out: string[] = [

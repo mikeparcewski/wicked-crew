@@ -5,7 +5,7 @@
 // outside the run's read roots — the bytes a real seat could reach.
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -46,6 +46,8 @@ describe('chat sees artifacts and runs (server, A1)', () => {
   const seatRead = new Map<string, string>();
   const outputs = new Map<string, string>([[`${RUN_A}:u1`, 'Coverage moved from 23% to 61%.'], [`${RUN_OTHER}:u1`, 'OTHER PROJECT 99%']]);
   const pathRuns: string[] = [];
+  /** When set, every unit-output read waits for it: a message's context is still being prepared. */
+  let holdOutputs: Promise<void> | null = null;
   let repos: Array<{ id: string; name: string; root_path: string; default_branch: string; registered_at: number }> = [];
 
   const makeAdapter = (): CoreAdapter => ({
@@ -84,7 +86,10 @@ describe('chat sees artifacts and runs (server, A1)', () => {
       runView(RUN_A, 'mikes'),
       runView(RUN_OTHER, 'other'),
     ],
-    workOutput: async (unitId: string) => outputs.get(unitId) ?? null,
+    workOutput: async (unitId: string) => {
+      if (holdOutputs !== null) await holdOutputs;
+      return outputs.get(unitId) ?? null;
+    },
     proposePlan: async () => ({ ok: true }),
     confirmGate: async () => 'awaiting_human',
     cancelRun: async () => 'cancelled',
@@ -187,7 +192,9 @@ describe('chat sees artifacts and runs (server, A1)', () => {
     // The seat could read each turn file it was handed.
     expect(seatRead.get(join(cwd, 'open', 'mikes__coverage-deck-v1.html'))).toBe(DECK);
     expect(seatRead.get(join(cwd, 'open', 'mikes__coverage-deck-v2.html'))).toContain('Introduction');
-    expect(seatRead.get(join(cwd, 'context', `run-${RUN_A}.md`))).toContain('Coverage moved from 23% to 61%.');
+    const brief = [...seatRead.keys()].find((k) => k.startsWith(join(cwd, 'context', `run-${RUN_A}-`)));
+    expect(brief).toMatch(/-[0-9a-f]{8}\.md$/);
+    expect(seatRead.get(brief!)).toContain('Coverage moved from 23% to 61%.');
     // The transcript: the person's words only, then what the turn was given.
     const msgs = (await app.inject({ method: 'GET', url: '/api/v1/chats/deck-1/messages' })).json() as ChatMessagesResponse;
     const user = msgs.messages.find((m) => m.kind === 'user');
@@ -197,7 +204,7 @@ describe('chat sees artifacts and runs (server, A1)', () => {
       kind: 'context',
       turnId: user?.turnId,
       artifact: { ref: 'mikes/coverage-deck', viewed: 1, head: 2, copies: ['open/mikes__coverage-deck-v1.html', 'open/mikes__coverage-deck-v2.html'], anchors: ['slide-3-heading-1'] },
-      runs: [{ id: RUN_A, status: 'completed', brief: `context/run-${RUN_A}.md` }],
+      runs: [{ id: RUN_A, status: 'completed', brief: expect.stringMatching(new RegExp(`^context/run-${RUN_A}-[0-9a-f]{8}\\.md$`)) }],
       refused: [],
       page: true,
     });
@@ -212,6 +219,32 @@ describe('chat sees artifacts and runs (server, A1)', () => {
     expect(instructions).not.toContain('THEIRS');
     expect(instructions).toContain(`run:${RUN_OTHER}: it is in project other, not in this chat's project (mikes)`);
     expect(instructions).toContain("doc:other/their-deck: it is not in this chat's project (mikes)");
+  });
+
+  it('a message whose chat is closed and reopened while its context is prepared writes nothing into the new chat', async () => {
+    const first = await open(app, { chatId: 'race-1', projectId: 'mikes', clis: ['claude'] });
+    expect(first.statusCode).toBe(201);
+    const cwd = JSON.parse(first.body).scope.cwd as string;
+    let release!: () => void;
+    holdOutputs = new Promise<void>((r) => { release = r; });
+    const before = launches.length;
+    const sent = send(app, 'race-1', { text: 'what did run 29bbbfb1 measure?', context: { artifact: { ref: 'mikes/coverage-deck', version: 1 } } });
+    // The message is now waiting on the run's output, inside its preparation.
+    await new Promise((r) => setTimeout(r, 150));
+    expect((await app.inject({ method: 'DELETE', url: '/api/v1/chats/race-1' })).statusCode).toBe(200);
+    let reopened = await open(app, { chatId: 'race-1', projectId: 'mikes', clis: ['claude'] });
+    for (let i = 0; i < 40 && reopened.statusCode === 409; i += 1) {
+      await new Promise((r) => setTimeout(r, 50));
+      reopened = await open(app, { chatId: 'race-1', projectId: 'mikes', clis: ['claude'] });
+    }
+    expect(reopened.statusCode).toBe(201);
+    holdOutputs = null;
+    release();
+    const res = await sent;
+    expect(res.statusCode).toBe(409);
+    expect(launches.length).toBe(before);
+    // The new chat's scratch root holds its own statement and nothing the old message prepared.
+    expect(readdirSync(cwd).filter((n) => n === 'open' || n === 'context').flatMap((d) => readdirSync(join(cwd, d)))).toEqual([]);
   });
 
   it('refuses context from someone who does not own the chat, and from an agent; the owner is served', async () => {
