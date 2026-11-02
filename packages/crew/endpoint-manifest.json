@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.169.0",
+  "apiTypesVersion": "0.170.0",
   "endpoints": [
     {
       "method": "GET",
@@ -176,6 +176,20 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/chats/:id/proposals/:pid",
+      "requestType": "ChatProposalDecisionBody",
+      "responseType": "ChatProposalDecisionResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        502
+      ]
     },
     {
       "method": "POST",

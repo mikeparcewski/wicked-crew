@@ -31,7 +31,7 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdir
 import { join } from 'node:path';
 
 import type { ChatAttachment, ChatCitationItem, ChatContextBinding, ChatTranscriptRecord, ChatUsage, CoreEvent, DecisionView } from '../core/types.js';
-import { DecisionFenceFilter, splitDecisionsBlock } from '../decisions/chat-recorder.js';
+import { DecisionFenceFilter, splitDecisionsBlock, splitMakeBlocks } from '../decisions/chat-recorder.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { CHAT_ID } from './chat-scope.js';
 
@@ -71,6 +71,9 @@ export class ChatTranscriptStore {
   private readonly fence = new DecisionFenceFilter();
   /** DC-S4b: the block body cut from a seat's latest `chatReply`, until the recorder takes it. */
   private readonly blocks = new Map<string, string>();
+  /** DES-CHAT-ARTIFACTS-001 §4.1 (A2): the `wicked-make` block bodies cut from a seat's latest `chatReply`, until the
+   *  proposal resolver takes them. */
+  private readonly makeBlocks = new Map<string, string[]>();
 
   constructor(opts: { dir?: string; now?: () => number } = {}) {
     this.dir = opts.dir ?? defaultChatTranscriptsDir();
@@ -256,6 +259,11 @@ export class ChatTranscriptStore {
       const key = `${chatId}\u0000${cliKey}`;
       if (split.block !== null) this.blocks.set(key, split.block);
       else this.blocks.delete(key);
+      // A2: every `wicked-make` block goes too (the resolver takes the last one that parses); never shown, never stored.
+      const made = splitMakeBlocks(text);
+      text = made.text;
+      if (made.blocks.length > 0) this.makeBlocks.set(key, made.blocks);
+      else this.makeBlocks.delete(key);
     }
     const roots = this.chatRoots.get(chatId);
     if (roots !== undefined && roots.length > 0) text = rewriteHostPaths(text, roots);
@@ -275,6 +283,29 @@ export class ChatTranscriptStore {
   }
 
   /**
+   * DES-CHAT-ARTIFACTS-001 §4.2 (A2): the `wicked-make` block bodies {@link rewriteEvent} cut from this seat's latest
+   * reply, handed over ONCE (`[]` after). Call right after `rewriteEvent` for the reply.
+   */
+  takeMakeBlocks(chatId: string, cliKey: string): string[] {
+    const key = `${chatId}\u0000${cliKey}`;
+    const blocks = this.makeBlocks.get(key) ?? [];
+    this.makeBlocks.delete(key);
+    return blocks;
+  }
+
+  /**
+   * DES-CHAT-ARTIFACTS-001 §4.2-§4.3 (A2): a proposal record (`proposal`, `proposal_accepting`, `proposal_decided`)
+   * on a LIVE chat's transcript. Like `decisions`, a record alone never recreates a dropped file: `false` when there
+   * is no transcript to append to (the caller then writes the kept history copy, `chat-history.ts`).
+   */
+  appendProposalRecord(chatId: string, record: ChatTranscriptRecord): boolean {
+    const file = this.fileOf(chatId);
+    if (file === null || !existsSync(file)) return false;
+    this.append(chatId, record);
+    return true;
+  }
+
+  /**
    * DC-S4b: the decisions recorded from one turn's operator message, appended as their OWN record
    * (the `citations` pattern: the transcript is append-only and derivation finishes after the
    * replies are stored). A reader folds it onto the turn's `user` record. Only a chat that has a
@@ -290,6 +321,7 @@ export class ChatTranscriptStore {
   drop(chatId: string): void {
     this.chatRoots.delete(chatId);
     for (const key of [...this.blocks.keys()]) if (key.startsWith(`${chatId}\u0000`)) this.blocks.delete(key);
+    for (const key of [...this.makeBlocks.keys()]) if (key.startsWith(`${chatId}\u0000`)) this.makeBlocks.delete(key);
     const file = this.fileOf(chatId);
     if (file !== null) rmSync(file, { force: true });
   }

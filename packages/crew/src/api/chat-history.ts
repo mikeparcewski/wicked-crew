@@ -14,7 +14,7 @@
  * the old entry to `<id>--<closedAt ms>` first, so a reuse never overwrites a past conversation.
  */
 
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { ChatHistoryEntry, ChatStartedOn, ChatTranscriptRecord } from '../core/types.js';
@@ -217,6 +217,26 @@ export class ChatHistoryStore {
       }
     }
     return n;
+  }
+
+  /**
+   * DES-CHAT-ARTIFACTS-001 §4.3 (A2): an ended chat's open proposal stays answerable from its card, so its proposal
+   * records (`proposal_accepting`, `proposal_decided`, a re-resolution) are appended to the KEPT copy. `false` when
+   * the entry is not closed or kept nothing (an entry with no transcript has no proposal to answer).
+   */
+  appendKept(id: string, record: ChatTranscriptRecord): boolean {
+    const e = this.read(id);
+    if (e === null || e.status !== 'closed') return false;
+    const kept = this.keptPath(e.id);
+    if (!existsSync(kept)) return false;
+    appendFileSync(kept, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+    return true;
+  }
+
+  /** The entry's status and instance (its `createdAt`: an id reused later is another instance), or null. */
+  stateOf(id: string): { status: 'open' | 'closed'; instance: number; actorId: string | null } | null {
+    const e = this.read(id);
+    return e === null ? null : { status: e.status, instance: e.createdAt, actorId: e.actorId };
   }
 
   /** The records of a chat: the live transcript while open, the kept copy once closed. */
