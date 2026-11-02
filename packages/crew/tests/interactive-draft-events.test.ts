@@ -2290,6 +2290,8 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     const a = await make('land-note');
     writeFileSync(join(draftDir, 'land-note', 'attempt-run-land-note', 'land-note-v1.html'), '<html><body><h1>Release note</h1><p>Coverage reached 80%.</p></body></html>');
     a.engine.fire({ type: 'sessionCompleted', session: 'run-land-note' });
+    // A redelivered terminal frame while it finalizes is not an orphan's: no false "interrupted" outcome.
+    a.engine.fire({ type: 'sessionCompleted', session: 'run-land-note' });
     await waitFor(() => a.bindings.get('_unfiled/land-note')?.attempts[0]?.emittedAt !== undefined, 8000);
     expect(outcomes).toEqual([]); // announced is not landed
     expect(a.sub.inFlightDocs()).toContain('land-note'); // and the document stays busy until it lands

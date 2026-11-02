@@ -644,17 +644,23 @@ export function removeAttemptDirs(runDir: string, runIds: readonly string[]): st
 /** Drop an attempt's packet copy (crew keeps the canonical one); its deliverable stays for interactive to read. Best
  *  effort, never through a link (a writer could have replaced the attempt folder). */
 export function removePacketCopy(runDir: string, attempt: string): void {
+  let root: string;
   try {
-    const root = realpathSync(runDir);
+    root = realpathSync(runDir);
     const st = lstatSync(join(root, attempt));
     if (st.isSymbolicLink() || !st.isDirectory()) return;
-    for (const d of ['sources', 'records']) {
+  } catch {
+    return;
+  }
+  // Each folder on its own: one already gone never keeps the other.
+  for (const d of ['sources', 'records']) {
+    try {
       const p = join(root, attempt, d);
       const sd = lstatSync(p);
       rmSync(p, sd.isSymbolicLink() || !sd.isDirectory() ? { force: true } : { recursive: true, force: true });
+    } catch {
+      /* absent, or not removable: best effort */
     }
-  } catch {
-    /* best effort */
   }
 }
 
@@ -894,6 +900,8 @@ export async function startInteractiveDraftSubscriber(
   // Keyed by the per-project handoff key (crew#809: two projects finalizing the same slug must not
   // clear each other's marker); the VALUE is the document id `inFlightDocs()` reports.
   const finalizing = new Map<string, string>();
+  /** A3: runs whose finalize (floor, announce) is under way: a redelivered terminal frame is not an orphan's. */
+  const finalizingRuns = new Set<string>();
   let closed = false; // set by stop(): a handler mid-snapshot must never launch after shutdown
 
   /** Emit onto interactive's vocabulary as the `wi-crew` producer. Never throws into the
@@ -1003,7 +1011,7 @@ export async function startInteractiveDraftSubscriber(
     if (flight === undefined) {
       // A3 (§6.2): a proposal-bound run this process holds no flight for (a restart lost it, and the boot reconcile
       // could not see it end in time) still ends its attempt: released, Try again offered. Never relaunched.
-      if ((event.type === 'sessionCompleted' || event.type === 'sessionFailed' || event.type === 'runCancelled') && opts.bindings !== undefined) {
+      if ((event.type === 'sessionCompleted' || event.type === 'sessionFailed' || event.type === 'runCancelled') && opts.bindings !== undefined && !finalizingRuns.has(runId)) {
         const hit = opts.bindings.attemptOf(runId);
         if (hit !== null && hit.attempt.outcome === undefined && hit.attempt.emittedAt === undefined) {
           const outcome: BoundOutcome = { kind: 'failed', reason: 'interrupted by a restart' };
@@ -1139,12 +1147,16 @@ export async function startInteractiveDraftSubscriber(
       endFlight(runId);
       // The doc stays busy until the floor and the announce are done (codex on crew#725).
       finalizing.set(draftHandoffKey(flight.documentId, flight.projectId), flight.documentId);
+      finalizingRuns.add(runId);
       // The announce awaits the bus writer; a throw is logged, as a synchronous one was.
       finalize(flight, runId)
         .catch((err: unknown) =>
           log(`[interactive-draft] finalizing run ${runId} failed: ${err instanceof Error ? err.message : String(err)}`),
         )
-        .finally(() => finalizing.delete(draftHandoffKey(flight.documentId, flight.projectId)));
+        .finally(() => {
+          finalizing.delete(draftHandoffKey(flight.documentId, flight.projectId));
+          finalizingRuns.delete(runId);
+        });
       return;
     }
 
@@ -1276,6 +1288,11 @@ export async function startInteractiveDraftSubscriber(
     // never rides the bus payload. The deterministic key makes a re-announce a no-op (the key resolves to the existing row).
     // A3: the bound attempt is announced: from here only a landing (`version.created`) or a refusal ends it. Marked
     // BEFORE the emit, so a restart in between is reconciled against the document's head (`server.ts`).
+    // An attempt that already has an outcome (recorded some other way meanwhile) is never announced after it.
+    if (flight.bound !== undefined && opts.bindings?.attemptOf(runId)?.attempt.outcome !== undefined) {
+      log(`[interactive-draft] run ${runId}: its attempt already has an outcome — not announced`);
+      return;
+    }
     if (flight.bound !== undefined) opts.bindings?.markEmitted(flight.bound.ref, runId);
     const emitted = await emitInteractive(
       DRAFT_COMPLETED,

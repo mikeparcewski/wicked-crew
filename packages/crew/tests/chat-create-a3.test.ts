@@ -950,3 +950,73 @@ describe('xreview r3 folds (A3)', () => {
     expect(w3.records.get('c3')!.some((x) => x.kind === 'proposal_accepting')).toBe(false);
   });
 });
+
+describe('xreview r4 folds (A3)', () => {
+  const runs = [run(R1, { status: 'cancelled' }), run(R2, { status: 'cancelled' }), run(R3)];
+
+  it('Try again into a document that was deleted meanwhile refuses (it would never land), keeping the card answerable', async () => {
+    const w = world();
+    withChat(w, 'c1');
+    await w.svc.decide('c1', 'c1:t2', { decision: 'go' }, ME, 'i1');
+    const first = w.launches[0]!;
+    w.bindings.setOutcome(first.artifactRef, first.runId, { kind: 'failed', reason: 'the run was stopped' });
+    const retryPid = (await w.svc.appendRetry('c1', 'c1:t2', first.runId, first.artifactRef, 'the run was stopped'))!;
+    const docDir = join(w.docs, '_unfiled', first.artifactRef.split('/')[1]!);
+    writeFileSync(join(docDir, 'versions.json'), JSON.stringify({ head: 0, versions: [{ version: 0 }], retired_at: '2026-11-02T12:00:00Z' }));
+    const out = await w.svc.decide('c1', retryPid, { decision: 'go' }, ME, 'i1');
+    expect(out.code).toBe(502);
+    expect(JSON.stringify(out.body)).toContain('was deleted');
+    expect(w.launches).toHaveLength(1);
+  });
+
+  it("a message source brings the files attached to its turn (the answer's evidence)", async () => {
+    const att = join(fresh('att'), 'rep');
+    writeFileSync(att, 'measured: 3585 of 5786');
+    const records = chatRecords('c1');
+    (records[0] as Record<string, unknown>)['attachments'] = [{ id: 'rep1', chatId: 'c1', name: 'report.txt', mediaType: 'text/plain', kind: 'text', bytes: 22, sha256: 'x', createdAt: '' }];
+    const res = proposal('c1:t2', { sources: [{ token: 'message:t1', label: "claude's answer", status: 'ok', projectId: null }] });
+    const p = await buildSourcePacket({ runId: 'run-at', chatId: 'c1', pid: 'c1:t2', cutoffTurnId: 't2', resolution: res, records }, packetDeps(runs, () => null, { rep1: { name: 'report.txt', path: att } }));
+    expect(p.tokens['message:t1']).toContain('attachment-rep1-report.txt');
+    expect(p.files.find((f) => f.name === 'attachment-rep1-report.txt')?.bytes.toString()).toBe('measured: 3585 of 5786');
+  });
+
+  it('an archived chat’s retry is filed under the chat as it is kept now, never the chat that reused the id', async () => {
+    const w = world();
+    withChat(w, 'c1');
+    await w.svc.decide('c1', 'c1:t2', { decision: 'go' }, ME, 'i1');
+    const first = w.launches[0]!;
+    w.bindings.setOutcome(first.artifactRef, first.runId, { kind: 'failed', reason: 'the run was stopped' });
+    w.records.set('c1--1', w.records.get('c1')!);
+    w.records.set('c1', [{ at: 9, turnId: 'x1', kind: 'user', text: 'someone else', seats: ['claude'], owner: true }]);
+    w.chats.set('c1--1', w.chats.get('c1')!);
+    (w.svc as unknown as { deps: ChatProposalDeps }).deps.instanceOf = (c) => (c === 'c1' ? 'i2' : c === 'c1--1' ? 'i1' : null);
+    // The history moved instance i1 to its archive id.
+    ((w.registry as unknown as { dispatchers: Map<string, { deps: { chatIdOf: unknown } }> }).dispatchers.get('create')!.deps).chatIdOf = (c: string, inst: string | null) => (c === 'c1' && inst === 'i1' ? 'c1--1' : c);
+    const retryPid = (await w.svc.appendRetry('c1--1', 'c1:t2', first.runId, first.artifactRef, 'the run was stopped', 'i1'))!;
+    expect((await w.svc.decide('c1--1', retryPid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
+    expect(w.launches[1]!.chatId).toBe('c1--1');
+  });
+
+  it('a person who cleared the repositories gets no graph either; attachments over the packet together are refused', async () => {
+    const w = world();
+    withChat(w, 'c1');
+    ((w.registry as unknown as { dispatchers: Map<string, { deps: { graphFor: unknown } }> }).dispatchers.get('create')!.deps).graphFor = async () => '/graphs/chat.db';
+    await w.svc.decide('c1', 'c1:t2', { decision: 'go', edits: { repos: [] } }, ME, 'i1');
+    expect(w.launches[0]!.graphDb).toBeNull();
+    expect(w.launches[0]!.repos).toEqual([]);
+    const w2 = world();
+    withChat(w2, 'c2');
+    (w2.svc as unknown as { deps: ChatProposalDeps }).deps.attachments = () => [{ id: 'a1', name: 'a.txt', bytes: 500 * 1024 }, { id: 'a2', name: 'b.txt', bytes: 500 * 1024 }];
+    const r = await w2.svc.decide('c2', 'c2:t2', { decision: 'go', edits: { sources: ['chat', 'attachment:a1', 'attachment:a2'] } }, ME, 'i1');
+    expect(r.code).toBe(400);
+    expect(JSON.stringify(r.body)).toContain('768 KB');
+  });
+
+  it('packet cleanup removes records/ even when sources/ is already gone', () => {
+    const runDir = fresh('clean');
+    mkdirSync(join(runDir, 'attempt-x', 'records'), { recursive: true });
+    writeFileSync(join(runDir, 'attempt-x', 'records', 'run-a-00000000.md'), 'x');
+    removePacketCopy(runDir, 'attempt-x');
+    expect(existsSync(join(runDir, 'attempt-x', 'records'))).toBe(false);
+  });
+});

@@ -2785,7 +2785,7 @@ export async function createServer(
       // document are recorded from the binding, as the draft seam would have.
       ensureLaunchRecord: (b, a) => {
         if (runTimingIndex.proposalOf(a.runId) !== undefined) return;
-        recordRunLaunched(audit, runTimingIndex, DAEMON_ACTOR, a.runId, { deliver: 'none', channel: 'studio', actor: b.owner, chatId: b.chatId, proposalId: a.pid, artifactRef: b.ref, recoveredAtBoot: true });
+        recordRunLaunched(audit, runTimingIndex, DAEMON_ACTOR, a.runId, { deliver: 'none', channel: 'studio', actor: b.owner, chatId: chatHistory.idOfInstance(b.chatId, b.chatInstance) ?? b.chatId, proposalId: a.pid, artifactRef: b.ref, recoveredAtBoot: true });
       },
       hasLandingFailed: (runId) => runTimingIndex.landingFailedOf(runId) !== undefined,
       // Every attempt's document link, every boot (the ledger row of a run a crash recovered may not exist).

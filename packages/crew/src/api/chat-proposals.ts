@@ -24,11 +24,11 @@
  *     (the effective proposal and the identity derived from the pid), then the one launcher per run id
  *     ({@link LaunchOnceRegistry}), then `proposal_decided`. Not now runs no other check.
  *
- * Nothing in this slice starts work: each operation's launcher is registered by its own slice (A3 create, A5 refine,
- * A7 theme, A8 demo). Production advertises `proposals` with every operation off, so seats are told about nothing and
- * the resolver refuses any block. The TEST configuration (`WICKED_CHAT_ARTIFACTS_STUB=1`, DES §13 A2) turns every
- * operation's resolution on and registers a {@link RecordingStubDispatcher}, which records a dispatch and starts
- * nothing.
+ * Each operation's launcher is registered by its own slice: A3's real `create` (`interactive/proposal-create.ts`)
+ * whenever the draft seam is armed, so production advertises `proposals` and `create`; refine (A5), theme (A7) and demo
+ * (A8) stay off there until their slices land. The TEST configuration (`WICKED_CHAT_ARTIFACTS_STUB=1`, DES §13 A2)
+ * turns every operation's resolution on and registers a {@link RecordingStubDispatcher} for the kinds that have no real
+ * launcher yet (`capabilities.chatArtifacts.stubOps`): those record a dispatch and start nothing.
  *
  * Records go to the chat's live transcript, or to its kept history copy once the chat has ended, so an open proposal
  * stays answerable after a restart (§4.3).
@@ -1470,6 +1470,12 @@ export class ChatProposals {
       const had = new Set(p.sources.map((s) => s.token));
       const added = next.sources.find((src) => src.status === 'struck' && !had.has(src.token));
       if (added !== undefined) throw new EditRefusal(`${added.label}: ${added.reason ?? 'it cannot be used'}`);
+      // The attachments together must fit the packet (1 MB with room for the rest), or one would be left out at launch.
+      const files = this.deps.attachments(chatId);
+      const attached = next.sources
+        .filter((s) => s.status === 'ok' && s.token.startsWith('attachment:'))
+        .reduce((n, s) => n + (files.find((a) => `attachment:${a.id}` === s.token)?.bytes ?? 0), 0);
+      if (attached > 768 * 1024) throw new EditRefusal(`the attached files together are ${Math.round(attached / 1024)} KB: a document's sources take at most 768 KB of attachments; leave one out`);
     }
     return next;
   }

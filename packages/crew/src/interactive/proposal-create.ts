@@ -20,7 +20,7 @@
 
 import type { ArtifactProposal, ChatTranscriptRecord, ProposalIdentity, SessionView } from '../core/types.js';
 import { parseArtifactRef, UNFILED_MOUNT } from '../api/chat-context.js';
-import type { ProposalDispatch, ProposalDispatcher } from '../api/chat-proposals.js';
+import { foldProposals, type ProposalDispatch, type ProposalDispatcher } from '../api/chat-proposals.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
 import { realpathSync } from 'node:fs';
 
@@ -102,7 +102,10 @@ export class CreateLauncher implements ProposalDispatcher {
     // The stored graph binding. A document moved out of the chat's own scope gets none: a project graph would reach
     // repositories the move cut (§4.2), and only the accepted ones are snapshotted.
     const scopeProject = scopeProjectOf(this.deps.records(d.chatId), res);
-    const graphDb = held !== null ? held.graphDb : scopeProject !== projectId ? null : await this.deps.graphFor(projectId, d.chatId);
+    // ...and none when the person changed the repositories either (cleared or narrowed): the graph would reach past them.
+    const accepted = foldProposals(this.deps.records(d.chatId)).get(d.pid)?.accepting?.edits ?? null;
+    const reposEdited = accepted !== null && (accepted.repos !== undefined || accepted.project !== undefined);
+    const graphDb = held !== null ? held.graphDb : scopeProject !== projectId || reposEdited || (res.repoRefs ?? []).length === 0 ? null : await this.deps.graphFor(projectId, d.chatId);
     const base = head?.head ?? 0;
     const binding = this.deps.bindings.begin(
       {
@@ -150,6 +153,9 @@ export class CreateLauncher implements ProposalDispatcher {
       }
     } else if (head.kind === 'demo') {
       throw new Error(`${ref.ref} is a demo, not a document`);
+    } else if (docRetired(root, ref.doc)) {
+      // A retired document answers nothing: a draft for it would never land, and its chat would stay busy.
+      throw new Error(`${ref.ref} was deleted; ask again in the chat to make a new document`);
     }
 
     // 3. The packet, then the draft with the derived run id. The chat is read through its own instance: after a reuse of
@@ -180,7 +186,8 @@ export class CreateLauncher implements ProposalDispatcher {
       brief: res.brief ?? res.what.title,
       style: this.deps.styleOf(res.what.entry),
       runId: d.identity.runId,
-      chatId: binding.chatId,
+      // Filed under the chat as it is kept now (an archive id after a reuse), never the other chat that took the id.
+      chatId: chatNow ?? binding.chatId,
       proposalId: d.pid,
       artifactRef: ref.ref,
       repos: binding.repos.map((r) => ({ repoRef: r.id, name: r.name, rootPath: r.rootPath })),
@@ -340,5 +347,15 @@ export function docVersionsOf(docsRoot: string, doc: string): { head: number; by
     return { head: m.head, byRun, provenance };
   } catch {
     return null;
+  }
+}
+
+/** Whether interactive retired (tombstoned) the document: its manifest carries `retired_at`. */
+function docRetired(docsRoot: string, doc: string): boolean {
+  try {
+    const m = JSON.parse(readBeneath(realpathSync(docsRoot), `${doc}/versions.json`, 2 * 1024 * 1024).data.toString('utf8')) as { retired_at?: unknown };
+    return typeof m.retired_at === 'string' && m.retired_at !== '';
+  } catch {
+    return false;
   }
 }

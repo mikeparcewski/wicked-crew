@@ -238,6 +238,22 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
     }
     return true;
   };
+  /** A chat attachment as a packet file, read beneath its own folder (crew's state), by id. */
+  const attachmentFile = (stage: Stage, id: string): PacketFile => {
+    if (!ATTACHMENT_ID.test(id)) throw new Refused('not an attachment id');
+    const a = deps.attachment(storage, id);
+    if (a === null) throw new Refused('no longer attached');
+    let dir: string;
+    let base: string;
+    try {
+      const real = realpathSync(a.path);
+      dir = real.slice(0, real.lastIndexOf('/'));
+      base = real.slice(real.lastIndexOf('/') + 1);
+    } catch {
+      throw new Refused('no longer attached');
+    }
+    return stage.add(`attachment-${id}-${safeName(a.name).slice(0, Math.max(1, 190 - id.length))}`, readUnder(dir, base, PACKET_FILE_MAX_BYTES));
+  };
   /** A document version as a packet file, read beneath its docs root (the head when `version` is null). */
   const docFile = async (stage: Stage, refText: string, version: number | null): Promise<PacketFile> => {
     const ref = parseArtifactRef(refText);
@@ -285,6 +301,17 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
       if (!got.recovered) rebuilt += 1;
     }
     const runCount = names.length;
+    // The files the person attached to that turn: what the answer read is evidence too.
+    let attachNote = '';
+    const asked = records.find((r): r is Extract<ChatTranscriptRecord, { kind: 'user' }> => r.kind === 'user' && r.turnId === turn);
+    for (const att of asked?.attachments ?? []) {
+      try {
+        names.push(attachmentFile(stage, att.id).name);
+      } catch (err) {
+        if (!(err instanceof Refused)) throw err;
+        attachNote += ` (the file ${mdLabel(att.name)} attached to that turn is not in the packet: ${err.message})`;
+      }
+    }
     const ctx = records.find((r): r is Extract<ChatTranscriptRecord, { kind: 'context' }> => r.kind === 'context' && r.turnId === turn);
     let docNote = '';
     if (ctx?.artifact !== undefined) {
@@ -295,9 +322,9 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
         docNote = ` (the document it had open, ${ctx.artifact.ref} v${ctx.artifact.viewed}, is not in the packet: ${err.message})`;
       }
     }
-    if (names.length === 0) return { names, line: docNote === '' ? null : `Records this answer was given:${docNote}` };
+    if (names.length === 0) return { names, line: docNote + attachNote === '' ? null : `Records this answer was given:${docNote}${attachNote}` };
     const note = rebuilt === 0 ? '' : ` (${rebuilt === runCount ? 'the briefs' : `${rebuilt} of them`} this answer was given are no longer on this daemon: these are crew's current briefs of the same runs, which may differ)`;
-    return { names, line: `Records this answer was given: ${names.map((n) => `\`${n}\``).join(', ')}${note}${docNote}` };
+    return { names, line: `Records this answer was given: ${names.map((n) => `\`${n}\``).join(', ')}${note}${docNote}${attachNote}` };
   };
 
   for (const src of resolution.sources) {
@@ -387,20 +414,7 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
       } else if (token.startsWith('doc:')) {
         names = [(await docFile(stage, token.slice(4), null)).name];
       } else if (token.startsWith('attachment:')) {
-        const id = token.slice('attachment:'.length);
-        if (!ATTACHMENT_ID.test(id)) throw new Refused('not an attachment id');
-        const a = deps.attachment(storage, id);
-        if (a === null) throw new Refused('no longer attached');
-        let dir: string;
-        let base: string;
-        try {
-          const real = realpathSync(a.path);
-          dir = real.slice(0, real.lastIndexOf('/'));
-          base = real.slice(real.lastIndexOf('/') + 1);
-        } catch {
-          throw new Refused('no longer attached');
-        }
-        names = [stage.add(`attachment-${id}-${safeName(a.name).slice(0, Math.max(1, 190 - id.length))}`, readUnder(dir, base, PACKET_FILE_MAX_BYTES)).name];
+        names = [attachmentFile(stage, token.slice('attachment:'.length)).name];
       } else {
         // `page`: studio's page summary rode with the message and is not kept after it (§5.1); never invented.
         throw new Refused(token === 'page' ? "studio's page summary is not kept after the message" : 'not a source crew can read');
