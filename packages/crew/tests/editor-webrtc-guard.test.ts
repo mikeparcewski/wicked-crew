@@ -105,6 +105,11 @@ describe('guardBundle: the prelude goes first in every inline script that runs, 
     expect(withPrelude('"use strict"\n(b)')).toBe(`${P}"use strict"\n(b)`);
     expect(withPrelude('"use strict"\nin b')).toBe(`${P}"use strict"\nin b`);
     expect(withPrelude('"a" b')).toBe(`${P}"a" b`);
+    // A unary `!`/`~` or `++`/`--` on the next line starts a new statement (the minified IIFE shape); `!=` and `+` do not.
+    expect(withPrelude('"use strict"\n!function(){}()')).toBe(`"use strict";${P}\n!function(){}()`);
+    expect(withPrelude('"use strict"\n++i')).toBe(`"use strict";${P}\n++i`);
+    expect(withPrelude('"a"\n!= b')).toBe(`${P}"a"\n!= b`);
+    expect(withPrelude('"a"\n+ b')).toBe(`${P}"a"\n+ b`);
     // A string that starts an expression is not a directive.
     expect(withPrelude("'use strict';\n'x'+y")).toBe(`'use strict';${P}\n'x'+y`);
     const { body, hashes } = guard('<script>"use strict";x</script>');
