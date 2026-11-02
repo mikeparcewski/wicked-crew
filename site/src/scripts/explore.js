@@ -271,5 +271,9 @@ function onTakeover(root, cb) {
   if (!t || reduced) return;
   const box = t.closest('.install');
   t.classList.add('is-armed');
-  onLock(box, () => t.classList.add('is-typing'), 0.6);
+  onLock(box, () => {
+    t.classList.add('is-typing');
+    // the command is never left hidden: once the typing is over (or if animations never run), unclip it
+    setTimeout(() => t.classList.remove('is-armed', 'is-typing'), 3300);
+  }, 0.6);
 })();

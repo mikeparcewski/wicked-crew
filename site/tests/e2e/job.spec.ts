@@ -36,13 +36,29 @@ test.describe('the job demo’s poster', () => {
 
 test.describe('the job demo', () => {
   test('opening a receipt on the poster stops the automatic replay from clearing it', async ({ page }) => {
+    // Page time is paused from the start, so a slow load cannot use up the 1.6 s replay window
+    // before the click; then it runs well past the replay deadline.
+    await page.clock.install({ time: new Date('2026-11-02T10:00:00Z') });
+    await page.clock.pauseAt(new Date('2026-11-02T10:00:00.050Z'));
     await page.goto('/');
     const job = page.locator('[data-job]');
     await job.locator('[data-gate="2"]').click();
     await expect(job.locator('[data-panel]')).toContainText('Review gate');
-    await page.waitForTimeout(2_600);
+    await page.clock.runFor(5_000);
     await expect(job.locator('[data-panel]')).toContainText('Review gate');
     await expect(job.locator('[data-job-run]')).toBeEnabled();
+    await expect(job.locator('[data-st="4"]')).toHaveClass(/is-done/);
+  });
+
+  test('without a click, the poster does replay once it is in view', async ({ page }) => {
+    await page.clock.install({ time: new Date('2026-11-02T10:00:00Z') });
+    await page.clock.pauseAt(new Date('2026-11-02T10:00:00.050Z'));
+    await page.goto('/');
+    const job = page.locator('[data-job]');
+    await expect(job.locator('[data-panel]')).toContainText('DELIVERED');
+    await page.clock.runFor(2_500);
+    await expect(job.locator('[data-job-run]')).toHaveAttribute('aria-disabled', 'true');
+    await expect(job.locator('[data-pr]')).not.toHaveClass(/is-lit/);
   });
 
   test('a keyboard Run keeps focus on Run, and the caption follows the job', async ({ page }) => {
