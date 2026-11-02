@@ -538,8 +538,9 @@ function bindingOf(records: readonly ChatTranscriptRecord[], turnId: string): { 
   return { binding: latest, turnHas: false };
 }
 
-/** Hosts the demo recorder can reach (DES §10: a loopback-only jail). */
-const LOCAL_HOSTS: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '[::1]']);
+/** Hosts the demo recorder can reach (DES §10: a loopback-only jail). The seat's instructions name the same three
+ *  (`chat-scope.ts`; a test keeps them equal). */
+export const LOCAL_HOSTS: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '[::1]']);
 
 /** Every http(s) address in the person's words, whole (trailing sentence punctuation dropped). */
 function personUrls(words: string): Set<string> {
@@ -1006,6 +1007,8 @@ export class ChatProposals {
           if (!hex) return [];
           const ci = ids.filter((id) => id.toLowerCase() === low);
           if (ci.length > 0) return ci;
+          // A complete uuid is exact-only (never a prefix of a longer id); a shorter hex id of 8+ digits is a prefix.
+          if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(low)) return [];
           return low.replace(/-/g, '').length >= 8 ? ids.filter((id) => id.toLowerCase().startsWith(low)) : [];
         };
         // Authorized before anything of it is read: a seat's token is matched against the runs the person named in

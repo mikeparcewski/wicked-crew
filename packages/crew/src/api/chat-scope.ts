@@ -802,7 +802,7 @@ export function chatMakeLines(make: MakeDigest): string[] {
       '```',
       '',
       'With no address, ask for it and propose nothing. The recorder reaches only an app on this machine',
-      '(localhost or 127.0.0.1): for any other address, say so in one sentence and propose nothing.',
+      '(localhost, 127.0.0.1 or [::1]): for any other address, say so in one sentence and propose nothing.',
       '',
     );
   }

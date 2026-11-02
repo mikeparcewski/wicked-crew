@@ -549,6 +549,23 @@ describe('r3', () => {
     ]);
   });
 
+  it('a complete uuid is exact-only: absent, it never selects a longer id it prefixes (even added by the person)', async () => {
+    const r = rig();
+    r.runs = [run('29bbbfb1-1111-4000-8000-000000000001-2')];
+    const t = chatWith(r, 'c1');
+    const p = (await propose(r, 'c1', t, { entry: 'presentation', sources: ['chat'] }))!;
+    const go = await r.svc.decide('c1', p.pid, { decision: 'go', edits: { sources: ['chat', 'run:29bbbfb1-1111-4000-8000-000000000001'] } }, ME, 'i1');
+    expect(go).toMatchObject({ code: 400, body: { code: 'edits_invalid' } });
+    expect(r.launcher.launched).toHaveLength(0);
+  });
+
+  it('the seat is told the same loopback hosts the resolver accepts', async () => {
+    const { chatMakeLines } = await import('../src/api/chat-scope.js');
+    const { LOCAL_HOSTS } = await import('../src/api/chat-proposals.js');
+    const text = chatMakeLines({ create: false, refine: false, theme: false, demo: true, entries: [{ id: 'demo-video', title: 'Demo video', kind: 'demo', outcome: 'x' }] }).join('\n');
+    for (const h of LOCAL_HOSTS) expect(text).toContain(h);
+  });
+
   it('a bracketed IPv6 localhost address the person gave is theirs, with or without punctuation after it', async () => {
     const r = rig();
     for (const words of ['Record http://[::1]:5173/app', 'Record http://[::1]:5173/app.']) {
