@@ -310,7 +310,7 @@ describe("the proxy's chat_id grant (A3, §5.2)", () => {
     // Another document, another mount, an unlisted repository: refused.
     expect((await prepareDocCreate(body({ name: 'other-doc', chat_id: 'c1', proposal_id: 'c1:t2' }), 'application/json', adapter, 'default', undefined, () => grant)).refusal?.code).toBe('proposal_grant_refused');
     expect((await prepareDocCreate(body({ chat_id: 'c1', proposal_id: 'c1:t2' }), 'application/json', adapter, 'mikes', undefined, () => grant)).refusal?.code).toBe('proposal_grant_refused');
-    expect((await prepareDocCreate(body({ chat_id: 'c1', proposal_id: 'c1:t2', repo_refs: ['wicked-core'] }), 'application/json', adapter, 'default', undefined, () => grant)).refusal?.code).toBe('proposal_grant_refused');
+    expect((await prepareDocCreate(body({ chat_id: 'c1', proposal_id: 'c1:t2', repo_refs: ['repo-core'] }), 'application/json', adapter, 'default', undefined, () => grant)).refusal?.code).toBe('proposal_grant_refused');
     // The grant: allowed, resolved to the registry id, and neither field reaches the bridge.
     const ok = await prepareDocCreate(body({ chat_id: 'c1', proposal_id: 'c1:t2', repo_refs: ['wicked-crew'] }), 'application/json', adapter, 'default', undefined, () => grant);
     expect(ok.refusal).toBeUndefined();
@@ -579,7 +579,7 @@ describe('Change something on a create: the project and the repositories (A3, §
     w.chats.set('c1', { ...w.chats.get('c1')!, projectId: 'mikes' });
     expect((await w.svc.decide('c1', 'c1:t2', { decision: 'go', edits: { project: null } }, ME, 'i1')).body).toMatchObject({ code: 'edits_invalid' });
     w.chats.set('c1', { ...w.chats.get('c1')!, projectId: null });
-    expect((await w.svc.decide('c1', 'c1:t2', { decision: 'go', edits: { repos: ['wicked-core'] } }, ME, 'i1')).body).toMatchObject({ code: 'edits_invalid' });
+    expect((await w.svc.decide('c1', 'c1:t2', { decision: 'go', edits: { repos: ['repo-core'] } }, ME, 'i1')).body).toMatchObject({ code: 'edits_invalid' });
     expect(w.launches).toHaveLength(0);
   });
 });
