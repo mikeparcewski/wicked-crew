@@ -65,6 +65,16 @@ describe('the catalog seeds (one source of truth)', () => {
     }
   });
 
+  it('shown copy promises nothing the product cannot do today (messaging rules N7, N8)', () => {
+    // PowerPoint export needs python-pptx nothing installs (wicked-interactive#322); demos have no voice-over;
+    // chat refinement of documents is not built. Search-only synonyms may still name them.
+    const shown = (s: (typeof CATALOG_SEEDS)[number]): string =>
+      [s.title, s.summary, s.outcome, ...(s.useWhen ?? []), ...s.tags].filter((x) => x !== undefined).join(' | ');
+    for (const s of CATALOG_SEEDS) {
+      expect(shown(s), s.id).not.toMatch(/powerpoint|pptx|narrat|refine|\bshare\b/i);
+    }
+  });
+
   it('asks for every field the demo route requires (codex r3)', () => {
     const demo = CATALOG_SEEDS.find((s) => s.id === 'demo-video')!;
     const required = Object.entries(DemoLaunchSchema.shape)
