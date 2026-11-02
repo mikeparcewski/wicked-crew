@@ -60,3 +60,22 @@ test.describe('inline-tag boundaries render with their spaces', () => {
     }
   });
 });
+
+test.describe('the reviewed messaging', () => {
+  test('the kicker, the sub-line, the benefits and what is new read as whole sentences', async ({ page }) => {
+    await page.goto('/');
+    await expect(page.locator('.hero-kicker')).toHaveText('Intent in. Gated work out.');
+    await expect(page.locator('.lede')).toContainText('approved by default, not verified');
+    const why = (await page.locator('.why').innerText()).replace(/\s+/g, ' ');
+    expect(why).toContain('Your agents, sandboxed. By default each runs in a sandbox');
+    expect(why).toContain('up to three hand-off attempts in all');
+    expect(why).toContain('a feature, bug fix, migration, MCP server or editor plugin pass QE acceptance first');
+    const news = await page.locator('.news-list li').allTextContents();
+    expect(news.length).toBe(6);
+    for (const n of news) expect(n).toMatch(/^\S.*\S \S/); // a space between the name and its line
+    const body = (await page.locator('body').innerText()).replace(/\s+/g, ' ');
+    expect(body).not.toMatch(/never claimed|never asserted/i);
+    expect(body).not.toMatch(/one failed check stops/i);
+    await expect(page.locator('.tbl--layers')).toContainText('By default, a different agent reviews the work.');
+  });
+});
