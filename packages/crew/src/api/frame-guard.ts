@@ -13,7 +13,7 @@
  * - `X-Frame-Options: SAMEORIGIN` for browsers without `frame-ancestors`. A browser that has it
  *   ignores this header, so the dev server still works there.
  *
- * Two hooks put them on EVERY response, HTML or JSON, success or refusal:
+ * Two hooks put them on every response the router answers, HTML or JSON, success or refusal:
  *
  * - `onRequest` writes both on the raw response first, so a route that hijacks the reply and
  *   writes its own head (the interactive proxy, the ask MCP route) still sends them: Node merges
@@ -24,6 +24,9 @@
  * A route that hijacks AND writes its own `Content-Security-Policy` must keep the guard's policy
  * beside it with {@link keepFrameGuard}. A WebSocket upgrade's `101` is written by `ws` straight to
  * the socket, past both hooks; {@link guardUpgrades} adds the headers there.
+ *
+ * Left as they are: the 400s written before any route runs (a URL Fastify cannot decode, a WebSocket handshake
+ * `ws` rejects). They carry a status line and nothing to click, so framing them gains a page nothing.
  */
 import type { ServerResponse } from 'node:http';
 import type { FastifyInstance } from 'fastify';
@@ -32,13 +35,23 @@ import { STUDIO_DEV_ORIGINS, type OriginPolicy } from './origin-guard.js';
 export const X_FRAME_OPTIONS = 'SAMEORIGIN';
 
 /**
- * A serialized origin exactly as a browser sends it in `Origin`: `http(s)://host[:port]`, nothing after it (no path,
- * no trailing slash, no query, fragment or credentials). Only such an entry can match an `Origin` header in
- * origin-guard's exact allowlist check, and only such an entry is a single CSP host-source that cannot end or widen
- * the directive. The entry is checked as written, never reduced to an origin first: `https://a.example/#; x` would
- * reduce to an origin the API refuses, and a granted frame would outlive that refusal.
+ * An origin written exactly as a browser sends it in `Origin`: `http(s)://host[:port]`, lowercase, no default port,
+ * nothing after it (no path, trailing slash, query, fragment or credentials). Only such an entry can match an
+ * `Origin` header in origin-guard's exact allowlist check, and only such an entry is a single CSP host-source that
+ * cannot end or widen the directive. The entry is checked as written, never normalized into a grant: CSP matches
+ * hosts case-insensitively and a default port as its omission, so `https://A.example:443` would let
+ * `https://a.example` frame studio while the API refuses that page.
  */
-const SERIALIZED_ORIGIN = /^https?:\/\/(?:[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.?|\[[0-9A-Fa-f:.]+\])(?::\d{1,5})?$/;
+const SERIALIZED_ORIGIN = /^https?:\/\/(?:[a-z0-9-]+(?:\.[a-z0-9-]+)*\.?|\[[0-9a-f:.]+\])(?::\d{1,5})?$/;
+
+function isSerializedOrigin(entry: string): boolean {
+  if (!SERIALIZED_ORIGIN.test(entry)) return false;
+  try {
+    return new URL(entry).origin === entry;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * The `frame-ancestors` directive for this daemon: `'self'`, studio's dev server and the allowed origins, each kept
@@ -47,7 +60,7 @@ const SERIALIZED_ORIGIN = /^https?:\/\/(?:[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.?|\
 export function frameAncestors(policy: Pick<OriginPolicy, 'allowedOrigins'>): string {
   const sources = new Set<string>();
   for (const origin of [...STUDIO_DEV_ORIGINS, ...(policy.allowedOrigins ?? [])]) {
-    if (SERIALIZED_ORIGIN.test(origin)) sources.add(origin);
+    if (isSerializedOrigin(origin)) sources.add(origin);
   }
   return ["frame-ancestors 'self'", ...sources].join(' ');
 }

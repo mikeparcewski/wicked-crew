@@ -16,8 +16,13 @@ describe('frameAncestors', () => {
   });
 
   it('adds the allowed origins exactly as allowed, de-duplicated (a trailing dot is a different origin and is kept)', () => {
-    expect(frameAncestors({ allowedOrigins: ['https://Studio.Example.com', 'http://localhost:4200', 'http://10.0.0.5:8080', 'https://skin.example.', 'http://[::1]:5173'] }))
-      .toBe(`${DEV} https://Studio.Example.com http://10.0.0.5:8080 https://skin.example. http://[::1]:5173`);
+    expect(frameAncestors({ allowedOrigins: ['https://studio.example.com', 'http://localhost:4200', 'http://10.0.0.5:8080', 'https://skin.example.', 'http://[::1]:5173'] }))
+      .toBe(`${DEV} https://studio.example.com http://10.0.0.5:8080 https://skin.example. http://[::1]:5173`);
+  });
+
+  it('drops an entry a browser never sends as an Origin (mixed case, default port): CSP would match the canonical page the API refuses', () => {
+    expect(frameAncestors({ allowedOrigins: ['https://Studio.Example.com', 'https://studio.example.com:443', 'http://skin.example:80', 'http://[::1]:80', 'http://[0:0::1]:5173'] }))
+      .toBe(DEV);
   });
 
   it('drops any entry that is not a serialized origin, checked as written (never reduced to an origin first)', () => {
@@ -45,12 +50,21 @@ describe('frameAncestors', () => {
   });
 
   it('every origin it lets frame is one the API already accepts from that page (origin-guard corsAllowed)', () => {
-    const allowedOrigins = ['https://ok.example', 'https://skin.example.', 'https://evil.example/#; x', 'https://evil.example/', 'https://u:p@evil.example'];
+    const allowedOrigins = [
+      'https://ok.example', 'https://skin.example.', 'https://evil.example/#; x', 'https://evil.example/', 'https://u:p@evil.example',
+      'https://Mixed.example', 'https://port.example:443',
+    ];
     const granted = frameAncestors({ allowedOrigins }).split(' ').slice(2);
-    expect(granted.length).toBeGreaterThan(0);
+    expect(granted).toEqual(['http://127.0.0.1:4200', 'http://localhost:4200', 'https://ok.example', 'https://skin.example.']);
     for (const origin of granted) {
+      // Each grant is what the browser sends as Origin for that page, and the API accepts it.
+      expect(new URL(origin).origin, origin).toBe(origin);
       expect(corsAllowed(origin, { mode: 'off', allowedOrigins }), origin).toBe(true);
-      expect(corsAllowed(origin, { mode: 'required', allowedOrigins }), origin).toBe(true);
+    }
+    // The canonical pages behind the dropped mixed-case / default-port entries are refused by the API and not granted.
+    for (const page of ['https://mixed.example', 'https://port.example']) {
+      expect(corsAllowed(page, { mode: 'off', allowedOrigins }), page).toBe(false);
+      expect(granted).not.toContain(page);
     }
   });
 });
