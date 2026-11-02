@@ -30,7 +30,7 @@ const FRAMES = '[data-frame], .same-garden, .footer';
   // PageUp cancel out); jump = Home / End.
   // restY = where the page last came to rest. A gesture starts there, not at scrollY when its first
   // input event arrives: with threaded scrolling, a wheel notch has often moved the page already.
-  let pending = false, y0 = window.scrollY, restY = window.scrollY, idir = 0, keys = 0, jump = false, arrows = false, keyed = false;
+  let pending = false, y0 = window.scrollY, restY = window.scrollY, idir = 0, keys = 0, jump = false, arrows = false, keyed = false, touched = false;
   let gliding = false, glideTo = 0, focusAt = -1e9, inputAt = -1e9, restT = 0;
   // small nudges add up: two 30px nudges the same way from the same frame make one 60px move, so a
   // gentle scroller is never held on a frame, however slowly they go (reset by a turn or a new frame)
@@ -52,15 +52,18 @@ const FRAMES = '[data-frame], .same-garden, .footer';
     if (gliding) {
       // the visitor takes over our glide: it stops where it is, and the gesture counts from the
       // frame the glide was going to (so a reversal goes back, and another notch goes on)
-      halt(); y0 = glideTo; idir = 0; keys = 0; jump = false; arrows = false; keyed = false;
+      halt(); y0 = glideTo; idir = 0; keys = 0; jump = false; arrows = false; keyed = false; touched = false;
     } else if (!pending || t - inputAt > 600) {
-      y0 = restY; idir = 0; keys = 0; jump = false; arrows = false; keyed = false;
+      y0 = restY; idir = 0; keys = 0; jump = false; arrows = false; keyed = false; touched = false;
+    } else if (kind === 'touch' && dir && idir && dir !== idir) {
+      // a finger that turns back without lifting: the gesture starts again from where it turned
+      y0 = window.scrollY; nudge.sum = 0;
     }
     pending = true;
     if (kind === 'key') { keys += dir; arrows = false; keyed = true; }
     else if (kind === 'arrow') { keys = dir; arrows = true; keyed = true; }   // the arrows: see target()
     else if (kind === 'jump') jump = true;
-    else if (kind === 'wheel' || kind === 'touch') { keys = 0; keyed = false; }
+    else if (kind === 'wheel' || kind === 'touch') { keys = 0; keyed = false; if (kind === 'touch') touched = true; }
     if (dir) idir = dir;
     // an explicit scroll after a keyboard focus is the visitor's again: the focus guard ends
     if (kind !== 'pointer') focusAt = -1e9;
@@ -71,13 +74,13 @@ const FRAMES = '[data-frame], .same-garden, .footer';
   if (reduceMQ.addEventListener) reduceMQ.addEventListener('change', off);
   window.addEventListener('resize', off);
   window.addEventListener('wheel', (e) => { if (e.deltaY) begin('wheel', e.deltaY > 0 ? 1 : -1); }, { passive: true });
-  // a finger moving up scrolls down: the direction comes from the finger, from where it went down
+  // a finger moving up scrolls down: the direction is the finger's latest clear movement (4px or more)
   let touchY = null;
   window.addEventListener('touchstart', (e) => { touchY = e.touches && e.touches[0] ? e.touches[0].clientY : null; }, { passive: true });
   window.addEventListener('touchmove', (e) => {
     const y = e.touches && e.touches[0] ? e.touches[0].clientY : null;
     const dy = touchY === null || y === null ? 0 : touchY - y;
-    begin('touch', Math.abs(dy) > 4 ? (dy > 0 ? 1 : -1) : 0);
+    if (Math.abs(dy) > 4) { begin('touch', dy > 0 ? 1 : -1); touchY = y; } else begin('touch', 0);
   }, { passive: true });
   window.addEventListener('pointerdown', () => begin('pointer', 0), { passive: true });
   // a release keeps its gesture alive until the scroll comes to rest (a held key, a scrollbar drag)
@@ -177,7 +180,8 @@ const FRAMES = '[data-frame], .same-garden, .footer';
     pending = false;
     const t = now();
     let to = null;
-    if (on() && t - focusAt >= 800 && t - inputAt <= 1000 && !jump && !tallInView()) to = target(y);
+    // a touch fling's momentum can outlast any time window: it stays the visitor's until it rests
+    if (on() && t - focusAt >= 800 && (touched || t - inputAt <= 1000) && !jump && !tallInView()) to = target(y);
     if (to === null || Math.abs(Math.max(0, Math.min(to, maxY())) - y) < 2) { y0 = y; return; }
     to = Math.max(0, Math.min(to, maxY()));
     gliding = true; glideTo = to; y0 = to; restY = to;

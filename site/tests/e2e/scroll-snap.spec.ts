@@ -319,6 +319,49 @@ test.describe('frames and the settle', () => {
   }
 });
 
+test.describe('touch, on a touch screen 1024px wide and up (a tablet in landscape)', () => {
+  test.use({ viewport: { width: 1440, height: 700 }, hasTouch: true });
+
+  /** A real touch drag through the browser's input pipeline: finger positions, then a release. */
+  async function drag(page: Page, ys: number[], stepMs = 16, at = -1) {
+    const c = await page.context().newCDPSession(page);
+    const pt = (y: number) => [{ x: 720, y }];
+    let seen = -1;
+    await c.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: pt(ys[0]) });
+    for (let k = 1; k < ys.length; k++) {
+      await c.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: pt(ys[k]) });
+      await page.waitForTimeout(stepMs);
+      if (k === at) seen = await page.evaluate(() => Math.round(window.scrollY));
+    }
+    await c.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    return seen;
+  }
+  const steps = (from: number, to: number, n: number) => Array.from({ length: n + 1 }, (_, k) => Math.round(from + ((to - from) * k) / n));
+
+  test('a drag that turns back before the release settles the way the finger last went', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForTimeout(400);
+    const tops = await frameTops(page);
+    await page.evaluate((y) => window.scrollTo({ top: y, behavior: 'instant' }), tops[2]);
+    await page.waitForTimeout(500);
+    // finger up 180px (the page goes down), then back down 120px (the page comes back up), slowly
+    const turned = await drag(page, [...steps(500, 320, 12), ...steps(320, 440, 8).slice(1)], 40, 12);
+    expect(turned, 'the drag did not scroll the page (no touch scrolling to test)').toBeGreaterThan(tops[2] + 100);
+    const y = await settled(page);
+    expect(Math.abs(y - tops[2]), `rested at ${y}; the finger last went back towards ${tops[2]}`).toBeLessThanOrEqual(2);
+  });
+
+  test('a fast fling locks onto a frame after its momentum, however long that takes', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForTimeout(400);
+    const tops = await restTops(page);
+    await drag(page, steps(600, 200, 6), 8);
+    const y = await settled(page);
+    expect(onAFrame(y, tops), `the fling rested at ${y}, between frames`).toBe(true);
+    expect(y).toBeGreaterThan(0);
+  });
+});
+
 test.describe('no settle under reduced motion', () => {
   // The settle moves the viewport for you: the motion the preference asks the page to suppress.
   test.use({ contextOptions: { reducedMotion: 'reduce' } });
