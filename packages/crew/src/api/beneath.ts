@@ -51,10 +51,11 @@ export class BeneathError extends Error {
   }
 }
 
-/** The components of a path relative to a root: no empty, `.`, `..`, absolute or NUL-bearing part. */
+/** The components of a path relative to a root: no empty, `.`, `..`, absolute or NUL-bearing part. (`/` is the only
+ *  separator on the platforms this opens on: a backslash is an ordinary character in a POSIX name.) */
 function partsOf(rel: string): string[] {
   const parts = rel.split('/');
-  if (rel === '' || parts.some((p) => p === '' || p === '.' || p === '..' || p.includes('\0') || p.includes('\\'))) {
+  if (rel === '' || parts.some((p) => p === '' || p === '.' || p === '..' || p.includes('\0'))) {
     throw new BeneathError('EINVAL', `not a path beneath a root: ${JSON.stringify(rel)}`);
   }
   return parts;

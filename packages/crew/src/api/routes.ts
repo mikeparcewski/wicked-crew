@@ -3965,7 +3965,14 @@ export function registerRoutes(
         // The repositories the document was grounded on, as its draft launch resolved them (inferred from the brief or
         // the project's one repository too); the create-time request's list only for a binding that predates that.
         // Read beneath the docs root like every A1 read (crew#1274).
-        const bound = readGroundingBeneath(root, seed.doc)?.repoRefs ?? [];
+        const grounding = readGroundingBeneath(root, seed.doc);
+        if (grounding !== null && 'unreadable' in grounding) {
+          return reply.code(409).send({ code: 'seed_binding_unreadable', error: `what ${seed.ref} was made about cannot be read; open the chat without it` });
+        }
+        const bound = grounding?.repoRefs ?? [];
+        if (bound.length > 32) {
+          return reply.code(400).send({ code: 'seed_too_many_repos', error: `${seed.ref} was made about ${bound.length} repositories; a chat reads at most 32` });
+        }
         if (b.projectId !== undefined && bound.length > 0) {
           const members = new Set((await projectRepoCandidates(adapter, b.projectId)).map((r) => r.repoRef));
           const outside = bound.filter((r) => !members.has(r));
@@ -4321,7 +4328,10 @@ export function registerRoutes(
     runs: async () => (await adapter.sessionsDetail()).map((v) => decorateRun(v)),
     workOutput: async (unitId) => (typeof adapter.workOutput === 'function' ? adapter.workOutput(unitId) : null),
     acceptanceLine: async (view) => (await acceptanceViewOf(view, {})).summary.line,
-    docStyle: (root, doc) => readGroundingBeneath(root, doc)?.style,
+    docStyle: (root, doc) => {
+      const g = readGroundingBeneath(root, doc);
+      return g !== null && 'style' in g ? g.style : undefined;
+    },
   };
   // DES-CHAT-ARTIFACTS-001 §4 (A2): proposals. Resolved from crew's own records (the same reads the turn block uses);
   // records go to the live transcript, or the kept history copy once the chat has ended.

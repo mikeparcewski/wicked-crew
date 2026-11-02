@@ -833,24 +833,27 @@ const DOC_STYLE_VALUES = new Set(['web', 'ppt', 'brochure', 'doc']);
 /**
  * What crew recorded about a document when it was created and drafted (`crew-grounding.json`), read beneath the docs
  * root like every other A1 read (capped, non-blocking, no link followed): the style, and the repositories it was
- * grounded on — the draft launch's resolved list when there is one, else the create request's. `null` when there is
- * no sidecar (or it is not one crew wrote).
+ * grounded on — the draft launch's resolved list when there is one, else the create request's — however many the
+ * writer recorded. `null` when there is no sidecar; `{unreadable}` when there is one crew cannot read or does not
+ * recognise (never read as "no repositories": a seed then refuses rather than skipping its membership check).
  */
-export function readGroundingBeneath(docsRoot: string, doc: string): { style?: string; repoRefs: string[] } | null {
+export function readGroundingBeneath(docsRoot: string, doc: string): { style?: string; repoRefs: string[] } | { unreadable: true } | null {
   if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(doc) || beneathMode() === 'unsupported') return null;
   let parsed: unknown;
   try {
     parsed = JSON.parse(readBeneath(realpathSync(docsRoot), `${doc}/crew-grounding.json`, 256 * 1024).data.toString('utf8'));
-  } catch {
-    return null;
+  } catch (err) {
+    const code = err instanceof BeneathError ? err.code : (err as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' ? null : { unreadable: true };
   }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return { unreadable: true };
   const b = parsed as { style?: unknown; repo_refs?: unknown; grounding?: { repo_refs?: unknown } | null };
-  const refsOf = (v: unknown): string[] | null => (Array.isArray(v) && v.length <= 32 && v.every((r) => typeof r === 'string' && REPO_REF.test(r)) ? (v as string[]) : null);
-  const resolved = b.grounding !== undefined && b.grounding !== null && typeof b.grounding === 'object' ? refsOf(b.grounding.repo_refs) : null;
+  const refsOf = (v: unknown): string[] | null => (Array.isArray(v) && v.every((r) => typeof r === 'string' && REPO_REF.test(r)) ? (v as string[]) : null);
+  const resolved = b.grounding !== undefined && b.grounding !== null ? (typeof b.grounding === 'object' ? refsOf(b.grounding.repo_refs) : null) : undefined;
   const requested = refsOf(b.repo_refs ?? []);
-  const repoRefs = resolved ?? requested ?? [];
-  return { ...(typeof b.style === 'string' && DOC_STYLE_VALUES.has(b.style) ? { style: b.style } : {}), repoRefs };
+  // A list that is there but not a list of ids is not read as an empty one.
+  if (resolved === null || (resolved === undefined && requested === null)) return { unreadable: true };
+  return { ...(typeof b.style === 'string' && DOC_STYLE_VALUES.has(b.style) ? { style: b.style } : {}), repoRefs: resolved ?? requested ?? [] };
 }
 
 /** sha256 of a string, hex (tests and the route's binding). */

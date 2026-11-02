@@ -347,6 +347,28 @@ describe('chat sees artifacts and runs (server, A1)', () => {
     repos = [];
   });
 
+  it('a seed keeps the repositories the draft was grounded on: an inferred one outside the project is refused, too many or an unreadable binding is said', async () => {
+    const mikes = ensureProjectInteractiveRoot('mikes', undefined, process.env, home);
+    repos = [{ id: 'r-in', name: 'alpha', root_path: join(scratch, 'repo-in'), default_branch: 'main', registered_at: 1 }];
+    mkdirSync(repos[0]!.root_path, { recursive: true });
+    const doc = (name: string, sidecar: unknown): void => {
+      mkdirSync(join(mikes, name), { recursive: true });
+      writeFileSync(join(mikes, name, '_v1.html'), '<h1>x</h1>');
+      writeFileSync(join(mikes, name, 'versions.json'), JSON.stringify({ head: 1, versions: [{ version: 1 }] }));
+      writeFileSync(join(mikes, name, 'crew-grounding.json'), JSON.stringify(sidecar));
+    };
+    // Inferred from the brief (the create named none): one of them has since left the project.
+    doc('inferred-out', { project_id: 'mikes', repo_refs: [], grounding: { repo_refs: ['r-in', 'r-gone'], source: 'brief', skipped: [], member_count: 2 } });
+    expect((await open(app, { chatId: 'seed-i1', projectId: 'mikes', clis: ['claude'], seedFromArtifact: 'mikes/inferred-out' })).json()).toMatchObject({ code: 'seed_out_of_scope' });
+    doc('too-wide', { project_id: 'mikes', repo_refs: [], grounding: { repo_refs: Array.from({ length: 33 }, (_, i) => `r-${i}`), source: 'brief', skipped: [], member_count: 33 } });
+    expect((await open(app, { chatId: 'seed-i2', clis: ['claude'], seedFromArtifact: 'mikes/too-wide' })).json()).toMatchObject({ code: 'seed_too_many_repos' });
+    doc('garbled', { project_id: 'mikes', repo_refs: 'r-in' });
+    const garbled = await open(app, { chatId: 'seed-i3', projectId: 'mikes', clis: ['claude'], seedFromArtifact: 'mikes/garbled' });
+    expect(garbled.statusCode).toBe(409);
+    expect(garbled.json()).toMatchObject({ code: 'seed_binding_unreadable' });
+    repos = [];
+  });
+
   it('seeds a project chat with the document’s own repositories, and refuses one made about a repository outside the project', async () => {
     const mikes = ensureProjectInteractiveRoot('mikes', undefined, process.env, home);
     repos = [

@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { beneathMode, beneathTestHooks, createBeneath, listBeneath, openBeneath, readBeneath } from '../src/api/beneath.js';
-import { buildTurnContext, type ChatContextDeps } from '../src/api/chat-context.js';
+import { buildTurnContext, readGroundingBeneath, type ChatContextDeps } from '../src/api/chat-context.js';
 import { buildRunBrief } from '../src/api/run-brief.js';
 import type { ChatTranscriptRecord, SessionView } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
@@ -86,6 +86,22 @@ describe.skipIf(!supported)('opening beneath a root (crew#1274)', () => {
     expect(existsSync(join(scratch, 'outside', 'planted'))).toBe(false);
     expect(listBeneath(root, 'b', 10)).toBeNull();
     expect(listBeneath(root, 'a', 10)?.names.sort()).toEqual(['f', 'new']);
+  });
+
+  it('reads an evidence file whose name holds a backslash (an ordinary POSIX character), and keeps the grounding list whole', async () => {
+    const ev = join(scratch, 'evidence-bs');
+    mkdirSync(ev);
+    writeFileSync(join(ev, 'result\\summary.txt'), 'BACKSLASH-OK');
+    const md = (await buildRunBrief(view('aaaaaaaa-0000-4000-8000-0000000000a2', { evidence_root: ev }), { workOutput: async () => null })).markdown;
+    expect(md).toContain('BACKSLASH-OK');
+    const docs = join(scratch, 'docs-g');
+    mkdirSync(join(docs, 'wide'), { recursive: true });
+    const refs = Array.from({ length: 40 }, (_, i) => `r-${i}`);
+    writeFileSync(join(docs, 'wide', 'crew-grounding.json'), JSON.stringify({ project_id: 'p', repo_refs: [], style: 'ppt', grounding: { repo_refs: refs, source: 'brief', skipped: [], member_count: 40 } }));
+    expect(readGroundingBeneath(docs, 'wide')).toEqual({ style: 'ppt', repoRefs: refs });
+    writeFileSync(join(docs, 'wide', 'crew-grounding.json'), JSON.stringify({ project_id: 'p', repo_refs: [], grounding: { repo_refs: 'not-a-list' } }));
+    expect(readGroundingBeneath(docs, 'wide')).toEqual({ unreadable: true });
+    expect(readGroundingBeneath(docs, 'absent')).toBeNull();
   });
 
   it('a run brief never reads evidence through a folder swapped for a link after it was listed', async () => {

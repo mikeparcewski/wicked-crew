@@ -160,9 +160,10 @@ export function readEvidence(root: string): { files: EvidenceFile[]; more: boole
       try {
         fd = openBeneath(realRoot, rel, { flags: fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0) });
       } catch (err) {
-        // A link (here or in a folder above it), or gone: never followed, never listed. One crew may not open: said.
+        // A link (here or in a folder above it), or gone: never followed, never listed. Anything else crew could not
+        // open is said, never silently dropped.
         const code = (err as NodeJS.ErrnoException).code;
-        if (code === 'EACCES' || code === 'EPERM') unreadable.push(rel);
+        if (code !== 'ELOOP' && code !== 'ENOENT') unreadable.push(rel);
         continue;
       }
       let st: Stats;
