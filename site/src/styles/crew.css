@@ -343,6 +343,9 @@ code {
 .article-wrap h2 { font-size: var(--text-section); margin: 1.8em 0 .5em; }
 .article-wrap h3 { font-size: var(--text-lead); margin: 1.5em 0 .4em; }
 .article-wrap p, .article-wrap li { line-height: 1.7; margin: .7em 0; }
+/* the link colour is the monochrome ink, so a prose link is told apart by its underline, not by colour */
+.article-wrap a { text-decoration: underline; text-underline-offset: 2px; text-decoration-thickness: 1px; }
+.article-wrap a:hover { text-decoration-thickness: 2px; }
 .article-wrap blockquote {
   border-left: 3px solid var(--accent); padding-left: 14px; margin: 1.2em 0; font-style: italic;
 }
