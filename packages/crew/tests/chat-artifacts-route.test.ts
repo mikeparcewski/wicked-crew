@@ -48,6 +48,8 @@ describe('chat sees artifacts and runs (server, A1)', () => {
   const pathRuns: string[] = [];
   /** When set, every unit-output read waits for it: a message's context is still being prepared. */
   let holdOutputs: Promise<void> | null = null;
+  /** Resolved when an output read reaches the hold (the preparation is provably inside its await). */
+  let entered: (() => void) | null = null;
   let repos: Array<{ id: string; name: string; root_path: string; default_branch: string; registered_at: number }> = [];
 
   const makeAdapter = (): CoreAdapter => ({
@@ -87,7 +89,10 @@ describe('chat sees artifacts and runs (server, A1)', () => {
       runView(RUN_OTHER, 'other'),
     ],
     workOutput: async (unitId: string) => {
-      if (holdOutputs !== null) await holdOutputs;
+      if (holdOutputs !== null) {
+        entered?.();
+        await holdOutputs;
+      }
       return outputs.get(unitId) ?? null;
     },
     proposePlan: async () => ({ ok: true }),
@@ -228,9 +233,11 @@ describe('chat sees artifacts and runs (server, A1)', () => {
     let release!: () => void;
     holdOutputs = new Promise<void>((r) => { release = r; });
     const before = launches.length;
+    const reached = new Promise<void>((r) => { entered = r; });
     const sent = send(app, 'race-1', { text: 'what did run 29bbbfb1 measure?', context: { artifact: { ref: 'mikes/coverage-deck', version: 1 } } });
     // The message is now waiting on the run's output, inside its preparation.
-    await new Promise((r) => setTimeout(r, 150));
+    await reached;
+    entered = null;
     expect((await app.inject({ method: 'DELETE', url: '/api/v1/chats/race-1' })).statusCode).toBe(200);
     let reopened = await open(app, { chatId: 'race-1', projectId: 'mikes', clis: ['claude'] });
     for (let i = 0; i < 40 && reopened.statusCode === 409; i += 1) {
@@ -282,6 +289,23 @@ describe('chat sees artifacts and runs (server, A1)', () => {
     const missingElsewhere = await open(app, { chatId: 'seed-6', projectId: 'mikes', clis: ['claude'], seedFromArtifact: 'other/no-such-doc' });
     expect(missingElsewhere.statusCode).toBe(400);
     expect(missingElsewhere.json()).toMatchObject({ code: 'seed_out_of_scope' });
+    repos = [];
+  });
+
+  it('seeds from the repositories the draft was grounded on, opens a seed over the copy cap, and refuses an agent', async () => {
+    const unfiled = ensureProjectInteractiveRoot(undefined, undefined, process.env, home);
+    repos = [{ id: 'r-alpha', name: 'alpha', root_path: join(scratch, 'repo-alpha'), default_branch: 'main', registered_at: 1 }];
+    mkdirSync(repos[0]!.root_path, { recursive: true });
+    mkdirSync(join(unfiled, 'inferred'), { recursive: true });
+    writeFileSync(join(unfiled, 'inferred', '_v1.html'), `<h1>big</h1>${'x'.repeat(2 * 1024 * 1024 + 10)}`);
+    writeFileSync(join(unfiled, 'inferred', 'versions.json'), JSON.stringify({ head: 1, versions: [{ version: 1 }] }));
+    // The create named no repository; the draft launch inferred one from the brief.
+    writeFileSync(join(unfiled, 'inferred', 'crew-grounding.json'), JSON.stringify({ project_id: 'default', repo_refs: [], grounding: { repo_refs: ['r-alpha'], source: 'brief', skipped: [], member_count: 0 }, recorded_at: new Date().toISOString() }));
+    const seeded = await open(app, { chatId: 'seed-g1', clis: ['claude'], seedFromArtifact: '_unfiled/inferred', scopeKind: 'repos' });
+    expect(seeded.statusCode).toBe(201);
+    expect(JSON.parse(seeded.body).scope.repos.map((r: { id: string }) => r.id)).toEqual(['r-alpha']);
+    expect((await open(authed, { chatId: 'seed-g2', clis: ['claude'], seedFromArtifact: '_unfiled/inferred' }, 'agent-token')).json()).toMatchObject({ code: 'seed_refused' });
+    expect((await open(app, { chatId: 'seed-g3', clis: ['claude'], seedFromArtifact: '' })).json()).toMatchObject({ code: 'seed_invalid' });
     repos = [];
   });
 

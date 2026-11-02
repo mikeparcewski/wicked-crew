@@ -146,6 +146,9 @@ describe('run tokens', () => {
       ['9b43ee44-0000-4000-8000-000000000000', false], ['11111111-0000-4000-8000-000000000000', true],
     ]);
     expect(runTokensOf('see /s/abc', 'where: Chat (/s/7c1d2e3f-0000-4000-8000-000000000000)').map((t) => t.explicit)).toEqual([false]);
+    // Studio's own run page address, as written and as decoded.
+    expect(runTokensOf('why did this stop?', 'where: Run 29bbbfb1 (/s/run%3A29bbbfb1-1111-4000-8000-000000000001)').map((t) => t.token)).toEqual(['29bbbfb1-1111-4000-8000-000000000001']);
+    expect(runTokensOf('why?', 'where: Run (/s/run:29bbbfb1-1111-4000-8000-000000000001)').map((t) => t.token)).toEqual(['29bbbfb1-1111-4000-8000-000000000001']);
     // An Oxford comma keeps the list going; a hex part inside `run:<id>` is not a second id; a uuid's first groups are one id.
     expect(runTokensOf('runs 29bbbfb1, 679ca85b, and 57443b2b', undefined).map((t) => [t.token, t.explicit])).toEqual([['29bbbfb1', true], ['679ca85b', true], ['57443b2b', true]]);
     expect(runTokensOf('see run:deadbeef-v1 please', undefined).map((t) => [t.token, t.explicit])).toEqual([['deadbeef-v1', true]]);
@@ -503,8 +506,31 @@ describe('artifact outline, hostile and odd markup', () => {
     expect(stripRaw('<script data-x="/>">LEAK2</script><p>b</p>')).toBe('<p>b</p>');
     expect(stripRaw('<svg><svg><text>LEAK3</text></svg><text>LEAK4</text></svg><p>c</p>')).toBe('<p>c</p>');
     expect(stripRaw('<script />LEAK5</script><p>d</p>')).toBe('<p>d</p>');
+    // A raw tag's name inside an ordinary element's quoted attribute is not an opening; a comment inside an svg is skipped.
+    expect(stripRaw('<section title="Using <template> here"><h2>One</h2></section><p>e</p>')).toBe('<section title="Using <template> here"><h2>One</h2></section><p>e</p>');
+    expect(stripRaw('<svg><!--</svg>--><text>LEAK6</text></svg><p>f</p>')).toBe('<p>f</p>');
+    expect(outlineOf('<section class="wi-slide" data-slide-id="a" title="see <!-- here"><h2>A</h2></section><section class="wi-slide" data-slide-id="b"><h2>B</h2></section>').items.map((i) => i.text)).toEqual(['A', 'B']);
     const o = outlineOf('<section class="wi-slide" data-slide-id="s1" title="a < b"><h2>One</h2></section><section class="wi-slide" data-slide-id="s2"><h2>Two</h2></section>');
     expect(o.items.map((i) => i.text)).toEqual(['One', 'Two']);
+  });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('says evidence it could not read is unknown, never "no evidence"; exactly 40 files are not "more"', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'brief-locked-'));
+    mkdirSync(join(root, 'locked'));
+    writeFileSync(join(root, 'locked', 'proof.txt'), 'x');
+    execFileSync('chmod', ['000', join(root, 'locked')]);
+    const md = (await buildRunBrief(view('ffffffff-0000-4000-8000-000000000010', { evidence_root: root }), { workOutput: async () => null })).markdown;
+    execFileSync('chmod', ['700', join(root, 'locked')]);
+    removeScratch(root);
+    expect(md).not.toContain('No evidence files.');
+    expect(md).toContain('The evidence could not all be read: what it holds is unknown.');
+    expect(md).toContain('Folders that could not be read: locked');
+    const forty = mkdtempSync(join(tmpdir(), 'brief-forty-'));
+    for (let i = 0; i < 40; i += 1) writeFileSync(join(forty, `f${String(i).padStart(2, '0')}.txt`), 'x');
+    mkdirSync(join(forty, 'zz-empty'));
+    const md40 = (await buildRunBrief(view('ffffffff-0000-4000-8000-000000000011', { evidence_root: forty }), { workOutput: async () => null })).markdown;
+    removeScratch(forty);
+    expect(md40).not.toContain('holds more than this brief reads');
   });
 
   it('says when evidence sits deeper than it reads, never "no evidence"', async () => {

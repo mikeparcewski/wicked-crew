@@ -62,12 +62,20 @@ const ATTRS = `(?:[^<>"']|"[^"]{0,4096}"|'[^']{0,4096}')*`;
  */
 export function stripRaw(html: string): string {
   const out: string[] = [];
-  const open = new RegExp(`<!--|<(script|style|template|noscript|svg)(?=[\\s>/])(${ATTRS})>`, 'gi');
+  // Ordinary tags are matched too (and copied as they are), so `<template>` or `<!--` inside a quoted attribute value of
+  // an ordinary element is stepped over with that element, never taken for an opening.
+  const open = new RegExp(`<!--|<(script|style|template|noscript|svg)(?=[\\s>/])(${ATTRS})>|</?[a-zA-Z][\\w:-]*(?![\\w:-])${ATTRS}>`, 'gi');
   let from = 0;
   for (;;) {
     open.lastIndex = from;
     const m = open.exec(html);
     if (m === null) break;
+    if (m[1] === undefined && !m[0].startsWith('<!--')) {
+      // An ordinary tag: kept, attributes and all.
+      out.push(html.slice(from, m.index + m[0].length));
+      from = m.index + m[0].length;
+      continue;
+    }
     out.push(html.slice(from, m.index));
     if (m[1] === undefined) {
       const end = html.indexOf('-->', m.index + 4);
@@ -81,11 +89,18 @@ export function stripRaw(html: string): string {
       from = m.index + m[0].length;
       continue;
     }
-    const edge = new RegExp(`<(/?)${tag}(?=[\\s>/])(${ATTRS})>`, 'gi');
+    // A comment inside an svg or a template is stepped over whole: a tag in it changes no depth.
+    const edge = new RegExp(`<!--|<(/?)${tag}(?=[\\s>/])(${ATTRS})>`, 'gi');
     edge.lastIndex = m.index + m[0].length;
     let depth = 1;
     let closedAt = -1;
     for (let e = edge.exec(html); e !== null; e = edge.exec(html)) {
+      if (e[0] === '<!--') {
+        const end = html.indexOf('-->', e.index + 4);
+        if (end === -1) break;
+        edge.lastIndex = end + 3;
+        continue;
+      }
       if (e[1] === '/') depth -= 1;
       else if (nests && !(tag === 'svg' && /\/\s*$/.test(e[2] ?? ''))) depth += 1;
       if (depth === 0) {

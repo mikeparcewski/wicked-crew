@@ -471,6 +471,8 @@ export function runTokensOf(text: string, page: string | undefined): RunToken[] 
           } catch {
             /* keep it as written */
           }
+          // Studio's page for a run is `/s/run:<id>` (`/s/run%3A<id>` as written in the address).
+          if (id.startsWith('run:')) id = id.slice(4);
           if (RUN_ID.test(id)) add(id, false);
         }
       } else {
@@ -658,7 +660,7 @@ export async function buildTurnContext(input: TurnContextInput, deps: ChatContex
   for (const ref of prior.docs) {
     // A document was in scope when it was named in this chat (and a chat's project never changes).
     const p = parseArtifactRef(ref);
-    if (p !== null && (mine === null || p.mount === mine || p.mount === UNFILED_MOUNT)) named.docs.add(p.ref);
+    if (p !== null && (mine === null || p.mount === mine)) named.docs.add(p.ref);
   }
   for (const id of thisTurn.runs) named.runs.add(id);
   for (const ref of thisTurn.docs) named.docs.add(ref);
@@ -742,8 +744,9 @@ export function artifactExists(docsRoot: string, doc: string): boolean {
   try {
     const dir = realDocDir(docsRoot, doc);
     const m = readManifest(dir);
-    readNoFollow(join(dir, m.files.get(m.head)!), ARTIFACT_COPY_MAX, 'its latest version');
-    return true;
+    // Existence, not copy eligibility: a deck over the copy cap still exists (its messages say why it was not copied).
+    const st = lstatSync(join(dir, m.files.get(m.head)!));
+    return st.isFile() && !st.isSymbolicLink();
   } catch {
     return false;
   }

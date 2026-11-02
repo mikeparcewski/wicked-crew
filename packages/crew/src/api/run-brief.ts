@@ -156,15 +156,16 @@ interface EvidenceFile {
  * budget; text files at or under {@link BRIEF_EVIDENCE_INLINE_MAX} carry their text while the inline budget lasts.
  * A file that changes or disappears during the walk is listed as not read, never a failure of the brief.
  */
-export function readEvidence(root: string): { files: EvidenceFile[]; more: boolean; deeper: boolean } {
+export function readEvidence(root: string): { files: EvidenceFile[]; more: boolean; deeper: boolean; unreadable: string[] } {
   let realRoot: string;
   try {
     const st = lstatSync(root);
-    if (st.isSymbolicLink() || !st.isDirectory()) return { files: [], more: false, deeper: false };
+    if (st.isSymbolicLink() || !st.isDirectory()) return { files: [], more: false, deeper: false, unreadable: ['.'] };
     realRoot = realpathSync(root);
   } catch {
-    return { files: [], more: false, deeper: false };
+    return { files: [], more: false, deeper: false, unreadable: ['.'] };
   }
+  const unreadable: string[] = [];
   const found: Array<{ path: string; size: number }> = [];
   let visited = 0;
   let more = false;
@@ -178,6 +179,7 @@ export function readEvidence(root: string): { files: EvidenceFile[]; more: boole
     try {
       handle = opendirSync(dir);
     } catch {
+      unreadable.push(relative(realRoot, dir) || '.');
       return;
     }
     try {
@@ -195,10 +197,6 @@ export function readEvidence(root: string): { files: EvidenceFile[]; more: boole
       handle.closeSync();
     }
     for (const name of names.sort()) {
-      if (found.length >= BRIEF_EVIDENCE_FILES_MAX) {
-        more = true;
-        return;
-      }
       const path = join(dir, name);
       let st;
       try {
@@ -212,6 +210,10 @@ export function readEvidence(root: string): { files: EvidenceFile[]; more: boole
         else if (depth >= EVIDENCE_DEPTH_MAX) deeper = true;
         else more = true;
       } else if (st.isFile()) {
+        if (found.length >= BRIEF_EVIDENCE_FILES_MAX) {
+          more = true;
+          return;
+        }
         found.push({ path, size: st.size });
       }
     }
@@ -256,7 +258,7 @@ export function readEvidence(root: string): { files: EvidenceFile[]; more: boole
       });
     }
   }
-  return { files, more, deeper };
+  return { files, more, deeper, unreadable };
 }
 
 /** Build one run's brief from crew's records. Never throws for an unreadable output: it says it was not readable. */
@@ -339,7 +341,9 @@ export async function buildRunBrief(view: SessionView, deps: RunBriefDeps): Prom
   if (typeof s.evidence_root === 'string' && s.evidence_root !== '') {
     const ev = readEvidence(s.evidence_root);
     lines.push('', '## Evidence', '');
-    if (ev.files.length === 0) lines.push(ev.more || ev.deeper ? 'No evidence files within the limits this brief reads.' : 'No evidence files.');
+    if (ev.files.length === 0) {
+      lines.push(ev.unreadable.length > 0 ? 'The evidence could not all be read: what it holds is unknown.' : ev.more || ev.deeper ? 'No evidence files within the limits this brief reads.' : 'No evidence files.');
+    }
     for (const [i, f] of ev.files.entries()) {
       // A file's name is the run's too: it rides inside the fence, with its contents.
       const head = `file ${i + 1}: ${oneLine(f.rel, 200)} (${f.bytes} bytes${f.sha256 !== null ? `, sha256 ${f.sha256}` : ''})`;
@@ -348,6 +352,7 @@ export async function buildRunBrief(view: SessionView, deps: RunBriefDeps): Prom
     }
     if (ev.more) lines.push(`- The evidence root holds more than this brief reads (at most ${BRIEF_EVIDENCE_FILES_MAX} files out of ${BRIEF_EVIDENCE_ENTRIES_MAX} entries); ${ev.files.length} listed.`);
     if (ev.deeper) lines.push(`- Some files sit deeper than ${EVIDENCE_DEPTH_MAX} folders down and are not listed.`);
+    if (ev.unreadable.length > 0) lines.push(fenced(`Folders that could not be read: ${ev.unreadable.slice(0, 10).map((d) => oneLine(d, 120)).join(', ')}`));
   }
 
   const markdown = `${lines.join('\n').trimEnd()}\n`;

@@ -1413,7 +1413,7 @@ export const ChatOpenSchema = z.object({
   workflow: z.string().min(1).max(64).optional(),
   /** (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §6.3) "Ask about this" on a document no open chat holds: seed the
    *  chat's repositories from the document's recorded binding, after an access check. */
-  seedFromArtifact: z.string().min(3).max(200).optional(),
+  seedFromArtifact: z.string().max(200).optional(),
 }).strict();
 
 /**
@@ -3870,7 +3870,7 @@ export function registerRoutes(
         manifest: {
           requestType: 'ChatOpenBody',
           responseType: 'ChatOpenResponse',
-          statusCodes: [201, 400, 404, 409, 500, 501],
+          statusCodes: [201, 400, 403, 404, 409, 500, 501],
         },
       },
     },
@@ -3886,7 +3886,9 @@ export function registerRoutes(
       let scopeKind = b.scopeKind;
       // A named scope's SHAPE first (studio#323 R4, codex on #664): a body whose kind refuses its own
       // projectId/repoRefs is a 400 — never masked by the project lookup's 404/409 below, nor by a seed's reads.
-      const shape = namedKindRefusal(scopeKind, b.projectId, [...new Set(requestedRefs)]);
+      // (A seed asked to fill an empty `repo`/`repos` list is checked once it has filled it, below.)
+      const seedFills = b.seedFromArtifact !== undefined && requestedRefs.length === 0 && (scopeKind === 'repo' || scopeKind === 'repos');
+      const shape = seedFills ? null : namedKindRefusal(scopeKind, b.projectId, [...new Set(requestedRefs)]);
       if (shape !== null) return reply.code(400).send({ error: shape.error });
       // DES-CHAT-ARTIFACTS-001 §6.3 (A1): "Ask about this" on a document no open chat holds. Access first (a person,
       // a document that exists), then the scope rule: a chat in no project, or a project chat whose project is the
@@ -3915,7 +3917,10 @@ export function registerRoutes(
         if (root === null || !artifactExists(root, seed.doc)) {
           return reply.code(404).send({ code: 'seed_not_found', error: `no document ${seed.ref} on this daemon` });
         }
-        const bound = groundingReader.get(root, seed.doc)?.repo_refs ?? [];
+        // The repositories the document was grounded on, as its draft launch resolved them (inferred from the brief or
+        // the project's one repository too); the create-time request's list only for a binding that predates that.
+        const binding = groundingReader.get(root, seed.doc);
+        const bound = binding?.grounding !== undefined ? binding.grounding.repo_refs : binding?.repo_refs ?? [];
         if (b.projectId !== undefined && bound.length > 0) {
           const members = new Set((await projectRepoCandidates(adapter, b.projectId)).map((r) => r.repoRef));
           const outside = bound.filter((r) => !members.has(r));
@@ -3936,9 +3941,9 @@ export function registerRoutes(
         if (requestedRefs.length === 0 && bound.length > 0 && seedable) {
           requestedRefs.push(...bound);
           if (scopeKind === 'system' || scopeKind === 'none') scopeKind = undefined;
-          const reshaped = namedKindRefusal(scopeKind, b.projectId, [...new Set(requestedRefs)]);
-          if (reshaped !== null) return reply.code(400).send({ error: reshaped.error });
         }
+        const reshaped = namedKindRefusal(scopeKind, b.projectId, [...new Set(requestedRefs)]);
+        if (reshaped !== null) return reply.code(400).send({ error: reshaped.error });
       }
       // Validate the project BEFORE opening seats: a chat has no launch record for the engine to
       // attach against atomically (chats are an in-memory seat pool), so the route validates
