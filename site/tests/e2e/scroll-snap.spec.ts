@@ -390,6 +390,19 @@ test.describe('touch, on a touch screen 1024px wide and up (a tablet in landscap
     expect(Math.abs(y - tops[2]), `rested at ${y}; it skipped past ${tops[2]}`).toBeLessThanOrEqual(2);
   });
 
+  test('a key pressed after a swipe takes over: PageUp during the momentum goes up', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForTimeout(400);
+    const tops = await frameTops(page);
+    await atTop(page, tops[2]);
+    await drag(page, steps(500, 300, 6), 12);          // a swipe down the page
+    await page.waitForTimeout(250);
+    await page.keyboard.press('PageUp');
+    const y = await settled(page);
+    expect(y, `rested at ${y}: the swipe's direction overrode the PageUp`).toBeLessThan(tops[2] - 2);
+    expect(onAFrame(y, await restTops(page))).toBe(true);
+  });
+
   test('a fast fling ends on a frame top after its momentum', async ({ page }) => {
     // (a fling's momentum can outlast the one-second window wheel and key gestures have; touch has
     // none. This checks the outcome; it cannot force momentum past one second.)

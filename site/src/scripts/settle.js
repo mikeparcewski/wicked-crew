@@ -62,7 +62,9 @@ const FRAMES = '[data-frame], .same-garden, .footer';
     if (kind === 'key') { keys += dir; arrows = false; keyed = true; }
     else if (kind === 'arrow') { keys = dir; arrows = true; keyed = true; }   // the arrows: see target()
     else if (kind === 'jump') jump = true;
-    else if (kind === 'wheel' || kind === 'touch') { keys = 0; keyed = false; if (kind === 'touch') touched = true; }
+    else if (kind === 'wheel' || kind === 'touch') { keys = 0; keyed = false; }
+    // the latest input decides how the rest is targeted: a key or a wheel after a swipe takes over
+    touched = kind === 'touch' || (kind === 'pointer' && touched);
     if (dir) idir = dir;
     // an explicit scroll after a keyboard focus is the visitor's again: the focus guard ends
     if (kind !== 'pointer') focusAt = -1e9;
