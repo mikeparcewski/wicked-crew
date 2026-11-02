@@ -4,12 +4,14 @@
  *
  * POSITIONING (operator, option a): crew is the harness that runs the coding-agent CLIs you
  * already use (Claude Code, Codex, Pi, OpenCode, Copilot) through governed, gated jobs, in
- * sandboxed containers, where every gate says what it checked; "done" is re-derived from evidence.
+ * sandboxed containers, where every gate says what actually ran; an ungated step reads "approved
+ * by default, not verified", so "done" is never claimed past what was checked.
  * It is NOT the skills catalog (that is wicked-garden).
  *
- * Shape: hook → a working job demo (plan → build in a container → review by a different agent,
- * with a dispute a council settles → QE acceptance → deliver; open any gate's receipt; kill the
- * daemon and watch the job resume) → four proofs (sandboxes, gates, the council, workflows +
+ * Shape: hook (kicker "Intent in. Gated work out.") → a working job demo (plan → build in a
+ * container → review by a different agent, with a dispute a council settles → QE acceptance →
+ * deliver; open any gate's receipt; kill the daemon and watch the job resume) → three benefits and
+ * what's new (crew 0.16.12) → four proofs (sandboxes, gates, the council, workflows +
  * durability) → the family map → get it.
  *
  * ACCURACY (crew main, 2026-11-01), each from README.md / CHANGELOG.md / packages/crew-api-types:
@@ -55,11 +57,12 @@ import '../styles/crew.css';
 
 // The hook. Two strings, so a variant is a one-line swap.
 const HEADLINE = 'The harness for the coding agents you already use.';
-const SUBLINE = 'Claude Code, Codex, Copilot, OpenCode and Pi run your jobs in sandboxed containers, through gates that say what they checked. “Done” is re-derived from evidence, never claimed.';
+const KICKER = 'Intent in. Gated work out.';
+const SUBLINE = 'Claude Code, Codex, GitHub Copilot, OpenCode and Pi run your jobs in sandboxes, through gates that say plainly what actually ran. A step that passed without verification is labelled “approved by default, not verified”.';
 
 const title = 'wicked-crew — the harness for the coding agents you already use';
 const description =
-  'wicked-crew runs the coding agents you already use (Claude Code, Codex, GitHub Copilot, OpenCode, Pi) through gated jobs in sandboxed containers. Every gate says what it checked, a different agent reviews the work by default, the built-in app-changing workflows need QE acceptance before delivery (or a labelled waiver or skip), and "done" is re-derived from evidence. Jobs are durable workflows that resume after a crash, on your own machine and your own plans.';
+  'wicked-crew runs the coding agents you already use (Claude Code, Codex, GitHub Copilot, OpenCode, Pi) through gated jobs in sandboxed containers. Every gate says what actually ran, a different agent reviews the work by default, and the built-in feature, bug-fix, migration, MCP-server and editor-plugin jobs need QE acceptance before delivery (or a labelled waiver or skip). Jobs are durable workflows that resume after a crash, on your own machine and your own plans.';
 const repo = 'https://github.com/mikeparcewski/wicked-crew';
 
 const PHASES = ['Plan', 'Build', 'Review', 'QE', 'Deliver'];
@@ -76,7 +79,7 @@ const AGENTS = [
 
 const LAYERS = [
   { name: 'Evidence floor', does: 'The job changed its worktree.', can: 'a pass with no judge reads “floor only”' },
-  { name: 'Your checks and policies', does: 'Your repo’s own typecheck, lint and tests, plus the rules you approved.', can: 'a new failure sends it back or stops the job' },
+  { name: 'Your checks and policies', does: 'Your repo’s own typecheck, lint and tests, plus the rules you approved.', can: 'a new failure sends it back, waits for you or stops the job' },
   { name: 'Evaluator', does: 'A different agent reviews the work.', can: 'can send it back' },
   { name: 'Judge', does: 'An AI judge reads the evidence cold.', can: 'can fail a gate, never approve alone' },
   { name: 'QE acceptance', does: 'Garden’s QE pipeline, read from the QE ledger; a low-impact change may waive it.', can: 'when required, only an attributed PASS delivers' },
@@ -98,6 +101,23 @@ const WORKFLOWS = [
   { name: 'domain-extraction', steps: 'cover code with real requirements (default 80%)' },
 ];
 
+// Three benefits, right under the demo.
+const BENEFITS = [
+  { h: 'Your agents, sandboxed.', p: 'By default each runs in a sandbox with no capabilities, a read-only root and one way out: the model gateway (you need a container runtime: Docker, Podman, Rancher Desktop, Colima or OrbStack). Keys stay in a broker and the sandbox sees placeholders. A Claude subscription’s sign-in token is the one exception: a guard checks each step’s changes and the delivery for it, failing the step or refusing the delivery on a match.' },
+  { h: 'A failed check sends work back, waits for you or stops the job.', p: 'When you launch a preset or a plan on a repository, power mode is on by default and the code-writing step runs as one agent’s checkpointed turns. By default a different agent reviews the work; when none can, the job stops unless you launch it as “reduced assurance”, which is labelled (a saved workflow may require fewer checks; its requirements are listed in the receipts). In power mode a failed review or a qualifying build-check failure goes back to the builder, up to three hand-off attempts in all; problems that need your judgment pause for you. A phased job retries, escalates or stops.' },
+  { h: 'Tested before delivery, with receipts.', p: 'Jobs launched as a feature, bug fix, migration, MCP server or editor plugin pass QE acceptance first, unless a labelled waiver or skip says otherwise; a plan you compose yourself, a build continued from a chat, or a saved workflow that does not ask for it, requires none. Every gate says plainly what a pass means: what it checked, and what was waived or skipped.' },
+];
+
+// What's new (crew 0.16.11 and 0.16.12), one line each.
+const NEW = [
+  { name: 'Power mode', line: 'On by default when a preset or a plan is launched on a repository; the code-writing step runs as one agent’s checkpointed turns, its rigor re-scored from the diff.' },
+  { name: 'Proposed learnings', line: 'Jobs can propose new learnings for your approval, each with its source job and who proposed it.' },
+  { name: 'Requirements graphs', line: 'Counted against a minimum; placeholders never count.' },
+  { name: 'Voice', line: 'Transcription on your machine (whisper.cpp, installed separately); the audio is never stored.' },
+  { name: '“Check on it?”', line: 'A different agent reads a long step’s record and recommends; if none can, crew gives its own labelled reading. It changes nothing.' },
+  { name: 'Sandbox images', line: 'On Docker, protected from the runtime’s automatic cleanup; a missing built-in image is rebuilt on next use, and Nerve Center shows their state.' },
+];
+
 // Injected at build time from packages/crew/package.json via astro.config.mjs (DT-7).
 const crewVersion = __WICKED_CREW_VERSION__;
 ---
@@ -109,6 +129,7 @@ const crewVersion = __WICKED_CREW_VERSION__;
   <section class="hero" aria-labelledby="hero-h">
     <div class="grid-floor" aria-hidden="true"></div>
     <div class="wrap hero-head">
+      <p class="kicker hero-kicker">{KICKER}</p>
       <h1 id="hero-h">{HEADLINE}</h1>
       <p class="lede">{SUBLINE}</p>
     </div>
@@ -138,18 +159,40 @@ const crewVersion = __WICKED_CREW_VERSION__;
     </div>
   </section>
 
+  <!-- ── Three benefits ───────────────────────────────────────────────── -->
+  <section class="why" aria-labelledby="why-h">
+    <div class="wrap">
+      <h2 id="why-h" class="sr-only">What crew does for you</h2>
+      <ul class="facts facts--cards why-cards" role="list">
+        {BENEFITS.map((b) => <li><b>{b.h}</b> {b.p}</li>)}
+      </ul>
+    </div>
+  </section>
+
+  <!-- ── What's new ─────────────────────────────────────────────────────── -->
+  <section class="news" aria-labelledby="news-h">
+    <div class="wrap">
+      <div class="sec-head">
+        <h2 id="news-h">What’s new.</h2>
+      </div>
+      <ul class="labels news-list" role="list">
+        {NEW.map((n) => <li><b>{n.name}</b><span>{n.line}</span></li>)}
+      </ul>
+    </div>
+  </section>
+
   <!-- ── Proof 1: sandboxes ─────────────────────────────────────────────── -->
   <section class="sandbox" aria-labelledby="sandbox-h">
     <div class="wrap two">
       <div>
         <div class="sec-head">
           <h2 id="sandbox-h">Your agents, in sandboxes.</h2>
-          <p class="sec-sub">crew drives each agent’s own headless mode in a hardened container, on your accounts and plans. No billing, no reselling.</p>
+          <p class="sec-sub">crew drives each agent’s own headless mode in a hardened sandbox, on your accounts and plans. No billing, no reselling.</p>
         </div>
         <ul class="facts" role="list">
           <li>Your repo is read-only. The job writes its worktree and its git state.</li>
           <li>The model gateway is the only way out.</li>
-          <li>Keys stay in a broker; the container sees placeholders. A Claude subscription seat gets its sign-in token; a step that writes it into the work fails.</li>
+          <li>Keys stay in a broker; the sandbox sees placeholders. A Claude subscription seat gets its sign-in token; a step that writes it into the work fails.</li>
           <li>Sign each agent in once, on studio’s Agents page.</li>
         </ul>
       </div>
@@ -169,7 +212,7 @@ const crewVersion = __WICKED_CREW_VERSION__;
     <div class="wrap">
       <div class="sec-head">
         <h2 id="gates-h">Every gate says what it checked.</h2>
-        <p class="sec-sub">A gate decides on the layers that actually ran. A new failure sends the work back or stops the job, and no model can approve on its own.</p>
+        <p class="sec-sub">A gate decides on the layers that actually ran. A new failure sends the work back, waits for you or stops the job, and no model can approve on its own.</p>
       </div>
       <table class="tbl tbl--layers">
         <thead><tr><th scope="col">Layer</th><th scope="col">What it checks</th><th scope="col">Its power</th></tr></thead>
