@@ -162,20 +162,36 @@ describe('chat sees artifacts and runs (server, A1)', () => {
     expect(health.capabilities?.chatArtifacts).toEqual({ context: true, proposals: true, create: false, refine: false, theme: false, demo: false });
   });
 
+  it('a document at version 0 is a document: context at version 0 is sent and copied, and a chat can be seeded from it (crew#1273)', async () => {
+    const mikes = ensureProjectInteractiveRoot('mikes', undefined, process.env, home);
+    mkdirSync(join(mikes, 'first-draft'), { recursive: true });
+    writeFileSync(join(mikes, 'first-draft', '_v0.html'), '<h1>No draft yet</h1><p>first</p>');
+    writeFileSync(join(mikes, 'first-draft', 'versions.json'), JSON.stringify({ head: 0, versions: [{ version: 0, html_file: '_v0.html' }] }));
+    const opened = await open(app, { chatId: 'v0-1', projectId: 'mikes', clis: ['claude'] });
+    expect(opened.statusCode).toBe(201);
+    const res = await send(app, 'v0-1', { text: 'what is this?', context: { artifact: { ref: 'mikes/first-draft', version: 0 } } });
+    expect(res.statusCode).toBe(202);
+    const msgs = (await app.inject({ method: 'GET', url: '/api/v1/chats/v0-1/messages' })).json() as ChatMessagesResponse;
+    expect(msgs.messages.find((m) => m.kind === 'context')).toMatchObject({ artifact: { ref: 'mikes/first-draft', viewed: 0, head: 0, copies: ['open/mikes__first-draft-v0.html'] } });
+    const seeded = await open(app, { chatId: 'v0-2', projectId: 'mikes', clis: ['claude'], seedFromArtifact: 'mikes/first-draft' });
+    expect(seeded.statusCode).toBe(201);
+  });
+
   it('refuses a context that is not the contract: unknown keys, a bad ref, too many anchors', async () => {
+    const before = launches.length;
     const opened = await open(app, { chatId: 'strict-1', projectId: 'mikes', clis: ['claude'] });
     expect(opened.statusCode).toBe(201);
     for (const context of [
       { artifact: { ref: 'mikes/coverage-deck', version: 1 }, extra: true },
       { artifact: { ref: '../etc/passwd', version: 1 } },
-      { artifact: { ref: 'mikes/coverage-deck', version: 0 } },
+      { artifact: { ref: 'mikes/coverage-deck', version: -1 } },
       { artifact: { ref: 'mikes/coverage-deck', version: 1, anchors: Array.from({ length: 17 }, (_, i) => `a${i}`) } },
       { artifact: { ref: 'mikes/coverage-deck', version: 1, anchors: ['bad wid'] } },
     ]) {
       const res = await send(app, 'strict-1', { text: 'hi', context });
       expect(res.statusCode, JSON.stringify(context)).toBe(400);
     }
-    expect(launches).toHaveLength(0);
+    expect(launches).toHaveLength(before);
   });
 
   it('hands the seat the open deck (both versions), the outline and the named run, inside its read roots, and records the turn', async () => {
