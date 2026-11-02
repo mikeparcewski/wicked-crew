@@ -189,6 +189,9 @@ export function defaultStudioRoot(): string {
 }
 
 export interface CreateServerOptions {
+  /** DES-CHAT-ARTIFACTS-001 §13 A2: run the chat-artifacts TEST configuration (every operation resolves; Go records a
+   *  stub dispatch and starts nothing). Absent: `WICKED_CHAT_ARTIFACTS_STUB=1` decides. */
+  chatArtifactsStub?: boolean;
   /** Override the studio asset root (tests point this at a temp fixture dir). */
   studioRoot?: string;
   /**
@@ -559,6 +562,9 @@ export async function createServer(
       level: process.env['LOG_LEVEL'] ?? 'info',
       stream: teeStreamWithErrorRing(errorRing),
     },
+    // DES-CHAT-ARTIFACTS-001 A2: a proposal id is `<chat id>:<turn uuid>` and a chat id may be 128 characters, so a
+    // path parameter may be up to 165 (Fastify's default limit is 100). Generous, still bounded.
+    maxParamLength: 256,
   });
   // TH-11: accumulate the route table as it registers — the endpoint manifest's one source of
   // truth. Installed FIRST because fastify only fires onRoute for routes added after the hook
@@ -574,6 +580,8 @@ export async function createServer(
   let watchRegistry: WatchRegistry | null = null;
   // DC-S4b: the studio chat recorder, handed back by `registerRoutes` below (it needs the service built there).
   let chatDecisionRecorder: ChatDecisionRecorder | null = null;
+  // DES-CHAT-ARTIFACTS-001 §4.2 (A2): the proposal resolver (built with the routes), fed from the reply fold below.
+  let chatProposals: import('./chat-proposals.js').ChatProposals | null = null;
   // `GET /search`'s index, handed back by `registerRoutes` below; the frame fan-in feeds it late-bound.
   let searchService: SearchService | null = null;
   // DC-S7: considered · set aside · cited — the rule reads behind the citation verifier, the unit hook
@@ -2079,6 +2087,17 @@ export async function createServer(
       const cliKey = typeof f['cliKey'] === 'string' ? f['cliKey'] : undefined;
       if (chat !== undefined && cliKey !== undefined) {
         const block = rewritten.type === 'chatReply' ? chatTranscripts.takeDecisionsBlock(chat, cliKey) : null;
+        // A2: the reply's `wicked-make` blocks (cut above, never shown) become a proposal card, resolved off this path.
+        const makeBlocks = rewritten.type === 'chatReply' ? chatTranscripts.takeMakeBlocks(chat, cliKey) : [];
+        if (makeBlocks.length > 0) {
+          chatProposals?.onReply({
+            chat,
+            cliKey,
+            ...(typeof f['turn_id'] === 'string' ? { turnId: f['turn_id'] } : {}),
+            ok: f['ok'] === true,
+            blocks: makeBlocks,
+          });
+        }
         void chatDecisionRecorder?.onReply({
           chat,
           cliKey,
@@ -2536,6 +2555,8 @@ export async function createServer(
       broadcast: (frame) => broadcast(frame),
       // ASK-C1/C2: the ask-path index the routes write and the relay reads.
       askPaths,
+      // DES-CHAT-ARTIFACTS-001 §13 A2: the chat-artifacts TEST configuration (a recording stub; nothing launches).
+      chatArtifactsStub: options?.chatArtifactsStub ?? process.env['WICKED_CHAT_ARTIFACTS_STUB'] === '1',
       // ASK-C1: DELETE /chats/:id on an ask path closes through the same fold an engine
       // `chatClosed` takes (scope slot, decisions, considerations, retention-aware transcript).
       closeChat: async (frame, runId, ticket) => {
@@ -2573,6 +2594,7 @@ export async function createServer(
   // DC-S4a §6: records whose landing a restart interrupted are re-driven, idempotently (the review
   // proposal is keyed by the decision id). Off the boot path; a failure is a logged outcome.
   chatDecisionRecorder = registered.chatRecorder;
+  chatProposals = registered.chatProposals;
   considerations = registered.considerations;
   searchService = registered.search;
   decorateRun = registered.decorateRun;

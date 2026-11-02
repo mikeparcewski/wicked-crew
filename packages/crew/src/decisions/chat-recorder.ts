@@ -36,6 +36,13 @@ import type { DecisionModelLabels, DecisionRecord, DecisionType } from './types.
 
 /** The opening fence, exactly as the codebook (`skills/mem/refs/decision-report.md`) spells it. */
 export const DECISIONS_FENCE = '```wicked-decisions';
+/**
+ * DES-CHAT-ARTIFACTS-001 §4.1 (slice A2): a seat proposes an artifact job in a fenced `wicked-make` block, cut out of
+ * the reply and hidden while streaming on exactly this mechanism (`chat-proposals.ts` resolves it).
+ */
+export const MAKE_FENCE = '```wicked-make';
+/** Every fence a reader never sees, held back and dropped by {@link DecisionFenceFilter}. */
+const HIDDEN_FENCES: ReadonlyArray<string> = [DECISIONS_FENCE, MAKE_FENCE];
 
 const STEERING_TYPES = [
   'architecture',
@@ -132,7 +139,9 @@ export function splitDecisionsBlock(text: string): { text: string; block: string
   const lineStart = opening.index + opening[1]!.length;
   const afterOpen = text.indexOf('\n', lineStart);
   if (afterOpen === -1) return { text: trimEnd(text.slice(0, lineStart)), block: null, truncated: true };
-  const close = /\n[ \t]*```/u.exec(text.slice(afterOpen));
+  // A close is a line of three backticks alone (A2): another fence's opening (```wicked-make, ```json) never ends it,
+  // so one hidden block can never leave another's body in the reply.
+  const close = /\n[ \t]*```[ \t]*(?=\r?\n|$)/u.exec(text.slice(afterOpen));
   if (close === null) return { text: trimEnd(text.slice(0, lineStart)), block: null, truncated: true };
   const closeAt = afterOpen + close.index;
   const body = text.slice(afterOpen + 1, closeAt).trim();
@@ -141,9 +150,43 @@ export function splitDecisionsBlock(text: string): { text: string; block: string
 }
 
 /**
- * The `chatDelta` filter: per (chat, seat), hold back the longest tail that is still a prefix of the
- * fence (so a fence split across frames is caught), and from the fence on drop every character
- * until {@link reset} (the turn's `chatReply`, which carries the clean full text anyway).
+ * DES-CHAT-ARTIFACTS-001 §4.1 (A2): cut EVERY fenced `wicked-make` block out of a reply, in order, with the same line
+ * rule as {@link splitDecisionsBlock} (an opening fence on a line of its own; a mention inside a sentence is prose).
+ * The caller takes the last block that parses (`chat-proposals.ts`). An opening with no closing fence removes the reply
+ * from its line on and is reported `truncated` (its body is not a block): nothing of a block ever reaches a reader.
+ */
+/** Blocks taken from one reply, at most; from the next opening on, the reply is cut (hidden, never shown). */
+const MAKE_BLOCKS_MAX = 16;
+
+export function splitMakeBlocks(text: string): { text: string; blocks: string[]; truncated: boolean } {
+  const blocks: string[] = [];
+  let out = text;
+  for (;;) {
+    // Bounded work on an untrusted reply: past the cap, everything from the next opening on is cut in one step.
+    if (blocks.length >= MAKE_BLOCKS_MAX) {
+      const more = /(^|\n)[ \t]*```wicked-make[ \t]*(?=\r?\n|$)/u.exec(out);
+      return more === null ? { text: out, blocks, truncated: false } : { text: trimEnd(out.slice(0, more.index + more[1]!.length)), blocks, truncated: true };
+    }
+    const opening = /(^|\n)[ \t]*```wicked-make[ \t]*(?=\r?\n|$)/u.exec(out);
+    if (opening === null) return { text: out, blocks, truncated: false };
+    const lineStart = opening.index + opening[1]!.length;
+    const afterOpen = out.indexOf('\n', lineStart);
+    // The close is a line of its own: three backticks and nothing else. Another opening (```wicked-make, ```json) is
+    // not a close, so it can never end a block early and leave the rest of a block in the reply.
+    const close = afterOpen === -1 ? null : /\n[ \t]*```[ \t]*(?=\r?\n|$)/u.exec(out.slice(afterOpen));
+    if (afterOpen === -1 || close === null) return { text: trimEnd(out.slice(0, lineStart)), blocks, truncated: true };
+    const closeAt = afterOpen + close.index;
+    blocks.push(out.slice(afterOpen + 1, closeAt).trim());
+    const rest = out.slice(closeAt + close[0].length).replace(/^[ \t]*\r?\n?/u, '');
+    out = trimEnd(out.slice(0, lineStart) + rest);
+  }
+}
+
+/**
+ * The `chatDelta` filter: per (chat, seat), hold back the longest tail that is still a prefix of a
+ * hidden fence (`wicked-decisions`, or A2's `wicked-make`) so a fence split across frames is caught,
+ * and from the first fence on drop every character until {@link reset} (the turn's `chatReply`, which
+ * carries the clean full text anyway).
  */
 export class DecisionFenceFilter {
   private readonly state = new Map<string, { held: string; dropping: boolean }>();
@@ -160,14 +203,16 @@ export class DecisionFenceFilter {
       return '';
     }
     const buf = s.held + text;
-    const at = buf.indexOf(DECISIONS_FENCE);
-    if (at !== -1) {
+    const hits = HIDDEN_FENCES.map((f) => buf.indexOf(f)).filter((i) => i !== -1);
+    if (hits.length > 0) {
       this.state.set(key, { held: '', dropping: true });
-      return buf.slice(0, at);
+      return buf.slice(0, Math.min(...hits));
     }
+    const longest = Math.max(...HIDDEN_FENCES.map((f) => f.length)) - 1;
     let hold = 0;
-    for (let n = Math.min(buf.length, DECISIONS_FENCE.length - 1); n > 0; n -= 1) {
-      if (DECISIONS_FENCE.startsWith(buf.slice(buf.length - n))) {
+    for (let n = Math.min(buf.length, longest); n > 0; n -= 1) {
+      const tail = buf.slice(buf.length - n);
+      if (HIDDEN_FENCES.some((f) => f.startsWith(tail))) {
         hold = n;
         break;
       }

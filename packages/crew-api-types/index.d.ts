@@ -364,6 +364,38 @@ export interface HealthCapabilities {
    * requesting operator's usage ({@link WorkflowCatalogResponse}). ABSENT on an older daemon: read as `false`.
    */
   workflowCatalog?: boolean;
+  /**
+   * (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §14) What a chat can do with artifacts, one flag per operation, each
+   * true only once its slice ships. `context`: `ChatMessageBody.context` is accepted ({@link ChatMessageContext}),
+   * `POST /chats {seedFromArtifact}` is served, and each turn's seats get the open artifact, the runs the person names
+   * and the ids they may use, recorded per turn as a `context` transcript record. `proposals` (api-types 0.170.0,
+   * slice A2): a seat's `wicked-make` block becomes a crew-resolved proposal card answered by a person. The operations
+   * (`create`, `refine`, `theme`, `demo`) are later slices and are `false` until then (all `true` with `stub: true` in
+   * the test configuration). ABSENT on an older daemon: read every flag as `false`, and send no `context` (the message
+   * body is strict there, so the field would be refused).
+   */
+  chatArtifacts?: ChatArtifactsCapabilities;
+}
+
+/** {@link HealthCapabilities.chatArtifacts} (api-types 0.169.0). */
+export interface ChatArtifactsCapabilities {
+  context: boolean;
+  /**
+   * (api-types 0.170.0, slice A2) A seat's `wicked-make` block becomes a crew-resolved proposal ({@link ArtifactProposal},
+   * transcript kinds `proposal` / `proposal_accepting` / `proposal_decided`, `/ws` {@link ChatProposalFrame}) and
+   * `POST /chats/:id/proposals/:pid` answers it. Seats are told only about the operations below that are `true`, and
+   * the resolver and the accept route refuse the others, so with every operation `false` no card is made.
+   */
+  proposals: boolean;
+  create: boolean;
+  refine: boolean;
+  theme: boolean;
+  demo: boolean;
+  /**
+   * (api-types 0.170.0) The daemon runs the chat-artifacts TEST configuration (DES §13 A2): every operation resolves,
+   * and Go on a proposal records a stub dispatch and starts NOTHING. A skin says so on the card. ABSENT otherwise.
+   */
+  stub?: true;
 }
 
 // ── A run's working document (program DES-POWER-MODE §8.3, §9; api-types 0.148.0) ──────────────────
@@ -8019,6 +8051,18 @@ export interface ChatOpenBody {
    * engine without it is a 409. Send it only when `GET /health.capabilities.chatWorkflows` names it.
    */
   workflow?: string;
+  /**
+   * (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §6.3) "Ask about this" on a document no open chat holds: the
+   * artifact ref (`<mount>/<doc>`). Allowed for a chat with no `projectId`, or for a project chat whose project is the
+   * document's mount (checked before anything is read; else 400 `seed_out_of_scope`). Crew then checks the document
+   * exists (404 `seed_not_found`) and, for a project chat, that every repository it was made about belongs to the
+   * project (else 400 `seed_out_of_scope`). When the request names no `repoRefs` and its `scopeKind` is not
+   * `everything` or `project`, the chat reads the repositories the document was made about (its recorded binding);
+   * a `system` or `none` kind then becomes the repository scope. A document made about no repository seeds nothing.
+   * A non-person actor is refused (403 `seed_refused`). Send only when
+   * `GET /health.capabilities.chatArtifacts.context === true`.
+   */
+  seedFromArtifact?: string;
 }
 
 /** The scope a `POST /chats` caller may name (api-types 0.39.0, studio#323 R4). */
@@ -8319,7 +8363,17 @@ export interface ChatUsage {
  */
 export type ChatTranscriptRecord =
   /** `attachments` (api-types 0.137.0): the files the message carried, ABSENT when none. */
-  | { at: number; turnId: string; kind: 'user'; text: string; seats: string[]; attachments?: ChatAttachment[] }
+  | {
+      at: number;
+      turnId: string;
+      kind: 'user';
+      text: string;
+      seats: string[];
+      attachments?: ChatAttachment[];
+      /** (api-types 0.170.0) Sent by the chat's owner, a person (the message route's own check). Only these words count
+       *  as the person's for a proposal (a demo address, a document they named). ABSENT for any other sender. */
+      owner?: true;
+    }
   | { at: number; turnId: string; kind: 'seat'; cliKey: string; text: string; ok: boolean; usage: ChatUsage | null }
   /**
    * The citation verdicts of the `seat` record with the same `turnId` + `cliKey` (api-types 0.68.0,
@@ -8352,7 +8406,218 @@ export type ChatTranscriptRecord =
    * 0.85.0, DC-S7): the rules remembered since they last heard from crew. Disclosed here so the
    * operator sees exactly what crew added; the `user` record keeps the operator's own words.
    */
-  | { at: number; turnId: string; kind: 'system'; text: string };
+  | { at: number; turnId: string; kind: 'system'; text: string }
+  /**
+   * What the seats of `turnId` were given beside the operator's words (api-types 0.169.0, DES-CHAT-ARTIFACTS-001
+   * §5.1): the open artifact's copies, the run briefs, and what was refused. Written with the turn's `user` record.
+   */
+  | ({ at: number; turnId: string; kind: 'context' } & ChatContextBinding)
+  /**
+   * (api-types 0.170.0, DES-CHAT-ARTIFACTS-001 §4.2) A proposal crew resolved from a seat's `wicked-make` block in the
+   * reply of `turnId`. A later `proposal` record with the same `proposal.pid` REPLACES it (a re-resolution after the
+   * document's head moved); a newer pid in the same chat supersedes an open one.
+   */
+  | { at: number; turnId: string; kind: 'proposal'; proposal: ArtifactProposal }
+  /** (api-types 0.170.0, §4.3 step 2) A person said go: what was accepted, written before anything starts. */
+  | ({ at: number; turnId: string; kind: 'proposal_accepting' } & ProposalAccepting)
+  /** (api-types 0.170.0) The proposal's answer: go (with what it started) or not now. */
+  | ({ at: number; turnId: string; kind: 'proposal_decided' } & ProposalDecided);
+
+// ── Chat proposals (api-types 0.170.0, DES-CHAT-ARTIFACTS-001 §4, slice A2) ─────────────────────────────────────────
+//
+// A seat proposes an artifact job in a fenced `wicked-make` block. Crew cuts it out of the reply (it never reaches a
+// reader), resolves it against its own records, and appends a `proposal` transcript record plus a `chatProposal`
+// frame. The card's facts are crew's, never the seat's. Only `POST /chats/:id/proposals/:pid` (a person, the chat's
+// owner) starts anything. Capabilities: `GET /health.capabilities.chatArtifacts.proposals` and one flag per operation.
+
+/** What a proposal makes. `create` and `demo` come from a catalog entry; `refine` changes a document; `theme` is a
+ *  studio appearance patch. */
+export type ArtifactProposalKind = 'create' | 'refine' | 'theme' | 'demo';
+
+/** One "From" chip: a source the block named, as crew resolved and authorized it. */
+export interface ProposalSource {
+  /** The token as crew reads it: `chat`, `page`, `message:<turnId>`, `run:<full id>`, `doc:<mount>/<doc>`,
+   *  `attachment:<id>` (a run prefix the seat wrote is resolved to the full id when it can be). */
+  token: string;
+  /** Plain words: "this conversation", "run 29bbbfb1 · stopped", "Release note v4". */
+  label: string;
+  /** `struck`: the draft never sees it; `reason` says why ("run 1a2b3c4d · not named in this chat"). */
+  status: 'ok' | 'struck';
+  reason?: string;
+  /** The project the source belongs to (`null`: Unfiled, or not a project's); absent for `chat` and `page`. A form that
+   *  changes the project strikes a chip whose project differs. */
+  projectId?: string | null;
+}
+
+/** "Codex and Claude Code: one writes, the other checks": two distinct eligible seats (never who writes). */
+export interface ProposalHelpers {
+  seats: string[];
+  label: string;
+}
+
+/** "About 10–20 min · 3 agent steps · median of 4 past documents here: 9 min, $0.62". Unknown parts are left out. */
+export interface ProposalTime {
+  /** The catalog entry's `typicalMinutes`. */
+  minutes: [number, number] | null;
+  /** The catalog entry's relative cost. */
+  cost: 'low' | 'medium' | 'high' | null;
+  /** Agent steps of the workflow. */
+  steps: number | null;
+  /** Over completed runs of the same workflow on this daemon. `costUsd` only from at least 3 runs whose every agent
+   *  step reported a cost (`costRuns` of them); else `null`. */
+  median: { runs: number; minutes: number; costUsd: number | null; costRuns: number } | null;
+  label: string;
+}
+
+/** A proposal as crew resolved it. Every line is crew's: the seat chose only the block's words. */
+export interface ArtifactProposal {
+  /** `<chatId>:<turnId>` for a turn's proposal (later slices add `<chatId>:redo:<runId>` / `:retry:`). */
+  pid: string;
+  chatId: string;
+  /** The turn whose reply carried the block; `null` for a crew-made proposal (`sourceRunId`). */
+  turnId: string | null;
+  sourceRunId?: string;
+  kind: ArtifactProposalKind;
+  /** The seat that wrote the block. */
+  seat: string;
+  /** The "What" line: `label` is "Slides · Domain coverage for new engineers"; `outcome` is the catalog entry's. */
+  what: { entry: string | null; title: string; label: string; outcome: string | null };
+  /** The brief (create), the ask (refine), or what to show (demo), as the seat wrote it. */
+  brief: string | null;
+  reason: string | null;
+  sources: ProposalSource[];
+  /** Repositories (names), each in the chat's scope. */
+  repos: string[];
+  /** `null` for a theme (no run). */
+  helpers: ProposalHelpers | null;
+  /** `null` for a theme. */
+  time: ProposalTime | null;
+  /** "Stops for you if the check fails. The plan or an escalation may also ask." `null` for a theme. */
+  stops: string | null;
+  /** The project the result is filed in; `label` is the project's name or "Not in a project · this chat". */
+  filedIn: { projectId: string | null; label: string };
+  /** refine: the document (`<mount>/<doc>`), its title, and the head it was proposed on. */
+  target?: { ref: string; title: string; base: number };
+  /** refine: the parts the seat pointed at (`data-wid`s); hand edits are kept unless the person says otherwise. */
+  touches?: string[];
+  /** theme: the partial appearance patch and the keys it changes. */
+  theme?: { name: string; patch: Record<string, string | number | boolean>; changes: string[] };
+  /** demo: the app address (from the person's words), the audience and what to show. */
+  demo?: { url: string; audience: string | null; show: string | null };
+  /** Go is refused with this reason ("Needs a second helper to check it"); the card shows it. `null` = Go is open. */
+  blocked: string | null;
+}
+
+/**
+ * What a person may change before Go (typed per kind; crew re-checks every edit with the rules of §4.2). In this
+ * release (slice A2) crew takes `title`, `brief`, `sources` and `helpers` on a create, `ask` and `helpers` on a refine,
+ * `name` and `patch` on a theme, and `audience`, `show` and `helpers` on a demo; `project`, `repos`, `url` and `allow`
+ * are refused (400 `edits_invalid`) until the slices whose forms edit them. A source the person adds that cannot be used
+ * is refused too, never dropped. An interrupted (accepting) proposal resumes with its accepted choices: only its
+ * `helpers` may change.
+ */
+export interface ProposalEdits {
+  /** create */
+  title?: string;
+  brief?: string;
+  sources?: string[];
+  repos?: string[];
+  project?: string | null;
+  /** refine */
+  ask?: string;
+  allow?: string[];
+  /** theme */
+  name?: string;
+  patch?: Record<string, string | number | boolean>;
+  /** demo */
+  url?: string;
+  audience?: string;
+  show?: string;
+  /** any kind with a run */
+  helpers?: string[];
+}
+
+/** What the accepted proposal is named by: the artifact, and the run derived from the pid. */
+export interface ProposalIdentity {
+  /** `<mount>/<doc>`: the document a create makes (its name derived from the pid) or a refine changes; `null` for a
+   *  theme or a demo. */
+  artifactRef: string | null;
+  /** A name-based UUID of the pid: the launch's `sessionId`, so a retry can only adopt it. */
+  runId: string;
+}
+
+/** What Go started. */
+export interface ProposalResult {
+  runId: string;
+  artifactRef: string | null;
+  /** Found already launched (a retry, a second tab) and adopted rather than started again. */
+  adopted: boolean;
+  /** The test configuration's recording stub took it: nothing was started. */
+  stub: boolean;
+}
+
+export interface ProposalAccepting {
+  pid: string;
+  /** The person's actor id. */
+  actor: string;
+  edits: ProposalEdits | null;
+  /** The effective proposal after the edits were applied and checked. */
+  resolution: ArtifactProposal;
+  identity: ProposalIdentity;
+}
+
+export interface ProposalDecided {
+  pid: string;
+  actor: string;
+  decision: 'go' | 'not_now';
+  /** `null` for not now. */
+  result: ProposalResult | null;
+}
+
+/** A proposal folded from its records. */
+export interface ChatProposalView {
+  proposal: ArtifactProposal;
+  /** `accepting`: Go was recorded and its result was not (an interrupted Go: "Go again" resumes the same identity). */
+  state: 'open' | 'accepting' | 'decided' | 'superseded';
+  decision?: 'go' | 'not_now';
+  result?: ProposalResult | null;
+  /** Unix millis of the decision. */
+  decidedAt?: number;
+}
+
+/** `POST /chats/:id/proposals/:pid` body. */
+export interface ChatProposalDecisionBody {
+  decision: 'go' | 'not_now';
+  edits?: ProposalEdits;
+}
+
+/**
+ * `POST /chats/:id/proposals/:pid` → 200: the proposal as decided (a repeat of the same decision answers the stored
+ * result again, so a lost response is safe to retry). Only a person answers: under `auth: required` a worker, agent or
+ * system token is refused; under `auth: off` every request is the local person (the daemon's documented local-mode
+ * posture, as for gates). Refusals carry `code`: 403 `proposal_refused` (not a person),
+ * 404 (no such chat or proposal, or a chat that is not the caller's under `auth: required`: its existence is not
+ * disclosed), 409 `proposal_superseded` | `proposal_decided` | `proposal_blocked` | `operation_unavailable` |
+ * `chat_busy` | `document_busy` | `source_gone` | `helper_unavailable` | `chat_gone` | `proposal_reresolved` (the
+ * document moved: `view.proposal` is the fresh one), 400 `edits_invalid`, 502 `launch_failed` (accepting stays
+ * recorded; Go again resumes the same identity). A 409 carries the current `view` when there is one.
+ */
+export interface ChatProposalDecisionResponse {
+  view: ChatProposalView;
+}
+
+/**
+ * `/ws` (api-types 0.170.0): a proposal record was appended to chat `chat` (the same record the transcript holds).
+ * `project_id`: the chat's project, when it has one. A `type` alias (like the daemon's other synthetic frames) so it
+ * satisfies {@link CoreEvent}'s index signature.
+ */
+export type ChatProposalFrame = {
+  type: 'chatProposal';
+  chat: string;
+  turn_id: string;
+  record: Extract<ChatTranscriptRecord, { kind: 'proposal' | 'proposal_accepting' | 'proposal_decided' }>;
+  project_id?: string;
+};
 
 // ── System chat: history, close, attachments (api-types 0.137.0, DES-SYSTEM-CHAT "Crew") ────────
 //
@@ -8479,6 +8744,84 @@ export interface ChatMessageBody {
    *  file: a path it can open (images as images where the CLI reads them) plus, for text and pdf,
    *  the extracted text. Send only when `GET /health.capabilities.chatAttachments === true`. */
   attachments?: string[];
+  /**
+   * (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §5.1) What studio shows beside the message: the artifact open on the
+   * surface it was sent from, the tab's appearance, and studio's page summary. Send only when
+   * `GET /health.capabilities.chatArtifacts.context === true`. Crew checks the chat's owner and scope before it
+   * reads anything; the seat gets labelled copies (data, never instructions), and the turn's `context` transcript
+   * record says what it was given.
+   */
+  context?: ChatMessageContext;
+}
+
+/** {@link ChatMessageBody.context} (api-types 0.169.0). */
+export interface ChatMessageContext {
+  /** The artifact on the surface the message was sent from (inline, pane, Made or full screen). */
+  artifact?: ChatArtifactContext;
+  /** The tab's effective appearance (DES §9), sent when `chatArtifacts.theme` is advertised. */
+  appearance?: ChatContextAppearance;
+  /**
+   * Studio's page summary (the context pack), kept apart from the person's typed words. Crew labels it as studio's
+   * and reads from it only the run of the page it describes and the runs added as chips. At most 32,768 characters.
+   */
+  page?: string;
+}
+
+/** {@link ChatMessageContext.artifact} (api-types 0.169.0). */
+export interface ChatArtifactContext {
+  /** `<mount>/<doc>`: the mount is a project id or `_unfiled`; the doc is the interactive document name. */
+  ref: string;
+  /** The version the person is looking at (≥ 0: a document's first version is 0), read after the editor's in-flight
+   *  writes finished. */
+  version: number;
+  /** The `data-wid` of each part the person selected (at most 16). */
+  anchors?: string[];
+}
+
+/** {@link ChatMessageContext.appearance} (api-types 0.169.0): studio's appearance scalars, plus an active preview. */
+export interface ChatContextAppearance {
+  theme?: string;
+  accent_h?: number;
+  accent_s?: number;
+  accent_l?: number;
+  ambient?: boolean;
+  ambient_still?: boolean;
+  /** The name of the theme proposal being previewed, when one is. */
+  previewOf?: string;
+}
+
+/**
+ * What one turn's seats were given (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §5.1 "Bindings kept"): the `context`
+ * transcript record. Paths are relative to the chat's scratch root. A reader folds it onto the turn's `user` record; a
+ * skin that does not know this kind ignores it.
+ */
+export interface ChatContextBinding {
+  /** The open artifact, when the message carried one in scope. */
+  artifact?: {
+    ref: string;
+    title: string;
+    kind: string;
+    /** The version the person was looking at, and the latest when the turn was sent. */
+    viewed: number;
+    head: number;
+    /** `null` for an Unfiled document. */
+    projectId: string | null;
+    /** The copies the seat read: `open/<mount>__<doc>-v<n>.html`. When the version they look at is missing or could
+     *  not be copied, only the latest's copy is here, and `viewed` still says what they asked about. */
+    copies: string[];
+    anchors: string[];
+  };
+  /** The run briefs the seat was given: `context/run-<id>-<sha8>.md` (named by content, so a later brief of the same
+   *  run never replaces these bytes), with the sha256 of the brief as written. */
+  runs: Array<{ id: string; status: string; brief: string; sha256: string }>;
+  /** What was named but not read, and why ("not in this chat's project", "no such run on this daemon"). */
+  refused: Array<{ token: string; reason: string }>;
+  /** Every run and document the person has named in this chat up to this turn. On later turns a run is kept while it
+   *  is still on this daemon and in the chat's scope, a document while it is in the chat's scope; an earlier brief is
+   *  offered again only while its file still holds the bytes its sha256 records. */
+  named: { runs: string[]; docs: string[] };
+  /** Studio's page summary rode as `context.page` (true), never mixed into the person's words. */
+  page: boolean;
 }
 
 /** `GET /chats/:id` → 200. */

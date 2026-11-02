@@ -27,11 +27,11 @@
  * the worker Read fence — landed with core-ts 0.7.26), and named in `state-home-registry.ts`.
  */
 
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { appendFileSync, chmodSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
-import type { ChatAttachment, ChatCitationItem, ChatTranscriptRecord, ChatUsage, CoreEvent, DecisionView } from '../core/types.js';
-import { DecisionFenceFilter, splitDecisionsBlock } from '../decisions/chat-recorder.js';
+import type { ChatAttachment, ChatCitationItem, ChatContextBinding, ChatTranscriptRecord, ChatUsage, CoreEvent, DecisionView } from '../core/types.js';
+import { DecisionFenceFilter, splitDecisionsBlock, splitMakeBlocks } from '../decisions/chat-recorder.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { CHAT_ID } from './chat-scope.js';
 
@@ -42,6 +42,26 @@ export const CHAT_TRANSCRIPTS_DIRNAME = 'chats';
 // the deliver composer (crew#886) applies the same rewrite without importing this store.
 export { rewriteHostPaths, withRootAliases, type ChatRepoRoot } from '../core/host-paths.js';
 import { rewriteHostPaths, withRootAliases, type ChatRepoRoot } from '../core/host-paths.js';
+
+/**
+ * A2 (xreview r2): `'\n'` when the file's last byte is not one — a crash mid-append left a torn line, and the next
+ * record must start on its own line rather than be swallowed into the torn one (readers skip a malformed line).
+ */
+export function tornTailPrefix(file: string): string {
+  let fd: number | null = null;
+  try {
+    fd = openSync(file, 'r');
+    const size = fstatSync(fd).size;
+    if (size === 0) return '';
+    const b = Buffer.alloc(1);
+    readSync(fd, b, 0, 1, size - 1);
+    return b[0] === 0x0a ? '' : '\n';
+  } catch {
+    return '';
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+}
 
 /** Where the transcripts live: under the daemon's state home, like every other crew store. */
 export function defaultChatTranscriptsDir(): string {
@@ -62,6 +82,32 @@ function usageOf(value: unknown): ChatUsage | null {
   };
 }
 
+/**
+ * A2: host paths in a `wicked-make` block's string values, rewritten like the reply's — on the PARSED values, so the
+ * JSON stays valid whatever a root's name holds and an escaped (Windows) path is matched as written. A body that is not
+ * JSON is left as it is (the resolver refuses it anyway).
+ */
+function rewriteBlockPaths(body: string, roots: ReadonlyArray<ChatRepoRoot>): string | null {
+  // Bounded: a block is a few levels deep (`theme.patch`), so anything deeper or larger is not one — it is DROPPED (no
+  // card), never passed on unrewritten, and nothing a seat writes can make this fold throw.
+  if (body.length > 64 * 1024) return null;
+  try {
+    let nodes = 0;
+    const walk = (v: unknown, depth: number): unknown => {
+      nodes += 1;
+      if (depth > 6 || nodes > 2000) throw new Error('not a block');
+      return typeof v === 'string' ? rewriteHostPaths(v, roots)
+        : Array.isArray(v) ? v.map((x) => walk(x, depth + 1))
+          : v !== null && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x, depth + 1)]))
+            : v;
+    };
+    return JSON.stringify(walk(JSON.parse(body), 0));
+  } catch (err) {
+    // Not JSON: left as it is (the resolver refuses it); over the bounds: dropped.
+    return err instanceof SyntaxError ? body : null;
+  }
+}
+
 export class ChatTranscriptStore {
   private readonly dir: string;
   private readonly now: () => number;
@@ -71,6 +117,9 @@ export class ChatTranscriptStore {
   private readonly fence = new DecisionFenceFilter();
   /** DC-S4b: the block body cut from a seat's latest `chatReply`, until the recorder takes it. */
   private readonly blocks = new Map<string, string>();
+  /** DES-CHAT-ARTIFACTS-001 §4.1 (A2): the `wicked-make` block bodies cut from a seat's latest `chatReply`, until the
+   *  proposal resolver takes them. */
+  private readonly makeBlocks = new Map<string, string[]>();
 
   constructor(opts: { dir?: string; now?: () => number } = {}) {
     this.dir = opts.dir ?? defaultChatTranscriptsDir();
@@ -108,7 +157,7 @@ export class ChatTranscriptStore {
     if (file === null) return;
     mkdirSync(this.dir, { recursive: true, mode: 0o700 });
     const fresh = !existsSync(file);
-    appendFileSync(file, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+    appendFileSync(file, `${fresh ? '' : tornTailPrefix(file)}${JSON.stringify(record)}\n`, { mode: 0o600 });
     // `mode` applies on creation only; enforce on the first write and on the directory (mkdir's
     // `mode` is masked by the umask) — the transcript is the operator's conversation.
     if (process.platform !== 'win32') {
@@ -118,7 +167,7 @@ export class ChatTranscriptStore {
   }
 
   /** The operator's message a send delivered, with the seats the engine reached (the 202's `seats`). */
-  appendUser(chatId: string, turnId: string, text: string, seats: readonly string[], attachments?: readonly ChatAttachment[]): void {
+  appendUser(chatId: string, turnId: string, text: string, seats: readonly string[], attachments?: readonly ChatAttachment[], owner = false): void {
     this.append(chatId, {
       at: this.now(),
       turnId,
@@ -126,7 +175,18 @@ export class ChatTranscriptStore {
       text,
       seats: [...seats],
       ...(attachments !== undefined && attachments.length > 0 ? { attachments: [...attachments] } : {}),
+      // A2: the chat's owner, a person, sent it — only these words count as the person's for a proposal.
+      ...(owner ? { owner: true as const } : {}),
     });
+  }
+
+  /**
+   * DES-CHAT-ARTIFACTS-001 §5.1 (A1): what the turn's seats were given beside the operator's words — the open
+   * artifact's copies, the run briefs, what was refused, and every run and document named in the chat so far.
+   * Written with the turn's `user` record, so a later turn (and a later `message:` source) can name what it saw.
+   */
+  appendContext(chatId: string, turnId: string, binding: ChatContextBinding): void {
+    this.append(chatId, { at: this.now(), turnId, kind: 'context', ...binding });
   }
 
   /** DC-S7: a crew-authored preface the seats received with that turn's message — disclosed, verbatim. */
@@ -247,6 +307,16 @@ export class ChatTranscriptStore {
       const key = `${chatId}\u0000${cliKey}`;
       if (split.block !== null) this.blocks.set(key, split.block);
       else this.blocks.delete(key);
+      // A2: every `wicked-make` block goes too (the resolver takes the last one that parses); never shown, never stored.
+      const made = splitMakeBlocks(text);
+      text = made.text;
+      // The block's words reach a card (and the transcript) too: host paths in them are rewritten like the reply's.
+      const blockRoots = this.chatRoots.get(chatId);
+      const bodies = blockRoots !== undefined && blockRoots.length > 0
+        ? made.blocks.map((b) => rewriteBlockPaths(b, blockRoots)).filter((b): b is string => b !== null)
+        : made.blocks;
+      if (bodies.length > 0) this.makeBlocks.set(key, bodies);
+      else this.makeBlocks.delete(key);
     }
     const roots = this.chatRoots.get(chatId);
     if (roots !== undefined && roots.length > 0) text = rewriteHostPaths(text, roots);
@@ -266,6 +336,29 @@ export class ChatTranscriptStore {
   }
 
   /**
+   * DES-CHAT-ARTIFACTS-001 §4.2 (A2): the `wicked-make` block bodies {@link rewriteEvent} cut from this seat's latest
+   * reply, handed over ONCE (`[]` after). Call right after `rewriteEvent` for the reply.
+   */
+  takeMakeBlocks(chatId: string, cliKey: string): string[] {
+    const key = `${chatId}\u0000${cliKey}`;
+    const blocks = this.makeBlocks.get(key) ?? [];
+    this.makeBlocks.delete(key);
+    return blocks;
+  }
+
+  /**
+   * DES-CHAT-ARTIFACTS-001 §4.2-§4.3 (A2): a proposal record (`proposal`, `proposal_accepting`, `proposal_decided`)
+   * on a LIVE chat's transcript. Like `decisions`, a record alone never recreates a dropped file: `false` when there
+   * is no transcript to append to (the caller then writes the kept history copy, `chat-history.ts`).
+   */
+  appendProposalRecord(chatId: string, record: ChatTranscriptRecord): boolean {
+    const file = this.fileOf(chatId);
+    if (file === null || !existsSync(file)) return false;
+    this.append(chatId, record);
+    return true;
+  }
+
+  /**
    * DC-S4b: the decisions recorded from one turn's operator message, appended as their OWN record
    * (the `citations` pattern: the transcript is append-only and derivation finishes after the
    * replies are stored). A reader folds it onto the turn's `user` record. Only a chat that has a
@@ -281,6 +374,7 @@ export class ChatTranscriptStore {
   drop(chatId: string): void {
     this.chatRoots.delete(chatId);
     for (const key of [...this.blocks.keys()]) if (key.startsWith(`${chatId}\u0000`)) this.blocks.delete(key);
+    for (const key of [...this.makeBlocks.keys()]) if (key.startsWith(`${chatId}\u0000`)) this.makeBlocks.delete(key);
     const file = this.fileOf(chatId);
     if (file !== null) rmSync(file, { force: true });
   }

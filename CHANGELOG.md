@@ -10,31 +10,7 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
-### Added
-
-- **The workflows are a catalog: `GET /api/v1/workflows/catalog` (api-types 0.168.0).** It serves the categories
-  (Create, Resolve, Analyze, Test, More, and Your workflows once you have saved presets) and one entry per thing you
-  can start: what you get, what it needs, the inputs it asks for, a time and cost hint, tags and synonyms for search,
-  its status (available, coming soon, or unavailable on an older engine) and how to launch it (a run, a document
-  style, the demo, draft epics or a chat). Each entry carries YOUR usage: launches, last used and median time, from
-  the runs whose `run.launched` trail entry names the requesting principal (runs a schedule or the daemon launched
-  are not counted, nor are retries), optionally for one project (`?projectId=`), and `top` lists your six most used.
-  The metadata lives in one data module (`src/workflow-catalog/catalog-data.ts`); a workflow's title, summary and
-  use-when stay on its def. A served workflow with no catalog entry still appears under More. Apps (the data builder,
-  formerly Vibe) and Studio phase plugin are listed as coming soon. The engine's new `docs`,
-  `validate-docs`, `test-plan` and `test-analysis` workflows (wicked-core) fill Documentation, Validate
-  documentation, Test planning and Test analysis. `health.capabilities.workflowCatalog` says the route is served.
-  A saved preset that shares a card's name is described as what it is (it is what a launch of that name runs), a
-  run card named like a studio card is `run:<name>` so ids stay unique, and the document review and theme-learning
-  seams (`interactive-review`, `interactive-theme`) are now system workflows, so they are no longer offered by hand.
-
 ### Fixed
-
-- **The workflow catalog promises only what works today.** The Presentation card no longer offers PowerPoint
-  export (it needs python-pptx that nothing installs, wicked-interactive#322); document cards say "edit in place"
-  and "export as PDF" (chat refinement and sharing are not built); the demo card says captioned, no voice-over (the
-  engine renders no audio); Fix a bug and Build a feature promise the checks their plans run, not a failing-first
-  test; Apps (coming soon) says what it will be. A test pins the shown copy.
 
 - **An editor plugin's frame can no longer use WebRTC.** A bundle's policy blocks fetch, XHR, WebSocket and beacons
   (`connect-src 'none'`), but browsers do not apply that to WebRTC, and Chromium ignores `webrtc 'block'`. Crew now puts
@@ -62,84 +38,73 @@ mentioned only where a daemon release depends on them.
   cost is deliberate: a third-party editor cannot use inline event handlers, `javascript:` URLs or scripts it builds
   from new text.
 
-- **Other web pages can no longer put studio in a frame.** Crew sent no `frame-ancestors` directive and no
-  `X-Frame-Options`, so any page open in the same browser could frame studio, including its gate buttons. Every
-  response (studio's pages, `/api/v1`, editor bundles, proxied documents, refusals) now sends
-  `Content-Security-Policy: frame-ancestors 'self'` plus studio's dev server and `WICKED_CREW_ALLOWED_ORIGINS`, merged
-  into any policy the response already had, and `X-Frame-Options: SAMEORIGIN`. Studio's own frames (editor plugins,
-  documents, the editor test page) are same-origin and still load.
-- **A draft's process notes stay out of the shared document.** The draft clauses said an UNVERIFIED page count, a
-  repo-less draft's citations and a source that was not in reach go "in the notes". A document has no notes, so the
-  drafter wrote them into the body, and the PDF shared from rig run 2e6059da said "Page count UNVERIFIED…". The
-  clauses now say where they go: in the worker's reply (the run keeps it), never the document's visible text; a deck
-  may also carry them in its hidden speaker notes.
-- **`WorkUnit.reassign_refused` matches the engine.** crew's mirror of wicked-core's `work_authors` counted every
-  recon step's seat as an author. The engine skips a guarded read-only recon step (the run's scope step) whose tree
-  is unchanged, so crew refused, and studio never offered, a seat the engine would accept as the reviewer.
-- **The system snapshot names the step a run is on.** `phase` was the engine's synthetic `phase_ref`
-  (`wf-<run>:unit-1`), which the voice dashboard printed. It is now the step from the unit id ("answer 1",
-  "pa scope"), else the catalog entry, else the stage.
-- **The requirements list agrees with its header, or says why not (api-types 0.167.0, wicked-core req-reconcile).**
-  On the rig wicked-crew listed 3,917 non-placeholder rows under a header of 3,476 real. Every one of the 1,458 extra
-  rows (441 stated, 1,017 placeholders) sits on a TypeScript shape, which the engine stopped counting as behaviour
-  (core#1238) after an extraction page had annotated it. The engine now gives its verdict on each listed row from the
-  same pass as the header (`rows: { real, uncounted }`), so crew no longer guesses "real" from the document (whose
-  fallback rule makes a confident risk note look stated). Each item carries `uncounted` (`structural` |
-  `not_product` | `unindexed`): such rows sort after the counted ones, carry no corroboration (a type has no
-  callers, so "dead code" was wrong) and are counted on the page (`uncounted: { stated, placeholders }`); the counted
-  real rows are the header's real. Functional now opens on behaviour rules instead of crew-api-types wire types.
-  Data risk is the placeholder verdict, not a `/risk/i` match over rule text, which flagged 16 real rules that merely
-  say "risk". The page also counts its categories (`categories`), so a client can leave out the Config & data filter
-  when it is empty. An older engine sends no verdicts: rows are read off the document as before and nothing is claimed.
-- **Each listed requirement says whether it is a placeholder (api-types 0.166.0).** The list already ordered real
-  requirements first by the engine's rule (a validated requirement, or a business rule at or above 0.75), but a
-  client could only guess from the statement's `[RISK]` prefix, which misses plain rules under the threshold: six on
-  wicked-crew showed no placeholder mark. `RequirementSummary.placeholder` (and the detail's) carries the verdict.
-- **The requirements page says which graph build it lists** (api-types 0.165.0, wicked-core 2026-11-01). The list is
-  the last graph build; its header counts the store now. On the rig wicked-crew listed the 04:59 build (1,383 real,
-  built under the old placeholder-counting gate) under "3,585 real": a run had mapped 2,223 more and was stopped at
-  its repeat ask, before the graph build (which refuses below the minimum anyway). The page now carries `graphBuild:
-  { generation, coverage, behind }` from the engine's read: the label the listed build persisted (null when it
-  carried none or an older engine's `mapped_pct` one) and `behind`, true unless every count matches the header's
-  (counts, which is what the header shows; not a claim that every statement is unchanged). A client says "N real
-  requirements mapped since the last graph build; build the graph to list them" instead of showing two numbers that
-  cannot agree. `graphBuild` is null when the engine does not say or sent no live label (the graph's own label is
-  never compared with its build). Rows and header are unchanged: unbuilt rules are never listed as part of the
-  graph, and mapped work is never hidden.
-- **The requirements list opens on real requirements, and Functional holds no manifest field.** A component names a
-  symbol in its file (`package.json#devDependencies`), and the category was read off the whole string, so a manifest,
-  config or doc entry with a symbol classed as functional; only `package-lock` entries, matched by name, did not.
-  Functional held 7,285 of wicked-crew's 7,300 items, opening on `package.json`'s fields. The category is now read off
-  the file: config and data only when every reading of `file#name` names a config file, and only when every component
-  the requirement names does, so a source path holding `#` or with no extension stays functional. The list orders
-  real requirements first (a validated requirement, or a stated rule at or above the engine's 0.75 resolve threshold),
-  then placeholders (the `[RISK]` floor, a plain rule under the threshold, or no statement), then config and data,
-  keeping the graph's order within each.
-- **An end-of-run learnings distil never waits on you (#1251).** A distil seat that rightly found nothing could
-  reply in under 200 characters, fail the engine's substance floor and park as "Waiting on you". The distil's
-  outcome is its report file, so crew now stops a distil run at any gate it reaches and files from the report:
-  an empty list is recorded as "none found" (`filed.json` `noneFound`, `checked`, `stopped`), and a missing report
-  (a crashed seat) files the evidence raw as before. The distil seat now writes `checked` (each evidence item, kept
-  or dropped and why) and says the same in its reply, so "none found" is a reviewable answer. A distil already
-  parked when the daemon starts is left for the operator.
-- Working document: an agent decision whose text already ends in `.`, `!` or `?` no longer gets a second period before "Why:"; Goal drops the hidden linked-issues block and, when too long, is cut at a word boundary with an ellipsis (#1240).
+## [0.16.12] — 2026-11-02
 
-### Changed
-
-- **The requirements minimum counts real requirements only** (api-types 0.164.0, operator decision
-  2026-11-01, wicked-core#1233). `RequirementsCoverage` on `GET /repos/:id/requirements` (the page and the
-  `notGenerated` 404) is now `{ realPct, minPct, behaviorBearing, real, placeholders, unmapped, notProduct }`:
-  `realPct` is the one number the minimum is checked against; risk-flagged `placeholders` are shown but never
-  counted; tests, data, manifests and documents are out of `behaviorBearing` (`notProduct`). `mappedPct`,
-  `mapped` and `resolved` are gone (they counted placeholders as mapped: pi-governance read "100% mapped" with 3
-  real requirements of 120). An older engine's `mapped_pct` label is never shown as the real share. The
-  domain-extraction coverage step's pinned validator is `9fddcc159580ed33` (the reworded criterion).
-- **`test-related` words the cross-repo line like the network line (#1244).** It now reads "left out the tests
-  tagged `cross-repo` (N in the repository, in …; only those this run selected were affected): no sibling
-  wicked-core checkout; CI runs them (crew#1173)". The count and files were always the repository's, so a targeted
-  run no longer claims it left out tests it never selected. The filter and when it applies are unchanged.
+A feature release on wicked-core-ts ^0.15.20 and wicked-crew-api-types 0.170.0, bundling wicked-studio 0.14.0 (UI v3). It carries the 50 PRs since 0.16.11 (#1205 through #1276). Requirements: the graph is read from estate, the minimum counts real requirements, and the list agrees with its header. Learnings: every run proposes what it learned, and the end-of-run distil never waits. Voice: local speech to text, voice gate answers, and steering by voice. Also: guided multi-select asks, the workflow catalog, frame-ancestors / X-Frame-Options on studio and the API, the container checks floor, and the in-flight "Is this going well?" check. The chat sees the open artifact and the runs you name (#1271); every brief and copy it reads opens beneath its root and follows no link (#1276). Chat-proposed artifact jobs (#1275) ship inert: production advertises no artifact operation, so no seat is told about one. Every new wire shape is additive and behind a capability, so an older studio sends what it did before.
 
 ### Added
+
+- **A chat proposes an artifact job as a card; only your click answers it (api-types 0.170.0, DES-CHAT-ARTIFACTS-001
+  slice A2).** A seat asked to make or change a document, a deck, a web page, a demo video or a studio theme ends its
+  reply with a fenced `wicked-make` block, cut out of the reply and hidden while it streams, exactly like the
+  `wicked-decisions` block (a block of either kind now closes only on a line of three backticks alone). Seats are told
+  only about the operations crew advertises, in the statement and in a short per-message digest after your words:
+  propose it, never write it in the reply; an ambiguous ask gets one question (Revise it / Make something new / Just
+  tell me), something studio can't make gets the nearest thing named, and a demo needs an app on this machine. Crew
+  turns the last valid block into a `proposal` transcript record and a `chatProposal`
+  frame whose every line is crew's own: the catalog entry and what you get, each source checked (a run or document
+  counts only when you named it in this chat or had it open, and it is in the chat's scope; anything else is struck
+  with the reason), the repositories (the chat's scope, or Go is blocked), two distinct helpers (the chat's lead seat,
+  then another of its seats, else the roster's next: studio's rule, moved to crew), time and cost (the catalog's band,
+  the workflow's steps, the median of completed runs here, and a dollar figure only from at least three runs whose
+  every dispatched attempt reported a price), the stops and where it is filed. A newer proposal supersedes the open
+  one, and a late reply to an earlier turn never takes the chat back.
+  `POST /chats/:id/proposals/:pid {decision: go | not_now, edits?}` is the only way one starts anything: a person and
+  the chat's owner only (a worker or system actor gets 403, even on a proposal already accepting), checked on every
+  call; then one lock per proposal, what already happened first (a decided proposal answers its result again, so a
+  lost response is safe to retry; an accepting one whose run exists is adopted), and only a fresh Go runs the state
+  checks before anything is recorded (edits, sources still there, the chat and the document not busy, a refine's
+  document still on the head it was proposed on, else the card re-resolves). Then `proposal_accepting` with the run
+  id derived from the proposal, one launcher per run id, and `proposal_decided`. An ended chat's open proposal stays
+  answerable (its records go to the kept history, fenced by the chat's instance nonce, which history entries now keep
+  with their project). Nothing launches yet: production advertises `proposals` with every
+  operation off, so seats are told about none and no card is made; each later slice turns its own on. The test
+  configuration (`WICKED_CHAT_ARTIFACTS_STUB=1`) turns them all on with a recording stub that starts nothing, and
+  `health.capabilities.chatArtifacts.stub` says so.
+- **A chat sees the artifact you have open and the runs you name (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 slice
+  A1).** `POST /chats/:id/messages` takes `context`: the artifact open where the message was sent (`<mount>/<doc>`,
+  the version you are looking at, the parts you selected), the tab's appearance, and studio's page summary, which no
+  longer has to ride inside your words. Before anything is read, crew checks that the chat is yours and that the
+  artifact is in its scope (a project chat sees its project's documents and runs, and any other chat sees what is on
+  this daemon; the Unfiled documents a project chat makes join its scope with slice A3's per-document binding); what
+  fails is named to the seat with its reason, never read. The
+  version you are looking at and the latest are copied into the chat's scratch root, read only, with their outline
+  and your selected parts, so "what does slide 4 say?" is answered from slide 4. Each run you name (an id in your
+  words, a run chip, or the run page you are on) gets a brief, named by its content, written from crew's own records (status, times, steps
+  and seats, each finished step's output, acceptance, delivery, evidence), through one builder (`api/run-brief.ts`)
+  that slice A3's drafts will reuse. Everything that is not your own words is labelled and fenced as data. Each turn's
+  `context` transcript record says what its seats were given, and a follow-up turn is told what the chat named
+  before (re-checked against its scope). The copies and briefs are written only after the message's last check, so a
+  chat closed meanwhile gets none of them. `POST /chats {seedFromArtifact}` opens "Ask about this"
+  chats for a document no chat holds, with the repositories it was made about. `health.capabilities.chatArtifacts`
+  says which operations this daemon serves (`context` only, for now). A 48-message labelled corpus
+  (`tests/fixtures/chat-artifacts-corpus/`) is in place for slice A2's runs.
+- **The workflows are a catalog: `GET /api/v1/workflows/catalog` (api-types 0.168.0).** It serves the categories
+  (Create, Resolve, Analyze, Test, More, and Your workflows once you have saved presets) and one entry per thing you
+  can start: what you get, what it needs, the inputs it asks for, a time and cost hint, tags and synonyms for search,
+  its status (available, coming soon, or unavailable on an older engine) and how to launch it (a run, a document
+  style, the demo, draft epics or a chat). Each entry carries YOUR usage: launches, last used and median time, from
+  the runs whose `run.launched` trail entry names the requesting principal (runs a schedule or the daemon launched
+  are not counted, nor are retries), optionally for one project (`?projectId=`), and `top` lists your six most used.
+  The metadata lives in one data module (`src/workflow-catalog/catalog-data.ts`); a workflow's title, summary and
+  use-when stay on its def. A served workflow with no catalog entry still appears under More. Apps (the data builder,
+  formerly Vibe) and Studio phase plugin are listed as coming soon. The engine's new `docs`,
+  `validate-docs`, `test-plan` and `test-analysis` workflows (wicked-core) fill Documentation, Validate
+  documentation, Test planning and Test analysis. `health.capabilities.workflowCatalog` says the route is served.
+  A saved preset that shares a card's name is described as what it is (it is what a launch of that name runs), a
+  run card named like a studio card is `run:<name>` so ids stay unique, and the document review and theme-learning
+  seams (`interactive-review`, `interactive-theme`) are now system workflows, so they are no longer offered by hand.
+
 
 - **A requirements generation keeps going until its target** (api-types 0.163.0, domain-graph-3). Settings →
   `requirementsGraph` takes `maxPages` (1..200), `maxMinutes` (1..1440) and `pageSize` (50..2000) beside
@@ -289,7 +254,137 @@ mentioned only where a daemon release depends on them.
   brief, in a marked block (at most 8) the PR text takes back out. `WICKED_CREW_RUN_LEARNINGS=off|extract|distill`
   (default `distill`; `WICKED_CREW_LEARNINGS_DIR`, default `~/.wicked/learnings`, holds each distil handoff).
 
+
+- **The orchestrator fills the run's working document (power mode, operator ask 2026-10-30).** The engine's
+  `powerWorkingNotes` frame (wicked-core#1195) is written into the run's working document as one version by
+  `agent:<seat>` (author kind `agent`). It replaces Approach and appends each decision, with its reason and turn,
+  under Decisions. It never steers. A person's Approach stands: the agent's restatement is recorded under Decisions
+  instead. A person's edit racing the write wins, and the agent writes again on top of it. The document is made if
+  the run has none yet.
+- **api-types 0.150.0:** the `ToolActivityEvent` (`toolActivity`, live per tool call) and `PowerWorkingNotesEvent`
+  frames; `RunBusType` `wicked.run.tool.started` / `wicked.run.tool.finished` / `wicked.run.notes.recorded`; and
+  `WorkingDocAuthor` `{ kind: 'agent' }`.
+- `GET /api/v1/diagnostics` carries `floorCache` — the engine's repo-checks floor cache usage (`Core.floorCacheUsage`: path as `~/...`, bytes, caps, per-repo sizes, logs), read at most once per 60 s; `null` on an addon without the static (#1147). `DiagnosticsResponse.floorCache` is added to `wicked-crew-api-types`.
+
+### Changed
+
+- **The requirements minimum counts real requirements only** (api-types 0.164.0, operator decision
+  2026-11-01, wicked-core#1233). `RequirementsCoverage` on `GET /repos/:id/requirements` (the page and the
+  `notGenerated` 404) is now `{ realPct, minPct, behaviorBearing, real, placeholders, unmapped, notProduct }`:
+  `realPct` is the one number the minimum is checked against; risk-flagged `placeholders` are shown but never
+  counted; tests, data, manifests and documents are out of `behaviorBearing` (`notProduct`). `mappedPct`,
+  `mapped` and `resolved` are gone (they counted placeholders as mapped: pi-governance read "100% mapped" with 3
+  real requirements of 120). An older engine's `mapped_pct` label is never shown as the real share. The
+  domain-extraction coverage step's pinned validator is `9fddcc159580ed33` (the reworded criterion).
+- **`test-related` words the cross-repo line like the network line (#1244).** It now reads "left out the tests
+  tagged `cross-repo` (N in the repository, in …; only those this run selected were affected): no sibling
+  wicked-core checkout; CI runs them (crew#1173)". The count and files were always the repository's, so a targeted
+  run no longer claims it left out tests it never selected. The filter and when it applies are unchanged.
+
+
+- **Requirements are read from estate, not from a JSON file in the repo** (operator ruling 2026-10-31,
+  wicked-core#1223). `GET /repos/:id/requirements` (list, detail, PATCH), `GET /repos/:id/domain-graph`, the project
+  requirements and domain aggregates, and product compose read the repository's requirements graph from its estate
+  store through the engine (`getRequirementsGraphForRepo`). That is the same read-only, one-library path as the
+  per-repo coverage. `<repo>/.wicked-estate/requirements/requirements_graph.json` is no longer read. The coverage
+  label ("N% mapped, minimum M%") comes from the store's own counts at read time, so a later extraction page shows
+  without a rebuild. `RequirementsPage.source` is `'store'`. A repo whose daemon resolved no graph root answers 503
+  with the engine's diagnosis, like the other graph surfaces. An engine without the read answers an error naming the
+  upgrade. The operator-overrides sidecar (`requirements_overrides.json`) is unchanged.
+
+- **A failing floor re-runs only the failing test files.** `.wicked/checks.json` declares `rerun` for `test`
+  and `test_targeted` (`scripts/test-related.mjs --tests <files>`, which keeps the clean
+  build, the cross-repo filter and the one deadline retry). With wicked-core#1198 the engine's retry and its base
+  comparison then run only the files the head failed instead of the whole suite. `test_targeted` is marked
+  `self_retry`, because it already re-runs its own deadline failures, so the engine does not retry it a second
+  time. Needs an engine with wicked-core#1198: an older engine refuses the unknown `rerun` key.
+- **A plugin may write its own lines under Open questions and Next, not only Decisions.** The Phase report fills a
+  run's working document from the run's events: decisions answered under Decisions, what waits on a person under
+  Open questions, and what the newest hand-off round left under Next. A plugin's write never steers, in any section,
+  Next included. Only a person's edit does. Goal, Approach and Constraints stay a person's
+  (`packages/crew/src/working-doc/sections.ts` `PLUGIN_SECTIONS`).
+
 ### Fixed
+
+- **A chat's run briefs and artifact copies never read or write through a swapped folder (crew#1274).** A run brief
+  checked an evidence file's real path and then opened it by path; `O_NOFOLLOW` covers only the last component, so a
+  run that swapped an evidence folder for a link between the two could put a file from outside its evidence root into
+  the brief a chat seat reads. Every file the chat's per-turn block reads or writes (evidence, a document's
+  `versions.json` and version pages, the copies and briefs in the chat's scratch root, the earlier briefs a follow-up
+  offers, `seedFromArtifact`'s existence check) is now opened beneath its root with no link followed in any folder
+  below it: macOS's `O_NOFOLLOW_ANY`, and on Linux a descriptor walk through `/proc/self/fd`. A platform with neither
+  copies and briefs nothing and says why.
+- **A document at version 0 is a document (crew#1273).** `ChatMessageBody.context.artifact.version` was refused below
+  1, and a document whose `versions.json` head is 0 read as having no version, so "Ask about this" on a first draft
+  answered 400 and a chat could not be seeded from it. Version 0 is now accepted in the request, the manifest head and
+  its entries.
+- **The workflow catalog promises only what works today.** The Presentation card no longer offers PowerPoint
+  export (it needs python-pptx that nothing installs, wicked-interactive#322); document cards say "edit in place"
+  and "export as PDF" (chat refinement and sharing are not built); the demo card says captioned, no voice-over (the
+  engine renders no audio); Fix a bug and Build a feature promise the checks their plans run, not a failing-first
+  test; Apps (coming soon) says what it will be. A test pins the shown copy.
+- **Other web pages can no longer put studio in a frame.** Crew sent no `frame-ancestors` directive and no
+  `X-Frame-Options`, so any page open in the same browser could frame studio, including its gate buttons. Every
+  response (studio's pages, `/api/v1`, editor bundles, proxied documents, refusals) now sends
+  `Content-Security-Policy: frame-ancestors 'self'` plus studio's dev server and `WICKED_CREW_ALLOWED_ORIGINS`, merged
+  into any policy the response already had, and `X-Frame-Options: SAMEORIGIN`. Studio's own frames (editor plugins,
+  documents, the editor test page) are same-origin and still load.
+- **A draft's process notes stay out of the shared document.** The draft clauses said an UNVERIFIED page count, a
+  repo-less draft's citations and a source that was not in reach go "in the notes". A document has no notes, so the
+  drafter wrote them into the body, and the PDF shared from rig run 2e6059da said "Page count UNVERIFIED…". The
+  clauses now say where they go: in the worker's reply (the run keeps it), never the document's visible text; a deck
+  may also carry them in its hidden speaker notes.
+- **`WorkUnit.reassign_refused` matches the engine.** crew's mirror of wicked-core's `work_authors` counted every
+  recon step's seat as an author. The engine skips a guarded read-only recon step (the run's scope step) whose tree
+  is unchanged, so crew refused, and studio never offered, a seat the engine would accept as the reviewer.
+- **The system snapshot names the step a run is on.** `phase` was the engine's synthetic `phase_ref`
+  (`wf-<run>:unit-1`), which the voice dashboard printed. It is now the step from the unit id ("answer 1",
+  "pa scope"), else the catalog entry, else the stage.
+- **The requirements list agrees with its header, or says why not (api-types 0.167.0, wicked-core req-reconcile).**
+  On the rig wicked-crew listed 3,917 non-placeholder rows under a header of 3,476 real. Every one of the 1,458 extra
+  rows (441 stated, 1,017 placeholders) sits on a TypeScript shape, which the engine stopped counting as behaviour
+  (core#1238) after an extraction page had annotated it. The engine now gives its verdict on each listed row from the
+  same pass as the header (`rows: { real, uncounted }`), so crew no longer guesses "real" from the document (whose
+  fallback rule makes a confident risk note look stated). Each item carries `uncounted` (`structural` |
+  `not_product` | `unindexed`): such rows sort after the counted ones, carry no corroboration (a type has no
+  callers, so "dead code" was wrong) and are counted on the page (`uncounted: { stated, placeholders }`); the counted
+  real rows are the header's real. Functional now opens on behaviour rules instead of crew-api-types wire types.
+  Data risk is the placeholder verdict, not a `/risk/i` match over rule text, which flagged 16 real rules that merely
+  say "risk". The page also counts its categories (`categories`), so a client can leave out the Config & data filter
+  when it is empty. An older engine sends no verdicts: rows are read off the document as before and nothing is claimed.
+- **Each listed requirement says whether it is a placeholder (api-types 0.166.0).** The list already ordered real
+  requirements first by the engine's rule (a validated requirement, or a business rule at or above 0.75), but a
+  client could only guess from the statement's `[RISK]` prefix, which misses plain rules under the threshold: six on
+  wicked-crew showed no placeholder mark. `RequirementSummary.placeholder` (and the detail's) carries the verdict.
+- **The requirements page says which graph build it lists** (api-types 0.165.0, wicked-core 2026-11-01). The list is
+  the last graph build; its header counts the store now. On the rig wicked-crew listed the 04:59 build (1,383 real,
+  built under the old placeholder-counting gate) under "3,585 real": a run had mapped 2,223 more and was stopped at
+  its repeat ask, before the graph build (which refuses below the minimum anyway). The page now carries `graphBuild:
+  { generation, coverage, behind }` from the engine's read: the label the listed build persisted (null when it
+  carried none or an older engine's `mapped_pct` one) and `behind`, true unless every count matches the header's
+  (counts, which is what the header shows; not a claim that every statement is unchanged). A client says "N real
+  requirements mapped since the last graph build; build the graph to list them" instead of showing two numbers that
+  cannot agree. `graphBuild` is null when the engine does not say or sent no live label (the graph's own label is
+  never compared with its build). Rows and header are unchanged: unbuilt rules are never listed as part of the
+  graph, and mapped work is never hidden.
+- **The requirements list opens on real requirements, and Functional holds no manifest field.** A component names a
+  symbol in its file (`package.json#devDependencies`), and the category was read off the whole string, so a manifest,
+  config or doc entry with a symbol classed as functional; only `package-lock` entries, matched by name, did not.
+  Functional held 7,285 of wicked-crew's 7,300 items, opening on `package.json`'s fields. The category is now read off
+  the file: config and data only when every reading of `file#name` names a config file, and only when every component
+  the requirement names does, so a source path holding `#` or with no extension stays functional. The list orders
+  real requirements first (a validated requirement, or a stated rule at or above the engine's 0.75 resolve threshold),
+  then placeholders (the `[RISK]` floor, a plain rule under the threshold, or no statement), then config and data,
+  keeping the graph's order within each.
+- **An end-of-run learnings distil never waits on you (#1251).** A distil seat that rightly found nothing could
+  reply in under 200 characters, fail the engine's substance floor and park as "Waiting on you". The distil's
+  outcome is its report file, so crew now stops a distil run at any gate it reaches and files from the report:
+  an empty list is recorded as "none found" (`filed.json` `noneFound`, `checked`, `stopped`), and a missing report
+  (a crashed seat) files the evidence raw as before. The distil seat now writes `checked` (each evidence item, kept
+  or dropped and why) and says the same in its reply, so "none found" is a reviewable answer. A distil already
+  parked when the daemon starts is left for the operator.
+- Working document: an agent decision whose text already ends in `.`, `!` or `?` no longer gets a second period before "Why:"; Goal drops the hidden linked-issues block and, when too long, is cut at a word boundary with an ellipsis (#1240).
+
 
 - **A repository with no requirements graph says so, typed, instead of a refusal.** `GET /repos/:id/requirements`
   answered a bare 404 sentence ("requirements_graph.json not generated for this repo yet") that studio could only show
@@ -350,44 +445,6 @@ mentioned only where a daemon release depends on them.
   read host processes only. With wicked-core#1202 (`ps` inside the macOS jail) a clean crew change's base is green.
 - **A missing `wicked-estate-mcp` now reads as not installed, not "memory store not created yet".** The estate infra row checks the binary before the store (not installed or not on PATH, estate is optional, `npx wicked-installer` or `WICKED_ESTATE_MCP_EXE`), and `/memory/*` and `/proposals` answer 502 with that reason instead of the raw `spawn … ENOENT` (crew#1213).
 
-### Changed
-
-- **Requirements are read from estate, not from a JSON file in the repo** (operator ruling 2026-10-31,
-  wicked-core#1223). `GET /repos/:id/requirements` (list, detail, PATCH), `GET /repos/:id/domain-graph`, the project
-  requirements and domain aggregates, and product compose read the repository's requirements graph from its estate
-  store through the engine (`getRequirementsGraphForRepo`). That is the same read-only, one-library path as the
-  per-repo coverage. `<repo>/.wicked-estate/requirements/requirements_graph.json` is no longer read. The coverage
-  label ("N% mapped, minimum M%") comes from the store's own counts at read time, so a later extraction page shows
-  without a rebuild. `RequirementsPage.source` is `'store'`. A repo whose daemon resolved no graph root answers 503
-  with the engine's diagnosis, like the other graph surfaces. An engine without the read answers an error naming the
-  upgrade. The operator-overrides sidecar (`requirements_overrides.json`) is unchanged.
-
-- **A failing floor re-runs only the failing test files.** `.wicked/checks.json` declares `rerun` for `test`
-  and `test_targeted` (`scripts/test-related.mjs --tests <files>`, which keeps the clean
-  build, the cross-repo filter and the one deadline retry). With wicked-core#1198 the engine's retry and its base
-  comparison then run only the files the head failed instead of the whole suite. `test_targeted` is marked
-  `self_retry`, because it already re-runs its own deadline failures, so the engine does not retry it a second
-  time. Needs an engine with wicked-core#1198: an older engine refuses the unknown `rerun` key.
-- **A plugin may write its own lines under Open questions and Next, not only Decisions.** The Phase report fills a
-  run's working document from the run's events: decisions answered under Decisions, what waits on a person under
-  Open questions, and what the newest hand-off round left under Next. A plugin's write never steers, in any section,
-  Next included. Only a person's edit does. Goal, Approach and Constraints stay a person's
-  (`packages/crew/src/working-doc/sections.ts` `PLUGIN_SECTIONS`).
-
-### Added
-
-- **The orchestrator fills the run's working document (power mode, operator ask 2026-10-30).** The engine's
-  `powerWorkingNotes` frame (wicked-core#1195) is written into the run's working document as one version by
-  `agent:<seat>` (author kind `agent`). It replaces Approach and appends each decision, with its reason and turn,
-  under Decisions. It never steers. A person's Approach stands: the agent's restatement is recorded under Decisions
-  instead. A person's edit racing the write wins, and the agent writes again on top of it. The document is made if
-  the run has none yet.
-- **api-types 0.150.0:** the `ToolActivityEvent` (`toolActivity`, live per tool call) and `PowerWorkingNotesEvent`
-  frames; `RunBusType` `wicked.run.tool.started` / `wicked.run.tool.finished` / `wicked.run.notes.recorded`; and
-  `WorkingDocAuthor` `{ kind: 'agent' }`.
-- `GET /api/v1/diagnostics` carries `floorCache` — the engine's repo-checks floor cache usage (`Core.floorCacheUsage`: path as `~/...`, bytes, caps, per-repo sizes, logs), read at most once per 60 s; `null` on an addon without the static (#1147). `DiagnosticsResponse.floorCache` is added to `wicked-crew-api-types`.
-
-### Fixed
 
 - **A chat's MCP call no longer times out at a fixed 30 s on a loaded host (crew#1212, J6).** The first call
   after approval failed with `upstream_error: timed out after 30 s` at host load 40-47 on 14 CPUs. Crew starts a
@@ -5215,7 +5272,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.11...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.12...HEAD
+[0.16.12]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.11...v0.16.12
 [0.16.11]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.10...v0.16.11
 [0.16.10]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.9...v0.16.10
 [0.16.9]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.8...v0.16.9
