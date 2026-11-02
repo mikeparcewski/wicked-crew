@@ -562,6 +562,9 @@ export async function createServer(
       level: process.env['LOG_LEVEL'] ?? 'info',
       stream: teeStreamWithErrorRing(errorRing),
     },
+    // DES-CHAT-ARTIFACTS-001 A2: a proposal id is `<chat id>:<turn uuid>` and a chat id may be 128 characters, so a
+    // path parameter may be up to 165 (Fastify's default limit is 100). Generous, still bounded.
+    maxParamLength: 256,
   });
   // TH-11: accumulate the route table as it registers — the endpoint manifest's one source of
   // truth. Installed FIRST because fastify only fires onRoute for routes added after the hook

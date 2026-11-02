@@ -382,6 +382,14 @@ describe('chat proposals (server, A2)', () => {
     expect(kinds).toEqual(['proposal', 'proposal_accepting', 'proposal_decided']);
   });
 
+  it('a 64-character chat id makes a proposal id past Fastify’s default limit, and it is still answered', async () => {
+    const long = `c${'x'.repeat(63)}`;
+    await turn(stub, stubListeners, long, 'Make a deck', { entry: 'presentation', title: 'Long', sources: ['chat'] });
+    const p = await proposalOf(stub, long);
+    expect(p.pid.length).toBeGreaterThan(100);
+    expect((await decide(stub, long, p.pid, { decision: 'not_now' })).statusCode).toBe(200);
+  });
+
   it('refuses an unknown proposal, a bad body, and an unknown chat', async () => {
     await turn(stub, stubListeners, 'bad-1', 'hi', null);
     expect((await decide(stub, 'bad-1', 'bad-1:nope', { decision: 'go' })).statusCode).toBe(404);

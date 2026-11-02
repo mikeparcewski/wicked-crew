@@ -743,6 +743,8 @@ export function chatMakeLines(make: MakeDigest): string[] {
     'Studio can make these from this chat. You do not make them: you PROPOSE, and crew turns your',
     'proposal into a card the person answers with one click. Nothing is made until they click, so',
     'never say you made, started or will start it, and never say this chat is read-only for it.',
+    'Never write the document, deck or page itself in your reply, not even a draft or an outline of',
+    'it: an ask to make one is answered with a sentence or two on what it would contain, and the block.',
     '',
   ];
   if (make.create && docs.length > 0) {

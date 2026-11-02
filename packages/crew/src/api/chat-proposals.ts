@@ -378,6 +378,38 @@ export class RecordingStubDispatcher implements ProposalDispatcher {
   }
 }
 
+// ── cost ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A completed run's cost in dollars when it is wholly known, else `null` (DES §4.2: "a dollar figure only counts runs
+ * whose every step reported a cost"). Every attempt the engine dispatched for an agent step (a tool step is no agent's)
+ * must have reported a finite, priced usage frame; an unpriced frame, or a dispatched attempt with none (a retry on a
+ * seat that reports nothing), makes the run's cost unknown.
+ */
+export function runCostFromEvents(view: SessionView, events: ReadonlyArray<Record<string, unknown>>): number | null {
+  const agentOrds = view.units
+    .filter((u) => (u as unknown as { routing?: { method?: string } | null }).routing?.method !== 'tool' && u.assigned_cli !== null)
+    .map((u) => u.ord);
+  if (agentOrds.length === 0) return null;
+  const dispatched = new Set<string>();
+  const priced = new Set<string>();
+  const byOrd = new Map<number, number>();
+  for (const e of events) {
+    const ord = e['ord'] ?? e['unitOrd'];
+    if (typeof ord !== 'number' || !agentOrds.includes(ord)) continue;
+    const attempt = typeof e['attempt'] === 'number' ? e['attempt'] : 0;
+    if (e['type'] === 'unitDispatched') dispatched.add(`${ord}:${attempt}`);
+    if (e['type'] !== 'cliUsage') continue;
+    const cost = e['costUsd'];
+    if (typeof cost !== 'number' || !Number.isFinite(cost) || cost < 0) return null;
+    priced.add(`${ord}:${attempt}`);
+    byOrd.set(ord, (byOrd.get(ord) ?? 0) + cost);
+  }
+  if (agentOrds.some((o) => !byOrd.has(o))) return null;
+  if ([...dispatched].some((k) => !priced.has(k))) return null;
+  return agentOrds.reduce((sum, o) => sum + (byOrd.get(o) ?? 0), 0);
+}
+
 // ── resolution ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /** The workflow each operation's run is. */
@@ -574,19 +606,21 @@ export class ChatProposals {
   digest(): MakeDigest {
     const f = this.deps.flags();
     const on = f.proposals;
+    const entries = on
+      ? this.deps.catalog.flatMap((c): Array<MakeDigest['entries'][number]> => {
+          if (c.status === 'coming_soon') return [];
+          if (c.launch.kind === 'document' && f.create) return [{ id: c.id, title: c.title ?? c.id, kind: 'document' as const, outcome: c.outcome }];
+          if (c.launch.kind === 'demo' && f.demo) return [{ id: c.id, title: c.title ?? c.id, kind: 'demo' as const, outcome: c.outcome }];
+          return [];
+        })
+      : [];
+    // A create or demo with no catalog entry to name is not on (the seat is told nothing it could propose).
     return {
-      create: on && f.create,
+      create: on && f.create && entries.some((e) => e.kind === 'document'),
       refine: on && f.refine,
       theme: on && f.theme,
-      demo: on && f.demo,
-      entries: on
-        ? this.deps.catalog.flatMap((c): Array<MakeDigest['entries'][number]> => {
-            if (c.status === 'coming_soon') return [];
-            if (c.launch.kind === 'document' && f.create) return [{ id: c.id, title: c.title ?? c.id, kind: 'document' as const, outcome: c.outcome }];
-            if (c.launch.kind === 'demo' && f.demo) return [{ id: c.id, title: c.title ?? c.id, kind: 'demo' as const, outcome: c.outcome }];
-            return [];
-          })
-        : [],
+      demo: on && f.demo && entries.some((e) => e.kind === 'demo'),
+      entries,
     };
   }
 
@@ -621,13 +655,20 @@ export class ChatProposals {
         // later turn has its own card (a slow seat's late reply never takes the chat back).
         const order = rs.filter((r) => r.kind === 'user').map((r) => r.turnId);
         const mine = order.indexOf(turnId);
-        return rs.some((r) => r.kind === 'proposal' && (r.proposal.pid === pid || (r.proposal.turnId !== null && order.indexOf(r.proposal.turnId) > mine)));
+        // A reply can fold before its own turn's record is written (the route records it after the engine accepted the
+        // message): such a turn is the newest, and only its own card suppresses it.
+        return rs.some((r) => r.kind === 'proposal' && (r.proposal.pid === pid || (mine !== -1 && r.proposal.turnId !== null && order.indexOf(r.proposal.turnId) > mine)));
       };
       if (has()) return;
+      // Give the route a moment to record the turn's own words and context (they authorize what the block names).
+      for (let i = 0; i < 25 && !this.deps.records(frame.chat).some((r) => r.kind === 'user' && r.turnId === turnId); i += 1) {
+        await new Promise((res) => setTimeout(res, 200));
+      }
+      if (this.deps.instanceOf(frame.chat) !== instance || has()) return;
       const proposal = await this.resolve({ chatId: frame.chat, turnId, seat: frame.cliKey, block, records: this.deps.records(frame.chat) });
       if (proposal === null) return;
       // Published under the chat's lock, so it never lands between an accept's checks and its record.
-      await this.lock.run(`chat\u0000${frame.chat}`, async () => {
+      await this.lock.run(`chat\u0000${instance ?? frame.chat}`, async () => {
         if (!has()) this.write(frame.chat, { at: this.now(), turnId, kind: 'proposal', proposal }, instance);
       });
     })
@@ -1081,7 +1122,8 @@ export class ChatProposals {
    */
   private go(chatId: string, folded: FoldedProposal, resolution: ArtifactProposal, edits: ProposalEdits | null, identity: ProposalIdentity, actor: Actor, instance: string | null): Promise<DecideResult> {
     const docKey = resolution.kind === 'refine' && identity.artifactRef !== null ? identity.artifactRef : null;
-    return this.lock.run(`chat\u0000${chatId}`, () =>
+    // Keyed by the chat's instance (shared by its original id and an ended chat's archived alias), else its id.
+    return this.lock.run(`chat\u0000${instance ?? chatId}`, () =>
       docKey === null
         ? this.goLocked(chatId, folded, resolution, edits, identity, actor, instance)
         : this.lock.run(`doc\u0000${docKey}`, () => this.goLocked(chatId, folded, resolution, edits, identity, actor, instance)));
@@ -1125,6 +1167,11 @@ export class ChatProposals {
       const head = root === null ? null : artifactHead(root, ref.doc);
       if (head === null) return { code: 409, body: { code: 'source_gone', error: `${resolution.target.title} is gone`, view: viewOf(folded) } };
       if (head !== resolution.target.base) {
+        // A newer proposal exists: this one is not re-opened over it (the chat moved on).
+        const pids = [...foldProposals(this.deps.records(chatId)).keys()];
+        if (pids.indexOf(pid) < pids.length - 1) {
+          return { code: 409, body: { code: 'proposal_superseded', error: `${resolution.target.title} changed since this was proposed, and a newer proposal replaced it`, view: viewOf(folded) } };
+        }
         // From the proposal as crew recorded it (never the refused request's edits): the person chooses again.
         const recorded = folded.proposal;
         const fresh: ArtifactProposal = { ...recorded, target: { ...(recorded.target ?? resolution.target), base: head } };

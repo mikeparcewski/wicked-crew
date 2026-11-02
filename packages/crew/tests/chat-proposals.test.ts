@@ -170,7 +170,7 @@ describe('what the seat is told (per message, advertised operations only)', () =
 
   it('with every operation on: the block for each, the entries, the no-block cases, and documents are no longer refused', () => {
     const lines = chatWorkRequestLines(scope, { make: all }).join('\n');
-    for (const want of ['```wicked-make', '"entry":"<id>"', '"refine":"<mount>/<doc>"', '"theme":{', '"entry":"demo-video"', '`presentation`: Presentation', 'Revise it, Make something new, and Just tell me', 'nearest thing it can make', 'never say this chat is read-only']) {
+    for (const want of ['```wicked-make', '"entry":"<id>"', '"refine":"<mount>/<doc>"', '"theme":{', '"entry":"demo-video"', '`presentation`: Presentation', 'Revise it, Make something new, and Just tell me', 'nearest thing it can make', 'never say this chat is read-only', 'Never write the document, deck or page itself in your reply']) {
       expect(lines).toContain(want);
     }
     expect(lines).not.toContain('write code or docs');

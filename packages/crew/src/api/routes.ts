@@ -244,7 +244,7 @@ import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
 import { registerInteractiveDocChecks } from '../interactive/doc-checks-routes.js';
 import { crewStateHome, stateHomeOfDb } from '../projects/state-home.js';
-import { ChatProposals, LaunchOnceRegistry, RecordingStubDispatcher } from './chat-proposals.js';
+import { ChatProposals, LaunchOnceRegistry, RecordingStubDispatcher, runCostFromEvents } from './chat-proposals.js';
 import { CATALOG_SEEDS } from '../workflow-catalog/catalog-data.js';
 import { registerInteractiveDocList } from '../interactive/doc-list-routes.js';
 import { REVIEWS_DIRNAME } from '../interactive/review-ledger.js';
@@ -4305,32 +4305,9 @@ export function registerRoutes(
   };
   // DES-CHAT-ARTIFACTS-001 §4 (A2): proposals. Resolved from crew's own records (the same reads the turn block uses);
   // records go to the live transcript, or the kept history copy once the chat has ended.
-  const proposalCosts = async (view: SessionView): Promise<number | null> => {
-    // A dollar figure only from a run whose EVERY agent step reported a cost (DES §4.2).
-    const agentOrds = view.units
-      .filter((u) => (u as unknown as { routing?: { method?: string } | null }).routing?.method !== 'tool' && u.assigned_cli !== null)
-      .map((u) => u.ord);
-    if (agentOrds.length === 0) return null;
-    // Every attempt the engine dispatched for an agent step must have reported a priced usage frame; any unpriced
-    // frame, or a dispatched attempt with none (a retry on a seat that reports nothing), makes the cost unknown.
-    const dispatched = new Set<string>();
-    const priced = new Set<string>();
-    const byOrd = new Map<number, number>();
-    for (const e of (await adapter.runEvents(view.session.id)) as Array<Record<string, unknown>>) {
-      const ord = e['ord'] ?? e['unitOrd'];
-      if (typeof ord !== 'number' || !agentOrds.includes(ord)) continue;
-      const attempt = typeof e['attempt'] === 'number' ? e['attempt'] : 0;
-      if (e['type'] === 'unitDispatched') dispatched.add(`${ord}:${attempt}`);
-      if (e['type'] !== 'cliUsage') continue;
-      const cost = e['costUsd'];
-      if (typeof cost !== 'number' || !Number.isFinite(cost) || cost < 0) return null;
-      priced.add(`${ord}:${attempt}`);
-      byOrd.set(ord, (byOrd.get(ord) ?? 0) + cost);
-    }
-    if (agentOrds.some((o) => !byOrd.has(o))) return null;
-    if ([...dispatched].some((k) => !priced.has(k))) return null;
-    return agentOrds.reduce((sum, o) => sum + (byOrd.get(o) ?? 0), 0);
-  };
+  // A dollar figure only from a run whose EVERY dispatched attempt of every agent step reported a price (DES §4.2).
+  const proposalCosts = async (view: SessionView): Promise<number | null> =>
+    runCostFromEvents(view, (await adapter.runEvents(view.session.id)) as Array<Record<string, unknown>>);
   const chatProposals = new ChatProposals({
     flags: () => chatArtifactFlags,
     catalog: CATALOG_SEEDS,

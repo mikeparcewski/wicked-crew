@@ -453,6 +453,60 @@ describe('the fence', () => {
   });
 });
 
+describe('r3', () => {
+  it('a reply that folds before its own turn is recorded still gets its card (waits for the turn; not suppressed by an older card)', async () => {
+    const r = rig();
+    const t1 = chatWith(r, 'c1');
+    await propose(r, 'c1', t1, { entry: 'presentation', title: 'Older' });
+    // Turn 2's reply arrives before the route wrote turn 2's user and context records.
+    r.svc.onReply({ chat: 'c1', cliKey: 'claude', turnId: 't-new', ok: true, blocks: [JSON.stringify({ entry: 'presentation', title: 'Newer' })] });
+    await new Promise((res) => setTimeout(res, 50));
+    r.records.get('c1')!.push({ at: 5, turnId: 't-new', kind: 'user', text: 'a deck', seats: ['claude'], owner: true });
+    await r.svc.settled();
+    const f = foldProposals(r.records.get('c1')!);
+    expect(f.get('c1:t-new')?.state).toBe('open');
+    expect(f.get(`c1:${t1}`)?.state).toBe('superseded');
+  });
+
+  it('the chat lock is the chat instance: an ended chat answered through its archived alias still waits for its first name', async () => {
+    const r = rig();
+    r.launcher.stayLive = true;
+    const t1 = chatWith(r, 'c1');
+    const p1 = (await propose(r, 'c1', t1, { entry: 'presentation', title: 'one' }))!;
+    const t2 = chatWith(r, 'c1');
+    const p2 = (await propose(r, 'c1', t2, { entry: 'presentation', title: 'two' }))!;
+    // p1 was interrupted (accepting); the chat ended and its records are reachable under an alias with the SAME instance.
+    r.records.get('c1')!.push({ at: 3, turnId: t1, kind: 'proposal_accepting', pid: p1.pid, actor: 'maria', edits: null, resolution: p1, identity: { artifactRef: '_unfiled/one', runId: proposalRunId(p1.pid) } });
+    r.records.set('c1--9', r.records.get('c1')!);
+    r.instances.set('c1--9', 'i1');
+    r.chats.set('c1--9', r.chats.get('c1')!);
+    const [a, b] = await Promise.all([r.svc.decide('c1', p1.pid, { decision: 'go' }, ME, 'i1'), r.svc.decide('c1--9', p2.pid, { decision: 'go' }, ME, 'i1')]);
+    expect([a.code, b.code].sort()).toStrictEqual([200, 409]);
+    expect(r.launcher.launched).toHaveLength(1);
+  });
+
+  it('an interrupted refine whose document moved after a newer proposal exists is superseded, never re-opened', async () => {
+    const r = rig();
+    const t1 = chatWith(r, 'c1', { open: 'mikes/coverage-deck' });
+    const p1 = (await propose(r, 'c1', t1, { refine: 'mikes/coverage-deck', ask: 'x' }))!;
+    r.records.get('c1')!.push({ at: 3, turnId: t1, kind: 'proposal_accepting', pid: p1.pid, actor: 'maria', edits: null, resolution: p1, identity: { artifactRef: 'mikes/coverage-deck', runId: proposalRunId(p1.pid) } });
+    const t2 = chatWith(r, 'c1');
+    await propose(r, 'c1', t2, { entry: 'presentation', title: 'newer' });
+    doc('mikes', 'coverage-deck', 3);
+    const before = r.records.get('c1')!.length;
+    expect(await r.svc.decide('c1', p1.pid, { decision: 'go' }, ME, 'i1')).toMatchObject({ code: 409, body: { code: 'proposal_superseded' } });
+    expect(r.records.get('c1')!.length).toBe(before);
+    expect(r.launcher.launched).toHaveLength(0);
+  });
+
+  it('the digest turns create or demo on only with a catalog entry to name', () => {
+    const r = rig();
+    const d = r.svc.digest();
+    expect(d.create).toBe(true);
+    expect(d.entries.some((e) => e.kind === 'document')).toBe(true);
+  });
+});
+
 describe('the fold (r2)', () => {
   it('an older proposal re-resolved after a newer one exists is superseded, never re-opened over it', () => {
     const p = (pid: string): ArtifactProposal => ({ pid, chatId: 'c1', turnId: pid.split(':')[1]!, kind: 'refine', seat: 'claude', what: { entry: null, title: 'D', label: 'Change · D', outcome: null }, brief: null, reason: null, sources: [], repos: [], helpers: null, time: null, stops: null, filedIn: { projectId: null, label: 'x' }, blocked: null });

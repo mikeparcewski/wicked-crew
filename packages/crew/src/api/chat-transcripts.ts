@@ -88,18 +88,23 @@ function usageOf(value: unknown): ChatUsage | null {
  * JSON is left as it is (the resolver refuses it anyway).
  */
 function rewriteBlockPaths(body: string, roots: ReadonlyArray<ChatRepoRoot>): string {
-  let parsed: unknown;
+  // Bounded: a block is a few levels deep (`theme.patch`), so anything deeper or larger is not one — it is left as it
+  // is (the resolver refuses it), and nothing a seat writes can make this fold throw.
+  if (body.length > 64 * 1024) return body;
   try {
-    parsed = JSON.parse(body);
+    let nodes = 0;
+    const walk = (v: unknown, depth: number): unknown => {
+      nodes += 1;
+      if (depth > 6 || nodes > 2000) throw new Error('not a block');
+      return typeof v === 'string' ? rewriteHostPaths(v, roots)
+        : Array.isArray(v) ? v.map((x) => walk(x, depth + 1))
+          : v !== null && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x, depth + 1)]))
+            : v;
+    };
+    return JSON.stringify(walk(JSON.parse(body), 0));
   } catch {
     return body;
   }
-  const walk = (v: unknown): unknown =>
-    typeof v === 'string' ? rewriteHostPaths(v, roots)
-      : Array.isArray(v) ? v.map(walk)
-        : v !== null && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)]))
-          : v;
-  return JSON.stringify(walk(parsed));
 }
 
 export class ChatTranscriptStore {
