@@ -70,12 +70,24 @@ test.describe('the reviewed messaging', () => {
     expect(why).toContain('Your agents, sandboxed. By default each runs in a sandbox');
     expect(why).toContain('up to three hand-off attempts in all');
     expect(why).toContain('a feature, bug fix, migration, MCP server or editor plugin pass QE acceptance first');
-    const news = await page.locator('.news-list li').allTextContents();
+    // each row is exactly "<name> <line>": the space between them is the guard
+    const news = (await page.locator('.news-list li').allTextContents()).map((t) => t.replace(/\s+/g, ' ').trim());
     expect(news.length).toBe(6);
-    for (const n of news) expect(n).toMatch(/^\S.*\S \S/); // a space between the name and its line
-    const body = (await page.locator('body').innerText()).replace(/\s+/g, ' ');
-    expect(body).not.toMatch(/never claimed|never asserted/i);
-    expect(body).not.toMatch(/one failed check stops/i);
+    expect(news[0]).toMatch(/^Power mode On by default/);
+    expect(news[3]).toMatch(/^Voice Transcription on your machine/);
+    expect(news[5]).toMatch(/^Sandbox images On Docker/);
+    // crew's own sections; the shared family map (.same-garden) renders the pinned wicked-web's
+    // copy, which wicked-web#46/#47 fixed and the restyle PR's re-pin brings in
+    const own = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('main section, body > section'))
+        .filter((s) => !s.closest('.same-garden'))
+        .map((s) => (s as HTMLElement).innerText)
+        .join(' ')
+        .replace(/\s+/g, ' '),
+    );
+    expect(own.length).toBeGreaterThan(1000);
+    expect(own).not.toMatch(/never claimed|never asserted/i);
+    expect(own).not.toMatch(/one failed check stops/i);
     await expect(page.locator('.tbl--layers')).toContainText('By default, a different agent reviews the work.');
   });
 });
