@@ -62,6 +62,8 @@ export class RunTimingIndex {
   private readonly runToChatId = new Map<string, string>();
   /** crew#854: runs an ask launched (the `run.launched` entry's `askPath`). */
   private readonly askPathRuns = new Set<string>();
+  /** wf-catalog: run → the NON-system principal its `run.launched` entry names (`Actor.id`), for per-operator usage. */
+  private readonly runToPrincipal = new Map<string, string>();
   /** crew#1157: runs an ANALYSIS chat launched → its workflow (the entry's `chatWorkflow`). */
   private readonly runToChatWorkflow = new Map<string, string>();
   /** crew#552: chained run → the onboarding run it was launched from (`detail.chainedFrom`). */
@@ -79,12 +81,21 @@ export class RunTimingIndex {
    * `GroupIndex`, so boot stays at the same full-file trail scans, not one more.
    */
   hydrateFromLaunchEntries(entries: AuditEntry[]): void {
+    const principalSeen = new Set<string>();
     for (const entry of entries) {
       if (typeof entry.runId === 'string' && typeof entry.ts === 'number' && entry.ts > 0) {
         this.runToCreatedAt.set(entry.runId, toSeconds(entry.ts));
       }
       const runId = entry.runId;
       if (typeof runId !== 'string') continue;
+      // The trail reads newest first: a reused run id keeps its NEWEST launch's principal (codex r2), and a
+      // system relaunch means "nobody's use".
+      if (!principalSeen.has(runId)) {
+        principalSeen.add(runId);
+        const launcher = entry.actor as { id?: unknown; kind?: unknown } | undefined;
+        if (typeof launcher?.id === 'string' && launcher.kind !== 'system') this.setPrincipal(runId, launcher.id);
+        else this.runToPrincipal.delete(runId);
+      }
       const detail = entry.detail as Record<string, unknown> | undefined;
       const ch = detail?.['channel'];
       if (ch === 'studio' || ch === 'cli' || ch === 'api') this.runToChannel.set(runId, ch);
@@ -153,6 +164,22 @@ export class RunTimingIndex {
   /** Record the launch actor string for a run (crew#632). */
   setLaunchActor(runId: string, actor: string): void {
     this.runToLaunchActor.set(runId, actor);
+  }
+
+  /** wf-catalog: record the principal that launched a run (the live half of the hydrate above). Callers pass
+   *  only a NON-system launcher: a schedule's or the daemon's launch is nobody's use, whatever its id. */
+  setPrincipal(runId: string, actorId: string): void {
+    if (actorId.length > 0) this.runToPrincipal.set(runId, actorId);
+  }
+
+  /** wf-catalog: a system relaunch of a reused run id is nobody's use. */
+  clearPrincipal(runId: string): void {
+    this.runToPrincipal.delete(runId);
+  }
+
+  /** The principal (`Actor.id`) the run's `run.launched` entry names, or `undefined` when there is none. */
+  principalFor(runId: string): string | undefined {
+    return this.runToPrincipal.get(runId);
   }
 
   /** The launch actor string, or `undefined` (ABSENT when the launch did not name one). */
@@ -346,6 +373,8 @@ export function recordRunLaunched(
 ): number {
   const ts = audit.record('run.launched', actor, { runId, detail });
   if (ts > 0) runTimingIndex?.set(runId, ts);
+  if (actor.kind !== 'system') runTimingIndex?.setPrincipal(runId, actor.id);
+  else runTimingIndex?.clearPrincipal(runId);
   // crew#632: also stamp channel/actor into the index for live serving (same posture as created_at).
   const ch = detail['channel'];
   if ((ch === 'studio' || ch === 'cli' || ch === 'api') && runTimingIndex !== undefined) {

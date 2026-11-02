@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.167.0",
+  "apiTypesVersion": "0.168.0",
   "endpoints": [
     {
       "method": "GET",
@@ -2716,6 +2716,16 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workflows/catalog",
+      "requestType": null,
+      "responseType": "WorkflowCatalogResponse",
+      "statusCodes": [
+        200,
+        400
+      ]
     },
     {
       "method": "GET",

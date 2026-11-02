@@ -54,6 +54,10 @@ export const SYSTEM_WORKFLOWS: ReadonlySet<string> = new Set([
   'interactive-chat',
   'interactive-draft',
   'interactive-edit',
+  // wf-catalog (codex r1): the document review and theme-learning seams (`interactive/review-events.ts`,
+  // `theme-events.ts`) run on a handoff their subscriber writes; a hand launch has none to run on.
+  'interactive-review',
+  'interactive-theme',
 ]);
 
 /** Whether a preset/workflow name is a system one ({@link SYSTEM_WORKFLOWS}). */

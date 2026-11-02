@@ -35,7 +35,7 @@ import type {
   SystemInfraRow,
 } from '../core/types.js';
 import { resolveCursorUnit } from '../core/cursor.js';
-import type { InteractionRequest } from '../core/types.js';
+import type { InteractionRequest, Preset, WorkflowCatalogResponse } from '../core/types.js';
 
 /** Create `dir` (private) when missing and answer it — a read root must exist when a run launches. */
 function ensureDir(dir: string): string {
@@ -52,6 +52,7 @@ import { detectRefusal, isOpenGate, offeredChoices, replayOpenGate, type GateCac
 import type { ElicitationCache } from './elicitation-cache.js';
 import { acceptanceRequirementOf, buildAcceptanceView } from '../qe/acceptance.js';
 import { runIdentityOf, wireIdentity } from '../core/run-identity.js';
+import { buildWorkflowCatalog, type CatalogRun } from '../workflow-catalog/build.js';
 import { buildEvidenceBundle, coreUnitId, evidenceFilename } from './evidence.js';
 import { attemptUnavailableReason, capturedAttempts, outputUnavailableReason, resolveUnit, storedAttempt, unitKeysFor } from './unit-output.js';
 import type {
@@ -1992,6 +1993,8 @@ export function registerRoutes(
       // (api-types 0.156.0, DES-VOICE) Voice mode's routes are served: local speech to text, the model with
       // consent, and the per-person dashboard. Whether transcription can run now is `GET /voice/status`.
       voice: app.hasRoute({ method: 'POST', url: `${V}/voice/transcribe` }),
+      // (api-types 0.168.0, wf-catalog) The categorised workflow catalog with the operator's usage.
+      workflowCatalog: app.hasRoute({ method: 'GET', url: `${V}/workflows/catalog` }),
     };
     // wicked-core#411 / crew#497: the state-home blocker rides the health probe as a WARNING. The
     // daemon still SERVES (status stays ok — studio must load and show the blocker) but refuses to
@@ -6879,6 +6882,49 @@ export function registerRoutes(
     const { workflows, unavailable } = await adapter.workflowCatalog();
     return { workflows, unavailable };
   });
+
+  // wf-catalog (api-types 0.168.0): the workflows as a categorised catalog with the requesting
+  // operator's usage. Metadata is the ONE data module (`workflow-catalog/catalog-data.ts`); what a
+  // workflow is and does stays on its def; usage is derived from the runs and the launch trail.
+  app.get(
+    `${V}/workflows/catalog`,
+    { config: { manifest: { responseType: 'WorkflowCatalogResponse', statusCodes: [200, 400] } } },
+    async (req, reply) => {
+    const raw = (req.query as { projectId?: unknown } | undefined)?.projectId;
+    if (raw !== undefined && (typeof raw !== 'string' || raw.length > 200)) {
+      return reply.code(400).send({ error: '`projectId` must be a string' });
+    }
+    const projectId = typeof raw === 'string' && raw !== '' ? raw : null;
+    const { workflows } = await adapter.workflowCatalog();
+    let presets: Preset[] = [];
+    try {
+      presets = await adapter.listPresets(projectId ?? undefined);
+    } catch (err) {
+      // An unknown project: the global presets (built-in attribution and saved ones still hold, agy r1).
+      // An engine without presets lists the served defs only. Either way, said once in the log.
+      app.log.warn(`workflows/catalog: the presets could not be read${projectId !== null ? ` for project ${projectId}` : ''} (${message(err)}); listing ${projectId !== null ? 'the global ones' : 'the served workflows only'}`);
+      if (projectId !== null) presets = await adapter.listPresets().catch(() => []);
+    }
+    const views = await adapter.sessionsDetail();
+    // codex r1: date terminal runs that have no `run.ended` entry from their event log, as GET /runs
+    // does, so the median does not depend on which read came first. Only THIS principal's completed
+    // runs can reach a median, so only they are read (Copilot).
+    const me = actorOf(req).id;
+    await backfillEndedAt(views.filter((v) => v.session.status === 'completed' && runTimingIndex.principalFor(v.session.id) === me));
+    const runs: CatalogRun[] = views.map((view) => ({
+      id: view.session.id,
+      workflow: runIdentityOf(view).name,
+      projectId: projects.index.projectOf(view.session.id) ?? null,
+      status: view.session.status,
+      createdAt: runTimingIndex.createdAtFor(view.session.id),
+      endedAt: runTimingIndex.endedAtFor(view.session.id),
+      retryOf: retryIndex.retryOfFor(view.session.id),
+      principal: runTimingIndex.principalFor(view.session.id),
+    }));
+    const body: WorkflowCatalogResponse = buildWorkflowCatalog({ defs: workflows, presets, runs, actorId: me, projectId });
+    return body;
+    },
+  );
 
   app.get(`${V}/workflows/:id`, async (req, reply) => {
     const { id } = req.params as { id: string };
