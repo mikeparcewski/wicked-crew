@@ -1699,7 +1699,10 @@ export async function createServer(
     editSub = await startInteractiveEditSubscriber(adapter, {
       ...busOf(o.dbPath),
       // A3: a document a chat proposal is still drafting or landing takes no structural edit.
-      isDocBusy: (documentId) => docBindings.all().some((b) => b.doc === documentId && b.attempts.some((a) => a.outcome === undefined && (a.launchingAt !== undefined || a.launchedAt !== undefined || a.emittedAt !== undefined))),
+      isDocBusy: (documentId, projectId) => {
+        const b = docBindings.get(`${projectId ?? '_unfiled'}/${documentId}`);
+        return b !== null && b.attempts.some((a) => a.outcome === undefined && (a.launchingAt !== undefined || a.launchedAt !== undefined || a.emittedAt !== undefined));
+      },
       ...(o.pollIntervalMs !== undefined ? { pollIntervalMs: o.pollIntervalMs } : {}),
       ...(o.heartbeatMs !== undefined ? { heartbeatMs: o.heartbeatMs } : {}),
       ...(o.ledgerPath !== undefined ? { ledgerPath: o.ledgerPath } : {}),

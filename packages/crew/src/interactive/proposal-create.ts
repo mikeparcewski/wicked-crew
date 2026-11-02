@@ -99,7 +99,10 @@ export class CreateLauncher implements ProposalDispatcher {
     //    instance and the project the chat itself was in (which says whether the packet is re-checked).
     const held = this.deps.bindings.get(ref.ref);
     const repos = held?.repos ?? (await this.boundRepos(res));
-    const graphDb = held !== null ? held.graphDb : await this.deps.graphFor(projectId, d.chatId);
+    // The stored graph binding. A document moved out of the chat's own scope gets none: a project graph would reach
+    // repositories the move cut (§4.2), and only the accepted ones are snapshotted.
+    const scopeProject = scopeProjectOf(this.deps.records(d.chatId), res);
+    const graphDb = held !== null ? held.graphDb : scopeProject !== projectId ? null : await this.deps.graphFor(projectId, d.chatId);
     const base = head?.head ?? 0;
     const binding = this.deps.bindings.begin(
       {
@@ -110,7 +113,7 @@ export class CreateLauncher implements ProposalDispatcher {
         owner: d.actor.id,
         chatId: d.chatId,
         chatInstance: this.deps.instanceOf(d.chatId),
-        scopeProject: scopeProjectOf(this.deps.records(d.chatId), res),
+        scopeProject,
         proposalId: d.pid,
         cutoffTurnId: res.turnId,
         repos,

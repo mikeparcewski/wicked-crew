@@ -498,7 +498,10 @@ export interface ChatProposalDeps {
    *  project edit keeps no repository). */
   projectRepos?(projectId: string): Promise<Array<{ id: string; name: string }> | null>;
   /** This chat's attachments. */
-  attachments(chatId: string): ReadonlyArray<{ id: string; name: string }>;
+  attachments(chatId: string): ReadonlyArray<{ id: string; name: string; bytes?: number; mediaType?: string }>;
+  /** A3: the registry ids of the repositories registered now (a selected one unregistered since refuses Go). Absent =
+   *  not checked. */
+  repoIds?(): Promise<ReadonlySet<string>>;
   /** Steps of a workflow as a launch in this project resolves it, when known. */
   workflowSteps(name: string, projectId: string | null): Promise<number | null>;
   /** A completed run's cost when every agent step reported one, else `null`. */
@@ -983,8 +986,9 @@ export class ChatProposals {
         continue;
       }
       if (token === 'page') {
-        if (ctx.turnHas && ctx.binding?.page === true) push({ token, label: 'the page you were on', status: 'ok' });
-        else strike(token, 'the page you were on', 'no page was shared with this message');
+        // A3: studio's page summary rides with its message and is not kept after it, so a document cannot be made from
+        // it later: struck with the reason, never promised on the card and then dropped at launch.
+        strike(token, 'the page you were on', ctx.turnHas && ctx.binding?.page === true ? "studio's page summary is not kept after the message" : 'no page was shared with this message');
         continue;
       }
       const colon = token.indexOf(':');
@@ -1005,6 +1009,8 @@ export class ChatProposals {
       if (kind === 'attachment') {
         const a = this.deps.attachments(ctx.chatId).find((x) => x.id === id);
         if (a === undefined) strike(`attachment:${id}`, `attachment ${id.slice(0, 12)}`, 'not a file attached to this chat');
+        // A3: the packet's per-file cap (512 KB): a file over it could never reach the draft.
+        else if (typeof a.bytes === 'number' && a.bytes > 512 * 1024) strike(`attachment:${a.id}`, a.name, 'too large for a document\'s sources (over 512 KB)');
         else push({ token: `attachment:${a.id}`, label: a.name, status: 'ok' });
         continue;
       }
@@ -1289,6 +1295,12 @@ export class ChatProposals {
    */
   private async firstGone(chatId: string, p: ArtifactProposal): Promise<string | null> {
     let runs: SessionView[] | null = null;
+    // A3: a repository the card names must still be registered (never silently dropped from the launch).
+    if ((p.repoRefs ?? []).length > 0 && this.deps.repoIds !== undefined) {
+      const have = await this.deps.repoIds();
+      const lost = (p.repoRefs ?? []).findIndex((id) => !have.has(id));
+      if (lost !== -1) return `${p.repos[lost] ?? p.repoRefs![lost]} is no longer registered on this daemon; ask again in the chat`;
+    }
     for (const s of p.sources) {
       if (s.status !== 'ok') continue;
       if (s.token.startsWith('run:')) {
@@ -1450,7 +1462,9 @@ export class ChatProposals {
         personNamed: true,
       });
       next = { ...next, sources: resolved };
-      if (recheck) next = await this.recheckProject(next, edits.repos !== undefined);
+      // Re-checked whenever the document is filed outside the chat's own scope (a moved document, or a retry of one).
+      const chatScope = this.deps.chat(chatId)?.projectId ?? this.deps.projectOf(chatId);
+      if (recheck || next.filedIn.projectId !== chatScope) next = await this.recheckProject(next, edits.repos !== undefined);
       // A source the person ADDED (not one the proposal already held) that cannot be used is said back, never silently
       // dropped from a launch; one it already held is struck with the reason, as the project change promises.
       const had = new Set(p.sources.map((s) => s.token));

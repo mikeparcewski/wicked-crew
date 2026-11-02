@@ -36,7 +36,8 @@
 
 import { judgeFallbackLabel } from '../core/deliver-text.js';
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
-import { existsSync, lstatSync, mkdirSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createBeneath, listBeneath, mkdirBeneath, readBeneath, statBeneath } from '../api/beneath.js';
 import { basename, dirname, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -607,21 +608,37 @@ export function writePacketCopy(runDir: string, attempt: string, packet: SourceP
 
 /** Remove one entry of the document's run folder (an attempt folder), never through a link: a link a writer put there
  *  is removed itself, never followed. Best effort: a leftover is a disk wart, never a correctness one. */
-function removeEntry(runDir: string, name: string): void {
+function removeEntry(runDir: string, name: string): boolean {
+  let root: string;
   try {
-    const root = realpathSync(runDir);
-    const p = join(root, name);
+    root = realpathSync(runDir);
+  } catch {
+    return true; // no run folder: nothing of the attempt is there
+  }
+  const p = join(root, name);
+  try {
     const st = lstatSync(p);
     rmSync(p, st.isSymbolicLink() || !st.isDirectory() ? { force: true } : { recursive: true, force: true });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+  }
+  try {
+    lstatSync(p);
+    return false; // still there
   } catch {
-    /* absent, or not removable: nothing to follow */
+    return true;
   }
 }
 
-/** Remove the named earlier attempts' folders under a document's run directory (A3): only attempts of THIS document's
- *  binding, so a same-named document elsewhere never loses its own. */
-export function removeAttemptDirs(runDir: string, runIds: readonly string[]): void {
-  for (const id of runIds) if (/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)) removeEntry(runDir, attemptDirName(id));
+/** Remove the named attempts' folders under a document's run directory (A3): only attempts of THIS document's binding,
+ *  so a same-named document elsewhere never loses its own. Returns the folders that could NOT be removed. */
+export function removeAttemptDirs(runDir: string, runIds: readonly string[]): string[] {
+  const left: string[] = [];
+  for (const id of runIds) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)) continue;
+    if (!removeEntry(runDir, attemptDirName(id))) left.push(attemptDirName(id));
+  }
+  return left;
 }
 
 /** Drop an attempt's packet copy (crew keeps the canonical one); its deliverable stays for interactive to read. Best
@@ -761,7 +778,8 @@ export interface InteractiveDraftSubscription {
    *  engine). Resolves once the engine accepted the launch; throws when it did not (nothing launched). */
   launchBound(spec: BoundDraft): Promise<void>;
   /** A3: remove earlier attempts' folders of a bound document BEFORE a new attempt reads its base, so an announce of an
-   *  earlier attempt still on the bus can no longer land (its file is gone). */
+   *  earlier attempt still on the bus can no longer land (its file is gone). Throws when one could not be removed: the new
+   *  attempt does not start. */
   fenceBound(documentId: string, runIds: readonly string[]): void;
 }
 
@@ -798,6 +816,8 @@ interface InFlight {
    *  folder (the packet copy, checked against crew's hashes at landing), its records folder (a claims source for the
    *  floor) and the head it started from (the announce's `expect_head`). */
   bound?: { ref: string; runDir: string; attempt: string; attemptDir: string; files: Array<{ name: string; sha256: string; bytes: number }>; base: number } | undefined;
+  /** The handoff-ledger key this flight was launched under (a bound attempt's own; else the document's draft key). */
+  ledgerKey?: string | undefined;
 }
 
 /** The seam's durable state (handoff ledger + working dirs) follows the daemon's state home —
@@ -1139,7 +1159,7 @@ export async function startInteractiveDraftSubscriber(
     if (event.type === 'sessionFailed' || event.type === 'runCancelled') {
       endFlight(runId);
       removeSnapshots(flight); // the failure path cleans its snapshots too (CREW-UX-8 v4)
-      ledger.recordFailure(draftHandoffKey(flight.documentId, flight.projectId));
+      ledger.recordFailure(flight.ledgerKey ?? draftHandoffKey(flight.documentId, flight.projectId));
       const why =
         flight.failureDetail !== undefined ? ` Reason: ${oneLine(flight.failureDetail, 600)}` : '';
       emitStatus({
@@ -1171,7 +1191,7 @@ export async function startInteractiveDraftSubscriber(
     if (!ok) {
       // The run is terminal — its grounding snapshots are done serving reads.
       removeSnapshots(flight);
-      ledger.recordFailure(draftHandoffKey(documentId, projectId));
+      ledger.recordFailure(flight.ledgerKey ?? draftHandoffKey(documentId, projectId));
       emitStatus({
         ...docScope(documentId, projectId),
         state: 'error',
@@ -1188,7 +1208,7 @@ export async function startInteractiveDraftSubscriber(
       const changed = packetChanged(flight.bound.runDir, flight.bound.attempt, flight.bound.files);
       if (changed !== null) {
         removeSnapshots(flight);
-        ledger.recordFailure(draftHandoffKey(documentId, projectId));
+        ledger.recordFailure(flight.ledgerKey ?? draftHandoffKey(documentId, projectId));
         emitStatus({
           ...docScope(documentId, projectId),
           state: 'error',
@@ -1197,6 +1217,18 @@ export async function startInteractiveDraftSubscriber(
         removePacketCopy(flight.bound.runDir, flight.bound.attempt);
         reportBound(flight, runId, { kind: 'failed', reason: `the source packet changed during the run (${changed})` });
         return;
+      }
+    }
+    let floorRecords: string | null = null;
+    if (flight.bound !== undefined && opts.bindings !== undefined) {
+      try {
+        floorRecords = mkdtempSync(join(tmpdir(), 'crew-floor-records-'));
+        for (const f of flight.bound.files) {
+          if (packetDirOf(f.name) !== 'records') continue;
+          writeFileSync(join(floorRecords, f.name), opts.bindings.packetBytes(flight.bound.ref, f.name), { mode: 0o600, flag: 'wx' });
+        }
+      } catch (err) {
+        log(`[interactive-draft] run ${runId}: crew's copy of the records for the floor failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
     // THE DRAFT FLOOR (crew#621 / crew#504): the document's own verdict, re-derived by crew from
@@ -1208,17 +1240,19 @@ export async function startInteractiveDraftSubscriber(
     const floorVerdict = await runDraftFloor(
       outPath,
       flight.floor?.budget ?? { pages: null, exact: false, source: 'unknown' },
-      // A3: the packet's records/ is a claims source too (the run briefs, documents and attachments a figure may cite).
-      [...flight.snapshotDirs, ...(flight.bound !== undefined ? [join(flight.bound.attemptDir, 'records')] : [])],
+      // A3: the packet's records are a claims source too (the run briefs, documents and attachments a figure may cite),
+      // read from crew's OWN copy of exactly the verified files, never the writable inbox.
+      [...flight.snapshotDirs, ...(floorRecords !== null ? [floorRecords] : [])],
       { ...(flight.floor !== undefined ? { style: flight.floor.style } : {}) },
       opts.draftFloorIo ?? {},
     );
     removeSnapshots(flight);
+    if (floorRecords !== null) rmSync(floorRecords, { recursive: true, force: true });
     // The packet served its last read: crew keeps the canonical copy, the inbox keeps only the deliverable.
     if (flight.bound !== undefined) removePacketCopy(flight.bound.runDir, flight.bound.attempt);
     log(`[interactive-draft] run ${runId} draft floor: ${floorVerdict.verdict} — ${floorVerdict.summary}`);
     if (floorVerdict.verdict === 'fail') {
-      ledger.recordFailure(draftHandoffKey(documentId, projectId));
+      ledger.recordFailure(flight.ledgerKey ?? draftHandoffKey(documentId, projectId));
       emitStatus({
         ...docScope(documentId, projectId),
         state: 'error',
@@ -1254,7 +1288,7 @@ export async function startInteractiveDraftSubscriber(
       // The bus refused the announce: the draft exists on disk but never reached
       // the service. Fail HONEST — leaving the ledger row launched-but-never-closed would
       // silently eat every replay of this doc (the launch gate is `ledger.has`).
-      ledger.recordFailure(draftHandoffKey(documentId, projectId));
+      ledger.recordFailure(flight.ledgerKey ?? draftHandoffKey(documentId, projectId));
       emitStatus({
         ...docScope(documentId, projectId),
         state: 'error',
@@ -1266,7 +1300,7 @@ export async function startInteractiveDraftSubscriber(
       log(`[interactive-draft] draft.completed emit FAILED for doc ${documentId} (run ${runId}) — recorded as failure`);
       return;
     }
-    ledger.recordEmitted(draftHandoffKey(documentId, projectId));
+    ledger.recordEmitted(flight.ledgerKey ?? draftHandoffKey(documentId, projectId));
     emitStatus({
       ...docScope(documentId, projectId),
       state: 'complete',
@@ -1347,6 +1381,7 @@ export async function startInteractiveDraftSubscriber(
       snapshotDirs: [],
       narration: 'Crew run launched — working on your draft…',
       floor: { budget: pageBudgetFor(doc.brief, doc.style), style: doc.style },
+      ledgerKey: key,
       ...(bound !== undefined
         ? { bound: { ref: bound.artifactRef, runDir, attempt: attemptDirName(runId), attemptDir, files: bound.packet.files.map((f) => ({ name: f.name, sha256: f.sha256, bytes: f.bytes.length })), base: bound.base } }
         : {}),
@@ -1541,8 +1576,10 @@ export async function startInteractiveDraftSubscriber(
       // announce of it still on the bus can no longer land: its file is gone), then this attempt gets crew's copy of its
       // packet, through no link (§5.3).
       try {
-        // (CreateLauncher fenced the earlier attempts before it read the base; this repeats it, idempotently.)
-        removeAttemptDirs(runDir, (opts.bindings?.get(bound.artifactRef)?.attempts ?? []).map((a) => a.runId).filter((id) => id !== runId));
+        // (CreateLauncher fenced the earlier attempts before it read the base; this repeats it, idempotently, and clears
+        // what an earlier try of THIS attempt left if the engine refused it: Go again starts from a fresh folder.)
+        const left = removeAttemptDirs(runDir, (opts.bindings?.get(bound.artifactRef)?.attempts ?? []).map((a) => a.runId));
+        if (left.length > 0) throw new Error(`an earlier attempt's folder could not be removed (${left.join(', ')})`);
         writePacketCopy(runDir, attemptDirName(runId), bound.packet);
       } catch (err) {
         endFlight(runId);
@@ -1786,7 +1823,10 @@ export async function startInteractiveDraftSubscriber(
         ...(opts.bindings?.all() ?? []).filter((b) => b.attempts.some((a) => a.outcome === undefined && (a.launchingAt !== undefined || a.launchedAt !== undefined || a.emittedAt !== undefined))).map((b) => b.doc),
       ]),
     ],
-    fenceBound: (documentId: string, runIds: readonly string[]) => removeAttemptDirs(join(draftDir, documentId), runIds),
+    fenceBound: (documentId: string, runIds: readonly string[]) => {
+      const left = removeAttemptDirs(join(draftDir, documentId), runIds);
+      if (left.length > 0) throw new Error(`an earlier attempt of this document could not be fenced (${left.join(', ')} is still there)`);
+    },
     launchBound: async (spec: BoundDraft) => {
       if (closed) throw new Error('the draft seam is stopping');
       for (const f of inFlight.values()) {

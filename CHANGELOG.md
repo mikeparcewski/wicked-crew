@@ -26,7 +26,8 @@ mentioned only where a daemon release depends on them.
     labelled "may be wrong", each with the run briefs its turn was given, recovered by their recorded hash when the
     chat still has them, else crew's current brief, said so), named answers and a per-run manifest of what was used
     and what was struck; `records/` holds what a figure may come from (run briefs named by content, source documents,
-    attachments) and is a claims source for the document floor, so a figure cites `records/<file>:<line>`. A source
+    attachments) and is a claims source for the document floor (from crew's own copy of the verified files), so a figure
+    cites its record by name and line (`data-source="<file>:<line>"`). A source
     joins whole or not at all, within 1 MB with room kept for the brief and the manifest. Names are immutable and kept
     in crew's state; each attempt gets a fresh copy (an earlier attempt's folder is removed first). The task gives the
     reviewing step the sha256 of every file; crew checks the copy again, bounded by each file's size, before anything

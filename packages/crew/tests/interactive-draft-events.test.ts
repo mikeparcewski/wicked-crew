@@ -2229,6 +2229,29 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     await expect(sub!.launchBound({ ...spec, runId: 'run-other' })).rejects.toThrow(/already running/);
   });
 
+  it('A3: an attempt the engine refused can be tried again with the same run id (Go again): a fresh folder, one launch', async () => {
+    const { bindings, spec, repoRoot } = await boundWorld('retry-note');
+    const engine = fakeAdapter({ repos: [{ id: 'repo-crew', root_path: repoRoot }] });
+    const adapter = engine.asAdapter();
+    const inner = adapter.launchRun.bind(adapter);
+    let refuse = 1;
+    (adapter as unknown as { launchRun: unknown }).launchRun = async (input: LaunchRunInput) => {
+      if (refuse > 0) {
+        refuse -= 1;
+        throw new Error('the engine is restarting');
+      }
+      return inner(input);
+    };
+    const sub = await startInteractiveDraftSubscriber(adapter, {
+      dbPath: busDb, pollIntervalMs: 25, heartbeatMs: 60_000, ledgerPath: join(dir, 'ledger-retry.json'), draftDir: join(dir, 'drafts'), clisJson: SEATS, bindings, log: () => {},
+    });
+    subs.push(sub!);
+    await expect(sub!.launchBound(spec)).rejects.toThrow(/restarting/);
+    expect(bindings.get('_unfiled/retry-note')?.attempts[0]?.launchingAt).toBeUndefined();
+    await sub!.launchBound(spec);
+    expect(engine.launches.map((l) => l.sessionId)).toEqual(['run-retry-note']);
+  });
+
   it("A3: a bound document's doc.created is handed to its proposal's launcher, never answered with a random-id launch", async () => {
     const bus = await import('wicked-bus');
     const { bindings } = await boundWorld('trigger-note');
@@ -2281,6 +2304,8 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     bus.emit(db, bus.loadConfig({ db_path: busDb }), { event_type: VERSION_CREATED, domain: 'wicked-interactive', subdomain: 'versions', payload: { document_id: 'land-note', version: 1, parent: 0, kind: 'generated', ts: new Date().toISOString() }, producer_id: 'wi-service' });
     await waitFor(() => outcomes.length === 1, 8000);
     expect(outcomes[0]).toEqual(['_unfiled/land-note', 'run-land-note', 'landed v1']);
+    // The bound row of the handoff ledger is the one that says it was announced.
+    expect(a.sub.ledger.get('land-note:attempt:_unfiled:run-land-note')?.emittedAt).toBeDefined();
     // 2. A stopped run: released with the reason.
     const b = await make('stop-note');
     b.engine.fire({ type: 'runCancelled', session: 'run-stop-note' });

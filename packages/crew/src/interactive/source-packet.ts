@@ -162,6 +162,8 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
   const sourceBudget = PACKET_MAX_BYTES - PACKET_BRIEF_RESERVE - MANIFEST_BASE;
   const storage = input.storageChatId ?? chatId;
   let total = 0;
+  /** The files' own bytes (`total` also books each manifest entry's estimated cost). */
+  let fileBytes = 0;
   let views: SessionView[] | null = null;
   const allRuns = async (): Promise<SessionView[]> => (views ??= await deps.runs());
   /** Current briefs, by run id (built once per packet). */
@@ -190,7 +192,11 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
       // Each file's manifest entry is booked once per token that lists it (a run brief two answers used counts twice).
       for (const f of this.files.values()) more += manifestEntryCost(f.name) + (out.has(f.name) ? 0 : f.bytes.length);
       if (total + more > sourceBudget) throw new Refused(`the packet would pass ${PACKET_MAX_BYTES / 1024} KB`);
-      for (const f of this.files.values()) if (!out.has(f.name)) out.set(f.name, f);
+      for (const f of this.files.values()) {
+        if (out.has(f.name)) continue;
+        out.set(f.name, f);
+        fileBytes += f.bytes.length;
+      }
       total += more;
     }
   }
@@ -232,7 +238,43 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
     }
     return true;
   };
-  /** The briefs a turn was given, as files, with a line saying which were recovered and which are crew's current ones. */
+  /** A document version as a packet file, read beneath its docs root (the head when `version` is null). */
+  const docFile = async (stage: Stage, refText: string, version: number | null): Promise<PacketFile> => {
+    const ref = parseArtifactRef(refText);
+    if (ref === null || !ARTIFACT_REF.test(ref.ref)) throw new Refused('not a document reference');
+    const docsRoot = await deps.docsRoot(ref.projectId);
+    if (docsRoot === null) throw new Refused('its project is gone');
+    // Every read beneath the docs root's real path, following no link at any component (A1's `beneath`).
+    let root: string;
+    try {
+      root = realpathSync(docsRoot);
+    } catch {
+      throw new Refused('its project is gone');
+    }
+    let isDir = false;
+    try {
+      isDir = statBeneath(root, ref.doc)?.isDirectory() === true;
+    } catch {
+      isDir = false;
+    }
+    if (!isDir) throw new Refused('no such document');
+    let versions: { head?: unknown; versions?: Array<{ version?: unknown; html_file?: unknown }> };
+    try {
+      versions = JSON.parse(readUnder(root, `${ref.doc}/versions.json`, 1024 * 1024).toString('utf8')) as typeof versions;
+    } catch (err) {
+      throw err instanceof Refused ? err : new Refused('its versions.json is not readable');
+    }
+    const head = typeof versions.head === 'number' && Number.isInteger(versions.head) && versions.head >= 0 ? versions.head : null;
+    if (head === null) throw new Refused('it has no readable head');
+    const want = version ?? head;
+    const entry = versions.versions?.find((v) => v.version === want);
+    if (version !== null && entry === undefined && version !== head) throw new Refused(`its version ${version} is not on record`);
+    const file = typeof entry?.html_file === 'string' && /^_v\d{1,6}\.html$/.test(entry.html_file) ? entry.html_file : `_v${want}.html`;
+    // Named by the ref's hash and the document's name: bounded whatever the mount's length, never a label.
+    return stage.add(`doc-${sha256(ref.ref).slice(0, 12)}-${ref.doc}-v${want}.html`, readUnder(root, `${ref.doc}/${file}`, PACKET_FILE_MAX_BYTES));
+  };
+  /** The records a turn was given, as files: its run briefs (recovered by hash, else crew's current ones, said) and the
+   *  version of the document it had open. */
   const givenBriefs = async (stage: Stage, turn: string): Promise<{ names: string[]; line: string | null }> => {
     const names: string[] = [];
     let rebuilt = 0;
@@ -242,9 +284,20 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
       names.push(got.file.name);
       if (!got.recovered) rebuilt += 1;
     }
-    if (names.length === 0) return { names, line: null };
-    const note = rebuilt === 0 ? '' : ` (${rebuilt === names.length ? 'the briefs' : `${rebuilt} of them`} this answer was given are no longer on this daemon: these are crew's current briefs of the same runs, which may differ)`;
-    return { names, line: `Records this answer was given: ${names.map((n) => `\`${n}\``).join(', ')}${note}` };
+    const runCount = names.length;
+    const ctx = records.find((r): r is Extract<ChatTranscriptRecord, { kind: 'context' }> => r.kind === 'context' && r.turnId === turn);
+    let docNote = '';
+    if (ctx?.artifact !== undefined) {
+      try {
+        names.push((await docFile(stage, ctx.artifact.ref, ctx.artifact.viewed)).name);
+      } catch (err) {
+        if (!(err instanceof Refused)) throw err;
+        docNote = ` (the document it had open, ${ctx.artifact.ref} v${ctx.artifact.viewed}, is not in the packet: ${err.message})`;
+      }
+    }
+    if (names.length === 0) return { names, line: docNote === '' ? null : `Records this answer was given:${docNote}` };
+    const note = rebuilt === 0 ? '' : ` (${rebuilt === runCount ? 'the briefs' : `${rebuilt} of them`} this answer was given are no longer on this daemon: these are crew's current briefs of the same runs, which may differ)`;
+    return { names, line: `Records this answer was given: ${names.map((n) => `\`${n}\``).join(', ')}${note}${docNote}` };
   };
 
   for (const src of resolution.sources) {
@@ -332,36 +385,7 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
         if (got === null) throw new Refused('no such run on this daemon');
         names = [got.file.name];
       } else if (token.startsWith('doc:')) {
-        const ref = parseArtifactRef(token.slice(4));
-        if (ref === null || !ARTIFACT_REF.test(ref.ref)) throw new Refused('not a document reference');
-        const docsRoot = await deps.docsRoot(ref.projectId);
-        if (docsRoot === null) throw new Refused('its project is gone');
-        // Every read beneath the docs root's real path, following no link at any component (A1's `beneath`).
-        let root: string;
-        try {
-          root = realpathSync(docsRoot);
-        } catch {
-          throw new Refused('its project is gone');
-        }
-        let isDir = false;
-        try {
-          isDir = statBeneath(root, ref.doc)?.isDirectory() === true;
-        } catch {
-          isDir = false;
-        }
-        if (!isDir) throw new Refused('no such document');
-        let versions: { head?: unknown; versions?: Array<{ version?: unknown; html_file?: unknown }> };
-        try {
-          versions = JSON.parse(readUnder(root, `${ref.doc}/versions.json`, 1024 * 1024).toString('utf8')) as typeof versions;
-        } catch (err) {
-          throw err instanceof Refused ? err : new Refused('its versions.json is not readable');
-        }
-        const head = typeof versions.head === 'number' && Number.isInteger(versions.head) && versions.head >= 0 ? versions.head : null;
-        if (head === null) throw new Refused('it has no readable head');
-        const entry = versions.versions?.find((v) => v.version === head);
-        const file = typeof entry?.html_file === 'string' && /^_v\d{1,6}\.html$/.test(entry.html_file) ? entry.html_file : `_v${head}.html`;
-        // Named by the ref's hash and the document's name: bounded whatever the mount's length, never a label.
-        names = [stage.add(`doc-${sha256(ref.ref).slice(0, 12)}-${ref.doc}-v${head}.html`, readUnder(root, `${ref.doc}/${file}`, PACKET_FILE_MAX_BYTES)).name];
+        names = [(await docFile(stage, token.slice(4), null)).name];
       } else if (token.startsWith('attachment:')) {
         const id = token.slice('attachment:'.length);
         if (!ATTACHMENT_ID.test(id)) throw new Refused('not an attachment id');
@@ -413,7 +437,8 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
   ];
   const manifest = { run: runId, chat: chatId, proposal: pid, files: entries, struck };
   const manifestBytes = Buffer.from(JSON.stringify(manifest, null, 1), 'utf8');
-  if (total + briefFile.bytes.length + manifestBytes.length > PACKET_MAX_BYTES) throw new Error('the packet is over its budget (a manifest estimate was low)');
+  // The estimates booked at admission are upper bounds, so the real packet always fits; checked, never assumed.
+  if (fileBytes + briefFile.bytes.length + manifestBytes.length > PACKET_MAX_BYTES) throw new Error('the packet is over its budget (a manifest estimate was low)');
   const manifestFile: PacketFile = { name: `MANIFEST-${runId}.json`, bytes: manifestBytes, sha256: sha256(manifestBytes) };
   return { files: [...out.values(), briefFile, manifestFile], canonical, tokens, struck, manifest };
 }
@@ -433,7 +458,9 @@ export function packetClause(inboxDir: string, packet: SourcePacket, notesWhere:
     `(${sources.join(', ')}); sources/MANIFEST-${packet.manifest.run}.json says which source each file came from and what was left out. ` +
     `The brief-*.md file is the request's scope and structure only, never a source of figures. Every figure, name and claim in the ` +
     `document comes from a file in records/, or a repository; an agent's answer in conversation-*.md or message-*.md counts only where ` +
-    `a record confirms it. Where the request itself states a figure the records contradict, use the records' figure. Cite each figure ` +
+    `a record confirms it. An attachment that is not text (an image, a PDF) can be read but not cited by line: a figure from one needs ` +
+    `the same figure in a text record or a repository. Where the request itself states a figure the records contradict, use the ` +
+    `records' figure. Cite each figure ` +
     `with data-source="<file>:<line>", the file's name as it is in records/ without the folder (records/ is one of the self-check's ` +
     `--repo folders; sources/ is not, so nothing there can be cited). Leave out any claim nothing in ` +
     `the packet supports, and list it ${notesWhere}. ` +

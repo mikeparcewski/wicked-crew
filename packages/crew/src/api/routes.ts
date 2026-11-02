@@ -4410,7 +4410,8 @@ export function registerRoutes(
     docsRoot: (projectId) => projectDocsRoot(adapter, projectSettings, projectId),
     projectName: async (projectId) => (await adapter.projectGet(projectId).catch(() => null))?.name ?? null,
     projectRepos: async (projectId) => (await projectRepoCandidates(adapter, projectId, (m) => app.log.warn(m))).map((r) => ({ id: r.repoRef, name: r.name })),
-    attachments: (chatId) => chatAttachments.list(chatId).map((a) => ({ id: a.id, name: a.name })),
+    attachments: (chatId) => chatAttachments.list(chatId).map((a) => ({ id: a.id, name: a.name, bytes: a.bytes, mediaType: a.mediaType })),
+    repoIds: async () => new Set((await adapter.listRepos()).map((r) => r.id)),
     workflowSteps: async (name, projectId) => {
       // The preset a launch in this project resolves first (a project row wins over a global one), then the def.
       const presets = await adapter.listPresets(projectId ?? undefined).catch(() => [] as Preset[]);

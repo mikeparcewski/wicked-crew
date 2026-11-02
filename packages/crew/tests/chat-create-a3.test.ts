@@ -865,3 +865,88 @@ describe('xreview r2 folds (A3)', () => {
     expect(await w.svc.liveJobOf('c1')).toBeNull();
   });
 });
+
+describe('xreview r3 folds (A3)', () => {
+  const runs = [run(R1, { status: 'cancelled' }), run(R2, { status: 'cancelled' }), run(R3)];
+
+  it('near the budget boundary a source is struck whole, never an over-budget packet', async () => {
+    for (const size of [1600, 1650, 1705, 1715, 1725, 1800]) {
+      const ids = Array.from({ length: 480 }, (_, i) => `${String(i).padStart(8, '0')}-0000-4000-8000-000000000000`);
+      const records: ChatTranscriptRecord[] = [];
+      for (let i = 0; i < 60; i += 1) {
+        records.push({ at: i, turnId: `t${i}`, kind: 'user', text: `q${i}`, seats: ['claude'], owner: true });
+        records.push({ at: i, turnId: `t${i}`, kind: 'context', runs: ids.slice(i * 8, i * 8 + 8).map((id) => ({ id, status: 'completed', brief: `context/run-${id}.md`, sha256: 'x' })), refused: [], page: false, named: { runs: [], docs: [] } });
+        records.push({ at: i, turnId: `t${i}`, kind: 'seat', cliKey: 'claude', text: 'a', ok: true, usage: null });
+      }
+      const deps: PacketDeps = { ...packetDeps(ids.map((id) => run(id))), brief: async (v) => { const md = `# ${v.session.id}\n${'y'.repeat(size)}`; return { runId: v.session.id, status: 'completed', title: 't', markdown: md, sha256: sha(md) }; } };
+      const res = proposal('c1:t59', { sources: [{ token: 'chat', label: 'this conversation', status: 'ok' }, { token: `run:${ids[0]}`, label: 'r', status: 'ok' }] });
+      const p = await buildSourcePacket({ runId: 'run-b', chatId: 'c1', pid: 'c1:t59', cutoffTurnId: 't59', resolution: res, records }, deps);
+      expect(p.files.reduce((n, f) => n + f.bytes.length, 0), String(size)).toBeLessThanOrEqual(PACKET_MAX_BYTES);
+    }
+  });
+
+  it("an answer's open document rides with it (the version it was looking at), or the file says why not", async () => {
+    const docs = fresh('docs');
+    mkdirSync(join(docs, 'deck'), { recursive: true });
+    writeFileSync(join(docs, 'deck', 'versions.json'), JSON.stringify({ head: 3, versions: [{ version: 2 }, { version: 3 }] }));
+    writeFileSync(join(docs, 'deck', '_v2.html'), '<p>slide 4: 61% of 5786</p>');
+    writeFileSync(join(docs, 'deck', '_v3.html'), '<p>later</p>');
+    const records = chatRecords('c1');
+    (records[1] as Record<string, unknown>)['artifact'] = { ref: 'mikes/deck', title: 'Deck', kind: 'slides', viewed: 2, head: 3, projectId: 'mikes', copies: [], anchors: [] };
+    const res = proposal('c1:t2', { sources: [{ token: 'message:t1', label: "claude's answer", status: 'ok', projectId: null }] });
+    const p = await buildSourcePacket({ runId: 'run-o', chatId: 'c1', pid: 'c1:t2', cutoffTurnId: 't2', resolution: res, records }, packetDeps(runs, (pr) => (pr === 'mikes' ? docs : null)));
+    const doc = p.files.find((f) => f.name.startsWith('doc-') && f.name.endsWith('-deck-v2.html'));
+    expect(doc?.bytes.toString()).toContain('61% of 5786');
+    expect(p.tokens['message:t1']).toContain(doc!.name);
+  });
+
+  it('a fence that cannot remove an earlier attempt folder refuses the new attempt (never a silent success)', () => {
+    const runDir = fresh('fence');
+    mkdirSync(join(runDir, 'attempt-old', 'sources'), { recursive: true });
+    writeFileSync(join(runDir, 'attempt-old', 'sources', 'f'), 'x');
+    execFileSync('chmod', ['0500', join(runDir, 'attempt-old')]);
+    try {
+      expect(removeAttemptDirs(runDir, ['old'])).toEqual(['attempt-old']);
+    } finally {
+      execFileSync('chmod', ['0700', join(runDir, 'attempt-old')]);
+    }
+    expect(removeAttemptDirs(runDir, ['old', 'never-made'])).toEqual([]);
+  });
+
+  it('a document moved out of the chat’s scope gets no project graph (it would reach the repositories the move cut)', async () => {
+    const w = world();
+    withChat(w, 'c1');
+    ((w.registry as unknown as { dispatchers: Map<string, { deps: { graphFor: unknown } }> }).dispatchers.get('create')!.deps).graphFor = async () => '/graphs/mikes.db';
+    await w.svc.decide('c1', 'c1:t2', { decision: 'go', edits: { project: 'mikes' } }, ME, 'i1');
+    expect(w.launches[0]!.graphDb).toBeNull();
+    const w2 = world();
+    withChat(w2, 'c2');
+    ((w2.registry as unknown as { dispatchers: Map<string, { deps: { graphFor: unknown } }> }).dispatchers.get('create')!.deps).graphFor = async () => '/graphs/chat.db';
+    await w2.svc.decide('c2', 'c2:t2', { decision: 'go' }, ME, 'i1');
+    expect(w2.launches[0]!.graphDb).toBe('/graphs/chat.db');
+  });
+
+  it('Change something refuses what could never reach the draft: an outside message on a retry filed elsewhere, an attachment over the cap, an unregistered repository', async () => {
+    // A retry already filed in Mikes (the chat is in no project): an added message whose records are elsewhere is refused.
+    const w = world();
+    withChat(w, 'c1');
+    const pid = 'c1:retry:old';
+    w.records.get('c1')!.push({ at: 9, turnId: 't2', kind: 'proposal', proposal: { ...proposal(pid, { filedIn: { projectId: 'mikes', label: 'Mikes' }, sources: [{ token: 'chat', label: 'this conversation', status: 'ok' }] }), turnId: null, sourceRunId: 'old', artifactRef: 'mikes/release-note-00000000' } });
+    expect((await w.svc.decide('c1', pid, { decision: 'go', edits: { sources: ['chat', 'message:t1'] } }, ME, 'i1')).code).toBe(400);
+    // An attachment over the packet's per-file cap is struck at resolution (so an added one is refused).
+    const w2 = world();
+    withChat(w2, 'c2');
+    (w2.svc as unknown as { deps: ChatProposalDeps }).deps.attachments = () => [{ id: 'a1', name: 'huge.pdf', bytes: 600 * 1024 }];
+    const r = await w2.svc.decide('c2', 'c2:t2', { decision: 'go', edits: { sources: ['chat', 'attachment:a1'] } }, ME, 'i1');
+    expect(r.code).toBe(400);
+    expect(JSON.stringify(r.body)).toContain('over 512 KB');
+    // A repository the card names that is no longer registered refuses Go, before anything is recorded.
+    const w3 = world();
+    withChat(w3, 'c3');
+    (w3.svc as unknown as { deps: ChatProposalDeps }).deps.repoIds = async () => new Set(['something-else']);
+    const g = await w3.svc.decide('c3', 'c3:t2', { decision: 'go' }, ME, 'i1');
+    expect(g.code).toBe(409);
+    expect(g.body).toMatchObject({ code: 'source_gone' });
+    expect(w3.records.get('c3')!.some((x) => x.kind === 'proposal_accepting')).toBe(false);
+  });
+});
