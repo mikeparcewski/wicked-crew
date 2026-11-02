@@ -246,6 +246,17 @@ jobs:
         working-directory: wicked-crew
         run: npm run -w packages/crew build:with-studio
 
+      # The editor-frame egress probe (packages/crew/tests/editor-webrtc-egress.test.ts) frames a hostile editor plugin
+      # in Chromium and counts the UDP packets that reach a loopback sink: it passes only at zero. Ubuntu leg only (the
+      # browser's behaviour is the same on both); the Test step there sets WICKED_EGRESS_PROBE=required, so a browser
+      # that does not start fails the probe instead of skipping it. Elsewhere the probe skips and says why.
+      - name: Install Chromium for the editor egress probe
+        if: runner.os == 'Linux'
+        working-directory: wicked-crew/packages/crew
+        run: npx playwright install --with-deps --only-shell chromium
+
       - name: Test
         working-directory: wicked-crew
+        env:
+          WICKED_EGRESS_PROBE: ${{ runner.os == 'Linux' && 'required' || '' }}
         run: npm run -w packages/crew test

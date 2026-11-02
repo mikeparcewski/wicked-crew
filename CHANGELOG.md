@@ -35,6 +35,21 @@ mentioned only where a daemon release depends on them.
   and "export as PDF" (chat refinement and sharing are not built); the demo card says captioned, no voice-over (the
   engine renders no audio); Fix a bug and Build a feature promise the checks their plans run, not a failing-first
   test; Apps (coming soon) says what it will be. A test pins the shown copy.
+
+- **An editor plugin's frame can no longer use WebRTC.** A bundle's policy blocks fetch, XHR, WebSocket and beacons
+  (`connect-src 'none'`), but browsers do not apply that to WebRTC, and Chromium ignores `webrtc 'block'`. Crew now puts
+  a short prelude at the start of every inline script of every editor bundle it serves. Before the editor's own code
+  runs, the prelude removes the WebRTC constructors for good (`src/editors/webrtc-guard.ts`). A third-party editor's
+  `script-src` is exactly those scripts' hashes, with no `'unsafe-inline'`. Any document it makes (a child frame,
+  or a `blob:` or `data:` page it opens in its own frame) can therefore run only those scripts, so it runs the prelude
+  first. `javascript:` URLs, inline event handlers and new script text are refused. No editor bundle loads a child
+  frame from a URL (`frame-src 'none'; child-src 'none'`). First-party editors keep `'unsafe-inline'` because their
+  nested frames show agent-authored HTML; studio guards those documents itself. A new probe,
+  `tests/editor-webrtc-egress.test.ts`, frames a hostile plugin in Chromium through crew's own routes and passes only
+  when none of 16 attempts gets a UDP packet out. It runs as required on the ubuntu CI leg, which installs Chromium
+  (`playwright` 1.64.0 is now a dev dependency). The cost is deliberate: a third-party editor cannot use inline event
+  handlers, `javascript:` URLs or scripts it builds from new text.
+
 - **Other web pages can no longer put studio in a frame.** Crew sent no `frame-ancestors` directive and no
   `X-Frame-Options`, so any page open in the same browser could frame studio, including its gate buttons. Every
   response (studio's pages, `/api/v1`, editor bundles, proxied documents, refusals) now sends

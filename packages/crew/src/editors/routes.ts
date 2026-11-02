@@ -15,7 +15,8 @@
  *    the token an "allow" would add. The host fetches it before `host.hello` and enforces it.
  *  - `GET /editors/:id/:version/entry`: the bundle, with exactly the §8.2 headers. The file path comes
  *    from the registry record — never from the URL — and the bytes are re-hashed on every serve: a
- *    changed file answers 409 `bundle_hash_mismatch`, never the changed bundle.
+ *    changed file answers 409 `bundle_hash_mismatch`, never the changed bundle. The pinned bytes are
+ *    served with the WebRTC prelude at the start of each inline script (`webrtc-guard.ts`).
  *
  * Human-only means `actor.kind === 'human'` (the DC `remember()` check). Under `auth=off` every
  * same-uid caller is the local human actor — the honest limit §6.4 states; refusing a worker token
@@ -31,6 +32,7 @@ import type { Actor, ConformanceRule, EditorGrantsResponse, ListEditorsResponse 
 import { bundleHeaders } from './csp.js';
 import { installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from './pack-install.js';
 import { EDITOR_ID, EDITOR_VERSION, EditorRegistry, HOST_BUNDLE_CAP_BYTES, notRealEntry, readCapped, type EditorRecord } from './registry.js';
+import { guardBundle } from './webrtc-guard.js';
 
 const V = '/api/v1';
 
@@ -290,6 +292,8 @@ export function serveBundle(record: EditorRecord, reply: FastifyReply, log?: (ms
     log?.(`[editors] ${record.manifest.id}@${record.manifest.version}: bundle hash changed on disk (pinned ${record.sha256.slice(0, 12)}…, found ${actual.slice(0, 12)}…); refused`);
     return reply.code(409).send({ code: 'bundle_hash_mismatch', error: `the ${record.manifest.id} bundle on disk no longer matches its pinned hash; restart the daemon to re-pin it` });
   }
-  for (const [k, v] of Object.entries(bundleHeaders(record))) reply.header(k, v);
-  return reply.type('text/html; charset=utf-8').send(buf);
+  // The prelude goes into every inline script, and a third-party bundle may run only those (`webrtc-guard.ts`).
+  const guarded = guardBundle(buf);
+  for (const [k, v] of Object.entries(bundleHeaders(record, guarded.scriptHashes))) reply.header(k, v);
+  return reply.type('text/html; charset=utf-8').send(guarded.body);
 }

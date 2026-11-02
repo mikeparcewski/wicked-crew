@@ -5,11 +5,16 @@
  *  - {@link bundleHeaders}: on the bundle response. `sandbox allow-scripts` sandboxes the bundle even
  *    when opened top-level; `default-src 'none'` + `connect-src 'none'` is the line that protects the
  *    local no-auth daemon (no fetch, XHR, WebSocket, EventSource or beacon); `form-action 'none'`,
- *    `base-uri 'none'`, no workers, no manifest. `script-src 'unsafe-inline'` is acceptable only
- *    because the bundle is ONE hashed file and nothing else can load. An editor holding
+ *    `base-uri 'none'`, no workers, no manifest. An editor holding
  *    `network.media` (first-party `wicked-page`: agent-authored pages use web images) gets
  *    `img-src … https:` and `font-src … https:` — a GET-only channel, never `connect-src`.
  *    `navigate-to` / `prefetch-src` are deliberately absent: no browser enforces them (review B1).
+ *    WebRTC is outside `connect-src`, so crew serves every bundle with the `webrtc-guard.ts` prelude at the
+ *    start of each inline script. A THIRD-PARTY bundle's `script-src` is exactly those scripts' hashes, so no
+ *    new realm it can make (a `srcdoc` child, a `blob:`/`data:` document it navigates to) runs a line before
+ *    the prelude, and `javascript:` URLs and inline handlers are refused. A first-party bundle keeps
+ *    `'unsafe-inline'`: its nested frames run agent HTML, and studio guards those documents itself. No bundle
+ *    may load a child frame from a URL (`frame-src 'none'`); `srcdoc` frames are not URL loads.
  *  - {@link shellCsp}: on studio's own shell document. A sandboxed frame may navigate ITSELF, and
  *    once it does the bundle's policy is gone — so the shell limits what any frame may point at:
  *    crew's own editors route, crew's interactive proxy (today's Document mode), `blob:` and
@@ -19,18 +24,30 @@
 import type { EditorRecord } from './registry.js';
 
 export const BUNDLE_CSP_BASE =
-  "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
-  "img-src data: blob:{MEDIA}; media-src blob:; font-src data:{MEDIA}; frame-src blob: data: about:; " +
-  "child-src blob: data: about:; connect-src 'none'; form-action 'none'; base-uri 'none'; " +
+  "sandbox allow-scripts; default-src 'none'; script-src {SCRIPTS}; style-src 'unsafe-inline'; " +
+  "img-src data: blob:{MEDIA}; media-src blob:; font-src data:{MEDIA}; frame-src 'none'; " +
+  "child-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none'; " +
   "worker-src 'none'; manifest-src 'none'";
 
-/** Exactly the §8.2 header set for one editor's bundle. */
-export function bundleHeaders(record: Pick<EditorRecord, 'manifest' | 'firstParty'>): Record<string, string> {
+/** A first-party bundle's `script-src`: its own inline scripts, whatever their text (see the module comment). */
+export const FIRST_PARTY_SCRIPTS = "'unsafe-inline'";
+
+/** A third-party bundle's `script-src`: exactly its prefixed inline scripts (`guardBundle`), or nothing at all. */
+export function thirdPartyScripts(scriptHashes: readonly string[]): string {
+  return scriptHashes.length === 0 ? "'none'" : scriptHashes.map((h) => `'sha256-${h}'`).join(' ');
+}
+
+/**
+ * Exactly the §8.2 header set for one editor's bundle. `scriptHashes` are the served bundle's prefixed inline
+ * scripts (`guardBundle`); a third-party bundle runs those and nothing else, so none given means none run.
+ */
+export function bundleHeaders(record: Pick<EditorRecord, 'manifest' | 'firstParty'>, scriptHashes: readonly string[] = []): Record<string, string> {
   // `network.media` widens only for a first-party editor: a third-party pack editor never gets the
   // network (§6.1 would have it ASK; garden's editor scaffold refuses to declare it at all).
   const media = record.firstParty && record.manifest.permissions.some((p) => p.id === 'network.media') ? ' https:' : '';
+  const scripts = record.firstParty ? FIRST_PARTY_SCRIPTS : thirdPartyScripts(scriptHashes);
   return {
-    'Content-Security-Policy': BUNDLE_CSP_BASE.replaceAll('{MEDIA}', media),
+    'Content-Security-Policy': BUNDLE_CSP_BASE.replaceAll('{MEDIA}', media).replace('{SCRIPTS}', scripts),
     'Cross-Origin-Resource-Policy': 'same-origin',
     'X-Content-Type-Options': 'nosniff',
     'X-DNS-Prefetch-Control': 'off',
