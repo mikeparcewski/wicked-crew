@@ -15,7 +15,10 @@
  *    the token an "allow" would add. The host fetches it before `host.hello` and enforces it.
  *  - `GET /editors/:id/:version/entry`: the bundle, with exactly the §8.2 headers. The file path comes
  *    from the registry record — never from the URL — and the bytes are re-hashed on every serve: a
- *    changed file answers 409 `bundle_hash_mismatch`, never the changed bundle.
+ *    changed file answers 409 `bundle_hash_mismatch`, never the changed bundle. The pinned bytes are
+ *    served with the WebRTC prelude at the start of each inline script (`webrtc-guard.ts`); a third-party
+ *    bundle with more than 200 inline script elements (repeats count: each gains the prelude) answers 409
+ *    `bundle_too_many_scripts`.
  *
  * Human-only means `actor.kind === 'human'` (the DC `remember()` check). Under `auth=off` every
  * same-uid caller is the local human actor — the honest limit §6.4 states; refusing a worker token
@@ -31,6 +34,7 @@ import type { Actor, ConformanceRule, EditorGrantsResponse, ListEditorsResponse 
 import { bundleHeaders } from './csp.js';
 import { installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from './pack-install.js';
 import { EDITOR_ID, EDITOR_VERSION, EditorRegistry, HOST_BUNDLE_CAP_BYTES, notRealEntry, readCapped, type EditorRecord } from './registry.js';
+import { guardBundle, MAX_INLINE_SCRIPTS, type GuardedBundle } from './webrtc-guard.js';
 
 const V = '/api/v1';
 
@@ -265,6 +269,19 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
   );
 }
 
+/** The guarded form of each pinned bundle, built once per hash (a few entries: one per installed editor build). */
+const guardedByHash = new Map<string, GuardedBundle>();
+const GUARDED_KEPT = 32;
+function guardedFor(record: EditorRecord, buf: Buffer): GuardedBundle {
+  const key = `${record.firstParty ? '1' : '3'}:${record.sha256}`;
+  const kept = guardedByHash.get(key);
+  if (kept !== undefined) return kept;
+  const built = guardBundle(buf, record.firstParty ? Number.POSITIVE_INFINITY : MAX_INLINE_SCRIPTS);
+  if (guardedByHash.size >= GUARDED_KEPT) guardedByHash.delete(guardedByHash.keys().next().value!);
+  guardedByHash.set(key, built);
+  return built;
+}
+
 /** Re-hash on every serve: a bundle that changed on disk is refused, never served. */
 export function serveBundle(record: EditorRecord, reply: FastifyReply, log?: (msg: string) => void): FastifyReply {
   // The same fence as discovery, re-applied per serve (codex r1): an entry swapped for a link after
@@ -290,6 +307,15 @@ export function serveBundle(record: EditorRecord, reply: FastifyReply, log?: (ms
     log?.(`[editors] ${record.manifest.id}@${record.manifest.version}: bundle hash changed on disk (pinned ${record.sha256.slice(0, 12)}…, found ${actual.slice(0, 12)}…); refused`);
     return reply.code(409).send({ code: 'bundle_hash_mismatch', error: `the ${record.manifest.id} bundle on disk no longer matches its pinned hash; restart the daemon to re-pin it` });
   }
-  for (const [k, v] of Object.entries(bundleHeaders(record))) reply.header(k, v);
-  return reply.type('text/html; charset=utf-8').send(buf);
+  // The prelude goes into every inline script, and a third-party bundle may run only those (`webrtc-guard.ts`). Each
+  // script gains the prelude and a hash in the policy header: past the budget crew refuses, and says why, rather than
+  // build a body many times the pinned size or a header the browser refuses. The bytes are pinned by their hash, so
+  // the guarded form is kept per hash and built once.
+  const guarded = guardedFor(record, buf);
+  if (guarded.tooMany !== undefined) {
+    log?.(`[editors] ${record.manifest.id}@${record.manifest.version}: ${guarded.tooMany} inline scripts, over ${MAX_INLINE_SCRIPTS}; refused`);
+    return reply.code(409).send({ code: 'bundle_too_many_scripts', error: `the ${record.manifest.id} bundle has ${guarded.tooMany} inline scripts; an editor bundle may have at most ${MAX_INLINE_SCRIPTS} (merge them into fewer scripts)` });
+  }
+  for (const [k, v] of Object.entries(bundleHeaders(record, guarded.scriptHashes))) reply.header(k, v);
+  return reply.type('text/html; charset=utf-8').send(guarded.body);
 }

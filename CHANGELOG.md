@@ -10,6 +10,34 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An editor plugin's frame can no longer use WebRTC.** A bundle's policy blocks fetch, XHR, WebSocket and beacons
+  (`connect-src 'none'`), but browsers do not apply that to WebRTC, and Chromium ignores `webrtc 'block'`. Crew now puts
+  a short prelude first in every inline script of every editor bundle it serves, after the script's `;`-ended directive
+  prologue (so `"use strict";` keeps working). Before the editor's own code runs, the prelude removes the WebRTC constructors for good
+  (`src/editors/webrtc-guard.ts`); if it cannot, the script stops. A third-party editor's `script-src` is exactly those
+  scripts' hashes, with no `'unsafe-inline'`, plus a second policy that allows inline scripts only (a hash would also admit
+  an external script whose `integrity` names it, and the browser fetches that before checking it). Any document it makes (a child frame, or a `blob:` or `data:` page it
+  opens in its own frame) can therefore run only those scripts, prelude first. `javascript:` URLs, inline event
+  handlers and new script text are refused. No editor bundle loads a child frame from a URL (`frame-src 'none';
+  child-src 'none'`). A third-party bundle with more than 200 inline scripts is refused with
+  `409 bundle_too_many_scripts`, because each script gains the prelude and a hash in the policy header. The interactive
+  proxy now refuses to load a document into a frame for another site (`Sec-Fetch-Site: cross-site` on a frame
+  navigation), unless the frame's page is one the daemon lets frame it (its `Referer` is a studio dev or allowed
+  origin). An editor frame's origin is opaque, so this always applies to it, and it can no longer navigate itself to a
+  document whose scripts run outside the guard. Studio's own document frames load as before.
+  A document can no longer open another proxied document inside its own frame. First-party editors keep
+  `'unsafe-inline'` because the page and deck editors show agent-authored HTML in nested frames. Studio guards those
+  documents itself, from the studio release that carries its nested-frame guard; until crew bundles that release,
+  those nested frames are not covered. A new probe, `tests/editor-webrtc-egress.test.ts`, frames a hostile plugin in
+  Chromium through crew's own routes (the interactive proxy included) and passes only when none of 19 attempts gets a
+  UDP packet or an HTTP request out. It also runs the
+  bundled studio's page and deck editors, and holds their nested frames to zero once the bundled studio guards them.
+  It runs as required on the ubuntu CI leg, which installs Chromium (`playwright` 1.64.0 is now a dev dependency). The
+  cost is deliberate: a third-party editor cannot use inline event handlers, `javascript:` URLs or scripts it builds
+  from new text.
+
 ## [0.16.12] — 2026-11-02
 
 A feature release on wicked-core-ts ^0.15.20 and wicked-crew-api-types 0.170.0, bundling wicked-studio 0.14.0 (UI v3). It carries the 50 PRs since 0.16.11 (#1205 through #1276). Requirements: the graph is read from estate, the minimum counts real requirements, and the list agrees with its header. Learnings: every run proposes what it learned, and the end-of-run distil never waits. Voice: local speech to text, voice gate answers, and steering by voice. Also: guided multi-select asks, the workflow catalog, frame-ancestors / X-Frame-Options on studio and the API, the container checks floor, and the in-flight "Is this going well?" check. The chat sees the open artifact and the runs you name (#1271); every brief and copy it reads opens beneath its root and follows no link (#1276). Chat-proposed artifact jobs (#1275) ship inert: production advertises no artifact operation, so no seat is told about one. Every new wire shape is additive and behind a capability, so an older studio sends what it did before.

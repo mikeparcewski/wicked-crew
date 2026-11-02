@@ -45,6 +45,7 @@
     "@types/node": "^24.13.3",
     "@types/semver": "^7.5.8",
     "@types/ws": "^8.18.1",
+    "playwright": "1.64.0",
     "semver": "^7.6.0",
     "tsx": "^4.16.0",
     "typescript": "^5.5.0",
