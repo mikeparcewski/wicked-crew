@@ -141,7 +141,7 @@ import { WorkingDocService } from '../working-doc/service.js';
 import { WorkingDocStore } from '../working-doc/store.js';
 import { isWorkingDoc as isWorkingDocAt } from '../interactive/chat-events.js';
 import { DocBindingStore } from '../interactive/doc-binding.js';
-import { docVersionsOf, reconcileBoundAttempts, recoveredChatId } from '../interactive/proposal-create.js';
+import { docVersionsOf, reconcileBoundAttempts, recoveredLaunchDetail } from '../interactive/proposal-create.js';
 import type { BoundOutcome } from '../interactive/draft-events.js';
 import { bridgeBackend } from '../working-doc/bridge-backend.js';
 import { registerWorkingDocRoutes } from '../working-doc/routes.js';
@@ -2786,8 +2786,7 @@ export async function createServer(
       ensureLaunchRecord: (b, a) => {
         if (runTimingIndex.proposalOf(a.runId) !== undefined) return;
         // Filed under the chat as it is kept now; when that chat is gone, under none (never a chat that took its id since).
-        const chatNow = recoveredChatId(chatHistory, b);
-        recordRunLaunched(audit, runTimingIndex, DAEMON_ACTOR, a.runId, { deliver: 'none', channel: 'studio', actor: b.owner, ...(chatNow !== null ? { chatId: chatNow } : {}), proposalId: a.pid, artifactRef: b.ref, recoveredAtBoot: true });
+        recordRunLaunched(audit, runTimingIndex, DAEMON_ACTOR, a.runId, recoveredLaunchDetail(chatHistory, b, a));
       },
       hasLandingFailed: (runId) => runTimingIndex.landingFailedOf(runId) !== undefined,
       // Every attempt's document link, every boot (the ledger row of a run a crash recovered may not exist).

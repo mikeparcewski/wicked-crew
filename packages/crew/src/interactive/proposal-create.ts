@@ -347,6 +347,17 @@ export function recoveredChatId(
   return b.chatInstance === null ? b.chatId : history.idOfInstance(b.chatId, b.chatInstance);
 }
 
+/** The `run.launched` detail boot writes for a recovered attempt whose launch record is missing: the chat, proposal,
+ *  artifact and document from the binding, as the draft seam would have, under the chat as it is kept now. */
+export function recoveredLaunchDetail(
+  history: { idOfInstance(id: string, instance: string | null): string | null },
+  b: Pick<DocBinding, 'chatId' | 'chatInstance' | 'owner' | 'ref'>,
+  a: Pick<DocBindingAttempt, 'pid'>,
+): Record<string, unknown> {
+  const chatNow = recoveredChatId(history, b);
+  return { deliver: 'none', channel: 'studio', actor: b.owner, ...(chatNow !== null ? { chatId: chatNow } : {}), proposalId: a.pid, artifactRef: b.ref, recoveredAtBoot: true };
+}
+
 export function docVersionsOf(docsRoot: string, doc: string): { head: number; byRun: Map<string, number>; provenance: boolean } | null {
   if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(doc)) return null;
   try {

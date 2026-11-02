@@ -16,7 +16,7 @@ import { ChatProposals, foldProposals, LaunchOnceRegistry, proposalRunId, type C
 import { DocBindingError, DocBindingStore } from '../src/interactive/doc-binding.js';
 import { buildSourcePacket, packetClause, PACKET_FILE_MAX_BYTES, PACKET_MAX_BYTES, type PacketDeps } from '../src/interactive/source-packet.js';
 import { boundAttemptKey, isAnotherProjectsDraftKey, packetChanged, removeAttemptDirs, removePacketCopy, writePacketCopy, type BoundDraft } from '../src/interactive/draft-events.js';
-import { CreateLauncher, reconcileBoundAttempts, recoveredChatId } from '../src/interactive/proposal-create.js';
+import { CreateLauncher, reconcileBoundAttempts, recoveredChatId, recoveredLaunchDetail } from '../src/interactive/proposal-create.js';
 import { prepareDocCreate } from '../src/interactive/proxy-routes.js';
 import { resumeOrphanedRuns } from '../src/core/run-boot-resume.js';
 import { RunTimingIndex, recordRunLaunched } from '../src/api/run-timing-index.js';
@@ -1086,9 +1086,41 @@ describe('xreview r5 folds (A3)', () => {
   });
 
   it('boot files a recovered run under the chat as kept now, and under none when that chat is gone (never a reuser)', () => {
-    const history = { idOfInstance: (id: string, inst: string | null) => (inst === 'i1' ? `${id}--1` : null) };
+    // c1's instance i1 was archived to c1--1; instance i9's history is deleted and a new chat took the id c9.
+    const history = { idOfInstance: (id: string, inst: string | null) => (id === 'c1' && inst === 'i1' ? 'c1--1' : inst === null && id === 'c9' ? 'c9' : null) };
     expect(recoveredChatId(history, { chatId: 'c1', chatInstance: 'i1' })).toBe('c1--1');
-    expect(recoveredChatId(history, { chatId: 'c1', chatInstance: 'i9' })).toBeNull();
+    expect(recoveredChatId(history, { chatId: 'c9', chatInstance: 'i9' })).toBeNull();
     expect(recoveredChatId(history, { chatId: 'c1', chatInstance: null })).toBe('c1');
+    // Through the launch record boot writes: the audit detail, the live index and a rehydrated one.
+    const entries: AuditEntry[] = [];
+    const audit = { record: (action: string, actor: Actor, e: { runId: string; detail: Record<string, unknown> }) => { entries.unshift({ ts: 1000 + entries.length, action, actor, runId: e.runId, detail: e.detail } as unknown as AuditEntry); return 1000; } };
+    const idx = new RunTimingIndex();
+    recordRunLaunched(audit as never, idx, ME, 'run-kept', recoveredLaunchDetail(history, { chatId: 'c1', chatInstance: 'i1', owner: 'local', ref: '_unfiled/rn-1' }, { pid: 'c1:t2' }));
+    recordRunLaunched(audit as never, idx, ME, 'run-gone', recoveredLaunchDetail(history, { chatId: 'c9', chatInstance: 'i9', owner: 'local', ref: '_unfiled/rn-9' }, { pid: 'c9:t2' }));
+    expect(entries.find((e) => e.runId === 'run-kept')!.detail).toMatchObject({ chatId: 'c1--1', proposalId: 'c1:t2', artifactRef: '_unfiled/rn-1', recoveredAtBoot: true });
+    expect(entries.find((e) => e.runId === 'run-gone')!.detail).not.toHaveProperty('chatId');
+    expect(idx.chatIdFor('run-kept')).toBe('c1--1');
+    expect(idx.chatIdFor('run-gone')).toBeUndefined();
+    const after = new RunTimingIndex();
+    after.hydrateFromLaunchEntries(entries);
+    expect(after.chatIdFor('run-kept')).toBe('c1--1');
+    expect(after.chatIdFor('run-gone')).toBeUndefined();
+    expect(after.proposalOf('run-gone')).toEqual({ proposalId: 'c9:t2', artifactRef: '_unfiled/rn-9' });
+  });
+
+  it('a demo someone else created at the derived name meanwhile is refused, not adopted and drafted', async () => {
+    const w = world();
+    withChat(w, 'c1');
+    const deps = (w.registry as unknown as { dispatchers: Map<string, { deps: { createDoc: unknown } }> }).dispatchers.get('create')!.deps;
+    deps.createDoc = async (projectId: string, body: Record<string, unknown>) => {
+      const dir = join(w.docs, projectId === 'default' ? '_unfiled' : projectId, String(body['name']));
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'versions.json'), JSON.stringify({ head: 0, kind: 'demo', versions: [{ version: 0 }] }));
+      return { status: 409, body: { error: 'exists' } };
+    };
+    const out = await w.svc.decide('c1', 'c1:t2', { decision: 'go' }, ME, 'i1');
+    expect(out.code).toBe(502);
+    expect(JSON.stringify(out.body)).toContain('is a demo, not a document');
+    expect(w.launches).toHaveLength(0);
   });
 });
