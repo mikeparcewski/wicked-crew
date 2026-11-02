@@ -181,6 +181,14 @@ export function prologueEnd(text: string): { at: number; afterHashbang: boolean;
       lineStart = false;
       at = i;
       semicolon = false;
+    } else if (text.startsWith('<!--', i)) {
+      // A comment in a classic script, code in a module (`"a" < !--x`): end the directive here with crew's own `;`
+      // and stop, so the prelude stands before this text either way (a module then fails on it; a classic script keeps
+      // its strict mode).
+      at = end;
+      semicolon = true;
+      afterHashbang = false;
+      break;
     } else if ((crossed || i >= n) && endsByAsi(text, i)) {
       at = end;
       semicolon = true;

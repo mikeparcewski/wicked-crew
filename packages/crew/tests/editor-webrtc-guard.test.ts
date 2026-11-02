@@ -237,8 +237,11 @@ describe('the prelude: WebRTC is gone from the window, for good, before the edit
     // prelude goes first. Before the first directive it can only be a comment (classic) or a syntax error (module).
     // (V8 refuses any `<!--` in a module outright, so Chromium cannot run such a module either way; engines that follow
     // the spec's tokenization would, which is what this pins.)
-    expect(withPrelude('"a"\n<!--window[rtc()]\n;')).toBe(`${P}"a"\n<!--window[rtc()]\n;`);
-    expect(withPrelude('"a"\n<!--window[rtc()] +\n"b";')).toBe(`${P}"a"\n<!--window[rtc()] +\n"b";`);
+    // So the directive ends there with crew's own `;`, and the prelude stands before the ambiguous text (a module then
+    // fails on `<!--`; a classic script reads a comment and keeps strict mode).
+    expect(withPrelude('"a"\n<!--window[rtc()]\n;')).toBe(`"a";${P}\n<!--window[rtc()]\n;`);
+    expect(withPrelude('"a"\n<!--window[rtc()] +\n"b";')).toBe(`"a";${P}\n<!--window[rtc()] +\n"b";`);
+    expect(withPrelude('"use strict" <!-- same line\nx()')).toBe(`"use strict";${P} <!-- same line\nx()`);
     // A block comment that spans lines puts the next token at a line start (a following `-->` is a comment).
     expect(withPrelude('/*\n*/ --> c\n"use strict";y()')).toBe(`/*\n*/ --> c\n"use strict";${P}y()`);
   });
@@ -246,6 +249,12 @@ describe('the prelude: WebRTC is gone from the window, for good, before the edit
   it('a directive ended by automatic semicolon insertion keeps strict mode, and the prelude still runs first', () => {
     const ctx = fakeWindow();
     runInContext(withPrelude('"use strict"\nwindow.strict = (function(){ return this })() === undefined; window.seen = typeof RTCPeerConnection;'), ctx);
+    expect(runInContext('window.strict + " " + window.seen', ctx)).toBe('true undefined');
+  });
+
+  it('a classic "use strict" followed by an HTML comment keeps strict mode, and the prelude runs before the comment', () => {
+    const ctx = fakeWindow();
+    runInContext(withPrelude('"use strict"\n<!-- legacy\nwindow.strict = (function(){ return this })() === undefined; window.seen = typeof RTCPeerConnection;'), ctx);
     expect(runInContext('window.strict + " " + window.seen', ctx)).toBe('true undefined');
   });
 
