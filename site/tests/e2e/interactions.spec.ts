@@ -183,7 +183,9 @@ test.describe('animated states never move anything outside their box', () => {
     for (const frame of ['review', 'gate', 'deliver']) {
       await setup(page, frame);
       await page.locator(`#${frame}`).evaluate((el) => el.scrollIntoView({ block: 'start' }));
-      await page.waitForTimeout(300);
+      // the frame's one-time arrival (a 12px rise, staggered) is over before the autoplay is sampled
+      await expect(page.locator(`#${frame}`)).toHaveClass(/is-arrived/);
+      await page.waitForTimeout(1300);
       const first = await snap(page);
       for (let k = 0; k < 4; k++) {
         await page.waitForTimeout(900);

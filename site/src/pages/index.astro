@@ -67,9 +67,10 @@ import '../styles/crew.css';
 const HEADLINE = 'The harness for the coding agents you already use.';
 const KICKER_IN = 'Intent in.';
 const KICKER_OUT = 'Gated work out.';
-// The sub-line, split so its on-screen label renders as the label it is.
-const SUBLINE = 'Claude Code, Codex, GitHub Copilot, OpenCode and Pi run your jobs in sandboxes, through gates that say plainly what actually ran. A step that passed without verification is labelled';
-const SUBLINE_LABEL = 'approved by default, not verified';
+// The sub-line (the words PR's rendering: the caveat label in plain quotes; the promise carries the weight).
+const SUBLINE_A = 'Claude Code, Codex, GitHub Copilot, OpenCode and Pi run your jobs in sandboxes, through gates that';
+const SUBLINE_EM = 'say plainly what actually ran';
+const SUBLINE_B = '. A step that passed without verification is labelled “approved by default, not verified”.';
 
 const title = 'wicked-crew — the harness for the coding agents you already use';
 const description =
@@ -93,7 +94,7 @@ const AGENTS = [
   { name: 'GitHub Copilot', image: 'yes' },
   { name: 'OpenCode', image: 'yes' },
   { name: 'Pi', image: 'yes' },
-  { name: 'Antigravity', image: 'image defined, seat benched for now' },
+  { name: 'Antigravity', image: 'sandbox image defined; the agent is benched for now' },
   { name: 'A local model, or your own binary', image: 'your own image, offline' },
 ];
 
@@ -106,11 +107,11 @@ const HOTS = [
   { key: 'repo', name: 'Your repo', tag: 'read-only', fact: 'Your repo is read-only.' },
   { key: 'worktree', name: 'Worktree + git state', tag: 'writable', fact: 'The job writes its worktree and its git state.' },
   { key: 'gateway', name: 'Model gateway', tag: 'the only way out', fact: 'The model gateway is the only way out.' },
-  { key: 'broker', name: 'Broker', tag: 'keys → placeholders', fact: B1_BROKER },
+  { key: 'broker', name: 'Broker', tag: 'keys → placeholders, one exception', fact: B1_BROKER },
 ];
 
 const LAYERS = [
-  { key: 'floor', name: 'Evidence floor', does: 'The job changed its worktree.', can: 'a pass with no judge reads “floor only”' },
+  { key: 'floor', name: 'Evidence check (the floor)', does: 'The job changed its worktree.', can: 'a pass with no judge reads “floor only”' },
   { key: 'checks', name: 'Your checks and policies', does: 'Your repo’s own typecheck, lint and tests, plus the rules you approved.', can: 'a new failure sends it back, waits for you or stops the job' },
   { key: 'eval', name: 'Evaluator', does: 'By default, a different agent reviews the work.', can: 'can send it back' },
   { key: 'judge', name: 'Judge', does: 'An AI judge reads the evidence cold.', can: 'can fail a gate, never approve alone' },
@@ -128,12 +129,13 @@ const WORKFLOWS = [
   { name: 'feature', steps: 'clarify → design → build → adversarial-review → test → review' },
   { name: 'bug', steps: 'triage → reproduce → fix → verify' },
   { name: 'migration', steps: 'plan → execute → cutover → verify → cleanup' },
-  { name: 'mcp-server', steps: 'build an MCP server, install it on consent' },
-  { name: 'editor-plugin', steps: 'build and test an editor, install on consent' },
+  { name: 'mcp-server', steps: 'design → build → test → review → install (on your consent)' },
+  { name: 'editor-plugin', steps: 'design → build → test → install (on your consent)' },
+  // not a fixed sequence of steps: one line, and no step counter
   { name: 'domain-extraction', steps: 'cover code with real requirements (default 80%)' },
 ];
-// A workflow's steps as rail nodes: the arrows separate steps; a comma separates the two halves.
-const stepsOf = (s: string) => (s.includes('→') ? s.split('→') : s.split(',')).map((x) => x.trim());
+// A workflow's steps as rail nodes: the arrows separate steps; a one-line description is one node.
+const stepsOf = (s: string) => s.split('→').map((x) => x.trim());
 
 // The dispute, step by step (the council proof's flow, with the demo job's own lines).
 const DISPUTE = [
@@ -144,9 +146,14 @@ const DISPUTE = [
   { name: 'Ruling', what: 'Yes, no, or no verdict, with the agreement and the dissent.', job: 'council ruled: finding stands · 2 of 3 · OpenCode dissented' },
 ];
 
+// Benefit 2, the reviewed words split into its three cases (one row each), not reworded.
 const BENEFIT_2 = {
   h: 'A failed check sends work back, waits for you or stops the job.',
-  p: 'When you launch a preset or a plan on a repository, power mode is on by default and the code-writing step runs as one agent’s checkpointed turns. By default a different agent reviews the work; when none can, the job stops unless you launch it as “reduced assurance”, which is labelled (a saved workflow may require fewer checks; its requirements are listed in the receipts). In power mode a failed review or a qualifying build-check failure goes back to the builder, up to three hand-off attempts in all; problems that need your judgment pause for you. A phased job retries, escalates or stops.',
+  rows: [
+    { k: 'Power mode', note: 'a preset or plan launched on a repository; on by default', p: 'the code-writing step runs as one agent’s checkpointed turns; a failed review or a qualifying build-check failure goes back to the builder, up to three hand-off attempts in all; problems that need your judgment pause for you.' },
+    { k: 'Phased job', note: '', p: 'retries, escalates or stops.' },
+    { k: 'No other agent can review', note: '', p: 'the job stops unless you launch it as “reduced assurance”, which is labelled (a saved workflow may require fewer checks; its requirements are listed in the receipts).' },
+  ],
 };
 const BENEFIT_3 = {
   h: 'Tested before delivery, with receipts.',
@@ -169,6 +176,13 @@ const crewVersion = __WICKED_CREW_VERSION__;
 
 <Base title={title} description={description}>
   <Topbar pkg="wicked-crew" repo={repo} />
+  <!-- Frames rise in as they arrive. Set before the first frame paints, so nothing flashes; if the
+       page script never runs, the switch is taken back off and everything simply shows. -->
+  <script is:inline>(function(){try{if(window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches)return;var h=document.documentElement;h.classList.add('can-rise');setTimeout(function(){if(!window.__crewArrive)h.classList.remove('can-rise');},3000);}catch(e){}})();</script>
+
+  <!-- The spine, at 1024px wide and up: job r-4f2a's five beats as one thread under the topbar,
+       filling as each beat arrives (decoration; the beat kickers and the gutter track say it in words). -->
+  <div class="thread" data-thread aria-hidden="true">{BEATS.map((b) => <i data-thread-seg={b.id}><b></b></i>)}</div>
 
   <!-- The spine: job r-4f2a's beats, in the right gutter (1400px wide and up only). -->
   <nav class="beats" data-beats aria-label="Job r-4f2a, beat by beat">
@@ -185,14 +199,14 @@ const crewVersion = __WICKED_CREW_VERSION__;
     <div class="wrap hero-head">
       <p class="hero-kicker"><span class="kick-in">{KICKER_IN}</span> <span class="kick-out">{KICKER_OUT}</span></p>
       <h1 id="hero-h">{HEADLINE}</h1>
-      <p class="lede">{SUBLINE} <span class="glabel">{SUBLINE_LABEL}</span>.</p>
+      <p class="lede">{SUBLINE_A} <strong>{SUBLINE_EM}</strong>{SUBLINE_B}</p>
     </div>
 
     <div class="wrap">
       <div class="job" data-job aria-label="A working demo: one job through its gates">
         <div class="job-bar">
           <span class="job-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-          <span class="job-t">job r-4f2a · <b>feature</b></span>
+          <span class="job-t">job r-4f2a · <b>feature</b> · phased</span>
           <span class="job-note">scripted demo</span>
           <span class="job-acts">
             <button type="button" class="job-btn job-btn--go" data-job-run><span class="lbl stack"><span class="stack-i is-on" data-l="go">Run the job</span><span class="stack-i" data-l="again" aria-hidden="true">Run it again</span></span></button>
@@ -227,20 +241,20 @@ const crewVersion = __WICKED_CREW_VERSION__;
   </section>
 
   <!-- ── S2 · Build: your agents, sandboxed ─────────────────────────────── -->
-  <section class="frame sec build" id="build" data-frame data-beat="build" aria-labelledby="build-h">
+  <section class="frame sec build" id="build" data-frame data-beat="build" aria-labelledby="sandbox-h">
     <div class="wrap two two--build">
       <div class="sec-copy">
-        <p class="beat"><span class="beat-dots" aria-hidden="true"><i class="on"></i><i class="on"></i><i></i><i></i><i></i></span><span class="beat-id">r-4f2a</span> Build</p>
-        <h2 id="build-h">Your agents, sandboxed.</h2>
+        <p class="beat"><span class="beat-dots" aria-hidden="true"><i class="on"></i><i class="on"></i><i></i><i></i><i></i></span><span class="beat-id">job r-4f2a ·</span> Build</p>
+        <h2 id="sandbox-h">Your agents, sandboxed.</h2>
         <p class="lead">{B1_LEAD}</p>
         <p class="sub">crew drives each agent’s own headless mode in a hardened sandbox, on your accounts and plans.</p>
-        <p class="pull">No billing, no reselling.</p>
+        <p class="pull">Your accounts, your plans: no billing, no reselling.</p>
       </div>
 
       <div class="sbx" data-sbx>
         <div class="sbx-map" role="group" aria-label="What the sandbox can reach">
           {HOTS.filter((h) => h.key !== 'worktree').map((h) => (
-            <button type="button" class={`hot hot--${h.key}`} data-hot={h.key} aria-pressed={h.key === 'gateway' ? 'true' : 'false'} aria-controls="sbx-cap">
+            <button type="button" class={`hot hot--${h.key}`} data-hot={h.key} aria-pressed={h.key === 'broker' ? 'true' : 'false'} aria-controls="sbx-cap">
               <b>{h.name}</b>{' '}<small>{h.tag}</small>
             </button>
           ))}
@@ -259,10 +273,10 @@ const crewVersion = __WICKED_CREW_VERSION__;
         </div>
         <div class="sbx-cap stack" id="sbx-cap" aria-live="polite">
           {HOTS.map((h) => (
-            <p class:list={['stack-i', { 'is-on': h.key === 'gateway' }]} data-cap={h.key}><b>{h.name}</b>{' '}<span>{h.fact}</span></p>
+            <p class:list={['stack-i', { 'is-on': h.key === 'broker' }]} data-cap={h.key}><b>{h.name}</b>{' '}<span>{h.fact}</span></p>
           ))}
           {AGENTS.map((a, i) => (
-            <p class="stack-i" data-cap={`agent-${i}`}><b>{a.name}</b>{' '}<span class:list={['sbx-img', { 'is-yes': a.image === 'yes' }]}>{a.image === 'yes' ? 'ships with crew' : a.image}</span></p>
+            <p class="stack-i" data-cap={`agent-${i}`}><b>{a.name}</b>{' '}<span class:list={['sbx-img', { 'is-yes': a.image === 'yes' }]}>{a.image === 'yes' ? 'sandbox image ships with crew; you sign in with your own account' : a.image}</span></p>
           ))}
         </div>
         <div class="agents" role="group" aria-label="Pick an agent to put in the sandbox">
@@ -270,23 +284,27 @@ const crewVersion = __WICKED_CREW_VERSION__;
             <button type="button" class:list={['agent', { 'is-yes': a.image === 'yes' }]} data-agent={i} data-agent-name={a.name} aria-pressed={i === 0 ? 'true' : 'false'} aria-controls="sbx-cap">{a.name}</button>
           ))}
         </div>
-        <p class="sbx-note">Sign each agent in once, on studio’s Agents page.</p>
+        <p class="sbx-note">Sign each agent in once, on the Agents page of studio, the browser UI that ships inside crew.</p>
       </div>
     </div>
   </section>
 
   <!-- ── S3 · Review: a different agent, and a council for disputes ─────── -->
-  <section class="frame sec review" id="review" data-frame data-beat="review" aria-labelledby="review-h">
+  <section class="frame sec review" id="review" data-frame data-beat="review" aria-labelledby="council-h">
     <div class="wrap">
       <div class="sec-head">
-        <p class="beat"><span class="beat-dots" aria-hidden="true"><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i></span><span class="beat-id">r-4f2a</span> Review</p>
-        <h2 id="review-h">A council settles disputes. It doesn’t pick agents.</h2>
-        <p class="sub">Agents are routed by their skills. A council is convened only when a reviewer and a builder disagree about a finding.</p>
+        <p class="beat"><span class="beat-dots" aria-hidden="true"><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i></span><span class="beat-id">job r-4f2a ·</span> Review</p>
+        <h2 id="council-h">A council settles disputes. It doesn’t pick agents.</h2>
+        <p class="sub">By default a different agent reviews the work. Agents are routed by their skills; a council is convened only when a reviewer and a builder disagree about a finding.</p>
       </div>
       <div class="two two--review">
-        <div class="benefit">
+        <div class="benefit benefit--rows">
           <h3>{BENEFIT_2.h}</h3>
-          <p>{BENEFIT_2.p}</p>
+          <dl class="cases">
+            {BENEFIT_2.rows.map((r) => (
+              <div class="case"><dt><b>{r.k}</b>{r.note && <Fragment>{' '}<span class="case-note">({r.note})</span></Fragment>}:</dt>{' '}<dd>{r.p}</dd></div>
+            ))}
+          </dl>
         </div>
         <div class="disp" data-disp>
           <ol class="disp-steps" aria-label="How a dispute reaches a council">
@@ -321,17 +339,17 @@ const crewVersion = __WICKED_CREW_VERSION__;
       <ul class="facts facts--row" role="list">
         <li>The ruling is on the gate’s receipt.</li>
         <li>Council size is a setting: 1 to 9, default 3.</li>
-        <li>After two send-backs, the job asks you instead.</li>
+        <li>In a phased job, after two send-backs, the job asks you instead.</li>
       </ul>
     </div>
   </section>
 
   <!-- ── S4 · Gate: every gate says what it checked ─────────────────────── -->
-  <section class="frame sec gate" id="gate" data-frame data-beat="gate" aria-labelledby="gate-h">
+  <section class="frame sec gate" id="gate" data-frame data-beat="gate" aria-labelledby="gates-h">
     <div class="wrap two two--gate">
       <div class="sec-copy">
-        <p class="beat"><span class="beat-dots" aria-hidden="true"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i></span><span class="beat-id">r-4f2a</span> Gate</p>
-        <h2 id="gate-h">Every gate says what it checked.</h2>
+        <p class="beat"><span class="beat-dots" aria-hidden="true"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i></span><span class="beat-id">job r-4f2a ·</span> Gate</p>
+        <h2 id="gates-h">Every gate says what it checked.</h2>
         <p class="sub">A gate decides on the layers that actually ran. A new failure sends the work back, waits for you or stops the job, and no model can approve on its own.</p>
         <div class="benefit">
           <h3>{BENEFIT_3.h}</h3>
@@ -340,7 +358,7 @@ const crewVersion = __WICKED_CREW_VERSION__;
       </div>
 
       <div class="rcx" data-rcx>
-        <p class="rcx-k">When a gate is weaker than that, its receipt says so:</p>
+        <p class="rcx-k">Pick a receipt. When a gate is weaker than a full pass, it says so:</p>
         <ul class="labels rcx-pick" role="list">
           <li><button type="button" class="rcx-opt rcx-opt--full" data-scen="full" aria-pressed="true" aria-controls="rcx-card"><b>PASS</b>{' '}<span>every layer ran</span></button></li>
           {LABELS.map((l) => (
@@ -349,7 +367,7 @@ const crewVersion = __WICKED_CREW_VERSION__;
         </ul>
         <div class="rcx-card" id="rcx-card">
           <div class="rcx-head">
-            <span class="rcx-title">Review gate · <span class="nw">r-4f2a</span>
+            <span class="rcx-title">Gate receipt · <span class="nw">r-4f2a</span>
               <span class="rcx-when stack" aria-hidden="true">
                 <span class="stack-i is-on" data-when="full">every layer ran</span>
                 {LABELS.map((l) => <Fragment>{' '}<span class="stack-i" data-when={l.key}>{l.when}</span></Fragment>)}
@@ -378,6 +396,10 @@ const crewVersion = __WICKED_CREW_VERSION__;
                 <div><dt>Its power</dt><dd>{l.can}</dd></div>
               </dl>
             ))}
+            <dl class="stack-i" data-detail="nogate">
+              <div><dt>What it checks</dt><dd>Nothing: no gate ran on this phase.</dd></div>
+              <div><dt>Its power</dt><dd>none: the step passes, labelled “approved by default, not verified”</dd></div>
+            </dl>
           </div>
         </div>
       </div>
@@ -385,11 +407,12 @@ const crewVersion = __WICKED_CREW_VERSION__;
   </section>
 
   <!-- ── S5 · Deliver: workflows are data, jobs survive a crash ─────────── -->
-  <section class="frame sec deliver" id="deliver" data-frame data-beat="deliver" aria-labelledby="deliver-h">
+  <section class="frame sec deliver" id="deliver" data-frame data-beat="deliver" aria-labelledby="durable-h">
     <div class="wrap two two--deliver">
       <div class="sec-copy">
-        <p class="beat"><span class="beat-dots" aria-hidden="true"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i></span><span class="beat-id">r-4f2a</span> Deliver</p>
-        <h2 id="deliver-h">Workflows are data. Jobs survive a crash.</h2>
+        <p class="beat"><span class="beat-dots" aria-hidden="true"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i></span><span class="beat-id">job r-4f2a ·</span> Deliver</p>
+        <h2 id="durable-h">Workflows are data. Jobs survive a crash.</h2>
+        <p class="end-line">r-4f2a ends as pull request #42, with its evidence bundle ready to export.</p>
         <p class="sub">Pick a built-in, or save your own steps as a preset (<code>PUT /api/v1/presets/:name</code>).</p>
         <div class="wf" data-wf>
           <div class="wf-tabs" role="group" aria-label="Built-in workflows">
@@ -399,7 +422,7 @@ const crewVersion = __WICKED_CREW_VERSION__;
           </div>
           <div class="wf-stage stack" id="wf-stage">
             {WORKFLOWS.map((w, i) => (
-              <ol class:list={['stack-i', 'wf-rail', { 'is-on': i === 0 }]} data-wf-panel={i} aria-label={`${w.name}: ${w.steps}`}>
+              <ol class:list={['stack-i', 'wf-rail', { 'is-on': i === 0, 'is-single': !w.steps.includes('→') }]} data-wf-panel={i} aria-label={`${w.name}: ${w.steps}`}>
                 {stepsOf(w.steps).map((s) => <li class="wf-node" data-node><span class="wf-dot" aria-hidden="true"></span><span class="wf-s">{s}</span></li>)}
               </ol>
             ))}
@@ -411,7 +434,7 @@ const crewVersion = __WICKED_CREW_VERSION__;
         </div>
       </div>
       <ul class="facts facts--cards" role="list">
-        <li><b>Power mode by default.</b> For a preset or plan on a repo, the step that builds code runs as one agent in checkpointed turns, its rigor re-scored from the diff; the hand-off runs the review and QE that rigor calls for.</li>
+        <li><b>Power mode by default.</b> For a preset or plan on a repo; see Review. The job above is shown phased, one gate per step.</li>
         <li><b>Crash-resumable.</b> A daemon that dies mid-job resumes it at boot, at the step it was on.</li>
         <li><b>One open API.</b> Studio ships inside crew and uses the same <code>/api/v1</code> and <code>/ws</code> your tools can.</li>
         <li><b>Headless too.</b> <code>wicked-crew start</code>, the REST API, or <code>wicked-crew mcp</code> for agents.</li>
@@ -456,7 +479,6 @@ const crewVersion = __WICKED_CREW_VERSION__;
           <p class="get-tos">
             <b>Terms of service:</b> crew drives CLIs you installed under your own accounts. Check
             that each one’s terms allow programmatic use.
-            · <a href="/article">Why this exists&nbsp;→</a>
           </p>
         </div>
         <div class="install-stack">
@@ -496,5 +518,6 @@ wicked-crew serve   <span class="c"># opens studio on 127.0.0.1:7701</span></cod
     import '../scripts/job-demo.js';
     import '../scripts/explore.js';
     import '../scripts/settle.js';
+    import '../scripts/arrive.js';
   </script>
 </Base>

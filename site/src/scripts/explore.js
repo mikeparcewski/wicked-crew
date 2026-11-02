@@ -120,7 +120,7 @@ function onTakeover(root, cb) {
   const whens = $$(root, '[data-when]');
   const SCEN = {
     full: { focus: 'eval', s: { floor: 'ran', checks: 'ran', eval: 'ran · Codex', judge: 'ran', qe: 'PASS' } },
-    nogate: { focus: 'floor', s: { floor: 'no gate', checks: 'no gate', eval: 'no gate', judge: 'no gate', qe: 'no gate' } },
+    nogate: { focus: 'nogate', s: { floor: 'no gate', checks: 'no gate', eval: 'no gate', judge: 'no gate', qe: 'no gate' } },
     floor: { focus: 'floor', s: { floor: 'ran', checks: 'ran', eval: '—', judge: 'no distinct judge', qe: '—' } },
     reduced: { focus: 'eval', s: { floor: '—', checks: '—', eval: 'the builder', judge: '—', qe: '—' } },
     qeskip: { focus: 'qe', s: { floor: '—', checks: '—', eval: '—', judge: '—', qe: 'skipped, with your reason' } },
@@ -173,7 +173,10 @@ function onTakeover(root, cb) {
   });
   let w = 0, k = 0, dead = false, timer = null, inView = false, finished = false;
   const nodes = () => $$(panels[w], '[data-node]');
-  const label = (n) => n.querySelector('.wf-s').textContent;
+  // a workflow that is one line, not a sequence of steps, has no step counter: it is named by its name
+  const single = () => panels[w].classList.contains('is-single');
+  const label = (n) => (single() ? tabs[w].textContent.trim() : n.querySelector('.wf-s').textContent);
+  const at = (ns, j) => (single() ? 'running · ' : 'step ' + (j + 1) + ' of ' + ns.length + ' · ') + '<b>' + label(ns[j]) + '</b>';
   function paint() {
     const ns = nodes();
     ns.forEach((n, j) => {
@@ -191,9 +194,9 @@ function onTakeover(root, cb) {
     if (dead || !inView || reduced) return;
     const ns = nodes();
     timer = setTimeout(() => {
-      if (finished) { finished = false; k = 0; paint(); say('step 1 of ' + ns.length + ' · <b>' + label(ns[0]) + '</b>'); tick(); return; }
+      if (finished) { finished = false; k = 0; paint(); say(at(ns, 0)); tick(); return; }
       if (k >= ns.length - 1) { finished = true; paint(); say('done · evidence bundle ready'); timer = setTimeout(tick, 600); return; }
-      k++; paint(); say('step ' + (k + 1) + ' of ' + ns.length + ' · <b>' + label(ns[k]) + '</b>'); tick();
+      k++; paint(); say(at(ns, k)); tick();
     }, finished ? 1800 : 1100);
   }
   function pick(n) {
@@ -204,7 +207,7 @@ function onTakeover(root, cb) {
     setLabel('crash');
     const ns = nodes();
     paint();
-    say(reduced ? 'done · evidence bundle ready' : 'step 1 of ' + ns.length + ' · <b>' + label(ns[0]) + '</b>');
+    say(reduced ? 'done · evidence bundle ready' : at(ns, 0));
     tick();
   }
   crash.addEventListener('click', () => {

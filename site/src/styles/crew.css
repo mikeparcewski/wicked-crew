@@ -25,7 +25,8 @@ body { padding-top: var(--topbar-h); }
   --seat: var(--ink-muted);
   --job-bg: color-mix(in oklab, var(--surface-2) 90%, #000 10%);
   --job-shadow: 0 40px 80px -50px rgba(0, 0, 0, .85);
-  --card-bg: color-mix(in oklab, var(--surface-2) 72%, transparent);
+  /* solid (both mixed colours are opaque): the background line art never shows through a card */
+  --card-bg: color-mix(in oklab, var(--surface-2) 72%, var(--canvas));
   --pad-y: clamp(24px, 5svh, 72px);
   /* the site's display scale (marketing sizes; the tokens are studio's product-UI scale) */
   --h1: clamp(40px, 3vw + 1.5vh, 76px);
@@ -37,7 +38,7 @@ body { padding-top: var(--topbar-h); }
 [data-theme="light"], [data-theme="wicked-light"] {
   --job-bg: var(--surface-card);
   --job-shadow: 0 1px 0 rgba(0, 0, 0, .04), 0 30px 60px -36px rgba(24, 24, 26, .35);
-  --card-bg: color-mix(in oklab, var(--surface-card) 82%, transparent);
+  --card-bg: color-mix(in oklab, var(--surface-card) 82%, var(--canvas));
 }
 
 .wrap { width: 100%; max-width: 1240px; margin-inline: auto; padding-inline: 28px; }
@@ -53,11 +54,13 @@ body { padding-top: var(--topbar-h); }
    src/scripts/settle.js (a directional settle that never pulls against the visitor). Each frame is
    one viewport tall (minus the topbar) on a desktop window; between 768 and 1023px wide or below
    640px tall, sections take their natural height and nothing settles. */
-html { scroll-snap-type: none; scroll-padding-top: var(--topbar-h); }
+html { scroll-snap-type: none; scroll-padding-top: var(--topbar-h); scroll-padding-bottom: 12px; }
 section { scroll-snap-align: none; }
 .frame { position: relative; isolation: isolate; }
 @media (min-width: 1024px) and (min-height: 640px) {
   .frame { min-height: calc(100svh - var(--topbar-h)); display: flex; flex-direction: column; justify-content: safe center; }
+  /* the shared family band is a frame too, so paging past it lands every frame on its top */
+  .same-garden { min-height: calc(100svh - var(--topbar-h)); display: flex; flex-direction: column; justify-content: center; }
 }
 .sec { border-top: 1px solid var(--hairline); padding: var(--pad-y) 0; }
 .sec:nth-of-type(odd) { background: color-mix(in oklab, #000 6%, transparent); }
@@ -65,39 +68,44 @@ section { scroll-snap-align: none; }
 
 /* ── Background: the harness schematic (static line art) + crew's light ─ */
 body::before {
-  content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  content: ''; position: fixed; inset: 0; z-index: -2; pointer-events: none;
   background-color: var(--ink);
   /* fully override the shared wicked-web line-grid blueprint (tokens.css sets a
      linear-gradient background-image on body::before) — crew owns this layer */
   background-image: none;
-  opacity: 0.08;
+  opacity: 0.07;
   -webkit-mask-image: url("data:image/svg+xml,%3Csvg width='1600' height='900' viewBox='0 0 1600 900' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M312 168 H586' stroke-dasharray='5 9'/%3E%3Cpath d='M736 166 H998' stroke-dasharray='5 9'/%3E%3Cpath d='M1156 166 H1356' stroke-dasharray='5 9'/%3E%3Cpath d='M578 162 l8 6 l-8 6'/%3E%3Cpath d='M990 160 l8 6 l-8 6'/%3E%3Cpath d='M1348 160 l8 6 l-8 6'/%3E%3Cpath d='M338 453 H584' stroke-dasharray='5 9'/%3E%3Cpath d='M768 472 H1054' stroke-dasharray='5 9'/%3E%3Cpath d='M1182 472 H1392' stroke-dasharray='5 9'/%3E%3Cpath d='M576 447 l8 6 l-8 6'/%3E%3Cpath d='M1046 466 l8 6 l-8 6'/%3E%3Cpath d='M1384 466 l8 6 l-8 6'/%3E%3Cpath d='M250 792 H424' stroke-dasharray='5 9'/%3E%3Cpath d='M556 782 H754' stroke-dasharray='5 9'/%3E%3Cpath d='M924 792 H1064' stroke-dasharray='5 9'/%3E%3Cpath d='M1226 792 H1354' stroke-dasharray='5 9'/%3E%3Cpath d='M416 786 l8 6 l-8 6'/%3E%3Cpath d='M746 776 l8 6 l-8 6'/%3E%3Cpath d='M1056 786 l8 6 l-8 6'/%3E%3Cpath d='M1346 786 l8 6 l-8 6'/%3E%3Cpath d='M230 224 V430' stroke-dasharray='6 10'/%3E%3Cpath d='M675 226 V420' stroke-dasharray='6 10'/%3E%3Cpath d='M1118 220 V420' stroke-dasharray='6 10'/%3E%3Cpath d='M205 548 V716' stroke-dasharray='6 10'/%3E%3Cpath d='M820 548 V700' stroke-dasharray='6 10'/%3E%3Cpath d='M1180 552 V690' stroke-dasharray='6 10'/%3E%3Cpath d='M470 590 l9 10 l16 -22'/%3E%3Cpath d='M900 300 l9 10 l16 -22'/%3E%3Cpath d='M1250 580 l9 10 l16 -22'/%3E%3Cpath d='M520 250 l8 9 l15 -20'/%3E%3Ccircle cx='360' cy='300' r='6'/%3E%3Ccircle cx='1000' cy='560' r='6'/%3E%3Ccircle cx='700' cy='860' r='6'/%3E%3Ccircle cx='1440' cy='300' r='6'/%3E%3Ccircle cx='230' cy='430' r='5'/%3E%3Ccircle cx='675' cy='420' r='5'/%3E%3Ccircle cx='1118' cy='420' r='5'/%3E%3Cg transform='translate(150 120)'%3E%3Crect width='158' height='96' rx='13' stroke-width='1.8'/%3E%3Cpath d='M0 25 H158'/%3E%3Ccircle cx='18' cy='13' r='3'/%3E%3Ccircle cx='31' cy='13' r='3'/%3E%3Ccircle cx='44' cy='13' r='3'/%3E%3Cpath d='M22 46 l18 14 l-18 14'/%3E%3Cpath d='M48 74 H98'/%3E%3Crect x='108' y='62' width='13' height='18' rx='2'/%3E%3C/g%3E%3Cg transform='translate(600 120)'%3E%3Crect width='128' height='100' rx='18' stroke-width='1.8'/%3E%3Cpath d='M64 0 V-16'/%3E%3Ccircle cx='64' cy='-21' r='4.5'/%3E%3Cpath d='M0 46 H-11'/%3E%3Cpath d='M128 46 H139'/%3E%3Ccircle cx='42' cy='44' r='8'/%3E%3Ccircle cx='86' cy='44' r='8'/%3E%3Cpath d='M40 76 H88'/%3E%3Cpath d='M52 72 V80 M64 72 V80 M76 72 V80'/%3E%3C/g%3E%3Cg transform='translate(1000 110)'%3E%3Cpath d='M14 112 V24'/%3E%3Ccircle cx='14' cy='20' r='6'/%3E%3Cpath d='M14 20 H150'/%3E%3Cpath d='M44 14 l-16 12 M72 14 l-16 12 M100 14 l-16 12 M128 14 l-16 12'/%3E%3Cpath d='M0 112 H60'/%3E%3Cpath d='M92 82 l14 15 l26 -34'/%3E%3C/g%3E%3Cg transform='translate(1360 150)'%3E%3Ccircle cx='56' cy='56' r='30'/%3E%3Ccircle cx='56' cy='56' r='11'/%3E%3Cpath d='M86 56 H98 M14 56 H26 M56 86 V98 M56 14 V26'/%3E%3Cpath d='M77 77 L86 86 M35 77 L26 86 M35 35 L26 26 M77 35 L86 26'/%3E%3C/g%3E%3Cg transform='translate(230 430)'%3E%3Crect width='100' height='46' rx='23' stroke-width='1.8'/%3E%3Ccircle cx='72' cy='23' r='15'/%3E%3C/g%3E%3Cg transform='translate(590 420)'%3E%3Crect width='170' height='104' rx='12' stroke-width='1.6' stroke-dasharray='7 7'/%3E%3Ccircle cx='40' cy='58' r='7'/%3E%3Cpath d='M40 58 H96'/%3E%3Cpath d='M96 58 C116 58 116 34 116 34'/%3E%3Ccircle cx='116' cy='28' r='7'/%3E%3Cpath d='M96 58 C116 58 116 82 116 82'/%3E%3Ccircle cx='116' cy='88' r='7'/%3E%3Crect x='128' y='18' width='30' height='15' rx='4'/%3E%3C/g%3E%3Cg transform='translate(1060 420)'%3E%3Cpath d='M60 0 L114 20 V52 C114 92 90 114 60 128 C30 114 6 92 6 52 V20 Z' stroke-width='1.8'/%3E%3Cpath d='M34 60 l18 20 l32 -42'/%3E%3C/g%3E%3Cg transform='translate(1400 490)'%3E%3Ccircle cx='0' cy='0' r='8'/%3E%3Cpath d='M12 0 H52'/%3E%3Cpath d='M44 -6 l8 6 l-8 6'/%3E%3Ccircle cx='66' cy='0' r='8'/%3E%3Cpath d='M78 0 H118'/%3E%3Cpath d='M110 -6 l8 6 l-8 6'/%3E%3Ccircle cx='132' cy='0' r='8'/%3E%3C/g%3E%3Cg transform='translate(150 720)'%3E%3Ccircle cx='56' cy='56' r='30'/%3E%3Ccircle cx='56' cy='56' r='11'/%3E%3Cpath d='M86 56 H98 M14 56 H26 M56 86 V98 M56 14 V26'/%3E%3Cpath d='M77 77 L86 86 M35 77 L26 86 M35 35 L26 26 M77 35 L86 26'/%3E%3C/g%3E%3Cg transform='translate(430 690)'%3E%3Cpath d='M0 12 C0 5 5 0 12 0 H92 L120 28 V138 C120 145 115 150 108 150 H12 C5 150 0 145 0 138 Z' stroke-width='1.8'/%3E%3Cpath d='M92 0 V28 H120'/%3E%3Cpath d='M44 62 C33 62 38 76 27 80 C38 84 33 98 44 98'/%3E%3Cpath d='M78 62 C89 62 84 76 95 80 C84 84 89 98 78 98'/%3E%3Cpath d='M30 120 H92 M30 133 H72'/%3E%3C/g%3E%3Cg transform='translate(760 700)'%3E%3Crect width='158' height='96' rx='13' stroke-width='1.8'/%3E%3Cpath d='M0 25 H158'/%3E%3Ccircle cx='18' cy='13' r='3'/%3E%3Ccircle cx='31' cy='13' r='3'/%3E%3Ccircle cx='44' cy='13' r='3'/%3E%3Cpath d='M22 46 l18 14 l-18 14'/%3E%3Cpath d='M48 74 H98'/%3E%3Crect x='108' y='62' width='13' height='18' rx='2'/%3E%3C/g%3E%3Cg transform='translate(1070 700)'%3E%3Cpath d='M14 112 V24'/%3E%3Ccircle cx='14' cy='20' r='6'/%3E%3Cpath d='M14 20 H150'/%3E%3Cpath d='M44 14 l-16 12 M72 14 l-16 12 M100 14 l-16 12 M128 14 l-16 12'/%3E%3Cpath d='M0 112 H60'/%3E%3Cpath d='M92 82 l14 15 l26 -34'/%3E%3C/g%3E%3Cg transform='translate(1360 690)'%3E%3Cpath d='M60 0 L114 20 V52 C114 92 90 114 60 128 C30 114 6 92 6 52 V20 Z' stroke-width='1.8'/%3E%3Cpath d='M34 60 l18 20 l32 -42'/%3E%3C/g%3E%3C/g%3E%3Cg fill='black'%3E%3Ccircle cx='150' cy='620' r='2.5'/%3E%3Ccircle cx='163' cy='620' r='2.5'/%3E%3Ccircle cx='176' cy='620' r='2.5'/%3E%3Ccircle cx='980' cy='860' r='2.5'/%3E%3Ccircle cx='993' cy='860' r='2.5'/%3E%3Ccircle cx='1006' cy='860' r='2.5'/%3E%3Ccircle cx='1300' cy='450' r='2.5'/%3E%3Ccircle cx='1313' cy='450' r='2.5'/%3E%3Ccircle cx='1326' cy='450' r='2.5'/%3E%3C/g%3E%3C/svg%3E");
           mask-image: url("data:image/svg+xml,%3Csvg width='1600' height='900' viewBox='0 0 1600 900' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M312 168 H586' stroke-dasharray='5 9'/%3E%3Cpath d='M736 166 H998' stroke-dasharray='5 9'/%3E%3Cpath d='M1156 166 H1356' stroke-dasharray='5 9'/%3E%3Cpath d='M578 162 l8 6 l-8 6'/%3E%3Cpath d='M990 160 l8 6 l-8 6'/%3E%3Cpath d='M1348 160 l8 6 l-8 6'/%3E%3Cpath d='M338 453 H584' stroke-dasharray='5 9'/%3E%3Cpath d='M768 472 H1054' stroke-dasharray='5 9'/%3E%3Cpath d='M1182 472 H1392' stroke-dasharray='5 9'/%3E%3Cpath d='M576 447 l8 6 l-8 6'/%3E%3Cpath d='M1046 466 l8 6 l-8 6'/%3E%3Cpath d='M1384 466 l8 6 l-8 6'/%3E%3Cpath d='M250 792 H424' stroke-dasharray='5 9'/%3E%3Cpath d='M556 782 H754' stroke-dasharray='5 9'/%3E%3Cpath d='M924 792 H1064' stroke-dasharray='5 9'/%3E%3Cpath d='M1226 792 H1354' stroke-dasharray='5 9'/%3E%3Cpath d='M416 786 l8 6 l-8 6'/%3E%3Cpath d='M746 776 l8 6 l-8 6'/%3E%3Cpath d='M1056 786 l8 6 l-8 6'/%3E%3Cpath d='M1346 786 l8 6 l-8 6'/%3E%3Cpath d='M230 224 V430' stroke-dasharray='6 10'/%3E%3Cpath d='M675 226 V420' stroke-dasharray='6 10'/%3E%3Cpath d='M1118 220 V420' stroke-dasharray='6 10'/%3E%3Cpath d='M205 548 V716' stroke-dasharray='6 10'/%3E%3Cpath d='M820 548 V700' stroke-dasharray='6 10'/%3E%3Cpath d='M1180 552 V690' stroke-dasharray='6 10'/%3E%3Cpath d='M470 590 l9 10 l16 -22'/%3E%3Cpath d='M900 300 l9 10 l16 -22'/%3E%3Cpath d='M1250 580 l9 10 l16 -22'/%3E%3Cpath d='M520 250 l8 9 l15 -20'/%3E%3Ccircle cx='360' cy='300' r='6'/%3E%3Ccircle cx='1000' cy='560' r='6'/%3E%3Ccircle cx='700' cy='860' r='6'/%3E%3Ccircle cx='1440' cy='300' r='6'/%3E%3Ccircle cx='230' cy='430' r='5'/%3E%3Ccircle cx='675' cy='420' r='5'/%3E%3Ccircle cx='1118' cy='420' r='5'/%3E%3Cg transform='translate(150 120)'%3E%3Crect width='158' height='96' rx='13' stroke-width='1.8'/%3E%3Cpath d='M0 25 H158'/%3E%3Ccircle cx='18' cy='13' r='3'/%3E%3Ccircle cx='31' cy='13' r='3'/%3E%3Ccircle cx='44' cy='13' r='3'/%3E%3Cpath d='M22 46 l18 14 l-18 14'/%3E%3Cpath d='M48 74 H98'/%3E%3Crect x='108' y='62' width='13' height='18' rx='2'/%3E%3C/g%3E%3Cg transform='translate(600 120)'%3E%3Crect width='128' height='100' rx='18' stroke-width='1.8'/%3E%3Cpath d='M64 0 V-16'/%3E%3Ccircle cx='64' cy='-21' r='4.5'/%3E%3Cpath d='M0 46 H-11'/%3E%3Cpath d='M128 46 H139'/%3E%3Ccircle cx='42' cy='44' r='8'/%3E%3Ccircle cx='86' cy='44' r='8'/%3E%3Cpath d='M40 76 H88'/%3E%3Cpath d='M52 72 V80 M64 72 V80 M76 72 V80'/%3E%3C/g%3E%3Cg transform='translate(1000 110)'%3E%3Cpath d='M14 112 V24'/%3E%3Ccircle cx='14' cy='20' r='6'/%3E%3Cpath d='M14 20 H150'/%3E%3Cpath d='M44 14 l-16 12 M72 14 l-16 12 M100 14 l-16 12 M128 14 l-16 12'/%3E%3Cpath d='M0 112 H60'/%3E%3Cpath d='M92 82 l14 15 l26 -34'/%3E%3C/g%3E%3Cg transform='translate(1360 150)'%3E%3Ccircle cx='56' cy='56' r='30'/%3E%3Ccircle cx='56' cy='56' r='11'/%3E%3Cpath d='M86 56 H98 M14 56 H26 M56 86 V98 M56 14 V26'/%3E%3Cpath d='M77 77 L86 86 M35 77 L26 86 M35 35 L26 26 M77 35 L86 26'/%3E%3C/g%3E%3Cg transform='translate(230 430)'%3E%3Crect width='100' height='46' rx='23' stroke-width='1.8'/%3E%3Ccircle cx='72' cy='23' r='15'/%3E%3C/g%3E%3Cg transform='translate(590 420)'%3E%3Crect width='170' height='104' rx='12' stroke-width='1.6' stroke-dasharray='7 7'/%3E%3Ccircle cx='40' cy='58' r='7'/%3E%3Cpath d='M40 58 H96'/%3E%3Cpath d='M96 58 C116 58 116 34 116 34'/%3E%3Ccircle cx='116' cy='28' r='7'/%3E%3Cpath d='M96 58 C116 58 116 82 116 82'/%3E%3Ccircle cx='116' cy='88' r='7'/%3E%3Crect x='128' y='18' width='30' height='15' rx='4'/%3E%3C/g%3E%3Cg transform='translate(1060 420)'%3E%3Cpath d='M60 0 L114 20 V52 C114 92 90 114 60 128 C30 114 6 92 6 52 V20 Z' stroke-width='1.8'/%3E%3Cpath d='M34 60 l18 20 l32 -42'/%3E%3C/g%3E%3Cg transform='translate(1400 490)'%3E%3Ccircle cx='0' cy='0' r='8'/%3E%3Cpath d='M12 0 H52'/%3E%3Cpath d='M44 -6 l8 6 l-8 6'/%3E%3Ccircle cx='66' cy='0' r='8'/%3E%3Cpath d='M78 0 H118'/%3E%3Cpath d='M110 -6 l8 6 l-8 6'/%3E%3Ccircle cx='132' cy='0' r='8'/%3E%3C/g%3E%3Cg transform='translate(150 720)'%3E%3Ccircle cx='56' cy='56' r='30'/%3E%3Ccircle cx='56' cy='56' r='11'/%3E%3Cpath d='M86 56 H98 M14 56 H26 M56 86 V98 M56 14 V26'/%3E%3Cpath d='M77 77 L86 86 M35 77 L26 86 M35 35 L26 26 M77 35 L86 26'/%3E%3C/g%3E%3Cg transform='translate(430 690)'%3E%3Cpath d='M0 12 C0 5 5 0 12 0 H92 L120 28 V138 C120 145 115 150 108 150 H12 C5 150 0 145 0 138 Z' stroke-width='1.8'/%3E%3Cpath d='M92 0 V28 H120'/%3E%3Cpath d='M44 62 C33 62 38 76 27 80 C38 84 33 98 44 98'/%3E%3Cpath d='M78 62 C89 62 84 76 95 80 C84 84 89 98 78 98'/%3E%3Cpath d='M30 120 H92 M30 133 H72'/%3E%3C/g%3E%3Cg transform='translate(760 700)'%3E%3Crect width='158' height='96' rx='13' stroke-width='1.8'/%3E%3Cpath d='M0 25 H158'/%3E%3Ccircle cx='18' cy='13' r='3'/%3E%3Ccircle cx='31' cy='13' r='3'/%3E%3Ccircle cx='44' cy='13' r='3'/%3E%3Cpath d='M22 46 l18 14 l-18 14'/%3E%3Cpath d='M48 74 H98'/%3E%3Crect x='108' y='62' width='13' height='18' rx='2'/%3E%3C/g%3E%3Cg transform='translate(1070 700)'%3E%3Cpath d='M14 112 V24'/%3E%3Ccircle cx='14' cy='20' r='6'/%3E%3Cpath d='M14 20 H150'/%3E%3Cpath d='M44 14 l-16 12 M72 14 l-16 12 M100 14 l-16 12 M128 14 l-16 12'/%3E%3Cpath d='M0 112 H60'/%3E%3Cpath d='M92 82 l14 15 l26 -34'/%3E%3C/g%3E%3Cg transform='translate(1360 690)'%3E%3Cpath d='M60 0 L114 20 V52 C114 92 90 114 60 128 C30 114 6 92 6 52 V20 Z' stroke-width='1.8'/%3E%3Cpath d='M34 60 l18 20 l32 -42'/%3E%3C/g%3E%3C/g%3E%3Cg fill='black'%3E%3Ccircle cx='150' cy='620' r='2.5'/%3E%3Ccircle cx='163' cy='620' r='2.5'/%3E%3Ccircle cx='176' cy='620' r='2.5'/%3E%3Ccircle cx='980' cy='860' r='2.5'/%3E%3Ccircle cx='993' cy='860' r='2.5'/%3E%3Ccircle cx='1006' cy='860' r='2.5'/%3E%3Ccircle cx='1300' cy='450' r='2.5'/%3E%3Ccircle cx='1313' cy='450' r='2.5'/%3E%3Ccircle cx='1326' cy='450' r='2.5'/%3E%3C/g%3E%3C/svg%3E");
   -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
   -webkit-mask-position: center;  mask-position: center;
   -webkit-mask-size: cover;       mask-size: cover;
 }
+[data-theme="light"] body::before { opacity: 0.05; }
 
 /* crew's light: violet current entering the harness (top-left), a green pass at the far gate
-   (bottom-right). The schematic never moves; only the light drifts, and only with no-preference. */
+   (bottom-right), over the schematic, with a veil of the page colour behind the content column so
+   the drawing stays in the gutters and never puts a stray shape inside a paragraph. The schematic
+   never moves; only the light drifts (a transform, so it never repaints), and only with no-preference. */
 body::after {
-  content: ''; position: fixed; inset: 0; z-index: -2; pointer-events: none;
+  content: ''; position: fixed; inset: -3%; z-index: -1; pointer-events: none;
+  --veil: color-mix(in oklab, var(--canvas) 68%, transparent);
   background:
-    radial-gradient(ellipse 52% 46% at 4% 6%, color-mix(in oklab, var(--ctrl) 14%, transparent), transparent 62%),
-    radial-gradient(ellipse 46% 46% at 96% 94%, color-mix(in oklab, var(--ok) 7%, transparent), transparent 62%);
-  background-position: 0 0, 0 0;
+    radial-gradient(ellipse 52% 46% at 6% 8%, color-mix(in oklab, var(--ctrl) 14%, transparent), transparent 62%),
+    radial-gradient(ellipse 46% 46% at 94% 92%, color-mix(in oklab, var(--ok) 7%, transparent), transparent 62%),
+    linear-gradient(90deg, transparent 0, transparent 8%, var(--veil) 22%, var(--veil) 78%, transparent 92%, transparent 100%);
 }
 [data-theme="light"] body::after {
   background:
-    radial-gradient(ellipse 52% 46% at 4% 6%, color-mix(in oklab, var(--ctrl) 10%, transparent), transparent 62%),
-    radial-gradient(ellipse 46% 46% at 96% 94%, color-mix(in oklab, var(--ok) 6%, transparent), transparent 62%);
+    radial-gradient(ellipse 52% 46% at 6% 8%, color-mix(in oklab, var(--ctrl) 10%, transparent), transparent 62%),
+    radial-gradient(ellipse 46% 46% at 94% 92%, color-mix(in oklab, var(--ok) 6%, transparent), transparent 62%),
+    linear-gradient(90deg, transparent 0, transparent 8%, var(--veil) 22%, var(--veil) 78%, transparent 92%, transparent 100%);
 }
 @media (prefers-reduced-motion: no-preference) {
   body::after { animation: crew-current 22s var(--ease) infinite alternate; }
 }
 @keyframes crew-current {
-  from { background-position: 0 0, 0 0; }
-  to   { background-position: 3% 2%, -3% -2%; }
+  from { transform: translate3d(0, 0, 0); }
+  to   { transform: translate3d(1.6%, 1.2%, 0); }
 }
 
 /* ── Type ──────────────────────────────────────────────────────────────── */
@@ -127,6 +135,12 @@ code {
 .beat-id { color: var(--muted); font-weight: 400; }
 .benefit h3 { font-size: var(--h3); line-height: 1.25; margin: 0; }
 .benefit p { margin: 8px 0 0; font-size: var(--body); line-height: 1.6; color: color-mix(in oklab, var(--ink) 76%, transparent); }
+/* benefit 2's three cases, one row each */
+.cases { margin: 10px 0 0; display: flex; flex-direction: column; gap: 8px; }
+.case { padding: 2px 0 2px 12px; border-left: 2px solid color-mix(in oklab, var(--ctrl) 55%, var(--hairline-strong)); font-size: var(--body); line-height: 1.5; color: color-mix(in oklab, var(--ink) 76%, transparent); }
+.case dt, .case dd { display: inline; margin: 0; }
+.case dt b { color: var(--ink); font-weight: var(--weight-strong); }
+.case-note { color: var(--muted); }
 
 /* buttons inside the explorables */
 .ctl-btn {
@@ -158,6 +172,8 @@ code {
 .facts li { position: relative; padding-left: 16px; font-size: var(--body); line-height: 1.5; color: color-mix(in oklab, var(--ink) 80%, transparent); }
 .facts li::before { content: ''; position: absolute; left: 0; top: 0.6em; width: 6px; height: 6px; border-radius: 50%; background: var(--ctrl); }
 .facts b { color: var(--ink); }
+/* a command never breaks inside its chip ("wicked-crew" / "mcp") */
+.facts code { white-space: nowrap; }
 .facts--row { flex-direction: row; flex-wrap: wrap; gap: 8px 32px; margin-top: clamp(16px, 2.6svh, 30px); }
 .facts--cards { gap: 8px; }
 .facts--cards li { padding: 11px 14px 11px 30px; border: 1px solid var(--hairline-strong); border-radius: 12px; background: var(--card-bg); }
@@ -186,12 +202,7 @@ code {
 .kick-out { color: var(--ok); }
 .hero-head h1 { font-size: var(--h1); margin: 0 auto; max-width: 22ch; line-height: 1.0; }
 .lede { margin: clamp(8px, 1.4svh, 16px) auto 0; font-size: var(--lead); line-height: 1.5; color: color-mix(in oklab, var(--ink) 80%, transparent); max-width: 86ch; }
-/* an on-screen label, set as the label it is */
-.glabel {
-  display: inline-block; font: 600 0.82em/1.35 var(--font-mono); color: var(--warn); white-space: nowrap;
-  padding: 0 0.5em; border: 1px solid color-mix(in oklab, var(--warn) 55%, transparent); border-radius: 5px;
-  background: color-mix(in oklab, var(--warn) 10%, transparent);
-}
+.lede strong { color: var(--ink); font-weight: var(--weight-strong); }
 
 .job {
   --job-h: clamp(210px, calc(100svh - 470px), 400px);
@@ -206,7 +217,7 @@ code {
 .job-t b { color: var(--ink); }
 .job-note { font: 12px var(--font-mono); color: var(--muted); }
 .job-acts { display: inline-flex; gap: 8px; }
-.job-btn { font: 600 14px/1 var(--font-sans); border-radius: 8px; padding: 8px 14px; cursor: pointer; border: 1px solid var(--hairline-strong); background: transparent; color: var(--ink); white-space: nowrap; transition: background .18s var(--ease), border-color .18s var(--ease), opacity .18s var(--ease); }
+.job-btn { font: 600 14px/1 var(--font-sans); border-radius: 8px; padding: 8px 14px; cursor: pointer; border: 1px solid var(--hairline-strong); background: transparent; color: var(--ink); white-space: nowrap; transition: background .18s var(--ease), border-color .18s var(--ease), color .18s var(--ease), opacity .18s var(--ease); }
 .job-btn--go { color: var(--canvas); background: var(--ctrl); border-color: var(--ctrl); }
 .job-btn--go:hover, .job-btn--go:focus-visible, .job-btn--go:active { background: color-mix(in oklab, var(--ctrl) 86%, var(--ink)); }
 .job-btn--kill { color: var(--deny); border-color: color-mix(in oklab, var(--deny) 55%, transparent); }
@@ -245,16 +256,19 @@ code {
 .st.is-held { border-color: var(--deny); }
 .st.is-held .st-gate { color: var(--status-fail-fg); background: var(--deny); border-color: var(--deny); }
 .st.is-down { border-color: var(--deny); border-style: dashed; }
+.st::after { content: ''; position: absolute; inset: -1px; border-radius: inherit; pointer-events: none; box-shadow: 0 0 0 3px color-mix(in oklab, var(--ctrl) 32%, transparent); opacity: 0; }
 @media (prefers-reduced-motion: no-preference) {
-  .st.is-now { animation: st-pulse 1.6s ease-in-out infinite; }
+  .st.is-now::after { animation: glow 1.6s ease-in-out infinite; }
 }
-@keyframes st-pulse { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--ctrl) 0%, transparent); } 50% { box-shadow: 0 0 0 3px color-mix(in oklab, var(--ctrl) 32%, transparent); } }
+@keyframes glow { 50% { opacity: 1; } }
 
 .job-body { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); height: var(--job-h); }
 .log-col { display: grid; grid-template-rows: minmax(0, 1fr) auto; min-height: 0; border-right: 1px solid var(--hairline); }
-.log { overflow-y: auto; min-height: 0; padding: 10px 14px; display: flex; flex-direction: column; gap: 5px; }
+.log { overflow: hidden; min-height: 0; padding: 10px 14px; display: flex; flex-direction: column; gap: 5px; }
 .ln { margin: 0; font-family: var(--font-mono); font-size: 13px; line-height: 1.45; color: color-mix(in oklab, var(--ink) 74%, transparent); animation: ln-in .25s var(--ease) backwards; }
 .ln--still { animation: none; }
+/* the previous run's lines, kept on a replay until the new run's lines replace them */
+.ln--ghost { opacity: .38; }
 .ln b { color: var(--ink); }
 .ln--ok, .ln--ok b { color: var(--ok); }
 .ln--deny, .ln--deny b { color: var(--deny); }
@@ -305,6 +319,7 @@ code {
   grid-template-areas: "repo ro box out gw" ". . keys . ." ". . brk . .";
 }
 .hot {
+  position: relative; z-index: 1;
   display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; width: 100%;
   padding: 10px 12px; text-align: left; cursor: pointer; color: var(--ink);
   border: 1px solid var(--hairline-strong); border-radius: 10px; background: var(--card-bg);
@@ -326,8 +341,10 @@ code {
 .sbx-tag { position: absolute; top: 7px; left: 12px; font: 600 10px/1 var(--font-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--ctrl); }
 .sbx-agent { display: flex; align-items: center; gap: 8px; height: 2.6em; font: 600 14px/1.3 var(--font-sans); color: var(--ink); overflow: hidden; }
 .sbx-agent > span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.sbx-pulse { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px color-mix(in oklab, var(--ok) 25%, transparent); }
+.sbx-pulse { position: relative; flex: none; width: 10px; height: 10px; margin-left: 5px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px color-mix(in oklab, var(--ok) 25%, transparent); }
+.sbx-pulse::after { content: ''; position: absolute; inset: -3px; border-radius: 50%; border: 2px solid color-mix(in oklab, var(--ok) 45%, transparent); opacity: 0; }
 .sbx.is-benched .sbx-pulse { background: var(--muted); box-shadow: 0 0 0 3px color-mix(in oklab, var(--muted) 20%, transparent); }
+.sbx.is-benched .sbx-pulse::after { display: none; }
 .wire { position: relative; display: block; height: 2px; align-self: center; }
 .wire--ro { grid-area: ro; background: repeating-linear-gradient(90deg, var(--muted) 0 5px, transparent 5px 9px); }
 .wire--ro i { position: absolute; right: -1px; top: -4px; border: 5px solid transparent; border-left: 7px solid var(--muted); border-right: 0; }
@@ -335,10 +352,11 @@ code {
 .wire--out .pkt { position: absolute; top: -3px; left: 0; width: 8px; height: 8px; border-radius: 50%; background: var(--ctrl); box-shadow: 0 0 10px var(--ctrl); }
 @media (prefers-reduced-motion: no-preference) {
   .wire--out .pkt { animation: pkt 1.8s linear infinite; }
-  .sbx-pulse { animation: breathe 2.4s ease-in-out infinite; }
+  .sbx-pulse::after { animation: breathe 2.4s ease-out infinite; }
 }
-@keyframes pkt { from { left: 0; opacity: 0; } 15% { opacity: 1; } 85% { opacity: 1; } to { left: calc(100% - 8px); opacity: 0; } }
-@keyframes breathe { 50% { box-shadow: 0 0 0 6px color-mix(in oklab, var(--ok) 0%, transparent); } }
+/* the packet travels by transform along the 40px wire */
+@keyframes pkt { from { transform: translateX(0); opacity: 0; } 15% { opacity: 1; } 85% { opacity: 1; } to { transform: translateX(var(--pkt-run, 32px)); opacity: 0; } }
+@keyframes breathe { from { transform: scale(1); opacity: .9; } to { transform: scale(1.45); opacity: 0; } }
 .wire--keys { grid-area: keys; justify-self: center; width: 2px; height: 100%; background: repeating-linear-gradient(180deg, var(--muted) 0 4px, transparent 4px 8px); }
 .sbx-cap { min-height: 0; padding: 12px 14px; border: 1px solid var(--hairline-strong); border-radius: 12px; background: var(--card-bg); }
 .sbx-cap p { margin: 0; font-size: var(--body); line-height: 1.55; color: color-mix(in oklab, var(--ink) 82%, transparent); }
@@ -372,7 +390,7 @@ code {
 .disp-step.is-done .disp-n { color: var(--ctrl); }
 .disp-step[aria-current] { color: var(--ink); border-color: var(--ctrl); background: color-mix(in oklab, var(--ctrl) 14%, var(--job-bg)); }
 .disp-step[aria-current] .disp-n { color: var(--ctrl); }
-.disp-card { padding: 14px 16px; border: 1px solid var(--hairline-strong); border-radius: 12px; background: var(--job-bg); display: flex; flex-direction: column; gap: 10px; }
+.disp-card { padding: 14px 16px; border: 1px solid var(--hairline-strong); border-radius: 12px; background: var(--job-bg); display: flex; flex-direction: column; justify-content: center; gap: 10px; }
 .disp-what { margin: 0; font-size: var(--body); line-height: 1.5; color: color-mix(in oklab, var(--ink) 80%, transparent); }
 .disp-what b { color: var(--ink); }
 .disp-job { margin: 0; font: 13px/1.5 var(--font-mono); color: var(--warn); padding-left: 10px; border-left: 2px solid currentColor; }
@@ -429,19 +447,23 @@ code {
 .rcx-layers th, .rcx-layers td { padding: 0 14px; height: 40px; vertical-align: middle; }
 .rcx-layers tr + tr > *, .rcx-layers tbody tr:first-child > * { border-top: 0; }
 .rcx-layers tbody tr + tr > * { border-top: 1px solid var(--hairline); }
-.rcx-layers td { width: 15.5em; }
+/* as wide as the longest status ("skipped, with your reason"), so no state is ever cut off */
+.rcx-layers td { width: 17.5em; }
 .rcx-l { display: block; width: 100%; padding: 8px 0; text-align: left; font: 600 14px var(--font-sans); color: var(--ink); background: transparent; border: 0; cursor: pointer; }
 .rcx-l::after { content: ' ›'; color: var(--faint); }
 .rcx-l:hover, .rcx-l:active { color: var(--ctrl); }
+/* the ring sits inside the row, so the detail panel under the last row never covers it */
+.rcx-l:focus-visible { outline-offset: -2px; border-radius: 4px; }
 .rcx-l[aria-pressed="true"] { color: var(--ctrl); }
 .rcx-l[aria-pressed="true"]::after { color: var(--ctrl); }
-.rcx-layers tr { transition: opacity .2s var(--ease); }
-.rcx-layers tr:not(.is-marked) { opacity: .5; }
-/* a fixed status cell: a label change never resizes the row */
-.rcx-s { display: block; text-align: center; font: 500 12px/1 var(--font-mono); padding: 6px 8px; border-radius: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* a layer this label does not speak about is dimmed by colour (never opacity), so it stays legible */
+.rcx-layers tr:not(.is-marked) .rcx-l { color: var(--muted); }
+.rcx-layers tr:not(.is-marked) .rcx-l::after { color: var(--muted); }
+/* a fixed status cell: a label change never resizes the row (the column fits the longest) */
+.rcx-s { display: block; text-align: center; font: 500 12px/1 var(--font-mono); padding: 6px 8px; border-radius: 5px; white-space: nowrap; }
 .rcx-s[data-tone="ok"] { color: var(--ok); background: color-mix(in oklab, var(--ok) 12%, transparent); }
 .rcx-s[data-tone="warn"] { color: var(--warn); background: color-mix(in oklab, var(--warn) 12%, transparent); }
-.rcx-s[data-tone="none"] { color: var(--faint); }
+.rcx-s[data-tone="none"] { color: var(--muted); }
 .rcx-detail { border-top: 1px solid var(--hairline); padding: 10px 14px 12px; background: color-mix(in oklab, var(--ctrl) 5%, transparent); }
 .rcx-detail dl { margin: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
 .rcx-detail dt { font: 600 10px/1 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--ctrl); }
@@ -450,7 +472,7 @@ code {
 /* ── S5 Deliver: workflows on a rail ─────────────────────────────────── */
 .wf { margin-top: clamp(16px, 2.6svh, 28px); display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr); grid-template-areas: "tabs stage" "ctl ctl"; gap: 12px 18px; }
 .wf-tabs { grid-area: tabs; display: flex; flex-direction: column; gap: 5px; }
-.wf-tab { display: flex; align-items: center; min-height: 32px; padding: 0 10px; text-align: left; cursor: pointer; border: 1px solid var(--hairline-strong); border-radius: 8px; background: transparent; transition: border-color .18s var(--ease), background .18s var(--ease); }
+.wf-tab { display: flex; align-items: center; min-height: 32px; padding: 0 10px; text-align: left; cursor: pointer; border: 1px solid var(--hairline-strong); border-radius: 8px; background: var(--card-bg); transition: border-color .18s var(--ease), background .18s var(--ease); }
 .wf-tab code { background: none; border: 0; padding: 0; font-size: 13px; white-space: nowrap; color: var(--muted); }
 .wf-tab:hover, .wf-tab:focus-visible, .wf-tab:active { border-color: var(--ctrl); }
 .wf-tab[aria-pressed="true"] { border-color: var(--ctrl); background: color-mix(in oklab, var(--ctrl) 12%, transparent); }
@@ -469,16 +491,20 @@ code {
 .wf-node.is-now .wf-s { color: var(--ctrl); }
 .wf-node.is-down .wf-dot { border-color: var(--deny); border-style: dashed; background: transparent; }
 .wf-node.is-down .wf-s { color: var(--deny); }
+.wf-dot::after { content: ''; position: absolute; inset: -2px; border-radius: 50%; pointer-events: none; box-shadow: 0 0 0 4px color-mix(in oklab, var(--ctrl) 30%, transparent); opacity: 0; }
 @media (prefers-reduced-motion: no-preference) {
-  .wf-node.is-now .wf-dot { animation: dot-pulse 1.1s ease-in-out infinite; }
+  .wf-node.is-now .wf-dot::after { animation: glow 1.1s ease-in-out infinite; }
 }
-@keyframes dot-pulse { 50% { box-shadow: 0 0 0 4px color-mix(in oklab, var(--ctrl) 30%, transparent); } }
 .wf-ctl { grid-area: ctl; display: flex; align-items: center; gap: 12px; min-width: 0; }
-.wf-status { flex: 1; margin: 0; min-width: 0; font: 13px/1.3 var(--font-mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.wf-status b { color: var(--ink); }
+/* a fixed two-line box, sized for the longest line (a crash or a resume at the longest step) */
+.wf-status { flex: 1; margin: 0; min-width: 0; height: calc(2 * 1.35em); overflow: hidden; font: 13px/1.35 var(--font-mono); color: var(--muted); white-space: normal; overflow-wrap: anywhere; }
+.wf-status b { color: var(--ink); white-space: nowrap; }   /* a step's name never breaks at its hyphen */
 .wf-status .deny { color: var(--deny); }
 .wf-status .ctrl { color: var(--ctrl); }
 .two--deliver .facts--cards li { font-size: 14px; }
+
+/* the job's own ending, under the Deliver heading */
+.end-line { margin: 10px 0 0; font: 500 14px/1.45 var(--font-mono); color: var(--ok); }
 
 /* ── S6 What's new ───────────────────────────────────────────────────── */
 .news-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; }
@@ -503,12 +529,12 @@ code {
 .needs li::before { content: ''; position: absolute; left: 0; top: 0.6em; width: 6px; height: 6px; border-radius: 50%; background: var(--ctrl); }
 
 .install { min-width: 0; width: 100%; border: 1px solid var(--hairline-strong); border-radius: 12px; overflow: hidden; background: var(--job-bg); }
-.install__bar { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; padding: 10px 14px; border-bottom: 1px solid var(--hairline); background: color-mix(in oklab, var(--canvas) 50%, transparent); }
-.install__label { min-width: 0; font: 12px var(--font-mono); color: var(--muted); }
+.install__bar { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: nowrap; padding: 10px 14px; border-bottom: 1px solid var(--hairline); background: color-mix(in oklab, var(--canvas) 50%, transparent); }
+.install__label { flex: 1; min-width: 0; font: 12px var(--font-mono); color: var(--muted); }
 /* the button always reserves room for "Copied" (a hidden twin in the same grid cell) */
 .install__copy { display: inline-flex; flex-direction: column; align-items: center; }
 .install__copy::after { content: 'Copied'; height: 0; overflow: hidden; visibility: hidden; }
-.install__copy { font: 600 12px var(--font-sans); color: var(--muted); background: transparent; border: 1px solid var(--hairline-strong); border-radius: 6px; padding: 5px 12px; min-height: 26px; cursor: pointer; transition: border-color .2s var(--ease), color .2s var(--ease); }
+.install__copy { flex: none; font: 600 12px var(--font-sans); color: var(--muted); background: transparent; border: 1px solid var(--hairline-strong); border-radius: 6px; padding: 5px 12px; min-height: 26px; cursor: pointer; transition: border-color .2s var(--ease), color .2s var(--ease); }
 .install__copy:hover, .install__copy:focus-visible, .install__copy:active { border-color: var(--ctrl); color: var(--ink); }
 .install__code { min-width: 0; margin: 0; padding: 16px; overflow-x: auto; }
 /* `pre-wrap`, not `pre`: a long trailing comment falls to the next line instead of being cut off.
@@ -530,7 +556,7 @@ code {
 .install--primary .install__label { color: var(--ink); }
 .install__star { color: var(--ctrl); }
 .install__note { margin: 0; padding: 10px 16px 14px; font: 12px/1.5 var(--font-mono); color: var(--muted); border-top: 1px solid var(--hairline); }
-.install__ver { color: var(--ctrl); }
+.install__ver { color: var(--ctrl); white-space: nowrap; }
 .install--secondary { background: color-mix(in oklab, var(--job-bg) 80%, transparent); }
 .install-or { display: flex; align-items: center; gap: 12px; margin: 2px 0; }
 .install-or::before, .install-or::after { content: ''; flex: 1; height: 1px; background: var(--hairline-strong); }
@@ -555,7 +581,8 @@ code {
 .beats-dot { flex: none; width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--hairline-strong); background: var(--canvas); transition: background .2s var(--ease), border-color .2s var(--ease); }
 .beats li + li a::before { content: ''; position: absolute; right: 4px; top: -18px; width: 2px; height: 22px; background: var(--hairline); z-index: -1; }
 .beats a[aria-current] { color: var(--ctrl); }
-.beats a[aria-current] .beats-l { opacity: 1; }
+.beats a[aria-current] .beats-l,
+.beats a:hover .beats-l, .beats a:focus-visible .beats-l { opacity: 1; }
 .beats a[aria-current] .beats-dot { background: var(--ctrl); border-color: var(--ctrl); }
 .beats a:hover .beats-dot, .beats a:focus-visible .beats-dot, .beats a:active .beats-dot { border-color: var(--ctrl); }
 .beats a:focus-visible { outline: 2px solid var(--focus, var(--ink)); outline-offset: 2px; border-radius: 4px; }
@@ -591,6 +618,7 @@ code {
 /* ── Big desktop windows (1600x900 and up): the frame is fuller, not emptier ── */
 @media (min-width: 1600px) and (min-height: 900px) {
   :root { --body: 17px; --lead: 20px; --h3: 25px; }
+  .job { --job-h: clamp(210px, calc(100svh - 520px), 400px); }
   .sec { --pad-y: 56px; }
   .sec-head { margin-bottom: 40px; }
   .beat { font-size: 14px; }
@@ -606,13 +634,20 @@ code {
   .ctl-btn { font-size: 14.5px; padding: 10px 15px; } .disp-count { font-size: 14px; }
   .rcx { gap: 14px; } .rcx-k { font-size: 15px; } .rcx-opt { padding: 12px 13px; } .rcx-opt b { font-size: 12.5px; } .rcx-opt span { font-size: 14px; }
   .rcx-head { padding: 14px 18px; } .rcx-title { font-size: 15px; } .rcx-stamp .stack-i { font-size: 12.5px; padding: 7px 11px; }
-  .rcx-layers th, .rcx-layers td { height: 52px; padding: 0 18px; } .rcx-l { font-size: 16.5px; } .rcx-s { font-size: 13.5px; padding: 6px 10px; }
+  .rcx-layers th, .rcx-layers td { height: 52px; padding: 0 18px; } .rcx-layers td { width: 19em; } .rcx-l { font-size: 16.5px; } .rcx-s { font-size: 13.5px; padding: 6px 10px; }
   .rcx-detail { padding: 14px 18px 16px; } .rcx-detail dd { font-size: 16px; } .rcx-detail dt { font-size: 11px; }
   .wf { gap: 16px 22px; } .wf-tab { min-height: 42px; } .wf-tab code { font-size: 15px; } .wf-stage { padding: 16px 18px; }
   .wf-node { min-height: 42px; gap: 14px; } .wf-node + .wf-node::before { top: -21px; height: 42px; } .wf-s { font-size: 15px; } .wf-status { font-size: 15px; }
   .two--deliver .facts--cards li { font-size: 16.5px; padding: 15px 18px 15px 34px; } .facts--cards { gap: 12px; }
   .news-list { gap: 18px; } .news-list li { gap: 12px; padding: 28px 28px 30px; } .news-n { font-size: 13px; }
   .install__code code { font-size: 16px; } .install__label, .install__note { font-size: 13.5px; } .get-intro p, .get-tos { font-size: 16px; }
+}
+
+/* ── Very big windows (1800x1000 and up): the beats scale up as a whole ──────
+   zoom re-lays the content out larger (no bitmap scaling); the max width is the same 1400px on
+   screen. The hero and the shared band keep their own scale. */
+@media (min-width: 1800px) and (min-height: 1000px) {
+  .sec > .wrap, .get > .wrap { zoom: 1.12; max-width: 1250px; }
 }
 
 /* ── Tablet / narrow desktop ─────────────────────────────────────────── */
@@ -627,7 +662,8 @@ code {
 /* ── Phones: a deliberate layout, not a squashed desktop ─────────────── */
 @media (max-width: 760px) {
   .job { --job-h: auto; }
-  .job-bar { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: "title note install" "acts acts acts"; gap: 8px 10px; padding: 9px 10px; }
+  /* the job's title gets its own row, so "· phased" is never cut */
+  .job-bar { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title title" "note install" "acts acts"; gap: 6px 10px; padding: 9px 10px; }
   .job-dots { display: none; }
   .job-t { grid-area: title; font-size: 12px; }
   .job-note { grid-area: note; font-size: 11px; }
@@ -642,15 +678,19 @@ code {
   .st { flex-direction: column; align-items: stretch; padding: 6px 3px; text-align: center; gap: 5px; }
   .st-name { font-size: 12px; }
   .st-gate { min-height: 26px; padding: 0; }
-  /* the receipt comes first on a phone, right under the gates it belongs to; the live ticker under it */
+  /* on a phone the plain caption comes first, right under the gates, then the receipt, then the
+     live ticker (the log column dissolves so its two parts can be ordered apart) */
   .job-body { grid-template-columns: 1fr; height: auto; }
+  .log-col { display: contents; }
+  .caption { order: -2; border-top: 0; border-bottom: 1px solid var(--hairline); }
   .panel { order: -1; border-bottom: 1px solid var(--hairline); }
-  .log-col { border-right: 0; }
   /* a 3-line live ticker instead of the 300px log; the receipt panel is a fixed box that scrolls */
   .log { height: 96px; padding: 8px 12px; gap: 3px; }
   .ln { font-size: 12px; }
   .ln-seats { display: none; }
-  .caption { height: 36px; font-size: 13px; padding: 0 12px; }
+  /* a fixed two-line box: the longest caption wraps instead of being cut */
+  .caption { height: 52px; font-size: 13px; padding: 0 12px; white-space: normal; line-height: 1.3; }
+  .caption > span:last-child { overflow: visible; text-overflow: clip; }
   .panel { height: 240px; padding: 10px 12px; }
   .rc table { font-size: 13px; }
 
@@ -676,8 +716,9 @@ code {
   /* a long label cannot sit beside the title on a phone: the stamp goes under it */
   .rcx-head { flex-direction: column; align-items: flex-start; gap: 8px; }
   .rcx-stamp { justify-items: start; }
-  .rcx-layers th, .rcx-layers td { height: 40px; }
-  .rcx-layers th, .rcx-layers td { padding: 0 10px; }
+  /* every row is two lines tall at all times, so a status that wraps never resizes it */
+  .rcx-layers th, .rcx-layers td { height: 46px; padding: 0 10px; }
+  .rcx-s { white-space: normal; line-height: 1.2; padding: 4px 6px; }
   .rcx-layers { table-layout: fixed; }
   .rcx-layers th { width: 54%; }
   .rcx-layers td { width: 46%; }
@@ -687,7 +728,9 @@ code {
   .wf { grid-template-columns: 1fr; grid-template-areas: "tabs" "stage" "ctl"; }
   .wf-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
   .wf-tab { min-height: 40px; }
+  .wf-ctl { display: grid; grid-template-columns: auto; justify-items: start; gap: 8px; }
   .wf-ctl .ctl-btn { min-height: 40px; }
+  .wf-status { width: 100%; }
 
   /* What's new: an x-snap carousel with dots, a counter and Prev / Next */
   .news-list { display: flex; gap: 12px; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; padding-bottom: 4px; margin-inline: -18px; padding-inline: 18px; scroll-padding-inline: 18px; }
@@ -726,3 +769,68 @@ code {
   .gh-pill:hover { transform: none; }
   html { scroll-behavior: auto; }
 }
+
+/* ── Shared chrome: site-local overrides ──────────────────────────────────
+   Each is reported to wicked-web for the shared fix; drop it here once the pinned chrome has it.
+   Prefixed with `html body` so they win whatever order the bundled stylesheets load in. */
+/* the bar is opaque: a settled frame never shows the last 64px of the frame above through it */
+html body .topbar { background: var(--surface-base); }
+/* tooltips open below the 64px bar, over the page (opening above, they were drawn off the window) */
+.topbar [data-tip]::after { bottom: auto; top: calc(100% + 8px); }
+.topbar #themeBtn[data-tip]::after { left: auto; right: 0; transform: none; }
+/* the projects menu opens where the tooltip would: no tooltip over an open menu */
+.topbar .dropdown-wrap:has(> .dropdown-menu:not([hidden]))::after { opacity: 0; }
+/* the projects menu is wide enough for its longest row */
+.topbar #projectsMenu.dropdown-menu { min-width: 300px; }
+.topbar #projectsMenu .di-label { white-space: normal; }
+/* a lit plane keeps its 1px ring only: the old 56px glow spread under the text below and into Get it */
+html body .same-garden .sg-plane:hover, html body .same-garden .sg-plane:focus-within { box-shadow: 0 0 0 1px color-mix(in oklab, var(--plane) 26%, transparent); }
+/* a card does not lift inside a plane whose padding is under 8px */
+html body .same-garden .sg-card:hover, html body .same-garden .sg-card:focus-within { transform: none; }
+
+/* ── The thread: the job's five beats under the topbar (1024px and up) ───
+   Decoration (aria-hidden): segment k fills as beat k comes into view, so the job visibly travels
+   down the page. It sits under the bar's stacking (z 199), so the projects menu and the tooltips
+   always paint over it; 3px tall, over each frame's top padding when a frame is settled. */
+.thread { display: none; }
+@media (min-width: 1024px) and (min-height: 640px) {
+  .thread {
+    display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px;
+    position: fixed; z-index: 199; top: var(--topbar-h); left: 0; right: 0; height: 3px;
+    max-width: 1240px; margin-inline: auto; padding-inline: 28px; pointer-events: none;
+    opacity: 0; transition: opacity .3s var(--ease);
+  }
+  .thread.is-on { opacity: 1; }
+}
+@media (min-width: 1700px) and (min-height: 640px) { .thread { max-width: 1400px; } }
+.thread i { display: block; height: 100%; border-radius: 0 0 2px 2px; background: color-mix(in oklab, var(--ctrl) 16%, transparent); overflow: hidden; }
+.thread b { display: block; height: 100%; background: var(--ctrl); box-shadow: 0 0 10px color-mix(in oklab, var(--ctrl) 60%, transparent); transform-origin: 0 50%; transform: scaleX(var(--f, 0)); }
+
+/* ── Arrival: each frame rises in as it locks in ──────────────────────────
+   Only with motion allowed and the page script running (html.can-rise, set before first paint).
+   Transform and opacity only, 12px at most, staggered top to bottom (--r, set by arrive.js), so a
+   rising element only ever moves away from the one below it, inside its own frame. The animation
+   fills backwards only, so once it ends every element's own hover and focus styles apply again. */
+.can-rise .frame:not(.is-arrived) :is(.hero-kicker, .hero-head h1, .lede, .job, .beat, .sec h2, .sec .sub, .sec .lead, .pull, .end-line, .benefit, .sbx, .disp, .rcx, .wf, .facts--row, .facts--cards li, .get-intro, .install-stack, .gh-pill),
+.can-rise .same-garden:not(.is-arrived) :is(.sg-head, .sg-plane) { opacity: 0; }
+.can-rise .is-arrived :is(.hero-kicker, .hero-head h1, .lede, .job, .beat, .sec h2, .sec .sub, .sec .lead, .pull, .end-line, .benefit, .sbx, .disp, .rcx, .wf, .facts--row, .facts--cards li, .get-intro, .install-stack, .gh-pill),
+.can-rise .same-garden.is-arrived :is(.sg-head, .sg-plane) {
+  animation: rise .62s var(--ease) calc(var(--r, 0) * 60ms) backwards;
+}
+@keyframes rise { from { opacity: 0; transform: translateY(12px); } }
+/* the explorables' connectors draw in after their boxes */
+/* (pseudo-elements cannot sit inside :is(), so they are listed on their own) */
+.can-rise .frame:not(.is-arrived) :is(.wire--ro, .wire--out),
+.can-rise .frame:not(.is-arrived) .disp-steps li + li::before { transform: scaleX(0); }
+.can-rise .frame:not(.is-arrived) .wire--keys,
+.can-rise .frame:not(.is-arrived) .wf-node + .wf-node::before { transform: scaleY(0); }
+.can-rise .is-arrived :is(.wire--ro, .wire--out) { transform-origin: 0 50%; animation: draw-x .5s var(--ease) .45s backwards; }
+.can-rise .is-arrived .disp-steps li + li::before { transform-origin: 0 50%; animation: draw-x .4s var(--ease) .5s backwards; }
+.can-rise .is-arrived .wire--keys { transform-origin: 50% 0; animation: draw-y .4s var(--ease) .6s backwards; }
+.can-rise .is-arrived .wf-node + .wf-node::before { transform-origin: 50% 0; animation: draw-y .35s var(--ease) .5s backwards; }
+@keyframes draw-x { from { transform: scaleX(0); } }
+@keyframes draw-y { from { transform: scaleY(0); } }
+
+/* ── Loops idle while their frame is off-screen (arrive.js toggles .is-live) ── */
+.frame:not(.is-live) .st::after, .frame:not(.is-live) .wire--out .pkt,
+.frame:not(.is-live) .sbx-pulse::after, .frame:not(.is-live) .wf-dot::after { animation-play-state: paused; }

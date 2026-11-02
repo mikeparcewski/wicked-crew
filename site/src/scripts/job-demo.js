@@ -28,7 +28,7 @@ function initJob(root) {
 
   // One plain caption per beat, built from the demo's own lines.
   const CAPS = {
-    plan: ['1', 'You confirm the plan.'],
+    plan: ['1', 'You confirm the plan (this job runs phased, one gate per step).'],
     build: ['2', 'Claude Code builds it in its sandbox.'],
     review: ['3', 'Codex, a different agent, reviews it.'],
     council: ['3', 'A council settles the dispute.'],
@@ -42,9 +42,9 @@ function initJob(root) {
   let R = {};
   const RECEIPTS = {
     0: { title: 'Plan gate', verdict: 'PASS', rows: [['Required', 'you confirm the plan'], ['Ran', 'operator approval'], ['Decided by', 'you']] },
-    1: { title: 'Build gate', verdict: 'PASS', rows: [['Required', 'evidence floor, your policies'], ['Ran', 'floor: worktree changed · PASS'], ['', 'policy schema-drift · PASS'], ['Built by', 'Claude Code, in its sandbox'], ['Skipped', 'nothing']] },
-    2: { title: 'Review gate', verdict: 'PASS', rows: [['Evaluator', 'Codex (a different agent)'], ['Findings', '1 → disputed → council'], ['Council', 'finding stands · 2 of 3 · seed 4127'], ['Seats', 'Pi, OpenCode, Copilot (OpenCode dissented)'], ['Send-backs', '1 (you are asked after 2)']] },
-    3: { title: 'QE gate', verdict: 'PASS', rows: [['Required', 'feature changes the app'], ['Read', 'GET /api/v1/runs/r-4f2a/acceptance'], ['Ledger', 'PASS, attributed to r-4f2a']] },
+    1: { title: 'Build gate', verdict: 'PASS', rows: [['Required', 'evidence check, your policies'], ['Ran', 'evidence check: worktree changed · PASS'], ['', 'policy schema-drift · PASS'], ['Built by', 'Claude Code, in its sandbox'], ['Skipped', 'nothing']] },
+    2: { title: 'Review gate', verdict: 'PASS', rows: [['Evaluator', 'Codex (a different agent)'], ['Findings', '1 → disputed → council'], ['Council', 'finding stands · 2 of 3 · seed 4127'], ['Drawn', 'Pi, OpenCode, Copilot (OpenCode dissented)'], ['Send-backs', '1 (you are asked after 2)']] },
+    3: { title: 'QE gate', verdict: 'PASS', rows: [['Required', 'built-in feature job'], ['Read', 'GET /api/v1/runs/r-4f2a/acceptance'], ['Ledger', 'PASS, attributed to r-4f2a']] },
     4: { title: 'Delivery', verdict: 'DELIVERED', rows: [['Pull request', '#42 from wicked/r-4f2a'], ['Assurance', 'full: built and reviewed by different agents'], ['QE acceptance', 'PASS'], ['Evidence', 'bundle ready to export']] },
   };
 
@@ -55,13 +55,13 @@ function initJob(root) {
   // `wait` pauses for the visitor; `cap` switches the plain caption.
   const S = [
     { p: 0, t: 'run.launched · workflow <b>feature</b>', cap: 'plan' },
-    { p: 0, t: 'plan proposed · 4 steps' },
+    { p: 0, t: 'plan proposed from the feature workflow' },
     { p: 0, t: 'plan confirmed by you', gate: 0 },
     { p: 1, t: 'container started · <b>Claude Code</b> · repo read-only, worktree writable', cap: 'build' },
-    { p: 1, t: 'egress: the model gateway only · keys stay in the broker' },
+    { p: 1, t: 'egress: the model gateway only · keys stay in the broker; the sandbox sees placeholders' },
     { p: 1, t: 'writing the change · usage 41k in / 6k out' },
     { p: 1, t: 'diff captured · 3 files' },
-    { p: 1, t: 'gate: evidence floor PASS · schema-drift PASS', c: 'ok', gate: 1 },
+    { p: 1, t: 'gate: evidence check PASS · schema-drift PASS', c: 'ok', gate: 1 },
     { p: 2, t: 'review goes to <b>Codex</b>, a different agent than the builder', cap: 'review' },
     { p: 2, t: 'Codex finding (high): the limit is keyed on IP; the brief says per API key · rateLimit.ts:12', c: 'warn' },
     { p: 2, t: 'Claude Code declines: “IP is right for routes with no key”' },
@@ -71,7 +71,7 @@ function initJob(root) {
     { p: 2, t: 'sent back to Build with the ruling' },
     { p: 2, t: 'Claude Code: limit is now per API key, IP only when no key is sent' },
     { p: 2, t: 'Codex: PASS', c: 'ok', gate: 2 },
-    { p: 3, t: 'QE acceptance <b>required</b>: this job changes the app', cap: 'qe' },
+    { p: 3, t: 'QE acceptance <b>required</b>: a feature job passes it before delivery', cap: 'qe' },
     { p: 3, t: 'garden’s QE pipeline ran; its verdict is in the QE ledger' },
     { p: 3, wait: 'qe' },
     { p: 4, t: 'pushed wicked/r-4f2a · pull request <b>#42</b> opened', c: 'ok', cap: 'deliver' },
@@ -97,8 +97,15 @@ function initJob(root) {
     const el = document.createElement('p');
     el.className = 'ln' + (cls ? ' ln--' + cls : '') + (still ? ' ln--still' : '');
     el.innerHTML = html + (seats ? ' ' + SEATS : '');
+    // a replay never empties the box: the oldest of the previous run's dimmed lines makes room
+    const ghost = logEl.querySelector('.ln--ghost');
+    if (ghost) ghost.remove();
     logEl.appendChild(el);
     logEl.scrollTop = logEl.scrollHeight;
+  }
+  /** The previous run's lines stay on screen, dimmed, until the new run's lines replace them. */
+  function dimLog() {
+    logEl.querySelectorAll('.ln').forEach(function (l) { l.classList.add('ln--ghost', 'ln--still'); });
   }
   function caption(key) {
     const c = CAPS[key];
@@ -170,7 +177,7 @@ function initJob(root) {
     if (v !== 'PASS') {
       const why = v === 'CONDITIONAL' ? 'CONDITIONAL is not a pass' : 'no verdict is not a pass';
       line('delivery refused · <b>409 qe_acceptance_required</b> · ' + why, 'deny');
-      R[3] = { title: 'QE gate', verdict: 'HELD', rows: [['Required', 'feature changes the app'], ['Ledger', v === 'NONE' ? 'no verdict for r-4f2a' : 'CONDITIONAL for r-4f2a'], ['Delivery', 'refused until an attributed PASS']] };
+      R[3] = { title: 'QE gate', verdict: 'HELD', rows: [['Required', 'built-in feature job'], ['Ledger', v === 'NONE' ? 'no verdict for r-4f2a' : 'CONDITIONAL for r-4f2a'], ['Delivery', 'refused until an attributed PASS']] };
       const had = panel.contains(document.activeElement);
       showReceipt(3);
       panel.insertAdjacentHTML('beforeend', '<p class="ask-again">Nothing ships. Pick again: ' + PICKS + '</p>');
@@ -191,7 +198,9 @@ function initJob(root) {
     if (i >= S.length) { finish(); return; }
     const s = S[i];
     if (s.cap) caption(s.cap);
-    if (s.wait) { waiting = s.wait; qePanel(); return; }
+    // at the decision the log is this run's alone: the last dimmed lines of the previous run (its
+    // delivery) would read as if this one had already shipped
+    if (s.wait) { logEl.querySelectorAll('.ln--ghost').forEach(function (g) { g.remove(); }); waiting = s.wait; qePanel(); return; }
     line(s.t, s.c, false, s.seats);
     if (s.gate !== undefined) { R[s.gate] = RECEIPTS[s.gate]; stamp(s.gate); showReceipt(s.gate); }
     i++;
@@ -214,7 +223,7 @@ function initJob(root) {
   }
   function start() {
     clearTimeout(timer);
-    logEl.innerHTML = ''; R = {}; i = 0; dead = false; waiting = null; running = true;
+    dimLog(); R = {}; i = 0; dead = false; waiting = null; running = true;
     setOff(runBtn, true); setOff(killBtn, false); label(killBtn, 'kill');
     idlePanel('Each gate’s receipt opens here as the job reaches it. Click a gate on the track to reopen one.');
     go();
@@ -227,7 +236,8 @@ function initJob(root) {
       line('— daemon killed mid-job —', 'deny');
       label(killBtn, 'start');
       caption('down');
-      idlePanel('The daemon is down. The job is still on disk, at the step it was on.');
+      // (the caption says what happened; the panel says what to do, so a phone never reads it twice)
+      idlePanel('Start the daemon: its boot sweep finds the job and re-enters the step it was on.');
       return;
     }
     // Restart: the boot sweep finds the orphaned job and re-enters the step it was on.

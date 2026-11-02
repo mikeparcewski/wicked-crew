@@ -61,17 +61,31 @@ test.describe('inline-tag boundaries render with their spaces', () => {
   });
 });
 
+test.describe('deep links', () => {
+  test('the live anchors still resolve (DECISIONS cites #council-h)', async ({ page }) => {
+    await page.goto('/');
+    for (const id of ['sandbox-h', 'council-h', 'gates-h', 'durable-h', 'get']) {
+      await expect(page.locator(`#${id}`), `#${id}`).toHaveCount(1);
+    }
+    for (const [sec, h] of [['build', 'sandbox-h'], ['review', 'council-h'], ['gate', 'gates-h'], ['deliver', 'durable-h']]) {
+      await expect(page.locator(`#${sec}`)).toHaveAttribute('aria-labelledby', h);
+    }
+  });
+});
+
 test.describe('the reviewed messaging', () => {
   test('the kicker, the sub-line, the benefits and what is new read as whole sentences', async ({ page }) => {
     await page.goto('/');
     await expect(page.locator('.hero-kicker')).toHaveText('Intent in. Gated work out.');
-    await expect(page.locator('.lede')).toContainText('is labelled approved by default, not verified.');
+    // the caveat label is quoted in plain text (the words PR's rendering), not a coloured chip
+    await expect(page.locator('.lede')).toContainText('is labelled “approved by default, not verified”.');
+    expect(await page.locator('.lede .glabel').count()).toBe(0);
     // the three benefits now lead the beats they describe (Build, Review, Gate); textContent, because
     // the explorables keep every state in the DOM and show one at a time
     const text = async (sel: string) => ((await page.locator(sel).textContent()) || '').replace(/\s+/g, ' ');
     expect(await text('#build')).toContain('Your agents, sandboxed. By default each runs in a sandbox');
     expect(await text('#build')).toContain('Keys stay in a broker and the sandbox sees placeholders. A Claude subscription’s sign-in token is the one exception');
-    expect(await text('#build')).toContain('No billing, no reselling.');
+    expect(await text('#build')).toContain('Your accounts, your plans: no billing, no reselling.');
     expect(await text('#review')).toContain('A failed check sends work back, waits for you or stops the job.');
     expect(await text('#review')).toContain('up to three hand-off attempts in all');
     expect(await text('#gate')).toContain('a feature, bug fix, migration, MCP server or editor plugin pass QE acceptance first');
@@ -101,5 +115,18 @@ test.describe('the reviewed messaging', () => {
     expect(own).not.toMatch(/one failed check stops/i);
     // one sandbox heading, not two
     expect(own).not.toContain('Your agents, in sandboxes.');
+    // crew ships the sandbox images, never the agent CLIs (they come from their publishers)
+    expect((own.match(/ships with crew/g) || []).length).toBe((own.match(/sandbox image ships with crew; you sign in with your own account/g) || []).length);
+    // QE is required by the job's kind (a built-in), not because "the job changes the app"
+    expect(own).not.toMatch(/changes the app/);
+    expect(own).toContain('QE acceptance required: a feature job passes it before delivery');
+    // the demo is a phased job; the send-back rule names its mode
+    expect(own).toContain('job r-4f2a · feature · phased');
+    expect(await text('#review')).toContain('In a phased job, after two send-backs, the job asks you instead.');
+    // the broker's exception is on the map itself, and is the caption shown before any click
+    expect(await text('#build')).toContain('keys → placeholders, one exception');
+    await expect(page.locator('#sbx-cap [data-cap="broker"]')).toHaveClass(/is-on/);
+    // public words: no "seat"
+    expect(own).not.toMatch(/\bseats?\b/i);
   });
 });

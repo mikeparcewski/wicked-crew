@@ -7,8 +7,11 @@ import { test, expect, type Page } from '@playwright/test';
  * `proximity` fixed that, but Chromium's proximity captures anything within a third of a frame, so
  * slow 100px wheel notches from a frame top were pulled straight back to it: ten notches left scrollY
  * at 0 at 1440x700 and at 1920x1080. The page now has ONE mechanism instead (src/scripts/settle.js):
- * CSS snap is off, and when a user scroll comes to rest the page glides to the next frame top in the
- * direction of travel, only when that top is within 45% of a frame.
+ * CSS snap is off, and every user scroll comes to rest on a frame top: the next one after where the
+ * gesture started, in the direction of travel (a nudge returns; a small overshoot snaps back; a key
+ * steps one frame; the bottom of the page counts as a frame). A first version only settled when the
+ * next top was within 45% of a frame, so most wheel rests stopped mid-frame, half of two sections
+ * showing, and paging up never realigned.
  *
  * These tests drive the page with REAL wheel events (page.mouse.wheel). window.scrollBy() emits no
  * wheel event and bypasses the scroll machinery entirely.
@@ -37,6 +40,14 @@ async function frameTops(page: Page) {
       Math.round(el.getBoundingClientRect().top + window.scrollY - tb));
   });
 }
+/** Every resting place the settle may use: the frame tops, clamped to the page, and the page bottom. */
+async function restTops(page: Page) {
+  const max = await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight);
+  const t = (await frameTops(page)).map((v) => Math.min(max, Math.max(0, v)));
+  t.push(max);
+  return [...new Set(t)].sort((a, b) => a - b);
+}
+const onAFrame = (y: number, tops: number[]) => tops.some((t) => Math.abs(t - y) <= 2);
 
 test.describe('frames and the settle', () => {
   test('CSS snap is off: one mechanism, and every frame is a frame @ 1440x700', async ({ page }) => {
@@ -63,20 +74,56 @@ test.describe('frames and the settle', () => {
     });
   }
 
-  test('a settle goes the way you scroll, never back @ 1440x700', async ({ page }) => {
+  for (const vp of [{ w: 1440, h: 700 }, { w: 1920, h: 1080 }]) {
+    test(`every wheel rest locks onto a frame, in the direction of travel @ ${vp.w}x${vp.h}`, async ({ page }) => {
+      await page.setViewportSize({ width: vp.w, height: vp.h });
+      await page.goto('/');
+      await page.waitForTimeout(400);
+      await page.mouse.move(vp.w / 2, 120);
+      const tops = await frameTops(page);
+      // one notch: the next frame (a 100px notch is a deliberate move, even on a 1016px frame)
+      await page.mouse.wheel(0, 100);
+      expect(Math.abs((await settled(page)) - tops[1])).toBeLessThanOrEqual(2);
+      // one more: the frame after (the old settle left this rest 100px into Build)
+      await page.mouse.wheel(0, 100);
+      expect(Math.abs((await settled(page)) - tops[2])).toBeLessThanOrEqual(2);
+      // a three-notch flick: one frame
+      for (let k = 0; k < 3; k++) { await page.mouse.wheel(0, 100); await page.waitForTimeout(50); }
+      expect(Math.abs((await settled(page)) - tops[3])).toBeLessThanOrEqual(2);
+      // a notch up: back one frame, never left mid-frame
+      await page.mouse.wheel(0, -100);
+      expect(Math.abs((await settled(page)) - tops[2])).toBeLessThanOrEqual(2);
+      // a 30px nudge: back to the frame it started on
+      await page.mouse.wheel(0, 30);
+      expect(Math.abs((await settled(page)) - tops[2])).toBeLessThanOrEqual(2);
+      // one long move a little past a frame top: that frame, so an overshoot never builds up
+      await page.mouse.wheel(0, tops[3] - tops[2] + 30);
+      expect(Math.abs((await settled(page)) - tops[3])).toBeLessThanOrEqual(2);
+    });
+  }
+
+  test('keys step one frame per press, and paging up from the bottom lands on Get it @ 1440x700', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 700 });
     await page.goto('/');
     await page.waitForTimeout(400);
-    await page.mouse.move(720, 350);
-    const tops = await frameTops(page);
-    // 400px down from the hero: the next frame's top is within 45% -> it glides there
-    await page.mouse.wheel(0, 400);
-    expect(Math.abs((await settled(page)) - tops[1])).toBeLessThanOrEqual(2);
-    // one notch further: the frame after is far away, so the page stays where the wheel left it
-    await page.mouse.wheel(0, 100);
-    const y = await settled(page);
-    expect(y, 'pulled back to the frame top it had just left').toBeGreaterThan(tops[1] + 50);
-    expect(y).toBeLessThan(tops[2] - 50);
+    const tops = await restTops(page);
+    for (let k = 1; k <= 4; k++) {
+      await page.keyboard.press('PageDown');
+      const y = await settled(page);
+      expect(Math.abs(y - tops[k]), `PageDown ${k} rested at ${y}, frame top ${tops[k]}`).toBeLessThanOrEqual(2);
+    }
+    // from the very bottom, PageUp and Shift+Space each land on a frame top: first Get it's
+    const max = tops[tops.length - 1];
+    await page.evaluate((y) => window.scrollTo({ top: y, behavior: 'instant' }), max);
+    await page.waitForTimeout(500);
+    const getTop = await page.evaluate(() => Math.round(document.getElementById('get')!.getBoundingClientRect().top + window.scrollY - document.querySelector('.topbar')!.getBoundingClientRect().height));
+    await page.keyboard.press('PageUp');
+    expect(Math.abs((await settled(page)) - getTop), 'PageUp from the end did not land on Get it').toBeLessThanOrEqual(2);
+    for (let k = 0; k < 3; k++) {
+      await page.keyboard.press('Shift+Space');
+      const y = await settled(page);
+      expect(onAFrame(y, tops), `Shift+Space rested at ${y}, off every frame top`).toBe(true);
+    }
   });
 
   for (const vp of [{ w: 1440, h: 700 }, { w: 1440, h: 760 }]) {
@@ -86,7 +133,8 @@ test.describe('frames and the settle', () => {
       await page.waitForTimeout(600);
       await page.mouse.move(vp.w / 2, vp.h / 2);
 
-      const seen = new Set<string>();
+      // the hero is where the page starts (every rest is a frame, so the first notch already leaves it)
+      const seen = new Set<string>(['job']);
       let lastY = -1;
       let stuck = 0;
       for (let step = 0; step < 80; step++) {
@@ -147,13 +195,18 @@ test.describe('frames and the settle', () => {
     expect(tall, `sections taller than the 700px viewport: ${tall.map((s) => `${s.name}=${s.h}`).join(', ')}`).toEqual([]);
   });
 
-  test('the shared platform band fits a laptop viewport @ 1440x700', async ({ page }) => {
-    await page.setViewportSize({ width: 1440, height: 700 });
-    await page.goto('/');
-    await page.waitForTimeout(600);
-    const h = await page.evaluate(() => Math.round(document.querySelector('.same-garden')!.getBoundingClientRect().height));
-    expect(h).toBeLessThanOrEqual(700);
-  });
+  for (const vp of [{ w: 1440, h: 700 }, { w: 1920, h: 1080 }]) {
+    test(`the shared platform band is one frame tall, so Get it lands on its top @ ${vp.w}x${vp.h}`, async ({ page }) => {
+      await page.setViewportSize({ width: vp.w, height: vp.h });
+      await page.goto('/');
+      await page.waitForTimeout(600);
+      const { h, usable } = await page.evaluate(() => ({
+        h: Math.round(document.querySelector('.same-garden')!.getBoundingClientRect().height),
+        usable: innerHeight - Math.round(document.querySelector('.topbar')!.getBoundingClientRect().height),
+      }));
+      expect(Math.abs(h - usable), `band ${h}px, frame ${usable}px`).toBeLessThanOrEqual(1);
+    });
+  }
 });
 
 test.describe('no settle under reduced motion', () => {
@@ -187,16 +240,5 @@ test.describe('content is not truncated or orphaned', () => {
         .filter((r) => r.scrollW > r.clientW + 1),
     );
     expect(clipped).toEqual([]);
-  });
-
-  test('the ToS call-to-action does not strand its arrow on its own line', async ({ page }) => {
-    await page.setViewportSize({ width: 1440, height: 700 });
-    await page.goto('/');
-    await page.waitForTimeout(400);
-    const rects = await page.evaluate(() =>
-      Array.from(document.querySelector('.get-tos a')!.getClientRects()).map((r) => Math.round(r.width)),
-    );
-    expect(rects.length).toBe(1);
-    expect(rects[0]).toBeGreaterThan(40);
   });
 });
