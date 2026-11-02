@@ -17,9 +17,13 @@ describe('reassign_refused mirrors the engine', () => {
   it('a guarded read-only recon step does not make its seat an author', () => {
     expect(reassignRefusedSeats(view([scope, build, review]), 3)).toEqual(['codex']);
   });
-  it('a read step that recorded an author, or kept a tree change, still counts', () => {
-    expect(reassignRefusedSeats(view([{ ...scope, authored_by: ['claude'] }, build, review]), 3)).toEqual(['claude', 'codex']);
+  it('a read step that recorded an author counts that author, never its own seat; one that kept a tree change counts', () => {
+    expect(reassignRefusedSeats(view([{ ...scope, assigned_cli: 'pi2', authored_by: ['claude'] }, build, review]), 3)).toEqual(['claude', 'codex']);
     expect(reassignRefusedSeats(view([{ ...scope, worktree_mutation: { restored: false } }, build, review]), 3)).toEqual(['claude', 'codex']);
+  });
+  it('a restored mutation, or a team member read step, is still a read step', () => {
+    expect(reassignRefusedSeats(view([{ ...scope, worktree_mutation: { restored: true } }, build, review]), 3)).toEqual(['codex']);
+    expect(reassignRefusedSeats(view([{ ...scope, worktree_guarded: false, owner: 'team' }, build, review]), 3)).toEqual(['codex']);
   });
   it('an unguarded or code-running recon step is an author', () => {
     expect(reassignRefusedSeats(view([{ ...scope, worktree_guarded: false }, build, review]), 3)).toEqual(['claude', 'codex']);

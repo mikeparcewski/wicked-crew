@@ -1165,8 +1165,6 @@ function powerPauseOf(s: unknown): { checkpoint: number | null; why: string | nu
   return { checkpoint: typeof p.checkpoint === 'number' ? p.checkpoint : null, why: reasons[0] ?? null };
 }
 
-/** One run's computed liveness. Pure: every input is a reading. */
-
 /**
  * The step a run is on, in words a person reads (artifact-runs-fix: the voice dashboard showed
  * `wf-<run>:unit-1`). `phase_ref` is the engine's composed id, synthetic for every preset and ask
@@ -1175,13 +1173,19 @@ function powerPauseOf(s: unknown): { checkpoint: number | null; why: string | nu
  * entry, then the stage.
  */
 export function stepWordsOf(unit: { id?: unknown; phase_ref?: unknown; catalog?: unknown; stage?: unknown }, sessionId: string): string | null {
-  const synthetic = (step: string): boolean => /^unit-\d+(?::a\d+)?$/.test(step);
-  const id = str(unit.id);
-  const fromId = id !== undefined && id.startsWith(`${sessionId}:`) ? id.slice(sessionId.length + 1) : undefined;
-  const ref = str(unit.phase_ref);
-  const fromRef = ref === undefined ? undefined : ref.includes(':') ? ref.slice(ref.indexOf(':') + 1) : ref;
-  const named = [fromId, fromRef].find((s): s is string => s !== undefined && s !== '' && !synthetic(s));
-  const words = named ?? str(unit.catalog) ?? str(unit.stage);
+  // The engine numbers a step it did not name: `unit-N` (composed plans, `:aN` for a re-plan) or `uN` (a plan
+  // with no workflow definition). A remainder that still holds a colon is a shape this does not know.
+  const named = (step: string | undefined): string | undefined =>
+    step !== undefined && step !== '' && !step.includes(':') && !/^(?:unit-\d+|u\d+)$/.test(step) ? step : undefined;
+  const after = (value: string | undefined, prefixes: string[]): string | undefined => {
+    if (value === undefined) return undefined;
+    const p = prefixes.find((x) => value.startsWith(x));
+    const rest = p === undefined ? value : value.slice(p.length);
+    return rest.replace(/:a\d+$/, '');
+  };
+  const fromId = after(str(unit.id), [`${sessionId}:`]);
+  const fromRef = after(str(unit.phase_ref), [`wf-${sessionId}:`, `${sessionId}:`]);
+  const words = named(str(unit.id)?.startsWith(`${sessionId}:`) === true ? fromId : undefined) ?? named(fromRef) ?? str(unit.catalog) ?? str(unit.stage);
   return words === undefined ? null : words.replace(/[-_]+/g, ' ');
 }
 

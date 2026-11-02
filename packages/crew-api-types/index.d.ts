@@ -9925,7 +9925,9 @@ export interface SystemRun {
   liveness: SystemRunLiveness;
   /** Plain-words why ("waiting on you: plan approval", "no event for 42 min"). */
   reason: string;
-  /** The cursor unit's phase (`phase_ref`, else `stage`); `null` before planning. */
+  /** The step the cursor unit is on, as display words: the step id its unit id names (`answer-1` → `answer 1`),
+   *  else a named `phase_ref`, else its catalog entry, else its `stage`; an engine-numbered step (`unit-N`, `uN`)
+   *  never shows. `null` before planning. */
   phase: string | null;
   /** The cursor unit's ord; `null` when none is in flight. */
   unitOrd: number | null;

@@ -296,6 +296,11 @@ describe('the step a run is on, in words (artifact-runs-fix: the voice dashboard
     expect(stepWordsOf({ id: 'r1:unit-3', phase_ref: 'wf-r1:unit-3', stage: 'review' }, 'r1')).toBe('review');
     expect(stepWordsOf({ phase_ref: 'build' }, 'r1')).toBe('build');
     expect(stepWordsOf({}, 'r1')).toBeNull();
+    // A plan with no workflow definition numbers its units `uN` (review r1).
+    expect(stepWordsOf({ id: 'r:u1', phase_ref: 'wf-r:unit-1', stage: 'build' }, 'r')).toBe('build');
+    // A campaign run id holds colons: the known prefix is stripped whole (review r1).
+    expect(stepWordsOf({ id: 'camp:node:a0:unit-3', phase_ref: 'wf-camp:node:a0:unit-3', catalog: 'critique' }, 'camp:node:a0')).toBe('critique');
+    expect(stepWordsOf({ id: 'camp:node:a0:draft', phase_ref: 'wf-camp:node:a0:unit-1' }, 'camp:node:a0')).toBe('draft');
   });
 });
 
