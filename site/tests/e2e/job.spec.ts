@@ -4,6 +4,7 @@ import { bringIntoView } from './utils';
 /**
  * The hero's job demo, driven the way a visitor drives it: a job through plan, build, review (with a
  * dispute a council settles), QE acceptance and delivery; gate receipts; a crash and a resume.
+ * It paints the finished job first (the poster), then replays once it is 40% visible.
  */
 
 async function atQe(page: Page) {
@@ -15,6 +16,31 @@ async function atQe(page: Page) {
 }
 
 test.describe('the job demo', () => {
+  test('the first frame is the finished job: every gate passed, the delivery receipt open, the PR lit', async ({ page }) => {
+    await page.goto('/');
+    const job = page.locator('[data-job]');
+    await expect(job.locator('[data-panel]')).toContainText('DELIVERED');
+    await expect(job.locator('[data-panel]')).toContainText('#42 from wicked/r-4f2a');
+    await expect(job.locator('[data-pr]')).toHaveClass(/is-lit/);
+    for (const k of [0, 1, 2, 3, 4]) await expect(job.locator(`[data-st="${k}"]`)).toHaveClass(/is-done/);
+    await expect(job.locator('[data-log] .ln').last()).toContainText('evidence bundle ready');
+    await expect(job.locator('[data-caption]')).toContainText('A pull request, with receipts.');
+    // intent in, gated work out: the two ends of the track
+    await expect(job.locator('.io--in')).toContainText('add rate limiting to the public API');
+  });
+
+  test('a keyboard Run keeps focus on Run, and the caption follows the job', async ({ page }) => {
+    await page.goto('/');
+    const job = page.locator('[data-job]');
+    const run = job.locator('[data-job-run]');
+    await run.focus();
+    await page.keyboard.press('Enter');
+    await expect(run).toHaveAttribute('aria-disabled', 'true');
+    await expect(run, 'focus dropped to <body> when Run stopped accepting clicks').toBeFocused();
+    await expect(job.locator('[data-caption]')).toContainText('Claude Code builds it in its sandbox.', { timeout: 10_000 });
+    await expect(job.locator('[data-pr]')).not.toHaveClass(/is-lit/);
+  });
+
   test('runs plan, build and review, with a council settling the dispute, then waits on QE', async ({ page }) => {
     const job = await atQe(page);
     const log = job.locator('[data-log]');
@@ -62,7 +88,8 @@ test.describe('the job demo', () => {
     const job = page.locator('[data-job]');
     await bringIntoView(job);
     const log = job.locator('[data-log]');
-    await expect(log).toContainText('container started', { timeout: 15_000 });
+    // the poster already shows the finished log: wait for the replay to reach Build
+    await expect(job.locator('[data-caption]')).toContainText('Claude Code builds it', { timeout: 15_000 });
     await job.getByRole('button', { name: 'Kill the daemon' }).click();
     await expect(log).toContainText('daemon killed mid-job');
     const linesAtKill = await log.locator('.ln').count();

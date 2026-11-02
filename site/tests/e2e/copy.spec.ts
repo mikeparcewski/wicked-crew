@@ -65,29 +65,41 @@ test.describe('the reviewed messaging', () => {
   test('the kicker, the sub-line, the benefits and what is new read as whole sentences', async ({ page }) => {
     await page.goto('/');
     await expect(page.locator('.hero-kicker')).toHaveText('Intent in. Gated work out.');
-    await expect(page.locator('.lede')).toContainText('approved by default, not verified');
-    const why = (await page.locator('.why').innerText()).replace(/\s+/g, ' ');
-    expect(why).toContain('Your agents, sandboxed. By default each runs in a sandbox');
-    expect(why).toContain('up to three hand-off attempts in all');
-    expect(why).toContain('a feature, bug fix, migration, MCP server or editor plugin pass QE acceptance first');
+    await expect(page.locator('.lede')).toContainText('is labelled approved by default, not verified.');
+    // the three benefits now lead the beats they describe (Build, Review, Gate); textContent, because
+    // the explorables keep every state in the DOM and show one at a time
+    const text = async (sel: string) => ((await page.locator(sel).textContent()) || '').replace(/\s+/g, ' ');
+    expect(await text('#build')).toContain('Your agents, sandboxed. By default each runs in a sandbox');
+    expect(await text('#build')).toContain('Keys stay in a broker and the sandbox sees placeholders. A Claude subscription’s sign-in token is the one exception');
+    expect(await text('#build')).toContain('No billing, no reselling.');
+    expect(await text('#review')).toContain('A failed check sends work back, waits for you or stops the job.');
+    expect(await text('#review')).toContain('up to three hand-off attempts in all');
+    expect(await text('#gate')).toContain('a feature, bug fix, migration, MCP server or editor plugin pass QE acceptance first');
+    expect(await text('#gate')).toContain('By default, a different agent reviews the work.');
+    for (const label of ['approved by default, not verified', 'floor only', 'reduced assurance', 'QE acceptance skipped by operator']) {
+      await expect(page.locator('#gate .rcx-pick')).toContainText(label);
+    }
     // each row is exactly "<name> <line>": the space between them is the guard
     const news = (await page.locator('.news-list li').allTextContents()).map((t) => t.replace(/\s+/g, ' ').trim());
     expect(news.length).toBe(6);
-    expect(news[0]).toMatch(/^Power mode On by default/);
-    expect(news[3]).toMatch(/^Voice Transcription on your machine/);
-    expect(news[5]).toMatch(/^Sandbox images On Docker/);
-    // crew's own sections; the shared family map (.same-garden) renders the pinned wicked-web's
-    // copy, which wicked-web#46/#47 fixed and the restyle PR's re-pin brings in
+    expect(news[0]).toMatch(/^01 Power mode On by default/);
+    expect(news[3]).toMatch(/^04 Voice Transcription on your machine/);
+    expect(news[5]).toMatch(/^06 Sandbox images On Docker/);
+    // What's new comes after the proofs
+    const order = await page.evaluate(() => Array.from(document.querySelectorAll('section[id]')).map((s) => s.id));
+    expect(order.indexOf('news')).toBeGreaterThan(order.indexOf('deliver'));
+    // crew's own sections; the shared family map (.same-garden) renders the pinned wicked-web's copy
     const own = await page.evaluate(() =>
-      Array.from(document.querySelectorAll('main section, body > section'))
+      Array.from(document.querySelectorAll('main section, body > section, .finale > section'))
         .filter((s) => !s.closest('.same-garden'))
-        .map((s) => (s as HTMLElement).innerText)
+        .map((s) => (s as HTMLElement).textContent || '')
         .join(' ')
         .replace(/\s+/g, ' '),
     );
     expect(own.length).toBeGreaterThan(1000);
     expect(own).not.toMatch(/never claimed|never asserted/i);
     expect(own).not.toMatch(/one failed check stops/i);
-    await expect(page.locator('.tbl--layers')).toContainText('By default, a different agent reviews the work.');
+    // one sandbox heading, not two
+    expect(own).not.toContain('Your agents, in sandboxes.');
   });
 });

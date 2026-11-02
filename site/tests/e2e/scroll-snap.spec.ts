@@ -1,82 +1,97 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 
 /**
- * Scroll-snap reachability.
+ * Frames lock in without ever fighting the wheel.
  *
- * The site used to set `scroll-snap-type: y mandatory`, overriding the shared
- * chrome's `y proximity`. Under `mandatory` the viewport may not come to rest
- * anywhere that is not a snap point, so:
- *   - any section taller than the viewport had its lower half made unreachable;
- *   - at 1440x760 the page did not scroll at all — from the top, one 320px wheel
- *     notch landed nearer the hero's snap point than the next section's, so the
- *     browser dragged the viewport straight back to y=0. Three notches, scrollY
- *     never left 0, eleven of twelve sections unreachable by mouse.
- * Same defect and same fix as wicked-studio#132.
+ * History: `mandatory` snap made the page unscrollable at 1440x760 (crew#337, wicked-studio#132);
+ * `proximity` fixed that, but Chromium's proximity captures anything within a third of a frame, so
+ * slow 100px wheel notches from a frame top were pulled straight back to it: ten notches left scrollY
+ * at 0 at 1440x700 and at 1920x1080. The page now has ONE mechanism instead (src/scripts/settle.js):
+ * CSS snap is off, and when a user scroll comes to rest the page glides to the next frame top in the
+ * direction of travel, only when that top is within 45% of a frame.
  *
- * These tests drive the page with REAL wheel events (page.mouse.wheel). That is
- * load-bearing: window.scrollBy() emits no wheel event and bypasses the snap
- * machinery entirely, so it passes happily on a page that is frozen in the hand.
+ * These tests drive the page with REAL wheel events (page.mouse.wheel). window.scrollBy() emits no
+ * wheel event and bypasses the scroll machinery entirely.
  */
 
-/** Every section that must be reachable, in document order. */
-const SECTIONS = [
-  'hero', 'sandbox', 'gates', 'council', 'durable', 'same-garden', 'get', 'footer',
-];
+/** Every block that must be reachable, in document order (id, or the first class name). */
+const SECTIONS = ['job', 'build', 'review', 'gate', 'deliver', 'news', 'same-garden', 'get', 'footer'];
 
-const VIEWPORTS = [
-  { w: 1440, h: 700 },
-  { w: 1440, h: 760 },
-];
+const nameOf = `(el) => el.id || String(el.className).split(' ')[0]`;
 
-test.describe('scroll-snap reachability', () => {
-  for (const vp of VIEWPORTS) {
-    test(`snap is soft and every section has a snap point @ ${vp.w}x${vp.h}`, async ({ page }) => {
+async function settled(page: Page) {
+  // wait for the wheel's own scroll and any settle glide to finish
+  let last = -1;
+  for (let k = 0; k < 30; k++) {
+    await page.waitForTimeout(120);
+    const y = await page.evaluate(() => Math.round(window.scrollY));
+    if (y === last) return y;
+    last = y;
+  }
+  return last;
+}
+async function frameTops(page: Page) {
+  return page.evaluate(() => {
+    const tb = document.querySelector('.topbar')!.getBoundingClientRect().height;
+    return Array.from(document.querySelectorAll('[data-frame], .same-garden, .footer')).map((el) =>
+      Math.round(el.getBoundingClientRect().top + window.scrollY - tb));
+  });
+}
+
+test.describe('frames and the settle', () => {
+  test('CSS snap is off: one mechanism, and every frame is a frame @ 1440x700', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 700 });
+    await page.goto('/');
+    expect(await page.evaluate(() => getComputedStyle(document.documentElement).scrollSnapType)).toBe('none');
+    const names = await page.evaluate(`Array.from(document.querySelectorAll('[data-frame]')).map(${nameOf})`);
+    expect(names).toEqual(['job', 'build', 'review', 'gate', 'deliver', 'news', 'get']);
+  });
+
+  for (const vp of [{ w: 1440, h: 700 }, { w: 1920, h: 1080 }]) {
+    test(`ten slow 100px wheel notches get past the hero @ ${vp.w}x${vp.h}`, async ({ page }) => {
       await page.setViewportSize({ width: vp.w, height: vp.h });
       await page.goto('/');
-
-      // `y proximity` serializes to `y` (proximity is the initial strictness).
-      // The assertion that matters is that it is NOT mandatory.
-      const snapType = await page.evaluate(
-        () => getComputedStyle(document.documentElement).scrollSnapType,
-      );
-      expect(snapType).not.toContain('mandatory');
-      expect(snapType).toBe('y');
-
-      // DEFECT 2: a section with scroll-snap-align:none is scrolled straight
-      // past. Snap points are assigned structurally now, so enumerate the DOM
-      // rather than a hardcoded list — a section added later is covered too.
-      const noSnap = await page.evaluate(() =>
-        Array.from(document.querySelectorAll('section'))
-          .filter((el) => getComputedStyle(el).scrollSnapAlign === 'none')
-          .map((el) => String(el.className).split(' ')[0] || el.tagName),
-      );
-      expect(noSnap).toEqual([]);
+      await page.waitForTimeout(400);
+      await page.mouse.move(vp.w / 2, vp.h / 2);
+      for (let k = 0; k < 10; k++) {
+        await page.mouse.wheel(0, 100);
+        await page.waitForTimeout(300);
+      }
+      const y = await settled(page);
+      const tops = await frameTops(page);
+      expect(y, `scrollY ${y}: the wheel was pulled back to the hero`).toBeGreaterThanOrEqual(tops[1] - 2);
     });
+  }
 
-    test(`mouse wheel reaches every section @ ${vp.w}x${vp.h}`, async ({ page }) => {
+  test('a settle goes the way you scroll, never back @ 1440x700', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 700 });
+    await page.goto('/');
+    await page.waitForTimeout(400);
+    await page.mouse.move(720, 350);
+    const tops = await frameTops(page);
+    // 400px down from the hero: the next frame's top is within 45% -> it glides there
+    await page.mouse.wheel(0, 400);
+    expect(Math.abs((await settled(page)) - tops[1])).toBeLessThanOrEqual(2);
+    // one notch further: the frame after is far away, so the page stays where the wheel left it
+    await page.mouse.wheel(0, 100);
+    const y = await settled(page);
+    expect(y, 'pulled back to the frame top it had just left').toBeGreaterThan(tops[1] + 50);
+    expect(y).toBeLessThan(tops[2] - 50);
+  });
+
+  for (const vp of [{ w: 1440, h: 700 }, { w: 1440, h: 760 }]) {
+    test(`the mouse wheel reaches every section @ ${vp.w}x${vp.h}`, async ({ page }) => {
       await page.setViewportSize({ width: vp.w, height: vp.h });
       await page.goto('/');
       await page.waitForTimeout(600);
-
-      await page.evaluate(() => {
-        (window as any).__ends = 0;
-        window.addEventListener('scrollend', () => { (window as any).__ends++; });
-      });
       await page.mouse.move(vp.w / 2, vp.h / 2);
 
       const seen = new Set<string>();
       let lastY = -1;
       let stuck = 0;
-
       for (let step = 0; step < 80; step++) {
-        const n = await page.evaluate(() => (window as any).__ends);
         await page.mouse.wheel(0, 320);
-        // Wait for the scroll to settle (incl. any snap correction) before reading.
-        await page
-          .waitForFunction((prev) => (window as any).__ends > prev, n, { timeout: 1200 })
-          .catch(() => {});
-        await page.waitForTimeout(110);
-
+        await settled(page);
         const cur = await page.evaluate((vh) => {
           const els = Array.from(document.querySelectorAll('section, .same-garden, .footer'));
           let best = '';
@@ -84,19 +99,15 @@ test.describe('scroll-snap reachability', () => {
           for (const el of els) {
             const r = el.getBoundingClientRect();
             const vis = Math.min(r.bottom, vh) - Math.max(r.top, 0);
-            if (vis > bestVis) { bestVis = vis; best = String((el as HTMLElement).className).split(' ')[0]; }
+            if (vis > bestVis) { bestVis = vis; best = el.id || String((el as HTMLElement).className).split(' ')[0]; }
           }
           return {
             y: Math.round(window.scrollY),
             best,
-            atEnd: Math.ceil(window.scrollY + window.innerHeight)
-              >= document.documentElement.scrollHeight - 2,
+            atEnd: Math.ceil(window.scrollY + window.innerHeight) >= document.documentElement.scrollHeight - 2,
           };
         }, vp.h);
-
         seen.add(cur.best);
-
-        // Under the old `mandatory` this tripped at y=0 on the third notch.
         if (cur.y === lastY) {
           stuck++;
           expect(stuck, `wheel made no progress — stuck at scrollY=${cur.y} after ${step} notches`).toBeLessThan(3);
@@ -106,61 +117,57 @@ test.describe('scroll-snap reachability', () => {
         lastY = cur.y;
         if (cur.atEnd) break;
       }
-
       const missed = SECTIONS.filter((s) => !seen.has(s));
       expect(missed, `sections never reachable by mouse wheel: ${missed.join(', ')}`).toEqual([]);
     });
   }
 
-  test('no section overflows the viewport by more than a wheel notch @ 1440x700', async ({ page }) => {
+  test('a keyboard focus that scrolls the page is never moved by the settle @ 1440x700', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 700 });
+    await page.goto('/');
+    await page.waitForTimeout(400);
+    // Tab to the first sandbox hotspot: the browser scrolls it into view; the settle must not move it away
+    await page.locator('[data-hot="repo"]').focus();
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Shift+Tab');
+    await settled(page);
+    await expect(page.locator('[data-hot="repo"]')).toBeFocused();
+    await expect(page.locator('[data-hot="repo"]')).toBeInViewport();
+  });
+
+  test('no frame overflows the viewport @ 1440x700', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 700 });
     await page.goto('/');
     await page.waitForTimeout(600);
-
     const tall = await page.evaluate(() =>
-      Array.from(document.querySelectorAll('section, .same-garden, .footer'))
-        .map((el) => ({
-          name: String((el as HTMLElement).className).split(' ')[0],
-          h: Math.round(el.getBoundingClientRect().height),
-        }))
+      Array.from(document.querySelectorAll('section, .same-garden'))
+        .map((el) => ({ name: el.id || String((el as HTMLElement).className).split(' ')[0], h: Math.round(el.getBoundingClientRect().height) }))
         .filter((s) => s.h > window.innerHeight),
     );
-
-    // No exceptions — crew#337 recovered even .console-sec (was 804px) from
-    // type, spacing and copy without squashing the gate console. The stronger
-    // content-vs-usable-height guard lives in sections-fit.spec.ts; this one
-    // keeps the coarse box-vs-viewport regression net.
-    expect(
-      tall,
-      `sections taller than the 700px viewport: ${tall.map((s) => `${s.name}=${s.h}`).join(', ')}`,
-    ).toEqual([]);
+    expect(tall, `sections taller than the 700px viewport: ${tall.map((s) => `${s.name}=${s.h}`).join(', ')}`).toEqual([]);
   });
 
   test('the shared platform band fits a laptop viewport @ 1440x700', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 700 });
     await page.goto('/');
     await page.waitForTimeout(600);
-
-    // Regression guard on the re-pinned chrome: this band was 1115px (415px
-    // past the fold) before wicked-web#28 brought it to ~686px.
-    const h = await page.evaluate(
-      () => Math.round(document.querySelector('.same-garden')!.getBoundingClientRect().height),
-    );
+    const h = await page.evaluate(() => Math.round(document.querySelector('.same-garden')!.getBoundingClientRect().height));
     expect(h).toBeLessThanOrEqual(700);
-    expect(h).toBeLessThan(760);
   });
 });
 
-test.describe('scroll-snap under reduced motion', () => {
-  // wicked-web#31: snapping moves the viewport for you, the motion the preference asks the page to
-  // suppress. crew.css re-declares `scroll-snap-type` on html after the chrome's guard, so it carries
-  // the guard too; assert at a desktop width, where snapping would otherwise be on (`y`).
+test.describe('no settle under reduced motion', () => {
+  // The settle moves the viewport for you: the motion the preference asks the page to suppress.
   test.use({ contextOptions: { reducedMotion: 'reduce' } });
 
-  test('no scroll snapping under prefers-reduced-motion @ 1440x700', async ({ page }) => {
+  test('the page stays where the wheel left it @ 1440x700', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 700 });
     await page.goto('/');
-    expect(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches)).toBe(true);
+    await page.waitForTimeout(400);
+    await page.mouse.move(720, 350);
+    await page.mouse.wheel(0, 400);
+    const y = await settled(page);
+    expect(Math.abs(y - 400)).toBeLessThanOrEqual(2);
     expect(await page.evaluate(() => getComputedStyle(document.documentElement).scrollSnapType)).toBe('none');
   });
 });
@@ -170,12 +177,9 @@ test.describe('content is not truncated or orphaned', () => {
     await page.setViewportSize({ width: 1440, height: 700 });
     await page.goto('/');
     await page.waitForTimeout(400);
-
-    // Was: scrollWidth 630 inside clientWidth 541 — "· ships the `wicked` CLI"
-    // was cut off, reachable only by scrolling a code block sideways.
     const clipped = await page.evaluate(() =>
-      Array.from(document.querySelectorAll('.install__code')).
-        map((el) => ({
+      Array.from(document.querySelectorAll('.install__code'))
+        .map((el) => ({
           text: (el.textContent || '').trim().slice(0, 40),
           scrollW: (el as HTMLElement).scrollWidth,
           clientW: (el as HTMLElement).clientWidth,
@@ -189,8 +193,6 @@ test.describe('content is not truncated or orphaned', () => {
     await page.setViewportSize({ width: 1440, height: 700 });
     await page.goto('/');
     await page.waitForTimeout(400);
-
-    // Was: 2 client rects, the second only 16px wide — a lone "→".
     const rects = await page.evaluate(() =>
       Array.from(document.querySelector('.get-tos a')!.getClientRects()).map((r) => Math.round(r.width)),
     );
