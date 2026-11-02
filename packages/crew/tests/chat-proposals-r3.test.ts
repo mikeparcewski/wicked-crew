@@ -45,6 +45,12 @@ describe('the cost rule (runCostFromEvents)', () => {
       { type: 'unitDispatched', ord: 1, attempt: 0 }, { type: 'cliUsage', ord: 1, attempt: 0, costUsd: 0.25 },
       { type: 'unitDispatched', ord: 1, attempt: 1 }, { type: 'cliUsage', ord: 1, attempt: 1, costUsd: 0.5 },
     ])).toBeCloseTo(0.75);
+    // A lost MIDDLE attempt (0 and 2 priced, 1 gone) is unknown too.
+    (retried.units[0] as unknown as { last_attempt: number }).last_attempt = 2;
+    expect(runCostFromEvents(retried, [
+      { type: 'unitDispatched', ord: 1, attempt: 0 }, { type: 'cliUsage', ord: 1, attempt: 0, costUsd: 0.25 },
+      { type: 'unitDispatched', ord: 1, attempt: 2 }, { type: 'cliUsage', ord: 1, attempt: 2, costUsd: 0.5 },
+    ])).toBeNull();
   });
 });
 

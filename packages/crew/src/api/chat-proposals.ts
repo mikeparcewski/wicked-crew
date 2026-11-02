@@ -407,10 +407,12 @@ export function runCostFromEvents(view: SessionView, events: ReadonlyArray<Recor
   }
   if (agentOrds.some((o) => !byOrd.has(o))) return null;
   if ([...dispatched].some((k) => !priced.has(k))) return null;
-  // The unit's durable attempt counter outranks a log that may have lost a later attempt (a crash): it must be priced.
+  // The unit's durable attempt counter outranks a log that may have lost an attempt (a crash): EVERY attempt up to it
+  // must be priced.
   for (const u of view.units) {
     const last = (u as unknown as { last_attempt?: unknown }).last_attempt;
-    if (agentOrds.includes(u.ord) && typeof last === 'number' && !priced.has(`${u.ord}:${last}`)) return null;
+    if (!agentOrds.includes(u.ord) || typeof last !== 'number' || !Number.isInteger(last) || last < 0) continue;
+    for (let a = 0; a <= last; a += 1) if (!priced.has(`${u.ord}:${a}`)) return null;
   }
   return agentOrds.reduce((sum, o) => sum + (byOrd.get(o) ?? 0), 0);
 }
@@ -542,7 +544,12 @@ const LOCAL_HOSTS: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '[::
 /** Every http(s) address in the person's words, whole (trailing sentence punctuation dropped). */
 function personUrls(words: string): Set<string> {
   const out = new Set<string>();
-  for (const m of words.matchAll(/https?:\/\/[^\s"'<>`]+/gu)) out.add(m[0].replace(/[.,;:!?)\]}]+$/u, ''));
+  for (const m of words.matchAll(/https?:\/\/[^\s"'<>`]+/gu)) {
+    // Sentence punctuation after an address is not part of it; a bracketed IPv6 host's own ']' is.
+    let url = m[0].replace(/[.,;:!?)}]+$/u, '');
+    if (url.endsWith(']') && !/^https?:\/\/\[[^\]]*\]$/u.test(url)) url = url.replace(/\]+$/u, '');
+    out.add(url);
+  }
   return out;
 }
 
@@ -990,23 +997,32 @@ export class ChatProposals {
           strike(token, `run ${short}`, 'not a run id');
           continue;
         }
-        const hex = /^[0-9a-fA-F-]+$/.test(want);
-        const matches = (full: string): boolean => full === want || full.startsWith(want) || (hex && (full.toLowerCase() === want.toLowerCase() || full.toLowerCase().startsWith(want.toLowerCase())));
+        // A1's rules: a custom id only by its exact spelling; a hex id exactly in any case; a hex prefix of 8+ digits.
+        const hex = /^[0-9a-fA-F][0-9a-fA-F-]*$/.test(want);
+        const low = want.toLowerCase();
+        const pick = (ids: readonly string[]): string[] => {
+          const exact = ids.filter((id) => id === want);
+          if (exact.length > 0) return exact;
+          if (!hex) return [];
+          const ci = ids.filter((id) => id.toLowerCase() === low);
+          if (ci.length > 0) return ci;
+          return low.replace(/-/g, '').length >= 8 ? ids.filter((id) => id.toLowerCase().startsWith(low)) : [];
+        };
         // Authorized before anything of it is read: a seat's token is matched against the runs the person named in
         // this chat (full ids), never against every run on the daemon — an unnamed id learns nothing of what exists.
         // A source the person adds is theirs to name, and is looked up.
         let candidates: string[];
         if (ctx.personNamed) {
-          candidates = (await allRuns()).map((v) => v.session.id).filter(matches);
+          candidates = pick((await allRuns()).map((v) => v.session.id));
         } else {
-          candidates = (ctx.binding?.named.runs ?? []).filter(matches);
+          candidates = pick(ctx.binding?.named.runs ?? []);
           if (candidates.length === 0) {
             strike(`run:${want}`, `run ${short}`, 'not named in this chat');
             continue;
           }
         }
-        const hit = candidates.includes(want) ? want : candidates.length === 1 ? candidates[0]! : null;
-        if (candidates.length > 1 && !candidates.includes(want)) {
+        const hit = candidates.length === 1 ? candidates[0]! : null;
+        if (candidates.length > 1) {
           strike(`run:${want}`, `run ${short}`, 'matches more than one run');
           continue;
         }

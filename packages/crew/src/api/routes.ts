@@ -4341,12 +4341,12 @@ export function registerRoutes(
     projectName: async (projectId) => (await adapter.projectGet(projectId).catch(() => null))?.name ?? null,
     attachments: (chatId) => chatAttachments.list(chatId).map((a) => ({ id: a.id, name: a.name })),
     workflowSteps: async (name, projectId) => {
-      const phases = adapter.getWorkflow(name)?.phases;
-      if (phases !== undefined && phases.length > 0) return phases.length;
-      // The preset a launch in this project resolves: a project row wins over a global one.
+      // The preset a launch in this project resolves first (a project row wins over a global one), then the def.
       const presets = await adapter.listPresets(projectId ?? undefined).catch(() => [] as Preset[]);
       const preset = presets.find((p) => p.name === name && p.scope !== 'global') ?? presets.find((p) => p.name === name);
-      return preset !== undefined && preset.steps.length > 0 ? preset.steps.length : null;
+      if (preset !== undefined && preset.steps.length > 0) return preset.steps.length;
+      const phases = adapter.getWorkflow(name)?.phases;
+      return phases !== undefined && phases.length > 0 ? phases.length : null;
     },
     runCostUsd: proposalCosts,
     registry: proposalLaunchers,

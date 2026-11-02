@@ -539,6 +539,23 @@ describe('r3', () => {
       ['run:x', 'ok'],
       ['run:29bbbfb1-aaaa-4000-8000-000000000001', 'ok'],
     ]);
+    // A custom id's prefix is not it; a full uuid in capitals wins over a longer id it prefixes.
+    r.runs.push(run('29bbbfb1-aaaa-4000-8000-000000000001-2'));
+    const t2 = chatWith(r, 'c2', { namedRuns: ['Run_Alpha', '29bbbfb1-aaaa-4000-8000-000000000001', '29bbbfb1-aaaa-4000-8000-000000000001-2'] });
+    const q = await propose(r, 'c2', t2, { entry: 'presentation', sources: ['run:Run_Al', 'run:29BBBFB1-AAAA-4000-8000-000000000001'] });
+    expect(q?.sources.map((s) => [s.token, s.status])).toStrictEqual([
+      ['run:Run_Al', 'struck'],
+      ['run:29bbbfb1-aaaa-4000-8000-000000000001', 'ok'],
+    ]);
+  });
+
+  it('a bracketed IPv6 localhost address the person gave is theirs, with or without punctuation after it', async () => {
+    const r = rig();
+    for (const words of ['Record http://[::1]:5173/app', 'Record http://[::1]:5173/app.']) {
+      const id = `v6-${words.length}`;
+      const t = chatWith(r, id, { words });
+      expect((await propose(r, id, t, { entry: 'demo-video', url: 'http://[::1]:5173/app', audience: 'a', show: 's' }))?.blocked, words).toBeNull();
+    }
   });
 });
 
