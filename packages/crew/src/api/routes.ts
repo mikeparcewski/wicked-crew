@@ -3970,9 +3970,6 @@ export function registerRoutes(
           return reply.code(409).send({ code: 'seed_binding_unreadable', error: `what ${seed.ref} was made about cannot be read; open the chat without it` });
         }
         const bound = grounding?.repoRefs ?? [];
-        if (bound.length > 32) {
-          return reply.code(400).send({ code: 'seed_too_many_repos', error: `${seed.ref} was made about ${bound.length} repositories; a chat reads at most 32` });
-        }
         if (b.projectId !== undefined && bound.length > 0) {
           const members = new Set((await projectRepoCandidates(adapter, b.projectId)).map((r) => r.repoRef));
           const outside = bound.filter((r) => !members.has(r));
@@ -3991,6 +3988,11 @@ export function registerRoutes(
           ? scopeKind === undefined || scopeKind === 'repo' || scopeKind === 'repos' || scopeKind === 'system' || scopeKind === 'none'
           : scopeKind === undefined || scopeKind === 'repo' || scopeKind === 'repos';
         if (requestedRefs.length === 0 && bound.length > 0 && seedable) {
+          // Only where the binding becomes the chat's repository list does a chat's limit apply (an `everything` or
+          // `project` chat, or one that names its own repositories, reads its own scope whatever the binding holds).
+          if (bound.length > 32) {
+            return reply.code(400).send({ code: 'seed_too_many_repos', error: `${seed.ref} was made about ${bound.length} repositories; a chat reads at most 32 — open it in its project or across all repositories` });
+          }
           requestedRefs.push(...bound);
           if (scopeKind === 'system' || scopeKind === 'none') scopeKind = undefined;
         }

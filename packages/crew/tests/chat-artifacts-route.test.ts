@@ -362,6 +362,9 @@ describe('chat sees artifacts and runs (server, A1)', () => {
     expect((await open(app, { chatId: 'seed-i1', projectId: 'mikes', clis: ['claude'], seedFromArtifact: 'mikes/inferred-out' })).json()).toMatchObject({ code: 'seed_out_of_scope' });
     doc('too-wide', { project_id: 'mikes', repo_refs: [], grounding: { repo_refs: Array.from({ length: 33 }, (_, i) => `r-${i}`), source: 'brief', skipped: [], member_count: 33 } });
     expect((await open(app, { chatId: 'seed-i2', clis: ['claude'], seedFromArtifact: 'mikes/too-wide' })).json()).toMatchObject({ code: 'seed_too_many_repos' });
+    // Where the binding does not become the chat's list, its width does not matter.
+    expect((await open(app, { chatId: 'seed-i2b', clis: ['claude'], scopeKind: 'everything', seedFromArtifact: 'mikes/too-wide' })).statusCode).toBe(201);
+    expect((await open(app, { chatId: 'seed-i2c', clis: ['claude'], repoRefs: ['r-in'], seedFromArtifact: 'mikes/too-wide' })).statusCode).toBe(201);
     doc('garbled', { project_id: 'mikes', repo_refs: 'r-in' });
     const garbled = await open(app, { chatId: 'seed-i3', projectId: 'mikes', clis: ['claude'], seedFromArtifact: 'mikes/garbled' });
     expect(garbled.statusCode).toBe(409);
