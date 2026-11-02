@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest';
 import type { ArtifactProposal, ChatTranscriptRecord } from '../src/core/types.js';
 import { DecisionFenceFilter, splitMakeBlocks } from '../src/decisions/chat-recorder.js';
 import { ChatTranscriptStore } from '../src/api/chat-transcripts.js';
-import { chatMakeLines, chatScopeStatement, chatWorkRequestLines, type MakeDigest } from '../src/api/chat-scope.js';
+import { chatMakeDigest, chatMakeLines, chatScopeStatement, chatWorkRequestLines, type MakeDigest } from '../src/api/chat-scope.js';
 import {
   foldProposals,
   LaunchOnceRegistry,
@@ -186,6 +186,16 @@ describe('what the seat is told (per message, advertised operations only)', () =
 
   it('an analysis chat proposes nothing', () => {
     expect(chatWorkRequestLines(scope, { analysis: true, make: all }).join('\n')).not.toContain('wicked-make');
+  });
+
+  it('the per-message digest names what can be made now and the propose-never-write rule; nothing when nothing is on', () => {
+    expect(chatMakeDigest(none)).toBe('');
+    expect(chatMakeDigest(undefined)).toBe('');
+    const d = chatMakeDigest(all);
+    expect(d).toContain('presentation (`presentation`)');
+    expect(d).toContain('a demo video of an app on this machine');
+    expect(d).toContain('Do not');
+    expect(d).toContain('write it in your reply');
   });
 
   it('the statement every answer step carries includes the rules', () => {

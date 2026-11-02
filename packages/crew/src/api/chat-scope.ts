@@ -819,6 +819,28 @@ export function chatMakeLines(make: MakeDigest): string[] {
   return lines;
 }
 
+/**
+ * DES-CHAT-ARTIFACTS-001 §4.1 (A2): the per-message digest that rides after the person's words (beside the turn's
+ * context block): what this chat can make right now, and the one rule that matters most at the moment of answering.
+ * `''` when nothing is advertised.
+ */
+export function chatMakeDigest(make: MakeDigest | undefined): string {
+  if (!makesAnything(make)) return '';
+  const can: string[] = [];
+  if (make.create) can.push(...make.entries.filter((e) => e.kind === 'document').map((e) => `${e.title.toLowerCase()} (\`${e.id}\`)`));
+  if (make.demo && make.entries.some((e) => e.kind === 'demo')) can.push('a demo video of an app on this machine (`demo-video`)');
+  if (make.refine) can.push('a change to a document that is open or named in this chat');
+  if (make.theme) can.push('a studio theme');
+  return [
+    '### What this chat can make now (crew)',
+    '',
+    `Studio can make: ${can.join('; ')}. If the message above asks for one of these, PROPOSE it: a sentence or two`,
+    'on what it would contain, then the `wicked-make` block from "Making documents, slides, pages and demos". Do not',
+    'write it in your reply. Anything else (a question, an ambiguous ask, something studio cannot make, a code change)',
+    'gets no block.',
+  ].join('\n');
+}
+
 export function chatWorkRequestLines(scope: Pick<ChatScope, 'kind' | 'repos'>, opts: ChatStatementOptions = {}): string[] {
   // crew#1157: an ANALYSIS chat (`POST /chats {workflow}`) answers questions and never proposes
   // work: no `PLAN+` line, so nothing in it can open a creator step or a Continue in Build.

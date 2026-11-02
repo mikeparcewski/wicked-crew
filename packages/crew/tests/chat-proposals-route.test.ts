@@ -182,6 +182,7 @@ describe('chat proposals (server, A2)', () => {
     await turn(prod, prodListeners, 'prod-1', 'Make a 5-slide deck on coverage', { entry: 'presentation', title: 'Coverage', sources: ['chat'] });
     const instructions = (launches.at(-1)!.plan as unknown as { steps: Array<{ instructions: string }> }).steps[0]!.instructions;
     expect(instructions).not.toContain('wicked-make');
+    expect(instructions).not.toContain('What this chat can make now');
     expect(instructions).toContain('write code or docs');
     await new Promise((r) => setTimeout(r, 100));
     const recs = await records(prod, 'prod-1');
@@ -194,6 +195,8 @@ describe('chat proposals (server, A2)', () => {
     await turn(stub, stubListeners, 'info-1', 'What did run 29bbbfb1 measure?', null);
     const instructions = (launches.at(-1)!.plan as unknown as { steps: Array<{ instructions: string }> }).steps[0]!.instructions;
     expect(instructions).toContain('```wicked-make');
+    // The per-message digest rides after the person's words.
+    expect(instructions.indexOf('### What this chat can make now (crew)')).toBeGreaterThan(instructions.indexOf('What did run 29bbbfb1 measure?'));
     await new Promise((r) => setTimeout(r, 100));
     expect((await records(stub, 'info-1')).filter((r) => r.kind === 'proposal')).toEqual([]);
   });

@@ -105,6 +105,7 @@ import { ChatTurnIndex } from './chat-turns.js';
 import type { ChatRepoRoot, ChatTranscriptStore } from './chat-transcripts.js';
 import {
   CHAT_ID,
+  chatMakeDigest,
   ChatScopeIndex,
   chatScopeDeps,
   chatScopeStatement,
@@ -4620,6 +4621,9 @@ export function registerRoutes(
         }
         seatText = `${seatText}\n\n${contextBlock}`;
       }
+      // A2: the per-message digest of what the chat can make now (advertised operations only; never in an analysis).
+      const makeDigest = path.workflow === undefined ? chatMakeDigest(chatProposals.digest()) : '';
+      if (makeDigest !== '') seatText = `${seatText}\n\n${makeDigest}`;
       voice = path.pa !== null ? [path.pa] : [];
       // A random pick reserves every eligible seat until the relay names the PA.
       audience = voice.length > 0 ? voice : path.eligible;
