@@ -8,12 +8,23 @@ __      _(_) ___| | _____  __| |       ___ _ __ _____      __
 
 # wicked-crew
 
-**Intent in. Gated work out. crew runs the jobs studio starts, and refuses to call them done without
-proof.**
+**The harness for the coding agents you already use. Intent in. Gated work out.**
 
 *Your coding agents do the work. A different agent checks it against your rules. You get the
-evidence.* In the wicked platform crew is the control plane: studio is where you direct the work,
-garden supplies the skills, estate holds the record, and crew runs each job between them.
+evidence.* By default a different agent reviews the work. When none can, the job stops unless you
+launch it as "reduced assurance", which is labelled on the job, every gate and the delivery. A
+saved workflow may require fewer checks; its requirements are listed in the receipts.
+
+crew runs the jobs studio starts, with your agents in sandboxes. When you launch a preset or a plan
+on a repository, power mode is on by default: the code-writing step runs as one agent's
+checkpointed turns, rigor re-scored from the diff. In power mode a failed review or a qualifying
+build-check failure goes back to the builder, up to three hand-off attempts in all; other failures
+pause for your judgment. A phased job retries, escalates or stops. Gates report the checks that
+actually ran, and an unverified pass is labelled. Built-in feature, bug-fix, migration, MCP-server
+and editor-plugin jobs pass acceptance testing before delivery, unless a labelled waiver or skip
+says otherwise; a plan you compose yourself, or a build continued from a chat, requires none.
+Studio is where you direct the work, crew runs and checks it, garden supplies the skills, and
+estate holds the record.
 
 - **Your agents, sandboxed.** The coding-agent CLIs you already use (Claude Code, Codex, GitHub
   Copilot, OpenCode, Pi) run as workers in hardened containers, on your own accounts and plans.
@@ -27,10 +38,11 @@ garden supplies the skills, estate holds the record, and crew runs each job betw
 - **Tested before delivery, with the evidence.** The built-in workflows that change your app
   (`feature`, `bug`, `migration`, `mcp-server`, `editor-plugin`) are not delivered until QE acceptance
   reads an attributed PASS, unless the run's own diff score waives it or you skip it with a reason,
-  and either is labelled; a plan you compose yourself requires none. A gate says what it checked, a
-  failed check sends the work back (in power mode, for up to three hand-off attempts in all, then it asks you) or retries,
-  escalates or stops a phased job, and "done" is re-derived from evidence, never asserted. Jobs are
-  durable workflows defined as data, crash-resumable, and exportable as evidence.
+  and either is labelled; a plan you compose yourself requires none. A gate says what it checked.
+  In power mode, a failed review or qualifying build-check failure goes back to the builder, for up
+  to three hand-off attempts in all; other failures pause for your judgment. A phased job retries,
+  escalates or stops. Gates report the checks that actually ran, and an unverified pass is
+  labelled. Jobs are durable workflows defined as data, crash-resumable, and exportable as evidence.
 
 Under the hood it's a daemon (`wicked-crew serve`) plus CLI and the bundled studio console. The
 engine underneath is **wicked-core**. (In the API and the code a job is a *run*, and an agent is a
@@ -45,7 +57,9 @@ engine underneath is **wicked-core**. (In the API and the code a job is a *run*,
 
 Requires Node.js ≥ 22 and a container runtime (Rancher Desktop, Docker, Podman, Colima or OrbStack):
 governed agents run each CLI's headless mode in a hardened seat container (crew builds the seat images
-on first use), and you sign each agent in once from studio's Agents tab, in a login container.
+on first use), and you sign each agent in once from studio's Agents page. Claude Code and GitHub
+Copilot sign in through a login container; Codex, Pi and OpenCode sign in with their host CLIs and a
+temporary home. Either way the credential goes to the broker and the seat sees a placeholder.
 Seat images ship for Claude Code, Codex, GitHub Copilot, OpenCode and Pi. Antigravity's image is
 defined but its seat is benched by default, and a local model or custom
 binary needs your own image (`WICKED_SEAT_IMAGE_<CLI>`, offline seats only). `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead; there, only
@@ -181,8 +195,9 @@ pay for instead of replacing them.
   policies, an evaluator seat that reads cold evidence only. A transition with none of them is
   disclosed as "approved by default, not verified", never dressed as a pass. That seat is distinct
   from the creator's; when none is, the run waits unless it was launched with reduced assurance.
-- **Evidence, not assertion.** "Done" is re-derived from evidence at the gate, never claimed by the
-  agent that did the work.
+- **Evidence, not assertion.** At a gate, "done" is re-derived from the evidence of the layers that
+  ran, never claimed by the agent that did the work; a step with no gate passes labelled "approved
+  by default, not verified".
 - **Drive it your way.** Headless over CLI + REST/WS, or through the browser console.
 
 ## The governed lifecycle

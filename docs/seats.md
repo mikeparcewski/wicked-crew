@@ -7,7 +7,10 @@ whether the seat can authenticate, and whether it enforces governance on its too
 ## Where a seat's login lives
 
 **Default (container floor, `WICKED_SEAT_FLOOR=container`):** sign each agent in once from studio →
-Agents → **Sign in**, which opens that CLI's own login in a disposable login container; the
+Agents → **Sign in**, which opens that CLI's own login. Claude Code and GitHub Copilot sign in in a
+disposable login container. Codex, Pi and OpenCode sign in with the host's own CLI and a throwaway
+home under the gateway directory, because their browser logins call back to a loopback port that
+only a host-side login can receive (wicked-core `src/seat_login.rs`, `host_login`). Either way the
 credential goes to the gateway's broker and every governed seat gets a placeholder. Nothing below
 applies to it: a host login (`claude /login` on the host) does not sign a container seat in.
 
