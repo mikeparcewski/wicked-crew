@@ -32,9 +32,10 @@ export const BUNDLE_CSP_BASE =
 /** A first-party bundle's `script-src`: its own inline scripts, whatever their text (see the module comment). */
 export const FIRST_PARTY_SCRIPTS = "'unsafe-inline'";
 
-/** A third-party bundle's `script-src`: exactly its prefixed inline scripts (`guardBundle`), or nothing at all. */
+/** A third-party bundle's `script-src`: exactly its prefixed inline scripts (`guardBundle`), each once, or nothing. */
 export function thirdPartyScripts(scriptHashes: readonly string[]): string {
-  return scriptHashes.length === 0 ? "'none'" : scriptHashes.map((h) => `'sha256-${h}'`).join(' ');
+  const unique = [...new Set(scriptHashes)];
+  return unique.length === 0 ? "'none'" : unique.map((h) => `'sha256-${h}'`).join(' ');
 }
 
 /**

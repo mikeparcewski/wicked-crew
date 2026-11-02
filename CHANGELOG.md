@@ -38,17 +38,22 @@ mentioned only where a daemon release depends on them.
 
 - **An editor plugin's frame can no longer use WebRTC.** A bundle's policy blocks fetch, XHR, WebSocket and beacons
   (`connect-src 'none'`), but browsers do not apply that to WebRTC, and Chromium ignores `webrtc 'block'`. Crew now puts
-  a short prelude at the start of every inline script of every editor bundle it serves. Before the editor's own code
-  runs, the prelude removes the WebRTC constructors for good (`src/editors/webrtc-guard.ts`). A third-party editor's
-  `script-src` is exactly those scripts' hashes, with no `'unsafe-inline'`. Any document it makes (a child frame,
-  or a `blob:` or `data:` page it opens in its own frame) can therefore run only those scripts, so it runs the prelude
-  first. `javascript:` URLs, inline event handlers and new script text are refused. No editor bundle loads a child
-  frame from a URL (`frame-src 'none'; child-src 'none'`). First-party editors keep `'unsafe-inline'` because their
-  nested frames show agent-authored HTML; studio guards those documents itself. A new probe,
-  `tests/editor-webrtc-egress.test.ts`, frames a hostile plugin in Chromium through crew's own routes and passes only
-  when none of 16 attempts gets a UDP packet out. It runs as required on the ubuntu CI leg, which installs Chromium
-  (`playwright` 1.64.0 is now a dev dependency). The cost is deliberate: a third-party editor cannot use inline event
-  handlers, `javascript:` URLs or scripts it builds from new text.
+  a short prelude first in every inline script of every editor bundle it serves, after the script's directive prologue
+  (so strict mode is kept). Before the editor's own code runs, the prelude removes the WebRTC constructors for good
+  (`src/editors/webrtc-guard.ts`); if it cannot, the script stops. A third-party editor's `script-src` is exactly those
+  scripts' hashes, with no `'unsafe-inline'`. Any document it makes (a child frame, or a `blob:` or `data:` page it
+  opens in its own frame) can therefore run only those scripts, prelude first. `javascript:` URLs, inline event
+  handlers and new script text are refused. No editor bundle loads a child frame from a URL (`frame-src 'none';
+  child-src 'none'`). A third-party bundle with more than 200 distinct inline scripts is refused with
+  `409 bundle_too_many_scripts`, because the browser would refuse its policy header. First-party editors keep
+  `'unsafe-inline'` because the page and deck editors show agent-authored HTML in nested frames. Studio guards those
+  documents itself, from the studio release that carries its nested-frame guard; until crew bundles that release,
+  those nested frames are not covered. A new probe, `tests/editor-webrtc-egress.test.ts`, frames a hostile plugin in
+  Chromium through crew's own routes and passes only when none of 17 attempts gets a UDP packet out. It also runs the
+  bundled studio's page and deck editors, and holds their nested frames to zero once the bundled studio guards them.
+  It runs as required on the ubuntu CI leg, which installs Chromium (`playwright` 1.64.0 is now a dev dependency). The
+  cost is deliberate: a third-party editor cannot use inline event handlers, `javascript:` URLs or scripts it builds
+  from new text.
 
 - **Other web pages can no longer put studio in a frame.** Crew sent no `frame-ancestors` directive and no
   `X-Frame-Options`, so any page open in the same browser could frame studio, including its gate buttons. Every

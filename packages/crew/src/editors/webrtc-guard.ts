@@ -6,9 +6,14 @@
  * a STUN or TURN server of its choosing, and ICE then sends UDP there (Chromium ignores `webrtc 'block'`). A third-party
  * editor could carry what it reads out of the artifact that way.
  *
- * So crew puts {@link WEBRTC_PRELUDE} at the start of every inline script of every bundle it serves. The prelude
- * defines each `RTC*` / `webkitRTC*` global as a non-writable, non-configurable `undefined` before any of the editor's
- * own statements run. It has no `try`: if it cannot do that it throws, and the rest of that script never runs.
+ * So crew puts {@link WEBRTC_PRELUDE} at the start of every inline script of every bundle it serves (after the
+ * script's directive prologue and hashbang, if any: those are inert, and moving them would turn strict mode off). The
+ * prelude defines each WebRTC global as a non-writable, non-configurable `undefined` before any of the editor's own
+ * statements run. It has no `try`: if it cannot do that it throws, and the rest of that script never runs. It names no
+ * global a script can shadow and calls nothing a script can define first. A module's own `function window(){}` is
+ * bound before its first statement runs, so the prelude checks that `window` really is the window. It takes `Object`
+ * from an object literal, and its failure path throws a string (not `new TypeError`, which a hoisted declaration
+ * could replace).
  *
  * For a third-party editor, the bundle's `script-src` is then exactly the hashes {@link guardBundle} returns, with no
  * `'unsafe-inline'`. A new JavaScript realm could otherwise bring the constructors back: a `srcdoc` child, a
@@ -18,8 +23,11 @@
  *
  * The scanner below finds inline scripts the way an HTML parser does, closely enough for real bundles. Its accuracy
  * is not what keeps the guard sound: every hash crew issues is of text that crew itself built to start with the
- * prelude. A script the scanner misreads gets a hash the browser doesn't compute, so it doesn't run. The editor breaks
- * visibly, and nothing runs without the prelude.
+ * prelude, after an inert prologue. A script the scanner misreads gets a hash the browser doesn't compute, so it
+ * doesn't run. The editor breaks visibly, and nothing runs without the prelude.
+ *
+ * Every distinct script adds a hash to one response header, so a third-party bundle may hold at most
+ * {@link MAX_SCRIPT_HASHES} distinct inline scripts; past that crew refuses to serve it, with the reason.
  */
 
 import { createHash } from 'node:crypto';
@@ -42,16 +50,43 @@ export const WEBRTC_GLOBALS = [
   'RTCCertificate',
 ] as const;
 
+/** The prelude's one failure message (thrown as a string: see the module comment). */
+export const WEBRTC_PRELUDE_REFUSAL = 'WebRTC is not available in an editor frame';
+
 /**
  * The prelude: one line of ES5, ending in a newline so the editor's own first line stays its own statement. It holds no
- * `<` at all, so it can never end, open or escape the `<script>` it sits in.
+ * `<` at all, so it can never end, open or escape the `<script>` it sits in. `w` must be the window itself (a module's
+ * hoisted `function window(){}` is a function, a `var window` is undefined, a `let`/`class` is not yet initialized).
+ * It takes the listed names always, and any other `RTC*`/`webkitRTC*`/`mozRTC*` global the browser defines (an
+ * interface object is configurable; a script's own `var RTCConfig` is not, and is left alone).
  */
 export const WEBRTC_PRELUDE =
-  '(function(w,o){var n=' +
+  '(function(w,o){if(typeof w!=="object"||w===null||w.window!==w)throw ' + JSON.stringify(WEBRTC_PRELUDE_REFUSAL) + ';var n=' +
   JSON.stringify(WEBRTC_GLOBALS) +
-  ',k=o.getOwnPropertyNames(w),i;for(i=0;i!==k.length;i++)if(/^(webkit|moz)?RTC/.test(k[i]))n.push(k[i]);' +
-  'for(i=0;i!==n.length;i++){o.defineProperty(w,n[i],{value:void 0,writable:false,enumerable:false,configurable:false});' +
-  'if(w[n[i]]!==void 0)throw new TypeError("WebRTC is not available in an editor frame")}})(window,Object);\n';
+  ',k=o.getOwnPropertyNames(w),i,d;for(i=0;i!==k.length;i++)if(/^(webkit|moz)?RTC/.test(k[i])&&(d=o.getOwnPropertyDescriptor(w,k[i]))&&d.configurable)n.push(k[i]);' +
+  'for(i=0;i!==n.length;i++){o.defineProperty(w,n[i],{value:void 0,writable:false,configurable:false});' +
+  'if(w[n[i]]!==void 0)throw ' + JSON.stringify(WEBRTC_PRELUDE_REFUSAL) + '}})(window,({}).constructor);\n';
+
+/** The most distinct inline scripts a third-party bundle may hold: each is one hash in the response's policy header. */
+export const MAX_SCRIPT_HASHES = 200;
+
+/**
+ * Where the prelude goes in a script's text: after a hashbang line and a directive prologue (`"use strict";` and the
+ * like, each ended by its own `;`), with the whitespace and comments around them. That prefix runs no code, and keeping
+ * it first keeps the script's strict mode. Anything else (a directive with no `;`, any other statement) ends it.
+ */
+const PROLOGUE =
+  /^(?:#![^\n\r\u2028\u2029]*)?(?:(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\n\r\u2028\u2029]*)*(?:"(?:[^"\\\n\r]|\\[\s\S])*"|'(?:[^'\\\n\r]|\\[\s\S])*')(?:\s|\/\*[\s\S]*?\*\/)*;)*/;
+
+/** `text` with the prelude written in: after its inert prologue (see {@link PROLOGUE}), before its first statement. A
+ *  hashbang is a comment to the end of its line, so after one the prelude always starts on a line of its own. */
+export function withPrelude(text: string): string {
+  const at = PROLOGUE.exec(text)?.[0].length ?? 0;
+  const head = text.slice(0, at);
+  // The head is only a hashbang line when it holds no line terminator at all.
+  const newline = head.startsWith('#!') && !/[\n\r\u2028\u2029]/.test(head) ? '\n' : '';
+  return head + newline + WEBRTC_PRELUDE + text.slice(at);
+}
 
 /** One served bundle: its bytes with the prelude in every inline script, and those scripts' sha256 (base64). */
 export interface GuardedBundle {
@@ -79,6 +114,19 @@ export interface InlineScript {
   runs: boolean;
 }
 
+const NAMED_REFS: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", sol: '/', period: '.', plus: '+', lowbar: '_', colon: ':', semi: ';', comma: ',' };
+
+/** An attribute value as the parser hands it on: numeric character references, and the named ones a script type can
+ *  use. One it does not know stays as written, so the script reads as a data block and is refused, never run unguarded. */
+export function decodeAttribute(v: string): string {
+  return v
+    .replace(/&#(?:[xX]([0-9a-fA-F]+)|([0-9]+));?/g, (_m, hex: string | undefined, dec: string | undefined) => {
+      const cp = hex !== undefined ? parseInt(hex, 16) : parseInt(dec!, 10);
+      return cp > 0 && cp <= 0x10ffff && !(cp >= 0xd800 && cp <= 0xdfff) ? String.fromCodePoint(cp) : '\uFFFD';
+    })
+    .replace(/&([a-z]+);/g, (m, name: string) => NAMED_REFS[name] ?? m);
+}
+
 /** Whether `<script …>` with these attributes runs its text as a classic or module script (HTML "prepare the script
  *  element"); a `src` makes it external, and an unknown type makes it a data block. */
 function runsInline(attrs: Map<string, string>): boolean {
@@ -103,13 +151,13 @@ export function inlineScripts(html: string): InlineScript[] {
   const delimited = (p: number): boolean => p < n && TAG_END.test(s[p]!);
 
   /** Attributes from `p` (just after the tag name) to the tag's `>`; `end` is past the `>`, or -1 at end of file. */
-  const attributes = (p: number): { end: number; attrs: Map<string, string> } => {
+  const attributes = (p: number): { end: number; attrs: Map<string, string>; selfClosing: boolean } => {
     const attrs = new Map<string, string>();
     let j = p;
     while (j < n) {
       while (j < n && (WS.test(s[j]!) || s[j] === '/')) j++;
       if (j >= n) break;
-      if (s[j] === '>') return { end: j + 1, attrs };
+      if (s[j] === '>') return { end: j + 1, attrs, selfClosing: s[j - 1] === '/' };
       let k = j + 1; // a name may start with `=`
       while (k < n && !TAG_END.test(s[k]!) && s[k] !== '=') k++;
       const name = s.slice(j, k).toLowerCase();
@@ -122,7 +170,7 @@ export function inlineScripts(html: string): InlineScript[] {
         const q = s[m];
         if (q === '"' || q === "'") {
           const close = s.indexOf(q, m + 1);
-          if (close < 0) return { end: -1, attrs };
+          if (close < 0) return { end: -1, attrs, selfClosing: false };
           value = s.slice(m + 1, close);
           j = close + 1;
         } else {
@@ -134,9 +182,9 @@ export function inlineScripts(html: string): InlineScript[] {
       } else {
         j = m;
       }
-      if (!attrs.has(name)) attrs.set(name, value);
+      if (!attrs.has(name)) attrs.set(name, decodeAttribute(value));
     }
-    return { end: -1, attrs };
+    return { end: -1, attrs, selfClosing: false };
   };
 
   /** Where a script's text ends (the `<` of its end tag, or end of file), from `p` just after its start tag. */
@@ -168,6 +216,9 @@ export function inlineScripts(html: string): InlineScript[] {
     return n;
   };
 
+  // Inside <svg> or <math> (foreign content) `style`, `title` and the like are ordinary elements, not raw text, and a
+  // self-closing `<script/>` is empty.
+  let foreign = 0;
   let i = 0;
   while (i < n) {
     const lt = s.indexOf('<', i);
@@ -198,6 +249,8 @@ export function inlineScripts(html: string): InlineScript[] {
       }
       let k = lt + 2;
       while (k < n && !TAG_END.test(s[k]!)) k++;
+      const closing = s.slice(lt + 2, k).toLowerCase();
+      if (foreign > 0 && (closing === 'svg' || closing === 'math')) foreign--;
       const { end } = attributes(k);
       if (end < 0) break;
       i = end;
@@ -207,8 +260,10 @@ export function inlineScripts(html: string): InlineScript[] {
     let k = lt + 1;
     while (k < n && !TAG_END.test(s[k]!)) k++;
     const name = s.slice(lt + 1, k).toLowerCase();
-    const { end, attrs } = attributes(k);
+    const { end, attrs, selfClosing } = attributes(k);
     if (end < 0) break; // end of file inside a tag: the parser drops it
+    if ((name === 'svg' || name === 'math') && !selfClosing) { foreign++; i = end; continue; }
+    if (name === 'script' && foreign > 0 && selfClosing) { i = end; continue; }
     if (name === 'script') {
       const textEnd = scriptTextEnd(end);
       out.push({ start: end, end: textEnd, runs: runsInline(attrs) });
@@ -218,7 +273,7 @@ export function inlineScripts(html: string): InlineScript[] {
       i = after.end;
       continue;
     }
-    if (RAW_TEXT.has(name)) {
+    if (RAW_TEXT.has(name) && foreign === 0) {
       let j = end;
       for (;;) {
         const close = s.indexOf('</', j);
@@ -236,7 +291,7 @@ export function inlineScripts(html: string): InlineScript[] {
 }
 
 /**
- * The bundle as crew serves it: the prelude at the start of every inline script that runs, and those scripts' hashes.
+ * The bundle as crew serves it: the prelude first in every inline script that runs, and those scripts' hashes.
  * Newlines are normalized first (the HTML parser turns CRLF and CR into LF before anything else, so the DOM is the same
  * and a script's text is what crew hashes). A NUL in a script's text reaches the parser as U+FFFD, so crew writes it so.
  */
@@ -247,7 +302,7 @@ export function guardBundle(bytes: Buffer): GuardedBundle {
   let last = 0;
   for (const script of inlineScripts(html)) {
     if (!script.runs) continue;
-    const text = WEBRTC_PRELUDE + html.slice(script.start, script.end).replace(/\0/g, '�');
+    const text = withPrelude(html.slice(script.start, script.end).replace(/\0/g, '\uFFFD'));
     parts.push(html.slice(last, script.start), text);
     last = script.end;
     scriptHashes.push(createHash('sha256').update(text, 'utf8').digest('base64'));

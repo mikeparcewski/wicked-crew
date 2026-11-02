@@ -16,7 +16,8 @@
  *  - `GET /editors/:id/:version/entry`: the bundle, with exactly the §8.2 headers. The file path comes
  *    from the registry record — never from the URL — and the bytes are re-hashed on every serve: a
  *    changed file answers 409 `bundle_hash_mismatch`, never the changed bundle. The pinned bytes are
- *    served with the WebRTC prelude at the start of each inline script (`webrtc-guard.ts`).
+ *    served with the WebRTC prelude at the start of each inline script (`webrtc-guard.ts`); a third-party
+ *    bundle with more distinct inline scripts than its policy header can list answers 409 `bundle_too_many_scripts`.
  *
  * Human-only means `actor.kind === 'human'` (the DC `remember()` check). Under `auth=off` every
  * same-uid caller is the local human actor — the honest limit §6.4 states; refusing a worker token
@@ -32,7 +33,7 @@ import type { Actor, ConformanceRule, EditorGrantsResponse, ListEditorsResponse 
 import { bundleHeaders } from './csp.js';
 import { installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from './pack-install.js';
 import { EDITOR_ID, EDITOR_VERSION, EditorRegistry, HOST_BUNDLE_CAP_BYTES, notRealEntry, readCapped, type EditorRecord } from './registry.js';
-import { guardBundle } from './webrtc-guard.js';
+import { guardBundle, MAX_SCRIPT_HASHES } from './webrtc-guard.js';
 
 const V = '/api/v1';
 
@@ -292,8 +293,15 @@ export function serveBundle(record: EditorRecord, reply: FastifyReply, log?: (ms
     log?.(`[editors] ${record.manifest.id}@${record.manifest.version}: bundle hash changed on disk (pinned ${record.sha256.slice(0, 12)}…, found ${actual.slice(0, 12)}…); refused`);
     return reply.code(409).send({ code: 'bundle_hash_mismatch', error: `the ${record.manifest.id} bundle on disk no longer matches its pinned hash; restart the daemon to re-pin it` });
   }
-  // The prelude goes into every inline script, and a third-party bundle may run only those (`webrtc-guard.ts`).
+  // The prelude goes into every inline script, and a third-party bundle may run only those (`webrtc-guard.ts`). Each
+  // distinct script is one hash in the policy header: past the budget the header would be refused by the browser, so
+  // crew refuses first and says why.
   const guarded = guardBundle(buf);
+  const distinct = new Set(guarded.scriptHashes).size;
+  if (!record.firstParty && distinct > MAX_SCRIPT_HASHES) {
+    log?.(`[editors] ${record.manifest.id}@${record.manifest.version}: ${distinct} distinct inline scripts, over ${MAX_SCRIPT_HASHES}; refused`);
+    return reply.code(409).send({ code: 'bundle_too_many_scripts', error: `the ${record.manifest.id} bundle has ${distinct} distinct inline scripts; an editor bundle may have at most ${MAX_SCRIPT_HASHES} (merge them into fewer scripts)` });
+  }
   for (const [k, v] of Object.entries(bundleHeaders(record, guarded.scriptHashes))) reply.header(k, v);
   return reply.type('text/html; charset=utf-8').send(guarded.body);
 }
