@@ -94,6 +94,13 @@ describe('the interactive proxy refuses a cross-site frame load before the bridg
     // An allowed origin's page under /api/ (an editor bundle asking for its own URL as Referer, behind a proxy that
     // rewrites Host) is never a framing page.
     expect(await as('127.0.0.1:7701', 'http://localhost:4200/api/v1/editors/acme/1.0.0/entry')).toBe(403);
+    // Behind a proxy that rewrites Host but says what it forwarded for, an origin-only Referer of that host is still
+    // the daemon itself (an editor that switched its referrer policy to "origin").
+    const fwd = async (headers: Record<string, string>): Promise<number> =>
+      (await a.inject({ method: 'GET', url: DOC, headers: { ...nav('cross-site'), host: '127.0.0.1:7701', referer: 'http://localhost:4200/', ...headers } })).statusCode;
+    expect(await fwd({ 'x-forwarded-host': 'localhost:4200' })).toBe(403);
+    expect(await fwd({ forwarded: 'for=1.2.3.4;host=localhost:4200;proto=http' })).toBe(403);
+    expect(await fwd({})).toBe(200); // no forwarding headers: a dev page on another origin is studio's
     expect(await as('127.0.0.1:7701', 'not a url')).toBe(403);
     await a.close();
   });

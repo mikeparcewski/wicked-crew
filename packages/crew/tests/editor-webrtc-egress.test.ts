@@ -124,7 +124,7 @@ const WELL_BEHAVED =
  * A document the page or deck editor shows in its nested frame, written to get WebRTC out: its own script reports
  * `agent-ran` and makes one attempt; any new realm it makes runs a copy of that script and reports `child-*`.
  */
-function agentDoc(editor: string, attempt: string, port: number): string {
+function agentDoc(editor: string, attempt: string, port: number, sinkOrigin = ''): string {
   const js = `var U=${JSON.stringify(String(port))};
 function report(m){try{top.postMessage({probe:String(m)},'*')}catch(e){}}
 function rtc(W,tag){try{var C=W.RTCPeerConnection||W.webkitRTCPeerConnection;if(typeof C!=='function'){report(tag+':no-ctor');return}
@@ -132,6 +132,7 @@ var pc=new C({iceServers:[{urls:'stun:127.0.0.1:'+U}]});pc.createDataChannel('x'
 var SELF=document.currentScript?document.currentScript.textContent:'';
 var CHILD='<scr'+'ipt>'+SELF+'</scr'+'ipt>';
 var FRESH='<scr'+'ipt>var U='+JSON.stringify(U)+';'+report+rtc+'rtc(window,"fresh")</scr'+'ipt>';
+var SINK=${JSON.stringify(`${sinkOrigin}/sink/nested-${editor}`)};
 if(!document.documentElement.hasAttribute('data-agent-root')){report('child-ran:'+location.protocol);rtc(window,'child')}
 else if(!window.__probeDone){window.__probeDone=1;report('agent-ran');${NESTED_ATTEMPTS[attempt]}}`;
   const scripts = `${attempt === 'module-shadow' ? SHADOWING_MODULE.replaceAll('__PORT__', String(port)) : ''}<script>${js}</script>`;
@@ -151,6 +152,9 @@ const NESTED_ATTEMPTS: Record<string, string> = {
   'navigate-data': "location.href='data:text/html,'+encodeURIComponent(CHILD)",
   worker: "try{var w=new Worker(URL.createObjectURL(new Blob(['postMessage(typeof RTCPeerConnection)'],{type:'text/javascript'})));w.onmessage=function(e){report('worker:'+e.data)}}catch(e){report('worker-threw')}",
   'module-shadow': MODULE_ALONE_IN_CHILD,
+  // An external script admitted by its own hash's integrity (fetched before the check): never leaves, guarded or not
+  // (the first-party bundle's policy names no URL).
+  'external-integrity': "crypto.subtle.digest('SHA-256',new TextEncoder().encode(SELF)).then(function(d){var s=document.createElement('script');s.integrity='sha256-'+btoa(String.fromCharCode.apply(null,new Uint8Array(d)));s.src=SINK;document.body.appendChild(s)})",
 };
 
 interface Sink { port: number; packets: () => number; close: () => void }
@@ -404,7 +408,7 @@ describe('editor frames: zero WebRTC egress from a hostile plugin (Chromium, cre
         const sink = await udpSink();
         try {
           const doc = `${editor}-${attempt}`;
-          agentDocs.set(doc, agentDoc(editor, attempt, sink.port));
+          agentDocs.set(doc, agentDoc(editor, attempt, sink.port, origin));
           const page = await browser!.newPage({ viewport: { width: 1400, height: 900 } });
           const logs: string[] = [];
           page.on('console', (m) => logs.push(m.text().slice(0, 160)));
@@ -424,6 +428,8 @@ describe('editor frames: zero WebRTC egress from a hostile plugin (Chromium, cre
               if (attempt === 'srcdoc-copy') expect(said, `${editor}: the copy ran in the child and found no constructor`).toContain('child:no-ctor');
               if (attempt === 'module-shadow') expect(logs.some((l) => l.includes(REFUSED)), `${editor}: the guard stopped the module`).toBe(true);
             }
+            // No HTTP request leaves a nested document, guarded or not: the first-party bundle's policy names no URL.
+            expect(sinkHits.get(`nested-${editor}`) ?? 0, `${editor} ${attempt}: HTTP requests that left`).toBe(0);
             outcomes.push(`${attempt}=${sink.packets()}`);
           } finally {
             await page.close();
