@@ -5,7 +5,7 @@
 // outside the run's read roots — the bytes a real seat could reach.
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -192,7 +192,8 @@ describe('chat sees artifacts and runs (server, A1)', () => {
     expect(instructions).toMatch(/Slide 4 \[data-wid section-3\]: Timeline 23% to 61% in 29bbbfb1/);
     expect(instructions).toContain('Coverage moved from 23% to 61%.');
     expect(instructions).toContain("Studio's summary of the page they are on");
-    const cwd = JSON.parse(opened.body).scope.cwd as string;
+    // The seat is handed real paths (a container sees a read root only at its canonical path).
+    const cwd = realpathSync(JSON.parse(opened.body).scope.cwd as string);
     expect(input.extraReadRoots).toEqual(expect.arrayContaining([join(cwd, 'open'), join(cwd, 'context')]));
     // The seat could read each turn file it was handed.
     expect(seatRead.get(join(cwd, 'open', 'mikes__coverage-deck-v1.html'))).toBe(DECK);

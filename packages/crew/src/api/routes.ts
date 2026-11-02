@@ -235,6 +235,7 @@ import {
   contextReadRoots,
   ensureRealDir,
   parseArtifactRef,
+  seatPathOf,
   UNFILED_MOUNT,
   type ChatContextDeps,
 } from './chat-context.js';
@@ -4585,7 +4586,8 @@ export function registerRoutes(
               extraReadRoots: [
                 ...readRoots,
                 ...(attachRoot !== null ? [ensureDir(attachRoot)] : []),
-                ...(scope !== undefined ? [ensureRealDir(contextReadRoots(scope.cwd).open), ensureRealDir(contextReadRoots(scope.cwd).context)] : []),
+                // At their real paths: a seat in a container sees a read root only there (see `seatPathOf`).
+                ...(scope !== undefined ? [seatPathOf(ensureRealDir(contextReadRoots(scope.cwd).open)), seatPathOf(ensureRealDir(contextReadRoots(scope.cwd).context))] : []),
               ],
             }
             : {}),

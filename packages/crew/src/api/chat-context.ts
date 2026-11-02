@@ -177,6 +177,19 @@ export function contextReadRoots(scratchRoot: string): { open: string; context: 
   return { open: join(scratchRoot, 'open'), context: join(scratchRoot, 'context') };
 }
 
+/**
+ * The scratch root as a seat sees it: its real path. A seat in a container sees a read root at its canonical path
+ * only (macOS's `/var/folders/…` is `/private/var/folders/…`; the non-canonical spelling does not exist in a Linux
+ * seat), so every path crew hands the seat, and every read root it launches with, is the real one.
+ */
+export function seatPathOf(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
 /** Create `dir` (one level, private); it and its parent must be real directories, never links. */
 export function ensureRealDir(dir: string): string {
   const parent = lstatSync(join(dir, '..'));
@@ -323,6 +336,7 @@ async function readArtifact(
   const docDir = realDocDir(root, ref.doc);
   const manifest = readManifest(docDir);
   const openDir = contextReadRoots(input.scratchRoot).open;
+  const seatOpenDir = join(seatPathOf(input.scratchRoot), 'open');
   const unusable = dirUnusable(openDir);
   if (unusable !== null) throw new ContextRefusal(unusable);
   const nameOf = (v: number): string => `${ref.mount}__${ref.doc}-v${v}.html`;
@@ -381,8 +395,8 @@ async function readArtifact(
     lines.push(`- They are looking at version ${viewed}; the latest is version ${manifest.head}. Answer about version ${viewed} unless they ask about the latest, and say which version you read.`);
   } else lines.push('- Say which version you read.');
   lines.push(...notes.map((n) => `- ${n}`));
-  if (viewedHtml !== null) lines.push(`- Version ${viewed}: ${join(openDir, nameOf(viewed))}`);
-  if (headHtml !== null && (viewedHtml === null || viewed !== manifest.head)) lines.push(`- Version ${manifest.head} (latest): ${join(openDir, nameOf(manifest.head))}`);
+  if (viewedHtml !== null) lines.push(`- Version ${viewed}: ${join(seatOpenDir, nameOf(viewed))}`);
+  if (headHtml !== null && (viewedHtml === null || viewed !== manifest.head)) lines.push(`- Version ${manifest.head} (latest): ${join(seatOpenDir, nameOf(manifest.head))}`);
   lines.push('');
   const picked = anchors.length > 0 ? anchorTexts(shownHtml, anchors) : [];
   if (picked.length > 0) {
@@ -570,6 +584,7 @@ export async function buildTurnContext(input: TurnContextInput, deps: ChatContex
   const briefed: ChatContextBinding['runs'] = [];
   const briefLines: string[] = [];
   const contextDir = contextReadRoots(input.scratchRoot).context;
+  const seatRoot = seatPathOf(input.scratchRoot);
   if (tokens.length > 0) {
     const runs = await allRuns();
     const resolved: SessionView[] = [];
@@ -627,7 +642,7 @@ export async function buildTurnContext(input: TurnContextInput, deps: ChatContex
       briefed.push({ id, status: brief.status, brief: `context/${name}`, sha256: brief.sha256 });
       const inline = brief.markdown.length <= BRIEF_INLINE_MAX && brief.markdown.length <= budget;
       if (inline) budget -= brief.markdown.length;
-      briefLines.push(`- Run ${id.slice(0, 8)} (${brief.status}). Brief: ${join(contextDir, name)}`);
+      briefLines.push(`- Run ${id.slice(0, 8)} (${brief.status}). Brief: ${join(seatRoot, 'context', name)}`);
       if (inline) briefLines.push('', fenced(brief.markdown, 'markdown'), '');
       else briefLines.push('  The brief is long: read it at that path.');
     }
@@ -668,7 +683,7 @@ export async function buildTurnContext(input: TurnContextInput, deps: ChatContex
   for (const id of named.runs) {
     const b = prior.briefs.get(id);
     if (b === undefined || briefed.some((x) => x.id === id)) continue;
-    if (earlierBriefIntact(input.scratchRoot, b)) earlierBriefs.push(join(input.scratchRoot, b.brief));
+    if (earlierBriefIntact(input.scratchRoot, b)) earlierBriefs.push(join(seatRoot, b.brief));
     else refuse(`brief:${id}`, 'the brief written earlier in this chat no longer holds what crew wrote; name the run again for a fresh one');
   }
   if (refused.length > 0) {

@@ -5,7 +5,7 @@
 
 import { REPO_FOLDER_MISSING, repoFolderMissingMessage } from '../src/core/repoPaths.js';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -627,7 +627,7 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
     for (const field of ['cwd', 'readRoots', 'codeGraphDb']) expect(launched[0]).not.toHaveProperty(field);
     // crew#1034: the repository is the run's read root whether or not the project graph is built —
     // and (DES-SYSTEM-CHAT) the chat's attachments directory, from launch; the compared roots stay the scope's.
-    expect(launched[0]?.extraReadRoots).toEqual(['/srv/repos/alpha', join(cwd, 'attachments'), join(cwd, 'open'), join(cwd, 'context')]);
+    expect(launched[0]?.extraReadRoots).toEqual(['/srv/repos/alpha', join(cwd, 'attachments'), realpathSync(join(cwd, 'open')), realpathSync(join(cwd, 'context'))]);
     expect(askPaths.get('dynamic')?.launchReadRoots).toEqual(['/srv/repos/alpha']);
     for (const file of ['AGENTS.md', 'CLAUDE.md']) expect(readFileSync(join(cwd, file), 'utf8')).toContain('/srv/repos/alpha');
     expect(readFileSync(join(cwd, 'notes.txt'), 'utf8')).toBe('keep me');
@@ -843,7 +843,7 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
       expect(noGraph.statusCode).toBe(201);
       expect((await send('no-graph')).statusCode).toBe(202);
       expect(launched[0]).not.toHaveProperty('projectGraph');
-      expect(launched[0]?.extraReadRoots).toEqual(['/srv/repos/alpha', ...['attachments', 'open', 'context'].map((d) => join(noGraph.json().scope.cwd as string, d))]);
+      expect(launched[0]?.extraReadRoots).toEqual(['/srv/repos/alpha', join(noGraph.json().scope.cwd as string, 'attachments'), ...['open', 'context'].map((d) => realpathSync(join(noGraph.json().scope.cwd as string, d)))]);
       // Unchanged roots and graph: the follow-up continues the same run.
       const propose = park('no-graph');
       expect((await send('no-graph')).statusCode).toBe(202);
@@ -893,7 +893,7 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
     vi.mocked(adapter.listRepos).mockResolvedValueOnce([]);
     expect((await send('retry-scope')).statusCode).toBe(202);
     // No repository read root — only the chat's own attachments directory (DES-SYSTEM-CHAT).
-    expect(launched[0]?.extraReadRoots).toEqual(['attachments', 'open', 'context'].map((d) => join(retry.json().scope.cwd as string, d)));
+    expect(launched[0]?.extraReadRoots).toEqual([join(retry.json().scope.cwd as string, 'attachments'), ...['open', 'context'].map((d) => realpathSync(join(retry.json().scope.cwd as string, d)))]);
     const propose = park('retry-scope');
     const storedScope = chatScopes.get('retry-scope');
     const sent = await send('retry-scope');
@@ -927,7 +927,7 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
     expect(chatScopes.get('dynamic-all')?.repos.map((repo) => repo.id)).toEqual(['r1']);
     expect(chatScopes.engineOf('dynamic-all')?.readRoots).toEqual(['/srv/repos/alpha']);
     expect(launched).toHaveLength(1);
-    expect(launched[0]?.extraReadRoots).toEqual(['/srv/repos/alpha', ...['attachments', 'open', 'context'].map((d) => join(opened.json().scope.cwd as string, d))]);
+    expect(launched[0]?.extraReadRoots).toEqual(['/srv/repos/alpha', join(opened.json().scope.cwd as string, 'attachments'), ...['open', 'context'].map((d) => realpathSync(join(opened.json().scope.cwd as string, d)))]);
   });
 
   it('refreshes a changed graph binding even with the same repository list', async () => {
