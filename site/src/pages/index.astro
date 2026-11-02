@@ -19,7 +19,8 @@
  *    model or custom binary needs your own image (WICKED_SEAT_IMAGE_<CLI>), offline only. The
  *    worktree is the only repo path mounted writable; the repository boundary is mounted read-only
  *    (wicked-core src/container_floor.rs mount_plan); the model gateway is the only egress; keys
- *    stay in a credential broker.
+ *    stay in a credential broker, except a Claude subscription seat's sign-in token, which the seat
+ *    receives and a guard checks each step's changes and the delivery for (src/seat_secret_guard.rs).
  *  - Gates resolve deny-dominates on the layers that ran (evidence floor, repo checks, policies,
  *    an evaluator on a distinct agent, a judge that can reject but never approve alone). An
  *    ungated phase reads "approved by default, not verified"; a gate with no distinct judge is
@@ -80,7 +81,7 @@ const AGENTS = [
 const LAYERS = [
   { name: 'Evidence floor', does: 'The job changed its worktree.', can: 'a pass with no judge reads “floor only”' },
   { name: 'Your checks and policies', does: 'Your repo’s own typecheck, lint and tests, plus the rules you approved.', can: 'a new failure sends it back, waits for you or stops the job' },
-  { name: 'Evaluator', does: 'A different agent reviews the work.', can: 'can send it back' },
+  { name: 'Evaluator', does: 'By default, a different agent reviews the work.', can: 'can send it back' },
   { name: 'Judge', does: 'An AI judge reads the evidence cold.', can: 'can fail a gate, never approve alone' },
   { name: 'QE acceptance', does: 'Garden’s QE pipeline, read from the QE ledger; a low-impact change may waive it.', can: 'when required, only an attributed PASS delivers' },
 ];
@@ -164,7 +165,7 @@ const crewVersion = __WICKED_CREW_VERSION__;
     <div class="wrap">
       <h2 id="why-h" class="sr-only">What crew does for you</h2>
       <ul class="facts facts--cards why-cards" role="list">
-        {BENEFITS.map((b) => <li><b>{b.h}</b> {b.p}</li>)}
+        {BENEFITS.map((b) => <li><b>{b.h}</b>{' '}{b.p}</li>)}
       </ul>
     </div>
   </section>
@@ -176,7 +177,7 @@ const crewVersion = __WICKED_CREW_VERSION__;
         <h2 id="news-h">What’s new.</h2>
       </div>
       <ul class="labels news-list" role="list">
-        {NEW.map((n) => <li><b>{n.name}</b><span>{n.line}</span></li>)}
+        {NEW.map((n) => <li><b>{n.name}</b>{' '}<span>{n.line}</span></li>)}
       </ul>
     </div>
   </section>
