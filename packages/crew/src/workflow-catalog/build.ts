@@ -15,6 +15,7 @@ import type {
   WorkflowCatalogUsage,
   WorkflowDef,
 } from '../core/types.js';
+import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
 import { CATALOG_CATEGORIES, CATALOG_EXCLUDED, CATALOG_SEEDS, CATEGORY_ORDER, type CatalogSeed } from './catalog-data.js';
 
 /** One run as the catalog reads it. Times are unix SECONDS (the served run's `created_at`/`ended_at`). */
@@ -96,15 +97,21 @@ export function buildWorkflowCatalog(input: CatalogInputs): WorkflowCatalogRespo
     const held = savedByName.get(p.name);
     if (held === undefined || (held.scope === 'global' && p.scope !== 'global')) savedByName.set(p.name, p);
   }
-  const mine = input.runs.filter(
-    (r) => r.principal === input.actorId && r.retryOf === undefined && (input.projectId === null || r.projectId === input.projectId),
-  );
+  // The Unfiled project (`default`) holds the runs filed nowhere (codex r2).
+  const inScope = (r: CatalogRun): boolean =>
+    input.projectId === null ||
+    (input.projectId === DEFAULT_PROJECT_ID ? r.projectId === null || r.projectId === DEFAULT_PROJECT_ID : r.projectId === input.projectId);
+  const mine = input.runs.filter((r) => r.principal === input.actorId && r.retryOf === undefined && inScope(r));
   const entries: WorkflowCatalogEntry[] = [];
   /** Workflow names a card already launches. */
   const claimed = new Set<string>();
   /** Card ids in use: a run card whose name a studio card holds is `run:<name>` (ids stay unique). */
   const ids = new Set<string>(CATALOG_SEEDS.filter((s) => s.launch.kind !== 'run').map((s) => s.id));
-  const runCardId = (name: string): string => (ids.has(name) ? `run:${name}` : name);
+  const runCardId = (name: string): string => {
+    let id = name;
+    while (ids.has(id)) id = `run:${id}`;
+    return id;
+  };
 
   for (const seed of CATALOG_SEEDS) {
     const { title, summary, useWhen, status, statusNote, ...rest } = seed;
@@ -117,9 +124,15 @@ export function buildWorkflowCatalog(input: CatalogInputs): WorkflowCatalogRespo
       // A saved preset of this name is what a launch runs (codex r1): describe IT, not the shadowed def.
       const saved = savedByName.get(name);
       if (saved !== undefined) {
+        // Its own steps decide its inputs and hints, not the shadowed seed's (codex r2).
         entries.push({
           ...rest,
-          title: saved.title ?? def?.title ?? name,
+          needs: [],
+          inputs: GENERIC_INPUTS,
+          typicalMinutes: null,
+          cost: null,
+          tags: ['saved'],
+          title: saved.title ?? name,
           summary: saved.summary ?? savedSummary(saved),
           outcome: 'What your saved steps produce.',
           useWhen: saved.use_when ?? [],

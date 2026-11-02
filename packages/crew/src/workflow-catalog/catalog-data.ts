@@ -37,7 +37,7 @@ export const CATALOG_CATEGORIES: readonly WorkflowCatalogCategory[] = [
     title: 'Create',
     summary: 'Make something new: a feature, docs, a deck, a demo, a plugin or a tool.',
     subcategories: [
-      { id: 'create', title: 'Create' },
+      { id: 'apps', title: 'Apps' },
       { id: 'feature', title: 'Feature' },
       { id: 'documentation', title: 'Documentation' },
       { id: 'presentation', title: 'Presentation' },
@@ -103,10 +103,11 @@ const RUN_ON_REPO = (label: string): WorkflowCatalogInput[] => [INTENT(label), R
 export const CATALOG_SEEDS: readonly CatalogSeed[] = [
   // ── Create ──
   {
-    id: 'create-app',
+    // Operator ruling 2026-11-02: the data builder (was Vibe, working name Create) is named Apps.
+    id: 'apps',
     category: 'create',
-    subcategory: 'create',
-    title: 'Create',
+    subcategory: 'apps',
+    title: 'Apps',
     summary: 'Build a live app, dashboard or tool over your own data and APIs by describing it.',
     useWhen: ['a dashboard over your data', 'an internal tool without a codebase'],
     outcome: 'A working app you can open, share and keep changing.',
@@ -115,7 +116,7 @@ export const CATALOG_SEEDS: readonly CatalogSeed[] = [
     typicalMinutes: null,
     cost: null,
     tags: ['app', 'dashboard', 'no-code'],
-    synonyms: ['vibe', 'vibe code', 'ui builder', 'data app', 'prototype', 'build an app'],
+    synonyms: ['apps', 'app', 'dashboard', 'data app', 'internal tool', 'vibe', 'vibe code', 'ui builder', 'create', 'prototype', 'build an app'],
     launch: { kind: 'none' },
     delivers: 'none',
     status: 'coming_soon',

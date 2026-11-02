@@ -7350,7 +7350,10 @@ export interface WorkflowCatalogUsage {
 
 /** One card of the catalog. */
 export interface WorkflowCatalogEntry {
-  /** Unique card id. For `launch.kind === 'run'` it equals `launch.workflow`. */
+  /**
+   * Unique, opaque card id. For `launch.kind === 'run'` it is `launch.workflow`, prefixed `run:` when a non-run
+   * card already holds that id (a saved preset called `presentation`). Launch by `launch.workflow`, never by `id`.
+   */
   id: string;
   category: WorkflowCatalogCategoryId;
   /** A subcategory id of its category, or null. */

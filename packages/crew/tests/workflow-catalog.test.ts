@@ -94,7 +94,7 @@ describe('buildWorkflowCatalog', () => {
   it('lists coming-soon cards unlaunchable, and studio flows with their own launch kind', () => {
     const { defs, presets } = served();
     const out = buildWorkflowCatalog({ defs, presets, runs: [], actorId: 'local', projectId: null });
-    const create = out.entries.find((e) => e.id === 'create-app')!;
+    const create = out.entries.find((e) => e.id === 'apps')!;
     expect([create.status, create.launch, create.source]).toEqual(['coming_soon', { kind: 'none' }, 'none']);
     expect(out.entries.find((e) => e.id === 'presentation')!.launch).toEqual({ kind: 'document', style: 'ppt' });
     expect(out.entries.find((e) => e.id === 'demo-video')!.launch).toEqual({ kind: 'demo' });
@@ -146,7 +146,9 @@ describe('buildWorkflowCatalog', () => {
     const out = buildWorkflowCatalog({ defs, presets: inProject, runs: [], actorId: 'local', projectId: 'p' });
     const feature = out.entries.filter((e) => e.launch.kind === 'run' && e.launch.workflow === 'feature');
     expect(feature).toHaveLength(1);
-    expect([feature[0]!.category, feature[0]!.source, feature[0]!.requiresQe, feature[0]!.delivers, feature[0]!.status]).toEqual(['create', 'saved', false, 'report', 'available']);
+    expect([feature[0]!.category, feature[0]!.source, feature[0]!.requiresQe, feature[0]!.delivers, feature[0]!.status, feature[0]!.title]).toEqual(['create', 'saved', false, 'report', 'available', 'feature']);
+    // codex r2: its own inputs, not the shadowed seed's.
+    expect([feature[0]!.needs, feature[0]!.inputs.map((i) => i.id), feature[0]!.cost]).toEqual([[], ['intent', 'repo', 'project', 'seats'], null]);
     // A seeded name the engine does not serve but the operator saved is launchable, not unavailable.
     const onlySaved = buildWorkflowCatalog({
       defs: defs.filter((d) => d.id !== 'docs'),
@@ -169,6 +171,10 @@ describe('buildWorkflowCatalog', () => {
     expect(out.entries.find((e) => e.id === 'run:demo-video')!.launch).toEqual({ kind: 'run', workflow: 'demo-video' });
     expect(out.entries.find((e) => e.id === 'presentation')!.launch.kind).toBe('document');
     expect(out.top).toEqual(['run:demo-video']);
+    // agy r2: a def already named `run:presentation` does not make the prefix collide.
+    const twice = buildWorkflowCatalog({ defs: [...defs, def('run:presentation')], presets, runs: [], actorId: 'local', projectId: null });
+    const tids = twice.entries.map((e) => e.id);
+    expect(new Set(tids).size).toBe(tids.length);
   });
 
   it('orders entries by category, then subcategory, then catalog order', () => {
@@ -177,7 +183,7 @@ describe('buildWorkflowCatalog', () => {
     const order = ['create', 'resolve', 'analyze', 'test', 'more', 'yours'];
     const cats = out.entries.map((e) => order.indexOf(e.category));
     expect([...cats].sort((a, b) => a - b)).toEqual(cats);
-    expect(out.entries.filter((e) => e.category === 'create').map((e) => e.subcategory)[0]).toBe('create');
+    expect(out.entries.filter((e) => e.category === 'create').map((e) => e.subcategory)[0]).toBe('apps');
   });
 
   it("counts only this principal's launches, skips retries and system launchers, and filters by project", () => {
@@ -198,6 +204,9 @@ describe('buildWorkflowCatalog', () => {
     expect(out.entries.find((e) => e.id === 'review-recent-work')!.usage.launches).toBe(0);
     expect(out.entries.find((e) => e.id === 'demo-video')!.usage.launches).toBe(1);
     expect(out.usage).toEqual({ scope: 'operator', projectId: null, actorId: 'local', launches: 4 });
+    // codex r2: the Unfiled project (`default`) counts the runs filed nowhere.
+    const unfiled = buildWorkflowCatalog({ defs, presets, runs, actorId: 'local', projectId: 'default' });
+    expect(unfiled.entries.find((e) => e.id === 'bug')!.usage.launches).toBe(2);
     const inP = buildWorkflowCatalog({ defs, presets, runs, actorId: 'local', projectId: 'p' });
     expect(inP.entries.find((e) => e.id === 'bug')!.usage.launches).toBe(1);
     expect(inP.usage.scope).toBe('project');
@@ -210,12 +219,12 @@ describe('buildWorkflowCatalog', () => {
       run('feature', { createdAt: 1_800_000_000 }),
       run('migration', { createdAt: 1_800_500_000 }),
       ...['docs', 'test-plan', 'validate-docs', 'test-analysis', 'qe-author-tests'].map((w) => run(w)),
-      run('create-app'),
+      run('apps'),
     ];
     const out = buildWorkflowCatalog({ defs, presets, runs, actorId: 'local', projectId: null });
     expect(out.top).toHaveLength(TOP_MAX);
     expect(out.top.slice(0, 2)).toEqual(['bug', 'migration']);
-    expect(out.top).not.toContain('create-app');
+    expect(out.top).not.toContain('apps');
     expect(buildWorkflowCatalog({ defs, presets, runs: [], actorId: 'local', projectId: null }).top).toEqual([]);
   });
 });
@@ -228,6 +237,25 @@ describe('the launch principal (the usage key)', () => {
       { ts: 1, action: 'run.launched', actor: { id: 'local', kind: 'system', trust: 'admin' }, runId: 'run-t' } as never,
     ]);
     expect([idx.principalFor('run-s'), idx.principalFor('run-t')]).toEqual([undefined, undefined]);
+  });
+
+  it('follows the NEWEST launch of a reused run id, live and rehydrated (codex r2)', () => {
+    const human = (id: string) => ({ id, kind: 'human', trust: 'admin' }) as never;
+    const live = new RunTimingIndex();
+    recordRunLaunched(AuditLog.noop(), live, human('alice'), 'R', {});
+    recordRunLaunched(AuditLog.noop(), live, human('bob'), 'R', {});
+    expect(live.principalFor('R')).toBe('bob');
+    recordRunLaunched(AuditLog.noop(), live, { id: 'daemon', kind: 'system', trust: 'admin' } as never, 'R', {});
+    expect(live.principalFor('R')).toBeUndefined();
+    const hydrated = new RunTimingIndex();
+    // The trail reads newest first.
+    hydrated.hydrateFromLaunchEntries([
+      { ts: 3, action: 'run.launched', actor: { id: 'daemon', kind: 'system', trust: 'admin' }, runId: 'S' },
+      { ts: 2, action: 'run.launched', actor: { id: 'bob', kind: 'human', trust: 'admin' }, runId: 'R' },
+      { ts: 1, action: 'run.launched', actor: { id: 'alice', kind: 'human', trust: 'admin' }, runId: 'R' },
+      { ts: 0, action: 'run.launched', actor: { id: 'alice', kind: 'human', trust: 'admin' }, runId: 'S' },
+    ] as never);
+    expect([hydrated.principalFor('R'), hydrated.principalFor('S')]).toEqual(['bob', undefined]);
   });
 
   it('is recorded live by recordRunLaunched and rehydrated from the trail', () => {

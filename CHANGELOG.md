@@ -20,8 +20,8 @@ mentioned only where a daemon release depends on them.
   the runs whose `run.launched` trail entry names the requesting principal (runs a schedule or the daemon launched
   are not counted, nor are retries), optionally for one project (`?projectId=`), and `top` lists your six most used.
   The metadata lives in one data module (`src/workflow-catalog/catalog-data.ts`); a workflow's title, summary and
-  use-when stay on its def. A served workflow with no catalog entry still appears under More. Create (the working
-  name for what was Vibe) and Studio phase plugin are listed as coming soon. The engine's new `docs`,
+  use-when stay on its def. A served workflow with no catalog entry still appears under More. Apps (the data builder,
+  formerly Vibe) and Studio phase plugin are listed as coming soon. The engine's new `docs`,
   `validate-docs`, `test-plan` and `test-analysis` workflows (wicked-core) fill Documentation, Validate
   documentation, Test planning and Test analysis. `health.capabilities.workflowCatalog` says the route is served.
   A saved preset that shares a card's name is described as what it is (it is what a launch of that name runs), a
