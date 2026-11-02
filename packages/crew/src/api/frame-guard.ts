@@ -41,6 +41,11 @@ export const X_FRAME_OPTIONS = 'SAMEORIGIN';
  * cannot end or widen the directive. The entry is checked as written, never normalized into a grant: CSP matches
  * hosts case-insensitively and a default port as its omission, so `https://A.example:443` would let
  * `https://a.example` frame studio while the API refuses that page.
+ *
+ * One widening CSP keeps and we accept: an `http:` source also matches its `https:` twin (same host, same port or
+ * both default; CSP3 scheme-part matching). That twin gains no attacker anything: serving `https://host[:port]`
+ * takes control of the name (or of the loopback port), and that control already serves `http://host[:port]`, which
+ * the API accepts. Dropping `http:` entries instead would cut off studio's dev server.
  */
 const SERIALIZED_ORIGIN = /^https?:\/\/(?:[a-z0-9-]+(?:\.[a-z0-9-]+)*\.?|\[[0-9a-f:.]+\])(?::\d{1,5})?$/;
 
