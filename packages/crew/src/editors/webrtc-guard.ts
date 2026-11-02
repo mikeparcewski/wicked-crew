@@ -7,8 +7,8 @@
  * editor could carry what it reads out of the artifact that way.
  *
  * So crew puts {@link WEBRTC_PRELUDE} at the start of every inline script of every bundle it serves (after the
- * script's hashbang and a directive prologue whose directives end in their own `;`: those are inert, and moving them
- * would turn strict mode off; a directive that relies on automatic semicolon insertion is not kept first). The
+ * script's hashbang and its directive prologue: those are inert, and moving them would turn strict mode off; a
+ * directive ended by automatic semicolon insertion is kept too, with crew's own `;` before the prelude). The
  * prelude defines each WebRTC global as a non-writable, non-configurable `undefined` before any of the editor's own
  * statements run. It has no `try`: if it cannot do that it throws, and the rest of that script never runs. It names no
  * global a script can shadow and calls nothing a script can define first. A module's own `function window(){}` is
