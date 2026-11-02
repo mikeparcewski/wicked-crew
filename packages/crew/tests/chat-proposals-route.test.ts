@@ -237,14 +237,14 @@ describe('chat proposals (server, A2)', () => {
   });
 
   it('the open artifact counts as named; a repo outside the scope or an unknown entry blocks Go with the reason', async () => {
-    await turn(stub, stubListeners, 'make-2', 'Turn this deck into a web page', { entry: 'document-interactive', sources: ['doc:mikes/coverage-deck'], repos: ['wicked-core'] }, { projectId: 'mikes', open: true });
+    await turn(stub, stubListeners, 'make-2', 'Turn this deck into a web page', { entry: 'document-interactive', sources: ['doc:mikes/coverage-deck'], repos: ['some-other-repo'] }, { projectId: 'mikes', open: true });
     const p = await proposalOf(stub, 'make-2');
     expect(p.sources).toEqual([{ token: 'doc:mikes/coverage-deck', label: 'Coverage deck v1', status: 'ok', projectId: 'mikes' }]);
-    expect(p.blocked).toBe("wicked-core isn't in this chat's scope");
+    expect(p.blocked).toBe("some-other-repo isn't in this chat's scope");
     const pid = p.pid;
     const go = await decide(stub, 'make-2', pid, { decision: 'go' });
     expect(go.statusCode).toBe(409);
-    expect(go.json()).toMatchObject({ code: 'proposal_blocked', error: "wicked-core isn't in this chat's scope" });
+    expect(go.json()).toMatchObject({ code: 'proposal_blocked', error: "some-other-repo isn't in this chat's scope" });
     await turn(stub, stubListeners, 'make-3', 'Make me a spreadsheet', { entry: 'spreadsheet', title: 'x' });
     expect((await proposalOf(stub, 'make-3')).blocked).toBe('studio has no job called “spreadsheet”');
   });
@@ -276,8 +276,12 @@ describe('chat proposals (server, A2)', () => {
     expect(kinds).toEqual(['proposal', 'proposal_accepting', 'proposal_decided']);
     // A Not now after Go is refused with the decision.
     expect((await decide(stub, 'go-1', p.pid, { decision: 'not_now' })).json()).toMatchObject({ code: 'proposal_decided' });
-    // The audit keeps what was accepted.
-    const audit = readFileSync(join(scratch, 'audit.log'), 'utf8');
+    // The audit keeps what was accepted (its appends are asynchronous: read until the line lands).
+    let audit = '';
+    for (let i = 0; i < 50 && !audit.includes('chat.proposal.accepted'); i += 1) {
+      await new Promise((r) => setTimeout(r, 40));
+      audit = existsSync(join(scratch, 'audit.log')) ? readFileSync(join(scratch, 'audit.log'), 'utf8') : '';
+    }
     expect(audit).toContain('chat.proposal.accepted');
   });
 
