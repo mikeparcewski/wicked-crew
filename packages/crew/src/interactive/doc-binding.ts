@@ -42,6 +42,9 @@ export interface DocBindingAttempt {
   outcome?: { kind: 'landed'; version: number; at: number } | { kind: 'failed'; reason: string; at: number };
   /** The retry proposal crew appended for this failure, once it did. */
   retryPid?: string;
+  /** A failure's publication (the run's `landing_failed` and the retry card) is done. Until it is, the boot reconcile
+   *  publishes it again (both halves are idempotent), so a crash between the outcome and its publication loses nothing. */
+  published?: boolean;
 }
 
 /** A repository the document is grounded on, as the chat's scope held it at Go. */
@@ -61,6 +64,13 @@ export interface DocBinding {
   /** The person's actor id (the proposal's accepting actor). */
   owner: string;
   chatId: string;
+  /** The chat's instance (its history nonce): a reused chat id is another chat, and the binding follows its own
+   *  instance to the archive id a reuse moved it to. `null` = unknown. */
+  chatInstance: string | null;
+  /** The project the chat itself was filed in when the proposal was made (`null`: none). When it differs from
+   *  {@link projectId} (an everything chat's document moved into a project), every attempt's packet is re-checked
+   *  against the document's project. */
+  scopeProject: string | null;
   /** The first proposal that made it. */
   proposalId: string;
   /** The turn the conversation snapshot is cut at (the first proposal's turn). */
@@ -214,6 +224,14 @@ export class DocBindingStore {
     return this.update(ref, runId, (a) => {
       if (a.outcome !== undefined) return false;
       a.outcome = outcome.kind === 'landed' ? { kind: 'landed', version: outcome.version, at: this.now() } : { kind: 'failed', reason: outcome.reason, at: this.now() };
+      return true;
+    });
+  }
+
+  markPublished(ref: string, runId: string): void {
+    this.update(ref, runId, (a) => {
+      if (a.published === true) return false;
+      a.published = true;
       return true;
     });
   }

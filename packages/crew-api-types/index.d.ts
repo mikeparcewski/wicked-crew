@@ -393,7 +393,8 @@ export interface ChatArtifactsCapabilities {
   demo: boolean;
   /**
    * (api-types 0.170.0) The daemon runs the chat-artifacts TEST configuration (DES §13 A2): every operation resolves,
-   * and Go on a proposal records a stub dispatch and starts NOTHING. A skin says so on the card. ABSENT otherwise.
+   * and Go on a proposal of a kind in {@link stubOps} records a stub dispatch and starts NOTHING (a skin says so on that
+   * card). With `stubOps` absent (a daemon before 0.171.0), that is every kind. ABSENT in production.
    */
   stub?: true;
   /**

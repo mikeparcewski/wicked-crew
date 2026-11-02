@@ -2153,7 +2153,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     const bindings = new DocBindingStore(join(dir, 'bindings'));
     const ref = `_unfiled/${doc}`;
     bindings.begin(
-      { ref, mount: '_unfiled', doc, projectId: null, owner: 'maria', chatId: 'c1', proposalId: 'c1:t2', cutoffTurnId: 't2', repos: [{ id: 'repo-crew', name: 'wicked-crew', rootPath: repoRoot }], graphDb: '/graphs/chat.db' },
+      { ref, mount: '_unfiled', doc, projectId: null, owner: 'maria', chatId: 'c1', chatInstance: 'i1', scopeProject: null, proposalId: 'c1:t2', cutoffTurnId: 't2', repos: [{ id: 'repo-crew', name: 'wicked-crew', rootPath: repoRoot }], graphDb: '/graphs/chat.db' },
       { pid: 'c1:t2', runId: `run-${doc}`, base: 0 },
     );
     const view = { session: { id: 'run-src', status: 'completed', problem: 'x', workflow_id: 'wf', repo_ref: null }, units: [] } as never;
@@ -2174,7 +2174,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     const spec: BoundDraft = {
       documentId: doc, brief: 'a release note', style: 'doc', runId: `run-${doc}`, chatId: 'c1', proposalId: 'c1:t2', artifactRef: ref,
       repos: [{ repoRef: 'repo-crew', name: 'wicked-crew', rootPath: repoRoot }], graphDb: '/graphs/chat.db',
-      clisJson: '[{"key":"claude"},{"key":"codex"}]', packet,
+      clisJson: '[{"key":"claude"},{"key":"codex"}]', packet, base: 0,
     };
     return { bindings, spec, repoRoot };
   }
@@ -2189,9 +2189,9 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
       bindings, onRunLaunched: (id, d) => launched.push([id, d]), log: () => {},
     });
     subs.push(sub!);
-    // A stale deliverable from an earlier attempt must never pass this attempt's floor.
-    mkdirSync(join(draftDir, 'bound-note'), { recursive: true });
-    writeFileSync(join(draftDir, 'bound-note', 'bound-note-v1.html'), '<html>old attempt</html>');
+    // An earlier attempt's folder (its deliverable, its packet) is gone before this attempt starts.
+    mkdirSync(join(draftDir, 'bound-note', 'attempt-old-run'), { recursive: true });
+    writeFileSync(join(draftDir, 'bound-note', 'attempt-old-run', 'bound-note-v1.html'), '<html>old attempt</html>');
     await sub!.launchBound(spec);
     expect(engine.launches).toHaveLength(1);
     const launch = engine.launches[0]!;
@@ -2199,17 +2199,27 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect(launch.clisJson).toBe(spec.clisJson);
     expect(launch.projectGraph).toEqual({ dbPath: '/graphs/chat.db' });
     expect('projectId' in launch).toBe(false); // Unfiled
-    expect(existsSync(join(draftDir, 'bound-note', 'bound-note-v1.html'))).toBe(false);
+    expect(existsSync(join(draftDir, 'bound-note', 'attempt-old-run'))).toBe(false);
     expect(existsSync(join(draftDir, 'bound-note', 'repos'))).toBe(true); // the chat's repository, snapshotted
+    const att = join(draftDir, 'bound-note', 'attempt-run-bound-note');
     for (const f of spec.packet.files) {
-      expect(readFileSync(join(draftDir, 'bound-note', 'sources', f.name)).equals(f.bytes)).toBe(true);
-      expect(launch.problem).toContain(`${f.name}=${f.sha256}`);
+      const dir = f.name.startsWith('run-') ? 'records' : 'sources';
+      expect(readFileSync(join(att, dir, f.name)).equals(f.bytes)).toBe(true);
+      expect(launch.problem).toContain(`${dir}/${f.name}=${f.sha256}`);
     }
+    // The deliverable is the attempt's own; the write root stays the document's folder (studio binds a run by it).
+    expect(launch.requireDeliverables).toEqual([join(att, 'bound-note-v1.html')]);
+    expect(launch.extraWriteRoots).toEqual([join(draftDir, 'bound-note')]);
+    // records/ is a claims source for the self-check (figures cite the run briefs), never sources/.
+    expect(launch.problem).toContain(`--repo ${join(att, 'records')}`);
+    expect(launch.problem).not.toContain(`--repo ${join(att, 'sources')}`);
     expect(launch.problem).toContain('THE SOURCE PACKET');
     expect(launch.problem).toContain('wicked-crew');
     expect(launch.problem).not.toContain('\n');
     expect(launched[0]).toEqual(['run-bound-note', expect.objectContaining({ chatId: 'c1', proposalId: 'c1:t2', artifactRef: '_unfiled/bound-note', deliver: 'none' })]);
-    expect(sub!.ledger.get('bound-note:attempt:run-bound-note')?.runId).toBe('run-bound-note');
+    expect(sub!.ledger.get('bound-note:attempt:_unfiled:run-bound-note')?.runId).toBe('run-bound-note');
+    // A launched attempt keeps the document busy for every seam that serializes on the in-flight list.
+    expect(sub!.inFlightDocs()).toContain('bound-note');
     expect(bindings.get('_unfiled/bound-note')?.attempts[0]?.launchedAt).toBeDefined();
     // The same document cannot get a second live draft.
     await expect(sub!.launchBound({ ...spec, runId: 'run-other' })).rejects.toThrow(/already running/);
@@ -2234,6 +2244,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
 
   it('A3: a bound attempt ends on its LANDING (version.created after the announce), and a failure or a changed packet records landing_failed', async () => {
     const bus = await import('wicked-bus');
+    armProbe(bus);
     const draftDir = join(dir, 'drafts');
     const outcomes: Array<[string, string, string]> = [];
     const make = async (doc: string) => {
@@ -2250,10 +2261,18 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     };
     // 1. Landed: the run completes, crew announces with the run id, interactive lands v1.
     const a = await make('land-note');
-    writeFileSync(join(draftDir, 'land-note', 'land-note-v1.html'), '<html><body><h1>Release note</h1><p>Coverage reached 80%.</p></body></html>');
+    writeFileSync(join(draftDir, 'land-note', 'attempt-run-land-note', 'land-note-v1.html'), '<html><body><h1>Release note</h1><p>Coverage reached 80%.</p></body></html>');
     a.engine.fire({ type: 'sessionCompleted', session: 'run-land-note' });
     await waitFor(() => a.bindings.get('_unfiled/land-note')?.attempts[0]?.emittedAt !== undefined, 8000);
     expect(outcomes).toEqual([]); // announced is not landed
+    expect(a.sub.inFlightDocs()).toContain('land-note'); // and the document stays busy until it lands
+    await waitFor(() => probeEvents.some((e) => e.event_type === DRAFT_COMPLETED && (e.payload as { document_id?: string }).document_id === 'land-note'), 8000);
+    expect(probeEvents.find((e) => e.event_type === DRAFT_COMPLETED && (e.payload as { document_id?: string }).document_id === 'land-note')!.payload).toMatchObject({ run_id: 'run-land-note', expect_head: 0 });
+    // A version from before the announce (a delayed event) or not past the base does not settle it.
+    const db0 = bus.openDb({ db_path: busDb });
+    bus.emit(db0, bus.loadConfig({ db_path: busDb }), { event_type: VERSION_CREATED, domain: 'wicked-interactive', subdomain: 'versions', payload: { document_id: 'land-note', version: 0, parent: 0, kind: 'generated', ts: new Date().toISOString() }, producer_id: 'wi-service' });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(outcomes).toEqual([]);
     const db = bus.openDb({ db_path: busDb });
     bus.emit(db, bus.loadConfig({ db_path: busDb }), { event_type: VERSION_CREATED, domain: 'wicked-interactive', subdomain: 'versions', payload: { document_id: 'land-note', version: 1, parent: 0, kind: 'generated', ts: new Date().toISOString() }, producer_id: 'wi-service' });
     await waitFor(() => outcomes.length === 1, 8000);
@@ -2265,12 +2284,27 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect(outcomes[1]).toEqual(['_unfiled/stop-note', 'run-stop-note', 'the run was stopped']);
     // 3. A source file changed during the run: nothing lands.
     const c = await make('tamper-note');
-    writeFileSync(join(draftDir, 'tamper-note', 'tamper-note-v1.html'), '<html><body><p>ok</p></body></html>');
+    writeFileSync(join(draftDir, 'tamper-note', 'attempt-run-tamper-note', 'tamper-note-v1.html'), '<html><body><p>ok</p></body></html>');
     const victim = c.spec.packet.files.find((f) => f.name.startsWith('run-'))!.name;
-    writeFileSync(join(draftDir, 'tamper-note', 'sources', victim), 'Coverage: 99%');
+    writeFileSync(join(draftDir, 'tamper-note', 'attempt-run-tamper-note', 'records', victim), 'Coverage: 99%');
     c.engine.fire({ type: 'sessionCompleted', session: 'run-tamper-note' });
     await waitFor(() => outcomes.length === 3, 8000);
     expect(outcomes[2]).toEqual(['_unfiled/tamper-note', 'run-tamper-note', `the source packet changed during the run (${victim})`]);
     expect(c.bindings.get('_unfiled/tamper-note')?.attempts[0]?.emittedAt).toBeUndefined();
+    // 4. A bound run this process holds no flight for (a restart lost it) still ends its attempt when it terminates.
+    const d = await boundWorld('lost-note');
+    d.bindings.markLaunched('_unfiled/lost-note', 'run-lost-note');
+    const engine = fakeAdapter();
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb, pollIntervalMs: 25, heartbeatMs: 60_000, ledgerPath: join(dir, 'ledger-lost.json'), draftDir, clisJson: SEATS,
+      bindings: d.bindings, onBoundOutcome: (ref, runId, o) => outcomes.push([ref, runId, o.kind === 'landed' ? `landed v${o.version}` : o.reason]), log: () => {},
+    });
+    subs.push(sub!);
+    expect(sub!.inFlightDocs()).toContain('lost-note');
+    engine.fire({ type: 'runCancelled', session: 'run-lost-note' });
+    await waitFor(() => outcomes.length === 4);
+    expect(outcomes[3]).toEqual(['_unfiled/lost-note', 'run-lost-note', 'interrupted by a restart']);
+    expect(engine.launches).toHaveLength(0); // never relaunched
+    expect(sub!.inFlightDocs()).not.toContain('lost-note');
   });
 });

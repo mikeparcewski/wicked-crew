@@ -15,7 +15,7 @@ import {
 } from './requirements.js';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { readFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, realpathSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -251,6 +251,7 @@ import {
   ChatMessageContextSchema,
   contextReadRoots,
   ensureRealDir,
+  sha256Hex,
   parseArtifactRef,
   readGroundingBeneath,
   seatPathOf,
@@ -262,6 +263,10 @@ import { CreateLauncher } from '../interactive/proposal-create.js';
 import type { DocBindingStore } from '../interactive/doc-binding.js';
 import type { BoundDraft } from '../interactive/draft-events.js';
 import { buildRunBrief } from './run-brief.js';
+import { readBeneath } from './beneath.js';
+
+/** A context brief copied into a document's packet, at most (the packet's per-file cap). */
+const BRIEF_COPY_MAX = 512 * 1024;
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
 import { registerInteractiveDocChecks } from '../interactive/doc-checks-routes.js';
 import { crewStateHome, stateHomeOfDb } from '../projects/state-home.js';
@@ -9584,6 +9589,8 @@ export function registerRoutes(
         }, projectId, body, actorId),
       launchBound: runtime.launchBoundDraft!,
       records: (chatId) => chatHistory?.messages(chatId) ?? chatTranscripts?.read(chatId) ?? [],
+      instanceOf: (chatId) => chatHistory?.stateOf(chatId)?.instance ?? null,
+      chatIdOf: (chatId, instance) => (chatHistory === null ? chatId : chatHistory.idOfInstance(chatId, instance)),
       repos: async () => (await adapter.listRepos()).map((r) => ({ id: r.id, name: typeof r.name === 'string' && r.name.trim() !== '' ? r.name.trim() : basename(r.root_path), rootPath: r.root_path })),
       graphFor: async (projectId, chatId) => {
         if (projectId === null) return chatScopes.engineOf(chatId)?.codeGraphDb ?? null;
@@ -9606,6 +9613,18 @@ export function registerRoutes(
         attachment: (chatId, id) => {
           const hit = chatAttachments.resolve(chatId, [id])[0];
           return hit === undefined ? null : { name: hit.name, path: hit.path };
+        },
+        // The exact brief a turn was given, from the live chat's scratch root, beneath it (no link followed), only when
+        // its bytes still hash to what the turn recorded (A1's binding). Gone after the chat ends or the daemon restarts.
+        contextBrief: (chatId, relPath, sha) => {
+          const cwd = chatScopes.get(chatId)?.cwd;
+          if (cwd === undefined) return null;
+          try {
+            const data = readBeneath(realpathSync(cwd), relPath, BRIEF_COPY_MAX).data;
+            return sha256Hex(data) === sha ? data : null;
+          } catch {
+            return null;
+          }
         },
       },
       log: (m) => app.log.warn(m),

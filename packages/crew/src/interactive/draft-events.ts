@@ -36,7 +36,7 @@
 
 import { judgeFallbackLabel } from '../core/deliver-text.js';
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
-import { existsSync, lstatSync, mkdirSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { createBeneath, mkdirBeneath, readBeneath } from '../api/beneath.js';
 import { basename, dirname, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -80,7 +80,7 @@ import { busSubscriberErrorReporter } from './bus-subscriber-errors.js';
 import { emitOnBus, requireEngineBus, tapBus, type BusEvent } from '../core/bus.js';
 import type { DocBindingStore } from './doc-binding.js';
 import { UNFILED_MOUNT } from '../api/chat-context.js';
-import { packetClause, type SourcePacket } from './source-packet.js';
+import { packetClause, packetDirOf, type SourcePacket } from './source-packet.js';
 
 // ── Vocabulary constants (interactive's, verbatim — src/service/events.js is the truth) ──────
 
@@ -484,10 +484,17 @@ export function draftIdempotencyKey(documentId: string, projectId: string | unde
     : `crew:interactive.draft:${documentId}:${partition}:${runId}`;
 }
 
-/** The handoff-ledger key of a proposal-bound attempt (one per run: a document may have several attempts). It starts
- *  `<doc>:` like every handoff key, so the doc↔run index and the delete sweep see it. */
-export function boundAttemptKey(documentId: string, runId: string): string {
-  return `${documentId}:attempt:${runId}`;
+/** The handoff-ledger key of a proposal-bound attempt (one per run: a document may have several attempts), with the
+ *  project partition like every draft key (crew#809). It starts `<doc>:` like every handoff key, so the doc↔run index
+ *  and the delete sweep see it, and {@link isAnotherProjectsDraftKey} keeps another project's. */
+export function boundAttemptKey(documentId: string, projectId: string | undefined, runId: string): string {
+  return `${documentId}:attempt:${projectPartitionOf(projectId)}:${runId}`;
+}
+
+/** The folder of one proposal-bound attempt under the document's run directory: its deliverable, `sources/` and
+ *  `records/`. A fresh one per attempt, and an earlier attempt's is removed before a new one starts. */
+export function attemptDirName(runId: string): string {
+  return `attempt-${runId}`;
 }
 
 /** What a proposal-bound launch adds to a draft (DES-CHAT-ARTIFACTS-001 §5.2, slice A3). */
@@ -509,6 +516,9 @@ export interface BoundDraft {
   /** The card's two helpers, as the launch's roster. */
   clisJson: string;
   packet: SourcePacket;
+  /** The document's head when the attempt started: the announce's `expect_head` (an interactive with the I1 contract
+   *  lands nothing on a moved head and says `draft.conflict`). */
+  base: number;
   actor?: string | undefined;
 }
 
@@ -541,6 +551,8 @@ export function draftHandoffKey(documentId: string, projectId?: string): string 
 export function isAnotherProjectsDraftKey(key: string, documentId: string, projectId: string | undefined): boolean {
   const own = draftHandoffKey(documentId, projectId);
   if (key === own) return false;
+  // A3: a proposal-bound attempt's row is this document's only when its partition is this project's.
+  if (key.startsWith(`${documentId}:attempt:`)) return !key.startsWith(`${documentId}:attempt:${projectPartitionOf(projectId)}:`);
   if (key.startsWith(`${documentId}:draft:`)) return true;
   return key === documentId && own !== documentId; // the unfiled document's row, when this one is filed
 }
@@ -572,42 +584,51 @@ export function isStudioScratchDoc(doc: { documentId: string; brief: string }): 
 export { InteractiveHandoffLedger, type HandoffLedgerEntry } from './ledger.js';
 
 /**
- * A3 (§5.3): give one attempt's inbox crew's copy of its source packet. The directory is made a real directory (a link
- * an earlier writer left there is removed, never followed), every file an earlier writer may have changed is replaced
- * with crew's bytes, and each file is created exclusively, through no link.
+ * A3 (§5.3): give one attempt's inbox crew's copy of its source packet, in a fresh attempt folder. The run's own folder
+ * is the trusted root (a writer can write only inside it, never rename it); everything below it is made and opened with
+ * A1's `beneath`, following no link at any component.
  */
-export function writePacketCopy(dir: string, packet: SourcePacket): void {
-  // The run's own folder is the trusted root (a writer can write only inside it, never rename it); everything below it
-  // is opened with A1's `beneath`, following no link at any component.
-  const root = realpathSync(dirname(dir));
-  const name = basename(dir);
-  try {
-    const st = lstatSync(join(root, name));
-    if (st.isSymbolicLink() || !st.isDirectory()) rmSync(join(root, name), { recursive: true, force: true });
-  } catch {
-    /* absent */
-  }
-  mkdirBeneath(root, name);
-  for (const f of packet.files) {
-    rmSync(join(root, name, f.name), { force: true, recursive: true });
-    createBeneath(root, `${name}/${f.name}`, f.bytes, 0o600);
-  }
+export function writePacketCopy(runDir: string, attempt: string, packet: SourcePacket): void {
+  const root = realpathSync(runDir);
+  mkdirBeneath(root, attempt);
+  const inbox = realpathSync(join(root, attempt));
+  for (const d of ['sources', 'records'] as const) mkdirBeneath(inbox, d);
+  for (const f of packet.files) createBeneath(inbox, `${packetDirOf(f.name)}/${f.name}`, f.bytes, 0o600);
 }
 
-/** The first packet file whose bytes no longer match crew's hash (or that is missing or a link), else `null`. */
-export function packetChanged(dir: string, hashes: Record<string, string>): string | null {
+/** Remove every earlier attempt's folder under a document's run directory (A3). */
+export function removeAttemptDirs(runDir: string): void {
+  let names: string[];
+  try {
+    names = readdirSync(runDir);
+  } catch {
+    return;
+  }
+  for (const n of names) if (/^attempt-[A-Za-z0-9._-]+$/.test(n)) rmSync(join(runDir, n), { recursive: true, force: true });
+}
+
+/** Drop an attempt's packet copy (crew keeps the canonical one); its deliverable stays for interactive to read. */
+export function removePacketCopy(attemptDir: string): void {
+  for (const d of ['sources', 'records']) rmSync(join(attemptDir, d), { recursive: true, force: true });
+}
+
+/**
+ * The first packet file whose bytes no longer match crew's record (or that is missing, a link, not a regular file, or
+ * not its recorded size), else `null`. Each read is bounded by the recorded size and never blocks (a FIFO is refused).
+ */
+export function packetChanged(attemptDir: string, files: ReadonlyArray<{ name: string; sha256: string; bytes: number }>): string | null {
   let root: string;
   try {
-    root = realpathSync(dirname(dir));
+    root = realpathSync(attemptDir);
   } catch {
-    return Object.keys(hashes)[0] ?? null;
+    return files[0]?.name ?? null;
   }
-  for (const [name, want] of Object.entries(hashes)) {
+  for (const f of files) {
     try {
-      const { data } = readBeneath(root, `${basename(dir)}/${name}`, 8 * 1024 * 1024);
-      if (createHash('sha256').update(data).digest('hex') !== want) return name;
+      const { data } = readBeneath(root, `${packetDirOf(f.name)}/${f.name}`, f.bytes);
+      if (data.length !== f.bytes || createHash('sha256').update(data).digest('hex') !== f.sha256) return f.name;
     } catch {
-      return name;
+      return f.name;
     }
   }
   return null;
@@ -727,9 +748,10 @@ interface InFlight {
    *  crucially, the crew#311 deliverable-floor report, which says exactly which artifact was
    *  expected and what was found instead of "the run failed, inspect it via the API". */
   failureDetail?: string | undefined;
-  /** A3: the proposal-bound attempt this flight is (its outcome is recorded on the document's binding), and its packet
-   *  copy with the hashes crew holds (checked again at landing). */
-  bound?: { ref: string; sourcesDir: string; hashes: Record<string, string> } | undefined;
+  /** A3: the proposal-bound attempt this flight is (its outcome is recorded on the document's binding), its attempt
+   *  folder (the packet copy, checked against crew's hashes at landing), its records folder (a claims source for the
+   *  floor) and the head it started from (the announce's `expect_head`). */
+  bound?: { ref: string; attemptDir: string; files: Array<{ name: string; sha256: string; bytes: number }>; base: number } | undefined;
 }
 
 /** The seam's durable state (handoff ledger + working dirs) follows the daemon's state home —
@@ -912,7 +934,24 @@ export async function startInteractiveDraftSubscriber(
     const planned = unitsByRun.get(runId);
     if (planned?.observe(event) === true) return;
     const flight = inFlight.get(runId);
-    if (flight === undefined) return;
+    if (flight === undefined) {
+      // A3 (§6.2): a proposal-bound run this process holds no flight for (a restart lost it, and the boot reconcile
+      // could not see it end in time) still ends its attempt: released, Try again offered. Never relaunched.
+      if ((event.type === 'sessionCompleted' || event.type === 'sessionFailed' || event.type === 'runCancelled') && opts.bindings !== undefined) {
+        const hit = opts.bindings.attemptOf(runId);
+        if (hit !== null && hit.attempt.outcome === undefined && hit.attempt.emittedAt === undefined) {
+          const outcome: BoundOutcome = { kind: 'failed', reason: 'interrupted by a restart' };
+          if (opts.bindings.setOutcome(hit.binding.ref, runId, outcome)) {
+            try {
+              opts.onBoundOutcome?.(hit.binding.ref, runId, outcome);
+            } catch (err) {
+              log(`[interactive-draft] recording the outcome of run ${runId} failed: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+        }
+      }
+      return;
+    }
     // F-4R2-005: every narration line and heartbeat from here carries the run id and the ord of the
     // latest unit-scoped frame (`narrationStamps`), so a skin keys the thread per run and per unit.
     flight.runId ??= runId;
@@ -1064,6 +1103,7 @@ export async function startInteractiveDraftSubscriber(
           `The crew run answering this document ${event.type === 'runCancelled' ? 'was cancelled' : 'failed'} ` +
           `(run ${runId}).${why} Inspect it via the crew API (GET /api/v1/runs/${runId}); the assist loop can still take over.`,
       });
+      if (flight.bound !== undefined) removePacketCopy(flight.bound.attemptDir);
       reportBound(flight, runId, {
         kind: 'failed',
         reason: `${event.type === 'runCancelled' ? 'the run was stopped' : 'the run failed'}${flight.failureDetail !== undefined ? `: ${oneLine(flight.failureDetail, 300)}` : ''}`,
@@ -1091,6 +1131,7 @@ export async function startInteractiveDraftSubscriber(
         state: 'error',
         message: `The crew run completed but produced no draft file at ${outPath} (run ${runId}).`,
       });
+      if (flight.bound !== undefined) removePacketCopy(flight.bound.attemptDir);
       reportBound(flight, runId, { kind: 'failed', reason: 'the run finished without writing the draft file' });
       log(`[interactive-draft] run ${runId} completed but ${outPath} is missing/empty`);
       return;
@@ -1098,7 +1139,7 @@ export async function startInteractiveDraftSubscriber(
     // A3 (§5.3): the source packet the run was given is checked against the hashes crew holds before anything lands —
     // a changed or missing file fails the landing (the reviewing step was told to check them too).
     if (flight.bound !== undefined) {
-      const changed = packetChanged(flight.bound.sourcesDir, flight.bound.hashes);
+      const changed = packetChanged(flight.bound.attemptDir, flight.bound.files);
       if (changed !== null) {
         removeSnapshots(flight);
         ledger.recordFailure(draftHandoffKey(documentId, projectId));
@@ -1107,6 +1148,7 @@ export async function startInteractiveDraftSubscriber(
           state: 'error',
           message: `The draft was not landed: its source file ${changed} changed during the run (run ${runId}), so crew cannot vouch for what it was made from.`,
         });
+        removePacketCopy(flight.bound.attemptDir);
         reportBound(flight, runId, { kind: 'failed', reason: `the source packet changed during the run (${changed})` });
         return;
       }
@@ -1120,11 +1162,14 @@ export async function startInteractiveDraftSubscriber(
     const floorVerdict = await runDraftFloor(
       outPath,
       flight.floor?.budget ?? { pages: null, exact: false, source: 'unknown' },
-      flight.snapshotDirs,
+      // A3: the packet's records/ is a claims source too (the run briefs, documents and attachments a figure may cite).
+      [...flight.snapshotDirs, ...(flight.bound !== undefined ? [join(flight.bound.attemptDir, 'records')] : [])],
       { ...(flight.floor !== undefined ? { style: flight.floor.style } : {}) },
       opts.draftFloorIo ?? {},
     );
     removeSnapshots(flight);
+    // The packet served its last read: crew keeps the canonical copy, the inbox keeps only the deliverable.
+    if (flight.bound !== undefined) removePacketCopy(flight.bound.attemptDir);
     log(`[interactive-draft] run ${runId} draft floor: ${floorVerdict.verdict} — ${floorVerdict.summary}`);
     if (floorVerdict.verdict === 'fail') {
       ledger.recordFailure(draftHandoffKey(documentId, projectId));
@@ -1154,8 +1199,9 @@ export async function startInteractiveDraftSubscriber(
     if (flight.bound !== undefined) opts.bindings?.markEmitted(flight.bound.ref, runId);
     const emitted = await emitInteractive(
       DRAFT_COMPLETED,
-      // `run_id` (DES §12): which attempt this draft is; interactive ≥ the I1 contract records it on the version.
-      { ...docScope(documentId, projectId), html_path: outPath, run_id: runId },
+      // `run_id` (DES §12): which attempt this draft is; interactive ≥ the I1 contract records it on the version. A bound
+      // attempt also says the head it started from (`expect_head`): that contract lands nothing on a moved head.
+      { ...docScope(documentId, projectId), html_path: outPath, run_id: runId, ...(flight.bound !== undefined ? { expect_head: flight.bound.base } : {}) },
       draftIdempotencyKey(documentId, projectId, runId),
     );
     if (!emitted) {
@@ -1238,7 +1284,10 @@ export async function startInteractiveDraftSubscriber(
     // NOT created here (Copilot round 2): runDir is only mkdir'd after the snapshot helper's
     // containment check has ruled the location safe — see the pre-launch mkdir below.
     const runDir = join(draftDir, doc.documentId);
-    const outPath = join(runDir, `${doc.documentId}-v1.html`);
+    // A3: a proposal-bound attempt works in its own folder: its deliverable and packet never share a name with an
+    // earlier attempt's (or a same-named document's in another project, once that attempt ended).
+    const attemptDir = bound !== undefined ? join(runDir, attemptDirName(runId)) : runDir;
+    const outPath = join(attemptDir, `${doc.documentId}-v1.html`);
 
     // PRE-LAUNCH placeholder (Copilot round 2): the awaits below (repo resolution, snapshot)
     // open a window in which this doc has no `inFlight` entry — so the chat seam's `isDocBusy`
@@ -1253,7 +1302,7 @@ export async function startInteractiveDraftSubscriber(
       narration: 'Crew run launched — working on your draft…',
       floor: { budget: pageBudgetFor(doc.brief, doc.style), style: doc.style },
       ...(bound !== undefined
-        ? { bound: { ref: bound.artifactRef, sourcesDir: join(runDir, 'sources'), hashes: Object.fromEntries(bound.packet.files.map((f) => [f.name, f.sha256])) } }
+        ? { bound: { ref: bound.artifactRef, attemptDir, files: bound.packet.files.map((f) => ({ name: f.name, sha256: f.sha256, bytes: f.bytes.length })), base: bound.base } }
         : {}),
     };
     inFlight.set(runId, flight);
@@ -1433,6 +1482,8 @@ export async function startInteractiveDraftSubscriber(
       endFlight(runId);
       removeSnapshots(flight);
       log(`[interactive-draft] doc ${doc.documentId}: subscriber stopped before launch — abandoned (a replay retries)`);
+      // A bound launch reports it: its proposal stays accepting, and Go again resumes the same identity.
+      if (bound !== undefined) throw new Error('the daemon is stopping; nothing was launched');
       return;
     }
 
@@ -1440,12 +1491,12 @@ export async function startInteractiveDraftSubscriber(
     mkdirSync(runDir, { recursive: true });
     let packetLine = '';
     if (bound !== undefined) {
-      // A3: an earlier attempt's deliverable must never pass this attempt's floor, and its writer may have changed its
-      // copies of the packet: the inbox gets crew's bytes again, through no link (§5.3).
-      rmSync(outPath, { force: true });
-      const sourcesDir = join(runDir, 'sources');
+      // A3: an earlier attempt's folder goes first (its deliverable can never pass this attempt's floor, and an
+      // announce of it still on the bus can no longer land: its file is gone), then this attempt gets crew's copy of its
+      // packet, through no link (§5.3).
       try {
-        writePacketCopy(sourcesDir, bound.packet);
+        removeAttemptDirs(runDir);
+        writePacketCopy(runDir, attemptDirName(runId), bound.packet);
       } catch (err) {
         endFlight(runId);
         removeSnapshots(flight);
@@ -1453,7 +1504,7 @@ export async function startInteractiveDraftSubscriber(
         emitStatus({ ...docScope(doc.documentId, doc.projectId), state: 'error', message });
         throw new Error(message);
       }
-      packetLine = ' ' + packetClause(sourcesDir, bound.packet, PROCESS_NOTES_WHERE);
+      packetLine = ' ' + packetClause(attemptDir, bound.packet, PROCESS_NOTES_WHERE);
     }
 
     // Resolve the project's graph BEFORE the launch, never indexing (a refresh is
@@ -1509,7 +1560,7 @@ export async function startInteractiveDraftSubscriber(
           draftQualityClause(
             outPath,
             pageBudgetFor(doc.brief, doc.style),
-            subjects.flatMap((s) => (s.snapshotDir !== undefined ? [s.snapshotDir] : [])),
+            [...subjects.flatMap((s) => (s.snapshotDir !== undefined ? [s.snapshotDir] : [])), ...(bound !== undefined ? [join(attemptDir, 'records')] : [])],
             { style: doc.style },
           ) +
           packetLine,
@@ -1635,12 +1686,19 @@ export async function startInteractiveDraftSubscriber(
     const runIdP = typeof p['run_id'] === 'string' && p['run_id'] !== '' ? p['run_id'] : null;
     const b = bindings.get(`${projectId ?? UNFILED_MOUNT}/${documentId}`);
     if (b === null) return;
+    const version = typeof p['version'] === 'number' ? p['version'] : null;
+    const ts = typeof p['ts'] === 'string' ? Date.parse(p['ts']) : NaN;
     const a = b.attempts.find((x) =>
       x.outcome === undefined && x.emittedAt !== undefined &&
-      (runIdP !== null ? x.runId === runIdP : event.event_type === VERSION_CREATED && p['kind'] === 'generated'));
+      (runIdP !== null
+        ? x.runId === runIdP
+        // An interactive before the I1 contract names no run: only a generated version past the attempt's base, made
+        // after crew announced it (a delayed event from before cannot settle it), is its landing.
+        : event.event_type === VERSION_CREATED && p['kind'] === 'generated' && version !== null && version > x.base &&
+          (Number.isNaN(ts) || ts >= x.emittedAt - 5000)));
     if (a === undefined) return;
     const outcome: BoundOutcome = event.event_type === VERSION_CREATED
-      ? { kind: 'landed', version: typeof p['version'] === 'number' ? p['version'] : 0 }
+      ? { kind: 'landed', version: version ?? 0 }
       : { kind: 'failed', reason: `the document changed while it was being drafted (it was at v${String(p['expect_head'] ?? '?')}, now v${String(p['actual_head'] ?? '?')}), so nothing landed` };
     if (!bindings.setOutcome(b.ref, a.runId, outcome)) return;
     log(`[interactive-draft] run ${a.runId} for ${b.ref}: ${outcome.kind === 'landed' ? `landed v${outcome.version}` : outcome.reason}`);
@@ -1671,7 +1729,13 @@ export async function startInteractiveDraftSubscriber(
   return {
     ledger,
     inFlightDocs: () => [
-      ...new Set([...[...inFlight.values()].map((f) => f.documentId), ...finalizing.values()]),
+      ...new Set([
+        ...[...inFlight.values()].map((f) => f.documentId),
+        ...finalizing.values(),
+        // A3 (§6.2): a proposal-bound document stays busy until its attempt's outcome is recorded (announced and not
+        // yet landed, or reconciling at boot), for every seam that serializes on this list.
+        ...(opts.bindings?.all() ?? []).filter((b) => b.attempts.some((a) => a.outcome === undefined && (a.launchedAt !== undefined || a.emittedAt !== undefined))).map((b) => b.doc),
+      ]),
     ],
     launchBound: async (spec: BoundDraft) => {
       if (closed) throw new Error('the draft seam is stopping');
@@ -1688,7 +1752,7 @@ export async function startInteractiveDraftSubscriber(
         style: spec.style,
         ...(spec.projectId !== undefined ? { projectId: spec.projectId } : {}),
       };
-      await launchDraft(doc, spec.runId, boundAttemptKey(spec.documentId, spec.runId), spec);
+      await launchDraft(doc, spec.runId, boundAttemptKey(spec.documentId, spec.projectId, spec.runId), spec);
     },
     stop: async () => {
       closed = true; // a handler mid-snapshot sees this and never launches (Copilot round 2)

@@ -139,9 +139,9 @@ import { seatParser } from '../standing-orders/parse.js';
 import { registerGateHistoryRoute, runBand, runPreset, runProject } from '../standing-orders/history.js';
 import { WorkingDocService } from '../working-doc/service.js';
 import { WorkingDocStore } from '../working-doc/store.js';
-import { isWorkingDoc as isWorkingDocAt, readDocHead } from '../interactive/chat-events.js';
+import { isWorkingDoc as isWorkingDocAt } from '../interactive/chat-events.js';
 import { DocBindingStore } from '../interactive/doc-binding.js';
-import { reconcileBoundAttempts } from '../interactive/proposal-create.js';
+import { docVersionsOf, reconcileBoundAttempts } from '../interactive/proposal-create.js';
 import type { BoundOutcome } from '../interactive/draft-events.js';
 import { bridgeBackend } from '../working-doc/bridge-backend.js';
 import { registerWorkingDocRoutes } from '../working-doc/routes.js';
@@ -585,8 +585,6 @@ export async function createServer(
   let chatDecisionRecorder: ChatDecisionRecorder | null = null;
   // DES-CHAT-ARTIFACTS-001 §4.2 (A2): the proposal resolver (built with the routes), fed from the reply fold below.
   let chatProposals: import('./chat-proposals.js').ChatProposals | null = null;
-  // A3: the one launcher per run id (built with the routes); the draft seam's bus trigger and the boot reconcile use it.
-  let proposalLaunchers: import('./chat-proposals.js').LaunchOnceRegistry | null = null;
   // `GET /search`'s index, handed back by `registerRoutes` below; the frame fan-in feeds it late-bound.
   let searchService: SearchService | null = null;
   // DC-S7: considered · set aside · cited — the rule reads behind the citation verifier, the unit hook
@@ -1091,38 +1089,38 @@ export async function createServer(
       audit.record('chat.proposal.landed', DAEMON_ACTOR, { runId, detail: { artifactRef: ref, version: outcome.version } });
       return;
     }
-    const ts = audit.record('run.landing_failed', DAEMON_ACTOR, { runId, detail: { artifactRef: ref, reason: outcome.reason } });
-    runTimingIndex.setLandingFailed(runId, outcome.reason, ts > 0 ? ts : Date.now());
+    // Idempotent halves (a boot republishes a failure a crash cut short): the run's record once, the retry card once.
+    if (runTimingIndex.landingFailedOf(runId) === undefined) {
+      const ts = audit.record('run.landing_failed', DAEMON_ACTOR, { runId, detail: { artifactRef: ref, reason: outcome.reason } });
+      runTimingIndex.setLandingFailed(runId, outcome.reason, ts > 0 ? ts : Date.now());
+    }
     broadcast({ type: 'landingFailed', session: runId, artifact_ref: ref, reason: outcome.reason });
     if (hit === null || chatProposals === null) return;
-    void chatProposals
-      .appendRetry(hit.binding.chatId, hit.attempt.pid, runId, ref, outcome.reason)
-      .then((pid) => {
-        if (pid !== null) docBindings.setRetry(ref, runId, pid);
-      })
-      .catch((err: unknown) => app.log.warn(`[proposals] no retry card for run ${runId}: ${err instanceof Error ? err.message : String(err)}`));
-  };
-  /** A3: a bound document's `doc.created` (normal or late) goes to its proposal's one launcher per run id. */
-  const onBoundDocCreated = async (ref: string): Promise<void> => {
-    const b = docBindings.get(ref);
-    const a = b?.attempts.filter((x) => x.outcome === undefined).at(-1);
-    if (b === null || a === undefined || chatProposals === null || proposalLaunchers === null) return;
-    const acc = chatProposals.acceptedOf(b.chatId, a.pid);
-    if (acc === null) {
-      app.log.warn(`[proposals] ${ref}: doc.created for proposal ${a.pid}, which holds no accepted record — nothing launched`);
+    const chatNow = chatHistory.idOfInstance(hit.binding.chatId, hit.binding.chatInstance);
+    if (chatNow === null) {
+      app.log.warn(`[proposals] run ${runId} failed, and the chat it was made from is gone — no retry card`);
+      docBindings.markPublished(ref, runId);
       return;
     }
-    const result = await proposalLaunchers.launchOnce({
-      kind: 'create',
-      pid: a.pid,
-      chatId: b.chatId,
-      actor: { id: acc.actor, kind: 'human', trust: 'operator' },
-      identity: acc.identity,
-      resolution: acc.resolution,
-    });
-    app.log.info(`[proposals] ${ref}: doc.created → run ${result.runId} ${result.adopted ? 'adopted (already launched)' : 'launched by the trigger'}`);
-    // A run the trigger had to start (Go's own launch failed) decides the proposal; an adopted one is Go's to decide.
-    if (!result.adopted) await chatProposals.settleAccepting(b.chatId, a.pid);
+    void chatProposals
+      .appendRetry(chatNow, hit.attempt.pid, runId, ref, outcome.reason, hit.binding.chatInstance)
+      .then((pid) => {
+        if (pid !== null) docBindings.setRetry(ref, runId, pid);
+        docBindings.markPublished(ref, runId);
+      })
+      .catch((err: unknown) => app.log.warn(`[proposals] no retry card for run ${runId} (published again at the next start): ${err instanceof Error ? err.message : String(err)}`));
+  };
+  /**
+   * A3: a bound document's `doc.created` (normal or late) never launches anything: only a person's Go (or Go again)
+   * starts a run, under the proposal's and the chat's locks and busy checks. The trigger only settles an `accepting`
+   * proposal whose run Go already started (a lost response), as the boot reconcile does.
+   */
+  const onBoundDocCreated = async (ref: string): Promise<void> => {
+    const b = docBindings.get(ref);
+    if (b === null || chatProposals === null) return;
+    const chatNow = chatHistory.idOfInstance(b.chatId, b.chatInstance);
+    if (chatNow === null) return;
+    for (const a of b.attempts.filter((x) => x.outcome === undefined)) await chatProposals.settleAccepting(chatNow, a.pid);
   };
   /** The three seams' ledgers, read AT USE TIME (a seam that armed after this closure was built is
    *  still preferred over its file) — shared by the doc-delete sweep and the doc↔run index. */
@@ -2656,7 +2654,6 @@ export async function createServer(
   // proposal is keyed by the decision id). Off the boot path; a failure is a logged outcome.
   chatDecisionRecorder = registered.chatRecorder;
   chatProposals = registered.chatProposals;
-  proposalLaunchers = registered.proposalLaunchers;
   considerations = registered.considerations;
   searchService = registered.search;
   decorateRun = registered.decorateRun;
@@ -2776,8 +2773,16 @@ export async function createServer(
       bindings: docBindings,
       sessions: () => adapter.sessionsDetail(),
       cancelRun: (runId) => adapter.cancelRun(runId),
-      docHead: (projectId, doc) => readDocHead(interactiveDocsRoot(projectId ?? undefined), doc)?.head ?? null,
+      docVersions: (projectId, doc) => docVersionsOf(interactiveDocsRoot(projectId ?? undefined), doc),
+      chatIdOf: (chatId, instance) => chatHistory.idOfInstance(chatId, instance),
       settleAccepting: (chatId, pid) => chatProposals?.settleAccepting(chatId, pid) ?? Promise.resolve(false),
+      // A crash between the engine accepting the run and crew recording it: the run's chat, proposal, artifact and
+      // document are recorded from the binding, as the draft seam would have.
+      ensureLaunchRecord: (b, a) => {
+        if (runTimingIndex.proposalOf(a.runId) !== undefined) return;
+        recordRunLaunched(audit, runTimingIndex, DAEMON_ACTOR, a.runId, { deliver: 'none', channel: 'studio', actor: b.owner, chatId: b.chatId, proposalId: a.pid, artifactRef: b.ref, recoveredAtBoot: true });
+        docRuns.set(a.runId, b.doc);
+      },
       onOutcome: onBoundOutcome,
       log: (m) => app.log.warn(m),
     });

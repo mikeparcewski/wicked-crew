@@ -22,8 +22,11 @@ import type { ArtifactProposal, ChatTranscriptRecord, ProposalIdentity, SessionV
 import { parseArtifactRef, UNFILED_MOUNT } from '../api/chat-context.js';
 import type { ProposalDispatch, ProposalDispatcher } from '../api/chat-proposals.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
+import { realpathSync } from 'node:fs';
+
+import { readBeneath } from '../api/beneath.js';
 import { readDocHead } from './chat-events.js';
-import type { BoundRepo, DocBindingStore } from './doc-binding.js';
+import type { BoundRepo, DocBinding, DocBindingAttempt, DocBindingStore } from './doc-binding.js';
 import type { BoundDraft, BoundOutcome } from './draft-events.js';
 import { buildSourcePacket, type PacketDeps } from './source-packet.js';
 
@@ -39,6 +42,11 @@ export interface CreateLauncherDeps {
   launchBound: ((spec: BoundDraft) => Promise<void>) | null;
   /** The chat's records (live transcript or kept history). */
   records(chatId: string): ChatTranscriptRecord[];
+  /** The chat's instance now (its history nonce), or `null`. */
+  instanceOf(chatId: string): string | null;
+  /** The id a chat instance is kept under now: its own id, or the archive id a reuse of the id moved it to; `null` when
+   *  it is gone. A binding reads its chat through this, never another person's chat that reused the id. */
+  chatIdOf(chatId: string, instance: string | null): string | null;
   /** Registered repositories by id (for their roots). */
   repos(): Promise<Array<{ id: string; name: string; rootPath: string }>>;
   /** The code graph a document in this mount gets: the project's, else the chat's own scope graph. */
@@ -83,10 +91,12 @@ export class CreateLauncher implements ProposalDispatcher {
     if (root === null) throw new Error(`${projectId === null ? 'Unfiled' : `project ${projectId}`} is no longer on this daemon`);
     const head = readDocHead(root, ref.doc);
 
-    // 1. Recorded before anything is created or launched. A retry keeps the binding's repositories, graph and cutoff.
+    // 1. Recorded before anything is created or launched. A retry keeps the binding's repositories, graph, cutoff, chat
+    //    instance and the project the chat itself was in (which says whether the packet is re-checked).
     const held = this.deps.bindings.get(ref.ref);
     const repos = held?.repos ?? (await this.boundRepos(res));
     const graphDb = held !== null ? held.graphDb : await this.deps.graphFor(projectId, d.chatId);
+    const base = head?.head ?? 0;
     const binding = this.deps.bindings.begin(
       {
         ref: ref.ref,
@@ -95,13 +105,16 @@ export class CreateLauncher implements ProposalDispatcher {
         projectId,
         owner: d.actor.id,
         chatId: d.chatId,
+        chatInstance: this.deps.instanceOf(d.chatId),
+        scopeProject: scopeProjectOf(this.deps.records(d.chatId), res),
         proposalId: d.pid,
         cutoffTurnId: res.turnId,
         repos,
         graphDb,
       },
-      { pid: d.pid, runId: d.identity.runId, base: head?.head ?? 0 },
+      { pid: d.pid, runId: d.identity.runId, base },
     );
+    const attempt = binding.attempts.find((a) => a.runId === d.identity.runId)!;
     const clisJson = res.helpers !== null ? this.deps.clisJsonFor(res.helpers.seats) : null;
     if (clisJson === null) throw new Error('a helper on the card can no longer work; choose two helpers and Go again');
 
@@ -132,7 +145,9 @@ export class CreateLauncher implements ProposalDispatcher {
       throw new Error(`${ref.ref} is a demo, not a document`);
     }
 
-    // 3. The packet, then the draft with the derived run id.
+    // 3. The packet, then the draft with the derived run id. The chat is read through its own instance: after a reuse of
+    //    its id it is the archived chat, and when it is gone only what the canonical packet already holds is used.
+    const chatNow = this.deps.chatIdOf(binding.chatId, binding.chatInstance);
     const packet = await buildSourcePacket(
       {
         runId: d.identity.runId,
@@ -140,9 +155,9 @@ export class CreateLauncher implements ProposalDispatcher {
         pid: d.pid,
         cutoffTurnId: binding.cutoffTurnId,
         resolution: res,
-        records: this.deps.records(binding.chatId),
+        records: chatNow === null ? [] : this.deps.records(chatNow),
         held: { tokens: binding.tokens, bytes: (name) => this.deps.bindings.packetBytes(ref.ref, name) },
-        ...(res.filedIn.projectId !== projectIdOfChat(this.deps.records(binding.chatId), res) ? { recheckProject: projectId } : {}),
+        ...(binding.scopeProject !== binding.projectId ? { recheckProject: binding.projectId } : {}),
       },
       this.deps.packetDeps,
     );
@@ -164,6 +179,7 @@ export class CreateLauncher implements ProposalDispatcher {
       graphDb: binding.graphDb,
       clisJson,
       packet,
+      base: attempt.base,
       actor: d.actor.id,
     });
   }
@@ -183,10 +199,12 @@ export class CreateLauncher implements ProposalDispatcher {
   }
 }
 
-/** The project the proposal was resolved in: a resolution re-filed by an edit differs from it (§4.2's re-check). */
-function projectIdOfChat(records: readonly ChatTranscriptRecord[], res: ArtifactProposal): string | null {
+/** The project the chat itself was in when the proposal was made (its first record, before any edit): a resolution
+ *  re-filed by an edit differs from it, and then the packet is re-checked against the document's project (§4.2). A
+ *  `null` there is a real answer (a chat in no project), never "unknown". */
+function scopeProjectOf(records: readonly ChatTranscriptRecord[], res: ArtifactProposal): string | null {
   const first = records.find((r): r is Extract<ChatTranscriptRecord, { kind: 'proposal' }> => r.kind === 'proposal' && r.proposal.pid === res.pid);
-  return first?.proposal.filedIn.projectId ?? res.filedIn.projectId;
+  return first !== undefined ? first.proposal.filedIn.projectId : res.filedIn.projectId;
 }
 
 /** The route project of a mount (`default` for Unfiled). */
@@ -198,11 +216,17 @@ export interface ReconcileDeps {
   bindings: DocBindingStore;
   sessions(): Promise<SessionView[]>;
   cancelRun(runId: string): Promise<unknown>;
-  /** The document's head now (`null`: not readable). */
-  docHead(projectId: string | null, doc: string): number | null;
+  /** The document's versions now: its head and, per version, the run that made it when interactive records that (the
+   *  I1 contract: `run_id` on each new entry). `provenance` = the manifest records runs at all. `null` = not readable. */
+  docVersions(projectId: string | null, doc: string): { head: number; byRun: Map<string, number>; provenance: boolean } | null;
+  /** The id the binding's chat is kept under now (its own, or an archive id after a reuse), or `null`. */
+  chatIdOf(chatId: string, instance: string | null): string | null;
   /** Decide an `accepting` proposal whose run exists (A2's adopt). */
   settleAccepting(chatId: string, pid: string): Promise<boolean>;
-  /** An outcome this reconcile recorded (release, `landing_failed`, retry card). */
+  /** The run's `run.launched` facts (chat, proposal, artifact, document), recorded again when a crash lost them. */
+  ensureLaunchRecord(binding: DocBinding, attempt: DocBindingAttempt): void;
+  /** An outcome this reconcile recorded, or a failure whose publication a crash cut short (release, `landing_failed`,
+   *  retry card: each idempotent). */
   onOutcome(ref: string, runId: string, outcome: BoundOutcome): void;
   log(msg: string): void;
   /** How long a cancelled run is waited for, ms (default 30 s). */
@@ -214,26 +238,39 @@ const TERMINAL_STATUSES: ReadonlySet<string> = new Set(['completed', 'cancelled'
 
 /**
  * DES-CHAT-ARTIFACTS-001 §6.2 (A3): at daemon start, BEFORE the generic boot resume (which skips bound runs), every
- * proposal-bound attempt without a recorded outcome is settled. An `accepting` proposal whose run exists is decided.
- * An attempt crew had announced, whose document's head moved past its base while the daemon was down, landed. Every
- * other attempt with a run lost its seam flight in the restart: its engine run is cancelled to a CONFIRMED terminal
- * state, then "interrupted by a restart" is recorded — and only then are the chat and the document released and Try
- * again offered, so an old attempt never runs beside a new one. Never a redispatch. An attempt with no run is left
- * alone: its card's "Go again" resumes the same identity.
+ * proposal-bound attempt without a recorded outcome is settled. An `accepting` proposal whose run exists is decided, and
+ * the run's launch facts are recorded again if a crash lost them. An attempt crew had announced landed when the
+ * document's manifest names its run (the I1 contract); before that contract, when the head moved past its base (the
+ * best evidence there is, said in the log). Every other attempt with a run lost its seam flight in the restart: its
+ * engine run is cancelled to a CONFIRMED terminal state, then "interrupted by a restart" is recorded, and only then are
+ * the chat and the document released and Try again offered, so an old attempt never runs beside a new one (a retry
+ * also removes the old attempt's folder, so an announce of it still on the bus cannot land). Never a redispatch. An
+ * attempt with no run is left alone: its card's "Go again" resumes the same identity. A failure whose publication a
+ * crash cut short is published again.
  */
 export async function reconcileBoundAttempts(deps: ReconcileDeps): Promise<void> {
-  const pending = deps.bindings.all().flatMap((b) => b.attempts.filter((a) => a.outcome === undefined).map((a) => ({ b, a })));
+  const all = deps.bindings.all();
+  for (const b of all) {
+    for (const a of b.attempts) {
+      if (a.outcome?.kind === 'failed' && a.published !== true) deps.onOutcome(b.ref, a.runId, a.outcome);
+    }
+  }
+  const pending = all.flatMap((b) => b.attempts.filter((a) => a.outcome === undefined).map((a) => ({ b, a })));
   if (pending.length === 0) return;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const views = new Map((await deps.sessions()).map((v) => [v.session.id, v] as const));
   for (const { b, a } of pending) {
     const view = views.get(a.runId);
     if (view === undefined) continue;
-    await deps.settleAccepting(b.chatId, a.pid).catch(() => false);
+    deps.ensureLaunchRecord(b, a);
+    const chatNow = deps.chatIdOf(b.chatId, b.chatInstance);
+    if (chatNow !== null) await deps.settleAccepting(chatNow, a.pid).catch(() => false);
     if (a.emittedAt !== undefined) {
-      const head = deps.docHead(b.projectId, b.doc);
-      if (head !== null && head > a.base) {
-        const landed: BoundOutcome = { kind: 'landed', version: head };
+      const v = deps.docVersions(b.projectId, b.doc);
+      const landedAt = v === null ? undefined : v.provenance ? v.byRun.get(a.runId) : v.head > a.base ? v.head : undefined;
+      if (landedAt !== undefined) {
+        if (v !== null && !v.provenance) deps.log(`[proposals] boot: ${b.ref} run ${a.runId}: v${landedAt} is past the attempt's base; this interactive records no run per version, so that is taken as its landing`);
+        const landed: BoundOutcome = { kind: 'landed', version: landedAt };
         if (deps.bindings.setOutcome(b.ref, a.runId, landed)) deps.onOutcome(b.ref, a.runId, landed);
         continue;
       }
@@ -252,6 +289,7 @@ export async function reconcileBoundAttempts(deps: ReconcileDeps): Promise<void>
         await sleep(500);
       }
       if (!TERMINAL_STATUSES.has(status)) {
+        // Its terminal frame settles it later (the draft seam records the interruption for a run it holds no flight for).
         deps.log(`[proposals] boot: run ${a.runId} of ${b.ref} is still ${status}; the document stays busy until it ends`);
         continue;
       }
@@ -259,5 +297,29 @@ export async function reconcileBoundAttempts(deps: ReconcileDeps): Promise<void>
     const outcome: BoundOutcome = { kind: 'failed', reason: 'interrupted by a restart' };
     if (deps.bindings.setOutcome(b.ref, a.runId, outcome)) deps.onOutcome(b.ref, a.runId, outcome);
     deps.log(`[proposals] boot: ${b.ref} run ${a.runId} was interrupted by the restart (engine ${status}); released, Try again offered`);
+  }
+}
+
+/**
+ * A document's head and which run made each version, read from its `versions.json` beneath the docs root (no link
+ * followed). `provenance` is whether the manifest records runs at all (interactive's I1 contract writes `run_id` on
+ * every new entry; an older interactive writes none). `null` when the manifest cannot be read.
+ */
+export function docVersionsOf(docsRoot: string, doc: string): { head: number; byRun: Map<string, number>; provenance: boolean } | null {
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(doc)) return null;
+  try {
+    const root = realpathSync(docsRoot);
+    const m = JSON.parse(readBeneath(root, `${doc}/versions.json`, 2 * 1024 * 1024).data.toString('utf8')) as { head?: unknown; versions?: unknown };
+    if (typeof m.head !== 'number' || !Number.isInteger(m.head) || m.head < 0) return null;
+    const byRun = new Map<string, number>();
+    let provenance = false;
+    for (const e of Array.isArray(m.versions) ? (m.versions as Array<Record<string, unknown>>) : []) {
+      if (e === null || typeof e !== 'object' || !('run_id' in e)) continue;
+      provenance = true;
+      if (typeof e['run_id'] === 'string' && typeof e['version'] === 'number') byRun.set(e['run_id'], e['version']);
+    }
+    return { head: m.head, byRun, provenance };
+  } catch {
+    return null;
   }
 }

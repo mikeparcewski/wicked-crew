@@ -1540,19 +1540,25 @@ export class ChatProposals {
    * failed attempt's effective resolution (edits, helpers, sources; the conversation cutoff stays the binding's), a new
    * run id derived from its own pid — to the live chat or its kept history. Once per failed run.
    */
-  async appendRetry(chatId: string, failedPid: string, runId: string, artifactRef: string, reason: string): Promise<string | null> {
+  async appendRetry(chatId: string, failedPid: string, runId: string, artifactRef: string, reason: string, bound?: string | null): Promise<string | null> {
     const instance = this.deps.instanceOf(chatId);
+    // Only on the chat instance the document was made in (`bound`, when known): never on another chat that reused the id.
+    if (bound !== undefined && bound !== null && instance !== bound) {
+      this.log(`[proposals] chat ${chatId} is no longer the chat run ${runId} was made from — no retry card there`);
+      return null;
+    }
     return this.lock.run(`chat\u0000${instance ?? chatId}`, async () => {
       const records = this.deps.records(chatId);
       const folded = foldProposals(records);
-      const pid = `${chatId}:retry:${runId}`;
-      if (folded.has(pid)) return pid;
       const failed = folded.get(failedPid);
       const base = failed?.accepting?.resolution ?? failed?.proposal;
       if (failed === undefined || base === undefined) {
         this.log(`[proposals] chat ${chatId}: run ${runId} failed but proposal ${failedPid} is not in its records — no retry card`);
         return null;
       }
+      // Named by the chat's own id (an ended chat's archive alias still holds the same proposals).
+      const pid = `${base.chatId}:retry:${runId}`;
+      if (folded.has(pid)) return pid;
       const retry: ArtifactProposal = {
         ...base,
         pid,
