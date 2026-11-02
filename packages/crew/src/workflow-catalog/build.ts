@@ -15,6 +15,7 @@ import type {
   WorkflowCatalogUsage,
   WorkflowDef,
 } from '../core/types.js';
+import { isCodeWorkDef } from '../api/delivery-index.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
 import { CATALOG_CATEGORIES, CATALOG_EXCLUDED, CATALOG_SEEDS, CATEGORY_ORDER, type CatalogSeed } from './catalog-data.js';
 
@@ -197,7 +198,8 @@ export function buildWorkflowCatalog(input: CatalogInputs): WorkflowCatalogRespo
       statusNote: null,
       launch: { kind: 'run', workflow: def.id },
       requiresQe: requiresQe(def),
-      delivers: def.phases.some((p) => p.executes_code) ? 'pr' : 'report',
+      // Crew's own code-work rule: an evaluator that executes code judges, it delivers nothing (Copilot).
+      delivers: isCodeWorkDef(def) ? 'pr' : 'report',
       source: builtinNames.has(def.id) ? 'builtin' : 'crew',
       usage: usageOf(def.id, mine),
     });

@@ -121,6 +121,12 @@ describe('buildWorkflowCatalog', () => {
     expect(CATALOG_EXCLUDED['distill-learnings']).toBeDefined();
     const withSaved = [...presets, { name: 'hasOwnProperty', scope: 'global', steps: [{ catalog: 'understand', id: 'u' }], created_by: 'api', updated_at: 2 } as Preset];
     const out = buildWorkflowCatalog({ defs, presets: withSaved, runs: [], actorId: 'local', projectId: null });
+    const judge = buildWorkflowCatalog({
+      defs: [...defs, def('judge-only', { phases: [{ id: 'j', executes_code: true, role: 'evaluator' } as unknown as WorkflowDef['phases'][number]] }), def('builder', { phases: [{ id: 'b', executes_code: true, role: 'creator' } as unknown as WorkflowDef['phases'][number]] })],
+      presets, runs: [], actorId: 'local', projectId: null,
+    });
+    // Copilot: an evaluator that runs code delivers no pull request (crew's isCodeWorkDef).
+    expect([judge.entries.find((e) => e.id === 'judge-only')!.delivers, judge.entries.find((e) => e.id === 'builder')!.delivers]).toEqual(['report', 'pr']);
     const fresh = out.entries.find((e) => e.id === 'brand-new')!;
     expect([fresh.category, fresh.title, fresh.launch]).toEqual(['more', 'T brand-new', { kind: 'run', workflow: 'brand-new' }]);
     expect(out.entries.some((e) => ['chat', 'distill-learnings'].includes(e.id))).toBe(false);

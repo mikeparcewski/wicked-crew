@@ -6899,15 +6899,18 @@ export function registerRoutes(
     let presets: Preset[] = [];
     try {
       presets = await adapter.listPresets(projectId ?? undefined);
-    } catch {
+    } catch (err) {
       // An unknown project: the global presets (built-in attribution and saved ones still hold, agy r1).
-      // An engine without presets lists the served defs only.
+      // An engine without presets lists the served defs only. Either way, said once in the log.
+      app.log.warn(`workflows/catalog: the presets could not be read${projectId !== null ? ` for project ${projectId}` : ''} (${message(err)}); listing ${projectId !== null ? 'the global ones' : 'the served workflows only'}`);
       if (projectId !== null) presets = await adapter.listPresets().catch(() => []);
     }
     const views = await adapter.sessionsDetail();
     // codex r1: date terminal runs that have no `run.ended` entry from their event log, as GET /runs
-    // does, so the median does not depend on which read came first.
-    await backfillEndedAt(views);
+    // does, so the median does not depend on which read came first. Only THIS principal's completed
+    // runs can reach a median, so only they are read (Copilot).
+    const me = actorOf(req).id;
+    await backfillEndedAt(views.filter((v) => v.session.status === 'completed' && runTimingIndex.principalFor(v.session.id) === me));
     const runs: CatalogRun[] = views.map((view) => ({
       id: view.session.id,
       workflow: runIdentityOf(view).name,
@@ -6918,7 +6921,7 @@ export function registerRoutes(
       retryOf: retryIndex.retryOfFor(view.session.id),
       principal: runTimingIndex.principalFor(view.session.id),
     }));
-    const body: WorkflowCatalogResponse = buildWorkflowCatalog({ defs: workflows, presets, runs, actorId: actorOf(req).id, projectId });
+    const body: WorkflowCatalogResponse = buildWorkflowCatalog({ defs: workflows, presets, runs, actorId: me, projectId });
     return body;
     },
   );
