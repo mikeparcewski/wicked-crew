@@ -291,7 +291,23 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
   };
   /** The records a turn was given, as files: its run briefs (recovered by hash, else crew's current ones, said) and the
    *  version of the document it had open. */
-  const givenBriefs = async (stage: Stage, turn: string): Promise<{ names: string[]; line: string | null }> => {
+  /** The files the person attached to a turn, as packet files; one that cannot join is named in the note, never dropped
+   *  silently. */
+  const turnAttachments = (stage: Stage, turn: string): { names: string[]; note: string } => {
+    const names: string[] = [];
+    let note = '';
+    const asked = records.find((r): r is Extract<ChatTranscriptRecord, { kind: 'user' }> => r.kind === 'user' && r.turnId === turn);
+    for (const att of asked?.attachments ?? []) {
+      try {
+        names.push(attachmentFile(stage, att.id).name);
+      } catch (err) {
+        if (!(err instanceof Refused)) throw err;
+        note += ` (the file ${mdLabel(att.name)} attached to that turn is not in the packet: ${err.message})`;
+      }
+    }
+    return { names, note };
+  };
+  const givenBriefs = async (stage: Stage, turn: string, withAttachments = true): Promise<{ names: string[]; line: string | null }> => {
     const names: string[] = [];
     let rebuilt = 0;
     for (const r of turnRecords(turn).runs) {
@@ -301,16 +317,13 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
       if (!got.recovered) rebuilt += 1;
     }
     const runCount = names.length;
-    // The files the person attached to that turn: what the answer read is evidence too.
+    // The files the person attached to that turn: what the answer read is evidence too. (The conversation adds each
+    // turn's files once itself, answered or not.)
     let attachNote = '';
-    const asked = records.find((r): r is Extract<ChatTranscriptRecord, { kind: 'user' }> => r.kind === 'user' && r.turnId === turn);
-    for (const att of asked?.attachments ?? []) {
-      try {
-        names.push(attachmentFile(stage, att.id).name);
-      } catch (err) {
-        if (!(err instanceof Refused)) throw err;
-        attachNote += ` (the file ${mdLabel(att.name)} attached to that turn is not in the packet: ${err.message})`;
-      }
+    if (withAttachments) {
+      const att = turnAttachments(stage, turn);
+      names.push(...att.names);
+      attachNote = att.note;
     }
     const ctx = records.find((r): r is Extract<ChatTranscriptRecord, { kind: 'context' }> => r.kind === 'context' && r.turnId === turn);
     let docNote = '';
@@ -367,6 +380,12 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
           const user = records.find((r): r is Extract<ChatTranscriptRecord, { kind: 'user' }> => r.kind === 'user' && r.turnId === turn);
           if (user !== undefined) {
             lines.push(`## ${user.owner === true ? 'The person' : 'Another sender (not the person)'} · turn ${turn}`, '', fenced(user.text), '');
+            // The turn's files ride whether or not an answer to it succeeded (xreview r5): the person's own evidence.
+            const att = turnAttachments(stage, turn);
+            extra.push(...att.names);
+            if (att.names.length > 0 || att.note !== '') {
+              lines.push(`Files attached to this turn:${att.names.length > 0 ? ` ${att.names.map((n) => `\`${n}\``).join(', ')}` : ''}${att.note}`, '');
+            }
           }
           for (const ans of records.filter((r): r is Extract<ChatTranscriptRecord, { kind: 'seat' }> => r.kind === 'seat' && r.turnId === turn && r.ok)) {
             if (input.recheckProject !== undefined && !(await inProject(turnRecords(turn), input.recheckProject))) {
@@ -375,7 +394,7 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
               continue;
             }
             lines.push(`## An agent's answer (${mdLabel(ans.cliKey)}; may be wrong: use only if a record confirms it) · turn ${turn}`, '', fenced(ans.text), '');
-            const given = await givenBriefs(stage, turn);
+            const given = await givenBriefs(stage, turn, false);
             extra.push(...given.names);
             if (given.line !== null) lines.push(given.line, '');
           }

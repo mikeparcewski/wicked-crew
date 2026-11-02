@@ -151,12 +151,14 @@ export class CreateLauncher implements ProposalDispatcher {
         const why = (r.body as { error?: unknown } | null)?.error;
         throw new Error(`the document could not be created (${r.status}${typeof why === 'string' ? `: ${why}` : ''})`);
       }
-    } else if (head.kind === 'demo') {
-      throw new Error(`${ref.ref} is a demo, not a document`);
-    } else if (docRetired(root, ref.doc)) {
-      // A retired document answers nothing: a draft for it would never land, and its chat would stay busy.
-      throw new Error(`${ref.ref} was deleted; ask again in the chat to make a new document`);
     }
+    // The document as it is now, the one just created or adopted (a 409 is someone else's create) alike: a demo or a
+    // retired document answers nothing, so a draft for it would never land and its chat would stay busy.
+    const refuseUnanswerable = (): void => {
+      if (readDocHead(root, ref.doc)?.kind === 'demo') throw new Error(`${ref.ref} is a demo, not a document`);
+      if (docRetired(root, ref.doc)) throw new Error(`${ref.ref} was deleted; ask again in the chat to make a new document`);
+    };
+    refuseUnanswerable();
 
     // 3. The packet, then the draft with the derived run id. The chat is read through its own instance: after a reuse of
     //    its id it is the archived chat, and when it is gone only what the canonical packet already holds is used.
@@ -175,6 +177,8 @@ export class CreateLauncher implements ProposalDispatcher {
       },
       this.deps.packetDeps,
     );
+    // Read again after the packet's awaits: a document retired meanwhile is refused here, not drafted (xreview r5).
+    refuseUnanswerable();
     this.deps.bindings.addPacket(ref.ref, packet.canonical, packet.tokens);
     this.deps.log?.(
       `[proposals] ${d.pid}: ${ref.ref} run ${d.identity.runId} — packet ${packet.files.length} file(s)` +
@@ -331,6 +335,18 @@ export async function reconcileBoundAttempts(deps: ReconcileDeps): Promise<void>
  * followed). `provenance` is whether the manifest records runs at all (interactive's I1 contract writes `run_id` on
  * every new entry; an older interactive writes none). `null` when the manifest cannot be read.
  */
+/**
+ * The chat a recovered attempt is filed under: the binding's own chat instance where it is kept now (its archive id after
+ * a reuse); none when that instance is gone, never the bare id a later chat may have taken since (xreview r5). A chat
+ * that had no instance when Go was pressed can only be named by its id.
+ */
+export function recoveredChatId(
+  history: { idOfInstance(id: string, instance: string | null): string | null },
+  b: Pick<DocBinding, 'chatId' | 'chatInstance'>,
+): string | null {
+  return b.chatInstance === null ? b.chatId : history.idOfInstance(b.chatId, b.chatInstance);
+}
+
 export function docVersionsOf(docsRoot: string, doc: string): { head: number; byRun: Map<string, number>; provenance: boolean } | null {
   if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(doc)) return null;
   try {

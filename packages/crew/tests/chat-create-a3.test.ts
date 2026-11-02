@@ -16,7 +16,7 @@ import { ChatProposals, foldProposals, LaunchOnceRegistry, proposalRunId, type C
 import { DocBindingError, DocBindingStore } from '../src/interactive/doc-binding.js';
 import { buildSourcePacket, packetClause, PACKET_FILE_MAX_BYTES, PACKET_MAX_BYTES, type PacketDeps } from '../src/interactive/source-packet.js';
 import { boundAttemptKey, isAnotherProjectsDraftKey, packetChanged, removeAttemptDirs, removePacketCopy, writePacketCopy, type BoundDraft } from '../src/interactive/draft-events.js';
-import { CreateLauncher, reconcileBoundAttempts } from '../src/interactive/proposal-create.js';
+import { CreateLauncher, reconcileBoundAttempts, recoveredChatId } from '../src/interactive/proposal-create.js';
 import { prepareDocCreate } from '../src/interactive/proxy-routes.js';
 import { resumeOrphanedRuns } from '../src/core/run-boot-resume.js';
 import { RunTimingIndex, recordRunLaunched } from '../src/api/run-timing-index.js';
@@ -1018,5 +1018,77 @@ describe('xreview r4 folds (A3)', () => {
     writeFileSync(join(runDir, 'attempt-x', 'records', 'run-a-00000000.md'), 'x');
     removePacketCopy(runDir, 'attempt-x');
     expect(existsSync(join(runDir, 'attempt-x', 'records'))).toBe(false);
+  });
+});
+
+describe('xreview r5 folds (A3)', () => {
+  const runs = [run(R1, { status: 'cancelled' }), run(R2, { status: 'cancelled' }), run(R3)];
+
+  it('the conversation brings the files of a turn whose answer failed, once each, named in the snapshot', async () => {
+    const att = join(fresh('att5'), 'rep');
+    writeFileSync(att, 'measured: 3476 of 4333');
+    const records = chatRecords('c1');
+    // Turn t1's answer failed: no ok seat record. Its attachment is the person's own evidence all the same.
+    (records[0] as Record<string, unknown>)['attachments'] = [{ id: 'rep1', chatId: 'c1', name: 'report.txt', mediaType: 'text/plain', kind: 'text', bytes: 22, sha256: 'x', createdAt: '' }];
+    (records[2] as Record<string, unknown>)['ok'] = false;
+    const res = proposal('c1:t2', { sources: [{ token: 'chat', label: 'this conversation', status: 'ok', projectId: null }] });
+    const p = await buildSourcePacket({ runId: 'run-c5', chatId: 'c1', pid: 'c1:t2', cutoffTurnId: 't2', resolution: res, records }, packetDeps(runs, () => null, { rep1: { name: 'report.txt', path: att } }));
+    expect(p.struck).toEqual([]);
+    expect(p.tokens['chat']).toContain('attachment-rep1-report.txt');
+    expect(p.tokens['chat']!.filter((n) => n === 'attachment-rep1-report.txt')).toHaveLength(1);
+    const convo = p.files.find((f) => f.name.startsWith('conversation-'))!.bytes.toString();
+    expect(convo).toContain('Files attached to this turn: `attachment-rep1-report.txt`');
+  });
+
+  it('a file of the conversation that cannot join is named in the snapshot, not dropped silently', async () => {
+    const records = chatRecords('c1');
+    (records[0] as Record<string, unknown>)['attachments'] = [{ id: 'gone1', chatId: 'c1', name: 'gone.txt', mediaType: 'text/plain', kind: 'text', bytes: 5, sha256: 'x', createdAt: '' }];
+    const res = proposal('c1:t2', { sources: [{ token: 'chat', label: 'this conversation', status: 'ok', projectId: null }] });
+    const p = await buildSourcePacket({ runId: 'run-c6', chatId: 'c1', pid: 'c1:t2', cutoffTurnId: 't2', resolution: res, records }, packetDeps(runs));
+    const convo = p.files.find((f) => f.name.startsWith('conversation-'))!.bytes.toString();
+    expect(convo).toContain('the file gone.txt attached to that turn is not in the packet: no longer attached');
+  });
+  it('a document someone else created meanwhile and retired is refused, not adopted and drafted', async () => {
+    const w = world();
+    withChat(w, 'c1');
+    const deps = (w.registry as unknown as { dispatchers: Map<string, { deps: { createDoc: unknown } }> }).dispatchers.get('create')!.deps;
+    deps.createDoc = async (projectId: string, body: Record<string, unknown>) => {
+      const dir = join(w.docs, projectId === 'default' ? '_unfiled' : projectId, String(body['name']));
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'versions.json'), JSON.stringify({ head: 0, kind: 'doc', versions: [{ version: 0 }], retired_at: '2026-11-02T12:00:00Z' }));
+      return { status: 409, body: { error: 'exists' } };
+    };
+    const out = await w.svc.decide('c1', 'c1:t2', { decision: 'go' }, ME, 'i1');
+    expect(out.code).toBe(502);
+    expect(JSON.stringify(out.body)).toContain('was deleted');
+    expect(w.launches).toHaveLength(0);
+  });
+
+  it('a document retired while its packet is built is refused before the draft launches', async () => {
+    const w = world();
+    withChat(w, 'c1');
+    const launcher = (w.registry as unknown as { dispatchers: Map<string, { deps: { packetDeps: PacketDeps } }> }).dispatchers.get('create')!.deps;
+    const before = launcher.packetDeps.runs;
+    launcher.packetDeps = {
+      ...launcher.packetDeps,
+      runs: async () => {
+        // The person retires the new document in another tab while crew reads the run briefs.
+        for (const name of readdirSync(join(w.docs, '_unfiled'))) {
+          writeFileSync(join(w.docs, '_unfiled', name, 'versions.json'), JSON.stringify({ head: 0, kind: 'doc', versions: [{ version: 0 }], retired_at: '2026-11-02T12:00:00Z' }));
+        }
+        return before();
+      },
+    };
+    const out = await w.svc.decide('c1', 'c1:t2', { decision: 'go' }, ME, 'i1');
+    expect(out.code).toBe(502);
+    expect(JSON.stringify(out.body)).toContain('was deleted');
+    expect(w.launches).toHaveLength(0);
+  });
+
+  it('boot files a recovered run under the chat as kept now, and under none when that chat is gone (never a reuser)', () => {
+    const history = { idOfInstance: (id: string, inst: string | null) => (inst === 'i1' ? `${id}--1` : null) };
+    expect(recoveredChatId(history, { chatId: 'c1', chatInstance: 'i1' })).toBe('c1--1');
+    expect(recoveredChatId(history, { chatId: 'c1', chatInstance: 'i9' })).toBeNull();
+    expect(recoveredChatId(history, { chatId: 'c1', chatInstance: null })).toBe('c1');
   });
 });
