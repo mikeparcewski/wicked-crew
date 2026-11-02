@@ -1165,6 +1165,30 @@ function powerPauseOf(s: unknown): { checkpoint: number | null; why: string | nu
   return { checkpoint: typeof p.checkpoint === 'number' ? p.checkpoint : null, why: reasons[0] ?? null };
 }
 
+/**
+ * The step a run is on, in words a person reads (artifact-runs-fix: the voice dashboard showed
+ * `wf-<run>:unit-1`). `phase_ref` is the engine's composed id, synthetic for every preset and ask
+ * path; the unit id is `<session>:<step>` (`answer-1`, `pa-scope`, `draft`, `critique`), so its step
+ * is the name, said with spaces. A step the engine numbered (`unit-N`) falls back to the catalog
+ * entry, then the stage.
+ */
+export function stepWordsOf(unit: { id?: unknown; phase_ref?: unknown; catalog?: unknown; stage?: unknown }, sessionId: string): string | null {
+  // The engine numbers a step it did not name: `unit-N` (composed plans, `:aN` for a re-plan), `uN` (a plan with
+  // no workflow definition) or a bare ordinal. A remainder that still holds a colon is a shape this does not know.
+  const named = (step: string | undefined): string | undefined =>
+    step !== undefined && step !== '' && !step.includes(':') && !/^(?:unit-\d+|u\d+|\d+)$/.test(step) ? step : undefined;
+  const after = (value: string | undefined, prefixes: string[]): string | undefined => {
+    if (value === undefined) return undefined;
+    const p = prefixes.find((x) => value.startsWith(x));
+    const rest = p === undefined ? value : value.slice(p.length);
+    return rest.replace(/:a\d+$/, '');
+  };
+  const fromId = after(str(unit.id), [`${sessionId}:`]);
+  const fromRef = after(str(unit.phase_ref), [`wf-${sessionId}:`, `${sessionId}:`]);
+  const words = named(str(unit.id)?.startsWith(`${sessionId}:`) === true ? fromId : undefined) ?? named(fromRef) ?? str(unit.catalog) ?? str(unit.stage);
+  return words === undefined ? null : words.replace(/[-_]+/g, ' ');
+}
+
 /** One run's computed liveness. Pure: every input is a reading. */
 export function runLiveness(input: {
   view: SessionView;
@@ -1178,7 +1202,7 @@ export function runLiveness(input: {
   const s = view.session as SessionView['session'] & { title?: string; created_at?: number };
   const cursor =
     view.units.find((u) => u.status === 'distributed') ?? (gate?.ord != null ? view.units.find((u) => u.ord === gate.ord) : undefined) ?? view.units.find((u) => u.status === 'pending');
-  const phase = cursor === undefined ? null : (str((cursor as { phase_ref?: unknown }).phase_ref) ?? str((cursor as { stage?: unknown }).stage) ?? null);
+  const phase = cursor === undefined ? null : stepWordsOf(cursor, s.id);
   const quietForMs = evidence === null ? null : Math.max(0, now - evidence.at);
   const createdMs = num(s.created_at) !== undefined ? (s.created_at as number) * 1000 : null;
   let liveness: SystemRunLiveness;

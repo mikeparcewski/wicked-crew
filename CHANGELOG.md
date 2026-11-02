@@ -36,6 +36,17 @@ mentioned only where a daemon release depends on them.
   `Content-Security-Policy: frame-ancestors 'self'` plus studio's dev server and `WICKED_CREW_ALLOWED_ORIGINS`, merged
   into any policy the response already had, and `X-Frame-Options: SAMEORIGIN`. Studio's own frames (editor plugins,
   documents, the editor test page) are same-origin and still load.
+- **A draft's process notes stay out of the shared document.** The draft clauses said an UNVERIFIED page count, a
+  repo-less draft's citations and a source that was not in reach go "in the notes". A document has no notes, so the
+  drafter wrote them into the body, and the PDF shared from rig run 2e6059da said "Page count UNVERIFIED…". The
+  clauses now say where they go: in the worker's reply (the run keeps it), never the document's visible text; a deck
+  may also carry them in its hidden speaker notes.
+- **`WorkUnit.reassign_refused` matches the engine.** crew's mirror of wicked-core's `work_authors` counted every
+  recon step's seat as an author. The engine skips a guarded read-only recon step (the run's scope step) whose tree
+  is unchanged, so crew refused, and studio never offered, a seat the engine would accept as the reviewer.
+- **The system snapshot names the step a run is on.** `phase` was the engine's synthetic `phase_ref`
+  (`wf-<run>:unit-1`), which the voice dashboard printed. It is now the step from the unit id ("answer 1",
+  "pa scope"), else the catalog entry, else the stage.
 - **The requirements list agrees with its header, or says why not (api-types 0.167.0, wicked-core req-reconcile).**
   On the rig wicked-crew listed 3,917 non-placeholder rows under a header of 3,476 real. Every one of the 1,458 extra
   rows (441 stated, 1,017 placeholders) sits on a TypeScript shape, which the engine stopped counting as behaviour

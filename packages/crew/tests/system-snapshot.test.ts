@@ -30,6 +30,7 @@ import {
   skillsRow,
   sortRuns,
   stateHomeRow,
+  stepWordsOf,
   type ExecLike,
   type RosterSeatLike,
 } from '../src/api/system-snapshot.js';
@@ -282,6 +283,26 @@ describe('derived rows', () => {
     expect(loadRow(() => ({ load1: 16, cores: 8 }), 'darwin').state).toBe('degraded');
     expect(loadRow(() => ({ load1: 90, cores: 14 }), 'darwin').state).toBe('down');
     expect(loadRow(() => ({ load1: 0, cores: 8 }), 'win32').state).toBe('unknown');
+  });
+});
+
+describe('the step a run is on, in words (artifact-runs-fix: the voice dashboard showed wf-<run>:unit-1)', () => {
+  it('names the step from the unit id, never the synthetic phase_ref', () => {
+    expect(stepWordsOf({ id: 'r1:answer-1', phase_ref: 'wf-r1:unit-1', stage: 'recon' }, 'r1')).toBe('answer 1');
+    expect(stepWordsOf({ id: 'r1:pa-scope', phase_ref: 'wf-r1:unit-1:a1', stage: 'recon' }, 'r1')).toBe('pa scope');
+  });
+  it('falls back to the catalog entry, then the stage, when the engine numbered the step', () => {
+    expect(stepWordsOf({ id: 'r1:unit-3', phase_ref: 'wf-r1:unit-3', catalog: 'critique', stage: 'review' }, 'r1')).toBe('critique');
+    expect(stepWordsOf({ id: 'r1:unit-3', phase_ref: 'wf-r1:unit-3', stage: 'review' }, 'r1')).toBe('review');
+    expect(stepWordsOf({ phase_ref: 'build' }, 'r1')).toBe('build');
+    expect(stepWordsOf({}, 'r1')).toBeNull();
+    // A plan with no workflow definition numbers its units `uN` (review r1).
+    expect(stepWordsOf({ id: 'r:u1', phase_ref: 'wf-r:unit-1', stage: 'build' }, 'r')).toBe('build');
+    // A bare ordinal is no name either (Copilot on #1266: system-route's `run-live:0` with phase_ref `fix`).
+    expect(stepWordsOf({ id: 'run-live:0', phase_ref: 'fix' }, 'run-live')).toBe('fix');
+    // A campaign run id holds colons: the known prefix is stripped whole (review r1).
+    expect(stepWordsOf({ id: 'camp:node:a0:unit-3', phase_ref: 'wf-camp:node:a0:unit-3', catalog: 'critique' }, 'camp:node:a0')).toBe('critique');
+    expect(stepWordsOf({ id: 'camp:node:a0:draft', phase_ref: 'wf-camp:node:a0:unit-1' }, 'camp:node:a0')).toBe('draft');
   });
 });
 

@@ -118,6 +118,15 @@ export function pageBudgetFor(brief: string, style: string): PageBudget {
 export const DRAFT_SELF_CHECK_LAUNCHER = '"$WICKED_GARDEN_ROOT/scripts/wicked-garden" run scripts/draft/self_check.py';
 
 /**
+ * WHERE A DRAFTER'S PROCESS NOTES GO (artifact-runs-fix): a check that could not run, a source that
+ * was not in reach, the citations of a repo-less draft. "The notes" read, to a worker drafting a
+ * document (which has no notes), as the document itself — the shared PDF of run 2e6059da said
+ * "Page count UNVERIFIED…" in its body. One sentence, used by every clause that says "disclose".
+ */
+export const PROCESS_NOTES_WHERE =
+  'in your reply (the run keeps it), never in the document\'s visible text — a slide deck may also carry them in its hidden speaker notes';
+
+/**
  * The single-line task clause (FINDING-011: no embedded newline) that hands the worker what the
  * skill's self-check needs: the budget, the snapshot(s) to cite against, and the exact command on
  * the SAVED file. `revision: true` is the edit/chat wording — the file already has a page count the
@@ -146,7 +155,7 @@ export function draftQualityClause(
       ? `${snapshotDirs.map((d) => `--repo ${d}`).join(' ')} (the repository snapshot${snapshotDirs.length === 1 ? '' : 's'} every number, URL and product claim must trace to)`
       : opts.revision === true
         ? '(no repository snapshot rides a revision — the claims scan checks placeholders and labels only)'
-        : '(no repository snapshot is available — cite the estate tool results in the notes and label every mock visibly)';
+        : `(no repository snapshot is available — cite the estate tool results ${PROCESS_NOTES_WHERE}, and label every mock visibly)`;
   const modeFlag = opts.style === 'web' ? ' --mode screen --min-font-pt 0' : '';
   const when =
     opts.revision === true
@@ -156,8 +165,8 @@ export function draftQualityClause(
     `QUALITY FLOOR (skill wicked-garden-draft): page budget = ${budgetWords}. ${when}: ` +
     `${DRAFT_SELF_CHECK_LAUNCHER} ${outPath} ${pagesFlag} --render${modeFlag} ${repos}; ` +
     `fix the document (never the check) and re-run until it prints PASS; paste the verdict line into your reply — ` +
-    `a FAIL is yours to fix before the turn ends, and an UNVERIFIED page count must be disclosed in the notes with ` +
-    `the structural estimate, never stated as a count. `
+    `a FAIL is yours to fix before the turn ends, and an UNVERIFIED page count must be disclosed ${PROCESS_NOTES_WHERE}, ` +
+    `with the structural estimate, never stated as a count. `
   );
 }
 
