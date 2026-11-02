@@ -10,16 +10,16 @@
  *
  * Trust: a run's outputs are text agents wrote, and its evidence is files a run produced. The brief says it is data,
  * and every piece of run-authored text sits inside a fence longer than any backtick run in it, so nothing in an
- * output can close the fence and pose as crew's own words. Evidence is read only as regular files inside the run's
- * evidence root (no links, real paths contained), with size caps.
+ * output can close the fence and pose as crew's own words. Evidence is read only as regular files opened beneath the
+ * run's evidence root with no link followed in any folder below it (`beneath.ts`, crew#1274), with size caps.
  */
 
 import { createHash } from 'node:crypto';
-import { closeSync, constants as fsConstants, fstatSync, lstatSync, opendirSync, openSync, readSync, realpathSync } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { closeSync, constants as fsConstants, fstatSync, lstatSync, readSync, realpathSync, type Stats } from 'node:fs';
 
 import type { SessionView, WorkUnit } from '../core/types.js';
 import { coreUnitId } from './evidence.js';
+import { beneathMode, listBeneath, openBeneath } from './beneath.js';
 
 /** A step output past this many characters is cut at the last paragraph break before it. */
 export const BRIEF_STEP_OUTPUT_CAP = 4000;
@@ -39,39 +39,6 @@ const EVIDENCE_READ_BUDGET = 8 * 1024 * 1024;
 const EVIDENCE_DEPTH_MAX = 3;
 /** The person's request, as the run recorded it, is cut here. */
 const PROBLEM_CAP = 2000;
-
-/** A refusal of one file, with the reason a person can read. */
-export class FileRefusal extends Error {}
-
-/**
- * Read a regular file without following a link at the leaf, without blocking on a FIFO, at most `max` bytes (over =
- * refused, never truncated). The size and the bytes come from the same open file.
- */
-export function readNoFollow(path: string, max: number, what: string): Buffer {
-  const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0);
-  let fd: number;
-  try {
-    fd = openSync(path, flags);
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    throw new FileRefusal(code === 'ENOENT' ? `${what} is missing` : code === 'ELOOP' ? `${what} is a link; it was not followed` : `${what} could not be read`);
-  }
-  try {
-    const st = fstatSync(fd);
-    if (!st.isFile()) throw new FileRefusal(`${what} is not a regular file`);
-    if (st.size > max) throw new FileRefusal(`${what} is over ${max >= 1024 * 1024 ? `${Math.round(max / (1024 * 1024))} MB` : `${Math.round(max / 1024)} KB`}`);
-    const buf = Buffer.alloc(st.size);
-    let off = 0;
-    while (off < st.size) {
-      const n = readSync(fd, buf, off, st.size - off, off);
-      if (n === 0) break;
-      off += n;
-    }
-    return buf.subarray(0, off);
-  } finally {
-    closeSync(fd);
-  }
-}
 
 export interface RunBriefDeps {
   /** The unit's captured output (`CoreAdapter.workOutput`); `null`/throw = not readable. */
@@ -150,11 +117,13 @@ interface EvidenceFile {
 }
 
 /**
- * The run's evidence files: regular files under its evidence root (links never followed, real paths contained), at
- * most {@link BRIEF_EVIDENCE_FILES_MAX} files out of {@link BRIEF_EVIDENCE_ENTRIES_MAX} entries visited, sorted by
- * path. Each file is read through one no-follow, non-blocking open with a hard size cap, within a per-brief read
- * budget; text files at or under {@link BRIEF_EVIDENCE_INLINE_MAX} carry their text while the inline budget lasts.
- * A file that changes or disappears during the walk is listed as not read, never a failure of the brief.
+ * The run's evidence files: regular files under its evidence root, at most {@link BRIEF_EVIDENCE_FILES_MAX} files out
+ * of {@link BRIEF_EVIDENCE_ENTRIES_MAX} entries visited, sorted by path within each folder. Every entry is opened
+ * BENEATH the evidence root (`beneath.ts`: no link followed in any folder below the root, so a run that swaps a folder
+ * for a link while the brief is built gets a refused open, never a read outside — crew#1274); its kind, size and bytes
+ * all come from that one descriptor, non-blocking and capped, within a per-brief read budget. Text files at or under
+ * {@link BRIEF_EVIDENCE_INLINE_MAX} carry their text while the inline budget lasts. A file that changes, disappears or
+ * is refused during the walk is listed as not read, never a failure of the brief.
  */
 export function readEvidence(root: string): { files: EvidenceFile[]; more: boolean; deeper: boolean; unreadable: string[] } {
   let realRoot: string;
@@ -165,99 +134,95 @@ export function readEvidence(root: string): { files: EvidenceFile[]; more: boole
   } catch {
     return { files: [], more: false, deeper: false, unreadable: ['.'] };
   }
+  if (beneathMode() === 'unsupported') return { files: [], more: false, deeper: false, unreadable: ['. (this platform cannot read it without following links)'] };
   const unreadable: string[] = [];
-  const found: Array<{ path: string; size: number }> = [];
+  const files: EvidenceFile[] = [];
   let visited = 0;
   let more = false;
   let deeper = false;
-  const walk = (dir: string, depth: number): void => {
-    // Read entry by entry, and stop at the budget: a directory of a million entries costs the budget, not the million.
-    // Within one directory the entries read are sorted; only past the budget does which ones were read depend on the
+  let inlineLeft = BRIEF_EVIDENCE_TOTAL_MAX;
+  let readLeft = EVIDENCE_READ_BUDGET;
+  let fileCount = 0;
+  const walk = (relDir: string, depth: number): void => {
+    // Read entry by entry, and stop at the budget: a folder of a million entries costs the budget, not the million.
+    // Within one folder the entries read are sorted; only past the budget does which ones were read depend on the
     // file system (and the brief says more were left).
-    const names: string[] = [];
-    let handle;
-    try {
-      handle = opendirSync(dir);
-    } catch {
-      unreadable.push(relative(realRoot, dir) || '.');
+    const listed = listBeneath(realRoot, relDir, Math.max(0, BRIEF_EVIDENCE_ENTRIES_MAX - visited));
+    if (listed === null) {
+      unreadable.push(relDir === '' ? '.' : relDir);
       return;
     }
-    try {
-      for (let e = handle.readSync(); e !== null; e = handle.readSync()) {
-        if (visited >= BRIEF_EVIDENCE_ENTRIES_MAX) {
-          more = true;
-          break;
-        }
-        visited += 1;
-        names.push(e.name);
-      }
-    } catch {
-      /* an unreadable directory lists what was read */
-    } finally {
-      handle.closeSync();
-    }
-    for (const name of names.sort()) {
-      const path = join(dir, name);
-      let st;
+    visited += listed.names.length;
+    if (listed.more) more = true;
+    for (const name of listed.names.sort()) {
+      const rel = relDir === '' ? name : `${relDir}/${name}`;
+      let fd: number;
       try {
-        st = lstatSync(path);
-      } catch {
+        fd = openBeneath(realRoot, rel, { flags: fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0) });
+      } catch (err) {
+        // A link (here or in a folder above it), or gone: never followed, never listed. Anything else crew could not
+        // open is said, never silently dropped.
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== 'ELOOP' && code !== 'ENOENT') unreadable.push(rel);
         continue;
       }
-      if (st.isSymbolicLink()) continue;
+      let st: Stats;
+      try {
+        st = fstatSync(fd);
+      } catch {
+        closeSync(fd);
+        continue;
+      }
       if (st.isDirectory()) {
-        if (depth < EVIDENCE_DEPTH_MAX && visited < BRIEF_EVIDENCE_ENTRIES_MAX) walk(path, depth + 1);
-        else if (depth >= EVIDENCE_DEPTH_MAX) deeper = true;
-        else more = true;
-      } else if (st.isFile()) {
-        if (found.length >= BRIEF_EVIDENCE_FILES_MAX) {
+        closeSync(fd);
+        if (depth >= EVIDENCE_DEPTH_MAX) deeper = true;
+        else if (visited >= BRIEF_EVIDENCE_ENTRIES_MAX) more = true;
+        else walk(rel, depth + 1);
+        continue;
+      }
+      try {
+        if (!st.isFile()) continue;
+        if (fileCount >= BRIEF_EVIDENCE_FILES_MAX) {
           more = true;
           return;
         }
-        found.push({ path, size: st.size });
+        fileCount += 1;
+        if (st.size > EVIDENCE_HASH_MAX || st.size > readLeft) {
+          files.push({ rel, bytes: st.size, sha256: null, text: null, why: st.size > EVIDENCE_HASH_MAX ? 'over 1 MB: not read' : 'the brief’s read budget is spent' });
+          continue;
+        }
+        // The bytes come from the descriptor just opened beneath the root, at most its size.
+        const data = Buffer.alloc(st.size);
+        let off = 0;
+        while (off < st.size) {
+          const n = readSync(fd, data, off, st.size - off, off);
+          if (n === 0) break;
+          off += n;
+        }
+        const got = data.subarray(0, off);
+        readLeft -= got.length;
+        const sha256 = createHash('sha256').update(got).digest('hex');
+        const binary = got.subarray(0, 8192).includes(0);
+        if (!binary && got.length <= BRIEF_EVIDENCE_INLINE_MAX && got.length <= inlineLeft) {
+          inlineLeft -= got.length;
+          files.push({ rel, bytes: got.length, sha256, text: got.toString('utf8') });
+        } else {
+          files.push({
+            rel,
+            bytes: got.length,
+            sha256,
+            text: null,
+            why: binary ? 'binary' : got.length > BRIEF_EVIDENCE_INLINE_MAX ? 'over 64 KB' : 'the brief’s evidence budget is spent',
+          });
+        }
+      } catch {
+        files.push({ rel, bytes: st.size, sha256: null, text: null, why: 'it could not be read' });
+      } finally {
+        closeSync(fd);
       }
     }
   };
-  walk(realRoot, 0);
-  let inlineLeft = BRIEF_EVIDENCE_TOTAL_MAX;
-  let readLeft = EVIDENCE_READ_BUDGET;
-  const files: EvidenceFile[] = [];
-  for (const { path, size } of found) {
-    const rel = relative(realRoot, path);
-    try {
-      const real = realpathSync(path);
-      if (!(real === realRoot || real.startsWith(realRoot + sep))) continue;
-    } catch {
-      files.push({ rel, bytes: size, sha256: null, text: null, why: 'it changed while it was read' });
-      continue;
-    }
-    if (size > EVIDENCE_HASH_MAX || size > readLeft) {
-      files.push({ rel, bytes: size, sha256: null, text: null, why: size > EVIDENCE_HASH_MAX ? 'over 1 MB: not read' : 'the brief’s read budget is spent' });
-      continue;
-    }
-    let data: Buffer;
-    try {
-      data = readNoFollow(path, Math.min(EVIDENCE_HASH_MAX, readLeft), 'it');
-    } catch (err) {
-      files.push({ rel, bytes: size, sha256: null, text: null, why: err instanceof FileRefusal ? err.message : 'it could not be read' });
-      continue;
-    }
-    readLeft -= data.length;
-    const sha256 = createHash('sha256').update(data).digest('hex');
-    const binary = data.subarray(0, 8192).includes(0);
-    if (!binary && data.length <= BRIEF_EVIDENCE_INLINE_MAX && data.length <= inlineLeft) {
-      inlineLeft -= data.length;
-      files.push({ rel, bytes: data.length, sha256, text: data.toString('utf8') });
-    } else {
-      files.push({
-        rel,
-        bytes: data.length,
-        sha256,
-        text: null,
-        why: binary ? 'binary' : data.length > BRIEF_EVIDENCE_INLINE_MAX ? 'over 64 KB' : 'the brief’s evidence budget is spent',
-      });
-    }
-  }
+  walk('', 0);
   return { files, more, deeper, unreadable };
 }
 

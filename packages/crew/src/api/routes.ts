@@ -44,6 +44,20 @@ function ensureDir(dir: string): string {
   return dir;
 }
 
+/** DES-CHAT-ARTIFACTS-001 §5.1: the chat's `open/` and `context/` read roots, made and proven real beneath its scratch
+ *  root, as the seat sees them; none where the platform cannot open beneath a root, or when they cannot be made. */
+function turnReadRoots(scratchRoot: string): string[] {
+  if (!beneathSupported()) return [];
+  try {
+    ensureRealDir(contextReadRoots(scratchRoot).open);
+    ensureRealDir(contextReadRoots(scratchRoot).context);
+  } catch {
+    return [];
+  }
+  const real = seatPathOf(scratchRoot);
+  return [join(real, 'open'), join(real, 'context')];
+}
+
 /** {@link registerRoutes}'s one reading of a run's open gate rows (see `recordedOpenGate`). */
 type RecordedOpenGate =
   | { state: 'none' }
@@ -228,15 +242,17 @@ import {
 } from '../core/deliver.js';
 import { credentialsMissingIn, deliverCredentialsProbe, missingCredentials } from '../core/deliver-credentials.js';
 import { codebaseArchiveUrl, type CodebaseArchive, type CodebaseArchiveStore } from './codebase-archive.js';
-import { DocGroundingStore, projectRepoCandidates } from '../interactive/doc-grounding.js';
+import { projectRepoCandidates, type DocGroundingStore } from '../interactive/doc-grounding.js';
 import {
-  artifactExists,
+  artifactStatus,
+  beneathSupported,
   buildTurnContext,
   chatMount,
   ChatMessageContextSchema,
   contextReadRoots,
   ensureRealDir,
   parseArtifactRef,
+  readGroundingBeneath,
   seatPathOf,
   UNFILED_MOUNT,
   type ChatContextDeps,
@@ -3939,13 +3955,21 @@ export function registerRoutes(
         } catch (err) {
           return reply.code(500).send({ error: `cannot read ${seed.ref}: ${message(err)}` });
         }
-        if (root === null || !artifactExists(root, seed.doc)) {
+        const status = root === null ? 'missing' : artifactStatus(root, seed.doc);
+        if (status === 'unsupported') {
+          return reply.code(501).send({ code: 'seed_unsupported', error: 'this platform cannot read a document without following links in its folders' });
+        }
+        if (root === null || status === 'missing') {
           return reply.code(404).send({ code: 'seed_not_found', error: `no document ${seed.ref} on this daemon` });
         }
         // The repositories the document was grounded on, as its draft launch resolved them (inferred from the brief or
         // the project's one repository too); the create-time request's list only for a binding that predates that.
-        const binding = groundingReader.get(root, seed.doc);
-        const bound = binding?.grounding !== undefined ? binding.grounding.repo_refs : binding?.repo_refs ?? [];
+        // Read beneath the docs root like every A1 read (crew#1274).
+        const grounding = readGroundingBeneath(root, seed.doc);
+        if (grounding !== null && 'unreadable' in grounding) {
+          return reply.code(409).send({ code: 'seed_binding_unreadable', error: `what ${seed.ref} was made about cannot be read; open the chat without it` });
+        }
+        const bound = grounding?.repoRefs ?? [];
         if (b.projectId !== undefined && bound.length > 0) {
           const members = new Set((await projectRepoCandidates(adapter, b.projectId)).map((r) => r.repoRef));
           const outside = bound.filter((r) => !members.has(r));
@@ -3964,6 +3988,11 @@ export function registerRoutes(
           ? scopeKind === undefined || scopeKind === 'repo' || scopeKind === 'repos' || scopeKind === 'system' || scopeKind === 'none'
           : scopeKind === undefined || scopeKind === 'repo' || scopeKind === 'repos';
         if (requestedRefs.length === 0 && bound.length > 0 && seedable) {
+          // Only where the binding becomes the chat's repository list does a chat's limit apply (an `everything` or
+          // `project` chat, or one that names its own repositories, reads its own scope whatever the binding holds).
+          if (bound.length > 32) {
+            return reply.code(400).send({ code: 'seed_too_many_repos', error: `${seed.ref} was made about ${bound.length} repositories; a chat reads at most 32 — open it in its project or across all repositories` });
+          }
           requestedRefs.push(...bound);
           if (scopeKind === 'system' || scopeKind === 'none') scopeKind = undefined;
         }
@@ -4296,13 +4325,15 @@ export function registerRoutes(
   // DES-CHAT-ARTIFACTS-001 §5.1 (A1): what a turn's block reads — the docs roots, the decorated runs (project,
   // document and chat ids), unit outputs and the acceptance line. One set of deps, so the block and the run pages
   // read the same records.
-  const groundingReader = runtime.docGrounding ?? new DocGroundingStore();
   const chatContextDeps: ChatContextDeps = {
     docsRoot: (projectId) => projectDocsRoot(adapter, projectSettings, projectId),
     runs: async () => (await adapter.sessionsDetail()).map((v) => decorateRun(v)),
     workOutput: async (unitId) => (typeof adapter.workOutput === 'function' ? adapter.workOutput(unitId) : null),
     acceptanceLine: async (view) => (await acceptanceViewOf(view, {})).summary.line,
-    docStyle: (root, doc) => groundingReader.get(root, doc)?.style,
+    docStyle: (root, doc) => {
+      const g = readGroundingBeneath(root, doc);
+      return g !== null && 'style' in g ? g.style : undefined;
+    },
   };
   // DES-CHAT-ARTIFACTS-001 §4 (A2): proposals. Resolved from crew's own records (the same reads the turn block uses);
   // records go to the live transcript, or the kept history copy once the chat has ended.
@@ -4669,8 +4700,11 @@ export function registerRoutes(
               extraReadRoots: [
                 ...readRoots,
                 ...(attachRoot !== null ? [ensureDir(attachRoot)] : []),
-                // At their real paths: a seat in a container sees a read root only there (see `seatPathOf`).
-                ...(scope !== undefined ? [seatPathOf(ensureRealDir(contextReadRoots(scope.cwd).open)), seatPathOf(ensureRealDir(contextReadRoots(scope.cwd).context))] : []),
+                // At their real paths: a seat in a container sees a read root only there (see `seatPathOf`). Named from the
+                // trusted scratch root's real path, never a child's (a child is the seat's to change; and no seat of this
+                // chat exists yet: this is its first launch). Left out where the platform cannot write them safely, and
+                // when they cannot be made: a plain chat still launches.
+                ...(scope !== undefined ? turnReadRoots(scope.cwd) : []),
               ],
             }
             : {}),

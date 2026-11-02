@@ -75,6 +75,18 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **A chat's run briefs and artifact copies never read or write through a swapped folder (crew#1274).** A run brief
+  checked an evidence file's real path and then opened it by path; `O_NOFOLLOW` covers only the last component, so a
+  run that swapped an evidence folder for a link between the two could put a file from outside its evidence root into
+  the brief a chat seat reads. Every file the chat's per-turn block reads or writes (evidence, a document's
+  `versions.json` and version pages, the copies and briefs in the chat's scratch root, the earlier briefs a follow-up
+  offers, `seedFromArtifact`'s existence check) is now opened beneath its root with no link followed in any folder
+  below it: macOS's `O_NOFOLLOW_ANY`, and on Linux a descriptor walk through `/proc/self/fd`. A platform with neither
+  copies and briefs nothing and says why.
+- **A document at version 0 is a document (crew#1273).** `ChatMessageBody.context.artifact.version` was refused below
+  1, and a document whose `versions.json` head is 0 read as having no version, so "Ask about this" on a first draft
+  answered 400 and a chat could not be seeded from it. Version 0 is now accepted in the request, the manifest head and
+  its entries.
 - **The workflow catalog promises only what works today.** The Presentation card no longer offers PowerPoint
   export (it needs python-pptx that nothing installs, wicked-interactive#322); document cards say "edit in place"
   and "export as PDF" (chat refinement and sharing are not built); the demo card says captioned, no voice-over (the

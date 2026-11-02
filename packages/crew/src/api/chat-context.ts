@@ -33,14 +33,15 @@
  */
 
 import { createHash } from 'node:crypto';
-import { lstatSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
-import { join, sep } from 'node:path';
+import { lstatSync, realpathSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { z } from 'zod';
 
 import type { ChatContextBinding, ChatTranscriptRecord, SessionView } from '../core/types.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
 import { anchorTexts, outlineOf } from './artifact-outline.js';
-import { buildRunBrief, fenced, FileRefusal, readNoFollow } from './run-brief.js';
+import { buildRunBrief, fenced } from './run-brief.js';
+import { BeneathError, beneathMode, createBeneath, mkdirBeneath, readBeneath, statBeneath } from './beneath.js';
 
 /** The Unfiled mount in an artifact ref (studio's mount alias `default` is read as it). */
 export const UNFILED_MOUNT = '_unfiled';
@@ -78,7 +79,8 @@ export const ChatMessageContextSchema = z
     artifact: z
       .object({
         ref: z.string().regex(ARTIFACT_REF, 'artifact.ref must be <mount>/<doc>'),
-        version: z.number().int().min(1).max(1_000_000),
+        // Version 0 is a version: a document's first (crew#1273).
+        version: z.number().int().min(0).max(1_000_000),
         anchors: z.array(z.string().regex(ANCHOR_WID, 'each anchor must be a data-wid')).max(CONTEXT_ANCHORS_MAX).optional(),
       })
       .strict()
@@ -172,6 +174,11 @@ export interface TurnContext {
   publish(): void;
 }
 
+/** Whether this platform can open files beneath a root without following links (`beneath.ts`). */
+export function beneathSupported(): boolean {
+  return beneathMode() !== 'unsupported';
+}
+
 /** The directories the seat reads the copies and briefs from: read roots of the chat's run, made at its launch. */
 export function contextReadRoots(scratchRoot: string): { open: string; context: string } {
   return { open: join(scratchRoot, 'open'), context: join(scratchRoot, 'context') };
@@ -190,71 +197,100 @@ export function seatPathOf(path: string): string {
   }
 }
 
-/** Create `dir` (one level, private); it and its parent must be real directories, never links. */
+/** The chat scratch root, checked: a real directory (never a link), as its real path — the root every file crew reads
+ *  or writes in it is opened beneath (`beneath.ts`, crew#1274). */
+function realScratchRoot(scratchRoot: string): string {
+  const st = lstatSync(scratchRoot);
+  if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`refusing chat scratch root ${scratchRoot}: not a real directory`);
+  return realpathSync(scratchRoot);
+}
+
+/** Create `dir` (one level below the chat's scratch root, private), proven a real directory beneath it, never a link. */
 export function ensureRealDir(dir: string): string {
-  const parent = lstatSync(join(dir, '..'));
-  if (parent.isSymbolicLink() || !parent.isDirectory()) throw new Error(`refusing ${dir}: its parent is not a real directory`);
   try {
-    mkdirSync(dir, { recursive: false, mode: 0o700 });
+    mkdirBeneath(realScratchRoot(dirname(dir)), basename(dir));
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    throw new Error(`refusing ${dir}: not a real directory (${err instanceof Error ? err.message : String(err)})`);
   }
-  const st = lstatSync(dir);
-  if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`refusing ${dir}: not a real directory`);
   return dir;
 }
 
 /** Why one artifact or run was not given to the seat; the message itself still goes. */
 class ContextRefusal extends Error {}
 
-const refusalOf = (err: unknown): string | null => (err instanceof ContextRefusal || err instanceof FileRefusal ? err.message : null);
+const refusalOf = (err: unknown): string | null => (err instanceof ContextRefusal ? err.message : null);
+
+/** A read or open beneath a root that failed, as a refusal a person can read (`what`: "version 3", "its versions.json"). */
+function fileRefusal(err: unknown, what: string, max?: number): ContextRefusal {
+  const code = err instanceof BeneathError ? err.code : (err as NodeJS.ErrnoException).code;
+  if (code === 'ENOENT') return new ContextRefusal(`${what} is missing`);
+  if (code === 'ELOOP') return new ContextRefusal(`${what} is a link (or sits in a folder that is); it was not followed`);
+  if (code === 'EFTYPE') return new ContextRefusal(`${what} is not a regular file`);
+  if (code === 'EFBIG' && max !== undefined) return new ContextRefusal(`${what} is over ${Math.round(max / (1024 * 1024))} MB; open it in studio`);
+  if (code === 'ENOTSUP') return new ContextRefusal(`${what} cannot be read on this platform without following links`);
+  return new ContextRefusal(`${what} could not be read`);
+}
+
+/** Read `rel` beneath `root` (no link followed below it), as a refusal on failure. */
+function readOrRefuse(root: string, rel: string, max: number, what: string): Buffer {
+  try {
+    return readBeneath(root, rel, max).data;
+  } catch (err) {
+    throw fileRefusal(err, what, max);
+  }
+}
+
+/** The two folders of the scratch root crew writes into. */
+type ScratchDir = 'open' | 'context';
 
 /** A file crew writes once, read-only, named by what it holds: the same bytes already there are kept; anything else
  *  under its name is refused, never overwritten. */
 interface PendingWrite {
-  dir: string;
+  dir: ScratchDir;
   name: string;
   data: Buffer;
 }
 
 /**
  * Whether a copy already in the scratch root holds exactly `data`: `true` (keep it), `false` (none there), or a
- * refusal (a link, a non-file, a different content: never overwritten). Read without following, capped at the size
- * the copy must have.
+ * refusal (a link anywhere below the root, a non-file, a different content: never overwritten). Opened beneath the
+ * scratch root, capped at the size the copy must have.
  */
-function existingCopy(path: string, name: string, data: Buffer): boolean {
-  let st;
+function existingCopy(scratchReal: string, dir: ScratchDir, name: string, data: Buffer): boolean {
+  let got: Buffer;
   try {
-    st = lstatSync(path);
+    got = readBeneath(scratchReal, `${dir}/${name}`, data.length).data;
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
-    throw err;
+    const code = err instanceof BeneathError ? err.code : (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return false;
+    throw new ContextRefusal(`a different ${name} is already in this chat's scratch root`);
   }
-  if (st.isSymbolicLink() || !st.isFile() || st.size !== data.length) throw new ContextRefusal(`a different ${name} is already in this chat's scratch root`);
-  if (Buffer.compare(readNoFollow(path, data.length, name), data) !== 0) throw new ContextRefusal(`a different ${name} is already in this chat's scratch root`);
+  if (Buffer.compare(got, data) !== 0) throw new ContextRefusal(`a different ${name} is already in this chat's scratch root`);
   return true;
 }
 
-/** Why a directory crew writes into cannot be used now (a link or a non-directory planted there), or `null`. Absent is
+/** Why a folder crew writes into cannot be used now (a link or a non-directory planted there), or `null`. Absent is
  *  fine: publication makes it. */
-function dirUnusable(dir: string): string | null {
+function dirUnusable(scratchReal: string, dir: ScratchDir): string | null {
+  if (beneathMode() === 'unsupported') return 'this platform cannot write files without following links in their folders';
   try {
-    const st = lstatSync(dir);
-    return st.isSymbolicLink() || !st.isDirectory() ? "this chat's scratch root holds something other than crew's folder where its copies go" : null;
+    const st = statBeneath(scratchReal, dir);
+    return st === null || st.isDirectory() ? null : "this chat's scratch root holds something other than crew's folder where its copies go";
   } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? null : "this chat's scratch root could not be read";
+    const code = err instanceof BeneathError ? err.code : (err as NodeJS.ErrnoException).code;
+    return code === 'ELOOP' ? "this chat's scratch root holds something other than crew's folder where its copies go" : "this chat's scratch root could not be read";
   }
 }
 
+/** Write the turn's files: each folder proven real beneath the scratch root, each file created exclusively beneath it
+ *  (no link followed in any component), the same bytes already there kept. */
 function publishWrites(scratchRoot: string, writes: readonly PendingWrite[]): void {
   if (writes.length === 0) return;
-  const root = lstatSync(scratchRoot);
-  if (root.isSymbolicLink() || !root.isDirectory()) throw new Error(`refusing chat scratch root ${scratchRoot}: not a real directory`);
-  for (const dir of new Set(writes.map((w) => w.dir))) ensureRealDir(dir);
+  const root = realScratchRoot(scratchRoot);
+  for (const dir of new Set(writes.map((w) => w.dir))) mkdirBeneath(root, dir);
   for (const w of writes) {
-    const path = join(w.dir, w.name);
-    if (existingCopy(path, w.name, w.data)) continue;
-    writeFileSync(path, w.data, { flag: 'wx', mode: 0o444 });
+    if (existingCopy(root, w.dir, w.name, w.data)) continue;
+    createBeneath(root, `${w.dir}/${w.name}`, w.data, 0o444);
   }
 }
 
@@ -264,22 +300,23 @@ interface Manifest {
   files: Map<number, string>;
 }
 
-function readManifest(docDir: string): Manifest {
+/** The document's `versions.json`, read beneath the docs root. A document at version 0 is a document (crew#1273). */
+function readManifest(rootReal: string, doc: string): Manifest {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readNoFollow(join(docDir, 'versions.json'), MANIFEST_MAX, 'its versions.json').toString('utf8'));
+    parsed = JSON.parse(readOrRefuse(rootReal, `${doc}/versions.json`, MANIFEST_MAX, 'its versions.json').toString('utf8'));
   } catch (err) {
     if (refusalOf(err) !== null) throw err;
     throw new ContextRefusal('its versions.json is not readable');
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new ContextRefusal('its versions.json is not readable');
   const m = parsed as { head?: unknown; kind?: unknown; versions?: unknown };
-  if (typeof m.head !== 'number' || !Number.isInteger(m.head) || m.head < 1) throw new ContextRefusal('it has no version yet');
+  if (typeof m.head !== 'number' || !Number.isInteger(m.head) || m.head < 0) throw new ContextRefusal('its versions.json names no version');
   const files = new Map<number, string>();
   for (const v of Array.isArray(m.versions) ? (m.versions as unknown[]) : []) {
     if (typeof v !== 'object' || v === null) continue;
     const e = v as { version?: unknown; html_file?: unknown };
-    if (typeof e.version !== 'number' || !Number.isInteger(e.version) || e.version < 1) continue;
+    if (typeof e.version !== 'number' || !Number.isInteger(e.version) || e.version < 0) continue;
     if (e.html_file === undefined || e.html_file === null || e.html_file === '') {
       files.set(e.version, `_v${e.version}.html`);
       continue;
@@ -293,15 +330,15 @@ function readManifest(docDir: string): Manifest {
   return { head: m.head, kind, files };
 }
 
-/** The document directory, checked: a real directory inside the docs root. Throws a refusal. */
-function realDocDir(root: string, doc: string): string {
+/** The docs root as its real path, after proving the document is a real directory beneath it (no link in its path).
+ *  Every read of the document is then opened beneath this root. Throws a refusal. */
+function realDocsRoot(root: string, doc: string): string {
+  if (beneathMode() === 'unsupported') throw new ContextRefusal('this platform cannot read files without following links in their folders');
   try {
-    const dir = join(root, doc);
-    const st = lstatSync(dir);
-    if (st.isSymbolicLink() || !st.isDirectory()) throw new ContextRefusal('no such document');
-    const real = realpathSync(dir);
-    if (!real.startsWith(realpathSync(root) + sep)) throw new ContextRefusal('no such document');
-    return real;
+    const rootReal = realpathSync(root);
+    const st = statBeneath(rootReal, doc);
+    if (st === null || !st.isDirectory()) throw new ContextRefusal('no such document');
+    return rootReal;
   } catch (err) {
     if (refusalOf(err) !== null) throw err;
     throw new ContextRefusal('no such document');
@@ -333,11 +370,12 @@ async function readArtifact(
   }
   const root = await deps.docsRoot(ref.projectId);
   if (root === null) throw new ContextRefusal(`project ${ref.projectId} does not exist on this daemon`);
-  const docDir = realDocDir(root, ref.doc);
-  const manifest = readManifest(docDir);
-  const openDir = contextReadRoots(input.scratchRoot).open;
+  // Every read of the document is opened beneath the docs root, every copy compared beneath the scratch root.
+  const docsReal = realDocsRoot(root, ref.doc);
+  const manifest = readManifest(docsReal, ref.doc);
+  const scratchReal = realScratchRoot(input.scratchRoot);
   const seatOpenDir = join(seatPathOf(input.scratchRoot), 'open');
-  const unusable = dirUnusable(openDir);
+  const unusable = dirUnusable(scratchReal, 'open');
   if (unusable !== null) throw new ContextRefusal(unusable);
   const nameOf = (v: number): string => `${ref.mount}__${ref.doc}-v${v}.html`;
   const writes: PendingWrite[] = [];
@@ -345,9 +383,9 @@ async function readArtifact(
   const copy = (v: number): Buffer => {
     const file = manifest.files.get(v);
     if (file === undefined) throw new ContextRefusal(`it has no version ${v} (the latest is ${manifest.head})`);
-    const data = readNoFollow(join(docDir, file), ARTIFACT_COPY_MAX, `version ${v}`);
-    existingCopy(join(openDir, nameOf(v)), nameOf(v), data); // a different copy already there is refused now
-    writes.push({ dir: openDir, name: nameOf(v), data });
+    const data = readOrRefuse(docsReal, `${ref.doc}/${file}`, ARTIFACT_COPY_MAX, `version ${v}`);
+    existingCopy(scratchReal, 'open', nameOf(v), data); // a different copy already there is refused now
+    writes.push({ dir: 'open', name: nameOf(v), data });
     copies.push(`open/${nameOf(v)}`);
     return data;
   };
@@ -531,9 +569,9 @@ function priorNamed(records: readonly ChatTranscriptRecord[]): { runs: string[];
  *  root): a regular file under `context/`, read without following, whose sha256 is the one recorded. */
 function earlierBriefIntact(scratchRoot: string, b: { brief: string; sha256: string }): boolean {
   const m = /^context\/(run-[A-Za-z0-9._-]{1,200}\.md)$/.exec(b.brief);
-  if (m === null || dirUnusable(join(scratchRoot, 'context')) !== null) return false;
+  if (m === null) return false;
   try {
-    return sha256Hex(readNoFollow(join(scratchRoot, 'context', m[1]!), 4 * 1024 * 1024, 'the brief')) === b.sha256;
+    return sha256Hex(readBeneath(realScratchRoot(scratchRoot), `context/${m[1]!}`, 4 * 1024 * 1024).data) === b.sha256;
   } catch {
     return false;
   }
@@ -583,7 +621,6 @@ export async function buildTurnContext(input: TurnContextInput, deps: ChatContex
   if (allTokens.length > tokens.length) refuse('run:…', `${allTokens.length - tokens.length} more ids were not looked at; ask about fewer at a time`);
   const briefed: ChatContextBinding['runs'] = [];
   const briefLines: string[] = [];
-  const contextDir = contextReadRoots(input.scratchRoot).context;
   const seatRoot = seatPathOf(input.scratchRoot);
   if (tokens.length > 0) {
     const runs = await allRuns();
@@ -620,7 +657,8 @@ export async function buildTurnContext(input: TurnContextInput, deps: ChatContex
         refuse(`run:${id}`, 'its id cannot name a file');
         continue;
       }
-      const unusable = dirUnusable(contextDir);
+      const scratchReal = realScratchRoot(input.scratchRoot);
+      const unusable = dirUnusable(scratchReal, 'context');
       if (unusable !== null) {
         refuse(`run:${id}`, unusable);
         continue;
@@ -630,14 +668,14 @@ export async function buildTurnContext(input: TurnContextInput, deps: ChatContex
       const name = `run-${id}-${brief.sha256.slice(0, 8)}.md`;
       const data = Buffer.from(brief.markdown, 'utf8');
       try {
-        existingCopy(join(contextDir, name), name, data);
+        existingCopy(scratchReal, 'context', name, data);
       } catch (err) {
         const why = refusalOf(err);
         if (why === null) throw err;
         refuse(`run:${id}`, why);
         continue;
       }
-      writes.push({ dir: contextDir, name, data });
+      writes.push({ dir: 'context', name, data });
       named.runs.add(id);
       briefed.push({ id, status: brief.status, brief: `context/${name}`, sha256: brief.sha256 });
       const inline = brief.markdown.length <= BRIEF_INLINE_MAX && brief.markdown.length <= budget;
@@ -751,34 +789,71 @@ export async function buildTurnContext(input: TurnContextInput, deps: ChatContex
 }
 
 /**
- * Whether `<docsRoot>/<doc>` is a real document directory inside the docs root whose latest version is a readable
- * page (`POST /chats {seedFromArtifact}`'s access check). Never follows a link.
+ * Whether `<docsRoot>/<doc>` is a real document directory inside the docs root whose latest version (0 included) is
+ * a regular file (`POST /chats {seedFromArtifact}`'s access check): `ok`, `missing`, or `unsupported` (this platform
+ * cannot open files without following links). Everything is opened beneath the docs root: no link is followed in any
+ * component.
  */
-export function artifactExists(docsRoot: string, doc: string): boolean {
-  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(doc)) return false;
+export function artifactStatus(docsRoot: string, doc: string): 'ok' | 'missing' | 'unsupported' {
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(doc)) return 'missing';
+  if (beneathMode() === 'unsupported') return 'unsupported';
   try {
-    const dir = realDocDir(docsRoot, doc);
-    const m = readManifest(dir);
+    const rootReal = realDocsRoot(docsRoot, doc);
+    const m = readManifest(rootReal, doc);
     // Existence, not copy eligibility: a deck over the copy cap still exists (its messages say why it was not copied).
-    const st = lstatSync(join(dir, m.files.get(m.head)!));
-    return st.isFile() && !st.isSymbolicLink();
+    return statBeneath(rootReal, `${doc}/${m.files.get(m.head)!}`)?.isFile() === true ? 'ok' : 'missing';
   } catch {
-    return false;
+    return 'missing';
   }
 }
 
+/** Whether `<docsRoot>/<doc>` is a document crew can read ({@link artifactStatus} `ok`). */
+export function artifactExists(docsRoot: string, doc: string): boolean {
+  return artifactStatus(docsRoot, doc) === 'ok';
+}
+
 /**
- * DES-CHAT-ARTIFACTS-001 §4.2-§4.3 (A2): the latest version of `<docsRoot>/<doc>`, read the way {@link artifactExists}
- * reads it (no link followed, contained), or `null` when it is not a document. A proposal records it as a refine's
- * base, and Go checks it has not moved.
+ * DES-CHAT-ARTIFACTS-001 §4.2-§4.3 (A2): the latest version of `<docsRoot>/<doc>`, read the way {@link artifactStatus}
+ * reads it (beneath the docs root, no link followed in any folder), or `null` when it is not a document. A proposal
+ * records it as a refine's base, and Go checks it has not moved.
  */
 export function artifactHead(docsRoot: string, doc: string): number | null {
   if (!artifactExists(docsRoot, doc)) return null;
   try {
-    return readManifest(realDocDir(docsRoot, doc)).head;
+    return readManifest(realDocsRoot(docsRoot, doc), doc).head;
   } catch {
     return null;
   }
+}
+
+/** The repository ids a grounding sidecar may name: registry ids, never text. */
+const REPO_REF = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
+const DOC_STYLE_VALUES = new Set(['web', 'ppt', 'brochure', 'doc']);
+
+/**
+ * What crew recorded about a document when it was created and drafted (`crew-grounding.json`), read beneath the docs
+ * root like every other A1 read (capped, non-blocking, no link followed): the style, and the repositories it was
+ * grounded on — the draft launch's resolved list when there is one, else the create request's — however many the
+ * writer recorded. `null` when there is no sidecar; `{unreadable}` when there is one crew cannot read or does not
+ * recognise (never read as "no repositories": a seed then refuses rather than skipping its membership check).
+ */
+export function readGroundingBeneath(docsRoot: string, doc: string): { style?: string; repoRefs: string[] } | { unreadable: true } | null {
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(doc) || beneathMode() === 'unsupported') return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readBeneath(realpathSync(docsRoot), `${doc}/crew-grounding.json`, 256 * 1024).data.toString('utf8'));
+  } catch (err) {
+    const code = err instanceof BeneathError ? err.code : (err as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' ? null : { unreadable: true };
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return { unreadable: true };
+  const b = parsed as { style?: unknown; repo_refs?: unknown; grounding?: { repo_refs?: unknown } | null };
+  const refsOf = (v: unknown): string[] | null => (Array.isArray(v) && v.every((r) => typeof r === 'string' && REPO_REF.test(r)) ? (v as string[]) : null);
+  const resolved = b.grounding !== undefined && b.grounding !== null ? (typeof b.grounding === 'object' ? refsOf(b.grounding.repo_refs) : null) : undefined;
+  const requested = refsOf(b.repo_refs ?? []);
+  // A list that is there but not a list of ids is not read as an empty one.
+  if (resolved === null || (resolved === undefined && requested === null)) return { unreadable: true };
+  return { ...(typeof b.style === 'string' && DOC_STYLE_VALUES.has(b.style) ? { style: b.style } : {}), repoRefs: resolved ?? requested ?? [] };
 }
 
 /** sha256 of a string, hex (tests and the route's binding). */

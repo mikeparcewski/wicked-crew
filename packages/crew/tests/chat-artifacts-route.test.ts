@@ -13,6 +13,7 @@ import type { FastifyInstance } from 'fastify';
 import type { ChatMessagesResponse, HealthResponse } from 'wicked-crew-api-types';
 
 import { createServer } from '../src/api/server.js';
+import { beneathTestHooks } from '../src/api/beneath.js';
 import { tokenHash } from '../src/api/auth.js';
 import { ensureProjectInteractiveRoot } from '../src/interactive/bridge-root.js';
 import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
@@ -162,20 +163,56 @@ describe('chat sees artifacts and runs (server, A1)', () => {
     expect(health.capabilities?.chatArtifacts).toEqual({ context: true, proposals: true, create: false, refine: false, theme: false, demo: false });
   });
 
+  it('a platform that cannot open beneath a root still chats: no turn read roots, the artifact refused with the reason, a seed answers 501', async () => {
+    beneathTestHooks.mode = 'unsupported';
+    try {
+      const before = launches.length;
+      expect((await open(app, { chatId: 'unsup-1', projectId: 'mikes', clis: ['claude'] })).statusCode).toBe(201);
+      const res = await send(app, 'unsup-1', { text: 'what is this?', context: { artifact: { ref: 'mikes/coverage-deck', version: 1 } } });
+      expect(res.statusCode).toBe(202);
+      expect(launches.length).toBe(before + 1);
+      const input = launches.at(-1)!;
+      expect((input.extraReadRoots ?? []).some((r) => r.endsWith('/open') || r.endsWith('/context'))).toBe(false);
+      const msgs = (await app.inject({ method: 'GET', url: '/api/v1/chats/unsup-1/messages' })).json() as ChatMessagesResponse;
+      expect(msgs.messages.find((m) => m.kind === 'context')).toMatchObject({ refused: [{ token: 'doc:mikes/coverage-deck', reason: expect.stringMatching(/cannot read files without following links/) }] });
+      const seed = await open(app, { chatId: 'unsup-2', clis: ['claude'], seedFromArtifact: 'mikes/coverage-deck' });
+      expect(seed.statusCode).toBe(501);
+      expect(seed.json()).toMatchObject({ code: 'seed_unsupported' });
+    } finally {
+      delete beneathTestHooks.mode;
+    }
+  });
+
+  it('a document at version 0 is a document: context at version 0 is sent and copied, and a chat can be seeded from it (crew#1273)', async () => {
+    const mikes = ensureProjectInteractiveRoot('mikes', undefined, process.env, home);
+    mkdirSync(join(mikes, 'first-draft'), { recursive: true });
+    writeFileSync(join(mikes, 'first-draft', '_v0.html'), '<h1>No draft yet</h1><p>first</p>');
+    writeFileSync(join(mikes, 'first-draft', 'versions.json'), JSON.stringify({ head: 0, versions: [{ version: 0, html_file: '_v0.html' }] }));
+    const opened = await open(app, { chatId: 'v0-1', projectId: 'mikes', clis: ['claude'] });
+    expect(opened.statusCode).toBe(201);
+    const res = await send(app, 'v0-1', { text: 'what is this?', context: { artifact: { ref: 'mikes/first-draft', version: 0 } } });
+    expect(res.statusCode).toBe(202);
+    const msgs = (await app.inject({ method: 'GET', url: '/api/v1/chats/v0-1/messages' })).json() as ChatMessagesResponse;
+    expect(msgs.messages.find((m) => m.kind === 'context')).toMatchObject({ artifact: { ref: 'mikes/first-draft', viewed: 0, head: 0, copies: ['open/mikes__first-draft-v0.html'] } });
+    const seeded = await open(app, { chatId: 'v0-2', projectId: 'mikes', clis: ['claude'], seedFromArtifact: 'mikes/first-draft' });
+    expect(seeded.statusCode).toBe(201);
+  });
+
   it('refuses a context that is not the contract: unknown keys, a bad ref, too many anchors', async () => {
+    const before = launches.length;
     const opened = await open(app, { chatId: 'strict-1', projectId: 'mikes', clis: ['claude'] });
     expect(opened.statusCode).toBe(201);
     for (const context of [
       { artifact: { ref: 'mikes/coverage-deck', version: 1 }, extra: true },
       { artifact: { ref: '../etc/passwd', version: 1 } },
-      { artifact: { ref: 'mikes/coverage-deck', version: 0 } },
+      { artifact: { ref: 'mikes/coverage-deck', version: -1 } },
       { artifact: { ref: 'mikes/coverage-deck', version: 1, anchors: Array.from({ length: 17 }, (_, i) => `a${i}`) } },
       { artifact: { ref: 'mikes/coverage-deck', version: 1, anchors: ['bad wid'] } },
     ]) {
       const res = await send(app, 'strict-1', { text: 'hi', context });
       expect(res.statusCode, JSON.stringify(context)).toBe(400);
     }
-    expect(launches).toHaveLength(0);
+    expect(launches).toHaveLength(before);
   });
 
   it('hands the seat the open deck (both versions), the outline and the named run, inside its read roots, and records the turn', async () => {
@@ -307,6 +344,31 @@ describe('chat sees artifacts and runs (server, A1)', () => {
     expect(JSON.parse(seeded.body).scope.repos.map((r: { id: string }) => r.id)).toEqual(['r-alpha']);
     expect((await open(authed, { chatId: 'seed-g2', clis: ['claude'], seedFromArtifact: '_unfiled/inferred' }, 'agent-token')).json()).toMatchObject({ code: 'seed_refused' });
     expect((await open(app, { chatId: 'seed-g3', clis: ['claude'], seedFromArtifact: '' })).json()).toMatchObject({ code: 'seed_invalid' });
+    repos = [];
+  });
+
+  it('a seed keeps the repositories the draft was grounded on: an inferred one outside the project is refused, too many or an unreadable binding is said', async () => {
+    const mikes = ensureProjectInteractiveRoot('mikes', undefined, process.env, home);
+    repos = [{ id: 'r-in', name: 'alpha', root_path: join(scratch, 'repo-in'), default_branch: 'main', registered_at: 1 }];
+    mkdirSync(repos[0]!.root_path, { recursive: true });
+    const doc = (name: string, sidecar: unknown): void => {
+      mkdirSync(join(mikes, name), { recursive: true });
+      writeFileSync(join(mikes, name, '_v1.html'), '<h1>x</h1>');
+      writeFileSync(join(mikes, name, 'versions.json'), JSON.stringify({ head: 1, versions: [{ version: 1 }] }));
+      writeFileSync(join(mikes, name, 'crew-grounding.json'), JSON.stringify(sidecar));
+    };
+    // Inferred from the brief (the create named none): one of them has since left the project.
+    doc('inferred-out', { project_id: 'mikes', repo_refs: [], grounding: { repo_refs: ['r-in', 'r-gone'], source: 'brief', skipped: [], member_count: 2 } });
+    expect((await open(app, { chatId: 'seed-i1', projectId: 'mikes', clis: ['claude'], seedFromArtifact: 'mikes/inferred-out' })).json()).toMatchObject({ code: 'seed_out_of_scope' });
+    doc('too-wide', { project_id: 'mikes', repo_refs: [], grounding: { repo_refs: Array.from({ length: 33 }, (_, i) => `r-${i}`), source: 'brief', skipped: [], member_count: 33 } });
+    expect((await open(app, { chatId: 'seed-i2', clis: ['claude'], seedFromArtifact: 'mikes/too-wide' })).json()).toMatchObject({ code: 'seed_too_many_repos' });
+    // Where the binding does not become the chat's list, its width does not matter.
+    expect((await open(app, { chatId: 'seed-i2b', clis: ['claude'], scopeKind: 'everything', seedFromArtifact: 'mikes/too-wide' })).statusCode).toBe(201);
+    expect((await open(app, { chatId: 'seed-i2c', clis: ['claude'], repoRefs: ['r-in'], seedFromArtifact: 'mikes/too-wide' })).statusCode).toBe(201);
+    doc('garbled', { project_id: 'mikes', repo_refs: 'r-in' });
+    const garbled = await open(app, { chatId: 'seed-i3', projectId: 'mikes', clis: ['claude'], seedFromArtifact: 'mikes/garbled' });
+    expect(garbled.statusCode).toBe(409);
+    expect(garbled.json()).toMatchObject({ code: 'seed_binding_unreadable' });
     repos = [];
   });
 

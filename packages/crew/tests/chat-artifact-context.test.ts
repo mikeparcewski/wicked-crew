@@ -261,7 +261,7 @@ describe('buildTurnContext', () => {
     rmSync(v1);
     symlinkSync(join(outside, 'secret.html'), v1);
     const linkedFile = await built({ context: { artifact: { ref: 'mikes/linked-file', version: 1 } } });
-    expect(linkedFile.binding?.refused[0]?.reason).toMatch(/version 1 is a link; it was not followed/);
+    expect(linkedFile.binding?.refused[0]?.reason).toMatch(/version 1 is a link .*it was not followed/);
 
     writeDoc('mikes', 'escape', { 1: '<h1>mine</h1>' }, { head: 1, versions: [{ version: 1, html_file: '../outside/secret.html' }] });
     const escaped = await built({ context: { artifact: { ref: 'mikes/escape', version: 1 } } });
@@ -343,13 +343,12 @@ describe('buildTurnContext', () => {
     expect(ctx.block).toMatch(/Studio's summary of the page they are on \(written by studio, not by the person\)\n\n```text\nwhere: Jobs/);
   });
 
-  it('hands the seat real paths: a scratch root under a link is spelled as its target', async () => {
-    const real = join(scratch, 'real-root');
-    mkdirSync(real);
-    symlinkSync(real, join(scratch, 'linked-root'));
-    const ctx = await buildTurnContext(input({ scratchRoot: join(scratch, 'linked-root'), text: 'run 29bbbfb1' }), deps);
-    expect(ctx.block).toContain(`Brief: ${join(real, 'context', 'run-29bbbfb1-1111-4000-8000-000000000001-')}`);
-    expect(ctx.block).not.toContain(join(scratch, 'linked-root'));
+  it('hands the seat real paths: a scratch root under a linked folder (macOS /var) is spelled as its target', async () => {
+    mkdirSync(join(scratch, 'real-parent', 'root'), { recursive: true });
+    symlinkSync(join(scratch, 'real-parent'), join(scratch, 'linked-parent'));
+    const ctx = await buildTurnContext(input({ scratchRoot: join(scratch, 'linked-parent', 'root'), text: 'run 29bbbfb1' }), deps);
+    expect(ctx.block).toContain(`Brief: ${join(scratch, 'real-parent', 'root', 'context', 'run-29bbbfb1-1111-4000-8000-000000000001-')}`);
+    expect(ctx.block).not.toContain(join(scratch, 'linked-parent'));
   });
 
   it('writes nothing until publish(): the route publishes only after its last await and generation check', async () => {
@@ -368,7 +367,7 @@ describe('buildTurnContext', () => {
     mkdirSync(elsewhere);
     const ctx = await buildTurnContext(input({ text: 'run 29bbbfb1' }), deps);
     symlinkSync(elsewhere, join(scratch, 'chat-root', 'context'));
-    expect(() => ctx.publish()).toThrow(/not a real directory/);
+    expect(() => ctx.publish()).toThrow(/ELOOP|not a real/);
     expect(readdirSync(elsewhere)).toEqual([]);
     const again = await built({ text: 'run 29bbbfb1' });
     expect(again.binding?.runs).toEqual([]);
@@ -399,7 +398,7 @@ describe('buildTurnContext', () => {
     writeDoc('mikes', 'big-head', { 1: DECK_V1, 2: `<h1>big</h1>${'x'.repeat(2 * 1024 * 1024 + 10)}` });
     const ctx = await built({ context: { artifact: { ref: 'mikes/big-head', version: 1 } } });
     expect(ctx.binding?.artifact).toMatchObject({ viewed: 1, head: 2, copies: ['open/mikes__big-head-v1.html'] });
-    expect(ctx.block).toContain('The latest, version 2, was not copied: version 2 is over 2 MB.');
+    expect(ctx.block).toContain('The latest, version 2, was not copied: version 2 is over 2 MB; open it in studio.');
   });
 
   it.skipIf(process.platform === 'win32')('never blocks on a FIFO where a manifest or a version should be', async () => {

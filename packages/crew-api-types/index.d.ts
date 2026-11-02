@@ -8771,7 +8771,8 @@ export interface ChatMessageContext {
 export interface ChatArtifactContext {
   /** `<mount>/<doc>`: the mount is a project id or `_unfiled`; the doc is the interactive document name. */
   ref: string;
-  /** The version the person is looking at (≥ 1), read after the editor's in-flight writes finished. */
+  /** The version the person is looking at (≥ 0: a document's first version is 0), read after the editor's in-flight
+   *  writes finished. */
   version: number;
   /** The `data-wid` of each part the person selected (at most 16). */
   anchors?: string[];
