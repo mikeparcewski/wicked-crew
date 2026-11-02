@@ -419,6 +419,25 @@ describe('CORS pairing (the R2 gap)', () => {
     }
   });
 
+  it('local mode: the /ws upgrade (101) and a refused upgrade (403) both carry the clickjacking guard', async () => {
+    const wsBase = localBase.replace(/^http/, 'ws');
+    const opened = await new Promise<Record<string, unknown>>((done, fail) => {
+      const ws = new WebSocket(`${wsBase}/ws`, { headers: { Origin: localBase } });
+      ws.on('upgrade', (res) => { done({ ...res.headers }); ws.close(); });
+      ws.on('error', fail);
+    });
+    expect(opened['x-frame-options']).toBe('SAMEORIGIN');
+    expect(String(opened['content-security-policy'])).toMatch(/^frame-ancestors 'self' /);
+    const refused = await new Promise<Record<string, unknown>>((done) => {
+      const ws = new WebSocket(`${wsBase}/ws`, { headers: { Origin: 'http://localhost:4999' } });
+      ws.on('unexpected-response', (_req, res) => { res.resume(); done({ status: res.statusCode, ...res.headers }); });
+      ws.on('error', () => undefined);
+    });
+    expect(refused['status']).toBe(403);
+    expect(refused['x-frame-options']).toBe('SAMEORIGIN');
+    expect(String(refused['content-security-policy'])).toMatch(/^frame-ancestors 'self' /);
+  });
+
   it('local mode: the daemon\'s own origin still opens /ws', async () => {
     const wsBase = localBase.replace(/^http/, 'ws');
     const outcome = await new Promise<string>((done) => {

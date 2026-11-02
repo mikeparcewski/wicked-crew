@@ -22,25 +22,44 @@
  *   `frame-src`, an editor bundle's sandbox policy), which would otherwise replace the raw one.
  *
  * A route that hijacks AND writes its own `Content-Security-Policy` must keep the guard's policy
- * beside it with {@link keepFrameGuard}.
+ * beside it with {@link keepFrameGuard}. A WebSocket upgrade's `101` is written by `ws` straight to
+ * the socket, past both hooks; {@link guardUpgrades} adds the headers there.
  */
 import type { ServerResponse } from 'node:http';
 import type { FastifyInstance } from 'fastify';
-import { STUDIO_DEV_ORIGINS, canonicalOrigin, type OriginPolicy } from './origin-guard.js';
+import { STUDIO_DEV_ORIGINS, type OriginPolicy } from './origin-guard.js';
 
 export const X_FRAME_OPTIONS = 'SAMEORIGIN';
 
-/** A canonical `http(s)://host[:port]` with nothing that could end or widen a CSP source list. */
-const SAFE_SOURCE = /^https?:\/\/[a-z0-9.\-[\]:]+$/;
+/**
+ * A serialized origin exactly as a browser sends it in `Origin`: `http(s)://host[:port]`, nothing after it (no path,
+ * no trailing slash, no query, fragment or credentials). Only such an entry can match an `Origin` header in
+ * origin-guard's exact allowlist check, and only such an entry is a single CSP host-source that cannot end or widen
+ * the directive. The entry is checked as written, never reduced to an origin first: `https://a.example/#; x` would
+ * reduce to an origin the API refuses, and a granted frame would outlive that refusal.
+ */
+const SERIALIZED_ORIGIN = /^https?:\/\/(?:[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.?|\[[0-9A-Fa-f:.]+\])(?::\d{1,5})?$/;
 
-/** The `frame-ancestors` directive for this daemon: `'self'`, studio's dev server, the allowed origins. */
+/**
+ * The `frame-ancestors` directive for this daemon: `'self'`, studio's dev server and the allowed origins, each kept
+ * exactly as allowed. An entry that is not a serialized origin is left out (it can't be an `Origin` the API accepts).
+ */
 export function frameAncestors(policy: Pick<OriginPolicy, 'allowedOrigins'>): string {
   const sources = new Set<string>();
   for (const origin of [...STUDIO_DEV_ORIGINS, ...(policy.allowedOrigins ?? [])]) {
-    const canonical = canonicalOrigin(origin.trim());
-    if (canonical !== null && SAFE_SOURCE.test(canonical)) sources.add(canonical);
+    if (SERIALIZED_ORIGIN.test(origin)) sources.add(origin);
   }
   return ["frame-ancestors 'self'", ...sources].join(' ');
+}
+
+/**
+ * The guard on a WebSocket upgrade's `101`. `ws` writes that response to the socket itself, past both hooks; it is
+ * not a document anyone can frame, but every response says the same thing.
+ */
+export function guardUpgrades(wss: { on(event: 'headers', listener: (headers: string[]) => void): unknown }, directive: string): void {
+  wss.on('headers', (headers) => {
+    headers.push(`X-Frame-Options: ${X_FRAME_OPTIONS}`, `Content-Security-Policy: ${directive}`);
+  });
 }
 
 const HAS_FRAME_ANCESTORS = /(^|;)\s*frame-ancestors(\s|;|$)/i;
@@ -70,8 +89,11 @@ export function keepFrameGuard(raw: ServerResponse, csp: string | string[] | und
   return [guard, ...(Array.isArray(csp) ? csp : [csp])];
 }
 
-/** Register the guard. Call it before any other `onRequest` hook that can answer the request. */
-export function registerFrameGuard(app: FastifyInstance, policy: Pick<OriginPolicy, 'allowedOrigins'>): void {
+/**
+ * Register the guard. Call it before any other `onRequest` hook that can answer the request. Returns the directive,
+ * for {@link guardUpgrades}.
+ */
+export function registerFrameGuard(app: FastifyInstance, policy: Pick<OriginPolicy, 'allowedOrigins'>): string {
   const directive = frameAncestors(policy);
   app.addHook('onRequest', async (_req, reply) => {
     reply.raw.setHeader('X-Frame-Options', X_FRAME_OPTIONS);
@@ -85,4 +107,5 @@ export function registerFrameGuard(app: FastifyInstance, policy: Pick<OriginPoli
     if (reply.getHeader('x-frame-options') === undefined) reply.header('X-Frame-Options', X_FRAME_OPTIONS);
     return payload;
   });
+  return directive;
 }

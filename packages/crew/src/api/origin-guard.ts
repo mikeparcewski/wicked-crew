@@ -46,7 +46,7 @@ export interface GuardedRequest {
 }
 
 /** `scheme://host[:port]`, lowercased, without a trailing dot or a default port; `null` if unparseable. */
-export function canonicalOrigin(url: string): string | null {
+function canonicalOrigin(url: string): string | null {
   try {
     const u = new URL(url);
     const host = u.hostname.toLowerCase().replace(/\.$/, '');

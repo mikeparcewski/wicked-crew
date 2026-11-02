@@ -4,7 +4,8 @@ import { request as httpRequest, type IncomingHttpHeaders } from 'node:http';
 import Fastify from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 import { bundleHeaders } from '../src/editors/csp.js';
-import { frameAncestors, keepFrameGuard, mergeFrameAncestors, registerFrameGuard } from '../src/api/frame-guard.js';
+import { frameAncestors, guardUpgrades, keepFrameGuard, mergeFrameAncestors, registerFrameGuard } from '../src/api/frame-guard.js';
+import { corsAllowed } from '../src/api/origin-guard.js';
 
 const DEV = "frame-ancestors 'self' http://127.0.0.1:4200 http://localhost:4200";
 
@@ -14,16 +15,43 @@ describe('frameAncestors', () => {
     expect(frameAncestors({ allowedOrigins: [] })).toBe(DEV);
   });
 
-  it('adds the allowed origins, canonical and de-duplicated', () => {
-    expect(frameAncestors({ allowedOrigins: ['https://Studio.Example.com', ' http://localhost:4200 ', 'http://10.0.0.5:8080/'] }))
-      .toBe(`${DEV} https://studio.example.com http://10.0.0.5:8080`);
+  it('adds the allowed origins exactly as allowed, de-duplicated (a trailing dot is a different origin and is kept)', () => {
+    expect(frameAncestors({ allowedOrigins: ['https://Studio.Example.com', 'http://localhost:4200', 'http://10.0.0.5:8080', 'https://skin.example.', 'http://[::1]:5173'] }))
+      .toBe(`${DEV} https://Studio.Example.com http://10.0.0.5:8080 https://skin.example. http://[::1]:5173`);
   });
 
-  it('drops anything that is not a plain http(s) origin, so an allowlist entry cannot widen or end the directive', () => {
-    const d = frameAncestors({ allowedOrigins: ['*', "https://a.example; script-src 'unsafe-inline'", 'javascript:alert(1)', 'ftp://x.example', 'not a url', 'https://ok.example'] });
+  it('drops any entry that is not a serialized origin, checked as written (never reduced to an origin first)', () => {
+    const d = frameAncestors({
+      allowedOrigins: [
+        '*',
+        'https://*.example',
+        "https://a.example; script-src 'unsafe-inline'",
+        'https://evil.example/#; frame-ancestors *',
+        'https://evil.example/path',
+        'https://evil.example/',
+        'https://evil.example?x=1',
+        'https://user:pw@evil.example',
+        ' https://evil.example ',
+        'javascript:alert(1)',
+        'ftp://x.example',
+        'not a url',
+        'https://ok.example',
+      ],
+    });
     expect(d).toBe(`${DEV} https://ok.example`);
+    expect(d).not.toContain('evil');
     expect(d).not.toContain(';');
     expect(d).not.toContain('*');
+  });
+
+  it('every origin it lets frame is one the API already accepts from that page (origin-guard corsAllowed)', () => {
+    const allowedOrigins = ['https://ok.example', 'https://skin.example.', 'https://evil.example/#; x', 'https://evil.example/', 'https://u:p@evil.example'];
+    const granted = frameAncestors({ allowedOrigins }).split(' ').slice(2);
+    expect(granted.length).toBeGreaterThan(0);
+    for (const origin of granted) {
+      expect(corsAllowed(origin, { mode: 'off', allowedOrigins }), origin).toBe(true);
+      expect(corsAllowed(origin, { mode: 'required', allowedOrigins }), origin).toBe(true);
+    }
   });
 });
 
@@ -127,6 +155,14 @@ describe('registerFrameGuard', () => {
     // node joins repeated headers with ", ": two policies, both enforced.
     expect(doc.headers['content-security-policy']).toBe(`${D}, sandbox allow-scripts`);
     expect(doc.headers['x-frame-options']).toBe('SAMEORIGIN');
+  });
+
+  it('guardUpgrades adds both headers to a WebSocket upgrade response', () => {
+    let listener: ((headers: string[]) => void) | undefined;
+    guardUpgrades({ on: (_e: 'headers', l: (headers: string[]) => void) => { listener = l; } }, DEV);
+    const headers = ['HTTP/1.1 101 Switching Protocols', 'Upgrade: websocket'];
+    listener!(headers);
+    expect(headers).toEqual(['HTTP/1.1 101 Switching Protocols', 'Upgrade: websocket', 'X-Frame-Options: SAMEORIGIN', `Content-Security-Policy: ${DEV}`]);
   });
 
   it('keepFrameGuard leaves a response with no guard as it was', () => {

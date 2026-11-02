@@ -18,7 +18,7 @@ import { ElicitationCache } from './elicitation-cache.js';
 import { AskServer } from '../mcp/ask-server.js';
 import { registerAuthHooks, resolveAuth, type AuthOptions } from './auth.js';
 import { corsAllowed, refuseRequest } from './origin-guard.js';
-import { registerFrameGuard } from './frame-guard.js';
+import { guardUpgrades, registerFrameGuard } from './frame-guard.js';
 import { AuditLog } from './audit.js';
 import { defaultEvalStoreRoot, EvalRunStore } from './eval-store.js';
 import { DefaultEvalStore } from '../evals/store.js';
@@ -2321,7 +2321,7 @@ export async function createServer(
 
   // Clickjacking guard (frame-guard.ts): who may frame the daemon's pages, on every response. FIRST
   // onRequest hook, so a preflight 204, a 403 or a 401 answered by a later hook carries it too.
-  registerFrameGuard(app, { allowedOrigins: auth.allowedOrigins });
+  const frameDirective = registerFrameGuard(app, { allowedOrigins: auth.allowedOrigins });
 
   app.addHook('onRequest', async (req, reply) => {
     const origin = req.headers.origin;
@@ -2360,6 +2360,8 @@ export async function createServer(
   });
 
   await app.register(fastifyWebsocket);
+  // A successful upgrade's 101 is written by `ws` itself, past both frame-guard hooks.
+  guardUpgrades(app.websocketServer, frameDirective);
 
   // Identity (401) + trust (403) hooks. Ordering is load-bearing twice over:
   // AFTER the CORS hook, so an OPTIONS preflight (which carries no
