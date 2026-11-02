@@ -18,9 +18,11 @@
  * The root itself is trusted: its ancestors belong to the daemon, and a run or a seat cannot rename the root (it can
  * write only inside it). Every component below it is checked on every open, by the kernel.
  *
- * Listing a directory is path-based on macOS (`/dev/fd/<n>` cannot be listed there), so a listing may be raced; that
- * is harmless here because nothing a listing returns is used except as a name to open beneath the root, and an open
- * through a swapped component fails.
+ * Listing a directory is by IDENTITY, never by a path that could be re-resolved: the directory is first opened beneath
+ * the root, then listed through what that descriptor holds — on Linux `/proc/self/fd/<n>`, on macOS
+ * `/.vol/<dev>/<ino>` (the volume file system's by-identity name; `/dev/fd/<n>` cannot be listed there). A folder
+ * swapped for a link after it was opened still lists as the folder that was opened; a file system without `/.vol`
+ * refuses the listing.
  */
 
 import { closeSync, constants as fsConstants, existsSync, fstatSync, mkdirSync, openSync, opendirSync, readSync, writeSync, type Stats } from 'node:fs';
@@ -34,12 +36,14 @@ export type BeneathMode = 'darwin' | 'procfd' | 'unsupported';
 let modeHeld: BeneathMode | null = null;
 /** How this platform opens beneath a root. */
 export function beneathMode(): BeneathMode {
+  if (beneathTestHooks.mode !== undefined) return beneathTestHooks.mode;
   modeHeld ??= process.platform === 'darwin' ? 'darwin' : process.platform === 'linux' && existsSync('/proc/self/fd') ? 'procfd' : 'unsupported';
   return modeHeld;
 }
 
-/** A test seam: called with the absolute path, just before the open of a path beneath a root. */
-export const beneathTestHooks: { beforeOpen?: (absPath: string) => void } = {};
+/** Test seams: called with the absolute path just before an open beneath a root (with its flags), and just before a
+ *  directory opened beneath a root is listed. */
+export const beneathTestHooks: { beforeOpen?: (absPath: string, flags: number) => void; beforeList?: (absPath: string) => void; mode?: BeneathMode } = {};
 
 export class BeneathError extends Error {
   constructor(readonly code: string, message: string) {
@@ -71,7 +75,7 @@ export function openBeneath(root: string, rel: string, opts: OpenBeneathOptions 
   const parts = partsOf(rel);
   const base = opts.flags ?? fsConstants.O_RDONLY;
   const abs = join(root, ...parts);
-  beneathTestHooks.beforeOpen?.(abs);
+  beneathTestHooks.beforeOpen?.(abs, base);
   const mode = beneathMode();
   // Darwin refuses O_NOFOLLOW together with O_NOFOLLOW_ANY (EINVAL); the latter covers the last component too.
   if (mode === 'darwin') return openSync(abs, base | DARWIN_O_NOFOLLOW_ANY, opts.mode);
@@ -80,7 +84,16 @@ export function openBeneath(root: string, rel: string, opts: OpenBeneathOptions 
     let dir = openSync(root, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY);
     try {
       for (const p of parts.slice(0, -1)) {
-        const next = openSync(`/proc/self/fd/${dir}/${p}`, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | (fsConstants.O_NOFOLLOW ?? 0));
+        let next: number;
+        try {
+          next = openSync(`/proc/self/fd/${dir}/${p}`, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | (fsConstants.O_NOFOLLOW ?? 0));
+        } catch (err) {
+          // Linux answers a link here with ENOTDIR (O_DIRECTORY is checked first) or ELOOP: either way the folder on
+          // the way is not a real folder, and it is said the way macOS says it.
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code === 'ENOTDIR' || code === 'ELOOP') throw new BeneathError('ELOOP', `${p} is not a real folder (a link is never followed)`);
+          throw err;
+        }
         closeSync(dir);
         dir = next;
       }
@@ -157,9 +170,8 @@ export function mkdirBeneath(root: string, name: string, mode = 0o700): void {
 }
 
 /**
- * The names in the directory `rel` beneath `root` (`''` = the root itself), at most `max`. On Linux the listing is of
- * the directory the walk opened; on macOS it is by path after the directory was proven real (a raced listing yields
- * only names, which the caller opens beneath the root). Returns `null` when the directory cannot be listed.
+ * The names in the directory `rel` beneath `root` (`''` = the root itself, trusted), at most `max`, listed by the
+ * identity of the directory opened beneath the root (see the module doc). `null` when it cannot be listed.
  */
 export function listBeneath(root: string, rel: string, max: number): { names: string[]; more: boolean } | null {
   let target = root;
@@ -167,7 +179,11 @@ export function listBeneath(root: string, rel: string, max: number): { names: st
   try {
     if (rel !== '') {
       fd = openBeneath(root, rel, { flags: fsConstants.O_RDONLY | fsConstants.O_DIRECTORY });
-      target = beneathMode() === 'procfd' ? `/proc/self/fd/${fd}` : join(root, ...partsOf(rel));
+      const st = fstatSync(fd);
+      if (!st.isDirectory()) return null;
+      beneathTestHooks.beforeList?.(join(root, ...partsOf(rel)));
+      // By identity: what the descriptor holds, whatever the path names now.
+      target = beneathMode() === 'procfd' ? `/proc/self/fd/${fd}` : `/.vol/${st.dev}/${st.ino}`;
     }
     const names: string[] = [];
     let more = false;

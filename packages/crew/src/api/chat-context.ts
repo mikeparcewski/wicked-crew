@@ -174,6 +174,11 @@ export interface TurnContext {
   publish(): void;
 }
 
+/** Whether this platform can open files beneath a root without following links (`beneath.ts`). */
+export function beneathSupported(): boolean {
+  return beneathMode() !== 'unsupported';
+}
+
 /** The directories the seat reads the copies and briefs from: read roots of the chat's run, made at its launch. */
 export function contextReadRoots(scratchRoot: string): { open: string; context: string } {
   return { open: join(scratchRoot, 'open'), context: join(scratchRoot, 'context') };
@@ -328,6 +333,7 @@ function readManifest(rootReal: string, doc: string): Manifest {
 /** The docs root as its real path, after proving the document is a real directory beneath it (no link in its path).
  *  Every read of the document is then opened beneath this root. Throws a refusal. */
 function realDocsRoot(root: string, doc: string): string {
+  if (beneathMode() === 'unsupported') throw new ContextRefusal('this platform cannot read files without following links in their folders');
   try {
     const rootReal = realpathSync(root);
     const st = statBeneath(rootReal, doc);
@@ -784,33 +790,67 @@ export async function buildTurnContext(input: TurnContextInput, deps: ChatContex
 
 /**
  * Whether `<docsRoot>/<doc>` is a real document directory inside the docs root whose latest version (0 included) is
- * a regular file (`POST /chats {seedFromArtifact}`'s access check). Everything is opened beneath the docs root: no
- * link is followed in any component.
+ * a regular file (`POST /chats {seedFromArtifact}`'s access check): `ok`, `missing`, or `unsupported` (this platform
+ * cannot open files without following links). Everything is opened beneath the docs root: no link is followed in any
+ * component.
  */
-export function artifactExists(docsRoot: string, doc: string): boolean {
-  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(doc)) return false;
+export function artifactStatus(docsRoot: string, doc: string): 'ok' | 'missing' | 'unsupported' {
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(doc)) return 'missing';
+  if (beneathMode() === 'unsupported') return 'unsupported';
   try {
     const rootReal = realDocsRoot(docsRoot, doc);
     const m = readManifest(rootReal, doc);
     // Existence, not copy eligibility: a deck over the copy cap still exists (its messages say why it was not copied).
-    return statBeneath(rootReal, `${doc}/${m.files.get(m.head)!}`)?.isFile() === true;
+    return statBeneath(rootReal, `${doc}/${m.files.get(m.head)!}`)?.isFile() === true ? 'ok' : 'missing';
   } catch {
-    return false;
+    return 'missing';
   }
 }
 
+/** Whether `<docsRoot>/<doc>` is a document crew can read ({@link artifactStatus} `ok`). */
+export function artifactExists(docsRoot: string, doc: string): boolean {
+  return artifactStatus(docsRoot, doc) === 'ok';
+}
+
 /**
- * DES-CHAT-ARTIFACTS-001 §4.2-§4.3 (A2): the latest version of `<docsRoot>/<doc>`, read the way {@link artifactExists}
- * reads it (no link followed, contained), or `null` when it is not a document. A proposal records it as a refine's
- * base, and Go checks it has not moved.
+ * DES-CHAT-ARTIFACTS-001 §4.2-§4.3 (A2): the latest version of `<docsRoot>/<doc>`, read the way {@link artifactStatus}
+ * reads it (beneath the docs root, no link followed in any folder), or `null` when it is not a document. A proposal
+ * records it as a refine's base, and Go checks it has not moved.
  */
 export function artifactHead(docsRoot: string, doc: string): number | null {
   if (!artifactExists(docsRoot, doc)) return null;
   try {
-    return readManifest(realDocDir(docsRoot, doc)).head;
+    return readManifest(realDocsRoot(docsRoot, doc), doc).head;
   } catch {
     return null;
   }
+}
+
+/** The repository ids a grounding sidecar may name: registry ids, never text. */
+const REPO_REF = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
+const DOC_STYLE_VALUES = new Set(['web', 'ppt', 'brochure', 'doc']);
+
+/**
+ * What crew recorded about a document when it was created and drafted (`crew-grounding.json`), read beneath the docs
+ * root like every other A1 read (capped, non-blocking, no link followed): the style, and the repositories it was
+ * grounded on — the draft launch's resolved list when there is one, else the create request's. `null` when there is
+ * no sidecar (or it is not one crew wrote).
+ */
+export function readGroundingBeneath(docsRoot: string, doc: string): { style?: string; repoRefs: string[] } | null {
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(doc) || beneathMode() === 'unsupported') return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readBeneath(realpathSync(docsRoot), `${doc}/crew-grounding.json`, 256 * 1024).data.toString('utf8'));
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+  const b = parsed as { style?: unknown; repo_refs?: unknown; grounding?: { repo_refs?: unknown } | null };
+  const refsOf = (v: unknown): string[] | null => (Array.isArray(v) && v.length <= 32 && v.every((r) => typeof r === 'string' && REPO_REF.test(r)) ? (v as string[]) : null);
+  const resolved = b.grounding !== undefined && b.grounding !== null && typeof b.grounding === 'object' ? refsOf(b.grounding.repo_refs) : null;
+  const requested = refsOf(b.repo_refs ?? []);
+  const repoRefs = resolved ?? requested ?? [];
+  return { ...(typeof b.style === 'string' && DOC_STYLE_VALUES.has(b.style) ? { style: b.style } : {}), repoRefs };
 }
 
 /** sha256 of a string, hex (tests and the route's binding). */

@@ -13,6 +13,7 @@ import type { FastifyInstance } from 'fastify';
 import type { ChatMessagesResponse, HealthResponse } from 'wicked-crew-api-types';
 
 import { createServer } from '../src/api/server.js';
+import { beneathTestHooks } from '../src/api/beneath.js';
 import { tokenHash } from '../src/api/auth.js';
 import { ensureProjectInteractiveRoot } from '../src/interactive/bridge-root.js';
 import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
@@ -160,6 +161,26 @@ describe('chat sees artifacts and runs (server, A1)', () => {
   it('advertises chatArtifacts with context (and A2 proposals) on, every operation off', async () => {
     const health = (await app.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse;
     expect(health.capabilities?.chatArtifacts).toEqual({ context: true, proposals: true, create: false, refine: false, theme: false, demo: false });
+  });
+
+  it('a platform that cannot open beneath a root still chats: no turn read roots, the artifact refused with the reason, a seed answers 501', async () => {
+    beneathTestHooks.mode = 'unsupported';
+    try {
+      const before = launches.length;
+      expect((await open(app, { chatId: 'unsup-1', projectId: 'mikes', clis: ['claude'] })).statusCode).toBe(201);
+      const res = await send(app, 'unsup-1', { text: 'what is this?', context: { artifact: { ref: 'mikes/coverage-deck', version: 1 } } });
+      expect(res.statusCode).toBe(202);
+      expect(launches.length).toBe(before + 1);
+      const input = launches.at(-1)!;
+      expect((input.extraReadRoots ?? []).some((r) => r.endsWith('/open') || r.endsWith('/context'))).toBe(false);
+      const msgs = (await app.inject({ method: 'GET', url: '/api/v1/chats/unsup-1/messages' })).json() as ChatMessagesResponse;
+      expect(msgs.messages.find((m) => m.kind === 'context')).toMatchObject({ refused: [{ token: 'doc:mikes/coverage-deck', reason: expect.stringMatching(/cannot read files without following links/) }] });
+      const seed = await open(app, { chatId: 'unsup-2', clis: ['claude'], seedFromArtifact: 'mikes/coverage-deck' });
+      expect(seed.statusCode).toBe(501);
+      expect(seed.json()).toMatchObject({ code: 'seed_unsupported' });
+    } finally {
+      delete beneathTestHooks.mode;
+    }
   });
 
   it('a document at version 0 is a document: context at version 0 is sent and copied, and a chat can be seeded from it (crew#1273)', async () => {

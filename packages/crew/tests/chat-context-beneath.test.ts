@@ -4,7 +4,7 @@
 // window a run or a seat would race. Each fails if the open goes back to a path open that follows ancestor links
 // (`O_NOFOLLOW` alone covers only the last component).
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
+import { constants, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -17,11 +17,12 @@ import { removeScratch } from './setup/scratch.js';
 
 const supported = beneathMode() !== 'unsupported';
 
-/** Swap `dir` for a link to `target` the first time an open's path ends with `suffix`. */
-function swapOnOpen(suffix: string, dir: string, target: string): () => boolean {
+/** Swap `dir` for a link to `target` the first time an open's path ends with `suffix` (and, when given, its flags
+ *  match). */
+function swapOnOpen(suffix: string, dir: string, target: string, when: (flags: number) => boolean = () => true): () => boolean {
   let swapped = false;
-  beneathTestHooks.beforeOpen = (abs) => {
-    if (swapped || !abs.endsWith(suffix)) return;
+  beneathTestHooks.beforeOpen = (abs, flags) => {
+    if (swapped || !abs.endsWith(suffix) || !when(flags)) return;
     swapped = true;
     renameSync(dir, `${dir}-moved`);
     symlinkSync(target, dir);
@@ -47,7 +48,26 @@ describe.skipIf(!supported)('opening beneath a root (crew#1274)', () => {
   });
   afterEach(() => {
     delete beneathTestHooks.beforeOpen;
+    delete beneathTestHooks.beforeList;
     removeScratch(scratch);
+  });
+
+  it('lists a folder by what was opened beneath the root, even when its path is swapped for a link before the listing', () => {
+    const root = join(scratch, 'root');
+    mkdirSync(join(root, 'a'), { recursive: true });
+    writeFileSync(join(root, 'a', 'in1'), 'x');
+    let swapped = false;
+    beneathTestHooks.beforeList = (abs) => {
+      if (swapped || !abs.endsWith('/a')) return;
+      swapped = true;
+      renameSync(join(root, 'a'), join(root, 'a-moved'));
+      symlinkSync(join(scratch, 'outside'), join(root, 'a'));
+    };
+    const listed = listBeneath(root, 'a', 10);
+    expect(swapped).toBe(true);
+    // The held folder's names (or nothing): never the outside folder's.
+    expect(listed === null || !listed.names.includes('proof.txt')).toBe(true);
+    expect(listed?.names ?? []).not.toContain('versions.json');
   });
 
   it('refuses a link in any folder below the root, and paths that leave it, while reading what is really inside', () => {
@@ -93,7 +113,22 @@ describe.skipIf(!supported)('opening beneath a root (crew#1274)', () => {
     expect(ctx.binding?.refused[0]?.reason).toMatch(/version 1 is a link/);
   });
 
-  it('publication never writes through a scratch folder swapped for a link after it was proven real', async () => {
+  it('publication never creates a file through a scratch folder swapped for a link at the create itself', async () => {
+    const chatRoot = join(scratch, 'chat');
+    mkdirSync(chatRoot);
+    const deps: ChatContextDeps = { docsRoot: async () => null, runs: async () => [view('bbbbbbbb-0000-4000-8000-0000000000b1')], workOutput: async () => null };
+    const ctx = await buildTurnContext({ chatId: 'c', scratchRoot: chatRoot, projectId: null, text: 'run bbbbbbbb', records: [], attachmentIds: [] }, deps);
+    const target = join(scratch, 'elsewhere');
+    mkdirSync(target);
+    // Only at the exclusive create (after the existing-copy check found nothing): the create must refuse the link.
+    const swapped = swapOnOpen('.md', join(chatRoot, 'context'), target, (flags) => (flags & constants.O_CREAT) !== 0);
+    mkdirSync(join(chatRoot, 'context'));
+    expect(() => ctx.publish()).toThrow();
+    expect(swapped()).toBe(true);
+    expect(readdirSync(target)).toEqual([]);
+  });
+
+  it('publication never compares against a copy read through a scratch folder swapped for a link', async () => {
     const chatRoot = join(scratch, 'chat');
     mkdirSync(chatRoot);
     const deps: ChatContextDeps = { docsRoot: async () => null, runs: async () => [view('bbbbbbbb-0000-4000-8000-0000000000b1')], workOutput: async () => null };
