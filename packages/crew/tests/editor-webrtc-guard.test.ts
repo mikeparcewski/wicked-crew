@@ -125,12 +125,16 @@ describe('guardBundle: the prelude goes first in every inline script that runs, 
   it('a type written with character references runs as the browser runs it: decoded, then prefixed', () => {
     expect(decodeAttribute('text&#47;java&#x73;cript')).toBe('text/javascript');
     expect(decodeAttribute('text&sol;javascript&amp;&unknown;')).toBe('text/javascript&&unknown;');
+    expect(guard('<script type="&Tab;module&NewLine;">m</script>').hashes).toEqual([b64(P + 'm')]);
     expect(guard('<script type="text&#47;javascript">a</script><script type="&#x6d;odule">b</script>').hashes).toEqual([b64(P + 'a'), b64(P + 'b')]);
   });
 
   it('an SVG script is external by href (src does nothing there); a value ending in "/" does not close its tag', () => {
     const html = '<svg data-path=/a/><style><script>b</script></style><script src=x>c</script><script href=y>d</script></svg><script src=z>e</script>';
     expect(inlineScripts(html).map((x) => [html.slice(x.start, x.end), x.runs])).toEqual([['b', true], ['c', true], ['d', false], ['e', false]]);
+    // `language` is HTML's fallback only: an SVG script with language="other" still runs (and is prefixed).
+    expect(texts('<svg><script language="other">s()</script></svg>')).toEqual(['s()']);
+    expect(guard('<svg><script language="other">s()</script></svg>').hashes).toHaveLength(1);
   });
 
   it('inside <svg>/<math>, style and title are not raw text and a self-closing <script/> is empty; HTML <style> still is', () => {
@@ -223,6 +227,9 @@ describe('the prelude: WebRTC is gone from the window, for good, before the edit
     expect(withPrelude('/* never closed')).toBe(`${P}/* never closed`);
     // `<!--` opens a line comment in a classic script: a directive after it is still kept first.
     expect(withPrelude('<!-- old\n"use strict";x()')).toBe(`<!-- old\n"use strict";${P}x()`);
+    // `-->` at the start of a line is a comment too (and runs nothing); elsewhere it is not.
+    expect(withPrelude('\n--> old\n"use strict";x()')).toBe(`\n--> old\n"use strict";${P}x()`);
+    expect(withPrelude('"a" --> 0')).toBe(`${P}"a" --> 0`);
   });
 
   it('a directive ended by automatic semicolon insertion keeps strict mode, and the prelude still runs first', () => {

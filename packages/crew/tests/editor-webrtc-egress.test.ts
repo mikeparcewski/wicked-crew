@@ -383,18 +383,20 @@ describe('editor frames: zero WebRTC egress from a hostile plugin (Chromium, cre
   // bundle frame itself has no WebRTC constructor. Once the bundled studio carries its nested-frame guard (studio's
   // `guardNestedHtml`, found by the prelude's refusal text in the bundle), every attempt from the document must send
   // zero packets; until then the test says, loudly, that the bundled studio does not guard nested frames yet.
-  it('the bundled studio\'s page and deck editors: they start and render; nested documents are held to zero packets once the bundled studio guards them', async (ctx) => {
+  it('the bundled studio\'s page, document and deck editors: they start and render; nested documents are held to zero packets once the bundled studio guards them', async (ctx) => {
     needBrowser(() => ctx.skip());
     const studioDir = dirname(createRequire(import.meta.url).resolve('wicked-studio/package.json'));
     const studioVersion = (JSON.parse(readFileSync(join(studioDir, 'package.json'), 'utf8')) as { version: string }).version;
-    for (const editor of ['wicked-page', 'wicked-deck']) {
+    for (const editor of ['wicked-page', 'wicked-doc', 'wicked-deck']) {
       const bundle = readFileSync(join(studioDir, 'dist', 'editors', editor, 'index.html'));
+      // The editor's real manifest: its permissions decide its policy (Page and Document hold network.media).
+      const shipped = JSON.parse(readFileSync(join(studioDir, 'dist', 'editors', editor, 'editor.json'), 'utf8')) as { permissions: unknown[]; protocol: number[]; kinds: string[] };
       const guarded = bundle.includes('WebRTC is not available in an editor frame');
       const id = `${editor}-release`;
       const entryPath = join(dir, `${id}.html`);
       writeFileSync(entryPath, bundle);
       records.set(id, {
-        manifest: { id, title: id, version: '1.0.0', protocol: [1, 2], kinds: ['page'], entry: 'index.html', sizes: ['inline'], permissions: [] },
+        manifest: { id, title: id, version: '1.0.0', protocol: shipped.protocol, kinds: shipped.kinds, entry: 'index.html', sizes: ['inline'], permissions: shipped.permissions },
         sha256: sha256Of(bundle), bytes: bundle.length, entryPath, firstParty: true, source: 'studio-bundle', enabled: true,
       } as unknown as EditorRecord);
       const outcomes: string[] = [];

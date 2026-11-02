@@ -118,12 +118,22 @@ export function prologueEnd(text: string): { at: number; afterHashbang: boolean;
     afterHashbang = true;
   }
   let crossed = false;
+  // At the start of a line (only whitespace and comments since the last line end): where a classic script's `-->`
+  // opens a line comment.
+  let lineStart = true;
   /** Past whitespace and whole comments (noting a line end); false at a block comment that never closes. */
   const skip = (): boolean => {
     for (;;) {
       while (i < n && SPACE.test(text[i]!)) {
-        if (LINE_END.test(text[i]!)) crossed = true;
+        if (LINE_END.test(text[i]!)) {
+          crossed = true;
+          lineStart = true;
+        }
         i++;
+      }
+      if (lineStart && text.startsWith('-->', i)) {
+        while (i < n && !LINE_END.test(text[i]!)) i++;
+        continue;
       }
       if (text.startsWith('/*', i)) {
         const close = text.indexOf('*/', i + 2);
@@ -151,12 +161,14 @@ export function prologueEnd(text: string): { at: number; afterHashbang: boolean;
       j += 1;
     }
     if (!closed) break;
+    lineStart = false;
     const end = j;
     i = j;
     crossed = false;
     if (!skip()) break;
     if (text[i] === ';') {
       i += 1;
+      lineStart = false;
       at = i;
       semicolon = false;
     } else if ((crossed || i >= n) && endsByAsi(text, i)) {
@@ -205,7 +217,7 @@ export interface InlineScript {
   runs: boolean;
 }
 
-const NAMED_REFS: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", sol: '/', period: '.', plus: '+', lowbar: '_', colon: ':', semi: ';', comma: ',' };
+const NAMED_REFS: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", sol: '/', period: '.', plus: '+', lowbar: '_', colon: ':', semi: ';', comma: ',', Tab: '\t', NewLine: '\n' };
 
 /** An attribute value as the parser hands it on: numeric character references, and the named ones a script type can
  *  use. One it does not know stays as written, so the script reads as a data block and is refused, never run unguarded. */
@@ -215,7 +227,7 @@ export function decodeAttribute(v: string): string {
       const cp = hex !== undefined ? parseInt(hex, 16) : parseInt(dec!, 10);
       return cp > 0 && cp <= 0x10ffff && !(cp >= 0xd800 && cp <= 0xdfff) ? String.fromCodePoint(cp) : '\uFFFD';
     })
-    .replace(/&([a-z]+);/g, (m, name: string) => NAMED_REFS[name] ?? m);
+    .replace(/&([A-Za-z]+);/g, (m, name: string) => NAMED_REFS[name] ?? m);
 }
 
 /** Whether `<script …>` with these attributes runs its text as a classic or module script (HTML "prepare the script
@@ -223,7 +235,7 @@ export function decodeAttribute(v: string): string {
  *  data block. */
 function runsInline(attrs: Map<string, string>, svg: boolean): boolean {
   if (svg ? attrs.has('href') || attrs.has('xlink:href') : attrs.has('src')) return false;
-  const language = attrs.get('language');
+  const language = svg ? undefined : attrs.get('language'); // `language` is HTML's legacy fallback, not SVG's
   const raw = attrs.has('type') ? attrs.get('type')! : language !== undefined && language !== '' ? `text/${language}` : '';
   if (raw === '') return true;
   const type = raw.replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, '').toLowerCase();
