@@ -812,7 +812,8 @@ export function chatMakeLines(make: MakeDigest): string[] {
     '- it is ambiguous ("make this better", "do something with this"): ask ONE question whose three',
     '  choices are Revise it, Make something new, and Just tell me;',
     '- studio cannot make it (a spreadsheet, an image, audio, a video of something with no app):',
-    '  say so in one sentence and name the nearest thing it can make;',
+    '  say so in one sentence and name the nearest thing it can make, with no block for that either',
+    '  (they ask for it if they want it);',
     '- it asks to change CODE: that is a request for work (below).',
   );
   return lines;
