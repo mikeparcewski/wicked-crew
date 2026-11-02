@@ -1,0 +1,666 @@
+{
+  "version": 1,
+  "design": "DES-CHAT-ARTIFACTS-001 §4.1 (the per-message decision) and §13 (A1 builds it, A2 runs it)",
+  "intents": [
+    "information",
+    "make",
+    "refine",
+    "theme",
+    "demo",
+    "ambiguous",
+    "cant",
+    "code-change"
+  ],
+  "runs": {
+    "29bbbfb1": "measured requirements coverage 23% -> 61%",
+    "679ca85b": "72% -> 79%",
+    "57443b2b": "79% -> 80%"
+  },
+  "artifacts": {
+    "mikes/domain-coverage-deck": {
+      "kind": "slides",
+      "version": 3,
+      "head": 3,
+      "fixture": "domain-coverage-deck-v3.html"
+    },
+    "_unfiled/release-note": {
+      "kind": "document",
+      "version": 2,
+      "head": 2,
+      "fixture": "release-note-v2.html"
+    },
+    "mikes/coverage-status": {
+      "kind": "web page",
+      "version": 1,
+      "head": 1,
+      "fixture": "coverage-status-v1.html"
+    }
+  },
+  "messages": [
+    {
+      "id": "info-open-1",
+      "intent": "information",
+      "open": "mikes/domain-coverage-deck",
+      "text": "What does slide 4 say?",
+      "expect": {
+        "proposal": null,
+        "reply": "answer",
+        "quotes": [
+          "slide 4"
+        ],
+        "fromVersion": 3
+      }
+    },
+    {
+      "id": "info-open-2",
+      "intent": "information",
+      "open": "_unfiled/release-note",
+      "text": "Summarise this release note in one sentence.",
+      "expect": {
+        "proposal": null,
+        "reply": "answer",
+        "fromVersion": 2
+      }
+    },
+    {
+      "id": "info-open-3",
+      "intent": "information",
+      "open": "mikes/domain-coverage-deck",
+      "text": "Which runs does this deck cite, and are their figures right?",
+      "expect": {
+        "proposal": null,
+        "reply": "answer",
+        "runs": [
+          "29bbbfb1",
+          "679ca85b",
+          "57443b2b"
+        ]
+      }
+    },
+    {
+      "id": "info-none-1",
+      "intent": "information",
+      "open": null,
+      "text": "What did runs 29bbbfb1, 679ca85b and 57443b2b each measure?",
+      "expect": {
+        "proposal": null,
+        "reply": "answer",
+        "runs": [
+          "29bbbfb1",
+          "679ca85b",
+          "57443b2b"
+        ]
+      }
+    },
+    {
+      "id": "info-none-2",
+      "intent": "information",
+      "open": null,
+      "text": "Why did run 57443b2b stop?",
+      "expect": {
+        "proposal": null,
+        "reply": "answer",
+        "runs": [
+          "57443b2b"
+        ]
+      }
+    },
+    {
+      "id": "info-none-3",
+      "intent": "information",
+      "open": null,
+      "text": "How long did run 679ca85b take, and who checked it?",
+      "expect": {
+        "proposal": null,
+        "reply": "answer",
+        "runs": [
+          "679ca85b"
+        ]
+      }
+    },
+    {
+      "id": "make-open-1",
+      "intent": "make",
+      "open": "_unfiled/release-note",
+      "text": "Make this a 5-slide deck for new engineers.",
+      "expect": {
+        "proposal": {
+          "kind": "entry",
+          "entry": "presentation",
+          "sources": [
+            "doc:_unfiled/release-note"
+          ]
+        }
+      }
+    },
+    {
+      "id": "make-open-2",
+      "intent": "make",
+      "open": "mikes/domain-coverage-deck",
+      "text": "Turn this deck into a one-page web page I can share.",
+      "expect": {
+        "proposal": {
+          "kind": "entry",
+          "entry": "document-interactive",
+          "sources": [
+            "doc:mikes/domain-coverage-deck"
+          ]
+        }
+      }
+    },
+    {
+      "id": "make-open-3",
+      "intent": "make",
+      "open": "mikes/coverage-status",
+      "text": "Write a release note from this status page.",
+      "expect": {
+        "proposal": {
+          "kind": "entry",
+          "entry": "document-static",
+          "sources": [
+            "doc:mikes/coverage-status"
+          ]
+        }
+      }
+    },
+    {
+      "id": "make-none-1",
+      "intent": "make",
+      "open": null,
+      "text": "Write a release note for the wicked-crew requirements work, 61% to 80%, from runs 29bbbfb1, 679ca85b and 57443b2b.",
+      "expect": {
+        "proposal": {
+          "kind": "entry",
+          "entry": "document-static",
+          "sources": [
+            "run:29bbbfb1",
+            "run:679ca85b",
+            "run:57443b2b"
+          ]
+        }
+      }
+    },
+    {
+      "id": "make-none-2",
+      "intent": "make",
+      "open": null,
+      "text": "Make a 5-slide deck explaining domain coverage to new engineers.",
+      "expect": {
+        "proposal": {
+          "kind": "entry",
+          "entry": "presentation"
+        }
+      }
+    },
+    {
+      "id": "make-none-3",
+      "intent": "make",
+      "open": null,
+      "text": "Turn your last answer into a status page.",
+      "expect": {
+        "proposal": {
+          "kind": "entry",
+          "entry": "document-interactive",
+          "sources": [
+            "message:<previous turn>"
+          ]
+        }
+      }
+    },
+    {
+      "id": "refine-open-1",
+      "intent": "refine",
+      "open": "mikes/domain-coverage-deck",
+      "text": "Make this a timeline table.",
+      "expect": {
+        "proposal": {
+          "kind": "refine",
+          "refine": "mikes/domain-coverage-deck",
+          "touches": [
+            "section-3"
+          ]
+        }
+      },
+      "anchors": [
+        "slide-3-heading-1"
+      ]
+    },
+    {
+      "id": "refine-open-2",
+      "intent": "refine",
+      "open": "_unfiled/release-note",
+      "text": "Make the summary two sentences and add what's next.",
+      "expect": {
+        "proposal": {
+          "kind": "refine",
+          "refine": "_unfiled/release-note"
+        }
+      }
+    },
+    {
+      "id": "refine-open-3",
+      "intent": "refine",
+      "open": "mikes/domain-coverage-deck",
+      "text": "Build on my edit: tighten the speaker notes.",
+      "expect": {
+        "proposal": {
+          "kind": "refine",
+          "refine": "mikes/domain-coverage-deck",
+          "keeps": "hand edits"
+        }
+      }
+    },
+    {
+      "id": "refine-none-1",
+      "intent": "refine",
+      "open": null,
+      "text": "Shorten the release note you just made to half a page.",
+      "expect": {
+        "proposal": {
+          "kind": "refine",
+          "refine": "_unfiled/release-note"
+        }
+      },
+      "madeInChat": [
+        "_unfiled/release-note"
+      ]
+    },
+    {
+      "id": "refine-none-2",
+      "intent": "refine",
+      "open": null,
+      "text": "Add a table of the open placeholders by domain to the status page.",
+      "expect": {
+        "proposal": {
+          "kind": "refine",
+          "refine": "mikes/coverage-status"
+        }
+      },
+      "madeInChat": [
+        "mikes/coverage-status"
+      ]
+    },
+    {
+      "id": "refine-none-3",
+      "intent": "refine",
+      "open": null,
+      "text": "In the deck, swap slides 2 and 3.",
+      "expect": {
+        "proposal": {
+          "kind": "refine",
+          "refine": "mikes/domain-coverage-deck"
+        }
+      },
+      "madeInChat": [
+        "mikes/domain-coverage-deck"
+      ]
+    },
+    {
+      "id": "theme-open-1",
+      "intent": "theme",
+      "open": "mikes/domain-coverage-deck",
+      "text": "Give studio a calmer dark theme for night work.",
+      "expect": {
+        "proposal": {
+          "kind": "theme",
+          "changes": [
+            "theme",
+            "accent_h",
+            "accent_s",
+            "accent_l"
+          ]
+        }
+      }
+    },
+    {
+      "id": "theme-open-2",
+      "intent": "theme",
+      "open": "_unfiled/release-note",
+      "text": "Make the accent a bit warmer.",
+      "expect": {
+        "proposal": {
+          "kind": "theme",
+          "changes": [
+            "accent_h"
+          ]
+        }
+      }
+    },
+    {
+      "id": "theme-open-3",
+      "intent": "theme",
+      "open": "mikes/domain-coverage-deck",
+      "text": "Keep my accent, turn Ambient on but still.",
+      "expect": {
+        "proposal": {
+          "kind": "theme",
+          "changes": [
+            "ambient",
+            "ambient_still"
+          ]
+        }
+      }
+    },
+    {
+      "id": "theme-none-1",
+      "intent": "theme",
+      "open": null,
+      "text": "A calmer dark theme for night work, please.",
+      "expect": {
+        "proposal": {
+          "kind": "theme",
+          "changes": [
+            "theme",
+            "accent_h",
+            "accent_s",
+            "accent_l"
+          ]
+        }
+      }
+    },
+    {
+      "id": "theme-none-2",
+      "intent": "theme",
+      "open": null,
+      "text": "Switch studio to the light theme.",
+      "expect": {
+        "proposal": {
+          "kind": "theme",
+          "changes": [
+            "theme"
+          ]
+        }
+      }
+    },
+    {
+      "id": "theme-none-3",
+      "intent": "theme",
+      "open": null,
+      "text": "Turn Ambient off.",
+      "expect": {
+        "proposal": {
+          "kind": "theme",
+          "changes": [
+            "ambient"
+          ]
+        }
+      }
+    },
+    {
+      "id": "demo-open-1",
+      "intent": "demo",
+      "open": "mikes/domain-coverage-deck",
+      "text": "Make a demo video of the requirements view at http://localhost:5173/requirements for engineers.",
+      "expect": {
+        "proposal": {
+          "kind": "entry",
+          "entry": "demo-video",
+          "url": "http://localhost:5173/requirements"
+        }
+      }
+    },
+    {
+      "id": "demo-open-2",
+      "intent": "demo",
+      "open": "_unfiled/release-note",
+      "text": "Record a short demo of what this release note describes.",
+      "expect": {
+        "proposal": null,
+        "reply": "asks for the app address first"
+      }
+    },
+    {
+      "id": "demo-open-3",
+      "intent": "demo",
+      "open": "mikes/domain-coverage-deck",
+      "text": "Make a demo video showing the deck's timeline in the app at http://127.0.0.1:7721/projects/mikes.",
+      "expect": {
+        "proposal": {
+          "kind": "entry",
+          "entry": "demo-video",
+          "url": "http://127.0.0.1:7721/projects/mikes"
+        }
+      }
+    },
+    {
+      "id": "demo-none-1",
+      "intent": "demo",
+      "open": null,
+      "text": "Make a demo video of the requirements view.",
+      "expect": {
+        "proposal": null,
+        "reply": "asks for the app address first"
+      }
+    },
+    {
+      "id": "demo-none-2",
+      "intent": "demo",
+      "open": null,
+      "text": "Record a 2-minute demo of http://localhost:3000 opening the coverage page, for new engineers.",
+      "expect": {
+        "proposal": {
+          "kind": "entry",
+          "entry": "demo-video",
+          "url": "http://localhost:3000"
+        }
+      }
+    },
+    {
+      "id": "demo-none-3",
+      "intent": "demo",
+      "open": null,
+      "text": "Make a demo of https://example.com/app for the sales team.",
+      "expect": {
+        "proposal": null,
+        "reply": "says the recorder reaches only studio's own origin or a localhost app"
+      }
+    },
+    {
+      "id": "amb-open-1",
+      "intent": "ambiguous",
+      "open": "mikes/domain-coverage-deck",
+      "text": "Make this better.",
+      "expect": {
+        "proposal": null,
+        "reply": "one choose ask",
+        "choices": [
+          "Revise it",
+          "Make something new",
+          "Just tell me"
+        ]
+      }
+    },
+    {
+      "id": "amb-open-2",
+      "intent": "ambiguous",
+      "open": "_unfiled/release-note",
+      "text": "Can you do something with this?",
+      "expect": {
+        "proposal": null,
+        "reply": "one choose ask",
+        "choices": [
+          "Revise it",
+          "Make something new",
+          "Just tell me"
+        ]
+      }
+    },
+    {
+      "id": "amb-open-3",
+      "intent": "ambiguous",
+      "open": "mikes/domain-coverage-deck",
+      "text": "This needs work.",
+      "expect": {
+        "proposal": null,
+        "reply": "one choose ask",
+        "choices": [
+          "Revise it",
+          "Make something new",
+          "Just tell me"
+        ]
+      }
+    },
+    {
+      "id": "amb-none-1",
+      "intent": "ambiguous",
+      "open": null,
+      "text": "Make it better.",
+      "expect": {
+        "proposal": null,
+        "reply": "one clarifying question"
+      }
+    },
+    {
+      "id": "amb-none-2",
+      "intent": "ambiguous",
+      "open": null,
+      "text": "Do the thing we talked about.",
+      "expect": {
+        "proposal": null,
+        "reply": "one clarifying question"
+      }
+    },
+    {
+      "id": "amb-none-3",
+      "intent": "ambiguous",
+      "open": null,
+      "text": "Fix the document.",
+      "expect": {
+        "proposal": null,
+        "reply": "one clarifying question"
+      }
+    },
+    {
+      "id": "cant-open-1",
+      "intent": "cant",
+      "open": "mikes/domain-coverage-deck",
+      "text": "Export this deck as an Excel spreadsheet.",
+      "expect": {
+        "proposal": null,
+        "reply": "one sentence it can't, and the nearest thing it can make",
+        "nearest": "a document with a table"
+      }
+    },
+    {
+      "id": "cant-open-2",
+      "intent": "cant",
+      "open": "_unfiled/release-note",
+      "text": "Make a PNG poster of this release note.",
+      "expect": {
+        "proposal": null,
+        "reply": "one sentence it can't, and the nearest thing it can make",
+        "nearest": "a web page"
+      }
+    },
+    {
+      "id": "cant-open-3",
+      "intent": "cant",
+      "open": "mikes/domain-coverage-deck",
+      "text": "Turn this into a podcast episode.",
+      "expect": {
+        "proposal": null,
+        "reply": "one sentence it can't, and the nearest thing it can make",
+        "nearest": "a document or a deck with speaker notes"
+      }
+    },
+    {
+      "id": "cant-none-1",
+      "intent": "cant",
+      "open": null,
+      "text": "Make me a spreadsheet of coverage by domain.",
+      "expect": {
+        "proposal": null,
+        "reply": "one sentence it can't, and the nearest thing it can make",
+        "nearest": "a document with a table"
+      }
+    },
+    {
+      "id": "cant-none-2",
+      "intent": "cant",
+      "open": null,
+      "text": "Draw a logo for wicked-crew.",
+      "expect": {
+        "proposal": null,
+        "reply": "one sentence it can't, and the nearest thing it can make",
+        "nearest": "a web page"
+      }
+    },
+    {
+      "id": "cant-none-3",
+      "intent": "cant",
+      "open": null,
+      "text": "Generate an image of the architecture.",
+      "expect": {
+        "proposal": null,
+        "reply": "one sentence it can't, and the nearest thing it can make",
+        "nearest": "a document or a page with a diagram described in text"
+      }
+    },
+    {
+      "id": "code-open-1",
+      "intent": "code-change",
+      "open": "mikes/domain-coverage-deck",
+      "text": "Change the coverage counter in wicked-crew so placeholders are excluded.",
+      "expect": {
+        "proposal": null,
+        "reply": "today's code path (a plan, then Continue in Build)",
+        "wickedMake": false
+      }
+    },
+    {
+      "id": "code-open-2",
+      "intent": "code-change",
+      "open": "_unfiled/release-note",
+      "text": "Fix the bug this release note mentions in chat-scope.ts.",
+      "expect": {
+        "proposal": null,
+        "reply": "today's code path (a plan, then Continue in Build)",
+        "wickedMake": false
+      }
+    },
+    {
+      "id": "code-open-3",
+      "intent": "code-change",
+      "open": "mikes/coverage-status",
+      "text": "Add a test for the requirements reconcile in wicked-core.",
+      "expect": {
+        "proposal": null,
+        "reply": "today's code path (a plan, then Continue in Build)",
+        "wickedMake": false
+      }
+    },
+    {
+      "id": "code-none-1",
+      "intent": "code-change",
+      "open": null,
+      "text": "Refactor the chat transcript store to batch its writes.",
+      "expect": {
+        "proposal": null,
+        "reply": "today's code path (a plan, then Continue in Build)",
+        "wickedMake": false
+      }
+    },
+    {
+      "id": "code-none-2",
+      "intent": "code-change",
+      "open": null,
+      "text": "Add a --json flag to the wicked-crew status command.",
+      "expect": {
+        "proposal": null,
+        "reply": "today's code path (a plan, then Continue in Build)",
+        "wickedMake": false
+      }
+    },
+    {
+      "id": "code-none-3",
+      "intent": "code-change",
+      "open": null,
+      "text": "Rename runTimingIndex to runLaunchIndex across the repo.",
+      "expect": {
+        "proposal": null,
+        "reply": "today's code path (a plan, then Continue in Build)",
+        "wickedMake": false
+      }
+    }
+  ]
+}

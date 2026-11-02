@@ -12,6 +12,24 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **A chat sees the artifact you have open and the runs you name (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 slice
+  A1).** `POST /chats/:id/messages` takes `context`: the artifact open where the message was sent (`<mount>/<doc>`,
+  the version you are looking at, the parts you selected), the tab's appearance, and studio's page summary, which no
+  longer has to ride inside your words. Before anything is read, crew checks that the chat is yours and that the
+  artifact is in its scope (a project chat sees its project's documents and runs, and any other chat sees what is on
+  this daemon; the Unfiled documents a project chat makes join its scope with slice A3's per-document binding); what
+  fails is named to the seat with its reason, never read. The
+  version you are looking at and the latest are copied into the chat's scratch root, read only, with their outline
+  and your selected parts, so "what does slide 4 say?" is answered from slide 4. Each run you name (an id in your
+  words, a run chip, or the run page you are on) gets a brief, named by its content, written from crew's own records (status, times, steps
+  and seats, each finished step's output, acceptance, delivery, evidence), through one builder (`api/run-brief.ts`)
+  that slice A3's drafts will reuse. Everything that is not your own words is labelled and fenced as data. Each turn's
+  `context` transcript record says what its seats were given, and a follow-up turn is told what the chat named
+  before (re-checked against its scope). The copies and briefs are written only after the message's last check, so a
+  chat closed meanwhile gets none of them. `POST /chats {seedFromArtifact}` opens "Ask about this"
+  chats for a document no chat holds, with the repositories it was made about. `health.capabilities.chatArtifacts`
+  says which operations this daemon serves (`context` only, for now). A 48-message labelled corpus
+  (`tests/fixtures/chat-artifacts-corpus/`) is in place for slice A2's runs.
 - **The workflows are a catalog: `GET /api/v1/workflows/catalog` (api-types 0.168.0).** It serves the categories
   (Create, Resolve, Analyze, Test, More, and Your workflows once you have saved presets) and one entry per thing you
   can start: what you get, what it needs, the inputs it asks for, a time and cost hint, tags and synonyms for search,
