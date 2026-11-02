@@ -87,6 +87,9 @@ function endsByAsi(text: string, i: number): boolean {
   const c = text[i]!;
   if (c === '"' || c === "'" || c === '{' || c === '~' || /[0-9]/.test(c)) return true;
   if (c === '!') return text[i + 1] !== '=';
+  // `.5` is a number, and `\u0074op` an identifier written with an escape (an escaped `in` is no keyword).
+  if (c === '.') return /[0-9]/.test(text[i + 1] ?? '');
+  if (c === '\\') return true;
   if (c === '+' || c === '-') return text[i + 1] === c;
   if (!IDENTIFIER_PART.test(c)) return false;
   let j = i;

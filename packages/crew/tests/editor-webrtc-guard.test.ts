@@ -110,6 +110,9 @@ describe('guardBundle: the prelude goes first in every inline script that runs, 
     expect(withPrelude('"use strict"\n++i')).toBe(`"use strict";${P}\n++i`);
     expect(withPrelude('"a"\n!= b')).toBe(`${P}"a"\n!= b`);
     expect(withPrelude('"a"\n+ b')).toBe(`${P}"a"\n+ b`);
+    expect(withPrelude('"use strict"\n.5;x()')).toBe(`"use strict";${P}\n.5;x()`);
+    expect(withPrelude('"use strict"\n\\u0074op()')).toBe(`"use strict";${P}\n\\u0074op()`);
+    expect(withPrelude('"a"\n.length')).toBe(`${P}"a"\n.length`);
     // A string that starts an expression is not a directive.
     expect(withPrelude("'use strict';\n'x'+y")).toBe(`'use strict';${P}\n'x'+y`);
     const { body, hashes } = guard('<script>"use strict";x</script>');
