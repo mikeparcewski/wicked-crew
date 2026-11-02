@@ -767,6 +767,20 @@ export function artifactExists(docsRoot: string, doc: string): boolean {
   }
 }
 
+/**
+ * DES-CHAT-ARTIFACTS-001 §4.2-§4.3 (A2): the latest version of `<docsRoot>/<doc>`, read the way {@link artifactExists}
+ * reads it (no link followed, contained), or `null` when it is not a document. A proposal records it as a refine's
+ * base, and Go checks it has not moved.
+ */
+export function artifactHead(docsRoot: string, doc: string): number | null {
+  if (!artifactExists(docsRoot, doc)) return null;
+  try {
+    return readManifest(realDocDir(docsRoot, doc)).head;
+  } catch {
+    return null;
+  }
+}
+
 /** sha256 of a string, hex (tests and the route's binding). */
 export function sha256Hex(s: string | Buffer): string {
   return createHash('sha256').update(s).digest('hex');

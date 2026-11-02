@@ -12,6 +12,33 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **A chat proposes an artifact job as a card; only your click answers it (api-types 0.170.0, DES-CHAT-ARTIFACTS-001
+  slice A2).** A seat asked to make or change a document, a deck, a web page, a demo video or a studio theme ends its
+  reply with a fenced `wicked-make` block, cut out of the reply and hidden while it streams, exactly like the
+  `wicked-decisions` block (a block of either kind now closes only on a line of three backticks alone). Seats are told
+  only about the operations crew advertises, in the statement and in a short per-message digest after your words:
+  propose it, never write it in the reply; an ambiguous ask gets one question (Revise it / Make something new / Just
+  tell me), something studio can't make gets the nearest thing named, and a demo needs an app on this machine. Crew
+  turns the last valid block into a `proposal` transcript record and a `chatProposal`
+  frame whose every line is crew's own: the catalog entry and what you get, each source checked (a run or document
+  counts only when you named it in this chat or had it open, and it is in the chat's scope; anything else is struck
+  with the reason), the repositories (the chat's scope, or Go is blocked), two distinct helpers (the chat's lead seat,
+  then another of its seats, else the roster's next: studio's rule, moved to crew), time and cost (the catalog's band,
+  the workflow's steps, the median of completed runs here, and a dollar figure only from at least three runs whose
+  every dispatched attempt reported a price), the stops and where it is filed. A newer proposal supersedes the open
+  one, and a late reply to an earlier turn never takes the chat back.
+  `POST /chats/:id/proposals/:pid {decision: go | not_now, edits?}` is the only way one starts anything: a person and
+  the chat's owner only (a worker or system actor gets 403, even on a proposal already accepting), checked on every
+  call; then one lock per proposal, what already happened first (a decided proposal answers its result again, so a
+  lost response is safe to retry; an accepting one whose run exists is adopted), and only a fresh Go runs the state
+  checks before anything is recorded (edits, sources still there, the chat and the document not busy, a refine's
+  document still on the head it was proposed on, else the card re-resolves). Then `proposal_accepting` with the run
+  id derived from the proposal, one launcher per run id, and `proposal_decided`. An ended chat's open proposal stays
+  answerable (its records go to the kept history, fenced by the chat's instance nonce, which history entries now keep
+  with their project). Nothing launches yet: production advertises `proposals` with every
+  operation off, so seats are told about none and no card is made; each later slice turns its own on. The test
+  configuration (`WICKED_CHAT_ARTIFACTS_STUB=1`) turns them all on with a recording stub that starts nothing, and
+  `health.capabilities.chatArtifacts.stub` says so.
 - **A chat sees the artifact you have open and the runs you name (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 slice
   A1).** `POST /chats/:id/messages` takes `context`: the artifact open where the message was sent (`<mount>/<doc>`,
   the version you are looking at, the parts you selected), the tab's appearance, and studio's page summary, which no

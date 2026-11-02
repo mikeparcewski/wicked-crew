@@ -104,6 +104,8 @@ import type { SeatContainerLoginOutcome } from '../core/types.js';
 import { ChatTurnIndex } from './chat-turns.js';
 import type { ChatRepoRoot, ChatTranscriptStore } from './chat-transcripts.js';
 import {
+  CHAT_ID,
+  chatMakeDigest,
   ChatScopeIndex,
   chatScopeDeps,
   chatScopeStatement,
@@ -243,6 +245,8 @@ import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
 import { registerInteractiveDocChecks } from '../interactive/doc-checks-routes.js';
 import { crewStateHome, stateHomeOfDb } from '../projects/state-home.js';
+import { ChatProposals, LaunchOnceRegistry, RecordingStubDispatcher, runCostFromEvents } from './chat-proposals.js';
+import { CATALOG_SEEDS } from '../workflow-catalog/catalog-data.js';
 import { registerInteractiveDocList } from '../interactive/doc-list-routes.js';
 import { REVIEWS_DIRNAME } from '../interactive/review-ledger.js';
 import type { DocLedgerSweep } from '../interactive/doc-ledger-sweep.js';
@@ -1131,9 +1135,14 @@ export interface RegisteredRoutes {
   decorateRun: (view: SessionView) => SessionView;
   /** DES-DEFAULT-EVALS-001 §7: prepare a `run-evals` launch (run the evals in-process, write the report copy). */
   runEvalsPrepare: (input: LaunchRunInput) => Promise<void>;
+  /** DES-CHAT-ARTIFACTS-001 §4 (A2): proposals from a seat's `wicked-make` block (the reply fold feeds `onReply`). */
+  chatProposals: ChatProposals;
 }
 
 export interface RuntimeDeps {
+  /** DES-CHAT-ARTIFACTS-001 §13 A2: the chat-artifacts TEST configuration — every operation resolves and Go records a
+   *  stub dispatch, starting nothing (`WICKED_CHAT_ARTIFACTS_STUB=1`, read by `createServer`). Absent = production. */
+  chatArtifactsStub?: boolean;
   /** (program DES-LEARN §3.3) The voice block of the personality a chat in this project uses (the project's
    *  override, else the person's), or null when none is saved; absent = no personalities on this daemon. */
   personaVoice?: (projectId: string | null) => string | null;
@@ -1555,6 +1564,20 @@ export function registerRoutes(
   const chatTranscripts = runtime.chatTranscripts;
   const chatAttachments = runtime.chatAttachments ?? new ChatAttachmentStore();
   const chatHistory = runtime.chatHistory ?? (chatTranscripts !== undefined ? new ChatHistoryStore(chatTranscripts, chatAttachments) : null);
+  // DES-CHAT-ARTIFACTS-001 §14 (A2): what a chat can do with artifacts. Production: `proposals` on and every operation
+  // off — each later slice turns its own on and registers its launcher. The TEST configuration (§13 A2) turns every
+  // operation's resolution on and registers a recording stub that starts nothing.
+  const chatArtifactsStub = runtime.chatArtifactsStub === true;
+  const chatArtifactFlags: import('../core/types.js').ChatArtifactsCapabilities = chatArtifactsStub
+    ? { context: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true }
+    : { context: true, proposals: true, create: false, refine: false, theme: false, demo: false };
+  const proposalLaunchers = new LaunchOnceRegistry();
+  if (chatArtifactsStub) {
+    // Under the registered `chats` entry (a new top-level state-home entry would make core refuse every launch), and
+    // not a `.jsonl` there (the boot sweep clears orphaned transcripts by that suffix).
+    const stub = new RecordingStubDispatcher(join(crewStateHome(), 'chats', 'proposal-stub', 'dispatches.ndjson'));
+    for (const kind of ['create', 'refine', 'theme', 'demo'] as const) proposalLaunchers.register(kind, stub);
+  }
   const deliveryIndex = runtime.deliveryIndex ?? new DeliveryIndex();
   // Wave 6: the doc↔run binding and the registered test sets — `createServer` injects the real
   // ones; a directly-driven route set gets an empty index (every run `document_id: null`, no sets).
@@ -2012,8 +2035,9 @@ export function registerRoutes(
       // (api-types 0.168.0, wf-catalog) The categorised workflow catalog with the operator's usage.
       workflowCatalog: app.hasRoute({ method: 'GET', url: `${V}/workflows/catalog` }),
       // (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §14) Per operation: A1 serves `context` (the chat sees the open
-      // artifact and the runs the person names; `seedFromArtifact`). The rest are later slices.
-      chatArtifacts: { context: true, proposals: false, create: false, refine: false, theme: false, demo: false },
+      // artifact and the runs the person names; `seedFromArtifact`); A2 (0.170.0) `proposals`. The operations are later
+      // slices (all on, with `stub`, in the test configuration).
+      chatArtifacts: { ...chatArtifactFlags },
     };
     // wicked-core#411 / crew#497: the state-home blocker rides the health probe as a WARNING. The
     // daemon still SERVES (status stays ok — studio must load and show the blocker) but refuses to
@@ -3979,7 +4003,7 @@ export function registerRoutes(
         if (!resolved.ok) return reply.code(resolved.status).send({ error: resolved.error });
         workflow = resolved.workflow;
       }
-      const statementOpts = { analysis: workflow !== undefined };
+      const statementOpts = { analysis: workflow !== undefined, make: chatProposals.digest() };
       // A chat id this daemon already holds a scope for is LIVE: re-preparing its scratch root and
       // re-opening it would overwrite the statement its seats are reading and (on a changed scope)
       // evict them mid-conversation (Copilot, #518). Close it first, or let the daemon mint the id.
@@ -4195,6 +4219,8 @@ export function registerRoutes(
             startedOn: b.startedOn,
             cli: b.primary ?? clis[0] ?? null,
             actorId: security.authMode === 'required' ? actorOf(req).id : null,
+            // A2: an ended chat's proposal frames still name its project.
+            projectId: scope.projectId ?? null,
           });
         } catch (err) {
           req.log.warn({ chatId }, `chat history entry not written: ${message(err)}`);
@@ -4278,6 +4304,59 @@ export function registerRoutes(
     acceptanceLine: async (view) => (await acceptanceViewOf(view, {})).summary.line,
     docStyle: (root, doc) => groundingReader.get(root, doc)?.style,
   };
+  // DES-CHAT-ARTIFACTS-001 §4 (A2): proposals. Resolved from crew's own records (the same reads the turn block uses);
+  // records go to the live transcript, or the kept history copy once the chat has ended.
+  // A dollar figure only from a run whose EVERY dispatched attempt of every agent step reported a price (DES §4.2).
+  const proposalCosts = async (view: SessionView): Promise<number | null> =>
+    runCostFromEvents(view, (await adapter.runEvents(view.session.id)) as Array<Record<string, unknown>>);
+  const chatProposals = new ChatProposals({
+    flags: () => chatArtifactFlags,
+    catalog: CATALOG_SEEDS,
+    records: (chatId) => chatHistory?.messages(chatId) ?? chatTranscripts?.read(chatId) ?? [],
+    append: (chatId, record) => {
+      if (chatHistory?.stateOf(chatId)?.status === 'closed') return chatHistory.appendKept(chatId, record);
+      return chatTranscripts?.appendProposalRecord(chatId, record) ?? false;
+    },
+    instanceOf: (chatId) => chatHistory?.stateOf(chatId)?.instance ?? null,
+    projectOf: (chatId) => chatScopes.get(chatId)?.projectId ?? chatHistory?.stateOf(chatId)?.projectId ?? null,
+    chat: (chatId) => {
+      const scope = chatScopes.get(chatId);
+      if (scope === undefined) return null;
+      const path = askPaths.get(chatId);
+      return {
+        projectId: scope.projectId ?? null,
+        repos: scope.repos.map((r) => ({ id: r.id, name: r.name })),
+        lead: path?.pa ?? path?.primary ?? null,
+        seats: path?.eligible ?? [],
+        analysis: path?.workflow !== undefined,
+      };
+    },
+    rosterEligible: () =>
+      rosterWithStanding()
+        .filter((s) => s.enabled_for_council && s.seat_eligible_for_work !== false && s.auth !== 'signed_out' && s.optIn !== true)
+        .map((s) => ({ key: String(s.key), name: s.display_name || String(s.key) })),
+    runs: async () => (await adapter.sessionsDetail()).map((v) => decorateRun(v)),
+    chatOfRun: (runId) => runTimingIndex.chatIdFor(runId),
+    isAskPath: (runId) => runTimingIndex.isAskPath(runId),
+    docsRoot: (projectId) => projectDocsRoot(adapter, projectSettings, projectId),
+    projectName: async (projectId) => (await adapter.projectGet(projectId).catch(() => null))?.name ?? null,
+    attachments: (chatId) => chatAttachments.list(chatId).map((a) => ({ id: a.id, name: a.name })),
+    workflowSteps: async (name, projectId) => {
+      // The preset a launch in this project resolves first (a project row wins over a global one), then the def.
+      const presets = await adapter.listPresets(projectId ?? undefined).catch(() => [] as Preset[]);
+      const preset = presets.find((p) => p.name === name && p.scope !== 'global') ?? presets.find((p) => p.name === name);
+      if (preset !== undefined && preset.steps.length > 0) return preset.steps.length;
+      const phases = adapter.getWorkflow(name)?.phases;
+      return phases !== undefined && phases.length > 0 ? phases.length : null;
+    },
+    runCostUsd: proposalCosts,
+    registry: proposalLaunchers,
+    broadcast: (frame) => runtime.broadcast?.(frame),
+    audit: (event, actor, detail) => {
+      audit.record(event, actor, { detail });
+    },
+    log: (m) => app.log.warn(m),
+  });
   // F-RECON-017: a message sent while a targeted seat is still answering the previous one is
   // REFUSED, not queued. The engine queues silently (the worker gets the text the instant the
   // previous turn's final block lands) and its reply frames carry no message correlation, so the
@@ -4376,7 +4455,7 @@ export function registerRoutes(
       try {
         after();
         if (preface !== null) chatTranscripts?.appendSystem(id, turnId, preface);
-        chatTranscripts?.appendUser(id, turnId, text, voice, attached.map(attachmentWire));
+        chatTranscripts?.appendUser(id, turnId, text, voice, attached.map(attachmentWire), contextAllowed);
         if (turnBinding !== null) chatTranscripts?.appendContext(id, turnId, turnBinding);
         // The recorder's audience is the turn's AS THE TURN INDEX HOLDS IT NOW: the eligible roster
         // for a random pick, or the PA the relay narrowed it to during the engine awaits above
@@ -4511,7 +4590,7 @@ export function registerRoutes(
       }
       if (storedScope !== undefined && scope !== undefined && engine !== undefined &&
         (JSON.stringify(scope) !== JSON.stringify(storedScope) || JSON.stringify(engine) !== JSON.stringify(chatScopes.engineOf(id)))) {
-        prepareChatScratch(id, scope, rules, { analysis: path.workflow !== undefined, ...voiceFor(scope.projectId) });
+        prepareChatScratch(id, scope, rules, { analysis: path.workflow !== undefined, make: chatProposals.digest(), ...voiceFor(scope.projectId) });
         if (chatScopes.refresh(id, storedScope, scope, engine)) {
           chatTranscripts?.registerRoots(id, scope.repos.map((r) => ({ absRoot: resolve(r.rootPath), name: r.name })));
         }
@@ -4542,6 +4621,9 @@ export function registerRoutes(
         }
         seatText = `${seatText}\n\n${contextBlock}`;
       }
+      // A2: the per-message digest of what the chat can make now (advertised operations only; never in an analysis).
+      const makeDigest = path.workflow === undefined ? chatMakeDigest(chatProposals.digest()) : '';
+      if (makeDigest !== '') seatText = `${seatText}\n\n${makeDigest}`;
       voice = path.pa !== null ? [path.pa] : [];
       // A random pick reserves every eligible seat until the relay names the PA.
       audience = voice.length > 0 ? voice : path.eligible;
@@ -4551,7 +4633,8 @@ export function registerRoutes(
       // chat (crew#1157) never delivers: it is bound to its repository read-only, with no deliver.
       const repoRef = scope?.kind === 'repos' && scope.repos.length === 1 ? scope.repos[0]!.id : undefined;
       const delivers = repoRef !== undefined && path.workflow === undefined;
-      const statementOpts = { analysis: path.workflow !== undefined, ...voiceFor(scope?.projectId) };
+      // A2: the per-message digest of what the chat can make now (advertised operations only).
+      const statementOpts = { analysis: path.workflow !== undefined, make: chatProposals.digest(), ...voiceFor(scope?.projectId) };
       const projectId = scope?.projectId;
       if (path.runId === undefined) {
         const stepId = 'answer-1';
@@ -4672,6 +4755,58 @@ export function registerRoutes(
       return reply.code(400).send({ error: message(err) });
     }
   });
+  // DES-CHAT-ARTIFACTS-001 §4.3 (A2): the ONLY way a proposal starts work. Capability, person and owner are checked
+  // first on every call (a worker or system actor is refused even on an `accepting` proposal); the service then takes
+  // the proposal's lock and looks for what already happened before any state check.
+  const ProposalPatchValue = z.union([z.string().max(200), z.number(), z.boolean()]);
+  const ProposalDecisionSchema = z.object({
+    decision: z.enum(['go', 'not_now']),
+    edits: z.object({
+      title: z.string().max(400).optional(),
+      brief: z.string().max(16000).optional(),
+      sources: z.array(z.string().min(1).max(300)).max(32).optional(),
+      repos: z.array(z.string().min(1).max(200)).max(16).optional(),
+      project: z.string().max(200).nullable().optional(),
+      ask: z.string().max(8000).optional(),
+      allow: z.array(z.string().min(1).max(128)).max(64).optional(),
+      name: z.string().max(200).optional(),
+      patch: z.record(z.string().max(40), ProposalPatchValue).optional(),
+      url: z.string().max(2048).optional(),
+      audience: z.string().max(800).optional(),
+      show: z.string().max(4000).optional(),
+      helpers: z.array(z.string().min(1).max(64)).max(8).optional(),
+    }).strict().optional(),
+  }).strict();
+  app.post(
+    `${V}/chats/:id/proposals/:pid`,
+    { config: { manifest: { requestType: 'ChatProposalDecisionBody', responseType: 'ChatProposalDecisionResponse', statusCodes: [200, 400, 403, 404, 409, 502] } } },
+    async (req, reply) => {
+      const { id, pid } = req.params as { id: string; pid: string };
+      if (!chatArtifactFlags.proposals) return reply.code(404).send({ error: 'this daemon does not answer chat proposals' });
+      const actor = actorOf(req);
+      if (!isHumanOperator(actor)) {
+        audit.record('chat.proposal.refused', actor, { detail: { chatId: id, pid, reason: 'not_a_person' } });
+        return reply.code(403).send({
+          code: 'proposal_refused',
+          error: `only a person answers a proposal (you are ${actor.kind}/${actor.trust}). Nothing was started.`,
+        });
+      }
+      const viewer = security.authMode === 'required' ? actor.id : null;
+      if (!CHAT_ID.test(id) || chatHistory === null || !chatHistory.visibleTo(id, viewer)) {
+        return reply.code(404).send({ error: `no chat ${id} on this daemon` });
+      }
+      // The instance these checks passed against: nothing is recorded on a chat that reuses the id meanwhile.
+      const instance = chatHistory.stateOf(id)?.instance ?? null;
+      const parsed = ProposalDecisionSchema.safeParse(req.body);
+      if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
+      // Optional fields arrive as absent, never as `undefined` (the contract's exact optional shape).
+      const edits = parsed.data.edits === undefined
+        ? undefined
+        : (Object.fromEntries(Object.entries(parsed.data.edits).filter(([, v]) => v !== undefined)) as import('../core/types.js').ProposalEdits);
+      const out = await chatProposals.decide(id, pid, { decision: parsed.data.decision, ...(edits !== undefined ? { edits } : {}) }, actor, instance);
+      return reply.code(out.code).send(out.body);
+    },
+  );
   const ChatSeatsSchema = z.object({
     clis: z.array(z.string().min(1)).min(1).max(8),
   }).strict();
@@ -9461,5 +9596,5 @@ export function registerRoutes(
   const runEvalsPrepare = async (input: LaunchRunInput): Promise<void> => {
     await prepareRunEvalsLaunch(input, () => runAndRecord(defaultEvalDeps, { project: null, baseline: false, id: randomUUID(), now: new Date() }), runtime.evalRunsDir);
   };
-  return { decideGate, decisions, chatRecorder, considerations, search, decorateRun, runEvalsPrepare };
+  return { decideGate, decisions, chatRecorder, considerations, search, decorateRun, runEvalsPrepare, chatProposals };
 }

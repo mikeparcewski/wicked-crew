@@ -710,6 +710,137 @@ export const CHAT_DECISIONS_DIRECTIVE = `${CHAT_DECISIONS_LINES.join('\n')}\n\n`
  * run in, so the seat answers with the plan and points at Continue in Build (the launch-form
  * prefill) instead. Either way it never attempts the change itself.
  */
+/**
+ * DES-CHAT-ARTIFACTS-001 §4.1 (slice A2): what this daemon can make from a chat RIGHT NOW, for the seat. Only the
+ * operations crew advertises (`capabilities.chatArtifacts`) are on, and only the catalog entries a create or demo
+ * may name are listed. Built per message (`routes.ts`), so the statement every answer step carries follows the flags.
+ */
+export interface MakeDigest {
+  create: boolean;
+  refine: boolean;
+  theme: boolean;
+  demo: boolean;
+  /** Catalog entries (`launch.kind` document or demo) whose operation is on: `id`, title, what you get. */
+  entries: ReadonlyArray<{ id: string; title: string; kind: 'document' | 'demo'; outcome: string }>;
+}
+
+/** Whether a digest turns anything on. */
+export function makesAnything(make: MakeDigest | undefined): make is MakeDigest {
+  return make !== undefined && (make.create || make.refine || make.theme || make.demo);
+}
+
+/**
+ * DES-CHAT-ARTIFACTS-001 §4.1 (A2): the artifact rules — the `wicked-make` block for the advertised operations, and
+ * the turns that get no block (a question, an ambiguous ask, something studio can't make, a code change). The block
+ * never reaches the person: crew cuts it from the reply and draws a card from its own records; only the person's
+ * click on that card starts anything.
+ */
+export function chatMakeLines(make: MakeDigest): string[] {
+  const docs = make.entries.filter((e) => e.kind === 'document');
+  const lines: string[] = [
+    '## Making documents, slides, pages and demos',
+    '',
+    'Studio can make these from this chat. You do not make them: you PROPOSE, and crew turns your',
+    'proposal into a card the person answers with one click. Nothing is made until they click, so',
+    'never say you made, started or will start it, and never say this chat is read-only for it.',
+    'Never write the document, deck or page itself in your reply, not even a draft or an outline of',
+    'it: an ask to make one is answered with a sentence or two on what it would contain, and the block.',
+    '',
+  ];
+  if (make.create && docs.length > 0) {
+    lines.push(
+      'When the latest message asks to MAKE a document, deck or web page (also "turn this answer into',
+      'a page"), say in a sentence or two what you would make, then end the reply with ONE block:',
+      '',
+      '```wicked-make',
+      '{"entry":"<id>","title":"<short title>","brief":"<what it covers, for whom>","sources":["chat"],"repos":[],"reason":"<one line>"}',
+      '```',
+      '',
+      'The `entry` ids you may use:',
+      ...docs.map((e) => `- \`${e.id}\`: ${e.title}. ${e.outcome}`),
+      '',
+      '`sources`: what it is made from, with these tokens only: `chat` (this conversation),',
+      '`message:<turn id>` (one earlier answer), `run:<id>`, `doc:<mount>/<doc>`, `attachment:<id>`,',
+      '`page`. Use the ids the turn\'s context block lists; crew strikes any it cannot authorize.',
+      '`repos`: repository names from this chat\'s scope, or `[]`.',
+      '',
+    );
+  }
+  if (make.refine) {
+    lines.push(
+      'When it asks to CHANGE a document that is open or was named in this chat, end the reply with:',
+      '',
+      '```wicked-make',
+      '{"refine":"<mount>/<doc>","ask":"<the change, in their words>","touches":["<data-wid>"],"sources":[],"reason":"<one line>"}',
+      '```',
+      '',
+      '`touches` is optional: the parts the change is about. The person keeps their own edits unless they say otherwise.',
+      'A change to a document, deck or page that is neither open nor named in this chat is not code work:',
+      'ask which one they mean (and propose nothing); never point it at Continue in Build.',
+      '',
+    );
+  }
+  if (make.theme) {
+    lines.push(
+      'When it asks for a studio THEME (colours, light or dark, Ambient), end the reply with:',
+      '',
+      '```wicked-make',
+      '{"theme":{"name":"<short name>","patch":{"accent_h":210}},"reason":"<one line>"}',
+      '```',
+      '',
+      '`patch` carries only the keys that change: `theme` ("wicked-dark" or "wicked-light"), `accent_h`',
+      '(0-360), `accent_s` and `accent_l` (0-100), `ambient` and `ambient_still` (true or false).',
+      '',
+    );
+  }
+  if (make.demo && make.entries.some((e) => e.kind === 'demo')) {
+    lines.push(
+      'A DEMO VIDEO needs the address of the running app in the person\'s own words. With one, end with:',
+      '',
+      '```wicked-make',
+      '{"entry":"demo-video","url":"<their address>","audience":"<who it is for>","show":"<what to show>","reason":"<one line>"}',
+      '```',
+      '',
+      'With no address, ask for it and propose nothing. The recorder reaches only an app on this machine',
+      '(localhost, 127.0.0.1 or [::1]): for any other address, say so in one sentence and propose nothing.',
+      '',
+    );
+  }
+  lines.push(
+    'One block at most per reply, with exactly one of `entry`, `refine` and `theme`. No block when:',
+    '- the message asks ABOUT an artifact or a run (what it says, whether it is right): answer it;',
+    '- it is ambiguous ("make this better", "do something with this"): ask ONE question whose three',
+    '  choices are Revise it, Make something new, and Just tell me;',
+    '- studio cannot make it (a spreadsheet, an image, audio, a video of something with no app):',
+    '  say so in one sentence and name the nearest thing it can make, with no block for that either',
+    '  (they ask for it if they want it);',
+    '- it asks to change CODE: that is a request for work (below).',
+  );
+  return lines;
+}
+
+/**
+ * DES-CHAT-ARTIFACTS-001 §4.1 (A2): the per-message digest that rides after the person's words (beside the turn's
+ * context block): what this chat can make right now, and the one rule that matters most at the moment of answering.
+ * `''` when nothing is advertised.
+ */
+export function chatMakeDigest(make: MakeDigest | undefined): string {
+  if (!makesAnything(make)) return '';
+  const can: string[] = [];
+  if (make.create) can.push(...make.entries.filter((e) => e.kind === 'document').map((e) => `${e.title.toLowerCase()} (\`${e.id}\`)`));
+  if (make.demo && make.entries.some((e) => e.kind === 'demo')) can.push('a demo video of an app on this machine (`demo-video`)');
+  if (make.refine) can.push('a change to a document that is open or named in this chat');
+  if (make.theme) can.push('a studio theme');
+  return [
+    '### What this chat can make now (crew)',
+    '',
+    `Studio can make: ${can.join('; ')}. If the message above asks for one of these, PROPOSE it: a sentence or two`,
+    'on what it would contain, then the `wicked-make` block from "Making documents, slides, pages and demos". Do not',
+    'write it in your reply. Anything else (a question, an ambiguous ask, something studio cannot make, a code change)',
+    'gets no block.',
+  ].join('\n');
+}
+
 export function chatWorkRequestLines(scope: Pick<ChatScope, 'kind' | 'repos'>, opts: ChatStatementOptions = {}): string[] {
   // crew#1157: an ANALYSIS chat (`POST /chats {workflow}`) answers questions and never proposes
   // work: no `PLAN+` line, so nothing in it can open a creator step or a Continue in Build.
@@ -723,11 +854,16 @@ export function chatWorkRequestLines(scope: Pick<ChatScope, 'kind' | 'repos'>, o
       'that a job (not this analysis) makes changes.',
     ];
   }
+  // A2: with documents advertised, a document ask is a proposal (above), not "work"; code still is.
+  const docsByProposal = opts.make !== undefined && (opts.make.create || opts.make.refine);
   const head = [
+    ...(makesAnything(opts.make) ? [...chatMakeLines(opts.make), ''] : []),
     '## Requests for work',
     '',
     'This chat cannot change anything: writes outside this directory are refused. When the message',
-    'asks for work (build, fix, add, change, write code or docs), do NOT attempt it. Answer with a',
+    docsByProposal
+      ? 'asks for work on code (build, fix, add, change code), do NOT attempt it. Answer with a'
+      : 'asks for work (build, fix, add, change, write code or docs), do NOT attempt it. Answer with a',
     'short plan: what changes, in which files, and how it will be checked.',
   ];
   if (scope.kind === 'repos' && scope.repos.length === 1) {
@@ -755,6 +891,8 @@ export interface ChatStatementOptions {
   /** (program DES-LEARN §3.3) The personality's voice block (`persona/voice.ts`): how to talk, never what
    *  may be done. Absent = no personality saved for this chat's scope. */
   voice?: string;
+  /** (DES-CHAT-ARTIFACTS-001 A2) What the chat can make now; absent or all off = nothing (today's wording). */
+  make?: MakeDigest;
 }
 
 export function chatScopeStatement(
