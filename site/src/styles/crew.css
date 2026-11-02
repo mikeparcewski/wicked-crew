@@ -666,6 +666,17 @@ code {
   .job-bar { flex-wrap: wrap; }
   .job-dots { display: none; }
   .job-t { flex: 1 1 100%; }
+}
+/* up to 1099px, intent in and work out sit on a row above the track, so each phase keeps room for
+   its gate and "Gated work out." keeps its legend (at 1024 both were cut); the log gives back the row */
+@media (max-width: 1099px) {
+  .track-wrap { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "in out" "track track"; gap: 10px 8px; }
+  .io--in { grid-area: in; }
+  .io--out { grid-area: out; }
+  .track-mid { grid-area: track; }
+  .job { --job-h: clamp(210px, calc(100svh - 510px), 400px); }
+}
+@media (max-width: 1023px) {
   .caption { height: 52px; white-space: normal; line-height: 1.3; }
   .caption > span:last-child { overflow: visible; text-overflow: clip; }
 }

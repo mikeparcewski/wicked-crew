@@ -212,3 +212,31 @@ test.describe('the thread', () => {
     expect(f[4]).toBeLessThan(0.05);
   });
 });
+
+test.describe('the job track', () => {
+  for (const vp of [{ width: 768, height: 1024 }, { width: 1024, height: 700 }, { width: 1100, height: 700 }, { width: 390, height: 844 }, { width: 360, height: 740 }]) {
+    test(`every gate stays inside its phase, and both ends keep their legends @ ${vp.width}x${vp.height}`, async ({ page }) => {
+      await page.setViewportSize(vp);
+      await page.goto('/');
+      await page.evaluate(async () => { await document.fonts.ready; });
+      const bad = await page.evaluate(() => {
+        const out: string[] = [];
+        document.querySelectorAll('.st').forEach((st, i) => {
+          const r = st.getBoundingClientRect();
+          for (const c of Array.from(st.children)) {
+            const q = c.getBoundingClientRect();
+            if (q.right > r.right + 0.5 || q.left < r.left - 0.5) out.push(`phase ${i}: ${c.className} spills ${Math.round(q.right - r.right)}px`);
+          }
+        });
+        document.querySelectorAll<HTMLElement>('.io').forEach((io) => {
+          const r = io.getBoundingClientRect();
+          const sm = io.querySelector('small')!.getBoundingClientRect();
+          if (io.scrollWidth > io.clientWidth + 1 || io.scrollHeight > io.clientHeight + 1) out.push(`overflow: ${io.textContent!.trim()}`);
+          if (sm.right > r.right + 0.5) out.push(`legend cut: ${io.textContent!.trim()}`);
+        });
+        return out;
+      });
+      expect(bad).toEqual([]);
+    });
+  }
+});
