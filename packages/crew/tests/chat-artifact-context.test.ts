@@ -509,6 +509,10 @@ describe('artifact outline, hostile and odd markup', () => {
     // A raw tag's name inside an ordinary element's quoted attribute is not an opening; a comment inside an svg is skipped.
     expect(stripRaw('<section title="Using <template> here"><h2>One</h2></section><p>e</p>')).toBe('<section title="Using <template> here"><h2>One</h2></section><p>e</p>');
     expect(stripRaw('<svg><!--</svg>--><text>LEAK6</text></svg><p>f</p>')).toBe('<p>f</p>');
+    // In a script or a style, `<!--` is just text: the slides after it stay.
+    expect(stripRaw('<script>const marker = "<!--";</script><p>g</p>')).toBe('<p>g</p>');
+    expect(stripRaw('<style>p::before { content: "<!--" }</style><p>h</p>')).toBe('<p>h</p>');
+    expect(anchorTexts('<script>var m = "<!--";</script><section class="wi-slide" data-slide-id="a"><h2 data-wid="w1">Visible</h2></section>', ['w1'])[0]).toMatchObject({ found: true, slide: 1, text: 'Visible' });
     expect(outlineOf('<section class="wi-slide" data-slide-id="a" title="see <!-- here"><h2>A</h2></section><section class="wi-slide" data-slide-id="b"><h2>B</h2></section>').items.map((i) => i.text)).toEqual(['A', 'B']);
     const o = outlineOf('<section class="wi-slide" data-slide-id="s1" title="a < b"><h2>One</h2></section><section class="wi-slide" data-slide-id="s2"><h2>Two</h2></section>');
     expect(o.items.map((i) => i.text)).toEqual(['One', 'Two']);

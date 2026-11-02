@@ -89,8 +89,9 @@ export function stripRaw(html: string): string {
       from = m.index + m[0].length;
       continue;
     }
-    // A comment inside an svg or a template is stepped over whole: a tag in it changes no depth.
-    const edge = new RegExp(`<!--|<(/?)${tag}(?=[\\s>/])(${ATTRS})>`, 'gi');
+    // A comment inside an svg or a template is stepped over whole: a tag in it changes no depth. A script's or a
+    // style's body is raw text, where `<!--` is just characters: only its own close tag ends it.
+    const edge = new RegExp(`${nests ? '<!--|' : ''}<(/?)${tag}(?=[\\s>/])(${ATTRS})>`, 'gi');
     edge.lastIndex = m.index + m[0].length;
     let depth = 1;
     let closedAt = -1;
