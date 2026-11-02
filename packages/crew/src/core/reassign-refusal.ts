@@ -35,13 +35,31 @@ function enforcesDistinctEvaluator(view: SessionView): boolean {
   return required.includes('distinct_evaluator') && a.mode !== 'reduced';
 }
 
-/** wicked-core `work_authors`: every seat that authored the work the unit at `ord` checks. */
+/** wicked-core `is_read_step` (`pipeline.rs`): a team member's read step, or a GUARDED read step — a
+ *  recon stage, a neutral role, no code, held to the tree by the worktree guard, which left the tree
+ *  as it found it (no mutation, or one the guard restored). Its own seat authored nothing a review
+ *  checks (PRODUCT-WORKS J6). The DTO omits `executes_code: false`, `owner: pa` and an absent
+ *  mutation, so each reads as its default. */
+function isReadStep(u: Unit): boolean {
+  if (u.stage !== 'recon' || u.role !== 'neutral' || field(u, 'executes_code') === true) return false;
+  if (field(u, 'owner') === 'team') return true;
+  const mutation = field(u, 'worktree_mutation') as { restored?: unknown } | null | undefined;
+  return field(u, 'worktree_guarded') === true && (mutation == null || mutation.restored === true);
+}
+
+/** wicked-core `work_authors`: every seat that authored the work the unit at `ord` checks — each
+ *  earlier Build/Recon agent unit's seat and every seat it was dispatched on, except a read step's own
+ *  seat (`authors_work` / `author_seats`). A read step still counts when it RECORDED an author (a floor
+ *  fix changed the tree on it). */
 function workAuthors(units: readonly Unit[], ord: number): string[] {
   const out: string[] = [];
   for (const u of units) {
     if (u.ord >= ord || u.tool_cmd != null || (u.stage !== 'build' && u.stage !== 'recon')) continue;
-    const authored = field(u, 'authored_by');
-    const seats = [u.assigned_cli, ...(Array.isArray(authored) ? authored : [])];
+    const authoredRaw = field(u, 'authored_by');
+    const authored = Array.isArray(authoredRaw) ? authoredRaw : [];
+    const readStep = isReadStep(u);
+    if (readStep && authored.length === 0) continue;
+    const seats = [...(readStep ? [] : [u.assigned_cli]), ...authored];
     for (const s of seats) if (typeof s === 'string' && s !== '' && !out.includes(s)) out.push(s);
   }
   return out;

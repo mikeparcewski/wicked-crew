@@ -1166,6 +1166,26 @@ function powerPauseOf(s: unknown): { checkpoint: number | null; why: string | nu
 }
 
 /** One run's computed liveness. Pure: every input is a reading. */
+
+/**
+ * The step a run is on, in words a person reads (artifact-runs-fix: the voice dashboard showed
+ * `wf-<run>:unit-1`). `phase_ref` is the engine's composed id, synthetic for every preset and ask
+ * path; the unit id is `<session>:<step>` (`answer-1`, `pa-scope`, `draft`, `critique`), so its step
+ * is the name, said with spaces. A step the engine numbered (`unit-N`) falls back to the catalog
+ * entry, then the stage.
+ */
+export function stepWordsOf(unit: { id?: unknown; phase_ref?: unknown; catalog?: unknown; stage?: unknown }, sessionId: string): string | null {
+  const synthetic = (step: string): boolean => /^unit-\d+(?::a\d+)?$/.test(step);
+  const id = str(unit.id);
+  const fromId = id !== undefined && id.startsWith(`${sessionId}:`) ? id.slice(sessionId.length + 1) : undefined;
+  const ref = str(unit.phase_ref);
+  const fromRef = ref === undefined ? undefined : ref.includes(':') ? ref.slice(ref.indexOf(':') + 1) : ref;
+  const named = [fromId, fromRef].find((s): s is string => s !== undefined && s !== '' && !synthetic(s));
+  const words = named ?? str(unit.catalog) ?? str(unit.stage);
+  return words === undefined ? null : words.replace(/[-_]+/g, ' ');
+}
+
+/** One run's computed liveness. Pure: every input is a reading. */
 export function runLiveness(input: {
   view: SessionView;
   now: number;
@@ -1178,7 +1198,7 @@ export function runLiveness(input: {
   const s = view.session as SessionView['session'] & { title?: string; created_at?: number };
   const cursor =
     view.units.find((u) => u.status === 'distributed') ?? (gate?.ord != null ? view.units.find((u) => u.ord === gate.ord) : undefined) ?? view.units.find((u) => u.status === 'pending');
-  const phase = cursor === undefined ? null : (str((cursor as { phase_ref?: unknown }).phase_ref) ?? str((cursor as { stage?: unknown }).stage) ?? null);
+  const phase = cursor === undefined ? null : stepWordsOf(cursor, s.id);
   const quietForMs = evidence === null ? null : Math.max(0, now - evidence.at);
   const createdMs = num(s.created_at) !== undefined ? (s.created_at as number) * 1000 : null;
   let liveness: SystemRunLiveness;

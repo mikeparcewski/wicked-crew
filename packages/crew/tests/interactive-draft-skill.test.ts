@@ -89,11 +89,19 @@ describe('draftQualityClause', () => {
     expect(clause).toContain(`${DRAFT_SELF_CHECK_LAUNCHER} /inbox/doc/draft.html --pages 2 --exact --render --repo /inbox/doc/repos/wicked-studio`);
     expect(clause).toMatch(/PASS/);
     expect(clause).toMatch(/UNVERIFIED page count must be disclosed/);
+    // artifact-runs-fix (run 2e6059da): a process note is never part of the shared artifact.
+    expect(clause).toContain('in your reply');
+    expect(clause).toContain("never in the document's visible text");
+    expect(clause).not.toMatch(/disclosed in the notes/);
     expect(clause).toContain('"$WICKED_GARDEN_ROOT/scripts/wicked-garden" run scripts/draft/self_check.py');
   });
   it('a web page: --no-pages --mode screen --min-font-pt 0; a deck: the outline\'s slide count; a revision: no --repo, revision wording', () => {
     expect(draftQualityClause('/o.html', { pages: null, exact: false, source: 'style-default' }, [], { style: 'web' })).toContain('--no-pages --render --mode screen --min-font-pt 0');
     expect(draftQualityClause('/o.html', { pages: null, exact: false, source: 'style-default' }, [], { style: 'ppt' })).toContain('--pages <the slide count the outline fixed> --exact');
+    // A repo-less draft cites its estate results in the reply, not in the body.
+    const bare = draftQualityClause('/o.html', { pages: null, exact: false, source: 'unknown' }, [], {});
+    expect(bare).toContain('cite the estate tool results in your reply');
+    expect(bare).not.toMatch(/results in the notes/);
     const rev = draftQualityClause('/o.html', { pages: null, exact: false, source: 'unknown' }, [], { revision: true });
     expect(rev).toContain('A revision can re-introduce a defect');
     expect(rev).not.toContain('--repo');

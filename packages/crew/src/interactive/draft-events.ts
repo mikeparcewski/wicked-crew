@@ -45,6 +45,7 @@ import {
   draftQualityClause,
   logDraftSkillArmLine,
   pageBudgetFor,
+  PROCESS_NOTES_WHERE,
   runDraftFloor,
   type DraftFloorIo,
   type PageBudget,
@@ -415,11 +416,11 @@ export function draftProblem(
       ? `This document is ABOUT the ${subjects.length === 1 ? 'repository' : 'repositories'} ` +
         `${subjects.map((s) => s.name).join(', ')} — ground every product claim in ` +
         `${subjects.length === 1 ? 'that repository' : 'those repositories'} (never a sibling repository ` +
-        `that happens to share the project), and say in the draft's notes when something you need is not in reach. `
+        `that happens to share the project), and say ${PROCESS_NOTES_WHERE} when something you need is not in reach. `
       : grounding?.unnamedAmong !== undefined && grounding.unnamedAmong > 1
         ? `The project has ${grounding.unnamedAmong} repositories and none was named for this document — do not ` +
           `present details from an arbitrary one as the subject's; where the brief refers to a specific ` +
-          `repository, say in the draft's notes that its source was not in reach. `
+          `repository, say ${PROCESS_NOTES_WHERE} that its source was not in reach. `
         : '';
   // The offline fallback: the subjects' snapshots when grounding resolved them (F-046), else the
   // legacy single snapshot dir a caller passed. Paths ride VERBATIM (Copilot, crew#313).
