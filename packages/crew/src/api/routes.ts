@@ -4335,6 +4335,7 @@ export function registerRoutes(
         repos: scope.repos.map((r) => ({ id: r.id, name: r.name })),
         lead: path?.pa ?? path?.primary ?? null,
         seats: path?.eligible ?? [],
+        analysis: path?.workflow !== undefined,
       };
     },
     rosterEligible: () =>
@@ -4459,7 +4460,7 @@ export function registerRoutes(
       try {
         after();
         if (preface !== null) chatTranscripts?.appendSystem(id, turnId, preface);
-        chatTranscripts?.appendUser(id, turnId, text, voice, attached.map(attachmentWire));
+        chatTranscripts?.appendUser(id, turnId, text, voice, attached.map(attachmentWire), contextAllowed);
         if (turnBinding !== null) chatTranscripts?.appendContext(id, turnId, turnBinding);
         // The recorder's audience is the turn's AS THE TURN INDEX HOLDS IT NOW: the eligible roster
         // for a random pick, or the PA the relay narrowed it to during the engine awaits above
@@ -4796,13 +4797,15 @@ export function registerRoutes(
       if (!CHAT_ID.test(id) || chatHistory === null || !chatHistory.visibleTo(id, viewer)) {
         return reply.code(404).send({ error: `no chat ${id} on this daemon` });
       }
+      // The instance these checks passed against: nothing is recorded on a chat that reuses the id meanwhile.
+      const instance = chatHistory.stateOf(id)?.instance ?? null;
       const parsed = ProposalDecisionSchema.safeParse(req.body);
       if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
       // Optional fields arrive as absent, never as `undefined` (the contract's exact optional shape).
       const edits = parsed.data.edits === undefined
         ? undefined
         : (Object.fromEntries(Object.entries(parsed.data.edits).filter(([, v]) => v !== undefined)) as import('../core/types.js').ProposalEdits);
-      const out = await chatProposals.decide(id, pid, { decision: parsed.data.decision, ...(edits !== undefined ? { edits } : {}) }, actor);
+      const out = await chatProposals.decide(id, pid, { decision: parsed.data.decision, ...(edits !== undefined ? { edits } : {}) }, actor, instance);
       return reply.code(out.code).send(out.body);
     },
   );

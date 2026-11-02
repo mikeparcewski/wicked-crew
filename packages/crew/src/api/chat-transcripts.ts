@@ -121,7 +121,7 @@ export class ChatTranscriptStore {
   }
 
   /** The operator's message a send delivered, with the seats the engine reached (the 202's `seats`). */
-  appendUser(chatId: string, turnId: string, text: string, seats: readonly string[], attachments?: readonly ChatAttachment[]): void {
+  appendUser(chatId: string, turnId: string, text: string, seats: readonly string[], attachments?: readonly ChatAttachment[], owner = false): void {
     this.append(chatId, {
       at: this.now(),
       turnId,
@@ -129,6 +129,8 @@ export class ChatTranscriptStore {
       text,
       seats: [...seats],
       ...(attachments !== undefined && attachments.length > 0 ? { attachments: [...attachments] } : {}),
+      // A2: the chat's owner, a person, sent it — only these words count as the person's for a proposal.
+      ...(owner ? { owner: true as const } : {}),
     });
   }
 
@@ -262,7 +264,10 @@ export class ChatTranscriptStore {
       // A2: every `wicked-make` block goes too (the resolver takes the last one that parses); never shown, never stored.
       const made = splitMakeBlocks(text);
       text = made.text;
-      if (made.blocks.length > 0) this.makeBlocks.set(key, made.blocks);
+      // The block's words reach a card (and the transcript) too: host paths in them are rewritten like the reply's.
+      const blockRoots = this.chatRoots.get(chatId);
+      const bodies = blockRoots !== undefined && blockRoots.length > 0 ? made.blocks.map((b) => rewriteHostPaths(b, blockRoots)) : made.blocks;
+      if (bodies.length > 0) this.makeBlocks.set(key, bodies);
       else this.makeBlocks.delete(key);
     }
     const roots = this.chatRoots.get(chatId);

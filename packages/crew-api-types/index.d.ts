@@ -8363,7 +8363,17 @@ export interface ChatUsage {
  */
 export type ChatTranscriptRecord =
   /** `attachments` (api-types 0.137.0): the files the message carried, ABSENT when none. */
-  | { at: number; turnId: string; kind: 'user'; text: string; seats: string[]; attachments?: ChatAttachment[] }
+  | {
+      at: number;
+      turnId: string;
+      kind: 'user';
+      text: string;
+      seats: string[];
+      attachments?: ChatAttachment[];
+      /** (api-types 0.170.0) Sent by the chat's owner, a person (the message route's own check). Only these words count
+       *  as the person's for a proposal (a demo address, a document they named). ABSENT for any other sender. */
+      owner?: true;
+    }
   | { at: number; turnId: string; kind: 'seat'; cliKey: string; text: string; ok: boolean; usage: ChatUsage | null }
   /**
    * The citation verdicts of the `seat` record with the same `turnId` + `cliKey` (api-types 0.68.0,
@@ -8576,23 +8586,29 @@ export interface ChatProposalDecisionBody {
 
 /**
  * `POST /chats/:id/proposals/:pid` → 200: the proposal as decided (a repeat of the same decision answers the stored
- * result again, so a lost response is safe to retry). Refusals carry `code`: 403 `proposal_refused` (not a person, or
- * not the chat's owner), 404 (no such chat or proposal), 409 `proposal_superseded` | `proposal_decided` |
- * `proposal_blocked` | `operation_unavailable` | `chat_busy` | `document_busy` | `source_gone` |
- * `proposal_reresolved` (the document moved: the body's `proposal` is the fresh one), 400 `edits_invalid`.
+ * result again, so a lost response is safe to retry). Refusals carry `code`: 403 `proposal_refused` (not a person),
+ * 404 (no such chat or proposal, or a chat that is not the caller's under `auth: required`: its existence is not
+ * disclosed), 409 `proposal_superseded` | `proposal_decided` | `proposal_blocked` | `operation_unavailable` |
+ * `chat_busy` | `document_busy` | `source_gone` | `helper_unavailable` | `chat_gone` | `proposal_reresolved` (the
+ * document moved: `view.proposal` is the fresh one), 400 `edits_invalid`, 502 `launch_failed` (accepting stays
+ * recorded; Go again resumes the same identity). A 409 carries the current `view` when there is one.
  */
 export interface ChatProposalDecisionResponse {
   view: ChatProposalView;
 }
 
-/** `/ws` (api-types 0.170.0): a proposal record was appended to chat `chat` (the same record the transcript holds). */
-export interface ChatProposalFrame {
+/**
+ * `/ws` (api-types 0.170.0): a proposal record was appended to chat `chat` (the same record the transcript holds).
+ * `project_id`: the chat's project, when it has one. A `type` alias (like the daemon's other synthetic frames) so it
+ * satisfies {@link CoreEvent}'s index signature.
+ */
+export type ChatProposalFrame = {
   type: 'chatProposal';
   chat: string;
   turn_id: string;
   record: Extract<ChatTranscriptRecord, { kind: 'proposal' | 'proposal_accepting' | 'proposal_decided' }>;
   project_id?: string;
-}
+};
 
 // ── System chat: history, close, attachments (api-types 0.137.0, DES-SYSTEM-CHAT "Crew") ────────
 //

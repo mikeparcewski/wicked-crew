@@ -161,7 +161,9 @@ export function splitMakeBlocks(text: string): { text: string; blocks: string[];
     if (opening === null) return { text: out, blocks, truncated: false };
     const lineStart = opening.index + opening[1]!.length;
     const afterOpen = out.indexOf('\n', lineStart);
-    const close = afterOpen === -1 ? null : /\n[ \t]*```/u.exec(out.slice(afterOpen));
+    // The close is a line of its own: three backticks and nothing else. Another opening (```wicked-make, ```json) is
+    // not a close, so it can never end a block early and leave the rest of a block in the reply.
+    const close = afterOpen === -1 ? null : /\n[ \t]*```[ \t]*(?=\r?\n|$)/u.exec(out.slice(afterOpen));
     if (afterOpen === -1 || close === null) return { text: trimEnd(out.slice(0, lineStart)), blocks, truncated: true };
     const closeAt = afterOpen + close.index;
     blocks.push(out.slice(afterOpen + 1, closeAt).trim());

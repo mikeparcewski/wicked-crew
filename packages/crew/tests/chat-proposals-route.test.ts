@@ -42,8 +42,6 @@ describe('chat proposals (server, A2)', () => {
   let prod: FastifyInstance;
   const launches: LaunchRunInput[] = [];
   const pathRuns: string[] = [];
-  /** Live work runs the fake engine reports (the busy rule). */
-  const extraRuns: SessionView[] = [];
 
   const makeAdapter = (mine: Array<(e: CoreEvent) => void>): CoreAdapter => ({
     dbPath: join(home, 'core.db'),
@@ -73,7 +71,6 @@ describe('chat proposals (server, A2)', () => {
       runView(RUN_A),
       runView(RUN_B),
       runView(RUN_OTHER),
-      ...extraRuns,
     ],
     workOutput: async () => 'Coverage moved.',
     runEvents: async () => [],
@@ -289,15 +286,10 @@ describe('chat proposals (server, A2)', () => {
     const stale = await decide(stub, 'sup-1', first.pid, { decision: 'go' });
     expect(stale.statusCode).toBe(409);
     expect(stale.json()).toMatchObject({ code: 'proposal_superseded' });
-    // A live job filed under this chat makes it busy for Go, but Not now still records.
-    extraRuns.push({ session: { id: 'busy-run', status: 'executing', problem: 'x', workflow_id: 'wf', extra_write_roots: [] }, units: [] } as unknown as SessionView);
-    try {
-      const declined = await decide(stub, 'sup-1', second.pid, { decision: 'not_now' });
-      expect(declined.statusCode).toBe(200);
-      expect((declined.json() as { view: ChatProposalView }).view).toMatchObject({ state: 'decided', decision: 'not_now', result: null });
-    } finally {
-      extraRuns.length = 0;
-    }
+    // Not now records the decline (the busy and state cases are in chat-proposals-accept.test.ts).
+    const declined = await decide(stub, 'sup-1', second.pid, { decision: 'not_now' });
+    expect(declined.statusCode).toBe(200);
+    expect((declined.json() as { view: ChatProposalView }).view).toMatchObject({ state: 'decided', decision: 'not_now', result: null });
   });
 
   it('an interrupted Go (accepting, no run) launches once on Go again; accepting with its run is adopted', async () => {
