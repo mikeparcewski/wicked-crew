@@ -189,6 +189,24 @@ test.describe('arrival', () => {
     expect(await t.evaluate((el) => getComputedStyle(el).animationName)).toBe('none');
   });
 
+  test('reduced motion switched on mid-visit: no queued replay, still cards, a finished workflow', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForTimeout(250);
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    // the hero replay was queued (1.6s after the card is in view): it never starts on its own
+    await page.waitForTimeout(2500);
+    await expect(page.locator('[data-panel]')).toContainText('DELIVERED');
+    // the workflow ticker that was running stops at the finished job
+    await page.evaluate(() => document.getElementById('deliver')!.scrollIntoView({ block: 'start', behavior: 'instant' }));
+    await expect(page.locator('[data-wf-status]')).toContainText('done', { timeout: 3000 });
+    // What's new: the cards are simply there
+    await page.evaluate(() => document.getElementById('news')!.scrollIntoView({ block: 'start', behavior: 'instant' }));
+    await page.waitForTimeout(120);
+    const li = page.locator('.news-list li').last();
+    expect(await li.evaluate((el) => getComputedStyle(el).opacity)).toBe('1');
+    expect(await li.evaluate((el) => getComputedStyle(el).transform)).toBe('none');
+  });
+
   test('with motion, a frame rises in once it arrives, and is fully shown after', async ({ page }) => {
     await page.goto('/');
     await page.waitForTimeout(300);

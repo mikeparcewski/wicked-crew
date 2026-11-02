@@ -515,8 +515,11 @@ code {
 .news-n { font-size: 12px; color: var(--ctrl); }
 .news-list b { font-size: var(--h3); font-weight: var(--weight-strong); line-height: 1.2; color: var(--ink); }
 .news-list li > span:last-child { font-size: var(--body); line-height: 1.55; color: color-mix(in oklab, var(--ink) 76%, transparent); }
-.news.will-stagger .news-list li { opacity: 0; transform: translateY(8px); }
-.news.will-stagger.is-in .news-list li { opacity: 1; transform: none; transition: opacity .5s var(--ease), transform .5s var(--ease); transition-delay: calc(var(--i) * 90ms); }
+/* (inside no-preference, so reduced motion switched on mid-visit shows the cards, still) */
+@media (prefers-reduced-motion: no-preference) {
+  .news.will-stagger .news-list li { opacity: 0; transform: translateY(8px); }
+  .news.will-stagger.is-in .news-list li { opacity: 1; transform: none; transition: opacity .5s var(--ease), transform .5s var(--ease); transition-delay: calc(var(--i) * 90ms); }
+}
 .car-ctl, .car-dots { display: none; }
 
 /* ── Get it / finale ─────────────────────────────────────────────────── */

@@ -167,6 +167,18 @@ test.describe('frames and the settle', () => {
     expect(y, `the glide went on to ${y} after reduced motion was switched on at ${Math.round(at)}`).toBeLessThan(tops[1] - 8);
   });
 
+  test('a scroll key right after a Tab still locks in (the focus guard ends with new input) @ 1440x700', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 700 });
+    await page.goto('/');
+    await page.waitForTimeout(400);
+    const tops = await frameTops(page);
+    await page.locator('[data-job-run]').focus();
+    await page.keyboard.press('Tab');   // Run -> Kill, no scroll
+    await page.mouse.move(4, 400);
+    await page.mouse.wheel(0, 100);
+    expect(Math.abs((await settled(page)) - tops[1]), 'the wheel right after a Tab rested mid-frame').toBeLessThanOrEqual(2);
+  });
+
   test('a burst of arrow keys never ends behind where it scrolled to @ 1440x700', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 700 });
     await page.goto('/');

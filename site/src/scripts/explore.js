@@ -193,9 +193,13 @@ function onTakeover(root, cb) {
   function stopT() { clearTimeout(timer); timer = null; }
   function tick() {
     stopT();
-    if (dead || !inView || isReduced()) return;
+    // under reduced motion (even switched on mid-visit) the rail shows the finished job, still
+    if (isReduced()) { if (!dead && !finished && inView) { finished = true; paint(); say('done · evidence bundle ready'); } return; }
+    if (dead || !inView) return;
     const ns = nodes();
     timer = setTimeout(() => {
+      // reduced motion switched on while this tick waited: the finished job, at once
+      if (isReduced()) { stopT(); finished = true; dead = false; paint(); say('done · evidence bundle ready'); return; }
       if (finished) { finished = false; k = 0; paint(); say(at(ns, 0)); tick(); return; }
       if (k >= ns.length - 1) { finished = true; paint(); say('done · evidence bundle ready'); timer = setTimeout(tick, 600); return; }
       k++; paint(); say(at(ns, k)); tick();

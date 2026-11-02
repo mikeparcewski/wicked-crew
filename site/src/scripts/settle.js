@@ -62,6 +62,8 @@ const FRAMES = '[data-frame], .same-garden, .footer';
     else if (kind === 'jump') jump = true;
     else if (kind === 'wheel' || kind === 'touch') { keys = 0; keyed = false; }
     if (dir) idir = dir;
+    // an explicit scroll after a keyboard focus is the visitor's again: the focus guard ends
+    if (kind !== 'pointer') focusAt = -1e9;
     inputAt = t;
   }
   // settling switched off mid-glide (reduced motion turned on, a window made too small): stop now
@@ -69,7 +71,14 @@ const FRAMES = '[data-frame], .same-garden, .footer';
   if (reduceMQ.addEventListener) reduceMQ.addEventListener('change', off);
   window.addEventListener('resize', off);
   window.addEventListener('wheel', (e) => { if (e.deltaY) begin('wheel', e.deltaY > 0 ? 1 : -1); }, { passive: true });
-  window.addEventListener('touchmove', () => begin('touch', 0), { passive: true });
+  // a finger moving up scrolls down: the direction comes from the finger, from where it went down
+  let touchY = null;
+  window.addEventListener('touchstart', (e) => { touchY = e.touches && e.touches[0] ? e.touches[0].clientY : null; }, { passive: true });
+  window.addEventListener('touchmove', (e) => {
+    const y = e.touches && e.touches[0] ? e.touches[0].clientY : null;
+    const dy = touchY === null || y === null ? 0 : touchY - y;
+    begin('touch', Math.abs(dy) > 4 ? (dy > 0 ? 1 : -1) : 0);
+  }, { passive: true });
   window.addEventListener('pointerdown', () => begin('pointer', 0), { passive: true });
   // a release keeps its gesture alive until the scroll comes to rest (a held key, a scrollbar drag)
   const release = () => { if (pending) inputAt = now(); };

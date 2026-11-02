@@ -281,7 +281,8 @@ function initJob(root) {
 
   poster();
   if (RM.matches) return;
-  function auto() { if (!booted) { booted = true; start(); } }
+  // a replay still waiting to start does not start once reduced motion is on (Run still runs it)
+  function auto() { if (!booted && !RM.matches) { booted = true; start(); } }
   if ('IntersectionObserver' in window) {
     const io = new IntersectionObserver(function (es) {
       if (es.some(function (x) { return x.isIntersecting; })) { io.disconnect(); setTimeout(auto, 1600); }
