@@ -38,8 +38,8 @@ mentioned only where a daemon release depends on them.
 
 - **An editor plugin's frame can no longer use WebRTC.** A bundle's policy blocks fetch, XHR, WebSocket and beacons
   (`connect-src 'none'`), but browsers do not apply that to WebRTC, and Chromium ignores `webrtc 'block'`. Crew now puts
-  a short prelude first in every inline script of every editor bundle it serves, after the script's directive prologue
-  (so strict mode is kept). Before the editor's own code runs, the prelude removes the WebRTC constructors for good
+  a short prelude first in every inline script of every editor bundle it serves, after the script's `;`-ended directive
+  prologue (so `"use strict";` keeps working). Before the editor's own code runs, the prelude removes the WebRTC constructors for good
   (`src/editors/webrtc-guard.ts`); if it cannot, the script stops. A third-party editor's `script-src` is exactly those
   scripts' hashes, with no `'unsafe-inline'`. Any document it makes (a child frame, or a `blob:` or `data:` page it
   opens in its own frame) can therefore run only those scripts, prelude first. `javascript:` URLs, inline event

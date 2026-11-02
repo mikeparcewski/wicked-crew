@@ -7,7 +7,8 @@
  * editor could carry what it reads out of the artifact that way.
  *
  * So crew puts {@link WEBRTC_PRELUDE} at the start of every inline script of every bundle it serves (after the
- * script's directive prologue and hashbang, if any: those are inert, and moving them would turn strict mode off). The
+ * script's hashbang and a directive prologue whose directives end in their own `;`: those are inert, and moving them
+ * would turn strict mode off; a directive that relies on automatic semicolon insertion is not kept first). The
  * prelude defines each WebRTC global as a non-writable, non-configurable `undefined` before any of the editor's own
  * statements run. It has no `try`: if it cannot do that it throws, and the rest of that script never runs. It names no
  * global a script can shadow and calls nothing a script can define first. A module's own `function window(){}` is
@@ -21,10 +22,11 @@
  * the bundle's policy, so the only scripts that can run in them are copies of crew's prefixed scripts, and the prelude
  * runs first there too. `javascript:` URLs, inline event handlers and new script text are refused.
  *
- * The scanner below finds inline scripts the way an HTML parser does, closely enough for real bundles. Its accuracy
- * is not what keeps the guard sound: every hash crew issues is of text that crew itself built to start with the
- * prelude, after an inert prologue. A script the scanner misreads gets a hash the browser doesn't compute, so it
- * doesn't run. The editor breaks visibly, and nothing runs without the prelude.
+ * The scanner below finds inline scripts the way an HTML parser does, closely enough for real bundles. For a
+ * third-party bundle its accuracy is not what keeps the guard sound: every hash crew issues is of text that crew itself
+ * built with the prelude first (after an inert prologue). A script the scanner misreads gets a hash the browser doesn't
+ * compute, so it doesn't run. The editor breaks visibly, and nothing runs without the prelude. A first-party bundle
+ * keeps `'unsafe-inline'` (it is studio's own code), so there the prelude is only where the scanner finds a script.
  *
  * Every distinct script adds a hash to one response header, so a third-party bundle may hold at most
  * {@link MAX_SCRIPT_HASHES} distinct inline scripts; past that crew refuses to serve it, with the reason.
@@ -70,22 +72,67 @@ export const WEBRTC_PRELUDE =
 /** The most distinct inline scripts a third-party bundle may hold: each is one hash in the response's policy header. */
 export const MAX_SCRIPT_HASHES = 200;
 
-/**
- * Where the prelude goes in a script's text: after a hashbang line and a directive prologue (`"use strict";` and the
- * like, each ended by its own `;`), with the whitespace and comments around them. That prefix runs no code, and keeping
- * it first keeps the script's strict mode. Anything else (a directive with no `;`, any other statement) ends it.
- */
-const PROLOGUE =
-  /^(?:#![^\n\r\u2028\u2029]*)?(?:(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\n\r\u2028\u2029]*)*(?:"(?:[^"\\\n\r]|\\[\s\S])*"|'(?:[^'\\\n\r]|\\[\s\S])*')(?:\s|\/\*[\s\S]*?\*\/)*;)*/;
+const LINE_END = /[\n\r\u2028\u2029]/;
+const SPACE = /\s/;
 
-/** `text` with the prelude written in: after its inert prologue (see {@link PROLOGUE}), before its first statement. A
- *  hashbang is a comment to the end of its line, so after one the prelude always starts on a line of its own. */
+/**
+ * Where the prelude goes in a script's text, read the way a JavaScript lexer reads it: past a hashbang line and a
+ * directive prologue (each directive a string literal ended by its own `;`), with whitespace and comments between.
+ * No regular expression does this: a backtracking pattern can be made to end a comment early or late. Here a block
+ * comment ends at its first `*\/` and a line comment at the end of its line, exactly as in JavaScript, so the place
+ * found is never inside a comment or a string, and nothing before it is code. Anything else ends the prologue.
+ */
+export function prologueEnd(text: string): { at: number; afterHashbang: boolean } {
+  const n = text.length;
+  let i = 0;
+  let at = 0;
+  let afterHashbang = false;
+  if (text.startsWith('#!')) {
+    while (i < n && !LINE_END.test(text[i]!)) i++;
+    at = i;
+    afterHashbang = true;
+  }
+  /** Past whitespace and whole comments; false at a block comment that never closes. */
+  const skip = (): boolean => {
+    for (;;) {
+      while (i < n && SPACE.test(text[i]!)) i++;
+      if (text.startsWith('/*', i)) {
+        const close = text.indexOf('*/', i + 2);
+        if (close < 0) return false;
+        i = close + 2;
+      } else if (text.startsWith('//', i)) {
+        while (i < n && !LINE_END.test(text[i]!)) i++;
+      } else {
+        return true;
+      }
+    }
+  };
+  while (skip()) {
+    const quote = text[i];
+    if (quote !== '"' && quote !== "'") break;
+    let j = i + 1;
+    let closed = false;
+    while (j < n) {
+      const c = text[j]!;
+      if (c === '\\') { j += 2; continue; }
+      if (c === quote) { closed = true; j += 1; break; }
+      if (c === '\n' || c === '\r') break;
+      j += 1;
+    }
+    if (!closed) break;
+    i = j;
+    if (!skip() || text[i] !== ';') break;
+    i += 1;
+    at = i;
+    afterHashbang = false;
+  }
+  return { at, afterHashbang };
+}
+
+/** `text` with the prelude before its first statement (see {@link prologueEnd}); after a lone hashbang, on its own line. */
 export function withPrelude(text: string): string {
-  const at = PROLOGUE.exec(text)?.[0].length ?? 0;
-  const head = text.slice(0, at);
-  // The head is only a hashbang line when it holds no line terminator at all.
-  const newline = head.startsWith('#!') && !/[\n\r\u2028\u2029]/.test(head) ? '\n' : '';
-  return head + newline + WEBRTC_PRELUDE + text.slice(at);
+  const { at, afterHashbang } = prologueEnd(text);
+  return text.slice(0, at) + (afterHashbang ? '\n' : '') + WEBRTC_PRELUDE + text.slice(at);
 }
 
 /** One served bundle: its bytes with the prelude in every inline script, and those scripts' sha256 (base64). */
@@ -128,9 +175,10 @@ export function decodeAttribute(v: string): string {
 }
 
 /** Whether `<script …>` with these attributes runs its text as a classic or module script (HTML "prepare the script
- *  element"); a `src` makes it external, and an unknown type makes it a data block. */
-function runsInline(attrs: Map<string, string>): boolean {
-  if (attrs.has('src')) return false;
+ *  element"); a `src` makes it external (`href` or `xlink:href` for an SVG script), and an unknown type makes it a
+ *  data block. */
+function runsInline(attrs: Map<string, string>, svg: boolean): boolean {
+  if (svg ? attrs.has('href') || attrs.has('xlink:href') : attrs.has('src')) return false;
   const language = attrs.get('language');
   const raw = attrs.has('type') ? attrs.get('type')! : language !== undefined && language !== '' ? `text/${language}` : '';
   if (raw === '') return true;
@@ -155,9 +203,11 @@ export function inlineScripts(html: string): InlineScript[] {
     const attrs = new Map<string, string>();
     let j = p;
     while (j < n) {
+      const from = j;
       while (j < n && (WS.test(s[j]!) || s[j] === '/')) j++;
       if (j >= n) break;
-      if (s[j] === '>') return { end: j + 1, attrs, selfClosing: s[j - 1] === '/' };
+      // Self-closing is a `/` between attributes right before `>`, never the last character of an unquoted value.
+      if (s[j] === '>') return { end: j + 1, attrs, selfClosing: j > from && s[j - 1] === '/' };
       let k = j + 1; // a name may start with `=`
       while (k < n && !TAG_END.test(s[k]!) && s[k] !== '=') k++;
       const name = s.slice(j, k).toLowerCase();
@@ -266,7 +316,7 @@ export function inlineScripts(html: string): InlineScript[] {
     if (name === 'script' && foreign > 0 && selfClosing) { i = end; continue; }
     if (name === 'script') {
       const textEnd = scriptTextEnd(end);
-      out.push({ start: end, end: textEnd, runs: runsInline(attrs) });
+      out.push({ start: end, end: textEnd, runs: runsInline(attrs, foreign > 0) });
       if (textEnd >= n) break;
       const after = attributes(textEnd + 8);
       if (after.end < 0) break;

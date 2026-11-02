@@ -55,17 +55,24 @@ var FRESH='<scr'+'ipt>var U='+JSON.stringify(U)+';'+report+rtc+'rtc(window,"fres
 if(location.protocol!=='http:'){report('child-ran:'+location.protocol);rtc(window,'child')}
 else{report('ran');${attempt}}`;
   // `extra` (a module) goes first so the plugin's script can find it; a module runs after the document is parsed anyway.
-  return `<!doctype html><html><head><meta charset="utf-8"><title>probe</title></head><body><p>hostile</p>${extra}<script>${js}</script></body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><title>probe</title></head><body><p>hostile</p>${extra.replaceAll('__PORT__', String(port))}<script>${js}</script></body></html>`;
 }
 
 /** Every attempt, and what the new realm (if the browser makes one) must say. */
 /** A module whose own top-level declarations shadow `window` (and `TypeError`, which a failing guard must not call):
- *  they are bound before its first statement runs. The plugin also copies it into a srcdoc child. */
+ *  they are bound before its first statement runs. Self-contained (`__PORT__` is the sink), so that copied into a child
+ *  as that realm's ONLY script it is the first code there: nothing else can have locked the realm before it. */
 const SHADOWING_MODULE =
   "<script type=\"module\">function window(){} function self(){} function globalThis(){} function TypeError(){ top.postMessage({probe:'shadow-called'},'*') }" +
-  "top.postMessage({probe:'module-ran'},'*');rtc(document.defaultView,'module')</script>";
+  "top.postMessage({probe:'module-ran'},'*');var C=document.defaultView.RTCPeerConnection;var pc=new C({iceServers:[{urls:'stun:127.0.0.1:__PORT__'}]});" +
+  "pc.createDataChannel('x');pc.createOffer().then(function(o){return pc.setLocalDescription(o)})</script>";
+/** The plugin copies its module into a srcdoc child, alone. */
+const MODULE_ALONE_IN_CHILD =
+  "var m=document.querySelector('script[type=module]');var f=document.createElement('iframe');f.srcdoc='<scr'+'ipt type=module>'+m.textContent+'</scr'+'ipt>';document.body.appendChild(f)";
+/** What the guard says when it stops a script (`WEBRTC_PRELUDE_REFUSAL`), as the console shows it. */
+const REFUSED = 'WebRTC is not available in an editor frame';
 
-const ATTEMPTS: Record<string, { code: string; childMustReport?: string; extra?: string }> = {
+const ATTEMPTS: Record<string, { code: string; childMustReport?: string; extra?: string; consoleMust?: string }> = {
   direct: { code: "rtc(window,'direct')" },
   restore: { code: "try{delete window.RTCPeerConnection}catch(e){};Object.getOwnPropertyNames(window).forEach(function(k){if(/RTC/.test(k)&&typeof window[k]==='function')report('found:'+k)});rtc(window,'restore')" },
   'srcdoc-copy': { code: "var f=document.createElement('iframe');f.srcdoc=CHILD;document.body.appendChild(f)", childMustReport: 'child:no-ctor' },
@@ -82,11 +89,7 @@ const ATTEMPTS: Record<string, { code: string; childMustReport?: string; extra?:
   'navigate-refresh': { code: "var m=document.createElement('meta');m.httpEquiv='refresh';m.content='0;url='+URL.createObjectURL(new Blob([CHILD],{type:'text/html'}));document.head.appendChild(m)", childMustReport: 'child:no-ctor' },
   'navigate-fresh': { code: "location.href=URL.createObjectURL(new Blob([FRESH],{type:'text/html'}))" },
   'navigate-javascript': { code: "location.href='javascript:'+JSON.stringify(CHILD)" },
-  'module-shadow': {
-    code: "var m=document.querySelector('script[type=module]');var f=document.createElement('iframe');f.srcdoc='<scr'+'ipt>'+SELF+'</scr'+'ipt><scr'+'ipt type=module>'+m.textContent+'</scr'+'ipt>';document.body.appendChild(f)",
-    childMustReport: 'child:no-ctor',
-    extra: SHADOWING_MODULE,
-  },
+  'module-shadow': { code: MODULE_ALONE_IN_CHILD, extra: SHADOWING_MODULE, consoleMust: REFUSED },
 };
 
 /** A well-behaved bundle with awkward scripts: every one must run under the guard, with no policy violation. */
@@ -116,7 +119,7 @@ var CHILD='<scr'+'ipt>'+SELF+'</scr'+'ipt>';
 var FRESH='<scr'+'ipt>var U='+JSON.stringify(U)+';'+report+rtc+'rtc(window,"fresh")</scr'+'ipt>';
 if(!document.documentElement.hasAttribute('data-agent-root')){report('child-ran:'+location.protocol);rtc(window,'child')}
 else if(!window.__probeDone){window.__probeDone=1;report('agent-ran');${NESTED_ATTEMPTS[attempt]}}`;
-  const scripts = `${attempt === 'module-shadow' ? SHADOWING_MODULE : ''}<script>${js}</script>`;
+  const scripts = `${attempt === 'module-shadow' ? SHADOWING_MODULE.replaceAll('__PORT__', String(port)) : ''}<script>${js}</script>`;
   return editor === 'wicked-deck'
     ? `<!doctype html><html data-agent-root><head><style>.wi-slide{width:1280px;height:720px}</style></head><body data-wi-kind="deck"><section class="wi-slide" data-wid="s0" data-slide-id="s-a"><h1 data-wid="h0">A slide</h1>${scripts}</section><section class="wi-slide" data-wid="s1" data-slide-id="s-b"><h2 data-wid="h1">Two</h2></section></body></html>`
     : `<!doctype html><html data-agent-root><head><title>p</title></head><body><p data-wid="p0">A page</p>${scripts}</body></html>`;
@@ -127,7 +130,12 @@ const NESTED_ATTEMPTS: Record<string, string> = {
   'srcdoc-fresh': "var f=document.createElement('iframe');f.srcdoc=FRESH;document.body.appendChild(f)",
   handler: "document.body.insertAdjacentHTML('beforeend','<img src=x onerror=\"'+(report+rtc+'rtc(window,\\'handler\\')').replace(/&/g,'&amp;').replace(/\"/g,'&quot;')+'\">')",
   'javascript-child': "var f=document.createElement('iframe');f.src='javascript:'+JSON.stringify(CHILD);document.body.appendChild(f)",
-  'module-shadow': "",
+  'blob-child': "var f=document.createElement('iframe');f.src=URL.createObjectURL(new Blob([CHILD],{type:'text/html'}));document.body.appendChild(f)",
+  'data-child': "var f=document.createElement('iframe');f.src='data:text/html,'+encodeURIComponent(CHILD);document.body.appendChild(f)",
+  'navigate-blob': "location.href=URL.createObjectURL(new Blob([CHILD],{type:'text/html'}))",
+  'navigate-data': "location.href='data:text/html,'+encodeURIComponent(CHILD)",
+  worker: "try{var w=new Worker(URL.createObjectURL(new Blob(['postMessage(typeof RTCPeerConnection)'],{type:'text/javascript'})));w.onmessage=function(e){report('worker:'+e.data)}}catch(e){report('worker-threw')}",
+  'module-shadow': MODULE_ALONE_IN_CHILD,
 };
 
 interface Sink { port: number; packets: () => number; close: () => void }
@@ -217,10 +225,16 @@ describe('editor frames: zero WebRTC egress from a hostile plugin (Chromium, cre
   });
 
   /** One frame load: what the frames reported, the policy refusals in the console, and the packets the sink got. */
-  async function load(src: string, sink: Sink, settleMs = 1500, waitFor?: string): Promise<{ said: string[]; refused: string[]; packets: number }> {
+  async function load(src: string, sink: Sink, settleMs = 1500, waitFor?: string): Promise<{ said: string[]; refused: string[]; logs: string[]; packets: number }> {
     const page = await browser!.newPage();
     const refused: string[] = [];
-    page.on('console', (m) => { if (/Content Security Policy|Content-Security-Policy/.test(m.text())) refused.push(m.text().slice(0, 140)); });
+    const logs: string[] = [];
+    page.on('console', (m) => {
+      logs.push(m.text().slice(0, 160));
+      if (/Content Security Policy|Content-Security-Policy/.test(m.text())) refused.push(m.text().slice(0, 140));
+    });
+    // A script the guard stops throws: that reaches Playwright as an uncaught error, from whichever frame it ran in.
+    page.on('pageerror', (e) => logs.push(`pageerror: ${e.message}`.slice(0, 160)));
     try {
       await page.goto(`${origin}/shell?src=${encodeURIComponent(src)}`);
       await page.waitForFunction('window.R && window.R.length > 0', undefined, { timeout: 10_000 }).catch(() => undefined);
@@ -228,7 +242,7 @@ describe('editor frames: zero WebRTC egress from a hostile plugin (Chromium, cre
       if (waitFor !== undefined) await page.waitForFunction((m) => (window as unknown as { R: string[] }).R.includes(m), waitFor, { timeout: 10_000 }).catch(() => undefined);
       await page.waitForTimeout(settleMs);
       const said = (await page.evaluate('window.R')) as string[];
-      return { said, refused, packets: sink.packets() };
+      return { said, refused, logs, packets: sink.packets() };
     } finally {
       await page.close();
     }
@@ -257,7 +271,7 @@ describe('editor frames: zero WebRTC egress from a hostile plugin (Chromium, cre
   it('a third-party plugin: zero packets from every attempt, and every new realm it opened found no constructor', async (ctx) => {
     needBrowser(() => ctx.skip());
     const names = Object.keys(ATTEMPTS);
-    const results: Record<string, { said: string[]; refused: string[]; packets: number }> = {};
+    const results: Record<string, { said: string[]; refused: string[]; logs: string[]; packets: number }> = {};
     for (let i = 0; i < names.length; i += 6) {
       await Promise.all(names.slice(i, i + 6).map(async (name) => {
         const sink = await udpSink();
@@ -277,6 +291,8 @@ describe('editor frames: zero WebRTC egress from a hostile plugin (Chromium, cre
       expect(r.said.filter((m) => /rtc-created|offer-set|^found:|^module-ran|^shadow-called/.test(m)), name).toEqual([]);
       const must = ATTEMPTS[name]!.childMustReport;
       if (must !== undefined) expect(r.said, `${name}: the new realm ran and found no constructor`).toContain(must);
+      const stopped = ATTEMPTS[name]!.consoleMust;
+      if (stopped !== undefined) expect(r.logs.some((l) => l.includes(stopped)), `${name}: the guard stopped the script (${JSON.stringify(r.logs)})`).toBe(true);
     }
   }, 120_000);
 
@@ -340,6 +356,9 @@ describe('editor frames: zero WebRTC egress from a hostile plugin (Chromium, cre
           const doc = `${editor}-${attempt}`;
           agentDocs.set(doc, agentDoc(editor, attempt, sink.port));
           const page = await browser!.newPage({ viewport: { width: 1400, height: 900 } });
+          const logs: string[] = [];
+          page.on('console', (m) => logs.push(m.text().slice(0, 160)));
+          page.on('pageerror', (e) => logs.push(`pageerror: ${e.message}`.slice(0, 160)));
           try {
             await page.goto(`${origin}/host?id=${id}&doc=${encodeURIComponent(doc)}`);
             await page.waitForFunction("window.R.includes('agent-ran')", undefined, { timeout: 10_000 }).catch(() => undefined);
@@ -352,6 +371,8 @@ describe('editor frames: zero WebRTC egress from a hostile plugin (Chromium, cre
             if (guarded) {
               expect(sink.packets(), `${editor} ${attempt}: ${JSON.stringify(said)}`).toBe(0);
               expect(said.filter((m) => /rtc-created|^module-ran|^shadow-called/.test(m)), `${editor} ${attempt}`).toEqual([]);
+              if (attempt === 'srcdoc-copy') expect(said, `${editor}: the copy ran in the child and found no constructor`).toContain('child:no-ctor');
+              if (attempt === 'module-shadow') expect(logs.some((l) => l.includes(REFUSED)), `${editor}: the guard stopped the module`).toBe(true);
             }
             outcomes.push(`${attempt}=${sink.packets()}`);
           } finally {

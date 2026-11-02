@@ -113,6 +113,11 @@ describe('guardBundle: the prelude goes first in every inline script that runs, 
     expect(guard('<script type="text&#47;javascript">a</script><script type="&#x6d;odule">b</script>').hashes).toEqual([b64(P + 'a'), b64(P + 'b')]);
   });
 
+  it('an SVG script is external by href (src does nothing there); a value ending in "/" does not close its tag', () => {
+    const html = '<svg data-path=/a/><style><script>b</script></style><script src=x>c</script><script href=y>d</script></svg><script src=z>e</script>';
+    expect(inlineScripts(html).map((x) => [html.slice(x.start, x.end), x.runs])).toEqual([['b', true], ['c', true], ['d', false], ['e', false]]);
+  });
+
   it('inside <svg>/<math>, style and title are not raw text and a self-closing <script/> is empty; HTML <style> still is', () => {
     const html = '<svg><title><script>a</script></title><style><script>b</script></style><script/></svg><style><script>c</script></style><script>d</script>';
     expect(texts(html)).toEqual(['a', 'b', 'd']);
@@ -187,6 +192,20 @@ describe('the prelude: WebRTC is gone from the window, for good, before the edit
     let thrownVar: unknown;
     try { runInContext(`(function(){ ${P} var window; })()`, ctx); } catch (e) { thrownVar = e; }
     expect(thrownVar).toBe(WEBRTC_PRELUDE_REFUSAL);
+  });
+
+  it('a comment cannot be read short or long to move the prelude: it still runs before the first statement (review r2)', () => {
+    // A line comment that a backtracking pattern could end early (reading `"a";` as a directive), and a block comment it
+    // could stretch past its real end: JavaScript ends them at the line's end and at the first `*/`, and so does crew.
+    for (const body of ['//"a";\nwindow.seen = typeof RTCPeerConnection;', '/* */ window.seen = typeof RTCPeerConnection; /* */ "a";', '"use strict"; //"a";\nwindow.seen = typeof RTCPeerConnection;']) {
+      const ctx = fakeWindow();
+      runInContext(withPrelude(body), ctx);
+      expect(runInContext('window.seen', ctx), body).toBe('undefined');
+    }
+    expect(withPrelude('//"a";\nx()')).toBe(`${P}//"a";\nx()`);
+    expect(withPrelude('/* */ x(); /* */ "a";')).toBe(`${P}/* */ x(); /* */ "a";`);
+    expect(withPrelude('"a" // c\n;b()')).toBe(`"a" // c\n;${P}b()`);
+    expect(withPrelude('/* never closed')).toBe(`${P}/* never closed`);
   });
 
   it('a script with a hashbang and no directive still runs the prelude first (it is not swallowed by the hashbang)', () => {
