@@ -8508,7 +8508,14 @@ export interface ArtifactProposal {
   blocked: string | null;
 }
 
-/** What a person may change before Go (typed per kind; crew re-checks every edit with the rules of §4.2). */
+/**
+ * What a person may change before Go (typed per kind; crew re-checks every edit with the rules of §4.2). In this
+ * release (slice A2) crew takes `title`, `brief`, `sources` and `helpers` on a create, `ask` and `helpers` on a refine,
+ * `name` and `patch` on a theme, and `audience`, `show` and `helpers` on a demo; `project`, `repos`, `url` and `allow`
+ * are refused (400 `edits_invalid`) until the slices whose forms edit them. A source the person adds that cannot be used
+ * is refused too, never dropped. An interrupted (accepting) proposal resumes with its accepted choices: only its
+ * `helpers` may change.
+ */
 export interface ProposalEdits {
   /** create */
   title?: string;
@@ -8586,7 +8593,9 @@ export interface ChatProposalDecisionBody {
 
 /**
  * `POST /chats/:id/proposals/:pid` → 200: the proposal as decided (a repeat of the same decision answers the stored
- * result again, so a lost response is safe to retry). Refusals carry `code`: 403 `proposal_refused` (not a person),
+ * result again, so a lost response is safe to retry). Only a person answers: under `auth: required` a worker, agent or
+ * system token is refused; under `auth: off` every request is the local person (the daemon's documented local-mode
+ * posture, as for gates). Refusals carry `code`: 403 `proposal_refused` (not a person),
  * 404 (no such chat or proposal, or a chat that is not the caller's under `auth: required`: its existence is not
  * disclosed), 409 `proposal_superseded` | `proposal_decided` | `proposal_blocked` | `operation_unavailable` |
  * `chat_busy` | `document_busy` | `source_gone` | `helper_unavailable` | `chat_gone` | `proposal_reresolved` (the

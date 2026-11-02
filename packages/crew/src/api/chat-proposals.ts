@@ -60,6 +60,7 @@ import type {
 } from '../core/types.js';
 import type { CatalogSeed } from '../workflow-catalog/catalog-data.js';
 import { artifactExists, artifactHead, chatMount, parseArtifactRef, UNFILED_MOUNT } from './chat-context.js';
+import { tornTailPrefix } from './chat-transcripts.js';
 import type { MakeDigest } from './chat-scope.js';
 
 // ── the block ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -197,8 +198,13 @@ export function foldProposals(records: readonly ChatTranscriptRecord[]): Map<str
       const pid = r.proposal.pid;
       const held = out.get(pid);
       if (held !== undefined && (held.state === 'decided' || held.state === 'superseded')) continue;
-      // The newest proposal record is the chat's one open proposal: a new pid, or a re-resolution of an open or
-      // interrupted one (which replaces its frozen choices: the next Go uses the fresh card).
+      // A re-resolution of an older proposal while a newer one exists never takes the chat back: it is superseded.
+      if (held !== undefined && [...out.keys()].indexOf(pid) < out.size - 1) {
+        held.state = 'superseded';
+        continue;
+      }
+      // The newest proposal is the chat's one open proposal: a new pid, or a re-resolution of the newest (which replaces
+      // its frozen choices: the next Go uses the fresh card).
       for (const [other, v] of out) if (other !== pid && v.state === 'open') v.state = 'superseded';
       out.set(pid, { proposal: r.proposal, state: 'open', turnId: r.turnId });
     } else if (r.kind === 'proposal_accepting') {
@@ -281,6 +287,9 @@ class KeyedLock {
 export class LaunchOnceRegistry {
   private readonly dispatchers = new Map<ArtifactProposalKind, ProposalDispatcher>();
   private readonly lock = new KeyedLock();
+  /** Runs this daemon started per artifact (`<mount>/<doc>`): a document is busy while one is live, whichever chat
+   *  started it, even before the engine's run list names its document. */
+  private readonly byArtifact = new Map<string, Array<{ kind: ArtifactProposalKind; runId: string }>>();
 
   register(kind: ArtifactProposalKind, dispatcher: ProposalDispatcher): void {
     this.dispatchers.set(kind, dispatcher);
@@ -302,6 +311,12 @@ export class LaunchOnceRegistry {
     return d?.live === undefined ? false : d.live(runId);
   }
 
+  /** Whether a run this daemon started for the artifact is still live. */
+  async liveForArtifact(artifactRef: string): Promise<boolean> {
+    for (const r of this.byArtifact.get(artifactRef) ?? []) if (await this.live(r.kind, r.runId)) return true;
+    return false;
+  }
+
   launchOnce(dispatch: ProposalDispatch): Promise<ProposalResult> {
     const d = this.dispatchers.get(dispatch.kind);
     if (d === undefined) return Promise.reject(new Error(`nothing can start a ${dispatch.kind} on this daemon yet`));
@@ -309,6 +324,8 @@ export class LaunchOnceRegistry {
       const base = { runId: dispatch.identity.runId, artifactRef: dispatch.identity.artifactRef, stub: d.stub === true };
       if (await d.find(dispatch.identity)) return { ...base, adopted: true };
       await d.launch(dispatch);
+      const ref = dispatch.identity.artifactRef;
+      if (ref !== null) this.byArtifact.set(ref, [...(this.byArtifact.get(ref) ?? []).slice(-15), { kind: dispatch.kind, runId: dispatch.identity.runId }]);
       return { ...base, adopted: false };
     });
   }
@@ -350,7 +367,7 @@ export class RecordingStubDispatcher implements ProposalDispatcher {
     const fresh = !existsSync(this.file);
     appendFileSync(
       this.file,
-      `${JSON.stringify({ at: this.now(), kind: d.kind, pid: d.pid, chatId: d.chatId, runId: d.identity.runId, artifactRef: d.identity.artifactRef, actor: d.actor.id, title: d.resolution.what.title })}\n`,
+      `${fresh ? '' : tornTailPrefix(this.file)}${JSON.stringify({ at: this.now(), kind: d.kind, pid: d.pid, chatId: d.chatId, runId: d.identity.runId, artifactRef: d.identity.artifactRef, actor: d.actor.id, title: d.resolution.what.title })}\n`,
       { mode: 0o600 },
     );
     if (fresh && process.platform !== 'win32') chmodSync(this.file, 0o600);
@@ -418,8 +435,10 @@ export interface ChatProposalDeps {
   records(chatId: string): ChatTranscriptRecord[];
   /** Append one proposal record to the live transcript, or the kept copy once ended; `false` when neither exists. */
   append(chatId: string, record: ProposalRecord): boolean;
-  /** The chat's instance (its history entry's `createdAt`): a reused id is a different chat. `null` = unknown. */
-  instanceOf(chatId: string): number | null;
+  /** The chat's instance (its history entry's own nonce): a reused id is a different chat. `null` = unknown. */
+  instanceOf(chatId: string): string | null;
+  /** The chat's project (live, or as its history recorded it once it has ended); `null` = none. */
+  projectOf(chatId: string): string | null;
   /** The live chat, or `null` once it has ended. */
   chat(chatId: string): ProposalChat | null;
   /** Seats that can work now, in roster order (enabled, work-eligible, not signed out, not opt-in). */
@@ -434,8 +453,8 @@ export interface ChatProposalDeps {
   projectName(projectId: string): Promise<string | null>;
   /** This chat's attachments. */
   attachments(chatId: string): ReadonlyArray<{ id: string; name: string }>;
-  /** Agent steps of a workflow, when known. */
-  workflowSteps(name: string): Promise<number | null>;
+  /** Steps of a workflow as a launch in this project resolves it, when known. */
+  workflowSteps(name: string, projectId: string | null): Promise<number | null>;
   /** A completed run's cost when every agent step reported one, else `null`. */
   runCostUsd(view: SessionView): Promise<number | null>;
   registry: LaunchOnceRegistry;
@@ -503,10 +522,27 @@ function personWords(records: readonly ChatTranscriptRecord[], turnId: string): 
   return out.join('\n');
 }
 
-/** Whether the person's own words name a document by its ref (`mount/doc`, or `doc:mount/doc`), whole. */
+/**
+ * Whether the person's own words name a document by its whole ref (`mount/doc`, or `doc:mount/doc`; studio's `default`
+ * mount alias for an Unfiled one): a longer name or path (`mount/doc-2`, `mount/doc_x`, `mount/doc/notes`,
+ * `mount/doc.html`) is not it. Sentence punctuation after it is.
+ */
 function wordsNameRef(words: string, ref: string): boolean {
-  const esc = ref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(^|[^A-Za-z0-9._/-])(?:doc:)?${esc}(?![A-Za-z0-9-])`, 'u').test(words);
+  const spellings = ref.startsWith(`${UNFILED_MOUNT}/`) ? [ref, `default/${ref.slice(UNFILED_MOUNT.length + 1)}`] : [ref];
+  return spellings.some((r) => {
+    const esc = r.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(^|[^A-Za-z0-9._/-])(?:doc:)?${esc}(?![A-Za-z0-9_-]|[./][A-Za-z0-9_-])`, 'u').test(words);
+  });
+}
+
+/** The title an earlier turn's `context` record gave the document, when one did (the chat had it open). */
+function titleSeen(records: readonly ChatTranscriptRecord[], ref: string, turnId: string): string | null {
+  let title: string | null = null;
+  for (const r of records) {
+    if (r.kind === 'context' && r.artifact?.ref === ref) title = r.artifact.title;
+    if (r.kind === 'user' && r.turnId === turnId) break;
+  }
+  return title;
 }
 
 /** Why an edit was refused, as the 400 says it. */
@@ -576,9 +612,17 @@ export class ChatProposals {
     // Chained per chat: a proposal resolves after every earlier reply's, so a slow resolution can never be appended
     // after (and so supersede) a newer turn's card.
     const job = this.order.run(`chat\u0000${frame.chat}`, async () => {
+      // Nothing of a chat that ended and reused its id is read for this (older) reply.
+      if (this.deps.instanceOf(frame.chat) !== instance) return;
       const pid = `${frame.chat}:${turnId}`;
-      const has = (): boolean => this.deps.records(frame.chat).some((r) => r.kind === 'proposal' && r.proposal.pid === pid);
-      // One proposal per turn: a second seat answering the same turn never replaces (or re-opens) the first card.
+      const has = (): boolean => {
+        const rs = this.deps.records(frame.chat);
+        // One proposal per turn (a second seat answering the same turn never replaces it), and none for a turn once a
+        // later turn has its own card (a slow seat's late reply never takes the chat back).
+        const order = rs.filter((r) => r.kind === 'user').map((r) => r.turnId);
+        const mine = order.indexOf(turnId);
+        return rs.some((r) => r.kind === 'proposal' && (r.proposal.pid === pid || (r.proposal.turnId !== null && order.indexOf(r.proposal.turnId) > mine)));
+      };
       if (has()) return;
       const proposal = await this.resolve({ chatId: frame.chat, turnId, seat: frame.cliKey, block, records: this.deps.records(frame.chat) });
       if (proposal === null) return;
@@ -593,7 +637,7 @@ export class ChatProposals {
   }
 
   /** Append a record and send it on `/ws` — only while the chat is still the instance the caller acted on. */
-  private write(chatId: string, record: ProposalRecord, instance: number | null): boolean {
+  private write(chatId: string, record: ProposalRecord, instance: string | null): boolean {
     if (this.deps.instanceOf(chatId) !== instance) {
       this.log(`[proposals] chat ${chatId} ended and its id was reused — ${record.kind} not recorded on the new chat`);
       return false;
@@ -602,7 +646,7 @@ export class ChatProposals {
       this.log(`[proposals] chat ${chatId}: no transcript to record ${record.kind} on`);
       return false;
     }
-    const projectId = this.deps.chat(chatId)?.projectId ?? null;
+    const projectId = this.deps.projectOf(chatId);
     const frame: ChatProposalFrame = { type: 'chatProposal', chat: chatId, turn_id: record.turnId, record, ...(projectId !== null ? { project_id: projectId } : {}) };
     this.deps.broadcast(frame);
     return true;
@@ -660,7 +704,7 @@ export class ChatProposals {
         const open = binding?.artifact?.ref === ref.ref;
         const named = open || (binding?.named.docs ?? []).includes(ref.ref) || wordsNameRef(words, ref.ref);
         const mine = chatMount(chat.projectId);
-        const title = open && binding?.artifact !== undefined ? binding.artifact.title : humanDoc(ref.doc);
+        const title = open && binding?.artifact !== undefined ? binding.artifact.title : titleSeen(records, ref.ref, turnId) ?? humanDoc(ref.doc);
         // Authorized before anything of it is read: an unnamed or out-of-scope document is never resolved.
         if (!named) blocked.push(`${title} · not open or named in this chat`);
         else if (mine !== null && ref.mount !== mine) blocked.push(`${title} · not in this chat's project`);
@@ -686,7 +730,7 @@ export class ChatProposals {
         sources,
         repos: [],
         helpers,
-        time: await this.timeOf('refine', null),
+        time: await this.timeOf('refine', null, projectId),
         stops: STOPS.refine,
         filedIn: await filedIn(projectId),
         ...(target !== undefined ? { target } : {}),
@@ -740,7 +784,7 @@ export class ChatProposals {
       sources,
       repos,
       helpers,
-      time: await this.timeOf(kind, seed ?? null),
+      time: await this.timeOf(kind, seed ?? null, chat.projectId),
       stops: STOPS[kind],
       filedIn: await filedIn(chat.projectId),
       ...(demo !== undefined ? { demo } : {}),
@@ -771,11 +815,11 @@ export class ChatProposals {
   }
 
   /** Time and cost: the catalog's band, the workflow's steps, and medians over completed runs here. */
-  private async timeOf(kind: Exclude<ArtifactProposalKind, 'theme'>, seed: CatalogSeed | null): Promise<ProposalTime> {
+  private async timeOf(kind: Exclude<ArtifactProposalKind, 'theme'>, seed: CatalogSeed | null, projectId: string | null): Promise<ProposalTime> {
     const workflow = PROPOSAL_WORKFLOWS[kind];
     const minutes = seed?.typicalMinutes ?? null;
     const cost = seed?.cost ?? null;
-    const steps = await this.deps.workflowSteps(workflow).catch(() => null);
+    const steps = await this.deps.workflowSteps(workflow, projectId).catch(() => null);
     const done = (await this.deps.runs())
       .filter((v) => String(v.session.status) === 'completed' && workflowOf(v) === workflow)
       .map((v) => ({ v, start: secondsOf((v.session as { created_at?: unknown }).created_at), end: secondsOf((v.session as { ended_at?: unknown }).ended_at) }))
@@ -788,9 +832,17 @@ export class ChatProposals {
       const costs: number[] = [];
       for (const r of done.slice(0, COST_RUNS)) {
         const id = r.v.session.id;
-        if (!this.costs.has(id)) this.costs.set(id, await this.deps.runCostUsd(r.v).catch(() => null));
-        const c = this.costs.get(id);
-        if (typeof c === 'number') costs.push(c);
+        // A completed run's cost does not change: cached. A failed read is not (it is retried next time).
+        let c = this.costs.get(id);
+        if (c === undefined) {
+          try {
+            c = await this.deps.runCostUsd(r.v);
+            this.costs.set(id, c);
+          } catch {
+            c = null;
+          }
+        }
+        if (typeof c === 'number' && Number.isFinite(c)) costs.push(c);
       }
       med = {
         runs: done.length,
@@ -801,7 +853,7 @@ export class ChatProposals {
     }
     const parts: string[] = [];
     if (minutes !== null) parts.push(`About ${minutes[0]}–${minutes[1]} min`);
-    if (steps !== null) parts.push(`${steps} agent step${steps === 1 ? '' : 's'}`);
+    if (steps !== null) parts.push(`${steps} step${steps === 1 ? '' : 's'}`);
     if (med !== null) {
       const [one, many] = NOUN[kind];
       parts.push(`median of ${med.runs} past ${med.runs === 1 ? one : many} here: ${med.minutes} min${med.costUsd !== null ? `, $${med.costUsd.toFixed(2)}` : ''}`);
@@ -885,18 +937,28 @@ export class ChatProposals {
           strike(token, `run ${short}`, 'not a run id');
           continue;
         }
-        const hits = (await allRuns()).filter((v) => v.session.id === want || v.session.id.startsWith(want));
-        const exact = hits.find((v) => v.session.id === want);
-        const v = exact ?? (hits.length === 1 ? hits[0] : undefined);
+        // Authorized before anything of it is read: a seat's token is matched against the runs the person named in
+        // this chat (full ids), never against every run on the daemon — an unnamed id learns nothing of what exists.
+        // A source the person adds is theirs to name, and is looked up.
+        let candidates: string[];
+        if (ctx.personNamed) {
+          candidates = (await allRuns()).map((v) => v.session.id).filter((id) => id === want || id.startsWith(want));
+        } else {
+          candidates = (ctx.binding?.named.runs ?? []).filter((id) => id === want || id.startsWith(want));
+          if (candidates.length === 0) {
+            strike(`run:${want}`, `run ${short}`, 'not named in this chat');
+            continue;
+          }
+        }
+        const hit = candidates.includes(want) ? want : candidates.length === 1 ? candidates[0]! : null;
+        const v = hit === null ? undefined : (await allRuns()).find((x) => x.session.id === hit);
         if (v === undefined) {
-          strike(token, `run ${short}`, hits.length > 1 ? 'matches more than one run' : 'no such run on this daemon');
+          strike(`run:${want}`, `run ${short}`, candidates.length > 1 ? 'matches more than one run' : 'no such run on this daemon');
           continue;
         }
         const label = `run ${v.session.id.slice(0, 8)} · ${STATUS_WORDS[String(v.session.status)] ?? 'running'}`;
         const projectId = projectOfMount(runMount(v));
-        const named = ctx.personNamed || (ctx.binding?.named.runs ?? []).includes(v.session.id);
-        if (!named) strike(`run:${v.session.id}`, `run ${v.session.id.slice(0, 8)}`, 'not named in this chat', projectId);
-        else if (mine !== null && runMount(v) !== mine) strike(`run:${v.session.id}`, `run ${v.session.id.slice(0, 8)}`, "not in this chat's project", projectId);
+        if (mine !== null && runMount(v) !== mine) strike(`run:${v.session.id}`, `run ${v.session.id.slice(0, 8)}`, "not in this chat's project", projectId);
         else push({ token: `run:${v.session.id}`, label, status: 'ok', projectId });
         continue;
       }
@@ -909,7 +971,7 @@ export class ChatProposals {
         const projectId = projectOfMount(ref.mount);
         const open = ctx.binding?.artifact?.ref === ref.ref ? ctx.binding.artifact : undefined;
         const named = ctx.personNamed || open !== undefined || (ctx.binding?.named.docs ?? []).includes(ref.ref) || wordsNameRef(ctx.words, ref.ref);
-        const title = open?.title ?? humanDoc(ref.doc);
+        const title = open?.title ?? titleSeen(ctx.records, ref.ref, ctx.turnId) ?? humanDoc(ref.doc);
         if (!named) {
           strike(`doc:${ref.ref}`, title, 'not open or named in this chat', projectId);
           continue;
@@ -936,15 +998,17 @@ export class ChatProposals {
    * instance those checks passed against: nothing is read for, or written to, a chat that reused the id since. One
    * lock per proposal: a second tab or a double click waits for the first and gets its result.
    */
-  decide(chatId: string, pid: string, body: { decision: 'go' | 'not_now'; edits?: ProposalEdits | undefined }, actor: Actor, instance: number | null): Promise<DecideResult> {
-    return this.lock.run(`pid\u0000${chatId}\u0000${pid}`, () => this.decideLocked(chatId, pid, body, actor, instance));
+  decide(chatId: string, pid: string, body: { decision: 'go' | 'not_now'; edits?: ProposalEdits | undefined }, actor: Actor, instance: string | null): Promise<DecideResult> {
+    // Keyed by the pid alone (it is unique: `<chat>:<turn uuid>`), so the same proposal answered through an ended chat's
+    // archived alias still waits for an in-flight answer through its first name.
+    return this.lock.run(`pid\u0000${pid}`, () => this.decideLocked(chatId, pid, body, actor, instance));
   }
 
   private gone(chatId: string): DecideResult {
     return { code: 409, body: { code: 'chat_gone', error: `chat ${chatId} ended and its id was reused; this proposal can no longer be answered here` } };
   }
 
-  private async decideLocked(chatId: string, pid: string, body: { decision: 'go' | 'not_now'; edits?: ProposalEdits | undefined }, actor: Actor, instance: number | null): Promise<DecideResult> {
+  private async decideLocked(chatId: string, pid: string, body: { decision: 'go' | 'not_now'; edits?: ProposalEdits | undefined }, actor: Actor, instance: string | null): Promise<DecideResult> {
     if (this.deps.instanceOf(chatId) !== instance) return this.gone(chatId);
     const records = this.deps.records(chatId);
     const folded = foldProposals(records).get(pid);
@@ -973,8 +1037,21 @@ export class ChatProposals {
         if (!this.decided(chatId, folded.turnId, pid, actor, 'not_now', null, acc.resolution, acc.edits, instance)) return this.gone(chatId);
         return ok(reread());
       }
-      // Go again: the frozen choices and identity, re-checked.
-      return this.go(chatId, folded, acc.resolution, acc.edits, acc.identity, actor, instance);
+      // Go again: the frozen choices and identity, re-checked. Only the helpers may change (one may have signed out
+      // since); everything else stays as accepted.
+      let again = acc.resolution;
+      if (body.edits !== undefined) {
+        if (Object.keys(body.edits).some((k) => k !== 'helpers')) {
+          return { code: 400, body: { code: 'edits_invalid', error: 'an interrupted proposal resumes with the choices it was accepted with; only its helpers can change' } };
+        }
+        try {
+          again = await this.applyEdits(chatId, { ...folded, proposal: acc.resolution }, body.edits);
+        } catch (err) {
+          if (err instanceof EditRefusal) return { code: 400, body: { code: 'edits_invalid', error: err.message } };
+          throw err;
+        }
+      }
+      return this.go(chatId, folded, again, again === acc.resolution ? acc.edits : { ...(acc.edits ?? {}), ...body.edits }, acc.identity, actor, instance);
     }
     if (folded.state === 'superseded') {
       return { code: 409, body: { code: 'proposal_superseded', error: 'a newer proposal in this chat replaced this one', view: viewOf(folded) } };
@@ -1002,7 +1079,7 @@ export class ChatProposals {
    * The state checks, then `accepting`, the launch, and `decided` — under the chat's lock and the document's, so two
    * proposals of one chat (or two chats changing one document) can never both pass the busy check.
    */
-  private go(chatId: string, folded: FoldedProposal, resolution: ArtifactProposal, edits: ProposalEdits | null, identity: ProposalIdentity, actor: Actor, instance: number | null): Promise<DecideResult> {
+  private go(chatId: string, folded: FoldedProposal, resolution: ArtifactProposal, edits: ProposalEdits | null, identity: ProposalIdentity, actor: Actor, instance: string | null): Promise<DecideResult> {
     const docKey = resolution.kind === 'refine' && identity.artifactRef !== null ? identity.artifactRef : null;
     return this.lock.run(`chat\u0000${chatId}`, () =>
       docKey === null
@@ -1010,7 +1087,7 @@ export class ChatProposals {
         : this.lock.run(`doc\u0000${docKey}`, () => this.goLocked(chatId, folded, resolution, edits, identity, actor, instance)));
   }
 
-  private async goLocked(chatId: string, folded: FoldedProposal, resolution: ArtifactProposal, edits: ProposalEdits | null, identity: ProposalIdentity, actor: Actor, instance: number | null): Promise<DecideResult> {
+  private async goLocked(chatId: string, folded: FoldedProposal, resolution: ArtifactProposal, edits: ProposalEdits | null, identity: ProposalIdentity, actor: Actor, instance: string | null): Promise<DecideResult> {
     const kind = resolution.kind;
     const pid = resolution.pid;
     // Under the chat's lock: a newer proposal published while this one was being checked supersedes it.
@@ -1048,7 +1125,9 @@ export class ChatProposals {
       const head = root === null ? null : artifactHead(root, ref.doc);
       if (head === null) return { code: 409, body: { code: 'source_gone', error: `${resolution.target.title} is gone`, view: viewOf(folded) } };
       if (head !== resolution.target.base) {
-        const fresh: ArtifactProposal = { ...resolution, target: { ...resolution.target, base: head } };
+        // From the proposal as crew recorded it (never the refused request's edits): the person chooses again.
+        const recorded = folded.proposal;
+        const fresh: ArtifactProposal = { ...recorded, target: { ...(recorded.target ?? resolution.target), base: head } };
         if (!this.write(chatId, { at: this.now(), turnId: folded.turnId, kind: 'proposal', proposal: fresh }, instance)) return this.gone(chatId);
         const after = foldProposals(this.deps.records(chatId)).get(pid);
         return {
@@ -1077,7 +1156,7 @@ export class ChatProposals {
   }
 
   /** Record the answer (and audit exactly what was answered); `false` when the chat is no longer this instance. */
-  private decided(chatId: string, turnId: string, pid: string, actor: Actor, decision: 'go' | 'not_now', result: ProposalResult | null, resolution: ArtifactProposal, edits: ProposalEdits | null, instance: number | null): boolean {
+  private decided(chatId: string, turnId: string, pid: string, actor: Actor, decision: 'go' | 'not_now', result: ProposalResult | null, resolution: ArtifactProposal, edits: ProposalEdits | null, instance: string | null): boolean {
     if (!this.write(chatId, { at: this.now(), turnId, kind: 'proposal_decided', pid, actor: actor.id, decision, result }, instance)) return false;
     this.deps.audit(decision === 'go' ? 'chat.proposal.accepted' : 'chat.proposal.declined', actor, { chatId, pid, kind: resolution.kind, resolution, edits, result });
     return true;
@@ -1139,6 +1218,9 @@ export class ChatProposals {
       return { code: 'chat_busy', reason: `This chat already has a job running (run ${v.session.id.slice(0, 8)}). Wait, or stop that run.` };
     }
     if (artifactRef !== null && p.kind === 'refine') {
+      if (await this.deps.registry.liveForArtifact(artifactRef)) {
+        return { code: 'document_busy', reason: `“${p.target?.title ?? artifactRef}” is being revised. Wait, or stop that run.` };
+      }
       const ref = parseArtifactRef(artifactRef);
       if (ref !== null) {
         for (const v of runs) {
@@ -1223,6 +1305,9 @@ export class ChatProposals {
         words: personWords(records, f.turnId),
         personNamed: true,
       });
+      // A source the person adds that cannot be used is said back, never silently dropped from a launch.
+      const added = sources.find((src) => src.status === 'struck' && !p.sources.some((old) => old.token === src.token && old.status === 'struck'));
+      if (added !== undefined) throw new EditRefusal(`${added.label}: ${added.reason ?? 'it cannot be used'}`);
       next = { ...next, sources };
     }
     return next;

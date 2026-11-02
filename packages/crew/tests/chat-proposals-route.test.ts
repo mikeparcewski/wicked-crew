@@ -215,18 +215,19 @@ describe('chat proposals (server, A2)', () => {
     expect(p.sources).toEqual([
       { token: 'chat', label: 'this conversation', status: 'ok' },
       { token: `run:${RUN_A}`, label: 'run 29bbbfb1 · stopped', status: 'ok', projectId: 'mikes' },
-      { token: `run:${RUN_B}`, label: 'run 679ca85b', status: 'struck', reason: 'not named in this chat', projectId: null },
+      // Not named: struck as the seat wrote it, without looking it up (nothing of an unnamed run is disclosed).
+      { token: 'run:679ca85b', label: 'run 679ca85b', status: 'struck', reason: 'not named in this chat' },
       // Named by the person, but refused by A1's scope check (another project): never in `named`, so struck.
-      { token: `run:${RUN_OTHER}`, label: 'run 0bad0bad', status: 'struck', reason: 'not named in this chat', projectId: 'other' },
+      { token: 'run:0bad0bad', label: 'run 0bad0bad', status: 'struck', reason: 'not named in this chat' },
       { token: 'doc:mikes/coverage-deck', label: 'coverage deck', status: 'struck', reason: 'not open or named in this chat', projectId: 'mikes' },
-      { token: 'run:ffffffff', label: 'run ffffffff', status: 'struck', reason: 'no such run on this daemon' },
+      { token: 'run:ffffffff', label: 'run ffffffff', status: 'struck', reason: 'not named in this chat' },
       { token: 'nonsense', label: 'nonsense', status: 'struck', reason: 'not a source studio knows' },
     ]);
     expect(p.helpers?.seats).toHaveLength(2);
     expect(p.helpers?.seats[0]).toBe('claude');
     expect(p.helpers?.label).toMatch(/: one writes, the other checks$/);
     expect(p.time?.label).toContain('About 10–20 min');
-    expect(p.time?.label).toContain('3 agent steps');
+    expect(p.time?.label).toContain('3 steps');
     // The reply the person sees carries no block.
     const seat = (await records(stub, 'make-1')).find((r) => r.kind === 'seat');
     expect(seat !== undefined && seat.kind === 'seat' ? seat.text : null).toBe('I can make that.');
@@ -342,17 +343,16 @@ describe('chat proposals (server, A2)', () => {
     expect((await decide(stub, 'edit-1', p.pid, { decision: 'go', edits: { helpers: ['claude', 'claude'] } })).json()).toMatchObject({ code: 'edits_invalid' });
     expect((await decide(stub, 'edit-1', p.pid, { decision: 'go', edits: { project: 'other' } })).json()).toMatchObject({ code: 'edits_invalid' });
     expect((await decide(stub, 'edit-1', p.pid, { decision: 'go', edits: { title: '' } })).json()).toMatchObject({ code: 'edits_invalid' });
-    const go = await decide(stub, 'edit-1', p.pid, { decision: 'go', edits: { title: 'Edited', sources: ['chat', `run:${RUN_B}`, `run:${RUN_OTHER}`] } });
+    // Added by the person now: named by them, but still checked against the chat's project — and said back, never dropped.
+    const refused = await decide(stub, 'edit-1', p.pid, { decision: 'go', edits: { title: 'Edited', sources: ['chat', `run:${RUN_OTHER}`] } });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json()).toMatchObject({ code: 'edits_invalid', error: "run 0bad0bad: not in this chat's project" });
+    const go = await decide(stub, 'edit-1', p.pid, { decision: 'go', edits: { title: 'Edited', sources: ['chat', `run:${RUN_A}`] } });
     expect(go.statusCode, go.body).toBe(200);
     const resolution = (await records(stub, 'edit-1')).find((r) => r.kind === 'proposal_accepting');
     expect(resolution !== undefined && resolution.kind === 'proposal_accepting' ? resolution.resolution : null).toMatchObject({
       what: { title: 'Edited', label: 'Slides · Edited' },
-      sources: [
-        { token: 'chat', status: 'ok' },
-        // Added by the person now: named, but still checked against the chat's project.
-        { token: `run:${RUN_B}`, status: 'struck', reason: "not in this chat's project" },
-        { token: `run:${RUN_OTHER}`, status: 'struck', reason: "not in this chat's project" },
-      ],
+      sources: [{ token: 'chat', status: 'ok' }, { token: `run:${RUN_A}`, status: 'ok', projectId: 'mikes' }],
     });
   });
 

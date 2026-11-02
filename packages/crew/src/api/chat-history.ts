@@ -15,12 +15,14 @@
  */
 
 import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
 import type { ChatHistoryEntry, ChatStartedOn, ChatTranscriptRecord } from '../core/types.js';
 import { crewStateHome } from '../projects/state-home.js';
 import type { ChatAttachmentStore } from './chat-attachments.js';
 import { CHAT_ID } from './chat-scope.js';
+import { tornTailPrefix } from './chat-transcripts.js';
 
 export const CHAT_HISTORY_DEFAULT_LIMIT = 20;
 export const CHAT_HISTORY_MAX_LIMIT = 100;
@@ -40,6 +42,11 @@ interface StoredEntry {
   closedAt?: number;
   /** The opener's actor id (filters the list under `auth: required`). */
   actorId: string | null;
+  /** A2: this opening's own nonce (an id reused later, even in the same millisecond, is a different instance). Absent
+   *  on entries written before it existed: `createdAt` stands in. */
+  instance?: string;
+  /** A2: the project the chat was filed in, so an ended chat's proposal frames still say it. */
+  projectId?: string | null;
 }
 
 /** The transcript reader the history derives from (the live store). */
@@ -133,7 +140,7 @@ export class ChatHistoryStore {
   }
 
   /** A chat was opened: a fresh entry. A CLOSED entry under the same id is kept under a new id. */
-  opened(id: string, opts: { startedOn?: ChatStartedOn | undefined; cli: string | null; actorId: string | null }): void {
+  opened(id: string, opts: { startedOn?: ChatStartedOn | undefined; cli: string | null; actorId: string | null; projectId?: string | null }): void {
     if (!this.valid(id)) return;
     let prev = this.read(id);
     // An entry still `open` here is stale: this daemon only opens an id it does not hold, so that
@@ -156,6 +163,8 @@ export class ChatHistoryStore {
       createdAt: this.now(),
       status: 'open',
       actorId: opts.actorId,
+      instance: randomUUID(),
+      ...(opts.projectId !== undefined ? { projectId: opts.projectId } : {}),
     });
   }
 
@@ -229,14 +238,14 @@ export class ChatHistoryStore {
     if (e === null || e.status !== 'closed') return false;
     const kept = this.keptPath(e.id);
     if (!existsSync(kept)) return false;
-    appendFileSync(kept, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+    appendFileSync(kept, `${tornTailPrefix(kept)}${JSON.stringify(record)}\n`, { mode: 0o600 });
     return true;
   }
 
-  /** The entry's status and instance (its `createdAt`: an id reused later is another instance), or null. */
-  stateOf(id: string): { status: 'open' | 'closed'; instance: number; actorId: string | null } | null {
+  /** The entry's status, instance (its own nonce; `createdAt` for an older entry) and project, or null. */
+  stateOf(id: string): { status: 'open' | 'closed'; instance: string; actorId: string | null; projectId: string | null } | null {
     const e = this.read(id);
-    return e === null ? null : { status: e.status, instance: e.createdAt, actorId: e.actorId };
+    return e === null ? null : { status: e.status, instance: e.instance ?? String(e.createdAt), actorId: e.actorId, projectId: e.projectId ?? null };
   }
 
   /** The records of a chat: the live transcript while open, the kept copy once closed. */

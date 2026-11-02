@@ -27,7 +27,7 @@
  * the worker Read fence — landed with core-ts 0.7.26), and named in `state-home-registry.ts`.
  */
 
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { appendFileSync, chmodSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { ChatAttachment, ChatCitationItem, ChatContextBinding, ChatTranscriptRecord, ChatUsage, CoreEvent, DecisionView } from '../core/types.js';
@@ -42,6 +42,26 @@ export const CHAT_TRANSCRIPTS_DIRNAME = 'chats';
 // the deliver composer (crew#886) applies the same rewrite without importing this store.
 export { rewriteHostPaths, withRootAliases, type ChatRepoRoot } from '../core/host-paths.js';
 import { rewriteHostPaths, withRootAliases, type ChatRepoRoot } from '../core/host-paths.js';
+
+/**
+ * A2 (xreview r2): `'\n'` when the file's last byte is not one — a crash mid-append left a torn line, and the next
+ * record must start on its own line rather than be swallowed into the torn one (readers skip a malformed line).
+ */
+export function tornTailPrefix(file: string): string {
+  let fd: number | null = null;
+  try {
+    fd = openSync(file, 'r');
+    const size = fstatSync(fd).size;
+    if (size === 0) return '';
+    const b = Buffer.alloc(1);
+    readSync(fd, b, 0, 1, size - 1);
+    return b[0] === 0x0a ? '' : '\n';
+  } catch {
+    return '';
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+}
 
 /** Where the transcripts live: under the daemon's state home, like every other crew store. */
 export function defaultChatTranscriptsDir(): string {
@@ -60,6 +80,26 @@ function usageOf(value: unknown): ChatUsage | null {
     cacheCreationTokens: num('cacheCreationTokens'),
     costUsd: typeof u['costUsd'] === 'number' && Number.isFinite(u['costUsd']) ? (u['costUsd'] as number) : null,
   };
+}
+
+/**
+ * A2: host paths in a `wicked-make` block's string values, rewritten like the reply's — on the PARSED values, so the
+ * JSON stays valid whatever a root's name holds and an escaped (Windows) path is matched as written. A body that is not
+ * JSON is left as it is (the resolver refuses it anyway).
+ */
+function rewriteBlockPaths(body: string, roots: ReadonlyArray<ChatRepoRoot>): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return body;
+  }
+  const walk = (v: unknown): unknown =>
+    typeof v === 'string' ? rewriteHostPaths(v, roots)
+      : Array.isArray(v) ? v.map(walk)
+        : v !== null && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)]))
+          : v;
+  return JSON.stringify(walk(parsed));
 }
 
 export class ChatTranscriptStore {
@@ -111,7 +151,7 @@ export class ChatTranscriptStore {
     if (file === null) return;
     mkdirSync(this.dir, { recursive: true, mode: 0o700 });
     const fresh = !existsSync(file);
-    appendFileSync(file, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+    appendFileSync(file, `${fresh ? '' : tornTailPrefix(file)}${JSON.stringify(record)}\n`, { mode: 0o600 });
     // `mode` applies on creation only; enforce on the first write and on the directory (mkdir's
     // `mode` is masked by the umask) — the transcript is the operator's conversation.
     if (process.platform !== 'win32') {
@@ -266,7 +306,7 @@ export class ChatTranscriptStore {
       text = made.text;
       // The block's words reach a card (and the transcript) too: host paths in them are rewritten like the reply's.
       const blockRoots = this.chatRoots.get(chatId);
-      const bodies = blockRoots !== undefined && blockRoots.length > 0 ? made.blocks.map((b) => rewriteHostPaths(b, blockRoots)) : made.blocks;
+      const bodies = blockRoots !== undefined && blockRoots.length > 0 ? made.blocks.map((b) => rewriteBlockPaths(b, blockRoots)) : made.blocks;
       if (bodies.length > 0) this.makeBlocks.set(key, bodies);
       else this.makeBlocks.delete(key);
     }

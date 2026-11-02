@@ -56,7 +56,7 @@ class FakeLauncher implements ProposalDispatcher {
 interface Rig {
   svc: ChatProposals;
   records: Map<string, ChatTranscriptRecord[]>;
-  instances: Map<string, number>;
+  instances: Map<string, string>;
   chats: Map<string, ProposalChat>;
   runs: SessionView[];
   chatOfRun: Map<string, string>;
@@ -96,6 +96,7 @@ function rig(): Rig {
       return true;
     },
     instanceOf: (c) => r.instances.get(c) ?? null,
+    projectOf: (c) => r.chats.get(c)?.projectId ?? null,
     chat: (c) => r.chats.get(c) ?? null,
     rosterEligible: () => r.roster,
     runs: async () => {
@@ -125,7 +126,7 @@ function rig(): Rig {
 function chatWith(r: Rig, chatId: string, o: { projectId?: string | null; words?: string; namedRuns?: string[]; namedDocs?: string[]; open?: string; owner?: boolean; analysis?: boolean } = {}): string {
   const turnId = `t${(r.records.get(chatId)?.length ?? 0) + 1}`;
   if (!r.records.has(chatId)) r.records.set(chatId, []);
-  if (!r.instances.has(chatId)) r.instances.set(chatId, 1);
+  if (!r.instances.has(chatId)) r.instances.set(chatId, 'i1');
   r.chats.set(chatId, { projectId: o.projectId ?? null, repos: [{ id: 'r-crew', name: 'wicked-crew' }], lead: 'claude', seats: ['claude'], analysis: o.analysis === true });
   const list = r.records.get(chatId)!;
   list.push({ at: 1, turnId, kind: 'user', text: o.words ?? 'make it', seats: ['claude'], ...(o.owner === false ? {} : { owner: true as const }) });
@@ -172,6 +173,15 @@ describe('the resolver', () => {
     expect(await propose(r, 'c1', t, { refine: 'mikes/coverage-deck', ask: 'timeline' })).toMatchObject({ blocked: null, target: { base: 2 } });
     const t2 = chatWith(r, 'c2', { words: 'Change mikes/coverage-deck please', owner: false });
     expect((await propose(r, 'c2', t2, { refine: 'mikes/coverage-deck', ask: 'x' }))?.blocked).toMatch(/not open or named/);
+    // A longer name or path is not the document: nothing of it is read.
+    for (const words of ['see mikes/coverage-deck-2', 'see mikes/coverage-deck/notes', 'see mikes/coverage-deck.html', 'see mikes/coverage-deck_x']) {
+      const id = `p-${words.length}-${words.at(-1)}`;
+      const t3 = chatWith(r, id, { words });
+      expect((await propose(r, id, t3, { refine: 'mikes/coverage-deck', ask: 'x' }))?.blocked, words).toMatch(/not open or named/);
+    }
+    // Sentence punctuation after the ref is still the ref.
+    const t4 = chatWith(r, 'c4', { words: 'Please change mikes/coverage-deck.' });
+    expect((await propose(r, 'c4', t4, { refine: 'mikes/coverage-deck', ask: 'x' }))?.blocked).toBeNull();
   });
 
   it('a demo address must be one the person gave, whole: a prefix, a substring or a query-string URL is not', async () => {
@@ -199,6 +209,18 @@ describe('the resolver', () => {
     const ps = (r.records.get('c1') ?? []).filter((x) => x.kind === 'proposal');
     expect(ps).toHaveLength(1);
     expect(ps[0]!.kind === 'proposal' && ps[0]!.proposal.what.title).toBe('First');
+  });
+
+  it('a late reply to an earlier turn never takes the chat back from a newer turn’s card', async () => {
+    const r = rig();
+    const t1 = chatWith(r, 'c1');
+    const t2 = chatWith(r, 'c1');
+    await propose(r, 'c1', t2, { entry: 'presentation', title: 'Newer' });
+    r.svc.onReply({ chat: 'c1', cliKey: 'codex', turnId: t1, ok: true, blocks: [JSON.stringify({ entry: 'presentation', title: 'Late' })] });
+    await r.svc.settled();
+    const f = foldProposals(r.records.get('c1')!);
+    expect([...f.keys()]).toStrictEqual([`c1:${t2}`]);
+    expect(f.get(`c1:${t2}`)?.state).toBe('open');
   });
 
   it('resolutions publish in reply order: a slow older one never supersedes a newer one', async () => {
@@ -229,7 +251,7 @@ describe('the resolver', () => {
     const t = chatWith(r, 'c1');
     const two = await propose(r, 'c1', t, { entry: 'document-static', title: 'x' });
     expect(two?.time).toMatchObject({ minutes: [10, 20], steps: 3, median: { runs: 3, minutes: 9, costUsd: null, costRuns: 2 } });
-    expect(two?.time?.label).toBe('About 10–20 min · 3 agent steps · median of 3 past documents here: 9 min');
+    expect(two?.time?.label).toBe('About 10–20 min · 3 steps · median of 3 past documents here: 9 min');
     r.runs.push(run('costed-5', { status: 'completed', workflow: 'interactive-draft', created: 0, ended: 420 }));
     const t2 = chatWith(r, 'c2');
     expect((await propose(r, 'c2', t2, { entry: 'document-static', title: 'x' }))?.time?.median).toMatchObject({ runs: 4, costUsd: 0.7, costRuns: 3 });
@@ -255,11 +277,11 @@ describe('the accept flow', () => {
     const p = (await propose(r, 'c1', t, { entry: 'presentation', title: 'x' }))!;
     r.runs = [run('busy-run', { status: 'executing' })];
     r.chatOfRun.set('busy-run', 'c1');
-    const go = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 1);
+    const go = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
     expect(go).toMatchObject({ code: 409, body: { code: 'chat_busy' } });
     expect(kinds(r, 'c1')).toStrictEqual(['proposal']);
     expect(r.launcher.launched).toHaveLength(0);
-    expect((await r.svc.decide('c1', p.pid, { decision: 'not_now' }, ME, 1)).code).toBe(200);
+    expect((await r.svc.decide('c1', p.pid, { decision: 'not_now' }, ME, 'i1')).code).toBe(200);
     expect(kinds(r, 'c1')).toStrictEqual(['proposal', 'proposal_decided']);
   });
 
@@ -268,7 +290,7 @@ describe('the accept flow', () => {
     const t = chatWith(r, 'c1', { open: 'mikes/coverage-deck' });
     const p = (await propose(r, 'c1', t, { refine: 'mikes/coverage-deck', ask: 'x' }))!;
     r.runs = [run('revising', { status: 'executing', project: 'mikes', doc: 'coverage-deck' })];
-    expect(await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 1)).toMatchObject({ code: 409, body: { code: 'document_busy' } });
+    expect(await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1')).toMatchObject({ code: 409, body: { code: 'document_busy' } });
     expect(r.launcher.launched).toHaveLength(0);
   });
 
@@ -281,7 +303,7 @@ describe('the accept flow', () => {
     r.records.get('c1')!.push({ at: 3, turnId: t1, kind: 'proposal_accepting', pid: p1.pid, actor: 'maria', edits: null, resolution: p1, identity: { artifactRef: '_unfiled/one', runId: proposalRunId(p1.pid) } });
     const t2 = chatWith(r, 'c1');
     const p2 = (await propose(r, 'c1', t2, { entry: 'presentation', title: 'two' }))!;
-    const [a, b] = await Promise.all([r.svc.decide('c1', p1.pid, { decision: 'go' }, ME, 1), r.svc.decide('c1', p2.pid, { decision: 'go' }, ME, 1)]);
+    const [a, b] = await Promise.all([r.svc.decide('c1', p1.pid, { decision: 'go' }, ME, 'i1'), r.svc.decide('c1', p2.pid, { decision: 'go' }, ME, 'i1')]);
     expect([a.code, b.code].sort()).toStrictEqual([200, 409]);
     expect([a, b].find((x) => x.code === 409)?.body).toMatchObject({ code: 'chat_busy' });
     expect(r.launcher.launched).toHaveLength(1);
@@ -293,7 +315,7 @@ describe('the accept flow', () => {
     const p = (await propose(r, 'c1', t, { refine: 'mikes/coverage-deck', ask: 'x' }))!;
     let release!: () => void;
     r.hold.runs = new Promise<void>((res) => { release = res; });
-    const pending = r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 1);
+    const pending = r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
     await new Promise((res) => setTimeout(res, 10));
     doc('mikes', 'coverage-deck', 3); // a hand edit lands meanwhile
     r.hold.runs = null;
@@ -309,10 +331,10 @@ describe('the accept flow', () => {
     const p = (await propose(r, 'c1', t, { entry: 'presentation', sources: ['run:29bbbfb1-aaaa'] }))!;
     expect(p.sources[0]?.status).toBe('ok');
     r.runs = [run('29bbbfb1-aaaa', { project: 'other' })];
-    expect((await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 1)).body).toMatchObject({ code: 'source_gone', error: 'run 29bbbfb1 · stopped moved to another project since this was proposed' });
+    expect((await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1')).body).toMatchObject({ code: 'source_gone', error: 'run 29bbbfb1 · stopped moved to another project since this was proposed' });
     r.runs = [run('29bbbfb1-aaaa', { project: 'mikes' })];
     r.roster = [{ key: 'claude', name: 'Claude Code' }];
-    expect((await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 1)).body).toMatchObject({ code: 'helper_unavailable', error: "codex can't work now; pick another helper" });
+    expect((await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1')).body).toMatchObject({ code: 'helper_unavailable', error: "codex can't work now; pick another helper" });
     expect(r.launcher.launched).toHaveLength(0);
     expect(kinds(r, 'c1')).toStrictEqual(['proposal']);
   });
@@ -323,13 +345,56 @@ describe('the accept flow', () => {
     const t = chatWith(r, 'c1');
     const p = (await propose(r, 'c1', t, { entry: 'presentation', title: 'Original' }))!;
     expect(p.blocked).toBe('Needs a second helper to check it');
-    expect((await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 1)).body).toMatchObject({ code: 'proposal_blocked' });
+    expect((await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1')).body).toMatchObject({ code: 'proposal_blocked' });
     r.roster = [{ key: 'claude', name: 'Claude Code' }, { key: 'pi', name: 'Pi' }];
-    const go = await r.svc.decide('c1', p.pid, { decision: 'go', edits: { helpers: ['claude', 'pi'], title: 'Edited' } }, ME, 1);
+    const go = await r.svc.decide('c1', p.pid, { decision: 'go', edits: { helpers: ['claude', 'pi'], title: 'Edited' } }, ME, 'i1');
     expect(go.code).toBe(200);
     expect(go.body).toMatchObject({ view: { state: 'decided', proposal: { what: { title: 'Edited' }, helpers: { seats: ['claude', 'pi'] }, blocked: null } } });
     // A retry answers the same, edited card.
-    expect((await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 1)).body).toMatchObject({ view: { proposal: { what: { title: 'Edited' } } } });
+    expect((await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1')).body).toMatchObject({ view: { proposal: { what: { title: 'Edited' } } } });
+  });
+
+  it('two chats refining one document at once start ONE revision (the document lock and its live run)', async () => {
+    const r = rig();
+    r.launcher.stayLive = true;
+    const ta = chatWith(r, 'ca', { open: 'mikes/coverage-deck' });
+    const tb = chatWith(r, 'cb', { open: 'mikes/coverage-deck' });
+    const pa = (await propose(r, 'ca', ta, { refine: 'mikes/coverage-deck', ask: 'a' }))!;
+    const pb = (await propose(r, 'cb', tb, { refine: 'mikes/coverage-deck', ask: 'b' }))!;
+    const [a, b] = await Promise.all([r.svc.decide('ca', pa.pid, { decision: 'go' }, ME, 'i1'), r.svc.decide('cb', pb.pid, { decision: 'go' }, ME, 'i1')]);
+    expect([a.code, b.code].sort()).toStrictEqual([200, 409]);
+    expect([a, b].find((x) => x.code === 409)?.body).toMatchObject({ code: 'document_busy' });
+    expect(r.launcher.launched).toHaveLength(1);
+  });
+
+  it('an interrupted Go whose helper signed out resumes with two working helpers chosen now (and nothing else changed)', async () => {
+    const r = rig();
+    const t = chatWith(r, 'c1');
+    const p = (await propose(r, 'c1', t, { entry: 'presentation', title: 'Keep' }))!;
+    r.records.get('c1')!.push({ at: 3, turnId: t, kind: 'proposal_accepting', pid: p.pid, actor: 'maria', edits: null, resolution: p, identity: { artifactRef: '_unfiled/keep', runId: proposalRunId(p.pid) } });
+    r.roster = [{ key: 'claude', name: 'Claude Code' }, { key: 'pi', name: 'Pi' }];
+    expect((await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1')).body).toMatchObject({ code: 'helper_unavailable' });
+    expect((await r.svc.decide('c1', p.pid, { decision: 'go', edits: { title: 'Changed' } }, ME, 'i1')).body).toMatchObject({ code: 'edits_invalid' });
+    const go = await r.svc.decide('c1', p.pid, { decision: 'go', edits: { helpers: ['claude', 'pi'] } }, ME, 'i1');
+    expect(go.code).toBe(200);
+    expect(go.body).toMatchObject({ view: { proposal: { what: { title: 'Keep' }, helpers: { seats: ['claude', 'pi'] } } } });
+    expect(r.launcher.launched[0]?.identity.runId).toBe(proposalRunId(p.pid));
+  });
+
+  it('a stub dispatch found after a crash is adopted and recorded as a stub', async () => {
+    const r = rig();
+    const t = chatWith(r, 'c1');
+    const p = (await propose(r, 'c1', t, { entry: 'presentation' }))!;
+    const identity = { artifactRef: '_unfiled/x', runId: proposalRunId(p.pid) };
+    r.records.get('c1')!.push({ at: 3, turnId: t, kind: 'proposal_accepting', pid: p.pid, actor: 'maria', edits: null, resolution: p, identity });
+    // The launcher already has it, and is the test configuration's stub.
+    Object.assign(r.launcher, { stub: true });
+    r.launcher.launched.push({ kind: 'create', pid: p.pid, chatId: 'c1', actor: ME, identity, resolution: p });
+    const go = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
+    expect(go.body).toMatchObject({ view: { state: 'decided', result: { adopted: true, stub: true } } });
+    const decided = r.records.get('c1')!.find((x) => x.kind === 'proposal_decided');
+    expect(decided).toMatchObject({ result: { adopted: true, stub: true } });
+    expect(r.launcher.launched).toHaveLength(1);
   });
 
   it('a failed launch keeps accepting (with the view); Go again starts it once; a crash-adopted stub stays a stub', async () => {
@@ -337,10 +402,10 @@ describe('the accept flow', () => {
     const t = chatWith(r, 'c1');
     const p = (await propose(r, 'c1', t, { entry: 'presentation' }))!;
     r.launcher.fail = 'engine down';
-    const failed = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 1);
+    const failed = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
     expect(failed).toMatchObject({ code: 502, body: { code: 'launch_failed', view: { state: 'accepting' } } });
     r.launcher.fail = null;
-    expect((await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 1)).code).toBe(200);
+    expect((await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
     expect(r.launcher.launched).toHaveLength(1);
     // Adoption reports the launcher's stub flag.
     const stubReg = new LaunchOnceRegistry();
@@ -355,10 +420,10 @@ describe('the accept flow', () => {
     const p = (await propose(r, 'c1', t, { entry: 'presentation' }))!;
     let release!: () => void;
     r.hold.runs = new Promise<void>((res) => { release = res; });
-    const pending = r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 1);
+    const pending = r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
     await new Promise((res) => setTimeout(res, 10));
     // The id is reused: a new instance with its own (empty) transcript.
-    r.instances.set('c1', 2);
+    r.instances.set('c1', 'i2');
     r.records.set('c1', []);
     r.hold.runs = null;
     release();
@@ -374,5 +439,30 @@ describe('the fence', () => {
     const out = splitMakeBlocks(text);
     expect(out.text).toBe('I can make that.\nDone.');
     expect(out.text).not.toContain('presentation');
+    // The first opening's body runs to the one real close: one (unparseable) block, nothing truncated.
+    expect(out.blocks).toHaveLength(1);
+    expect(out.truncated).toBe(false);
+  });
+
+  it('a decisions block left open never eats a make block: neither shows', async () => {
+    const { splitDecisionsBlock } = await import('../src/decisions/chat-recorder.js');
+    const text = 'Sure.\n```wicked-decisions\n{"items":[]\n```wicked-make\n{"entry":"presentation"}\n```\n';
+    const d = splitDecisionsBlock(text);
+    expect(d.text).toBe('Sure.');
+    expect(splitMakeBlocks(d.text).text).toBe('Sure.');
+  });
+});
+
+describe('the fold (r2)', () => {
+  it('an older proposal re-resolved after a newer one exists is superseded, never re-opened over it', () => {
+    const p = (pid: string): ArtifactProposal => ({ pid, chatId: 'c1', turnId: pid.split(':')[1]!, kind: 'refine', seat: 'claude', what: { entry: null, title: 'D', label: 'Change · D', outcome: null }, brief: null, reason: null, sources: [], repos: [], helpers: null, time: null, stops: null, filedIn: { projectId: null, label: 'x' }, blocked: null });
+    const f = foldProposals([
+      { at: 1, turnId: 't1', kind: 'proposal', proposal: p('c1:t1') },
+      { at: 2, turnId: 't1', kind: 'proposal_accepting', pid: 'c1:t1', actor: 'm', edits: null, resolution: p('c1:t1'), identity: { artifactRef: null, runId: 'r' } },
+      { at: 3, turnId: 't2', kind: 'proposal', proposal: p('c1:t2') },
+      { at: 4, turnId: 't1', kind: 'proposal', proposal: p('c1:t1') },
+    ]);
+    expect(f.get('c1:t1')?.state).toBe('superseded');
+    expect(f.get('c1:t2')?.state).toBe('open');
   });
 });

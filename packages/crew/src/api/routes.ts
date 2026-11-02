@@ -4218,6 +4218,8 @@ export function registerRoutes(
             startedOn: b.startedOn,
             cli: b.primary ?? clis[0] ?? null,
             actorId: security.authMode === 'required' ? actorOf(req).id : null,
+            // A2: an ended chat's proposal frames still name its project.
+            projectId: scope.projectId ?? null,
           });
         } catch (err) {
           req.log.warn({ chatId }, `chat history entry not written: ${message(err)}`);
@@ -4309,12 +4311,24 @@ export function registerRoutes(
       .filter((u) => (u as unknown as { routing?: { method?: string } | null }).routing?.method !== 'tool' && u.assigned_cli !== null)
       .map((u) => u.ord);
     if (agentOrds.length === 0) return null;
+    // Every attempt the engine dispatched for an agent step must have reported a priced usage frame; any unpriced
+    // frame, or a dispatched attempt with none (a retry on a seat that reports nothing), makes the cost unknown.
+    const dispatched = new Set<string>();
+    const priced = new Set<string>();
     const byOrd = new Map<number, number>();
     for (const e of (await adapter.runEvents(view.session.id)) as Array<Record<string, unknown>>) {
-      if (e['type'] !== 'cliUsage' || typeof e['costUsd'] !== 'number' || typeof e['ord'] !== 'number') continue;
-      byOrd.set(e['ord'], (byOrd.get(e['ord']) ?? 0) + e['costUsd']);
+      const ord = e['ord'] ?? e['unitOrd'];
+      if (typeof ord !== 'number' || !agentOrds.includes(ord)) continue;
+      const attempt = typeof e['attempt'] === 'number' ? e['attempt'] : 0;
+      if (e['type'] === 'unitDispatched') dispatched.add(`${ord}:${attempt}`);
+      if (e['type'] !== 'cliUsage') continue;
+      const cost = e['costUsd'];
+      if (typeof cost !== 'number' || !Number.isFinite(cost) || cost < 0) return null;
+      priced.add(`${ord}:${attempt}`);
+      byOrd.set(ord, (byOrd.get(ord) ?? 0) + cost);
     }
     if (agentOrds.some((o) => !byOrd.has(o))) return null;
+    if ([...dispatched].some((k) => !priced.has(k))) return null;
     return agentOrds.reduce((sum, o) => sum + (byOrd.get(o) ?? 0), 0);
   };
   const chatProposals = new ChatProposals({
@@ -4326,6 +4340,7 @@ export function registerRoutes(
       return chatTranscripts?.appendProposalRecord(chatId, record) ?? false;
     },
     instanceOf: (chatId) => chatHistory?.stateOf(chatId)?.instance ?? null,
+    projectOf: (chatId) => chatScopes.get(chatId)?.projectId ?? chatHistory?.stateOf(chatId)?.projectId ?? null,
     chat: (chatId) => {
       const scope = chatScopes.get(chatId);
       if (scope === undefined) return null;
@@ -4348,10 +4363,12 @@ export function registerRoutes(
     docsRoot: (projectId) => projectDocsRoot(adapter, projectSettings, projectId),
     projectName: async (projectId) => (await adapter.projectGet(projectId).catch(() => null))?.name ?? null,
     attachments: (chatId) => chatAttachments.list(chatId).map((a) => ({ id: a.id, name: a.name })),
-    workflowSteps: async (name) => {
+    workflowSteps: async (name, projectId) => {
       const phases = adapter.getWorkflow(name)?.phases;
       if (phases !== undefined && phases.length > 0) return phases.length;
-      const preset = (await adapter.listPresets().catch(() => [] as Preset[])).find((p) => p.name === name);
+      // The preset a launch in this project resolves: a project row wins over a global one.
+      const presets = await adapter.listPresets(projectId ?? undefined).catch(() => [] as Preset[]);
+      const preset = presets.find((p) => p.name === name && p.scope !== 'global') ?? presets.find((p) => p.name === name);
       return preset !== undefined && preset.steps.length > 0 ? preset.steps.length : null;
     },
     runCostUsd: proposalCosts,

@@ -139,7 +139,9 @@ export function splitDecisionsBlock(text: string): { text: string; block: string
   const lineStart = opening.index + opening[1]!.length;
   const afterOpen = text.indexOf('\n', lineStart);
   if (afterOpen === -1) return { text: trimEnd(text.slice(0, lineStart)), block: null, truncated: true };
-  const close = /\n[ \t]*```/u.exec(text.slice(afterOpen));
+  // A close is a line of three backticks alone (A2): another fence's opening (```wicked-make, ```json) never ends it,
+  // so one hidden block can never leave another's body in the reply.
+  const close = /\n[ \t]*```[ \t]*(?=\r?\n|$)/u.exec(text.slice(afterOpen));
   if (close === null) return { text: trimEnd(text.slice(0, lineStart)), block: null, truncated: true };
   const closeAt = afterOpen + close.index;
   const body = text.slice(afterOpen + 1, closeAt).trim();
