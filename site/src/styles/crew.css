@@ -784,6 +784,9 @@ code {
 
 /* ── Reduced motion: end states, no movement ─────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
+  /* the install command is simply there, even if the typing had been armed before the switch */
+  .type.is-armed, .type.is-typing { clip-path: none; animation: none; }
+  .type.is-typing::after { display: none; }
   .ln, .st-gate.is-stamp, .stack > .stack-i { animation: none; transition: none; }
   .btn, .gh-pill, .rail i, .disp-steps li + li::after { transition: none; }
   .gh-pill:hover { transform: none; }

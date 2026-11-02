@@ -26,14 +26,15 @@ const FRAMES = '[data-frame], .same-garden, .footer';
   const NUDGE = 0.12, NUDGE_PX = 60, OVER = 0.10;
   const SCROLL_KEYS = ['PageDown', 'PageUp', 'ArrowDown', 'ArrowUp', ' '];
   // A gesture: the user inputs since the last rest. y0 = where it started; idir = the direction it
-  // asked for (+1 down, -1 up, 0 unknown); keys = scroll-key presses in it; jump = Home / End.
+  // asked for (+1 down, -1 up, 0 unknown); keys = its scroll-key presses, signed (a PageDown and a
+  // PageUp cancel out); jump = Home / End.
   // restY = where the page last came to rest. A gesture starts there, not at scrollY when its first
   // input event arrives: with threaded scrolling, a wheel notch has often moved the page already.
-  let pending = false, y0 = window.scrollY, restY = window.scrollY, idir = 0, keys = 0, jump = false, arrows = false;
+  let pending = false, y0 = window.scrollY, restY = window.scrollY, idir = 0, keys = 0, jump = false, arrows = false, keyed = false;
   let gliding = false, glideTo = 0, focusAt = -1e9, inputAt = -1e9, restT = 0;
-  // small nudges add up: two 30px nudges the same way make one 60px move, so a gentle scroller
-  // is never held on a frame
-  const nudge = { dir: 0, sum: 0, at: -1e9 };
+  // small nudges add up: two 30px nudges the same way from the same frame make one 60px move, so a
+  // gentle scroller is never held on a frame, however slowly they go (reset by a turn or a new frame)
+  const nudge = { dir: 0, sum: 0, frame: -1 };
   const on = () => window.innerWidth >= 1024 && window.innerHeight >= 640 && !reduceMQ.matches;
   const maxY = () => Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
 
@@ -51,18 +52,22 @@ const FRAMES = '[data-frame], .same-garden, .footer';
     if (gliding) {
       // the visitor takes over our glide: it stops where it is, and the gesture counts from the
       // frame the glide was going to (so a reversal goes back, and another notch goes on)
-      halt(); y0 = glideTo; idir = 0; keys = 0; jump = false; arrows = false;
+      halt(); y0 = glideTo; idir = 0; keys = 0; jump = false; arrows = false; keyed = false;
     } else if (!pending || t - inputAt > 600) {
-      y0 = restY; idir = 0; keys = 0; jump = false; arrows = false;
+      y0 = restY; idir = 0; keys = 0; jump = false; arrows = false; keyed = false;
     }
     pending = true;
-    if (kind === 'key') { keys++; arrows = false; }
-    else if (kind === 'arrow') { keys = Math.max(keys, 1); arrows = true; }   // the arrows: see target()
+    if (kind === 'key') { keys += dir; arrows = false; keyed = true; }
+    else if (kind === 'arrow') { keys = dir; arrows = true; keyed = true; }   // the arrows: see target()
     else if (kind === 'jump') jump = true;
-    else if (kind === 'wheel' || kind === 'touch') keys = 0;
+    else if (kind === 'wheel' || kind === 'touch') { keys = 0; keyed = false; }
     if (dir) idir = dir;
     inputAt = t;
   }
+  // settling switched off mid-glide (reduced motion turned on, a window made too small): stop now
+  function off() { if (on()) return; halt(); clearTimeout(restT); pending = false; restY = window.scrollY; }
+  if (reduceMQ.addEventListener) reduceMQ.addEventListener('change', off);
+  window.addEventListener('resize', off);
   window.addEventListener('wheel', (e) => { if (e.deltaY) begin('wheel', e.deltaY > 0 ? 1 : -1); }, { passive: true });
   window.addEventListener('touchmove', () => begin('touch', 0), { passive: true });
   window.addEventListener('pointerdown', () => begin('pointer', 0), { passive: true });
@@ -110,18 +115,22 @@ const FRAMES = '[data-frame], .same-garden, .footer';
     const T = tops();
     const d = y - y0;
     if (Math.abs(d) < 1) return null;
-    // the direction asked for wins (a notch that interrupted a glide can rest short of where it began)
-    const down = idir ? idir > 0 : d > 0, over = OVER * vh;
+    // the direction asked for wins (a notch that interrupted a glide can rest short of where it began);
+    // for keys it is the net of their presses
+    const down = keys ? keys > 0 : (idir ? idir > 0 : d > 0), over = OVER * vh;
     const nearest = T.reduce((a, b) => (Math.abs(b - y0) < Math.abs(a - y0) ? b : a), T[0]);
     const onStart = Math.abs(nearest - y0) <= 2;
     const thr = Math.min(NUDGE * vh, NUDGE_PX);
+    if (keyed && keys === 0) {                // keys that cancelled out: back where they began
+      return onStart ? nearest : T.reduce((a, b) => (Math.abs(b - y) < Math.abs(a - y) ? b : a), T[0]);
+    }
     if (keys) {
       // PageDown / PageUp / Space: one frame per press, counted from the frame the gesture started on
       let s;
       if (onStart) s = T.indexOf(nearest);
       else if (down) s = T.filter((v) => v < y0).length - 1;
       else s = T.length - T.filter((v) => v > y0).length;
-      const to = T[Math.max(0, Math.min(T.length - 1, s + (down ? keys : -keys)))];
+      const to = T[Math.max(0, Math.min(T.length - 1, s + keys))];
       if (!arrows) return to;
       // the arrows scroll 40px a press natively: a burst can pass that frame, so it ends on the frame
       // ahead of where it got to, never behind it
@@ -130,9 +139,8 @@ const FRAMES = '[data-frame], .same-garden, .footer';
       return Math.min(to, a === undefined ? 0 : a);
     }
     if (onStart && Math.abs(d) < thr) {
-      const sgn = d > 0 ? 1 : -1, t = now();
-      if (nudge.dir === sgn && t - nudge.at < 2500) nudge.sum += Math.abs(d); else { nudge.dir = sgn; nudge.sum = Math.abs(d); }
-      nudge.at = t;
+      const sgn = d > 0 ? 1 : -1;
+      if (nudge.dir === sgn && nudge.frame === nearest) nudge.sum += Math.abs(d); else { nudge.dir = sgn; nudge.sum = Math.abs(d); nudge.frame = nearest; }
       if (nudge.sum < thr) return nearest;      // a nudge: back to the frame it started on
       nudge.sum = 0;                            // nudges that add up to a move: step on
     } else nudge.sum = 0;

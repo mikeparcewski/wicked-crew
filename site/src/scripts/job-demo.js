@@ -13,7 +13,8 @@ const root = document.querySelector('[data-job]');
 if (root) initJob(root);
 
 function initJob(root) {
-  const reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // read live, so reduced motion switched on mid-replay runs the rest of it at once
+  const RM = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : { matches: false };
   const logEl = root.querySelector('[data-log]');
   const panel = root.querySelector('[data-panel]');
   const capN = root.querySelector('[data-caption-n]');
@@ -208,9 +209,10 @@ function initJob(root) {
   }
   function go() {
     clearTimeout(timer);
-    if (reduced) { while (!dead && !waiting && i < S.length) stepOnce(); if (i >= S.length) finish(); return; }
+    if (RM.matches) { while (!dead && !waiting && i < S.length) stepOnce(); if (i >= S.length) finish(); return; }
     (function tick() {
       if (dead || waiting) return;
+      if (RM.matches) { go(); return; }
       stepOnce();
       if (i >= S.length) { finish(); return; }
       if (!waiting) timer = setTimeout(tick, STEP);
@@ -278,7 +280,7 @@ function initJob(root) {
   killBtn.addEventListener('click', function () { if (isOff(killBtn)) return; kill(); });
 
   poster();
-  if (reduced) return;
+  if (RM.matches) return;
   function auto() { if (!booted) { booted = true; start(); } }
   if ('IntersectionObserver' in window) {
     const io = new IntersectionObserver(function (es) {

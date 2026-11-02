@@ -50,6 +50,15 @@ async function restTops(page: Page) {
   return [...new Set(t)].sort((a, b) => a - b);
 }
 const onAFrame = (y: number, tops: number[]) => tops.some((t) => Math.abs(t - y) <= 2);
+/** Wait until the settle's glide is visibly under way: strictly between `from` and `to`. */
+async function midGlide(page: Page, from: number, to: number) {
+  for (let k = 0; k < 120; k++) {
+    const y = await page.evaluate(() => window.scrollY);
+    if (y > from + 8 && y < to - 8) return y;
+    await page.waitForTimeout(10);
+  }
+  throw new Error(`no glide from ${from} to ${to} was seen`);
+}
 
 test.describe('frames and the settle', () => {
   test('CSS snap is off: one mechanism, and every frame is a frame @ 1440x700', async ({ page }) => {
@@ -111,10 +120,51 @@ test.describe('frames and the settle', () => {
     await page.goto('/');
     await page.waitForTimeout(400);
     await page.mouse.move(720, 120);
+    const tops = await frameTops(page);
     await page.mouse.wheel(0, 100);
-    await page.waitForTimeout(220);   // the rest has fired and the glide to Build is under way
+    await midGlide(page, 100, tops[1]);   // the glide to Build is under way
     await page.mouse.wheel(0, -100);
     expect(await settled(page), 'the glide carried on past the visitor reversing it').toBeLessThanOrEqual(2);
+  });
+
+  test('a PageDown and a PageUp before the settle cancel out @ 1440x700', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 700 });
+    await page.goto('/');
+    await page.waitForTimeout(400);
+    const tops = await frameTops(page);
+    await page.evaluate((y) => window.scrollTo({ top: y, behavior: 'instant' }), tops[2]);
+    await page.waitForTimeout(500);
+    await page.keyboard.press('PageDown');
+    await page.waitForTimeout(140);
+    await page.keyboard.press('PageUp');
+    expect(Math.abs((await settled(page)) - tops[2]), 'opposite keys were counted the same way').toBeLessThanOrEqual(2);
+  });
+
+  test('slow, gentle nudges still move on @ 1440x700', async ({ page }) => {
+    test.setTimeout(45_000);
+    await page.setViewportSize({ width: 1440, height: 700 });
+    await page.goto('/');
+    await page.waitForTimeout(400);
+    await page.mouse.move(720, 120);
+    const tops = await frameTops(page);
+    await page.mouse.wheel(0, 30);
+    expect(await settled(page)).toBeLessThanOrEqual(2);
+    await page.waitForTimeout(3000);   // a pause longer than any idle window
+    await page.mouse.wheel(0, 30);
+    expect(Math.abs((await settled(page)) - tops[1]), 'two slow nudges the same way left the visitor on the hero').toBeLessThanOrEqual(2);
+  });
+
+  test('reduced motion switched on during a glide stops it @ 1440x700', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 700 });
+    await page.goto('/');
+    await page.waitForTimeout(400);
+    await page.mouse.move(720, 120);
+    const tops = await frameTops(page);
+    await page.mouse.wheel(0, 100);
+    const at = await midGlide(page, 100, tops[1]);
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    const y = await settled(page);
+    expect(y, `the glide went on to ${y} after reduced motion was switched on at ${Math.round(at)}`).toBeLessThan(tops[1] - 8);
   });
 
   test('a burst of arrow keys never ends behind where it scrolled to @ 1440x700', async ({ page }) => {
@@ -134,9 +184,11 @@ test.describe('frames and the settle', () => {
     await page.goto('/');
     await page.waitForTimeout(400);
     await page.locator('[data-job-run]').focus();
+    await page.waitForTimeout(900);   // past the settle's guard after a keyboard focus
     await page.mouse.move(720, 120);
+    const tops = await frameTops(page);
     await page.mouse.wheel(0, 100);
-    await page.waitForTimeout(220);   // the glide to Build is under way
+    await midGlide(page, 100, tops[1]);   // the glide to Build is under way
     await page.keyboard.press('Tab');
     await settled(page);
     await page.waitForTimeout(400);

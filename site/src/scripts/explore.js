@@ -6,7 +6,9 @@
  * Motion runs only when the frame is in view, once, and never under prefers-reduced-motion (the
  * end state is shown instead). Every control is a real button with aria-pressed / aria-current. */
 
-const reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+// read live, so reduced motion switched on mid-visit stops an autoplay at its next step
+const RM = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : { matches: false };
+const isReduced = () => RM.matches;
 const $$ = (root, sel) => Array.prototype.slice.call(root.querySelectorAll(sel));
 
 /** Run `cb` once, when `el` is at least `ratio` visible (the frame has locked in). */
@@ -91,16 +93,16 @@ function onTakeover(root, cb) {
   function stop() { clearInterval(timer); timer = null; }
   function play() {
     stop(); go(0);
-    if (reduced) { go(N - 1); return; }
-    timer = setInterval(() => { if (k >= N - 1) { stop(); return; } go(k + 1); }, 900);
+    if (isReduced()) { go(N - 1); return; }
+    timer = setInterval(() => { if (isReduced() || k >= N - 1) { stop(); go(N - 1); return; } go(k + 1); }, 900);
   }
   steps.forEach((s) => s.addEventListener('click', () => { stop(); go(parseInt(s.dataset.dstep, 10)); }));
   root.querySelector('[data-dprev]').addEventListener('click', () => { stop(); go(k - 1); });
   root.querySelector('[data-dnext]').addEventListener('click', () => { stop(); go(k + 1); });
   root.querySelector('[data-dreplay]').addEventListener('click', play);
-  go(reduced ? N - 1 : 0);
+  go(isReduced() ? N - 1 : 0);
   const touch = onTakeover(root, stop);
-  if (!reduced) onLock(root, () => { if (!timer && !touch.taken) play(); });
+  if (!isReduced()) onLock(root, () => { if (!timer && !touch.taken && !isReduced()) play(); });
 })();
 
 /* ── S4 Gate: the receipt explorer ─────────────────────────────────────────
@@ -147,13 +149,13 @@ function onTakeover(root, cb) {
   scen('full');
   // Autoplay once through the labels when the frame locks in, back to PASS; the visitor's first
   // touch stops it where it is.
-  if (!reduced) {
+  if (!isReduced()) {
     const touch = onTakeover(root, stop);
     onLock(root, () => {
-      if (touch.taken) return;
+      if (touch.taken || isReduced()) return;
       const order = ['nogate', 'floor', 'reduced', 'qeskip', 'full'];
       let j = 0;
-      timer = setInterval(() => { scen(order[j++]); if (j >= order.length) stop(); }, 2200);
+      timer = setInterval(() => { if (isReduced()) { stop(); scen('full'); return; } scen(order[j++]); if (j >= order.length) stop(); }, 2200);
     });
   }
 })();
@@ -191,7 +193,7 @@ function onTakeover(root, cb) {
   function stopT() { clearTimeout(timer); timer = null; }
   function tick() {
     stopT();
-    if (dead || !inView || reduced) return;
+    if (dead || !inView || isReduced()) return;
     const ns = nodes();
     timer = setTimeout(() => {
       if (finished) { finished = false; k = 0; paint(); say(at(ns, 0)); tick(); return; }
@@ -201,13 +203,13 @@ function onTakeover(root, cb) {
   }
   function pick(n) {
     stopT();
-    w = n; k = 0; dead = false; finished = !!reduced;
+    w = n; k = 0; dead = false; finished = isReduced();
     press(tabs, (t) => t.dataset.wfTab === String(n));
     swap(panels, (p) => p.dataset.wfPanel === String(n));
     setLabel('crash');
     const ns = nodes();
     paint();
-    say(reduced ? 'done · evidence bundle ready' : at(ns, 0));
+    say(isReduced() ? 'done · evidence bundle ready' : at(ns, 0));
     tick();
   }
   crash.addEventListener('click', () => {
@@ -224,7 +226,7 @@ function onTakeover(root, cb) {
     dead = false;
     setLabel('crash');
     say('<span class="ctrl">run.resumed {via: boot}</span> · re-entering <b>' + label(ns[k]) + '</b>');
-    if (reduced) { finished = true; }
+    if (isReduced()) { finished = true; }
     paint();
     tick();
   });
@@ -241,7 +243,7 @@ function onTakeover(root, cb) {
   const items = $$(list, 'li');
   const dots = $$(sec, '[data-car-dots] i');
   const count = sec.querySelector('[data-car-count]');
-  if (!reduced) { sec.classList.add('will-stagger'); onLock(list, () => sec.classList.add('is-in'), 0.3); }
+  if (!isReduced()) { sec.classList.add('will-stagger'); onLock(list, () => sec.classList.add('is-in'), 0.3); }
   let cur = 0;
   function mark(n) {
     cur = n;
@@ -250,7 +252,7 @@ function onTakeover(root, cb) {
   }
   function to(n) {
     n = Math.max(0, Math.min(items.length - 1, n));
-    list.scrollTo({ left: items[n].offsetLeft - list.offsetLeft, behavior: reduced ? 'auto' : 'smooth' });
+    list.scrollTo({ left: items[n].offsetLeft - list.offsetLeft, behavior: isReduced() ? 'auto' : 'smooth' });
     mark(n);
   }
   sec.querySelector('[data-car-prev]').addEventListener('click', () => to(cur - 1));
@@ -271,7 +273,7 @@ function onTakeover(root, cb) {
 /* ── S8 Get it: the command types itself once ──────────────────────────── */
 (function () {
   const t = document.querySelector('[data-type]');
-  if (!t || reduced) return;
+  if (!t || isReduced()) return;
   const box = t.closest('.install');
   t.classList.add('is-armed');
   onLock(box, () => {

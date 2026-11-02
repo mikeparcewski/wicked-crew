@@ -178,6 +178,17 @@ test.describe('arrival', () => {
     expect(await h2.evaluate((el) => getComputedStyle(el).animationName)).toBe('none');
   });
 
+  test('reduced motion switched on after load shows the install command whole (no typing)', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForTimeout(300);
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.evaluate(() => document.getElementById('get')!.scrollIntoView({ block: 'start', behavior: 'instant' }));
+    await page.waitForTimeout(150);
+    const t = page.locator('[data-type]');
+    expect(await t.evaluate((el) => getComputedStyle(el).clipPath)).toBe('none');
+    expect(await t.evaluate((el) => getComputedStyle(el).animationName)).toBe('none');
+  });
+
   test('with motion, a frame rises in once it arrives, and is fully shown after', async ({ page }) => {
     await page.goto('/');
     await page.waitForTimeout(300);
