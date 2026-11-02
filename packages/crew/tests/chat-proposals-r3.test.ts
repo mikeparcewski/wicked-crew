@@ -37,6 +37,15 @@ describe('the cost rule (runCostFromEvents)', () => {
     expect(runCostFromEvents(units, [{ type: 'cliUsage', ord: 1, costUsd: 0.25 }])).toBeNull();
     expect(runCostFromEvents(units, [{ type: 'cliUsage', ord: 1, costUsd: 0.25 }, { type: 'cliUsage', ord: 2, costUsd: Number.NaN }])).toBeNull();
   });
+  it('a unit whose durable attempt counter is past the priced attempts (a log that lost a retry) is unknown', () => {
+    const retried = view([{ ord: 1, cli: 'claude' }]);
+    (retried.units[0] as unknown as { last_attempt: number }).last_attempt = 1;
+    expect(runCostFromEvents(retried, [{ type: 'unitDispatched', ord: 1, attempt: 0 }, { type: 'cliUsage', ord: 1, attempt: 0, costUsd: 0.25 }])).toBeNull();
+    expect(runCostFromEvents(retried, [
+      { type: 'unitDispatched', ord: 1, attempt: 0 }, { type: 'cliUsage', ord: 1, attempt: 0, costUsd: 0.25 },
+      { type: 'unitDispatched', ord: 1, attempt: 1 }, { type: 'cliUsage', ord: 1, attempt: 1, costUsd: 0.5 },
+    ])).toBeCloseTo(0.75);
+  });
 });
 
 describe('a torn tail never swallows the next record', () => {
@@ -93,8 +102,22 @@ describe('host paths inside a block', () => {
     const parsed = JSON.parse(body!) as { brief: string; nested: Array<{ a: string }> };
     expect(parsed.brief).not.toContain('/srv/repos');
     expect(parsed.nested[0]!.a).not.toContain('/srv/repos');
-    const deep = `${'['.repeat(5000)}"/srv/repos/al\\"pha/z"${']'.repeat(5000)}`;
-    store.rewriteEvent({ type: 'chatReply', chat: 'c1', cliKey: 'claude', text: `ok\n\`\`\`wicked-make\n${deep}\n\`\`\``, ok: true } as never);
-    expect(store.takeMakeBlocks('c1', 'claude')).toStrictEqual([deep]);
+    // An otherwise valid block padded past the bounds (deep junk, or a huge body) is DROPPED, never passed on unrewritten.
+    const deepJunk = JSON.stringify({ entry: 'presentation', title: '/srv/repos/al"pha/secret', junk: JSON.parse(`${'['.repeat(20)}1${']'.repeat(20)}`) });
+    store.rewriteEvent({ type: 'chatReply', chat: 'c1', cliKey: 'claude', text: `ok\n\`\`\`wicked-make\n${deepJunk}\n\`\`\``, ok: true } as never);
+    expect(store.takeMakeBlocks('c1', 'claude')).toStrictEqual([]);
+    const huge = `{"entry":"presentation","title":"/srv/repos/al\\"pha/s"${' '.repeat(70 * 1024)}}`;
+    store.rewriteEvent({ type: 'chatReply', chat: 'c1', cliKey: 'claude', text: `ok\n\`\`\`wicked-make\n${huge}\n\`\`\``, ok: true } as never);
+    expect(store.takeMakeBlocks('c1', 'claude')).toStrictEqual([]);
+  });
+
+  it('a reply with many blocks is cut in bounded work: 16 blocks at most, the rest hidden', async () => {
+    const { splitMakeBlocks } = await import('../src/decisions/chat-recorder.js');
+    const many = `prose\n${Array.from({ length: 40 }, (_, i) => `\`\`\`wicked-make\n{"n":${i}}\n\`\`\`\ntail ${i}`).join('\n')}`;
+    const out = splitMakeBlocks(many);
+    expect(out.blocks).toHaveLength(16);
+    expect(out.truncated).toBe(true);
+    expect(out.text).not.toContain('wicked-make');
+    expect(out.text).not.toContain('tail 39');
   });
 });

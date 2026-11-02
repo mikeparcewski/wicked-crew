@@ -775,6 +775,8 @@ export function chatMakeLines(make: MakeDigest): string[] {
       '```',
       '',
       '`touches` is optional: the parts the change is about. The person keeps their own edits unless they say otherwise.',
+      'A change to a document, deck or page that is neither open nor named in this chat is not code work:',
+      'ask which one they mean (and propose nothing); never point it at Continue in Build.',
       '',
     );
   }
@@ -799,7 +801,8 @@ export function chatMakeLines(make: MakeDigest): string[] {
       '{"entry":"demo-video","url":"<their address>","audience":"<who it is for>","show":"<what to show>","reason":"<one line>"}',
       '```',
       '',
-      'With no address, ask for it and propose nothing.',
+      'With no address, ask for it and propose nothing. The recorder reaches only an app on this machine',
+      '(localhost or 127.0.0.1): for any other address, say so in one sentence and propose nothing.',
       '',
     );
   }

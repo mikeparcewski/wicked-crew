@@ -155,10 +155,18 @@ export function splitDecisionsBlock(text: string): { text: string; block: string
  * The caller takes the last block that parses (`chat-proposals.ts`). An opening with no closing fence removes the reply
  * from its line on and is reported `truncated` (its body is not a block): nothing of a block ever reaches a reader.
  */
+/** Blocks taken from one reply, at most; from the next opening on, the reply is cut (hidden, never shown). */
+const MAKE_BLOCKS_MAX = 16;
+
 export function splitMakeBlocks(text: string): { text: string; blocks: string[]; truncated: boolean } {
   const blocks: string[] = [];
   let out = text;
   for (;;) {
+    // Bounded work on an untrusted reply: past the cap, everything from the next opening on is cut in one step.
+    if (blocks.length >= MAKE_BLOCKS_MAX) {
+      const more = /(^|\n)[ \t]*```wicked-make[ \t]*(?=\r?\n|$)/u.exec(out);
+      return more === null ? { text: out, blocks, truncated: false } : { text: trimEnd(out.slice(0, more.index + more[1]!.length)), blocks, truncated: true };
+    }
     const opening = /(^|\n)[ \t]*```wicked-make[ \t]*(?=\r?\n|$)/u.exec(out);
     if (opening === null) return { text: out, blocks, truncated: false };
     const lineStart = opening.index + opening[1]!.length;

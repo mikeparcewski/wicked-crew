@@ -407,6 +407,11 @@ export function runCostFromEvents(view: SessionView, events: ReadonlyArray<Recor
   }
   if (agentOrds.some((o) => !byOrd.has(o))) return null;
   if ([...dispatched].some((k) => !priced.has(k))) return null;
+  // The unit's durable attempt counter outranks a log that may have lost a later attempt (a crash): it must be priced.
+  for (const u of view.units) {
+    const last = (u as unknown as { last_attempt?: unknown }).last_attempt;
+    if (agentOrds.includes(u.ord) && typeof last === 'number' && !priced.has(`${u.ord}:${last}`)) return null;
+  }
   return agentOrds.reduce((sum, o) => sum + (byOrd.get(o) ?? 0), 0);
 }
 
@@ -530,6 +535,9 @@ function bindingOf(records: readonly ChatTranscriptRecord[], turnId: string): { 
   }
   return { binding: latest, turnHas: false };
 }
+
+/** Hosts the demo recorder can reach (DES §10: a loopback-only jail). */
+const LOCAL_HOSTS: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '[::1]']);
 
 /** Every http(s) address in the person's words, whole (trailing sentence punctuation dropped). */
 function personUrls(words: string): Set<string> {
@@ -807,6 +815,8 @@ export class ChatProposals {
       if (url === '' || !ok) blocked.push('Needs the address of the running app');
       // Whole addresses only: a prefix, a substring or an address inside a query string is not one they gave.
       else if (!personUrls(words).has(url)) blocked.push('The app address must come from you: say it in the chat');
+      // DES §10 (A8's build note): the recorder reaches only an app on this machine.
+      else if (!LOCAL_HOSTS.has(new URL(url).hostname)) blocked.push('The recorder reaches only an app running on this machine (localhost)');
       demo = { url, audience: block.audience ?? null, show: block.show ?? null };
     }
     const sources = kind === 'create' ? await this.resolveSources(block.sources, { chatId, turnId, records, binding, turnHas, chat, words, personNamed: false }) : [];
@@ -967,31 +977,39 @@ export class ChatProposals {
       }
       if (kind === 'attachment') {
         const a = this.deps.attachments(ctx.chatId).find((x) => x.id === id);
-        if (a === undefined) strike(token, `attachment ${id.slice(0, 12)}`, 'not a file attached to this chat');
-        else push({ token, label: a.name, status: 'ok' });
+        if (a === undefined) strike(`attachment:${id}`, `attachment ${id.slice(0, 12)}`, 'not a file attached to this chat');
+        else push({ token: `attachment:${a.id}`, label: a.name, status: 'ok' });
         continue;
       }
       if (kind === 'run') {
-        const want = id.toLowerCase();
+        // A1's run-id grammar; an id matches exactly (custom ids keep their case), and a hex id or prefix also matches
+        // case-insensitively (a uuid typed in capitals is the same run).
+        const want = id;
         const short = want.slice(0, 8);
-        if (!/^[a-z0-9][a-z0-9._-]{3,127}$/.test(want)) {
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(want)) {
           strike(token, `run ${short}`, 'not a run id');
           continue;
         }
+        const hex = /^[0-9a-fA-F-]+$/.test(want);
+        const matches = (full: string): boolean => full === want || full.startsWith(want) || (hex && (full.toLowerCase() === want.toLowerCase() || full.toLowerCase().startsWith(want.toLowerCase())));
         // Authorized before anything of it is read: a seat's token is matched against the runs the person named in
         // this chat (full ids), never against every run on the daemon — an unnamed id learns nothing of what exists.
         // A source the person adds is theirs to name, and is looked up.
         let candidates: string[];
         if (ctx.personNamed) {
-          candidates = (await allRuns()).map((v) => v.session.id).filter((id) => id === want || id.startsWith(want));
+          candidates = (await allRuns()).map((v) => v.session.id).filter(matches);
         } else {
-          candidates = (ctx.binding?.named.runs ?? []).filter((id) => id === want || id.startsWith(want));
+          candidates = (ctx.binding?.named.runs ?? []).filter(matches);
           if (candidates.length === 0) {
             strike(`run:${want}`, `run ${short}`, 'not named in this chat');
             continue;
           }
         }
         const hit = candidates.includes(want) ? want : candidates.length === 1 ? candidates[0]! : null;
+        if (candidates.length > 1 && !candidates.includes(want)) {
+          strike(`run:${want}`, `run ${short}`, 'matches more than one run');
+          continue;
+        }
         const v = hit === null ? undefined : (await allRuns()).find((x) => x.session.id === hit);
         if (v === undefined) {
           strike(`run:${want}`, `run ${short}`, candidates.length > 1 ? 'matches more than one run' : 'no such run on this daemon');
@@ -1167,10 +1185,15 @@ export class ChatProposals {
       const head = root === null ? null : artifactHead(root, ref.doc);
       if (head === null) return { code: 409, body: { code: 'source_gone', error: `${resolution.target.title} is gone`, view: viewOf(folded) } };
       if (head !== resolution.target.base) {
-        // A newer proposal exists: this one is not re-opened over it (the chat moved on).
+        // A newer proposal exists: this one is not re-opened over it (the chat moved on). The re-resolution is still
+        // recorded, so the fold settles it as superseded for every reader (and its frame says so).
         const pids = [...foldProposals(this.deps.records(chatId)).keys()];
         if (pids.indexOf(pid) < pids.length - 1) {
-          return { code: 409, body: { code: 'proposal_superseded', error: `${resolution.target.title} changed since this was proposed, and a newer proposal replaced it`, view: viewOf(folded) } };
+          const recordedOld = folded.proposal;
+          const freshOld: ArtifactProposal = { ...recordedOld, target: { ...(recordedOld.target ?? resolution.target), base: head } };
+          if (!this.write(chatId, { at: this.now(), turnId: folded.turnId, kind: 'proposal', proposal: freshOld }, instance)) return this.gone(chatId);
+          const settled = foldProposals(this.deps.records(chatId)).get(pid);
+          return { code: 409, body: { code: 'proposal_superseded', error: `${resolution.target.title} changed since this was proposed, and a newer proposal replaced it`, ...(settled !== undefined ? { view: viewOf(settled) } : {}) } };
         }
         // From the proposal as crew recorded it (never the refused request's edits): the person chooses again.
         const recorded = folded.proposal;

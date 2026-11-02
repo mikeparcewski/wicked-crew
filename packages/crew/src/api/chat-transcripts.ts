@@ -87,10 +87,10 @@ function usageOf(value: unknown): ChatUsage | null {
  * JSON stays valid whatever a root's name holds and an escaped (Windows) path is matched as written. A body that is not
  * JSON is left as it is (the resolver refuses it anyway).
  */
-function rewriteBlockPaths(body: string, roots: ReadonlyArray<ChatRepoRoot>): string {
-  // Bounded: a block is a few levels deep (`theme.patch`), so anything deeper or larger is not one — it is left as it
-  // is (the resolver refuses it), and nothing a seat writes can make this fold throw.
-  if (body.length > 64 * 1024) return body;
+function rewriteBlockPaths(body: string, roots: ReadonlyArray<ChatRepoRoot>): string | null {
+  // Bounded: a block is a few levels deep (`theme.patch`), so anything deeper or larger is not one — it is DROPPED (no
+  // card), never passed on unrewritten, and nothing a seat writes can make this fold throw.
+  if (body.length > 64 * 1024) return null;
   try {
     let nodes = 0;
     const walk = (v: unknown, depth: number): unknown => {
@@ -102,8 +102,9 @@ function rewriteBlockPaths(body: string, roots: ReadonlyArray<ChatRepoRoot>): st
             : v;
     };
     return JSON.stringify(walk(JSON.parse(body), 0));
-  } catch {
-    return body;
+  } catch (err) {
+    // Not JSON: left as it is (the resolver refuses it); over the bounds: dropped.
+    return err instanceof SyntaxError ? body : null;
   }
 }
 
@@ -311,7 +312,9 @@ export class ChatTranscriptStore {
       text = made.text;
       // The block's words reach a card (and the transcript) too: host paths in them are rewritten like the reply's.
       const blockRoots = this.chatRoots.get(chatId);
-      const bodies = blockRoots !== undefined && blockRoots.length > 0 ? made.blocks.map((b) => rewriteBlockPaths(b, blockRoots)) : made.blocks;
+      const bodies = blockRoots !== undefined && blockRoots.length > 0
+        ? made.blocks.map((b) => rewriteBlockPaths(b, blockRoots)).filter((b): b is string => b !== null)
+        : made.blocks;
       if (bodies.length > 0) this.makeBlocks.set(key, bodies);
       else this.makeBlocks.delete(key);
     }

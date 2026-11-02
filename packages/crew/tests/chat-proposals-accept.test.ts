@@ -66,6 +66,7 @@ interface Rig {
   docsRootCalls: string[];
   roster: Array<{ key: string; name: string }>;
   hold: { runs: Promise<void> | null };
+  attachments: Array<{ id: string; name: string }>;
 }
 
 function rig(): Rig {
@@ -82,6 +83,7 @@ function rig(): Rig {
     docsRootCalls: [],
     roster: [{ key: 'claude', name: 'Claude Code' }, { key: 'codex', name: 'Codex' }],
     hold: { runs: null },
+    attachments: [],
   };
   const registry = new LaunchOnceRegistry();
   for (const k of ['create', 'refine', 'theme', 'demo'] as const) registry.register(k, r.launcher);
@@ -110,7 +112,7 @@ function rig(): Rig {
       return ['mikes', 'other', 'default'].includes(projectId) ? join(ROOT, projectId === 'default' ? '_unfiled' : projectId) : null;
     },
     projectName: async (p) => (p === 'mikes' ? 'Mikes' : null),
-    attachments: () => [],
+    attachments: () => r.attachments,
     workflowSteps: async () => 3,
     runCostUsd: async (v) => (v.session.id.startsWith('costed') ? 0.5 + Number(v.session.id.slice(-1)) / 10 : null),
     registry,
@@ -187,11 +189,16 @@ describe('the resolver', () => {
   it('a demo address must be one the person gave, whole: a prefix, a substring or a query-string URL is not', async () => {
     const r = rig();
     const words = 'Record a demo of http://192.168.1.100:8080/app and https://app.local/auth?redirect=https://evil.example/phish please.';
-    for (const [url, ok] of [['http://192.168.1.100:8080/app', true], ['http://192.168.1.10', false], ['https://evil.example/phish', false], ['https://app.local/auth?redirect=https://evil.example/phish', true]] as const) {
+    for (const [url, blocked] of [
+      ['http://192.168.1.100:8080/app', 'The recorder reaches only an app running on this machine (localhost)'],
+      ['http://192.168.1.10', 'The app address must come from you: say it in the chat'],
+      ['https://evil.example/phish', 'The app address must come from you: say it in the chat'],
+      ['http://localhost:5173/req', null],
+    ] as const) {
       const id = `d-${url.length}`;
-      const t = chatWith(r, id, { words });
+      const t = chatWith(r, id, { words: `${words} Also http://localhost:5173/req.` });
       const p = await propose(r, id, t, { entry: 'demo-video', url, audience: 'eng', show: 'x' });
-      expect(p?.blocked === null, url).toBe(ok);
+      expect(p?.blocked, url).toBe(blocked);
     }
     // An agent's message carrying the address does not make it the person's.
     const t = chatWith(r, 'agent-said', { words: 'http://localhost:3000', owner: false });
@@ -494,16 +501,44 @@ describe('r3', () => {
     await propose(r, 'c1', t2, { entry: 'presentation', title: 'newer' });
     doc('mikes', 'coverage-deck', 3);
     const before = r.records.get('c1')!.length;
-    expect(await r.svc.decide('c1', p1.pid, { decision: 'go' }, ME, 'i1')).toMatchObject({ code: 409, body: { code: 'proposal_superseded' } });
-    expect(r.records.get('c1')!.length).toBe(before);
+    expect(await r.svc.decide('c1', p1.pid, { decision: 'go' }, ME, 'i1')).toMatchObject({ code: 409, body: { code: 'proposal_superseded', view: { state: 'superseded' } } });
+    // Recorded once (so every reader folds it superseded), never accepted or launched.
+    expect(r.records.get('c1')!.slice(before).map((x) => x.kind)).toStrictEqual(['proposal']);
+    expect(foldProposals(r.records.get('c1')!).get(p1.pid)?.state).toBe('superseded');
     expect(r.launcher.launched).toHaveLength(0);
+  });
+
+  it('an attachment source is stored by its id (any spelling the seat wrote), and Go finds it still attached', async () => {
+    const r = rig();
+    r.attachments = [{ id: 'att-1', name: 'notes.pdf' }];
+    const t = chatWith(r, 'c1');
+    const p = (await propose(r, 'c1', t, { entry: 'presentation', sources: ['attachment: att-1', 'attachment:att-1'] }))!;
+    expect(p.sources).toStrictEqual([{ token: 'attachment:att-1', label: 'notes.pdf', status: 'ok' }]);
+    expect((await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
   });
 
   it('the digest turns create or demo on only with a catalog entry to name', () => {
     const r = rig();
     const d = r.svc.digest();
-    expect(d.create).toBe(true);
-    expect(d.entries.some((e) => e.kind === 'document')).toBe(true);
+    expect([d.create, d.demo]).toStrictEqual([true, true]);
+    for (const catalog of [[], CATALOG_SEEDS.filter((c) => c.launch.kind === 'demo'), CATALOG_SEEDS.filter((c) => c.launch.kind === 'document')]) {
+      const svc = new ChatProposals({ ...(r.svc as unknown as { deps: ChatProposalDeps }).deps, catalog });
+      const g = svc.digest();
+      expect(g.create).toBe(catalog.some((c) => c.launch.kind === 'document'));
+      expect(g.demo).toBe(catalog.some((c) => c.launch.kind === 'demo'));
+    }
+  });
+
+  it('run ids: a custom id keeps its case and matches exactly; a short named id works; a uuid matches in capitals', async () => {
+    const r = rig();
+    r.runs = [run('Run_Alpha'), run('run_alpha'), run('x'), run('29bbbfb1-aaaa-4000-8000-000000000001')];
+    const t = chatWith(r, 'c1', { namedRuns: ['Run_Alpha', 'run_alpha', 'x', '29bbbfb1-aaaa-4000-8000-000000000001'] });
+    const p = await propose(r, 'c1', t, { entry: 'presentation', sources: ['run:Run_Alpha', 'run:x', 'run:29BBBFB1'] });
+    expect(p?.sources.map((s) => [s.token, s.status])).toStrictEqual([
+      ['run:Run_Alpha', 'ok'],
+      ['run:x', 'ok'],
+      ['run:29bbbfb1-aaaa-4000-8000-000000000001', 'ok'],
+    ]);
   });
 });
 
