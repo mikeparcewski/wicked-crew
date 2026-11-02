@@ -19,6 +19,7 @@ import { CONFORMANCE_CASES, gardenConformance, gardenPackCheck, installPack, Pac
 import { EditorRegistry, EDITORS_STATE_FILENAME, discoverStudioEditors, externalReferences, readCapped, sha256Of } from '../src/editors/registry.js';
 import { registerEditorRoutes, serveBundle } from '../src/editors/routes.js';
 import { readNoFollow } from '../src/editors/visuals.js';
+import { guardBundle } from '../src/editors/webrtc-guard.js';
 
 const scratches: string[] = [];
 afterEach(() => {
@@ -170,7 +171,7 @@ describe('the two policies (§8.2), pinned to the letter', () => {
     const plain = bundleHeaders({ firstParty: true, manifest: manifest('wicked-doc', { permissions: [{ id: 'artifact.read', why: 'r' }] }) as never });
     expect(plain).toEqual({
       'Content-Security-Policy':
-        "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; media-src blob:; font-src data:; frame-src blob: data: about:; child-src blob: data: about:; connect-src 'none'; form-action 'none'; base-uri 'none'; worker-src 'none'; manifest-src 'none'",
+        "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; media-src blob:; font-src data:; frame-src 'none'; child-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none'; worker-src 'none'; manifest-src 'none'",
       'Cross-Origin-Resource-Policy': 'same-origin',
       'X-Content-Type-Options': 'nosniff',
       'X-DNS-Prefetch-Control': 'off',
@@ -182,9 +183,11 @@ describe('the two policies (§8.2), pinned to the letter', () => {
     expect(media['Content-Security-Policy']).toContain('img-src data: blob: https:;');
     expect(media['Content-Security-Policy']).toContain('font-src data: https:;');
     expect(media['Content-Security-Policy']).toContain("connect-src 'none'");
-    const third = bundleHeaders({ firstParty: false, manifest: manifest('acme-page') as never });
-    expect(third['Content-Security-Policy']).toBe(plain['Content-Security-Policy']);
+    // A third-party bundle never gets the network, and runs only the scripts crew hashed (webrtc-guard.ts).
+    const third = bundleHeaders({ firstParty: false, manifest: manifest('acme-page') as never }, ['h1=']);
+    expect(third['Content-Security-Policy']).toBe(`${plain['Content-Security-Policy']!.replace("script-src 'unsafe-inline'", "script-src 'sha256-h1='")}, script-src 'unsafe-inline'`);
     expect(BUNDLE_CSP_BASE).toContain('{MEDIA}');
+    expect(BUNDLE_CSP_BASE).toContain('{SCRIPTS}');
   });
 
   it('shell policy: frame-src names crew\'s own editors route and interactive proxy for the request\'s origin, plus blob: and data:', () => {
@@ -510,7 +513,9 @@ describe('the routes', () => {
     const h = await harness();
     const ok = await h.app.inject({ method: 'GET', url: '/api/v1/editors/wicked-page/0.6.0/entry' });
     expect(ok.statusCode).toBe(200);
-    expect(ok.body).toBe(PAGE_HTML);
+    // The pinned bytes, with the WebRTC prelude at the start of the inline script.
+    expect(ok.body).toBe(guardBundle(Buffer.from(PAGE_HTML)).body.toString('utf8'));
+    expect(ok.body).toMatch(/<script>\(function\(w,o\)\{.*\n?parent;<\/script>/s);
     expect(ok.headers['content-type']).toMatch(/^text\/html; charset=utf-8/);
     const expected = bundleHeaders(h.registry.get('wicked-page')!);
     for (const [k, v] of Object.entries(expected)) expect(ok.headers[k.toLowerCase()], k).toBe(v);
@@ -569,8 +574,12 @@ describe('the routes', () => {
     expect(listed.editors.map((e) => e.id)).toEqual(['wicked-doc', 'wicked-page', 'acme-terms']);
     const served = await h.app.inject({ method: 'GET', url: '/api/v1/editors/acme-terms/0.1.0/entry' });
     expect(served.statusCode).toBe(200);
-    expect(served.body).toBe(EDITOR_HTML);
-    expect(served.headers['content-security-policy']).toBe(BUNDLE_CSP_BASE.replaceAll('{MEDIA}', ''));
+    const guarded = guardBundle(Buffer.from(EDITOR_HTML));
+    expect(served.body).toBe(guarded.body.toString('utf8'));
+    expect(guarded.scriptHashes).toHaveLength(1);
+    expect(served.headers['content-security-policy']).toBe(
+      `${BUNDLE_CSP_BASE.replaceAll('{MEDIA}', '').replace('{SCRIPTS}', `'sha256-${guarded.scriptHashes[0]}'`)}, script-src 'unsafe-inline'`,
+    );
     expect((await h.app.inject({ method: 'DELETE', url: '/api/v1/editors/wicked-page', headers: HUMAN })).statusCode).toBe(409);
     expect((await h.app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-terms', headers: AGENT })).statusCode).toBe(403);
     const removed = await h.app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-terms', headers: HUMAN });
