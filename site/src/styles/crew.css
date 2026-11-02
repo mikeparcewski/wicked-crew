@@ -284,6 +284,14 @@ code {
 .tbl td.is-yes { color: var(--ok); }
 .tbl--layers td:last-child { color: var(--ink); }
 .labels-k { margin: 22px 0 10px; font-size: var(--text-body); color: var(--muted); }
+/* The gates proof (a five-row table and four labels) is the tallest section. Wicked Sans A sets wider than v2,
+   and CI's Linux runner wider than macOS (gates: 647px there against 605px here, in 636px at 1440x700), so on
+   short viewports it gives back padding and gaps to keep its slack (559px of content here). */
+@media (max-height: 760px) {
+  .gates { padding: clamp(32px, 5svh, 80px) 0; }
+  .gates .sec-head { margin-bottom: 20px; }
+  .gates .labels-k { margin: 14px 0 8px; }
+}
 .labels { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .labels li { display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; border: 1px solid color-mix(in oklab, var(--ctrl) 40%, var(--hairline-strong)); border-radius: 10px; }
 .labels b { font-family: var(--font-sans); font-size: var(--text-caption); color: var(--ctrl); }
