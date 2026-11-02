@@ -11,7 +11,9 @@ Agents → **Sign in**, which opens that CLI's own login. Claude Code and GitHub
 disposable login container. Codex, Pi and OpenCode sign in with the host's own CLI and a throwaway
 home under the gateway directory, because their browser logins call back to a loopback port that
 only a host-side login can receive (wicked-core `src/seat_login.rs`, `host_login`). Either way the
-credential goes to the gateway's broker and every governed seat gets a placeholder. Nothing below
+credential goes to the gateway's broker and every governed seat gets a placeholder, with one
+exception: a Claude Code seat on a Claude subscription receives its sign-in token, and a guard fails
+the step or refuses the delivery that contains it (wicked-core `src/seat_secret_guard.rs`). Nothing below
 applies to it: a host login (`claude /login` on the host) does not sign a container seat in.
 
 On this floor the roster's `auth` is the broker's status, and the daemon sends no live request of

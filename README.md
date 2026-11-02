@@ -59,7 +59,9 @@ Requires Node.js ≥ 22 and a container runtime (Rancher Desktop, Docker, Podman
 governed agents run each CLI's headless mode in a hardened seat container (crew builds the seat images
 on first use), and you sign each agent in once from studio's Agents page. Claude Code and GitHub
 Copilot sign in through a login container; Codex, Pi and OpenCode sign in with their host CLIs and a
-temporary home. Either way the credential goes to the broker and the seat sees a placeholder.
+temporary home. Either way the credential goes to the broker and the seat sees a placeholder, except
+a Claude Code seat on a Claude subscription, which receives its sign-in token (a guard fails the step
+or refuses the delivery that contains it).
 Seat images ship for Claude Code, Codex, GitHub Copilot, OpenCode and Pi. Antigravity's image is
 defined but its seat is benched by default, and a local model or custom
 binary needs your own image (`WICKED_SEAT_IMAGE_<CLI>`, offline seats only). `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead; there, only
