@@ -261,7 +261,8 @@ function initJob(root) {
     const qe = t.closest('[data-qe]');
     if (qe) { answerQe(qe.getAttribute('data-qe')); return; }
     const g = t.closest('[data-gate]');
-    if (g && !isOff(g)) { showReceipt(parseInt(g.getAttribute('data-gate'), 10)); return; }
+    // opening a receipt is taking control: the automatic replay must not clear it a moment later
+    if (g && !isOff(g)) { booted = true; showReceipt(parseInt(g.getAttribute('data-gate'), 10)); return; }
   });
   runBtn.addEventListener('click', function () { if (isOff(runBtn)) return; booted = true; start(); });
   killBtn.addEventListener('click', function () { if (isOff(killBtn)) return; kill(); });

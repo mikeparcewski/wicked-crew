@@ -51,6 +51,25 @@ async function snap(page: Page) {
   });
 }
 
+/** The other half of the oracle: what a swap box shows must stay inside the box (a label wider than
+ *  its box would spill over its neighbour while every outer box stays put). */
+async function spills(page: Page) {
+  return page.evaluate(() => {
+    const out: string[] = [];
+    for (const box of document.querySelectorAll<HTMLElement>('[data-ix].stack')) {
+      const r = box.getBoundingClientRect();
+      if (!r.width || !r.height) continue;
+      for (const it of box.querySelectorAll<HTMLElement>(':scope > .stack-i.is-on, :scope > .stack-i.is-on *')) {
+        const q = it.getBoundingClientRect();
+        if (!q.width || !q.height || getComputedStyle(it).visibility === 'hidden') continue;
+        const by = Math.max(r.left - q.left, q.right - r.right, r.top - q.top, q.bottom - r.bottom);
+        if (by > 1.5) out.push(`"${(it.textContent || '').trim().slice(0, 30)}" spills ${by.toFixed(1)}px out of ${box.className}`);
+      }
+    }
+    return out;
+  });
+}
+
 function diff(a: Record<string, number[]>, b: Record<string, number[]>, self: string, selfSub: Set<string>) {
   const bad: string[] = [];
   for (const id in b) {
@@ -65,7 +84,8 @@ function diff(a: Record<string, number[]>, b: Record<string, number[]>, self: st
 
 for (const vp of [{ width: 1440, height: 700 }, { width: 390, height: 844 }]) {
   test.describe(`criterion 6 @ ${vp.width}x${vp.height}`, () => {
-    test.use({ viewport: vp, contextOptions: { reducedMotion: 'reduce' }, hasTouch: vp.width < 600 });
+    // clipboard permission, so the Copy buttons really reach their "Copied" state and it is measured
+    test.use({ viewport: vp, contextOptions: { reducedMotion: 'reduce' }, hasTouch: vp.width < 600, permissions: ['clipboard-read', 'clipboard-write'] });
 
     for (const frame of FRAMES) {
       test(`no control in #${frame} moves, grows or pushes anything else`, async ({ page }) => {
@@ -75,7 +95,7 @@ for (const vp of [{ width: 1440, height: 700 }, { width: 390, height: 844 }]) {
         // What's new has controls only on a phone (its carousel)
         test.skip(ctrls.length === 0 && frame === 'news', 'no controls at this size');
         expect(ctrls.length, `no controls found in #${frame}`).toBeGreaterThan(0);
-        const problems: string[] = [];
+        const problems: string[] = (await spills(page)).map((p) => `at rest: ${p}`);
         for (const c of ctrls) {
           const loc = page.locator(`[data-ix="${c.ix}"]`);
           await loc.evaluate((el) => el.scrollIntoView({ block: 'center' }));
@@ -95,7 +115,11 @@ for (const vp of [{ width: 1440, height: 700 }, { width: 390, height: 844 }]) {
           for (const [what, act] of steps) {
             await act();
             await page.waitForTimeout(260);
+            if (what === 'click' && (await loc.evaluate((e) => e.classList.contains('install__copy')))) {
+              await expect(loc, 'the copy feedback state was never reached').toHaveText('Copied');
+            }
             const after = await snap(page);
+            for (const p of await spills(page)) problems.push(`${what} "${c.name}": ${p}`);
             const names = await page.evaluate(() => (window as any).__ixName || {});
             for (const p of diff(before, after, c.ix, sub)) problems.push(`${what} "${c.name}": ${p.replace(/#(\d+)/, (m, id) => `${m} ${names[id] || ''}`)}`);
             before = after;

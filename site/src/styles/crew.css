@@ -415,7 +415,8 @@ code {
 .rcx-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--hairline); }
 .rcx-title { font: 600 13px var(--font-mono); color: var(--ink); }
 .rcx-when { display: none; font: 400 13px/1.35 var(--font-sans); color: var(--muted); margin-top: 3px; }
-.rcx-stamp { justify-items: end; }
+/* the stamp is as wide as its widest label (all stacked) and never shrinks under it */
+.rcx-stamp { flex: none; justify-items: end; }
 .rcx-stamp .stack-i { font: 600 11px/1 var(--font-mono); padding: 6px 9px; border-radius: 6px; white-space: nowrap; color: #141414; background: var(--warn); letter-spacing: .02em; }
 .rcx-stamp .stack-i.ok { color: var(--canvas); background: var(--ok); }
 @media (prefers-reduced-motion: no-preference) {
@@ -504,6 +505,9 @@ code {
 .install { min-width: 0; width: 100%; border: 1px solid var(--hairline-strong); border-radius: 12px; overflow: hidden; background: var(--job-bg); }
 .install__bar { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; padding: 10px 14px; border-bottom: 1px solid var(--hairline); background: color-mix(in oklab, var(--canvas) 50%, transparent); }
 .install__label { min-width: 0; font: 12px var(--font-mono); color: var(--muted); }
+/* the button always reserves room for "Copied" (a hidden twin in the same grid cell) */
+.install__copy { display: inline-flex; flex-direction: column; align-items: center; }
+.install__copy::after { content: 'Copied'; height: 0; overflow: hidden; visibility: hidden; }
 .install__copy { font: 600 12px var(--font-sans); color: var(--muted); background: transparent; border: 1px solid var(--hairline-strong); border-radius: 6px; padding: 5px 12px; min-height: 26px; cursor: pointer; transition: border-color .2s var(--ease), color .2s var(--ease); }
 .install__copy:hover, .install__copy:focus-visible, .install__copy:active { border-color: var(--ctrl); color: var(--ink); }
 .install__code { min-width: 0; margin: 0; padding: 16px; overflow-x: auto; }
@@ -669,7 +673,9 @@ code {
   .rcx-opt { min-height: 36px; padding: 8px 10px; justify-content: center; }
   .rcx-opt span { display: none; }
   .rcx-when { display: grid; }
-  .rcx-head { align-items: flex-start; }
+  /* a long label cannot sit beside the title on a phone: the stamp goes under it */
+  .rcx-head { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .rcx-stamp { justify-items: start; }
   .rcx-layers th, .rcx-layers td { height: 40px; }
   .rcx-layers th, .rcx-layers td { padding: 0 10px; }
   .rcx-layers { table-layout: fixed; }

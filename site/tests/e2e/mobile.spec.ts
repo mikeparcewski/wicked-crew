@@ -64,15 +64,24 @@ test.describe('mobile (390×844)', () => {
 
   test('workflow names never wrap, and What’s new is a carousel', async ({ page }) => {
     await page.goto('/');
-    const lines = await page.locator('.wf-tab code').evaluateAll((els) => els.map((e) => e.getClientRects().length));
-    expect(lines.every((n) => n === 1), `a workflow name broke across lines: ${lines}`).toBe(true);
+    // one line box per name (a Range sees text lines; an element's own rects do not), and it fits its tab
+    const tabs = await page.locator('.wf-tab').evaluateAll((els) => els.map((tab) => {
+      const code = tab.querySelector('code')!;
+      const r = document.createRange();
+      r.selectNodeContents(code);
+      const tops = new Set(Array.from(r.getClientRects()).map((q) => Math.round(q.top)));
+      return { name: code.textContent, lines: tops.size, fits: code.scrollWidth <= (tab as HTMLElement).clientWidth };
+    }));
+    const bad = tabs.filter((t) => t.lines !== 1 || !t.fits);
+    expect(bad, `workflow names that wrap or overflow: ${JSON.stringify(bad)}`).toEqual([]);
     const news = page.locator('#news');
     await bringIntoView(news);
     await expect(news.locator('[data-car-count]')).toHaveText('1 of 6');
     await news.locator('[data-car-next]').click();
     await expect(news.locator('[data-car-count]')).toHaveText('2 of 6');
-    const overflow = await news.locator('.news-list').evaluate((el) => el.scrollWidth > el.clientWidth);
-    expect(overflow).toBe(true);
+    // the carousel really moved: the second note is the one in view
+    await expect.poll(() => news.locator('.news-list').evaluate((el) => el.scrollLeft)).toBeGreaterThan(100);
+    await expect(news.locator('.news-list li').nth(1)).toBeInViewport({ ratio: 0.9 });
   });
 
   test('the proofs and the four-plane map render on a phone', async ({ page }) => {

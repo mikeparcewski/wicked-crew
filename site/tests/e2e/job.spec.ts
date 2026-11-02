@@ -15,7 +15,10 @@ async function atQe(page: Page) {
   return job;
 }
 
-test.describe('the job demo', () => {
+test.describe('the job demo’s poster', () => {
+  // Reduced motion keeps the poster still (it never replays on its own), so these assertions cannot
+  // race the 1.6 s replay; the poster is the same paint in both modes.
+  test.use({ contextOptions: { reducedMotion: 'reduce' } });
   test('the first frame is the finished job: every gate passed, the delivery receipt open, the PR lit', async ({ page }) => {
     await page.goto('/');
     const job = page.locator('[data-job]');
@@ -27,6 +30,19 @@ test.describe('the job demo', () => {
     await expect(job.locator('[data-caption]')).toContainText('A pull request, with receipts.');
     // intent in, gated work out: the two ends of the track
     await expect(job.locator('.io--in')).toContainText('add rate limiting to the public API');
+  });
+
+});
+
+test.describe('the job demo', () => {
+  test('opening a receipt on the poster stops the automatic replay from clearing it', async ({ page }) => {
+    await page.goto('/');
+    const job = page.locator('[data-job]');
+    await job.locator('[data-gate="2"]').click();
+    await expect(job.locator('[data-panel]')).toContainText('Review gate');
+    await page.waitForTimeout(2_600);
+    await expect(job.locator('[data-panel]')).toContainText('Review gate');
+    await expect(job.locator('[data-job-run]')).toBeEnabled();
   });
 
   test('a keyboard Run keeps focus on Run, and the caption follows the job', async ({ page }) => {

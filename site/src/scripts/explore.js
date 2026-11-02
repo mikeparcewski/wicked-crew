@@ -31,9 +31,13 @@ function swap(items, pred) {
   });
 }
 function press(btns, pred) { btns.forEach((b) => b.setAttribute('aria-pressed', pred(b) ? 'true' : 'false')); }
-/** Stop an autoplay the moment the visitor takes over. */
+/** Stop an autoplay the moment the visitor takes over, and remember it: an autoplay that is still
+ *  waiting for its frame to lock in must not start after the visitor has already touched it. */
 function onTakeover(root, cb) {
-  ['pointerdown', 'keydown', 'focusin'].forEach((ev) => root.addEventListener(ev, cb, { once: true }));
+  const st = { taken: false };
+  const take = () => { st.taken = true; cb(); };
+  ['pointerdown', 'keydown', 'focusin'].forEach((ev) => root.addEventListener(ev, take, { once: true }));
+  return st;
 }
 
 /* ── S2 Build: the sandbox ─────────────────────────────────────────────── */
@@ -95,8 +99,8 @@ function onTakeover(root, cb) {
   root.querySelector('[data-dnext]').addEventListener('click', () => { stop(); go(k + 1); });
   root.querySelector('[data-dreplay]').addEventListener('click', play);
   go(reduced ? N - 1 : 0);
-  if (!reduced) onLock(root, () => { if (!timer) play(); });
-  onTakeover(root, () => { if (k < N - 1) stop(); });
+  const touch = onTakeover(root, stop);
+  if (!reduced) onLock(root, () => { if (!timer && !touch.taken) play(); });
 })();
 
 /* ── S4 Gate: the receipt explorer ─────────────────────────────────────────
@@ -144,12 +148,13 @@ function onTakeover(root, cb) {
   // Autoplay once through the labels when the frame locks in, back to PASS; the visitor's first
   // touch stops it where it is.
   if (!reduced) {
+    const touch = onTakeover(root, stop);
     onLock(root, () => {
+      if (touch.taken) return;
       const order = ['nogate', 'floor', 'reduced', 'qeskip', 'full'];
       let j = 0;
       timer = setInterval(() => { scen(order[j++]); if (j >= order.length) stop(); }, 2200);
     });
-    onTakeover(root, stop);
   }
 })();
 
