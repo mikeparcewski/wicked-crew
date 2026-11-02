@@ -71,6 +71,9 @@ export interface DocDeleteDeps {
   /** The four-ledger sweep (`server.ts` wires the real one over the armed seams + their files;
    *  a directly-driven route set gets an inert default so unit tests never touch ~/.wicked-crew). */
   dropDocLedgerRows: (documentId: string, projectId?: string) => DocLedgerSweep;
+  /** DES-CHAT-ARTIFACTS-001 (A3): why the document cannot be retired now (a chat proposal's attempt at it has no
+   *  outcome yet: it would never get one), or `null`. */
+  busyReason?: (projectId: string, documentId: string) => string | null;
   env?: NodeJS.ProcessEnv;
   /** The daemon state home the DEFAULT docs root hangs off (crew ≥ 0.7.35, D-L7-1; tests point it at a scratch dir). */
   stateHome?: string;
@@ -145,6 +148,9 @@ export function registerInteractiveDocDelete(
       if (root === null) {
         return reply.code(404).send({ error: `Project ${projectId} not found` });
       }
+      // A3: a chat proposal's attempt at this document must reach its outcome first (it keeps its chat busy until then).
+      const busy = deps.busyReason?.(projectId, doc) ?? null;
+      if (busy !== null) return reply.code(409).send({ code: 'document_busy', document_id: doc, error: busy });
       // Spike 3: a run's working document is never retired from here (its binding lives with the run).
       if (isWorkingDoc(root, doc)) {
         return reply.code(403).send({ code: 'working_doc', document_id: doc, error: WORKING_DOC_REFUSED_MESSAGE });

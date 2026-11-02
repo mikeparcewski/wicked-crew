@@ -1437,22 +1437,25 @@ export class ChatProposals {
       if (edits.sources.length > PROPOSAL_SOURCES_MAX) throw new EditRefusal(`at most ${PROPOSAL_SOURCES_MAX} sources`);
       const records = this.deps.records(chatId);
       const { binding, turnHas } = bindingOf(records, f.turnId);
-      // A source the person adds counts as named by them, and is still checked against the scope.
-      const sources = await this.resolveSources(edits.sources, {
+      // A source the person adds counts as named by them, and is checked against the chat's own scope first; then the
+      // project re-check (when the document moves) strikes what is outside the target.
+      const resolved = await this.resolveSources(edits.sources, {
         chatId,
         turnId: f.turnId,
         records,
         binding,
         turnHas,
-        chat: { projectId: next.filedIn.projectId },
+        chat: { projectId: p.filedIn.projectId },
         words: personWords(records, f.turnId),
         personNamed: true,
       });
-      // A source the person adds that cannot be used is said back, never silently dropped from a launch.
-      const added = sources.find((src) => src.status === 'struck' && !p.sources.some((old) => old.token === src.token && old.status === 'struck'));
-      if (added !== undefined) throw new EditRefusal(`${added.label}: ${added.reason ?? 'it cannot be used'}`);
-      next = { ...next, sources };
+      next = { ...next, sources: resolved };
       if (recheck) next = await this.recheckProject(next, edits.repos !== undefined);
+      // A source the person ADDED (not one the proposal already held) that cannot be used is said back, never silently
+      // dropped from a launch; one it already held is struck with the reason, as the project change promises.
+      const had = new Set(p.sources.map((s) => s.token));
+      const added = next.sources.find((src) => src.status === 'struck' && !had.has(src.token));
+      if (added !== undefined) throw new EditRefusal(`${added.label}: ${added.reason ?? 'it cannot be used'}`);
     }
     return next;
   }
@@ -1541,13 +1544,13 @@ export class ChatProposals {
    * run id derived from its own pid — to the live chat or its kept history. Once per failed run.
    */
   async appendRetry(chatId: string, failedPid: string, runId: string, artifactRef: string, reason: string, bound?: string | null): Promise<string | null> {
-    const instance = this.deps.instanceOf(chatId);
-    // Only on the chat instance the document was made in (`bound`, when known): never on another chat that reused the id.
-    if (bound !== undefined && bound !== null && instance !== bound) {
-      this.log(`[proposals] chat ${chatId} is no longer the chat run ${runId} was made from — no retry card there`);
-      return null;
-    }
+    const instance = bound ?? this.deps.instanceOf(chatId);
     return this.lock.run(`chat\u0000${instance ?? chatId}`, async () => {
+      // Checked under the lock: only on the chat instance the document was made in, never on another chat that reused
+      // the id meanwhile (the caller resolves the instance's current id again and retries).
+      if (bound !== undefined && bound !== null && this.deps.instanceOf(chatId) !== bound) {
+        throw new Error(`chat ${chatId} is no longer the chat run ${runId} was made from`);
+      }
       const records = this.deps.records(chatId);
       const folded = foldProposals(records);
       const failed = folded.get(failedPid);
@@ -1570,6 +1573,19 @@ export class ChatProposals {
       };
       return this.write(chatId, { at: this.now(), turnId: failed.turnId, kind: 'proposal', proposal: retry }, instance) ? pid : null;
     });
+  }
+
+  /**
+   * The artifact job a chat's proposal started that is still live (busy until its outcome is recorded), as the card
+   * names it, or `null`. A work launch filed under the chat (`POST /runs {chatId}`) is refused while one is: one live
+   * job per chat, work and artifact runs together (DES §4.3).
+   */
+  async liveJobOf(chatId: string): Promise<string | null> {
+    for (const f of foldProposals(this.deps.records(chatId)).values()) {
+      const runId = f.state === 'decided' && f.decision === 'go' ? f.result?.runId ?? null : f.state === 'accepting' ? f.accepting?.identity.runId ?? null : null;
+      if (runId !== null && (await this.deps.registry.live(f.proposal.kind, runId))) return f.proposal.what.label;
+    }
+    return null;
   }
 
   /** At daemon start (§6.2): an `accepting` proposal whose run exists is decided (adopted). `true` when it recorded. */

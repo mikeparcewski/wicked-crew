@@ -1176,6 +1176,8 @@ export interface RuntimeDeps {
   /** A3: the draft seam's proposal-bound launch. With {@link docBindings}, `create` is advertised and its real launcher
    *  registered; absent (no draft seam armed) = `create` stays off. */
   launchBoundDraft?: (spec: BoundDraft) => Promise<void>;
+  /** A3: remove a bound document's earlier attempt folders before a new attempt reads its base. */
+  fenceBoundDraft?: (documentId: string, runIds: readonly string[]) => void;
   /** (program DES-LEARN §3.3) The voice block of the personality a chat in this project uses (the project's
    *  override, else the person's), or null when none is saved; absent = no personalities on this daemon. */
   personaVoice?: (projectId: string | null) => string | null;
@@ -3129,6 +3131,12 @@ export function registerRoutes(
         return reply.code(409).send({ error: `the review could not be prepared: ${message(err)}` });
       }
       deliver = 'none';
+    }
+    // DES-CHAT-ARTIFACTS-001 §4.3 (A3): one live job per chat, work and artifact runs together. A work launch filed under
+    // a chat whose proposal's document attempt has no outcome yet is refused, as Go is refused the other way round.
+    if (b.chatId !== undefined && chatArtifactFlags.proposals) {
+      const live = await chatProposals.liveJobOf(b.chatId).catch(() => null);
+      if (live !== null) return reply.code(409).send({ code: 'chat_busy', error: `This chat already has a job running (${live}). Wait, or stop that run.` });
     }
     try {
       const runId = await adapter.launchRun(input);
@@ -5994,6 +6002,15 @@ export function registerRoutes(
     // but its work is complete and liftable — normalize to `completed` so the terminal branch
     // below refuses resume with the DELIVER recovery (POST /runs/:id/deliver), not a re-entry.
     const conflictStrand = normalizeStranded(run);
+    // DES-CHAT-ARTIFACTS-001 §6.2 (A3): a chat proposal's FAILED attempt is never resumed from its cursor: its seam flight
+    // is gone (a resume would finish without landing anything) and its retry may already run. Try again is the path.
+    // A still-live bound run's own gate is approved as any run's.
+    if (run.session.status === 'failed' && runtime.docBindings?.isBound(id) === true) {
+      return reply.code(409).send({
+        error: `run ${id} answered a chat proposal: it cannot be resumed. Use Try again on its card in the chat (a new attempt at the same document).`,
+        recovery: 'retry',
+      });
+    }
     // A TERMINAL run is refused LOUDLY, with the actual recovery named (crew#311 defect 2).
     // The engine's `resume_run` no-ops on completed/cancelled and answers the status token, so
     // this route used to reply 200 {"status":"cancelled"} — on the exact runs an operator was
@@ -9588,6 +9605,7 @@ export function registerRoutes(
           log: (m) => app.log.warn(m),
         }, projectId, body, actorId),
       launchBound: runtime.launchBoundDraft!,
+      ...(runtime.fenceBoundDraft !== undefined ? { fence: runtime.fenceBoundDraft } : {}),
       records: (chatId) => chatHistory?.messages(chatId) ?? chatTranscripts?.read(chatId) ?? [],
       instanceOf: (chatId) => chatHistory?.stateOf(chatId)?.instance ?? null,
       chatIdOf: (chatId, instance) => (chatHistory === null ? chatId : chatHistory.idOfInstance(chatId, instance)),
@@ -9645,6 +9663,13 @@ export function registerRoutes(
     // the operator's real ~/.wicked-crew ledgers. The real sweep always arrives from
     // `createServer`.
     dropDocLedgerRows: runtime.dropDocLedgerRows ?? (() => ({ ok: true, removed_keys: [] })),
+    // A3: a document a chat proposal is still drafting (or landing) is not retired under it.
+    busyReason: (projectId, doc) => {
+      const pending = runtime.docBindings?.busy(`${projectId === 'default' ? UNFILED_MOUNT : projectId}/${doc}`) ?? null;
+      return pending !== null && (pending.launchingAt !== undefined || pending.launchedAt !== undefined || pending.emittedAt !== undefined)
+        ? `a chat proposal is still drafting this document (run ${pending.runId.slice(0, 8)}); wait for it to land, or stop that run first`
+        : null;
+    },
     log: (m) => app.log.warn(m),
   });
 

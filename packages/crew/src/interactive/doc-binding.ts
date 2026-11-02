@@ -35,6 +35,9 @@ export interface DocBindingAttempt {
   at: number;
   /** The document's head when the attempt started (0: a new document's placeholder). */
   base: number;
+  /** Crew is handing the run to the engine (set right before the launch call, cleared if it throws): a crash between the
+   *  engine accepting it and {@link launchedAt} still leaves the document busy until the boot reconcile looks. */
+  launchingAt?: number;
   /** The run was handed to the engine (unix millis). */
   launchedAt?: number;
   /** Crew announced the draft (`draft.completed`) at this time: from here, only a landing or a refusal ends it. */
@@ -201,6 +204,21 @@ export class DocBindingStore {
     if (a === undefined || !fn(a)) return false;
     this.write(next);
     return true;
+  }
+
+  markLaunching(ref: string, runId: string): void {
+    this.update(ref, runId, (a) => {
+      a.launchingAt = this.now();
+      return true;
+    });
+  }
+
+  clearLaunching(ref: string, runId: string): void {
+    this.update(ref, runId, (a) => {
+      if (a.launchingAt === undefined) return false;
+      delete a.launchingAt;
+      return true;
+    });
   }
 
   markLaunched(ref: string, runId: string): void {

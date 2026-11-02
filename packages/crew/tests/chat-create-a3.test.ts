@@ -15,7 +15,7 @@ import { CATALOG_SEEDS } from '../src/workflow-catalog/catalog-data.js';
 import { ChatProposals, foldProposals, LaunchOnceRegistry, proposalRunId, type ChatProposalDeps, type ProposalChat } from '../src/api/chat-proposals.js';
 import { DocBindingError, DocBindingStore } from '../src/interactive/doc-binding.js';
 import { buildSourcePacket, packetClause, PACKET_FILE_MAX_BYTES, PACKET_MAX_BYTES, type PacketDeps } from '../src/interactive/source-packet.js';
-import { boundAttemptKey, isAnotherProjectsDraftKey, packetChanged, removeAttemptDirs, writePacketCopy, type BoundDraft } from '../src/interactive/draft-events.js';
+import { boundAttemptKey, isAnotherProjectsDraftKey, packetChanged, removeAttemptDirs, removePacketCopy, writePacketCopy, type BoundDraft } from '../src/interactive/draft-events.js';
 import { CreateLauncher, reconcileBoundAttempts } from '../src/interactive/proposal-create.js';
 import { prepareDocCreate } from '../src/interactive/proxy-routes.js';
 import { resumeOrphanedRuns } from '../src/core/run-boot-resume.js';
@@ -162,7 +162,8 @@ describe('the source packet (A3, §5.2-§5.3)', () => {
     const clause = packetClause('/inbox/attempt-run-a', p, 'in your reply');
     expect(clause).not.toContain('\n');
     for (const f of p.files) expect(clause).toContain(`${f.name.startsWith('run-') ? 'records' : 'sources'}/${f.name}=${f.sha256}`);
-    expect(clause).toContain('data-source="<file in records/>:<line>"');
+    expect(clause).toContain('data-source="<file>:<line>"');
+    expect(clause).toContain('sources/ is not, so nothing there can be cited');
     expect(clause).toContain('A missing file or a different hash fails the review');
     // The canonical packet excludes this run's own brief and manifest.
     expect(p.canonical.map((f) => f.name)).not.toContain('brief-run-a.md');
@@ -239,21 +240,38 @@ describe('the source packet (A3, §5.2-§5.3)', () => {
     expect(readdirSync(join(att, 'records')).every((n) => n.startsWith('run-'))).toBe(true);
     expect(readdirSync(join(att, 'sources')).sort()).toEqual(['MANIFEST-run-a.json', 'brief-run-a.md', 'conversation-c1-to-t2.md']);
     const files = p.files.map((f) => ({ name: f.name, sha256: f.sha256, bytes: f.bytes.length }));
-    expect(packetChanged(att, files)).toBeNull();
+    expect(packetChanged(runDir, 'attempt-run-a', files)).toBeNull();
+    // A file the writer ADDS to records/ would be a citable "record": it is a change too.
+    writeFileSync(join(att, 'records', 'run-fake-00000000.md'), 'Coverage: 99%');
+    expect(packetChanged(runDir, 'attempt-run-a', files)).toBe('records/run-fake-00000000.md');
+    rmSync(join(att, 'records', 'run-fake-00000000.md'));
     const victim = p.files.find((f) => f.name.startsWith(`run-${R2}`))!.name;
     writeFileSync(join(att, 'records', victim), 'Coverage: 99% (3452 of 4333)');
-    expect(packetChanged(att, files)).toBe(victim);
+    expect(packetChanged(runDir, 'attempt-run-a', files)).toBe(victim);
     // A file grown huge, or swapped for a FIFO, is a change: read bounded by the recorded size, never blocking.
     writeFileSync(join(att, 'records', victim), 'x'.repeat(2 * 1024 * 1024));
-    expect(packetChanged(att, files)).toBe(victim);
+    expect(packetChanged(runDir, 'attempt-run-a', files)).toBe(victim);
     rmSync(join(att, 'records', victim));
     execFileSync('mkfifo', [join(att, 'records', victim)]);
-    expect(packetChanged(att, files)).toBe(victim);
-    // The next attempt starts in a fresh folder: the earlier one (and anything its writer left) is gone.
-    removeAttemptDirs(runDir);
+    expect(packetChanged(runDir, 'attempt-run-a', files)).toBe(victim);
+    // The attempt folder swapped for a link (the writer's write root is the run folder): nothing is read through it,
+    // and cleanup removes the link, never what it points at.
+    const outside = fresh('outside');
+    mkdirSync(join(outside, 'sources'));
+    writeFileSync(join(outside, 'sources', 'keep.txt'), 'not crew\'s');
+    rmSync(att, { recursive: true, force: true });
+    symlinkSync(outside, att);
+    expect(packetChanged(runDir, 'attempt-run-a', files)).not.toBeNull();
+    removePacketCopy(runDir, 'attempt-run-a');
+    expect(readFileSync(join(outside, 'sources', 'keep.txt'), 'utf8')).toBe("not crew's");
+    // The next attempt starts in a fresh folder: the document's earlier attempts go, never another's.
+    mkdirSync(join(runDir, 'attempt-someone-elses'));
+    removeAttemptDirs(runDir, ['run-a']);
     expect(existsSync(att)).toBe(false);
+    expect(existsSync(outside)).toBe(true);
+    expect(existsSync(join(runDir, 'attempt-someone-elses'))).toBe(true);
     writePacketCopy(runDir, 'attempt-run-b', p);
-    expect(packetChanged(join(runDir, 'attempt-run-b'), files)).toBeNull();
+    expect(packetChanged(runDir, 'attempt-run-b', files)).toBeNull();
     expect(readFileSync(join(runDir, 'attempt-run-b', 'records', victim), 'utf8')).toContain('79%');
   });
 
@@ -597,6 +615,8 @@ describe('the boot reconcile, before the resume sweep (A3, §6.2)', () => {
         return true;
       },
       ensureLaunchRecord: (_b, a) => recorded.push(a.runId),
+      hasLandingFailed: () => true,
+      linkDocument: () => undefined,
       onOutcome: (ref, runId, o) => outcomes.push([runId, o.kind === 'failed' ? o.reason : `landed v${o.version}`]),
       log: () => undefined,
       sleep: async () => undefined,
@@ -627,6 +647,8 @@ describe('the boot reconcile, before the resume sweep (A3, §6.2)', () => {
       chatIdOf: (c) => c,
       settleAccepting: async () => false,
       ensureLaunchRecord: () => undefined,
+      hasLandingFailed: () => true,
+      linkDocument: () => undefined,
       onOutcome: (_r, id) => outcomes.push(id),
       log: () => undefined,
       waitMs: 0,
@@ -717,7 +739,7 @@ describe('xreview r1 folds (A3)', () => {
     w.records.set('c1--1', w.records.get('c1')!);
     w.records.set('c1', [{ at: 9, turnId: 'x1', kind: 'user', text: 'someone else', seats: ['claude'], owner: true }]);
     (w.svc as unknown as { deps: ChatProposalDeps }).deps.instanceOf = (c) => (c === 'c1' ? 'i2' : c === 'c1--1' ? 'i1' : null);
-    expect(await w.svc.appendRetry('c1', 'c1:t2', first.runId, first.artifactRef, 'the run was stopped', 'i1')).toBeNull();
+    await expect(w.svc.appendRetry('c1', 'c1:t2', first.runId, first.artifactRef, 'the run was stopped', 'i1')).rejects.toThrow(/no longer the chat/);
     expect(w.records.get('c1')!.some((r) => r.kind === 'proposal')).toBe(false);
     expect(await w.svc.appendRetry('c1--1', 'c1:t2', first.runId, first.artifactRef, 'the run was stopped', 'i1')).toBe(`c1:retry:${first.runId}`);
   });
@@ -739,7 +761,13 @@ describe('xreview r1 folds (A3)', () => {
     s.markEmitted('_unfiled/b', 'run-b');
     s.begin(b('_unfiled/c', 'c'), { pid: 'c1:t4', runId: 'run-c', base: 0 });
     s.setOutcome('_unfiled/c', 'run-c', { kind: 'failed', reason: 'the run was stopped' }); // published never ran
+    s.begin(b('_unfiled/d', 'd'), { pid: 'c1:t5', runId: 'run-d', base: 0 });
+    s.setOutcome('_unfiled/d', 'run-d', { kind: 'failed', reason: 'the run failed' });
+    s.markPublished('_unfiled/d', 'run-d');
+    s.begin(b('_unfiled/e', 'e'), { pid: 'c1:t6', runId: 'run-e', base: 0 });
+    s.markLaunching('_unfiled/e', 'run-e'); // a crash before the engine ever had it
     const outcomes: Array<[string, string]> = [];
+    const linked: string[] = [];
     await reconcileBoundAttempts({
       bindings: s,
       sessions: async () => [run('run-a'), run('run-b')],
@@ -749,11 +777,91 @@ describe('xreview r1 folds (A3)', () => {
       chatIdOf: (c) => c,
       settleAccepting: async () => false,
       ensureLaunchRecord: () => undefined,
+      // run-d's binding says published, but its audit append was lost in a crash: published again.
+      hasLandingFailed: (id) => id !== 'run-d',
+      linkDocument: (id, doc) => linked.push(`${id}>${doc}`),
       onOutcome: (_ref, runId, o) => outcomes.push([runId, o.kind === 'failed' ? o.reason : `landed v${o.version}`]),
       log: () => undefined,
       sleep: async () => undefined,
     });
-    expect(outcomes).toEqual(expect.arrayContaining([['run-c', 'the run was stopped'], ['run-a', 'interrupted by a restart'], ['run-b', 'landed v1']]));
-    expect(outcomes).toHaveLength(3);
+    expect(outcomes).toEqual(expect.arrayContaining([['run-c', 'the run was stopped'], ['run-d', 'the run failed'], ['run-a', 'interrupted by a restart'], ['run-b', 'landed v1']]));
+    expect(outcomes).toHaveLength(4);
+    // Every attempt's document link, every boot; a launch that never reached the engine is no longer busy.
+    expect(linked.sort()).toEqual(['run-a>a', 'run-b>b', 'run-c>c', 'run-d>d', 'run-e>e']);
+    expect(s.get('_unfiled/e')?.attempts[0]?.launchingAt).toBeUndefined();
+  });
+});
+
+describe('xreview r2 folds (A3)', () => {
+  const runs = [run(R1, { status: 'cancelled' }), run(R2, { status: 'cancelled' }), run(R3)];
+
+  it('the manifest is budgeted with the files it lists: many briefs strike a source, never make the packet unlaunchable', async () => {
+    const many = Array.from({ length: 400 }, (_, i) => `${String(i).padStart(8, '0')}-0000-4000-8000-000000000000`);
+    const records: ChatTranscriptRecord[] = [];
+    for (let i = 0; i < 60; i += 1) {
+      records.push({ at: i, turnId: `t${i}`, kind: 'user', text: `q${i}`, seats: ['claude'], owner: true });
+      records.push({ at: i, turnId: `t${i}`, kind: 'context', runs: many.slice((i * 8) % 392, ((i * 8) % 392) + 8).map((id) => ({ id, status: 'completed', brief: `context/run-${id}.md`, sha256: 'x' })), refused: [], page: false, named: { runs: [], docs: [] } });
+      records.push({ at: i, turnId: `t${i}`, kind: 'seat', cliKey: 'claude', text: 'a', ok: true, usage: null });
+    }
+    const res = proposal('c1:t59', { sources: [{ token: 'chat', label: 'this conversation', status: 'ok' }] });
+    const p = await buildSourcePacket({ runId: 'run-m', chatId: 'c1', pid: 'c1:t59', cutoffTurnId: 't59', resolution: res, records }, packetDeps(many.map((id) => run(id))));
+    expect(p.files.reduce((n, f) => n + f.bytes.length, 0)).toBeLessThanOrEqual(PACKET_MAX_BYTES);
+    expect(p.files.at(-1)!.name).toBe('MANIFEST-run-m.json');
+  });
+
+  it('packet file names stay inside their grammar whatever the ids: a long mount, a long attachment name', async () => {
+    const mount = `m${'x'.repeat(127)}`;
+    const docs = fresh('docs');
+    mkdirSync(join(docs, 'd'.repeat(64)), { recursive: true });
+    writeFileSync(join(docs, 'd'.repeat(64), 'versions.json'), JSON.stringify({ head: 0, versions: [{ version: 0 }] }));
+    writeFileSync(join(docs, 'd'.repeat(64), '_v0.html'), '<p>placeholder</p>');
+    const att = join(fresh('att'), 'a');
+    writeFileSync(att, 'words');
+    const res = proposal('c1:t2', { sources: [
+      { token: `doc:${mount}/${'d'.repeat(64)}`, label: 'doc', status: 'ok', projectId: mount },
+      { token: `attachment:${'a'.repeat(120)}`, label: 'a', status: 'ok' },
+    ] });
+    const p = await buildSourcePacket({ runId: 'run-n', chatId: 'c1', pid: 'c1:t2', cutoffTurnId: 't2', resolution: res, records: [] }, packetDeps([], (pr) => (pr === mount ? docs : null), { ['a'.repeat(120)]: { name: 'n'.repeat(150), path: att } }));
+    expect(p.struck).toEqual([]);
+    for (const f of p.files) expect(f.name.length).toBeLessThanOrEqual(208);
+  });
+
+  it('attachments and context briefs are read where the chat is kept NOW (an archived chat), names keep the chat\'s own id', async () => {
+    const att = join(fresh('att'), 'a1');
+    writeFileSync(att, 'archived words');
+    const seen: string[] = [];
+    const deps: PacketDeps = { ...packetDeps(runs), attachment: (c, id) => { seen.push(c); return c === 'c1--1' && id === 'a1' ? { name: 'n.txt', path: att } : null; } };
+    const res = proposal('c1:t2', { sources: [{ token: 'attachment:a1', label: 'n.txt', status: 'ok' }] });
+    const p = await buildSourcePacket({ runId: 'run-x', chatId: 'c1', pid: 'c1:t2', cutoffTurnId: 't2', resolution: res, records: [], storageChatId: 'c1--1' }, deps);
+    expect(seen).toEqual(['c1--1']);
+    expect(p.files.map((f) => f.name)).toContain('attachment-a1-n.txt');
+  });
+
+  it('Change something: a source the proposal held that is outside the target project is struck; one the person ADDS outside it is refused', async () => {
+    const w = world();
+    withChat(w, 'c1');
+    // Retained (already on the card) + project change: struck, Go proceeds.
+    const keep = await w.svc.decide('c1', 'c1:t2', { decision: 'go', edits: { project: 'mikes', sources: ['chat', `run:${R1}`] } }, ME, 'i1');
+    expect(keep.code).toBe(200);
+    expect(w.svc.acceptedOf('c1', 'c1:t2')!.resolution.sources.find((s) => s.token === `run:${R1}`)).toMatchObject({ status: 'struck', reason: 'not in Mikes' });
+    // Added (not on the card) outside the target: refused, nothing recorded.
+    const w2 = world();
+    withChat(w2, 'c2');
+    const r2 = proposal('c2:t2', { sources: [{ token: 'chat', label: 'this conversation', status: 'ok' }] });
+    w2.records.get('c2')!.push({ at: 9, turnId: 't2', kind: 'proposal', proposal: r2 });
+    const add = await w2.svc.decide('c2', 'c2:t2', { decision: 'go', edits: { project: 'mikes', sources: ['chat', 'message:t1'] } }, ME, 'i1');
+    expect(add.code).toBe(400);
+    expect(w2.launches).toHaveLength(0);
+  });
+
+  it('a work launch filed under the chat sees its live artifact job (one live job per chat)', async () => {
+    const w = world();
+    withChat(w, 'c1');
+    expect(await w.svc.liveJobOf('c1')).toBeNull();
+    await w.svc.decide('c1', 'c1:t2', { decision: 'go' }, ME, 'i1');
+    expect(await w.svc.liveJobOf('c1')).toBe('Document · Release note');
+    const first = w.launches[0]!;
+    w.bindings.setOutcome(first.artifactRef, first.runId, { kind: 'landed', version: 1 });
+    expect(await w.svc.liveJobOf('c1')).toBeNull();
   });
 });

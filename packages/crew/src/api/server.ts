@@ -1698,6 +1698,8 @@ export async function createServer(
     const o = options.interactiveEditEvents;
     editSub = await startInteractiveEditSubscriber(adapter, {
       ...busOf(o.dbPath),
+      // A3: a document a chat proposal is still drafting or landing takes no structural edit.
+      isDocBusy: (documentId) => docBindings.all().some((b) => b.doc === documentId && b.attempts.some((a) => a.outcome === undefined && (a.launchingAt !== undefined || a.launchedAt !== undefined || a.emittedAt !== undefined))),
       ...(o.pollIntervalMs !== undefined ? { pollIntervalMs: o.pollIntervalMs } : {}),
       ...(o.heartbeatMs !== undefined ? { heartbeatMs: o.heartbeatMs } : {}),
       ...(o.ledgerPath !== undefined ? { ledgerPath: o.ledgerPath } : {}),
@@ -2586,7 +2588,7 @@ export async function createServer(
       docGrounding,
       // DES-CHAT-ARTIFACTS-001 §5.2 (A3): chat-made documents; `create` is real only when the draft seam is armed.
       docBindings,
-      ...(draftSub !== null ? { launchBoundDraft: draftSub.launchBound } : {}),
+      ...(draftSub !== null ? { launchBoundDraft: draftSub.launchBound, fenceBoundDraft: draftSub.fenceBound } : {}),
       // crew#899: a chat's checkouts are brought to their upstream (when clean) before it reads them.
       freshenCheckout: (root: string) => freshenCheckout(root),
       ...(skillsRuntime !== undefined ? { skills: skillsRuntime } : {}),
@@ -2781,8 +2783,10 @@ export async function createServer(
       ensureLaunchRecord: (b, a) => {
         if (runTimingIndex.proposalOf(a.runId) !== undefined) return;
         recordRunLaunched(audit, runTimingIndex, DAEMON_ACTOR, a.runId, { deliver: 'none', channel: 'studio', actor: b.owner, chatId: b.chatId, proposalId: a.pid, artifactRef: b.ref, recoveredAtBoot: true });
-        docRuns.set(a.runId, b.doc);
       },
+      hasLandingFailed: (runId) => runTimingIndex.landingFailedOf(runId) !== undefined,
+      // Every attempt's document link, every boot (the ledger row of a run a crash recovered may not exist).
+      linkDocument: (runId, doc) => docRuns.set(runId, doc),
       onOutcome: onBoundOutcome,
       log: (m) => app.log.warn(m),
     });

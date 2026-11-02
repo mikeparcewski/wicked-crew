@@ -40,9 +40,13 @@ import { PACKET_NAME } from './doc-binding.js';
 export const PACKET_MAX_BYTES = 1024 * 1024;
 /** One file, in bytes. */
 export const PACKET_FILE_MAX_BYTES = 512 * 1024;
-/** Kept for the request's brief (its text is capped at 8000 characters) and for the manifest. */
+/** Kept for the request's brief (its text is capped at 8000 characters). */
 export const PACKET_BRIEF_RESERVE = 48 * 1024;
-export const PACKET_MANIFEST_RESERVE = 64 * 1024;
+/** The manifest's fixed part (run, chat, proposal, the struck list); each listed file books its own entry. */
+const MANIFEST_BASE = 32 * 1024;
+/** What one manifest file entry can take, pretty-printed: `{"file":"records/<name>","sha256":"<64>","bytes":<n>}`. */
+const manifestEntryCost = (name: string): number => name.length + 140;
+const manifestTokenCost = (token: string): number => token.length + 60;
 /** A conversation snapshot keeps at most this many turns (the latest ones). */
 export const CONVERSATION_TURNS_MAX = 60;
 
@@ -98,6 +102,9 @@ export interface PacketInput {
   recheckProject?: string | null;
   /** Files the document's canonical packet already holds, by token (reused, never rebuilt). */
   held?: { tokens: Record<string, string[]>; bytes: (name: string) => Buffer };
+  /** Where the chat is kept NOW (its own id, or the archive id a reuse of the id moved it to): attachments and the
+   *  chat's context briefs are read from there. File names keep {@link chatId}. Default: `chatId`. */
+  storageChatId?: string;
 }
 
 export interface PacketDeps {
@@ -150,8 +157,10 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
   const out = new Map<string, PacketFile>();
   const tokens: Record<string, string[]> = {};
   const struck: Array<{ token: string; reason: string }> = [];
-  // The sources share what is left once the brief and the manifest have their room.
-  const sourceBudget = PACKET_MAX_BYTES - PACKET_BRIEF_RESERVE - PACKET_MANIFEST_RESERVE;
+  // The sources share what is left once the brief has its room; every admitted file also books its manifest entry, so
+  // the manifest can never be what makes a packet unlaunchable.
+  const sourceBudget = PACKET_MAX_BYTES - PACKET_BRIEF_RESERVE - MANIFEST_BASE;
+  const storage = input.storageChatId ?? chatId;
   let total = 0;
   let views: SessionView[] | null = null;
   const allRuns = async (): Promise<SessionView[]> => (views ??= await deps.runs());
@@ -176,9 +185,10 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
       this.files.set(name, f);
       return f;
     }
-    commit(): void {
-      let more = 0;
-      for (const f of this.files.values()) if (!out.has(f.name)) more += f.bytes.length;
+    commit(token: string): void {
+      let more = manifestTokenCost(token);
+      // Each file's manifest entry is booked once per token that lists it (a run brief two answers used counts twice).
+      for (const f of this.files.values()) more += manifestEntryCost(f.name) + (out.has(f.name) ? 0 : f.bytes.length);
       if (total + more > sourceBudget) throw new Refused(`the packet would pass ${PACKET_MAX_BYTES / 1024} KB`);
       for (const f of this.files.values()) if (!out.has(f.name)) out.set(f.name, f);
       total += more;
@@ -188,7 +198,7 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
   const briefFor = async (stage: Stage, run: { id: string; brief?: string; sha256?: string }): Promise<{ file: PacketFile; recovered: boolean } | null> => {
     if (!RUN_ID.test(run.id)) return null;
     if (run.brief !== undefined && run.sha256 !== undefined && CONTEXT_BRIEF.test(run.brief) && deps.contextBrief !== undefined) {
-      const bytes = deps.contextBrief(chatId, run.brief, run.sha256);
+      const bytes = deps.contextBrief(storage, run.brief, run.sha256);
       if (bytes !== null && sha256(bytes) === run.sha256) {
         return { file: stage.add(`run-${run.id}-${run.sha256.slice(0, 8)}.md`, bytes), recovered: true };
       }
@@ -248,7 +258,7 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
       const held = input.held?.tokens[token];
       if (held !== undefined && held.length > 0) {
         for (const n of held) stage.add(n, input.held!.bytes(n));
-        stage.commit();
+        stage.commit(token);
         tokens[token] = [...held];
         continue;
       }
@@ -350,11 +360,12 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
         if (head === null) throw new Refused('it has no readable head');
         const entry = versions.versions?.find((v) => v.version === head);
         const file = typeof entry?.html_file === 'string' && /^_v\d{1,6}\.html$/.test(entry.html_file) ? entry.html_file : `_v${head}.html`;
-        names = [stage.add(`doc-${ref.mount}__${ref.doc}-v${head}.html`, readUnder(root, `${ref.doc}/${file}`, PACKET_FILE_MAX_BYTES)).name];
+        // Named by the ref's hash and the document's name: bounded whatever the mount's length, never a label.
+        names = [stage.add(`doc-${sha256(ref.ref).slice(0, 12)}-${ref.doc}-v${head}.html`, readUnder(root, `${ref.doc}/${file}`, PACKET_FILE_MAX_BYTES)).name];
       } else if (token.startsWith('attachment:')) {
         const id = token.slice('attachment:'.length);
         if (!ATTACHMENT_ID.test(id)) throw new Refused('not an attachment id');
-        const a = deps.attachment(chatId, id);
+        const a = deps.attachment(storage, id);
         if (a === null) throw new Refused('no longer attached');
         let dir: string;
         let base: string;
@@ -365,12 +376,12 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
         } catch {
           throw new Refused('no longer attached');
         }
-        names = [stage.add(`attachment-${id}-${safeName(a.name)}`, readUnder(dir, base, PACKET_FILE_MAX_BYTES)).name];
+        names = [stage.add(`attachment-${id}-${safeName(a.name).slice(0, Math.max(1, 190 - id.length))}`, readUnder(dir, base, PACKET_FILE_MAX_BYTES)).name];
       } else {
         // `page`: studio's page summary rode with the message and is not kept after it (§5.1); never invented.
         throw new Refused(token === 'page' ? "studio's page summary is not kept after the message" : 'not a source crew can read');
       }
-      stage.commit();
+      stage.commit(token);
       tokens[token] = names;
     } catch (err) {
       if (!(err instanceof Refused)) throw err;
@@ -402,7 +413,7 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
   ];
   const manifest = { run: runId, chat: chatId, proposal: pid, files: entries, struck };
   const manifestBytes = Buffer.from(JSON.stringify(manifest, null, 1), 'utf8');
-  if (manifestBytes.length > PACKET_MANIFEST_RESERVE) throw new Error('the packet manifest is over its reserved room');
+  if (total + briefFile.bytes.length + manifestBytes.length > PACKET_MAX_BYTES) throw new Error('the packet is over its budget (a manifest estimate was low)');
   const manifestFile: PacketFile = { name: `MANIFEST-${runId}.json`, bytes: manifestBytes, sha256: sha256(manifestBytes) };
   return { files: [...out.values(), briefFile, manifestFile], canonical, tokens, struck, manifest };
 }
@@ -423,7 +434,8 @@ export function packetClause(inboxDir: string, packet: SourcePacket, notesWhere:
     `The brief-*.md file is the request's scope and structure only, never a source of figures. Every figure, name and claim in the ` +
     `document comes from a file in records/, or a repository; an agent's answer in conversation-*.md or message-*.md counts only where ` +
     `a record confirms it. Where the request itself states a figure the records contradict, use the records' figure. Cite each figure ` +
-    `with data-source="<file in records/>:<line>" (records/ is one of the self-check's --repo folders). Leave out any claim nothing in ` +
+    `with data-source="<file>:<line>", the file's name as it is in records/ without the folder (records/ is one of the self-check's ` +
+    `--repo folders; sources/ is not, so nothing there can be cited). Leave out any claim nothing in ` +
     `the packet supports, and list it ${notesWhere}. ` +
     `FOR THE REVIEWING STEP: before you review, compute the sha256 of every packet file (for example \`shasum -a 256 <file>\`, from ` +
     `${inboxDir}) and compare it with these, which crew holds outside the writer's reach: ${hashes}. ` +

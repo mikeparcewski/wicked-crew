@@ -2189,9 +2189,12 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
       bindings, onRunLaunched: (id, d) => launched.push([id, d]), log: () => {},
     });
     subs.push(sub!);
-    // An earlier attempt's folder (its deliverable, its packet) is gone before this attempt starts.
+    // An earlier attempt's folder (its deliverable, its packet) is gone before this attempt starts; a folder that is no
+    // attempt of THIS document's (a same-named document elsewhere) stays.
+    bindings.begin({ ref: '_unfiled/bound-note', mount: '_unfiled', doc: 'bound-note', projectId: null, owner: 'maria', chatId: 'c1', chatInstance: 'i1', scopeProject: null, proposalId: 'c1:t2', cutoffTurnId: 't2', repos: [], graphDb: null }, { pid: 'c1:retry:x', runId: 'old-run', base: 0 });
     mkdirSync(join(draftDir, 'bound-note', 'attempt-old-run'), { recursive: true });
     writeFileSync(join(draftDir, 'bound-note', 'attempt-old-run', 'bound-note-v1.html'), '<html>old attempt</html>');
+    mkdirSync(join(draftDir, 'bound-note', 'attempt-elsewhere'), { recursive: true });
     await sub!.launchBound(spec);
     expect(engine.launches).toHaveLength(1);
     const launch = engine.launches[0]!;
@@ -2200,6 +2203,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect(launch.projectGraph).toEqual({ dbPath: '/graphs/chat.db' });
     expect('projectId' in launch).toBe(false); // Unfiled
     expect(existsSync(join(draftDir, 'bound-note', 'attempt-old-run'))).toBe(false);
+    expect(existsSync(join(draftDir, 'bound-note', 'attempt-elsewhere'))).toBe(true);
     expect(existsSync(join(draftDir, 'bound-note', 'repos'))).toBe(true); // the chat's repository, snapshotted
     const att = join(draftDir, 'bound-note', 'attempt-run-bound-note');
     for (const f of spec.packet.files) {

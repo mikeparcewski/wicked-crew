@@ -40,6 +40,8 @@ export interface CreateLauncherDeps {
   createDoc(projectId: string, body: Record<string, unknown>, actorId: string): Promise<{ status: number; body: unknown }>;
   /** The draft seam's proposal-bound launch; `null` when the seam is not armed (nothing can draft). */
   launchBound: ((spec: BoundDraft) => Promise<void>) | null;
+  /** Remove earlier attempts' folders of the document before this attempt reads its base (`fenceBound`). */
+  fence?: (documentId: string, runIds: readonly string[]) => void;
   /** The chat's records (live transcript or kept history). */
   records(chatId: string): ChatTranscriptRecord[];
   /** The chat's instance now (its history nonce), or `null`. */
@@ -89,6 +91,8 @@ export class CreateLauncher implements ProposalDispatcher {
     const projectId = ref.mount === UNFILED_MOUNT ? null : ref.mount;
     const root = await this.deps.docsRoot(ref.projectId);
     if (root === null) throw new Error(`${projectId === null ? 'Unfiled' : `project ${projectId}`} is no longer on this daemon`);
+    // An earlier attempt's folder goes BEFORE the base is read: an announce of it still on the bus can no longer land.
+    this.deps.fence?.(ref.doc, (this.deps.bindings.get(ref.ref)?.attempts ?? []).map((a) => a.runId).filter((id) => id !== d.identity.runId));
     const head = readDocHead(root, ref.doc);
 
     // 1. Recorded before anything is created or launched. A retry keeps the binding's repositories, graph, cutoff, chat
@@ -156,6 +160,7 @@ export class CreateLauncher implements ProposalDispatcher {
         cutoffTurnId: binding.cutoffTurnId,
         resolution: res,
         records: chatNow === null ? [] : this.deps.records(chatNow),
+        ...(chatNow !== null ? { storageChatId: chatNow } : {}),
         held: { tokens: binding.tokens, bytes: (name) => this.deps.bindings.packetBytes(ref.ref, name) },
         ...(binding.scopeProject !== binding.projectId ? { recheckProject: binding.projectId } : {}),
       },
@@ -228,6 +233,11 @@ export interface ReconcileDeps {
   /** An outcome this reconcile recorded, or a failure whose publication a crash cut short (release, `landing_failed`,
    *  retry card: each idempotent). */
   onOutcome(ref: string, runId: string, outcome: BoundOutcome): void;
+  /** Whether the run's `run.landing_failed` is on record (the audit append is asynchronous: a crash can lose it after
+   *  the binding said "published"). */
+  hasLandingFailed(runId: string): boolean;
+  /** Every attempt's document, every boot (a recovered run keeps its document link across restarts). */
+  linkDocument(runId: string, doc: string): void;
   log(msg: string): void;
   /** How long a cancelled run is waited for, ms (default 30 s). */
   waitMs?: number;
@@ -252,7 +262,8 @@ export async function reconcileBoundAttempts(deps: ReconcileDeps): Promise<void>
   const all = deps.bindings.all();
   for (const b of all) {
     for (const a of b.attempts) {
-      if (a.outcome?.kind === 'failed' && a.published !== true) deps.onOutcome(b.ref, a.runId, a.outcome);
+      deps.linkDocument(a.runId, b.doc);
+      if (a.outcome?.kind === 'failed' && (a.published !== true || !deps.hasLandingFailed(a.runId))) deps.onOutcome(b.ref, a.runId, a.outcome);
     }
   }
   const pending = all.flatMap((b) => b.attempts.filter((a) => a.outcome === undefined).map((a) => ({ b, a })));
@@ -261,7 +272,12 @@ export async function reconcileBoundAttempts(deps: ReconcileDeps): Promise<void>
   const views = new Map((await deps.sessions()).map((v) => [v.session.id, v] as const));
   for (const { b, a } of pending) {
     const view = views.get(a.runId);
-    if (view === undefined) continue;
+    if (view === undefined) {
+      // Never handed to the engine (a crash before the launch call, or a launch that failed): not busy. Go again
+      // resumes the same identity.
+      if (a.launchingAt !== undefined) deps.bindings.clearLaunching(b.ref, a.runId);
+      continue;
+    }
     deps.ensureLaunchRecord(b, a);
     const chatNow = deps.chatIdOf(b.chatId, b.chatInstance);
     if (chatNow !== null) await deps.settleAccepting(chatNow, a.pid).catch(() => false);
