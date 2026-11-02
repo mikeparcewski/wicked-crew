@@ -524,27 +524,35 @@ export function isCrossSiteFrameLoad(headers: IncomingHttpHeaders): boolean {
 export function fromFramingPage(referer: string | string[] | undefined, frameGuard: unknown, ownOrigin: string): boolean {
   const ref = Array.isArray(referer) ? referer[0] : referer;
   if (typeof ref !== 'string' || ref === '') return false;
-  let origin: string;
-  let host: string;
+  let url: URL;
   try {
-    const url = new URL(ref);
-    origin = url.origin;
-    host = url.host;
+    url = new URL(ref);
   } catch {
     return false;
   }
-  // The daemon's own host never counts, whatever the scheme: behind a TLS-terminating proxy the request arrives as
-  // http while the browser's Referer says https.
-  let ownHost = '';
-  try {
-    ownHost = new URL(ownOrigin).host;
-  } catch {
-    /* no host: nothing to compare */
-  }
-  if (origin === 'null' || host === ownHost) return false;
+  if (url.origin === 'null' || isOwnAuthority(url, ownOrigin)) return false;
+  const origin = url.origin;
   const csp = Array.isArray(frameGuard) ? frameGuard.join(', ') : typeof frameGuard === 'string' ? frameGuard : '';
   const listed = /frame-ancestors([^;,]*)/i.exec(csp)?.[1]?.trim().split(/\s+/) ?? [];
   return listed.includes(origin);
+}
+
+/**
+ * Whether a Referer names the daemon itself, whatever the scheme: behind a TLS-terminating proxy the request arrives as
+ * http (and `Host` may carry `:443`) while the browser's Referer says https with the default port left out. Same host
+ * name, and the same port once defaults are filled in; a `Host` with no port matches either default.
+ */
+function isOwnAuthority(ref: URL, ownOrigin: string): boolean {
+  let own: URL;
+  try {
+    own = new URL(ownOrigin);
+  } catch {
+    return false;
+  }
+  if (ref.hostname !== own.hostname) return false;
+  const refPort = ref.port !== '' ? ref.port : ref.protocol === 'https:' ? '443' : '80';
+  const ownPort = /:\d+$/.test(own.host) ? own.host.slice(own.host.lastIndexOf(':') + 1) : own.port;
+  return ownPort === '' ? refPort === '80' || refPort === '443' : ownPort === refPort;
 }
 
 /** The words a refused frame shows. */

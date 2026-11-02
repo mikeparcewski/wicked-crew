@@ -123,7 +123,9 @@ export function prologueEnd(text: string): { at: number; afterHashbang: boolean;
   let lineStart = true;
   // HTML-like comments (`<!--`, a line-leading `-->`) are comments only in a classic script. In a module, after an
   // operand, `<!--x` is `< !--x`: code. So they are taken only before the first directive, where in a module they can
-  // only be a syntax error (nothing runs) and in a classic script they are comments.
+  // only be a syntax error (nothing runs) and in a classic script they are comments. This must not depend on whether
+  // the script is classic or a module: a hash does not bind the type, so the same prefixed text can be run as either
+  // (a classic script copied into a child as a module), and what stands before the prelude must be inert under both.
   let beforeDirectives = true;
   /** Past whitespace and whole comments (noting a line end); false at a block comment that never closes. */
   const skip = (): boolean => {

@@ -78,7 +78,20 @@ describe('the interactive proxy refuses a cross-site frame load before the bridg
     expect(await from('https://elsewhere.example/')).toBe(403);
     // Behind a TLS-terminating proxy the request is http but the Referer is https: the daemon's own host still never counts.
     expect(await from('https://127.0.0.1:7701/api/v1/editors/acme/1.0.0/entry')).toBe(403);
-    expect(await from('not a url')).toBe(403);
+    await a.close();
+  });
+
+  it('the daemon\'s own host never counts as a framing page, with default ports written or left out (TLS terminator)', async () => {
+    const a = await app();
+    const as = async (host: string, referer: string): Promise<number> =>
+      (await a.inject({ method: 'GET', url: DOC, headers: { ...nav('cross-site'), referer, host } })).statusCode;
+    // localhost:4200 is in frame-ancestors (studio's dev server); the daemon here is that same name.
+    expect(await as('localhost:443', 'https://localhost/api/v1/editors/x/1.0.0/entry')).toBe(403);
+    expect(await as('localhost', 'https://localhost/x')).toBe(403);
+    expect(await as('localhost:80', 'http://localhost/x')).toBe(403);
+    expect(await as('localhost:4200', 'http://localhost:4200/x')).toBe(403); // the daemon on the dev port: still itself
+    expect(await as('localhost:7701', 'http://localhost:4200/projects')).toBe(200); // studio's dev server on its own port
+    expect(await as('127.0.0.1:7701', 'not a url')).toBe(403);
     await a.close();
   });
 
