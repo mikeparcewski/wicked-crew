@@ -245,6 +245,32 @@ describe('chat sees artifacts and runs (server, A1)', () => {
     expect(sameProject.statusCode).toBe(201);
     const bad = await open(app, { chatId: 'seed-5', clis: ['claude'], seedFromArtifact: '../x/y' });
     expect(bad.statusCode).toBe(400);
+    // Scope before any read: another project's document is refused for the project chat whether or not it exists.
+    const missingElsewhere = await open(app, { chatId: 'seed-6', projectId: 'mikes', clis: ['claude'], seedFromArtifact: 'other/no-such-doc' });
+    expect(missingElsewhere.statusCode).toBe(400);
+    expect(missingElsewhere.json()).toMatchObject({ code: 'seed_out_of_scope' });
+    repos = [];
+  });
+
+  it('seeds a project chat with the document’s own repositories, and refuses one made about a repository outside the project', async () => {
+    const mikes = ensureProjectInteractiveRoot('mikes', undefined, process.env, home);
+    repos = [
+      { id: 'r-in', name: 'alpha', root_path: join(scratch, 'repo-in'), default_branch: 'main', registered_at: 1 },
+      { id: 'r-in-2', name: 'beta', root_path: join(scratch, 'repo-in-2'), default_branch: 'main', registered_at: 1 },
+    ];
+    for (const r of repos) mkdirSync(r.root_path, { recursive: true });
+    for (const [doc, bound] of [['bound-in', ['r-in']], ['bound-out', ['r-elsewhere']]] as const) {
+      mkdirSync(join(mikes, doc), { recursive: true });
+      writeFileSync(join(mikes, doc, '_v1.html'), '<h1>x</h1>');
+      writeFileSync(join(mikes, doc, 'versions.json'), JSON.stringify({ head: 1, versions: [{ version: 1 }] }));
+      writeFileSync(join(mikes, doc, 'crew-grounding.json'), JSON.stringify({ project_id: 'mikes', repo_refs: bound, recorded_at: new Date().toISOString() }));
+    }
+    const inside = await open(app, { chatId: 'seed-p1', projectId: 'mikes', clis: ['claude'], seedFromArtifact: 'mikes/bound-in' });
+    expect(inside.statusCode).toBe(201);
+    expect(JSON.parse(inside.body).scope.repos.map((r: { id: string }) => r.id)).toEqual(['r-in']);
+    const outside = await open(app, { chatId: 'seed-p2', projectId: 'mikes', clis: ['claude'], seedFromArtifact: 'mikes/bound-out' });
+    expect(outside.statusCode).toBe(400);
+    expect(outside.json()).toMatchObject({ code: 'seed_out_of_scope' });
     repos = [];
   });
 });

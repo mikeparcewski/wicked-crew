@@ -23,7 +23,9 @@ mentioned only where a daemon release depends on them.
   words, a run chip, or the run page you are on) gets a brief written from crew's own records (status, times, steps
   and seats, each finished step's output, acceptance, delivery, evidence), through one builder (`api/run-brief.ts`)
   that slice A3's drafts will reuse. Everything that is not your own words is labelled and fenced as data. Each turn's
-  `context` transcript record says what its seats were given. `POST /chats {seedFromArtifact}` opens "Ask about this"
+  `context` transcript record says what its seats were given, and a follow-up turn is told what the chat named
+  before (re-checked against its scope). The copies and briefs are written only after the message's last check, so a
+  chat closed meanwhile gets none of them. `POST /chats {seedFromArtifact}` opens "Ask about this"
   chats for a document no chat holds, with the repositories it was made about. `health.capabilities.chatArtifacts`
   says which operations this daemon serves (`context` only, for now). A 48-message labelled corpus
   (`tests/fixtures/chat-artifacts-corpus/`) is in place for slice A2's runs.

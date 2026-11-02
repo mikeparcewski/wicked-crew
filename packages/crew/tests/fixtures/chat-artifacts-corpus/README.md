@@ -9,8 +9,8 @@ real seats (in crew's test configuration, on a disposable daemon, one chat at a 
   person's words, verbatim), optional `anchors` (`data-wid`s selected), optional `madeInChat` (artifact refs the chat
   made before this message), and `expect`:
   - `proposal: null` for information, ambiguous, can't and code-change messages, and for a demo with no usable address;
-  - `proposal.kind` `entry` (with the catalog `entry` id and the expected `sources`), `refine` (with the target ref) or
-    `theme` (with the keys it `changes`) otherwise;
+  - `proposal.kind` `entry` (with the catalog `entry` id, the expected `sources` when the message names any, and a
+    demo's `url`), `refine` (with the target ref) or `theme` (with the keys it `changes`) otherwise;
   - `reply` says what the answer must do instead (answer, one choose ask, one sentence and the nearest thing studio
     can make, today's code path).
 - Every intent has 6 messages: 3 with an artifact open and 3 without. `tests/chat-artifacts-corpus.test.ts` keeps it

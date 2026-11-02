@@ -8040,10 +8040,13 @@ export interface ChatOpenBody {
   workflow?: string;
   /**
    * (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §6.3) "Ask about this" on a document no open chat holds: the
-   * artifact ref (`<mount>/<doc>`). Crew checks the document exists and is the caller's to open, then seeds the
-   * chat's repositories from the repositories the document was made about (its recorded binding) when the request
-   * names none. Allowed for a chat with no `projectId`, or for a project chat when the document's mount is that
-   * project and every bound repository belongs to it; anything else is a 400 `seed_out_of_scope`. Send only when
+   * artifact ref (`<mount>/<doc>`). Allowed for a chat with no `projectId`, or for a project chat whose project is the
+   * document's mount (checked before anything is read; else 400 `seed_out_of_scope`). Crew then checks the document
+   * exists (404 `seed_not_found`) and, for a project chat, that every repository it was made about belongs to the
+   * project (else 400 `seed_out_of_scope`). When the request names no `repoRefs` and its `scopeKind` is not
+   * `everything` or `project`, the chat reads the repositories the document was made about (its recorded binding);
+   * a `system` or `none` kind then becomes the repository scope. A document made about no repository seeds nothing.
+   * A non-person actor is refused (403 `seed_refused`). Send only when
    * `GET /health.capabilities.chatArtifacts.context === true`.
    */
   seedFromArtifact?: string;
@@ -8530,7 +8533,7 @@ export interface ChatMessageContext {
   appearance?: ChatContextAppearance;
   /**
    * Studio's page summary (the context pack), kept apart from the person's typed words. Crew labels it as studio's
-   * and scans it for the run the page is about. At most 32 KiB.
+   * and reads from it only the run of the page it describes and the runs added as chips. At most 32,768 characters.
    */
   page?: string;
 }

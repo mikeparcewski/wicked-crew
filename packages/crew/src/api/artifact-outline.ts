@@ -40,10 +40,11 @@ export function decodeEntities(s: string): string {
 }
 
 function parseAttrs(raw: string): Record<string, string> {
-  const attrs: Record<string, string> = {};
+  // No prototype: an attribute named `constructor` or `toString` is an attribute like any other.
+  const attrs = Object.create(null) as Record<string, string>;
   for (const m of raw.matchAll(/([^\s"'>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g)) {
     const name = m[1]!.toLowerCase();
-    if (!(name in attrs)) attrs[name] = decodeEntities(m[2] ?? m[3] ?? m[4] ?? '');
+    if (!Object.hasOwn(attrs, name)) attrs[name] = decodeEntities(m[2] ?? m[3] ?? m[4] ?? '');
   }
   return attrs;
 }
@@ -54,21 +55,32 @@ function parseAttrs(raw: string): Record<string, string> {
  * here would rescan to the end once per unclosed opening (quadratic on a hostile document).
  */
 export function stripRaw(html: string): string {
-  const lower = html.toLowerCase();
   const out: string[] = [];
-  const open = /<!--|<(script|style|template|noscript|svg)(?=[\s>/])/gi;
+  // Every search runs on `html` itself (a lower-cased copy can differ in length: `İ` lower-cases to two units).
+  // An opening's own `>` is found first: a self-closing `<svg … />` has no body to drop.
+  const open = /<!--|<(script|style|template|noscript|svg)(?=[\s>/])[^<>]*>/gi;
   let from = 0;
   for (;;) {
     open.lastIndex = from;
     const m = open.exec(html);
     if (m === null) break;
     out.push(html.slice(from, m.index));
-    const close = m[1] === undefined ? '-->' : `</${m[1].toLowerCase()}`;
-    const end = lower.indexOf(close, m.index + m[0].length);
-    if (end === -1) return out.join('');
-    const gt = m[1] === undefined ? end + 3 : lower.indexOf('>', end);
-    if (gt === -1) return out.join('');
-    from = m[1] === undefined ? gt : gt + 1;
+    if (m[1] === undefined) {
+      const end = html.indexOf('-->', m.index + 4);
+      if (end === -1) return out.join('');
+      from = end + 3;
+      continue;
+    }
+    if (/\/\s*>$/.test(m[0])) {
+      from = m.index + m[0].length;
+      continue;
+    }
+    // The close must be the tag itself (`</script>`, `</script >`), never a longer name (`</scriptlet>`).
+    const close = new RegExp(`</${m[1]}(?=[\\s>/])[^<>]*>`, 'gi');
+    close.lastIndex = m.index + m[0].length;
+    const c = close.exec(html);
+    if (c === null) return out.join('');
+    from = c.index + c[0].length;
   }
   out.push(html.slice(from));
   return out.join('');
@@ -80,9 +92,10 @@ export function parseHtml(html: string): HtmlNode {
   let cur = root;
   let depth = 0;
   const src = stripRaw(html);
-  // A tag's attribute run stops at the next unquoted `<`, so a tag that never closes costs at most the distance to
-  // the next tag, never the rest of the document.
-  for (const m of src.matchAll(/<(\/?)([a-zA-Z][\w:-]*)((?:[^<>"']|"[^"]*"|'[^']*')*)>|([^<]+)|</g)) {
+  // Linear by construction: the tag name ends where name characters end (the lookahead stops it giving characters
+  // back to the attribute run), and the attribute run, quoted values included, stops at the next `<`. A tag that never
+  // closes costs at most the distance to the next tag, never the rest of the document.
+  for (const m of src.matchAll(/<(\/?)([a-zA-Z][\w:-]*)(?![\w:-])((?:[^<>"']|"[^"<]*"|'[^'<]*')*)>|([^<]+)|</g)) {
     if (m[4] !== undefined) {
       cur.children.push(decodeEntities(m[4]));
       continue;
@@ -151,6 +164,11 @@ function hasClass(n: HtmlNode, cls: string): boolean {
   return (n.attrs['class'] ?? '').split(/\s+/).includes(cls);
 }
 
+const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+function idOrNull(v: string | undefined): string | null {
+  return v !== undefined && ID.test(v) ? v : null;
+}
+
 const isSlide = (n: HtmlNode): boolean => n.tag === 'section' && (hasClass(n, 'wi-slide') || 'data-slide-id' in n.attrs);
 const isNotes = (n: HtmlNode): boolean => n.tag === 'aside' && (hasClass(n, 'notes') || 'data-notes-for' in n.attrs);
 
@@ -201,8 +219,9 @@ export function outlineOf(html: string, opts: { maxItems?: number; itemChars?: n
     return {
       n: i + 1,
       unit,
-      wid: node.attrs['data-wid'] ?? null,
-      slideId: node.attrs['data-slide-id'] ?? null,
+      // Ids from the document are data too: only one that is an id is shown, never a value that carries text.
+      wid: idOrNull(node.attrs['data-wid']),
+      slideId: idOrNull(node.attrs['data-slide-id']),
       text: cap(textOf(node, isNotes), itemChars),
       notes: notes === '' ? null : cap(notes, itemChars),
     };
