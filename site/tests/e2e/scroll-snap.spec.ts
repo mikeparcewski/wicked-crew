@@ -23,12 +23,14 @@ const SECTIONS = ['job', 'build', 'review', 'gate', 'deliver', 'news', 'same-gar
 const nameOf = `(el) => el.id || String(el.className).split(' ')[0]`;
 
 async function settled(page: Page) {
-  // wait for the wheel's own scroll and any settle glide to finish
-  let last = -1;
-  for (let k = 0; k < 30; k++) {
+  // wait for the wheel's own scroll, the settle's short pause before it acts (140ms) and its glide:
+  // the position must hold for half a second
+  let last = -1, same = 0;
+  for (let k = 0; k < 50; k++) {
     await page.waitForTimeout(120);
     const y = await page.evaluate(() => Math.round(window.scrollY));
-    if (y === last) return y;
+    same = y === last ? same + 1 : 0;
+    if (same >= 4) return y;
     last = y;
   }
   return last;
@@ -93,14 +95,58 @@ test.describe('frames and the settle', () => {
       // a notch up: back one frame, never left mid-frame
       await page.mouse.wheel(0, -100);
       expect(Math.abs((await settled(page)) - tops[2])).toBeLessThanOrEqual(2);
-      // a 30px nudge: back to the frame it started on
+      // a 30px nudge: back to the frame it started on; a second one the same way adds up: on
       await page.mouse.wheel(0, 30);
       expect(Math.abs((await settled(page)) - tops[2])).toBeLessThanOrEqual(2);
+      await page.mouse.wheel(0, 30);
+      expect(Math.abs((await settled(page)) - tops[3]), 'gentle nudges kept the visitor on the frame').toBeLessThanOrEqual(2);
       // one long move a little past a frame top: that frame, so an overshoot never builds up
-      await page.mouse.wheel(0, tops[3] - tops[2] + 30);
-      expect(Math.abs((await settled(page)) - tops[3])).toBeLessThanOrEqual(2);
+      await page.mouse.wheel(0, tops[4] - tops[3] + 30);
+      expect(Math.abs((await settled(page)) - tops[4])).toBeLessThanOrEqual(2);
     });
   }
+
+  test('a notch the other way during a glide wins @ 1440x700', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 700 });
+    await page.goto('/');
+    await page.waitForTimeout(400);
+    await page.mouse.move(720, 120);
+    await page.mouse.wheel(0, 100);
+    await page.waitForTimeout(220);   // the rest has fired and the glide to Build is under way
+    await page.mouse.wheel(0, -100);
+    expect(await settled(page), 'the glide carried on past the visitor reversing it').toBeLessThanOrEqual(2);
+  });
+
+  test('a burst of arrow keys never ends behind where it scrolled to @ 1440x700', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 700 });
+    await page.goto('/');
+    await page.waitForTimeout(400);
+    const tops = await restTops(page);
+    for (let k = 0; k < 30; k++) { await page.keyboard.press('ArrowDown'); await page.waitForTimeout(40); }
+    const reached = await page.evaluate(() => Math.round(window.scrollY));
+    const y = await settled(page);
+    expect(onAFrame(y, tops), `rested at ${y}, off every frame top`).toBe(true);
+    expect(y, `pulled back from ${reached} to ${y}`).toBeGreaterThanOrEqual(reached - 2);
+  });
+
+  test('a Tab during a glide stops it, so the focused control stays in view @ 1440x700', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 700 });
+    await page.goto('/');
+    await page.waitForTimeout(400);
+    await page.locator('[data-job-run]').focus();
+    await page.mouse.move(720, 120);
+    await page.mouse.wheel(0, 100);
+    await page.waitForTimeout(220);   // the glide to Build is under way
+    await page.keyboard.press('Tab');
+    await settled(page);
+    await page.waitForTimeout(400);
+    const vis = await page.evaluate(() => {
+      const r = document.activeElement!.getBoundingClientRect();
+      return { top: Math.round(r.top), bottom: Math.round(r.bottom), bar: Math.round(document.querySelector('.topbar')!.getBoundingClientRect().bottom), vh: innerHeight };
+    });
+    expect(vis.top, `focused control at ${vis.top}px, under the topbar or off screen`).toBeGreaterThanOrEqual(vis.bar);
+    expect(vis.bottom).toBeLessThanOrEqual(vis.vh);
+  });
 
   test('keys step one frame per press, and paging up from the bottom lands on Get it @ 1440x700', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 700 });

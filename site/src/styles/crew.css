@@ -435,7 +435,8 @@ code {
 .rcx-when { display: none; font: 400 13px/1.35 var(--font-sans); color: var(--muted); margin-top: 3px; }
 /* the stamp is as wide as its widest label (all stacked) and never shrinks under it */
 .rcx-stamp { flex: none; justify-items: end; }
-.rcx-stamp .stack-i { font: 600 11px/1 var(--font-mono); padding: 6px 9px; border-radius: 6px; white-space: nowrap; color: #141414; background: var(--warn); letter-spacing: .02em; }
+/* the page colour on the amber: dark on Wicked Dark's light amber, light on Wicked Light's dark amber (6.4:1) */
+.rcx-stamp .stack-i { font: 600 11px/1 var(--font-mono); padding: 6px 9px; border-radius: 6px; white-space: nowrap; color: var(--canvas); background: var(--warn); letter-spacing: .02em; }
 .rcx-stamp .stack-i.ok { color: var(--canvas); background: var(--ok); }
 @media (prefers-reduced-motion: no-preference) {
   .rcx-stamp .stack-i.is-on { animation: stamp-in .28s var(--ease); }
@@ -659,6 +660,16 @@ code {
   .news-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
+/* ── Tablets and phones: the caption is a fixed two-line box, so its longest line wraps; the
+   job's title has a row of its own, so "· phased" is never cut ── */
+@media (max-width: 1023px) {
+  .job-bar { flex-wrap: wrap; }
+  .job-dots { display: none; }
+  .job-t { flex: 1 1 100%; }
+  .caption { height: 52px; white-space: normal; line-height: 1.3; }
+  .caption > span:last-child { overflow: visible; text-overflow: clip; }
+}
+
 /* ── Phones: a deliberate layout, not a squashed desktop ─────────────── */
 @media (max-width: 760px) {
   .job { --job-h: auto; }
@@ -688,9 +699,7 @@ code {
   .log { height: 96px; padding: 8px 12px; gap: 3px; }
   .ln { font-size: 12px; }
   .ln-seats { display: none; }
-  /* a fixed two-line box: the longest caption wraps instead of being cut */
-  .caption { height: 52px; font-size: 13px; padding: 0 12px; white-space: normal; line-height: 1.3; }
-  .caption > span:last-child { overflow: visible; text-overflow: clip; }
+  .caption { font-size: 13px; padding: 0 12px; }
   .panel { height: 240px; padding: 10px 12px; }
   .rc table { font-size: 13px; }
 
@@ -810,26 +819,29 @@ html body .same-garden .sg-card:hover, html body .same-garden .sg-card:focus-wit
    Only with motion allowed and the page script running (html.can-rise, set before first paint).
    Transform and opacity only, 12px at most, staggered top to bottom (--r, set by arrive.js), so a
    rising element only ever moves away from the one below it, inside its own frame. The animation
-   fills backwards only, so once it ends every element's own hover and focus styles apply again. */
-.can-rise .frame:not(.is-arrived) :is(.hero-kicker, .hero-head h1, .lede, .job, .beat, .sec h2, .sec .sub, .sec .lead, .pull, .end-line, .benefit, .sbx, .disp, .rcx, .wf, .facts--row, .facts--cards li, .get-intro, .install-stack, .gh-pill),
-.can-rise .same-garden:not(.is-arrived) :is(.sg-head, .sg-plane) { opacity: 0; }
-.can-rise .is-arrived :is(.hero-kicker, .hero-head h1, .lede, .job, .beat, .sec h2, .sec .sub, .sec .lead, .pull, .end-line, .benefit, .sbx, .disp, .rcx, .wf, .facts--row, .facts--cards li, .get-intro, .install-stack, .gh-pill),
-.can-rise .same-garden.is-arrived :is(.sg-head, .sg-plane) {
-  animation: rise .62s var(--ease) calc(var(--r, 0) * 60ms) backwards;
+   fills backwards only, so once it ends every element's own hover and focus styles apply again.
+   All of it sits inside no-preference, so reduced motion switched on after load shows everything. */
+@media (prefers-reduced-motion: no-preference) {
+  .can-rise .frame:not(.is-arrived) :is(.hero-kicker, .hero-head h1, .lede, .job, .beat, .sec h2, .sec .sub, .sec .lead, .pull, .end-line, .benefit, .sbx, .disp, .rcx, .wf, .facts--row, .facts--cards li, .get-intro, .install-stack, .gh-pill),
+  .can-rise .same-garden:not(.is-arrived) :is(.sg-head, .sg-plane) { opacity: 0; }
+  .can-rise .is-arrived :is(.hero-kicker, .hero-head h1, .lede, .job, .beat, .sec h2, .sec .sub, .sec .lead, .pull, .end-line, .benefit, .sbx, .disp, .rcx, .wf, .facts--row, .facts--cards li, .get-intro, .install-stack, .gh-pill),
+  .can-rise .same-garden.is-arrived :is(.sg-head, .sg-plane) {
+    animation: rise .62s var(--ease) calc(var(--r, 0) * 60ms) backwards;
+  }
+  @keyframes rise { from { opacity: 0; transform: translateY(12px); } }
+  /* the explorables' connectors draw in after their boxes */
+  /* (pseudo-elements cannot sit inside :is(), so they are listed on their own) */
+  .can-rise .frame:not(.is-arrived) :is(.wire--ro, .wire--out),
+  .can-rise .frame:not(.is-arrived) .disp-steps li + li::before { transform: scaleX(0); }
+  .can-rise .frame:not(.is-arrived) .wire--keys,
+  .can-rise .frame:not(.is-arrived) .wf-node + .wf-node::before { transform: scaleY(0); }
+  .can-rise .is-arrived :is(.wire--ro, .wire--out) { transform-origin: 0 50%; animation: draw-x .5s var(--ease) .45s backwards; }
+  .can-rise .is-arrived .disp-steps li + li::before { transform-origin: 0 50%; animation: draw-x .4s var(--ease) .5s backwards; }
+  .can-rise .is-arrived .wire--keys { transform-origin: 50% 0; animation: draw-y .4s var(--ease) .6s backwards; }
+  .can-rise .is-arrived .wf-node + .wf-node::before { transform-origin: 50% 0; animation: draw-y .35s var(--ease) .5s backwards; }
+  @keyframes draw-x { from { transform: scaleX(0); } }
+  @keyframes draw-y { from { transform: scaleY(0); } }
 }
-@keyframes rise { from { opacity: 0; transform: translateY(12px); } }
-/* the explorables' connectors draw in after their boxes */
-/* (pseudo-elements cannot sit inside :is(), so they are listed on their own) */
-.can-rise .frame:not(.is-arrived) :is(.wire--ro, .wire--out),
-.can-rise .frame:not(.is-arrived) .disp-steps li + li::before { transform: scaleX(0); }
-.can-rise .frame:not(.is-arrived) .wire--keys,
-.can-rise .frame:not(.is-arrived) .wf-node + .wf-node::before { transform: scaleY(0); }
-.can-rise .is-arrived :is(.wire--ro, .wire--out) { transform-origin: 0 50%; animation: draw-x .5s var(--ease) .45s backwards; }
-.can-rise .is-arrived .disp-steps li + li::before { transform-origin: 0 50%; animation: draw-x .4s var(--ease) .5s backwards; }
-.can-rise .is-arrived .wire--keys { transform-origin: 50% 0; animation: draw-y .4s var(--ease) .6s backwards; }
-.can-rise .is-arrived .wf-node + .wf-node::before { transform-origin: 50% 0; animation: draw-y .35s var(--ease) .5s backwards; }
-@keyframes draw-x { from { transform: scaleX(0); } }
-@keyframes draw-y { from { transform: scaleY(0); } }
 
 /* ── Loops idle while their frame is off-screen (arrive.js toggles .is-live) ── */
 .frame:not(.is-live) .st::after, .frame:not(.is-live) .wire--out .pkt,

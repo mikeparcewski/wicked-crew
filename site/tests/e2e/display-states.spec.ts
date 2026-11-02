@@ -13,11 +13,14 @@ import { test, expect, type Page } from '@playwright/test';
  */
 
 async function settled(page: Page) {
-  let last = -1;
-  for (let k = 0; k < 30; k++) {
+  // wait for the wheel's own scroll, the settle's short pause before it acts (140ms) and its glide:
+  // the position must hold for half a second
+  let last = -1, same = 0;
+  for (let k = 0; k < 50; k++) {
     await page.waitForTimeout(120);
     const y = await page.evaluate(() => Math.round(window.scrollY));
-    if (y === last) return y;
+    same = y === last ? same + 1 : 0;
+    if (same >= 4) return y;
     last = y;
   }
   return last;
@@ -120,7 +123,7 @@ async function cutStates(page: Page) {
   });
 }
 
-for (const vp of [{ width: 1440, height: 700 }, { width: 1920, height: 1080 }, { width: 1024, height: 700 }, { width: 390, height: 844 }, { width: 360, height: 740 }]) {
+for (const vp of [{ width: 1440, height: 700 }, { width: 1920, height: 1080 }, { width: 1024, height: 700 }, { width: 768, height: 1024 }, { width: 390, height: 844 }, { width: 360, height: 740 }]) {
   test(`no state text is cut off in its box @ ${vp.width}x${vp.height}`, async ({ page }) => {
     await page.setViewportSize(vp);
     await page.goto('/');
@@ -158,6 +161,32 @@ test.describe('the job demo, replayed', () => {
     await expect(job.locator('[data-caption]')).toContainText('Claude Code builds it', { timeout: 10_000 });
     expect(await lines()).toBe(n0);
     expect(await job.locator('.ln--ghost').count()).toBeGreaterThan(0);
+  });
+});
+
+test.describe('arrival', () => {
+  test.use({ viewport: { width: 1440, height: 700 } });
+
+  test('reduced motion switched on after load shows every frame at once, with no rise', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForTimeout(300);
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.evaluate(() => document.getElementById('build')!.scrollIntoView({ block: 'start', behavior: 'instant' }));
+    await page.waitForTimeout(80);
+    const h2 = page.locator('#sandbox-h');
+    expect(await h2.evaluate((el) => getComputedStyle(el).opacity)).toBe('1');
+    expect(await h2.evaluate((el) => getComputedStyle(el).animationName)).toBe('none');
+  });
+
+  test('with motion, a frame rises in once it arrives, and is fully shown after', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForTimeout(300);
+    await page.evaluate(() => document.getElementById('gate')!.scrollIntoView({ block: 'start', behavior: 'instant' }));
+    await expect(page.locator('#gate')).toHaveClass(/is-arrived/);
+    await page.waitForTimeout(1400);
+    for (const sel of ['#gates-h', '#gate .rcx', '#gate .benefit']) {
+      expect(await page.locator(sel).evaluate((el) => getComputedStyle(el).opacity), sel).toBe('1');
+    }
   });
 });
 

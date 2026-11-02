@@ -29,6 +29,9 @@ if (!('IntersectionObserver' in window)) {
   } else {
     frames.forEach((f) => f.classList.add('is-arrived'));
   }
-  const live = new IntersectionObserver((es) => es.forEach((e) => e.target.classList.toggle('is-live', e.isIntersecting)), { threshold: 0 });
+  // the strip under the (opaque) topbar does not count as on screen
+  const bar = document.querySelector('.topbar');
+  const tb = bar ? Math.round(bar.getBoundingClientRect().height) : 64;
+  const live = new IntersectionObserver((es) => es.forEach((e) => e.target.classList.toggle('is-live', e.isIntersecting)), { threshold: 0, rootMargin: `-${tb}px 0px 0px 0px` });
   frames.forEach((f) => live.observe(f));
 }

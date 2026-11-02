@@ -4,12 +4,15 @@
  *
  * Every user scroll ends on a frame top, in the direction of travel. When a gesture starts, the page
  * remembers where it was; when the scroll comes to rest:
- *  - a wheel or touch nudge under 12% of a frame (60px at most) from a frame top glides back to it;
+ *  - a wheel or touch nudge under 12% of a frame (60px at most) from a frame top glides back to it,
+ *    and nudges the same way add up, so a gentle scroller still moves on;
  *  - otherwise the page glides to the next frame top after the start, in the direction of travel;
  *  - a long fling that went past that frame ends on the frame top it passed last when it is within
  *    10% of a frame (an overshoot never accumulates), or on the next one ahead;
  *  - a key (PageDown/Up, Space) steps one frame per press; the arrows, one frame per burst;
- *  - the bottom of the page counts as a frame, so paging up from the end lands on Get it's top.
+ *  - the bottom of the page counts as a frame, so paging up from the end lands on Get it's top;
+ *  - a burst of arrow keys ends on the frame ahead of where it scrolled to, never behind it;
+ *  - new input during a glide stops the glide where it is; a keyboard focus stops it for good.
  * Every desktop frame is exactly one window tall, so nothing is ever skipped. It is off below 1024px
  * wide or 640px tall, under prefers-reduced-motion, while a section taller than its frame is in view,
  * and after a keyboard focus scrolled the page (Tab), so focus never jumps away. */
@@ -26,25 +29,35 @@ const FRAMES = '[data-frame], .same-garden, .footer';
   // asked for (+1 down, -1 up, 0 unknown); keys = scroll-key presses in it; jump = Home / End.
   // restY = where the page last came to rest. A gesture starts there, not at scrollY when its first
   // input event arrives: with threaded scrolling, a wheel notch has often moved the page already.
-  let pending = false, y0 = window.scrollY, restY = window.scrollY, idir = 0, keys = 0, jump = false;
+  let pending = false, y0 = window.scrollY, restY = window.scrollY, idir = 0, keys = 0, jump = false, arrows = false;
   let gliding = false, glideTo = 0, focusAt = -1e9, inputAt = -1e9, restT = 0;
+  // small nudges add up: two 30px nudges the same way make one 60px move, so a gentle scroller
+  // is never held on a frame
+  const nudge = { dir: 0, sum: 0, at: -1e9 };
   const on = () => window.innerWidth >= 1024 && window.innerHeight >= 640 && !reduceMQ.matches;
   const maxY = () => Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
 
+  /** Stop our glide where it is: the browser's smooth scroll keeps going unless it is replaced. */
+  function halt() {
+    if (!gliding) return;
+    gliding = false;
+    window.scrollTo({ top: window.scrollY, behavior: 'instant' });
+  }
   function begin(kind, dir) {
     const t = now();
     // an input that cannot move the page (down at the bottom, up at the top) starts nothing
     if (dir && !gliding && ((dir > 0 && window.scrollY >= maxY() - 1) || (dir < 0 && window.scrollY <= 0))) return;
     clearTimeout(restT);
     if (gliding) {
-      // the visitor takes over our glide: the gesture starts from where the glide was going
-      gliding = false; y0 = glideTo; idir = 0; keys = 0; jump = false;
+      // the visitor takes over our glide: it stops where it is, and the gesture counts from the
+      // frame the glide was going to (so a reversal goes back, and another notch goes on)
+      halt(); y0 = glideTo; idir = 0; keys = 0; jump = false; arrows = false;
     } else if (!pending || t - inputAt > 600) {
-      y0 = restY; idir = 0; keys = 0; jump = false;
+      y0 = restY; idir = 0; keys = 0; jump = false; arrows = false;
     }
     pending = true;
-    if (kind === 'key') keys++;
-    else if (kind === 'arrow') keys = Math.max(keys, 1);   // the arrows step one frame per gesture
+    if (kind === 'key') { keys++; arrows = false; }
+    else if (kind === 'arrow') { keys = Math.max(keys, 1); arrows = true; }   // the arrows: see target()
     else if (kind === 'jump') jump = true;
     else if (kind === 'wheel' || kind === 'touch') keys = 0;
     if (dir) idir = dir;
@@ -53,8 +66,15 @@ const FRAMES = '[data-frame], .same-garden, .footer';
   window.addEventListener('wheel', (e) => { if (e.deltaY) begin('wheel', e.deltaY > 0 ? 1 : -1); }, { passive: true });
   window.addEventListener('touchmove', () => begin('touch', 0), { passive: true });
   window.addEventListener('pointerdown', () => begin('pointer', 0), { passive: true });
+  // a release keeps its gesture alive until the scroll comes to rest (a held key, a scrollbar drag)
+  const release = () => { if (pending) inputAt = now(); };
+  window.addEventListener('keyup', (e) => { if (SCROLL_KEYS.indexOf(e.key) >= 0) release(); });
+  window.addEventListener('pointerup', release, { passive: true });
+  window.addEventListener('touchend', release, { passive: true });
+  // keyboard focus wins: a glide under way stops where it is, and nothing settles after it
+  function focusTakes() { focusAt = now(); halt(); clearTimeout(restT); pending = false; }
   window.addEventListener('keydown', (e) => {
-    if (e.key === 'Tab') { focusAt = now(); return; }
+    if (e.key === 'Tab') { focusTakes(); return; }
     if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
     const tg = e.target;
     // Space on a control presses it; it does not scroll
@@ -65,7 +85,9 @@ const FRAMES = '[data-frame], .same-garden, .footer';
   // a keyboard focus that scrolled the page is left where it is (a mouse click focuses without :focus-visible)
   window.addEventListener('focusin', (e) => {
     const t = e.target;
-    try { if (t && t.matches && t.matches(':focus-visible')) focusAt = now(); } catch (err) { focusAt = now(); }
+    let kb = true;
+    try { kb = !!(t && t.matches && t.matches(':focus-visible')); } catch (err) { kb = true; }
+    if (kb) focusTakes();
   });
 
   function tops() {
@@ -92,29 +114,42 @@ const FRAMES = '[data-frame], .same-garden, .footer';
     const down = idir ? idir > 0 : d > 0, over = OVER * vh;
     const nearest = T.reduce((a, b) => (Math.abs(b - y0) < Math.abs(a - y0) ? b : a), T[0]);
     const onStart = Math.abs(nearest - y0) <= 2;
+    const thr = Math.min(NUDGE * vh, NUDGE_PX);
     if (keys) {
-      // one frame per key press, counted from the frame the gesture started on
+      // PageDown / PageUp / Space: one frame per press, counted from the frame the gesture started on
       let s;
       if (onStart) s = T.indexOf(nearest);
       else if (down) s = T.filter((v) => v < y0).length - 1;
       else s = T.length - T.filter((v) => v > y0).length;
-      return T[Math.max(0, Math.min(T.length - 1, s + (down ? keys : -keys)))];
+      const to = T[Math.max(0, Math.min(T.length - 1, s + (down ? keys : -keys)))];
+      if (!arrows) return to;
+      // the arrows scroll 40px a press natively: a burst can pass that frame, so it ends on the frame
+      // ahead of where it got to, never behind it
+      if (down) { const a = T.find((v) => v >= y - 2); return Math.max(to, a === undefined ? max : a); }
+      const a = T.filter((v) => v <= y + 2).pop();
+      return Math.min(to, a === undefined ? 0 : a);
     }
-    if (onStart && Math.abs(d) < Math.min(NUDGE * vh, NUDGE_PX)) return nearest; // a nudge: back
+    if (onStart && Math.abs(d) < thr) {
+      const sgn = d > 0 ? 1 : -1, t = now();
+      if (nudge.dir === sgn && t - nudge.at < 2500) nudge.sum += Math.abs(d); else { nudge.dir = sgn; nudge.sum = Math.abs(d); }
+      nudge.at = t;
+      if (nudge.sum < thr) return nearest;      // a nudge: back to the frame it started on
+      nudge.sum = 0;                            // nudges that add up to a move: step on
+    } else nudge.sum = 0;
     if (down) {
       const next = T.find((v) => v > y0 + 2);
       if (next === undefined) return max;
       if (y <= next + over) return next;
       const passed = T.filter((v) => v <= y).pop();
-      const ahead = T.find((v) => v > y);
-      return ahead === undefined || y - passed <= over ? passed : ahead;
+      const ahd = T.find((v) => v > y);
+      return ahd === undefined || y - passed <= over ? passed : ahd;
     }
     const prev = T.filter((v) => v < y0 - 2).pop();
     if (prev === undefined) return 0;
     if (y >= prev - over) return prev;
     const passed = T.find((v) => v >= y);
-    const ahead = T.filter((v) => v < y).pop();
-    return ahead === undefined || passed - y <= over ? passed : ahead;
+    const ahd = T.filter((v) => v < y).pop();
+    return ahd === undefined || passed - y <= over ? passed : ahd;
   }
 
   function rest() {
