@@ -8,6 +8,9 @@
  * them (pinned by a test), so there is no second copy to drift. Only a seed with no def (studio's own
  * flows, coming soon) carries its own copy.
  *
+ * Copy here is a product claim: a card promises only what works today (approved messaging rules N5, N7, N8;
+ * pinned by tests/workflow-catalog.test.ts). Search-only `synonyms` may name what people type for it.
+ *
  * Adding a workflow to the catalog = one seed here. A served, hand-launchable workflow with no seed and
  * not in {@link CATALOG_EXCLUDED} still appears (under `more`), so nothing launchable is ever lost.
  */
@@ -110,7 +113,7 @@ export const CATALOG_SEEDS: readonly CatalogSeed[] = [
     title: 'Apps',
     summary: 'Build a live app, dashboard or tool over your own data and APIs by describing it.',
     useWhen: ['a dashboard over your data', 'an internal tool without a codebase'],
-    outcome: 'A working app you can open, share and keep changing.',
+    outcome: 'Live apps and dashboards over your APIs and databases.',
     needs: ['project'],
     inputs: [],
     typicalMinutes: null,
@@ -126,7 +129,7 @@ export const CATALOG_SEEDS: readonly CatalogSeed[] = [
     id: 'feature',
     category: 'create',
     subcategory: 'feature',
-    outcome: 'A pull request with the change, its tests and a review, after QE acceptance.',
+    outcome: 'A pull request with the change, checked by tests and a review, after QE acceptance.',
     needs: ['repo'],
     inputs: RUN_ON_REPO('What should it do?'),
     typicalMinutes: [60, 240],
@@ -155,9 +158,10 @@ export const CATALOG_SEEDS: readonly CatalogSeed[] = [
     category: 'create',
     subcategory: 'documentation',
     title: 'Interactive document',
-    summary: 'Draft a web page document from a brief, grounded in your repositories, and refine it in studio.',
+    // Chat refinement of a document is not built (rule N8): it is edited in place, by hand.
+    summary: 'Draft a web page document from a brief, grounded in your repositories, then edit it in place in studio.',
     useWhen: ['a living spec or explainer', 'a page people click through'],
-    outcome: 'An HTML document in studio, versioned, that you can edit, share and export.',
+    outcome: 'A versioned HTML document in studio that you can edit in place and export as PDF.',
     needs: ['project'],
     inputs: [INTENT('What is it about?'), PROJECT_REQUIRED, REPO_OPTIONAL, SEATS],
     typicalMinutes: [10, 20],
@@ -174,12 +178,12 @@ export const CATALOG_SEEDS: readonly CatalogSeed[] = [
     title: 'Document',
     summary: 'Draft a prose document from a brief, grounded in your repositories, ready to export.',
     useWhen: ['a memo, white paper or proposal', 'a document to print or send as PDF'],
-    outcome: 'A document in studio you can edit and export as PDF.',
+    outcome: 'A document in studio you can edit in place and export as PDF.',
     needs: ['project'],
     inputs: [INTENT('What is it about?'), PROJECT_REQUIRED, REPO_OPTIONAL, SEATS],
     typicalMinutes: [10, 20],
     cost: 'medium',
-    tags: ['pdf', 'document', 'word'],
+    tags: ['pdf', 'document'],
     synonyms: ['memo', 'white paper', 'proposal', 'report', 'pdf', 'word', 'docx', 'write up'],
     launch: { kind: 'document', style: 'doc' },
     delivers: 'document',
@@ -191,7 +195,9 @@ export const CATALOG_SEEDS: readonly CatalogSeed[] = [
     title: 'Presentation',
     summary: 'Draft a slide deck from a brief, grounded in your repositories.',
     useWhen: ['a deck for a review or a pitch', 'walk people through a change'],
-    outcome: '16:9 slides in studio you can edit and export as PDF or PowerPoint.',
+    // No PowerPoint here until its export works on a stock install (wicked-interactive#322: the exporter needs
+    // python-pptx, which nothing installs; rule N8). Add "or PowerPoint" back when #322 ships.
+    outcome: '16:9 slides in studio you can edit in place and export as PDF.',
     needs: ['project'],
     inputs: [INTENT('What is the deck about, and for whom?'), PROJECT_REQUIRED, REPO_OPTIONAL, SEATS],
     typicalMinutes: [10, 20],
@@ -206,9 +212,10 @@ export const CATALOG_SEEDS: readonly CatalogSeed[] = [
     category: 'create',
     subcategory: 'demo',
     title: 'Demo video',
-    summary: 'Plan, record and review a narrated demo video of a running app.',
+    // The engine renders no audio (wicked-interactive demo-cut.js; rule N7): captions, no voice-over.
+    summary: 'Plan, record and review a captioned demo video of a running app (no voice-over).',
     useWhen: ['show a feature working', 'a product walkthrough on video'],
-    outcome: 'A narrated video of your app, recorded and reviewed.',
+    outcome: 'A captioned video of your app, recorded and reviewed.',
     needs: ['project', 'running_app'],
     inputs: [
       PROJECT_REQUIRED,
@@ -276,7 +283,7 @@ export const CATALOG_SEEDS: readonly CatalogSeed[] = [
     id: 'bug',
     category: 'resolve',
     subcategory: 'issue',
-    outcome: 'A pull request with the fix and a test that fails without it, after QE acceptance.',
+    outcome: 'A pull request with the fix and the checks that show it holds, after QE acceptance.',
     needs: ['repo'],
     inputs: RUN_ON_REPO('What is wrong? Paste the error or the issue.'),
     typicalMinutes: [10, 60],

@@ -30,6 +30,11 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **The workflow catalog promises only what works today.** The Presentation card no longer offers PowerPoint
+  export (it needs python-pptx that nothing installs, wicked-interactive#322); document cards say "edit in place"
+  and "export as PDF" (chat refinement and sharing are not built); the demo card says captioned, no voice-over (the
+  engine renders no audio); Fix a bug and Build a feature promise the checks their plans run, not a failing-first
+  test; Apps (coming soon) says what it will be. A test pins the shown copy.
 - **Other web pages can no longer put studio in a frame.** Crew sent no `frame-ancestors` directive and no
   `X-Frame-Options`, so any page open in the same browser could frame studio, including its gate buttons. Every
   response (studio's pages, `/api/v1`, editor bundles, proxied documents, refusals) now sends
