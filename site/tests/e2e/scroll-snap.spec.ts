@@ -338,24 +338,65 @@ test.describe('touch, on a touch screen 1024px wide and up (a tablet in landscap
   }
   const steps = (from: number, to: number, n: number) => Array.from({ length: n + 1 }, (_, k) => Math.round(from + ((to - from) * k) / n));
 
-  test('a drag that turns back before the release settles the way the finger last went', async ({ page }) => {
+  async function atTop(page: Page, y: number) {
+    await page.evaluate((v) => window.scrollTo({ top: v, behavior: 'instant' }), y);
+    await page.waitForTimeout(500);
+  }
+  const now = (page: Page) => page.evaluate(() => Math.round(window.scrollY));
+
+  test('a swipe goes to the next frame; a drag held still before lifting goes back to the nearest', async ({ page }) => {
     await page.goto('/');
     await page.waitForTimeout(400);
     const tops = await frameTops(page);
-    await page.evaluate((y) => window.scrollTo({ top: y, behavior: 'instant' }), tops[2]);
-    await page.waitForTimeout(500);
-    // finger up 180px (the page goes down), then back down 120px (the page comes back up), slowly
-    const turned = await drag(page, [...steps(500, 320, 12), ...steps(320, 440, 8).slice(1)], 40, 12);
-    expect(turned, 'the drag did not scroll the page (no touch scrolling to test)').toBeGreaterThan(tops[2] + 100);
-    const y = await settled(page);
-    expect(Math.abs(y - tops[2]), `rested at ${y}; the finger last went back towards ${tops[2]}`).toBeLessThanOrEqual(2);
+    await atTop(page, tops[2]);
+    await drag(page, steps(500, 300, 8), 16);          // finger up 200px: the page goes down
+    expect(Math.abs((await settled(page)) - tops[3])).toBeLessThanOrEqual(2);
+    await atTop(page, tops[2]);
+    const c = await page.context().newCDPSession(page);
+    await c.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: 720, y: 500 }] });
+    for (const y of steps(500, 400, 8).slice(1)) { await c.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: 720, y }] }); await page.waitForTimeout(30); }
+    await page.waitForTimeout(400);                       // held still
+    await c.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    expect(Math.abs((await settled(page)) - tops[2]), 'a drag held still went on to the next frame').toBeLessThanOrEqual(2);
   });
 
-  test('a fast fling locks onto a frame after its momentum, however long that takes', async ({ page }) => {
+  test('a drag that turns back settles the way the finger last went, wherever it began', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForTimeout(400);
+    const tops = await frameTops(page);
+    await atTop(page, tops[2]);
+    // finger up 200px (the page goes down 200), then back down 30px, and lift at once: the page is
+    // about 170px past Review, well past any nudge, with the finger last going back up the page
+    await drag(page, [...steps(500, 300, 10), ...steps(300, 330, 3).slice(1)], 30);
+    const before = await now(page);
+    expect(before, 'the drag did not scroll the page (no touch scrolling to test)').toBeGreaterThan(tops[2] + 100);
+    const y = await settled(page);
+    expect(Math.abs(y - tops[2]), `rested at ${y} from ${before}; the finger last went back towards ${tops[2]}`).toBeLessThanOrEqual(2);
+  });
+
+  test('a hold, then a turn back, still goes back to the frame the finger turned towards', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForTimeout(400);
+    const tops = await frameTops(page);
+    await atTop(page, tops[2]);
+    const c = await page.context().newCDPSession(page);
+    const mv = async (y: number) => { await c.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: 720, y }] }); await page.waitForTimeout(30); };
+    await c.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: 720, y: 500 }] });
+    for (const y of steps(500, 335, 10).slice(1)) await mv(y);
+    await page.waitForTimeout(800);                       // held longer than any gesture window
+    for (const y of steps(335, 365, 3).slice(1)) await mv(y);
+    await c.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    const y = await settled(page);
+    expect(Math.abs(y - tops[2]), `rested at ${y}; it skipped past ${tops[2]}`).toBeLessThanOrEqual(2);
+  });
+
+  test('a fast fling ends on a frame top after its momentum', async ({ page }) => {
+    // (a fling's momentum can outlast the one-second window wheel and key gestures have; touch has
+    // none. This checks the outcome; it cannot force momentum past one second.)
     await page.goto('/');
     await page.waitForTimeout(400);
     const tops = await restTops(page);
-    await drag(page, steps(600, 200, 6), 8);
+    await drag(page, steps(600, 100, 4), 8);
     const y = await settled(page);
     expect(onAFrame(y, tops), `the fling rested at ${y}, between frames`).toBe(true);
     expect(y).toBeGreaterThan(0);

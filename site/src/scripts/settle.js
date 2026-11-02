@@ -12,6 +12,8 @@
  *  - a key (PageDown/Up, Space) steps one frame per press; the arrows, one frame per burst;
  *  - the bottom of the page counts as a frame, so paging up from the end lands on Get it's top;
  *  - a burst of arrow keys ends on the frame ahead of where it scrolled to, never behind it;
+ *  - touch ends on the frame top ahead in the direction the finger last went (the nearest one if
+ *    the finger was held still before lifting), after any momentum, however long it lasts;
  *  - new input during a glide stops the glide where it is; a keyboard focus stops it for good.
  * Every desktop frame is exactly one window tall, so nothing is ever skipped. It is off below 1024px
  * wide or 640px tall, under prefers-reduced-motion, while a section taller than its frame is in view,
@@ -55,9 +57,6 @@ const FRAMES = '[data-frame], .same-garden, .footer';
       halt(); y0 = glideTo; idir = 0; keys = 0; jump = false; arrows = false; keyed = false; touched = false;
     } else if (!pending || t - inputAt > 600) {
       y0 = restY; idir = 0; keys = 0; jump = false; arrows = false; keyed = false; touched = false;
-    } else if (kind === 'touch' && dir && idir && dir !== idir) {
-      // a finger that turns back without lifting: the gesture starts again from where it turned
-      y0 = window.scrollY; nudge.sum = 0;
     }
     pending = true;
     if (kind === 'key') { keys += dir; arrows = false; keyed = true; }
@@ -74,14 +73,18 @@ const FRAMES = '[data-frame], .same-garden, .footer';
   if (reduceMQ.addEventListener) reduceMQ.addEventListener('change', off);
   window.addEventListener('resize', off);
   window.addEventListener('wheel', (e) => { if (e.deltaY) begin('wheel', e.deltaY > 0 ? 1 : -1); }, { passive: true });
-  // a finger moving up scrolls down: the direction is the finger's latest clear movement (4px or more)
-  let touchY = null;
-  window.addEventListener('touchstart', (e) => { touchY = e.touches && e.touches[0] ? e.touches[0].clientY : null; }, { passive: true });
+  // Touch has its own simple model (see touchTarget): it only needs the finger's latest clear
+  // movement (4px or more; a finger moving up scrolls down) and whether the finger was held still
+  // before it lifted.
+  let touchY = null, touchDir = 0, touchMoveAt = -1e9, touchEndAt = -1e9;
+  window.addEventListener('touchstart', (e) => { touchY = e.touches && e.touches[0] ? e.touches[0].clientY : null; touchDir = 0; }, { passive: true });
   window.addEventListener('touchmove', (e) => {
     const y = e.touches && e.touches[0] ? e.touches[0].clientY : null;
     const dy = touchY === null || y === null ? 0 : touchY - y;
-    if (Math.abs(dy) > 4) { begin('touch', dy > 0 ? 1 : -1); touchY = y; } else begin('touch', 0);
+    if (Math.abs(dy) > 4) { touchDir = dy > 0 ? 1 : -1; touchY = y; touchMoveAt = now(); }
+    begin('touch', 0);
   }, { passive: true });
+  window.addEventListener('touchend', () => { touchEndAt = now(); }, { passive: true });
   window.addEventListener('pointerdown', () => begin('pointer', 0), { passive: true });
   // a release keeps its gesture alive until the scroll comes to rest (a held key, a scrollbar drag)
   const release = () => { if (pending) inputAt = now(); };
@@ -121,6 +124,16 @@ const FRAMES = '[data-frame], .same-garden, .footer';
       const r = el.getBoundingClientRect();
       return r.height > vh + 2 && r.top < window.innerHeight - 1 && r.bottom > tb + 1;
     });
+  }
+  /** Touch: after the finger lifts (and any momentum), the frame top ahead in the direction the finger
+   *  last went; if the finger was held still before lifting, the nearest frame top. A reversal is
+   *  simply the latest direction, wherever the drag began. */
+  function touchTarget(y) {
+    const T = tops(), max = maxY();
+    if (!touchDir || touchEndAt - touchMoveAt > 150) return T.reduce((a, b) => (Math.abs(b - y) < Math.abs(a - y) ? b : a), T[0]);
+    if (touchDir > 0) { const a = T.find((v) => v >= y - 2); return a === undefined ? max : a; }
+    const a = T.filter((v) => v <= y + 2).pop();
+    return a === undefined ? 0 : a;
   }
   function target(y) {
     const vh = window.innerHeight - topbarH(), max = maxY();
@@ -181,7 +194,7 @@ const FRAMES = '[data-frame], .same-garden, .footer';
     const t = now();
     let to = null;
     // a touch fling's momentum can outlast any time window: it stays the visitor's until it rests
-    if (on() && t - focusAt >= 800 && (touched || t - inputAt <= 1000) && !jump && !tallInView()) to = target(y);
+    if (on() && t - focusAt >= 800 && (touched || t - inputAt <= 1000) && !jump && !tallInView()) to = touched ? touchTarget(y) : target(y);
     if (to === null || Math.abs(Math.max(0, Math.min(to, maxY())) - y) < 2) { y0 = y; return; }
     to = Math.max(0, Math.min(to, maxY()));
     gliding = true; glideTo = to; y0 = to; restY = to;
