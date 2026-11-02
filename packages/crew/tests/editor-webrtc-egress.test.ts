@@ -77,7 +77,7 @@ const MODULE_ALONE_IN_CHILD =
 /** What the guard says when it stops a script (`WEBRTC_PRELUDE_REFUSAL`), as the console shows it. */
 const REFUSED = 'WebRTC is not available in an editor frame';
 
-const ATTEMPTS: Record<string, { code: string; childMustReport?: string; extra?: string; consoleMust?: string; consoleTimes?: number; mustNotSay?: string }> = {
+const ATTEMPTS: Record<string, { code: string; childMustReport?: string; extra?: string; consoleMust?: string; consoleTimes?: number; mustNotSay?: string; waitFor?: string }> = {
   direct: { code: "rtc(window,'direct')" },
   restore: { code: "try{delete window.RTCPeerConnection}catch(e){};Object.getOwnPropertyNames(window).forEach(function(k){if(/RTC/.test(k)&&typeof window[k]==='function')report('found:'+k)});rtc(window,'restore')" },
   'srcdoc-copy': { code: "var f=document.createElement('iframe');f.srcdoc=CHILD;document.body.appendChild(f)", childMustReport: 'child:no-ctor' },
@@ -99,6 +99,12 @@ const ATTEMPTS: Record<string, { code: string; childMustReport?: string; extra?:
   // Studio's shell lets a frame point at crew's interactive proxy; a document there runs its own scripts (the stand-in
   // upstream below serves one that tries WebRTC). The proxy must refuse the editor frame's navigation.
   'navigate-proxy': { code: "location.href='/api/v1/projects/default/interactive/d/x/doc/1?port='+U", mustNotSay: 'proxy-doc-ran' },
+  // A hash source would also admit an external script whose integrity names it, fetched before it is checked. The
+  // plugin knows its own script's hash; the request must never leave (the HTTP sink below counts it).
+  'external-integrity': {
+    code: "crypto.subtle.digest('SHA-256',new TextEncoder().encode(SELF)).then(function(d){var s=document.createElement('script');s.integrity='sha256-'+btoa(String.fromCharCode.apply(null,new Uint8Array(d)));s.src=new URL('/sink/external-integrity?d=leak',location.href).href;document.body.appendChild(s);report('external-added')},function(e){report('digest-failed')})",
+    waitFor: 'external-added',
+  },
 };
 
 /** A well-behaved bundle with awkward scripts: every one must run under the guard, with no policy violation. */
@@ -167,6 +173,8 @@ describe('editor frames: zero WebRTC egress from a hostile plugin (Chromium, cre
   const agentDocs = new Map<string, string>();
   /** The interactive bridge's stand-in: every document it serves runs a script that tries WebRTC (port from the query). */
   let docUpstream: Server | null = null;
+  /** Requests that reached the HTTP sink, by attempt: any is a request that left the frame. */
+  const sinkHits = new Map<string, number>();
 
   const record = (id: string, html: string, firstParty: boolean): void => {
     const entryPath = join(dir, `${id}.html`);
@@ -215,6 +223,11 @@ describe('editor frames: zero WebRTC egress from a hostile plugin (Chromium, cre
           `ch.port1.onmessage=function(m){var d=m.data||{};if(d.type==='artifact.read'&&d.id){R.push('artifact-read');ch.port1.postMessage({p:'wicked.editor',v:1,re:d.id,ok:true,payload:{version:1,head:1,content:{type:'html',html:HTML}}})}};` +
           `document.body.appendChild(f);</script></body>`,
       );
+    });
+    app.get('/sink/:name', async (req, reply) => {
+      const name = (req.params as { name: string }).name;
+      sinkHits.set(name, (sinkHits.get(name) ?? 0) + 1);
+      return reply.type('text/javascript').send('/* sink */');
     });
     app.get('/api/v1/editors/control/:id/entry', async (req, reply) => {
       const html = control.get((req.params as { id: string }).id);
@@ -305,7 +318,7 @@ describe('editor frames: zero WebRTC egress from a hostile plugin (Chromium, cre
           record(`acme-${name}`, hostile(ATTEMPTS[name]!.code, sink.port, ATTEMPTS[name]!.extra), false);
           const a = ATTEMPTS[name]!;
           const logged = a.consoleMust !== undefined ? { text: a.consoleMust, times: a.consoleTimes ?? 1 } : undefined;
-          results[name] = await load(`/api/v1/editors/acme-${name}/1.0.0/entry`, sink, 1500, a.childMustReport, logged);
+          results[name] = await load(`/api/v1/editors/acme-${name}/1.0.0/entry`, sink, 1500, a.childMustReport ?? a.waitFor, logged);
         } finally {
           sink.close();
         }
@@ -319,6 +332,8 @@ describe('editor frames: zero WebRTC egress from a hostile plugin (Chromium, cre
       expect(r.said.filter((m) => /rtc-created|offer-set|^found:|^module-ran|^shadow-called/.test(m)), name).toEqual([]);
       const must = ATTEMPTS[name]!.childMustReport;
       if (must !== undefined) expect(r.said, `${name}: the new realm ran and found no constructor`).toContain(must);
+      expect(sinkHits.get(name) ?? 0, `${name}: HTTP requests that left the frame`).toBe(0);
+      if (ATTEMPTS[name]!.waitFor !== undefined) expect(r.said, `${name}: the attempt was made`).toContain(ATTEMPTS[name]!.waitFor);
       const forbidden = ATTEMPTS[name]!.mustNotSay;
       if (forbidden !== undefined) expect(r.said, `${name}: never ran`).not.toContain(forbidden);
       const stopped = ATTEMPTS[name]!.consoleMust;

@@ -113,6 +113,8 @@ describe('guardBundle: the prelude goes first in every inline script that runs, 
     expect(withPrelude('"use strict"\n.5;x()')).toBe(`"use strict";${P}\n.5;x()`);
     expect(withPrelude('"use strict"\n\\u0074op()')).toBe(`"use strict";${P}\n\\u0074op()`);
     expect(withPrelude('"a"\n.length')).toBe(`${P}"a"\n.length`);
+    // An identifier that starts like `in` but goes on with an escape is a name, not the operator.
+    expect(withPrelude('"use strict"\nin\\u0078 = 1')).toBe(`"use strict";${P}\nin\\u0078 = 1`);
     // A string that starts an expression is not a directive.
     expect(withPrelude("'use strict';\n'x'+y")).toBe(`'use strict';${P}\n'x'+y`);
     const { body, hashes } = guard('<script>"use strict";x</script>');
@@ -219,6 +221,8 @@ describe('the prelude: WebRTC is gone from the window, for good, before the edit
     expect(withPrelude('/* */ x(); /* */ "a";')).toBe(`${P}/* */ x(); /* */ "a";`);
     expect(withPrelude('"a" // c\n;b()')).toBe(`"a" // c\n;${P}b()`);
     expect(withPrelude('/* never closed')).toBe(`${P}/* never closed`);
+    // `<!--` opens a line comment in a classic script: a directive after it is still kept first.
+    expect(withPrelude('<!-- old\n"use strict";x()')).toBe(`<!-- old\n"use strict";${P}x()`);
   });
 
   it('a directive ended by automatic semicolon insertion keeps strict mode, and the prelude still runs first', () => {
@@ -259,6 +263,8 @@ describe('bundle headers: a third-party bundle runs exactly its prefixed scripts
     expect(csp).toContain("script-src 'sha256-AAA=' 'sha256-BBB=';");
     expect(csp).not.toContain('unsafe-inline\'; style'); // script-src only: style-src keeps its own
     expect(bundleHeaders({ manifest, firstParty: false })['Content-Security-Policy']).toContain("script-src 'none';");
+    // A second policy, inline only and no URL: a hash would also admit an external script whose integrity names it.
+    expect(csp.endsWith(", script-src 'unsafe-inline'")).toBe(true);
   });
 
   it('first-party: unsafe-inline (its nested frames run agent HTML that studio guards); hashes are not added (they would switch unsafe-inline off)', () => {

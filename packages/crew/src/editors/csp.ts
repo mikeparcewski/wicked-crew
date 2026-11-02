@@ -13,7 +13,8 @@
  *    start of each inline script. A THIRD-PARTY bundle's `script-src` is exactly those scripts' hashes, so no
  *    new realm it can make (a `srcdoc` child, a `blob:`/`data:` document it navigates to) runs a line before
  *    the prelude, and `javascript:` URLs and inline handlers are refused. A first-party bundle keeps
- *    `'unsafe-inline'`: its nested frames run agent HTML, and studio guards those documents itself. No bundle
+ *    `'unsafe-inline'`: its nested frames run agent HTML, which studio guards (from the studio release that carries
+ *    `guardNestedHtml`; until crew bundles it, those nested frames are not covered). No bundle
  *    may load a child frame from a URL (`frame-src 'none'`); `srcdoc` frames are not URL loads.
  *  - {@link shellCsp}: on studio's own shell document. A sandboxed frame may navigate ITSELF, and
  *    once it does the bundle's policy is gone — so the shell limits what any frame may point at:
@@ -32,6 +33,14 @@ export const BUNDLE_CSP_BASE =
 /** A first-party bundle's `script-src`: its own inline scripts, whatever their text (see the module comment). */
 export const FIRST_PARTY_SCRIPTS = "'unsafe-inline'";
 
+/**
+ * The second policy every third-party bundle carries: inline scripts only, no URL at all. A hash source would also let
+ * an external script through when its `integrity` names that hash (CSP3), and the browser fetches it before checking:
+ * a plugin knows its own script's hash, so the hash policy alone would let it send a request anywhere. A script must
+ * satisfy both policies; documents the frame makes inherit both.
+ */
+export const INLINE_ONLY_POLICY = "script-src 'unsafe-inline'";
+
 /** A third-party bundle's `script-src`: exactly its prefixed inline scripts (`guardBundle`), each once, or nothing. */
 export function thirdPartyScripts(scriptHashes: readonly string[]): string {
   const unique = [...new Set(scriptHashes)];
@@ -46,9 +55,12 @@ export function bundleHeaders(record: Pick<EditorRecord, 'manifest' | 'firstPart
   // `network.media` widens only for a first-party editor: a third-party pack editor never gets the
   // network (§6.1 would have it ASK; garden's editor scaffold refuses to declare it at all).
   const media = record.firstParty && record.manifest.permissions.some((p) => p.id === 'network.media') ? ' https:' : '';
-  const scripts = record.firstParty ? FIRST_PARTY_SCRIPTS : thirdPartyScripts(scriptHashes);
+  const policy = BUNDLE_CSP_BASE.replaceAll('{MEDIA}', media);
   return {
-    'Content-Security-Policy': BUNDLE_CSP_BASE.replaceAll('{MEDIA}', media).replace('{SCRIPTS}', scripts),
+    // One header, a comma-separated policy list (CSP3): the third-party hash policy, then the inline-only one.
+    'Content-Security-Policy': record.firstParty
+      ? policy.replace('{SCRIPTS}', FIRST_PARTY_SCRIPTS)
+      : `${policy.replace('{SCRIPTS}', thirdPartyScripts(scriptHashes))}, ${INLINE_ONLY_POLICY}`,
     'Cross-Origin-Resource-Policy': 'same-origin',
     'X-Content-Type-Options': 'nosniff',
     'X-DNS-Prefetch-Control': 'off',

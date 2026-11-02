@@ -74,7 +74,7 @@ export const MAX_INLINE_SCRIPTS = 200;
 
 const LINE_END = /[\n\r\u2028\u2029]/;
 const SPACE = /\s/;
-const IDENTIFIER_PART = /[\w$\u0080-\uFFFF]/;
+const IDENTIFIER_PART = /[\w$\\\u0080-\uFFFF]/; // `\` too: an identifier may be written with escapes
 
 /**
  * Whether a directive with no `;` ends before `text[i]` by automatic semicolon insertion: a line ended after it, and
@@ -130,7 +130,8 @@ export function prologueEnd(text: string): { at: number; afterHashbang: boolean;
         if (close < 0) return false;
         if (LINE_END.test(text.slice(i, close))) crossed = true;
         i = close + 2;
-      } else if (text.startsWith('//', i)) {
+      } else if (text.startsWith('//', i) || text.startsWith('<!--', i)) {
+        // `<!--` opens a comment to the end of its line in a classic script (it is a syntax error in a module).
         while (i < n && !LINE_END.test(text[i]!)) i++;
       } else {
         return true;

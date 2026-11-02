@@ -41,20 +41,22 @@ mentioned only where a daemon release depends on them.
   a short prelude first in every inline script of every editor bundle it serves, after the script's `;`-ended directive
   prologue (so `"use strict";` keeps working). Before the editor's own code runs, the prelude removes the WebRTC constructors for good
   (`src/editors/webrtc-guard.ts`); if it cannot, the script stops. A third-party editor's `script-src` is exactly those
-  scripts' hashes, with no `'unsafe-inline'`. Any document it makes (a child frame, or a `blob:` or `data:` page it
+  scripts' hashes, with no `'unsafe-inline'`, plus a second policy that allows inline scripts only (a hash would also admit
+  an external script whose `integrity` names it, and the browser fetches that before checking it). Any document it makes (a child frame, or a `blob:` or `data:` page it
   opens in its own frame) can therefore run only those scripts, prelude first. `javascript:` URLs, inline event
   handlers and new script text are refused. No editor bundle loads a child frame from a URL (`frame-src 'none';
   child-src 'none'`). A third-party bundle with more than 200 inline scripts is refused with
   `409 bundle_too_many_scripts`, because each script gains the prelude and a hash in the policy header. The interactive
   proxy now refuses to load a document into a frame for another site (`Sec-Fetch-Site: cross-site` on a frame
-  navigation). An editor frame's origin is opaque, so this always applies to it, and it can no longer navigate itself
-  to a document whose scripts run outside the guard. Studio's own document frames are same-origin and load as before.
+  navigation), unless the frame's page is one the daemon lets frame it (its `Referer` is a studio dev or allowed
+  origin). An editor frame's origin is opaque, so this always applies to it, and it can no longer navigate itself to a
+  document whose scripts run outside the guard. Studio's own document frames load as before.
   A document can no longer open another proxied document inside its own frame. First-party editors keep
   `'unsafe-inline'` because the page and deck editors show agent-authored HTML in nested frames. Studio guards those
   documents itself, from the studio release that carries its nested-frame guard; until crew bundles that release,
   those nested frames are not covered. A new probe, `tests/editor-webrtc-egress.test.ts`, frames a hostile plugin in
-  Chromium through crew's own routes (the interactive proxy included) and passes only when none of 18 attempts gets a
-  UDP packet out. It also runs the
+  Chromium through crew's own routes (the interactive proxy included) and passes only when none of 19 attempts gets a
+  UDP packet or an HTTP request out. It also runs the
   bundled studio's page and deck editors, and holds their nested frames to zero once the bundled studio guards them.
   It runs as required on the ubuntu CI leg, which installs Chromium (`playwright` 1.64.0 is now a dev dependency). The
   cost is deliberate: a third-party editor cannot use inline event handlers, `javascript:` URLs or scripts it builds

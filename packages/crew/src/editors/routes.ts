@@ -17,7 +17,8 @@
  *    from the registry record — never from the URL — and the bytes are re-hashed on every serve: a
  *    changed file answers 409 `bundle_hash_mismatch`, never the changed bundle. The pinned bytes are
  *    served with the WebRTC prelude at the start of each inline script (`webrtc-guard.ts`); a third-party
- *    bundle with more distinct inline scripts than its policy header can list answers 409 `bundle_too_many_scripts`.
+ *    bundle with more than 200 inline script elements (repeats count: each gains the prelude) answers 409
+ *    `bundle_too_many_scripts`.
  *
  * Human-only means `actor.kind === 'human'` (the DC `remember()` check). Under `auth=off` every
  * same-uid caller is the local human actor — the honest limit §6.4 states; refusing a worker token

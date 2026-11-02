@@ -36,6 +36,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { InteractiveDocCreateRequest } from 'wicked-crew-api-types';
 import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage } from 'node:http';
+import { requestOrigin } from '../editors/csp.js';
 import { API_PREFIX } from '../api/api-prefix.js';
 import { keepFrameGuard } from '../api/frame-guard.js';
 import type { CoreAdapter } from '../core/adapter.js';
@@ -514,6 +515,27 @@ export function isCrossSiteFrameLoad(headers: IncomingHttpHeaders): boolean {
   return one('sec-fetch-mode') === 'navigate' && one('sec-fetch-site') === 'cross-site' && FRAME_DESTINATIONS.has(one('sec-fetch-dest'));
 }
 
+/**
+ * Whether a cross-site frame load comes from a page the daemon lets frame it: its clickjacking guard
+ * (`api/frame-guard.ts`) has already written `frame-ancestors` (studio's dev server and the operator's allowed origins)
+ * on this response. The page's own `Referer` names it; an editor frame sends none, or (if it asks for one) its own URL
+ * on the daemon's origin, which never counts.
+ */
+export function fromFramingPage(referer: string | string[] | undefined, frameGuard: unknown, ownOrigin: string): boolean {
+  const ref = Array.isArray(referer) ? referer[0] : referer;
+  if (typeof ref !== 'string' || ref === '') return false;
+  let origin: string;
+  try {
+    origin = new URL(ref).origin;
+  } catch {
+    return false;
+  }
+  if (origin === ownOrigin || origin === 'null') return false;
+  const csp = Array.isArray(frameGuard) ? frameGuard.join(', ') : typeof frameGuard === 'string' ? frameGuard : '';
+  const listed = /frame-ancestors([^;,]*)/i.exec(csp)?.[1]?.trim().split(/\s+/) ?? [];
+  return listed.includes(origin);
+}
+
 /** The words a refused frame shows. */
 export const CROSS_SITE_FRAME_REFUSED = 'This document opens only in studio, not from inside another page or an editor plugin.';
 
@@ -539,7 +561,7 @@ export function registerInteractiveProxy(app: FastifyInstance, adapter: CoreAdap
     const serve = async (req: FastifyRequest, reply: FastifyReply): Promise<FastifyReply> => {
       const { projectId } = req.params as { projectId: string };
       // An editor plugin's frame navigating itself here would run a document's scripts outside its WebRTC guard.
-      if (isCrossSiteFrameLoad(req.headers)) {
+      if (isCrossSiteFrameLoad(req.headers) && !fromFramingPage(req.headers.referer, reply.raw.getHeader('content-security-policy'), requestOrigin(req))) {
         deps.log?.(`interactive ${req.method} ${req.url}: refused, a frame of another site (an editor plugin's or another page's) asked for it`);
         return reply.code(403).type('text/plain; charset=utf-8').send(CROSS_SITE_FRAME_REFUSED);
       }

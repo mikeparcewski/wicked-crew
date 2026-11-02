@@ -70,6 +70,16 @@ describe('the interactive proxy refuses a cross-site frame load before the bridg
     await a.close();
   });
 
+  it('a page the frame guard lets frame the daemon (studio on localhost:4200) is served; the daemon\'s own or another origin as Referer is not', async () => {
+    const a = await app();
+    const from = async (referer: string): Promise<number> => (await a.inject({ method: 'GET', url: DOC, headers: { ...nav('cross-site'), referer, host: '127.0.0.1:7701' } })).statusCode;
+    expect(await from('http://localhost:4200/projects')).toBe(200);
+    expect(await from('http://127.0.0.1:7701/api/v1/editors/acme/1.0.0/entry')).toBe(403); // an editor frame asking for its own URL
+    expect(await from('https://elsewhere.example/')).toBe(403);
+    expect(await from('not a url')).toBe(403);
+    await a.close();
+  });
+
   it('studio framing it (same-origin), its own image (cross-site, not a frame) and a request with no Sec-Fetch-* are served', async () => {
     const a = await app();
     for (const headers of [nav('same-origin'), { 'sec-fetch-mode': 'no-cors', 'sec-fetch-site': 'cross-site', 'sec-fetch-dest': 'image' }, {}]) {
