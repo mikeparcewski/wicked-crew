@@ -18,7 +18,7 @@ test.describe('the job demo', () => {
   test('runs plan, build and review, with a council settling the dispute, then waits on QE', async ({ page }) => {
     const job = await atQe(page);
     const log = job.locator('[data-log]');
-    await expect(log).toContainText('only the worktree mounted');
+    await expect(log).toContainText('repo read-only, worktree writable');
     await expect(log).toContainText('a different agent than the builder');
     await expect(log).toContainText('Codex holds the finding → dispute');
     await expect(log).toContainText('council ruled: finding stands · 2 of 3');
