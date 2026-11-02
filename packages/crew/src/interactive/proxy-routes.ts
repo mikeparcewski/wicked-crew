@@ -525,12 +525,23 @@ export function fromFramingPage(referer: string | string[] | undefined, frameGua
   const ref = Array.isArray(referer) ? referer[0] : referer;
   if (typeof ref !== 'string' || ref === '') return false;
   let origin: string;
+  let host: string;
   try {
-    origin = new URL(ref).origin;
+    const url = new URL(ref);
+    origin = url.origin;
+    host = url.host;
   } catch {
     return false;
   }
-  if (origin === ownOrigin || origin === 'null') return false;
+  // The daemon's own host never counts, whatever the scheme: behind a TLS-terminating proxy the request arrives as
+  // http while the browser's Referer says https.
+  let ownHost = '';
+  try {
+    ownHost = new URL(ownOrigin).host;
+  } catch {
+    /* no host: nothing to compare */
+  }
+  if (origin === 'null' || host === ownHost) return false;
   const csp = Array.isArray(frameGuard) ? frameGuard.join(', ') : typeof frameGuard === 'string' ? frameGuard : '';
   const listed = /frame-ancestors([^;,]*)/i.exec(csp)?.[1]?.trim().split(/\s+/) ?? [];
   return listed.includes(origin);

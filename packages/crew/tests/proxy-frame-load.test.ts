@@ -76,6 +76,8 @@ describe('the interactive proxy refuses a cross-site frame load before the bridg
     expect(await from('http://localhost:4200/projects')).toBe(200);
     expect(await from('http://127.0.0.1:7701/api/v1/editors/acme/1.0.0/entry')).toBe(403); // an editor frame asking for its own URL
     expect(await from('https://elsewhere.example/')).toBe(403);
+    // Behind a TLS-terminating proxy the request is http but the Referer is https: the daemon's own host still never counts.
+    expect(await from('https://127.0.0.1:7701/api/v1/editors/acme/1.0.0/entry')).toBe(403);
     expect(await from('not a url')).toBe(403);
     await a.close();
   });

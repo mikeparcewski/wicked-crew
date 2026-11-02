@@ -45,7 +45,7 @@ describe('guardBundle: the prelude goes first in every inline script that runs, 
   });
 
   it('the JavaScript types HTML runs are prefixed: empty type, JS MIME types any case with spaces, language=javascript', () => {
-    const html = '<script type="">a</script><script type=" Text/JavaScript ">b</script><script type=MODULE>c</script><script language="javascript">d</script><script language="">e</script>';
+    const html = '<script type="">a</script><script type=" Text/JavaScript ">b</script><script type=MODULE>c</script><script language="javascript">d</script><script language="">e</script><script type=" module">f</script>';
     expect(guard(html).hashes).toEqual(['a', 'b', 'c', 'd', 'e'].map((t) => b64(P + t)));
   });
 
@@ -125,7 +125,10 @@ describe('guardBundle: the prelude goes first in every inline script that runs, 
   it('a type written with character references runs as the browser runs it: decoded, then prefixed', () => {
     expect(decodeAttribute('text&#47;java&#x73;cript')).toBe('text/javascript');
     expect(decodeAttribute('text&sol;javascript&amp;&unknown;')).toBe('text/javascript&&unknown;');
-    expect(guard('<script type="&Tab;module&NewLine;">m</script>').hashes).toEqual([b64(P + 'm')]);
+    // A classic JavaScript type is matched with surrounding whitespace stripped; `module` only exactly as written
+    // (Chromium runs neither "&Tab;module" nor " module" as a module).
+    expect(guard('<script type="&Tab;text/javascript&NewLine;">c</script>').hashes).toEqual([b64(P + 'c')]);
+    expect(guard('<script type="&Tab;module&NewLine;">m</script>').hashes).toEqual([]);
     expect(guard('<script type="text&#47;javascript">a</script><script type="&#x6d;odule">b</script>').hashes).toEqual([b64(P + 'a'), b64(P + 'b')]);
   });
 
@@ -230,6 +233,14 @@ describe('the prelude: WebRTC is gone from the window, for good, before the edit
     // `-->` at the start of a line is a comment too (and runs nothing); elsewhere it is not.
     expect(withPrelude('\n--> old\n"use strict";x()')).toBe(`\n--> old\n"use strict";${P}x()`);
     expect(withPrelude('"a" --> 0')).toBe(`${P}"a" --> 0`);
+    // After a directive, `<!--` is code in a module by the spec (`"a" < !--x`): never skipped there (review r7), so the
+    // prelude goes first. Before the first directive it can only be a comment (classic) or a syntax error (module).
+    // (V8 refuses any `<!--` in a module outright, so Chromium cannot run such a module either way; engines that follow
+    // the spec's tokenization would, which is what this pins.)
+    expect(withPrelude('"a"\n<!--window[rtc()]\n;')).toBe(`${P}"a"\n<!--window[rtc()]\n;`);
+    expect(withPrelude('"a"\n<!--window[rtc()] +\n"b";')).toBe(`${P}"a"\n<!--window[rtc()] +\n"b";`);
+    // A block comment that spans lines puts the next token at a line start (a following `-->` is a comment).
+    expect(withPrelude('/*\n*/ --> c\n"use strict";y()')).toBe(`/*\n*/ --> c\n"use strict";${P}y()`);
   });
 
   it('a directive ended by automatic semicolon insertion keeps strict mode, and the prelude still runs first', () => {
