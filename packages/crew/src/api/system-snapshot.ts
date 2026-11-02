@@ -1173,10 +1173,10 @@ function powerPauseOf(s: unknown): { checkpoint: number | null; why: string | nu
  * entry, then the stage.
  */
 export function stepWordsOf(unit: { id?: unknown; phase_ref?: unknown; catalog?: unknown; stage?: unknown }, sessionId: string): string | null {
-  // The engine numbers a step it did not name: `unit-N` (composed plans, `:aN` for a re-plan) or `uN` (a plan
-  // with no workflow definition). A remainder that still holds a colon is a shape this does not know.
+  // The engine numbers a step it did not name: `unit-N` (composed plans, `:aN` for a re-plan), `uN` (a plan with
+  // no workflow definition) or a bare ordinal. A remainder that still holds a colon is a shape this does not know.
   const named = (step: string | undefined): string | undefined =>
-    step !== undefined && step !== '' && !step.includes(':') && !/^(?:unit-\d+|u\d+)$/.test(step) ? step : undefined;
+    step !== undefined && step !== '' && !step.includes(':') && !/^(?:unit-\d+|u\d+|\d+)$/.test(step) ? step : undefined;
   const after = (value: string | undefined, prefixes: string[]): string | undefined => {
     if (value === undefined) return undefined;
     const p = prefixes.find((x) => value.startsWith(x));

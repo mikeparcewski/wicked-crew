@@ -298,6 +298,8 @@ describe('the step a run is on, in words (artifact-runs-fix: the voice dashboard
     expect(stepWordsOf({}, 'r1')).toBeNull();
     // A plan with no workflow definition numbers its units `uN` (review r1).
     expect(stepWordsOf({ id: 'r:u1', phase_ref: 'wf-r:unit-1', stage: 'build' }, 'r')).toBe('build');
+    // A bare ordinal is no name either (Copilot on #1266: system-route's `run-live:0` with phase_ref `fix`).
+    expect(stepWordsOf({ id: 'run-live:0', phase_ref: 'fix' }, 'run-live')).toBe('fix');
     // A campaign run id holds colons: the known prefix is stripped whole (review r1).
     expect(stepWordsOf({ id: 'camp:node:a0:unit-3', phase_ref: 'wf-camp:node:a0:unit-3', catalog: 'critique' }, 'camp:node:a0')).toBe('critique');
     expect(stepWordsOf({ id: 'camp:node:a0:draft', phase_ref: 'wf-camp:node:a0:unit-1' }, 'camp:node:a0')).toBe('draft');
