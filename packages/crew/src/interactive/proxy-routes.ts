@@ -37,6 +37,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { InteractiveDocCreateRequest } from 'wicked-crew-api-types';
 import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage } from 'node:http';
 import { API_PREFIX } from '../api/api-prefix.js';
+import { keepFrameGuard } from '../api/frame-guard.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
 import type { ProjectSettingsStore } from '../projects/settings.js';
@@ -721,6 +722,8 @@ function forwardCreate(
             out[name] = name === 'location' && typeof value === 'string' ? rewriteLocation(value, bridge, prefix) : value;
           }
           out['content-length'] = String(body.length);
+          const createCsp = keepFrameGuard(reply.raw, out['content-security-policy']);
+          if (createCsp !== undefined) out['content-security-policy'] = createCsp;
           reply.raw.writeHead(status, out);
           reply.raw.end(body);
           resolvePromise();
@@ -811,6 +814,9 @@ function forward(
             'sandbox allow-scripts',
           ];
         }
+        // The daemon's clickjacking guard (frame-guard.ts) stays beside whatever policy this writes.
+        const csp = keepFrameGuard(reply.raw, headers['content-security-policy']);
+        if (csp !== undefined) headers['content-security-policy'] = csp;
         reply.raw.writeHead(res.statusCode ?? 502, headers);
         // No `pipeline` and no buffering layer: `pipe` forwards each chunk as it lands, and
         // Node flushes it because we never set a highWaterMark barrier in between.

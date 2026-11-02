@@ -13,6 +13,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { ConformanceRule, EditorConformanceSummary, EditorGrantsResponse, EditorView, InstallEditorRefusal, InstallEditorResponse, ListEditorsResponse } from '../src/core/types.js';
+import { registerFrameGuard } from '../src/api/frame-guard.js';
 import { BUNDLE_CSP_BASE, bundleHeaders, requestOrigin, shellCsp } from '../src/editors/csp.js';
 import { CONFORMANCE_CASES, gardenConformance, gardenPackCheck, installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from '../src/editors/pack-install.js';
 import { EditorRegistry, EDITORS_STATE_FILENAME, discoverStudioEditors, externalReferences, readCapped, sha256Of } from '../src/editors/registry.js';
@@ -440,7 +441,7 @@ describe('the routes', () => {
     for (const a of apps.splice(0)) await a.close();
   });
 
-  async function harness(opts: { grants?: boolean; packCheck?: PackCheckRunner; conformance?: ConformanceRunner; ledger?: { excludes: string[] } | null; home?: string } = {}) {
+  async function harness(opts: { grants?: boolean; packCheck?: PackCheckRunner; conformance?: ConformanceRunner; ledger?: { excludes: string[] } | null; home?: string; frameGuard?: boolean } = {}) {
     const root = studioRoot();
     const home = opts.home ?? mkdtempSync(join(tmpdir(), 'editors-home-'));
     if (opts.home === undefined) scratches.push(home);
@@ -463,6 +464,7 @@ describe('the routes', () => {
     };
     const adapter = opts.grants === false ? {} : { editorGrantsSupported: () => true, evaluateEditorGrants, ...rules };
     const app = Fastify({ logger: false });
+    if (opts.frameGuard === true) registerFrameGuard(app, { allowedOrigins: null });
     app.decorateRequest('actor', null as unknown as never);
     app.addHook('onRequest', async (req) => {
       const h = req.headers['x-actor'];
@@ -479,6 +481,18 @@ describe('the routes', () => {
   }
   const HUMAN = { 'x-actor': 'human:operator' };
   const AGENT = { 'x-actor': 'agent:operator' };
+
+  it('the bundle keeps its sandbox policy and gains the clickjacking guard (frame-ancestors merged, X-Frame-Options)', async () => {
+    const h = await harness({ frameGuard: true });
+    const listed = (await h.app.inject({ method: 'GET', url: '/api/v1/editors', headers: { 'x-actor': 'human:operator' } })).json() as ListEditorsResponse;
+    const page = listed.editors.find((e) => e.id === 'wicked-page')!;
+    const served = await h.app.inject({ method: 'GET', url: page.entry_url });
+    expect(served.statusCode).toBe(200);
+    expect(served.headers['x-frame-options']).toBe('SAMEORIGIN');
+    const csp = String(served.headers['content-security-policy']);
+    expect(csp.startsWith(bundleHeaders({ manifest: { permissions: page.permissions } as never, firstParty: true })['Content-Security-Policy']!)).toBe(true);
+    expect(csp.endsWith("; frame-ancestors 'self' http://127.0.0.1:4200 http://localhost:4200")).toBe(true);
+  });
   const OBSERVER = { 'x-actor': 'human:observer' };
 
   it('GET /editors lists the registry (operator+; observer 403) and says installs need the conformance run', async () => {

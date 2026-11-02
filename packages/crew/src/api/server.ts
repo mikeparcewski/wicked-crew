@@ -18,6 +18,7 @@ import { ElicitationCache } from './elicitation-cache.js';
 import { AskServer } from '../mcp/ask-server.js';
 import { registerAuthHooks, resolveAuth, type AuthOptions } from './auth.js';
 import { corsAllowed, refuseRequest } from './origin-guard.js';
+import { registerFrameGuard } from './frame-guard.js';
 import { AuditLog } from './audit.js';
 import { defaultEvalStoreRoot, EvalRunStore } from './eval-store.js';
 import { DefaultEvalStore } from '../evals/store.js';
@@ -2317,6 +2318,10 @@ export async function createServer(
       stallWatchdog.stop();
     });
   }
+
+  // Clickjacking guard (frame-guard.ts): who may frame the daemon's pages, on every response. FIRST
+  // onRequest hook, so a preflight 204, a 403 or a 401 answered by a later hook carries it too.
+  registerFrameGuard(app, { allowedOrigins: auth.allowedOrigins });
 
   app.addHook('onRequest', async (req, reply) => {
     const origin = req.headers.origin;

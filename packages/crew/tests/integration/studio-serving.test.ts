@@ -97,16 +97,17 @@ describe('studio serving (static + SPA fallback alongside API/WS)', () => {
   it('EP-C1 (§8.2): the shell and its SPA fallback carry the frame-src policy for the request\'s own origin; assets and the API do not', async () => {
     const root = await app.inject({ method: 'GET', url: '/', headers: { host: 'localhost:7701' } });
     expect(root.headers['content-security-policy']).toBe(
-      'frame-src http://localhost:7701/api/v1/editors/ http://localhost:7701/api/v1/projects/ blob: data:',
+      `frame-src http://localhost:7701/api/v1/editors/ http://localhost:7701/api/v1/projects/ blob: data:; ${GUARD}`,
     );
     const fallback = await app.inject({ method: 'GET', url: '/runs/does-not-exist', headers: { host: '127.0.0.1:61741' } });
     expect(fallback.headers['content-security-policy']).toBe(
-      'frame-src http://127.0.0.1:61741/api/v1/editors/ http://127.0.0.1:61741/api/v1/projects/ blob: data:',
+      `frame-src http://127.0.0.1:61741/api/v1/editors/ http://127.0.0.1:61741/api/v1/projects/ blob: data:; ${GUARD}`,
     );
+    // Assets and the API carry only the clickjacking guard (frame-guard.ts), never a frame-src.
     const asset = await app.inject({ method: 'GET', url: '/assets/index-abc123.js' });
-    expect(asset.headers['content-security-policy']).toBeUndefined();
+    expect(asset.headers['content-security-policy']).toBe(GUARD);
     const health = await app.inject({ method: 'GET', url: '/api/v1/health' });
-    expect(health.headers['content-security-policy']).toBeUndefined();
+    expect(health.headers['content-security-policy']).toBe(GUARD);
   });
 
   it('a non-GET to a non-API path is 404 JSON, not the SPA shell', async () => {
@@ -114,6 +115,43 @@ describe('studio serving (static + SPA fallback alongside API/WS)', () => {
     expect(res.statusCode).toBe(404);
     expect(res.body).not.toContain('<div id="root">');
     expect(res.json()).toEqual({ error: 'not found' });
+  });
+});
+
+// Clickjacking guard (frame-guard.ts): no other page may frame studio's gate buttons.
+const GUARD = "frame-ancestors 'self' http://127.0.0.1:4200 http://localhost:4200";
+
+describe('frame guard: every response says who may frame it', () => {
+  it('every HTML route carries frame-ancestors and X-Frame-Options, merged into the shell policy (frame-src kept)', async () => {
+    for (const url of ['/', '/index.html', '/runs/abc', '/projects/p1/settings', '/deep/link?x=1']) {
+      const res = await app.inject({ method: 'GET', url, headers: { host: '127.0.0.1:7721' } });
+      expect(res.statusCode, url).toBe(200);
+      expect(res.headers['content-type'], url).toMatch(/text\/html/);
+      expect(res.headers['x-frame-options'], url).toBe('SAMEORIGIN');
+      const csp = String(res.headers['content-security-policy']);
+      expect(csp, url).toContain('frame-src http://127.0.0.1:7721/api/v1/editors/ http://127.0.0.1:7721/api/v1/projects/ blob: data:');
+      expect(csp, url).toMatch(/; frame-ancestors 'self' http:\/\/127\.0\.0\.1:4200 http:\/\/localhost:4200$/);
+    }
+  });
+
+  it('API responses, refusals, preflights, 404s and assets carry both headers too', async () => {
+    const cases = [
+      { method: 'GET' as const, url: '/api/v1/health', status: 200 },
+      { method: 'GET' as const, url: '/api/v1/no-such-route', status: 404 },
+      { method: 'POST' as const, url: '/some/random/path', status: 404 },
+      { method: 'GET' as const, url: '/assets/index-abc123.js', status: 200 },
+      { method: 'OPTIONS' as const, url: '/api/v1/runs', status: 204, headers: { origin: 'http://127.0.0.1:4200' } },
+      // A foreign Host (DNS rebinding) is refused 403 by the origin guard; the refusal is guarded too.
+      { method: 'GET' as const, url: '/', status: 403, headers: { host: 'evil.example:7701' } },
+      // A cross-site write is refused 403.
+      { method: 'POST' as const, url: '/api/v1/runs', status: 403, headers: { origin: 'https://evil.example' } },
+    ];
+    for (const c of cases) {
+      const res = await app.inject({ method: c.method, url: c.url, headers: c.headers ?? {} });
+      expect(res.statusCode, `${c.method} ${c.url}`).toBe(c.status);
+      expect(res.headers['x-frame-options'], `${c.method} ${c.url}`).toBe('SAMEORIGIN');
+      expect(res.headers['content-security-policy'], `${c.method} ${c.url}`).toBe(GUARD);
+    }
   });
 });
 

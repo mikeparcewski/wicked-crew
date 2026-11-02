@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { InteractiveBridgePool, INTERACTIVE_SPEC, LOCK_NAME } from '../../src/interactive/bridge-pool.js';
 import { CREW_GROUNDING_FILE, DocGroundingStore } from '../../src/interactive/doc-grounding.js';
+import { registerFrameGuard } from '../../src/api/frame-guard.js';
 import { registerInteractiveProxy } from '../../src/interactive/proxy-routes.js';
 import { mkdirSync as mkdirp } from 'node:fs';
 import { ProjectSettingsStore } from '../../src/projects/settings.js';
@@ -115,6 +116,8 @@ let dir: string;
 let settingsPath: string;
 let app: FastifyInstance;
 let base: string;
+// The clickjacking guard's policy (frame-guard.ts) with no allowed origins.
+const GUARD = "frame-ancestors 'self' http://127.0.0.1:4200 http://localhost:4200";
 let pool: InteractiveBridgePool;
 const children: ChildProcess[] = [];
 /** Set to make the next spawn fail — the "bridge cannot start" case. */
@@ -162,6 +165,8 @@ beforeAll(async () => {
 
   pool = new InteractiveBridgePool({ spawn: spawnFake, startTimeoutMs: 15_000, healthTimeoutMs: 1_000 });
   app = Fastify({ logger: false });
+  // The daemon's clickjacking guard (frame-guard.ts), as createServer registers it.
+  registerFrameGuard(app, { allowedOrigins: null });
   registerInteractiveProxy(app, stubAdapter(new Set(['p-a', 'p-b', 'p-bound'])), {
     settings: new ProjectSettingsStore(settingsPath),
     pool,
@@ -316,7 +321,18 @@ describe('interactive proxy — transport semantics', () => {
     expect(csp).not.toContain('allow-same-origin');
     expect(csp).toContain("img-src 'self'");
     const json = await fetch(`${base}${P}/api/docs`);
-    expect(json.headers.get('content-security-policy')).toBeNull();
+    expect(json.headers.get('content-security-policy')).toBe(GUARD);
+  });
+
+  it('keeps the clickjacking guard on proxied documents beside the sandbox and the bridge\'s own policy', async () => {
+    const res = await fetch(`${base}${P}/d/doc-1/doc/1`);
+    expect(res.headers.get('x-frame-options')).toBe('SAMEORIGIN');
+    // Three policies, each enforced: the guard, the bridge's, the sandbox.
+    expect(res.headers.get('content-security-policy')).toBe(`${GUARD}, img-src 'self', sandbox allow-scripts`);
+    const sse = await fetch(`${base}${P}/api/stream`);
+    expect(sse.headers.get('x-frame-options')).toBe('SAMEORIGIN');
+    expect(sse.headers.get('content-security-policy')).toBe(GUARD);
+    await sse.body?.cancel();
   });
 
   it('SSE: a chunk arrives BEFORE the stream closes (unbuffered)', async () => {
@@ -373,6 +389,7 @@ describe('interactive proxy — doc create interception (F-046)', () => {
       ],
     }) as CoreAdapter;
     createApp = Fastify({ logger: false });
+    registerFrameGuard(createApp, { allowedOrigins: null });
     registerInteractiveProxy(createApp, adapter, {
       settings: new ProjectSettingsStore(settingsPath),
       pool,
@@ -431,6 +448,9 @@ describe('interactive proxy — doc create interception (F-046)', () => {
       repo_ref: 'wicked-studio', // by NAME — canonicalized to the registry id below
     });
     expect(res.status).toBe(200);
+    // The create is answered on a hijacked reply: the clickjacking guard still rides it.
+    expect(res.headers.get('x-frame-options')).toBe('SAMEORIGIN');
+    expect(res.headers.get('content-security-policy')).toBe(GUARD);
     const body = (await res.json()) as { name: string; received: Record<string, unknown> };
     expect(body.name).toBe('brochure');
     expect('repo_ref' in body.received).toBe(false);
