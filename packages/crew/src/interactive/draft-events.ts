@@ -36,7 +36,8 @@
 
 import { judgeFallbackLabel } from '../core/deliver-text.js';
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
-import { closeSync, constants as fsc, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { createBeneath, mkdirBeneath, readBeneath } from '../api/beneath.js';
 import { basename, dirname, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { InteractiveHandoffLedger } from './ledger.js';
@@ -576,38 +577,35 @@ export { InteractiveHandoffLedger, type HandoffLedgerEntry } from './ledger.js';
  * with crew's bytes, and each file is created exclusively, through no link.
  */
 export function writePacketCopy(dir: string, packet: SourcePacket): void {
+  // The run's own folder is the trusted root (a writer can write only inside it, never rename it); everything below it
+  // is opened with A1's `beneath`, following no link at any component.
+  const root = realpathSync(dirname(dir));
+  const name = basename(dir);
   try {
-    const st = lstatSync(dir);
-    if (st.isSymbolicLink() || !st.isDirectory()) rmSync(dir, { recursive: true, force: true });
+    const st = lstatSync(join(root, name));
+    if (st.isSymbolicLink() || !st.isDirectory()) rmSync(join(root, name), { recursive: true, force: true });
   } catch {
     /* absent */
   }
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const st = lstatSync(dir);
-  if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`the sources folder ${dir} is not a real directory`);
+  mkdirBeneath(root, name);
   for (const f of packet.files) {
-    const path = join(dir, f.name);
-    rmSync(path, { force: true, recursive: true });
-    const fd = openSync(path, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600);
-    try {
-      writeSync(fd, f.bytes);
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
+    rmSync(join(root, name, f.name), { force: true, recursive: true });
+    createBeneath(root, `${name}/${f.name}`, f.bytes, 0o600);
   }
 }
 
 /** The first packet file whose bytes no longer match crew's hash (or that is missing or a link), else `null`. */
 export function packetChanged(dir: string, hashes: Record<string, string>): string | null {
+  let root: string;
+  try {
+    root = realpathSync(dirname(dir));
+  } catch {
+    return Object.keys(hashes)[0] ?? null;
+  }
   for (const [name, want] of Object.entries(hashes)) {
     try {
-      const fd = openSync(join(dir, name), fsc.O_RDONLY | fsc.O_NOFOLLOW);
-      try {
-        if (createHash('sha256').update(readFileSync(fd)).digest('hex') !== want) return name;
-      } finally {
-        closeSync(fd);
-      }
+      const { data } = readBeneath(root, `${basename(dir)}/${name}`, 8 * 1024 * 1024);
+      if (createHash('sha256').update(data).digest('hex') !== want) return name;
     } catch {
       return name;
     }

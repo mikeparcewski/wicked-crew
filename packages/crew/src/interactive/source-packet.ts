@@ -22,12 +22,13 @@
  */
 
 import { createHash } from 'node:crypto';
-import { closeSync, fstatSync, lstatSync, openSync, readSync, constants as fsc } from 'node:fs';
+import { closeSync, fstatSync, openSync, readSync, realpathSync, constants as fsc } from 'node:fs';
 import { join } from 'node:path';
 
 import type { ArtifactProposal, ChatTranscriptRecord, SessionView } from '../core/types.js';
 import { ARTIFACT_REF, parseArtifactRef, UNFILED_MOUNT } from '../api/chat-context.js';
 import { fenced, type RunBrief } from '../api/run-brief.js';
+import { readBeneath, statBeneath } from '../api/beneath.js';
 import { PACKET_NAME } from './doc-binding.js';
 
 /** The whole packet, in bytes (§5.3). */
@@ -301,18 +302,33 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
       if (token.startsWith('doc:')) {
         const ref = parseArtifactRef(token.slice(4));
         if (ref === null || !ARTIFACT_REF.test(ref.ref)) throw new Refused('not a document reference');
-        const root = await deps.docsRoot(ref.projectId);
-        if (root === null) throw new Refused('its project is gone');
-        // The document's own folder, never a link out of the docs root.
+        const docsRoot = await deps.docsRoot(ref.projectId);
+        if (docsRoot === null) throw new Refused('its project is gone');
+        // Every read beneath the docs root's real path, following no link at any component (A1's `beneath`).
+        let root: string;
         try {
-          const st = lstatSync(join(root, ref.doc));
-          if (st.isSymbolicLink() || !st.isDirectory()) throw new Refused('it is not a real document folder');
-        } catch (err) {
-          throw err instanceof Refused ? err : new Refused('no such document');
+          root = realpathSync(docsRoot);
+        } catch {
+          throw new Refused('its project is gone');
         }
+        const below = (rel: string, max: number): Buffer => {
+          try {
+            return readBeneath(root, rel, max).data;
+          } catch (err) {
+            const code = (err as { code?: string }).code;
+            throw new Refused(code === 'ELOOP' ? 'it is a link, which crew never follows' : code === 'ENOENT' ? 'no such document' : code === 'EFBIG' ? 'it is too large for the packet' : 'it is not readable');
+          }
+        };
+        let isDir = false;
+        try {
+          isDir = statBeneath(root, ref.doc)?.isDirectory() === true;
+        } catch {
+          isDir = false;
+        }
+        if (!isDir) throw new Refused('no such document');
         let versions: { head?: unknown; versions?: Array<{ version?: unknown; html_file?: unknown }> };
         try {
-          versions = JSON.parse(readRegular(join(root, ref.doc, 'versions.json'), 1024 * 1024).toString('utf8')) as typeof versions;
+          versions = JSON.parse(below(`${ref.doc}/versions.json`, 1024 * 1024).toString('utf8')) as typeof versions;
         } catch (err) {
           throw err instanceof Refused ? err : new Refused('its versions.json is not readable');
         }
@@ -320,7 +336,7 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
         if (head === null) throw new Refused('it has no readable head');
         const entry = versions.versions?.find((v) => v.version === head);
         const file = typeof entry?.html_file === 'string' && /^_v\d{1,6}\.html$/.test(entry.html_file) ? entry.html_file : `_v${head}.html`;
-        const bytes = readRegular(join(root, ref.doc, file), PACKET_FILE_MAX_BYTES);
+        const bytes = below(`${ref.doc}/${file}`, PACKET_FILE_MAX_BYTES);
         const f = add(`doc-${ref.mount}__${ref.doc}-v${head}.html`, bytes);
         tokens[token] = [f.name];
         continue;
