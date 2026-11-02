@@ -36,9 +36,11 @@
 
 import { judgeFallbackLabel } from '../core/deliver-text.js';
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
-import { mkdirSync, existsSync, rmSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { createBeneath, listBeneath, mkdirBeneath, readBeneath, statBeneath } from '../api/beneath.js';
 import { basename, dirname, join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { InteractiveHandoffLedger } from './ledger.js';
 import { reviewPartitionOf as projectPartitionOf } from './review-ledger.js';
 import {
@@ -77,6 +79,9 @@ import {
 } from './council-outcome.js';
 import { busSubscriberErrorReporter } from './bus-subscriber-errors.js';
 import { emitOnBus, requireEngineBus, tapBus, type BusEvent } from '../core/bus.js';
+import type { DocBindingStore } from './doc-binding.js';
+import { UNFILED_MOUNT } from '../api/chat-context.js';
+import { packetClause, packetDirOf, type SourcePacket } from './source-packet.js';
 
 // ── Vocabulary constants (interactive's, verbatim — src/service/events.js is the truth) ──────
 
@@ -84,6 +89,10 @@ export const INTERACTIVE_DOMAIN = 'wicked-interactive';
 export const DOC_CREATED = 'wicked.interactive.doc.created';
 export const DRAFT_COMPLETED = 'wicked.interactive.draft.completed';
 export const STATUS_POSTED = 'wicked.interactive.status.posted';
+/** interactive's announce of a landed version (`{document_id, project_id?, version, parent, kind, run_id?}`). */
+export const VERSION_CREATED = 'wicked.interactive.version.created';
+/** interactive ≥ the I1 contract: a `draft.completed` whose `expect_head` no longer held landed nothing. */
+export const DRAFT_CONFLICT = 'wicked.interactive.draft.conflict';
 
 /** Exact-type filter with a domain guard — no wildcard, one event type is the whole trigger. */
 export const INTERACTIVE_BUS_FILTER = `${DOC_CREATED}@${INTERACTIVE_DOMAIN}`;
@@ -462,15 +471,60 @@ export interface DraftGrounding {
   unnamedAmong?: number | undefined;
 }
 
-/** Deterministic bus idempotency key for the one draft this seam may land per document. */
-export function draftIdempotencyKey(documentId: string, projectId?: string): string {
+/**
+ * Deterministic bus idempotency key of ONE attempt's draft: a re-announce of the same run dedupes at the bus, while a
+ * second attempt at the same document (a proposal's Try again, DES-CHAT-ARTIFACTS-001 §4.3) announces under its own key.
+ * Before A3 the key was per document (`…:v1`), so the bus would have dropped a retry's landing as a duplicate.
+ */
+export function draftIdempotencyKey(documentId: string, projectId: string | undefined, runId: string): string {
   const partition = projectPartitionOf(projectId);
   // crew#809: the bus resolves a repeated key to the existing row, so a same-slug document in
   // ANOTHER project must announce under its own key or its draft.completed is silently dropped.
   return partition === '_unfiled'
-    ? `crew:interactive.draft:${documentId}:v1`
-    : `crew:interactive.draft:${documentId}:${partition}:v1`;
+    ? `crew:interactive.draft:${documentId}:${runId}`
+    : `crew:interactive.draft:${documentId}:${partition}:${runId}`;
 }
+
+/** The handoff-ledger key of a proposal-bound attempt (one per run: a document may have several attempts), with the
+ *  project partition like every draft key (crew#809). It starts `<doc>:` like every handoff key, so the doc↔run index
+ *  and the delete sweep see it, and {@link isAnotherProjectsDraftKey} keeps another project's. */
+export function boundAttemptKey(documentId: string, projectId: string | undefined, runId: string): string {
+  return `${documentId}:attempt:${projectPartitionOf(projectId)}:${runId}`;
+}
+
+/** The folder of one proposal-bound attempt under the document's run directory: its deliverable, `sources/` and
+ *  `records/`. A fresh one per attempt, and an earlier attempt's is removed before a new one starts. */
+export function attemptDirName(runId: string): string {
+  return `attempt-${runId}`;
+}
+
+/** What a proposal-bound launch adds to a draft (DES-CHAT-ARTIFACTS-001 §5.2, slice A3). */
+export interface BoundDraft {
+  documentId: string;
+  /** `undefined` = Unfiled. */
+  projectId?: string | undefined;
+  brief: string;
+  style: string;
+  /** The derived run id: the launch's `sessionId`, so a retry can only adopt it. */
+  runId: string;
+  chatId: string;
+  proposalId: string;
+  artifactRef: string;
+  /** The chat's scope repositories it is grounded on — filed or Unfiled. */
+  repos: GroundingRepo[];
+  /** The stored code-graph binding; `null` = none. */
+  graphDb: string | null;
+  /** The card's two helpers, as the launch's roster. */
+  clisJson: string;
+  packet: SourcePacket;
+  /** The document's head when the attempt started: the announce's `expect_head` (an interactive with the I1 contract
+   *  lands nothing on a moved head and says `draft.conflict`). */
+  base: number;
+  actor?: string | undefined;
+}
+
+/** How a proposal-bound attempt ended, as the seam saw it. */
+export type BoundOutcome = { kind: 'landed'; version: number } | { kind: 'failed'; reason: string };
 
 // ── Per-project identity of a draft (crew#809) ────────────────────────────────────────────────
 //
@@ -498,6 +552,8 @@ export function draftHandoffKey(documentId: string, projectId?: string): string 
 export function isAnotherProjectsDraftKey(key: string, documentId: string, projectId: string | undefined): boolean {
   const own = draftHandoffKey(documentId, projectId);
   if (key === own) return false;
+  // A3: a proposal-bound attempt's row is this document's only when its partition is this project's.
+  if (key.startsWith(`${documentId}:attempt:`)) return !key.startsWith(`${documentId}:attempt:${projectPartitionOf(projectId)}:`);
   if (key.startsWith(`${documentId}:draft:`)) return true;
   return key === documentId && own !== documentId; // the unfiled document's row, when this one is filed
 }
@@ -527,6 +583,122 @@ export function isStudioScratchDoc(doc: { documentId: string; brief: string }): 
 // the seam's public surface stays one module.
 
 export { InteractiveHandoffLedger, type HandoffLedgerEntry } from './ledger.js';
+
+/**
+ * A3 (§5.3): give one attempt's inbox crew's copy of its source packet, in a fresh attempt folder. The document's run
+ * folder is the trusted root (a writer can write only inside it, never rename it); everything below it, the attempt
+ * folder included, is made and opened with A1's `beneath`, following no link at any component.
+ */
+export function writePacketCopy(runDir: string, attempt: string, packet: SourcePacket): void {
+  const root = realpathSync(runDir);
+  mkdirBeneath(root, attempt);
+  for (const d of ['sources', 'records'] as const) {
+    const st = (() => {
+      try {
+        return statBeneath(root, `${attempt}/${d}`);
+      } catch {
+        return null;
+      }
+    })();
+    if (st === null) mkdirSync(join(root, attempt, d), { mode: 0o700 });
+    if (statBeneath(root, `${attempt}/${d}`)?.isDirectory() !== true) throw new Error(`${attempt}/${d} is not a real folder`);
+  }
+  for (const f of packet.files) createBeneath(root, `${attempt}/${packetDirOf(f.name)}/${f.name}`, f.bytes, 0o600);
+}
+
+/** Remove one entry of the document's run folder (an attempt folder), never through a link: a link a writer put there
+ *  is removed itself, never followed. Best effort: a leftover is a disk wart, never a correctness one. */
+function removeEntry(runDir: string, name: string): boolean {
+  let root: string;
+  try {
+    root = realpathSync(runDir);
+  } catch {
+    return true; // no run folder: nothing of the attempt is there
+  }
+  const p = join(root, name);
+  try {
+    const st = lstatSync(p);
+    rmSync(p, st.isSymbolicLink() || !st.isDirectory() ? { force: true } : { recursive: true, force: true });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+  }
+  try {
+    lstatSync(p);
+    return false; // still there
+  } catch {
+    return true;
+  }
+}
+
+/** Remove the named attempts' folders under a document's run directory (A3): only attempts of THIS document's binding,
+ *  so a same-named document elsewhere never loses its own. Returns the folders that could NOT be removed. */
+export function removeAttemptDirs(runDir: string, runIds: readonly string[]): string[] {
+  const left: string[] = [];
+  for (const id of runIds) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)) continue;
+    if (!removeEntry(runDir, attemptDirName(id))) left.push(attemptDirName(id));
+  }
+  return left;
+}
+
+/** Drop an attempt's packet copy (crew keeps the canonical one); its deliverable stays for interactive to read. Best
+ *  effort, never through a link (a writer could have replaced the attempt folder). */
+export function removePacketCopy(runDir: string, attempt: string): void {
+  let root: string;
+  try {
+    root = realpathSync(runDir);
+    const st = lstatSync(join(root, attempt));
+    if (st.isSymbolicLink() || !st.isDirectory()) return;
+  } catch {
+    return;
+  }
+  // Each folder on its own: one already gone never keeps the other.
+  for (const d of ['sources', 'records']) {
+    try {
+      const p = join(root, attempt, d);
+      const sd = lstatSync(p);
+      rmSync(p, sd.isSymbolicLink() || !sd.isDirectory() ? { force: true } : { recursive: true, force: true });
+    } catch {
+      /* absent, or not removable: best effort */
+    }
+  }
+}
+
+/**
+ * The first packet file whose bytes no longer match crew's record (missing, a link anywhere below the run folder, not
+ * a regular file, not its recorded size), or an entry crew never put there, else `null`. Each read is bounded by the
+ * recorded size and never blocks (a FIFO is refused).
+ */
+export function packetChanged(runDir: string, attempt: string, files: ReadonlyArray<{ name: string; sha256: string; bytes: number }>): string | null {
+  let root: string;
+  try {
+    root = realpathSync(runDir);
+  } catch {
+    return files[0]?.name ?? null;
+  }
+  for (const f of files) {
+    try {
+      const { data } = readBeneath(root, `${attempt}/${packetDirOf(f.name)}/${f.name}`, f.bytes);
+      if (data.length !== f.bytes || createHash('sha256').update(data).digest('hex') !== f.sha256) return f.name;
+    } catch {
+      return f.name;
+    }
+  }
+  // Nothing extra: a file the writer added to records/ would otherwise be a citable "record".
+  const want = new Set(files.map((f) => `${packetDirOf(f.name)}/${f.name}`));
+  for (const d of ['sources', 'records'] as const) {
+    const listed = (() => {
+      try {
+        return listBeneath(root, `${attempt}/${d}`, 4096);
+      } catch {
+        return null;
+      }
+    })();
+    if (listed === null || listed.more) return `${d}/`;
+    for (const n of listed.names) if (!want.has(`${d}/${n}`)) return `${d}/${n}`;
+  }
+  return null;
+}
 
 // ── The subscriber ────────────────────────────────────────────────────────────────────────────
 
@@ -586,6 +758,14 @@ export interface InteractiveDraftOptions {
   /** Injectable IO for the draft floor crew re-derives at finalize (crew#621/#504) — tests
    *  substitute the plugin root and the check's answer; the daemon passes nothing. */
   draftFloorIo?: DraftFloorIo;
+  /** DES-CHAT-ARTIFACTS-001 §5.2 (A3): the durable bindings of chat-made documents. A `doc.created` for a bound document
+   *  is never answered with a fresh random-id launch: it goes to {@link onBoundDocCreated}. */
+  bindings?: DocBindingStore;
+  /** A bound document's `doc.created` arrived (the normal path, or late): the daemon hands it to the proposal's one
+   *  launcher per run id, which adopts the run its Go already started. */
+  onBoundDocCreated?: (artifactRef: string, documentId: string) => Promise<void>;
+  /** A bound attempt's outcome was recorded (landed, or failed with the reason). */
+  onBoundOutcome?: (artifactRef: string, runId: string, outcome: BoundOutcome) => void;
   /** Diagnostics sink (default: console.error). */
   log?: (message: string) => void;
   /** Error-level logger for connection-fatal subscriber errors (the /diagnostics ring folds it); defaults to `log`. */
@@ -600,6 +780,13 @@ export interface InteractiveDraftSubscription {
   /** Documents with a draft run currently in flight — the chat seam's per-doc serialization
    *  (CREW-UX-5 contract (c)) consults this so an iteration ask never races a first draft. */
   inFlightDocs(): string[];
+  /** A3: launch a proposal-bound draft with its derived run id (the caller holds the run id's lock and has checked the
+   *  engine). Resolves once the engine accepted the launch; throws when it did not (nothing launched). */
+  launchBound(spec: BoundDraft): Promise<void>;
+  /** A3: remove earlier attempts' folders of a bound document BEFORE a new attempt reads its base, so an announce of an
+   *  earlier attempt still on the bus can no longer land (its file is gone). Throws when one could not be removed: the new
+   *  attempt does not start. */
+  fenceBound(documentId: string, runIds: readonly string[]): void;
 }
 
 interface InFlight {
@@ -631,6 +818,12 @@ interface InFlight {
    *  crucially, the crew#311 deliverable-floor report, which says exactly which artifact was
    *  expected and what was found instead of "the run failed, inspect it via the API". */
   failureDetail?: string | undefined;
+  /** A3: the proposal-bound attempt this flight is (its outcome is recorded on the document's binding), its attempt
+   *  folder (the packet copy, checked against crew's hashes at landing), its records folder (a claims source for the
+   *  floor) and the head it started from (the announce's `expect_head`). */
+  bound?: { ref: string; runDir: string; attempt: string; attemptDir: string; files: Array<{ name: string; sha256: string; bytes: number }>; base: number } | undefined;
+  /** The handoff-ledger key this flight was launched under (a bound attempt's own; else the document's draft key). */
+  ledgerKey?: string | undefined;
 }
 
 /** The seam's durable state (handoff ledger + working dirs) follows the daemon's state home —
@@ -707,6 +900,8 @@ export async function startInteractiveDraftSubscriber(
   // Keyed by the per-project handoff key (crew#809: two projects finalizing the same slug must not
   // clear each other's marker); the VALUE is the document id `inFlightDocs()` reports.
   const finalizing = new Map<string, string>();
+  /** A3: runs whose finalize (floor, announce) is under way: a redelivered terminal frame is not an orphan's. */
+  const finalizingRuns = new Set<string>();
   let closed = false; // set by stop(): a handler mid-snapshot must never launch after shutdown
 
   /** Emit onto interactive's vocabulary as the `wi-crew` producer. Never throws into the
@@ -793,6 +988,18 @@ export async function startInteractiveDraftSubscriber(
     }
   }
 
+  /** A3: record a proposal-bound attempt's outcome on its document's binding (the first outcome counts), then tell the
+   *  daemon (release, retry proposal, `landing_failed` on the run). */
+  function reportBound(flight: InFlight, runId: string, outcome: BoundOutcome): void {
+    if (flight.bound === undefined) return;
+    if (opts.bindings?.setOutcome(flight.bound.ref, runId, outcome) !== true) return;
+    try {
+      opts.onBoundOutcome?.(flight.bound.ref, runId, outcome);
+    } catch (err) {
+      log(`[interactive-draft] recording the outcome of run ${runId} failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   /** Terminal-event fold: turn the governed run's own events into interactive narration, and
    *  close the loop with `draft.completed` when the run lands. */
   const foldEvent = (event: CoreEvent): void => {
@@ -801,7 +1008,24 @@ export async function startInteractiveDraftSubscriber(
     const planned = unitsByRun.get(runId);
     if (planned?.observe(event) === true) return;
     const flight = inFlight.get(runId);
-    if (flight === undefined) return;
+    if (flight === undefined) {
+      // A3 (§6.2): a proposal-bound run this process holds no flight for (a restart lost it, and the boot reconcile
+      // could not see it end in time) still ends its attempt: released, Try again offered. Never relaunched.
+      if ((event.type === 'sessionCompleted' || event.type === 'sessionFailed' || event.type === 'runCancelled') && opts.bindings !== undefined && !finalizingRuns.has(runId)) {
+        const hit = opts.bindings.attemptOf(runId);
+        if (hit !== null && hit.attempt.outcome === undefined && hit.attempt.emittedAt === undefined) {
+          const outcome: BoundOutcome = { kind: 'failed', reason: 'interrupted by a restart' };
+          if (opts.bindings.setOutcome(hit.binding.ref, runId, outcome)) {
+            try {
+              opts.onBoundOutcome?.(hit.binding.ref, runId, outcome);
+            } catch (err) {
+              log(`[interactive-draft] recording the outcome of run ${runId} failed: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+        }
+      }
+      return;
+    }
     // F-4R2-005: every narration line and heartbeat from here carries the run id and the ord of the
     // latest unit-scoped frame (`narrationStamps`), so a skin keys the thread per run and per unit.
     flight.runId ??= runId;
@@ -923,12 +1147,16 @@ export async function startInteractiveDraftSubscriber(
       endFlight(runId);
       // The doc stays busy until the floor and the announce are done (codex on crew#725).
       finalizing.set(draftHandoffKey(flight.documentId, flight.projectId), flight.documentId);
+      finalizingRuns.add(runId);
       // The announce awaits the bus writer; a throw is logged, as a synchronous one was.
       finalize(flight, runId)
         .catch((err: unknown) =>
           log(`[interactive-draft] finalizing run ${runId} failed: ${err instanceof Error ? err.message : String(err)}`),
         )
-        .finally(() => finalizing.delete(draftHandoffKey(flight.documentId, flight.projectId)));
+        .finally(() => {
+          finalizing.delete(draftHandoffKey(flight.documentId, flight.projectId));
+          finalizingRuns.delete(runId);
+        });
       return;
     }
 
@@ -943,7 +1171,7 @@ export async function startInteractiveDraftSubscriber(
     if (event.type === 'sessionFailed' || event.type === 'runCancelled') {
       endFlight(runId);
       removeSnapshots(flight); // the failure path cleans its snapshots too (CREW-UX-8 v4)
-      ledger.recordFailure(draftHandoffKey(flight.documentId, flight.projectId));
+      ledger.recordFailure(flight.ledgerKey ?? draftHandoffKey(flight.documentId, flight.projectId));
       const why =
         flight.failureDetail !== undefined ? ` Reason: ${oneLine(flight.failureDetail, 600)}` : '';
       emitStatus({
@@ -952,6 +1180,11 @@ export async function startInteractiveDraftSubscriber(
         message:
           `The crew run answering this document ${event.type === 'runCancelled' ? 'was cancelled' : 'failed'} ` +
           `(run ${runId}).${why} Inspect it via the crew API (GET /api/v1/runs/${runId}); the assist loop can still take over.`,
+      });
+      if (flight.bound !== undefined) removePacketCopy(flight.bound.runDir, flight.bound.attempt);
+      reportBound(flight, runId, {
+        kind: 'failed',
+        reason: `${event.type === 'runCancelled' ? 'the run was stopped' : 'the run failed'}${flight.failureDetail !== undefined ? `: ${oneLine(flight.failureDetail, 300)}` : ''}`,
       });
       log(`[interactive-draft] run ${runId} for doc ${flight.documentId} ended: ${event.type}`);
     }
@@ -970,14 +1203,45 @@ export async function startInteractiveDraftSubscriber(
     if (!ok) {
       // The run is terminal — its grounding snapshots are done serving reads.
       removeSnapshots(flight);
-      ledger.recordFailure(draftHandoffKey(documentId, projectId));
+      ledger.recordFailure(flight.ledgerKey ?? draftHandoffKey(documentId, projectId));
       emitStatus({
         ...docScope(documentId, projectId),
         state: 'error',
         message: `The crew run completed but produced no draft file at ${outPath} (run ${runId}).`,
       });
+      if (flight.bound !== undefined) removePacketCopy(flight.bound.runDir, flight.bound.attempt);
+      reportBound(flight, runId, { kind: 'failed', reason: 'the run finished without writing the draft file' });
       log(`[interactive-draft] run ${runId} completed but ${outPath} is missing/empty`);
       return;
+    }
+    // A3 (§5.3): the source packet the run was given is checked against the hashes crew holds before anything lands —
+    // a changed or missing file fails the landing (the reviewing step was told to check them too).
+    if (flight.bound !== undefined) {
+      const changed = packetChanged(flight.bound.runDir, flight.bound.attempt, flight.bound.files);
+      if (changed !== null) {
+        removeSnapshots(flight);
+        ledger.recordFailure(flight.ledgerKey ?? draftHandoffKey(documentId, projectId));
+        emitStatus({
+          ...docScope(documentId, projectId),
+          state: 'error',
+          message: `The draft was not landed: its source file ${changed} changed during the run (run ${runId}), so crew cannot vouch for what it was made from.`,
+        });
+        removePacketCopy(flight.bound.runDir, flight.bound.attempt);
+        reportBound(flight, runId, { kind: 'failed', reason: `the source packet changed during the run (${changed})` });
+        return;
+      }
+    }
+    let floorRecords: string | null = null;
+    if (flight.bound !== undefined && opts.bindings !== undefined) {
+      try {
+        floorRecords = mkdtempSync(join(tmpdir(), 'crew-floor-records-'));
+        for (const f of flight.bound.files) {
+          if (packetDirOf(f.name) !== 'records') continue;
+          writeFileSync(join(floorRecords, f.name), opts.bindings.packetBytes(flight.bound.ref, f.name), { mode: 0o600, flag: 'wx' });
+        }
+      } catch (err) {
+        log(`[interactive-draft] run ${runId}: crew's copy of the records for the floor failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
     // THE DRAFT FLOOR (crew#621 / crew#504): the document's own verdict, re-derived by crew from
     // the artifact before it is published — the same `wicked-garden-draft` self-check the worker
@@ -988,14 +1252,19 @@ export async function startInteractiveDraftSubscriber(
     const floorVerdict = await runDraftFloor(
       outPath,
       flight.floor?.budget ?? { pages: null, exact: false, source: 'unknown' },
-      flight.snapshotDirs,
+      // A3: the packet's records are a claims source too (the run briefs, documents and attachments a figure may cite),
+      // read from crew's OWN copy of exactly the verified files, never the writable inbox.
+      [...flight.snapshotDirs, ...(floorRecords !== null ? [floorRecords] : [])],
       { ...(flight.floor !== undefined ? { style: flight.floor.style } : {}) },
       opts.draftFloorIo ?? {},
     );
     removeSnapshots(flight);
+    if (floorRecords !== null) rmSync(floorRecords, { recursive: true, force: true });
+    // The packet served its last read: crew keeps the canonical copy, the inbox keeps only the deliverable.
+    if (flight.bound !== undefined) removePacketCopy(flight.bound.runDir, flight.bound.attempt);
     log(`[interactive-draft] run ${runId} draft floor: ${floorVerdict.verdict} — ${floorVerdict.summary}`);
     if (floorVerdict.verdict === 'fail') {
-      ledger.recordFailure(draftHandoffKey(documentId, projectId));
+      ledger.recordFailure(flight.ledgerKey ?? draftHandoffKey(documentId, projectId));
       emitStatus({
         ...docScope(documentId, projectId),
         state: 'error',
@@ -1004,6 +1273,7 @@ export async function startInteractiveDraftSubscriber(
           `${floorVerdict.breaches.join(' ')} The file crew checked is at ${outPath}; ask again — ` +
           `the brief's hard constraints are part of the deliverable, not a preference.`,
       });
+      reportBound(flight, runId, { kind: 'failed', reason: `the draft did not meet the document floor: ${oneLine(floorVerdict.breaches.join(' '), 300)}` });
       return;
     }
     if (floorVerdict.verdict === 'unverified' || floorVerdict.verdict === 'unavailable') {
@@ -1016,16 +1286,26 @@ export async function startInteractiveDraftSubscriber(
     }
     // ADR-0019 D5: announce by path — the service reads the file itself, so a large draft
     // never rides the bus payload. The deterministic key makes a re-announce a no-op (the key resolves to the existing row).
+    // A3: the bound attempt is announced: from here only a landing (`version.created`) or a refusal ends it. Marked
+    // BEFORE the emit, so a restart in between is reconciled against the document's head (`server.ts`).
+    // An attempt that already has an outcome (recorded some other way meanwhile) is never announced after it.
+    if (flight.bound !== undefined && opts.bindings?.attemptOf(runId)?.attempt.outcome !== undefined) {
+      log(`[interactive-draft] run ${runId}: its attempt already has an outcome — not announced`);
+      return;
+    }
+    if (flight.bound !== undefined) opts.bindings?.markEmitted(flight.bound.ref, runId);
     const emitted = await emitInteractive(
       DRAFT_COMPLETED,
-      { ...docScope(documentId, projectId), html_path: outPath },
-      draftIdempotencyKey(documentId, projectId),
+      // `run_id` (DES §12): which attempt this draft is; interactive ≥ the I1 contract records it on the version. A bound
+      // attempt also says the head it started from (`expect_head`): that contract lands nothing on a moved head.
+      { ...docScope(documentId, projectId), html_path: outPath, run_id: runId, ...(flight.bound !== undefined ? { expect_head: flight.bound.base } : {}) },
+      draftIdempotencyKey(documentId, projectId, runId),
     );
     if (!emitted) {
       // The bus refused the announce: the draft exists on disk but never reached
       // the service. Fail HONEST — leaving the ledger row launched-but-never-closed would
       // silently eat every replay of this doc (the launch gate is `ledger.has`).
-      ledger.recordFailure(draftHandoffKey(documentId, projectId));
+      ledger.recordFailure(flight.ledgerKey ?? draftHandoffKey(documentId, projectId));
       emitStatus({
         ...docScope(documentId, projectId),
         state: 'error',
@@ -1033,10 +1313,11 @@ export async function startInteractiveDraftSubscriber(
           `Crew finished the draft but could not announce it on the bus (run ${runId}); ` +
           `the draft file is at ${outPath}. Inspect the crew daemon log.`,
       });
+      reportBound(flight, runId, { kind: 'failed', reason: 'crew could not announce the draft on the bus' });
       log(`[interactive-draft] draft.completed emit FAILED for doc ${documentId} (run ${runId}) — recorded as failure`);
       return;
     }
-    ledger.recordEmitted(draftHandoffKey(documentId, projectId));
+    ledger.recordEmitted(flight.ledgerKey ?? draftHandoffKey(documentId, projectId));
     emitStatus({
       ...docScope(documentId, projectId),
       state: 'complete',
@@ -1059,6 +1340,18 @@ export async function startInteractiveDraftSubscriber(
       return;
     }
 
+    // A3: a document a chat proposal made is never answered with a fresh random-id launch. Its Go recorded the binding
+    // BEFORE the create, so the trigger finds it and hands the document to the proposal's one launcher per run id,
+    // which adopts the run Go already started (or starts the one a lost trigger never did).
+    const boundRef = `${doc.projectId ?? UNFILED_MOUNT}/${doc.documentId}`;
+    if (opts.bindings?.get(boundRef) != null) {
+      log(`[interactive-draft] doc ${doc.documentId}${where} was made by a chat proposal — its launcher answers it`);
+      // Not awaited: the launcher waits for Go's own launch (the run id's lock), which must not hold up other documents.
+      void (opts.onBoundDocCreated?.(boundRef, doc.documentId) ?? Promise.resolve()).catch((err: unknown) =>
+        log(`[interactive-draft] doc ${doc.documentId}${where}: its proposal's launcher failed: ${err instanceof Error ? err.message : String(err)}`));
+      return;
+    }
+
     // Replay-dedup: the ledger is the durable gate (redelivery after crash/restart), the
     // in-flight scan the live one (redelivery inside a single process lifetime). Keyed per
     // PROJECT (crew#809): the same slug in another project is another document.
@@ -1070,6 +1363,15 @@ export async function startInteractiveDraftSubscriber(
     for (const f of inFlight.values()) {
       if (f.documentId === doc.documentId && f.projectId === doc.projectId) return;
     }
+    await launchDraft(doc, randomUUID(), key, undefined);
+  }
+
+  /**
+   * One draft launch: the plain path (a random run id, the doc's create-time grounding) and a proposal-bound one (A3:
+   * the derived run id, the chat's scope repositories and graph, the card's helpers, the source packet). Throws when
+   * nothing was launched.
+   */
+  async function launchDraft(doc: SourceDocCreated, runId: string, key: string, bound: BoundDraft | undefined): Promise<void> {
 
     // Per-run ISOLATION (Copilot, crew#313): every launch gets its OWN subdirectory holding
     // both the deliverable and (when grounded) the repo snapshot, and declares ONLY that
@@ -1079,8 +1381,10 @@ export async function startInteractiveDraftSubscriber(
     // NOT created here (Copilot round 2): runDir is only mkdir'd after the snapshot helper's
     // containment check has ruled the location safe — see the pre-launch mkdir below.
     const runDir = join(draftDir, doc.documentId);
-    const outPath = join(runDir, `${doc.documentId}-v1.html`);
-    const runId = randomUUID();
+    // A3: a proposal-bound attempt works in its own folder: its deliverable and packet never share a name with an
+    // earlier attempt's (or a same-named document's in another project, once that attempt ended).
+    const attemptDir = bound !== undefined ? join(runDir, attemptDirName(runId)) : runDir;
+    const outPath = join(attemptDir, `${doc.documentId}-v1.html`);
 
     // PRE-LAUNCH placeholder (Copilot round 2): the awaits below (repo resolution, snapshot)
     // open a window in which this doc has no `inFlight` entry — so the chat seam's `isDocBusy`
@@ -1094,6 +1398,10 @@ export async function startInteractiveDraftSubscriber(
       snapshotDirs: [],
       narration: 'Crew run launched — working on your draft…',
       floor: { budget: pageBudgetFor(doc.brief, doc.style), style: doc.style },
+      ledgerKey: key,
+      ...(bound !== undefined
+        ? { bound: { ref: bound.artifactRef, runDir, attempt: attemptDirName(runId), attemptDir, files: bound.packet.files.map((f) => ({ name: f.name, sha256: f.sha256, bytes: f.bytes.length })), base: bound.base } }
+        : {}),
     };
     inFlight.set(runId, flight);
 
@@ -1108,7 +1416,7 @@ export async function startInteractiveDraftSubscriber(
     // reads its binding too (studio#302): the proxy records the create's seat choice and
     // provenance under the default mount, and only the repo grounding is project-only.
     const binding =
-      groundingStore !== undefined
+      groundingStore !== undefined && bound === undefined
         ? await groundingStore.waitFor(
             resolveDocsRoot(doc.projectId),
             doc.documentId,
@@ -1116,10 +1424,14 @@ export async function startInteractiveDraftSubscriber(
             GROUNDING_BINDING_WAIT_MS,
           )
         : undefined;
-    const docClisJson = binding?.clis_json;
-    const docChannel = binding?.channel;
-    const docActor = binding?.actor;
-    if (doc.projectId !== undefined) {
+    const docClisJson = bound?.clisJson ?? binding?.clis_json;
+    const docChannel = bound !== undefined ? 'studio' : binding?.channel;
+    const docActor = bound?.actor ?? binding?.actor;
+    if (bound !== undefined) {
+      // DES §5.2: a chat-made document is grounded on the chat's scope repositories, filed OR Unfiled (the accepted
+      // record is what lifted the Unfiled rule at the create).
+      decision = { repos: bound.repos, source: 'named', missing: [], ambiguous: [], memberCount: bound.repos.length };
+    } else if (doc.projectId !== undefined) {
       decision = await resolveGroundingRepos(adapter, doc.projectId, doc.brief, binding?.repo_refs, log);
     }
 
@@ -1244,9 +1556,9 @@ export async function startInteractiveDraftSubscriber(
     // crew#512: the same facts as DATA — recorded beside the doc first (a skin that refetches the
     // docs list on this frame finds it there), then on the narration frame itself. The record is
     // written even when there is no line to say (a repo-less project): the list still answers.
-    if (decision !== undefined && doc.projectId !== undefined) {
+    if (decision !== undefined && (doc.projectId !== undefined || bound !== undefined)) {
       const record = groundingRecord(decision, snapshotted);
-      if (groundingStore !== undefined) {
+      if (groundingStore !== undefined && doc.projectId !== undefined) {
         try {
           groundingStore.recordGrounding(resolveDocsRoot(doc.projectId), doc.documentId, doc.projectId, record);
         } catch (err) {
@@ -1268,11 +1580,33 @@ export async function startInteractiveDraftSubscriber(
       endFlight(runId);
       removeSnapshots(flight);
       log(`[interactive-draft] doc ${doc.documentId}: subscriber stopped before launch — abandoned (a replay retries)`);
+      // A bound launch reports it: its proposal stays accepting, and Go again resumes the same identity.
+      if (bound !== undefined) throw new Error('the daemon is stopping; nothing was launched');
       return;
     }
 
     // Containment is settled (any repo overlap refused above) — the run's write root may exist.
     mkdirSync(runDir, { recursive: true });
+    let packetLine = '';
+    if (bound !== undefined) {
+      // A3: an earlier attempt's folder goes first (its deliverable can never pass this attempt's floor, and an
+      // announce of it still on the bus can no longer land: its file is gone), then this attempt gets crew's copy of its
+      // packet, through no link (§5.3).
+      try {
+        // (CreateLauncher fenced the earlier attempts before it read the base; this repeats it, idempotently, and clears
+        // what an earlier try of THIS attempt left if the engine refused it: Go again starts from a fresh folder.)
+        const left = removeAttemptDirs(runDir, (opts.bindings?.get(bound.artifactRef)?.attempts ?? []).map((a) => a.runId));
+        if (left.length > 0) throw new Error(`an earlier attempt's folder could not be removed (${left.join(', ')})`);
+        writePacketCopy(runDir, attemptDirName(runId), bound.packet);
+      } catch (err) {
+        endFlight(runId);
+        removeSnapshots(flight);
+        const message = `Crew could not give this draft its sources: ${err instanceof Error ? err.message : String(err)}.`;
+        emitStatus({ ...docScope(doc.documentId, doc.projectId), state: 'error', message });
+        throw new Error(message);
+      }
+      packetLine = ' ' + packetClause(attemptDir, bound.packet, PROCESS_NOTES_WHERE);
+    }
 
     // Resolve the project's graph BEFORE the launch, never indexing (a refresh is
     // `wicked-estate index` per member, bounded at 600s EACH — doing that inside a launch turns
@@ -1286,7 +1620,10 @@ export async function startInteractiveDraftSubscriber(
     // but says so — a silent `catch(() => null)` would make a broken binding indistinguishable
     // from a project that simply has no graph yet.
     let projectGraphBinding: ProjectGraphBinding | null = null;
-    if (doc.projectId !== undefined) {
+    if (bound !== undefined) {
+      // The stored graph binding (DES §5.2), whatever the mount.
+      projectGraphBinding = bound.graphDb !== null ? { dbPath: bound.graphDb } : null;
+    } else if (doc.projectId !== undefined) {
       const decision = await resolveProjectGraphBinding(adapter, doc.projectId, undefined).catch(
         (err: unknown) => ({
           binding: null,
@@ -1299,6 +1636,7 @@ export async function startInteractiveDraftSubscriber(
       projectGraphBinding = decision.binding;
       log(`run ${runId}: ${decision.reason}`);
     }
+    if (bound !== undefined) opts.bindings?.markLaunching(bound.artifactRef, runId);
     try {
       unitsByRun.set(runId, new RunUnits()); // before the launch: its first plan is announced during it
       await adapter.launchRun({
@@ -1324,9 +1662,10 @@ export async function startInteractiveDraftSubscriber(
           draftQualityClause(
             outPath,
             pageBudgetFor(doc.brief, doc.style),
-            subjects.flatMap((s) => (s.snapshotDir !== undefined ? [s.snapshotDir] : [])),
+            [...subjects.flatMap((s) => (s.snapshotDir !== undefined ? [s.snapshotDir] : [])), ...(bound !== undefined ? [join(attemptDir, 'records')] : [])],
             { style: doc.style },
-          ),
+          ) +
+          packetLine,
         sessionId: runId,
         clisJson: docClisJson ?? opts.clisJson ?? JSON.stringify(rosterOf(adapter, opts.roster)),
         workflow: INTERACTIVE_DRAFT_WORKFLOW,
@@ -1364,6 +1703,7 @@ export async function startInteractiveDraftSubscriber(
       });
     } catch (err) {
       unitsByRun.delete(runId);
+      if (bound !== undefined) opts.bindings?.clearLaunching(bound.artifactRef, runId);
       // A launch that never happened keeps no flight and no snapshot (a replayed frame
       // re-registers and re-snapshots fresh).
       endFlight(runId);
@@ -1386,6 +1726,7 @@ export async function startInteractiveDraftSubscriber(
     // delivery retries. The crash window between launch and this write is the reason the
     // draft emit ALSO carries a deterministic idempotency key.
     ledger.recordLaunch(key, runId);
+    if (bound !== undefined) opts.bindings?.markLaunched(bound.artifactRef, runId);
     if (closed) {
       // stop() ran while the engine was accepting the launch: its sweep already dropped the
       // placeholder and the snapshot, and the engine's workers die with the daemon — the
@@ -1397,6 +1738,8 @@ export async function startInteractiveDraftSubscriber(
       deliver: 'none', // crew#762: a document draft publishes a document, it never delivers a PR
       ...(docChannel !== undefined ? { channel: docChannel } : {}),
       ...(docActor !== undefined ? { actor: docActor } : {}),
+      // A3 (DES §5.2 "Filing"): the run is filed under the chat, and says which proposal and artifact it is.
+      ...(bound !== undefined ? { chatId: bound.chatId, proposalId: bound.proposalId, artifactRef: bound.artifactRef } : {}),
     });
 
     // Upgrade the placeholder to a live flight: the heartbeat starts once the run exists.
@@ -1433,11 +1776,91 @@ export async function startInteractiveDraftSubscriber(
     }),
   });
 
+  // A3 (§6.2): a bound attempt's outcome is its LANDING, not the run's end: interactive's `version.created` for the
+  // document after crew's announce (an interactive with the I1 contract also names the run; an older one is matched by
+  // the document and its `generated` kind, as only one attempt per document is ever live), or its `draft.conflict`.
+  async function handleLanding(event: BusEvent): Promise<void> {
+    const bindings = opts.bindings;
+    if (bindings === undefined || (event.event_type !== VERSION_CREATED && event.event_type !== DRAFT_CONFLICT)) return;
+    const p = (typeof event.payload === 'object' && event.payload !== null ? event.payload : {}) as Record<string, unknown>;
+    const documentId = typeof p['document_id'] === 'string' ? p['document_id'] : '';
+    if (!DOC_NAME.test(documentId)) return;
+    const projectId = typeof p['project_id'] === 'string' && p['project_id'] !== '' ? p['project_id'] : null;
+    const runIdP = typeof p['run_id'] === 'string' && p['run_id'] !== '' ? p['run_id'] : null;
+    const b = bindings.get(`${projectId ?? UNFILED_MOUNT}/${documentId}`);
+    if (b === null) return;
+    const version = typeof p['version'] === 'number' ? p['version'] : null;
+    const ts = typeof p['ts'] === 'string' ? Date.parse(p['ts']) : NaN;
+    const a = b.attempts.find((x) =>
+      x.outcome === undefined && x.emittedAt !== undefined &&
+      (runIdP !== null
+        ? x.runId === runIdP
+        // An interactive before the I1 contract names no run: only a generated version past the attempt's base, made
+        // after crew announced it (a delayed event from before cannot settle it), is its landing.
+        : event.event_type === VERSION_CREATED && p['kind'] === 'generated' && version !== null && version > x.base &&
+          !Number.isNaN(ts) && ts >= x.emittedAt));
+    if (a === undefined) return;
+    const outcome: BoundOutcome = event.event_type === VERSION_CREATED
+      ? { kind: 'landed', version: version ?? 0 }
+      : { kind: 'failed', reason: `the document changed while it was being drafted (it was at v${String(p['expect_head'] ?? '?')}, now v${String(p['actual_head'] ?? '?')}), so nothing landed` };
+    if (!bindings.setOutcome(b.ref, a.runId, outcome)) return;
+    log(`[interactive-draft] run ${a.runId} for ${b.ref}: ${outcome.kind === 'landed' ? `landed v${outcome.version}` : outcome.reason}`);
+    try {
+      opts.onBoundOutcome?.(b.ref, a.runId, outcome);
+    } catch (err) {
+      log(`[interactive-draft] recording the outcome of run ${a.runId} failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  const landingTap = opts.bindings === undefined
+    ? null
+    : await tapBus({
+        dbPath: busDbPath,
+        filter: 'wicked.interactive.**@wicked-interactive',
+        pollIntervalMs: opts.pollIntervalMs ?? 2000,
+        handler: (event: BusEvent) => handleLanding(event),
+        onError: busSubscriberErrorReporter({
+          describe: (err, event) => `[interactive-draft] landing handler error on event ${String(event?.event_id ?? '?')}: ${err.message}`,
+          log,
+          logError: opts.logError,
+          pollIntervalMs: opts.pollIntervalMs ?? 2000,
+        }),
+      }).catch((err: unknown) => {
+        log(`[interactive-draft] could not watch landings (bound drafts settle at the next restart): ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      });
+
   return {
     ledger,
     inFlightDocs: () => [
-      ...new Set([...[...inFlight.values()].map((f) => f.documentId), ...finalizing.values()]),
+      ...new Set([
+        ...[...inFlight.values()].map((f) => f.documentId),
+        ...finalizing.values(),
+        // A3 (§6.2): a proposal-bound document stays busy until its attempt's outcome is recorded (announced and not
+        // yet landed, or reconciling at boot), for every seam that serializes on this list.
+        ...(opts.bindings?.all() ?? []).filter((b) => b.attempts.some((a) => a.outcome === undefined && (a.launchingAt !== undefined || a.launchedAt !== undefined || a.emittedAt !== undefined))).map((b) => b.doc),
+      ]),
     ],
+    fenceBound: (documentId: string, runIds: readonly string[]) => {
+      const left = removeAttemptDirs(join(draftDir, documentId), runIds);
+      if (left.length > 0) throw new Error(`an earlier attempt of this document could not be fenced (${left.join(', ')} is still there)`);
+    },
+    launchBound: async (spec: BoundDraft) => {
+      if (closed) throw new Error('the draft seam is stopping');
+      for (const f of inFlight.values()) {
+        if (f.documentId === spec.documentId && f.projectId === spec.projectId) {
+          throw new Error(`a draft of ${spec.artifactRef} is already running (run ${f.runId ?? 'starting'})`);
+        }
+      }
+      if (finalizing.has(draftHandoffKey(spec.documentId, spec.projectId))) throw new Error(`a draft of ${spec.artifactRef} is still landing`);
+      const doc: SourceDocCreated = {
+        documentId: spec.documentId,
+        brief: spec.brief,
+        sourcePaths: [],
+        style: spec.style,
+        ...(spec.projectId !== undefined ? { projectId: spec.projectId } : {}),
+      };
+      await launchDraft(doc, spec.runId, boundAttemptKey(spec.documentId, spec.projectId, spec.runId), spec);
+    },
     stop: async () => {
       closed = true; // a handler mid-snapshot sees this and never launches (Copilot round 2)
       offCoreEvents();
@@ -1453,6 +1876,7 @@ export async function startInteractiveDraftSubscriber(
         if (flight !== undefined) removeSnapshots(flight);
       }
       finalizing.clear(); // nothing is finalizing after the subscriber detaches
+      await landingTap?.stop();
       await sub.stop();
     },
   };

@@ -24,11 +24,11 @@
  *     (the effective proposal and the identity derived from the pid), then the one launcher per run id
  *     ({@link LaunchOnceRegistry}), then `proposal_decided`. Not now runs no other check.
  *
- * Nothing in this slice starts work: each operation's launcher is registered by its own slice (A3 create, A5 refine,
- * A7 theme, A8 demo). Production advertises `proposals` with every operation off, so seats are told about nothing and
- * the resolver refuses any block. The TEST configuration (`WICKED_CHAT_ARTIFACTS_STUB=1`, DES §13 A2) turns every
- * operation's resolution on and registers a {@link RecordingStubDispatcher}, which records a dispatch and starts
- * nothing.
+ * Each operation's launcher is registered by its own slice: A3's real `create` (`interactive/proposal-create.ts`)
+ * whenever the draft seam is armed, so production advertises `proposals` and `create`; refine (A5), theme (A7) and demo
+ * (A8) stay off there until their slices land. The TEST configuration (`WICKED_CHAT_ARTIFACTS_STUB=1`, DES §13 A2)
+ * turns every operation's resolution on and registers a {@link RecordingStubDispatcher} for the kinds that have no real
+ * launcher yet (`capabilities.chatArtifacts.stubOps`): those record a dispatch and start nothing.
  *
  * Records go to the chat's live transcript, or to its kept history copy once the chat has ended, so an open proposal
  * stays answerable after a restart (§4.3).
@@ -256,6 +256,8 @@ export interface ProposalDispatcher {
   launch(dispatch: ProposalDispatch): Promise<void>;
   /** Whether a run it started is still live (the one-live-job-per-chat rule). */
   live?(runId: string): Promise<boolean>;
+  /** Whether a document has an attempt of this launcher still without an outcome (A3: one live job per document). */
+  docBusy?(artifactRef: string): Promise<boolean>;
   /** The test configuration's recording stub: nothing is started. */
   readonly stub?: boolean;
 }
@@ -311,9 +313,11 @@ export class LaunchOnceRegistry {
     return d?.live === undefined ? false : d.live(runId);
   }
 
-  /** Whether a run this daemon started for the artifact is still live. */
+  /** Whether a run this daemon started for the artifact is still live, or a launcher's durable record says an attempt at
+   *  it has no outcome yet (A3: across a restart too). */
   async liveForArtifact(artifactRef: string): Promise<boolean> {
     for (const r of this.byArtifact.get(artifactRef) ?? []) if (await this.live(r.kind, r.runId)) return true;
+    for (const d of new Set(this.dispatchers.values())) if (d.docBusy !== undefined && (await d.docBusy(artifactRef))) return true;
     return false;
   }
 
@@ -490,8 +494,14 @@ export interface ChatProposalDeps {
   /** The docs root of a project (`default` = Unfiled); `null` = no such project. */
   docsRoot(projectId: string): Promise<string | null>;
   projectName(projectId: string): Promise<string | null>;
+  /** A3: a project's repository members (registry ids and names); `null` = no such project. Absent = unknown (a
+   *  project edit keeps no repository). */
+  projectRepos?(projectId: string): Promise<Array<{ id: string; name: string }> | null>;
   /** This chat's attachments. */
-  attachments(chatId: string): ReadonlyArray<{ id: string; name: string }>;
+  attachments(chatId: string): ReadonlyArray<{ id: string; name: string; bytes?: number; mediaType?: string }>;
+  /** A3: the registry ids of the repositories registered now (a selected one unregistered since refuses Go). Absent =
+   *  not checked. */
+  repoIds?(): Promise<ReadonlySet<string>>;
   /** Steps of a workflow as a launch in this project resolves it, when known. */
   workflowSteps(name: string, projectId: string | null): Promise<number | null>;
   /** A completed run's cost when every agent step reported one, else `null`. */
@@ -804,10 +814,21 @@ export class ChatProposals {
     const style = seed !== undefined && seed.launch.kind === 'document' ? seed.launch.style : null;
     const title = block.title !== undefined && block.title !== '' ? block.title : seed?.title ?? block.entry;
     const repos: string[] = [];
+    const repoRefs: string[] = [];
     for (const want of block.repos) {
-      const hit = chat.repos.find((r) => r.name === want || r.id === want);
-      if (hit === undefined) blocked.push(`${want} isn't in this chat's scope`);
-      else if (!repos.includes(hit.name)) repos.push(hit.name);
+      const hits = chat.repos.filter((r) => r.name === want || r.id === want);
+      if (hits.length === 0) blocked.push(`${want} isn't in this chat's scope`);
+      else if (hits.length > 1) blocked.push(`${want} names ${hits.length} repositories in this chat's scope (name it by id)`);
+      else if (!repoRefs.includes(hits[0]!.id)) {
+        repos.push(hits[0]!.name);
+        repoRefs.push(hits[0]!.id);
+      }
+    }
+    // A3 (§5.2): a chat-made document is grounded on the chat's scope. A block that names none, in a chat scoped to ONE
+    // repository, is about that one; with several, nothing is guessed (the card says what it is about).
+    if (kind === 'create' && block.repos.length === 0 && chat.repos.length === 1) {
+      repos.push(chat.repos[0]!.name);
+      repoRefs.push(chat.repos[0]!.id);
     }
     let demo: ArtifactProposal['demo'];
     if (kind === 'demo') {
@@ -842,6 +863,7 @@ export class ChatProposals {
       reason: block.reason ?? null,
       sources,
       repos,
+      ...(repoRefs.length > 0 ? { repoRefs } : {}),
       helpers,
       time: await this.timeOf(kind, seed ?? null, chat.projectId),
       stops: STOPS[kind],
@@ -964,8 +986,9 @@ export class ChatProposals {
         continue;
       }
       if (token === 'page') {
-        if (ctx.turnHas && ctx.binding?.page === true) push({ token, label: 'the page you were on', status: 'ok' });
-        else strike(token, 'the page you were on', 'no page was shared with this message');
+        // A3: studio's page summary rides with its message and is not kept after it, so a document cannot be made from
+        // it later: struck with the reason, never promised on the card and then dropped at launch.
+        strike(token, 'the page you were on', ctx.turnHas && ctx.binding?.page === true ? "studio's page summary is not kept after the message" : 'no page was shared with this message');
         continue;
       }
       const colon = token.indexOf(':');
@@ -986,6 +1009,8 @@ export class ChatProposals {
       if (kind === 'attachment') {
         const a = this.deps.attachments(ctx.chatId).find((x) => x.id === id);
         if (a === undefined) strike(`attachment:${id}`, `attachment ${id.slice(0, 12)}`, 'not a file attached to this chat');
+        // A3: the packet's per-file cap (512 KB): a file over it could never reach the draft.
+        else if (typeof a.bytes === 'number' && a.bytes > 512 * 1024) strike(`attachment:${a.id}`, a.name, 'too large for a document\'s sources (over 512 KB)');
         else push({ token: `attachment:${a.id}`, label: a.name, status: 'ok' });
         continue;
       }
@@ -1158,7 +1183,7 @@ export class ChatProposals {
    * proposals of one chat (or two chats changing one document) can never both pass the busy check.
    */
   private go(chatId: string, folded: FoldedProposal, resolution: ArtifactProposal, edits: ProposalEdits | null, identity: ProposalIdentity, actor: Actor, instance: string | null): Promise<DecideResult> {
-    const docKey = resolution.kind === 'refine' && identity.artifactRef !== null ? identity.artifactRef : null;
+    const docKey = (resolution.kind === 'refine' || (resolution.kind === 'create' && resolution.artifactRef !== undefined)) && identity.artifactRef !== null ? identity.artifactRef : null;
     // Keyed by the chat's instance (shared by its original id and an ended chat's archived alias), else its id.
     return this.lock.run(`chat\u0000${instance ?? chatId}`, () =>
       docKey === null
@@ -1256,6 +1281,8 @@ export class ChatProposals {
     const runId = proposalRunId(p.pid);
     if (p.kind === 'refine') return { artifactRef: p.target?.ref ?? null, runId };
     if (p.kind === 'create') {
+      // A retry fills the same document again (§4.3: artifact identity and attempt identity are separate).
+      if (p.artifactRef !== undefined) return { artifactRef: p.artifactRef, runId };
       const mount = chatMount(p.filedIn.projectId) ?? UNFILED_MOUNT;
       return { artifactRef: `${mount}/${proposalDocName(p.pid, p.what.title)}`, runId };
     }
@@ -1268,6 +1295,12 @@ export class ChatProposals {
    */
   private async firstGone(chatId: string, p: ArtifactProposal): Promise<string | null> {
     let runs: SessionView[] | null = null;
+    // A3: a repository the card names must still be registered (never silently dropped from the launch).
+    if ((p.repoRefs ?? []).length > 0 && this.deps.repoIds !== undefined) {
+      const have = await this.deps.repoIds();
+      const lost = (p.repoRefs ?? []).findIndex((id) => !have.has(id));
+      if (lost !== -1) return `${p.repos[lost] ?? p.repoRefs![lost]} is no longer registered on this daemon; ask again in the chat`;
+    }
     for (const s of p.sources) {
       if (s.status !== 'ok') continue;
       if (s.token.startsWith('run:')) {
@@ -1306,16 +1339,16 @@ export class ChatProposals {
       if (!isLive(v) || this.deps.chatOfRun(v.session.id) !== chatId || this.deps.isAskPath(v.session.id)) continue;
       return { code: 'chat_busy', reason: `This chat already has a job running (run ${v.session.id.slice(0, 8)}). Wait, or stop that run.` };
     }
-    if (artifactRef !== null && p.kind === 'refine') {
+    if (artifactRef !== null && (p.kind === 'refine' || (p.kind === 'create' && p.artifactRef !== undefined))) {
       if (await this.deps.registry.liveForArtifact(artifactRef)) {
-        return { code: 'document_busy', reason: `“${p.target?.title ?? artifactRef}” is being revised. Wait, or stop that run.` };
+        return { code: 'document_busy', reason: `“${p.target?.title ?? p.what.title}” is being ${p.kind === 'create' ? 'drafted' : 'revised'}. Wait, or stop that run.` };
       }
       const ref = parseArtifactRef(artifactRef);
       if (ref !== null) {
         for (const v of runs) {
           const doc = (v.session as { document_id?: string | null }).document_id;
           if (isLive(v) && doc === ref.doc && runMount(v) === ref.mount) {
-            return { code: 'document_busy', reason: `“${p.target?.title ?? ref.doc}” is being revised. Wait, or stop that run.` };
+            return { code: 'document_busy', reason: `“${p.target?.title ?? p.what.title}” is being ${p.kind === 'create' ? 'drafted' : 'revised'}. Wait, or stop that run.` };
           }
         }
       }
@@ -1333,7 +1366,7 @@ export class ChatProposals {
     const p = f.proposal;
     if (edits === undefined) return p;
     const allowed: Record<ArtifactProposalKind, ReadonlyArray<keyof ProposalEdits>> = {
-      create: ['title', 'brief', 'sources', 'helpers'],
+      create: p.artifactRef !== undefined ? ['title', 'brief', 'sources', 'helpers'] : ['title', 'brief', 'sources', 'helpers', 'repos', 'project'],
       refine: ['ask', 'helpers'],
       theme: ['name', 'patch'],
       demo: ['audience', 'show', 'helpers'],
@@ -1379,12 +1412,46 @@ export class ChatProposals {
       // Two helpers lift the one block a person can lift.
       next = { ...next, helpers, blocked: next.blocked === NEEDS_HELPER ? null : next.blocked };
     }
+    // A3 (§4.2 Change something, create): the project — only in a chat filed in no project. Every source, repository
+    // and turn is re-checked against the target below; what is outside it is struck (a `message:` whole).
+    let recheck = false;
+    if (edits.project !== undefined) {
+      const chatProject = this.deps.chat(chatId)?.projectId ?? this.deps.projectOf(chatId);
+      if (chatProject !== null) throw new EditRefusal("this chat is filed in a project: its documents stay there");
+      const target = edits.project === null || edits.project === '' || edits.project === 'default' ? null : edits.project;
+      if (target !== null && (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(target) || (await this.deps.docsRoot(target)) === null)) {
+        throw new EditRefusal(`there is no project ${target.slice(0, 80)} on this daemon`);
+      }
+      if (target !== p.filedIn.projectId) {
+        recheck = true;
+        next = { ...next, filedIn: { projectId: target, label: target === null ? 'Not in a project · this chat' : ((await this.deps.projectName(target)) ?? target) } };
+      }
+    }
+    if (edits.repos !== undefined) {
+      if (edits.repos.length > 8) throw new EditRefusal('at most 8 repositories');
+      // In the chat's scope: the live chat's, else (an ended chat) the repositories the proposal was resolved with.
+      const scope = this.deps.chat(chatId)?.repos ?? (p.repoRefs ?? []).map((id, i) => ({ id, name: p.repos[i] ?? id }));
+      const repos: string[] = [];
+      const repoRefs: string[] = [];
+      for (const want of edits.repos) {
+        const hits = scope.filter((r) => r.id === want || r.name === want);
+        if (hits.length !== 1) throw new EditRefusal(`${want.slice(0, 120)} ${hits.length === 0 ? "isn't in this chat's scope" : 'names several repositories (name it by id)'}`);
+        if (!repoRefs.includes(hits[0]!.id)) {
+          repos.push(hits[0]!.name);
+          repoRefs.push(hits[0]!.id);
+        }
+      }
+      next = { ...next, repos, ...(repoRefs.length > 0 ? { repoRefs } : {}) };
+      if (repoRefs.length === 0) delete (next as { repoRefs?: string[] }).repoRefs;
+    }
+    if (recheck) next = await this.recheckProject(next, edits.repos !== undefined);
     if (edits.sources !== undefined) {
       if (edits.sources.length > PROPOSAL_SOURCES_MAX) throw new EditRefusal(`at most ${PROPOSAL_SOURCES_MAX} sources`);
       const records = this.deps.records(chatId);
       const { binding, turnHas } = bindingOf(records, f.turnId);
-      // A source the person adds counts as named by them, and is still checked against the scope.
-      const sources = await this.resolveSources(edits.sources, {
+      // A source the person adds counts as named by them, and is checked against the chat's own scope first; then the
+      // project re-check (when the document moves) strikes what is outside the target.
+      const resolved = await this.resolveSources(edits.sources, {
         chatId,
         turnId: f.turnId,
         records,
@@ -1394,11 +1461,165 @@ export class ChatProposals {
         words: personWords(records, f.turnId),
         personNamed: true,
       });
-      // A source the person adds that cannot be used is said back, never silently dropped from a launch.
-      const added = sources.find((src) => src.status === 'struck' && !p.sources.some((old) => old.token === src.token && old.status === 'struck'));
+      next = { ...next, sources: resolved };
+      // Re-checked whenever the document is filed outside the chat's own scope (a moved document, or a retry of one).
+      const chatScope = this.deps.chat(chatId)?.projectId ?? this.deps.projectOf(chatId);
+      if (recheck || next.filedIn.projectId !== chatScope) next = await this.recheckProject(next, edits.repos !== undefined);
+      // A source the person ADDED (not one the proposal already held) that cannot be used is said back, never silently
+      // dropped from a launch; one it already held is struck with the reason, as the project change promises.
+      const had = new Set(p.sources.map((s) => s.token));
+      const added = next.sources.find((src) => src.status === 'struck' && !had.has(src.token));
       if (added !== undefined) throw new EditRefusal(`${added.label}: ${added.reason ?? 'it cannot be used'}`);
-      next = { ...next, sources };
+      // The attachments together must fit the packet (1 MB with room for the rest), or one would be left out at launch.
+      const files = this.deps.attachments(chatId);
+      const attached = next.sources
+        .filter((s) => s.status === 'ok' && s.token.startsWith('attachment:'))
+        .reduce((n, s) => n + (files.find((a) => `attachment:${a.id}` === s.token)?.bytes ?? 0), 0);
+      if (attached > 768 * 1024) throw new EditRefusal(`the attached files together are ${Math.round(attached / 1024)} KB: a document's sources take at most 768 KB of attachments; leave one out`);
     }
     return next;
+  }
+
+  /**
+   * A3 (§4.2): re-check a create against the project it is now filed in. A run or document source from elsewhere is
+   * struck; a `message:` source is struck whole when any record its answer was given is elsewhere (the conversation
+   * keeps only what is in the project, at packet time); repositories outside the project's members are cut (or, when
+   * the person chose them, refused).
+   */
+  private async recheckProject(p: ArtifactProposal, personRepos: boolean): Promise<ArtifactProposal> {
+    const target = p.filedIn.projectId;
+    const label = target === null ? 'Unfiled' : p.filedIn.label;
+    const records = this.deps.records(p.chatId);
+    let runs: SessionView[] | null = null;
+    const runProject = async (id: string): Promise<string | null | undefined> => {
+      runs ??= await this.deps.runs();
+      const v = runs.find((x) => x.session.id === id);
+      return v === undefined ? undefined : projectOfMount(runMount(v));
+    };
+    const sources: ProposalSource[] = [];
+    for (const s of p.sources) {
+      if (s.status !== 'ok') {
+        sources.push(s);
+        continue;
+      }
+      if (s.token.startsWith('run:') || s.token.startsWith('doc:')) {
+        const proj = s.projectId !== undefined ? s.projectId : s.token.startsWith('run:') ? await runProject(s.token.slice(4)) : projectOfMount(parseArtifactRef(s.token.slice(4))?.mount ?? '');
+        sources.push(proj === target ? s : { ...s, status: 'struck', reason: `not in ${label}` });
+        continue;
+      }
+      if (s.token.startsWith('message:')) {
+        const turn = s.token.slice('message:'.length);
+        const ctx = records.find((r): r is Extract<ChatTranscriptRecord, { kind: 'context' }> => r.kind === 'context' && r.turnId === turn);
+        let inside = true;
+        for (const r of ctx?.runs ?? []) if ((await runProject(r.id)) !== target) inside = false;
+        if (ctx?.artifact !== undefined && projectOfMount(parseArtifactRef(ctx.artifact.ref)?.mount ?? '') !== target) inside = false;
+        sources.push(inside ? s : { ...s, status: 'struck', reason: `it was answered from records outside ${label}` });
+        continue;
+      }
+      sources.push(s);
+    }
+    let repos = p.repos;
+    let repoRefs = p.repoRefs ?? [];
+    if (target !== null && repoRefs.length > 0) {
+      const members = (await this.deps.projectRepos?.(target)) ?? [];
+      const outside = repoRefs.filter((id) => !members.some((m) => m.id === id));
+      if (outside.length > 0 && personRepos) {
+        throw new EditRefusal(`${outside.map((id) => p.repos[repoRefs.indexOf(id)] ?? id).join(', ')} ${outside.length === 1 ? 'is' : 'are'} not in ${label}`);
+      }
+      repos = repos.filter((_, i) => !outside.includes(repoRefs[i]!));
+      repoRefs = repoRefs.filter((id) => !outside.includes(id));
+    }
+    const out: ArtifactProposal = { ...p, sources, repos, ...(repoRefs.length > 0 ? { repoRefs } : {}) };
+    if (repoRefs.length === 0) delete (out as { repoRefs?: string[] }).repoRefs;
+    return out;
+  }
+
+  // ── A3: what the create launcher and the daemon need from the proposals ────────────────────────────────────────────
+
+  /**
+   * The accepted proposal a create's `chat_id` + `proposal_id` names, for this actor (§5.2): accepting (or decided go),
+   * accepted by them, a create. `null` otherwise — and then the create is refused.
+   */
+  grantFor(chatId: string, pid: string, actorId: string): { doc: string; projectId: string; repos: Array<{ id: string; name: string }> } | null {
+    const f = foldProposals(this.deps.records(chatId)).get(pid);
+    const acc = f?.accepting;
+    if (f === undefined || acc === undefined || acc.actor !== actorId || acc.resolution.kind !== 'create') return null;
+    if (!(f.state === 'accepting' || (f.state === 'decided' && f.decision === 'go'))) return null;
+    const ref = acc.identity.artifactRef === null ? null : parseArtifactRef(acc.identity.artifactRef);
+    if (ref === null) return null;
+    const ids = acc.resolution.repoRefs ?? [];
+    return { doc: ref.doc, projectId: ref.projectId, repos: ids.map((id, i) => ({ id, name: acc.resolution.repos[i] ?? id })) };
+  }
+
+  /** The accepted resolution and identity of a proposal (the launcher's bus trigger rebuilds its dispatch from it). */
+  acceptedOf(chatId: string, pid: string): { actor: string; resolution: ArtifactProposal; identity: ProposalIdentity; turnId: string; state: ChatProposalView['state'] } | null {
+    const f = foldProposals(this.deps.records(chatId)).get(pid);
+    if (f?.accepting === undefined) return null;
+    return { actor: f.accepting.actor, resolution: f.accepting.resolution, identity: f.accepting.identity, turnId: f.turnId, state: f.state };
+  }
+
+  /**
+   * §6.2: a proposal-bound attempt ended without landing. Crew appends `<chatId>:retry:<runId>` — the same artifact, the
+   * failed attempt's effective resolution (edits, helpers, sources; the conversation cutoff stays the binding's), a new
+   * run id derived from its own pid — to the live chat or its kept history. Once per failed run.
+   */
+  async appendRetry(chatId: string, failedPid: string, runId: string, artifactRef: string, reason: string, bound?: string | null): Promise<string | null> {
+    const instance = bound ?? this.deps.instanceOf(chatId);
+    return this.lock.run(`chat\u0000${instance ?? chatId}`, async () => {
+      // Checked under the lock: only on the chat instance the document was made in, never on another chat that reused
+      // the id meanwhile (the caller resolves the instance's current id again and retries).
+      if (bound !== undefined && bound !== null && this.deps.instanceOf(chatId) !== bound) {
+        throw new Error(`chat ${chatId} is no longer the chat run ${runId} was made from`);
+      }
+      const records = this.deps.records(chatId);
+      const folded = foldProposals(records);
+      const failed = folded.get(failedPid);
+      const base = failed?.accepting?.resolution ?? failed?.proposal;
+      if (failed === undefined || base === undefined) {
+        this.log(`[proposals] chat ${chatId}: run ${runId} failed but proposal ${failedPid} is not in its records — no retry card`);
+        return null;
+      }
+      // Named by the chat's own id (an ended chat's archive alias still holds the same proposals).
+      const pid = `${base.chatId}:retry:${runId}`;
+      if (folded.has(pid)) return pid;
+      const retry: ArtifactProposal = {
+        ...base,
+        pid,
+        turnId: null,
+        sourceRunId: runId,
+        artifactRef,
+        reason: `The last attempt ended without a draft: ${reason}. Try again fills the same document.`,
+        blocked: null,
+      };
+      return this.write(chatId, { at: this.now(), turnId: failed.turnId, kind: 'proposal', proposal: retry }, instance) ? pid : null;
+    });
+  }
+
+  /**
+   * The artifact job a chat's proposal started that is still live (busy until its outcome is recorded), as the card
+   * names it, or `null`. A work launch filed under the chat (`POST /runs {chatId}`) is refused while one is: one live
+   * job per chat, work and artifact runs together (DES §4.3).
+   */
+  async liveJobOf(chatId: string): Promise<string | null> {
+    for (const f of foldProposals(this.deps.records(chatId)).values()) {
+      const runId = f.state === 'decided' && f.decision === 'go' ? f.result?.runId ?? null : f.state === 'accepting' ? f.accepting?.identity.runId ?? null : null;
+      if (runId !== null && (await this.deps.registry.live(f.proposal.kind, runId))) return f.proposal.what.label;
+    }
+    return null;
+  }
+
+  /** At daemon start (§6.2): an `accepting` proposal whose run exists is decided (adopted). `true` when it recorded. */
+  async settleAccepting(chatId: string, pid: string): Promise<boolean> {
+    const instance = this.deps.instanceOf(chatId);
+    return this.lock.run(`pid\u0000${pid}`, async () => {
+      const f = foldProposals(this.deps.records(chatId)).get(pid);
+      const acc = f?.accepting;
+      if (f === undefined || acc === undefined || f.state !== 'accepting') return false;
+      const found = await this.deps.registry.find(f.proposal.kind, acc.identity);
+      if (found === null) return false;
+      const result: ProposalResult = { runId: acc.identity.runId, artifactRef: acc.identity.artifactRef, adopted: true, stub: found.stub };
+      const actor: Actor = { id: acc.actor, kind: 'human', trust: 'operator' };
+      return this.decided(chatId, f.turnId, pid, actor, 'go', result, acc.resolution, acc.edits, instance);
+    });
   }
 }

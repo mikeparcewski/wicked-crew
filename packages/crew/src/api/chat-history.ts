@@ -242,6 +242,23 @@ export class ChatHistoryStore {
     return true;
   }
 
+  /**
+   * DES-CHAT-ARTIFACTS-001 (A3): the id a chat INSTANCE is kept under now — its own id, or the archive id
+   * (`<id>--<closedAt ms>`) a reuse of the id moved it to; `null` when it is gone. A chat-made document's binding reads
+   * its chat through this, never the other chat that reused the id.
+   */
+  idOfInstance(id: string, instance: string | null): string | null {
+    if (instance === null) return this.stateOf(id) !== null ? id : null;
+    if (this.stateOf(id)?.instance === instance) return id;
+    if (!existsSync(this.dir)) return null;
+    for (const f of readdirSync(this.dir)) {
+      if (!f.startsWith(`${id}--`) || !f.endsWith('.json')) continue;
+      const other = f.slice(0, -5);
+      if (this.stateOf(other)?.instance === instance) return other;
+    }
+    return null;
+  }
+
   /** The entry's status, instance (its own nonce; `createdAt` for an older entry) and project, or null. */
   stateOf(id: string): { status: 'open' | 'closed'; instance: string; actorId: string | null; projectId: string | null } | null {
     const e = this.read(id);

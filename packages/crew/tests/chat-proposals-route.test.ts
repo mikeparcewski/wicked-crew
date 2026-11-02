@@ -71,6 +71,8 @@ describe('chat proposals (server, A2)', () => {
       runView(RUN_A),
       runView(RUN_B),
       runView(RUN_OTHER),
+      // A3: a chat proposal's attempt that failed (its retry is the path, never a cursor resume).
+      { ...runView('bound-failed'), session: { ...runView('bound-failed').session, status: 'failed' } },
     ],
     workOutput: async () => 'Coverage moved.',
     runEvents: async () => [],
@@ -94,6 +96,16 @@ describe('chat proposals (server, A2)', () => {
     mkdirSync(home);
     mkdirSync(join(scratch, 'repo-crew'));
     setCrewStateHome(home);
+    // A3: two chat-made documents' bindings, as a previous daemon left them: one attempt failed, one launched and not
+    // yet landed (its run is not on this engine: the boot reconcile leaves it to the card's Go again).
+    const bindings = join(home, 'chats', 'doc-bindings');
+    mkdirSync(bindings, { recursive: true });
+    const bind = (doc: string, attempt: Record<string, unknown>) => writeFileSync(join(bindings, `_unfiled__${doc}.json`), JSON.stringify({
+      ref: `_unfiled/${doc}`, mount: '_unfiled', doc, projectId: null, owner: 'local', chatId: 'gone-chat', chatInstance: 'i0', scopeProject: null,
+      proposalId: 'gone-chat:t1', cutoffTurnId: 't1', repos: [], graphDb: null, packet: {}, tokens: {}, attempts: [{ pid: 'gone-chat:t1', base: 0, at: 1, ...attempt }], createdAt: 1,
+    }));
+    bind('failed-doc', { runId: 'bound-failed', launchedAt: 2, outcome: { kind: 'failed', reason: 'the run failed', at: 3 }, published: true });
+    bind('drafting-doc', { runId: 'bound-drafting', launchedAt: 2 });
     const tokens = join(scratch, 'tokens.json');
     writeFileSync(tokens, JSON.stringify({
       tokens: [
@@ -171,11 +183,25 @@ describe('chat proposals (server, A2)', () => {
     return (sent.json() as { turnId: string }).turnId;
   };
 
+  it('A3: a chat proposal\'s failed run is never resumed from its cursor, and a document still being drafted is not retired', async () => {
+    const resume = await stub.inject({ method: 'POST', url: '/api/v1/runs/bound-failed/resume' });
+    expect(resume.statusCode).toBe(409);
+    expect(resume.json()).toMatchObject({ recovery: 'retry', error: expect.stringMatching(/Try again/) });
+    const del = await stub.inject({ method: 'DELETE', url: '/api/v1/projects/default/interactive/docs/drafting-doc' });
+    expect(del.statusCode).toBe(409);
+    expect(del.json()).toMatchObject({ code: 'document_busy', document_id: 'drafting-doc' });
+    // The failed attempt's run record is published at boot (its audit entry was missing): the DTO says why it failed.
+    const runs = (await stub.inject({ method: 'GET', url: '/api/v1/runs' })).json() as { runs: Array<{ session: { id: string; landing_failed?: { reason: string } } }> };
+    expect(runs.runs.find((r) => r.session.id === 'bound-failed')?.session.landing_failed?.reason).toBe('the run failed');
+  });
+
   it('advertises proposals, and in the test configuration every operation with the stub', async () => {
+    // A route set with no draft seam (no `launchBoundDraft`): `create` has no real launcher, so production keeps it off
+    // and the test configuration stubs it with the rest (A3: `stubOps` names the stubbed kinds).
     expect(((await prod.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse).capabilities?.chatArtifacts)
       .toEqual({ context: true, proposals: true, create: false, refine: false, theme: false, demo: false });
     expect(((await stub.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse).capabilities?.chatArtifacts)
-      .toEqual({ context: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true });
+      .toEqual({ context: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps: ['create', 'refine', 'theme', 'demo'] });
   });
 
   it('production: the seat is told nothing about making, and a block is cut from the reply but makes no card', async () => {

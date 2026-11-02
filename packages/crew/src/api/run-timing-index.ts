@@ -74,6 +74,10 @@ export class RunTimingIndex {
   private readonly autoCaptureOffRuns = new Set<string>();
   /** crew#762: the RESOLVED delivery decision the launch recorded (`detail.deliver`). */
   private readonly runToLaunchDeliver = new Map<string, 'pr' | 'none'>();
+  /** DES-CHAT-ARTIFACTS-001 (A3): the proposal a run answers and the artifact it makes (`detail.proposalId`/`artifactRef`). */
+  private readonly runToProposal = new Map<string, { proposalId: string; artifactRef: string }>();
+  /** A3 (§6.2): a proposal-bound attempt that ended without landing (`run.landing_failed`). */
+  private readonly runToLandingFailed = new Map<string, { reason: string; at: number }>();
 
   /**
    * Consume pre-read `run.launched` entries — the seam that lets `createServer` feed this index
@@ -114,8 +118,38 @@ export class RunTimingIndex {
       if (typeof cw === 'string' && cw.length > 0) this.runToChatWorkflow.set(runId, cw);
       const deliver = detail?.['deliver'];
       if (deliver === 'pr' || deliver === 'none') this.runToLaunchDeliver.set(runId, deliver);
+      this.noteProposal(runId, detail);
       this.noteChain(runId, detail);
     }
+  }
+
+  /** A3: a launch entry's proposal facts (`proposalId`, `artifactRef`), both or neither. */
+  noteProposal(runId: string, detail: Record<string, unknown> | undefined): void {
+    const pid = detail?.['proposalId'];
+    const ref = detail?.['artifactRef'];
+    if (typeof pid === 'string' && pid !== '' && typeof ref === 'string' && ref !== '') this.runToProposal.set(runId, { proposalId: pid, artifactRef: ref });
+  }
+
+  /** A3: the proposal a run answers and the artifact it makes, or `undefined`. */
+  proposalOf(runId: string): { proposalId: string; artifactRef: string } | undefined {
+    return this.runToProposal.get(runId);
+  }
+
+  /** A3: the `run.landing_failed` entries (newest first: the oldest, i.e. the first recorded, wins). */
+  hydrateLandingFailed(entries: AuditEntry[]): void {
+    for (const entry of entries) {
+      const reason = (entry.detail as Record<string, unknown> | undefined)?.['reason'];
+      if (typeof entry.runId !== 'string' || typeof reason !== 'string' || typeof entry.ts !== 'number') continue;
+      this.runToLandingFailed.set(entry.runId, { reason, at: entry.ts });
+    }
+  }
+
+  setLandingFailed(runId: string, reason: string, at: number): void {
+    if (!this.runToLandingFailed.has(runId)) this.runToLandingFailed.set(runId, { reason, at });
+  }
+
+  landingFailedOf(runId: string): { reason: string; at: number } | undefined {
+    return this.runToLandingFailed.get(runId);
   }
 
   /**
@@ -398,6 +432,8 @@ export function recordRunLaunched(
   }
   // crew#552: the chain facts, live — the same fields a restart rehydrates.
   runTimingIndex?.noteChain(runId, detail);
+  // A3: the proposal facts, live — the same fields a restart rehydrates.
+  runTimingIndex?.noteProposal(runId, detail);
   // crew#762: the launch's delivery decision, live — the same field a restart rehydrates.
   const deliver = detail['deliver'];
   if ((deliver === 'pr' || deliver === 'none') && runTimingIndex !== undefined) {

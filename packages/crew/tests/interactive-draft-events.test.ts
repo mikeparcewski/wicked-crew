@@ -42,8 +42,12 @@ import {
   isAnotherProjectsDraftKey,
   STUDIO_SCRATCH_DOC_BRIEF_PREFIX,
   STUDIO_SCRATCH_DOC_NAME,
+  VERSION_CREATED,
+  type BoundDraft,
 } from '../src/interactive/draft-events.js';
 import { DocGroundingStore } from '../src/interactive/doc-grounding.js';
+import { DocBindingStore } from '../src/interactive/doc-binding.js';
+import { buildSourcePacket } from '../src/interactive/source-packet.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, LaunchRunInput, WorkflowDef } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
@@ -357,9 +361,10 @@ describe('bus identity constants', () => {
     expect(INTERACTIVE_PRODUCER).toBe('wi-crew');
   });
 
-  it('derives a deterministic idempotency key per document', () => {
-    expect(draftIdempotencyKey('my-doc')).toBe('crew:interactive.draft:my-doc:v1');
-    expect(draftIdempotencyKey('my-doc')).toBe(draftIdempotencyKey('my-doc'));
+  it('derives a deterministic idempotency key per attempt (document + run): a retry announces under its own key (A3)', () => {
+    expect(draftIdempotencyKey('my-doc', undefined, 'run-1')).toBe('crew:interactive.draft:my-doc:run-1');
+    expect(draftIdempotencyKey('my-doc', undefined, 'run-1')).toBe(draftIdempotencyKey('my-doc', undefined, 'run-1'));
+    expect(draftIdempotencyKey('my-doc', undefined, 'run-2')).not.toBe(draftIdempotencyKey('my-doc', undefined, 'run-1'));
   });
 });
 
@@ -706,7 +711,8 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect((draft.payload as { html_path?: string }).html_path).toBe(outPath);
     expect((draft.payload as { document_id?: string }).document_id).toBe('spike-doc');
     expect(draft.producer_id).toBe(INTERACTIVE_PRODUCER);
-    expect(draft.idempotency_key).toBe(draftIdempotencyKey('spike-doc', 'proj-7'));
+    expect(draft.idempotency_key).toBe(draftIdempotencyKey('spike-doc', 'proj-7', launch.sessionId));
+    expect((draft.payload as { run_id?: string }).run_id).toBe(launch.sessionId);
 
     // …and closes out with a complete status.
     await waitFor(() =>
@@ -827,7 +833,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     await waitFor(() => probeEvents.filter((e) => e.event_type === DRAFT_COMPLETED).length === 2, 8000);
     const announces = probeEvents.filter((e) => e.event_type === DRAFT_COMPLETED);
     expect(announces.map((e) => e.idempotency_key).sort()).toEqual(
-      [draftIdempotencyKey('welcome-page', 'proj-a'), draftIdempotencyKey('welcome-page', 'proj-b')].sort(),
+      [draftIdempotencyKey('welcome-page', 'proj-a', a.sessionId), draftIdempotencyKey('welcome-page', 'proj-b', b.sessionId)].sort(),
     );
     expect(announces.map((e) => (e.payload as { project_id?: string }).project_id).sort()).toEqual(['proj-a', 'proj-b']);
     await waitFor(() => sub!.ledger.get(draftHandoffKey('welcome-page', 'proj-b'))?.emittedAt !== undefined);
@@ -851,8 +857,8 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect(draftHandoffKey('my-doc')).toBe('my-doc');
     expect(draftHandoffKey('my-doc', 'default')).toBe('my-doc'); // the mount alias is not a project
     expect(draftHandoffKey('my-doc', 'proj-7')).toBe('my-doc:draft:p-proj-7');
-    expect(draftIdempotencyKey('my-doc')).toBe('crew:interactive.draft:my-doc:v1');
-    expect(draftIdempotencyKey('my-doc', 'proj-7')).toBe('crew:interactive.draft:my-doc:p-proj-7:v1');
+    expect(draftIdempotencyKey('my-doc', undefined, 'r1')).toBe('crew:interactive.draft:my-doc:r1');
+    expect(draftIdempotencyKey('my-doc', 'proj-7', 'r1')).toBe('crew:interactive.draft:my-doc:p-proj-7:r1');
   });
 
   it("studio's brand-learn scratch document launches NO draft run — it is a theme-learning pad, not a request (crew#811)", async () => {
@@ -1628,7 +1634,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     const draft = probeEvents.find((e) => e.event_type === DRAFT_COMPLETED)!;
     expect((draft.payload as { html_path?: string }).html_path).toBe(inboxPath);
     expect(readFileSync(inboxPath, 'utf8')).toContain('grounded draft');
-    expect(draft.idempotency_key).toBe(draftIdempotencyKey('repo-doc', 'proj-repo'));
+    expect(draft.idempotency_key).toBe(draftIdempotencyKey('repo-doc', 'proj-repo', engine.launches[0]!.sessionId));
     expect(sub!.ledger.get(keyOf('repo-doc'))?.emittedAt).toBeTruthy();
     // The launch-scoped snapshot did not outlive its run.
     expect(existsSync(join(draftDir, 'repo-doc', 'repos'))).toBe(false);
@@ -2061,7 +2067,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     const draft = probeEvents.find((e) => e.event_type === DRAFT_COMPLETED)!;
     expect((draft.payload as { document_id?: string }).document_id).toBe('unfiled-doc');
     expect((draft.payload as { html_path?: string }).html_path).toBe(outPath);
-    expect(draft.idempotency_key).toBe(draftIdempotencyKey('unfiled-doc'));
+    expect(draft.idempotency_key).toBe(draftIdempotencyKey('unfiled-doc', undefined, launch.sessionId));
     expect(sub!.ledger.get('unfiled-doc')?.emittedAt).toBeTruthy();
     expect(filed).toHaveLength(0); // an unfiled run is never reported as filed
   });
@@ -2138,5 +2144,198 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect('projectId' in launch).toBe(projectId !== undefined);
     await waitFor(() => launched.length === 1);
     expect(launched[0]![1]).toMatchObject({ channel: 'studio' });
+  });
+
+  // ── DES-CHAT-ARTIFACTS-001 §5.2-§6.2 (A3): a proposal-bound draft ──────────────────────────────────────────────────
+
+  async function boundWorld(doc: string): Promise<{ bindings: DocBindingStore; spec: BoundDraft; repoRoot: string }> {
+    const repoRoot = seedRepoFixture(`repo-${doc}`);
+    const bindings = new DocBindingStore(join(dir, 'bindings'));
+    const ref = `_unfiled/${doc}`;
+    bindings.begin(
+      { ref, mount: '_unfiled', doc, projectId: null, owner: 'maria', chatId: 'c1', chatInstance: 'i1', scopeProject: null, proposalId: 'c1:t2', cutoffTurnId: 't2', repos: [{ id: 'repo-crew', name: 'wicked-crew', rootPath: repoRoot }], graphDb: '/graphs/chat.db' },
+      { pid: 'c1:t2', runId: `run-${doc}`, base: 0 },
+    );
+    const view = { session: { id: 'run-src', status: 'completed', problem: 'x', workflow_id: 'wf', repo_ref: null }, units: [] } as never;
+    const packet = await buildSourcePacket(
+      {
+        runId: `run-${doc}`, chatId: 'c1', pid: 'c1:t2', cutoffTurnId: 't2',
+        resolution: {
+          pid: 'c1:t2', chatId: 'c1', turnId: 't2', kind: 'create', seat: 'claude',
+          what: { entry: 'document-static', title: 'Release note', label: 'Document · Release note', outcome: null },
+          brief: 'a release note', reason: null, sources: [{ token: 'run:run-src', label: 'run', status: 'ok', projectId: null }],
+          repos: ['wicked-crew'], repoRefs: ['repo-crew'], helpers: { seats: ['claude', 'codex'], label: '' }, time: null, stops: null,
+          filedIn: { projectId: null, label: 'Not in a project · this chat' }, blocked: null,
+        },
+        records: [],
+      },
+      { runs: async () => [view], brief: async () => ({ runId: 'run-src', status: 'completed', title: 't', markdown: 'Coverage: 80%', sha256: 'f'.repeat(64) }), docsRoot: async () => null, attachment: () => null },
+    );
+    const spec: BoundDraft = {
+      documentId: doc, brief: 'a release note', style: 'doc', runId: `run-${doc}`, chatId: 'c1', proposalId: 'c1:t2', artifactRef: ref,
+      repos: [{ repoRef: 'repo-crew', name: 'wicked-crew', rootPath: repoRoot }], graphDb: '/graphs/chat.db',
+      clisJson: '[{"key":"claude"},{"key":"codex"}]', packet, base: 0,
+    };
+    return { bindings, spec, repoRoot };
+  }
+
+  it('A3: a proposal-bound draft launches with the DERIVED run id, its packet in the inbox and the hashes in the task, grounded on the chat\'s repo though Unfiled, filed under the chat', async () => {
+    const { bindings, spec, repoRoot } = await boundWorld('bound-note');
+    const engine = fakeAdapter({ repos: [{ id: 'repo-crew', root_path: repoRoot }] });
+    const draftDir = join(dir, 'drafts');
+    const launched: Array<[string, Record<string, unknown>]> = [];
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb, pollIntervalMs: 25, heartbeatMs: 60_000, ledgerPath: join(dir, 'ledger.json'), draftDir, clisJson: SEATS,
+      bindings, onRunLaunched: (id, d) => launched.push([id, d]), log: () => {},
+    });
+    subs.push(sub!);
+    // An earlier attempt's folder (its deliverable, its packet) is gone before this attempt starts; a folder that is no
+    // attempt of THIS document's (a same-named document elsewhere) stays.
+    bindings.begin({ ref: '_unfiled/bound-note', mount: '_unfiled', doc: 'bound-note', projectId: null, owner: 'maria', chatId: 'c1', chatInstance: 'i1', scopeProject: null, proposalId: 'c1:t2', cutoffTurnId: 't2', repos: [], graphDb: null }, { pid: 'c1:retry:x', runId: 'old-run', base: 0 });
+    mkdirSync(join(draftDir, 'bound-note', 'attempt-old-run'), { recursive: true });
+    writeFileSync(join(draftDir, 'bound-note', 'attempt-old-run', 'bound-note-v1.html'), '<html>old attempt</html>');
+    mkdirSync(join(draftDir, 'bound-note', 'attempt-elsewhere'), { recursive: true });
+    await sub!.launchBound(spec);
+    expect(engine.launches).toHaveLength(1);
+    const launch = engine.launches[0]!;
+    expect(launch.sessionId).toBe('run-bound-note');
+    expect(launch.clisJson).toBe(spec.clisJson);
+    expect(launch.projectGraph).toEqual({ dbPath: '/graphs/chat.db' });
+    expect('projectId' in launch).toBe(false); // Unfiled
+    expect(existsSync(join(draftDir, 'bound-note', 'attempt-old-run'))).toBe(false);
+    expect(existsSync(join(draftDir, 'bound-note', 'attempt-elsewhere'))).toBe(true);
+    expect(existsSync(join(draftDir, 'bound-note', 'repos'))).toBe(true); // the chat's repository, snapshotted
+    const att = join(draftDir, 'bound-note', 'attempt-run-bound-note');
+    for (const f of spec.packet.files) {
+      const dir = f.name.startsWith('run-') ? 'records' : 'sources';
+      expect(readFileSync(join(att, dir, f.name)).equals(f.bytes)).toBe(true);
+      expect(launch.problem).toContain(`${dir}/${f.name}=${f.sha256}`);
+    }
+    // The deliverable is the attempt's own; the write root stays the document's folder (studio binds a run by it).
+    expect(launch.requireDeliverables).toEqual([join(att, 'bound-note-v1.html')]);
+    expect(launch.extraWriteRoots).toEqual([join(draftDir, 'bound-note')]);
+    // records/ is a claims source for the self-check (figures cite the run briefs), never sources/.
+    expect(launch.problem).toContain(`--repo ${join(att, 'records')}`);
+    expect(launch.problem).not.toContain(`--repo ${join(att, 'sources')}`);
+    expect(launch.problem).toContain('THE SOURCE PACKET');
+    expect(launch.problem).toContain('wicked-crew');
+    expect(launch.problem).not.toContain('\n');
+    expect(launched[0]).toEqual(['run-bound-note', expect.objectContaining({ chatId: 'c1', proposalId: 'c1:t2', artifactRef: '_unfiled/bound-note', deliver: 'none' })]);
+    expect(sub!.ledger.get('bound-note:attempt:_unfiled:run-bound-note')?.runId).toBe('run-bound-note');
+    // A launched attempt keeps the document busy for every seam that serializes on the in-flight list.
+    expect(sub!.inFlightDocs()).toContain('bound-note');
+    expect(bindings.get('_unfiled/bound-note')?.attempts[0]?.launchedAt).toBeDefined();
+    // The same document cannot get a second live draft.
+    await expect(sub!.launchBound({ ...spec, runId: 'run-other' })).rejects.toThrow(/already running/);
+  });
+
+  it('A3: an attempt the engine refused can be tried again with the same run id (Go again): a fresh folder, one launch', async () => {
+    const { bindings, spec, repoRoot } = await boundWorld('retry-note');
+    const engine = fakeAdapter({ repos: [{ id: 'repo-crew', root_path: repoRoot }] });
+    const adapter = engine.asAdapter();
+    const inner = adapter.launchRun.bind(adapter);
+    let refuse = 1;
+    (adapter as unknown as { launchRun: unknown }).launchRun = async (input: LaunchRunInput) => {
+      if (refuse > 0) {
+        refuse -= 1;
+        throw new Error('the engine is restarting');
+      }
+      return inner(input);
+    };
+    const sub = await startInteractiveDraftSubscriber(adapter, {
+      dbPath: busDb, pollIntervalMs: 25, heartbeatMs: 60_000, ledgerPath: join(dir, 'ledger-retry.json'), draftDir: join(dir, 'drafts'), clisJson: SEATS, bindings, log: () => {},
+    });
+    subs.push(sub!);
+    await expect(sub!.launchBound(spec)).rejects.toThrow(/restarting/);
+    expect(bindings.get('_unfiled/retry-note')?.attempts[0]?.launchingAt).toBeUndefined();
+    await sub!.launchBound(spec);
+    expect(engine.launches.map((l) => l.sessionId)).toEqual(['run-retry-note']);
+  });
+
+  it("A3: a bound document's doc.created is handed to its proposal's launcher, never answered with a random-id launch", async () => {
+    const bus = await import('wicked-bus');
+    const { bindings } = await boundWorld('trigger-note');
+    const engine = fakeAdapter();
+    const handed: string[] = [];
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb, pollIntervalMs: 25, heartbeatMs: 60_000, ledgerPath: join(dir, 'ledger.json'), draftDir: join(dir, 'drafts'), clisJson: SEATS,
+      bindings, onBoundDocCreated: async (ref) => { handed.push(ref); }, log: () => {},
+    });
+    subs.push(sub!);
+    await emitDocCreated(bus, 'trigger-note');
+    await waitFor(() => handed.length === 1);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(handed).toEqual(['_unfiled/trigger-note']);
+    expect(engine.launches).toHaveLength(0);
+  });
+
+  it('A3: a bound attempt ends on its LANDING (version.created after the announce), and a failure or a changed packet records landing_failed', async () => {
+    const bus = await import('wicked-bus');
+    armProbe(bus);
+    const draftDir = join(dir, 'drafts');
+    const outcomes: Array<[string, string, string]> = [];
+    const make = async (doc: string) => {
+      const w = await boundWorld(doc);
+      const engine = fakeAdapter({ repos: [{ id: 'repo-crew', root_path: w.repoRoot }] });
+      const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+        dbPath: busDb, pollIntervalMs: 25, heartbeatMs: 60_000, ledgerPath: join(dir, `ledger-${doc}.json`), draftDir, clisJson: SEATS,
+        bindings: w.bindings, onBoundOutcome: (ref, runId, o) => outcomes.push([ref, runId, o.kind === 'landed' ? `landed v${o.version}` : o.reason]),
+        draftFloorIo: { gardenRoot: () => null }, log: () => {},
+      });
+      subs.push(sub!);
+      await sub!.launchBound(w.spec);
+      return { ...w, engine, sub: sub! };
+    };
+    // 1. Landed: the run completes, crew announces with the run id, interactive lands v1.
+    const a = await make('land-note');
+    writeFileSync(join(draftDir, 'land-note', 'attempt-run-land-note', 'land-note-v1.html'), '<html><body><h1>Release note</h1><p>Coverage reached 80%.</p></body></html>');
+    a.engine.fire({ type: 'sessionCompleted', session: 'run-land-note' });
+    // A redelivered terminal frame while it finalizes is not an orphan's: no false "interrupted" outcome.
+    a.engine.fire({ type: 'sessionCompleted', session: 'run-land-note' });
+    await waitFor(() => a.bindings.get('_unfiled/land-note')?.attempts[0]?.emittedAt !== undefined, 8000);
+    expect(outcomes).toEqual([]); // announced is not landed
+    expect(a.sub.inFlightDocs()).toContain('land-note'); // and the document stays busy until it lands
+    await waitFor(() => probeEvents.some((e) => e.event_type === DRAFT_COMPLETED && (e.payload as { document_id?: string }).document_id === 'land-note'), 8000);
+    expect(probeEvents.find((e) => e.event_type === DRAFT_COMPLETED && (e.payload as { document_id?: string }).document_id === 'land-note')!.payload).toMatchObject({ run_id: 'run-land-note', expect_head: 0 });
+    // A version from before the announce (a delayed event) or not past the base does not settle it.
+    const db0 = bus.openDb({ db_path: busDb });
+    bus.emit(db0, bus.loadConfig({ db_path: busDb }), { event_type: VERSION_CREATED, domain: 'wicked-interactive', subdomain: 'versions', payload: { document_id: 'land-note', version: 0, parent: 0, kind: 'generated', ts: new Date().toISOString() }, producer_id: 'wi-service' });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(outcomes).toEqual([]);
+    const db = bus.openDb({ db_path: busDb });
+    bus.emit(db, bus.loadConfig({ db_path: busDb }), { event_type: VERSION_CREATED, domain: 'wicked-interactive', subdomain: 'versions', payload: { document_id: 'land-note', version: 1, parent: 0, kind: 'generated', ts: new Date().toISOString() }, producer_id: 'wi-service' });
+    await waitFor(() => outcomes.length === 1, 8000);
+    expect(outcomes[0]).toEqual(['_unfiled/land-note', 'run-land-note', 'landed v1']);
+    // The bound row of the handoff ledger is the one that says it was announced.
+    expect(a.sub.ledger.get('land-note:attempt:_unfiled:run-land-note')?.emittedAt).toBeDefined();
+    // 2. A stopped run: released with the reason.
+    const b = await make('stop-note');
+    b.engine.fire({ type: 'runCancelled', session: 'run-stop-note' });
+    await waitFor(() => outcomes.length === 2);
+    expect(outcomes[1]).toEqual(['_unfiled/stop-note', 'run-stop-note', 'the run was stopped']);
+    // 3. A source file changed during the run: nothing lands.
+    const c = await make('tamper-note');
+    writeFileSync(join(draftDir, 'tamper-note', 'attempt-run-tamper-note', 'tamper-note-v1.html'), '<html><body><p>ok</p></body></html>');
+    const victim = c.spec.packet.files.find((f) => f.name.startsWith('run-'))!.name;
+    writeFileSync(join(draftDir, 'tamper-note', 'attempt-run-tamper-note', 'records', victim), 'Coverage: 99%');
+    c.engine.fire({ type: 'sessionCompleted', session: 'run-tamper-note' });
+    await waitFor(() => outcomes.length === 3, 8000);
+    expect(outcomes[2]).toEqual(['_unfiled/tamper-note', 'run-tamper-note', `the source packet changed during the run (${victim})`]);
+    expect(c.bindings.get('_unfiled/tamper-note')?.attempts[0]?.emittedAt).toBeUndefined();
+    // 4. A bound run this process holds no flight for (a restart lost it) still ends its attempt when it terminates.
+    const d = await boundWorld('lost-note');
+    d.bindings.markLaunched('_unfiled/lost-note', 'run-lost-note');
+    const engine = fakeAdapter();
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb, pollIntervalMs: 25, heartbeatMs: 60_000, ledgerPath: join(dir, 'ledger-lost.json'), draftDir, clisJson: SEATS,
+      bindings: d.bindings, onBoundOutcome: (ref, runId, o) => outcomes.push([ref, runId, o.kind === 'landed' ? `landed v${o.version}` : o.reason]), log: () => {},
+    });
+    subs.push(sub!);
+    expect(sub!.inFlightDocs()).toContain('lost-note');
+    engine.fire({ type: 'runCancelled', session: 'run-lost-note' });
+    await waitFor(() => outcomes.length === 4);
+    expect(outcomes[3]).toEqual(['_unfiled/lost-note', 'run-lost-note', 'interrupted by a restart']);
+    expect(engine.launches).toHaveLength(0); // never relaunched
+    expect(sub!.inFlightDocs()).not.toContain('lost-note');
   });
 });

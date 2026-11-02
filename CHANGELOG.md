@@ -10,6 +10,49 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+
+- **Make it creates a grounded document from the chat, filed under the chat, exactly once (api-types 0.171.0,
+  DES-CHAT-ARTIFACTS-001 slice A3).** `create` is now a real operation: production advertises it whenever the draft
+  seam is armed, and Go on a document proposal makes one document and one run. Go records the document's durable
+  binding (owner, chat, repositories, graph, attempts) under the state home's `chats/` before anything starts, creates
+  the document by its derived name only if it is missing (crew itself, through the proxy's create path with
+  `chat_id` + `proposal_id`), and launches the draft with the run id derived from the proposal as its `sessionId`. The
+  document's own `doc.created` never launches anything (it only settles a proposal whose run Go already started), so
+  only a person's Go or Go again starts a run; a double click, a lost response, two tabs, a crash between launch and
+  record and a crash between create and draft launch each end with one document and one run.
+  - **The draft gets what the chat had.** A source packet in the attempt's own folder: `sources/` holds the request's
+    brief (scope only, never a source of figures), the conversation (the person's words labelled; agent answers
+    labelled "may be wrong", each with the run briefs its turn was given, recovered by their recorded hash when the
+    chat still has them, else crew's current brief, said so), named answers and a per-run manifest of what was used
+    and what was struck; `records/` holds what a figure may come from (run briefs named by content, source documents,
+    attachments) and is a claims source for the document floor (from crew's own copy of the verified files), so a figure
+    cites its record by name and line (`data-source="<file>:<line>"`). A source
+    joins whole or not at all, within 1 MB with room kept for the brief and the manifest. Names are immutable and kept
+    in crew's state; each attempt gets a fresh copy (an earlier attempt's folder is removed first). The task gives the
+    reviewing step the sha256 of every file; crew checks the copy again, bounded by each file's size, before anything
+    lands, and a changed file fails the landing.
+  - **A chat-made document is grounded on the chat's repositories, filed or Unfiled.** The proxy lifts
+    `unfiled_doc_repo` only for a create whose `chat_id` + `proposal_id` match an accepted record of the caller's that
+    names this document, this mount and every repository; a bare `chat_id` is refused (`proposal_grant_refused`).
+  - **Busy until it lands, and Try again into the same document.** The chat and the document stay busy until the
+    attempt's outcome is recorded (interactive's `version.created` after crew's announce), not just until the engine
+    run ends. Any terminal failure (a failed or stopped run, no draft file, the document floor, a changed source file,
+    a restart) records `landing_failed` on the run (DTO, `/ws` `landingFailed`, audit `run.landing_failed`) and
+    appends a retry proposal `<chatId>:retry:<runId>` that fills the same document with a new run id. At daemon start,
+    proposal-bound attempts are reconciled before the boot resume sweep (which now skips them): a live run is
+    cancelled to a confirmed terminal state and offered as a retry, never redispatched.
+  - `run.launched` and the run DTO carry `proposal_id` and `artifact_ref` (recorded again at boot if a crash lost
+    them); the draft announce carries `run_id` and, for a proposal's attempt, `expect_head` (interactive's I1 contract
+    lands nothing on a moved head), and its bus idempotency key includes the run id (a per-document key would have
+    dropped a retry's landing). A proposal-bound document is busy for every seam until its attempt's outcome is
+    recorded, and a failure's publication (the run's `landing_failed`, the retry card) is redone at boot if a crash cut
+    it short. A chat id reused by another chat never gets a retry card meant for the first.
+  - Change something on a create takes `repos` and, in a chat filed in no project, `project` (sources, repositories and
+    the conversation are re-checked against the target project and struck when outside it). The test configuration
+    keeps the recording stub only for refine, theme and demo (`capabilities.chatArtifacts.stubOps`).
+
+
 ### Fixed
 
 - **An editor plugin's frame can no longer use WebRTC.** A bundle's policy blocks fetch, XHR, WebSocket and beacons

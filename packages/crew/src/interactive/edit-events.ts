@@ -264,6 +264,8 @@ export function collectEditResults(items: HandoffFileItem[]): EditCollection {
 export interface InteractiveEditOptions {
   /** The bus db the daemon handed its engine (core/bus.ts); without one the seam does not arm. */
   dbPath?: string;
+  /** A3: a document another seam holds (a chat proposal's draft until it lands): no structural edit launches on it. */
+  isDocBusy?: (documentId: string, projectId: string | undefined) => boolean;
   /** Poll cadence, ms (default 2000; tests shorten it). */
   pollIntervalMs?: number;
   /** Heartbeat narration cadence while a run is in flight, ms (default 15000 — inside the
@@ -717,6 +719,18 @@ export async function startInteractiveEditSubscriber(
     }
 
     const key = handoffKey(handoff.documentId, handoff.version);
+
+    // DES-CHAT-ARTIFACTS-001 (A3): a document a chat proposal is still drafting (or landing) takes no structural edit:
+    // the two would work on competing heads. Refused with a status, never queued; a later batch launches normally.
+    if (opts.isDocBusy?.(handoff.documentId, handoff.projectId) === true) {
+      log(`[interactive-edit] handoff ${key}: the document is being drafted by a chat proposal — refused`);
+      emitStatus({
+        ...docScope(handoff.documentId, handoff.projectId),
+        state: 'error',
+        message: 'This document is still being drafted. Wait for the draft to land, then send your changes again.',
+      });
+      return;
+    }
 
     // Replay-dedup: the ledger is the durable gate (redelivery after crash/restart), the
     // in-flight scan the live one (redelivery inside a single process lifetime). Keyed by
