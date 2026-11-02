@@ -136,7 +136,23 @@ export interface InteractiveProxyDeps {
   /** The current council roster — when supplied, a doc/demo create body with a `clisJson` that
    *  names a seat not in the roster is refused 400 before the bridge sees the request (#631). */
   roster?: () => unknown[];
+  /** DES-CHAT-ARTIFACTS-001 §5.2 (A3): the accepted proposal a create's `chat_id` + `proposal_id` names, for this actor.
+   *  Absent = every `chat_id` / `proposal_id` is refused. */
+  proposalGrant?: (chatId: string, proposalId: string, actorId: string) => ProposalGrant | null;
+  /** The caller's actor id (the route's `actorOf`); absent = the local person. */
+  actorOf?: (req: FastifyRequest) => string;
   log?: (msg: string) => void;
+}
+
+/**
+ * What an accepted proposal lets ONE create do (A3): make the document its identity derived (`doc`, in the mount whose
+ * route project is `projectId`), grounded on the repositories its stored resolution lists, filed or Unfiled.
+ */
+export interface ProposalGrant {
+  doc: string;
+  /** The route's project id (`default` for Unfiled). */
+  projectId: string;
+  repos: ReadonlyArray<{ id: string; name: string }>;
 }
 
 /** The create body as `prepareDocCreate` reads it — the published `InteractiveDocCreateRequest`
@@ -147,7 +163,7 @@ export type DocCreateBody = InteractiveDocCreateRequest;
  *  wire: crew-api-types `InteractiveDocCreateRefusal`. */
 export interface DocCreateRefusal {
   error: string;
-  code: 'repo_not_in_project' | 'unfiled_doc_repo' | 'invalid_repo_ref' | 'ambiguous_repo_ref' | 'project_mismatch';
+  code: 'repo_not_in_project' | 'unfiled_doc_repo' | 'invalid_repo_ref' | 'ambiguous_repo_ref' | 'project_mismatch' | 'proposal_grant_refused';
   requested: string[];
   missing?: string[];
   /** `ambiguous_repo_ref`: the refs that name several repos, each with its candidates. */
@@ -190,6 +206,8 @@ export interface PreparedCreate {
   normalized?: DocCreateBody;
   /** Recorded under the doc name the bridge answers with, when the request named repositories. */
   binding?: { projectId: string; repoRefs: string[]; style?: string | undefined; clisJson?: string | undefined; channel?: 'studio' | 'cli' | 'api' | undefined; actor?: string | undefined };
+  /** A3: the accepted proposal this create answers (checked through its record); never forwarded to the bridge. */
+  proposal?: { chatId: string; proposalId: string };
   refusal?: DocCreateRefusal;
 }
 
@@ -309,6 +327,8 @@ export async function prepareDocCreate(
   adapter: CoreAdapter,
   projectId: string,
   log?: (msg: string) => void,
+  /** A3: the accepted proposal a `chat_id` + `proposal_id` names, for the caller. Absent = refuse them. */
+  grantFor?: (chatId: string, proposalId: string) => ProposalGrant | null,
 ): Promise<PreparedCreate> {
   const passthrough: PreparedCreate = { body: raw, contentType: contentType ?? 'application/json' };
   let parsed: unknown;
@@ -365,6 +385,36 @@ export async function prepareDocCreate(
   const refs = parseRepoRefs(body);
   if (!refs.ok) {
     return { ...passthrough, refusal: { error: refs.error, code: 'invalid_repo_ref', requested: refs.requested } };
+  }
+  // DES-CHAT-ARTIFACTS-001 §5.2 (A3): a create from a chat's proposal. `chat_id` counts ONLY with `proposal_id`, and only
+  // through a matching accepted record of the caller's: its identity names this document in this mount, and its stored
+  // resolution lists every repository named. Only then is the Unfiled rule (`unfiled_doc_repo`) lifted, and the
+  // repositories resolve against the record (the chat's scope), not the project's members. A bare `chat_id` grants
+  // nothing: it is refused, never ignored.
+  const chatIdRaw = body['chat_id'];
+  const proposalIdRaw = body['proposal_id'];
+  let grant: ProposalGrant | null = null;
+  if (chatIdRaw !== undefined || proposalIdRaw !== undefined) {
+    const refuse = (why: string): PreparedCreate => ({
+      ...passthrough,
+      refusal: { error: `${why} Nothing was created.`, code: 'proposal_grant_refused', requested: refs.refs },
+    });
+    if (typeof chatIdRaw !== 'string' || typeof proposalIdRaw !== 'string' || chatIdRaw === '' || proposalIdRaw === '') {
+      return refuse('a create names a chat only together with the accepted proposal it answers (`chat_id` and `proposal_id`, both strings).');
+    }
+    grant = grantFor?.(chatIdRaw, proposalIdRaw) ?? null;
+    if (grant === null) return refuse(`chat ${chatIdRaw.slice(0, 80)} holds no accepted proposal ${proposalIdRaw.slice(0, 160)} of yours.`);
+    const name = typeof body['name'] === 'string' ? body['name'] : '';
+    if (grant.projectId !== projectId || name !== grant.doc) {
+      return refuse(`proposal ${proposalIdRaw.slice(0, 160)} makes ${grant.doc} in ${grant.projectId === DEFAULT_PROJECT_ID ? 'Unfiled' : grant.projectId}, not ${name === '' ? 'an unnamed document' : name.slice(0, 64)} in ${projectId === DEFAULT_PROJECT_ID ? 'Unfiled' : projectId}.`);
+    }
+    const repoRefs: string[] = [];
+    for (const ref of refs.refs) {
+      const hits = grant.repos.filter((r) => r.id === ref || r.name === ref);
+      if (hits.length !== 1) return refuse(`repository "${ref.slice(0, 120)}" is not ${hits.length === 0 ? 'one the accepted proposal lists' : 'named uniquely by the accepted proposal (name it by id)'}.`);
+      if (!repoRefs.includes(hits[0]!.id)) repoRefs.push(hits[0]!.id);
+    }
+    return finishPrepare(body, projectId, repoRefs, log, { chatId: chatIdRaw, proposalId: proposalIdRaw });
   }
   const repoRefs: string[] = [];
   if (refs.refs.length > 0) {
@@ -428,6 +478,17 @@ export async function prepareDocCreate(
       };
     }
   }
+  return finishPrepare(body, projectId, repoRefs, log, null);
+}
+
+/** The rest of a create, once its repositories are settled (shared by the plain path and a proposal's). */
+function finishPrepare(
+  body: Record<string, unknown>,
+  projectId: string,
+  repoRefs: string[],
+  log: ((msg: string) => void) | undefined,
+  proposal: { chatId: string; proposalId: string } | null,
+): PreparedCreate {
   // Style: pass a valid one through; infer an absent/unknown one from the brief's format words so
   // a print brief reaches the bridge's print instructions instead of its `web` default.
   const brief = typeof body['brief'] === 'string' ? body['brief'] : undefined;
@@ -490,9 +551,10 @@ export async function prepareDocCreate(
     body: Buffer.from(JSON.stringify(normalized), 'utf8'),
     contentType: 'application/json',
     normalized,
-    ...((repoRefs.length > 0 || clisJson !== undefined || channel !== undefined || actor !== undefined)
+    ...((repoRefs.length > 0 || clisJson !== undefined || channel !== undefined || actor !== undefined || proposal !== null)
       ? { binding: { projectId, repoRefs, style, ...(clisJson !== undefined ? { clisJson } : {}), ...(channel !== undefined ? { channel } : {}), ...(actor !== undefined ? { actor } : {}) } }
       : {}),
+    ...(proposal !== null ? { proposal } : {}),
   };
 }
 
@@ -629,7 +691,8 @@ export function registerInteractiveProxy(app: FastifyInstance, adapter: CoreAdap
       if (grounding !== undefined && isDocCreate(req.method, target)) {
         const raw = await readBody(req.raw, DOC_CREATE_BODY_MAX);
         if (raw === null) return reply.code(413).send({ error: `create body exceeds ${DOC_CREATE_BODY_MAX} bytes` });
-        create = await prepareDocCreate(raw, req.headers['content-type'], adapter, projectId, deps.log);
+        const actorId = deps.actorOf?.(req) ?? 'local';
+        create = await prepareDocCreate(raw, req.headers['content-type'], adapter, projectId, deps.log, (chatId, pid) => deps.proposalGrant?.(chatId, pid, actorId) ?? null);
         if (create.refusal !== undefined) return reply.code(400).send(create.refusal);
         // crew#631: validate the per-doc seat override against the current roster before the
         // bridge sees the request — the same check the testing routes apply at their boundary.
@@ -831,6 +894,92 @@ function forwardCreate(
       upstream.destroy();
     });
     upstream.end(create.body);
+  });
+}
+
+/**
+ * DES-CHAT-ARTIFACTS-001 §4.3 (A3): crew's OWN create of a proposal's document, in process. It runs the same
+ * `prepareDocCreate` the proxy route runs (so the `chat_id` grant is checked through the accepted record exactly as for
+ * any caller), then posts the prepared body to the project's bridge and records the grounding sidecar. Never replayed:
+ * a connection lost after the body was sent answers 502 `create_undetermined`, and the caller looks the document up.
+ */
+export async function createDocInProcess(
+  adapter: CoreAdapter,
+  deps: Pick<InteractiveProxyDeps, 'settings' | 'pool' | 'grounding' | 'roster' | 'proposalGrant' | 'stateHome' | 'home' | 'env' | 'log'>,
+  projectId: string,
+  body: Record<string, unknown>,
+  actorId: string,
+): Promise<{ status: number; body: unknown }> {
+  const root = await projectDocsRoot(adapter, deps.settings, projectId, deps);
+  if (root === null) return { status: 404, body: { error: `Project ${projectId} not found` } };
+  const create = await prepareDocCreate(Buffer.from(JSON.stringify(body), 'utf8'), 'application/json', adapter, projectId, deps.log, (chatId, pid) => deps.proposalGrant?.(chatId, pid, actorId) ?? null);
+  if (create.refusal !== undefined) return { status: 400, body: create.refusal };
+  if (create.binding?.clisJson !== undefined && deps.roster !== undefined) {
+    const seatErr = proxyValidateClisJson(create.binding.clisJson, deps.roster());
+    if (seatErr !== null) return { status: 400, body: { error: seatErr } };
+  }
+  const bridge = await deps.pool.ensure(root);
+  const token = create.binding !== undefined ? deps.grounding?.beginCreate(projectId) : undefined;
+  try {
+    const answer = await postToBridge(bridge, DOC_CREATE_PATH, create.body);
+    let parsed: unknown = null;
+    try {
+      parsed = JSON.parse(answer.body.toString('utf8'));
+    } catch {
+      parsed = { error: answer.body.toString('utf8').slice(0, 400) };
+    }
+    const name = (parsed as { name?: unknown } | null)?.name;
+    if (answer.status >= 200 && answer.status < 300 && create.binding !== undefined && deps.grounding !== undefined && typeof name === 'string' && name !== '') {
+      deps.grounding.record(root, name, {
+        project_id: create.binding.projectId,
+        repo_refs: create.binding.repoRefs,
+        ...(create.binding.style !== undefined ? { style: create.binding.style } : {}),
+        ...(create.binding.clisJson !== undefined ? { clis_json: create.binding.clisJson } : {}),
+        ...(create.binding.channel !== undefined ? { channel: create.binding.channel } : {}),
+        ...(create.binding.actor !== undefined ? { actor: create.binding.actor } : {}),
+      });
+    }
+    return { status: answer.status, body: parsed };
+  } catch (err) {
+    if ((err as CreateForwardError).createDispatched === true) return { status: 502, body: CREATE_UNDETERMINED };
+    throw err;
+  } finally {
+    if (token !== undefined) deps.grounding?.settleCreate(token);
+  }
+}
+
+/** POST a small JSON body to the bridge and buffer its answer. A failure after the body was flushed is marked
+ *  `createDispatched` (the bridge may have acted on it). */
+function postToBridge(bridge: LiveBridge, target: string, body: Buffer): Promise<{ status: number; body: Buffer }> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    let dispatched = false;
+    const upstream = httpRequest(
+      {
+        host: bridge.host,
+        port: bridge.port,
+        method: 'POST',
+        path: target,
+        headers: { host: `${bridge.host}:${bridge.port}`, 'content-type': 'application/json', 'content-length': String(body.length) },
+      },
+      (res) => {
+        dispatched = true;
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('error', (err) => {
+          (err as CreateForwardError).createDispatched = true;
+          rejectPromise(err);
+        });
+        res.on('end', () => resolvePromise({ status: res.statusCode ?? 502, body: Buffer.concat(chunks) }));
+      },
+    );
+    upstream.on('finish', () => {
+      dispatched = true;
+    });
+    upstream.on('error', (err) => {
+      (err as CreateForwardError).createDispatched = dispatched;
+      rejectPromise(err);
+    });
+    upstream.end(body);
   });
 }
 

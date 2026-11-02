@@ -396,6 +396,13 @@ export interface ChatArtifactsCapabilities {
    * and Go on a proposal records a stub dispatch and starts NOTHING. A skin says so on the card. ABSENT otherwise.
    */
   stub?: true;
+  /**
+   * (api-types 0.171.0, slice A3) The operations whose Go records a stub dispatch and starts nothing under the TEST
+   * configuration; every other advertised operation starts real work (A3: `create` is real, `refine`, `theme` and
+   * `demo` stay stubs until their slices). ABSENT in production. A skin says "starts nothing" only for these kinds;
+   * before this field, `stub: true` meant every kind.
+   */
+  stubOps?: ArtifactProposalKind[];
 }
 
 // ── A run's working document (program DES-POWER-MODE §8.3, §9; api-types 0.148.0) ──────────────────
@@ -1257,6 +1264,22 @@ export interface AgentSession {
    * before the field: check `GET /health.capabilities.runChatId` before grouping runs by chat.
    */
   chat_id?: string;
+  /**
+   * (api-types 0.171.0, DES-CHAT-ARTIFACTS-001 §4.3, slice A3) The chat proposal this run answers
+   * (`<chatId>:<turnId>`, or a crew-made `<chatId>:retry:<runId>`), read back from the `run.launched`
+   * entry after a restart. ABSENT on a run no proposal started.
+   */
+  proposal_id?: string;
+  /** (api-types 0.171.0) The artifact a proposal-bound run makes (`<mount>/<doc>`, the mount a project id or `_unfiled`),
+   *  so a skin finds an Unfiled run's document. ABSENT on a run no proposal started. */
+  artifact_ref?: string;
+  /**
+   * (api-types 0.171.0, §6.2) A proposal-bound attempt ended without landing: the engine run failed or was stopped,
+   * crew's landing check failed (no file, the document floor, the announce), or a daemon restart interrupted it
+   * ("interrupted by a restart"). The chat and the document are released, and the chat holds a retry proposal
+   * (`<chatId>:retry:<runId>`: Try again into the same document). ABSENT when the attempt landed or is still going.
+   */
+  landing_failed?: { reason: string; at: number };
   /**
    * (crew#552) The onboarding run this run was CHAINED from (a `capture-learnings` run the daemon
    * launched when that onboarding completed) — read back from the `run.launched` entry after a
@@ -7619,6 +7642,16 @@ export interface InteractiveDemoStepDraft {
 export interface InteractiveDocCreateRequest {
   /** The doc name; the bridge slugifies it (409 when taken or retired). */
   name?: string;
+  /**
+   * (api-types 0.171.0, DES-CHAT-ARTIFACTS-001 §5.2) The chat a proposal's create comes from. Accepted ONLY with
+   * `proposal_id`, and only when that chat holds a `proposal_accepting` record of the caller's whose identity names
+   * this document in this mount and whose stored resolution lists every `repo_ref(s)`: then an Unfiled document may
+   * name those repositories (`unfiled_doc_repo` is lifted through the record, nothing else). Anything else is a 400
+   * `proposal_grant_refused` and nothing is created. Crew sends these itself on a proposal's Go.
+   */
+  chat_id?: string;
+  /** (api-types 0.171.0) The proposal (`<chatId>:<turnId>` or `<chatId>:retry:<runId>`); see `chat_id`. */
+  proposal_id?: string;
   /** Omitted = a plain html doc (`html` required); `source` = generated from brief/sources; `demo` = a recording. */
   kind?: 'source' | 'demo';
   /** A plain html doc's content (or a `source` doc's seed). */
@@ -7680,9 +7713,11 @@ export interface InteractiveDocCreateRefusal {
    * Unfiled mount; `invalid_repo_ref` — junk spelling / shape / over the cap; `ambiguous_repo_ref`
    * — a name or basename shared by several member repos (name it by id); `project_mismatch` — the
    * body's `project` is not the route's project (or is present on the Unfiled mount). The proxy
-   * canonicalizes an OMITTED `project` from the route.
+   * canonicalizes an OMITTED `project` from the route. `proposal_grant_refused` (api-types 0.171.0) — `chat_id`
+   * without `proposal_id` (or the reverse), or no `proposal_accepting` record of the caller's in that chat that names
+   * this document, this mount and every requested repository.
    */
-  code: 'repo_not_in_project' | 'unfiled_doc_repo' | 'invalid_repo_ref' | 'ambiguous_repo_ref' | 'project_mismatch';
+  code: 'repo_not_in_project' | 'unfiled_doc_repo' | 'invalid_repo_ref' | 'ambiguous_repo_ref' | 'project_mismatch' | 'proposal_grant_refused';
   /** The refs the request named, as spelled (best-effort stringified when malformed). */
   requested: string[];
   /** The subset of `requested` that matched no member repo (`repo_not_in_project` only). */
@@ -8488,6 +8523,11 @@ export interface ArtifactProposal {
   sources: ProposalSource[];
   /** Repositories (names), each in the chat's scope. */
   repos: string[];
+  /** (api-types 0.171.0) The same repositories by registry id, in the same order (two checkouts may share a name). */
+  repoRefs?: string[];
+  /** (api-types 0.171.0) A crew-made retry (`sourceRunId`): the document it fills again (`<mount>/<doc>`), the same
+   *  artifact as the failed attempt's. ABSENT on a turn's proposal (its document name derives from the pid). */
+  artifactRef?: string;
   /** `null` for a theme (no run). */
   helpers: ProposalHelpers | null;
   /** `null` for a theme. */
@@ -8509,12 +8549,15 @@ export interface ArtifactProposal {
 }
 
 /**
- * What a person may change before Go (typed per kind; crew re-checks every edit with the rules of §4.2). In this
- * release (slice A2) crew takes `title`, `brief`, `sources` and `helpers` on a create, `ask` and `helpers` on a refine,
- * `name` and `patch` on a theme, and `audience`, `show` and `helpers` on a demo; `project`, `repos`, `url` and `allow`
- * are refused (400 `edits_invalid`) until the slices whose forms edit them. A source the person adds that cannot be used
- * is refused too, never dropped. An interrupted (accepting) proposal resumes with its accepted choices: only its
- * `helpers` may change.
+ * What a person may change before Go (typed per kind; crew re-checks every edit with the rules of §4.2). Crew takes
+ * `title`, `brief`, `sources`, `helpers`, `repos` and `project` on a create (api-types 0.171.0, slice A3: New document's
+ * "answer this proposal" mode), `ask` and `helpers` on a refine, `name` and `patch` on a theme, and `audience`, `show`
+ * and `helpers` on a demo; `url` and `allow` are refused (400 `edits_invalid`) until the slices whose forms edit them.
+ * `project` changes only in a chat filed in no project: then every source, repository and turn of the conversation is
+ * re-checked against the target project, and what is outside it is struck (a `message:` source whole, when any of its
+ * records is outside). `repos` must be in the chat's scope (and, with a target project, members of it). A source or
+ * repository the person adds that cannot be used is refused, never dropped. An interrupted (accepting) proposal
+ * resumes with its accepted choices: only its `helpers` may change.
  */
 export interface ProposalEdits {
   /** create */
@@ -8618,6 +8661,15 @@ export type ChatProposalFrame = {
   record: Extract<ChatTranscriptRecord, { kind: 'proposal' | 'proposal_accepting' | 'proposal_decided' }>;
   project_id?: string;
 };
+
+/**
+ * `/ws` (api-types 0.171.0, DES-CHAT-ARTIFACTS-001 §6.2, slice A3): a proposal-bound attempt ended without landing — the
+ * engine run failed or was stopped, crew's landing check refused it (no draft file, the document floor, a source file
+ * changed during the run, the announce), or a daemon restart interrupted it. The run's DTO carries the same
+ * `landing_failed`, the chat and the document are released, and the chat holds a retry proposal
+ * (`<chatId>:retry:<session>`, a `chatProposal` frame).
+ */
+export type RunLandingFailedFrame = { type: 'landingFailed'; session: string; artifact_ref: string; reason: string };
 
 // ── System chat: history, close, attachments (api-types 0.137.0, DES-SYSTEM-CHAT "Crew") ────────
 //

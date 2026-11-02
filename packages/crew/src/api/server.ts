@@ -139,7 +139,10 @@ import { seatParser } from '../standing-orders/parse.js';
 import { registerGateHistoryRoute, runBand, runPreset, runProject } from '../standing-orders/history.js';
 import { WorkingDocService } from '../working-doc/service.js';
 import { WorkingDocStore } from '../working-doc/store.js';
-import { isWorkingDoc as isWorkingDocAt } from '../interactive/chat-events.js';
+import { isWorkingDoc as isWorkingDocAt, readDocHead } from '../interactive/chat-events.js';
+import { DocBindingStore } from '../interactive/doc-binding.js';
+import { reconcileBoundAttempts } from '../interactive/proposal-create.js';
+import type { BoundOutcome } from '../interactive/draft-events.js';
 import { bridgeBackend } from '../working-doc/bridge-backend.js';
 import { registerWorkingDocRoutes } from '../working-doc/routes.js';
 import { projectDocsRoot as workingDocRoot } from '../interactive/project-root.js';
@@ -582,6 +585,8 @@ export async function createServer(
   let chatDecisionRecorder: ChatDecisionRecorder | null = null;
   // DES-CHAT-ARTIFACTS-001 §4.2 (A2): the proposal resolver (built with the routes), fed from the reply fold below.
   let chatProposals: import('./chat-proposals.js').ChatProposals | null = null;
+  // A3: the one launcher per run id (built with the routes); the draft seam's bus trigger and the boot reconcile use it.
+  let proposalLaunchers: import('./chat-proposals.js').LaunchOnceRegistry | null = null;
   // `GET /search`'s index, handed back by `registerRoutes` below; the frame fan-in feeds it late-bound.
   let searchService: SearchService | null = null;
   // DC-S7: considered · set aside · cited — the rule reads behind the citation verifier, the unit hook
@@ -849,6 +854,8 @@ export async function createServer(
     // status write and the synchronous record below) stays undated.
     const endedEntries = await audit.readAll({ action: 'run.ended' });
     runTimingIndex.hydrateFromEndedEntries(endedEntries);
+    // DES-CHAT-ARTIFACTS-001 §6.2 (A3): proposal-bound attempts that ended without landing.
+    runTimingIndex.hydrateLandingFailed(await audit.readAll({ action: 'run.landing_failed' }));
     // crew#619: rebuild the chat↔run retention maps for runs that were still live when the
     // daemon was last stopped. The `run.launched` entries that carry `chatId` and are NOT in
     // `run.ended` represent runs whose transcripts must still be on disk.
@@ -1070,6 +1077,53 @@ export async function createServer(
   // `crew-grounding.json` sidecar beside the doc's `versions.json` under the project's docs root
   // (doc-grounding.ts says why not the state home: core's fence refuses unregistered entries).
   const docGrounding = new DocGroundingStore();
+  // DES-CHAT-ARTIFACTS-001 §5.2 (A3): the durable binding of every chat-made document, under the registered `chats`
+  // state-home entry (core's fence refuses a new top-level entry, and no worker reads the state home).
+  const docBindings = new DocBindingStore(join(crewStateDir, 'chats', 'doc-bindings'));
+  /**
+   * A3 (§6.2): a proposal-bound attempt's outcome was recorded. A failure is said on the run (`run.landing_failed`, the
+   * DTO's `landing_failed` and a `landingFailed` frame), releases the chat and the document (their busy checks read the
+   * recorded outcome), and appends the retry proposal: Try again fills the same document.
+   */
+  const onBoundOutcome = (ref: string, runId: string, outcome: BoundOutcome): void => {
+    const hit = docBindings.attemptOf(runId);
+    if (outcome.kind === 'landed') {
+      audit.record('chat.proposal.landed', DAEMON_ACTOR, { runId, detail: { artifactRef: ref, version: outcome.version } });
+      return;
+    }
+    const ts = audit.record('run.landing_failed', DAEMON_ACTOR, { runId, detail: { artifactRef: ref, reason: outcome.reason } });
+    runTimingIndex.setLandingFailed(runId, outcome.reason, ts > 0 ? ts : Date.now());
+    broadcast({ type: 'landingFailed', session: runId, artifact_ref: ref, reason: outcome.reason });
+    if (hit === null || chatProposals === null) return;
+    void chatProposals
+      .appendRetry(hit.binding.chatId, hit.attempt.pid, runId, ref, outcome.reason)
+      .then((pid) => {
+        if (pid !== null) docBindings.setRetry(ref, runId, pid);
+      })
+      .catch((err: unknown) => app.log.warn(`[proposals] no retry card for run ${runId}: ${err instanceof Error ? err.message : String(err)}`));
+  };
+  /** A3: a bound document's `doc.created` (normal or late) goes to its proposal's one launcher per run id. */
+  const onBoundDocCreated = async (ref: string): Promise<void> => {
+    const b = docBindings.get(ref);
+    const a = b?.attempts.filter((x) => x.outcome === undefined).at(-1);
+    if (b === null || a === undefined || chatProposals === null || proposalLaunchers === null) return;
+    const acc = chatProposals.acceptedOf(b.chatId, a.pid);
+    if (acc === null) {
+      app.log.warn(`[proposals] ${ref}: doc.created for proposal ${a.pid}, which holds no accepted record — nothing launched`);
+      return;
+    }
+    const result = await proposalLaunchers.launchOnce({
+      kind: 'create',
+      pid: a.pid,
+      chatId: b.chatId,
+      actor: { id: acc.actor, kind: 'human', trust: 'operator' },
+      identity: acc.identity,
+      resolution: acc.resolution,
+    });
+    app.log.info(`[proposals] ${ref}: doc.created → run ${result.runId} ${result.adopted ? 'adopted (already launched)' : 'launched by the trigger'}`);
+    // A run the trigger had to start (Go's own launch failed) decides the proposal; an adopted one is Go's to decide.
+    if (!result.adopted) await chatProposals.settleAccepting(b.chatId, a.pid);
+  };
   /** The three seams' ledgers, read AT USE TIME (a seam that armed after this closure was built is
    *  still preferred over its file) — shared by the doc-delete sweep and the doc↔run index. */
   const docLedgerSources = (): DocLedgerSource[] => [
@@ -1622,6 +1676,10 @@ export async function createServer(
       // F-046: the create-time grounding sidecar is read under the SAME per-project docs root the
       // proxy recorded it in.
       groundingStore: docGrounding,
+      // DES-CHAT-ARTIFACTS-001 §5.2 (A3): chat-made documents.
+      bindings: docBindings,
+      onBoundDocCreated: (ref) => onBoundDocCreated(ref),
+      onBoundOutcome,
       resolveDocsRoot: o.resolveDocsRoot ?? interactiveDocsRoot,
       log: (m) => app.log.warn(m),
       logError: (m) => app.log.error(m),
@@ -2528,6 +2586,9 @@ export async function createServer(
       // EP-C2: where the checks read finds a document's recorded reviews.
       docReviewsDir,
       docGrounding,
+      // DES-CHAT-ARTIFACTS-001 §5.2 (A3): chat-made documents; `create` is real only when the draft seam is armed.
+      docBindings,
+      ...(draftSub !== null ? { launchBoundDraft: draftSub.launchBound } : {}),
       // crew#899: a chat's checkouts are brought to their upstream (when clean) before it reads them.
       freshenCheckout: (root: string) => freshenCheckout(root),
       ...(skillsRuntime !== undefined ? { skills: skillsRuntime } : {}),
@@ -2595,6 +2656,7 @@ export async function createServer(
   // proposal is keyed by the decision id). Off the boot path; a failure is a logged outcome.
   chatDecisionRecorder = registered.chatRecorder;
   chatProposals = registered.chatProposals;
+  proposalLaunchers = registered.proposalLaunchers;
   considerations = registered.considerations;
   searchService = registered.search;
   decorateRun = registered.decorateRun;
@@ -2700,7 +2762,26 @@ export async function createServer(
   // crew#830: a run the previous daemon left `executing` with no worker is marked `runOrphaned` by
   // the engine at bootstrap (core#124) but never moved — resume every run whose trail ends on that
   // frame, once, and audit it as `run.resumed {via: 'boot'}`; a live run (trail continues) is untouched.
-  void resumeOrphanedRuns(adapter, audit, DAEMON_ACTOR, (m) => app.log.warn(m));
+  //
+  // DES-CHAT-ARTIFACTS-001 §6.2 (A3): proposal-bound runs are reconciled FIRST and skipped by that sweep. An `accepting`
+  // proposal whose run exists is decided; every attempt without a recorded outcome either landed while the daemon was
+  // down (crew had announced it and the document's head moved past its base) or lost its seam flight in the restart:
+  // its engine run is cancelled to a confirmed terminal state, `landing_failed` says "interrupted by a restart", and
+  // only then are the chat and the document released and Try again offered. Never a redispatch.
+  void reconcileProposalRuns()
+    .catch((err: unknown) => app.log.warn(`[proposals] boot reconcile failed: ${err instanceof Error ? err.message : String(err)}`))
+    .finally(() => void resumeOrphanedRuns(adapter, audit, DAEMON_ACTOR, (m) => app.log.warn(m), (runId) => docBindings.isBound(runId)));
+  function reconcileProposalRuns(): Promise<void> {
+    return reconcileBoundAttempts({
+      bindings: docBindings,
+      sessions: () => adapter.sessionsDetail(),
+      cancelRun: (runId) => adapter.cancelRun(runId),
+      docHead: (projectId, doc) => readDocHead(interactiveDocsRoot(projectId ?? undefined), doc)?.head ?? null,
+      settleAccepting: (chatId, pid) => chatProposals?.settleAccepting(chatId, pid) ?? Promise.resolve(false),
+      onOutcome: onBoundOutcome,
+      log: (m) => app.log.warn(m),
+    });
+  }
 
   // The UI-emittable direction of the interactive seam. Registered unconditionally (a null relay
   // answers 503, not 404) and BEFORE the static/SPA fallback below, like every other API route.

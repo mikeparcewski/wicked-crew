@@ -17,7 +17,7 @@ import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { videoPalette } from '../appearance/video-palette.js';
 import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, settingsFilePath } from '../core/adapter.js';
@@ -257,7 +257,11 @@ import {
   UNFILED_MOUNT,
   type ChatContextDeps,
 } from './chat-context.js';
-import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
+import { createDocInProcess, registerInteractiveProxy } from '../interactive/proxy-routes.js';
+import { CreateLauncher } from '../interactive/proposal-create.js';
+import type { DocBindingStore } from '../interactive/doc-binding.js';
+import type { BoundDraft } from '../interactive/draft-events.js';
+import { buildRunBrief } from './run-brief.js';
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
 import { registerInteractiveDocChecks } from '../interactive/doc-checks-routes.js';
 import { crewStateHome, stateHomeOfDb } from '../projects/state-home.js';
@@ -1153,12 +1157,20 @@ export interface RegisteredRoutes {
   runEvalsPrepare: (input: LaunchRunInput) => Promise<void>;
   /** DES-CHAT-ARTIFACTS-001 §4 (A2): proposals from a seat's `wicked-make` block (the reply fold feeds `onReply`). */
   chatProposals: ChatProposals;
+  /** A3: the one launcher per run id (the draft seam's bus trigger and the boot reconcile go through it). */
+  proposalLaunchers: LaunchOnceRegistry;
 }
 
 export interface RuntimeDeps {
   /** DES-CHAT-ARTIFACTS-001 §13 A2: the chat-artifacts TEST configuration — every operation resolves and Go records a
-   *  stub dispatch, starting nothing (`WICKED_CHAT_ARTIFACTS_STUB=1`, read by `createServer`). Absent = production. */
+   *  stub dispatch, starting nothing (`WICKED_CHAT_ARTIFACTS_STUB=1`, read by `createServer`). Absent = production.
+   *  Since A3, `create` is real in it too whenever {@link launchBoundDraft} is wired; only the unbuilt kinds are stubs. */
   chatArtifactsStub?: boolean;
+  /** DES-CHAT-ARTIFACTS-001 §5.2 (A3): the durable bindings of chat-made documents (`interactive/doc-binding.ts`). */
+  docBindings?: DocBindingStore;
+  /** A3: the draft seam's proposal-bound launch. With {@link docBindings}, `create` is advertised and its real launcher
+   *  registered; absent (no draft seam armed) = `create` stays off. */
+  launchBoundDraft?: (spec: BoundDraft) => Promise<void>;
   /** (program DES-LEARN §3.3) The voice block of the personality a chat in this project uses (the project's
    *  override, else the person's), or null when none is saved; absent = no personalities on this daemon. */
   personaVoice?: (projectId: string | null) => string | null;
@@ -1584,15 +1596,20 @@ export function registerRoutes(
   // off — each later slice turns its own on and registers its launcher. The TEST configuration (§13 A2) turns every
   // operation's resolution on and registers a recording stub that starts nothing.
   const chatArtifactsStub = runtime.chatArtifactsStub === true;
+  // A3: a real `create` exists whenever the draft seam can launch a proposal-bound draft (the launcher is registered
+  // below, once the bridge pool exists). Production advertises it; the test configuration keeps the recording stub only
+  // for the operations whose slices have not landed.
+  const realCreate = runtime.docBindings !== undefined && runtime.launchBoundDraft !== undefined;
+  const stubOps: import('../core/types.js').ArtifactProposalKind[] = realCreate ? ['refine', 'theme', 'demo'] : ['create', 'refine', 'theme', 'demo'];
   const chatArtifactFlags: import('../core/types.js').ChatArtifactsCapabilities = chatArtifactsStub
-    ? { context: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true }
-    : { context: true, proposals: true, create: false, refine: false, theme: false, demo: false };
+    ? { context: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps }
+    : { context: true, proposals: true, create: realCreate, refine: false, theme: false, demo: false };
   const proposalLaunchers = new LaunchOnceRegistry();
   if (chatArtifactsStub) {
     // Under the registered `chats` entry (a new top-level state-home entry would make core refuse every launch), and
     // not a `.jsonl` there (the boot sweep clears orphaned transcripts by that suffix).
     const stub = new RecordingStubDispatcher(join(crewStateHome(), 'chats', 'proposal-stub', 'dispatches.ndjson'));
-    for (const kind of ['create', 'refine', 'theme', 'demo'] as const) proposalLaunchers.register(kind, stub);
+    for (const kind of stubOps) proposalLaunchers.register(kind, stub);
   }
   const deliveryIndex = runtime.deliveryIndex ?? new DeliveryIndex();
   // Wave 6: the doc↔run binding and the registered test sets — `createServer` injects the real
@@ -1880,6 +1897,14 @@ export function registerRoutes(
     // C1: the chat the run was launched from, on every run (terminal ones too) — ABSENT otherwise.
     const chatId = runTimingIndex.chatIdFor(view.session.id);
     if (chatId !== undefined) view.session.chat_id = chatId;
+    // DES-CHAT-ARTIFACTS-001 (A3): the proposal a run answers, the artifact it makes, and a landing that failed.
+    const proposalOf = runTimingIndex.proposalOf(view.session.id);
+    if (proposalOf !== undefined) {
+      view.session.proposal_id = proposalOf.proposalId;
+      view.session.artifact_ref = proposalOf.artifactRef;
+    }
+    const landingFailed = runTimingIndex.landingFailedOf(view.session.id);
+    if (landingFailed !== undefined) view.session.landing_failed = landingFailed;
     // crew#552: the onboarding run a chained capture was launched from — ABSENT otherwise.
     const chainedFrom = runTimingIndex.chainedFromOf(view.session.id);
     if (chainedFrom !== undefined) view.session.chained_from = chainedFrom;
@@ -4371,6 +4396,7 @@ export function registerRoutes(
     isAskPath: (runId) => runTimingIndex.isAskPath(runId),
     docsRoot: (projectId) => projectDocsRoot(adapter, projectSettings, projectId),
     projectName: async (projectId) => (await adapter.projectGet(projectId).catch(() => null))?.name ?? null,
+    projectRepos: async (projectId) => (await projectRepoCandidates(adapter, projectId, (m) => app.log.warn(m))).map((r) => ({ id: r.repoRef, name: r.name })),
     attachments: (chatId) => chatAttachments.list(chatId).map((a) => ({ id: a.id, name: a.name })),
     workflowSteps: async (name, projectId) => {
       // The preset a launch in this project resolves first (a project row wins over a global one), then the def.
@@ -9528,14 +9554,63 @@ export function registerRoutes(
     },
   );
 
+  // DES-CHAT-ARTIFACTS-001 §5.2 (A3): a create's `chat_id` + `proposal_id` counts only through the caller's accepted record.
+  const proposalGrant = (chatId: string, pid: string, actorId: string) => (CHAT_ID.test(chatId) ? chatProposals.grantFor(chatId, pid, actorId) : null);
   registerInteractiveProxy(app, adapter, {
     settings: projectSettings,
     pool: interactiveBridges,
     ...(runtime.docGrounding !== undefined ? { grounding: runtime.docGrounding } : {}),
     // crew#631: supply the standing roster so doc/demo creates can refuse an unavailable seat.
     roster: () => rosterWithStanding(),
+    proposalGrant,
+    actorOf: (req) => actorOf(req).id,
     log: (m) => app.log.warn(m),
   });
+  // A3: the real `create` launcher (§4.3 steps 2-3): one document and one run per proposal identity.
+  if (realCreate) {
+    const bindings = runtime.docBindings!;
+    proposalLaunchers.register('create', new CreateLauncher({
+      bindings,
+      runExists: async (runId) => (await adapter.sessions()).includes(runId),
+      docsRoot: (projectId) => projectDocsRoot(adapter, projectSettings, projectId),
+      createDoc: (projectId, body, actorId) =>
+        createDocInProcess(adapter, {
+          settings: projectSettings,
+          pool: interactiveBridges,
+          ...(runtime.docGrounding !== undefined ? { grounding: runtime.docGrounding } : {}),
+          roster: () => rosterWithStanding(),
+          proposalGrant,
+          log: (m) => app.log.warn(m),
+        }, projectId, body, actorId),
+      launchBound: runtime.launchBoundDraft!,
+      records: (chatId) => chatHistory?.messages(chatId) ?? chatTranscripts?.read(chatId) ?? [],
+      repos: async () => (await adapter.listRepos()).map((r) => ({ id: r.id, name: typeof r.name === 'string' && r.name.trim() !== '' ? r.name.trim() : basename(r.root_path), rootPath: r.root_path })),
+      graphFor: async (projectId, chatId) => {
+        if (projectId === null) return chatScopes.engineOf(chatId)?.codeGraphDb ?? null;
+        const decision = await resolveProjectGraphBinding(adapter, projectId, undefined).catch(() => ({ binding: null }));
+        return decision.binding?.dbPath ?? null;
+      },
+      clisJsonFor: (seats) => {
+        const roster = rosterWithStanding() as Array<{ key?: unknown }>;
+        const picked = seats.map((k) => roster.find((s) => s.key === k));
+        return picked.some((s) => s === undefined) ? null : JSON.stringify(picked);
+      },
+      styleOf: (entry) => {
+        const seed = CATALOG_SEEDS.find((c) => c.id === entry);
+        return seed !== undefined && seed.launch.kind === 'document' ? seed.launch.style : 'web';
+      },
+      packetDeps: {
+        runs: chatContextDeps.runs,
+        brief: (view) => buildRunBrief(view, { workOutput: chatContextDeps.workOutput, ...(chatContextDeps.acceptanceLine !== undefined ? { acceptanceLine: chatContextDeps.acceptanceLine } : {}) }),
+        docsRoot: chatContextDeps.docsRoot,
+        attachment: (chatId, id) => {
+          const hit = chatAttachments.resolve(chatId, [id])[0];
+          return hit === undefined ? null : { name: hit.name, path: hit.path };
+        },
+      },
+      log: (m) => app.log.warn(m),
+    }));
+  }
 
   // ── Governed doc delete (crew#338) — the one door that changes BOTH stores ──
   // `DELETE /projects/:id/interactive/docs/:doc` retires the doc on the bridge AND drops crew's
@@ -9630,5 +9705,5 @@ export function registerRoutes(
   const runEvalsPrepare = async (input: LaunchRunInput): Promise<void> => {
     await prepareRunEvalsLaunch(input, () => runAndRecord(defaultEvalDeps, { project: null, baseline: false, id: randomUUID(), now: new Date() }), runtime.evalRunsDir);
   };
-  return { decideGate, decisions, chatRecorder, considerations, search, decorateRun, runEvalsPrepare, chatProposals };
+  return { decideGate, decisions, chatRecorder, considerations, search, decorateRun, runEvalsPrepare, chatProposals, proposalLaunchers };
 }

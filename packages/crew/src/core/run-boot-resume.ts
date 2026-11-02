@@ -61,6 +61,9 @@ export async function resumeOrphanedRuns(
   audit: RunResumeAudit,
   actor: Actor,
   log: (message: string) => void,
+  /** DES-CHAT-ARTIFACTS-001 §6.2 (A3): runs this sweep never resumes (proposal-bound attempts: the reconcile before it
+   *  ended them; resuming one would finish an engine run whose seam flight is gone, landing nothing). */
+  skip: (runId: string) => boolean = () => false,
 ): Promise<BootRunResumeResult> {
   const result: BootRunResumeResult = { resumed: [], failed: [] };
   // A partial adapter (a directly-driven route set, a stub without the trail) may lack the surface.
@@ -80,6 +83,7 @@ export async function resumeOrphanedRuns(
   }
   for (const view of executing) {
     const id = view.session.id;
+    if (skip(id)) continue;
     let events: RecordedEvent[] | null;
     try {
       events = await adapter.runEvents(id);
