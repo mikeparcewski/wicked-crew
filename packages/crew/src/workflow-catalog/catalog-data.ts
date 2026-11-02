@@ -213,8 +213,9 @@ export const CATALOG_SEEDS: readonly CatalogSeed[] = [
     inputs: [
       PROJECT_REQUIRED,
       { id: 'url', label: 'Where the app runs', kind: 'url', required: true },
-      { id: 'audience', label: 'Who it is for', kind: 'text', required: false },
-      { id: 'show', label: 'What to show', kind: 'text', required: false },
+      // The demo route requires both (`DemoLaunchSchema`, api/recording.ts; codex r3).
+      { id: 'audience', label: 'Who it is for', kind: 'text', required: true },
+      { id: 'show', label: 'What to show', kind: 'text', required: true },
     ],
     typicalMinutes: null,
     cost: 'medium',

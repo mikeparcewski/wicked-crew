@@ -11,6 +11,7 @@ import { CoreAdapter } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
 import { RunTimingIndex, recordRunLaunched } from '../src/api/run-timing-index.js';
 import { AuditLog } from '../src/api/audit.js';
+import { DemoLaunchSchema } from '../src/api/recording.js';
 import { buildWorkflowCatalog, TOP_MAX, type CatalogRun } from '../src/workflow-catalog/build.js';
 import { CATALOG_CATEGORIES, CATALOG_EXCLUDED, CATALOG_SEEDS } from '../src/workflow-catalog/catalog-data.js';
 import { isSystemWorkflow } from '../src/core/run-identity.js';
@@ -62,6 +63,15 @@ describe('the catalog seeds (one source of truth)', () => {
       if (s.status === 'coming_soon') expect(s.launch.kind, s.id).toBe('none');
       expect(s.outcome.length, s.id).toBeGreaterThan(0);
     }
+  });
+
+  it('asks for every field the demo route requires (codex r3)', () => {
+    const demo = CATALOG_SEEDS.find((s) => s.id === 'demo-video')!;
+    const required = Object.entries(DemoLaunchSchema.shape)
+      .filter(([, v]) => !(v as { isOptional(): boolean }).isOptional())
+      .map(([k]) => k);
+    expect(required.sort()).toEqual(['audience', 'show', 'url']);
+    for (const k of required) expect(demo.inputs.find((i) => i.id === k)?.required, k).toBe(true);
   });
 
   it("covers the operator's taxonomy: every subcategory of create/resolve/analyze/test has a card", () => {
