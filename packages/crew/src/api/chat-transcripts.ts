@@ -30,7 +30,7 @@
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
-import type { ChatAttachment, ChatCitationItem, ChatTranscriptRecord, ChatUsage, CoreEvent, DecisionView } from '../core/types.js';
+import type { ChatAttachment, ChatCitationItem, ChatContextBinding, ChatTranscriptRecord, ChatUsage, CoreEvent, DecisionView } from '../core/types.js';
 import { DecisionFenceFilter, splitDecisionsBlock } from '../decisions/chat-recorder.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { CHAT_ID } from './chat-scope.js';
@@ -127,6 +127,15 @@ export class ChatTranscriptStore {
       seats: [...seats],
       ...(attachments !== undefined && attachments.length > 0 ? { attachments: [...attachments] } : {}),
     });
+  }
+
+  /**
+   * DES-CHAT-ARTIFACTS-001 §5.1 (A1): what the turn's seats were given beside the operator's words — the open
+   * artifact's copies, the run briefs, what was refused, and every run and document named in the chat so far.
+   * Written with the turn's `user` record, so a later turn (and a later `message:` source) can name what it saw.
+   */
+  appendContext(chatId: string, turnId: string, binding: ChatContextBinding): void {
+    this.append(chatId, { at: this.now(), turnId, kind: 'context', ...binding });
   }
 
   /** DC-S7: a crew-authored preface the seats received with that turn's message — disclosed, verbatim. */

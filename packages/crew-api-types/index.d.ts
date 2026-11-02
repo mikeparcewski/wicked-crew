@@ -364,6 +364,25 @@ export interface HealthCapabilities {
    * requesting operator's usage ({@link WorkflowCatalogResponse}). ABSENT on an older daemon: read as `false`.
    */
   workflowCatalog?: boolean;
+  /**
+   * (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §14) What a chat can do with artifacts, one flag per operation, each
+   * true only once its slice ships. `context`: `ChatMessageBody.context` is accepted ({@link ChatMessageContext}),
+   * `POST /chats {seedFromArtifact}` is served, and each turn's seats get the open artifact, the runs the person names
+   * and the ids they may use, recorded per turn as a `context` transcript record. The others (`proposals`, `create`,
+   * `refine`, `theme`, `demo`) are later slices and are `false` until then. ABSENT on an older daemon: read every flag
+   * as `false`, and send no `context` (the message body is strict there, so the field would be refused).
+   */
+  chatArtifacts?: ChatArtifactsCapabilities;
+}
+
+/** {@link HealthCapabilities.chatArtifacts} (api-types 0.169.0). */
+export interface ChatArtifactsCapabilities {
+  context: boolean;
+  proposals: boolean;
+  create: boolean;
+  refine: boolean;
+  theme: boolean;
+  demo: boolean;
 }
 
 // ── A run's working document (program DES-POWER-MODE §8.3, §9; api-types 0.148.0) ──────────────────
@@ -8019,6 +8038,15 @@ export interface ChatOpenBody {
    * engine without it is a 409. Send it only when `GET /health.capabilities.chatWorkflows` names it.
    */
   workflow?: string;
+  /**
+   * (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §6.3) "Ask about this" on a document no open chat holds: the
+   * artifact ref (`<mount>/<doc>`). Crew checks the document exists and is the caller's to open, then seeds the
+   * chat's repositories from the repositories the document was made about (its recorded binding) when the request
+   * names none. Allowed for a chat with no `projectId`, or for a project chat when the document's mount is that
+   * project and every bound repository belongs to it; anything else is a 400 `seed_out_of_scope`. Send only when
+   * `GET /health.capabilities.chatArtifacts.context === true`.
+   */
+  seedFromArtifact?: string;
 }
 
 /** The scope a `POST /chats` caller may name (api-types 0.39.0, studio#323 R4). */
@@ -8352,7 +8380,12 @@ export type ChatTranscriptRecord =
    * 0.85.0, DC-S7): the rules remembered since they last heard from crew. Disclosed here so the
    * operator sees exactly what crew added; the `user` record keeps the operator's own words.
    */
-  | { at: number; turnId: string; kind: 'system'; text: string };
+  | { at: number; turnId: string; kind: 'system'; text: string }
+  /**
+   * What the seats of `turnId` were given beside the operator's words (api-types 0.169.0, DES-CHAT-ARTIFACTS-001
+   * §5.1): the open artifact's copies, the run briefs, and what was refused. Written with the turn's `user` record.
+   */
+  | ({ at: number; turnId: string; kind: 'context' } & ChatContextBinding);
 
 // ── System chat: history, close, attachments (api-types 0.137.0, DES-SYSTEM-CHAT "Crew") ────────
 //
@@ -8479,6 +8512,79 @@ export interface ChatMessageBody {
    *  file: a path it can open (images as images where the CLI reads them) plus, for text and pdf,
    *  the extracted text. Send only when `GET /health.capabilities.chatAttachments === true`. */
   attachments?: string[];
+  /**
+   * (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §5.1) What studio shows beside the message: the artifact open on the
+   * surface it was sent from, the tab's appearance, and studio's page summary. Send only when
+   * `GET /health.capabilities.chatArtifacts.context === true`. Crew checks the chat's owner and scope before it
+   * reads anything; the seat gets labelled copies (data, never instructions), and the turn's `context` transcript
+   * record says what it was given.
+   */
+  context?: ChatMessageContext;
+}
+
+/** {@link ChatMessageBody.context} (api-types 0.169.0). */
+export interface ChatMessageContext {
+  /** The artifact on the surface the message was sent from (inline, pane, Made or full screen). */
+  artifact?: ChatArtifactContext;
+  /** The tab's effective appearance (DES §9), sent when `chatArtifacts.theme` is advertised. */
+  appearance?: ChatContextAppearance;
+  /**
+   * Studio's page summary (the context pack), kept apart from the person's typed words. Crew labels it as studio's
+   * and scans it for the run the page is about. At most 32 KiB.
+   */
+  page?: string;
+}
+
+/** {@link ChatMessageContext.artifact} (api-types 0.169.0). */
+export interface ChatArtifactContext {
+  /** `<mount>/<doc>`: the mount is a project id or `_unfiled`; the doc is the interactive document name. */
+  ref: string;
+  /** The version the person is looking at (≥ 1), read after the editor's in-flight writes finished. */
+  version: number;
+  /** The `data-wid` of each part the person selected (at most 16). */
+  anchors?: string[];
+}
+
+/** {@link ChatMessageContext.appearance} (api-types 0.169.0): studio's appearance scalars, plus an active preview. */
+export interface ChatContextAppearance {
+  theme?: string;
+  accent_h?: number;
+  accent_s?: number;
+  accent_l?: number;
+  ambient?: boolean;
+  ambient_still?: boolean;
+  /** The name of the theme proposal being previewed, when one is. */
+  previewOf?: string;
+}
+
+/**
+ * What one turn's seats were given (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §5.1 "Bindings kept"): the `context`
+ * transcript record. Paths are relative to the chat's scratch root. A reader folds it onto the turn's `user` record; a
+ * skin that does not know this kind ignores it.
+ */
+export interface ChatContextBinding {
+  /** The open artifact, when the message carried one in scope. */
+  artifact?: {
+    ref: string;
+    title: string;
+    kind: string;
+    /** The version the person was looking at, and the latest when the turn was sent. */
+    viewed: number;
+    head: number;
+    /** `null` for an Unfiled document. */
+    projectId: string | null;
+    /** The copies the seat read: `open/<mount>__<doc>-v<n>.html`. */
+    copies: string[];
+    anchors: string[];
+  };
+  /** The run briefs the seat was given: `context/run-<id>.md`, with the sha256 of the brief as written. */
+  runs: Array<{ id: string; status: string; brief: string; sha256: string }>;
+  /** What was named but not read, and why ("not in this chat's project", "no such run on this daemon"). */
+  refused: Array<{ token: string; reason: string }>;
+  /** Every run and document the person has named in this chat up to this turn (each re-checked on later turns). */
+  named: { runs: string[]; docs: string[] };
+  /** Studio's page summary rode as `context.page` (true), never mixed into the person's words. */
+  page: boolean;
 }
 
 /** `GET /chats/:id` → 200. */

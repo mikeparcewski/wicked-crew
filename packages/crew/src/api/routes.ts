@@ -27,6 +27,7 @@ import type {
   CodeGraphData,
   AcpCliDiagnostics,
   ChatAttachment,
+  ChatContextBinding,
   CoreEvent,
   DiagnosticsSeatGovernanceEntry,
   RecordedEvent,
@@ -160,6 +161,7 @@ import type { DecisionLike, EventLike, RunLike } from '../evals/capture.js';
 import { gardenRootFor } from '../learn/scheduler.js';
 import { DEMO_PRESET, demoLaunchRoots, registerDemoDocumentRoute, registerDemoRoutes, registerWalkthroughRoutes, walkthroughAcceptance, type BridgeCall } from './recording.js';
 import { projectDocsRoot } from '../interactive/project-root.js';
+import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
 import { registerSkillsRoutes } from './skills.js';
 import { registerMcpRoutes } from './mcp.js';
 import { chatMcpToolsFor } from './chat-mcp.js';
@@ -225,7 +227,17 @@ import {
 } from '../core/deliver.js';
 import { credentialsMissingIn, deliverCredentialsProbe, missingCredentials } from '../core/deliver-credentials.js';
 import { codebaseArchiveUrl, type CodebaseArchive, type CodebaseArchiveStore } from './codebase-archive.js';
-import type { DocGroundingStore } from '../interactive/doc-grounding.js';
+import { DocGroundingStore, projectRepoCandidates } from '../interactive/doc-grounding.js';
+import {
+  artifactExists,
+  buildTurnContext,
+  ChatMessageContextSchema,
+  contextReadRoots,
+  ensureRealDir,
+  parseArtifactRef,
+  UNFILED_MOUNT,
+  type ChatContextDeps,
+} from './chat-context.js';
 import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
 import { registerInteractiveDocChecks } from '../interactive/doc-checks-routes.js';
@@ -1399,6 +1411,9 @@ export const ChatOpenSchema = z.object({
   /** (api-types 0.141.0, crew#1157) The read-only workflow every turn runs (`analyze`); see
    *  `chat-workflow.ts`. Omitted ⇒ a plain chat. */
   workflow: z.string().min(1).max(64).optional(),
+  /** (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §6.3) "Ask about this" on a document no open chat holds: seed the
+   *  chat's repositories from the document's recorded binding, after an access check. */
+  seedFromArtifact: z.string().min(3).max(200).optional(),
 }).strict();
 
 /**
@@ -1995,6 +2010,9 @@ export function registerRoutes(
       voice: app.hasRoute({ method: 'POST', url: `${V}/voice/transcribe` }),
       // (api-types 0.168.0, wf-catalog) The categorised workflow catalog with the operator's usage.
       workflowCatalog: app.hasRoute({ method: 'GET', url: `${V}/workflows/catalog` }),
+      // (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §14) Per operation: A1 serves `context` (the chat sees the open
+      // artifact and the runs the person names; `seedFromArtifact`). The rest are later slices.
+      chatArtifacts: { context: true, proposals: false, create: false, refine: false, theme: false, demo: false },
     };
     // wicked-core#411 / crew#497: the state-home blocker rides the health probe as a WARNING. The
     // daemon still SERVES (status stays ok — studio must load and show the blocker) but refuses to
@@ -3864,6 +3882,48 @@ export function registerRoutes(
       const b = parsed.data;
       const chatId = b.chatId ?? randomUUID();
       const requestedRefs = [...(b.repoRef !== undefined ? [b.repoRef] : []), ...(b.repoRefs ?? [])];
+      // DES-CHAT-ARTIFACTS-001 §6.3 (A1): "Ask about this" on a document no open chat holds. Access first (a person,
+      // a document that exists), then the scope rule: a chat in no project, or a project chat whose project is the
+      // document's mount and holds every repository the document was made about. Only then are the chat's
+      // repositories seeded from that binding — and only when the request names none and no kind that refuses them.
+      if (b.seedFromArtifact !== undefined) {
+        const seed = parseArtifactRef(b.seedFromArtifact);
+        if (seed === null) return reply.code(400).send({ code: 'seed_invalid', error: 'seedFromArtifact must be <mount>/<doc>' });
+        if (actorOf(req).kind !== 'human') {
+          return reply.code(403).send({ code: 'seed_refused', error: 'only a person can open a chat about a document' });
+        }
+        let root: string | null;
+        try {
+          root = await projectDocsRoot(adapter, projectSettings, seed.projectId);
+        } catch (err) {
+          return reply.code(500).send({ error: `cannot read ${seed.ref}: ${message(err)}` });
+        }
+        if (root === null || !artifactExists(root, seed.doc)) {
+          return reply.code(404).send({ code: 'seed_not_found', error: `no document ${seed.ref} on this daemon` });
+        }
+        const bound = groundingReader.get(root, seed.doc)?.repo_refs ?? [];
+        if (b.projectId !== undefined) {
+          const chatMountOf = b.projectId === DEFAULT_PROJECT_ID ? UNFILED_MOUNT : b.projectId;
+          if (seed.mount !== chatMountOf) {
+            return reply.code(400).send({
+              code: 'seed_out_of_scope',
+              error: `${seed.ref} is ${seed.mount === UNFILED_MOUNT ? 'Unfiled' : `in project ${seed.mount}`}, not in project ${b.projectId}; open the chat in its project, or in no project`,
+            });
+          }
+          if (bound.length > 0) {
+            const members = new Set((await projectRepoCandidates(adapter, b.projectId)).map((r) => r.repoRef));
+            const outside = bound.filter((r) => !members.has(r));
+            if (outside.length > 0) {
+              return reply.code(400).send({
+                code: 'seed_out_of_scope',
+                error: `${seed.ref} was made about ${outside.join(', ')}, which project ${b.projectId} does not hold; open the chat in no project`,
+              });
+            }
+          }
+        } else if (requestedRefs.length === 0 && (b.scopeKind === undefined || b.scopeKind === 'repo' || b.scopeKind === 'repos')) {
+          requestedRefs.push(...bound);
+        }
+      }
       // A named scope's SHAPE first (studio#323 R4, codex on #664): a body whose kind refuses its own
       // projectId/repoRefs is a 400 — never masked by the project lookup's 404/409 below.
       const shape = namedKindRefusal(b.scopeKind, b.projectId, [...new Set(requestedRefs)]);
@@ -4186,7 +4246,20 @@ export function registerRoutes(
     targets: z.array(z.string().min(1)).min(1).max(8).optional(),
     /** (api-types 0.137.0) Attachment ids from `POST /chats/:id/attachments`. */
     attachments: z.array(z.string().min(1).max(64)).optional(),
+    /** (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §5.1) What studio shows beside the message. */
+    context: ChatMessageContextSchema.optional(),
   }).strict();
+  // DES-CHAT-ARTIFACTS-001 §5.1 (A1): what a turn's block reads — the docs roots, the decorated runs (project,
+  // document and chat ids), unit outputs and the acceptance line. One set of deps, so the block and the run pages
+  // read the same records.
+  const groundingReader = runtime.docGrounding ?? new DocGroundingStore();
+  const chatContextDeps: ChatContextDeps = {
+    docsRoot: (projectId) => projectDocsRoot(adapter, projectSettings, projectId),
+    runs: async () => (await adapter.sessionsDetail()).map((v) => decorateRun(v)),
+    workOutput: async (unitId) => (typeof adapter.workOutput === 'function' ? adapter.workOutput(unitId) : null),
+    acceptanceLine: async (view) => (await acceptanceViewOf(view, {})).summary.line,
+    docStyle: (root, doc) => groundingReader.get(root, doc)?.style,
+  };
   // F-RECON-017: a message sent while a targeted seat is still answering the previous one is
   // REFUSED, not queued. The engine queues silently (the worker gets the text the instant the
   // previous turn's final block lands) and its reply frames carry no message correlation, so the
@@ -4215,6 +4288,22 @@ export function registerRoutes(
       return reply.code(409).send({ error: `chat '${id}' has no eligible seat — sign a seat in and re-seat it (POST /chats/:id/seats)` });
     }
     const text = parsed.data.text;
+    // DES-CHAT-ARTIFACTS-001 §5.1 (A1): the per-turn block reads crew's records (documents, runs) for the chat's own
+    // person. A message that carries `context` from anyone else (another actor under `auth: required`, or an agent,
+    // system or plugin actor) is refused before anything is reserved or read; one without `context` from them still
+    // goes through, with no block.
+    const msgContext = parsed.data.context;
+    const sender = actorOf(req);
+    const ownsChat = chatHistory === null || chatHistory.visibleTo(id, security.authMode === 'required' ? sender.id : null);
+    const contextAllowed = sender.kind === 'human' && ownsChat;
+    if (msgContext !== undefined && !contextAllowed) {
+      return reply.code(403).send({
+        code: 'chat_context_refused',
+        error: sender.kind !== 'human'
+          ? `only a person can send what they are looking at with a chat message (you are a ${sender.kind} actor). Nothing was sent.`
+          : `chat '${id}' was opened by someone else; only its owner can send what they are looking at into it. Nothing was sent.`,
+      });
+    }
     // DES-SYSTEM-CHAT: the attachments this message carries — every id this chat's, within the caps,
     // refused before anything is reserved or sent.
     let attached: Array<ChatAttachment & { path: string }> = [];
@@ -4261,6 +4350,8 @@ export function registerRoutes(
     // crew#826: the turn lives as long as its answer step may (`budget_secs`), not 3× the pool knob.
     let turn: ReturnType<ChatTurnIndex['begin']> = null;
     let turnId: string = randomUUID();
+    // A1: what this turn's seats were given beside the words (recorded with the turn).
+    let turnBinding: ChatContextBinding | null = null;
     // What an ACCEPTED message records — the engine has it, so a persistence failure here is
     // logged, never a retraction of a turn that is already being answered (codex on #808 r2, 9).
     const persistAccepted = (preface: string | null, after: () => void): void => {
@@ -4268,6 +4359,7 @@ export function registerRoutes(
         after();
         if (preface !== null) chatTranscripts?.appendSystem(id, turnId, preface);
         chatTranscripts?.appendUser(id, turnId, text, voice, attached.map(attachmentWire));
+        if (turnBinding !== null) chatTranscripts?.appendContext(id, turnId, turnBinding);
         // The recorder's audience is the turn's AS THE TURN INDEX HOLDS IT NOW: the eligible roster
         // for a random pick, or the PA the relay narrowed it to during the engine awaits above
         // (`path.started` / `path.repicked` may land before this record exists — ASK-C2, codex on
@@ -4367,6 +4459,30 @@ export function registerRoutes(
         });
       }
       const pending = await considerations.pendingPreface(id, { inForce: rules });
+      // DES-CHAT-ARTIFACTS-001 §5.1 (A1): the turn's block — scope checked before anything is read or copied; the
+      // copies and briefs land in the scratch root's `open/` and `context/`, read roots of the chat's run.
+      let contextBlock = '';
+      if (scope !== undefined && contextAllowed) {
+        try {
+          const built = await buildTurnContext(
+            {
+              chatId: id,
+              scratchRoot: scope.cwd,
+              projectId: scope.projectId ?? null,
+              text,
+              context: msgContext,
+              records: chatTranscripts?.read(id) ?? [],
+              attachmentIds: chatAttachments.list(id).map((a) => a.id),
+            },
+            chatContextDeps,
+          );
+          contextBlock = built.block;
+          turnBinding = built.binding;
+        } catch (err) {
+          askPaths.release(id, lease);
+          return reply.code(500).send({ error: `could not prepare what this message is about: ${message(err)}. Nothing was sent.` });
+        }
+      }
       // The last await before delivery may also have closed/reopened the chat. From this check
       // through publication and the send there is no await, so no executing turn's files change.
       if (askPaths.get(id)?.generation !== lease || chatScopes.get(id) !== storedScope) {
@@ -4394,6 +4510,8 @@ export function registerRoutes(
           return reply.code(500).send({ error: `could not stage the attachments for the seat: ${message(err)}` });
         }
       }
+      // A1: after the person's words (and their files), labelled as data.
+      if (contextBlock !== '') seatText = `${seatText}\n\n${contextBlock}`;
       voice = path.pa !== null ? [path.pa] : [];
       // A random pick reserves every eligible seat until the relay names the PA.
       audience = voice.length > 0 ? voice : path.eligible;
@@ -4431,8 +4549,16 @@ export function registerRoutes(
           // statement tells the seats to read them at their paths, so the boundary must let them.
           // DES-SYSTEM-CHAT: plus the chat's attachments directory, from launch (a run cannot gain a
           // read root later), so a file attached on any later turn is readable too.
+          // DES-CHAT-ARTIFACTS-001 §5.1 (A1): and the directories the turn blocks copy artifacts (`open/`) and write run
+          // briefs (`context/`) into, from launch, so a later turn's copies and briefs are readable too.
           ...(readRoots.length > 0 || attachRoot !== null
-            ? { extraReadRoots: [...readRoots, ...(attachRoot !== null ? [ensureDir(attachRoot)] : [])] }
+            ? {
+              extraReadRoots: [
+                ...readRoots,
+                ...(attachRoot !== null ? [ensureDir(attachRoot)] : []),
+                ...(scope !== undefined ? [ensureRealDir(contextReadRoots(scope.cwd).open), ensureRealDir(contextReadRoots(scope.cwd).context)] : []),
+              ],
+            }
             : {}),
         };
         const runId = await adapter.launchRun(input);
