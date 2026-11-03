@@ -15317,7 +15317,13 @@ export interface AppQueryBody {
 /** One cell: values are rendered as text by the runtime. */
 export type AppCell = string | number | boolean | null;
 
-/** `POST /apps/:app/query` 200 (DES §7.2). `rows` are aligned with `columns`. */
+/**
+ * `POST /apps/:app/query` 200 (DES §7.2). `rows` are aligned with `columns`, which are exactly the query's
+ * declared output (api-types 0.177.0: values coerced to their declared types; `integer` and `number` cells
+ * are JS numbers within ±2^53; `date` is `YYYY-MM-DD`, `datetime` ISO 8601). `truncated`: a cap cut the
+ * answer (5,000 rows, 10 MB, a cell past 64 KB cut). `hasMore`: the more path says another page exists.
+ * `ms`: this request's time. Identical reads within the query's cache life share one answer.
+ */
 export interface AppQueryResponse {
   columns: AppOutputColumn[];
   rows: AppCell[][];
@@ -15351,6 +15357,17 @@ export interface AppCheckFinding {
  *  - 429 `rate_limited` (with `retryAfterMs`: a query queue or a per-viewer rate is full, DES §7.5);
  *  - 501 `not_implemented` (a route a later slice serves; nothing happened);
  *  - 503 `apps_unavailable`.
+ *
+ * (api-types 0.177.0, K2b) `POST /apps/:app/query` also answers: 400 `bad_params` (a parameter that is not
+ * declared, does not satisfy its schema, is required and missing, or is viewer-bound and was sent); 403
+ * `human_only` for an agent or plugin actor (an app's rows reach a person, never a model); 409
+ * `viewer_unavailable` (a viewer-bound value crew does not know, e.g. no git `user.email` locally, or groups
+ * in local preview), `contract_changed` (the source's connection, or what the query reads there, changed
+ * since this version was checked: check it again), `query_refused` (the read policy or the source's live
+ * relation checks refuse it now); 422 `result_invalid` (a value does not fit its declared column: the
+ * message names the column and row, never the value); 502 `source_failed` / `source_unavailable` (the
+ * source answered an error or could not be reached: a class and a SQLSTATE, never the source's words); 504
+ * `source_timeout` (stopped at the 10 s deadline, at the source).
  */
 export interface AppErrorBody {
   code:
@@ -15376,7 +15393,15 @@ export interface AppErrorBody {
     | 'not_this_turn'
     | 'not_checked'
     | 'reviewer_not_distinct'
-    | 'apps_unavailable';
+    | 'apps_unavailable'
+    | 'bad_params'
+    | 'viewer_unavailable'
+    | 'contract_changed'
+    | 'query_refused'
+    | 'result_invalid'
+    | 'source_failed'
+    | 'source_unavailable'
+    | 'source_timeout';
   error: string;
   /** `rate_limited`: when to try again (also sent as `Retry-After`). */
   retryAfterMs?: number;
@@ -15414,7 +15439,10 @@ export type AppsCheckResponse =
  * serves that route for real rather than answering `501`.
  */
 export interface AppsCapabilities {
-  /** `POST /apps/:app/query` runs queries (until then it checks the receipt, then answers `501`). */
+  /**
+   * `POST /apps/:app/query` runs queries (until then it checks the receipt, then answers `501`). True since
+   * api-types 0.177.0 (K2b, the executor).
+   */
   query: boolean;
   /** `POST /apps/:app/actions/:id/prepare|run|grant`, `GET …/actions/records/:id`. */
   actions: boolean;

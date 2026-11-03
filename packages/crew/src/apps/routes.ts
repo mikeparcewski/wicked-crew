@@ -5,8 +5,8 @@
  *  - `GET /apps/:app` (observer): the spec at head, the versions with their receipts, the undo pointer.
  *  - `POST /apps/:app/edits`, `/undo`, `/redo`, `/restore` (HUMAN operator): each carries the version it was
  *    made on (`409 stale_base`); while a turn runs, `409 turn_in_flight`.
- *  - `POST /apps/:app/query` (observer): the version must hold an accepted receipt for this app and the
- *    query must exist in it; then `501` until the executor lands.
+ *  - `POST /apps/:app/query` (observer, a person): the executor (K2b, `exec/executor.ts`) runs one named
+ *    query of an accepted version; without one, the receipt and the query are checked, then `501`.
  *  - actions (prepare, run, records, grant, revoke) and publish (HUMAN operator): `501` after the human check.
  *  - `POST /apps/:app/turns` (operator): launch an `apps-turn` run and hold the app (`501` while this daemon
  *    has no launcher).
@@ -28,6 +28,7 @@ import type { Actor, AppEditOp, AppErrorBody } from '../core/types.js';
 import { APP_NAMED_ID_RE, parseSpec } from './spec.js';
 import { APP_SLUG_RE, AppStore, AppStoreError } from './store.js';
 import { QUERY_TEXT_MAX_BYTES } from './check.js';
+import { AppExecError, type AppExecutor } from './exec/executor.js';
 import { AppGitError } from './git.js';
 
 const V = '/api/v1';
@@ -48,6 +49,8 @@ export interface AppRoutesDeps {
    * until the engine carries one: the route answers 503 and does nothing.
    */
   verifyUnitToken?: (token: string) => Promise<{ runId: string } | null>;
+  /** (K2b) The executor; absent = the query route checks the receipt and answers 501. */
+  executor?: AppExecutor;
 }
 
 const actorOf = (req: FastifyRequest): Actor => req.actor ?? LOCAL_ACTOR;
@@ -71,6 +74,10 @@ function overLong(body: unknown, key: string, max: number): boolean {
 
 function fail(reply: FastifyReply, err: unknown): FastifyReply {
   if (err instanceof AppStoreError) return reply.code(err.status).send({ code: err.code, error: err.message, ...err.extra });
+  if (err instanceof AppExecError) {
+    if (err.extra.retryAfterMs !== undefined) void reply.header('retry-after', String(Math.max(1, Math.ceil(err.extra.retryAfterMs / 1000))));
+    return reply.code(err.status).send({ code: err.code, error: err.message, ...err.extra });
+  }
   // The app repo was changed in a way crew refuses to read or write through (a link, a commondir file, an
   // object that does not hash to its id): nothing landed.
   if (err instanceof AppGitError && err.code === 'corrupt') return refuse(reply, 409, { code: 'unreadable_tree', error: err.message });
@@ -223,14 +230,24 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
 
   app.post(
     `${V}/apps/:app/query`,
-    { config: { manifest: { requestType: 'AppQueryBody', responseType: 'AppQueryResponse', statusCodes: [400, 403, 404, 409, 501, 503] } } },
+    { config: { manifest: { requestType: 'AppQueryBody', responseType: 'AppQueryResponse', statusCodes: [200, 400, 403, 404, 409, 422, 429, 501, 502, 503, 504] } } },
     async (req, reply) => {
-      // A plugin actor reads crew's own state; an app's live data reaches the app only through its host.
-      if (actorOf(req).kind === 'plugin') return refuse(reply, 403, { code: 'human_only', error: 'a plugin actor cannot run an app query' });
+      // An app's live data reaches a person through the app's host only: never a plugin actor, and never an
+      // agent seat (no value read from a row goes to a model, DES §5.2), whatever its trust.
+      const actor = actorOf(req);
+      if (actor.kind === 'plugin' || actor.kind === 'agent') return refuse(reply, 403, { code: 'human_only', error: `an app's query answers a person through the app; a ${actor.kind} actor cannot run one` });
       const slug = slugOf(req, reply);
       if (slug === null) return reply;
       const parsed = AppQuerySchema.safeParse(req.body);
       if (!parsed.success) return badRequest(reply, parsed.error);
+      if (deps.executor !== undefined) {
+        try {
+          const auth = req.headers.authorization;
+          return await deps.executor.runQuery({ app: slug, version: parsed.data.version, query: parsed.data.query, ...(parsed.data.params !== undefined ? { params: parsed.data.params } : {}), actor, ...(typeof auth === 'string' ? { authorization: auth } : {}) });
+        } catch (err) {
+          return fail(reply, err);
+        }
+      }
       try {
         // DES §7.2 steps 1-2: an accepted receipt for (app, tree), and the query in that tree.
         const { spec } = await store.acceptedSpec(slug, parsed.data.version);

@@ -390,6 +390,9 @@ import { gardenConformance, gardenPackCheck, type ConformanceRunner, type PackCh
 import { conformanceProvisioner, conformanceRuntimeRoot } from '../editors/conformance-runtime.js';
 import { EditorRegistry } from '../editors/registry.js';
 import { registerEditorRoutes } from '../editors/routes.js';
+import { AppExecutor } from '../apps/exec/executor.js';
+import { localViewerOf, type Viewer } from '../apps/exec/viewer.js';
+import type { Actor as AppsActor } from '../core/types.js';
 import { registerAppRoutes } from '../apps/routes.js';
 import { AppStoreError, type AppStore } from '../apps/store.js';
 import { registerMcpInspectRoutes } from '../mcp-inspect/routes.js';
@@ -1388,6 +1391,8 @@ export interface RuntimeDeps {
    *  the state home's `daemon-apps.json` and the apps root; a directly-driven route set gets the routes only when it
    *  injects one (so a test never makes a repo under the real `~/.wicked/apps`). */
   apps?: AppStore;
+  /** (K2b) Who a viewer is (email, name) for viewer-bound parameters; default: the global git identity for the local actor. */
+  appsViewerOf?: (actor: AppsActor) => Promise<Viewer>;
   /** The eval RUN history store behind `/testing/evals[/:id]` — `createServer` builds one over the
    *  daemon state home so every `POST /testing/evals/run` is recorded; a directly-driven route set
    *  (tests) gets one only when it injects it, so a test that never touches the eval routes writes
@@ -1739,10 +1744,24 @@ export function registerRoutes(
     log: (m) => app.log.warn(m),
   });
   // DES-APPS-001 §7.6 (K2a): the app store's routes, when this daemon has a store.
+  // (K2b) The executor: queries of an accepted version run for real (DES §7.2), crew-source reads in process.
+  const appsExecutor =
+    runtime.apps !== undefined
+      ? new AppExecutor({
+          store: runtime.apps,
+          registry: runtime.mcp ?? null,
+          crewInject: async (r) => {
+            const res = await app.inject({ method: r.method, url: r.url, headers: r.headers });
+            return { statusCode: res.statusCode, body: res.body };
+          },
+          viewerOf: runtime.appsViewerOf ?? localViewerOf,
+        })
+      : undefined;
   if (runtime.apps !== undefined) {
     registerAppRoutes(app, {
       store: runtime.apps,
       audit,
+      ...(appsExecutor !== undefined ? { executor: appsExecutor } : {}),
       ...(typeof adapter.projectsSupported === 'function' && adapter.projectsSupported()
         ? { projectExists: async (id: string) => (await adapter.projectGet(id)) !== null }
         : {}),
@@ -2110,7 +2129,7 @@ export function registerRoutes(
         ? {
             apps: {
               // (typed against the contract below: a renamed flag fails the build)
-              query: false,
+              query: appsExecutor !== undefined,
               actions: false,
               turns: runtime.apps.turns !== null,
               publish: false,

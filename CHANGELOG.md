@@ -12,6 +12,21 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **Apps: queries run (api-types 0.177.0, DES-APPS-001 §7.2, §7.5, slice K2b).** `POST /apps/:app/query` runs one
+  named query of an accepted version and `capabilities.apps.query` is true. Its parameters are validated against the
+  query's schema; viewer-bound ones are filled by crew (studio with auth off: your global git `user.email` and
+  `user.name`), and a request that sets one is refused. Before the read, the source's descriptor and the query's
+  contract are recomputed from the stored catalog, the registry or the introspection and must equal the version's
+  lock (`409 contract_changed` otherwise: a changed connection, a used column's type described anew, a tool's schema
+  or read acceptance). SQL reads pass the read policy again and run `READ ONLY` with the 10 s deadline at the source;
+  REST and MCP reads call the accepted tool; GraphQL reads pass the parameters as variables; crew-source reads run in
+  process with the viewer's own credentials. Rows are projected to the declared columns, coerced (Postgres `int8` and
+  `numeric` strings become numbers, refused past 2^53; datetimes become ISO 8601) and validated on every row; the row
+  path and more path are a JSONPath subset; the caps are 5,000 rows, 10 MB and 64 KB per cell. Reads are cached per
+  app (5 s for `load`, half the interval for `every`, never for `events`; 500 entries or 50 MB) and identical reads
+  share one source call; 4 queries per source per app run at once with 16 waiting, then `429`, and a viewer gets 60 a
+  minute per app. An agent or plugin actor cannot read an app's rows (`403`). Errors carry a class and a SQLSTATE,
+  never the source's words; the source's secret is scrubbed from every cell.
 - **Apps: the source stage (api-types 0.176.0, DES-APPS-001 §9.2 step 3, slice K2b).** A version of an app holding
   queries or actions now lands when their check passes (it was refused `409 source_check_unavailable`), and
   `GET /health` says `capabilities.apps.sourceCheck: true`. The check never executes a read or a write: a SQL query

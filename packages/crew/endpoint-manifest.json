@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.176.0",
+  "apiTypesVersion": "0.177.0",
   "endpoints": [
     {
       "method": "GET",
@@ -134,12 +134,17 @@
       "requestType": "AppQueryBody",
       "responseType": "AppQueryResponse",
       "statusCodes": [
+        200,
         400,
         403,
         404,
         409,
+        422,
+        429,
         501,
-        503
+        502,
+        503,
+        504
       ]
     },
     {

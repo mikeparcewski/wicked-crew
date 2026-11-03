@@ -96,8 +96,9 @@ describe('GET /api/v1/health: the apps capability', () => {
     const h = await withStore.app.inject({ method: 'GET', url: '/api/v1/health' });
     expect(h.statusCode, h.body).toBe(200);
     const caps = h.json().capabilities;
-    // Uploads serve since the sources slice (K1, POST /apps/uploads); the rest are still to come.
-    expect(caps.apps).toEqual({ query: false, actions: false, turns: false, publish: false, uploads: true, sourceCheck: false });
+    // Uploads serve since the sources slice (K1, POST /apps/uploads), queries since the executor (K2b); this
+    // store has no source stage (the daemon's has: createServer wires it), and the rest are still to come.
+    expect(caps.apps).toEqual({ query: true, actions: false, turns: false, publish: false, uploads: true, sourceCheck: false });
     const without = routes(false);
     expect((await without.app.inject({ method: 'GET', url: '/api/v1/health' })).json().capabilities.apps).toBeUndefined();
   });
