@@ -28,6 +28,7 @@ import type { Actor, AppEditOp, AppErrorBody } from '../core/types.js';
 import { APP_NAMED_ID_RE, parseSpec } from './spec.js';
 import { APP_SLUG_RE, AppStore, AppStoreError } from './store.js';
 import { QUERY_TEXT_MAX_BYTES } from './check.js';
+import { AppGitError } from './git.js';
 
 const V = '/api/v1';
 
@@ -59,8 +60,20 @@ function badRequest(reply: FastifyReply, err: z.ZodError): FastifyReply {
   return refuse(reply, 400, { code: 'bad_request', error: err.issues.slice(0, 10).map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; ') });
 }
 
+/**
+ * Zod reports an over-long array and still parses every element (codex r2 on the store), so a body's
+ * arrays are measured before the schema sees it.
+ */
+function overLong(body: unknown, key: string, max: number): boolean {
+  const v = body !== null && typeof body === 'object' ? (body as Record<string, unknown>)[key] : undefined;
+  return Array.isArray(v) && v.length > max;
+}
+
 function fail(reply: FastifyReply, err: unknown): FastifyReply {
   if (err instanceof AppStoreError) return reply.code(err.status).send({ code: err.code, error: err.message, ...err.extra });
+  // The app repo was changed in a way crew refuses to read or write through (a link, a commondir file, an
+  // object that does not hash to its id): nothing landed.
+  if (err instanceof AppGitError && err.code === 'corrupt') return refuse(reply, 409, { code: 'unreadable_tree', error: err.message });
   throw err;
 }
 
@@ -80,7 +93,7 @@ export const AppRestoreSchema = z.object({ base, version }).strict();
 export const AppQuerySchema = z.object({ version, query: z.string().regex(APP_NAMED_ID_RE), params: z.record(z.unknown()).optional() }).strict();
 export const AppTurnSchema = z.object({ base, message: z.string().min(1).max(8000), about: z.array(z.string().min(1).max(64)).max(20).optional() }).strict();
 /** `commit`: the builder's candidate COMMIT in the app repo (crew reads its tree and writes the lock on it). */
-const CheckSchema = z.object({ token: z.string().min(1).max(4096), app: slugParam, commit: z.string().regex(/^[0-9a-fA-F]{40}$/), manifest: z.unknown().optional() }).strict();
+export const AppsCheckSchema = z.object({ token: z.string().min(1).max(4096), app: slugParam, commit: z.string().regex(/^[0-9a-fA-F]{40}$/), manifest: z.unknown().optional() }).strict();
 
 export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): void {
   const { store } = deps;
@@ -142,6 +155,7 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
       if (!humanOnly(req, reply, 'edit an app')) return reply;
       const slug = slugOf(req, reply);
       if (slug === null) return reply;
+      if (overLong(req.body, 'ops', 50)) return refuse(reply, 400, { code: 'bad_request', error: 'an edit holds at most 50 ops' });
       const parsed = AppEditsSchema.safeParse(req.body);
       if (!parsed.success) return badRequest(reply, parsed.error);
       const ops: AppEditOp[] = [];
@@ -256,6 +270,7 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
     async (req, reply) => {
       const slug = slugOf(req, reply);
       if (slug === null) return reply;
+      if (overLong(req.body, 'about', 20)) return refuse(reply, 400, { code: 'bad_request', error: 'a turn is about at most 20 components' });
       const parsed = AppTurnSchema.safeParse(req.body);
       if (!parsed.success) return badRequest(reply, parsed.error);
       try {
@@ -272,12 +287,12 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
   // verified on every call. Nothing here reads `req.actor`.
   app.post(
     `${V}/apps/check`,
-    { config: { manifest: { requestType: '{ token: string; app: string; commit: string; manifest?: unknown }', responseType: '{ ok: boolean; commit?: string; tree?: string; findings?: AppCheckFinding[] }', statusCodes: [200, 400, 401, 404, 409, 503] } } },
+    { config: { manifest: { requestType: 'AppsCheckBody', responseType: 'AppsCheckResponse', statusCodes: [200, 400, 401, 404, 409, 503] } } },
     async (req, reply) => {
     if (deps.verifyUnitToken === undefined) {
       return refuse(reply, 503, { code: 'apps_unavailable', error: "this engine cannot verify a unit's token for apps_check yet; nothing was checked" });
     }
-    const parsed = CheckSchema.safeParse(req.body);
+    const parsed = AppsCheckSchema.safeParse(req.body);
     if (!parsed.success) return refuse(reply, 400, { code: 'bad_request', error: 'body must be { token, app, commit }' });
     const unit = await deps.verifyUnitToken(parsed.data.token);
     if (unit === null) return reply.code(401).send({ code: 'invalid_token', error: 'the unit token is not valid' });

@@ -131,9 +131,15 @@ export async function readAppTree(
   const blobs = new Map<string, TreeEntry>();
   try {
     const root = await git.readTree(tree);
+    // A raw tree can repeat a name or hold any number of entries (codex r2): the root holds at most the
+    // three names crew knows, each once, and queries/ at most one file per query a spec may declare.
+    const unique = (entries: { name: string }[]): boolean => new Set(entries.map((e) => e.name)).size === entries.length;
+    if (root.length > 3 || !unique(root)) return { ok: false, findings: [fileFinding('bad_tree', '', 'the tree holds more than apps.json, apps.lock.json and queries/, or one of them twice')] };
     for (const e of root) {
       if (e.name === QUERIES_DIR && e.type === 'tree') {
-        for (const q of await git.readTree(e.sha)) {
+        const queryEntries = await git.readTree(e.sha);
+        if (queryEntries.length > 100 || !unique(queryEntries)) return { ok: false, findings: [fileFinding('bad_tree', QUERIES_DIR, 'queries/ holds more than 100 files, or one name twice')] };
+        for (const q of queryEntries) {
           const path = `${QUERIES_DIR}/${q.name}`;
           if (!QUERY_FILE_RE.test(q.name)) findings.push(fileFinding('unexpected_path', path, `${path} is not a query text file`));
           else if (q.type !== 'blob' || (q.mode !== '100644' && q.mode !== '100755')) findings.push(fileFinding('not_a_file', path, `${path} is not a regular file (mode ${q.mode})`));
@@ -337,9 +343,12 @@ export async function stagedCheck(input: {
     lock.actions[a.id] = { source: a.source, actionHash: actionHash(a), contractHash };
   }
   for (const name of [...usedSources].sort()) {
-    const pin = (result !== null ? own(result.sources, name) : undefined) ?? own(prior.sources, name);
+    const fresh = result !== null ? own(result.sources, name) : undefined;
+    const pin = fresh ?? own(prior.sources, name);
     if (pin !== undefined) lock.sources[name] = pin;
-    const upload = (result !== null ? own(result.uploads, name) : undefined) ?? own(prior.uploads, name);
+    // A source the stage answered for is answered for whole: its upload pin is the stage's, removal
+    // included; a source it did not touch keeps its prior pin (codex r2).
+    const upload = fresh !== undefined ? own(result!.uploads, name) : own(prior.uploads, name);
     if (upload !== undefined) lock.uploads[name] = upload;
   }
   return { ok: true, lock, summary: { level, checked: [...checkQ, ...checkA] } };

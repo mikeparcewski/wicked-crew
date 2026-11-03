@@ -10,6 +10,12 @@
  *    `reference-transaction` hook runs on `update-ref`), fsmonitor, maintenance and gc, commit signing,
  *    every transport (`protocol.allow=never`), and lazy fetching from a promisor remote
  *    (`GIT_NO_LAZY_FETCH`); and uses plumbing only, which runs no filter, diff driver, pager or editor;
+ *  - pins the administrative directories (`GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY`), so a `commondir` file
+ *    an agent wrote cannot point crew at another repository, writes no reflog, and before every WRITE
+ *    checks that `.git`, `objects` (and its fan-out directories) and `refs/heads` are real directories
+ *    inside the repo, never links ({@link AppGit.assertConfined});
+ *  - requires a git whose lazy-fetch switch is honoured (2.45.1 and later), and refuses every transport by
+ *    name as well as by default (a repo's `protocol.<name>.allow` cannot widen it);
  *  - ignores replace refs (`GIT_NO_REPLACE_OBJECTS`);
  *  - VERIFIES every object it reads: the bytes crew parses are hashed (`<type> <size>\0<bytes>`) and must
  *    be the object id asked for, so an edited object file, an alternate or a replacement can make a read
@@ -19,7 +25,7 @@
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, rm } from 'node:fs/promises';
+import { lstat, mkdir, readdir, realpath, rm } from 'node:fs/promises';
 import { devNull } from 'node:os';
 import { join } from 'node:path';
 
@@ -51,6 +57,8 @@ function gitEnv(gitDir: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('GIT_')) env[k] = v;
   env['GIT_DIR'] = gitDir;
+  env['GIT_COMMON_DIR'] = gitDir;
+  env['GIT_OBJECT_DIRECTORY'] = join(gitDir, 'objects');
   env['GIT_CONFIG_NOSYSTEM'] = '1';
   env['GIT_CONFIG_GLOBAL'] = devNull;
   env['GIT_TERMINAL_PROMPT'] = '0';
@@ -74,8 +82,36 @@ const SAFE_CONFIG = [
   '-c', 'maintenance.auto=false',
   '-c', 'commit.gpgSign=false',
   '-c', 'protocol.allow=never',
+  ...['file', 'git', 'ssh', 'http', 'https', 'ext', 'fd'].flatMap((p) => ['-c', `protocol.${p}.allow=never`]),
   '-c', 'core.alternateRefsCommand=',
+  '-c', 'core.logAllRefUpdates=false',
 ];
+
+/** The oldest git whose `GIT_NO_LAZY_FETCH` crew relies on (the lazy-fetch fix shipped in 2.45.1). */
+export const MIN_GIT: readonly [number, number, number] = [2, 45, 1];
+
+let gitOk: Promise<string | null> | null = null;
+
+/** `git --version` output → `null` when it is at least {@link MIN_GIT}, else why not. */
+export function gitVersionProblem(out: string): string | null {
+  const m = /(\d+)\.(\d+)\.(\d+)/.exec(out);
+  if (m === null) return `cannot read the git version from "${out.trim()}"`;
+  const v = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const old = v[0]! < MIN_GIT[0] || (v[0] === MIN_GIT[0] && (v[1]! < MIN_GIT[1] || (v[1] === MIN_GIT[1] && v[2]! < MIN_GIT[2])));
+  return old ? `Apps needs git ${MIN_GIT.join('.')} or later (this host has ${v.join('.')})` : null;
+}
+
+/** `null` when the installed git is new enough; else why Apps cannot use it. Probed once. */
+export function gitProblem(): Promise<string | null> {
+  gitOk ??= (async () => {
+    try {
+      return gitVersionProblem((await runGit(devNull, ['--version'])).toString('utf8'));
+    } catch (err) {
+      return `git did not run: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  })();
+  return gitOk;
+}
 
 /** Run git in `gitDir`; stdout as a Buffer. Rejects on a non-zero exit, a timeout, or more than `cap` bytes. */
 export function runGit(gitDir: string, args: string[], input?: Buffer | string, extraEnv: Record<string, string> = {}, cap = OUTPUT_CAP): Promise<Buffer> {
@@ -154,6 +190,44 @@ export class AppGit {
   }
 
   /**
+   * Before a WRITE: `.git`, `objects`, every two-hex fan-out directory under it, `refs` and `refs/heads` are
+   * real directories (not links) whose real paths are inside the repo, and no `commondir` file is there
+   * (codex r2: an agent can plant indirection under `.git`; the environment pins cover the files git
+   * reads for it, this covers the directories it writes through).
+   */
+  async assertConfined(): Promise<void> {
+    const realRoot = await realpath(this.root);
+    const dirs = [this.gitDir, join(this.gitDir, 'objects'), join(this.gitDir, 'refs'), join(this.gitDir, 'refs', 'heads')];
+    try {
+      for (const name of await readdir(join(this.gitDir, 'objects'))) {
+        if (/^[0-9a-f]{2}$/.test(name)) dirs.push(join(this.gitDir, 'objects', name));
+      }
+    } catch {
+      /* no objects dir: the check below names it */
+    }
+    for (const d of dirs) {
+      let st;
+      try {
+        st = await lstat(d);
+      } catch {
+        if (d === this.gitDir || d.endsWith('objects')) throw new AppGitError(`${d} is missing`, 'corrupt');
+        continue;
+      }
+      if (st.isSymbolicLink() || !st.isDirectory()) throw new AppGitError(`${d} is not a plain directory inside the app repo`, 'corrupt');
+      const real = await realpath(d);
+      if (real !== realRoot && !real.startsWith(`${realRoot}/`) && !real.startsWith(`${realRoot}\\`)) {
+        throw new AppGitError(`${d} resolves outside the app repo`, 'corrupt');
+      }
+    }
+    try {
+      await lstat(join(this.gitDir, 'commondir'));
+      throw new AppGitError(`${this.gitDir} holds a commondir file; crew writes only into the repo's own .git`, 'corrupt');
+    } catch (err) {
+      if (err instanceof AppGitError) throw err;
+    }
+  }
+
+  /**
    * A new empty repo at `root`: `git init` on branch `main` and one empty commit (a worktree needs a
    * base). The directory must not exist: the create is exclusive, so a taken name is never adopted.
    * Answers the empty commit.
@@ -188,7 +262,8 @@ export class AppGit {
 
   /** Point `main` at `commit` as a DIRECT ref (a symbolic `main` is replaced, never followed). */
   async setMain(commit: string): Promise<void> {
-    await this.git(['update-ref', '--no-deref', '-m', 'wicked-crew apps', 'refs/heads/main', commit]);
+    await this.assertConfined();
+    await this.git(['update-ref', '--no-deref', 'refs/heads/main', commit]);
   }
 
   /** The object `sha` of `type`, its bytes verified against the id (at most `cap` bytes). */
@@ -224,12 +299,14 @@ export class AppGit {
   }
 
   async writeBlob(content: Buffer | string): Promise<string> {
+    await this.assertConfined();
     return (await this.git(['hash-object', '-w', '--no-filters', '--stdin'], content)).toString('utf8').trim();
   }
 
   /** A tree from entries `{mode, type, sha, name}` (one level). */
   async mktree(entries: Array<{ mode: string; type: 'blob' | 'tree'; sha: string; name: string }>): Promise<string> {
     const input = entries.map((e) => `${e.mode} ${e.type} ${e.sha}\t${e.name}`).join('\n') + (entries.length > 0 ? '\n' : '');
+    await this.assertConfined();
     return (await this.git(['mktree'], input)).toString('utf8').trim();
   }
 
@@ -237,6 +314,7 @@ export class AppGit {
   async commitTree(tree: string, parent: string | null, message: string, at: number): Promise<string> {
     const date = `${Math.floor(at / 1000)} +0000`;
     const args = ['commit-tree', '--no-gpg-sign', tree, ...(parent !== null ? ['-p', parent] : [])];
+    await this.assertConfined();
     const out = await runGit(this.gitDir, args, message, { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date });
     return out.toString('utf8').trim();
   }

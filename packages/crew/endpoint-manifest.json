@@ -195,8 +195,8 @@
     {
       "method": "POST",
       "path": "/api/v1/apps/check",
-      "requestType": "{ token: string; app: string; commit: string; manifest?: unknown }",
-      "responseType": "{ ok: boolean; commit?: string; tree?: string; findings?: AppCheckFinding[] }",
+      "requestType": "AppsCheckBody",
+      "responseType": "AppsCheckResponse",
       "statusCodes": [
         200,
         400,
@@ -1675,9 +1675,15 @@
     {
       "method": "POST",
       "path": "/api/v1/repos",
-      "requestType": null,
+      "requestType": "RegisterRepoBody",
       "responseType": null,
-      "statusCodes": []
+      "statusCodes": [
+        201,
+        400,
+        409,
+        422,
+        503
+      ]
     },
     {
       "method": "GET",

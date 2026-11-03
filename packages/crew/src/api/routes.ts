@@ -2743,7 +2743,7 @@ export function registerRoutes(
    * (core has no unregister). A registered repo returns 201 with `onboardRunId: null` and
    * `onboardError` on launch failure, so callers can attach it to their project and retry onboarding.
    */
-  app.post(`${V}/repos`, async (req, reply) => {
+  app.post(`${V}/repos`, { config: { manifest: { requestType: 'RegisterRepoBody', statusCodes: [201, 400, 409, 422, 503] } } }, async (req, reply) => {
     const parsed = RegisterRepoSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));

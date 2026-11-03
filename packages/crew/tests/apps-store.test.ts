@@ -3,7 +3,7 @@
 // 409 turn_in_flight; a rejected tree cannot be restored; the query route refuses an unreceipted tree; an
 // agent-kind operator token cannot post an edit; two concurrent undos move the pointer once.
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { isUnitTokenRoute, registerAuthHooks, requiredTrust } from '../src/api/auth.js';
 import type { AppSourceStage, AppSourceStageInput } from '../src/apps/check.js';
+import { gitVersionProblem } from '../src/apps/git.js';
 import { registerAppRoutes } from '../src/apps/routes.js';
 import { AppStore, type AppRepoRegistry, type AppTurnLauncher } from '../src/apps/store.js';
 import type { Actor, AppDetail, AppSpec } from '../src/core/types.js';
@@ -450,7 +451,7 @@ describe('apps: the turn lock and turn landing', () => {
 
   it('the check route answers 503 and checks nothing while the engine cannot verify a unit token', async () => {
     const s = setup();
-    const res = await s.call('POST', '/apps/check', { token: 't', app: 'escalations', tree: 'a'.repeat(40) });
+    const res = await s.call('POST', '/apps/check', { token: 't', app: 'escalations', commit: 'a'.repeat(40) });
     expect(res.status).toBe(503);
   });
 });
@@ -526,6 +527,8 @@ describe('apps: the repo is the agent’s, so crew trusts nothing in it but obje
       ['remote.origin.uploadpack', script],
       ['commit.gpgSign', 'true'],
       ['gpg.program', script],
+      ['protocol.file.allow', 'always'],
+      ['protocol.allow', 'always'],
     ] as const) {
       git(root, 'config', k, v);
     }
@@ -661,16 +664,28 @@ describe('apps: turns and reads under concurrency', () => {
     await newApp(s);
     await edit(s, 'escalations', 1, 'two');
     const fresh = new AppStore({ stateFile: s.store.stateFile, appsRoot: s.store.appsRoot, registry: fakeRegistry().registry });
-    const app = Fastify({ logger: false });
-    apps.push(app);
-    registerAppRoutes(app, { store: fresh, audit: { record: vi.fn() } });
-    const [d, e] = await Promise.all([
-      fresh.detail('escalations'),
-      app.inject({ method: 'POST', url: '/api/v1/apps/escalations/edits', payload: { base: 2, ops: [{ op: 'spec', spec: textSpec('Escalations', 'three') }] } }),
-    ]);
-    expect(e.statusCode).toBe(200);
-    const text = (d.spec.pages[0]!.components[0] as { text: string }).text;
-    expect({ head: d.head.version, text }).toEqual(d.head.version === 2 ? { head: 2, text: 'two' } : { head: 3, text: 'three' });
+    // Hold the detail read inside its tree read, land v3 meanwhile, then let the read finish (codex r2).
+    const inner = fresh as unknown as { files: (a: unknown, tree: string) => Promise<unknown> };
+    const original = inner.files.bind(fresh);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let entered!: () => void;
+    const reading = new Promise<void>((r) => (entered = r));
+    inner.files = async (a, tree) => {
+      if (inner.files !== original) {
+        inner.files = original;
+        entered();
+        await gate;
+      }
+      return original(a, tree);
+    };
+    const detail = fresh.detail('escalations');
+    await reading;
+    const landed = await fresh.edit('escalations', { base: 2, ops: [{ op: 'spec', spec: textSpec('Escalations', 'three') }], actor: HUMAN });
+    expect(landed.version).toBe(3);
+    release();
+    const d = await detail;
+    expect({ head: d.head.version, text: (d.spec.pages[0]!.components[0] as { text: string }).text, versions: d.versions.length, top: d.history.states.at(-1) }).toEqual({ head: 2, text: 'two', versions: 2, top: 2 });
   });
 });
 
@@ -745,6 +760,7 @@ describe('apps: the check route, plugin actors and a broken state file (pi r1 on
     expect((await s.call('POST', '/apps/check', { token: 'nope', app: 'escalations', commit: head })).status).toBe(401);
     expect((await s.call('POST', '/apps/check', { token: 'unit-other', app: 'escalations', commit: head })).body).toMatchObject({ code: 'not_this_turn' });
     expect((await s.call('POST', '/apps/check', { token: 'unit-ok', app: 'nope', commit: head })).status).toBe(404);
+    expect((await s.call('POST', '/apps/check', { token: 'unit-ok', app: 'escalations', tree: head })).status).toBe(400);
     const ok = await s.call('POST', '/apps/check', { token: 'unit-ok', app: 'escalations', commit: head });
     expect(ok.status).toBe(200);
     expect(ok.body).toMatchObject({ ok: true, summary: { level: 'spec' } });
@@ -762,5 +778,197 @@ describe('apps: the check route, plugin actors and a broken state file (pi r1 on
     dirs.push(dir);
     writeFileSync(join(dir, 'daemon-apps.json'), '{"version":1,"apps":');
     expect(() => new AppStore({ stateFile: join(dir, 'daemon-apps.json'), appsRoot: join(dir, 'apps'), registry: fakeRegistry().registry })).toThrow(SyntaxError);
+  });
+});
+
+// ── xreview r2 on the store (codex, pi): one test per finding ──────────────────────────────────────
+
+describe('apps: crew writes only into the app repo’s own .git (P1)', () => {
+  it('a commondir file an agent planted is refused, and the repo it names is untouched', async () => {
+    const s = setup();
+    await newApp(s);
+    const other = await newApp(s, 'other');
+    const root = join(s.dir, 'apps', 'escalations');
+    const otherRoot = join(s.dir, 'apps', 'other');
+    writeFileSync(join(root, '.git', 'commondir'), `${join(otherRoot, '.git')}\n`);
+    const res = await edit(s, 'escalations', 1, 'two');
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'unreadable_tree' });
+    expect(git(otherRoot, 'rev-parse', 'refs/heads/main')).toBe(other.versions[0]!.commit);
+  });
+
+  it('a linked objects fan-out directory or refs/heads is refused before any write', async () => {
+    const s = setup();
+    await newApp(s);
+    const root = join(s.dir, 'apps', 'escalations');
+    const elsewhere = join(s.dir, 'elsewhere');
+    mkdirSync(elsewhere);
+    for (let i = 0; i < 256; i++) {
+      const fan = join(root, '.git', 'objects', i.toString(16).padStart(2, '0'));
+      rmSync(fan, { recursive: true, force: true });
+      symlinkSync(elsewhere, fan);
+    }
+    expect((await edit(s, 'escalations', 1, 'two')).body).toMatchObject({ code: 'unreadable_tree' });
+    expect(readdirSync(elsewhere)).toEqual([]);
+  });
+
+  it('needs a git whose lazy-fetch switch is honoured', () => {
+    expect(gitVersionProblem('git version 2.45.0')).toMatch(/2\.45\.1 or later/);
+    expect(gitVersionProblem('git version 2.39.5 (Apple Git-154)')).toMatch(/or later/);
+    expect(gitVersionProblem('git version 2.45.1')).toBeNull();
+    expect(gitVersionProblem('git version 2.56.0')).toBeNull();
+  });
+});
+
+describe('apps: recovery, the mirror and provenance (codex r2)', () => {
+  it('recovery never deletes an app: a failed registration leaves it, a later boot finishes it', async () => {
+    const s = setup();
+    await newApp(s);
+    await edit(s, 'escalations', 1, 'two');
+    const state = JSON.parse(readFileSync(s.store.stateFile, 'utf8'));
+    state.apps.escalations.repoId = '';
+    writeFileSync(s.store.stateFile, JSON.stringify(state));
+    let fail = true;
+    const reg = fakeRegistry(() => fail);
+    const again = new AppStore({ stateFile: s.store.stateFile, appsRoot: s.store.appsRoot, registry: reg.registry });
+    await again.reconcile();
+    const kept = await again.detail('escalations');
+    expect(kept.versions).toHaveLength(2);
+    expect(kept.repoId).toBe('');
+    expect(existsSync(join(s.dir, 'apps', 'escalations'))).toBe(true);
+    fail = false;
+    await again.reconcile();
+    expect((await again.detail('escalations')).repoId).toBe('escalations');
+  });
+
+  it('a main that cannot be moved never fails a landing; the next change repairs it', async () => {
+    const s = setup();
+    const a = await newApp(s);
+    const root = join(s.dir, 'apps', 'escalations');
+    const lock = join(root, '.git', 'refs', 'heads', 'main.lock');
+    writeFileSync(lock, '');
+    const v2 = await edit(s, 'escalations', 1, 'two');
+    expect(v2.status).toBe(200);
+    expect(git(root, 'rev-parse', 'refs/heads/main')).toBe(a.versions[0]!.commit);
+    rmSync(lock);
+    const v3 = await edit(s, 'escalations', 2, 'three');
+    expect(git(root, 'rev-parse', 'refs/heads/main')).toBe((v3.body['landed'] as { commit: string }).commit);
+    expect(git(root, 'rev-parse', `${(v3.body['landed'] as { commit: string }).commit}^`)).toBe((v2.body['landed'] as { commit: string }).commit);
+  });
+
+  it("restoring a version keeps THAT version's provenance when two versions share a tree", async () => {
+    const t: AppTurnLauncher = { launch: async () => undefined, isActive: async () => true };
+    const s = setup({ turns: t });
+    const a = await newApp(s);
+    const runId = (await s.call('POST', '/apps/escalations/turns', { base: 1, message: 'x' })).body['runId'] as string;
+    // The builder offers exactly v1's spec: the checked tree is v1's tree, landed as `reviewed` v2.
+    const checked = await s.store.checkTurn('escalations', runId, a.versions[0]!.commit);
+    expect(checked).toMatchObject({ ok: true, tree: a.versions[0]!.tree });
+    await s.store.landTurn('escalations', { runId, commit: (checked as { commit: string }).commit, builder: 'claude', reviewer: 'codex', summary: 'same' });
+    await edit(s, 'escalations', 2, 'three');
+    const r = await s.call('POST', '/apps/escalations/restore', { base: 3, version: 2 });
+    expect(r.body['landed']).toMatchObject({ receipt: { kind: 'restored', restoredFrom: { version: 2, originKind: 'reviewed', originVersion: 2 } } });
+  });
+});
+
+describe('apps: turns, registration and request bounds (codex r2)', () => {
+  it('a poll while the launch is in flight never releases the turn', async () => {
+    let launched!: () => void;
+    const launching = new Promise<void>((r) => (launched = r));
+    let started!: () => void;
+    const inLaunch = new Promise<void>((r) => (started = r));
+    let known = false;
+    const s = setup({
+      turns: {
+        launch: async () => {
+          started();
+          await launching;
+          known = true;
+        },
+        isActive: async () => known,
+      },
+    });
+    await newApp(s);
+    const turn = s.store.beginTurn('escalations', { base: 1, message: 'x', about: [], actor: HUMAN });
+    await inLaunch;
+    expect((await s.store.detail('escalations')).turn).not.toBeNull();
+    launched();
+    const t = await turn;
+    expect((await s.store.detail('escalations')).turn).toMatchObject({ runId: t.runId });
+    expect((await edit(s, 'escalations', 1, 'blocked')).body).toMatchObject({ code: 'turn_in_flight' });
+  });
+
+  it('an id registered between the check and the registration is refused, and nothing is left', async () => {
+    let calls = 0;
+    const repos = new Map<string, string>();
+    const registry: AppRepoRegistry = {
+      register: async (name, root) => {
+        repos.set(name, root);
+        return { id: name, name, root_path: root, registered_at: 1, default_branch: 'main' };
+      },
+      idTaken: async () => ++calls > 1, // free when first asked, taken just before registering
+    };
+    const dir = mkdtempSync(join(tmpdir(), 'apps-store-'));
+    dirs.push(dir);
+    const store = new AppStore({ stateFile: join(dir, 'daemon-apps.json'), appsRoot: join(dir, 'apps'), registry });
+    await expect(store.create({ slug: 'race', name: 'race', projectId: 'p', actor: HUMAN })).rejects.toMatchObject({ code: 'slug_taken' });
+    expect(repos.size).toBe(0);
+    expect(store.has('race')).toBe(false);
+    expect(existsSync(join(dir, 'apps', 'race'))).toBe(false);
+  });
+
+  it('an over-long ops or about list is refused before the schema walks it', async () => {
+    const s = setup({ turns: { launch: async () => undefined, isActive: async () => true } });
+    await newApp(s);
+    const ops = await s.call('POST', '/apps/escalations/edits', { base: 1, ops: Array.from({ length: 100_000 }, () => ({})) });
+    expect(ops.body).toMatchObject({ code: 'bad_request', error: 'an edit holds at most 50 ops' });
+    const about = await s.call('POST', '/apps/escalations/turns', { base: 1, message: 'x', about: Array.from({ length: 21 }, () => 'c') });
+    expect(about.body).toMatchObject({ code: 'bad_request', error: 'a turn is about at most 20 components' });
+  });
+
+  it('a tree that repeats a name is refused by the files stage', async () => {
+    const t = { launch: async () => undefined, isActive: async () => true };
+    const s = setup({ turns: t });
+    await newApp(s);
+    const runId = (await s.call('POST', '/apps/escalations/turns', { base: 1, message: 'x' })).body['runId'] as string;
+    const root = join(s.dir, 'apps', 'escalations');
+    const env = { ...process.env, GIT_DIR: join(root, '.git') };
+    const blob = execFileSync('git', ['hash-object', '-w', '--stdin'], { input: JSON.stringify(textSpec('x', 'y')), env }).toString().trim();
+    const entry = Buffer.concat([Buffer.from('100644 apps.json\0'), Buffer.from(blob, 'hex')]);
+    const tree = execFileSync('git', ['hash-object', '-t', 'tree', '-w', '--literally', '--stdin'], { input: Buffer.concat([entry, entry]), env }).toString().trim();
+    const c = git(root, 'commit-tree', tree, '-p', git(root, 'rev-parse', 'refs/heads/main'), '-m', 'b');
+    expect(await s.store.checkTurn('escalations', runId, c)).toMatchObject({ ok: false, findings: [expect.objectContaining({ code: 'bad_tree' })] });
+  });
+
+  it('a long four-word slug that is taken still gets a valid, free suggestion', async () => {
+    const s = setup();
+    const slug = `${'a'.repeat(42)}-b-c-d`;
+    s.repos.set(slug, '/elsewhere');
+    const res = await s.call('POST', '/apps', { slug, projectId: 'p1' });
+    const sug = res.body.suggestion as string;
+    expect(sug).toMatch(/^(?=.{1,48}$)[a-z][a-z0-9]*(?:-[a-z0-9]+){0,3}$/);
+    expect(sug).not.toBe(slug);
+  });
+
+  it('a rechecked source loses an upload pin the stage no longer answers', async () => {
+    let uploaded = true;
+    const stage: AppSourceStage = {
+      check: async (input) => ({
+        findings: [],
+        sources: { 'support-pg': { kind: 'sql', descriptor: { uploaded }, descriptorHash: uploaded ? 'snap' : 'remote' } },
+        queries: Object.fromEntries(input.queries.map((q) => [q, `c-${q}`])),
+        actions: {},
+        uploads: uploaded ? { 'support-pg': { digest: 'd1' } } : {},
+      }),
+    };
+    const s = setup({ stage });
+    await newApp(s);
+    const v2 = await s.call('POST', '/apps/escalations/edits', { base: 1, ops: [{ op: 'spec', spec: dataSpec('x') }, { op: 'query-text', query: 'open_count', text: 'select 1 as open' }] });
+    expect(v2.body.app.lock.uploads).toEqual({ 'support-pg': { digest: 'd1' } });
+    uploaded = false;
+    const v3 = await s.call('POST', '/apps/escalations/undo', { base: 2 });
+    expect(v3.status).toBe(200);
+    const redo = await s.call('POST', '/apps/escalations/redo', { base: 3 });
+    expect(redo.body.app.lock.uploads).toEqual({});
   });
 });

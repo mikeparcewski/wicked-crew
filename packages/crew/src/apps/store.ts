@@ -36,10 +36,11 @@ import type {
   AppSummary,
   AppTurnState,
   AppVersion,
+  AppsCheckResponse,
   RepoEntry,
 } from '../core/types.js';
-import { EMPTY_LOCK, LOCK_PATH, QUERIES_DIR, QUERY_EXT, SPEC_PATH, lockBytes, readAppTree, specBytes, stagedCheck, type AppFiles, type AppSourceStage } from './check.js';
-import { AppGit, SHA_RE } from './git.js';
+import { EMPTY_LOCK, LOCK_PATH, QUERIES_DIR, QUERY_EXT, SPEC_PATH, lockBytes, ownText, readAppTree, specBytes, stagedCheck, type AppFiles, type AppSourceStage } from './check.js';
+import { AppGit, gitProblem, SHA_RE } from './git.js';
 
 /** The state-home file name (the registered `daemon-` file prefix). */
 export const APPS_STATE_FILENAME = 'daemon-apps.json';
@@ -76,6 +77,8 @@ interface StoredTurn extends AppTurnState {
   checkedTree?: string | null;
   /** What that check ran. */
   checkedSummary: AppCheckSummary | null;
+  /** True while the launch is in flight: the engine may not know the run yet, so no poll may release it. */
+  launching?: boolean;
 }
 
 interface StoredApp {
@@ -189,7 +192,14 @@ export class AppStore {
   }
 
   /** Run `fn` holding `slug`'s lock: one change to an app at a time. */
+  /** Apps runs git only where git honours its lazy-fetch switch (git.ts); else every operation says why. */
+  private async requireGit(): Promise<void> {
+    const problem = await gitProblem();
+    if (problem !== null) throw new AppStoreError(503, 'apps_unavailable', problem);
+  }
+
   private async withApp<T>(slug: string, fn: () => Promise<T>): Promise<T> {
+    await this.requireGit();
     const prev = this.locks.get(slug) ?? Promise.resolve();
     const run = prev.then(fn, fn);
     const tail = run.catch(() => undefined);
@@ -245,7 +255,7 @@ export class AppStore {
     const hit = this.treeCache.get(key);
     if (hit !== undefined) return hit;
     const read = await readAppTree(this.git(a), tree);
-    if (!read.ok) throw new AppStoreError(500, 'unreadable_tree', `app ${a.slug} tree ${tree} cannot be read: ${read.findings.map((f) => f.message).join('; ')}`);
+    if (!read.ok) throw new AppStoreError(409, 'unreadable_tree', `app ${a.slug} tree ${tree} cannot be read from its repo (it may have been changed): ${read.findings.map((f) => f.message).join('; ')}`);
     const files: AppFiles = { ...read.files, lock: read.files.lock ?? EMPTY_LOCK };
     if (this.treeCache.size > 256) this.treeCache.clear();
     this.treeCache.set(key, files);
@@ -253,13 +263,26 @@ export class AppStore {
   }
 
   async detail(slug: string): Promise<AppDetail> {
+    await this.requireGit();
     const a = this.app(slug);
-    await this.refreshTurn(a);
+    await this.refreshTurn(a, { locked: false });
     // One snapshot: the summary, versions and pointer are taken together with the head whose files are
     // read, so a landing during the read cannot pair a new base with an old spec (codex r1 on the store).
     const snap = structuredClone({ summary: this.summary(a), versions: a.versions, history: this.historyOf(a), root: a.root });
     const files = await this.files({ ...a, root: snap.root }, snap.summary.head.tree);
     return { ...snap.summary, spec: files.spec, lock: files.lock, queryText: { ...files.queryText }, versions: snap.versions, history: snap.history };
+  }
+
+  /**
+   * After a version is committed to the record, point `main` at it. A failure here never undoes or fails
+   * the landing (the record is the truth): it is logged, and the next change or the boot repairs `main`.
+   */
+  private async mirror(a: StoredApp, commit: string): Promise<void> {
+    try {
+      await this.git(a).setMain(commit);
+    } catch (err) {
+      this.log(`[apps] ${a.slug}: main could not be pointed at ${commit} (repaired on the next change): ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /** The first accepted receipt `tree` holds in this app, or `null`. */
@@ -288,6 +311,7 @@ export class AppStore {
 
   /** The spec at an accepted tree of this app (the query route's step 1-2). */
   async acceptedSpec(slug: string, version: number | string): Promise<{ spec: AppSpec; tree: string; receipt: AppReceipt }> {
+    await this.requireGit();
     const a = this.app(slug);
     const r = await this.resolve(slug, version);
     if (r === null) throw new AppStoreError(404, 'unknown_version', `app ${slug} has no version ${JSON.stringify(version)}`);
@@ -298,9 +322,13 @@ export class AppStore {
 
   // ── The turn lock ───────────────────────────────────────────────────────────────────────────────
 
-  /** A turn whose run has ended no longer holds the app (a lost end event, a restart). */
-  private async refreshTurn(a: StoredApp): Promise<void> {
-    if (a.turn === null || this.turns === null) return;
+  /**
+   * A turn whose run has ended no longer holds the app (a lost end event, a restart). The engine is asked
+   * outside any lock; the turn is cleared only under the app's lock (`locked`: the caller holds it), only if
+   * it is still the turn that was asked about, and never while its launch is in flight (codex r2).
+   */
+  private async refreshTurn(a: StoredApp, opts: { locked: boolean }): Promise<void> {
+    if (a.turn === null || a.turn.launching === true || this.turns === null) return;
     const runId = a.turn.runId;
     let active = true;
     try {
@@ -308,14 +336,17 @@ export class AppStore {
     } catch (err) {
       this.log(`[apps] cannot tell whether turn ${runId} of ${a.slug} still runs (it keeps the app read-only): ${err instanceof Error ? err.message : String(err)}`);
     }
-    // Only the turn that was asked about is cleared: a newer one launched meanwhile stays (codex r1).
-    const current = this.state.apps[a.slug];
-    if (!active && current !== undefined && current.turn?.runId === runId) {
+    if (active) return;
+    const clear = async (): Promise<void> => {
+      const current = Object.hasOwn(this.state.apps, a.slug) ? this.state.apps[a.slug]! : undefined;
+      if (current === undefined || current.turn?.runId !== runId || current.turn.launching === true) return;
       this.log(`[apps] turn ${runId} of ${a.slug} is no longer running; the app is editable again`);
       this.transact(a.slug, () => {
         current.turn = null;
       });
-    }
+    };
+    if (opts.locked) await clear();
+    else await this.withApp(a.slug, clear);
   }
 
   private turnInFlight(a: StoredApp, what: string): AppStoreError {
@@ -327,7 +358,7 @@ export class AppStore {
 
   /** The guard every change runs first: no turn in flight, the base is the head, `main` mirrors the head. */
   private async guard(a: StoredApp, base: number, what: string, opts: { turnRun?: string } = {}): Promise<void> {
-    await this.refreshTurn(a);
+    await this.refreshTurn(a, { locked: true });
     if (a.turn !== null && a.turn.runId !== opts.turnRun) throw this.turnInFlight(a, what);
     const h = this.head(a);
     if (base !== h.version) {
@@ -350,7 +381,7 @@ export class AppStore {
       // The turn is recorded under the run id crew chose BEFORE the run starts, so a crash between the two
       // leaves a turn crew can ask about, never a run with no lock (codex r1 on the store).
       const runId = `apps-${slug}-${randomBytes(6).toString('hex')}`;
-      const turn: StoredTurn = { runId, startedAt: this.now(), base: input.base, actor: input.actor.id, launchedBy: input.actor, checked: null, checkedTree: null, checkedSummary: null };
+      const turn: StoredTurn = { runId, startedAt: this.now(), base: input.base, actor: input.actor.id, launchedBy: input.actor, checked: null, checkedTree: null, checkedSummary: null, launching: true };
       this.transact(slug, () => {
         a.turn = turn;
       });
@@ -362,6 +393,9 @@ export class AppStore {
         });
         throw err;
       }
+      this.transact(slug, () => {
+        if (a.turn?.runId === runId) delete a.turn.launching;
+      });
       return { runId, startedAt: turn.startedAt, base: turn.base, actor: turn.actor };
     });
   }
@@ -383,7 +417,7 @@ export class AppStore {
    * and commits it on the candidate. That commit is the tree the turn offers, and the only one a review
    * can land.
    */
-  async checkTurn(slug: string, runId: string, candidate: string): Promise<{ ok: true; commit: string; tree: string; summary: AppCheckSummary } | { ok: false; code: string; findings: AppCheckFinding[] }> {
+  async checkTurn(slug: string, runId: string, candidate: string): Promise<AppsCheckResponse> {
     return this.withApp(slug, async () => {
       const a = this.app(slug);
       if (a.turn?.runId !== runId) throw new AppStoreError(409, 'not_this_turn', `run ${runId} is not ${slug}'s turn in flight`);
@@ -440,7 +474,7 @@ export class AppStore {
         a.turn = null;
         this.pushHistory(a, landed.version);
       });
-      await git.setMain(commit);
+      await this.mirror(a, commit);
       return landed!;
     });
   }
@@ -468,17 +502,25 @@ export class AppStore {
    */
   async suggest(slug: string): Promise<string> {
     const words = slug.split('-');
-    const stem = (suffix: string): string => {
-      if (words.length < 4) return `${slug.slice(0, 48 - suffix.length - 1)}-${suffix}`;
-      const head = words.slice(0, 3).join('-');
-      return `${head}-${words[3]!.slice(0, Math.max(1, 48 - head.length - 1 - suffix.length))}${suffix}`;
+    /** `slug` with `suffix` added, shortened (longest word first, each kept to one letter at least) to fit 48. */
+    const candidate = (suffix: string): string => {
+      const w = words.length < 4 ? [...words, suffix] : [...words.slice(0, 3), `${words[3]}${suffix}`];
+      const last = w.length - 1;
+      const keep = (i: number): number => (i === last ? suffix.length + 1 : 1);
+      while (w.join('-').length > 48) {
+        let longest = -1;
+        for (let i = 0; i < w.length; i++) if (w[i]!.length > keep(i) && (longest < 0 || w[i]!.length > w[longest]!.length)) longest = i;
+        if (longest < 0) break;
+        w[longest] = longest === last ? `${w[longest]!.slice(0, w[longest]!.length - suffix.length - 1)}${suffix}` : w[longest]!.slice(0, -1);
+      }
+      return w.join('-');
     };
     for (let i = 2; i < 100; i++) {
-      const c = stem(String(i));
+      const c = candidate(String(i));
       if (await this.free(c)) return c;
     }
     for (let i = 0; i < 20; i++) {
-      const c = stem(randomBytes(3).toString('hex'));
+      const c = candidate(randomBytes(3).toString('hex'));
       if (await this.free(c)) return c;
     }
     throw new AppStoreError(409, 'slug_taken', `${slug} is taken and no free name like it was found`);
@@ -509,6 +551,7 @@ export class AppStore {
       await this.assertNewSlug(slug);
       const { root } = await this.createEmptyRepo(slug);
       try {
+        if (await this.registry.idTaken(slug)) throw new AppStoreError(409, 'slug_taken', `${slug} was registered by something else meanwhile`, { suggestion: await this.suggest(slug) });
         return { root, repo: await this.registry.register(slug, root) };
       } catch (err) {
         await rm(root, { recursive: true, force: true }).catch(() => undefined);
@@ -548,22 +591,31 @@ export class AppStore {
         await rm(root, { recursive: true, force: true }).catch(() => undefined);
         throw err;
       }
-      await this.registerApp(slug);
+      await this.registerApp(slug, { compensate: true });
       return this.detail(slug);
     });
   }
 
-  /** Register an app whose record has no repo id yet; on a refusal, the app and its repo are removed. */
-  private async registerApp(slug: string): Promise<void> {
+  /**
+   * Register an app whose record has no repo id yet. At creation (`compensate`) a refusal removes the app
+   * and its repo, so the slug can be tried again; at recovery it never does (the app may already hold
+   * accepted versions): the app stays, and the next boot tries again (codex r2). Just before registering,
+   * the id is checked again, narrowing the window in which another registration could take it.
+   */
+  private async registerApp(slug: string, opts: { compensate: boolean }): Promise<void> {
     const a = this.app(slug);
     let repoId: string;
     try {
+      const existing = await this.registry.idTaken(slug);
+      if (existing && opts.compensate) throw new AppStoreError(409, 'slug_taken', `${slug} was registered by something else meanwhile`, { suggestion: await this.suggest(slug) });
       repoId = (await this.registry.register(slug, a.root)).id;
     } catch (err) {
-      this.transact(slug, () => {
-        delete this.state.apps[slug];
-      });
-      await rm(a.root, { recursive: true, force: true }).catch(() => undefined);
+      if (opts.compensate) {
+        this.transact(slug, () => {
+          delete this.state.apps[slug];
+        });
+        await rm(a.root, { recursive: true, force: true }).catch(() => undefined);
+      }
       throw err;
     }
     this.transact(slug, () => {
@@ -571,11 +623,16 @@ export class AppStore {
     });
   }
 
-  /** At boot: finish the registration of any app a crash left unregistered. */
+  /** At boot: finish any registration a crash interrupted, and point every app's `main` at its head. */
   async reconcile(): Promise<void> {
+    if ((await gitProblem()) !== null) return;
     for (const slug of Object.keys(this.state.apps)) {
-      if (this.state.apps[slug]!.repoId !== '') continue;
-      await this.withApp(slug, () => this.registerApp(slug)).catch((err: unknown) => this.log(`[apps] ${slug} could not be registered: ${err instanceof Error ? err.message : String(err)}`));
+      await this.withApp(slug, async () => {
+        const a = this.app(slug);
+        if (a.repoId === '') await this.registerApp(slug, { compensate: false });
+        const head = this.head(a).commit;
+        if ((await this.git(a).main()) !== head) await this.mirror(a, head);
+      }).catch((err: unknown) => this.log(`[apps] ${slug} could not be reconciled: ${err instanceof Error ? err.message : String(err)}`));
     }
   }
 
@@ -584,7 +641,7 @@ export class AppStore {
   private async writeTree(git: AppGit, spec: AppSpec, queryText: Record<string, string>, lock: AppLock): Promise<string> {
     const queryEntries: Array<{ mode: string; type: 'blob'; sha: string; name: string }> = [];
     for (const q of spec.queries) {
-      queryEntries.push({ mode: '100644', type: 'blob', sha: await git.writeBlob(queryText[q.id] ?? ''), name: `${q.id}.${QUERY_EXT[q.kind]}` });
+      queryEntries.push({ mode: '100644', type: 'blob', sha: await git.writeBlob(ownText(queryText, q.id) ?? ''), name: `${q.id}.${QUERY_EXT[q.kind]}` });
     }
     const root: Array<{ mode: string; type: 'blob' | 'tree'; sha: string; name: string }> = [
       { mode: '100644', type: 'blob', sha: await git.writeBlob(specBytes(spec)), name: SPEC_PATH },
@@ -633,7 +690,7 @@ export class AppStore {
       landed = this.record(a, { commit, tree, at, author: humanAuthor(opts.actor), receipt: opts.receipt(version, tree, at), summary: opts.summary, check: outcome.summary, base: h.version });
       opts.history(version);
     });
-    await git.setMain(commit);
+    await this.mirror(a, commit);
     return landed!;
   }
 
@@ -681,7 +738,7 @@ export class AppStore {
         throw new AppStoreError(409, direction === 'undo' ? 'nothing_to_undo' : 'nothing_to_redo', direction === 'undo' ? 'there is no earlier accepted version to go back to' : 'there is nothing to redo');
       }
       const target = a.versions[states[to]! - 1]!;
-      const held = this.acceptedReceipt(slug, target.tree);
+      const held = target.receipt !== null && ACCEPTED.has(target.receipt.kind) ? target.receipt : this.acceptedReceipt(slug, target.tree);
       if (held === null) throw new AppStoreError(409, 'not_accepted', `v${target.version} holds no accepted receipt`);
       const files = await this.files(a, target.tree);
       return this.land(a, { spec: files.spec, queryText: files.queryText }, {
@@ -703,7 +760,10 @@ export class AppStore {
       await this.guard(a, input.base, 'this restore');
       const r = await this.resolve(slug, input.version);
       if (r === null) throw new AppStoreError(404, 'unknown_version', `${slug} has no version ${JSON.stringify(input.version)}`);
-      const held = this.acceptedReceipt(slug, r.tree);
+      // A known version's OWN accepted receipt carries its provenance; a tree-level one only for a commit
+      // that is no accepted version of this app (codex r2: two versions can share a tree).
+      const own = r.version !== null ? a.versions[r.version - 1]!.receipt : null;
+      const held = own !== null && ACCEPTED.has(own.kind) ? own : this.acceptedReceipt(slug, r.tree);
       if (held === null) {
         throw new AppStoreError(409, 'not_accepted', `${typeof input.version === 'number' ? `v${input.version}` : input.version} is not in ${slug}'s accepted history (no you, reviewed or restored receipt); it cannot be restored`);
       }

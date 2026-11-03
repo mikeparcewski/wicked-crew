@@ -100,7 +100,8 @@ import type { CreateStandingOrderSchema, ParseStandingOrderSchema, StandingAwayS
 import type { StandingOrdersState as ServedStandingOrdersState } from '../src/standing-orders/store.js';
 import type { DEFAULT_SETTINGS, RecordedEvent } from '../src/core/types.js';
 import type { AppSpecSchema } from '../src/apps/spec.js';
-import type { AppCreateSchema, AppEditsSchema, AppHistoryMoveSchema, AppQuerySchema, AppRestoreSchema, AppTurnSchema } from '../src/apps/routes.js';
+import type { AppCreateSchema, AppEditsSchema, AppHistoryMoveSchema, AppQuerySchema, AppRestoreSchema, AppsCheckSchema, AppTurnSchema } from '../src/apps/routes.js';
+import type { AppStore } from '../src/apps/store.js';
 import type { RegisterRepoSchema } from '../src/api/routes.js';
 
 /** Compile-time: what the daemon PRODUCES must satisfy what the contract PUBLISHES. */
@@ -1131,6 +1132,13 @@ accepts<z.input<typeof AppRestoreSchema>, Wire.AppRestoreBody>();
 accepts<z.input<typeof AppQuerySchema>, Wire.AppQueryBody>();
 accepts<z.input<typeof AppTurnSchema>, Wire.AppTurnBody>();
 accepts<z.input<typeof RegisterRepoSchema>, Wire.RegisterRepoBody>();
+accepts<z.input<typeof AppsCheckSchema>, Wire.AppsCheckBody>();
+// …and what the store produces is what the contract publishes (pi r2 on the store).
+respondsWith<Wire.AppDetail, Awaited<ReturnType<AppStore['detail']>>>();
+respondsWith<Wire.AppSummary[], ReturnType<AppStore['list']>>();
+respondsWith<Wire.AppVersion, Awaited<ReturnType<AppStore['edit']>>>();
+respondsWith<Wire.AppTurnState, Awaited<ReturnType<AppStore['beginTurn']>>>();
+respondsWith<Wire.AppsCheckResponse, Awaited<ReturnType<AppStore['checkTurn']>>>();
 // The variants are exclusive in the contract as they are in the schema (codex r1): one kind each.
 // @ts-expect-error a value is one variant
 export const twoValues: Wire.AppValue = { kind: 'param', name: 'x', value: 1 };
