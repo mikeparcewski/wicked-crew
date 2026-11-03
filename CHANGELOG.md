@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.16.13] — 2026-11-03
+
+A feature release on wicked-core-ts ^0.15.21 and wicked-crew-api-types 0.172.0, bundling wicked-studio 0.14.1. It carries the PRs since 0.16.12 (#1263, #1269, #1278, #1283, #1285) and raises the interactive bridge floor. Make it creates a grounded document from a chat, exactly once (A3, #1278), and its draft lands only on the head it started from, now that crew spawns wicked-interactive ^0.15.0. An editor plugin's frame can no longer use WebRTC (#1269). The Apps schema and the app store's wire contract (K2a, #1285) are types and validation only: no daemon route serves them yet. The release smoke runs on wicked-ci f1775d8 (#1283), and the site has studio's look (#1263, site only). Pins: wicked-core-ts ^0.15.21, wicked-studio ^0.14.1, wicked-vault ^0.8.0, wicked-interactive ^0.15.0 (bridge floor, was ^0.14.1), wicked-crew-api-types 0.172.0.
+
 ### Added
 
 - **Apps: the `apps.json` schema and the app store's wire contract (api-types 0.172.0, DES-APPS-001 slice K2a).** The
@@ -61,7 +65,6 @@ mentioned only where a daemon release depends on them.
   - Change something on a create takes `repos` and, in a chat filed in no project, `project` (sources, repositories and
     the conversation are re-checked against the target project and struck when outside it). The test configuration
     keeps the recording stub only for refine, theme and demo (`capabilities.chatArtifacts.stubOps`).
-
 
 ### Changed
 
@@ -5333,7 +5336,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.12...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.13...HEAD
+[0.16.13]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.12...v0.16.13
 [0.16.12]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.11...v0.16.12
 [0.16.11]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.10...v0.16.11
 [0.16.10]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.9...v0.16.10
