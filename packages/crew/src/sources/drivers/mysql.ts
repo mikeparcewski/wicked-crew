@@ -23,6 +23,19 @@ import { type ReadOptions, READ_MAX_ROWS, type SqlConnectArgs, type SqlDescribe,
 /** The session's SQL mode: MySQL 8's defaults plus NO_BACKSLASH_ESCAPES; no ANSI_QUOTES, no PIPES_AS_CONCAT. */
 export const MYSQL_SQL_MODE = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION,NO_BACKSLASH_ESCAPES';
 
+/**
+ * Storage engines whose rows live in this server. Any other engine (FEDERATED reads another server;
+ * an engine this list does not know) is treated as foreign: never read (fail closed).
+ */
+const LOCAL_ENGINES = new Set(['INNODB', 'MYISAM', 'MEMORY', 'ARCHIVE', 'CSV', 'MRG_MYISAM', 'BLACKHOLE', 'NDB', 'NDBCLUSTER', 'TEMPTABLE', 'PERFORMANCE_SCHEMA']);
+
+/** A relation's kind from `information_schema.TABLES` (`TABLE_TYPE`, `ENGINE`), for the catalog and the live check alike. */
+export function mysqlRelationKind(tableType: string, engine: string | null): 'table' | 'view' | 'foreign' | 'other' {
+  if (tableType === 'VIEW' || tableType === 'SYSTEM VIEW') return 'view';
+  if (tableType !== 'BASE TABLE') return 'other';
+  return engine !== null && LOCAL_ENGINES.has(engine.toUpperCase()) ? 'table' : 'foreign';
+}
+
 /** A column type code as its MySQL name (`LONGLONG`, `NEWDECIMAL`, `VAR_STRING`, …). */
 function typeName(f: { columnType?: number; type?: number }): string {
   const code = f.columnType ?? f.type;
@@ -76,7 +89,11 @@ export async function mysqlConnect(args: SqlConnectArgs, deadlineMs = STATEMENT_
     throw mysqlError(err);
   }
   try {
-    await conn.query(`SET SESSION sql_mode = '${MYSQL_SQL_MODE}', SESSION max_execution_time = ${Math.max(1, Math.floor(deadlineMs))}`);
+    // max_execution_time stops a SELECT at the source; lock_wait_timeout stops a wait on a metadata or
+    // table lock, which max_execution_time does not cover (seconds, rounded up).
+    await conn.query(
+      `SET SESSION sql_mode = '${MYSQL_SQL_MODE}', SESSION max_execution_time = ${Math.max(1, Math.floor(deadlineMs))}, SESSION lock_wait_timeout = ${Math.max(1, Math.ceil(deadlineMs / 1000))}`,
+    );
     await conn.query('SET SESSION TRANSACTION READ ONLY');
   } catch (err) {
     conn.destroy();
@@ -97,8 +114,8 @@ export function mysqlError(err: unknown): SourceQueryError {
   return new SourceQueryError(null, 'connection', message);
 }
 
-/** Describe `text` with COM_STMT_PREPARE: never executed. */
-export async function mysqlDescribe(args: SqlConnectArgs, text: string): Promise<SqlDescribe> {
+/** Describe `text` with COM_STMT_PREPARE: never executed. Its relations are checked live first (as a read's). */
+export async function mysqlDescribe(args: SqlConnectArgs, text: string, expect?: readonly MysqlRelationExpectation[]): Promise<SqlDescribe> {
   const conn = await mysqlConnect(args);
   // A prepare can wait on a metadata lock: the deadline ends it (the connection is dropped).
   let timedOut = false;
@@ -107,6 +124,7 @@ export async function mysqlDescribe(args: SqlConnectArgs, text: string): Promise
     conn.destroy();
   }, STATEMENT_DEADLINE_MS);
   try {
+    if (expect !== undefined) await mysqlExpectRelations(conn, expect);
     const stmt = await conn.prepare(text);
     try {
       const info = (stmt as unknown as { statement: { columns?: Array<FieldPacket & { columnType?: number }>; parameters?: unknown[] } }).statement;
@@ -126,6 +144,9 @@ export async function mysqlDescribe(args: SqlConnectArgs, text: string): Promise
   }
 }
 
+/** How long the KILL QUERY connection (and then the KILL) may take before the read's connection is dropped. */
+const KILL_CONNECT_MS = 3_000;
+
 /** What a read expects of its relations, checked live before it runs (as drivers/postgres.ts). */
 export interface MysqlRelationExpectation {
   schema: string;
@@ -135,9 +156,11 @@ export interface MysqlRelationExpectation {
 
 async function mysqlExpectRelations(conn: Connection, expect: readonly MysqlRelationExpectation[]): Promise<void> {
   for (const e of expect) {
-    const [rows] = (await conn.execute('SELECT TABLE_TYPE AS t FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?', [e.schema, e.name])) as unknown as [Array<{ t: string }>];
-    const t = rows[0]?.t;
-    const kind = t === undefined ? null : t === 'BASE TABLE' ? 'table' : t === 'VIEW' || t === 'SYSTEM VIEW' ? 'view' : 'other';
+    const [rows] = (await conn.execute('SELECT TABLE_TYPE AS t, ENGINE AS engine FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?', [e.schema, e.name])) as unknown as [
+      Array<{ t: string; engine: string | null }>,
+    ];
+    const row = rows[0];
+    const kind = row === undefined ? null : mysqlRelationKind(row.t, row.engine);
     if (kind === null || !(e.kinds as readonly string[]).includes(kind)) throw new SourceQueryError(null, 'refused', `${e.schema}.${e.name} changed at the source (it is ${kind ?? 'gone'} now): describe the source again`);
   }
 }
@@ -157,18 +180,31 @@ export async function mysqlRead(args: SqlConnectArgs, text: string, params: unkn
     if (killed || ended) return;
     killed = true;
     // The KILL connection goes to the very address the read runs on, and gives up quickly; when it
-    // cannot be had, the read's own connection is dropped as the last resort.
-    const killer = await Promise.race([
-      mysqlConnect(args, 5_000, conn.crewAddress ?? null).catch(() => null),
-      new Promise<null>((r) => setTimeout(() => r(null), 3_000).unref()),
-    ]);
+    // cannot be had, the read's own connection is dropped as the last resort. A killer connection that
+    // arrives after the race was lost is closed at once, never left holding a server slot.
+    let raceOver = false;
+    const attempt = mysqlConnect(args, 5_000, conn.crewAddress ?? null).then(
+      (c) => {
+        if (raceOver) {
+          c.destroy();
+          return null;
+        }
+        return c;
+      },
+      () => null,
+    );
+    const killer = await Promise.race([attempt, new Promise<null>((r) => setTimeout(() => r(null), KILL_CONNECT_MS).unref())]);
+    raceOver = true;
     if (killer === null || ended) {
       killer?.destroy();
       conn.destroy();
       return;
     }
     try {
-      await killer.query(`KILL QUERY ${Math.trunc(conn.threadId)}`);
+      // The KILL itself is bounded too: a killer that hangs drops the read's connection instead.
+      const sent = killer.query(`KILL QUERY ${Math.trunc(conn.threadId)}`).then(() => true);
+      const ok = await Promise.race([sent, new Promise<false>((r) => setTimeout(() => r(false), KILL_CONNECT_MS).unref())]);
+      if (!ok) conn.destroy();
     } catch {
       conn.destroy(); // the query may have just ended; either way it is not left running on our side
     } finally {

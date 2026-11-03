@@ -3,6 +3,8 @@
 // the G6 test call (named first, then sent exactly), uploads with sample rows for humans only.
 
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,11 +21,14 @@ import { McpRegistry } from '../src/mcp/registry.js';
 import { McpRegistryStore } from '../src/mcp/registry-store.js';
 import type { SecretStore } from '../src/mcp/secrets.js';
 import { sourceDescriptorHash } from '../src/sources/kinds.js';
-import { registerSourceRoutes } from '../src/sources/routes.js';
+import { graphqlPost } from '../src/sources/graphql.js';
+import { registerSourceRoutes, switchLocksHeldForTests } from '../src/sources/routes.js';
+import { ingestUpload } from '../src/sources/uploads.js';
 import { startGraphqlServer, startMcpServer, startOpenApiService } from './fixtures/apps-sources/servers.mjs';
 import { makeSqlite } from './fixtures/apps-sources/uploads/make.mjs';
 
 const FIX = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'apps-sources', 'uploads');
+const LEAKY = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'apps-sources', 'leaky-mcp.mjs');
 const AGENT: Actor = { id: 'worker-1', kind: 'agent', trust: 'operator' };
 const LOOP = { allow: ['127.0.0.0/8'] };
 
@@ -188,6 +193,144 @@ describe('the OpenAPI test service and the reference MCP server as sources', () 
   });
 });
 
+describe('review r2 folds (codex): what reaches whom, and what a confirmation binds', () => {
+  it('a test call failing upstream: its words are scrubbed of the secret, the sent call is audited; a re-save under another env name makes the confirmation stale (S7, S14, S13)', async () => {
+    const secret = `k1-leak-${Date.now().toString(36)}-sentinel`;
+    process.env['WKD_K1_LEAK'] = secret;
+    try {
+      const cfg = { name: 'leaky', kind: 'mcp-stdio', command: process.execPath, args: [LEAKY], auth: { ref: 'env:WKD_K1_LEAK', env: 'TOKEN_A' } };
+      await register(cfg);
+      const named = (await app.inject({ method: 'POST', url: '/api/v1/sources/leaky/test-call', payload: { target: 'peek' } })).json() as Extract<SourceTestCallResponse, { sent: false }>;
+      expect(named.sent).toBe(false);
+      const sent = await app.inject({ method: 'POST', url: '/api/v1/sources/leaky/test-call', payload: { target: 'peek', confirm: named.requestHash } });
+      expect(sent.statusCode).toBeGreaterThanOrEqual(400);
+      expect(sent.statusCode).not.toBe(500);
+      expect(sent.body).toContain('refused the token');
+      expect(sent.body).not.toContain(secret);
+      await audit.flush();
+      const calls = (await audit.read()).filter((e) => e.action === 'apps.source.test_call');
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.detail).toMatchObject({ source: 'leaky', ok: false });
+      expect(JSON.stringify(calls)).not.toContain(secret);
+      // The confirmation binds the whole non-secret config: the env name the secret is injected under too.
+      const again = (await app.inject({ method: 'POST', url: '/api/v1/sources/leaky/test-call', payload: { target: 'peek' } })).json() as Extract<SourceTestCallResponse, { sent: false }>;
+      await register({ ...cfg, auth: { ...cfg.auth, env: 'TOKEN_B' } });
+      const stale = await app.inject({ method: 'POST', url: '/api/v1/sources/leaky/test-call', payload: { target: 'peek', confirm: again.requestHash } });
+      expect(stale.statusCode).toBe(409);
+      expect(stale.json()).toMatchObject({ code: 'request_changed' });
+    } finally {
+      delete process.env['WKD_K1_LEAK'];
+    }
+  });
+
+  it("a redirect's Location reaches a human only; an agent gets the refusal code (S6)", async () => {
+    let redirect = false;
+    const front = createServer((req, res) => {
+      if (redirect) {
+        res.writeHead(302, { location: 'https://elsewhere.example/leak-marker-7q' }).end();
+        return;
+      }
+      let body = '';
+      req.on('data', (c: Buffer) => (body += c.toString()));
+      req.on('end', () => {
+        void fetch(`${gql.origin}/graphql`, { method: 'POST', headers: { 'content-type': 'application/json' }, body }).then(async (r) => {
+          res.writeHead(r.status, { 'content-type': 'application/json' }).end(await r.text());
+        });
+      });
+    });
+    await new Promise<void>((r) => front.listen(0, '127.0.0.1', r));
+    try {
+      await register({ name: 'hop', kind: 'graphql', url: `http://127.0.0.1:${(front.address() as AddressInfo).port}/graphql`, address: { ...LOOP, plaintext: true } });
+      redirect = true;
+      actor = AGENT;
+      const agentSees = await app.inject({ method: 'POST', url: '/api/v1/sources/hop/describe' });
+      expect(agentSees.statusCode).toBe(409);
+      expect(agentSees.json()).toMatchObject({ code: 'redirect_refused' });
+      expect(agentSees.body).not.toContain('leak-marker-7q');
+      actor = LOCAL_ACTOR;
+      const humanSees = await app.inject({ method: 'POST', url: '/api/v1/sources/hop/describe' });
+      expect(humanSees.json()).toMatchObject({ code: 'redirect_refused' });
+    } finally {
+      front.closeAllConnections();
+      await new Promise<void>((r) => front.close(() => r()));
+    }
+  });
+
+  it('R3: removing a source never deletes the catalog of the source saved under its name right after', async () => {
+    const registry = new McpRegistry({ store: new McpRegistryStore(join(base, 'mcp3')), secrets: new MemorySecretStore(), probe: probeMcpServer, discover: () => [] });
+    const up = await ingestUpload('r.csv', readFileSync(join(FIX, 'with-header.csv')), { dir: join(base, 'snapshots') });
+    await registry.registerSnapshotSource('tix', up.digest, { catalog: up.catalog });
+    // Hold the catalog deletion open: a save of the same name must wait for it, not slip in before it.
+    const catalogs = (registry as unknown as { catalogs: { remove: (n: string) => Promise<void> } }).catalogs;
+    const realRemove = catalogs.remove.bind(catalogs);
+    let release = (): void => undefined;
+    const gate = new Promise<void>((r) => (release = r));
+    catalogs.remove = async (n) => {
+      await gate;
+      return realRemove(n);
+    };
+    const removing = registry.remove('tix');
+    await new Promise((r) => setTimeout(r, 50));
+    const replacing = registry.registerSnapshotSource('tix', up.digest, { catalog: up.catalog });
+    setTimeout(release, 150);
+    await Promise.all([removing, replacing]);
+    expect((await registry.source('tix')).description).not.toBeNull();
+  });
+
+  it("a probe's source words: the error class for health and agents, the words for a human at the preview (S5)", async () => {
+    const leaking = new McpRegistry({
+      store: new McpRegistryStore(join(base, 'mcp2')),
+      secrets: new MemorySecretStore(),
+      probe: async () => ({ ok: false, error: 'the source answered source (SQLSTATE 42501)', sourceDetail: 'permission denied for table payroll_marker' }),
+      discover: () => [],
+    });
+    const app2 = Fastify({ logger: false });
+    registerMcpRoutes(app2, { registry: leaking, audit, actorOf: () => actor });
+    await app2.ready();
+    try {
+      const payload = { name: 'pub', kind: 'sql', sql: { driver: 'postgres', host: 'db.example.com', database: 'd', user: 'u' } };
+      actor = AGENT;
+      const agentSees = await app2.inject({ method: 'POST', url: '/api/v1/mcp/servers/preview', payload });
+      expect(agentSees.statusCode).toBe(502);
+      expect(agentSees.body).toContain('SQLSTATE 42501');
+      expect(agentSees.body).not.toContain('payroll_marker');
+      actor = LOCAL_ACTOR;
+      expect((await app2.inject({ method: 'POST', url: '/api/v1/mcp/servers/preview', payload })).body).toContain('payroll_marker');
+    } finally {
+      await app2.close();
+    }
+    // And the prober itself: a source's own answer is the class in `error`, the words apart.
+    const notJson = createServer((_req, res) => res.writeHead(500, { 'content-type': 'text/plain' }).end('boom payroll_marker'));
+    await new Promise<void>((r) => notJson.listen(0, '127.0.0.1', r));
+    try {
+      const r = await probeMcpServer({ name: 'g', kind: 'graphql', command: null, args: [], url: `http://127.0.0.1:${(notJson.address() as AddressInfo).port}/graphql`, auth: null, address: { ...LOOP, plaintext: true } }, null);
+      expect(r).toMatchObject({ ok: false, error: 'the source answered source' });
+      expect((r as { sourceDetail?: string }).sourceDetail).toMatch(/did not answer JSON/);
+    } finally {
+      notJson.closeAllConnections();
+      await new Promise<void>((r) => notJson.close(() => r()));
+    }
+  });
+});
+
+describe('GraphQL transport failures are source error classes (codex r2: K2)', () => {
+  it('a stalled endpoint is a timeout, a closed port a connection error; neither escapes as a bare error', async () => {
+    const stalled = createServer(() => undefined); // accepts, never answers
+    await new Promise<void>((r) => stalled.listen(0, '127.0.0.1', r));
+    const port = (stalled.address() as AddressInfo).port;
+    try {
+      const src = { url: `http://127.0.0.1:${port}/graphql`, auth: null, policy: { allow: ['127.0.0.0/8'], plaintext: true } };
+      await expect(graphqlPost(src, null, { query: '{ a }' }, 300)).rejects.toMatchObject({ name: 'SourceQueryError', errorClass: 'timeout' });
+      await new Promise<void>((r) => stalled.close(() => r()));
+      stalled.closeAllConnections();
+      await expect(graphqlPost(src, null, { query: '{ a }' }, 2_000)).rejects.toMatchObject({ name: 'SourceQueryError', errorClass: 'connection' });
+    } finally {
+      stalled.closeAllConnections();
+      stalled.close();
+    }
+  });
+});
+
 describe('uploads (DES §5.1): a file becomes a sql/sqlite source', () => {
   it('a CSV: the source is registered, its first rows answered to a human only, the catalog and check work', async () => {
     const csv = readFileSync(join(FIX, 'with-header.csv'));
@@ -201,6 +344,10 @@ describe('uploads (DES §5.1): a file becomes a sql/sqlite source', () => {
     const agentUp = await app.inject({ method: 'POST', url: '/api/v1/apps/uploads?name=refunds2&filename=refunds.csv', headers: { 'content-type': 'application/octet-stream' }, payload: csv });
     expect(agentUp.statusCode).toBe(201);
     expect((agentUp.json() as SourceUploadResponse).sample).toEqual([]); // values never to an agent
+    // An agent's upload never promotes a first row to names (codex r2: S4).
+    const agentHeader = (agentUp.json() as SourceUploadResponse).header;
+    expect(agentHeader?.detected).toBe(false);
+    expect(agentHeader?.columns.every((c) => /^col_\d+$/.test(c))).toBe(true);
     actor = LOCAL_ACTOR;
     const cat = (await app.inject({ method: 'GET', url: '/api/v1/sources/refunds/catalog' })).json() as SourceCatalogResponse;
     expect(cat).toMatchObject({ kind: 'sql', catalog: { dialect: 'sqlite' } });
@@ -240,6 +387,7 @@ describe('the registry kinds and the built-in crew source', () => {
     expect(crew.json()).toMatchObject({ code: 'reserved_name' });
     await register({ name: 'tix', kind: 'graphql', url: `${gql.origin}/graphql`, address: LOOP });
     expect((await app.inject({ method: 'PUT', url: '/api/v1/sources/tix/allow-writes', payload: { allowed: true } })).statusCode).toBe(400);
+    expect(switchLocksHeldForTests()).toBe(0); // the per-source lock is gone once its last waiter is (codex r2: R4)
     const builtin = (await app.inject({ method: 'GET', url: '/api/v1/sources/crew/catalog' })).json() as SourceCatalogResponse;
     expect(builtin.kind).toBe('crew');
     expect((builtin.catalog as { routes: Array<{ path: string }> }).routes.map((r) => r.path)).toContain('/runs');

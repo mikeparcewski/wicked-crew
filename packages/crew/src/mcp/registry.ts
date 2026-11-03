@@ -60,6 +60,8 @@ export class McpRegistryError extends Error {
     readonly status: 400 | 403 | 404 | 409 | 500 | 501 | 502 | 503,
     readonly code: string,
     message: string,
+    /** (DES-APPS-001 §5.2) Fuller words that hold a source's own text: answered to a HUMAN only. */
+    readonly humanMessage?: string,
   ) {
     super(message);
   }
@@ -72,6 +74,8 @@ export interface McpCallTarget {
   rest: McpRestMapping | null;
   annotations: McpToolAnnotations | null;
   classOverride: McpToolClass | null;
+  /** The tool's saved schema hash (`null`: never registered, or no such tool). */
+  schemaHash: string | null;
   registered: boolean;
   /**
    * (G2) The tool is a `rest` tool saved before its hash covered the server's target (or whose
@@ -181,8 +185,9 @@ export class McpRegistry {
       const what = config.kind === 'rest' ? 'the OpenAPI document could not be imported' : 'the server did not answer tools/list';
       // (DES-APPS-001 §5.2) The dialer refused the connection: a 409 naming why (an unconfirmed range
       // to confirm, an always-refused address, plaintext), not an upstream failure.
-      if (result.refusal !== undefined) throw new McpRegistryError(409, result.refusal, `${what}: ${result.error}`);
-      throw new McpRegistryError(502, 'probe_failed', `${what}: ${result.error}`);
+      const human = result.sourceDetail !== undefined ? `${what}: ${result.sourceDetail}` : undefined;
+      if (result.refusal !== undefined) throw new McpRegistryError(409, result.refusal, `${what}: ${result.error}`, human);
+      throw new McpRegistryError(502, 'probe_failed', `${what}: ${result.error}`, human);
     }
     const tools = result.tools.map((t) => ({ ...t, schemaHash: hashOf(config, t) }));
     const previewHash = sha256Hex(canonicalJson({ config, tools: tools.map((t) => [t.name, t.schemaHash]) }));
@@ -440,12 +445,14 @@ export class McpRegistry {
 
   /** Remove a server, and the keychain secret it owns (`keychain:wicked-mcp/<name>`). */
   async remove(name: string): Promise<void> {
-    const removed = await this.deps.store.mutate((file) => {
+    const removed = await this.deps.store.mutate(async (file) => {
       const s = this.find(file.servers, name);
       file.servers = file.servers.filter((x) => x.name !== name);
+      // Inside the mutation, serialized with every save and upload: a source saved under this name
+      // next writes its catalog after this deletion, never before it.
+      if (s.kind === 'sql' || s.kind === 'graphql') await this.catalogs.remove(name);
       return s;
     });
-    if (removed.kind === 'sql' || removed.kind === 'graphql') await this.catalogs.remove(name);
     if (removed.auth?.ref === keychainRef(name) && this.deps.secrets.available) {
       try {
         await this.deps.secrets.delete(name);
@@ -579,6 +586,7 @@ export class McpRegistry {
       rest: t?.rest ?? null,
       annotations: t?.annotations ?? null,
       classOverride: t?.classOverride ?? null,
+      schemaHash: t?.schemaHash ?? null,
       registered: s.enabled && t !== undefined && t.enabled && statusOf(s, t) === 'registered',
       resaveRequired: t !== undefined && !targetBound(s, t),
     };

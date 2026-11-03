@@ -65,8 +65,7 @@ import type {
   PutMcpSecretSchema,
   SaveMcpServerSchema,
 } from '../src/api/mcp.js';
-import type { SourceAllowWritesSchema, SourceCheckSchema, SourcePrivilegesSchema, SourceSafetySchema, SourceTestCallSchema } from '../src/sources/routes.js';
-import type { SqlCheckResult } from '../src/sources/sql.js';
+import type { graphqlCheckAnswer, SourceAllowWritesSchema, SourceCheckSchema, SourcePrivilegesSchema, SourceSafetySchema, SourceTestCallSchema, sqlCheckAnswer } from '../src/sources/routes.js';
 import type { SafetyResult } from '../src/sources/safety/postgres.js';
 import type { PgPrivilegeReport } from '../src/sources/catalog/postgres.js';
 import type { SqlCatalog } from '../src/sources/catalog/types.js';
@@ -1111,7 +1110,12 @@ accepts<z.input<typeof SourceTestCallSchema>, Wire.SourceTestCallBody>();
 accepts<Wire.SourceSafetyResponse, SafetyResult>();
 accepts<Wire.SourcePrivilegeReport, PgPrivilegeReport>();
 accepts<Wire.SqlSourceCatalog, SqlCatalog>();
-accepts<Wire.SourceCheckResponse, Extract<SqlCheckResult, { ok: false }> extends { ok: false; code: string; detail: string } ? { ok: false; code: string; detail: string } : never>();
+// The check route answers what these mappers produce: every shape they produce is the contract's, and
+// every contract shape is one they produce (pi/codex r2: T3).
+respondsWith<Wire.SourceCheckResponse, ReturnType<typeof sqlCheckAnswer>>();
+respondsWith<ReturnType<typeof sqlCheckAnswer>, Wire.SourceCheckResponse>();
+respondsWith<Wire.SourceCheckResponse, ReturnType<typeof graphqlCheckAnswer>>();
+respondsWith<ReturnType<typeof graphqlCheckAnswer>, Wire.SourceCheckResponse>();
 accepts<z.input<typeof PatchMcpServerSchema>, Wire.PatchMcpServerBody>();
 accepts<z.input<typeof PatchMcpToolSchema>, Wire.PatchMcpToolBody>();
 accepts<z.input<typeof PutMcpSecretSchema>, Wire.PutMcpSecretBody>();

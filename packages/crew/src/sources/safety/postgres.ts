@@ -121,7 +121,7 @@ export async function pgTableSafetyIn(tx: Tx, schema: string, name: string, decl
             a.atttypid::pg_catalog.int8::pg_catalog.text AS typid, ty.typname::pg_catalog.text AS typname, ty.typtype::pg_catalog.text AS typtype,
             tn.nspname::pg_catalog.text AS typschema, (ty.oid < 16384) AS type_builtin, a.attnotnull AS notnull, a.attgenerated::pg_catalog.text AS generated,
             a.attidentity::pg_catalog.text AS identity, pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS default_expr,
-            COALESCE(cn.nspname || '.' || co.collname, '')::pg_catalog.text AS collation
+            CASE WHEN co.oid IS NULL THEN '' ELSE pg_catalog.quote_ident(cn.nspname) || '.' || pg_catalog.quote_ident(co.collname) || ' ' || pg_catalog.to_jsonb(co.*)::pg_catalog.text END AS collation
        FROM pg_catalog.pg_attribute a
        JOIN pg_catalog.pg_type ty ON ty.oid = a.atttypid JOIN pg_catalog.pg_namespace tn ON tn.oid = ty.typnamespace
        LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum

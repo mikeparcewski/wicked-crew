@@ -14,6 +14,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 import { pathToFileURL } from 'node:url';
 
 import type { CatalogRelation, SqlCatalog } from '../catalog/types.js';
@@ -39,14 +40,15 @@ try {
   if (req.op === 'inspect') {
     const objects = db.prepare("SELECT type, name, tbl_name AS tbl, sql FROM sqlite_schema ORDER BY name").all();
     // SQLite's own classification (not the schema text, which a hand-made file can word freely):
-    // table, view, virtual or shadow.
-    const kinds = new Map(db.prepare("SELECT name, type FROM pragma_table_list WHERE schema = 'main'").all().map((r) => [r.name, r.type]));
+    // table, view, virtual or shadow. Through PRAGMA statements, never the table-valued pragma_*
+    // functions: an ordinary table of the file named pragma_table_list would shadow those.
+    const kinds = new Map(db.prepare('PRAGMA main.table_list').all().filter((r) => r.schema === 'main').map((r) => [r.name, r.type]));
     const tables = [];
     for (const o of objects) {
       if (o.type !== 'table' || String(o.name).startsWith('sqlite_')) continue;
       if (kinds.get(o.name) !== 'table') continue;
       const quoted = '"' + String(o.name).replace(/"/g, '""') + '"';
-      const cols = db.prepare('SELECT name, type, "notnull" AS nn, pk, hidden FROM pragma_table_xinfo(?)').all(o.name);
+      const cols = db.prepare('PRAGMA main.table_xinfo(' + quoted + ')').all().map((c) => ({ name: c.name, type: c.type, nn: c.notnull, pk: c.pk, hidden: c.hidden }));
       const count = db.prepare('SELECT count(*) AS c FROM ' + quoted).get().c;
       tables.push({ name: o.name, sql: o.sql, columns: cols, rows: Number(count) });
     }
@@ -107,6 +109,8 @@ async function runChild(request: Record<string, unknown>, deadlineMs: number, si
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ['--no-warnings', '--input-type=module', '-e', RUNNER], { stdio: ['pipe', 'pipe', 'pipe'], env: {} });
     if (child.pid !== undefined) onSpawnForTests?.(child.pid);
+    // One decoder for the whole answer: a character split across two pipe chunks stays one character.
+    const decoder = new StringDecoder('utf8');
     let stdout = '';
     let size = 0;
     let stderr = '';
@@ -127,7 +131,7 @@ async function runChild(request: Record<string, unknown>, deadlineMs: number, si
         finish(new SourceQueryError(null, 'source', 'the answer is larger than crew reads'));
         return;
       }
-      stdout += c.toString('utf8');
+      stdout += decoder.write(c);
     });
     child.stderr.on('data', (c: Buffer) => {
       stderr = (stderr + c.toString('utf8')).slice(-2048);
@@ -136,7 +140,7 @@ async function runChild(request: Record<string, unknown>, deadlineMs: number, si
     child.on('close', () => {
       if (done) return;
       try {
-        finish(null, JSON.parse(stdout) as RunnerAnswer);
+        finish(null, JSON.parse(stdout + decoder.end()) as RunnerAnswer);
       } catch {
         finish(new SourceQueryError(null, 'source', `the SQLite runner failed${stderr === '' ? '' : `: ${stderr.trim()}`}`));
       }

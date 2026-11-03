@@ -13198,6 +13198,10 @@ export interface SourceRowWrite {
 export interface SourcePrivilegeReport {
   login: string;
   superuser: boolean;
+  /**
+   * Not a superuser, and no INSERT/UPDATE/DELETE/TRUNCATE (table or column level) on any visible
+   * table, view (an updatable view writes its table) or foreign table, nor UPDATE on a sequence.
+   */
   readOnly: boolean;
   tables: Array<{ schema: string; table: string; select: boolean; selectSomeColumns: boolean; insert: boolean; update: boolean; delete: boolean }>;
   writes: Array<{ write: SourceRowWrite; missing: string[] }>;
@@ -13228,10 +13232,16 @@ export type SourceCheckResponse =
   | {
       ok: false;
       /**
-       * The read policy's refusal class (`not_select`, `function`, `cast`, `operator`, `relation`,
-       * `view`, `unqualified`, `qualified_name`, `recursive`, `locking`, `into`, `statements`,
-       * `lexical`, `syntax`, `parse`; GraphQL `operations`, `not_query`, `invalid`). Nothing reached
-       * the source.
+       * Why the query was refused. Two kinds of class:
+       *
+       * - The read policy, before anything reaches the source: `not_select`, `function`, `cast`,
+       *   `operator`, `relation`, `view`, `unqualified`, `qualified_name`, `column`, `recursive`,
+       *   `locking`, `into`, `statements`, `lexical`, `syntax`, `parse`, `params`, `too_long`; GraphQL
+       *   `operations`, `not_query`, `invalid`.
+       * - The source, after crew connected and asked it to prepare the text (never to execute it):
+       *   `prepare` (the source refused to prepare it; its own words reach a human only, an agent gets
+       *   the SQLSTATE), `authorizer` (SQLite's authorizer denied it), `refused` (a relation changed at
+       *   the source since the describe: describe it again), or a dialer refusal code.
        */
       code: string;
       detail: string;
@@ -13311,7 +13321,11 @@ export interface SourceUploadResponse {
   snapshot: { digest: string; bytes: number; kind: 'csv' | 'xlsx' | 'sqlite' };
   /** The table a CSV/XLSX became; `null` for a `.sqlite` file. */
   table: string | null;
-  /** CSV/XLSX: whether the first row was taken as the header (a first row that looks like data becomes `col_1…`). */
+  /**
+   * CSV/XLSX: whether the first row was taken as the header, and the column names. Only a HUMAN's
+   * upload takes one (detected, or `header=yes`); a first row that looks like data, or holds values
+   * such as an email, becomes `col_1…`, and an agent's upload always gets `col_1…` names.
+   */
   header: { detected: boolean; columns: string[] } | null;
   /** The first 20 rows, answered to a HUMAN actor only (an agent gets `[]`). */
   sample: string[][];

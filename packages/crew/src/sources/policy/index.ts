@@ -29,8 +29,8 @@ export async function checkReadPolicy(dialect: SqlDialect, text: string, catalog
   if (text.includes('\0')) return { ok: false, code: 'lexical', detail: 'a NUL character is refused in query text' };
   if (dialect === 'postgres') return checkPgRead(text, catalog);
   if (dialect === 'mysql') return checkMysqlRead(text, catalog);
-  // SQLite: the authorizer decides at prepare (drivers/sqlite.ts). Statically: the placeholders.
+  // SQLite: the authorizer decides at prepare (drivers/sqlite.ts). Statically: the statement kind and the placeholders.
   const p = sqliteParams(text);
-  if (!p.ok) return { ok: false, code: 'params', detail: p.detail };
+  if (!p.ok) return { ok: false, code: p.code, detail: p.detail };
   return { ok: true, relations: [], functions: [], params: p.count };
 }

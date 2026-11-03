@@ -12,7 +12,7 @@
 import { buildClientSchema, getIntrospectionQuery, type GraphQLSchema, type IntrospectionQuery, Kind, parse, validate } from 'graphql';
 
 import { scrubSecrets } from '../mcp/secrets.js';
-import { type AddressPolicy, dialFetch, type DialOptions } from './dialer.js';
+import { type AddressPolicy, dialFetch, type DialOptions, DialRefusedError } from './dialer.js';
 import { SourceQueryError } from './drivers/types.js';
 
 export const GRAPHQL_RESPONSE_MAX_BYTES = 10 * 1024 * 1024;
@@ -59,9 +59,19 @@ async function readJsonCapped(res: Response): Promise<unknown> {
 export async function graphqlPost(src: GraphqlSource, secret: string | null, body: { query: string; variables?: Record<string, unknown> }, deadlineMs = GRAPHQL_DEADLINE_MS): Promise<{ status: number; json: unknown }> {
   const headers: Record<string, string> = { 'content-type': 'application/json', accept: 'application/json' };
   if (src.auth !== null && secret !== null) headers[src.auth.header] = `${src.auth.prefix ?? ''}${secret}`;
-  const res = await dialFetch(src.url, { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(deadlineMs) }, src.policy, src.dial ?? {});
-  const json = await readJsonCapped(res);
-  return scrubSecrets({ status: res.status, json }, secret === null ? [] : [secret]);
+  const secrets = secret === null ? [] : [secret];
+  try {
+    const res = await dialFetch(src.url, { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(deadlineMs) }, src.policy, src.dial ?? {});
+    const json = await readJsonCapped(res);
+    return scrubSecrets({ status: res.status, json }, secrets);
+  } catch (err) {
+    // Every failure is a source error class (the routes answer 504/502 for them), never a bare 500. A
+    // dialer refusal stays itself (a 409 naming why).
+    if (err instanceof SourceQueryError || err instanceof DialRefusedError) throw err;
+    const name = (err as { name?: unknown })?.name;
+    if (name === 'TimeoutError' || name === 'AbortError') throw new SourceQueryError(null, 'timeout', `the GraphQL endpoint did not answer within ${deadlineMs / 1000} s`);
+    throw new SourceQueryError(null, 'connection', scrubSecrets(`the GraphQL endpoint could not be reached: ${err instanceof Error ? err.message : String(err)}`, secrets));
+  }
 }
 
 /** Introspect the endpoint; answers the schema (for checks) and its structural catalog. */

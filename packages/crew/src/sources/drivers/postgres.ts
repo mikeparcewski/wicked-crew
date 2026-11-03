@@ -14,6 +14,9 @@
  * - The daemon's own `PG*` environment never reaches a source (no password fallback).
  */
 
+import { isIP } from 'node:net';
+import { checkServerIdentity, type PeerCertificate } from 'node:tls';
+
 import postgres from 'postgres';
 
 import { DialRefusedError, dialTcp, plaintextAllowed } from '../dialer.js';
@@ -50,10 +53,19 @@ export function pgClient(args: SqlConnectArgs, opts: { deadlineMs?: number; read
   let pinned: string | null = null;
   const params = sessionParameters(deadlineMs);
   if (opts.readOnly === false) delete params['default_transaction_read_only'];
+  // verify-full: the chain AND the name. The identity is checked against the host the person gave
+  // (a DNS name, or an IP literal against the certificate's IP SAN), never the dialled address; SNI
+  // carries a DNS name only (TLS forbids an IP there).
   const ssl =
     source.tls === 'disable'
       ? false
-      : { servername: source.host, rejectUnauthorized: true, minVersion: 'TLSv1.2' as const, ...(source.ca != null ? { ca: source.ca } : {}) };
+      : {
+          ...(isIP(source.host) === 0 ? { servername: source.host } : {}),
+          checkServerIdentity: (_host: string, cert: PeerCertificate) => checkServerIdentity(source.host, cert),
+          rejectUnauthorized: true,
+          minVersion: 'TLSv1.2' as const,
+          ...(source.ca != null ? { ca: source.ca } : {}),
+        };
   const options = {
     host: source.host,
     port: source.port,
@@ -131,10 +143,12 @@ async function typeNames(tx: postgres.TransactionSql<Record<string, never>>, oid
 
 /**
  * Prepare `text` and describe it (columns and the parameter types the server inferred, from
- * unspecified types). Parse + Describe only: the statement never executes.
+ * unspecified types). Parse + Describe only: the statement never executes. Its relations are checked
+ * live first, as a read's are (a table replaced by a view since the describe is refused here too).
  */
-export async function pgDescribe(args: SqlConnectArgs, text: string): Promise<SqlDescribe> {
+export async function pgDescribe(args: SqlConnectArgs, text: string, expect?: readonly RelationExpectation[]): Promise<SqlDescribe> {
   return pgReadOnly(args, async (tx) => {
+    if (expect !== undefined) await pgExpectRelations(tx, expect);
     const d = (await tx.unsafe(text).describe()) as unknown as { types: number[]; columns: Array<{ name: string; type: number }> | null };
     const cols = d.columns ?? [];
     const names = await typeNames(tx, [...new Set([...d.types, ...cols.map((c) => c.type)])]);
@@ -155,14 +169,31 @@ export interface RelationExpectation {
   noForeignBelow: boolean;
 }
 
+/** `"schema"."name"`, quoted for SQL. */
+const qualified = (schema: string, name: string): string => `"${schema.replace(/"/g, '""')}"."${name.replace(/"/g, '""')}"`;
+
 /**
  * Before a read runs, every relation it names is checked against the live catalog: still there,
  * still of an accepted kind (a table since replaced by a view or a foreign table is refused), and,
  * when read without ONLY, with no foreign table among its partitions or children. The stored catalog
  * the policy used may be stale; the source's own catalog is not.
+ *
+ * Each relation is LOCKed (ACCESS SHARE, what the read takes anyway) before it is checked, and the
+ * lock is held to the end of the transaction: a concurrent DROP, RENAME or CREATE OR REPLACE waits
+ * for the read, so the relation checked is the one the statement reads.
  */
 async function pgExpectRelations(tx: postgres.TransactionSql<Record<string, never>>, expect: readonly RelationExpectation[]): Promise<void> {
   for (const e of expect) {
+    try {
+      // LOCK takes tables, partitioned tables and views; a materialized view is checked unlocked.
+      if (!e.kinds.includes('matview')) await tx.unsafe(`LOCK TABLE ${qualified(e.schema, e.name)} IN ACCESS SHARE MODE`);
+    } catch (err) {
+      // Gone (42P01), or now a kind LOCK refuses, such as a foreign table (42809): changed.
+      if ((err as { code?: unknown })?.code === '42P01' || (err as { code?: unknown })?.code === '42809') {
+        throw new SourceQueryError(null, 'refused', `${e.schema}.${e.name} changed at the source (it is gone or no longer a table): describe the source again`);
+      }
+      throw err;
+    }
     const rows = await tx.unsafe<Array<{ relkind: string; foreign_below: boolean }>>(
       `WITH RECURSIVE t AS (
          SELECT c.oid, c.relkind FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2
@@ -194,8 +225,19 @@ export async function pgRead(args: SqlConnectArgs, text: string, params: unknown
   const started = Date.now();
   const sourceTimeout = opts.sourceTimeoutMs ?? deadlineMs;
   const sql = pgClient(args, { deadlineMs: sourceTimeout });
-  let guard: NodeJS.Timeout | undefined;
   let cancelled = false;
+  // ONE absolute deadline for the whole read, armed at entry: connecting, BEGIN, the live relation
+  // checks, every cursor batch and the type lookup all count (statement_timeout restarts on each
+  // statement). At it: a cancel request for the running statement (on a connection pinned to this
+  // backend), then the connection closed; before there is a statement, the connection closed at once.
+  let q: { cancel: () => unknown } | null = null;
+  const stop = (): void => {
+    cancelled = true;
+    if (q !== null) void Promise.resolve(q.cancel()).catch(() => undefined);
+    setTimeout(() => void sql.end({ timeout: 0 }).catch(() => undefined), q === null ? 0 : 1_000).unref();
+  };
+  const guard = setTimeout(stop, deadlineMs);
+  opts.signal?.addEventListener('abort', stop, { once: true });
   try {
     const out = await sql.begin('read only', async (tx) => {
       await tx.unsafe(`SET LOCAL statement_timeout = ${Math.max(1, Math.floor(sourceTimeout))}`);
@@ -203,19 +245,12 @@ export async function pgRead(args: SqlConnectArgs, text: string, params: unknown
       const rows: unknown[][] = [];
       let columns: Array<{ name: string; type: number }> = [];
       let truncated = false;
-      const q = tx.unsafe(text, params as never).values();
-      // One absolute deadline for the whole read (statement_timeout restarts on every cursor batch):
-      // at it, a cancel request (on a connection pinned to this backend), then the connection closed.
-      const remaining = Math.max(1, deadlineMs - (Date.now() - started));
-      guard = setTimeout(() => {
-        cancelled = true;
-        void Promise.resolve(q.cancel()).catch(() => undefined);
-        setTimeout(() => void sql.end({ timeout: 0 }).catch(() => undefined), 1_000).unref();
-      }, remaining);
-      opts.signal?.addEventListener('abort', () => void Promise.resolve(q.cancel()).catch(() => undefined), { once: true });
-      await q.cursor(500, (batch) => {
+      const query = tx.unsafe(text, params as never).values();
+      q = query;
+      await query.cursor(500, (batch) => {
         const b = batch as unknown as unknown[][] & { columns?: Array<{ name: string; type: number }> };
-        if (b.columns !== undefined) columns = b.columns;
+        // Only the first batch carries the columns (later ones may carry none, or null).
+        if (Array.isArray(b.columns) && b.columns.length > 0) columns = b.columns;
         for (const r of b) {
           if (rows.length >= maxRows) {
             truncated = true;
@@ -225,6 +260,8 @@ export async function pgRead(args: SqlConnectArgs, text: string, params: unknown
         }
         return undefined;
       });
+      // A read with no rows never calls the cursor back: its columns are on the prepared statement.
+      if (columns.length === 0) columns = (query as unknown as { statement?: { columns?: Array<{ name: string; type: number }> } }).statement?.columns ?? [];
       const names = await typeNames(tx, [...new Set(columns.map((c) => c.type))]);
       return { columns: columns.map((c) => ({ name: c.name, type: names.get(c.type) ?? `oid ${c.type}` })), rows, truncated };
     });

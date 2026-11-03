@@ -45,6 +45,10 @@ function expectations(h: SqlSourceHandle, keys: readonly string[]): Array<{ sche
   });
 }
 
+function mysqlExpectations(expect: ReturnType<typeof expectations>): Array<{ schema: string; name: string; kinds: Array<'table' | 'view'> }> {
+  return expect.map((e) => ({ schema: e.schema, name: e.name, kinds: e.kinds.includes('view') ? ['view'] : ['table'] }));
+}
+
 async function policy(h: SqlSourceHandle, text: string): Promise<Extract<PolicyResult, { ok: true }>> {
   const r = await checkReadPolicy(h.driver, text, policyCatalog(h.catalog, h.driver === 'sqlite' ? [] : h.viewsAllowed));
   if (!r.ok) throw new SourcePolicyError(r.code, r.detail);
@@ -56,15 +60,20 @@ export type SqlCheckResult = { ok: true; describe: SqlDescribe; relations: strin
 /** The per-kind source check: policy, then prepare/describe. Never executes the query. */
 export async function checkSqlQuery(h: SqlSourceHandle, text: string): Promise<SqlCheckResult> {
   let relations: string[];
+  let keys: string[];
   try {
-    relations = (await policy(h, text)).relations;
+    const ok = await policy(h, text);
+    relations = ok.relations;
+    keys = ok.keys ?? [];
   } catch (err) {
     if (err instanceof SourcePolicyError) return { ok: false, code: err.code, detail: err.message };
     throw err;
   }
   try {
     if (h.driver === 'sqlite') return { ok: true, describe: await sqliteDescribe(h.snapshotPath, h.catalog, text), relations };
-    return { ok: true, describe: h.driver === 'postgres' ? await pgDescribe(h.connect, text) : await mysqlDescribe(h.connect, text), relations };
+    // The live relation checks a read makes run here too: the stored catalog may be stale.
+    const expect = expectations(h, keys);
+    return { ok: true, describe: h.driver === 'postgres' ? await pgDescribe(h.connect, text, expect) : await mysqlDescribe(h.connect, text, mysqlExpectations(expect)), relations };
   } catch (err) {
     // The source refused or failed to prepare the text: a check result, not a transport failure. A
     // timeout or a lost connection stays an error.
@@ -81,5 +90,5 @@ export async function readSqlQuery(h: SqlSourceHandle, text: string, params: unk
   if (h.driver === 'sqlite') return sqliteRead(h.snapshotPath, h.catalog, text, params, opts);
   const expect = expectations(h, ok.keys ?? []);
   if (h.driver === 'postgres') return pgRead(h.connect, text, params, { ...opts, expect });
-  return mysqlRead(h.connect, text, params, { ...opts, expect: expect.map((e) => ({ schema: e.schema, name: e.name, kinds: e.kinds.includes('view') ? ['view'] : ['table'] })) });
+  return mysqlRead(h.connect, text, params, { ...opts, expect: mysqlExpectations(expect) });
 }

@@ -289,8 +289,12 @@ function auditPartial(deps: McpRouteDeps, req: FastifyRequest, err: unknown, sub
   for (const id of err.changed) deps.audit.record('governance.rule.upserted', deps.actorOf(req), { detail: { id, source: 'mcp-approval', partial: true } });
 }
 
-function fail(reply: FastifyReply, err: unknown): FastifyReply {
-  if (err instanceof McpRegistryError) return reply.code(err.status).send({ error: err.message, code: err.code });
+function fail(reply: FastifyReply, err: unknown, actor?: Actor): FastifyReply {
+  if (err instanceof McpRegistryError) {
+    // A source's own words go to a human only (DES-APPS-001 §5.2); an agent gets crew's sentence.
+    const words = actor?.kind === 'human' && err.humanMessage !== undefined ? err.humanMessage : err.message;
+    return reply.code(err.status).send({ error: words, code: err.code });
+  }
   if (err instanceof McpRegistryCorruptError) return reply.code(503).send({ error: err.message, code: 'registry_corrupt' });
   if (err instanceof SecretStoreError) return reply.code(502).send({ error: err.message, code: 'secret_store_failed' });
   throw err;
@@ -427,7 +431,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
         }
         return { ...preview, policies };
       } catch (err) {
-        return fail(reply, err);
+        return fail(reply, err, deps.actorOf(req));
       }
     },
   );

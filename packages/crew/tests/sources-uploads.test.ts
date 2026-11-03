@@ -2,7 +2,7 @@
 // child process. Real files: CSV with and without a header, XLSX, a .sqlite holding a trigger, a
 // workbook that expands past 200 MB.
 
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -93,7 +93,11 @@ describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => 
       'SELECT * FROM sqlite_schema',
       "SELECT load_extension('x')",
     ]) {
-      await expect(readSqlQuery(h, q, []), q).rejects.toThrow(/not authorized|prohibited|exactly one statement/);
+      await expect(readSqlQuery(h, q, []), q).rejects.toThrow(/not authorized|prohibited|exactly one statement|is not a read/);
+    }
+    // The authorizer holds on its own too (the statement-kind check before it aside).
+    for (const q of ["ATTACH DATABASE '/etc/hosts' AS x", 'PRAGMA table_info(refunds)', 'DELETE FROM refunds']) {
+      await expect(sqliteRead(h.snapshotPath, h.catalog, q, []), q).rejects.toThrow(/not authorized|prohibited/);
     }
     const r = await readSqlQuery(h, 'SELECT count(*) AS n, sum(amount) FROM refunds', []);
     expect(r.rows).toEqual([['2', 110.49]]);
@@ -117,6 +121,19 @@ describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => 
     expect(() => process.kill(pids[0] as number, 0)).toThrow(); // ESRCH: the process is gone, not just abandoned
   });
 
+  it('an answer full of multibyte text survives the pipe: characters split across chunks stay whole (codex r2: C5)', async () => {
+    const { DatabaseSync } = await import('node:sqlite');
+    const file = join(work, 'utf8.sqlite');
+    const text = 'é€😀'.repeat(60_000); // ~540 kB: many pipe chunks, boundaries inside characters
+    const db = new DatabaseSync(file);
+    db.exec('CREATE TABLE t (s TEXT)');
+    db.prepare('INSERT INTO t VALUES (?)').run(text);
+    db.close();
+    const up = await ingestUpload('utf8.sqlite', readFileSync(file), { dir });
+    const r = await sqliteRead(snapshotPath(up.digest, dir), up.catalog, 'SELECT s FROM t', []);
+    expect(r.rows[0]?.[0] === text).toBe(true);
+  });
+
   it('node:sqlite reports the FIRST statement as sourceSQL, which the tail check relies on (pi r1)', async () => {
     const { DatabaseSync } = await import('node:sqlite');
     const db = new DatabaseSync(':memory:');
@@ -124,10 +141,11 @@ describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => 
     db.close();
   });
 
-  it('a .sqlite holding a virtual table (its kind hidden in the schema text) or a generated column is refused (codex r1)', async () => {
+  it('a .sqlite holding a virtual table (its kind hidden in the schema text, or behind a table named pragma_table_list) or a generated column is refused (codex r1, r2)', async () => {
     makeSqlite(join(work, 'vt.sqlite'), { hiddenVirtual: true });
     makeSqlite(join(work, 'gen.sqlite'), { generated: true });
-    for (const f of ['vt.sqlite', 'gen.sqlite']) {
+    makeSqlite(join(work, 'shadow.sqlite'), { shadowPragma: true }); // codex r2: S3
+    for (const f of ['vt.sqlite', 'gen.sqlite', 'shadow.sqlite']) {
       const err = await ingestUpload(f, readFileSync(join(work, f)), { dir }).catch((e: unknown) => e);
       expect(err, f).toBeInstanceOf(UploadError);
       expect((err as UploadError).code, f).toBe('sqlite_code');
@@ -142,6 +160,12 @@ describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => 
     expect(chosen.header?.columns).toEqual(['Priya Shah', 'priya@example.com']);
     expect(detectHeader([['id', 'amount'], ['1', '2.5']], null)).toBe(true);
     expect(detectHeader([['name', 'email'], ['a', 'b']], null)).toBe(false);
+    // codex r2 (S4): a record whose shape differs from the rows under it is still a record when its
+    // cells are values (an email, a domain, a time), not names.
+    const record = Buffer.from('unknown,alice@example.com\n1,bob@example.com\n2,carol@example.com\n');
+    expect((await ingestUpload('r.csv', record, { dir })).header).toEqual({ detected: false, columns: ['col_1', 'col_2'] });
+    for (const first of [['unknown', 'example.com'], ['note', '10:30'], ['x', 'https://a.b/c']]) expect(looksLikeHeader(first), first.join()).toBe(false);
+    expect(looksLikeHeader(['Order ID', 'Amount (USD)', 'Q3 %', 'région'])).toBe(true);
   });
 
   it('CSV edge cases: exact large integers, a two-byte file, quoted delimiters, case-insensitive names, early column limit (codex r1)', async () => {
@@ -158,15 +182,33 @@ describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => 
     await expect(ingestUpload('wide.csv', wide, { dir })).rejects.toMatchObject({ code: 'too_many_columns' });
   });
 
-  it('a snapshot store inside a git work tree is refused (codex r1)', async () => {
+  it('a snapshot store inside a git work tree is refused, through a symlink too; the store ignores itself (codex r1, r2: S8)', async () => {
     const repo = mkdtempSync(join(tmpdir(), 'apps-repo-'));
+    const outside = mkdtempSync(join(tmpdir(), 'apps-link-'));
     mkdirSync(join(repo, '.git'));
+    mkdirSync(join(repo, 'state'));
+    symlinkSync(join(repo, 'state'), join(outside, 'state'));
     try {
       await expect(ingestUpload('x.csv', readFileSync(join(FIX, 'with-header.csv')), { dir: join(repo, 'state', 'mcp', 'snapshots') })).rejects.toMatchObject({ code: 'snapshot_in_repo' });
+      // The state directory is a symlink INTO the checkout: the lexical path is outside, the real one inside.
+      await expect(ingestUpload('x.csv', readFileSync(join(FIX, 'with-header.csv')), { dir: join(outside, 'state', 'mcp', 'snapshots') })).rejects.toMatchObject({ code: 'snapshot_in_repo' });
     } finally {
       rmSync(repo, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
     }
+    expect(readFileSync(join(dir, '.gitignore'), 'utf8')).toBe('*\n');
   });
+
+  it('one absolute deadline covers parsing, a row of a million cells and every inspection (codex r2: S9)', async () => {
+    const oneRow = zip([
+      { name: 'xl/workbook.xml', data: Buffer.from('<workbook xmlns:r="r"><sheets><sheet name="S" sheetId="1" r:id="rId1"/></sheets></workbook>') },
+      { name: 'xl/_rels/workbook.xml.rels', data: Buffer.from('<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>') },
+      { name: 'xl/worksheets/sheet1.xml', data: Buffer.from(`<worksheet><sheetData><row r="1">${'<c r="A1"><v>1</v></c>'.repeat(1_000_000)}</row></sheetData></worksheet>`) },
+    ]);
+    await expect(ingestUpload('one-row.xlsx', oneRow, { dir, parseMs: 5 })).rejects.toMatchObject({ code: 'too_slow' });
+    // A .sqlite's inspections share the same deadline (no fresh 30 s each).
+    await expect(ingestUpload('ok.sqlite', readFileSync(join(work, 'ok.sqlite')), { dir, parseMs: 20 })).rejects.toMatchObject({ code: 'too_slow' });
+  }, 30_000);
 
   it('XLSX: shared strings repeated past 200 MB are refused; unclosed rows end the scan at once (codex r1)', async () => {
     const huge = 'x'.repeat(1024 * 1024);

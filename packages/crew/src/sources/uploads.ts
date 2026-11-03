@@ -15,14 +15,15 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { inflateRawSync } from 'node:zlib';
 
 import { mcpStateDir } from '../mcp/registry-store.js';
 import type { SqlCatalog } from './catalog/types.js';
 import { sqliteInspect } from './drivers/sqlite.js';
+import { SourceQueryError } from './drivers/types.js';
 
 export const UPLOAD_LIMITS = Object.freeze({
   fileBytes: 50 * 1024 * 1024,
@@ -42,6 +43,13 @@ export class UploadError extends Error {
     super(message);
     this.name = 'UploadError';
   }
+}
+
+const tooSlow = (): UploadError => new UploadError('too_slow', `the file took more than ${UPLOAD_LIMITS.parseMs / 1000} s to load`);
+
+/** Throw `too_slow` once the upload's one absolute deadline has passed. */
+function within(deadline: number): void {
+  if (Date.now() > deadline) throw tooSlow();
 }
 
 export function snapshotDir(): string {
@@ -316,21 +324,24 @@ export function parseXlsx(buf: Buffer, deadline: number): string[][] {
     const sst = zip.read('xl/sharedStrings.xml');
     let sharedBytes = 0;
     for (const si of elements(sst, 'si')) {
+      if ((shared.length & 0x3ff) === 0) within(deadline);
       const t = texts(si);
       sharedBytes += t.length;
       if (sharedBytes > UPLOAD_LIMITS.expandedBytes) throw new UploadError('too_large', `the workbook's strings expand past ${UPLOAD_LIMITS.expandedBytes / (1024 * 1024)} MB`);
       shared.push(t);
     }
-    if (Date.now() > deadline) throw new UploadError('too_slow', `the file took more than ${UPLOAD_LIMITS.parseMs / 1000} s to parse`);
   }
   const sheet = zip.read(sheetPath);
   const rows: string[][] = [];
   // Shared strings are referenced, not copied: count what the cells hold once resolved, so a small
   // sheet repeating one large string cannot become a snapshot far past the expansion limit.
   let cellBytes = 0;
+  let cells = 0;
   for (const rowXml of elements(sheet, 'row')) {
     const row: string[] = [];
     for (const cell of elements(rowXml, 'c', true)) {
+      // Every cell counts toward the deadline, so one row of a million cells cannot outrun it.
+      if ((++cells & 0xfff) === 0) within(deadline);
       const ref = attr(cell.head, 'r');
       const t = attr(cell.head, 't');
       const inner = cell.body;
@@ -351,8 +362,9 @@ export function parseXlsx(buf: Buffer, deadline: number): string[][] {
     }
     if (row.length > 0 && row.some((c) => c !== '')) rows.push(row);
     if (rows.length > UPLOAD_LIMITS.rows + 1) throw new UploadError('too_many_rows', `the sheet has more than ${UPLOAD_LIMITS.rows} rows`);
-    if (rows.length % 1_000 === 0 && Date.now() > deadline) throw new UploadError('too_slow', `the file took more than ${UPLOAD_LIMITS.parseMs / 1000} s to parse`);
+    if (rows.length % 1_000 === 0) within(deadline);
   }
+  within(deadline);
   return rows;
 }
 
@@ -378,13 +390,20 @@ export function detectHeader(rows: readonly string[][], choice: 'yes' | 'no' | n
   });
 }
 
-/** A first row looks like a header when every cell is a non-empty, distinct word, none of them data-like. */
+/**
+ * A column name as people write one: a letter or `_` first, then letters, digits, spaces and a little
+ * punctuation (`Amount (USD)`, `Q3 %`, `order-id`), at most 64 characters. No `@`, `.`, `:` or `/`:
+ * an email address, a domain, a URL or a time is a value, never a name.
+ */
+const NAME_LIKE = /^[\p{L}_][\p{L}\p{N}\p{Zs}_\-()%#&]{0,63}$/u;
+
+/** A first row looks like a header when every cell is a distinct column name, none of them data-like. */
 export function looksLikeHeader(first: readonly string[]): boolean {
   if (first.length === 0) return false;
   const seen = new Set<string>();
   for (const raw of first) {
     const cell = raw.trim();
-    if (cell === '' || NUMBER.test(cell) || DATEISH.test(cell) || /^(true|false)$/i.test(cell)) return false;
+    if (cell === '' || NUMBER.test(cell) || DATEISH.test(cell) || /^(true|false)$/i.test(cell) || !NAME_LIKE.test(cell)) return false;
     const k = cell.toLowerCase();
     if (seen.has(k)) return false;
     seen.add(k);
@@ -416,9 +435,11 @@ function isInt64(v: string): boolean {
 }
 
 /** INTEGER (stored exactly, as a 64-bit integer), REAL, or TEXT; an integer past int64 makes the column TEXT. */
-function inferType(values: Iterable<string>): 'INTEGER' | 'REAL' | 'TEXT' {
+function inferType(values: Iterable<string>, deadline: number): 'INTEGER' | 'REAL' | 'TEXT' {
   let t: 'INTEGER' | 'REAL' | 'TEXT' | null = null;
+  let n = 0;
   for (const raw of values) {
+    if ((++n & 0xffff) === 0) within(deadline);
     const v = raw.trim();
     if (v === '') continue;
     if (/^[+-]?\d+$/.test(v)) {
@@ -454,7 +475,7 @@ async function writeRowsSnapshot(tmp: string, table: string, names: string[], ty
     let n = 0;
     for (const r of rows) {
       if ((++n & 0x3ff) === 0) {
-        if (Date.now() > deadline) throw new UploadError('too_slow', `the file took more than ${UPLOAD_LIMITS.parseMs / 1000} s to load`);
+        within(deadline);
         // Let the daemon breathe between batches: a large upload never holds the event loop for long.
         await new Promise<void>((r) => setImmediate(r));
       }
@@ -509,14 +530,29 @@ async function sqliteAvailable(): Promise<boolean> {
   }
 }
 
+/** `p` with every symlink of its longest existing prefix resolved (the rest does not exist yet). */
+async function realPath(p: string): Promise<string> {
+  const rest: string[] = [];
+  for (let d = resolve(p); ; d = dirname(d)) {
+    try {
+      return join(await realpath(d), ...rest.reverse());
+    } catch {
+      if (dirname(d) === d) return resolve(p);
+      rest.push(basename(d));
+    }
+  }
+}
+
 /**
- * The nearest git work tree holding `dir`, or `null`. Snapshots never live inside one (DES §4): a
- * state home placed inside a project checkout would put them where `git add` reaches. The climb stops
- * below the user's home directory, so a repository of the home itself (dotfiles) does not count.
+ * The nearest git work tree holding `dir`, or `null`. Snapshots never live inside one (DES §4): the
+ * repo is mounted into agent seats, so a state home inside a project checkout would put snapshot rows
+ * where seats and `git add` reach. The climb follows REAL paths (a symlinked state directory does not
+ * hide the checkout it points into) and stops at the user's home directory: a repository of the home
+ * itself (dotfiles) is no project a seat mounts, and the store's own `.gitignore` keeps `git add` off it.
  */
 async function repoAround(dir: string): Promise<string | null> {
-  const home = resolve(homedir());
-  for (let d = resolve(dir); ; d = dirname(d)) {
+  const home = await realPath(homedir());
+  for (let d = await realPath(dir); ; d = dirname(d)) {
     if (d === home) return null;
     try {
       await stat(join(d, '.git'));
@@ -528,7 +564,23 @@ async function repoAround(dir: string): Promise<string | null> {
   }
 }
 
-export async function ingestUpload(filename: string, data: Buffer, opts: { dir?: string; header?: 'yes' | 'no' | null } = {}): Promise<UploadResult> {
+/** The snapshot runner's inspection, inside what is left of the upload's deadline. */
+async function inspectWithin(path: string, deadline: number): ReturnType<typeof sqliteInspect> {
+  within(deadline);
+  try {
+    return await sqliteInspect(path, Math.max(1, deadline - Date.now()));
+  } catch (err) {
+    if (err instanceof SourceQueryError && err.errorClass === 'timeout') throw tooSlow();
+    throw err;
+  }
+}
+
+/**
+ * @param opts.parseMs TESTS ONLY: the upload's one absolute deadline (default {@link UPLOAD_LIMITS}.parseMs),
+ *   which parsing, type inference, writing and every inspection share.
+ */
+export async function ingestUpload(filename: string, data: Buffer, opts: { dir?: string; header?: 'yes' | 'no' | null; parseMs?: number } = {}): Promise<UploadResult> {
+  const deadline = Date.now() + (opts.parseMs ?? UPLOAD_LIMITS.parseMs);
   if (data.length > UPLOAD_LIMITS.fileBytes) throw new UploadError('too_large', `an upload is at most ${UPLOAD_LIMITS.fileBytes / (1024 * 1024)} MB`);
   if (data.length === 0) throw new UploadError('empty', 'the file is empty');
   if (!(await sqliteAvailable())) throw new UploadError('sqlite_unavailable', 'uploads need Node.js 24.12 or later (node:sqlite with the authorizer and defensive mode)');
@@ -536,13 +588,17 @@ export async function ingestUpload(filename: string, data: Buffer, opts: { dir?:
   const repo = await repoAround(dir);
   if (repo !== null) throw new UploadError('snapshot_in_repo', `the snapshot store ${dir} is inside the git work tree ${repo}; snapshots are kept outside any repository (move crew's state home out of it)`);
   await mkdir(dir, { recursive: true, mode: 0o700 });
+  // Whatever holds the store, `git add` never stages a snapshot.
+  await writeFile(join(dir, '.gitignore'), '*\n', { flag: 'wx', mode: 0o600 }).catch((err: NodeJS.ErrnoException) => {
+    if (err.code !== 'EEXIST') throw err;
+  });
   const tmp = join(dir, `.tmp-${randomUUID()}.sqlite`);
   const kind = kindOf(filename, data);
   try {
     if (kind === 'sqlite') {
       if (data.subarray(0, 16).toString('latin1') !== 'SQLite format 3\0') throw new UploadError('bad_sqlite', 'the file is not a SQLite database');
       await writeFile(tmp, data, { mode: 0o600 });
-      const inspected = await sqliteInspect(tmp);
+      const inspected = await inspectWithin(tmp, deadline);
       const bad = inspected.objects.filter((o) => (o.type !== 'table' && o.type !== 'index') || o.virtual);
       if (bad.length > 0) {
         throw new UploadError('sqlite_code', `an uploaded .sqlite may hold only tables and indexes; it holds ${bad.map((o) => `${o.virtual ? 'the virtual table' : `the ${o.type}`} ${o.name}`).join(', ')}`);
@@ -552,9 +608,8 @@ export async function ingestUpload(filename: string, data: Buffer, opts: { dir?:
       if (total > UPLOAD_LIMITS.rows) throw new UploadError('too_many_rows', `the database has more than ${UPLOAD_LIMITS.rows} rows`);
       if (inspected.catalog.relations.some((r) => r.columns.length > UPLOAD_LIMITS.columns)) throw new UploadError('too_many_columns', `a table has more than ${UPLOAD_LIMITS.columns} columns`);
       const s = await store(tmp, dir);
-      return { digest: s.digest, bytes: s.bytes, kind, table: null, header: null, sample: [], catalog: (await sqliteInspect(s.path)).catalog };
+      return { digest: s.digest, bytes: s.bytes, kind, table: null, header: null, sample: [], catalog: (await inspectWithin(s.path, deadline)).catalog };
     }
-    const deadline = Date.now() + UPLOAD_LIMITS.parseMs;
     const rows =
       kind === 'xlsx'
         ? parseXlsx(data, deadline)
@@ -568,7 +623,7 @@ export async function ingestUpload(filename: string, data: Buffer, opts: { dir?:
     if (body.length > UPLOAD_LIMITS.rows) throw new UploadError('too_many_rows', `the file has more than ${UPLOAD_LIMITS.rows} rows`);
     const types = names.map((_n, i) => inferType((function* () {
       for (const r of body) yield r[i] ?? '';
-    })()));
+    })(), deadline));
     const table = tableNameFor(filename);
     await writeRowsSnapshot(tmp, table, names, types, body, deadline);
     const s = await store(tmp, dir);
@@ -579,7 +634,7 @@ export async function ingestUpload(filename: string, data: Buffer, opts: { dir?:
       table,
       header: { detected: header, columns: names },
       sample: body.slice(0, UPLOAD_LIMITS.sampleRows).map((r) => names.map((_n, i) => r[i] ?? '')),
-      catalog: (await sqliteInspect(s.path)).catalog,
+      catalog: (await inspectWithin(s.path, deadline)).catalog,
     };
   } finally {
     await rm(tmp, { force: true });

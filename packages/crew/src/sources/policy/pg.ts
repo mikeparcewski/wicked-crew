@@ -66,14 +66,61 @@ function strings(list: unknown): string[] {
 /** Fields that never hold a node: positions, flags, enum-valued kinds. */
 const DATA_FIELDS = new Set(['location', 'stmt_location', 'stmt_len']);
 
+/**
+ * One query level: the CTEs it can see (name → output columns) and its FROM items (the name a
+ * reference qualifies them with → their columns). A qualified column reference resolves at the
+ * nearest level that has its qualifier, as Postgres resolves it.
+ */
 interface Scope {
-  ctes: Set<string>;
+  ctes: Map<string, string[]>;
+  range: Map<string, string[]>;
   parent: Scope | null;
 }
 
-function cteVisible(scope: Scope | null, name: string): boolean {
-  for (let s = scope; s !== null; s = s.parent) if (s.ctes.has(name)) return true;
-  return false;
+const level = (parent: Scope | null, ctes: Map<string, string[]> = new Map()): Scope => ({ ctes, range: new Map(), parent });
+
+function cteColumns(scope: Scope | null, name: string): string[] | undefined {
+  for (let s = scope; s !== null; s = s.parent) {
+    const c = s.ctes.get(name);
+    if (c !== undefined) return c;
+  }
+  return undefined;
+}
+
+function rangeColumns(scope: Scope | null, qualifier: string): string[] | undefined {
+  for (let s = scope; s !== null; s = s.parent) {
+    const c = s.range.get(qualifier);
+    if (c !== undefined) return c;
+  }
+  return undefined;
+}
+
+/** An alias column list renames the first columns; the rest keep their names. */
+const renamed = (cols: readonly string[], alias: readonly string[]): string[] => [...alias, ...cols.slice(alias.length)];
+
+/** A raw alias's name and column list, if the node has one. */
+function aliasOf(f: Json, key = 'alias'): { name: string; cols: string[] } | null {
+  const a = f[key];
+  if (!isObj(a) || typeof a['aliasname'] !== 'string') return null;
+  return { name: a['aliasname'], cols: strings(a['colnames']) };
+}
+
+/**
+ * The name Postgres gives an unnamed output column, only where it is certain (FigureColname: a
+ * column reference's last name, a function's name, a cast's argument or else its type). Anything
+ * else is `?column?`, which no reference can name, so a guess never makes a column up.
+ */
+function figureName(v: unknown): string | null {
+  if (!isObj(v)) return null;
+  const [type, f] = unwrap(v);
+  if (type === 'ColumnRef') {
+    const parts = (f['fields'] as unknown[] | undefined) ?? [];
+    const last = parts[parts.length - 1];
+    return isObj(last) && isObj(last['String']) && typeof last['String']['sval'] === 'string' ? last['String']['sval'] : null;
+  }
+  if (type === 'FuncCall') return strings(f['funcname']).at(-1) ?? null;
+  if (type === 'TypeCast') return figureName(f['arg']) ?? (isObj(f['typeName']) ? (strings(f['typeName']['names']).at(-1) ?? null) : null);
+  return null;
 }
 
 export interface PgWalkOptions {
@@ -88,13 +135,6 @@ class Walker {
   readonly relations = new Set<string>();
   readonly functions = new Set<string>();
   params = 0;
-  /** Table aliases (and bare table names) → the relations they name, collected over the whole statement. */
-  private readonly aliases = new Map<string, Set<string>>();
-  /** Names the statement itself defines as columns: output names, alias column lists. */
-  private readonly definedNames = new Set<string>();
-  /** Qualified column references, judged after the walk (FROM is walked after the target list). */
-  private readonly qualifiedRefs: Array<{ qualifier: string; column: string }> = [];
-
   constructor(private readonly opts: PgWalkOptions) {}
 
   /** Visit `fields` of a node: each key must be in `allowed` (or a data field); `allowed` says how. */
@@ -112,38 +152,17 @@ class Walker {
     }
   }
 
-  select(node: unknown, scope: Scope | null): void {
+  /** Walk one SELECT; answers its output column names (what a reference to it as a subquery or CTE may name). */
+  select(node: unknown, scope: Scope | null): string[] {
     const [type, f] = unwrap(node);
     if (type !== 'SelectStmt') refuse('not_select', `${type.replace(/Stmt$/, '').toUpperCase()} is not a read; only SELECT (or WITH … SELECT) is`);
-    this.selectFields(f, scope);
+    return this.selectFields(f, scope);
   }
 
   /** A raw alias (`{aliasname, colnames}`), as RangeVar, RangeSubselect and JoinExpr carry it. */
   private alias(v: unknown): void {
     if (!isObj(v)) refuse('syntax', 'a malformed alias');
     this.fields('Alias', v as Json, { aliasname: 'data', colnames: 'data' }, null);
-    for (const c of strings((v as Json)['colnames'])) this.definedNames.add(c);
-  }
-
-  /**
-   * After the walk: every qualified column reference (`q.c`) must name a column the qualifier really
-   * has. Postgres reads `q.c` as the function `c(q)` when `q` has no column `c` (functional notation),
-   * which would call a built-in no allowlist judged; so a name that is no known column is refused.
-   */
-  finish(): void {
-    const catalogColumns = (keys: Iterable<string>): Set<string> => {
-      const out = new Set<string>();
-      for (const k of keys) for (const c of this.opts.catalog?.columns?.get(k) ?? []) out.add(c);
-      return out;
-    };
-    const known = new Set([...catalogColumns(this.relations), ...this.definedNames]);
-    for (const { qualifier, column } of this.qualifiedRefs) {
-      const named = this.aliases.get(qualifier);
-      // A table alias: only that table's columns (or names the statement gave it). Anything else (a
-      // subquery or CTE alias): a column of a table the statement reads, or a name it defines.
-      const ok = named !== undefined ? catalogColumns(named).has(column) || this.definedNames.has(column) : known.has(column);
-      if (!ok) refuse('column', `${qualifier}.${column} is not a known column (Postgres would call a function named ${column} on the row); name a column, or alias the expression`);
-    }
   }
 
   /** A raw WindowDef (a FuncCall's `over`) or a wrapped one (a WINDOW clause entry). */
@@ -151,13 +170,16 @@ class Walker {
     this.fields('WindowDef', f, { name: 'data', refname: 'data', partitionClause: 'nodes', orderClause: 'nodes', frameOptions: 'data', startOffset: 'node', endOffset: 'node' }, scope);
   }
 
-  /** The fields of a SELECT; set operations carry their arms as raw SelectStmt fields. */
-  private selectFields(f: Json, scope: Scope | null): void {
+  /**
+   * The fields of a SELECT; set operations carry their arms as raw SelectStmt fields. FROM is walked
+   * first, so every column reference after it resolves against the FROM items it can see.
+   */
+  private selectFields(f: Json, scope: Scope | null): string[] {
     if (this.opts.expressionOnly === true) refuse('syntax', 'a subquery is outside a CHECK expression');
     if (f['intoClause'] !== undefined) refuse('into', 'SELECT … INTO creates a table; a read never writes');
     if (Array.isArray(f['lockingClause']) && f['lockingClause'].length > 0) refuse('locking', 'a locking clause (FOR UPDATE/SHARE) is not a read');
     if (f['valuesLists'] !== undefined) refuse('syntax', 'VALUES lists are outside the read subset');
-    let inner: Scope = { ctes: new Set(), parent: scope };
+    let inner: Scope = level(scope);
     const withClause = f['withClause'];
     if (withClause !== undefined) {
       if (!isObj(withClause)) refuse('syntax', 'a malformed WITH');
@@ -165,21 +187,27 @@ class Walker {
       if (w['recursive'] === true) refuse('recursive', 'WITH RECURSIVE is outside the read subset');
       for (const k of Object.keys(w)) if (!['ctes', 'recursive', 'location'].includes(k)) refuse('syntax', `WITH.${k} is outside the read subset`);
       // Each CTE sees only the ones before it (non-recursive WITH); the body sees all of them.
-      const seen: Scope = { ctes: new Set(), parent: scope };
+      const seen = new Map<string, string[]>();
       for (const cte of (w['ctes'] as unknown[]) ?? []) {
         const [ct, cf] = unwrap(cte);
         if (ct !== 'CommonTableExpr') refuse('syntax', `${ct} in WITH`);
-        for (const c of strings(cf['aliascolnames'])) this.definedNames.add(c);
-        this.fields('CommonTableExpr', cf, { ctename: 'data', aliascolnames: 'data', ctematerialized: 'data', ctequery: (q) => this.select(q, { ctes: new Set(seen.ctes), parent: scope }) }, scope);
+        let out: string[] = [];
+        this.fields('CommonTableExpr', cf, { ctename: 'data', aliascolnames: 'data', ctematerialized: 'data', ctequery: (q) => (out = this.select(q, level(scope, new Map(seen)))) }, scope);
         if (typeof cf['ctename'] !== 'string') refuse('syntax', 'a CTE with no name');
-        seen.ctes.add(cf['ctename'] as string);
+        seen.set(cf['ctename'] as string, renamed(out, strings(cf['aliascolnames'])));
       }
-      inner = seen;
+      inner = level(scope, seen);
+    }
+    const from = f['fromClause'];
+    if (from !== undefined) {
+      if (!Array.isArray(from)) refuse('syntax', 'SelectStmt.fromClause is not a list');
+      for (const item of from as unknown[]) this.fromItem(item, inner);
     }
     if (f['distinctClause'] !== undefined) {
       // `SELECT DISTINCT` is a list holding one empty node; `DISTINCT ON (…)` lists expressions.
       for (const d of f['distinctClause'] as unknown[]) if (!(isObj(d) && Object.keys(d).length === 0)) this.node(d, inner);
     }
+    let armColumns: string[] | null = null;
     this.fields(
       'SelectStmt',
       f,
@@ -187,7 +215,7 @@ class Walker {
         withClause: 'data', // walked above
         distinctClause: 'data', // walked above
         targetList: 'nodes',
-        fromClause: 'nodes',
+        fromClause: 'data', // walked above
         whereClause: 'node',
         groupClause: 'nodes',
         groupDistinct: 'data',
@@ -199,12 +227,90 @@ class Walker {
         limitOption: 'data',
         op: 'data',
         all: 'data',
-        larg: (v) => (isObj(v) ? this.selectFields(v, inner) : refuse('syntax', 'a malformed set operation')),
+        larg: (v) => (isObj(v) ? (armColumns = this.selectFields(v, inner)) : refuse('syntax', 'a malformed set operation')),
         rarg: (v) => (isObj(v) ? this.selectFields(v, inner) : refuse('syntax', 'a malformed set operation')),
         lockingClause: 'data', // refused above when non-empty
       },
       inner,
     );
+    // A set operation is named by its first arm.
+    if (armColumns !== null) return armColumns;
+    const out: string[] = [];
+    for (const t of (f['targetList'] as unknown[] | undefined) ?? []) {
+      const [, tf] = unwrap(t);
+      if (typeof tf['name'] === 'string') {
+        out.push(tf['name']);
+        continue;
+      }
+      const star = this.starColumns(tf['val'], inner);
+      out.push(...(star ?? [figureName(tf['val']) ?? '?column?']));
+    }
+    return out;
+  }
+
+  /** `*` or `q.*` in a target list: the columns it expands to; `null` for any other expression. */
+  private starColumns(v: unknown, scope: Scope): string[] | null {
+    if (!isObj(v) || !isObj(v['ColumnRef'])) return null;
+    const parts = ((v['ColumnRef']['fields'] as unknown[] | undefined) ?? []).map((p) => (isObj(p) && isObj(p['String']) ? String(p['String']['sval']) : '*'));
+    if (parts[parts.length - 1] !== '*') return null;
+    if (parts.length === 1) return [...scope.range.values()].flat();
+    return rangeColumns(scope, parts[parts.length - 2] as string) ?? [];
+  }
+
+  /** One FROM item: walked, and added to the level's FROM items under the name a reference uses. */
+  private fromItem(n: unknown, scope: Scope): void {
+    const [type, f] = unwrap(n);
+    switch (type) {
+      case 'RangeVar': {
+        const cols = this.relation(f, scope);
+        this.fields(type, f, { schemaname: 'data', relname: 'data', inh: 'data', relpersistence: 'data', alias: (v) => this.alias(v) }, scope);
+        const a = aliasOf(f);
+        scope.range.set(a?.name ?? String(f['relname'] ?? ''), renamed(cols, a?.cols ?? []));
+        return;
+      }
+      case 'RangeSubselect': {
+        if (this.opts.expressionOnly === true) refuse('syntax', 'a subquery is outside a CHECK expression');
+        let out: string[] = [];
+        this.fields(type, f, { lateral: 'data', subquery: (v) => (out = this.select(v, scope)), alias: (v) => this.alias(v) }, scope);
+        const a = aliasOf(f);
+        if (a !== null) scope.range.set(a.name, renamed(out, a.cols));
+        return;
+      }
+      case 'JoinExpr': {
+        strings(f['usingClause']);
+        const before = new Set(scope.range.keys());
+        this.fields(
+          type,
+          f,
+          {
+            jointype: 'data',
+            isNatural: 'data',
+            larg: (v) => this.fromItem(v, scope),
+            rarg: (v) => this.fromItem(v, scope),
+            usingClause: 'data',
+            join_using_alias: (v) => this.alias(v),
+            quals: 'data', // walked below, once both sides are in scope
+            alias: (v) => this.alias(v),
+            rtindex: 'data',
+          },
+          scope,
+        );
+        if (f['quals'] !== undefined) this.node(f['quals'], scope);
+        const using = aliasOf(f, 'join_using_alias');
+        if (using !== null) scope.range.set(using.name, strings(f['usingClause']));
+        const a = aliasOf(f);
+        if (a !== null) {
+          // An aliased join hides the names inside it; only the alias qualifies its columns.
+          const inside = [...scope.range.keys()].filter((k) => !before.has(k));
+          const cols = inside.flatMap((k) => scope.range.get(k) ?? []);
+          for (const k of inside) scope.range.delete(k);
+          scope.range.set(a.name, renamed(cols, a.cols));
+        }
+        return;
+      }
+      default:
+        return refuse('syntax', `${type} is outside the read subset`);
+    }
   }
 
   private typeName(tn: unknown): string {
@@ -231,9 +337,9 @@ class Walker {
     const [type, f] = unwrap(n);
     switch (type) {
       case 'SelectStmt':
-        return this.select(n, scope);
+        this.select(n, scope);
+        return;
       case 'ResTarget':
-        if (typeof f['name'] === 'string') this.definedNames.add(f['name']);
         return this.fields(type, f, { name: 'data', val: 'node' }, scope);
       case 'ColumnRef': {
         const parts = ((f['fields'] as unknown[]) ?? []).map((part) => {
@@ -241,7 +347,16 @@ class Walker {
           if (pt !== 'String' && pt !== 'A_Star') refuse('syntax', `a column reference with ${pt}`);
           return pt === 'String' ? String(pf['sval']) : '*';
         });
-        if (parts.length >= 2 && parts[parts.length - 1] !== '*') this.qualifiedRefs.push({ qualifier: parts[parts.length - 2] as string, column: parts[parts.length - 1] as string });
+        // Postgres reads `q.c` as the function `c(q)` when `q` has no column `c` (functional notation),
+        // which would call a built-in no allowlist judged; so `q` must be a FROM item in scope and `c`
+        // one of ITS columns (never an output name or another table's column).
+        if (parts.length >= 2 && this.opts.expressionOnly !== true) {
+          const q = parts[parts.length - 2] as string;
+          const c = parts[parts.length - 1] as string;
+          const cols = rangeColumns(scope, q);
+          if (cols === undefined) refuse('column', `${q}.${c}: ${q} is no table, subquery or CTE of this query`);
+          else if (c !== '*' && !cols.includes(c)) refuse('column', `${q}.${c} is not a column of ${q} (Postgres would call a function named ${c} on the row); name a column, or alias the expression`);
+        }
         return this.fields(type, f, { fields: 'data' }, scope);
       }
       case 'A_Star':
@@ -324,14 +439,8 @@ class Walker {
       case 'GroupingSet':
         return this.fields(type, f, { kind: 'data', content: 'nodes' }, scope);
       case 'RangeVar':
-        this.relation(f, scope);
-        return this.fields(type, f, { schemaname: 'data', relname: 'data', inh: 'data', relpersistence: 'data', alias: (v) => this.alias(v) }, scope);
-      case 'RangeSubselect':
-        if (this.opts.expressionOnly === true) refuse('syntax', 'a subquery is outside a CHECK expression');
-        return this.fields(type, f, { lateral: 'data', subquery: (v) => this.select(v, scope), alias: (v) => this.alias(v) }, scope);
-      case 'JoinExpr':
-        strings(f['usingClause']);
-        return this.fields(type, f, { jointype: 'data', isNatural: 'data', larg: 'node', rarg: 'node', usingClause: 'data', join_using_alias: (v) => this.alias(v), quals: 'node', alias: (v) => this.alias(v), rtindex: 'data' }, scope);
+        // Only a FROM item (fromItem) reads a relation; one anywhere else is not a read we know.
+        return refuse('relation', 'no table may be read here');
       case 'String':
         return this.fields(type, f, { sval: 'data' }, scope);
       case 'Integer':
@@ -343,15 +452,16 @@ class Walker {
     }
   }
 
-  private relation(f: Json, scope: Scope | null): void {
+  /** Check one relation reference; answers its columns (the CTE's, or the catalog's in order). */
+  private relation(f: Json, scope: Scope | null): string[] {
     if (this.opts.expressionOnly === true || this.opts.catalog === null) refuse('relation', 'no table may be read here');
     const relname = String(f['relname'] ?? '');
     if (f['catalogname'] !== undefined) refuse('relation', `a three-part name (${String(f['catalogname'])}.…) is refused`);
     if (f['relpersistence'] !== undefined && f['relpersistence'] !== 'p') refuse('relation', 'a temporary or unlogged relation reference is refused');
     const schema = f['schemaname'];
-    const aliasName = isObj(f['alias']) && typeof (f['alias'] as Json)['aliasname'] === 'string' ? String((f['alias'] as Json)['aliasname']) : relname;
     if (schema === undefined) {
-      if (cteVisible(scope, relname)) return;
+      const cte = cteColumns(scope, relname);
+      if (cte !== undefined) return cte;
       refuse('unqualified', `the table ${relname} must be schema-qualified (schema.table)`);
     }
     const catalog = this.opts.catalog as PolicyCatalog;
@@ -369,9 +479,7 @@ class Walker {
       refuse('relation', `${label} has a foreign table among its partitions or children, which a plain read would reach; read ONLY ${label}`);
     }
     this.relations.add(key);
-    const set = this.aliases.get(aliasName) ?? new Set<string>();
-    set.add(key);
-    this.aliases.set(aliasName, set);
+    return [...(catalog.columns?.get(key) ?? [])];
   }
 }
 
@@ -388,7 +496,6 @@ export async function checkPgRead(text: string, catalog: PolicyCatalog): Promise
   const w = new Walker({ catalog });
   try {
     w.select(stmts[0]?.stmt, null);
-    w.finish();
   } catch (err) {
     if (err instanceof Refusal) return { ok: false, code: err.code, detail: err.message };
     throw err;

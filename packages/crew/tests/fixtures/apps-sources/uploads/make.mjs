@@ -100,9 +100,10 @@ export async function makeZipBomb(mb, declared = 1024) {
 
 /**
  * A .sqlite file at `path`: a refunds table, plus, when asked, a trigger, a view, a virtual table whose
- * schema text hides its kind behind a comment (`hiddenVirtual`), or a generated column.
+ * schema text hides its kind behind a comment (`hiddenVirtual`), or a generated column; or an RTREE
+ * table behind an ordinary table named `pragma_table_list` (`shadowPragma`).
  */
-export function makeSqlite(path, { trigger = false, view = false, hiddenVirtual = false, generated = false } = {}) {
+export function makeSqlite(path, { trigger = false, view = false, hiddenVirtual = false, generated = false, shadowPragma = false } = {}) {
   const db = new DatabaseSync(path, { defensive: false });
   db.exec("CREATE TABLE refunds (id INTEGER PRIMARY KEY, region TEXT, amount REAL); INSERT INTO refunds VALUES (1, 'EMEA', 10.5), (2, 'AMER', 99.99);");
   if (trigger) db.exec('CREATE TABLE audit (n TEXT); CREATE TRIGGER t AFTER INSERT ON refunds BEGIN INSERT INTO audit VALUES (new.region); END;');
@@ -113,5 +114,11 @@ export function makeSqlite(path, { trigger = false, view = false, hiddenVirtual 
     db.exec("UPDATE sqlite_schema SET sql = 'CREATE /* a table */ VIRTUAL TABLE notes USING fts5(body)' WHERE name = 'notes'");
   }
   if (generated) db.exec('CREATE TABLE g (a INTEGER, b INTEGER GENERATED ALWAYS AS (abs(a)) VIRTUAL); INSERT INTO g (a) VALUES (-3);');
+  if (shadowPragma) {
+    // An ordinary table named like SQLite's table-valued pragma, claiming an RTREE table is a plain one.
+    db.exec('CREATE VIRTUAL TABLE geo USING rtree(id, a, b)');
+    db.exec('CREATE TABLE pragma_table_list (schema TEXT, name TEXT, type TEXT, ncol INTEGER, wr INTEGER, strict INTEGER)');
+    db.exec("INSERT INTO pragma_table_list SELECT 'main', name, 'table', 0, 0, 0 FROM sqlite_schema WHERE type = 'table'");
+  }
   db.close();
 }

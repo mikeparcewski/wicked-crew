@@ -22,6 +22,7 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
 import type { McpAuthConfig, McpRestMapping, McpToolAnnotations, McpUpstreamKind } from '../core/types.js';
 import { addressPolicyOf, type AddressPolicy, boundFetch, type DialOptions, DialRefusedError, type DialRefusalCode } from '../sources/dialer.js';
+import { SourceQueryError } from '../sources/drivers/types.js';
 import { describeSource, type SourceDescription, type SqlSourceConfig } from '../sources/kinds.js';
 import { probeRestServer, type RestEgress } from './rest.js';
 import { scrubSecrets } from './secrets.js';
@@ -84,6 +85,11 @@ export type ProbeResult =
       error: string;
       /** (DES-APPS-001 §5.2) The dialer refused the connection: why, so the route can say so as a 409, not a 502. */
       refusal?: DialRefusalCode;
+      /**
+       * (DES-APPS-001 §5.2) A source's own words (`sql`/`graphql`), scrubbed, for a HUMAN only; `error`
+       * then holds only the error class and SQLSTATE, which is what health and every agent see.
+       */
+      sourceDetail?: string;
     };
 
 export type Prober = (config: McpUpstreamConfig, secret: string | null) => Promise<ProbeResult>;
@@ -148,7 +154,14 @@ async function probeSourceKind(config: McpUpstreamConfig, secret: string | null,
     const message = err instanceof Error ? err.message : String(err);
     // A dialer refusal keeps its code whether it arrives as itself or wrapped by a driver.
     const refusal = err instanceof DialRefusedError ? err.code : ((err as { refusal?: unknown })?.refusal as DialRefusalCode | null | undefined) ?? undefined;
-    return scrubSecrets({ ok: false as const, error: message, ...(refusal !== undefined && refusal !== null ? { refusal } : {}) }, secrets);
+    const coded = refusal !== undefined && refusal !== null ? { refusal } : {};
+    // The dialer's own words can carry upstream text (a redirect's Location): the code only, words for a human.
+    if (err instanceof DialRefusedError) return scrubSecrets({ ok: false as const, error: `the connection was refused (${err.code})`, sourceDetail: message, ...coded }, secrets);
+    // A source's own words (a server error, a GraphQL error) are for a human; everyone else gets the class.
+    if (err instanceof SourceQueryError) {
+      return scrubSecrets({ ok: false as const, error: `the source answered ${err.errorClass}${err.sqlstate !== null ? ` (SQLSTATE ${err.sqlstate})` : ''}`, sourceDetail: message, ...coded }, secrets);
+    }
+    return scrubSecrets({ ok: false as const, error: message, ...coded }, secrets);
   }
 }
 

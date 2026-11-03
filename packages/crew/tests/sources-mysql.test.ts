@@ -1,6 +1,8 @@
 // DES-APPS-001 K1 against a REAL MySQL 8 (S3, S11): describe, read through the policy, refusals that
 // never reach the source, and the 10 s deadline stopping the query AT THE SOURCE (SHOW PROCESSLIST).
 
+import { type AddressInfo, connect, createServer, type Socket } from 'node:net';
+
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { describeMysql } from '../src/sources/catalog/mysql.js';
@@ -129,5 +131,74 @@ for (const target of MYSQL_TARGETS) {
       await new Promise((r) => setTimeout(r, 500));
       expect(await active()).toBe(0); // and gone from the source
     }, 30_000);
+
+    describe('review r2 folds (codex)', () => {
+      it('T2/S10: a production read runs READ ONLY with sql_mode, max_execution_time and lock_wait_timeout pinned at the source, and stops at 5,000 rows', async () => {
+        const r = await mysqlRead(reader(), 'SELECT @@transaction_read_only AS ro, @@lock_wait_timeout AS lw, @@max_execution_time AS me, @@sql_mode AS m', []);
+        const [ro, lw, me, mode] = (r.rows[0] ?? []).map(String);
+        expect([ro, lw, me]).toEqual(['1', '10', '10000']);
+        expect(mode).toContain('NO_BACKSLASH_ESCAPES');
+        const args = reader();
+        const h: SqlSourceHandle = { driver: 'mysql', connect: args, catalog: await describeMysql(args), viewsAllowed: [] };
+        const capped = await readSqlQuery(h, 'SELECT a.n FROM big a CROSS JOIN big b LIMIT 6000', []);
+        expect(capped.rows).toHaveLength(5_000);
+        expect(capped.truncated).toBe(true);
+      });
+
+      it('S2: the check runs the live relation checks too: a table replaced by a view since the describe is refused', async () => {
+        await db.admin.query(`CREATE TABLE ${db.database}.r2m (id INT)`);
+        try {
+          const args = reader();
+          const h: SqlSourceHandle = { driver: 'mysql', connect: args, catalog: await describeMysql(args), viewsAllowed: [] };
+          expect(await checkSqlQuery(h, 'SELECT id FROM r2m')).toMatchObject({ ok: true });
+          await db.admin.query(`DROP TABLE ${db.database}.r2m`);
+          await db.admin.query(`CREATE VIEW ${db.database}.r2m AS SELECT 1 AS id`);
+          expect(await checkSqlQuery(h, 'SELECT id FROM r2m')).toMatchObject({ ok: false, code: 'refused' });
+        } finally {
+          await db.admin.query(`DROP VIEW IF EXISTS ${db.database}.r2m`);
+          await db.admin.query(`DROP TABLE IF EXISTS ${db.database}.r2m`);
+        }
+      });
+
+      it('R1: a KILL connection that arrives after its race was lost is closed at once, never left holding a slot', async () => {
+        // A proxy in front of the server: the read's connection passes at once; the second (the KILL
+        // connection, pinned to the same address) is held back past the 3 s race.
+        const opened: Array<{ forwardedAt: number; closedAt: number | null }> = [];
+        const sockets = new Set<Socket>();
+        const proxy = createServer((client) => {
+          sockets.add(client);
+          const rec = { forwardedAt: 0, closedAt: null as number | null };
+          opened.push(rec);
+          client.on('close', () => (rec.closedAt = Date.now()));
+          client.on('error', () => undefined);
+          setTimeout(
+            () => {
+              const up = connect(db.port, '127.0.0.1');
+              sockets.add(up);
+              up.on('error', () => client.destroy());
+              rec.forwardedAt = Date.now();
+              client.pipe(up);
+              up.pipe(client);
+              client.on('close', () => up.destroy());
+            },
+            opened.length === 2 ? 4_000 : 0,
+          );
+        });
+        await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r));
+        try {
+          const args = { ...reader(), source: { ...reader().source, port: (proxy.address() as AddressInfo).port } };
+          const marker = `late_kill_${Date.now()}`;
+          await expect(mysqlRead(args, `SELECT SUM(a.n + b.n + c.n) AS ${marker} FROM big a, big b, big c`, [], { deadlineMs: 500 })).rejects.toBeDefined();
+          // The killer arrives at ~4.5 s; with the fix it is closed as soon as its handshake completes.
+          for (let i = 0; i < 80 && !(opened[1]?.forwardedAt && opened[1].closedAt !== null); i++) await new Promise((r) => setTimeout(r, 100));
+          expect(opened.length).toBe(2);
+          expect(opened[1]?.closedAt).not.toBeNull();
+          expect((opened[1]?.closedAt ?? 0) - (opened[1]?.forwardedAt ?? 0)).toBeLessThan(2_000);
+        } finally {
+          for (const sk of sockets) sk.destroy();
+          await new Promise<void>((r) => proxy.close(() => r()));
+        }
+      }, 20_000);
+    });
   });
 }

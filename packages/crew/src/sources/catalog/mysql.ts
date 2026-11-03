@@ -4,7 +4,7 @@
  * primary and foreign keys. Structure only; read-only session (drivers/mysql.ts).
  */
 
-import { mysqlConnect, mysqlError } from '../drivers/mysql.js';
+import { mysqlConnect, mysqlError, mysqlRelationKind } from '../drivers/mysql.js';
 import type { SqlConnectArgs } from '../drivers/types.js';
 import type { CatalogRelation, SqlCatalog } from './types.js';
 
@@ -21,9 +21,9 @@ export async function describeMysql(args: SqlConnectArgs): Promise<SqlCatalog> {
   try {
     const db = args.source.database;
     const [tables] = (await conn.execute(
-      'SELECT TABLE_NAME AS name, TABLE_TYPE AS type, TABLE_ROWS AS rows_est FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME',
+      'SELECT TABLE_NAME AS name, TABLE_TYPE AS type, ENGINE AS engine, TABLE_ROWS AS rows_est FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME',
       [db],
-    )) as unknown as [Array<{ name: string; type: string; rows_est: string | number | null }>];
+    )) as unknown as [Array<{ name: string; type: string; engine: string | null; rows_est: string | number | null }>];
     const [cols] = (await conn.execute(
       'SELECT TABLE_NAME AS tbl, COLUMN_NAME AS name, COLUMN_TYPE AS type, IS_NULLABLE AS nullable FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME, ORDINAL_POSITION',
       [db],
@@ -39,10 +39,12 @@ export async function describeMysql(args: SqlConnectArgs): Promise<SqlCatalog> {
     )) as unknown as [Array<{ tbl: string; name: string; col: string; rschema: string | null; rtable: string | null; rcol: string | null; ctype: string }>];
     const byName = new Map<string, CatalogRelation>();
     const relations: CatalogRelation[] = tables.map((t) => {
+      // A FEDERATED (or unknown-engine) table reads another server: it is described as foreign, never read.
+      const k = mysqlRelationKind(t.type, t.engine);
       const rel: CatalogRelation = {
         schema: db,
         name: t.name,
-        kind: t.type === 'VIEW' || t.type === 'SYSTEM VIEW' ? 'view' : 'table',
+        kind: k === 'other' ? 'foreign' : k,
         rowEstimate: t.rows_est === null ? null : Number(t.rows_est),
         columns: [],
         primaryKey: [],

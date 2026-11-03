@@ -169,7 +169,9 @@ const RESERVED = new Set([
 ]);
 
 const UNITS = new Set(['MICROSECOND', 'SECOND', 'MINUTE', 'HOUR', 'DAY', 'WEEK', 'MONTH', 'QUARTER', 'YEAR']);
-const BARE_TIME = new Set(['CURRENT_DATE', 'CURRENT_TIME', 'CURRENT_TIMESTAMP', 'LOCALTIME', 'LOCALTIMESTAMP', 'UTC_DATE', 'UTC_TIMESTAMP']);
+const BARE_TIME = new Set(['CURRENT_DATE', 'CURRENT_TIME', 'CURRENT_TIMESTAMP', 'LOCALTIME', 'LOCALTIMESTAMP', 'UTC_DATE', 'UTC_TIME', 'UTC_TIMESTAMP']);
+/** Functions MySQL calls with no parentheses that are not in the read subset (they read the login, not data). */
+const BARE_FUNCTIONS = new Set(['CURRENT_USER', 'CURRENT_ROLE']);
 
 interface Scope {
   ctes: Set<string>;
@@ -584,6 +586,7 @@ class Parser {
         this.i++;
         return;
       }
+      if (BARE_FUNCTIONS.has(tok.v) && !this.isOp('(', this.peek())) refuse('function', `${tok.v} is a function MySQL calls without parentheses, outside the read subset`);
     }
     if (this.isName() || (tok.kind === 'ident' && this.isOp('(', this.peek()))) {
       if (this.isOp('(', this.peek())) {

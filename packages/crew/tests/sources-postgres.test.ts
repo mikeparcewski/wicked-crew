@@ -280,7 +280,20 @@ for (const target of PG_TARGETS) {
       const withdrawn: string[] = [];
       const app = Fastify({ logger: false });
       registerMcpRoutes(app, { registry, audit, actorOf: () => actor });
-      registerSourceRoutes(app, { registry, audit, actorOf: () => actor, rowWriteGrants: { withdrawForSource: async (n) => (withdrawn.push(n), 3) } });
+      let live = 0; // the row-write grants K2b's store would hold
+      registerSourceRoutes(app, {
+        registry,
+        audit,
+        actorOf: () => actor,
+        rowWriteGrants: {
+          withdrawForSource: async (n) => {
+            withdrawn.push(n);
+            const k = live;
+            live = 0;
+            return k;
+          },
+        },
+      });
       await app.ready();
       try {
         const config = { name: 'support', kind: 'sql', sql: { driver: 'postgres', host: '127.0.0.1', port: db.port, database: db.database, user: 'apps_reader', tls: 'disable' }, auth: { ref: 'env:APPS_K1_PW' }, address: LOOPBACK };
@@ -300,13 +313,14 @@ for (const target of PG_TARGETS) {
         actor = LOCAL_ACTOR;
         expect((await app.inject({ method: 'PUT', url: '/api/v1/sources/support/allow-writes', payload: { allowed: true } })).json()).toEqual({ name: 'support', allowWrites: true, withdrawnGrants: 0 });
         expect((await registry.get('support')).descriptorHash).toBe(hash); // not part of the descriptor
+        live = 3; // grants made while on
         // A read in flight while the switch goes off keeps running and completes.
         const src = await registry.source('support');
         const reading = pgRead(sqlConnectArgs(src.config, 'apps-reader'), 'SELECT sum(a.n + b.n) AS s FROM s.big a, s.big b', []);
         await new Promise((r) => setTimeout(r, 150));
         const off = await app.inject({ method: 'PUT', url: '/api/v1/sources/support/allow-writes', payload: { allowed: false } });
         expect(off.json()).toEqual({ name: 'support', allowWrites: false, withdrawnGrants: 3 });
-        expect(withdrawn).toEqual(['support']);
+        expect(withdrawn).toEqual(['support', 'support']); // on withdraws leftovers first (none), off withdraws the 3
         const r = await reading;
         expect(r.rows).toEqual([['64016000000']]);
         expect((await registry.get('support')).descriptorHash).toBe(hash);
@@ -314,9 +328,10 @@ for (const target of PG_TARGETS) {
         const lines = (await audit.read()).filter((e) => e.action.startsWith('apps.source.writes_'));
         expect(lines.map((e) => [e.action, e.actor.kind])).toEqual(expect.arrayContaining([['apps.source.writes_allowed', 'human'], ['apps.source.writes_disallowed', 'human']]));
         expect(lines).toHaveLength(2);
-        // Off when already off changes nothing and records nothing (pi r1).
+        // Off when already off changes nothing and records nothing (pi r1); it does retry the
+        // withdrawal, which finds none left (codex r2: S12).
         expect((await app.inject({ method: 'PUT', url: '/api/v1/sources/support/allow-writes', payload: { allowed: false } })).json()).toEqual({ name: 'support', allowWrites: false, withdrawnGrants: 0 });
-        expect(withdrawn).toEqual(['support']);
+        expect(withdrawn).toEqual(['support', 'support', 'support']);
         await audit.flush();
         expect((await audit.read()).filter((e) => e.action.startsWith('apps.source.writes_'))).toHaveLength(2);
       } finally {
@@ -418,6 +433,160 @@ for (const target of PG_TARGETS) {
           expect(agent.json()).toMatchObject({ ok: false, code: 'prepare' });
           expect(agent.body).not.toContain('marker-value-4821');
           expect(agent.body).toContain('22P02');
+        } finally {
+          await app.close();
+          rmSync(base, { recursive: true, force: true });
+        }
+      });
+    });
+
+    describe('review r2 folds (codex)', () => {
+      const reader = (): SqlConnectArgs => login('apps_reader', 'apps-reader');
+      const handle = async (): Promise<SqlSourceHandle> => ({ driver: 'postgres', connect: reader(), catalog: await describePg(reader()), viewsAllowed: [] });
+
+      it('S2: the check runs the live relation checks too: a table replaced by a view since the describe is refused', async () => {
+        await db.admin.unsafe('CREATE TABLE s.r2a (id int); GRANT SELECT ON s.r2a TO apps_reader');
+        try {
+          const h = await handle();
+          expect(await checkSqlQuery(h, 'SELECT id FROM s.r2a')).toMatchObject({ ok: true });
+          await db.admin.unsafe('DROP TABLE s.r2a; CREATE VIEW s.r2a AS SELECT 1 AS id; GRANT SELECT ON s.r2a TO apps_reader');
+          expect(await checkSqlQuery(h, 'SELECT id FROM s.r2a')).toMatchObject({ ok: false, code: 'refused' });
+        } finally {
+          await db.admin.unsafe('DROP VIEW IF EXISTS s.r2a; DROP TABLE IF EXISTS s.r2a');
+        }
+      });
+
+      it('R2: a relation swapped while the read waits is the relation checked: LOCK before the check, held to the end', async () => {
+        await db.admin.unsafe("CREATE TABLE s.r2b (id int, owner text); INSERT INTO s.r2b VALUES (1, 'table-row'); GRANT SELECT ON s.r2b TO apps_reader");
+        const b = await db.admin.reserve();
+        try {
+          await b.unsafe('BEGIN');
+          await b.unsafe("ALTER TABLE s.r2b RENAME TO r2b_old; CREATE VIEW s.r2b AS SELECT 1 AS id, 'view-marker'::text AS owner; GRANT SELECT ON s.r2b TO apps_reader");
+          const read = pgRead(reader(), 'SELECT id, owner FROM s.r2b', [], { expect: [{ schema: 's', name: 'r2b', kinds: ['table', 'partitioned'], noForeignBelow: true }] }).then(
+            (r) => ({ ok: true as const, rows: r.rows }),
+            (e: unknown) => ({ ok: false as const, message: String((e as Error).message) }),
+          );
+          // The read is waiting on the swap's lock before the swap commits.
+          for (let i = 0; i < 60; i++) {
+            const [w] = await db.admin.unsafe<Array<{ n: string }>>(`SELECT count(*)::text AS n FROM pg_stat_activity WHERE datname = '${db.database}' AND usename = 'apps_reader' AND wait_event_type = 'Lock'`);
+            if (w?.n !== '0') break;
+            await new Promise((r) => setTimeout(r, 50));
+          }
+          await b.unsafe('COMMIT');
+          const out = await read;
+          expect(out).toMatchObject({ ok: false });
+          expect((out as { message: string }).message).toMatch(/changed at the source/);
+        } finally {
+          await b.unsafe('ROLLBACK').catch(() => undefined);
+          b.release();
+          await db.admin.unsafe('DROP VIEW IF EXISTS s.r2b; DROP TABLE IF EXISTS s.r2b; DROP TABLE IF EXISTS s.r2b_old');
+        }
+      });
+
+      it('C1: one deadline from entry: a connection slower than the deadline is a timeout, not a fresh 10 s after it', async () => {
+        const slow = (async (host: string) => {
+          await new Promise((r) => setTimeout(r, 2_500));
+          return host === DB_HOST ? ['127.0.0.1'] : [];
+        }) as ReturnType<typeof countingResolver>;
+        const t0 = Date.now();
+        await expect(pgRead(login('apps_reader', 'apps-reader', slow), 'SELECT 1 AS one', [], { deadlineMs: 300 })).rejects.toMatchObject({ errorClass: 'timeout' });
+        // Stopped at its deadline while still connecting, not once the 2.5 s connection is up.
+        expect(Date.now() - t0).toBeLessThan(1_500);
+      });
+
+      it('C2: a read with no rows still answers its columns', async () => {
+        const r = await pgRead(reader(), 'SELECT id, owner FROM s.w WHERE false', []);
+        expect(r.rows).toEqual([]);
+        expect(r.columns).toEqual([{ name: 'id', type: 'integer' }, { name: 'owner', type: 'text' }]);
+      });
+
+      it('T2: a production read runs READ ONLY under the pinned search_path, and stops at 5,000 rows', async () => {
+        const r = await pgRead(reader(), "SELECT current_setting('transaction_read_only') AS ro, current_setting('search_path') AS sp", []);
+        expect(r.rows).toEqual([['on', 'pg_catalog, pg_temp']]);
+        const capped = await readSqlQuery(await handle(), 'SELECT a.n FROM s.big a CROSS JOIN s.big b LIMIT 6000', []);
+        expect(capped.rows).toHaveLength(5_000);
+        expect(capped.truncated).toBe(true);
+      });
+
+      it('C3: UPDATE on an updatable view (or a foreign table, or setval) is a write: the login is not read-only', async () => {
+        expect((await pgPrivileges(reader())).readOnly).toBe(true);
+        await db.admin.unsafe('CREATE VIEW s.uv AS SELECT id, owner FROM s.w; GRANT UPDATE ON s.uv TO apps_reader');
+        try {
+          expect((await pgPrivileges(reader())).readOnly).toBe(false);
+        } finally {
+          await db.admin.unsafe('DROP VIEW s.uv');
+        }
+        await db.admin.unsafe('CREATE SEQUENCE s.sq; GRANT UPDATE ON SEQUENCE s.sq TO apps_reader');
+        try {
+          expect((await pgPrivileges(reader())).readOnly).toBe(false);
+        } finally {
+          await db.admin.unsafe('DROP SEQUENCE s.sq');
+        }
+      });
+
+      it('C4: the fingerprint tells apart collations whose dotted names print the same', async () => {
+        await db.admin.unsafe('CREATE SCHEMA "k1.a"; CREATE SCHEMA k1; CREATE COLLATION "k1.a".c FROM "C"; CREATE COLLATION k1."a.c" FROM "C"');
+        await db.admin.unsafe('CREATE TABLE s.colt (id int PRIMARY KEY, t text COLLATE "k1.a".c)');
+        try {
+          const f1 = (await pgTableSafety(reader(), 's', 'colt')).fingerprint;
+          await db.admin.unsafe('ALTER TABLE s.colt ALTER COLUMN t TYPE text COLLATE k1."a.c"');
+          const f2 = (await pgTableSafety(reader(), 's', 'colt')).fingerprint;
+          expect(f1).toMatch(/^[0-9a-f]{64}$/);
+          expect(f2).not.toBe(f1);
+        } finally {
+          await db.admin.unsafe('DROP TABLE s.colt; DROP SCHEMA "k1.a" CASCADE; DROP SCHEMA k1 CASCADE');
+        }
+      });
+
+      it('S12: a failed withdrawal is retried by asking again; grants left from before never come back on', async () => {
+        const base = mkdtempSync(join(tmpdir(), 'apps-withdraw-'));
+        const secrets: SecretStore = { available: false, get: async () => null, has: async () => false, set: async () => undefined, delete: async () => undefined };
+        const registry = new McpRegistry({ store: new McpRegistryStore(join(base, 'mcp')), secrets, probe: probeMcpServer, discover: () => [], env: { APPS_K1_PW: 'apps-reader' } });
+        const audit = new AuditLog(join(base, 'audit.log'), () => undefined);
+        let live = 0; // the grant store K2b will provide
+        let failNext = 0;
+        const app = Fastify({ logger: false });
+        registerMcpRoutes(app, { registry, audit, actorOf: () => LOCAL_ACTOR });
+        registerSourceRoutes(app, {
+          registry,
+          audit,
+          actorOf: () => LOCAL_ACTOR,
+          rowWriteGrants: {
+            withdrawForSource: async () => {
+              if (failNext > 0) {
+                failNext--;
+                throw new Error('the grant store is unavailable');
+              }
+              const n = live;
+              live = 0;
+              return n;
+            },
+          },
+        });
+        await app.ready();
+        const sw = (allowed: boolean) => app.inject({ method: 'PUT', url: '/api/v1/sources/support/allow-writes', payload: { allowed } });
+        try {
+          const config = { name: 'support', kind: 'sql', sql: { driver: 'postgres', host: '127.0.0.1', port: db.port, database: db.database, user: 'apps_reader', tls: 'disable' }, auth: { ref: 'env:APPS_K1_PW' }, address: LOOPBACK };
+          const p = (await app.inject({ method: 'POST', url: '/api/v1/mcp/servers/preview', payload: config })).json() as McpPreviewResponse;
+          expect((await app.inject({ method: 'POST', url: '/api/v1/mcp/servers', payload: { previewHash: p.previewHash } })).statusCode).toBe(201);
+          expect((await sw(true)).json()).toEqual({ name: 'support', allowWrites: true, withdrawnGrants: 0 });
+          live = 3;
+          failNext = 1;
+          const failed = await sw(false);
+          expect(failed.statusCode).toBe(500);
+          expect(failed.json()).toMatchObject({ code: 'withdraw_failed' });
+          expect((await registry.get('support')).allowWrites).toBe(false);
+          // Asking again retries the withdrawal (it used to answer "nothing changed").
+          expect((await sw(false)).json()).toEqual({ name: 'support', allowWrites: false, withdrawnGrants: 3 });
+          // Grants left behind (a crash between the switch and the withdrawal): turning on withdraws them
+          // first, and stays off when it cannot.
+          live = 2;
+          failNext = 1;
+          const refused = await sw(true);
+          expect(refused.statusCode).toBe(500);
+          expect((await registry.get('support')).allowWrites).toBe(false);
+          expect((await sw(true)).json()).toEqual({ name: 'support', allowWrites: true, withdrawnGrants: 2 });
+          expect(live).toBe(0);
         } finally {
           await app.close();
           rmSync(base, { recursive: true, force: true });

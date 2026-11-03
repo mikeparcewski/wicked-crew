@@ -147,7 +147,10 @@ export interface RowWriteGrants {
 export interface PgPrivilegeReport {
   login: string;
   superuser: boolean;
-  /** No table-level or column-level INSERT/UPDATE/DELETE/TRUNCATE on any visible table, and not a superuser. */
+  /**
+   * Not a superuser, and no table-level or column-level INSERT/UPDATE/DELETE/TRUNCATE on any visible
+   * table, view (an updatable view writes its table) or foreign table, nor UPDATE on a sequence.
+   */
   readOnly: boolean;
   tables: TablePrivileges[];
   writes: RowWriteGrants[];
@@ -170,6 +173,16 @@ export async function pgPrivilegesIn(tx: Tx, writes: readonly DeclaredRowWrite[]
        FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
       WHERE c.relkind IN ('r', 'p') AND ${USER_SCHEMAS} AND pg_catalog.has_schema_privilege(n.oid, 'USAGE')
       ORDER BY n.nspname, c.relname`,
+  );
+  // Writes reach data through more than tables: an automatically updatable view, a foreign table, setval.
+  const [other] = await tx.unsafe<Array<{ any: boolean }>>(
+    `SELECT EXISTS (
+       SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relkind IN ('v', 'f', 'S') AND ${USER_SCHEMAS} AND pg_catalog.has_schema_privilege(n.oid, 'USAGE')
+          AND CASE WHEN c.relkind = 'S' THEN pg_catalog.has_sequence_privilege(c.oid, 'UPDATE')
+                   ELSE pg_catalog.has_any_column_privilege(c.oid, 'INSERT') OR pg_catalog.has_any_column_privilege(c.oid, 'UPDATE')
+                     OR pg_catalog.has_table_privilege(c.oid, 'DELETE') OR pg_catalog.has_table_privilege(c.oid, 'TRUNCATE') END
+     ) AS any`,
   );
   const login = who[0]?.login ?? '';
   const superuser = who[0]?.superuser === true;
@@ -201,7 +214,7 @@ export async function pgPrivilegesIn(tx: Tx, writes: readonly DeclaredRowWrite[]
   return {
     login,
     superuser,
-    readOnly: !superuser && tables.every((t) => !t.anyWrite),
+    readOnly: !superuser && tables.every((t) => !t.anyWrite) && other?.any !== true,
     tables: tables.map((t) => ({ schema: t.schema, table: t.table, select: t.select, selectSomeColumns: t.selectSomeColumns, insert: t.insert, update: t.update, delete: t.delete })),
     writes: out,
   };

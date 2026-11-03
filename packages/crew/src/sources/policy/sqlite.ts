@@ -46,26 +46,36 @@ export function sqliteAuthorize(
   return DENY;
 }
 
+/** SQLite's identifier characters: ASCII letters, digits, `_`, `$` and every character above U+007F. */
+const IDENT_CHAR = /[A-Za-z0-9_$\u0080-\uffff]/;
+
 /**
  * The parameters of a SQLite read, counted by lexing the text (strings, quoted names and comments
  * skipped): only anonymous `?` placeholders are accepted, so the count is the bind count. Numbered
- * (`?5`) and named (`:x`, `@x`, `$x`) placeholders are refused.
+ * (`?5`) and named (`:x`, `:1`, `@x`, `$x`, any spelling) placeholders are refused. The statement
+ * must begin with `SELECT` or `WITH` (no `VALUES`, no `EXPLAIN`): the authorizer judges what is
+ * read, this judges what kind of statement it is.
  */
-export function sqliteParams(text: string): { ok: true; count: number } | { ok: false; detail: string } {
+export function sqliteParams(text: string): { ok: true; count: number } | { ok: false; code: 'params' | 'not_select'; detail: string } {
   let count = 0;
   let i = 0;
+  let first: string | null = null;
   const n = text.length;
   while (i < n) {
     const c = text[i] as string;
+    if (first === null && /[A-Za-z]/.test(c)) {
+      first = (/^[A-Za-z]+/.exec(text.slice(i)) as RegExpExecArray)[0].toUpperCase();
+      if (first !== 'SELECT' && first !== 'WITH') return { ok: false, code: 'not_select', detail: `${first} is not a read; only SELECT (or WITH … SELECT) is` };
+    }
     if (c === "'" || c === '"' || c === '`') {
       const end = text.indexOf(c, i + 1);
-      if (end < 0) return { ok: false, detail: 'an unterminated quoted string or name' };
+      if (end < 0) return { ok: false, code: 'params', detail: 'an unterminated quoted string or name' };
       i = end + 1;
       continue;
     }
     if (c === '[') {
       const end = text.indexOf(']', i + 1);
-      if (end < 0) return { ok: false, detail: 'an unterminated [name]' };
+      if (end < 0) return { ok: false, code: 'params', detail: 'an unterminated [name]' };
       i = end + 1;
       continue;
     }
@@ -80,13 +90,15 @@ export function sqliteParams(text: string): { ok: true; count: number } | { ok: 
       continue;
     }
     if (c === '?') {
-      if (/[0-9]/.test(text[i + 1] ?? '')) return { ok: false, detail: 'numbered placeholders (?N) are refused; use ? in order' };
+      if (/[0-9]/.test(text[i + 1] ?? '')) return { ok: false, code: 'params', detail: 'numbered placeholders (?N) are refused; use ? in order' };
       count++;
       i++;
       continue;
     }
-    if ((c === ':' || c === '@' || c === '$') && /[A-Za-z_]/.test(text[i + 1] ?? '')) return { ok: false, detail: `named placeholders (${c}name) are refused; use ? in order` };
+    // `:` and `@` mean nothing else outside a string; `$` inside a name (`a$b`) is part of the name.
+    if (c === ':' || c === '@' || (c === '$' && !IDENT_CHAR.test(text[i - 1] ?? ' '))) return { ok: false, code: 'params', detail: `named placeholders (${c}name) are refused; use ? in order` };
     i++;
   }
+  if (first === null) return { ok: false, code: 'not_select', detail: 'an empty statement' };
   return { ok: true, count };
 }
