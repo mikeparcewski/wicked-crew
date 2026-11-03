@@ -24,7 +24,8 @@ mentioned only where a daemon release depends on them.
   has the one input form its column takes. Each lands with a contract hash in `apps.lock.json` (for a row write the
   table's safety fingerprint is inside it) and the source's pin. Findings use crew's words and a source's identifiers,
   never a source's message text. api-types adds `AppQueryArg`, `AppToolQueryText` and `AppCrewQueryText` (the `.json`
-  query texts).
+  query texts) and `SqlSourceCatalog` relations' `rowSecurityForced`; a Postgres catalog column that is an array of an
+  enum now carries that enum's labels.
 - **Apps data sources (api-types 0.175.0, DES-APPS-001 §5, §7.4, §7.5, slice K1).** crew's one connector registry
   gains two kinds, `sql` (drivers `postgres`, `mysql`, `sqlite`) and `graphql`, registered through the same
   `POST /mcp/servers/preview` and save and never offered to a governed run (they have no tools). A preview describes the

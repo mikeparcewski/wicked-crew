@@ -13157,6 +13157,8 @@ export interface SourceCatalogRelation {
   foreignKeys: Array<{ name: string; columns: string[]; references: { schema: string | null; table: string; columns: string[] } }>;
   /** Postgres: row security enabled or forced. */
   rowSecurity?: boolean;
+  /** (api-types 0.176.0) Postgres: row security FORCED (it applies to the table's owner too). */
+  rowSecurityForced?: boolean;
 }
 
 /** A `sql` source's catalog: structure only. */

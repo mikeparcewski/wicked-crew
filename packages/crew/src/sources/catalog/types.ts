@@ -10,7 +10,7 @@ export interface CatalogColumn {
   /** The source's own type text (`integer`, `character varying(80)`, `support.priority`). */
   type: string;
   nullable: boolean;
-  /** Enum literals the schema declares for this column's type (Postgres enum, MySQL ENUM). */
+  /** Enum literals the schema declares for this column's type (Postgres enum, or an array of one; MySQL ENUM). */
   enumValues?: string[];
 }
 
@@ -32,6 +32,8 @@ export interface CatalogRelation {
   foreignKeys: CatalogForeignKey[];
   /** Postgres: row security enabled (or forced) on the table. */
   rowSecurity?: boolean;
+  /** Postgres: row security forced (the owner is subject to it too). */
+  rowSecurityForced?: boolean;
   /** Postgres: a foreign table is among its partitions or inheritance children (a plain read reaches it). */
   foreignDescendant?: boolean;
 }

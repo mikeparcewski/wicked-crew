@@ -66,7 +66,14 @@ describe('the source stage without a database', () => {
       return (r.body as unknown as Landed).findings![0]!;
     };
     expect(await first(JSON.stringify({ route: '/runs/:id', params: { id: { kind: 'param', name: 'undeclared' } }, query: { id: { kind: 'literal', value: 'mask' } } }))).toMatchObject({ code: 'unknown_param' });
-    for (const bad of ['', '.', '..']) expect(await first(JSON.stringify({ route: '/runs/:id', params: { id: { kind: 'literal', value: bad } } }))).toMatchObject({ code: 'crew_route' });
+    for (const bad of ['', '.', '..', '\uD800']) expect(await first(JSON.stringify({ route: '/runs/:id', params: { id: { kind: 'literal', value: bad } } }))).toMatchObject({ code: 'crew_route' });
+    // r2: a path parameter with a bad default, or optional with none.
+    const withParam = (decl: Record<string, unknown>): AppQuery => ({ ...one, params: { type: 'object', properties: { id: decl as never } } });
+    const text = JSON.stringify({ route: '/runs/:id', params: { id: { kind: 'param', name: 'id' } } });
+    for (const decl of [{ type: 'string', default: '.' }, { type: 'string' }]) {
+      const r = await h.land('runs-board', specWith([withParam(decl)]), { one_run: text });
+      expect((r.body as unknown as Landed).findings?.[0], JSON.stringify(decl)).toMatchObject({ code: 'crew_route' });
+    }
     expect(await first('{"route": "/runs", "query": {"__proto__": {"kind": "param", "name": "missing"}}}')).toMatchObject({ code: 'query_text' });
     const stage = new AppsSourceStage({ registry: null });
     const r = await stage.check({ app: 'x', spec: specWith([]), queryText: {}, queries: ['ghost'], actions: ['phantom'] });
@@ -141,7 +148,7 @@ describe('the source stage over REST, MCP and GraphQL sources (the K1 test servi
       [
         tool('list_rest', 'tickets', 'rest'),
         tool('list_mcp', 'ref', 'mcp'),
-        { id: 'list_gql', source: 'tix', kind: 'graphql', rowPath: '$.data.tickets[*]', params: { type: 'object', properties: { status: { type: 'string', default: 'OPEN' } } }, output: [{ name: 'id', type: 'integer' }] },
+        { id: 'list_gql', source: 'tix', kind: 'graphql', rowPath: '$.data.tickets[*]', params: { type: 'object', properties: { status: { type: 'string', enum: ['OPEN', 'CLOSED'], default: 'OPEN' } } }, output: [{ name: 'id', type: 'integer' }] },
       ],
       {
         list_rest: JSON.stringify({ tool: 'listTickets', args: { page: { kind: 'literal', value: 1 } } }),
@@ -270,6 +277,18 @@ for (const target of PG_TARGETS) {
         await db.admin.unsafe('ALTER TABLE s.w ALTER COLUMN owner TYPE text');
         await h.call('POST', '/sources/support/describe', {});
       }
+      // r2: an enum array gaining a label, and row security turning forced, are changes to what the read relies on.
+      await db.admin.unsafe("CREATE TYPE s.st2 AS ENUM ('open', 'closed'); CREATE TABLE s.arr (id int PRIMARY KEY, states s.st2[]); GRANT SELECT ON s.arr TO apps_reader");
+      try {
+        expect((await h.call('POST', '/sources/support/describe', {})).status).toBe(200);
+        const arr: AppQuery = { id: 'arr', source: 'support', kind: 'sql', output: [{ name: 'id', type: 'integer' }, { name: 'states', type: 'string' }] };
+        expect((await h.land('tickets', specWith([arr]), { arr: 'SELECT a.id, a.states FROM s.arr AS a' })).status).toBe(200);
+        await db.admin.unsafe("ALTER TYPE s.st2 ADD VALUE 'held'");
+        expect(await findingOf([{ ...arr, description: 'x' }], { arr: 'SELECT a.id, a.states FROM s.arr AS a' })).toMatchObject({ code: 'catalog_stale' });
+      } finally {
+        await db.admin.unsafe('DROP TABLE s.arr; DROP TYPE s.st2');
+        await h.call('POST', '/sources/support/describe', {});
+      }
       const two = (order: Array<'a' | 'b'>): AppQuery => ({ ...byId, params: { type: 'object', properties: Object.fromEntries(order.map((n) => [n, { type: 'integer' as const, default: 4821 }])) } });
       const t2 = 'SELECT w.id, w.owner FROM s.w AS w WHERE w.id = $1 AND w.id = $2';
       const ab = await h.land('tickets', specWith([two(['a', 'b'])]), { by_id: t2 });
@@ -314,13 +333,21 @@ for (const target of PG_TARGETS) {
       expect(await findingOf([], {}, [code])).toMatchObject({ code: 'value_does_not_fit' });
       const amount: AppAction = { ...assign, table: 's.money', set: { amount: { kind: 'literal', value: '1.234' } } };
       expect(await findingOf([], {}, [amount])).toMatchObject({ code: 'value_does_not_fit' });
-      await db.admin.unsafe('CREATE TABLE s.ts0 (id int PRIMARY KEY, at timestamp(0))');
+      await db.admin.unsafe('CREATE TABLE s.ts0 (id int PRIMARY KEY, at timestamp(0), at3 timestamptz(3), code varchar(3))');
       try {
         const at: AppAction = { ...assign, table: 's.ts0', set: { at: { kind: 'crew', value: 'now' } } };
         expect(await findingOf([], {}, [at])).toMatchObject({ code: 'value_does_not_fit' });
+        // r2: crew fills milliseconds, which timestamptz(3) keeps; a uuid does not fit varchar(3).
+        const at3: AppAction = { ...assign, table: 's.ts0', set: { at3: { kind: 'crew', value: 'now' } } };
+        expect((await h.land('tickets', specWith([], [at3]))).status).toBe(200);
+        const uuid: AppAction = { ...assign, table: 's.ts0', set: { code: { kind: 'crew', value: 'uuid' } } };
+        expect(await findingOf([], {}, [uuid])).toMatchObject({ code: 'value_does_not_fit' });
       } finally {
         await db.admin.unsafe('DROP TABLE s.ts0');
       }
+      // r2: a parameter's default is a known value too.
+      const dflt: AppAction = { ...assign, table: 's.money', set: { amount: { kind: 'param', name: 'amt' } }, params: { type: 'object', properties: { id: { type: 'integer' }, amt: { type: 'string', default: '1.234' } }, required: ['id'] } };
+      expect(await findingOf([], {}, [dflt])).toMatchObject({ code: 'value_does_not_fit' });
       const ratio: AppAction = { ...assign, table: 's.money', set: { ratio: { kind: 'literal', value: 1 } } };
       expect(await findingOf([], {}, [ratio])).toMatchObject({ code: 'written_type' }); // P31: floating point
     });

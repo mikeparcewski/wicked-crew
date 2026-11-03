@@ -239,10 +239,13 @@ export class AppsSourceStage implements AppSourceStage {
       for (const p of route.params) if (!Object.hasOwn(parsed.value.params, p)) throw new Refused('crew_route', `${route.path} needs :${p}`);
       for (const p of Object.keys(parsed.value.params)) if (!route.params.includes(p)) throw new Refused('crew_route', `${route.path} has no :${p}`);
       // Each map on its own (codex/pi r1: a spread let a query value hide a path argument's parameter).
-      providers(parsed.value.params, q.params);
+      const path = providers(parsed.value.params, q.params);
       providers(parsed.value.query, q.params);
-      for (const [k, a] of Object.entries(parsed.value.params)) {
-        if (a.kind === 'literal' && !crewPathValueOk(a.value)) throw new Refused('crew_route', `:${k} of ${route.path} cannot be ${JSON.stringify(a.value)}`);
+      // A path segment is always there and never '', '.', '..' or ill-formed (the reader refuses those, codex r2).
+      for (const [k, p] of Object.entries(path)) {
+        if (p.kind === 'param' && !p.always) throw new Refused('crew_route', `:${k} of ${route.path} comes from parameter ${p.name}, which is optional with no default`);
+        const known = p.kind === 'literal' ? [p.value] : p.kind === 'param' ? [...(p.schema.enum ?? []), ...(p.schema.default !== undefined ? [p.schema.default] : [])] : [];
+        for (const v of known) if (!crewPathValueOk(v)) throw new Refused('crew_route', `:${k} of ${route.path} cannot be ${JSON.stringify(v)}`);
       }
       return crewQueryContract(route);
     }
@@ -408,6 +411,11 @@ export function checkRowValues(a: AppRowWriteAction, columns: readonly SafetyCol
       }
       const problem = paramFits(kind, p, c);
       if (problem !== null) throw new Refused('value_type', `${at}: ${problem} (parameter ${v.name} is ${p.type}${p.format !== undefined ? `, format ${p.format}` : ''})`);
+      // Values the schema already names must also survive the column's full type (codex r2).
+      for (const known of [...(p.enum ?? []), ...(p.default !== undefined ? [p.default] : [])]) {
+        const f = inputForm(kind, known, { nullable: !c.notnull, ...(c.enumLabels !== undefined ? { enumLabels: c.enumLabels } : {}) });
+        if (f.ok && f.text !== null) fixed.push({ column: col, full: c.type, base: baseTypeSql(c), text: f.text });
+      }
     } else if (v.kind === 'literal') {
       const f = inputForm(kind, v.value, { nullable: !c.notnull, ...(c.enumLabels !== undefined ? { enumLabels: c.enumLabels } : {}) });
       if (!f.ok) throw new Refused('value_type', `the literal for ${at} ${f.why}`);
@@ -416,9 +424,11 @@ export function checkRowValues(a: AppRowWriteAction, columns: readonly SafetyCol
       if (kind !== 'text' && kind !== 'varchar') throw new Refused('value_type', `${at} cannot take the viewer's ${v.claim}: a viewer claim goes into a text column`);
     } else if (!crewValueFits(kind, v.value)) {
       throw new Refused('value_type', `${at} cannot take crew's ${v.value === 'now' ? 'now (a timestamp)' : 'new uuid'}`);
-    } else if (v.value === 'now') {
-      // crew fills microseconds: a column that keeps fewer would round it.
-      fixed.push({ column: col, full: c.type, base: baseTypeSql(c), text: crewNow(kind, new Date(Date.UTC(2026, 0, 2, 3, 4, 5, 678))).replace(/\.678000/, '.678901') });
+    } else {
+      // A value of exactly the precision crew fills (milliseconds for now; a canonical uuid) must survive the
+      // column's full type: timestamp(0) would round now, varchar(3) would cut a uuid (codex/pi r2).
+      const sample = v.value === 'now' ? crewNow(kind, new Date(Date.UTC(2026, 0, 2, 3, 4, 5, 678))) : 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11';
+      fixed.push({ column: col, full: c.type, base: baseTypeSql(c), text: sample });
     }
   }
   return fixed;

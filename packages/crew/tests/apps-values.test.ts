@@ -79,7 +79,7 @@ describe('the one input form per written type', () => {
 describe('what an app sends against what the source takes (codex r1)', () => {
   it('a tool argument: its JSON type, its enum, a required property never optional', () => {
     const schema = { type: 'object', properties: { id: { type: 'integer' }, status: { type: 'string', enum: ['OPEN', 'CLOSED'] } }, required: ['id'] };
-    const params = { type: 'object' as const, properties: { id: { type: 'integer' as const }, s: { type: 'string' as const }, opt: { type: 'integer' as const } }, required: ['id'] };
+    const params = { type: 'object' as const, properties: { id: { type: 'integer' as const }, s: { type: 'string' as const }, opt: { type: 'integer' as const } }, required: ['id', 's'] };
     expect(() => checkToolArgs({ id: providerOf({ kind: 'param', name: 'id' }, params) }, schema)).not.toThrow();
     expect(() => checkToolArgs({ id: providerOf({ kind: 'literal', value: 'bad' }, params) }, schema)).toThrow(/integer/);
     expect(() => checkToolArgs({ id: providerOf({ kind: 'param', name: 's' }, params) }, schema)).toThrow(/integer/);
@@ -96,6 +96,36 @@ describe('what an app sends against what the source takes (codex r1)', () => {
     expect(() => checkGraphqlVariables('query ($id: Int!) { t(id: $id) }', intro, { id: p('req') })).not.toThrow();
     expect(() => checkGraphqlVariables('query ($f: F) { t(id: 1, f: $f) }', intro, { f: p('id') })).toThrow(/input object/);
     expect(() => checkGraphqlVariables('query ($s: S) { t(id: 1, s: $s) }', intro, { s: p('s') })).toThrow(/DONE/);
+  });
+
+  it('r2: a required property needs an always-present provider (any schema); array items; an enum destination needs a closed set of values', () => {
+    const params = { type: 'object' as const, properties: { opt: { type: 'string' as const }, tags: { type: 'array' as const, items: { type: 'string' as const } }, st: { type: 'string' as const, enum: ['OPEN'] }, free: { type: 'string' as const, default: 'OPEN' } }, required: [] };
+    const p = (name: string) => providerOf({ kind: 'param', name }, params);
+    expect(() => checkToolArgs({ x: p('opt') }, { required: ['x'] })).toThrow(/optional/);
+    expect(() => checkToolArgs({ ids: p('tags') }, { properties: { ids: { type: 'array', items: { type: 'integer' } } } })).toThrow(/items/);
+    const en = { properties: { status: { type: 'string', enum: ['OPEN', 'CLOSED'] } } };
+    expect(() => checkToolArgs({ status: p('free') }, en)).toThrow(/enum/);
+    expect(() => checkToolArgs({ status: p('st') }, en)).not.toThrow();
+    expect(() => checkToolArgs({ status: providerOf({ kind: 'viewer', claim: 'email' }, params) }, en)).toThrow(/enum/);
+  });
+
+  it('r2: GraphQL takes an explicit null for a nullable variable, the minimum Int, and an enum only from a closed set', () => {
+    const intro = introspectionFromSchema(buildSchema('enum S { OPEN CLOSED } type Q { t(n: Int, s: S, o: String): Int } schema { query: Q }'));
+    const params = { type: 'object' as const, properties: { s: { type: 'string' as const, default: 'OPEN' }, se: { type: 'string' as const, enum: ['OPEN'] } }, required: [] };
+    expect(() => checkGraphqlVariables('query ($o: String) { t(o: $o) }', intro, { o: providerOf({ kind: 'literal', value: null }, params) })).not.toThrow();
+    expect(() => checkGraphqlVariables('query ($n: Int) { t(n: $n) }', intro, { n: providerOf({ kind: 'literal', value: -2147483648 }, params) })).not.toThrow();
+    expect(() => checkGraphqlVariables('query ($s: S) { t(s: $s) }', intro, { s: providerOf({ kind: 'param', name: 's' }, params) })).toThrow(/enum/);
+    expect(() => checkGraphqlVariables('query ($s: S) { t(s: $s) }', intro, { s: providerOf({ kind: 'param', name: 'se' }, params) })).not.toThrow();
+  });
+
+  it('r2: the GraphQL contract holds the directives a document uses and the members of a union it selects', () => {
+    const a = introspectionFromSchema(buildSchema('directive @limit(count: Int = 1) on FIELD type A { id: Int } type B { id: Int } union R = A | B type Query { r: R x: Int }'));
+    const b = introspectionFromSchema(buildSchema('directive @limit(count: Int = 100) on FIELD type A { id: Int } type B { id: Int } union R = A | B type Query { r: R x: Int }'));
+    const c = introspectionFromSchema(buildSchema('directive @limit(count: Int = 1) on FIELD type A { id: Int } type B { id: Int } type C { id: Int } union R = A | B | C type Query { r: R x: Int }'));
+    const d1 = 'query { x @limit }';
+    expect(graphqlRootSignatures(d1, a, 'query')).not.toEqual(graphqlRootSignatures(d1, b, 'query'));
+    const d2 = 'query { r { __typename ... on A { id } ... on B { id } } }';
+    expect(graphqlRootSignatures(d2, a, 'query')).not.toEqual(graphqlRootSignatures(d2, c, 'query'));
   });
 
   it('the GraphQL contract holds every selected field at any depth, fragments and meta-fields included', () => {
@@ -118,6 +148,8 @@ describe('what an app sends against what the source takes (codex r1)', () => {
     const base = sqlQueryContract('postgres', cat(['low', 'high'], false), keys, undefined);
     expect(sqlQueryContract('postgres', cat(['low', 'urgent'], false), keys, undefined)).not.toBe(base);
     expect(sqlQueryContract('postgres', cat(['low', 'high'], true), keys, undefined)).not.toBe(base);
+    const forced = cat(['low', 'high'], true);
+    expect(sqlQueryContract('postgres', { ...forced, relations: [{ ...forced.relations[0]!, rowSecurityForced: true }] }, keys, undefined)).not.toBe(sqlQueryContract('postgres', forced, keys, undefined));
     const tool: McpToolRecord = { name: 't', description: null, inputSchema: null, outputSchema: null, annotations: { readOnlyHint: true }, classOverride: null, enabled: false, schemaHash: 'h', observedSchemaHash: 'h', present: true };
     expect(toolQueryContract('rest', { ...tool, observedSchemaHash: 'h2' }, undefined)).not.toBe(toolQueryContract('rest', tool, undefined));
     expect(toolQueryContract('rest', { ...tool, present: false }, undefined)).not.toBe(toolQueryContract('rest', tool, undefined));

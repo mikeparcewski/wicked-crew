@@ -14,7 +14,7 @@
 
 import { createHash } from 'node:crypto';
 
-import { buildClientSchema, type DocumentNode, getNamedType, type GraphQLSchema, type GraphQLType, type IntrospectionQuery, isEnumType, isInputObjectType, isScalarType, parse, TypeInfo, typeFromAST, visit, visitWithTypeInfo } from 'graphql';
+import { buildClientSchema, type DocumentNode, getNamedType, type GraphQLSchema, type GraphQLType, type IntrospectionQuery, isAbstractType, isEnumType, isInputObjectType, isScalarType, isUnionType, parse, TypeInfo, typeFromAST, visit, visitWithTypeInfo } from 'graphql';
 
 import type { AppParamsSchema } from '../../core/types.js';
 import { canonicalJson, deriveToolClass, effectiveToolClass } from '../../mcp/classify.js';
@@ -62,6 +62,7 @@ export function relationTerms(catalog: SqlCatalog | null, relationKeys: readonly
       kind: r.kind,
       foreignBelow: r.foreignDescendant === true,
       rowSecurity: r.rowSecurity === true,
+      rowSecurityForced: r.rowSecurityForced === true,
       columns: r.columns.map((c) => [c.name, c.type, c.nullable, c.enumValues ?? null]),
     });
   }
@@ -136,6 +137,22 @@ export function graphqlRootSignatures(document: string, introspection: Introspec
         refer(def.type);
         for (const a of def.args) refer(a.type);
       },
+      Directive() {
+        // A directive's definition is part of what the document relies on (codex r2).
+        const d = typeInfo.getDirective();
+        if (d === null || d === undefined) {
+          missing = true;
+          return;
+        }
+        lines.add(`directive @${d.name}(${d.args.map((a) => `${a.name}: ${String(a.type)}${a.defaultValue !== undefined ? ` = ${JSON.stringify(a.defaultValue)}` : ''}`).join(', ')}) on ${[...d.locations].sort().join(' | ')}`);
+        for (const a of d.args) refer(a.type);
+      },
+      InlineFragment() {
+        refer(typeInfo.getType());
+      },
+      FragmentDefinition() {
+        refer(typeInfo.getType());
+      },
       VariableDefinition(node) {
         const t = typeFromAST(schema, node.type);
         if (t === undefined) {
@@ -162,6 +179,11 @@ export function graphqlRootSignatures(document: string, introspection: Introspec
       lines.add(`input ${t.name} { ${fields.map((f) => `${f.name}: ${String(f.type)}${f.defaultValue !== undefined ? ` = ${JSON.stringify(f.defaultValue)}` : ''}`).join(', ')} }`);
       for (const f of fields) queue.push(getNamedType(f.type).name);
     } else if (isScalarType(t)) lines.add(`scalar ${t.name}`);
+    else if (isAbstractType(t)) {
+      // A union's or interface's possible types: a new member changes what a row can be (codex r2).
+      const members = schema.getPossibleTypes(t).map((m) => m.name).sort();
+      lines.add(`${isUnionType(t) ? 'union' : 'interface'} ${t.name} = ${members.join(' | ')}`);
+    }
   }
   return [...lines].sort();
 }

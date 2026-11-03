@@ -286,7 +286,7 @@ export function crewValueFits(kind: WritableKind, v: 'now' | 'uuid'): boolean {
   return v === 'now' ? kind === 'timestamptz' || kind === 'timestamp' : kind === 'uuid' || kind === 'text' || kind === 'varchar';
 }
 
-/** crew's `now` for a column of `kind`, microsecond precision (UTC; a `timestamp` gets the UTC wall time). */
+/** crew's `now` for a column of `kind`: millisecond precision written with six digits (UTC; a `timestamp` gets the UTC wall time). */
 export function crewNow(kind: WritableKind, at: Date = new Date()): string {
   const iso = at.toISOString(); // 2026-11-03T08:32:00.123Z
   const micro = `${iso.slice(0, 23)}000`;

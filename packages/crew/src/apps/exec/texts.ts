@@ -62,5 +62,7 @@ export function parseCrewQueryText(text: string): Parsed<AppCrewQueryText> {
 
 /** A value a crew-source path segment may take (the reader refuses the rest before any request). */
 export function crewPathValueOk(v: unknown): boolean {
-  return v !== null && v !== undefined && String(v) !== '' && String(v) !== '.' && String(v) !== '..';
+  if (v === null || v === undefined) return false;
+  const t = String(v);
+  return t !== '' && t !== '.' && t !== '..' && !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(t);
 }
