@@ -415,13 +415,70 @@ export function structureFinding(value: unknown): AppCheckFinding | null {
   return null;
 }
 
+/** The most findings a check answers; the element-wise pass stops once it has this many. */
+const MAX_FINDINGS = 50;
+
+/**
+ * The document with its three big lists (components, queries, actions) unparsed: cheap, and what the
+ * element-wise pass walks.
+ */
+const SkeletonSchema = AppSpecSchema.extend({
+  pages: z.array(PageSchema.extend({ components: z.array(z.unknown()).max(100) })).min(1).max(20),
+  queries: z.array(z.unknown()).max(100),
+  actions: z.array(z.unknown()).max(50),
+});
+
+/** (tests) How many big-list elements the last {@link parseSpec} parsed: proof that a bad document stops early. */
+export const parseWork = { elements: 0 };
+
+/**
+ * Schema findings with a budget (codex r4): the skeleton first, then each component, query and action on
+ * its own, stopping once {@link MAX_FINDINGS} findings are in hand, so a malformed document costs at most
+ * the elements up to that point, never zod's diagnostics for every element of every list.
+ */
+function budgetedFindings(value: unknown): AppCheckFinding[] {
+  parseWork.elements = 0;
+  const out: AppCheckFinding[] = [];
+  const add = (issues: z.ZodIssue[], prefix: (string | number)[]): void => {
+    for (const i of issues) {
+      if (out.length >= MAX_FINDINGS) return;
+      out.push(finding('schema', [...prefix, ...i.path], i.message));
+    }
+  };
+  const skeleton = SkeletonSchema.safeParse(value);
+  if (!skeleton.success) add(skeleton.error.issues, []);
+  const doc = value as { pages?: unknown; queries?: unknown; actions?: unknown };
+  const lists: Array<[unknown, z.ZodTypeAny, (i: number, p?: number) => (string | number)[]]> = [];
+  if (Array.isArray(doc.pages)) {
+    doc.pages.forEach((page, pi) => {
+      const comps = (page as { components?: unknown } | null)?.components;
+      if (Array.isArray(comps)) lists.push([comps, ComponentSchema, (i) => ['pages', pi, 'components', i]]);
+    });
+  }
+  if (Array.isArray(doc.queries)) lists.push([doc.queries, QuerySchema, (i) => ['queries', i]]);
+  if (Array.isArray(doc.actions)) lists.push([doc.actions, ActionSchema, (i) => ['actions', i]]);
+  for (const [items, schema, at] of lists) {
+    for (const [i, item] of (items as unknown[]).entries()) {
+      if (out.length >= MAX_FINDINGS) return out;
+      parseWork.elements++;
+      const r = schema.safeParse(item);
+      if (!r.success) add(r.error.issues, at(i));
+    }
+  }
+  return out;
+}
+
 /** The shape alone: the parsed spec, or the findings (at most 50). */
 export function parseSpec(value: unknown): { spec: AppSpec; findings: [] } | { spec: null; findings: AppCheckFinding[] } {
   const structure = structureFinding(value);
   if (structure !== null) return { spec: null, findings: [structure] };
+  const findings = budgetedFindings(value);
+  if (findings.length > 0) return { spec: null, findings };
+  // Every piece passed on its own; the whole schema now types the document (and has nothing to say
+  // beyond what the pieces said: a valid document costs zod no diagnostics).
   const parsed = AppSpecSchema.safeParse(value);
   if (parsed.success) return { spec: parsed.data as AppSpec, findings: [] };
-  return { spec: null, findings: parsed.error.issues.slice(0, 50).map((i) => finding('schema', i.path, i.message)) };
+  return { spec: null, findings: parsed.error.issues.slice(0, MAX_FINDINGS).map((i) => finding('schema', i.path, i.message)) };
 }
 
 /** `apps.json` bytes → the parsed spec or findings: size, JSON, then {@link parseSpec} and {@link checkSpec}. */

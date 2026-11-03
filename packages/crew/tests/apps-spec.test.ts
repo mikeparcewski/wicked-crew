@@ -1,7 +1,7 @@
 // DES-APPS-001 §4 (K2a): `apps.json`, the schema and the consistency check crew runs on every tree.
 import { describe, expect, it } from 'vitest';
 
-import { APP_SPEC_MAX_BYTES, checkSpec, parseSpec, readSpec } from '../src/apps/spec.js';
+import { APP_SPEC_MAX_BYTES, checkSpec, parseSpec, parseWork, readSpec } from '../src/apps/spec.js';
 import type { AppSpec } from '../src/core/types.js';
 
 /** Priya's "Escalations" app (DES §3), trimmed: every component kind and both action kinds. */
@@ -415,6 +415,21 @@ describe('apps.json: the consistency check', () => {
     expect(codes(s)).toEqual([]);
     (s.pages[0]!.components[2] as { format: unknown }).format = { kind: 'number', currency: 'EUR' };
     expect(codes(s)[0]).toMatch(/^schema@/);
+  });
+
+  it('stops parsing a malformed document once it has 50 findings (codex r4)', () => {
+    // 20 pages x 100 tables x 200 malformed columns: inside every list limit, 1.26 MB.
+    const comp = `{"type":"table","columns":[${Array(200).fill('{}').join(',')}]}`;
+    const page = `{"id":"p","title":"t","components":[${Array(100).fill(comp).join(',')}]}`;
+    const doc = `{"schema":"wicked.apps/v1","name":"x","queries":[],"actions":[],"linkHosts":[],"pages":[${Array(20).fill(page).join(',')}]}`;
+    const r = readSpec(doc);
+    expect(r.findings).toHaveLength(50);
+    // The first component alone yields 50 findings; nothing after it is parsed.
+    expect(parseWork.elements).toBe(1);
+    // A valid document is parsed whole.
+    const ok = escalations();
+    expect(parseSpec(ok).findings).toEqual([]);
+    expect(parseWork.elements).toBe(ok.pages.reduce((n, p) => n + p.components.length, 0) + ok.queries.length + ok.actions.length);
   });
 
   it('accepts the largest legal shapes inside 2 MB (codex r2: 3 pages of 90 tables of 200 columns)', () => {
