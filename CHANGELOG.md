@@ -63,6 +63,14 @@ mentioned only where a daemon release depends on them.
     keeps the recording stub only for refine, theme and demo (`capabilities.chatArtifacts.stubOps`).
 
 
+### Changed
+
+- **The interactive bridge floor is `^0.15.0` (was `^0.14.1`).** wicked-interactive 0.15.0 (#323, slice I1) lands a
+  draft that carries `expect_head` only on that head, and records `kind` and `run_id` on every version it lands. A
+  chat-made document's draft (A3) sends `expect_head`, and a 0.14.x bridge ignores it and lands over a person's edit.
+  The caret pins the minor on 0.x, so crew never spawned 0.15.0 on `^0.14.1`. A `WICKED_INTERACTIVE_SPEC` override
+  below the floor is still honoured, and the boot line warns about it.
+
 ### Fixed
 
 - **An editor plugin's frame can no longer use WebRTC.** A bundle's policy blocks fetch, XHR, WebSocket and beacons

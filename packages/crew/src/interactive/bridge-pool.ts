@@ -171,7 +171,16 @@ const INTERACTIVE_PACKAGE = 'wicked-interactive';
  * (`PUT /d/:doc/api/theme/source`) in 0.14.0, which was tagged but never published; 0.14.1 is the first
  * build with both. A caret on 0.x pins the minor, so `^0.12.0` spawned 0.12.x, which has neither route.
  */
-export const INTERACTIVE_DEFAULT_RANGE = '^0.14.1';
+/**
+ * 0.15.0 (wicked-interactive#323, slice I1): a `draft.completed` with `expect_head` lands only on that
+ * head (a moved head lands nothing and emits `draft.conflict`), and every landed version records
+ * `kind` + `run_id`. A chat-made document's draft (A3) sends `expect_head`; a 0.14.x bridge ignores it
+ * and lands on whatever the head is, over a person's edit. The caret pins the minor, so `^0.14.1` never
+ * spawned 0.15.0: the floor follows. As with every floor that adds no env key, a 0.14.x bridge that is
+ * adopted (a sidecar that names it, a matching env) keeps serving until it restarts; the previous
+ * daemon's shutdown reaps the bridges it spawned, so a normal upgrade starts a 0.15.x one.
+ */
+export const INTERACTIVE_DEFAULT_RANGE = '^0.15.0';
 /** The env override of the RANGE (not the package). */
 export const INTERACTIVE_SPEC_ENV = 'WICKED_INTERACTIVE_SPEC';
 /** The default spec — what the daemon spawns with no override. */
