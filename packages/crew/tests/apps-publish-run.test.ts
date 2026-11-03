@@ -105,7 +105,7 @@ describe('the publish run (crew side)', () => {
   it('start binds the head tree and the manifest, launches apps-publish, and refuses a second while it runs, a stale base and a failing check', async () => {
     const a = await svc.start('esc', await oidcBody(), { id: 'priya', kind: 'human', trust: 'operator' });
     expect(a.runId).toMatch(/^apps-publish-esc-[0-9a-f]{12}$/);
-    expect(launched.at(-1)).toMatchObject({ runId: a.runId, app: 'esc', name: 'esc', version: await head(), excludeSeats: [] });
+    expect(launched.at(-1)).toMatchObject({ runId: a.runId, app: 'esc', name: 'esc', version: await head(), excludeSeats: [], commit: (await h.store.detail('esc')).versions.at(-1)!.commit });
     expect(h.store.publishingOf(a.runId)?.publishing.digest).toBe(a.manifestDigest);
     await expect(svc.start('esc', await oidcBody(), { id: 'priya', kind: 'human', trust: 'operator' })).rejects.toMatchObject({ status: 409, code: 'publish_in_flight' });
     active = false; // the run ended without producing
@@ -142,17 +142,28 @@ describe('the publish run (crew side)', () => {
     units.set('tok-check2', { runId, step: 'check', tool: true });
     await expect(svc.produce('tok-check2')).rejects.toMatchObject({ status: 403, code: 'not_this_step' });
     const out = await svc.produce('tok-produce');
-    expect(out.published).toMatchObject({ runId, shareUrl: 'https://esc.example.com/', manifestDigest, image: { tag: `wicked-apps/esc:v${await head()}`, id: `sha256:${'a'.repeat(64)}` }, snippet: null, teamsPackage: { url: '/api/v1/apps/esc/published/teams.zip' }, run: { volume: null, port: 8080 } });
-    expect(built.at(-1)).toBe(`wicked-apps/esc:v${await head()}`);
+    expect(out.published).toMatchObject({ runId, shareUrl: 'https://esc.example.com/', manifestDigest, image: { tag: `wicked-apps/esc:v${await head()}-${runId.slice(-12)}`, id: `sha256:${'a'.repeat(64)}` }, snippet: null, teamsPackage: { url: '/api/v1/apps/esc/published/teams.zip' }, run: { volume: null, port: 8080 } });
+    expect(built.at(-1)).toBe(`wicked-apps/esc:v${await head()}-${runId.slice(-12)}`);
     const detail = await h.store.detail('esc');
     expect(detail.published?.shareUrl).toBe('https://esc.example.com/');
     expect(h.store.list()[0]!.published?.version).toBe(detail.head.version);
     expect(detail.versions.at(-1)!.receipt?.kind).not.toBe('published'); // the version keeps its own receipt; the tree gains one
     expect(h.store.publishingOf(runId)).toBeNull();
-    const pkg = readFileSync(join(dir, 'published', 'esc', 'teams.zip'));
+    // Each produce writes its own run's package (a stale produce never overwrites the record's).
+    const pkg = readFileSync(join(dir, 'published', 'esc', runId.slice(-12), 'teams.zip'));
     expect(zipNames(pkg)).toEqual(['manifest.json', 'color.png', 'outline.png']);
     // The same publish cannot produce twice.
     await expect(svc.produce('tok-produce')).rejects.toMatchObject({ code: 'not_publishing' });
+  });
+
+  it('a failed image build answers a code (502 image_build_failed), and nothing is published', async () => {
+    active = false;
+    const { runId } = await svc.start('esc', await oidcBody(), { id: 'priya', kind: 'human', trust: 'operator' });
+    units.set('tok-produce-fail', { runId, step: 'produce', tool: true });
+    const { ImageBuildError } = await import('../src/apps/publish/image.js');
+    const failing = new AppPublishService({ ...(svc as unknown as { deps: ConstructorParameters<typeof AppPublishService>[0] }).deps, build: async () => Promise.reject(new ImageBuildError('build_failed', 'the image build failed (exit 1)', 'step 3/5 failed')) });
+    await expect(failing.produce('tok-produce-fail')).rejects.toMatchObject({ status: 502, code: 'image_build_failed' });
+    expect(h.store.publishingOf(runId)).not.toBeNull(); // still the run's to retry or end
   });
 
   it('the routes: publish answers 202 with the run, the Tool routes take a token body only, the Teams package downloads', async () => {
@@ -186,7 +197,7 @@ describe('the Teams package', () => {
     expect(tm.validDomains).toEqual(['esc.example.com']);
     expect(tm.webApplicationInfo).toEqual({ id: CLIENT, resource: `api://esc.example.com/${CLIENT}` });
     expect(tm.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-    expect(tm.version).toBe('1.0.14');
+    expect(tm.version).toBe('1.1.14');
     expect(teamsManifest(m)).toEqual(tm); // stable: the same app republished keeps its tab
     expect(consentCard(m)).toContain('Framed by: https://teams.microsoft.com');
   });

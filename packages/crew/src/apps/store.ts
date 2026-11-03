@@ -102,6 +102,17 @@ interface StoredApp {
   published?: AppPublished | null;
 }
 
+/**
+ * (K6, DES §9.3) The seats that built a reviewed turn in a version after `publishedVersion` (the last published one):
+ * none of them may be a publish's QE seat. By VERSION, never by tree: receipts are keyed by tree, and a later turn that
+ * rebuilds an earlier published tree is still a turn since that publish.
+ */
+export function buildersSince(versions: readonly AppVersion[], publishedVersion: number): string[] {
+  const builders = new Set<string>();
+  for (const v of versions) if (v.version > publishedVersion && v.receipt?.kind === 'reviewed' && v.receipt.review !== undefined) builders.add(v.receipt.review.builder);
+  return [...builders].sort();
+}
+
 /** (K6, DES §9.3) A publish in flight: the run, and the tree and manifest it is bound to. */
 export interface StoredPublishing {
   runId: string;
@@ -121,7 +132,8 @@ export interface StoredPublishing {
 
 /** (K6) The publish seam: launching an `apps-publish` run, and asking whether one still runs. */
 export interface AppPublishLauncher {
-  launch(input: { runId: string; app: string; name: string; repoId: string; projectId: string; version: number; excludeSeats: string[]; actor: Actor }): Promise<void>;
+  /** `commit` is the bound version's: the app repo's `main` points at it when the run starts (the run's tree). */
+  launch(input: { runId: string; app: string; name: string; repoId: string; projectId: string; version: number; commit: string; excludeSeats: string[]; actor: Actor }): Promise<void>;
   isActive(runId: string): Promise<boolean>;
 }
 
@@ -455,17 +467,13 @@ export class AppStore {
 
   // ── Publish (K6, DES §9.3) ──────────────────────────────────────────────────────────────────────
 
-  /** The seats that built an accepted turn since the app's last publish (the publish's QE seat must be none of them). */
+  /**
+   * The seats that built an accepted turn since the app's last publish (the publish's QE seat must be none of them):
+   * every version after the last PUBLISHED VERSION whose own receipt is `reviewed` (a tree's receipts are keyed by
+   * tree, so a later turn that rebuilt a published tree still counts: the boundary is the version, not the tree).
+   */
   private buildersSinceLastPublish(a: StoredApp): string[] {
-    const builders = new Set<string>();
-    for (let i = a.versions.length - 1; i >= 0; i--) {
-      const v = a.versions[i]!;
-      const held = Object.hasOwn(a.receipts, v.tree) ? a.receipts[v.tree]! : [];
-      if (held.some((r) => r.kind === 'published')) break;
-      for (const r of held) if (r.kind === 'reviewed' && r.review !== undefined) builders.add(r.review.builder);
-      if (v.receipt?.kind === 'reviewed' && v.receipt.review !== undefined) builders.add(v.receipt.review.builder);
-    }
-    return [...builders].sort();
+    return buildersSince(a.versions, a.published?.version ?? 0);
   }
 
   /**
@@ -482,8 +490,9 @@ export class AppStore {
     if (launcher === null) throw new AppStoreError(501, 'not_implemented', 'this daemon cannot launch apps-publish runs');
     return this.withApp(slug, async () => {
       const a = this.app(slug);
+      // The base is the head, no turn runs, and `main` points at the head commit: the run starts on the bound tree.
+      await this.guard(a, input.base, 'a publish');
       const h = this.head(a);
-      if (input.base !== h.version) throw new AppStoreError(409, 'stale_base', `the app is at v${h.version}, not v${input.base}: publish the version you are looking at`, { head: h.version });
       if (this.acceptedReceipt(slug, h.tree) === null) throw new AppStoreError(409, 'not_accepted', `v${h.version} holds no accepted receipt: it cannot be published`);
       const inFlight = a.publishing ?? null;
       if (inFlight !== null && (await launcher.isActive(inFlight.runId).catch(() => true))) {
@@ -496,7 +505,7 @@ export class AppStore {
         a.publishing = publishing;
       });
       try {
-        await launcher.launch({ runId, app: slug, name: a.name, repoId: a.repoId, projectId: a.projectId, version: h.version, excludeSeats: publishing.excludeSeats, actor: input.actor });
+        await launcher.launch({ runId, app: slug, name: a.name, repoId: a.repoId, projectId: a.projectId, version: h.version, commit: h.commit, excludeSeats: publishing.excludeSeats, actor: input.actor });
       } catch (err) {
         if (a.publishing?.runId === runId) {
           this.transact(slug, () => {
@@ -507,6 +516,12 @@ export class AppStore {
       }
       return structuredClone(publishing);
     });
+  }
+
+  /** How many publishes of this app produced their image (the Teams package revision climbs with it). */
+  publishCount(slug: string): number {
+    const a = this.app(slug);
+    return Object.values(a.receipts).reduce((n, rs) => n + rs.filter((r) => r.kind === 'published').length, 0);
   }
 
   /** The publish a run is: its app and what it is bound to, or `null`. */

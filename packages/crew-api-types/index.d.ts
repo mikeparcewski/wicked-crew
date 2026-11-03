@@ -15587,7 +15587,8 @@ export interface AppActionRevokeResponse {
 
 /** One reason a check refused a tree. `path` is a JSON path into `apps.json`, or a repo path. */
 export interface AppCheckFinding {
-  stage: 'spec' | 'files' | 'policy' | 'source';
+  /** (api-types 0.181.0) `publish`: the publish check (`POST /apps/:app/publish`, path `$`). */
+  stage: 'spec' | 'files' | 'policy' | 'source' | 'publish';
   code: string;
   path: string;
   message: string;
@@ -15672,14 +15673,17 @@ export interface AppErrorBody {
     | 'unknown_action'
     | 'unknown_record'
     | 'missing_grants'
-    // (api-types 0.180.0, K6) Publish: one runs already; the token is not this publish step's; no publish runs as
+    // (api-types 0.181.0, K6) Publish: one runs already; the token is not this publish step's; no publish runs as
     // that run; this crew carries no runtime or server artifact to build with; no Teams package was produced.
     | 'publish_in_flight'
     | 'not_this_step'
     | 'not_publishing'
     | 'no_runtime'
     | 'no_server'
-    | 'not_published';
+    | 'not_published'
+    | 'no_container_engine'
+    | 'image_build_failed'
+    | 'pack_failed';
   error: string;
   /** `rate_limited`: when to try again (also sent as `Retry-After`). */
   retryAfterMs?: number;
@@ -15897,7 +15901,7 @@ export interface AppPublished {
   runId: string;
   /** Unix millis, when the image was produced. */
   at: number;
-  /** Who consented. */
+  /** Who started the publish (the consent itself is on the run's gate record, answered by a human operator only). */
   actor: Actor;
   targets: AppPublishTarget[];
   /** The share link: `site.origin` + `/`. What studio's Copy link copies. */

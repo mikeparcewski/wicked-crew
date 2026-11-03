@@ -2169,7 +2169,8 @@ export function registerRoutes(
               query: appsExecutor !== undefined,
               actions: appsWritePath !== undefined,
               turns: runtime.apps.turns !== null,
-              publish: appsPublish !== undefined,
+              // Only when this crew can build what Publish produces: the runtime's standalone build and the app server.
+              publish: appsPublish !== undefined && appsRuntimeDir() !== null && appsServerArtifact() !== null,
               uploads: app.hasRoute({ method: 'POST', url: `${V}/apps/uploads` }),
               sourceCheck: runtime.apps.sourceStage !== null,
             } satisfies import('../core/types.js').AppsCapabilities,
@@ -5886,6 +5887,16 @@ export function registerRoutes(
    * an order is just another actor, named on the audit line (`extraDetail.standingOrder`). One
    * decision at a time per run ({@link decideExclusively}).
    */
+  /**
+   * (DES-APPS-001 §9.3, K6) An Apps publish's gates are the person's: its `produce` step's consent is THE approval of
+   * what ships, and no agent-kind operator, plugin or standing order answers it, by any path (gate, resume, approve).
+   */
+  const appsPublishGateRefusal = (runId: string, actor: import('../core/types.js').Actor): { code: number; body: unknown } | null => {
+    if (runtime.apps?.publishingOf(runId) == null || isHumanOperator(actor)) return null;
+    audit.record('gate.apps_publish_refused', actor, { runId, detail: { reason: 'human_operator_only' } });
+    return { code: 403, body: { error: `only a human operator can answer an Apps publish's gates (you are ${actor.kind}/${actor.trust})`, code: 'human_operator_only' } };
+  };
+
   async function decideGate(
     id: string,
     decision: unknown,
@@ -5896,6 +5907,8 @@ export function registerRoutes(
     if (!parsed.success) {
       return { code: 400, body: invalidBody(parsed.error, 'Invalid request body') };
     }
+    const publishRefused = appsPublishGateRefusal(id, actor);
+    if (publishRefused !== null) return publishRefused;
     // (studio#923) Skipping QE acceptance is the human operator's call alone: a seat's token, a
     // standing order or any other non-human actor is refused before anything is read, and the
     // attempt is audited. The engine records WHO skipped it from the same actor (recordGateActor).
@@ -6150,6 +6163,10 @@ export function registerRoutes(
       // A gated resume IS an approve, so it is judged by the record like every decision, passes the
       // same delivery checks (freeze, EX-03) — no side door around the deliver gate — and answers
       // with the gated unit's receipt.
+      if (gated) {
+        const publishRefused = appsPublishGateRefusal(id, actorOf(req));
+        if (publishRefused !== null) return reply.code(publishRefused.code).send(publishRefused.body);
+      }
       const decided = gated ? await gateForDecision(run, undefined) : undefined;
       if (decided !== undefined && 'refusal' in decided) return reply.code(decided.refusal.code).send(decided.refusal.body);
       const steeringPropose =
@@ -6503,6 +6520,8 @@ export function registerRoutes(
     const cursor = resolveCursorUnit(run);
     const ord = cursor?.ord ?? run.session.unit_ix;
     let noteRode = false;
+    const publishRefused = appsPublishGateRefusal(id, actorOf(req));
+    if (publishRefused !== null) return reply.code(publishRefused.code).send(publishRefused.body);
     const approve = async (): Promise<void> => {
       if (typeof adapter.confirmGate !== 'function') return; // refused above for a gated run
       const who = actorOf(req);

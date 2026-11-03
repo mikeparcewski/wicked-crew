@@ -83,7 +83,10 @@ function overLong(body: unknown, key: string, max: number): boolean {
 }
 
 function fail(reply: FastifyReply, err: unknown): FastifyReply {
-  if (err instanceof PublishError) return reply.code(err.status).send({ code: err.code, error: err.message, ...(err.findings.length > 0 ? { findings: err.findings } : {}) });
+  if (err instanceof PublishError) {
+    const body: AppErrorBody = { code: err.code as AppErrorBody['code'], error: err.message, ...(err.findings.length > 0 ? { findings: err.wireFindings() } : {}) };
+    return reply.code(err.status).send(body);
+  }
   if (err instanceof AppStoreError) return reply.code(err.status).send({ code: err.code, error: err.message, ...err.extra });
   if (err instanceof AppExecError || err instanceof AppWriteError) {
     if (err.extra.retryAfterMs !== undefined) void reply.header('retry-after', String(Math.max(1, Math.ceil(err.extra.retryAfterMs / 1000))));
@@ -454,7 +457,8 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
     const slug = slugOf(req, reply);
     if (slug === null) return reply;
     const published = store.list().find((a) => a.slug === slug)?.published ?? null;
-    const file = deps.publishedDir === undefined ? null : `${deps.publishedDir}/${slug}/teams.zip`;
+    // The package of the publish the record names (each produce writes its own run's), never a newer stray one.
+    const file = deps.publishedDir === undefined || published == null ? null : `${deps.publishedDir}/${slug}/${published.runId.slice(-12)}/teams.zip`;
     const { existsSync, readFileSync } = await import('node:fs');
     if (published?.teamsPackage == null || file === null || !existsSync(file)) return refuse(reply, 404, { code: 'not_published', error: `${slug} has no Teams package: publish it with the Teams target` });
     return reply.header('content-type', 'application/zip').header('content-disposition', `attachment; filename="${slug}-teams.zip"`).header('cache-control', 'no-store').send(readFileSync(file));

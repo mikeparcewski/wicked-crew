@@ -149,6 +149,8 @@ export async function buildManifest(input: ManifestInput): Promise<ManifestOutco
     if (!id.issuer.startsWith('https://')) find('identity', 'The issuer is an https:// URL');
     if (id.clientId.trim() === '') find('identity', 'The client id is required');
     if (id.profile === 'entra') {
+      // Entra's client id is the app registration's GUID (Teams' webApplicationInfo.id must be one too).
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id.clientId)) find('identity', 'The Entra client id is the app registration’s GUID');
       const m = ENTRA_ISSUER.exec(id.issuer);
       if (m === null || id.tenantId === undefined || m[1]!.toLowerCase() !== id.tenantId.toLowerCase()) find('identity', 'The Entra issuer is https://login.microsoftonline.com/<tenant id>/v2.0, for the tenant named');
       if (!body.audience.kind.startsWith('entra-')) find('audience', 'Entra sign-in judges app roles or group object ids');
@@ -156,6 +158,7 @@ export async function buildManifest(input: ManifestInput): Promise<ManifestOutco
       find('audience', 'OIDC sign-in judges group values or email domains');
     }
     if (input.endpoints === null) find('identity', "The issuer's discovery document could not be read");
+    else if (input.endpoints.idTokenAlgs !== undefined && input.endpoints.idTokenAlgs.length === 0) find('identity', 'The issuer signs ID tokens only with algorithms the site cannot verify (it verifies RS, PS and ES)');
     // The page checks the sign-in's nonce, which needs the ID token: the scope always asks for `openid`.
     if (id.scope !== undefined && !id.scope.split(/\s+/).includes('openid')) find('identity', 'The sign-in scope must include openid');
   }

@@ -17,11 +17,14 @@ import type { AppPublishLauncher } from '../store.js';
 export interface PublishAdapter {
   launchRun(input: { problem: string; sessionId: string; clisJson: string; workflow: string; repoRef: string; projectId?: string; excludeSeats?: string[] }): Promise<string>;
   seatsForWorkflow(workflow: string): Promise<unknown>;
-  sessionsDetail(): Promise<Array<{ session: { id: string; status: string }; units: Array<{ ord: number; phase_ref: string | null; command?: unknown }> }>>;
+  sessionsDetail(): Promise<Array<{ session: { id: string; status: string }; units: Array<{ id: string; ord: number; tool_cmd?: string[] | null }> }>>;
   askUnit(token: string): Promise<{ runId: string; ord: number }>;
 }
 
 export const APPS_PUBLISH_WORKFLOW = 'apps-publish';
+/** The ID-token algorithms the site's verifier (crew's `api/auth.ts`) checks, by their exact JOSE names. */
+const JOSE_ALGS = new Set(['RS256', 'RS384', 'RS512', 'PS256', 'PS384', 'PS512', 'ES256', 'ES384', 'ES512']);
+const DISCOVERY_MAX_BYTES = 1024 * 1024;
 const ENDED = new Set(['completed', 'failed', 'cancelled', 'canceled', 'partially_completed', 'superseded']);
 
 export function publishLauncher(adapter: PublishAdapter, hooks: { launched?: (runId: string, projectId: string, actor: Actor) => void } = {}): AppPublishLauncher {
@@ -59,7 +62,11 @@ export function unitOfToken(adapter: PublishAdapter): (token: string) => Promise
     const run = (await adapter.sessionsDetail()).find((s) => s.session.id === unit.runId);
     const u = run?.units.find((x) => x.ord === unit.ord);
     if (u === undefined) return null;
-    return { runId: unit.runId, step: u.phase_ref, tool: u.command !== undefined && u.command !== null };
+    // The authored step is the unit id's suffix (`<runId>:check`), as `plannedUnitsOfRun` reads it; a Tool unit is
+    // one with a command (`tool_cmd`). Anything else (an agent unit, another shape) is no step of a publish.
+    const prefix = `${unit.runId}:`;
+    const step = u.id.startsWith(prefix) ? u.id.slice(prefix.length) : null;
+    return { runId: unit.runId, step, tool: Array.isArray(u.tool_cmd) && u.tool_cmd.length > 0 };
   };
 }
 
@@ -68,12 +75,33 @@ export async function discoverIssuer(issuer: string, allowRanges: string[]): Pro
   if (!issuer.startsWith('https://')) return null;
   try {
     const res = await dialFetch(`${issuer.replace(/\/$/, '')}/.well-known/openid-configuration`, { signal: AbortSignal.timeout(10_000), headers: { accept: 'application/json' } }, oidcAddressPolicy({ issuer, allowRanges }));
-    if (!res.ok) return null;
-    const doc = (await res.json()) as { issuer?: unknown; authorization_endpoint?: unknown; token_endpoint?: unknown; id_token_signing_alg_values_supported?: unknown };
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => undefined);
+      return null;
+    }
+    // Read at most 1 MiB (as crew's own verifier reads discovery documents): a huge answer is no issuer's.
+    const reader = res.body?.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    for (;;) {
+      if (reader === undefined) break;
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > DISCOVERY_MAX_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        return null;
+      }
+      chunks.push(value);
+    }
+    const doc = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { issuer?: unknown; authorization_endpoint?: unknown; token_endpoint?: unknown; id_token_signing_alg_values_supported?: unknown };
     const https = (u: unknown): u is string => typeof u === 'string' && u.startsWith('https://');
     if (doc.issuer !== issuer || !https(doc.authorization_endpoint) || !https(doc.token_endpoint)) return null;
-    const algs = Array.isArray(doc.id_token_signing_alg_values_supported) ? doc.id_token_signing_alg_values_supported.filter((a): a is string => typeof a === 'string' && /^[A-Z0-9]{2,10}$/.test(a)) : [];
-    return { authorization: doc.authorization_endpoint, token: doc.token_endpoint, ...(algs.length > 0 ? { idTokenAlgs: algs } : {}) };
+    const listed = Array.isArray(doc.id_token_signing_alg_values_supported) ? doc.id_token_signing_alg_values_supported.filter((a): a is string => typeof a === 'string') : [];
+    const algs = listed.filter((a) => JOSE_ALGS.has(a));
+    // An issuer that lists only algorithms the site cannot verify (EdDSA, say) answers an EMPTY list: the publish
+    // check refuses it, rather than a page that signs everyone in and a server that refuses every token.
+    return { authorization: doc.authorization_endpoint, token: doc.token_endpoint, ...(listed.length > 0 ? { idTokenAlgs: algs } : {}) };
   } catch {
     return null;
   }

@@ -29,8 +29,8 @@ import type { AppExecutor } from '../exec/executor.js';
 import type { AppWritePath } from '../actions/write-path.js';
 import { AppStoreError, type AppStore } from '../store.js';
 import { buildManifest, type PublishFinding } from './manifest.js';
-import { writeImageContext } from './pack.js';
-import { buildImage } from './image.js';
+import { PackError, writeImageContext } from './pack.js';
+import { buildImage, ImageBuildError } from './image.js';
 import { SITE_PORT, TEAMS_FRAME_ORIGINS } from './layout.js';
 import { teamsPackage } from './teams.js';
 
@@ -42,6 +42,11 @@ export class PublishError extends Error {
     readonly findings: PublishFinding[] = [],
   ) {
     super(message);
+  }
+
+  /** The findings in the app routes' shape (`AppErrorBody.findings`, stage `publish`). */
+  wireFindings(): Array<{ stage: 'publish'; code: string; path: string; message: string }> {
+    return this.findings.map((f) => ({ stage: 'publish', code: f.code, path: '$', message: f.message }));
   }
 }
 
@@ -197,6 +202,9 @@ export class AppPublishService {
     if (server === null || !existsSync(join(server, 'Dockerfile'))) throw new PublishError(503, 'no_server', 'this crew carries no app server artifact (packages/apps-server dist)');
     const texts = await this.deps.store.treeTexts(slug, p.tree);
     const ctx = mkdtempSync(join(tmpdir(), `wicked-apps-${slug}-`));
+    // Everything this produce writes is THIS run's (its image tag, its Teams package): a stale or duplicate produce
+    // can never move what a newer publish's record points at.
+    const runTag = p.runId.slice(-12);
     try {
       const { readFileSync } = await import('node:fs');
       writeImageContext(ctx, {
@@ -207,14 +215,15 @@ export class AppPublishService {
         serverArtifact: server,
         ...(this.deps.snapshotDir !== undefined ? { snapshotDir: this.deps.snapshotDir } : {}),
       });
-      const tag = `wicked-apps/${slug}:v${p.version}`;
+      const tag = `wicked-apps/${slug}:v${p.version}-${runTag}`;
       const built = await (this.deps.build ?? buildImage)(ctx, tag, { 'wicked.apps.app': slug, 'wicked.apps.version': String(p.version), 'wicked.apps.manifest': p.digest, 'wicked.apps.run': p.runId });
       let teams: AppPublished['teamsPackage'] = null;
       if (p.manifest.targets.includes('teams') && p.manifest.identity !== null) {
-        const zip = teamsPackage(p.manifest);
+        // The package's version climbs with every publish (Teams takes a changed manifest only at a higher version).
+        const zip = teamsPackage(p.manifest, this.deps.store.publishCount(slug) + 1);
         const { mkdirSync, writeFileSync } = await import('node:fs');
-        mkdirSync(join(this.deps.artifactsDir, slug), { recursive: true });
-        writeFileSync(join(this.deps.artifactsDir, slug, 'teams.zip'), zip);
+        mkdirSync(join(this.deps.artifactsDir, slug, runTag), { recursive: true });
+        writeFileSync(join(this.deps.artifactsDir, slug, runTag, 'teams.zip'), zip);
         teams = { url: `/api/v1/apps/${slug}/published/teams.zip`, sha256: createHash('sha256').update(zip).digest('hex') };
       }
       const origin = p.manifest.site.origin;
@@ -235,6 +244,11 @@ export class AppPublishService {
       };
       await this.deps.store.finishPublish(p.runId, published);
       return { published, log: built.log };
+    } catch (err) {
+      // Routine failures answer with a code, never a bare 500 (the step's output shows the reason).
+      if (err instanceof ImageBuildError) throw new PublishError(err.code === 'no_engine' ? 503 : 502, err.code === 'no_engine' ? 'no_container_engine' : 'image_build_failed', `${err.message}${err.log !== '' ? `: ${err.log.slice(-600)}` : ''}`);
+      if (err instanceof PackError) throw new PublishError(409, 'pack_failed', err.message);
+      throw err;
     } finally {
       rmSync(ctx, { recursive: true, force: true });
     }

@@ -11,11 +11,15 @@ import { crc32, deflateSync } from 'node:zlib';
 
 import type { AppPublishManifest } from '../../core/types.js';
 
-/** A solid square PNG (8-bit RGBA), `size` pixels on a side. */
-export function solidPng(size: number, rgba: [number, number, number, number]): Buffer {
-  const row = Buffer.alloc(1 + size * 4);
-  for (let x = 0; x < size; x++) row.set(rgba, 1 + x * 4);
-  const raw = Buffer.concat(Array.from({ length: size }, () => row));
+/** A square PNG (8-bit RGBA), `size` pixels on a side: `rgba` where `on(x, y)` (everywhere by default), else transparent. */
+export function solidPng(size: number, rgba: [number, number, number, number], on: (x: number, y: number) => boolean = () => true): Buffer {
+  const rows: Buffer[] = [];
+  for (let y = 0; y < size; y++) {
+    const row = Buffer.alloc(1 + size * 4);
+    for (let x = 0; x < size; x++) if (on(x, y)) row.set(rgba, 1 + x * 4);
+    rows.push(row);
+  }
+  const raw = Buffer.concat(rows);
   const chunk = (type: string, data: Buffer): Buffer => {
     const len = Buffer.alloc(4);
     len.writeUInt32BE(data.length);
@@ -88,13 +92,14 @@ function appId(m: AppPublishManifest): string {
 }
 
 /** The Teams app manifest for the published site (personal static tab, SSO for the site's own `access_as_user`). */
-export function teamsManifest(m: AppPublishManifest): Record<string, unknown> {
+export function teamsManifest(m: AppPublishManifest, revision = 1): Record<string, unknown> {
   const site = new URL(m.site.origin);
   const name = m.app.name.slice(0, 30);
   return {
     $schema: 'https://developer.microsoft.com/en-us/json-schemas/teams/v1.17/MicrosoftTeams.schema.json',
     manifestVersion: '1.17',
-    version: `1.0.${m.app.version}`,
+    // Teams updates a tab only when its version climbs: one more for every publish, then the app version.
+    version: `1.${revision}.${m.app.version}`,
     id: appId(m),
     developer: { name: 'wicked Apps', websiteUrl: `${m.site.origin}/`, privacyUrl: `${m.site.origin}/`, termsOfUseUrl: `${m.site.origin}/` },
     name: { short: name, full: m.app.name.slice(0, 100) },
@@ -108,10 +113,15 @@ export function teamsManifest(m: AppPublishManifest): Record<string, unknown> {
   };
 }
 
-export function teamsPackage(m: AppPublishManifest): Buffer {
+/** The 32 px outline icon: a white frame on transparency (Teams draws it on its own background). */
+export function outlinePng(): Buffer {
+  return solidPng(32, [0xff, 0xff, 0xff, 0xff], (x, y) => x < 3 || y < 3 || x > 28 || y > 28 || (x > 9 && x < 22 && y > 9 && y < 22));
+}
+
+export function teamsPackage(m: AppPublishManifest, revision = 1): Buffer {
   return zip([
-    { name: 'manifest.json', data: Buffer.from(`${JSON.stringify(teamsManifest(m), null, 2)}\n`, 'utf8') },
+    { name: 'manifest.json', data: Buffer.from(`${JSON.stringify(teamsManifest(m, revision), null, 2)}\n`, 'utf8') },
     { name: 'color.png', data: solidPng(192, [0x22, 0x4a, 0x5e, 0xff]) },
-    { name: 'outline.png', data: solidPng(32, [0xff, 0xff, 0xff, 0xff]) },
+    { name: 'outline.png', data: outlinePng() },
   ]);
 }
