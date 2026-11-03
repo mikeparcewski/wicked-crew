@@ -22,19 +22,16 @@ if (!('IntersectionObserver' in window)) {
   frames.forEach((f) => f.classList.add('is-arrived', 'is-live'));
 } else {
   if (html.classList.contains('can-rise')) {
-    // a frame arrives once 30% of it is on screen; a frame taller than the window (a phone's) arrives
-    // once it fills a tenth of the window, so its heading never scrolls up blank (30% of a 1100px
-    // phone frame was 330px of empty screen)
-    const STEPS = Array.from({ length: 16 }, (_, k) => k * 0.02); // 0 … 0.30
-    const arrive = new IntersectionObserver((es) => es.forEach((e) => {
-      if (!e.isIntersecting) return;
-      const rootH = e.rootBounds ? e.rootBounds.height : window.innerHeight;
-      const tall = e.boundingClientRect.height > rootH;
-      if (e.intersectionRatio >= 0.3 || (tall && e.intersectionRect.height >= rootH * 0.1)) {
-        e.target.classList.add('is-arrived'); arrive.unobserve(e.target);
-      }
-    }), { threshold: STEPS });
-    frames.forEach((f) => arrive.observe(f));
+    // a frame arrives once 30% of it is on screen. A frame taller than the window (a phone's) arrives
+    // as soon as its top is a tenth of the window above the bottom edge (the bottom root margin), so
+    // its heading never scrolls up blank: 30% of a 1100px phone frame was 330px of empty screen. Both
+    // are single crossings the browser reports exactly, so nothing waits between two thresholds.
+    const arrived = (f) => { f.classList.add('is-arrived'); share.unobserve(f); early.unobserve(f); };
+    const share = new IntersectionObserver((es) => es.forEach((e) => { if (e.isIntersecting) arrived(e.target); }), { threshold: 0.3 });
+    const early = new IntersectionObserver((es) => es.forEach((e) => {
+      if (e.isIntersecting && e.boundingClientRect.height > window.innerHeight) arrived(e.target);
+    }), { threshold: 0, rootMargin: '0px 0px -10% 0px' });
+    frames.forEach((f) => { share.observe(f); early.observe(f); });
   } else {
     frames.forEach((f) => f.classList.add('is-arrived'));
   }

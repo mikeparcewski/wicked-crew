@@ -701,6 +701,7 @@ code {
   .job-install:hover, .job-install:focus-visible, .job-install:active { text-decoration: underline; }
   .job-acts { grid-area: acts; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .job-btn { min-height: 44px; }
+  .pick { min-height: 44px; }
   .track-wrap { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "in out" "track track"; gap: 8px; padding: 10px 10px 16px; }
   .io--in { grid-area: in; }
   .io--out { grid-area: out; }
@@ -720,7 +721,7 @@ code {
   .ln { font-size: 12px; }
   .ln-seats { display: none; }
   .caption { font-size: 13px; padding: 0 12px; }
-  .panel { height: 240px; padding: 10px 12px; }
+  .panel { height: 250px; padding: 10px 12px; }
   .rc table { font-size: 13px; }
 
   .sbx-map { grid-template-columns: 1fr; grid-template-rows: none; grid-template-areas: none; gap: 8px; }
@@ -825,7 +826,8 @@ html body .same-garden .sg-card:hover, html body .same-garden .sg-card:focus-wit
   html body .topbar .icon-btn { width: 44px; height: 44px; }
   html body .topbar .wordmark, html body .footer .footer-wordmark { min-height: 44px; }
   html body .footer .footer-wordmark { display: inline-flex; align-items: center; }
-  html body .same-garden .sg-card-foot { padding-block: 0; }
+  /* 5px above and below the links: the card clips its overflow, and a link's focus ring sits 3px out */
+  html body .same-garden .sg-card-foot { padding-block: 5px; }
   html body .same-garden .sg-card-foot :is(.sg-visit, .sg-repo) { min-height: 44px; min-width: 44px; justify-content: center; }
   html body .footer .footer-cta a { display: inline-flex; align-items: center; min-height: 44px; }
   html body .footer .footer-links { gap: 0; }

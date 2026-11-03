@@ -96,32 +96,54 @@ test.describe('mobile (390×844)', () => {
     await expect(map.locator('.sg-plane')).toHaveCount(4);
   });
 
-  test('every link and button on the page is a 44px touch target, the shared chrome included', async ({ page }) => {
+  test('every link and button is a 44px touch target, the shared chrome and the demo\'s decisions included', async ({ page }) => {
+    // reduced motion: Run goes straight to the QE question and each answer lands at once
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    const audit = (state: string) => page.evaluate((st) => {
+      const sel = 'a[href], button, [tabindex]:not([tabindex="-1"]), input, select, summary';
+      return Array.from(document.querySelectorAll<HTMLElement>(sel)).flatMap((el) => {
+        const cs = getComputedStyle(el);
+        if (cs.display === 'none' || cs.visibility === 'hidden' || el.closest('[hidden], [aria-hidden="true"]')) return [];
+        const r = el.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) return [];
+        if (r.width >= 44 && r.height >= 44) return [];
+        const name = (el.getAttribute('aria-label') || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 30);
+        return [`${st}: ${el.tagName.toLowerCase()}.${el.className} "${name}" ${Math.round(r.width)}x${Math.round(r.height)}`];
+      });
+    }, state);
     for (const size of [{ width: 390, height: 844 }, { width: 360, height: 740 }]) {
       await page.setViewportSize(size);
       await page.goto('/');
-      const small = await page.evaluate(() => {
-        const sel = 'a[href], button, [tabindex]:not([tabindex="-1"]), input, select, summary';
-        return Array.from(document.querySelectorAll<HTMLElement>(sel)).flatMap((el) => {
-          const cs = getComputedStyle(el);
-          if (cs.display === 'none' || cs.visibility === 'hidden' || el.closest('[hidden], [aria-hidden="true"]')) return [];
-          const r = el.getBoundingClientRect();
-          if (r.width === 0 || r.height === 0) return [];
-          if (r.width >= 44 && r.height >= 44) return [];
-          const name = (el.getAttribute('aria-label') || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 30);
-          return [`${el.tagName.toLowerCase()}.${el.className} "${name}" ${Math.round(r.width)}x${Math.round(r.height)}`];
-        });
-      });
+      const job = page.locator('[data-job]');
+      const small = await audit('page');
+      // the QE question, then the refused delivery with its ask-again choices
+      await job.locator('[data-job-run]').click();
+      await expect(job.locator('[data-qe="PASS"]')).toBeVisible();
+      small.push(...await audit('QE question'));
+      await job.locator('[data-qe="CONDITIONAL"]').click();
+      await expect(job.locator('.ask-again [data-qe="PASS"]')).toBeVisible();
+      small.push(...await audit('refused delivery'));
+      // the larger choices still fit the fixed receipt box: it never has to scroll
+      const [sh, ch] = await job.locator('[data-panel]').evaluate((el) => [el.scrollHeight, el.clientHeight]);
+      expect(sh, `the refused-delivery receipt overflows its box at ${size.width}x${size.height}`).toBeLessThanOrEqual(ch + 1);
       expect(small, `targets under 44px at ${size.width}x${size.height}`).toEqual([]);
     }
   });
 
-  test('a phone frame (taller than the window) rises in as its heading comes on screen, not 30% in', async ({ page }) => {
+  test('a phone frame (taller than the window) rises in as soon as a tenth of the window shows it', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
     await page.goto('/');
-    const build = page.locator('#build');
-    // 120px of a ~1070px frame on screen: about 11% of it, a seventh of the window
-    await build.evaluate((el) => window.scrollTo({ top: el.getBoundingClientRect().top + window.scrollY - window.innerHeight + 120, behavior: 'instant' }));
-    await expect(build).toHaveClass(/is-arrived/);
+    const get = page.locator('#get');
+    // creep up to it, 4px at a time, and stop at 92px on screen: past a tenth of the 844px window,
+    // under 10% of the ~980px frame (a stepped-threshold observer would still be waiting here)
+    const at = (px: number) => get.evaluate((el, v) => window.scrollTo({ top: el.getBoundingClientRect().top + window.scrollY - window.innerHeight + v, behavior: 'instant' }), px);
+    for (let px = 40; px <= 92; px += 4) {
+      await at(px);
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+    }
+    await expect(get).toHaveClass(/is-arrived/);
+    // and 30% of a frame is no longer needed: far short of it, its heading is not left blank
+    expect(await get.evaluate((el) => (window.innerHeight - el.getBoundingClientRect().top) / el.getBoundingClientRect().height)).toBeLessThan(0.3);
   });
 
   test('the hamburger menu lists crew as a site link', async ({ page }) => {
