@@ -376,9 +376,10 @@ export interface HealthCapabilities {
    */
   chatArtifacts?: ChatArtifactsCapabilities;
   /**
-   * (api-types 0.172.0, DES-APPS-001) The app store is served: `GET|POST /apps`, `GET /apps/:app`, and the human-only
-   * edits, undo, redo and restore. Each flag of {@link AppsCapabilities} says whether a later route serves for real yet.
-   * A skin shows Apps only when this is present. ABSENT on an older daemon.
+   * (api-types 0.172.0, DES-APPS-001) PRESENT means the app store is served: `GET|POST /apps`, `GET /apps/:app`, and
+   * the human-only edits, undo, redo and restore. The flags of {@link AppsCapabilities} are about the OTHER routes:
+   * each says whether that route serves for real yet (rather than `501`). A skin shows Apps only when this is
+   * present. ABSENT on an older daemon.
    */
   apps?: AppsCapabilities;
 }

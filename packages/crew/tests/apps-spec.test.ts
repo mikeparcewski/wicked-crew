@@ -369,6 +369,23 @@ describe('apps.json: the consistency check', () => {
     expect(one({ type: 'array', items: { type: 'string' }, default: 'x' })).toEqual([`bad_param@${at}.default`]);
   });
 
+  it('types viewer claims, keeps a default inside its enum, and gives SQL no row path (pi r3)', () => {
+    const one = (decl: Record<string, unknown>): string[] => {
+      const s = escalations();
+      s.queries[0]!.params = { type: 'object', properties: { p: decl as never } };
+      return codes(s);
+    };
+    const at = '$.queries[0].params.properties.p';
+    expect(one({ type: 'string', from: 'viewer.groups' })).toEqual([`bad_param@${at}`]);
+    expect(one({ type: 'array', items: { type: 'string' }, from: 'viewer.groups' })).toEqual([]);
+    expect(one({ type: 'integer', from: 'viewer.email' })).toEqual([`bad_param@${at}`]);
+    expect(one({ type: 'string', from: 'viewer.email', default: 'x@example.com' })).toEqual([`bad_param@${at}`]);
+    expect(one({ type: 'string', enum: ['a', 'b'], default: 'c' })).toEqual([`bad_param@${at}.default`]);
+    const sql = escalations();
+    sql.queries[0]!.rowPath = '$.rows[*]';
+    expect(codes(sql)).toEqual(['bad_path@$.queries[0]']);
+  });
+
   it('lists a required parameter once', () => {
     const s = escalations();
     s.queries[1]!.params!.required = ['since', 'since'];

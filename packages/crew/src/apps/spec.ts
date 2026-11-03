@@ -349,8 +349,8 @@ export const APP_SPEC_MAX_BYTES = 2 * 1024 * 1024;
  * Bounds on the JSON's structure, checked BEFORE the schema sees it: zod records an over-long array and
  * still parses every element, so a 2 MB document of a million empty objects would cost a million
  * findings. Every legal spec is inside these: its longest list is 200, its deepest object 7 levels down,
- * and the node budget is above what 2 MB of JSON can hold (it bounds a larger edit body before the size
- * check). Published with the contract (`AppSpec`).
+ * and the node budget is above any legal spec's node count (it also bounds an edit body, which may be
+ * larger than 2 MB, before the size check). Published with the contract (`AppSpec`).
  */
 export const APP_SPEC_LIMITS = { depth: 16, arrayLength: 200, objectKeys: 256, nodes: 1_000_000 } as const;
 
@@ -474,8 +474,9 @@ const FORMAT_OK: Record<NonNullable<AppParamSchema['format']>, (v: string) => bo
 };
 
 /**
- * Why `value` does not satisfy the scalar declaration `decl`, or `null` when it does: type (integer
- * included), enum, numeric and length bounds, format. The executor validates request values with it too.
+ * Why `value` does not satisfy the SCALAR declaration `decl`, or `null` when it does: type (integer
+ * included), enum, numeric and length bounds, format. An `array` parameter is not a scalar (its values
+ * are judged item by item by whoever validates a request).
  */
 export function paramValueProblem(decl: Pick<AppParamSchema, 'type' | 'format' | 'enum' | 'minimum' | 'maximum' | 'minLength' | 'maxLength'>, value: unknown): string | null {
   switch (decl.type) {
@@ -575,7 +576,8 @@ export function checkSpec(spec: AppSpec): AppCheckFinding[] {
       if (p.type === 'array' && p.enum !== undefined) push('bad_param', [...at, 'enum'], 'an array has no enum');
       if (p.type === 'array' && p.default !== undefined) push('bad_param', [...at, 'default'], 'an array has no default');
       if (p.type !== 'array') {
-        // Every enum value, and the default, satisfies the whole declaration (the enum aside).
+        // Every enum value satisfies the rest of the declaration; the default satisfies all of it, so a
+        // default must also be one of the enum values.
         const { enum: values, default: dflt, description: _d, from: _f, items: _i, ...decl } = p;
         void _d;
         void _f;
