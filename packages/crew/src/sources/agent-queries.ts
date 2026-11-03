@@ -54,13 +54,7 @@ export const SOURCE_QUERIES_FILENAME = 'source-queries.ndjson';
 export class SourceAgentQueryLog {
   private chain: Promise<unknown> = Promise.resolve();
   readonly path: string;
-  /** Runs whose correcting entry could not be written (this process): their data use is unknown. */
-  private readonly unknownRuns = new Set<string>();
 
-  /** A correction for `runId` did not land: its data use reads as unknown from now on (this process). */
-  markUnknown(runId: string): void {
-    this.unknownRuns.add(runId);
-  }
 
   constructor(dir: string = mcpStateDir()) {
     this.path = join(dir, SOURCE_QUERIES_FILENAME);
@@ -136,7 +130,6 @@ export class SourceAgentQueryLog {
 
   /** A run's data use, one line per source it queried, by name; `null` = the record cannot be read (unknown). */
   async dataUse(runId: string): Promise<SourceDataUse[] | null> {
-    if (this.unknownRuns.has(runId)) return null;
     const all = await this.all();
     if (all === null) return null;
     const by = new Map<string, SourceDataUse>();

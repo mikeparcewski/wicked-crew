@@ -73,14 +73,14 @@ export interface SourcesUnitScope {
 
 /** What a tool answered: an answer for the agent (`isError` = the tool refused, as data), or a refusal the broker records. */
 export type SourcesToolResult =
-  | { ok: true; answer: Record<string, unknown>; isError: boolean; abandon?: () => Promise<void> }
+  | { ok: true; answer: Record<string, unknown>; isError: boolean; commit?: () => Promise<{ ok: true } | { ok: false; ruleId: string; reason: string }> }
   | { ok: false; outcome: 'guard_error' | 'withheld'; ruleId: string; reason: string; remedy: string };
 
 type AgentSource = Awaited<ReturnType<McpRegistry['agentSources']>>[number];
 
 export interface SourcesAgentToolsDeps {
   registry: Pick<McpRegistry, 'agentSources' | 'source' | 'callSecret' | 'holdsReservedSourcesName'>;
-  queries: Pick<SourceAgentQueryLog, 'append'> & Partial<Pick<SourceAgentQueryLog, 'markUnknown'>>;
+  queries: Pick<SourceAgentQueryLog, 'append'>;
   audit: { record(action: string, actor: Actor, fields?: { runId?: string; detail?: Record<string, unknown> }): unknown };
   /** `Core.resolveEstateScope`, read per call; `null` = the linked engine predates it. */
   resolver: () => ((requestJson: string) => Promise<string>) | null;
@@ -435,9 +435,6 @@ export class SourcesAgentTools {
       audit(e);
       await this.deps.queries.append(e).catch((err: unknown) => {
         this.deps.log?.(`[sources] the agent-query record for ${s.name} (${e.outcome}) could not be written: ${message(err)}`);
-        // A correction that did not land would leave an earlier "released" standing: the run's data use is
-        // then unknown, never a confirmed release that did not happen (codex r2 #2).
-        this.deps.queries.markUnknown?.(e.runId);
       });
     };
     try {
@@ -545,32 +542,40 @@ export class SourcesAgentTools {
       ms: res.ms,
     };
 
-    // The durable record lands BEFORE the rows are released; when it cannot, they are withheld (codex r12 #15).
-    const done = entry('ok', { rows: fit.rows.length, truncated, released: true });
+    // Rows are released in TWO durable steps (codex r3): an UNCONFIRMED entry now (released: false), then, at the
+    // release boundary (`commit`, after the broker's own call record), the release check and the final entry
+    // (released: true). Whatever fails or crashes in between, the last entry for the call says the rows were
+    // NOT released, which is then true: there is no correction to lose, before or after a restart.
+    const pending = entry('unconfirmed', { rows: fit.rows.length, truncated });
     try {
-      await this.deps.queries.append(done);
+      await this.deps.queries.append(pending);
     } catch (err) {
-      audit({ ...done, outcome: 'record_failed', released: false });
+      audit({ ...pending, outcome: 'record_failed' });
       this.deps.log?.(`[sources] the agent-query record for ${s.name} could not be written (${message(err)}); its rows are withheld`);
       return { ok: false, outcome: 'withheld', ruleId: 'sources:record', reason: 'the query ran, but crew could not record it, so its rows are withheld', remedy: 'try again; report it if it persists' };
     }
-    // THEN the release check, after the last await of this tool (codex r1 #3): read again now, the whole
-    // predicate must still hold for this unit, on the same connection and the same views. Otherwise the record
-    // is corrected (the fold keeps the last entry per call) and the rows are withheld.
-    const now = (await this.sources()).find((x) => x.name === s.name);
-    if (now === undefined || !agentMay(now.agents, now, scope.projectId, 'query') || now.descriptorHash !== s.descriptorHash || !sameViews(now.viewsAllowed, s.viewsAllowed)) {
-      await settle(entry('changed_while_running', { rows: fit.rows.length, truncated }));
-      return refusal('changed_while_running', `${s.name} was switched off, hidden, narrowed or saved again while the query ran, so its rows are withheld`);
-    }
-    audit(done);
     return {
       ok: true,
       isError: false,
       answer: safe,
-      // The broker's own call record is the one write after this; when it fails, the rows are withheld and
-      // this corrects the source record (codex r1 #1).
-      abandon: async () => {
-        await settle({ ...done, at: new Date(this.now()).toISOString(), outcome: 'record_failed', released: false });
+      commit: async () => {
+        // The release check, read again NOW (codex r1 #3): the whole predicate must still hold for this unit, on
+        // the same connection and the same views.
+        const now = (await this.sources()).find((x) => x.name === s.name);
+        if (now === undefined || !agentMay(now.agents, now, scope.projectId, 'query') || now.descriptorHash !== s.descriptorHash || !sameViews(now.viewsAllowed, s.viewsAllowed)) {
+          await settle(entry('changed_while_running', { rows: fit.rows.length, truncated }));
+          return { ok: false, ruleId: 'sources:changed', reason: `${s.name} was switched off, hidden, narrowed or saved again while the query ran, so its rows are withheld` };
+        }
+        const done = entry('ok', { rows: fit.rows.length, truncated, released: true });
+        try {
+          await this.deps.queries.append(done);
+        } catch (err) {
+          audit({ ...done, outcome: 'record_failed', released: false });
+          this.deps.log?.(`[sources] the agent-query record for ${s.name} could not be written (${message(err)}); its rows are withheld`);
+          return { ok: false, ruleId: 'sources:record', reason: 'the query ran, but crew could not record its release, so its rows are withheld' };
+        }
+        audit(done);
+        return { ok: true };
       },
     };
   }
@@ -584,7 +589,12 @@ export class SourcesAgentTools {
 export function agentWords(text: string, catalog: Pick<SqlCatalog, 'dialect' | 'database'>): string {
   const db = catalog.database;
   if (catalog.dialect !== 'mysql' || db === null || db === '') return text;
-  return text.split(`"${db}".`).join('').split(`\`${db}\`.`).join('').split(`${db}.`).join('').split(db).join('(the source\'s database)');
+  // The qualifier as K1 prints it (quotes doubled inside, codex r3), as MySQL quotes it, and bare; then any other mention.
+  const forms = [`"${db.replace(/"/g, '""')}".`, `\`${db.replace(/`/g, '``')}\`.`, `${db}.`];
+  let out = text;
+  for (const f of forms) out = out.split(f).join('');
+  for (const f of [db.replace(/"/g, '""'), db.replace(/`/g, '``'), db]) out = out.split(f).join("(the source's database)");
+  return out;
 }
 
 function sameViews(a: readonly string[], b: readonly string[]): boolean {

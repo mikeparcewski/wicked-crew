@@ -318,7 +318,7 @@ describe('the agent tools on an uploaded source', () => {
       expect((await put(r, 'tix', { query: false })).statusCode).toBe(200);
     });
     const mid = await call(r, 'wmt_a', 'query', { name: 'tix', sql: 'SELECT id, title FROM "tickets"' });
-    expect(mid.answer).toMatchObject({ refused: 'changed_while_running' });
+    expect(mid.body).toMatchObject({ outcome: 'withheld', ruleIds: ['sources:changed'] });
     expect(mid.raw).not.toContain(ROW_MARK);
     expect((await call(r, 'wmt_a', 'query', { name: 'tix', sql: 'SELECT 1' })).answer).toMatchObject({ refused: 'query_off' });
     // Narrowing the projects mid-read withholds too (the whole predicate is read again).
@@ -326,7 +326,7 @@ describe('the agent tools on an uploaded source', () => {
     r.setAfterRead(async () => {
       await put(r, 'tix', { projects: ['proj_b'] });
     });
-    expect((await call(r, 'wmt_a', 'query', { name: 'tix', sql: 'SELECT id FROM "tickets"' })).answer).toMatchObject({ refused: 'changed_while_running' });
+    expect((await call(r, 'wmt_a', 'query', { name: 'tix', sql: 'SELECT id FROM "tickets"' })).body).toMatchObject({ outcome: 'withheld', ruleIds: ['sources:changed'] });
   });
 
   it('load on the source: at most 2 agent queries at once per source (busy), and 30 a minute (rate_limited)', async () => {
@@ -515,14 +515,14 @@ describe('review r1 folds (codex, pi)', () => {
     const append = r.queries.append.bind(r.queries);
     let flipped = false;
     (r.queries as { append: typeof append }).append = async (e) => {
-      if (e.released && !flipped) {
+      if (e.outcome === 'unconfirmed' && !flipped) {
         flipped = true;
         await put(r, 'tix', { query: false });
       }
       return append(e);
     };
     const c = await call(r, 'wmt_a', 'query', { name: 'tix', sql: 'SELECT id, title FROM "tickets"' });
-    expect(c.answer).toMatchObject({ refused: 'changed_while_running' });
+    expect(c.body).toMatchObject({ outcome: 'withheld', ruleIds: ['sources:changed'] });
     expect(c.raw).not.toContain(ROW_MARK);
     expect(await r.queries.dataUse('run-a')).toEqual([expect.objectContaining({ released: 0 })]);
   });
@@ -608,9 +608,14 @@ describe('review r2 folds (codex)', () => {
     const words = agentWords((pol as { detail: string }).detail, MY);
     expect(words).not.toContain('private_connection_database');
     expect(agentWords('schema support.tickets', { dialect: 'postgres', database: 'support' })).toBe('schema support.tickets');
+    // A database name holding a quote is printed doubled by K1 (codex r3).
+    const Q: SqlCatalog = { ...MY, database: 'private"db', relations: [{ ...MY.relations[0]!, schema: 'private"db' }] };
+    const pq = await checkReadPolicy('mysql', 'SELECT * FROM absent_table', policyCatalog(Q));
+    expect(pq.ok).toBe(false);
+    expect(agentWords((pq as { detail: string }).detail, Q)).not.toMatch(/private/);
   });
 
-  it('when the broker cannot record the call AND the correction cannot be written, the run\'s data use is unknown, not released', async () => {
+  it('when the broker cannot record the call, or the release cannot be recorded, the rows stay unreleased in the record, across a restart too', async () => {
     const r = await rig();
     try {
       await upload(r, 'tix', TICKETS_CSV);
@@ -618,15 +623,11 @@ describe('review r2 folds (codex)', () => {
       (r.records as { append: unknown }).append = async () => {
         throw new Error('disk full');
       };
-      const append = r.queries.append.bind(r.queries);
-      (r.queries as { append: typeof append }).append = async (e) => {
-        if (e.outcome === 'record_failed') throw new Error('disk full');
-        return append(e);
-      };
       const c = await call(r, 'wmt_a', 'query', { name: 'tix', sql: 'SELECT id FROM "tickets"' });
       expect(c.body).toMatchObject({ outcome: 'guard_error' });
-      expect(await r.queries.dataUse('run-a')).toBeNull();
-      expect(((await r.app.inject({ method: 'GET', url: '/api/v1/runs/run-a/data-use' })).json() as RunDataUseResponse).known).toBe(false);
+      // A daemon started afresh reads the same file: the call is still not released (no correction to lose).
+      expect(await new SourceAgentQueryLog(join(r.base, 'mcp')).dataUse('run-a')).toEqual([expect.objectContaining({ queries: 1, released: 0, rows: 0 })]);
+      expect((await new SourceAgentQueryLog(join(r.base, 'mcp')).recent('tix'))![0]).toMatchObject({ outcome: 'unconfirmed', released: false });
     } finally {
       await close(r);
     }
@@ -766,7 +767,7 @@ for (const target of PG_TARGETS) {
         await resave([]);
       });
       const c = await call(r, 'wmt_a', 'query', { name: 'support-pg', sql: 'SELECT id FROM support.v_open' });
-      expect(c.answer).toMatchObject({ refused: 'changed_while_running' });
+      expect(c.body).toMatchObject({ outcome: 'withheld', ruleIds: ['sources:changed'] });
     });
 
     it('an agent read runs with parallel workers off and a small work_mem (the driver option the tool sets)', async () => {

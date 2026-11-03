@@ -493,13 +493,28 @@ export class McpBroker {
     try {
       await this.deps.records.append(record);
     } catch (err) {
+      // A query's rows stay unreleased: its source record's last entry is still "unconfirmed" (codex r1 #1, r3).
       this.deps.log?.(`[mcp] the call record for ${body.subject} could not be written (${message(err)}); its result is withheld`);
-      // A query's rows are withheld: its source record says so too (codex r1 #1).
-      await out.abandon?.().catch(() => undefined);
       return {
         status: OUTCOME_STATUS.guard_error,
         body: { outcome: 'guard_error', subject: body.subject, callId: null, ruleIds: [], reason: 'the call could not be recorded (D-3); its result is withheld', remedy: 'the call ran; its result is not shown' },
       };
+    }
+    // The release boundary: a query's rows go out only once its release is checked and recorded (codex r3).
+    if (out.commit !== undefined) {
+      let c: Awaited<ReturnType<NonNullable<typeof out.commit>>>;
+      try {
+        c = await out.commit();
+      } catch (err) {
+        this.deps.log?.(`[mcp] ${body.subject}: the release could not be recorded: ${message(err)}`);
+        c = { ok: false, ruleId: 'sources:record', reason: 'crew could not record the release, so the rows are withheld' };
+      }
+      if (!c.ok) {
+        // The span above is already recorded as answered; the withholding is the source record's (its last entry).
+        this.deps.log?.(`[mcp] ${body.subject}: the result was withheld at release (${c.ruleId})`);
+        this.publish(record);
+        return { status: OUTCOME_STATUS.withheld, body: { outcome: 'withheld', subject: body.subject, callId: span.spanId, ruleIds: [c.ruleId], reason: c.reason, remedy: 'ask the person; nothing of the result is shown', denied: true } };
+      }
     }
     this.publish(record);
     return { status: 200, body: { outcome: 'ok', subject: body.subject, callId: span.spanId, result, ruleIds: [] } };
