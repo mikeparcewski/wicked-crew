@@ -25,12 +25,13 @@
  */
 
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { lstat, mkdir, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
-import { deflateSync } from 'node:zlib';
 import { devNull } from 'node:os';
 import { join } from 'node:path';
+import { deflateSync } from 'node:zlib';
+
+import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 
 /** A full object id (SHA-1 repositories only). */
 export const SHA_RE = /^[0-9a-f]{40}$/;
@@ -119,8 +120,8 @@ export function gitProblem(): Promise<string | null> {
 /** Run git in `gitDir`; stdout as a Buffer. Rejects on a non-zero exit, a timeout, or more than `cap` bytes. */
 export function runGit(gitDir: string, args: string[], input?: Buffer | string, extraEnv: Record<string, string> = {}, cap = OUTPUT_CAP): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const env = { ...gitEnv(gitDir), ...extraEnv };
-    const child = spawn('git', [...SAFE_CONFIG, ...args], { env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    // The daemon's exported governance store (it may hold a credential) never reaches git (crew#495).
+    const child = spawn('git', [...SAFE_CONFIG, ...args], { env: childEnvWithBootEstateDb({ ...gitEnv(gitDir), ...extraEnv }), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     const out: Buffer[] = [];
     let size = 0;
     let err = '';
