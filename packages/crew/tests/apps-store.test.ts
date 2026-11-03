@@ -1075,3 +1075,36 @@ describe('apps: the lock, turns and the guard after round 3 (codex, pi)', () => 
     expect(refuseRequest({ ...req, path: '/api/v1/apps/escalations/edits' }, { mode: 'off', allowedOrigins: null })).not.toBeNull();
   });
 });
+
+describe('apps: cleanup and replacement never act through a link (codex r4)', () => {
+  it('dropping the checked ref through a planted link higher up deletes nothing outside the repo', async () => {
+    const t: AppTurnLauncher = { launch: async () => undefined, isActive: async () => true };
+    const s = setup({ turns: t });
+    const a = await newApp(s);
+    const runId = (await s.call('POST', '/apps/escalations/turns', { base: 1, message: 'x' })).body['runId'] as string;
+    await s.store.checkTurn('escalations', runId, a.versions[0]!.commit);
+    const root = join(s.dir, 'apps', 'escalations');
+    // The agent swaps refs/wicked for a link to a directory holding a file named like the run.
+    const victimDir = join(s.dir, 'victim', 'apps-checked');
+    mkdirSync(victimDir, { recursive: true });
+    writeFileSync(join(victimDir, runId), 'keep me');
+    rmSync(join(root, '.git', 'refs', 'wicked'), { recursive: true, force: true });
+    symlinkSync(join(s.dir, 'victim'), join(root, '.git', 'refs', 'wicked'));
+    await s.store.endTurn('escalations', runId);
+    expect(readFileSync(join(victimDir, runId), 'utf8')).toBe('keep me');
+  });
+
+  it('an object or main written over a planted link replaces the link and leaves its target alone', async () => {
+    const s = setup();
+    await newApp(s);
+    const root = join(s.dir, 'apps', 'escalations');
+    const outside = join(s.dir, 'outside-main');
+    writeFileSync(outside, 'untouched');
+    rmSync(join(root, '.git', 'refs', 'heads', 'main'));
+    symlinkSync(outside, join(root, '.git', 'refs', 'heads', 'main'));
+    const v2 = await edit(s, 'escalations', 1, 'two');
+    expect(v2.status).toBe(200);
+    expect(readFileSync(outside, 'utf8')).toBe('untouched');
+    expect(git(root, 'rev-parse', 'refs/heads/main')).toBe((v2.body['landed'] as { commit: string }).commit);
+  });
+});

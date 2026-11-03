@@ -27,7 +27,7 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { randomBytes } from 'node:crypto';
-import { chmod, lstat, mkdir, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { deflateSync } from 'node:zlib';
 import { devNull } from 'node:os';
 import { join } from 'node:path';
@@ -218,14 +218,16 @@ export class AppGit {
    * Each of `dirs` (in order, each inside the one before) is made if missing and must be a real directory
    * (never a link) whose real path is inside the repo; `.git` must not name another common directory.
    */
-  private async ensureDirs(dirs: string[]): Promise<void> {
+  private async ensureDirs(dirs: string[], opts: { create: boolean } = { create: true }): Promise<void> {
     const realRoot = await realpath(this.root);
     const inside = (p: string): boolean => p === realRoot || p.startsWith(`${realRoot}/`) || p.startsWith(`${realRoot}\\`);
     for (const d of dirs) {
-      try {
-        await mkdir(d);
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      if (opts.create) {
+        try {
+          await mkdir(d);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+        }
       }
       const st = await lstat(d);
       if (st.isSymbolicLink() || !st.isDirectory()) throw new AppGitError(`${d} is not a plain directory inside the app repo`, 'corrupt');
@@ -239,24 +241,25 @@ export class AppGit {
     }
   }
 
-  /** Write `data` as `dir/name`: a temp file in `dir`, renamed over whatever is there (a link is replaced, never followed). */
-  private async place(dir: string, name: string, data: Buffer | string, mode: number): Promise<void> {
+  /**
+   * Write `data` as `dir/name`: a temp file in `dir`, renamed over whatever is there (a link at `name` is
+   * replaced, never followed). Nothing is ever done THROUGH the existing entry (codex r4: no chmod of it).
+   * Where the platform refuses to rename over an existing read-only file (Windows), an existing OBJECT that
+   * is a regular file is kept (`keepExisting`): it is content-addressed, and every read verifies it.
+   */
+  private async place(dir: string, name: string, data: Buffer | string, mode: number, keepExisting = false): Promise<void> {
     const tmp = join(dir, `.tmp-crew-${randomBytes(6).toString('hex')}`);
     await writeFile(tmp, data, { flag: 'wx', mode });
     try {
       await rename(tmp, join(dir, name));
     } catch (err) {
-      // Windows will not rename over a read-only file: make it writable and try once more.
+      await unlink(tmp).catch(() => undefined);
       const code = (err as NodeJS.ErrnoException).code;
-      if (code !== 'EPERM' && code !== 'EACCES' && code !== 'EEXIST') {
-        await unlink(tmp).catch(() => undefined);
-        throw err;
+      if (keepExisting && (code === 'EPERM' || code === 'EACCES' || code === 'EEXIST')) {
+        const st = await lstat(join(dir, name)).catch(() => null);
+        if (st !== null && st.isFile() && !st.isSymbolicLink()) return;
       }
-      await chmod(join(dir, name), 0o644).catch(() => undefined);
-      await rename(tmp, join(dir, name)).catch(async (e: unknown) => {
-        await unlink(tmp).catch(() => undefined);
-        throw e;
-      });
+      throw err;
     }
   }
 
@@ -266,7 +269,7 @@ export class AppGit {
     const objects = join(this.gitDir, 'objects');
     const fan = join(objects, sha.slice(0, 2));
     await this.ensureDirs([this.gitDir, objects, fan]);
-    await this.place(fan, sha.slice(2), deflateSync(Buffer.concat([Buffer.from(`${type} ${content.length}\0`), content])), 0o444);
+    await this.place(fan, sha.slice(2), deflateSync(Buffer.concat([Buffer.from(`${type} ${content.length}\0`), content])), 0o444, true);
     return sha;
   }
 
@@ -279,16 +282,21 @@ export class AppGit {
     await this.place(dirs[dirs.length - 1]!, path[path.length - 1]!, `${sha}\n`, 0o644);
   }
 
-  /** Remove the loose ref `refs/<path…>` if it is a plain file inside the repo. Best effort. */
+  /**
+   * Remove the loose ref `refs/<path…>`. Every directory from `.git` down to the ref's own must be a real
+   * directory inside the repo (codex r4: a link higher up must not take the unlink elsewhere); nothing is
+   * created; anything unsafe or missing leaves the ref where it is. Best effort.
+   */
   async dropRef(path: string[]): Promise<void> {
-    const file = join(this.gitDir, 'refs', ...path);
+    const dirs = [this.gitDir, join(this.gitDir, 'refs')];
+    for (const part of path.slice(0, -1)) dirs.push(join(dirs[dirs.length - 1]!, part));
     try {
-      const dir = join(file, '..');
-      const st = await lstat(dir);
-      if (!st.isDirectory() || st.isSymbolicLink()) return;
-      await unlink(file);
+      await this.ensureDirs(dirs, { create: false });
+      const file = join(dirs[dirs.length - 1]!, path[path.length - 1]!);
+      const st = await lstat(file);
+      if (st.isFile() || st.isSymbolicLink()) await unlink(file); // unlinking a link removes the link only
     } catch {
-      /* already gone */
+      /* unsafe or already gone: left as it is */
     }
   }
 
