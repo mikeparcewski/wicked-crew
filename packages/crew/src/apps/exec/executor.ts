@@ -22,7 +22,7 @@ import { buildClientSchema, getVariableValues, type IntrospectionQuery, Kind, pa
 
 import type { Actor, AppCell, AppLock, AppQuery, AppQueryResponse } from '../../core/types.js';
 import { canonicalJson, deriveToolClass, effectiveToolClass } from '../../mcp/classify.js';
-import { McpRegistryError, type McpRegistry } from '../../mcp/registry.js';
+import { McpRegistryError } from '../../mcp/registry.js';
 import { invokeMcpTool } from '../../mcp/invoke.js';
 import type { McpToolRecord } from '../../mcp/registry-store.js';
 import { UpstreamCallError } from '../../mcp/upstream-error.js';
@@ -41,7 +41,7 @@ import { crewQueryContract, graphqlQueryContract, graphqlRootSignatures, sqlQuer
 import { AppLimits, RateLimited } from './limits.js';
 import { bindParams, ParamError, type Viewer } from './params.js';
 import { morePathSays, projectRows, RESULT_LIMITS, ResultError, selectPath, sqlRowObjects } from './project.js';
-import { lookupSource, pinOf, queryKindFits, type AppSource } from './sources.js';
+import { lookupSource, pinOf, queryKindFits, type AppSource, type AppSourceRegistry } from './sources.js';
 import { parseCrewQueryText, parseToolQueryText, type QueryArg } from './texts.js';
 
 /** A refusal or failure of the query route, as `AppErrorBody` carries it. */
@@ -70,9 +70,16 @@ export interface AppCallRecord {
   outcome: 'ok' | 'cached' | string;
 }
 
+/**
+ * The part of crew's app store the executor and the write path read: an accepted version's files, and
+ * whether a tree still holds its receipt. crew passes its `AppStore`; the app server passes the one
+ * published (app, tree) its image carries.
+ */
+export type AppFilesSource = Pick<AppStore, 'acceptedFiles' | 'acceptedReceipt'>;
+
 export interface ExecutorDeps {
-  store: AppStore;
-  registry: McpRegistry | null;
+  store: AppFilesSource;
+  registry: AppSourceRegistry | null;
   /** The crew source's in-process reads (Fastify `inject`); absent = the crew source is unavailable. */
   crewInject?: CrewInject;
   /** Who the actor is as a viewer (email, name, groups). */
@@ -175,6 +182,25 @@ export class AppExecutor {
       const e = this.failure(err);
       this.record({ at: started, viewer: input.actor.id, app: input.app, version, tree, query: q.id, ms: this.now() - started, rows: 0, bytes: 0, outcome: e.code });
       throw e;
+    }
+  }
+
+  /**
+   * Steps 1-4 of a read, without the read: the version is accepted, the query is in it, and its source's
+   * descriptor and its contract, recomputed now, still equal the lock's (the read policy passes again).
+   * Throws the refusal a read would answer. The app server runs it for every query at startup and after
+   * every re-describe, so a query whose source changed is refused by name before anyone asks for it.
+   */
+  async checkQuery(app: string, version: number | string, query: string): Promise<{ contractHash: string; descriptorHash: string }> {
+    const { files } = await this.deps.store.acceptedFiles(app, version);
+    const q = files.spec.queries.find((x) => x.id === query);
+    if (q === undefined) throw new AppExecError(404, 'unknown_query', `this version of ${app} has no query ${query}`);
+    const text = Object.hasOwn(files.queryText, q.id) ? files.queryText[q.id]! : '';
+    try {
+      const { contractHash, descriptorHash } = await this.plan(q, text, files.lock, {});
+      return { contractHash, descriptorHash };
+    } catch (err) {
+      throw this.failure(err);
     }
   }
 

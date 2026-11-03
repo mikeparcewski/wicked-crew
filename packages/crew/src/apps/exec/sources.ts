@@ -20,6 +20,13 @@ import type { StoredDescription } from '../../sources/store.js';
 
 const sha = (v: unknown): string => createHash('sha256').update(canonicalJson(v)).digest('hex');
 
+/**
+ * The part of crew's connector registry Apps reads to run a query or an action. crew passes its
+ * `McpRegistry`; the app server (K6) passes the registry its image carries (the published sources,
+ * their secrets from the environment names the manifest lists).
+ */
+export type AppSourceRegistry = Pick<McpRegistry, 'snapshot' | 'source' | 'appTool' | 'callSecret'>;
+
 /** The non-secret descriptor of any registry source Apps may use. */
 export function appSourceDescriptor(config: McpUpstreamConfig): Record<string, unknown> {
   const base = sourceDescriptor(config);
@@ -45,7 +52,7 @@ export type AppSource =
   | { name: string; kind: 'rest' | 'mcp-http' | 'mcp-stdio'; pin: AppLockSource; config: McpUpstreamConfig; enabled: boolean };
 
 /** Look a source up now; `null` = no such source in the registry. */
-export async function lookupSource(registry: McpRegistry | null, name: string): Promise<AppSource | null> {
+export async function lookupSource(registry: Pick<AppSourceRegistry, 'snapshot' | 'source'> | null, name: string): Promise<AppSource | null> {
   if (name === CREW_SOURCE) return { name: CREW_SOURCE, kind: 'crew', pin: CREW_PIN };
   if (registry === null) return null;
   // One read of the store: the config, its kind and (for a tool server) its switch belong together (codex r4).

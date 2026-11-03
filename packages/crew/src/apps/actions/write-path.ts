@@ -23,7 +23,6 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Actor, AppAction, AppActionCard, AppActionCardValue, AppActionGrant, AppActionPrepareResponse, AppActionRecordView, AppActionRunResponse, AppApiAction, AppRowWriteAction, AppValue } from '../../core/types.js';
 import type { AuditLog } from '../../api/audit.js';
 import { canonicalJson } from '../../mcp/classify.js';
-import type { McpRegistry } from '../../mcp/registry.js';
 import type { McpToolRecord } from '../../mcp/registry-store.js';
 import type { DialOptions } from '../../sources/dialer.js';
 import { pgPrivileges } from '../../sources/catalog/postgres.js';
@@ -32,12 +31,11 @@ import { sqlConnectArgs } from '../../sources/kinds.js';
 import { pgTableSafety, type SafetyColumn } from '../../sources/safety/postgres.js';
 import { actionHash } from '../check.js';
 import { graphqlMutationContract, graphqlRootSignatures, rowWriteContract, splitTable, toolActionContract } from '../exec/contract.js';
-import { type AppExecutor, graphqlVariablesProblem } from '../exec/executor.js';
+import { type AppExecutor, type AppFilesSource, graphqlVariablesProblem } from '../exec/executor.js';
 import { AppLimits, RateLimited } from '../exec/limits.js';
 import { bindParams, ParamError, type Viewer } from '../exec/params.js';
 import { checkRowValues } from '../exec/source-stage.js';
-import { lookupSource, pinOf, type AppSource } from '../exec/sources.js';
-import type { AppStore } from '../store.js';
+import { lookupSource, pinOf, type AppSource, type AppSourceRegistry } from '../exec/sources.js';
 import { callMutation, callTool, describeMutation, describeToolRequest, idempotencyArg, mutationField, type ApiOutcome } from './api-action.js';
 import { baseTypeSql, pgExactFitIn, type FitItem } from './pg-fit.js';
 import { generateStatement, runRowWrite, type WriteHooks } from './pg-write.js';
@@ -61,9 +59,9 @@ export class AppWriteError extends Error {
 }
 
 export interface WritePathDeps {
-  store: AppStore;
+  store: AppFilesSource;
   actions: AppActionStore;
-  registry: McpRegistry | null;
+  registry: AppSourceRegistry | null;
   audit: Pick<AuditLog, 'record'>;
   viewerOf: (actor: Actor) => Promise<Viewer>;
   /** The read cache to invalidate after every outcome. */
@@ -269,6 +267,18 @@ export class AppWritePath {
       return this.withdraw(app, action.id, 'contract_changed', action.kind === 'row-write' ? 'table_changed' : 'contract_changed', `what action ${action.id} uses at ${action.source} changed since the grant (for a table: its safety fingerprint): the grant is withdrawn`, grant);
     }
     return { grant, resolved };
+  }
+
+  /**
+   * Every recheck a prepare runs, without preparing: the version is accepted, the action holds a grant
+   * for this version of it, its source's descriptor is the granted one, Allow writes is on for a row
+   * write, and its contract recomputed now (for a row write, the table safety check against the live
+   * catalog) equals the grant's. A grant that no longer holds is withdrawn, as at prepare. The app
+   * server runs it for every action at startup and after every re-describe.
+   */
+  async checkAction(app: string, id: string, version: number | string): Promise<void> {
+    const { at, action } = await this.actionAt(app, version, id);
+    await this.recheck(app, action, at.tree);
   }
 
   async prepareAction(app: string, id: string, input: { version: number | string; params?: Record<string, unknown>; actor: Actor }): Promise<AppActionPrepareResponse> {

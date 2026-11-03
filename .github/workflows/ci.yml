@@ -239,6 +239,13 @@ jobs:
         working-directory: wicked-crew
         run: npm run -w packages/crew typecheck
 
+      # DES-APPS-001 K6: the standalone app server (packages/apps-server), which bundles crew's executor and
+      # write path into the image an Apps publish builds.
+      - name: App server (lint, typecheck)
+        if: runner.os == 'Linux'
+        working-directory: wicked-crew
+        run: npm run -w packages/apps-server lint && npm run -w packages/apps-server typecheck
+
       # Copies the installed wicked-studio package's dist into packages/crew/dist/studio (the
       # serving artifact). Deliberately `build:with-studio`, not the default `build` (which is
       # plain tsc, task #84): CI must keep proving the release-shaped bundle assembles.
@@ -260,6 +267,11 @@ jobs:
         env:
           WICKED_EGRESS_PROBE: ${{ runner.os == 'Linux' && 'required' || '' }}
         run: npm run -w packages/crew test
+
+      # The server artifact builds on both platforms; its database and browser tests run in sources-db.
+      - name: App server (build, unit tests)
+        working-directory: wicked-crew
+        run: npm run -w packages/apps-server build && npm run -w packages/apps-server test
 
   # DES-APPS-001 K1: Apps data sources against REAL databases. Postgres 16, Postgres 17 and MySQL 8 run
   # as service containers (Linux only, hence a job of its own); the source tests seed a fresh database
@@ -320,3 +332,20 @@ jobs:
         # tests/sources-*: K1. tests/apps-*: K2b's source stage, executor and write path (and the P1-P43
         # regression suite), which skip without these variables everywhere else.
         run: npx vitest run tests/sources- tests/apps- --maxWorkers=2
+
+      # DES-APPS-001 K6: the standalone site on a real Postgres and a real HTTPS issuer (sign-in, audience,
+      # CSP, /spec behind the token, row writes and their records, startup refusals), and its page in
+      # Chromium (the production sign-in, framing refusals; the real-runtime leg runs when the installed
+      # wicked-studio ships its standalone entry).
+      - name: Install Chromium for the app server's page tests
+        working-directory: wicked-crew/packages/crew
+        run: npx playwright install --with-deps --only-shell chromium
+
+      - name: App server on real databases
+        working-directory: wicked-crew
+        env:
+          WICKED_SOURCES_DB: required
+          APPS_PG16_URL: postgres://postgres:apps@127.0.0.1:55416/postgres
+          APPS_PG17_URL: postgres://postgres:apps@127.0.0.1:55417/postgres
+          APPS_MYSQL8_URL: mysql://root:apps@127.0.0.1:53308/mysql
+        run: npm run -w packages/apps-server build && cd packages/apps-server && npx vitest run --maxWorkers=2

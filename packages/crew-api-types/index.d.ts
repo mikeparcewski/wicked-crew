@@ -15316,6 +15316,12 @@ export interface AppSummary {
   createdAt: number;
   head: { version: number; tree: string; receipt: AppReceiptKind | null };
   turn: AppTurnState | null;
+  /**
+   * (api-types 0.180.0) The app's last successful publish: its share link (`shareUrl`), the version it serves
+   * and what was produced. `null` until a publish run finished (studio says "Publish to share", never a made-up
+   * link); absent from an older daemon.
+   */
+  published?: AppPublished | null;
 }
 
 /** `GET /apps` (observer); `?project=<id>` keeps one project's apps. */
@@ -15743,4 +15749,165 @@ export interface RegisterRepoBody {
   channel?: 'studio' | 'cli' | 'api';
   actor?: string;
   autoCapture?: boolean;
+}
+
+// ── Apps: publish and the standalone site (api-types 0.180.0, DES-APPS-001 §8.1-8.2, §9.3, slice K6) ──────────
+//
+// Publish turns an accepted version into a container image the deployer runs: `wicked-apps-server` with the
+// runtime, the checked `apps.json`, `queries/`, `apps.lock.json`, the snapshots by digest and the manifest
+// below. The SHARE LINK is the site's own address, the base URL the deployer gives in the publish settings
+// (`site.origin`): after a successful publish it is `AppPublished.shareUrl`, and anyone in the app's audience
+// (anyone at all, for a public app) opens it. crew never invents one and pushes nothing anywhere.
+
+/** Where a publish puts the app. `studio` is always on; `embed` needs a public app; `teams` needs the Entra profile. */
+export type AppPublishTarget = 'studio' | 'site' | 'embed' | 'teams';
+
+/**
+ * Who may open the site, judged on the verified token (DES §8.2). `public`: anyone, read-only (every query
+ * public, no action). `oidc-groups`: a group claim value (`claim`, default `groups`). `oidc-email-domain`: the
+ * email's domain, only with `email_verified: true` (a Boolean). `entra-roles`: an app-role VALUE in `roles`
+ * (recommended). `entra-groups`: a group object id in `groups` (a token with a groups overage marker is refused).
+ */
+export type AppAudienceRule =
+  | { kind: 'public' }
+  | { kind: 'oidc-groups'; groups: string[]; claim?: string }
+  | { kind: 'oidc-email-domain'; domains: string[] }
+  | { kind: 'entra-roles'; roles: string[] }
+  | { kind: 'entra-groups'; groups: string[] };
+
+/**
+ * The site's one issuer, fixed at publish. `oidc`: the page signs in with authorization code + PKCE and sends
+ * the ID token (`aud` = `clientId`). `entra`: the page sends a v2 ACCESS token for the app's own
+ * `access_as_user` scope (`aud` = `clientId`, `scp` has `access_as_user`, `tid` = `tenantId`); app-only tokens and
+ * ID tokens are refused. The issuer is `https://` (Entra: `https://login.microsoftonline.com/<tenantId>/v2.0`).
+ */
+export interface AppPublishIdentity {
+  profile: 'oidc' | 'entra';
+  issuer: string;
+  clientId: string;
+  /** `entra` only. */
+  tenantId?: string;
+  /** The scope the page asks for. Default: `openid email profile groups` (oidc), `api://<site host>/<clientId>/access_as_user openid profile` (entra). */
+  scope?: string;
+  /**
+   * Loopback or private CIDR ranges the issuer may be reached at when it is a NAME on a private network (crew's
+   * `OidcConfig.allowRanges`); an IP-literal issuer confirms itself. Never metadata or link-local.
+   */
+  allowRanges?: string[];
+}
+
+/** `POST /apps/:app/publish` (HUMAN operator): launch an `apps-publish` run bound to the head tree and this manifest. */
+export interface AppPublishBody {
+  /** The head version the person is publishing (`409 stale_base` if head moved). */
+  base: number;
+  targets: AppPublishTarget[];
+  /**
+   * The site's address: `https://<host>[:port]`, or `http://localhost:<port>` / `http://127.0.0.1:<port>` for a
+   * local run. No path, query or credentials. It is the share link, the redirect URI's origin
+   * (`<origin>/auth/callback`), and the only origin a POST to the site may come from.
+   */
+  site: { origin: string };
+  /** `null` = a public app (no sign-in). */
+  identity: AppPublishIdentity | null;
+  audience: AppAudienceRule;
+  /** `embed`: the origins that may frame the public site (`https://…`, no path). `teams` adds the Teams origins itself. */
+  embedOrigins?: string[];
+}
+
+/** One source as the person consents to shipping it (DES §9.3 step 3). */
+export interface AppManifestSource {
+  name: string;
+  kind: 'sql' | 'graphql' | 'rest' | 'mcp-http';
+  descriptorHash: string;
+  /** Where the container must reach it (`db.support.internal:5432`, a URL's origin), or `null` for a snapshot. */
+  reach: string | null;
+  /** The address is loopback or private: the container's network must reach it. */
+  privateAddress: boolean;
+  /** The environment variable the deployer passes its secret in, or `null` when it has none. */
+  env: string | null;
+  /** A Postgres source's Allow writes switch at publish. */
+  allowWrites: boolean;
+  /** An upload: the snapshot's digest, shipped in the image. */
+  snapshot?: string;
+}
+
+/** The manifest a publish run is bound to (its digest is on the run, the QE verdict and the `published` receipt). */
+export interface AppPublishManifest {
+  schema: 'wicked.apps.manifest/v1';
+  app: { slug: string; name: string; version: number; tree: string; commit: string };
+  targets: AppPublishTarget[];
+  site: { origin: string };
+  /**
+   * The issuer, with the endpoints its discovery document named at publish (the page's `connect-src`) and the ID
+   * token signing algorithms it named (`id_token_signing_alg_values_supported`; the page checks the ID token's).
+   */
+  identity: (AppPublishIdentity & { endpoints: { authorization: string; token: string; idTokenAlgs?: string[] } }) | null;
+  audience: AppAudienceRule;
+  embedOrigins: string[];
+  sources: AppManifestSource[];
+  queries: Array<{ id: string; source: string; public: boolean }>;
+  /** Each action with the grant the image enforces (revoking = publishing again without it). */
+  actions: Array<{ id: string; kind: 'api' | 'row-write'; source: string; grant: AppActionGrant; table?: string; columns?: string[] }>;
+  /** Every environment name the image needs, sorted. A missing one fails the server's start, by name. */
+  env: string[];
+  /** `/data` must be a mounted volume when the app has an action (its action records and logs live there). */
+  volume: '/data' | null;
+}
+
+/** An app's last successful publish (`AppSummary.published`, so also on `AppDetail`): the share link and what was produced. */
+export interface AppPublished {
+  version: number;
+  tree: string;
+  /** The `apps-publish` run. */
+  runId: string;
+  /** Unix millis, when the image was produced. */
+  at: number;
+  /** Who consented. */
+  actor: Actor;
+  targets: AppPublishTarget[];
+  /** The share link: `site.origin` + `/`. What studio's Copy link copies. */
+  shareUrl: string;
+  /** Who can open it, in one line ("People in group support-ops who sign in at dex.apps.test"). */
+  audience: string;
+  /** The image in the local container engine (never pushed): its tag and its id (`sha256:…`). */
+  image: { tag: string; id: string };
+  /** `embed`: the iframe snippet (a public app only); otherwise `null`. */
+  snippet: string | null;
+  /** `teams`: the Teams app package, at `GET /api/v1/apps/:app/published/teams.zip`; otherwise `null`. */
+  teamsPackage: { url: string; sha256: string } | null;
+  manifestDigest: string;
+  /** How the deployer runs it: the environment names, the volume (or `null`), the port the server listens on. */
+  run: { env: string[]; volume: '/data' | null; port: number };
+}
+
+// The standalone site's own routes (`wicked-apps-server`; the page's in-process host calls them). Bearer only,
+// no cookies; every POST needs `Origin` = the site's origin and `Content-Type: application/json`.
+
+/** `GET /spec` (a token in the audience, or a public app): the published version and who is viewing. */
+export interface AppSiteSpecResponse {
+  app: { slug: string; name: string; version: number };
+  spec: AppSpec;
+  /** What the server took from the verified token; `null` on a public site. */
+  viewer: { email: string | null; name: string | null } | null;
+  /** Actions run on this site (a mounted `/data`, `APPS_READ_ONLY` unset). The page still refuses them in a frame. */
+  actions: boolean;
+  /**
+   * Queries and actions the server refuses NOW, each with its reason. They are judged again at every refresh (every
+   * 10 minutes, and after a failed read): a source back as it was published clears them; a source that really
+   * changed needs the app checked and published again.
+   */
+  refused: Array<{ kind: 'query' | 'action'; id: string; reason: string }>;
+}
+
+/**
+ * `GET /healthz` (no sign-in): up, and what it refuses, by kind, id and a code only (`contract_changed`,
+ * `table_changed`, `source_unavailable`, …). The reasons, which can name a source or a table, are on `GET /spec`
+ * behind the sign-in.
+ */
+export interface AppSiteHealth {
+  ok: boolean;
+  app: string;
+  version: number;
+  refused: Array<{ kind: 'query' | 'action'; id: string; code: string }>;
+  actions: boolean;
 }
