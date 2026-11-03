@@ -32,6 +32,7 @@ import {
 import { probeLegacyOutbox, replayCommand } from '../api/governance-health.js';
 import { crewPackageVersion, runGovernance } from './governance.js';
 import { runMcpServer } from './mcp.js';
+import { runAppsCheck, runAppsProduce } from './apps.js';
 import { versionLines } from '../core/versions.js';
 import { DAEMON_PORT_ENV, DEFAULT_DAEMON_PORT, daemonPortSource, resolveDaemonPort } from './port.js';
 import { INTERACTIVE_DEFAULT_RANGE, INTERACTIVE_SPEC_ENV, resolveInteractiveSpec } from '../interactive/bridge-pool.js';
@@ -756,6 +757,10 @@ async function main(): Promise<void> {
     await runMcpServer(port);
   } else if (command === 'governance') {
     await runGovernance(argv);
+  } else if (command === 'apps-check') {
+    await runAppsCheck(argv);
+  } else if (command === 'apps-produce') {
+    await runAppsProduce();
   } else {
     console.error(`Unknown command: ${command ?? '(none)'}`);
     console.error('Usage: wicked-crew serve|start|resume|gate|status|mcp|governance|version');

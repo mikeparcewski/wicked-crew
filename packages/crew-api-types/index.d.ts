@@ -15671,7 +15671,15 @@ export interface AppErrorBody {
     | 'record_expired'
     | 'unknown_action'
     | 'unknown_record'
-    | 'missing_grants';
+    | 'missing_grants'
+    // (api-types 0.180.0, K6) Publish: one runs already; the token is not this publish step's; no publish runs as
+    // that run; this crew carries no runtime or server artifact to build with; no Teams package was produced.
+    | 'publish_in_flight'
+    | 'not_this_step'
+    | 'not_publishing'
+    | 'no_runtime'
+    | 'no_server'
+    | 'not_published';
   error: string;
   /** `rate_limited`: when to try again (also sent as `Retry-After`). */
   retryAfterMs?: number;
@@ -15812,6 +15820,33 @@ export interface AppPublishBody {
   audience: AppAudienceRule;
   /** `embed`: the origins that may frame the public site (`https://…`, no path). `teams` adds the Teams origins itself. */
   embedOrigins?: string[];
+}
+
+/** `POST /apps/:app/publish` 202: the `apps-publish` run, bound to the head tree and this manifest digest. */
+export interface AppPublishResponse {
+  runId: string;
+  manifestDigest: string;
+}
+
+/**
+ * `POST /apps/publish/check` and `/apps/publish/produce` (WORKER-FACING, bearer-exempt): the body of the run's
+ * `check` / `produce` Tool unit (`wicked-crew apps-check --publish`, `wicked-crew apps-produce`). Only that step's
+ * capability token is taken.
+ */
+export interface AppPublishStepBody {
+  token: string;
+}
+
+/** `POST /apps/publish/check` 200: the publish check (nothing runs) and the consent card, the manifest in words. */
+export interface AppPublishCheckResponse {
+  ok: boolean;
+  card: string;
+  findings: Array<{ code: string; message: string }>;
+}
+
+/** `POST /apps/publish/produce` 200: the image is built and the share link recorded. */
+export interface AppPublishProduceResponse {
+  published: AppPublished;
 }
 
 /** One source as the person consents to shipping it (DES §9.3 step 3). */

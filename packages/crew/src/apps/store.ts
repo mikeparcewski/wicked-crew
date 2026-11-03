@@ -30,6 +30,9 @@ import type {
   AppEditOp,
   AppHistory,
   AppLock,
+  AppPublished,
+  AppPublishBody,
+  AppPublishManifest,
   AppReceipt,
   AppReceiptKind,
   AppSpec,
@@ -41,6 +44,7 @@ import type {
 } from '../core/types.js';
 import { EMPTY_LOCK, LOCK_PATH, QUERIES_DIR, QUERY_EXT, SPEC_PATH, lockBytes, ownText, readAppTree, specBytes, stagedCheck, type AppFiles, type AppSourceStage } from './check.js';
 import { AppGit, gitProblem, SHA_RE } from './git.js';
+import type { ImageSources } from './publish/layout.js';
 
 /** The state-home file name (the registered `daemon-` file prefix). */
 export const APPS_STATE_FILENAME = 'daemon-apps.json';
@@ -52,7 +56,7 @@ export const APPS_STATE_FILENAME = 'daemon-apps.json';
  * routes, not apps.
  */
 export const APP_SLUG_RE = /^(?=.{1,48}$)[a-z][a-z0-9]*(?:-[a-z0-9]+){0,3}$/;
-export const RESERVED_APP_SLUGS: ReadonlySet<string> = new Set(['check', 'uploads']);
+export const RESERVED_APP_SLUGS: ReadonlySet<string> = new Set(['check', 'uploads', 'publish']);
 
 /** The receipts that make a tree part of an app's accepted history (DES §6.4). */
 const ACCEPTED: ReadonlySet<AppReceiptKind> = new Set(['you', 'reviewed', 'restored']);
@@ -93,6 +97,32 @@ interface StoredApp {
   receipts: Record<string, AppReceipt[]>;
   history: { states: number[]; pointer: number };
   turn: StoredTurn | null;
+  /** (K6) The publish in flight, and the last one that produced its image (absent in an older state file). */
+  publishing?: StoredPublishing | null;
+  published?: AppPublished | null;
+}
+
+/** (K6, DES §9.3) A publish in flight: the run, and the tree and manifest it is bound to. */
+export interface StoredPublishing {
+  runId: string;
+  version: number;
+  tree: string;
+  commit: string;
+  manifest: AppPublishManifest;
+  digest: string;
+  sources: ImageSources;
+  /** The person's publish settings (the check builds the manifest again from them and today's state). */
+  body: AppPublishBody;
+  /** The seats that built a turn since the last publish: none of them may be the publish's QE seat. */
+  excludeSeats: string[];
+  actor: Actor;
+  startedAt: number;
+}
+
+/** (K6) The publish seam: launching an `apps-publish` run, and asking whether one still runs. */
+export interface AppPublishLauncher {
+  launch(input: { runId: string; app: string; name: string; repoId: string; projectId: string; version: number; excludeSeats: string[]; actor: Actor }): Promise<void>;
+  isActive(runId: string): Promise<boolean>;
 }
 
 interface StateFile {
@@ -125,6 +155,8 @@ export interface AppStoreOptions {
   /** The source stage, when this daemon has one (the sources slice wires it). */
   sourceStage?: AppSourceStage | null;
   turns?: AppTurnLauncher | null;
+  /** (K6) The publish seam, when this daemon can launch `apps-publish` runs. */
+  publish?: AppPublishLauncher | null;
   now?: () => number;
   log?: (msg: string) => void;
 }
@@ -149,6 +181,7 @@ export class AppStore {
   private readonly treeCache = new Map<string, AppFiles>();
   sourceStage: AppSourceStage | null;
   turns: AppTurnLauncher | null;
+  publish: AppPublishLauncher | null;
   private readonly registry: AppRepoRegistry;
 
   constructor(opts: AppStoreOptions) {
@@ -159,6 +192,7 @@ export class AppStore {
     this.log = opts.log ?? (() => undefined);
     this.sourceStage = opts.sourceStage ?? null;
     this.turns = opts.turns ?? null;
+    this.publish = opts.publish ?? null;
     this.state = this.read();
   }
 
@@ -238,7 +272,7 @@ export class AppStore {
   private summary(a: StoredApp): AppSummary {
     const h = this.head(a);
     const turn = a.turn === null ? null : { runId: a.turn.runId, startedAt: a.turn.startedAt, base: a.turn.base, actor: a.turn.actor };
-    return { slug: a.slug, name: a.name, projectId: a.projectId, repoId: a.repoId, createdAt: a.createdAt, head: { version: h.version, tree: h.tree, receipt: h.receipt?.kind ?? null }, turn };
+    return { slug: a.slug, name: a.name, projectId: a.projectId, repoId: a.repoId, createdAt: a.createdAt, head: { version: h.version, tree: h.tree, receipt: h.receipt?.kind ?? null }, turn, published: a.published ?? null };
   }
 
   list(projectId?: string): AppSummary[] {
@@ -416,6 +450,104 @@ export class AppStore {
         this.launching.delete(runId);
       }
       return { runId, startedAt: turn.startedAt, base: turn.base, actor: turn.actor };
+    });
+  }
+
+  // ── Publish (K6, DES §9.3) ──────────────────────────────────────────────────────────────────────
+
+  /** The seats that built an accepted turn since the app's last publish (the publish's QE seat must be none of them). */
+  private buildersSinceLastPublish(a: StoredApp): string[] {
+    const builders = new Set<string>();
+    for (let i = a.versions.length - 1; i >= 0; i--) {
+      const v = a.versions[i]!;
+      const held = Object.hasOwn(a.receipts, v.tree) ? a.receipts[v.tree]! : [];
+      if (held.some((r) => r.kind === 'published')) break;
+      for (const r of held) if (r.kind === 'reviewed' && r.review !== undefined) builders.add(r.review.builder);
+      if (v.receipt?.kind === 'reviewed' && v.receipt.review !== undefined) builders.add(v.receipt.review.builder);
+    }
+    return [...builders].sort();
+  }
+
+  /**
+   * Bind a publish to the head tree and the manifest `prepare` builds for it, then launch its run. `409 stale_base`
+   * when head moved, `409 not_accepted` when head holds no accepted receipt, `409 publish_in_flight` while another
+   * publish of this app runs. The record is written BEFORE the run starts (a crash between the two leaves a publish
+   * crew can ask about).
+   */
+  async beginPublish(
+    slug: string,
+    input: { base: number; actor: Actor; prepare: (at: { version: number; tree: string; commit: string; files: AppFiles; name: string }) => Promise<{ manifest: AppPublishManifest; digest: string; sources: ImageSources; body: AppPublishBody }> },
+  ): Promise<StoredPublishing> {
+    const launcher = this.publish;
+    if (launcher === null) throw new AppStoreError(501, 'not_implemented', 'this daemon cannot launch apps-publish runs');
+    return this.withApp(slug, async () => {
+      const a = this.app(slug);
+      const h = this.head(a);
+      if (input.base !== h.version) throw new AppStoreError(409, 'stale_base', `the app is at v${h.version}, not v${input.base}: publish the version you are looking at`, { head: h.version });
+      if (this.acceptedReceipt(slug, h.tree) === null) throw new AppStoreError(409, 'not_accepted', `v${h.version} holds no accepted receipt: it cannot be published`);
+      const inFlight = a.publishing ?? null;
+      if (inFlight !== null && (await launcher.isActive(inFlight.runId).catch(() => true))) {
+        throw new AppStoreError(409, 'publish_in_flight', `a publish of ${slug} is running (${inFlight.runId}): wait for it to end`);
+      }
+      const prepared = await input.prepare({ version: h.version, tree: h.tree, commit: h.commit, files: await this.files(a, h.tree), name: a.name });
+      const runId = `apps-publish-${slug}-${randomBytes(6).toString('hex')}`;
+      const publishing: StoredPublishing = { runId, version: h.version, tree: h.tree, commit: h.commit, ...prepared, excludeSeats: this.buildersSinceLastPublish(a), actor: input.actor, startedAt: this.now() };
+      this.transact(slug, () => {
+        a.publishing = publishing;
+      });
+      try {
+        await launcher.launch({ runId, app: slug, name: a.name, repoId: a.repoId, projectId: a.projectId, version: h.version, excludeSeats: publishing.excludeSeats, actor: input.actor });
+      } catch (err) {
+        if (a.publishing?.runId === runId) {
+          this.transact(slug, () => {
+            a.publishing = null;
+          });
+        }
+        throw err;
+      }
+      return structuredClone(publishing);
+    });
+  }
+
+  /** The publish a run is: its app and what it is bound to, or `null`. */
+  publishingOf(runId: string): { slug: string; publishing: StoredPublishing } | null {
+    for (const a of Object.values(this.state.apps)) if (a.publishing?.runId === runId) return { slug: a.slug, publishing: structuredClone(a.publishing) };
+    return null;
+  }
+
+  /** The checked files of a tree, as crew committed them (the packer's input: nothing from a worktree). */
+  async treeTexts(slug: string, tree: string): Promise<{ spec: AppSpec; specText: string; lockText: string; queryText: Record<string, string> }> {
+    const files = await this.files(this.app(slug), tree);
+    return { spec: files.spec, specText: specBytes(files.spec), lockText: lockBytes(files.lock), queryText: { ...files.queryText } };
+  }
+
+  /** The publish produced its image: the tree gains its `published` receipt and the app its published record. */
+  async finishPublish(runId: string, published: AppPublished): Promise<void> {
+    const found = this.publishingOf(runId);
+    if (found === null) throw new AppStoreError(409, 'not_publishing', `no publish runs as ${runId}`);
+    await this.withApp(found.slug, async () => {
+      const a = this.app(found.slug);
+      const p = a.publishing;
+      if (p?.runId !== runId) throw new AppStoreError(409, 'not_publishing', `no publish runs as ${runId}`);
+      const receipt: AppReceipt = { kind: 'published', tree: p.tree, version: p.version, at: this.now(), actor: p.actor, publish: { runId, manifestDigest: p.digest, artifacts: { image: published.image.id, ...(published.teamsPackage !== null ? { teams: published.teamsPackage.sha256 } : {}) } } };
+      this.transact(found.slug, () => {
+        a.receipts[p.tree] = [...(Object.hasOwn(a.receipts, p.tree) ? a.receipts[p.tree]! : []), receipt];
+        a.published = structuredClone(published);
+        a.publishing = null;
+      });
+    });
+  }
+
+  /** The publish run ended without producing (any reason): the app may publish again. Idempotent. */
+  async endPublish(runId: string): Promise<void> {
+    const found = this.publishingOf(runId);
+    if (found === null) return;
+    await this.withApp(found.slug, async () => {
+      const a = this.app(found.slug);
+      if (a.publishing?.runId !== runId) return;
+      this.transact(found.slug, () => {
+        a.publishing = null;
+      });
     });
   }
 

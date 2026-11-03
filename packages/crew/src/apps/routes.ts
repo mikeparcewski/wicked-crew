@@ -26,13 +26,14 @@ import { z } from 'zod';
 
 import { LOCAL_ACTOR, trustAtLeast } from '../api/auth.js';
 import type { AuditLog } from '../api/audit.js';
-import type { Actor, AppEditOp, AppErrorBody } from '../core/types.js';
+import type { Actor, AppAudienceRule, AppEditOp, AppErrorBody } from '../core/types.js';
 import { APP_NAMED_ID_RE, parseSpec } from './spec.js';
 import { APP_SLUG_RE, AppStore, AppStoreError } from './store.js';
 import { QUERY_TEXT_MAX_BYTES } from './check.js';
 import { AppWriteError, type AppWritePath } from './actions/write-path.js';
 import { AppExecError, type AppExecutor } from './exec/executor.js';
 import { AppGitError } from './git.js';
+import { AppPublishService, PublishError } from './publish/service.js';
 
 const V = '/api/v1';
 
@@ -56,6 +57,10 @@ export interface AppRoutesDeps {
   executor?: AppExecutor;
   /** (K2b) The write path; absent = the action routes answer 501 after the human check. */
   writePath?: AppWritePath;
+  /** (K6) Publish; absent = `POST /apps/:app/publish` answers 501 after the human check. */
+  publish?: AppPublishService;
+  /** (K6) Where produced Teams packages are kept (`<dir>/<app>/teams.zip`). */
+  publishedDir?: string;
 }
 
 const actorOf = (req: FastifyRequest): Actor => req.actor ?? LOCAL_ACTOR;
@@ -78,6 +83,7 @@ function overLong(body: unknown, key: string, max: number): boolean {
 }
 
 function fail(reply: FastifyReply, err: unknown): FastifyReply {
+  if (err instanceof PublishError) return reply.code(err.status).send({ code: err.code, error: err.message, ...(err.findings.length > 0 ? { findings: err.findings } : {}) });
   if (err instanceof AppStoreError) return reply.code(err.status).send({ code: err.code, error: err.message, ...err.extra });
   if (err instanceof AppExecError || err instanceof AppWriteError) {
     if (err.extra.retryAfterMs !== undefined) void reply.header('retry-after', String(Math.max(1, Math.ceil(err.extra.retryAfterMs / 1000))));
@@ -108,6 +114,35 @@ export const AppTurnSchema = z.object({ base, message: z.string().min(1).max(800
 export const AppActionPrepareSchema = z.object({ version, params: z.record(z.unknown()).optional() }).strict();
 export const AppActionRunSchema = z.object({ record: z.string().uuid() }).strict();
 export const AppActionGrantSchema = z.object({ version }).strict();
+const httpsOrigin = z.string().min(8).max(300);
+const AudienceSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('public') }).strict(),
+  z.object({ kind: z.literal('oidc-groups'), groups: z.array(z.string().min(1).max(200)).min(1).max(50), claim: z.string().regex(/^[A-Za-z_][A-Za-z0-9_:.-]{0,63}$/).optional() }).strict(),
+  z.object({ kind: z.literal('oidc-email-domain'), domains: z.array(z.string().min(3).max(253)).min(1).max(20) }).strict(),
+  z.object({ kind: z.literal('entra-roles'), roles: z.array(z.string().min(1).max(120)).min(1).max(20) }).strict(),
+  z.object({ kind: z.literal('entra-groups'), groups: z.array(z.string().min(1).max(64)).min(1).max(50) }).strict(),
+]);
+export const AppPublishSchema = z
+  .object({
+    base,
+    targets: z.array(z.enum(['studio', 'site', 'embed', 'teams'])).max(4),
+    site: z.object({ origin: httpsOrigin }).strict(),
+    identity: z
+      .object({
+        profile: z.enum(['oidc', 'entra']),
+        issuer: z.string().min(9).max(300),
+        clientId: z.string().min(1).max(200),
+        tenantId: z.string().max(64).optional(),
+        scope: z.string().max(500).optional(),
+        allowRanges: z.array(z.string().max(64)).max(10).optional(),
+      })
+      .strict()
+      .nullable(),
+    audience: AudienceSchema,
+    embedOrigins: z.array(httpsOrigin).max(10).optional(),
+  })
+  .strict();
+export const AppPublishStepSchema = z.object({ token: z.string().min(1).max(4096) }).strict();
 export const AppsCheckSchema = z.object({ token: z.string().min(1).max(4096), app: slugParam, commit: z.string().regex(/^[0-9a-fA-F]{40}$/), manifest: z.unknown().optional() }).strict();
 
 export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): void {
@@ -368,7 +403,62 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
       return { grant: g };
     });
   }
-  stub('POST', '/publish', 'publish an app');
+  if (deps.publish === undefined) stub('POST', '/publish', 'publish an app');
+  else {
+    const pub = deps.publish;
+    app.post(
+      `${V}/apps/:app/publish`,
+      { config: { manifest: { requestType: 'AppPublishBody', responseType: 'AppPublishResponse', statusCodes: [202, 400, 403, 404, 409, 422, 501, 503] } } },
+      async (req, reply) => {
+        if (!humanOnly(req, reply, 'publish an app')) return reply;
+        const slug = slugOf(req, reply);
+        if (slug === null) return reply;
+        const parsed = AppPublishSchema.safeParse(req.body);
+        if (!parsed.success) return badRequest(reply, parsed.error);
+        const b = parsed.data;
+        const a = b.audience;
+        const audience: AppAudienceRule = a.kind === 'oidc-groups' ? { kind: 'oidc-groups', groups: a.groups, ...(a.claim !== undefined ? { claim: a.claim } : {}) } : a;
+        try {
+          const started = await pub.start(slug, { base: b.base, targets: b.targets, site: b.site, identity: b.identity === null ? null : { profile: b.identity.profile, issuer: b.identity.issuer, clientId: b.identity.clientId, ...(b.identity.tenantId !== undefined ? { tenantId: b.identity.tenantId } : {}), ...(b.identity.scope !== undefined ? { scope: b.identity.scope } : {}), ...(b.identity.allowRanges !== undefined ? { allowRanges: b.identity.allowRanges } : {}) }, audience, ...(b.embedOrigins !== undefined ? { embedOrigins: b.embedOrigins } : {}) }, actorOf(req));
+          deps.audit.record('apps.publish.launched', actorOf(req), { runId: started.runId, detail: { app: slug, version: b.base, manifestDigest: started.manifestDigest, targets: b.targets, origin: b.site.origin } });
+          return reply.code(202).send(started);
+        } catch (err) {
+          return fail(reply, err);
+        }
+      },
+    );
+    // WORKER-FACING (bearer-exempt, `isUnitTokenRoute`): the run's `check` and `produce` Tool units. The token in
+    // the body is the credential, and only the token of THAT step of a publish crew is running is taken.
+    app.post(`${V}/apps/publish/check`, { config: { manifest: { requestType: 'AppPublishStepBody', responseType: 'AppPublishCheckResponse', statusCodes: [200, 400, 401, 403, 404, 409] } } }, async (req, reply) => {
+      const parsed = AppPublishStepSchema.safeParse(req.body);
+      if (!parsed.success) return refuse(reply, 400, { code: 'bad_request', error: 'body must be { token }' });
+      try {
+        return await pub.check(parsed.data.token);
+      } catch (err) {
+        return fail(reply, err);
+      }
+    });
+    app.post(`${V}/apps/publish/produce`, { config: { manifest: { requestType: 'AppPublishStepBody', responseType: 'AppPublishProduceResponse', statusCodes: [200, 400, 401, 403, 404, 409, 502, 503] } } }, async (req, reply) => {
+      const parsed = AppPublishStepSchema.safeParse(req.body);
+      if (!parsed.success) return refuse(reply, 400, { code: 'bad_request', error: 'body must be { token }' });
+      try {
+        const out = await pub.produce(parsed.data.token);
+        deps.audit.record('apps.publish.produced', { id: 'wicked-crew', kind: 'agent', trust: 'operator' } as Actor, { runId: out.published.runId, detail: { shareUrl: out.published.shareUrl, version: out.published.version, image: out.published.image.id, manifestDigest: out.published.manifestDigest } });
+        return { published: out.published };
+      } catch (err) {
+        return fail(reply, err);
+      }
+    });
+  }
+  app.get(`${V}/apps/:app/published/teams.zip`, { config: { manifest: { statusCodes: [200, 404] } } }, async (req, reply) => {
+    const slug = slugOf(req, reply);
+    if (slug === null) return reply;
+    const published = store.list().find((a) => a.slug === slug)?.published ?? null;
+    const file = deps.publishedDir === undefined ? null : `${deps.publishedDir}/${slug}/teams.zip`;
+    const { existsSync, readFileSync } = await import('node:fs');
+    if (published?.teamsPackage == null || file === null || !existsSync(file)) return refuse(reply, 404, { code: 'not_published', error: `${slug} has no Teams package: publish it with the Teams target` });
+    return reply.header('content-type', 'application/zip').header('content-disposition', `attachment; filename="${slug}-teams.zip"`).header('cache-control', 'no-store').send(readFileSync(file));
+  });
 
   app.post(
     `${V}/apps/:app/turns`,

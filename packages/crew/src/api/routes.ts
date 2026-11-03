@@ -397,6 +397,8 @@ import { AppExecutor } from '../apps/exec/executor.js';
 import { localViewerOf, type Viewer } from '../apps/exec/viewer.js';
 import type { Actor as AppsActor } from '../core/types.js';
 import { registerAppRoutes } from '../apps/routes.js';
+import { AppPublishService } from '../apps/publish/service.js';
+import { discoverIssuer, type PublishAdapter, runtimeDir as appsRuntimeDir, serverArtifact as appsServerArtifact, unitOfToken } from '../apps/publish/wire.js';
 import { AppStoreError, type AppStore } from '../apps/store.js';
 import { registerMcpInspectRoutes } from '../mcp-inspect/routes.js';
 import { discoverLivePlugin } from '../skills/plugin-source.js';
@@ -1774,12 +1776,29 @@ export function registerRoutes(
           ...(appsExecutor !== undefined ? { executor: appsExecutor } : {}),
         })
       : undefined;
+  // (K6) Publish: an `apps-publish` run bound to the head tree and its manifest, when the store can launch one.
+  const appsPublishedDir = join(crewStateHome(), 'apps-published');
+  const appsPublish =
+    runtime.apps !== undefined && runtime.apps.publish !== null && appsExecutor !== undefined
+      ? new AppPublishService({
+          store: runtime.apps,
+          registry: runtime.mcp ?? null,
+          executor: appsExecutor,
+          writePath: appsWritePath ?? null,
+          unitOf: unitOfToken(adapter as unknown as PublishAdapter),
+          discover: discoverIssuer,
+          runtimeDir: () => appsRuntimeDir(),
+          serverArtifact: () => appsServerArtifact(),
+          artifactsDir: appsPublishedDir,
+        })
+      : undefined;
   if (runtime.apps !== undefined) {
     registerAppRoutes(app, {
       store: runtime.apps,
       audit,
       ...(appsExecutor !== undefined ? { executor: appsExecutor } : {}),
       ...(appsWritePath !== undefined ? { writePath: appsWritePath } : {}),
+      ...(appsPublish !== undefined ? { publish: appsPublish, publishedDir: appsPublishedDir } : {}),
       ...(typeof adapter.projectsSupported === 'function' && adapter.projectsSupported()
         ? { projectExists: async (id: string) => (await adapter.projectGet(id)) !== null }
         : {}),
@@ -2150,7 +2169,7 @@ export function registerRoutes(
               query: appsExecutor !== undefined,
               actions: appsWritePath !== undefined,
               turns: runtime.apps.turns !== null,
-              publish: false,
+              publish: appsPublish !== undefined,
               uploads: app.hasRoute({ method: 'POST', url: `${V}/apps/uploads` }),
               sourceCheck: runtime.apps.sourceStage !== null,
             } satisfies import('../core/types.js').AppsCapabilities,

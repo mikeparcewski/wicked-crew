@@ -14,6 +14,7 @@ import { registerRoutes } from './routes.js';
 import { APPS_ACTIONS_STATE_FILENAME, AppActionStore } from '../apps/actions/store.js';
 import { AppsSourceStage } from '../apps/exec/source-stage.js';
 import { APPS_STATE_FILENAME, AppStore, defaultAppsRoot } from '../apps/store.js';
+import { type PublishAdapter, publishLauncher } from '../apps/publish/wire.js';
 import { freshenCheckout } from './chat-freshness.js';
 import { ErrorRing, teeStreamWithErrorRing } from './diagnostics.js';
 import { GateCache } from './gate-cache.js';
@@ -2543,6 +2544,9 @@ export async function createServer(
       // (K2b) The source stage: the read policy and the per-kind source check over the connector registry,
       // so a version holding queries or actions lands when they pass (DES §9.2 step 3).
       sourceStage: new AppsSourceStage({ registry: mcpRegistry }),
+      // (K6) Publish: `apps-publish` runs through the engine (the preset forces QE and holds the produce step for
+      // consent).
+      publish: publishLauncher(adapter as unknown as PublishAdapter),
       log: (m) => app.log.warn(m),
     });
     // A crash between an app's record and its registration is finished here, off the boot path.
@@ -2939,5 +2943,10 @@ export async function startServer(
   // `WICKED_MCP_TOKEN`) as `WICKED_CREW_URL`, so the garden shim reaches THIS daemon's broker. The
   // engine reads the daemon's own env at every spawn; a daemon that never listened hands none.
   process.env['WICKED_CREW_URL'] = brokerUrlFor(boundHost, boundPort);
+  // DES-APPS-001 K0/K6: an Apps run's Tool units run crew's own CLI (`wicked-crew apps-check`, `apps-produce`); the
+  // engine finds it through WICKED_CREW_BIN (crew under npx has no `wicked-crew` on PATH). This daemon's own entry,
+  // when it runs from its built dist; an operator's setting wins.
+  const ownCli = fileURLToPath(new URL('../cli/index.js', import.meta.url));
+  if ((process.env['WICKED_CREW_BIN'] ?? '') === '' && existsSync(ownCli)) process.env['WICKED_CREW_BIN'] = ownCli;
   return { app, port: boundPort, host: boundHost, stages: clock.snapshot() };
 }
