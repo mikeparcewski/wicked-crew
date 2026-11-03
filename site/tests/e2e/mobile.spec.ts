@@ -2,7 +2,7 @@ import { test, expect, devices } from '@playwright/test';
 import { bringIntoView } from './utils';
 
 /**
- * Phones (390x844): the job demo is the same working demo, laid out for a phone (a 3-line ticker and a
+ * Phones (390x844): the job demo is the same working demo, laid out for a phone (a short ticker and a
  * fixed receipt panel, so nothing grows while it runs). The explorables become tappable lists, What's
  * new is a carousel, the four-plane map renders, and the page never scrolls sideways.
  */
@@ -111,7 +111,8 @@ test.describe('mobile (390×844)', () => {
         return [`${st}: ${el.tagName.toLowerCase()}.${el.className} "${name}" ${Math.round(r.width)}x${Math.round(r.height)}`];
       });
     }, state);
-    for (const size of [{ width: 390, height: 844 }, { width: 360, height: 740 }]) {
+    // 600px: the phone sizing runs to 760px (codex review: a misplaced media block had cut it at 560)
+    for (const size of [{ width: 390, height: 844 }, { width: 360, height: 740 }, { width: 600, height: 900 }]) {
       await page.setViewportSize(size);
       await page.goto('/');
       const job = page.locator('[data-job]');
@@ -146,11 +147,62 @@ test.describe('mobile (390×844)', () => {
     expect(await get.evaluate((el) => (window.innerHeight - el.getBoundingClientRect().top) / el.getBoundingClientRect().height)).toBeLessThan(0.3);
   });
 
-  test('the hamburger menu lists crew as a site link', async ({ page }) => {
+  test('each install Copy label sits in the middle of its 44px button', async ({ page }) => {
     await page.goto('/');
+    const off = await page.locator('.install__copy').evaluateAll((bs) => bs.map((b) => {
+      const r = b.getBoundingClientRect();
+      const range = document.createRange(); range.selectNodeContents(b);
+      const t = Array.from(range.getClientRects()).find((x) => x.height > 0)!;
+      return { h: Math.round(r.height), dy: Math.abs((t.top + t.bottom) / 2 - (r.top + r.bottom) / 2), dx: Math.abs((t.left + t.right) / 2 - (r.left + r.right) / 2) };
+    }));
+    expect(off.length).toBe(2);
+    for (const o of off) {
+      expect(o.h).toBeGreaterThanOrEqual(44);
+      expect(o.dy, `the label is ${o.dy.toFixed(1)}px off the middle`).toBeLessThanOrEqual(1);
+      expect(o.dx).toBeLessThanOrEqual(1);
+    }
+  });
+
+  test('the header keeps the mark and "labs / wicked-crew"; the menu leads with Wicked Labs', async ({ page }) => {
+    await page.goto('/');
+    const path = page.locator('.topbar').getByRole('navigation', { name: 'Breadcrumb' });
+    // the lockup shows only its mark on a phone (its lettering clipped), in a 44px target; the two
+    // text crumbs stay whole, 44px tall
+    expect(await path.locator('.wordmark-lockup').evaluate((svg) => getComputedStyle(svg).clipPath)).toContain('22px');
+    const mark = (await path.locator('.wordmark').boundingBox())!;
+    expect(Math.min(mark.width, mark.height), 'the mark is a 44px target').toBeGreaterThanOrEqual(44);
+    // its focus ring is drawn inside its box, so the window's left edge never cuts it (codex review)
+    for (let k = 0; k < 4 && !(await path.locator('.wordmark').evaluate((el) => el === document.activeElement)); k++) await page.keyboard.press('Tab');
+    const ring = await path.locator('.wordmark').evaluate((el) => {
+      const cs = getComputedStyle(el); const r = el.getBoundingClientRect();
+      return { focused: el.matches(':focus-visible'), left: r.left - parseFloat(cs.outlineOffset) - parseFloat(cs.outlineWidth) };
+    });
+    expect(ring.focused).toBe(true);
+    expect(ring.left, 'the focus ring starts off the window').toBeGreaterThanOrEqual(0);
+    for (const [name, href] of [['labs', 'https://wickedlabs.ai/'], ['wicked-crew', 'https://wc.wickedagile.com']]) {
+      const l = path.getByRole('link', { name, exact: true });
+      await expect(l).toHaveAttribute('href', href);
+      expect(await l.evaluate((el) => el.scrollWidth <= el.clientWidth + 1), `${name} is cut`).toBe(true);
+      expect((await l.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    }
     await page.locator('#menuBtn').click();
     const menu = page.locator('#mobileMenu');
     await expect(menu).toBeVisible();
-    await expect(menu.getByRole('link', { name: /crew/ })).toHaveAttribute('href', 'https://wc.wickedagile.com');
+    const first = menu.getByRole('link').first();
+    await expect(first).toContainText('Wicked Labs');
+    await expect(first).toHaveAttribute('href', 'https://wickedlabs.ai/');
   });
+
+  // codex (local review, studio): the path cut the package name short at 641-720, with this site's
+  // 44px icons beside the full lockup
+  for (const width of [360, 390, 641, 700, 721, 768]) {
+    test(`the header's path shows the whole package name @ ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 844 });
+      await page.goto('/');
+      await page.evaluate(async () => { await document.fonts.ready; });
+      const name = page.locator('.topbar .crumbs').getByRole('link', { name: 'wicked-crew', exact: true });
+      await expect(name).toBeInViewport({ ratio: 1 });
+      expect(await name.evaluate((el) => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
+    });
+  }
 });

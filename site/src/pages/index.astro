@@ -129,8 +129,11 @@ const WORKFLOWS = [
   { name: 'feature', steps: 'clarify → design → build → adversarial-review → test → review' },
   { name: 'bug', steps: 'triage → reproduce → fix → verify' },
   { name: 'migration', steps: 'plan → execute → cutover → verify → cleanup' },
-  { name: 'mcp-server', steps: 'design → build → test → review → install (on your consent)' },
-  { name: 'editor-plugin', steps: 'design → build → test → install (on your consent)' },
+  // mcp-server's nine steps (wicked-core src/presets/mcp-server.json) do not fit the frame at
+  // 1280x660, so it keeps the words PR's one line, with no step counter
+  { name: 'mcp-server', steps: 'build an MCP server, install it on consent' },
+  // exactly the steps of wicked-core src/presets/editor-plugin.json (main ca90345); install asks first
+  { name: 'editor-plugin', steps: 'scope → design → build → test → security-review → install-plan → install' },
   // not a fixed sequence of steps: one line, and no step counter
   { name: 'domain-extraction', steps: 'cover code with real requirements (default 80%)' },
 ];

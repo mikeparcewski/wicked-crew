@@ -1,9 +1,9 @@
 import { test, expect } from '@playwright/test';
 
 /**
- * wicked-web chrome (Topbar) — theme toggle (#themeBtn ↔ data-theme on <html>,
- * persisted under localStorage 'wa-theme-v3', written only on a click) and the ecosystem dropdown
- * (#projectsBtn → #projectsMenu).
+ * wicked-web chrome (Topbar, bc5ca29) — theme toggle (#themeBtn ↔ data-theme on <html>,
+ * persisted under localStorage 'wa-theme-v3', written only on a click), and the product path
+ * "Wicked Agile / labs / wicked-crew" with the flask linking the lab (the Experiments menu is gone).
  */
 test.describe('site chrome (wicked-web topbar)', () => {
   test('theme toggle flips data-theme on <html> and persists across reload', async ({ page }) => {
@@ -31,20 +31,20 @@ test.describe('site chrome (wicked-web topbar)', () => {
       .toBe('dark');
   });
 
-  test('ecosystem dropdown opens on click and closes on Escape', async ({ page }) => {
+  test('the product path is three links, Wicked Agile / labs / wicked-crew, and the flask links the lab', async ({ page }) => {
     await page.goto('/');
-    const btn = page.locator('#projectsBtn');
-    const menu = page.locator('#projectsMenu');
-
-    await expect(menu).toBeHidden();
-    await btn.click();
-    await expect(menu).toBeVisible();
-    await expect(btn).toHaveAttribute('aria-expanded', 'true');
-    await expect(menu.getByRole('link', { name: /garden/ })).toBeVisible();
-    await expect(menu.getByRole('link', { name: /estate/ })).toBeVisible();
-
-    await page.keyboard.press('Escape');
-    await expect(menu).toBeHidden();
-    await expect(btn).toHaveAttribute('aria-expanded', 'false');
+    const links = page.locator('.topbar').getByRole('navigation', { name: 'Breadcrumb' }).getByRole('link');
+    await expect(links).toHaveCount(3);
+    await expect(links.nth(0)).toHaveAccessibleName('Wicked Agile');
+    await expect(links.nth(0)).toHaveAttribute('href', 'https://wickedagile.com/');
+    await expect(links.nth(1)).toHaveText('labs');
+    await expect(links.nth(1)).toHaveAttribute('href', 'https://wickedlabs.ai/');
+    await expect(links.nth(2)).toHaveText('wicked-crew');
+    await expect(links.nth(2)).toHaveAttribute('href', 'https://wc.wickedagile.com');
+    await expect(links.nth(2)).toHaveAttribute('aria-current', 'page');
+    for (const l of await links.all()) await expect(l).toBeVisible();
+    await expect(page.locator('.topbar').getByRole('link', { name: 'Wicked Labs' })).toHaveAttribute('href', 'https://wickedlabs.ai/');
+    // the Experiments menu is gone
+    await expect(page.locator('#projectsBtn, #projectsMenu')).toHaveCount(0);
   });
 });

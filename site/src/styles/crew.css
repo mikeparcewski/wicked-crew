@@ -264,21 +264,18 @@ code {
 
 .job-body { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); height: var(--job-h); }
 .log-col { display: grid; grid-template-rows: minmax(0, 1fr) auto; min-height: 0; border-right: 1px solid var(--hairline); }
-.log { overflow: hidden; min-height: 0; padding: 10px 14px; display: flex; flex-direction: column; gap: 5px; }
-/* once the log is full it is pinned to its newest line: the oldest one fades out at the top edge
-   instead of being sliced through mid-glyph (job-demo.js sets .is-full) */
-.log.is-full { -webkit-mask-image: linear-gradient(to bottom, transparent, #000 26px); mask-image: linear-gradient(to bottom, transparent, #000 26px); }
-.ln { margin: 0; font-family: var(--font-mono); font-size: 13px; line-height: 1.45; color: color-mix(in oklab, var(--ink) 74%, transparent); animation: ln-in .25s var(--ease) backwards; }
+/* the log is a short window in large type, with air between its lines: the newest lines, at most
+   five, and only as many as fit whole (job-demo.js hides the older ones; none is ever cut off) */
+.log { overflow: hidden; min-height: 0; padding: 14px 24px; display: flex; flex-direction: column; gap: 12px; }
+.ln { margin: 0; font-family: var(--font-mono); font-size: 16px; line-height: 1.5; color: color-mix(in oklab, var(--ink) 78%, transparent); animation: ln-in .25s var(--ease) backwards; }
 .ln--still { animation: none; }
-/* the previous run's lines, kept on a replay until the new run's lines replace them */
-.ln--ghost { opacity: .38; }
 .ln b { color: var(--ink); }
 .ln--ok, .ln--ok b { color: var(--ok); }
 .ln--deny, .ln--deny b { color: var(--deny); }
 .ln--warn { color: var(--warn); }
 .ln--ctrl, .ln--ctrl b { color: var(--ctrl); }
 .ln-seats { display: inline-flex; gap: 4px; margin-left: 8px; vertical-align: 1px; }
-.ln-seats i { font: 500 10px/1 var(--font-mono); font-style: normal; padding: 3px 6px; border-radius: 4px; border: 1px solid var(--hairline-strong); color: var(--muted); }
+.ln-seats i { font: 500 12px/1 var(--font-mono); font-style: normal; padding: 3px 6px; border-radius: 4px; border: 1px solid var(--hairline-strong); color: var(--muted); }
 .ln-seats i.on { color: var(--canvas); background: var(--ctrl); border-color: var(--ctrl); }
 @media (prefers-reduced-motion: no-preference) {
   .ln:not(.ln--still) .ln-seats i.on { animation: seat-on .3s var(--ease) backwards; }
@@ -539,8 +536,9 @@ code {
 .install { min-width: 0; width: 100%; border: 1px solid var(--hairline-strong); border-radius: 12px; overflow: hidden; background: var(--job-bg); }
 .install__bar { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: nowrap; padding: 10px 14px; border-bottom: 1px solid var(--hairline); background: color-mix(in oklab, var(--canvas) 50%, transparent); }
 .install__label { flex: 1; min-width: 0; font: 12px var(--font-mono); color: var(--muted); }
-/* the button always reserves room for "Copied" (a hidden twin in the same grid cell) */
-.install__copy { display: inline-flex; flex-direction: column; align-items: center; }
+/* the button always reserves room for "Copied" (a hidden, zero-height twin under the label); the
+   label is centred both ways, so it stays in the middle when a phone grows the button to 44px */
+.install__copy { display: inline-flex; flex-direction: column; align-items: center; justify-content: center; }
 .install__copy::after { content: 'Copied'; height: 0; overflow: hidden; visibility: hidden; }
 .install__copy { flex: none; font: 600 12px var(--font-sans); color: var(--muted); background: transparent; border: 1px solid var(--hairline-strong); border-radius: 6px; padding: 5px 12px; min-height: 26px; cursor: pointer; transition: border-color .2s var(--ease), color .2s var(--ease); }
 .install__copy:hover, .install__copy:focus-visible, .install__copy:active { border-color: var(--ctrl); color: var(--ink); }
@@ -633,7 +631,7 @@ code {
   .facts li { font-size: 17px; }
   .st-name { font-size: 16px; } .st { padding: 10px 12px; } .st-gate { font-size: 12px; padding: 5px 9px; }
   .io { font-size: 13px; } .job-t { font-size: 14px; } .job-btn { font-size: 15px; padding: 10px 16px; }
-  .ln { font-size: 14px; } .caption { font-size: 16px; height: 40px; } .rc table, .panel-empty { font-size: 15.5px; } .rc th, .rc td { padding-top: 7px; padding-bottom: 7px; }
+  .ln { font-size: 17px; } .caption { font-size: 16px; height: 40px; } .rc table, .panel-empty { font-size: 15.5px; } .rc th, .rc td { padding-top: 7px; padding-bottom: 7px; }
   .sbx { gap: 16px; } .hot { padding: 15px 16px; gap: 6px; } .hot b { font-size: 17px; } .hot small { font-size: 13px; }
   .sbx-box { padding: 32px 16px 16px; gap: 14px; } .sbx-agent { font-size: 17px; } .sbx-cap { padding: 16px 18px; }
   .agent { font-size: 14px; padding: 9px 13px; } .sbx-note { font-size: 15px; } .sbx-map { grid-template-rows: auto 36px auto; }
@@ -716,9 +714,9 @@ code {
   .log-col { display: contents; }
   .caption { order: -2; border-top: 0; border-bottom: 1px solid var(--hairline); }
   .panel { order: -1; border-bottom: 1px solid var(--hairline); }
-  /* a 3-line live ticker instead of the 300px log; the receipt panel is a fixed box that scrolls */
-  .log { height: 96px; padding: 8px 12px; gap: 3px; }
-  .ln { font-size: 12px; }
+  /* a short live ticker instead of the 300px log: the same 16px lines, 12px apart (the newest that
+     fit whole); the receipt panel is a fixed box that scrolls */
+  .log { height: 176px; padding: 10px 14px; gap: 12px; }
   .ln-seats { display: none; }
   .caption { font-size: 13px; padding: 0 12px; }
   .panel { height: 250px; padding: 10px 12px; }
@@ -811,11 +809,6 @@ html body .topbar { background: var(--surface-base); }
 /* tooltips open below the 64px bar, over the page (opening above, they were drawn off the window) */
 .topbar [data-tip]::after { bottom: auto; top: calc(100% + 8px); }
 .topbar #themeBtn[data-tip]::after { left: auto; right: 0; transform: none; }
-/* the projects menu opens where the tooltip would: no tooltip over an open menu */
-.topbar .dropdown-wrap:has(> .dropdown-menu:not([hidden]))::after { opacity: 0; }
-/* the projects menu is wide enough for its longest row */
-.topbar #projectsMenu.dropdown-menu { min-width: 300px; }
-.topbar #projectsMenu .di-label { white-space: normal; }
 /* a lit plane keeps its 1px ring only: the old 56px glow spread under the text below and into Get it */
 html body .same-garden .sg-plane:hover, html body .same-garden .sg-plane:focus-within { box-shadow: 0 0 0 1px color-mix(in oklab, var(--plane) 26%, transparent); }
 /* a card does not lift inside a plane whose padding is under 8px */
@@ -825,6 +818,8 @@ html body .same-garden .sg-card:hover, html body .same-garden .sg-card:focus-wit
 @media (max-width: 760px) {
   html body .topbar .icon-btn { width: 44px; height: 44px; }
   html body .topbar .wordmark, html body .footer .footer-wordmark { min-height: 44px; }
+  /* the product path's two text links ("labs", "wicked-crew"): 44px tall, and 44px wide at least */
+  html body .topbar .crumb { line-height: 44px; min-width: 44px; text-align: center; }
   html body .footer .footer-wordmark { display: inline-flex; align-items: center; }
   /* 5px above and below the links: the card clips its overflow, and a link's focus ring sits 3px out */
   html body .same-garden .sg-card-foot { padding-block: 5px; }
@@ -833,10 +828,20 @@ html body .same-garden .sg-card:hover, html body .same-garden .sg-card:focus-wit
   html body .footer .footer-links { gap: 0; }
   html body .footer .footer-links a { min-height: 44px; min-width: 44px; padding-block: 10px; }
 }
+@media (max-width: 720px) {
+  /* the path keeps only the lockup's 22px mark up to 720px (the shared chrome clips it at 560; with
+     this site's 44px icons, 561-720 had cut the package name short): the link around it is a 44px
+     target, its pad given back by negative margins (14px into the bar's 16px edge, 8px into the gap
+     before the first slash, never over it), so the path keeps its spacing; the lettering stays
+     clipped, and the focus ring is drawn inside the box so the window's edge never cuts it */
+  html body .topbar .crumbs .wordmark { box-sizing: border-box; width: 44px; overflow: hidden; padding: 0 8px 0 14px; margin: 0 -8px 0 -14px; }
+  html body .topbar .crumbs .wordmark-lockup { clip-path: inset(0 calc(100% - 22px) 0 0); }
+  html body .topbar .crumbs .wordmark:focus-visible { outline-offset: -2px; }
+}
 
 /* ── The thread: the job's five beats under the topbar (1024px and up) ───
    Decoration (aria-hidden): segment k fills as beat k comes into view, so the job visibly travels
-   down the page. It sits under the bar's stacking (z 199), so the projects menu and the tooltips
+   down the page. It sits under the bar's stacking (z 199), so the tooltips
    always paint over it; 3px tall, over each frame's top padding when a frame is settled. */
 .thread { display: none; }
 @media (min-width: 1024px) and (min-height: 640px) {

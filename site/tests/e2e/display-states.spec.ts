@@ -10,6 +10,10 @@ import { test, expect, type Page } from '@playwright/test';
  *    the page at 1920x1080 (the visitor was stuck in the hero);
  *  - a replay emptied the log to a box holding 1 to 3 lines.
  * The tooltip and plane rules are site-local overrides of the shared chrome (crew.css).
+ *
+ * Operator feedback on that fix (2026-11-02): the log was "text on text", like landing on a system
+ * crash. It is now a short window in 16px type with 12px between lines (the newest five that fit
+ * whole), and a replay starts from an empty log: the previous run's lines no longer stay, dimmed.
  */
 
 async function settled(page: Page) {
@@ -151,16 +155,166 @@ test.describe('the hero log never holds the wheel', () => {
 test.describe('the job demo, replayed', () => {
   test.use({ viewport: { width: 1440, height: 700 } });
 
-  test('a replay keeps the log full: the previous lines dim and the new ones replace them', async ({ page }) => {
+  test('a replay starts from an empty log: nothing of the previous run stays, dimmed or not', async ({ page }) => {
     await page.goto('/');
     const job = page.locator('[data-job]');
-    const lines = () => job.locator('.ln').count();
-    const n0 = await lines();
-    expect(n0).toBeGreaterThan(15);
-    // the replay starts on its own when the card is in view; a moment in, the box is still full
-    await expect(job.locator('[data-caption]')).toContainText('Claude Code builds it', { timeout: 10_000 });
-    expect(await lines()).toBe(n0);
-    expect(await job.locator('.ln--ghost').count()).toBeGreaterThan(0);
+    // (the poster itself is checked under reduced motion, where no replay can race the read)
+    // the replay starts on its own when the card is in view (its first beat's caption), from an empty log
+    await expect(job.locator('[data-caption]')).toContainText('You confirm the plan', { timeout: 10_000 });
+    const texts = await job.locator('.ln').allTextContents();
+    expect(texts.length, texts.join(' | ')).toBeLessThanOrEqual(3);
+    expect(texts[0]).toContain('run.launched');
+    expect(texts.join('\n')).not.toContain('evidence bundle ready');
+    expect(texts.join('\n')).not.toContain('pull request #42');
+    expect(await job.locator('.ln--ghost').count()).toBe(0);
+    // and no line is drawn dimmed once its own fade-in is over
+    const ops = await job.locator('.ln:not([hidden])').evaluateAll((ls) => ls.map((l) => { l.getAnimations().forEach((a) => a.finish()); return getComputedStyle(l).opacity; }));
+    for (const op of ops) expect(op).toBe('1');
+  });
+});
+
+/** The log's window at rest (no glide running): its shown lines, their type, the space between them,
+ *  and whether each is whole. */
+async function logWindow(page: Page) {
+  return page.locator('[data-log]').evaluate((log) => new Promise<{ n: number; all: number; gaps: number[]; cut: (string | null)[]; font: number; lh: number; last: string | null }>((resolve) => {
+    const resting = () => !log.getAnimations({ subtree: true }).some((a) => a.playState === 'running' && !(a instanceof CSSAnimation));
+    (function wait() { if (resting()) resolve(measure()); else requestAnimationFrame(wait); })();
+    function measure() {
+    const box = log.getBoundingClientRect();
+    const shown = Array.from(log.querySelectorAll<HTMLElement>('.ln')).filter((l) => !l.hidden && l.getBoundingClientRect().height > 0);
+    const gaps = shown.slice(1).map((l, k) => Math.round(l.getBoundingClientRect().top - shown[k].getBoundingClientRect().bottom));
+    const cut = shown.filter((l) => { const r = l.getBoundingClientRect(); return r.top < box.top - 0.5 || r.bottom > box.bottom + 0.5; }).map((l) => l.textContent);
+    const cs = shown.length ? getComputedStyle(shown[0]) : null;
+    return { n: shown.length, all: log.querySelectorAll('.ln').length, gaps, cut, font: cs ? parseFloat(cs.fontSize) : 0, lh: cs ? parseFloat(cs.lineHeight) / parseFloat(cs.fontSize) : 0, last: shown.length ? shown[shown.length - 1].textContent : '' };
+    }
+  }));
+}
+
+test.describe('the job log is a short window, not a wall of text', () => {
+  for (const vp of [{ width: 1440, height: 700 }, { width: 1280, height: 660 }, { width: 1920, height: 1080 }, { width: 1024, height: 700 }]) {
+    test(`at most five whole lines, 16px or larger, 12px apart, as the job runs @ ${vp.width}x${vp.height}`, async ({ page }) => {
+      await page.setViewportSize(vp);
+      await page.goto('/');
+      await page.evaluate(async () => { await document.fonts.ready; });
+      const job = page.locator('[data-job]');
+      for (const at of ['Claude Code builds it', 'Codex, a different agent', 'QE acceptance decides']) {
+        await expect(job.locator('[data-caption]')).toContainText(at, { timeout: 20_000 });
+        await page.waitForTimeout(350);
+        const w = await logWindow(page);
+        expect(w.n, `${at}: ${w.n} lines shown`).toBeGreaterThanOrEqual(1);
+        expect(w.n, `${at}: ${w.n} lines shown`).toBeLessThanOrEqual(5);
+        expect(w.cut, `${at}: lines cut by the log's edge`).toEqual([]);
+        expect(w.font).toBeGreaterThanOrEqual(16);
+        expect(w.lh).toBeGreaterThanOrEqual(1.45);
+        for (const g of w.gaps) expect(g, `${at}: the space between lines`).toBeGreaterThanOrEqual(11);
+      }
+    });
+
+    test(`the poster is the end of the job, in whole lines @ ${vp.width}x${vp.height}`, async ({ page }) => {
+      // reduced motion keeps the poster (no replay can race the read)
+      await page.emulateMedia({ reducedMotion: 'reduce' });
+      await page.setViewportSize(vp);
+      await page.goto('/');
+      await page.evaluate(async () => { await document.fonts.ready; });
+      const w = await logWindow(page);
+      expect(w.n).toBeGreaterThanOrEqual(3);
+      expect(w.n).toBeLessThanOrEqual(5);
+      expect(w.cut).toEqual([]);
+      expect(w.last).toContain('evidence bundle ready');
+    });
+  }
+
+  // codex (local review): the lines still shown glided up while the new one appeared at its place, so
+  // for a moment they were drawn over it, text on text again. Every frame of the moving window counts.
+  for (const vp of [{ width: 1440, height: 700 }, { width: 390, height: 844 }]) {
+    test(`as the window moves, no line ever passes over another @ ${vp.width}x${vp.height}`, async ({ page }) => {
+      await page.setViewportSize(vp);
+      await page.goto('/');
+      await page.evaluate(async () => { await document.fonts.ready; });
+      await page.locator('[data-log]').scrollIntoViewIfNeeded();
+      // the window is full by the build step; sample every frame across the next lines
+      await expect(page.locator('[data-caption]')).toContainText('Claude Code builds it', { timeout: 20_000 });
+      const over = await page.evaluate(() => new Promise<string[]>((resolve) => {
+        const log = document.querySelector('[data-log]')!; const bad: string[] = []; const t0 = performance.now(); let moved = 0;
+        (function frame() {
+          const ls = Array.from(log.querySelectorAll<HTMLElement>('.ln')).filter((l) => !l.hidden);
+          // the glide is a script animation (the line's own fade-in is a CSS one)
+          if (ls.some((l) => l.getAnimations().some((a) => a.playState === 'running' && !(a instanceof CSSAnimation)))) moved++;
+          for (let k = 1; k < ls.length; k++) {
+            const a = ls[k - 1].getBoundingClientRect(), b = ls[k].getBoundingClientRect();
+            if (b.top < a.bottom - 1) bad.push(`${Math.round(a.bottom - b.top)}px over "${(ls[k].textContent || '').slice(0, 30)}"`);
+          }
+          if (performance.now() - t0 < 4500) requestAnimationFrame(frame); else resolve(moved ? bad : ['the window never moved']);
+        })();
+      }));
+      expect(over).toEqual([]);
+    });
+  }
+
+  test('reduced motion switched on mid-glide lands the lines at once', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 700 });
+    await page.goto('/');
+    // every animation at 1/20 speed, so the 260ms glide is still running when the preference flips
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Animation.enable');
+    await cdp.send('Animation.setPlaybackRate', { playbackRate: 0.05 });
+    const glides = () => page.locator('[data-log]').evaluate((log) => log.getAnimations({ subtree: true }).filter((a) => a.playState === 'running' && !(a instanceof CSSAnimation)).length);
+    await expect.poll(glides, { timeout: 20_000, intervals: [100] }).toBeGreaterThan(0);
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await expect.poll(glides, { timeout: 1_000, intervals: [50] }).toBe(0);
+  });
+
+  test('a restart adds two lines at once; reduced motion switched on then lands every line, none over another', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto('/');
+    const job = page.locator('[data-job]');
+    await expect(job.locator('[data-caption]')).toContainText('Claude Code builds it', { timeout: 20_000 });
+    await job.getByRole('button', { name: 'Kill the daemon' }).click();
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Animation.enable');
+    await cdp.send('Animation.setPlaybackRate', { playbackRate: 0.05 });
+    await job.getByRole('button', { name: 'Start the daemon' }).click();
+    const glides = () => page.locator('[data-log]').evaluate((log) => log.getAnimations({ subtree: true }).filter((a) => a.playState === 'running' && !(a instanceof CSSAnimation)).length);
+    await expect.poll(glides, { timeout: 5_000, intervals: [50] }).toBeGreaterThan(0);
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await expect.poll(glides, { timeout: 1_000, intervals: [50] }).toBe(0);
+    const over = await page.locator('[data-log]').evaluate((log) => {
+      const ls = Array.from(log.querySelectorAll<HTMLElement>('.ln')).filter((l) => !l.hidden); const bad: string[] = [];
+      for (let k = 1; k < ls.length; k++) { const a = ls[k - 1].getBoundingClientRect(), b = ls[k].getBoundingClientRect(); if (b.top < a.bottom - 1) bad.push((ls[k].textContent || '').slice(0, 30)); }
+      return bad;
+    });
+    expect(over).toEqual([]);
+  });
+
+  test('on a phone the ticker shows the newest whole lines in the same 16px type, 12px apart', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto('/');
+    await page.evaluate(async () => { await document.fonts.ready; });
+    const w = await logWindow(page);
+    expect(w.n).toBeGreaterThanOrEqual(1);
+    expect(w.n).toBeLessThanOrEqual(5);
+    expect(w.cut).toEqual([]);
+    expect(w.font).toBeGreaterThanOrEqual(16);
+    expect(w.lh).toBeGreaterThanOrEqual(1.45);
+    for (const g of w.gaps) expect(g).toBeGreaterThanOrEqual(11);
+    expect(w.last).toContain('evidence bundle ready');
+  });
+});
+
+/* wicked-core main (ca903459) src/presets/editor-plugin.json, its steps' ids in order */
+const EDITOR_PLUGIN_STEPS = ['scope', 'design', 'build', 'test', 'security-review', 'install-plan', 'install'];
+
+test.describe('the built-in workflows', () => {
+  test.use({ viewport: { width: 1440, height: 700 } });
+
+  test('editor-plugin\'s rail is exactly the preset\'s steps; mcp-server is one line (its nine steps do not fit)', async ({ page }) => {
+    await page.goto('/');
+    const panel = (name: string) => page.locator('[data-wf-panel]').nth(
+      ['feature', 'bug', 'migration', 'mcp-server', 'editor-plugin', 'domain-extraction'].indexOf(name));
+    expect(await panel('editor-plugin').locator('.wf-s').allTextContents()).toEqual(EDITOR_PLUGIN_STEPS);
+    await expect(panel('mcp-server')).toHaveClass(/is-single/);
+    expect(await panel('mcp-server').locator('.wf-s').allTextContents()).toEqual(['build an MCP server, install it on consent']);
   });
 });
 

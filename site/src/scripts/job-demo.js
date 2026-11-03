@@ -5,6 +5,9 @@
  * is 40% visible. Under prefers-reduced-motion the poster stays (the end state) and Run goes
  * straight to the QE decision, with no animation.
  *
+ * The log is a short window in large type: the newest lines, at most five, and only as many as fit
+ * whole. A replay starts from an empty log, so nothing of the previous run stays on screen.
+ *
  * Keyboard: no control is ever `disabled` (a disabled button drops focus to <body>); a control
  * that cannot act says aria-disabled and ignores the click. When the panel's content is replaced
  * while focus is inside it, focus moves to the new content's first control (or the panel). */
@@ -98,21 +101,47 @@ function initJob(root) {
     const el = document.createElement('p');
     el.className = 'ln' + (cls ? ' ln--' + cls : '') + (still ? ' ln--still' : '');
     el.innerHTML = html + (seats ? ' ' + SEATS : '');
-    // a replay never empties the box: the oldest of the previous run's dimmed lines makes room
-    const ghost = logEl.querySelector('.ln--ghost');
-    if (ghost) ghost.remove();
+    const before = still ? null : tops();
     logEl.appendChild(el);
-    pin();
+    fit();
+    if (before) slide(before);
   }
-  /** Pinned to the newest line; once lines run past the top, the top edge fades (.is-full). */
-  function pin() {
-    logEl.scrollTop = logEl.scrollHeight;
-    logEl.classList.toggle('is-full', logEl.scrollHeight > logEl.clientHeight + 1);
+  /** The log shows a short window: the newest lines, at most WINDOW of them, and only as many as fit
+   *  whole (an older line is hidden, never sliced through at the top edge). Hidden lines stay in the
+   *  log, so a window that grows shows them again. */
+  const WINDOW = 5;
+  function fit() {
+    const ls = logEl.querySelectorAll('.ln');
+    const n = ls.length;
+    let first = Math.max(0, n - WINDOW);
+    for (let k = 0; k < n; k++) ls[k].hidden = k < first;
+    while (first < n - 1 && logEl.scrollHeight > logEl.clientHeight + 1) ls[first++].hidden = true;
   }
-  /** The previous run's lines stay on screen, dimmed, until the new run's lines replace them. */
-  function dimLog() {
-    logEl.querySelectorAll('.ln').forEach(function (l) { l.classList.add('ln--ghost', 'ln--still'); });
+  // where each shown line sits before a new one arrives, so the window can glide up into place
+  function tops() {
+    if (RM.matches || !logEl.animate) return null;
+    const m = new Map();
+    logEl.querySelectorAll('.ln:not([hidden])').forEach(function (l) { m.set(l, l.offsetTop); });
+    return m;
   }
+  // When older lines leave the window, every line still shown moves up by the same distance, and the
+  // new one rises in from just under them: they move together, so the spacing holds the whole way and
+  // no line ever passes over another. A new glide takes over from one still running (a restart adds
+  // two lines at once): the old one is dropped, and the new one covers every line shown.
+  let glides = [];
+  function slide(before) {
+    let dy = 0;
+    before.forEach(function (top, l) { if (!dy && !l.hidden) dy = top - l.offsetTop; });
+    if (!dy) return;
+    glides.forEach(function (a) { a.cancel(); });
+    glides = Array.prototype.map.call(logEl.querySelectorAll('.ln:not([hidden])'), function (l) {
+      return l.animate([{ transform: 'translateY(' + dy + 'px)' }, { transform: 'none' }], { duration: 260, easing: 'cubic-bezier(.2,.7,.2,1)' });
+    });
+  }
+  // reduced motion switched on mid-glide: the lines land at once
+  if (RM.addEventListener) RM.addEventListener('change', function () {
+    if (RM.matches) { glides.forEach(function (a) { a.finish(); }); glides = []; }
+  });
   function caption(key) {
     const c = CAPS[key];
     if (!c) return;
@@ -204,9 +233,7 @@ function initJob(root) {
     if (i >= S.length) { finish(); return; }
     const s = S[i];
     if (s.cap) caption(s.cap);
-    // at the decision the log is this run's alone: the last dimmed lines of the previous run (its
-    // delivery) would read as if this one had already shipped
-    if (s.wait) { logEl.querySelectorAll('.ln--ghost').forEach(function (g) { g.remove(); }); pin(); waiting = s.wait; qePanel(); return; }
+    if (s.wait) { waiting = s.wait; qePanel(); return; }
     line(s.t, s.c, false, s.seats);
     if (s.gate !== undefined) { R[s.gate] = RECEIPTS[s.gate]; stamp(s.gate); showReceipt(s.gate); }
     i++;
@@ -230,7 +257,7 @@ function initJob(root) {
   }
   function start() {
     clearTimeout(timer);
-    dimLog(); R = {}; i = 0; dead = false; waiting = null; running = true;
+    logEl.innerHTML = ''; R = {}; i = 0; dead = false; waiting = null; running = true;
     setOff(runBtn, true); setOff(killBtn, false); label(killBtn, 'kill');
     idlePanel('Each gate’s receipt opens here as the job reaches it. Click a gate on the track to reopen one.');
     go();
@@ -285,8 +312,8 @@ function initJob(root) {
   killBtn.addEventListener('click', function () { if (isOff(killBtn)) return; kill(); });
 
   poster();
-  // a window resize changes the log's height: it stays pinned, and its fade follows
-  if ('ResizeObserver' in window) new ResizeObserver(pin).observe(logEl);
+  // a window resize changes the log's height: the window shows as many of the newest lines as fit
+  if ('ResizeObserver' in window) new ResizeObserver(fit).observe(logEl);
   if (RM.matches) return;
   // a replay still waiting to start does not start once reduced motion is on (Run still runs it)
   function auto() { if (!booted && !RM.matches) { booted = true; start(); } }
