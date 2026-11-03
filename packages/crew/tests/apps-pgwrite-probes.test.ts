@@ -561,5 +561,59 @@ for (const target of PG_TARGETS) {
         await db.admin.unsafe('DROP SCHEMA IF EXISTS support CASCADE; DROP SCHEMA IF EXISTS support_old CASCADE; DROP SCHEMA IF EXISTS replacement CASCADE');
       }
     });
+
+    // ── The Postgres merge gate (2026-11-03): each confirmed finding becomes a probe here. ──
+
+    it('P44 (gate, confirmed): with CREATE on pg_catalog, an exact-type pg_typeof overload would run in the write; such a pg_catalog refuses row writes', async () => {
+      await db.admin.unsafe(`
+        DO $$ BEGIN CREATE ROLE apps_k2b_g44 LOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+        CREATE SCHEMA g44 AUTHORIZATION apps_k2b_g44; GRANT CREATE ON SCHEMA pg_catalog TO apps_k2b_g44;
+        SET ROLE apps_k2b_g44;
+        CREATE TABLE g44.side (note text);
+        CREATE TABLE g44.t (id int PRIMARY KEY, owner text); INSERT INTO g44.t VALUES (1, 'a');
+        CREATE FUNCTION pg_catalog.pg_typeof(g44.t) RETURNS pg_catalog.regtype LANGUAGE plpgsql VOLATILE AS $f$ BEGIN INSERT INTO g44.side VALUES ('overload ran'); RETURN 'g44.t'::pg_catalog.regtype; END $f$;
+        RESET ROLE;
+        GRANT USAGE ON SCHEMA g44 TO apps_k2b_writer; GRANT SELECT, UPDATE ON g44.t TO apps_k2b_writer; GRANT INSERT ON g44.side TO apps_k2b_writer`);
+      try {
+        // As Postgres: the overload wins over the built-in polymorphic one, and the row-type check still passes.
+        const raw = await rolledBack(async (tx) => {
+          await tx.unsafe('SET LOCAL search_path = pg_catalog, pg_temp');
+          const [row] = await tx.unsafe<Array<{ ok: boolean }>>(
+            `UPDATE ONLY "g44"."t" AS "w" SET "owner" = 'x'::"pg_catalog"."text" WHERE "w"."id" = 1::"pg_catalog"."int4"
+               RETURNING pg_catalog.pg_typeof("w".*)::pg_catalog.oid = (SELECT c.reltype FROM pg_catalog.pg_class c WHERE c.oid = 'g44.t'::pg_catalog.regclass) AS ok`,
+          );
+          return { ok: row?.ok, side: await count(tx, 'SELECT count(*)::text AS n FROM g44.side') };
+        });
+        expect(raw).toEqual({ ok: true, side: 1 });
+        // The product: the role that can create in pg_catalog, and the object it left there, each refuse the table.
+        const reasons = (await pgTableSafety(args('apps_reader', 'apps-reader'), 'g44', 't', { op: 'update', set: ['owner'], key: ['id'] })).reasons.map((r) => r.code);
+        expect(reasons).toEqual(expect.arrayContaining(['catalog_create', 'catalog_object']));
+        expect(await landCode([updateAction(id(), 'writer', 'g44.t', { owner: { kind: 'literal', value: 'x' } })])).toBe('catalog_create');
+      } finally {
+        await db.admin.unsafe(`DROP FUNCTION IF EXISTS pg_catalog.pg_typeof(g44.t); REVOKE CREATE ON SCHEMA pg_catalog FROM apps_k2b_g44; DROP SCHEMA g44 CASCADE; DROP ROLE apps_k2b_g44`);
+      }
+      expect((await safety('w')).safe).toBe(true); // pg_catalog as initdb left it again
+    });
+
+    it('P45 (gate, not reproduced): an enum renamed away and a domain over it taking its name between the check and the statement: the statement fails to resolve, nothing runs or is written', async () => {
+      await db.admin.unsafe(`
+        CREATE TYPE s.g45 AS ENUM ('low', 'high');
+        CREATE TABLE s.t45 (id int PRIMARY KEY, st s.g45); INSERT INTO s.t45 VALUES (1, 'low');
+        GRANT SELECT, UPDATE ON s.t45 TO apps_k2b_writer;
+        CREATE FUNCTION s.chk45(text) RETURNS boolean LANGUAGE plpgsql VOLATILE SECURITY DEFINER AS $f$ BEGIN INSERT INTO s.side VALUES ('domain check ran'); RETURN true; END $f$;`);
+      try {
+        const a = updateAction(id(), 'writer', 's.t45', { st: { kind: 'literal', value: 'high' } });
+        const record = await ready(a, { id: 1 });
+        rig.h.hooks.afterCheck = async () => {
+          await db.admin.unsafe('ALTER TYPE s.g45 RENAME TO g45_old; CREATE DOMAIN s.g45 AS s.g45_old CHECK (s.chk45(VALUE::text))');
+        };
+        const r = await run(a, record);
+        expect(r.body).toMatchObject({ state: 'failed' }); // "operator does not exist: s.g45_old = s.g45": no plan, nothing executed
+        expect(await side()).toBe(0);
+        expect((await db.admin.unsafe<Array<{ v: string }>>('SELECT st::text AS v FROM s.t45 WHERE id = 1'))[0]?.v).toBe('low');
+      } finally {
+        await db.admin.unsafe('DROP TABLE IF EXISTS s.t45; DROP DOMAIN IF EXISTS s.g45; DROP TYPE IF EXISTS s.g45_old; DROP TYPE IF EXISTS s.g45; DROP FUNCTION IF EXISTS s.chk45(text)');
+      }
+    });
   });
 }
