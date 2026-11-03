@@ -463,7 +463,7 @@ async function writeRowsSnapshot(tmp: string, table: string, names: string[], ty
     await sqliteCreate(tmp, table, names, types, rows, Math.max(1, deadline - Date.now()));
   } catch (err) {
     if (err instanceof SourceQueryError && err.errorClass === 'timeout') throw tooSlow();
-    throw err;
+    throw unavailable(err) ?? err;
   }
 }
 
@@ -498,8 +498,15 @@ function kindOf(filename: string, data: Buffer): UploadKind {
  */
 function sqliteAvailable(): boolean {
   const [major = 0, minor = 0] = process.versions.node.split('.').map(Number);
-  return major > 24 || (major === 24 && minor >= 12);
+  return major > 25 || (major === 25 && minor >= 1) || (major === 24 && minor >= 12);
 }
+
+/** The runner's own refusal on a runtime without the authorizer or defensive mode, as the upload's. */
+function unavailable(err: unknown): UploadError | null {
+  return err instanceof SourceQueryError && /need Node\.js 24\.12/.test(err.message) ? new UploadError('sqlite_unavailable', UNAVAILABLE) : null;
+}
+
+const UNAVAILABLE = 'uploads need Node.js 24.12, 25.1 or later (its built-in SQLite, with the authorizer and defensive mode)';
 
 /** `p` with every symlink of its longest existing prefix resolved (the rest does not exist yet). */
 async function realPath(p: string): Promise<string> {
@@ -542,7 +549,7 @@ async function inspectWithin(path: string, deadline: number): ReturnType<typeof 
     return await sqliteInspect(path, Math.max(1, deadline - Date.now()));
   } catch (err) {
     if (err instanceof SourceQueryError && err.errorClass === 'timeout') throw tooSlow();
-    throw err;
+    throw unavailable(err) ?? err;
   }
 }
 
@@ -554,7 +561,7 @@ export async function ingestUpload(filename: string, data: Buffer, opts: { dir?:
   const deadline = Date.now() + (opts.parseMs ?? UPLOAD_LIMITS.parseMs);
   if (data.length > UPLOAD_LIMITS.fileBytes) throw new UploadError('too_large', `an upload is at most ${UPLOAD_LIMITS.fileBytes / (1024 * 1024)} MB`);
   if (data.length === 0) throw new UploadError('empty', 'the file is empty');
-  if (!sqliteAvailable()) throw new UploadError('sqlite_unavailable', 'uploads need Node.js 24.12 or later (its built-in SQLite, with the authorizer and defensive mode)');
+  if (!sqliteAvailable()) throw new UploadError('sqlite_unavailable', UNAVAILABLE);
   const dir = opts.dir ?? snapshotDir();
   const repo = await repoAround(dir);
   if (repo !== null) throw new UploadError('snapshot_in_repo', `the snapshot store ${dir} is inside the git work tree ${repo}; snapshots are kept outside any repository (move crew's state home out of it)`);
@@ -608,6 +615,7 @@ export async function ingestUpload(filename: string, data: Buffer, opts: { dir?:
       catalog: (await inspectWithin(s.path, deadline)).catalog,
     };
   } finally {
-    await rm(tmp, { force: true });
+    // The file and any journal a runner ended mid-transaction left beside it.
+    await Promise.all(['', '-journal', '-wal', '-shm'].map((s) => rm(`${tmp}${s}`, { force: true })));
   }
 }

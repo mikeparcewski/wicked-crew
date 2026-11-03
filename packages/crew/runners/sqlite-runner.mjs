@@ -14,7 +14,7 @@ const authorize = typeof req.authorizer === 'string' ? new Function(`return (${r
 const out = (v) => process.stdout.write(JSON.stringify(v));
 try {
   if (typeof DatabaseSync.prototype.setAuthorizer !== 'function' || typeof DatabaseSync.prototype.enableDefensive !== 'function') {
-    throw new Error('SQLite sources need Node.js 24.12 or later (the authorizer and defensive mode)');
+    throw new Error('SQLite sources need Node.js 24.12, 25.1 or later (the authorizer and defensive mode)');
   }
   if (req.op === 'create') {
     // A new snapshot from parsed rows (uploads.ts): one table, typed columns, one transaction.

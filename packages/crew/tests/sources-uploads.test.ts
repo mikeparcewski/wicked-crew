@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { observeSqliteRunnerForTests, sqliteRead } from '../src/sources/drivers/sqlite.js';
+import { observeSqliteRunnerForTests, runnerEnv, sqliteCreate, sqliteRead } from '../src/sources/drivers/sqlite.js';
 import { readSqlQuery, SourcePolicyError } from '../src/sources/sql.js';
 import { detectHeader, ingestUpload, looksLikeHeader, snapshotPath, UploadError } from '../src/sources/uploads.js';
 import { makeSqlite, makeXlsx, makeZipBomb, zip } from './fixtures/apps-sources/uploads/make.mjs';
@@ -135,6 +135,18 @@ describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => 
     // The other way too: a bound value crosses the pipe into the child whole (codex r3).
     const back = await sqliteRead(snapshotPath(up.digest, dir), up.catalog, 'SELECT count(*) FROM t WHERE s = ?', [text]);
     expect(back.rows).toEqual([['1']]);
+  });
+
+  it('a runner ended while its request is still being written: the call is a timeout and the daemon lives on (codex r7)', async () => {
+    const cell = 'x'.repeat(200);
+    const rows = Array.from({ length: 200_000 }, (_v, i) => [String(i), cell]); // ~40 MB of request
+    await expect(sqliteCreate(join(work, 'epipe.sqlite'), 't', ['id', 'v'], ['INTEGER', 'TEXT'], rows, 1)).rejects.toMatchObject({ errorClass: 'timeout' });
+    await new Promise((r) => setTimeout(r, 300)); // an unhandled EPIPE would surface here and fail the run
+  });
+
+  it('the runner gets none of the daemon\'s environment, the estate store\'s connection string included (codex r7)', () => {
+    expect(runnerEnv('postgres://crew:s3cret@estate.internal/db')).toEqual({});
+    expect(runnerEnv()).toEqual({});
   });
 
   it('node:sqlite reports the FIRST statement as sourceSQL, which the tail check relies on (pi r1)', async () => {

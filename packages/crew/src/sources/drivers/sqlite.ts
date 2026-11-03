@@ -21,7 +21,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import type { CatalogRelation, SqlCatalog } from '../catalog/types.js';
 import { deniedFunction, SQLITE_FUNCTIONS } from '../policy/allowlists.js';
-import { childEnvWithBootEstateDb } from '../../core/governance-store.js';
+import { childEnvWithBootEstateDb, ESTATE_DB_ENGINE_ENV } from '../../core/governance-store.js';
 import { sqliteAuthorize, sqliteParams } from '../policy/sqlite.js';
 import { type ReadOptions, READ_MAX_ROWS, type SqlDescribe, type SqlReadResult, SourceQueryError, STATEMENT_DEADLINE_MS } from './types.js';
 
@@ -47,11 +47,26 @@ export function observeSqliteRunnerForTests(fn: ((pid: number) => void) | null):
   onSpawnForTests = fn;
 }
 
+/**
+ * The runner's environment: none of the daemon's. Routed through the child-env helper like every
+ * spawn, then the estate store's variable is dropped as well: the runner reads no store, and a
+ * connection string there can carry a credential.
+ */
+export function runnerEnv(boot?: string): NodeJS.ProcessEnv {
+  const env = childEnvWithBootEstateDb({}, ...(boot !== undefined ? [boot] : []));
+  delete env[ESTATE_DB_ENGINE_ENV];
+  return env;
+}
+
 /** Run one request in a fresh child; SIGKILL at the deadline. */
 async function runChild(request: Record<string, unknown>, deadlineMs: number, signal?: AbortSignal): Promise<RunnerAnswer> {
   return new Promise((resolve, reject) => {
-    // An empty environment (nothing of the daemon's reaches the runner), routed like every child's.
-    const child = spawn(process.execPath, ['--no-warnings', RUNNER_PATH], { stdio: ['pipe', 'pipe', 'pipe'], env: childEnvWithBootEstateDb({}) });
+    const child = spawn(process.execPath, ['--no-warnings', RUNNER_PATH], { stdio: ['pipe', 'pipe', 'pipe'], env: runnerEnv() });
+    // A runner ended mid-request (its deadline) closes the pipe under a large write: that EPIPE is the
+    // kill's own echo, never an error of the daemon's (an unhandled stream error would end the process).
+    child.stdin.on('error', () => undefined);
+    child.stdout.on('error', () => undefined);
+    child.stderr.on('error', () => undefined);
     if (child.pid !== undefined) onSpawnForTests?.(child.pid);
     // One decoder for the whole answer: a character split across two pipe chunks stays one character.
     const decoder = new StringDecoder('utf8');
