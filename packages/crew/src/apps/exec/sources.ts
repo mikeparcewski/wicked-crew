@@ -53,9 +53,11 @@ export async function lookupSource(registry: McpRegistry | null, name: string): 
   if (snap === null) return null;
   const config = snap.config;
   if (config.kind === 'sql' || config.kind === 'graphql') {
+    // Everything of a data source (its kind included) comes from this one read (codex r5): a save between the
+    // two reads cannot pair one record's kind with another's config.
     const s = await registry.source(name);
     const base = { name, pin: pinOf(s.config), config: s.config, description: s.description, allowWrites: s.allowWrites, enabled: s.enabled };
-    return config.kind === 'sql' ? { ...base, kind: 'sql' } : { ...base, kind: 'graphql' };
+    return s.config.kind === 'sql' ? { ...base, kind: 'sql' } : { ...base, kind: 'graphql' };
   }
   // A server switched off is part of the snapshot for every kind (codex r2 on the write path).
   return { name, kind: config.kind, pin: pinOf(config), config, enabled: snap.enabled };

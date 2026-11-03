@@ -11,7 +11,7 @@ DO $$ BEGIN
                   WHERE r.rolname = 'apps_k2b_repl' AND s.setdatabase = 0 AND 'session_replication_role=replica' = ANY (s.setconfig)) THEN
     ALTER ROLE apps_k2b_repl SET session_replication_role = replica;
   END IF;
-EXCEPTION WHEN internal_error THEN NULL;
+EXCEPTION WHEN internal_error OR unique_violation THEN NULL;  -- updated, or first inserted, by a concurrent seed
 END $$;
 GRANT USAGE ON SCHEMA s TO apps_k2b_writer, apps_k2b_colwriter, apps_k2b_inserter, apps_k2b_repl;
 -- (s.side gets no grant: every side write in the suite runs as the superuser or a SECURITY DEFINER function,

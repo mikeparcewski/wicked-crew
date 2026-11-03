@@ -47,6 +47,8 @@ for (const target of PG_TARGETS) {
     const safety = (table: string, decl: SafetyDeclaration | null = null) => pgTableSafety(args('apps_reader', 'apps-reader'), 's', table, decl);
     const codes = async (table: string, decl: SafetyDeclaration | null = null): Promise<string[]> => (await safety(table, decl)).reasons.map((r) => r.code);
     const side = async (): Promise<number> => Number((await db.admin.unsafe<Array<{ n: string }>>('SELECT count(*)::text AS n FROM s.side'))[0]?.n ?? '0');
+    /** What s.side holds, for a failure's message. */
+    const sideNotes = async (): Promise<string> => JSON.stringify(await db.admin.unsafe('SELECT note FROM s.side'));
     /** Land `actions` and answer the check's first finding code, or 'landed'. */
     const landCode = async (actions: AppAction[]): Promise<string> => {
       const r = await rig.h.land('desk', specWith([], actions));
@@ -547,7 +549,7 @@ for (const target of PG_TARGETS) {
         };
         const r = await run(b, record);
         expect(r.body).toMatchObject({ state: 'failed' });
-        expect(await side()).toBe(0);
+        expect(await side(), `${await sideNotes()} ${JSON.stringify(r.body)}`).toBe(0);
         // The raw form of the same statement: the starred form is not fooled, the bare alias is.
         const row = await rolledBack(async (tx) =>
           (
