@@ -426,10 +426,30 @@ describe('apps.json: the consistency check', () => {
     expect(r.findings).toHaveLength(50);
     // The first component alone yields 50 findings; nothing after it is parsed.
     expect(parseWork.elements).toBe(1);
-    // A valid document is parsed whole.
+    expect(parseWork.whole).toBe(false);
+    // A valid document is parsed piece by piece, then by the whole schema.
     const ok = escalations();
     expect(parseSpec(ok).findings).toEqual([]);
     expect(parseWork.elements).toBe(ok.pages.reduce((n, p) => n + p.components.length, 0) + ok.queries.length + ok.actions.length);
+    expect(parseWork.whole).toBe(true);
+  });
+
+  it('answers a finding, never a throw, for a root that is not an object (codex r5)', () => {
+    for (const raw of ['null', '[]', '1', '"x"', 'true']) {
+      expect(readSpec(raw).findings.map((f) => f.code), raw).toEqual(['schema']);
+    }
+  });
+
+  it('holds each record to its own key limit before zod parses its values (codex r5)', () => {
+    const props = escalations();
+    props.queries[1]!.params!.properties = Object.fromEntries(Array.from({ length: 31 }, (_, i) => [`p${i}`, { type: 'string' as const }]));
+    expect(codes(props)).toEqual(['too_complex@$.queries[1].params.properties']);
+    const set = escalations();
+    (set.actions[0] as { set: Record<string, unknown> }).set = Object.fromEntries(Array.from({ length: 201 }, (_, i) => [`c${i}`, { kind: 'literal', value: 1 }]));
+    expect(codes(set)).toEqual(['too_complex@$.actions[0].set']);
+    const binds = escalations();
+    (binds.pages[0]!.components[2] as { data: { params: Record<string, string> } }).data.params = Object.fromEntries(Array.from({ length: 31 }, (_, i) => [`p${i}`, 'filter.region']));
+    expect(codes(binds)).toEqual(['too_complex@$.pages[0].components[2].data.params']);
   });
 
   it('accepts the largest legal shapes inside 2 MB (codex r2: 3 pages of 90 tables of 200 columns)', () => {

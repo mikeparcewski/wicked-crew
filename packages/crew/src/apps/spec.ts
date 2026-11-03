@@ -374,6 +374,25 @@ const LIST_LIMITS: ReadonlyMap<string, number> = new Map([
   ['actions.*.params.required', 30],
 ]);
 
+/**
+ * Each record's own key limit, by the same normalised path (codex r5): zod checks a record's size only
+ * after parsing every value, so the walk holds it first. Every binding map on a component (`…params`) is
+ * held to 30; any other object to {@link APP_SPEC_LIMITS.objectKeys}. With these and the list limits, one
+ * component, query or action can yield a few thousand diagnostics at most.
+ */
+const RECORD_LIMITS: ReadonlyMap<string, number> = new Map([
+  ['queries.*.params.properties', 30],
+  ['actions.*.params.properties', 30],
+  ['actions.*.args', 50],
+  ['actions.*.set', 200],
+  ['actions.*.key', 16],
+]);
+const BINDING_MAP_PATH = /^pages\.\*\.components\.\*\.(.+\.)?params$/;
+
+/** A walk path with list indices and parameter names as `*`. */
+const normalise = (path: ReadonlyArray<string | number>): string =>
+  path.map((p) => (typeof p === 'number' ? '*' : p)).join('.').replace(/\.properties\.[^.]+/g, '.properties.*');
+
 const own = (o: object, k: string): boolean => Object.hasOwn(o, k);
 
 function pathOf(path: ReadonlyArray<string | number>): string {
@@ -400,13 +419,15 @@ export function structureFinding(value: unknown): AppCheckFinding | null {
     if (v === null || typeof v !== 'object') continue;
     if (path.length >= APP_SPEC_LIMITS.depth) return finding('too_complex', path, `apps.json nests deeper than ${APP_SPEC_LIMITS.depth}`);
     if (Array.isArray(v)) {
-      const limit = LIST_LIMITS.get(path.map((p) => (typeof p === 'number' ? '*' : p)).join('.').replace(/\.properties\.[^.]+/g, '.properties.*')) ?? APP_SPEC_LIMITS.arrayLength;
+      const limit = LIST_LIMITS.get(normalise(path)) ?? APP_SPEC_LIMITS.arrayLength;
       if (v.length > limit) return finding('too_complex', path, `a list here holds at most ${limit} items`);
       v.forEach((x, i) => stack.push({ v: x, path: [...path, i] }));
       continue;
     }
     const keys = Object.keys(v);
-    if (keys.length > APP_SPEC_LIMITS.objectKeys) return finding('too_complex', path, `an object holds more than ${APP_SPEC_LIMITS.objectKeys} keys`);
+    const norm = normalise(path);
+    const keyLimit = RECORD_LIMITS.get(norm) ?? (BINDING_MAP_PATH.test(norm) ? 30 : APP_SPEC_LIMITS.objectKeys);
+    if (keys.length > keyLimit) return finding('too_complex', path, `an object here holds at most ${keyLimit} keys`);
     for (const k of keys) {
       if (k === '__proto__') return finding('bad_key', [...path, k], '__proto__ is not a key apps.json may use');
       stack.push({ v: (v as Record<string, unknown>)[k], path: [...path, k] });
@@ -428,8 +449,8 @@ const SkeletonSchema = AppSpecSchema.extend({
   actions: z.array(z.unknown()).max(50),
 });
 
-/** (tests) How many big-list elements the last {@link parseSpec} parsed: proof that a bad document stops early. */
-export const parseWork = { elements: 0 };
+/** (tests) What the last {@link parseSpec} parsed: big-list elements, and whether the whole schema ran. */
+export const parseWork = { elements: 0, whole: false };
 
 /**
  * Schema findings with a budget (codex r4): the skeleton first, then each component, query and action on
@@ -438,6 +459,7 @@ export const parseWork = { elements: 0 };
  */
 function budgetedFindings(value: unknown): AppCheckFinding[] {
   parseWork.elements = 0;
+  parseWork.whole = false;
   const out: AppCheckFinding[] = [];
   const add = (issues: z.ZodIssue[], prefix: (string | number)[]): void => {
     for (const i of issues) {
@@ -447,6 +469,8 @@ function budgetedFindings(value: unknown): AppCheckFinding[] {
   };
   const skeleton = SkeletonSchema.safeParse(value);
   if (!skeleton.success) add(skeleton.error.issues, []);
+  // A root that is not an object (null, a list, a scalar) has no pieces to walk (codex r5).
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return out;
   const doc = value as { pages?: unknown; queries?: unknown; actions?: unknown };
   const lists: Array<[unknown, z.ZodTypeAny, (i: number, p?: number) => (string | number)[]]> = [];
   if (Array.isArray(doc.pages)) {
@@ -476,6 +500,7 @@ export function parseSpec(value: unknown): { spec: AppSpec; findings: [] } | { s
   if (findings.length > 0) return { spec: null, findings };
   // Every piece passed on its own; the whole schema now types the document (and has nothing to say
   // beyond what the pieces said: a valid document costs zod no diagnostics).
+  parseWork.whole = true;
   const parsed = AppSpecSchema.safeParse(value);
   if (parsed.success) return { spec: parsed.data as AppSpec, findings: [] };
   return { spec: null, findings: parsed.error.issues.slice(0, MAX_FINDINGS).map((i) => finding('schema', i.path, i.message)) };
