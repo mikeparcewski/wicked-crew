@@ -48,16 +48,17 @@ export type AppSource =
 export async function lookupSource(registry: McpRegistry | null, name: string): Promise<AppSource | null> {
   if (name === CREW_SOURCE) return { name: CREW_SOURCE, kind: 'crew', pin: CREW_PIN };
   if (registry === null) return null;
-  const config = await registry.inspectTarget(name);
-  if (config === null) return null;
+  // One read of the store: the config, its kind and (for a tool server) its switch belong together (codex r4).
+  const snap = await registry.snapshot(name);
+  if (snap === null) return null;
+  const config = snap.config;
   if (config.kind === 'sql' || config.kind === 'graphql') {
     const s = await registry.source(name);
     const base = { name, pin: pinOf(s.config), config: s.config, description: s.description, allowWrites: s.allowWrites, enabled: s.enabled };
     return config.kind === 'sql' ? { ...base, kind: 'sql' } : { ...base, kind: 'graphql' };
   }
   // A server switched off is part of the snapshot for every kind (codex r2 on the write path).
-  const enabled = await registry.enabledNow(name);
-  return { name, kind: config.kind, pin: pinOf(config), config, enabled };
+  return { name, kind: config.kind, pin: pinOf(config), config, enabled: snap.enabled };
 }
 
 /** Whether a query of `kind` reads a source of this kind. */

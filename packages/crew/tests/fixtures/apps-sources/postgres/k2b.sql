@@ -1,10 +1,18 @@
 -- DES-APPS-001 K2b: what the write path and the P1-P43 regression suite add on top of seed.sql. Applied by a
 -- superuser right after it, to the same fresh database. The writer logins are cluster-wide (created if missing).
-DO $$ BEGIN CREATE ROLE apps_k2b_writer LOGIN PASSWORD 'apps-k2b-writer'; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN CREATE ROLE apps_k2b_colwriter LOGIN PASSWORD 'apps-k2b-colwriter'; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN CREATE ROLE apps_k2b_inserter LOGIN PASSWORD 'apps-k2b-inserter'; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN CREATE ROLE apps_k2b_repl LOGIN PASSWORD 'apps-k2b-repl'; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-ALTER ROLE apps_k2b_repl SET session_replication_role = replica;                                       -- P26
+DO $$ BEGIN CREATE ROLE apps_k2b_writer LOGIN PASSWORD 'apps-k2b-writer'; EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE apps_k2b_colwriter LOGIN PASSWORD 'apps-k2b-colwriter'; EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE apps_k2b_inserter LOGIN PASSWORD 'apps-k2b-inserter'; EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE apps_k2b_repl LOGIN PASSWORD 'apps-k2b-repl'; EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $$;
+-- P26. Role settings are cluster-wide and test files seed databases in parallel: set it once, and a concurrent
+-- seed that set it first ("tuple concurrently updated") is fine.
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_db_role_setting s JOIN pg_catalog.pg_roles r ON r.oid = s.setrole
+                  WHERE r.rolname = 'apps_k2b_repl' AND s.setdatabase = 0 AND 'session_replication_role=replica' = ANY (s.setconfig)) THEN
+    ALTER ROLE apps_k2b_repl SET session_replication_role = replica;
+  END IF;
+EXCEPTION WHEN internal_error THEN NULL;
+END $$;
 GRANT USAGE ON SCHEMA s TO apps_k2b_writer, apps_k2b_colwriter, apps_k2b_inserter, apps_k2b_repl;
 -- (s.side gets no grant: every side write in the suite runs as the superuser or a SECURITY DEFINER function,
 -- and K1's read-only privilege report for apps_reader must stay read-only.)

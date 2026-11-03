@@ -588,9 +588,16 @@ for (const target of PG_TARGETS) {
         // The product: the role that can create in pg_catalog, and the object it left there, each refuse the table.
         const reasons = (await pgTableSafety(args('apps_reader', 'apps-reader'), 'g44', 't', { op: 'update', set: ['owner'], key: ['id'] })).reasons.map((r) => r.code);
         expect(reasons).toEqual(expect.arrayContaining(['catalog_create', 'catalog_object']));
-        expect(await landCode([updateAction(id(), 'writer', 'g44.t', { owner: { kind: 'literal', value: 'x' } })])).toBe('catalog_create');
+        expect(await landCode([updateAction(id(), 'writer', 'g44.t', { owner: { kind: 'literal', value: 'x' } })])).toMatch(/^catalog_(create|object)$/);
+        // codex r4: an exact-type overload of a function the check itself uses cannot quiet it (the guard runs first,
+        // with no overloadable call, and refuses at once).
+        await db.admin.unsafe("SET ROLE apps_k2b_g44; CREATE FUNCTION pg_catalog.array_to_json(text[]) RETURNS pg_catalog.json LANGUAGE sql AS $f$ SELECT '[]'::pg_catalog.json $f$; RESET ROLE");
+        await db.admin.unsafe('REVOKE CREATE ON SCHEMA pg_catalog FROM apps_k2b_g44');
+        const quiet = (await pgTableSafety(args('apps_reader', 'apps-reader'), 'g44', 't', { op: 'update', set: ['owner'], key: ['id'] })).reasons.map((r) => r.detail);
+        expect(quiet.join(' ')).toContain('array_to_json');
+        await db.admin.unsafe('DROP FUNCTION pg_catalog.array_to_json(text[])');
       } finally {
-        await db.admin.unsafe(`DROP FUNCTION IF EXISTS pg_catalog.pg_typeof(g44.t); REVOKE CREATE ON SCHEMA pg_catalog FROM apps_k2b_g44; DROP SCHEMA g44 CASCADE; DROP ROLE apps_k2b_g44`);
+        await db.admin.unsafe(`DROP FUNCTION IF EXISTS pg_catalog.array_to_json(text[]); DROP FUNCTION IF EXISTS pg_catalog.pg_typeof(g44.t); REVOKE CREATE ON SCHEMA pg_catalog FROM apps_k2b_g44; DROP SCHEMA g44 CASCADE; DROP ROLE apps_k2b_g44`);
       }
       expect((await safety('w')).safe).toBe(true); // pg_catalog as initdb left it again
     });

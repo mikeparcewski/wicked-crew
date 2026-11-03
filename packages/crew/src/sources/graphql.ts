@@ -58,7 +58,13 @@ async function readJsonCapped(res: Response): Promise<unknown> {
 
 /** POST one GraphQL request through the dialer; the answer scrubbed of the source's secret. */
 export async function graphqlPost(src: GraphqlSource, secret: string | null, body: { query: string; variables?: Record<string, unknown> }, deadlineMs = GRAPHQL_DEADLINE_MS): Promise<{ status: number; json: unknown }> {
-  return scrubSecrets(await graphqlPostRaw(src, secret, body, deadlineMs), secret === null ? [] : [secret]);
+  const raw = await graphqlPostRaw(src, secret, body, deadlineMs);
+  try {
+    return scrubSecrets(raw, secret === null ? [] : [secret]);
+  } catch {
+    // An answer too deep to walk is a source error, as before (codex r4).
+    throw new SourceQueryError(null, 'source', 'the GraphQL answer is nested too deeply to read');
+  }
 }
 
 /**

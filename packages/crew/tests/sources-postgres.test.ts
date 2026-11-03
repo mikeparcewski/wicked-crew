@@ -397,7 +397,9 @@ for (const target of PG_TARGETS) {
             throw Object.assign(new Error('rollback'), { codes: r.reasons.map((x) => x.code) });
           })
           .catch((e: { codes?: string[] }) => e.codes ?? []);
-        expect(codes).toContain('check_dependency');
+        // (K2b gate, P44) Any object created in pg_catalog after initdb now refuses the table before the rest of
+        // the check runs, so the overload is found as that, ahead of the CHECK dependency it also makes.
+        expect(codes).toContain('catalog_object');
         await db.admin.unsafe("CREATE TYPE s.lvl AS ENUM ('a', 'b'); CREATE TABLE s.fp2 (id int PRIMARY KEY, lvl s.lvl, note text)");
         const before = (await pgTableSafety(login('apps_writer', 'apps-writer'), 's', 'fp2')).fingerprint;
         await db.admin.unsafe("ALTER TYPE s.lvl ADD VALUE 'c'");

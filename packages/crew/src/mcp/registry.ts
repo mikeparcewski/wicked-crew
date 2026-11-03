@@ -668,10 +668,10 @@ export class McpRegistry {
     return { config: configOf(s), tool: structuredClone(t), bound: s.enabled && statusOf(s, t) === 'registered' };
   }
 
-  /** (K2b) Whether a server is switched on, read straight from the store (no presentation work in between). */
-  async enabledNow(name: string): Promise<boolean> {
+  /** (K2b) A server's config and whether it is switched on, from ONE read of the store (no presentation work). */
+  async snapshot(name: string): Promise<{ config: McpUpstreamConfig; enabled: boolean } | null> {
     const s = (await this.deps.store.read()).servers.find((x) => x.name === name);
-    return s?.enabled === true;
+    return s === undefined ? null : { config: configOf(s), enabled: s.enabled };
   }
 
   /** Store a fresh description of a source (a re-describe), bound to the descriptor it was taken under. */
