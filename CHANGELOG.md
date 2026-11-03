@@ -10,13 +10,9 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
-## [0.16.13] — 2026-11-03
-
-A feature release on wicked-core-ts ^0.15.21 and wicked-crew-api-types 0.172.0, bundling wicked-studio 0.14.1. It carries the PRs since 0.16.12 (#1263, #1269, #1278, #1283, #1285) and raises the interactive bridge floor. Make it creates a grounded document from a chat, exactly once (A3, #1278), and its draft lands only on the head it started from, now that crew spawns wicked-interactive ^0.15.0. An editor plugin's frame can no longer use WebRTC (#1269). The Apps schema and the app store's wire contract (K2a, #1285) are types and validation only: no daemon route serves them yet. The release smoke runs on wicked-ci f1775d8 (#1283), and the site has studio's look (#1263, site only). Pins: wicked-core-ts ^0.15.21, wicked-studio ^0.14.1, wicked-vault ^0.8.0, wicked-interactive ^0.15.0 (bridge floor, was ^0.14.1), wicked-crew-api-types 0.172.0.
-
 ### Added
 
-- **Apps: the app store, versions and receipts behind `/api/v1/apps` (DES-APPS-001 slice K2a).** An app is a git
+- **Apps: the app store, versions and receipts behind `/api/v1/apps` (api-types 0.173.0, DES-APPS-001 slice K2a).** An app is a git
   repo crew makes under `~/.wicked/apps/<slug>` (`WICKED_CREW_APPS_ROOT`), registered like any repo; `POST /repos`
   gains `create: true` for a new empty repo there (one empty commit, no onboarding; a taken or reserved name is
   refused with a suggestion). crew keeps each app's versions, a receipt per (app, tree), the undo pointer and the turn
@@ -33,7 +29,16 @@ A feature release on wicked-core-ts ^0.15.21 and wicked-crew-api-types 0.172.0, 
   `501` until the executor lands; the action and publish routes answer `501`; `POST /apps/:app/turns` holds the turn
   lock once a launcher is wired (`501` until then); `POST /apps/check` is bearer-exempt like `/mcp/call` and answers
   `503` until the engine can verify a unit token. `GET /health` advertises `capabilities.apps`. App slugs `check`
-  and `uploads` are reserved.
+  and `uploads` are reserved. api-types 0.173.0 adds the worker check route's `AppsCheckBody` and `AppsCheckResponse` and five
+  `AppErrorBody` codes (`unreadable_tree`, `invalid_token`, `not_this_turn`, `not_checked`,
+  `reviewer_not_distinct`).
+
+## [0.16.13] — 2026-11-03
+
+A feature release on wicked-core-ts ^0.15.21 and wicked-crew-api-types 0.172.0, bundling wicked-studio 0.14.1. It carries the PRs since 0.16.12 (#1263, #1269, #1278, #1283, #1285) and raises the interactive bridge floor. Make it creates a grounded document from a chat, exactly once (A3, #1278), and its draft lands only on the head it started from, now that crew spawns wicked-interactive ^0.15.0. An editor plugin's frame can no longer use WebRTC (#1269). The Apps schema and the app store's wire contract (K2a, #1285) are types and validation only: no daemon route serves them yet. The release smoke runs on wicked-ci f1775d8 (#1283), and the site has studio's look (#1263, site only). Pins: wicked-core-ts ^0.15.21, wicked-studio ^0.14.1, wicked-vault ^0.8.0, wicked-interactive ^0.15.0 (bridge floor, was ^0.14.1), wicked-crew-api-types 0.172.0.
+
+### Added
+
 - **Apps: the `apps.json` schema and the app store's wire contract (api-types 0.172.0, DES-APPS-001 slice K2a).** The
   app spec an Apps app is made of: pages of components on a 12-column grid (table, chart, KPI, text, filter, form,
   button, image, link), named queries with declared output columns and parameters (viewer-bound ones filled by the

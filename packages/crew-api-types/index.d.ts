@@ -14972,8 +14972,8 @@ export interface AppCheckFinding {
  *    accepted receipt for this app), `nothing_to_undo`, `nothing_to_redo`, `slug_taken` (with
  *    `suggestion`), `source_check_unavailable` (the tree has queries or actions and this daemon cannot
  *    run the source stage yet, so nothing lands);
- *  - 409 `unreadable_tree` (a tree crew landed no longer reads back from the app repo: the repo was changed);
- *  - the worker-facing `POST /apps/check` also answers 401 `invalid_token` and 409 `not_this_turn` (the token's
+ *  - (api-types 0.173.0) 409 `unreadable_tree` (a tree crew landed no longer reads back from the app repo: the repo was changed);
+ *  - (api-types 0.173.0) the worker-facing `POST /apps/check` also answers 401 `invalid_token` and 409 `not_this_turn` (the token's
  *    run is not the app's turn in flight); landing a turn refuses `not_checked` and `reviewer_not_distinct`;
  *  - 422 `check_failed` (with `findings`), `reserved_slug`;
  *  - 429 `rate_limited` (with `retryAfterMs`: a query queue or a per-viewer rate is full, DES §7.5);
@@ -15015,7 +15015,7 @@ export interface AppErrorBody {
 }
 
 /**
- * `POST /apps/check` (worker-facing; the `apps_check` Tool runs `wicked-crew apps-check`, which sends the
+ * (api-types 0.173.0) `POST /apps/check` (worker-facing; the `apps_check` Tool runs `wicked-crew apps-check`, which sends the
  * unit's capability token in the body, never as a bearer): check the builder's candidate commit of the
  * app's turn in flight (DES §9.2 `check`).
  */
@@ -15029,7 +15029,7 @@ export interface AppsCheckBody {
 }
 
 /**
- * `POST /apps/check` 200: on a pass, the commit crew made on the candidate with its lock (the only tree the
+ * (api-types 0.173.0) `POST /apps/check` 200: on a pass, the commit crew made on the candidate with its lock (the only tree the
  * turn's review can land) and what the check ran; on a refusal, why.
  */
 export type AppsCheckResponse =
