@@ -14429,6 +14429,8 @@ export type AppComponentType = AppComponent['type'];
  * Viewer values are never bindings: a parameter declared `from: 'viewer.*'` is filled by the server.
  */
 export type AppBindingRef = `filter.${string}` | `form.${string}` | `row.${string}` | `url.${string}`;
+// The template type is the shape; crew's grammar is the rule: `filter.<component id>` with an optional
+// `.from`/`.to`, `form.<field name>`, `row.<output column>`, `url.<^[A-Za-z_][A-Za-z0-9_]{0,63}$>`.
 
 /** A component reading a query: the query's id, and a binding for any of its parameters. */
 export interface AppQueryBinding {
@@ -14511,15 +14513,17 @@ export interface AppFilterOption {
   label?: string;
 }
 
+/** A select filter's choices: a query's columns, or a fixed list of at most 200. */
+export type AppFilterOptions =
+  | { kind: 'query'; query: AppQueryBinding; value: string; label?: string }
+  | { kind: 'values'; values: AppFilterOption[] };
+
 export interface AppFilterComponent extends AppComponentBase {
   type: 'filter';
   filter: 'select' | 'date-range' | 'search';
   label?: string;
-  /**
-   * `select` only: the choices, from a query (its `value` and optional `label` columns) or a fixed list
-   * (at most 200).
-   */
-  options?: { query: AppQueryBinding; value: string; label?: string } | { values: AppFilterOption[] };
+  /** `select` only: the choices, from a query (its `value` and optional `label` columns) or a fixed list. */
+  options?: AppFilterOptions;
   /** The value before the viewer picks one: a `select`/`search` string, or `{ lastDays }` for a `date-range`. */
   default?: string | { lastDays: number };
 }
@@ -14558,15 +14562,15 @@ export interface AppImageComponent extends AppComponentBase {
 }
 
 /**
- * A link: to another page of the app (`page`, with optional URL parameters bound like a query's), or
- * out (`href`, an `https://` URL whose host is in {@link AppSpec.linkHosts}). Exactly one of the two.
+ * Where a link goes: another page of the app (with URL parameters bound like a query's), or out to an
+ * `https://` URL whose host is in {@link AppSpec.linkHosts} (no credentials, no port).
  */
+export type AppLinkTarget = { kind: 'page'; page: string; params?: Record<string, AppBindingRef> } | { kind: 'href'; href: string };
+
 export interface AppLinkComponent extends AppComponentBase {
   type: 'link';
   label: string;
-  page?: string;
-  params?: Record<string, AppBindingRef>;
-  href?: string;
+  to: AppLinkTarget;
 }
 
 /** A source kind a query reads; it names the text file: `sql` `.sql`, `graphql` `.graphql`, else `.json`. */
@@ -14576,19 +14580,21 @@ export type AppQueryKind = 'sql' | 'graphql' | 'rest' | 'mcp' | 'crew';
 export type AppColumnType = 'string' | 'number' | 'integer' | 'boolean' | 'date' | 'datetime';
 
 export interface AppOutputColumn {
-  /** 1-128 characters. */
+  /** `^[A-Za-z_][A-Za-z0-9_-]{0,127}$` (alias an SQL expression, e.g. `AS order_total`). */
   name: string;
   type: AppColumnType;
   nullable?: boolean;
 }
 
-/** `load` (the default; cached 5 s), `every` N seconds (N >= 15), or `events` (the built-in `crew` source only). */
+/** `load` (the default; cached 5 s), `every` N seconds (an integer, 15-86,400), or `events` (the built-in `crew` source only). */
 export type AppRefresh = { mode: 'load' } | { mode: 'every'; seconds: number } | { mode: 'events' };
 
 /**
  * One parameter, a JSON Schema subset (no `pattern`: an agent-written regular expression would run on
  * the server). `from` makes it VIEWER-BOUND: the server fills it from verified claims and refuses a
- * client value for it, and no component may bind it.
+ * client value for it, and no component may bind it. A `default` must itself satisfy the declaration
+ * (and an array has none); bounds are not reversed. A REQUIRED parameter with neither `from` nor a
+ * `default` must be bound at every component that uses its query or action.
  */
 export interface AppParamSchema {
   type: 'string' | 'number' | 'integer' | 'boolean' | 'array';
@@ -14625,9 +14631,9 @@ export interface AppQuery {
   params?: AppParamsSchema;
   /** 1-200 declared output columns; the result is projected to exactly these. */
   output: AppOutputColumn[];
-  /** REST, GraphQL and MCP: where the rows are (a JSONPath subset, e.g. `$.items[*]`). */
+  /** REST, GraphQL, MCP and crew (never SQL): where the rows are (a JSONPath subset, e.g. `$.items[*]`). */
   rowPath?: string;
-  /** REST, GraphQL and MCP: where "another page exists" is read. */
+  /** REST, GraphQL, MCP and crew (never SQL): where "another page exists" is read. */
   morePath?: string;
   refresh?: AppRefresh;
   /** A public app may hold only public queries (DES §9.3). */
@@ -14636,20 +14642,26 @@ export interface AppQuery {
 
 /** A value an action sends: a parameter, a literal fixed by the app, a viewer claim, or crew's `now` or new uuid. */
 export type AppValue =
-  | { param: string }
-  | { literal: string | number | boolean | null }
-  | { viewer: 'email' | 'name' | 'id' }
-  | { crew: 'now' | 'uuid' };
+  | AppParamValue
+  | { kind: 'literal'; value: string | number | boolean | null }
+  | { kind: 'viewer'; claim: 'email' | 'name' | 'id' }
+  | { kind: 'crew'; value: 'now' | 'uuid' };
+
+/** A declared parameter of the action. */
+export interface AppParamValue {
+  kind: 'param';
+  name: string;
+}
 
 /**
  * An API action (DES §4 "Action"): one REST operation or MCP write tool by its registry tool name, or
- * one GraphQL mutation document with one root field (at most 16 KB).
+ * one GraphQL mutation document with one root field (at most 16 KB of UTF-8).
  */
 export interface AppApiAction {
   id: string;
   kind: 'api';
   source: string;
-  call: { tool: string } | { mutation: string };
+  call: { kind: 'tool'; tool: string } | { kind: 'mutation'; mutation: string };
   args: Record<string, AppValue>;
   params?: AppParamsSchema;
   /** Shown on the card as "The app says" (at most 500 characters). */
@@ -14667,8 +14679,10 @@ export interface AppRowWriteAction {
   source: string;
   table: string;
   op: 'insert' | 'update' | 'delete';
+  /** At most 200 columns. */
   set?: Record<string, AppValue>;
-  key: Record<string, { param: string }>;
+  /** 1-16 columns. */
+  key: Record<string, AppParamValue>;
   params?: AppParamsSchema;
   description?: string;
 }
@@ -14879,6 +14893,26 @@ export interface AppRestoreBody {
 export interface AppLandedResponse {
   app: AppDetail;
   landed: AppVersion;
+}
+
+/**
+ * `POST /apps/:app/turns` (operator): one chat message becomes one governed `apps-turn` run (Build → Check →
+ * Review) on the head version. While it runs the app is read-only for edits, undo, redo and restore, and a second
+ * turn is `409 turn_in_flight`.
+ */
+export interface AppTurnBody {
+  /** The head version the message was written on; a stale one is `409 stale_base`. */
+  base: number;
+  /** 1-8,000 characters. */
+  message: string;
+  /** Component ids the message is about (the composer's chips), at most 20. */
+  about?: string[];
+}
+
+/** `POST /apps/:app/turns` 202. */
+export interface AppTurnResponse {
+  runId: string;
+  turn: AppTurnState;
 }
 
 /** `POST /apps/:app/query` (observer): run one named query of an accepted version (DES §7.2). */

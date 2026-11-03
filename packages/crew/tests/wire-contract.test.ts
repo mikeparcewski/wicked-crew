@@ -1107,9 +1107,10 @@ accepts<z.input<typeof McpPolicyPreviewSchema>, Wire.McpPolicyPreviewBody>();
 accepts<z.input<typeof McpApprovalSchema>, Wire.McpApprovalBody>();
 
 // ── Apps: `apps.json` (DES-APPS-001 §4, api-types 0.172.0) ─────────────────────────────────────
-// Both directions, so the contract and crew's schema are the same document: every spec the contract
-// lets a builder write is one crew's schema accepts, and every spec the schema accepts is one the
-// contract describes (studio's runtime reads exactly what crew lets land).
+// Both directions, so the contract and crew's schema have the same STRUCTURE: every key, variant and
+// type the contract lets a builder write is one crew's schema has, and every one the schema parses is
+// one the contract describes. What types cannot carry (string grammars, lengths, cross-references) is
+// crew's rule alone, stated in the contract's doc comments; crew refuses a spec that breaks it.
 // A spec crew parsed came from JSON, which has no `undefined`: zod types an absent optional key as
 // `?: T | undefined`, so the produced direction is read with `undefined` taken out of every property.
 type FromJson<T> = T extends readonly (infer U)[] ? FromJson<U>[] : T extends object ? { [K in keyof T]: FromJson<Exclude<T[K], undefined>> } : T;
@@ -1120,6 +1121,15 @@ respondsWith<Wire.AppSpec, FromJson<z.output<typeof AppSpecSchema>>>();
 type AllKeys<T> = T extends readonly (infer U)[] ? AllKeys<U>[] : T extends object ? { [K in keyof T]-?: AllKeys<Exclude<T[K], undefined>> } : T;
 respondsWith<AllKeys<Wire.AppSpec>, AllKeys<z.output<typeof AppSpecSchema>>>();
 respondsWith<AllKeys<z.output<typeof AppSpecSchema>>, AllKeys<Wire.AppSpec>>();
+// The variants are exclusive in the contract as they are in the schema (codex r1): one kind each.
+// @ts-expect-error a value is one variant
+export const twoValues: Wire.AppValue = { kind: 'param', name: 'x', value: 1 };
+// @ts-expect-error a call is a tool or a mutation
+export const twoCalls: Wire.AppApiAction['call'] = { kind: 'tool', tool: 't', mutation: 'mutation { x }' };
+// @ts-expect-error a link goes to a page or out
+export const twoTargets: Wire.AppLinkTarget = { kind: 'href', href: 'https://a.example', page: 'p' };
+// @ts-expect-error a select's options come from a query or a list
+export const twoOptions: Wire.AppFilterOptions = { kind: 'values', values: [], query: { query: 'q' }, value: 'v' };
 respondsWith<Wire.McpPolicyPreviewResponse, Awaited<ReturnType<McpPolicies['preview']>>>();
 respondsWith<Wire.McpPolicyPreviewResponse, Awaited<ReturnType<McpPolicies['previewUnsaved']>>>();
 respondsWith<Wire.McpApprovalsResponse, Awaited<ReturnType<McpPolicies['approvals']>>>();

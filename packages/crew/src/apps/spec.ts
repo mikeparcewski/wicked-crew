@@ -17,7 +17,7 @@
 
 import { z } from 'zod';
 
-import type { AppBindingRef, AppCheckFinding, AppSpec } from '../core/types.js';
+import type { AppBindingRef, AppCheckFinding, AppParamSchema, AppParamsSchema, AppSpec, AppValue } from '../core/types.js';
 import { MCP_SERVER_NAME_RE } from '../mcp/classify.js';
 
 /** Page and component ids: unique across the app. */
@@ -25,7 +25,7 @@ export const APP_ELEMENT_ID_RE = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 /** Query and action ids. A query id is a file name (`queries/<id>.sql`), so lower case only. */
 export const APP_NAMED_ID_RE = /^[a-z][a-z0-9_]{0,63}$/;
 /** Output column and SQL identifier names. */
-const COLUMN_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+const COLUMN_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,127}$/;
 const PARAM_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const FIELD_RE = /^[a-z][a-z0-9_]{0,63}$/;
 const SQL_IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/;
@@ -37,15 +37,23 @@ const HOST_RE = /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-
 const JSON_PATH_RE = /^\$(\.[A-Za-z_][A-Za-z0-9_]*|\[\*\]|\[[0-9]{1,6}\])*$/;
 /** `filter.<id>` (`.from`/`.to` on a date range), `form.<field>`, `row.<column>`, `url.<name>`. */
 const BINDING_RE =
-  /^(filter\.[A-Za-z][A-Za-z0-9_-]{0,63}(\.(from|to))?|form\.[a-z][a-z0-9_]{0,63}|row\.[A-Za-z_][A-Za-z0-9_]{0,127}|url\.[A-Za-z_][A-Za-z0-9_]{0,63})$/;
+  /^(filter\.[A-Za-z][A-Za-z0-9_-]{0,63}(\.(from|to))?|form\.[a-z][a-z0-9_]{0,63}|row\.[A-Za-z_][A-Za-z0-9_-]{0,127}|url\.[A-Za-z_][A-Za-z0-9_]{0,63})$/;
 /** 256 KB decoded: the base64 payload of at most 262,144 bytes. */
-const IMAGE_MAX_BASE64 = Math.ceil(262_144 / 3) * 4;
+const IMAGE_MAX_BYTES = 262_144;
+const IMAGE_MAX_BASE64 = Math.ceil(IMAGE_MAX_BYTES / 3) * 4;
+
+/** The decoded size of a whole base64 payload (`null` when it is not whole quartets). */
+function base64Bytes(payload: string): number | null {
+  if (payload.length % 4 !== 0) return null;
+  const pad = payload.endsWith('==') ? 2 : payload.endsWith('=') ? 1 : 0;
+  return (payload.length / 4) * 3 - pad;
+}
 const IMAGE_RE = /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
 
 const id = z.string().regex(APP_ELEMENT_ID_RE, 'an id is 1-64 of A-Z a-z 0-9 _ -, starting with a letter');
 const namedId = z.string().regex(APP_NAMED_ID_RE, 'a query or action id is 1-64 of a-z 0-9 _, starting with a letter');
 const sourceName = z.string().regex(MCP_SERVER_NAME_RE, 'a source name is 1-63 of a-z 0-9 _ -, starting with a letter or digit');
-const column = z.string().regex(COLUMN_RE, 'a column is 1-128 of A-Z a-z 0-9 _, not starting with a digit');
+const column = z.string().regex(COLUMN_RE, 'a column is 1-128 of A-Z a-z 0-9 _ -, starting with a letter or _');
 const color = z.string().regex(COLOR_RE, 'a colour is #rrggbb');
 const text = (max: number) => z.string().min(1).max(max);
 const binding = z.custom<AppBindingRef>((v) => typeof v === 'string' && BINDING_RE.test(v), {
@@ -141,9 +149,9 @@ const FilterSchema = z
     filter: z.enum(['select', 'date-range', 'search']),
     label: z.string().max(120).optional(),
     options: z
-      .union([
-        z.object({ query: QueryBindingSchema, value: column, label: column.optional() }).strict(),
-        z.object({ values: z.array(OptionSchema).min(1).max(200) }).strict(),
+      .discriminatedUnion('kind', [
+        z.object({ kind: z.literal('query'), query: QueryBindingSchema, value: column, label: column.optional() }).strict(),
+        z.object({ kind: z.literal('values'), values: z.array(OptionSchema).min(1).max(200) }).strict(),
       ])
       .optional(),
     default: z.union([z.string().max(200), z.object({ lastDays: z.number().int().min(1).max(3660) }).strict()]).optional(),
@@ -182,7 +190,10 @@ const ImageSchema = z
       .string()
       .max(IMAGE_MAX_BASE64 + 32)
       .regex(IMAGE_RE, 'an image is a data:image/(png|jpeg|gif|webp);base64 URI')
-      .refine((s) => s.length - s.indexOf(',') - 1 <= IMAGE_MAX_BASE64, 'an image is at most 256 KB'),
+      .refine((s) => {
+        const n = base64Bytes(s.slice(s.indexOf(',') + 1));
+        return n !== null && n <= IMAGE_MAX_BYTES;
+      }, 'an image is whole base64 of at most 256 KB'),
     alt: z.string().max(300),
   })
   .strict();
@@ -192,9 +203,10 @@ const LinkSchema = z
     ...base,
     type: z.literal('link'),
     label: text(120),
-    page: id.optional(),
-    params: bindings.optional(),
-    href: z.string().max(2048).optional(),
+    to: z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('page'), page: id, params: bindings.optional() }).strict(),
+      z.object({ kind: z.literal('href'), href: z.string().max(2048) }).strict(),
+    ]),
   })
   .strict();
 
@@ -260,11 +272,12 @@ const QuerySchema = z
   })
   .strict();
 
-const ValueSchema = z.union([
-  z.object({ param: z.string().regex(PARAM_RE) }).strict(),
-  z.object({ literal: z.union([z.string().max(1000), z.number().finite(), z.boolean(), z.null()]) }).strict(),
-  z.object({ viewer: z.enum(['email', 'name', 'id']) }).strict(),
-  z.object({ crew: z.enum(['now', 'uuid']) }).strict(),
+const ParamValueSchema = z.object({ kind: z.literal('param'), name: z.string().regex(PARAM_RE) }).strict();
+const ValueSchema = z.discriminatedUnion('kind', [
+  ParamValueSchema,
+  z.object({ kind: z.literal('literal'), value: z.union([z.string().max(1000), z.number().finite(), z.boolean(), z.null()]) }).strict(),
+  z.object({ kind: z.literal('viewer'), claim: z.enum(['email', 'name', 'id']) }).strict(),
+  z.object({ kind: z.literal('crew'), value: z.enum(['now', 'uuid']) }).strict(),
 ]);
 
 const ApiActionSchema = z
@@ -272,9 +285,12 @@ const ApiActionSchema = z
     id: namedId,
     kind: z.literal('api'),
     source: sourceName,
-    call: z.union([
-      z.object({ tool: z.string().regex(TOOL_RE, 'a tool name is 1-128 of A-Z a-z 0-9 _ . -') }).strict(),
-      z.object({ mutation: text(16_384) }).strict(),
+    call: z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('tool'), tool: z.string().regex(TOOL_RE, 'a tool name is 1-128 of A-Z a-z 0-9 _ . -') }).strict(),
+      z.object({
+        kind: z.literal('mutation'),
+        mutation: text(16_384).refine((m) => Buffer.byteLength(m, 'utf8') <= 16_384, 'a mutation is at most 16 KB of UTF-8'),
+      }).strict(),
     ]),
     args: z.record(z.string().min(1).max(128), ValueSchema).refine((r) => Object.keys(r).length <= 50, 'at most 50 arguments'),
     params: ParamsSchema.optional(),
@@ -289,9 +305,12 @@ const RowWriteActionSchema = z
     source: sourceName,
     table: z.string().regex(TABLE_RE, 'a table is schema.table'),
     op: z.enum(['insert', 'update', 'delete']),
-    set: z.record(z.string().regex(SQL_IDENT_RE, 'a column is a plain SQL identifier'), ValueSchema).optional(),
+    set: z
+      .record(z.string().regex(SQL_IDENT_RE, 'a column is a plain SQL identifier'), ValueSchema)
+      .refine((r) => Object.keys(r).length <= 200, 'at most 200 columns')
+      .optional(),
     key: z
-      .record(z.string().regex(SQL_IDENT_RE, 'a key column is a plain SQL identifier'), z.object({ param: z.string().regex(PARAM_RE) }).strict())
+      .record(z.string().regex(SQL_IDENT_RE, 'a key column is a plain SQL identifier'), ParamValueSchema)
       .refine((k) => Object.keys(k).length >= 1 && Object.keys(k).length <= 16, 'a key names 1-16 columns'),
     params: ParamsSchema.optional(),
     description: z.string().max(500).optional(),
@@ -317,6 +336,16 @@ export const AppSpecSchema = z
 /** The largest `apps.json` crew reads (the spec, images included). */
 export const APP_SPEC_MAX_BYTES = 2 * 1024 * 1024;
 
+
+/**
+ * Bounds on the JSON's structure, checked BEFORE the schema sees it: zod records an over-long array and
+ * still parses every element, so a 2 MB document of a million empty objects would cost a million
+ * findings. Every legal spec is far inside these (its longest list is 200, its deepest path 10).
+ */
+export const APP_SPEC_LIMITS = { depth: 16, arrayLength: 1000, objectKeys: 256, nodes: 100_000 } as const;
+
+const own = (o: object, k: string): boolean => Object.hasOwn(o, k);
+
 function pathOf(path: ReadonlyArray<string | number>): string {
   let out = '$';
   for (const p of path) out += typeof p === 'number' ? `[${p}]` : /^[A-Za-z_][A-Za-z0-9_]*$/.test(p) ? `.${p}` : `[${JSON.stringify(p)}]`;
@@ -327,8 +356,38 @@ function finding(code: string, path: ReadonlyArray<string | number>, message: st
   return { stage: 'spec', code, path: pathOf(path), message };
 }
 
-/** The shape alone: the parsed spec, or the schema's findings (at most 50). */
+/**
+ * The structure walk: depth, list length, key count and node count within {@link APP_SPEC_LIMITS}, and no
+ * `__proto__` key (JSON makes it an own key, but a parsed record drops it, so crew would check a document
+ * other than the one it was given). Iterative: depth is what it bounds.
+ */
+export function structureFinding(value: unknown): AppCheckFinding | null {
+  const stack: Array<{ v: unknown; path: (string | number)[] }> = [{ v: value, path: [] }];
+  let nodes = 0;
+  while (stack.length > 0) {
+    const { v, path } = stack.pop()!;
+    if (++nodes > APP_SPEC_LIMITS.nodes) return finding('too_complex', [], `apps.json holds more than ${APP_SPEC_LIMITS.nodes} values`);
+    if (v === null || typeof v !== 'object') continue;
+    if (path.length >= APP_SPEC_LIMITS.depth) return finding('too_complex', path, `apps.json nests deeper than ${APP_SPEC_LIMITS.depth}`);
+    if (Array.isArray(v)) {
+      if (v.length > APP_SPEC_LIMITS.arrayLength) return finding('too_complex', path, `a list holds more than ${APP_SPEC_LIMITS.arrayLength} items`);
+      v.forEach((x, i) => stack.push({ v: x, path: [...path, i] }));
+      continue;
+    }
+    const keys = Object.keys(v);
+    if (keys.length > APP_SPEC_LIMITS.objectKeys) return finding('too_complex', path, `an object holds more than ${APP_SPEC_LIMITS.objectKeys} keys`);
+    for (const k of keys) {
+      if (k === '__proto__') return finding('bad_key', [...path, k], '__proto__ is not a key apps.json may use');
+      stack.push({ v: (v as Record<string, unknown>)[k], path: [...path, k] });
+    }
+  }
+  return null;
+}
+
+/** The shape alone: the parsed spec, or the findings (at most 50). */
 export function parseSpec(value: unknown): { spec: AppSpec; findings: [] } | { spec: null; findings: AppCheckFinding[] } {
+  const structure = structureFinding(value);
+  if (structure !== null) return { spec: null, findings: [structure] };
   const parsed = AppSpecSchema.safeParse(value);
   if (parsed.success) return { spec: parsed.data as AppSpec, findings: [] };
   return { spec: null, findings: parsed.error.issues.slice(0, 50).map((i) => finding('schema', i.path, i.message)) };
@@ -350,6 +409,42 @@ export function readSpec(bytes: Buffer | string): { spec: AppSpec; findings: [] 
   return findings.length === 0 ? parsed : { spec: null, findings };
 }
 
+const FORMAT_RE: Record<NonNullable<AppParamSchema['format']>, RegExp> = {
+  date: /^\d{4}-\d{2}-\d{2}$/,
+  'date-time': /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/,
+  uuid: /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/,
+  email: /^[^\s@]{1,64}@[^\s@]{1,255}$/,
+};
+
+/**
+ * Why `value` does not satisfy the scalar declaration `decl`, or `null` when it does: type (integer
+ * included), enum, numeric and length bounds, format. The executor validates request values with it too.
+ */
+export function paramValueProblem(decl: Pick<AppParamSchema, 'type' | 'format' | 'enum' | 'minimum' | 'maximum' | 'minLength' | 'maxLength'>, value: unknown): string | null {
+  switch (decl.type) {
+    case 'string':
+      if (typeof value !== 'string') return 'is not a string';
+      if (decl.minLength !== undefined && value.length < decl.minLength) return `is shorter than ${decl.minLength}`;
+      if (decl.maxLength !== undefined && value.length > decl.maxLength) return `is longer than ${decl.maxLength}`;
+      if (decl.format !== undefined && !FORMAT_RE[decl.format].test(value)) return `is not a ${decl.format}`;
+      break;
+    case 'number':
+    case 'integer':
+      if (typeof value !== 'number' || !Number.isFinite(value)) return 'is not a number';
+      if (decl.type === 'integer' && !Number.isSafeInteger(value)) return 'is not an integer';
+      if (decl.minimum !== undefined && value < decl.minimum) return `is below ${decl.minimum}`;
+      if (decl.maximum !== undefined && value > decl.maximum) return `is above ${decl.maximum}`;
+      break;
+    case 'boolean':
+      if (typeof value !== 'boolean') return 'is not a boolean';
+      break;
+    default:
+      return 'is not a scalar';
+  }
+  if (decl.enum !== undefined && !decl.enum.some((e) => e === value)) return 'is not one of its enum values';
+  return null;
+}
+
 /** Every binding of a component, with the JSON path of its map, and what it binds into. */
 interface BindingSite {
   path: (string | number)[];
@@ -363,7 +458,8 @@ interface BindingSite {
 
 /**
  * What the schema cannot say (DES §6.2 "Spec schema, bindings exist, link hosts listed"). Empty when the
- * spec is consistent.
+ * spec is consistent. Every name lookup is an OWN-property lookup: `constructor` or `toString` is a name
+ * like any other, never something an object inherits.
  */
 export function checkSpec(spec: AppSpec): AppCheckFinding[] {
   const out: AppCheckFinding[] = [];
@@ -397,11 +493,12 @@ export function checkSpec(spec: AppSpec): AppCheckFinding[] {
   });
   dup(elementIds, 'page or component', (i) => elementPaths[i]!);
 
-  // Parameters: `required` names declared ones; `from` fits the type; `items` only on arrays.
-  const checkParams = (params: AppSpec['queries'][number]['params'], path: (string | number)[]): void => {
+  // Parameters: `required` names declared ones; `from` fits the type; `items` only on arrays; bounds in
+  // order; a default and every enum value satisfy the declaration.
+  const checkParams = (params: AppParamsSchema | undefined, path: (string | number)[]): void => {
     if (params === undefined) return;
     for (const r of params.required ?? []) {
-      if (!(r in params.properties)) push('unknown_param', [...path, 'required'], `required parameter ${JSON.stringify(r)} is not declared`);
+      if (!own(params.properties, r)) push('unknown_param', [...path, 'required'], `required parameter ${JSON.stringify(r)} is not declared`);
     }
     for (const [name, p] of Object.entries(params.properties)) {
       const at = [...path, 'properties', name];
@@ -409,8 +506,24 @@ export function checkSpec(spec: AppSpec): AppCheckFinding[] {
       if (p.from === 'viewer.groups' && !(p.type === 'array' && p.items?.type === 'string')) push('bad_param', at, 'viewer.groups is an array of strings');
       if (p.from !== undefined && p.from !== 'viewer.groups' && p.type !== 'string') push('bad_param', at, `${p.from} is a string`);
       if (p.from !== undefined && p.default !== undefined) push('bad_param', at, 'a viewer-bound parameter has no default');
+      if (p.minimum !== undefined && p.maximum !== undefined && p.minimum > p.maximum) push('bad_param', at, 'minimum is above maximum');
+      if (p.minLength !== undefined && p.maxLength !== undefined && p.minLength > p.maxLength) push('bad_param', at, 'minLength is above maxLength');
+      // An enum value is judged by the type alone (an array's by its item type), never by bounds.
+      const itemType: AppParamSchema['type'] = p.type === 'array' ? (p.items?.type ?? 'string') : p.type;
+      for (const [i, e] of (p.enum ?? []).entries()) {
+        const problem = paramValueProblem({ type: itemType }, e);
+        if (problem !== null) push('bad_param', [...at, 'enum', i], `enum value ${JSON.stringify(e)} ${problem}`);
+      }
+      if (p.default !== undefined) {
+        const problem = p.type === 'array' ? 'is on an array (an array has no default)' : paramValueProblem(p, p.default);
+        if (problem !== null) push('bad_param', [...at, 'default'], `the default ${problem}`);
+      }
     }
   };
+  /** A required parameter nobody fills: no `from`, no default. */
+  const mustBind = (params: AppParamsSchema | undefined): string[] =>
+    (params?.required ?? []).filter((r) => own(params!.properties, r) && params!.properties[r]!.from === undefined && params!.properties[r]!.default === undefined);
+
   spec.queries.forEach((q, i) => {
     checkParams(q.params, ['queries', i, 'params']);
     if (q.refresh?.mode === 'events' && q.source !== 'crew') push('bad_refresh', ['queries', i, 'refresh'], 'refresh on events is for the built-in crew source only');
@@ -422,21 +535,21 @@ export function checkSpec(spec: AppSpec): AppCheckFinding[] {
   spec.actions.forEach((a, i) => {
     const path = ['actions', i];
     checkParams(a.params, [...path, 'params']);
-    const declared = new Set(Object.keys(a.params?.properties ?? {}));
-    const values: [string, (string | number)[], { param?: string }][] = [];
+    const declared = a.params?.properties ?? {};
+    const values: [(string | number)[], AppValue][] = [];
     if (a.kind === 'api') {
-      for (const [k, v] of Object.entries(a.args)) values.push([k, [...path, 'args', k], v as { param?: string }]);
+      for (const [k, v] of Object.entries(a.args)) values.push([[...path, 'args', k], v]);
     } else {
-      for (const [k, v] of Object.entries(a.set ?? {})) values.push([k, [...path, 'set', k], v as { param?: string }]);
-      for (const [k, v] of Object.entries(a.key)) values.push([k, [...path, 'key', k], v]);
+      for (const [k, v] of Object.entries(a.set ?? {})) values.push([[...path, 'set', k], v]);
+      for (const [k, v] of Object.entries(a.key)) values.push([[...path, 'key', k], v]);
       if (a.op === 'delete' && a.set !== undefined) push('bad_row_write', [...path, 'set'], 'a delete sets no column');
       if (a.op !== 'delete' && (a.set === undefined || Object.keys(a.set).length === 0)) push('bad_row_write', [...path, 'set'], `an ${a.op} sets at least one column`);
       for (const k of Object.keys(a.set ?? {})) {
-        if (a.op === 'update' && k in a.key) push('bad_row_write', [...path, 'set', k], 'an update never changes a primary-key column');
+        if (a.op === 'update' && own(a.key, k)) push('bad_row_write', [...path, 'set', k], 'an update never changes a primary-key column');
       }
     }
-    for (const [, at, v] of values) {
-      if (v.param !== undefined && !declared.has(v.param)) push('unknown_param', at, `parameter ${JSON.stringify(v.param)} is not declared`);
+    for (const [at, v] of values) {
+      if (v.kind === 'param' && !own(declared, v.name)) push('unknown_param', at, `parameter ${JSON.stringify(v.name)} is not declared`);
     }
   });
 
@@ -454,7 +567,7 @@ export function checkSpec(spec: AppSpec): AppCheckFinding[] {
           sites.push({ path: [...at, 'rowActions', ri], target: { action: ra.action }, params: ra.params ?? {}, rowQuery: c.data.query, formFields: null }),
         );
       }
-      if (c.type === 'filter' && c.options !== undefined && 'query' in c.options) {
+      if (c.type === 'filter' && c.options?.kind === 'query') {
         sites.push({ path: [...at, 'options', 'query'], target: { query: c.options.query.query }, params: c.options.query.params ?? {}, rowQuery: null, formFields: null });
         const q = queries.get(c.options.query.query);
         if (q !== undefined) {
@@ -476,20 +589,18 @@ export function checkSpec(spec: AppSpec): AppCheckFinding[] {
       }
       if (c.type === 'button') sites.push({ path: [...at, 'action'], target: { action: c.action.action }, params: c.action.params ?? {}, rowQuery: null, formFields: null });
       if (c.type === 'link') {
-        if ((c.page === undefined) === (c.href === undefined)) push('bad_link', at, 'a link has exactly one of page and href');
-        if (c.params !== undefined && c.page === undefined) push('bad_link', [...at, 'params'], 'only a link to a page binds URL parameters');
-        if (c.page !== undefined) sites.push({ path: at, target: { page: c.page }, params: c.params ?? {}, rowQuery: null, formFields: null });
-        if (c.href !== undefined) {
+        if (c.to.kind === 'page') sites.push({ path: [...at, 'to'], target: { page: c.to.page }, params: c.to.params ?? {}, rowQuery: null, formFields: null });
+        else {
           let url: URL | null = null;
           try {
-            url = new URL(c.href);
+            url = new URL(c.to.href);
           } catch {
             url = null;
           }
           if (url === null || url.protocol !== 'https:' || url.username !== '' || url.password !== '' || url.port !== '') {
-            push('bad_link', [...at, 'href'], 'a link leaves over https, with no credentials or port');
+            push('bad_link', [...at, 'to', 'href'], 'a link leaves over https, with no credentials or port');
           } else if (!hosts.has(url.hostname)) {
-            push('unlisted_host', [...at, 'href'], `host ${url.hostname} is not in linkHosts`);
+            push('unlisted_host', [...at, 'to', 'href'], `host ${url.hostname} is not in linkHosts`);
           }
         }
       }
@@ -512,10 +623,11 @@ export function checkSpec(spec: AppSpec): AppCheckFinding[] {
       if (c.type === 'chart' && c.chart === 'pie' && c.series.length !== 1) push('bad_chart', [...at, 'series'], 'a pie has exactly one series');
     });
 
-    // Each binding on this page: the target exists, the parameter is declared and not viewer-bound,
-    // and the source of the value exists where it is bound.
+    // Each binding on this page: the target exists, every parameter it binds is declared (an OWN key) and
+    // not viewer-bound, every required parameter nobody else fills is bound, and the bound value's source
+    // exists where it is bound.
     for (const site of sites.splice(0)) {
-      let params: AppSpec['queries'][number]['params'];
+      let params: AppParamsSchema | undefined;
       if ('query' in site.target) {
         const q = queries.get(site.target.query);
         if (q === undefined) {
@@ -534,10 +646,15 @@ export function checkSpec(spec: AppSpec): AppCheckFinding[] {
         if (!pages.has(site.target.page)) push('unknown_page', [...site.path, 'page'], `no page ${JSON.stringify(site.target.page)}`);
         params = undefined;
       }
+      if (!('page' in site.target)) {
+        for (const r of mustBind(params)) {
+          if (!own(site.params, r)) push('unbound_param', [...site.path, 'params'], `required parameter ${JSON.stringify(r)} has no binding, default or viewer claim`);
+        }
+      }
       for (const [name, ref] of Object.entries(site.params)) {
         const at = [...site.path, 'params', name];
         if (!('page' in site.target)) {
-          const decl = params?.properties[name];
+          const decl = params !== undefined && own(params.properties, name) ? params.properties[name] : undefined;
           if (decl === undefined) {
             push('unknown_param', at, `parameter ${JSON.stringify(name)} is not declared`);
             continue;
