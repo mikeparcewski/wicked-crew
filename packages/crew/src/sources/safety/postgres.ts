@@ -53,12 +53,35 @@ export interface SafetyReason {
   detail: string;
 }
 
+/** One column of the checked table, as the write path needs it (K2b: statement generation, input forms). */
+export interface SafetyColumn {
+  name: string;
+  /** `format_type` with the typmod (`numeric(3,1)`), printed under `search_path = pg_catalog, pg_temp`. */
+  type: string;
+  typname: string;
+  typschema: string;
+  /** `pg_type.typtype`: `b` base, `e` enum, `d` domain, … */
+  typtype: string;
+  /** Created by initdb (oid < 16384). */
+  builtin: boolean;
+  notnull: boolean;
+  /** `pg_attribute.attidentity`: '' none, `a` always, `d` by default. */
+  identity: string;
+  /** An enum column's labels, in order. */
+  enumLabels?: string[];
+}
+
 export interface SafetyResult {
   table: { schema: string; name: string };
   safe: boolean;
   reasons: SafetyReason[];
   /** sha256 over the full definitions read (not counts). Equal fingerprints = nothing the check rests on changed. */
   fingerprint: string;
+  /** The relation checked (`pg_class.oid`) and its row type (`pg_class.reltype`), as text; '' when not found. */
+  oid: string;
+  reltype: string;
+  /** Its columns in order (empty when not found). */
+  columns: SafetyColumn[];
 }
 
 /** Writes need this; the lock the run takes needs table-level UPDATE (P42). */
@@ -92,12 +115,16 @@ interface ColumnRow {
   default_expr: string | null;
 }
 
-/** Run the safety check inside `tx` (the caller's transaction). */
-export async function pgTableSafetyIn(tx: Tx, schema: string, name: string, decl: SafetyDeclaration | null = null): Promise<SafetyResult> {
+/**
+ * Run the safety check inside `tx` (the caller's transaction). `opts.oid` reads exactly that relation (the
+ * write path passes the one it locked) instead of resolving `schema.name`; its CURRENT names are then what
+ * the fingerprint holds, so a relation renamed since the grant (P30) never matches it.
+ */
+export async function pgTableSafetyIn(tx: Tx, schema: string, name: string, decl: SafetyDeclaration | null = null, opts: { oid?: string } = {}): Promise<SafetyResult> {
   await tx.unsafe('SET LOCAL search_path = pg_catalog, pg_temp');
   const q = <T extends Record<string, unknown>>(text: string, params: unknown[] = []): Promise<T[]> => tx.unsafe<T[]>(text, params as never) as unknown as Promise<T[]>;
   const reasons: SafetyReason[] = [];
-  const label = `${schema}.${name}`;
+  let label = `${schema}.${name}`;
   const add = (code: string, detail: string): void => {
     reasons.push({ code, detail });
   };
@@ -105,14 +132,20 @@ export async function pgTableSafetyIn(tx: Tx, schema: string, name: string, decl
   const [t] = await q<TableRow & Record<string, unknown>>(
     `SELECT c.oid::pg_catalog.int8::pg_catalog.text AS oid, c.reltype::pg_catalog.int8::pg_catalog.text AS reltype, c.relkind::pg_catalog.text AS relkind, c.relispartition AS ispartition,
             c.relrowsecurity AS rowsecurity, c.relforcerowsecurity AS forcerowsecurity, am.amname::pg_catalog.text AS amname,
-            (am.oid < 16384) AS am_builtin
+            (am.oid < 16384) AS am_builtin, n.nspname::pg_catalog.text AS schema, c.relname::pg_catalog.text AS name
        FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
        LEFT JOIN pg_catalog.pg_am am ON am.oid = c.relam
-      WHERE n.nspname = $1 AND c.relname = $2`,
-    [schema, name],
+      WHERE ${opts.oid !== undefined ? 'c.oid = $1::pg_catalog.text::pg_catalog.oid' : 'n.nspname = $1 AND c.relname = $2'}`,
+    opts.oid !== undefined ? [opts.oid] : [schema, name],
   );
   if (t === undefined) {
-    return { table: { schema, name }, safe: false, reasons: [{ code: 'table_not_found', detail: `\`${label}\` does not exist (or this login cannot see it)` }], fingerprint: '' };
+    return { table: { schema, name }, safe: false, reasons: [{ code: 'table_not_found', detail: `\`${label}\` does not exist (or this login cannot see it)` }], fingerprint: '', oid: '', reltype: '', columns: [] };
+  }
+  // By oid, the names are the relation's own now (the fingerprint below holds them).
+  if (opts.oid !== undefined) {
+    schema = String(t['schema']);
+    name = String(t['name']);
+    label = `${schema}.${name}`;
   }
   const T = t.oid;
 
@@ -360,7 +393,26 @@ export async function pgTableSafetyIn(tx: Tx, schema: string, name: string, decl
       }),
     )
     .digest('hex');
-  return { table: { schema, name }, safe: reasons.length === 0, reasons, fingerprint };
+  const labelsOf = new Map(enumLabels.map((e) => [e.typid, e.labels] as const));
+  return {
+    table: { schema, name },
+    safe: reasons.length === 0,
+    reasons,
+    fingerprint,
+    oid: t.oid,
+    reltype: t.reltype,
+    columns: columns.map((c) => ({
+      name: c.name,
+      type: c.type,
+      typname: c.typname,
+      typschema: c.typschema,
+      typtype: c.typtype,
+      builtin: c.type_builtin,
+      notnull: c.notnull,
+      identity: c.identity,
+      ...(c.typtype === 'e' ? { enumLabels: [...(labelsOf.get(c.typid) ?? [])] } : {}),
+    })),
+  };
 }
 
 /** The safety check, standalone: its own READ ONLY transaction on the source. */

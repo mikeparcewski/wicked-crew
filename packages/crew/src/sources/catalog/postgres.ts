@@ -34,21 +34,23 @@ const USER_SCHEMAS = "n.nspname NOT IN ('pg_catalog', 'information_schema') AND 
 /** Describe the catalog inside an open read-only transaction. */
 export async function describePgIn(tx: Tx): Promise<SqlCatalog> {
   const db = await tx.unsafe<Array<{ db: string }>>('SELECT pg_catalog.current_database() AS db');
-  const rels = await tx.unsafe<Array<{ oid: string; schema: string; name: string; relkind: string; reltuples: number | null; rls: boolean }>>(
+  const rels = await tx.unsafe<Array<{ oid: string; schema: string; name: string; relkind: string; reltuples: number | null; rls: boolean; forced: boolean }>>(
     `SELECT c.oid::pg_catalog.int8::pg_catalog.text AS oid, n.nspname AS schema, c.relname AS name, c.relkind::pg_catalog.text AS relkind,
             CASE WHEN c.reltuples < 0 THEN NULL ELSE c.reltuples::pg_catalog.float8 END AS reltuples,
-            (c.relrowsecurity OR c.relforcerowsecurity) AS rls
+            (c.relrowsecurity OR c.relforcerowsecurity) AS rls, c.relforcerowsecurity AS forced
        FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
       WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND ${USER_SCHEMAS}
         AND pg_catalog.has_schema_privilege(n.oid, 'USAGE')
       ORDER BY n.nspname, c.relname`,
   );
-  const cols = await tx.unsafe<Array<{ rel: string; name: string; type: string; notnull: boolean; typtype: string; typid: string }>>(
+  // An array column's element type too: an array of an enum carries that enum's labels (codex r2 on K2b).
+  const cols = await tx.unsafe<Array<{ rel: string; name: string; type: string; notnull: boolean; typtype: string; typid: string; elemtype: string | null; elemid: string | null }>>(
     `SELECT a.attrelid::pg_catalog.int8::pg_catalog.text AS rel, a.attname AS name, pg_catalog.format_type(a.atttypid, a.atttypmod) AS type,
-            a.attnotnull AS notnull, t.typtype::pg_catalog.text AS typtype, a.atttypid::pg_catalog.int8::pg_catalog.text AS typid
+            a.attnotnull AS notnull, t.typtype::pg_catalog.text AS typtype, a.atttypid::pg_catalog.int8::pg_catalog.text AS typid,
+            et.typtype::pg_catalog.text AS elemtype, et.oid::pg_catalog.int8::pg_catalog.text AS elemid
        FROM pg_catalog.pg_attribute a
        JOIN pg_catalog.pg_class c ON c.oid = a.attrelid JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-       JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+       JOIN pg_catalog.pg_type t ON t.oid = a.atttypid LEFT JOIN pg_catalog.pg_type et ON et.oid = t.typelem AND t.typelem <> 0
       WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND ${USER_SCHEMAS} AND a.attnum > 0 AND NOT a.attisdropped
       ORDER BY a.attrelid, a.attnum`,
   );
@@ -88,6 +90,7 @@ export async function describePgIn(tx: Tx): Promise<SqlCatalog> {
       primaryKey: [],
       foreignKeys: [],
       rowSecurity: r.rls,
+      ...(r.forced ? { rowSecurityForced: true } : {}),
       ...(foreignRoots.has(r.oid) ? { foreignDescendant: true } : {}),
     };
     byOid.set(r.oid, rel);
@@ -96,7 +99,8 @@ export async function describePgIn(tx: Tx): Promise<SqlCatalog> {
   for (const c of cols) {
     const rel = byOid.get(c.rel);
     if (rel === undefined) continue;
-    rel.columns.push({ name: c.name, type: c.type, nullable: !c.notnull, ...(c.typtype === 'e' ? { enumValues: enumLabels.get(c.typid) ?? [] } : {}) });
+    const enumOf = c.typtype === 'e' ? c.typid : c.elemtype === 'e' ? c.elemid : null;
+    rel.columns.push({ name: c.name, type: c.type, nullable: !c.notnull, ...(enumOf !== null ? { enumValues: enumLabels.get(enumOf) ?? [] } : {}) });
   }
   for (const k of keys) {
     const rel = byOid.get(k.rel);

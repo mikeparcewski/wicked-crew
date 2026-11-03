@@ -78,7 +78,7 @@ export async function graphqlPost(src: GraphqlSource, secret: string | null, bod
 
 /** Introspect the endpoint; answers the schema (for checks) and its structural catalog. */
 export async function describeGraphql(src: GraphqlSource, secret: string | null): Promise<{ introspection: IntrospectionQuery; catalog: GraphqlCatalog }> {
-  const { status, json } = await graphqlPost(src, secret, { query: getIntrospectionQuery({ descriptions: false }) });
+  const { status, json } = await graphqlPost(src, secret, { query: getIntrospectionQuery({ descriptions: false, directiveIsRepeatable: true }) });
   const data = (json as { data?: IntrospectionQuery } | null)?.data;
   if (status >= 400 || data?.__schema === undefined) throw new SourceQueryError(null, 'source', `introspection failed (HTTP ${status}); the endpoint may disable it`);
   try {

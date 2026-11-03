@@ -237,6 +237,8 @@ export function checkCandidateFiles(spec: AppSpec, queryText: Record<string, str
   return out;
 }
 
+const paramNames = (q: Pick<AppQuery, 'params'>): string[] => Object.keys(q.params?.properties ?? {});
+
 /** Queries and actions whose data stage must run: new, changed in declaration or text, or not in the base lock. */
 export function changedData(spec: AppSpec, queryText: Record<string, string>, base: AppFiles | null): { queries: string[]; actions: string[] } {
   const baseQueries = new Map((base?.spec.queries ?? []).map((q) => [q.id, q] as const));
@@ -249,6 +251,8 @@ export function changedData(spec: AppSpec, queryText: Record<string, string>, ba
         b === undefined ||
         locked === undefined ||
         canonicalJson(b) !== canonicalJson(q) ||
+        // `$n` binds the n-th declared parameter: canonical JSON sorts keys, so a reorder is compared here.
+        paramNames(b).join('\u0000') !== paramNames(q).join('\u0000') ||
         locked.source !== q.source ||
         locked.textHash !== textHash(ownText(queryText, q.id) ?? '')
       );

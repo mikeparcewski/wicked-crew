@@ -297,7 +297,9 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
         const src = await open(r, req.params.name, req);
         if (src.config.kind !== 'sql' || src.config.sql?.driver !== 'postgres') return reply.code(400).send({ error: 'row writes (and their safety check) are Postgres only in v1', code: 'not_postgres' });
         const w = parsed.data.write;
-        return scrubSecrets(await pgTableSafety(sqlConnectArgs(src.config, src.secret, dial), parsed.data.schema, parsed.data.table, w === undefined ? null : { op: w.op, set: w.set, key: w.key }), secretsOf(req));
+        const safety = await pgTableSafety(sqlConnectArgs(src.config, src.secret, dial), parsed.data.schema, parsed.data.table, w === undefined ? null : { op: w.op, set: w.set, key: w.key });
+        // The published answer (SourceSafetyResponse); the oid and column list are the write path's own.
+        return scrubSecrets({ table: safety.table, safe: safety.safe, reasons: safety.reasons, fingerprint: safety.fingerprint }, secretsOf(req));
       } catch (err) {
         return fail(reply, err, deps.actorOf(req), secretsOf(req));
       }

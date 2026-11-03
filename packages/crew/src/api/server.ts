@@ -11,6 +11,7 @@ import type { ChatDecisionRecorder } from '../decisions/chat-recorder.js';
 import type { ConsiderationService } from '../decisions/consider.js';
 import { requestOrigin, shellCsp } from '../editors/csp.js';
 import { registerRoutes } from './routes.js';
+import { AppsSourceStage } from '../apps/exec/source-stage.js';
 import { APPS_STATE_FILENAME, AppStore, defaultAppsRoot } from '../apps/store.js';
 import { freshenCheckout } from './chat-freshness.js';
 import { ErrorRing, teeStreamWithErrorRing } from './diagnostics.js';
@@ -2537,6 +2538,9 @@ export async function createServer(
         register: (name, root) => adapter.registerRepo(name, root),
         idTaken: async (id) => (await adapter.listRepos()).some((r) => r.id === id),
       },
+      // (K2b) The source stage: the read policy and the per-kind source check over the connector registry,
+      // so a version holding queries or actions lands when they pass (DES §9.2 step 3).
+      sourceStage: new AppsSourceStage({ registry: mcpRegistry }),
       log: (m) => app.log.warn(m),
     });
     // A crash between an app's record and its registration is finished here, off the boot path.
