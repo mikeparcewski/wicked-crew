@@ -31,6 +31,9 @@ export default defineConfig({
   // "returns8 hits". The bytes saved are not worth silently broken copy.
   compressHTML: false,
   vite: {
+    // Safari before 16.4 ignores media-query range syntax (`width <= 760px`), so the minifier must keep min-width and
+    // max-width: the CSS targets name the oldest browsers the site supports (wicked-web#63, wickedagile#71).
+    build: { cssTarget: ['chrome100', 'edge100', 'firefox100', 'safari14'] },
     resolve: { alias },
     define: { __WICKED_CREW_VERSION__: JSON.stringify(crewPkg.version) },
   },
