@@ -1100,7 +1100,7 @@ accepts<z.input<typeof ReplaceSkillSchema>, Wire.ReplaceSkillBody>();
 // ── api-types 0.58.0 — the MCP tools registry (DES-MCP-TOOLS-001 S2) ─────────────────────────────
 accepts<z.input<typeof McpServerConfigSchema>, Wire.McpServerConfigBody>();
 accepts<z.input<typeof SaveMcpServerSchema>, Wire.SaveMcpServerBody>();
-// Apps data sources (DES-APPS-001 K1, api-types 0.174.0): each published body passes its route's schema,
+// Apps data sources (DES-APPS-001 K1, api-types 0.175.0): each published body passes its route's schema,
 // and what the code produces fits each published response.
 accepts<z.input<typeof SourceCheckSchema>, Wire.SourceCheckBody>();
 accepts<z.input<typeof SourcePrivilegesSchema>, Wire.SourcePrivilegesBody>();

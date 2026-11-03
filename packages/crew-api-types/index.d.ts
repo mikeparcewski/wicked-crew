@@ -12311,7 +12311,7 @@ export interface PutDeliveryFreezeBody {
 
 /**
  * How crew reaches an upstream: an MCP server over stdio or streamable HTTP, or a plain REST API
- * wrapped as tools from its OpenAPI document (`rest`, api-types 0.64.0). (api-types 0.174.0,
+ * wrapped as tools from its OpenAPI document (`rest`, api-types 0.64.0). (api-types 0.175.0,
  * DES-APPS-001 §5.1) `sql` (drivers `postgres`, `mysql`, `sqlite`) and `graphql` are Apps data
  * sources: registered through the same preview/save, but with NO tools — nothing of theirs is ever
  * offered to a governed run. Their preview answers {@link McpPreviewResponse.source} (the catalog).
@@ -12413,13 +12413,13 @@ export interface McpServerConfigBody {
    */
   address?: McpAddressPolicy;
   /**
-   * (api-types 0.174.0, DES-APPS-001 §5.1) `sql` only: the driver and its connection settings. The
+   * (api-types 0.175.0, DES-APPS-001 §5.1) `sql` only: the driver and its connection settings. The
    * password is the secret behind `auth.ref` (`auth` takes only `ref` for `sql`). `sqlite` sources come
    * from `POST /apps/uploads` (a snapshot digest), not from a preview.
    */
   sql?: SqlSourceConfigBody;
   /**
-   * (api-types 0.174.0) `sql` only: the views (and materialized views) a read may name, as
+   * (api-types 0.175.0) `sql` only: the views (and materialized views) a read may name, as
    * `schema.view` (MySQL `database.view`). A view not listed is refused by the read policy.
    */
   viewsAllowed?: string[];
@@ -12501,19 +12501,19 @@ export interface McpServer {
   openapiUrl?: string | null;
   /** `rest` only: the operations that were picked; `null` = all. */
   operations?: string[] | null;
-  /** (api-types 0.174.0) `sql` only: driver and connection settings (`ca` shown as whether one is set). */
+  /** (api-types 0.175.0) `sql` only: driver and connection settings (`ca` shown as whether one is set). */
   sql?: SqlSourceView;
-  /** (api-types 0.174.0) `sql` only: views a read may name. */
+  /** (api-types 0.175.0) `sql` only: views a read may name. */
   viewsAllowed?: string[];
   /**
-   * (api-types 0.174.0, DES-APPS-001 §7.4) Postgres `sql` only: the per-source **Allow writes**
+   * (api-types 0.175.0, DES-APPS-001 §7.4) Postgres `sql` only: the per-source **Allow writes**
    * switch, `false` on every new source. Only a human operator turns it on or off
    * (`PUT /sources/:name/allow-writes`); turning it off withdraws every row-write grant on the
    * source. It is not part of the connection descriptor: reads are unaffected.
    */
   allowWrites?: boolean;
   /**
-   * (api-types 0.174.0) `sql`/`graphql`: the sha256 of the source's connection descriptor (driver,
+   * (api-types 0.175.0) `sql`/`graphql`: the sha256 of the source's connection descriptor (driver,
    * host, port, database, login, TLS mode, url, auth header, snapshot, confirmed ranges; never
    * `allowWrites`). Queries, actions and grants bind to it.
    */
@@ -12608,12 +12608,12 @@ export interface McpPreviewResponse {
     operations?: string[] | null;
     /** (api-types 0.174.0) `mcp-http` and `rest` only: the ranges this preview dialled under. */
     address?: McpAddressPolicy;
-    /** (api-types 0.174.0) `sql` only. */
+    /** (api-types 0.175.0) `sql` only. */
     sql?: SqlSourceView;
     viewsAllowed?: string[];
   };
   /**
-   * (api-types 0.174.0, DES-APPS-001 §5.1) `sql`/`graphql` only: what the describe found —
+   * (api-types 0.175.0, DES-APPS-001 §5.1) `sql`/`graphql` only: what the describe found —
    * structure, never a value from a row — and, for Postgres, the login's privilege report.
    */
   source?: { catalog: SourceCatalog; privileges?: SourcePrivilegeReport };
@@ -13099,7 +13099,7 @@ export interface McpUsageResponse {
   skipped: number;
 }
 
-// ── Apps data sources (DES-APPS-001 §5, §7.4, §7.5; api-types 0.174.0) ───────────────────────────
+// ── Apps data sources (DES-APPS-001 §5, §7.4, §7.5; api-types 0.175.0) ───────────────────────────
 
 /** `McpServerConfigBody.sql`: a network SQL source's settings. Secrets go in `auth.ref` only. */
 export interface SqlSourceConfigBody {

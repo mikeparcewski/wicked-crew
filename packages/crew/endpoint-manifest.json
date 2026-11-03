@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.174.0",
+  "apiTypesVersion": "0.175.0",
   "endpoints": [
     {
       "method": "GET",
@@ -9,22 +9,6 @@
       "responseType": "VideoPaletteResponse",
       "statusCodes": [
         200
-      ]
-    },
-    {
-      "method": "POST",
-      "path": "/api/v1/apps/uploads",
-      "requestType": null,
-      "responseType": "SourceUploadResponse",
-      "statusCodes": [
-        201,
-        400,
-        409,
-        413,
-        415,
-        502,
-        503,
-        504
       ]
     },
     {
@@ -229,6 +213,22 @@
         404,
         409,
         503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/apps/uploads",
+      "requestType": null,
+      "responseType": "SourceUploadResponse",
+      "statusCodes": [
+        201,
+        400,
+        409,
+        413,
+        415,
+        502,
+        503,
+        504
       ]
     },
     {
