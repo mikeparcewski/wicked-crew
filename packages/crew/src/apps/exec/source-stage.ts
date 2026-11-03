@@ -31,7 +31,7 @@ import { describePg } from '../../sources/catalog/postgres.js';
 import { policyCatalog, type SqlCatalog } from '../../sources/catalog/types.js';
 import { CREW_SOURCE_ROUTES } from '../../sources/crew-source.js';
 import { DialRefusedError, type DialOptions } from '../../sources/dialer.js';
-import { pgReadOnly } from '../../sources/drivers/postgres.js';
+import { pgDescribe, pgReadOnly } from '../../sources/drivers/postgres.js';
 import { SourceQueryError } from '../../sources/drivers/types.js';
 import { checkGraphqlRead } from '../../sources/graphql.js';
 import { sqlConnectArgs } from '../../sources/kinds.js';
@@ -40,6 +40,7 @@ import { pgTableSafety, type SafetyColumn } from '../../sources/safety/postgres.
 import { checkSqlQuery, type SqlSourceHandle } from '../../sources/sql.js';
 import { snapshotPath } from '../../sources/uploads.js';
 import { baseTypeSql, pgExactFitIn, type FitItem } from '../actions/pg-fit.js';
+import { generateStatement } from '../actions/pg-write.js';
 import { crewNow, crewValueFits, inputForm, paramFits, writableKind } from '../actions/values.js';
 import { ArgTypeError, checkGraphqlVariables, checkToolArgs, type Provider, providerOf } from './arg-types.js';
 import type { AppSourceStage, AppSourceStageInput, AppSourceStageResult } from '../check.js';
@@ -357,6 +358,13 @@ export class AppsSourceStage implements AppSourceStage {
     if (fixed.length > 0) {
       const misfits = await pgReadOnly(args, (tx) => pgExactFitIn(tx, fixed));
       if (misfits.length > 0) throw new Refused('value_does_not_fit', misfits.map((m) => `the app's value for ${a.table}.${m.column} ${m.why}`).join('; '));
+    }
+    // The generated statement, described the same way as a read (Parse/Describe, never executed, §9.2).
+    try {
+      await pgDescribe(args, generateStatement({ schema, table: name, op: a.op, set, key, columns: r.columns }).text);
+    } catch (err) {
+      if (err instanceof SourceQueryError && err.errorClass === 'source') throw new Refused('statement', `the source refused the generated statement${err.sqlstate !== null ? ` (SQLSTATE ${err.sqlstate})` : ''}`);
+      throw err;
     }
     return rowWriteContract({ schema, table: name, op: a.op, set, key, fingerprint: r.fingerprint });
   }

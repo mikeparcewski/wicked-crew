@@ -76,6 +76,8 @@ export async function freshPgDatabase(t: DbTarget): Promise<FreshPg> {
   const [{ v } = { v: '0' }] = await admin.unsafe<Array<{ v: string }>>("SELECT current_setting('server_version_num') AS v");
   if (Math.floor(Number(v) / 10_000) !== t.major) throw new Error(`${t.label}: the server at ${t.url.host} is version ${v}, not ${t.major}`);
   await admin.unsafe(readFileSync(join(FIX, 'postgres', 'seed.sql'), 'utf8'));
+  // K2b's tables and writer logins (the write path and the P1-P43 suite).
+  await admin.unsafe(readFileSync(join(FIX, 'postgres', 'k2b.sql'), 'utf8'));
   return {
     database,
     port: Number(t.url.port),

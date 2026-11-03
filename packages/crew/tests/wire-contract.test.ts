@@ -104,7 +104,11 @@ import type { CreateStandingOrderSchema, ParseStandingOrderSchema, StandingAwayS
 import type { StandingOrdersState as ServedStandingOrdersState } from '../src/standing-orders/store.js';
 import type { DEFAULT_SETTINGS, RecordedEvent } from '../src/core/types.js';
 import type { AppSpecSchema } from '../src/apps/spec.js';
-import type { AppCreateSchema, AppEditsSchema, AppHistoryMoveSchema, AppQuerySchema, AppRestoreSchema, AppsCheckSchema, AppTurnSchema } from '../src/apps/routes.js';
+import type { AppActionGrantSchema, AppActionPrepareSchema, AppActionRunSchema, AppCreateSchema, AppEditsSchema, AppHistoryMoveSchema, AppQuerySchema, AppRestoreSchema, AppsCheckSchema, AppTurnSchema } from '../src/apps/routes.js';
+import type { AppWritePath } from '../src/apps/actions/write-path.js';
+import type { AppExecutor } from '../src/apps/exec/executor.js';
+import type { AppToolQueryText as ToolText, AppCrewQueryText as CrewText } from '../src/core/types.js';
+import type { parseCrewQueryText, parseToolQueryText } from '../src/apps/exec/texts.js';
 import type { AppStore } from '../src/apps/store.js';
 import type { RegisterRepoSchema } from '../src/api/routes.js';
 
@@ -1153,6 +1157,17 @@ accepts<z.input<typeof AppQuerySchema>, Wire.AppQueryBody>();
 accepts<z.input<typeof AppTurnSchema>, Wire.AppTurnBody>();
 accepts<z.input<typeof RegisterRepoSchema>, Wire.RegisterRepoBody>();
 accepts<z.input<typeof AppsCheckSchema>, Wire.AppsCheckBody>();
+// K2b (api-types 0.176.0-0.178.0): the action bodies the routes accept, and what the executor and the write path answer.
+accepts<z.input<typeof AppActionPrepareSchema>, Wire.AppActionPrepareBody>();
+accepts<z.input<typeof AppActionRunSchema>, Wire.AppActionRunBody>();
+accepts<z.input<typeof AppActionGrantSchema>, Wire.AppActionGrantBody>();
+respondsWith<Wire.AppQueryResponse, Awaited<ReturnType<AppExecutor['runQuery']>>>();
+respondsWith<Wire.AppActionPrepareResponse, Awaited<ReturnType<AppWritePath['prepareAction']>>>();
+respondsWith<Wire.AppActionRunResponse, Awaited<ReturnType<AppWritePath['runAction']>>>();
+respondsWith<Wire.AppActionRecordView, ReturnType<AppWritePath['recordView']>>();
+respondsWith<Wire.AppActionGrant, Awaited<ReturnType<AppWritePath['grant']>>>();
+respondsWith<ToolText, Extract<ReturnType<typeof parseToolQueryText>, { ok: true }>['value']>();
+respondsWith<CrewText, Extract<ReturnType<typeof parseCrewQueryText>, { ok: true }>['value']>();
 // …and what the store produces is what the contract publishes (pi r2 on the store).
 respondsWith<Wire.AppDetail, Awaited<ReturnType<AppStore['detail']>>>();
 respondsWith<Wire.AppSummary[], ReturnType<AppStore['list']>>();
