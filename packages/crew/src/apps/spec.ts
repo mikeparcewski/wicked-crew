@@ -458,8 +458,6 @@ export const parseWork = { elements: 0, whole: false };
  * the elements up to that point, never zod's diagnostics for every element of every list.
  */
 function budgetedFindings(value: unknown): AppCheckFinding[] {
-  parseWork.elements = 0;
-  parseWork.whole = false;
   const out: AppCheckFinding[] = [];
   const add = (issues: z.ZodIssue[], prefix: (string | number)[]): void => {
     for (const i of issues) {
@@ -494,6 +492,8 @@ function budgetedFindings(value: unknown): AppCheckFinding[] {
 
 /** The shape alone: the parsed spec, or the findings (at most 50). */
 export function parseSpec(value: unknown): { spec: AppSpec; findings: [] } | { spec: null; findings: AppCheckFinding[] } {
+  parseWork.elements = 0;
+  parseWork.whole = false;
   const structure = structureFinding(value);
   if (structure !== null) return { spec: null, findings: [structure] };
   const findings = budgetedFindings(value);

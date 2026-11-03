@@ -438,6 +438,15 @@ describe('apps.json: the consistency check', () => {
     expect(parseWork.whole).toBe(true);
   });
 
+  it('counts each parse afresh, a structurally refused one included (codex r6)', () => {
+    expect(parseSpec(escalations()).findings).toEqual([]);
+    expect(parseWork.whole).toBe(true);
+    const wide = escalations();
+    (wide.actions[1] as { args: Record<string, unknown> }).args = Object.fromEntries(Array.from({ length: 51 }, (_, i) => [`a${i}`, { kind: 'literal', value: 1 }]));
+    expect(parseSpec(wide).findings[0]?.code).toBe('too_complex');
+    expect(parseWork).toEqual({ elements: 0, whole: false });
+  });
+
   it('answers a finding, never a throw, for a root that is not an object (codex r5)', () => {
     for (const raw of ['null', '[]', '1', '"x"', 'true']) {
       expect(readSpec(raw).findings.map((f) => f.code), raw).toEqual(['schema']);
