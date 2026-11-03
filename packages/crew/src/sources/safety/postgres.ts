@@ -129,6 +129,31 @@ export async function pgTableSafetyIn(tx: Tx, schema: string, name: string, decl
     reasons.push({ code, detail });
   };
 
+  // (K2b, the Postgres merge gate) FIRST, pg_catalog as initdb left it: no role but a superuser may create there,
+  // and nothing created since initdb is there; otherwise an object placed in pg_catalog can take a name this
+  // check or the write resolves (an exact-type overload of a polymorphic function such as pg_typeof or
+  // array_to_json, an `=` for an enum) ahead of the built-in one (P44). This query calls no overloadable
+  // function: exact-signature comparisons and casts only, rows assembled here (codex r4). Anything found
+  // refuses at once, before the rest of the check runs.
+  const guard = await q<{ kind: string; name: string }>(
+    `SELECT 'role'::pg_catalog.text AS kind, r.rolname::pg_catalog.text AS name FROM pg_catalog.pg_roles r
+      WHERE NOT r.rolsuper AND pg_catalog.has_schema_privilege(r.oid, 'pg_catalog'::pg_catalog.regnamespace::pg_catalog.oid, 'CREATE'::pg_catalog.text)
+     UNION ALL SELECT 'function'::pg_catalog.text, p.proname::pg_catalog.text FROM pg_catalog.pg_proc p
+      WHERE p.pronamespace = 'pg_catalog'::pg_catalog.regnamespace::pg_catalog.oid AND p.oid >= '16384'::pg_catalog.oid
+     UNION ALL SELECT 'operator'::pg_catalog.text, o.oprname::pg_catalog.text FROM pg_catalog.pg_operator o
+      WHERE o.oprnamespace = 'pg_catalog'::pg_catalog.regnamespace::pg_catalog.oid AND o.oid >= '16384'::pg_catalog.oid
+     UNION ALL SELECT 'type'::pg_catalog.text, y.typname::pg_catalog.text FROM pg_catalog.pg_type y
+      WHERE y.typnamespace = 'pg_catalog'::pg_catalog.regnamespace::pg_catalog.oid AND y.oid >= '16384'::pg_catalog.oid`,
+  );
+  if (guard.length > 0) {
+    const found = guard.map((g) => [g.kind, g.name] as const).sort((a, b) => (a[0] + a[1] < b[0] + b[1] ? -1 : 1));
+    for (const [kind, n] of found) {
+      if (kind === 'role') add('catalog_create', `the role ${n} can create objects in pg_catalog, where one could take a name a write uses: v1 row writes need pg_catalog writable by superusers only`);
+      else add('catalog_object', `pg_catalog holds the ${kind} ${n}, created after initdb: v1 row writes need pg_catalog as initdb left it`);
+    }
+    return { table: { schema, name }, safe: false, reasons, fingerprint: createHash('sha256').update(JSON.stringify(found)).digest('hex'), oid: '', reltype: '', columns: [] };
+  }
+
   const [t] = await q<TableRow & Record<string, unknown>>(
     `SELECT c.oid::pg_catalog.int8::pg_catalog.text AS oid, c.reltype::pg_catalog.int8::pg_catalog.text AS reltype, c.relkind::pg_catalog.text AS relkind, c.relispartition AS ispartition,
             c.relrowsecurity AS rowsecurity, c.relforcerowsecurity AS forcerowsecurity, am.amname::pg_catalog.text AS amname,

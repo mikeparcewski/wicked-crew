@@ -431,6 +431,19 @@ for (const target of PG_TARGETS) {
       }
     });
 
+    it('a read whose backend is terminated mid-transaction answers an error and sends nothing on the closed connection (no uncaught error)', async () => {
+      const slow: AppQuery = { id: 'slow', source: 'support', kind: 'sql', output: [{ name: 'n', type: 'integer' }] };
+      const landed = await h.land('tickets', specWith([...queries, slow]), { ...texts, slow: 'SELECT count(*)::int8 AS n FROM s.big AS a, s.big AS b, s.big AS c' });
+      expect(landed.status, JSON.stringify(landed.body)).toBe(200);
+      const v = (landed.body as { app: { head: { version: number } } }).app.head.version;
+      const reading = h.call('POST', '/apps/tickets/query', { version: v, query: 'slow' });
+      await new Promise((r) => setTimeout(r, 600));
+      await db.admin.unsafe("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = 'apps_reader' AND datname = current_database() AND state = 'active'");
+      const r = await reading;
+      expect([502, 504]).toContain(r.status);
+      await new Promise((x) => setTimeout(x, 300)); // an uncaught error from the driver would surface here
+    });
+
     it('codex r1: a source switched off reads nothing', async () => {
       await h.registry.setServerEnabled('support', false);
       try {

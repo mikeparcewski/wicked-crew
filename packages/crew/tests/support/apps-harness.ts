@@ -12,6 +12,9 @@ import { expect } from 'vitest';
 import { AuditLog } from '../../src/api/audit.js';
 import { LOCAL_ACTOR, registerAuthHooks } from '../../src/api/auth.js';
 import { registerMcpRoutes } from '../../src/api/mcp.js';
+import { AppActionStore } from '../../src/apps/actions/store.js';
+import type { WriteHooks } from '../../src/apps/actions/pg-write.js';
+import { AppWritePath } from '../../src/apps/actions/write-path.js';
 import { AppExecutor } from '../../src/apps/exec/executor.js';
 import type { Viewer } from '../../src/apps/exec/params.js';
 import { AppsSourceStage } from '../../src/apps/exec/source-stage.js';
@@ -38,6 +41,12 @@ export interface Harness {
   store: AppStore;
   audit: AuditLog;
   executor: AppExecutor;
+  actions: AppActionStore;
+  writePath: AppWritePath;
+  /** The write path's environment (`APPS_READ_ONLY`). */
+  writeEnv: Record<string, string>;
+  /** TESTS: the race seams inside a row write's transaction. */
+  hooks: WriteHooks;
   /** Who each actor is as a viewer (default: `<id>@example.com`, name = id, no groups). */
   viewers: Record<string, Viewer>;
   env: Record<string, string>;
@@ -70,6 +79,7 @@ export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick
   const store = new AppStore({ stateFile: join(dir, 'daemon-apps.json'), appsRoot: join(dir, 'apps'), registry: repoRegistry, sourceStage: new AppsSourceStage({ registry }) });
   const app = Fastify({ logger: false });
   const viewers: Record<string, Viewer> = {};
+  const viewerOf = async (a: Actor): Promise<Viewer> => viewers[a.id] ?? { id: a.id, email: `${a.id}@example.com`, name: a.id, groups: null };
   const executor = new AppExecutor({
     store,
     registry,
@@ -77,15 +87,19 @@ export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick
       const res = await app.inject({ method: r.method, url: r.url, headers: r.headers });
       return { statusCode: res.statusCode, body: res.body };
     },
-    viewerOf: async (a) => viewers[a.id] ?? { id: a.id, email: `${a.id}@example.com`, name: a.id, groups: null },
+    viewerOf,
     ...(opts.now !== undefined ? { now: opts.now } : {}),
     ...(opts.crewDeadlineMs !== undefined ? { crewDeadlineMs: opts.crewDeadlineMs } : {}),
   });
+  const actions = new AppActionStore(join(dir, 'daemon-apps-actions.json'), opts.now);
+  const writeEnv: Record<string, string> = {};
+  const hooks: WriteHooks = {};
+  const writePath = new AppWritePath({ store, actions, registry, audit, viewerOf, executor, env: writeEnv, hooks, ...(opts.now !== undefined ? { now: opts.now } : {}) });
   registerAuthHooks(app, { mode: 'required', verifiers: [{ name: 'test', verify: async (t) => TOKENS[t] ?? null }], allowedOrigins: null });
   const actorOf = (req: { actor?: Actor | null }): Actor => req.actor ?? LOCAL_ACTOR;
   registerMcpRoutes(app, { registry, audit, actorOf });
-  registerSourceRoutes(app, { registry, audit, actorOf });
-  registerAppRoutes(app, { store, audit, executor });
+  registerSourceRoutes(app, { registry, audit, actorOf, rowWriteGrants: writePath });
+  registerAppRoutes(app, { store, audit, executor, writePath });
   await opts.extra?.(app, { registry, store, audit, executor });
   await app.ready();
   const call: Harness['call'] = async (method, url, payload, as = 'priya') => {
@@ -105,6 +119,10 @@ export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick
     store,
     audit,
     executor,
+    actions,
+    writePath,
+    writeEnv,
+    hooks,
     viewers,
     env,
     call,

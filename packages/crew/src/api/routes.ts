@@ -390,6 +390,8 @@ import { gardenConformance, gardenPackCheck, type ConformanceRunner, type PackCh
 import { conformanceProvisioner, conformanceRuntimeRoot } from '../editors/conformance-runtime.js';
 import { EditorRegistry } from '../editors/registry.js';
 import { registerEditorRoutes } from '../editors/routes.js';
+import type { AppActionStore } from '../apps/actions/store.js';
+import { AppWritePath } from '../apps/actions/write-path.js';
 import { AppExecutor } from '../apps/exec/executor.js';
 import { localViewerOf, type Viewer } from '../apps/exec/viewer.js';
 import type { Actor as AppsActor } from '../core/types.js';
@@ -1391,6 +1393,8 @@ export interface RuntimeDeps {
    *  the state home's `daemon-apps.json` and the apps root; a directly-driven route set gets the routes only when it
    *  injects one (so a test never makes a repo under the real `~/.wicked/apps`). */
   apps?: AppStore;
+  /** (K2b) Grants and action records (`daemon-apps-actions.json`); with `apps`, the action routes serve for real. */
+  appsActions?: AppActionStore;
   /** (K2b) Who a viewer is (email, name) for viewer-bound parameters; default: the global git identity for the local actor. */
   appsViewerOf?: (actor: AppsActor) => Promise<Viewer>;
   /** The eval RUN history store behind `/testing/evals[/:id]` — `createServer` builds one over the
@@ -1757,11 +1761,24 @@ export function registerRoutes(
           viewerOf: runtime.appsViewerOf ?? localViewerOf,
         })
       : undefined;
+  // (K2b) The write path: grants, records, API actions and Postgres row writes (DES §7.3, §7.4, §9.4).
+  const appsWritePath =
+    runtime.apps !== undefined && runtime.appsActions !== undefined
+      ? new AppWritePath({
+          store: runtime.apps,
+          actions: runtime.appsActions,
+          registry: runtime.mcp ?? null,
+          audit,
+          viewerOf: runtime.appsViewerOf ?? localViewerOf,
+          ...(appsExecutor !== undefined ? { executor: appsExecutor } : {}),
+        })
+      : undefined;
   if (runtime.apps !== undefined) {
     registerAppRoutes(app, {
       store: runtime.apps,
       audit,
       ...(appsExecutor !== undefined ? { executor: appsExecutor } : {}),
+      ...(appsWritePath !== undefined ? { writePath: appsWritePath } : {}),
       ...(typeof adapter.projectsSupported === 'function' && adapter.projectsSupported()
         ? { projectExists: async (id: string) => (await adapter.projectGet(id)) !== null }
         : {}),
@@ -2130,7 +2147,7 @@ export function registerRoutes(
             apps: {
               // (typed against the contract below: a renamed flag fails the build)
               query: appsExecutor !== undefined,
-              actions: false,
+              actions: appsWritePath !== undefined,
               turns: runtime.apps.turns !== null,
               publish: false,
               uploads: app.hasRoute({ method: 'POST', url: `${V}/apps/uploads` }),
@@ -9247,6 +9264,8 @@ export function registerRoutes(
     ...(runtime.mcp !== undefined ? { registry: runtime.mcp } : {}),
     audit,
     actorOf,
+    // (K2b) Allow writes off withdraws the source's row-write grants.
+    ...(appsWritePath !== undefined ? { rowWriteGrants: appsWritePath } : {}),
   });
 
   // ── The wicked-interactive bridge, reverse-proxied (DES-MERGE-001 §5.3/§7.2) ──

@@ -666,12 +666,15 @@ export async function invokeRestTool(
   args: Record<string, unknown>,
   timeoutMs: number,
   dial: RestDial = {},
+  /** (K2b) Called just before the request is handed to the dialer's fetch (see `Invoker`). */
+  onDispatch?: () => void,
 ): Promise<UpstreamToolResult> {
   const { url, init, droppedArgs } = buildRestRequest(config, secret, mapping, args);
   const deadline = Math.max(1, Math.min(timeoutMs, mapping.timeoutMs));
   const { fetch: fetchImpl } = dialOf(config, dial);
   let res: Response;
   try {
+    onDispatch?.();
     res = await fetchImpl(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(deadline) });
   } catch (err) {
     // The dialer refuses a redirect before it is followed; it is judged below like one answered.
@@ -713,6 +716,8 @@ async function readRestResult(res: Response, droppedArgs: string[]): Promise<Ups
   try {
     read = await readCapped(res, REST_RESPONSE_MAX_BYTES);
   } catch (err) {
+    // The status arrived before the body: an error status is an answer even when its body cannot be read (K2b).
+    if (res.status >= 400) throw new UpstreamCallError('http', false, `the API answered HTTP ${res.status} (its body could not be read)`);
     throw new UpstreamCallError('transport', true, `reading the response failed: ${err instanceof Error ? err.message : String(err)}`);
   }
   let structured: Record<string, unknown> | undefined;

@@ -11,6 +11,7 @@ import type { ChatDecisionRecorder } from '../decisions/chat-recorder.js';
 import type { ConsiderationService } from '../decisions/consider.js';
 import { requestOrigin, shellCsp } from '../editors/csp.js';
 import { registerRoutes } from './routes.js';
+import { APPS_ACTIONS_STATE_FILENAME, AppActionStore } from '../apps/actions/store.js';
 import { AppsSourceStage } from '../apps/exec/source-stage.js';
 import { APPS_STATE_FILENAME, AppStore, defaultAppsRoot } from '../apps/store.js';
 import { freshenCheckout } from './chat-freshness.js';
@@ -2530,6 +2531,7 @@ export async function createServer(
   });
   // DES-APPS-001 (K2a): an unreadable store file leaves Apps off (said once) rather than failing the boot.
   let appStore: AppStore | null = null;
+  let appActions: AppActionStore | null = null;
   try {
     appStore = new AppStore({
       stateFile: join(crewStateHome(), APPS_STATE_FILENAME),
@@ -2545,6 +2547,8 @@ export async function createServer(
     });
     // A crash between an app's record and its registration is finished here, off the boot path.
     void appStore.reconcile();
+    // (K2b) Grants and action records; every `running` record of an earlier process becomes `unknown` here.
+    appActions = new AppActionStore(join(crewStateHome(), APPS_ACTIONS_STATE_FILENAME));
   } catch (err) {
     app.log.error(`[apps] the app store cannot be read, so Apps is off: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -2622,6 +2626,7 @@ export async function createServer(
       mcp: mcpRegistry,
       // DES-APPS-001 (K2a): the app store (`daemon-apps.json` in the state home; repos under the apps root).
       ...(appStore !== null ? { apps: appStore } : {}),
+      ...(appStore !== null && appActions !== null ? { appsActions: appActions } : {}),
       // DES-MCP-TOOLS-001 S3: the broker's call path over that registry.
       mcpBroker,
       ...(typeof adapter.askSupported === 'function' && adapter.askSupported() ? { askServer } : {}),

@@ -56,15 +56,38 @@ async function readJsonCapped(res: Response): Promise<unknown> {
   }
 }
 
-/** POST one GraphQL request through the dialer. */
+/** POST one GraphQL request through the dialer; the answer scrubbed of the source's secret. */
 export async function graphqlPost(src: GraphqlSource, secret: string | null, body: { query: string; variables?: Record<string, unknown> }, deadlineMs = GRAPHQL_DEADLINE_MS): Promise<{ status: number; json: unknown }> {
+  const raw = await graphqlPostRaw(src, secret, body, deadlineMs);
+  try {
+    return scrubSecrets(raw, secret === null ? [] : [secret]);
+  } catch {
+    // An answer too deep to walk is a source error, as before (codex r4).
+    throw new SourceQueryError(null, 'source', 'the GraphQL answer is nested too deeply to read');
+  }
+}
+
+/**
+ * The same POST with the answer NOT yet scrubbed (K2b): a caller that must judge the answer's structure (an
+ * action's outcome: `errors`, `data`) does so first, then scrubs what it keeps or shows. Errors are scrubbed.
+ */
+export async function graphqlPostRaw(src: GraphqlSource, secret: string | null, body: { query: string; variables?: Record<string, unknown> }, deadlineMs = GRAPHQL_DEADLINE_MS): Promise<{ status: number; json: unknown }> {
   const headers: Record<string, string> = { 'content-type': 'application/json', accept: 'application/json' };
   if (src.auth !== null && secret !== null) headers[src.auth.header] = `${src.auth.prefix ?? ''}${secret}`;
   const secrets = secret === null ? [] : [secret];
   try {
     const res = await dialFetch(src.url, { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(deadlineMs) }, src.policy, src.dial ?? {});
-    const json = await readJsonCapped(res);
-    return scrubSecrets({ status: res.status, json }, secrets);
+    let json: unknown;
+    try {
+      json = await readJsonCapped(res);
+    } catch (err) {
+      // The status arrived before the body: an error status is an answer even when its body cannot be read or
+      // is too large (K2b). A body that is not JSON already says its status.
+      const notJson = err instanceof SourceQueryError && err.message.includes('did not answer JSON');
+      if (res.status >= 400 && !notJson) throw new SourceQueryError(null, 'source', `the GraphQL endpoint answered HTTP ${res.status} (its body could not be read)`);
+      throw err;
+    }
+    return { status: res.status, json };
   } catch (err) {
     // Every failure is a source error class (the routes answer 504/502 for them), never a bare 500. A
     // dialer refusal stays itself (a 409 naming why).

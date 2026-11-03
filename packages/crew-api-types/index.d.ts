@@ -15334,6 +15334,151 @@ export interface AppQueryResponse {
   cachedAt: number | null;
 }
 
+// ── Apps: the write path (api-types 0.178.0, DES-APPS-001 §7.3, §7.4, §9.4, slice K2b) ─────────────────
+
+/** Where a value on an action card comes from (DES §7.3: "your sign-in", "fixed by the app", "filled by studio: now"). */
+export type AppActionValueSource = 'param' | 'app' | 'viewer' | 'crew';
+
+/** One value on a card: the column or argument, the value as it will be sent, and where it comes from. */
+export interface AppActionCardValue {
+  name: string;
+  /** A list argument shows its items (an array parameter, the viewer's groups). */
+  value: string | number | boolean | null | Array<string | number | boolean>;
+  from: AppActionValueSource;
+  /** The words for `from`: "you entered it", "fixed by the app", "your sign-in", "filled by studio: now". */
+  label: string;
+}
+
+/**
+ * The card crew generates from the RESOLVED operation (DES §7.3) and the host draws outside the app's
+ * frame: the only per-run consent. Every value is on it, literals included.
+ */
+export type AppActionCard =
+  | {
+      kind: 'api';
+      app: string;
+      action: string;
+      source: string;
+      /** The source's kind: `rest`, `mcp-http`, `mcp-stdio` or `graphql`. */
+      sourceKind: string;
+      /** `POST /v1/tickets/4821/assign`, `mutation assign`, or `tool assign_ticket`. */
+      operation: string;
+      args: AppActionCardValue[];
+      /** The request as it will be sent (method and URL and body, the GraphQL document and variables, or the tool call). */
+      request: string;
+      /** The action's description, labelled "The app says" by the host. */
+      appSays?: string;
+    }
+  | {
+      kind: 'row-write';
+      app: string;
+      action: string;
+      source: string;
+      /** The login the write runs as. */
+      login: string;
+      verb: 'INSERT' | 'UPDATE' | 'DELETE';
+      /** Schema-qualified: `support.tickets`. */
+      table: string;
+      /** Every column it sets (an insert: every column of the table), with its value. */
+      columns: AppActionCardValue[];
+      /** The key (`id = 4821`). */
+      key: AppActionCardValue[];
+      /** "exactly 1 row, verified". */
+      rows: string;
+      /** "plain table: no triggers, rules, inheritance or row security; checked just now". */
+      checks: string;
+      /** The statement as it will run (values are its `$n` parameters, listed above). */
+      statement: string;
+      appSays?: string;
+    };
+
+/** `POST /apps/:app/actions/:id/prepare` (HUMAN operator). `params` are the action's declared, non-viewer parameters. */
+export interface AppActionPrepareBody {
+  version: number | string;
+  params?: Record<string, unknown>;
+}
+
+/** `POST /apps/:app/actions/:id/prepare` 200: the record to run within 2 minutes, and its card. */
+export interface AppActionPrepareResponse {
+  record: string;
+  card: AppActionCard;
+  /** Unix millis. */
+  expiresAt: number;
+}
+
+/** `POST /apps/:app/actions/:id/run` (HUMAN operator, the person who prepared it). */
+export interface AppActionRunBody {
+  record: string;
+}
+
+/**
+ * An action record's states (DES §7.3): `prepared → running → succeeded | failed | unknown`. `running` is the
+ * linearization point (persisted before the upstream call); `unknown` = the outcome could not be known (the
+ * daemon restarted during the call, or the call was sent and no answer came). Nothing is ever re-run.
+ */
+export type AppActionState = 'prepared' | 'running' | 'succeeded' | 'failed' | 'unknown';
+
+/** `POST /apps/:app/actions/:id/run` 200: how it ended. */
+export interface AppActionRunResponse {
+  record: string;
+  state: 'succeeded' | 'failed' | 'unknown';
+  /** Why it failed or is unknown, in crew's words. */
+  reason?: string;
+  /** A row write: `{ table, op, key }`; an API action: the answer, scrubbed and cut at 64 KB. */
+  result?: unknown;
+}
+
+/** `GET /apps/:app/actions/records/:id` 200 (the person who prepared it): answers a lost response. */
+export interface AppActionRecordView {
+  id: string;
+  app: string;
+  action: string;
+  version: number | null;
+  tree: string;
+  state: AppActionState;
+  reason?: string;
+  result?: unknown;
+  card: AppActionCard;
+  createdAt: number;
+  expiresAt: number;
+  endedAt?: number;
+}
+
+/** `POST /apps/:app/actions/:id/grant` (HUMAN operator): grant the action as it is in this version. */
+export interface AppActionGrantBody {
+  version: number | string;
+}
+
+/**
+ * A grant (DES §9.4): keyed by app and action, bound to the action hash, the contract hash (a row write's
+ * holds the table's safety fingerprint) and the source descriptor; any change withdraws it. Turning a
+ * source's Allow writes off withdraws its row-write grants.
+ */
+export interface AppActionGrant {
+  app: string;
+  action: string;
+  kind: 'api' | 'row-write';
+  source: string;
+  actionHash: string;
+  contractHash: string;
+  descriptorHash: string;
+  /** A row write: the table safety check's fingerprint at grant. */
+  fingerprint?: string;
+  grantedBy: Actor;
+  /** Unix millis. */
+  grantedAt: number;
+}
+
+/** `POST …/grant` 200 and `GET …/grant` 200 (observer). */
+export interface AppActionGrantResponse {
+  grant: AppActionGrant;
+}
+
+/** `DELETE …/grant` 200: whether a grant was there. */
+export interface AppActionRevokeResponse {
+  revoked: boolean;
+}
+
 /** One reason a check refused a tree. `path` is a JSON path into `apps.json`, or a repo path. */
 export interface AppCheckFinding {
   stage: 'spec' | 'files' | 'policy' | 'source';
@@ -15357,6 +15502,15 @@ export interface AppCheckFinding {
  *  - 429 `rate_limited` (with `retryAfterMs`: a query queue or a per-viewer rate is full, DES §7.5);
  *  - 501 `not_implemented` (a route a later slice serves; nothing happened);
  *  - 503 `apps_unavailable`.
+ *
+ * (api-types 0.178.0, K2b) The action routes also answer: 409 `read_only` (`APPS_READ_ONLY` is set: no
+ * write at all), `not_granted` (no grant for the action as it is now; a stale grant is withdrawn and says
+ * so), `writes_off` (the source's Allow writes switch is off), `table_changed` (the row write's table no
+ * longer passes the safety check, or its fingerprint differs from the grant's: the grant is withdrawn),
+ * `value_does_not_fit` (a value its column would change, P28), `record_used` (the record already ran or is
+ * running: nothing is re-run), `record_expired`, `missing_grants` (granting a row write whose login lacks a
+ * privilege the write needs: the message lists the exact `GRANT` statements); 404 `unknown_action`,
+ * `unknown_record`.
  *
  * (api-types 0.177.0, K2b) `POST /apps/:app/query` also answers: 400 `bad_params` (a parameter that is not
  * declared, does not satisfy its schema, is required and missing, or is viewer-bound and was sent); 403
@@ -15401,7 +15555,17 @@ export interface AppErrorBody {
     | 'result_invalid'
     | 'source_failed'
     | 'source_unavailable'
-    | 'source_timeout';
+    | 'source_timeout'
+    | 'read_only'
+    | 'not_granted'
+    | 'writes_off'
+    | 'table_changed'
+    | 'value_does_not_fit'
+    | 'record_used'
+    | 'record_expired'
+    | 'unknown_action'
+    | 'unknown_record'
+    | 'missing_grants';
   error: string;
   /** `rate_limited`: when to try again (also sent as `Retry-After`). */
   retryAfterMs?: number;
@@ -15444,7 +15608,10 @@ export interface AppsCapabilities {
    * api-types 0.177.0 (K2b, the executor).
    */
   query: boolean;
-  /** `POST /apps/:app/actions/:id/prepare|run|grant`, `GET …/actions/records/:id`. */
+  /**
+   * `POST /apps/:app/actions/:id/prepare|run|grant`, `GET|DELETE …/grant`, `GET …/actions/records/:id`. True
+   * since api-types 0.178.0 (K2b, the write path: API actions and Postgres row writes).
+   */
   actions: boolean;
   /** `POST /apps/:app/turns` launches `apps-turn` runs. */
   turns: boolean;

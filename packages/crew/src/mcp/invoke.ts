@@ -86,6 +86,12 @@ export type Invoker = (
   timeoutMs: number,
   /** A `rest` tool's request mapping (slice S5a); `null` for an MCP server's tool. */
   rest?: McpRestMapping | null,
+  /**
+   * (DES-APPS-001 K2b) Called once the tool call itself is about to leave crew (an MCP server: connected and
+   * initialized; a REST tool: the request built and its address checked): an action's outcome after it is
+   * not known without an answer; before it, nothing was sent.
+   */
+  onDispatch?: () => void,
 ) => Promise<UpstreamToolResult>;
 
 /**
@@ -109,11 +115,11 @@ export function classifyUpstreamError(err: unknown): UpstreamCallError {
 }
 
 /** The real invoker. */
-export const invokeMcpTool: Invoker = async (config, secret, tool, args, timeoutMs, rest = null) => {
+export const invokeMcpTool: Invoker = async (config, secret, tool, args, timeoutMs, rest = null, onDispatch) => {
   if (config.kind === 'rest') {
     // A REST tool is one pinned HTTP request, built from its allowlisted arguments (I6).
     if (rest === null) throw new UpstreamCallError('protocol', false, `${tool} has no REST mapping; test and save the server again`);
-    return invokeRestTool(config, secret, rest, args, timeoutMs);
+    return invokeRestTool(config, secret, rest, args, timeoutMs, {}, onDispatch);
   }
   const { transport, stderrTail } = transportFor(config, secret);
   const client = new Client({ name: 'wicked-crew-mcp-broker', version: '1' }, { capabilities: {} });
@@ -137,6 +143,7 @@ export const invokeMcpTool: Invoker = async (config, secret, tool, args, timeout
   const work = (async (): Promise<UpstreamToolResult> => {
     await client.connect(transport, sdkTimeout);
     connected = true;
+    onDispatch?.();
     return (await client.callTool({ name: tool, arguments: args }, undefined, sdkTimeout)) as UpstreamToolResult;
   })();
   try {

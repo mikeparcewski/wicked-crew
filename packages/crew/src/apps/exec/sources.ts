@@ -42,20 +42,25 @@ export type AppSource =
   | { name: typeof CREW_SOURCE; kind: 'crew'; pin: AppLockSource }
   | { name: string; kind: 'sql'; pin: AppLockSource; config: McpUpstreamConfig; description: StoredDescription | null; allowWrites: boolean; enabled: boolean }
   | { name: string; kind: 'graphql'; pin: AppLockSource; config: McpUpstreamConfig; description: StoredDescription | null; allowWrites: boolean; enabled: boolean }
-  | { name: string; kind: 'rest' | 'mcp-http' | 'mcp-stdio'; pin: AppLockSource; config: McpUpstreamConfig };
+  | { name: string; kind: 'rest' | 'mcp-http' | 'mcp-stdio'; pin: AppLockSource; config: McpUpstreamConfig; enabled: boolean };
 
 /** Look a source up now; `null` = no such source in the registry. */
 export async function lookupSource(registry: McpRegistry | null, name: string): Promise<AppSource | null> {
   if (name === CREW_SOURCE) return { name: CREW_SOURCE, kind: 'crew', pin: CREW_PIN };
   if (registry === null) return null;
-  const config = await registry.inspectTarget(name);
-  if (config === null) return null;
+  // One read of the store: the config, its kind and (for a tool server) its switch belong together (codex r4).
+  const snap = await registry.snapshot(name);
+  if (snap === null) return null;
+  const config = snap.config;
   if (config.kind === 'sql' || config.kind === 'graphql') {
+    // Everything of a data source (its kind included) comes from this one read (codex r5): a save between the
+    // two reads cannot pair one record's kind with another's config.
     const s = await registry.source(name);
     const base = { name, pin: pinOf(s.config), config: s.config, description: s.description, allowWrites: s.allowWrites, enabled: s.enabled };
-    return config.kind === 'sql' ? { ...base, kind: 'sql' } : { ...base, kind: 'graphql' };
+    return s.config.kind === 'sql' ? { ...base, kind: 'sql' } : { ...base, kind: 'graphql' };
   }
-  return { name, kind: config.kind, pin: pinOf(config), config };
+  // A server switched off is part of the snapshot for every kind (codex r2 on the write path).
+  return { name, kind: config.kind, pin: pinOf(config), config, enabled: snap.enabled };
 }
 
 /** Whether a query of `kind` reads a source of this kind. */

@@ -12,6 +12,26 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **Apps: actions run (api-types 0.178.0, DES-APPS-001 §7.3, §7.4, §9.4, slice K2b).** The action routes serve and
+  `capabilities.apps.actions` is true: `POST /apps/:app/actions/:id/grant` (a person, once per action version),
+  `DELETE …/grant`, `GET …/grant`, `POST …/prepare` (the card, generated from the resolved operation, and a record that
+  expires in 2 minutes), `POST …/run` (the record, once) and `GET …/actions/records/:id` (a lost response). A grant
+  binds the action hash, the contract hash and the source descriptor; any change withdraws it, and turning a source's
+  Allow writes off withdraws its row-write grants. Prepare and run each recheck the receipt, the grant, the descriptor,
+  Allow writes and `APPS_READ_ONLY`; the move to `running` is persisted before the call, and a record left `running`
+  by a stopped daemon becomes `unknown` at the next start (nothing is ever re-run). Every run writes one
+  `apps.action.ran` audit line with no values, and invalidates the app's read cache. **API actions** call one REST
+  operation, MCP write tool or GraphQL mutation with exactly the card's values. **Postgres row writes** (§7.4 rev 11):
+  granting needs Allow writes on, the table safety check passing and the login's privileges (the exact missing
+  `GRANT`s are named); prepare re-runs the check, and the database says whether each value survives its column's
+  full type (P28); the run is one fresh connection: `session_replication_role` must be `origin`, `LOCK TABLE ONLY …
+  IN SHARE ROW EXCLUSIVE MODE`, the safety check by the locked relation's oid against the granted fingerprint, `SET
+  CONSTRAINTS ALL IMMEDIATE`, then the generated statement (`ONLY`, quoted identifiers, base-type casts, returning the
+  written relation's row type and one flag per key and value), committed only for exactly one row of the locked
+  table with every flag true. Row writes also need `pg_catalog` as initdb left it: the table safety check refuses
+  while any non-superuser role can create in it (`catalog_create`) or any function, operator or type created after
+  initdb is there (`catalog_object`). The probes P1-P45 are permanent tests (`tests/apps-pgwrite-probes.test.ts`) on
+  Postgres 16 and 17 in CI.
 - **Apps: queries run (api-types 0.177.0, DES-APPS-001 §7.2, §7.5, slice K2b).** `POST /apps/:app/query` runs one
   named query of an accepted version and `capabilities.apps.query` is true. Its parameters are validated against the
   query's schema; viewer-bound ones are filled by crew (studio with auth off: your global git `user.email` and
@@ -94,6 +114,11 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **A Postgres backend terminated mid-read no longer takes the daemon down.** postgres.js's `begin()` sends ROLLBACK
+  on a connection that has already closed, which throws inside its own timers; crew's process guard then exits on the
+  uncaught exception, so a database restart or `pg_terminate_backend` during a source read stopped the daemon. Every
+  Postgres transaction crew runs (reads, describes, safety checks, row writes) is now run by hand on one connection,
+  and nothing is sent, or sent to a new connection, once that connection has closed.
 - **One dialer for every connection crew makes to a source (api-types 0.174.0, DES-APPS-001 §5.2, S10).** A `rest`
   server's OpenAPI document was fetched before any address was looked at (`mcp/rest.ts`, then `restEgress` resolved the
   base URL's host separately), its tool calls and every `mcp-http` request used plain `fetch` with no address check,

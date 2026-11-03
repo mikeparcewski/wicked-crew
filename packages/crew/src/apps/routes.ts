@@ -7,7 +7,9 @@
  *    made on (`409 stale_base`); while a turn runs, `409 turn_in_flight`.
  *  - `POST /apps/:app/query` (observer, a person): the executor (K2b, `exec/executor.ts`) runs one named
  *    query of an accepted version; without one, the receipt and the query are checked, then `501`.
- *  - actions (prepare, run, records, grant, revoke) and publish (HUMAN operator): `501` after the human check.
+ *  - actions (prepare, run, records, grant, revoke; HUMAN operator): the write path (K2b, `actions/`) when the
+ *    daemon has one, else `501` after the human check; `GET …/actions/:id/grant` (observer) reads a grant.
+ *    Publish: `501` after the human check.
  *  - `POST /apps/:app/turns` (operator): launch an `apps-turn` run and hold the app (`501` while this daemon
  *    has no launcher).
  *  - `POST /apps/check {token, app, commit}`: the `apps_check` Tool's route, authenticated by the unit's
@@ -28,6 +30,7 @@ import type { Actor, AppEditOp, AppErrorBody } from '../core/types.js';
 import { APP_NAMED_ID_RE, parseSpec } from './spec.js';
 import { APP_SLUG_RE, AppStore, AppStoreError } from './store.js';
 import { QUERY_TEXT_MAX_BYTES } from './check.js';
+import { AppWriteError, type AppWritePath } from './actions/write-path.js';
 import { AppExecError, type AppExecutor } from './exec/executor.js';
 import { AppGitError } from './git.js';
 
@@ -51,6 +54,8 @@ export interface AppRoutesDeps {
   verifyUnitToken?: (token: string) => Promise<{ runId: string } | null>;
   /** (K2b) The executor; absent = the query route checks the receipt and answers 501. */
   executor?: AppExecutor;
+  /** (K2b) The write path; absent = the action routes answer 501 after the human check. */
+  writePath?: AppWritePath;
 }
 
 const actorOf = (req: FastifyRequest): Actor => req.actor ?? LOCAL_ACTOR;
@@ -74,7 +79,7 @@ function overLong(body: unknown, key: string, max: number): boolean {
 
 function fail(reply: FastifyReply, err: unknown): FastifyReply {
   if (err instanceof AppStoreError) return reply.code(err.status).send({ code: err.code, error: err.message, ...err.extra });
-  if (err instanceof AppExecError) {
+  if (err instanceof AppExecError || err instanceof AppWriteError) {
     if (err.extra.retryAfterMs !== undefined) void reply.header('retry-after', String(Math.max(1, Math.ceil(err.extra.retryAfterMs / 1000))));
     return reply.code(err.status).send({ code: err.code, error: err.message, ...err.extra });
   }
@@ -100,6 +105,9 @@ export const AppRestoreSchema = z.object({ base, version }).strict();
 export const AppQuerySchema = z.object({ version, query: z.string().regex(APP_NAMED_ID_RE), params: z.record(z.unknown()).optional() }).strict();
 export const AppTurnSchema = z.object({ base, message: z.string().min(1).max(8000), about: z.array(z.string().min(1).max(64)).max(20).optional() }).strict();
 /** `commit`: the builder's candidate COMMIT in the app repo (crew reads its tree and writes the lock on it). */
+export const AppActionPrepareSchema = z.object({ version, params: z.record(z.unknown()).optional() }).strict();
+export const AppActionRunSchema = z.object({ record: z.string().uuid() }).strict();
+export const AppActionGrantSchema = z.object({ version }).strict();
 export const AppsCheckSchema = z.object({ token: z.string().min(1).max(4096), app: slugParam, commit: z.string().regex(/^[0-9a-fA-F]{40}$/), manifest: z.unknown().optional() }).strict();
 
 export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): void {
@@ -261,7 +269,8 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
     },
   );
 
-  // The write path and publish are later slices; the boundary already holds: a human operator only.
+  // The write path (K2b) when this daemon has one; publish is a later slice. The boundary holds either way:
+  // a human operator only.
   const stub = (method: 'POST' | 'GET' | 'DELETE', path: string, what: string): void => {
     app.route({
       method,
@@ -274,11 +283,91 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
       },
     });
   };
-  stub('POST', '/actions/:id/prepare', 'prepare an action');
-  stub('POST', '/actions/:id/run', 'run an action');
-  stub('GET', '/actions/records/:id', 'read an action record');
-  stub('POST', '/actions/:id/grant', 'grant an action');
-  stub('DELETE', '/actions/:id/grant', 'revoke an action');
+  const wp = deps.writePath;
+  const actionId = (req: FastifyRequest, reply: FastifyReply): string | null => {
+    const id = (req.params as { id?: string }).id;
+    if (typeof id === 'string' && APP_NAMED_ID_RE.test(id)) return id;
+    void refuse(reply, 404, { code: 'unknown_action', error: `no action ${JSON.stringify(id)}` });
+    return null;
+  };
+  if (wp === undefined) {
+    stub('POST', '/actions/:id/prepare', 'prepare an action');
+    stub('POST', '/actions/:id/run', 'run an action');
+    stub('GET', '/actions/records/:id', 'read an action record');
+    stub('POST', '/actions/:id/grant', 'grant an action');
+    stub('DELETE', '/actions/:id/grant', 'revoke an action');
+  } else {
+    const codes = [200, 400, 403, 404, 409, 429, 502, 503];
+    app.post(`${V}/apps/:app/actions/:id/prepare`, { config: { manifest: { requestType: 'AppActionPrepareBody', responseType: 'AppActionPrepareResponse', statusCodes: codes } } }, async (req, reply) => {
+      if (!humanOnly(req, reply, 'prepare an action')) return reply;
+      const slug = slugOf(req, reply);
+      if (slug === null) return reply;
+      const id = actionId(req, reply);
+      if (id === null) return reply;
+      const parsed = AppActionPrepareSchema.safeParse(req.body);
+      if (!parsed.success) return badRequest(reply, parsed.error);
+      try {
+        return await wp.prepareAction(slug, id, { version: parsed.data.version, ...(parsed.data.params !== undefined ? { params: parsed.data.params } : {}), actor: actorOf(req) });
+      } catch (err) {
+        return fail(reply, err);
+      }
+    });
+    app.post(`${V}/apps/:app/actions/:id/run`, { config: { manifest: { requestType: 'AppActionRunBody', responseType: 'AppActionRunResponse', statusCodes: codes } } }, async (req, reply) => {
+      if (!humanOnly(req, reply, 'run an action')) return reply;
+      const slug = slugOf(req, reply);
+      if (slug === null) return reply;
+      const id = actionId(req, reply);
+      if (id === null) return reply;
+      const parsed = AppActionRunSchema.safeParse(req.body);
+      if (!parsed.success) return badRequest(reply, parsed.error);
+      try {
+        return await wp.runAction(slug, id, { record: parsed.data.record, actor: actorOf(req) });
+      } catch (err) {
+        return fail(reply, err);
+      }
+    });
+    app.get(`${V}/apps/:app/actions/records/:id`, { config: { manifest: { responseType: 'AppActionRecordView', statusCodes: [200, 403, 404] } } }, async (req, reply) => {
+      if (!humanOnly(req, reply, 'read an action record')) return reply;
+      const slug = slugOf(req, reply);
+      if (slug === null) return reply;
+      try {
+        return wp.recordView(slug, String((req.params as { id?: string }).id ?? ''), actorOf(req));
+      } catch (err) {
+        return fail(reply, err);
+      }
+    });
+    app.post(`${V}/apps/:app/actions/:id/grant`, { config: { manifest: { requestType: 'AppActionGrantBody', responseType: 'AppActionGrantResponse', statusCodes: codes } } }, async (req, reply) => {
+      if (!humanOnly(req, reply, 'grant an action')) return reply;
+      const slug = slugOf(req, reply);
+      if (slug === null) return reply;
+      const id = actionId(req, reply);
+      if (id === null) return reply;
+      const parsed = AppActionGrantSchema.safeParse(req.body);
+      if (!parsed.success) return badRequest(reply, parsed.error);
+      try {
+        return { grant: await wp.grant(slug, id, { version: parsed.data.version, actor: actorOf(req) }) };
+      } catch (err) {
+        return fail(reply, err);
+      }
+    });
+    app.delete(`${V}/apps/:app/actions/:id/grant`, { config: { manifest: { responseType: 'AppActionRevokeResponse', statusCodes: [200, 403, 404] } } }, async (req, reply) => {
+      if (!humanOnly(req, reply, 'revoke an action')) return reply;
+      const slug = slugOf(req, reply);
+      if (slug === null) return reply;
+      const id = actionId(req, reply);
+      if (id === null) return reply;
+      return { revoked: await wp.revoke(slug, id, actorOf(req)) };
+    });
+    app.get(`${V}/apps/:app/actions/:id/grant`, { config: { manifest: { responseType: 'AppActionGrantResponse', statusCodes: [200, 404] } } }, async (req, reply) => {
+      const slug = slugOf(req, reply);
+      if (slug === null) return reply;
+      const id = actionId(req, reply);
+      if (id === null) return reply;
+      const g = wp.getGrant(slug, id);
+      if (g === null) return refuse(reply, 404, { code: 'not_granted', error: `action ${id} of ${slug} holds no grant` });
+      return { grant: g };
+    });
+  }
   stub('POST', '/publish', 'publish an app');
 
   app.post(

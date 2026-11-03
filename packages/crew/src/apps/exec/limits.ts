@@ -26,14 +26,15 @@ export class AppLimits {
   constructor(private readonly now: () => number = Date.now) {}
 
   /** Count one call by `who` in `bucket` against `perMinute`; throws `RateLimited` past it. */
-  rate(bucket: 'query' | 'action', app: string, who: string): void {
-    const limit = bucket === 'query' ? QUERY_LIMITS.perMinute : QUERY_LIMITS.actionsPerMinute;
+  rate(bucket: 'query' | 'action' | 'prepare', app: string, who: string): void {
+    // A run is an action (20 a minute); preparing a card costs a check and a read, bounded like a query.
+    const limit = bucket === 'action' ? QUERY_LIMITS.actionsPerMinute : QUERY_LIMITS.perMinute;
     const key = `${bucket}\u0000${app}\u0000${who}`;
     const t = this.now();
     const w = (this.windows.get(key) ?? []).filter((x) => t - x < 60_000);
     if (w.length >= limit) {
       this.windows.set(key, w);
-      throw new RateLimited(`at most ${limit} ${bucket === 'query' ? 'queries' : 'actions'} a minute per viewer in this app`, 60_000 - (t - w[0]!));
+      throw new RateLimited(`at most ${limit} ${bucket === 'query' ? 'queries' : bucket === 'action' ? 'action runs' : 'prepared actions'} a minute per viewer in this app`, 60_000 - (t - w[0]!));
     }
     w.push(t);
     this.windows.set(key, w);

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.177.0",
+  "apiTypesVersion": "0.178.0",
   "endpoints": [
     {
       "method": "GET",
@@ -51,55 +51,80 @@
       "method": "DELETE",
       "path": "/api/v1/apps/:app/actions/:id/grant",
       "requestType": null,
-      "responseType": null,
+      "responseType": "AppActionRevokeResponse",
       "statusCodes": [
+        200,
         403,
-        404,
-        501
+        404
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/apps/:app/actions/:id/grant",
+      "requestType": null,
+      "responseType": "AppActionGrantResponse",
+      "statusCodes": [
+        200,
+        404
       ]
     },
     {
       "method": "POST",
       "path": "/api/v1/apps/:app/actions/:id/grant",
-      "requestType": null,
-      "responseType": null,
+      "requestType": "AppActionGrantBody",
+      "responseType": "AppActionGrantResponse",
       "statusCodes": [
+        200,
+        400,
         403,
         404,
-        501
+        409,
+        429,
+        502,
+        503
       ]
     },
     {
       "method": "POST",
       "path": "/api/v1/apps/:app/actions/:id/prepare",
-      "requestType": null,
-      "responseType": null,
+      "requestType": "AppActionPrepareBody",
+      "responseType": "AppActionPrepareResponse",
       "statusCodes": [
+        200,
+        400,
         403,
         404,
-        501
+        409,
+        429,
+        502,
+        503
       ]
     },
     {
       "method": "POST",
       "path": "/api/v1/apps/:app/actions/:id/run",
-      "requestType": null,
-      "responseType": null,
+      "requestType": "AppActionRunBody",
+      "responseType": "AppActionRunResponse",
       "statusCodes": [
+        200,
+        400,
         403,
         404,
-        501
+        409,
+        429,
+        502,
+        503
       ]
     },
     {
       "method": "GET",
       "path": "/api/v1/apps/:app/actions/records/:id",
       "requestType": null,
-      "responseType": null,
+      "responseType": "AppActionRecordView",
       "statusCodes": [
+        200,
         403,
-        404,
-        501
+        404
       ]
     },
     {
