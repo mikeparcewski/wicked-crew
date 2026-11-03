@@ -43,7 +43,7 @@ const TEXT_TYPES = { crewText: { to: 25, from: [1082, 1083, 1114, 1184, 1266, 11
  * A postgres.js client for one source, one connection, closed by the caller (`end`). `readOnly`
  * false is for the row-write path (K2b), which opens its own transaction; reads never use it.
  */
-export function pgClient(args: SqlConnectArgs, opts: { deadlineMs?: number; readOnly?: boolean } = {}): PgSql {
+export function pgClient(args: SqlConnectArgs, opts: { deadlineMs?: number; readOnly?: boolean; signal?: AbortSignal } = {}): PgSql {
   const { source, password, policy, dial } = args;
   if (source.driver !== 'postgres') throw new Error('pgClient is for a postgres source');
   const deadlineMs = opts.deadlineMs ?? STATEMENT_DEADLINE_MS;
@@ -84,7 +84,12 @@ export function pgClient(args: SqlConnectArgs, opts: { deadlineMs?: number; read
     connection: params,
     types: TEXT_TYPES as never,
     socket: async () => {
-      const { socket, target } = await dialTcp(pinned ?? source.host, source.port, policy, dial ?? {});
+      // A connection whose read has ended is never made, and one that arrives late is closed at once.
+      const { socket, target } = await dialTcp(pinned ?? source.host, source.port, policy, { ...(dial ?? {}), ...(opts.signal !== undefined ? { signal: opts.signal } : {}) });
+      if (opts.signal?.aborted === true) {
+        socket.destroy();
+        throw new SourceQueryError(null, 'timeout', 'the read ended before its connection was made');
+      }
       pinned ??= target.address;
       if (source.tls === 'disable' && !plaintextAllowed(target.cls, policy)) {
         socket.destroy();
@@ -167,6 +172,8 @@ export interface RelationExpectation {
   kinds: ReadonlyArray<'table' | 'partitioned' | 'view' | 'matview'>;
   /** A plain read of it must not reach a foreign table (it was read without ONLY). */
   noForeignBelow: boolean;
+  /** The columns the policy judged the query against (the described catalog's): each must still exist. */
+  columns?: readonly string[];
 }
 
 /** `"schema"."name"`, quoted for SQL. */
@@ -174,27 +181,28 @@ const qualified = (schema: string, name: string): string => `"${schema.replace(/
 
 /**
  * Before a read runs, every relation it names is checked against the live catalog: still there,
- * still of an accepted kind (a table since replaced by a view or a foreign table is refused), and,
- * when read without ONLY, with no foreign table among its partitions or children. The stored catalog
- * the policy used may be stale; the source's own catalog is not.
+ * still of an accepted kind (a table since replaced by a view or a foreign table is refused), with
+ * the columns the policy judged against, and, when read without ONLY, with no foreign table among its
+ * partitions or children. The stored catalog the policy used may be stale; the source's own is not.
  *
- * Each relation is LOCKed (ACCESS SHARE, what the read takes anyway) before it is checked, and the
- * lock is held to the end of the transaction: a concurrent DROP, RENAME or CREATE OR REPLACE waits
- * for the read, so the relation checked is the one the statement reads.
+ * Each relation is first held with the lock the read takes anyway (ACCESS SHARE), by PREPARING a
+ * fixed `SELECT FROM` it (Parse + Describe, never executed). The lock lasts to the end of the
+ * transaction, so a concurrent DROP, RENAME or CREATE OR REPLACE waits for the read and the relation
+ * checked is the one the statement reads. Preparing needs no table privilege (a column-level grant
+ * reads fine), takes materialized views, and locks only the named relation, not its children.
  */
 async function pgExpectRelations(tx: postgres.TransactionSql<Record<string, never>>, expect: readonly RelationExpectation[]): Promise<void> {
   for (const e of expect) {
     try {
-      // LOCK takes tables, partitioned tables and views; a materialized view is checked unlocked.
-      if (!e.kinds.includes('matview')) await tx.unsafe(`LOCK TABLE ${qualified(e.schema, e.name)} IN ACCESS SHARE MODE`);
+      await tx.unsafe(`SELECT FROM ${qualified(e.schema, e.name)}`).describe();
     } catch (err) {
-      // Gone (42P01), or now a kind LOCK refuses, such as a foreign table (42809): changed.
-      if ((err as { code?: unknown })?.code === '42P01' || (err as { code?: unknown })?.code === '42809') {
-        throw new SourceQueryError(null, 'refused', `${e.schema}.${e.name} changed at the source (it is gone or no longer a table): describe the source again`);
+      // Gone (42P01): changed.
+      if ((err as { code?: unknown })?.code === '42P01') {
+        throw new SourceQueryError(null, 'refused', `${e.schema}.${e.name} changed at the source (it is gone): describe the source again`);
       }
       throw err;
     }
-    const rows = await tx.unsafe<Array<{ relkind: string; foreign_below: boolean }>>(
+    const rows = await tx.unsafe<Array<{ relkind: string; foreign_below: boolean; cols: string[] }>>(
       `WITH RECURSIVE t AS (
          SELECT c.oid, c.relkind FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2
        ), d(child) AS (
@@ -202,7 +210,9 @@ async function pgExpectRelations(tx: postgres.TransactionSql<Record<string, neve
          UNION SELECT i.inhrelid FROM d JOIN pg_catalog.pg_inherits i ON i.inhparent = d.child
        )
        SELECT t.relkind::pg_catalog.text AS relkind,
-              EXISTS (SELECT 1 FROM d JOIN pg_catalog.pg_class c ON c.oid = d.child WHERE c.relkind = 'f') AS foreign_below
+              EXISTS (SELECT 1 FROM d JOIN pg_catalog.pg_class c ON c.oid = d.child WHERE c.relkind = 'f') AS foreign_below,
+              pg_catalog.array_to_json(ARRAY(SELECT a.attname::pg_catalog.text FROM pg_catalog.pg_attribute a
+                 WHERE a.attrelid = t.oid AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum)) AS cols
          FROM t`,
       [e.schema, e.name],
     );
@@ -212,6 +222,13 @@ async function pgExpectRelations(tx: postgres.TransactionSql<Record<string, neve
       throw new SourceQueryError(null, 'refused', `${e.schema}.${e.name} changed at the source (it is ${kind ?? 'gone'} now): describe the source again`);
     }
     if (e.noForeignBelow && live?.foreign_below === true) throw new SourceQueryError(null, 'refused', `${e.schema}.${e.name} now has a foreign table below it: describe the source again`);
+    // A column renamed or dropped since the describe: a reference the policy accepted as a column
+    // could now be read by Postgres as a function on the row. (A column added since is harmless: the
+    // policy refuses a reference to a column it does not know.)
+    const liveCols = new Set(live?.cols ?? []);
+    if (e.columns !== undefined && !e.columns.every((c) => liveCols.has(c))) {
+      throw new SourceQueryError(null, 'refused', `${e.schema}.${e.name}'s columns changed at the source: describe the source again`);
+    }
   }
 }
 
@@ -224,7 +241,8 @@ export async function pgRead(args: SqlConnectArgs, text: string, params: unknown
   const maxRows = opts.maxRows ?? READ_MAX_ROWS;
   const started = Date.now();
   const sourceTimeout = opts.sourceTimeoutMs ?? deadlineMs;
-  const sql = pgClient(args, { deadlineMs: sourceTimeout });
+  const ended = new AbortController();
+  const sql = pgClient(args, { deadlineMs: sourceTimeout, signal: ended.signal });
   let cancelled = false;
   // ONE absolute deadline for the whole read, armed at entry: connecting, BEGIN, the live relation
   // checks, every cursor batch and the type lookup all count (statement_timeout restarts on each
@@ -233,6 +251,9 @@ export async function pgRead(args: SqlConnectArgs, text: string, params: unknown
   let q: { cancel: () => unknown } | null = null;
   const stop = (): void => {
     cancelled = true;
+    // Still connecting: no connection may be made from now. Running: the cancel request needs its
+    // own (pinned) connection, so new connections stay allowed until the read has ended.
+    if (q === null) ended.abort();
     if (q !== null) void Promise.resolve(q.cancel()).catch(() => undefined);
     setTimeout(() => void sql.end({ timeout: 0 }).catch(() => undefined), q === null ? 0 : 1_000).unref();
   };
@@ -271,6 +292,8 @@ export async function pgRead(args: SqlConnectArgs, text: string, params: unknown
     throw pgError(err);
   } finally {
     clearTimeout(guard);
+    opts.signal?.removeEventListener('abort', stop);
+    ended.abort();
     await closeQuietly(sql);
   }
 }

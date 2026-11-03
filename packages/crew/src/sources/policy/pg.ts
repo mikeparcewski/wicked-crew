@@ -74,10 +74,12 @@ const DATA_FIELDS = new Set(['location', 'stmt_location', 'stmt_len']);
 interface Scope {
   ctes: Map<string, string[]>;
   range: Map<string, string[]>;
+  /** The level's FROM output in order (what `*` expands to): joins merged as Postgres merges them. */
+  from: string[];
   parent: Scope | null;
 }
 
-const level = (parent: Scope | null, ctes: Map<string, string[]> = new Map()): Scope => ({ ctes, range: new Map(), parent });
+const level = (parent: Scope | null, ctes: Map<string, string[]> = new Map()): Scope => ({ ctes, range: new Map(), from: [], parent });
 
 function cteColumns(scope: Scope | null, name: string): string[] | undefined {
   for (let s = scope; s !== null; s = s.parent) {
@@ -95,8 +97,11 @@ function rangeColumns(scope: Scope | null, qualifier: string): string[] | undefi
   return undefined;
 }
 
-/** An alias column list renames the first columns; the rest keep their names. */
-const renamed = (cols: readonly string[], alias: readonly string[]): string[] => [...alias, ...cols.slice(alias.length)];
+/** An alias column list renames the first columns; the rest keep their names. A longer list names columns that do not exist. */
+function renamed(cols: readonly string[], alias: readonly string[]): string[] {
+  if (alias.length > cols.length) refuse('column', `an alias names ${alias.length} columns, but the relation has ${cols.length}`);
+  return [...alias, ...cols.slice(alias.length)];
+}
 
 /** A raw alias's name and column list, if the node has one. */
 function aliasOf(f: Json, key = 'alias'): { name: string; cols: string[] } | null {
@@ -201,7 +206,7 @@ class Walker {
     const from = f['fromClause'];
     if (from !== undefined) {
       if (!Array.isArray(from)) refuse('syntax', 'SelectStmt.fromClause is not a list');
-      for (const item of from as unknown[]) this.fromItem(item, inner);
+      for (const item of from as unknown[]) inner.from.push(...this.fromItem(item, inner));
     }
     if (f['distinctClause'] !== undefined) {
       // `SELECT DISTINCT` is a list holding one empty node; `DISTINCT ON (…)` lists expressions.
@@ -238,12 +243,11 @@ class Walker {
     const out: string[] = [];
     for (const t of (f['targetList'] as unknown[] | undefined) ?? []) {
       const [, tf] = unwrap(t);
-      if (typeof tf['name'] === 'string') {
-        out.push(tf['name']);
-        continue;
-      }
       const star = this.starColumns(tf['val'], inner);
-      out.push(...(star ?? [figureName(tf['val']) ?? '?column?']));
+      // Postgres expands `q.*` into q's columns and never applies an alias to it: refused rather than guessed.
+      if (star !== null && typeof tf['name'] === 'string') refuse('syntax', `an alias on ${tf['name']} = *: a star is not one column`);
+      if (typeof tf['name'] === 'string') out.push(tf['name']);
+      else out.push(...(star ?? [figureName(tf['val']) ?? '?column?']));
     }
     return out;
   }
@@ -253,40 +257,46 @@ class Walker {
     if (!isObj(v) || !isObj(v['ColumnRef'])) return null;
     const parts = ((v['ColumnRef']['fields'] as unknown[] | undefined) ?? []).map((p) => (isObj(p) && isObj(p['String']) ? String(p['String']['sval']) : '*'));
     if (parts[parts.length - 1] !== '*') return null;
-    if (parts.length === 1) return [...scope.range.values()].flat();
+    if (parts.length === 1) return [...scope.from];
     return rangeColumns(scope, parts[parts.length - 2] as string) ?? [];
   }
 
-  /** One FROM item: walked, and added to the level's FROM items under the name a reference uses. */
-  private fromItem(n: unknown, scope: Scope): void {
+  /**
+   * One FROM item: walked, and added to the level's FROM items under the name a reference uses.
+   * Answers the item's output columns in order (what `*` and an alias column list see).
+   */
+  private fromItem(n: unknown, scope: Scope): string[] {
     const [type, f] = unwrap(n);
     switch (type) {
       case 'RangeVar': {
         const cols = this.relation(f, scope);
         this.fields(type, f, { schemaname: 'data', relname: 'data', inh: 'data', relpersistence: 'data', alias: (v) => this.alias(v) }, scope);
         const a = aliasOf(f);
-        scope.range.set(a?.name ?? String(f['relname'] ?? ''), renamed(cols, a?.cols ?? []));
-        return;
+        const out = renamed(cols, a?.cols ?? []);
+        scope.range.set(a?.name ?? String(f['relname'] ?? ''), out);
+        return out;
       }
       case 'RangeSubselect': {
         if (this.opts.expressionOnly === true) refuse('syntax', 'a subquery is outside a CHECK expression');
-        let out: string[] = [];
-        this.fields(type, f, { lateral: 'data', subquery: (v) => (out = this.select(v, scope)), alias: (v) => this.alias(v) }, scope);
+        let sub: string[] = [];
+        this.fields(type, f, { lateral: 'data', subquery: (v) => (sub = this.select(v, scope)), alias: (v) => this.alias(v) }, scope);
         const a = aliasOf(f);
-        if (a !== null) scope.range.set(a.name, renamed(out, a.cols));
-        return;
+        const out = renamed(sub, a?.cols ?? []);
+        if (a !== null) scope.range.set(a.name, out);
+        return out;
       }
       case 'JoinExpr': {
-        strings(f['usingClause']);
         const before = new Set(scope.range.keys());
+        let left: string[] = [];
+        let right: string[] = [];
         this.fields(
           type,
           f,
           {
             jointype: 'data',
             isNatural: 'data',
-            larg: (v) => this.fromItem(v, scope),
-            rarg: (v) => this.fromItem(v, scope),
+            larg: (v) => (left = this.fromItem(v, scope)),
+            rarg: (v) => (right = this.fromItem(v, scope)),
             usingClause: 'data',
             join_using_alias: (v) => this.alias(v),
             quals: 'data', // walked below, once both sides are in scope
@@ -296,17 +306,18 @@ class Walker {
           scope,
         );
         if (f['quals'] !== undefined) this.node(f['quals'], scope);
+        // Postgres's join output: the merged (USING / NATURAL) columns once, first, then each side's others.
+        const shared = f['isNatural'] === true ? [...new Set(left.filter((c) => right.includes(c)))] : strings(f['usingClause']);
+        const out = [...shared, ...left.filter((c) => !shared.includes(c)), ...right.filter((c) => !shared.includes(c))];
         const using = aliasOf(f, 'join_using_alias');
-        if (using !== null) scope.range.set(using.name, strings(f['usingClause']));
+        if (using !== null) scope.range.set(using.name, shared);
         const a = aliasOf(f);
-        if (a !== null) {
-          // An aliased join hides the names inside it; only the alias qualifies its columns.
-          const inside = [...scope.range.keys()].filter((k) => !before.has(k));
-          const cols = inside.flatMap((k) => scope.range.get(k) ?? []);
-          for (const k of inside) scope.range.delete(k);
-          scope.range.set(a.name, renamed(cols, a.cols));
-        }
-        return;
+        if (a === null) return out;
+        // An aliased join hides the names inside it; only the alias qualifies its columns.
+        for (const k of [...scope.range.keys()].filter((k) => !before.has(k))) scope.range.delete(k);
+        const named = renamed(out, a.cols);
+        scope.range.set(a.name, named);
+        return named;
       }
       default:
         return refuse('syntax', `${type} is outside the read subset`);

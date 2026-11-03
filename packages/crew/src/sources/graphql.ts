@@ -12,6 +12,7 @@
 import { buildClientSchema, getIntrospectionQuery, type GraphQLSchema, type IntrospectionQuery, Kind, parse, validate } from 'graphql';
 
 import { scrubSecrets } from '../mcp/secrets.js';
+import { UpstreamCallError } from '../mcp/upstream-error.js';
 import { type AddressPolicy, dialFetch, type DialOptions, DialRefusedError } from './dialer.js';
 import { SourceQueryError } from './drivers/types.js';
 
@@ -69,7 +70,8 @@ export async function graphqlPost(src: GraphqlSource, secret: string | null, bod
     // dialer refusal stays itself (a 409 naming why).
     if (err instanceof SourceQueryError || err instanceof DialRefusedError) throw err;
     const name = (err as { name?: unknown })?.name;
-    if (name === 'TimeoutError' || name === 'AbortError') throw new SourceQueryError(null, 'timeout', `the GraphQL endpoint did not answer within ${deadlineMs / 1000} s`);
+    const timedOut = name === 'TimeoutError' || name === 'AbortError' || (err instanceof UpstreamCallError && err.errorClass === 'timeout');
+    if (timedOut) throw new SourceQueryError(null, 'timeout', `the GraphQL endpoint did not answer within ${deadlineMs / 1000} s`);
     throw new SourceQueryError(null, 'connection', scrubSecrets(`the GraphQL endpoint could not be reached: ${err instanceof Error ? err.message : String(err)}`, secrets));
   }
 }
@@ -79,8 +81,13 @@ export async function describeGraphql(src: GraphqlSource, secret: string | null)
   const { status, json } = await graphqlPost(src, secret, { query: getIntrospectionQuery({ descriptions: false }) });
   const data = (json as { data?: IntrospectionQuery } | null)?.data;
   if (status >= 400 || data?.__schema === undefined) throw new SourceQueryError(null, 'source', `introspection failed (HTTP ${status}); the endpoint may disable it`);
-  const schema = buildClientSchema(data);
-  return { introspection: data, catalog: catalogOf(schema) };
+  try {
+    const schema = buildClientSchema(data);
+    return { introspection: data, catalog: catalogOf(schema) };
+  } catch (err) {
+    // The endpoint's own schema words (names it declared) can ride the message: a source error, for a human only.
+    throw new SourceQueryError(null, 'source', `the introspection answer is not a valid schema: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 function catalogOf(schema: GraphQLSchema): GraphqlCatalog {

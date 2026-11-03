@@ -26,6 +26,8 @@ import { type ReadOptions, READ_MAX_ROWS, type SqlDescribe, type SqlReadResult, 
 const RUNNER = `
 import { DatabaseSync, constants } from 'node:sqlite';
 const authorize = ${sqliteAuthorize.toString()};
+// One UTF-8 decoder for the whole request: a character split across two pipe chunks stays one.
+process.stdin.setEncoding('utf8');
 let input = '';
 for await (const chunk of process.stdin) input += chunk;
 const req = JSON.parse(input);

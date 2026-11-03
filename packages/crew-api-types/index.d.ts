@@ -13200,7 +13200,8 @@ export interface SourcePrivilegeReport {
   superuser: boolean;
   /**
    * Not a superuser, and no INSERT/UPDATE/DELETE/TRUNCATE (table or column level) on any visible
-   * table, view (an updatable view writes its table) or foreign table, nor UPDATE on a sequence.
+   * table, view (an updatable view writes its table) or foreign table, nor UPDATE or USAGE
+   * (`nextval`) on a sequence.
    */
   readOnly: boolean;
   tables: Array<{ schema: string; table: string; select: boolean; selectSomeColumns: boolean; insert: boolean; update: boolean; delete: boolean }>;

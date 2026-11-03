@@ -199,6 +199,48 @@ for (const target of MYSQL_TARGETS) {
           await new Promise<void>((r) => proxy.close(() => r()));
         }
       }, 20_000);
+
+      it('one deadline from entry (codex r3): a connection slower than the deadline is a timeout, not a fresh 10 s after it', async () => {
+        const slow = (async (host: string) => {
+          await new Promise((r) => setTimeout(r, 2_500));
+          return host === DB_HOST ? ['127.0.0.1'] : [];
+        }) as ReturnType<typeof countingResolver>;
+        const t0 = Date.now();
+        await expect(mysqlRead(reader(slow), 'SELECT 1 AS one', [], { deadlineMs: 300 })).rejects.toMatchObject({ errorClass: 'timeout' });
+        expect(Date.now() - t0).toBeLessThan(1_500);
+      }, 15_000);
+
+      it('a KILL connection that never gets through its handshake is abandoned when its race is lost (codex r3)', async () => {
+        // The second connection (the killer) reaches a proxy that never answers: no greeting, no handshake.
+        const opened: Array<{ at: number; closedAt: number | null }> = [];
+        const sockets = new Set<Socket>();
+        const proxy = createServer((client) => {
+          sockets.add(client);
+          const rec = { at: Date.now(), closedAt: null as number | null };
+          opened.push(rec);
+          client.on('close', () => (rec.closedAt = Date.now()));
+          client.on('error', () => undefined);
+          if (opened.length === 2) return; // stall
+          const up = connect(db.port, '127.0.0.1');
+          sockets.add(up);
+          up.on('error', () => client.destroy());
+          client.pipe(up);
+          up.pipe(client);
+          client.on('close', () => up.destroy());
+        });
+        await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r));
+        try {
+          const args = { ...reader(), source: { ...reader().source, port: (proxy.address() as AddressInfo).port } };
+          await expect(mysqlRead(args, 'SELECT SUM(a.n + b.n + c.n) AS s FROM big a, big b, big c', [], { deadlineMs: 500 })).rejects.toBeDefined();
+          for (let i = 0; i < 80 && opened[1]?.closedAt == null; i++) await new Promise((r) => setTimeout(r, 100));
+          expect(opened.length).toBe(2);
+          // Closed at the 3 s race, not at mysql2's own 10 s connect timeout.
+          expect((opened[1]?.closedAt ?? Infinity) - (opened[1]?.at ?? 0)).toBeLessThan(6_000);
+        } finally {
+          for (const sk of sockets) sk.destroy();
+          await new Promise<void>((r) => proxy.close(() => r()));
+        }
+      }, 20_000);
     });
   });
 }

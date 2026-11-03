@@ -483,15 +483,44 @@ for (const target of PG_TARGETS) {
         }
       });
 
-      it('C1: one deadline from entry: a connection slower than the deadline is a timeout, not a fresh 10 s after it', async () => {
+      it('C1: one deadline from entry: a connection slower than the deadline is a timeout, not a fresh 10 s after it', { timeout: 15_000 }, async () => {
         const slow = (async (host: string) => {
           await new Promise((r) => setTimeout(r, 2_500));
           return host === DB_HOST ? ['127.0.0.1'] : [];
         }) as ReturnType<typeof countingResolver>;
+        const count = async (): Promise<number> =>
+          Number((await db.admin.unsafe<Array<{ n: string }>>(`SELECT count(*)::text AS n FROM pg_stat_activity WHERE datname = '${db.database}' AND usename = 'apps_reader'`))[0]?.n ?? '0');
+        const before = await count();
         const t0 = Date.now();
         await expect(pgRead(login('apps_reader', 'apps-reader', slow), 'SELECT 1 AS one', [], { deadlineMs: 300 })).rejects.toMatchObject({ errorClass: 'timeout' });
         // Stopped at its deadline while still connecting, not once the 2.5 s connection is up.
         expect(Date.now() - t0).toBeLessThan(1_500);
+        // And the connection that would have arrived late is never made (codex r3).
+        await new Promise((r) => setTimeout(r, 3_000));
+        expect(await count()).toBeLessThanOrEqual(before);
+      });
+
+      it('the relation lock is a prepare (codex r3): a column-level grant reads, ONLY does not wait on a locked child, a renamed column is caught', async () => {
+        await db.admin.unsafe('CREATE TABLE s.cg (id int, secret text); GRANT SELECT (id) ON s.cg TO apps_reader; CREATE TABLE s.cd (id int, note text); GRANT SELECT ON s.cd TO apps_reader');
+        const b = await db.admin.reserve();
+        try {
+          const h = await handle();
+          // SELECT(id) only: LOCK TABLE would need a table privilege; preparing does not.
+          expect((await readSqlQuery(h, 'SELECT id FROM s.cg', [])).rows).toEqual([]);
+          // A child held ACCESS EXCLUSIVE by someone else: a read of ONLY the parent does not wait for it.
+          await b.unsafe('BEGIN');
+          await b.unsafe('LOCK TABLE s.child IN ACCESS EXCLUSIVE MODE');
+          const only = await readSqlQuery(h, 'SELECT id FROM ONLY s.parent', [], { deadlineMs: 3_000 });
+          expect(only.rows).toBeDefined();
+          await b.unsafe('ROLLBACK');
+          // A column renamed since the describe: the policy accepted c.note as a column; it is refused, not read as note(c).
+          await db.admin.unsafe('ALTER TABLE s.cd RENAME COLUMN note TO note2');
+          await expect(readSqlQuery(h, 'SELECT c.note FROM s.cd c', [])).rejects.toThrow(/columns changed at the source/);
+        } finally {
+          await b.unsafe('ROLLBACK').catch(() => undefined);
+          b.release();
+          await db.admin.unsafe('DROP TABLE IF EXISTS s.cg; DROP TABLE IF EXISTS s.cd');
+        }
       });
 
       it('C2: a read with no rows still answers its columns', async () => {
@@ -519,6 +548,9 @@ for (const target of PG_TARGETS) {
         await db.admin.unsafe('CREATE SEQUENCE s.sq; GRANT UPDATE ON SEQUENCE s.sq TO apps_reader');
         try {
           expect((await pgPrivileges(reader())).readOnly).toBe(false);
+          // USAGE alone advances it (nextval): a write too (codex r3).
+          await db.admin.unsafe('REVOKE UPDATE ON SEQUENCE s.sq FROM apps_reader; GRANT USAGE ON SEQUENCE s.sq TO apps_reader');
+          expect((await pgPrivileges(reader())).readOnly).toBe(false);
         } finally {
           await db.admin.unsafe('DROP SEQUENCE s.sq');
         }
@@ -535,6 +567,22 @@ for (const target of PG_TARGETS) {
           expect(f2).not.toBe(f1);
         } finally {
           await db.admin.unsafe('DROP TABLE s.colt; DROP SCHEMA "k1.a" CASCADE; DROP SCHEMA k1 CASCADE');
+        }
+      });
+
+      it('C4 (codex r3): an index-only collation\'s definition and the database collation are in the fingerprint', async () => {
+        await db.admin.unsafe('CREATE SCHEMA k1c; CREATE COLLATION k1c.c2 FROM "C"; CREATE TABLE s.ixc (id int PRIMARY KEY, t text); CREATE INDEX ixc_t ON s.ixc (t COLLATE k1c.c2)');
+        try {
+          const fp = async (): Promise<string> => (await pgTableSafety(reader(), 's', 'ixc')).fingerprint;
+          const f1 = await fp();
+          // A refreshed collation version, as ALTER COLLATION … REFRESH VERSION records after a library upgrade.
+          await db.admin.unsafe("UPDATE pg_catalog.pg_collation SET collversion = 'k1-test' WHERE collname = 'c2' AND collnamespace = 'k1c'::regnamespace");
+          const f2 = await fp();
+          expect(f2).not.toBe(f1);
+          await db.admin.unsafe(`UPDATE pg_catalog.pg_database SET datcollversion = 'k1-test' WHERE datname = '${db.database}'`);
+          expect(await fp()).not.toBe(f2);
+        } finally {
+          await db.admin.unsafe('DROP TABLE s.ixc; DROP SCHEMA k1c CASCADE');
         }
       });
 

@@ -21,7 +21,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
 import type { McpAuthConfig, McpRestMapping, McpToolAnnotations, McpUpstreamKind } from '../core/types.js';
-import { addressPolicyOf, type AddressPolicy, boundFetch, type DialOptions, DialRefusedError, type DialRefusalCode } from '../sources/dialer.js';
+import { addressPolicyOf, type AddressPolicy, boundFetch, type DialOptions, DialRedirectRefusedError, DialRefusedError, type DialRefusalCode } from '../sources/dialer.js';
 import { SourceQueryError } from '../sources/drivers/types.js';
 import { describeSource, type SourceDescription, type SqlSourceConfig } from '../sources/kinds.js';
 import { probeRestServer, type RestEgress } from './rest.js';
@@ -156,12 +156,17 @@ async function probeSourceKind(config: McpUpstreamConfig, secret: string | null,
     const refusal = err instanceof DialRefusedError ? err.code : ((err as { refusal?: unknown })?.refusal as DialRefusalCode | null | undefined) ?? undefined;
     const coded = refusal !== undefined && refusal !== null ? { refusal } : {};
     // The dialer's own words can carry upstream text (a redirect's Location): the code only, words for a human.
-    if (err instanceof DialRefusedError) return scrubSecrets({ ok: false as const, error: `the connection was refused (${err.code})`, sourceDetail: message, ...coded }, secrets);
+    if (err instanceof DialRefusedError) {
+      const where = err instanceof DialRedirectRefusedError && err.location !== null ? ` (to ${err.location})` : '';
+      return scrubSecrets({ ok: false as const, error: `the connection was refused (${err.code})`, sourceDetail: `${message}${where}`, ...coded }, secrets);
+    }
     // A source's own words (a server error, a GraphQL error) are for a human; everyone else gets the class.
     if (err instanceof SourceQueryError) {
       return scrubSecrets({ ok: false as const, error: `the source answered ${err.errorClass}${err.sqlstate !== null ? ` (SQLSTATE ${err.sqlstate})` : ''}`, sourceDetail: message, ...coded }, secrets);
     }
-    return scrubSecrets({ ok: false as const, error: message, ...coded }, secrets);
+    // Anything else is crew's own failure while describing; its words may still quote what the source
+    // sent, so they too are a human's, and everyone else gets a fixed sentence.
+    return scrubSecrets({ ok: false as const, error: 'the source could not be described', sourceDetail: message, ...coded }, secrets);
   }
 }
 

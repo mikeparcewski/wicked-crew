@@ -34,7 +34,7 @@ import { scrubSecrets } from '../mcp/secrets.js';
 import { pgPrivileges } from './catalog/postgres.js';
 import { policyCatalog, type SqlCatalog } from './catalog/types.js';
 import { crewSourceCatalog } from './crew-source.js';
-import { type DialOptions, DialRefusedError } from './dialer.js';
+import { type DialOptions, DialRedirectRefusedError, DialRefusedError } from './dialer.js';
 import { SourceQueryError } from './drivers/types.js';
 import { checkGraphqlRead, type GraphqlCheck, graphqlPost } from './graphql.js';
 import { CREW_SOURCE, describeSource, graphqlSource, sqlConnectArgs } from './kinds.js';
@@ -104,8 +104,11 @@ function fail(reply: FastifyReply, err: unknown, actor: Actor, secrets: readonly
   const say = (message: string, fixed: string): string => (human ? scrubSecrets(message, [...secrets]) : fixed);
   if (err instanceof McpRegistryError) return reply.code(err.status).send({ error: scrubSecrets(err.message, [...secrets]), code: err.code });
   if (err instanceof McpRegistryCorruptError) return reply.code(503).send({ error: err.message, code: 'registry_corrupt' });
-  // The dialer's words can carry upstream text (a redirect's Location): a human gets them, scrubbed.
-  if (err instanceof DialRefusedError) return reply.code(409).send({ error: say(err.message, `the connection was refused (${err.code})`), code: err.code });
+  // A redirect's Location is upstream text: a human gets it, scrubbed; an agent gets the code.
+  if (err instanceof DialRefusedError) {
+    const where = err instanceof DialRedirectRefusedError && err.location !== null ? ` (to ${err.location})` : '';
+    return reply.code(409).send({ error: say(`${err.message}${where}`, `the connection was refused (${err.code})`), code: err.code });
+  }
   if (err instanceof UploadError) return reply.code(err.code === 'too_large' ? 413 : 400).send({ error: err.message, code: err.code });
   if (err instanceof SourceQueryError) {
     const status = err.errorClass === 'refused' ? 409 : err.errorClass === 'timeout' ? 504 : 502;

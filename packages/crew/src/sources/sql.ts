@@ -33,15 +33,19 @@ export class SourcePolicyError extends Error {
 }
 
 /** The live expectations a read checks before it runs: each relation still of an accepted kind. */
-function expectations(h: SqlSourceHandle, keys: readonly string[]): Array<{ schema: string; name: string; kinds: Array<'table' | 'partitioned' | 'view' | 'matview'>; noForeignBelow: boolean }> {
+function expectations(
+  h: SqlSourceHandle,
+  keys: readonly string[],
+): Array<{ schema: string; name: string; kinds: Array<'table' | 'partitioned' | 'view' | 'matview'>; noForeignBelow: boolean; columns: string[] }> {
   const pc = policyCatalog(h.catalog, h.driver === 'sqlite' ? [] : h.viewsAllowed);
   return keys.map((k) => {
     const [schema, name] = k.split('\u0000') as [string, string];
     const kind = pc.relations.get(k);
     const kinds: Array<'table' | 'partitioned' | 'view' | 'matview'> = kind === 'view' || kind === 'matview' ? [kind] : ['table', 'partitioned'];
     // A relation the catalog already knows to have a foreign descendant passed the policy only under
-    // ONLY; any other must not have gained one since the describe.
-    return { schema, name, kinds, noForeignBelow: pc.foreignDescendants?.has(k) !== true };
+    // ONLY; any other must not have gained one since the describe. Its columns must still be the
+    // ones the policy judged against.
+    return { schema, name, kinds, noForeignBelow: pc.foreignDescendants?.has(k) !== true, columns: [...(pc.columns?.get(k) ?? [])] };
   });
 }
 

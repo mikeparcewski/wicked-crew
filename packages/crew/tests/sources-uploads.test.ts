@@ -132,6 +132,9 @@ describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => 
     const up = await ingestUpload('utf8.sqlite', readFileSync(file), { dir });
     const r = await sqliteRead(snapshotPath(up.digest, dir), up.catalog, 'SELECT s FROM t', []);
     expect(r.rows[0]?.[0] === text).toBe(true);
+    // The other way too: a bound value crosses the pipe into the child whole (codex r3).
+    const back = await sqliteRead(snapshotPath(up.digest, dir), up.catalog, 'SELECT count(*) FROM t WHERE s = ?', [text]);
+    expect(back.rows).toEqual([['1']]);
   });
 
   it('node:sqlite reports the FIRST statement as sourceSQL, which the tail check relies on (pi r1)', async () => {

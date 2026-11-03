@@ -149,7 +149,8 @@ export interface PgPrivilegeReport {
   superuser: boolean;
   /**
    * Not a superuser, and no table-level or column-level INSERT/UPDATE/DELETE/TRUNCATE on any visible
-   * table, view (an updatable view writes its table) or foreign table, nor UPDATE on a sequence.
+   * table, view (an updatable view writes its table) or foreign table, nor UPDATE or USAGE (nextval)
+   * on a sequence.
    */
   readOnly: boolean;
   tables: TablePrivileges[];
@@ -179,7 +180,7 @@ export async function pgPrivilegesIn(tx: Tx, writes: readonly DeclaredRowWrite[]
     `SELECT EXISTS (
        SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
         WHERE c.relkind IN ('v', 'f', 'S') AND ${USER_SCHEMAS} AND pg_catalog.has_schema_privilege(n.oid, 'USAGE')
-          AND CASE WHEN c.relkind = 'S' THEN pg_catalog.has_sequence_privilege(c.oid, 'UPDATE')
+          AND CASE WHEN c.relkind = 'S' THEN pg_catalog.has_sequence_privilege(c.oid, 'UPDATE') OR pg_catalog.has_sequence_privilege(c.oid, 'USAGE')
                    ELSE pg_catalog.has_any_column_privilege(c.oid, 'INSERT') OR pg_catalog.has_any_column_privilege(c.oid, 'UPDATE')
                      OR pg_catalog.has_table_privilege(c.oid, 'DELETE') OR pg_catalog.has_table_privilege(c.oid, 'TRUNCATE') END
      ) AS any`,

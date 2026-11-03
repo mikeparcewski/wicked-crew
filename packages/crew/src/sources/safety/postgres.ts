@@ -121,7 +121,7 @@ export async function pgTableSafetyIn(tx: Tx, schema: string, name: string, decl
             a.atttypid::pg_catalog.int8::pg_catalog.text AS typid, ty.typname::pg_catalog.text AS typname, ty.typtype::pg_catalog.text AS typtype,
             tn.nspname::pg_catalog.text AS typschema, (ty.oid < 16384) AS type_builtin, a.attnotnull AS notnull, a.attgenerated::pg_catalog.text AS generated,
             a.attidentity::pg_catalog.text AS identity, pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS default_expr,
-            CASE WHEN co.oid IS NULL THEN '' ELSE pg_catalog.quote_ident(cn.nspname) || '.' || pg_catalog.quote_ident(co.collname) || ' ' || pg_catalog.to_jsonb(co.*)::pg_catalog.text END AS collation
+            CASE WHEN co.oid IS NULL THEN '' ELSE pg_catalog.quote_ident(cn.nspname) || '.' || pg_catalog.quote_ident(co.collname) END AS collation
        FROM pg_catalog.pg_attribute a
        JOIN pg_catalog.pg_type ty ON ty.oid = a.atttypid JOIN pg_catalog.pg_namespace tn ON tn.oid = ty.typnamespace
        LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
@@ -178,6 +178,19 @@ export async function pgTableSafetyIn(tx: Tx, schema: string, name: string, decl
             i.indisprimary AS primary
        FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid JOIN pg_catalog.pg_am am ON am.oid = ic.relam
       WHERE i.indrelid = $1::pg_catalog.oid ORDER BY ic.relname`,
+    [T],
+  );
+  // Every collation the table's columns and indexes use, by its full definition (provider, locale,
+  // determinism, version), and the database's own collation, which the `default` collation means.
+  const [coll] = await q<{ defs: string[]; db: string | null }>(
+    `SELECT pg_catalog.array_to_json(ARRAY(
+              SELECT pg_catalog.to_jsonb(co.*)::pg_catalog.text FROM pg_catalog.pg_collation co
+               WHERE co.oid IN (SELECT a.attcollation FROM pg_catalog.pg_attribute a WHERE a.attrelid = $1::pg_catalog.oid AND a.attnum > 0 AND NOT a.attisdropped
+                                UNION SELECT pg_catalog.unnest(i.indcollation::pg_catalog.oid[]) FROM pg_catalog.pg_index i WHERE i.indrelid = $1::pg_catalog.oid)
+               ORDER BY co.oid)) AS defs,
+            (SELECT pg_catalog.jsonb_object_agg(e.key, e.value ORDER BY e.key)::pg_catalog.text FROM pg_catalog.jsonb_each(pg_catalog.to_jsonb(d.*)) e
+              WHERE e.key IN ('datcollate', 'datctype', 'datlocprovider', 'daticulocale', 'datlocale', 'daticurules', 'datcollversion')) AS db
+       FROM pg_catalog.pg_database d WHERE d.datname = pg_catalog.current_database()`,
     [T],
   );
   const stats = await q<{ name: string; exprs: boolean; def: string }>(
@@ -326,6 +339,7 @@ export async function pgTableSafetyIn(tx: Tx, schema: string, name: string, decl
         table: { schema, name, oid: t.oid, reltype: t.reltype, relkind: t.relkind, partition: t.ispartition, rowSecurity: t.rowsecurity, forceRowSecurity: t.forcerowsecurity, am: t.amname, amBuiltin: t.am_builtin },
         columns: columns.map((c) => ({ name: c.name, type: c.type, typid: c.typid, typtype: c.typtype, typschema: c.typschema, builtin: c.type_builtin, collation: c.collation, notnull: c.notnull, generated: c.generated, identity: c.identity, default: c.default_expr })),
         enums: enumLabels,
+        collations: { defs: coll?.defs ?? [], database: coll?.db ?? null },
         constraints: constraints.map((k) => ({ name: k.name, type: k.contype, def: k.def, deferrable: k.deferrable })),
         foreignKeysIn: fksIn.map((k) => ({ name: k.name, from: k.from, def: k.def })),
         fkOperators: fkOperators.map((o) => [o.con, o.operator, o.op_builtin, o.fn_builtin]),

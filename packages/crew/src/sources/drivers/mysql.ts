@@ -43,9 +43,9 @@ function typeName(f: { columnType?: number; type?: number }): string {
   return code === undefined ? 'unknown' : (names[code] ?? String(code));
 }
 
-async function dialedSocket(args: SqlConnectArgs, pin: string | null): Promise<{ socket: Socket; address: string }> {
+async function dialedSocket(args: SqlConnectArgs, pin: string | null, signal?: AbortSignal): Promise<{ socket: Socket; address: string }> {
   const { source, policy, dial } = args;
-  const { socket, target } = await dialTcp(pin ?? source.host, source.port, policy, dial ?? {});
+  const { socket, target } = await dialTcp(pin ?? source.host, source.port, policy, { ...(dial ?? {}), ...(signal !== undefined ? { signal } : {}) });
   if (source.tls === 'disable' && !plaintextAllowed(target.cls, policy)) {
     socket.destroy();
     throw new DialRefusedError('plaintext_refused', `a MySQL connection without TLS to ${source.host} (${target.address}) is refused: use TLS (VERIFY_IDENTITY), or confirm this ${target.cls} range as plaintext`);
@@ -60,11 +60,35 @@ async function dialedSocket(args: SqlConnectArgs, pin: string | null): Promise<{
 /**
  * One connection for one source, session pinned. The caller ends it. `pin` dials exactly that
  * (already checked) address: the KILL QUERY connection must reach the server running the query.
+ * `signal` abandons the attempt at ANY stage (dialling, the handshake, the session statements): the
+ * stream is destroyed, so nothing is left holding a server slot.
  */
-export async function mysqlConnect(args: SqlConnectArgs, deadlineMs = STATEMENT_DEADLINE_MS, pin: string | null = null): Promise<Connection & { crewAddress?: string }> {
-  const { source, password } = args;
+export async function mysqlConnect(args: SqlConnectArgs, deadlineMs = STATEMENT_DEADLINE_MS, pin: string | null = null, signal?: AbortSignal): Promise<Connection & { crewAddress?: string }> {
+  const { source } = args;
   if (source.driver !== 'mysql') throw new Error('mysqlConnect is for a mysql source');
-  const { socket: stream, address } = await dialedSocket(args, pin);
+  const abandoned = (): SourceQueryError => new SourceQueryError(null, 'timeout', 'the connection was abandoned at its deadline');
+  let stream: Socket;
+  let address: string;
+  try {
+    ({ socket: stream, address } = await dialedSocket(args, pin, signal));
+  } catch (err) {
+    throw signal?.aborted === true ? abandoned() : err;
+  }
+  const onAbort = (): void => void stream.destroy();
+  signal?.addEventListener('abort', onAbort, { once: true });
+  try {
+    if (signal?.aborted === true) throw abandoned();
+    return await connectOn(args, stream, address, deadlineMs);
+  } catch (err) {
+    stream.destroy();
+    throw signal?.aborted === true ? abandoned() : err;
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+  }
+}
+
+async function connectOn(args: SqlConnectArgs, stream: Socket, address: string, deadlineMs: number): Promise<Connection & { crewAddress?: string }> {
+  const { source, password } = args;
   let conn: Connection;
   try {
     conn = await createConnection({
@@ -116,13 +140,18 @@ export function mysqlError(err: unknown): SourceQueryError {
 
 /** Describe `text` with COM_STMT_PREPARE: never executed. Its relations are checked live first (as a read's). */
 export async function mysqlDescribe(args: SqlConnectArgs, text: string, expect?: readonly MysqlRelationExpectation[]): Promise<SqlDescribe> {
-  const conn = await mysqlConnect(args);
+  // One deadline from entry: connecting counts.
+  const started = Date.now();
+  const conn = await connectWithin(args, STATEMENT_DEADLINE_MS);
   // A prepare can wait on a metadata lock: the deadline ends it (the connection is dropped).
   let timedOut = false;
-  const guard = setTimeout(() => {
-    timedOut = true;
-    conn.destroy();
-  }, STATEMENT_DEADLINE_MS);
+  const guard = setTimeout(
+    () => {
+      timedOut = true;
+      conn.destroy();
+    },
+    Math.max(1, STATEMENT_DEADLINE_MS - (Date.now() - started)),
+  );
   try {
     if (expect !== undefined) await mysqlExpectRelations(conn, expect);
     const stmt = await conn.prepare(text);
@@ -146,6 +175,20 @@ export async function mysqlDescribe(args: SqlConnectArgs, text: string, expect?:
 
 /** How long the KILL QUERY connection (and then the KILL) may take before the read's connection is dropped. */
 const KILL_CONNECT_MS = 3_000;
+
+/** A connection inside `deadlineMs` from now (or `signal`): abandoned, never left open, when it takes longer. */
+async function connectWithin(args: SqlConnectArgs, deadlineMs: number, sourceTimeoutMs = deadlineMs, signal?: AbortSignal): Promise<Connection & { crewAddress?: string }> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), deadlineMs);
+  const relay = (): void => ac.abort();
+  signal?.addEventListener('abort', relay, { once: true });
+  try {
+    return await mysqlConnect(args, sourceTimeoutMs, null, ac.signal);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', relay);
+  }
+}
 
 /** What a read expects of its relations, checked live before it runs (as drivers/postgres.ts). */
 export interface MysqlRelationExpectation {
@@ -173,7 +216,9 @@ export async function mysqlRead(args: SqlConnectArgs, text: string, params: unkn
   const deadlineMs = opts.deadlineMs ?? STATEMENT_DEADLINE_MS;
   const maxRows = opts.maxRows ?? READ_MAX_ROWS;
   const started = Date.now();
-  const conn = await mysqlConnect(args, opts.sourceTimeoutMs ?? deadlineMs);
+  // ONE deadline from entry: dialling, the handshake and the session statements count, and an abort
+  // during them abandons the connection.
+  const conn = await connectWithin(args, deadlineMs, opts.sourceTimeoutMs ?? deadlineMs, opts.signal);
   let killed = false;
   let ended = false;
   const kill = async (): Promise<void> => {
@@ -183,7 +228,8 @@ export async function mysqlRead(args: SqlConnectArgs, text: string, params: unkn
     // cannot be had, the read's own connection is dropped as the last resort. A killer connection that
     // arrives after the race was lost is closed at once, never left holding a server slot.
     let raceOver = false;
-    const attempt = mysqlConnect(args, 5_000, conn.crewAddress ?? null).then(
+    const abandon = new AbortController();
+    const attempt = mysqlConnect(args, 5_000, conn.crewAddress ?? null, abandon.signal).then(
       (c) => {
         if (raceOver) {
           c.destroy();
@@ -195,6 +241,8 @@ export async function mysqlRead(args: SqlConnectArgs, text: string, params: unkn
     );
     const killer = await Promise.race([attempt, new Promise<null>((r) => setTimeout(() => r(null), KILL_CONNECT_MS).unref())]);
     raceOver = true;
+    // A killer still connecting (dialling, handshaking, or stuck in a session statement) is abandoned now.
+    if (killer === null) abandon.abort();
     if (killer === null || ended) {
       killer?.destroy();
       conn.destroy();
@@ -211,7 +259,7 @@ export async function mysqlRead(args: SqlConnectArgs, text: string, params: unkn
       killer.destroy();
     }
   };
-  const guard = setTimeout(() => void kill(), deadlineMs);
+  const guard = setTimeout(() => void kill(), Math.max(1, deadlineMs - (Date.now() - started)));
   opts.signal?.addEventListener('abort', () => void kill(), { once: true });
   try {
     await conn.query('START TRANSACTION READ ONLY');

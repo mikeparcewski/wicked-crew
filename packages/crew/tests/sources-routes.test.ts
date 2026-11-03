@@ -223,6 +223,23 @@ describe('review r2 folds (codex): what reaches whom, and what a confirmation bi
     }
   });
 
+  it('S13 (codex r3): a confirmation is bound to the tool\'s saved schema: the same config, a new schema, a stale confirmation', async () => {
+    process.env['WKD_K1_LEAK'] = 'k1-schema-sentinel';
+    const flag = join(base, 'leaky-schema');
+    try {
+      const cfg = { name: 'leaky', kind: 'mcp-stdio', command: process.execPath, args: [LEAKY, flag], auth: { ref: 'env:WKD_K1_LEAK', env: 'TOKEN_A' } };
+      await register(cfg);
+      const named = (await app.inject({ method: 'POST', url: '/api/v1/sources/leaky/test-call', payload: { target: 'peek' } })).json() as Extract<SourceTestCallResponse, { sent: false }>;
+      writeFileSync(flag, 'wide');
+      await register(cfg); // the config is byte-for-byte the same; only the tool's schema changed
+      const stale = await app.inject({ method: 'POST', url: '/api/v1/sources/leaky/test-call', payload: { target: 'peek', confirm: named.requestHash } });
+      expect(stale.statusCode).toBe(409);
+      expect(stale.json()).toMatchObject({ code: 'request_changed' });
+    } finally {
+      delete process.env['WKD_K1_LEAK'];
+    }
+  });
+
   it("a redirect's Location reaches a human only; an agent gets the refusal code (S6)", async () => {
     let redirect = false;
     const front = createServer((req, res) => {
@@ -250,6 +267,15 @@ describe('review r2 folds (codex): what reaches whom, and what a confirmation bi
       actor = LOCAL_ACTOR;
       const humanSees = await app.inject({ method: 'POST', url: '/api/v1/sources/hop/describe' });
       expect(humanSees.json()).toMatchObject({ code: 'redirect_refused' });
+      expect(humanSees.body).toContain('leak-marker-7q'); // the person sees where it pointed
+      // The MCP and REST probes see the same redirect: the dialer's words never carry the Location (codex r3).
+      const url = `http://127.0.0.1:${(front.address() as AddressInfo).port}/mcp`;
+      const mcpProbe = await probeMcpServer({ name: 'm', kind: 'mcp-http', command: null, args: [], url, auth: null, address: { ...LOOP, plaintext: true } }, null);
+      expect(mcpProbe.ok).toBe(false);
+      expect(JSON.stringify(mcpProbe)).not.toContain('leak-marker-7q');
+      const restProbe = await probeMcpServer({ name: 'r', kind: 'rest', command: null, args: [], url, openapiUrl: `${url}/openapi.json`, auth: null, address: { ...LOOP, plaintext: true } }, null);
+      expect(restProbe.ok).toBe(false);
+      expect(JSON.stringify(restProbe)).not.toContain('leak-marker-7q');
     } finally {
       front.closeAllConnections();
       await new Promise<void>((r) => front.close(() => r()));
@@ -309,6 +335,18 @@ describe('review r2 folds (codex): what reaches whom, and what a confirmation bi
     } finally {
       notJson.closeAllConnections();
       await new Promise<void>((r) => notJson.close(() => r()));
+    }
+    // An introspection answer that is not a valid schema: its names stay out of `error` (codex r3).
+    const badSchema = createServer((_req, res) => res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ data: { __schema: { queryType: { name: 'Q_marker_9z' }, types: [] } } })));
+    await new Promise<void>((r) => badSchema.listen(0, '127.0.0.1', r));
+    try {
+      const r = await probeMcpServer({ name: 'g', kind: 'graphql', command: null, args: [], url: `http://127.0.0.1:${(badSchema.address() as AddressInfo).port}/graphql`, auth: null, address: { ...LOOP, plaintext: true } }, null);
+      expect(r.ok).toBe(false);
+      expect((r as { error: string }).error).not.toContain('Q_marker_9z');
+      expect((r as { sourceDetail?: string }).sourceDetail).toContain('Q_marker_9z');
+    } finally {
+      badSchema.closeAllConnections();
+      await new Promise<void>((r) => badSchema.close(() => r()));
     }
   });
 });

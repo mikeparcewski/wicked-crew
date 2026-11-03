@@ -55,6 +55,7 @@ describe('Postgres: qualified column references must name columns (codex r1: fun
     // A renamed column is gone under its old name; a qualifier that is no FROM item is refused.
     expect(await pg('SELECT x.id FROM s.w AS x(a, b)')).toMatchObject({ ok: false, code: 'column' });
     expect(await pg('SELECT x.owner FROM s.w AS x(a)')).toMatchObject({ ok: true });
+    expect(await pg('SELECT x.e FROM s.w AS x(a, b, c, d, e)')).toMatchObject({ ok: false, code: 'column' }); // pi r3: no phantom columns
     expect(await pg('SELECT id.text FROM s.w')).toMatchObject({ ok: false, code: 'column' });
     // Subquery and CTE columns are their output names: real ones pass, made-up ones do not.
     expect(await pg('SELECT q.row_to_json FROM (SELECT w.id AS row_to_json FROM s.w w) q')).toMatchObject({ ok: true });
@@ -69,6 +70,18 @@ describe('Postgres: qualified column references must name columns (codex r1: fun
     // An aliased join hides the names inside it.
     expect(await pg('SELECT j.owner FROM (s.w a JOIN s.v b ON a.id = b.id) AS j')).toMatchObject({ ok: true });
     expect(await pg('SELECT a.owner FROM (s.w a JOIN s.v b ON a.id = b.id) AS j')).toMatchObject({ ok: false, code: 'column' });
+  });
+
+  it('a join is named as Postgres names it: USING/NATURAL columns once, then the rest; a star takes no alias (codex r3)', async () => {
+    // s.w(id, owner) USING (id) s.v(id): output (id, owner); renamed (x, y), so j.owner no longer exists.
+    expect(await pg('SELECT j.y FROM (s.w a JOIN s.v b USING (id)) AS j(x, y)')).toMatchObject({ ok: true });
+    expect(await pg('SELECT j.owner FROM (s.w a JOIN s.v b USING (id)) AS j(x, y)')).toMatchObject({ ok: false, code: 'column' });
+    expect(await pg('SELECT j.z FROM (s.w a NATURAL JOIN s.v b) AS j(x, y, z)')).toMatchObject({ ok: false, code: 'column' }); // two columns, not three
+    // A USING alias names only the merged columns, and adds none to a star.
+    expect(await pg('SELECT u.id FROM s.w a JOIN s.v b USING (id) AS u')).toMatchObject({ ok: true });
+    expect(await pg('SELECT q.id, q.owner FROM (SELECT * FROM s.w a JOIN s.v b USING (id) AS u) q(i, o)')).toMatchObject({ ok: false, code: 'column' });
+    expect(await pg('SELECT q.i, q.o FROM (SELECT * FROM s.w a JOIN s.v b USING (id) AS u) q(i, o)')).toMatchObject({ ok: true });
+    expect(await pg('SELECT q.display FROM (SELECT w.* AS display FROM s.w w) q')).toMatchObject({ ok: false, code: 'syntax' });
   });
 });
 
