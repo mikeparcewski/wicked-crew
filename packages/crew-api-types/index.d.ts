@@ -15076,6 +15076,38 @@ export interface AppLockAction {
   contractHash: string;
 }
 
+/**
+ * (api-types 0.176.0, DES-APPS-001 K2b) One argument of a `.json` query text: a declared parameter of the
+ * query, or a literal fixed by the app (a string of at most 1,000 characters). Viewer values are declared on
+ * the query's parameters (`from`), never here.
+ */
+export type AppQueryArg = { kind: 'param'; name: string } | { kind: 'literal'; value: string | number | boolean | null };
+
+/**
+ * (api-types 0.176.0) `queries/<id>.json` of a `rest` or `mcp` query: one registry tool the person accepted
+ * as a read on the source sheet, and its arguments (at most 50, each one of the tool's input properties).
+ */
+export interface AppToolQueryText {
+  tool: string;
+  args: Record<string, AppQueryArg>;
+}
+
+/**
+ * (api-types 0.176.0) `queries/<id>.json` of a `crew` query: one route the built-in crew source reads
+ * (`SourceCatalogResponse` of `crew` lists them, e.g. `/runs/:id`), every `:param` of it in `params`, and
+ * query-string values in `query`.
+ */
+export interface AppCrewQueryText {
+  route: string;
+  params: Record<string, AppQueryArg>;
+  query: Record<string, AppQueryArg>;
+}
+
+// How a query's text binds its parameters (api-types 0.176.0): SQL `$n` (Postgres) and the n-th `?` (MySQL,
+// SQLite) bind the n-th parameter in the order `params.properties` declares them, and every declared
+// parameter is used; GraphQL variables are the parameters by name; `.json` texts name them in `AppQueryArg`s.
+// The order is part of the query's contract, so reordering the parameters is checked again.
+
 // ── Apps: the store and its routes (DES §6.4, §7.6, §9.1) ────────────────────────────────────────
 
 /**
@@ -15390,7 +15422,10 @@ export interface AppsCapabilities {
   publish: boolean;
   /** `POST /apps/uploads`. */
   uploads: boolean;
-  /** The read policy and the per-kind source check run, so a change to queries or actions can land. */
+  /**
+   * The read policy and the per-kind source check run, so a change to queries or actions can land (true since
+   * api-types 0.176.0 on a daemon with a connector registry: crew's source stage, DES §9.2 step 3).
+   */
   sourceCheck: boolean;
 }
 

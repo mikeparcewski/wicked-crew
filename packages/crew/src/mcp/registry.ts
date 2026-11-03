@@ -654,6 +654,20 @@ export class McpRegistry {
     return { config, allowWrites: s.allowWrites === true, description: stored !== null && stored.descriptorHash === descriptorHash ? stored : null, descriptorHash };
   }
 
+  /**
+   * (DES-APPS-001 §9.4) A REST or MCP server's tool as an Apps query or API action uses it: the server's
+   * config and descriptor hash, and the tool's record, with whether the person's saved schema still is the
+   * one the server shows (`bound`). The per-tool switch (G1) governs agent runs only, so a tool's `enabled`
+   * is not consulted here; a server switched off is. `null` = no such server or tool.
+   */
+  async appTool(server: string, tool: string): Promise<{ config: McpUpstreamConfig; tool: McpToolRecord; bound: boolean } | null> {
+    const s = (await this.deps.store.read()).servers.find((x) => x.name === server);
+    if (s === undefined || (s.kind !== 'rest' && s.kind !== 'mcp-http' && s.kind !== 'mcp-stdio')) return null;
+    const t = s.tools.find((x) => x.name === tool);
+    if (t === undefined) return null;
+    return { config: configOf(s), tool: structuredClone(t), bound: s.enabled && statusOf(s, t) === 'registered' };
+  }
+
   /** Store a fresh description of a source (a re-describe), bound to the descriptor it was taken under. */
   async saveDescription(name: string, description: SourceDescription, descriptorHash: string): Promise<void> {
     // Checked and written inside one registry mutation (serialized with every save), so a save that

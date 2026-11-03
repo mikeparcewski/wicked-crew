@@ -12,6 +12,19 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **Apps: the source stage (api-types 0.176.0, DES-APPS-001 §9.2 step 3, slice K2b).** A version of an app holding
+  queries or actions now lands when their check passes (it was refused `409 source_check_unavailable`), and
+  `GET /health` says `capabilities.apps.sourceCheck: true`. The check never executes a read or a write: a SQL query
+  passes the read policy, then Parse/Describe, with the described result columns held to the declared output and the
+  parameters the source inferred held to the declared ones (`$n`, and the n-th `?`, bind the n-th declared parameter;
+  every one is used; reordering them is checked again); a GraphQL query is one `query` operation whose variables are
+  its parameters; a REST or MCP query names a tool whose saved schema is the server's and which the person accepted as
+  a read; a crew query names an allowlisted route. An API action names a tool, or one GraphQL mutation with one root
+  field; a Postgres row write passes the table safety check with its declaration, and every value it sets or keys on
+  has the one input form its column takes. Each lands with a contract hash in `apps.lock.json` (for a row write the
+  table's safety fingerprint is inside it) and the source's pin. Findings use crew's words and a source's identifiers,
+  never a source's message text. api-types adds `AppQueryArg`, `AppToolQueryText` and `AppCrewQueryText` (the `.json`
+  query texts).
 - **Apps data sources (api-types 0.175.0, DES-APPS-001 §5, §7.4, §7.5, slice K1).** crew's one connector registry
   gains two kinds, `sql` (drivers `postgres`, `mysql`, `sqlite`) and `graphql`, registered through the same
   `POST /mcp/servers/preview` and save and never offered to a governed run (they have no tools). A preview describes the
