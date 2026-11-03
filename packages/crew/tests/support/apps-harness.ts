@@ -12,6 +12,8 @@ import { expect } from 'vitest';
 import { AuditLog } from '../../src/api/audit.js';
 import { LOCAL_ACTOR, registerAuthHooks } from '../../src/api/auth.js';
 import { registerMcpRoutes } from '../../src/api/mcp.js';
+import { AppExecutor } from '../../src/apps/exec/executor.js';
+import type { Viewer } from '../../src/apps/exec/params.js';
 import { AppsSourceStage } from '../../src/apps/exec/source-stage.js';
 import { registerAppRoutes } from '../../src/apps/routes.js';
 import { AppStore, type AppRepoRegistry } from '../../src/apps/store.js';
@@ -35,6 +37,9 @@ export interface Harness {
   registry: McpRegistry;
   store: AppStore;
   audit: AuditLog;
+  executor: AppExecutor;
+  /** Who each actor is as a viewer (default: `<id>@example.com`, name = id, no groups). */
+  viewers: Record<string, Viewer>;
   env: Record<string, string>;
   call(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, payload?: unknown, as?: keyof typeof TOKENS): Promise<{ status: number; body: Record<string, unknown> & { code?: string } }>;
   /** Save any server through the real preview/save (a REST origin the spec does not list is confirmed). */
@@ -48,7 +53,7 @@ export interface Harness {
   close(): Promise<void>;
 }
 
-export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick<Harness, 'registry' | 'store' | 'audit'>) => void | Promise<void> } = {}): Promise<Harness> {
+export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick<Harness, 'registry' | 'store' | 'audit' | 'executor'>) => void | Promise<void>; now?: () => number; crewDeadlineMs?: number } = {}): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), 'apps-k2b-'));
   const env: Record<string, string> = {};
   const secrets: SecretStore = { available: false, get: async () => null, has: async () => false, set: async () => undefined, delete: async () => undefined };
@@ -64,12 +69,24 @@ export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick
   };
   const store = new AppStore({ stateFile: join(dir, 'daemon-apps.json'), appsRoot: join(dir, 'apps'), registry: repoRegistry, sourceStage: new AppsSourceStage({ registry }) });
   const app = Fastify({ logger: false });
+  const viewers: Record<string, Viewer> = {};
+  const executor = new AppExecutor({
+    store,
+    registry,
+    crewInject: async (r) => {
+      const res = await app.inject({ method: r.method, url: r.url, headers: r.headers });
+      return { statusCode: res.statusCode, body: res.body };
+    },
+    viewerOf: async (a) => viewers[a.id] ?? { id: a.id, email: `${a.id}@example.com`, name: a.id, groups: null },
+    ...(opts.now !== undefined ? { now: opts.now } : {}),
+    ...(opts.crewDeadlineMs !== undefined ? { crewDeadlineMs: opts.crewDeadlineMs } : {}),
+  });
   registerAuthHooks(app, { mode: 'required', verifiers: [{ name: 'test', verify: async (t) => TOKENS[t] ?? null }], allowedOrigins: null });
   const actorOf = (req: { actor?: Actor | null }): Actor => req.actor ?? LOCAL_ACTOR;
   registerMcpRoutes(app, { registry, audit, actorOf });
   registerSourceRoutes(app, { registry, audit, actorOf });
-  registerAppRoutes(app, { store, audit });
-  await opts.extra?.(app, { registry, store, audit });
+  registerAppRoutes(app, { store, audit, executor });
+  await opts.extra?.(app, { registry, store, audit, executor });
   await app.ready();
   const call: Harness['call'] = async (method, url, payload, as = 'priya') => {
     const res = await app.inject({ method, url: `/api/v1${url}`, headers: { authorization: `Bearer ${as}` }, ...(payload !== undefined ? { payload: payload as object } : {}) });
@@ -87,6 +104,8 @@ export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick
     registry,
     store,
     audit,
+    executor,
+    viewers,
     env,
     call,
     async register(config) {

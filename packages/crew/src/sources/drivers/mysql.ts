@@ -18,7 +18,7 @@ import mysql2 from 'mysql2';
 import { createConnection, type Connection, type FieldPacket } from 'mysql2/promise';
 
 import { DialRefusedError, dialTcp, plaintextAllowed } from '../dialer.js';
-import { type ReadOptions, READ_MAX_ROWS, type SqlConnectArgs, type SqlDescribe, type SqlReadResult, SourceQueryError, STATEMENT_DEADLINE_MS } from './types.js';
+import { approxRowBytes, type ReadOptions, READ_MAX_ROWS, type SqlConnectArgs, type SqlDescribe, type SqlReadResult, SourceQueryError, STATEMENT_DEADLINE_MS } from './types.js';
 
 /** The session's SQL mode: MySQL 8's defaults plus NO_BACKSLASH_ESCAPES; no ANSI_QUOTES, no PIPES_AS_CONCAT. */
 export const MYSQL_SQL_MODE = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION,NO_BACKSLASH_ESCAPES';
@@ -306,18 +306,20 @@ export async function mysqlRead(args: SqlConnectArgs, text: string, params: unkn
       const rows: unknown[][] = [];
       let fields: FieldPacket[] = [];
       let truncated = false;
+      let bytes = 0;
       const q = core.execute({ sql: text, rowsAsArray: true }, params);
       q.on('fields', (f: FieldPacket[]) => {
         fields = f;
       });
       q.on('result', (row: unknown[]) => {
-        if (rows.length >= maxRows) {
+        if (rows.length >= maxRows || (opts.maxBytes !== undefined && bytes >= opts.maxBytes)) {
           if (!truncated) {
             truncated = true;
             void kill();
           }
           return;
         }
+        bytes += approxRowBytes(row);
         rows.push(row);
       });
       q.on('error', (err: unknown) => (truncated ? resolve({ rows, fields, truncated }) : reject(err)));

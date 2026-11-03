@@ -324,6 +324,20 @@ export class AppStore {
     return { spec: (await this.files(a, r.tree)).spec, tree: r.tree, receipt };
   }
 
+  /**
+   * (K2b) The files at an accepted tree of this app: the spec, the query texts and the lock crew wrote, read
+   * from the repo's verified objects. The executor's and the write path's step 1 (DES §7.2, §7.3).
+   */
+  async acceptedFiles(slug: string, version: number | string): Promise<{ files: AppFiles; tree: string; commit: string; version: number | null; receipt: AppReceipt }> {
+    await this.requireGit();
+    const a = this.app(slug);
+    const r = await this.resolve(slug, version);
+    if (r === null) throw new AppStoreError(404, 'unknown_version', `app ${slug} has no version ${JSON.stringify(version)}`);
+    const receipt = this.acceptedReceipt(slug, r.tree);
+    if (receipt === null) throw new AppStoreError(409, 'not_accepted', `tree ${r.tree} holds no accepted receipt for app ${slug}: it never runs against a source`);
+    return { files: await this.files(a, r.tree), tree: r.tree, commit: r.commit, version: r.version, receipt };
+  }
+
   // ── The turn lock ───────────────────────────────────────────────────────────────────────────────
 
   /**
