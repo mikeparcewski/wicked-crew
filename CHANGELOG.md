@@ -28,8 +28,10 @@ mentioned only where a daemon release depends on them.
   IN SHARE ROW EXCLUSIVE MODE`, the safety check by the locked relation's oid against the granted fingerprint, `SET
   CONSTRAINTS ALL IMMEDIATE`, then the generated statement (`ONLY`, quoted identifiers, base-type casts, returning the
   written relation's row type and one flag per key and value), committed only for exactly one row of the locked
-  table with every flag true. The probes P1-P43 are permanent tests (`tests/apps-pgwrite-probes.test.ts`) on Postgres
-  16 and 17 in CI.
+  table with every flag true. Row writes also need `pg_catalog` as initdb left it: the table safety check refuses
+  while any non-superuser role can create in it (`catalog_create`) or any function, operator or type created after
+  initdb is there (`catalog_object`). The probes P1-P45 are permanent tests (`tests/apps-pgwrite-probes.test.ts`) on
+  Postgres 16 and 17 in CI.
 - **Apps: queries run (api-types 0.177.0, DES-APPS-001 §7.2, §7.5, slice K2b).** `POST /apps/:app/query` runs one
   named query of an accepted version and `capabilities.apps.query` is true. Its parameters are validated against the
   query's schema; viewer-bound ones are filled by crew (studio with auth off: your global git `user.email` and
@@ -112,6 +114,11 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **A Postgres backend terminated mid-read no longer takes the daemon down.** postgres.js's `begin()` sends ROLLBACK
+  on a connection that has already closed, which throws inside its own timers; crew's process guard then exits on the
+  uncaught exception, so a database restart or `pg_terminate_backend` during a source read stopped the daemon. Every
+  Postgres transaction crew runs (reads, describes, safety checks, row writes) is now run by hand on one connection,
+  and nothing is sent, or sent to a new connection, once that connection has closed.
 - **One dialer for every connection crew makes to a source (api-types 0.174.0, DES-APPS-001 §5.2, S10).** A `rest`
   server's OpenAPI document was fetched before any address was looked at (`mcp/rest.ts`, then `restEgress` resolved the
   base URL's host separately), its tool calls and every `mcp-http` request used plain `fetch` with no address check,

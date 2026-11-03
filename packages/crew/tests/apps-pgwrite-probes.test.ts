@@ -489,6 +489,9 @@ for (const target of PG_TARGETS) {
 
     it('P40: an UPDATE planned against expression statistics runs the expression; the table cannot land', async () => {
       expect(await landCode([updateAction(id(), 'writer', 's.tickets10', { owner: { kind: 'literal', value: 'x' } })])).toBe('statistics_expression');
+      // Autovacuum off for this table first: 100 new rows otherwise invite its own ANALYZE, which runs the expression
+      // (it writes s.side) up to a minute later, in the middle of another probe (seen in P43: 'stats expr ran').
+      await db.admin.unsafe('ALTER TABLE s.tickets10 SET (autovacuum_enabled = false)');
       await db.admin.unsafe("INSERT INTO s.tickets10 SELECT g, 'o' || g FROM generate_series(1, 100) g ON CONFLICT DO NOTHING; ANALYZE s.tickets10; TRUNCATE s.side");
       const ran = await rolledBack(async (tx) => {
         await tx.unsafe("UPDATE ONLY s.tickets10 AS w SET owner = 'priya' WHERE w.id = 7");
