@@ -27,6 +27,13 @@ export interface SqlConnectArgs {
 
 /** The statement deadline (§7.5): 10 s per driver, enforced AT THE SOURCE and then by cancel. */
 export const STATEMENT_DEADLINE_MS = 10_000;
+/** A row's size, roughly (UTF-16 string lengths, 8 per other value): what a read's byte budget counts. */
+export function approxRowBytes(row: readonly unknown[]): number {
+  let n = 2;
+  for (const v of row) n += typeof v === 'string' ? v.length + 3 : v !== null && typeof v === 'object' ? JSON.stringify(v).length + 1 : 8;
+  return n;
+}
+
 /** Rows a read returns at most (§7.5); the read says `truncated` past it. */
 export const READ_MAX_ROWS = 5_000;
 
@@ -69,6 +76,8 @@ export class SourceQueryError extends Error {
 export interface ReadOptions {
   deadlineMs?: number;
   maxRows?: number;
+  /** (K2b) Stop reading once the rows held reach about this many bytes (`truncated`): the executor's 10 MB cap, applied while reading. */
+  maxBytes?: number;
   signal?: AbortSignal;
   /**
    * TESTS ONLY: the source-side timeout, when it should differ from the deadline, so the client-side

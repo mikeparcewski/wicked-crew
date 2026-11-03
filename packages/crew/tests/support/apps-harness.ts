@@ -53,7 +53,7 @@ export interface Harness {
   close(): Promise<void>;
 }
 
-export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick<Harness, 'registry' | 'store' | 'audit' | 'executor'>) => void | Promise<void>; now?: () => number } = {}): Promise<Harness> {
+export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick<Harness, 'registry' | 'store' | 'audit' | 'executor'>) => void | Promise<void>; now?: () => number; crewDeadlineMs?: number } = {}): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), 'apps-k2b-'));
   const env: Record<string, string> = {};
   const secrets: SecretStore = { available: false, get: async () => null, has: async () => false, set: async () => undefined, delete: async () => undefined };
@@ -79,6 +79,7 @@ export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick
     },
     viewerOf: async (a) => viewers[a.id] ?? { id: a.id, email: `${a.id}@example.com`, name: a.id, groups: null },
     ...(opts.now !== undefined ? { now: opts.now } : {}),
+    ...(opts.crewDeadlineMs !== undefined ? { crewDeadlineMs: opts.crewDeadlineMs } : {}),
   });
   registerAuthHooks(app, { mode: 'required', verifiers: [{ name: 'test', verify: async (t) => TOKENS[t] ?? null }], allowedOrigins: null });
   const actorOf = (req: { actor?: Actor | null }): Actor => req.actor ?? LOCAL_ACTOR;

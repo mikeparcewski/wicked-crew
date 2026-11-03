@@ -25,12 +25,11 @@ import { canonicalJson, deriveToolClass, effectiveToolClass } from '../../mcp/cl
 import { McpRegistryError, type McpRegistry } from '../../mcp/registry.js';
 import { invokeMcpTool } from '../../mcp/invoke.js';
 import type { McpToolRecord } from '../../mcp/registry-store.js';
-import { scrubSecrets } from '../../mcp/secrets.js';
 import { UpstreamCallError } from '../../mcp/upstream-error.js';
 import { policyCatalog, type SqlCatalog } from '../../sources/catalog/types.js';
 import { CREW_SOURCE_ROUTES, type CrewInject, readCrewSource } from '../../sources/crew-source.js';
 import { DialRefusedError, type DialOptions } from '../../sources/dialer.js';
-import { SourceQueryError } from '../../sources/drivers/types.js';
+import { SourceQueryError, STATEMENT_DEADLINE_MS } from '../../sources/drivers/types.js';
 import { checkGraphqlRead, readGraphql } from '../../sources/graphql.js';
 import { graphqlSource, sqlConnectArgs } from '../../sources/kinds.js';
 import { checkReadPolicy } from '../../sources/policy/index.js';
@@ -41,7 +40,7 @@ import { AppReadCache, ttlOf } from './cache.js';
 import { crewQueryContract, graphqlQueryContract, graphqlRootSignatures, sqlQueryContract, toolQueryContract } from './contract.js';
 import { AppLimits, RateLimited } from './limits.js';
 import { bindParams, ParamError, type Viewer } from './params.js';
-import { morePathSays, projectRows, ResultError, selectPath, sqlRowObjects } from './project.js';
+import { morePathSays, projectRows, RESULT_LIMITS, ResultError, selectPath, sqlRowObjects } from './project.js';
 import { lookupSource, pinOf, queryKindFits, type AppSource } from './sources.js';
 import { parseCrewQueryText, parseToolQueryText, type QueryArg } from './texts.js';
 
@@ -81,6 +80,8 @@ export interface ExecutorDeps {
   dial?: DialOptions;
   snapshotDir?: string;
   now?: () => number;
+  /** How long a crew-source read may take (default: the 10 s statement deadline). */
+  crewDeadlineMs?: number;
 }
 
 const sha = (v: unknown): string => createHash('sha256').update(canonicalJson(v)).digest('hex');
@@ -138,17 +139,31 @@ export class AppExecutor {
       throw err;
     }
     const text = Object.hasOwn(files.queryText, q.id) ? files.queryText[q.id]! : '';
-    const { plan, contractHash, descriptorHash } = await this.plan(q, text, files.lock, bound.byName);
+    const first = await this.plan(q, text, files.lock, bound.byName);
+    const { plan, contractHash, descriptorHash } = first;
+    // The secret resolved now: its digest keys the cache, so rows read under a credential that has since been
+    // rotated are never served under the new one (codex r1); it is never stored.
+    const secret = await this.secret(plan);
     try {
       this.limits.rate('query', input.app, input.actor.id);
     } catch (err) {
       if (err instanceof RateLimited) throw new AppExecError(429, 'rate_limited', err.message, { retryAfterMs: err.retryAfterMs });
       throw err;
     }
-    const key = sha({ tree, query: q.id, params: bound.byName, descriptorHash, contractHash, ...(plan.kind === 'crew' ? { actor: input.actor.id } : {}) });
+    const key = sha({ tree, query: q.id, params: bound.byName, descriptorHash, contractHash, credential: secret === null ? null : createHash('sha256').update(secret).digest('hex'), ...(plan.kind === 'crew' ? { actor: input.actor.id } : {}) });
     try {
       const sourceName = plan.kind === 'crew' ? 'crew' : plan.source.name;
-      const r = await this.cache.read(input.app, key, ttlOf(q.refresh), () => this.limits.run(input.app, sourceName, () => this.execute(q, text, plan, bound, input.authorization)));
+      const r = await this.cache.read(input.app, key, ttlOf(q.refresh), () =>
+        this.limits.run(input.app, sourceName, async () => {
+          // Planned again once the slot is held: a read that waited never runs a plan the source has since
+          // changed under (codex r1).
+          const now = await this.plan(q, text, files.lock, bound.byName);
+          if (now.contractHash !== contractHash || now.descriptorHash !== descriptorHash || (await this.secret(now.plan)) !== secret) {
+            throw new AppExecError(409, 'contract_changed', `${q.source} changed while query ${q.id} waited: run it again`);
+          }
+          return this.execute(q, text, now.plan, bound, input.authorization, secret);
+        }),
+      );
       const ms = this.now() - started;
       this.record({ at: started, viewer: input.actor.id, app: input.app, version, tree, query: q.id, ms, rows: r.value.rows.length, bytes: r.value.bytes, outcome: r.cachedAt === null ? 'ok' : 'cached' });
       const { bytes: _b, ...body } = r.value;
@@ -176,6 +191,8 @@ export class AppExecutor {
     }
     if (source === null || !queryKindFits(q.kind, source)) throw new AppExecError(409, 'contract_changed', `${q.source} is gone or is another kind of source now`);
     if (source.pin.descriptorHash !== pinned.descriptorHash) throw new AppExecError(409, 'contract_changed', `${q.source}'s connection changed since this version was checked: check it again`);
+    // A source switched off reads nothing (codex r1; a tool's server is checked through `bound`).
+    if ((source.kind === 'sql' || source.kind === 'graphql') && !source.enabled) throw new AppExecError(409, 'query_refused', `${q.source} is switched off`);
     const changed = (): AppExecError => new AppExecError(409, 'contract_changed', `what query ${q.id} reads at ${q.source} changed since this version was checked: check it again`);
     let plan: Plan;
     let contract: string | null;
@@ -216,8 +233,8 @@ export class AppExecutor {
   }
 
   /** Steps 5-6: the read, then the rows. */
-  private async execute(q: AppQuery, text: string, plan: Plan, bound: ReturnType<typeof bindParams>, authorization: string | undefined): Promise<{ value: Omit<AppQueryResponse, 'cachedAt' | 'ms'> & { bytes: number }; bytes: number }> {
-    let secrets: string[] = [];
+  private async execute(q: AppQuery, text: string, plan: Plan, bound: ReturnType<typeof bindParams>, authorization: string | undefined, secret: string | null): Promise<{ value: Omit<AppQueryResponse, 'cachedAt' | 'ms'> & { bytes: number }; bytes: number }> {
+    const secrets: string[] = secret === null ? [] : [secret];
     let rows: Array<Record<string, unknown>>;
     let truncated = false;
     let hasMore = false;
@@ -226,11 +243,10 @@ export class AppExecutor {
       if (plan.driver === 'sqlite') {
         handle = { driver: 'sqlite', snapshotPath: snapshotPath(plan.source.config.sql?.snapshot ?? '', this.deps.snapshotDir), catalog: plan.catalog };
       } else {
-        const secret = await this.secret(plan.source);
-        secrets = secret === null ? [] : [secret];
         handle = { driver: plan.driver, connect: sqlConnectArgs(plan.source.config, secret, this.deps.dial ?? {}), catalog: plan.catalog, viewsAllowed: plan.source.config.viewsAllowed ?? [] };
       }
-      const r = await readSqlQuery(handle, text, bound.ordered);
+      // The 10 MB cap applies while reading, not after holding everything (codex r1).
+      const r = await readSqlQuery(handle, text, bound.ordered, { maxBytes: RESULT_LIMITS.bytes });
       // The live result carries the declared columns (names; the source check held their types).
       for (const o of q.output) if (!r.columns.some((c) => c.name === o.name)) throw new AppExecError(409, 'contract_changed', `query ${q.id} no longer returns column ${o.name}: check this version again`);
       rows = sqlRowObjects(r.columns, r.rows);
@@ -238,8 +254,6 @@ export class AppExecutor {
     } else {
       let body: unknown;
       if (plan.kind === 'graphql') {
-        const secret = await this.secret(plan.source);
-        secrets = secret === null ? [] : [secret];
         const introspection = plan.source.description!.introspection!;
         const variables = Object.fromEntries(Object.entries(bound.byName).filter(([k]) => !bound.absent.has(k)));
         // graphql-js's own coercion of the bound variables, before anything is sent (codex r2: Int range, enums, nulls).
@@ -249,14 +263,14 @@ export class AppExecutor {
         const errs = (body as { errors?: unknown } | null)?.errors;
         if (Array.isArray(errs) && errs.length > 0 && (body as { data?: unknown }).data == null) throw new AppExecError(502, 'source_failed', `the GraphQL source answered ${errs.length} error(s) and no data`);
       } else if (plan.kind === 'tool') {
-        const secret = await this.secret(plan.source);
-        secrets = secret === null ? [] : [secret];
         // An argument an absent optional parameter fills is left out (codex r2).
         const args = Object.fromEntries(Object.entries(plan.args).filter(([, a]) => a.kind !== 'param' || !bound.absent.has(a.name)).map(([k, a]) => [k, argValue(a, bound.byName)]));
         const res = await invokeMcpTool(plan.source.config, secret, plan.tool.name, args, 30_000, plan.tool.rest ?? null);
         if (res['isError'] === true) {
-          const status = (res['_meta'] as { 'wicked/rest'?: { status?: number } } | undefined)?.['wicked/rest']?.status;
-          throw new AppExecError(502, 'source_failed', `${plan.source.name}/${plan.tool.name} answered an error${status !== undefined ? ` (HTTP ${status})` : ''}`);
+          // Only crew's own REST invoker writes this status; an MCP server's metadata is its own text (codex r1).
+          const status = plan.source.kind === 'rest' ? (res['_meta'] as { 'wicked/rest'?: { status?: unknown } } | undefined)?.['wicked/rest']?.status : undefined;
+          const shown = typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599 ? ` (HTTP ${status})` : '';
+          throw new AppExecError(502, 'source_failed', `${plan.source.name}/${plan.tool.name} answered an error${shown}`);
         }
         body = toolBody(res);
       } else {
@@ -266,24 +280,35 @@ export class AppExecutor {
           const v = argValue(a, bound.byName);
           return v === null || v === undefined ? [] : [[k, String(v)]];
         }));
-        const r = await readCrewSource(this.deps.crewInject, plan.route, params, query, authorization !== undefined ? { authorization } : {});
+        // Bounded like every other read: a crew route that never answers releases its slot at the deadline (codex r1).
+        let timer: NodeJS.Timeout | undefined;
+        const deadline = new Promise<never>((_, reject) => {
+          const ms = this.deps.crewDeadlineMs ?? STATEMENT_DEADLINE_MS;
+          timer = setTimeout(() => reject(new AppExecError(504, 'source_timeout', `crew did not answer ${plan.route} within ${Math.round(ms / 1000)} s`)), ms);
+        });
+        const r = await Promise.race([readCrewSource(this.deps.crewInject, plan.route, params, query, authorization !== undefined ? { authorization } : {}), deadline]).finally(() => clearTimeout(timer));
         if (r.status !== 200) throw new AppExecError(502, 'source_failed', `crew answered HTTP ${r.status} for ${plan.route}`);
         body = r.json;
       }
-      const selected = q.rowPath === undefined ? [body] : selectPath(body, q.rowPath);
+      // At most one row past the cap is selected (it says `truncated`); only rows that are kept are validated.
+      const selected = q.rowPath === undefined ? Object.assign([body], { more: false }) : selectPath(body, q.rowPath, RESULT_LIMITS.rows);
+      truncated = selected.more === true;
       rows = selected.map((v, i) => {
         if (v === null || typeof v !== 'object' || Array.isArray(v)) throw new ResultError(`row ${i + 1} at ${q.rowPath ?? '$'} is not an object`);
         return v as Record<string, unknown>;
       });
       hasMore = morePathSays(body, q.morePath);
     }
-    const projected = projectRows(q.output, rows, truncated);
-    const cells = scrubSecrets(projected.rows, secrets) as AppCell[][];
+    // The secret is scrubbed from each raw value before it is coerced, cut or measured.
+    const projected = projectRows(q.output, rows, truncated, secrets);
+    const cells: AppCell[][] = projected.rows;
     const value = { columns: q.output.map((c) => ({ ...c })), rows: cells, truncated: projected.truncated, hasMore, bytes: projected.bytes };
     return { value, bytes: projected.bytes };
   }
 
-  private async secret(s: AppSource & { config: Parameters<McpRegistry['callSecret']>[0] }): Promise<string | null> {
+  private async secret(plan: Plan): Promise<string | null> {
+    if (plan.kind === 'crew' || (plan.kind === 'sql' && plan.driver === 'sqlite')) return null;
+    const s = plan.source;
     const r = await this.deps.registry!.callSecret(s.config);
     if (r.missing) throw new AppExecError(409, 'source_failed', `${s.name}'s secret resolves to nothing; set it first`);
     return r.secret;
@@ -292,6 +317,7 @@ export class AppExecutor {
   /** A failure in the route's words: a class and a SQLSTATE, never the source's message (it can echo a value). */
   private failure(err: unknown): AppExecError {
     if (err instanceof AppExecError) return err;
+    if (err instanceof RateLimited) return new AppExecError(429, 'rate_limited', err.message, { retryAfterMs: err.retryAfterMs });
     if (err instanceof ResultError) return new AppExecError(422, 'result_invalid', err.message);
     if (err instanceof SourcePolicyError) return new AppExecError(409, 'query_refused', `the read policy refuses the query (${err.code}): ${err.message}`);
     if (err instanceof DialRefusedError) return new AppExecError(409, 'query_refused', `the connection to the source was refused (${err.code})`);

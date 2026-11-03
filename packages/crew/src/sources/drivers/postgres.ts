@@ -20,7 +20,7 @@ import { checkServerIdentity, type PeerCertificate } from 'node:tls';
 import postgres from 'postgres';
 
 import { DialRefusedError, dialTcp, plaintextAllowed } from '../dialer.js';
-import { type ReadOptions, READ_MAX_ROWS, type SqlConnectArgs, type SqlDescribe, type SqlReadResult, SourceQueryError, STATEMENT_DEADLINE_MS } from './types.js';
+import { approxRowBytes, type ReadOptions, READ_MAX_ROWS, type SqlConnectArgs, type SqlDescribe, type SqlReadResult, SourceQueryError, STATEMENT_DEADLINE_MS } from './types.js';
 
 export type PgSql = postgres.Sql<Record<string, never>>;
 
@@ -284,6 +284,7 @@ export async function pgRead(args: SqlConnectArgs, text: string, params: unknown
       const rows: unknown[][] = [];
       let columns: Array<{ name: string; type: number }> = [];
       let truncated = false;
+      let bytes = 0;
       const query = tx.unsafe(text, params as never).values();
       q = query;
       await query.cursor(500, (batch) => {
@@ -291,10 +292,11 @@ export async function pgRead(args: SqlConnectArgs, text: string, params: unknown
         // Only the first batch carries the columns (later ones may carry none, or null).
         if (Array.isArray(b.columns) && b.columns.length > 0) columns = b.columns;
         for (const r of b) {
-          if (rows.length >= maxRows) {
+          if (rows.length >= maxRows || (opts.maxBytes !== undefined && bytes >= opts.maxBytes)) {
             truncated = true;
             return (sql as unknown as { CLOSE: undefined }).CLOSE;
           }
+          bytes += approxRowBytes(r);
           rows.push(r);
         }
         return undefined;

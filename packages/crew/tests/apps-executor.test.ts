@@ -3,11 +3,14 @@
 // the lock → the read → projection, coercion, row and more paths → cache with generation. Against the K1
 // test services (REST, MCP, GraphQL), the built-in crew source and, when set, real Postgres 16 and 17.
 
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { AppReadCache } from '../src/apps/exec/cache.js';
 import { AppLimits, RateLimited } from '../src/apps/exec/limits.js';
-import { coerceCell, morePathSays, selectPath } from '../src/apps/exec/project.js';
+import { coerceCell, morePathSays, projectRows, selectPath } from '../src/apps/exec/project.js';
 import type { AppQuery, AppQueryResponse } from '../src/core/types.js';
 import { SECRET_REDACTION } from '../src/mcp/secrets.js';
 import { startGraphqlServer, startMcpServer, startOpenApiService } from './fixtures/apps-sources/servers.mjs';
@@ -28,6 +31,23 @@ describe('the executor: projection, coercion, paths, cache, limits (units)', () 
     expect(coerceCell('boolean', 1)).toEqual({ ok: true, cell: true });
     expect(coerceCell('string', { a: [1] })).toEqual({ ok: true, cell: '{"a":[1]}' });
     expect(coerceCell('integer', 'four')).toEqual({ ok: false, why: 'is not an integer' });
+  });
+
+  it('codex/pi r1: numbers underflowing or past 2^53, impossible dates and times are refused; a secret leaves no cell, before any cut; a selection is bounded', () => {
+    expect(coerceCell('number', '1e-4000')).toMatchObject({ ok: false });
+    expect(coerceCell('number', '9007199254740993.5')).toMatchObject({ ok: false });
+    expect(coerceCell('number', '0.000')).toEqual({ ok: true, cell: 0 });
+    expect(coerceCell('date', '2026-02-30')).toMatchObject({ ok: false });
+    expect(coerceCell('datetime', '2026-13-40 99:99:99+99')).toMatchObject({ ok: false });
+    expect(coerceCell('datetime', '2026-11-03 08:32+0530')).toEqual({ ok: true, cell: '2026-11-03T08:32+05:30' });
+    const out = [{ name: 'n', type: 'integer' as const }, { name: 's', type: 'string' as const }];
+    const r = projectRows(out, [{ n: 123456, s: `${'x'.repeat(65_530)}123456abc` }], false, ['123456']);
+    expect(r.rows[0]![0]).toBeNull(); // a number that IS the secret is no value
+    expect(String(r.rows[0]![1])).not.toContain('123'); // scrubbed before the 64 KB cut, so no fragment survives
+    const big = { items: Array.from({ length: 200_000 }, (_v, i) => ({ id: i })) };
+    const sel = selectPath(big, '$.items[*]', 5_000);
+    expect(sel).toHaveLength(5_000);
+    expect(sel.more).toBe(true);
   });
 
   it('selects rows and reads the more path with the subset ($, .name, [*], [n]), own properties only', () => {
@@ -198,6 +218,39 @@ describe('the executor over the K1 test services and the crew source', () => {
     expect(all.rows).toHaveLength(25); // `status` left out, not sent as null
   });
 
+  it('codex r1: a read that waited for its slot is planned again (a source re-saved meanwhile refuses it), and a full queue is 429', async () => {
+    const limits = h.executor.limits;
+    const run = limits.run.bind(limits);
+    let once = true;
+    limits.run = (async (app: string, source: string, fn: () => Promise<unknown>) =>
+      run(app, source, async () => {
+        if (once) {
+          once = false;
+          await h.register({ name: 'ref', kind: 'mcp-http', url: `${mcp2.origin}/mcp`, address: LOOP }); // the save lands while it waits
+        }
+        return fn();
+      })) as typeof limits.run;
+    try {
+      h.executor.invalidate('desk');
+      expect((await query('mcp_open')).body).toMatchObject({ code: 'contract_changed' });
+    } finally {
+      limits.run = run;
+      await h.register({ name: 'ref', kind: 'mcp-http', url: `${mcp.origin}/mcp`, address: LOOP });
+    }
+    // The queue past 16 (distinct reads, so none coalesce) answers 429, not 502.
+    const gate: Array<() => void> = [];
+    const hold = Array.from({ length: 20 }, () => limits.run('desk', 'tickets', () => new Promise<void>((r) => gate.push(r))));
+    await new Promise((r) => setTimeout(r, 10));
+    const r = await query('page', { page: 9 });
+    expect(r.status).toBe(429);
+    expect(r.body).toMatchObject({ code: 'rate_limited' });
+    while (gate.length > 0) {
+      gate.shift()!();
+      await new Promise((x) => setTimeout(x, 1));
+    }
+    await Promise.all(hold);
+  });
+
   it('an agent seat or a plugin cannot read an app: no row value goes to a model', async () => {
     const r = await query('page', undefined, 'seat');
     expect(r.status).toBe(403);
@@ -232,6 +285,37 @@ describe('the executor over the K1 test services and the crew source', () => {
     expect((await query('mcp_open')).body).toMatchObject({ code: 'contract_changed' });
     expect((await query('page')).status).toBe(200);
   });
+});
+
+describe('the executor: a crew read that never answers, an MCP error with its own metadata (codex r1)', () => {
+  it('a hung crew route releases its slot at the deadline (504); an MCP server’s error metadata never becomes crew’s words', async () => {
+    const h = await appsHarness({
+      crewDeadlineMs: 200,
+      extra: (app) => {
+        app.get('/api/v1/system', () => new Promise(() => undefined)); // never answers
+      },
+    });
+    try {
+      const META = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'apps-sources', 'meta-mcp.mjs');
+      await h.register({ name: 'meta', kind: 'mcp-stdio', command: process.execPath, args: [META] });
+      await h.newApp('desk');
+      const q: AppQuery[] = [
+        { id: 'sys', source: 'crew', kind: 'crew', output: [{ name: 'x', type: 'string' }] },
+        { id: 'meta_rows', source: 'meta', kind: 'mcp', rowPath: '$.rows[*]', output: [{ name: 'x', type: 'string' }] },
+      ];
+      const landed = await h.land('desk', specWith(q), { sys: JSON.stringify({ route: '/system' }), meta_rows: JSON.stringify({ tool: 'rows' }) });
+      expect(landed.status, JSON.stringify(landed.body)).toBe(200);
+      const t0 = Date.now();
+      const hung = await h.call('POST', '/apps/desk/query', { version: 2, query: 'sys' });
+      expect(hung.status).toBe(504);
+      expect(Date.now() - t0).toBeLessThan(5_000);
+      const m = await h.call('POST', '/apps/desk/query', { version: 2, query: 'meta_rows' });
+      expect(m.status).toBe(502);
+      expect(String(m.body.error)).not.toContain('SERVER-CHOSEN-WORDS');
+    } finally {
+      await h.close();
+    }
+  }, 30_000);
 });
 
 if (PG_TARGETS.length === 0) {
@@ -326,6 +410,16 @@ for (const target of PG_TARGETS) {
         await db.admin.unsafe('ALTER TABLE s.kids ALTER COLUMN id TYPE int4');
         await h.call('POST', '/sources/support/describe', {});
       }
+    });
+
+    it('codex r1: a source switched off reads nothing', async () => {
+      await h.registry.setServerEnabled('support', false);
+      try {
+        expect((await query('search')).body).toMatchObject({ code: 'query_refused' });
+      } finally {
+        await h.registry.setServerEnabled('support', true);
+      }
+      expect((await query('search')).status).toBe(200);
     });
 
     it('a query this version does not hold is 404, with nothing sent', async () => {

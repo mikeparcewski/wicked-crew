@@ -644,14 +644,14 @@ export class McpRegistry {
    * and its stored description (`null` until described). 404 for no such source, 400 for a server
    * that is not one.
    */
-  async source(name: string): Promise<{ config: McpUpstreamConfig; allowWrites: boolean; description: StoredDescription | null; descriptorHash: string }> {
+  async source(name: string): Promise<{ config: McpUpstreamConfig; allowWrites: boolean; description: StoredDescription | null; descriptorHash: string; enabled: boolean }> {
     const s = this.find((await this.deps.store.read()).servers, name);
     if (s.kind !== 'sql' && s.kind !== 'graphql') throw new McpRegistryError(400, 'not_a_source', `${name} is an ${s.kind} server, not a data source`);
     const config = configOf(s);
     const descriptorHash = sourceDescriptorHash(config);
     const stored = await this.catalogs.read(name);
     // A description taken under another descriptor (a re-save since) is not this source's: not described.
-    return { config, allowWrites: s.allowWrites === true, description: stored !== null && stored.descriptorHash === descriptorHash ? stored : null, descriptorHash };
+    return { config, allowWrites: s.allowWrites === true, description: stored !== null && stored.descriptorHash === descriptorHash ? stored : null, descriptorHash, enabled: s.enabled };
   }
 
   /**
