@@ -36,7 +36,9 @@ mentioned only where a daemon release depends on them.
   20) and `GET /runs/:id/data-use` (`known: false` when unreadable, never "none"); a run's PR text gains a
   **Data sources** section naming them. The shim's `list` shows the tools to a unit whose project reaches a source,
   and a chat turn's instructions name its project's sources and the commands. An agent-kind bearer reads
-  `GET /sources/:name/catalog` only for a source seen by every project, without the privilege report or estimates.
+  `GET /sources/:name/catalog` only for a source seen by every project, without the privilege report or the
+  database name, and with row estimates only when agents may query it. Agent answers never carry the
+  connection's database name (MySQL tables are named unqualified).
 
 - **Data sources: Test connection, and ask a question of the data (api-types 0.179.0, operator 2026-11-03).**
   `POST /sources/:name/test` re-runs connect, describe and the read-policy check on a saved `sql` or `graphql` source

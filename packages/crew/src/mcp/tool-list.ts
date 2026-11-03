@@ -62,8 +62,13 @@ export async function listUnitTools(deps: McpToolListDeps, token: string): Promi
     return { status: 503, body: { error: 'the linked engine cannot list MCP tools (wicked-core-ts predates listMcpTools)', code: 'mcp_unavailable' } };
   }
   let callable: McpCallableTool[];
+  // crew's built-ins, by exact subject (never by server name alone: a registered server from before the name
+  // was reserved holds `sources` too, and its tools are left out, since the broker would never reach them).
+  const builtIns = new Set<string>();
   try {
-    callable = [...(await deps.registry.callableTools()), ...(await sourcesToolsFor(deps.sources, token))];
+    const injected = await sourcesToolsFor(deps.sources, token);
+    for (const t of injected) builtIns.add(mcpSubject(t.server, t.tool));
+    callable = [...(await deps.registry.callableTools()).filter((t) => t.server !== SOURCES_SERVER), ...injected];
   } catch (err) {
     return { status: 500, body: { error: `the MCP registry could not be read: ${message(err)}`, code: 'guard_error' } };
   }
@@ -90,7 +95,7 @@ export async function listUnitTools(deps: McpToolListDeps, token: string): Promi
     const t = bySubject.get(j.subject);
     if (t === undefined) continue;
     // crew's built-ins: the person's per-source switches are the consent, so no first-use ask (§5.4).
-    const builtIn = t.server === SOURCES_SERVER;
+    const builtIn = builtIns.has(j.subject);
     tools.push({
       subject: j.subject,
       class: j.class,

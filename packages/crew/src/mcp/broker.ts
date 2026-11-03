@@ -456,7 +456,8 @@ export class McpBroker {
         if (msg.startsWith('bad_request')) return { status: 400, body: { error: msg, code: 'bad_request' } };
         return { status: 401, body: { error: msg, code: 'invalid_token' } };
       }
-      return this.refuse(span, 'guard_error', 'guard_error', 'broker:sources', [], `the token's unit could not be read: ${msg}`, 'nothing ran; try again, and report it if it persists', null, null);
+      this.deps.log?.(`[mcp] ${body.subject}: the token's unit could not be read: ${msg}`);
+      return this.refuse(span, 'guard_error', 'guard_error', 'broker:sources', [], "the token's unit could not be read", 'nothing ran; try again, and report it if it persists', null, null);
     }
     if (scope === null || admitted === null) {
       return this.refuse(span, 'guard_error', 'guard_error', 'broker:sources', [], 'the linked engine cannot bind or judge a data-source call (wicked-core-ts predates resolveEstateScope or listMcpTools)', 'upgrade the engine; no data-source call runs unjudged', null, null);
@@ -481,7 +482,9 @@ export class McpBroker {
     try {
       out = await tools.run(name, body.args ?? {}, scope, span.spanId);
     } catch (err) {
-      return this.refuse(span, 'guard_error', 'guard_error', 'broker:sources', [], `${body.subject} failed in crew (${message(err)}); nothing is shown`, 'try again, and report it if it persists', null, null);
+      // crew's own words stay in crew's log: an error's text can name a snapshot path or a host (pi r1 S2).
+      this.deps.log?.(`[mcp] ${body.subject} failed in crew: ${message(err)}`);
+      return this.refuse(span, 'guard_error', 'guard_error', 'broker:sources', [], `${body.subject} failed in crew; nothing is shown`, 'try again, and report it if it persists', null, null);
     }
     if (!out.ok) return this.refuse(span, out.outcome, 'deny', out.ruleId, [out.ruleId], out.reason, out.remedy, null, null);
     const result: Record<string, unknown> = { content: [{ type: 'text', text: JSON.stringify(out.answer) }], isError: out.isError };
@@ -491,6 +494,8 @@ export class McpBroker {
       await this.deps.records.append(record);
     } catch (err) {
       this.deps.log?.(`[mcp] the call record for ${body.subject} could not be written (${message(err)}); its result is withheld`);
+      // A query's rows are withheld: its source record says so too (codex r1 #1).
+      await out.abandon?.().catch(() => undefined);
       return {
         status: OUTCOME_STATUS.guard_error,
         body: { outcome: 'guard_error', subject: body.subject, callId: null, ruleIds: [], reason: 'the call could not be recorded (D-3); its result is withheld', remedy: 'the call ran; its result is not shown' },

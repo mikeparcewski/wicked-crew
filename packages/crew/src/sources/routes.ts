@@ -37,6 +37,7 @@ import { scrubSecrets } from '../mcp/secrets.js';
 import type { SeatTurnInput, SeatTurnOutcome } from '../standing-orders/parse.js';
 import { ASK_CELL_CHARS, ASK_DEADLINE_MS, ASK_QUESTION_MAX, ASK_RESULT_BYTES, ASK_ROW_CAP, ASK_STEP_ID, AskRunTokens, askCell, askPrompt, draftFromAnswer, draftHolds, rowsWithin } from './ask.js';
 import { agentMay } from './agent-access.js';
+import { agentCatalogView } from './agent-tools.js';
 import { pgPrivileges } from './catalog/postgres.js';
 import { testConnection } from './connection-test.js';
 import { policyCatalog, type SqlCatalog } from './catalog/types.js';
@@ -229,10 +230,11 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
         const human = deps.actorOf(req).kind === 'human';
         // An agent-kind bearer gets the structure as the agent tools give it: no privilege report, and no row
         // estimates unless agents may query the source.
+        // (codex r1 #5) and never the connection's database name.
         const catalog =
-          human || src.config.kind !== 'sql' || agentMay(src.agents, { enabled: src.enabled, kind: src.config.kind }, null, 'query')
+          human || src.config.kind !== 'sql'
             ? src.description.catalog
-            : { ...(src.description.catalog as SqlCatalog), relations: (src.description.catalog as SqlCatalog).relations.map((rel) => ({ ...rel, rowEstimate: null })) };
+            : agentCatalogView(src.description.catalog as SqlCatalog, agentMay(src.agents, { enabled: src.enabled, kind: src.config.kind }, null, 'query'));
         const body: SourceCatalogResponse = {
           name: req.params.name,
           kind: src.config.kind as 'sql' | 'graphql',

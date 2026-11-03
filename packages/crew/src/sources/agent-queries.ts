@@ -12,7 +12,7 @@
  * "no data used". The file lives in the `mcp` state-home entry workers are fenced out of, mode 0600.
  */
 
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { appendFile, mkdir, open, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import { mcpStateDir } from '../mcp/registry-store.js';
@@ -59,17 +59,42 @@ export class SourceAgentQueryLog {
     this.path = join(dir, SOURCE_QUERIES_FILENAME);
   }
 
-  /** Append one entry; resolves once it is on disk, rejects when it is not (the caller withholds the rows). */
+  /**
+   * Append one entry; resolves once it is on disk, rejects when it is not (the caller withholds the rows). A
+   * torn last line (a crash mid-append) is closed with a newline first, so it can never swallow this entry
+   * (codex r1 #2): the torn one was never released (rows go out only after an append resolves).
+   */
   append(entry: SourceAgentQueryEntry): Promise<void> {
     const next = this.chain.then(async () => {
       await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
-      await appendFile(this.path, `${JSON.stringify(entry)}\n`, { encoding: 'utf8', mode: 0o600 });
+      await appendFile(this.path, `${(await this.endsTorn()) ? '\n' : ''}${JSON.stringify(entry)}\n`, { encoding: 'utf8', mode: 0o600 });
     });
     this.chain = next.catch(() => undefined);
     return next;
   }
 
-  /** Every entry, oldest first; `null` when the file cannot be read (missing = none). */
+  /** Whether the file's last byte is not a newline (an append a crash cut short). */
+  private async endsTorn(): Promise<boolean> {
+    let fh: Awaited<ReturnType<typeof open>> | null = null;
+    try {
+      fh = await open(this.path, 'r');
+      const { size } = await fh.stat();
+      if (size === 0) return false;
+      const b = Buffer.alloc(1);
+      await fh.read(b, 0, 1, size - 1);
+      return b[0] !== 0x0a;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw err;
+    } finally {
+      await fh?.close();
+    }
+  }
+
+  /**
+   * Every call's FINAL entry (a call can be corrected: released, then withheld when the switch turned off
+   * or the broker could not record it), oldest first; `null` when the file cannot be read (missing = none).
+   */
   async all(): Promise<SourceAgentQueryEntry[] | null> {
     await this.chain;
     let text: string;
@@ -79,17 +104,20 @@ export class SourceAgentQueryLog {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
       return null;
     }
-    const out: SourceAgentQueryEntry[] = [];
+    const last = new Map<string, SourceAgentQueryEntry>();
     for (const line of text.split('\n')) {
       if (line.trim() === '') continue;
       try {
         const e = JSON.parse(line) as SourceAgentQueryEntry;
-        if (typeof e.runId === 'string' && typeof e.source === 'string') out.push(e);
+        if (typeof e.runId === 'string' && typeof e.source === 'string' && typeof e.callId === 'string') {
+          last.delete(e.callId);
+          last.set(e.callId, e);
+        }
       } catch {
-        // A torn last line (a crash mid-append) is skipped; the rest still reads.
+        // A torn line (a crash mid-append, never released) is skipped; the rest still reads.
       }
     }
-    return out;
+    return [...last.values()];
   }
 
   /** The most recent `n` entries for `source`, newest first; `null` = the record cannot be read. */

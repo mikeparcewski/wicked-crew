@@ -2511,6 +2511,7 @@ export async function createServer(
     audit,
     resolver: () => CoreAdapter.estateScopeResolver(),
     lister: () => CoreAdapter.mcpToolLister(),
+    log: (m) => app.log.warn(m),
   });
   const mcpBroker = new McpBroker({
     registry: mcpRegistry,

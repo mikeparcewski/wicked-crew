@@ -8,7 +8,7 @@
 // token to a unit and its run's project (`resolveEstateScope`), and judges the subjects (`listMcpTools`),
 // omitting every one for an Apps unit as core's D-7 does (core pins D-7 itself: `apps_presets.rs`).
 
-import { mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -31,7 +31,9 @@ import type { SecretStore } from '../src/mcp/secrets.js';
 import { agentAccessOf, agentMay, AGENT_ACCESS_DEFAULT } from '../src/sources/agent-access.js';
 import { SourceAgentQueryLog } from '../src/sources/agent-queries.js';
 import { registerSourceAgentRoutes } from '../src/sources/agent-routes.js';
-import { AGENT_ROW_CAP, AGENT_ROWS_BYTES, SourcesAgentTools, untrustedLabel } from '../src/sources/agent-tools.js';
+import { AGENT_ROW_CAP, AGENT_ROWS_BYTES, agentCatalogView, agentStructure, SourcesAgentTools, untrustedLabel } from '../src/sources/agent-tools.js';
+import { policyCatalog, type SqlCatalog } from '../src/sources/catalog/types.js';
+import { checkReadPolicy } from '../src/sources/policy/index.js';
 import { registerSourceRoutes } from '../src/sources/routes.js';
 import { countingResolver, DB_HOST, DB_REQUIRED, type FreshPg, freshPgDatabase, LOOPBACK, PG_TARGETS } from './support/sources-db.js';
 import { removeScratch } from './setup/scratch.js';
@@ -488,6 +490,132 @@ describe('the agent tools on an uploaded source', () => {
   });
 });
 
+describe('review r1 folds (codex, pi)', () => {
+  let r: Rig;
+  beforeEach(async () => {
+    r = await rig();
+    await upload(r, 'tix', TICKETS_CSV);
+    await put(r, 'tix', { projects: ['proj_a'], query: true });
+  });
+  afterEach(async () => {
+    await close(r);
+  });
+
+  it('the broker cannot record the call: the rows are withheld, and the source record says they were not released', async () => {
+    (r.records as { append: unknown }).append = async () => {
+      throw new Error('disk full');
+    };
+    const c = await call(r, 'wmt_a', 'query', { name: 'tix', sql: 'SELECT id, title FROM "tickets"' });
+    expect(c.body).toMatchObject({ outcome: 'guard_error' });
+    expect(c.raw).not.toContain(ROW_MARK);
+    expect(await r.queries.dataUse('run-a')).toEqual([expect.objectContaining({ source: 'tix', queries: 1, released: 0, rows: 0 })]);
+  });
+
+  it('a switch turned off while the record is written still withholds the rows (the release check is the last step)', async () => {
+    const append = r.queries.append.bind(r.queries);
+    let flipped = false;
+    (r.queries as { append: typeof append }).append = async (e) => {
+      if (e.released && !flipped) {
+        flipped = true;
+        await put(r, 'tix', { query: false });
+      }
+      return append(e);
+    };
+    const c = await call(r, 'wmt_a', 'query', { name: 'tix', sql: 'SELECT id, title FROM "tickets"' });
+    expect(c.answer).toMatchObject({ refused: 'changed_while_running' });
+    expect(c.raw).not.toContain(ROW_MARK);
+    expect(await r.queries.dataUse('run-a')).toEqual([expect.objectContaining({ released: 0 })]);
+  });
+
+  it('a torn last line never swallows the next record', async () => {
+    await call(r, 'wmt_a', 'query', { name: 'tix', sql: 'SELECT 1' });
+    appendFileSync(r.queries.path, '{"callId":"torn","runId":"run-a","sou');
+    await call(r, 'wmt_a', 'query', { name: 'tix', sql: 'SELECT 2' });
+    expect(await r.queries.dataUse('run-a')).toEqual([expect.objectContaining({ queries: 2, released: 2 })]);
+  });
+
+  it('an unexpected failure after the policy leaves a record, and the agent gets crew\'s sentence, never the error text', async () => {
+    const source = r.registry.source.bind(r.registry);
+    (r.registry as { source: typeof source }).source = async () => {
+      throw new Error('ENOENT: /very/secret/state/path/snapshots/abc');
+    };
+    const c = await call(r, 'wmt_a', 'query', { name: 'tix', sql: 'SELECT 1' });
+    (r.registry as { source: typeof source }).source = source;
+    expect(c.body).toMatchObject({ outcome: 'guard_error' });
+    expect(c.raw).not.toContain('/very/secret');
+    expect(await r.queries.dataUse('run-a')).toEqual([expect.objectContaining({ queries: 1, released: 0 })]);
+    expect((await r.queries.recent('tix'))![0]).toMatchObject({ outcome: 'failed' });
+  });
+
+  it('a registered server left holding "sources" is not advertised: its tools are never reinterpreted as the built-ins', async () => {
+    const store = new McpRegistryStore(join(r.base, 'mcp'));
+    await store.mutate((file) => {
+      file.servers.push({
+        name: 'sources', kind: 'mcp-stdio', command: 'x', args: [], url: null, auth: null, enabled: true,
+        health: { state: 'ok', consecutiveFailures: 0, checkedAt: null, lastError: null }, registeredAt: 'now', updatedAt: 'now',
+        tools: [{ name: 'legacy_read', description: null, inputSchema: {}, outputSchema: null, annotations: { readOnlyHint: true }, classOverride: null, enabled: true, schemaHash: 'h', observedSchemaHash: 'h', present: true }],
+      });
+    });
+    const tl = (await r.app.inject({ method: 'POST', url: '/api/v1/mcp/tools', payload: { token: 'wmt_a' } })).json() as McpToolsResponse;
+    expect(tl.tools).toEqual([]);
+  });
+
+  it('only the chat turn tells a seat about sources; no Apps module reaches the agent tools or the chat block', () => {
+    const files = (dir: string): string[] => readdirSync(dir).flatMap((n) => (statSync(join(dir, n)).isDirectory() ? files(join(dir, n)) : n.endsWith('.ts') ? [join(dir, n)] : []));
+    const src = join(__dirname, '..', 'src');
+    const all = files(src).map((f) => ({ f: f.slice(src.length + 1), t: readFileSync(f, 'utf8') }));
+    expect(all.filter((x) => /chatSourcesFor\(/.test(x.t)).map((x) => x.f).sort()).toEqual(['api/chat-sources.ts', 'api/routes.ts']);
+    expect(all.filter((x) => x.f.startsWith('apps/') && /agent-tools|chat-sources|SourcesAgentTools/.test(x.t)).map((x) => x.f)).toEqual([]);
+  });
+});
+
+describe('the agent projection hides the connection\'s database name (MySQL), and the policy still resolves it', () => {
+  const MYSQL: SqlCatalog = {
+    dialect: 'mysql',
+    database: 'fixture_database',
+    describedAt: '2026-11-03T00:00:00Z',
+    relations: [
+      { schema: 'fixture_database', name: 'tickets', kind: 'table', rowEstimate: 7, columns: [{ name: 'id', type: 'int', nullable: false }, { name: 'owner', type: 'int', nullable: true }], primaryKey: ['id'], foreignKeys: [{ name: 'f', columns: ['owner'], references: { schema: 'fixture_database', table: 'people', columns: ['id'] } }] },
+      { schema: 'fixture_database', name: 'people', kind: 'table', rowEstimate: 3, columns: [{ name: 'id', type: 'int', nullable: false }], primaryKey: ['id'], foreignKeys: [] },
+    ],
+  };
+  it('describe and the agent catalog view carry no database name; an unqualified table passes the read policy', async () => {
+    const st = agentStructure(MYSQL, []);
+    expect(JSON.stringify(st)).not.toContain('fixture_database');
+    expect(st.relations[0]).toMatchObject({ schema: null, table: 'tickets', foreignKeys: [{ references: { schema: null, table: 'people' } }] });
+    const view = agentCatalogView(MYSQL, false);
+    expect(JSON.stringify(view)).not.toContain('fixture_database');
+    expect(view.relations.every((x) => x.rowEstimate === null)).toBe(true);
+    expect((await checkReadPolicy('mysql', 'SELECT count(*) FROM tickets', policyCatalog(MYSQL))).ok).toBe(true);
+    // Postgres keeps its schemas (structure) and never carried the database name.
+    expect(agentStructure({ ...MYSQL, dialect: 'postgres', database: 'pgdb', relations: [{ ...MYSQL.relations[1]!, schema: 'support' }] }, []).database).toBeNull();
+  });
+});
+
+describe('a network source re-saved: the agent controls follow the connection descriptor', () => {
+  it('the same descriptor keeps see, query, the projects and Allow writes; a new one turns query and writes off and keeps see and the projects', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'sources-agent-save-'));
+    try {
+      const desc = { catalog: { dialect: 'postgres' as const, database: 'x', describedAt: '2026-11-03T00:00:00Z', relations: [] }, privileges: { login: 'reader', readOnly: true, tables: [], writes: [] } };
+      const registry = new McpRegistry({ store: new McpRegistryStore(join(base, 'mcp')), secrets: new MemorySecretStore(), probe: async () => ({ ok: true, serverInfo: null, tools: [], source: desc as never }), discover: () => [] });
+      const cfg = (host: string) => ({ name: 'pg', kind: 'sql', command: null, args: [], url: null, auth: null, sql: { driver: 'postgres', host, port: 5432, database: 'x', user: 'reader', tls: 'verify-full' }, address: { allow: ['10.0.0.0/8'], plaintext: false } }) as never;
+      const save = async (host: string) => registry.save((await registry.preview(cfg(host))).previewHash);
+      await save('10.1.1.1');
+      await registry.setAgentAccess('pg', { query: true, projects: ['proj_a'] });
+      await registry.setAllowWrites('pg', true);
+      expect((await save('10.1.1.1')).agents).toEqual({ see: true, query: true, projects: ['proj_a'], everyProject: false });
+      expect((await registry.get('pg')).allowWrites).toBe(true);
+      const moved = await save('10.1.1.2');
+      expect(moved.agents).toEqual({ see: true, query: false, projects: ['proj_a'], everyProject: false });
+      expect(moved.allowWrites).toBe(false);
+      await registry.setAgentAccess('pg', { see: false });
+      expect((await save('10.1.1.3')).agents).toMatchObject({ see: false, query: false });
+    } finally {
+      removeScratch(base);
+    }
+  });
+});
+
 if (PG_TARGETS.length === 0) {
   describe('agent tools on a real Postgres', () => {
     it.skipIf(!DB_REQUIRED)('needs APPS_PG16_URL / APPS_PG17_URL (CI sets them)', () => {
@@ -577,6 +705,27 @@ for (const target of PG_TARGETS) {
       expect(e.isError).toBe(true);
       expect(e.answer).toMatchObject({ sqlstate: '22P02' });
       expect(e.raw).not.toContain(ROW_MARK); // Postgres's own message echoes the value; the agent never sees it
+    });
+
+    it('review r1: the secret is scrubbed from column names too; a view allowance withdrawn during the read withholds its rows', async () => {
+      await put(r, 'support-pg', { query: true });
+      const named = await call(r, 'wmt_a', 'query', { name: 'support-pg', sql: `SELECT 1 AS "${SECRET_MARK}"` });
+      expect(named.isError, named.raw).toBe(false);
+      expect(named.raw).not.toContain(SECRET_MARK);
+      // Save the source again with a view allowed (same connection descriptor), then withdraw it mid-read.
+      await db.admin.unsafe("CREATE OR REPLACE VIEW support.v_open AS SELECT id FROM support.tickets WHERE status = 'open'; GRANT SELECT ON support.v_open TO agent_reader");
+      const resave = async (views: string[]) => {
+        const p = await r.app.inject({ method: 'POST', url: '/api/v1/mcp/servers/preview', payload: { name: 'support-pg', kind: 'sql', sql: { driver: 'postgres', host: DB_HOST, port: db.port, database: db.database, user: 'agent_reader', tls: 'disable' }, auth: { ref: 'keychain:wicked-mcp/support-pg' }, address: { ...LOOPBACK, plaintext: true }, viewsAllowed: views } });
+        expect(p.statusCode, p.body).toBe(200);
+        expect((await r.app.inject({ method: 'POST', url: '/api/v1/mcp/servers', payload: { previewHash: (p.json() as McpPreviewResponse).previewHash } })).statusCode).toBe(201);
+      };
+      await resave(['support.v_open']);
+      expect((await call(r, 'wmt_a', 'query', { name: 'support-pg', sql: 'SELECT count(*) FROM support.v_open' })).isError).toBe(false);
+      r.setAfterRead(async () => {
+        await resave([]);
+      });
+      const c = await call(r, 'wmt_a', 'query', { name: 'support-pg', sql: 'SELECT id FROM support.v_open' });
+      expect(c.answer).toMatchObject({ refused: 'changed_while_running' });
     });
 
     it('an agent read runs with parallel workers off and a small work_mem (the driver option the tool sets)', async () => {
