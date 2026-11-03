@@ -10,6 +10,9 @@
  *   POST /sources/:name/safety            operator   Postgres: the table safety check and its fingerprint
  *   PUT  /sources/:name/allow-writes      HUMAN      the Allow writes switch (audited; off withdraws row-write grants)
  *   POST /sources/:name/test-call         HUMAN      G6: name the one request, then send exactly it (reads only)
+ *   POST /sources/:name/test              operator   Test connection: connect, describe (saved) and a probe read check
+ *   POST /sources/:name/ask               HUMAN      a seat drafts one read from the structure; crew checks it; nothing runs
+ *   POST /sources/:name/query             HUMAN      check SQL, or run exactly the checked text: READ ONLY, 10 s, 50 rows
  *   POST /apps/uploads?name=&filename=    operator   a file becomes a `sql`/`sqlite` source (sample rows: humans only)
  *
  * Every connection is the dialer's, under the source's confirmed ranges; every secret is resolved at
@@ -24,14 +27,17 @@ import { z } from 'zod';
 import type { AuditLog } from '../api/audit.js';
 import { trustAtLeast } from '../api/auth.js';
 import { API_PREFIX } from '../api/api-prefix.js';
-import type { Actor, SourceAllowWritesResponse, SourceCatalogResponse, SourceTestCallRequest, SourceTestCallResponse, SourceUploadResponse } from '../core/types.js';
+import type { Actor, SourceAllowWritesResponse, SourceAskResponse, SourceCatalogResponse, SourceQueryResponse, SourceTestCallRequest, SourceTestCallResponse, SourceUploadResponse } from '../core/types.js';
 import { canonicalJson, deriveToolClass, effectiveToolClass, MCP_SERVER_NAME_RE } from '../mcp/classify.js';
 import { invokeMcpTool } from '../mcp/invoke.js';
 import { McpRegistryError, type McpRegistry } from '../mcp/registry.js';
 import { McpRegistryCorruptError } from '../mcp/registry-store.js';
 import { buildRestRequest, invokeRestTool } from '../mcp/rest.js';
 import { scrubSecrets } from '../mcp/secrets.js';
+import type { SeatTurnInput, SeatTurnOutcome } from '../standing-orders/parse.js';
+import { ASK_CELL_CHARS, ASK_DEADLINE_MS, ASK_QUESTION_MAX, ASK_RESULT_BYTES, ASK_ROW_CAP, ASK_STEP_ID, AskRunTokens, askCell, askPrompt, draftFromAnswer, draftHolds, rowsWithin } from './ask.js';
 import { pgPrivileges } from './catalog/postgres.js';
+import { testConnection } from './connection-test.js';
 import { policyCatalog, type SqlCatalog } from './catalog/types.js';
 import { crewSourceCatalog } from './crew-source.js';
 import { type DialOptions, DialRedirectRefusedError, DialRefusedError } from './dialer.js';
@@ -39,7 +45,8 @@ import { SourceQueryError } from './drivers/types.js';
 import { checkGraphqlRead, type GraphqlCheck, graphqlPost } from './graphql.js';
 import { CREW_SOURCE, describeSource, graphqlSource, sqlConnectArgs } from './kinds.js';
 import { pgTableSafety } from './safety/postgres.js';
-import { checkSqlQuery, type SqlCheckResult, type SqlSourceHandle } from './sql.js';
+import { checkReadPolicy } from './policy/index.js';
+import { checkSqlQuery, readSqlQuery, SourcePolicyError, type SqlCheckResult, type SqlSourceHandle } from './sql.js';
 import { ingestUpload, snapshotPath, UPLOAD_LIMITS, UploadError } from './uploads.js';
 
 const V = API_PREFIX;
@@ -59,6 +66,15 @@ export interface SourceRouteDeps {
   /** Tests: where snapshots are stored, and how connections resolve. */
   snapshotDir?: string;
   dial?: DialOptions;
+  /**
+   * "Ask a question of this data": ONE seat's one turn (`seatTurn`, standing-orders/parse.ts). Given
+   * the question and the source's structure only; absent = no seat path on this daemon (503).
+   */
+  draft?: (input: SeatTurnInput) => Promise<SeatTurnOutcome>;
+  /** The run tokens' key holder (tests share one across registrations). */
+  runTokens?: AskRunTokens;
+  /** TESTS ONLY: a shorter deadline for a person's query (production: K1's 10 s). */
+  queryDeadlineMs?: number;
 }
 
 const name = z.string().regex(MCP_SERVER_NAME_RE);
@@ -81,6 +97,8 @@ export const SourceSafetySchema = z
   })
   .strict();
 export const SourceAllowWritesSchema = z.object({ allowed: z.boolean() }).strict();
+export const SourceAskSchema = z.object({ question: z.string().trim().min(1).max(ASK_QUESTION_MAX) }).strict();
+export const SourceQuerySchema = z.object({ sql: z.string().min(1).max(64 * 1024), confirm: z.string().regex(/^[0-9a-f]{64}$/).optional() }).strict();
 export const SourceTestCallSchema = z
   .object({ target: z.string().min(1).max(64 * 1024), args: z.record(z.string(), z.unknown()).optional(), confirm: z.string().regex(/^[0-9a-f]{64}$/).optional() })
   .strict();
@@ -380,6 +398,221 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
         );
       } catch (err) {
         return fail(reply, err, deps.actorOf(req), secretsOf(req));
+      }
+    },
+  );
+
+  // ── Test connection; ask a question of the data (operator 2026-11-03) ─────────────────────────
+
+  app.post<{ Params: { name: string } }>(
+    `${V}/sources/:name/test`,
+    { config: { manifest: { responseType: 'SourceConnectionTestResponse', statusCodes: [200, 400, 404, 503] } } },
+    async (req, reply) => {
+      const r = registry(reply);
+      if (r === null) return reply;
+      try {
+        return await testConnection({ registry: r, dial, ...(deps.snapshotDir !== undefined ? { snapshotDir: deps.snapshotDir } : {}) }, req.params.name, deps.actorOf(req).kind === 'human');
+      } catch (err) {
+        return fail(reply, err, deps.actorOf(req), secretsOf(req));
+      }
+    },
+  );
+
+  const tokens = deps.runTokens ?? new AskRunTokens();
+
+  /**
+   * A saved SQL source a person asks or queries: described and switched on (a switched-off source reads
+   * nothing, a prepare included), with its handle (the secret resolved when it is asked for).
+   */
+  const askable = async (r: McpRegistry, sourceName: string, req: FastifyRequest) => {
+    const src = await r.source(sourceName);
+    if (src.config.kind !== 'sql') throw new McpRegistryError(400, 'not_sql', `${sourceName} is a GraphQL source: asking a question is for SQL sources; its test call reads it`);
+    if (src.description === null) throw new McpRegistryError(409, 'not_described', `${sourceName} has not been described yet: test the connection first`);
+    if (!src.enabled) throw new McpRegistryError(409, 'source_disabled', `${sourceName} is switched off: it reads nothing`);
+    const catalog = src.description.catalog as SqlCatalog;
+    const sql = src.config.sql;
+    const views = src.config.viewsAllowed ?? [];
+    let secret: string | null | undefined;
+    /** The source's secret, resolved once per request (null: it has none). */
+    const secretNow = async (): Promise<string | null> => {
+      if (secret !== undefined) return secret;
+      if (sql?.driver === 'sqlite') return (secret = null);
+      const got = await r.callSecret(src.config);
+      if (got.missing) throw new McpRegistryError(409, 'secret_missing', `${src.config.auth?.ref ?? 'the secret'} resolves to no secret; set it first`);
+      if (got.secret !== null) RESOLVED.set(req, [got.secret]);
+      return (secret = got.secret);
+    };
+    const handle = async (): Promise<SqlSourceHandle> => {
+      if (sql?.driver === 'sqlite') return { driver: 'sqlite', snapshotPath: snapshotPath(sql.snapshot ?? '', deps.snapshotDir), catalog };
+      return { driver: sql?.driver === 'mysql' ? 'mysql' : 'postgres', connect: sqlConnectArgs(src.config, await secretNow(), dial), catalog, viewsAllowed: views };
+    };
+    return { src, catalog, views, driver: sql?.driver ?? 'postgres', handle, secretNow };
+  };
+
+  /**
+   * The check a person's SQL gets: K1's read policy, then a prepare (never executed). A text with
+   * parameters is refused here: a person's query runs with none, so it could never run.
+   */
+  const personCheck = async (h: SqlSourceHandle, text: string, req: FastifyRequest) => {
+    const c = await checkSqlQuery(h, text);
+    if (c.ok && c.describe.params.length > 0) {
+      return { ok: false as const, code: 'params', detail: `this query has ${c.describe.params.length} parameter${c.describe.params.length === 1 ? '' : 's'} ($1, ?): write the values into it, since a query you run here takes none` };
+    }
+    return sqlCheckAnswer(c, true, secretsOf(req));
+  };
+
+  app.post<{ Params: { name: string } }>(
+    `${V}/sources/:name/ask`,
+    { config: { manifest: { requestType: 'SourceAskBody', responseType: 'SourceAskResponse', statusCodes: [200, 400, 403, 404, 409, 422, 502, 503, 504] } } },
+    async (req, reply) => {
+      const parsed = SourceAskSchema.safeParse(req.body);
+      if (!parsed.success) return invalid(reply, parsed.error);
+      const actor = deps.actorOf(req);
+      // Human-only, like Allow writes: an agent-kind token, whatever its trust, never asks for a draft.
+      if (!isHumanOperator(actor)) return reply.code(403).send({ error: `only a human operator asks a question of a source; you are ${actor.kind}/${actor.trust}`, code: 'ask_human_only' });
+      const source = req.params.name;
+      // ONE trail entry per attempt, however it ends: THAT a person asked and how it went, never the
+      // question, the SQL or a source's words.
+      let recorded = false;
+      let seat: string | null = null;
+      const asked = (detail: Record<string, unknown>): void => {
+        if (recorded) return;
+        recorded = true;
+        deps.audit.record('apps.source.asked', actor, { detail: { source, ...(seat !== null ? { seat } : {}), ...detail } });
+      };
+      if (deps.draft === undefined) {
+        asked({ drafted: false, failed: 'ask_unavailable' });
+        return reply.code(503).send({ error: 'this daemon has no seat path to draft a query: write the SQL yourself', code: 'ask_unavailable' });
+      }
+      const r = registry(reply);
+      if (r === null) {
+        asked({ drafted: false, failed: 'registry_unavailable' });
+        return reply;
+      }
+      try {
+        const a = await askable(r, source, req);
+        // The seat gets the question and the STRUCTURE (the catalog holds no row value), nothing else.
+        const turn = await deps.draft({
+          problem: `Draft one read query for the data source ${source}`,
+          stepId: ASK_STEP_ID,
+          noSeat: 'no seat can take a turn to draft the query: sign a seat in from the Agents page, or write the SQL yourself',
+          instructions: askPrompt(parsed.data.question, a.catalog, a.views),
+        });
+        if (!turn.ok) {
+          asked({ drafted: false, failed: turn.code === 409 ? 'no_seat' : 'seat_failed' });
+          return reply.code(turn.code).send({ error: turn.error, code: turn.code === 409 ? 'no_seat' : 'seat_failed' });
+        }
+        seat = turn.seat;
+        // Defense in depth: a seat steered into reading the source's secret (schema-name injection on a
+        // seat that can run commands) never gets it shown, checked or run.
+        const secret = await a.secretNow();
+        const d = draftFromAnswer(turn.answer);
+        // Raw AND decoded: JSON escapes a quote or a backslash in a password, and decoding restores it.
+        if (secret !== null && draftHolds(secret, turn.answer, d)) {
+          asked({ drafted: false, failed: 'draft_holds_secret' });
+          return reply.code(502).send({ error: `the ${turn.seat} seat's answer held this source's secret, so crew shows none of it: write the SQL yourself, and change the source's password`, code: 'draft_holds_secret' });
+        }
+        if (d === null) {
+          asked({ drafted: false, failed: 'no_draft' });
+          return reply.code(422).send({ error: `the ${turn.seat} seat did not answer with a query: ask again in other words, or write the SQL yourself`, code: 'no_draft' });
+        }
+        if (d.sql === '') {
+          asked({ drafted: false, failed: 'cannot_answer' });
+          const none: SourceAskResponse = { sql: '', explanation: d.explanation, seat: turn.seat, check: null, confirm: null };
+          return none;
+        }
+        // K1's read policy, then a prepare at the source. Nothing executes.
+        const check = await personCheck(await a.handle(), d.sql, req);
+        asked({ drafted: true, check: check.ok ? 'ok' : check.code });
+        const body: SourceAskResponse = { sql: d.sql, explanation: d.explanation, seat: turn.seat, check, confirm: check.ok ? tokens.mint(source, a.src.descriptorHash, d.sql) : null };
+        return body;
+      } catch (err) {
+        asked({ drafted: seat !== null, failed: err instanceof McpRegistryError ? err.code : err instanceof SourceQueryError ? `source_${err.errorClass}` : 'failed' });
+        return fail(reply, err, actor, secretsOf(req));
+      }
+    },
+  );
+
+  app.post<{ Params: { name: string } }>(
+    `${V}/sources/:name/query`,
+    { config: { manifest: { requestType: 'SourceQueryBody', responseType: 'SourceQueryResponse', statusCodes: [200, 400, 403, 404, 409, 502, 503, 504] } } },
+    async (req, reply) => {
+      const parsed = SourceQuerySchema.safeParse(req.body);
+      if (!parsed.success) return invalid(reply, parsed.error);
+      const actor = deps.actorOf(req);
+      if (!isHumanOperator(actor)) return reply.code(403).send({ error: `only a human operator queries a source; you are ${actor.kind}/${actor.trust}`, code: 'query_human_only' });
+      const source = req.params.name;
+      const { sql, confirm } = parsed.data;
+      // A RUN attempt (with `confirm`) leaves ONE trail entry, however it ends; a check alone, like the
+      // source check route, leaves none. Never the SQL, a value or a source's words.
+      let recorded = false;
+      const queried = (detail: Record<string, unknown>): void => {
+        if (recorded || confirm === undefined) return;
+        recorded = true;
+        deps.audit.record('apps.source.queried', actor, { detail: { source, ...detail } });
+      };
+      const r = registry(reply);
+      if (r === null) {
+        queried({ ok: false, failed: 'registry_unavailable' });
+        return reply;
+      }
+      try {
+        const a = await askable(r, source, req);
+        if (confirm === undefined) {
+          // The check only: the policy, then a prepare. A pass carries the token for exactly this text.
+          const check = await personCheck(await a.handle(), sql, req);
+          const checked: SourceQueryResponse = { ran: false, check, confirm: check.ok ? tokens.mint(source, a.src.descriptorHash, sql) : null };
+          return checked;
+        }
+        // Only a text crew checked and answered, for this source as it is now, runs.
+        if (!tokens.verify(confirm, source, a.src.descriptorHash, sql)) {
+          queried({ ok: false, refused: 'query_changed' });
+          return reply.code(409).send({ error: 'this is not the SQL crew checked for this source as it is now: check it again, then run it', code: 'query_changed' });
+        }
+        // The policy again (the catalog may have been described anew since the check); its relations are
+        // what the trail names (identifiers, never a value).
+        const pol = await checkReadPolicy(a.driver, sql, policyCatalog(a.catalog, a.driver === 'sqlite' ? [] : a.views));
+        if (!pol.ok) {
+          queried({ ok: false, refused: pol.code });
+          return reply.code(409).send({ error: pol.detail, code: pol.code });
+        }
+        const handle = await a.handle();
+        // The source as it is NOW, just before the read: a new connection descriptor, a switch-off, or
+        // a view allowance withdrawn since the token was checked is a change, and nothing runs on the old.
+        // (A change that completes between this read and the connect still races it: every check here
+        // is a snapshot, and no lock serializes runs with saves. A person's own two clicks, ms apart.)
+        const now = await r.source(source);
+        const sameViews = JSON.stringify([...(now.config.viewsAllowed ?? [])].sort()) === JSON.stringify([...a.views].sort());
+        if (now.descriptorHash !== a.src.descriptorHash || !now.enabled || !sameViews) {
+          queried({ ok: false, refused: 'query_changed' });
+          return reply.code(409).send({ error: `${source} changed (its connection, its allowed views) or was switched off since this SQL was checked: check it again, then run it`, code: 'query_changed' });
+        }
+        // The relations read, as the policy names them (identifiers). SQLite's policy is its authorizer at
+        // prepare, which names none here: the entry then says nothing about them.
+        const named = pol.relations.length > 0 ? { relations: pol.relations } : {};
+        let res: Awaited<ReturnType<typeof readSqlQuery>>;
+        try {
+          res = await readSqlQuery(handle, sql, [], { maxRows: ASK_ROW_CAP, maxBytes: ASK_RESULT_BYTES, deadlineMs: deps.queryDeadlineMs ?? ASK_DEADLINE_MS, blobsAsHex: true, cellChars: ASK_CELL_CHARS });
+        } catch (err) {
+          if (err instanceof SourcePolicyError) {
+            queried({ ok: false, ...named, refused: err.code });
+            return reply.code(409).send({ error: err.message, code: err.code });
+          }
+          queried({ ok: false, ...named, ...(err instanceof SourceQueryError ? { errorClass: err.errorClass, ...(err.sqlstate !== null ? { sqlstate: err.sqlstate } : {}) } : { errorClass: 'failed' }) });
+          throw err;
+        }
+        // Rows to this answer only, as JSON carries them, scrubbed of the source's secret (defense in
+        // depth), and held to the byte budget as encoded (each cell is cut first).
+        const secrets = secretsOf(req);
+        const fit = rowsWithin(res.rows.map((raw) => scrubSecrets(raw.map(askCell), secrets)), ASK_RESULT_BYTES);
+        const rows = fit.rows;
+        const truncated = res.truncated || fit.cut;
+        queried({ ok: true, ...named, rows: rows.length, truncated, ms: res.ms });
+        const ran: SourceQueryResponse = { ran: true, columns: res.columns, rows, truncated, rowCap: ASK_ROW_CAP, ms: res.ms };
+        return ran;
+      } catch (err) {
+        queried({ ok: false, failed: err instanceof McpRegistryError ? err.code : err instanceof SourceQueryError ? `source_${err.errorClass}` : 'failed' });
+        return fail(reply, err, actor, secretsOf(req));
       }
     },
   );

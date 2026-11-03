@@ -13341,6 +13341,106 @@ export interface CrewSourceCatalog {
   routes: Array<{ path: string; responseType: string; params: string[] }>;
 }
 
+// ── Test connection, and ask a question of a source (operator 2026-11-03; api-types 0.179.0) ─────────
+
+/**
+ * `POST /sources/:name/test` — "Test connection" on a saved `sql` or `graphql` source (it replaces
+ * "Describe again"). crew connects with the saved credentials resolved now, describes the source again
+ * and saves that description, then (SQL) checks a probe read of one table with the read policy and a
+ * prepare at the source; the probe is never executed. A failure is a result (`ok: false`, HTTP 200):
+ * crew's `code` and words (a source's own words reach a human only, scrubbed of the secret). No answer
+ * carries the secret.
+ */
+export interface SourceConnectionTestResponse {
+  name: string;
+  kind: 'sql' | 'graphql';
+  driver: 'postgres' | 'mysql' | 'sqlite' | null;
+  ok: boolean;
+  /** Connecting and describing, in milliseconds (a failure: until it failed). */
+  ms: number;
+  /** When crew ran the test (ISO 8601). */
+  testedAt: string;
+  /**
+   * How crew connects: `verified` (TLS, the certificate checked against the host: Postgres
+   * `verify-full`, MySQL `VERIFY_IDENTITY`, HTTPS), `off` (plaintext, allowed on this confirmed
+   * address), `local` (an upload: crew opens its own snapshot, there is no connection).
+   */
+  tls: 'verified' | 'off' | 'local';
+  /** `ok`: the fresh description (saved): structure, and for Postgres the login's privilege report. */
+  catalog?: SourceCatalogResponse;
+  /** `ok`, SQL: the read-policy check of the probe read (`null`: no table to probe). */
+  readCheck?: ({ ok: true; text: string; relation: string } | { ok: false; text: string; relation: string; code: string; detail: string }) | null;
+  /** `!ok`: why (`secret_missing`, a dialer refusal code, `source_connection`, `source_timeout`, `source_source`, `test_failed`, …). */
+  code?: string;
+  error?: string;
+}
+
+/** `POST /sources/:name/ask` — HUMAN operator only (403 `ask_human_only`). SQL sources. */
+export interface SourceAskBody {
+  /** The person's question, e.g. "How many tickets are open?" (1-1000 characters). */
+  question: string;
+}
+
+/**
+ * The draft: one seat wrote one read query from the question and the source's STRUCTURE only (what
+ * agents see: names, types, keys, declared enum literals, row estimates; never a row or a credential),
+ * and crew checked it with the read policy, then a prepare at the source. NOTHING RAN. `confirm` is
+ * crew's run token for exactly `sql` (only when the check passed): `POST /sources/:name/query` with it
+ * runs that text. Audited `apps.source.asked` (no question, no SQL).
+ */
+export interface SourceAskResponse {
+  /** The query the seat wrote (`''`: it said the structure cannot answer the question). */
+  sql: string;
+  /** The seat's one line: what the query returns and how to read it (or why there is no query). */
+  explanation: string;
+  /** The seat that drafted it. */
+  seat: string;
+  /** The check of `sql` (`null` when there is no query). */
+  check: SourceCheckResponse | null;
+  confirm: string | null;
+}
+
+/** `POST /sources/:name/query` — HUMAN operator only (403 `query_human_only`). SQL sources. */
+export interface SourceQueryBody {
+  /** The SQL to check (or run): a draft, an edited draft, or the person's own. */
+  sql: string;
+  /** crew's run token for exactly `sql` (from the ask, or from this route without `confirm`). */
+  confirm?: string;
+}
+
+/**
+ * Without `confirm`: the check only (`ran: false`; nothing reaches the source but a prepare) and, when
+ * it passed, the run token. With `confirm`: crew verifies the token is its own for exactly this text
+ * and this source as it is now (`409 query_changed` otherwise), then runs it: the read policy again,
+ * a `READ ONLY` transaction, the 10 s deadline cancelled at the source (`504 source_timeout`), at most
+ * {@link SourceQueryRan.rowCap} rows. The rows go to this answer only: never to a seat, a log or the
+ * audit trail (`apps.source.queried` records the relations, counts and time).
+ */
+export type SourceQueryResponse = SourceQueryChecked | SourceQueryRan;
+
+export interface SourceQueryChecked {
+  ran: false;
+  check: SourceCheckResponse;
+  confirm: string | null;
+}
+
+export interface SourceQueryRan {
+  ran: true;
+  columns: Array<{ name: string; type: string }>;
+  /**
+   * Cells as the source's driver reads them, as JSON carries them: Postgres and MySQL dates, times,
+   * numerics and 64-bit integers as the source's own text (`2026-01-01 01:00:00+00`, in the session's
+   * time zone), bytes as `\x` hex (the first 32,767 bytes, `…` past them; Postgres `bytea` arrives as the source's `\x`
+   * text and is cut like any text), JSON values as JSON; text past 64 KB
+   * is cut.
+   */
+  rows: unknown[][];
+  /** More rows than the cap, or past 1 MB of rows as encoded: only the first are shown. */
+  truncated: boolean;
+  rowCap: number;
+  ms: number;
+}
+
 // ── Decision capture (DES-decision-capture §4.2.1 / §4.6; DC-S4a, api-types 0.80.0) ──────────────
 
 /** The laya codebook's decision types. `none` is crew's label for "no decision". */

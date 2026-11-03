@@ -65,7 +65,7 @@ import type {
   PutMcpSecretSchema,
   SaveMcpServerSchema,
 } from '../src/api/mcp.js';
-import type { graphqlCheckAnswer, SourceAllowWritesSchema, SourceCheckSchema, SourcePrivilegesSchema, SourceSafetySchema, SourceTestCallSchema, sqlCheckAnswer } from '../src/sources/routes.js';
+import type { graphqlCheckAnswer, SourceAllowWritesSchema, SourceAskSchema, SourceCheckSchema, SourcePrivilegesSchema, SourceQuerySchema, SourceSafetySchema, SourceTestCallSchema, sqlCheckAnswer } from '../src/sources/routes.js';
 import type { SafetyResult } from '../src/sources/safety/postgres.js';
 import type { PgPrivilegeReport } from '../src/sources/catalog/postgres.js';
 import type { SqlCatalog } from '../src/sources/catalog/types.js';
@@ -1120,6 +1120,9 @@ respondsWith<Wire.SourceCheckResponse, ReturnType<typeof sqlCheckAnswer>>();
 respondsWith<ReturnType<typeof sqlCheckAnswer>, Wire.SourceCheckResponse>();
 respondsWith<Wire.SourceCheckResponse, ReturnType<typeof graphqlCheckAnswer>>();
 respondsWith<ReturnType<typeof graphqlCheckAnswer>, Wire.SourceCheckResponse>();
+// Test connection and ask (api-types 0.179.0): the bodies pass their schemas; what the code produces fits.
+accepts<z.input<typeof SourceAskSchema>, Wire.SourceAskBody>();
+accepts<z.input<typeof SourceQuerySchema>, Wire.SourceQueryBody>();
 accepts<z.input<typeof PatchMcpServerSchema>, Wire.PatchMcpServerBody>();
 accepts<z.input<typeof PatchMcpToolSchema>, Wire.PatchMcpToolBody>();
 accepts<z.input<typeof PutMcpSecretSchema>, Wire.PutMcpSecretBody>();

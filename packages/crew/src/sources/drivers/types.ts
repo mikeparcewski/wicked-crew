@@ -79,6 +79,10 @@ export interface ReadOptions {
   /** (K2b) Stop reading once the rows held reach about this many bytes (`truncated`): the executor's 10 MB cap, applied while reading. */
   maxBytes?: number;
   signal?: AbortSignal;
+  /** SQLite: BLOB cells as `\x` hex (a person's own query), not null (an app's read). */
+  blobsAsHex?: boolean;
+  /** SQLite: text cells cut at this many characters (`…` after) before the byte budget counts them (a person's own query). */
+  cellChars?: number;
   /**
    * TESTS ONLY: the source-side timeout, when it should differ from the deadline, so the client-side
    * cancel (Postgres cancel, MySQL KILL QUERY) is what stops the query. Production never sets it.

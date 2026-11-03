@@ -83,9 +83,24 @@ try {
       stmt.setReturnArrays(true);
       const rows = [];
       let truncated = false;
+      // The byte budget (`maxBytes`) holds while collecting: a row that would pass it is not kept.
+      let bytes = 2;
+      // A BLOB: null for an app's read (as before); a person's own query (`blobs: 'hex'`) sees it as
+      // `\x` hex, its first 32,767 bytes (65,536 characters with the prefix), `…` past them.
+      const BLOB_MAX = 32767;
+      const blob = (b) => (req.blobs === 'hex' ? `\\x${Buffer.from(b.buffer, b.byteOffset, Math.min(b.byteLength, BLOB_MAX)).toString('hex')}${b.byteLength > BLOB_MAX ? '…' : ''}` : null);
       for (const row of stmt.iterate(...req.params)) {
         if (rows.length >= req.maxRows) { truncated = true; break; }
-        rows.push(row.map((v) => (typeof v === 'bigint' ? v.toString() : v instanceof Uint8Array ? null : v)));
+        // A person's query cuts long text first (`cellChars`), so a long cell shows shortened rather than
+        // its whole row being left out by the byte budget.
+        const text = (v) => (typeof req.cellChars === 'number' && v.length > req.cellChars ? `${v.slice(0, req.cellChars)}…` : v);
+        const cells = row.map((v) => (typeof v === 'bigint' ? v.toString() : v instanceof Uint8Array ? blob(v) : typeof v === 'string' ? text(v) : v));
+        if (typeof req.maxBytes === 'number') {
+          const n = Buffer.byteLength(JSON.stringify(cells), 'utf8') + (rows.length > 0 ? 1 : 0);
+          if (bytes + n > req.maxBytes) { truncated = true; break; }
+          bytes += n;
+        }
+        rows.push(cells);
       }
       out({ ok: true, columns, rows, truncated });
     }
