@@ -666,12 +666,15 @@ export async function invokeRestTool(
   args: Record<string, unknown>,
   timeoutMs: number,
   dial: RestDial = {},
+  /** (K2b) Called just before the request is handed to the dialer's fetch (see `Invoker`). */
+  onDispatch?: () => void,
 ): Promise<UpstreamToolResult> {
   const { url, init, droppedArgs } = buildRestRequest(config, secret, mapping, args);
   const deadline = Math.max(1, Math.min(timeoutMs, mapping.timeoutMs));
   const { fetch: fetchImpl } = dialOf(config, dial);
   let res: Response;
   try {
+    onDispatch?.();
     res = await fetchImpl(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(deadline) });
   } catch (err) {
     // The dialer refuses a redirect before it is followed; it is judged below like one answered.

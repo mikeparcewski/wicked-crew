@@ -7,7 +7,9 @@ import { join } from 'node:path';
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
+import { callMutation, capped, mutationField } from '../src/apps/actions/api-action.js';
 import { AppActionStore } from '../src/apps/actions/store.js';
+import { AppWritePath } from '../src/apps/actions/write-path.js';
 import type { AppAction, AppActionPrepareResponse } from '../src/core/types.js';
 import { startGraphqlServer, startMcpServer, startOpenApiService } from './fixtures/apps-sources/servers.mjs';
 import { appsHarness, type Harness, specWith } from './support/apps-harness.js';
@@ -179,6 +181,28 @@ for (const target of PG_TARGETS) {
       expect((await rig.h.call('POST', '/apps/desk/actions/assign/prepare', { version: rig.version(), params: { id: 1 } }, 'seat')).status).toBe(403);
     });
 
+    it('codex r1: a connection lost inside the write never continues elsewhere: failed, nothing written', async () => {
+      if (rig.h.writePath.getGrant('desk', 'assign') === null) expect((await rig.grant('assign')).status).toBe(200);
+      const p = await rig.prepare('assign', { id: 4822 });
+      rig.h.hooks.afterCheck = async () => {
+        await db.admin.unsafe("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = 'apps_k2b_writer' AND datname = current_database() AND state LIKE 'idle in transaction%'");
+      };
+      const r = await rig.run('assign', (p.body as unknown as AppActionPrepareResponse).record);
+      expect(r.body).toMatchObject({ state: 'failed' });
+      expect(await rig.one('SELECT owner AS v FROM s.tickets WHERE id = 4822')).toBe('nobody');
+    });
+
+    it('codex r1: preparing an older version of an action is refused and leaves the newer grant in place', async () => {
+      const v1 = updateAction('old_new', 'writer', 's.tickets', { owner: { kind: 'literal', value: 'v1' } });
+      const older = await rig.land([assign, note, drop, v1]);
+      const v2 = updateAction('old_new', 'writer', 's.tickets', { owner: { kind: 'literal', value: 'v2' } });
+      await rig.land([assign, note, drop, v2]);
+      expect((await rig.grant('old_new')).status).toBe(200);
+      const p = await rig.prepare('old_new', { id: 4821 }, older);
+      expect(p.body).toMatchObject({ code: 'not_granted' });
+      expect(rig.h.writePath.getGrant('desk', 'old_new')).not.toBeNull();
+    });
+
     it('S14: a used column changes type: the grant is withdrawn at the next prepare, with the reason', async () => {
       if (rig.h.writePath.getGrant('desk', 'assign') === null) expect((await rig.grant('assign')).status).toBe(200);
       await db.admin.unsafe('ALTER TABLE s.tickets ALTER COLUMN owner TYPE varchar(200)');
@@ -259,6 +283,60 @@ describe('API actions (DES §7.3) over the K1 test services', () => {
     expect(g.run).toMatchObject({ state: 'succeeded', result: { assign: { id: 4803, owner: 'priya@example.com' } } });
   });
 
+  it('codex r1: a source re-saved, a grant replaced, or APPS_READ_ONLY set after the run’s checks and before running: refused, nothing sent', async () => {
+    const prep = async (id: string, args: Record<string, unknown>) => {
+      if (h.writePath.getGrant('desk', id) === null) expect((await h.call('POST', `/apps/desk/actions/${id}/grant`, { version })).status).toBe(200);
+      const p = await h.call('POST', `/apps/desk/actions/${id}/prepare`, { version, params: args });
+      return (p.body as unknown as AppActionPrepareResponse).record;
+    };
+    const before = mcp.hits.filter((x) => x.body.includes('assign_ticket')).length;
+    const r1 = await prep('mcp_assign', { id: 4805 });
+    h.hooks.beforeRunning = async () => {
+      await h.register({ name: 'ref', kind: 'mcp-http', url: `${mcp.origin}/mcp?moved=1`, address: LOOP });
+    };
+    expect((await h.call('POST', '/apps/desk/actions/mcp_assign/run', { record: r1 })).body).toMatchObject({ code: 'contract_changed' });
+    delete h.hooks.beforeRunning;
+    await h.register({ name: 'ref', kind: 'mcp-http', url: `${mcp.origin}/mcp`, address: LOOP });
+    const r2 = await prep('approve', { id: 4806 });
+    h.writeEnv['APPS_READ_ONLY'] = '';
+    h.hooks.beforeRunning = async () => {
+      h.writeEnv['APPS_READ_ONLY'] = '1';
+    };
+    expect((await h.call('POST', '/apps/desk/actions/approve/run', { record: r2 })).body).toMatchObject({ code: 'read_only' });
+    delete h.hooks.beforeRunning;
+    delete h.writeEnv['APPS_READ_ONLY'];
+    expect(mcp.hits.filter((x) => x.body.includes('assign_ticket')).length).toBe(before);
+  });
+
+  it('codex/pi r1: a value that looks like a placeholder is sent as shown; an outcome that cannot be saved is still answered and audited', async () => {
+    const lit: AppAction = { id: 'lit', kind: 'api', source: 'ref', call: { kind: 'tool', tool: 'assign_ticket' }, args: { id: { kind: 'param', name: 'id' }, owner: { kind: 'literal', value: '{record}' } }, params };
+    const r = await h.land('desk', specWith([], [...actions, lit]));
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    version = 3;
+    const { run } = await call('lit', { id: 4807 });
+    expect(run).toMatchObject({ state: 'succeeded' });
+    expect(JSON.stringify(run)).toContain('{record}'); // the tool echoes the owner it set: the card's value
+    // The terminal save fails (twice): the person still gets the outcome; the audit says it was not saved.
+    const store = (h.writePath as unknown as { deps: { actions: AppActionStore } }).deps.actions;
+    const locked = store.locked.bind(store);
+    let calls = 0;
+    store.locked = (async (fn: Parameters<typeof locked>[0]) => {
+      calls++;
+      if (calls >= 3) throw new Error('disk full');
+      return locked(fn);
+    }) as typeof store.locked;
+    try {
+      const p = await h.call('POST', '/apps/desk/actions/lit/prepare', { version, params: { id: 4808 } });
+      calls = 1; // the prepare's own lock does not count; next: running (2), then the outcome (3, 4)
+      const out = await h.call('POST', '/apps/desk/actions/lit/run', { record: (p.body as unknown as AppActionPrepareResponse).record });
+      expect(out.body).toMatchObject({ state: 'succeeded' });
+    } finally {
+      store.locked = locked;
+    }
+    await h.audit.flush();
+    expect((await h.audit.read()).some((e) => e.action === 'apps.action.ran' && (e.detail as { recordNotSaved?: boolean }).recordNotSaved === true)).toBe(true);
+  });
+
   it('S9: a daemon that stopped during a run ends the record unknown at the next start, before and after its deadline, and never runs it again', async () => {
     if (h.writePath.getGrant('desk', 'mcp_assign') === null) expect((await h.call('POST', '/apps/desk/actions/mcp_assign/grant', { version })).status).toBe(200);
     const p = await h.call('POST', '/apps/desk/actions/mcp_assign/prepare', { version, params: { id: 4804 } });
@@ -274,6 +352,39 @@ describe('API actions (DES §7.3) over the K1 test services', () => {
     expect(reborn.record(record)?.reason).toContain('not run again');
     const later = new AppActionStore(file, () => Date.now() + 10 * 60 * 1000); // past its 2-minute deadline
     expect(later.record(record)?.state).toBe('unknown');
+    // The recovered run gets its audit line when the write path starts over that store (codex r1).
+    const lines: Array<[string, unknown]> = [];
+    void new AppWritePath({ store: h.store, actions: reborn, registry: h.registry, audit: { record: (a: string, _actor: unknown, f?: { detail?: unknown }) => lines.push([a, f?.detail]) as never }, viewerOf: async (a) => ({ id: a.id, email: null, name: null, groups: null }) });
+    expect(lines).toEqual(expect.arrayContaining([['apps.action.ran', expect.objectContaining({ record, outcome: 'unknown', recovered: true })]]));
+  });
+});
+
+describe('API outcomes (codex r1)', () => {
+  it('a GraphQL 200 without a result is unknown; an error status with an HTML body is failed; a result is cut at 64 KB of UTF-8; the card names the root field', async () => {
+    const { createServer } = await import('node:http');
+    let answer: { status: number; body: string; type: string } = { status: 200, body: '{}', type: 'application/json' };
+    const server = createServer((_req, res) => {
+      res.writeHead(answer.status, { 'content-type': answer.type });
+      res.end(answer.body);
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as { port: number }).port;
+    const config = { name: 'g', kind: 'graphql' as const, command: null, args: [], url: `http://127.0.0.1:${port}/graphql`, auth: null, address: { allow: ['127.0.0.0/8'], plaintext: true } };
+    try {
+      expect(await callMutation(config, null, 'mutation { assign(id: 1) { id } }', {}, 'assign')).toMatchObject({ state: 'unknown' });
+      answer = { status: 200, body: '{"status":"ok"}', type: 'application/json' };
+      expect(await callMutation(config, null, 'mutation { assign(id: 1) { id } }', {}, 'assign')).toMatchObject({ state: 'unknown' });
+      answer = { status: 502, body: '<html>bad gateway</html>', type: 'text/html' };
+      expect(await callMutation(config, null, 'mutation { assign(id: 1) { id } }', {}, 'assign')).toMatchObject({ state: 'failed' });
+      answer = { status: 200, body: '{"data":{"assign":{"id":1}}}', type: 'application/json' };
+      expect(await callMutation(config, null, 'mutation { assign(id: 1) { id } }', {}, 'assign')).toEqual({ state: 'succeeded', result: { assign: { id: 1 } } });
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+    const wide = capped({ s: '漢'.repeat(60_000) }) as { truncated?: boolean; text?: string };
+    expect(wide.truncated).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(wide), 'utf8')).toBeLessThanOrEqual(64 * 1024 + 64);
+    expect(mutationField('mutation { assign(id: 1) { aaa: id } }')).toBe('assign');
   });
 });
 

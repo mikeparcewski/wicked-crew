@@ -43,7 +43,7 @@ const TEXT_TYPES = { crewText: { to: 25, from: [1082, 1083, 1114, 1184, 1266, 11
  * A postgres.js client for one source, one connection, closed by the caller (`end`). `readOnly`
  * false is for the row-write path (K2b), which opens its own transaction; reads never use it.
  */
-export function pgClient(args: SqlConnectArgs, opts: { deadlineMs?: number; readOnly?: boolean; signal?: AbortSignal } = {}): PgSql {
+export function pgClient(args: SqlConnectArgs, opts: { deadlineMs?: number; readOnly?: boolean; signal?: AbortSignal; onclose?: () => void } = {}): PgSql {
   const { source, password, policy, dial } = args;
   if (source.driver !== 'postgres') throw new Error('pgClient is for a postgres source');
   const deadlineMs = opts.deadlineMs ?? STATEMENT_DEADLINE_MS;
@@ -91,6 +91,7 @@ export function pgClient(args: SqlConnectArgs, opts: { deadlineMs?: number; read
     connect_timeout: 10,
     max_lifetime: 60,
     onnotice: () => undefined,
+    ...(opts.onclose !== undefined ? { onclose: opts.onclose } : {}),
     connection: params,
     types: TEXT_TYPES as never,
     socket: async () => {
@@ -135,16 +136,54 @@ async function closeQuietly(sql: PgSql): Promise<void> {
   await sql.end({ timeout: 1 }).catch(() => undefined);
 }
 
+/** Whether a transaction's one connection has closed (set by the client's `onclose`). */
+export interface PgLife {
+  closed: boolean;
+}
+
+/**
+ * Run `fn` in ONE transaction on a max-1 client, by hand rather than with postgres.js's `begin()` (K2b): when
+ * the connection closes mid-transaction (a terminated backend, a restart), `begin()` sends ROLLBACK on the
+ * closed connection, which throws inside postgres.js's own timers (`socket.write` of null) and takes the
+ * daemon down as an uncaught exception. Here nothing is sent once the connection has closed (the server ends
+ * an interrupted transaction itself), and no statement can go to a NEW connection outside the transaction:
+ * every statement checks `life` first, in the same tick it is handed to the connection.
+ *
+ * `client` must have been made with `onclose` setting `life.closed`. `fn` gets the guarded client.
+ */
+export async function pgTx<T>(client: PgSql, life: PgLife, begin: string, fn: (tx: postgres.TransactionSql<Record<string, never>>) => Promise<T>): Promise<T> {
+  const guarded = new Proxy(client, {
+    get(target, prop, receiver) {
+      if (prop !== 'unsafe') return Reflect.get(target, prop, receiver) as unknown;
+      return (text: string, params?: unknown[], o?: unknown) => {
+        if (life.closed) throw new SourceQueryError(null, 'connection', 'the connection to the source closed during the transaction');
+        return (target.unsafe as (...a: unknown[]) => unknown)(text, params, o);
+      };
+    },
+  }) as unknown as postgres.TransactionSql<Record<string, never>>;
+  await guarded.unsafe(begin);
+  try {
+    const out = await fn(guarded);
+    await guarded.unsafe('COMMIT');
+    return out;
+  } catch (err) {
+    // A live connection ends the transaction; a closed one has already ended it at the server.
+    if (!life.closed) await (client.unsafe('ROLLBACK') as unknown as Promise<unknown>).catch(() => undefined);
+    throw err;
+  }
+}
+
 /** Run `fn` inside a READ ONLY transaction with `search_path = pg_catalog, pg_temp` set locally too. */
 export async function pgReadOnly<T>(args: SqlConnectArgs, fn: (tx: postgres.TransactionSql<Record<string, never>>) => Promise<T>, opts: { deadlineMs?: number } = {}): Promise<T> {
   // The client owns its sockets: each is destroyed when the call ends, never left half-closed.
   const ended = new AbortController();
-  const sql = pgClient(args, { ...opts, signal: ended.signal });
+  const life: PgLife = { closed: false };
+  const sql = pgClient(args, { ...opts, signal: ended.signal, onclose: () => (life.closed = true) });
   try {
-    return (await sql.begin('read only', async (tx) => {
+    return await pgTx(sql, life, 'BEGIN READ ONLY', async (tx) => {
       await tx.unsafe('SET LOCAL search_path = pg_catalog, pg_temp');
       return fn(tx);
-    })) as T;
+    });
   } catch (err) {
     throw pgError(err);
   } finally {
@@ -260,7 +299,8 @@ export async function pgRead(args: SqlConnectArgs, text: string, params: unknown
   const started = Date.now();
   const sourceTimeout = opts.sourceTimeoutMs ?? deadlineMs;
   const ended = new AbortController();
-  const sql = pgClient(args, { deadlineMs: sourceTimeout, signal: ended.signal });
+  const life: PgLife = { closed: false };
+  const sql = pgClient(args, { deadlineMs: sourceTimeout, signal: ended.signal, onclose: () => (life.closed = true) });
   let cancelled = false;
   // ONE absolute deadline for the whole read, armed at entry: connecting, BEGIN, the live relation
   // checks, every cursor batch and the type lookup all count (statement_timeout restarts on each
@@ -278,7 +318,7 @@ export async function pgRead(args: SqlConnectArgs, text: string, params: unknown
   const guard = setTimeout(stop, deadlineMs);
   opts.signal?.addEventListener('abort', stop, { once: true });
   try {
-    const out = await sql.begin('read only', async (tx) => {
+    const out = await pgTx(sql, life, 'BEGIN READ ONLY', async (tx) => {
       await tx.unsafe(`SET LOCAL statement_timeout = ${Math.max(1, Math.floor(sourceTimeout))}`);
       if (opts.expect !== undefined) await pgExpectRelations(tx, opts.expect);
       const rows: unknown[][] = [];

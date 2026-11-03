@@ -11,7 +11,7 @@
  */
 
 import { randomBytes, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 import type { AppActionCard, AppActionGrant, AppActionState } from '../../core/types.js';
@@ -79,6 +79,8 @@ const grantKey = (app: string, action: string): string => `${app}\u0000${action}
 export class AppActionStore {
   /** This process's epoch: a `running` record of any other epoch is from a daemon that stopped. */
   readonly epoch = randomBytes(8).toString('hex');
+  /** Records this start found `running` from an earlier process and ended `unknown` (the write path audits them). */
+  readonly recoveredAtBoot: ActionRecord[] = [];
   private state: StateFile;
   private chain: Promise<unknown> = Promise.resolve();
 
@@ -95,6 +97,7 @@ export class AppActionStore {
         r.reason = 'crew stopped while this action ran: whether it happened is not known (check the source); it is not run again';
         r.endedAt = this.now();
         changed = true;
+        this.recoveredAtBoot.push(structuredClone(r));
       }
     }
     if (changed) this.persist();
@@ -107,11 +110,32 @@ export class AppActionStore {
     return parsed;
   }
 
+  /**
+   * Durable before it returns (codex r1): the temp file is flushed to disk, renamed over the store, and the
+   * directory flushed too, so the `running` step a call waits on survives a host crash.
+   */
   private persist(): void {
-    mkdirSync(dirname(this.stateFile), { recursive: true });
+    const dir = dirname(this.stateFile);
+    mkdirSync(dir, { recursive: true });
     const tmp = `${this.stateFile}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
-    writeFileSync(tmp, `${JSON.stringify(this.state)}\n`, { encoding: 'utf8', mode: 0o600 });
+    const fd = openSync(tmp, 'w', 0o600);
+    try {
+      writeSync(fd, `${JSON.stringify(this.state)}\n`);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(tmp, this.stateFile);
+    try {
+      const d = openSync(dir, 'r');
+      try {
+        fsyncSync(d);
+      } finally {
+        closeSync(d);
+      }
+    } catch {
+      // A platform that cannot flush a directory (Windows) keeps the file's own flush.
+    }
   }
 
   /** Run `fn` under the store's one lock; a mutation it makes is persisted, or undone when the write fails. */
@@ -197,8 +221,8 @@ export class ActionTx {
     return Object.hasOwn(this.state.records, id) ? this.state.records[id]! : null;
   }
 
-  addRecord(r: Omit<ActionRecord, 'id'>): ActionRecord {
-    const rec: ActionRecord = { ...r, id: randomUUID() };
+  addRecord(r: Omit<ActionRecord, 'id'> & { id?: string }): ActionRecord {
+    const rec: ActionRecord = { ...r, id: r.id ?? randomUUID() };
     this.state.records[rec.id] = rec;
     this.dirty = true;
     return rec;

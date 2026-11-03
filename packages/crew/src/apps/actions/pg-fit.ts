@@ -32,14 +32,17 @@ export interface FitItem {
 export async function pgExactFitIn(tx: Tx, items: readonly FitItem[]): Promise<Array<{ column: string; why: string }>> {
   const misfits: Array<{ column: string; why: string }> = [];
   for (const it of items) {
+    await tx.unsafe('SAVEPOINT k2b_fit');
     try {
-      const rows = await tx.savepoint(async (sp) =>
-        sp.unsafe<Array<{ ok: boolean }>>(`SELECT ((($1::pg_catalog.text)::${it.full})::${it.base} IS NOT DISTINCT FROM ($1::pg_catalog.text)::${it.base}) AS ok`, [it.text] as never),
-      );
+      const rows = await tx.unsafe<Array<{ ok: boolean }>>(`SELECT ((($1::pg_catalog.text)::${it.full})::${it.base} IS NOT DISTINCT FROM ($1::pg_catalog.text)::${it.base}) AS ok`, [it.text] as never);
+      await tx.unsafe('RELEASE SAVEPOINT k2b_fit');
       if (rows[0]?.ok !== true) misfits.push({ column: it.column, why: `does not fit ${it.column} ${it.full} (the column would change it)` });
     } catch (err) {
       const code = (err as { code?: unknown })?.code;
-      misfits.push({ column: it.column, why: `is not a value of ${it.column} ${it.full}${typeof code === 'string' ? ` (SQLSTATE ${code})` : ''}` });
+      // Only an answer from the server is a value the type refused; anything else is the transport's.
+      if (typeof code !== 'string' || !/^[0-9A-Z]{5}$/.test(code)) throw err;
+      await tx.unsafe('ROLLBACK TO SAVEPOINT k2b_fit');
+      misfits.push({ column: it.column, why: `is not a value of ${it.column} ${it.full} (SQLSTATE ${code})` });
     }
   }
   return misfits;

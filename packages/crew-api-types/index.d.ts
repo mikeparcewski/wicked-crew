@@ -15342,7 +15342,8 @@ export type AppActionValueSource = 'param' | 'app' | 'viewer' | 'crew';
 /** One value on a card: the column or argument, the value as it will be sent, and where it comes from. */
 export interface AppActionCardValue {
   name: string;
-  value: string | number | boolean | null;
+  /** A list argument shows its items (an array parameter, the viewer's groups). */
+  value: string | number | boolean | null | Array<string | number | boolean>;
   from: AppActionValueSource;
   /** The words for `from`: "you entered it", "fixed by the app", "your sign-in", "filled by studio: now". */
   label: string;

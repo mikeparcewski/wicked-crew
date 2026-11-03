@@ -8,6 +8,8 @@
  * A REST operation that maps an `Idempotency-Key` header gets the record id there.
  */
 
+import { Kind, parse } from 'graphql';
+
 import type { McpRestMapping } from '../../core/types.js';
 import { invokeMcpTool } from '../../mcp/invoke.js';
 import type { McpUpstreamConfig } from '../../mcp/probe.js';
@@ -15,6 +17,7 @@ import { buildRestRequest } from '../../mcp/rest.js';
 import { scrubSecrets } from '../../mcp/secrets.js';
 import { UpstreamCallError } from '../../mcp/upstream-error.js';
 import { DialRefusedError, type DialOptions } from '../../sources/dialer.js';
+import { SourceQueryError } from '../../sources/drivers/types.js';
 import { graphqlPost } from '../../sources/graphql.js';
 import { graphqlSource } from '../../sources/kinds.js';
 
@@ -37,6 +40,13 @@ export function describeToolRequest(config: McpUpstreamConfig, tool: string, res
   return { operation: `tool ${tool}`, request: `${config.name}/${tool} ${JSON.stringify(args)}` };
 }
 
+/** The one root field a mutation document selects (from its AST, not the contract's sorted lines; codex r1). */
+export function mutationField(document: string): string {
+  const op = parse(document, { noLocation: true, maxTokens: 10_000 }).definitions.find((d) => d.kind === Kind.OPERATION_DEFINITION);
+  const sel = op !== undefined && op.kind === Kind.OPERATION_DEFINITION ? op.selectionSet.selections[0] : undefined;
+  return sel !== undefined && sel.kind === Kind.FIELD ? sel.name.value : 'mutation';
+}
+
 /** How a mutation will go out, for the card. */
 export function describeMutation(config: McpUpstreamConfig, document: string, variables: Record<string, unknown>, field: string): { operation: string; request: string } {
   return { operation: `mutation ${field}`, request: `POST ${config.url ?? ''}\n${JSON.stringify({ query: document, variables })}` };
@@ -44,43 +54,68 @@ export function describeMutation(config: McpUpstreamConfig, document: string, va
 
 export type ApiOutcome = { state: 'succeeded'; result: unknown } | { state: 'failed' | 'unknown'; reason: string };
 
-function capped(v: unknown): unknown {
+/** A result cut to 64 KB of serialized UTF-8 (codex r1: bytes, not UTF-16 units). */
+export function capped(v: unknown): unknown {
   const text = JSON.stringify(v ?? null);
-  return text.length <= API_RESULT_MAX ? (v ?? null) : `${text.slice(0, API_RESULT_MAX)}…`;
+  if (Buffer.byteLength(text, 'utf8') <= API_RESULT_MAX) return v ?? null;
+  const cut = Buffer.from(text, 'utf8').subarray(0, API_RESULT_MAX - 64).toString('utf8').replace(/\uFFFD$/, '');
+  return { truncated: true, text: cut };
 }
 
 /** Call one tool. Never throws. */
 export async function callTool(config: McpUpstreamConfig, secret: string | null, tool: string, rest: McpRestMapping | null | undefined, args: Record<string, unknown>): Promise<ApiOutcome> {
   const secrets = secret === null ? [] : [secret];
+  let sent = false;
   try {
-    const res = await invokeMcpTool(config, secret, tool, args, 30_000, rest ?? null);
-    const status = (res['_meta'] as { 'wicked/rest'?: { status?: number } } | undefined)?.['wicked/rest']?.status;
-    if (res['isError'] === true) return { state: 'failed', reason: `${config.name}/${tool} answered an error${status !== undefined ? ` (HTTP ${status})` : ''}` };
+    const res = await invokeMcpTool(config, secret, tool, args, 30_000, rest ?? null, () => {
+      sent = true;
+    });
+    if (res['isError'] === true) {
+      // Only crew's own REST invoker writes this status; an MCP server's metadata is its own text.
+      const status = config.kind === 'rest' ? (res['_meta'] as { 'wicked/rest'?: { status?: unknown } } | undefined)?.['wicked/rest']?.status : undefined;
+      const shown = typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599 ? ` (HTTP ${status})` : '';
+      return { state: 'failed', reason: `${config.name}/${tool} answered an error${shown}` };
+    }
     return { state: 'succeeded', result: capped(scrubSecrets(res['structuredContent'] ?? res['content'] ?? null, secrets)) };
   } catch (err) {
-    return failure(err, `${config.name}/${tool}`);
+    return failure(err, `${config.name}/${tool}`, sent);
   }
 }
 
 /** Call one mutation. Never throws. */
-export async function callMutation(config: McpUpstreamConfig, secret: string | null, document: string, variables: Record<string, unknown>, dial: DialOptions = {}): Promise<ApiOutcome> {
+export async function callMutation(config: McpUpstreamConfig, secret: string | null, document: string, variables: Record<string, unknown>, field: string, dial: DialOptions = {}): Promise<ApiOutcome> {
   const secrets = secret === null ? [] : [secret];
   try {
     const { status, json } = await graphqlPost(graphqlSource(config, dial), secret, { query: document, variables });
-    const errors = (json as { errors?: unknown } | null)?.errors;
-    if (status >= 400 || (Array.isArray(errors) && errors.length > 0)) return { state: 'failed', reason: `the GraphQL source answered ${Array.isArray(errors) ? `${errors.length} error(s)` : `HTTP ${status}`}` };
-    return { state: 'succeeded', result: capped(scrubSecrets((json as { data?: unknown } | null)?.data ?? null, secrets)) };
+    const body = json as { errors?: unknown; data?: unknown } | null;
+    if (Array.isArray(body?.errors) && body.errors.length > 0) return { state: 'failed', reason: `the GraphQL source answered ${body.errors.length} error(s)` };
+    if (status >= 400) return { state: 'failed', reason: `the GraphQL source answered HTTP ${status}` };
+    // A success is a GraphQL execution result holding the root field (codex r1); anything else after the
+    // request went out does not establish what happened.
+    const data = body?.data;
+    if (data === null || typeof data !== 'object' || !Object.hasOwn(data, field)) return { state: 'unknown', reason: `the GraphQL source answered HTTP ${status} without a result for ${field}: whether it happened is not known; check the source. It is not run again` };
+    return { state: 'succeeded', result: capped(scrubSecrets(data, secrets)) };
   } catch (err) {
-    return failure(err, config.name);
+    // An answer that was not JSON still carries its status: an error status was an answer.
+    if (err instanceof SourceQueryError && err.errorClass === 'source') {
+      const m = /HTTP (\d{3})/.exec(err.message);
+      if (m !== null && Number(m[1]) >= 400) return { state: 'failed', reason: `the GraphQL source answered HTTP ${m[1]}` };
+    }
+    return failure(err, config.name, !(err instanceof DialRefusedError));
   }
 }
 
-function failure(err: unknown, what: string): ApiOutcome {
-  // Refused before anything left crew: nothing happened.
+/**
+ * An error in an outcome's words: refused before anything left crew, or an error the source answered, is
+ * `failed`; a call that went out and got no usable answer is `unknown` (codex r1).
+ */
+function failure(err: unknown, what: string, sent: boolean): ApiOutcome {
   if (err instanceof DialRefusedError) return { state: 'failed', reason: `the connection to ${what} was refused (${err.code}); nothing was sent` };
   if (err instanceof UpstreamCallError) {
     if (err.errorClass === 'boundary') return { state: 'failed', reason: `crew refused the request to ${what} (${err.errorClass}); nothing was sent` };
     if (err.errorClass === 'http') return { state: 'failed', reason: `${what} answered an HTTP error` };
+    if (err.errorClass === 'protocol' && sent) return { state: 'failed', reason: `${what} answered an error (the call was refused)` };
   }
+  if (!sent) return { state: 'failed', reason: `${what} could not be reached; nothing was sent` };
   return { state: 'unknown', reason: `the call to ${what} was sent and no answer came (${err instanceof UpstreamCallError ? err.errorClass : 'transport'}): whether it happened is not known; check the source. It is not run again` };
 }

@@ -38,7 +38,7 @@ import { bindParams, ParamError, type Viewer } from '../exec/params.js';
 import { checkRowValues } from '../exec/source-stage.js';
 import { lookupSource, pinOf, type AppSource } from '../exec/sources.js';
 import type { AppStore } from '../store.js';
-import { callMutation, callTool, describeMutation, describeToolRequest, idempotencyArg, type ApiOutcome } from './api-action.js';
+import { callMutation, callTool, describeMutation, describeToolRequest, idempotencyArg, mutationField, type ApiOutcome } from './api-action.js';
 import { baseTypeSql, pgExactFitIn, type FitItem } from './pg-fit.js';
 import { generateStatement, runRowWrite, type WriteHooks } from './pg-write.js';
 import type { ActionRecord, AppActionStore, ResolvedOperation } from './store.js';
@@ -100,6 +100,10 @@ export class AppWritePath {
   constructor(private readonly deps: WritePathDeps) {
     this.now = deps.now ?? Date.now;
     this.limits = new AppLimits(this.now);
+    // A run a stopped daemon left `running` gets its audit line now, as `unknown` (codex r1).
+    for (const r of deps.actions.recoveredAtBoot) {
+      this.audited('apps.action.ran', CREW, { app: r.app, action: r.action, record: r.id, viewer: r.viewer, descriptorHash: r.descriptorHash, paramsDigest: r.paramHash, outcome: 'unknown', reason: 'crew stopped during the run', recovered: true });
+    }
   }
 
   private readOnly(): boolean {
@@ -123,8 +127,9 @@ export class AppWritePath {
   }
 
   /** Recompute the action's contract against the source now (never executes it). */
-  private async resolve(action: AppAction): Promise<Resolved> {
-    const source = await lookupSource(this.deps.registry, action.source);
+  private async resolve(action: AppAction, snapshot?: AppSource | null): Promise<Resolved> {
+    // ONE snapshot of the source for the check and the call (codex r1: two lookups could see two saves).
+    const source = snapshot !== undefined ? snapshot : await lookupSource(this.deps.registry, action.source);
     if (source === null) throw refuse(409, 'contract_changed', `${action.source} is gone`);
     if (action.kind === 'row-write') {
       if (source.kind !== 'sql' || source.config.sql?.driver !== 'postgres') throw refuse(409, 'contract_changed', `${action.source} is not a Postgres source`);
@@ -147,8 +152,7 @@ export class AppWritePath {
     if (source.kind !== 'graphql' || source.description?.introspection === undefined) throw refuse(409, 'contract_changed', `${action.source} is not a described GraphQL source now`);
     const sigs = graphqlRootSignatures(action.call.mutation, source.description.introspection, 'mutation');
     if (sigs === null) throw refuse(409, 'contract_changed', `the mutation no longer fits ${action.source}'s schema`);
-    const field = /^field [A-Za-z_][A-Za-z0-9_]*\.([A-Za-z_][A-Za-z0-9_]*)\(/.exec(sigs.find((l) => l.startsWith('field ')) ?? '')?.[1] ?? 'mutation';
-    return { source, contractHash: graphqlMutationContract(sigs), field };
+    return { source, contractHash: graphqlMutationContract(sigs), field: mutationField(action.call.mutation) };
   }
 
   private async secret(s: AppSource): Promise<string | null> {
@@ -163,8 +167,13 @@ export class AppWritePath {
   }
 
   /** Withdraw a grant that no longer holds (any change withdraws it), audited, then refuse. */
-  private async withdraw(app: string, action: string, why: string, code: string, message: string): Promise<never> {
-    const gone = await this.deps.actions.locked((tx) => tx.dropGrant(app, action));
+  private async withdraw(app: string, action: string, why: string, code: string, message: string, observed?: AppActionGrant): Promise<never> {
+    // Only the grant that was judged stale goes: one granted again meanwhile stays (codex r1).
+    const gone = await this.deps.actions.locked((tx) => {
+      const g = tx.grant(app, action);
+      if (g === null || (observed !== undefined && (g.grantedAt !== observed.grantedAt || g.contractHash !== observed.contractHash || g.actionHash !== observed.actionHash))) return false;
+      return tx.dropGrant(app, action);
+    });
     if (gone) this.audited('apps.action.revoked', CREW, { app, action, reason: why });
     throw refuse(409, code, message);
   }
@@ -180,7 +189,9 @@ export class AppWritePath {
     if (action.kind === 'row-write' && r.source.kind === 'sql') {
       const { schema, name } = splitTable(action.table);
       const report = await pgPrivileges(sqlConnectArgs(r.source.config, await this.secret(r.source), this.deps.dial ?? {}), [{ schema, table: name, op: action.op, set: Object.keys(action.set ?? {}), key: Object.keys(action.key) }]).catch(() => null);
-      const missing = report?.writes[0]?.missing ?? [];
+      // No report is no evidence: the grant waits for one (codex r1).
+      if (report === null || report.writes[0] === undefined) throw refuse(502, 'source_unavailable', `the privilege report for ${action.table} could not be read; nothing was granted`);
+      const missing = report.writes[0].missing;
       if (missing.length > 0) throw refuse(409, 'missing_grants', `${r.source.config.sql?.user ?? 'the login'} cannot make this write yet; run: ${missing.join(' ')}`);
     }
     if (r.source.pin.descriptorHash !== pinned.descriptorHash) throw refuse(409, 'contract_changed', `${action.source}'s connection changed since this version was checked: check it again`);
@@ -235,23 +246,26 @@ export class AppWritePath {
     const grant = this.deps.actions.grant(app, action.id);
     const hash = actionHash(action);
     if (grant === null) throw refuse(409, 'not_granted', `action ${action.id} is not granted: a person grants it in the data panel first`);
-    if (grant.actionHash !== hash || (record !== undefined && (record.actionHash !== hash || record.contractHash !== grant.contractHash))) {
-      return this.withdraw(app, action.id, 'action_changed', 'not_granted', `action ${action.id} changed since it was granted: the grant is withdrawn; grant it again`);
+    // The grant is for another version of the action (an older tab, or a newer grant): refused, and that
+    // grant stays (codex r1).
+    if (grant.actionHash !== hash || (record !== undefined && (record.actionHash !== hash || record.actionHash !== grant.actionHash || record.contractHash !== grant.contractHash))) {
+      throw refuse(409, 'not_granted', `this version of action ${action.id} is not the one granted: grant it again to use it`);
     }
     const source = await lookupSource(this.deps.registry, action.source);
     if (source === null || source.pin.descriptorHash !== grant.descriptorHash || (record !== undefined && record.descriptorHash !== source.pin.descriptorHash)) {
-      return this.withdraw(app, action.id, 'source_changed', 'contract_changed', `${action.source}'s connection changed since the grant: the grant is withdrawn`);
+      return this.withdraw(app, action.id, 'source_changed', 'contract_changed', `${action.source}'s connection changed since the grant: the grant is withdrawn`, grant);
     }
+    if ((source.kind === 'sql' || source.kind === 'graphql') && !source.enabled) throw refuse(409, 'contract_changed', `${action.source} is switched off`);
     if (action.kind === 'row-write' && (source.kind !== 'sql' || !source.allowWrites)) throw refuse(409, 'writes_off', `${action.source}'s Allow writes switch is off`);
     let resolved: Resolved;
     try {
-      resolved = await this.resolve(action);
+      resolved = await this.resolve(action, source);
     } catch (err) {
-      if (err instanceof AppWriteError && (err.code === 'table_changed' || err.code === 'contract_changed')) return this.withdraw(app, action.id, err.code, err.code, `${err.message}: the grant is withdrawn`);
+      if (err instanceof AppWriteError && (err.code === 'table_changed' || err.code === 'contract_changed')) return this.withdraw(app, action.id, err.code, err.code, `${err.message}: the grant is withdrawn`, grant);
       throw err;
     }
     if (resolved.contractHash !== grant.contractHash) {
-      return this.withdraw(app, action.id, 'contract_changed', action.kind === 'row-write' ? 'table_changed' : 'contract_changed', `what action ${action.id} uses at ${action.source} changed since the grant (for a table: its safety fingerprint): the grant is withdrawn`);
+      return this.withdraw(app, action.id, 'contract_changed', action.kind === 'row-write' ? 'table_changed' : 'contract_changed', `what action ${action.id} uses at ${action.source} changed since the grant (for a table: its safety fingerprint): the grant is withdrawn`, grant);
     }
     return { grant, resolved };
   }
@@ -284,16 +298,19 @@ export class AppWritePath {
       }
       return { value: v.value === 'now' ? '' : randomUUID(), from: 'crew', label: `${LABEL.crew}: ${v.value === 'now' ? 'now' : 'new uuid'}` };
     };
+    // The record's id is chosen first: an operation that sends it (an idempotency key) shows it on the card.
+    const recordId = randomUUID();
     let card: AppActionCard;
     let operation: ResolvedOperation;
     if (action.kind === 'row-write') ({ card, operation } = await this.prepareRow(app, action, resolved, value, nowAt));
-    else ({ card, operation } = this.prepareApi(app, action, resolved, value, nowAt, bound.absent));
+    else ({ card, operation } = this.prepareApi(app, action, resolved, value, nowAt, bound.absent, recordId));
     const t = this.now();
     const rec = await this.deps.actions.locked((tx) => {
       // The grant is read again under the lock: a revoke meanwhile wins.
       const g = tx.grant(app, id);
-      if (g === null || g.contractHash !== grant.contractHash) throw refuse(409, 'not_granted', `action ${id} was revoked while it was being prepared`);
+      if (g === null || g.contractHash !== grant.contractHash || g.actionHash !== grant.actionHash || g.descriptorHash !== grant.descriptorHash) throw refuse(409, 'not_granted', `action ${id} was revoked or granted again while it was being prepared`);
       return tx.addRecord({
+        id: recordId,
         app,
         tree: at.tree,
         commit: at.commit,
@@ -384,6 +401,7 @@ export class AppWritePath {
     value: (v: AppValue) => { value: unknown; from: AppActionCardValue['from']; label: string },
     nowAt: Date,
     absent: ReadonlySet<string>,
+    recordId: string,
   ): { card: AppActionCard; operation: ResolvedOperation } {
     const cards: AppActionCardValue[] = [];
     const args: Record<string, unknown> = {};
@@ -400,8 +418,12 @@ export class AppWritePath {
     let operation: ResolvedOperation;
     if (action.call.kind === 'tool') {
       const tool = resolved.tool!;
+      // An operation that maps an Idempotency-Key header gets the record id, on the card like any value (codex/pi r1).
       const idem = idempotencyArg(tool.rest);
-      if (idem !== null && !Object.hasOwn(args, idem)) args[idem] = '{record}';
+      if (idem !== null && !Object.hasOwn(args, idem)) {
+        args[idem] = recordId;
+        cards.push({ name: idem, value: recordId, from: 'crew', label: `${LABEL.crew}: the record id` });
+      }
       shown = describeToolRequest(source.config, tool.name, tool.rest, args);
       operation = { kind: 'tool', tool: tool.name, args };
     } else {
@@ -451,18 +473,22 @@ export class AppWritePath {
     if (action === undefined || files.tree !== snap.tree) throw refuse(409, 'not_accepted', `the version this record was prepared on no longer holds action ${id}`);
     const { resolved } = await this.recheck(app, action, snap.tree, snap);
     const secret = await this.secret(resolved.source);
-    // The linearization point: prepared → running, persisted, under the lock a revoke and Allow-writes-off take too.
+    await this.deps.hooks?.beforeRunning?.();
+    // The linearization point: prepared → running, persisted, under the lock a revoke and Allow-writes-off take
+    // too. The awaited read of the source comes FIRST; every check after it is synchronous, right before the
+    // step (codex r1: expiry or APPS_READ_ONLY could otherwise change during the await).
     const rec = await this.deps.actions.locked(async (tx) => {
+      const now = await lookupSource(this.deps.registry, action.source);
       const r = tx.record(snap.id);
       if (r === null || r.state !== 'prepared') throw refuse(409, 'record_used', `record ${snap.id} already ran`);
       if (this.now() >= r.expiresAt) throw refuse(409, 'record_expired', `record ${snap.id} expired: prepare the action again`);
-      const g = tx.grant(app, id);
-      if (g === null || g.contractHash !== r.contractHash || g.descriptorHash !== r.descriptorHash) throw refuse(409, 'not_granted', `action ${id} was revoked`);
       if (this.readOnly()) throw refuse(409, 'read_only', 'APPS_READ_ONLY is set: no action runs on this daemon');
-      if (action.kind === 'row-write') {
-        const now = await lookupSource(this.deps.registry, action.source);
-        if (now === null || now.kind !== 'sql' || !now.allowWrites || now.pin.descriptorHash !== r.descriptorHash) throw refuse(409, 'writes_off', `${action.source}'s Allow writes switch is off`);
-      }
+      const g = tx.grant(app, id);
+      if (g === null || g.actionHash !== r.actionHash || g.contractHash !== r.contractHash || g.descriptorHash !== r.descriptorHash) throw refuse(409, 'not_granted', `action ${id} was revoked or granted again`);
+      // The source the call goes to is the one checked: its descriptor is the record's, for every kind (codex r1).
+      if (now === null || now.pin.descriptorHash !== r.descriptorHash || resolved.source.pin.descriptorHash !== r.descriptorHash) throw refuse(409, 'contract_changed', `${action.source} changed while the action was starting`);
+      if ((now.kind === 'sql' || now.kind === 'graphql') && !now.enabled) throw refuse(409, 'contract_changed', `${action.source} is switched off`);
+      if (action.kind === 'row-write' && (now.kind !== 'sql' || !now.allowWrites)) throw refuse(409, 'writes_off', `${action.source}'s Allow writes switch is off`);
       return structuredClone(tx.update(r, { state: 'running', startedAt: this.now(), epoch: this.deps.actions.epoch }));
     });
     let outcome: { state: 'succeeded' | 'failed' | 'unknown'; reason?: string; result?: unknown };
@@ -473,10 +499,19 @@ export class AppWritePath {
       // Only reached by a bug: the call may have gone out, so the outcome is not known.
       outcome = { state: 'unknown', reason: `the run ended unexpectedly (${err instanceof Error ? err.name : 'error'}): whether it happened is not known` };
     }
-    const done = await this.deps.actions.locked((tx) => {
-      const r = tx.record(rec.id)!;
-      return structuredClone(tx.update(r, { state: outcome.state, ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}), ...(outcome.result !== undefined ? { result: outcome.result } : {}), endedAt: this.now() }));
-    });
+    // The outcome is known now: it is answered, audited and the cache invalidated even if saving it fails
+    // (codex r1); the record then stays `running` on disk and the next start makes it `unknown`.
+    const patch = { state: outcome.state, ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}), ...(outcome.result !== undefined ? { result: outcome.result } : {}), endedAt: this.now() };
+    let done: ActionRecord = { ...rec, ...patch };
+    let saved = false;
+    for (let attempt = 0; attempt < 2 && !saved; attempt++) {
+      try {
+        done = await this.deps.actions.locked((tx) => structuredClone(tx.update(tx.record(rec.id)!, patch)));
+        saved = true;
+      } catch {
+        // retried once
+      }
+    }
     this.deps.executor?.invalidate(app);
     const op = rec.operation;
     this.audited('apps.action.ran', input.actor, {
@@ -490,6 +525,7 @@ export class AppWritePath {
       ...(rec.fingerprint !== undefined ? { fingerprint: rec.fingerprint } : {}),
       outcome: done.state,
       ...(done.reason !== undefined ? { reason: done.reason } : {}),
+      ...(saved ? {} : { recordNotSaved: true }),
       ms: this.now() - started,
     });
     return { record: done.id, state: done.state as AppActionRunResponse['state'], ...(done.reason !== undefined ? { reason: done.reason } : {}), ...(done.result !== undefined ? { result: done.result } : {}) };
@@ -506,10 +542,9 @@ export class AppWritePath {
     const source = resolved.source as Extract<AppSource, { kind: 'rest' | 'mcp-http' | 'mcp-stdio' | 'graphql' }>;
     let out: ApiOutcome;
     if (op.kind === 'tool') {
-      const args = Object.fromEntries(Object.entries(op.args).map(([k, v]) => [k, v === '{record}' ? rec.id : v]));
-      out = await callTool(source.config, secret, op.tool, resolved.tool?.rest, args);
+      out = await callTool(source.config, secret, op.tool, resolved.tool?.rest, op.args);
     } else {
-      out = await callMutation(source.config, secret, op.document, op.variables, this.deps.dial ?? {});
+      out = await callMutation(source.config, secret, op.document, op.variables, resolved.field ?? mutationField(op.document), this.deps.dial ?? {});
     }
     return out.state === 'succeeded' ? { state: 'succeeded', result: out.result } : { state: out.state, reason: out.reason };
   }
