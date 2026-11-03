@@ -6,6 +6,8 @@
  */
 
 import { spawn } from 'node:child_process';
+
+import { childEnvWithBootEstateDb } from '../../core/governance-store.js';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,10 +28,10 @@ const LOG_TAIL = 8_000;
 
 function run(bin: string, args: string[], deadlineMs: number, env: NodeJS.ProcessEnv): Promise<{ code: number | null; out: string }> {
   return new Promise((resolve, reject) => {
-    const childEnv: NodeJS.ProcessEnv = {};
-    for (const k of KEEP_ENV) if (env[k] !== undefined) childEnv[k] = env[k];
-    childEnv['DOCKER_BUILDKIT'] = '1';
-    const child = spawn(bin, args, { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+    const picked: NodeJS.ProcessEnv = { DOCKER_BUILDKIT: '1' };
+    for (const k of KEEP_ENV) if (env[k] !== undefined) picked[k] = env[k];
+    // crew's child-env rule (crew#495): through childEnvWithBootEstateDb, so the daemon's exported store never rides along.
+    const child = spawn(bin, args, { env: childEnvWithBootEstateDb(picked), stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     const take = (b: Buffer): void => {
       out = (out + b.toString('utf8')).slice(-LOG_TAIL);
