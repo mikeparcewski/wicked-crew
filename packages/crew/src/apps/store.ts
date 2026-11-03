@@ -77,8 +77,6 @@ interface StoredTurn extends AppTurnState {
   checkedTree?: string | null;
   /** What that check ran. */
   checkedSummary: AppCheckSummary | null;
-  /** True while the launch is in flight: the engine may not know the run yet, so no poll may release it. */
-  launching?: boolean;
 }
 
 interface StoredApp {
@@ -141,6 +139,12 @@ export class AppStore {
   private readonly log: (msg: string) => void;
   private state: StateFile;
   private readonly locks = new Map<string, Promise<unknown>>();
+  /**
+   * Runs whose launch THIS process has in flight: the engine may not know them yet, so no poll may release
+   * their turn. In memory on purpose (codex/pi r3): after a restart nothing is launching, and the engine is
+   * asked about every turn.
+   */
+  private readonly launching = new Set<string>();
   /** Parsed trees, by (repo root, tree): trees are immutable. */
   private readonly treeCache = new Map<string, AppFiles>();
   sourceStage: AppSourceStage | null;
@@ -254,7 +258,7 @@ export class AppStore {
     const key = `${a.root}\0${tree}`;
     const hit = this.treeCache.get(key);
     if (hit !== undefined) return hit;
-    const read = await readAppTree(this.git(a), tree);
+    const read = await readAppTree(this.git(a), tree, { requireLock: true });
     if (!read.ok) throw new AppStoreError(409, 'unreadable_tree', `app ${a.slug} tree ${tree} cannot be read from its repo (it may have been changed): ${read.findings.map((f) => f.message).join('; ')}`);
     const files: AppFiles = { ...read.files, lock: read.files.lock ?? EMPTY_LOCK };
     if (this.treeCache.size > 256) this.treeCache.clear();
@@ -328,7 +332,7 @@ export class AppStore {
    * it is still the turn that was asked about, and never while its launch is in flight (codex r2).
    */
   private async refreshTurn(a: StoredApp, opts: { locked: boolean }): Promise<void> {
-    if (a.turn === null || a.turn.launching === true || this.turns === null) return;
+    if (a.turn === null || this.launching.has(a.turn.runId) || this.turns === null) return;
     const runId = a.turn.runId;
     let active = true;
     try {
@@ -339,7 +343,7 @@ export class AppStore {
     if (active) return;
     const clear = async (): Promise<void> => {
       const current = Object.hasOwn(this.state.apps, a.slug) ? this.state.apps[a.slug]! : undefined;
-      if (current === undefined || current.turn?.runId !== runId || current.turn.launching === true) return;
+      if (current === undefined || current.turn?.runId !== runId || this.launching.has(runId)) return;
       this.log(`[apps] turn ${runId} of ${a.slug} is no longer running; the app is editable again`);
       this.transact(a.slug, () => {
         current.turn = null;
@@ -364,11 +368,10 @@ export class AppStore {
     if (base !== h.version) {
       throw new AppStoreError(409, 'stale_base', `${what} was made on v${base}, but ${a.slug} is at v${h.version}; reload and try again`, { head: h.version });
     }
-    const git = this.git(a);
-    const main = await git.main();
+    const main = await this.git(a).main();
     if (main !== h.commit) {
-      this.log(`[apps] ${a.slug}: main was at ${main ?? '(none)'}, not crew's head ${h.commit}; re-pointed`);
-      await git.setMain(h.commit);
+      this.log(`[apps] ${a.slug}: main was at ${main ?? '(none)'}, not crew's head ${h.commit}; re-pointing it`);
+      await this.mirror(a, h.commit);
     }
   }
 
@@ -381,21 +384,23 @@ export class AppStore {
       // The turn is recorded under the run id crew chose BEFORE the run starts, so a crash between the two
       // leaves a turn crew can ask about, never a run with no lock (codex r1 on the store).
       const runId = `apps-${slug}-${randomBytes(6).toString('hex')}`;
-      const turn: StoredTurn = { runId, startedAt: this.now(), base: input.base, actor: input.actor.id, launchedBy: input.actor, checked: null, checkedTree: null, checkedSummary: null, launching: true };
-      this.transact(slug, () => {
-        a.turn = turn;
-      });
+      const turn: StoredTurn = { runId, startedAt: this.now(), base: input.base, actor: input.actor.id, launchedBy: input.actor, checked: null, checkedTree: null, checkedSummary: null };
+      this.launching.add(runId);
       try {
+        this.transact(slug, () => {
+          a.turn = turn;
+        });
         await turns.launch({ runId, app: slug, repoId: a.repoId, base: input.base, message: input.message, about: input.about, actor: input.actor });
       } catch (err) {
-        this.transact(slug, () => {
-          if (a.turn?.runId === runId) a.turn = null;
-        });
+        if (a.turn?.runId === runId) {
+          this.transact(slug, () => {
+            a.turn = null;
+          });
+        }
         throw err;
+      } finally {
+        this.launching.delete(runId);
       }
-      this.transact(slug, () => {
-        if (a.turn?.runId === runId) delete a.turn.launching;
-      });
       return { runId, startedAt: turn.startedAt, base: turn.base, actor: turn.actor };
     });
   }
@@ -408,6 +413,7 @@ export class AppStore {
       this.transact(slug, () => {
         a.turn = null;
       });
+      await this.git(a).dropRef(['wicked', 'apps-checked', runId]);
     });
   }
 
@@ -432,6 +438,8 @@ export class AppStore {
       const checkedTree = await this.writeTree(git, read.files.spec, read.files.queryText, outcome.lock);
       const commit = await git.commitTree(checkedTree, candidate.toLowerCase(), `apps-check: lock for turn ${runId}`, this.now());
       const t = a.turn;
+      // Anchored under a crew ref so a gc in the builder's seat cannot prune it before it lands (pi r3).
+      await git.writeRef(['wicked', 'apps-checked', runId], commit);
       this.transact(slug, () => {
         t.checked = commit;
         t.checkedTree = checkedTree;
@@ -475,6 +483,7 @@ export class AppStore {
         this.pushHistory(a, landed.version);
       });
       await this.mirror(a, commit);
+      await git.dropRef(['wicked', 'apps-checked', t.runId]);
       return landed!;
     });
   }

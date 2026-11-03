@@ -121,7 +121,7 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
     return { apps: store.list(q.data.project) };
   });
 
-  app.post(`${V}/apps`, { config: { manifest: { requestType: 'CreateAppBody', responseType: 'AppDetailResponse', statusCodes: [201, 400, 404, 409, 422] } } }, async (req, reply) => {
+  app.post(`${V}/apps`, { config: { manifest: { requestType: 'CreateAppBody', responseType: 'AppDetailResponse', statusCodes: [201, 400, 404, 409, 422, 503] } } }, async (req, reply) => {
     const parsed = AppCreateSchema.safeParse(req.body);
     if (!parsed.success) return badRequest(reply, parsed.error);
     const { slug, projectId } = parsed.data;
@@ -138,7 +138,7 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
     }
   });
 
-  app.get(`${V}/apps/:app`, { config: { manifest: { responseType: 'AppDetailResponse', statusCodes: [200, 404] } } }, async (req, reply) => {
+  app.get(`${V}/apps/:app`, { config: { manifest: { responseType: 'AppDetailResponse', statusCodes: [200, 404, 409, 503] } } }, async (req, reply) => {
     const slug = slugOf(req, reply);
     if (slug === null) return reply;
     try {
@@ -150,7 +150,7 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
 
   app.post(
     `${V}/apps/:app/edits`,
-    { bodyLimit: EDIT_BODY_LIMIT, config: { manifest: { requestType: 'AppEditsBody', responseType: 'AppLandedResponse', statusCodes: [200, 400, 403, 404, 409, 422] } } },
+    { bodyLimit: EDIT_BODY_LIMIT, config: { manifest: { requestType: 'AppEditsBody', responseType: 'AppLandedResponse', statusCodes: [200, 400, 403, 404, 409, 422, 503] } } },
     async (req, reply) => {
       if (!humanOnly(req, reply, 'edit an app')) return reply;
       const slug = slugOf(req, reply);
@@ -184,7 +184,7 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
   for (const direction of ['undo', 'redo'] as const) {
     app.post(
       `${V}/apps/:app/${direction}`,
-      { config: { manifest: { requestType: 'AppHistoryMoveBody', responseType: 'AppLandedResponse', statusCodes: [200, 400, 403, 404, 409, 422] } } },
+      { config: { manifest: { requestType: 'AppHistoryMoveBody', responseType: 'AppLandedResponse', statusCodes: [200, 400, 403, 404, 409, 422, 503] } } },
       async (req, reply) => {
         if (!humanOnly(req, reply, `${direction} an app version`)) return reply;
         const slug = slugOf(req, reply);
@@ -204,7 +204,7 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
 
   app.post(
     `${V}/apps/:app/restore`,
-    { config: { manifest: { requestType: 'AppRestoreBody', responseType: 'AppLandedResponse', statusCodes: [200, 400, 403, 404, 409, 422] } } },
+    { config: { manifest: { requestType: 'AppRestoreBody', responseType: 'AppLandedResponse', statusCodes: [200, 400, 403, 404, 409, 422, 503] } } },
     async (req, reply) => {
       if (!humanOnly(req, reply, 'restore an app version')) return reply;
       const slug = slugOf(req, reply);
@@ -223,7 +223,7 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
 
   app.post(
     `${V}/apps/:app/query`,
-    { config: { manifest: { requestType: 'AppQueryBody', responseType: 'AppQueryResponse', statusCodes: [400, 403, 404, 409, 501] } } },
+    { config: { manifest: { requestType: 'AppQueryBody', responseType: 'AppQueryResponse', statusCodes: [400, 403, 404, 409, 501, 503] } } },
     async (req, reply) => {
       // A plugin actor reads crew's own state; an app's live data reaches the app only through its host.
       if (actorOf(req).kind === 'plugin') return refuse(reply, 403, { code: 'human_only', error: 'a plugin actor cannot run an app query' });
@@ -266,7 +266,7 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
 
   app.post(
     `${V}/apps/:app/turns`,
-    { config: { manifest: { requestType: 'AppTurnBody', responseType: 'AppTurnResponse', statusCodes: [202, 400, 404, 409, 501] } } },
+    { config: { manifest: { requestType: 'AppTurnBody', responseType: 'AppTurnResponse', statusCodes: [202, 400, 404, 409, 501, 503] } } },
     async (req, reply) => {
       const slug = slugOf(req, reply);
       if (slug === null) return reply;

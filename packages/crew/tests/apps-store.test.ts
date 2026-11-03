@@ -12,8 +12,9 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { isUnitTokenRoute, registerAuthHooks, requiredTrust } from '../src/api/auth.js';
+import { refuseRequest } from '../src/api/origin-guard.js';
 import type { AppSourceStage, AppSourceStageInput } from '../src/apps/check.js';
-import { gitVersionProblem } from '../src/apps/git.js';
+import { AppGit, gitVersionProblem } from '../src/apps/git.js';
 import { registerAppRoutes } from '../src/apps/routes.js';
 import { AppStore, type AppRepoRegistry, type AppTurnLauncher } from '../src/apps/store.js';
 import type { Actor, AppDetail, AppSpec } from '../src/core/types.js';
@@ -845,12 +846,11 @@ describe('apps: recovery, the mirror and provenance (codex r2)', () => {
     const s = setup();
     const a = await newApp(s);
     const root = join(s.dir, 'apps', 'escalations');
-    const lock = join(root, '.git', 'refs', 'heads', 'main.lock');
-    writeFileSync(lock, '');
+    const spy = vi.spyOn(AppGit.prototype, 'setMain').mockRejectedValueOnce(new Error('disk full'));
     const v2 = await edit(s, 'escalations', 1, 'two');
+    spy.mockRestore();
     expect(v2.status).toBe(200);
     expect(git(root, 'rev-parse', 'refs/heads/main')).toBe(a.versions[0]!.commit);
-    rmSync(lock);
     const v3 = await edit(s, 'escalations', 2, 'three');
     expect(git(root, 'rev-parse', 'refs/heads/main')).toBe((v3.body['landed'] as { commit: string }).commit);
     expect(git(root, 'rev-parse', `${(v3.body['landed'] as { commit: string }).commit}^`)).toBe((v2.body['landed'] as { commit: string }).commit);
@@ -970,5 +970,108 @@ describe('apps: turns, registration and request bounds (codex r2)', () => {
     expect(v3.status).toBe(200);
     const redo = await s.call('POST', '/apps/escalations/redo', { base: 3 });
     expect(redo.body.app.lock.uploads).toEqual({});
+  });
+});
+
+// ── xreview r3 on the store (codex, pi): one test per finding ──────────────────────────────────────
+
+describe('apps: crew writes its objects and refs itself (codex r3 P1)', () => {
+  it('writes objects git itself accepts as valid', async () => {
+    const s = setup({ stage: fakeStage() });
+    await newApp(s);
+    await s.call('POST', '/apps/escalations/edits', { base: 1, ops: [{ op: 'spec', spec: dataSpec('x') }, { op: 'query-text', query: 'open_count', text: 'select 1 as open' }] });
+    await s.call('POST', '/apps/escalations/undo', { base: 2 });
+    const root = join(s.dir, 'apps', 'escalations');
+    execFileSync('git', ['fsck', '--strict', '--no-dangling'], { env: { ...process.env, GIT_DIR: join(root, '.git'), GIT_CONFIG_GLOBAL: '/dev/null' }, stdio: 'pipe' });
+    expect(git(root, 'log', '--format=%s', 'refs/heads/main').split('\n')).toEqual(['v3: Undo to v1', 'v2: Edited', 'v1: a new app', 'Empty app repository']);
+  });
+
+  it('a planted reflog link or a reftable setting never takes a write outside the repo', async () => {
+    const s = setup();
+    await newApp(s);
+    const root = join(s.dir, 'apps', 'escalations');
+    const outside = join(s.dir, 'outside.txt');
+    writeFileSync(outside, 'untouched\n');
+    mkdirSync(join(root, '.git', 'logs', 'refs', 'heads'), { recursive: true });
+    symlinkSync(outside, join(root, '.git', 'logs', 'refs', 'heads', 'main'));
+    expect((await edit(s, 'escalations', 1, 'two')).status).toBe(200);
+    expect(readFileSync(outside, 'utf8')).toBe('untouched\n');
+    git(root, 'config', 'core.repositoryformatversion', '1');
+    git(root, 'config', 'extensions.refStorage', 'reftable');
+    const res = await edit(s, 'escalations', 2, 'three');
+    expect([200, 409]).toContain(res.status); // the agent can break its own repo's reads; it cannot move crew's writes
+    expect(readFileSync(outside, 'utf8')).toBe('untouched\n');
+  });
+});
+
+describe('apps: the lock, turns and the guard after round 3 (codex, pi)', () => {
+  it('an upload pin that appears or goes away re-checks every query on that source', async () => {
+    let upload: string | null = null;
+    const calls: string[][] = [];
+    const stage: AppSourceStage = {
+      check: async (input) => {
+        calls.push([...input.queries]);
+        return {
+          findings: [],
+          sources: { 'support-pg': { kind: 'sql', descriptor: {}, descriptorHash: 'same' } },
+          queries: Object.fromEntries(input.queries.map((q) => [q, `c-${q}-${upload ?? 'none'}`])),
+          actions: {},
+          uploads: upload === null ? {} : { 'support-pg': { digest: upload } },
+        };
+      },
+    };
+    const s = setup({ stage });
+    await newApp(s);
+    const two: AppSpec = { ...dataSpec('x'), queries: [...dataSpec('x').queries, { id: 'second', source: 'support-pg', kind: 'sql', output: [{ name: 'n', type: 'integer' }] }] };
+    await s.call('POST', '/apps/escalations/edits', { base: 1, ops: [{ op: 'spec', spec: two }, { op: 'query-text', query: 'open_count', text: 'select 1 as open' }, { op: 'query-text', query: 'second', text: 'select 2 as n' }] });
+    upload = 'd1'; // absent -> present
+    const v3 = await s.call('POST', '/apps/escalations/edits', { base: 2, ops: [{ op: 'query-text', query: 'open_count', text: 'select 3 as open' }] });
+    expect(calls.at(-1)).toEqual(['open_count', 'second']);
+    expect(v3.body.app.lock.uploads).toEqual({ 'support-pg': { digest: 'd1' } });
+    upload = null; // present -> absent, with the sibling still on the source
+    const v4 = await s.call('POST', '/apps/escalations/edits', { base: 3, ops: [{ op: 'query-text', query: 'open_count', text: 'select 4 as open' }] });
+    expect(calls.at(-1)).toEqual(['open_count', 'second']);
+    expect(v4.body.app.lock.uploads).toEqual({});
+    expect(v4.body.app.lock.queries['second']).toMatchObject({ contractHash: 'c-second-none' });
+  });
+
+  it('a landed tree whose lock is gone or changed reads as unreadable, never as an empty lock', async () => {
+    const s = setup();
+    const a = await newApp(s);
+    const root = join(s.dir, 'apps', 'escalations');
+    const lockBlob = git(root, 'rev-parse', `${a.versions[0]!.commit}:apps.lock.json`);
+    overwriteLooseObject(root, lockBlob, 'blob', Buffer.from('{"schema":"x"}'));
+    const fresh = new AppStore({ stateFile: s.store.stateFile, appsRoot: s.store.appsRoot, registry: fakeRegistry().registry });
+    await expect(fresh.detail('escalations')).rejects.toMatchObject({ code: 'unreadable_tree' });
+    await expect(fresh.acceptedSpec('escalations', 1)).rejects.toMatchObject({ code: 'unreadable_tree' });
+  });
+
+  it('after a restart a turn whose launch never finished is asked about, and released', async () => {
+    const t: AppTurnLauncher = { launch: async () => undefined, isActive: async () => true };
+    const s = setup({ turns: t });
+    await newApp(s);
+    await s.call('POST', '/apps/escalations/turns', { base: 1, message: 'x' });
+    // The daemon restarts; the engine never heard of the run.
+    const again = new AppStore({ stateFile: s.store.stateFile, appsRoot: s.store.appsRoot, registry: fakeRegistry().registry, turns: { launch: async () => undefined, isActive: async () => false } });
+    expect((await again.detail('escalations')).turn).toBeNull();
+    expect(JSON.parse(readFileSync(s.store.stateFile, 'utf8')).apps.escalations.turn).toBeNull();
+  });
+
+  it("anchors the checked commit under a crew ref until the turn lands", async () => {
+    const t: AppTurnLauncher = { launch: async () => undefined, isActive: async () => true };
+    const s = setup({ turns: t });
+    const a = await newApp(s);
+    const runId = (await s.call('POST', '/apps/escalations/turns', { base: 1, message: 'x' })).body['runId'] as string;
+    const root = join(s.dir, 'apps', 'escalations');
+    const checked = (await s.store.checkTurn('escalations', runId, a.versions[0]!.commit)) as { commit: string };
+    expect(git(root, 'rev-parse', `refs/wicked/apps-checked/${runId}`)).toBe(checked.commit);
+    await s.store.landTurn('escalations', { runId, commit: checked.commit, builder: 'claude', reviewer: 'codex', summary: 'x' });
+    expect(existsSync(join(root, '.git', 'refs', 'wicked', 'apps-checked', runId))).toBe(false);
+  });
+
+  it('the origin guard lets the worker check route through, as it does /mcp/call (pi r3)', () => {
+    const req = { method: 'POST', path: '/api/v1/apps/check', host: 'seat-gateway.internal', origin: 'http://elsewhere.example', secFetchSite: 'cross-site', upgrade: undefined };
+    expect(refuseRequest(req, { mode: 'off', allowedOrigins: null })).toBeNull();
+    expect(refuseRequest({ ...req, path: '/api/v1/apps/escalations/edits' }, { mode: 'off', allowedOrigins: null })).not.toBeNull();
   });
 });

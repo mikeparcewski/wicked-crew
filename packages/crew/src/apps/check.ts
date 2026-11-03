@@ -126,6 +126,7 @@ export const ownText = (r: Record<string, string>, k: string): string | undefine
 export async function readAppTree(
   git: AppGit,
   tree: string,
+  opts: { requireLock?: boolean } = {},
 ): Promise<{ ok: true; files: Omit<AppFiles, 'lock'> & { lock: AppLock | null } } | { ok: false; findings: AppCheckFinding[] }> {
   const findings: AppCheckFinding[] = [];
   const blobs = new Map<string, TreeEntry>();
@@ -204,17 +205,26 @@ export async function readAppTree(
   for (const path of blobs.keys()) {
     if (path.startsWith(`${QUERIES_DIR}/`) && !declared.has(path)) findings.push(fileFinding('undeclared_query_text', path, `${path} is no declared query's text`));
   }
+  // A candidate's lock is crew's to write, so a missing or bad one is ignored. A tree crew LANDED must read
+  // back its lock (`requireLock`): a lock that is gone, changed or not a lock is a finding, never an empty
+  // lock in its place (codex r3).
   let lock: AppLock | null = null;
   const lockEntry = blobs.get(LOCK_PATH);
   if (lockEntry !== undefined) {
     const bytes = await read(LOCK_PATH, lockEntry.sha, LOCK_MAX_BYTES);
     if (Buffer.isBuffer(bytes)) {
       try {
-        lock = JSON.parse(bytes.toString('utf8')) as AppLock;
+        const parsed = JSON.parse(bytes.toString('utf8')) as AppLock;
+        lock = parsed !== null && typeof parsed === 'object' && parsed.schema === 'wicked.apps.lock/v1' ? parsed : null;
       } catch {
         lock = null;
       }
+      if (lock === null && opts.requireLock === true) findings.push(fileFinding('bad_lock', LOCK_PATH, 'apps.lock.json is not a lock crew wrote'));
+    } else if (opts.requireLock === true) {
+      findings.push(bytes);
     }
+  } else if (opts.requireLock === true) {
+    findings.push(fileFinding('missing_lock', LOCK_PATH, 'the tree has no apps.lock.json'));
   }
   if (findings.length > 0) return { ok: false, findings };
   return { ok: true, files: { spec, queryText, lock } };
@@ -359,16 +369,18 @@ function own<T>(r: Record<string, T>, k: string): T | undefined {
   return Object.hasOwn(r, k) ? r[k] : undefined;
 }
 
-/** Sources whose pin in `result` differs from the prior lock's (descriptor hash or upload digest). */
+/**
+ * Sources the stage answered whose pin differs from the prior lock's: the descriptor hash, or the upload
+ * snapshot, including one appearing or going away (codex r3). A source the prior lock never held is new to
+ * every query on it, which the changed set already covers.
+ */
 function movedSources(prior: AppLock, result: AppSourceStageResult): Set<string> {
   const moved = new Set<string>();
   for (const [name, pin] of Object.entries(result.sources)) {
     const was = own(prior.sources, name);
-    if (was !== undefined && was.descriptorHash !== pin.descriptorHash) moved.add(name);
-  }
-  for (const [name, up] of Object.entries(result.uploads)) {
-    const was = own(prior.uploads, name);
-    if (was !== undefined && was.digest !== up.digest) moved.add(name);
+    if (was === undefined) continue;
+    if (was.descriptorHash !== pin.descriptorHash) moved.add(name);
+    if (own(prior.uploads, name)?.digest !== own(result.uploads, name)?.digest) moved.add(name);
   }
   return moved;
 }

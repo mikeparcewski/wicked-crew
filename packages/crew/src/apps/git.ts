@@ -10,10 +10,11 @@
  *    `reference-transaction` hook runs on `update-ref`), fsmonitor, maintenance and gc, commit signing,
  *    every transport (`protocol.allow=never`), and lazy fetching from a promisor remote
  *    (`GIT_NO_LAZY_FETCH`); and uses plumbing only, which runs no filter, diff driver, pager or editor;
- *  - pins the administrative directories (`GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY`), so a `commondir` file
- *    an agent wrote cannot point crew at another repository, writes no reflog, and before every WRITE
- *    checks that `.git`, `objects` (and its fan-out directories) and `refs/heads` are real directories
- *    inside the repo, never links ({@link AppGit.assertConfined});
+ *  - pins the administrative directories for its READS (`GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY`), so a
+ *    `commondir` file an agent wrote cannot point crew at another repository;
+ *  - WRITES WITHOUT GIT (codex r3 on the store): crew writes its loose objects and its refs itself, a temp
+ *    file renamed into a directory it has just checked is a real directory inside the repo. No git config,
+ *    ref backend, reflog, hook or object setting of the agent's repo is ever on crew's write path;
  *  - requires a git whose lazy-fetch switch is honoured (2.45.1 and later), and refuses every transport by
  *    name as well as by default (a repo's `protocol.<name>.allow` cannot widen it);
  *  - ignores replace refs (`GIT_NO_REPLACE_OBJECTS`);
@@ -25,7 +26,9 @@
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstat, mkdir, readdir, realpath, rm } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { chmod, lstat, mkdir, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { deflateSync } from 'node:zlib';
 import { devNull } from 'node:os';
 import { join } from 'node:path';
 
@@ -190,47 +193,9 @@ export class AppGit {
   }
 
   /**
-   * Before a WRITE: `.git`, `objects`, every two-hex fan-out directory under it, `refs` and `refs/heads` are
-   * real directories (not links) whose real paths are inside the repo, and no `commondir` file is there
-   * (codex r2: an agent can plant indirection under `.git`; the environment pins cover the files git
-   * reads for it, this covers the directories it writes through).
-   */
-  async assertConfined(): Promise<void> {
-    const realRoot = await realpath(this.root);
-    const dirs = [this.gitDir, join(this.gitDir, 'objects'), join(this.gitDir, 'refs'), join(this.gitDir, 'refs', 'heads')];
-    try {
-      for (const name of await readdir(join(this.gitDir, 'objects'))) {
-        if (/^[0-9a-f]{2}$/.test(name)) dirs.push(join(this.gitDir, 'objects', name));
-      }
-    } catch {
-      /* no objects dir: the check below names it */
-    }
-    for (const d of dirs) {
-      let st;
-      try {
-        st = await lstat(d);
-      } catch {
-        if (d === this.gitDir || d.endsWith('objects')) throw new AppGitError(`${d} is missing`, 'corrupt');
-        continue;
-      }
-      if (st.isSymbolicLink() || !st.isDirectory()) throw new AppGitError(`${d} is not a plain directory inside the app repo`, 'corrupt');
-      const real = await realpath(d);
-      if (real !== realRoot && !real.startsWith(`${realRoot}/`) && !real.startsWith(`${realRoot}\\`)) {
-        throw new AppGitError(`${d} resolves outside the app repo`, 'corrupt');
-      }
-    }
-    try {
-      await lstat(join(this.gitDir, 'commondir'));
-      throw new AppGitError(`${this.gitDir} holds a commondir file; crew writes only into the repo's own .git`, 'corrupt');
-    } catch (err) {
-      if (err instanceof AppGitError) throw err;
-    }
-  }
-
-  /**
-   * A new empty repo at `root`: `git init` on branch `main` and one empty commit (a worktree needs a
-   * base). The directory must not exist: the create is exclusive, so a taken name is never adopted.
-   * Answers the empty commit.
+   * A new empty repo at `root`: `git init` on branch `main` (in a directory crew has just made, so nothing
+   * of an agent's is there yet) and one empty commit (a worktree needs a base). The create is exclusive, so
+   * a taken name is never adopted. Answers the empty commit.
    */
   static async createEmpty(root: string): Promise<{ git: AppGit; commit: string }> {
     await mkdir(join(root, '..'), { recursive: true });
@@ -249,6 +214,84 @@ export class AppGit {
     }
   }
 
+  /**
+   * Each of `dirs` (in order, each inside the one before) is made if missing and must be a real directory
+   * (never a link) whose real path is inside the repo; `.git` must not name another common directory.
+   */
+  private async ensureDirs(dirs: string[]): Promise<void> {
+    const realRoot = await realpath(this.root);
+    const inside = (p: string): boolean => p === realRoot || p.startsWith(`${realRoot}/`) || p.startsWith(`${realRoot}\\`);
+    for (const d of dirs) {
+      try {
+        await mkdir(d);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      }
+      const st = await lstat(d);
+      if (st.isSymbolicLink() || !st.isDirectory()) throw new AppGitError(`${d} is not a plain directory inside the app repo`, 'corrupt');
+      if (!inside(await realpath(d))) throw new AppGitError(`${d} resolves outside the app repo`, 'corrupt');
+    }
+    try {
+      await lstat(join(this.gitDir, 'commondir'));
+      throw new AppGitError(`${this.gitDir} holds a commondir file; crew writes only into the repo's own .git`, 'corrupt');
+    } catch (err) {
+      if (err instanceof AppGitError) throw err;
+    }
+  }
+
+  /** Write `data` as `dir/name`: a temp file in `dir`, renamed over whatever is there (a link is replaced, never followed). */
+  private async place(dir: string, name: string, data: Buffer | string, mode: number): Promise<void> {
+    const tmp = join(dir, `.tmp-crew-${randomBytes(6).toString('hex')}`);
+    await writeFile(tmp, data, { flag: 'wx', mode });
+    try {
+      await rename(tmp, join(dir, name));
+    } catch (err) {
+      // Windows will not rename over a read-only file: make it writable and try once more.
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'EPERM' && code !== 'EACCES' && code !== 'EEXIST') {
+        await unlink(tmp).catch(() => undefined);
+        throw err;
+      }
+      await chmod(join(dir, name), 0o644).catch(() => undefined);
+      await rename(tmp, join(dir, name)).catch(async (e: unknown) => {
+        await unlink(tmp).catch(() => undefined);
+        throw e;
+      });
+    }
+  }
+
+  /** Write a loose object (crew's own bytes, deflated) and answer its id. */
+  async writeObject(type: 'blob' | 'tree' | 'commit', content: Buffer): Promise<string> {
+    const sha = objectId(type, content);
+    const objects = join(this.gitDir, 'objects');
+    const fan = join(objects, sha.slice(0, 2));
+    await this.ensureDirs([this.gitDir, objects, fan]);
+    await this.place(fan, sha.slice(2), deflateSync(Buffer.concat([Buffer.from(`${type} ${content.length}\0`), content])), 0o444);
+    return sha;
+  }
+
+  /** Point the loose ref `refs/<path…>` at `sha` (a direct ref; whatever was there, link or file, is replaced). */
+  async writeRef(path: string[], sha: string): Promise<void> {
+    if (!SHA_RE.test(sha)) throw new AppGitError(`${sha} is not an object id`, 'missing');
+    const dirs = [this.gitDir, join(this.gitDir, 'refs')];
+    for (const part of path.slice(0, -1)) dirs.push(join(dirs[dirs.length - 1]!, part));
+    await this.ensureDirs(dirs);
+    await this.place(dirs[dirs.length - 1]!, path[path.length - 1]!, `${sha}\n`, 0o644);
+  }
+
+  /** Remove the loose ref `refs/<path…>` if it is a plain file inside the repo. Best effort. */
+  async dropRef(path: string[]): Promise<void> {
+    const file = join(this.gitDir, 'refs', ...path);
+    try {
+      const dir = join(file, '..');
+      const st = await lstat(dir);
+      if (!st.isDirectory() || st.isSymbolicLink()) return;
+      await unlink(file);
+    } catch {
+      /* already gone */
+    }
+  }
+
   /** `main`'s commit as a direct ref, or `null` when it is missing or not a plain ref to a commit id. */
   async main(): Promise<string | null> {
     try {
@@ -262,8 +305,7 @@ export class AppGit {
 
   /** Point `main` at `commit` as a DIRECT ref (a symbolic `main` is replaced, never followed). */
   async setMain(commit: string): Promise<void> {
-    await this.assertConfined();
-    await this.git(['update-ref', '--no-deref', 'refs/heads/main', commit]);
+    await this.writeRef(['heads', 'main'], commit);
   }
 
   /** The object `sha` of `type`, its bytes verified against the id (at most `cap` bytes). */
@@ -299,23 +341,21 @@ export class AppGit {
   }
 
   async writeBlob(content: Buffer | string): Promise<string> {
-    await this.assertConfined();
-    return (await this.git(['hash-object', '-w', '--no-filters', '--stdin'], content)).toString('utf8').trim();
+    return this.writeObject('blob', Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8'));
   }
 
-  /** A tree from entries `{mode, type, sha, name}` (one level). */
+  /** A tree from entries `{mode, type, sha, name}` (one level), in git's order (a tree sorts as `name/`). */
   async mktree(entries: Array<{ mode: string; type: 'blob' | 'tree'; sha: string; name: string }>): Promise<string> {
-    const input = entries.map((e) => `${e.mode} ${e.type} ${e.sha}\t${e.name}`).join('\n') + (entries.length > 0 ? '\n' : '');
-    await this.assertConfined();
-    return (await this.git(['mktree'], input)).toString('utf8').trim();
+    const key = (e: { type: string; name: string }): string => (e.type === 'tree' ? `${e.name}/` : e.name);
+    const sorted = [...entries].sort((a, b) => Buffer.compare(Buffer.from(key(a)), Buffer.from(key(b))));
+    const raw = Buffer.concat(sorted.map((e) => Buffer.concat([Buffer.from(`${e.type === 'tree' ? '40000' : e.mode} ${e.name}\0`), Buffer.from(e.sha, 'hex')])));
+    return this.writeObject('tree', raw);
   }
 
-  /** A commit of `tree` on `parent`, dated `at` (unix millis); the message rides stdin, never argv. */
+  /** A commit of `tree` on `parent`, dated `at` (unix millis), authored by crew. */
   async commitTree(tree: string, parent: string | null, message: string, at: number): Promise<string> {
-    const date = `${Math.floor(at / 1000)} +0000`;
-    const args = ['commit-tree', '--no-gpg-sign', tree, ...(parent !== null ? ['-p', parent] : [])];
-    await this.assertConfined();
-    const out = await runGit(this.gitDir, args, message, { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date });
-    return out.toString('utf8').trim();
+    const sig = `${IDENTITY.name} <${IDENTITY.email}> ${Math.floor(at / 1000)} +0000`;
+    const body = `tree ${tree}\n${parent !== null ? `parent ${parent}\n` : ''}author ${sig}\ncommitter ${sig}\n\n${message.endsWith('\n') ? message : `${message}\n`}`;
+    return this.writeObject('commit', Buffer.from(body, 'utf8'));
   }
 }
