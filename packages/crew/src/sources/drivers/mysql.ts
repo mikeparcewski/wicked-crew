@@ -139,20 +139,23 @@ export function mysqlError(err: unknown): SourceQueryError {
 }
 
 /** Describe `text` with COM_STMT_PREPARE: never executed. Its relations are checked live first (as a read's). */
-export async function mysqlDescribe(args: SqlConnectArgs, text: string, expect?: readonly MysqlRelationExpectation[]): Promise<SqlDescribe> {
+export async function mysqlDescribe(args: SqlConnectArgs, text: string, expect?: readonly MysqlRelationExpectation[], deadlineMs = STATEMENT_DEADLINE_MS): Promise<SqlDescribe> {
   // One deadline from entry: connecting counts.
   const started = Date.now();
-  const conn = await connectWithin(args, STATEMENT_DEADLINE_MS);
-  // A prepare can wait on a metadata lock: the deadline ends it (the connection is dropped).
-  let timedOut = false;
-  const guard = setTimeout(
-    () => {
-      timedOut = true;
-      conn.destroy();
-    },
-    Math.max(1, STATEMENT_DEADLINE_MS - (Date.now() - started)),
-  );
-  try {
+  const conn = await connectWithin(args, deadlineMs);
+  // A prepare can wait (a metadata lock, a stalled server): at the deadline the call settles as a
+  // timeout and the connection is dropped, whatever the pending command does.
+  let guard: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    guard = setTimeout(
+      () => {
+        drop(conn);
+        reject(new SourceQueryError(null, 'timeout', 'describing the query ran past its deadline'));
+      },
+      Math.max(1, deadlineMs - (Date.now() - started)),
+    );
+  });
+  const work = (async (): Promise<SqlDescribe> => {
     if (expect !== undefined) await mysqlExpectRelations(conn, expect);
     const stmt = await conn.prepare(text);
     try {
@@ -164,13 +167,27 @@ export async function mysqlDescribe(args: SqlConnectArgs, text: string, expect?:
     } finally {
       await stmt.close();
     }
+  })();
+  work.catch(() => undefined); // settled by the race below; a late failure is not an unhandled one
+  deadline.catch(() => undefined);
+  try {
+    return await Promise.race([work, deadline]);
   } catch (err) {
-    if (timedOut) throw new SourceQueryError(null, 'timeout', 'describing the query ran past its deadline');
     throw mysqlError(err);
   } finally {
     clearTimeout(guard);
-    conn.destroy();
+    drop(conn);
   }
+}
+
+/**
+ * Drop a connection so every command still pending on it settles: the socket itself is destroyed
+ * (mysql2's own `destroy()` marks the connection closing first, and a pending command then never
+ * settles).
+ */
+function drop(conn: Connection): void {
+  (conn as unknown as { connection?: { stream?: Socket } }).connection?.stream?.destroy();
+  conn.destroy();
 }
 
 /** How long the KILL QUERY connection (and then the KILL) may take before the read's connection is dropped. */
@@ -181,6 +198,7 @@ async function connectWithin(args: SqlConnectArgs, deadlineMs: number, sourceTim
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), deadlineMs);
   const relay = (): void => ac.abort();
+  if (signal?.aborted === true) ac.abort(); // an abort before the call is not replayed by a listener
   signal?.addEventListener('abort', relay, { once: true });
   try {
     return await mysqlConnect(args, sourceTimeoutMs, null, ac.signal);
@@ -221,6 +239,9 @@ export async function mysqlRead(args: SqlConnectArgs, text: string, params: unkn
   const conn = await connectWithin(args, deadlineMs, opts.sourceTimeoutMs ?? deadlineMs, opts.signal);
   let killed = false;
   let ended = false;
+  // The KILL connection's attempt belongs to the whole call: when the call ends first (the source
+  // stopped the query itself), the attempt is abandoned with it, never left handshaking.
+  const abandon = new AbortController();
   const kill = async (): Promise<void> => {
     if (killed || ended) return;
     killed = true;
@@ -228,7 +249,6 @@ export async function mysqlRead(args: SqlConnectArgs, text: string, params: unkn
     // cannot be had, the read's own connection is dropped as the last resort. A killer connection that
     // arrives after the race was lost is closed at once, never left holding a server slot.
     let raceOver = false;
-    const abandon = new AbortController();
     const attempt = mysqlConnect(args, 5_000, conn.crewAddress ?? null, abandon.signal).then(
       (c) => {
         if (raceOver) {
@@ -244,19 +264,20 @@ export async function mysqlRead(args: SqlConnectArgs, text: string, params: unkn
     // A killer still connecting (dialling, handshaking, or stuck in a session statement) is abandoned now.
     if (killer === null) abandon.abort();
     if (killer === null || ended) {
-      killer?.destroy();
-      conn.destroy();
+      if (killer !== null) drop(killer);
+      drop(conn);
       return;
     }
     try {
       // The KILL itself is bounded too: a killer that hangs drops the read's connection instead.
       const sent = killer.query(`KILL QUERY ${Math.trunc(conn.threadId)}`).then(() => true);
+      sent.catch(() => undefined);
       const ok = await Promise.race([sent, new Promise<false>((r) => setTimeout(() => r(false), KILL_CONNECT_MS).unref())]);
-      if (!ok) conn.destroy();
+      if (!ok) drop(conn);
     } catch {
-      conn.destroy(); // the query may have just ended; either way it is not left running on our side
+      drop(conn); // the query may have just ended; either way it is not left running on our side
     } finally {
-      killer.destroy();
+      drop(killer);
     }
   };
   const guard = setTimeout(() => void kill(), Math.max(1, deadlineMs - (Date.now() - started)));
@@ -300,6 +321,7 @@ export async function mysqlRead(args: SqlConnectArgs, text: string, params: unkn
   } finally {
     ended = true;
     clearTimeout(guard);
-    conn.destroy();
+    abandon.abort();
+    drop(conn);
   }
 }

@@ -521,6 +521,7 @@ async function testCall(
 function scrubbedFailure(err: unknown, secrets: string[]): Error {
   const words = scrubSecrets(err instanceof Error ? err.message : String(err), secrets);
   if (err instanceof SourceQueryError) return new SourceQueryError(err.sqlstate, err.errorClass, words, err.refusal);
+  if (err instanceof DialRedirectRefusedError) return new DialRedirectRefusedError(err.status, err.location === null ? null : scrubSecrets(err.location, secrets), words);
   if (err instanceof DialRefusedError) return new DialRefusedError(err.code, words);
   if (err instanceof McpRegistryError) return new McpRegistryError(err.status, err.code, words);
   return new McpRegistryError(502, 'test_call_failed', `the test call failed: ${words}`);

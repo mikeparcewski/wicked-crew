@@ -13237,8 +13237,9 @@ export type SourceCheckResponse =
        *
        * - The read policy, before anything reaches the source: `not_select`, `function`, `cast`,
        *   `operator`, `relation`, `view`, `unqualified`, `qualified_name`, `column`, `recursive`,
-       *   `locking`, `into`, `statements`, `lexical`, `syntax`, `parse`, `params`, `too_long`; GraphQL
-       *   `operations`, `not_query`, `invalid`.
+       *   `locking`, `into`, `statements`, `lexical`, `syntax` (NATURAL JOIN among them), `parse`,
+       *   `params`, `too_long`; GraphQL `operations`, `not_query`, `invalid`, `schema` (the described
+       *   schema does not validate: describe the source again).
        * - The source, after crew connected and asked it to prepare the text (never to execute it):
        *   `prepare` (the source refused to prepare it; its own words reach a human only, an agent gets
        *   the SQLSTATE), `authorizer` (SQLite's authorizer denied it), `refused` (a relation changed at

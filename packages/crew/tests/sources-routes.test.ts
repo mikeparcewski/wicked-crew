@@ -348,6 +348,17 @@ describe('review r2 folds (codex): what reaches whom, and what a confirmation bi
       badSchema.closeAllConnections();
       await new Promise<void>((r) => badSchema.close(() => r()));
     }
+    // One that builds but does not validate (a query type with no fields) is refused at the describe (codex r4).
+    const fieldless = { data: { __schema: { queryType: { name: 'Q' }, mutationType: null, subscriptionType: null, directives: [], types: [{ kind: 'OBJECT', name: 'Q', fields: [], interfaces: [] }, { kind: 'SCALAR', name: 'String' }, { kind: 'SCALAR', name: 'Boolean' }] } } };
+    const emptyQuery = createServer((_req, res) => res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(fieldless)));
+    await new Promise<void>((r) => emptyQuery.listen(0, '127.0.0.1', r));
+    try {
+      const r = await probeMcpServer({ name: 'g', kind: 'graphql', command: null, args: [], url: `http://127.0.0.1:${(emptyQuery.address() as AddressInfo).port}/graphql`, auth: null, address: { ...LOOP, plaintext: true } }, null);
+      expect(r).toMatchObject({ ok: false, error: 'the source answered source' });
+    } finally {
+      emptyQuery.closeAllConnections();
+      await new Promise<void>((r) => emptyQuery.close(() => r()));
+    }
   });
 });
 

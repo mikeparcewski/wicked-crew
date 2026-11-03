@@ -286,6 +286,9 @@ class Walker {
         return out;
       }
       case 'JoinExpr': {
+        // NATURAL joins on whatever names the two sides share at run time: a column added to either
+        // side since the describe changes the join (and its output) without changing the query text.
+        if (f['isNatural'] === true) refuse('syntax', 'NATURAL JOIN is refused: name the join columns (JOIN … USING (…) or ON …)');
         const before = new Set(scope.range.keys());
         let left: string[] = [];
         let right: string[] = [];
@@ -307,7 +310,7 @@ class Walker {
         );
         if (f['quals'] !== undefined) this.node(f['quals'], scope);
         // Postgres's join output: the merged (USING / NATURAL) columns once, first, then each side's others.
-        const shared = f['isNatural'] === true ? [...new Set(left.filter((c) => right.includes(c)))] : strings(f['usingClause']);
+        const shared = strings(f['usingClause']);
         const out = [...shared, ...left.filter((c) => !shared.includes(c)), ...right.filter((c) => !shared.includes(c))];
         const using = aliasOf(f, 'join_using_alias');
         if (using !== null) scope.range.set(using.name, shared);

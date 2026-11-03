@@ -14,7 +14,7 @@
  * - The daemon's own `PG*` environment never reaches a source (no password fallback).
  */
 
-import { isIP } from 'node:net';
+import { isIP, type Socket } from 'node:net';
 import { checkServerIdentity, type PeerCertificate } from 'node:tls';
 
 import postgres from 'postgres';
@@ -51,6 +51,16 @@ export function pgClient(args: SqlConnectArgs, opts: { deadlineMs?: number; read
   // send a cancel) goes to exactly that address, still under the policy, never resolving the name
   // again: a cancel must reach the backend that runs the query.
   let pinned: string | null = null;
+  // With a signal, the client OWNS its sockets: at the abort every one still open is destroyed
+  // (postgres.js's own end only half-closes a socket, which a peer that never answers keeps alive).
+  const owned = new Set<Socket>();
+  opts.signal?.addEventListener(
+    'abort',
+    () => {
+      for (const s of owned) s.destroy();
+    },
+    { once: true },
+  );
   const params = sessionParameters(deadlineMs);
   if (opts.readOnly === false) delete params['default_transaction_read_only'];
   // verify-full: the chain AND the name. The identity is checked against the host the person gave
@@ -89,6 +99,10 @@ export function pgClient(args: SqlConnectArgs, opts: { deadlineMs?: number; read
       if (opts.signal?.aborted === true) {
         socket.destroy();
         throw new SourceQueryError(null, 'timeout', 'the read ended before its connection was made');
+      }
+      if (opts.signal !== undefined) {
+        owned.add(socket);
+        socket.once('close', () => owned.delete(socket));
       }
       pinned ??= target.address;
       if (source.tls === 'disable' && !plaintextAllowed(target.cls, policy)) {
@@ -172,7 +186,7 @@ export interface RelationExpectation {
   kinds: ReadonlyArray<'table' | 'partitioned' | 'view' | 'matview'>;
   /** A plain read of it must not reach a foreign table (it was read without ONLY). */
   noForeignBelow: boolean;
-  /** The columns the policy judged the query against (the described catalog's): each must still exist. */
+  /** The columns the policy judged the query against (the described catalog's, in order): they must still lead the live ones. */
   columns?: readonly string[];
 }
 
@@ -222,11 +236,12 @@ async function pgExpectRelations(tx: postgres.TransactionSql<Record<string, neve
       throw new SourceQueryError(null, 'refused', `${e.schema}.${e.name} changed at the source (it is ${kind ?? 'gone'} now): describe the source again`);
     }
     if (e.noForeignBelow && live?.foreign_below === true) throw new SourceQueryError(null, 'refused', `${e.schema}.${e.name} now has a foreign table below it: describe the source again`);
-    // A column renamed or dropped since the describe: a reference the policy accepted as a column
-    // could now be read by Postgres as a function on the row. (A column added since is harmless: the
-    // policy refuses a reference to a column it does not know.)
-    const liveCols = new Set(live?.cols ?? []);
-    if (e.columns !== undefined && !e.columns.every((c) => liveCols.has(c))) {
+    // The described columns must still lead the live ones, in order. A column renamed, dropped or
+    // reordered since the describe changes what a reference, an alias list or `*` means (Postgres
+    // could read a gone name as a function on the row). A column appended since is harmless: alias
+    // lists rename the leading columns, and the policy refuses a reference to a name it does not know.
+    const liveCols = live?.cols ?? [];
+    if (e.columns !== undefined && !e.columns.every((c, i) => liveCols[i] === c)) {
       throw new SourceQueryError(null, 'refused', `${e.schema}.${e.name}'s columns changed at the source: describe the source again`);
     }
   }
@@ -293,7 +308,10 @@ export async function pgRead(args: SqlConnectArgs, text: string, params: unknown
   } finally {
     clearTimeout(guard);
     opts.signal?.removeEventListener('abort', stop);
-    ended.abort();
     await closeQuietly(sql);
+    // Every socket the read opened is destroyed shortly after it ends: late enough that a cancel
+    // request already on its way completes (postgres.js does not surface its failure), early enough
+    // that nothing outlives the read for long.
+    setTimeout(() => ended.abort(), 2_000).unref();
   }
 }

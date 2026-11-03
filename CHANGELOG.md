@@ -77,8 +77,10 @@ A feature release on wicked-core-ts ^0.15.21 and wicked-crew-api-types 0.172.0, 
   plus a cancel pinned to the backend; `max_execution_time` and `lock_wait_timeout` plus `KILL QUERY` on the same
   server; the SQLite process ended). A GraphQL read's 10 s deadline is client-side: crew aborts the request. Before a
   SQL read or check runs, its relations are checked live (a table since replaced by a view or a foreign table, a MySQL
-  `FEDERATED` table, or a plain read reaching a foreign partition or child, is refused); Postgres locks each one
-  (`ACCESS SHARE`) before checking it, so the relation checked is the relation read. TLS is `verify-full` /
+  `FEDERATED` table, a column renamed, dropped or reordered, or a plain read reaching a foreign partition or child, is
+  refused); Postgres first takes the read's own `ACCESS SHARE` lock on each one by preparing a fixed `SELECT FROM` it
+  (never executed), so the relation checked is the relation read. `NATURAL JOIN` is refused (it joins on whatever
+  columns the two sides share at run time). TLS is `verify-full` /
   `VERIFY_IDENTITY` against the host the person gave (a DNS name, or an IP literal against an IP SAN). An agent sees a
   source's error as its class and SQLSTATE only, at the preview and in health too. SQLite sources and uploads need Node.js 24.12 or later (the authorizer). New routes: `GET /sources/:name/catalog` (`crew` is the built-in source),
   `POST /sources/:name/describe`, `…/privileges` (the exact missing `GRANT`s for a declared row write), `…/check` (policy,

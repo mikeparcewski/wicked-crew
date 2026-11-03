@@ -181,15 +181,18 @@ export async function pgTableSafetyIn(tx: Tx, schema: string, name: string, decl
     [T],
   );
   // Every collation the table's columns and indexes use, by its full definition (provider, locale,
-  // determinism, version), and the database's own collation, which the `default` collation means.
-  const [coll] = await q<{ defs: string[]; db: string | null }>(
+  // determinism, recorded version) AND the version the server's library has now (an ICU or libc
+  // upgrade changes comparisons before anyone refreshes the recorded one), and the database's own
+  // collation, which the `default` collation means.
+  const [coll] = await q<{ defs: string[]; db: string | null; dbActual: string | null }>(
     `SELECT pg_catalog.array_to_json(ARRAY(
-              SELECT pg_catalog.to_jsonb(co.*)::pg_catalog.text FROM pg_catalog.pg_collation co
+              SELECT pg_catalog.to_jsonb(co.*)::pg_catalog.text || ' ' || COALESCE(pg_catalog.pg_collation_actual_version(co.oid), '') FROM pg_catalog.pg_collation co
                WHERE co.oid IN (SELECT a.attcollation FROM pg_catalog.pg_attribute a WHERE a.attrelid = $1::pg_catalog.oid AND a.attnum > 0 AND NOT a.attisdropped
                                 UNION SELECT pg_catalog.unnest(i.indcollation::pg_catalog.oid[]) FROM pg_catalog.pg_index i WHERE i.indrelid = $1::pg_catalog.oid)
                ORDER BY co.oid)) AS defs,
             (SELECT pg_catalog.jsonb_object_agg(e.key, e.value ORDER BY e.key)::pg_catalog.text FROM pg_catalog.jsonb_each(pg_catalog.to_jsonb(d.*)) e
-              WHERE e.key IN ('datcollate', 'datctype', 'datlocprovider', 'daticulocale', 'datlocale', 'daticurules', 'datcollversion')) AS db
+              WHERE e.key IN ('datcollate', 'datctype', 'datlocprovider', 'daticulocale', 'datlocale', 'daticurules', 'datcollversion')) AS db,
+            pg_catalog.pg_database_collation_actual_version(d.oid) AS "dbActual"
        FROM pg_catalog.pg_database d WHERE d.datname = pg_catalog.current_database()`,
     [T],
   );
@@ -339,7 +342,7 @@ export async function pgTableSafetyIn(tx: Tx, schema: string, name: string, decl
         table: { schema, name, oid: t.oid, reltype: t.reltype, relkind: t.relkind, partition: t.ispartition, rowSecurity: t.rowsecurity, forceRowSecurity: t.forcerowsecurity, am: t.amname, amBuiltin: t.am_builtin },
         columns: columns.map((c) => ({ name: c.name, type: c.type, typid: c.typid, typtype: c.typtype, typschema: c.typschema, builtin: c.type_builtin, collation: c.collation, notnull: c.notnull, generated: c.generated, identity: c.identity, default: c.default_expr })),
         enums: enumLabels,
-        collations: { defs: coll?.defs ?? [], database: coll?.db ?? null },
+        collations: { defs: coll?.defs ?? [], database: coll?.db ?? null, databaseActual: coll?.dbActual ?? null },
         constraints: constraints.map((k) => ({ name: k.name, type: k.contype, def: k.def, deferrable: k.deferrable })),
         foreignKeysIn: fksIn.map((k) => ({ name: k.name, from: k.from, def: k.def })),
         fkOperators: fkOperators.map((o) => [o.con, o.operator, o.op_builtin, o.fn_builtin]),

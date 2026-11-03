@@ -9,7 +9,7 @@
  * - The secret rides in the one header the source names, resolved at the call, scrubbed from answers.
  */
 
-import { buildClientSchema, getIntrospectionQuery, type GraphQLSchema, type IntrospectionQuery, Kind, parse, validate } from 'graphql';
+import { assertValidSchema, buildClientSchema, getIntrospectionQuery, type GraphQLSchema, type IntrospectionQuery, Kind, parse, validate } from 'graphql';
 
 import { scrubSecrets } from '../mcp/secrets.js';
 import { UpstreamCallError } from '../mcp/upstream-error.js';
@@ -83,6 +83,9 @@ export async function describeGraphql(src: GraphqlSource, secret: string | null)
   if (status >= 400 || data?.__schema === undefined) throw new SourceQueryError(null, 'source', `introspection failed (HTTP ${status}); the endpoint may disable it`);
   try {
     const schema = buildClientSchema(data);
+    // buildClientSchema does not validate everything (a query type with no fields builds): a schema
+    // the checks cannot validate against is refused here, not at the first check.
+    assertValidSchema(schema);
     return { introspection: data, catalog: catalogOf(schema) };
   } catch (err) {
     // The endpoint's own schema words (names it declared) can ride the message: a source error, for a human only.
@@ -116,7 +119,13 @@ export function checkGraphqlRead(document: string, introspection: IntrospectionQ
   if (ops.length !== 1 || other.length > 0) return { ok: false, code: 'operations', detail: 'a read is a document with exactly one operation (fragments allowed)' };
   const op = ops[0] as Extract<(typeof doc.definitions)[number], { kind: Kind.OPERATION_DEFINITION }>;
   if (op.operation !== 'query') return { ok: false, code: 'not_query', detail: `a ${op.operation} is not a read; a read is one query operation` };
-  const errors = validate(buildClientSchema(introspection), doc);
+  let errors: readonly Error[];
+  try {
+    errors = validate(buildClientSchema(introspection), doc);
+  } catch {
+    // A stored schema that does not validate (described before this check existed): describe again.
+    return { ok: false, code: 'schema', detail: "the source's described schema is not valid; describe the source again" };
+  }
   if (errors.length > 0) return { ok: false, code: 'invalid', detail: errors.map((e) => e.message).join('; ') };
   return { ok: true, operation: op.name?.value ?? null, variables: (op.variableDefinitions ?? []).map((v) => v.variable.name.value) };
 }

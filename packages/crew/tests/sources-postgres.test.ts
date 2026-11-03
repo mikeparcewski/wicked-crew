@@ -3,6 +3,7 @@
 // SOURCE (pg_stat_activity), the table safety check over the probe tables, and the privilege report.
 
 import { mkdtempSync, rmSync } from 'node:fs';
+import { type AddressInfo, createServer as createNetServer, Socket as NetSocket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -520,6 +521,42 @@ for (const target of PG_TARGETS) {
           await b.unsafe('ROLLBACK').catch(() => undefined);
           b.release();
           await db.admin.unsafe('DROP TABLE IF EXISTS s.cg; DROP TABLE IF EXISTS s.cd');
+        }
+      });
+
+      it('a peer that never answers the startup: the read times out and its socket is destroyed, not left half-open (codex r4)', async () => {
+        const peers = new Set<import('node:net').Socket>();
+        const silent = createNetServer({ allowHalfOpen: true }, (c) => {
+          peers.add(c);
+          c.on('error', () => undefined);
+        });
+        await new Promise<void>((r) => silent.listen(0, '127.0.0.1', r));
+        const port = (silent.address() as AddressInfo).port;
+        try {
+          const args = { ...reader(), source: { ...reader().source, port } };
+          await expect(pgRead(args, 'SELECT 1', [], { deadlineMs: 300 })).rejects.toMatchObject({ errorClass: 'timeout' });
+          const open = (): number =>
+            (process as unknown as { _getActiveHandles: () => unknown[] })._getActiveHandles().filter((h) => h instanceof NetSocket && h.remotePort === port && !h.destroyed).length;
+          for (let i = 0; i < 40 && open() > 0; i++) await new Promise((r) => setTimeout(r, 100));
+          expect(open()).toBe(0);
+        } finally {
+          for (const c of peers) c.destroy();
+          await new Promise<void>((r) => silent.close(() => r()));
+        }
+      }, 15_000);
+
+      it('a column dropped and added back (same names, new order) is a changed relation (codex r4)', async () => {
+        await db.admin.unsafe('CREATE TABLE s.ord (id int, a text, b text); GRANT SELECT ON s.ord TO apps_reader');
+        try {
+          const h = await handle();
+          expect((await readSqlQuery(h, 'SELECT o.b FROM s.ord AS o(x, y)', [])).rows).toEqual([]);
+          await db.admin.unsafe('ALTER TABLE s.ord DROP COLUMN a; ALTER TABLE s.ord ADD COLUMN a text');
+          await expect(readSqlQuery(h, 'SELECT o.b FROM s.ord AS o(x, y)', [])).rejects.toThrow(/columns changed at the source/);
+          // Appending a column keeps the described ones leading: still fine.
+          await db.admin.unsafe('ALTER TABLE s.w ADD COLUMN k1_extra int');
+          expect((await readSqlQuery(h, 'SELECT w.owner FROM s.w AS w WHERE w.id = $1', [4821])).rows).toEqual([['nobody']]);
+        } finally {
+          await db.admin.unsafe('DROP TABLE s.ord; ALTER TABLE s.w DROP COLUMN IF EXISTS k1_extra');
         }
       });
 

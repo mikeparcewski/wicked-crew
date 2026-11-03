@@ -6,7 +6,7 @@ import { type AddressInfo, connect, createServer, type Socket } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { describeMysql } from '../src/sources/catalog/mysql.js';
-import { mysqlConnect, mysqlRead } from '../src/sources/drivers/mysql.js';
+import { mysqlConnect, mysqlDescribe, mysqlRead } from '../src/sources/drivers/mysql.js';
 import type { SqlConnectArgs } from '../src/sources/drivers/types.js';
 import { checkSqlQuery, readSqlQuery, SourcePolicyError, type SqlSourceHandle } from '../src/sources/sql.js';
 import { countingResolver, DB_HOST, DB_REQUIRED, type FreshMysql, freshMysqlDatabase, LOOPBACK, MYSQL_TARGETS } from './support/sources-db.js';
@@ -200,6 +200,47 @@ for (const target of MYSQL_TARGETS) {
         }
       }, 20_000);
 
+      it('a describe whose prepare the server never answers settles at its deadline (codex r4)', async () => {
+        // A proxy that passes everything but swallows COM_STMT_PREPARE (command 0x16): the prepare never answers.
+        const sockets = new Set<Socket>();
+        const proxy = createServer((client) => {
+          sockets.add(client);
+          client.on('error', () => undefined);
+          const up = connect(db.port, '127.0.0.1');
+          sockets.add(up);
+          up.on('error', () => client.destroy());
+          up.pipe(client);
+          let buf = Buffer.alloc(0);
+          let stalled = false;
+          client.on('data', (c: Buffer) => {
+            if (stalled) return;
+            buf = Buffer.concat([buf, c]);
+            while (buf.length >= 4) {
+              const len = buf.readUIntLE(0, 3);
+              if (buf.length < 4 + len) break;
+              const packet = buf.subarray(0, 4 + len);
+              buf = buf.subarray(4 + len);
+              if (packet[3] === 0 && packet[4] === 0x16) {
+                stalled = true;
+                return;
+              }
+              up.write(packet);
+            }
+          });
+          client.on('close', () => up.destroy());
+        });
+        await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r));
+        try {
+          const args = { ...reader(), source: { ...reader().source, port: (proxy.address() as AddressInfo).port } };
+          const t0 = Date.now();
+          await expect(mysqlDescribe(args, 'SELECT n FROM big', undefined, 800)).rejects.toMatchObject({ errorClass: 'timeout' });
+          expect(Date.now() - t0).toBeLessThan(3_000);
+        } finally {
+          for (const sk of sockets) sk.destroy();
+          await new Promise<void>((r) => proxy.close(() => r()));
+        }
+      }, 15_000);
+
       it('one deadline from entry (codex r3): a connection slower than the deadline is a timeout, not a fresh 10 s after it', async () => {
         const slow = (async (host: string) => {
           await new Promise((r) => setTimeout(r, 2_500));
@@ -232,10 +273,13 @@ for (const target of MYSQL_TARGETS) {
         try {
           const args = { ...reader(), source: { ...reader().source, port: (proxy.address() as AddressInfo).port } };
           await expect(mysqlRead(args, 'SELECT SUM(a.n + b.n + c.n) AS s FROM big a, big b, big c', [], { deadlineMs: 500 })).rejects.toBeDefined();
+          const mainEnded = Date.now();
           for (let i = 0; i < 80 && opened[1]?.closedAt == null; i++) await new Promise((r) => setTimeout(r, 100));
           expect(opened.length).toBe(2);
-          // Closed at the 3 s race, not at mysql2's own 10 s connect timeout.
+          // Closed at the 3 s race at the latest, not at mysql2's own 10 s connect timeout ...
           expect((opened[1]?.closedAt ?? Infinity) - (opened[1]?.at ?? 0)).toBeLessThan(6_000);
+          // ... and with the call: the source stopped the query itself, so the attempt ended with it (codex r4).
+          expect((opened[1]?.closedAt ?? Infinity) - mainEnded).toBeLessThan(1_500);
         } finally {
           for (const sk of sockets) sk.destroy();
           await new Promise<void>((r) => proxy.close(() => r()));

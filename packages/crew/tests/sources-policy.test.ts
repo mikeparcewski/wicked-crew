@@ -76,7 +76,7 @@ describe('Postgres: qualified column references must name columns (codex r1: fun
     // s.w(id, owner) USING (id) s.v(id): output (id, owner); renamed (x, y), so j.owner no longer exists.
     expect(await pg('SELECT j.y FROM (s.w a JOIN s.v b USING (id)) AS j(x, y)')).toMatchObject({ ok: true });
     expect(await pg('SELECT j.owner FROM (s.w a JOIN s.v b USING (id)) AS j(x, y)')).toMatchObject({ ok: false, code: 'column' });
-    expect(await pg('SELECT j.z FROM (s.w a NATURAL JOIN s.v b) AS j(x, y, z)')).toMatchObject({ ok: false, code: 'column' }); // two columns, not three
+    expect(await pg('SELECT j.x FROM (s.w a NATURAL JOIN s.v b) AS j(x, y)')).toMatchObject({ ok: false, code: 'syntax' }); // NATURAL: refused (codex r4)
     // A USING alias names only the merged columns, and adds none to a star.
     expect(await pg('SELECT u.id FROM s.w a JOIN s.v b USING (id) AS u')).toMatchObject({ ok: true });
     expect(await pg('SELECT q.id, q.owner FROM (SELECT * FROM s.w a JOIN s.v b USING (id) AS u) q(i, o)')).toMatchObject({ ok: false, code: 'column' });
