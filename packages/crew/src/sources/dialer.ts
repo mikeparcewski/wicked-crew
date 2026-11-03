@@ -708,7 +708,9 @@ export async function dialFetch(input: string | URL, init: DialRequestInit = {},
   if (status >= 300 && status < 400) {
     const location = typeof res.headers.location === 'string' ? res.headers.location : null;
     res.destroy();
-    throw new DialRedirectRefusedError(status, location, `${url.host} answered HTTP ${status} (a redirect${location === null ? '' : ` to ${location}`}); redirects are never followed`);
+    // The Location is the upstream's text (it can carry anything): kept on the error for a caller that
+    // shows a person, never in the message, which agents and health can see.
+    throw new DialRedirectRefusedError(status, location, `${url.host} answered HTTP ${status} (a redirect); redirects are never followed`);
   }
   if (status < 200 || status > 599) {
     res.destroy();

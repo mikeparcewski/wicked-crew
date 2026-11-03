@@ -19,6 +19,7 @@ import { join } from 'node:path';
 import type { McpAuthConfig, McpHealth, McpRestMapping, McpToolAnnotations, McpToolClass, McpUpstreamKind } from '../core/types.js';
 import { crewStateHome } from '../projects/state-home.js';
 import type { AddressPolicy } from '../sources/dialer.js';
+import type { SqlSourceConfig } from '../sources/kinds.js';
 
 export const MCP_STATE_DIRNAME = 'mcp';
 export const MCP_REGISTRY_FILENAME = 'registry.json';
@@ -69,6 +70,15 @@ export interface McpServerRecord {
    * safe to re-derive (`registry.ts` legacyAddress).
    */
   address?: AddressPolicy;
+  /** (DES-APPS-001 §5.1) `sql` only: driver and connection settings (no secret). */
+  sql?: SqlSourceConfig;
+  /** `sql` only: the views a read may name. */
+  viewsAllowed?: string[];
+  /**
+   * (DES-APPS-001 §7.4) Postgres `sql` only: the Allow writes switch. `false` on every new source;
+   * changed only by a human operator (`PUT /sources/:name/allow-writes`). Not part of the descriptor.
+   */
+  allowWrites?: boolean;
   enabled: boolean;
   health: McpHealth;
   registeredAt: string;
@@ -90,6 +100,11 @@ export class McpRegistryStore {
 
   get path(): string {
     return join(this.dir, MCP_REGISTRY_FILENAME);
+  }
+
+  /** The directory the registry lives in (its sibling stores live beside it). */
+  get directory(): string {
+    return this.dir;
   }
 
   async read(): Promise<McpRegistryFile> {

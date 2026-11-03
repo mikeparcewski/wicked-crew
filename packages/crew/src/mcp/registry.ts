@@ -17,6 +17,7 @@
  */
 
 import { isIP } from 'node:net';
+import { join } from 'node:path';
 
 import type {
   McpAuthConfig,
@@ -40,6 +41,8 @@ import type { McpUpstreamConfig, ProbedTool, ProbeResult, Prober } from './probe
 import type { McpRegistryStore, McpServerRecord, McpToolRecord } from './registry-store.js';
 import { restTarget } from './rest.js';
 import { type AddressPolicy, classifyAddress, exactRangesFor, NO_CONFIRMATION } from '../sources/dialer.js';
+import { CREW_SOURCE, type SourceDescription, sourceDescriptorHash } from '../sources/kinds.js';
+import { SourceCatalogStore, type StoredDescription } from '../sources/store.js';
 import { KEYCHAIN_SERVICE, keychainRef, parseSecretRef, resolveSecret, secretIsSet, type SecretStore } from './secrets.js';
 
 /** How long a preview can be saved. */
@@ -57,6 +60,8 @@ export class McpRegistryError extends Error {
     readonly status: 400 | 403 | 404 | 409 | 500 | 501 | 502 | 503,
     readonly code: string,
     message: string,
+    /** (DES-APPS-001 §5.2) Fuller words that hold a source's own text: answered to a HUMAN only. */
+    readonly humanMessage?: string,
   ) {
     super(message);
   }
@@ -69,6 +74,8 @@ export interface McpCallTarget {
   rest: McpRestMapping | null;
   annotations: McpToolAnnotations | null;
   classOverride: McpToolClass | null;
+  /** The tool's saved schema hash (`null`: never registered, or no such tool). */
+  schemaHash: string | null;
   registered: boolean;
   /**
    * (G2) The tool is a `rest` tool saved before its hash covered the server's target (or whose
@@ -103,6 +110,8 @@ interface HeldPreview {
   secret: string | null;
   /** (G2) A `rest` preview's egress; `null` for an MCP server. */
   egress: McpRestEgress | null;
+  /** (DES-APPS-001 §5.1) A `sql`/`graphql` preview's describe; `null` otherwise. */
+  source: SourceDescription | null;
 }
 
 export interface McpRegistryDeps {
@@ -110,6 +119,8 @@ export interface McpRegistryDeps {
   secrets: SecretStore;
   probe: Prober;
   discover: (managed: ReadonlySet<string>) => McpDiscoveredServer[];
+  /** Where `sql`/`graphql` sources' descriptions live; default beside the registry file. */
+  catalogs?: SourceCatalogStore;
   now?: () => number;
   env?: NodeJS.ProcessEnv;
 }
@@ -118,10 +129,14 @@ export class McpRegistry {
   private readonly previews = new Map<string, HeldPreview>();
   private readonly now: () => number;
   private readonly env: NodeJS.ProcessEnv;
+  readonly catalogs: SourceCatalogStore;
 
   constructor(private readonly deps: McpRegistryDeps) {
     this.now = deps.now ?? Date.now;
     this.env = deps.env ?? process.env;
+    // Beside the registry file; a store without a directory (a test double) gets the default place.
+    const dir = (deps.store as { directory?: unknown }).directory;
+    this.catalogs = deps.catalogs ?? new SourceCatalogStore(typeof dir === 'string' ? join(dir, 'catalogs') : undefined);
   }
 
   get secretStoreAvailable(): boolean {
@@ -149,6 +164,9 @@ export class McpRegistry {
     if (config.name === ESTATE_SERVER) {
       throw new McpRegistryError(400, 'reserved_name', `"${ESTATE_SERVER}" is reserved: mcp:${ESTATE_SERVER}/<tool> is the broker's estate relay (the seat's own estate), never a registered server; choose another name`);
     }
+    if ((config.kind === 'sql' || config.kind === 'graphql') && config.name === CREW_SOURCE) {
+      throw new McpRegistryError(400, 'reserved_name', `"${CREW_SOURCE}" is the built-in crew source; choose another name`);
+    }
     if (stagedSecret !== null) {
       if (!this.deps.secrets.available) {
         throw new McpRegistryError(501, 'secret_store_unavailable', 'this platform has no OS secret store; reference a daemon env variable instead (auth.ref "env:<NAME>")');
@@ -167,8 +185,9 @@ export class McpRegistry {
       const what = config.kind === 'rest' ? 'the OpenAPI document could not be imported' : 'the server did not answer tools/list';
       // (DES-APPS-001 §5.2) The dialer refused the connection: a 409 naming why (an unconfirmed range
       // to confirm, an always-refused address, plaintext), not an upstream failure.
-      if (result.refusal !== undefined) throw new McpRegistryError(409, result.refusal, `${what}: ${result.error}`);
-      throw new McpRegistryError(502, 'probe_failed', `${what}: ${result.error}`);
+      const human = result.sourceDetail !== undefined ? `${what}: ${result.sourceDetail}` : undefined;
+      if (result.refusal !== undefined) throw new McpRegistryError(409, result.refusal, `${what}: ${result.error}`, human);
+      throw new McpRegistryError(502, 'probe_failed', `${what}: ${result.error}`, human);
     }
     const tools = result.tools.map((t) => ({ ...t, schemaHash: hashOf(config, t) }));
     const previewHash = sha256Hex(canonicalJson({ config, tools: tools.map((t) => [t.name, t.schemaHash]) }));
@@ -179,7 +198,9 @@ export class McpRegistry {
     const egress: McpRestEgress | null =
       config.kind !== 'rest' || result.egress === undefined ? null : { ...result.egress, confirmRequired: egressRefusal(result.egress, null, existing) !== null };
     if (config.kind === 'rest' && egress === null) throw new McpRegistryError(502, 'probe_failed', 'the rest probe did not report where its calls go');
-    this.hold(previewHash, { config, tools, expiresAt, secret: stagedSecret, egress });
+    const source = result.source ?? null;
+    if ((config.kind === 'sql' || config.kind === 'graphql') && source === null) throw new McpRegistryError(502, 'probe_failed', 'the source probe did not describe the source');
+    this.hold(previewHash, { config, tools, expiresAt, secret: stagedSecret, egress, source });
     const was = (name: string): McpToolRecord | undefined => existing?.tools.find((p) => p.name === name);
     // The override a save keeps: only while the tool's schema is unchanged (as `save` decides).
     const survivingOverride = (t: { name: string; schemaHash: string }): McpToolClass | null => {
@@ -206,6 +227,7 @@ export class McpRegistry {
       diff: existing === undefined ? null : diffTools(existing.tools, tools),
       ...(result.skipped !== undefined && result.skipped.length > 0 ? { skipped: result.skipped } : {}),
       ...(egress !== null ? { egress } : {}),
+      ...(source !== null ? { source: { catalog: source.catalog, ...(source.privileges !== undefined ? { privileges: source.privileges } : {}) } } : {}),
     };
   }
 
@@ -253,7 +275,7 @@ export class McpRegistry {
     // orphan this was written to prevent. `null` = no prior value, and then the rollback deletes.
     const prior = held.secret === null ? null : await this.deps.secrets.get(held.config.name);
     if (held.secret !== null) await this.deps.secrets.set(held.config.name, held.secret);
-    const saved = await this.restoreSecretOnFailure(held.config.name, held.secret !== null, prior, () => this.deps.store.mutate((file) => {
+    const saved = await this.restoreSecretOnFailure(held.config.name, held.secret !== null, prior, () => this.deps.store.mutate(async (file) => {
       const prior = file.servers.find((s) => s.name === held.config.name);
       // (G2) Re-judged against the record as it is NOW, inside the write: a confirmation the
       // preview inherited from a server since removed or re-pointed does not carry over.
@@ -283,10 +305,16 @@ export class McpRegistry {
       const origin = held.egress?.origin ?? null;
       // The confirmed origin is kept while the server still goes there: named now, or by an earlier save.
       const allowedOrigin = origin !== null && (allowOrigin === origin || prior?.allowedOrigin === origin) ? origin : null;
-      const { address, ...config } = held.config;
+      const { address, sql, viewsAllowed, ...config } = held.config;
+      // (DES-APPS-001 §7.4) Allow writes is off on every new Postgres source. A re-save keeps it only
+      // while the connection descriptor is unchanged (grants bind to the descriptor anyway).
+      const keepWrites = prior?.allowWrites === true && prior.kind === 'sql' && sourceDescriptorHash(configOf(prior)) === sourceDescriptorHash(held.config);
       const record: McpServerRecord = {
         ...config,
         ...(address != null ? { address } : {}),
+        ...(sql != null ? { sql } : {}),
+        ...(viewsAllowed != null ? { viewsAllowed } : {}),
+        ...(sql != null && sql.driver === 'postgres' ? { allowWrites: keepWrites } : {}),
         ...(allowedOrigin !== null ? { allowedOrigin } : {}),
         enabled: prior?.enabled ?? true,
         health: { state: 'ok', consecutiveFailures: 0, checkedAt: stamp, lastError: null },
@@ -295,6 +323,9 @@ export class McpRegistry {
         tools,
       };
       file.servers = [...file.servers.filter((s) => s.name !== record.name), record];
+      // The description lands INSIDE the record's own write (the store serializes mutations), so a
+      // record and its description can never be paired with another save's.
+      if (held.source !== null) await this.catalogs.write(record.name, { ...held.source, descriptorHash: sourceDescriptorHash(configOf(record)) });
       return record;
     }));
     return this.view(saved);
@@ -414,9 +445,12 @@ export class McpRegistry {
 
   /** Remove a server, and the keychain secret it owns (`keychain:wicked-mcp/<name>`). */
   async remove(name: string): Promise<void> {
-    const removed = await this.deps.store.mutate((file) => {
+    const removed = await this.deps.store.mutate(async (file) => {
       const s = this.find(file.servers, name);
       file.servers = file.servers.filter((x) => x.name !== name);
+      // Inside the mutation, serialized with every save and upload: a source saved under this name
+      // next writes its catalog after this deletion, never before it.
+      if (s.kind === 'sql' || s.kind === 'graphql') await this.catalogs.remove(name);
       return s;
     });
     if (removed.auth?.ref === keychainRef(name) && this.deps.secrets.available) {
@@ -552,6 +586,7 @@ export class McpRegistry {
       rest: t?.rest ?? null,
       annotations: t?.annotations ?? null,
       classOverride: t?.classOverride ?? null,
+      schemaHash: t?.schemaHash ?? null,
       registered: s.enabled && t !== undefined && t.enabled && statusOf(s, t) === 'registered',
       resaveRequired: t !== undefined && !targetBound(s, t),
     };
@@ -602,6 +637,85 @@ export class McpRegistry {
     return { secret, missing: secret === null };
   }
 
+  // ── Apps data sources (DES-APPS-001 §5, §7.4) ─────────────────────────────────────────────
+
+  /**
+   * A `sql` or `graphql` source as the sources routes need it: its config, its Allow writes switch
+   * and its stored description (`null` until described). 404 for no such source, 400 for a server
+   * that is not one.
+   */
+  async source(name: string): Promise<{ config: McpUpstreamConfig; allowWrites: boolean; description: StoredDescription | null; descriptorHash: string }> {
+    const s = this.find((await this.deps.store.read()).servers, name);
+    if (s.kind !== 'sql' && s.kind !== 'graphql') throw new McpRegistryError(400, 'not_a_source', `${name} is an ${s.kind} server, not a data source`);
+    const config = configOf(s);
+    const descriptorHash = sourceDescriptorHash(config);
+    const stored = await this.catalogs.read(name);
+    // A description taken under another descriptor (a re-save since) is not this source's: not described.
+    return { config, allowWrites: s.allowWrites === true, description: stored !== null && stored.descriptorHash === descriptorHash ? stored : null, descriptorHash };
+  }
+
+  /** Store a fresh description of a source (a re-describe), bound to the descriptor it was taken under. */
+  async saveDescription(name: string, description: SourceDescription, descriptorHash: string): Promise<void> {
+    // Checked and written inside one registry mutation (serialized with every save), so a save that
+    // lands while the source was being described always wins.
+    await this.deps.store.mutate(async (file) => {
+      const s = this.find(file.servers, name);
+      if (sourceDescriptorHash(configOf(s)) !== descriptorHash) throw new McpRegistryError(409, 'server_changed', `${name} was saved again while it was being described; describe it again`);
+      await this.catalogs.write(name, { ...description, descriptorHash });
+    });
+  }
+
+  /**
+   * (DES-APPS-001 §7.4) Turn a Postgres source's Allow writes switch on or off. The route allows a
+   * human operator only and audits it; turning it off withdraws the source's row-write grants (the
+   * caller's hook). Answers whether it changed.
+   */
+  async setAllowWrites(name: string, allowed: boolean): Promise<{ before: boolean; after: boolean; server: McpServer }> {
+    const { before, rec } = await this.deps.store.mutate((file) => {
+      const s = this.find(file.servers, name);
+      if (s.kind !== 'sql' || s.sql?.driver !== 'postgres') throw new McpRegistryError(400, 'writes_not_supported', `${name} is not a Postgres source: v1 row writes are Postgres only`);
+      const was = s.allowWrites === true;
+      s.allowWrites = allowed;
+      s.updatedAt = new Date(this.now()).toISOString();
+      return { before: was, rec: s };
+    });
+    return { before, after: allowed, server: await this.view(rec) };
+  }
+
+  /**
+   * Register (or replace) an uploaded snapshot as a `sql`/`sqlite` source (DES-APPS-001 §5.1). The
+   * upload IS the person's act, so there is no preview; a name held by any other kind is refused.
+   */
+  async registerSnapshotSource(name: string, digest: string, description: SourceDescription): Promise<McpServer> {
+    if (name === CREW_SOURCE || name === ESTATE_SERVER) throw new McpRegistryError(400, 'reserved_name', `"${name}" is reserved; choose another name`);
+    const stamp = new Date(this.now()).toISOString();
+    const rec = await this.deps.store.mutate(async (file) => {
+      const prior = file.servers.find((s) => s.name === name);
+      if (prior !== undefined && !(prior.kind === 'sql' && prior.sql?.driver === 'sqlite')) {
+        throw new McpRegistryError(409, 'name_taken', `${name} is already a registered ${prior.kind} server; choose another name`);
+      }
+      const record: McpServerRecord = {
+        name,
+        kind: 'sql',
+        command: null,
+        args: [],
+        url: null,
+        auth: null,
+        sql: { driver: 'sqlite', snapshot: digest },
+        viewsAllowed: [],
+        enabled: true,
+        health: { state: 'ok', consecutiveFailures: 0, checkedAt: stamp, lastError: null },
+        registeredAt: prior?.registeredAt ?? stamp,
+        updatedAt: stamp,
+        tools: [],
+      };
+      file.servers = [...file.servers.filter((s) => s.name !== name), record];
+      await this.catalogs.write(name, { ...description, descriptorHash: sourceDescriptorHash(configOf(record)) });
+      return record;
+    });
+    return this.view(rec);
+  }
+
   // ── internals ──────────────────────────────────────────────────────────────────────────────
 
   private find(servers: McpServerRecord[], name: string): McpServerRecord {
@@ -643,8 +757,11 @@ export class McpRegistry {
   private async view(s: McpServerRecord): Promise<McpServer> {
     const tools = s.tools.map((t) => toolView(s, t));
     const live = tools.filter((t) => t.status !== 'gone');
+    const isSource = s.kind === 'sql' || s.kind === 'graphql';
     return {
       ...configView(configOf(s)),
+      ...(s.kind === 'sql' && s.sql?.driver === 'postgres' ? { allowWrites: s.allowWrites === true } : {}),
+      ...(isSource ? { descriptorHash: sourceDescriptorHash(configOf(s)) } : {}),
       authState: await this.authState(s.auth),
       enabled: s.enabled,
       health: s.health,
@@ -663,9 +780,14 @@ export class McpRegistry {
   }
 }
 
-function configOf(s: McpServerRecord): McpUpstreamConfig {
+export function configOf(s: McpServerRecord): McpUpstreamConfig {
   const base: McpUpstreamConfig = { name: s.name, kind: s.kind, command: s.command, args: s.args, url: s.url, auth: s.auth };
   if (s.kind === 'mcp-stdio') return base;
+  if (s.kind === 'sql') {
+    const sqlite = s.sql?.driver === 'sqlite';
+    return { ...base, sql: s.sql ?? null, viewsAllowed: s.viewsAllowed ?? [], ...(sqlite ? {} : { address: s.address ?? { ...NO_CONFIRMATION, allow: [] } }) };
+  }
+  if (s.kind === 'graphql') return { ...base, address: s.address ?? { ...NO_CONFIRMATION, allow: [] } };
   const address = s.address ?? legacyAddress(s);
   if (s.kind !== 'rest') return { ...base, address };
   return { ...base, openapiUrl: s.openapiUrl ?? null, openapi: s.openapi ?? null, operations: s.operations ?? null, address };
@@ -700,6 +822,8 @@ interface ConfigView {
   openapiUrl?: string | null;
   operations?: string[] | null;
   address?: AddressPolicy;
+  sql?: { driver: 'postgres' | 'mysql' | 'sqlite'; host: string | null; port: number | null; database: string | null; user: string | null; tls: 'verify-full' | 'disable'; ca: boolean; snapshot: string | null };
+  viewsAllowed?: string[];
 }
 
 /** What a response shows of a config. A pasted OpenAPI document is not echoed back. */
@@ -709,7 +833,11 @@ function configView(c: McpUpstreamConfig): ConfigView {
     view.openapiUrl = c.openapiUrl ?? null;
     view.operations = c.operations ?? null;
   }
-  if (c.kind !== 'mcp-stdio') view.address = c.address ?? { ...NO_CONFIRMATION, allow: [] };
+  if (c.kind !== 'mcp-stdio' && !(c.kind === 'sql' && c.sql?.driver === 'sqlite')) view.address = c.address ?? { ...NO_CONFIRMATION, allow: [] };
+  if (c.kind === 'sql' && c.sql != null) {
+    view.sql = { driver: c.sql.driver, host: c.sql.host ?? null, port: c.sql.port ?? null, database: c.sql.database ?? null, user: c.sql.user ?? null, tls: c.sql.tls ?? 'verify-full', ca: c.sql.ca != null, snapshot: c.sql.snapshot ?? null };
+    view.viewsAllowed = c.viewsAllowed ?? [];
+  }
   return view;
 }
 

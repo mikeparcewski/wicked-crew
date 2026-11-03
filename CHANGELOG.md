@@ -12,6 +12,36 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **Apps data sources (api-types 0.175.0, DES-APPS-001 §5, §7.4, §7.5, slice K1).** crew's one connector registry
+  gains two kinds, `sql` (drivers `postgres`, `mysql`, `sqlite`) and `graphql`, registered through the same
+  `POST /mcp/servers/preview` and save and never offered to a governed run (they have no tools). A preview describes the
+  source: its catalog (structure and declared enum literals, never a row value) and, for Postgres, the login's privilege
+  report. Every query passes the **read policy** before it reaches the source, at check time and at every run: Postgres
+  through libpg_query with a closed node, function, operator and cast allowlist (`search_path = pg_catalog, pg_temp`,
+  `standard_conforming_strings` pinned); MySQL through a hand-written closed-subset grammar (`sql_mode` pinned,
+  executable comments, backslashes and variables refused); SQLite through the authorizer at prepare in a child process.
+  SQL reads run `READ ONLY` with one 10 s deadline from the call's start, enforced at the source (`statement_timeout`
+  plus a cancel pinned to the backend; `max_execution_time` and `lock_wait_timeout` plus `KILL QUERY` on the same
+  server; the SQLite process ended). A GraphQL read's 10 s deadline is client-side: crew aborts the request. Before a
+  SQL read or check runs, its relations are checked live (a table since replaced by a view or a foreign table, a MySQL
+  `FEDERATED` table, a column renamed, dropped or reordered, or a plain read reaching a foreign partition or child, is
+  refused); Postgres first takes the read's own `ACCESS SHARE` lock on each one by preparing a fixed `SELECT FROM` it
+  (never executed), so the relation checked is the relation read. `NATURAL JOIN` is refused (it joins on whatever
+  columns the two sides share at run time). TLS is `verify-full` /
+  `VERIFY_IDENTITY` against the host the person gave (a DNS name, or an IP literal against an IP SAN). An agent sees a
+  source's error as its class and SQLSTATE only, at the preview and in health too. SQLite sources and uploads need Node.js 24.12 or later (the authorizer). New routes: `GET /sources/:name/catalog` (`crew` is the built-in source),
+  `POST /sources/:name/describe`, `…/privileges` (the exact missing `GRANT`s for a declared row write), `…/check` (policy,
+  then prepare/describe, never execute), `…/safety` (the Postgres **table safety check** and its fingerprint, §7.4 rev
+  11), `PUT …/allow-writes` (the per-source **Allow writes** switch: off on every new Postgres source, human operator
+  only, audited `apps.source.writes_allowed` / `writes_disallowed`, turning it off withdraws the source's row-write
+  grants, not part of the connection descriptor), `POST …/test-call` (G6: names its one request first, sends exactly
+  it only with the request's hash; reads only; human operator only) and `POST /apps/uploads` (a CSV, an XLSX or a
+  `.sqlite` becomes a content-addressed snapshot source; a `.sqlite` holding a view, trigger or virtual table is refused;
+  50 MB, 200 MB expanded, 1,000,000 rows, 200 columns, one 30 s deadline; the first rows go to a human only, and only a
+  human's upload takes a first row as the header: an agent's gets `col_1…` names; the store holds a `.gitignore`). CI gains the
+  `sources-db` job: Postgres 16, Postgres 17 and MySQL 8 service containers, and `tests/fixtures/apps-sources/` (seeds,
+  an OpenAPI test service, a GraphQL test server, the reference MCP server, upload samples) for the later Apps lanes.
+
 - **Apps: the app store, versions and receipts behind `/api/v1/apps` (api-types 0.173.0, DES-APPS-001 slice K2a).** An app is a git
   repo crew makes under `~/.wicked/apps/<slug>` (`WICKED_CREW_APPS_ROOT`), registered like any repo; `POST /repos`
   gains `create: true` for a new empty repo there (one empty commit, no onboarding; a taken or reserved name is

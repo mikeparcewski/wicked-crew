@@ -260,3 +260,61 @@ jobs:
         env:
           WICKED_EGRESS_PROBE: ${{ runner.os == 'Linux' && 'required' || '' }}
         run: npm run -w packages/crew test
+
+  # DES-APPS-001 K1: Apps data sources against REAL databases. Postgres 16, Postgres 17 and MySQL 8 run
+  # as service containers (Linux only, hence a job of its own); the source tests seed a fresh database
+  # per run from packages/crew/tests/fixtures/apps-sources/ and drop it after. WICKED_SOURCES_DB=required
+  # makes a database that is not there a failure, not a skip (locally, without these variables, the
+  # tests skip and say why). The shared fixtures (the OpenAPI and GraphQL test services, the reference
+  # MCP server, upload samples) live in the same folder for the later Apps lanes (K2b's P1-P43 suite,
+  # K6, the E2E runs), which add their test files to this job.
+  sources-db:
+    name: sources · Postgres 16, 17 · MySQL 8
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      pg16:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: apps
+        ports: ['55416:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 5s --health-retries 30
+      pg17:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: apps
+        ports: ['55417:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 5s --health-retries 30
+      mysql8:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: apps
+        ports: ['53308:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -papps" --health-interval 3s --health-timeout 5s --health-retries 40
+    steps:
+      - name: Checkout wicked-crew
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          path: wicked-crew
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: wicked-crew/package-lock.json
+
+      - name: Install (clean, from lockfile)
+        working-directory: wicked-crew
+        run: npm ci
+
+      - name: Apps source tests on real databases
+        working-directory: wicked-crew/packages/crew
+        env:
+          WICKED_SOURCES_DB: required
+          APPS_PG16_URL: postgres://postgres:apps@127.0.0.1:55416/postgres
+          APPS_PG17_URL: postgres://postgres:apps@127.0.0.1:55417/postgres
+          APPS_MYSQL8_URL: mysql://root:apps@127.0.0.1:53308/mysql
+        run: npx vitest run tests/sources- --maxWorkers=2

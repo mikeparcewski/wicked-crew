@@ -178,6 +178,7 @@ import { gardenRootFor } from '../learn/scheduler.js';
 import { DEMO_PRESET, demoLaunchRoots, registerDemoDocumentRoute, registerDemoRoutes, registerWalkthroughRoutes, walkthroughAcceptance, type BridgeCall } from './recording.js';
 import { projectDocsRoot } from '../interactive/project-root.js';
 import { registerSkillsRoutes } from './skills.js';
+import { registerSourceRoutes } from '../sources/routes.js';
 import { registerMcpRoutes } from './mcp.js';
 import { chatMcpToolsFor } from './chat-mcp.js';
 import type { AskServer } from '../mcp/ask-server.js';
@@ -9219,6 +9220,12 @@ export function registerRoutes(
     ...(runtime.mcpBroker !== undefined ? { broker: runtime.mcpBroker } : {}),
     ...(mcpPolicies !== undefined ? { policies: mcpPolicies } : {}),
     ...(runtime.mcpCalls !== undefined ? { usage: runtime.mcpCalls } : {}),
+    audit,
+    actorOf,
+  });
+  // Apps data sources (DES-APPS-001 §5): the source sheet's routes over the same registry.
+  registerSourceRoutes(app, {
+    ...(runtime.mcp !== undefined ? { registry: runtime.mcp } : {}),
     audit,
     actorOf,
   });
