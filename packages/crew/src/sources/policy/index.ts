@@ -11,12 +11,13 @@
 
 import { checkMysqlRead } from './mysql.js';
 import { checkPgRead } from './pg.js';
+import { sqliteParams } from './sqlite.js';
 import type { PolicyCatalog, PolicyResult } from './types.js';
 
 export type SqlDialect = 'postgres' | 'mysql' | 'sqlite';
 
 export { checkPgCheckExpression } from './pg.js';
-export { sqliteAuthorize, type SqliteAuthorizerContext } from './sqlite.js';
+export { sqliteAuthorize, type SqliteAuthorizerContext, sqliteParams } from './sqlite.js';
 export type { PolicyCatalog, PolicyRelationKind, PolicyResult } from './types.js';
 
 /** The largest query text the policy reads. */
@@ -28,7 +29,8 @@ export async function checkReadPolicy(dialect: SqlDialect, text: string, catalog
   if (text.includes('\0')) return { ok: false, code: 'lexical', detail: 'a NUL character is refused in query text' };
   if (dialect === 'postgres') return checkPgRead(text, catalog);
   if (dialect === 'mysql') return checkMysqlRead(text, catalog);
-  // SQLite: the authorizer decides at prepare (drivers/sqlite.ts). Nothing here to judge statically
-  // beyond the text's size; the relations are the ones the authorizer allows.
-  return { ok: true, relations: [], functions: [], params: 0 };
+  // SQLite: the authorizer decides at prepare (drivers/sqlite.ts). Statically: the placeholders.
+  const p = sqliteParams(text);
+  if (!p.ok) return { ok: false, code: 'params', detail: p.detail };
+  return { ok: true, relations: [], functions: [], params: p.count };
 }

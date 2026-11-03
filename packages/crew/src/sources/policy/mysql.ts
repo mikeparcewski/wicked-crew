@@ -17,7 +17,7 @@
  */
 
 import { deniedFunction, MYSQL_CAST_TYPES, MYSQL_FUNCTIONS } from './allowlists.js';
-import type { PolicyCatalog, PolicyResult } from './types.js';
+import { type PolicyCatalog, type PolicyResult, relKey, relLabel } from './types.js';
 
 type TokKind = 'ident' | 'qident' | 'num' | 'str' | 'param' | 'op' | 'eof';
 interface Tok {
@@ -26,6 +26,10 @@ interface Tok {
   v: string;
   /** The identifier as written (case kept), for table and column names. */
   raw: string;
+  /** Offsets in the text: a function name must END exactly where its `(` STARTS (MySQL resolves a
+   * name followed by a space as a stored routine, not the built-in). */
+  start: number;
+  end: number;
 }
 
 class Refusal extends Error {
@@ -42,16 +46,27 @@ const refuse = (code: string, message: string): never => {
 
 const OPS = ['<=>', '<>', '!=', '<=', '>=', '(', ')', ',', '.', '*', '+', '-', '/', '%', '=', '<', '>', ';'];
 
+/** MySQL's own whitespace in a single-byte view: ASCII space and control characters only. */
+const ASCII_SPACE = /[\t\n\v\f\r ]/;
+
 function lex(text: string): Tok[] {
   if (text.includes('\\')) refuse('lexical', 'a backslash is refused in MySQL query text (MySQL and the checker could read it differently); pass the value as a parameter');
   const out: Tok[] = [];
   let i = 0;
   const n = text.length;
+  const push = (kind: TokKind, v: string, raw: string, start: number, end: number): void => {
+    out.push({ kind, v, raw, start, end });
+  };
   while (i < n) {
     const c = text[i] as string;
-    if (/\s/.test(c)) {
+    if (ASCII_SPACE.test(c)) {
       i++;
       continue;
+    }
+    // Outside a quoted literal or name, only ASCII is read: MySQL decides spaces and identifier
+    // characters by the connection character set, so a non-ASCII byte could mean something else there.
+    if (c.charCodeAt(0) > 0x7e || (c.charCodeAt(0) < 0x20 && !ASCII_SPACE.test(c))) {
+      refuse('lexical', 'a non-ASCII or control character outside a quoted string or `name` is refused');
     }
     if (c === '/' && text[i + 1] === '*') {
       if (text[i + 2] === '!' || text[i + 2] === '+') refuse('lexical', 'executable (/*! … */) and optimizer-hint (/*+ … */) comments are refused: MySQL runs them');
@@ -61,7 +76,8 @@ function lex(text: string): Tok[] {
       continue;
     }
     if (c === '-' && text[i + 1] === '-') {
-      if (!/[\s]/.test(text[i + 2] ?? '\n')) refuse('lexical', 'a "--" not followed by a space is refused (MySQL reads it as two minus signs, not a comment)');
+      const after = text[i + 2];
+      if (after !== undefined && !ASCII_SPACE.test(after)) refuse('lexical', 'a "--" not followed by an ASCII space is refused (MySQL reads it as two minus signs, not a comment)');
       const end = text.indexOf('\n', i);
       i = end < 0 ? n : end + 1;
       continue;
@@ -85,7 +101,7 @@ function lex(text: string): Tok[] {
         v += text[j];
         j++;
       }
-      out.push({ kind: 'str', v, raw: v });
+      push('str', v, v, i, j + 1);
       i = j + 1;
       continue;
     }
@@ -106,7 +122,7 @@ function lex(text: string): Tok[] {
         j++;
       }
       if (v === '') refuse('lexical', 'an empty `name`');
-      out.push({ kind: 'qident', v, raw: v });
+      push('qident', v, v, i, j + 1);
       i = j + 1;
       continue;
     }
@@ -114,7 +130,7 @@ function lex(text: string): Tok[] {
       const m = /^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?/.exec(text.slice(i)) as RegExpExecArray;
       const after = text[i + m[0].length] ?? '';
       if (/[A-Za-z_$]/.test(after) || (c === '0' && /^0[xXbB]/.test(text.slice(i, i + 2)))) refuse('lexical', 'hex, bit and digit-led names are refused');
-      out.push({ kind: 'num', v: m[0], raw: m[0] });
+      push('num', m[0], m[0], i, i + m[0].length);
       i += m[0].length;
       continue;
     }
@@ -122,21 +138,21 @@ function lex(text: string): Tok[] {
       const m = /^[A-Za-z_][A-Za-z0-9_$]*/.exec(text.slice(i)) as RegExpExecArray;
       const word = m[0];
       if (text[i + word.length] === "'") refuse('lexical', `${word}'…' literals and charset introducers are refused`);
-      out.push({ kind: 'ident', v: word.toUpperCase(), raw: word });
+      push('ident', word.toUpperCase(), word, i, i + word.length);
       i += word.length;
       continue;
     }
     if (c === '?') {
-      out.push({ kind: 'param', v: '?', raw: '?' });
+      push('param', '?', '?', i, i + 1);
       i++;
       continue;
     }
     const op = OPS.find((o) => text.startsWith(o, i));
     if (op === undefined) refuse('lexical', `the character ${JSON.stringify(c)} (or the operator it starts) is outside the read subset`);
-    out.push({ kind: 'op', v: op as string, raw: op as string });
+    push('op', op as string, op as string, i, i + (op as string).length);
     i += (op as string).length;
   }
-  out.push({ kind: 'eof', v: '', raw: '' });
+  push('eof', '', '', n, n);
   return out;
 }
 
@@ -389,11 +405,12 @@ class Parser {
       if (db === null) refuse('unqualified', `the table ${table} must be qualified with its database`);
       schema = db;
     }
-    const key = `${schema}.${table}`;
+    const key = relKey(schema, table);
+    const label = relLabel(key);
     const kind = this.catalog.relations.get(key);
-    if (kind === undefined) refuse('relation', `${key} is not a table of this source's catalog (describe the source again if it is new)`);
-    else if (kind === 'foreign') refuse('relation', `${key} is a foreign table`);
-    else if ((kind === 'view' || kind === 'matview') && !this.catalog.viewsAllowed.has(key)) refuse('view', `${key} is a view the person has not allowed by name on the source sheet`);
+    if (kind === undefined) refuse('relation', `${label} is not a table of this source's catalog (describe the source again if it is new)`);
+    else if (kind === 'foreign') refuse('relation', `${label} is a foreign table`);
+    else if ((kind === 'view' || kind === 'matview') && !this.catalog.viewsAllowed.has(key)) refuse('view', `${label} is a view the person has not allowed by name on the source sheet`);
     this.relations.add(key);
   }
 
@@ -626,6 +643,9 @@ class Parser {
     if (tok.kind !== 'ident') this.unexpected('a function');
     const fn = tok.v;
     if (deniedFunction(fn) || !MYSQL_FUNCTIONS.has(fn)) refuse('function', `${tok.raw}() is not a function a read may call`);
+    // With IGNORE_SPACE off (the pinned sql_mode), `NAME (` is a stored routine call to MySQL, not the
+    // built-in this allowlist names: the parenthesis must follow the name directly.
+    if (this.peek().start !== tok.end) refuse('function', `${tok.raw} must be followed directly by "(" (with a space, MySQL looks for a stored function of that name)`);
     this.functions.add(fn);
     this.i++;
     this.expectOp('(');
@@ -743,7 +763,7 @@ export function checkMysqlRead(text: string, catalog: PolicyCatalog): PolicyResu
   try {
     const p = new Parser(lex(text), catalog);
     p.statement();
-    return { ok: true, relations: [...p.relations].sort(), functions: [...p.functions].sort(), params: p.params };
+    return { ok: true, relations: [...p.relations].map(relLabel).sort(), keys: [...p.relations].sort(), functions: [...p.functions].sort(), params: p.params };
   } catch (err) {
     if (err instanceof Refusal) return { ok: false, code: err.code, detail: err.message };
     throw err;

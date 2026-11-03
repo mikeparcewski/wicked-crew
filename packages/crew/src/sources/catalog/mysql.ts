@@ -9,7 +9,7 @@ import type { SqlConnectArgs } from '../drivers/types.js';
 import type { CatalogRelation, SqlCatalog } from './types.js';
 
 function enumValues(columnType: string): string[] | undefined {
-  const m = /^enum\((.*)\)$/i.exec(columnType);
+  const m = /^enum\(([\s\S]*)\)$/i.exec(columnType);
   if (m === null) return undefined;
   const out: string[] = [];
   for (const v of (m[1] as string).matchAll(/'((?:[^']|'')*)'/g)) out.push((v[1] as string).replace(/''/g, "'"));

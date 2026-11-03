@@ -66,6 +66,7 @@ const TABLE_LEVEL = 'v1 row writes need a plain table';
 
 interface TableRow {
   oid: string;
+  reltype: string;
   relkind: string;
   ispartition: boolean;
   rowsecurity: boolean;
@@ -82,6 +83,9 @@ interface ColumnRow {
   typname: string;
   typtype: string;
   typschema: string;
+  /** Created by initdb (oid < 16384): BUILT IN, not merely placed in pg_catalog. */
+  type_builtin: boolean;
+  collation: string;
   notnull: boolean;
   generated: string;
   identity: string;
@@ -99,7 +103,7 @@ export async function pgTableSafetyIn(tx: Tx, schema: string, name: string, decl
   };
 
   const [t] = await q<TableRow & Record<string, unknown>>(
-    `SELECT c.oid::pg_catalog.int8::pg_catalog.text AS oid, c.relkind::pg_catalog.text AS relkind, c.relispartition AS ispartition,
+    `SELECT c.oid::pg_catalog.int8::pg_catalog.text AS oid, c.reltype::pg_catalog.int8::pg_catalog.text AS reltype, c.relkind::pg_catalog.text AS relkind, c.relispartition AS ispartition,
             c.relrowsecurity AS rowsecurity, c.relforcerowsecurity AS forcerowsecurity, am.amname::pg_catalog.text AS amname,
             (am.oid < 16384) AS am_builtin
        FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
@@ -115,11 +119,13 @@ export async function pgTableSafetyIn(tx: Tx, schema: string, name: string, decl
   const columns = await q<ColumnRow & Record<string, unknown>>(
     `SELECT a.attnum::pg_catalog.int4 AS attnum, a.attname::pg_catalog.text AS name, pg_catalog.format_type(a.atttypid, a.atttypmod) AS type,
             a.atttypid::pg_catalog.int8::pg_catalog.text AS typid, ty.typname::pg_catalog.text AS typname, ty.typtype::pg_catalog.text AS typtype,
-            tn.nspname::pg_catalog.text AS typschema, a.attnotnull AS notnull, a.attgenerated::pg_catalog.text AS generated,
-            a.attidentity::pg_catalog.text AS identity, pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS default_expr
+            tn.nspname::pg_catalog.text AS typschema, (ty.oid < 16384) AS type_builtin, a.attnotnull AS notnull, a.attgenerated::pg_catalog.text AS generated,
+            a.attidentity::pg_catalog.text AS identity, pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS default_expr,
+            COALESCE(cn.nspname || '.' || co.collname, '')::pg_catalog.text AS collation
        FROM pg_catalog.pg_attribute a
        JOIN pg_catalog.pg_type ty ON ty.oid = a.atttypid JOIN pg_catalog.pg_namespace tn ON tn.oid = ty.typnamespace
        LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+       LEFT JOIN pg_catalog.pg_collation co ON co.oid = a.attcollation LEFT JOIN pg_catalog.pg_namespace cn ON cn.oid = co.collnamespace
       WHERE a.attrelid = $1::pg_catalog.oid AND a.attnum > 0 AND NOT a.attisdropped
       ORDER BY a.attnum`,
     [T],
@@ -141,8 +147,8 @@ export async function pgTableSafetyIn(tx: Tx, schema: string, name: string, decl
   );
   const fkOperators = await q<{ con: string; operator: string; op_builtin: boolean; fn_builtin: boolean }>(
     `SELECT k.conname::pg_catalog.text AS con, o.oprname::pg_catalog.text AS operator,
-            (o.oprnamespace = 'pg_catalog'::pg_catalog.regnamespace) AS op_builtin,
-            (p.pronamespace = 'pg_catalog'::pg_catalog.regnamespace) AS fn_builtin
+            (o.oid < 16384 AND o.oprnamespace = 'pg_catalog'::pg_catalog.regnamespace) AS op_builtin,
+            (p.oid < 16384 AND p.pronamespace = 'pg_catalog'::pg_catalog.regnamespace) AS fn_builtin
        FROM pg_catalog.pg_constraint k
        CROSS JOIN LATERAL pg_catalog.unnest(k.conpfeqop || k.conppeqop || k.conffeqop) AS e(op)
        JOIN pg_catalog.pg_operator o ON o.oid = e.op JOIN pg_catalog.pg_proc p ON p.oid = o.oprcode
@@ -163,10 +169,11 @@ export async function pgTableSafetyIn(tx: Tx, schema: string, name: string, decl
             (SELECT pg_catalog.count(*) FROM pg_catalog.pg_inherits i WHERE i.inhparent = $1::pg_catalog.oid)::pg_catalog.text AS children`,
     [T],
   );
-  const indexes = await q<{ name: string; def: string; exprs: boolean; partial: boolean; amname: string; am_builtin: boolean; opclass_builtin: boolean; primary: boolean }>(
-    `SELECT ic.relname::pg_catalog.text AS name, pg_catalog.pg_get_indexdef(i.indexrelid, 0, true) AS def, (i.indexprs IS NOT NULL) AS exprs,
+  const indexes = await q<{ name: string; oid: string; opclasses: number[]; collations: number[]; def: string; exprs: boolean; partial: boolean; amname: string; am_builtin: boolean; opclass_builtin: boolean; primary: boolean }>(
+    `SELECT ic.relname::pg_catalog.text AS name, i.indexrelid::pg_catalog.int8::pg_catalog.text AS oid, pg_catalog.pg_get_indexdef(i.indexrelid, 0, true) AS def,
+            pg_catalog.array_to_json(i.indclass::pg_catalog.oid[]::pg_catalog.int8[]) AS opclasses, pg_catalog.array_to_json(i.indcollation::pg_catalog.oid[]::pg_catalog.int8[]) AS collations, (i.indexprs IS NOT NULL) AS exprs,
             (i.indpred IS NOT NULL) AS partial, am.amname::pg_catalog.text AS amname, (am.oid < 16384) AS am_builtin,
-            COALESCE((SELECT pg_catalog.bool_and(oc.opcnamespace = 'pg_catalog'::pg_catalog.regnamespace)
+            COALESCE((SELECT pg_catalog.bool_and(oc.oid < 16384 AND oc.opcnamespace = 'pg_catalog'::pg_catalog.regnamespace)
                         FROM pg_catalog.unnest(i.indclass::pg_catalog.oid[]) u(o) JOIN pg_catalog.pg_opclass oc ON oc.oid = u.o), true) AS opclass_builtin,
             i.indisprimary AS primary
        FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid JOIN pg_catalog.pg_am am ON am.oid = ic.relam
@@ -194,6 +201,11 @@ export async function pgTableSafetyIn(tx: Tx, schema: string, name: string, decl
   );
   const enumOids = columns.filter((c) => c.typtype === 'e').map((c) => c.typid);
   const enumArray = `{${enumOids.join(',')}}`;
+  const enumLabels = await q<{ typid: string; labels: string[] }>(
+    `SELECT e.enumtypid::pg_catalog.int8::pg_catalog.text AS typid, pg_catalog.array_to_json(pg_catalog.array_agg(e.enumlabel ORDER BY e.enumsortorder)) AS labels
+       FROM pg_catalog.pg_enum e WHERE e.enumtypid = ANY($1::pg_catalog.text::pg_catalog.oid[]) GROUP BY e.enumtypid ORDER BY 1`,
+    [enumArray],
+  );
   // The net (and the CHECK dependency rule): objects that depend on T (defaults excluded: no insert
   // ever lets one run) and, for each, what it depends on outside pg_catalog — functions, operators,
   // types (but T's own enums), operator classes and families.
@@ -207,17 +219,17 @@ export async function pgTableSafetyIn(tx: Tx, schema: string, name: string, decl
             x.classid::pg_catalog.regclass::pg_catalog.text AS classid
        FROM dependents x JOIN pg_catalog.pg_depend d ON d.classid = x.classid AND d.objid = x.objid
       WHERE (d.refclassid = 'pg_catalog.pg_proc'::pg_catalog.regclass
-               AND EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.oid = d.refobjid AND p.pronamespace <> 'pg_catalog'::pg_catalog.regnamespace))
+               AND EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.oid = d.refobjid AND (p.oid >= 16384 OR p.pronamespace <> 'pg_catalog'::pg_catalog.regnamespace)))
          OR (d.refclassid = 'pg_catalog.pg_operator'::pg_catalog.regclass
-               AND EXISTS (SELECT 1 FROM pg_catalog.pg_operator o WHERE o.oid = d.refobjid AND o.oprnamespace <> 'pg_catalog'::pg_catalog.regnamespace))
+               AND EXISTS (SELECT 1 FROM pg_catalog.pg_operator o WHERE o.oid = d.refobjid AND (o.oid >= 16384 OR o.oprnamespace <> 'pg_catalog'::pg_catalog.regnamespace)))
          OR (d.refclassid = 'pg_catalog.pg_type'::pg_catalog.regclass
                AND NOT (d.refobjid = ANY($2::pg_catalog.text::pg_catalog.oid[]))
-               AND EXISTS (SELECT 1 FROM pg_catalog.pg_type ty WHERE ty.oid = d.refobjid AND ty.typnamespace <> 'pg_catalog'::pg_catalog.regnamespace
+               AND EXISTS (SELECT 1 FROM pg_catalog.pg_type ty WHERE ty.oid = d.refobjid AND (ty.oid >= 16384 OR ty.typnamespace <> 'pg_catalog'::pg_catalog.regnamespace)
                              AND ty.typrelid <> $1::pg_catalog.oid))
          OR (d.refclassid = 'pg_catalog.pg_opclass'::pg_catalog.regclass
-               AND EXISTS (SELECT 1 FROM pg_catalog.pg_opclass oc WHERE oc.oid = d.refobjid AND oc.opcnamespace <> 'pg_catalog'::pg_catalog.regnamespace))
+               AND EXISTS (SELECT 1 FROM pg_catalog.pg_opclass oc WHERE oc.oid = d.refobjid AND (oc.oid >= 16384 OR oc.opcnamespace <> 'pg_catalog'::pg_catalog.regnamespace)))
          OR (d.refclassid = 'pg_catalog.pg_opfamily'::pg_catalog.regclass
-               AND EXISTS (SELECT 1 FROM pg_catalog.pg_opfamily f WHERE f.oid = d.refobjid AND f.opfnamespace <> 'pg_catalog'::pg_catalog.regnamespace))
+               AND EXISTS (SELECT 1 FROM pg_catalog.pg_opfamily f WHERE f.oid = d.refobjid AND (f.oid >= 16384 OR f.opfnamespace <> 'pg_catalog'::pg_catalog.regnamespace)))
       ORDER BY 1, 2`,
     [T, enumArray],
   );
@@ -242,7 +254,8 @@ export async function pgTableSafetyIn(tx: Tx, schema: string, name: string, decl
     if (!o.op_builtin || !o.fn_builtin) add('fk_operator', `the foreign key \`${o.con}\` on or into \`${label}\` compares with an operator outside pg_catalog (\`${o.operator}\`)`);
   }
   for (const c of columns) {
-    const builtin = c.typschema === 'pg_catalog';
+    // Built in = created by initdb (oid < 16384), not merely living in pg_catalog.
+    const builtin = c.typschema === 'pg_catalog' && c.type_builtin;
     if (c.typtype === 'd') add('column_type', `\`${label}.${c.name}\` has the domain type \`${c.type}\`: a domain runs its own checks`);
     else if (c.typtype !== 'e' && !builtin) add('column_type', `\`${label}.${c.name}\` has the custom type \`${c.type}\`: only built-in types and enums`);
     else if (c.typtype === 'c' || c.typtype === 'p') add('column_type', `\`${label}.${c.name}\` has the composite or pseudo type \`${c.type}\``);
@@ -276,7 +289,10 @@ export async function pgTableSafetyIn(tx: Tx, schema: string, name: string, decl
     const names = new Set(columns.map((c) => c.name));
     for (const col of [...decl.set, ...decl.key]) if (!names.has(col)) add('unknown_column', `\`${label}\` has no column \`${col}\``);
     const pkCols = new Set(pk?.cols ?? []);
-    if (pk !== undefined && (decl.key.length !== pkCols.size || !decl.key.every((k) => pkCols.has(k)))) {
+    const keySet = new Set(decl.key);
+    if (keySet.size !== decl.key.length) add('key_mismatch', 'the key names a column twice');
+    if (new Set(decl.set).size !== decl.set.length) add('nothing_set', 'the write sets a column twice');
+    if (pk !== undefined && (keySet.size !== pkCols.size || ![...pkCols].every((k) => keySet.has(k)))) {
       add('key_mismatch', `the key must be the whole primary key of \`${label}\` (${[...pkCols].join(', ')})`);
     }
     const fkOut = constraints.filter((k) => k.contype === 'f');
@@ -299,7 +315,7 @@ export async function pgTableSafetyIn(tx: Tx, schema: string, name: string, decl
     for (const col of new Set([...decl.set, ...decl.key])) {
       const c = columns.find((x) => x.name === col);
       if (c === undefined) continue;
-      const writable = c.typtype === 'e' || (c.typschema === 'pg_catalog' && PG_WRITABLE_TYPES.has(c.typname));
+      const writable = c.typtype === 'e' || (c.typschema === 'pg_catalog' && c.type_builtin && PG_WRITABLE_TYPES.has(c.typname));
       if (!writable) add('written_type', `\`${label}.${col}\` is \`${c.type}\`, which a v1 row write cannot write or key on (floating point, json, xml, bytea and arrays are not writable)`);
     }
   }
@@ -307,15 +323,16 @@ export async function pgTableSafetyIn(tx: Tx, schema: string, name: string, decl
   const fingerprint = createHash('sha256')
     .update(
       canonicalJson({
-        table: { schema, name, relkind: t.relkind, partition: t.ispartition, rowSecurity: t.rowsecurity, forceRowSecurity: t.forcerowsecurity, am: t.amname },
-        columns: columns.map((c) => ({ name: c.name, type: c.type, typtype: c.typtype, typschema: c.typschema, notnull: c.notnull, generated: c.generated, identity: c.identity, default: c.default_expr })),
+        table: { schema, name, oid: t.oid, reltype: t.reltype, relkind: t.relkind, partition: t.ispartition, rowSecurity: t.rowsecurity, forceRowSecurity: t.forcerowsecurity, am: t.amname, amBuiltin: t.am_builtin },
+        columns: columns.map((c) => ({ name: c.name, type: c.type, typid: c.typid, typtype: c.typtype, typschema: c.typschema, builtin: c.type_builtin, collation: c.collation, notnull: c.notnull, generated: c.generated, identity: c.identity, default: c.default_expr })),
+        enums: enumLabels,
         constraints: constraints.map((k) => ({ name: k.name, type: k.contype, def: k.def, deferrable: k.deferrable })),
         foreignKeysIn: fksIn.map((k) => ({ name: k.name, from: k.from, def: k.def })),
         fkOperators: fkOperators.map((o) => [o.con, o.operator, o.op_builtin, o.fn_builtin]),
         triggers: triggers.map((g) => ({ name: g.name, enabled: g.enabled, internal: g.internal, def: g.def })),
         rules: rules.map((r) => ({ name: r.name, def: r.def })),
         inheritance: inh,
-        indexes: indexes.map((i) => ({ name: i.name, def: i.def, am: i.amname })),
+        indexes: indexes.map((i) => ({ name: i.name, oid: i.oid, def: i.def, am: i.amname, opclasses: i.opclasses, collations: i.collations, exprs: i.exprs, partial: i.partial, opclassBuiltin: i.opclass_builtin })),
         statistics: stats.map((s) => ({ name: s.name, def: s.def })),
         policies,
         casts,

@@ -98,11 +98,20 @@ export async function makeZipBomb(mb, declared = 1024) {
   ]);
 }
 
-/** A .sqlite file at `path`: a refunds table, plus a trigger (or a view) when asked. */
-export function makeSqlite(path, { trigger = false, view = false } = {}) {
-  const db = new DatabaseSync(path);
+/**
+ * A .sqlite file at `path`: a refunds table, plus, when asked, a trigger, a view, a virtual table whose
+ * schema text hides its kind behind a comment (`hiddenVirtual`), or a generated column.
+ */
+export function makeSqlite(path, { trigger = false, view = false, hiddenVirtual = false, generated = false } = {}) {
+  const db = new DatabaseSync(path, { defensive: false });
   db.exec("CREATE TABLE refunds (id INTEGER PRIMARY KEY, region TEXT, amount REAL); INSERT INTO refunds VALUES (1, 'EMEA', 10.5), (2, 'AMER', 99.99);");
   if (trigger) db.exec('CREATE TABLE audit (n TEXT); CREATE TRIGGER t AFTER INSERT ON refunds BEGIN INSERT INTO audit VALUES (new.region); END;');
   if (view) db.exec('CREATE VIEW v AS SELECT * FROM refunds;');
+  if (hiddenVirtual) {
+    db.exec('CREATE VIRTUAL TABLE notes USING fts5(body)');
+    db.exec('PRAGMA writable_schema = ON');
+    db.exec("UPDATE sqlite_schema SET sql = 'CREATE /* a table */ VIRTUAL TABLE notes USING fts5(body)' WHERE name = 'notes'");
+  }
+  if (generated) db.exec('CREATE TABLE g (a INTEGER, b INTEGER GENERATED ALWAYS AS (abs(a)) VIRTUAL); INSERT INTO g (a) VALUES (-3);');
   db.close();
 }

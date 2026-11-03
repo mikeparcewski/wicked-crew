@@ -2,7 +2,7 @@
 // fixture services (GraphQL, OpenAPI, the reference MCP server) and real uploads: describe, check,
 // the G6 test call (named first, then sent exactly), uploads with sample rows for humans only.
 
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +18,7 @@ import { probeMcpServer } from '../src/mcp/probe.js';
 import { McpRegistry } from '../src/mcp/registry.js';
 import { McpRegistryStore } from '../src/mcp/registry-store.js';
 import type { SecretStore } from '../src/mcp/secrets.js';
+import { sourceDescriptorHash } from '../src/sources/kinds.js';
 import { registerSourceRoutes } from '../src/sources/routes.js';
 import { startGraphqlServer, startMcpServer, startOpenApiService } from './fixtures/apps-sources/servers.mjs';
 import { makeSqlite } from './fixtures/apps-sources/uploads/make.mjs';
@@ -59,6 +60,7 @@ afterAll(async () => {
 });
 
 let base = '';
+const base0 = (): string => base;
 let app: FastifyInstance;
 let actor: Actor;
 let audit: AuditLog;
@@ -123,6 +125,36 @@ describe('a GraphQL source (DES §5.1)', () => {
     expect((await audit.read()).filter((e) => e.action === 'apps.source.test_call')).toHaveLength(1);
   });
 
+  it('a confirmation hash binds the destination: re-pointing the source name elsewhere makes it stale (codex r1)', async () => {
+    const other = (await startGraphqlServer()) as Fixture;
+    try {
+      await register({ name: 'tix', kind: 'graphql', url: `${gql.origin}/graphql`, address: LOOP });
+      const doc = '{ tickets { id } }';
+      const named = (await app.inject({ method: 'POST', url: '/api/v1/sources/tix/test-call', payload: { target: doc } })).json() as Extract<SourceTestCallResponse, { sent: false }>;
+      await register({ name: 'tix', kind: 'graphql', url: `${other.origin}/graphql`, address: LOOP });
+      const before = other.hits.length;
+      const stale = await app.inject({ method: 'POST', url: '/api/v1/sources/tix/test-call', payload: { target: doc, confirm: named.requestHash } });
+      expect(stale.statusCode).toBe(409);
+      expect(stale.json()).toMatchObject({ code: 'request_changed' });
+      expect(other.hits.length).toBe(before); // nothing sent to the new destination on the old confirmation
+    } finally {
+      await other.close();
+    }
+  });
+
+  it('a description taken under another descriptor is not the source\'s; the auth prefix is part of the descriptor (codex r1)', async () => {
+    await register({ name: 'tix', kind: 'graphql', url: `${gql.origin}/graphql`, address: LOOP });
+    const base = { name: 'x', kind: 'graphql' as const, command: null, args: [], url: 'https://g.example/graphql', auth: { ref: 'env:T', header: 'Authorization', prefix: 'Bearer ' } };
+    expect(sourceDescriptorHash(base)).not.toBe(sourceDescriptorHash({ ...base, auth: { ...base.auth, prefix: 'Token ' } }));
+    // A stale catalog file (another descriptor) reads as "not described".
+    const cat = await app.inject({ method: 'GET', url: '/api/v1/sources/tix/catalog' });
+    expect(cat.statusCode).toBe(200);
+    const store = join(base0(), 'mcp', 'catalogs', 'tix.json');
+    const stored = JSON.parse(readFileSync(store, 'utf8')) as { descriptorHash: string };
+    writeFileSync(store, JSON.stringify({ ...stored, descriptorHash: 'f'.repeat(64) }));
+    expect((await app.inject({ method: 'GET', url: '/api/v1/sources/tix/catalog' })).statusCode).toBe(404);
+  });
+
   it('an unconfirmed loopback endpoint is refused at the preview with a code, and never contacted', async () => {
     const before = gql.hits.length;
     const p = await app.inject({ method: 'POST', url: '/api/v1/mcp/servers/preview', payload: { name: 'tix', kind: 'graphql', url: `${gql.origin}/graphql` } });
@@ -175,7 +207,10 @@ describe('uploads (DES §5.1): a file becomes a sql/sqlite source', () => {
     const ok = await app.inject({ method: 'POST', url: '/api/v1/sources/refunds/check', payload: { text: 'SELECT region, sum(amount) FROM refunds GROUP BY region' } });
     expect(ok.json()).toMatchObject({ ok: true, columns: [{ name: 'region' }, { name: 'sum(amount)' }] });
     const rec = await app.inject({ method: 'POST', url: '/api/v1/sources/refunds/check', payload: { text: 'WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT * FROM r' } });
-    expect(rec.statusCode).toBe(409);
+    expect(rec.statusCode).toBe(200); // a refusal is a check RESULT, the same shape for every dialect (pi r1)
+    expect(rec.json()).toMatchObject({ ok: false, code: 'authorizer' });
+    const named = await app.inject({ method: 'POST', url: '/api/v1/sources/refunds/check', payload: { text: 'SELECT * FROM refunds WHERE id = :id' } });
+    expect(named.json()).toMatchObject({ ok: false, code: 'params' });
   });
 
   it('a .sqlite holding a trigger is refused with its code; a name another kind holds is refused', async () => {

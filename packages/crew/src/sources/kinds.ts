@@ -62,7 +62,7 @@ export function sourceDescriptor(config: McpUpstreamConfig): Record<string, unkn
   return {
     kind: config.kind,
     url: config.url,
-    auth: config.auth === null ? null : { ref: config.auth.ref, header: config.auth.header?.toLowerCase() ?? null },
+    auth: config.auth === null ? null : { ref: config.auth.ref, header: config.auth.header?.toLowerCase() ?? null, prefix: config.auth.prefix ?? null },
     sql: sql === null ? null : { driver: sql.driver, host: sql.host ?? null, port: sql.port ?? null, database: sql.database ?? null, user: sql.user ?? null, tls: sql.tls ?? 'verify-full', ca: sql.ca == null ? null : createHash('sha256').update(sql.ca).digest('hex'), snapshot: sql.snapshot ?? null },
     address: config.address ?? null,
   };
@@ -95,7 +95,7 @@ export function graphqlSource(config: McpUpstreamConfig, dial: DialOptions = {})
 }
 
 /** Describe a `sql` or `graphql` source (its probe). Throws on failure; a dialer refusal keeps its code. */
-export async function describeSource(config: McpUpstreamConfig, secret: string | null, dial: DialOptions = {}): Promise<SourceDescription> {
+export async function describeSource(config: McpUpstreamConfig, secret: string | null, dial: DialOptions = {}, snapshotDir?: string): Promise<SourceDescription> {
   if (config.kind === 'graphql') {
     const d = await describeGraphql(graphqlSource(config, dial), secret);
     return { catalog: d.catalog, introspection: d.introspection };
@@ -104,7 +104,7 @@ export async function describeSource(config: McpUpstreamConfig, secret: string |
   if (config.kind !== 'sql' || sql === undefined || sql === null) throw new Error(`${config.name} is not a source`);
   if (sql.driver === 'sqlite') {
     if (typeof sql.snapshot !== 'string') throw new Error('a sqlite source names its snapshot');
-    return { catalog: (await sqliteInspect(snapshotPath(sql.snapshot))).catalog };
+    return { catalog: (await sqliteInspect(snapshotPath(sql.snapshot, snapshotDir))).catalog };
   }
   const args = sqlConnectArgs(config, secret, dial);
   if (sql.driver === 'postgres') {

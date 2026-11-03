@@ -2,17 +2,17 @@
 // child process. Real files: CSV with and without a header, XLSX, a .sqlite holding a trigger, a
 // workbook that expands past 200 MB.
 
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { sqliteRead } from '../src/sources/drivers/sqlite.js';
+import { observeSqliteRunnerForTests, sqliteRead } from '../src/sources/drivers/sqlite.js';
 import { readSqlQuery, SourcePolicyError } from '../src/sources/sql.js';
-import { ingestUpload, looksLikeHeader, snapshotPath, UploadError } from '../src/sources/uploads.js';
-import { makeSqlite, makeXlsx, makeZipBomb } from './fixtures/apps-sources/uploads/make.mjs';
+import { detectHeader, ingestUpload, looksLikeHeader, snapshotPath, UploadError } from '../src/sources/uploads.js';
+import { makeSqlite, makeXlsx, makeZipBomb, zip } from './fixtures/apps-sources/uploads/make.mjs';
 
 const FIX = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'apps-sources', 'uploads');
 let dir = '';
@@ -100,11 +100,91 @@ describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => 
     expect(SourcePolicyError).toBeDefined();
   });
 
-  it('a long SQLite read is stopped at its deadline: the process running it is ended', async () => {
+  it('a long SQLite read is stopped at its deadline: the process running it is ended (codex r1)', async () => {
     const up = await ingestUpload('ok.sqlite', readFileSync(join(work, 'ok.sqlite')), { dir });
     const joins = Array.from({ length: 40 }, (_v, i) => `refunds t${i}`).join(', ');
-    const t0 = Date.now();
-    await expect(sqliteRead(snapshotPath(up.digest, dir), up.catalog, `SELECT count(*) FROM ${joins}`, [], { deadlineMs: 1_500 })).rejects.toMatchObject({ errorClass: 'timeout' });
-    expect(Date.now() - t0).toBeLessThan(4_000);
+    const pids: number[] = [];
+    observeSqliteRunnerForTests((pid) => pids.push(pid));
+    try {
+      const t0 = Date.now();
+      await expect(sqliteRead(snapshotPath(up.digest, dir), up.catalog, `SELECT count(*) FROM ${joins}`, [], { deadlineMs: 1_500 })).rejects.toMatchObject({ errorClass: 'timeout' });
+      expect(Date.now() - t0).toBeLessThan(4_000);
+    } finally {
+      observeSqliteRunnerForTests(null);
+    }
+    expect(pids).toHaveLength(1);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(() => process.kill(pids[0] as number, 0)).toThrow(); // ESRCH: the process is gone, not just abandoned
   });
+
+  it('node:sqlite reports the FIRST statement as sourceSQL, which the tail check relies on (pi r1)', async () => {
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(':memory:');
+    expect(db.prepare('SELECT 1; SELECT 2').sourceSQL.trim()).toBe('SELECT 1;');
+    db.close();
+  });
+
+  it('a .sqlite holding a virtual table (its kind hidden in the schema text) or a generated column is refused (codex r1)', async () => {
+    makeSqlite(join(work, 'vt.sqlite'), { hiddenVirtual: true });
+    makeSqlite(join(work, 'gen.sqlite'), { generated: true });
+    for (const f of ['vt.sqlite', 'gen.sqlite']) {
+      const err = await ingestUpload(f, readFileSync(join(work, f)), { dir }).catch((e: unknown) => e);
+      expect(err, f).toBeInstanceOf(UploadError);
+      expect((err as UploadError).code, f).toBe('sqlite_code');
+    }
+  });
+
+  it('a header is taken only when it differs in shape from the data, or a person says so (codex r1)', async () => {
+    const people = Buffer.from('Priya Shah,priya@example.com\nSam Lee,sam@example.com\n');
+    const auto = await ingestUpload('people.csv', people, { dir });
+    expect(auto.header).toEqual({ detected: false, columns: ['col_1', 'col_2'] }); // a record never becomes column names
+    const chosen = await ingestUpload('people.csv', people, { dir, header: 'yes' });
+    expect(chosen.header?.columns).toEqual(['Priya Shah', 'priya@example.com']);
+    expect(detectHeader([['id', 'amount'], ['1', '2.5']], null)).toBe(true);
+    expect(detectHeader([['name', 'email'], ['a', 'b']], null)).toBe(false);
+  });
+
+  it('CSV edge cases: exact large integers, a two-byte file, quoted delimiters, case-insensitive names, early column limit (codex r1)', async () => {
+    const big = await ingestUpload('big.csv', Buffer.from('n,label\n9007199254740993,a\n12,b\n'), { dir });
+    const r = await sqliteRead(snapshotPath(big.digest, dir), big.catalog, 'SELECT n FROM big ORDER BY label', []);
+    expect(r.rows).toEqual([['9007199254740993'], ['12']]);
+    const tiny = await ingestUpload('one.csv', Buffer.from('1\n'), { dir });
+    expect(tiny.sample).toEqual([['1']]);
+    const quoted = await ingestUpload('q.csv', Buffer.from('id,note\n1,"a;b;c;d"\n'), { dir });
+    expect(quoted.catalog.relations[0]?.columns.map((c) => c.name)).toEqual(['id', 'note']);
+    const dupes = await ingestUpload('d.csv', Buffer.from('a b,A  B,x\n1,2,3\n'), { dir });
+    expect(dupes.header?.columns).toEqual(['a b', 'A B_2', 'x']);
+    const wide = Buffer.from(`${Array.from({ length: 5_000 }, (_v, i) => `c${i}`).join(',')}\n`);
+    await expect(ingestUpload('wide.csv', wide, { dir })).rejects.toMatchObject({ code: 'too_many_columns' });
+  });
+
+  it('a snapshot store inside a git work tree is refused (codex r1)', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'apps-repo-'));
+    mkdirSync(join(repo, '.git'));
+    try {
+      await expect(ingestUpload('x.csv', readFileSync(join(FIX, 'with-header.csv')), { dir: join(repo, 'state', 'mcp', 'snapshots') })).rejects.toMatchObject({ code: 'snapshot_in_repo' });
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('XLSX: shared strings repeated past 200 MB are refused; unclosed rows end the scan at once (codex r1)', async () => {
+    const huge = 'x'.repeat(1024 * 1024);
+    const cells = Array.from({ length: 250 }, (_v, i) => `<row r="${i + 1}"><c r="A${i + 1}" t="s"><v>0</v></c></row>`).join('');
+    const wb = zip([
+      { name: 'xl/workbook.xml', data: Buffer.from('<workbook xmlns:r="r"><sheets><sheet name="S" sheetId="1" r:id="rId1"/></sheets></workbook>') },
+      { name: 'xl/_rels/workbook.xml.rels', data: Buffer.from('<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>') },
+      { name: 'xl/sharedStrings.xml', data: Buffer.from(`<sst><si><t>${huge}</t></si></sst>`) },
+      { name: 'xl/worksheets/sheet1.xml', data: Buffer.from(`<worksheet><sheetData>${cells}</sheetData></worksheet>`) },
+    ]);
+    await expect(ingestUpload('rep.xlsx', wb, { dir })).rejects.toMatchObject({ code: 'too_large' });
+    const unclosed = zip([
+      { name: 'xl/workbook.xml', data: Buffer.from('<workbook xmlns:r="r"><sheets><sheet name="S" sheetId="1" r:id="rId1"/></sheets></workbook>') },
+      { name: 'xl/_rels/workbook.xml.rels', data: Buffer.from('<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>') },
+      { name: 'xl/worksheets/sheet1.xml', data: Buffer.from(`<worksheet><sheetData>${'<row r="1"><c r="A1"><v>1</v></c>'.repeat(200_000)}</sheetData></worksheet>`) },
+    ]);
+    const t0 = Date.now();
+    await expect(ingestUpload('unclosed.xlsx', unclosed, { dir })).rejects.toMatchObject({ code: 'empty' });
+    expect(Date.now() - t0).toBeLessThan(5_000);
+  }, 30_000);
 });

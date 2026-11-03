@@ -58,6 +58,8 @@ export class SourceQueryError extends Error {
     readonly sqlstate: string | null,
     readonly errorClass: 'timeout' | 'refused' | 'connection' | 'source',
     message: string,
+    /** A dialer refusal's code (`address_unconfirmed`, …) when the dialer refused the connection. */
+    readonly refusal: string | null = null,
   ) {
     super(message);
     this.name = 'SourceQueryError';
@@ -68,4 +70,9 @@ export interface ReadOptions {
   deadlineMs?: number;
   maxRows?: number;
   signal?: AbortSignal;
+  /**
+   * TESTS ONLY: the source-side timeout, when it should differ from the deadline, so the client-side
+   * cancel (Postgres cancel, MySQL KILL QUERY) is what stops the query. Production never sets it.
+   */
+  sourceTimeoutMs?: number;
 }

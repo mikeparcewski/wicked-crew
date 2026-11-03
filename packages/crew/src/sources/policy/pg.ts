@@ -22,7 +22,7 @@
 import { parse } from 'libpg-query';
 
 import { deniedFunction, PG_CAST_TYPES, PG_FUNCTIONS, PG_OPERATORS } from './allowlists.js';
-import type { PolicyCatalog, PolicyResult } from './types.js';
+import { type PolicyCatalog, type PolicyResult, relKey, relLabel } from './types.js';
 
 type Json = Record<string, unknown>;
 
@@ -88,6 +88,12 @@ class Walker {
   readonly relations = new Set<string>();
   readonly functions = new Set<string>();
   params = 0;
+  /** Table aliases (and bare table names) → the relations they name, collected over the whole statement. */
+  private readonly aliases = new Map<string, Set<string>>();
+  /** Names the statement itself defines as columns: output names, alias column lists. */
+  private readonly definedNames = new Set<string>();
+  /** Qualified column references, judged after the walk (FROM is walked after the target list). */
+  private readonly qualifiedRefs: Array<{ qualifier: string; column: string }> = [];
 
   constructor(private readonly opts: PgWalkOptions) {}
 
@@ -116,7 +122,28 @@ class Walker {
   private alias(v: unknown): void {
     if (!isObj(v)) refuse('syntax', 'a malformed alias');
     this.fields('Alias', v as Json, { aliasname: 'data', colnames: 'data' }, null);
-    for (const c of ((v as Json)['colnames'] as unknown[]) ?? []) strings([c]);
+    for (const c of strings((v as Json)['colnames'])) this.definedNames.add(c);
+  }
+
+  /**
+   * After the walk: every qualified column reference (`q.c`) must name a column the qualifier really
+   * has. Postgres reads `q.c` as the function `c(q)` when `q` has no column `c` (functional notation),
+   * which would call a built-in no allowlist judged; so a name that is no known column is refused.
+   */
+  finish(): void {
+    const catalogColumns = (keys: Iterable<string>): Set<string> => {
+      const out = new Set<string>();
+      for (const k of keys) for (const c of this.opts.catalog?.columns?.get(k) ?? []) out.add(c);
+      return out;
+    };
+    const known = new Set([...catalogColumns(this.relations), ...this.definedNames]);
+    for (const { qualifier, column } of this.qualifiedRefs) {
+      const named = this.aliases.get(qualifier);
+      // A table alias: only that table's columns (or names the statement gave it). Anything else (a
+      // subquery or CTE alias): a column of a table the statement reads, or a name it defines.
+      const ok = named !== undefined ? catalogColumns(named).has(column) || this.definedNames.has(column) : known.has(column);
+      if (!ok) refuse('column', `${qualifier}.${column} is not a known column (Postgres would call a function named ${column} on the row); name a column, or alias the expression`);
+    }
   }
 
   /** A raw WindowDef (a FuncCall's `over`) or a wrapped one (a WINDOW clause entry). */
@@ -142,7 +169,8 @@ class Walker {
       for (const cte of (w['ctes'] as unknown[]) ?? []) {
         const [ct, cf] = unwrap(cte);
         if (ct !== 'CommonTableExpr') refuse('syntax', `${ct} in WITH`);
-        this.fields('CommonTableExpr', cf, { ctename: 'data', aliascolnames: 'nodes', ctematerialized: 'data', ctequery: (q) => this.select(q, { ctes: new Set(seen.ctes), parent: scope }) }, scope);
+        for (const c of strings(cf['aliascolnames'])) this.definedNames.add(c);
+        this.fields('CommonTableExpr', cf, { ctename: 'data', aliascolnames: 'data', ctematerialized: 'data', ctequery: (q) => this.select(q, { ctes: new Set(seen.ctes), parent: scope }) }, scope);
         if (typeof cf['ctename'] !== 'string') refuse('syntax', 'a CTE with no name');
         seen.ctes.add(cf['ctename'] as string);
       }
@@ -205,13 +233,17 @@ class Walker {
       case 'SelectStmt':
         return this.select(n, scope);
       case 'ResTarget':
+        if (typeof f['name'] === 'string') this.definedNames.add(f['name']);
         return this.fields(type, f, { name: 'data', val: 'node' }, scope);
-      case 'ColumnRef':
-        for (const part of (f['fields'] as unknown[]) ?? []) {
-          const [pt] = unwrap(part);
+      case 'ColumnRef': {
+        const parts = ((f['fields'] as unknown[]) ?? []).map((part) => {
+          const [pt, pf] = unwrap(part);
           if (pt !== 'String' && pt !== 'A_Star') refuse('syntax', `a column reference with ${pt}`);
-        }
+          return pt === 'String' ? String(pf['sval']) : '*';
+        });
+        if (parts.length >= 2 && parts[parts.length - 1] !== '*') this.qualifiedRefs.push({ qualifier: parts[parts.length - 2] as string, column: parts[parts.length - 1] as string });
         return this.fields(type, f, { fields: 'data' }, scope);
+      }
       case 'A_Star':
         return this.fields(type, f, {}, scope);
       case 'A_Const':
@@ -317,18 +349,29 @@ class Walker {
     if (f['catalogname'] !== undefined) refuse('relation', `a three-part name (${String(f['catalogname'])}.…) is refused`);
     if (f['relpersistence'] !== undefined && f['relpersistence'] !== 'p') refuse('relation', 'a temporary or unlogged relation reference is refused');
     const schema = f['schemaname'];
+    const aliasName = isObj(f['alias']) && typeof (f['alias'] as Json)['aliasname'] === 'string' ? String((f['alias'] as Json)['aliasname']) : relname;
     if (schema === undefined) {
       if (cteVisible(scope, relname)) return;
       refuse('unqualified', `the table ${relname} must be schema-qualified (schema.table)`);
     }
-    const key = `${String(schema)}.${relname}`;
-    const rel = (this.opts.catalog as PolicyCatalog).relations.get(key);
-    if (rel === undefined) refuse('relation', `${key} is not a table of this source's catalog (describe the source again if it is new)`);
-    else if (rel === 'foreign') refuse('relation', `${key} is a foreign table; reads never touch foreign tables`);
-    else if ((rel === 'view' || rel === 'matview') && !(this.opts.catalog as PolicyCatalog).viewsAllowed.has(key)) {
-      refuse('view', `${key} is a view the person has not allowed by name on the source sheet`);
+    const catalog = this.opts.catalog as PolicyCatalog;
+    const key = relKey(String(schema), relname);
+    const label = relLabel(key);
+    const rel = catalog.relations.get(key);
+    if (rel === undefined) refuse('relation', `${label} is not a table of this source's catalog (describe the source again if it is new)`);
+    else if (rel === 'foreign') refuse('relation', `${label} is a foreign table; reads never touch foreign tables`);
+    else if ((rel === 'view' || rel === 'matview') && !catalog.viewsAllowed.has(key)) {
+      refuse('view', `${label} is a view the person has not allowed by name on the source sheet`);
+    }
+    // A read without ONLY includes every partition and inheritance child.
+    // libpg_query writes `inh: true` for a plain read and omits it (false) for ONLY.
+    if (f['inh'] === true && catalog.foreignDescendants?.has(key) === true) {
+      refuse('relation', `${label} has a foreign table among its partitions or children, which a plain read would reach; read ONLY ${label}`);
     }
     this.relations.add(key);
+    const set = this.aliases.get(aliasName) ?? new Set<string>();
+    set.add(key);
+    this.aliases.set(aliasName, set);
   }
 }
 
@@ -345,11 +388,12 @@ export async function checkPgRead(text: string, catalog: PolicyCatalog): Promise
   const w = new Walker({ catalog });
   try {
     w.select(stmts[0]?.stmt, null);
+    w.finish();
   } catch (err) {
     if (err instanceof Refusal) return { ok: false, code: err.code, detail: err.message };
     throw err;
   }
-  return { ok: true, relations: [...w.relations].sort(), functions: [...w.functions].sort(), params: w.params };
+  return { ok: true, relations: [...w.relations].map(relLabel).sort(), keys: [...w.relations].sort(), functions: [...w.functions].sort(), params: w.params };
 }
 
 /**

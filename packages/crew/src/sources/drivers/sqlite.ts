@@ -18,7 +18,7 @@ import { pathToFileURL } from 'node:url';
 
 import type { CatalogRelation, SqlCatalog } from '../catalog/types.js';
 import { deniedFunction, SQLITE_FUNCTIONS } from '../policy/allowlists.js';
-import { sqliteAuthorize } from '../policy/sqlite.js';
+import { sqliteAuthorize, sqliteParams } from '../policy/sqlite.js';
 import { type ReadOptions, READ_MAX_ROWS, type SqlDescribe, type SqlReadResult, SourceQueryError, STATEMENT_DEADLINE_MS } from './types.js';
 
 /** The runner: one JSON request on stdin, one JSON answer on stdout. Plain ESM, no imports but node:sqlite. */
@@ -38,15 +38,19 @@ try {
   db.exec('PRAGMA query_only = 1; PRAGMA trusted_schema = 0;');
   if (req.op === 'inspect') {
     const objects = db.prepare("SELECT type, name, tbl_name AS tbl, sql FROM sqlite_schema ORDER BY name").all();
+    // SQLite's own classification (not the schema text, which a hand-made file can word freely):
+    // table, view, virtual or shadow.
+    const kinds = new Map(db.prepare("SELECT name, type FROM pragma_table_list WHERE schema = 'main'").all().map((r) => [r.name, r.type]));
     const tables = [];
     for (const o of objects) {
       if (o.type !== 'table' || String(o.name).startsWith('sqlite_')) continue;
+      if (kinds.get(o.name) !== 'table') continue;
       const quoted = '"' + String(o.name).replace(/"/g, '""') + '"';
       const cols = db.prepare('SELECT name, type, "notnull" AS nn, pk, hidden FROM pragma_table_xinfo(?)').all(o.name);
       const count = db.prepare('SELECT count(*) AS c FROM ' + quoted).get().c;
       tables.push({ name: o.name, sql: o.sql, columns: cols, rows: Number(count) });
     }
-    out({ ok: true, objects: objects.map((o) => ({ type: o.type, name: o.name, virtual: /^\\s*CREATE\\s+VIRTUAL\\s+TABLE/i.test(String(o.sql ?? '')) })), tables });
+    out({ ok: true, objects: objects.map((o) => ({ type: o.type, name: o.name, virtual: o.type === 'table' && kinds.get(o.name) !== 'table' && !String(o.name).startsWith('sqlite_') })), tables });
   } else {
     const ctx = { tables: req.tables, functions: req.functions, denied: req.denied };
     db.setAuthorizer((action, a1, a2, dbName, tv) => authorize(constants, ctx, action, a1, a2, dbName, tv));
@@ -64,7 +68,7 @@ try {
     }
     const columns = stmt.columns().map((c) => ({ name: c.name, type: c.type ?? 'expression' }));
     if (req.op === 'prepare') {
-      out({ ok: true, columns, params: Array.from({ length: (req.sql.match(/\\?/g) ?? []).length }, () => 'unknown') });
+      out({ ok: true, columns, params: Array.from({ length: req.paramCount }, () => 'unknown') });
     } else {
       stmt.setReadBigInts(true);
       stmt.setReturnArrays(true);
@@ -92,10 +96,17 @@ interface RunnerAnswer {
 /** Bytes of the runner's answer the parent reads at most. */
 const ANSWER_MAX_BYTES = 64 * 1024 * 1024;
 
+/** TESTS ONLY: told each runner child's pid, so a test can prove the process is gone. */
+let onSpawnForTests: ((pid: number) => void) | null = null;
+export function observeSqliteRunnerForTests(fn: ((pid: number) => void) | null): void {
+  onSpawnForTests = fn;
+}
+
 /** Run one request in a fresh child; SIGKILL at the deadline. */
 async function runChild(request: Record<string, unknown>, deadlineMs: number, signal?: AbortSignal): Promise<RunnerAnswer> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ['--no-warnings', '--input-type=module', '-e', RUNNER], { stdio: ['pipe', 'pipe', 'pipe'], env: {} });
+    if (child.pid !== undefined) onSpawnForTests?.(child.pid);
     let stdout = '';
     let size = 0;
     let stderr = '';
@@ -145,6 +156,8 @@ function policyContext(catalog: SqlCatalog): { tables: string[]; functions: stri
 
 export interface SqliteInspection {
   objects: Array<{ type: string; name: string; virtual: boolean }>;
+  /** Generated or hidden columns (`table.column`): a snapshot holding one is refused. */
+  generated: string[];
   catalog: SqlCatalog;
 }
 
@@ -153,6 +166,9 @@ export async function sqliteInspect(path: string, deadlineMs = 30_000): Promise<
   const a = await runChild({ op: 'inspect', uri: snapshotUri(path) }, deadlineMs);
   if (!a.ok) throw new SourceQueryError(null, 'source', a.error ?? 'the snapshot could not be read');
   const tables = (a['tables'] as Array<{ name: string; columns: Array<{ name: string; type: string; nn: number; pk: number; hidden: number }>; rows: number }>) ?? [];
+  // A generated (or hidden) column runs its stored expression on read, outside the authorizer's view
+  // of the query: such a snapshot is refused by the upload, and never described as readable.
+  const generated = tables.flatMap((t) => t.columns.filter((c) => c.hidden !== 0).map((c) => `${t.name}.${c.name}`));
   const relations: CatalogRelation[] = tables.map((t) => ({
     schema: null,
     name: t.name,
@@ -162,12 +178,14 @@ export async function sqliteInspect(path: string, deadlineMs = 30_000): Promise<
     primaryKey: t.columns.filter((c) => c.pk > 0).sort((x, y) => x.pk - y.pk).map((c) => c.name),
     foreignKeys: [],
   }));
-  return { objects: (a['objects'] as SqliteInspection['objects']) ?? [], catalog: { dialect: 'sqlite', database: null, relations, describedAt: new Date().toISOString() } };
+  return { objects: (a['objects'] as SqliteInspection['objects']) ?? [], generated, catalog: { dialect: 'sqlite', database: null, relations, describedAt: new Date().toISOString() } };
 }
 
 /** Prepare under the authorizer and describe; never execute. */
 export async function sqliteDescribe(path: string, catalog: SqlCatalog, text: string): Promise<SqlDescribe> {
-  const a = await runChild({ op: 'prepare', uri: snapshotUri(path), sql: text, ...policyContext(catalog) }, STATEMENT_DEADLINE_MS);
+  const p = sqliteParams(text);
+  if (!p.ok) throw new SourceQueryError(null, 'refused', p.detail);
+  const a = await runChild({ op: 'prepare', uri: snapshotUri(path), sql: text, paramCount: p.count, ...policyContext(catalog) }, STATEMENT_DEADLINE_MS);
   if (!a.ok) throw new SourceQueryError(null, a.refused === true ? 'refused' : 'source', a.error ?? 'the query could not be prepared');
   return { columns: (a['columns'] as SqlDescribe['columns']) ?? [], params: (a['params'] as string[]) ?? [] };
 }

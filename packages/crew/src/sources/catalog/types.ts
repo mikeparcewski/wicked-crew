@@ -3,7 +3,7 @@
  * keys, row estimates, the enum literals the schema declares. Never a value read from a row.
  */
 
-import type { PolicyCatalog, PolicyRelationKind } from '../policy/types.js';
+import { type PolicyCatalog, type PolicyRelationKind, relKey } from '../policy/types.js';
 
 export interface CatalogColumn {
   name: string;
@@ -32,6 +32,8 @@ export interface CatalogRelation {
   foreignKeys: CatalogForeignKey[];
   /** Postgres: row security enabled (or forced) on the table. */
   rowSecurity?: boolean;
+  /** Postgres: a foreign table is among its partitions or inheritance children (a plain read reaches it). */
+  foreignDescendant?: boolean;
 }
 
 export interface SqlCatalog {
@@ -42,9 +44,25 @@ export interface SqlCatalog {
   describedAt: string;
 }
 
-/** The policy's view of a catalog: each relation's kind by qualified name, and the views allowed by name. */
+/**
+ * The policy's view of a catalog: each relation's kind and columns by {@link relKey}, the relations a
+ * plain read would carry into a foreign table, and the views allowed by name (`schema.view`, as the
+ * source config names them; a name holding a dot cannot be allowed).
+ */
 export function policyCatalog(catalog: SqlCatalog, viewsAllowed: readonly string[] = []): PolicyCatalog {
   const relations = new Map<string, PolicyRelationKind>();
-  for (const r of catalog.relations) relations.set(r.schema === null ? r.name : `${r.schema}.${r.name}`, r.kind);
-  return { relations, viewsAllowed: new Set(viewsAllowed), defaultSchema: catalog.dialect === 'mysql' ? catalog.database : null };
+  const columns = new Map<string, ReadonlySet<string>>();
+  const foreignDescendants = new Set<string>();
+  for (const r of catalog.relations) {
+    const k = relKey(r.schema, r.name);
+    relations.set(k, r.kind);
+    columns.set(k, new Set(r.columns.map((c) => c.name)));
+    if (r.foreignDescendant === true) foreignDescendants.add(k);
+  }
+  const views = new Set<string>();
+  for (const v of viewsAllowed) {
+    const dot = v.indexOf('.');
+    if (dot > 0) views.add(relKey(v.slice(0, dot), v.slice(dot + 1)));
+  }
+  return { relations, columns, foreignDescendants, viewsAllowed: views, defaultSchema: catalog.dialect === 'mysql' ? catalog.database : null };
 }

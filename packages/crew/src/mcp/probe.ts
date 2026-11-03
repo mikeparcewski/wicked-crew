@@ -146,8 +146,9 @@ async function probeSourceKind(config: McpUpstreamConfig, secret: string | null,
     return scrubSecrets({ ok: true as const, serverInfo: { name, version: '' }, tools: [], source }, secrets);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    const refusal = err instanceof DialRefusedError ? err.code : (err as { errorClass?: string })?.errorClass === 'refused' ? 'address_unconfirmed' : undefined;
-    return scrubSecrets({ ok: false as const, error: message, ...(refusal !== undefined && err instanceof DialRefusedError ? { refusal } : {}) }, secrets);
+    // A dialer refusal keeps its code whether it arrives as itself or wrapped by a driver.
+    const refusal = err instanceof DialRefusedError ? err.code : ((err as { refusal?: unknown })?.refusal as DialRefusalCode | null | undefined) ?? undefined;
+    return scrubSecrets({ ok: false as const, error: message, ...(refusal !== undefined && refusal !== null ? { refusal } : {}) }, secrets);
   }
 }
 

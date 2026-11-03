@@ -93,14 +93,23 @@ function invalid(reply: FastifyReply, err: z.ZodError): FastifyReply {
   return reply.code(400).send({ error: err.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; ') });
 }
 
-function fail(reply: FastifyReply, err: unknown): FastifyReply {
-  if (err instanceof McpRegistryError) return reply.code(err.status).send({ error: err.message, code: err.code });
+/**
+ * An error as the caller may see it. A source's own words (a Postgres cast error echoes the value it
+ * could not cast) go to a HUMAN only, scrubbed of the source's secret; an agent gets the class, the
+ * SQLSTATE and a fixed sentence (DES §5.2: "errors reach an agent as an error class, SQLSTATE and
+ * identifiers only, never the message text").
+ */
+function fail(reply: FastifyReply, err: unknown, actor: Actor, secrets: readonly string[] = []): FastifyReply {
+  const human = actor.kind === 'human';
+  const say = (message: string, fixed: string): string => (human ? scrubSecrets(message, [...secrets]) : fixed);
+  if (err instanceof McpRegistryError) return reply.code(err.status).send({ error: scrubSecrets(err.message, [...secrets]), code: err.code });
   if (err instanceof McpRegistryCorruptError) return reply.code(503).send({ error: err.message, code: 'registry_corrupt' });
   if (err instanceof DialRefusedError) return reply.code(409).send({ error: err.message, code: err.code });
   if (err instanceof UploadError) return reply.code(err.code === 'too_large' ? 413 : 400).send({ error: err.message, code: err.code });
   if (err instanceof SourceQueryError) {
     const status = err.errorClass === 'refused' ? 409 : err.errorClass === 'timeout' ? 504 : 502;
-    return reply.code(status).send({ error: err.message, code: err.errorClass === 'refused' ? 'refused' : `source_${err.errorClass}`, ...(err.sqlstate !== null ? { sqlstate: err.sqlstate } : {}) });
+    const code = err.refusal ?? (err.errorClass === 'refused' ? 'refused' : `source_${err.errorClass}`);
+    return reply.code(status).send({ error: say(err.message, `the source answered ${err.errorClass}${err.sqlstate !== null ? ` (SQLSTATE ${err.sqlstate})` : ''}`), code, ...(err.sqlstate !== null ? { sqlstate: err.sqlstate } : {}) });
   }
   throw err;
 }
@@ -114,6 +123,23 @@ function capped(value: unknown): { result: unknown; truncated: boolean } {
   return { result: text.slice(0, TEST_CALL_RESULT_MAX), truncated: true };
 }
 
+/** The secret a request resolved, so its errors can be scrubbed of it (set by `open`). */
+const RESOLVED = new WeakMap<FastifyRequest, string[]>();
+const secretsOf = (req: FastifyRequest): string[] => RESOLVED.get(req) ?? [];
+
+/** One critical section per source for the Allow writes switch: on, off and the withdrawal never interleave. */
+const switchLocks = new Map<string, Promise<unknown>>();
+async function exclusiveSwitch<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  const prev = switchLocks.get(name) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  switchLocks.set(name, next.catch(() => undefined));
+  try {
+    return await next;
+  } finally {
+    if (switchLocks.get(name) === next) switchLocks.delete(name);
+  }
+}
+
 export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps): void {
   const registry = (reply: FastifyReply): McpRegistry | null => {
     if (deps.registry === undefined) {
@@ -124,11 +150,12 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
   };
   const dial = deps.dial ?? {};
 
-  /** A source's handles, its secret resolved now. */
-  const open = async (r: McpRegistry, sourceName: string) => {
+  /** A source's handles, its secret resolved now (and remembered for scrubbing this request's errors). */
+  const open = async (r: McpRegistry, sourceName: string, req: FastifyRequest) => {
     const src = await r.source(sourceName);
     const { secret, missing } = await r.callSecret(src.config);
     if (missing) throw new McpRegistryError(409, 'secret_missing', `${src.config.auth?.ref ?? 'the secret'} resolves to no secret; set it first`);
+    if (secret !== null) RESOLVED.set(req, [secret]);
     return { ...src, secret };
   };
 
@@ -154,7 +181,7 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
         };
         return body;
       } catch (err) {
-        return fail(reply, err);
+        return fail(reply, err, deps.actorOf(req), secretsOf(req));
       }
     },
   );
@@ -166,13 +193,13 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
       const r = registry(reply);
       if (r === null) return reply;
       try {
-        const src = await open(r, req.params.name);
-        const d = scrubSecrets(await describeSource(src.config, src.secret, dial), src.secret === null ? [] : [src.secret]);
+        const src = await open(r, req.params.name, req);
+        const d = scrubSecrets(await describeSource(src.config, src.secret, dial, deps.snapshotDir), src.secret === null ? [] : [src.secret]);
         await r.saveDescription(req.params.name, d, src.descriptorHash);
         const body: SourceCatalogResponse = { name: req.params.name, kind: src.config.kind as 'sql' | 'graphql', catalog: d.catalog, ...(d.privileges !== undefined ? { privileges: d.privileges } : {}), descriptorHash: src.descriptorHash };
         return body;
       } catch (err) {
-        return fail(reply, err);
+        return fail(reply, err, deps.actorOf(req), secretsOf(req));
       }
     },
   );
@@ -186,11 +213,11 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
       const r = registry(reply);
       if (r === null) return reply;
       try {
-        const src = await open(r, req.params.name);
+        const src = await open(r, req.params.name, req);
         if (src.config.kind !== 'sql' || src.config.sql?.driver !== 'postgres') return reply.code(400).send({ error: 'the privilege report is for a Postgres source', code: 'not_postgres' });
         return scrubSecrets(await pgPrivileges(sqlConnectArgs(src.config, src.secret, dial), parsed.data.writes ?? []), src.secret === null ? [] : [src.secret]);
       } catch (err) {
-        return fail(reply, err);
+        return fail(reply, err, deps.actorOf(req), secretsOf(req));
       }
     },
   );
@@ -219,12 +246,17 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
           // The secret is resolved only once the policy has passed (checkSqlQuery checks first).
           const { secret, missing } = await r.callSecret(src.config);
           if (missing) return reply.code(409).send({ error: 'the source secret resolves to nothing', code: 'secret_missing' });
+          if (secret !== null) RESOLVED.set(req, [secret]);
           handle = { driver: sql?.driver === 'mysql' ? 'mysql' : 'postgres', connect: sqlConnectArgs(src.config, secret, dial), catalog, viewsAllowed: src.config.viewsAllowed ?? [] };
         }
         const c = await checkSqlQuery(handle, parsed.data.text);
-        return c.ok ? { ok: true, columns: c.describe.columns, params: c.describe.params, relations: c.relations } : c;
+        if (c.ok) return { ok: true, columns: c.describe.columns, params: c.describe.params, relations: c.relations };
+        // A policy refusal's words are crew's own; the source's own words (a prepare error) go to a human only.
+        const fromSource = c.code === 'prepare' || c.code === 'authorizer';
+        const human = deps.actorOf(req).kind === 'human';
+        return { ok: false, code: c.code, detail: fromSource && !human ? `the source refused the query${c.sqlstate != null ? ` (SQLSTATE ${c.sqlstate})` : ''}` : scrubSecrets(c.detail, secretsOf(req)) };
       } catch (err) {
-        return fail(reply, err);
+        return fail(reply, err, deps.actorOf(req), secretsOf(req));
       }
     },
   );
@@ -238,19 +270,19 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
       const r = registry(reply);
       if (r === null) return reply;
       try {
-        const src = await open(r, req.params.name);
+        const src = await open(r, req.params.name, req);
         if (src.config.kind !== 'sql' || src.config.sql?.driver !== 'postgres') return reply.code(400).send({ error: 'row writes (and their safety check) are Postgres only in v1', code: 'not_postgres' });
         const w = parsed.data.write;
-        return await pgTableSafety(sqlConnectArgs(src.config, src.secret, dial), parsed.data.schema, parsed.data.table, w === undefined ? null : { op: w.op, set: w.set, key: w.key });
+        return scrubSecrets(await pgTableSafety(sqlConnectArgs(src.config, src.secret, dial), parsed.data.schema, parsed.data.table, w === undefined ? null : { op: w.op, set: w.set, key: w.key }), secretsOf(req));
       } catch (err) {
-        return fail(reply, err);
+        return fail(reply, err, deps.actorOf(req), secretsOf(req));
       }
     },
   );
 
   app.put<{ Params: { name: string } }>(
     `${V}/sources/:name/allow-writes`,
-    { config: { manifest: { requestType: 'SourceAllowWritesBody', responseType: 'SourceAllowWritesResponse', statusCodes: [200, 400, 403, 404, 503] } } },
+    { config: { manifest: { requestType: 'SourceAllowWritesBody', responseType: 'SourceAllowWritesResponse', statusCodes: [200, 400, 403, 404, 500, 503] } } },
     async (req, reply) => {
       const parsed = SourceAllowWritesSchema.safeParse(req.body);
       if (!parsed.success) return invalid(reply, parsed.error);
@@ -262,15 +294,29 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
       const r = registry(reply);
       if (r === null) return reply;
       try {
-        const { before, after } = await r.setAllowWrites(req.params.name, parsed.data.allowed);
-        let withdrawn = 0;
-        if (!after && deps.rowWriteGrants !== undefined) withdrawn = await deps.rowWriteGrants.withdrawForSource(req.params.name);
-        if (before !== after || !after) {
-          deps.audit.record(after ? 'apps.source.writes_allowed' : 'apps.source.writes_disallowed', actor, { detail: { source: req.params.name, withdrawnGrants: withdrawn } });
-        }
-        return { name: req.params.name, allowWrites: after, withdrawnGrants: withdrawn };
+        // One critical section per source: the switch, the withdrawal and the audit land together, and
+        // a concurrent on/off cannot interleave with them.
+        return await exclusiveSwitch(req.params.name, async () => {
+          const { before, after } = await r.setAllowWrites(req.params.name, parsed.data.allowed);
+          if (before === after) return { name: req.params.name, allowWrites: after, withdrawnGrants: 0 }; // nothing changed
+          if (after) {
+            deps.audit.record('apps.source.writes_allowed', actor, { detail: { source: req.params.name } });
+            return { name: req.params.name, allowWrites: true, withdrawnGrants: 0 };
+          }
+          // Off is recorded first (the switch IS off: every grant is refused at prepare and run from now),
+          // then the grants are withdrawn; a failed withdrawal is recorded too, never lost.
+          let withdrawn = 0;
+          try {
+            if (deps.rowWriteGrants !== undefined) withdrawn = await deps.rowWriteGrants.withdrawForSource(req.params.name);
+          } catch (err) {
+            deps.audit.record('apps.source.writes_disallowed', actor, { detail: { source: req.params.name, withdrawnGrants: 0, withdrawFailed: true } });
+            throw new McpRegistryError(500, 'withdraw_failed', `Allow writes is off for ${req.params.name}, but its row-write grants could not all be withdrawn (${err instanceof Error ? err.message : String(err)}); they are refused while the switch is off`);
+          }
+          deps.audit.record('apps.source.writes_disallowed', actor, { detail: { source: req.params.name, withdrawnGrants: withdrawn } });
+          return { name: req.params.name, allowWrites: false, withdrawnGrants: withdrawn };
+        });
       } catch (err) {
-        return fail(reply, err);
+        return fail(reply, err, deps.actorOf(req), secretsOf(req));
       }
     },
   );
@@ -292,7 +338,7 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
         if (out.sent) deps.audit.record('apps.source.test_call', actor, { detail: { source: req.params.name, summary: out.request.summary, ok: out.ok, status: out.status } });
         return out;
       } catch (err) {
-        return fail(reply, err);
+        return fail(reply, err, deps.actorOf(req), secretsOf(req));
       }
     },
   );
@@ -306,7 +352,7 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
       if (code === 'FST_ERR_CTP_INVALID_MEDIA_TYPE') return reply.code(415).send({ error: 'send the file as application/octet-stream', code: 'upload_media_type' });
       return reply.send(err);
     });
-    scope.post<{ Querystring: { name?: string; filename?: string } }>(
+    scope.post<{ Querystring: { name?: string; filename?: string; header?: string } }>(
       `${V}/apps/uploads`,
       { config: { manifest: { responseType: 'SourceUploadResponse', statusCodes: [201, 400, 409, 413, 415, 503] } } },
       async (req, reply) => {
@@ -316,8 +362,12 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
         if (!Buffer.isBuffer(req.body)) return reply.code(415).send({ error: 'send the file as application/octet-stream', code: 'upload_media_type' });
         const r = registry(reply);
         if (r === null) return reply;
+        // The header choice is the person's: an agent's `header=yes` would turn a first record's values into
+        // column names it then reads in the catalog, so it is honoured for a human only.
+        const choice = req.query.header === 'yes' || req.query.header === 'no' ? req.query.header : null;
+        const header = deps.actorOf(req).kind === 'human' ? choice : choice === 'no' ? 'no' : null;
         try {
-          const up = await ingestUpload(filename, req.body, deps.snapshotDir !== undefined ? { dir: deps.snapshotDir } : {});
+          const up = await ingestUpload(filename, req.body, { ...(deps.snapshotDir !== undefined ? { dir: deps.snapshotDir } : {}), header });
           const source = await r.registerSnapshotSource(n.data, up.digest, { catalog: up.catalog });
           const actor = deps.actorOf(req);
           deps.audit.record('apps.source.uploaded', actor, { detail: { source: n.data, kind: up.kind, digest: up.digest, bytes: up.bytes } });
@@ -331,7 +381,7 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
             catalog: up.catalog,
           });
         } catch (err) {
-          return fail(reply, err);
+          return fail(reply, err, deps.actorOf(req), secretsOf(req));
         }
       },
     );
@@ -351,7 +401,9 @@ async function testCall(
   dial: DialOptions,
   registry: McpRegistry,
 ): Promise<SourceTestCallResponse> {
-  const config = await registry.inspectTarget(sourceName);
+  // ONE read of the registry: the config, the tool's mapping and schema, its status, all of one record.
+  const t0 = await registry.resolveCall(sourceName, target);
+  const config = t0?.config ?? (await registry.inspectTarget(sourceName));
   if (config === null) throw new McpRegistryError(404, 'unknown_server', `no source named ${sourceName}`);
   if (config.kind === 'sql') throw new McpRegistryError(400, 'no_test_call', 'a SQL source is tested by describing it and checking a query, not by a call');
   const { secret, missing } = await r.callSecret(config);
@@ -371,13 +423,20 @@ async function testCall(
       return { ok: res.status < 400, status: res.status, result: res.json };
     };
   } else {
-    const t = await registry.resolveCall(sourceName, target);
+    const t = t0;
     if (t === null) throw new McpRegistryError(404, 'unknown_server', `no source named ${sourceName}`);
     if (!t.registered) throw new McpRegistryError(409, 'not_registered', `${sourceName}/${target} is not a registered, enabled tool`);
     if (config.kind === 'rest') {
       if (t.rest === null || (t.rest.method !== 'GET' && t.rest.method !== 'HEAD')) throw new McpRegistryError(400, 'not_a_read', `a test call sends a read: ${target} is ${t.rest?.method ?? 'not a REST operation'}`);
       const built = buildRestRequest(config, null, t.rest, args);
-      request = { kind: 'rest', summary: `${t.rest.method} ${built.url.href}`, method: t.rest.method, url: built.url.href, headers: [...Object.keys(built.init.headers), ...(config.auth?.header !== undefined ? [config.auth.header] : [])] };
+      request = {
+        kind: 'rest',
+        summary: `${t.rest.method} ${built.url.href}`,
+        method: t.rest.method,
+        url: built.url.href,
+        headers: [...Object.keys(built.init.headers), ...(config.auth?.header !== undefined ? [config.auth.header] : [])],
+        ...(built.init.body !== undefined ? { body: built.init.body } : {}),
+      };
       const mapping = t.rest;
       send = async () => {
         const res = await invokeRestTool(config, secret, mapping, args, mapping.timeoutMs);
@@ -393,7 +452,12 @@ async function testCall(
       };
     }
   }
-  const requestHash = createHash('sha256').update(canonicalJson({ source: sourceName, request, args })).digest('hex');
+  // The hash binds what is sent AND where: the request (method, URL, header names and values but the
+  // secret, the body), the server's non-secret identity, and the tool's saved schema and mapping. A
+  // re-save pointing the name elsewhere, or a changed mapping, changes the hash.
+  const identity = { kind: config.kind, url: config.url, command: config.command, args: config.args, auth: config.auth === null ? null : { ref: config.auth.ref, header: config.auth.header ?? null, prefix: config.auth.prefix ?? null }, address: config.address ?? null };
+  const tool = t0 === null ? null : { rest: t0.rest, annotations: t0.annotations, classOverride: t0.classOverride };
+  const requestHash = createHash('sha256').update(canonicalJson({ source: sourceName, identity, tool, request, args })).digest('hex');
   if (confirm === null) return { sent: false, request, requestHash };
   if (confirm !== requestHash) throw new McpRegistryError(409, 'request_changed', 'the request is not the one confirmed: name it again, then confirm');
   const out = scrubSecrets(await send(), secrets);

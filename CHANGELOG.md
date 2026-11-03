@@ -73,8 +73,11 @@ A feature release on wicked-core-ts ^0.15.21 and wicked-crew-api-types 0.172.0, 
   through libpg_query with a closed node, function, operator and cast allowlist (`search_path = pg_catalog, pg_temp`,
   `standard_conforming_strings` pinned); MySQL through a hand-written closed-subset grammar (`sql_mode` pinned,
   executable comments, backslashes and variables refused); SQLite through the authorizer at prepare in a child process.
-  Reads run `READ ONLY` with a 10 s deadline enforced at the source (`statement_timeout` plus cancel; `max_execution_time`
-  plus `KILL QUERY`; the SQLite process ended). New routes: `GET /sources/:name/catalog` (`crew` is the built-in source),
+  Reads run `READ ONLY` with a 10 s deadline enforced at the source (`statement_timeout` plus a cancel pinned to the
+  backend; `max_execution_time` plus `KILL QUERY` on the same server; the SQLite process ended; a GraphQL read is
+  aborted client-side). Before a SQL read runs, its relations are checked live (a table since replaced by a view or a
+  foreign table, or a plain read reaching a foreign partition or child, is refused). An agent sees a source's error
+  as its class and SQLSTATE only. SQLite sources and uploads need Node.js 24.12 or later (the authorizer). New routes: `GET /sources/:name/catalog` (`crew` is the built-in source),
   `POST /sources/:name/describe`, `…/privileges` (the exact missing `GRANT`s for a declared row write), `…/check` (policy,
   then prepare/describe, never execute), `…/safety` (the Postgres **table safety check** and its fingerprint, §7.4 rev
   11), `PUT …/allow-writes` (the per-source **Allow writes** switch: off on every new Postgres source, human operator

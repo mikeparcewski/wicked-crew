@@ -84,6 +84,28 @@ for (const target of MYSQL_TARGETS) {
       expect(resolver.calls).toBe(0);
     });
 
+    it('a deadline the source does not enforce is met by KILL QUERY, sent to the backend the read runs on (codex r1)', async () => {
+      let n = 0;
+      const flip = Object.assign(async () => (n++ === 0 ? ['127.0.0.1'] : ['169.254.169.254']), { calls: 0 });
+      const marker = `kill_${Date.now()}`;
+      const t0 = Date.now();
+      const out = await mysqlRead(reader(flip as never), `SELECT SUM(a.n + b.n + c.n) AS ${marker} FROM big a, big b, big c`, [], { deadlineMs: 2_500, sourceTimeoutMs: 120_000 }).then(
+        () => ({ ok: true, at: Date.now() - t0 }),
+        (e: unknown) => ({ ok: false, at: Date.now() - t0, err: e as { errorClass?: string } }),
+      );
+      expect(out.ok).toBe(false);
+      expect(out.at).toBeLessThan(7_000);
+      expect(n).toBe(1); // the KILL connection was pinned to the read's address
+      await new Promise((r) => setTimeout(r, 500));
+      const [rows] = (await db.admin.query('SHOW FULL PROCESSLIST')) as unknown as [Array<{ Info: string | null }>];
+      expect(rows.filter((r) => (r.Info ?? '').includes(marker) && !(r.Info ?? '').startsWith('SHOW'))).toHaveLength(0);
+    }, 20_000);
+
+    it('TLS VERIFY_IDENTITY against the server\'s self-signed certificate is refused, never downgraded (codex r1)', async () => {
+      const args = reader();
+      await expect(describeMysql({ ...args, source: { ...args.source, tls: 'verify-full' } })).rejects.toThrow();
+    });
+
     it('S11: a query that would run for minutes stops at 10 s AT THE SOURCE (SHOW PROCESSLIST)', async () => {
       const marker = `deadline_${Date.now()}`;
       // A SUM over the cross join: MySQL answers a bare COUNT(*) of a join from statistics, instantly.

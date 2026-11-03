@@ -65,6 +65,16 @@ export async function describePgIn(tx: Tx): Promise<SqlCatalog> {
        LEFT JOIN pg_catalog.pg_class fc ON fc.oid = k.confrelid LEFT JOIN pg_catalog.pg_namespace fn ON fn.oid = fc.relnamespace
       WHERE k.contype IN ('p', 'f') AND ${USER_SCHEMAS}`,
   );
+  // Relations whose partitions or inheritance children (at any depth) include a foreign table: a plain
+  // read of them reaches it (crew's own query; recursion is fine here).
+  const foreignBelow = await tx.unsafe<Array<{ rel: string }>>(
+    `WITH RECURSIVE d(root, child) AS (
+       SELECT i.inhparent, i.inhrelid FROM pg_catalog.pg_inherits i
+       UNION SELECT d.root, i.inhrelid FROM d JOIN pg_catalog.pg_inherits i ON i.inhparent = d.child
+     )
+     SELECT DISTINCT d.root::pg_catalog.int8::pg_catalog.text AS rel FROM d JOIN pg_catalog.pg_class c ON c.oid = d.child WHERE c.relkind = 'f'`,
+  );
+  const foreignRoots = new Set(foreignBelow.map((r) => r.rel));
   const enumLabels = new Map<string, string[]>();
   for (const e of enums) enumLabels.set(e.typid, [...(enumLabels.get(e.typid) ?? []), e.label]);
   const byOid = new Map<string, CatalogRelation>();
@@ -78,6 +88,7 @@ export async function describePgIn(tx: Tx): Promise<SqlCatalog> {
       primaryKey: [],
       foreignKeys: [],
       rowSecurity: r.rls,
+      ...(foreignRoots.has(r.oid) ? { foreignDescendant: true } : {}),
     };
     byOid.set(r.oid, rel);
     return rel;

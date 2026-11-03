@@ -65,6 +65,11 @@ import type {
   PutMcpSecretSchema,
   SaveMcpServerSchema,
 } from '../src/api/mcp.js';
+import type { SourceAllowWritesSchema, SourceCheckSchema, SourcePrivilegesSchema, SourceSafetySchema, SourceTestCallSchema } from '../src/sources/routes.js';
+import type { SqlCheckResult } from '../src/sources/sql.js';
+import type { SafetyResult } from '../src/sources/safety/postgres.js';
+import type { PgPrivilegeReport } from '../src/sources/catalog/postgres.js';
+import type { SqlCatalog } from '../src/sources/catalog/types.js';
 import type { McpRegistry } from '../src/mcp/registry.js';
 import type { McpPolicies } from '../src/mcp/policies.js';
 import type { foldMcpUsage } from '../src/mcp/usage.js';
@@ -1096,6 +1101,17 @@ accepts<z.input<typeof ReplaceSkillSchema>, Wire.ReplaceSkillBody>();
 // ── api-types 0.58.0 — the MCP tools registry (DES-MCP-TOOLS-001 S2) ─────────────────────────────
 accepts<z.input<typeof McpServerConfigSchema>, Wire.McpServerConfigBody>();
 accepts<z.input<typeof SaveMcpServerSchema>, Wire.SaveMcpServerBody>();
+// Apps data sources (DES-APPS-001 K1, api-types 0.174.0): each published body passes its route's schema,
+// and what the code produces fits each published response.
+accepts<z.input<typeof SourceCheckSchema>, Wire.SourceCheckBody>();
+accepts<z.input<typeof SourcePrivilegesSchema>, Wire.SourcePrivilegesBody>();
+accepts<z.input<typeof SourceSafetySchema>, Wire.SourceSafetyBody>();
+accepts<z.input<typeof SourceAllowWritesSchema>, Wire.SourceAllowWritesBody>();
+accepts<z.input<typeof SourceTestCallSchema>, Wire.SourceTestCallBody>();
+accepts<Wire.SourceSafetyResponse, SafetyResult>();
+accepts<Wire.SourcePrivilegeReport, PgPrivilegeReport>();
+accepts<Wire.SqlSourceCatalog, SqlCatalog>();
+accepts<Wire.SourceCheckResponse, Extract<SqlCheckResult, { ok: false }> extends { ok: false; code: string; detail: string } ? { ok: false; code: string; detail: string } : never>();
 accepts<z.input<typeof PatchMcpServerSchema>, Wire.PatchMcpServerBody>();
 accepts<z.input<typeof PatchMcpToolSchema>, Wire.PatchMcpToolBody>();
 accepts<z.input<typeof PutMcpSecretSchema>, Wire.PutMcpSecretBody>();

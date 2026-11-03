@@ -45,3 +45,48 @@ export function sqliteAuthorize(
   }
   return DENY;
 }
+
+/**
+ * The parameters of a SQLite read, counted by lexing the text (strings, quoted names and comments
+ * skipped): only anonymous `?` placeholders are accepted, so the count is the bind count. Numbered
+ * (`?5`) and named (`:x`, `@x`, `$x`) placeholders are refused.
+ */
+export function sqliteParams(text: string): { ok: true; count: number } | { ok: false; detail: string } {
+  let count = 0;
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    const c = text[i] as string;
+    if (c === "'" || c === '"' || c === '`') {
+      const end = text.indexOf(c, i + 1);
+      if (end < 0) return { ok: false, detail: 'an unterminated quoted string or name' };
+      i = end + 1;
+      continue;
+    }
+    if (c === '[') {
+      const end = text.indexOf(']', i + 1);
+      if (end < 0) return { ok: false, detail: 'an unterminated [name]' };
+      i = end + 1;
+      continue;
+    }
+    if (c === '-' && text[i + 1] === '-') {
+      const end = text.indexOf('\n', i);
+      i = end < 0 ? n : end + 1;
+      continue;
+    }
+    if (c === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      i = end < 0 ? n : end + 2;
+      continue;
+    }
+    if (c === '?') {
+      if (/[0-9]/.test(text[i + 1] ?? '')) return { ok: false, detail: 'numbered placeholders (?N) are refused; use ? in order' };
+      count++;
+      i++;
+      continue;
+    }
+    if ((c === ':' || c === '@' || c === '$') && /[A-Za-z_]/.test(text[i + 1] ?? '')) return { ok: false, detail: `named placeholders (${c}name) are refused; use ? in order` };
+    i++;
+  }
+  return { ok: true, count };
+}

@@ -21,20 +21,27 @@ const FIX = join(dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'app
 export interface DbTarget {
   label: string;
   url: URL;
+  /** The server major version the target must be (checked against the live server). */
+  major: number;
 }
 
-function targets(pairs: Array<[string, string]>): DbTarget[] {
-  return pairs.flatMap(([label, env]) => {
+/** With WICKED_SOURCES_DB=required every declared target must be set: one missing is a failure, not a smaller run. */
+function targets(pairs: Array<[string, string, number]>): DbTarget[] {
+  return pairs.flatMap(([label, env, major]) => {
     const v = process.env[env];
-    return v === undefined || v === '' ? [] : [{ label, url: new URL(v) }];
+    if (v === undefined || v === '') {
+      if (DB_REQUIRED) throw new Error(`WICKED_SOURCES_DB=required, but ${env} (${label}) is not set`);
+      return [];
+    }
+    return [{ label, url: new URL(v), major }];
   });
 }
 
 export const PG_TARGETS = targets([
-  ['postgres 16', 'APPS_PG16_URL'],
-  ['postgres 17', 'APPS_PG17_URL'],
+  ['postgres 16', 'APPS_PG16_URL', 16],
+  ['postgres 17', 'APPS_PG17_URL', 17],
 ]);
-export const MYSQL_TARGETS = targets([['mysql 8', 'APPS_MYSQL8_URL']]);
+export const MYSQL_TARGETS = targets([['mysql 8', 'APPS_MYSQL8_URL', 8]]);
 
 /** Every source connection in the tests goes through the dialer by this NAME; the resolver counts dials. */
 export const DB_HOST = 'db.apps.test';
@@ -66,6 +73,8 @@ export async function freshPgDatabase(t: DbTarget): Promise<FreshPg> {
   const url = new URL(t.url.href);
   url.pathname = `/${database}`;
   const admin = postgres(url.href, { max: 2, onnotice: () => undefined }) as unknown as postgres.Sql<Record<string, never>>;
+  const [{ v } = { v: '0' }] = await admin.unsafe<Array<{ v: string }>>("SELECT current_setting('server_version_num') AS v");
+  if (Math.floor(Number(v) / 10_000) !== t.major) throw new Error(`${t.label}: the server at ${t.url.host} is version ${v}, not ${t.major}`);
   await admin.unsafe(readFileSync(join(FIX, 'postgres', 'seed.sql'), 'utf8'));
   return {
     database,
@@ -90,6 +99,8 @@ export interface FreshMysql {
 /** A fresh MySQL database seeded from mysql/seed.sql; `admin` is a root session. */
 export async function freshMysqlDatabase(t: DbTarget): Promise<FreshMysql> {
   const admin = await createConnection({ host: t.url.hostname, port: Number(t.url.port), user: decodeURIComponent(t.url.username), password: decodeURIComponent(t.url.password), multipleStatements: true });
+  const [ver] = (await admin.query('SELECT VERSION() AS v')) as unknown as [Array<{ v: string }>];
+  if (Number(String(ver[0]?.v ?? '0').split('.')[0]) !== t.major) throw new Error(`${t.label}: the server is version ${ver[0]?.v ?? '?'}, not ${t.major}`);
   const database = `apps_k1_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
   await admin.query(`CREATE DATABASE ${database}`);
   await admin.query(readFileSync(join(FIX, 'mysql', 'seed.sql'), 'utf8').replace(/\{\{db\}\}/g, database));

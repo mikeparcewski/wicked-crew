@@ -25,6 +25,7 @@ import { policyCatalog } from '../src/sources/catalog/types.js';
 import { pgClient, pgRead } from '../src/sources/drivers/postgres.js';
 import type { SqlConnectArgs } from '../src/sources/drivers/types.js';
 import { pgTableSafety, pgTableSafetyIn } from '../src/sources/safety/postgres.js';
+import { relKey } from '../src/sources/policy/types.js';
 import { checkSqlQuery, readSqlQuery, SourcePolicyError, type SqlSourceHandle } from '../src/sources/sql.js';
 import { countingResolver, DB_HOST, DB_REQUIRED, type FreshPg, freshPgDatabase, LOOPBACK, PG_TARGETS } from './support/sources-db.js';
 
@@ -76,7 +77,7 @@ for (const target of PG_TARGETS) {
       const check = await checkSqlQuery(h, "SELECT date_trunc('day', now()) AS d, count(*)::int8 AS n FROM s.plain WHERE prio = $1::text::s.prio IS NOT NULL OR owner = $1");
       expect(check.ok).toBe(false); // a cast to s.prio is outside pg_catalog
       const ok = await checkSqlQuery(h, 'SELECT count(*)::int8 AS n, max(amount) AS top FROM s.plain WHERE owner = $1');
-      expect(ok).toMatchObject({ ok: true, describe: { columns: [{ name: 'n', type: 'bigint' }, { name: 'top', type: 'numeric' }], params: ['text'] }, relations: ['s.plain'] });
+      expect(ok).toMatchObject({ ok: true, describe: { columns: [{ name: 'n', type: 'bigint' }, { name: 'top', type: 'numeric' }], params: ['text'] }, relations: ['"s"."plain"'] });
       await expect(readSqlQuery(h, 'SELECT id FROM s.v', [])).rejects.toBeInstanceOf(SourcePolicyError);
       const allowed: SqlSourceHandle = { ...h, viewsAllowed: ['s.v'] };
       expect((await readSqlQuery(allowed, 'SELECT id FROM s.v ORDER BY id', [])).rows).toEqual([[1], [2]]);
@@ -313,16 +314,122 @@ for (const target of PG_TARGETS) {
         const lines = (await audit.read()).filter((e) => e.action.startsWith('apps.source.writes_'));
         expect(lines.map((e) => [e.action, e.actor.kind])).toEqual(expect.arrayContaining([['apps.source.writes_allowed', 'human'], ['apps.source.writes_disallowed', 'human']]));
         expect(lines).toHaveLength(2);
+        // Off when already off changes nothing and records nothing (pi r1).
+        expect((await app.inject({ method: 'PUT', url: '/api/v1/sources/support/allow-writes', payload: { allowed: false } })).json()).toEqual({ name: 'support', allowWrites: false, withdrawnGrants: 0 });
+        expect(withdrawn).toEqual(['support']);
+        await audit.flush();
+        expect((await audit.read()).filter((e) => e.action.startsWith('apps.source.writes_'))).toHaveLength(2);
       } finally {
         await app.close();
         rmSync(base, { recursive: true, force: true });
       }
     });
 
+    describe('review r1 folds (codex, pi)', () => {
+      it('the catalog marks a table with a foreign child, and a plain read of it is refused at the policy', async () => {
+        await db.admin.unsafe("CREATE EXTENSION IF NOT EXISTS postgres_fdw; CREATE SERVER k1_fs FOREIGN DATA WRAPPER postgres_fdw; CREATE TABLE s.fparent (id int); CREATE FOREIGN TABLE s.fchild () INHERITS (s.fparent) SERVER k1_fs; GRANT SELECT ON s.fparent TO apps_reader");
+        const args = login('apps_reader', 'apps-reader');
+        const cat = await describePg(args);
+        expect(cat.relations.find((r) => r.name === 'fparent')?.foreignDescendant).toBe(true);
+        const h: SqlSourceHandle = { driver: 'postgres', connect: args, catalog: cat, viewsAllowed: [] };
+        await expect(readSqlQuery(h, 'SELECT id FROM s.fparent', [])).rejects.toMatchObject({ code: 'relation' });
+        expect((await readSqlQuery(h, 'SELECT id FROM ONLY s.fparent', [])).rows).toEqual([]);
+      });
+
+      it('a relation replaced at the source since the describe is refused before the read runs', async () => {
+        await db.admin.unsafe('CREATE TABLE s.swap (id int PRIMARY KEY); GRANT SELECT ON s.swap TO apps_reader');
+        const args = login('apps_reader', 'apps-reader');
+        const h: SqlSourceHandle = { driver: 'postgres', connect: args, catalog: await describePg(args), viewsAllowed: [] };
+        expect((await readSqlQuery(h, 'SELECT id FROM s.swap', [])).rows).toEqual([]);
+        await db.admin.unsafe('DROP TABLE s.swap; CREATE VIEW s.swap AS SELECT 1 AS id; GRANT SELECT ON s.swap TO apps_reader');
+        await expect(readSqlQuery(h, 'SELECT id FROM s.swap', [])).rejects.toMatchObject({ errorClass: 'refused' });
+      });
+
+      it('a deadline the source does not enforce is still met: the cancel stops the query at the source, on the backend it runs on', async () => {
+        let n = 0;
+        // The name answers the confirmed address once, then something else: the cancel must not follow it.
+        const flip = Object.assign(async () => (n++ === 0 ? ['127.0.0.1'] : ['169.254.169.254']), { calls: 0 });
+        const args = login('apps_reader', 'apps-reader', flip as never);
+        const marker = `guard_${Date.now()}`;
+        const t0 = Date.now();
+        const out = await pgRead(args, `SELECT count(*) AS ${marker} FROM s.big a, s.big b, s.big c`, [], { deadlineMs: 2_500, sourceTimeoutMs: 120_000 }).then(
+          () => ({ ok: true, at: Date.now() - t0 }),
+          (e: unknown) => ({ ok: false, at: Date.now() - t0, err: e as { errorClass?: string } }),
+        );
+        expect(out.ok).toBe(false);
+        expect(out.at).toBeLessThan(6_000);
+        expect(n).toBe(1); // the cancel connection went to the pinned address, not a fresh resolution
+        await new Promise((r) => setTimeout(r, 500));
+        const rows = await db.admin.unsafe<Array<{ n: string }>>(`SELECT count(*)::text AS n FROM pg_catalog.pg_stat_activity WHERE state = 'active' AND query LIKE '%' || $1 || '%' AND pid <> pg_catalog.pg_backend_pid()`, [marker]);
+        expect(rows[0]?.n).toBe('0');
+      }, 20_000);
+
+      it('TLS verify-full against a server without TLS is refused, never downgraded', async () => {
+        const args = { ...login('apps_reader', 'apps-reader'), source: { ...login('apps_reader', 'apps-reader').source, tls: 'verify-full' as const } };
+        await expect(describePg(args)).rejects.toThrow();
+      });
+
+      it('the safety check: a key named twice is not the whole key; a pg_catalog overload of an allowed function is user code; enum labels and collations are in the fingerprint', async () => {
+        await db.admin.unsafe('CREATE TABLE s.ck (a int, b int, v text, PRIMARY KEY (a, b))');
+        expect((await pgTableSafety(login('apps_writer', 'apps-writer'), 's', 'ck', { op: 'update', set: ['v'], key: ['a', 'a'] })).reasons.map((x) => x.code)).toContain('key_mismatch');
+        expect((await pgTableSafety(login('apps_writer', 'apps-writer'), 's', 'ck', { op: 'update', set: ['v'], key: ['a', 'b'] })).safe).toBe(true);
+        const codes = await db.admin
+          .begin(async (tx) => {
+            await tx.unsafe(`CREATE FUNCTION pg_catalog.lower(s.prio) RETURNS text LANGUAGE sql IMMUTABLE AS $f$ SELECT 'x' $f$;
+              CREATE TABLE s.ovl (id int PRIMARY KEY, prio s.prio, CHECK (lower(prio) <> ''))`);
+            const r = await pgTableSafetyIn(tx as never, 's', 'ovl');
+            throw Object.assign(new Error('rollback'), { codes: r.reasons.map((x) => x.code) });
+          })
+          .catch((e: { codes?: string[] }) => e.codes ?? []);
+        expect(codes).toContain('check_dependency');
+        await db.admin.unsafe("CREATE TYPE s.lvl AS ENUM ('a', 'b'); CREATE TABLE s.fp2 (id int PRIMARY KEY, lvl s.lvl, note text)");
+        const before = (await pgTableSafety(login('apps_writer', 'apps-writer'), 's', 'fp2')).fingerprint;
+        await db.admin.unsafe("ALTER TYPE s.lvl ADD VALUE 'c'");
+        const afterEnum = (await pgTableSafety(login('apps_writer', 'apps-writer'), 's', 'fp2')).fingerprint;
+        expect(afterEnum).not.toBe(before);
+        await db.admin.unsafe('ALTER TABLE s.fp2 ALTER COLUMN note TYPE text COLLATE "C"');
+        expect((await pgTableSafety(login('apps_writer', 'apps-writer'), 's', 'fp2')).fingerprint).not.toBe(afterEnum);
+      });
+
+      it('a source error reaches an agent as its class and SQLSTATE only; a person gets the words', async () => {
+        const base = mkdtempSync(join(tmpdir(), 'apps-errors-'));
+        const secrets: SecretStore = { available: false, get: async () => null, has: async () => false, set: async () => undefined, delete: async () => undefined };
+        const registry = new McpRegistry({ store: new McpRegistryStore(join(base, 'mcp')), secrets, probe: probeMcpServer, discover: () => [], env: { APPS_K1_PW: 'apps-reader' } });
+        let actor: Actor = LOCAL_ACTOR;
+        const app = Fastify({ logger: false });
+        const audit = new AuditLog(join(base, 'audit.log'), () => undefined);
+        registerMcpRoutes(app, { registry, audit, actorOf: () => actor });
+        registerSourceRoutes(app, { registry, audit, actorOf: () => actor });
+        await app.ready();
+        try {
+          const cfg = { name: 'support', kind: 'sql', sql: { driver: 'postgres', host: '127.0.0.1', port: db.port, database: db.database, user: 'apps_reader', tls: 'disable' }, auth: { ref: 'env:APPS_K1_PW' } };
+          // Without a confirmed range the preview is refused with the dialer's code (codex r1).
+          const refused = await app.inject({ method: 'POST', url: '/api/v1/mcp/servers/preview', payload: cfg });
+          expect(refused.statusCode).toBe(409);
+          expect(refused.json()).toMatchObject({ code: 'address_unconfirmed' });
+          const p = (await app.inject({ method: 'POST', url: '/api/v1/mcp/servers/preview', payload: { ...cfg, address: LOOPBACK } })).json() as McpPreviewResponse;
+          expect((await app.inject({ method: 'POST', url: '/api/v1/mcp/servers', payload: { previewHash: p.previewHash } })).statusCode).toBe(201);
+          const echo = "SELECT 'marker-value-4821'::int AS n FROM s.w";
+          const human = (await app.inject({ method: 'POST', url: '/api/v1/sources/support/check', payload: { text: echo } })).json() as { ok: boolean; code: string; detail: string };
+          expect(human).toMatchObject({ ok: false, code: 'prepare' });
+          expect(human.detail).toContain('marker-value-4821');
+          actor = { id: 'worker-1', kind: 'agent', trust: 'operator' };
+          const agent = await app.inject({ method: 'POST', url: '/api/v1/sources/support/check', payload: { text: echo } });
+          expect(agent.json()).toMatchObject({ ok: false, code: 'prepare' });
+          expect(agent.body).not.toContain('marker-value-4821');
+          expect(agent.body).toContain('22P02');
+        } finally {
+          await app.close();
+          rmSync(base, { recursive: true, force: true });
+        }
+      });
+    });
+
     it('policyCatalog keys relations by schema-qualified name', async () => {
       const pc = policyCatalog(await describePg(login('apps_reader', 'apps-reader')), ['s.v']);
-      expect(pc.relations.get('s.w')).toBe('table');
-      expect(pc.viewsAllowed.has('s.v')).toBe(true);
+      expect(pc.relations.get(relKey('s', 'w'))).toBe('table');
+      expect(pc.viewsAllowed.has(relKey('s', 'v'))).toBe(true);
+      expect(pc.columns?.get(relKey('s', 'w'))).toEqual(new Set(['id', 'owner']));
     });
   });
 }

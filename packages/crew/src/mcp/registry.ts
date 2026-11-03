@@ -270,7 +270,7 @@ export class McpRegistry {
     // orphan this was written to prevent. `null` = no prior value, and then the rollback deletes.
     const prior = held.secret === null ? null : await this.deps.secrets.get(held.config.name);
     if (held.secret !== null) await this.deps.secrets.set(held.config.name, held.secret);
-    const saved = await this.restoreSecretOnFailure(held.config.name, held.secret !== null, prior, () => this.deps.store.mutate((file) => {
+    const saved = await this.restoreSecretOnFailure(held.config.name, held.secret !== null, prior, () => this.deps.store.mutate(async (file) => {
       const prior = file.servers.find((s) => s.name === held.config.name);
       // (G2) Re-judged against the record as it is NOW, inside the write: a confirmation the
       // preview inherited from a server since removed or re-pointed does not carry over.
@@ -318,9 +318,11 @@ export class McpRegistry {
         tools,
       };
       file.servers = [...file.servers.filter((s) => s.name !== record.name), record];
+      // The description lands INSIDE the record's own write (the store serializes mutations), so a
+      // record and its description can never be paired with another save's.
+      if (held.source !== null) await this.catalogs.write(record.name, { ...held.source, descriptorHash: sourceDescriptorHash(configOf(record)) });
       return record;
     }));
-    if (held.source !== null) await this.catalogs.write(saved.name, { ...held.source, descriptorHash: sourceDescriptorHash(held.config) });
     return this.view(saved);
   }
 
@@ -638,14 +640,21 @@ export class McpRegistry {
     const s = this.find((await this.deps.store.read()).servers, name);
     if (s.kind !== 'sql' && s.kind !== 'graphql') throw new McpRegistryError(400, 'not_a_source', `${name} is an ${s.kind} server, not a data source`);
     const config = configOf(s);
-    return { config, allowWrites: s.allowWrites === true, description: await this.catalogs.read(name), descriptorHash: sourceDescriptorHash(config) };
+    const descriptorHash = sourceDescriptorHash(config);
+    const stored = await this.catalogs.read(name);
+    // A description taken under another descriptor (a re-save since) is not this source's: not described.
+    return { config, allowWrites: s.allowWrites === true, description: stored !== null && stored.descriptorHash === descriptorHash ? stored : null, descriptorHash };
   }
 
   /** Store a fresh description of a source (a re-describe), bound to the descriptor it was taken under. */
   async saveDescription(name: string, description: SourceDescription, descriptorHash: string): Promise<void> {
-    const current = await this.source(name);
-    if (current.descriptorHash !== descriptorHash) throw new McpRegistryError(409, 'server_changed', `${name} was saved again while it was being described; describe it again`);
-    await this.catalogs.write(name, { ...description, descriptorHash });
+    // Checked and written inside one registry mutation (serialized with every save), so a save that
+    // lands while the source was being described always wins.
+    await this.deps.store.mutate(async (file) => {
+      const s = this.find(file.servers, name);
+      if (sourceDescriptorHash(configOf(s)) !== descriptorHash) throw new McpRegistryError(409, 'server_changed', `${name} was saved again while it was being described; describe it again`);
+      await this.catalogs.write(name, { ...description, descriptorHash });
+    });
   }
 
   /**
@@ -672,7 +681,7 @@ export class McpRegistry {
   async registerSnapshotSource(name: string, digest: string, description: SourceDescription): Promise<McpServer> {
     if (name === CREW_SOURCE || name === ESTATE_SERVER) throw new McpRegistryError(400, 'reserved_name', `"${name}" is reserved; choose another name`);
     const stamp = new Date(this.now()).toISOString();
-    const rec = await this.deps.store.mutate((file) => {
+    const rec = await this.deps.store.mutate(async (file) => {
       const prior = file.servers.find((s) => s.name === name);
       if (prior !== undefined && !(prior.kind === 'sql' && prior.sql?.driver === 'sqlite')) {
         throw new McpRegistryError(409, 'name_taken', `${name} is already a registered ${prior.kind} server; choose another name`);
@@ -693,9 +702,9 @@ export class McpRegistry {
         tools: [],
       };
       file.servers = [...file.servers.filter((s) => s.name !== name), record];
+      await this.catalogs.write(name, { ...description, descriptorHash: sourceDescriptorHash(configOf(record)) });
       return record;
     });
-    await this.catalogs.write(name, { ...description, descriptorHash: sourceDescriptorHash(configOf(rec)) });
     return this.view(rec);
   }
 
