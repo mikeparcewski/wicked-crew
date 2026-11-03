@@ -40,7 +40,8 @@ export function pinOf(config: McpUpstreamConfig): AppLockSource {
 /** A source resolved for one check, read or write. */
 export type AppSource =
   | { name: typeof CREW_SOURCE; kind: 'crew'; pin: AppLockSource }
-  | { name: string; kind: 'sql' | 'graphql'; pin: AppLockSource; config: McpUpstreamConfig; description: StoredDescription | null; allowWrites: boolean }
+  | { name: string; kind: 'sql'; pin: AppLockSource; config: McpUpstreamConfig; description: StoredDescription | null; allowWrites: boolean }
+  | { name: string; kind: 'graphql'; pin: AppLockSource; config: McpUpstreamConfig; description: StoredDescription | null; allowWrites: boolean }
   | { name: string; kind: 'rest' | 'mcp-http' | 'mcp-stdio'; pin: AppLockSource; config: McpUpstreamConfig };
 
 /** Look a source up now; `null` = no such source in the registry. */
@@ -51,7 +52,8 @@ export async function lookupSource(registry: McpRegistry | null, name: string): 
   if (config === null) return null;
   if (config.kind === 'sql' || config.kind === 'graphql') {
     const s = await registry.source(name);
-    return { name, kind: config.kind, pin: pinOf(s.config), config: s.config, description: s.description, allowWrites: s.allowWrites };
+    const base = { name, pin: pinOf(s.config), config: s.config, description: s.description, allowWrites: s.allowWrites };
+    return config.kind === 'sql' ? { ...base, kind: 'sql' } : { ...base, kind: 'graphql' };
   }
   return { name, kind: config.kind, pin: pinOf(config), config };
 }

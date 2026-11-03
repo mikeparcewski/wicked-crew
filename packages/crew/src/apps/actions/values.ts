@@ -41,6 +41,12 @@ const RANGE: Partial<Record<WritableKind, [number, number]>> = {
 };
 
 const DECIMAL_RE = /^-?\d+(\.\d+)?$/;
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+/** Well-formed UTF-16: no lone surrogate (it would travel as U+FFFD). */
+export function wellFormed(s: string): boolean {
+  return !LONE_SURROGATE.test(s);
+}
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const TS_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})?$/;
 
@@ -71,7 +77,7 @@ function timestampProblem(v: string, zoned: boolean): string | null {
  * card and the database could disagree on what was meant). Answers the problem, or `null`.
  */
 export function jsonTextProblem(text: string): string | null {
-  if (text.includes('\u0000') || /\\u0000/i.test(text)) return 'holds a NUL, which jsonb refuses';
+  if (!wellFormed(text)) return 'holds a lone surrogate (not well-formed UTF-16)';
   let i = 0;
   const ws = (): void => {
     while (i < text.length && ' \t\n\r'.includes(text[i]!)) i++;
@@ -85,7 +91,12 @@ export function jsonTextProblem(text: string): string | null {
     while (i < text.length && text[i] !== '"') i += text[i] === '\\' ? 2 : 1;
     if (i >= text.length) fail('an unterminated string');
     i++;
-    return JSON.parse(text.slice(start, i)) as string;
+    const decoded = JSON.parse(text.slice(start, i)) as string;
+    // Checked DECODED (codex r1): an escaped lone surrogate or NUL is what Postgres refuses; a literal
+    // backslash followed by u0000 is six ordinary characters.
+    if (!wellFormed(decoded)) fail('a string with a lone surrogate escape, which jsonb refuses');
+    if (decoded.includes('\u0000')) fail('a NUL, which jsonb refuses');
+    return decoded;
   };
   const value = (depth: number): void => {
     if (depth > 64) fail('nests deeper than 64');
@@ -146,8 +157,10 @@ export function jsonTextProblem(text: string): string | null {
       str();
       return;
     }
-    const m = /^(-?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?|true|false|null)/.exec(text.slice(i));
+    const m = /^(-?(0|[1-9]\d*)(\.\d+)?([eE]([+-]?\d+))?|true|false|null)/.exec(text.slice(i, i + 1100));
     if (m === null) fail('not JSON');
+    // Postgres keeps a jsonb number as numeric: bound its digits and exponent well inside numeric's range.
+    if (m![1] !== undefined && (m![0].length > 1000 || Math.abs(Number(m![5] ?? '0')) > 1000)) fail('a number past the range jsonb keeps exactly');
     i += m![0].length;
   };
   try {
@@ -176,14 +189,18 @@ export function inputForm(kind: WritableKind, value: unknown, opts: { nullable: 
       return { ok: true, text: String(value) };
     }
     case 'numeric': {
-      const t = typeof value === 'number' && Number.isFinite(value) ? String(value) : value;
-      if (typeof t !== 'string' || t.length > 1000 || !DECIMAL_RE.test(t)) return { ok: false, why: 'is not a decimal (numeric takes a string such as "12.50")' };
+      // A JSON number is exact only as a safe integer (12345678901234567890 was already rounded by the
+      // parse, pi r1); a fraction travels as a decimal string.
+      const t = typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : value;
+      if (typeof t !== 'string' || t.length > 1000 || !DECIMAL_RE.test(t)) return { ok: false, why: 'is not a decimal (numeric takes a string such as "12.50", or a whole number)' };
       return { ok: true, text: t };
     }
     case 'text':
     case 'varchar':
       if (typeof value !== 'string') return { ok: false, why: `is not a string (${kind})` };
       if (value.includes('\u0000')) return { ok: false, why: 'holds a NUL, which Postgres text refuses' };
+      // A lone surrogate would be sent as U+FFFD: not the value on the card (codex r1).
+      if (!wellFormed(value)) return { ok: false, why: 'holds a lone surrogate (not well-formed UTF-16)' };
       return { ok: true, text: value };
     case 'bool':
       if (typeof value !== 'boolean') return { ok: false, why: 'is not a boolean' };
@@ -206,39 +223,62 @@ export function inputForm(kind: WritableKind, value: unknown, opts: { nullable: 
       return problem === null ? { ok: true, text: value } : { ok: false, why: problem };
     }
     case 'enum':
-      if (typeof value !== 'string') return { ok: false, why: 'is not a string (an enum label)' };
+      if (typeof value !== 'string' || !wellFormed(value)) return { ok: false, why: 'is not a string (an enum label)' };
       if (opts.enumLabels !== undefined && !opts.enumLabels.includes(value)) return { ok: false, why: 'is not one of the enum labels' };
       return { ok: true, text: value };
   }
 }
 
-/** Whether a declared parameter's schema can carry this column's one input form (checked when the action lands). */
-export function paramFits(kind: WritableKind, p: Pick<AppParamSchema, 'type' | 'format' | 'from'>): string | null {
+/**
+ * Whether a declared parameter's schema can carry this column's one input form (checked when the action
+ * lands): its type and format, and every value it can be known to take (its enum values and default).
+ */
+export function paramFits(kind: WritableKind, p: Pick<AppParamSchema, 'type' | 'format' | 'from' | 'enum' | 'default'>, column: { enumLabels?: readonly string[] } = {}): string | null {
   const t = p.type;
+  const f = p.format;
+  let problem: string | null;
   switch (kind) {
     case 'int2':
     case 'int4':
     case 'int8':
-      return t === 'integer' ? null : `${kind} takes an integer parameter`;
+      problem = t === 'integer' ? null : `${kind} takes an integer parameter`;
+      break;
     case 'numeric':
-      return t === 'string' || t === 'integer' || t === 'number' ? null : 'numeric takes a string (a decimal) or a number parameter';
+      problem = (t === 'string' && f === undefined) || t === 'integer' ? null : 'numeric takes a string parameter (a decimal, no format) or an integer parameter';
+      break;
     case 'text':
     case 'varchar':
+      problem = t === 'string' ? null : `${kind} takes a string parameter`;
+      break;
     case 'enum':
-      return t === 'string' ? null : `${kind === 'enum' ? 'an enum' : kind} takes a string parameter`;
+      problem = t === 'string' && f === undefined ? null : 'an enum takes a string parameter with no format';
+      break;
     case 'bool':
-      return t === 'boolean' ? null : 'bool takes a boolean parameter';
+      problem = t === 'boolean' ? null : 'bool takes a boolean parameter';
+      break;
     case 'date':
-      return t === 'string' && (p.format === undefined || p.format === 'date') ? null : 'date takes a string parameter (format date)';
+      problem = t === 'string' && (f === undefined || f === 'date') ? null : 'date takes a string parameter (format date)';
+      break;
     case 'timestamp':
-      return t === 'string' && p.format === undefined ? null : 'timestamp (without time zone) takes a string parameter with no format (date-time carries an offset it would drop)';
+      problem = t === 'string' && f === undefined ? null : 'timestamp (without time zone) takes a string parameter with no format (date-time carries an offset it would drop)';
+      break;
     case 'timestamptz':
-      return t === 'string' && (p.format === undefined || p.format === 'date-time') ? null : 'timestamptz takes a string parameter (format date-time)';
+      problem = t === 'string' && (f === undefined || f === 'date-time') ? null : 'timestamptz takes a string parameter (format date-time)';
+      break;
     case 'uuid':
-      return t === 'string' && (p.format === undefined || p.format === 'uuid') ? null : 'uuid takes a string parameter (format uuid)';
+      problem = t === 'string' && (f === undefined || f === 'uuid') ? null : 'uuid takes a string parameter (format uuid)';
+      break;
     case 'jsonb':
-      return t === 'string' ? null : 'jsonb takes a string parameter holding JSON';
+      problem = t === 'string' && f === undefined ? null : 'jsonb takes a string parameter holding JSON, with no format';
+      break;
   }
+  if (problem !== null) return problem;
+  // A value the schema already names must itself be the column's input form (codex r1).
+  for (const v of [...(p.enum ?? []), ...(p.default !== undefined ? [p.default] : [])]) {
+    const r = inputForm(kind, v, { nullable: false, ...(column.enumLabels !== undefined ? { enumLabels: column.enumLabels } : {}) });
+    if (!r.ok) return `the parameter's value ${JSON.stringify(v)} ${r.why}`;
+  }
+  return null;
 }
 
 /** Which crew-filled value a column of `kind` can take. */

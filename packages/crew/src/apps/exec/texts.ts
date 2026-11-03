@@ -30,6 +30,13 @@ export type QueryArg = z.infer<typeof Arg>;
 
 type Parsed<T> = { ok: true; value: T } | { ok: false; why: string };
 
+/** Whether a parsed value holds the key `__proto__` anywhere (a record parser would drop it silently, codex r1). */
+function holdsProto(v: unknown, depth = 0): boolean {
+  if (v === null || typeof v !== 'object' || depth > 16) return false;
+  if (!Array.isArray(v) && Object.hasOwn(v, '__proto__')) return true;
+  return (Array.isArray(v) ? v : Object.values(v as Record<string, unknown>)).some((x) => holdsProto(x, depth + 1));
+}
+
 function parseJson<T>(text: string, schema: z.ZodType<T>): Parsed<T> {
   let v: unknown;
   try {
@@ -37,6 +44,7 @@ function parseJson<T>(text: string, schema: z.ZodType<T>): Parsed<T> {
   } catch {
     return { ok: false, why: 'the query text is not JSON' };
   }
+  if (holdsProto(v)) return { ok: false, why: 'the query text uses the key __proto__' };
   const r = schema.safeParse(v);
   if (!r.success) return { ok: false, why: r.error.issues.slice(0, 3).map((i) => `${i.path.join('.') || 'text'}: ${i.message}`).join('; ') };
   return { ok: true, value: r.data };
@@ -52,7 +60,7 @@ export function parseCrewQueryText(text: string): Parsed<AppCrewQueryText> {
   return r.ok ? { ok: true, value: { route: r.value.route, params: r.value.params ?? {}, query: r.value.query ?? {} } } : r;
 }
 
-/** The parameters an argument map names (each must be declared). */
-export function argParams(args: Record<string, QueryArg>): string[] {
-  return Object.values(args).flatMap((a) => (a.kind === 'param' ? [a.name] : []));
+/** A value a crew-source path segment may take (the reader refuses the rest before any request). */
+export function crewPathValueOk(v: unknown): boolean {
+  return v !== null && v !== undefined && String(v) !== '' && String(v) !== '.' && String(v) !== '..';
 }

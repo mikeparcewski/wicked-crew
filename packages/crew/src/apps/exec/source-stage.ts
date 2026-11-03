@@ -24,11 +24,14 @@
 import { buildClientSchema, type IntrospectionQuery, Kind, parse, validate } from 'graphql';
 
 import type { AppAction, AppCheckFinding, AppParamSchema, AppParamsSchema, AppQuery, AppRowWriteAction, McpToolClass } from '../../core/types.js';
-import { deriveToolClass, effectiveToolClass } from '../../mcp/classify.js';
+import { canonicalJson, deriveToolClass, effectiveToolClass } from '../../mcp/classify.js';
 import { McpRegistryError, type McpRegistry } from '../../mcp/registry.js';
+import { describeMysql } from '../../sources/catalog/mysql.js';
+import { describePg } from '../../sources/catalog/postgres.js';
 import { policyCatalog, type SqlCatalog } from '../../sources/catalog/types.js';
 import { CREW_SOURCE_ROUTES } from '../../sources/crew-source.js';
 import { DialRefusedError, type DialOptions } from '../../sources/dialer.js';
+import { pgReadOnly } from '../../sources/drivers/postgres.js';
 import { SourceQueryError } from '../../sources/drivers/types.js';
 import { checkGraphqlRead } from '../../sources/graphql.js';
 import { sqlConnectArgs } from '../../sources/kinds.js';
@@ -36,11 +39,13 @@ import { checkReadPolicy } from '../../sources/policy/index.js';
 import { pgTableSafety, type SafetyColumn } from '../../sources/safety/postgres.js';
 import { checkSqlQuery, type SqlSourceHandle } from '../../sources/sql.js';
 import { snapshotPath } from '../../sources/uploads.js';
-import { crewValueFits, inputForm, paramFits, writableKind } from '../actions/values.js';
+import { baseTypeSql, pgExactFitIn, type FitItem } from '../actions/pg-fit.js';
+import { crewNow, crewValueFits, inputForm, paramFits, writableKind } from '../actions/values.js';
+import { ArgTypeError, checkGraphqlVariables, checkToolArgs, type Provider, providerOf } from './arg-types.js';
 import type { AppSourceStage, AppSourceStageInput, AppSourceStageResult } from '../check.js';
-import { crewQueryContract, graphqlMutationContract, graphqlQueryContract, graphqlRootSignatures, paramOrder, rowWriteContract, splitTable, sqlQueryContract, toolActionContract, toolQueryContract } from './contract.js';
-import { lookupSource, queryKindFits, type AppSource } from './sources.js';
-import { argParams, parseCrewQueryText, parseToolQueryText, type QueryArg } from './texts.js';
+import { crewQueryContract, graphqlMutationContract, graphqlQueryContract, graphqlRootSignatures, paramOrder, relationTerms, rowWriteContract, splitTable, sqlQueryContract, toolActionContract, toolQueryContract } from './contract.js';
+import { lookupSource, pinOf, queryKindFits, type AppSource } from './sources.js';
+import { crewPathValueOk, parseCrewQueryText, parseToolQueryText, type QueryArg } from './texts.js';
 
 export interface SourceStageDeps {
   registry: McpRegistry | null;
@@ -61,7 +66,8 @@ class Refused extends Error {
   }
 }
 
-const NUMERIC_PG = new Set(['smallint', 'integer', 'bigint', 'numeric', 'real', 'double precision']);
+const INTEGRAL_PG = new Set(['smallint', 'integer', 'bigint']);
+const NUMERIC_PG = new Set([...INTEGRAL_PG, 'numeric', 'real', 'double precision']);
 const TEXT_PG = new Set(['text', 'character varying', 'character', 'name']);
 
 /** Whether a declared parameter can be sent to a Postgres placeholder the server inferred as `pgType`. */
@@ -70,7 +76,9 @@ function paramTypeFits(p: AppParamSchema, pgType: string): boolean {
   if (pgType.endsWith('[]')) return p.type === 'array' && p.items !== undefined && paramTypeFits({ type: p.items.type }, base);
   if (p.type === 'array') return false;
   if (p.type === 'boolean') return base === 'boolean' || TEXT_PG.has(base);
-  if (p.type === 'integer' || p.type === 'number') return NUMERIC_PG.has(base) || TEXT_PG.has(base);
+  // An integer fills any number; a fraction (`number`) never an integral placeholder (codex r1).
+  if (p.type === 'integer') return NUMERIC_PG.has(base) || TEXT_PG.has(base);
+  if (p.type === 'number') return (NUMERIC_PG.has(base) && !INTEGRAL_PG.has(base)) || TEXT_PG.has(base);
   // A string: anything but a number or a boolean (dates, uuids, enums, json are typed from text).
   return !NUMERIC_PG.has(base) && base !== 'boolean' && base !== 'unknown';
 }
@@ -97,6 +105,7 @@ function outputTypeFits(declared: AppQuery['output'][number]['type'], pgType: st
 /** An error from reaching a source, in crew's words only. */
 function unreachable(err: unknown): Refused {
   if (err instanceof Refused) return err;
+  if (err instanceof ArgTypeError) return new Refused(err.code, err.message);
   if (err instanceof DialRefusedError) return new Refused(err.code, `the connection to the source was refused (${err.code})`);
   if (err instanceof McpRegistryError) return new Refused(err.code, `the source cannot be used (${err.code})`);
   if (err instanceof SourceQueryError) {
@@ -118,24 +127,29 @@ function checkOutput(q: AppQuery, columns: Array<{ name: string; type: string }>
   }
 }
 
-/** The declared parameters every argument names. */
-function checkArgParams(args: Record<string, QueryArg>, params: AppParamsSchema | undefined): void {
-  for (const p of argParams(args)) {
-    if (params === undefined || !Object.hasOwn(params.properties, p)) throw new Refused('unknown_param', `parameter ${JSON.stringify(p)} is not declared`, 'spec');
+/** Each argument's provider (a declared parameter, or a literal); an undeclared parameter is refused. */
+function providers(args: Record<string, QueryArg>, params: AppParamsSchema | undefined): Record<string, Provider> {
+  const out: Record<string, Provider> = Object.create(null) as Record<string, Provider>;
+  for (const [k, a] of Object.entries(args)) {
+    try {
+      out[k] = providerOf(a, params);
+    } catch (err) {
+      if (err instanceof ArgTypeError) throw new Refused(err.code, err.message, 'spec');
+      throw err;
+    }
   }
+  return out;
 }
 
-/** Arguments against a tool's input schema: known names, required ones supplied. */
-function checkToolArgs(names: string[], inputSchema: Record<string, unknown> | null): void {
-  const props = inputSchema !== null && typeof inputSchema['properties'] === 'object' && inputSchema['properties'] !== null ? (inputSchema['properties'] as Record<string, unknown>) : null;
-  if (props !== null) {
-    for (const n of names) if (!Object.hasOwn(props, n)) throw new Refused('unknown_argument', `the tool takes no argument ${JSON.stringify(n)}`);
-  }
-  const required = Array.isArray(inputSchema?.['required']) ? (inputSchema['required'] as unknown[]).filter((r): r is string => typeof r === 'string') : [];
-  for (const r of required) if (!names.includes(r)) throw new Refused('missing_argument', `the tool needs the argument ${JSON.stringify(r)}`);
+/** A query's parameters as the providers of a GraphQL document's variables, by name. */
+function paramProviders(params: AppParamsSchema | undefined): Record<string, Provider> {
+  return providers(Object.fromEntries(Object.keys(params?.properties ?? {}).map((n) => [n, { kind: 'param' as const, name: n }])), params);
 }
 
 const classOf = (t: { annotations: Parameters<typeof deriveToolClass>[0]; classOverride: McpToolClass | null }): McpToolClass => effectiveToolClass(deriveToolClass(t.annotations), t.classOverride);
+
+/** One check call's secrets (resolved once per source) and fresh catalogs (described once per source). */
+type SecretOf = ((s: AppSource & { config: unknown }) => Promise<string | null>) & { fresh: (name: string, describe: () => Promise<SqlCatalog>) => Promise<SqlCatalog> };
 
 export class AppsSourceStage implements AppSourceStage {
   constructor(private readonly deps: SourceStageDeps) {}
@@ -152,7 +166,8 @@ export class AppsSourceStage implements AppSourceStage {
       }
       return s;
     };
-    const secretOf = (s: AppSource & { config: unknown }): Promise<string | null> => {
+    const freshCatalogs = new Map<string, Promise<SqlCatalog>>();
+    const secretOf = ((s: AppSource & { config: unknown }): Promise<string | null> => {
       let p = secrets.get(s.name);
       if (p === undefined) {
         p = (async () => {
@@ -161,6 +176,14 @@ export class AppsSourceStage implements AppSourceStage {
           return r.secret;
         })();
         secrets.set(s.name, p);
+      }
+      return p;
+    }) as SecretOf;
+    secretOf.fresh = (name, describe) => {
+      let p = freshCatalogs.get(name);
+      if (p === undefined) {
+        p = describe();
+        freshCatalogs.set(name, p);
       }
       return p;
     };
@@ -172,7 +195,10 @@ export class AppsSourceStage implements AppSourceStage {
     for (const id of input.queries) {
       const i = input.spec.queries.findIndex((q) => q.id === id);
       const q = input.spec.queries[i];
-      if (q === undefined) continue;
+      if (q === undefined) {
+        out.findings.push({ stage: 'source', code: 'unknown_query', path: '$.queries', message: `the check was asked about query ${id}, which the spec does not hold` });
+        continue;
+      }
       try {
         const s = await source(q.source);
         if (s === null) throw new Refused('unknown_source', `no source named ${q.source}`);
@@ -187,7 +213,10 @@ export class AppsSourceStage implements AppSourceStage {
     for (const id of input.actions) {
       const i = input.spec.actions.findIndex((a) => a.id === id);
       const a = input.spec.actions[i];
-      if (a === undefined) continue;
+      if (a === undefined) {
+        out.findings.push({ stage: 'source', code: 'unknown_action', path: '$.actions', message: `the check was asked about action ${id}, which the spec does not hold` });
+        continue;
+      }
       try {
         const s = await source(a.source);
         if (s === null) throw new Refused('unknown_source', `no source named ${a.source}`);
@@ -201,7 +230,7 @@ export class AppsSourceStage implements AppSourceStage {
     return out;
   }
 
-  private async query(q: AppQuery, text: string, s: AppSource, secretOf: (s: AppSource & { config: unknown }) => Promise<string | null>): Promise<string> {
+  private async query(q: AppQuery, text: string, s: AppSource, secretOf: SecretOf): Promise<string> {
     if (s.kind === 'crew') {
       const parsed = parseCrewQueryText(text);
       if (!parsed.ok) throw new Refused('query_text', parsed.why, 'spec');
@@ -209,19 +238,21 @@ export class AppsSourceStage implements AppSourceStage {
       if (route === undefined) throw new Refused('crew_route', `the crew source does not read ${parsed.value.route}`);
       for (const p of route.params) if (!Object.hasOwn(parsed.value.params, p)) throw new Refused('crew_route', `${route.path} needs :${p}`);
       for (const p of Object.keys(parsed.value.params)) if (!route.params.includes(p)) throw new Refused('crew_route', `${route.path} has no :${p}`);
-      checkArgParams({ ...parsed.value.params, ...parsed.value.query }, q.params);
+      // Each map on its own (codex/pi r1: a spread let a query value hide a path argument's parameter).
+      providers(parsed.value.params, q.params);
+      providers(parsed.value.query, q.params);
+      for (const [k, a] of Object.entries(parsed.value.params)) {
+        if (a.kind === 'literal' && !crewPathValueOk(a.value)) throw new Refused('crew_route', `:${k} of ${route.path} cannot be ${JSON.stringify(a.value)}`);
+      }
       return crewQueryContract(route);
     }
     if (s.kind === 'rest' || s.kind === 'mcp-http' || s.kind === 'mcp-stdio') {
       const parsed = parseToolQueryText(text);
       if (!parsed.ok) throw new Refused('query_text', parsed.why, 'spec');
-      const t = await this.deps.registry!.appTool(s.name, parsed.value.tool);
-      if (t === null) throw new Refused('unknown_tool', `${s.name} has no tool ${parsed.value.tool}`);
-      if (!t.bound) throw new Refused('tool_not_saved', `${s.name}/${parsed.value.tool} is not saved as the server shows it now (or the server is off): save the source again`);
-      if (classOf(t.tool) !== 'read') throw new Refused('not_a_read', `${s.name}/${parsed.value.tool} is not accepted as a read on the source sheet`);
-      checkArgParams(parsed.value.args, q.params);
-      checkToolArgs(Object.keys(parsed.value.args), t.tool.inputSchema);
-      return toolQueryContract(s.kind, t.tool, q.params);
+      const t = await this.tool(s, parsed.value.tool);
+      if (classOf(t) !== 'read') throw new Refused('not_a_read', `${s.name}/${parsed.value.tool} is not accepted as a read on the source sheet`);
+      checkToolArgs(providers(parsed.value.args, q.params), t.inputSchema);
+      return toolQueryContract(s.kind, t, q.params);
     }
     if (s.kind === 'graphql') {
       const introspection = s.description?.introspection;
@@ -229,8 +260,8 @@ export class AppsSourceStage implements AppSourceStage {
       const c = checkGraphqlRead(text, introspection);
       if (!c.ok) throw new Refused(c.code, c.detail, 'policy');
       const declared = Object.keys(q.params?.properties ?? {});
-      for (const v of c.variables) if (!declared.includes(v)) throw new Refused('unknown_param', `the document's variable $${v} is not a declared parameter`);
       for (const d of declared) if (!c.variables.includes(d)) throw new Refused('unused_param', `parameter ${d} is not a variable of the document`);
+      checkGraphqlVariables(text, introspection, paramProviders(q.params));
       const sigs = graphqlRootSignatures(text, introspection, 'query');
       if (sigs === null) throw new Refused('invalid', 'the document selects a root field the schema does not have');
       return graphqlQueryContract(sigs, q.params);
@@ -263,42 +294,73 @@ export class AppsSourceStage implements AppSourceStage {
       });
     }
     checkOutput(q, c.describe.columns, driver === 'postgres');
+    // The contract hashes the STORED catalog (what a read recomputes later), so it must still be the
+    // source's: a relation that changed since the describe is refused here (codex r1).
+    if (driver !== 'sqlite') {
+      const fresh = await this.fresh(s, driver, secretOf);
+      const keys = policy.keys ?? [];
+      if (canonicalJson(relationTerms(catalog, keys)) !== canonicalJson(relationTerms(fresh, keys))) {
+        throw new Refused('catalog_stale', `what query ${q.id} reads at ${s.name} changed since the source was described: describe it again`);
+      }
+    }
     const contract = sqlQueryContract(driver, catalog, policy.keys ?? [], q.params);
     if (contract === null) throw new Refused('not_described', `${s.name}'s description does not cover every relation the query reads: describe it again`);
     return contract;
   }
 
-  private async action(a: AppAction, s: AppSource, secretOf: (s: AppSource & { config: unknown }) => Promise<string | null>): Promise<string> {
+  /** A tool of `s`, saved as the server shows it, read with `s`'s own config (codex r1: no other save's). */
+  private async tool(s: AppSource & { config: Parameters<McpRegistry['callSecret']>[0] }, name: string) {
+    const t = await this.deps.registry!.appTool(s.name, name);
+    if (t === null) throw new Refused('unknown_tool', `${s.name} has no tool ${name}`);
+    if (pinOf(t.config).descriptorHash !== s.pin.descriptorHash) throw new Refused('source_changed', `${s.name} was saved again while it was being checked: check again`);
+    if (!t.bound) throw new Refused('tool_not_saved', `${s.name}/${name} is not saved as the server shows it now (or the server is off): save the source again`);
+    return t.tool;
+  }
+
+  /** A fresh describe of a network SQL source's catalog: once per check call, never reused across calls. */
+  private fresh(s: Extract<AppSource, { kind: 'sql' }>, driver: 'postgres' | 'mysql', secretOf: SecretOf): Promise<SqlCatalog> {
+    return secretOf.fresh(s.name, async () => {
+      const args = sqlConnectArgs(s.config, await secretOf(s), this.deps.dial ?? {});
+      return driver === 'postgres' ? describePg(args) : describeMysql(args);
+    });
+  }
+
+  private async action(a: AppAction, s: AppSource, secretOf: SecretOf): Promise<string> {
     if (a.kind === 'row-write') return this.rowWrite(a, s, secretOf);
     if (a.call.kind === 'tool') {
       if (s.kind !== 'rest' && s.kind !== 'mcp-http' && s.kind !== 'mcp-stdio') throw new Refused('source_kind', `a tool action calls a REST or MCP server; ${a.source} is a ${s.kind} source`);
-      const t = await this.deps.registry!.appTool(s.name, a.call.tool);
-      if (t === null) throw new Refused('unknown_tool', `${s.name} has no tool ${a.call.tool}`);
-      if (!t.bound) throw new Refused('tool_not_saved', `${s.name}/${a.call.tool} is not saved as the server shows it now (or the server is off): save the source again`);
-      checkToolArgs(Object.keys(a.args), t.tool.inputSchema);
-      return toolActionContract(s.kind, t.tool);
+      const t = await this.tool(s, a.call.tool);
+      checkToolArgs(actionProviders(a.args, a.params), t.inputSchema);
+      return toolActionContract(s.kind, t);
     }
     if (s.kind !== 'graphql') throw new Refused('source_kind', `a mutation action calls a GraphQL source; ${a.source} is a ${s.kind} source`);
     const introspection = s.description?.introspection;
     if (introspection === undefined) throw new Refused('not_described', `${s.name} has not been described: describe it first`);
-    const sig = checkMutation(a.call.mutation, introspection, Object.keys(a.args));
-    return graphqlMutationContract(sig);
+    const sigs = checkMutation(a.call.mutation, introspection, Object.keys(a.args));
+    checkGraphqlVariables(a.call.mutation, introspection, actionProviders(a.args, a.params));
+    return graphqlMutationContract(sigs);
   }
 
-  private async rowWrite(a: AppRowWriteAction, s: AppSource, secretOf: (s: AppSource & { config: unknown }) => Promise<string | null>): Promise<string> {
+  private async rowWrite(a: AppRowWriteAction, s: AppSource, secretOf: SecretOf): Promise<string> {
     if (s.kind !== 'sql' || s.config.sql?.driver !== 'postgres') throw new Refused('writes_not_supported', `row writes are Postgres only in v1; ${a.source} is not a Postgres source`);
     const { schema, name } = splitTable(a.table);
     const set = Object.keys(a.set ?? {});
     const key = Object.keys(a.key);
-    const r = await pgTableSafety(sqlConnectArgs(s.config, await secretOf(s), this.deps.dial ?? {}), schema, name, { op: a.op, set, key });
+    const args = sqlConnectArgs(s.config, await secretOf(s), this.deps.dial ?? {});
+    const r = await pgTableSafety(args, schema, name, { op: a.op, set, key });
     if (!r.safe) throw new Refused(r.reasons[0]?.code ?? 'unsafe_table', r.reasons.map((x) => x.detail).join('; '));
-    checkRowValues(a, r.columns);
+    const fixed = checkRowValues(a, r.columns);
+    // A value the app fixes (a literal, crew's now) must survive its column's full type: the database says (P28, pi r1).
+    if (fixed.length > 0) {
+      const misfits = await pgReadOnly(args, (tx) => pgExactFitIn(tx, fixed));
+      if (misfits.length > 0) throw new Refused('value_does_not_fit', misfits.map((m) => `the app's value for ${a.table}.${m.column} ${m.why}`).join('; '));
+    }
     return rowWriteContract({ schema, table: name, op: a.op, set, key, fingerprint: r.fingerprint });
   }
 }
 
 /** One mutation, one root field, valid against the schema; its variables exactly the action's arguments. Answers the field's signature. */
-export function checkMutation(mutation: string, introspection: IntrospectionQuery, args: string[]): string {
+export function checkMutation(mutation: string, introspection: IntrospectionQuery, args: string[]): string[] {
   let doc;
   try {
     doc = parse(mutation, { noLocation: true, maxTokens: 10_000 });
@@ -321,12 +383,13 @@ export function checkMutation(mutation: string, introspection: IntrospectionQuer
   for (const v of vars) if (!args.includes(v)) throw new Refused('unknown_argument', `the mutation's variable $${v} has no argument`);
   for (const n of args) if (!vars.includes(n)) throw new Refused('unknown_argument', `the argument ${n} is not a variable of the mutation`);
   const sigs = graphqlRootSignatures(mutation, introspection, 'mutation');
-  if (sigs === null || sigs.length !== 1) throw new Refused('invalid', 'the mutation selects a root field the schema does not have');
-  return sigs[0]!;
+  if (sigs === null) throw new Refused('invalid', 'the mutation selects a field the schema does not have');
+  return sigs;
 }
 
 /** Every set and key value against its column's one input form (DES §7.4 "Values must fit exactly"). */
-export function checkRowValues(a: AppRowWriteAction, columns: readonly SafetyColumn[]): void {
+export function checkRowValues(a: AppRowWriteAction, columns: readonly SafetyColumn[]): FitItem[] {
+  const fixed: FitItem[] = [];
   const props = a.params?.properties ?? {};
   const entries: Array<[string, NonNullable<AppRowWriteAction['set']>[string]]> = [...Object.entries(a.set ?? {}), ...Object.entries(a.key)];
   for (const [col, v] of entries) {
@@ -343,15 +406,34 @@ export function checkRowValues(a: AppRowWriteAction, columns: readonly SafetyCol
         if (p.from === 'viewer.groups' || (kind !== 'text' && kind !== 'varchar')) throw new Refused('value_type', `${at} cannot take ${p.from}: a viewer claim goes into a text column`);
         continue;
       }
-      const problem = paramFits(kind, p);
+      const problem = paramFits(kind, p, c);
       if (problem !== null) throw new Refused('value_type', `${at}: ${problem} (parameter ${v.name} is ${p.type}${p.format !== undefined ? `, format ${p.format}` : ''})`);
     } else if (v.kind === 'literal') {
       const f = inputForm(kind, v.value, { nullable: !c.notnull, ...(c.enumLabels !== undefined ? { enumLabels: c.enumLabels } : {}) });
       if (!f.ok) throw new Refused('value_type', `the literal for ${at} ${f.why}`);
+      if (f.text !== null) fixed.push({ column: col, full: c.type, base: baseTypeSql(c), text: f.text });
     } else if (v.kind === 'viewer') {
       if (kind !== 'text' && kind !== 'varchar') throw new Refused('value_type', `${at} cannot take the viewer's ${v.claim}: a viewer claim goes into a text column`);
     } else if (!crewValueFits(kind, v.value)) {
       throw new Refused('value_type', `${at} cannot take crew's ${v.value === 'now' ? 'now (a timestamp)' : 'new uuid'}`);
+    } else if (v.value === 'now') {
+      // crew fills microseconds: a column that keeps fewer would round it.
+      fixed.push({ column: col, full: c.type, base: baseTypeSql(c), text: crewNow(kind, new Date(Date.UTC(2026, 0, 2, 3, 4, 5, 678))).replace(/\.678000/, '.678901') });
     }
   }
+  return fixed;
+}
+
+/** An action's argument values as providers. */
+function actionProviders(args: Record<string, import('../../core/types.js').AppValue>, params: AppParamsSchema | undefined): Record<string, Provider> {
+  const out: Record<string, Provider> = Object.create(null) as Record<string, Provider>;
+  for (const [k, v] of Object.entries(args)) {
+    try {
+      out[k] = providerOf(v, params);
+    } catch (err) {
+      if (err instanceof ArgTypeError) throw new Refused(err.code, err.message, 'spec');
+      throw err;
+    }
+  }
+  return out;
 }

@@ -6,6 +6,9 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 import type { AppAction, AppDetail, AppQuery, AppVersion } from '../src/core/types.js';
+import { AppsSourceStage } from '../src/apps/exec/source-stage.js';
+import type { McpRegistry } from '../src/mcp/registry.js';
+import type { McpToolRecord } from '../src/mcp/registry-store.js';
 import { startGraphqlServer, startMcpServer, startOpenApiService } from './fixtures/apps-sources/servers.mjs';
 import { appsHarness, type Harness, specWith } from './support/apps-harness.js';
 import { DB_REQUIRED, type FreshPg, freshPgDatabase, PG_TARGETS } from './support/sources-db.js';
@@ -51,6 +54,37 @@ describe('the source stage without a database', () => {
     expect((await refused(runsQuery, JSON.stringify({ route: '/runs', extra: 1 })))[0]).toMatchObject({ stage: 'spec', code: 'query_text' });
     const sql: AppQuery = { id: 'tickets', source: 'support', kind: 'sql', output: [{ name: 'n', type: 'integer' }] };
     expect((await refused(sql, 'SELECT 1 AS n'))[0]).toMatchObject({ code: 'unknown_source', message: 'query tickets: no source named support' });
+  });
+
+  it('fail closed (codex/pi r1): a path argument hidden by a same-named query value, a bad path literal, a __proto__ key, an id the spec lacks', async () => {
+    h = await appsHarness();
+    await h.newApp('runs-board');
+    const one: AppQuery = { ...runsQuery, id: 'one_run', rowPath: '$.run' };
+    const first = async (text: string) => {
+      const r = await h.land('runs-board', specWith([one]), { one_run: text });
+      expect(r.status, JSON.stringify(r.body)).toBe(422);
+      return (r.body as unknown as Landed).findings![0]!;
+    };
+    expect(await first(JSON.stringify({ route: '/runs/:id', params: { id: { kind: 'param', name: 'undeclared' } }, query: { id: { kind: 'literal', value: 'mask' } } }))).toMatchObject({ code: 'unknown_param' });
+    for (const bad of ['', '.', '..']) expect(await first(JSON.stringify({ route: '/runs/:id', params: { id: { kind: 'literal', value: bad } } }))).toMatchObject({ code: 'crew_route' });
+    expect(await first('{"route": "/runs", "query": {"__proto__": {"kind": "param", "name": "missing"}}}')).toMatchObject({ code: 'query_text' });
+    const stage = new AppsSourceStage({ registry: null });
+    const r = await stage.check({ app: 'x', spec: specWith([]), queryText: {}, queries: ['ghost'], actions: ['phantom'] });
+    expect(r.findings.map((f) => f.code)).toEqual(['unknown_query', 'unknown_action']);
+  });
+
+  it('a tool read with config A whose registry answers config B (a save between the two reads) is refused, never pinned to A (codex r1)', async () => {
+    const config = (url: string) => ({ name: 'api', kind: 'rest' as const, command: null, args: [], url, auth: null });
+    const tool: McpToolRecord = { name: 'list', description: null, inputSchema: null, outputSchema: null, annotations: { readOnlyHint: true }, classOverride: null, enabled: true, schemaHash: 'h', observedSchemaHash: 'h', present: true };
+    const registry = {
+      inspectTarget: async () => config('https://a.example/v1'),
+      appTool: async () => ({ config: config('https://b.example/v1'), tool, bound: true }),
+    } as unknown as McpRegistry;
+    const stage = new AppsSourceStage({ registry });
+    const q: AppQuery = { id: 'q', source: 'api', kind: 'rest', rowPath: '$.items[*]', output: [{ name: 'id', type: 'integer' }] };
+    const r = await stage.check({ app: 'x', spec: specWith([q]), queryText: { q: JSON.stringify({ tool: 'list' }) }, queries: ['q'], actions: [] });
+    expect(r.findings[0]).toMatchObject({ code: 'source_changed' });
+    expect(r.queries).toEqual({});
   });
 
   it('`$n` binds the n-th declared parameter, so reordering the parameters is checked again (canonical JSON alone would not see it)', async () => {
@@ -127,6 +161,12 @@ describe('the source stage over REST, MCP and GraphQL sources (the K1 test servi
     expect(lock.sources['ref']?.descriptor).toMatchObject({ kind: 'mcp-http', command: null });
   });
 
+  it('a GraphQL read through a root fragment and __typename lands (codex r1)', async () => {
+    const q: AppQuery = { id: 'frag', source: 'tix', kind: 'graphql', rowPath: '$.data.tickets[*]', output: [{ name: 'id', type: 'integer' }] };
+    const r = await land([q], { frag: 'query { __typename ...T } fragment T on Query { tickets { id } }' });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+  });
+
   it('refuses a write tool as a read, an argument the tool does not take, two root fields, a variable with no argument', async () => {
     const first = async (queries: AppQuery[], texts: Record<string, string>, actions: AppAction[] = []) => {
       const r = await land(queries, texts, actions);
@@ -142,6 +182,12 @@ describe('the source stage over REST, MCP and GraphQL sources (the K1 test servi
     expect(await first([], {}, [two])).toMatchObject({ code: 'root_fields' });
     const noArg: AppAction = { ...two, call: { kind: 'mutation', mutation: 'mutation ($id: Int!, $owner: String!) { assign(id: $id, owner: $owner) { id } }' } };
     expect(await first([], {}, [noArg])).toMatchObject({ code: 'unknown_argument' });
+    // Typed arguments (codex r1): a literal the tool's schema refuses, a GraphQL Int filled from a string.
+    expect(await first([tool('q', 'tickets', 'rest')], { q: JSON.stringify({ tool: 'listTickets', args: { page: { kind: 'literal', value: 'bad' } } }) })).toMatchObject({ code: 'argument_type' });
+    const gq: AppQuery = { id: 'g', source: 'tix', kind: 'graphql', rowPath: '$.data.ticket', params: { type: 'object', properties: { id: { type: 'string', default: 'not an integer' } } }, output: [{ name: 'id', type: 'integer' }] };
+    expect(await first([gq], { g: 'query ($id: Int!) { ticket(id: $id) { id } }' })).toMatchObject({ code: 'variable_type' });
+    const lit: AppAction = { ...noArg, args: { id: { kind: 'literal', value: 'x' }, owner: { kind: 'viewer', claim: 'email' } } };
+    expect(await first([], {}, [lit])).toMatchObject({ code: 'variable_type' });
     const rowOnRest: AppAction = { id: 'w', kind: 'row-write', source: 'tickets', table: 's.w', op: 'delete', key: { id: { kind: 'param', name: 'id' } }, params };
     expect(await first([], {}, [rowOnRest])).toMatchObject({ code: 'writes_not_supported' });
   });
@@ -211,6 +257,28 @@ for (const target of PG_TARGETS) {
       expect(f.message).not.toContain('does not exist');
     });
 
+    it('codex r1: a fraction for an integral placeholder; a description older than the table; a reorder of SQL parameters changes the contract', async () => {
+      const asNumber = { ...byId, params: { type: 'object' as const, properties: { id: { type: 'number' as const, default: 1.5 } } } };
+      expect(await findingOf([asNumber], { by_id: text })).toMatchObject({ code: 'param_type' });
+      await db.admin.unsafe('ALTER TABLE s.w ALTER COLUMN owner TYPE varchar(200)');
+      try {
+        // A changed description makes the stage check the query again.
+        expect(await findingOf([{ ...byId, description: 'stale' }], { by_id: text })).toMatchObject({ code: 'catalog_stale' });
+        expect((await h.call('POST', '/sources/support/describe', {})).status).toBe(200);
+        expect((await h.land('tickets', specWith([{ ...byId, description: 'fresh' }]), { by_id: text })).status).toBe(200);
+      } finally {
+        await db.admin.unsafe('ALTER TABLE s.w ALTER COLUMN owner TYPE text');
+        await h.call('POST', '/sources/support/describe', {});
+      }
+      const two = (order: Array<'a' | 'b'>): AppQuery => ({ ...byId, params: { type: 'object', properties: Object.fromEntries(order.map((n) => [n, { type: 'integer' as const, default: 4821 }])) } });
+      const t2 = 'SELECT w.id, w.owner FROM s.w AS w WHERE w.id = $1 AND w.id = $2';
+      const ab = await h.land('tickets', specWith([two(['a', 'b'])]), { by_id: t2 });
+      expect(ab.status, JSON.stringify(ab.body)).toBe(200);
+      const ba = await h.land('tickets', specWith([two(['b', 'a'])]), { by_id: t2 });
+      expect((ba.body as unknown as Landed).landed.check.checked).toEqual(['by_id']);
+      expect((ba.body as unknown as Landed).app.lock.queries['by_id']?.contractHash).not.toBe((ab.body as unknown as Landed).app.lock.queries['by_id']?.contractHash);
+    });
+
     const assign: AppAction = {
       id: 'assign',
       kind: 'row-write',
@@ -241,6 +309,18 @@ for (const target of PG_TARGETS) {
       expect(await findingOf([], {}, [numberOwner])).toMatchObject({ code: 'value_type' });
       const nowOwner: AppAction = { ...assign, set: { owner: { kind: 'crew', value: 'now' } } };
       expect(await findingOf([], {}, [nowOwner])).toMatchObject({ code: 'value_type' });
+      // pi r1: a fixed value the column's typmod would change is refused when the action lands (P28).
+      const code: AppAction = { ...assign, table: 's.money', set: { code: { kind: 'literal', value: 'abcd' } } };
+      expect(await findingOf([], {}, [code])).toMatchObject({ code: 'value_does_not_fit' });
+      const amount: AppAction = { ...assign, table: 's.money', set: { amount: { kind: 'literal', value: '1.234' } } };
+      expect(await findingOf([], {}, [amount])).toMatchObject({ code: 'value_does_not_fit' });
+      await db.admin.unsafe('CREATE TABLE s.ts0 (id int PRIMARY KEY, at timestamp(0))');
+      try {
+        const at: AppAction = { ...assign, table: 's.ts0', set: { at: { kind: 'crew', value: 'now' } } };
+        expect(await findingOf([], {}, [at])).toMatchObject({ code: 'value_does_not_fit' });
+      } finally {
+        await db.admin.unsafe('DROP TABLE s.ts0');
+      }
       const ratio: AppAction = { ...assign, table: 's.money', set: { ratio: { kind: 'literal', value: 1 } } };
       expect(await findingOf([], {}, [ratio])).toMatchObject({ code: 'written_type' }); // P31: floating point
     });

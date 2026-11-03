@@ -310,11 +310,13 @@ jobs:
         working-directory: wicked-crew
         run: npm ci
 
-      - name: Apps source tests on real databases
+      - name: Apps source and executor tests on real databases
         working-directory: wicked-crew/packages/crew
         env:
           WICKED_SOURCES_DB: required
           APPS_PG16_URL: postgres://postgres:apps@127.0.0.1:55416/postgres
           APPS_PG17_URL: postgres://postgres:apps@127.0.0.1:55417/postgres
           APPS_MYSQL8_URL: mysql://root:apps@127.0.0.1:53308/mysql
-        run: npx vitest run tests/sources- --maxWorkers=2
+        # tests/sources-*: K1. tests/apps-*: K2b's source stage, executor and write path (and the P1-P43
+        # regression suite), which skip without these variables everywhere else.
+        run: npx vitest run tests/sources- tests/apps- --maxWorkers=2
