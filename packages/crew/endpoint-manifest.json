@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.180.0",
+  "apiTypesVersion": "0.181.0",
   "endpoints": [
     {
       "method": "GET",
@@ -145,12 +145,27 @@
     {
       "method": "POST",
       "path": "/api/v1/apps/:app/publish",
+      "requestType": "AppPublishBody",
+      "responseType": "AppPublishResponse",
+      "statusCodes": [
+        202,
+        400,
+        403,
+        404,
+        409,
+        422,
+        501,
+        503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/apps/:app/published/teams.zip",
       "requestType": null,
       "responseType": null,
       "statusCodes": [
-        403,
-        404,
-        501
+        200,
+        404
       ]
     },
     {
@@ -242,6 +257,36 @@
         401,
         404,
         409,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/apps/publish/check",
+      "requestType": "AppPublishStepBody",
+      "responseType": "AppPublishCheckResponse",
+      "statusCodes": [
+        200,
+        400,
+        401,
+        403,
+        404,
+        409
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/apps/publish/produce",
+      "requestType": "AppPublishStepBody",
+      "responseType": "AppPublishProduceResponse",
+      "statusCodes": [
+        200,
+        400,
+        401,
+        403,
+        404,
+        409,
+        502,
         503
       ]
     },

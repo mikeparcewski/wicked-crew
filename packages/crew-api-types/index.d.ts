@@ -15822,7 +15822,7 @@ export interface AppPublishBody {
   embedOrigins?: string[];
 }
 
-/** `POST /apps/:app/publish` 202: the `apps-publish` run, bound to the head tree and this manifest digest. */
+/** (api-types 0.181.0, K6 publish run) `POST /apps/:app/publish` 202: the `apps-publish` run, bound to the head tree and this manifest digest. */
 export interface AppPublishResponse {
   runId: string;
   manifestDigest: string;
