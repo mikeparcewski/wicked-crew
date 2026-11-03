@@ -63,7 +63,16 @@ export async function graphqlPost(src: GraphqlSource, secret: string | null, bod
   const secrets = secret === null ? [] : [secret];
   try {
     const res = await dialFetch(src.url, { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(deadlineMs) }, src.policy, src.dial ?? {});
-    const json = await readJsonCapped(res);
+    let json: unknown;
+    try {
+      json = await readJsonCapped(res);
+    } catch (err) {
+      // The status arrived before the body: an error status is an answer even when its body cannot be read or
+      // is too large (K2b). A body that is not JSON already says its status.
+      const notJson = err instanceof SourceQueryError && err.message.includes('did not answer JSON');
+      if (res.status >= 400 && !notJson) throw new SourceQueryError(null, 'source', `the GraphQL endpoint answered HTTP ${res.status} (its body could not be read)`);
+      throw err;
+    }
     return scrubSecrets({ status: res.status, json }, secrets);
   } catch (err) {
     // Every failure is a source error class (the routes answer 504/502 for them), never a bare 500. A

@@ -105,6 +105,12 @@ export function pgClient(args: SqlConnectArgs, opts: { deadlineMs?: number; read
         owned.add(socket);
         socket.once('close', () => owned.delete(socket));
       }
+      // A socket error or close makes the connection unusable for a transaction run by hand (pgTx): this
+      // listener is added before postgres.js's own, so `onclose` has fired when the failing query rejects.
+      if (opts.onclose !== undefined) {
+        socket.once('error', opts.onclose);
+        socket.once('close', opts.onclose);
+      }
       pinned ??= target.address;
       if (source.tls === 'disable' && !plaintextAllowed(target.cls, policy)) {
         socket.destroy();
@@ -151,7 +157,7 @@ export interface PgLife {
  *
  * `client` must have been made with `onclose` setting `life.closed`. `fn` gets the guarded client.
  */
-export async function pgTx<T>(client: PgSql, life: PgLife, begin: string, fn: (tx: postgres.TransactionSql<Record<string, never>>) => Promise<T>): Promise<T> {
+export async function pgTx<T>(client: PgSql, life: PgLife, begin: string, fn: (tx: postgres.TransactionSql<Record<string, never>>) => Promise<T>, hooks: { beforeCommit?: () => void } = {}): Promise<T> {
   const guarded = new Proxy(client, {
     get(target, prop, receiver) {
       if (prop !== 'unsafe') return Reflect.get(target, prop, receiver) as unknown;
@@ -164,11 +170,23 @@ export async function pgTx<T>(client: PgSql, life: PgLife, begin: string, fn: (t
   await guarded.unsafe(begin);
   try {
     const out = await fn(guarded);
-    await guarded.unsafe('COMMIT');
+    // The guard refuses synchronously on a closed connection, so `beforeCommit` runs only when COMMIT goes out.
+    const commit = guarded.unsafe('COMMIT');
+    hooks.beforeCommit?.();
+    await commit;
     return out;
   } catch (err) {
-    // A live connection ends the transaction; a closed one has already ended it at the server.
-    if (!life.closed) await (client.unsafe('ROLLBACK') as unknown as Promise<unknown>).catch(() => undefined);
+    // A live connection ends the transaction (bounded: a reset mid-ROLLBACK never leaves this waiting); a closed
+    // one has already ended it at the server.
+    if (!life.closed) {
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        (client.unsafe('ROLLBACK') as unknown as Promise<unknown>).catch(() => undefined),
+        new Promise<void>((r) => {
+          timer = setTimeout(r, 2_000);
+        }),
+      ]).finally(() => clearTimeout(timer));
+    }
     throw err;
   }
 }

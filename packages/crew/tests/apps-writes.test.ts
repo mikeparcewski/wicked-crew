@@ -305,6 +305,17 @@ describe('API actions (DES §7.3) over the K1 test services', () => {
     expect((await h.call('POST', '/apps/desk/actions/approve/run', { record: r2 })).body).toMatchObject({ code: 'read_only' });
     delete h.hooks.beforeRunning;
     delete h.writeEnv['APPS_READ_ONLY'];
+    // codex r2: a REST or MCP server switched off after the checks is refused too.
+    const r3 = await prep('mcp_assign', { id: 4809 });
+    h.hooks.beforeRunning = async () => {
+      await h.registry.setServerEnabled('ref', false);
+    };
+    try {
+      expect((await h.call('POST', '/apps/desk/actions/mcp_assign/run', { record: r3 })).body).toMatchObject({ code: 'contract_changed' });
+    } finally {
+      delete h.hooks.beforeRunning;
+      await h.registry.setServerEnabled('ref', true);
+    }
     expect(mcp.hits.filter((x) => x.body.includes('assign_ticket')).length).toBe(before);
   });
 
@@ -362,6 +373,7 @@ describe('API actions (DES §7.3) over the K1 test services', () => {
 describe('API outcomes (codex r1)', () => {
   it('a GraphQL 200 without a result is unknown; an error status with an HTML body is failed; a result is cut at 64 KB of UTF-8; the card names the root field', async () => {
     const { createServer } = await import('node:http');
+    void 0;
     let answer: { status: number; body: string; type: string } = { status: 200, body: '{}', type: 'application/json' };
     const server = createServer((_req, res) => {
       res.writeHead(answer.status, { 'content-type': answer.type });
@@ -384,7 +396,32 @@ describe('API outcomes (codex r1)', () => {
     const wide = capped({ s: '漢'.repeat(60_000) }) as { truncated?: boolean; text?: string };
     expect(wide.truncated).toBe(true);
     expect(Buffer.byteLength(JSON.stringify(wide), 'utf8')).toBeLessThanOrEqual(64 * 1024 + 64);
-    expect(mutationField('mutation { assign(id: 1) { aaa: id } }')).toBe('assign');
+    expect(mutationField('mutation { assign(id: 1) { aaa: id } }')).toEqual({ name: 'assign', key: 'assign' });
+    // codex r2: an aliased root field's result arrives under its alias; a key that IS the secret arrives
+    // redacted; an error status whose body breaks off is still an answered error; the cap holds after escaping.
+    expect(mutationField('mutation { done: assign(id: 1) { id } }')).toEqual({ name: 'assign', key: 'done' });
+    const server2 = createServer((req, res) => {
+      if (req.url === '/reset') {
+        res.writeHead(400, { 'content-type': 'application/json', 'content-length': '1000' });
+        res.write('{"err');
+        setTimeout(() => res.socket?.destroy(), 20);
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(req.url === '/alias' ? '{"data":{"done":{"id":1}}}' : '{"data":{"assign":{"id":1}}}');
+    });
+    await new Promise<void>((r) => server2.listen(0, '127.0.0.1', r));
+    const p2 = (server2.address() as { port: number }).port;
+    const at = (path: string) => ({ ...config, url: `http://127.0.0.1:${p2}${path}` });
+    try {
+      expect(await callMutation(at('/alias'), null, 'mutation { done: assign(id: 1) { id } }', {}, 'done')).toMatchObject({ state: 'succeeded' });
+      expect(await callMutation({ ...at('/plain'), auth: { ref: 'env:X', header: 'x-key' } }, 'assign', 'mutation { assign(id: 1) { id } }', {}, 'assign')).toMatchObject({ state: 'succeeded' });
+      expect(await callMutation(at('/reset'), null, 'mutation { assign(id: 1) { id } }', {}, 'assign')).toMatchObject({ state: 'failed' });
+    } finally {
+      await new Promise((r) => server2.close(r));
+    }
+    const quotes = capped('"'.repeat(100_000));
+    expect(Buffer.byteLength(JSON.stringify(quotes), 'utf8')).toBeLessThanOrEqual(64 * 1024);
   });
 });
 

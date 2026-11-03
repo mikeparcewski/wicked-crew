@@ -89,8 +89,9 @@ interface Resolved {
   safety?: { fingerprint: string; columns: SafetyColumn[] };
   /** An API tool. */
   tool?: McpToolRecord;
-  /** A mutation's root field name. */
+  /** A mutation's root field name (for the card), and the key its result arrives under (its alias, or the name). */
   field?: string;
+  responseKey?: string;
 }
 
 export class AppWritePath {
@@ -152,7 +153,7 @@ export class AppWritePath {
     if (source.kind !== 'graphql' || source.description?.introspection === undefined) throw refuse(409, 'contract_changed', `${action.source} is not a described GraphQL source now`);
     const sigs = graphqlRootSignatures(action.call.mutation, source.description.introspection, 'mutation');
     if (sigs === null) throw refuse(409, 'contract_changed', `the mutation no longer fits ${action.source}'s schema`);
-    return { source, contractHash: graphqlMutationContract(sigs), field: mutationField(action.call.mutation) };
+    return { source, contractHash: graphqlMutationContract(sigs), field: mutationField(action.call.mutation).name, responseKey: mutationField(action.call.mutation).key };
   }
 
   private async secret(s: AppSource): Promise<string | null> {
@@ -171,7 +172,7 @@ export class AppWritePath {
     // Only the grant that was judged stale goes: one granted again meanwhile stays (codex r1).
     const gone = await this.deps.actions.locked((tx) => {
       const g = tx.grant(app, action);
-      if (g === null || (observed !== undefined && (g.grantedAt !== observed.grantedAt || g.contractHash !== observed.contractHash || g.actionHash !== observed.actionHash))) return false;
+      if (g === null || (observed !== undefined && (g.grantedAt !== observed.grantedAt || g.contractHash !== observed.contractHash || g.actionHash !== observed.actionHash || g.descriptorHash !== observed.descriptorHash))) return false;
       return tx.dropGrant(app, action);
     });
     if (gone) this.audited('apps.action.revoked', CREW, { app, action, reason: why });
@@ -255,7 +256,7 @@ export class AppWritePath {
     if (source === null || source.pin.descriptorHash !== grant.descriptorHash || (record !== undefined && record.descriptorHash !== source.pin.descriptorHash)) {
       return this.withdraw(app, action.id, 'source_changed', 'contract_changed', `${action.source}'s connection changed since the grant: the grant is withdrawn`, grant);
     }
-    if ((source.kind === 'sql' || source.kind === 'graphql') && !source.enabled) throw refuse(409, 'contract_changed', `${action.source} is switched off`);
+    if (source.kind !== 'crew' && !source.enabled) throw refuse(409, 'contract_changed', `${action.source} is switched off`);
     if (action.kind === 'row-write' && (source.kind !== 'sql' || !source.allowWrites)) throw refuse(409, 'writes_off', `${action.source}'s Allow writes switch is off`);
     let resolved: Resolved;
     try {
@@ -487,7 +488,7 @@ export class AppWritePath {
       if (g === null || g.actionHash !== r.actionHash || g.contractHash !== r.contractHash || g.descriptorHash !== r.descriptorHash) throw refuse(409, 'not_granted', `action ${id} was revoked or granted again`);
       // The source the call goes to is the one checked: its descriptor is the record's, for every kind (codex r1).
       if (now === null || now.pin.descriptorHash !== r.descriptorHash || resolved.source.pin.descriptorHash !== r.descriptorHash) throw refuse(409, 'contract_changed', `${action.source} changed while the action was starting`);
-      if ((now.kind === 'sql' || now.kind === 'graphql') && !now.enabled) throw refuse(409, 'contract_changed', `${action.source} is switched off`);
+      if (now.kind !== 'crew' && !now.enabled) throw refuse(409, 'contract_changed', `${action.source} is switched off`);
       if (action.kind === 'row-write' && (now.kind !== 'sql' || !now.allowWrites)) throw refuse(409, 'writes_off', `${action.source}'s Allow writes switch is off`);
       return structuredClone(tx.update(r, { state: 'running', startedAt: this.now(), epoch: this.deps.actions.epoch }));
     });
@@ -544,7 +545,7 @@ export class AppWritePath {
     if (op.kind === 'tool') {
       out = await callTool(source.config, secret, op.tool, resolved.tool?.rest, op.args);
     } else {
-      out = await callMutation(source.config, secret, op.document, op.variables, resolved.field ?? mutationField(op.document), this.deps.dial ?? {});
+      out = await callMutation(source.config, secret, op.document, op.variables, resolved.responseKey ?? mutationField(op.document).key, this.deps.dial ?? {});
     }
     return out.state === 'succeeded' ? { state: 'succeeded', result: out.result } : { state: out.state, reason: out.reason };
   }

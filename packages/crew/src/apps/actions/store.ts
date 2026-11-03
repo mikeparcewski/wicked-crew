@@ -11,7 +11,7 @@
  */
 
 import { randomBytes, randomUUID } from 'node:crypto';
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 import type { AppActionCard, AppActionGrant, AppActionState } from '../../core/types.js';
@@ -120,21 +120,24 @@ export class AppActionStore {
     const tmp = `${this.stateFile}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
     const fd = openSync(tmp, 'w', 0o600);
     try {
-      writeSync(fd, `${JSON.stringify(this.state)}\n`);
+      writeFileSync(fd, `${JSON.stringify(this.state)}\n`, 'utf8'); // every byte (writeSync may write fewer)
       fsyncSync(fd);
     } finally {
       closeSync(fd);
     }
     renameSync(tmp, this.stateFile);
+    // The directory too. Only a platform that cannot flush a directory (Windows; EINVAL/ENOTSUP where a file
+    // system has no directory fsync) is let through: a real failure (EIO) is not durable, so the step that
+    // waits on it does not happen (codex r2).
+    let d: number | null = null;
     try {
-      const d = openSync(dir, 'r');
-      try {
-        fsyncSync(d);
-      } finally {
-        closeSync(d);
-      }
-    } catch {
-      // A platform that cannot flush a directory (Windows) keeps the file's own flush.
+      d = openSync(dir, 'r');
+      fsyncSync(d);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (!(process.platform === 'win32' || code === 'EINVAL' || code === 'ENOTSUP')) throw err;
+    } finally {
+      if (d !== null) closeSync(d);
     }
   }
 

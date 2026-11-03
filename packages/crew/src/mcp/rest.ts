@@ -716,6 +716,8 @@ async function readRestResult(res: Response, droppedArgs: string[]): Promise<Ups
   try {
     read = await readCapped(res, REST_RESPONSE_MAX_BYTES);
   } catch (err) {
+    // The status arrived before the body: an error status is an answer even when its body cannot be read (K2b).
+    if (res.status >= 400) throw new UpstreamCallError('http', false, `the API answered HTTP ${res.status} (its body could not be read)`);
     throw new UpstreamCallError('transport', true, `reading the response failed: ${err instanceof Error ? err.message : String(err)}`);
   }
   let structured: Record<string, unknown> | undefined;

@@ -40,11 +40,14 @@ export function describeToolRequest(config: McpUpstreamConfig, tool: string, res
   return { operation: `tool ${tool}`, request: `${config.name}/${tool} ${JSON.stringify(args)}` };
 }
 
-/** The one root field a mutation document selects (from its AST, not the contract's sorted lines; codex r1). */
-export function mutationField(document: string): string {
+/**
+ * The one root field a mutation document selects (from its AST, not the contract's sorted lines; codex r1):
+ * its name (for the card) and the key its result arrives under, its alias when it has one (codex r2).
+ */
+export function mutationField(document: string): { name: string; key: string } {
   const op = parse(document, { noLocation: true, maxTokens: 10_000 }).definitions.find((d) => d.kind === Kind.OPERATION_DEFINITION);
   const sel = op !== undefined && op.kind === Kind.OPERATION_DEFINITION ? op.selectionSet.selections[0] : undefined;
-  return sel !== undefined && sel.kind === Kind.FIELD ? sel.name.value : 'mutation';
+  return sel !== undefined && sel.kind === Kind.FIELD ? { name: sel.name.value, key: sel.alias?.value ?? sel.name.value } : { name: 'mutation', key: 'mutation' };
 }
 
 /** How a mutation will go out, for the card. */
@@ -54,12 +57,19 @@ export function describeMutation(config: McpUpstreamConfig, document: string, va
 
 export type ApiOutcome = { state: 'succeeded'; result: unknown } | { state: 'failed' | 'unknown'; reason: string };
 
-/** A result cut to 64 KB of serialized UTF-8 (codex r1: bytes, not UTF-16 units). */
+/** A result cut to 64 KB of serialized UTF-8, the wrapper's own escaping included (codex r1, r2). */
 export function capped(v: unknown): unknown {
   const text = JSON.stringify(v ?? null);
   if (Buffer.byteLength(text, 'utf8') <= API_RESULT_MAX) return v ?? null;
-  const cut = Buffer.from(text, 'utf8').subarray(0, API_RESULT_MAX - 64).toString('utf8').replace(/\uFFFD$/, '');
-  return { truncated: true, text: cut };
+  const bytes = Buffer.from(text, 'utf8');
+  let n = API_RESULT_MAX - 64;
+  for (;;) {
+    const cut = bytes.subarray(0, n).toString('utf8').replace(/\uFFFD$/, '');
+    const wrapped = { truncated: true, text: cut };
+    const size = Buffer.byteLength(JSON.stringify(wrapped), 'utf8');
+    if (size <= API_RESULT_MAX || n <= 0) return wrapped;
+    n = Math.max(0, Math.floor((n * API_RESULT_MAX) / size) - 64);
+  }
 }
 
 /** Call one tool. Never throws. */
@@ -92,8 +102,10 @@ export async function callMutation(config: McpUpstreamConfig, secret: string | n
     if (status >= 400) return { state: 'failed', reason: `the GraphQL source answered HTTP ${status}` };
     // A success is a GraphQL execution result holding the root field (codex r1); anything else after the
     // request went out does not establish what happened.
-    const data = body?.data;
-    if (data === null || typeof data !== 'object' || !Object.hasOwn(data, field)) return { state: 'unknown', reason: `the GraphQL source answered HTTP ${status} without a result for ${field}: whether it happened is not known; check the source. It is not run again` };
+    // The answer was scrubbed of the secret, keys too: a key that IS the secret arrives as the marker (codex r2).
+    const red = (k: string): string => scrubSecrets(k, secrets);
+    const data = body === null ? undefined : (body as Record<string, unknown>)['data'] ?? (body as Record<string, unknown>)[red('data')];
+    if (data === null || data === undefined || typeof data !== 'object' || !(Object.hasOwn(data, field) || Object.hasOwn(data, red(field)))) return { state: 'unknown', reason: `the GraphQL source answered HTTP ${status} without a result for ${field}: whether it happened is not known; check the source. It is not run again` };
     return { state: 'succeeded', result: capped(scrubSecrets(data, secrets)) };
   } catch (err) {
     // An answer that was not JSON still carries its status: an error status was an answer.

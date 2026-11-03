@@ -109,13 +109,19 @@ export async function runRowWrite(
 ): Promise<WriteOutcome> {
   const started = Date.now();
   const ms = (): number => Date.now() - started;
-  // No abort signal: destroying the socket under postgres.js while it still has a write queued (a ROLLBACK
-  // after the backend went away) throws inside its timers; `end` closes it in order.
+  // The client owns its sockets and destroys them after `end` (codex r2: a half-closed socket a silent peer
+  // keeps open). pgTx sends nothing on a closed connection, so nothing is queued when they go.
   const life: PgLife = { closed: false };
-  const sql = pgClient(args, { readOnly: false, deadlineMs: 10_000, onclose: () => (life.closed = true) });
+  const ended = new AbortController();
+  const sql = pgClient(args, { readOnly: false, deadlineMs: 10_000, signal: ended.signal, onclose: () => (life.closed = true) });
   let commitSent = false;
   // A client guard past the server's own timeouts: before COMMIT the transaction cannot commit without us.
-  const guard = setTimeout(() => void sql.end({ timeout: 0 }).catch(() => undefined), 20_000);
+  const guard = setTimeout(() => {
+    void sql
+      .end({ timeout: 0 })
+      .catch(() => undefined)
+      .finally(() => ended.abort());
+  }, 20_000);
   try {
     await hooks.beforeBegin?.();
     await pgTx(sql, life, 'BEGIN ISOLATION LEVEL READ COMMITTED', async (tx) => {
@@ -152,8 +158,7 @@ export async function runRowWrite(
       if (String(row['rowtype']) !== t.reltype) throw new Refusal('the statement wrote a relation other than the table that was locked and checked (its row type differs); rolled back');
       const bad = Object.entries(row).filter(([k, v]) => k !== 'rowtype' && v !== true).map(([k]) => k);
       if (bad.length > 0) throw new Refusal(`the database changed a value on the way in or the key did not match (${bad.join(', ')}); rolled back`);
-      commitSent = true; // returning sends COMMIT
-    });
+    }, { beforeCommit: () => (commitSent = true) });
     return { state: 'succeeded', ms: ms() };
   } catch (err) {
     if (err instanceof Refusal) return { state: 'failed', reason: err.message, ms: ms() };
@@ -172,5 +177,6 @@ export async function runRowWrite(
   } finally {
     clearTimeout(guard);
     await sql.end({ timeout: 1 }).catch(() => undefined);
+    ended.abort();
   }
 }
