@@ -177,7 +177,10 @@ export async function pgTx<T>(client: PgSql, life: PgLife, begin: string, fn: (t
     return out;
   } catch (err) {
     // A live connection ends the transaction (bounded: a reset mid-ROLLBACK never leaves this waiting); a closed
-    // one has already ended it at the server.
+    // one has already ended it at the server. A transport failure is a dead connection even before its close
+    // is seen (codex r3: a TLS socket's errors reach postgres.js, not the raw socket's listeners).
+    const transport = (err instanceof SourceQueryError && err.errorClass === 'connection') || (!(err instanceof postgres.PostgresError) && typeof (err as { code?: unknown })?.code === 'string');
+    if (transport) life.closed = true;
     if (!life.closed) {
       let timer: NodeJS.Timeout | undefined;
       await Promise.race([

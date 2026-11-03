@@ -56,8 +56,16 @@ async function readJsonCapped(res: Response): Promise<unknown> {
   }
 }
 
-/** POST one GraphQL request through the dialer. */
+/** POST one GraphQL request through the dialer; the answer scrubbed of the source's secret. */
 export async function graphqlPost(src: GraphqlSource, secret: string | null, body: { query: string; variables?: Record<string, unknown> }, deadlineMs = GRAPHQL_DEADLINE_MS): Promise<{ status: number; json: unknown }> {
+  return scrubSecrets(await graphqlPostRaw(src, secret, body, deadlineMs), secret === null ? [] : [secret]);
+}
+
+/**
+ * The same POST with the answer NOT yet scrubbed (K2b): a caller that must judge the answer's structure (an
+ * action's outcome: `errors`, `data`) does so first, then scrubs what it keeps or shows. Errors are scrubbed.
+ */
+export async function graphqlPostRaw(src: GraphqlSource, secret: string | null, body: { query: string; variables?: Record<string, unknown> }, deadlineMs = GRAPHQL_DEADLINE_MS): Promise<{ status: number; json: unknown }> {
   const headers: Record<string, string> = { 'content-type': 'application/json', accept: 'application/json' };
   if (src.auth !== null && secret !== null) headers[src.auth.header] = `${src.auth.prefix ?? ''}${secret}`;
   const secrets = secret === null ? [] : [secret];
@@ -73,7 +81,7 @@ export async function graphqlPost(src: GraphqlSource, secret: string | null, bod
       if (res.status >= 400 && !notJson) throw new SourceQueryError(null, 'source', `the GraphQL endpoint answered HTTP ${res.status} (its body could not be read)`);
       throw err;
     }
-    return scrubSecrets({ status: res.status, json }, secrets);
+    return { status: res.status, json };
   } catch (err) {
     // Every failure is a source error class (the routes answer 504/502 for them), never a bare 500. A
     // dialer refusal stays itself (a 409 naming why).

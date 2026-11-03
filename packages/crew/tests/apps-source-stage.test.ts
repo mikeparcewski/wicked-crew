@@ -87,6 +87,7 @@ describe('the source stage without a database', () => {
       inspectTarget: async () => config('https://a.example/v1'),
       appTool: async () => ({ config: config('https://b.example/v1'), tool, bound: true }),
       get: async () => ({ enabled: true }),
+      enabledNow: async () => true,
     } as unknown as McpRegistry;
     const stage = new AppsSourceStage({ registry });
     const q: AppQuery = { id: 'q', source: 'api', kind: 'rest', rowPath: '$.items[*]', output: [{ name: 'id', type: 'integer' }] };

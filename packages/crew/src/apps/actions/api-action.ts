@@ -18,7 +18,7 @@ import { scrubSecrets } from '../../mcp/secrets.js';
 import { UpstreamCallError } from '../../mcp/upstream-error.js';
 import { DialRefusedError, type DialOptions } from '../../sources/dialer.js';
 import { SourceQueryError } from '../../sources/drivers/types.js';
-import { graphqlPost } from '../../sources/graphql.js';
+import { graphqlPostRaw } from '../../sources/graphql.js';
 import { graphqlSource } from '../../sources/kinds.js';
 
 export const API_RESULT_MAX = 64 * 1024;
@@ -96,16 +96,16 @@ export async function callTool(config: McpUpstreamConfig, secret: string | null,
 export async function callMutation(config: McpUpstreamConfig, secret: string | null, document: string, variables: Record<string, unknown>, field: string, dial: DialOptions = {}): Promise<ApiOutcome> {
   const secrets = secret === null ? [] : [secret];
   try {
-    const { status, json } = await graphqlPost(graphqlSource(config, dial), secret, { query: document, variables });
+    // The structure is judged on the answer as it came (codex r3: a key equal to the secret would be renamed by
+    // the scrub); what is kept is scrubbed.
+    const { status, json } = await graphqlPostRaw(graphqlSource(config, dial), secret, { query: document, variables });
     const body = json as { errors?: unknown; data?: unknown } | null;
     if (Array.isArray(body?.errors) && body.errors.length > 0) return { state: 'failed', reason: `the GraphQL source answered ${body.errors.length} error(s)` };
     if (status >= 400) return { state: 'failed', reason: `the GraphQL source answered HTTP ${status}` };
     // A success is a GraphQL execution result holding the root field (codex r1); anything else after the
     // request went out does not establish what happened.
-    // The answer was scrubbed of the secret, keys too: a key that IS the secret arrives as the marker (codex r2).
-    const red = (k: string): string => scrubSecrets(k, secrets);
-    const data = body === null ? undefined : (body as Record<string, unknown>)['data'] ?? (body as Record<string, unknown>)[red('data')];
-    if (data === null || data === undefined || typeof data !== 'object' || !(Object.hasOwn(data, field) || Object.hasOwn(data, red(field)))) return { state: 'unknown', reason: `the GraphQL source answered HTTP ${status} without a result for ${field}: whether it happened is not known; check the source. It is not run again` };
+    const data = body?.data;
+    if (data === null || data === undefined || typeof data !== 'object' || !Object.hasOwn(data, field)) return { state: 'unknown', reason: `the GraphQL source answered HTTP ${status} without a result for ${field}: whether it happened is not known; check the source. It is not run again` };
     return { state: 'succeeded', result: capped(scrubSecrets(data, secrets)) };
   } catch (err) {
     // An answer that was not JSON still carries its status: an error status was an answer.

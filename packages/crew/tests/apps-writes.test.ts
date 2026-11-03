@@ -408,6 +408,7 @@ describe('API outcomes (codex r1)', () => {
         return;
       }
       res.writeHead(200, { 'content-type': 'application/json' });
+      if (req.url === '/errs') return void res.end('{"data":{"errorsAction":null},"errors":[{"message":"refused"}]}');
       res.end(req.url === '/alias' ? '{"data":{"done":{"id":1}}}' : '{"data":{"assign":{"id":1}}}');
     });
     await new Promise<void>((r) => server2.listen(0, '127.0.0.1', r));
@@ -417,6 +418,8 @@ describe('API outcomes (codex r1)', () => {
       expect(await callMutation(at('/alias'), null, 'mutation { done: assign(id: 1) { id } }', {}, 'done')).toMatchObject({ state: 'succeeded' });
       expect(await callMutation({ ...at('/plain'), auth: { ref: 'env:X', header: 'x-key' } }, 'assign', 'mutation { assign(id: 1) { id } }', {}, 'assign')).toMatchObject({ state: 'succeeded' });
       expect(await callMutation(at('/reset'), null, 'mutation { assign(id: 1) { id } }', {}, 'assign')).toMatchObject({ state: 'failed' });
+      // codex r3: the structure is judged before the scrub, so a secret equal to `errors` hides no error.
+      expect(await callMutation({ ...at('/errs'), auth: { ref: 'env:X', header: 'x-key' } }, 'errors', 'mutation { errorsAction(id: 1) { id } }', {}, 'errorsAction')).toMatchObject({ state: 'failed' });
     } finally {
       await new Promise((r) => server2.close(r));
     }

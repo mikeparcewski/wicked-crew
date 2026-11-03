@@ -668,6 +668,12 @@ export class McpRegistry {
     return { config: configOf(s), tool: structuredClone(t), bound: s.enabled && statusOf(s, t) === 'registered' };
   }
 
+  /** (K2b) Whether a server is switched on, read straight from the store (no presentation work in between). */
+  async enabledNow(name: string): Promise<boolean> {
+    const s = (await this.deps.store.read()).servers.find((x) => x.name === name);
+    return s?.enabled === true;
+  }
+
   /** Store a fresh description of a source (a re-describe), bound to the descriptor it was taken under. */
   async saveDescription(name: string, description: SourceDescription, descriptorHash: string): Promise<void> {
     // Checked and written inside one registry mutation (serialized with every save), so a save that

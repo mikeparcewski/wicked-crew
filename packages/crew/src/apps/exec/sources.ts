@@ -56,7 +56,7 @@ export async function lookupSource(registry: McpRegistry | null, name: string): 
     return config.kind === 'sql' ? { ...base, kind: 'sql' } : { ...base, kind: 'graphql' };
   }
   // A server switched off is part of the snapshot for every kind (codex r2 on the write path).
-  const enabled = (await registry.get(name)).enabled;
+  const enabled = await registry.enabledNow(name);
   return { name, kind: config.kind, pin: pinOf(config), config, enabled };
 }
 
