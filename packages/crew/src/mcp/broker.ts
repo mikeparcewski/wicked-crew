@@ -521,7 +521,8 @@ function resaveReason(subject: string): string {
 }
 const RESAVE_REMEDY =
   'the operator re-saves the server in studio → MCP tools (preview it, then save), re-granting any write tools; the first call then asks again. ' +
-  "If the save answers egress_unconfirmed (a private address, or a base URL the spec's servers don't name), a human operator saves it through POST /api/v1/mcp/servers with allowOrigin set to the preview's egress.origin";
+  'If the preview says the host is a loopback or private address, a human operator previews it again with address.allow naming a range that covers it (and address.plaintext for plain http on a private range); ' +
+  "if the save answers egress_unconfirmed (a base URL the spec's servers don't name), a human operator saves it through POST /api/v1/mcp/servers with allowOrigin set to the preview's egress.origin";
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);

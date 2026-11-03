@@ -18,6 +18,7 @@ import { join } from 'node:path';
 
 import type { McpAuthConfig, McpHealth, McpRestMapping, McpToolAnnotations, McpToolClass, McpUpstreamKind } from '../core/types.js';
 import { crewStateHome } from '../projects/state-home.js';
+import type { AddressPolicy } from '../sources/dialer.js';
 
 export const MCP_STATE_DIRNAME = 'mcp';
 export const MCP_REGISTRY_FILENAME = 'registry.json';
@@ -62,6 +63,12 @@ export interface McpServerRecord {
    * there, so a re-save over it does not ask again.
    */
   allowedOrigin?: string;
+  /**
+   * (DES-APPS-001 §5.2) The ranges the person confirmed for this server's connections (`mcp-http`,
+   * `rest`). Every save writes it; a record without it predates the dialer and gets only what is
+   * safe to re-derive (`registry.ts` legacyAddress).
+   */
+  address?: AddressPolicy;
   enabled: boolean;
   health: McpHealth;
   registeredAt: string;

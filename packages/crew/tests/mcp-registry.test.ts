@@ -213,7 +213,7 @@ describe('a secret never leaves the broker (D-2)', () => {
     const upstream = await startHttpUpstream(seen, secret);
     try {
       const url = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/mcp`;
-      const saved = await previewAndSave({ name: 'web', kind: 'mcp-http', url, secret, auth: { ref: 'keychain:wicked-mcp/web', header: 'Authorization', prefix: 'Bearer ' } });
+      const saved = await previewAndSave({ name: 'web', kind: 'mcp-http', url, secret, auth: { ref: 'keychain:wicked-mcp/web', header: 'Authorization', prefix: 'Bearer ' }, address: { allow: ['127.0.0.0/8'] } });
       expect(saved.authState).toBe('set');
       expect(secrets.values.get('web')).toBe(secret);
       expect(toolOf(saved, 'web_lookup').description).toBe(`authorized as ${SECRET_REDACTION}`);

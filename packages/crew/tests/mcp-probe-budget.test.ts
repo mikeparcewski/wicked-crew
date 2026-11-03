@@ -86,7 +86,7 @@ describe('the MCP probe budget', () => {
     let now = 0;
     const waits: number[] = [];
     const r = await probeMcpServerWithin(
-      { name: 'never', kind: 'mcp-http', command: null, args: [], url: `http://127.0.0.1:${port}/mcp`, auth: null },
+      { name: 'never', kind: 'mcp-http', command: null, args: [], url: `http://127.0.0.1:${port}/mcp`, auth: null, address: { allow: ['127.0.0.0/8'], plaintext: false } },
       null,
       { budgetMs: 45_000, retryDelaysMs: [500, 1_000, 2_000, 4_000, 8_000], sleep: async (ms) => { waits.push(ms); now += ms; }, now: () => now },
     );
@@ -115,7 +115,7 @@ describe('the MCP probe budget', () => {
     });
     const timer = setTimeout(() => late.listen(port, '127.0.0.1'), 1_200);
     try {
-      const r = await probeMcpServerWithin({ name: 'late', kind: 'mcp-http', command: null, args: [], url: `http://127.0.0.1:${port}/mcp`, auth: null }, null, budget(6_000, { retryDelaysMs: [200, 400, 800] }));
+      const r = await probeMcpServerWithin({ name: 'late', kind: 'mcp-http', command: null, args: [], url: `http://127.0.0.1:${port}/mcp`, auth: null, address: { allow: ['127.0.0.0/8'], plaintext: false } }, null, budget(6_000, { retryDelaysMs: [200, 400, 800] }));
       expect(r.ok, JSON.stringify(r)).toBe(true);
       if (r.ok) expect(r.tools.map((t) => t.name)).toEqual(['ping']);
     } finally {

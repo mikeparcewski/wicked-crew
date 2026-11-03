@@ -11,11 +11,15 @@
  *                                       is registered DISABLED; `enabledWrites` names the ones the operator
  *                                       grants (human operator only → else 403), each audited
  *                                       `mcp.tool.write_granted`.
- *                                       (G2) a `rest` base URL that matches none of the spec's `servers`, or a
- *                                       loopback/private host, needs `allowOrigin` = exactly that origin (409
- *                                       `egress_unconfirmed`; human operator only → else 403), audited
- *                                       `mcp.server.egress_confirmed`. A REST tool's hash covers the target, so
- *                                       a changed target re-registers its tools and withdraws their approvals
+ *                                       (G2) a `rest` base URL that matches none of the spec's `servers` needs
+ *                                       `allowOrigin` = exactly that origin (409 `egress_unconfirmed`; human
+ *                                       operator only → else 403), audited `mcp.server.egress_confirmed`. A REST
+ *                                       tool's hash covers the target, so a changed target re-registers its tools
+ *                                       and withdraws their approvals.
+ *                                       (DES-APPS-001 §5.2) every connection to an `mcp-http`/`rest` server goes
+ *                                       through the one dialer: a loopback/private host needs `address.allow` on
+ *                                       the PREVIEW (which dials) and the save, human operator only (403
+ *                                       `address_confirm_human_only`), audited `mcp.server.address_confirmed`
  *   PATCH  /mcp/servers/:name           `{enabled}`
  *   DELETE /mcp/servers/:name           remove the server and the keychain secret it owns
  *   POST   /mcp/servers/:name/test      probe again: health plus the tool diff
@@ -71,6 +75,7 @@ import type { McpCallRecordSource } from '../mcp/call-records.js';
 import { foldMcpUsage, MCP_USAGE_DECISIONS, MCP_USAGE_DEFAULT_DAYS, MCP_USAGE_MAX_DAYS } from '../mcp/usage.js';
 import type { McpUpstreamConfig } from '../mcp/probe.js';
 import { parseBaseUrl, REST_SPEC_MAX_BYTES } from '../mcp/rest.js';
+import { NO_CONFIRMATION, validateAllowRanges } from '../sources/dialer.js';
 import { API_PREFIX } from './api-prefix.js';
 import type { AuditLog } from './audit.js';
 import { trustAtLeast } from './auth.js';
@@ -94,6 +99,18 @@ const AuthSchema = z
   })
   .strict();
 
+/** (DES-APPS-001 §5.2) A source's address confirmation: CIDRs inside loopback/private ranges only. */
+export const AddressSchema = z
+  .object({
+    allow: z.array(z.string().min(1).max(64)).max(16),
+    plaintext: z.boolean().optional(),
+  })
+  .strict()
+  .superRefine((a, ctx) => {
+    const problem = validateAllowRanges(a.allow);
+    if (problem !== null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['allow'], message: problem });
+  });
+
 // Exported so tests/wire-contract.test.ts can pin the published bodies against them.
 export const McpServerConfigSchema = z
   .object({
@@ -109,6 +126,14 @@ export const McpServerConfigSchema = z
       .refine((d) => Buffer.byteLength(JSON.stringify(d), 'utf8') <= REST_SPEC_MAX_BYTES, { message: `the OpenAPI document is at most ${REST_SPEC_MAX_BYTES} bytes` })
       .optional(),
     operations: z.array(z.string().min(1).max(256)).min(1).max(512).optional(),
+    /**
+     * (DES-APPS-001 §5.2) The loopback/private ranges the person confirms for this server's
+     * connections, and whether plaintext is accepted on a confirmed private range. Human operator
+     * only (403 `address_confirm_human_only`), on the preview (which dials) and the save; audited
+     * `mcp.server.address_confirmed`. `mcp-http` and `rest` only: an `mcp-stdio` server is a local
+     * program, outside the dialer.
+     */
+    address: AddressSchema.optional(),
     /**
      * (crew#719) The secret VALUE this server's keychain entry will hold. The preview is probed
      * with it and it is held with the preview; `POST /mcp/servers` writes it to the OS store as
@@ -142,6 +167,7 @@ export const McpServerConfigSchema = z
       }
       if (c.auth != null && (c.auth.header === undefined || c.auth.env !== undefined)) issue('auth', 'a rest server injects its secret into one header: auth.header, no auth.env');
     } else if (c.kind === 'mcp-stdio') {
+      if (c.address !== undefined) issue('address', 'an mcp-stdio server is a local program, outside the dialer: it takes no address confirmation');
       if (c.command === undefined) issue('command', 'an mcp-stdio server needs a command');
       if (c.url !== undefined) issue('url', 'an mcp-stdio server takes no url');
       if (c.auth != null && (c.auth.env === undefined || c.auth.header !== undefined)) issue('auth', 'an mcp-stdio server injects its secret into one env variable: auth.env, no auth.header');
@@ -255,6 +281,18 @@ function writeGrantRefused(reply: FastifyReply, actor: Actor): FastifyReply {
   });
 }
 
+/** Whether a confirmation actually confirms something (a range, or plaintext). */
+function confirmsAddress(address: { allow: string[]; plaintext?: boolean | undefined } | null | undefined): boolean {
+  return address != null && (address.allow.length > 0 || address.plaintext === true);
+}
+
+function addressConfirmRefused(reply: FastifyReply, actor: Actor): FastifyReply {
+  return reply.code(403).send({
+    error: `only a human operator can confirm a loopback or private range (or plaintext) for a server's connections; you are ${actor.kind}/${actor.trust}`,
+    code: 'address_confirm_human_only',
+  });
+}
+
 function egressConfirmRefused(reply: FastifyReply, actor: Actor): FastifyReply {
   return reply.code(403).send({
     error: `only a human operator can confirm where a rest server's calls go (allowOrigin); you are ${actor.kind}/${actor.trust}`,
@@ -271,6 +309,11 @@ function toConfig(body: z.infer<typeof McpServerConfigSchema>): McpUpstreamConfi
     url: body.url ?? null,
     ...(body.kind === 'rest'
       ? { openapiUrl: body.openapiUrl ?? null, openapi: body.openapi ?? null, operations: body.operations ?? null }
+      : {}),
+    // A dialled server always carries its confirmation (none = global unicast over TLS only), so a
+    // save stores it and a legacy record is the only one ever derived (registry.ts legacyAddress).
+    ...(body.kind !== 'mcp-stdio'
+      ? { address: body.address === undefined ? { ...NO_CONFIRMATION, allow: [] } : { allow: [...body.address.allow], plaintext: body.address.plaintext ?? false } }
       : {}),
     auth:
       body.auth == null
@@ -319,12 +362,15 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
 
   app.post(
     `${V}/mcp/servers/preview`,
-    { config: { manifest: { requestType: 'McpServerConfigBody', responseType: 'McpPreviewResponse', statusCodes: [200, 400, 409, 501, 502, 503] } } },
+    { config: { manifest: { requestType: 'McpServerConfigBody', responseType: 'McpPreviewResponse', statusCodes: [200, 400, 403, 409, 501, 502, 503] } } },
     async (req, reply) => {
       const r = registry(reply);
       if (r === null) return reply;
       const parsed = McpServerConfigSchema.safeParse(req.body);
       if (!parsed.success) return invalidBody(reply, parsed.error);
+      // (DES-APPS-001 §5.2) The preview DIALS: a confirmed private range is used now, so only a
+      // human operator may name one, here as at the save.
+      if (confirmsAddress(parsed.data.address) && !mayGrantWrite(deps.actorOf(req))) return addressConfirmRefused(reply, deps.actorOf(req));
       try {
         const preview = await r.preview(toConfig(parsed.data), parsed.data.secret ?? null);
         if (deps.policies === undefined) return preview;
@@ -365,6 +411,8 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
           await r.checkEgress(parsed.data.previewHash, allowOrigin);
         }
         const held = parsed.data.previewHash === undefined ? null : r.peekPreview(parsed.data.previewHash);
+        // The confirmation rides in the previewed config; saving it is the human operator's, too.
+        if (held !== null && confirmsAddress(held.address) && !mayGrantWrite(deps.actorOf(req))) return addressConfirmRefused(reply, deps.actorOf(req));
         const commit = async (): Promise<McpServer> => {
           if (held !== null && deps.policies !== undefined) {
             const tokens = await deps.policies.withdrawnBySave(held);
@@ -390,6 +438,9 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
             disabledWrites: server.tools.filter((t) => t.status !== 'gone' && !t.enabled && isWriteGrant(t.annotations, t.classOverride)).map((t) => t.subject),
           },
         });
+        if (held !== null && confirmsAddress(held.address)) {
+          deps.audit.record('mcp.server.address_confirmed', deps.actorOf(req), { detail: { name: server.name, kind: server.kind, allow: held.address?.allow ?? [], plaintext: held.address?.plaintext ?? false } });
+        }
         // Audited whenever the operator named the origin: the save accepted it, so it is the origin.
         if (allowOrigin !== null && held?.egress != null) {
           const e = held.egress;

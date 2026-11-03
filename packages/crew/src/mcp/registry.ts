@@ -16,6 +16,8 @@
  *   from its result (`probe.ts`).
  */
 
+import { isIP } from 'node:net';
+
 import type {
   McpAuthConfig,
   McpAuthState,
@@ -37,6 +39,7 @@ import { canonicalJson, deriveToolClass, effectiveToolClass, ESTATE_SERVER, type
 import type { McpUpstreamConfig, ProbedTool, ProbeResult, Prober } from './probe.js';
 import type { McpRegistryStore, McpServerRecord, McpToolRecord } from './registry-store.js';
 import { restTarget } from './rest.js';
+import { type AddressPolicy, classifyAddress, exactRangesFor, NO_CONFIRMATION } from '../sources/dialer.js';
 import { KEYCHAIN_SERVICE, keychainRef, parseSecretRef, resolveSecret, secretIsSet, type SecretStore } from './secrets.js';
 
 /** How long a preview can be saved. */
@@ -162,6 +165,9 @@ export class McpRegistry {
     if ('missingSecret' in result) throw new McpRegistryError(409, 'secret_missing', result.error);
     if (!result.ok) {
       const what = config.kind === 'rest' ? 'the OpenAPI document could not be imported' : 'the server did not answer tools/list';
+      // (DES-APPS-001 §5.2) The dialer refused the connection: a 409 naming why (an unconfirmed range
+      // to confirm, an always-refused address, plaintext), not an upstream failure.
+      if (result.refusal !== undefined) throw new McpRegistryError(409, result.refusal, `${what}: ${result.error}`);
       throw new McpRegistryError(502, 'probe_failed', `${what}: ${result.error}`);
     }
     const tools = result.tools.map((t) => ({ ...t, schemaHash: hashOf(config, t) }));
@@ -277,8 +283,10 @@ export class McpRegistry {
       const origin = held.egress?.origin ?? null;
       // The confirmed origin is kept while the server still goes there: named now, or by an earlier save.
       const allowedOrigin = origin !== null && (allowOrigin === origin || prior?.allowedOrigin === origin) ? origin : null;
+      const { address, ...config } = held.config;
       const record: McpServerRecord = {
-        ...held.config,
+        ...config,
+        ...(address != null ? { address } : {}),
         ...(allowedOrigin !== null ? { allowedOrigin } : {}),
         enabled: prior?.enabled ?? true,
         health: { state: 'ok', consecutiveFailures: 0, checkedAt: stamp, lastError: null },
@@ -350,8 +358,8 @@ export class McpRegistry {
 
   /**
    * (G2, DES-data-connectors §3) Refuse a save whose egress the operator has not confirmed: when
-   * the held preview's `egress.confirmRequired` (the base URL matches none of the spec's `servers`,
-   * or its host is a loopback/private address), `allowOrigin` must be exactly `egress.origin`
+   * the held preview's `egress.confirmRequired` (the base URL matches none of the spec's `servers`;
+   * a loopback/private host is the dialer's, confirmed as `address.allow`), `allowOrigin` must be exactly `egress.origin`
    * (409 `egress_unconfirmed`). An `allowOrigin` that names another origin is refused the same way
    * even when no confirmation is needed, and one for a server that is not `rest` is a 400
    * `egress_not_rest`. Like {@link checkWriteGrants} it changes nothing, so the route calls it
@@ -382,10 +390,11 @@ export class McpRegistry {
   }
 
   /** What a held preview would register: its server name and each tool's schema hash (S6). */
-  peekPreview(previewHash: string): { name: string; tools: Array<{ name: string; schemaHash: string }>; egress: McpRestEgress | null; target: HashedRestTarget | null } | null {
+  peekPreview(previewHash: string): { name: string; tools: Array<{ name: string; schemaHash: string }>; egress: McpRestEgress | null; target: HashedRestTarget | null; address: AddressPolicy | null } | null {
     const held = this.previews.get(previewHash);
     if (held === undefined || held.expiresAt <= this.now()) return null;
     return {
+      address: held.config.address ?? null,
       name: held.config.name,
       tools: held.tools.map((t) => ({ name: t.name, schemaHash: t.schemaHash })),
       egress: held.egress,
@@ -656,8 +665,29 @@ export class McpRegistry {
 
 function configOf(s: McpServerRecord): McpUpstreamConfig {
   const base: McpUpstreamConfig = { name: s.name, kind: s.kind, command: s.command, args: s.args, url: s.url, auth: s.auth };
-  if (s.kind !== 'rest') return base;
-  return { ...base, openapiUrl: s.openapiUrl ?? null, openapi: s.openapi ?? null, operations: s.operations ?? null };
+  if (s.kind === 'mcp-stdio') return base;
+  const address = s.address ?? legacyAddress(s);
+  if (s.kind !== 'rest') return { ...base, address };
+  return { ...base, openapiUrl: s.openapiUrl ?? null, openapi: s.openapi ?? null, operations: s.operations ?? null, address };
+}
+
+/**
+ * (DES-APPS-001 §5.2) The confirmation of a record saved before the dialer, which has none. Only
+ * what is safe to re-derive: the IP literal, or `localhost`, it was explicitly registered at — an
+ * `mcp-http` server's url, or the origin a `rest` server's operator confirmed with G2's
+ * `allowOrigin` (before the dialer, the only way a rest server reached a loopback or private host).
+ * An IP literal is the exact address (no name to re-resolve); `localhost` is loopback by definition
+ * (RFC 6761). A private NAME is not re-derived: its calls are refused, naming the range to confirm,
+ * until the server is saved again with one.
+ */
+export function legacyAddress(s: Pick<McpServerRecord, 'kind' | 'url' | 'allowedOrigin'>): AddressPolicy {
+  const raw = s.kind === 'mcp-http' ? s.url : s.kind === 'rest' ? (s.allowedOrigin ?? null) : null;
+  const allow = exactRangesFor(raw);
+  if (allow.length === 0) return { ...NO_CONFIRMATION, allow: [] };
+  // A private IP literal registered over http was registered as plaintext; loopback never needs it.
+  const host = new URL(raw as string).hostname.replace(/^\[|\]$/g, '');
+  const plaintext = new URL(raw as string).protocol === 'http:' && isIP(host) !== 0 && classifyAddress(host).cls === 'private';
+  return { allow, plaintext };
 }
 
 interface ConfigView {
@@ -669,6 +699,7 @@ interface ConfigView {
   auth: McpAuthConfig | null;
   openapiUrl?: string | null;
   operations?: string[] | null;
+  address?: AddressPolicy;
 }
 
 /** What a response shows of a config. A pasted OpenAPI document is not echoed back. */
@@ -678,6 +709,7 @@ function configView(c: McpUpstreamConfig): ConfigView {
     view.openapiUrl = c.openapiUrl ?? null;
     view.operations = c.operations ?? null;
   }
+  if (c.kind !== 'mcp-stdio') view.address = c.address ?? { ...NO_CONFIRMATION, allow: [] };
   return view;
 }
 
@@ -719,10 +751,11 @@ function egressRefusal(egress: Omit<McpRestEgress, 'confirmRequired'>, allowOrig
     return new McpRegistryError(409, 'egress_unconfirmed', `allowOrigin ${JSON.stringify(allowOrigin)} is not this server's origin; to confirm it, name exactly ${egress.origin}`);
   }
   if (allowOrigin !== null || prior?.allowedOrigin === egress.origin) return null;
+  // (DES-APPS-001 §5.2) A loopback, private or unresolvable host is the dialer's to judge, at every
+  // connection under the server's confirmed ranges; a preview could not have reached here with an
+  // unconfirmed one. `allowOrigin` is only the operator accepting a base URL the spec does not list.
   const why = [
     ...(egress.matches ? [] : [egress.servers.length === 0 ? 'the OpenAPI document names no server crew can check it against' : `it matches none of the OpenAPI document's servers (${egress.servers.join(', ')})`]),
-    ...(egress.privateAddress ? ['it is a loopback or private address'] : []),
-    ...(egress.resolved ? [] : ['its host did not resolve, so crew could not check that it is not a private address']),
   ];
   if (why.length === 0) return null;
   return new McpRegistryError(409, 'egress_unconfirmed', `the calls would go to ${egress.origin}${egress.basePath}, but ${why.join(', and ')}: to use it anyway, save with allowOrigin set to exactly ${egress.origin}`);

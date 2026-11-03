@@ -9,7 +9,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { McpInspectLogResponse, McpInspectRpcResponse, McpInspectStartResponse } from '../src/core/types.js';
-import { registerMcpInspectRoutes, type InspectRegistry } from '../src/mcp-inspect/routes.js';
+import { type ConnectSpec, openTransport, registerMcpInspectRoutes, type InspectRegistry } from '../src/mcp-inspect/routes.js';
 import { commandName, heldTail, InspectSessions, MAX_SESSIONS } from '../src/mcp-inspect/session.js';
 import type { McpToolAnnotations, McpToolClass } from '../src/core/types.js';
 import type { McpUpstreamConfig } from '../src/mcp/probe.js';
@@ -89,6 +89,32 @@ describe('the MCP inspector bridge', () => {
     expect(l.entries.filter((e) => e.dir === 'out').map((e) => e.text).join('\n')).toContain('-32601');
     expect(l.state).toBe('ready');
     expect(l.next).toBe(l.entries[l.entries.length - 1]!.seq);
+  });
+
+  it('DES-APPS-001 §5.2: a typed URL dials under exactly what it names; an agent cannot start one at all', async () => {
+    const specs: ConnectSpec[] = [];
+    const app = Fastify({ logger: false });
+    app.decorateRequest('actor', null as unknown as never);
+    app.addHook('onRequest', async (req) => {
+      const h = req.headers['x-actor'];
+      if (typeof h === 'string') {
+        const [kind, trust] = h.split(':');
+        (req as unknown as { actor: unknown }).actor = { id: `${kind}-1`, kind, trust };
+      }
+    });
+    registerMcpInspectRoutes(app, { sessions: new InspectSessions(), open: (spec) => (specs.push(spec), openTransport({ ...spec, url: 'http://127.0.0.1:9/mcp' })) });
+    await app.ready();
+    apps.push(app);
+    const start = (target: unknown, headers = HUMAN) => app.inject({ method: 'POST', url: '/api/v1/mcp-inspect/sessions', headers, payload: { target } });
+    expect((await start({ url: 'http://127.0.0.1:9/mcp' }, AGENT)).statusCode).toBe(403);
+    expect(specs).toHaveLength(0);
+    await start({ url: 'http://10.0.0.5:8080/mcp' });
+    expect(specs.at(-1)?.address).toEqual({ allow: ['10.0.0.5/32'], plaintext: false }); // plaintext never implied
+    await start({ url: 'https://mcp.corp.internal/mcp' });
+    expect(specs.at(-1)?.address).toEqual({ allow: [], plaintext: false }); // a private NAME confirms nothing
+    await start({ url: 'https://mcp.corp.internal/mcp', address: { allow: ['10.20.0.0/16'], plaintext: false } });
+    expect(specs.at(-1)?.address).toEqual({ allow: ['10.20.0.0/16'], plaintext: false });
+    expect((await start({ url: 'https://x.example/mcp', address: { allow: ['169.254.0.0/16'] } })).statusCode).toBe(400);
   });
 
   it('start, send and delete are HUMAN-only; the log needs operator; an unknown method or bad target is refused', async () => {

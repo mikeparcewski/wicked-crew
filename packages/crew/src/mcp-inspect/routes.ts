@@ -30,6 +30,7 @@ import type { Actor, McpInspectLogResponse, McpInspectRpcResponse, McpInspectSta
 import type { McpUpstreamConfig } from '../mcp/probe.js';
 import { canonicalJson } from '../mcp/classify.js';
 import { isWriteGrant, type McpCallTarget } from '../mcp/registry.js';
+import { type AddressPolicy, boundFetch, exactRangesFor, NO_CONFIRMATION, validateAllowRanges } from '../sources/dialer.js';
 import { commandName, InspectError, InspectSession, InspectSessions, INSPECT_METHODS, type OpenedTransport, type TargetDescription } from './session.js';
 
 const V = '/api/v1';
@@ -75,6 +76,8 @@ export interface ConnectSpec {
   cwd?: string;
   url?: string;
   headers?: Record<string, string>;
+  /** (DES-APPS-001 §5.2) An http target's address policy: every request goes through the dialer under it. */
+  address?: AddressPolicy;
 }
 
 export type TransportOpener = (spec: ConnectSpec) => OpenedTransport;
@@ -93,7 +96,10 @@ export const openTransport: TransportOpener = (spec) => {
   }
   const url = new URL(spec.url ?? '');
   const requestInit = { headers: spec.headers ?? {} };
-  const t = spec.kind === 'sse' ? new SSEClientTransport(url, { requestInit }) : new StreamableHTTPClientTransport(url, { requestInit });
+  // Every request either transport makes (POST, SSE GET, reconnect, session DELETE) goes through the
+  // ONE dialer under the target's address policy: checked, pinned, never redirected.
+  const fetchImpl = boundFetch(spec.address ?? NO_CONFIRMATION) as typeof fetch;
+  const t = spec.kind === 'sse' ? new SSEClientTransport(url, { requestInit, fetch: fetchImpl }) : new StreamableHTTPClientTransport(url, { requestInit, fetch: fetchImpl });
   // The SDK's classes declare `sessionId?: string` against `Transport`, which
   // `exactOptionalPropertyTypes` refuses; the runtime shapes are the same (as `probe.ts`).
   return { transport: t as unknown as Transport, stderr: null, pid: () => null };
@@ -118,6 +124,12 @@ const Target = z.union([
       url: z.string().url().max(4096).refine((u) => /^https?:\/\//iu.test(u), 'an http(s) URL'),
       transport: z.enum(['streamable-http', 'sse']).optional(),
       headers: Headers.optional(),
+      /** (DES-APPS-001 §5.2) Loopback/private ranges the typed host may reach (a private host NAME needs one). */
+      address: z
+        .object({ allow: z.array(z.string().min(1).max(64)).max(16), plaintext: z.boolean().optional() })
+        .strict()
+        .refine((a) => validateAllowRanges(a.allow) === null, (a) => ({ message: validateAllowRanges(a.allow) ?? '' }))
+        .optional(),
     })
     .strict(),
 ]);
@@ -156,7 +168,7 @@ async function resolve(target: z.infer<typeof Target>, registry: InspectRegistry
     const headers: Record<string, string> = {};
     if (config.auth?.header !== undefined && secret !== null) headers[config.auth.header] = `${config.auth.prefix ?? ''}${secret}`;
     return {
-      spec: { kind: 'streamable-http', url: config.url ?? '', headers },
+      spec: { kind: 'streamable-http', url: config.url ?? '', headers, address: config.address ?? NO_CONFIRMATION },
       describe: { kind: 'server', name: config.name, label: config.url ?? '', envNames: [], headerNames: Object.keys(headers) },
       secrets,
       registered: config,
@@ -173,8 +185,11 @@ async function resolve(target: z.infer<typeof Target>, registry: InspectRegistry
   }
   const kind = target.transport ?? 'streamable-http';
   const headers = target.headers ?? {};
+  // A typed URL confirms only the IP literal or localhost it names; a private host NAME needs `address`.
+  // Plaintext on a private range is never implied by typing http: it must be confirmed (`address.plaintext`).
+  const address: AddressPolicy = { allow: [...exactRangesFor(target.url), ...(target.address?.allow ?? [])], plaintext: target.address?.plaintext ?? false };
   return {
-    spec: { kind, url: target.url, headers },
+    spec: { kind, url: target.url, headers, address },
     describe: { kind, name: new URL(target.url).host, label: target.url, envNames: [], headerNames: Object.keys(headers) },
     secrets: Object.values(headers).filter((v) => v.length >= 4),
   };
