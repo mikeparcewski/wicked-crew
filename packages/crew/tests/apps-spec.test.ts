@@ -199,6 +199,13 @@ describe('apps.json: the shape', () => {
     expect(codes(inList)).toEqual(['bad_key@$.linkHosts[0].__proto__']);
     const wide = { ...escalations(), theme: Object.fromEntries(Array.from({ length: 300 }, (_, i) => [`k${i}`, 1])) };
     expect(codes(wide)).toEqual(['too_complex@$.theme']);
+    // Each list is held to the schema's own limit before zod parses its items (codex r3).
+    const comps = escalations() as unknown as { pages: { components: unknown[] }[] };
+    comps.pages[0]!.components = Array.from({ length: 101 }, () => ({}));
+    expect(codes(comps)).toEqual(['too_complex@$.pages[0].components']);
+    const outputs = escalations() as unknown as { queries: { output: unknown[] }[] };
+    outputs.queries[0]!.output = Array.from({ length: 201 }, () => ({}));
+    expect(codes(outputs)).toEqual(['too_complex@$.queries[0].output']);
   });
 
   it('refuses a binding that is not filter/form/row/url, and a regular-expression parameter', () => {
@@ -344,6 +351,14 @@ describe('apps.json: the consistency check', () => {
       expect(one({ type: 'string', format: 'date-time', default: bad }), bad).toEqual([`bad_param@${at}.default`]);
     }
     expect(one({ type: 'string', format: 'date-time', default: '2026-11-03T08:05:00.123+01:00' })).toEqual([]);
+    // codex r3: no leap second, any fraction length, and the years 0001-0099 are years too.
+    expect(one({ type: 'string', format: 'date-time', default: '2026-11-03T08:05:60Z' })).toEqual([`bad_param@${at}.default`]);
+    expect(one({ type: 'string', format: 'date-time', default: '2026-11-03T08:05:00.1234567890Z' })).toEqual([]);
+    expect(one({ type: 'string', format: 'date', default: '0099-01-01' })).toEqual([]);
+    expect(one({ type: 'string', format: 'date', default: '0000-01-01' })).toEqual([`bad_param@${at}.default`]);
+    // Lengths are code points: one emoji is one character.
+    expect(one({ type: 'string', minLength: 2, default: '😀' })).toEqual([`bad_param@${at}.default`]);
+    expect(one({ type: 'string', maxLength: 1, default: '😀' })).toEqual([]);
     // Bounds in order, and constraints on their own type only.
     expect(one({ type: 'integer', minimum: 10, maximum: 1 })).toEqual([`bad_param@${at}`]);
     expect(one({ type: 'string', minLength: 5, maxLength: 2 })).toEqual([`bad_param@${at}`]);

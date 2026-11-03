@@ -352,7 +352,27 @@ export const APP_SPEC_MAX_BYTES = 2 * 1024 * 1024;
  * and the node budget is above what 2 MB of JSON can hold (it bounds a larger edit body before the size
  * check). Published with the contract (`AppSpec`).
  */
-export const APP_SPEC_LIMITS = { depth: 16, arrayLength: 1000, objectKeys: 256, nodes: 1_000_000 } as const;
+export const APP_SPEC_LIMITS = { depth: 16, arrayLength: 200, objectKeys: 256, nodes: 1_000_000 } as const;
+
+/**
+ * Each list's own limit, by its path with indices and record keys as `*` (codex r3): the walk refuses a
+ * list longer than the schema allows before zod parses its elements, so no list can make zod expand
+ * more items than a legal spec holds. A list not named here is held to {@link APP_SPEC_LIMITS.arrayLength},
+ * the longest any legal list is.
+ */
+const LIST_LIMITS: ReadonlyMap<string, number> = new Map([
+  ['pages', 20],
+  ['queries', 100],
+  ['actions', 50],
+  ['linkHosts', 50],
+  ['theme.palette', 12],
+  ['pages.*.components', 100],
+  ['pages.*.components.*.rowActions', 4],
+  ['pages.*.components.*.series', 12],
+  ['pages.*.components.*.fields', 30],
+  ['queries.*.params.required', 30],
+  ['actions.*.params.required', 30],
+]);
 
 const own = (o: object, k: string): boolean => Object.hasOwn(o, k);
 
@@ -380,7 +400,8 @@ export function structureFinding(value: unknown): AppCheckFinding | null {
     if (v === null || typeof v !== 'object') continue;
     if (path.length >= APP_SPEC_LIMITS.depth) return finding('too_complex', path, `apps.json nests deeper than ${APP_SPEC_LIMITS.depth}`);
     if (Array.isArray(v)) {
-      if (v.length > APP_SPEC_LIMITS.arrayLength) return finding('too_complex', path, `a list holds more than ${APP_SPEC_LIMITS.arrayLength} items`);
+      const limit = LIST_LIMITS.get(path.map((p) => (typeof p === 'number' ? '*' : p)).join('.').replace(/\.properties\.[^.]+/g, '.properties.*')) ?? APP_SPEC_LIMITS.arrayLength;
+      if (v.length > limit) return finding('too_complex', path, `a list here holds at most ${limit} items`);
       v.forEach((x, i) => stack.push({ v: x, path: [...path, i] }));
       continue;
     }
@@ -419,23 +440,31 @@ export function readSpec(bytes: Buffer | string): { spec: AppSpec; findings: [] 
   return findings.length === 0 ? parsed : { spec: null, findings };
 }
 
-/** A real calendar date `YYYY-MM-DD`. */
+/** A real calendar date `YYYY-MM-DD`, years 0001-9999 (proleptic Gregorian). */
 function isDate(v: string): boolean {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
   if (m === null) return false;
   const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
-  const t = new Date(Date.UTC(y, mo - 1, d));
-  return t.getUTCFullYear() === y && t.getUTCMonth() === mo - 1 && t.getUTCDate() === d;
+  if (y < 1 || mo < 1 || mo > 12 || d < 1) return false;
+  const leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo - 1]!;
+  return d <= days;
 }
 
-/** RFC 3339 `date-time`: a real date, `HH:MM:SS` (a leap second allowed), optional fraction, `Z` or an offset. */
+/**
+ * The `date-time` crew accepts: RFC 3339 with seconds, `YYYY-MM-DDTHH:MM:SS[.fraction](Z|±HH:MM)`, a real
+ * date, seconds 00-59 (no leap second: no source stores one), any number of fraction digits.
+ */
 function isDateTime(v: string): boolean {
-  const m = /^(\d{4}-\d{2}-\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d{1,9})?([Zz]|([+-])(\d{2}):(\d{2}))$/.exec(v);
+  const m = /^(\d{4}-\d{2}-\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d+)?([Zz]|[+-](\d{2}):(\d{2}))$/.exec(v);
   if (m === null || !isDate(m[1]!)) return false;
   const [h, mi, se] = [Number(m[2]), Number(m[3]), Number(m[4])];
-  if (h > 23 || mi > 59 || se > 60) return false;
-  return m[7] === undefined || (Number(m[8]) <= 23 && Number(m[9]) <= 59);
+  if (h > 23 || mi > 59 || se > 59) return false;
+  return m[7] === undefined || (Number(m[7]) <= 23 && Number(m[8]) <= 59);
 }
+
+/** A string's length as JSON Schema counts it: Unicode code points, not UTF-16 units. */
+const codePoints = (v: string): number => Array.from(v).length;
 
 const FORMAT_OK: Record<NonNullable<AppParamSchema['format']>, (v: string) => boolean> = {
   date: isDate,
@@ -452,8 +481,8 @@ export function paramValueProblem(decl: Pick<AppParamSchema, 'type' | 'format' |
   switch (decl.type) {
     case 'string':
       if (typeof value !== 'string') return 'is not a string';
-      if (decl.minLength !== undefined && value.length < decl.minLength) return `is shorter than ${decl.minLength}`;
-      if (decl.maxLength !== undefined && value.length > decl.maxLength) return `is longer than ${decl.maxLength}`;
+      if (decl.minLength !== undefined && codePoints(value) < decl.minLength) return `is shorter than ${decl.minLength}`;
+      if (decl.maxLength !== undefined && codePoints(value) > decl.maxLength) return `is longer than ${decl.maxLength}`;
       if (decl.format !== undefined && !FORMAT_OK[decl.format](value)) return `is not a ${decl.format}`;
       break;
     case 'number':

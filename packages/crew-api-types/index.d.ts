@@ -14347,8 +14347,9 @@ export type AppSpecSchemaId = 'wicked.apps/v1';
  * document, so a field a newer studio writes reaches an older daemon as a refused edit, never as a
  * silently dropped one.
  *
- * The whole document is at most 2 MB of JSON, nests at most 16 deep, holds no list longer than 1,000 and
- * no object with more than 256 keys, and never uses the key `__proto__`.
+ * The whole document is at most 2 MB of JSON, nests at most 16 deep, holds no list longer than its stated
+ * limit (200 for any list not given one) and no object with more than 256 keys, and never uses the key
+ * `__proto__`.
  */
 export interface AppSpec {
   schema: AppSpecSchemaId;
@@ -14599,9 +14600,10 @@ export type AppRefresh = { mode: 'load' } | { mode: 'every'; seconds: number } |
  *
  * Constraints apply to their type only: `format`, `minLength` and `maxLength` to strings, `minimum` and
  * `maximum` to numbers and integers; an `array` takes neither `enum` nor `default`. Bounds are not
- * reversed. A `default` and every `enum` value satisfy the whole declaration (a `date` is a real calendar
- * date, a `date-time` is RFC 3339 with seconds); strings in a `default` or an `enum` are at most 1,000 and
- * 200 characters. A REQUIRED parameter with neither `from` nor a `default` must be bound at every
+ * reversed; lengths count Unicode code points, as JSON Schema does. A `default` and every `enum` value
+ * satisfy the whole declaration (a `date` is a real calendar date, years 0001-9999; a `date-time` is
+ * RFC 3339 with seconds 00-59, any fraction, `Z` or an offset); strings in a `default` or an `enum` are at
+ * most 1,000 and 200 characters. A REQUIRED parameter with neither `from` nor a `default` must be bound at every
  * component that uses its query or action.
  */
 export interface AppParamSchema {
