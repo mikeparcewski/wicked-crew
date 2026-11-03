@@ -266,7 +266,7 @@ code {
 .log-col { display: grid; grid-template-rows: minmax(0, 1fr) auto; min-height: 0; border-right: 1px solid var(--hairline); }
 /* the log is a short window in large type, with air between its lines: the newest lines, at most
    five, and only as many as fit whole (job-demo.js hides the older ones; none is ever cut off) */
-.log { overflow: hidden; min-height: 0; padding: 14px 24px; display: flex; flex-direction: column; gap: 12px; }
+.log { position: relative; overflow: hidden; min-height: 0; padding: 14px 24px; display: flex; flex-direction: column; gap: 12px; }
 .ln { margin: 0; font-family: var(--font-mono); font-size: 16px; line-height: 1.5; color: color-mix(in oklab, var(--ink) 78%, transparent); animation: ln-in .25s var(--ease) backwards; }
 .ln--still { animation: none; }
 .ln b { color: var(--ink); }

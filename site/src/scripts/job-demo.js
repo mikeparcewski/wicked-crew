@@ -103,6 +103,7 @@ function initJob(root) {
     el.innerHTML = html + (seats ? ' ' + SEATS : '');
     const before = still ? null : tops();
     logEl.appendChild(el);
+    if (sizes) sizes.observe(el);
     fit();
     if (before) slide(before);
   }
@@ -110,12 +111,29 @@ function initJob(root) {
    *  whole (an older line is hidden, never sliced through at the top edge). Hidden lines stay in the
    *  log, so a window that grows shows them again. */
   const WINDOW = 5;
+  // The window refits whenever the log or one of its lines changes size: a resize, and a rewrap that
+  // leaves the log's own box alone (the web font arriving after the poster was fitted, text spacing).
+  // The refit runs on the next frame, outside the observer's delivery (hiding a line resizes it).
+  let refit = 0;
+  const sizes = 'ResizeObserver' in window ? new ResizeObserver(function () {
+    if (!refit) refit = requestAnimationFrame(function () { refit = 0; fit(); });
+  }) : null;
+  // Whether the lines fit is read from their laid-out boxes (offsetTop within the log), never from
+  // scrollHeight: a running glide's transform adds to the scrolled overflow, not to the layout.
   function fit() {
     const ls = logEl.querySelectorAll('.ln');
     const n = ls.length;
     let first = Math.max(0, n - WINDOW);
     for (let k = 0; k < n; k++) ls[k].hidden = k < first;
-    while (first < n - 1 && logEl.scrollHeight > logEl.clientHeight + 1) ls[first++].hidden = true;
+    if (!n) return;
+    const room = logEl.clientHeight - parseFloat(getComputedStyle(logEl).paddingBottom);
+    const last = ls[n - 1];
+    while (first < n - 1 && last.offsetTop + last.offsetHeight > room + 1) ls[first++].hidden = true;
+  }
+  function clearLog() {
+    if (sizes) { sizes.disconnect(); sizes.observe(logEl); }
+    glides = [];
+    logEl.innerHTML = '';
   }
   // where each shown line sits before a new one arrives, so the window can glide up into place
   function tops() {
@@ -257,7 +275,7 @@ function initJob(root) {
   }
   function start() {
     clearTimeout(timer);
-    logEl.innerHTML = ''; R = {}; i = 0; dead = false; waiting = null; running = true;
+    clearLog(); R = {}; i = 0; dead = false; waiting = null; running = true;
     setOff(runBtn, true); setOff(killBtn, false); label(killBtn, 'kill');
     idlePanel('Each gate’s receipt opens here as the job reaches it. Click a gate on the track to reopen one.');
     go();
@@ -290,7 +308,7 @@ function initJob(root) {
 
   // The finished job, painted at once: every line, every gate, the delivery receipt.
   function poster() {
-    logEl.innerHTML = '';
+    clearLog();
     S.forEach(function (s) { if (s.wait) line(PASS_LINE, 'ok', true); else line(s.t, s.c, true, s.seats); });
     R = {}; Object.keys(RECEIPTS).forEach(function (k) { R[k] = RECEIPTS[k]; });
     i = S.length; running = false; waiting = null; dead = false;
@@ -313,7 +331,11 @@ function initJob(root) {
 
   poster();
   // a window resize changes the log's height: the window shows as many of the newest lines as fit
-  if ('ResizeObserver' in window) new ResizeObserver(fit).observe(logEl);
+  if (sizes) sizes.observe(logEl);
+  // a web font that arrives (now or later, either wider or narrower) can rewrap a hidden line too,
+  // which no observer sees: the window refits from scratch
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(fit);
+  if (document.fonts && document.fonts.addEventListener) document.fonts.addEventListener('loadingdone', function () { fit(); });
   if (RM.matches) return;
   // a replay still waiting to start does not start once reduced motion is on (Run still runs it)
   function auto() { if (!booted && !RM.matches) { booted = true; start(); } }

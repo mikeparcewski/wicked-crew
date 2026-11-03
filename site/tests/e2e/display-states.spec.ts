@@ -176,7 +176,7 @@ test.describe('the job demo, replayed', () => {
 /** The log's window at rest (no glide running): its shown lines, their type, the space between them,
  *  and whether each is whole. */
 async function logWindow(page: Page) {
-  return page.locator('[data-log]').evaluate((log) => new Promise<{ n: number; all: number; gaps: number[]; cut: (string | null)[]; font: number; lh: number; last: string | null }>((resolve) => {
+  return page.locator('[data-log]').evaluate((log) => new Promise<{ n: number; all: number; gaps: number[]; cut: (string | null)[]; roomForMore: boolean; font: number; lh: number; last: string | null }>((resolve) => {
     const resting = () => !log.getAnimations({ subtree: true }).some((a) => a.playState === 'running' && !(a instanceof CSSAnimation));
     (function wait() { if (resting()) resolve(measure()); else requestAnimationFrame(wait); })();
     function measure() {
@@ -185,7 +185,16 @@ async function logWindow(page: Page) {
     const gaps = shown.slice(1).map((l, k) => Math.round(l.getBoundingClientRect().top - shown[k].getBoundingClientRect().bottom));
     const cut = shown.filter((l) => { const r = l.getBoundingClientRect(); return r.top < box.top - 0.5 || r.bottom > box.bottom + 0.5; }).map((l) => l.textContent);
     const cs = shown.length ? getComputedStyle(shown[0]) : null;
-    return { n: shown.length, all: log.querySelectorAll('.ln').length, gaps, cut, font: cs ? parseFloat(cs.fontSize) : 0, lh: cs ? parseFloat(cs.lineHeight) / parseFloat(cs.fontSize) : 0, last: shown.length ? shown[shown.length - 1].textContent : '' };
+    // under-filled: the line just above the window would still fit if it were shown (at most five)
+    const all = Array.from(log.querySelectorAll<HTMLElement>('.ln')); const f = shown.length ? all.indexOf(shown[0]) : -1;
+    let roomForMore = false;
+    if (f > 0 && shown.length < 5) {
+      const prev = all[f - 1]; prev.hidden = false;
+      const last = shown[shown.length - 1], r = last.getBoundingClientRect();
+      roomForMore = r.bottom <= box.bottom - parseFloat(getComputedStyle(log).paddingBottom) + 1;
+      prev.hidden = true;
+    }
+    return { n: shown.length, all: log.querySelectorAll('.ln').length, gaps, cut, roomForMore, font: cs ? parseFloat(cs.fontSize) : 0, lh: cs ? parseFloat(cs.lineHeight) / parseFloat(cs.fontSize) : 0, last: shown.length ? shown[shown.length - 1].textContent : '' };
     }
   }));
 }
@@ -204,6 +213,8 @@ test.describe('the job log is a short window, not a wall of text', () => {
         expect(w.n, `${at}: ${w.n} lines shown`).toBeGreaterThanOrEqual(1);
         expect(w.n, `${at}: ${w.n} lines shown`).toBeLessThanOrEqual(5);
         expect(w.cut, `${at}: lines cut by the log's edge`).toEqual([]);
+        // codex (review r4): a refit during a glide counted the glide's offset and hid one line too many
+        expect(w.roomForMore, `${at}: the window hides a line it has room for`).toBe(false);
         expect(w.font).toBeGreaterThanOrEqual(16);
         expect(w.lh).toBeGreaterThanOrEqual(1.45);
         for (const g of w.gaps) expect(g, `${at}: the space between lines`).toBeGreaterThanOrEqual(11);
@@ -223,6 +234,52 @@ test.describe('the job log is a short window, not a wall of text', () => {
       expect(w.last).toContain('evidence bundle ready');
     });
   }
+
+  // CI (Linux): the poster was fitted before the web font arrived; with it the lines wrapped longer and
+  // the last one hung past the log's bottom edge, since the log's own box never changed size. Any
+  // rewrap (a late font, text spacing, a user style) must refit the window. Here the lines are made
+  // wider after the poster is fitted.
+  test('lines that rewrap after the window is fitted are refitted: they stay whole', async ({ page }) => {
+    // and the refit raises no ResizeObserver loop error (it runs on the next frame, not inside delivery)
+    await page.addInitScript(() => { (window as unknown as { __errs: string[] }).__errs = []; window.addEventListener('error', (e) => (window as unknown as { __errs: string[] }).__errs.push(e.message)); });
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.setViewportSize({ width: 1440, height: 700 });
+    await page.goto('/');
+    await page.evaluate(async () => { await document.fonts.ready; });
+    expect((await logWindow(page)).cut).toEqual([]);
+    await page.addStyleTag({ content: '[data-log] .ln { letter-spacing: .12em; }' });
+    await page.waitForTimeout(200);
+    const w = await logWindow(page);
+    expect(w.cut).toEqual([]);
+    expect(w.roomForMore).toBe(false);
+    expect(w.n).toBeGreaterThanOrEqual(1);
+    expect(w.last).toContain('evidence bundle ready');
+    expect(await page.evaluate(() => (window as unknown as { __errs: string[] }).__errs)).toEqual([]);
+  });
+
+  // codex (review r5): a line hidden by the window is display: none, so no observer sees it rewrap.
+  // When only it narrows (here: spacing that wrapped it alone is taken away), the window stays a line
+  // short until something refits it; a web font arriving (now or later) refits from scratch.
+  test('a font that arrives later refits a window whose hidden line narrowed', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.setViewportSize({ width: 1440, height: 700 });
+    await page.goto('/');
+    await page.evaluate(async () => { await document.fonts.ready; });
+    const tag = await page.addStyleTag({ content: '[data-log] .ln { letter-spacing: .02em; }' });
+    await page.waitForTimeout(200);
+    await tag.evaluate((el) => el.remove());
+    await page.waitForTimeout(200);
+    await page.evaluate(async () => {
+      const url = performance.getEntriesByType('resource').map((e) => e.name).find((n) => /jetbrains-mono-latin-wght-normal/.test(n))!;
+      const face = new FontFace('Refit Probe', `url(${url})`);
+      document.fonts.add(face);
+      await face.load();
+    });
+    await page.waitForTimeout(200);
+    const w = await logWindow(page);
+    expect(w.cut).toEqual([]);
+    expect(w.roomForMore, 'the window stayed a line short').toBe(false);
+  });
 
   // codex (local review): the lines still shown glided up while the new one appeared at its place, so
   // for a moment they were drawn over it, text on text again. Every frame of the moving window counts.
