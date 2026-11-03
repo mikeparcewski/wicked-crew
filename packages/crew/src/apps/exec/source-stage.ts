@@ -407,14 +407,16 @@ export function checkRowValues(a: AppRowWriteAction, columns: readonly SafetyCol
       if (p === undefined) throw new Refused('unknown_param', `parameter ${JSON.stringify(v.name)} is not declared`, 'spec');
       if (p.from !== undefined) {
         if (p.from === 'viewer.groups' || (kind !== 'text' && kind !== 'varchar')) throw new Refused('value_type', `${at} cannot take ${p.from}: a viewer claim goes into a text column`);
-        continue;
+      } else {
+        const problem = paramFits(kind, p, c);
+        if (problem !== null) throw new Refused('value_type', `${at}: ${problem} (parameter ${v.name} is ${p.type}${p.format !== undefined ? `, format ${p.format}` : ''})`);
       }
-      const problem = paramFits(kind, p, c);
-      if (problem !== null) throw new Refused('value_type', `${at}: ${problem} (parameter ${v.name} is ${p.type}${p.format !== undefined ? `, format ${p.format}` : ''})`);
-      // Values the schema already names must also survive the column's full type (codex r2).
+      // Values the schema already names (a viewer-bound parameter's too) must be the column's form and
+      // survive its full type (codex r2, r3; pi r3).
       for (const known of [...(p.enum ?? []), ...(p.default !== undefined ? [p.default] : [])]) {
         const f = inputForm(kind, known, { nullable: !c.notnull, ...(c.enumLabels !== undefined ? { enumLabels: c.enumLabels } : {}) });
-        if (f.ok && f.text !== null) fixed.push({ column: col, full: c.type, base: baseTypeSql(c), text: f.text });
+        if (!f.ok) throw new Refused('value_type', `the value ${JSON.stringify(known)} of parameter ${v.name} for ${at} ${f.why}`);
+        if (f.text !== null) fixed.push({ column: col, full: c.type, base: baseTypeSql(c), text: f.text });
       }
     } else if (v.kind === 'literal') {
       const f = inputForm(kind, v.value, { nullable: !c.notnull, ...(c.enumLabels !== undefined ? { enumLabels: c.enumLabels } : {}) });

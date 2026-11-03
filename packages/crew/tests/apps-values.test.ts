@@ -128,6 +128,20 @@ describe('what an app sends against what the source takes (codex r1)', () => {
     expect(graphqlRootSignatures(d2, a, 'query')).not.toEqual(graphqlRootSignatures(d2, c, 'query'));
   });
 
+  it('r3: a known Int default is range-checked; tool array items in either spelling, and item enums, are checked; repeatable directives are in the contract', () => {
+    const intro = introspectionFromSchema(buildSchema('type Q { t(n: Int): Int x: Int } schema { query: Q }'));
+    const big = { type: 'object' as const, properties: { n: { type: 'integer' as const, default: 2_147_483_648 } }, required: [] };
+    expect(() => checkGraphqlVariables('query ($n: Int) { t(n: $n) }', intro, { n: providerOf({ kind: 'param', name: 'n' }, big) })).toThrow(/Int/);
+    const params = { type: 'object' as const, properties: { tags: { type: 'array' as const, items: { type: 'string' as const } } }, required: ['tags'] };
+    const tags = providerOf({ kind: 'param', name: 'tags' }, params);
+    expect(() => checkToolArgs({ ids: tags }, { properties: { ids: { type: 'array', items: { type: ['integer', 'null'] } } } })).toThrow(/items/);
+    expect(() => checkToolArgs({ ids: tags }, { properties: { ids: { items: { type: 'integer' } } } })).toThrow(/items/);
+    expect(() => checkToolArgs({ ids: tags }, { properties: { ids: { type: 'array', items: { type: 'string', enum: ['OPEN'] } } } })).toThrow(/item values/);
+    const rep = introspectionFromSchema(buildSchema('directive @tag repeatable on FIELD type Query { x: Int }'));
+    const one = introspectionFromSchema(buildSchema('directive @tag on FIELD type Query { x: Int }'));
+    expect(graphqlRootSignatures('query { x @tag }', rep, 'query')).not.toEqual(graphqlRootSignatures('query { x @tag }', one, 'query'));
+  });
+
   it('the GraphQL contract holds every selected field at any depth, fragments and meta-fields included', () => {
     const a = introspectionFromSchema(buildSchema('type Item { id: Int } type Query { item: Item }'));
     const b = introspectionFromSchema(buildSchema('type Item { id: String } type Query { item: Item }'));

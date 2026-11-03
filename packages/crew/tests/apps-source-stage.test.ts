@@ -342,6 +342,9 @@ for (const target of PG_TARGETS) {
         expect((await h.land('tickets', specWith([], [at3]))).status).toBe(200);
         const uuid: AppAction = { ...assign, table: 's.ts0', set: { code: { kind: 'crew', value: 'uuid' } } };
         expect(await findingOf([], {}, [uuid])).toMatchObject({ code: 'value_does_not_fit' });
+        // r3: a viewer-bound parameter's declared values are known values too.
+        const named: AppAction = { ...assign, table: 's.ts0', set: { code: { kind: 'param', name: 'me' } }, params: { type: 'object', properties: { id: { type: 'integer' }, me: { type: 'string', from: 'viewer.name', enum: ['Alice'] } }, required: ['id'] } };
+        expect(await findingOf([], {}, [named])).toMatchObject({ code: 'value_does_not_fit' });
       } finally {
         await db.admin.unsafe('DROP TABLE s.ts0');
       }

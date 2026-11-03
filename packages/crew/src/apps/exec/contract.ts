@@ -144,7 +144,7 @@ export function graphqlRootSignatures(document: string, introspection: Introspec
           missing = true;
           return;
         }
-        lines.add(`directive @${d.name}(${d.args.map((a) => `${a.name}: ${String(a.type)}${a.defaultValue !== undefined ? ` = ${JSON.stringify(a.defaultValue)}` : ''}`).join(', ')}) on ${[...d.locations].sort().join(' | ')}`);
+        lines.add(`directive @${d.name}${d.isRepeatable ? ' repeatable' : ''}(${d.args.map((a) => `${a.name}: ${String(a.type)}${a.defaultValue !== undefined ? ` = ${JSON.stringify(a.defaultValue)}` : ''}`).join(', ')}) on ${[...d.locations].sort().join(' | ')}`);
         for (const a of d.args) refer(a.type);
       },
       InlineFragment() {

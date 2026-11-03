@@ -59,6 +59,23 @@ function sends(p: Provider): Set<string> {
   return new Set(t === 'integer' ? ['integer', 'number'] : [t]);
 }
 
+/** The values a provider is known to take (a literal; a parameter's enum and default): each must fit a scalar's range. */
+function knownValues(p: Provider): unknown[] {
+  if (p.kind === 'literal') return [p.value];
+  if (p.kind === 'param') return [...(p.schema.enum ?? []), ...(p.schema.default !== undefined ? [p.schema.default] : [])];
+  return [];
+}
+
+/** A JSON Schema `type` (a string or a list) as a list; `null` when none is declared. */
+function typesOf(declared: unknown): string[] | null {
+  if (typeof declared === 'string') return [declared];
+  if (Array.isArray(declared)) {
+    const t = declared.filter((x): x is string => typeof x === 'string');
+    return t.length > 0 ? t : null;
+  }
+  return null;
+}
+
 /**
  * Every value a provider can send, when that is a closed set: a literal, or a parameter that declares an
  * `enum`. `null` = open (a free parameter, a viewer claim, a crew value): it cannot be shown to fit an enum
@@ -91,17 +108,19 @@ export function checkToolArgs(args: Record<string, Provider>, inputSchema: Recor
   for (const [name, p] of Object.entries(args)) {
     const prop = props[name];
     if (prop === null || typeof prop !== 'object') continue;
-    const declared = (prop as { type?: unknown }).type;
-    const types = typeof declared === 'string' ? [declared] : Array.isArray(declared) ? declared.filter((t): t is string => typeof t === 'string') : null;
-    if (types !== null && types.length > 0) {
+    const types = typesOf((prop as { type?: unknown }).type);
+    if (types !== null) {
       const s = sends(p);
       if (!types.some((t) => s.has(t))) throw new ArgTypeError('argument_type', `the tool's ${name} is ${types.join(' or ')}, and the app sends ${[...s].join(' or ')}${p.kind === 'param' ? ` (parameter ${p.name})` : ''}`);
-      // An array's items (codex r2): an array parameter's item type against the property's `items.type`.
-      const items = (prop as { items?: { type?: unknown } }).items?.type;
-      if (types.includes('array') && typeof items === 'string' && p.kind === 'param' && p.schema.type === 'array') {
-        const it = p.schema.from === 'viewer.groups' ? 'string' : (p.schema.items?.type ?? 'string');
-        if (!(it === items || (it === 'integer' && items === 'number'))) throw new ArgTypeError('argument_type', `the tool's ${name} holds ${items} items, and parameter ${p.name} holds ${it}`);
-      }
+    }
+    // An array's items whenever the app sends an array (codex r2, r3): their type, in either JSON Schema
+    // spelling; item enums cannot be met (an app's array parameter declares no item values).
+    const items = (prop as { items?: unknown }).items;
+    if (p.kind === 'param' && (p.schema.type === 'array' || p.schema.from === 'viewer.groups') && items !== null && typeof items === 'object') {
+      const it = p.schema.from === 'viewer.groups' ? 'string' : (p.schema.items?.type ?? 'string');
+      const itemTypes = typesOf((items as { type?: unknown }).type);
+      if (itemTypes !== null && !itemTypes.some((t) => t === it || (it === 'integer' && t === 'number'))) throw new ArgTypeError('argument_type', `the tool's ${name} holds ${itemTypes.join(' or ')} items, and parameter ${p.name} holds ${it}`);
+      if (Array.isArray((items as { enum?: unknown }).enum)) throw new ArgTypeError('argument_type', `the tool's ${name} takes only listed item values, which an app array parameter cannot declare`);
     }
     const allowed = (prop as { enum?: unknown }).enum;
     if (Array.isArray(allowed)) {
@@ -133,14 +152,14 @@ function gqlProblem(type: GraphQLInputType, hasDefault: boolean, p: Provider, na
     return scalarFits(inner, new Set(item === 'integer' ? ['integer', 'number'] : [item]), null, name, type);
   }
   if (p.kind === 'param' && p.schema.type === 'array') return `$${name} is ${String(type)}, not a list`;
-  return scalarFits(t, sends(p), closedValues(p), name, type);
+  return scalarFits(t, sends(p), closedValues(p), name, type, knownValues(p));
 }
 
 function getInner(t: GraphQLInputType): GraphQLInputType {
   return isNonNullType(t) ? t.ofType : t;
 }
 
-function scalarFits(t: GraphQLInputType, s: Set<string>, values: unknown[] | null, name: string, whole: GraphQLInputType): string | null {
+function scalarFits(t: GraphQLInputType, s: Set<string>, values: unknown[] | null, name: string, whole: GraphQLInputType, known: unknown[] = values ?? []): string | null {
   if (isInputObjectType(t)) return `$${name} is the input object ${t.name}; an app parameter cannot fill it`;
   if (isListType(t) || isNonNullType(t)) return `$${name} nests lists (${String(whole)}), which an app parameter cannot fill`;
   const words = `$${name} is ${String(whole)}, and the app sends ${[...s].join(' or ')}`;
@@ -155,7 +174,8 @@ function scalarFits(t: GraphQLInputType, s: Set<string>, values: unknown[] | nul
   switch (t.name) {
     case 'Int':
       if (!s.has('integer')) return words;
-      for (const v of values ?? []) if (typeof v !== 'number' || !Number.isInteger(v) || v < INT_MIN || v > INT_MAX) return `${JSON.stringify(v)} is not an Int ($${name})`;
+      // A known value (a literal, an enum member, a default) must be an Int (codex r3).
+      for (const v of known) if (typeof v !== 'number' || !Number.isInteger(v) || v < INT_MIN || v > INT_MAX) return `${JSON.stringify(v)} is not an Int ($${name})`;
       return null;
     case 'Float':
       return s.has('number') ? null : words;
