@@ -31,7 +31,7 @@ import type { SecretStore } from '../src/mcp/secrets.js';
 import { agentAccessOf, agentMay, AGENT_ACCESS_DEFAULT } from '../src/sources/agent-access.js';
 import { SourceAgentQueryLog } from '../src/sources/agent-queries.js';
 import { registerSourceAgentRoutes } from '../src/sources/agent-routes.js';
-import { AGENT_ROW_CAP, AGENT_ROWS_BYTES, agentCatalogView, agentStructure, SourcesAgentTools, untrustedLabel } from '../src/sources/agent-tools.js';
+import { AGENT_ROW_CAP, AGENT_ROWS_BYTES, agentCatalogView, agentRows, agentStructure, agentWords, SourcesAgentTools, untrustedLabel } from '../src/sources/agent-tools.js';
 import { policyCatalog, type SqlCatalog } from '../src/sources/catalog/types.js';
 import { checkReadPolicy } from '../src/sources/policy/index.js';
 import { registerSourceRoutes } from '../src/sources/routes.js';
@@ -589,6 +589,47 @@ describe('the agent projection hides the connection\'s database name (MySQL), an
     expect((await checkReadPolicy('mysql', 'SELECT count(*) FROM tickets', policyCatalog(MYSQL))).ok).toBe(true);
     // Postgres keeps its schemas (structure) and never carried the database name.
     expect(agentStructure({ ...MYSQL, dialect: 'postgres', database: 'pgdb', relations: [{ ...MYSQL.relations[1]!, schema: 'support' }] }, []).database).toBeNull();
+  });
+});
+
+describe('review r2 folds (codex)', () => {
+  it('a redaction can lengthen a cell, so the cap is applied after it; the envelope keys never pass the scrubber', () => {
+    const rows = Array.from({ length: 200 }, () => ['dbreader '.repeat(30)]);
+    const fit = agentRows(rows, 'dbreader');
+    expect(Buffer.byteLength(JSON.stringify(fit.rows), 'utf8')).toBeLessThanOrEqual(AGENT_ROWS_BYTES);
+    expect(fit.cut).toBe(true);
+    expect(JSON.stringify(fit.rows)).not.toContain('dbreader');
+  });
+
+  it('MySQL policy words never name the connection\'s database', async () => {
+    const MY: SqlCatalog = { dialect: 'mysql', database: 'private_connection_database', describedAt: '', relations: [{ schema: 'private_connection_database', name: 'tickets', kind: 'table', rowEstimate: 1, columns: [{ name: 'id', type: 'int', nullable: false }], primaryKey: ['id'], foreignKeys: [] }] };
+    const pol = await checkReadPolicy('mysql', 'SELECT * FROM absent_table', policyCatalog(MY));
+    expect(pol.ok).toBe(false);
+    const words = agentWords((pol as { detail: string }).detail, MY);
+    expect(words).not.toContain('private_connection_database');
+    expect(agentWords('schema support.tickets', { dialect: 'postgres', database: 'support' })).toBe('schema support.tickets');
+  });
+
+  it('when the broker cannot record the call AND the correction cannot be written, the run\'s data use is unknown, not released', async () => {
+    const r = await rig();
+    try {
+      await upload(r, 'tix', TICKETS_CSV);
+      await put(r, 'tix', { projects: ['proj_a'], query: true });
+      (r.records as { append: unknown }).append = async () => {
+        throw new Error('disk full');
+      };
+      const append = r.queries.append.bind(r.queries);
+      (r.queries as { append: typeof append }).append = async (e) => {
+        if (e.outcome === 'record_failed') throw new Error('disk full');
+        return append(e);
+      };
+      const c = await call(r, 'wmt_a', 'query', { name: 'tix', sql: 'SELECT id FROM "tickets"' });
+      expect(c.body).toMatchObject({ outcome: 'guard_error' });
+      expect(await r.queries.dataUse('run-a')).toBeNull();
+      expect(((await r.app.inject({ method: 'GET', url: '/api/v1/runs/run-a/data-use' })).json() as RunDataUseResponse).known).toBe(false);
+    } finally {
+      await close(r);
+    }
   });
 });
 

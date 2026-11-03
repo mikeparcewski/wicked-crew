@@ -80,7 +80,7 @@ type AgentSource = Awaited<ReturnType<McpRegistry['agentSources']>>[number];
 
 export interface SourcesAgentToolsDeps {
   registry: Pick<McpRegistry, 'agentSources' | 'source' | 'callSecret' | 'holdsReservedSourcesName'>;
-  queries: Pick<SourceAgentQueryLog, 'append'>;
+  queries: Pick<SourceAgentQueryLog, 'append'> & Partial<Pick<SourceAgentQueryLog, 'markUnknown'>>;
   audit: { record(action: string, actor: Actor, fields?: { runId?: string; detail?: Record<string, unknown> }): unknown };
   /** `Core.resolveEstateScope`, read per call; `null` = the linked engine predates it. */
   resolver: () => ((requestJson: string) => Promise<string>) | null;
@@ -104,6 +104,12 @@ const message = (err: unknown): string => (err instanceof Error ? err.message : 
 /** A tool refusal as data the agent reads (the call ran: crew answered it). */
 function refusal(code: string, reason: string, extra: Record<string, unknown> = {}): SourcesToolResult {
   return { ok: true, isError: true, answer: { refused: code, reason, ...extra } };
+}
+
+/** The rows an agent gets: each cell projected and cut, scrubbed of the source's secret, THEN held to the byte cap. */
+export function agentRows(rows: readonly unknown[][], secret: string | null): { rows: unknown[][]; cut: boolean } {
+  const cells = rows.map((row) => row.map(agentCell));
+  return rowsWithin(secret === null ? cells : scrubSecrets(cells, [secret]), AGENT_ROWS_BYTES);
 }
 
 /** A cell as an agent gets it: Ask's projection, then its JSON text cut to {@link AGENT_CELL_CHARS}. */
@@ -427,7 +433,12 @@ export class SourcesAgentTools {
     /** A call that released no rows: its audit line and its record (a failed write is logged; nothing was released). */
     const settle = async (e: SourceAgentQueryEntry): Promise<void> => {
       audit(e);
-      await this.deps.queries.append(e).catch((err: unknown) => this.deps.log?.(`[sources] the agent-query record for ${s.name} (${e.outcome}) could not be written: ${message(err)}`));
+      await this.deps.queries.append(e).catch((err: unknown) => {
+        this.deps.log?.(`[sources] the agent-query record for ${s.name} (${e.outcome}) could not be written: ${message(err)}`);
+        // A correction that did not land would leave an earlier "released" standing: the run's data use is
+        // then unknown, never a confirmed release that did not happen (codex r2 #2).
+        this.deps.queries.markUnknown?.(e.runId);
+      });
     };
     try {
       return await this.readAdmitted(s, sqlText, params, scope, { catalog, driver, entry, audit, settle });
@@ -456,7 +467,7 @@ export class SourcesAgentTools {
     const pol = await checkReadPolicy(driver, sqlText, policyCatalog(catalog, driver === 'sqlite' ? [] : s.viewsAllowed));
     if (!pol.ok) {
       await settle(entry(pol.code));
-      return refusal(pol.code, `the read policy refused this query, and nothing ran: ${pol.detail}`, { remedy: 'one SELECT over the described relations, built-in functions only' });
+      return refusal(pol.code, `the read policy refused this query, and nothing ran: ${agentWords(pol.detail, catalog)}`, { remedy: 'one SELECT over the described relations, built-in functions only' });
     }
 
     let secret: string | null = null;
@@ -500,7 +511,7 @@ export class SourcesAgentTools {
     } catch (err) {
       if (err instanceof SourcePolicyError) {
         await settle(entry(err.code));
-        return refusal(err.code, `the read policy refused this query, and nothing ran: ${err.message}`);
+        return refusal(err.code, `the read policy refused this query, and nothing ran: ${agentWords(err.message, catalog)}`);
       }
       if (err instanceof SourceQueryError) {
         // The class and the SQLSTATE only: a source's own words can echo a value (§5.2).
@@ -515,15 +526,17 @@ export class SourcesAgentTools {
     }
     await this.deps.afterRead?.();
 
-    // The rows: each cell projected and cut, then the exact cap; the whole answer (column names and types
-    // too) is scrubbed of the source's secret (codex r1 #6).
-    const fit = rowsWithin(res.rows.map((row) => row.map(agentCell)), AGENT_ROWS_BYTES);
+    // The rows: each cell projected and cut, scrubbed of the source's secret, THEN the exact cap (a redaction
+    // can lengthen a cell: codex r2 #3). Column names and types are scrubbed as strings (r1 #6); the fixed
+    // envelope's own keys never pass through the scrubber (r2 #4).
+    const scrub = <T>(v: T): T => (secret === null ? v : scrubSecrets(v, [secret]));
+    const fit = agentRows(res.rows, secret);
     const truncated = res.truncated || fit.cut;
-    const answer: Record<string, unknown> = {
+    const safe: Record<string, unknown> = {
       untrusted: untrustedLabel(s.name),
       source: s.name,
-      sql: sqlText,
-      columns: res.columns,
+      sql: scrub(sqlText),
+      columns: res.columns.map((c) => ({ name: scrub(c.name), type: scrub(c.type) })),
       rows: fit.rows,
       rowCount: fit.rows.length,
       truncated,
@@ -531,7 +544,6 @@ export class SourcesAgentTools {
       byteCap: AGENT_ROWS_BYTES,
       ms: res.ms,
     };
-    const safe = secret === null ? answer : scrubSecrets(answer, [secret]);
 
     // The durable record lands BEFORE the rows are released; when it cannot, they are withheld (codex r12 #15).
     const done = entry('ok', { rows: fit.rows.length, truncated, released: true });
@@ -562,6 +574,17 @@ export class SourcesAgentTools {
       },
     };
   }
+}
+
+/**
+ * crew's own words for an agent, without the connection's database name: K1's MySQL policy names a table it
+ * resolved through the connected database as `"<db>"."<table>"` (codex r2 #1). Postgres words name schemas,
+ * which are structure, never the database.
+ */
+export function agentWords(text: string, catalog: Pick<SqlCatalog, 'dialect' | 'database'>): string {
+  const db = catalog.database;
+  if (catalog.dialect !== 'mysql' || db === null || db === '') return text;
+  return text.split(`"${db}".`).join('').split(`\`${db}\`.`).join('').split(`${db}.`).join('').split(db).join('(the source\'s database)');
 }
 
 function sameViews(a: readonly string[], b: readonly string[]): boolean {
