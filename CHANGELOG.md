@@ -12,6 +12,16 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **Apps: the `apps.json` schema and the app store's wire contract (api-types 0.172.0, DES-APPS-001 slice K2a).** The
+  app spec an Apps app is made of: pages of components on a 12-column grid (table, chart, KPI, text, filter, form,
+  button, image, link), named queries with declared output columns and parameters (viewer-bound ones filled by the
+  server, never bound by a component), API actions and declared Postgres row writes, the theme and the hosts a link may
+  open. crew's schema (`src/apps/spec.ts`) is strict at every level and checks what a shape cannot say: unique ids,
+  bindings that name a query, action, filter, form field, row column or page that exists, links over https to a listed
+  host only. The contract also carries the lock (`apps.lock.json`), receipts, versions, the undo pointer, the edit,
+  undo, redo, restore and query bodies, one error body, `HealthCapabilities.apps` and `RegisterRepoBody.create`; the
+  routes that serve them follow in the store slice. `tests/wire-contract.test.ts` holds the contract and the schema
+  equal in both directions.
 - **Make it creates a grounded document from the chat, filed under the chat, exactly once (api-types 0.171.0,
   DES-CHAT-ARTIFACTS-001 slice A3).** `create` is now a real operation: production advertises it whenever the draft
   seam is armed, and Go on a document proposal makes one document and one run. Go records the document's durable
