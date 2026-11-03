@@ -132,7 +132,11 @@ describe('in-daemon crew loads no SQLite library (wicked-core#631)', () => {
   });
 
   it('no in-daemon source prepares SQL, sets a PRAGMA or runs .exec(…)', () => {
-    expect(files.flatMap((f) => sqlCalls(f.code).map((hit) => `${f.rel}: ${hit}`))).toEqual([]);
+    // The one `.prepare(` that is no SQL on a daemon store: the MySQL source driver prepares the
+    // person's query ON THEIR SERVER (COM_STMT_PREPARE over the network, never executed;
+    // DES-APPS-001 §5.3). Every other hit, there or anywhere, still counts.
+    const remotePrepare = (rel: string, hit: string): boolean => rel === 'sources/drivers/mysql.ts' && /^\.prepare/.test(hit);
+    expect(files.flatMap((f) => sqlCalls(f.code).filter((hit) => !remotePrepare(f.rel, hit)).map((hit) => `${f.rel}: ${hit}`))).toEqual([]);
   });
 
   it('wicked-bus and better-sqlite3 are not runtime dependencies of the crew package', () => {

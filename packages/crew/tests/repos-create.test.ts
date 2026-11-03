@@ -96,7 +96,8 @@ describe('GET /api/v1/health: the apps capability', () => {
     const h = await withStore.app.inject({ method: 'GET', url: '/api/v1/health' });
     expect(h.statusCode, h.body).toBe(200);
     const caps = h.json().capabilities;
-    expect(caps.apps).toEqual({ query: false, actions: false, turns: false, publish: false, uploads: false, sourceCheck: false });
+    // Uploads serve since the sources slice (K1, POST /apps/uploads); the rest are still to come.
+    expect(caps.apps).toEqual({ query: false, actions: false, turns: false, publish: false, uploads: true, sourceCheck: false });
     const without = routes(false);
     expect((await without.app.inject({ method: 'GET', url: '/api/v1/health' })).json().capabilities.apps).toBeUndefined();
   });

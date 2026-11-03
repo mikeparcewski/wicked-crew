@@ -62,6 +62,19 @@ function mysqlGreeting(): Buffer {
   return Buffer.concat([head, body]);
 }
 
+/** A Postgres ErrorResponse (FATAL, SQLSTATE 28000) carrying `message`. */
+function pgFatal(message: string): Buffer {
+  const fields = Buffer.concat([
+    Buffer.from('SFATAL\0VFATAL\0C28000\0', 'latin1'),
+    Buffer.from(`M${message}\0`, 'utf8'),
+    Buffer.from([0]),
+  ]);
+  const head = Buffer.alloc(5);
+  head.write('E', 0, 'latin1');
+  head.writeUInt32BE(fields.length + 4, 1);
+  return Buffer.concat([head, fields]);
+}
+
 /** A TCP endpoint that starts TLS the way `dialect`'s server does, with `key`/`cert`. */
 async function tlsEndpoint(dialect: Dialect, key: Buffer, cert: Buffer): Promise<Endpoint> {
   const ep = { port: 0, secured: 0 } as Endpoint;
@@ -71,7 +84,10 @@ async function tlsEndpoint(dialect: Dialect, key: Buffer, cert: Buffer): Promise
     const tls = new TLSSocket(raw, { isServer: true, key, cert });
     tls.on('secure', () => {
       ep.secured++;
-      tls.destroy(); // enough: the client accepted the certificate
+      // Enough: the client accepted the certificate. Postgres gets a FATAL ErrorResponse, so the
+      // driver settles at once instead of trying the connection again; MySQL is simply hung up on.
+      if (dialect === 'postgres') tls.end(pgFatal('tls probe: the handshake completed'));
+      else tls.destroy();
     });
     tls.on('error', () => raw.destroy());
   };
@@ -139,7 +155,6 @@ describe.skipIf(!OPENSSL)('SQL TLS identity: the certificate must name the host 
       const ep = await tlsEndpoint(driver, leaf['dns']!.key, leaf['dns']!.cert);
       try {
         // The handshake completes (the endpoint then hangs up: the failure after it is not about TLS).
-        // (postgres.js tries the connection again when the server hangs up: count, do not pin.)
         const ok = await describeWith(driver, args(driver, 'db.apps.test', ep.port)).catch((e: unknown) => e);
         expect(String(ok)).not.toMatch(IDENTITY);
         expect(ep.secured).toBeGreaterThan(0);

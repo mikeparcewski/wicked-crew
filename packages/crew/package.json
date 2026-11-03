@@ -15,6 +15,7 @@
     "skills",
     "watch",
     "endpoint-manifest.json",
+    "runners",
     "workflows"
   ],
   "scripts": {

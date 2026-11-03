@@ -22,7 +22,7 @@ import { inflateRawSync } from 'node:zlib';
 
 import { mcpStateDir } from '../mcp/registry-store.js';
 import type { SqlCatalog } from './catalog/types.js';
-import { sqliteInspect } from './drivers/sqlite.js';
+import { sqliteCreate, sqliteInspect } from './drivers/sqlite.js';
 import { SourceQueryError } from './drivers/types.js';
 
 export const UPLOAD_LIMITS = Object.freeze({
@@ -451,47 +451,19 @@ function inferType(values: Iterable<string>, deadline: number): 'INTEGER' | 'REA
   return t ?? 'TEXT';
 }
 
-function quote(name: string): string {
-  return `"${name.replace(/"/g, '""')}"`;
-}
-
 function tableNameFor(filename: string): string {
   const base = filename.replace(/^.*[\\/]/, '').replace(/\.[^.]+$/, '').toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
   return /^[a-z_]/.test(base) && base.length > 0 ? base.slice(0, 63) : `data${base === '' ? '' : `_${base}`}`.slice(0, 63);
 }
 
+/** Write the rows as a new SQLite file at `tmp`, in the snapshot runner (the daemon loads no SQLite library). */
 async function writeRowsSnapshot(tmp: string, table: string, names: string[], types: string[], rows: string[][], deadline: number): Promise<void> {
-  let sqlite: typeof import('node:sqlite');
+  within(deadline);
   try {
-    sqlite = await import('node:sqlite');
-  } catch {
-    throw new UploadError('sqlite_unavailable', 'uploads need Node.js with node:sqlite (24.12 or later)');
-  }
-  const db = new sqlite.DatabaseSync(tmp);
-  try {
-    db.exec(`CREATE TABLE ${quote(table)} (${names.map((n, i) => `${quote(n)} ${types[i]}`).join(', ')})`);
-    const ins = db.prepare(`INSERT INTO ${quote(table)} VALUES (${names.map(() => '?').join(', ')})`);
-    db.exec('BEGIN');
-    let n = 0;
-    for (const r of rows) {
-      if ((++n & 0x3ff) === 0) {
-        within(deadline);
-        // Let the daemon breathe between batches: a large upload never holds the event loop for long.
-        await new Promise<void>((r) => setImmediate(r));
-      }
-      ins.run(
-        ...names.map((_n, i) => {
-          const v = (r[i] ?? '').trim();
-          if (v === '') return null;
-          if (types[i] === 'INTEGER') return BigInt(v);
-          if (types[i] === 'REAL') return Number(v);
-          return r[i] ?? '';
-        }),
-      );
-    }
-    db.exec('COMMIT');
-  } finally {
-    db.close();
+    await sqliteCreate(tmp, table, names, types, rows, Math.max(1, deadline - Date.now()));
+  } catch (err) {
+    if (err instanceof SourceQueryError && err.errorClass === 'timeout') throw tooSlow();
+    throw err;
   }
 }
 
@@ -514,20 +486,19 @@ function kindOf(filename: string, data: Buffer): UploadKind {
   if (data.length >= 4 && data.readUInt32LE(0) === 0x04034b50) return 'xlsx';
   const ext = filename.toLowerCase().replace(/^.*\./, '');
   if (ext === 'xlsx') return 'xlsx';
-  if (ext === 'sqlite' || ext === 'db' || ext === 'sqlite3') return 'sqlite';
+  if (/^(sqlite3?|db)$/.test(ext)) return 'sqlite';
   return 'csv';
 }
 
 /** Turn one uploaded file into a stored snapshot (or refuse it). */
-/** Whether this runtime can hold snapshots (node:sqlite with the authorizer and defensive mode). */
-async function sqliteAvailable(): Promise<boolean> {
-  try {
-    const m = await import('node:sqlite');
-    const proto = m.DatabaseSync.prototype as unknown as Record<string, unknown>;
-    return typeof proto['setAuthorizer'] === 'function' && typeof proto['enableDefensive'] === 'function';
-  } catch {
-    return false;
-  }
+/**
+ * Whether this runtime can hold snapshots: node:sqlite with the authorizer and defensive mode, Node.js
+ * 24.12 or later. Judged from the version (the daemon itself never loads node:sqlite; the runner child
+ * checks the API again and refuses with the same words).
+ */
+function sqliteAvailable(): boolean {
+  const [major = 0, minor = 0] = process.versions.node.split('.').map(Number);
+  return major > 24 || (major === 24 && minor >= 12);
 }
 
 /** `p` with every symlink of its longest existing prefix resolved (the rest does not exist yet). */
@@ -583,7 +554,7 @@ export async function ingestUpload(filename: string, data: Buffer, opts: { dir?:
   const deadline = Date.now() + (opts.parseMs ?? UPLOAD_LIMITS.parseMs);
   if (data.length > UPLOAD_LIMITS.fileBytes) throw new UploadError('too_large', `an upload is at most ${UPLOAD_LIMITS.fileBytes / (1024 * 1024)} MB`);
   if (data.length === 0) throw new UploadError('empty', 'the file is empty');
-  if (!(await sqliteAvailable())) throw new UploadError('sqlite_unavailable', 'uploads need Node.js 24.12 or later (node:sqlite with the authorizer and defensive mode)');
+  if (!sqliteAvailable()) throw new UploadError('sqlite_unavailable', 'uploads need Node.js 24.12 or later (its built-in SQLite, with the authorizer and defensive mode)');
   const dir = opts.dir ?? snapshotDir();
   const repo = await repoAround(dir);
   if (repo !== null) throw new UploadError('snapshot_in_repo', `the snapshot store ${dir} is inside the git work tree ${repo}; snapshots are kept outside any repository (move crew's state home out of it)`);
