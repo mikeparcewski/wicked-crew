@@ -22,6 +22,7 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
 import type { McpAuthConfig, McpRestMapping, McpToolAnnotations, McpUpstreamKind } from '../core/types.js';
 import { addressPolicyOf, type AddressPolicy, boundFetch, type DialOptions, DialRefusedError, type DialRefusalCode } from '../sources/dialer.js';
+import { describeSource, type SourceDescription, type SqlSourceConfig } from '../sources/kinds.js';
 import { probeRestServer, type RestEgress } from './rest.js';
 import { scrubSecrets } from './secrets.js';
 
@@ -52,6 +53,10 @@ export interface McpUpstreamConfig {
    * through the dialer under it; absent = global unicast over TLS only. Not for `mcp-stdio`.
    */
   address?: AddressPolicy | null;
+  /** (DES-APPS-001 §5.1) `sql` only: driver and connection settings (no secret; the password is `auth.ref`). */
+  sql?: SqlSourceConfig | null;
+  /** (DES-APPS-001 §5.3) `sql` only: views (and materialized views) a read may name, `schema.view`. */
+  viewsAllowed?: string[] | null;
 }
 
 export interface ProbedTool {
@@ -65,7 +70,15 @@ export interface ProbedTool {
 }
 
 export type ProbeResult =
-  | { ok: true; serverInfo: { name: string; version: string } | null; tools: ProbedTool[]; skipped?: string[]; egress?: RestEgress }
+  | {
+      ok: true;
+      serverInfo: { name: string; version: string } | null;
+      tools: ProbedTool[];
+      skipped?: string[];
+      egress?: RestEgress;
+      /** (DES-APPS-001 §5.1) A `sql` or `graphql` source's describe: its catalog, structure only. */
+      source?: SourceDescription;
+    }
   | {
       ok: false;
       error: string;
@@ -99,6 +112,7 @@ function objectOrNull(raw: unknown): Record<string, unknown> | null {
  */
 export function transportFor(config: McpUpstreamConfig, secret: string | null, dial: DialOptions = {}): { transport: Transport; stderrTail: () => string } {
   if (config.kind === 'rest') throw new Error('a rest upstream is not an MCP server; it has no MCP transport');
+  if (config.kind === 'sql' || config.kind === 'graphql') throw new Error(`a ${config.kind} source is not an MCP server; it has no MCP transport`);
   if (config.kind === 'mcp-stdio') {
     const env: Record<string, string> = { ...getDefaultEnvironment() };
     if (config.auth?.env !== undefined && secret !== null) env[config.auth.env] = secret;
@@ -118,6 +132,23 @@ export function transportFor(config: McpUpstreamConfig, secret: string | null, d
   // The SDK's own class declares `sessionId?: string` against its `Transport` interface, which
   // `exactOptionalPropertyTypes` refuses; the runtime shapes are the same.
   return { transport: http as unknown as Transport, stderrTail: () => '' };
+}
+
+/**
+ * (DES-APPS-001 §5.1) A `sql` or `graphql` source's probe is a DESCRIBE: its structural catalog (and a
+ * Postgres login's privilege report). It has no tools. Every string is scrubbed of the secret.
+ */
+async function probeSourceKind(config: McpUpstreamConfig, secret: string | null, dial: DialOptions): Promise<ProbeResult> {
+  const secrets = secret === null ? [] : [secret];
+  try {
+    const source = await describeSource(config, secret, dial);
+    const name = config.kind === 'graphql' ? 'graphql' : (config.sql?.driver ?? 'sql');
+    return scrubSecrets({ ok: true as const, serverInfo: { name, version: '' }, tools: [], source }, secrets);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const refusal = err instanceof DialRefusedError ? err.code : (err as { errorClass?: string })?.errorClass === 'refused' ? 'address_unconfirmed' : undefined;
+    return scrubSecrets({ ok: false as const, error: message, ...(refusal !== undefined && err instanceof DialRefusedError ? { refusal } : {}) }, secrets);
+  }
 }
 
 /** The time kept back for a final http attempt when the next backoff step would overrun the budget. */
@@ -159,6 +190,7 @@ export const probeMcpServer: Prober = async (config, secret) => probeMcpServerWi
 
 export async function probeMcpServerWithin(config: McpUpstreamConfig, secret: string | null, budget: ProbeBudget, dial: DialOptions = {}): Promise<ProbeResult> {
   if (config.kind === 'rest') return probeRestServer(config, secret);
+  if (config.kind === 'sql' || config.kind === 'graphql') return probeSourceKind(config, secret, dial);
   const secrets = secret === null ? [] : [secret];
   const end = budget.now() + budget.budgetMs;
   let lastTail = '';

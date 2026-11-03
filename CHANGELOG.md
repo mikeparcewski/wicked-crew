@@ -65,6 +65,27 @@ A feature release on wicked-core-ts ^0.15.21 and wicked-crew-api-types 0.172.0, 
 
 ### Added
 
+- **Apps data sources (api-types 0.174.0, DES-APPS-001 §5, §7.4, §7.5, slice K1).** crew's one connector registry
+  gains two kinds, `sql` (drivers `postgres`, `mysql`, `sqlite`) and `graphql`, registered through the same
+  `POST /mcp/servers/preview` and save and never offered to a governed run (they have no tools). A preview describes the
+  source: its catalog (structure and declared enum literals, never a row value) and, for Postgres, the login's privilege
+  report. Every query passes the **read policy** before it reaches the source, at check time and at every run: Postgres
+  through libpg_query with a closed node, function, operator and cast allowlist (`search_path = pg_catalog, pg_temp`,
+  `standard_conforming_strings` pinned); MySQL through a hand-written closed-subset grammar (`sql_mode` pinned,
+  executable comments, backslashes and variables refused); SQLite through the authorizer at prepare in a child process.
+  Reads run `READ ONLY` with a 10 s deadline enforced at the source (`statement_timeout` plus cancel; `max_execution_time`
+  plus `KILL QUERY`; the SQLite process ended). New routes: `GET /sources/:name/catalog` (`crew` is the built-in source),
+  `POST /sources/:name/describe`, `…/privileges` (the exact missing `GRANT`s for a declared row write), `…/check` (policy,
+  then prepare/describe, never execute), `…/safety` (the Postgres **table safety check** and its fingerprint, §7.4 rev
+  11), `PUT …/allow-writes` (the per-source **Allow writes** switch: off on every new Postgres source, human operator
+  only, audited `apps.source.writes_allowed` / `writes_disallowed`, turning it off withdraws the source's row-write
+  grants, not part of the connection descriptor), `POST …/test-call` (G6: names its one request first, sends exactly
+  it only with the request's hash; reads only; human operator only) and `POST /apps/uploads` (a CSV, an XLSX or a
+  `.sqlite` becomes a content-addressed snapshot source; a `.sqlite` holding a view, trigger or virtual table is refused;
+  50 MB, 200 MB expanded, 1,000,000 rows, 200 columns, 30 s; the first rows go to a human only). CI gains the
+  `sources-db` job: Postgres 16, Postgres 17 and MySQL 8 service containers, and `tests/fixtures/apps-sources/` (seeds,
+  an OpenAPI test service, a GraphQL test server, the reference MCP server, upload samples) for the later Apps lanes.
+
 - **Apps: the `apps.json` schema and the app store's wire contract (api-types 0.172.0, DES-APPS-001 slice K2a).** The
   app spec an Apps app is made of: pages of components on a 12-column grid (table, chart, KPI, text, filter, form,
   button, image, link), named queries with declared output columns and parameters (viewer-bound ones filled by the

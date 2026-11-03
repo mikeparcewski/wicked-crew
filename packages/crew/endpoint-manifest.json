@@ -12,6 +12,20 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/api/v1/apps/uploads",
+      "requestType": null,
+      "responseType": "SourceUploadResponse",
+      "statusCodes": [
+        201,
+        400,
+        409,
+        413,
+        415,
+        503
+      ]
+    },
+    {
       "method": "GET",
       "path": "/api/v1/apps",
       "requestType": null,
@@ -2581,6 +2595,106 @@
         200,
         400,
         409,
+        503
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/sources/:name/allow-writes",
+      "requestType": "SourceAllowWritesBody",
+      "responseType": "SourceAllowWritesResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/sources/:name/catalog",
+      "requestType": null,
+      "responseType": "SourceCatalogResponse",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/sources/:name/check",
+      "requestType": "SourceCheckBody",
+      "responseType": "SourceCheckResponse",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409,
+        502,
+        503,
+        504
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/sources/:name/describe",
+      "requestType": null,
+      "responseType": "SourceCatalogResponse",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409,
+        502,
+        503,
+        504
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/sources/:name/privileges",
+      "requestType": "SourcePrivilegesBody",
+      "responseType": "SourcePrivilegeReport",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409,
+        502,
+        503,
+        504
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/sources/:name/safety",
+      "requestType": "SourceSafetyBody",
+      "responseType": "SourceSafetyResponse",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409,
+        502,
+        503,
+        504
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/sources/:name/test-call",
+      "requestType": "SourceTestCallBody",
+      "responseType": "SourceTestCallResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        502,
         503
       ]
     },

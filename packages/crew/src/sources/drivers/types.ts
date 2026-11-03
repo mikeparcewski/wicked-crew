@@ -1,0 +1,71 @@
+/** Shapes shared by the SQL drivers (DES-APPS-001 §5.1, §7.5). */
+
+import type { AddressPolicy, DialOptions } from '../dialer.js';
+
+/** `verify-full` (Postgres) / `VERIFY_IDENTITY` (MySQL); `disable` only where the dialer allows plaintext. */
+export type SqlTlsMode = 'verify-full' | 'disable';
+
+/** A network SQL source's connection descriptor: its non-secret identity. */
+export interface SqlNetworkSource {
+  driver: 'postgres' | 'mysql';
+  host: string;
+  port: number;
+  database: string;
+  user: string;
+  tls: SqlTlsMode;
+  /** A CA (PEM) the person gave for this source's TLS; replaces the system roots when set. */
+  ca?: string | null;
+}
+
+export interface SqlConnectArgs {
+  source: SqlNetworkSource;
+  /** The password, resolved from its secret reference at connect time; never stored here. */
+  password: string | null;
+  policy: AddressPolicy;
+  dial?: DialOptions;
+}
+
+/** The statement deadline (§7.5): 10 s per driver, enforced AT THE SOURCE and then by cancel. */
+export const STATEMENT_DEADLINE_MS = 10_000;
+/** Rows a read returns at most (§7.5); the read says `truncated` past it. */
+export const READ_MAX_ROWS = 5_000;
+
+export interface SqlColumn {
+  name: string;
+  /** The source's type name (Postgres `format_type`, MySQL column type). */
+  type: string;
+}
+
+export interface SqlDescribe {
+  columns: SqlColumn[];
+  /** The parameter types the source inferred, in order. */
+  params: string[];
+}
+
+export interface SqlReadResult {
+  columns: SqlColumn[];
+  rows: unknown[][];
+  truncated: boolean;
+  ms: number;
+}
+
+/**
+ * A failure from the source: its SQLSTATE (or MySQL error code) and class are safe to show an agent;
+ * `message` is for the person only (a cast error can echo a value, §5.2).
+ */
+export class SourceQueryError extends Error {
+  constructor(
+    readonly sqlstate: string | null,
+    readonly errorClass: 'timeout' | 'refused' | 'connection' | 'source',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'SourceQueryError';
+  }
+}
+
+export interface ReadOptions {
+  deadlineMs?: number;
+  maxRows?: number;
+  signal?: AbortSignal;
+}

@@ -12311,9 +12311,12 @@ export interface PutDeliveryFreezeBody {
 
 /**
  * How crew reaches an upstream: an MCP server over stdio or streamable HTTP, or a plain REST API
- * wrapped as tools from its OpenAPI document (`rest`, api-types 0.64.0).
+ * wrapped as tools from its OpenAPI document (`rest`, api-types 0.64.0). (api-types 0.174.0,
+ * DES-APPS-001 §5.1) `sql` (drivers `postgres`, `mysql`, `sqlite`) and `graphql` are Apps data
+ * sources: registered through the same preview/save, but with NO tools — nothing of theirs is ever
+ * offered to a governed run. Their preview answers {@link McpPreviewResponse.source} (the catalog).
  */
-export type McpUpstreamKind = 'mcp-stdio' | 'mcp-http' | 'rest';
+export type McpUpstreamKind = 'mcp-stdio' | 'mcp-http' | 'rest' | 'sql' | 'graphql';
 /**
  * A tool's class, from its own `tools/list` annotations (never from a carrier): `read` when
  * `readOnlyHint` is true; else `destructive` unless `destructiveHint` is false; else `write`. A tool
@@ -12410,6 +12413,17 @@ export interface McpServerConfigBody {
    */
   address?: McpAddressPolicy;
   /**
+   * (api-types 0.174.0, DES-APPS-001 §5.1) `sql` only: the driver and its connection settings. The
+   * password is the secret behind `auth.ref` (`auth` takes only `ref` for `sql`). `sqlite` sources come
+   * from `POST /apps/uploads` (a snapshot digest), not from a preview.
+   */
+  sql?: SqlSourceConfigBody;
+  /**
+   * (api-types 0.174.0) `sql` only: the views (and materialized views) a read may name, as
+   * `schema.view` (MySQL `database.view`). A view not listed is refused by the read policy.
+   */
+  viewsAllowed?: string[];
+  /**
    * The secret VALUE this server's keychain entry will hold (wicked-crew#719). The preview is
    * probed with it and it is held with the preview; `POST /mcp/servers` writes it to the OS store
    * as part of the save, so the secret and the registry row commit together — studio used to write
@@ -12487,6 +12501,23 @@ export interface McpServer {
   openapiUrl?: string | null;
   /** `rest` only: the operations that were picked; `null` = all. */
   operations?: string[] | null;
+  /** (api-types 0.174.0) `sql` only: driver and connection settings (`ca` shown as whether one is set). */
+  sql?: SqlSourceView;
+  /** (api-types 0.174.0) `sql` only: views a read may name. */
+  viewsAllowed?: string[];
+  /**
+   * (api-types 0.174.0, DES-APPS-001 §7.4) Postgres `sql` only: the per-source **Allow writes**
+   * switch, `false` on every new source. Only a human operator turns it on or off
+   * (`PUT /sources/:name/allow-writes`); turning it off withdraws every row-write grant on the
+   * source. It is not part of the connection descriptor: reads are unaffected.
+   */
+  allowWrites?: boolean;
+  /**
+   * (api-types 0.174.0) `sql`/`graphql`: the sha256 of the source's connection descriptor (driver,
+   * host, port, database, login, TLS mode, url, auth header, snapshot, confirmed ranges; never
+   * `allowWrites`). Queries, actions and grants bind to it.
+   */
+  descriptorHash?: string;
   /**
    * (api-types 0.174.0) `mcp-http` and `rest` only: the ranges confirmed for this server's
    * connections. A server saved before 0.174.0 shows what crew re-derived for it: the IP literal or
@@ -12577,7 +12608,15 @@ export interface McpPreviewResponse {
     operations?: string[] | null;
     /** (api-types 0.174.0) `mcp-http` and `rest` only: the ranges this preview dialled under. */
     address?: McpAddressPolicy;
+    /** (api-types 0.174.0) `sql` only. */
+    sql?: SqlSourceView;
+    viewsAllowed?: string[];
   };
+  /**
+   * (api-types 0.174.0, DES-APPS-001 §5.1) `sql`/`graphql` only: what the describe found —
+   * structure, never a value from a row — and, for Postgres, the login's privilege report.
+   */
+  source?: { catalog: SourceCatalog; privileges?: SourcePrivilegeReport };
   serverInfo: { name: string; version: string } | null;
   tools: McpPreviewTool[];
   diff: McpToolDiff | null;
@@ -13058,6 +13097,230 @@ export interface McpUsageResponse {
   seats: string[];
   /** Lines of `calls.ndjson` that did not parse as a call record. */
   skipped: number;
+}
+
+// ── Apps data sources (DES-APPS-001 §5, §7.4, §7.5; api-types 0.174.0) ───────────────────────────
+
+/** `McpServerConfigBody.sql`: a network SQL source's settings. Secrets go in `auth.ref` only. */
+export interface SqlSourceConfigBody {
+  driver: 'postgres' | 'mysql';
+  host: string;
+  /** Default 5432 (Postgres), 3306 (MySQL). */
+  port?: number;
+  database: string;
+  /** The login. A read-only login is recommended; the privilege report says when it is not one. */
+  user: string;
+  /**
+   * `verify-full` (default; Postgres verify-full, MySQL VERIFY_IDENTITY: the certificate and the
+   * host name are verified). `disable` only to loopback, or a private range confirmed as plaintext
+   * in `address` (else the preview is a 409 `plaintext_refused`).
+   */
+  tls?: 'verify-full' | 'disable';
+  /** A CA certificate (PEM) when the server's is not signed by a public root. */
+  ca?: string;
+}
+
+/** A `sql` source's settings as answered (the CA as whether one is set). */
+export interface SqlSourceView {
+  driver: 'postgres' | 'mysql' | 'sqlite';
+  host: string | null;
+  port: number | null;
+  database: string | null;
+  user: string | null;
+  tls: 'verify-full' | 'disable';
+  ca: boolean;
+  /** `sqlite`: the snapshot's sha256. */
+  snapshot: string | null;
+}
+
+/** How a relation may be read: base tables; views only by name (`viewsAllowed`); foreign tables never. */
+export type SourceRelationKind = 'table' | 'partitioned' | 'view' | 'matview' | 'foreign';
+
+export interface SourceCatalogColumn {
+  name: string;
+  /** The source's own type text (`integer`, `character varying(80)`, `support.priority`). */
+  type: string;
+  nullable: boolean;
+  /** Enum literals the schema declares (Postgres enum, MySQL ENUM). Never a value read from a row. */
+  enumValues?: string[];
+}
+
+export interface SourceCatalogRelation {
+  /** Postgres schema, MySQL database; `null` for SQLite. */
+  schema: string | null;
+  name: string;
+  kind: SourceRelationKind;
+  /** The planner's estimate (SQLite: the snapshot's exact count); `null` = unknown. */
+  rowEstimate: number | null;
+  columns: SourceCatalogColumn[];
+  primaryKey: string[];
+  foreignKeys: Array<{ name: string; columns: string[]; references: { schema: string | null; table: string; columns: string[] } }>;
+  /** Postgres: row security enabled or forced. */
+  rowSecurity?: boolean;
+}
+
+/** A `sql` source's catalog: structure only. */
+export interface SqlSourceCatalog {
+  dialect: 'postgres' | 'mysql' | 'sqlite';
+  database: string | null;
+  relations: SourceCatalogRelation[];
+  describedAt: string;
+}
+
+/** A `graphql` source's catalog: root fields and declared enums (from introspection). */
+export interface GraphqlSourceCatalog {
+  queries: Array<{ name: string; type: string; args: Array<{ name: string; type: string }> }>;
+  mutations: Array<{ name: string; type: string; args: Array<{ name: string; type: string }> }>;
+  enums: Array<{ name: string; values: string[] }>;
+  describedAt: string;
+}
+
+export type SourceCatalog = SqlSourceCatalog | GraphqlSourceCatalog;
+
+/** One declared Postgres row write, as the privilege report and the safety check take it (DES §7.4). */
+export interface SourceRowWrite {
+  schema: string;
+  table: string;
+  op: 'insert' | 'update' | 'delete';
+  /** The columns the write sets (an insert: every column of the table). */
+  set: string[];
+  /** Every primary-key column. */
+  key: string[];
+}
+
+/**
+ * The Postgres privilege report (DES §5.1 "Test", §7.4 "the writer login"): what the login can read
+ * and change, whether it is read-only, and per declared row write the EXACT `GRANT` statements still
+ * missing: `USAGE` on the schema, table-level `SELECT` (the returned row type reads the whole row;
+ * it covers the key and written columns), table-level `UPDATE` for every row write (the lock needs
+ * it), and `INSERT` or `DELETE` for those operations.
+ */
+export interface SourcePrivilegeReport {
+  login: string;
+  superuser: boolean;
+  readOnly: boolean;
+  tables: Array<{ schema: string; table: string; select: boolean; selectSomeColumns: boolean; insert: boolean; update: boolean; delete: boolean }>;
+  writes: Array<{ write: SourceRowWrite; missing: string[] }>;
+}
+
+/** `GET /sources/:name/catalog`, `POST /sources/:name/describe` (re-describe now). */
+export interface SourceCatalogResponse {
+  name: string;
+  kind: 'sql' | 'graphql' | 'crew';
+  catalog: SourceCatalog | CrewSourceCatalog;
+  privileges?: SourcePrivilegeReport;
+  descriptorHash: string | null;
+}
+
+/** `POST /sources/:name/privileges`. */
+export interface SourcePrivilegesBody {
+  writes?: SourceRowWrite[];
+}
+
+/** `POST /sources/:name/check` — the per-kind source check: policy, then prepare/describe, never execute. */
+export interface SourceCheckBody {
+  /** SQL text (Postgres `$1…`, MySQL and SQLite `?`), or a GraphQL document. */
+  text: string;
+}
+
+export type SourceCheckResponse =
+  | { ok: true; columns: Array<{ name: string; type: string }>; params: string[]; relations: string[] }
+  | {
+      ok: false;
+      /**
+       * The read policy's refusal class (`not_select`, `function`, `cast`, `operator`, `relation`,
+       * `view`, `unqualified`, `qualified_name`, `recursive`, `locking`, `into`, `statements`,
+       * `lexical`, `syntax`, `parse`; GraphQL `operations`, `not_query`, `invalid`). Nothing reached
+       * the source.
+       */
+      code: string;
+      detail: string;
+    };
+
+/** `POST /sources/:name/safety` — the Postgres table safety check (DES §7.4 rev 11). */
+export interface SourceSafetyBody {
+  schema: string;
+  table: string;
+  /** A declared row write to check as well (key = the whole primary key; FK enforcement refused). */
+  write?: { op: 'insert' | 'update' | 'delete'; set: string[]; key: string[] };
+}
+
+export interface SourceSafetyResponse {
+  table: { schema: string; name: string };
+  safe: boolean;
+  /**
+   * Each reason a v1 row write may not touch the table, in words naming the object (`code`:
+   * `not_a_table`, `partitioned`, `partition`, `access_method`, `inheritance_parent`,
+   * `inheritance_child`, `row_security`, `rule`, `user_trigger`, `internal_trigger_disabled`,
+   * `cascading_key`, `fk_operator`, `column_type`, `user_cast`, `generated_column`,
+   * `exclusion_constraint`, `check_expression`, `check_dependency`, `index_expression`,
+   * `index_partial`, `index_access_method`, `index_opclass`, `statistics_expression`, `depend_net`,
+   * `no_primary_key`, `table_not_found`; for a declared write also `key_mismatch`, `key_write`,
+   * `unknown_column`, `nothing_set`, `fk_enforcement`, `insert_columns`, `written_type`).
+   */
+  reasons: Array<{ code: string; detail: string }>;
+  /** sha256 over the full definitions read; a grant binds to it (K2b). */
+  fingerprint: string;
+}
+
+/** `PUT /sources/:name/allow-writes` — human operator only (403 `writes_switch_human_only`). */
+export interface SourceAllowWritesBody {
+  allowed: boolean;
+}
+
+export interface SourceAllowWritesResponse {
+  name: string;
+  allowWrites: boolean;
+  /** Row-write grants withdrawn by turning the switch off (0 when turning it on). */
+  withdrawnGrants: number;
+}
+
+/**
+ * `POST /sources/:name/test-call` (G6) — human operator only. Without `confirm` it sends NOTHING and
+ * answers the exact request it would send and its `requestHash`; with `confirm` equal to that hash it
+ * sends exactly that one request. Reads only: a REST GET/HEAD operation, a GraphQL `query`, an MCP
+ * tool whose class is `read`. Audited `apps.source.test_call`.
+ */
+export interface SourceTestCallBody {
+  /** REST: the tool (operation) name; MCP: the tool name; GraphQL: the query document. */
+  target: string;
+  args?: Record<string, unknown>;
+  confirm?: string;
+}
+
+export interface SourceTestCallRequest {
+  kind: 'rest' | 'graphql' | 'mcp';
+  /** REST/GraphQL: `GET https://api…/v1/tickets?page=1`; MCP: the tool name. */
+  summary: string;
+  method?: string;
+  url?: string;
+  /** Header NAMES only; the auth header's value is never shown. */
+  headers?: string[];
+  body?: unknown;
+  tool?: string;
+  args?: Record<string, unknown>;
+}
+
+export type SourceTestCallResponse =
+  | { sent: false; request: SourceTestCallRequest; requestHash: string }
+  | { sent: true; request: SourceTestCallRequest; ok: boolean; status: number | null; result: unknown; truncated: boolean };
+
+/** `POST /apps/uploads?name=<source>&filename=<file>` (body: the file's bytes) — a file becomes a `sql`/`sqlite` source. */
+export interface SourceUploadResponse {
+  source: McpServer;
+  snapshot: { digest: string; bytes: number; kind: 'csv' | 'xlsx' | 'sqlite' };
+  /** The table a CSV/XLSX became; `null` for a `.sqlite` file. */
+  table: string | null;
+  /** CSV/XLSX: whether the first row was taken as the header (a first row that looks like data becomes `col_1…`). */
+  header: { detected: boolean; columns: string[] } | null;
+  /** The first 20 rows, answered to a HUMAN actor only (an agent gets `[]`). */
+  sample: string[][];
+  catalog: SqlSourceCatalog;
+}
+
+/** The built-in `crew` source (DES §5.1): allowlisted GET routes, read in-process as the viewing actor. */
+export interface CrewSourceCatalog {
+  routes: Array<{ path: string; responseType: string; params: string[] }>;
 }
 
 // ── Decision capture (DES-decision-capture §4.2.1 / §4.6; DC-S4a, api-types 0.80.0) ──────────────

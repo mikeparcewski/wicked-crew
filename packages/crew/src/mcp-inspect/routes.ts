@@ -152,6 +152,7 @@ async function resolve(target: z.infer<typeof Target>, registry: InspectRegistry
     const config = registry === undefined ? null : await registry.inspectTarget(target.server);
     if (config === null || registry === undefined) throw new InspectError(404, 'unknown_server', `no MCP server named ${target.server} is registered`);
     if (config.kind === 'rest') throw new InspectError(400, 'not_mcp', `${target.server} is a REST API wrapped as tools, not an MCP server`);
+    if (config.kind === 'sql' || config.kind === 'graphql') throw new InspectError(400, 'not_mcp', `${target.server} is a ${config.kind} data source, not an MCP server`);
     const { secret, missing } = await registry.callSecret(config);
     if (missing) throw new InspectError(409, 'secret_missing', `${config.auth?.ref ?? 'the secret'} resolves to no secret; set it in MCP tools (the inspector never connects unauthenticated)`);
     const secrets = secret === null ? [] : [secret];

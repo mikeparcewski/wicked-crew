@@ -111,11 +111,24 @@ export const AddressSchema = z
     if (problem !== null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['allow'], message: problem });
   });
 
+/** (DES-APPS-001 §5.1) A network SQL source's settings; the password is `auth.ref`'s secret. */
+export const SqlSourceSchema = z
+  .object({
+    driver: z.enum(['postgres', 'mysql']),
+    host: z.string().min(1).max(253).regex(/^[^\s/@?#]+$/, 'a host name or IP address'),
+    port: z.number().int().min(1).max(65_535).optional(),
+    database: z.string().min(1).max(128),
+    user: z.string().min(1).max(128),
+    tls: z.enum(['verify-full', 'disable']).optional(),
+    ca: z.string().min(1).max(65_536).optional(),
+  })
+  .strict();
+
 // Exported so tests/wire-contract.test.ts can pin the published bodies against them.
 export const McpServerConfigSchema = z
   .object({
     name: serverName,
-    kind: z.enum(['mcp-stdio', 'mcp-http', 'rest']),
+    kind: z.enum(['mcp-stdio', 'mcp-http', 'rest', 'sql', 'graphql']),
     command: z.string().min(1).max(4096).optional(),
     args: z.array(z.string().max(4096)).max(64).optional(),
     url: z.string().max(4096).optional(),
@@ -134,6 +147,10 @@ export const McpServerConfigSchema = z
      * program, outside the dialer.
      */
     address: AddressSchema.optional(),
+    /** (DES-APPS-001 §5.1) `sql` only: a network SQL source's settings (sqlite sources come from uploads). */
+    sql: SqlSourceSchema.optional(),
+    /** `sql` only: the views a read may name (`schema.view`). */
+    viewsAllowed: z.array(z.string().min(3).max(256).regex(/^[^.\s]+\.[^.\s]+$/, 'a view is named schema.view')).max(256).optional(),
     /**
      * (crew#719) The secret VALUE this server's keychain entry will hold. The preview is probed
      * with it and it is held with the preview; `POST /mcp/servers` writes it to the OS store as
@@ -155,6 +172,20 @@ export const McpServerConfigSchema = z
     };
     if (c.kind !== 'rest' && (c.openapiUrl !== undefined || c.openapi !== undefined || c.operations !== undefined)) {
       issue('openapi', 'openapiUrl, openapi and operations are for a rest server');
+    }
+    if (c.kind !== 'sql' && (c.sql !== undefined || c.viewsAllowed !== undefined)) issue('sql', 'sql and viewsAllowed are for a sql source');
+    if (c.kind === 'sql') {
+      if (c.sql === undefined) issue('sql', 'a sql source needs sql: {driver, host, database, user} (a sqlite source comes from POST /apps/uploads)');
+      if (c.command !== undefined || c.args !== undefined || c.url !== undefined) issue('url', 'a sql source takes sql settings, not a command or url');
+      if (c.auth != null && (c.auth.env !== undefined || c.auth.header !== undefined || c.auth.prefix !== undefined)) issue('auth', 'a sql source takes its password as auth.ref only');
+      return;
+    }
+    if (c.kind === 'graphql') {
+      if (c.command !== undefined || c.args !== undefined) issue('command', 'a graphql source takes a url, not a command');
+      if (!httpUrl(c.url)) issue('url', 'a graphql source needs an http(s) endpoint url');
+      else if (new URL(c.url ?? '').username + new URL(c.url ?? '').password !== '') issue('url', 'the url must not carry credentials; reference the secret with auth.ref');
+      if (c.auth != null && (c.auth.header === undefined || c.auth.env !== undefined)) issue('auth', 'a graphql source injects its secret into one header: auth.header, no auth.env');
+      return;
     }
     if (c.kind === 'rest') {
       if (c.command !== undefined || c.args !== undefined) issue('command', 'a rest server takes a base url, not a command');
@@ -309,6 +340,20 @@ function toConfig(body: z.infer<typeof McpServerConfigSchema>): McpUpstreamConfi
     url: body.url ?? null,
     ...(body.kind === 'rest'
       ? { openapiUrl: body.openapiUrl ?? null, openapi: body.openapi ?? null, operations: body.operations ?? null }
+      : {}),
+    ...(body.kind === 'sql' && body.sql !== undefined
+      ? {
+          sql: {
+            driver: body.sql.driver,
+            host: body.sql.host,
+            port: body.sql.port ?? (body.sql.driver === 'postgres' ? 5432 : 3306),
+            database: body.sql.database,
+            user: body.sql.user,
+            tls: body.sql.tls ?? 'verify-full',
+            ...(body.sql.ca !== undefined ? { ca: body.sql.ca } : {}),
+          },
+          viewsAllowed: body.viewsAllowed ?? [],
+        }
       : {}),
     // A dialled server always carries its confirmation (none = global unicast over TLS only), so a
     // save stores it and a legacy record is the only one ever derived (registry.ts legacyAddress).
