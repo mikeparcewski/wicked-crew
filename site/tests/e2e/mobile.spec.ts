@@ -34,7 +34,7 @@ test.describe('mobile (390×844)', () => {
     expect(overflow).toBeLessThanOrEqual(0);
   });
 
-  test('the demo card is laid out for a thumb: title first, Run and Kill side by side, 24px gate chips', async ({ page }) => {
+  test('the demo card is laid out for a thumb: title first, Run and Kill side by side, 44px gate chips', async ({ page }) => {
     await page.goto('/');
     const job = page.locator('[data-job]');
     const title = await job.locator('.job-t').boundingBox();
@@ -45,7 +45,7 @@ test.describe('mobile (390×844)', () => {
     expect(Math.abs(run!.width - kill!.width)).toBeLessThanOrEqual(2);
     for (const k of [0, 1, 2, 3, 4]) {
       const g = await job.locator(`[data-gate="${k}"]`).boundingBox();
-      expect(g!.height, `gate chip ${k} is under the 24px target size`).toBeGreaterThanOrEqual(24);
+      expect(g!.height, `gate chip ${k} is under the 44px target size`).toBeGreaterThanOrEqual(44);
     }
   });
 
@@ -94,6 +94,34 @@ test.describe('mobile (390×844)', () => {
     const map = page.locator('.same-garden');
     await bringIntoView(map);
     await expect(map.locator('.sg-plane')).toHaveCount(4);
+  });
+
+  test('every link and button on the page is a 44px touch target, the shared chrome included', async ({ page }) => {
+    for (const size of [{ width: 390, height: 844 }, { width: 360, height: 740 }]) {
+      await page.setViewportSize(size);
+      await page.goto('/');
+      const small = await page.evaluate(() => {
+        const sel = 'a[href], button, [tabindex]:not([tabindex="-1"]), input, select, summary';
+        return Array.from(document.querySelectorAll<HTMLElement>(sel)).flatMap((el) => {
+          const cs = getComputedStyle(el);
+          if (cs.display === 'none' || cs.visibility === 'hidden' || el.closest('[hidden], [aria-hidden="true"]')) return [];
+          const r = el.getBoundingClientRect();
+          if (r.width === 0 || r.height === 0) return [];
+          if (r.width >= 44 && r.height >= 44) return [];
+          const name = (el.getAttribute('aria-label') || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 30);
+          return [`${el.tagName.toLowerCase()}.${el.className} "${name}" ${Math.round(r.width)}x${Math.round(r.height)}`];
+        });
+      });
+      expect(small, `targets under 44px at ${size.width}x${size.height}`).toEqual([]);
+    }
+  });
+
+  test('a phone frame (taller than the window) rises in as its heading comes on screen, not 30% in', async ({ page }) => {
+    await page.goto('/');
+    const build = page.locator('#build');
+    // 120px of a ~1070px frame on screen: about 11% of it, a seventh of the window
+    await build.evaluate((el) => window.scrollTo({ top: el.getBoundingClientRect().top + window.scrollY - window.innerHeight + 120, behavior: 'instant' }));
+    await expect(build).toHaveClass(/is-arrived/);
   });
 
   test('the hamburger menu lists crew as a site link', async ({ page }) => {

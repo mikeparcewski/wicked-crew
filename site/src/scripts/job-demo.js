@@ -102,7 +102,12 @@ function initJob(root) {
     const ghost = logEl.querySelector('.ln--ghost');
     if (ghost) ghost.remove();
     logEl.appendChild(el);
+    pin();
+  }
+  /** Pinned to the newest line; once lines run past the top, the top edge fades (.is-full). */
+  function pin() {
     logEl.scrollTop = logEl.scrollHeight;
+    logEl.classList.toggle('is-full', logEl.scrollHeight > logEl.clientHeight + 1);
   }
   /** The previous run's lines stay on screen, dimmed, until the new run's lines replace them. */
   function dimLog() {
@@ -201,7 +206,7 @@ function initJob(root) {
     if (s.cap) caption(s.cap);
     // at the decision the log is this run's alone: the last dimmed lines of the previous run (its
     // delivery) would read as if this one had already shipped
-    if (s.wait) { logEl.querySelectorAll('.ln--ghost').forEach(function (g) { g.remove(); }); waiting = s.wait; qePanel(); return; }
+    if (s.wait) { logEl.querySelectorAll('.ln--ghost').forEach(function (g) { g.remove(); }); pin(); waiting = s.wait; qePanel(); return; }
     line(s.t, s.c, false, s.seats);
     if (s.gate !== undefined) { R[s.gate] = RECEIPTS[s.gate]; stamp(s.gate); showReceipt(s.gate); }
     i++;
@@ -280,6 +285,8 @@ function initJob(root) {
   killBtn.addEventListener('click', function () { if (isOff(killBtn)) return; kill(); });
 
   poster();
+  // a window resize changes the log's height: it stays pinned, and its fade follows
+  if ('ResizeObserver' in window) new ResizeObserver(pin).observe(logEl);
   if (RM.matches) return;
   // a replay still waiting to start does not start once reduced motion is on (Run still runs it)
   function auto() { if (!booted && !RM.matches) { booted = true; start(); } }

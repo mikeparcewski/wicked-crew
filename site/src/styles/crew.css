@@ -265,6 +265,9 @@ code {
 .job-body { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); height: var(--job-h); }
 .log-col { display: grid; grid-template-rows: minmax(0, 1fr) auto; min-height: 0; border-right: 1px solid var(--hairline); }
 .log { overflow: hidden; min-height: 0; padding: 10px 14px; display: flex; flex-direction: column; gap: 5px; }
+/* once the log is full it is pinned to its newest line: the oldest one fades out at the top edge
+   instead of being sliced through mid-glyph (job-demo.js sets .is-full) */
+.log.is-full { -webkit-mask-image: linear-gradient(to bottom, transparent, #000 26px); mask-image: linear-gradient(to bottom, transparent, #000 26px); }
 .ln { margin: 0; font-family: var(--font-mono); font-size: 13px; line-height: 1.45; color: color-mix(in oklab, var(--ink) 74%, transparent); animation: ln-in .25s var(--ease) backwards; }
 .ln--still { animation: none; }
 /* the previous run's lines, kept on a replay until the new run's lines replace them */
@@ -450,8 +453,9 @@ code {
 .rcx-layers tbody tr + tr > * { border-top: 1px solid var(--hairline); }
 /* as wide as the longest status ("skipped, with your reason"), so no state is ever cut off */
 .rcx-layers td { width: 17.5em; }
-.rcx-l { display: block; width: 100%; padding: 8px 0; text-align: left; font: 600 14px var(--font-sans); color: var(--ink); background: transparent; border: 0; cursor: pointer; }
-.rcx-l::after { content: ' ›'; color: var(--faint); }
+.rcx-l { display: block; width: calc(100% + 12px); margin-inline: -6px; padding: 8px 6px; text-align: left; font: 600 14px var(--font-sans); color: var(--ink); background: transparent; border: 0; cursor: pointer; }
+/* the chevron is held to the label's last word (a no-break space), so it never wraps alone */
+.rcx-l::after { content: '\00a0›'; color: var(--faint); }
 .rcx-l:hover, .rcx-l:active { color: var(--ctrl); }
 /* the ring sits inside the row, so the detail panel under the last row never covers it */
 .rcx-l:focus-visible { outline-offset: -2px; border-radius: 4px; }
@@ -692,9 +696,11 @@ code {
   .job-dots { display: none; }
   .job-t { grid-area: title; font-size: 12px; }
   .job-note { grid-area: note; font-size: 11px; }
-  .job-install { grid-area: install; padding: 4px 2px; }
+  /* a 44px target, underlined on hover and focus (a border would sit 11px below the word) */
+  .job-install { grid-area: install; display: inline-flex; align-items: center; justify-content: center; min-height: 44px; min-width: 44px; padding: 0 6px; border-bottom: 0; text-underline-offset: 4px; }
+  .job-install:hover, .job-install:focus-visible, .job-install:active { text-decoration: underline; }
   .job-acts { grid-area: acts; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  .job-btn { min-height: 40px; }
+  .job-btn { min-height: 44px; }
   .track-wrap { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "in out" "track track"; gap: 8px; padding: 10px 10px 16px; }
   .io--in { grid-area: in; }
   .io--out { grid-area: out; }
@@ -702,7 +708,7 @@ code {
   .track { gap: 4px; }
   .st { flex-direction: column; align-items: stretch; padding: 6px 3px; text-align: center; gap: 5px; }
   .st-name { font-size: 12px; }
-  .st-gate { min-height: 26px; padding: 0; }
+  .st-gate { min-height: 44px; padding: 0; }
   /* on a phone the plain caption comes first, right under the gates, then the receipt, then the
      live ticker (the log column dissolves so its two parts can be ordered apart) */
   .job-body { grid-template-columns: 1fr; height: auto; }
@@ -723,17 +729,17 @@ code {
   .wire { display: none; }
   .hot { flex-direction: row; align-items: center; justify-content: space-between; min-height: 44px; }
   .hot small { text-align: right; }
-  .agent { min-height: 32px; }
+  .agent { min-height: 44px; min-width: 44px; }
 
   .disp-steps { gap: 6px; }
   .disp-steps li + li::before, .disp-steps li + li::after { left: -6px; width: 6px; }
   .disp-step { padding: 8px 4px; align-items: center; text-align: center; min-height: 52px; }
   .disp-step b { font-size: 11px; }
-  .disp-ctl .ctl-btn { min-height: 40px; }
+  .disp-ctl .ctl-btn { min-height: 44px; }
 
   /* the labels become a row of chips; the chosen one's "when" moves onto the receipt */
   .rcx-pick { display: flex; flex-wrap: wrap; gap: 6px; }
-  .rcx-opt { min-height: 36px; padding: 8px 10px; justify-content: center; }
+  .rcx-opt { min-height: 44px; padding: 8px 10px; justify-content: center; }
   .rcx-opt span { display: none; }
   .rcx-when { display: grid; }
   /* a long label cannot sit beside the title on a phone: the stamp goes under it */
@@ -745,14 +751,14 @@ code {
   .rcx-layers { table-layout: fixed; }
   .rcx-layers th { width: 54%; }
   .rcx-layers td { width: 46%; }
-  .rcx-l { font-size: 13px; }
+  .rcx-l { font-size: 13px; min-height: 44px; }
   .rcx-detail dl { grid-template-columns: 1fr; gap: 8px; }
 
   .wf { grid-template-columns: 1fr; grid-template-areas: "tabs" "stage" "ctl"; }
   .wf-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
-  .wf-tab { min-height: 40px; }
+  .wf-tab { min-height: 44px; }
   .wf-ctl { display: grid; grid-template-columns: auto; justify-items: start; gap: 8px; }
-  .wf-ctl .ctl-btn { min-height: 40px; }
+  .wf-ctl .ctl-btn { min-height: 44px; }
   .wf-status { width: 100%; }
 
   /* What's new: an x-snap carousel with dots, a counter and Prev / Next */
@@ -760,7 +766,7 @@ code {
   .news-list::-webkit-scrollbar { display: none; }
   .news-list li { flex: 0 0 min(85vw, 320px); scroll-snap-align: start; }
   .car-ctl { display: flex; align-items: center; gap: 8px; }
-  .car-ctl .ctl-btn { min-width: 44px; min-height: 40px; }
+  .car-ctl .ctl-btn { min-width: 44px; min-height: 44px; }
   .car-count { font-size: 12px; color: var(--muted); min-width: 4.2em; text-align: center; }
   .car-dots { display: flex; justify-content: center; gap: 6px; margin-top: 12px; }
   .car-dots i { width: 7px; height: 7px; border-radius: 50%; background: var(--hairline-strong); transition: background .2s var(--ease); }
@@ -775,7 +781,7 @@ code {
   .two { gap: 22px; }
   .facts--cards li { padding: 9px 12px 9px 28px; }
   .facts--cards li::before { left: 12px; }
-  .wf-tab { min-height: 38px; }
+  .install__copy { min-height: 44px; min-width: 44px; }
 }
 @media (max-width: 560px) {
   .hero-head h1 { font-size: clamp(30px, 8.6vw, 40px); }
@@ -813,6 +819,18 @@ html body .topbar { background: var(--surface-base); }
 html body .same-garden .sg-plane:hover, html body .same-garden .sg-plane:focus-within { box-shadow: 0 0 0 1px color-mix(in oklab, var(--plane) 26%, transparent); }
 /* a card does not lift inside a plane whose padding is under 8px */
 html body .same-garden .sg-card:hover, html body .same-garden .sg-card:focus-within { transform: none; }
+/* phones: the bar's buttons, the family map's links and the footer's links are 44px touch targets
+   (the shared chrome sizes them for a mouse); the rows grow to hold them, nothing is overlapped */
+@media (max-width: 760px) {
+  html body .topbar .icon-btn { width: 44px; height: 44px; }
+  html body .topbar .wordmark, html body .footer .footer-wordmark { min-height: 44px; }
+  html body .footer .footer-wordmark { display: inline-flex; align-items: center; }
+  html body .same-garden .sg-card-foot { padding-block: 0; }
+  html body .same-garden .sg-card-foot :is(.sg-visit, .sg-repo) { min-height: 44px; min-width: 44px; justify-content: center; }
+  html body .footer .footer-cta a { display: inline-flex; align-items: center; min-height: 44px; }
+  html body .footer .footer-links { gap: 0; }
+  html body .footer .footer-links a { min-height: 44px; min-width: 44px; padding-block: 10px; }
+}
 
 /* ── The thread: the job's five beats under the topbar (1024px and up) ───
    Decoration (aria-hidden): segment k fills as beat k comes into view, so the job visibly travels
