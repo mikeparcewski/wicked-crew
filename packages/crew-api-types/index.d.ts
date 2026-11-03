@@ -375,6 +375,12 @@ export interface HealthCapabilities {
    * body is strict there, so the field would be refused).
    */
   chatArtifacts?: ChatArtifactsCapabilities;
+  /**
+   * (api-types 0.172.0, DES-APPS-001) The app store is served: `GET|POST /apps`, `GET /apps/:app`, and the human-only
+   * edits, undo, redo and restore. Each flag of {@link AppsCapabilities} says whether a later route serves for real yet.
+   * A skin shows Apps only when this is present. ABSENT on an older daemon.
+   */
+  apps?: AppsCapabilities;
 }
 
 /** {@link HealthCapabilities.chatArtifacts} (api-types 0.169.0). */
@@ -14317,4 +14323,665 @@ export interface VoiceDashboard {
 export interface PutVoiceDashboardBody {
   layout: string[];
   widgets: VoiceWidgetManifest[];
+}
+
+// ── Apps (DES-APPS-001 rev 11, slice K2a; api-types 0.172.0) ──────────────────────────────────────
+//
+// An app is a git repo crew owns under `~/.wicked/apps/<slug>`: `apps.json` (an {@link AppSpec}),
+// `queries/<id>.<sql|graphql|json>` (each query's text) and `apps.lock.json` (an {@link AppLock},
+// written by crew's check, never by an agent or a person). Every version is one commit on the repo's
+// `main`; crew keeps, outside the repo, a RECEIPT per (app, tree) saying how the tree was accepted, and
+// only a tree holding one ever runs against a source.
+
+/** The `schema` value of every v1 `apps.json`. */
+export type AppSpecSchemaId = 'wicked.apps/v1';
+
+/**
+ * `apps.json`, the whole app: pages of components on a 12-column grid, the named queries and actions
+ * they bind, the theme and the hosts a link may open. No app code: the `wicked-apps` runtime interprets
+ * this document and nothing else (DES §7.1).
+ *
+ * Identifiers: page and component ids match `^[A-Za-z][A-Za-z0-9_-]{0,63}$` and are unique across the
+ * app; query and action ids match `^[a-z][a-z0-9_]{0,63}$` (a query id is a file name, so lower case
+ * only) and are unique among queries and among actions. crew refuses an unknown key anywhere in the
+ * document, so a field a newer studio writes reaches an older daemon as a refused edit, never as a
+ * silently dropped one.
+ */
+export interface AppSpec {
+  schema: AppSpecSchemaId;
+  /** The app's title (1-120 characters). */
+  name: string;
+  /** At most 2,000 characters. */
+  description?: string;
+  theme?: AppTheme;
+  /** 1-20 pages; the first is the one an app opens on. */
+  pages: AppPage[];
+  /** At most 100. */
+  queries: AppQuery[];
+  /** At most 50. */
+  actions: AppAction[];
+  /**
+   * Exact host names (lower case, no scheme, no port) a link component may open, over https only. The
+   * host shows the full URL before opening it (DES §7.1). At most 50.
+   */
+  linkHosts: string[];
+}
+
+/** Colours are `#rrggbb`. */
+export interface AppTheme {
+  /** `auto` follows the viewer's setting (the default). */
+  mode?: 'light' | 'dark' | 'auto';
+  accent?: string;
+  /** Chart series colours in order (at most 12). */
+  palette?: string[];
+  density?: 'comfortable' | 'compact';
+}
+
+export interface AppPage {
+  id: string;
+  /** 1-80 characters. */
+  title: string;
+  /** At most 100 per page. */
+  components: AppComponent[];
+}
+
+/**
+ * A component's place on its page's 12-column grid: column `x` (0-11), row `y` (0-999), `w` columns
+ * (1-12, `x + w <= 12`) and `h` rows (1-50). Below 640 px the runtime stacks components by (`y`, `x`).
+ */
+export interface AppBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** What every component carries. */
+export interface AppComponentBase {
+  id: string;
+  box: AppBox;
+  /** At most 120 characters; shown above the component. */
+  title?: string;
+  /** Hidden below 640 px. */
+  hideOnPhone?: boolean;
+}
+
+export type AppComponent =
+  | AppTableComponent
+  | AppChartComponent
+  | AppKpiComponent
+  | AppTextComponent
+  | AppFilterComponent
+  | AppFormComponent
+  | AppButtonComponent
+  | AppImageComponent
+  | AppLinkComponent;
+
+export type AppComponentType = AppComponent['type'];
+
+/**
+ * Where a query or action parameter's value comes from on the page (DES §4 "Binding"):
+ *  - `filter.<id>`: the value of filter component `<id>` (a `date-range` filter gives
+ *    `filter.<id>.from` and `filter.<id>.to`);
+ *  - `form.<field>`: a field of the form the binding sits on;
+ *  - `row.<column>`: a column of the row a table's row action was pressed on;
+ *  - `url.<name>`: a parameter of the page's URL.
+ * Viewer values are never bindings: a parameter declared `from: 'viewer.*'` is filled by the server.
+ */
+export type AppBindingRef = `filter.${string}` | `form.${string}` | `row.${string}` | `url.${string}`;
+
+/** A component reading a query: the query's id, and a binding for any of its parameters. */
+export interface AppQueryBinding {
+  query: string;
+  params?: Record<string, AppBindingRef>;
+}
+
+/** A control that runs an action: its label, the action's id, and a binding for any of its parameters. */
+export interface AppActionBinding {
+  /** 1-60 characters. */
+  label: string;
+  action: string;
+  params?: Record<string, AppBindingRef>;
+}
+
+/** How a value is shown. `currency` is an ISO 4217 code; `decimals` is 0-10. */
+export interface AppFormat {
+  kind: 'text' | 'number' | 'percent' | 'currency' | 'date' | 'datetime' | 'duration';
+  decimals?: number;
+  currency?: string;
+}
+
+export interface AppTableColumn {
+  /** A declared output column of the table's query. */
+  column: string;
+  label?: string;
+  format?: AppFormat;
+}
+
+export interface AppTableComponent extends AppComponentBase {
+  type: 'table';
+  data: AppQueryBinding;
+  /** Shown columns in order; absent = every declared output column. */
+  columns?: AppTableColumn[];
+  /** A button on every row (at most 4); its parameters may bind `row.<column>`. */
+  rowActions?: AppActionBinding[];
+  /** Rows per page, 5-500. */
+  pageSize?: number;
+}
+
+export interface AppChartSeries {
+  /** A declared output column of the chart's query. */
+  column: string;
+  label?: string;
+  color?: string;
+}
+
+export interface AppChartComponent extends AppComponentBase {
+  type: 'chart';
+  chart: 'line' | 'bar' | 'area' | 'pie';
+  data: AppQueryBinding;
+  /** The category (x axis, or pie slice) column. */
+  x: string;
+  /** 1-12 series; a pie has exactly one. */
+  series: AppChartSeries[];
+  stacked?: boolean;
+}
+
+export interface AppKpiComponent extends AppComponentBase {
+  type: 'kpi';
+  data: AppQueryBinding;
+  /** The column of the first row shown as the figure. */
+  value: string;
+  format?: AppFormat;
+  /** A column of the first row shown as the change beside the figure. */
+  delta?: string;
+  /** A line under the figure, at most 120 characters ("vs previous 90 days"). */
+  caption?: string;
+}
+
+/** Author text, always rendered as text (never HTML or markdown). At most 4,000 characters. */
+export interface AppTextComponent extends AppComponentBase {
+  type: 'text';
+  text: string;
+  style?: 'heading' | 'body' | 'caption';
+}
+
+export interface AppFilterOption {
+  value: string;
+  label?: string;
+}
+
+export interface AppFilterComponent extends AppComponentBase {
+  type: 'filter';
+  filter: 'select' | 'date-range' | 'search';
+  label?: string;
+  /**
+   * `select` only: the choices, from a query (its `value` and optional `label` columns) or a fixed list
+   * (at most 200).
+   */
+  options?: { query: AppQueryBinding; value: string; label?: string } | { values: AppFilterOption[] };
+  /** The value before the viewer picks one: a `select`/`search` string, or `{ lastDays }` for a `date-range`. */
+  default?: string | { lastDays: number };
+}
+
+export interface AppFormField {
+  /** `^[a-z][a-z0-9_]{0,63}$`; bound as `form.<name>`. */
+  name: string;
+  label?: string;
+  input: 'text' | 'textarea' | 'number' | 'date' | 'checkbox' | 'select';
+  required?: boolean;
+  /** `select` only (at most 200). */
+  options?: AppFilterOption[];
+}
+
+export interface AppFormComponent extends AppComponentBase {
+  type: 'form';
+  /** 1-30 fields. */
+  fields: AppFormField[];
+  /** The action the form submits; its parameters bind `form.<name>`. */
+  submit: AppActionBinding;
+}
+
+export interface AppButtonComponent extends AppComponentBase {
+  type: 'button';
+  action: AppActionBinding;
+}
+
+/**
+ * An image carried in the spec: `src` is a `data:image/(png|jpeg|gif|webp);base64,…` URI of at most
+ * 256 KB. No network images (the frame's CSP has none) and no SVG.
+ */
+export interface AppImageComponent extends AppComponentBase {
+  type: 'image';
+  src: string;
+  alt: string;
+}
+
+/**
+ * A link: to another page of the app (`page`, with optional URL parameters bound like a query's), or
+ * out (`href`, an `https://` URL whose host is in {@link AppSpec.linkHosts}). Exactly one of the two.
+ */
+export interface AppLinkComponent extends AppComponentBase {
+  type: 'link';
+  label: string;
+  page?: string;
+  params?: Record<string, AppBindingRef>;
+  href?: string;
+}
+
+/** A source kind a query reads; it names the text file: `sql` `.sql`, `graphql` `.graphql`, else `.json`. */
+export type AppQueryKind = 'sql' | 'graphql' | 'rest' | 'mcp' | 'crew';
+
+/** A declared output column's type. A value the source cannot confirm is validated on every row (DES §7.2). */
+export type AppColumnType = 'string' | 'number' | 'integer' | 'boolean' | 'date' | 'datetime';
+
+export interface AppOutputColumn {
+  /** 1-128 characters. */
+  name: string;
+  type: AppColumnType;
+  nullable?: boolean;
+}
+
+/** `load` (the default; cached 5 s), `every` N seconds (N >= 15), or `events` (the built-in `crew` source only). */
+export type AppRefresh = { mode: 'load' } | { mode: 'every'; seconds: number } | { mode: 'events' };
+
+/**
+ * One parameter, a JSON Schema subset (no `pattern`: an agent-written regular expression would run on
+ * the server). `from` makes it VIEWER-BOUND: the server fills it from verified claims and refuses a
+ * client value for it, and no component may bind it.
+ */
+export interface AppParamSchema {
+  type: 'string' | 'number' | 'integer' | 'boolean' | 'array';
+  /** `array` only. */
+  items?: { type: 'string' | 'number' | 'integer' };
+  format?: 'date' | 'date-time' | 'uuid' | 'email';
+  enum?: Array<string | number>;
+  minimum?: number;
+  maximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  default?: string | number | boolean;
+  description?: string;
+  from?: 'viewer.email' | 'viewer.name' | 'viewer.id' | 'viewer.groups';
+}
+
+/** A query's or action's parameters: a JSON Schema object (at most 30 properties). */
+export interface AppParamsSchema {
+  type: 'object';
+  properties: Record<string, AppParamSchema>;
+  required?: string[];
+}
+
+/**
+ * A named read (DES §4 "Query"). Its text is `queries/<id>.<ext>` ({@link AppQueryKind}); the browser
+ * only ever sends the id and parameter values.
+ */
+export interface AppQuery {
+  id: string;
+  /** The source's name in crew's registry, or `crew` (the built-in source). */
+  source: string;
+  kind: AppQueryKind;
+  description?: string;
+  params?: AppParamsSchema;
+  /** 1-200 declared output columns; the result is projected to exactly these. */
+  output: AppOutputColumn[];
+  /** REST, GraphQL and MCP: where the rows are (a JSONPath subset, e.g. `$.items[*]`). */
+  rowPath?: string;
+  /** REST, GraphQL and MCP: where "another page exists" is read. */
+  morePath?: string;
+  refresh?: AppRefresh;
+  /** A public app may hold only public queries (DES §9.3). */
+  public?: boolean;
+}
+
+/** A value an action sends: a parameter, a literal fixed by the app, a viewer claim, or crew's `now` or new uuid. */
+export type AppValue =
+  | { param: string }
+  | { literal: string | number | boolean | null }
+  | { viewer: 'email' | 'name' | 'id' }
+  | { crew: 'now' | 'uuid' };
+
+/**
+ * An API action (DES §4 "Action"): one REST operation or MCP write tool by its registry tool name, or
+ * one GraphQL mutation document with one root field (at most 16 KB).
+ */
+export interface AppApiAction {
+  id: string;
+  kind: 'api';
+  source: string;
+  call: { tool: string } | { mutation: string };
+  args: Record<string, AppValue>;
+  params?: AppParamsSchema;
+  /** Shown on the card as "The app says" (at most 500 characters). */
+  description?: string;
+}
+
+/**
+ * A declared Postgres row write (DES §7.4): crew generates the one statement. `table` is
+ * schema-qualified (`support.tickets`); `key` binds every primary-key column to a parameter; `set` is
+ * every column for an insert, the changed columns for an update, and absent for a delete.
+ */
+export interface AppRowWriteAction {
+  id: string;
+  kind: 'row-write';
+  source: string;
+  table: string;
+  op: 'insert' | 'update' | 'delete';
+  set?: Record<string, AppValue>;
+  key: Record<string, { param: string }>;
+  params?: AppParamsSchema;
+  description?: string;
+}
+
+export type AppAction = AppApiAction | AppRowWriteAction;
+
+/**
+ * `apps.lock.json`, written by crew's check and committed with the tree it checked; never by an agent or
+ * a person (an edit that names it is refused). It pins what each query and action USES (DES §4):
+ * per source the kind, connection descriptor and its hash; per query the hash of its text and its
+ * contract hash; per action its declaration hash and contract hash; per upload the snapshot digest.
+ * Never a secret, never snapshot bytes. Hashes are lower-case hex SHA-256.
+ */
+export interface AppLock {
+  schema: 'wicked.apps.lock/v1';
+  sources: Record<string, AppLockSource>;
+  queries: Record<string, AppLockQuery>;
+  actions: Record<string, AppLockAction>;
+  uploads: Record<string, { digest: string }>;
+}
+
+export interface AppLockSource {
+  kind: string;
+  /** The non-secret connection descriptor (DES §4 "Source"). */
+  descriptor: Record<string, unknown>;
+  descriptorHash: string;
+}
+
+export interface AppLockQuery {
+  source: string;
+  textHash: string;
+  contractHash: string;
+}
+
+export interface AppLockAction {
+  source: string;
+  actionHash: string;
+  contractHash: string;
+}
+
+// ── Apps: the store and its routes (DES §6.4, §7.6, §9.1) ────────────────────────────────────────
+
+/**
+ * How a tree was accepted (DES §9.1). Only `you`, `reviewed` and `restored` make a tree part of the
+ * app's ACCEPTED HISTORY (undo, redo and restore move only within it); `published` binds a tree that
+ * already held one of those to a publish manifest.
+ */
+export type AppReceiptKind = 'you' | 'reviewed' | 'restored' | 'published';
+
+/**
+ * crew's record that a tree of THIS app passed a check and was accepted. Keyed by (app, tree): the same
+ * tree in another app holds nothing there. Minted only by crew: on a human actor's edit, undo, redo or
+ * restore, on an `apps-turn` run whose review by a distinct seat named the tree, and on a consented
+ * publish. Never stored in the app repo (agent seats mount it).
+ */
+export interface AppReceipt {
+  kind: AppReceiptKind;
+  tree: string;
+  /** The version that landed with it. */
+  version: number;
+  /** Unix millis. */
+  at: number;
+  /** Who accepted it: the person, or for `reviewed` the actor who launched the turn. */
+  actor: Actor;
+  /**
+   * `restored`: the version restored, and that version's own provenance followed through any chain of
+   * restores (`originKind` is `you` or `reviewed`, `originVersion` the version that first held it).
+   */
+  restoredFrom?: { version: number; originKind: 'you' | 'reviewed'; originVersion: number };
+  /** `reviewed`: the turn's run and the seats that built and reviewed it (always distinct). */
+  review?: { runId: string; builder: string; reviewer: string };
+  /** `published`: the publish run, the manifest digest and each produced artifact's digest. */
+  publish?: { runId: string; manifestDigest: string; artifacts: Record<string, string> };
+}
+
+/** Which checks ran before a version landed (DES §6.2 "Checks are staged by what changed"). */
+export interface AppCheckSummary {
+  /**
+   * `spec`: schema, bindings, link hosts and file confinement only (a layout, prop, theme or label
+   * change). `data`: those plus the read policy and the per-kind source check for what changed.
+   * `full`: those for every query and action (an undo, redo or restore, against today's sources).
+   */
+  level: 'spec' | 'data' | 'full';
+  /** Queries and actions the source stage checked (empty at `spec`). */
+  checked: string[];
+}
+
+/** One version: one commit on the app repo's `main`. */
+export interface AppVersion {
+  /** 1, 2, 3, … per app (the strip's `v14`). */
+  version: number;
+  commit: string;
+  tree: string;
+  /** The version it was made on; `null` for the first. */
+  base: number | null;
+  /** Unix millis. */
+  at: number;
+  /** A person (`human`), a seat that built a turn (`seat`), or crew itself (`crew`, an app's first version). */
+  author: { kind: 'human' | 'seat' | 'crew'; id: string };
+  /** The receipt it landed with; `null` = this tree never runs against a source. */
+  receipt: AppReceipt | null;
+  /** One line for the strip ("Moved the KPIs above the charts"), at most 200 characters. */
+  summary: string;
+  check: AppCheckSummary;
+}
+
+/**
+ * The undo pointer (DES §6.4), kept per app by crew so every tab agrees. `states` are the versions of
+ * the accepted history in order and `pointer` indexes the current one. Undo lands `states[pointer-1]`'s
+ * tree as a new version and moves the pointer back; redo lands `states[pointer+1]`'s; a new edit,
+ * landed turn or restore drops everything after the pointer and appends itself.
+ */
+export interface AppHistory {
+  states: number[];
+  pointer: number;
+  canUndo: boolean;
+  canRedo: boolean;
+}
+
+/** A turn in flight: the app is read-only for edits, undo, redo and restore until it ends (`409 turn_in_flight`). */
+export interface AppTurnState {
+  runId: string;
+  /** Unix millis. */
+  startedAt: number;
+  /** The version the turn builds on. */
+  base: number;
+  /** The actor id that launched it. */
+  actor: string;
+}
+
+/** `GET /apps` item. */
+export interface AppSummary {
+  /** `^[a-z][a-z0-9-]{0,47}$`; `check` and `uploads` are reserved. */
+  slug: string;
+  name: string;
+  projectId: string;
+  /** The app repo's id in crew's repo registry. */
+  repoId: string;
+  /** Unix millis. */
+  createdAt: number;
+  head: { version: number; tree: string; receipt: AppReceiptKind | null };
+  turn: AppTurnState | null;
+}
+
+/** `GET /apps` (observer); `?project=<id>` keeps one project's apps. */
+export interface AppsListResponse {
+  apps: AppSummary[];
+}
+
+/** `POST /apps` (operator): a new app, an empty repo in the project with crew's first version. */
+export interface CreateAppBody {
+  slug: string;
+  /** The app's title; defaults to the slug. */
+  name?: string;
+  projectId: string;
+}
+
+/** The app at head: the spec, the lock, every query's text, the versions and the undo pointer. */
+export interface AppDetail extends AppSummary {
+  spec: AppSpec;
+  lock: AppLock;
+  /** Query id → its text at head. */
+  queryText: Record<string, string>;
+  /** Oldest first. */
+  versions: AppVersion[];
+  history: AppHistory;
+}
+
+/** `GET /apps/:app` (observer), and `POST /apps` (201). */
+export interface AppDetailResponse {
+  app: AppDetail;
+}
+
+/**
+ * One change in an edit burst. `spec` replaces `apps.json`; `query-text` writes the text of a query the
+ * resulting spec declares (crew removes the text of a query the spec no longer declares). Nothing else
+ * in the repo can be written: `apps.lock.json` is crew's.
+ */
+export type AppEditOp = { op: 'spec'; spec: AppSpec } | { op: 'query-text'; query: string; text: string };
+
+/**
+ * `POST /apps/:app/edits` (HUMAN operator only): one `you` version from one edit burst (1-50 ops). `base`
+ * is the head version the edit was made on: a stale one is `409 stale_base`, and while a turn runs every
+ * edit is `409 turn_in_flight`.
+ */
+export interface AppEditsBody {
+  base: number;
+  ops: AppEditOp[];
+  /** The strip's line; crew writes one when absent. */
+  summary?: string;
+}
+
+/** `POST /apps/:app/undo` and `/redo` (HUMAN operator only). */
+export interface AppHistoryMoveBody {
+  base: number;
+}
+
+/**
+ * `POST /apps/:app/restore` (HUMAN operator only): land `version` (a version number, or a commit of the
+ * app repo) as a new version, only when its tree holds an accepted receipt for this app.
+ */
+export interface AppRestoreBody {
+  base: number;
+  version: number | string;
+}
+
+/** The answer to an edit, undo, redo or restore that landed: the app after it, and the version it made. */
+export interface AppLandedResponse {
+  app: AppDetail;
+  landed: AppVersion;
+}
+
+/** `POST /apps/:app/query` (observer): run one named query of an accepted version (DES §7.2). */
+export interface AppQueryBody {
+  /** A version number, or a commit of the app repo; its tree must hold an accepted receipt. */
+  version: number | string;
+  query: string;
+  params?: Record<string, unknown>;
+}
+
+/** One cell: values are rendered as text by the runtime. */
+export type AppCell = string | number | boolean | null;
+
+/** `POST /apps/:app/query` 200 (DES §7.2). `rows` are aligned with `columns`. */
+export interface AppQueryResponse {
+  columns: AppOutputColumn[];
+  rows: AppCell[][];
+  truncated: boolean;
+  hasMore: boolean;
+  ms: number;
+  /** Unix millis of the cached answer, `null` when it ran now. */
+  cachedAt: number | null;
+}
+
+/** One reason a check refused a tree. `path` is a JSON path into `apps.json`, or a repo path. */
+export interface AppCheckFinding {
+  stage: 'spec' | 'files' | 'policy' | 'source';
+  code: string;
+  path: string;
+  message: string;
+}
+
+/**
+ * Every refusal the app routes answer, by `code`:
+ *  - 400 `bad_request`; 403 `human_only` (the route needs a human operator: an agent-kind token is refused);
+ *  - 404 `unknown_app`, `unknown_version`, `unknown_query`, `unknown_project`;
+ *  - 409 `stale_base` (with `head`), `turn_in_flight` (with `turn`), `not_accepted` (the tree holds no
+ *    accepted receipt for this app), `nothing_to_undo`, `nothing_to_redo`, `slug_taken` (with
+ *    `suggestion`), `source_check_unavailable` (the tree has queries or actions and this daemon cannot
+ *    run the source stage yet, so nothing lands);
+ *  - 422 `check_failed` (with `findings`), `reserved_slug`;
+ *  - 501 `not_implemented` (a route a later slice serves; nothing happened);
+ *  - 503 `apps_unavailable`.
+ */
+export interface AppErrorBody {
+  code:
+    | 'bad_request'
+    | 'human_only'
+    | 'unknown_app'
+    | 'unknown_version'
+    | 'unknown_query'
+    | 'unknown_project'
+    | 'stale_base'
+    | 'turn_in_flight'
+    | 'not_accepted'
+    | 'nothing_to_undo'
+    | 'nothing_to_redo'
+    | 'slug_taken'
+    | 'source_check_unavailable'
+    | 'check_failed'
+    | 'reserved_slug'
+    | 'not_implemented'
+    | 'apps_unavailable';
+  error: string;
+  head?: number;
+  turn?: AppTurnState;
+  findings?: AppCheckFinding[];
+  suggestion?: string;
+}
+
+/**
+ * {@link HealthCapabilities.apps} (api-types 0.172.0): present when crew serves the app store
+ * (`/api/v1/apps`, list, add, read, edits, undo, redo, restore); each flag is true only once its slice
+ * serves that route for real rather than answering `501`.
+ */
+export interface AppsCapabilities {
+  /** `POST /apps/:app/query` runs queries (until then it checks the receipt, then answers `501`). */
+  query: boolean;
+  /** `POST /apps/:app/actions/:id/prepare|run|grant`, `GET …/actions/records/:id`. */
+  actions: boolean;
+  /** `POST /apps/:app/turns` launches `apps-turn` runs. */
+  turns: boolean;
+  /** `POST /apps/:app/publish`. */
+  publish: boolean;
+  /** `POST /apps/uploads`. */
+  uploads: boolean;
+  /** The read policy and the per-kind source check run, so a change to queries or actions can land. */
+  sourceCheck: boolean;
+}
+
+/**
+ * `POST /repos` body. `create: true` (api-types 0.172.0, DES-APPS-001): crew makes `<apps root>/<name>`
+ * (`~/.wicked/apps` by default), runs `git init` with one empty commit and registers it; no onboarding
+ * run starts (`onboardRunId: null`), and `rootPath`/`gitUrl` are refused beside it. A taken name is
+ * `409 slug_taken` with a `suggestion`.
+ */
+export interface RegisterRepoBody {
+  name: string;
+  rootPath?: string;
+  gitUrl?: string;
+  create?: true;
+  projectId?: string;
+  channel?: 'studio' | 'cli' | 'api';
+  actor?: string;
+  autoCapture?: boolean;
 }

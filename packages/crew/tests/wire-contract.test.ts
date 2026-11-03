@@ -99,6 +99,7 @@ import type { EditPlanSchema, PlanPreviewSchema, joinTeam } from '../src/team/ro
 import type { CreateStandingOrderSchema, ParseStandingOrderSchema, StandingAwaySchema } from '../src/standing-orders/routes.js';
 import type { StandingOrdersState as ServedStandingOrdersState } from '../src/standing-orders/store.js';
 import type { DEFAULT_SETTINGS, RecordedEvent } from '../src/core/types.js';
+import type { AppSpecSchema } from '../src/apps/spec.js';
 
 /** Compile-time: what the daemon PRODUCES must satisfy what the contract PUBLISHES. */
 function respondsWith<Contract, Produced extends Contract>(): Produced | void {
@@ -1104,6 +1105,21 @@ respondsWith<Wire.McpTool, Awaited<ReturnType<McpRegistry['patchTool']>>['tool']
 // ── api-types 0.63.0 — MCP policies: the preview matrix and the approvals (DES-MCP-TOOLS-001 S6) ──
 accepts<z.input<typeof McpPolicyPreviewSchema>, Wire.McpPolicyPreviewBody>();
 accepts<z.input<typeof McpApprovalSchema>, Wire.McpApprovalBody>();
+
+// ── Apps: `apps.json` (DES-APPS-001 §4, api-types 0.172.0) ─────────────────────────────────────
+// Both directions, so the contract and crew's schema are the same document: every spec the contract
+// lets a builder write is one crew's schema accepts, and every spec the schema accepts is one the
+// contract describes (studio's runtime reads exactly what crew lets land).
+// A spec crew parsed came from JSON, which has no `undefined`: zod types an absent optional key as
+// `?: T | undefined`, so the produced direction is read with `undefined` taken out of every property.
+type FromJson<T> = T extends readonly (infer U)[] ? FromJson<U>[] : T extends object ? { [K in keyof T]: FromJson<Exclude<T[K], undefined>> } : T;
+accepts<z.input<typeof AppSpecSchema>, Wire.AppSpec>();
+respondsWith<Wire.AppSpec, FromJson<z.output<typeof AppSpecSchema>>>();
+// Assignability lets an OPTIONAL key drift (a renamed `hideOnPhone?` still assigns both ways), so the
+// spec is also held equal with every key made required: a key only one side knows fails one direction.
+type AllKeys<T> = T extends readonly (infer U)[] ? AllKeys<U>[] : T extends object ? { [K in keyof T]-?: AllKeys<Exclude<T[K], undefined>> } : T;
+respondsWith<AllKeys<Wire.AppSpec>, AllKeys<z.output<typeof AppSpecSchema>>>();
+respondsWith<AllKeys<z.output<typeof AppSpecSchema>>, AllKeys<Wire.AppSpec>>();
 respondsWith<Wire.McpPolicyPreviewResponse, Awaited<ReturnType<McpPolicies['preview']>>>();
 respondsWith<Wire.McpPolicyPreviewResponse, Awaited<ReturnType<McpPolicies['previewUnsaved']>>>();
 respondsWith<Wire.McpApprovalsResponse, Awaited<ReturnType<McpPolicies['approvals']>>>();
