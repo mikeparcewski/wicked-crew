@@ -542,6 +542,9 @@ export function resolveAuth(options: AuthOptions | undefined, warn: (msg: string
 /** `POST /runs/:id/working-doc/versions`: the one write a plugin actor may make (its own lines, checked by the route). */
 const WORKING_DOC_VERSIONS_PATH = new RegExp(`^${API_PREFIX}/runs/[^/]+/working-doc/versions$`);
 
+/** `POST /apps/:app/query` (DES-APPS-001 §7.2): a read of live data, so an observer may make it. */
+const APP_QUERY_PATH = new RegExp(`^${API_PREFIX}/apps/[^/]+/query$`);
+
 /** `PATCH /projects/:id` (exactly one segment after /projects) — see {@link requiredTrust}. */
 const PROJECT_DETAIL_PATH = new RegExp(`^${API_PREFIX}/projects/[^/]+$`);
 
@@ -551,7 +554,7 @@ const PROJECT_DETAIL_PATH = new RegExp(`^${API_PREFIX}/projects/[^/]+$`);
  *
  * - `/ws/terminals` and any sub-path → `operator` (write-capable WS channel;
  *   inbound frames are raw PTY stdin regardless of the GET upgrade method)
- * - reads (GET/HEAD) and the main `/ws` stream → `observer`
+ * - reads (GET/HEAD), the main `/ws` stream and `POST /apps/:app/query` (a named read) → `observer`
  * - governance writes, settings writes, project archive/restore → `admin`
  * - every other mutation (launch, gate, cancel, chats, terminals, repos,
  *   workflows, project CRUD/membership) → `operator`
@@ -566,6 +569,8 @@ export function requiredTrust(method: string, path: string, body: unknown): Trus
   // socket carries operator-level writes. Guard both with and without trailing slash.
   if (path === '/ws/terminals' || path.startsWith('/ws/terminals/')) return 'operator';
   if (method === 'GET' || method === 'HEAD') return 'observer';
+  // A named query of an accepted app version is a read: the route itself checks the receipt.
+  if (method === 'POST' && APP_QUERY_PATH.test(path)) return 'observer';
   if (path.startsWith(`${API_PREFIX}/governance/`)) return 'admin';
   if (path === `${API_PREFIX}/settings`) return 'admin';
   if (
@@ -611,6 +616,8 @@ const UNIT_TOKEN_ROUTES: ReadonlySet<string> = new Set([
   `POST ${API_PREFIX}/mcp/ask`,
   `GET ${API_PREFIX}/mcp/ask`,
   `DELETE ${API_PREFIX}/mcp/ask`,
+  // DES-APPS-001 §9.2: the `apps_check` Tool's route; the body's unit token is its credential (verified there).
+  `POST ${API_PREFIX}/apps/check`,
 ]);
 
 /** True for exactly the unit-token routes above (method and path both exact). */

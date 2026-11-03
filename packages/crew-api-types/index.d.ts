@@ -15025,7 +15025,8 @@ export interface AppsCapabilities {
 /**
  * `POST /repos` body. `create: true` (api-types 0.172.0, DES-APPS-001): crew makes `<apps root>/<name>`
  * (`~/.wicked/apps` by default), runs `git init` with one empty commit and registers it; no onboarding
- * run starts (`onboardRunId: null`), and `rootPath`/`gitUrl` are refused beside it. A taken name is
+ * run starts (`onboardRunId: null`), and `rootPath`/`gitUrl` are refused beside it. With `create`, `name` is
+ * an app slug (`^[a-z][a-z0-9-]{0,47}$`, not `check` or `uploads`: `422 reserved_slug`). A taken name is
  * `409 slug_taken` with a `suggestion`.
  */
 export interface RegisterRepoBody {

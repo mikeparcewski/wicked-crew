@@ -54,6 +54,13 @@ need `operator` — so there is no per-route registry to drift. One rule is
 body-dependent: `PATCH /projects/:id` is an `operator` rename/describe unless
 the patch touches `status` (archive/restore), which is `admin`.
 
+Apps (DES-APPS-001) adds two rules. `POST /apps/:app/query` is a read of a named
+query, so it needs `observer` (the route itself refuses a version with no accepted
+receipt, and a `plugin` actor). And the routes that accept a version or a grant
+(`POST /apps/:app/edits`, `undo`, `redo`, `restore`, the actions routes and
+`publish`) need a **human** actor at `operator` or above: an authenticated
+`kind: agent` token is refused with 403 `human_only` whatever its trust.
+
 The implicit local actor is `admin`: a solo deployment has one human and no
 boundary worth drawing between that human and the daemon.
 
@@ -195,7 +202,9 @@ itself (crew#1048, `src/api/origin-guard.ts`):
   its own name and gets 403 `origin_refused`, plain reads included. The worker
   MCP routes (`/mcp/call`, `/mcp/tools`, `/mcp/ask`) are exempt: the seat
   gateway reaches them under a host alias, and the engine checks their unit
-  token in every mode.
+  token in every mode. `POST /apps/check` (the `apps_check` Tool's route) is
+  exempt the same way: its body's unit token is its only credential, and it
+  answers 503 and does nothing while the engine cannot verify one.
 - **A write or a WebSocket upgrade must come from the daemon's own origin, or an
   allowed one.** Allowed means studio's dev server (`http://127.0.0.1:4200`,
   `http://localhost:4200`) or an entry in `WICKED_CREW_ALLOWED_ORIGINS`. Any

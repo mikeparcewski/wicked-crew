@@ -11,6 +11,7 @@ import type { ChatDecisionRecorder } from '../decisions/chat-recorder.js';
 import type { ConsiderationService } from '../decisions/consider.js';
 import { requestOrigin, shellCsp } from '../editors/csp.js';
 import { registerRoutes } from './routes.js';
+import { APPS_STATE_FILENAME, AppStore, defaultAppsRoot } from '../apps/store.js';
 import { freshenCheckout } from './chat-freshness.js';
 import { ErrorRing, teeStreamWithErrorRing } from './diagnostics.js';
 import { GateCache } from './gate-cache.js';
@@ -2526,6 +2527,13 @@ export async function createServer(
       });
     },
   });
+  // DES-APPS-001 (K2a): an unreadable store file leaves Apps off (said once) rather than failing the boot.
+  let appStore: AppStore | null = null;
+  try {
+    appStore = new AppStore({ stateFile: join(crewStateHome(), APPS_STATE_FILENAME), appsRoot: defaultAppsRoot(), log: (m) => app.log.warn(m) });
+  } catch (err) {
+    app.log.error(`[apps] the app store cannot be read, so Apps is off: ${err instanceof Error ? err.message : String(err)}`);
+  }
   const registered = registerRoutes(
     app,
     adapter,
@@ -2598,6 +2606,8 @@ export async function createServer(
       // DES-MCP-TOOLS-001 S2: the registry over `<state home>/mcp` (created on the first save).
       // Route tests drive `registerMcpRoutes` over their own registry (tests/mcp-registry.test.ts).
       mcp: mcpRegistry,
+      // DES-APPS-001 (K2a): the app store (`daemon-apps.json` in the state home; repos under the apps root).
+      ...(appStore !== null ? { apps: appStore } : {}),
       // DES-MCP-TOOLS-001 S3: the broker's call path over that registry.
       mcpBroker,
       ...(typeof adapter.askSupported === 'function' && adapter.askSupported() ? { askServer } : {}),
