@@ -1742,7 +1742,6 @@ export function registerRoutes(
     registerAppRoutes(app, {
       store: runtime.apps,
       audit,
-      registerRepo: async (name, root) => (await adapter.registerRepo(name, root)).id,
       ...(typeof adapter.projectsSupported === 'function' && adapter.projectsSupported()
         ? { projectExists: async (id: string) => (await adapter.projectGet(id)) !== null }
         : {}),
@@ -2109,13 +2108,14 @@ export function registerRoutes(
       ...(runtime.apps !== undefined
         ? {
             apps: {
+              // (typed against the contract below: a renamed flag fails the build)
               query: false,
               actions: false,
               turns: runtime.apps.turns !== null,
               publish: false,
               uploads: app.hasRoute({ method: 'POST', url: `${V}/apps/uploads` }),
               sourceCheck: runtime.apps.sourceStage !== null,
-            },
+            } satisfies import('../core/types.js').AppsCapabilities,
           }
         : {}),
     };
@@ -2755,20 +2755,13 @@ export function registerRoutes(
       if (store === undefined) return reply.code(503).send({ code: 'apps_unavailable', error: 'this daemon has no apps root to make a repo in' });
       const name = parsed.data.name;
       try {
-        store.assertNewSlug(name);
-        const { root } = await store.createEmptyRepo(name);
-        let repo: RepoEntry;
-        try {
-          repo = await adapter.registerRepo(name, root);
-        } catch (err) {
-          await fsp.rm(root, { recursive: true, force: true }).catch(() => undefined);
-          return reply.code(400).send({ error: message(err) });
-        }
+        const { repo } = await store.createRepo(name);
         audit.record('repo.created', actorOf(req), { detail: { repoId: repo.id, name } });
         return reply.code(201).send({ repo, onboardRunId: null });
       } catch (err) {
         if (err instanceof AppStoreError) return reply.code(err.status).send({ code: err.code, error: err.message, ...err.extra });
-        throw err;
+        // A registration the engine refused: the repo was removed again, nothing is left.
+        return reply.code(400).send({ error: message(err) });
       }
     }
     const refused = await onboardRefusal();

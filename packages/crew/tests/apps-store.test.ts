@@ -3,7 +3,8 @@
 // 409 turn_in_flight; a rejected tree cannot be restored; the query route refuses an unreceipted tree; an
 // agent-kind operator token cannot post an edit; two concurrent undos move the pointer once.
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { deflateSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -13,7 +14,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { isUnitTokenRoute, registerAuthHooks, requiredTrust } from '../src/api/auth.js';
 import type { AppSourceStage, AppSourceStageInput } from '../src/apps/check.js';
 import { registerAppRoutes } from '../src/apps/routes.js';
-import { AppStore, type AppTurnLauncher } from '../src/apps/store.js';
+import { AppStore, type AppRepoRegistry, type AppTurnLauncher } from '../src/apps/store.js';
 import type { Actor, AppDetail, AppSpec } from '../src/core/types.js';
 
 const dirs: string[] = [];
@@ -52,21 +53,36 @@ function fakeStage(): AppSourceStage & { calls: AppSourceStageInput[] } {
   };
 }
 
-function setup(opts: { auth?: boolean; stage?: AppSourceStage | null; turns?: AppTurnLauncher | null } = {}) {
+/** A fake repo registry keyed like core's (the slug is the id). */
+function fakeRegistry(fail: () => boolean = () => false) {
+  const repos = new Map<string, string>();
+  const registry: AppRepoRegistry = {
+    register: async (name, root) => {
+      if (fail()) throw new Error('the engine refused the registration');
+      repos.set(name, root);
+      return { id: name, name, root_path: root, registered_at: 1, default_branch: 'main' };
+    },
+    idTaken: async (id) => repos.has(id),
+  };
+  return { registry, repos };
+}
+
+function setup(opts: { auth?: boolean; stage?: AppSourceStage | null; turns?: AppTurnLauncher | null; failRegister?: () => boolean; verifyUnitToken?: (t: string) => Promise<{ runId: string } | null> } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'apps-store-'));
   dirs.push(dir);
-  const store = new AppStore({ stateFile: join(dir, 'daemon-apps.json'), appsRoot: join(dir, 'apps'), sourceStage: opts.stage ?? null, turns: opts.turns ?? null });
+  const reg = fakeRegistry(opts.failRegister);
+  const store = new AppStore({ stateFile: join(dir, 'daemon-apps.json'), appsRoot: join(dir, 'apps'), registry: reg.registry, sourceStage: opts.stage ?? null, turns: opts.turns ?? null });
   const app = Fastify({ logger: false });
   apps.push(app);
-  const tokens: Record<string, Actor> = { human: HUMAN, agent: AGENT, observer: OBSERVER };
+  const tokens: Record<string, Actor> = { human: HUMAN, agent: AGENT, observer: OBSERVER, plugin: { id: 'plugin:x@1', kind: 'plugin', trust: 'observer' } };
   if (opts.auth === true) registerAuthHooks(app, { mode: 'required', verifiers: [{ name: 'test', verify: async (t) => tokens[t] ?? null }], allowedOrigins: null });
   const audit = { record: vi.fn() };
-  registerAppRoutes(app, { store, audit, registerRepo: async (name) => `repo-${name}` });
+  registerAppRoutes(app, { store, audit, ...(opts.verifyUnitToken !== undefined ? { verifyUnitToken: opts.verifyUnitToken } : {}) });
   const call = async (method: 'GET' | 'POST', url: string, payload?: unknown, token?: string) => {
     const res = await app.inject({ method, url: `/api/v1${url}`, ...(payload !== undefined ? { payload: payload as object } : {}), ...(token !== undefined ? { headers: { authorization: `Bearer ${token}` } } : {}) });
     return { status: res.statusCode, body: res.json() as Record<string, unknown> & { app: AppDetail; code?: string } };
   };
-  return { dir, store, app, call, audit };
+  return { dir, store, app, call, audit, repos: reg.repos };
 }
 
 const textSpec = (name: string, text: string): AppSpec => ({
@@ -290,9 +306,14 @@ describe('apps: the query route runs only accepted trees', () => {
     expect(refused.body).toMatchObject({ code: 'not_accepted' });
     expect((await s.call('POST', '/apps/escalations/query', { version: 2, query: 'missing' }, 'observer')).body).toMatchObject({ code: 'unknown_query' });
     expect((await s.call('POST', '/apps/escalations/query', { version: 2, query: 'open_count' }, 'observer')).body).toMatchObject({ code: 'not_implemented' });
-    // App B's accepted commit is no version of app A (S7, crew side).
+    // App B's accepted commit is no version of app A (S7, crew side)…
     const b = await newApp(s, 'other', 'human');
     expect((await s.call('POST', '/apps/escalations/query', { version: b.versions[0]!.commit, query: 'open_count' }, 'observer')).body).toMatchObject({ code: 'unknown_version' });
+    // …and when B's objects ARE readable from A (an alternates file an agent wrote), B's accepted tree is
+    // still not accepted in A: receipts are per (app, tree) (codex r1 on the store).
+    writeFileSync(join(root, '.git', 'objects', 'info', 'alternates'), `${join(s.dir, 'apps', 'other', '.git', 'objects')}\n`);
+    expect((await s.call('POST', '/apps/escalations/query', { version: b.versions[0]!.commit, query: 'open_count' }, 'observer')).body).toMatchObject({ code: 'not_accepted' });
+    expect((await s.call('POST', '/apps/escalations/restore', { base: 2, version: b.versions[0]!.commit }, 'human')).body).toMatchObject({ code: 'not_accepted' });
   });
 });
 
@@ -351,9 +372,8 @@ describe('apps: the turn lock and turn landing', () => {
     let active = true;
     const launched: string[] = [];
     const turns: AppTurnLauncher = {
-      launch: async () => {
-        launched.push(`run-${launched.length + 1}`);
-        return launched.at(-1)!;
+      launch: async ({ runId }) => {
+        launched.push(runId);
       },
       isActive: async () => active,
     };
@@ -367,7 +387,9 @@ describe('apps: the turn lock and turn landing', () => {
     await edit(s, 'escalations', 1, 'two');
     const turn = await s.call('POST', '/apps/escalations/turns', { base: 2, message: 'make it a two-page app' });
     expect(turn.status).toBe(202);
-    expect(turn.body).toMatchObject({ runId: 'run-1', turn: { runId: 'run-1', base: 2, actor: 'local' } });
+    const runId = turn.body['runId'] as string;
+    expect(runId).toMatch(/^apps-escalations-[0-9a-f]{12}$/);
+    expect(turn.body).toMatchObject({ turn: { runId, base: 2, actor: 'local' } });
     for (const [url, body] of [
       ['/apps/escalations/edits', { base: 2, ops: [{ op: 'spec', spec: textSpec('a', 'b') }] }],
       ['/apps/escalations/undo', { base: 2 }],
@@ -377,12 +399,12 @@ describe('apps: the turn lock and turn landing', () => {
     ] as const) {
       const res = await s.call('POST', url, body);
       expect(res.status, url).toBe(409);
-      expect(res.body, url).toMatchObject({ code: 'turn_in_flight', turn: { runId: 'run-1' } });
+      expect(res.body, url).toMatchObject({ code: 'turn_in_flight', turn: { runId } });
     }
-    expect((await s.call('GET', '/apps/escalations')).body.app.turn).toMatchObject({ runId: 'run-1' });
+    expect((await s.call('GET', '/apps/escalations')).body.app.turn).toMatchObject({ runId });
     t.end();
     expect((await edit(s, 'escalations', 2, 'after the turn')).status).toBe(200);
-    expect(t.launched).toEqual(['run-1']);
+    expect(t.launched).toEqual([runId]);
   });
 
   it('a turn route on a daemon with no launcher is 501 and holds nothing', async () => {
@@ -396,7 +418,7 @@ describe('apps: the turn lock and turn landing', () => {
     const t = turnsFake();
     const s = setup({ turns: t.turns });
     await newApp(s);
-    await s.call('POST', '/apps/escalations/turns', { base: 1, message: 'add a note' });
+    const runId = (await s.call('POST', '/apps/escalations/turns', { base: 1, message: 'add a note' })).body['runId'] as string;
     const root = join(s.dir, 'apps', 'escalations');
     const env = { ...process.env, GIT_DIR: join(root, '.git') };
     const blob = (content: string) => execFileSync('git', ['hash-object', '-w', '--stdin'], { input: content, env }).toString().trim();
@@ -404,22 +426,22 @@ describe('apps: the turn lock and turn landing', () => {
     // A builder's candidate with a file outside apps.json and queries/ is refused by the files stage.
     const evilTree = execFileSync('git', ['mktree'], { input: `100644 blob ${blob(JSON.stringify(textSpec('x', 'y')))}\tapps.json\n100755 blob ${blob('curl evil')}\trun.sh\n`, env }).toString().trim();
     const evil = git(root, 'commit-tree', evilTree, '-p', head, '-m', 'builder');
-    expect(await s.store.checkTurn('escalations', 'run-1', evil)).toMatchObject({ ok: false, findings: [expect.objectContaining({ code: 'unexpected_path', path: 'run.sh' })] });
+    expect(await s.store.checkTurn('escalations', runId, evil)).toMatchObject({ ok: false, findings: [expect.objectContaining({ code: 'unexpected_path', path: 'run.sh' })] });
     await expect(s.store.checkTurn('escalations', 'run-9', evil)).rejects.toMatchObject({ code: 'not_this_turn' });
     // An apps.json over the limit is refused by its size in the tree, never read whole.
     const bigTree = execFileSync('git', ['mktree'], { input: `100644 blob ${blob(' '.repeat(3 * 1024 * 1024))}\tapps.json\n`, env }).toString().trim();
     const big = git(root, 'commit-tree', bigTree, '-p', head, '-m', 'builder');
-    expect(await s.store.checkTurn('escalations', 'run-1', big)).toMatchObject({ ok: false, findings: [expect.objectContaining({ code: 'too_large', path: 'apps.json' })] });
+    expect(await s.store.checkTurn('escalations', runId, big)).toMatchObject({ ok: false, findings: [expect.objectContaining({ code: 'too_large', path: 'apps.json' })] });
     const goodTree = execFileSync('git', ['mktree'], { input: `100644 blob ${blob(JSON.stringify(textSpec('Escalations', 'from the seat')))}\tapps.json\n`, env }).toString().trim();
     const candidate = git(root, 'commit-tree', goodTree, '-p', head, '-m', 'builder');
-    const checked = await s.store.checkTurn('escalations', 'run-1', candidate);
+    const checked = await s.store.checkTurn('escalations', runId, candidate);
     expect(checked).toMatchObject({ ok: true });
     const offered = (checked as { commit: string }).commit;
     expect(git(root, 'cat-file', '-p', `${offered}:apps.lock.json`)).toContain('wicked.apps.lock/v1');
-    await expect(s.store.landTurn('escalations', { runId: 'run-1', commit: candidate, builder: 'claude', reviewer: 'codex', summary: 'x' })).rejects.toMatchObject({ code: 'not_checked' });
-    await expect(s.store.landTurn('escalations', { runId: 'run-1', commit: offered, builder: 'claude', reviewer: 'claude', summary: 'x' })).rejects.toMatchObject({ code: 'reviewer_not_distinct' });
-    const v = await s.store.landTurn('escalations', { runId: 'run-1', commit: offered, builder: 'claude', reviewer: 'codex', summary: 'Added a note' });
-    expect(v).toMatchObject({ version: 2, author: { kind: 'seat', id: 'claude' }, receipt: { kind: 'reviewed', review: { runId: 'run-1', builder: 'claude', reviewer: 'codex' } } });
+    await expect(s.store.landTurn('escalations', { runId, commit: candidate, builder: 'claude', reviewer: 'codex', summary: 'x' })).rejects.toMatchObject({ code: 'not_checked' });
+    await expect(s.store.landTurn('escalations', { runId, commit: offered, builder: 'claude', reviewer: 'claude', summary: 'x' })).rejects.toMatchObject({ code: 'reviewer_not_distinct' });
+    const v = await s.store.landTurn('escalations', { runId, commit: offered, builder: 'claude', reviewer: 'codex', summary: 'Added a note' });
+    expect(v).toMatchObject({ version: 2, author: { kind: 'seat', id: 'claude' }, receipt: { kind: 'reviewed', review: { runId, builder: 'claude', reviewer: 'codex' } } });
     const after = (await s.call('GET', '/apps/escalations')).body.app;
     expect(after.turn).toBeNull();
     expect(after.history).toMatchObject({ states: [1, 2], pointer: 1 });
@@ -435,17 +457,310 @@ describe('apps: the turn lock and turn landing', () => {
 
 describe('apps: the store survives a restart', () => {
   it('reads its versions, receipts, pointer and turn back from daemon-apps.json', async () => {
-    const t = { launch: async () => 'run-1', isActive: async () => true };
+    const t: AppTurnLauncher = { launch: async () => undefined, isActive: async () => true };
     const s = setup({ turns: t });
     await newApp(s);
     await edit(s, 'escalations', 1, 'two');
-    await s.call('POST', '/apps/escalations/turns', { base: 2, message: 'x' });
-    const again = new AppStore({ stateFile: s.store.stateFile, appsRoot: s.store.appsRoot, turns: t });
+    const runId = (await s.call('POST', '/apps/escalations/turns', { base: 2, message: 'x' })).body['runId'] as string;
+    const again = new AppStore({ stateFile: s.store.stateFile, appsRoot: s.store.appsRoot, registry: fakeRegistry().registry, turns: t });
     const d = await again.detail('escalations');
     expect(d.versions.map((v) => v.receipt?.kind)).toEqual(['you', 'you']);
     expect(d.history.states).toEqual([1, 2]);
-    expect(d.turn).toMatchObject({ runId: 'run-1' });
+    expect(d.turn).toMatchObject({ runId });
     writeFileSync(join(s.dir, 'garbage.json'), '{"version":2}');
-    expect(() => new AppStore({ stateFile: join(s.dir, 'garbage.json'), appsRoot: s.store.appsRoot })).toThrow(/not an apps store/);
+    expect(() => new AppStore({ stateFile: join(s.dir, 'garbage.json'), appsRoot: s.store.appsRoot, registry: fakeRegistry().registry })).toThrow(/not an apps store/);
+  });
+});
+
+// ── xreview r1 on the store (codex): one test per finding ──────────────────────────────────────────
+
+/** Write `content` as the loose object file `sha` names (what an agent with the object store mounted can do). */
+function overwriteLooseObject(root: string, sha: string, type: string, content: Buffer): void {
+  const file = join(root, '.git', 'objects', sha.slice(0, 2), sha.slice(2));
+  chmodSync(file, 0o644);
+  writeFileSync(file, deflateSync(Buffer.concat([Buffer.from(`${type} ${content.length}\0`), content])));
+}
+
+describe('apps: the repo is the agent’s, so crew trusts nothing in it but object ids', () => {
+  it('a changed object file under an accepted tree is refused, never served (P1)', async () => {
+    const s = setup();
+    const a = await newApp(s);
+    const root = join(s.dir, 'apps', 'escalations');
+    const specBlob = git(root, 'rev-parse', `${a.versions[0]!.commit}:apps.json`);
+    overwriteLooseObject(root, specBlob, 'blob', Buffer.from(JSON.stringify(textSpec('Escalations', 'swapped by an agent'))));
+    // A fresh store (no cache): the read verifies the bytes against the id.
+    const fresh = new AppStore({ stateFile: s.store.stateFile, appsRoot: s.store.appsRoot, registry: fakeRegistry().registry });
+    await expect(fresh.detail('escalations')).rejects.toMatchObject({ code: 'unreadable_tree' });
+    await expect(fresh.acceptedSpec('escalations', 1)).rejects.toMatchObject({ code: 'unreadable_tree' });
+  });
+
+  it('replace refs are ignored: crew reads the object the id names (P1)', async () => {
+    const s = setup();
+    const a = await newApp(s);
+    const root = join(s.dir, 'apps', 'escalations');
+    const env = { ...process.env, GIT_DIR: join(root, '.git') };
+    const specBlob = git(root, 'rev-parse', `${a.versions[0]!.commit}:apps.json`);
+    const other = execFileSync('git', ['hash-object', '-w', '--stdin'], { input: JSON.stringify(textSpec('Escalations', 'replaced')), env }).toString().trim();
+    git(root, 'replace', specBlob, other);
+    const fresh = new AppStore({ stateFile: s.store.stateFile, appsRoot: s.store.appsRoot, registry: fakeRegistry().registry });
+    expect((await fresh.detail('escalations')).spec.pages[0]!.components).toEqual([]);
+  });
+
+  it('runs no hook, fsmonitor or transport the repo configures, lazy fetch included (P1)', async () => {
+    const s = setup();
+    await newApp(s);
+    const root = join(s.dir, 'apps', 'escalations');
+    const marker = join(s.dir, 'ran');
+    const script = join(s.dir, 'evil.sh');
+    writeFileSync(script, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`);
+    chmodSync(script, 0o755);
+    mkdirSync(join(root, '.git', 'hooks'), { recursive: true });
+    writeFileSync(join(root, '.git', 'hooks', 'reference-transaction'), `#!/bin/sh\ntouch '${marker}'\n`);
+    chmodSync(join(root, '.git', 'hooks', 'reference-transaction'), 0o755);
+    for (const [k, v] of [
+      ['core.fsmonitor', script],
+      ['core.repositoryformatversion', '1'],
+      ['extensions.partialClone', 'origin'],
+      ['remote.origin.url', `file://${join(s.dir, 'nowhere')}`],
+      ['remote.origin.promisor', 'true'],
+      ['remote.origin.uploadpack', script],
+      ['commit.gpgSign', 'true'],
+      ['gpg.program', script],
+    ] as const) {
+      git(root, 'config', k, v);
+    }
+    expect((await edit(s, 'escalations', 1, 'two')).status).toBe(200); // update-ref, hash-object, mktree, commit-tree
+    // A commit the repo does not hold: a promisor remote would be asked for it.
+    expect((await s.call('POST', '/apps/escalations/restore', { base: 2, version: 'f'.repeat(40) })).status).toBe(404);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it('re-points a symbolic main as a direct ref, never moving the branch it named', async () => {
+    const s = setup();
+    const a = await newApp(s);
+    const root = join(s.dir, 'apps', 'escalations');
+    const tip = git(root, 'rev-parse', `${a.versions[0]!.commit}^`);
+    git(root, 'update-ref', 'refs/heads/wicked/run-1', tip);
+    git(root, 'symbolic-ref', 'refs/heads/main', 'refs/heads/wicked/run-1');
+    const v2 = await edit(s, 'escalations', 1, 'two');
+    expect(v2.status).toBe(200);
+    expect(git(root, 'rev-parse', 'refs/heads/wicked/run-1')).toBe(tip);
+    // main is a direct ref again (symbolic-ref -q exits 1 for a direct ref), at crew's head.
+    expect(() => execFileSync('git', ['symbolic-ref', '-q', 'refs/heads/main'], { env: { ...process.env, GIT_DIR: join(root, '.git') }, stdio: 'pipe' })).toThrow();
+    expect(git(root, 'rev-parse', 'refs/heads/main')).toBe((v2.body['landed'] as { commit: string }).commit);
+  }, 30_000);
+
+  it('refuses a query file that is not UTF-8', async () => {
+    const t = { launch: async () => undefined, isActive: async () => true };
+    const s = setup({ turns: t, stage: fakeStage() });
+    await newApp(s);
+    const runId = (await s.call('POST', '/apps/escalations/turns', { base: 1, message: 'x' })).body['runId'] as string;
+    const root = join(s.dir, 'apps', 'escalations');
+    const env = { ...process.env, GIT_DIR: join(root, '.git') };
+    const blob = (content: string | Buffer) => execFileSync('git', ['hash-object', '-w', '--stdin'], { input: content, env }).toString().trim();
+    const q = execFileSync('git', ['mktree'], { input: `100644 blob ${blob(Buffer.from([0x73, 0xff, 0xfe]))}\topen_count.sql\n`, env }).toString().trim();
+    const tree = execFileSync('git', ['mktree'], { input: `100644 blob ${blob(JSON.stringify(dataSpec('x')))}\tapps.json\n040000 tree ${q}\tqueries\n`, env }).toString().trim();
+    const c = git(root, 'commit-tree', tree, '-p', git(root, 'rev-parse', 'refs/heads/main'), '-m', 'b');
+    expect(await s.store.checkTurn('escalations', runId, c)).toMatchObject({ ok: false, findings: [expect.objectContaining({ code: 'not_utf8' })] });
+  });
+});
+
+describe('apps: the registry, creation and the state file', () => {
+  it('a slug is at most four words (the registry id is the slug), and a registered id is taken', async () => {
+    const s = setup();
+    expect((await s.call('POST', '/apps', { slug: 'one-two-three-four-five', projectId: 'p1' })).status).toBe(400);
+    s.repos.set('one-two-three-four', '/elsewhere');
+    const taken = await s.call('POST', '/apps', { slug: 'one-two-three-four', projectId: 'p1' });
+    expect(taken.body).toMatchObject({ code: 'slug_taken', suggestion: 'one-two-three-four2' });
+    const long = `a${'b'.repeat(38)}-c-d-${'e'.repeat(4)}`; // 48 characters, four words
+    s.repos.set(long, '/elsewhere');
+    const sug = (await s.call('POST', '/apps', { slug: long, projectId: 'p1' })).body.suggestion as string;
+    expect(sug.length).toBeLessThanOrEqual(48);
+    expect(sug).toMatch(/^(?=.{1,48}$)[a-z][a-z0-9]*(?:-[a-z0-9]+){0,3}$/);
+    expect(sug).not.toBe(long);
+  });
+
+  it('a dangling link under the root takes its slug, and the suggestion is another one', async () => {
+    const s = setup();
+    mkdirSync(join(s.dir, 'apps'), { recursive: true });
+    symlinkSync(join(s.dir, 'gone'), join(s.dir, 'apps', 'ghost'));
+    expect((await s.call('POST', '/apps', { slug: 'ghost', projectId: 'p1' })).body).toMatchObject({ code: 'slug_taken', suggestion: 'ghost-2' });
+  });
+
+  it('a refused registration leaves nothing behind, so the same slug can be tried again', async () => {
+    let fail = true;
+    const s = setup({ failRegister: () => fail });
+    const res = await s.app.inject({ method: 'POST', url: '/api/v1/apps', payload: { slug: 'escalations', projectId: 'p1' } });
+    expect(res.statusCode).toBe(500);
+    expect(existsSync(join(s.dir, 'apps', 'escalations'))).toBe(false);
+    expect(s.store.has('escalations')).toBe(false);
+    fail = false;
+    expect((await newApp(s)).head.version).toBe(1);
+  });
+
+  it('a state write that fails leaves memory as the file says (P2)', async () => {
+    const s = setup();
+    await newApp(s);
+    chmodSync(s.dir, 0o555);
+    try {
+      expect((await s.app.inject({ method: 'POST', url: '/api/v1/apps/escalations/edits', payload: { base: 1, ops: [{ op: 'spec', spec: textSpec('a', 'b') }] } })).statusCode).toBe(500);
+    } finally {
+      chmodSync(s.dir, 0o755);
+    }
+    expect((await s.call('GET', '/apps/escalations')).body.app.head.version).toBe(1);
+    expect((await edit(s, 'escalations', 1, 'now it lands')).body['landed']).toMatchObject({ version: 2 });
+  });
+});
+
+describe('apps: turns and reads under concurrency', () => {
+  it('records the turn before the run starts', async () => {
+    let seen: unknown = null;
+    const s = setup({
+      turns: {
+        launch: async ({ runId }) => {
+          seen = JSON.parse(readFileSync(join(s.dir, 'daemon-apps.json'), 'utf8')).apps.escalations.turn?.runId === runId;
+        },
+        isActive: async () => true,
+      },
+    });
+    await newApp(s);
+    expect((await s.call('POST', '/apps/escalations/turns', { base: 1, message: 'x' })).status).toBe(202);
+    expect(seen).toBe(true);
+  });
+
+  it('a launch that fails releases the turn', async () => {
+    const s = setup({ turns: { launch: async () => { throw new Error('no seat'); }, isActive: async () => true } });
+    await newApp(s);
+    expect((await s.app.inject({ method: 'POST', url: '/api/v1/apps/escalations/turns', payload: { base: 1, message: 'x' } })).statusCode).toBe(500);
+    expect((await edit(s, 'escalations', 1, 'editable')).status).toBe(200);
+  });
+
+  it('a late "ended" answer about an old turn never clears a newer one (P2)', async () => {
+    let answer!: (v: boolean) => void;
+    const active = new Map<string, boolean>();
+    const turns: AppTurnLauncher = {
+      launch: async ({ runId }) => {
+        active.set(runId, true);
+      },
+      isActive: (runId) => (runId === first ? new Promise<boolean>((r) => (answer = r)) : Promise.resolve(active.get(runId) ?? false)),
+    };
+    const s = setup({ turns });
+    await newApp(s);
+    let first = '';
+    first = (await s.store.beginTurn('escalations', { base: 1, message: 'a', about: [], actor: HUMAN })).runId;
+    const reading = s.store.detail('escalations'); // asks about `first` and waits
+    await s.store.endTurn('escalations', first);
+    const second = (await s.store.beginTurn('escalations', { base: 1, message: 'b', about: [], actor: HUMAN })).runId;
+    answer(false);
+    await reading;
+    expect((await s.store.detail('escalations')).turn).toMatchObject({ runId: second });
+  });
+
+  it('a read during a landing answers one version, never a new head with an old spec (P2)', async () => {
+    const s = setup();
+    await newApp(s);
+    await edit(s, 'escalations', 1, 'two');
+    const fresh = new AppStore({ stateFile: s.store.stateFile, appsRoot: s.store.appsRoot, registry: fakeRegistry().registry });
+    const app = Fastify({ logger: false });
+    apps.push(app);
+    registerAppRoutes(app, { store: fresh, audit: { record: vi.fn() } });
+    const [d, e] = await Promise.all([
+      fresh.detail('escalations'),
+      app.inject({ method: 'POST', url: '/api/v1/apps/escalations/edits', payload: { base: 2, ops: [{ op: 'spec', spec: textSpec('Escalations', 'three') }] } }),
+    ]);
+    expect(e.statusCode).toBe(200);
+    const text = (d.spec.pages[0]!.components[0] as { text: string }).text;
+    expect({ head: d.head.version, text }).toEqual(d.head.version === 2 ? { head: 2, text: 'two' } : { head: 3, text: 'three' });
+  });
+});
+
+describe('apps: the lock across shared sources and the two namespaces', () => {
+  it('a source whose pin moves re-checks every query on it, not only the edited one (P2)', async () => {
+    let host = 'db.example';
+    const calls: string[][] = [];
+    const stage: AppSourceStage = {
+      check: async (input) => {
+        calls.push([...input.queries]);
+        return {
+          findings: [],
+          sources: { 'support-pg': { kind: 'sql', descriptor: { host }, descriptorHash: `d-${host}` } },
+          queries: Object.fromEntries(input.queries.map((q) => [q, `c-${q}-${host}`])),
+          actions: {},
+          uploads: {},
+        };
+      },
+    };
+    const s = setup({ stage });
+    await newApp(s);
+    const two: AppSpec = { ...dataSpec('x'), queries: [...dataSpec('x').queries, { id: 'second', source: 'support-pg', kind: 'sql', output: [{ name: 'n', type: 'integer' }] }] };
+    await s.call('POST', '/apps/escalations/edits', { base: 1, ops: [{ op: 'spec', spec: two }, { op: 'query-text', query: 'open_count', text: 'select 1 as open' }, { op: 'query-text', query: 'second', text: 'select 2 as n' }] });
+    host = 'replacement.example';
+    const v3 = await s.call('POST', '/apps/escalations/edits', { base: 2, ops: [{ op: 'query-text', query: 'open_count', text: 'select 3 as open' }] });
+    expect(calls.slice(1)).toEqual([['open_count'], ['open_count', 'second']]);
+    expect(v3.body.app.lock.queries).toMatchObject({ open_count: { contractHash: 'c-open_count-replacement.example' }, second: { contractHash: 'c-second-replacement.example' } });
+    expect(v3.body['landed']).toMatchObject({ check: { checked: ['open_count', 'second'] } });
+  });
+
+  it('a query and an action with one id are each held to their own source (P2)', async () => {
+    const stage: AppSourceStage = {
+      check: async (input) => ({
+        findings: [],
+        sources: { 'writer-pg': { kind: 'sql', descriptor: {}, descriptorHash: 'w' } }, // no pin for the query's source
+        queries: Object.fromEntries(input.queries.map((q) => [q, 'c'])),
+        actions: Object.fromEntries(input.actions.map((a) => [a, 'c'])),
+        uploads: {},
+      }),
+    };
+    const s = setup({ stage });
+    await newApp(s);
+    const spec: AppSpec = {
+      ...dataSpec('x'),
+      queries: [{ id: 'shared', source: 'support-pg', kind: 'sql', output: [{ name: 'n', type: 'integer' }] }],
+      actions: [{ id: 'shared', kind: 'row-write', source: 'writer-pg', table: 's.t', op: 'delete', key: { id: { kind: 'param', name: 'id' } }, params: { type: 'object', properties: { id: { type: 'integer' } }, required: ['id'] } }],
+    };
+    const res = await s.call('POST', '/apps/escalations/edits', { base: 1, ops: [{ op: 'spec', spec }, { op: 'query-text', query: 'shared', text: 'select 1 as n' }] });
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({ findings: [expect.objectContaining({ code: 'source_check_incomplete', path: 'query shared' })] });
+  });
+
+  it('a query named constructor with no text is a finding, not a crash', async () => {
+    const s = setup({ stage: fakeStage() });
+    await newApp(s);
+    const spec: AppSpec = { ...dataSpec('x'), queries: [{ id: 'constructor', source: 'support-pg', kind: 'sql', output: [{ name: 'n', type: 'integer' }] }] };
+    const res = await s.call('POST', '/apps/escalations/edits', { base: 1, ops: [{ op: 'spec', spec }] });
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({ findings: [expect.objectContaining({ code: 'missing_query_text' })] });
+  });
+});
+
+describe('apps: the check route, plugin actors and a broken state file (pi r1 on the store)', () => {
+  it('the check route takes no bearer, verifies the unit token, and checks only the turn in flight', async () => {
+    const t: AppTurnLauncher = { launch: async () => undefined, isActive: async () => true };
+    let turnRun = '';
+    const s = setup({ auth: true, turns: t, verifyUnitToken: async (tok) => (tok === 'unit-ok' ? { runId: turnRun } : tok === 'unit-other' ? { runId: 'apps-other-run' } : null) });
+    await newApp(s, 'escalations', 'human');
+    turnRun = (await s.call('POST', '/apps/escalations/turns', { base: 1, message: 'x' }, 'human')).body['runId'] as string;
+    const head = git(join(s.dir, 'apps', 'escalations'), 'rev-parse', 'refs/heads/main');
+    // No Authorization header at all: the body's unit token is the credential.
+    expect((await s.call('POST', '/apps/check', { token: 'nope', app: 'escalations', commit: head })).status).toBe(401);
+    expect((await s.call('POST', '/apps/check', { token: 'unit-other', app: 'escalations', commit: head })).body).toMatchObject({ code: 'not_this_turn' });
+    expect((await s.call('POST', '/apps/check', { token: 'unit-ok', app: 'nope', commit: head })).status).toBe(404);
+    const ok = await s.call('POST', '/apps/check', { token: 'unit-ok', app: 'escalations', commit: head });
+    expect(ok.status).toBe(200);
+    expect(ok.body).toMatchObject({ ok: true, summary: { level: 'spec' } });
+  });
+
+  it('a plugin actor cannot run an app query', async () => {
+    const s = setup({ auth: true });
+    await newApp(s, 'escalations', 'human');
+    const res = await s.call('POST', '/apps/escalations/query', { version: 1, query: 'q' }, 'plugin');
+    expect(res.status).toBe(403);
+  });
+
+  it('a state file that is not JSON fails the store (the daemon then leaves Apps off)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'apps-store-'));
+    dirs.push(dir);
+    writeFileSync(join(dir, 'daemon-apps.json'), '{"version":1,"apps":');
+    expect(() => new AppStore({ stateFile: join(dir, 'daemon-apps.json'), appsRoot: join(dir, 'apps'), registry: fakeRegistry().registry })).toThrow(SyntaxError);
   });
 });

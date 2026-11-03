@@ -2,22 +2,28 @@
  * Git plumbing for app repos (DES-APPS-001 §4, §9.2): crew reads and writes an app's trees from the
  * canonical repo's OBJECTS, never through a worktree, and runs nothing the repo could configure.
  *
- * An app repo is mounted into agent seats (core `container_floor.rs`), so its `.git` may hold config or
- * hooks an agent wrote. Every call here therefore:
+ * An app repo, `.git` included, is mounted read-write into agent seats (core `container_floor.rs`), so an
+ * agent may have written its config, hooks, refs, replace refs, alternates and even its object files.
+ * Every call here therefore:
  *  - drops the caller's `GIT_*` variables and reads no system or global config;
- *  - overrides every repo-config key that runs a program on the commands used here (`core.hooksPath`,
- *    `core.fsmonitor`; the `reference-transaction` hook runs on `update-ref`), and uses plumbing only
- *    (`cat-file`, `ls-tree`, `hash-object --no-filters`, `mktree`, `commit-tree`, `update-ref`), which runs
- *    no filter, diff driver, pager or editor;
+ *  - pins off every repo-config route to running a program on the commands used here: hooks (the
+ *    `reference-transaction` hook runs on `update-ref`), fsmonitor, maintenance and gc, commit signing,
+ *    every transport (`protocol.allow=never`), and lazy fetching from a promisor remote
+ *    (`GIT_NO_LAZY_FETCH`); and uses plumbing only, which runs no filter, diff driver, pager or editor;
+ *  - ignores replace refs (`GIT_NO_REPLACE_OBJECTS`);
+ *  - VERIFIES every object it reads: the bytes crew parses are hashed (`<type> <size>\0<bytes>`) and must
+ *    be the object id asked for, so an edited object file, an alternate or a replacement can make a read
+ *    fail but never make crew act on bytes other than the ones the id names;
  *  - bounds its output and its time.
  */
 
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdir, rm } from 'node:fs/promises';
 import { devNull } from 'node:os';
 import { join } from 'node:path';
 
-/** A full object id. */
+/** A full object id (SHA-1 repositories only). */
 export const SHA_RE = /^[0-9a-f]{40}$/;
 
 const OUTPUT_CAP = 16 * 1024 * 1024;
@@ -27,20 +33,18 @@ const IDENTITY = { name: 'wicked-crew', email: 'apps@wicked-crew.invalid' };
 export class AppGitError extends Error {
   constructor(
     message: string,
-    readonly code: 'missing' | 'failed' = 'failed',
+    readonly code: 'missing' | 'failed' | 'too_large' | 'corrupt' = 'failed',
   ) {
     super(message);
   }
 }
 
-/** One entry of a recursive `ls-tree -l`. */
+/** One entry of a tree crew read (one level). */
 export interface TreeEntry {
   mode: string;
   type: 'blob' | 'tree' | 'commit';
   sha: string;
-  /** `null` for a tree or a submodule. */
-  size: number | null;
-  path: string;
+  name: string;
 }
 
 function gitEnv(gitDir: string): NodeJS.ProcessEnv {
@@ -50,6 +54,9 @@ function gitEnv(gitDir: string): NodeJS.ProcessEnv {
   env['GIT_CONFIG_NOSYSTEM'] = '1';
   env['GIT_CONFIG_GLOBAL'] = devNull;
   env['GIT_TERMINAL_PROMPT'] = '0';
+  env['GIT_NO_LAZY_FETCH'] = '1';
+  env['GIT_NO_REPLACE_OBJECTS'] = '1';
+  env['GIT_OPTIONAL_LOCKS'] = '0';
   env['GIT_AUTHOR_NAME'] = IDENTITY.name;
   env['GIT_AUTHOR_EMAIL'] = IDENTITY.email;
   env['GIT_COMMITTER_NAME'] = IDENTITY.name;
@@ -58,11 +65,20 @@ function gitEnv(gitDir: string): NodeJS.ProcessEnv {
   return env;
 }
 
-/** Repo-config keys that would run a program, pinned off for every call. */
-const SAFE_CONFIG = ['-c', `core.hooksPath=${devNull}`, '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-c', 'gc.auto=0'];
+/** Repo-config keys that would run a program (or reach a remote), pinned off for every call. */
+const SAFE_CONFIG = [
+  '-c', `core.hooksPath=${devNull}`,
+  '-c', 'core.fsmonitor=false',
+  '-c', 'core.untrackedCache=false',
+  '-c', 'gc.auto=0',
+  '-c', 'maintenance.auto=false',
+  '-c', 'commit.gpgSign=false',
+  '-c', 'protocol.allow=never',
+  '-c', 'core.alternateRefsCommand=',
+];
 
-/** Run git in `gitDir` with `args`; stdout as a Buffer. Rejects on a non-zero exit, a timeout or too much output. */
-export function runGit(gitDir: string, args: string[], input?: Buffer | string, extraEnv: Record<string, string> = {}): Promise<Buffer> {
+/** Run git in `gitDir`; stdout as a Buffer. Rejects on a non-zero exit, a timeout, or more than `cap` bytes. */
+export function runGit(gitDir: string, args: string[], input?: Buffer | string, extraEnv: Record<string, string> = {}, cap = OUTPUT_CAP): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const env = { ...gitEnv(gitDir), ...extraEnv };
     const child = spawn('git', [...SAFE_CONFIG, ...args], { env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
@@ -75,9 +91,10 @@ export function runGit(gitDir: string, args: string[], input?: Buffer | string, 
       child.kill('SIGKILL');
     }, TIMEOUT_MS);
     child.stdout.on('data', (d: Buffer) => {
+      if (failed !== null) return;
       size += d.length;
-      if (size > OUTPUT_CAP) {
-        failed = new AppGitError(`git ${args[0]} answered more than ${OUTPUT_CAP} bytes`);
+      if (size > cap) {
+        failed = new AppGitError(`git ${args[0]} answered more than ${cap} bytes`, 'too_large');
         child.kill('SIGKILL');
         return;
       }
@@ -93,12 +110,35 @@ export function runGit(gitDir: string, args: string[], input?: Buffer | string, 
     child.on('close', (code) => {
       clearTimeout(timer);
       if (failed !== null) return reject(failed);
-      if (code !== 0) return reject(new AppGitError(`git ${args[0]} failed (${code}): ${err.trim().slice(0, 500)}`));
+      if (code !== 0) return reject(new AppGitError(`git ${args[0]} failed (${code}): ${err.trim().slice(0, 500)}`, 'missing'));
       resolve(Buffer.concat(out));
     });
     child.stdin.on('error', () => undefined);
     child.stdin.end(input ?? '');
   });
+}
+
+/** The object id of `bytes` as a git object of `type`. */
+export function objectId(type: 'blob' | 'tree' | 'commit', bytes: Buffer): string {
+  return createHash('sha1').update(`${type} ${bytes.length}\0`).update(bytes).digest('hex');
+}
+
+/** Parse a raw tree object: `<mode> <name>\0<20-byte id>` repeated. */
+function parseTree(raw: Buffer): TreeEntry[] {
+  const out: TreeEntry[] = [];
+  let i = 0;
+  while (i < raw.length) {
+    const sp = raw.indexOf(0x20, i);
+    const nul = raw.indexOf(0x00, sp + 1);
+    if (sp < 0 || nul < 0 || nul + 21 > raw.length) throw new AppGitError('a tree object does not parse', 'corrupt');
+    const mode = raw.subarray(i, sp).toString('latin1');
+    const name = raw.subarray(sp + 1, nul).toString('utf8');
+    const sha = raw.subarray(nul + 1, nul + 21).toString('hex');
+    const type = mode === '40000' ? 'tree' : mode === '160000' ? 'commit' : 'blob';
+    out.push({ mode: mode === '40000' ? '040000' : mode, type, sha, name });
+    i = nul + 21;
+  }
+  return out;
 }
 
 /** One app repo, by its root (the working directory crew registered; `.git` beneath it). */
@@ -109,8 +149,8 @@ export class AppGit {
     this.gitDir = join(root, '.git');
   }
 
-  private git(args: string[], input?: Buffer | string): Promise<Buffer> {
-    return runGit(this.gitDir, args, input);
+  private git(args: string[], input?: Buffer | string, cap?: number): Promise<Buffer> {
+    return runGit(this.gitDir, args, input, {}, cap);
   }
 
   /**
@@ -135,47 +175,52 @@ export class AppGit {
     }
   }
 
-  /** `main`'s commit, or `null` when the ref is missing. */
+  /** `main`'s commit as a direct ref, or `null` when it is missing or not a plain ref to a commit id. */
   async main(): Promise<string | null> {
     try {
-      return (await this.git(['rev-parse', '--verify', '-q', 'refs/heads/main'])).toString('utf8').trim() || null;
+      const out = (await this.git(['for-each-ref', '--format=%(objectname) %(symref)', 'refs/heads/main'])).toString('utf8').trim();
+      const [id, symref] = out.split(' ');
+      return id !== undefined && SHA_RE.test(id) && (symref === undefined || symref === '') ? id : null;
     } catch {
       return null;
     }
   }
 
-  /** Point `main` at `commit` (crew owns `main` of an app repo; its own record says where it is). */
+  /** Point `main` at `commit` as a DIRECT ref (a symbolic `main` is replaced, never followed). */
   async setMain(commit: string): Promise<void> {
-    await this.git(['update-ref', '-m', 'wicked-crew apps', 'refs/heads/main', commit]);
+    await this.git(['update-ref', '--no-deref', '-m', 'wicked-crew apps', 'refs/heads/main', commit]);
   }
 
-  /** A full commit id → its tree, or `null` when the repo holds no such commit. */
+  /** The object `sha` of `type`, its bytes verified against the id (at most `cap` bytes). */
+  async readObject(type: 'blob' | 'tree' | 'commit', sha: string, cap = OUTPUT_CAP): Promise<Buffer> {
+    if (!SHA_RE.test(sha)) throw new AppGitError(`${sha} is not an object id`, 'missing');
+    const bytes = await this.git(['cat-file', type, sha], undefined, cap);
+    if (objectId(type, bytes) !== sha) throw new AppGitError(`object ${sha} does not hash to its id (the repo's object store was changed)`, 'corrupt');
+    return bytes;
+  }
+
+  /** A commit id → its tree, read from the verified commit; `null` when the repo holds no such commit. */
   async treeOf(commit: string): Promise<string | null> {
     if (!SHA_RE.test(commit)) return null;
+    let raw: Buffer;
     try {
-      const type = (await this.git(['cat-file', '-t', commit])).toString('utf8').trim();
-      if (type !== 'commit') return null;
-      return (await this.git(['rev-parse', '--verify', '-q', `${commit}^{tree}`])).toString('utf8').trim();
-    } catch {
+      raw = await this.readObject('commit', commit, 1024 * 1024);
+    } catch (err) {
+      if (err instanceof AppGitError && err.code === 'corrupt') throw err;
       return null;
     }
+    const m = /^tree ([0-9a-f]{40})\n/.exec(raw.toString('latin1'));
+    return m === null ? null : m[1]!;
   }
 
-  /** Every entry under `treeish`, recursively, trees included. */
-  async lsTree(treeish: string): Promise<TreeEntry[]> {
-    const raw = (await this.git(['ls-tree', '-r', '-t', '-l', '-z', '--full-tree', treeish])).toString('utf8');
-    const out: TreeEntry[] = [];
-    for (const rec of raw.split('\0')) {
-      if (rec === '') continue;
-      const tab = rec.indexOf('\t');
-      const [mode, type, sha, size] = rec.slice(0, tab).split(/\s+/) as [string, TreeEntry['type'], string, string];
-      out.push({ mode, type, sha, size: size === '-' ? null : Number(size), path: rec.slice(tab + 1) });
-    }
-    return out;
+  /** A tree's entries (one level), verified. */
+  async readTree(sha: string): Promise<TreeEntry[]> {
+    return parseTree(await this.readObject('tree', sha, 4 * 1024 * 1024));
   }
 
-  async readBlob(sha: string): Promise<Buffer> {
-    return this.git(['cat-file', 'blob', sha]);
+  /** A blob, verified; `AppGitError('too_large')` past `cap` bytes. */
+  async readBlob(sha: string, cap = OUTPUT_CAP): Promise<Buffer> {
+    return this.readObject('blob', sha, cap);
   }
 
   async writeBlob(content: Buffer | string): Promise<string> {
@@ -191,7 +236,7 @@ export class AppGit {
   /** A commit of `tree` on `parent`, dated `at` (unix millis); the message rides stdin, never argv. */
   async commitTree(tree: string, parent: string | null, message: string, at: number): Promise<string> {
     const date = `${Math.floor(at / 1000)} +0000`;
-    const args = ['commit-tree', tree, ...(parent !== null ? ['-p', parent] : [])];
+    const args = ['commit-tree', '--no-gpg-sign', tree, ...(parent !== null ? ['-p', parent] : [])];
     const out = await runGit(this.gitDir, args, message, { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date });
     return out.toString('utf8').trim();
   }

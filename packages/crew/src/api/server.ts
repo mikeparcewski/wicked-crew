@@ -2530,7 +2530,17 @@ export async function createServer(
   // DES-APPS-001 (K2a): an unreadable store file leaves Apps off (said once) rather than failing the boot.
   let appStore: AppStore | null = null;
   try {
-    appStore = new AppStore({ stateFile: join(crewStateHome(), APPS_STATE_FILENAME), appsRoot: defaultAppsRoot(), log: (m) => app.log.warn(m) });
+    appStore = new AppStore({
+      stateFile: join(crewStateHome(), APPS_STATE_FILENAME),
+      appsRoot: defaultAppsRoot(),
+      registry: {
+        register: (name, root) => adapter.registerRepo(name, root),
+        idTaken: async (id) => (await adapter.listRepos()).some((r) => r.id === id),
+      },
+      log: (m) => app.log.warn(m),
+    });
+    // A crash between an app's record and its registration is finished here, off the boot path.
+    void appStore.reconcile();
   } catch (err) {
     app.log.error(`[apps] the app store cannot be read, so Apps is off: ${err instanceof Error ? err.message : String(err)}`);
   }

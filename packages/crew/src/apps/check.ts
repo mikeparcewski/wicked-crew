@@ -19,7 +19,7 @@ import { createHash } from 'node:crypto';
 
 import type { AppAction, AppCheckFinding, AppCheckSummary, AppLock, AppQuery, AppQueryKind, AppSpec } from '../core/types.js';
 import { canonicalJson } from '../mcp/classify.js';
-import type { AppGit, TreeEntry } from './git.js';
+import { AppGitError, type AppGit, type TreeEntry } from './git.js';
 import { APP_SPEC_MAX_BYTES, checkSpec, readSpec } from './spec.js';
 
 export const SPEC_PATH = 'apps.json';
@@ -102,43 +102,76 @@ function checkQueryText(q: AppQuery, text: string | undefined, path: string): Ap
 
 export const queryPath = (q: Pick<AppQuery, 'id' | 'kind'>): string => `${QUERIES_DIR}/${q.id}.${QUERY_EXT[q.kind]}`;
 
+/** Strict UTF-8: malformed bytes are a finding, never silently replaced. */
+const UTF8 = new TextDecoder('utf-8', { fatal: true });
+
+function decodeUtf8(bytes: Buffer): string | null {
+  try {
+    return UTF8.decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+const QUERY_FILE_RE = /^[a-z][a-z0-9_]{0,63}\.(sql|graphql|json)$/;
+
+/** An own value of a record (a query id such as `constructor` is a name, never an inherited member). */
+export const ownText = (r: Record<string, string>, k: string): string | undefined => (Object.hasOwn(r, k) ? r[k] : undefined);
+
 /**
- * Read an app tree from the repo's objects, with the files stage. `lock` is `null` for a candidate an
- * agent offers (crew writes its lock); a tree crew landed always holds one.
+ * Read an app tree from the repo's objects, with the files stage. Every object is verified against its
+ * id (git.ts). `lock` is `null` for a candidate an agent offers (crew writes its lock); a tree crew
+ * landed always holds one.
  */
 export async function readAppTree(
   git: AppGit,
-  treeish: string,
+  tree: string,
 ): Promise<{ ok: true; files: Omit<AppFiles, 'lock'> & { lock: AppLock | null } } | { ok: false; findings: AppCheckFinding[] }> {
-  let entries: TreeEntry[];
-  try {
-    entries = await git.lsTree(treeish);
-  } catch (err) {
-    return { ok: false, findings: [fileFinding('unreadable', '', err instanceof Error ? err.message : String(err))] };
-  }
   const findings: AppCheckFinding[] = [];
   const blobs = new Map<string, TreeEntry>();
-  for (const e of entries) {
-    if (e.type === 'tree' && e.path === QUERIES_DIR) continue;
-    const allowed = e.path === SPEC_PATH || e.path === LOCK_PATH || /^queries\/[a-z][a-z0-9_]{0,63}\.(sql|graphql|json)$/.test(e.path);
-    if (!allowed) {
-      findings.push(fileFinding('unexpected_path', e.path, `${e.path} is outside apps.json, apps.lock.json and queries/`));
-      continue;
+  try {
+    const root = await git.readTree(tree);
+    for (const e of root) {
+      if (e.name === QUERIES_DIR && e.type === 'tree') {
+        for (const q of await git.readTree(e.sha)) {
+          const path = `${QUERIES_DIR}/${q.name}`;
+          if (!QUERY_FILE_RE.test(q.name)) findings.push(fileFinding('unexpected_path', path, `${path} is not a query text file`));
+          else if (q.type !== 'blob' || (q.mode !== '100644' && q.mode !== '100755')) findings.push(fileFinding('not_a_file', path, `${path} is not a regular file (mode ${q.mode})`));
+          else blobs.set(path, q);
+        }
+        continue;
+      }
+      if (e.name !== SPEC_PATH && e.name !== LOCK_PATH) {
+        findings.push(fileFinding('unexpected_path', e.name, `${e.name} is outside apps.json, apps.lock.json and queries/`));
+        continue;
+      }
+      if (e.type !== 'blob' || (e.mode !== '100644' && e.mode !== '100755')) {
+        findings.push(fileFinding('not_a_file', e.name, `${e.name} is not a regular file (mode ${e.mode})`));
+        continue;
+      }
+      blobs.set(e.name, e);
     }
-    if (e.type !== 'blob' || (e.mode !== '100644' && e.mode !== '100755')) {
-      findings.push(fileFinding('not_a_file', e.path, `${e.path} is not a regular file (mode ${e.mode})`));
-      continue;
-    }
-    blobs.set(e.path, e);
+  } catch (err) {
+    return { ok: false, findings: [fileFinding('unreadable', '', err instanceof Error ? err.message : String(err))] };
   }
   const specEntry = blobs.get(SPEC_PATH);
   if (specEntry === undefined) findings.push(fileFinding('missing_spec', SPEC_PATH, 'the tree has no apps.json'));
   if (findings.length > 0 || specEntry === undefined) return { ok: false, findings };
-  if ((specEntry.size ?? 0) > APP_SPEC_MAX_BYTES) return { ok: false, findings: [fileFinding('too_large', SPEC_PATH, `apps.json is over ${APP_SPEC_MAX_BYTES} bytes`)] };
-  const read = readSpec(await git.readBlob(specEntry.sha));
-  if (read.spec === null) return { ok: false, findings: read.findings };
-  const spec = read.spec;
-  const queryText: Record<string, string> = {};
+  /** A blob within `cap` bytes, or a finding. */
+  const read = async (path: string, sha: string, cap: number): Promise<Buffer | AppCheckFinding> => {
+    try {
+      return await git.readBlob(sha, cap);
+    } catch (err) {
+      if (err instanceof AppGitError && err.code === 'too_large') return fileFinding('too_large', path, `${path} is over ${cap} bytes`);
+      return fileFinding('unreadable', path, err instanceof Error ? err.message : String(err));
+    }
+  };
+  const specBlob = await read(SPEC_PATH, specEntry.sha, APP_SPEC_MAX_BYTES);
+  if (!Buffer.isBuffer(specBlob)) return { ok: false, findings: [specBlob] };
+  const parsed = readSpec(specBlob);
+  if (parsed.spec === null) return { ok: false, findings: parsed.findings };
+  const spec = parsed.spec;
+  const queryText: Record<string, string> = Object.create(null) as Record<string, string>;
   const declared = new Set<string>();
   for (const q of spec.queries) {
     const path = queryPath(q);
@@ -148,11 +181,16 @@ export async function readAppTree(
       findings.push(...checkQueryText(q, undefined, path));
       continue;
     }
-    if ((e.size ?? 0) > QUERY_TEXT_MAX_BYTES) {
-      findings.push(fileFinding('too_large', path, `${path} is over ${QUERY_TEXT_MAX_BYTES} bytes`));
+    const bytes = await read(path, e.sha, QUERY_TEXT_MAX_BYTES);
+    if (!Buffer.isBuffer(bytes)) {
+      findings.push(bytes);
       continue;
     }
-    const text = (await git.readBlob(e.sha)).toString('utf8');
+    const text = decodeUtf8(bytes);
+    if (text === null) {
+      findings.push(fileFinding('not_utf8', path, `${path} is not UTF-8`));
+      continue;
+    }
     const f = checkQueryText(q, text, path);
     if (f.length > 0) findings.push(...f);
     else queryText[q.id] = text;
@@ -162,11 +200,14 @@ export async function readAppTree(
   }
   let lock: AppLock | null = null;
   const lockEntry = blobs.get(LOCK_PATH);
-  if (lockEntry !== undefined && (lockEntry.size ?? 0) <= LOCK_MAX_BYTES) {
-    try {
-      lock = JSON.parse((await git.readBlob(lockEntry.sha)).toString('utf8')) as AppLock;
-    } catch {
-      lock = null;
+  if (lockEntry !== undefined) {
+    const bytes = await read(LOCK_PATH, lockEntry.sha, LOCK_MAX_BYTES);
+    if (Buffer.isBuffer(bytes)) {
+      try {
+        lock = JSON.parse(bytes.toString('utf8')) as AppLock;
+      } catch {
+        lock = null;
+      }
     }
   }
   if (findings.length > 0) return { ok: false, findings };
@@ -176,7 +217,7 @@ export async function readAppTree(
 /** The candidate's own file findings: every declared query has its text, within its limits. */
 export function checkCandidateFiles(spec: AppSpec, queryText: Record<string, string>): AppCheckFinding[] {
   const out: AppCheckFinding[] = [];
-  for (const q of spec.queries) out.push(...checkQueryText(q, queryText[q.id], queryPath(q)));
+  for (const q of spec.queries) out.push(...checkQueryText(q, ownText(queryText, q.id), queryPath(q)));
   return out;
 }
 
@@ -187,20 +228,20 @@ export function changedData(spec: AppSpec, queryText: Record<string, string>, ba
   const queries = spec.queries
     .filter((q) => {
       const b = baseQueries.get(q.id);
-      const locked = base?.lock.queries[q.id];
+      const locked = base !== null ? own(base.lock.queries, q.id) : undefined;
       return (
         b === undefined ||
         locked === undefined ||
         canonicalJson(b) !== canonicalJson(q) ||
         locked.source !== q.source ||
-        locked.textHash !== textHash(queryText[q.id] ?? '')
+        locked.textHash !== textHash(ownText(queryText, q.id) ?? '')
       );
     })
     .map((q) => q.id);
   const actions = spec.actions
     .filter((a) => {
       const b = baseActions.get(a.id);
-      const locked = base?.lock.actions[a.id];
+      const locked = base !== null ? own(base.lock.actions, a.id) : undefined;
       return b === undefined || locked === undefined || locked.actionHash !== actionHash(a) || locked.source !== a.source;
     })
     .map((a) => a.id);
@@ -231,8 +272,14 @@ export async function stagedCheck(input: {
       : changedData(spec, queryText, input.base);
   const level: AppCheckSummary['level'] = input.level === 'full' ? 'full' : changed.queries.length + changed.actions.length > 0 ? 'data' : 'spec';
 
+  // The data stage. A source whose pin moved (its descriptor or its upload snapshot) re-checks every
+  // query and action on it, not only the changed ones, before the lock takes the new pin (codex r1 on
+  // the store): a retained contract is never carried onto a connection it was not checked against.
+  const prior = input.base?.lock ?? EMPTY_LOCK;
+  const checkQ = new Set(changed.queries);
+  const checkA = new Set(changed.actions);
   let result: AppSourceStageResult | null = null;
-  if (changed.queries.length + changed.actions.length > 0) {
+  for (let pass = 0; pass < 2 && checkQ.size + checkA.size > 0; pass++) {
     if (input.sourceStage === null) {
       return {
         ok: false,
@@ -242,54 +289,79 @@ export async function stagedCheck(input: {
             stage: 'source',
             code: 'source_check_unavailable',
             path: '$',
-            message: `this daemon cannot run the read policy and the source check yet, so a version holding ${[...changed.queries, ...changed.actions].join(', ')} cannot land`,
+            message: `this daemon cannot run the read policy and the source check yet, so a version holding ${[...checkQ, ...checkA].join(', ')} cannot land`,
           },
         ],
       };
     }
     try {
-      result = await input.sourceStage.check({ app: input.app, spec, queryText, queries: changed.queries, actions: changed.actions });
+      result = await input.sourceStage.check({ app: input.app, spec, queryText, queries: [...checkQ], actions: [...checkA] });
     } catch (err) {
       // A check that could not run is a check that did not pass: nothing lands.
       return { ok: false, code: 'check_failed', findings: [{ stage: 'source', code: 'source_check_error', path: '$', message: `the source check could not run: ${err instanceof Error ? err.message : String(err)}` }] };
     }
     if (result.findings.length > 0) return { ok: false, code: 'check_failed', findings: result.findings.slice(0, 50) };
-    const sourceOf = new Map<string, string>([...spec.queries.map((q) => [q.id, q.source] as const), ...spec.actions.map((a) => [a.id, a.source] as const)]);
+    // Every checked query and action answered, with its own source's pin (queries and actions are
+    // separate namespaces: each is judged by its own declaration).
+    const r = result;
     const missing = [
-      ...changed.queries.filter((id) => typeof result!.queries[id] !== 'string'),
-      ...changed.actions.filter((id) => typeof result!.actions[id] !== 'string'),
-      ...[...changed.queries, ...changed.actions].filter((id) => !Object.hasOwn(result!.sources, sourceOf.get(id)!)),
-    ].filter((id, i, all) => all.indexOf(id) === i);
+      ...spec.queries.filter((q) => checkQ.has(q.id) && (typeof own(r.queries, q.id) !== 'string' || own(r.sources, q.source) === undefined)).map((q) => `query ${q.id}`),
+      ...spec.actions.filter((a) => checkA.has(a.id) && (typeof own(r.actions, a.id) !== 'string' || own(r.sources, a.source) === undefined)).map((a) => `action ${a.id}`),
+    ];
     if (missing.length > 0) {
-      return { ok: false, code: 'check_failed', findings: missing.map((id) => ({ stage: 'source', code: 'source_check_incomplete', path: id, message: `the source check answered nothing for ${id}` })) };
+      return { ok: false, code: 'check_failed', findings: missing.map((what) => ({ stage: 'source', code: 'source_check_incomplete', path: what, message: `the source check answered nothing (or no source pin) for ${what}` })) };
     }
+    const moved = movedSources(prior, r);
+    const extraQ = spec.queries.filter((q) => moved.has(q.source) && !checkQ.has(q.id));
+    const extraA = spec.actions.filter((a) => moved.has(a.source) && !checkA.has(a.id));
+    if (extraQ.length + extraA.length === 0) break;
+    for (const q of extraQ) checkQ.add(q.id);
+    for (const a of extraA) checkA.add(a.id);
+    result = null;
+  }
+  if (result === null && checkQ.size + checkA.size > 0) {
+    return { ok: false, code: 'check_failed', findings: [{ stage: 'source', code: 'source_changed', path: '$', message: 'a source changed again while its queries were being checked; try again' }] };
   }
 
   // The lock: checked entries from the stage, the rest carried from the base lock (crew's own).
-  const prior = input.base?.lock ?? EMPTY_LOCK;
   const lock: AppLock = { schema: 'wicked.apps.lock/v1', sources: {}, queries: {}, actions: {}, uploads: {} };
-  const checkedQ = new Set(changed.queries);
-  const checkedA = new Set(changed.actions);
   const usedSources = new Set<string>();
   for (const q of spec.queries) {
     usedSources.add(q.source);
-    const contractHash = checkedQ.has(q.id) ? result!.queries[q.id]! : prior.queries[q.id]!.contractHash;
-    lock.queries[q.id] = { source: q.source, textHash: textHash(queryText[q.id]!), contractHash };
+    const contractHash = checkQ.has(q.id) ? own(result!.queries, q.id)! : own(prior.queries, q.id)!.contractHash;
+    lock.queries[q.id] = { source: q.source, textHash: textHash(ownText(queryText, q.id)!), contractHash };
   }
   for (const a of spec.actions) {
     usedSources.add(a.source);
-    const contractHash = checkedA.has(a.id) ? result!.actions[a.id]! : prior.actions[a.id]!.contractHash;
+    const contractHash = checkA.has(a.id) ? own(result!.actions, a.id)! : own(prior.actions, a.id)!.contractHash;
     lock.actions[a.id] = { source: a.source, actionHash: actionHash(a), contractHash };
   }
   for (const name of [...usedSources].sort()) {
-    const fresh = result?.sources[name];
-    const kept = prior.sources[name];
-    if (fresh !== undefined) lock.sources[name] = fresh;
-    else if (kept !== undefined) lock.sources[name] = kept;
-    const upload = result?.uploads[name] ?? prior.uploads[name];
+    const pin = (result !== null ? own(result.sources, name) : undefined) ?? own(prior.sources, name);
+    if (pin !== undefined) lock.sources[name] = pin;
+    const upload = (result !== null ? own(result.uploads, name) : undefined) ?? own(prior.uploads, name);
     if (upload !== undefined) lock.uploads[name] = upload;
   }
-  return { ok: true, lock, summary: { level, checked: [...changed.queries, ...changed.actions] } };
+  return { ok: true, lock, summary: { level, checked: [...checkQ, ...checkA] } };
+}
+
+/** An own entry of a record (a name such as `constructor` is never an inherited member). */
+function own<T>(r: Record<string, T>, k: string): T | undefined {
+  return Object.hasOwn(r, k) ? r[k] : undefined;
+}
+
+/** Sources whose pin in `result` differs from the prior lock's (descriptor hash or upload digest). */
+function movedSources(prior: AppLock, result: AppSourceStageResult): Set<string> {
+  const moved = new Set<string>();
+  for (const [name, pin] of Object.entries(result.sources)) {
+    const was = own(prior.sources, name);
+    if (was !== undefined && was.descriptorHash !== pin.descriptorHash) moved.add(name);
+  }
+  for (const [name, up] of Object.entries(result.uploads)) {
+    const was = own(prior.uploads, name);
+    if (was !== undefined && was.digest !== up.digest) moved.add(name);
+  }
+  return moved;
 }
 
 /** The lock's bytes: keys sorted, so the same lock is the same blob. */

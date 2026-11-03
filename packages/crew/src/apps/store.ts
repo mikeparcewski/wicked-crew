@@ -18,7 +18,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
@@ -36,6 +36,7 @@ import type {
   AppSummary,
   AppTurnState,
   AppVersion,
+  RepoEntry,
 } from '../core/types.js';
 import { EMPTY_LOCK, LOCK_PATH, QUERIES_DIR, QUERY_EXT, SPEC_PATH, lockBytes, readAppTree, specBytes, stagedCheck, type AppFiles, type AppSourceStage } from './check.js';
 import { AppGit, SHA_RE } from './git.js';
@@ -43,8 +44,13 @@ import { AppGit, SHA_RE } from './git.js';
 /** The state-home file name (the registered `daemon-` file prefix). */
 export const APPS_STATE_FILENAME = 'daemon-apps.json';
 
-/** App slugs: a path component and a URL segment. `check` and `uploads` are routes, not apps. */
-export const APP_SLUG_RE = /^[a-z][a-z0-9-]{0,47}$/;
+/**
+ * App slugs: a path component, a URL segment, and the app repo's id in crew's repo registry. The registry
+ * keys a repo by the first four kebab words of its name (core `repo.rs` `slug`), so a slug is at most four
+ * words: then the registry id IS the slug, and two apps can never share one. `check` and `uploads` are
+ * routes, not apps.
+ */
+export const APP_SLUG_RE = /^(?=.{1,48}$)[a-z][a-z0-9]*(?:-[a-z0-9]+){0,3}$/;
 export const RESERVED_APP_SLUGS: ReadonlySet<string> = new Set(['check', 'uploads']);
 
 /** The receipts that make a tree part of an app's accepted history (DES §6.4). */
@@ -66,6 +72,8 @@ interface StoredTurn extends AppTurnState {
   launchedBy: Actor;
   /** The commit `POST /apps/check` wrote the lock on; the only tree a review can land. */
   checked: string | null;
+  /** That commit's tree, kept as checked (never re-resolved from the agent-writable repo). */
+  checkedTree?: string | null;
   /** What that check ran. */
   checkedSummary: AppCheckSummary | null;
 }
@@ -93,8 +101,17 @@ interface StateFile {
 
 /** The turn seam: launching an `apps-turn` run, and asking whether one still runs. */
 export interface AppTurnLauncher {
-  launch(input: { app: string; repoId: string; base: number; message: string; about: string[]; actor: Actor }): Promise<string>;
+  /** Launch the run under `runId`, which crew chose and recorded first (a crash between the two leaves a turn crew can check). */
+  launch(input: { runId: string; app: string; repoId: string; base: number; message: string; about: string[]; actor: Actor }): Promise<void>;
   isActive(runId: string): Promise<boolean>;
+}
+
+/** crew's repo registry, as the store needs it. */
+export interface AppRepoRegistry {
+  /** Register the repo at `root` under `name`. */
+  register(name: string, root: string): Promise<RepoEntry>;
+  /** Whether a repo already holds `id` (a registration would replace it). */
+  idTaken(id: string): Promise<boolean>;
 }
 
 export interface AppStoreOptions {
@@ -102,6 +119,8 @@ export interface AppStoreOptions {
   stateFile: string;
   /** Where app repos are made (`~/.wicked/apps`). */
   appsRoot: string;
+  /** Where an app's repo is registered. */
+  registry: AppRepoRegistry;
   /** The source stage, when this daemon has one (the sources slice wires it). */
   sourceStage?: AppSourceStage | null;
   turns?: AppTurnLauncher | null;
@@ -123,10 +142,12 @@ export class AppStore {
   private readonly treeCache = new Map<string, AppFiles>();
   sourceStage: AppSourceStage | null;
   turns: AppTurnLauncher | null;
+  private readonly registry: AppRepoRegistry;
 
   constructor(opts: AppStoreOptions) {
     this.stateFile = opts.stateFile;
     this.appsRoot = opts.appsRoot;
+    this.registry = opts.registry;
     this.now = opts.now ?? Date.now;
     this.log = opts.log ?? (() => undefined);
     this.sourceStage = opts.sourceStage ?? null;
@@ -149,6 +170,22 @@ export class AppStore {
     const tmp = `${this.stateFile}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
     writeFileSync(tmp, `${JSON.stringify(this.state, null, 1)}\n`, 'utf8');
     renameSync(tmp, this.stateFile);
+  }
+
+  /**
+   * Apply `mutate` to `slug`'s record and persist it, or put the record back as it was: memory never holds
+   * a change the file does not (codex r1 on the store: a failed write left a version accepted in memory).
+   */
+  private transact(slug: string, mutate: () => void): void {
+    const before = Object.hasOwn(this.state.apps, slug) ? structuredClone(this.state.apps[slug]!) : undefined;
+    mutate();
+    try {
+      this.persist();
+    } catch (err) {
+      if (before === undefined) delete this.state.apps[slug];
+      else this.state.apps[slug] = before;
+      throw err;
+    }
   }
 
   /** Run `fn` holding `slug`'s lock: one change to an app at a time. */
@@ -218,9 +255,11 @@ export class AppStore {
   async detail(slug: string): Promise<AppDetail> {
     const a = this.app(slug);
     await this.refreshTurn(a);
-    const h = this.head(a);
-    const files = await this.files(a, h.tree);
-    return { ...this.summary(a), spec: files.spec, lock: files.lock, queryText: { ...files.queryText }, versions: a.versions.map((v) => ({ ...v })), history: this.historyOf(a) };
+    // One snapshot: the summary, versions and pointer are taken together with the head whose files are
+    // read, so a landing during the read cannot pair a new base with an old spec (codex r1 on the store).
+    const snap = structuredClone({ summary: this.summary(a), versions: a.versions, history: this.historyOf(a), root: a.root });
+    const files = await this.files({ ...a, root: snap.root }, snap.summary.head.tree);
+    return { ...snap.summary, spec: files.spec, lock: files.lock, queryText: { ...files.queryText }, versions: snap.versions, history: snap.history };
   }
 
   /** The first accepted receipt `tree` holds in this app, or `null`. */
@@ -262,16 +301,20 @@ export class AppStore {
   /** A turn whose run has ended no longer holds the app (a lost end event, a restart). */
   private async refreshTurn(a: StoredApp): Promise<void> {
     if (a.turn === null || this.turns === null) return;
+    const runId = a.turn.runId;
     let active = true;
     try {
-      active = await this.turns.isActive(a.turn.runId);
+      active = await this.turns.isActive(runId);
     } catch (err) {
-      this.log(`[apps] cannot tell whether turn ${a.turn.runId} of ${a.slug} still runs (it keeps the app read-only): ${err instanceof Error ? err.message : String(err)}`);
+      this.log(`[apps] cannot tell whether turn ${runId} of ${a.slug} still runs (it keeps the app read-only): ${err instanceof Error ? err.message : String(err)}`);
     }
-    if (!active) {
-      this.log(`[apps] turn ${a.turn.runId} of ${a.slug} is no longer running; the app is editable again`);
-      a.turn = null;
-      this.persist();
+    // Only the turn that was asked about is cleared: a newer one launched meanwhile stays (codex r1).
+    const current = this.state.apps[a.slug];
+    if (!active && current !== undefined && current.turn?.runId === runId) {
+      this.log(`[apps] turn ${runId} of ${a.slug} is no longer running; the app is editable again`);
+      this.transact(a.slug, () => {
+        current.turn = null;
+      });
     }
   }
 
@@ -304,10 +347,22 @@ export class AppStore {
     return this.withApp(slug, async () => {
       const a = this.app(slug);
       await this.guard(a, input.base, 'a new turn');
-      const runId = await turns.launch({ app: slug, repoId: a.repoId, base: input.base, message: input.message, about: input.about, actor: input.actor });
-      a.turn = { runId, startedAt: this.now(), base: input.base, actor: input.actor.id, launchedBy: input.actor, checked: null, checkedSummary: null };
-      this.persist();
-      return { runId, startedAt: a.turn.startedAt, base: a.turn.base, actor: a.turn.actor };
+      // The turn is recorded under the run id crew chose BEFORE the run starts, so a crash between the two
+      // leaves a turn crew can ask about, never a run with no lock (codex r1 on the store).
+      const runId = `apps-${slug}-${randomBytes(6).toString('hex')}`;
+      const turn: StoredTurn = { runId, startedAt: this.now(), base: input.base, actor: input.actor.id, launchedBy: input.actor, checked: null, checkedTree: null, checkedSummary: null };
+      this.transact(slug, () => {
+        a.turn = turn;
+      });
+      try {
+        await turns.launch({ runId, app: slug, repoId: a.repoId, base: input.base, message: input.message, about: input.about, actor: input.actor });
+      } catch (err) {
+        this.transact(slug, () => {
+          if (a.turn?.runId === runId) a.turn = null;
+        });
+        throw err;
+      }
+      return { runId, startedAt: turn.startedAt, base: turn.base, actor: turn.actor };
     });
   }
 
@@ -316,8 +371,9 @@ export class AppStore {
     await this.withApp(slug, async () => {
       const a = this.app(slug);
       if (a.turn?.runId !== runId) return;
-      a.turn = null;
-      this.persist();
+      this.transact(slug, () => {
+        a.turn = null;
+      });
     });
   }
 
@@ -341,9 +397,12 @@ export class AppStore {
       if (!outcome.ok) return { ok: false, code: outcome.code, findings: outcome.findings };
       const checkedTree = await this.writeTree(git, read.files.spec, read.files.queryText, outcome.lock);
       const commit = await git.commitTree(checkedTree, candidate.toLowerCase(), `apps-check: lock for turn ${runId}`, this.now());
-      a.turn.checked = commit;
-      a.turn.checkedSummary = outcome.summary;
-      this.persist();
+      const t = a.turn;
+      this.transact(slug, () => {
+        t.checked = commit;
+        t.checkedTree = checkedTree;
+        t.checkedSummary = outcome.summary;
+      });
       return { ok: true, commit, tree: checkedTree, summary: outcome.summary };
     });
   }
@@ -366,7 +425,8 @@ export class AppStore {
       }
       await this.guard(a, t.base, 'the turn', { turnRun: t.runId });
       const git = this.git(a);
-      const tree = (await git.treeOf(t.checked))!;
+      const tree = t.checkedTree ?? null;
+      if (tree === null) throw new AppStoreError(409, 'not_checked', 'this turn has no checked tree');
       const at = this.now();
       const version = a.versions.length + 1;
       const receipt: AppReceipt = { kind: 'reviewed', tree, version, at, actor: t.launchedBy, review: { runId: t.runId, builder: input.builder, reviewer: input.reviewer } };
@@ -374,33 +434,61 @@ export class AppStore {
       // commits stay on the run's branch).
       const commit = await git.commitTree(tree, this.head(a).commit, `v${version}: ${input.summary}`, at);
       const check: AppCheckSummary = t.checkedSummary ?? { level: 'data', checked: [] };
-      const landed = this.record(a, { commit, tree, at, author: { kind: 'seat', id: input.builder }, receipt, summary: input.summary, check, base: t.base });
-      a.turn = null;
-      this.pushHistory(a, landed.version);
-      this.persist();
+      let landed: AppVersion | null = null;
+      this.transact(slug, () => {
+        landed = this.record(a, { commit, tree, at, author: { kind: 'seat', id: input.builder }, receipt, summary: input.summary, check, base: t.base });
+        a.turn = null;
+        this.pushHistory(a, landed.version);
+      });
       await git.setMain(commit);
-      return landed;
+      return landed!;
     });
   }
 
   // ── Creating an app ─────────────────────────────────────────────────────────────────────────────
 
-  /** The first free `<slug>`, `<slug>-2`, `<slug>-3`, … (neither an app nor a directory under the root). */
-  suggest(slug: string): string {
-    const free = (s: string): boolean => !this.has(s) && !RESERVED_APP_SLUGS.has(s) && !existsSync(join(this.appsRoot, s));
-    if (free(slug)) return slug;
-    const stem = slug.replace(/-\d+$/, '').slice(0, 44);
-    for (let i = 2; i < 1000; i++) if (free(`${stem}-${i}`)) return `${stem}-${i}`;
-    return `${stem}-${randomBytes(2).toString('hex')}`;
+  /** Whether anything (a file, a directory, a dangling link) holds `name` under the apps root. */
+  private pathTaken(name: string): boolean {
+    try {
+      lstatSync(join(this.appsRoot, name));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async free(slug: string): Promise<boolean> {
+    return APP_SLUG_RE.test(slug) && !RESERVED_APP_SLUGS.has(slug) && !this.has(slug) && !this.pathTaken(slug) && !(await this.registry.idTaken(slug));
+  }
+
+  /**
+   * A free slug like `slug`: `<slug>-2`, `-3`, … while it has fewer than four words, else its last word
+   * numbered (`a-b-c-d2`), always a valid slug that is neither an app, a path under the root, nor a
+   * registered repo id.
+   */
+  async suggest(slug: string): Promise<string> {
+    const words = slug.split('-');
+    const stem = (suffix: string): string => {
+      if (words.length < 4) return `${slug.slice(0, 48 - suffix.length - 1)}-${suffix}`;
+      const head = words.slice(0, 3).join('-');
+      return `${head}-${words[3]!.slice(0, Math.max(1, 48 - head.length - 1 - suffix.length))}${suffix}`;
+    };
+    for (let i = 2; i < 100; i++) {
+      const c = stem(String(i));
+      if (await this.free(c)) return c;
+    }
+    for (let i = 0; i < 20; i++) {
+      const c = stem(randomBytes(3).toString('hex'));
+      if (await this.free(c)) return c;
+    }
+    throw new AppStoreError(409, 'slug_taken', `${slug} is taken and no free name like it was found`);
   }
 
   /** The slug rules a new app or a new empty repo meets; throws the refusal. */
-  assertNewSlug(slug: string): void {
-    if (!APP_SLUG_RE.test(slug)) throw new AppStoreError(400, 'bad_request', 'an app slug is 1-48 of a-z 0-9 -, starting with a letter');
-    if (RESERVED_APP_SLUGS.has(slug)) throw new AppStoreError(422, 'reserved_slug', `${slug} is reserved`, { suggestion: this.suggest(`${slug}-app`) });
-    if (this.has(slug) || existsSync(join(this.appsRoot, slug))) {
-      throw new AppStoreError(409, 'slug_taken', `${slug} is taken`, { suggestion: this.suggest(slug) });
-    }
+  async assertNewSlug(slug: string): Promise<void> {
+    if (!APP_SLUG_RE.test(slug)) throw new AppStoreError(400, 'bad_request', 'an app slug is 1-48 of a-z 0-9 in at most four words joined by -, starting with a letter');
+    if (RESERVED_APP_SLUGS.has(slug)) throw new AppStoreError(422, 'reserved_slug', `${slug} is reserved`, { suggestion: await this.suggest(`${slug}-app`) });
+    if (!(await this.free(slug))) throw new AppStoreError(409, 'slug_taken', `${slug} is taken`, { suggestion: await this.suggest(slug) });
   }
 
   /** A new empty repo at `<apps root>/<slug>` (the `POST /repos {create: true}` path). */
@@ -410,43 +498,85 @@ export class AppStore {
       const { commit } = await AppGit.createEmpty(root);
       return { root, commit };
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'EEXIST') throw new AppStoreError(409, 'slug_taken', `${slug} is taken`, { suggestion: this.suggest(slug) });
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') throw new AppStoreError(409, 'slug_taken', `${slug} is taken`, { suggestion: await this.suggest(slug) });
       throw err;
     }
   }
 
-  /**
-   * A new app: the empty repo, registered (`register` answers the repo id), and crew's first version — one
-   * empty page. It holds a `you` receipt only when a human made it (an agent-kind caller may add an app,
-   * never accept a tree).
-   */
-  async create(input: { slug: string; name: string; projectId: string; actor: Actor; register: (name: string, root: string) => Promise<string> }): Promise<AppDetail> {
-    const { slug } = input;
+  /** `POST /repos {create: true}`: a new empty repo, registered (its id is the slug); no app record. */
+  async createRepo(slug: string): Promise<{ root: string; repo: RepoEntry }> {
     return this.withApp(slug, async () => {
-      this.assertNewSlug(slug);
-      const { root, commit: empty } = await this.createEmptyRepo(slug);
-      let repoId: string;
+      await this.assertNewSlug(slug);
+      const { root } = await this.createEmptyRepo(slug);
       try {
-        repoId = await input.register(slug, root);
+        return { root, repo: await this.registry.register(slug, root) };
       } catch (err) {
         await rm(root, { recursive: true, force: true }).catch(() => undefined);
         throw err;
       }
+    });
+  }
+
+  /**
+   * A new app: the empty repo and crew's first version (one empty page) are made first, then the record
+   * is written, then the repo is registered: a failure at any step leaves nothing behind that blocks a
+   * retry, and a crash after the record leaves an app whose registration {@link reconcile} finishes. The
+   * first version holds a `you` receipt only when a human made it (an agent-kind caller may add an app,
+   * never accept a tree).
+   */
+  async create(input: { slug: string; name: string; projectId: string; actor: Actor }): Promise<AppDetail> {
+    const { slug } = input;
+    return this.withApp(slug, async () => {
+      await this.assertNewSlug(slug);
+      const { root, commit: empty } = await this.createEmptyRepo(slug);
       const at = this.now();
-      const a: StoredApp = { slug, name: input.name, projectId: input.projectId, repoId, root, createdAt: at, baseCommit: empty, versions: [], receipts: {}, history: { states: [], pointer: -1 }, turn: null };
-      const spec: AppSpec = { schema: 'wicked.apps/v1', name: input.name, pages: [{ id: 'page-1', title: 'Page 1', components: [] }], queries: [], actions: [], linkHosts: [] };
-      const git = this.git(a);
-      const tree = await this.writeTree(git, spec, {}, EMPTY_LOCK);
-      const commit = await git.commitTree(tree, empty, 'v1: a new app', at);
+      const a: StoredApp = { slug, name: input.name, projectId: input.projectId, repoId: '', root, createdAt: at, baseCommit: empty, versions: [], receipts: {}, history: { states: [], pointer: -1 }, turn: null };
       const human = input.actor.kind === 'human';
-      const receipt: AppReceipt | null = human ? { kind: 'you', tree, version: 1, at, actor: input.actor } : null;
-      this.state.apps[slug] = a;
-      this.record(a, { commit, tree, at, author: { kind: 'crew', id: 'wicked-crew' }, receipt, summary: 'A new app', check: { level: 'spec', checked: [] }, base: null });
-      if (human) this.pushHistory(a, 1);
-      this.persist();
-      await git.setMain(commit);
+      try {
+        const spec: AppSpec = { schema: 'wicked.apps/v1', name: input.name, pages: [{ id: 'page-1', title: 'Page 1', components: [] }], queries: [], actions: [], linkHosts: [] };
+        const git = this.git(a);
+        const tree = await this.writeTree(git, spec, {}, EMPTY_LOCK);
+        const commit = await git.commitTree(tree, empty, 'v1: a new app', at);
+        await git.setMain(commit);
+        const receipt: AppReceipt | null = human ? { kind: 'you', tree, version: 1, at, actor: input.actor } : null;
+        this.transact(slug, () => {
+          this.state.apps[slug] = a;
+          this.record(a, { commit, tree, at, author: { kind: 'crew', id: 'wicked-crew' }, receipt, summary: 'A new app', check: { level: 'spec', checked: [] }, base: null });
+          if (human) this.pushHistory(a, 1);
+        });
+      } catch (err) {
+        await rm(root, { recursive: true, force: true }).catch(() => undefined);
+        throw err;
+      }
+      await this.registerApp(slug);
       return this.detail(slug);
     });
+  }
+
+  /** Register an app whose record has no repo id yet; on a refusal, the app and its repo are removed. */
+  private async registerApp(slug: string): Promise<void> {
+    const a = this.app(slug);
+    let repoId: string;
+    try {
+      repoId = (await this.registry.register(slug, a.root)).id;
+    } catch (err) {
+      this.transact(slug, () => {
+        delete this.state.apps[slug];
+      });
+      await rm(a.root, { recursive: true, force: true }).catch(() => undefined);
+      throw err;
+    }
+    this.transact(slug, () => {
+      a.repoId = repoId;
+    });
+  }
+
+  /** At boot: finish the registration of any app a crash left unregistered. */
+  async reconcile(): Promise<void> {
+    for (const slug of Object.keys(this.state.apps)) {
+      if (this.state.apps[slug]!.repoId !== '') continue;
+      await this.withApp(slug, () => this.registerApp(slug)).catch((err: unknown) => this.log(`[apps] ${slug} could not be registered: ${err instanceof Error ? err.message : String(err)}`));
+    }
   }
 
   // ── Changes a person makes (human-only routes) ──────────────────────────────────────────────────
@@ -498,11 +628,13 @@ export class AppStore {
     const at = this.now();
     const version = a.versions.length + 1;
     const commit = await git.commitTree(tree, h.commit, `v${version}: ${opts.summary}`, at);
-    const landed = this.record(a, { commit, tree, at, author: humanAuthor(opts.actor), receipt: opts.receipt(version, tree, at), summary: opts.summary, check: outcome.summary, base: h.version });
-    opts.history(version);
-    this.persist();
+    let landed: AppVersion | null = null;
+    this.transact(a.slug, () => {
+      landed = this.record(a, { commit, tree, at, author: humanAuthor(opts.actor), receipt: opts.receipt(version, tree, at), summary: opts.summary, check: outcome.summary, base: h.version });
+      opts.history(version);
+    });
     await git.setMain(commit);
-    return landed;
+    return landed!;
   }
 
   /** `POST /apps/:app/edits`: one `you` version from one edit burst. */

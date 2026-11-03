@@ -39,7 +39,12 @@ function routes(withStore = true) {
     ping: vi.fn(async () => 'ok'),
     projectMemberAttach: vi.fn(),
   };
-  const store = new AppStore({ stateFile: join(dir, 'daemon-apps.json'), appsRoot: join(dir, 'apps') });
+  const store = new AppStore({
+    stateFile: join(dir, 'daemon-apps.json'),
+    appsRoot: join(dir, 'apps'),
+    // The daemon's wiring (server.ts): the registry is the adapter's.
+    registry: { register: (name, root) => adapter.registerRepo(name, root), idTaken: async (id) => repos.some((r) => r.id === id) },
+  });
   const app = Fastify({ logger: false });
   registerRoutes(
     app,

@@ -14830,7 +14830,11 @@ export interface AppTurnState {
 
 /** `GET /apps` item. */
 export interface AppSummary {
-  /** `^[a-z][a-z0-9-]{0,47}$`; `check` and `uploads` are reserved. */
+  /**
+   * 1-48 characters, at most four words of `a-z 0-9` joined by `-`, starting with a letter
+   * (`^[a-z][a-z0-9]*(-[a-z0-9]+){0,3}$`): the app repo's id in crew's repo registry is the slug itself.
+   * `check` and `uploads` are reserved.
+   */
   slug: string;
   name: string;
   projectId: string;
@@ -14879,9 +14883,9 @@ export interface AppDetailResponse {
 export type AppEditOp = { op: 'spec'; spec: AppSpec } | { op: 'query-text'; query: string; text: string };
 
 /**
- * `POST /apps/:app/edits` (HUMAN operator only): one `you` version from one edit burst (1-50 ops). `base`
- * is the head version the edit was made on: a stale one is `409 stale_base`, and while a turn runs every
- * edit is `409 turn_in_flight`.
+ * `POST /apps/:app/edits` (HUMAN operator only): one `you` version from one edit burst (1-50 ops; the JSON
+ * body is at most 12 MB, which holds a whole spec and 50 query texts). `base` is the head version the edit
+ * was made on: a stale one is `409 stale_base`, and while a turn runs every edit is `409 turn_in_flight`.
  */
 export interface AppEditsBody {
   base: number;
@@ -15026,8 +15030,9 @@ export interface AppsCapabilities {
  * `POST /repos` body. `create: true` (api-types 0.172.0, DES-APPS-001): crew makes `<apps root>/<name>`
  * (`~/.wicked/apps` by default), runs `git init` with one empty commit and registers it; no onboarding
  * run starts (`onboardRunId: null`), and `rootPath`/`gitUrl` are refused beside it. With `create`, `name` is
- * an app slug (`^[a-z][a-z0-9-]{0,47}$`, not `check` or `uploads`: `422 reserved_slug`). A taken name is
- * `409 slug_taken` with a `suggestion`.
+ * an app slug ({@link AppSummary.slug}; `check` and `uploads` are `422 reserved_slug`). A name that is
+ * taken (an app, a path under the apps root, or a registered repo id) is `409 slug_taken` with a
+ * `suggestion`.
  */
 export interface RegisterRepoBody {
   name: string;

@@ -10,7 +10,7 @@
  *  - actions (prepare, run, records, grant, revoke) and publish (HUMAN operator): `501` after the human check.
  *  - `POST /apps/:app/turns` (operator): launch an `apps-turn` run and hold the app (`501` while this daemon
  *    has no launcher).
- *  - `POST /apps/check {token, app, tree}`: the `apps_check` Tool's route, authenticated by the unit's
+ *  - `POST /apps/check {token, app, commit}`: the `apps_check` Tool's route, authenticated by the unit's
  *    capability token (bearer-exempt like `/mcp/call`); `503` while the engine cannot verify one.
  *
  * Human-only means an actor of kind `human` at operator trust or above (the editors routes' rule): an
@@ -31,14 +31,15 @@ import { QUERY_TEXT_MAX_BYTES } from './check.js';
 
 const V = '/api/v1';
 
-/** A spec may carry images: the edit body is allowed past Fastify's 1 MB default (2 MB spec + query texts). */
-const EDIT_BODY_LIMIT = 4 * 1024 * 1024;
+/**
+ * An edit body holds a whole spec (2 MB) and up to 50 query texts (64 KB each): 12 MB covers every edit the
+ * contract allows, JSON escaping included, and is published on `AppEditsBody` (codex r1 on the store).
+ */
+const EDIT_BODY_LIMIT = 12 * 1024 * 1024;
 
 export interface AppRoutesDeps {
   store: AppStore;
   audit: Pick<AuditLog, 'record'>;
-  /** Registers an app's repo in crew's repo registry; answers its id. */
-  registerRepo: (name: string, root: string) => Promise<string>;
   /** Whether a project exists; absent = not checked (an engine without projects). */
   projectExists?: (id: string) => Promise<boolean>;
   /**
@@ -78,7 +79,8 @@ const version = z.union([z.number().int().min(1), z.string().regex(/^[0-9a-fA-F]
 export const AppRestoreSchema = z.object({ base, version }).strict();
 export const AppQuerySchema = z.object({ version, query: z.string().regex(APP_NAMED_ID_RE), params: z.record(z.unknown()).optional() }).strict();
 export const AppTurnSchema = z.object({ base, message: z.string().min(1).max(8000), about: z.array(z.string().min(1).max(64)).max(20).optional() }).strict();
-const CheckSchema = z.object({ token: z.string().min(1).max(4096), app: slugParam, tree: z.string().regex(/^[0-9a-fA-F]{40}$/), manifest: z.unknown().optional() }).strict();
+/** `commit`: the builder's candidate COMMIT in the app repo (crew reads its tree and writes the lock on it). */
+const CheckSchema = z.object({ token: z.string().min(1).max(4096), app: slugParam, commit: z.string().regex(/^[0-9a-fA-F]{40}$/), manifest: z.unknown().optional() }).strict();
 
 export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): void {
   const { store } = deps;
@@ -111,11 +113,11 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
     if (!parsed.success) return badRequest(reply, parsed.error);
     const { slug, projectId } = parsed.data;
     try {
-      store.assertNewSlug(slug);
+      await store.assertNewSlug(slug);
       if (deps.projectExists !== undefined && !(await deps.projectExists(projectId))) {
         return refuse(reply, 404, { code: 'unknown_project', error: `no project ${JSON.stringify(projectId)}` });
       }
-      const detail = await store.create({ slug, name: parsed.data.name ?? slug, projectId, actor: actorOf(req), register: deps.registerRepo });
+      const detail = await store.create({ slug, name: parsed.data.name ?? slug, projectId, actor: actorOf(req) });
       deps.audit.record('apps.app.created', actorOf(req), { detail: { app: slug, projectId, repoId: detail.repoId, receipt: detail.head.receipt } });
       return reply.code(201).send({ app: detail });
     } catch (err) {
@@ -268,19 +270,23 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
 
   // WORKER-FACING (bearer-exempt, `isUnitTokenRoute`): the capability token in the body is the credential,
   // verified on every call. Nothing here reads `req.actor`.
-  app.post(`${V}/apps/check`, { config: { manifest: { statusCodes: [200, 400, 401, 404, 409, 503] } } }, async (req, reply) => {
+  app.post(
+    `${V}/apps/check`,
+    { config: { manifest: { requestType: '{ token: string; app: string; commit: string; manifest?: unknown }', responseType: '{ ok: boolean; commit?: string; tree?: string; findings?: AppCheckFinding[] }', statusCodes: [200, 400, 401, 404, 409, 503] } } },
+    async (req, reply) => {
     if (deps.verifyUnitToken === undefined) {
       return refuse(reply, 503, { code: 'apps_unavailable', error: "this engine cannot verify a unit's token for apps_check yet; nothing was checked" });
     }
     const parsed = CheckSchema.safeParse(req.body);
-    if (!parsed.success) return refuse(reply, 400, { code: 'bad_request', error: 'body must be { token, app, tree }' });
+    if (!parsed.success) return refuse(reply, 400, { code: 'bad_request', error: 'body must be { token, app, commit }' });
     const unit = await deps.verifyUnitToken(parsed.data.token);
     if (unit === null) return reply.code(401).send({ code: 'invalid_token', error: 'the unit token is not valid' });
     if (!store.has(parsed.data.app)) return refuse(reply, 404, { code: 'unknown_app', error: `no app ${parsed.data.app}` });
     try {
-      return await store.checkTurn(parsed.data.app, unit.runId, parsed.data.tree);
+      return await store.checkTurn(parsed.data.app, unit.runId, parsed.data.commit);
     } catch (err) {
       return fail(reply, err);
     }
-  });
+    },
+  );
 }

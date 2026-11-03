@@ -195,8 +195,8 @@
     {
       "method": "POST",
       "path": "/api/v1/apps/check",
-      "requestType": null,
-      "responseType": null,
+      "requestType": "{ token: string; app: string; commit: string; manifest?: unknown }",
+      "responseType": "{ ok: boolean; commit?: string; tree?: string; findings?: AppCheckFinding[] }",
       "statusCodes": [
         200,
         400,
