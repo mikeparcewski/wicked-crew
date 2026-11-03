@@ -194,6 +194,11 @@ describe('apps.json: the shape', () => {
       JSON.stringify(escalations()).replace('"properties":{"ticket"', '"properties":{"__proto__":{"type":"string"},"ticket"'),
     ) as unknown;
     expect(codes(proto)).toEqual(['bad_key@$.actions[0].params.properties.__proto__']);
+    // …anywhere, inside a list too; and an object with too many keys is refused like a long list.
+    const inList = JSON.parse(JSON.stringify(escalations()).replace('"linkHosts":[', '"linkHosts":[{"__proto__":1},')) as unknown;
+    expect(codes(inList)).toEqual(['bad_key@$.linkHosts[0].__proto__']);
+    const wide = { ...escalations(), theme: Object.fromEntries(Array.from({ length: 300 }, (_, i) => [`k${i}`, 1])) };
+    expect(codes(wide)).toEqual(['too_complex@$.theme']);
   });
 
   it('refuses a binding that is not filter/form/row/url, and a regular-expression parameter', () => {
@@ -320,23 +325,84 @@ describe('apps.json: the consistency check', () => {
     expect(codes(d)).toEqual([]);
   });
 
-  it('holds defaults, enum values and bounds to their declaration', () => {
+  it('holds each default and enum value to the whole declaration, one rule at a time (codex r2)', () => {
+    const one = (decl: Record<string, unknown>): string[] => {
+      const s = escalations();
+      s.queries[0]!.params = { type: 'object', properties: { p: decl as never } };
+      return codes(s);
+    };
+    const at = '$.queries[0].params.properties.p';
+    expect(one({ type: 'number', default: 'wrong' })).toEqual([`bad_param@${at}.default`]);
+    expect(one({ type: 'integer', default: 1.5 })).toEqual([`bad_param@${at}.default`]);
+    expect(one({ type: 'integer', minimum: 10, enum: [1, 12] })).toEqual([`bad_param@${at}.enum[0]`]);
+    expect(one({ type: 'string', maxLength: 3, enum: ['abcd'] })).toEqual([`bad_param@${at}.enum[0]`]);
+    expect(one({ type: 'string', format: 'uuid', default: 'not-a-uuid' })).toEqual([`bad_param@${at}.default`]);
+    // A date is a real calendar date; a date-time is RFC 3339 with seconds.
+    for (const bad of ['2026-99-99', '2026-02-30', '2025-02-29']) expect(one({ type: 'string', format: 'date', default: bad }), bad).toEqual([`bad_param@${at}.default`]);
+    expect(one({ type: 'string', format: 'date', default: '2024-02-29' })).toEqual([]);
+    for (const bad of ['2026-99-99T99:99Z', '2026-01-01T10:00Z', '2026-01-01T24:00:00Z', '2026-01-01T10:00:00+25:00']) {
+      expect(one({ type: 'string', format: 'date-time', default: bad }), bad).toEqual([`bad_param@${at}.default`]);
+    }
+    expect(one({ type: 'string', format: 'date-time', default: '2026-11-03T08:05:00.123+01:00' })).toEqual([]);
+    // Bounds in order, and constraints on their own type only.
+    expect(one({ type: 'integer', minimum: 10, maximum: 1 })).toEqual([`bad_param@${at}`]);
+    expect(one({ type: 'string', minLength: 5, maxLength: 2 })).toEqual([`bad_param@${at}`]);
+    expect(one({ type: 'number', format: 'date' })).toEqual([`bad_param@${at}`]);
+    expect(one({ type: 'string', minimum: 1 })).toEqual([`bad_param@${at}`]);
+    // An array takes neither enum nor default (JSON Schema would read them as whole-array values).
+    expect(one({ type: 'array', items: { type: 'integer' }, enum: [1, 2] })).toEqual([`bad_param@${at}.enum`]);
+    expect(one({ type: 'array', items: { type: 'string' }, default: 'x' })).toEqual([`bad_param@${at}.default`]);
+  });
+
+  it('lists a required parameter once', () => {
     const s = escalations();
-    const props = s.queries[1]!.params!.properties;
-    props['region'] = { type: 'number', default: 'wrong' as unknown as number };
-    props['n'] = { type: 'integer', minimum: 10, maximum: 1, enum: [1.5] };
-    props['since'] = { type: 'string', format: 'date', default: 'yesterday', minLength: 5, maxLength: 2 };
-    props['tags'] = { type: 'array', items: { type: 'string' }, default: 'x' };
-    expect(codes(s).sort()).toEqual(
-      [
-        'bad_param@$.queries[1].params.properties.region.default',
-        'bad_param@$.queries[1].params.properties.n',
-        'bad_param@$.queries[1].params.properties.n.enum[0]',
-        'bad_param@$.queries[1].params.properties.since',
-        'bad_param@$.queries[1].params.properties.since.default',
-        'bad_param@$.queries[1].params.properties.tags.default',
-      ].sort(),
-    );
+    s.queries[1]!.params!.required = ['since', 'since'];
+    expect(codes(s)).toEqual(['bad_param@$.queries[1].params.required']);
+  });
+
+  it('takes a row write key only from required parameters, and an insert sets its key from them (codex r2)', () => {
+    const optional = escalations();
+    (optional.actions[0] as { params: { required?: string[] } }).params.required = [];
+    expect(codes(optional)).toEqual(['bad_row_write@$.actions[0].key.id']);
+    const insert = escalations();
+    const w = insert.actions[0] as { op: string; set: Record<string, unknown> };
+    w.op = 'insert';
+    w.set['id'] = { kind: 'literal', value: 7 };
+    expect(codes(insert)).toEqual(['bad_row_write@$.actions[0].set.id']);
+    w.set['id'] = { kind: 'param', name: 'ticket' };
+    expect(codes(insert)).toEqual([]);
+    delete w.set['id'];
+    expect(codes(insert)).toEqual(['bad_row_write@$.actions[0].set.id']);
+  });
+
+  it('formats a currency only with its code', () => {
+    const s = escalations();
+    (s.pages[0]!.components[2] as { format: unknown }).format = { kind: 'currency' };
+    expect(codes(s)[0]).toMatch(/^schema@\$\.pages\[0\]\.components\[2\]\.format/);
+    (s.pages[0]!.components[2] as { format: unknown }).format = { kind: 'currency', currency: 'EUR', decimals: 2 };
+    expect(codes(s)).toEqual([]);
+    (s.pages[0]!.components[2] as { format: unknown }).format = { kind: 'number', currency: 'EUR' };
+    expect(codes(s)[0]).toMatch(/^schema@/);
+  });
+
+  it('accepts the largest legal shapes inside 2 MB (codex r2: 3 pages of 90 tables of 200 columns)', () => {
+    const s = escalations();
+    const cols = Array.from({ length: 200 }, (_, i) => ({ name: `c${i}`, type: 'string' as const }));
+    s.queries.push({ id: 'wide', source: 'support-pg', kind: 'sql', output: cols });
+    s.pages = Array.from({ length: 3 }, (_, p) => ({
+      id: `p${p}`,
+      title: `P${p}`,
+      components: Array.from({ length: 90 }, (_, t) => ({
+        id: `t${p}-${t}`,
+        type: 'table' as const,
+        box: { x: 0, y: t, w: 12, h: 1 },
+        data: { query: 'wide' },
+        columns: cols.map((c) => ({ column: c.name })),
+      })),
+    }));
+    const bytes = JSON.stringify(s);
+    expect(bytes.length).toBeLessThan(2 * 1024 * 1024);
+    expect(readSpec(bytes).findings).toEqual([]);
   });
 
   it('keeps refresh on events and the crew kind to the built-in crew source', () => {

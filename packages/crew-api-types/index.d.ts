@@ -14346,6 +14346,9 @@ export type AppSpecSchemaId = 'wicked.apps/v1';
  * only) and are unique among queries and among actions. crew refuses an unknown key anywhere in the
  * document, so a field a newer studio writes reaches an older daemon as a refused edit, never as a
  * silently dropped one.
+ *
+ * The whole document is at most 2 MB of JSON, nests at most 16 deep, holds no list longer than 1,000 and
+ * no object with more than 256 keys, and never uses the key `__proto__`.
  */
 export interface AppSpec {
   schema: AppSpecSchemaId;
@@ -14446,12 +14449,10 @@ export interface AppActionBinding {
   params?: Record<string, AppBindingRef>;
 }
 
-/** How a value is shown. `currency` is an ISO 4217 code; `decimals` is 0-10. */
-export interface AppFormat {
-  kind: 'text' | 'number' | 'percent' | 'currency' | 'date' | 'datetime' | 'duration';
-  decimals?: number;
-  currency?: string;
-}
+/** How a value is shown. `decimals` is 0-10; a currency names its ISO 4217 code. */
+export type AppFormat =
+  | { kind: 'currency'; currency: string; decimals?: number }
+  | { kind: 'text' | 'number' | 'percent' | 'date' | 'datetime' | 'duration'; decimals?: number };
 
 export interface AppTableColumn {
   /** A declared output column of the table's query. */
@@ -14508,6 +14509,7 @@ export interface AppTextComponent extends AppComponentBase {
   style?: 'heading' | 'body' | 'caption';
 }
 
+/** `value` and `label` are at most 200 characters each. */
 export interface AppFilterOption {
   value: string;
   label?: string;
@@ -14552,8 +14554,9 @@ export interface AppButtonComponent extends AppComponentBase {
 }
 
 /**
- * An image carried in the spec: `src` is a `data:image/(png|jpeg|gif|webp);base64,…` URI of at most
- * 256 KB. No network images (the frame's CSP has none) and no SVG.
+ * An image carried in the spec: `src` is a `data:image/(png|jpeg|gif|webp);base64,…` URI whose DECODED
+ * payload is at most 256 KB (262,144 bytes; the URI itself is about a third longer); `alt` is at most
+ * 300 characters. No network images (the frame's CSP has none) and no SVG.
  */
 export interface AppImageComponent extends AppComponentBase {
   type: 'image';
@@ -14591,10 +14594,15 @@ export type AppRefresh = { mode: 'load' } | { mode: 'every'; seconds: number } |
 
 /**
  * One parameter, a JSON Schema subset (no `pattern`: an agent-written regular expression would run on
- * the server). `from` makes it VIEWER-BOUND: the server fills it from verified claims and refuses a
- * client value for it, and no component may bind it. A `default` must itself satisfy the declaration
- * (and an array has none); bounds are not reversed. A REQUIRED parameter with neither `from` nor a
- * `default` must be bound at every component that uses its query or action.
+ * the server). Names match `^[A-Za-z_][A-Za-z0-9_]{0,63}$`. `from` makes it VIEWER-BOUND: the server fills
+ * it from verified claims and refuses a client value for it, and no component may bind it.
+ *
+ * Constraints apply to their type only: `format`, `minLength` and `maxLength` to strings, `minimum` and
+ * `maximum` to numbers and integers; an `array` takes neither `enum` nor `default`. Bounds are not
+ * reversed. A `default` and every `enum` value satisfy the whole declaration (a `date` is a real calendar
+ * date, a `date-time` is RFC 3339 with seconds); strings in a `default` or an `enum` are at most 1,000 and
+ * 200 characters. A REQUIRED parameter with neither `from` nor a `default` must be bound at every
+ * component that uses its query or action.
  */
 export interface AppParamSchema {
   type: 'string' | 'number' | 'integer' | 'boolean' | 'array';
@@ -14640,7 +14648,7 @@ export interface AppQuery {
   public?: boolean;
 }
 
-/** A value an action sends: a parameter, a literal fixed by the app, a viewer claim, or crew's `now` or new uuid. */
+/** A value an action sends: a parameter, a literal fixed by the app (a string of at most 1,000 characters), a viewer claim, or crew's `now` or new uuid. */
 export type AppValue =
   | AppParamValue
   | { kind: 'literal'; value: string | number | boolean | null }
@@ -14661,7 +14669,9 @@ export interface AppApiAction {
   id: string;
   kind: 'api';
   source: string;
+  /** The mutation's single root field is the source stage's check. */
   call: { kind: 'tool'; tool: string } | { kind: 'mutation'; mutation: string };
+  /** At most 50. */
   args: Record<string, AppValue>;
   params?: AppParamsSchema;
   /** Shown on the card as "The app says" (at most 500 characters). */
@@ -14670,8 +14680,10 @@ export interface AppApiAction {
 
 /**
  * A declared Postgres row write (DES §7.4): crew generates the one statement. `table` is
- * schema-qualified (`support.tickets`); `key` binds every primary-key column to a parameter; `set` is
- * every column for an insert, the changed columns for an update, and absent for a delete.
+ * schema-qualified (`support.tickets`, plain identifiers); `key` binds every primary-key column to a
+ * REQUIRED parameter; `set` is every column for an insert (each key column set from its own key
+ * parameter), the changed columns for an update (never a key column), and absent for a delete. Whether
+ * the columns are the table's real ones is the source stage's check.
  */
 export interface AppRowWriteAction {
   id: string;
@@ -14954,6 +14966,7 @@ export interface AppCheckFinding {
  *    `suggestion`), `source_check_unavailable` (the tree has queries or actions and this daemon cannot
  *    run the source stage yet, so nothing lands);
  *  - 422 `check_failed` (with `findings`), `reserved_slug`;
+ *  - 429 `rate_limited` (with `retryAfterMs`: a query queue or a per-viewer rate is full, DES §7.5);
  *  - 501 `not_implemented` (a route a later slice serves; nothing happened);
  *  - 503 `apps_unavailable`.
  */
@@ -14975,8 +14988,11 @@ export interface AppErrorBody {
     | 'check_failed'
     | 'reserved_slug'
     | 'not_implemented'
+    | 'rate_limited'
     | 'apps_unavailable';
   error: string;
+  /** `rate_limited`: when to try again (also sent as `Retry-After`). */
+  retryAfterMs?: number;
   head?: number;
   turn?: AppTurnState;
   findings?: AppCheckFinding[];

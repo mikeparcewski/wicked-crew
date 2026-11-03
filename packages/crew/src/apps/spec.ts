@@ -80,13 +80,21 @@ const ThemeSchema = z
   })
   .strict();
 
-const FormatSchema = z
-  .object({
-    kind: z.enum(['text', 'number', 'percent', 'currency', 'date', 'datetime', 'duration']),
-    decimals: z.number().int().min(0).max(10).optional(),
-    currency: z.string().regex(/^[A-Z]{3}$/, 'a currency is an ISO 4217 code').optional(),
-  })
-  .strict();
+const FormatSchema = z.union([
+  z
+    .object({
+      kind: z.literal('currency'),
+      currency: z.string().regex(/^[A-Z]{3}$/, 'a currency is an ISO 4217 code'),
+      decimals: z.number().int().min(0).max(10).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.enum(['text', 'number', 'percent', 'date', 'datetime', 'duration']),
+      decimals: z.number().int().min(0).max(10).optional(),
+    })
+    .strict(),
+]);
 
 const QueryBindingSchema = z.object({ query: namedId, params: bindings.optional() }).strict();
 const ActionBindingSchema = z.object({ label: text(60), action: namedId, params: bindings.optional() }).strict();
@@ -340,9 +348,11 @@ export const APP_SPEC_MAX_BYTES = 2 * 1024 * 1024;
 /**
  * Bounds on the JSON's structure, checked BEFORE the schema sees it: zod records an over-long array and
  * still parses every element, so a 2 MB document of a million empty objects would cost a million
- * findings. Every legal spec is far inside these (its longest list is 200, its deepest path 10).
+ * findings. Every legal spec is inside these: its longest list is 200, its deepest object 7 levels down,
+ * and the node budget is above what 2 MB of JSON can hold (it bounds a larger edit body before the size
+ * check). Published with the contract (`AppSpec`).
  */
-export const APP_SPEC_LIMITS = { depth: 16, arrayLength: 1000, objectKeys: 256, nodes: 100_000 } as const;
+export const APP_SPEC_LIMITS = { depth: 16, arrayLength: 1000, objectKeys: 256, nodes: 1_000_000 } as const;
 
 const own = (o: object, k: string): boolean => Object.hasOwn(o, k);
 
@@ -409,11 +419,29 @@ export function readSpec(bytes: Buffer | string): { spec: AppSpec; findings: [] 
   return findings.length === 0 ? parsed : { spec: null, findings };
 }
 
-const FORMAT_RE: Record<NonNullable<AppParamSchema['format']>, RegExp> = {
-  date: /^\d{4}-\d{2}-\d{2}$/,
-  'date-time': /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/,
-  uuid: /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/,
-  email: /^[^\s@]{1,64}@[^\s@]{1,255}$/,
+/** A real calendar date `YYYY-MM-DD`. */
+function isDate(v: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+  if (m === null) return false;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const t = new Date(Date.UTC(y, mo - 1, d));
+  return t.getUTCFullYear() === y && t.getUTCMonth() === mo - 1 && t.getUTCDate() === d;
+}
+
+/** RFC 3339 `date-time`: a real date, `HH:MM:SS` (a leap second allowed), optional fraction, `Z` or an offset. */
+function isDateTime(v: string): boolean {
+  const m = /^(\d{4}-\d{2}-\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d{1,9})?([Zz]|([+-])(\d{2}):(\d{2}))$/.exec(v);
+  if (m === null || !isDate(m[1]!)) return false;
+  const [h, mi, se] = [Number(m[2]), Number(m[3]), Number(m[4])];
+  if (h > 23 || mi > 59 || se > 60) return false;
+  return m[7] === undefined || (Number(m[8]) <= 23 && Number(m[9]) <= 59);
+}
+
+const FORMAT_OK: Record<NonNullable<AppParamSchema['format']>, (v: string) => boolean> = {
+  date: isDate,
+  'date-time': isDateTime,
+  uuid: (v) => /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(v),
+  email: (v) => /^[^\s@]{1,64}@[^\s@]{1,255}$/.test(v),
 };
 
 /**
@@ -426,7 +454,7 @@ export function paramValueProblem(decl: Pick<AppParamSchema, 'type' | 'format' |
       if (typeof value !== 'string') return 'is not a string';
       if (decl.minLength !== undefined && value.length < decl.minLength) return `is shorter than ${decl.minLength}`;
       if (decl.maxLength !== undefined && value.length > decl.maxLength) return `is longer than ${decl.maxLength}`;
-      if (decl.format !== undefined && !FORMAT_RE[decl.format].test(value)) return `is not a ${decl.format}`;
+      if (decl.format !== undefined && !FORMAT_OK[decl.format](value)) return `is not a ${decl.format}`;
       break;
     case 'number':
     case 'integer':
@@ -497,9 +525,11 @@ export function checkSpec(spec: AppSpec): AppCheckFinding[] {
   // order; a default and every enum value satisfy the declaration.
   const checkParams = (params: AppParamsSchema | undefined, path: (string | number)[]): void => {
     if (params === undefined) return;
-    for (const r of params.required ?? []) {
+    const required = params.required ?? [];
+    for (const r of required) {
       if (!own(params.properties, r)) push('unknown_param', [...path, 'required'], `required parameter ${JSON.stringify(r)} is not declared`);
     }
+    if (new Set(required).size !== required.length) push('bad_param', [...path, 'required'], 'a parameter is listed as required twice');
     for (const [name, p] of Object.entries(params.properties)) {
       const at = [...path, 'properties', name];
       if ((p.type === 'array') !== (p.items !== undefined)) push('bad_param', at, 'an array parameter declares items, and only an array does');
@@ -508,21 +538,33 @@ export function checkSpec(spec: AppSpec): AppCheckFinding[] {
       if (p.from !== undefined && p.default !== undefined) push('bad_param', at, 'a viewer-bound parameter has no default');
       if (p.minimum !== undefined && p.maximum !== undefined && p.minimum > p.maximum) push('bad_param', at, 'minimum is above maximum');
       if (p.minLength !== undefined && p.maxLength !== undefined && p.minLength > p.maxLength) push('bad_param', at, 'minLength is above maxLength');
-      // An enum value is judged by the type alone (an array's by its item type), never by bounds.
-      const itemType: AppParamSchema['type'] = p.type === 'array' ? (p.items?.type ?? 'string') : p.type;
-      for (const [i, e] of (p.enum ?? []).entries()) {
-        const problem = paramValueProblem({ type: itemType }, e);
-        if (problem !== null) push('bad_param', [...at, 'enum', i], `enum value ${JSON.stringify(e)} ${problem}`);
-      }
-      if (p.default !== undefined) {
-        const problem = p.type === 'array' ? 'is on an array (an array has no default)' : paramValueProblem(p, p.default);
-        if (problem !== null) push('bad_param', [...at, 'default'], `the default ${problem}`);
+      // Constraints apply to their own type only.
+      const isString = p.type === 'string';
+      const isNumber = p.type === 'number' || p.type === 'integer';
+      if (!isString && (p.format !== undefined || p.minLength !== undefined || p.maxLength !== undefined)) push('bad_param', at, 'format, minLength and maxLength apply to a string');
+      if (!isNumber && (p.minimum !== undefined || p.maximum !== undefined)) push('bad_param', at, 'minimum and maximum apply to a number');
+      if (p.type === 'array' && p.enum !== undefined) push('bad_param', [...at, 'enum'], 'an array has no enum');
+      if (p.type === 'array' && p.default !== undefined) push('bad_param', [...at, 'default'], 'an array has no default');
+      if (p.type !== 'array') {
+        // Every enum value, and the default, satisfies the whole declaration (the enum aside).
+        const { enum: values, default: dflt, description: _d, from: _f, items: _i, ...decl } = p;
+        void _d;
+        void _f;
+        void _i;
+        for (const [i, e] of (values ?? []).entries()) {
+          const problem = paramValueProblem(decl, e);
+          if (problem !== null) push('bad_param', [...at, 'enum', i], `enum value ${JSON.stringify(e)} ${problem}`);
+        }
+        if (dflt !== undefined) {
+          const problem = paramValueProblem(p, dflt);
+          if (problem !== null) push('bad_param', [...at, 'default'], `the default ${problem}`);
+        }
       }
     }
   };
   /** A required parameter nobody fills: no `from`, no default. */
   const mustBind = (params: AppParamsSchema | undefined): string[] =>
-    (params?.required ?? []).filter((r) => own(params!.properties, r) && params!.properties[r]!.from === undefined && params!.properties[r]!.default === undefined);
+    [...new Set(params?.required ?? [])].filter((r) => own(params!.properties, r) && params!.properties[r]!.from === undefined && params!.properties[r]!.default === undefined);
 
   spec.queries.forEach((q, i) => {
     checkParams(q.params, ['queries', i, 'params']);
@@ -546,6 +588,18 @@ export function checkSpec(spec: AppSpec): AppCheckFinding[] {
       if (a.op !== 'delete' && (a.set === undefined || Object.keys(a.set).length === 0)) push('bad_row_write', [...path, 'set'], `an ${a.op} sets at least one column`);
       for (const k of Object.keys(a.set ?? {})) {
         if (a.op === 'update' && own(a.key, k)) push('bad_row_write', [...path, 'set', k], 'an update never changes a primary-key column');
+      }
+      // The row's identity always comes from the request: every key parameter is required (codex r2).
+      const required = new Set(a.params?.required ?? []);
+      for (const [k, v] of Object.entries(a.key)) {
+        if (own(declared, v.name) && !required.has(v.name)) push('bad_row_write', [...path, 'key', k], `key parameter ${JSON.stringify(v.name)} must be required`);
+        // An insert sets each key column from its own key parameter, never a second value (DES §7.4).
+        if (a.op === 'insert') {
+          const set = a.set !== undefined && own(a.set, k) ? a.set[k] : undefined;
+          if (set === undefined || set.kind !== 'param' || set.name !== v.name) {
+            push('bad_row_write', [...path, 'set', k], `an insert sets key column ${k} from its key parameter ${JSON.stringify(v.name)}`);
+          }
+        }
       }
     }
     for (const [at, v] of values) {
