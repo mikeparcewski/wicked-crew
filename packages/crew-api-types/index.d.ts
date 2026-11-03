@@ -12519,6 +12519,11 @@ export interface McpServer {
    */
   descriptorHash?: string;
   /**
+   * (api-types 0.180.0, DES-APPS-001 rev 12 §5.4) `sql`/`graphql`: which agents may use the source.
+   * Only a human operator changes it (`PUT /sources/:name/agents`).
+   */
+  agents?: SourceAgentAccess;
+  /**
    * (api-types 0.174.0) `mcp-http` and `rest` only: the ranges confirmed for this server's
    * connections. A server saved before 0.174.0 shows what crew re-derived for it: the IP literal or
    * `localhost` it was registered at; a private host NAME is not re-derived, and its calls are
@@ -13287,6 +13292,94 @@ export interface SourceAllowWritesResponse {
   allowWrites: boolean;
   /** Row-write grants withdrawn by turning the switch off (0 when turning it on). */
   withdrawnGrants: number;
+}
+
+/**
+ * (api-types 0.180.0, DES-APPS-001 rev 12 §5.4) Data sources as live knowledge for agents: which agents of
+ * governed runs and chat seats may use a `sql`/`graphql` source through crew's broker tools
+ * (`mcp:sources/list`, `mcp:sources/describe`, `mcp:sources/query`). Never a write, never a credential.
+ * Apps units (`apps-turn`, `apps-publish`) get none, whatever this says (D-7).
+ */
+export interface SourceAgentAccess {
+  /** "Agents can see this structure": ON on a new source. Off: the source is in no agent tool's answer. */
+  see: boolean;
+  /**
+   * "Agents can query this source": OFF on a new source, and off again when a re-save changes the
+   * connection descriptor. On: rows read through K1's read policy go to the agent's model provider.
+   * Needs `see`; SQL sources only (GraphQL is catalog-only for agents).
+   */
+  query: boolean;
+  /** The project ids whose runs and chats may use it (sorted). None on a new source: nothing reaches an agent until a person names one. */
+  projects: string[];
+  /** Every project on this daemon, and runs or chats filed in none: a separate, explicit choice. */
+  everyProject: boolean;
+}
+
+/** `PUT /sources/:name/agents` (human operator only; each change audited). At least one field. */
+export interface SourceAgentAccessBody {
+  see?: boolean;
+  query?: boolean;
+  projects?: string[];
+  everyProject?: boolean;
+}
+
+export interface SourceAgentAccessResponse {
+  name: string;
+  agents: SourceAgentAccess;
+}
+
+/**
+ * One agent query of a source (`GET /sources/:name/agent-queries`), as crew recorded it: never the SQL text,
+ * a value or a source's words.
+ */
+export interface SourceAgentQuery {
+  /** The broker call's id. */
+  callId: string;
+  at: string;
+  runId: string;
+  unit: number;
+  attempt: number;
+  seat: string;
+  source: string;
+  /** sha256 of the SQL text, hex. */
+  sqlHash: string;
+  /** `ok` (rows released), or crew's refusal code (a read-policy code, `query_off`, `changed_while_running`, `source_timeout`, …). */
+  outcome: string;
+  rows: number;
+  truncated: boolean;
+  ms: number;
+  /** Whether rows reached the agent. */
+  released: boolean;
+  sqlstate?: string;
+}
+
+/** `GET /sources/:name/agent-queries` (observer): the last 20, newest first. `known: false` = the record could not be read. */
+export interface SourceAgentQueriesResponse {
+  name: string;
+  known: boolean;
+  queries: SourceAgentQuery[];
+}
+
+/** One source a run's agents queried (`GET /runs/:id/data-use`). */
+export interface SourceDataUse {
+  source: string;
+  /** Calls that reached the read policy. */
+  queries: number;
+  /** Calls whose rows reached the agent. */
+  released: number;
+  rows: number;
+  truncated: boolean;
+  lastAt: string;
+}
+
+/**
+ * `GET /runs/:id/data-use` (observer): the data sources a run's agents queried, for its gate cards and its
+ * delivery. `known: false` = crew's record could not be read: UNKNOWN, never "none".
+ */
+export interface RunDataUseResponse {
+  runId: string;
+  known: boolean;
+  sources: SourceDataUse[];
 }
 
 /**

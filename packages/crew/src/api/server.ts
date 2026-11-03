@@ -95,6 +95,8 @@ import { probeMcpServer } from '../mcp/probe.js';
 import { budgetFromEnv, MCP_CALL_COMPLETED, McpBroker } from '../mcp/broker.js';
 import { EstateRelay } from '../mcp/estate-relay.js';
 import { McpCallRecordFile } from '../mcp/call-records.js';
+import { SourceAgentQueryLog } from '../sources/agent-queries.js';
+import { SourcesAgentTools } from '../sources/agent-tools.js';
 import { emitOnBus, type BusEvent } from '../core/bus.js';
 import { McpRegistry } from '../mcp/registry.js';
 import { McpRegistryStore } from '../mcp/registry-store.js';
@@ -2500,6 +2502,16 @@ export async function createServer(
   // and the engine's bus. A bus that is not attached only loses the event; the record is the record.
   // S7: the same file (one serialized chain) is what `GET /mcp/usage` reads back and folds.
   const mcpCallRecords = new McpCallRecordFile();
+  // DES-APPS-001 rev 12 §5.4: data sources as live knowledge for agents. `mcp:sources/<tool>` (the broker's),
+  // the shim's list and the chat block read the same tools; the unit is the engine's binding of its token.
+  const sourceQueries = new SourceAgentQueryLog();
+  const sourcesTools = new SourcesAgentTools({
+    registry: mcpRegistry,
+    queries: sourceQueries,
+    audit,
+    resolver: () => CoreAdapter.estateScopeResolver(),
+    lister: () => CoreAdapter.mcpToolLister(),
+  });
   const mcpBroker = new McpBroker({
     registry: mcpRegistry,
     engine: options?.mcpEngineGate ?? (() => CoreAdapter.mcpEngineGate()),
@@ -2508,6 +2520,7 @@ export async function createServer(
     log: (m) => app.log.warn(m),
     // wicked-core#1018: `mcp:estate/<tool>`, a container seat's way to its run's estate. Each
     // landed proposal is also written to the audit trail against its run (`estate.proposal.submitted`).
+    sources: sourcesTools,
     estate: new EstateRelay({
       resolver: () => CoreAdapter.estateScopeResolver(),
       onProposal: (p) =>
@@ -2629,6 +2642,9 @@ export async function createServer(
       ...(appStore !== null && appActions !== null ? { appsActions: appActions } : {}),
       // DES-MCP-TOOLS-001 S3: the broker's call path over that registry.
       mcpBroker,
+      // DES-APPS-001 rev 12 §5.4: the data-source tools (listed, told to chats) and their record.
+      sourcesTools,
+      sourceQueries,
       ...(typeof adapter.askSupported === 'function' && adapter.askSupported() ? { askServer } : {}),
       // DES-MCP-TOOLS-001 S7: the call records the usage fold reads.
       mcpCalls: mcpCallRecords,

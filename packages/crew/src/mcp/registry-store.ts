@@ -19,6 +19,7 @@ import { join } from 'node:path';
 import type { McpAuthConfig, McpHealth, McpRestMapping, McpToolAnnotations, McpToolClass, McpUpstreamKind } from '../core/types.js';
 import { crewStateHome } from '../projects/state-home.js';
 import type { AddressPolicy } from '../sources/dialer.js';
+import type { SourceAgentAccess } from '../sources/agent-access.js';
 import type { SqlSourceConfig } from '../sources/kinds.js';
 
 export const MCP_STATE_DIRNAME = 'mcp';
@@ -79,6 +80,12 @@ export interface McpServerRecord {
    * changed only by a human operator (`PUT /sources/:name/allow-writes`). Not part of the descriptor.
    */
   allowWrites?: boolean;
+  /**
+   * (DES-APPS-001 rev 12 §5.4) `sql`/`graphql` only: which agents may use the source (`see`, `query`,
+   * `projects`, `everyProject`). Absent = the defaults (see on, query off, no project). Changed only by a
+   * human operator (`PUT /sources/:name/agents`). Not part of the descriptor.
+   */
+  agents?: SourceAgentAccess;
   enabled: boolean;
   health: McpHealth;
   registeredAt: string;

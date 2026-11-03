@@ -69,6 +69,7 @@ import type { McpPolicies } from '../mcp/policies.js';
 import { MCP_PREVIEW_ROLES, MCP_RUN_MODES, McpLedgerEditError } from '../mcp/policies.js';
 import { isWriteGrant, McpRegistryError, type McpRegistry } from '../mcp/registry.js';
 import { listUnitTools } from '../mcp/tool-list.js';
+import type { SourcesAgentTools } from '../sources/agent-tools.js';
 import { McpRegistryCorruptError } from '../mcp/registry-store.js';
 import { parseSecretRef, SecretStoreError } from '../mcp/secrets.js';
 import type { McpCallRecordSource } from '../mcp/call-records.js';
@@ -268,6 +269,8 @@ export interface McpRouteDeps {
   broker?: McpBroker;
   /** `Core.listMcpTools` for `POST /mcp/tools` (S4), read per request. Absent → that route answers 503. */
   toolLister?: () => ((requestJson: string) => Promise<string>) | null;
+  /** (DES-APPS-001 rev 12 §5.4) crew's data-source tools, listed with the registry's for a unit whose project reaches a source. */
+  sources?: SourcesAgentTools;
   /** The preview and approvals (S6). Absent → those routes answer 503; the S2 routes are unchanged. */
   policies?: McpPolicies;
   /** The call records the usage fold reads (S7). Absent → `GET /mcp/usage` answers 503. */
@@ -630,7 +633,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       if (!parsed.success) {
         return reply.code(400).send({ error: `body: ${parsed.error.issues.map((i) => `${i.path.join('.') || 'body'} ${i.code}`).join('; ')}`, code: 'bad_request' });
       }
-      const answer = await listUnitTools({ registry, lister: toolLister }, parsed.data.token);
+      const answer = await listUnitTools({ registry, lister: toolLister, ...(deps.sources !== undefined ? { sources: deps.sources } : {}) }, parsed.data.token);
       return reply.code(answer.status).send(answer.body);
     },
   );

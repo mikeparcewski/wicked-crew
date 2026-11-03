@@ -7,13 +7,43 @@
  */
 
 import type { McpToolsResponse, McpVisibleTool } from '../core/types.js';
-import { mcpSubject } from './classify.js';
+import { SOURCES_TOOL_DEFS, type SourcesAgentTools, type SourcesToolName } from '../sources/agent-tools.js';
+import { mcpSubject, SOURCES_SERVER } from './classify.js';
 import type { McpCallableTool } from './registry.js';
 
 export interface McpToolListDeps {
   registry: { callableTools(): Promise<McpCallableTool[]> };
   /** `Core.listMcpTools`, read per request; `null` = the linked engine has none. */
   lister: () => ((requestJson: string) => Promise<string>) | null;
+  /**
+   * (DES-APPS-001 rev 12 §5.4) crew's data-source tools: listed for a unit whose run's project can see a
+   * source (`query` only where it can query one), judged by the engine with the registry's tools.
+   */
+  sources?: Pick<SourcesAgentTools, 'resolve' | 'reach' | 'nameTaken'>;
+}
+
+/** The built-in tools a unit's project reaches, as registry-shaped tools (judged like the rest). */
+async function sourcesToolsFor(sources: McpToolListDeps['sources'], token: string): Promise<McpCallableTool[]> {
+  if (sources === undefined) return [];
+  try {
+    const scope = await sources.resolve(token);
+    if (scope === null || (await sources.nameTaken())) return [];
+    const reach = await sources.reach(scope.projectId);
+    if (reach.see.length === 0) return [];
+    const names: SourcesToolName[] = reach.query.length > 0 ? ['list', 'describe', 'query'] : ['list', 'describe'];
+    return names.map((tool): McpCallableTool => ({
+      server: SOURCES_SERVER,
+      tool,
+      kind: 'sql',
+      annotations: { readOnlyHint: true },
+      classOverride: 'read',
+      description: SOURCES_TOOL_DEFS[tool].description,
+      inputSchema: SOURCES_TOOL_DEFS[tool].inputSchema,
+    }));
+  } catch {
+    // A token the engine does not know is the lister's to answer (401); anything else leaves them out.
+    return [];
+  }
 }
 
 export interface McpToolListAnswer {
@@ -33,7 +63,7 @@ export async function listUnitTools(deps: McpToolListDeps, token: string): Promi
   }
   let callable: McpCallableTool[];
   try {
-    callable = await deps.registry.callableTools();
+    callable = [...(await deps.registry.callableTools()), ...(await sourcesToolsFor(deps.sources, token))];
   } catch (err) {
     return { status: 500, body: { error: `the MCP registry could not be read: ${message(err)}`, code: 'guard_error' } };
   }
@@ -59,12 +89,14 @@ export async function listUnitTools(deps: McpToolListDeps, token: string): Promi
   for (const j of judged.tools) {
     const t = bySubject.get(j.subject);
     if (t === undefined) continue;
+    // crew's built-ins: the person's per-source switches are the consent, so no first-use ask (§5.4).
+    const builtIn = t.server === SOURCES_SERVER;
     tools.push({
       subject: j.subject,
       class: j.class,
-      decision: j.decision,
-      ruleIds: j.ruleIds,
-      ...(j.reason !== undefined ? { reason: j.reason } : {}),
+      decision: builtIn ? 'allow' : j.decision,
+      ruleIds: builtIn ? j.ruleIds.filter((r) => r !== 'engine:mcp-first-use') : j.ruleIds,
+      ...(j.reason !== undefined && !builtIn ? { reason: j.reason } : {}),
       description: t.description,
       inputSchema: t.inputSchema,
     });

@@ -22,6 +22,9 @@ import postgres from 'postgres';
 import { DialRefusedError, dialTcp, plaintextAllowed } from '../dialer.js';
 import { approxRowBytes, type ReadOptions, READ_MAX_ROWS, type SqlConnectArgs, type SqlDescribe, type SqlReadResult, SourceQueryError, STATEMENT_DEADLINE_MS } from './types.js';
 
+/** (rev 12 §5.4) `work_mem` for an agent's read. */
+export const AGENT_WORK_MEM = '16MB';
+
 export type PgSql = postgres.Sql<Record<string, never>>;
 
 /** Startup parameters every crew session to a Postgres source carries. */
@@ -341,6 +344,11 @@ export async function pgRead(args: SqlConnectArgs, text: string, params: unknown
   try {
     const out = await pgTx(sql, life, 'BEGIN READ ONLY', async (tx) => {
       await tx.unsafe(`SET LOCAL statement_timeout = ${Math.max(1, Math.floor(sourceTimeout))}`);
+      if (opts.agentLimits === true) {
+        // (rev 12 §5.4) An agent's read: no parallel workers, a small sort/hash memory budget.
+        await tx.unsafe('SET LOCAL max_parallel_workers_per_gather = 0');
+        await tx.unsafe(`SET LOCAL work_mem = '${AGENT_WORK_MEM}'`);
+      }
       if (opts.expect !== undefined) await pgExpectRelations(tx, opts.expect);
       const rows: unknown[][] = [];
       let columns: Array<{ name: string; type: number }> = [];

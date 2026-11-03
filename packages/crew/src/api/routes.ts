@@ -182,6 +182,10 @@ import { registerSourceRoutes } from '../sources/routes.js';
 import { seatTurn } from '../standing-orders/parse.js';
 import { registerMcpRoutes } from './mcp.js';
 import { chatMcpToolsFor } from './chat-mcp.js';
+import { chatSourcesFor } from './chat-sources.js';
+import type { SourcesAgentTools } from '../sources/agent-tools.js';
+import type { SourceAgentQueryLog } from '../sources/agent-queries.js';
+import { registerSourceAgentRoutes } from '../sources/agent-routes.js';
 import type { AskServer } from '../mcp/ask-server.js';
 import type { McpBroker } from '../mcp/broker.js';
 import type { McpCallRecordSource } from '../mcp/call-records.js';
@@ -1418,6 +1422,10 @@ export interface RuntimeDeps {
   mcp?: McpRegistry;
   /** The MCP broker's call path (DES-MCP-TOOLS-001 S3) over that registry; absent → `POST /mcp/call` 503. */
   mcpBroker?: McpBroker;
+  /** (DES-APPS-001 rev 12 §5.4) crew's data-source tools for agents (the broker holds the same one); absent = none listed or told. */
+  sourcesTools?: SourcesAgentTools;
+  /** (rev 12 §5.4) The agent-query record: the sheet's recent agent queries, a run's data use, its PR text. */
+  sourceQueries?: SourceAgentQueryLog;
   askServer?: AskServer;
   /** The broker's call records (DES-MCP-TOOLS-001 S7), the ones `GET /mcp/usage` folds; absent → 503. */
   mcpCalls?: McpCallRecordSource;
@@ -3693,6 +3701,8 @@ export function registerRoutes(
       const reports = await seatReports(run);
       // crew#1192: the QE check the deliver gate reads, so a required QE that passed says so.
       const qeAcceptance = await qeAcceptanceCheckFor(run);
+      // (DES-APPS-001 rev 12 §5.4) The data sources its agents queried; an unreadable record is "unknown".
+      const dataUse = runtime.sourceQueries === undefined ? undefined : ((await runtime.sourceQueries.dataUse(id)) ?? 'unknown');
       // The run's preset or workflow NAME, as the engine recorded it (seam X2).
       const text = composeDeliverText(
         factsFromRun(decorateRun(run), runUrlFor(configuredPublicOrigin(), id), {
@@ -3701,6 +3711,7 @@ export function registerRoutes(
           ...(followUps !== undefined ? { followUps } : {}),
           ...(reports !== undefined ? { reports } : {}),
           qeAcceptance,
+          ...(dataUse !== undefined ? { dataUse } : {}),
         }),
       );
       return reply.type('text/plain; charset=utf-8').send(framedDeliverText(text));
@@ -4645,6 +4656,9 @@ export function registerRoutes(
     try {
       const rules = (await considerations.inForceFor(scope?.projectId ?? null)).rules;
       mcpTools = await chatMcpToolsFor(runtime.mcp);
+      // (DES-APPS-001 rev 12 §5.4) The data sources this chat's project reaches, and the commands.
+      const sourcesBlock = await chatSourcesFor(runtime.sourcesTools, scope?.projectId ?? null);
+      if (sourcesBlock !== null) mcpTools = mcpTools !== null ? `${mcpTools}\n\n${sourcesBlock}` : sourcesBlock;
       // crew#1020: a project/everything chat must see repos attached since open. Admission was
       // under this scope KIND and the kind stays the same, so do not re-run seat admission.
       const scopeRequest = chatScopes.requestOf(id);
@@ -9255,6 +9269,7 @@ export function registerRoutes(
     ...(runtime.askServer !== undefined ? { askServer: runtime.askServer } : {}),
     ...(runtime.mcp !== undefined ? { registry: runtime.mcp, toolLister: () => CoreAdapter.mcpToolLister() } : {}),
     ...(runtime.mcpBroker !== undefined ? { broker: runtime.mcpBroker } : {}),
+    ...(runtime.sourcesTools !== undefined ? { sources: runtime.sourcesTools } : {}),
     ...(mcpPolicies !== undefined ? { policies: mcpPolicies } : {}),
     ...(runtime.mcpCalls !== undefined ? { usage: runtime.mcpCalls } : {}),
     audit,
@@ -9270,6 +9285,13 @@ export function registerRoutes(
     // (K2b) Allow writes off withdraws the source's row-write grants.
     ...(appsWritePath !== undefined ? { rowWriteGrants: appsWritePath } : {}),
     draft: seatTurn({ adapter, roster: rosterWithStanding }),
+  });
+  // (rev 12 §5.4) The sheet's agent controls and records, and a run's data use.
+  registerSourceAgentRoutes(app, {
+    ...(runtime.mcp !== undefined ? { registry: runtime.mcp } : {}),
+    ...(runtime.sourceQueries !== undefined ? { queries: runtime.sourceQueries } : {}),
+    audit,
+    actorOf,
   });
 
   // ── The wicked-interactive bridge, reverse-proxied (DES-MERGE-001 §5.3/§7.2) ──

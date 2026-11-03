@@ -36,11 +36,12 @@ import type {
   McpToolStatus,
   McpUpstreamKind,
 } from '../core/types.js';
-import { canonicalJson, deriveToolClass, effectiveToolClass, ESTATE_SERVER, type HashedRestTarget, type HashedToolShape, mcpSubject, parseMcpSubject, sha256Hex, toolSchemaHash } from './classify.js';
+import { canonicalJson, deriveToolClass, effectiveToolClass, ESTATE_SERVER, SOURCES_SERVER, type HashedRestTarget, type HashedToolShape, mcpSubject, parseMcpSubject, sha256Hex, toolSchemaHash } from './classify.js';
 import type { McpUpstreamConfig, ProbedTool, ProbeResult, Prober } from './probe.js';
 import type { McpRegistryStore, McpServerRecord, McpToolRecord } from './registry-store.js';
 import { restTarget } from './rest.js';
 import { type AddressPolicy, classifyAddress, exactRangesFor, NO_CONFIRMATION } from '../sources/dialer.js';
+import { agentAccessOf, type SourceAgentAccess } from '../sources/agent-access.js';
 import { CREW_SOURCE, type SourceDescription, sourceDescriptorHash } from '../sources/kinds.js';
 import { SourceCatalogStore, type StoredDescription } from '../sources/store.js';
 import { KEYCHAIN_SERVICE, keychainRef, parseSecretRef, resolveSecret, secretIsSet, type SecretStore } from './secrets.js';
@@ -163,6 +164,9 @@ export class McpRegistry {
   async preview(config: McpUpstreamConfig, stagedSecret: string | null = null): Promise<McpPreviewResponse> {
     if (config.name === ESTATE_SERVER) {
       throw new McpRegistryError(400, 'reserved_name', `"${ESTATE_SERVER}" is reserved: mcp:${ESTATE_SERVER}/<tool> is the broker's estate relay (the seat's own estate), never a registered server; choose another name`);
+    }
+    if (config.name === SOURCES_SERVER) {
+      throw new McpRegistryError(400, 'reserved_name', `"${SOURCES_SERVER}" is reserved: mcp:${SOURCES_SERVER}/<tool> is crew's built-in data-source tools for agents, never a registered server; choose another name`);
     }
     if ((config.kind === 'sql' || config.kind === 'graphql') && config.name === CREW_SOURCE) {
       throw new McpRegistryError(400, 'reserved_name', `"${CREW_SOURCE}" is the built-in crew source; choose another name`);
@@ -309,12 +313,19 @@ export class McpRegistry {
       // (DES-APPS-001 §7.4) Allow writes is off on every new Postgres source. A re-save keeps it only
       // while the connection descriptor is unchanged (grants bind to the descriptor anyway).
       const keepWrites = prior?.allowWrites === true && prior.kind === 'sql' && sourceDescriptorHash(configOf(prior)) === sourceDescriptorHash(held.config);
+      // (rev 12 §5.4) The agent controls are the person's: kept over a re-save of the same source, except
+      // "query", which a new connection descriptor turns off again (as it does Allow writes).
+      const isSource = held.config.kind === 'sql' || held.config.kind === 'graphql';
+      const priorAgents = prior !== undefined && prior.kind === held.config.kind && prior.agents !== undefined ? agentAccessOf(prior) : null;
+      const agents: SourceAgentAccess | null =
+        !isSource || priorAgents === null ? null : { ...priorAgents, query: priorAgents.query && sourceDescriptorHash(configOf(prior!)) === sourceDescriptorHash(held.config) };
       const record: McpServerRecord = {
         ...config,
         ...(address != null ? { address } : {}),
         ...(sql != null ? { sql } : {}),
         ...(viewsAllowed != null ? { viewsAllowed } : {}),
         ...(sql != null && sql.driver === 'postgres' ? { allowWrites: keepWrites } : {}),
+        ...(agents !== null ? { agents } : {}),
         ...(allowedOrigin !== null ? { allowedOrigin } : {}),
         enabled: prior?.enabled ?? true,
         health: { state: 'ok', consecutiveFailures: 0, checkedAt: stamp, lastError: null },
@@ -644,14 +655,66 @@ export class McpRegistry {
    * and its stored description (`null` until described). 404 for no such source, 400 for a server
    * that is not one.
    */
-  async source(name: string): Promise<{ config: McpUpstreamConfig; allowWrites: boolean; description: StoredDescription | null; descriptorHash: string; enabled: boolean }> {
+  async source(name: string): Promise<{ config: McpUpstreamConfig; allowWrites: boolean; description: StoredDescription | null; descriptorHash: string; enabled: boolean; agents: SourceAgentAccess }> {
     const s = this.find((await this.deps.store.read()).servers, name);
     if (s.kind !== 'sql' && s.kind !== 'graphql') throw new McpRegistryError(400, 'not_a_source', `${name} is an ${s.kind} server, not a data source`);
     const config = configOf(s);
     const descriptorHash = sourceDescriptorHash(config);
     const stored = await this.catalogs.read(name);
     // A description taken under another descriptor (a re-save since) is not this source's: not described.
-    return { config, allowWrites: s.allowWrites === true, description: stored !== null && stored.descriptorHash === descriptorHash ? stored : null, descriptorHash, enabled: s.enabled };
+    return { config, allowWrites: s.allowWrites === true, description: stored !== null && stored.descriptorHash === descriptorHash ? stored : null, descriptorHash, enabled: s.enabled, agents: agentAccessOf(s) };
+  }
+
+  /**
+   * (DES-APPS-001 rev 12 §5.4) Every `sql`/`graphql` source with what the agent tools need, from ONE read of
+   * the registry: name, kind, on/off, the agent controls, the descriptor hash, and the stored description
+   * (`null` until described, or when it was taken under another descriptor). Read anew on every agent call.
+   */
+  async agentSources(): Promise<Array<{ name: string; kind: 'sql' | 'graphql'; driver: string | null; enabled: boolean; agents: SourceAgentAccess; descriptorHash: string; viewsAllowed: string[]; description: StoredDescription | null }>> {
+    const servers = (await this.deps.store.read()).servers.filter((s) => s.kind === 'sql' || s.kind === 'graphql');
+    return Promise.all(
+      servers.map(async (s) => {
+        const config = configOf(s);
+        const descriptorHash = sourceDescriptorHash(config);
+        const stored = await this.catalogs.read(s.name);
+        return {
+          name: s.name,
+          kind: s.kind as 'sql' | 'graphql',
+          driver: s.kind === 'sql' ? (s.sql?.driver ?? null) : null,
+          enabled: s.enabled,
+          agents: agentAccessOf(s),
+          descriptorHash,
+          viewsAllowed: [...(s.viewsAllowed ?? [])],
+          description: stored !== null && stored.descriptorHash === descriptorHash ? stored : null,
+        };
+      }),
+    );
+  }
+
+  /** Whether a registered server holds the built-in tools' reserved name (a registry from before rev 12). */
+  async holdsReservedSourcesName(): Promise<boolean> {
+    return (await this.deps.store.read()).servers.some((s) => s.name === SOURCES_SERVER);
+  }
+
+  /**
+   * (rev 12 §5.4) Change a source's agent controls. The route allows a human operator only and audits each
+   * change. "Query" needs "see" (turning see off turns query off too) and a SQL source (GraphQL is
+   * catalog-only). Answers the controls before and after.
+   */
+  async setAgentAccess(name: string, patch: Partial<SourceAgentAccess>): Promise<{ before: SourceAgentAccess; after: SourceAgentAccess }> {
+    return this.deps.store.mutate((file) => {
+      const s = this.find(file.servers, name);
+      if (s.kind !== 'sql' && s.kind !== 'graphql') throw new McpRegistryError(400, 'not_a_source', `${name} is an ${s.kind} server, not a data source`);
+      const before = agentAccessOf(s);
+      const see = patch.see ?? before.see;
+      const query = see ? (patch.query ?? before.query) : false;
+      if (query && s.kind !== 'sql') throw new McpRegistryError(400, 'query_not_supported', `${name} is a GraphQL source: agents may see its structure, but agent queries are for SQL sources`);
+      if (patch.query === true && !see) throw new McpRegistryError(409, 'see_off', `agents cannot query ${name} while they cannot see its structure: turn "see" on first`);
+      const after = agentAccessOf({ agents: { see, query, projects: patch.projects ?? before.projects, everyProject: patch.everyProject ?? before.everyProject } });
+      s.agents = after;
+      s.updatedAt = new Date(this.now()).toISOString();
+      return { before, after };
+    });
   }
 
   /**
@@ -707,7 +770,7 @@ export class McpRegistry {
    * upload IS the person's act, so there is no preview; a name held by any other kind is refused.
    */
   async registerSnapshotSource(name: string, digest: string, description: SourceDescription): Promise<McpServer> {
-    if (name === CREW_SOURCE || name === ESTATE_SERVER) throw new McpRegistryError(400, 'reserved_name', `"${name}" is reserved; choose another name`);
+    if (name === CREW_SOURCE || name === ESTATE_SERVER || name === SOURCES_SERVER) throw new McpRegistryError(400, 'reserved_name', `"${name}" is reserved; choose another name`);
     const stamp = new Date(this.now()).toISOString();
     const rec = await this.deps.store.mutate(async (file) => {
       const prior = file.servers.find((s) => s.name === name);
@@ -728,6 +791,9 @@ export class McpRegistry {
         registeredAt: prior?.registeredAt ?? stamp,
         updatedAt: stamp,
         tools: [],
+        // (rev 12 §5.4) A new upload of the same name keeps the person's agent controls; "query" only
+        // when the snapshot is the same one (a new digest is a new descriptor).
+        ...(prior?.agents !== undefined ? { agents: { ...agentAccessOf(prior), query: agentAccessOf(prior).query && prior.sql?.snapshot === digest } } : {}),
       };
       file.servers = [...file.servers.filter((s) => s.name !== name), record];
       await this.catalogs.write(name, { ...description, descriptorHash: sourceDescriptorHash(configOf(record)) });
@@ -781,7 +847,7 @@ export class McpRegistry {
     return {
       ...configView(configOf(s)),
       ...(s.kind === 'sql' && s.sql?.driver === 'postgres' ? { allowWrites: s.allowWrites === true } : {}),
-      ...(isSource ? { descriptorHash: sourceDescriptorHash(configOf(s)) } : {}),
+      ...(isSource ? { descriptorHash: sourceDescriptorHash(configOf(s)), agents: agentAccessOf(s) } : {}),
       authState: await this.authState(s.auth),
       enabled: s.enabled,
       health: s.health,

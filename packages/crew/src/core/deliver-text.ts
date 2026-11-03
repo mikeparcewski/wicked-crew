@@ -183,6 +183,21 @@ export interface DeliverTextFacts {
    *  ({@link reportsFromOutputs}). `[]` = read, nothing reportable; absent = the outputs could not
    *  be read (a definition-time composition, or an adapter without transcripts) — said in the body. */
   reports?: DeliverReportFact[];
+  /**
+   * (DES-APPS-001 rev 12 §5.4) The data sources the run's agents queried, from crew's agent-query record:
+   * `[]` = none; `'unknown'` = the record could not be read (never shown as "none"); absent = not read (a
+   * definition-time composition, which says data use is not known there).
+   */
+  dataUse?: DeliverDataUseFact[] | 'unknown';
+}
+
+/** One data source a run's agents queried (counts only: never the SQL, never a value). */
+export interface DeliverDataUseFact {
+  source: string;
+  queries: number;
+  released: number;
+  rows: number;
+  truncated: boolean;
 }
 
 export interface DeliverText {
@@ -583,6 +598,7 @@ export function composeDeliverText(raw: DeliverTextFacts, links: IssueRefs = iss
   out.push('');
 
   if (f.assurance !== undefined) out.push(...assuranceSection(f.assurance), '');
+  out.push(...dataUseSection(f));
 
   out.push('## Phases', '');
   if (f.source === 'workflow') {
@@ -721,6 +737,25 @@ function qeReasonBody(reason: string, label: string): string {
 }
 
 /** (crew#1186) The `## Assurance` section: the labels the run carries, as the run and its gates show them. */
+/** (rev 12 §5.4) The "Data sources" section: which sources the run's agents read rows from, or that it is not known. */
+function dataUseSection(f: DeliverTextFacts): string[] {
+  if (f.dataUse === undefined) {
+    if (f.source !== 'workflow') return [];
+    return ['## Data sources', '', '_Not known in this text, which was composed at launch: the run record lists any data sources its agents read._', ''];
+  }
+  if (f.dataUse === 'unknown') {
+    return ['## Data sources', '', "_crew's agent-query record could not be read, so whether this run's agents read data sources is not known: see the run record._", ''];
+  }
+  const read = f.dataUse.filter((u) => u.queries > 0);
+  if (read.length === 0) return [];
+  const out = ['## Data sources', '', "This run's agents queried these data sources (crew's record: counts only, never the SQL or a value):", ''];
+  for (const u of read) {
+    out.push(`- ${code(u.source)}: ${u.queries} quer${u.queries === 1 ? 'y' : 'ies'}, ${u.rows} row${u.rows === 1 ? '' : 's'} released${u.truncated ? ' (some answers were cut at the cap)' : ''}`);
+  }
+  out.push('', '_The diff may hold values copied from them: check it before merging._', '');
+  return out;
+}
+
 function assuranceSection(a: DeliverAssuranceFact): string[] {
   const out = ['## Assurance', ''];
   if (a.mode === 'reduced') {
@@ -1151,6 +1186,8 @@ export function factsFromRun(
     /** crew#1192: the run's QE acceptance check as delivery reads it (`qeAcceptanceCheckFor`), when
      *  the caller read it: a satisfied `required` check with a verdict reads "QE acceptance passed". */
     qeAcceptance?: { status?: string; satisfied: boolean; verdictId: string | null; reviewer: string | null } | null;
+    /** (rev 12 §5.4) The run's data use as the agent-query record holds it, when the caller read it. */
+    dataUse?: DeliverDataUseFact[] | 'unknown';
   } = {},
 ): DeliverTextFacts {
   const s = view.session;
@@ -1195,6 +1232,7 @@ export function factsFromRun(
     ...(resolved.followUps !== undefined ? { followUps: resolved.followUps } : {}),
     ...(resolved.reports !== undefined ? { reports: resolved.reports } : {}),
     ...(assurance !== undefined ? { assurance } : {}),
+    ...(resolved.dataUse !== undefined ? { dataUse: resolved.dataUse } : {}),
   };
 }
 

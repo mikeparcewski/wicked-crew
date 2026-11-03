@@ -36,6 +36,7 @@ import { buildRestRequest, invokeRestTool } from '../mcp/rest.js';
 import { scrubSecrets } from '../mcp/secrets.js';
 import type { SeatTurnInput, SeatTurnOutcome } from '../standing-orders/parse.js';
 import { ASK_CELL_CHARS, ASK_DEADLINE_MS, ASK_QUESTION_MAX, ASK_RESULT_BYTES, ASK_ROW_CAP, ASK_STEP_ID, AskRunTokens, askCell, askPrompt, draftFromAnswer, draftHolds, rowsWithin } from './ask.js';
+import { agentMay } from './agent-access.js';
 import { pgPrivileges } from './catalog/postgres.js';
 import { testConnection } from './connection-test.js';
 import { policyCatalog, type SqlCatalog } from './catalog/types.js';
@@ -219,12 +220,24 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
       if (r === null) return reply;
       try {
         const src = await r.source(req.params.name);
+        // (rev 12 §5.4, codex r12 #1) An agent-kind bearer is no unit and has no project: it reads a catalog only
+        // for a source agents may see in every project. Anything else is the same 404 as no such source.
+        if (deps.actorOf(req).kind !== 'human' && !agentMay(src.agents, { enabled: src.enabled, kind: src.config.kind }, null, 'see')) {
+          return reply.code(404).send({ error: `no MCP server named ${req.params.name}`, code: 'unknown_server' });
+        }
         if (src.description === null) return reply.code(404).send({ error: `${req.params.name} has not been described yet`, code: 'not_described' });
+        const human = deps.actorOf(req).kind === 'human';
+        // An agent-kind bearer gets the structure as the agent tools give it: no privilege report, and no row
+        // estimates unless agents may query the source.
+        const catalog =
+          human || src.config.kind !== 'sql' || agentMay(src.agents, { enabled: src.enabled, kind: src.config.kind }, null, 'query')
+            ? src.description.catalog
+            : { ...(src.description.catalog as SqlCatalog), relations: (src.description.catalog as SqlCatalog).relations.map((rel) => ({ ...rel, rowEstimate: null })) };
         const body: SourceCatalogResponse = {
           name: req.params.name,
           kind: src.config.kind as 'sql' | 'graphql',
-          catalog: src.description.catalog,
-          ...(src.description.privileges !== undefined ? { privileges: src.description.privileges } : {}),
+          catalog,
+          ...(human && src.description.privileges !== undefined ? { privileges: src.description.privileges } : {}),
           descriptorHash: src.descriptorHash,
         };
         return body;

@@ -12,6 +12,32 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **Data sources as live knowledge for agents (api-types 0.180.0, DES-APPS-001 rev 12 §5.4, operator 2026-11-03).**
+  "It should be more than a catalogue - queries can happen through it, it's knowledge just needs to be orchestrated
+  differently." Governed run units and chat answer steps get three crew built-in tools through the broker, as the
+  reserved subjects `mcp:sources/list`, `mcp:sources/describe` and `mcp:sources/query` (the name `sources` is now
+  reserved; a registered server already holding it turns them off until it is renamed). `list` and `describe` answer
+  from crew's stored catalog and never dial a source; `describe` gives the structure inside Ask's bounds, with row
+  estimates only where agents may query. `query {name, sql, params?}` (SQL kinds) passes K1's read policy first, then
+  reads `READ ONLY` under the 10 s deadline cancelled at the source (Postgres: no parallel workers, `work_mem` 16MB),
+  at most 200 rows and 64 KB, cells cut at 2,000 characters, the source's secret scrubbed, and answers the rows
+  labelled as untrusted data from that source; at most 2 agent queries at once and 30 a minute per source. The unit
+  and its run's project are the engine's binding of the token (`resolveEstateScope`), and the engine judges the exact
+  subject (`listMcpTools`): every unit of an Apps run is denied (D-7), so `apps-turn`/`apps-publish` units get no
+  tool. Per source, three human-only controls (`PUT /sources/:name/agents`, 403 `agents_switch_human_only` for an
+  agent-kind token): "see" (on by default), "query" (off by default; a new connection descriptor turns it off again;
+  GraphQL is catalog-only) and the projects (none by default, so nothing reaches an agent until a person names one;
+  "every project" is a separate choice), read on every call: a switch turned off refuses the next call, and a read
+  already running has its rows withheld unless the whole predicate and the descriptor still hold. Audited
+  `apps.source.catalog_visible`/`catalog_hidden`, `apps.source.agent_query_allowed`/`agent_query_disallowed`,
+  `apps.source.agent_projects_set`, and `apps.source.agent_query` per query (unit, seat, source, the SQL's sha256,
+  rows, truncated, ms, outcome; never the SQL or a value). The agent-query record (`<state home>/mcp/source-queries.ndjson`)
+  is written before rows are released (else they are withheld) and backs `GET /sources/:name/agent-queries` (the last
+  20) and `GET /runs/:id/data-use` (`known: false` when unreadable, never "none"); a run's PR text gains a
+  **Data sources** section naming them. The shim's `list` shows the tools to a unit whose project reaches a source,
+  and a chat turn's instructions name its project's sources and the commands. An agent-kind bearer reads
+  `GET /sources/:name/catalog` only for a source seen by every project, without the privilege report or estimates.
+
 - **Data sources: Test connection, and ask a question of the data (api-types 0.179.0, operator 2026-11-03).**
   `POST /sources/:name/test` re-runs connect, describe and the read-policy check on a saved `sql` or `graphql` source
   with its saved credentials resolved now: the fresh description is saved (it replaces Describe again), and the

@@ -47,7 +47,7 @@ import type {
   McpUpstreamKind,
 } from '../core/types.js';
 import type { McpEngineGate } from '../core/adapter.js';
-import { ESTATE_SERVER, parseMcpSubject } from './classify.js';
+import { ESTATE_SERVER, parseMcpSubject, SOURCES_SERVER } from './classify.js';
 import type { McpCallRecordSink } from './call-records.js';
 import {
   classifyUpstreamError,
@@ -64,6 +64,7 @@ import { UpstreamCallError } from './upstream-error.js';
 import type { McpRegistry } from './registry.js';
 import { scrubSecrets } from './secrets.js';
 import { ESTATE_PROPOSAL_TOOL, proposalIdOf, rpcErrorEnvelope, scopeEstateArgs, type EstateRelay } from './estate-relay.js';
+import { SOURCES_TOOL_NAMES, type SourcesAgentTools, SourcesTokenError, type SourcesToolName } from '../sources/agent-tools.js';
 
 /** The bus event each call record rides. */
 export const MCP_CALL_COMPLETED = 'wicked.crew.mcp_call.completed';
@@ -133,6 +134,8 @@ export interface McpBrokerDeps {
   log?: (message: string) => void;
   /** The estate relay behind `mcp:estate/<tool>` (wicked-core#1018); absent = those calls are refused. */
   estate?: EstateRelay;
+  /** crew's data-source tools behind `mcp:sources/<tool>` (DES-APPS-001 rev 12 §5.4); absent = refused. */
+  sources?: SourcesAgentTools;
 }
 
 interface BreakerState {
@@ -191,6 +194,7 @@ export class McpBroker {
     if (parts === null) return { status: 400, body: { error: `subject must be mcp:<server>/<tool> (got ${JSON.stringify(body.subject)})`, code: 'bad_request' } };
     const span: Span = { start: this.now(), spanId: randomBytes(8).toString('hex'), subject: body.subject, verdict: null, kind: null, retries: 0, bytesOut: 0 };
     if (parts.server === ESTATE_SERVER) return this.callEstate(span, body, parts.tool);
+    if (parts.server === SOURCES_SERVER) return this.callSources(span, body, parts.tool);
 
     // ── 1-3. Resolve and judge ──────────────────────────────────────────────────────────────
     const gate = this.deps.engine();
@@ -423,6 +427,77 @@ export class McpBroker {
       if (proposalId !== null) relay.landed({ ...scope.unit, proposalId, kindType, callId: span.spanId });
     }
     return { status: 200, body: { outcome: 'ok', subject: body.subject, callId: span.spanId, result: scrubbed, ruleIds: [] } };
+  }
+
+  /**
+   * `mcp:sources/<tool>`: crew's data-source tools (DES-APPS-001 rev 12 §5.4, `sources/agent-tools.ts`). The
+   * token is resolved to its unit and run project by the ENGINE; the engine then judges the exact subject for
+   * that unit (D-7: no Apps unit gets one); the unit's budget is spent; the tool answers from crew's stored
+   * catalog, or reads through K1's policy; the call is recorded like any brokered call (never its arguments).
+   */
+  private async callSources(span: Span, body: McpCallBody, tool: string): Promise<McpBrokerAnswer> {
+    const tools = this.deps.sources;
+    span.kind = 'sql';
+    if (tools === undefined) {
+      return this.refuse(span, 'guard_error', 'guard_error', 'broker:sources', [], 'this daemon has no data-source tools', 'continue without them', null, null);
+    }
+    if (!(SOURCES_TOOL_NAMES as readonly string[]).includes(tool)) {
+      return this.refuse(span, 'denied', 'deny', 'sources:not-a-tool', ['sources:not-a-tool'], `mcp:sources/${tool} is not a tool: the data-source tools are ${SOURCES_TOOL_NAMES.map((t) => `mcp:sources/${t}`).join(', ')}`, 'list them with the shim\'s list', null, null);
+    }
+    const name = tool as SourcesToolName;
+    let scope: Awaited<ReturnType<SourcesAgentTools['resolve']>>;
+    let admitted: Awaited<ReturnType<SourcesAgentTools['admitted']>>;
+    try {
+      scope = await tools.resolve(body.token);
+      admitted = scope === null ? null : await tools.admitted(body.token, [name]);
+    } catch (err) {
+      const msg = message(err);
+      if (err instanceof SourcesTokenError) {
+        if (msg.startsWith('bad_request')) return { status: 400, body: { error: msg, code: 'bad_request' } };
+        return { status: 401, body: { error: msg, code: 'invalid_token' } };
+      }
+      return this.refuse(span, 'guard_error', 'guard_error', 'broker:sources', [], `the token's unit could not be read: ${msg}`, 'nothing ran; try again, and report it if it persists', null, null);
+    }
+    if (scope === null || admitted === null) {
+      return this.refuse(span, 'guard_error', 'guard_error', 'broker:sources', [], 'the linked engine cannot bind or judge a data-source call (wicked-core-ts predates resolveEstateScope or listMcpTools)', 'upgrade the engine; no data-source call runs unjudged', null, null);
+    }
+    span.verdict = { decision: 'allow', subject: body.subject, class: 'read', ruleIds: [], obligations: [], claimId: '', unit: scope.unit };
+    if (!admitted.has(name)) {
+      return this.refuse(span, 'denied', 'deny', 'engine:sources-tool', ['engine:sources-tool'], `${body.subject} is refused for this unit by the engine (a unit of an Apps run gets no source tool; otherwise a policy denies it)`, 'work from the files and the task as given', null, null);
+    }
+    if (await tools.nameTaken()) {
+      return this.refuse(span, 'guard_error', 'guard_error', 'broker:sources', [], `a registered server is named "${SOURCES_SERVER}", which crew now reserves for its data-source tools, so they are off until it is renamed`, 'the operator renames that server in studio -> MCP tools', 'sources_name_taken', null);
+    }
+    const unitKey = `${scope.unit.runId}:${scope.unit.ord}:${scope.unit.attempt}`;
+    const used = this.used.get(unitKey) ?? 0;
+    if (used >= this.budget) {
+      return this.refuse(span, 'budget_exhausted', 'deny', 'budget', [], `this unit has made its ${this.budget} MCP calls`, 'finish with what you have; the budget is per unit', null, null);
+    }
+    this.used.delete(unitKey);
+    this.used.set(unitKey, used + 1);
+    while (this.used.size > BUDGET_UNITS_MAX) this.used.delete(this.used.keys().next().value as string);
+
+    let out: Awaited<ReturnType<SourcesAgentTools['run']>>;
+    try {
+      out = await tools.run(name, body.args ?? {}, scope, span.spanId);
+    } catch (err) {
+      return this.refuse(span, 'guard_error', 'guard_error', 'broker:sources', [], `${body.subject} failed in crew (${message(err)}); nothing is shown`, 'try again, and report it if it persists', null, null);
+    }
+    if (!out.ok) return this.refuse(span, out.outcome, 'deny', out.ruleId, [out.ruleId], out.reason, out.remedy, null, null);
+    const result: Record<string, unknown> = { content: [{ type: 'text', text: JSON.stringify(out.answer) }], isError: out.isError };
+    span.bytesOut = Buffer.byteLength(JSON.stringify(result), 'utf8');
+    const record = this.record(span, 'ok', 'allow', 'broker:sources', [], out.isError ? 'tool_error' : null, null);
+    try {
+      await this.deps.records.append(record);
+    } catch (err) {
+      this.deps.log?.(`[mcp] the call record for ${body.subject} could not be written (${message(err)}); its result is withheld`);
+      return {
+        status: OUTCOME_STATUS.guard_error,
+        body: { outcome: 'guard_error', subject: body.subject, callId: null, ruleIds: [], reason: 'the call could not be recorded (D-3); its result is withheld', remedy: 'the call ran; its result is not shown' },
+      };
+    }
+    this.publish(record);
+    return { status: 200, body: { outcome: 'ok', subject: body.subject, callId: span.spanId, result, ruleIds: [] } };
   }
 
   private record(

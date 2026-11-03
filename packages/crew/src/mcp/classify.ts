@@ -23,6 +23,10 @@ export const MCP_SERVER_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
  *  `mcp:estate/<tool>` never reaches a registered server, and no server may be saved under it. */
 export const ESTATE_SERVER = 'estate';
 
+/** The reserved server name of crew's built-in data-source tools (DES-APPS-001 rev 12 §5.4,
+ *  `sources/agent-tools.ts`): `mcp:sources/<tool>` never reaches a registered server. */
+export const SOURCES_SERVER = 'sources';
+
 export function mcpSubject(server: string, tool: string): string {
   return `mcp:${server}/${tool}`;
 }
