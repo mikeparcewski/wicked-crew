@@ -758,9 +758,9 @@ async function main(): Promise<void> {
   } else if (command === 'governance') {
     await runGovernance(argv);
   } else if (command === 'apps-check') {
-    await runAppsCheck(argv);
+    process.exit(await runAppsCheck(argv));
   } else if (command === 'apps-produce') {
-    await runAppsProduce();
+    process.exit(await runAppsProduce());
   } else {
     console.error(`Unknown command: ${command ?? '(none)'}`);
     console.error('Usage: wicked-crew serve|start|resume|gate|status|mcp|governance|version');

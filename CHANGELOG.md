@@ -12,6 +12,20 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **Apps: Publish, the share link (api-types 0.181.0, DES-APPS-001 §9.3, slice K6; core-ts ^0.15.22).**
+  `POST /apps/:app/publish` (a human operator) binds the head tree and the publish settings. Those settings are the
+  targets, the site's address (the share link), the issuer and client, the audience and any embed origins. The route
+  then runs the deterministic publish check and launches an `apps-publish` run: QE is forced by the preset, and the
+  builders since the last publish are excluded from its QE seat. The run's `check` step (`wicked-crew apps-check
+  --publish`) rebuilds the manifest from today's state, which must still be the bound one, and checks every query
+  and action without running any. It prints the consent card, the manifest in words. The `produce` step
+  (`wicked-crew apps-produce`), which the engine runs only after consent and a QE PASS, packs the tree's checked
+  files and the snapshots by digest into the product image. It builds that image in the local engine (nothing is
+  pushed), writes the Teams package and the iframe snippet when chosen, and records the `published` receipt and
+  `AppPublished`. Studio's Share then shows the link. Both step routes take only that run's own Tool-step token.
+  `capabilities.apps.publish` is true. crew sets `WICKED_CREW_BIN` to its own CLI, and its release build carries the
+  app server artifact (`dist/apps-server`).
+
 - **Data sources: Test connection, and ask a question of the data (api-types 0.179.0, operator 2026-11-03).**
   `POST /sources/:name/test` re-runs connect, describe and the read-policy check on a saved `sql` or `graphql` source
   with its saved credentials resolved now: the fresh description is saved (it replaces Describe again), and the
