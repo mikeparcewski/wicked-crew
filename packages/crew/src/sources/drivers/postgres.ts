@@ -287,7 +287,8 @@ export async function pgRead(args: SqlConnectArgs, text: string, params: unknown
       let bytes = 0;
       const query = tx.unsafe(text, params as never).values();
       q = query;
-      await query.cursor(500, (batch) => {
+      // Small batches: the byte budget is checked as rows arrive, so at most one batch past it is ever held (codex r2).
+      await query.cursor(50, (batch) => {
         const b = batch as unknown as unknown[][] & { columns?: Array<{ name: string; type: number }> };
         // Only the first batch carries the columns (later ones may carry none, or null).
         if (Array.isArray(b.columns) && b.columns.length > 0) columns = b.columns;

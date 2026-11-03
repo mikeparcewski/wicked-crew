@@ -10,7 +10,7 @@
  */
 
 import type { AppCell, AppColumnType, AppOutputColumn } from '../../core/types.js';
-import { scrubSecrets } from '../../mcp/secrets.js';
+import { SECRET_REDACTION, scrubSecrets } from '../../mcp/secrets.js';
 
 /** §7.5 response caps. */
 export const RESULT_LIMITS = { rows: 5_000, bytes: 10 * 1024 * 1024, cellBytes: 64 * 1024, depth: 8 } as const;
@@ -42,40 +42,52 @@ export function parsePath(path: string): Step[] {
 
 /**
  * The values `path` selects in `root` (own properties only), at most `limit` of them (`more`: there were
- * others). Arrays are walked, never spread, so a source-sized array costs no more than `limit` (codex r1).
+ * others). Walked lazily, branch by branch, counting only the values the whole path reaches, so a
+ * source-sized array costs no more than `limit` and an empty branch never hides a later one (codex r1, r2).
  */
 export function selectPath(root: unknown, path: string, limit = Number.MAX_SAFE_INTEGER): unknown[] & { more?: boolean } {
-  let cur: unknown[] = [root];
+  const out: unknown[] = [];
   let more = false;
-  for (const step of parsePath(path)) {
-    const next: unknown[] = [];
-    for (const v of cur) {
-      if (next.length > limit) break;
-      if ('name' in step) {
-        if (v !== null && typeof v === 'object' && !Array.isArray(v) && Object.hasOwn(v, step.name)) next.push((v as Record<string, unknown>)[step.name]);
-      } else if ('index' in step) {
-        if (Array.isArray(v) && step.index < v.length) next.push(v[step.index]);
-      } else if (Array.isArray(v)) {
-        for (const x of v) {
-          if (next.length > limit) break;
-          next.push(x);
-        }
-      }
+  for (const v of walkPath(root, parsePath(path))) {
+    if (out.length >= limit) {
+      more = true;
+      break;
     }
-    cur = next;
-  }
-  if (cur.length > limit) {
-    more = true;
-    cur = cur.slice(0, limit);
+    out.push(v);
   }
   // `more` rides on the array without being one of its elements (non-enumerable).
-  return Object.defineProperty(cur, 'more', { value: more, enumerable: false }) as unknown[] & { more?: boolean };
+  return Object.defineProperty(out, 'more', { value: more, enumerable: false }) as unknown[] & { more?: boolean };
 }
 
-/** Whether the more path says another page exists: a value that is there and not null, false, 0 or empty. */
+/** Every value the steps reach from `v`, in order, one at a time. */
+function* walkPath(v: unknown, steps: readonly Step[], at = 0): Generator<unknown> {
+  if (at === steps.length) {
+    yield v;
+    return;
+  }
+  const step = steps[at]!;
+  if ('name' in step) {
+    if (v !== null && typeof v === 'object' && !Array.isArray(v) && Object.hasOwn(v, step.name)) yield* walkPath((v as Record<string, unknown>)[step.name], steps, at + 1);
+  } else if ('index' in step) {
+    if (Array.isArray(v) && step.index < v.length) yield* walkPath(v[step.index], steps, at + 1);
+  } else if (Array.isArray(v)) {
+    for (const x of v) yield* walkPath(x, steps, at + 1);
+  }
+}
+
+/**
+ * Whether the more path says another page exists: a value that is there and not null, false, 0 or empty.
+ * Read lazily until one says so; past a budget of values it says yes (a page is never claimed complete
+ * that was not read through; codex r2).
+ */
 export function morePathSays(root: unknown, path: string | undefined): boolean {
   if (path === undefined) return false;
-  return selectPath(root, path, 16).some((v) => v !== null && v !== undefined && v !== false && v !== 0 && v !== '' && !(Array.isArray(v) && v.length === 0));
+  let seen = 0;
+  for (const v of walkPath(root, parsePath(path))) {
+    if (v !== null && v !== undefined && v !== false && v !== 0 && v !== '' && !(Array.isArray(v) && v.length === 0)) return true;
+    if (++seen > 10_000) return true;
+  }
+  return false;
 }
 
 function depthOf(v: unknown, limit: number, d = 0): number {
@@ -205,6 +217,8 @@ export function projectRows(output: readonly AppOutputColumn[], rows: Iterable<R
       const c = coerceCell(col.type, raw);
       if (!c.ok) throw new ResultError(`row ${n}: column ${col.name} ${c.why} (declared ${col.type})`);
       let cell = c.cell;
+      // The text form (an object rendered as JSON) is scrubbed again before it is cut.
+      if (typeof cell === 'string' && live.length > 0) cell = scrubSecrets(cell, live);
       if (typeof cell === 'string' && Buffer.byteLength(cell, 'utf8') > RESULT_LIMITS.cellBytes) {
         cell = Buffer.from(cell, 'utf8').subarray(0, RESULT_LIMITS.cellBytes).toString('utf8').replace(/�$/, '');
         truncated = true;
@@ -222,14 +236,21 @@ export function projectRows(output: readonly AppOutputColumn[], rows: Iterable<R
   return { rows: out, truncated, bytes };
 }
 
-function scrubRaw(v: unknown, secrets: readonly string[]): unknown {
+/**
+ * A raw value with the source's secret taken out, walked to the same depth limit the cell has (codex r2): a
+ * string is scrubbed; a number, bigint or boolean whose text IS the secret is no value (null at the top, the
+ * redaction marker inside an object); keys are scrubbed too. Deeper than the limit refuses the row.
+ */
+function scrubRaw(v: unknown, secrets: readonly string[], depth = 0): unknown {
   if (typeof v === 'string') return scrubSecrets(v, secrets);
-  if (typeof v === 'number' || typeof v === 'bigint' || typeof v === 'boolean') return secrets.includes(String(v)) ? null : v;
-  if (typeof v === 'object') {
-    const text = JSON.stringify(v);
-    return secrets.some((x) => text.includes(x) || text.includes(JSON.stringify(x).slice(1, -1))) ? scrubSecrets(JSON.parse(text) as unknown, secrets) : v;
-  }
-  return v;
+  if (typeof v === 'number' || typeof v === 'bigint' || typeof v === 'boolean') return secrets.includes(String(v)) ? (depth === 0 ? null : SECRET_REDACTION) : v;
+  if (v === null || typeof v !== 'object') return v;
+  if (depth >= RESULT_LIMITS.depth) throw new ResultError(`a value nests deeper than ${RESULT_LIMITS.depth}`);
+  if (Array.isArray(v)) return v.map((x) => scrubRaw(x, secrets, depth + 1));
+  if (v instanceof Date) return v;
+  const out: Record<string, unknown> = {};
+  for (const [k, x] of Object.entries(v as Record<string, unknown>)) out[scrubSecrets(k, secrets)] = scrubRaw(x, secrets, depth + 1);
+  return out;
 }
 
 /** SQL rows (arrays aligned with `columns`) as objects by column name. */

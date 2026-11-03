@@ -50,6 +50,20 @@ describe('the executor: projection, coercion, paths, cache, limits (units)', () 
     expect(sel.more).toBe(true);
   });
 
+  it('codex r2: a secret inside an object (a number too) is redacted; an empty branch never hides a later one; the more path is read through; depth is checked before scrubbing', () => {
+    const out = [{ name: 'o', type: 'string' as const }];
+    const r = projectRows(out, [{ o: { n: 123456, s: 'x123456y', ['k123456']: 1 } }], false, ['123456']);
+    expect(String(r.rows[0]![0])).not.toContain('123456');
+    const groups = { groups: [...Array.from({ length: 5_002 }, () => ({ items: [] as Array<{ id: number }> })), { items: [{ id: 1 }] }] };
+    const sel = selectPath(groups, '$.groups[*].items[*]', 5_000);
+    expect(sel).toEqual([{ id: 1 }]);
+    expect(sel.more).toBe(false);
+    expect(morePathSays({ flags: [...Array.from({ length: 16 }, () => false), true] }, '$.flags[*]')).toBe(true);
+    let deep: unknown = 'leaf-123456';
+    for (let i = 0; i < 10_000; i++) deep = { d: deep };
+    expect(() => projectRows(out, [{ o: deep }], false, ['123456'])).toThrow(/deeper/);
+  });
+
   it('selects rows and reads the more path with the subset ($, .name, [*], [n]), own properties only', () => {
     const body = { data: { items: [{ id: 1 }, { id: 2 }], page: { next: 2 } } };
     expect(selectPath(body, '$.data.items[*]')).toEqual([{ id: 1 }, { id: 2 }]);

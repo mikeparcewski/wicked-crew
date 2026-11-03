@@ -158,7 +158,9 @@ export class AppExecutor {
           // Planned again once the slot is held: a read that waited never runs a plan the source has since
           // changed under (codex r1).
           const now = await this.plan(q, text, files.lock, bound.byName);
-          if (now.contractHash !== contractHash || now.descriptorHash !== descriptorHash || (await this.secret(now.plan)) !== secret) {
+          // A credential removed while it waited is a change like any other (codex r2).
+          const nowSecret = await this.secret(now.plan).catch(() => undefined);
+          if (now.contractHash !== contractHash || now.descriptorHash !== descriptorHash || nowSecret !== secret) {
             throw new AppExecError(409, 'contract_changed', `${q.source} changed while query ${q.id} waited: run it again`);
           }
           return this.execute(q, text, now.plan, bound, input.authorization, secret);
