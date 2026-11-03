@@ -12,6 +12,29 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **Data sources: Test connection, and ask a question of the data (api-types 0.179.0, operator 2026-11-03).**
+  `POST /sources/:name/test` re-runs connect, describe and the read-policy check on a saved `sql` or `graphql` source
+  with its saved credentials resolved now: the fresh description is saved (it replaces Describe again), and the
+  answer says how long it took, the TLS state (`verified`, `off` on a confirmed plaintext address, `local` for an
+  upload), the Postgres privilege report (read-only, or the tables the login can change), the read-policy check of a
+  probe `SELECT count(*)` of one table (prepared, never run), and when it ran; a failure is a result with crew's code,
+  and never carries the secret. `POST /sources/:name/ask {question}` (human operator only, 403 `ask_human_only`) hands
+  ONE seat the question and the source's structure as agents see it (names, types, keys, declared enum literals, row
+  estimates; no row, no credential, no host) through the standing-order parse's one-shot seat turn (one `understand`
+  step on the run engine, now `seatTurn` in `standing-orders/parse.ts`). The seat answers one read query and a
+  one-line explanation; crew checks it with the read policy and a prepare at the source, and nothing runs.
+  `POST /sources/:name/query {sql, confirm?}` (human operator only, 403 `query_human_only`) checks typed or edited SQL
+  the same way and answers a run token; with `confirm` it runs exactly the text crew checked for the source as it is
+  now (`409 query_changed` otherwise: an edit, another source, a new connection descriptor, a withdrawn view
+  allowance or a switch-off, also during the request): the read
+  policy again, `READ ONLY`, the 10 s deadline cancelled at the source, at most 50 rows and 1 MB of rows as encoded
+  (`truncated` past either). A query with parameters is refused at the check (`params`: nothing would bind them), a
+  switched-off source answers `409 source_disabled`, and an uploaded `.sqlite` file's BLOBs show as `\x` hex. The rows
+  go to that answer only, never to a seat, a log or the trail. A draft whose answer holds the source's secret (raw or
+  JSON-decoded) is shown nowhere (`502 draft_holds_secret`). SQLite reads now hold their byte budget while the rows
+  are collected. Audited `apps.source.asked` (one entry per ask, however it ends) and `apps.source.queried` (one per
+  run), with counts, relations and codes, never the question, the SQL or a value. SQL kinds
+  (Postgres, MySQL, SQLite uploads); GraphQL, REST and MCP keep the test call.
 - **Apps: actions run (api-types 0.178.0, DES-APPS-001 §7.3, §7.4, §9.4, slice K2b).** The action routes serve and
   `capabilities.apps.actions` is true: `POST /apps/:app/actions/:id/grant` (a person, once per action version),
   `DELETE …/grant`, `GET …/grant`, `POST …/prepare` (the card, generated from the resolved operation, and a record that

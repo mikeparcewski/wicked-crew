@@ -166,7 +166,7 @@ export async function sqliteDescribe(path: string, catalog: SqlCatalog, text: st
 export async function sqliteRead(path: string, catalog: SqlCatalog, text: string, params: unknown[], opts: ReadOptions = {}): Promise<SqlReadResult> {
   const started = Date.now();
   const a = await runChild(
-    { op: 'read', uri: snapshotUri(path), sql: text, params, maxRows: opts.maxRows ?? READ_MAX_ROWS, ...policyContext(catalog) },
+    { op: 'read', uri: snapshotUri(path), sql: text, params, maxRows: opts.maxRows ?? READ_MAX_ROWS, ...(opts.maxBytes !== undefined ? { maxBytes: opts.maxBytes } : {}), ...(opts.blobsAsHex === true ? { blobs: 'hex' } : {}), ...(opts.cellChars !== undefined ? { cellChars: opts.cellChars } : {}), ...policyContext(catalog) },
     opts.deadlineMs ?? STATEMENT_DEADLINE_MS,
     opts.signal,
   );

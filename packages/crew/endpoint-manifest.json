@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.178.0",
+  "apiTypesVersion": "0.179.0",
   "endpoints": [
     {
       "method": "GET",
@@ -2645,6 +2645,23 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/api/v1/sources/:name/ask",
+      "requestType": "SourceAskBody",
+      "responseType": "SourceAskResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        422,
+        502,
+        503,
+        504
+      ]
+    },
+    {
       "method": "GET",
       "path": "/api/v1/sources/:name/catalog",
       "requestType": null,
@@ -2703,6 +2720,22 @@
     },
     {
       "method": "POST",
+      "path": "/api/v1/sources/:name/query",
+      "requestType": "SourceQueryBody",
+      "responseType": "SourceQueryResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        502,
+        503,
+        504
+      ]
+    },
+    {
+      "method": "POST",
       "path": "/api/v1/sources/:name/safety",
       "requestType": "SourceSafetyBody",
       "responseType": "SourceSafetyResponse",
@@ -2714,6 +2747,18 @@
         502,
         503,
         504
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/sources/:name/test",
+      "requestType": null,
+      "responseType": "SourceConnectionTestResponse",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        503
       ]
     },
     {

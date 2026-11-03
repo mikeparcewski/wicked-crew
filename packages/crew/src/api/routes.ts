@@ -179,6 +179,7 @@ import { DEMO_PRESET, demoLaunchRoots, registerDemoDocumentRoute, registerDemoRo
 import { projectDocsRoot } from '../interactive/project-root.js';
 import { registerSkillsRoutes } from './skills.js';
 import { registerSourceRoutes } from '../sources/routes.js';
+import { seatTurn } from '../standing-orders/parse.js';
 import { registerMcpRoutes } from './mcp.js';
 import { chatMcpToolsFor } from './chat-mcp.js';
 import type { AskServer } from '../mcp/ask-server.js';
@@ -9259,13 +9260,16 @@ export function registerRoutes(
     audit,
     actorOf,
   });
-  // Apps data sources (DES-APPS-001 §5): the source sheet's routes over the same registry.
+  // Apps data sources (DES-APPS-001 §5): the source sheet's routes over the same registry. "Ask a
+  // question of this data" drafts through the standing-order parse's one-shot seat turn (one seat, one
+  // `understand` step, never the warm chat pool).
   registerSourceRoutes(app, {
     ...(runtime.mcp !== undefined ? { registry: runtime.mcp } : {}),
     audit,
     actorOf,
     // (K2b) Allow writes off withdraws the source's row-write grants.
     ...(appsWritePath !== undefined ? { rowWriteGrants: appsWritePath } : {}),
+    draft: seatTurn({ adapter, roster: rosterWithStanding }),
   });
 
   // ── The wicked-interactive bridge, reverse-proxied (DES-MERGE-001 §5.3/§7.2) ──
