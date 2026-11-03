@@ -389,6 +389,8 @@ import { gardenConformance, gardenPackCheck, type ConformanceRunner, type PackCh
 import { conformanceProvisioner, conformanceRuntimeRoot } from '../editors/conformance-runtime.js';
 import { EditorRegistry } from '../editors/registry.js';
 import { registerEditorRoutes } from '../editors/routes.js';
+import { registerAppRoutes } from '../apps/routes.js';
+import { AppStoreError, type AppStore } from '../apps/store.js';
 import { registerMcpInspectRoutes } from '../mcp-inspect/routes.js';
 import { discoverLivePlugin } from '../skills/plugin-source.js';
 import type { DecisionBusEmit } from '../decisions/events.js';
@@ -636,7 +638,7 @@ const RULE_STATUSES: ReadonlySet<string> = new Set(['active', 'retired', 'all'])
 // that would allow path traversal (slashes, dots-only segments, control chars).
 const SAFE_REPO_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 
-const RegisterRepoSchema = z
+export const RegisterRepoSchema = z
   .object({
     name: z
       .string()
@@ -656,17 +658,19 @@ const RegisterRepoSchema = z
     actor: z.string().min(1).max(256).optional(),
     /** crew#552: `false` = this onboarding chains no capture-learnings run (a one-off). */
     autoCapture: z.boolean().optional(),
+    /** (api-types 0.172.0, DES-APPS-001) A new empty repo under the apps root; no onboarding. */
+    create: z.literal(true).optional(),
   })
   .strict()
   .refine(
     (d) => {
       const hasRemote = typeof d.gitUrl === 'string' && d.gitUrl.length > 0;
       const hasLocal = typeof d.rootPath === 'string' && d.rootPath.length > 0;
-      // gitUrl alone (clone to default path), gitUrl + rootPath (clone to custom path),
-      // or rootPath alone (register existing local repo) — all valid.
-      return hasRemote || hasLocal;
+      // create alone (a new empty repo), gitUrl alone (clone to default path), gitUrl + rootPath (clone
+      // to custom path), or rootPath alone (register existing local repo) — all valid.
+      return d.create === true ? !hasRemote && !hasLocal : hasRemote || hasLocal;
     },
-    { message: 'Provide gitUrl (remote clone) or rootPath (local registration), or both.' },
+    { message: 'Provide create (a new empty repo), or gitUrl (remote clone) or rootPath (local registration), or both of those.' },
   );
 
 /** `POST /repos/:id/onboard`'s optional body (crew#496): where to file the run, and who asked. */
@@ -1379,6 +1383,10 @@ export interface RuntimeDeps {
   editorConformance?: ConformanceRunner;
   /** EP-C1 (tests): where `daemon-editors.json` lives; default = the crew state home. */
   editorsStateHome?: string;
+  /** DES-APPS-001 (K2a): the app store behind `/apps` and `POST /repos {create}`. `createServer` builds it over
+   *  the state home's `daemon-apps.json` and the apps root; a directly-driven route set gets the routes only when it
+   *  injects one (so a test never makes a repo under the real `~/.wicked/apps`). */
+  apps?: AppStore;
   /** The eval RUN history store behind `/testing/evals[/:id]` — `createServer` builds one over the
    *  daemon state home so every `POST /testing/evals/run` is recorded; a directly-driven route set
    *  (tests) gets one only when it injects it, so a test that never touches the eval routes writes
@@ -1729,6 +1737,16 @@ export function registerRoutes(
     conformance: runtime.editorConformance ?? gardenConformance(discoverLivePlugin()?.path ?? null, () => process.env['WICKED_CREW_URL'] ?? null, { provision: editorConformanceRuntime }),
     log: (m) => app.log.warn(m),
   });
+  // DES-APPS-001 §7.6 (K2a): the app store's routes, when this daemon has a store.
+  if (runtime.apps !== undefined) {
+    registerAppRoutes(app, {
+      store: runtime.apps,
+      audit,
+      ...(typeof adapter.projectsSupported === 'function' && adapter.projectsSupported()
+        ? { projectExists: async (id: string) => (await adapter.projectGet(id)) !== null }
+        : {}),
+    });
+  }
   const chatRecorder: ChatDecisionRecorder | null =
     decisions !== null && chatTranscripts !== undefined && runtime.broadcast !== undefined
       ? new ChatDecisionRecorder({
@@ -2086,6 +2104,20 @@ export function registerRoutes(
       // artifact and the runs the person names; `seedFromArtifact`); A2 (0.170.0) `proposals`. The operations are later
       // slices (all on, with `stub`, in the test configuration).
       chatArtifacts: { ...chatArtifactFlags },
+      // (api-types 0.172.0, DES-APPS-001 K2a) The app store is served; each later route says when it serves for real.
+      ...(runtime.apps !== undefined
+        ? {
+            apps: {
+              // (typed against the contract below: a renamed flag fails the build)
+              query: false,
+              actions: false,
+              turns: runtime.apps.turns !== null,
+              publish: false,
+              uploads: app.hasRoute({ method: 'POST', url: `${V}/apps/uploads` }),
+              sourceCheck: runtime.apps.sourceStage !== null,
+            } satisfies import('../core/types.js').AppsCapabilities,
+          }
+        : {}),
     };
     // wicked-core#411 / crew#497: the state-home blocker rides the health probe as a WARNING. The
     // daemon still SERVES (status stays ok — studio must load and show the blocker) but refuses to
@@ -2711,10 +2743,26 @@ export function registerRoutes(
    * (core has no unregister). A registered repo returns 201 with `onboardRunId: null` and
    * `onboardError` on launch failure, so callers can attach it to their project and retry onboarding.
    */
-  app.post(`${V}/repos`, async (req, reply) => {
+  app.post(`${V}/repos`, { config: { manifest: { requestType: 'RegisterRepoBody', statusCodes: [201, 400, 409, 422, 503] } } }, async (req, reply) => {
     const parsed = RegisterRepoSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
+    }
+    if (parsed.data.create === true) {
+      // DES-APPS-001 (K2a): `<apps root>/<name>`, `git init` with one empty commit, registered; an empty
+      // tree has nothing to onboard. A taken (or reserved) name is refused with a suggestion.
+      const store = runtime.apps;
+      if (store === undefined) return reply.code(503).send({ code: 'apps_unavailable', error: 'this daemon has no apps root to make a repo in' });
+      const name = parsed.data.name;
+      try {
+        const { repo } = await store.createRepo(name);
+        audit.record('repo.created', actorOf(req), { detail: { repoId: repo.id, name } });
+        return reply.code(201).send({ repo, onboardRunId: null });
+      } catch (err) {
+        if (err instanceof AppStoreError) return reply.code(err.status).send({ code: err.code, error: err.message, ...err.extra });
+        // A registration the engine refused: the repo was removed again, nothing is left.
+        return reply.code(400).send({ error: message(err) });
+      }
     }
     const refused = await onboardRefusal();
     if (refused !== null) return reply.code(refused.status).send(refused.body);

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.172.0",
+  "apiTypesVersion": "0.173.0",
   "endpoints": [
     {
       "method": "GET",
@@ -9,6 +9,210 @@
       "responseType": "VideoPaletteResponse",
       "statusCodes": [
         200
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/apps",
+      "requestType": null,
+      "responseType": "AppsListResponse",
+      "statusCodes": [
+        200,
+        400
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/apps",
+      "requestType": "CreateAppBody",
+      "responseType": "AppDetailResponse",
+      "statusCodes": [
+        201,
+        400,
+        404,
+        409,
+        422,
+        503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/apps/:app",
+      "requestType": null,
+      "responseType": "AppDetailResponse",
+      "statusCodes": [
+        200,
+        404,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/apps/:app/actions/:id/grant",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": [
+        403,
+        404,
+        501
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/apps/:app/actions/:id/grant",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": [
+        403,
+        404,
+        501
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/apps/:app/actions/:id/prepare",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": [
+        403,
+        404,
+        501
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/apps/:app/actions/:id/run",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": [
+        403,
+        404,
+        501
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/apps/:app/actions/records/:id",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": [
+        403,
+        404,
+        501
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/apps/:app/edits",
+      "requestType": "AppEditsBody",
+      "responseType": "AppLandedResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        422,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/apps/:app/publish",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": [
+        403,
+        404,
+        501
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/apps/:app/query",
+      "requestType": "AppQueryBody",
+      "responseType": "AppQueryResponse",
+      "statusCodes": [
+        400,
+        403,
+        404,
+        409,
+        501,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/apps/:app/redo",
+      "requestType": "AppHistoryMoveBody",
+      "responseType": "AppLandedResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        422,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/apps/:app/restore",
+      "requestType": "AppRestoreBody",
+      "responseType": "AppLandedResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        422,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/apps/:app/turns",
+      "requestType": "AppTurnBody",
+      "responseType": "AppTurnResponse",
+      "statusCodes": [
+        202,
+        400,
+        404,
+        409,
+        501,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/apps/:app/undo",
+      "requestType": "AppHistoryMoveBody",
+      "responseType": "AppLandedResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        422,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/apps/check",
+      "requestType": "AppsCheckBody",
+      "responseType": "AppsCheckResponse",
+      "statusCodes": [
+        200,
+        400,
+        401,
+        404,
+        409,
+        503
       ]
     },
     {
@@ -1480,9 +1684,15 @@
     {
       "method": "POST",
       "path": "/api/v1/repos",
-      "requestType": null,
+      "requestType": "RegisterRepoBody",
       "responseType": null,
-      "statusCodes": []
+      "statusCodes": [
+        201,
+        400,
+        409,
+        422,
+        503
+      ]
     },
     {
       "method": "GET",

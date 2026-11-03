@@ -14830,7 +14830,11 @@ export interface AppTurnState {
 
 /** `GET /apps` item. */
 export interface AppSummary {
-  /** `^[a-z][a-z0-9-]{0,47}$`; `check` and `uploads` are reserved. */
+  /**
+   * 1-48 characters, at most four words of `a-z 0-9` joined by `-`, starting with a letter
+   * (`^[a-z][a-z0-9]*(-[a-z0-9]+){0,3}$`): the app repo's id in crew's repo registry is the slug itself.
+   * `check` and `uploads` are reserved.
+   */
   slug: string;
   name: string;
   projectId: string;
@@ -14879,9 +14883,9 @@ export interface AppDetailResponse {
 export type AppEditOp = { op: 'spec'; spec: AppSpec } | { op: 'query-text'; query: string; text: string };
 
 /**
- * `POST /apps/:app/edits` (HUMAN operator only): one `you` version from one edit burst (1-50 ops). `base`
- * is the head version the edit was made on: a stale one is `409 stale_base`, and while a turn runs every
- * edit is `409 turn_in_flight`.
+ * `POST /apps/:app/edits` (HUMAN operator only): one `you` version from one edit burst (1-50 ops; the JSON
+ * body is at most 12 MB, which holds a whole spec and 50 query texts). `base` is the head version the edit
+ * was made on: a stale one is `409 stale_base`, and while a turn runs every edit is `409 turn_in_flight`.
  */
 export interface AppEditsBody {
   base: number;
@@ -14968,6 +14972,9 @@ export interface AppCheckFinding {
  *    accepted receipt for this app), `nothing_to_undo`, `nothing_to_redo`, `slug_taken` (with
  *    `suggestion`), `source_check_unavailable` (the tree has queries or actions and this daemon cannot
  *    run the source stage yet, so nothing lands);
+ *  - (api-types 0.173.0) 409 `unreadable_tree` (a tree crew landed no longer reads back from the app repo: the repo was changed);
+ *  - (api-types 0.173.0) the worker-facing `POST /apps/check` also answers 401 `invalid_token` and 409 `not_this_turn` (the token's
+ *    run is not the app's turn in flight); landing a turn refuses `not_checked` and `reviewer_not_distinct`;
  *  - 422 `check_failed` (with `findings`), `reserved_slug`;
  *  - 429 `rate_limited` (with `retryAfterMs`: a query queue or a per-viewer rate is full, DES §7.5);
  *  - 501 `not_implemented` (a route a later slice serves; nothing happened);
@@ -14992,6 +14999,11 @@ export interface AppErrorBody {
     | 'reserved_slug'
     | 'not_implemented'
     | 'rate_limited'
+    | 'unreadable_tree'
+    | 'invalid_token'
+    | 'not_this_turn'
+    | 'not_checked'
+    | 'reviewer_not_distinct'
     | 'apps_unavailable';
   error: string;
   /** `rate_limited`: when to try again (also sent as `Retry-After`). */
@@ -15001,6 +15013,28 @@ export interface AppErrorBody {
   findings?: AppCheckFinding[];
   suggestion?: string;
 }
+
+/**
+ * (api-types 0.173.0) `POST /apps/check` (worker-facing; the `apps_check` Tool runs `wicked-crew apps-check`, which sends the
+ * unit's capability token in the body, never as a bearer): check the builder's candidate commit of the
+ * app's turn in flight (DES §9.2 `check`).
+ */
+export interface AppsCheckBody {
+  token: string;
+  app: string;
+  /** The builder's candidate commit in the app repo. */
+  commit: string;
+  /** The publish manifest, for the publish check (a later slice). */
+  manifest?: unknown;
+}
+
+/**
+ * (api-types 0.173.0) `POST /apps/check` 200: on a pass, the commit crew made on the candidate with its lock (the only tree the
+ * turn's review can land) and what the check ran; on a refusal, why.
+ */
+export type AppsCheckResponse =
+  | { ok: true; commit: string; tree: string; summary: AppCheckSummary }
+  | { ok: false; code: 'check_failed' | 'source_check_unavailable'; findings: AppCheckFinding[] };
 
 /**
  * {@link HealthCapabilities.apps} (api-types 0.172.0): present when crew serves the app store
@@ -15025,8 +15059,10 @@ export interface AppsCapabilities {
 /**
  * `POST /repos` body. `create: true` (api-types 0.172.0, DES-APPS-001): crew makes `<apps root>/<name>`
  * (`~/.wicked/apps` by default), runs `git init` with one empty commit and registers it; no onboarding
- * run starts (`onboardRunId: null`), and `rootPath`/`gitUrl` are refused beside it. A taken name is
- * `409 slug_taken` with a `suggestion`.
+ * run starts (`onboardRunId: null`), and `rootPath`/`gitUrl` are refused beside it. With `create`, `name` is
+ * an app slug ({@link AppSummary.slug}; `check` and `uploads` are `422 reserved_slug`). A name that is
+ * taken (an app, a path under the apps root, or a registered repo id) is `409 slug_taken` with a
+ * `suggestion`.
  */
 export interface RegisterRepoBody {
   name: string;
