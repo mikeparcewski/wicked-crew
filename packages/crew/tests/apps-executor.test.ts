@@ -59,6 +59,11 @@ describe('the executor: projection, coercion, paths, cache, limits (units)', () 
     expect(sel).toEqual([{ id: 1 }]);
     expect(sel.more).toBe(false);
     expect(morePathSays({ flags: [...Array.from({ length: 16 }, () => false), true] }, '$.flags[*]')).toBe(true);
+    // codex r3: an own __proto__ key survives the copy; a Buffer renders as it always did.
+    const proto = projectRows(out, [{ o: JSON.parse('{"__proto__":{"label":"keep"},"ok":1}') as unknown }], false, ['unrelated']);
+    expect(proto.rows[0]![0]).toBe('{"__proto__":{"label":"keep"},"ok":1}');
+    const buf = projectRows(out, [{ o: Buffer.from([65, 66]) }], false, ['unrelated']);
+    expect(buf.rows[0]![0]).toBe('{"type":"Buffer","data":[65,66]}');
     let deep: unknown = 'leaf-123456';
     for (let i = 0; i < 10_000; i++) deep = { d: deep };
     expect(() => projectRows(out, [{ o: deep }], false, ['123456'])).toThrow(/deeper/);

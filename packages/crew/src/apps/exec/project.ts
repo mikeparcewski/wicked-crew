@@ -245,10 +245,14 @@ function scrubRaw(v: unknown, secrets: readonly string[], depth = 0): unknown {
   if (typeof v === 'string') return scrubSecrets(v, secrets);
   if (typeof v === 'number' || typeof v === 'bigint' || typeof v === 'boolean') return secrets.includes(String(v)) ? (depth === 0 ? null : SECRET_REDACTION) : v;
   if (v === null || typeof v !== 'object') return v;
+  if (v instanceof Date) return v;
+  // A value with its own JSON form (a Buffer from a `bytea`) is scrubbed in that form, as it will render (codex r3).
+  const toJSON = (v as { toJSON?: unknown }).toJSON;
+  if (typeof toJSON === 'function') return scrubRaw((toJSON as () => unknown).call(v), secrets, depth);
   if (depth >= RESULT_LIMITS.depth) throw new ResultError(`a value nests deeper than ${RESULT_LIMITS.depth}`);
   if (Array.isArray(v)) return v.map((x) => scrubRaw(x, secrets, depth + 1));
-  if (v instanceof Date) return v;
-  const out: Record<string, unknown> = {};
+  // Own keys only, `__proto__` included as data (codex r3): no inherited setter on the copy.
+  const out = Object.create(null) as Record<string, unknown>;
   for (const [k, x] of Object.entries(v as Record<string, unknown>)) out[scrubSecrets(k, secrets)] = scrubRaw(x, secrets, depth + 1);
   return out;
 }
