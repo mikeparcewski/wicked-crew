@@ -12355,6 +12355,29 @@ export interface McpAuthConfig {
 }
 
 /**
+ * (api-types 0.174.0, DES-APPS-001 §5.2) The ranges the person confirmed for one server's (or
+ * source's) connections. Every connection crew makes to it goes through ONE dialer that resolves
+ * the host once, checks EVERY address, connects to the checked address (keeping the name for TLS)
+ * and refuses redirects. With nothing confirmed, only global unicast addresses are reached, over
+ * TLS. A loopback or private address is reached only when a range here covers it. `0.0.0.0/8`,
+ * link-local (`169.254.0.0/16`, which holds `169.254.169.254`), CGNAT (`100.64.0.0/10`),
+ * `fd00:ec2::254`, multicast, documentation and reserved ranges are always refused and cannot be
+ * confirmed. An IPv4-mapped IPv6 address is judged as its IPv4 address.
+ */
+export interface McpAddressPolicy {
+  /**
+   * CIDR ranges wholly inside loopback (`127.0.0.0/8`, `::1/128`) or a private range
+   * (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`); at most 16. Anything else is a 400.
+   */
+  allow: string[];
+  /**
+   * Plaintext (`http:`) is accepted on a confirmed PRIVATE range. Loopback never needs it; a global
+   * address never gets it. `false`/absent = TLS only.
+   */
+  plaintext?: boolean;
+}
+
+/**
  * `POST /mcp/servers/preview`. `mcp-stdio` takes `command` (+ `args`); `mcp-http` takes `url`.
  * `rest` takes `url`, the base URL every call of the API is pinned to (its scheme, host and port,
  * and its path as a prefix), plus its OpenAPI 3 document: `openapiUrl` (fetched by crew) or
@@ -12375,6 +12398,17 @@ export interface McpServerConfigBody {
   openapi?: Record<string, unknown>;
   /** `rest` only: the operations to wrap, by `operationId` or tool name; absent = all. */
   operations?: string[];
+  /**
+   * (api-types 0.174.0, DES-APPS-001 §5.2) `mcp-http` and `rest` only (a 400 on `mcp-stdio`, a
+   * local program outside the dialer): the loopback/private ranges this server's connections may
+   * reach. The preview already dials under it, so a preview of a server whose host is loopback or
+   * private without a range covering it is a 409 `address_unconfirmed` naming the range to confirm
+   * (`address_refused` for an always-refused address, `plaintext_refused` for http where TLS is
+   * required). A non-empty `allow`, or
+   * `plaintext: true`, is a human operator's only, at the preview and at the save (else 403
+   * `address_confirm_human_only`), and the save audits it `mcp.server.address_confirmed`.
+   */
+  address?: McpAddressPolicy;
   /**
    * The secret VALUE this server's keychain entry will hold (wicked-crew#719). The preview is
    * probed with it and it is held with the preview; `POST /mcp/servers` writes it to the OS store
@@ -12453,6 +12487,13 @@ export interface McpServer {
   openapiUrl?: string | null;
   /** `rest` only: the operations that were picked; `null` = all. */
   operations?: string[] | null;
+  /**
+   * (api-types 0.174.0) `mcp-http` and `rest` only: the ranges confirmed for this server's
+   * connections. A server saved before 0.174.0 shows what crew re-derived for it: the IP literal or
+   * `localhost` it was registered at; a private host NAME is not re-derived, and its calls are
+   * refused until it is saved again with a range.
+   */
+  address?: McpAddressPolicy;
   authState: McpAuthState;
   enabled: boolean;
   health: McpHealth;
@@ -12534,6 +12575,8 @@ export interface McpPreviewResponse {
     auth: McpAuthConfig | null;
     openapiUrl?: string | null;
     operations?: string[] | null;
+    /** (api-types 0.174.0) `mcp-http` and `rest` only: the ranges this preview dialled under. */
+    address?: McpAddressPolicy;
   };
   serverInfo: { name: string; version: string } | null;
   tools: McpPreviewTool[];
@@ -12570,8 +12613,8 @@ export interface SaveMcpServerBody {
   /**
    * (api-types 0.112.0, G2) The operator naming the exact origin a `rest` server's calls go to
    * (`McpPreviewResponse.egress.origin`). Required when the preview's `egress.confirmRequired`
-   * (the base URL matches none of the document's `servers`, or its host is a loopback or private
-   * address, or did not resolve); without it, or with any other value, the save is a 409 `egress_unconfirmed`. It is
+   * (the base URL matches none of the document's `servers`; since 0.174.0 a loopback or private
+   * host is confirmed as a range in the config's `address` instead); without it, or with any other value, the save is a 409 `egress_unconfirmed`. It is
    * remembered with the server, so re-saving over the same origin does not ask again. Human
    * operator only (403 `egress_confirm_human_only`); audited `mcp.server.egress_confirmed`. A 400
    * `egress_not_rest` for a server that is not `rest`.
@@ -12596,16 +12639,21 @@ export interface McpRestEgress {
   servers: string[];
   /** The origin is one server's and the base path is that server's path or under it. */
   matches: boolean;
-  /** The host is `localhost`, or is or resolves to a loopback/private/link-local/unique-local address. */
+  /**
+   * The host is a loopback or private address (since api-types 0.174.0 always one the preview's
+   * `address` confirmed: an unconfirmed one fails the preview, and an always-refused one, like
+   * link-local or CGNAT, can never be confirmed).
+   */
   privateAddress: boolean;
   /**
-   * `false` = the host is a name that did not resolve at preview, so crew could not check that it
-   * is not private. An IP literal is always `true`.
+   * Since api-types 0.174.0 always `true`: a host that does not resolve fails the preview, because
+   * the dialer cannot check where it goes.
    */
   resolved: boolean;
   /**
-   * `!matches || privateAddress || !resolved`, unless this origin was already confirmed for this
-   * server by an earlier save: the save needs `allowOrigin`.
+   * `!matches`, unless this origin was already confirmed for this server by an earlier save: the
+   * save needs `allowOrigin`. (Before api-types 0.174.0 a private or unresolved host needed it too;
+   * addresses are now confirmed as ranges, in the config's `address`.)
    */
   confirmRequired: boolean;
 }
@@ -13834,7 +13882,18 @@ export interface DismissRecommendationResponse {
 export type McpInspectTarget =
   | { server: string }
   | { command: string; args?: string[]; env?: Record<string, string>; cwd?: string }
-  | { url: string; transport?: 'streamable-http' | 'sse'; headers?: Record<string, string> };
+  | {
+      url: string;
+      transport?: 'streamable-http' | 'sse';
+      headers?: Record<string, string>;
+      /**
+       * (api-types 0.174.0, DES-APPS-001 §5.2) Every request goes through crew's one dialer. A typed
+       * loopback IP literal or `localhost` is reachable as typed (http allowed); a typed private IP
+       * literal is reachable over https, and over http only with `plaintext: true` here; a private
+       * host NAME needs a range here (a 400 for a range outside loopback/private).
+       */
+      address?: McpAddressPolicy;
+    };
 
 /** `POST /mcp-inspect/sessions` */
 export interface McpInspectStartBody {

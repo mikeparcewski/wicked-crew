@@ -21,6 +21,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
 import type { McpAuthConfig, McpRestMapping, McpToolAnnotations, McpUpstreamKind } from '../core/types.js';
+import { addressPolicyOf, type AddressPolicy, boundFetch, type DialOptions, DialRefusedError, type DialRefusalCode } from '../sources/dialer.js';
 import { probeRestServer, type RestEgress } from './rest.js';
 import { scrubSecrets } from './secrets.js';
 
@@ -45,6 +46,12 @@ export interface McpUpstreamConfig {
   openapi?: Record<string, unknown> | null;
   /** `rest` only: the operations to wrap; `null`/absent = all. */
   operations?: string[] | null;
+  /**
+   * (DES-APPS-001 §5.2) The loopback/private ranges the person confirmed for this server, and
+   * whether plaintext is accepted on them. Every connection to an `mcp-http` or `rest` server goes
+   * through the dialer under it; absent = global unicast over TLS only. Not for `mcp-stdio`.
+   */
+  address?: AddressPolicy | null;
 }
 
 export interface ProbedTool {
@@ -59,7 +66,12 @@ export interface ProbedTool {
 
 export type ProbeResult =
   | { ok: true; serverInfo: { name: string; version: string } | null; tools: ProbedTool[]; skipped?: string[]; egress?: RestEgress }
-  | { ok: false; error: string };
+  | {
+      ok: false;
+      error: string;
+      /** (DES-APPS-001 §5.2) The dialer refused the connection: why, so the route can say so as a 409, not a 502. */
+      refusal?: DialRefusalCode;
+    };
 
 export type Prober = (config: McpUpstreamConfig, secret: string | null) => Promise<ProbeResult>;
 
@@ -85,7 +97,7 @@ function objectOrNull(raw: unknown): Record<string, unknown> | null {
  * The transport to one upstream, with the hardened env (stdio) or the auth header (http). Shared by
  * the probe and the broker's call path (`invoke.ts`), so both reach an upstream the same way.
  */
-export function transportFor(config: McpUpstreamConfig, secret: string | null): { transport: Transport; stderrTail: () => string } {
+export function transportFor(config: McpUpstreamConfig, secret: string | null, dial: DialOptions = {}): { transport: Transport; stderrTail: () => string } {
   if (config.kind === 'rest') throw new Error('a rest upstream is not an MCP server; it has no MCP transport');
   if (config.kind === 'mcp-stdio') {
     const env: Record<string, string> = { ...getDefaultEnvironment() };
@@ -99,7 +111,10 @@ export function transportFor(config: McpUpstreamConfig, secret: string | null): 
   }
   const headers: Record<string, string> = {};
   if (config.auth?.header !== undefined && secret !== null) headers[config.auth.header] = `${config.auth.prefix ?? ''}${secret}`;
-  const http = new StreamableHTTPClientTransport(new URL(config.url ?? ''), { requestInit: { headers } });
+  // (DES-APPS-001 §5.2) Every request the SDK makes goes through the ONE dialer under this server's
+  // address policy: resolved once, every address checked, pinned, no redirect followed, TLS unless
+  // the policy allows plaintext there.
+  const http = new StreamableHTTPClientTransport(new URL(config.url ?? ''), { requestInit: { headers }, fetch: boundFetch(addressPolicyOf(config), dial) as typeof fetch });
   // The SDK's own class declares `sessionId?: string` against its `Transport` interface, which
   // `exactOptionalPropertyTypes` refuses; the runtime shapes are the same.
   return { transport: http as unknown as Transport, stderrTail: () => '' };
@@ -142,14 +157,14 @@ export function stillStartingMessage(budgetMs: number, kind: McpUpstreamKind): s
 /** The real prober. Every string it returns has `secret` scrubbed out. */
 export const probeMcpServer: Prober = async (config, secret) => probeMcpServerWithin(config, secret, DEFAULT_BUDGET);
 
-export async function probeMcpServerWithin(config: McpUpstreamConfig, secret: string | null, budget: ProbeBudget): Promise<ProbeResult> {
+export async function probeMcpServerWithin(config: McpUpstreamConfig, secret: string | null, budget: ProbeBudget, dial: DialOptions = {}): Promise<ProbeResult> {
   if (config.kind === 'rest') return probeRestServer(config, secret);
   const secrets = secret === null ? [] : [secret];
   const end = budget.now() + budget.budgetMs;
   let lastTail = '';
   for (let attempt = 0; ; attempt++) {
     const remaining = end - budget.now();
-    const outcome = await probeOnce(config, secret, Math.max(remaining, 1));
+    const outcome = await probeOnce(config, secret, Math.max(remaining, 1), dial);
     if (outcome.ok) return scrubSecrets(outcome.result, secrets);
     lastTail = outcome.tail;
     const retryable = outcome.stillStarting || (config.kind === 'mcp-http' && notListening(outcome.message));
@@ -164,17 +179,17 @@ export async function probeMcpServerWithin(config: McpUpstreamConfig, secret: st
       continue;
     }
     const message = retryable ? stillStartingMessage(budget.budgetMs, config.kind) : outcome.message;
-    return scrubSecrets({ ok: false, error: lastTail === '' ? message : `${message}; stderr: ${lastTail}` }, secrets);
+    return scrubSecrets({ ok: false, error: lastTail === '' ? message : `${message}; stderr: ${lastTail}`, ...(outcome.refusal !== undefined ? { refusal: outcome.refusal } : {}) }, secrets);
   }
 }
 
 type Attempt =
   | { ok: true; result: ProbeResult }
-  | { ok: false; message: string; tail: string; stillStarting: boolean };
+  | { ok: false; message: string; tail: string; stillStarting: boolean; refusal?: DialRefusalCode };
 
 /** One connect + `tools/list`, within `deadlineMs`. Secrets are scrubbed by the caller. */
-async function probeOnce(config: McpUpstreamConfig, secret: string | null, deadlineMs: number): Promise<Attempt> {
-  const { transport, stderrTail } = transportFor(config, secret);
+async function probeOnce(config: McpUpstreamConfig, secret: string | null, deadlineMs: number, dial: DialOptions): Promise<Attempt> {
+  const { transport, stderrTail } = transportFor(config, secret, dial);
   const client = new Client({ name: 'wicked-crew-mcp-probe', version: '1' }, { capabilities: {} });
   let timer: NodeJS.Timeout | undefined;
   const deadline = new Promise<never>((_, reject) => {
@@ -207,7 +222,7 @@ async function probeOnce(config: McpUpstreamConfig, secret: string | null, deadl
   } catch (err) {
     work.catch(() => undefined);
     const message = err instanceof Error ? err.message : String(err);
-    return { ok: false, message, tail: stderrTail().trim(), stillStarting: err instanceof StillStarting };
+    return { ok: false, message, tail: stderrTail().trim(), stillStarting: err instanceof StillStarting, ...(err instanceof DialRefusedError ? { refusal: err.code } : {}) };
   } finally {
     clearTimeout(timer);
     await client.close().catch(() => undefined);

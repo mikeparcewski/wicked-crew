@@ -554,7 +554,8 @@ describe('G2: a REST tool approval covers where its calls go (real engine)', () 
     info: { title: 'Notes', version: '1' },
     paths: { '/notes': { get: { operationId: 'listNotes' }, post: { operationId: 'addNote', requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { text: { type: 'string' } } } } } } } } },
   };
-  const restBody = (url: string) => ({ name: 'notes', kind: 'rest', url, openapi: DOC });
+  // DES-APPS-001 §5.2: the loopback base is reachable only under a confirmed range (a human operator's).
+  const restBody = (url: string) => ({ name: 'notes', kind: 'rest', url, openapi: DOC, address: { allow: ['127.0.0.0/8'] } });
   const preview = async (url: string) => (await call('POST', '/mcp/servers/preview', restBody(url))).json() as McpPreviewResponse;
   // An inline document previews in a few ms, so these tests reach the engine within its first
   // ~100 ms. They used to wait here for the engine's seeded ledgers; the adapter now holds its store

@@ -29,6 +29,7 @@ import { join } from 'node:path';
 import { constants, createHash, createPublicKey, verify as cryptoVerify } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Actor, ActorKind, TrustLevel } from '../core/types.js';
+import { type AddressPolicy, dialFetch, type DialOptions, exactRangesFor, validateAllowRanges } from '../sources/dialer.js';
 import { API_PREFIX } from './api-prefix.js';
 
 declare module 'fastify' {
@@ -229,6 +230,13 @@ export interface OidcConfig {
   /** Explicit JWKS URI; omit to use the discovery document's `jwks_uri`. */
   jwksUri?: string;
   /**
+   * (DES-APPS-001 §5.2) Loopback/private CIDR ranges the issuer and its keys may be reached at, when
+   * the IdP is named by a host NAME on a private network. An issuer (or `jwksUri`) written as a
+   * loopback/private IP literal, or as `localhost`, is confirmed by itself; anything else is global
+   * unicast only. A discovery document's `jwks_uri` never widens this.
+   */
+  allowRanges?: string[];
+  /**
    * Claim mapping. `id` defaults to `sub`; `trust` names a claim whose value is
    * a {@link TrustLevel} (defaults to the `defaultTrust` below when absent).
    * OIDC-verified principals are always `kind: 'human'` — workloads use tokens.
@@ -271,14 +279,55 @@ function base64urlDecode(s: string): Buffer {
   return Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat(pad), 'base64');
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
-  if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url}`);
-  return res.json() as Promise<T>;
+/** The largest discovery or JWKS document crew reads. */
+const OIDC_DOC_MAX_BYTES = 1024 * 1024;
+
+/**
+ * (DES-APPS-001 §5.2, S10) OIDC discovery and keys go through the ONE dialer: resolved once, every
+ * address checked and pinned, redirects refused. The issuer is the operator's own configuration, so
+ * only the ranges it names are allowed ({@link oidcAddressPolicy}); metadata, link-local and the
+ * other always-refused ranges never are, even when a discovery document names them as `jwks_uri`.
+ */
+async function fetchJson<T>(url: string, policy: AddressPolicy, dial: DialOptions = {}): Promise<T> {
+  const res = await dialFetch(url, { signal: AbortSignal.timeout(10_000), headers: { accept: 'application/json' } }, policy, dial);
+  if (!res.ok) {
+    await res.body?.cancel().catch(() => undefined);
+    throw new Error(`HTTP ${res.status} fetching ${url}`);
+  }
+  const reader = res.body?.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    if (reader === undefined) break;
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > OIDC_DOC_MAX_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error(`the document at ${url} is larger than ${OIDC_DOC_MAX_BYTES} bytes`);
+    }
+    chunks.push(value);
+  }
+  const text = Buffer.concat(chunks).toString('utf8');
+  if (text.trim() === '') throw new Error(`the document at ${url} is empty`);
+  return JSON.parse(text) as T;
 }
 
-async function fetchJwks(jwksUri: string): Promise<Map<string, Jwk>> {
-  const doc = await fetchJson<JwksResponse>(jwksUri);
+/**
+ * (DES-APPS-001 §5.2) Where the daemon may reach its IdP: the ranges its own configuration names
+ * (`allowRanges`), and the exact loopback/private address an issuer or `jwksUri` written as an IP
+ * literal (or `localhost`) names. One policy for discovery AND keys: a discovery document cannot
+ * add a destination the operator did not configure.
+ */
+export function oidcAddressPolicy(config: Pick<OidcConfig, 'issuer' | 'jwksUri' | 'allowRanges'>): AddressPolicy {
+  return { allow: [...(config.allowRanges ?? []), ...exactRangesFor(config.issuer), ...exactRangesFor(config.jwksUri)], plaintext: false };
+}
+
+/** A test seam: how a verifier's IdP connections resolve and trust (resolver, CA). Production passes none. */
+const OIDC_DIAL = new WeakMap<OidcConfig, DialOptions>();
+
+async function fetchJwks(jwksUri: string, policy: AddressPolicy, dial: DialOptions): Promise<Map<string, Jwk>> {
+  const doc = await fetchJson<JwksResponse>(jwksUri, policy, dial);
   const map = new Map<string, Jwk>();
   for (const key of doc.keys ?? []) {
     if (key.use !== undefined && key.use !== 'sig') continue;
@@ -293,6 +342,8 @@ async function resolveJwksUri(config: OidcConfig): Promise<string> {
   if (config.jwksUri) return config.jwksUri;
   const discovery = await fetchJson<DiscoveryDoc>(
     `${config.issuer.replace(/\/$/, '')}/.well-known/openid-configuration`,
+    oidcAddressPolicy(config),
+    OIDC_DIAL.get(config) ?? {},
   );
   return discovery.jwks_uri;
 }
@@ -311,7 +362,7 @@ async function getJwk(
   }
   // Fetch (or re-fetch on stale/miss).
   const uri = await resolveJwksUri(config);
-  const keys = await fetchJwks(uri);
+  const keys = await fetchJwks(uri, oidcAddressPolicy(config), OIDC_DIAL.get(config) ?? {});
   JWKS_CACHE.set(config.issuer, { keys, fetchedAt: Date.now() });
   return keys.get(kid) ?? null;
 }
@@ -422,7 +473,8 @@ function mapOidcActor(payload: JwtPayload, config: OidcConfig): Actor {
  * Supports RS256/384/512, ES256/384/512, PS256/384/512. JWKS keys are cached
  * per issuer with a 5-minute TTL and auto-refreshed on unknown kid.
  */
-export function createOidcVerifier(config: OidcConfig): TokenVerifier {
+export function createOidcVerifier(config: OidcConfig, deps: { dial?: DialOptions } = {}): TokenVerifier {
+  if (deps.dial !== undefined) OIDC_DIAL.set(config, deps.dial);
   // Validate config at creation time — a misconfigured issuer URL is caught
   // immediately at boot rather than silently during the first verification.
   if (!config.issuer || !config.issuer.startsWith('https://')) {
@@ -433,6 +485,10 @@ export function createOidcVerifier(config: OidcConfig): TokenVerifier {
   }
   if (!config.audience) {
     throw new Error(`[auth] OIDC config: 'audience' is required`);
+  }
+  if (config.allowRanges !== undefined) {
+    const problem = Array.isArray(config.allowRanges) && config.allowRanges.every((r) => typeof r === 'string') ? validateAllowRanges(config.allowRanges) : 'it must be a list of CIDR strings';
+    if (problem !== null) throw new Error(`[auth] OIDC config: 'allowRanges': ${problem}`);
   }
   return {
     name: 'oidc',

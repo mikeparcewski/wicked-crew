@@ -33,6 +33,32 @@ mentioned only where a daemon release depends on them.
   `AppErrorBody` codes (`unreadable_tree`, `invalid_token`, `not_this_turn`, `not_checked`,
   `reviewer_not_distinct`).
 
+### Fixed
+
+- **One dialer for every connection crew makes to a source (api-types 0.174.0, DES-APPS-001 §5.2, S10).** A `rest`
+  server's OpenAPI document was fetched before any address was looked at (`mcp/rest.ts`, then `restEgress` resolved the
+  base URL's host separately), its tool calls and every `mcp-http` request used plain `fetch` with no address check,
+  and OIDC discovery followed redirects. All of them now go through `src/sources/dialer.ts`: a host is resolved once,
+  every address is checked (one refused address refuses the connection), an IPv4-mapped address is judged as its IPv4
+  address, the connection goes to the checked address while TLS keeps the hostname, and any redirect is refused.
+  Global unicast only by default; loopback and private ranges only where the person confirmed a range for that server
+  (`address: {allow, plaintext}` on `POST /mcp/servers/preview`, human operator only, at the preview and the save, 403
+  `address_confirm_human_only`; audited `mcp.server.address_confirmed`); a preview the dialer refuses is a 409 naming
+  why (`address_unconfirmed`, `address_refused`, `plaintext_refused`). Metadata (`169.254.169.254`, `fd00:ec2::254`,
+  `fd20:ce::254`), link-local, CGNAT, `0.0.0.0/8` and the IPv4-embedding IPv6 forms are always refused. Plaintext only
+  to loopback or a private range confirmed as plaintext. G2's `allowOrigin` now confirms only a base URL the spec does
+  not list. A server saved before this keeps working when it was registered at a loopback or private IP literal or
+  `localhost` (that exact address is re-derived; a private literal registered over plain http keeps plaintext); one at a
+  private host NAME is refused with the range to confirm until it is saved again, and one reached over plain http at a
+  public address must move to https.
+  The MCP inspector dials the same way (a registered server under its confirmed ranges; a typed URL under the IP
+  literal or `localhost` it names, or an `address` it carries). OIDC discovery and keys reach only what the operator
+  configured: an issuer or `jwksUri` written as a loopback/private IP literal or `localhost`, or the new `allowRanges`
+  in the OIDC config; a discovery document's `jwks_uri` never widens it. Answers are decoded (gzip, deflate, br) as
+  `fetch` did; an upgrade or an early close rejects instead of hanging; a name with several addresses falls back across
+  the checked ones (dual-stack `localhost`) without resolving again. `mcp-stdio` servers are outside the dialer (a
+  local program the person installed).
+
 ## [0.16.13] — 2026-11-03
 
 A feature release on wicked-core-ts ^0.15.21 and wicked-crew-api-types 0.172.0, bundling wicked-studio 0.14.1. It carries the PRs since 0.16.12 (#1263, #1269, #1278, #1283, #1285) and raises the interactive bridge floor. Make it creates a grounded document from a chat, exactly once (A3, #1278), and its draft lands only on the head it started from, now that crew spawns wicked-interactive ^0.15.0. An editor plugin's frame can no longer use WebRTC (#1269). The Apps schema and the app store's wire contract (K2a, #1285) are types and validation only: no daemon route serves them yet. The release smoke runs on wicked-ci f1775d8 (#1283), and the site has studio's look (#1263, site only). Pins: wicked-core-ts ^0.15.21, wicked-studio ^0.14.1, wicked-vault ^0.8.0, wicked-interactive ^0.15.0 (bridge floor, was ^0.14.1), wicked-crew-api-types 0.172.0.

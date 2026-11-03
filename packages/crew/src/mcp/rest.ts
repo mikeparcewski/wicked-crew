@@ -20,12 +20,12 @@
  * Ideas only from ContextForge (`openapi_service.py`, `tool_service.py`); no code is copied.
  */
 
-import { lookup } from 'node:dns/promises';
-import { BlockList, isIP } from 'node:net';
+import { isIP } from 'node:net';
 
 import { parse as parseYaml } from 'yaml';
 
 import type { McpRestEgress, McpRestMapping, McpToolAnnotations } from '../core/types.js';
+import { addressPolicyOf, boundFetch, checkScheme, classifyAddress, DialRedirectRefusedError, DialRefusedError, type DialFetch, type DialTarget, resolveTarget, type Resolver, systemResolver } from '../sources/dialer.js';
 import type { UpstreamToolResult } from './invoke.js';
 import type { HashedRestTarget } from './classify.js';
 import type { McpUpstreamConfig, ProbedTool, ProbeResult } from './probe.js';
@@ -110,51 +110,23 @@ export function restTarget(config: Pick<McpUpstreamConfig, 'url' | 'auth'>): Has
   return { origin: base.origin, basePath: basePath(base), authHeader: config.auth?.header?.toLowerCase() ?? null };
 }
 
-// ── Egress: the base URL against the spec's `servers`, and private addresses (G2) ───────────
+// ── Egress: the base URL against the spec's `servers` (G2); addresses are the dialer's ────────
 
 /**
- * Loopback, private, link-local, CGNAT, "this network", unique-local and (deprecated, RFC 3879)
- * site-local ranges, plus the local-use
- * IPv4/IPv6 translation prefix (RFC 8215), which may reach private IPv4. `BlockList` also matches
- * an IPv4-mapped IPv6 address (`::ffff:127.0.0.1`) against the IPv4 rules.
+ * Whether an IP literal is NOT a global unicast address: loopback, private, or one the dialer always
+ * refuses (link-local, CGNAT, "this network", NAT64, …). An IPv4-mapped IPv6 address
+ * (`::ffff:127.0.0.1`) is judged as its IPv4 address. Not an IP → `false`. Informational since the
+ * dialer (`sources/dialer.ts`) judges every connection itself.
  */
-const PRIVATE_RANGES = (() => {
-  const list = new BlockList();
-  for (const [net, prefix] of [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.168.0.0', 16]] as const) {
-    list.addSubnet(net, prefix, 'ipv4');
-  }
-  for (const [net, prefix] of [['::', 128], ['::1', 128], ['fc00::', 7], ['fe80::', 10], ['fec0::', 10], ['64:ff9b:1::', 48]] as const) list.addSubnet(net, prefix, 'ipv6');
-  return list;
-})();
-
-/** Whether an IP literal is a loopback/private/link-local/unique-local address. Not an IP → `false`. */
 export function isPrivateAddress(ip: string): boolean {
-  const family = isIP(ip);
-  if (family === 0) return false;
-  return PRIVATE_RANGES.check(ip, family === 4 ? 'ipv4' : 'ipv6');
+  if (isIP(ip.replace(/^\[|\]$/g, '')) === 0) return false;
+  return classifyAddress(ip).cls !== 'global';
 }
 
 /** Resolves a hostname to its addresses; `[]` when it does not resolve. Injectable for tests. */
-export type RestLookup = (hostname: string) => Promise<string[]>;
+export type RestLookup = Resolver;
 
-const LOOKUP_TIMEOUT_MS = 3_000;
-
-export const dnsLookup: RestLookup = async (hostname) => {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    const found = await Promise.race([
-      lookup(hostname, { all: true, verbatim: true }),
-      new Promise<never>((_r, reject) => {
-        timer = setTimeout(() => reject(new Error('timeout')), LOOKUP_TIMEOUT_MS);
-      }),
-    ]);
-    return found.map((a) => a.address);
-  } catch {
-    return [];
-  } finally {
-    clearTimeout(timer);
-  }
-};
+export const dnsLookup: RestLookup = systemResolver;
 
 /**
  * The spec's `servers`, each resolved to an absolute URL: `{variable}`s take their `default`, and a
@@ -195,26 +167,21 @@ export function specServers(doc: Record<string, unknown>, specUrl: string | null
 /** What the probe finds of a `rest` server's egress (G2); the registry adds `confirmRequired`. */
 export type RestEgress = Omit<McpRestEgress, 'confirmRequired'>;
 
-/** Check `base` against the spec's `servers`, and whether its host is a private address. */
-export async function restEgress(base: URL, doc: Record<string, unknown>, specUrl: string | null, lookupImpl: RestLookup = dnsLookup): Promise<RestEgress> {
+/**
+ * Check `base` against the spec's `servers`. `target` is the base host as the dialer resolved and
+ * checked it (DES-APPS-001 §5.2): an address it refuses never reaches here, so `privateAddress` only
+ * reports a loopback or private range the person confirmed, and `resolved` is always `true`.
+ */
+export function restEgress(base: URL, doc: Record<string, unknown>, specUrl: string | null, target: Pick<DialTarget, 'cls'> & { addresses?: DialTarget['addresses'] }): RestEgress {
   const servers = specServers(doc, specUrl);
   const path = basePath(base);
   const matches = servers.some((s) => {
     const prefix = basePath(s);
     return s.origin === base.origin && (prefix === '' || path === prefix || path.startsWith(`${prefix}/`));
   });
-  // The URL parser has already normalized an IP literal (`0x7f.1` → `127.0.0.1`); an IPv6 one keeps
-  // its brackets. A name is resolved exactly as the request will name it (a trailing dot included).
-  const host = base.hostname.replace(/^\[|\]$/g, '');
-  const name = host.toLowerCase().replace(/\.$/, '');
-  let privateAddress = name === 'localhost' || name.endsWith('.localhost') || isPrivateAddress(host);
-  let resolved = true;
-  if (!privateAddress && isIP(host) === 0) {
-    const addresses = await lookupImpl(host);
-    resolved = addresses.length > 0;
-    privateAddress = addresses.some(isPrivateAddress);
-  }
-  return { origin: base.origin, basePath: path, servers: servers.map((s) => s.href), matches, privateAddress, resolved };
+  // Any checked address, not just the first: a call may fall back to any of them.
+  const privateAddress = (target.addresses ?? [target]).some((a) => a.cls !== 'global');
+  return { origin: base.origin, basePath: path, servers: servers.map((s) => s.href), matches, privateAddress, resolved: true };
 }
 
 /**
@@ -556,7 +523,21 @@ function authHeaders(config: McpUpstreamConfig, secret: string | null): Record<s
 
 // ── The probe ───────────────────────────────────────────────────────────────────────────────
 
-export type RestFetch = typeof fetch;
+export type RestFetch = DialFetch;
+
+/**
+ * How a `rest` server is reached: the dialer (`sources/dialer.ts`) under the server's own address
+ * policy, unless a test hands in a `fetch` and a resolver. Production callers pass nothing.
+ */
+export interface RestDial {
+  fetch?: RestFetch;
+  resolver?: Resolver;
+}
+
+function dialOf(config: McpUpstreamConfig, dial: RestDial): { fetch: RestFetch; resolver: Resolver } {
+  const resolver = dial.resolver ?? systemResolver;
+  return { fetch: dial.fetch ?? boundFetch(addressPolicyOf(config), { resolver }), resolver };
+}
 
 /**
  * The `rest` probe: read the OpenAPI document and wrap its operations. The auth header goes to the
@@ -567,15 +548,23 @@ export type RestFetch = typeof fetch;
  * preview time (an API's spec often lives elsewhere, e.g. a docs host), not a worker's call, and it
  * carries no secret off the API's origin. The host pin (I6) is on the tools' calls.
  *
- * (G2) It also answers `egress`: the base URL checked against the document's `servers`, and
- * whether its host is a private address. The registry refuses to save a mismatch or a private
- * address unless the operator names that exact origin.
+ * (DES-APPS-001 §5.2) Every connection goes through the ONE dialer under the server's address
+ * policy: the base URL's host is resolved and checked FIRST (a refused or unconfirmed address
+ * fails the probe before anything is fetched), and the document download is itself a dialled
+ * request, checked at its own connection and never redirected. This replaces the old
+ * fetch-then-check, which downloaded the document before any address was looked at.
+ *
+ * (G2) It also answers `egress`: the base URL checked against the document's `servers`.
  */
-export async function probeRestServer(config: McpUpstreamConfig, secret: string | null, fetchImpl: RestFetch = fetch, lookupImpl: RestLookup = dnsLookup): Promise<ProbeResult> {
+export async function probeRestServer(config: McpUpstreamConfig, secret: string | null, dial: RestDial = {}): Promise<ProbeResult> {
   const secrets = secret === null ? [] : [secret];
+  const { fetch: fetchImpl, resolver } = dialOf(config, dial);
   try {
     const base = parseBaseUrl(config.url);
     if (base === null) throw new Error('a rest server needs an http(s) base url with no credentials, query or fragment');
+    const target = await resolveTarget(base.hostname, addressPolicyOf(config), resolver);
+    // A preview never accepts a base URL every call would refuse (plaintext where TLS is required).
+    checkScheme(base, target, addressPolicyOf(config));
     let doc: Json;
     if (config.openapi !== null && config.openapi !== undefined) {
       doc = config.openapi;
@@ -596,11 +585,11 @@ export async function probeRestServer(config: McpUpstreamConfig, secret: string 
       const sample = Object.fromEntries(Object.values(t.rest.pathMap).map((v) => [v, 'x']));
       pinnedUrl(base, t.rest.pathTemplate, sample);
     }
-    const egress = await restEgress(base, doc, config.openapi !== null && config.openapi !== undefined ? null : (config.openapiUrl ?? null), lookupImpl);
+    const egress = restEgress(base, doc, config.openapi !== null && config.openapi !== undefined ? null : (config.openapiUrl ?? null), target);
     return scrubSecrets({ ok: true as const, serverInfo: imported.serverInfo, tools: imported.tools, skipped: imported.skipped, egress }, secrets);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return scrubSecrets({ ok: false as const, error: message }, secrets);
+    return scrubSecrets({ ok: false as const, error: message, ...(err instanceof DialRefusedError ? { refusal: err.code } : {}) }, secrets);
   }
 }
 
@@ -676,32 +665,46 @@ export async function invokeRestTool(
   mapping: McpRestMapping,
   args: Record<string, unknown>,
   timeoutMs: number,
-  fetchImpl: RestFetch = fetch,
+  dial: RestDial = {},
 ): Promise<UpstreamToolResult> {
   const { url, init, droppedArgs } = buildRestRequest(config, secret, mapping, args);
   const deadline = Math.max(1, Math.min(timeoutMs, mapping.timeoutMs));
+  const { fetch: fetchImpl } = dialOf(config, dial);
   let res: Response;
   try {
     res = await fetchImpl(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(deadline) });
   } catch (err) {
+    // The dialer refuses a redirect before it is followed; it is judged below like one answered.
+    if (err instanceof DialRedirectRefusedError) return refuseRedirect(config, url, err.status, err.location);
+    // Any other dialer refusal (an address, plaintext) is already a `boundary` error.
+    if (err instanceof UpstreamCallError) throw err;
     const name = err instanceof Error ? err.name : '';
     if (name === 'TimeoutError' || name === 'AbortError') throw new UpstreamCallError('timeout', false, `timed out after ${Math.round(deadline / 1000)} s`);
     throw new UpstreamCallError('transport', true, err instanceof Error ? err.message : String(err));
   }
+  // The dialer refuses a 3xx itself (above); this covers an injected `fetch` that answers one.
   if (res.status >= 300 && res.status < 400) {
     await res.body?.cancel().catch(() => undefined);
-    const location = res.headers.get('location');
-    let target: URL | null = null;
-    try {
-      target = location === null ? null : new URL(location, url);
-    } catch {
-      target = null;
-    }
-    const base = parseBaseUrl(config.url);
-    const escape = target !== null && base !== null ? boundaryEscape(base, target) : null;
-    if (escape !== null) throw new RestBoundaryError(`the API redirected off its pin (${escape}); not followed`);
-    throw new UpstreamCallError('http', false, `the API answered HTTP ${res.status} (a redirect); redirects are not followed`);
+    return refuseRedirect(config, url, res.status, res.headers.get('location'));
   }
+  return readRestResult(res, droppedArgs);
+}
+
+/** A redirect is never followed: off the pin it is a {@link RestBoundaryError}, inside it an http error. */
+function refuseRedirect(config: McpUpstreamConfig, url: URL, status: number, location: string | null): never {
+  let target: URL | null = null;
+  try {
+    target = location === null ? null : new URL(location, url);
+  } catch {
+    target = null;
+  }
+  const base = parseBaseUrl(config.url);
+  const escape = target !== null && base !== null ? boundaryEscape(base, target) : null;
+  if (escape !== null) throw new RestBoundaryError(`the API redirected off its pin (${escape}); not followed`);
+  throw new UpstreamCallError('http', false, `the API answered HTTP ${status} (a redirect); redirects are not followed`);
+}
+
+async function readRestResult(res: Response, droppedArgs: string[]): Promise<UpstreamToolResult> {
   if (res.status === 429 || res.status >= 500) {
     await res.body?.cancel().catch(() => undefined);
     throw new UpstreamCallError('http', true, `the API answered HTTP ${res.status}`);

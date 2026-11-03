@@ -154,6 +154,29 @@ Auth mode (`WICKED_RUNTIME=team` or `WICKED_CREW_AUTH=required`) is controlled b
   `admin`; values not in that set fall back to `defaultTrust`.
 - **`defaultTrust`** (default `observer`) — trust assigned when no valid
   `claims.trust` value is present. Least-privilege default.
+- **`allowRanges`** (optional) — loopback or private CIDR ranges the IdP may be
+  reached at, for an IdP named by a host name on a private network (for example
+  `["10.20.0.0/16"]`). Only ranges inside `127.0.0.0/8`, `::1/128`, `10.0.0.0/8`,
+  `172.16.0.0/12`, `192.168.0.0/16` or `fc00::/7` are accepted.
+
+Discovery and key requests go through crew's dialer: the host is resolved once,
+every address it resolves to is checked, the connection goes to the checked
+address (TLS still verifies the host name), and a redirect is refused. By default
+only public (global unicast) addresses are reached, over https. An `issuer` or
+`jwksUri` written as a loopback or private IP literal, or as `localhost`, is
+reachable at that address; a private host NAME needs `allowRanges`. `allowRanges`
+grants an address range only: private destinations still need https (plain
+http is accepted on loopback alone). The `jwks_uri` a
+discovery document names gets the same policy and never widens it. Link-local
+(including `169.254.169.254`), CGNAT, `0.0.0.0/8` and the cloud metadata
+addresses are always refused.
+
+Upgrading with an IdP on a private network named by host name: add its range,
+for example
+
+```json
+{ "oidc": { "issuer": "https://idp.corp.internal", "audience": "wicked-crew", "allowRanges": ["10.20.0.0/16"] } }
+```
 
 Supported algorithms: RS256/384/512, ES256/384/512, PS256/384/512.
 JWKS keys are cached per issuer with a 5-minute TTL; an unknown `kid` triggers
