@@ -206,6 +206,10 @@ describe('apps.json: the shape', () => {
     const outputs = escalations() as unknown as { queries: { output: unknown[] }[] };
     outputs.queries[0]!.output = Array.from({ length: 201 }, () => ({}));
     expect(codes(outputs)).toEqual(['too_complex@$.queries[0].output']);
+    // …nested lists too: one table with 400,000 malformed columns never reaches zod (pi r5).
+    const cols = escalations() as unknown as { pages: { components: { columns?: unknown[] }[] }[] };
+    cols.pages[0]!.components[4]!.columns = Array.from({ length: 400_000 }, () => ({}));
+    expect(codes(cols)).toEqual(['too_complex@$.pages[0].components[4].columns']);
   });
 
   it('refuses a binding that is not filter/form/row/url, and a regular-expression parameter', () => {
