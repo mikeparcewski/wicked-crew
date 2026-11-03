@@ -4,18 +4,25 @@
  *
  * POSITIONING (operator, option a): crew is the harness that runs the coding-agent CLIs you
  * already use (Claude Code, Codex, Pi, OpenCode, Copilot) through governed, gated jobs, in
- * sandboxed containers, where every gate says what it checked; "done" is re-derived from evidence.
+ * sandboxed containers, where every gate says what actually ran; an ungated step reads "approved
+ * by default, not verified", so "done" is never claimed past what was checked.
  * It is NOT the skills catalog (that is wicked-garden).
  *
- * Shape: hook → a working job demo (plan → build in a container → review by a different agent,
- * with a dispute a council settles → QE acceptance → deliver; open any gate's receipt; kill the
- * daemon and watch the job resume) → four proofs (sandboxes, gates, the council, workflows +
- * durability) → the family map → get it.
+ * Shape (v2, 2026-11-02): ONE job follows you down the page. The hero runs job r-4f2a (intent in →
+ * plan → build in a sandbox → review by a different agent, with a dispute a council settles → QE
+ * acceptance → a pull request); the next four frames are that job's beats, each with one thing you
+ * can explore: Build (the sandbox), Review (the dispute), Gate (the receipt and its labels) and
+ * Deliver (workflows as data, a crash and a resume). Then what's new, the family map and Get it.
+ * Every interactive region is a fixed box sized for its tallest state (all states stacked in one
+ * grid cell), so a hover, a tap or an animation swaps content and never moves its neighbours.
  *
- * ACCURACY (crew 0.14.1), each from README.md / CHANGELOG.md / packages/crew-api-types:
- *  - Sandbox images: Claude Code, Codex, Copilot, OpenCode, Pi. Antigravity has none; a local
- *    model or custom binary needs your own image (WICKED_SEAT_IMAGE_<CLI>), offline only. Only the
- *    worktree is mounted; the model gateway is the only egress; keys stay in a credential broker.
+ * ACCURACY (crew main, 2026-11-01), each from README.md / CHANGELOG.md / packages/crew-api-types:
+ *  - Sandbox images: Claude Code, Codex, Copilot, OpenCode, Pi. Antigravity's is defined, its seat benched; a local
+ *    model or custom binary needs your own image (WICKED_SEAT_IMAGE_<CLI>), offline only. The
+ *    worktree is the only repo path mounted writable; the repository boundary is mounted read-only
+ *    (wicked-core src/container_floor.rs mount_plan); the model gateway is the only egress; keys
+ *    stay in a credential broker, except a Claude subscription seat's sign-in token, which the seat
+ *    receives and a guard checks each step's changes and the delivery for (src/seat_secret_guard.rs).
  *  - Gates resolve deny-dominates on the layers that ran (evidence floor, repo checks, policies,
  *    an evaluator on a distinct agent, a judge that can reject but never approve alone). An
  *    ungated phase reads "approved by default, not verified"; a gate with no distinct judge is
@@ -31,10 +38,24 @@
  *    send-backs a review_adjudication gate asks the operator.
  *  - Crash: a daemon that dies mid-run resumes the orphaned run at boot (crew#830), re-entering the
  *    unit it was on, audited run.resumed {via: 'boot'}. One machine today; no remote runner.
- *  - Workflows are data: built-ins feature / bug / migration / mcp-server / editor-plugin; your own
- *    is a preset saved with PUT /api/v1/presets/:name.
+ *  - Workflows are data: built-ins feature / bug / migration / mcp-server / editor-plugin /
+ *    domain-extraction (wicked-core src/catalog.rs); your own is a preset saved with
+ *    PUT /api/v1/presets/:name. domain-extraction loops page by page until REAL requirements reach
+ *    the minimum (requirementsGraph.minCoveragePct, default 80; placeholders never count).
+ *  - Power mode is the default launch for a repo-scoped preset or plan (routes.ts powerModeDefault):
+ *    one orchestrator seat builds in checkpointed turns, rigor re-scored from the diff, and the
+ *    hand-off runs review / security / QE; a NOT-PASS goes back up to 3 rounds, then asks.
+ *  - A NEW failure sends the work back (power hand-off, a send-back) or stops the job; a failure the base
+ *    shares is excluded only when the build guide can separate it (repo_checks.rs pass_excluded).
+ *  - Repo checks: the repository's own typecheck, lint and tests (build guide, .wicked/checks.json,
+ *    or package.json / Cargo.toml), compared with the run's base (wicked-core src/repo_checks.rs).
+ *  - Gate labels (studio GateVerdict.tsx): "floor only" = a pass where the floor (incl. the repo
+ *    checks) ran and no distinct judge reviewed it; "approved by default, not verified" = nothing
+ *    gated the phase. The receipt explorer marks only the layers each label speaks about.
  *  - Needs wicked-garden >= 12.40.0 (the governed-worker base skill), Node >= 22, a container runtime.
  * The demo is scripted and says so. Never hardcode a version in prose (build-injected stamp only).
+ * The words are the reviewed copy (messaging COPY.md rev 5, crew#1260): moved, split and visualized
+ * here, never reworded into new claims.
  */
 import Base from 'wicked-web/layouts/Base.astro';
 import Topbar from 'wicked-web/components/Topbar.astro';
@@ -44,14 +65,28 @@ import '../styles/crew.css';
 
 // The hook. Two strings, so a variant is a one-line swap.
 const HEADLINE = 'The harness for the coding agents you already use.';
-const SUBLINE = 'Claude Code, Codex, Copilot, OpenCode and Pi run your jobs in sandboxed containers, through gates that say what they checked. “Done” is re-derived from evidence, never claimed.';
+const KICKER_IN = 'Intent in.';
+const KICKER_OUT = 'Gated work out.';
+// The sub-line (the words PR's rendering: the caveat label in plain quotes; the promise carries the weight).
+const SUBLINE_A = 'Claude Code, Codex, GitHub Copilot, OpenCode and Pi run your jobs in sandboxes, through gates that';
+const SUBLINE_EM = 'say plainly what actually ran';
+const SUBLINE_B = '. A step that passed without verification is labelled “approved by default, not verified”.';
 
 const title = 'wicked-crew — the harness for the coding agents you already use';
 const description =
-  'wicked-crew runs the coding agents you already use (Claude Code, Codex, GitHub Copilot, OpenCode, Pi) through gated jobs in sandboxed containers. Every gate says what it checked, a different agent reviews the work, app changes need QE acceptance before delivery, and "done" is re-derived from evidence. Jobs are durable workflows that resume after a crash, on your own machine and your own plans.';
+  'wicked-crew runs the coding agents you already use (Claude Code, Codex, GitHub Copilot, OpenCode, Pi) through gated jobs in sandboxed containers. Every gate says what actually ran, a different agent reviews the work by default, and the built-in feature, bug-fix, migration, MCP-server and editor-plugin jobs need QE acceptance before delivery (or a labelled waiver or skip). Jobs are durable workflows that resume after a crash, on your own machine and your own plans.';
 const repo = 'https://github.com/mikeparcewski/wicked-crew';
 
 const PHASES = ['Plan', 'Build', 'Review', 'QE', 'Deliver'];
+
+// The page's spine: the hero's job, then its four beats.
+const BEATS = [
+  { id: 'job', name: 'The job' },
+  { id: 'build', name: 'Build' },
+  { id: 'review', name: 'Review' },
+  { id: 'gate', name: 'Gate' },
+  { id: 'deliver', name: 'Deliver' },
+];
 
 const AGENTS = [
   { name: 'Claude Code', image: 'yes' },
@@ -59,31 +94,83 @@ const AGENTS = [
   { name: 'GitHub Copilot', image: 'yes' },
   { name: 'OpenCode', image: 'yes' },
   { name: 'Pi', image: 'yes' },
-  { name: 'Antigravity', image: 'no image yet' },
+  { name: 'Antigravity', image: 'sandbox image defined; the agent is benched for now' },
   { name: 'A local model, or your own binary', image: 'your own image, offline' },
 ];
 
+// Benefit 1, split: its first sentence leads the Build beat; the rest is the broker's hotspot.
+const B1_LEAD = 'By default each runs in a sandbox with no capabilities, a read-only root and one way out: the model gateway (you need a container runtime: Docker, Podman, Rancher Desktop, Colima or OrbStack).';
+const B1_BROKER = 'Keys stay in a broker and the sandbox sees placeholders. A Claude subscription’s sign-in token is the one exception: a guard checks each step’s changes and the delivery for it, failing the step or refusing the delivery on a match.';
+
+// The sandbox's four hotspots (benefit 1 and the sandbox facts, placed where they happen).
+const HOTS = [
+  { key: 'repo', name: 'Your repo', tag: 'read-only', fact: 'Your repo is read-only.' },
+  { key: 'worktree', name: 'Worktree + git state', tag: 'writable', fact: 'The job writes its worktree and its git state.' },
+  { key: 'gateway', name: 'Model gateway', tag: 'the only way out', fact: 'The model gateway is the only way out.' },
+  { key: 'broker', name: 'Broker', tag: 'keys → placeholders, one exception', fact: B1_BROKER },
+];
+
 const LAYERS = [
-  { name: 'Evidence floor', does: 'The job changed its worktree.', can: 'a pass with no judge reads “floor only”' },
-  { name: 'Your checks and policies', does: 'Deterministic rules you approved, re-run against the worktree.', can: 'one failure stops the job' },
-  { name: 'Evaluator', does: 'A different agent reviews the work.', can: 'can send it back' },
-  { name: 'Judge', does: 'An AI judge reads the evidence cold.', can: 'can fail a gate, never approve alone' },
-  { name: 'QE acceptance', does: 'Garden’s QE pipeline, read from the QE ledger.', can: 'only an attributed PASS delivers' },
+  { key: 'floor', name: 'Evidence check (the floor)', does: 'The job changed its worktree.', can: 'a pass with no judge reads “floor only”' },
+  { key: 'checks', name: 'Your checks and policies', does: 'Your repo’s own typecheck, lint and tests, plus the rules you approved.', can: 'a new failure sends it back, waits for you or stops the job' },
+  { key: 'eval', name: 'Evaluator', does: 'By default, a different agent reviews the work.', can: 'can send it back' },
+  { key: 'judge', name: 'Judge', does: 'An AI judge reads the evidence cold.', can: 'can fail a gate, never approve alone' },
+  { key: 'qe', name: 'QE acceptance', does: 'Garden’s QE pipeline, read from the QE ledger; a low-impact change may waive it.', can: 'when required, only an attributed PASS delivers' },
 ];
 
 const LABELS = [
-  { label: 'approved by default, not verified', when: 'the phase had no gate' },
-  { label: 'floor only', when: 'no distinct judge could review it' },
-  { label: 'reduced assurance', when: 'you let the builder review its own work' },
-  { label: 'QE acceptance skipped by operator', when: 'you skipped it, with your reason' },
+  { key: 'nogate', label: 'approved by default, not verified', when: 'the phase had no gate' },
+  { key: 'floor', label: 'floor only', when: 'no distinct judge could review it' },
+  { key: 'reduced', label: 'reduced assurance', when: 'you let the builder review its own work' },
+  { key: 'qeskip', label: 'QE acceptance skipped by operator', when: 'you skipped it, with your reason' },
 ];
 
 const WORKFLOWS = [
   { name: 'feature', steps: 'clarify → design → build → adversarial-review → test → review' },
   { name: 'bug', steps: 'triage → reproduce → fix → verify' },
   { name: 'migration', steps: 'plan → execute → cutover → verify → cleanup' },
-  { name: 'mcp-server', steps: 'build an MCP server, then install it after your consent' },
-  { name: 'editor-plugin', steps: 'scaffold a studio editor, test it, install it after your consent' },
+  // mcp-server's nine steps (wicked-core src/presets/mcp-server.json) do not fit the frame at
+  // 1280x660, so it keeps the words PR's one line, with no step counter
+  { name: 'mcp-server', steps: 'build an MCP server, install it on consent' },
+  // exactly the steps of wicked-core src/presets/editor-plugin.json (main ca90345); install asks first
+  { name: 'editor-plugin', steps: 'scope → design → build → test → security-review → install-plan → install' },
+  // not a fixed sequence of steps: one line, and no step counter
+  { name: 'domain-extraction', steps: 'cover code with real requirements (default 80%)' },
+];
+// A workflow's steps as rail nodes: the arrows separate steps; a one-line description is one node.
+const stepsOf = (s: string) => s.split('→').map((x) => x.trim());
+
+// The dispute, step by step (the council proof's flow, with the demo job's own lines).
+const DISPUTE = [
+  { name: 'Finding', what: 'The reviewer flags a problem, with the file and line.', job: 'Codex finding (high): the limit is keyed on IP; the brief says per API key · rateLimit.ts:12' },
+  { name: 'Declined', what: 'The builder disagrees and says why.', job: 'Claude Code declines: “IP is right for routes with no key”' },
+  { name: 'Held', what: 'The reviewer stands by it. Now it is a dispute.', job: 'Codex holds the finding → dispute' },
+  { name: 'Council', what: 'Three agents, drawn at random with a recorded seed, rule on it.', job: 'council convened: 3 of 4 eligible agents, seed 4127 · Pi, OpenCode, Copilot' },
+  { name: 'Ruling', what: 'Yes, no, or no verdict, with the agreement and the dissent.', job: 'council ruled: finding stands · 2 of 3 · OpenCode dissented' },
+];
+
+// Benefit 2, the reviewed words split into its three cases (one row each), not reworded.
+const BENEFIT_2 = {
+  h: 'A failed check sends work back, waits for you or stops the job.',
+  rows: [
+    { k: 'Power mode', note: 'a preset or plan launched on a repository; on by default', p: 'the code-writing step runs as one agent’s checkpointed turns; a failed review or a qualifying build-check failure goes back to the builder, up to three hand-off attempts in all; problems that need your judgment pause for you.' },
+    { k: 'Phased job', note: '', p: 'retries, escalates or stops.' },
+    { k: 'No other agent can review', note: '', p: 'the job stops unless you launch it as “reduced assurance”, which is labelled (a saved workflow may require fewer checks; its requirements are listed in the receipts).' },
+  ],
+};
+const BENEFIT_3 = {
+  h: 'Tested before delivery, with receipts.',
+  p: 'Jobs launched as a feature, bug fix, migration, MCP server or editor plugin pass QE acceptance first, unless a labelled waiver or skip says otherwise; a plan you compose yourself, a build continued from a chat, or a saved workflow that does not ask for it, requires none. Every gate says plainly what a pass means: what it checked, and what was waived or skipped.',
+};
+
+// What's new (crew 0.16.11 and 0.16.12), one line each.
+const NEW = [
+  { name: 'Power mode', line: 'On by default when a preset or a plan is launched on a repository; the code-writing step runs as one agent’s checkpointed turns, its rigor re-scored from the diff.' },
+  { name: 'Proposed learnings', line: 'Jobs can propose new learnings for your approval, each with its source job and who proposed it.' },
+  { name: 'Requirements graphs', line: 'Counted against a minimum; placeholders never count.' },
+  { name: 'Voice', line: 'Transcription on your machine (whisper.cpp, installed separately); the audio is never stored.' },
+  { name: '“Check on it?”', line: 'A different agent reads a long step’s record and recommends; if none can, crew gives its own labelled reading. It changes nothing.' },
+  { name: 'Sandbox images', line: 'On Docker, protected from the runtime’s automatic cleanup; a missing built-in image is rebuilt on next use, and Nerve Center shows their state.' },
 ];
 
 // Injected at build time from packages/crew/package.json via astro.config.mjs (DT-7).
@@ -92,125 +179,265 @@ const crewVersion = __WICKED_CREW_VERSION__;
 
 <Base title={title} description={description}>
   <Topbar pkg="wicked-crew" repo={repo} />
+  <!-- Frames rise in as they arrive. Set before the first frame paints, so nothing flashes; if the
+       page script never runs, the switch is taken back off and everything simply shows. -->
+  <script is:inline>(function(){try{if(window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches)return;var h=document.documentElement;h.classList.add('can-rise');setTimeout(function(){if(!window.__crewArrive)h.classList.remove('can-rise');},3000);}catch(e){}})();</script>
 
-  <!-- ── Hook + the job demo ─────────────────────────────────────────────── -->
-  <section class="hero" aria-labelledby="hero-h">
-    <div class="grid-floor" aria-hidden="true"></div>
+  <!-- The spine, at 1024px wide and up: job r-4f2a's five beats as one thread under the topbar,
+       filling as each beat arrives (decoration; the beat kickers and the gutter track say it in words). -->
+  <div class="thread" data-thread aria-hidden="true">{BEATS.map((b) => <i data-thread-seg={b.id}><b></b></i>)}</div>
+
+  <!-- The spine: job r-4f2a's beats, in the right gutter (1400px wide and up only). -->
+  <nav class="beats" data-beats aria-label="Job r-4f2a, beat by beat">
+    <ol>
+      {BEATS.map((b, i) => (
+        <li><a href={`#${b.id}`} data-beat-link={b.id}><span class="beats-l">{b.name}</span><span class="beats-dot" aria-hidden="true"></span><span class="sr-only">{`, beat ${i + 1} of 5`}</span></a></li>
+      ))}
+    </ol>
+  </nav>
+
+  <!-- ── S1 · Hook + the job demo ───────────────────────────────────────── -->
+  <section class="frame hero" id="job" data-frame data-beat="job" aria-labelledby="hero-h">
+    <div class="hero-glow" aria-hidden="true"></div>
     <div class="wrap hero-head">
+      <p class="hero-kicker"><span class="kick-in">{KICKER_IN}</span> <span class="kick-out">{KICKER_OUT}</span></p>
       <h1 id="hero-h">{HEADLINE}</h1>
-      <p class="lede">{SUBLINE}</p>
+      <p class="lede">{SUBLINE_A} <strong>{SUBLINE_EM}</strong>{SUBLINE_B}</p>
     </div>
 
     <div class="wrap">
       <div class="job" data-job aria-label="A working demo: one job through its gates">
         <div class="job-bar">
           <span class="job-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-          <span class="job-t">job r-4f2a · <b>feature</b> · add rate limiting to the public API</span>
+          <span class="job-t">job r-4f2a · <b>feature</b> · phased</span>
           <span class="job-note">scripted demo</span>
-          <button type="button" class="job-btn job-btn--go" data-job-run>Run the job</button>
-          <button type="button" class="job-btn job-btn--kill" data-job-kill disabled>Kill the daemon</button>
+          <span class="job-acts">
+            <button type="button" class="job-btn job-btn--go" data-job-run><span class="lbl stack"><span class="stack-i is-on" data-l="go">Run the job</span><span class="stack-i" data-l="again" aria-hidden="true">Run it again</span></span></button>
+            <button type="button" class="job-btn job-btn--kill" data-job-kill aria-disabled="true"><span class="lbl stack"><span class="stack-i is-on" data-l="kill">Kill the daemon</span><span class="stack-i" data-l="start" aria-hidden="true">Start the daemon</span></span></button>
+          </span>
+          <a class="job-install" href="#get">Install</a>
         </div>
-        <ol class="track" data-track aria-label="Phases and their gates">
-          {PHASES.map((p, i) => (
-            <li class="st" data-st={i}>
-              <span class="st-name">{p}</span>
-              <button type="button" class="st-gate" data-gate={i} disabled aria-label={`${p} gate receipt`}>gate</button>
-            </li>
-          ))}
-        </ol>
+        <div class="track-wrap">
+          <p class="io io--in"><small>{KICKER_IN}</small>{' '}<span>add rate limiting to the public API</span></p>
+          <div class="track-mid">
+            <ol class="track" data-track aria-label="Phases and their gates">
+              {PHASES.map((p, i) => (
+                <li class="st" data-st={i}>
+                  <span class="st-name">{p}</span>
+                  <button type="button" class="st-gate" data-gate={i} aria-disabled="true" aria-pressed="false" aria-label={`${p} gate receipt`}>gate</button>
+                </li>
+              ))}
+            </ol>
+            <div class="rail" aria-hidden="true"><i data-rail></i></div>
+          </div>
+          <p class="io io--out" data-pr><small>{KICKER_OUT}</small>{' '}<span>pull request #42</span></p>
+        </div>
         <div class="job-body">
-          <div class="log" data-log role="log" aria-live="polite" aria-label="Job events"></div>
-          <aside class="panel" data-panel aria-live="polite" aria-label="Gate receipt or decision"></aside>
+          <div class="log-col">
+            <div class="log" data-log role="log" aria-live="polite" aria-label="Job events"></div>
+            <p class="caption" data-caption><span class="caption-n" data-caption-n></span><span data-caption-t></span></p>
+          </div>
+          <aside class="panel" data-panel tabindex="-1" aria-live="polite" aria-label="Gate receipt or decision"></aside>
         </div>
       </div>
     </div>
   </section>
 
-  <!-- ── Proof 1: sandboxes ─────────────────────────────────────────────── -->
-  <section class="sandbox" aria-labelledby="sandbox-h">
-    <div class="wrap two">
-      <div>
-        <div class="sec-head">
-          <h2 id="sandbox-h">Your agents, in sandboxes.</h2>
-          <p class="sec-sub">crew drives each agent’s own headless mode in a hardened container, on your accounts and plans. No billing, no reselling.</p>
+  <!-- ── S2 · Build: your agents, sandboxed ─────────────────────────────── -->
+  <section class="frame sec build" id="build" data-frame data-beat="build" aria-labelledby="sandbox-h">
+    <div class="wrap two two--build">
+      <div class="sec-copy">
+        <p class="beat"><span class="beat-dots" aria-hidden="true"><i class="on"></i><i class="on"></i><i></i><i></i><i></i></span><span class="beat-id">job r-4f2a ·</span> Build</p>
+        <h2 id="sandbox-h">Your agents, sandboxed.</h2>
+        <p class="lead">{B1_LEAD}</p>
+        <p class="sub">crew drives each agent’s own headless mode in a hardened sandbox, on your accounts and plans.</p>
+        <p class="pull">Your accounts, your plans: no billing, no reselling.</p>
+      </div>
+
+      <div class="sbx" data-sbx>
+        <div class="sbx-map" role="group" aria-label="What the sandbox can reach">
+          {HOTS.filter((h) => h.key !== 'worktree').map((h) => (
+            <button type="button" class={`hot hot--${h.key}`} data-hot={h.key} aria-pressed={h.key === 'broker' ? 'true' : 'false'} aria-controls="sbx-cap">
+              <b>{h.name}</b>{' '}<small>{h.tag}</small>
+            </button>
+          ))}
+          <div class="sbx-box">
+            <span class="sbx-tag" aria-hidden="true">sandbox</span>
+            <span class="sbx-agent"><i class="sbx-pulse" aria-hidden="true"></i><span data-sbx-agent>Claude Code</span></span>
+            {HOTS.filter((h) => h.key === 'worktree').map((h) => (
+              <button type="button" class={`hot hot--${h.key}`} data-hot={h.key} aria-pressed="false" aria-controls="sbx-cap">
+                <b>{h.name}</b>{' '}<small>{h.tag}</small>
+              </button>
+            ))}
+          </div>
+          <span class="wire wire--ro" aria-hidden="true"><i></i></span>
+          <span class="wire wire--out" aria-hidden="true"><i class="pkt"></i></span>
+          <span class="wire wire--keys" aria-hidden="true"><i></i></span>
         </div>
-        <ul class="facts" role="list">
-          <li>Only the job’s worktree is mounted.</li>
-          <li>The model gateway is the only way out.</li>
-          <li>Keys stay in a broker. The container sees placeholders.</li>
-          <li>Sign each agent in once, on studio’s Agents tab.</li>
-        </ul>
-      </div>
-      <table class="tbl" aria-label="Which agents have a sandbox image">
-        <thead><tr><th scope="col">Agent</th><th scope="col">Sandbox image</th></tr></thead>
-        <tbody>
-          {AGENTS.map((a) => (
-            <tr><th scope="row">{a.name}</th><td class:list={[{ 'is-yes': a.image === 'yes' }]}>{a.image === 'yes' ? 'ships with crew' : a.image}</td></tr>
+        <div class="sbx-cap stack" id="sbx-cap" aria-live="polite">
+          {HOTS.map((h) => (
+            <p class:list={['stack-i', { 'is-on': h.key === 'broker' }]} data-cap={h.key}><b>{h.name}</b>{' '}<span>{h.fact}</span></p>
           ))}
-        </tbody>
-      </table>
+          {AGENTS.map((a, i) => (
+            <p class="stack-i" data-cap={`agent-${i}`}><b>{a.name}</b>{' '}<span class:list={['sbx-img', { 'is-yes': a.image === 'yes' }]}>{a.image === 'yes' ? 'sandbox image ships with crew; you sign in with your own account' : a.image}</span></p>
+          ))}
+        </div>
+        <div class="agents" role="group" aria-label="Pick an agent to put in the sandbox">
+          {AGENTS.map((a, i) => (
+            <button type="button" class:list={['agent', { 'is-yes': a.image === 'yes' }]} data-agent={i} data-agent-name={a.name} aria-pressed={i === 0 ? 'true' : 'false'} aria-controls="sbx-cap">{a.name}</button>
+          ))}
+        </div>
+        <p class="sbx-note">Sign each agent in once, on the Agents page of studio, the browser UI that ships inside crew.</p>
+      </div>
     </div>
   </section>
 
-  <!-- ── Proof 2: gates that say what they checked ─────────────────────── -->
-  <section class="gates" aria-labelledby="gates-h">
+  <!-- ── S3 · Review: a different agent, and a council for disputes ─────── -->
+  <section class="frame sec review" id="review" data-frame data-beat="review" aria-labelledby="council-h">
     <div class="wrap">
       <div class="sec-head">
-        <h2 id="gates-h">Every gate says what it checked.</h2>
-        <p class="sec-sub">A gate decides on the layers that actually ran. One failed check stops the job, and no model can approve on its own.</p>
-      </div>
-      <table class="tbl tbl--layers">
-        <thead><tr><th scope="col">Layer</th><th scope="col">What it checks</th><th scope="col">Its power</th></tr></thead>
-        <tbody>
-          {LAYERS.map((l) => (
-            <tr><th scope="row">{l.name}</th><td>{l.does}</td><td>{l.can}</td></tr>
-          ))}
-        </tbody>
-      </table>
-      <p class="labels-k">When a gate is weaker than that, its receipt says so:</p>
-      <ul class="labels" role="list">
-        {LABELS.map((l) => <li><b>{l.label}</b><span>{l.when}</span></li>)}
-      </ul>
-    </div>
-  </section>
-
-  <!-- ── Proof 3: the council, in its real job ──────────────────────────── -->
-  <section class="council" aria-labelledby="council-h">
-    <div class="wrap">
-      <div class="sec-head">
+        <p class="beat"><span class="beat-dots" aria-hidden="true"><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i></span><span class="beat-id">job r-4f2a ·</span> Review</p>
         <h2 id="council-h">A council settles disputes. It doesn’t pick agents.</h2>
-        <p class="sec-sub">Agents are routed by their skills. A council is convened only when a reviewer and a builder disagree about a finding.</p>
+        <p class="sub">By default a different agent reviews the work. Agents are routed by their skills; a council is convened only when a reviewer and a builder disagree about a finding.</p>
       </div>
-      <ol class="flow" aria-label="How a dispute reaches a council">
-        <li><b>Finding</b><span>The reviewer flags a problem, with the file and line.</span></li>
-        <li><b>Declined</b><span>The builder disagrees and says why.</span></li>
-        <li><b>Held</b><span>The reviewer stands by it. Now it is a dispute.</span></li>
-        <li><b>Council</b><span>Three agents, drawn at random with a recorded seed, rule on it.</span></li>
-        <li><b>Ruling</b><span>Yes, no, or no verdict, with the agreement and the dissent.</span></li>
-      </ol>
+      <div class="two two--review">
+        <div class="benefit benefit--rows">
+          <h3>{BENEFIT_2.h}</h3>
+          <dl class="cases">
+            {BENEFIT_2.rows.map((r) => (
+              <div class="case"><dt><b>{r.k}</b>{r.note && <Fragment>{' '}<span class="case-note">({r.note})</span></Fragment>}:</dt>{' '}<dd>{r.p}</dd></div>
+            ))}
+          </dl>
+        </div>
+        <div class="disp" data-disp>
+          <ol class="disp-steps" aria-label="How a dispute reaches a council">
+            {DISPUTE.map((d, i) => (
+              <li><button type="button" class="disp-step" data-dstep={i} aria-controls="disp-stage" aria-current={i === 0 ? 'step' : undefined}><span class="disp-n">{i + 1}</span>{' '}<b>{d.name}</b></button></li>
+            ))}
+          </ol>
+          <div class="disp-stage stack" id="disp-stage" aria-live="polite">
+            {DISPUTE.map((d, i) => (
+              <div class:list={['stack-i', 'disp-card', { 'is-on': i === 0 }]} data-dpanel={i}>
+                <p class="disp-what"><b>{d.name}</b>{' '}<span>{d.what}</span></p>
+                <p class="disp-job">{d.job}</p>
+                {i === 3 && (
+                  <p class="disp-seats" aria-label="4 eligible agents; 3 drawn">
+                    <span class="seat-chip on">Pi</span> <span class="seat-chip on">OpenCode</span> <span class="seat-chip on">Copilot</span> <span class="seat-chip">not drawn</span> <span class="seed">seed 4127</span>
+                  </p>
+                )}
+                {i === 4 && (
+                  <p class="disp-seats"><span class="vote yes">Pi · stands</span> <span class="vote yes">Copilot · stands</span> <span class="vote no">OpenCode · dissent</span> <span class="seed">sent back to Build with the ruling</span></p>
+                )}
+              </div>
+            ))}
+          </div>
+          <div class="disp-ctl">
+            <button type="button" class="ctl-btn" data-dprev aria-label="Previous step">← Prev</button>
+            <button type="button" class="ctl-btn" data-dnext aria-label="Next step">Next →</button>
+            <button type="button" class="ctl-btn" data-dreplay>Replay</button>
+            <span class="disp-count mono" data-dcount aria-hidden="true">1 / 5</span>
+          </div>
+        </div>
+      </div>
       <ul class="facts facts--row" role="list">
         <li>The ruling is on the gate’s receipt.</li>
         <li>Council size is a setting: 1 to 9, default 3.</li>
-        <li>After two send-backs, the job asks you instead.</li>
+        <li>In a phased job, after two send-backs, the job asks you instead.</li>
       </ul>
     </div>
   </section>
 
-  <!-- ── Proof 4: workflows as data, jobs that survive ─────────────────── -->
-  <section class="durable" aria-labelledby="durable-h">
-    <div class="wrap two">
-      <div>
-        <div class="sec-head">
-          <h2 id="durable-h">Workflows are data. Jobs survive a crash.</h2>
-          <p class="sec-sub">Pick a built-in, or save your own steps as a preset (<code>PUT /api/v1/presets/:name</code>).</p>
+  <!-- ── S4 · Gate: every gate says what it checked ─────────────────────── -->
+  <section class="frame sec gate" id="gate" data-frame data-beat="gate" aria-labelledby="gates-h">
+    <div class="wrap two two--gate">
+      <div class="sec-copy">
+        <p class="beat"><span class="beat-dots" aria-hidden="true"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i></span><span class="beat-id">job r-4f2a ·</span> Gate</p>
+        <h2 id="gates-h">Every gate says what it checked.</h2>
+        <p class="sub">A gate decides on the layers that actually ran. A new failure sends the work back, waits for you or stops the job, and no model can approve on its own.</p>
+        <div class="benefit">
+          <h3>{BENEFIT_3.h}</h3>
+          <p>{BENEFIT_3.p}</p>
         </div>
-        <table class="tbl tbl--wf" aria-label="Built-in workflows">
-          <tbody>
-            {WORKFLOWS.map((w) => <tr><th scope="row"><code>{w.name}</code></th><td>{w.steps}</td></tr>)}
-          </tbody>
-        </table>
+      </div>
+
+      <div class="rcx" data-rcx>
+        <p class="rcx-k">Pick a receipt. When a gate is weaker than a full pass, it says so:</p>
+        <ul class="labels rcx-pick" role="list">
+          <li><button type="button" class="rcx-opt rcx-opt--full" data-scen="full" aria-pressed="true" aria-controls="rcx-card"><b>PASS</b>{' '}<span>every layer ran</span></button></li>
+          {LABELS.map((l) => (
+            <li><button type="button" class="rcx-opt" data-scen={l.key} aria-pressed="false" aria-controls="rcx-card"><b>{l.label}</b>{' '}<span>{l.when}</span></button></li>
+          ))}
+        </ul>
+        <div class="rcx-card" id="rcx-card">
+          <div class="rcx-head">
+            <span class="rcx-title">Gate receipt · <span class="nw">r-4f2a</span>
+              <span class="rcx-when stack" aria-hidden="true">
+                <span class="stack-i is-on" data-when="full">every layer ran</span>
+                {LABELS.map((l) => <Fragment>{' '}<span class="stack-i" data-when={l.key}>{l.when}</span></Fragment>)}
+              </span>
+            </span>
+            <span class="rcx-stamp stack" aria-live="polite">
+              <span class="stack-i is-on ok" data-stamp="full">PASS</span>
+              {LABELS.map((l) => <Fragment>{' '}<span class="stack-i" data-stamp={l.key}>{l.label}</span></Fragment>)}
+            </span>
+          </div>
+          <table class="tbl tbl--layers rcx-layers">
+            <thead><tr><th scope="col">Layer</th><th scope="col">On this receipt</th></tr></thead>
+            <tbody>
+              {LAYERS.map((l, i) => (
+                <tr data-layer={l.key}>
+                  <th scope="row"><button type="button" class="rcx-l" data-layer-btn={l.key} aria-pressed={i === 2 ? 'true' : 'false'} aria-controls="rcx-detail">{l.name}</button></th>
+                  <td><span class="rcx-s" data-s={l.key}>ran</span></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div class="rcx-detail stack" id="rcx-detail" aria-live="polite">
+            {LAYERS.map((l, i) => (
+              <dl class:list={['stack-i', { 'is-on': i === 2 }]} data-detail={l.key}>
+                <div><dt>What it checks</dt><dd>{l.does}</dd></div>
+                <div><dt>Its power</dt><dd>{l.can}</dd></div>
+              </dl>
+            ))}
+            <dl class="stack-i" data-detail="nogate">
+              <div><dt>What it checks</dt><dd>Nothing: no gate ran on this phase.</dd></div>
+              <div><dt>Its power</dt><dd>none: the step passes, labelled “approved by default, not verified”</dd></div>
+            </dl>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── S5 · Deliver: workflows are data, jobs survive a crash ─────────── -->
+  <section class="frame sec deliver" id="deliver" data-frame data-beat="deliver" aria-labelledby="durable-h">
+    <div class="wrap two two--deliver">
+      <div class="sec-copy">
+        <p class="beat"><span class="beat-dots" aria-hidden="true"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i></span><span class="beat-id">job r-4f2a ·</span> Deliver</p>
+        <h2 id="durable-h">Workflows are data. Jobs survive a crash.</h2>
+        <p class="end-line">r-4f2a ends as pull request #42, with its evidence bundle ready to export.</p>
+        <p class="sub">Pick a built-in, or save your own steps as a preset (<code>PUT /api/v1/presets/:name</code>).</p>
+        <div class="wf" data-wf>
+          <div class="wf-tabs" role="group" aria-label="Built-in workflows">
+            {WORKFLOWS.map((w, i) => (
+              <button type="button" class="wf-tab" data-wf-tab={i} aria-pressed={i === 0 ? 'true' : 'false'} aria-controls="wf-stage"><code>{w.name}</code></button>
+            ))}
+          </div>
+          <div class="wf-stage stack" id="wf-stage">
+            {WORKFLOWS.map((w, i) => (
+              <ol class:list={['stack-i', 'wf-rail', { 'is-on': i === 0, 'is-single': !w.steps.includes('→') }]} data-wf-panel={i} aria-label={`${w.name}: ${w.steps}`}>
+                {stepsOf(w.steps).map((s) => <li class="wf-node" data-node><span class="wf-dot" aria-hidden="true"></span><span class="wf-s">{s}</span></li>)}
+              </ol>
+            ))}
+          </div>
+          <div class="wf-ctl">
+            <button type="button" class="ctl-btn ctl-btn--deny" data-wf-crash><span class="lbl stack"><span class="stack-i is-on" data-l="crash">Crash it</span><span class="stack-i" data-l="start" aria-hidden="true">Start the daemon</span></span></button>
+            <p class="wf-status" data-wf-status aria-live="polite">running</p>
+          </div>
+        </div>
       </div>
       <ul class="facts facts--cards" role="list">
+        <li><b>Power mode by default.</b> For a preset or plan on a repo; see Review. The job above is shown phased, one gate per step.</li>
         <li><b>Crash-resumable.</b> A daemon that dies mid-job resumes it at boot, at the step it was on.</li>
         <li><b>One open API.</b> Studio ships inside crew and uses the same <code>/api/v1</code> and <code>/ws</code> your tools can.</li>
         <li><b>Headless too.</b> <code>wicked-crew start</code>, the REST API, or <code>wicked-crew mcp</code> for agents.</li>
@@ -219,11 +446,31 @@ const crewVersion = __WICKED_CREW_VERSION__;
     </div>
   </section>
 
+  <!-- ── S6 · What's new (after the proofs) ─────────────────────────────── -->
+  <section class="frame sec news" id="news" data-frame aria-labelledby="news-h">
+    <div class="wrap">
+      <div class="sec-head news-head">
+        <h2 id="news-h">What’s new.</h2>
+        <div class="car-ctl" data-car-ctl>
+          <button type="button" class="ctl-btn" data-car-prev aria-label="Previous release note">←</button>
+          <span class="car-count mono" data-car-count aria-live="polite">1 of 6</span>
+          <button type="button" class="ctl-btn" data-car-next aria-label="Next release note">→</button>
+        </div>
+      </div>
+      <ul class="news-list" data-news role="list">
+        {NEW.map((n, i) => (
+          <li style={`--i:${i}`}><span class="news-n mono" aria-hidden="true">{String(i + 1).padStart(2, '0')}</span>{' '}<b>{n.name}</b>{' '}<span>{n.line}</span></li>
+        ))}
+      </ul>
+      <div class="car-dots" data-car-dots aria-hidden="true">{NEW.map(() => <i></i>)}</div>
+    </div>
+  </section>
+
   <SameGarden current="wicked-crew" />
 
-  <!-- ── Get it ────────────────────────────────────────────────────────── -->
+  <!-- ── S8 · Get it ───────────────────────────────────────────────────── -->
   <div class="finale">
-    <section class="get" id="get">
+    <section class="frame get" id="get" data-frame>
       <div class="wrap get-grid">
         <div class="get-intro">
           <h2>Install it with the family. Studio comes with it.</h2>
@@ -235,7 +482,6 @@ const crewVersion = __WICKED_CREW_VERSION__;
           <p class="get-tos">
             <b>Terms of service:</b> crew drives CLIs you installed under your own accounts. Check
             that each one’s terms allow programmatic use.
-            · <a href="/article">Why this exists&nbsp;→</a>
           </p>
         </div>
         <div class="install-stack">
@@ -245,7 +491,7 @@ const crewVersion = __WICKED_CREW_VERSION__;
               <button class="install__copy" type="button" aria-label="Copy family installer command"
                 onclick="navigator.clipboard&&navigator.clipboard.writeText('npx wicked-installer').then(()=>{this.textContent='Copied';setTimeout(()=>{this.textContent='Copy';},1400);})">Copy</button>
             </div>
-            <pre class="install__code"><code>npx wicked-installer   <span class="c"># picks crew, garden and the rest</span></code></pre>
+            <pre class="install__code"><code><span class="type" data-type>npx wicked-installer</span>   <span class="c"># picks crew, garden and the rest</span></code></pre>
             <p class="install__note">Installs crew and garden together. <span class="install__ver">wicked-crew npm v{crewVersion}</span></p>
           </div>
 
@@ -271,193 +517,10 @@ wicked-crew serve   <span class="c"># opens studio on 127.0.0.1:7701</span></cod
     <Footer repo={repo} />
   </div>
 
-  <!-- ── The job demo: a list of steps; a pointer walks it; decisions pause it. ── -->
-  <script is:inline>
-    (function () {
-      var root = document.querySelector('[data-job]');
-      if (!root) return;
-      var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      var logEl = root.querySelector('[data-log]');
-      var panel = root.querySelector('[data-panel]');
-      var runBtn = root.querySelector('[data-job-run]');
-      var killBtn = root.querySelector('[data-job-kill]');
-      var sts = Array.prototype.slice.call(root.querySelectorAll('[data-st]'));
-      var gates = Array.prototype.slice.call(root.querySelectorAll('[data-gate]'));
-
-      // Receipts, one per gate, filled as the job reaches them.
-      var R = {};
-      var RECEIPTS = {
-        0: { title: 'Plan gate', verdict: 'PASS', rows: [['Required', 'you confirm the plan'], ['Ran', 'operator approval'], ['Decided by', 'you']] },
-        1: { title: 'Build gate', verdict: 'PASS', rows: [['Required', 'evidence floor, your policies'], ['Ran', 'floor: worktree changed · PASS'], ['', 'policy schema-drift · PASS'], ['Built by', 'Claude Code, in its sandbox'], ['Skipped', 'nothing']] },
-        2: { title: 'Review gate', verdict: 'PASS', rows: [['Evaluator', 'Codex (a different agent)'], ['Findings', '1 → disputed → council'], ['Council', 'finding stands · 2 of 3 · seed 4127'], ['Seats', 'Pi, OpenCode, Copilot (OpenCode dissented)'], ['Send-backs', '1 (you are asked after 2)']] },
-        3: { title: 'QE gate', verdict: 'PASS', rows: [['Required', 'feature changes the app'], ['Read', 'GET /api/v1/runs/r-4f2a/acceptance'], ['Ledger', 'PASS, attributed to r-4f2a']] },
-        4: { title: 'Delivery', verdict: 'DELIVERED', rows: [['Pull request', '#42 from wicked/r-4f2a'], ['Assurance', 'full: built and reviewed by different agents'], ['QE acceptance', 'PASS'], ['Evidence', 'bundle ready to export']] }
-      };
-
-      // The script. `p` = phase index; `gate` marks the step that closes a phase's gate;
-      // `wait` pauses for the visitor.
-      var S = [
-        { p: 0, t: 'run.launched · workflow <b>feature</b>' },
-        { p: 0, t: 'plan proposed · 4 steps' },
-        { p: 0, t: 'plan confirmed by you', gate: 0 },
-        { p: 1, t: 'container started · <b>Claude Code</b> · only the worktree mounted' },
-        { p: 1, t: 'egress: the model gateway only · keys stay in the broker' },
-        { p: 1, t: 'writing the change · usage 41k in / 6k out' },
-        { p: 1, t: 'diff captured · 3 files' },
-        { p: 1, t: 'gate: evidence floor PASS · schema-drift PASS', c: 'ok', gate: 1, pre: true },
-        { p: 2, t: 'review goes to <b>Codex</b>, a different agent than the builder' },
-        { p: 2, t: 'Codex finding (high): the limit is keyed on IP; the brief says per API key · rateLimit.ts:12', c: 'warn' },
-        { p: 2, t: 'Claude Code declines: “IP is right for routes with no key”' },
-        { p: 2, t: 'Codex holds the finding → <b>dispute</b>', c: 'warn' },
-        { p: 2, t: 'council convened: 3 of 4 eligible agents, seed 4127 · Pi, OpenCode, Copilot', c: 'ctrl' },
-        { p: 2, t: 'council ruled: <b>finding stands</b> · 2 of 3 · OpenCode dissented', c: 'ctrl' },
-        { p: 2, t: 'sent back to Build with the ruling' },
-        { p: 2, t: 'Claude Code: limit is now per API key, IP only when no key is sent' },
-        { p: 2, t: 'Codex: PASS', c: 'ok', gate: 2 },
-        { p: 3, t: 'QE acceptance <b>required</b>: this job changes the app' },
-        { p: 3, t: 'garden’s QE pipeline ran; its verdict is in the QE ledger' },
-        { p: 3, wait: 'qe' },
-        { p: 4, t: 'pushed wicked/r-4f2a · pull request <b>#42</b> opened', c: 'ok' },
-        { p: 4, t: 'done · evidence bundle ready', c: 'ok', gate: 4 }
-      ];
-
-      var i = 0, timer = null, running = false, dead = false, waiting = null, selected = null, booted = false;
-      var STEP = 750;
-
-      function line(html, cls) {
-        var el = document.createElement('p');
-        el.className = 'ln' + (cls ? ' ln--' + cls : '');
-        el.innerHTML = html;
-        logEl.appendChild(el);
-        logEl.scrollTop = logEl.scrollHeight;
-      }
-      function phase() { return i < S.length ? S[i].p : 4; }
-      function paintTrack() {
-        var cur = running || waiting ? phase() : -1;
-        sts.forEach(function (st, k) {
-          st.classList.toggle('is-done', !!(R[k] && R[k].verdict !== 'HELD'));
-          st.classList.toggle('is-now', k === cur && !dead);
-          st.classList.toggle('is-held', !!(R[k] && R[k].verdict === 'HELD'));
-          st.classList.toggle('is-down', k === cur && dead);
-          gates[k].disabled = !R[k];
-          gates[k].setAttribute('aria-pressed', selected === k ? 'true' : 'false');
-        });
-      }
-      function showReceipt(k) {
-        var r = R[k];
-        if (!r) return;
-        selected = k;
-        var cls = r.verdict === 'HELD' ? 'deny' : 'ok';
-        panel.innerHTML = '<div class="rc"><div class="rc-head"><span>' + r.title + '</span><span class="rc-v rc-v--' + cls + '">' + r.verdict + '</span></div>' +
-          '<table><tbody>' + r.rows.map(function (row) { return '<tr><th>' + row[0] + '</th><td>' + row[1] + '</td></tr>'; }).join('') + '</tbody></table></div>';
-        paintTrack();
-      }
-      function idlePanel(text) { selected = null; panel.innerHTML = '<p class="panel-empty">' + text + '</p>'; paintTrack(); }
-
-      function qePanel() {
-        selected = null;
-        panel.innerHTML = '<div class="ask"><p class="ask-q">What did the QE ledger record for this job?</p>' +
-          '<p class="ask-sub">Pick one to see the delivery gate decide.</p><div class="ask-acts">' +
-          '<button type="button" class="pick pick--yes" data-qe="PASS">PASS</button>' +
-          '<button type="button" class="pick" data-qe="CONDITIONAL">CONDITIONAL</button>' +
-          '<button type="button" class="pick" data-qe="NONE">No verdict</button></div></div>';
-        paintTrack();
-      }
-      function answerQe(v) {
-        if (waiting !== 'qe' || dead) return;
-        if (v !== 'PASS') {
-          var why = v === 'CONDITIONAL' ? 'CONDITIONAL is not a pass' : 'no verdict is not a pass';
-          line('delivery refused · <b>409 qe_acceptance_required</b> · ' + why, 'deny');
-          R[3] = { title: 'QE gate', verdict: 'HELD', rows: [['Required', 'feature changes the app'], ['Ledger', v === 'NONE' ? 'no verdict for r-4f2a' : 'CONDITIONAL for r-4f2a'], ['Delivery', 'refused until an attributed PASS']] };
-          showReceipt(3);
-          panel.insertAdjacentHTML('beforeend', '<p class="ask-again">Nothing ships. Pick again: <button type="button" class="pick pick--yes" data-qe="PASS">PASS</button><button type="button" class="pick" data-qe="CONDITIONAL">CONDITIONAL</button><button type="button" class="pick" data-qe="NONE">No verdict</button></p>');
-          return;
-        }
-        line('acceptance read: <b>PASS</b>, attributed to r-4f2a', 'ok');
-        R[3] = RECEIPTS[3];
-        waiting = null;
-        i++;
-        showReceipt(3);
-        go();
-      }
-
-      function stepOnce() {
-        if (dead || waiting) return;
-        if (i >= S.length) { finish(); return; }
-        var s = S[i];
-        if (s.wait) { waiting = s.wait; qePanel(); return; }
-        line(s.t, s.c);
-        if (s.gate !== undefined) { R[s.gate] = RECEIPTS[s.gate]; showReceipt(s.gate); }
-        i++;
-        paintTrack();
-      }
-      function go() {
-        clearTimeout(timer);
-        if (reduced) { while (!dead && !waiting && i < S.length) stepOnce(); if (i >= S.length) finish(); return; }
-        (function tick() {
-          if (dead || waiting) return;
-          stepOnce();
-          if (i >= S.length) { finish(); return; }
-          if (!waiting) timer = setTimeout(tick, STEP);
-        })();
-      }
-      function finish() {
-        running = false; killBtn.disabled = true; runBtn.disabled = false; runBtn.textContent = 'Run it again';
-        if (R[4]) showReceipt(4);
-        paintTrack();
-      }
-      function start() {
-        clearTimeout(timer);
-        logEl.innerHTML = ''; R = {}; i = 0; dead = false; waiting = null; running = true;
-        runBtn.disabled = true; killBtn.disabled = false; killBtn.textContent = 'Kill the daemon';
-        idlePanel('Each gate’s receipt opens here as the job reaches it. Click a gate on the track to reopen one.');
-        go();
-      }
-      function kill() {
-        if (!running) return;
-        if (!dead) {
-          clearTimeout(timer);
-          dead = true;
-          line('— daemon killed mid-job —', 'deny');
-          killBtn.textContent = 'Start the daemon';
-          idlePanel('The daemon is down. The job is still on disk, at the step it was on.');
-          return;
-        }
-        // Restart: the boot sweep finds the orphaned job and re-enters the step it was on.
-        dead = false;
-        killBtn.textContent = 'Kill the daemon';
-        var p = phase();
-        var names = ['Plan', 'Build', 'Review', 'QE', 'Deliver'];
-        line('daemon up · boot sweep found r-4f2a orphaned', 'ctrl');
-        line('run.resumed {via: boot} · re-entering <b>' + names[p] + '</b> · the step it was on runs again; finished steps stay finished', 'ctrl');
-        if (waiting === 'qe') { qePanel(); paintTrack(); return; }
-        // Re-enter the current phase from its first step (the unit it was on), never an earlier one.
-        while (i > 0 && S[i - 1].p === p && S[i - 1].gate === undefined) i--;
-        idlePanel('Resumed. Each gate’s receipt opens here as the job reaches it.');
-        go();
-      }
-
-      root.addEventListener('click', function (e) {
-        var t = e.target.closest ? e.target : null;
-        if (!t) return;
-        var qe = t.closest('[data-qe]');
-        if (qe) { answerQe(qe.getAttribute('data-qe')); return; }
-        var g = t.closest('[data-gate]');
-        if (g && !g.disabled) { showReceipt(parseInt(g.getAttribute('data-gate'), 10)); return; }
-      });
-      runBtn.addEventListener('click', function () { booted = true; start(); });
-      killBtn.addEventListener('click', kill);
-
-      idlePanel('Press Run the job, or wait a moment. You will pick the QE verdict, and you can kill the daemon at any point.');
-      paintTrack();
-      function auto() { if (!booted) { booted = true; start(); } }
-      if (reduced) { auto(); return; }
-      if ('IntersectionObserver' in window) {
-        var io = new IntersectionObserver(function (es) {
-          if (es.some(function (x) { return x.isIntersecting; })) { io.disconnect(); setTimeout(auto, 1200); }
-        }, { threshold: 0.4 });
-        io.observe(root);
-      } else { auto(); }
-    })();
+  <script>
+    import '../scripts/job-demo.js';
+    import '../scripts/explore.js';
+    import '../scripts/settle.js';
+    import '../scripts/arrive.js';
   </script>
 </Base>
