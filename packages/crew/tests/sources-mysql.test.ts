@@ -241,6 +241,86 @@ for (const target of MYSQL_TARGETS) {
         }
       }, 15_000);
 
+      /** A proxy in front of the server; `rule(conn, command)` per client command packet: forward, swallow (stall), or `hold` the whole connection. */
+      async function packetProxy(rule: (conn: number, command: number | null) => 'forward' | 'swallow' | 'hold') {
+        const sockets = new Set<Socket>();
+        const closed: Array<number | null> = [];
+        let n = 0;
+        const server = createServer((client) => {
+          const idx = n++;
+          closed[idx] = null;
+          sockets.add(client);
+          client.on('error', () => undefined);
+          client.on('close', () => (closed[idx] = Date.now()));
+          if (rule(idx, null) === 'hold') return;
+          const up = connect(db.port, '127.0.0.1');
+          sockets.add(up);
+          up.on('error', () => client.destroy());
+          up.pipe(client);
+          client.on('close', () => up.destroy());
+          let buf = Buffer.alloc(0);
+          let stalled = false;
+          client.on('data', (c: Buffer) => {
+            if (stalled) return;
+            buf = Buffer.concat([buf, c]);
+            while (buf.length >= 4) {
+              const len = buf.readUIntLE(0, 3);
+              if (buf.length < 4 + len) break;
+              const packet = buf.subarray(0, 4 + len);
+              buf = buf.subarray(4 + len);
+              if (packet[3] === 0 && rule(idx, packet[4] ?? null) === 'swallow') {
+                stalled = true;
+                return;
+              }
+              up.write(packet);
+            }
+          });
+        });
+        await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+        return {
+          port: (server.address() as AddressInfo).port,
+          closed,
+          close: async () => {
+            for (const sk of sockets) sk.destroy();
+            await new Promise<void>((r) => server.close(() => r()));
+          },
+        };
+      }
+
+      it('a read whose prepare never answers and whose KILL cannot be had settles once its connection is dropped (codex r5)', async () => {
+        // The read's connection swallows COM_STMT_PREPARE (0x16); the KILL connection is held at the door.
+        const px = await packetProxy((conn, cmd) => (conn === 1 ? 'hold' : cmd === 0x16 ? 'swallow' : 'forward'));
+        try {
+          const args = { ...reader(), source: { ...reader().source, port: px.port } };
+          const t0 = Date.now();
+          await expect(mysqlRead(args, 'SELECT n FROM big', [], { deadlineMs: 500 })).rejects.toMatchObject({ errorClass: 'timeout' });
+          expect(Date.now() - t0).toBeLessThan(6_000);
+        } finally {
+          await px.close();
+        }
+      }, 20_000);
+
+      it('an established KILL connection whose KILL never answers is dropped with the call (codex r5)', async () => {
+        // The KILL connection passes its handshake and session statements but swallows the KILL (COM_QUERY 0x03 after setup).
+        let killerQueries = 0;
+        const px = await packetProxy((conn, cmd) => {
+          if (conn !== 1 || cmd !== 0x03) return 'forward';
+          killerQueries++;
+          return killerQueries > 2 ? 'swallow' : 'forward'; // the two SET statements pass; the KILL does not
+        });
+        try {
+          const args = { ...reader(), source: { ...reader().source, port: px.port } };
+          await expect(mysqlRead(args, 'SELECT SUM(a.n + b.n + c.n) AS s FROM big a, big b, big c', [], { deadlineMs: 500 })).rejects.toBeDefined();
+          const ended = Date.now();
+          for (let i = 0; i < 40 && px.closed[1] == null; i++) await new Promise((r) => setTimeout(r, 100));
+          expect(px.closed[1]).not.toBeNull();
+          expect(killerQueries).toBeGreaterThanOrEqual(3); // the KILL itself was sent and swallowed (codex r6)
+          expect((px.closed[1] ?? Infinity) - ended).toBeLessThan(1_500);
+        } finally {
+          await px.close();
+        }
+      }, 20_000);
+
       it('one deadline from entry (codex r3): a connection slower than the deadline is a timeout, not a fresh 10 s after it', async () => {
         const slow = (async (host: string) => {
           await new Promise((r) => setTimeout(r, 2_500));

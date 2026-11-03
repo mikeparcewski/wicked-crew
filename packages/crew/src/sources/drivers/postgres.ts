@@ -137,7 +137,9 @@ async function closeQuietly(sql: PgSql): Promise<void> {
 
 /** Run `fn` inside a READ ONLY transaction with `search_path = pg_catalog, pg_temp` set locally too. */
 export async function pgReadOnly<T>(args: SqlConnectArgs, fn: (tx: postgres.TransactionSql<Record<string, never>>) => Promise<T>, opts: { deadlineMs?: number } = {}): Promise<T> {
-  const sql = pgClient(args, opts);
+  // The client owns its sockets: each is destroyed when the call ends, never left half-closed.
+  const ended = new AbortController();
+  const sql = pgClient(args, { ...opts, signal: ended.signal });
   try {
     return (await sql.begin('read only', async (tx) => {
       await tx.unsafe('SET LOCAL search_path = pg_catalog, pg_temp');
@@ -147,6 +149,7 @@ export async function pgReadOnly<T>(args: SqlConnectArgs, fn: (tx: postgres.Tran
     throw pgError(err);
   } finally {
     await closeQuietly(sql);
+    ended.abort();
   }
 }
 

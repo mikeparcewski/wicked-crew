@@ -185,7 +185,7 @@ export async function mysqlDescribe(args: SqlConnectArgs, text: string, expect?:
  * (mysql2's own `destroy()` marks the connection closing first, and a pending command then never
  * settles).
  */
-function drop(conn: Connection): void {
+export function drop(conn: Connection): void {
   (conn as unknown as { connection?: { stream?: Socket } }).connection?.stream?.destroy();
   conn.destroy();
 }
@@ -239,9 +239,21 @@ export async function mysqlRead(args: SqlConnectArgs, text: string, params: unkn
   const conn = await connectWithin(args, deadlineMs, opts.sourceTimeoutMs ?? deadlineMs, opts.signal);
   let killed = false;
   let ended = false;
-  // The KILL connection's attempt belongs to the whole call: when the call ends first (the source
-  // stopped the query itself), the attempt is abandoned with it, never left handshaking.
+  // The KILL connection belongs to the whole call: when the call ends first (the source stopped the
+  // query itself), an attempt still connecting is abandoned and an established one dropped with it.
   const abandon = new AbortController();
+  let killerConn: Connection | null = null;
+  // When the read's own connection has to be dropped (no KILL could be sent), the call settles as a
+  // timeout at once: a command pending on a dropped connection is not guaranteed to settle.
+  let failRead: (err: unknown) => void = () => undefined;
+  const dropped = new Promise<never>((_resolve, reject) => {
+    failRead = reject;
+  });
+  dropped.catch(() => undefined);
+  const dropRead = (): void => {
+    drop(conn);
+    failRead(new SourceQueryError('70100', 'timeout', 'the query ran past its deadline; its connection was dropped'));
+  };
   const kill = async (): Promise<void> => {
     if (killed || ended) return;
     killed = true;
@@ -265,29 +277,32 @@ export async function mysqlRead(args: SqlConnectArgs, text: string, params: unkn
     if (killer === null) abandon.abort();
     if (killer === null || ended) {
       if (killer !== null) drop(killer);
-      drop(conn);
+      dropRead();
       return;
     }
+    killerConn = killer;
     try {
       // The KILL itself is bounded too: a killer that hangs drops the read's connection instead.
       const sent = killer.query(`KILL QUERY ${Math.trunc(conn.threadId)}`).then(() => true);
       sent.catch(() => undefined);
       const ok = await Promise.race([sent, new Promise<false>((r) => setTimeout(() => r(false), KILL_CONNECT_MS).unref())]);
-      if (!ok) drop(conn);
+      if (!ok) dropRead();
     } catch {
-      drop(conn); // the query may have just ended; either way it is not left running on our side
+      dropRead(); // the query may have just ended; either way it is not left running on our side
     } finally {
       drop(killer);
+      killerConn = null;
     }
   };
   const guard = setTimeout(() => void kill(), Math.max(1, deadlineMs - (Date.now() - started)));
   opts.signal?.addEventListener('abort', () => void kill(), { once: true });
-  try {
+  // Every step races the dropped-connection signal: a command pending on a dropped connection need not settle.
+  const work = (async (): Promise<SqlReadResult> => {
     await conn.query('START TRANSACTION READ ONLY');
     if (opts.expect !== undefined) await mysqlExpectRelations(conn, opts.expect);
     // Streamed: rows past the cap are never held; the query is stopped at the source once it is hit.
     const core = (conn as unknown as { connection: { execute: (o: unknown, p: unknown) => NodeJS.EventEmitter } }).connection;
-    const { rows, fields, truncated } = await new Promise<{ rows: unknown[][]; fields: FieldPacket[]; truncated: boolean }>((resolve, reject) => {
+    const streamed = new Promise<{ rows: unknown[][]; fields: FieldPacket[]; truncated: boolean }>((resolve, reject) => {
       const rows: unknown[][] = [];
       let fields: FieldPacket[] = [];
       let truncated = false;
@@ -308,6 +323,7 @@ export async function mysqlRead(args: SqlConnectArgs, text: string, params: unkn
       q.on('error', (err: unknown) => (truncated ? resolve({ rows, fields, truncated }) : reject(err)));
       q.on('end', () => resolve({ rows, fields, truncated }));
     });
+    const { rows, fields, truncated } = await streamed;
     if (!truncated) await conn.query('COMMIT');
     return {
       columns: (fields ?? []).map((f) => ({ name: f.name, type: typeName(f as { columnType?: number }) })),
@@ -315,6 +331,10 @@ export async function mysqlRead(args: SqlConnectArgs, text: string, params: unkn
       truncated,
       ms: Date.now() - started,
     };
+  })();
+  work.catch(() => undefined);
+  try {
+    return await Promise.race([work, dropped]);
   } catch (err) {
     if (killed && Date.now() - started >= deadlineMs) throw new SourceQueryError('70100', 'timeout', 'the query ran past its deadline and was stopped at the source (KILL QUERY)');
     throw mysqlError(err);
@@ -322,6 +342,7 @@ export async function mysqlRead(args: SqlConnectArgs, text: string, params: unkn
     ended = true;
     clearTimeout(guard);
     abandon.abort();
+    if (killerConn !== null) drop(killerConn);
     drop(conn);
   }
 }

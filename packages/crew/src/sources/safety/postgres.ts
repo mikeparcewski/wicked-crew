@@ -184,6 +184,9 @@ export async function pgTableSafetyIn(tx: Tx, schema: string, name: string, decl
   // determinism, recorded version) AND the version the server's library has now (an ICU or libc
   // upgrade changes comparisons before anyone refreshes the recorded one), and the database's own
   // collation, which the `default` collation means.
+  // pg_database_collation_actual_version is Postgres 15+; older servers record no database version either.
+  const [ver] = await q<{ v: number }>(`SELECT pg_catalog.current_setting('server_version_num')::pg_catalog.int4 AS v`);
+  const dbActual = (ver?.v ?? 0) >= 150_000 ? 'pg_catalog.pg_database_collation_actual_version(d.oid)' : 'NULL::pg_catalog.text';
   const [coll] = await q<{ defs: string[]; db: string | null; dbActual: string | null }>(
     `SELECT pg_catalog.array_to_json(ARRAY(
               SELECT pg_catalog.to_jsonb(co.*)::pg_catalog.text || ' ' || COALESCE(pg_catalog.pg_collation_actual_version(co.oid), '') FROM pg_catalog.pg_collation co
@@ -192,7 +195,7 @@ export async function pgTableSafetyIn(tx: Tx, schema: string, name: string, decl
                ORDER BY co.oid)) AS defs,
             (SELECT pg_catalog.jsonb_object_agg(e.key, e.value ORDER BY e.key)::pg_catalog.text FROM pg_catalog.jsonb_each(pg_catalog.to_jsonb(d.*)) e
               WHERE e.key IN ('datcollate', 'datctype', 'datlocprovider', 'daticulocale', 'datlocale', 'daticurules', 'datcollversion')) AS db,
-            pg_catalog.pg_database_collation_actual_version(d.oid) AS "dbActual"
+            ${dbActual} AS "dbActual"
        FROM pg_catalog.pg_database d WHERE d.datname = pg_catalog.current_database()`,
     [T],
   );

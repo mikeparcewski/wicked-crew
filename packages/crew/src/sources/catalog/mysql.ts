@@ -4,7 +4,7 @@
  * primary and foreign keys. Structure only; read-only session (drivers/mysql.ts).
  */
 
-import { mysqlConnect, mysqlError, mysqlRelationKind } from '../drivers/mysql.js';
+import { drop, mysqlConnect, mysqlError, mysqlRelationKind } from '../drivers/mysql.js';
 import type { SqlConnectArgs } from '../drivers/types.js';
 import type { CatalogRelation, SqlCatalog } from './types.js';
 
@@ -77,6 +77,6 @@ export async function describeMysql(args: SqlConnectArgs): Promise<SqlCatalog> {
   } catch (err) {
     throw mysqlError(err);
   } finally {
-    conn.destroy();
+    drop(conn);
   }
 }
