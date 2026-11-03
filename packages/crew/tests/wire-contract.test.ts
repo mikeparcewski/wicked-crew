@@ -1126,7 +1126,7 @@ respondsWith<ReturnType<typeof graphqlCheckAnswer>, Wire.SourceCheckResponse>();
 // Test connection and ask (api-types 0.179.0): the bodies pass their schemas; what the code produces fits.
 accepts<z.input<typeof SourceAskSchema>, Wire.SourceAskBody>();
 accepts<z.input<typeof SourceQuerySchema>, Wire.SourceQueryBody>();
-// Sources as agent knowledge (api-types 0.180.0, DES-APPS-001 rev 12 §5.4): the switch body both ways; what
+// Sources as agent knowledge (api-types 0.181.0, DES-APPS-001 rev 12 §5.4): the switch body both ways; what
 // the registry, the record and the routes produce is the contract's.
 accepts<z.input<typeof SourceAgentAccessSchema>, Wire.SourceAgentAccessBody>();
 respondsWith<Wire.SourceAgentAccess, SourceAgentAccess>();

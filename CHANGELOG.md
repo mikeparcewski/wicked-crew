@@ -12,7 +12,7 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
-- **Data sources as live knowledge for agents (api-types 0.180.0, DES-APPS-001 rev 12 §5.4, operator 2026-11-03).**
+- **Data sources as live knowledge for agents (api-types 0.181.0, DES-APPS-001 rev 12 §5.4, operator 2026-11-03).**
   "It should be more than a catalogue - queries can happen through it, it's knowledge just needs to be orchestrated
   differently." Governed run units and chat answer steps get three crew built-in tools through the broker, as the
   reserved subjects `mcp:sources/list`, `mcp:sources/describe` and `mcp:sources/query` (the name `sources` is now

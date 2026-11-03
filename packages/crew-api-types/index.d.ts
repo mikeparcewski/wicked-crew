@@ -12519,7 +12519,7 @@ export interface McpServer {
    */
   descriptorHash?: string;
   /**
-   * (api-types 0.180.0, DES-APPS-001 rev 12 §5.4) `sql`/`graphql`: which agents may use the source.
+   * (api-types 0.181.0, DES-APPS-001 rev 12 §5.4) `sql`/`graphql`: which agents may use the source.
    * Only a human operator changes it (`PUT /sources/:name/agents`).
    */
   agents?: SourceAgentAccess;
@@ -13295,7 +13295,7 @@ export interface SourceAllowWritesResponse {
 }
 
 /**
- * (api-types 0.180.0, DES-APPS-001 rev 12 §5.4) Data sources as live knowledge for agents: which agents of
+ * (api-types 0.181.0, DES-APPS-001 rev 12 §5.4) Data sources as live knowledge for agents: which agents of
  * governed runs and chat seats may use a `sql`/`graphql` source through crew's broker tools
  * (`mcp:sources/list`, `mcp:sources/describe`, `mcp:sources/query`). Never a write, never a credential.
  * Apps units (`apps-turn`, `apps-publish`) get none, whatever this says (D-7).
