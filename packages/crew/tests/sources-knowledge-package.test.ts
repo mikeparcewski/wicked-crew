@@ -76,7 +76,10 @@ const narrowedCore = () => async (json: string) => {
   const cls = (c: (typeof calls)[number]) => c.classOverride ?? (c.annotations?.readOnlyHint === true ? 'read' : 'write');
   return JSON.stringify({
     unit: t.unit,
-    tools: calls.filter((c) => !(t.apps && cls(c) !== 'read')).map((c) => ({ subject: `mcp:${c.server}/${c.tool}`, class: cls(c), decision: 'ask', ruleIds: ['engine:mcp-first-use'] })),
+    // The engine's first-use ask on a store with the mcp-defaults pack: MCP-POSTURE-READ fires on a read (crew#1333).
+    tools: calls
+      .filter((c) => !(t.apps && cls(c) !== 'read'))
+      .map((c) => ({ subject: `mcp:${c.server}/${c.tool}`, class: cls(c), decision: 'ask', ...(cls(c) === 'read' ? { ruleIds: ['engine:mcp-first-use', 'MCP-POSTURE-READ'], firstUseOnly: true } : { ruleIds: ['engine:mcp-first-use', 'MCP-POSTURE-WRITE'] }) })),
   });
 };
 

@@ -210,8 +210,11 @@ export class DataGate {
 
   /**
    * The subjects the ENGINE lets this unit try, of `calls` (`listMcpTools`, which records nothing): absence is a
-   * deny (an operator policy; D-7 denies an Apps unit only write tools, and these go as reads). A first-use `ask` is admitted (the person's per-source
-   * switches are the consent); an `ask` for any other reason is not. `null` = the linked engine has no lister.
+   * deny (an operator policy; D-7 denies an Apps unit only write tools, and these go as reads). An `ask` the
+   * engine marks `firstUseOnly` is admitted: the server's first use is its only reason (every other rule that
+   * fired, such as the `mcp-defaults` read posture, allows), and the person's per-source switches are that
+   * consent (crew#1333). An `ask` for any other reason (an operator's asking rule), or from an engine that
+   * predates the mark, stands. `null` = the linked engine has no lister.
    */
   async admitted(token: string, calls: ReadonlyArray<{ server: string; tool: string; disclosure: string | null }>): Promise<Map<string, 'allow' | 'ask'> | null> {
     const lister = this.deps.lister();
@@ -225,13 +228,12 @@ export class DataGate {
       if (msg.startsWith('invalid_token') || msg.startsWith('bad_request')) throw new GateTokenError(msg);
       throw err;
     }
-    const judged = JSON.parse(raw) as { tools?: Array<{ subject?: unknown; decision?: unknown; ruleIds?: unknown }> };
+    const judged = JSON.parse(raw) as { tools?: Array<{ subject?: unknown; decision?: unknown; firstUseOnly?: unknown }> };
     const out = new Map<string, 'allow' | 'ask'>();
     for (const t of judged.tools ?? []) {
       if (typeof t.subject !== 'string') continue;
-      const rules = Array.isArray(t.ruleIds) ? t.ruleIds.filter((r): r is string => typeof r === 'string') : [];
       if (t.decision === 'allow') out.set(t.subject, 'allow');
-      else if (t.decision === 'ask') out.set(t.subject, firstUseOnly(rules) ? 'allow' : 'ask');
+      else if (t.decision === 'ask') out.set(t.subject, t.firstUseOnly === true ? 'allow' : 'ask');
     }
     return out;
   }
@@ -814,11 +816,6 @@ function sourceRefusal(err: unknown): GateRefused {
   }
   if (err instanceof DialRefusedError) return { refused: err.code, reason: `the connection was refused (${err.code})`, connection: true };
   throw err;
-}
-
-/** An engine `ask` that only says "first use": a non-empty rule list of exactly that rule. Any other ask stands. */
-export function firstUseOnly(ruleIds: readonly string[]): boolean {
-  return ruleIds.length > 0 && ruleIds.every((r) => r === 'engine:mcp-first-use');
 }
 
 function sameViews(a: readonly string[], b: readonly string[]): boolean {
