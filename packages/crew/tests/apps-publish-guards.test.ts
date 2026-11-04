@@ -80,6 +80,14 @@ describe('the runtime and the server artifact (Publish is offered only when prod
       writeFileSync(join(dir, 'art', 'server', 'lib', 'bundle', 'server.mjs'), '');
       mkdirSync(join(dir, 'art', 'runners'));
       writeFileSync(join(dir, 'art', 'runners', 'sqlite-runner.mjs'), '');
+      // The bundle and runner without the host shim or the external libpg-query: the image would stop at start.
+      expect(serverArtifact({ WICKED_APPS_SERVER_ARTIFACT: join(dir, 'art') })).toBeNull();
+      mkdirSync(join(dir, 'art', 'server', 'shim'));
+      writeFileSync(join(dir, 'art', 'server', 'shim', 'host.js'), '');
+      writeFileSync(join(dir, 'art', 'server', 'shim', 'host.css'), '');
+      expect(serverArtifact({ WICKED_APPS_SERVER_ARTIFACT: join(dir, 'art') })).toBeNull();
+      mkdirSync(join(dir, 'art', 'server', 'node_modules', 'libpg-query'), { recursive: true });
+      writeFileSync(join(dir, 'art', 'server', 'node_modules', 'libpg-query', 'package.json'), '{}');
       expect(serverArtifact({ WICKED_APPS_SERVER_ARTIFACT: join(dir, 'art') })).toBe(join(dir, 'art'));
     } finally {
       rmSync(dir, { recursive: true, force: true });

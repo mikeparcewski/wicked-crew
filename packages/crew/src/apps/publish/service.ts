@@ -182,6 +182,7 @@ export class AppPublishService {
         code: 'base_mismatch',
         message: base === null ? `the engine recorded no base for run ${p.runId}: it cannot be shown to start on v${p.version}; publish again` : `the run started on ${base.slice(0, 12)}, not v${p.version}'s commit ${p.commit.slice(0, 12)}: publish again`,
       });
+      return { ok: false, card: consentCard(p.manifest), findings };
     }
     const at = await this.deps.store.acceptedFiles(slug, p.commit);
     const again = await this.manifestFor(slug, { version: p.version, tree: p.tree, commit: p.commit, name: p.manifest.app.name, files: at.files }, p.body);

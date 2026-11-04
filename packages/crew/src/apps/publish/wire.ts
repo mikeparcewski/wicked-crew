@@ -76,11 +76,12 @@ export function unitOfToken(adapter: PublishAdapter): (token: string) => Promise
 export function runBaseOf(adapter: Pick<PublishAdapter, 'runEvents'>): (runId: string) => Promise<string | null> {
   return async (runId) => {
     const events = (await adapter.runEvents(runId)) ?? [];
-    let base: string | null = null;
-    for (const e of events) {
-      if (e['type'] === 'runBaseResolved' && e['session'] === runId && typeof e['baseCommit'] === 'string' && /^[0-9a-f]{40}$/.test(e['baseCommit'])) base = e['baseCommit'];
+    // The last one wins (a run mints its worktree once; a later record would be a re-mint).
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i]!;
+      if (e['type'] === 'runBaseResolved' && e['session'] === runId) return typeof e['baseCommit'] === 'string' && /^[0-9a-f]{40}$/.test(e['baseCommit']) ? e['baseCommit'] : null;
     }
-    return base;
+    return null;
   };
 }
 
@@ -125,7 +126,7 @@ const crewDist = (): string => join(dirname(fileURLToPath(import.meta.url)), '..
 
 /** What a runtime and a server artifact hold, at least; Publish is offered (and produce runs) only when every part is there. */
 const RUNTIME_PARTS = ['runtime.js', 'runtime.css'];
-const SERVER_PARTS = ['Dockerfile', 'server/lib/bundle/server.mjs', 'runners/sqlite-runner.mjs'];
+const SERVER_PARTS = ['Dockerfile', 'server/lib/bundle/server.mjs', 'server/shim/host.js', 'server/shim/host.css', 'server/node_modules/libpg-query/package.json', 'runners/sqlite-runner.mjs'];
 
 /** The runtime's standalone build: `WICKED_APPS_RUNTIME_DIR`, else the bundled studio's `apps-standalone`. */
 export function runtimeDir(env: NodeJS.ProcessEnv = process.env): string | null {

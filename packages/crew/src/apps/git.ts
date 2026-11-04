@@ -327,7 +327,8 @@ export class AppGit {
     try {
       const file = join(this.gitDir, 'HEAD');
       const st = await lstat(file);
-      return st.isFile() && !st.isSymbolicLink() && (await readFile(file, 'utf8')) === `${HEAD_MAIN}\n`;
+      // The size first: HEAD is agent-writable, and only the one expected line is ever read.
+      return st.isFile() && !st.isSymbolicLink() && st.size === HEAD_MAIN.length + 1 && (await readFile(file, 'utf8')) === `${HEAD_MAIN}\n`;
     } catch {
       return false;
     }

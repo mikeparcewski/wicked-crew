@@ -46,14 +46,16 @@ describe('the publish run (crew side)', () => {
   const built: string[] = [];
   /** The base the engine recorded per run (default: the commit the launcher was handed, as a real launch mints it). */
   const bases = new Map<string, string | null>();
-  /** TESTS: hold the image build until released. */
+  /** TESTS: hold the image build until released (`entered` resolves once a build is waiting on it). */
   let holdBuild: Promise<void> | null = null;
+  let entered: () => void = () => undefined;
 
   beforeAll(async () => {
     h = await appsHarness();
     dir = mkdtempSync(join(tmpdir(), 'k6-pub-'));
     // A server artifact and a runtime, as crew's dist carries them.
-    for (const p of ['art/server/lib/bundle', 'art/runners', 'rt']) mkdirSync(join(dir, p), { recursive: true });
+    for (const p of ['art/server/lib/bundle', 'art/server/shim', 'art/server/node_modules/libpg-query', 'art/runners', 'rt']) mkdirSync(join(dir, p), { recursive: true });
+    for (const f of ['server/shim/host.js', 'server/shim/host.css', 'server/node_modules/libpg-query/package.json']) writeFileSync(join(dir, 'art', f), '');
     writeFileSync(join(dir, 'art', 'Dockerfile'), 'FROM scratch\n');
     writeFileSync(join(dir, 'art', 'server', 'lib', 'bundle', 'server.mjs'), '');
     writeFileSync(join(dir, 'art', 'runners', 'sqlite-runner.mjs'), '');
@@ -80,7 +82,10 @@ describe('the publish run (crew side)', () => {
         // The context crew packed: the product Dockerfile, the site from the tree, no test host build.
         expect(existsSync(join(ctx, 'Dockerfile'))).toBe(true);
         expect(JSON.parse(readFileSync(join(ctx, 'site', 'manifest.json'), 'utf8')).app.slug).toBe('esc');
-        if (holdBuild !== null) await holdBuild;
+        if (holdBuild !== null) {
+          entered();
+          await holdBuild;
+        }
         built.push(tag);
         return { id: `sha256:${'a'.repeat(64)}`, log: 'built' };
       },
@@ -189,8 +194,9 @@ describe('the publish run (crew side)', () => {
     units.set('tok-produce-twice', { runId, step: 'produce', tool: true });
     let release!: () => void;
     holdBuild = new Promise((r) => (release = r));
+    const building = new Promise<void>((r) => (entered = r));
     const first = svc.produce('tok-produce-twice');
-    await new Promise((r) => setTimeout(r, 20));
+    await building; // the first produce holds its reservation and is inside the build
     await expect(svc.produce('tok-produce-twice')).rejects.toMatchObject({ status: 409, code: 'produce_in_flight' });
     release();
     holdBuild = null;
@@ -211,6 +217,11 @@ describe('the publish run (crew side)', () => {
     const ok = await svc.start('esc', await oidcBody(), { id: 'priya', kind: 'human', trust: 'operator' });
     expect(readFileSync(headFile, 'utf8')).toBe('ref: refs/heads/main\n');
     await h.store.endPublish(ok.runId);
+    // A huge HEAD that starts right is not read whole: it is not main's, and it is replaced.
+    writeFileSync(headFile, `ref: refs/heads/main\n${'x'.repeat(256 * 1024)}`);
+    const big = await svc.start('esc', await oidcBody(), { id: 'priya', kind: 'human', trust: 'operator' });
+    expect(readFileSync(headFile, 'utf8')).toBe('ref: refs/heads/main\n');
+    await h.store.endPublish(big.runId);
     // HEAD replaced by a directory (it cannot be rewritten): refused, and the launcher was not called.
     rmSync(headFile);
     mkdirSync(join(headFile, 'x'), { recursive: true });
