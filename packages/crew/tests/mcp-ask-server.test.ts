@@ -3,7 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { AskServer } from '../src/mcp/ask-server.js';
+import { ASK_MAX_INPUT_ELEMENTS, AskServer } from '../src/mcp/ask-server.js';
 import { registerMcpRoutes } from '../src/api/mcp.js';
 import { LOCAL_ACTOR, registerAuthHooks } from '../src/api/auth.js';
 import { AskError, type AskAdapter, type AskTicket, type AskUnit, type CoreEvent } from '../src/core/types.js';
@@ -262,6 +262,16 @@ describe('ask MCP over HTTP', () => {
     const response = await c.callTool({ name: 'ask', arguments: args });
     expect(response.isError).toBe(true);
     expect(JSON.stringify(response.content)).toContain(field);
+    expect(f.adapter.openAsk).not.toHaveBeenCalled();
+  });
+
+  it('refuses a call with more argument elements than the cap before its schema runs (GHSA-46jr-4wx8-v453)', async () => {
+    const f = await fixture();
+    const c = await f.client();
+    const choices = Array.from({ length: ASK_MAX_INPUT_ELEMENTS + 1 }, (_, i) => `c${i}`);
+    const response = await c.callTool({ name: 'ask', arguments: { question: 'Which?', choices } });
+    expect(response.isError).toBe(true);
+    expect(JSON.stringify(response.content)).toContain(`more than the maximum of ${ASK_MAX_INPUT_ELEMENTS} elements`);
     expect(f.adapter.openAsk).not.toHaveBeenCalled();
   });
 

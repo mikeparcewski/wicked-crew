@@ -358,6 +358,18 @@ mentioned only where a daemon release depends on them.
   the checked ones (dual-stack `localhost`) without resolving again. `mcp-stdio` servers are outside the dialer (a
   local program the person installed).
 
+### Security
+- **`@modelcontextprotocol/sdk` 1.31.0 -> 1.32.2, and the ask MCP endpoint caps a call's argument elements.**
+  GHSA-46jr-4wx8-v453 (high): the SDK validated every array element and object key of a tool call, so one request
+  inside the body limit could exhaust the heap; the fix is an opt-in `maxToolInputElements`, which crew's one HTTP
+  `McpServer` (the run-scoped ask endpoint, reached only with a run's ask token) now sets to 1,000 (the ask tool's
+  largest valid input is about 110). A larger call gets a tool error before its schema runs. Also closes
+  GHSA-22jm-h49p-29qw (high; crew passes no `taskStore`), GHSA-rvq5-wwqv-78pq and GHSA-6prh-2h8m-c8cw (medium).
+  The stdio `wicked-crew mcp` server is not affected.
+- **`body-parser` 2.3.0 -> 2.4.0** (GHSA-27r3-jxmh-p828, high: trailing bytes after a compressed body crash the
+  process). It reaches crew only as the MCP SDK's `express` dependency; crew serves HTTP with Fastify. Its own
+  requirement moves `qs` to 6.17.1, which closes GHSA-6pq8-jhm2-2vcw (medium).
+
 ## [0.16.13] — 2026-11-03
 
 A feature release on wicked-core-ts ^0.15.21 and wicked-crew-api-types 0.172.0, bundling wicked-studio 0.14.1. It carries the PRs since 0.16.12 (#1263, #1269, #1278, #1283, #1285) and raises the interactive bridge floor. Make it creates a grounded document from a chat, exactly once (A3, #1278), and its draft lands only on the head it started from, now that crew spawns wicked-interactive ^0.15.0. An editor plugin's frame can no longer use WebRTC (#1269). The Apps schema and the app store's wire contract (K2a, #1285) are types and validation only: no daemon route serves them yet. The release smoke runs on wicked-ci f1775d8 (#1283), and the site has studio's look (#1263, site only). Pins: wicked-core-ts ^0.15.21, wicked-studio ^0.14.1, wicked-vault ^0.8.0, wicked-interactive ^0.15.0 (bridge floor, was ^0.14.1), wicked-crew-api-types 0.172.0.
