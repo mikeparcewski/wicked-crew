@@ -43,6 +43,7 @@ export function appDetailFor(actor: Actor | null | undefined, detail: AppDetail)
   return {
     ...(view as Omit<AppDetail, 'queryText' | 'lock' | 'spec'>),
     spec: { ...detail.spec, actions: (detail.spec.actions ?? []).map(actionFor) },
-    lock: { ...detail.lock, sources },
+    // pi r2: the lock is built from its known fields, so a field added to it later stays out of the agent form.
+    lock: { schema: detail.lock.schema, sources, queries: detail.lock.queries, actions: detail.lock.actions, uploads: detail.lock.uploads },
   };
 }

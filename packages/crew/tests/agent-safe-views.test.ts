@@ -12,7 +12,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { AuditLog } from '../src/api/audit.js';
-import { agentAuditKeys, auditEntryFor, auditFor } from '../src/api/audit-view.js';
+import { agentAuditKeys, ALLOWED, auditEntryFor, auditFor } from '../src/api/audit-view.js';
 import { LOCAL_ACTOR, registerAuthHooks, tokenHash } from '../src/api/auth.js';
 import { registerMcpRoutes } from '../src/api/mcp.js';
 import { createServer } from '../src/api/server.js';
@@ -233,6 +233,9 @@ describe('crew#1317: a non-human GET /audit reads the MCP and source lines witho
     expect(agentAuditKeys('run.launched')).toBeNull();
     expect(agentAuditKeys('mcp.something_new')).toEqual(['name', 'source', 'subject', 'subjects', 'app', 'action']);
     expect(agentAuditKeys('apps.version.landed')).toBeNull();
+    // pi r2: no allowlist admits a key crew writes connection data, text or a person under.
+    const NEVER = ['authRef', 'ref', 'allow', 'plaintext', 'origin', 'basePath', 'resolved', 'privateAddress', 'matches', 'summary', 'relations', 'operation', 'reason', 'viewer', 'url', 'host', 'sql', 'detail', 'because', 'projects'];
+    for (const [action, keys] of Object.entries(ALLOWED)) for (const k of keys) expect(NEVER, `${action}.${k}`).not.toContain(k);
   });
 
   it("the lines crew's own MCP routes write, read back through the projection, hold no connection data", async () => {

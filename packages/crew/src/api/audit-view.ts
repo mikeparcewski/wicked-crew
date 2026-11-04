@@ -22,7 +22,8 @@ const FAMILIES: readonly string[] = ['mcp.', 'apps.source.', 'apps.action.', 'kn
 /** What any line of those families keeps: which server, source, tool, app or action it is about. */
 const IDENTITY: readonly string[] = ['name', 'source', 'subject', 'subjects', 'app', 'action'];
 
-const ALLOWED: Readonly<Record<string, readonly string[]>> = {
+/** Each action's allowlist (exported for the guard test, which checks no entry admits a connection-data key). */
+export const ALLOWED: Readonly<Record<string, readonly string[]>> = {
   'mcp.server.saved': ['name', 'kind', 'tools', 'disabledWrites'],
   'mcp.server.address_confirmed': ['name', 'kind'],
   'mcp.server.egress_confirmed': ['name'],
