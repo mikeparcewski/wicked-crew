@@ -64,6 +64,7 @@ import { UpstreamCallError } from './upstream-error.js';
 import type { McpRegistry } from './registry.js';
 import { scrubSecrets } from './secrets.js';
 import { ESTATE_PROPOSAL_TOOL, proposalIdOf, rpcErrorEnvelope, scopeEstateArgs, type EstateRelay } from './estate-relay.js';
+import { type DataGate, GateTokenError } from '../knowledge/gate/gate.js';
 
 /** The bus event each call record rides. */
 export const MCP_CALL_COMPLETED = 'wicked.crew.mcp_call.completed';
@@ -133,6 +134,12 @@ export interface McpBrokerDeps {
   log?: (message: string) => void;
   /** The estate relay behind `mcp:estate/<tool>` (wicked-core#1018); absent = those calls are refused. */
   estate?: EstateRelay;
+  /**
+   * (DES-KNOWLEDGE-DATA-001 §7) The data gate: a subject whose server is a live source (`mcp:<source>/<tool>`)
+   * goes through it, never to the registry's upstream path. Absent = those subjects take the registry path,
+   * where a source has no registered tool, so they are refused (D-5).
+   */
+  gate?: DataGate;
 }
 
 interface BreakerState {
@@ -191,6 +198,16 @@ export class McpBroker {
     if (parts === null) return { status: 400, body: { error: `subject must be mcp:<server>/<tool> (got ${JSON.stringify(body.subject)})`, code: 'bad_request' } };
     const span: Span = { start: this.now(), spanId: randomBytes(8).toString('hex'), subject: body.subject, verdict: null, kind: null, retries: 0, bytesOut: 0 };
     if (parts.server === ESTATE_SERVER) return this.callEstate(span, body, parts.tool);
+    // ── The gate step (DES-KNOWLEDGE-DATA-001 §7): a live source is never reached as a plain upstream. ──
+    if (this.deps.gate !== undefined) {
+      let gated: boolean;
+      try {
+        gated = await this.deps.gate.owns(parts.server);
+      } catch (err) {
+        return this.refuse(span, 'guard_error', 'guard_error', 'broker', [], `the MCP registry could not be read: ${message(err)}`, 'the operator fixes the registry in studio → MCP tools');
+      }
+      if (gated) return this.callGated(this.deps.gate, span, body, parts.server, parts.tool);
+    }
 
     // ── 1-3. Resolve and judge ──────────────────────────────────────────────────────────────
     const gate = this.deps.engine();
@@ -423,6 +440,91 @@ export class McpBroker {
       if (proposalId !== null) relay.landed({ ...scope.unit, proposalId, kindType, callId: span.spanId });
     }
     return { status: 200, body: { outcome: 'ok', subject: body.subject, callId: span.spanId, result: scrubbed, ruleIds: [] } };
+  }
+
+  /**
+   * `mcp:<source>/<tool>` through the data gate (DES-KNOWLEDGE-DATA-001 §7, §8.1). The token is resolved to its
+   * unit and run project by the ENGINE; the engine then judges the exact subject for that unit (absent = denied:
+   * D-7 for every Apps unit, or an operator's policy; a first-use ask is admitted, the per-source switch being
+   * the consent); the unit's budget is spent; the gate answers (structure from crew's stored catalog, or one
+   * read through the policy, the scheduler and the adapter); the call is recorded like any brokered call (never
+   * its arguments), and a read's rows are released only after the gate's two-step record.
+   */
+  private async callGated(gate: DataGate, span: Span, body: McpCallBody, server: string, tool: string): Promise<McpBrokerAnswer> {
+    span.kind = 'sql';
+    let scope: Awaited<ReturnType<DataGate['resolve']>>;
+    let admitted: Awaited<ReturnType<DataGate['admitted']>>;
+    try {
+      scope = await gate.resolve(body.token);
+      admitted = scope === null ? null : await gate.admitted(body.token, [{ server, tool, disclosure: null }]);
+    } catch (err) {
+      const msg = message(err);
+      if (err instanceof GateTokenError) {
+        if (msg.startsWith('bad_request')) return { status: 400, body: { error: msg, code: 'bad_request' } };
+        return { status: 401, body: { error: msg, code: 'invalid_token' } };
+      }
+      this.deps.log?.(`[mcp] ${body.subject}: the token's unit could not be read: ${msg}`);
+      return this.refuse(span, 'guard_error', 'guard_error', 'broker:gate', [], "the token's unit could not be read", 'nothing ran; try again, and report it if it persists', null, null);
+    }
+    if (scope === null || admitted === null) {
+      return this.refuse(span, 'guard_error', 'guard_error', 'broker:gate', [], 'the linked engine cannot bind or judge a data-source call (wicked-core-ts predates resolveEstateScope or listMcpTools)', 'upgrade the engine; no data-source call runs unjudged', null, null);
+    }
+    span.verdict = { decision: 'allow', subject: body.subject, class: 'read', ruleIds: [], obligations: [], claimId: '', unit: scope.unit };
+    const judged = admitted.get(body.subject);
+    if (judged === undefined) {
+      return this.refuse(span, 'denied', 'deny', 'engine:gated-tool', ['engine:gated-tool'], `${body.subject} is refused for this unit by the engine (a unit of an Apps run gets no source tool; otherwise a policy denies it)`, 'work from the files and the task as given', null, null);
+    }
+    if (judged === 'ask') {
+      return this.refuse(span, 'pending_approval', 'ask', 'engine:gated-tool', ['engine:gated-tool'], `an operator policy asks for approval of ${body.subject}; a live source's tools are allowed by its switches, never by a per-call approval`, 'the operator changes the policy, or the switches on the source sheet', null, null);
+    }
+    const unitKey = `${scope.unit.runId}:${scope.unit.ord}:${scope.unit.attempt}`;
+    const used = this.used.get(unitKey) ?? 0;
+    if (used >= this.budget) {
+      return this.refuse(span, 'budget_exhausted', 'deny', 'budget', [], `this unit has made its ${this.budget} MCP calls`, 'finish with what you have; the budget is per unit', null, null);
+    }
+    this.used.delete(unitKey);
+    this.used.set(unitKey, used + 1);
+    while (this.used.size > BUDGET_UNITS_MAX) this.used.delete(this.used.keys().next().value as string);
+
+    let out: Awaited<ReturnType<DataGate['unitCall']>>;
+    try {
+      out = await gate.unitCall(scope, server, tool, body.args ?? {}, span.spanId);
+    } catch (err) {
+      // crew's own words stay in crew's log: an error's text can name a host or a path.
+      this.deps.log?.(`[mcp] ${body.subject} failed in crew's gate: ${message(err)}`);
+      return this.refuse(span, 'guard_error', 'guard_error', 'broker:gate', [], `${body.subject} failed in crew; nothing is shown`, 'try again, and report it if it persists', null, null);
+    }
+    if (!out.ok) return this.refuse(span, out.outcome, 'deny', out.ruleId, [out.ruleId], out.reason, out.remedy, null, null);
+    const result: Record<string, unknown> = { content: [{ type: 'text', text: JSON.stringify(out.answer) }], isError: out.isError };
+    span.bytesOut = Buffer.byteLength(JSON.stringify(result), 'utf8');
+    const record = this.record(span, 'ok', 'allow', 'broker:gate', [], out.isError ? 'tool_error' : null, null);
+    try {
+      await this.deps.records.append(record);
+    } catch (err) {
+      // A read's rows stay unreleased: the gate record's last entry is still "unconfirmed".
+      this.deps.log?.(`[mcp] the call record for ${body.subject} could not be written (${message(err)}); its result is withheld`);
+      out.abandon?.();
+      return {
+        status: OUTCOME_STATUS.guard_error,
+        body: { outcome: 'guard_error', subject: body.subject, callId: null, ruleIds: [], reason: 'the call could not be recorded (D-3); its result is withheld', remedy: 'the call ran; its result is not shown' },
+      };
+    }
+    // The release boundary: a read's rows go out only once its release is checked and recorded.
+    if (out.commit !== undefined) {
+      let c: Awaited<ReturnType<NonNullable<typeof out.commit>>>;
+      try {
+        c = await out.commit();
+      } catch (err) {
+        this.deps.log?.(`[mcp] ${body.subject}: the release could not be recorded: ${message(err)}`);
+        c = { ok: false, ruleId: 'gate:record', reason: 'crew could not record the release, so the rows are withheld' };
+      }
+      if (!c.ok) {
+        this.deps.log?.(`[mcp] ${body.subject}: the result was withheld at release (${c.ruleId})`);
+        return { status: OUTCOME_STATUS.withheld, body: { outcome: 'withheld', subject: body.subject, callId: span.spanId, ruleIds: [c.ruleId], reason: c.reason, remedy: 'ask the person; nothing of the result is shown', denied: true } };
+      }
+    }
+    this.publish(record);
+    return { status: 200, body: { outcome: 'ok', subject: body.subject, callId: span.spanId, result, ruleIds: [] } };
   }
 
   private record(

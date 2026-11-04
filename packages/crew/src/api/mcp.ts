@@ -83,6 +83,7 @@ import { MCP_PREVIEW_ROLES, MCP_RUN_MODES, McpLedgerEditError } from '../mcp/pol
 import { agentServerView, configOf, isWriteGrant, McpRegistryError, type McpRegistry } from '../mcp/registry.js';
 import { restTarget } from '../mcp/rest.js';
 import { listUnitTools } from '../mcp/tool-list.js';
+import type { DataGate } from '../knowledge/gate/gate.js';
 import { McpRegistryCorruptError, type McpServerRecord } from '../mcp/registry-store.js';
 import { parseSecretRef, SecretStoreError } from '../mcp/secrets.js';
 import type { McpCallRecordSource } from '../mcp/call-records.js';
@@ -310,6 +311,8 @@ export interface McpRouteDeps {
   broker?: McpBroker;
   /** `Core.listMcpTools` for `POST /mcp/tools` (S4), read per request. Absent → that route answers 503. */
   toolLister?: () => ((requestJson: string) => Promise<string>) | null;
+  /** (DES-KNOWLEDGE-DATA-001 §7) The data gate: live sources' tools, listed for a unit as their switches allow. */
+  gate?: DataGate;
   /** The preview and approvals (S6). Absent → those routes answer 503; the S2 routes are unchanged. */
   policies?: McpPolicies;
   /** The call records the usage fold reads (S7). Absent → `GET /mcp/usage` answers 503. */
@@ -756,7 +759,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       if (!parsed.success) {
         return reply.code(400).send({ error: `body: ${parsed.error.issues.map((i) => `${i.path.join('.') || 'body'} ${i.code}`).join('; ')}`, code: 'bad_request' });
       }
-      const answer = await listUnitTools({ registry, lister: toolLister }, parsed.data.token);
+      const answer = await listUnitTools({ registry, lister: toolLister, ...(deps.gate !== undefined ? { gate: deps.gate } : {}) }, parsed.data.token);
       return reply.code(answer.status).send(answer.body);
     },
   );

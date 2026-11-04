@@ -33,7 +33,7 @@ export class SourcePolicyError extends Error {
 }
 
 /** The live expectations a read checks before it runs: each relation still of an accepted kind. */
-function expectations(
+export function expectations(
   h: SqlSourceHandle,
   keys: readonly string[],
 ): Array<{ schema: string; name: string; kinds: Array<'table' | 'partitioned' | 'view' | 'matview'>; noForeignBelow: boolean; columns: string[] }> {

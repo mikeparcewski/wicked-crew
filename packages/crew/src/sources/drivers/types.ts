@@ -84,6 +84,11 @@ export interface ReadOptions {
   /** SQLite: text cells cut at this many characters (`…` after) before the byte budget counts them (a person's own query). */
   cellChars?: number;
   /**
+   * (DES-KNOWLEDGE-DATA-001 §6.3) An AGENT's read: on Postgres, parallel workers off and `work_mem` capped for
+   * this transaction, so one permitted read takes less of the person's database.
+   */
+  agentLimits?: boolean;
+  /**
    * TESTS ONLY: the source-side timeout, when it should differ from the deadline, so the client-side
    * cancel (Postgres cancel, MySQL KILL QUERY) is what stops the query. Production never sets it.
    */

@@ -66,6 +66,10 @@ import type {
   PutMcpSecretSchema,
   SaveMcpServerSchema,
 } from '../src/api/mcp.js';
+import type { SourceAgentAccess } from '../src/knowledge/gate/access.js';
+import type { SourceReadEnvelope } from '../src/knowledge/gate/envelope.js';
+import type { SourceAgentQueryEntry, SourceDataUse } from '../src/knowledge/gate/record.js';
+import type { SourceAgentAccessSchema } from '../src/knowledge/gate/routes.js';
 import type { graphqlCheckAnswer, SourceAllowWritesSchema, SourceAskSchema, SourceCheckSchema, SourcePrivilegesSchema, SourceQuerySchema, SourceSafetySchema, SourceTestCallSchema, sqlCheckAnswer } from '../src/sources/routes.js';
 import type { SafetyResult } from '../src/sources/safety/postgres.js';
 import type { PgPrivilegeReport } from '../src/sources/catalog/postgres.js';
@@ -1124,6 +1128,14 @@ respondsWith<ReturnType<typeof graphqlCheckAnswer>, Wire.SourceCheckResponse>();
 // Test connection and ask (api-types 0.179.0): the bodies pass their schemas; what the code produces fits.
 accepts<z.input<typeof SourceAskSchema>, Wire.SourceAskBody>();
 accepts<z.input<typeof SourceQuerySchema>, Wire.SourceQueryBody>();
+// The data gate (api-types 0.184.0, DES-KNOWLEDGE-DATA-001 §7): the switch body both ways; what the registry, the
+// read record, the routes and the unit envelope produce is the contract's.
+accepts<z.input<typeof SourceAgentAccessSchema>, Wire.SourceAgentAccessBody>();
+respondsWith<Wire.SourceAgentAccess, SourceAgentAccess>();
+respondsWith<SourceAgentAccess, Wire.SourceAgentAccess>();
+respondsWith<Wire.SourceAgentQuery, SourceAgentQueryEntry>();
+respondsWith<Wire.SourceDataUse, SourceDataUse>();
+respondsWith<Wire.SourceReadEnvelope, SourceReadEnvelope>();
 accepts<z.input<typeof PatchMcpServerSchema>, Wire.PatchMcpServerBody>();
 accepts<z.input<typeof PatchMcpToolSchema>, Wire.PatchMcpToolBody>();
 accepts<z.input<typeof PutMcpSecretSchema>, Wire.PutMcpSecretBody>();
