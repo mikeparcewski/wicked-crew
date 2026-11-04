@@ -7,6 +7,12 @@ import { z } from 'zod';
 import { AskError, AskUnsupportedError, type AskAdapter, type AskTicket, type AskUnit, type CoreEvent } from '../core/types.js';
 
 const CONTINUE = 'Continue with your best judgment and state the assumption in your output.';
+/**
+ * GHSA-46jr-4wx8-v453: unless capped, the SDK validates every array element and object key of a call's arguments, so one
+ * request inside the body limit can exhaust the heap. The ask tool's largest valid input is about 110 (4 keys, 100
+ * choices, multi's 2), so a call far over that is refused before its schema runs.
+ */
+export const ASK_MAX_INPUT_ELEMENTS = 1_000;
 const inputSchema = z.object({
   question: z.string().min(1).max(8192),
   choices: z.array(z.string().min(1).max(512)).min(2).max(100).optional(),
@@ -147,7 +153,7 @@ export class AskServer {
         reply.code(202).send();
         return;
       }
-      server = new McpServer({ name: 'wicked', version: '1.0.0' });
+      server = new McpServer({ name: 'wicked', version: '1.0.0' }, { maxToolInputElements: ASK_MAX_INPUT_ELEMENTS });
       server.registerTool('ask', {
         title: 'Ask the operator',
         description: 'Ask the human operator a question and wait for the answer. Use it only when you cannot continue without a human decision. Give `choices` when the answer is one of a few options. Returns the operator\'s answer, or a no-answer result after the time limit; on no answer, continue with your best judgment and state the assumption in your output.',
