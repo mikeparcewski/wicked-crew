@@ -72,7 +72,7 @@ function fakeEngine() {
   const launched: LaunchRunInput[] = [];
   const cancelled: string[] = [];
   const events = new Map<string, Array<Record<string, unknown>>>();
-  const ctl = { cancelFails: false };
+  const ctl = { cancelFails: false, eventsFailAfter: Number.POSITIVE_INFINITY, eventReads: 0 };
   const listeners: Array<(e: CoreEvent) => void> = [];
   const unit = (runId: string, phase: string, ord: number, extra: Record<string, unknown> = {}) => ({ id: `${runId}:${phase}`, session_id: runId, ord, status: 'pending', denial_reason: null, ...extra });
   const engine: TurnEngine = {
@@ -94,7 +94,11 @@ function fakeEngine() {
       return () => undefined;
     },
     workOutput: async (id) => outputs.get(id) ?? null,
-    runEvents: async (runId) => events.get(runId) ?? [],
+    runEvents: async (runId) => {
+      ctl.eventReads += 1;
+      if (ctl.eventReads > ctl.eventsFailAfter) throw new Error('the event log is busy');
+      return events.get(runId) ?? [];
+    },
   };
   const set = (runId: string, status: string, units: Record<string, Record<string, unknown>> = {}) => {
     const v = views.get(runId)!;
@@ -355,6 +359,9 @@ describe('apps turns: check, land, refuse', () => {
     s.set(runId, 'awaiting_human', { review: { status: 'rejected', denial_reason: 'no' } });
     expect((await s.call('GET', '/apps/escalations')).body.app.turn).toMatchObject({ runId });
     expect((await s.call('POST', '/apps/escalations/edits', { base: 2, ops: [{ op: 'spec', spec: spec('x') }] })).status).toBe(409);
+    // No other turn starts while the refused run is still parked (xreview r3).
+    expect((await s.call('POST', '/apps/escalations/turns', { base: 2, message: 'another' })).status).toBe(409);
+    expect(s.launched).toHaveLength(1);
     expect((await s.call('GET', '/apps/escalations')).body.app.turns![0]!.state).toBe('running');
     s.ctl.cancelFails = false;
     const d = (await s.call('GET', '/apps/escalations')).body.app;
@@ -374,6 +381,32 @@ describe('apps turns: check, land, refuse', () => {
     expect(d.turns![0]).toMatchObject({ state: 'refused', code: 'review_refused', reason: expect.stringContaining('wrong table') });
     // An approval gate the person answers stays the turn's.
     const run2 = (await s.call('POST', '/apps/escalations/turns', { base: 2, message: 'x' })).body['runId'] as string;
+    void run2;
+  });
+
+  it('a frame-only refusal survives its stop and a failed read: the second read failing keeps the turn; after the stop it is still review_refused', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    s.set(runId, 'awaiting_human', { review: { status: 'distributed' } });
+    s.events.set(runId, [{ type: 'awaitingHuman', session: runId, ord: 3, gateKind: 'escalation', prompt: 'the review did not pass: wrong table' }]);
+    // isActive reads the frame (refused), the settlement's own read fails: nothing ends, nothing is stopped.
+    s.ctl.eventsFailAfter = s.ctl.eventReads + 1;
+    expect((await s.call('GET', '/apps/escalations')).body.app.turn).toMatchObject({ runId });
+    expect(s.cancelled).toEqual([]);
+    expect((await s.call('POST', '/apps/escalations/turns', { base: 2, message: 'another' })).status).toBe(409);
+    // The run was stopped (by crew, before a crash) and the record still says running: the frame says why.
+    s.ctl.eventsFailAfter = Number.POSITIVE_INFINITY;
+    s.set(runId, 'cancelled');
+    s.events.get(runId)!.push({ type: 'runCancelled', session: runId });
+    const d = (await s.call('GET', '/apps/escalations')).body.app;
+    expect(d.turn).toBeNull();
+    expect(d.turns![0]).toMatchObject({ state: 'refused', code: 'review_refused', reason: expect.stringContaining('wrong table') });
+  });
+
+  it('(kept) an approval gate stays the person\'s', async () => {
+    const s = setup();
+    await startTurn(s);
+    const run2 = (await s.call('GET', '/apps/escalations')).body.app.turn!.runId;
     s.set(run2, 'awaiting_human');
     s.events.set(run2, [{ type: 'awaitingHuman', session: run2, ord: 1, gateKind: 'run_level', prompt: 'approve?' }]);
     expect((await s.call('GET', '/apps/escalations')).body.app.turn).toMatchObject({ runId: run2 });

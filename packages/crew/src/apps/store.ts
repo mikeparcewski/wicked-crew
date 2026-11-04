@@ -105,7 +105,9 @@ export const TURN_LOG_SHOWN = 20;
 /** How a turn whose run is no longer running ends: it lands, or it ends with a reason (DES §9.2). */
 export type AppTurnSettlement =
   | { kind: 'land'; builder: string; reviewer: string; summary: string; change: string }
-  | { kind: 'end'; state: 'refused' | 'failed' | 'cancelled'; code: string; reason: string };
+  | { kind: 'end'; state: 'refused' | 'failed' | 'cancelled'; code: string; reason: string }
+  /** Not known yet (the engine did not answer, or would not stop a refused run): the turn stays in flight. */
+  | { kind: 'pending'; why: string };
 
 interface StateFile {
   version: 1;
@@ -421,11 +423,15 @@ export class AppStore {
       try {
         outcome = await this.turns.settlement({ slug: a.slug, runId, checkedTree: t.checkedTree ?? null, base: await this.files(a, this.head(a).tree), landedSpec: (tree) => this.files(a, tree) });
       } catch (err) {
-        // Not known yet (the engine did not answer, or would not stop a refused run): the turn stays in flight and
-        // settles on a later read. Nothing is recorded that the engine's record does not say (xreview r2).
-        this.log(`[apps] turn ${runId} of ${a.slug} could not be settled yet (it stays read-only): ${err instanceof Error ? err.message : String(err)}`);
-        return;
+        // A defect, not a wait: the turn ends (failed) so the app is never wedged read-only (xreview r3).
+        outcome = { kind: 'end', state: 'failed', code: 'unknown', reason: `crew could not read how the turn ended (${err instanceof Error ? err.message : String(err)}), so nothing landed` };
       }
+    }
+    if (outcome.kind === 'pending') {
+      // Not known yet: the turn stays in flight and settles on a later read; nothing is recorded that the engine's
+      // record does not say, and no other turn starts meanwhile (xreview r2, r3).
+      this.log(`[apps] turn ${runId} of ${a.slug} is not settled yet (it stays read-only): ${outcome.why}`);
+      return;
     }
     if (outcome.kind === 'land') {
       try {
