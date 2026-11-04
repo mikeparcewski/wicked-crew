@@ -128,10 +128,20 @@ export function changeLine(before: { spec: AppSpec; queryText: Record<string, st
   return `${line[0]!.toUpperCase()}${line.slice(1)}`;
 }
 
-/** The builder's closing change lines (its last paragraph), as text for the version strip: at most 6 lines, 600 chars. */
+/** A builder's change line ("Added KPI `kpi-open` over query `open_count`"), as the skill asks it to end with. */
+const CHANGE_LINE_RE = /^(?:[-*•]\s+)?(?:added|changed|removed|renamed|moved|replaced|made|set|bound|kept|split|merged|turned|updated|deleted|fixed)\b/i;
+
+/**
+ * The builder's change lines, as text for the turn record: the lines of its answer that read as change lines (the
+ * skill's closing lines), else its last paragraph; at most 6 lines, 600 chars. (Live 2026-11-04: a seat's closing
+ * paragraph was the governed-worker skill's counts, not the change.)
+ */
 export function builderLines(output: string | null): string {
   if (output === null) return '';
-  const lines = output.replace(/\r/g, '').split('\n').map((l) => l.trim());
+  const all = output.replace(/\r/g, '').split('\n').map((l) => l.trim());
+  const changes = all.filter((l) => CHANGE_LINE_RE.test(l)).slice(-6).map((l) => oneLine(l.replace(/^[-*•]\s+/, ''), 200));
+  if (changes.length > 0) return changes.join('\n').slice(0, 600);
+  const lines = all;
   while (lines.length > 0 && (lines[lines.length - 1] === '' || lines[lines.length - 1]!.startsWith('```'))) lines.pop();
   const tail: string[] = [];
   for (let i = lines.length - 1; i >= 0 && tail.length < 6; i--) {

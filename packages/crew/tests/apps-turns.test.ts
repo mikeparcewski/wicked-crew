@@ -245,6 +245,9 @@ describe('apps turns: the builder\'s task', () => {
     expect(changeLine(before, after)).toBe('Added 1 chart and 1 query; renamed it "Escalations by priority"');
     expect(changeLine(before, before)).toBe('No visible change');
     expect(builderLines('Thinking...\n\n- Added chart `chart-priority` over `breaches_by_priority`\n- Added query `breaches_by_priority`\nTREE: abc\n')).toBe('Added chart `chart-priority` over `breaches_by_priority`\nAdded query `breaches_by_priority`');
+    // The change lines win over a closing paragraph that is not one (the governed-worker skill's counts).
+    expect(builderLines('- Added KPI `kpi_open` over query `open_count`\n- Changed chart `by_region` from bar to line\n\nCounts: derived 3 / submitted 3 / failed 0. Memories proposed 0.')).toBe('Added KPI `kpi_open` over query `open_count`\nChanged chart `by_region` from bar to line');
+    expect(builderLines('All done.\n\nNothing to report')).toBe('Nothing to report');
   });
 });
 
