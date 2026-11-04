@@ -476,7 +476,8 @@ describe('the seat parse', () => {
     expect(calls).toEqual(['launch claude with-projects']);
     expect(launches[0]).toMatchObject({
       primary: 'claude',
-      plan: { steps: [{ catalog: 'understand', id: 'parse-1' }], monitors: { asked: 0 } },
+      // crew#1311: the one step declares its output an answer, so a short one meets the engine's floor.
+      plan: { steps: [{ catalog: 'understand', id: 'parse-1', answer_only: true }], monitors: { asked: 0 } },
     });
     expect(JSON.parse(String(launches[0]!['clisJson']))).toEqual([{ key: 'claude', chat_admission: { unscoped: { ok: true } } }]);
     expect(launches[0]).not.toHaveProperty('repoRef');
@@ -547,6 +548,50 @@ describe('the seat parse', () => {
     };
     expect(await seatParser({ adapter, roster })('x')).toMatchObject({ ok: false, code: 502, error: 'engine gone' });
     expect(calls).toEqual([]);
+  });
+
+  it('a run that parks for a human ends the turn at once: a 502 naming the failure kind, never its raw detail, and the run is cancelled (crew#1311)', async () => {
+    const { adapter, calls } = fakeAdapter(null);
+    let listener: ((e: CoreEvent) => void) | null = null;
+    (adapter as unknown as { onEvent: unknown }).onEvent = (fn: (e: CoreEvent) => void) => { listener = fn; return () => { listener = null; }; };
+    (adapter as unknown as { launchRun: unknown }).launchRun = async (input: Record<string, unknown>) => {
+      const runId = String(input['sessionId']);
+      setTimeout(() => {
+        // What the rig's run 0f5beafa sent: the floor's veto, then the escalation gate nobody sees.
+        listener?.({ type: 'stepFailed', session: runId, ord: 0, attempt: 0, failureKind: 'substanceRejected', detail: 'SECRET raw seat output' } as unknown as CoreEvent);
+        listener?.({ type: 'gateEscalated', session: runId, ord: 0 } as unknown as CoreEvent);
+        listener?.({ type: 'awaitingHuman', session: runId, ord: 0, gateKind: 'escalation', prompt: 'retry or cancel' } as unknown as CoreEvent);
+      }, 5);
+      calls.push(`launch ${runId}`);
+      return runId;
+    };
+    const started = Date.now();
+    const out = await seatParser({ adapter, roster, timeoutMs: 60_000 })('x');
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(out).toMatchObject({ ok: false, code: 502, error: "the claude seat's turn failed (substanceRejected)" });
+    expect(JSON.stringify(out)).not.toContain('SECRET');
+    const runId = calls[0]!.slice('launch '.length);
+    expect(calls).toEqual([`launch ${runId}`, `cancel ${runId}`]);
+  });
+
+  it('another run parking is not this turn\'s, and a park with no failure frame still ends it honestly', async () => {
+    const { adapter, calls } = fakeAdapter(null);
+    let listener: ((e: CoreEvent) => void) | null = null;
+    (adapter as unknown as { onEvent: unknown }).onEvent = (fn: (e: CoreEvent) => void) => { listener = fn; return () => { listener = null; }; };
+    (adapter as unknown as { launchRun: unknown }).launchRun = async (input: Record<string, unknown>) => {
+      const runId = String(input['sessionId']);
+      setTimeout(() => {
+        listener?.({ type: 'stepFailed', session: 'someone-else', ord: 0, attempt: 0, failureKind: 'workerError', detail: 'x' } as unknown as CoreEvent);
+        listener?.({ type: 'awaitingHuman', session: 'someone-else', ord: 0, gateKind: 'failure', prompt: 'p' } as unknown as CoreEvent);
+      }, 1);
+      setTimeout(() => listener?.({ type: 'awaitingHuman', session: runId, ord: 0, gateKind: 'run_level', prompt: 'p' } as unknown as CoreEvent), 20);
+      calls.push(`launch ${runId}`);
+      return runId;
+    };
+    const out = await seatParser({ adapter, roster, timeoutMs: 60_000 })('x');
+    expect(out).toMatchObject({ ok: false, code: 502, error: "the claude seat's turn failed (it stopped for a decision)" });
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toBe(`cancel ${calls[0]!.slice('launch '.length)}`);
   });
 
   it('a FAILED step is a failure even when its text holds a rule-shaped object (codex on #686)', async () => {

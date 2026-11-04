@@ -168,6 +168,13 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **"Ask a question of this data" no longer fails on a correct short draft (crew#1311; needs wicked-core with
+  `answer_only`, so core-ts above 0.15.22).** The one-shot seat turn (`seatTurn`, shared by the standing-order parse
+  and the ask) declares its one `understand` step `answer_only`: its answer is read by crew, so the engine's substance
+  floor asks only that an answer exists. A correct 192-character draft used to fail the floor's 200 characters, park at
+  an escalation gate nobody saw, and come back after 120 s as "the seat did not answer". A turn whose run parks for a
+  human now ends at once: crew cancels the run and answers 502 naming the engine's failure kind (never the step's raw
+  output).
 - **A Postgres backend terminated mid-read no longer takes the daemon down.** postgres.js's `begin()` sends ROLLBACK
   on a connection that has already closed, which throws inside its own timers; crew's process guard then exits on the
   uncaught exception, so a database restart or `pg_terminate_backend` during a source read stopped the daemon. Every

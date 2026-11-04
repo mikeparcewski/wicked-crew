@@ -246,7 +246,8 @@ describe('the ask pieces (no database)', () => {
       expect(r.statusCode, r.body).toBe(200);
       expect(r.json()).toMatchObject({ sql: 'SELECT 1', seat: 'claude', check: { ok: true } });
       expect(launches).toHaveLength(1);
-      expect(launches[0]).toMatchObject({ primary: 'claude', plan: { steps: [{ catalog: 'understand', id: 'draft-1' }], monitors: { asked: 0 } } });
+      // crew#1311: the draft step declares its output an answer, so a short correct draft meets the engine's floor.
+      expect(launches[0]).toMatchObject({ primary: 'claude', plan: { steps: [{ catalog: 'understand', id: 'draft-1', answer_only: true }], monitors: { asked: 0 } } });
       expect(launches[0]).not.toHaveProperty('repoRef');
       expect(launches[0]).not.toHaveProperty('deliver');
       // No seat: 409 that says what to do instead.

@@ -10,6 +10,11 @@
  *
  * {@link seatTurn} is that one-shot on its own (crew's smallest path to one seat's one answer, no
  * chat history, no repository); the parse and the data-source ask (`sources/ask.ts`) both use it.
+ *
+ * The step declares `answer_only` (crew#1311, wicked-core): its output is an answer crew reads, not
+ * work a later step builds on, so the engine's substance floor asks only that an answer exists. A
+ * correct short answer (a 192-character drafted query) used to fail the floor's 200 characters.
+ * And a run that parks for a human ends the turn at once: nobody sees a one-shot turn's gate.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -73,16 +78,27 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
     let settled = false;
     let timedOut = false;
     try {
-      let end: { ok: boolean } | null = null;
+      // `parked`: the run stopped at a gate (it has not ended, so `finally` cancels it).
+      type TurnEnd = { ok: boolean; parked?: true };
+      let end: TurnEnd | null = null;
       // The step's own status, the latest the engine captured (read when the run has ended).
       let stepStatus: string | undefined;
+      // The engine's kind for the step's failure (`substanceRejected`, `workerError`, …). Never its
+      // `detail`: for a worker error that is the seat's raw output, which the person must not see.
+      let failureKind: string | undefined;
       let wake: (() => void) | null = null;
       off = adapter.onEvent((e: CoreEvent) => {
-        const ev = e as unknown as { type?: string; session?: string; stepStatus?: string };
+        const ev = e as unknown as { type?: string; session?: string; stepStatus?: string; failureKind?: string };
         if (ev.session !== sessionId && (runId === undefined || ev.session !== runId)) return;
         if (ev.type === 'unitOutputCaptured' && typeof ev.stepStatus === 'string') stepStatus = ev.stepStatus;
+        else if (ev.type === 'stepFailed' && typeof ev.failureKind === 'string') failureKind = ev.failureKind;
         else if (end === null && (ev.type === 'sessionCompleted' || ev.type === 'sessionFailed' || ev.type === 'runCancelled')) {
           end = { ok: ev.type === 'sessionCompleted' };
+          wake?.();
+        } else if (end === null && ev.type === 'awaitingHuman') {
+          // A one-shot turn has nobody to answer a gate: waiting out the deadline would only turn
+          // "the step failed" into "the seat did not answer" (crew#1311).
+          end = { ok: false, parked: true };
           wake?.();
         }
       });
@@ -102,7 +118,8 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
         clisJson: JSON.stringify([entry]),
         primary: seat,
         plan: {
-          steps: [{ catalog: 'understand', id: input.stepId, budget_secs: Math.max(1, Math.ceil(timeoutMs / 1000)), instructions }],
+          // `answer_only`: the turn's one step is its last, runs no code, and crew reads its answer.
+          steps: [{ catalog: 'understand', id: input.stepId, budget_secs: Math.max(1, Math.ceil(timeoutMs / 1000)), instructions, answer_only: true }],
           monitors: { asked: 0 },
         },
       });
@@ -122,16 +139,18 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
       if (launched === 'timeout') return { ok: false, code: 502, error: `the ${seat} seat did not answer in ${timeoutMs / 1000} s` };
       runId = launched;
       const id = launched;
-      const ended = await new Promise<{ ok: boolean } | null>((resolve) => {
+      const ended = await new Promise<TurnEnd | null>((resolve) => {
         wake = () => resolve(timedOut ? null : end);
         if (end !== null || timedOut) wake();
       });
       if (ended === null) return { ok: false, code: 502, error: `the ${seat} seat did not answer in ${timeoutMs / 1000} s` };
-      settled = true;
+      // A parked run has not ended: `finally` cancels it.
+      settled = ended.parked !== true;
       const answer = await adapter.workOutput(`${id}:${input.stepId}`).catch(() => null);
       // A failed step is a failure, whatever its text holds — never a rule to confirm (codex on #686).
       if (!ended.ok || answer === null || (stepStatus !== undefined && stepStatus !== 'ok')) {
-        return { ok: false, code: 502, error: `the ${seat} seat's turn failed`, ...(answer !== null ? { answer } : {}) };
+        const why = failureKind !== undefined ? ` (${failureKind})` : ended.parked === true ? ' (it stopped for a decision)' : '';
+        return { ok: false, code: 502, error: `the ${seat} seat's turn failed${why}`, ...(answer !== null ? { answer } : {}) };
       }
       return { ok: true, answer, seat };
     } catch (err) {
