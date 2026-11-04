@@ -5,7 +5,7 @@
  * One credential usually reads every project on a Jira site, and often several sites; a GitHub token reads every repo
  * its owner can. So a source-level switch is not enough. For each PM tool crew knows, a binding says:
  *
- * - `prepare`: which arguments name the tenant and the project or repo. The gate SETS the tenant itself (Jira's
+ * - `bindArgs`: which arguments name the tenant and the project or repo. The gate SETS the tenant itself (Jira's
  *   `cloudId`; GitHub's host is the server's), and REWRITES or REFUSES the project argument so it stays inside L:
  *   a key must be a linked key, a repo a linked repo; a JQL query gets `project in (<linked keys>) AND (<jql>)`; a
  *   GitHub issue search gets the linked `repo:` qualifiers when it names none, and is refused when it names another.
@@ -60,7 +60,7 @@ export interface PmToolBinding {
   tool: string;
   /** What the answer discloses: issue content is `rows` (needs "query"). */
   disclosure: 'rows';
-  prepare(args: Record<string, unknown>, linked: readonly LinkedTracker[]): Prepared;
+  bindArgs(args: Record<string, unknown>, linked: readonly LinkedTracker[]): Prepared;
   project(result: Record<string, unknown>, prepared: Extract<Prepared, { ok: true }>): Projected;
 }
 
@@ -207,7 +207,7 @@ const jiraGetIssue: PmToolBinding = {
   system: 'jira',
   tool: 'getJiraIssue',
   disclosure: 'rows',
-  prepare(args, linked) {
+  bindArgs(args, linked) {
     const key = str(args['issueIdOrKey']);
     const m = key === null ? null : JIRA_ISSUE_KEY.exec(key);
     if (m === null || key === null) return refuse('bad_request', 'issueIdOrKey is a Jira issue key such as PROJA-12 (a numeric id cannot be checked against the linked projects)');
@@ -245,7 +245,7 @@ const jiraSearch: PmToolBinding = {
   system: 'jira',
   tool: 'searchJiraIssuesUsingJql',
   disclosure: 'rows',
-  prepare(args, linked) {
+  bindArgs(args, linked) {
     const jql = typeof args['jql'] === 'string' ? args['jql'] : '';
     if (jql.length > 4_000) return refuse('bad_request', 'jql is at most 4000 characters');
     const t = jiraTenant(args, linked);
@@ -349,7 +349,7 @@ const githubIssueRead: PmToolBinding = {
   system: 'github',
   tool: 'issue_read',
   disclosure: 'rows',
-  prepare(args, linked) {
+  bindArgs(args, linked) {
     const method = args['method'];
     if (method !== 'get' && method !== 'get_comments') return refuse('method_unbound', 'issue_read is bound for method get and get_comments only');
     const r = githubRepoArgs(args, linked);
@@ -406,7 +406,7 @@ const githubSearchIssues: PmToolBinding = {
   system: 'github',
   tool: 'search_issues',
   disclosure: 'rows',
-  prepare(args, linked) {
+  bindArgs(args, linked) {
     const q = typeof args['query'] === 'string' ? args['query'].trim() : '';
     if (q === '' || q.length > 1_000) return refuse('bad_request', 'query is a GitHub issue search of at most 1000 characters');
     const repos = linked.filter((t) => t.tenant === GITHUB_TENANT);

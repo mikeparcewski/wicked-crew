@@ -136,7 +136,7 @@ async function plan(deps: TrackerActionDeps, runId: string, body: z.infer<typeof
   let category: 'todo' | 'doing' | 'done' | null = null;
   if (binding !== null) {
     const [owner, repo] = t.key.split('/');
-    const prepared = binding.prepare(ref.system === 'jira' ? { cloudId: t.tenant, issueIdOrKey: key } : { method: 'get', owner, repo, issue_number: ref.number }, linked);
+    const prepared = binding.bindArgs(ref.system === 'jira' ? { cloudId: t.tenant, issueIdOrKey: key } : { method: 'get', owner, repo, issue_number: ref.number }, linked);
     if (prepared.ok) {
       const r = await pm.vendorRead(e, readTool, prepared.args, 'person');
       const p = r.ok ? binding.project(r.result, prepared) : null;

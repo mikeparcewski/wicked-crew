@@ -769,7 +769,7 @@ describe('the Jira projector: an issue proves its site (unit)', () => {
   const b = bindingFor('jira', 'getJiraIssue')!;
   const linked = [{ trackerId: 'trk_a', tenant: 'c1', key: 'PROJA', siteHost: 'acme.atlassian.net' }];
   const answer = (self: string | undefined) => ({ content: [{ type: 'text', text: JSON.stringify({ key: 'PROJA-1', ...(self !== undefined ? { self } : {}), fields: { summary: 's', project: { key: 'PROJA' } } }) }] });
-  const prepared = b.prepare({ issueIdOrKey: 'PROJA-1' }, linked);
+  const prepared = b.bindArgs({ issueIdOrKey: 'PROJA-1' }, linked);
   if (!prepared.ok) throw new Error('prepare');
   it('the site form admits on the host confirmed at link time, and drops another host', () => {
     expect(b.project(answer('https://acme.atlassian.net/rest/api/3/issue/10001'), prepared)).toMatchObject({ ok: true, items: [{ ref: 'PROJA-1' }] });

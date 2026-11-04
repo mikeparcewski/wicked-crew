@@ -377,7 +377,7 @@ export function registerTrackerRoutes(app: FastifyInstance, deps: TrackerRouteDe
           e.system === 'jira'
             ? { cloudId: t.tenant, jql: `${text !== '' ? `text ~ "${text}" ` : ''}ORDER BY updated DESC`, maxResults: 20 }
             : { query: `${text} is:issue is:open`.trim(), owner, repo, perPage: 20 };
-        const prepared = binding.prepare(args, [{ trackerId: t.trackerId, tenant: t.tenant, key: t.key, siteHost: t.siteHost }]);
+        const prepared = binding.bindArgs(args, [{ trackerId: t.trackerId, tenant: t.tenant, key: t.key, siteHost: t.siteHost }]);
         if (!prepared.ok) {
           row.error = prepared.code;
           continue;

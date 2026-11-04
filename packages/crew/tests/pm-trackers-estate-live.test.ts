@@ -44,7 +44,7 @@ describe.skipIf(EXE === '' || process.platform === 'win32')('tracker projection 
     WICKED_XEDGE_DB: join(base, 'xedge.db'),
     WICKED_ESTATE_DB: ':memory:',
   });
-  const io = { spawn: () => spawn(EXE, [], { stdio: ['pipe', 'pipe', 'pipe'] as const, env: env() }), timeoutMs: 60_000 };
+  const io = { spawn: () => spawn(EXE, [], { stdio: ['pipe', 'pipe', 'pipe'] as const, env: { ...process.env, ...env() } }), timeoutMs: 60_000 };
   const estate = (tool: string, args: Record<string, unknown>) => callEstateTool(tool, args, io);
   const writeWorld = (trackers: StoredTracker[]): void => {
     const server = { id: JIRA_ID, name: 'jira', kind: 'mcp-stdio', command: '/bin/echo', args: [], url: null, auth: null, pm: { system: 'jira' }, agents: { see: true, query: true, projects: [P, Q], everyProject: false }, enabled: true, health: { state: 'ok', consecutiveFailures: 0, checkedAt: stamp, lastError: null }, registeredAt: stamp, updatedAt: stamp, tools: [], trackers };

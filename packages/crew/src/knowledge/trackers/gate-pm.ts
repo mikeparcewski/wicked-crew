@@ -197,7 +197,7 @@ export class PmGate {
     if (!agentMay(e.access, src, scope.projectId, need)) {
       return refusal('query_off', `agents may not read issues from ${e.name}: a person has not turned on "Agents can query this source"`, { remedy: 'ask the person to turn querying on for this project' });
     }
-    const prepared = binding.prepare(args, linked);
+    const prepared = binding.bindArgs(args, linked);
     if (!prepared.ok) return refusal(prepared.code, prepared.reason, { linked: linked.map((l) => l.key) });
 
     const argsHash = sha({ tool, args: prepared.args });

@@ -154,7 +154,7 @@ export async function readPmIssues(
     const linked = linkedSetOf(set, e.id);
     const [owner, repo] = t.key.split('/');
     const args = r.system === 'jira' ? { cloudId: t.tenant, issueIdOrKey: `${r.key}-${r.number}` } : { method: 'get', owner, repo, issue_number: r.number };
-    const prepared = binding.prepare(args, linked);
+    const prepared = binding.bindArgs(args, linked);
     if (!prepared.ok) {
       out.push(fail(r.ref, 'not_linked', prepared.reason));
       continue;
