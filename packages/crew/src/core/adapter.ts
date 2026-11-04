@@ -667,6 +667,11 @@ interface CoreConstructor {
    *  Its PRESENCE is the capability: napi ignores an undeclared object field, so an older addon
    *  would drop a plan and run the launch unplanned and UNGATED. */
   supportsPlanLaunch?(): boolean;
+  /** (crew#1139, wicked-core-ts ≥ the release carrying it) A `plan_approval` approval carries the
+   *  operator's note: `confirmGate(run, true, amend)` and `confirmGate(…, amend, 'edit_plan', undefined,
+   *  planJson)` land `amend` on the first creator step the plan releases. Its PRESENCE is the
+   *  capability: an older addon refuses both. */
+  supportsPlanGateNote?(): boolean;
   /** (program DES-POWER-MODE) The addon runs power mode: `LaunchOptions.power`, `setPowerMode`,
    *  `raiseRigor`, `answerPowerPause` and the power frames. Its PRESENCE is the capability (napi drops an
    *  undeclared `power` field, so an older addon would launch the run phased without saying so). */
@@ -729,6 +734,25 @@ const { Core } = require('wicked-core-ts') as { Core: CoreConstructor };
  */
 export function engineSupportsPlanLaunch(): boolean {
   return typeof Core.supportsPlanLaunch === 'function' && Core.supportsPlanLaunch() === true;
+}
+
+/**
+ * (crew#1139) Does the linked engine let a plan approval carry the operator's note
+ * (`Core.supportsPlanGateNote`)? Read at call time, as {@link engineSupportsPlanLaunch}.
+ */
+export function engineSupportsPlanGateNote(): boolean {
+  return typeof Core.supportsPlanGateNote === 'function' && Core.supportsPlanGateNote() === true;
+}
+
+/** (crew#1139) A note on an edited plan's approval, on an engine without plan-gate notes (501). */
+export class PlanGateNoteUnsupportedError extends Error {
+  constructor() {
+    super(
+      'A note on a plan approval needs a wicked-core-ts that carries plan-gate notes ' +
+        '(Core.supportsPlanGateNote); approve the plan without the note',
+    );
+    this.name = 'PlanGateNoteUnsupportedError';
+  }
 }
 
 /** A plan path on an engine without the plan approval gate (maps to 501 at the HTTP boundary). */
@@ -2249,6 +2273,13 @@ export class CoreAdapter {
         if (!this.supportsPlanLaunch()) {
           return Promise.reject(new PlanLaunchUnsupportedError('An edited plan at the gate'));
         }
+        // (crew#1139) `amend` beside the plan is the operator's note to the steps it releases. Fail
+        // CLOSED on an addon without plan-gate notes: it refuses the pair, and its words ("send the
+        // edit in the plan") would not say what to do.
+        const note = amend !== undefined && amend.trim() !== '' ? amend : undefined;
+        if (note !== undefined && !this.supportsPlanGateNote()) {
+          return Promise.reject(new PlanGateNoteUnsupportedError());
+        }
         const core = this.core as unknown as {
           confirmGate(
             runId: string,
@@ -2259,7 +2290,7 @@ export class CoreAdapter {
             planJson?: string,
           ): Promise<string>;
         };
-        return core.confirmGate(runId, true, undefined, 'edit_plan', undefined, JSON.stringify(plan));
+        return core.confirmGate(runId, true, note, 'edit_plan', undefined, JSON.stringify(plan));
       }
       if (action === undefined && amendScope === undefined) {
         return this.core.confirmGate(runId, approve, amend);
@@ -2397,6 +2428,12 @@ export class CoreAdapter {
     }
     // JSON-encoded bool by contract (parse, never truthiness-test — 'false' is truthy).
     return JSON.parse(await archive.call(this.core, runId, archived, note ?? null)) as boolean;
+  }
+
+  /** (crew#1139) The linked engine lets a plan approval carry the operator's note
+   *  (`Core.supportsPlanGateNote`). */
+  supportsPlanGateNote(): boolean {
+    return engineSupportsPlanGateNote();
   }
 
   /** (program DES-POWER-MODE) The linked engine runs power mode (`Core.supportsPowerMode`). */

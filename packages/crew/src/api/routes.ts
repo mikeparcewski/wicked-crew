@@ -20,7 +20,7 @@ import { promises as fsp } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { videoPalette } from '../appearance/video-palette.js';
-import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, settingsFilePath } from '../core/adapter.js';
+import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanGateNoteUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, settingsFilePath } from '../core/adapter.js';
 import { codeGraphDb, codeGraphErrorStatus, repoFolderMissing, repoFolderMissingBody } from '../core/repoPaths.js';
 import type {
   ConformanceRule,
@@ -998,8 +998,10 @@ export const GateSchema = z.object({
   (b) => (b.action === 'edit_plan') === (b.plan !== undefined) || (b.action === undefined && b.plan !== undefined),
   { message: 'an edited plan answers a plan_approval gate: `plan` needs approve: true with `action` omitted or edit_plan, and edit_plan needs `plan`', path: ['plan'] },
 ).refine(
-  (b) => b.plan === undefined || (b.approve && b.amend === undefined && b.amendScope === undefined),
-  { message: '`plan` is an approve WITH an edited plan: approve: true, and no amend / amendScope (the plan is the edit)', path: ['plan'] },
+  // (crew#1139) `amend` beside a plan is the operator's note to the steps it releases (the engine lands
+  // it on the plan's first creator step); a plan gate's note has no scope to choose.
+  (b) => b.plan === undefined || (b.approve && b.amendScope === undefined),
+  { message: '`plan` is an approve WITH an edited plan: approve: true, and no amendScope (a note in `amend` lands on the plan\'s first creator step)', path: ['plan'] },
 ).refine(
   (b) => b.amendScope === undefined || b.approve,
   { message: '`amendScope` applies to an approve only (approve: true)', path: ['amendScope'] },
@@ -2174,6 +2176,9 @@ export function registerRoutes(
       workingDoc: app.hasRoute({ method: 'GET', url: `${V}/runs/:id/working-doc` }),
       // (api-types 0.149.0) Power mode: the routes are served AND the engine runs it.
       powerMode: powerSupported(),
+      // (api-types 0.187.0, crew#1139) A plan approval carries the operator's note (`GateDecision.amend` at a
+      // plan_approval gate, with or without `plan`): the engine lands it on the plan's first creator step.
+      planGateNote: typeof adapter.supportsPlanGateNote === 'function' && adapter.supportsPlanGateNote(),
       // (api-types 0.156.0, DES-VOICE) Voice mode's routes are served: local speech to text, the model with
       // consent, and the per-person dashboard. Whether transcription can run now is `GET /voice/status`.
       voice: app.hasRoute({ method: 'POST', url: `${V}/voice/transcribe` }),
@@ -6139,7 +6144,7 @@ export function registerRoutes(
           },
         };
       } catch (err) {
-        if (err instanceof PlanLaunchUnsupportedError) {
+        if (err instanceof PlanLaunchUnsupportedError || err instanceof PlanGateNoteUnsupportedError) {
           return { code: 501, body: { error: message(err) } };
         }
         return { code: 409, body: { error: message(err) } };

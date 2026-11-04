@@ -360,6 +360,13 @@ export interface HealthCapabilities {
    */
   powerMode?: boolean | undefined;
   /**
+   * (api-types 0.187.0, crew#1139) A `plan_approval` approval carries the operator's note: `GateDecision.amend`
+   * on `{approve: true}` or `{approve: true, plan}` at a plan gate lands on the first creator step the plan
+   * releases (else its first step) as `unitReworkAmended`. ABSENT or `false` (an engine without it refuses the
+   * note): offer no note field on the plan card.
+   */
+  planGateNote?: boolean | undefined;
+  /**
    * (api-types 0.156.0, DES-VOICE) Voice mode's routes are served: `GET /voice/status`, `POST|DELETE /voice/model`,
    * `POST /voice/transcribe` and `GET|PUT /voice/dashboard`. Whether transcription can run NOW (the engine and
    * the model are on this machine) is {@link VoiceStatus.ready}. ABSENT on an older daemon: read as `false`.
@@ -2470,7 +2477,8 @@ export interface GateDecision {
    * Absent = `'cursor'` (today: the gated unit's description). `'creator'` — the first creator
    * phase at or after the cursor receives it (`unitReworkAmended{scope: 'creator'}`) while the
    * cursor dispatches unamended: the intake steer that must reach the fix phase, not triage.
-   * Identical text already present on the target is not appended twice.
+   * Identical text already present on the target is not appended twice. At a `plan_approval` gate
+   * it does not apply (api-types 0.187.0): the note lands as {@link GateDecision.plan} says.
    */
   amendScope?: 'cursor' | 'creator';
   /**
@@ -2479,8 +2487,16 @@ export interface GateDecision {
    * `plan.proposed{by:"human", kind:"edit"}`, floor-fills it (phases below the floor are ADDED,
    * never refused) and accepts it as the next `plan_rev` — or refuses it (`plan.refused`) and
    * re-opens the gate under a new `gate_id`, answering `awaiting_human`. Requires `approve: true`
-   * and `action` omitted or `'edit_plan'`; `amend` / `amendScope` do not apply. A plain approve
-   * (no `plan`) releases the held plan as it is; `approve: false` rejects (cancels).
+   * and `action` omitted or `'edit_plan'`; no `amendScope` (a 400). A plain approve (no `plan`)
+   * releases the held plan as it is; `approve: false` rejects (cancels).
+   *
+   * THE OPERATOR'S NOTE (api-types 0.187.0, crew#1139; {@link HealthCapabilities.planGateNote}): `amend`
+   * on a plan gate's approve, with or without `plan`, is carried to the steps the plan releases. It lands
+   * once the answer applies (after an edit's re-plan, so on the edited plan's units) on the FIRST CREATOR
+   * step at or after the cursor (`unitReworkAmended{scope: 'creator'}`), else on the cursor step
+   * (`scope: 'cursor'`), and the gate's recorded answer carries it. A refused edit re-opens the gate and
+   * lands nothing. An engine without it answers 501 for a note beside `plan` and 409 for one on a plain
+   * approve, with the gate left open.
    */
   plan?: LaunchPlan;
   /**

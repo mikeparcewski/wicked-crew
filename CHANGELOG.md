@@ -47,6 +47,13 @@ mentioned only where a daemon release depends on them.
   Q-PM2: attaching a `crew.repo` member is a person's (403 `repo_attach_human_only`), and a non-human re-registering
   an existing repo id at another checkout gets 409 `repo_exists`. `GET /health` `capabilities.trackerLinks: true`.
 
+- **A plan approval carries the operator's note (api-types 0.187.0, crew#1139).** `POST /runs/:id/gate` at a
+  `plan_approval` gate takes `amend` on `{approve: true}` and on `{approve: true, plan}`: the engine lands it on the
+  first creator step the plan releases (after an edit's re-plan), else its first step, as `unitReworkAmended`. A blank
+  note is no note; `amendScope` beside `plan` is still a 400. `GET /health.capabilities.planGateNote` says whether the
+  linked engine carries it (`Core.supportsPlanGateNote`, the next core-ts release); without it a note beside `plan` is
+  a 501 and a note on a plain approve is the engine's 409, gate left open. Studio can now offer a note field on the
+  plan card.
 - **Data shapes: profile a source, review its shapes, see them on a Knowledge map (api-types 0.186.0,
   DES-KNOWLEDGE-DATA-001 §10, build B4).** `POST /sources/:name/profile` (a human operator's only; 403
   `profile_human_only`) profiles a described native Postgres source through the data gate's person read at the
