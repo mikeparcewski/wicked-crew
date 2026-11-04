@@ -10,6 +10,7 @@ import { agentAccessOf, agentMay, AGENT_ACCESS_DEFAULT, neededFor } from '../src
 import { citeOf, rowsWithin, sqlstateOf, UNIT_CELL_CHARS, unitCell, unitRows } from '../src/knowledge/gate/envelope.js';
 import { admitPg, boundedType, cellExpression, limitRewrite, projectedRewrite, recheckPg, statementOf } from '../src/knowledge/gate/pg.js';
 import { DEFAULT_LIMITS, GateBusyError, type Lease, SourceScheduler } from '../src/knowledge/gate/scheduler.js';
+import { mkdirDurable, SourceReadLog } from '../src/knowledge/gate/record.js';
 import { applicationNameOf, toolboxDocument, ToolboxDocumentError, yamlQuotedBody } from '../src/knowledge/adapters/toolbox/document.js';
 import { splitQualified } from '../src/knowledge/adapters/toolbox/catalog.js';
 import { StderrTail } from '../src/knowledge/adapters/toolbox/supervisor.js';
@@ -243,6 +244,31 @@ describe('the Toolbox document (§5.1 deployment policy at spawn, §7.5 host mod
     const d = await input(base, { tls: 'verify-full' });
     expect(d.yaml).toContain('sslmode: "verify-full"');
     await expect(input({ ...base, host: '10.1.2.3' }, { tls: 'disable', address: { allow: ['10.0.0.0/8'], plaintext: false } })).rejects.toBeInstanceOf(ToolboxDocumentError);
+  });
+});
+
+describe('the read record is durable before a release (§7.9)', () => {
+  const entry = { callId: 'c1', at: '2026-11-04T00:00:00.000Z', runId: 'r1', unit: 1, attempt: 1, seat: 'claude', source: 's', sourceId: 'id', sqlHash: 'h', outcome: 'ok', rows: 1, truncated: false, ms: 1, released: true };
+  it('a new directory chain is synced into each parent, deepest first, before the first append resolves', async () => {
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const base = mkdtempSync(join(tmpdir(), 'kd-rec-'));
+    const synced: string[] = [];
+    const log = new SourceReadLog(join(base, 'a', 'b', 'mcp'), async (d) => void synced.push(d));
+    await log.append(entry);
+    expect(synced).toEqual([join(base, 'a', 'b'), join(base, 'a'), base, join(base, 'a', 'b', 'mcp')]);
+    expect(await mkdirDurable(join(base, 'a'), async () => undefined)).toBe(false);
+  });
+  it('a directory barrier that fails rejects the append, so the rows are withheld', async () => {
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const base = mkdtempSync(join(tmpdir(), 'kd-rec-'));
+    const log = new SourceReadLog(join(base, 'mcp'), async () => {
+      throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    });
+    await expect(log.append(entry)).rejects.toThrow('permission denied');
   });
 });
 

@@ -14,7 +14,7 @@
  * workers are fenced out of, mode 0600.
  */
 
-import { mkdir, open, readFile } from 'node:fs/promises';
+import { mkdir, open, readFile, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import { mcpStateDir } from '../../mcp/registry-store.js';
@@ -55,19 +55,42 @@ export interface SourceDataUse {
 
 export const SOURCE_QUERIES_FILENAME = 'source-queries.ndjson';
 
-/** fsync a directory (a new file's entry in it); a platform that cannot open a directory (Windows) skips it. */
-async function syncDir(dir: string): Promise<void> {
-  let fh: Awaited<ReturnType<typeof open>> | null = null;
+/**
+ * fsync a directory, so the entries in it (a new file, a new subdirectory) are durable. Windows cannot open a
+ * directory for this (NTFS journals its metadata): skipped there. Anywhere else a failure is a failure: the append
+ * rejects and the caller withholds the rows, since a barrier that did not run is not a barrier.
+ */
+async function syncDir(dir: string, platform: NodeJS.Platform = process.platform): Promise<void> {
+  if (platform === 'win32') return;
+  const fh = await open(dir, 'r');
   try {
-    fh = await open(dir, 'r');
     await fh.sync();
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'EISDIR' || code === 'EPERM' || code === 'EACCES' || code === 'EINVAL') return;
-    throw err;
   } finally {
-    await fh?.close();
+    await fh.close();
   }
+}
+
+/**
+ * `mkdir -p`, durably: every directory it creates is synced into its parent, from the deepest up to the first one
+ * that already existed. Answers whether anything was created.
+ */
+export async function mkdirDurable(dir: string, sync: (d: string) => Promise<void> = syncDir): Promise<boolean> {
+  const created: string[] = [];
+  for (let d = dir; ; d = dirname(d)) {
+    try {
+      await stat(d);
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      created.push(d);
+      if (dirname(d) === d) break;
+    }
+  }
+  if (created.length === 0) return false;
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  // The parent of each created directory holds its entry: the deepest's parent first, the existing ancestor last.
+  for (const d of created) await sync(dirname(d));
+  return true;
 }
 
 export class SourceReadLog {
@@ -75,7 +98,11 @@ export class SourceReadLog {
   private dirSynced = false;
   readonly path: string;
 
-  constructor(dir: string = mcpStateDir()) {
+  constructor(
+    dir: string = mcpStateDir(),
+    /** TESTS ONLY: the directory barrier (production: fsync of the directory). */
+    private readonly sync: (dir: string) => Promise<void> = (d) => syncDir(d),
+  ) {
     this.path = join(dir, SOURCE_QUERIES_FILENAME);
   }
 
@@ -85,7 +112,8 @@ export class SourceReadLog {
    */
   append(entry: SourceAgentQueryEntry): Promise<void> {
     const next = this.chain.then(async () => {
-      await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
+      // The directory chain first, durably (a crash must not lose the directory the record is in).
+      if (!this.dirSynced) await mkdirDurable(dirname(this.path), this.sync);
       // A torn last line (a crash mid-append, never released: rows go out only after an append resolves) is cut
       // off before the next append, so the file never holds a damaged line anywhere but at its very end.
       await this.cutTornTail();
@@ -99,7 +127,7 @@ export class SourceReadLog {
       }
       // The file's own directory entry too, once (a new file is not durable until its directory is).
       if (!this.dirSynced) {
-        await syncDir(dirname(this.path));
+        await this.sync(dirname(this.path));
         this.dirSynced = true;
       }
     });
