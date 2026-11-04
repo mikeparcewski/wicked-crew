@@ -284,7 +284,7 @@ import { REVIEWS_DIRNAME } from '../interactive/review-ledger.js';
 import type { DocLedgerSweep } from '../interactive/doc-ledger-sweep.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
-import { resolveLinkedIssues, type LinkedIssue, type LinkedIssuesResult } from '../core/linked-issues.js';
+import { resolveLinkedIssues, stripLinkedIssues, type LinkedIssue, type LinkedIssuesResult } from '../core/linked-issues.js';
 import { AuditLog } from './audit.js';
 import { auditFor } from './audit-view.js';
 import {
@@ -3222,12 +3222,18 @@ export function registerRoutes(
     // free-text planner turns sentences into units, so issue text there would become work units.
     let linkedIssues: LinkedIssue[] | undefined;
     if (b.workflow !== undefined) {
+      // A retry relaunches with the earlier run's whole problem (studio sends its `problem`), daemon
+      // blocks included. They are dropped before anything is read, whatever the read answers, and
+      // read again below: the intent is the text before the first linked-issues marker, never a
+      // block an earlier launch appended (stripLinkedIssues).
+      const intent = stripLinkedIssues(b.problem);
+      input.problem = intent;
       // Best-effort by contract: reading issues never fails the launch it decorates. A resolver
       // fault (the repo list unreadable, say) launches the run on its intent alone and is logged.
       try {
         const root = b.repoRef !== undefined ? await repoRootOf(b.repoRef) : undefined;
-        const linked = await readLinkedIssues(b.problem, root, b.repoRef, b.excludeLinkedIssues ?? []);
-        if (linked.block !== null) input.problem = `${b.problem.trimEnd()}\n\n${linked.block}`;
+        const linked = await readLinkedIssues(intent, root, b.repoRef, b.excludeLinkedIssues ?? []);
+        if (linked.block !== null) input.problem = `${intent.trimEnd()}\n\n${linked.block}`;
         // crew#825: an all-excluded intent appends nothing but still answers what it left out.
         if (linked.issues.length > 0) linkedIssues = linked.issues;
       } catch (err) {

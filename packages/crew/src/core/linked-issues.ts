@@ -187,7 +187,8 @@ export async function resolveLinkedIssues(
     '',
     LINKED_ISSUES_PREFACE,
     '',
-    // Each section is already inert; this keeps the invariant for the whole content (a no-op today).
+    // The issue sections are inert already and the "Not read" line holds only refs; this pass keeps
+    // the invariant for the whole content, whatever section is added later.
     inertIssueText(sections.join('\n\n')),
     LINKED_ISSUES_CLOSE,
   ].join('\n');
@@ -200,7 +201,11 @@ export async function resolveLinkedIssues(
  * then this block, then the learnings block), so nothing from the first open marker on is theirs.
  * Cutting there, rather than at the first close marker, also holds for a block recorded before its
  * text was made inert, and for the stacked blocks a retry carries (it relaunches with the earlier
- * run's whole problem). The working document's Goal reads the intent the same way (`goalFrom`).
+ * run's whole problem; the launch drops those before it reads the issues again). The working
+ * document's Goal cuts at the same marker (`goalFrom`). A person's own words that quote the open
+ * marker therefore end there too: without a record of where the daemon's text began, a quoted marker
+ * cannot be told from an inherited block. Cutting early can only leave words out of the run and its
+ * PR, never put issue text into either, nor close an issue the person did not name.
  */
 export function stripLinkedIssues(problem: string): string {
   const at = problem.indexOf(LINKED_ISSUES_OPEN);

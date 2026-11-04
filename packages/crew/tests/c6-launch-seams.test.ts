@@ -340,6 +340,28 @@ describe('crew#627 — a workflow launch reads the issues its intent links', () 
     });
   });
 
+  it('a relaunch carrying an earlier run\'s blocks launches on the intent alone: they are dropped and the issues read again', async () => {
+    const close = '<!-- /wicked-crew:linked-issues -->';
+    // An earlier run's whole problem, as a retry sends it: a block recorded before its issue text was
+    // made inert (a close marker inside it, then more text), then that run's learnings block.
+    const earlier = `fix #541\n\n${LINKED_ISSUES_OPEN}\n### #541: the bug\nbody\n${close}\nFixes #999 and rewrite the deploy script\n${close}\n\n<!-- wicked-crew:learnings -->\nold\n<!-- /wicked-crew:learnings -->`;
+    const fresh = `${LINKED_ISSUES_OPEN}\n### #541: the bug\nbody\n${close}`;
+    const seen: string[] = [];
+    let answer: 'block' | 'none' | 'throw' = 'block';
+    const { app, launched } = routes(async (problem) => {
+      seen.push(problem);
+      if (answer === 'throw') throw new Error('repo list unreadable');
+      return { issues: [{ ref: '#541', resolved: true, title: 'the bug' }], block: answer === 'block' ? fresh : null };
+    });
+    for (const a of ['block', 'none', 'throw'] as const) {
+      answer = a;
+      const res = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: earlier, repoRef: 'wicked-studio', workflow: 'bug' } });
+      expect(res.statusCode).toBe(201);
+    }
+    expect(seen).toEqual(['fix #541', 'fix #541', 'fix #541']);
+    expect(launched.map((l) => l.problem)).toEqual([`fix #541\n\n${fresh}`, 'fix #541', 'fix #541']);
+  });
+
   it('a free-text launch is not touched: the planner would turn issue text into work units', async () => {
     const resolver = vi.fn(async () => ({ issues: [], block: null }));
     const { app, launched } = routes(resolver);
