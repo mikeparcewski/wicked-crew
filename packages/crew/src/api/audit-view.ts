@@ -1,9 +1,10 @@
 /**
  * (DES-KNOWLEDGE-DATA-001 §5.2, crew#1317) The audit trail as a non-human reader may see it.
  *
- * `GET /audit` is an observer read. The MCP and source lines carry connection data in their `detail`: a
- * saved server's secret reference (`authRef`), the confirmed address ranges, a REST server's origin, base
- * path, resolved address and its spec's servers, a test call's URL, a query's relations. A human actor
+ * `GET /audit` is an observer read. The MCP, source and app-action lines carry connection data in their
+ * `detail`: a saved server's secret reference (`authRef`), the confirmed address ranges, a REST server's
+ * origin, base path, resolved address and its spec's servers, a test call's URL, a query's relations, an
+ * action run's operation (`UPDATE support.tickets`) and its reason. A human actor
  * reads every line whole. Any other actor ({@link viewOf} `agent`) reads those lines with their `detail`
  * reduced to the keys allowed below, the way `GET /mcp/servers` answers it the agent-safe view. The trail
  * on disk is unchanged, and so is every in-process reader (`readAll`).
@@ -16,10 +17,10 @@ import type { Actor, AuditEntry } from '../core/types.js';
 import { viewOf } from './auth.js';
 
 /** The action families whose `detail` can hold a source's connection data. */
-const FAMILIES: readonly string[] = ['mcp.', 'apps.source.', 'knowledge.source.'];
+const FAMILIES: readonly string[] = ['mcp.', 'apps.source.', 'apps.action.', 'knowledge.source.'];
 
-/** What any line of those families keeps: which server, source or tool it is about. */
-const IDENTITY: readonly string[] = ['name', 'source', 'subject', 'subjects'];
+/** What any line of those families keeps: which server, source, tool, app or action it is about. */
+const IDENTITY: readonly string[] = ['name', 'source', 'subject', 'subjects', 'app', 'action'];
 
 const ALLOWED: Readonly<Record<string, readonly string[]>> = {
   'mcp.server.saved': ['name', 'kind', 'tools', 'disabledWrites'],
@@ -43,6 +44,9 @@ const ALLOWED: Readonly<Record<string, readonly string[]>> = {
   'apps.source.asked': ['source', 'seat', 'drafted', 'failed', 'check'],
   'apps.source.queried': ['source', 'ok', 'rows', 'truncated', 'ms', 'errorClass', 'sqlstate', 'refused', 'failed'],
   'apps.source.uploaded': ['source', 'kind', 'digest', 'bytes'],
+  'apps.action.granted': ['app', 'action', 'kind', 'source', 'actionHash', 'contractHash', 'descriptorHash'],
+  'apps.action.revoked': ['app', 'action'],
+  'apps.action.ran': ['app', 'action', 'record', 'outcome', 'recovered', 'recordNotSaved', 'ms'],
 };
 
 /** The keys of `action`'s detail a non-human reader keeps; `null` = the line is not a source line (kept whole). */

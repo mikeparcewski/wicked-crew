@@ -548,16 +548,17 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       if (r === null) return reply;
       const parsed = McpServerConfigSchema.safeParse(req.body);
       if (!parsed.success) return invalidBody(reply, parsed.error);
+      const actor = deps.actorOf(req);
       // (DES-APPS-001 §5.2) The preview DIALS: a confirmed private range is used now, so only a
       // human operator may name one, here as at the save.
-      if (confirmsAddress(parsed.data.address) && !mayGrantWrite(deps.actorOf(req))) return addressConfirmRefused(reply, deps.actorOf(req));
+      if (confirmsAddress(parsed.data.address) && !mayGrantWrite(actor)) return addressConfirmRefused(reply, actor);
       // (crew#1316) It also PROBES with the secret `auth.ref` names: a secret crew already holds is a human operator's to send.
-      if (namesStoredSecret(parsed.data) && !mayGrantWrite(deps.actorOf(req))) return storedSecretRefused(reply, deps.actorOf(req));
+      if (namesStoredSecret(parsed.data) && !mayGrantWrite(actor)) return storedSecretRefused(reply, actor);
       try {
         const full = await r.preview(toConfig(parsed.data), parsed.data.secret ?? null);
         // (DES-KNOWLEDGE-DATA-001 §5.2) A source's structure reaches an agent only through estate and the gate.
         const { source: described, ...rest } = full;
-        const preview: McpPreviewResponse = sees(deps.actorOf(req)) === 'full' && described !== undefined ? { ...rest, source: described } : rest;
+        const preview: McpPreviewResponse = sees(actor) === 'full' && described !== undefined ? { ...rest, source: described } : rest;
         if (deps.policies === undefined) return preview;
         let policies: McpPreviewResponse['policies'] = null;
         try {
@@ -567,7 +568,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
         }
         return { ...preview, policies };
       } catch (err) {
-        return fail(reply, err, deps.actorOf(req));
+        return fail(reply, err, actor);
       }
     },
   );

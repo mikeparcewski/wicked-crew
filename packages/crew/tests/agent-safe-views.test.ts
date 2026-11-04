@@ -18,12 +18,12 @@ import { registerMcpRoutes } from '../src/api/mcp.js';
 import { createServer } from '../src/api/server.js';
 import { appDetailFor } from '../src/apps/views.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
-import type { Actor, AppDetail, AppQuery, AuditEntry, AuditPage, McpPreviewResponse } from '../src/core/types.js';
+import type { Actor, AppAction, AppDetail, AppQuery, AuditEntry, AuditPage, McpPreviewResponse } from '../src/core/types.js';
 import type { McpUpstreamConfig, Prober } from '../src/mcp/probe.js';
 import { McpRegistry } from '../src/mcp/registry.js';
 import { McpRegistryStore } from '../src/mcp/registry-store.js';
 import type { SecretStore } from '../src/mcp/secrets.js';
-import { startMcpServer } from './fixtures/apps-sources/servers.mjs';
+import { startGraphqlServer, startMcpServer } from './fixtures/apps-sources/servers.mjs';
 import { removeScratch } from './setup/scratch.js';
 import { appsHarness, type Harness, specWith } from './support/apps-harness.js';
 
@@ -138,7 +138,7 @@ describe('crew#1316: a non-human preview cannot name a secret crew already holds
 
 // ── crew#1317: GET /audit ──────────────────────────────────────────────────────────────────────────────────────────
 
-/** The MCP and source lines as their emitters write them (api/mcp.ts, sources/routes.ts), plus lines outside them. */
+/** The MCP, source and app-action lines as their emitters write them (api/mcp.ts, sources/routes.ts, apps/actions/write-path.ts), plus a line outside them. */
 const SOURCE_LINES: AuditEntry[] = [
   { ts: 1_000, action: 'mcp.server.saved', actor: HUMAN, detail: { name: 'wh', kind: 'sql', tools: 2, authRef: 'keychain:wicked-mcp/wh', disabledWrites: ['mcp:wh/del'] } },
   { ts: 1_001, action: 'mcp.server.address_confirmed', actor: HUMAN, detail: { name: 'wh', kind: 'sql', allow: ['10.20.0.0/16'], plaintext: true } },
@@ -149,9 +149,12 @@ const SOURCE_LINES: AuditEntry[] = [
   // A line of these families with no allowlist entry keeps only its identity (a later field stays hidden).
   { ts: 1_006, action: 'knowledge.source.future_line', actor: HUMAN, detail: { source: 'wh', host: 'pg.corp.test', projects: ['p1'] } },
   { ts: 1_007, action: 'mcp.tool.write_granted', actor: HUMAN, detail: { subject: 'mcp:wh/del', class: 'destructive', via: 'save' } },
+  // codex r1: an action run names its operation's relation, and its reason can too.
+  { ts: 1_008, action: 'apps.action.ran', actor: HUMAN, detail: { app: 'desk', action: 'close', record: 'rec-1', viewer: 'priya@example.com', descriptorHash: 'd1', operation: 'UPDATE support.tickets', paramsDigest: 'p1', outcome: 'failed', reason: 'support.tickets has no column closed_at', ms: 9 } },
+  { ts: 1_009, action: 'apps.action.revoked', actor: SYSTEM, detail: { app: 'desk', action: 'close', reason: 'the table support.tickets changed' } },
 ];
 const OTHER_LINES: AuditEntry[] = [{ ts: 2_000, action: 'run.launched', actor: HUMAN, runId: 'r1', detail: { workflow: 'feature', repo: '/repos/x' } }];
-const LEAKS = ['authRef', 'keychain:wicked-mcp/wh', 'env:WH_PASSWORD', '10.20.0.0/16', 'tickets.corp.test', '/api/v3', '10.9.8.7', 'finance.payroll', 'pg.corp.test', 'plaintext'];
+const LEAKS = ['authRef', 'keychain:wicked-mcp/wh', 'env:WH_PASSWORD', '10.20.0.0/16', 'tickets.corp.test', '/api/v3', '10.9.8.7', 'finance.payroll', 'pg.corp.test', 'plaintext', 'support.tickets', 'priya@example.com'];
 
 describe('crew#1317: a non-human GET /audit reads the MCP and source lines without connection data', () => {
   let scratch: string;
@@ -209,6 +212,8 @@ describe('crew#1317: a non-human GET /audit reads the MCP and source lines witho
     expect(by('apps.source.queried')).toEqual({ source: 'wh', ok: true, rows: 3, truncated: false, ms: 12 });
     expect(by('knowledge.source.future_line')).toEqual({ source: 'wh' });
     expect(by('mcp.tool.write_granted')).toEqual({ subject: 'mcp:wh/del', class: 'destructive', via: 'save' });
+    expect(by('apps.action.ran')).toEqual({ app: 'desk', action: 'close', record: 'rec-1', outcome: 'failed', ms: 9 });
+    expect(by('apps.action.revoked')).toEqual({ app: 'desk', action: 'close' });
     // A line outside those families is unchanged.
     expect(page.entries.find((e) => e.action === 'run.launched')).toEqual(OTHER_LINES[0]);
   });
@@ -226,7 +231,8 @@ describe('crew#1317: a non-human GET /audit reads the MCP and source lines witho
     expect(auditFor(HUMAN, SOURCE_LINES)).toEqual(SOURCE_LINES);
     expect(auditEntryFor(AGENT, OTHER_LINES[0]!)).toBe(OTHER_LINES[0]);
     expect(agentAuditKeys('run.launched')).toBeNull();
-    expect(agentAuditKeys('mcp.something_new')).toEqual(['name', 'source', 'subject', 'subjects']);
+    expect(agentAuditKeys('mcp.something_new')).toEqual(['name', 'source', 'subject', 'subjects', 'app', 'action']);
+    expect(agentAuditKeys('apps.version.landed')).toBeNull();
   });
 
   it("the lines crew's own MCP routes write, read back through the projection, hold no connection data", async () => {
@@ -263,38 +269,65 @@ type Fixture = { origin: string; hits: unknown[]; close: () => Promise<void> };
 describe('crew#1317: a non-human GET /apps/:app reads the lock without source descriptors and no query text', () => {
   let h: Harness;
   let mcp: Fixture;
+  let gql: Fixture;
   const listQuery: AppQuery = { id: 'list_mcp', source: 'ref', kind: 'mcp', rowPath: '$.data.items[*]', output: [{ name: 'id', type: 'integer' }] };
   const QUERY_TEXT = JSON.stringify({ tool: 'list_tickets', args: {} });
+  const MUTATION = 'mutation ($id: Int!, $owner: String!) { assign(id: $id, owner: $owner) { id } }';
+  const assignArgs = { id: { kind: 'param' as const, name: 'id' }, owner: { kind: 'viewer' as const, claim: 'email' as const } };
+  const params = { type: 'object' as const, properties: { id: { type: 'integer' as const } }, required: ['id'] };
+  const ACTIONS: AppAction[] = [
+    { id: 'assign_mcp', kind: 'api', source: 'ref', call: { kind: 'tool', tool: 'assign_ticket' }, args: assignArgs, params },
+    { id: 'assign_gql', kind: 'api', source: 'tix', call: { kind: 'mutation', mutation: MUTATION }, args: assignArgs, params, description: 'Assigns the ticket to you' },
+  ];
 
   beforeAll(async () => {
     mcp = (await startMcpServer()) as Fixture;
+    gql = (await startGraphqlServer()) as Fixture;
     h = await appsHarness();
     await h.register({ name: 'ref', kind: 'mcp-http', url: `${mcp.origin}/mcp`, address: { allow: ['127.0.0.0/8'] } });
+    await h.register({ name: 'tix', kind: 'graphql', url: `${gql.origin}/graphql`, address: { allow: ['127.0.0.0/8'] } });
     await h.newApp('desk');
-    const landed = await h.land('desk', specWith([listQuery]), { list_mcp: QUERY_TEXT });
+    const landed = await h.land('desk', specWith([listQuery], ACTIONS), { list_mcp: QUERY_TEXT });
     expect(landed.status, JSON.stringify(landed.body)).toBe(200);
   }, 60_000);
   afterAll(async () => {
     await h?.close();
     await mcp?.close();
+    await gql?.close();
   });
 
-  it('NEGATIVE CONTROL: an agent bearer gets {kind, descriptorHash} per source, no descriptor host and no queryText', async () => {
+  it('NEGATIVE CONTROL: an agent bearer gets {kind, descriptorHash} per source, no descriptor host, no queryText and no action call', async () => {
     const full = await h.store.detail('desk');
-    const host = new URL(mcp.origin).host;
-    expect(JSON.stringify(full.lock.sources['ref']?.descriptor)).toContain(host);
+    const hosts = [new URL(mcp.origin).host, new URL(gql.origin).host];
+    for (const host of hosts) expect(JSON.stringify(full.lock.sources)).toContain(host);
     const r = await h.call('GET', '/apps/desk', undefined, 'seat');
     expect(r.status).toBe(200);
-    const app = (r.body as { app: Record<string, unknown> & { lock: AppDetail['lock'] } }).app;
+    const app = (r.body as { app: Record<string, unknown> & { lock: AppDetail['lock']; spec: AppDetail['spec'] } }).app;
     const text = JSON.stringify(r.body);
-    expect(text).not.toContain(host);
-    expect(text).not.toContain('list_tickets');
+    for (const leak of [...hosts, 'list_tickets', 'assign(id', 'assign_ticket', '"descriptor"']) expect(text, leak).not.toContain(leak);
     expect(app).not.toHaveProperty('queryText');
-    expect(app.lock.sources).toEqual({ ref: { kind: 'mcp-http', descriptorHash: full.lock.sources['ref']!.descriptorHash } });
-    // The rest of the detail (spec, versions, the lock's query and action pins) is the same as a person's.
+    expect(app.lock.sources).toEqual({
+      ref: { kind: 'mcp-http', descriptorHash: full.lock.sources['ref']!.descriptorHash },
+      tix: { kind: 'graphql', descriptorHash: full.lock.sources['tix']!.descriptorHash },
+    });
+    // codex r1: each action is what it is, not what it touches.
+    expect(app.spec.actions).toEqual([
+      { id: 'assign_mcp', kind: 'api', source: 'ref' },
+      { id: 'assign_gql', kind: 'api', source: 'tix', description: 'Assigns the ticket to you' },
+    ]);
+    // The rest of the detail (pages, queries, versions, the lock's query and action pins) is the same as a person's.
+    expect({ ...app.spec, actions: full.spec.actions }).toEqual(full.spec);
     expect(app.lock.queries).toEqual(full.lock.queries);
-    expect(app['spec']).toEqual(full.spec);
+    expect(app.lock.actions).toEqual(full.lock.actions);
     expect(app['versions']).toEqual(full.versions);
+  });
+
+  it('a non-human POST /apps answers the new app in the agent form too', async () => {
+    const r = await h.call('POST', '/apps', { slug: 'seat-made', projectId: 'p1' }, 'seat');
+    expect(r.status, JSON.stringify(r.body)).toBe(201);
+    expect((r.body as { app: Record<string, unknown> }).app).not.toHaveProperty('queryText');
+    const human = await h.call('POST', '/apps', { slug: 'person-made', projectId: 'p1' });
+    expect((human.body as { app: AppDetail }).app.queryText).toEqual({});
   });
 
   it("REGRESSION: studio's app viewers (human bearers, operator or observer) get the full lock and the query text", async () => {
@@ -304,16 +337,25 @@ describe('crew#1317: a non-human GET /apps/:app reads the lock without source de
       expect(r.status).toBe(200);
       expect((r.body as { app: AppDetail }).app).toEqual(full);
       expect((r.body as { app: AppDetail }).app.queryText).toEqual({ list_mcp: QUERY_TEXT });
+      expect((r.body as { app: AppDetail }).app.spec.actions).toEqual(ACTIONS);
     }
   });
 
-  it('the projection helper: a human detail is returned as is; any other kind gets the reduced lock', async () => {
+  it('the projection helper: a human detail is returned as is; any other kind gets the reduced lock and actions', async () => {
     const full = await h.store.detail('desk');
     expect(appDetailFor(HUMAN, full)).toBe(full);
+    // A row write names its table and columns (DES-APPS-001 §7.4): an agent sees only that it is an update.
+    const rowWrite: AppAction = { id: 'close', kind: 'row-write', source: 'support', table: 'support.tickets', op: 'update', set: { closed_at: { kind: 'crew', value: 'now' } }, key: { ticket_id: { kind: 'param', name: 'id' } } };
+    const withWrite: AppDetail = { ...full, spec: { ...full.spec, actions: [...full.spec.actions, rowWrite] } };
     for (const actor of [AGENT, PLUGIN, SYSTEM, null]) {
-      const v = appDetailFor(actor, full) as Record<string, unknown>;
+      const v = appDetailFor(actor, withWrite) as Record<string, unknown> & { spec: { actions: unknown[] } };
       expect(v).not.toHaveProperty('queryText');
-      expect(JSON.stringify(v)).not.toContain('"descriptor"');
+      const text = JSON.stringify(v);
+      for (const leak of ['"descriptor"', 'support.tickets', 'closed_at', 'ticket_id', 'assign(id']) expect(text, leak).not.toContain(leak);
+      expect(v.spec.actions[2]).toEqual({ id: 'close', kind: 'row-write', source: 'support', op: 'update' });
     }
+    // The store's own detail is not changed by a projection.
+    expect(withWrite.spec.actions[2]).toBe(rowWrite);
+    expect(full.queryText).toEqual({ list_mcp: QUERY_TEXT });
   });
 });
