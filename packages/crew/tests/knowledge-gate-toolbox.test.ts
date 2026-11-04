@@ -502,14 +502,47 @@ describe.skipIf(process.platform === 'win32')('the gate on a Toolbox-runtime sou
     expect(lines.filter((l) => l['callId'] === second.body.callId).at(-1)).toMatchObject({ outcome: 'unconfirmed', released: false });
   });
 
-  it('a record corrupted mid-file is unknown, never "no data used"; a torn last line is skipped', async () => {
+  it('a record damaged mid-file is unknown, never "no data used"; a torn last line is skipped, and cut before the next append', async () => {
     const path = join(r.base, 'mcp', 'source-queries.ndjson');
     const good = readFileSync(path, 'utf8');
+    const use = async () => (await r.app.inject({ method: 'GET', url: '/api/v1/runs/run-a/data-use' })).json() as RunDataUseResponse;
     writeFileSync(path, `${good}{"callId":"torn`);
-    expect(((await r.app.inject({ method: 'GET', url: '/api/v1/runs/run-a/data-use' })).json() as RunDataUseResponse).known).toBe(true);
-    writeFileSync(path, `garbage line\n${good}`);
-    expect(((await r.app.inject({ method: 'GET', url: '/api/v1/runs/run-a/data-use' })).json() as RunDataUseResponse).known).toBe(false);
-    writeFileSync(path, good);
+    expect((await use()).known).toBe(true);
+    // the next append cuts the torn tail: the file holds whole lines only
+    expect((await call(r, 'wmt_a', 'mcp:tb/execute_sql', { sql: Q })).answer).toMatchObject({ rowCount: 2 });
+    const after = readFileSync(path, 'utf8');
+    expect(after.includes('{"callId":"torn')).toBe(false);
+    expect(after.endsWith('\n')).toBe(true);
+    // a damaged entry in the middle (it starts like one, and a whole line follows it) makes the record unknown
+    const lines = after.trim().split('\n');
+    const damaged = [...lines.slice(0, -2), `${lines.at(-2)!.slice(0, 30)}`, lines.at(-1)!].join('\n') + '\n';
+    writeFileSync(path, damaged);
+    expect((await use()).known).toBe(false);
+    writeFileSync(path, `garbage line\n${after}`);
+    expect((await use()).known).toBe(false);
+    writeFileSync(path, after);
+    expect((await use()).known).toBe(true);
+  });
+
+  it('after a restart a no-deadline source is reconciled before a Test describes it too', { timeout: 60_000 }, async () => {
+    const runDir = join(r.base, 'mcp', 'adapters', 'toolbox', 'run', NODL_ID);
+    writeFileSync(join(runDir, 'remote-running'), '');
+    // a fresh process (as after a daemon restart): the old one is gone
+    r.sup.current(NODL_ID)?.kill();
+    await until(() => r.sup.current(NODL_ID) === null);
+    const t = (await r.app.inject({ method: 'POST', url: '/api/v1/sources/tb-nodl/test' })).json() as { ok: boolean; code?: string };
+    expect(t).toMatchObject({ ok: false, code: 'remote_work_pending' });
+    expect(r.gate.schedulers.get(NODL_ID)?.state().reserved).toBe(true);
+    rmSync(join(runDir, 'remote-running'));
+    expect(await r.gate.schedulers.get(NODL_ID)?.recheck()).toBe(true);
+    expect((await r.app.inject({ method: 'POST', url: '/api/v1/sources/tb-nodl/test' })).json()).toMatchObject({ ok: true });
+  });
+
+  it('two probes of one saved entry at once (its id is their label) each get their own process directory', { timeout: 60_000 }, async () => {
+    const [a, b] = await Promise.all([1, 2].map(() => r.app.inject({ method: 'POST', url: '/api/v1/mcp/servers/tb/test' })));
+    expect([a?.statusCode, b?.statusCode], `${a?.body} ${b?.body}`).toEqual([200, 200]);
+    expect([a?.json(), b?.json()].map((x) => (x as { ok?: boolean }).ok)).toEqual([true, true]);
+    expect(readdirSync(join(r.base, 'mcp', 'adapters', 'toolbox', 'run')).filter((d) => d.startsWith('preview-'))).toEqual([]);
   });
 
   it('an ask with no rule ids is not first use: it stays pending', async () => {

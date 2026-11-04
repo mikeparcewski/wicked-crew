@@ -55,8 +55,24 @@ export interface SourceDataUse {
 
 export const SOURCE_QUERIES_FILENAME = 'source-queries.ndjson';
 
+/** fsync a directory (a new file's entry in it); a platform that cannot open a directory (Windows) skips it. */
+async function syncDir(dir: string): Promise<void> {
+  let fh: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    fh = await open(dir, 'r');
+    await fh.sync();
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'EISDIR' || code === 'EPERM' || code === 'EACCES' || code === 'EINVAL') return;
+    throw err;
+  } finally {
+    await fh?.close();
+  }
+}
+
 export class SourceReadLog {
   private chain: Promise<unknown> = Promise.resolve();
+  private dirSynced = false;
   readonly path: string;
 
   constructor(dir: string = mcpStateDir()) {
@@ -70,32 +86,51 @@ export class SourceReadLog {
   append(entry: SourceAgentQueryEntry): Promise<void> {
     const next = this.chain.then(async () => {
       await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
-      const line = `${(await this.endsTorn()) ? '\n' : ''}${JSON.stringify(entry)}\n`;
+      // A torn last line (a crash mid-append, never released: rows go out only after an append resolves) is cut
+      // off before the next append, so the file never holds a damaged line anywhere but at its very end.
+      await this.cutTornTail();
       // Synced before it resolves: the release that follows is never ahead of the record on disk.
       const fh = await open(this.path, 'a', 0o600);
       try {
-        await fh.writeFile(line, 'utf8');
+        await fh.writeFile(`${JSON.stringify(entry)}\n`, 'utf8');
         await fh.sync();
       } finally {
         await fh.close();
+      }
+      // The file's own directory entry too, once (a new file is not durable until its directory is).
+      if (!this.dirSynced) {
+        await syncDir(dirname(this.path));
+        this.dirSynced = true;
       }
     });
     this.chain = next.catch(() => undefined);
     return next;
   }
 
-  /** Whether the file's last byte is not a newline (an append a crash cut short). */
-  private async endsTorn(): Promise<boolean> {
+  /** If the file's last byte is not a newline (an append a crash cut short), truncate it back to its last whole line. */
+  private async cutTornTail(): Promise<void> {
     let fh: Awaited<ReturnType<typeof open>> | null = null;
     try {
-      fh = await open(this.path, 'r');
+      fh = await open(this.path, 'r+');
       const { size } = await fh.stat();
-      if (size === 0) return false;
-      const b = Buffer.alloc(1);
-      await fh.read(b, 0, 1, size - 1);
-      return b[0] !== 0x0a;
+      if (size === 0) return;
+      const last = Buffer.alloc(1);
+      await fh.read(last, 0, 1, size - 1);
+      if (last[0] === 0x0a) return;
+      // Find the last newline before the torn tail (a line is small: read back in 64 KiB steps).
+      let end = 0;
+      for (let pos = size; pos > 0 && end === 0; ) {
+        const from = Math.max(0, pos - 64 * 1024);
+        const buf = Buffer.alloc(pos - from);
+        await fh.read(buf, 0, buf.length, from);
+        const i = buf.lastIndexOf(0x0a);
+        if (i >= 0) end = from + i + 1;
+        pos = from;
+      }
+      await fh.truncate(end);
+      await fh.sync();
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
       throw err;
     } finally {
       await fh?.close();
@@ -114,40 +149,23 @@ export class SourceReadLog {
     }
     const last = new Map<string, SourceAgentQueryEntry>();
     const lines = text.split('\n');
+    // The file ends in a newline unless its last append was torn (`cutTornTail` removes such a tail before the next
+    // append), so only the very last segment may be damaged; a damaged line anywhere else is corruption, and a
+    // record that cannot say what was released is unknown.
     for (const [i, line] of lines.entries()) {
       if (line.trim() === '') continue;
       let e: SourceAgentQueryEntry;
       try {
         e = JSON.parse(line) as SourceAgentQueryEntry;
       } catch {
-        // A torn LAST line (a crash mid-append, never released) is skipped. A line that does not parse anywhere
-        // else is corruption: the record cannot say what was used, so it is unknown.
         if (i === lines.length - 1) continue;
-        if (lines.slice(i + 1).every((l) => l.trim() === '')) continue;
-        // An append after a torn line starts with a newline (`endsTorn`), so the torn line is followed by a whole one.
-        if (!line.trimStart().startsWith('{') || !this.tornThenWhole(lines, i)) return null;
-        continue;
+        return null;
       }
       if (typeof e.runId !== 'string' || typeof e.source !== 'string' || typeof e.callId !== 'string' || typeof e.released !== 'boolean' || typeof e.rows !== 'number') return null;
       last.delete(e.callId);
       last.set(e.callId, e);
     }
     return [...last.values()];
-  }
-
-  /**
-   * Whether line `i` is a torn append (a crash mid-write): it parses as no JSON, and the next line is a whole
-   * entry. A torn append is never released (the rows go out only after an append resolves), so skipping it is true.
-   */
-  private tornThenWhole(lines: readonly string[], i: number): boolean {
-    const next = lines[i + 1];
-    if (next === undefined) return true;
-    try {
-      JSON.parse(next);
-      return true;
-    } catch {
-      return false;
-    }
   }
 
   /** The most recent `n` entries for `source`, newest first; `null` = the record cannot be read. */

@@ -12,6 +12,7 @@ import { admitPg, boundedType, cellExpression, limitRewrite, projectedRewrite, r
 import { DEFAULT_LIMITS, GateBusyError, type Lease, SourceScheduler } from '../src/knowledge/gate/scheduler.js';
 import { applicationNameOf, toolboxDocument, ToolboxDocumentError, yamlQuotedBody } from '../src/knowledge/adapters/toolbox/document.js';
 import { splitQualified } from '../src/knowledge/adapters/toolbox/catalog.js';
+import { StderrTail } from '../src/knowledge/adapters/toolbox/supervisor.js';
 import { platformKey, TOOLBOX_PINS, toolboxPath, toolboxUrl, ToolboxBinary } from '../src/knowledge/adapters/toolbox/binary.js';
 import { type PolicyCatalog, relKey } from '../src/sources/policy/types.js';
 
@@ -242,6 +243,32 @@ describe('the Toolbox document (§5.1 deployment policy at spawn, §7.5 host mod
     const d = await input(base, { tls: 'verify-full' });
     expect(d.yaml).toContain('sslmode: "verify-full"');
     await expect(input({ ...base, host: '10.1.2.3' }, { tls: 'disable', address: { allow: ['10.0.0.0/8'], plaintext: false } })).rejects.toBeInstanceOf(ToolboxDocumentError);
+  });
+});
+
+describe("an adapter's stderr as crew keeps it (§7.6)", () => {
+  it('a secret form longer than the kept tail, split across chunks (multi-byte at the split), is never shown in part', () => {
+    const secret = `ü${'s"\n'.repeat(2700)}é`;
+    const forms = [secret, yamlQuotedBody(secret), JSON.stringify(secret).slice(1, -1)];
+    expect(forms[1]!.length).toBeGreaterThan(8192);
+    const t = new StderrTail(forms);
+    const text = Buffer.from(`before ${forms[1]} after`, 'utf8');
+    // split inside a multi-byte character, and in the middle of the long form
+    const cuts = [8, 9, 4000, 9000, text.length];
+    let at = 0;
+    for (const c of cuts) {
+      t.push(text.subarray(at, c));
+      at = c;
+    }
+    const v = t.view();
+    expect(v).toContain('[redacted:secret]');
+    expect(v.endsWith(' after')).toBe(true);
+    for (const f of forms) for (const piece of [f.slice(0, 40), f.slice(-40), f.slice(5000, 5040)]) expect(v.includes(piece)).toBe(false);
+  });
+  it('a write that stops inside a secret form shows no fragment of it', () => {
+    const t = new StderrTail(['hunter2-long-secret']);
+    t.push(Buffer.from('connecting with hunter2-lo'));
+    expect(t.view()).toBe('connecting with ');
   });
 });
 

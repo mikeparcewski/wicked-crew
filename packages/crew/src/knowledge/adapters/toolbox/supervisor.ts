@@ -44,6 +44,54 @@ export class ToolboxCallError extends Error {
   }
 }
 
+/**
+ * A process's stderr as crew keeps it (§7.6: "adapter stdout and stderr are scrubbed of the raw and escaped forms
+ * before anything is kept"). One streaming decoder (a multi-byte character split across chunks decodes whole) feeds
+ * an UNSCRUBBED window held in memory only (as the secret itself is), larger than the kept tail by twice the
+ * longest protected form, so a form split across chunks, or longer than the tail, is whole in it when scrubbed.
+ * Only `view()` leaves: scrubbed, with a trailing partial form (a write not finished) cut off, then cut to the tail.
+ */
+export class StderrTail {
+  private raw = '';
+  private readonly decoder = new StringDecoder('utf8');
+  private readonly window: number;
+
+  constructor(
+    private readonly forms: readonly string[],
+    private readonly keep: number = STDERR_KEEP,
+  ) {
+    this.window = keep + 2 * Math.max(0, ...forms.map((f) => f.length));
+  }
+
+  push(chunk: Buffer): void {
+    this.raw = `${this.raw}${this.decoder.write(chunk)}`.slice(-this.window);
+  }
+
+  view(): string {
+    let t = scrubSecrets(this.raw, [...this.forms]);
+    // The window was cut at its start: a form it began inside is no longer whole there, so that start is dropped.
+    if (this.raw.length >= this.window) {
+      for (const f of this.forms) {
+        for (let k = Math.min(f.length - 1, t.length); k > 0; k--) {
+          if (t.startsWith(f.slice(-k))) {
+            t = t.slice(k);
+            break;
+          }
+        }
+      }
+    }
+    for (const f of this.forms) {
+      for (let k = Math.min(f.length - 1, t.length); k > 0; k--) {
+        if (t.endsWith(f.slice(0, k))) {
+          t = t.slice(0, t.length - k);
+          break;
+        }
+      }
+    }
+    return t.slice(-this.keep);
+  }
+}
+
 /** A tool's MCP result as Toolbox answers it. */
 export interface ToolboxResult {
   content: Array<{ type: string; text?: string }>;
@@ -73,8 +121,12 @@ export class ToolboxProcess {
   private pending: Pending | null = null;
   private line: Buffer[] = [];
   private lineBytes = 0;
-  private stderrTail = '';
-  private readonly stderrDecoder = new StringDecoder('utf8');
+  /**
+   * The last stderr as decoded, UNSCRUBBED, held in memory only (as the secret itself is) and never published: a
+   * window larger than the kept tail by twice the longest protected form, so a form split across chunks is whole in
+   * it when the tail is scrubbed. Only the scrubbed, cut view (`stderr`) ever leaves this object.
+   */
+  private readonly stderrTail: StderrTail;
   private exited = false;
   /** Set the moment a stop begins: a process being stopped is never handed out again, even before it exits. */
   private stopping = false;
@@ -92,6 +144,7 @@ export class ToolboxProcess {
   ) {
     this.secret = secret;
     this.secrets = secret === null || secret === '' ? [] : [secret, yamlQuotedBody(secret), JSON.stringify(secret).slice(1, -1)].filter((s, i, a) => s !== '' && a.indexOf(s) === i);
+    this.stderrTail = new StderrTail(this.secrets);
   }
 
   private readonly secret: string | null;
@@ -104,21 +157,9 @@ export class ToolboxProcess {
     return this.child !== null && !this.exited && !this.stopping;
   }
 
-  /**
-   * The last stderr, scrubbed of the secret's forms: for a human's diagnostics only. A tail that ends in the
-   * beginning of a secret form (a write the process had not finished) is cut there, so no fragment is shown.
-   */
+  /** The last stderr, scrubbed of the secret's forms (`StderrTail`): for a human's diagnostics only. */
   get stderr(): string {
-    let t = this.stderrTail;
-    for (const f of this.secrets) {
-      for (let k = Math.min(f.length - 1, t.length); k > 0; k--) {
-        if (t.endsWith(f.slice(0, k))) {
-          t = t.slice(0, t.length - k);
-          break;
-        }
-      }
-    }
-    return t;
+    return this.stderrTail.view();
   }
 
   /** Spawn, initialize and verify the session settings. */
@@ -141,9 +182,7 @@ export class ToolboxProcess {
     this.child = child;
     child.stdout?.on('data', (chunk: Buffer) => this.onData(chunk));
     child.stderr?.on('data', (chunk: Buffer) => {
-      // One streaming decoder (a multi-byte character split across chunks decodes whole), scrubbed over the
-      // kept tail plus the new text (a secret split across chunks is whole there), then cut to the tail.
-      this.stderrTail = scrubSecrets(`${this.stderrTail}${this.stderrDecoder.write(chunk)}`, this.secrets).slice(-STDERR_KEEP);
+      this.stderrTail.push(chunk);
     });
     child.on('error', () => this.onExit());
     child.on('exit', () => this.onExit());
@@ -413,13 +452,15 @@ export class ToolboxSupervisor {
    */
   async once<T>(label: string, doc: ToolboxDocument, secret: string | null, fn: (p: ToolboxProcess) => Promise<T>): Promise<T> {
     const bin = await this.deps.binary();
-    const p = new ToolboxProcess(bin, join(this.deps.runRoot, `preview-${label.replace(/[^A-Za-z0-9_-]/g, '_')}`), doc, secret, this.deps.idleMs ?? TOOLBOX_IDLE_MS, () => undefined);
+    // Its own directory per invocation: two previews (or Tests) of one entry never share or delete each other's.
+    const dir = join(this.deps.runRoot, `preview-${label.replace(/[^A-Za-z0-9_-]/g, '_')}-${randomBytes(4).toString('hex')}`);
+    const p = new ToolboxProcess(bin, dir, doc, secret, this.deps.idleMs ?? TOOLBOX_IDLE_MS, () => undefined);
     try {
       await p.start();
       return await fn(p);
     } finally {
       p.kill();
-      await rm(join(this.deps.runRoot, `preview-${label.replace(/[^A-Za-z0-9_-]/g, '_')}`), { recursive: true, force: true }).catch(() => undefined);
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
     }
   }
 

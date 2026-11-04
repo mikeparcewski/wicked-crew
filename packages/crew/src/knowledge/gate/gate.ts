@@ -559,17 +559,8 @@ export class DataGate {
     // The source's own deadline, as verified on open (not as written): without one, concurrency 1 and the reservation.
     const sourceDeadline = doc.sourceDeadline && proc.verified?.sourceDeadline === true;
     if (!sourceDeadline) {
-      const sched = this.schedulers.for(s.id, s.name, this.limitsFor(s, false));
-      // The first read on this process: work a previous process (or a previous daemon) left at the source may
-      // still run, and nothing would stop it. Checked before anything new is admitted (fail closed).
-      if (!this.reconciled.has(proc)) {
-        const state = await this.remoteCheck(s, doc, secret)().catch(() => 'unknown' as const);
-        if (state !== 'gone') {
-          sched.reserve(this.remoteCheck(s, doc, secret));
-          return { refused: 'remote_work_pending', reason: `${s.name} is closed: crew has not confirmed that earlier work ended at the source`, remedy: 'try again in a minute; crew re-checks the source' };
-        }
-        this.reconciled.add(proc);
-      }
+      const closed = await this.reconcile(s, proc, doc, secret);
+      if (closed !== null) return closed;
     }
     const started = this.now();
     let r;
@@ -608,6 +599,23 @@ export class DataGate {
     }
     const rows = objs.map((o) => names.map((n) => o[n] ?? null));
     return { columns: names.map((n) => ({ name: n, type: null })), rows, truncated: rows.length > UNIT_ROW_CAP, ms: this.now() - started, secrets: proc.secrets };
+  }
+
+  /**
+   * A no-deadline source's first work on a fresh process (a read or a describe): work a previous process, or a
+   * previous daemon, left at the source may still run, and nothing would stop it. Checked before anything new is
+   * sent; anything but `gone` holds the reservation (fail closed). `null` = reconciled, go on.
+   */
+  private async reconcile(s: GateSource, proc: ToolboxProcess, doc: ToolboxDocument, secret: string | null): Promise<GateRefused | null> {
+    const sched = this.schedulers.for(s.id, s.name, this.limitsFor(s, false));
+    if (this.reconciled.has(proc)) return null;
+    const state = await this.remoteCheck(s, doc, secret)().catch(() => 'unknown' as const);
+    if (state !== 'gone') {
+      sched.reserve(this.remoteCheck(s, doc, secret));
+      return { refused: 'remote_work_pending', reason: `${s.name} is closed: crew has not confirmed that earlier work ended at the source`, remedy: 'try again in a minute; crew re-checks the source' };
+    }
+    this.reconciled.add(proc);
+    return null;
   }
 
   /** Start the source's process again in the background, so the next call finds it warm. */
@@ -742,6 +750,13 @@ export class DataGate {
     try {
       got = await this.toolboxProcess(s);
       if ('refused' in got) return { ok: false, code: got.refused, error: got.reason, ms: this.now() - started, tls };
+      if (!(got.doc.sourceDeadline && got.proc.verified?.sourceDeadline === true)) {
+        const closed = await this.reconcile(s, got.proc, got.doc, got.secret);
+        if (closed !== null) {
+          end = { outcome: 'ok' };
+          return { ok: false, code: closed.refused, error: closed.reason, ms: this.now() - started, tls };
+        }
+      }
       const listed = await got.proc.callTool('list_tables', { output_format: 'detailed', table_names: '' }, 8 * 1024 * 1024, 30_000);
       const foreign = await got.proc.callTool('execute_sql', { sql: FOREIGN_BELOW_SQL }, 1024 * 1024, 30_000);
       end = { outcome: 'ok' };
