@@ -171,8 +171,9 @@ export class McpRegistry {
   /**
    * (crew#1328 item 3) A restored registry generation changes a source's projection key (its descriptor and allowed
    * views) with no catalog written, so `catalogs.onWritten` does not fire. Every source a restore commits is named
-   * here once it has landed, and the daemon re-projects its structure into estate, so the visible set does not wait
-   * for the next describe or boot. A listener's failure never fails the restore.
+   * here once it has landed, and the daemon queues a re-projection of its structure into estate, so a source whose
+   * stored catalog matches the restored descriptor does not wait for the next describe or boot (one whose catalog
+   * belongs to a later descriptor still needs a describe). A listener's failure never fails the restore.
    */
   onSourceChanged: ((name: string) => void) | null = null;
 

@@ -3,7 +3,7 @@
 // until the next describe or boot. The registry now names every source a restore commits (`onSourceChanged`), and
 // the daemon re-projects it. An ordinary MCP server is not a source and is not named.
 
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -63,16 +63,17 @@ describe('a registry restore names the sources it committed, for re-projection (
     const registry = new McpRegistry({ store, secrets: noSecrets, probe: probeMcpServer, discover: () => [] });
     // A later write keeps this file as generation 1.
     await registry.setServerEnabled('fx', false);
-    const named: string[] = [];
+    const named: Array<{ name: string; fxEnabledOnDisk: boolean }> = [];
     registry.onSourceChanged = (name) => {
-      named.push(name);
+      // Read synchronously as the listener runs: the restore has already landed (generation 1 had fx enabled).
+      const onDisk = JSON.parse(readFileSync(join(dir, 'registry.json'), 'utf8')) as { servers: Array<{ name: string; enabled: boolean }> };
+      named.push({ name, fxEnabledOnDisk: onDisk.servers.find((s) => s.name === 'fx')?.enabled === true });
       throw new Error('a listener failure is its own');
     };
     const plan = await registry.planRestore(1);
     const out = await registry.restore(plan);
     expect(out.servers).toBe(2);
-    expect(named).toEqual(['support-pg']);
-    // Named after the commit: what the projector reads then is the restored record.
-    expect((await store.read()).servers.map((s) => s.name).sort()).toEqual(['fx', 'support-pg']);
+    // Named once, after the commit: what the projector reads then is the restored registry.
+    expect(named).toEqual([{ name: 'support-pg', fxEnabledOnDisk: true }]);
   });
 });

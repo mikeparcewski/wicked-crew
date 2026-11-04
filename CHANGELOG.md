@@ -300,7 +300,9 @@ mentioned only where a daemon release depends on them.
   changes a source's projection key (its descriptor and allowed views) without writing a catalog, so nothing
   re-projected it, and the visible set hid the source's estate structure until the next describe or boot. The
   registry now names every source a restore commits (`onSourceChanged`), once the restore has landed, and the daemon
-  queues its projection. A listener's failure never fails the restore.
+  queues its projection. A source whose stored catalog still matches the restored descriptor is projected again at
+  once; one whose catalog belongs to a later descriptor still needs a describe, as before. A listener's failure
+  never fails the restore.
 - **An operator rule that triggers on a call's arguments fires for a live-source call (crew#1337).** The data gate
   judged `mcp:<source>/<tool>` by the engine's tool list, which judges every call with no arguments, so a rule such
   as `{applies_to: ["mcp:support-pg/execute_sql"], effect: "deny", trigger: {contains: "salary"}}` never fired and
