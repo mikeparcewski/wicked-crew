@@ -32,7 +32,7 @@ import { z } from 'zod';
 import type { AuditLog } from '../api/audit.js';
 import { trustAtLeast } from '../api/auth.js';
 import { API_PREFIX } from '../api/api-prefix.js';
-import type { Actor, SourceAllowWritesResponse, SourceAskResponse, SourceCatalogResponse, SourceQueryResponse, SourceTestCallRequest, SourceTestCallResponse, SourceUploadResponse } from '../core/types.js';
+import type { Actor, SourceAllowWritesResponse, SourceAskResponse, SourceCatalogResponse, SourceConnectionTestResponse, SourceQueryResponse, SourceTestCallRequest, SourceTestCallResponse, SourceUploadResponse } from '../core/types.js';
 import { canonicalJson, deriveToolClass, effectiveToolClass, MCP_SERVER_NAME_RE } from '../mcp/classify.js';
 import { invokeMcpTool } from '../mcp/invoke.js';
 import { McpRegistryError, type McpRegistry } from '../mcp/registry.js';
@@ -53,6 +53,8 @@ import { pgTableSafety } from './safety/postgres.js';
 import { checkReadPolicy } from './policy/index.js';
 import { checkSqlQuery, readSqlQuery, SourcePolicyError, type SqlCheckResult, type SqlSourceHandle } from './sql.js';
 import { ingestUpload, snapshotPath, UPLOAD_LIMITS, UploadError } from './uploads.js';
+import { type DataGate } from '../knowledge/gate/gate.js';
+import { GateBusyError } from '../knowledge/gate/scheduler.js';
 
 const V = API_PREFIX;
 
@@ -80,6 +82,11 @@ export interface SourceRouteDeps {
   runTokens?: AskRunTokens;
   /** TESTS ONLY: a shorter deadline for a person's query (production: K1's 10 s). */
   queryDeadlineMs?: number;
+  /**
+   * (DES-KNOWLEDGE-DATA-001 §7) The data gate: a person's query run on Postgres goes through it (the source's
+   * scheduler, the LIMIT rewrite), and a Toolbox-runtime source's Test is its describe.
+   */
+  gate?: Pick<DataGate, 'personRead' | 'isToolbox' | 'describeToolbox'>;
 }
 
 const name = z.string().regex(MCP_SERVER_NAME_RE);
@@ -416,6 +423,16 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
       const r = registry(reply);
       if (r === null) return reply;
       try {
+        // (DES-KNOWLEDGE-DATA-001 §6.3, §7.4) A Toolbox-runtime source is described through its own adapter.
+        if (deps.gate !== undefined && (await deps.gate.isToolbox(req.params.name))) {
+          const human = deps.actorOf(req).kind === 'human';
+          const d = await deps.gate.describeToolbox(req.params.name);
+          const testedAt = new Date().toISOString();
+          const tested: SourceConnectionTestResponse = d.ok
+            ? { name: req.params.name, kind: 'sql', driver: 'postgres', ok: true, ms: d.ms, testedAt, tls: 'verified', catalog: { name: req.params.name, kind: 'sql', catalog: d.catalog, descriptorHash: d.descriptorHash }, readCheck: null }
+            : { name: req.params.name, kind: 'sql', driver: 'postgres', ok: false, ms: d.ms, testedAt, tls: 'verified', code: d.code, error: human ? d.error : `the test failed (${d.code})` };
+          return tested;
+        }
         return await testConnection({ registry: r, dial, ...(deps.snapshotDir !== undefined ? { snapshotDir: deps.snapshotDir } : {}) }, req.params.name, deps.actorOf(req).kind === 'human');
       } catch (err) {
         return fail(reply, err, deps.actorOf(req), secretsOf(req));
@@ -597,11 +614,20 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
         const named = pol.relations.length > 0 ? { relations: pol.relations } : {};
         let res: Awaited<ReturnType<typeof readSqlQuery>>;
         try {
-          res = await readSqlQuery(handle, sql, [], { maxRows: ASK_ROW_CAP, maxBytes: ASK_RESULT_BYTES, deadlineMs: deps.queryDeadlineMs ?? ASK_DEADLINE_MS, blobsAsHex: true, cellChars: ASK_CELL_CHARS });
+          // (DES-KNOWLEDGE-DATA-001 §7.4) Postgres: through the gate (the source's one scheduler, the LIMIT
+          // rewrite), under Ask's caps; the answer below is unchanged.
+          res =
+            deps.gate !== undefined && handle.driver === 'postgres'
+              ? await deps.gate.personRead(source, { connect: handle.connect, catalog: a.catalog, viewsAllowed: a.views, sql, rowCap: ASK_ROW_CAP, maxBytes: ASK_RESULT_BYTES, deadlineMs: deps.queryDeadlineMs ?? ASK_DEADLINE_MS })
+              : await readSqlQuery(handle, sql, [], { maxRows: ASK_ROW_CAP, maxBytes: ASK_RESULT_BYTES, deadlineMs: deps.queryDeadlineMs ?? ASK_DEADLINE_MS, blobsAsHex: true, cellChars: ASK_CELL_CHARS });
         } catch (err) {
           if (err instanceof SourcePolicyError) {
             queried({ ok: false, ...named, refused: err.code });
             return reply.code(409).send({ error: err.message, code: err.code });
+          }
+          if (err instanceof GateBusyError) {
+            queried({ ok: false, ...named, refused: err.code });
+            return reply.code(503).send({ error: `${err.message}: ${err.remedy}`, code: err.code });
           }
           queried({ ok: false, ...named, ...(err instanceof SourceQueryError ? { errorClass: err.errorClass, ...(err.sqlstate !== null ? { sqlstate: err.sqlstate } : {}) } : { errorClass: 'failed' }) });
           throw err;

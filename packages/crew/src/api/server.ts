@@ -98,6 +98,11 @@ import { McpCallRecordFile } from '../mcp/call-records.js';
 import { emitOnBus, type BusEvent } from '../core/bus.js';
 import { McpRegistry } from '../mcp/registry.js';
 import { McpRegistryStore } from '../mcp/registry-store.js';
+import { resolveSecret } from '../mcp/secrets.js';
+import { DataGate } from '../knowledge/gate/gate.js';
+import { SourceReadLog } from '../knowledge/gate/record.js';
+import { ToolboxBinary, toolboxRunRoot } from '../knowledge/adapters/toolbox/binary.js';
+import { ToolboxSupervisor } from '../knowledge/adapters/toolbox/supervisor.js';
 import { platformSecretStore } from '../mcp/secrets.js';
 import { startProjectBus, MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
 import { startInteractiveWsRelay, registerInteractiveEventRoutes } from '../interactive/ws-relay.js';
@@ -2488,9 +2493,11 @@ export async function createServer(
   const studioRoot = options?.studioRoot ?? defaultStudioRoot();
 
   // DES-MCP-TOOLS-001 S2: the registry over `<state home>/mcp` (created on the first save).
+  const mcpRegistryStore = new McpRegistryStore();
+  const mcpSecrets = platformSecretStore();
   const mcpRegistry = new McpRegistry({
-    store: new McpRegistryStore(),
-    secrets: platformSecretStore(),
+    store: mcpRegistryStore,
+    secrets: mcpSecrets,
     probe: probeMcpServer,
     // Read the worker home at request time: `PUT /settings` can move it (applyWorkerConfigRoot).
     discover: (managed) => discoverMcpServers({ home: homedir(), workerHome: process.env['WICKED_WORKER_HOME'] ?? null }, managed),
@@ -2500,12 +2507,33 @@ export async function createServer(
   // and the engine's bus. A bus that is not attached only loses the event; the record is the record.
   // S7: the same file (one serialized chain) is what `GET /mcp/usage` reads back and folds.
   const mcpCallRecords = new McpCallRecordFile();
+  // DES-KNOWLEDGE-DATA-001 §7: the data gate. Every agent read of a live source (`mcp:<source>/<tool>`) and the
+  // person's own query pass through it; the Toolbox runtime's processes are its supervisor's, one per source,
+  // from the pinned, checksum-verified binary in the state home (downloaded on first use).
+  const sourceReads = new SourceReadLog();
+  const toolboxBinary = new ToolboxBinary();
+  const toolboxSupervisor = new ToolboxSupervisor({ binary: () => toolboxBinary.ensure(), runRoot: toolboxRunRoot() });
+  const dataGate = new DataGate({
+    store: mcpRegistryStore,
+    catalogs: mcpRegistry.catalogs,
+    secret: (ref) => resolveSecret(ref, mcpSecrets),
+    record: sourceReads,
+    audit,
+    resolver: () => CoreAdapter.estateScopeResolver(),
+    lister: () => CoreAdapter.mcpToolLister(),
+    toolbox: toolboxSupervisor,
+    log: (m) => app.log.warn(m),
+  });
+  app.addHook('onClose', async () => {
+    toolboxSupervisor.stopAll();
+  });
   const mcpBroker = new McpBroker({
     registry: mcpRegistry,
     engine: options?.mcpEngineGate ?? (() => CoreAdapter.mcpEngineGate()),
     records: mcpCallRecords,
     budgetPerUnit: budgetFromEnv(),
     log: (m) => app.log.warn(m),
+    gate: dataGate,
     // wicked-core#1018: `mcp:estate/<tool>`, a container seat's way to its run's estate. Each
     // landed proposal is also written to the audit trail against its run (`estate.proposal.submitted`).
     estate: new EstateRelay({
@@ -2629,6 +2657,10 @@ export async function createServer(
       ...(appStore !== null && appActions !== null ? { appsActions: appActions } : {}),
       // DES-MCP-TOOLS-001 S3: the broker's call path over that registry.
       mcpBroker,
+      // DES-KNOWLEDGE-DATA-001 §7: the data gate, its registry store and its read record.
+      dataGate,
+      mcpRegistryStore,
+      sourceReads,
       ...(typeof adapter.askSupported === 'function' && adapter.askSupported() ? { askServer } : {}),
       // DES-MCP-TOOLS-001 S7: the call records the usage fold reads.
       mcpCalls: mcpCallRecords,

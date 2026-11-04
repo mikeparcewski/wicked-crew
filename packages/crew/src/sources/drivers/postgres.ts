@@ -20,7 +20,10 @@ import { checkServerIdentity, type PeerCertificate } from 'node:tls';
 import postgres from 'postgres';
 
 import { DialRefusedError, dialTcp, plaintextAllowed } from '../dialer.js';
-import { approxRowBytes, type ReadOptions, READ_MAX_ROWS, type SqlConnectArgs, type SqlDescribe, type SqlReadResult, SourceQueryError, STATEMENT_DEADLINE_MS } from './types.js';
+import { approxRowBytes, type ReadOptions, READ_MAX_ROWS, type SqlColumn, type SqlConnectArgs, type SqlDescribe, type SqlReadResult, SourceQueryError, STATEMENT_DEADLINE_MS } from './types.js';
+
+/** (DES-KNOWLEDGE-DATA-001 §6.3) `work_mem` for an agent's read. */
+export const AGENT_WORK_MEM = '16MB';
 
 export type PgSql = postgres.Sql<Record<string, never>>;
 
@@ -314,7 +317,20 @@ async function pgExpectRelations(tx: postgres.TransactionSql<Record<string, neve
  * Run one read. The caller has already passed the read policy (§5.3); this is the transport:
  * READ ONLY, the deadline at the source plus a cancel guard, rows capped (`truncated` past the cap).
  */
-export async function pgRead(args: SqlConnectArgs, text: string, params: unknown[], opts: ReadOptions & { expect?: readonly RelationExpectation[] } = {}): Promise<SqlReadResult> {
+export async function pgRead(
+  args: SqlConnectArgs,
+  text: string,
+  params: unknown[],
+  opts: ReadOptions & {
+    expect?: readonly RelationExpectation[];
+    /**
+     * (DES-KNOWLEDGE-DATA-001 §6.3) The gate's per-cell projection: `text` is prepared (never executed) INSIDE
+     * the read's transaction, after the live relation checks took their locks, and `shape` turns the columns
+     * prepare reported into the text that runs. The read then answers those described columns.
+     */
+    shape?: (described: SqlColumn[]) => Promise<string>;
+  } = {},
+): Promise<SqlReadResult> {
   const deadlineMs = opts.deadlineMs ?? STATEMENT_DEADLINE_MS;
   const maxRows = opts.maxRows ?? READ_MAX_ROWS;
   const started = Date.now();
@@ -341,12 +357,26 @@ export async function pgRead(args: SqlConnectArgs, text: string, params: unknown
   try {
     const out = await pgTx(sql, life, 'BEGIN READ ONLY', async (tx) => {
       await tx.unsafe(`SET LOCAL statement_timeout = ${Math.max(1, Math.floor(sourceTimeout))}`);
+      if (opts.agentLimits === true) {
+        // (§6.3) An agent's read: no parallel workers, a small sort/hash memory budget.
+        await tx.unsafe('SET LOCAL max_parallel_workers_per_gather = 0');
+        await tx.unsafe(`SET LOCAL work_mem = '${AGENT_WORK_MEM}'`);
+      }
       if (opts.expect !== undefined) await pgExpectRelations(tx, opts.expect);
+      let run = text;
+      let described: SqlColumn[] | null = null;
+      if (opts.shape !== undefined) {
+        const d = (await tx.unsafe(text).describe()) as unknown as { columns: Array<{ name: string; type: number }> | null };
+        const cols = d.columns ?? [];
+        const dn = await typeNames(tx, [...new Set(cols.map((c) => c.type))]);
+        described = cols.map((c) => ({ name: c.name, type: dn.get(c.type) ?? `oid ${c.type}` }));
+        run = await opts.shape(described);
+      }
       const rows: unknown[][] = [];
       let columns: Array<{ name: string; type: number }> = [];
       let truncated = false;
       let bytes = 0;
-      const query = tx.unsafe(text, params as never).values();
+      const query = tx.unsafe(run, params as never).values();
       q = query;
       // Small batches: the byte budget is checked as rows arrive, so at most one batch past it is ever held (codex r2).
       await query.cursor(50, (batch) => {
@@ -365,6 +395,7 @@ export async function pgRead(args: SqlConnectArgs, text: string, params: unknown
       });
       // A read with no rows never calls the cursor back: its columns are on the prepared statement.
       if (columns.length === 0) columns = (query as unknown as { statement?: { columns?: Array<{ name: string; type: number }> } }).statement?.columns ?? [];
+      if (described !== null) return { columns: described, rows, truncated };
       const names = await typeNames(tx, [...new Set(columns.map((c) => c.type))]);
       return { columns: columns.map((c) => ({ name: c.name, type: names.get(c.type) ?? `oid ${c.type}` })), rows, truncated };
     });

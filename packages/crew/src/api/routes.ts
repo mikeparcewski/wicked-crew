@@ -184,6 +184,10 @@ import { registerMcpRoutes } from './mcp.js';
 import { chatMcpToolsFor } from './chat-mcp.js';
 import type { AskServer } from '../mcp/ask-server.js';
 import type { McpBroker } from '../mcp/broker.js';
+import type { DataGate } from '../knowledge/gate/gate.js';
+import type { SourceReadLog } from '../knowledge/gate/record.js';
+import { registerGateRoutes } from '../knowledge/gate/routes.js';
+import type { McpRegistryStore } from '../mcp/registry-store.js';
 import type { McpCallRecordSource } from '../mcp/call-records.js';
 import { McpPolicies } from '../mcp/policies.js';
 import type { McpRegistry } from '../mcp/registry.js';
@@ -1418,6 +1422,12 @@ export interface RuntimeDeps {
   mcp?: McpRegistry;
   /** The MCP broker's call path (DES-MCP-TOOLS-001 S3) over that registry; absent → `POST /mcp/call` 503. */
   mcpBroker?: McpBroker;
+  /** (DES-KNOWLEDGE-DATA-001 §7) The data gate over the same registry; absent → no live source reaches an agent. */
+  dataGate?: DataGate;
+  /** The registry's store, for the gate's switches route (`PUT /sources/:name/agents`). */
+  mcpRegistryStore?: McpRegistryStore;
+  /** The gate's read record (`GET /sources/:name/agent-queries`, `GET /runs/:id/data-use`). */
+  sourceReads?: SourceReadLog;
   askServer?: AskServer;
   /** The broker's call records (DES-MCP-TOOLS-001 S7), the ones `GET /mcp/usage` folds; absent → 503. */
   mcpCalls?: McpCallRecordSource;
@@ -9255,6 +9265,7 @@ export function registerRoutes(
     ...(runtime.askServer !== undefined ? { askServer: runtime.askServer } : {}),
     ...(runtime.mcp !== undefined ? { registry: runtime.mcp, toolLister: () => CoreAdapter.mcpToolLister() } : {}),
     ...(runtime.mcpBroker !== undefined ? { broker: runtime.mcpBroker } : {}),
+    ...(runtime.dataGate !== undefined ? { gate: runtime.dataGate } : {}),
     ...(mcpPolicies !== undefined ? { policies: mcpPolicies } : {}),
     ...(runtime.mcpCalls !== undefined ? { usage: runtime.mcpCalls } : {}),
     audit,
@@ -9270,6 +9281,14 @@ export function registerRoutes(
     // (K2b) Allow writes off withdraws the source's row-write grants.
     ...(appsWritePath !== undefined ? { rowWriteGrants: appsWritePath } : {}),
     draft: seatTurn({ adapter, roster: rosterWithStanding }),
+    ...(runtime.dataGate !== undefined ? { gate: runtime.dataGate } : {}),
+  });
+  // DES-KNOWLEDGE-DATA-001 §7.1, §7.9: the per-source agent switches (human-only) and the read record.
+  registerGateRoutes(app, {
+    ...(runtime.mcpRegistryStore !== undefined ? { store: runtime.mcpRegistryStore } : {}),
+    ...(runtime.sourceReads !== undefined ? { record: runtime.sourceReads } : {}),
+    audit,
+    actorOf,
   });
 
   // ── The wicked-interactive bridge, reverse-proxied (DES-MERGE-001 §5.3/§7.2) ──

@@ -13475,6 +13475,106 @@ export interface SourceAllowWritesResponse {
 }
 
 /**
+ * (api-types KD_B2_VERSION, DES-KNOWLEDGE-DATA-001 §7.1) A live source's agent switches. Agents reach a source
+ * only through crew's data gate (`mcp:<source>/<tool>` through the broker); Apps units get none of its tools,
+ * whatever this says (D-7). Never a write, never a credential.
+ */
+export type SourceAgentAccess = McpSourceAgents;
+
+/** `PUT /sources/:name/agents` (human operator only; each change audited). At least one field. */
+export interface SourceAgentAccessBody {
+  see?: boolean;
+  query?: boolean;
+  projects?: string[];
+  everyProject?: boolean;
+}
+
+export interface SourceAgentAccessResponse {
+  name: string;
+  agents: SourceAgentAccess;
+}
+
+/** One agent read of a source (`GET /sources/:name/agent-queries`), as crew recorded it: never the SQL, a value or a source's words. */
+export interface SourceAgentQuery {
+  /** The broker call's id. */
+  callId: string;
+  at: string;
+  runId: string;
+  unit: number;
+  attempt: number;
+  seat: string;
+  source: string;
+  /** The source's registry id. */
+  sourceId: string;
+  /** sha256 of the SQL text, hex. */
+  sqlHash: string;
+  /** `ok` (rows released), or crew's code (a read-policy code, `query_off`, `deadline`, `too_large`, `busy`, `changed_while_running`, …). */
+  outcome: string;
+  rows: number;
+  truncated: boolean;
+  ms: number;
+  /** Whether rows reached the agent. */
+  released: boolean;
+  sqlstate?: string;
+}
+
+/** `GET /sources/:name/agent-queries` (observer): the last 20, newest first. `known: false` = the record could not be read. */
+export interface SourceAgentQueriesResponse {
+  name: string;
+  known: boolean;
+  queries: SourceAgentQuery[];
+}
+
+/** One source a run's agents read (`GET /runs/:id/data-use`). */
+export interface SourceDataUse {
+  source: string;
+  /** Calls that reached the read policy. */
+  queries: number;
+  /** Calls whose rows reached the agent. */
+  released: number;
+  rows: number;
+  truncated: boolean;
+  lastAt: string;
+}
+
+/** `GET /runs/:id/data-use` (observer): the sources a run's agents read. `known: false` = UNKNOWN, never "none". */
+export interface RunDataUseResponse {
+  runId: string;
+  known: boolean;
+  sources: SourceDataUse[];
+}
+
+/**
+ * (api-types KD_B2_VERSION, DES-KNOWLEDGE-DATA-001 §7.8) What a unit's rows tool (`mcp:<source>/execute_sql`)
+ * answers through the gate: one JSON object inside the MCP result's text, citable like knowledge, fenced as
+ * untrusted data.
+ */
+export interface SourceReadEnvelope {
+  /** Always first: the rows are data from the source, never instructions. */
+  untrusted: string;
+  /** `src:<name>@<at>#<8 hex>`. */
+  cite: string;
+  source: string;
+  /** The dialect (`postgres`). */
+  kind: string;
+  /** The agent's own SQL (scrubbed of the source's secret). */
+  sql: string;
+  params: unknown[];
+  at: string;
+  /** `source:<id>`: what a cached answer depends on. */
+  deps: string[];
+  /** `type`: the source's type name, or `null` where the adapter does not report one. */
+  columns: Array<{ name: string; type: string | null }>;
+  rows: unknown[][];
+  rowCount: number;
+  /** More rows than the cap, more bytes than the cap, or a cell cut at 2,000 characters. */
+  truncated: boolean;
+  rowCap: number;
+  byteCap: number;
+  ms: number;
+}
+
+/**
  * `POST /sources/:name/test-call` (G6) — human operator only. Without `confirm` it sends NOTHING and
  * answers the exact request it would send and its `requestHash`; with `confirm` equal to that hash it
  * sends exactly that one request. Reads only: a REST GET/HEAD operation, a GraphQL `query`, an MCP
