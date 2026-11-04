@@ -175,9 +175,12 @@ shapes on Understand's **Knowledge map** (`GET /knowledge/map`, a person's only)
 
 A tracker is one project inside one issue tracker: a GitHub repository's issues, or a Jira project on one site.
 
-- **Register** GitHub Issues or Jira as a source backed by the vendor's own MCP server, with a token (a GitHub
-  personal access token, an Atlassian API token). crew keeps the token in the keychain. Test connection works
-  as for any source, and each of the server's tools is reviewed before an agent can use it.
+- **Register** GitHub Issues or Jira as a source backed by the vendor's own MCP server (GitHub's
+  `github-mcp-server`, Atlassian's remote server), with a token (a GitHub personal access token, an Atlassian API
+  token). Only a person registers one (`pm_source_human_only`). crew stores the token like any source secret, as a
+  keychain or environment reference. Test connection shows the sites or repositories the token reaches, without
+  reading an issue. Only the read tools crew binds to the linked trackers are offered to agents; every other tool of
+  the server (writes, a general search) is not.
 - **Link** trackers to studio projects, to repositories, or both: one or more trackers, from one tool or several.
   Use **Linked trackers** on a project's page or a repository's page. Only a person links or unlinks
   (`/api/v1/tracker-links`; any other actor gets 403 `tracker_links_human_only`).
@@ -188,7 +191,9 @@ A tracker is one project inside one issue tracker: a GitHub repository's issues,
   outside the set, and drops items outside it from the answer. Issue text is untrusted input, kept as background
   and never read as instructions.
 - **Start a job from an issue**, and the delivery's pull request names the issues it closes in each tracker's
-  own form.
+  own form. At delivery, you can have crew comment on an issue the job addresses, or move it to another state:
+  crew shows the card first (the issue, the exact text, the identity it acts as, the from and to states, the link
+  that admits it) and does exactly that only when you confirm (`/runs/:id/tracker-actions`, a person's only).
 - **No fall-through.** Once a GitHub Issues source is registered, `#N` in a job resolves only through the job's
   linked trackers, never through the daemon's own `gh`.
 - Understand's **Knowledge map** draws the links between trackers, projects and repositories.

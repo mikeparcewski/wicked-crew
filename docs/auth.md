@@ -97,8 +97,9 @@ the exception: they answer `human_only` at any trust.
   `restore_human_only`);
 - `GET /knowledge/map` (`knowledge_map_human_only`), and approving or declining a `knowledge` proposal
   (`knowledge_review_human_only`);
-- trackers: `GET`, `POST` and `DELETE /tracker-links`, and `GET /sources/:name/trackers`
-  (`tracker_links_human_only`); registering a GitHub Issues or Jira source (`pm_source_human_only`);
+- trackers: `GET`, `POST` and `DELETE /tracker-links`, `GET /tracker-links/issues` and
+  `GET /sources/:name/trackers` (`tracker_links_human_only`); `GET` and `POST /runs/:id/tracker-actions`
+  (`tracker_actions_human_only`); registering a GitHub Issues or Jira source (`pm_source_human_only`);
   attaching a repository to a project (`repo_attach_human_only`); and `POST /repos` that would point an
   existing repository id at another checkout (409 `repo_exists`);
 - an app's changes and grants (`human_only`): `POST /apps/:app/edits`, `undo`, `redo`, `restore`, `turns` and

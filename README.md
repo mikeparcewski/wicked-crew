@@ -314,12 +314,13 @@ data and cited `src:<source>@<time>#<hash>`, and a job's gates and delivery say 
 read. Each database's structure is also projected, value-free, into wicked-estate's knowledge store, so
 recall finds tables beside code, only for projects allowed to see them.
 
-**Trackers.** Register GitHub Issues or Jira through the vendor's own MCP server, with a token kept in the
-keychain, and link trackers (a GitHub repository's issues, a Jira project) to studio projects, to
+**Trackers.** Register GitHub Issues or Jira through the vendor's own MCP server, with a token crew stores
+like any source secret, and link trackers (a GitHub repository's issues, a Jira project) to studio projects, to
 repositories, or both. A job or chat in a project sees its project's trackers plus its repositories'
 trackers, under the source's switches, and every tracker call is held to that set. You can start a job from
-an issue, and the delivery names the issues it closes in each tracker's own form. GitLab and Azure DevOps
-are not in this release.
+an issue, the delivery names the issues it closes in each tracker's own form, and at delivery crew can
+comment on an issue or move it, only after you confirm the card it shows. GitLab and Azure DevOps are not in
+this release.
 
 The details, limits and routes are in [docs/data-sources.md](docs/data-sources.md); who may change what is
 in [docs/auth.md](docs/auth.md#non-human-actors).
