@@ -42,6 +42,19 @@ mentioned only where a daemon release depends on them.
   and reviewer, or the refusal's code and reason): the chat on the app's page is that list, no other thread store.
   An app is called what its spec calls it: a landed turn or edit that renames the spec renames the app.
 
+
+- **The knowledge package: chats, runs and the apps builder see a project's live sources one way (DES-KNOWLEDGE-DATA-001
+  §8.1, §9.3, build B3b).** `knowledgePackageFor({projectId})` keeps a source only when the data gate's predicate lets
+  the project see it, with its structure (never a row, a row estimate, a database name or a host), whether agents
+  may query it and the subjects offered now, bounded at 48 KB on its final UTF-8 bytes. A chat's answer step gets
+  it as its knowledge block (structure fenced as untrusted data, the shim commands, the `src:` citation), and a live
+  source's tools leave the generic MCP tools block. Every stored catalog is projected into estate's knowledge plane
+  as one complete, value-free generation keyed by the registry id (`knowledge.replace_source`, wicked-estate#389);
+  the estate relay hands `knowledge.recall`, `knowledge.source_catalog` and `knowledge.neighbors` crew's `visible`
+  set (never the worker's) and re-checks every item against a fresh read before release, admitting a source only
+  while estate holds the projection of its current descriptor. An isolated state home gets its own knowledge store
+  (`<state home>/mcp/knowledge.db`), so a rig or a test daemon never writes into the operator's global one. With
+  wicked-core#1261 (D-7 narrowed to write and destructive tools), an Apps unit reads under the same predicate.
 - **The data gate: live sources reach agents through ONE governed path (api-types 0.184.0, DES-KNOWLEDGE-DATA-001
   §7, build B2).** A governed unit or a chat answer step reads a live source as `mcp:<source>/<tool>` through the
   broker (`list_tables` = structure, `execute_sql` = rows; Toolbox's names on both runtimes): the unit is the
