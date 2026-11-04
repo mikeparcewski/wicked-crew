@@ -11,18 +11,16 @@
  * made (xreview r1: a raced parent directory, a hard link to a file elsewhere):
  *  - every path is one crew named (`apps.json`, `apps.lock.json`, `queries/<id>.<ext>`), checked against that
  *    shape again here;
- *  - each file is written to a FRESH inode (`O_CREAT | O_EXCL | O_NOFOLLOW`, a random name crew chose, `0644`) and
- *    renamed over its entry: an existing file, link or hard link there is replaced as a directory entry, never
- *    opened, truncated or chmodded;
- *  - `queries/` is built as a fresh directory and swapped in by rename; the old entry (whatever it is) is renamed
- *    out of the worktree into a private temporary directory before it is removed, so nothing in it is followed.
+ *  - every file is written to a FRESH inode (`O_CREAT | O_EXCL | O_NOFOLLOW`, `0644`) in a staging directory crew
+ *    makes BESIDE the worktree (mode 0700; a seat is given the worktree only), never inside it;
+ *  - then each entry is renamed into the worktree: an existing file, link or hard link there is replaced as a
+ *    directory entry, never opened, truncated or chmodded; `queries/` is swapped whole, and the old entry (whatever
+ *    it is) is renamed into staging before staging is removed, so nothing in it is followed.
  * Exit 0: checked and written. Exit 1: refused (the findings are printed). Exit 2: could not ask.
  */
 
-import { randomBytes } from 'node:crypto';
-import { constants, closeSync, fchmodSync, lstatSync, mkdirSync, mkdtempSync, openSync, renameSync, rmSync, writeSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { chmodSync, constants, closeSync, fchmodSync, lstatSync, mkdirSync, mkdtempSync, openSync, realpathSync, renameSync, rmSync, writeSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 /** The paths a checked tree may hold (query ids: `APP_NAMED_ID_RE`; extensions: `QUERY_EXT`). */
 const FILE_RE = /^(?:apps\.json|apps\.lock\.json|queries\/[a-z][a-z0-9_]{0,63}\.(?:sql|graphql|json))$/;
@@ -67,18 +65,19 @@ const exists = (path: string): boolean => {
   }
 };
 
-/** Move the entry at `path` out of the worktree (into `trash`), whatever it is; then it can be removed safely. */
-function moveOut(path: string, trash: string, name: string): void {
-  try {
-    renameSync(path, join(trash, name));
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== 'EXDEV') throw e;
-    // Another filesystem: removed in place (rm never follows a link; a directory's own entries are removed by name).
-    rmSync(path, { recursive: true, force: true });
-  }
+/** Move the entry at `path` out of the worktree (into the staging dir `to`), whatever it is: a rename, never followed. */
+function moveOut(path: string, to: string, name: string): void {
+  renameSync(path, join(to, name));
 }
 
-/** Put `files` (crew's checked tree) in the worktree `root`: fresh inodes renamed into place, `queries/` swapped whole. */
+/**
+ * Put `files` (crew's checked tree) in the worktree `root`. Everything is written in a STAGING directory crew makes
+ * beside the worktree (in its parent, mode 0700: a seat is given the worktree only, so it can neither see nor rename
+ * it, and it is on the worktree's filesystem, so the moves below are renames). Only then is anything moved: the old
+ * `queries/` entry (whatever it is) into staging, the new `queries/` and each file into the worktree, each a single
+ * rename of a directory entry. Nothing is written or followed through an entry the seat made (xreview r2: a staging
+ * directory inside the worktree could itself be raced). Staging is removed at the end, whatever happened.
+ */
 export function materialize(root: string, files: readonly CheckedFile[]): void {
   const seen = new Set<string>();
   for (const f of files) {
@@ -92,26 +91,19 @@ export function materialize(root: string, files: readonly CheckedFile[]): void {
     const st = exists(join(root, name)) ? lstatSync(join(root, name)) : null;
     if (st !== null && st.isDirectory()) throw new Error(`${name} in the worktree is a directory; nothing was written`);
   }
-  const tag = randomBytes(8).toString('hex');
-  const trash = mkdtempSync(join(tmpdir(), 'wicked-apps-check-'));
+  const staging = mkdtempSync(join(dirname(realpathSync(root)), '.wicked-apps-check-'));
   try {
-    // The query directory first, built fresh beside the files and swapped in by rename.
+    chmodSync(staging, 0o700);
+    // 1. Every file, fresh, in staging (nothing in the worktree is touched yet).
     const queries = files.filter((f) => f.path.startsWith('queries/'));
-    const fresh = join(root, `.wicked-apps-check-${tag}-queries`);
-    if (queries.length > 0) {
-      mkdirSync(fresh, { mode: 0o755 });
-      for (const f of queries) writeFresh(join(fresh, f.path.slice('queries/'.length)), f.text);
-    }
-    if (exists(join(root, 'queries'))) moveOut(join(root, 'queries'), trash, 'queries');
-    if (queries.length > 0) renameSync(fresh, join(root, 'queries'));
-    // Then each root file: a fresh inode renamed over the entry (a link or a hard link there is replaced, never opened).
-    for (const f of files.filter((x) => !x.path.includes('/'))) {
-      const tmp = join(root, `.wicked-apps-check-${tag}-${f.path}`);
-      writeFresh(tmp, f.text);
-      renameSync(tmp, join(root, f.path));
-    }
+    if (queries.length > 0) mkdirSync(join(staging, 'queries'), { mode: 0o755 });
+    for (const f of files) writeFresh(join(staging, f.path), f.text);
+    // 2. The moves: each one rename of a directory entry in the worktree root.
+    if (exists(join(root, 'queries'))) moveOut(join(root, 'queries'), staging, 'old-queries');
+    if (queries.length > 0) renameSync(join(staging, 'queries'), join(root, 'queries'));
+    for (const f of files.filter((x) => !x.path.includes('/'))) renameSync(join(staging, f.path), join(root, f.path));
   } finally {
-    rmSync(trash, { recursive: true, force: true });
+    rmSync(staging, { recursive: true, force: true });
   }
 }
 

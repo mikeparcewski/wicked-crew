@@ -415,12 +415,17 @@ export class AppStore {
     const t = a.turn;
     if (t === null || t.runId !== runId) return;
     let outcome: AppTurnSettlement;
-    try {
-      outcome = this.turns?.settlement === undefined
-        ? { kind: 'end', state: 'failed', code: 'unknown', reason: 'this daemon cannot read how the turn ended, so nothing landed' }
-        : await this.turns.settlement({ slug: a.slug, runId, checkedTree: t.checkedTree ?? null, base: await this.files(a, this.head(a).tree), landedSpec: (tree) => this.files(a, tree) });
-    } catch (err) {
-      outcome = { kind: 'end', state: 'failed', code: 'unknown', reason: `crew could not read how the turn ended (${err instanceof Error ? err.message : String(err)}), so nothing landed` };
+    if (this.turns?.settlement === undefined) {
+      outcome = { kind: 'end', state: 'failed', code: 'unknown', reason: 'this daemon cannot read how the turn ended, so nothing landed' };
+    } else {
+      try {
+        outcome = await this.turns.settlement({ slug: a.slug, runId, checkedTree: t.checkedTree ?? null, base: await this.files(a, this.head(a).tree), landedSpec: (tree) => this.files(a, tree) });
+      } catch (err) {
+        // Not known yet (the engine did not answer, or would not stop a refused run): the turn stays in flight and
+        // settles on a later read. Nothing is recorded that the engine's record does not say (xreview r2).
+        this.log(`[apps] turn ${runId} of ${a.slug} could not be settled yet (it stays read-only): ${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
     }
     if (outcome.kind === 'land') {
       try {

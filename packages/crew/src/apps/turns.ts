@@ -55,6 +55,8 @@ export interface TurnEngine {
   cancelRun(runId: string): Promise<string>;
   onEvent(listener: (event: CoreEvent) => void): () => void;
   workOutput(unitId: string): Promise<string | null>;
+  /** The run's recorded frames (durable): where a refusal gate's kind is read back after a restart. */
+  runEvents?(runId: string): Promise<readonly unknown[] | null>;
 }
 
 export interface AppTurnServiceDeps {
@@ -189,6 +191,8 @@ export function packageJson(pkg: KnowledgePackage): string {
     listed[listed.length - 1] = { name: s.name, kind: s.kind, note: 'its structure is left out: the package is full' };
     if (!fits(left)) listed.pop();
   });
+  // The count the string really carries can be wider than the one measured (xreview r2): trim until it fits.
+  while (listed.length > 0 && !fits(pkg.sources.length - listed.length)) listed.pop();
   return render(pkg.sources.length - listed.length);
 }
 
@@ -271,15 +275,31 @@ export class RegistryKnowledge implements KnowledgeProvider {
  * The step of a turn's run that did not pass, from the engine's record: a `rejected` build, check or review unit
  * with its reason; `null` when none did. crew's words lead (the engine's reason follows, for the person only).
  */
-export function parkedRefusal(v: SessionView): { phase: string; code: string; reason: string } | null {
+export function parkedRefusal(v: SessionView, events: ReadonlyArray<Record<string, unknown>> | null = null): { phase: string; code: string; reason: string } | null {
   const runId = v.session.id;
+  const refusal = (phase: string, detailText: string): { phase: string; code: string; reason: string } => {
+    const code = phase === 'review' ? 'review_refused' : phase === 'check' ? 'check_failed' : 'step_failed';
+    const what = phase === 'review' ? 'The reviewer refused the change' : phase === 'check' ? 'crew\'s check refused the change' : `${phase === 'build' ? 'The build' : 'A step'} did not pass`;
+    const detail = oneLine(detailText, 1500);
+    return { phase, code, reason: `${what}${detail !== '' ? `: ${detail}` : ''}. Nothing landed.` };
+  };
   for (const phase of ['check', 'review', 'build']) {
     const u = v.units.find((x) => x.id === `${runId}:${phase}`);
-    if (u === undefined || u.status !== 'rejected') continue;
-    const code = phase === 'review' ? 'review_refused' : phase === 'check' ? 'check_failed' : 'step_failed';
-    const what = phase === 'review' ? 'The reviewer refused the change' : phase === 'check' ? 'crew\'s check refused the change' : 'The build did not pass';
-    const detail = oneLine(u.denial_reason ?? '', 1500);
-    return { phase, code, reason: `${what}${detail !== '' ? `: ${detail}` : ''}. Nothing landed.` };
+    if (u !== undefined && u.status === 'rejected') return refusal(phase, u.denial_reason ?? '');
+  }
+  // (xreview r2) Parked on a refusal gate whose step does not (yet) read `rejected`: the engine's own frame says so.
+  if (v.session.status === 'awaiting_human' && events !== null) {
+    let open: Record<string, unknown> | null = null;
+    for (const e of events) {
+      if (e['type'] === 'awaitingHuman') open = e;
+      else if (e['type'] === 'resumed' || e['type'] === 'gateDecided') open = null;
+    }
+    const kind = typeof open?.['gateKind'] === 'string' ? open['gateKind'] : '';
+    if (open !== null && REFUSAL_GATES.has(kind)) {
+      const u = v.units.find((x) => x.ord === open!['ord']);
+      const phase = u === undefined ? 'step' : u.id.slice(runId.length + 1) || 'step';
+      return refusal(phase, u?.denial_reason ?? (typeof open['prompt'] === 'string' ? open['prompt'] : ''));
+    }
   }
   return null;
 }
@@ -339,13 +359,24 @@ export class AppTurnService implements AppTurnLauncher {
     return (await this.deps.engine.sessionsDetail()).find((v) => v.session.id === runId) ?? null;
   }
 
+  /** The run's recorded frames when it is parked (the only time a refusal gate's kind is needed). */
+  private async eventsIfParked(v: SessionView): Promise<Array<Record<string, unknown>> | null> {
+    if (v.session.status !== 'awaiting_human' || this.deps.engine.runEvents === undefined) return null;
+    try {
+      const got = await this.deps.engine.runEvents(v.session.id);
+      return got === null ? null : got.filter((e): e is Record<string, unknown> => typeof e === 'object' && e !== null);
+    } catch {
+      return null;
+    }
+  }
+
   async isActive(runId: string): Promise<boolean> {
     const v = await this.view(runId);
     // A run the engine does not know (a launch that never persisted) is not running. A run parked on a step that
     // did not pass (a refused review or check) is not running either: it can never land without overriding that
     // step, so it settles as refused (crew stops it), on the live frame or on any later read (xreview r1: after a
     // restart nothing else would ever free the app).
-    return v !== null && !TERMINAL.has(v.session.status) && parkedRefusal(v) === null;
+    return v !== null && !TERMINAL.has(v.session.status) && parkedRefusal(v, await this.eventsIfParked(v)) === null;
   }
 
   async settlement(input: { slug: string; runId: string; checkedTree: string | null; base: AppFiles; landedSpec: (tree: string) => Promise<AppFiles> }): Promise<AppTurnSettlement> {
@@ -384,17 +415,16 @@ export class AppTurnService implements AppTurnLauncher {
     }
     // A step that did not pass (the engine's own record: the unit is `rejected` with its reason) refused the turn,
     // whether the run is still parked on it, was stopped by crew for it, or failed on it. Durable across restarts.
-    const refused = parkedRefusal(v);
-    if (refused !== null && (status === 'awaiting_human' || status === 'cancelled')) {
+    const refused = parkedRefusal(v, await this.eventsIfParked(v));
+    if (refused !== null && (status === 'awaiting_human' || status === 'cancelled' || status === 'failed')) {
       if (status === 'awaiting_human') {
-        try {
-          await this.deps.engine.cancelRun(input.runId);
-          this.log(`[apps] turn ${input.runId} of ${input.slug} was refused at ${refused.phase}; its run was stopped`);
-        } catch (err) {
-          this.log(`[apps] could not stop refused turn ${input.runId}: ${err instanceof Error ? err.message : String(err)}`);
-        }
+        // The run is stopped BEFORE the turn ends: if the engine will not stop it, this throws and the turn stays
+        // in flight, to be settled (and the stop retried) on the next read (xreview r2: a run left parked must never
+        // be detached from its turn while another turn starts).
+        await this.deps.engine.cancelRun(input.runId);
+        this.log(`[apps] turn ${input.runId} of ${input.slug} was refused at ${refused.phase}; its run was stopped`);
       }
-      return { kind: 'end', state: 'refused', code: refused.code, reason: refused.reason };
+      return { kind: 'end', state: refused.code === 'step_failed' ? 'failed' : 'refused', code: refused.code, reason: refused.reason };
     }
     if (status === 'failed') {
       const check = unit('check');

@@ -25,15 +25,19 @@ mentioned only where a daemon release depends on them.
   documents, memories and inference (DES-KNOWLEDGE-DATA-001) plug in without changing the turn.
   `wicked-crew apps-check` is the turn's check step (the engine's Tool, with the unit's token, `WICKED_CREW_URL` and
   `WICKED_TREE`): `POST /apps/check {token, tree}` checks the engine's snapshot of the builder's worktree (crew makes
-  the candidate commit from the app repo's own objects; only the run's `check` step may call it, `403
-  not_the_check`), and on a pass the CLI writes exactly the checked tree's files into the worktree (`apps.json`,
-  `apps.lock.json`, `queries/<id>.<ext>`; a symlink or a directory where a file belongs is refused, never followed;
-  files `O_NOFOLLOW`, `0644`; stale query files removed), so the review is dispatched on the tree that can land. crew
+  the candidate commit from the app repo's own objects; only the run's attested `check` step may call it, `403
+  not_the_check`), and on a pass the CLI puts exactly the checked tree's files in the worktree (`apps.json`,
+  `apps.lock.json`, `queries/<id>.<ext>`): each is written fresh (`O_EXCL`, `0644`) in a staging directory beside
+  the worktree, which a seat never sees, then renamed into place, so a symlink or hard link the seat left there is
+  replaced and never written through; `queries/` is swapped whole and stale query files go with the old one. The
+  review is dispatched on the tree that can land. crew
   points the engine at its own CLI (`WICKED_CREW_BIN`) unless the operator set one. A turn lands as a `reviewed`
   version only when its run completed and the `review` unit's receipt names exactly the checked tree, with an
   evaluator seat distinct from the creator; a failed check, a review the engine parks on a refusal (crew stops the
-  run), a step that could not run or a stopped run ends it with that reason and lands nothing. A turn whose end frame
-  was missed settles on the next read. The app's detail carries `turns` (its last 20: message, chips, base, state,
+  run first, read from the engine's record: a rejected step or the parked gate's own frame), a step that could not
+  run or a stopped run ends it with that reason and lands nothing. A turn whose end frame was missed settles on the
+  next read; one crew cannot settle yet (the engine did not answer, or would not stop a refused run) stays the app's
+  turn until it can. The app's detail carries `turns` (its last 20: message, chips, base, state,
   the version it made, crew's change line such as "Added 1 chart and 1 query", the builder's change lines, builder
   and reviewer, or the refusal's code and reason): the chat on the app's page is that list, no other thread store.
   An app is called what its spec calls it: a landed turn or edit that renames the spec renames the app.

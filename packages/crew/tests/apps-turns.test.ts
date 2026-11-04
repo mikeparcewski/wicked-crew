@@ -71,6 +71,8 @@ function fakeEngine() {
   const outputs = new Map<string, string>();
   const launched: LaunchRunInput[] = [];
   const cancelled: string[] = [];
+  const events = new Map<string, Array<Record<string, unknown>>>();
+  const ctl = { cancelFails: false };
   const listeners: Array<(e: CoreEvent) => void> = [];
   const unit = (runId: string, phase: string, ord: number, extra: Record<string, unknown> = {}) => ({ id: `${runId}:${phase}`, session_id: runId, ord, status: 'pending', denial_reason: null, ...extra });
   const engine: TurnEngine = {
@@ -81,6 +83,7 @@ function fakeEngine() {
     },
     sessionsDetail: async () => [...views.values()],
     cancelRun: async (runId) => {
+      if (ctl.cancelFails) throw new Error('the engine is busy');
       cancelled.push(runId);
       const v = views.get(runId);
       if (v !== undefined) (v.session as { status: string }).status = 'cancelled';
@@ -91,6 +94,7 @@ function fakeEngine() {
       return () => undefined;
     },
     workOutput: async (id) => outputs.get(id) ?? null,
+    runEvents: async (runId) => events.get(runId) ?? [],
   };
   const set = (runId: string, status: string, units: Record<string, Record<string, unknown>> = {}) => {
     const v = views.get(runId)!;
@@ -100,7 +104,7 @@ function fakeEngine() {
   const emit = (e: Record<string, unknown>) => {
     for (const l of listeners) l(e as unknown as CoreEvent);
   };
-  return { engine, views, outputs, launched, cancelled, set, emit };
+  return { engine, views, outputs, launched, cancelled, set, emit, events, ctl };
 }
 
 function setup(opts: { knowledge?: RegistryKnowledge; auth?: boolean; verify?: (t: string) => Promise<{ runId: string; phase: string } | null> } = {}) {
@@ -215,6 +219,9 @@ describe('apps turns: the builder\'s task', () => {
     const j = JSON.parse(out) as { sources: Array<{ name: string; note?: string }>; sourcesNotListed: number };
     expect(j.sources.length + j.sourcesNotListed).toBe(12);
     expect(j.sources.some((x) => x.note?.includes('left out'))).toBe(true);
+    // A count that grows a digit at the end still fits (xreview r2).
+    const edge = { sources: [{ name: 'a', kind: 'postgres', structure: 'x'.repeat(24_000) }, { name: 'b', kind: 'postgres', structure: 'y'.repeat(24_000) }, ...Array.from({ length: 100 }, (_, i) => ({ name: `z${i}`, kind: 'postgres', structure: 'z'.repeat(60_000) }))] };
+    expect(Buffer.byteLength(packageJson(edge), 'utf8')).toBeLessThanOrEqual(48 * 1024);
   });
 
   it('change lines come from the specs; the builder\'s lines are its last paragraph without verdict lines', () => {
@@ -266,7 +273,7 @@ describe('apps turns: check, land, refuse', () => {
 
     const run2 = (await s.call('POST', '/apps/escalations/turns', { base: 2, message: 'again, properly' })).body['runId'] as string;
     const c2 = await s.store.checkTurn('escalations', run2, { tree: snapshotTree(root, builtFiles()) });
-    s.outputs.set(`${run2}:build`, '- Added chart `chart-priority`');
+    s.outputs.set(`${run2}:build`, '- Added chart `chart-priority`\n- Added query `breaches_by_priority`');
     s.set(run2, 'completed', { review: { status: 'done', assurance: { ...receipt('claude', 'codex'), tree: (c2 as { tree: string }).tree } } });
     s.emit({ type: 'sessionCompleted', session: run2 });
     await vi.waitFor(async () => expect((await s.call('GET', '/apps/escalations')).body.app.head.version).toBe(3));
@@ -274,7 +281,9 @@ describe('apps turns: check, land, refuse', () => {
     expect(d.name).toBe('Escalations by priority');
     expect(d.head.receipt).toBe('reviewed');
     expect(d.versions[2]).toMatchObject({ author: { kind: 'seat', id: 'claude' }, receipt: { review: { builder: 'claude', reviewer: 'codex', runId: run2 } } });
-    expect(d.turns![1]).toMatchObject({ runId: run2, state: 'landed', version: 3, change: 'Added 1 chart and 1 query; renamed it "Escalations by priority"', builder: 'claude', reviewer: 'codex', summary: 'Added chart `chart-priority`' });
+    expect(d.turns![1]).toMatchObject({ runId: run2, state: 'landed', version: 3, change: 'Added 1 chart and 1 query; renamed it "Escalations by priority"', builder: 'claude', reviewer: 'codex', summary: 'Added chart `chart-priority`\nAdded query `breaches_by_priority`' });
+    // The version strip's summary is one line: crew's change line.
+    expect(d.versions[2]!.summary).toBe('Added 1 chart and 1 query; renamed it "Escalations by priority"');
     expect(d.queryText['breaches_by_priority']).toContain('group by priority');
     // The next turn's task recalls it in crew's words.
     await s.call('POST', '/apps/escalations/turns', { base: 3, message: 'third' });
@@ -337,8 +346,37 @@ describe('apps turns: check, land, refuse', () => {
     expect(d.turn).toBeNull();
     expect(s.cancelled).toEqual([runId]);
     expect(d.turns![0]).toMatchObject({ state: 'refused', code: 'review_refused', reason: expect.stringContaining('nobody asked for') });
-    // The version strip's summary is one line even when the builder wrote several.
-    expect(d.versions.every((v) => !v.summary.includes('\n'))).toBe(true);
+  });
+
+  it('a refused run the engine will not stop stays the app\'s turn (read-only) until it can be stopped; then it settles', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    s.ctl.cancelFails = true;
+    s.set(runId, 'awaiting_human', { review: { status: 'rejected', denial_reason: 'no' } });
+    expect((await s.call('GET', '/apps/escalations')).body.app.turn).toMatchObject({ runId });
+    expect((await s.call('POST', '/apps/escalations/edits', { base: 2, ops: [{ op: 'spec', spec: spec('x') }] })).status).toBe(409);
+    expect((await s.call('GET', '/apps/escalations')).body.app.turns![0]!.state).toBe('running');
+    s.ctl.cancelFails = false;
+    const d = (await s.call('GET', '/apps/escalations')).body.app;
+    expect(d.turn).toBeNull();
+    expect(s.cancelled).toEqual([runId]);
+    expect(d.turns![0]).toMatchObject({ state: 'refused', code: 'review_refused' });
+  });
+
+  it('a run parked on a refusal gate whose step does not read rejected settles from the engine\'s recorded frame', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    s.set(runId, 'awaiting_human', { review: { status: 'distributed' } });
+    s.events.set(runId, [{ type: 'awaitingHuman', session: runId, ord: 3, gateKind: 'escalation', prompt: 'the review did not pass: the chart reads the wrong table' }]);
+    const d = (await s.call('GET', '/apps/escalations')).body.app;
+    expect(d.turn).toBeNull();
+    expect(s.cancelled).toEqual([runId]);
+    expect(d.turns![0]).toMatchObject({ state: 'refused', code: 'review_refused', reason: expect.stringContaining('wrong table') });
+    // An approval gate the person answers stays the turn's.
+    const run2 = (await s.call('POST', '/apps/escalations/turns', { base: 2, message: 'x' })).body['runId'] as string;
+    s.set(run2, 'awaiting_human');
+    s.events.set(run2, [{ type: 'awaitingHuman', session: run2, ord: 1, gateKind: 'run_level', prompt: 'approve?' }]);
+    expect((await s.call('GET', '/apps/escalations')).body.app.turn).toMatchObject({ runId: run2 });
   });
 
   it('the token resolver names the unit\'s step from the run\'s own units; anything it cannot place is refused', async () => {
@@ -354,11 +392,14 @@ describe('apps turns: check, land, refuse', () => {
     expect(await r('z')).toEqual({ runId: 'apps-x-1', phase: '(unknown)' });
     expect(await r('n')).toBeNull();
     expect(await r('bad')).toBeNull();
-    const s = setup({ verify: async () => ({ runId: 'apps-escalations-000000000000', phase: '(unknown)' }) });
-    await startTurn(s);
-    const res = await s.call('POST', '/apps/check', { token: 'x', tree: 'a'.repeat(40) });
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe('not_the_check');
+    for (const unit of [{ runId: 'apps-escalations-000000000000', phase: '(unknown)' }, { runId: 'apps-escalations-000000000000' }]) {
+      // A verifier that says nothing of the step (a legacy one) is refused as surely as an unknown step.
+      const s = setup({ verify: async () => unit as { runId: string; phase: string } });
+      await startTurn(s);
+      const res = await s.call('POST', '/apps/check', { token: 'x', tree: 'a'.repeat(40) });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('not_the_check');
+    }
   });
 
   it('an agent-kind token cannot send a message to an app, whatever its trust', async () => {
@@ -434,6 +475,8 @@ describe('wicked-crew apps-check: the worktree gets exactly the checked tree', (
     expect(lstatSync(join(d, 'apps.json')).isFile()).toBe(true);
     expect(readFileSync(join(d, 'apps.lock.json'), 'utf8')).toBe('{"l":1}\n');
     expect(readdirSync(d).sort()).toEqual(['apps.json', 'apps.lock.json', 'queries']);
+    // Staging lived beside the worktree, never inside it, and is gone.
+    expect(readdirSync(join(d, '..')).filter((n) => n.startsWith('.wicked-apps-check-'))).toEqual([]);
   });
 
   it('refuses a path crew could not have named, and a directory where a file belongs, writing nothing', () => {
