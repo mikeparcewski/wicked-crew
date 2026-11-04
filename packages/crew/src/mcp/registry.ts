@@ -168,6 +168,13 @@ export class McpRegistry {
   private readonly now: () => number;
   private readonly env: NodeJS.ProcessEnv;
   readonly catalogs: SourceCatalogStore;
+  /**
+   * (crew#1328 item 3) A restored registry generation changes a source's projection key (its descriptor and allowed
+   * views) with no catalog written, so `catalogs.onWritten` does not fire. Every source a restore commits is named
+   * here once it has landed, and the daemon re-projects its structure into estate, so the visible set does not wait
+   * for the next describe or boot. A listener's failure never fails the restore.
+   */
+  onSourceChanged: ((name: string) => void) | null = null;
 
   constructor(private readonly deps: McpRegistryDeps) {
     this.now = deps.now ?? Date.now;
@@ -410,6 +417,14 @@ export class McpRegistry {
       return record;
     }));
     return this.view(saved);
+  }
+
+  private sourceChanged(name: string): void {
+    try {
+      this.onSourceChanged?.(name);
+    } catch {
+      // a listener's failure is its own (the projector logs); the registry write has landed
+    }
   }
 
   /**
@@ -930,6 +945,7 @@ export class McpRegistry {
       file.servers = servers;
       return file.generation ?? 0;
     });
+    for (const s of servers) if (isSourceRecord(s)) this.sourceChanged(s.name);
     return { restored: plan.generation, generation: current + 1, servers: servers.length, disabled, queryReset: [...plan.queryReset], writesReset: [...plan.writesReset] };
   }
 

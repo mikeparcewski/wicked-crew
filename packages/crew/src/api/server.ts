@@ -2539,6 +2539,8 @@ export async function createServer(
   // plane, keyed by the registry id; what was described before this release is projected once, off the boot path.
   const sourceProjector = new SourceProjector({ store: mcpRegistryStore, catalogs: mcpRegistry.catalogs, log: (m) => app.log.warn(m) });
   mcpRegistry.catalogs.onWritten = (name) => sourceProjector.written(name);
+  // crew#1328: a restored generation changes what estate must hold for a source with no catalog written.
+  mcpRegistry.onSourceChanged = (name) => sourceProjector.written(name);
   void sourceProjector.backfill();
   // §4.3: what a unit's knowledge reads may see — the sources its project may see (the gate's predicate) and its repos.
   const unitVisible = async (scope: EstateUnitScope): Promise<string[]> => {
