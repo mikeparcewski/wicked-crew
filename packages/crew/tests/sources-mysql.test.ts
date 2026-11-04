@@ -254,6 +254,8 @@ for (const target of MYSQL_TARGETS) {
         const sockets = new Set<Socket>();
         const closed: Array<number | null> = [];
         const closing: Array<Promise<number>> = [];
+        /** Whether `holdReplies` started holding that connection's replies. */
+        const held: boolean[] = [];
         let n = 0;
         const server = createServer((client) => {
           const idx = n++;
@@ -289,7 +291,10 @@ for (const target of MYSQL_TARGETS) {
                 }
                 up.write(packet);
                 const hold = opts.holdReplies;
-                if (hold !== undefined && hold.conn === idx && packet[3] === 0 && packet[4] === hold.command) replies = hold.until;
+                if (hold !== undefined && hold.conn === idx && packet[3] === 0 && packet[4] === hold.command) {
+                  replies = hold.until;
+                  held[idx] = true;
+                }
               }
             });
             client.resume();
@@ -303,6 +308,7 @@ for (const target of MYSQL_TARGETS) {
           port: (server.address() as AddressInfo).port,
           closed,
           closing,
+          held,
           close: async () => {
             for (const sk of sockets) sk.destroy();
             await new Promise<void>((r) => server.close(() => r()));
@@ -327,13 +333,18 @@ for (const target of MYSQL_TARGETS) {
       // that came first, the call ended while the KILL connection was still connecting, so it was abandoned before it
       // sent anything (CI saw killerQueries 0 on a loaded runner). The read's answer is now held until the KILL has
       // been sent (bounded at 10 s), so the case under test always happens: the call ends while an established KILL
-      // connection waits on a KILL that never answers. The slow variant is the loaded runner, every time.
+      // connection waits on a KILL that never answers. The slow variant is the loaded runner, every time (1.2 s is inside
+      // the driver's 3 s KILL_CONNECT_MS, so the KILL connection is still had).
       for (const slowMs of [0, 1_200]) {
         it(`an established KILL connection whose KILL never answers is dropped with the call (codex r5)${slowMs > 0 ? `; its connection is ${slowMs} ms slow (crew#1322)` : ''}`, async () => {
           // The KILL connection passes its handshake and session statements but swallows the KILL (COM_QUERY 0x03 after setup).
           let killerQueries = 0;
           let killSent: () => void = () => undefined;
           const sent = new Promise<void>((r) => (killSent = r));
+          // Each wait is bounded; its timer is cleared once the wait is over (codex/pi r1).
+          const timers: NodeJS.Timeout[] = [];
+          const within = <T,>(p: Promise<T>, ms: number): Promise<T | null> =>
+            Promise.race([p, new Promise<null>((r) => timers.push(setTimeout(() => r(null), ms)))]);
           const px = await packetProxy(
             (conn, cmd) => {
               if (conn !== 1 || cmd !== 0x03) return 'forward';
@@ -345,7 +356,7 @@ for (const target of MYSQL_TARGETS) {
             {
               delayMs: (conn) => (conn === 1 ? slowMs : 0),
               // The read's answer to its statement (COM_STMT_EXECUTE 0x17) waits for the KILL to be sent.
-              holdReplies: { conn: 0, command: 0x17, until: Promise.race([sent, new Promise((r) => setTimeout(r, 10_000))]) },
+              holdReplies: { conn: 0, command: 0x17, until: within(sent, 10_000) },
             },
           );
           try {
@@ -353,11 +364,13 @@ for (const target of MYSQL_TARGETS) {
             await expect(mysqlRead(args, 'SELECT SUM(a.n + b.n + c.n) AS s FROM big a, big b, big c', [], { deadlineMs: 500 })).rejects.toBeDefined();
             const ended = Date.now();
             // The KILL connection's close, waited for (at most 5 s), not polled for.
-            const closedAt = await Promise.race([px.closing[1] ?? Promise.resolve(null), new Promise<null>((r) => setTimeout(() => r(null), 5_000))]);
-            expect(closedAt).not.toBeNull();
+            const closedAt = await within(px.closing[1] ?? Promise.resolve(null), 5_000);
+            expect(px.held[0], "the read's reply was held until the KILL was sent").toBe(true);
+            expect(closedAt, 'the KILL connection closed').not.toBeNull();
             expect(killerQueries).toBeGreaterThanOrEqual(3); // the KILL itself was sent and swallowed (codex r6)
             expect((closedAt ?? Infinity) - ended).toBeLessThan(1_500);
           } finally {
+            for (const t of timers) clearTimeout(t);
             await px.close();
           }
         }, 20_000);
