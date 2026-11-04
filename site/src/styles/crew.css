@@ -55,6 +55,10 @@ body { padding-top: var(--topbar-h); }
    one viewport tall (minus the topbar) on a desktop window; between 768 and 1023px wide or below
    640px tall, sections take their natural height and nothing settles. */
 html { scroll-snap-type: none; scroll-padding-top: var(--topbar-h); scroll-padding-bottom: 12px; }
+/* The page never follows content that swaps on a timer. Chromium's scroll anchoring would pick a line
+   of a playing demo as its anchor and scroll the page whenever that line moved; every swapping region
+   here is as tall as its tallest state, so there is nothing for anchoring to correct. */
+html { overflow-anchor: none; }
 section { scroll-snap-align: none; }
 .frame { position: relative; isolation: isolate; }
 @media (min-width: 1024px) and (min-height: 640px) {
@@ -888,3 +892,8 @@ html body .same-garden .sg-card:hover, html body .same-garden .sg-card:focus-wit
 /* ── Loops idle while their frame is off-screen (arrive.js toggles .is-live) ── */
 .frame:not(.is-live) .st::after, .frame:not(.is-live) .wire--out .pkt,
 .frame:not(.is-live) .sbx-pulse::after, .frame:not(.is-live) .wf-dot::after { animation-play-state: paused; }
+/* ── Nothing animates while nobody can see it: an interactive's root carries data-offscreen while under
+   a quarter of it shows, the tab is hidden or reduced motion is on (scripts/offscreen.js) ── */
+:is([data-offscreen], [data-offscreen] *),
+:is([data-offscreen], [data-offscreen] *)::before,
+:is([data-offscreen], [data-offscreen] *)::after { animation-play-state: paused !important; }

@@ -8,9 +8,16 @@
  * The log is a short window in large type: the newest lines, at most five, and only as many as fit
  * whole. A replay starts from an empty log, so nothing of the previous run stays on screen.
  *
+ * Off screen (under a quarter of the card showing), in a hidden tab or under reduced motion, the
+ * replay holds between two steps and its CSS loops pause (offscreen.js); it carries on from that
+ * step when it is back. A replay still waiting to start waits for the card too.
+ *
  * Keyboard: no control is ever `disabled` (a disabled button drops focus to <body>); a control
  * that cannot act says aria-disabled and ignores the click. When the panel's content is replaced
- * while focus is inside it, focus moves to the new content's first control (or the panel). */
+ * while focus is inside it, focus moves to the new content's first control (or the panel), without
+ * scrolling; focus outside the panel is never moved. */
+
+import { pauseWhenOffscreen } from './offscreen.js';
 
 const root = document.querySelector('[data-job]');
 if (root) initJob(root);
@@ -84,7 +91,10 @@ function initJob(root) {
   const PASS_LINE = 'acceptance read: <b>PASS</b>, attributed to r-4f2a';
 
   let i = 0, timer = null, running = false, dead = false, waiting = null, selected = null, booted = false;
+  // held: off screen with a step still to come; autoWanted: the replay's start came while off screen
+  let held = false, autoWanted = false;
   const STEP = 750;
+  const vis = pauseWhenOffscreen(root, { stop: hold, start: resume });
 
   // A button's labels are stacked in it (the box is the widest label): swap, never resize.
   function label(btn, key) {
@@ -257,16 +267,34 @@ function initJob(root) {
     i++;
     paintTrack();
   }
+  function tick() {
+    timer = null;
+    if (dead || waiting) return;
+    if (RM.matches) { go(); return; }
+    // off screen: hold before this step; resume() runs it once the card is back
+    if (!vis.live) { held = true; return; }
+    stepOnce();
+    if (i >= S.length) { finish(); return; }
+    if (!waiting) timer = setTimeout(tick, STEP);
+  }
   function go() {
-    clearTimeout(timer);
+    clearTimeout(timer); timer = null; held = false;
     if (RM.matches) { while (!dead && !waiting && i < S.length) stepOnce(); if (i >= S.length) finish(); return; }
-    (function tick() {
-      if (dead || waiting) return;
-      if (RM.matches) { go(); return; }
-      stepOnce();
-      if (i >= S.length) { finish(); return; }
-      if (!waiting) timer = setTimeout(tick, STEP);
-    })();
+    tick();
+  }
+  // the card left the screen (or the tab was hidden): no step runs, and a running glide lands now
+  function hold() {
+    // reduced motion switched on mid-replay: the rest of it lands at once, as before
+    if (RM.matches) { if (timer || held) go(); return; }
+    if (timer) { clearTimeout(timer); timer = null; held = true; }
+    glides.forEach(function (a) { a.finish(); }); glides = [];
+  }
+  // back on screen: the held step runs one STEP later, as it would have; a replay that wanted to start, starts
+  function resume() {
+    if (autoWanted) { autoWanted = false; auto(); return; }
+    if (!held) return;
+    held = false;
+    if (running && !dead && !waiting && i < S.length) timer = setTimeout(tick, STEP);
   }
   function finish() {
     running = false; setOff(killBtn, true); setOff(runBtn, false); label(runBtn, 'again');
@@ -337,8 +365,13 @@ function initJob(root) {
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(fit);
   if (document.fonts && document.fonts.addEventListener) document.fonts.addEventListener('loadingdone', function () { fit(); });
   if (RM.matches) return;
-  // a replay still waiting to start does not start once reduced motion is on (Run still runs it)
-  function auto() { if (!booted && !RM.matches) { booted = true; start(); } }
+  // a replay still waiting to start does not start once reduced motion is on (Run still runs it), and
+  // waits while the card is off screen
+  function auto() {
+    if (booted || RM.matches) return;
+    if (!vis.live) { autoWanted = true; return; }
+    booted = true; start();
+  }
   if ('IntersectionObserver' in window) {
     const io = new IntersectionObserver(function (es) {
       if (es.some(function (x) { return x.isIntersecting; })) { io.disconnect(); setTimeout(auto, 1600); }

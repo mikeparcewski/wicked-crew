@@ -4,7 +4,12 @@
  * in one grid cell (.stack > .stack-i), so the box is always as tall as its tallest state and a
  * hover, tap or autoplay step only crossfades inside it. Nothing here changes layout.
  * Motion runs only when the frame is in view, once, and never under prefers-reduced-motion (the
- * end state is shown instead). Every control is a real button with aria-pressed / aria-current. */
+ * end state is shown instead). Every control is a real button with aria-pressed / aria-current.
+ * Off screen (under a quarter of a region showing) or in a hidden tab, every autoplay holds where it
+ * is and its CSS loops pause (offscreen.js); it carries on from there when it is back, unless the
+ * visitor stopped it. */
+
+import { pauseWhenOffscreen } from './offscreen.js';
 
 // read live, so reduced motion switched on mid-visit stops an autoplay at its next step
 const RM = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : { matches: false };
@@ -18,11 +23,6 @@ function onLock(el, cb, ratio) {
     if (es.some((x) => x.isIntersecting)) { io.disconnect(); cb(); }
   }, { threshold: ratio || 0.55 });
   io.observe(el);
-}
-/** Track whether `el` is in view (for loops that should idle off-screen). */
-function onView(el, cb) {
-  if (!('IntersectionObserver' in window)) { cb(true); return; }
-  new IntersectionObserver((es) => cb(es[es.length - 1].isIntersecting), { threshold: 0.25 }).observe(el);
 }
 /** Show the stack item matching `pred`; hide the rest from assistive tech too. */
 function swap(items, pred) {
@@ -69,6 +69,8 @@ function onTakeover(root, cb) {
   });
   agents.forEach((a) => a.addEventListener('click', () => agent(parseInt(a.dataset.agent, 10))));
   swap(caps, (c) => c.classList.contains('is-on'));
+  // the packet and the pulse are CSS loops: they pause with the sandbox off screen
+  pauseWhenOffscreen(root);
 })();
 
 /* ── S3 Review: the dispute stepper ────────────────────────────────────── */
@@ -79,7 +81,7 @@ function onTakeover(root, cb) {
   const panels = $$(root, '[data-dpanel]');
   const count = root.querySelector('[data-dcount]');
   const N = steps.length;
-  let k = 0, timer = null;
+  let k = 0, timer = null, held = false;
   function go(n) {
     k = Math.max(0, Math.min(N - 1, n));
     steps.forEach((s, j) => {
@@ -90,12 +92,18 @@ function onTakeover(root, cb) {
     root.style.setProperty('--disp-k', String(k));
     count.textContent = (k + 1) + ' / ' + N;
   }
-  function stop() { clearInterval(timer); timer = null; }
+  function stop() { clearInterval(timer); timer = null; held = false; }
+  function arm() { timer = setInterval(() => { if (isReduced() || k >= N - 1) { stop(); go(N - 1); return; } go(k + 1); }, 900); }
   function play() {
     stop(); go(0);
     if (isReduced()) { go(N - 1); return; }
-    timer = setInterval(() => { if (isReduced() || k >= N - 1) { stop(); go(N - 1); return; } go(k + 1); }, 900);
+    if (vis.live) arm(); else held = true;
   }
+  // off screen it holds on its step; back on screen it carries on (a stop by the visitor stays)
+  const vis = pauseWhenOffscreen(root, {
+    stop() { if (isReduced()) { if (timer || held) { stop(); go(N - 1); } return; } if (timer) { clearInterval(timer); timer = null; held = true; } },
+    start() { if (held) { held = false; arm(); } },
+  });
   steps.forEach((s) => s.addEventListener('click', () => { stop(); go(parseInt(s.dataset.dstep, 10)); }));
   root.querySelector('[data-dprev]').addEventListener('click', () => { stop(); go(k - 1); });
   root.querySelector('[data-dnext]').addEventListener('click', () => { stop(); go(k + 1); });
@@ -128,7 +136,7 @@ function onTakeover(root, cb) {
     qeskip: { focus: 'qe', s: { floor: '—', checks: '—', eval: '—', judge: '—', qe: 'skipped, with your reason' } },
   };
   const TONE = { 'ran': 'ok', 'ran · Codex': 'ok', 'PASS': 'ok', 'no gate': 'warn', 'no distinct judge': 'warn', 'the builder': 'warn', 'skipped, with your reason': 'warn', '—': 'none' };
-  let timer = null;
+  let timer = null, held = false, order = [], j = 0;
   function layer(key) {
     press(lbtns, (b) => b.dataset.layerBtn === key);
     swap(details, (d) => d.dataset.detail === key);
@@ -145,7 +153,13 @@ function onTakeover(root, cb) {
   }
   opts.forEach((o) => o.addEventListener('click', () => { stop(); scen(o.dataset.scen); }));
   lbtns.forEach((b) => b.addEventListener('click', () => { stop(); layer(b.dataset.layerBtn); }));
-  function stop() { clearInterval(timer); timer = null; }
+  function stop() { clearInterval(timer); timer = null; held = false; }
+  function arm() { timer = setInterval(() => { if (isReduced()) { stop(); scen('full'); return; } scen(order[j++]); if (j >= order.length) stop(); }, 2200); }
+  // off screen it holds on its label; back on screen it carries on (a touch by the visitor stays)
+  const vis = pauseWhenOffscreen(root, {
+    stop() { if (isReduced()) { if (timer || held) { stop(); scen('full'); } return; } if (timer) { clearInterval(timer); timer = null; held = true; } },
+    start() { if (held) { held = false; arm(); } },
+  });
   scen('full');
   // Autoplay once through the labels when the frame locks in, back to PASS; the visitor's first
   // touch stops it where it is.
@@ -153,9 +167,9 @@ function onTakeover(root, cb) {
     const touch = onTakeover(root, stop);
     onLock(root, () => {
       if (touch.taken || isReduced()) return;
-      const order = ['nogate', 'floor', 'reduced', 'qeskip', 'full'];
-      let j = 0;
-      timer = setInterval(() => { if (isReduced()) { stop(); scen('full'); return; } scen(order[j++]); if (j >= order.length) stop(); }, 2200);
+      order = ['nogate', 'floor', 'reduced', 'qeskip', 'full'];
+      j = 0;
+      if (vis.live) arm(); else held = true;
     });
   }
 })();
@@ -236,7 +250,15 @@ function onTakeover(root, cb) {
   });
   tabs.forEach((t) => t.addEventListener('click', () => pick(parseInt(t.dataset.wfTab, 10))));
   pick(0);
-  onView(root, (v) => { inView = v; if (v) tick(); else stopT(); });
+  // it steps only while a quarter of it is on screen and the tab is visible; a crash stays crashed.
+  // Reduced motion switched on mid-run shows the finished job, still.
+  pauseWhenOffscreen(root, {
+    start() { inView = true; tick(); },
+    stop() {
+      inView = false; stopT();
+      if (isReduced() && !dead && !finished) { finished = true; paint(); say('done · evidence bundle ready'); }
+    },
+  });
 })();
 
 /* ── S6 What's new: tiles stagger in; on phones, a carousel ────────────── */
@@ -248,6 +270,8 @@ function onTakeover(root, cb) {
   const dots = $$(sec, '[data-car-dots] i');
   const count = sec.querySelector('[data-car-count]');
   if (!isReduced()) { sec.classList.add('will-stagger'); onLock(list, () => sec.classList.add('is-in'), 0.3); }
+  // leaving mid-stagger lands every tile at once (offscreen.js settles one-shot transitions)
+  pauseWhenOffscreen(list);
   let cur = 0;
   function mark(n) {
     cur = n;
@@ -280,9 +304,13 @@ function onTakeover(root, cb) {
   if (!t || isReduced()) return;
   const box = t.closest('.install');
   t.classList.add('is-armed');
+  let done = null;
+  const unclip = () => { clearTimeout(done); t.classList.remove('is-armed', 'is-typing'); };
   onLock(box, () => {
     t.classList.add('is-typing');
     // the command is never left hidden: once the typing is over (or if animations never run), unclip it
-    setTimeout(() => t.classList.remove('is-armed', 'is-typing'), 3300);
+    done = setTimeout(unclip, 3300);
   }, 0.6);
+  // leaving the screen mid-typing shows the whole command at once: nothing types while nobody sees it
+  pauseWhenOffscreen(box, { stop() { if (t.classList.contains('is-typing')) unclip(); } });
 })();
