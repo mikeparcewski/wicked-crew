@@ -4,7 +4,8 @@
   "private": true,
   "workspaces": [
     "packages/crew-api-types",
-    "packages/crew"
+    "packages/crew",
+    "packages/apps-server"
   ],
   "scripts": {
     "use-local-core-ts": "node scripts/use-local-core-ts.mjs",

@@ -273,6 +273,19 @@ interface DiscoveryDoc { jwks_uri: string }
 /** Per-issuer JWKS cache: keys indexed by kid (or by alg when kid is absent). */
 const JWKS_CACHE = new Map<string, { keys: Map<string, Jwk>; fetchedAt: number }>();
 const JWKS_TTL_MS = 5 * 60 * 1000; // 5-min TTL; synchronous re-fetch on stale or unknown kid
+/** An unknown kid re-fetches the keys at most this often (a rotated key is picked up within it). */
+const JWKS_REFETCH_MIN_MS = 30 * 1000;
+/**
+ * How long keys already fetched keep verifying when the issuer cannot be reached to refresh them (stale while
+ * revalidating): a refresh that fails, or is still running, never signs out a viewer whose key is known.
+ */
+const JWKS_STALE_MAX_MS = 24 * 60 * 60 * 1000;
+/**
+ * Per issuer: the one key refresh in flight (concurrent requests wait on it), and when the last refresh STARTED
+ * (stamped before any I/O, so a failing issuer is not asked again on every request either).
+ */
+const JWKS_INFLIGHT = new Map<string, Promise<Map<string, Jwk>>>();
+const JWKS_ATTEMPT = new Map<string, number>();
 
 function base64urlDecode(s: string): Buffer {
   const pad = (4 - (s.length % 4)) % 4;
@@ -353,17 +366,43 @@ async function getJwk(
   kid: string,
   allowRefresh: boolean,
 ): Promise<Jwk | null> {
-  const cached = JWKS_CACHE.get(config.issuer);
+  const iss = config.issuer;
+  const cached = JWKS_CACHE.get(iss);
   const stale = !cached || Date.now() - cached.fetchedAt > JWKS_TTL_MS;
+  const last = JWKS_ATTEMPT.get(iss);
+  // A refresh at most once per JWKS_REFETCH_MIN_MS per issuer, counted from when it STARTED, success or not: a
+  // token carrying a made-up kid, or an issuer that is down, never makes the verifier fetch the issuer's keys on
+  // every request (DES-APPS-001 §8.2: the app server faces the internet).
+  const cooling = last !== undefined && Date.now() - last < JWKS_REFETCH_MIN_MS && !JWKS_INFLIGHT.has(iss);
+  const known = cached?.keys.get(kid);
   if (cached && !stale) {
-    const hit = cached.keys.get(kid);
-    if (hit) return hit;
-    if (!allowRefresh) return null;
+    if (known) return known;
+    if (!allowRefresh || cooling) return null;
+  } else if (cooling) {
+    // Stale (or never fetched) and a refresh just ran: the keys we have, until the next one may start.
+    return known !== undefined && Date.now() - cached!.fetchedAt <= JWKS_STALE_MAX_MS ? known : null;
   }
-  // Fetch (or re-fetch on stale/miss).
-  const uri = await resolveJwksUri(config);
-  const keys = await fetchJwks(uri, oidcAddressPolicy(config), OIDC_DIAL.get(config) ?? {});
-  JWKS_CACHE.set(config.issuer, { keys, fetchedAt: Date.now() });
+  const startRefresh = (): Promise<Map<string, Jwk>> => {
+    const running = JWKS_INFLIGHT.get(iss);
+    if (running !== undefined) return running;
+    JWKS_ATTEMPT.set(iss, Date.now());
+    const refresh = (async () => fetchJwks(await resolveJwksUri(config), oidcAddressPolicy(config), OIDC_DIAL.get(config) ?? {}))();
+    JWKS_INFLIGHT.set(iss, refresh);
+    void refresh.then(
+      (keys) => {
+        JWKS_CACHE.set(iss, { keys, fetchedAt: Date.now() });
+        JWKS_INFLIGHT.delete(iss);
+      },
+      () => JWKS_INFLIGHT.delete(iss),
+    );
+    return refresh;
+  };
+  // A known kid in a stale cache verifies at once while the keys refresh behind it (bounded by JWKS_STALE_MAX_MS).
+  if (known !== undefined && cached !== undefined && Date.now() - cached.fetchedAt <= JWKS_STALE_MAX_MS) {
+    void startRefresh().catch(() => undefined);
+    return known;
+  }
+  const keys = await startRefresh();
   return keys.get(kid) ?? null;
 }
 
@@ -451,6 +490,22 @@ async function verifyJwt(token: string, config: OidcConfig): Promise<JwtPayload>
   }
 
   return payload;
+}
+
+/**
+ * (DES-APPS-001 §8.2) Verify a JWT exactly as the daemon's OIDC verifier does (the issuer's keys
+ * through the dialer; signature, `iss`, `aud`, `exp`, `nbf`) and answer its claims as they are. The
+ * daemon flattens a token to `{id, kind, trust}`; the app server keeps `email`, `email_verified`,
+ * `groups`, `tid`, `oid`, `upn`, `roles` and `scp` for its audience rules. Throws a descriptive error
+ * on any failure; the token itself is never in the message.
+ */
+export async function verifyOidcClaims(token: string, config: OidcConfig, deps: { dial?: DialOptions } = {}): Promise<Readonly<Record<string, unknown>>> {
+  if (!config.issuer || !config.issuer.startsWith('https://')) {
+    throw new Error(`[auth] OIDC config: 'issuer' must be an https:// URL (got ${JSON.stringify(config.issuer)})`);
+  }
+  if (!config.audience) throw new Error(`[auth] OIDC config: 'audience' is required`);
+  if (deps.dial !== undefined) OIDC_DIAL.set(config, deps.dial);
+  return Object.freeze(await verifyJwt(token, config));
 }
 
 function mapOidcActor(payload: JwtPayload, config: OidcConfig): Actor {

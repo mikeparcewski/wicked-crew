@@ -35,6 +35,37 @@ mentioned only where a daemon release depends on them.
   are collected. Audited `apps.source.asked` (one entry per ask, however it ends) and `apps.source.queried` (one per
   run), with counts, relations and codes, never the question, the SQL or a value. SQL kinds
   (Postgres, MySQL, SQLite uploads); GraphQL, REST and MCP keep the test call.
+- **Apps: the app server, `wicked-apps-server` (api-types 0.180.0, DES-APPS-001 §8.1-8.2, slice K6).** A new workspace
+  package, `packages/apps-server`: the standalone site an Apps publish puts in its container image. It serves the
+  app's one page and the published version's spec, named queries and granted actions, and nothing else (`GET /`,
+  `/auth/callback`, `/spec`, `/healthz`; `POST /q/:query`, `/a/:action/prepare`, `/a/:action/run`; `GET
+  /a/records/:id`). Reads and writes go through crew's own executor and write path, bundled into the image (esbuild,
+  no engine addon). Sign-in uses one issuer per site, with authorization code + PKCE in the page (oauth4webapi), and
+  two token profiles verified with crew's verifier code. The generic OIDC profile takes the ID token, with an audience
+  by group values or by email domain; it needs a Boolean `email_verified`. The Entra profile takes a v2 access token
+  for the app's own `access_as_user` scope, with an audience by app-role values or group ids. App-only tokens, ID
+  tokens, other tenants and groups overage are refused. Requests are bearer only, with no cookies, and every POST
+  needs the site's `Origin` and `application/json`. The page holds exactly one script and one stylesheet, both pinned
+  by sha256 in its CSP, under `Cross-Origin-Opener-Policy: same-origin`; `frame-ancestors` comes from the manifest.
+  A framed page refuses actions in its own host. Every request that needs a sign-in writes one line to the decision
+  log (the claims that decided, never the token). Action records, audit lines and decisions live on the `/data`
+  volume; without it, actions are refused. At startup a missing secret stops the server, naming the environment
+  variable. Every source is described live, and a query or action whose contract changed, or whose table no longer
+  passes the safety check, is refused by name; this check runs again every 10 minutes and after a failed read.
+  `GET /spec` is behind the token. The image is product-owned (`packages/apps-server/image/Dockerfile`, Node 24 slim
+  pinned by digest), and crew's packer (`src/apps/publish/pack.ts`) writes its context from the tree's files, the
+  manifest, the shipped sources and snapshots verified by digest; nothing from the app repository runs.
+- **Apps: the publish manifest and the share link (api-types 0.180.0).** `AppPublishBody`, `AppPublishManifest` and
+  `AppPublished` hold the share link: the site origin the deployer gives, published as `shareUrl` with the image, the
+  iframe snippet (public apps) and the Teams package. `AppSummary.published` stays `null` until a publish ran.
+  `buildManifest` (`src/apps/publish/manifest.ts`) is the publish check's deterministic part. It checks that the
+  targets fit (embed is for public apps only, Teams needs Entra), that the site origin is a bare https origin (http
+  only for localhost), and that the issuer and audience are set. It refuses a source an image cannot carry (the crew
+  source, a local MCP server) and names what uses it. A public app may hold no action and only public queries. Every
+  action needs a grant bound to its current hashes, and each secret gets its own environment name. crew's OIDC
+  verifier also gains `verifyOidcClaims`, which keeps the claims. An unknown `kid` now re-fetches the issuer's keys at
+  most once every 30 s.
+
 - **Apps: actions run (api-types 0.178.0, DES-APPS-001 §7.3, §7.4, §9.4, slice K2b).** The action routes serve and
   `capabilities.apps.actions` is true: `POST /apps/:app/actions/:id/grant` (a person, once per action version),
   `DELETE …/grant`, `GET …/grant`, `POST …/prepare` (the card, generated from the resolved operation, and a record that

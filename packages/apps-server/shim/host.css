@@ -1,0 +1,22 @@
+/* The standalone host's rules (DES-APPS-001 §7.1): appended to the runtime's one stylesheet, so the page's
+   style-src pins both by one hash. No element carries a style attribute. */
+.wk-host-gate { position: fixed; inset: 0; z-index: 30; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 24px; background: var(--surface-base); color: var(--ink-high); text-align: center; overflow: auto; }
+.wk-host-title { margin: 0; font-size: 22px; font-weight: 650; }
+.wk-host-sub { margin: 0; font-size: 15px; font-weight: 550; color: var(--ink-body); }
+.wk-host-line { margin: 0; color: var(--ink-muted); max-width: 46ch; overflow-wrap: anywhere; }
+.wk-host-btn { display: inline-flex; align-items: center; justify-content: center; min-height: 34px; padding: 0 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-raised); color: var(--ink-high); font: inherit; font-weight: 550; cursor: pointer; text-decoration: none; }
+.wk-host-btn:disabled { opacity: .5; cursor: default; }
+.wk-host-btn--pri { background: var(--ui-accent); border-color: var(--ui-accent); color: var(--accent-fg); }
+.wk-host-btn:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 2px; }
+.wk-host-scrim { position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center; padding: 16px; background: color-mix(in srgb, var(--ink-high) 38%, transparent); }
+.wk-host-card { width: min(560px, 100%); max-height: calc(100% - 32px); overflow: auto; display: flex; flex-direction: column; gap: 10px; padding: 18px 20px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface-raised); color: var(--ink-high); box-shadow: 0 12px 40px rgba(0, 0, 0, .25); }
+.wk-host-card-title { margin: 0; font-size: 17px; font-weight: 650; }
+.wk-host-op { margin: 0; font-family: var(--font-mono); font-size: 13px; overflow-wrap: anywhere; }
+.wk-host-says { margin: 0; color: var(--ink-muted); }
+.wk-host-kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 0; }
+.wk-host-k { color: var(--ink-muted); font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
+.wk-host-v { margin: 0; display: flex; flex-wrap: wrap; gap: 2px 8px; overflow-wrap: anywhere; }
+.wk-host-val { font-weight: 600; }
+.wk-host-from { color: var(--ink-muted); font-size: 12px; }
+.wk-host-pre { margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--surface-card); font-family: var(--font-mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.wk-host-actions { display: flex; justify-content: flex-end; gap: 8px; }

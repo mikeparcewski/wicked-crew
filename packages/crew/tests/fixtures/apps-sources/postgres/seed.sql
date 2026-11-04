@@ -2,9 +2,9 @@
 -- for the P1-P43 regression suite. Applied by a superuser to a FRESH database (tests create one per
 -- run). Table names follow the probe scripts (lanes/data-builder-design/review/pgwrite-probe*.sh);
 -- the probe number is noted on each. Roles are cluster-wide, so they are created only if missing.
-DO $$ BEGIN CREATE ROLE apps_reader LOGIN PASSWORD 'apps-reader'; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN CREATE ROLE apps_writer LOGIN PASSWORD 'apps-writer'; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN CREATE ROLE apps_bare LOGIN PASSWORD 'apps-bare'; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE apps_reader LOGIN PASSWORD 'apps-reader'; EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE apps_writer LOGIN PASSWORD 'apps-writer'; EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE apps_bare LOGIN PASSWORD 'apps-bare'; EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $$;
 
 CREATE SCHEMA s;
 CREATE TABLE s.side (note text);
