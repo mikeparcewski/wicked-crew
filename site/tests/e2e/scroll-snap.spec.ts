@@ -390,16 +390,18 @@ test.describe('touch, on a touch screen 1024px wide and up (a tablet in landscap
     expect(Math.abs(y - tops[2]), `rested at ${y}; it skipped past ${tops[2]}`).toBeLessThanOrEqual(2);
   });
 
-  /** What the page saw of one swipe and its PageUp (performance.now() times; -1: not seen). */
-  type Swipe = { glides: number[]; moveAt: number; liftAt: number; pageUpAt: number; yAtKey: number; lastY: number | null };
+  /** What the page saw of one swipe and its PageUp (performance.now() times; -1: not seen). The move is timed
+   *  as it is first dispatched and the lift and the key after settle.js has handled them, so the spans below
+   *  bound the page's own from above. `glidesAtKey` is how many glides had begun when the key was dispatched. */
+  type Swipe = { glides: number; glidesAtKey: number; moveAt: number; liftAfter: number; keyAfter: number; yAtKey: number; lastY: number | null };
   /** Why an attempt did not set up the case under test (null: it did). Each limit sits inside settle.js's own:
    *  a lift over 150 ms after the last clear move reads as held still (touchTarget), a key over 600 ms after
    *  the last input starts a new gesture (begin), and once the settle glides a key counts from the glide. */
   function setupMissed(s: Swipe, top2: number): string | null {
-    if (s.pageUpAt < 0 || s.liftAt < 0 || s.moveAt < 0) return 'the swipe or the PageUp never reached the page';
-    if (s.liftAt - s.moveAt > 100) return `the finger lifted ${Math.round(s.liftAt - s.moveAt)} ms after it last moved`;
-    if (s.pageUpAt - s.liftAt > 400) return `the PageUp came ${Math.round(s.pageUpAt - s.liftAt)} ms after the lift`;
-    if (s.glides.some((t) => t < s.pageUpAt)) return 'the settle began its glide before the PageUp arrived';
+    if (s.moveAt < 0 || s.liftAfter < 0 || s.keyAfter < 0 || s.glidesAtKey < 0) return 'the swipe or the PageUp never reached the page';
+    if (s.liftAfter - s.moveAt > 100) return `the finger lifted ${Math.round(s.liftAfter - s.moveAt)} ms after it last moved`;
+    if (s.keyAfter - s.moveAt > 400) return `the PageUp came ${Math.round(s.keyAfter - s.moveAt)} ms after the last move`;
+    if (s.glidesAtKey > 0) return 'the settle began its glide before the PageUp arrived';
     if (s.yAtKey <= top2 + 100) return `the swipe had moved the page only to ${s.yAtKey} when the key came`;
     return null;
   }
@@ -413,25 +415,31 @@ test.describe('touch, on a touch screen 1024px wide and up (a tablet in landscap
     // the finger lifts, and the page records what it saw. An attempt the runner delivered too late to set up
     // this case (see setupMissed) is tried again on a fresh page, at most three times; once one sets it up,
     // its rest is asserted.
+    test.slow();
     await page.addInitScript(() => {
-      const s: Swipe = { glides: [], moveAt: -1, liftAt: -1, pageUpAt: -1, yAtKey: -1, lastY: null };
+      const s: Swipe = { glides: 0, glidesAtKey: -1, moveAt: -1, liftAfter: -1, keyAfter: -1, yAtKey: -1, lastY: null };
       (window as unknown as { __swipe: Swipe }).__swipe = s;
       const scrollTo = window.scrollTo.bind(window) as (...a: unknown[]) => void;
       window.scrollTo = ((...a: unknown[]) => {
         const o = a[0];
-        if (o !== null && typeof o === 'object' && (o as ScrollToOptions).behavior === 'smooth') s.glides.push(performance.now());
+        if (o !== null && typeof o === 'object' && (o as ScrollToOptions).behavior === 'smooth') s.glides += 1;
         scrollTo(...a);
       }) as typeof window.scrollTo;
-      // the settle's glides count from the swipe on; a clear move is 4px or more, as settle.js reads one
-      window.addEventListener('touchstart', (e) => { s.glides = []; s.lastY = e.touches[0] ? e.touches[0].clientY : null; }, { capture: true, passive: true });
+      // First in line (capture, registered before the page's scripts): the swipe's start and its clear moves
+      // (more than 4 px, as settle.js reads one), and the glides begun when the key is dispatched.
+      window.addEventListener('touchstart', (e) => { s.glides = 0; s.lastY = e.touches[0] ? e.touches[0].clientY : null; }, { capture: true, passive: true });
       window.addEventListener('touchmove', (e) => {
         const y = e.touches[0] ? e.touches[0].clientY : null;
         if (y !== null && s.lastY !== null && Math.abs(s.lastY - y) > 4) { s.moveAt = performance.now(); s.lastY = y; }
       }, { capture: true, passive: true });
-      window.addEventListener('touchend', () => { s.liftAt = performance.now(); }, { capture: true, passive: true });
       window.addEventListener('keydown', (e) => {
-        if (e.key === 'PageUp' && s.pageUpAt < 0) { s.pageUpAt = performance.now(); s.yAtKey = Math.round(window.scrollY); }
+        if (e.key === 'PageUp' && s.glidesAtKey < 0) { s.glidesAtKey = s.glides; s.yAtKey = Math.round(window.scrollY); }
       }, { capture: true });
+      // Last in line: added once the page's module script (settle.js) has added its own, so these run after them.
+      window.addEventListener('load', () => {
+        window.addEventListener('touchend', () => { s.liftAfter = performance.now(); }, { passive: true });
+        window.addEventListener('keydown', (e) => { if (e.key === 'PageUp' && s.keyAfter < 0) s.keyAfter = performance.now(); });
+      });
     });
     const missed: string[] = [];
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -442,8 +450,10 @@ test.describe('touch, on a touch screen 1024px wide and up (a tablet in landscap
       await drag(page, steps(500, 300, 6), 12);          // a swipe down the page, and PageUp as the finger lifts
       await page.keyboard.press('PageUp');
       const y = await settled(page);
-      const why = setupMissed(await page.evaluate(() => (window as unknown as { __swipe: Swipe }).__swipe), tops[2]);
+      const s = await page.evaluate(() => (window as unknown as { __swipe: Swipe }).__swipe);
+      const why = setupMissed(s, tops[2]);
       if (why !== null) { missed.push(`attempt ${attempt}: ${why}`); continue; }
+      expect(s.glides, 'no settle glide was seen at all: the glide record no longer matches settle.js').toBeGreaterThan(0);
       expect(y, `rested at ${y}: the swipe's direction overrode the PageUp`).toBeLessThan(tops[2] - 2);
       expect(onAFrame(y, await restTops(page))).toBe(true);
       return;
