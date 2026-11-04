@@ -476,7 +476,8 @@ describe('the seat parse', () => {
     expect(calls).toEqual(['launch claude with-projects']);
     expect(launches[0]).toMatchObject({
       primary: 'claude',
-      plan: { steps: [{ catalog: 'understand', id: 'parse-1' }], monitors: { asked: 0 } },
+      // crew#1311: the one step declares its output an answer, so a short one meets the engine's floor.
+      plan: { steps: [{ catalog: 'understand', id: 'parse-1', answer_only: true }], monitors: { asked: 0 } },
     });
     expect(JSON.parse(String(launches[0]!['clisJson']))).toEqual([{ key: 'claude', chat_admission: { unscoped: { ok: true } } }]);
     expect(launches[0]).not.toHaveProperty('repoRef');
@@ -547,6 +548,109 @@ describe('the seat parse', () => {
     };
     expect(await seatParser({ adapter, roster })('x')).toMatchObject({ ok: false, code: 502, error: 'engine gone' });
     expect(calls).toEqual([]);
+  });
+
+  it('a run that parks for a human ends the turn at once: a 502 naming the failure kind, never its raw detail, and the run is cancelled (crew#1311)', async () => {
+    const { adapter, calls } = fakeAdapter(null);
+    // A parked turn never reads the answer: a stalled read must not hold the turn or its cancel (codex r1).
+    (adapter as unknown as { workOutput: unknown }).workOutput = () => new Promise<string>(() => undefined);
+    let listener: ((e: CoreEvent) => void) | null = null;
+    (adapter as unknown as { onEvent: unknown }).onEvent = (fn: (e: CoreEvent) => void) => { listener = fn; return () => { listener = null; }; };
+    (adapter as unknown as { launchRun: unknown }).launchRun = async (input: Record<string, unknown>) => {
+      const runId = String(input['sessionId']);
+      setTimeout(() => {
+        // What the rig's run 0f5beafa sent: the floor's veto, then the escalation gate nobody sees.
+        listener?.({ type: 'stepFailed', session: runId, ord: 0, attempt: 0, failureKind: 'substanceRejected', detail: 'SECRET raw seat output' } as unknown as CoreEvent);
+        listener?.({ type: 'gateEscalated', session: runId, ord: 0 } as unknown as CoreEvent);
+        listener?.({ type: 'awaitingHuman', session: runId, ord: 0, gateKind: 'escalation', prompt: 'retry or cancel' } as unknown as CoreEvent);
+      }, 5);
+      calls.push(`launch ${runId}`);
+      return runId;
+    };
+    const started = Date.now();
+    const out = await seatParser({ adapter, roster, timeoutMs: 60_000 })('x');
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(out).toMatchObject({ ok: false, code: 502, error: "the claude seat's turn failed (substanceRejected)" });
+    expect(JSON.stringify(out)).not.toContain('SECRET');
+    const runId = calls[0]!.slice('launch '.length);
+    expect(calls).toEqual([`launch ${runId}`, `cancel ${runId}`]);
+  });
+
+  it('another run parking is not this turn\'s, and a park with no failure frame still ends it honestly', async () => {
+    const { adapter, calls } = fakeAdapter(null);
+    let listener: ((e: CoreEvent) => void) | null = null;
+    (adapter as unknown as { onEvent: unknown }).onEvent = (fn: (e: CoreEvent) => void) => { listener = fn; return () => { listener = null; }; };
+    (adapter as unknown as { launchRun: unknown }).launchRun = async (input: Record<string, unknown>) => {
+      const runId = String(input['sessionId']);
+      setTimeout(() => {
+        listener?.({ type: 'stepFailed', session: 'someone-else', ord: 0, attempt: 0, failureKind: 'workerError', detail: 'x' } as unknown as CoreEvent);
+        listener?.({ type: 'awaitingHuman', session: 'someone-else', ord: 0, gateKind: 'failure', prompt: 'p' } as unknown as CoreEvent);
+      }, 1);
+      setTimeout(() => listener?.({ type: 'awaitingHuman', session: runId, ord: 0, gateKind: 'run_level', prompt: 'p' } as unknown as CoreEvent), 20);
+      calls.push(`launch ${runId}`);
+      return runId;
+    };
+    const out = await seatParser({ adapter, roster, timeoutMs: 60_000 })('x');
+    expect(out).toMatchObject({ ok: false, code: 502, error: "the claude seat's turn failed (it stopped for a decision)" });
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toBe(`cancel ${calls[0]!.slice('launch '.length)}`);
+  });
+
+  it('a park while the launch is still pending ends the turn at once; the run is cancelled by its session id, and again once the launch names it (codex r1)', async () => {
+    const { adapter, calls } = fakeAdapter(null);
+    let listener: ((e: CoreEvent) => void) | null = null;
+    (adapter as unknown as { onEvent: unknown }).onEvent = (fn: (e: CoreEvent) => void) => { listener = fn; return () => { listener = null; }; };
+    let release: (id: string) => void = () => undefined;
+    let sessionId = '';
+    (adapter as unknown as { launchRun: unknown }).launchRun = (input: Record<string, unknown>) => {
+      sessionId = String(input['sessionId']);
+      setTimeout(() => {
+        listener?.({ type: 'stepFailed', session: sessionId, ord: 0, attempt: 0, failureKind: 'workerError', detail: 'SECRET' } as unknown as CoreEvent);
+        listener?.({ type: 'awaitingHuman', session: sessionId, ord: 0, gateKind: 'failure', prompt: 'p' } as unknown as CoreEvent);
+      }, 1);
+      return new Promise<string>((r) => { release = r; });
+    };
+    const out = await seatParser({ adapter, roster, timeoutMs: 60_000 })('x');
+    expect(out).toMatchObject({ ok: false, code: 502, error: "the claude seat's turn failed (workerError)" });
+    expect(calls).toEqual([`cancel ${sessionId}`]);
+    release(sessionId);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(calls).toEqual([`cancel ${sessionId}`, `cancel ${sessionId}`]);
+  });
+
+  it('a terminal frame before a launch that hangs leaves the deadline armed: the timeout 502, no listener left, and no cancel of the ended run (codex r2)', async () => {
+    const { adapter, calls } = fakeAdapter(null);
+    let listener: ((e: CoreEvent) => void) | null = null;
+    (adapter as unknown as { onEvent: unknown }).onEvent = (fn: (e: CoreEvent) => void) => { listener = fn; return () => { listener = null; }; };
+    let release: (id: string) => void = () => undefined;
+    let sessionId = '';
+    (adapter as unknown as { launchRun: unknown }).launchRun = (input: Record<string, unknown>) => {
+      sessionId = String(input['sessionId']);
+      listener?.({ type: 'sessionCompleted', session: sessionId } as unknown as CoreEvent);
+      return new Promise<string>((r) => { release = r; });
+    };
+    expect(await seatParser({ adapter, roster, timeoutMs: 30 })('x')).toMatchObject({ ok: false, code: 502, error: 'the claude seat did not answer in 0.03 s' });
+    expect(listener).toBeNull();
+    release(sessionId);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(calls).toEqual([]);
+  });
+
+  it('a run that parks and then ends is not cancelled: the turn is still the park\'s failure (codex r1)', async () => {
+    const { adapter, calls } = fakeAdapter(null);
+    let listener: ((e: CoreEvent) => void) | null = null;
+    (adapter as unknown as { onEvent: unknown }).onEvent = (fn: (e: CoreEvent) => void) => { listener = fn; return () => { listener = null; }; };
+    (adapter as unknown as { launchRun: unknown }).launchRun = async (input: Record<string, unknown>) => {
+      const runId = String(input['sessionId']);
+      listener?.({ type: 'awaitingHuman', session: runId, ord: 0, gateKind: 'escalation', prompt: 'p' } as unknown as CoreEvent);
+      listener?.({ type: 'runCancelled', session: runId } as unknown as CoreEvent);
+      calls.push(`launch ${runId}`);
+      return runId;
+    };
+    const out = await seatParser({ adapter, roster, timeoutMs: 60_000 })('x');
+    expect(out).toMatchObject({ ok: false, code: 502, error: "the claude seat's turn failed (it stopped for a decision)" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatch(/^launch /u);
   });
 
   it('a FAILED step is a failure even when its text holds a rule-shaped object (codex on #686)', async () => {

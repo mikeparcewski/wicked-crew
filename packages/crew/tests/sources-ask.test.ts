@@ -246,9 +246,34 @@ describe('the ask pieces (no database)', () => {
       expect(r.statusCode, r.body).toBe(200);
       expect(r.json()).toMatchObject({ sql: 'SELECT 1', seat: 'claude', check: { ok: true } });
       expect(launches).toHaveLength(1);
-      expect(launches[0]).toMatchObject({ primary: 'claude', plan: { steps: [{ catalog: 'understand', id: 'draft-1' }], monitors: { asked: 0 } } });
+      // crew#1311: the draft step declares its output an answer, so a short correct draft meets the engine's floor.
+      expect(launches[0]).toMatchObject({ primary: 'claude', plan: { steps: [{ catalog: 'understand', id: 'draft-1', answer_only: true }], monitors: { asked: 0 } } });
       expect(launches[0]).not.toHaveProperty('repoRef');
       expect(launches[0]).not.toHaveProperty('deliver');
+      // crew#1311: a draft whose run parks (the step failed) is a 502 that carries neither the
+      // step's raw detail nor its stored answer, either of which may hold the source's secret.
+      const parkedAdapter = {
+        ...(adapter as unknown as Record<string, unknown>),
+        launchRun: async (input: Record<string, unknown>) => {
+          const id = String(input['sessionId']);
+          setTimeout(() => {
+            listener?.({ type: 'stepFailed', session: id, ord: 0, attempt: 0, failureKind: 'workerError', detail: 'env: PGPASSWORD=SECRET-1311' } as unknown as CoreEvent);
+            listener?.({ type: 'awaitingHuman', session: id, ord: 0, gateKind: 'failure', prompt: 'retry or cancel' } as unknown as CoreEvent);
+          }, 5);
+          return id;
+        },
+        workOutput: async () => '{"sql": "SELECT 1", "explanation": "SECRET-1311"}',
+      } as unknown as CoreAdapter;
+      const parkedH = await harness(seatTurn({ adapter: parkedAdapter, roster }));
+      try {
+        await parkedH.app.inject({ method: 'POST', url: '/api/v1/apps/uploads?name=tix&filename=tickets.csv', headers: { 'content-type': 'application/octet-stream' }, payload: Buffer.from('id,status\n1,open\n') });
+        const failed = await post(parkedH, '/sources/tix/ask', { question: 'How many?' });
+        expect(failed.statusCode).toBe(502);
+        expect(failed.json()).toMatchObject({ code: 'seat_failed', error: "the claude seat's turn failed (workerError)" });
+        expect(failed.body).not.toContain('SECRET-1311');
+      } finally {
+        await parkedH.close();
+      }
       // No seat: 409 that says what to do instead.
       const none = await harness(seatTurn({ adapter, roster: () => [] }));
       try {
