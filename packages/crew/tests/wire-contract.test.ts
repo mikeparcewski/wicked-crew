@@ -59,6 +59,7 @@ import type { SkillsStore, SnapshotManifest } from '../src/skills/store.js';
 import type {
   McpApprovalSchema,
   McpPolicyPreviewSchema,
+  McpRegistryRestoreSchema,
   McpServerConfigSchema,
   PatchMcpServerSchema,
   PatchMcpToolSchema,
@@ -69,7 +70,7 @@ import type { graphqlCheckAnswer, SourceAllowWritesSchema, SourceAskSchema, Sour
 import type { SafetyResult } from '../src/sources/safety/postgres.js';
 import type { PgPrivilegeReport } from '../src/sources/catalog/postgres.js';
 import type { SqlCatalog } from '../src/sources/catalog/types.js';
-import type { McpRegistry } from '../src/mcp/registry.js';
+import type { agentServerView, McpRegistry } from '../src/mcp/registry.js';
 import type { McpPolicies } from '../src/mcp/policies.js';
 import type { foldMcpUsage } from '../src/mcp/usage.js';
 import type { SkillsHealth, SkillsHealthFindingKind } from '../src/skills/runtime.js';
@@ -1131,6 +1132,12 @@ respondsWith<Wire.McpPreviewResponse, Awaited<ReturnType<McpRegistry['preview']>
 respondsWith<Wire.McpServer, Awaited<ReturnType<McpRegistry['save']>>>();
 respondsWith<Wire.McpServerTestResponse, Awaited<ReturnType<McpRegistry['test']>>>();
 respondsWith<Wire.McpTool, Awaited<ReturnType<McpRegistry['patchTool']>>['tool']>(); // the route answers `.tool` (G1: `grantedWrite` is audited, not sent)
+// api-types 0.183.0 — the one registry (DES-KNOWLEDGE-DATA-001 §5, B1): the agent-safe view, generations, restore.
+respondsWith<Wire.McpServerAgentView[], Awaited<ReturnType<McpRegistry['listForAgents']>>['servers']>();
+respondsWith<Wire.McpServerAgentView, ReturnType<typeof agentServerView>>(); // save, PATCH and test answer it to a non-human
+respondsWith<Wire.McpRegistryGenerationsResponse, Awaited<ReturnType<McpRegistry['generations']>>>();
+respondsWith<Wire.McpRegistryRestoreResponse, Awaited<ReturnType<McpRegistry['restore']>>>();
+accepts<z.input<typeof McpRegistryRestoreSchema>, Wire.McpRegistryRestoreBody>();
 
 // ── api-types 0.63.0 — MCP policies: the preview matrix and the approvals (DES-MCP-TOOLS-001 S6) ──
 accepts<z.input<typeof McpPolicyPreviewSchema>, Wire.McpPolicyPreviewBody>();

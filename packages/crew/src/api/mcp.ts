@@ -54,6 +54,19 @@
  * `POST /mcp/servers/preview` also answers the matrix (`policies`); a save that changes a saved
  * tool's schema, and a removal, withdraw the approvals that named it, BEFORE the registry changes.
  *
+ * DES-KNOWLEDGE-DATA-001 §5 (the one registry, B1):
+ *
+ *   GET    /mcp/servers?view=agent      the agent-safe projection (crew#1310): every NON-HUMAN actor gets it
+ *                                       whatever it asks; a human gets it on request. The answers of a save,
+ *                                       `PATCH /mcp/servers/:name` and a test are projected the same way
+ *   POST   /mcp/servers/preview         also `kind: "toolbox-source"` (Toolbox's own source document, checked
+ *                                       against the deployment policy: 400 with the policy's code); a `sql`
+ *                                       Postgres body is saved as the same document (descriptor version 2)
+ *   POST   /mcp/servers                 also `disclosures` (each tool's disclosure class): human operator only
+ *   PATCH  /mcp/tools/:subject          also `disclosure`: setting one is human operator only
+ *   GET    /mcp/registry/generations    the kept generations (human operator only)
+ *   POST   /mcp/registry/restore        `{generation}`: restore one, failing closed (human operator only)
+ *
  * The secret value is in no response, log, audit entry or file (D-2); tests/mcp-registry.test.ts
  * scans all of them, a malformed secret body included.
  */
@@ -61,21 +74,23 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
-import type { Actor, McpApprovalResponse, McpCallDecision, McpPreviewResponse, McpServer, McpUsageResponse } from '../core/types.js';
-import { MCP_SERVER_NAME_RE } from '../mcp/classify.js';
+import type { Actor, McpApprovalResponse, McpCallDecision, McpPreviewResponse, McpRegistryRestoreResponse, McpServer, McpServerAgentView, McpServerTestAgentResponse, McpServerTestResponse, McpUsageResponse } from '../core/types.js';
+import { canonicalJson, MCP_SERVER_NAME_RE } from '../mcp/classify.js';
 import type { McpBroker } from '../mcp/broker.js';
 import type { AskServer } from '../mcp/ask-server.js';
 import type { McpPolicies } from '../mcp/policies.js';
 import { MCP_PREVIEW_ROLES, MCP_RUN_MODES, McpLedgerEditError } from '../mcp/policies.js';
-import { isWriteGrant, McpRegistryError, type McpRegistry } from '../mcp/registry.js';
+import { agentServerView, configOf, isWriteGrant, McpRegistryError, type McpRegistry } from '../mcp/registry.js';
+import { restTarget } from '../mcp/rest.js';
 import { listUnitTools } from '../mcp/tool-list.js';
-import { McpRegistryCorruptError } from '../mcp/registry-store.js';
+import { McpRegistryCorruptError, type McpServerRecord } from '../mcp/registry-store.js';
 import { parseSecretRef, SecretStoreError } from '../mcp/secrets.js';
 import type { McpCallRecordSource } from '../mcp/call-records.js';
 import { foldMcpUsage, MCP_USAGE_DECISIONS, MCP_USAGE_DEFAULT_DAYS, MCP_USAGE_MAX_DAYS } from '../mcp/usage.js';
 import type { McpUpstreamConfig } from '../mcp/probe.js';
 import { parseBaseUrl, REST_SPEC_MAX_BYTES } from '../mcp/rest.js';
 import { NO_CONFIRMATION, validateAllowRanges } from '../sources/dialer.js';
+import type { ToolboxSourceEntry } from '../knowledge/registry/entry.js';
 import { API_PREFIX } from './api-prefix.js';
 import type { AuditLog } from './audit.js';
 import { trustAtLeast } from './auth.js';
@@ -83,6 +98,8 @@ import { trustAtLeast } from './auth.js';
 const V = API_PREFIX;
 const serverName = z.string().regex(MCP_SERVER_NAME_RE, 'a server name is 1-63 of a-z 0-9 _ -, starting with a letter or digit');
 const toolClass = z.enum(['read', 'write', 'destructive']);
+/** (DES-KNOWLEDGE-DATA-001 §7.1) What a tool's answer discloses. */
+const disclosureClass = z.enum(['none', 'structure', 'rows']);
 /** A pasted secret VALUE. Shared by the staged-secret preview field and `PUT …/secret` (crew#719). */
 const secretValue = z
   .string()
@@ -124,11 +141,19 @@ export const SqlSourceSchema = z
   })
   .strict();
 
+/**
+ * (DES-KNOWLEDGE-DATA-001 §5.1) Toolbox's source document, as sent: an object of at most 32 fields, each judged
+ * by the deployment policy (`knowledge/registry/policy.ts`) at the preview, not here.
+ */
+const ToolboxDocumentSchema = z
+  .record(z.string().max(64), z.union([z.string().max(4096), z.number(), z.boolean(), z.null(), z.record(z.string(), z.unknown()), z.array(z.unknown())]))
+  .refine((d) => Object.keys(d).length <= 32, { message: 'a Toolbox source document has at most 32 fields' });
+
 // Exported so tests/wire-contract.test.ts can pin the published bodies against them.
 export const McpServerConfigSchema = z
   .object({
     name: serverName,
-    kind: z.enum(['mcp-stdio', 'mcp-http', 'rest', 'sql', 'graphql']),
+    kind: z.enum(['mcp-stdio', 'mcp-http', 'rest', 'sql', 'graphql', 'toolbox-source']),
     command: z.string().min(1).max(4096).optional(),
     args: z.array(z.string().max(4096)).max(64).optional(),
     url: z.string().max(4096).optional(),
@@ -151,6 +176,10 @@ export const McpServerConfigSchema = z
     sql: SqlSourceSchema.optional(),
     /** `sql` only: the views a read may name (`schema.view`). */
     viewsAllowed: z.array(z.string().min(3).max(256).regex(/^[^.\s]+\.[^.\s]+$/, 'a view is named schema.view')).max(256).optional(),
+    /** (DES-KNOWLEDGE-DATA-001 §5.1) `toolbox-source` only: Toolbox's own source document, its runtime and TLS choice. */
+    toolbox: ToolboxDocumentSchema.optional(),
+    runtime: z.enum(['native', 'toolbox']).optional(),
+    tls: z.object({ mode: z.enum(['verify-full', 'disable']), ca: z.string().min(1).max(65_536).optional() }).strict().optional(),
     /**
      * (crew#719) The secret VALUE this server's keychain entry will hold. The preview is probed
      * with it and it is held with the preview; `POST /mcp/servers` writes it to the OS store as
@@ -173,7 +202,15 @@ export const McpServerConfigSchema = z
     if (c.kind !== 'rest' && (c.openapiUrl !== undefined || c.openapi !== undefined || c.operations !== undefined)) {
       issue('openapi', 'openapiUrl, openapi and operations are for a rest server');
     }
-    if (c.kind !== 'sql' && (c.sql !== undefined || c.viewsAllowed !== undefined)) issue('sql', 'sql and viewsAllowed are for a sql source');
+    if (c.kind !== 'sql' && c.sql !== undefined) issue('sql', 'sql is for a sql source');
+    if (c.kind !== 'sql' && c.kind !== 'toolbox-source' && c.viewsAllowed !== undefined) issue('viewsAllowed', 'viewsAllowed is for a sql or toolbox-source source');
+    if (c.kind !== 'toolbox-source' && (c.toolbox !== undefined || c.runtime !== undefined || c.tls !== undefined)) issue('toolbox', 'toolbox, runtime and tls are for a toolbox-source');
+    if (c.kind === 'toolbox-source') {
+      if (c.toolbox === undefined) issue('toolbox', "a toolbox-source needs toolbox: Toolbox's own source document ({kind: 'source', type: 'postgres', host, port, database, user, password: '${WICKED_SRC_1}'})");
+      if (c.command !== undefined || c.args !== undefined || c.url !== undefined) issue('url', 'a toolbox-source takes its Toolbox document, not a command or url');
+      if (c.auth != null && (c.auth.env !== undefined || c.auth.header !== undefined || c.auth.prefix !== undefined)) issue('auth', 'a toolbox-source takes its secret as auth.ref only');
+      return;
+    }
     if (c.kind === 'sql') {
       if (c.sql === undefined) issue('sql', 'a sql source needs sql: {driver, host, database, user} (a sqlite source comes from POST /apps/uploads)');
       if (c.command !== undefined || c.args !== undefined || c.url !== undefined) issue('url', 'a sql source takes sql settings, not a command or url');
@@ -222,13 +259,18 @@ export const SaveMcpServerSchema = z
     enabledWrites: z.array(z.string().min(1).max(256)).max(512).optional(),
     /** (G2) The exact origin a `rest` server's calls go to, confirmed by a human operator. */
     allowOrigin: z.string().min(1).max(4096).optional(),
+    /** (DES-KNOWLEDGE-DATA-001 §5.1) Each tool's disclosure class, reviewed by a human operator. */
+    disclosures: z.record(z.string().min(1).max(256), disclosureClass).refine((d) => Object.keys(d).length <= 512, { message: 'at most 512 tools' }).optional(),
   })
   .strict();
 export const PatchMcpServerSchema = z.object({ enabled: z.boolean() }).strict();
 export const PatchMcpToolSchema = z
-  .object({ enabled: z.boolean().optional(), classOverride: toolClass.nullable().optional() })
+  .object({ enabled: z.boolean().optional(), classOverride: toolClass.nullable().optional(), disclosure: disclosureClass.nullable().optional() })
   .strict()
-  .refine((p) => p.enabled !== undefined || p.classOverride !== undefined, { message: 'set enabled, classOverride or both' });
+  .refine((p) => p.enabled !== undefined || p.classOverride !== undefined || p.disclosure !== undefined, { message: 'set enabled, classOverride, disclosure or a combination' });
+/** Unknown query parameters (a cache-buster) are ignored, as they always were. */
+export const McpServersQuerySchema = z.object({ view: z.enum(['full', 'agent']).optional() });
+export const McpRegistryRestoreSchema = z.object({ generation: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER) }).strict();
 export const PutMcpSecretSchema = z.object({ value: secretValue }).strict();
 
 export const McpCallSchema = z
@@ -309,6 +351,20 @@ function mayGrantWrite(actor: Actor): boolean {
   return actor.kind === 'human' && trustAtLeast(actor, 'operator');
 }
 
+/** (DES-KNOWLEDGE-DATA-001 §5.2) The full view is a human actor's; every other actor gets the agent-safe one. */
+function sees(actor: Actor): 'full' | 'agent' {
+  return actor.kind === 'human' ? 'full' : 'agent';
+}
+
+/** A server answer as `actor` may see it. */
+function serverFor(actor: Actor, server: McpServer): McpServer | McpServerAgentView {
+  return sees(actor) === 'full' ? server : agentServerView(server);
+}
+
+function humanOperatorOnly(reply: FastifyReply, actor: Actor, what: string, code: string): FastifyReply {
+  return reply.code(403).send({ error: `only a human operator can ${what}; you are ${actor.kind}/${actor.trust}`, code });
+}
+
 function writeGrantRefused(reply: FastifyReply, actor: Actor): FastifyReply {
   return reply.code(403).send({
     error: `only a human operator can enable a write tool (a write grant); you are ${actor.kind}/${actor.trust}`,
@@ -359,6 +415,19 @@ function toConfig(body: z.infer<typeof McpServerConfigSchema>): McpUpstreamConfi
           viewsAllowed: body.viewsAllowed ?? [],
         }
       : {}),
+    // (DES-KNOWLEDGE-DATA-001 §5.1) The document as sent: the registry checks it against the deployment policy.
+    ...(body.kind === 'toolbox-source' && body.toolbox !== undefined
+      ? {
+          entry: {
+            toolbox: body.toolbox as unknown as ToolboxSourceEntry['toolbox'],
+            runtime: body.runtime ?? 'native',
+            tls: { mode: body.tls?.mode ?? 'verify-full', ca: body.tls?.ca ?? null },
+            descriptorVersion: 2 as const,
+            policyVersion: '',
+          },
+          viewsAllowed: body.viewsAllowed ?? [],
+        }
+      : {}),
     // A dialled server always carries its confirmation (none = global unicast over TLS only), so a
     // save stores it and a legacy record is the only one ever derived (registry.ts legacyAddress).
     ...(body.kind !== 'mcp-stdio'
@@ -374,6 +443,42 @@ function toConfig(body: z.infer<typeof McpServerConfigSchema>): McpUpstreamConfi
             ...(body.auth.prefix !== undefined ? { prefix: body.auth.prefix } : {}),
           },
   };
+}
+
+/**
+ * (DES-KNOWLEDGE-DATA-001 §5.5) The approval tokens a restore withdraws: an approval covers a tool's SAVED schema,
+ * not its name. Every held token of a tool whose restored record is absent, was never saved (`schemaHash` null) or
+ * was saved under another schema is withdrawn, with its server's own token (a server-wide approval cannot leave one
+ * tool out); every token of a server the generation does not hold, or of a `rest` server whose target differs; and
+ * every token naming a server the generation brings back that is not registered now (an orphan).
+ */
+export async function restoreWithdrawals(p: Pick<McpPolicies, 'tokensOf'>, current: readonly McpServer[], restored: readonly McpServerRecord[]): Promise<string[]> {
+  const out = new Set<string>();
+  for (const now of current) {
+    const held = await p.tokensOf(now.name);
+    if (held.length === 0) continue;
+    const then = restored.find((x) => x.name === now.name);
+    const targetChanged = then !== undefined && (now.kind === 'rest' || then.kind === 'rest') && canonicalJson(now.kind === 'rest' ? restTarget(now) : null) !== canonicalJson(then.kind === 'rest' ? restTarget(configOf(then)) : null);
+    if (then === undefined || targetChanged) {
+      for (const t of held) out.add(t);
+      continue;
+    }
+    const changed = now.tools
+      .filter((t) => {
+        const was = then.tools.find((x) => x.name === t.name);
+        return was === undefined || was.schemaHash === null || was.schemaHash !== t.schemaHash;
+      })
+      .map((t) => t.subject);
+    const drop = new Set([...changed, ...(changed.length > 0 ? [`mcp:${now.name}`] : [])]);
+    for (const t of held) if (drop.has(t)) out.add(t);
+  }
+  // codex r3: an approval naming a server that is not registered now covers nothing anyone reviewed; a restore that
+  // brings the name back must not hand it to that registration.
+  for (const then of restored) {
+    if (current.some((c) => c.name === then.name)) continue;
+    for (const t of await p.tokensOf(then.name)) out.add(t);
+  }
+  return [...out].sort();
 }
 
 export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): void {
@@ -399,10 +504,15 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
     return null;
   };
 
-  app.get(`${V}/mcp/servers`, { config: { manifest: { responseType: 'McpServersResponse', statusCodes: [200, 503] } } }, async (_req, reply) => {
+  app.get(`${V}/mcp/servers`, { config: { manifest: { responseType: 'McpServersResponse | McpServersAgentResponse', statusCodes: [200, 400, 503] } } }, async (req, reply) => {
     const r = registry(reply);
     if (r === null) return reply;
+    const q = McpServersQuerySchema.safeParse(req.query ?? {});
+    if (!q.success) return invalidBody(reply, q.error);
     try {
+      // (DES-KNOWLEDGE-DATA-001 §5.2, crew#1310) Connection fields are a human operator's: any other actor gets
+      // the projection whatever it asks for.
+      if (q.data.view === 'agent' || sees(deps.actorOf(req)) === 'agent') return { view: 'agent' as const, ...(await r.listForAgents()) };
       return await r.list();
     } catch (err) {
       return fail(reply, err);
@@ -421,7 +531,10 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       // human operator may name one, here as at the save.
       if (confirmsAddress(parsed.data.address) && !mayGrantWrite(deps.actorOf(req))) return addressConfirmRefused(reply, deps.actorOf(req));
       try {
-        const preview = await r.preview(toConfig(parsed.data), parsed.data.secret ?? null);
+        const full = await r.preview(toConfig(parsed.data), parsed.data.secret ?? null);
+        // (DES-KNOWLEDGE-DATA-001 §5.2) A source's structure reaches an agent only through estate and the gate.
+        const { source: described, ...rest } = full;
+        const preview: McpPreviewResponse = sees(deps.actorOf(req)) === 'full' && described !== undefined ? { ...rest, source: described } : rest;
         if (deps.policies === undefined) return preview;
         let policies: McpPreviewResponse['policies'] = null;
         try {
@@ -438,7 +551,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
 
   app.post(
     `${V}/mcp/servers`,
-    { config: { manifest: { requestType: 'SaveMcpServerBody', responseType: 'McpServer', statusCodes: [201, 400, 403, 409, 500, 502, 503] } } },
+    { config: { manifest: { requestType: 'SaveMcpServerBody', responseType: 'McpServer | McpServerAgentView', statusCodes: [201, 400, 403, 409, 500, 502, 503] } } },
     async (req, reply) => {
       const r = registry(reply);
       if (r === null) return reply;
@@ -450,6 +563,9 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       // (G2) So is an egress confirmation from anyone but a human operator.
       const allowOrigin = parsed.data.allowOrigin ?? null;
       if (allowOrigin !== null && !mayGrantWrite(deps.actorOf(req))) return egressConfirmRefused(reply, deps.actorOf(req));
+      // (DES-KNOWLEDGE-DATA-001 §5.1) So is a review of what a tool discloses.
+      const disclosures = parsed.data.disclosures ?? {};
+      if (Object.keys(disclosures).length > 0 && !mayGrantWrite(deps.actorOf(req))) return humanOperatorOnly(reply, deps.actorOf(req), 'review what a tool discloses', 'disclosure_review_human_only');
       try {
         // A saved tool whose schema changed loses its approvals BEFORE the save lands, so a failed
         // withdrawal refuses the save rather than leaving an approval over a schema nobody approved.
@@ -458,6 +574,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
           await r.checkWriteGrants(parsed.data.previewHash, enabledWrites);
           // (G2) An unconfirmed egress is refused before any approval is withdrawn, too.
           await r.checkEgress(parsed.data.previewHash, allowOrigin);
+          r.checkDisclosures(parsed.data.previewHash, disclosures);
         }
         const held = parsed.data.previewHash === undefined ? null : r.peekPreview(parsed.data.previewHash);
         // The confirmation rides in the previewed config; saving it is the human operator's, too.
@@ -471,7 +588,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
               for (const id of rules) deps.audit.record('governance.rule.upserted', deps.actorOf(req), { detail: { id, source: 'mcp-approval' } });
             }
           }
-          return r.save(parsed.data.previewHash, enabledWrites, allowOrigin);
+          return r.save(parsed.data.previewHash, enabledWrites, allowOrigin, disclosures);
         };
         // (crew#993) The withdrawal and the save are one step for the server: an approval for it
         // waits until the save commits, then is judged against the new registration. With no held
@@ -500,7 +617,11 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
           if (tool === undefined) continue;
           deps.audit.record('mcp.tool.write_granted', deps.actorOf(req), { detail: { subject: tool.subject, class: tool.class, via: 'save' } });
         }
-        return reply.code(201).send(server);
+        for (const [name, disclosure] of Object.entries(disclosures)) {
+          const tool = server.tools.find((t) => t.name === name);
+          if (tool !== undefined) deps.audit.record('mcp.tool.disclosure_reviewed', deps.actorOf(req), { detail: { subject: tool.subject, disclosure, via: 'save' } });
+        }
+        return reply.code(201).send(serverFor(deps.actorOf(req), server));
       } catch (err) {
         return fail(reply, err);
       }
@@ -509,7 +630,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
 
   app.patch<{ Params: { name: string } }>(
     `${V}/mcp/servers/:name`,
-    { config: { manifest: { requestType: 'PatchMcpServerBody', responseType: 'McpServer', statusCodes: [200, 400, 404, 503] } } },
+    { config: { manifest: { requestType: 'PatchMcpServerBody', responseType: 'McpServer | McpServerAgentView', statusCodes: [200, 400, 404, 503] } } },
     async (req, reply) => {
       const r = registry(reply);
       if (r === null) return reply;
@@ -518,7 +639,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       try {
         const server = await r.setServerEnabled(req.params.name, parsed.data.enabled);
         deps.audit.record(parsed.data.enabled ? 'mcp.server.enabled' : 'mcp.server.disabled', deps.actorOf(req), { detail: { name: server.name } });
-        return server;
+        return serverFor(deps.actorOf(req), server);
       } catch (err) {
         return fail(reply, err);
       }
@@ -556,12 +677,16 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
 
   app.post<{ Params: { name: string } }>(
     `${V}/mcp/servers/:name/test`,
-    { config: { manifest: { responseType: 'McpServerTestResponse', statusCodes: [200, 404, 409, 503] } } },
+    { config: { manifest: { responseType: 'McpServerTestResponse | McpServerTestAgentResponse', statusCodes: [200, 404, 409, 503] } } },
     async (req, reply) => {
       const r = registry(reply);
       if (r === null) return reply;
       try {
-        return await r.test(req.params.name);
+        const t: McpServerTestResponse = await r.test(req.params.name);
+        if (sees(deps.actorOf(req)) === 'full') return t;
+        // A probe's error can name the host it could not reach: an agent gets that it failed.
+        const agentAnswer: McpServerTestAgentResponse = { ok: t.ok, error: t.error === null ? null : 'the probe failed', diff: t.diff, server: agentServerView(t.server) };
+        return agentAnswer;
       } catch (err) {
         return fail(reply, err);
       }
@@ -578,11 +703,12 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       if (!parsed.success) return invalidBody(reply, parsed.error);
       try {
         const actor = deps.actorOf(req);
-        const { tool, grantedWrite } = await r.patchTool(req.params.subject, parsed.data, { mayGrantWrite: mayGrantWrite(actor) });
+        const { tool, grantedWrite } = await r.patchTool(req.params.subject, parsed.data, { mayGrantWrite: mayGrantWrite(actor), mayReviewDisclosure: mayGrantWrite(actor) });
         deps.audit.record('mcp.tool.updated', actor, { detail: { subject: tool.subject, ...parsed.data } });
         if (grantedWrite) {
           deps.audit.record('mcp.tool.write_granted', actor, { detail: { subject: tool.subject, class: tool.class, via: 'toggle' } });
         }
+        if (parsed.data.disclosure !== undefined) deps.audit.record('mcp.tool.disclosure_reviewed', actor, { detail: { subject: tool.subject, disclosure: parsed.data.disclosure, via: 'patch' } });
         return tool;
       } catch (err) {
         return fail(reply, err);
@@ -656,6 +782,86 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
         return { ref, set: true as const };
       } catch (err) {
         return fail(reply, err);
+      }
+    },
+  );
+
+  // ── DES-KNOWLEDGE-DATA-001 §5.5: generations and a fail-closed restore ───────────────────────
+
+  app.get(
+    `${V}/mcp/registry/generations`,
+    { config: { manifest: { responseType: 'McpRegistryGenerationsResponse', statusCodes: [200, 403, 503] } } },
+    async (req, reply) => {
+      const actor = deps.actorOf(req);
+      if (!mayGrantWrite(actor)) return humanOperatorOnly(reply, actor, "read the registry's generations", 'human_only');
+      const r = registry(reply);
+      if (r === null) return reply;
+      try {
+        return await r.generations();
+      } catch (err) {
+        return fail(reply, err, actor);
+      }
+    },
+  );
+
+  app.post(
+    `${V}/mcp/registry/restore`,
+    { config: { manifest: { requestType: 'McpRegistryRestoreBody', responseType: 'McpRegistryRestoreResponse', statusCodes: [200, 400, 403, 404, 409, 500, 503] } } },
+    async (req, reply) => {
+      const actor = deps.actorOf(req);
+      if (!mayGrantWrite(actor)) return humanOperatorOnly(reply, actor, 'restore the registry', 'restore_human_only');
+      const r = registry(reply);
+      if (r === null) return reply;
+      const parsed = McpRegistryRestoreSchema.safeParse(req.body);
+      if (!parsed.success) return invalidBody(reply, parsed.error);
+      const generation = parsed.data.generation;
+      try {
+        // ONE snapshot, read and validated before anything changes: a restore that is refused (unknown, unreadable,
+        // a document the policy refuses) withdraws nothing, and a generation pruned meanwhile cannot fail it half-way.
+        const plan = await r.planRestore(generation);
+        const p = deps.policies;
+        const planned = plan.servers.map((s) => s.name);
+        // (crew#993) The withdrawal and the commit are one step for EVERY server they touch: each server's lock, in
+        // name order (every other holder takes one lock, so the order cannot deadlock), so no approval, save or
+        // removal of those servers lands between them. A server registered while the locks were being taken is not
+        // covered: then nothing is done, and the locks are taken again over the larger set (codex r2).
+        const locked = <T>(names: readonly string[], fn: () => Promise<T>): Promise<T> => (p === undefined ? fn() : names.reduceRight<() => Promise<T>>((inner, name) => () => p.exclusive(name, inner), fn)());
+        let names = [...new Set([...(await r.list()).servers.map((s) => s.name), ...planned])].sort();
+        let done: { out: Awaited<ReturnType<McpRegistry['restore']>>; withdrawn: string[] } | null = null;
+        for (let attempt = 0; attempt < 3 && done === null; attempt++) {
+          const held = names;
+          done = await locked(held, async () => {
+            const now = (await r.list()).servers;
+            const wider = now.map((s) => s.name).filter((n) => !held.includes(n));
+            if (wider.length > 0) {
+              names = [...new Set([...held, ...wider])].sort();
+              return null;
+            }
+            let withdrawn: string[] = [];
+            if (p !== undefined) {
+              withdrawn = await restoreWithdrawals(p, now, plan.servers);
+              if (withdrawn.length > 0) {
+                let rules: string[];
+                try {
+                  rules = await p.withdraw(withdrawn);
+                } catch (err) {
+                  auditPartial(deps, req, err, withdrawn);
+                  throw new McpRegistryError(500, 'withdraw_failed', `the registry was not restored: approvals that generation ${generation} does not cover could not be withdrawn (${err instanceof Error ? err.message : String(err)})`);
+                }
+                deps.audit.record('mcp.approval.withdrawn', actor, { detail: { subjects: withdrawn, rules, why: 'registry_restored' } });
+                for (const id of rules) deps.audit.record('governance.rule.upserted', actor, { detail: { id, source: 'mcp-approval' } });
+              }
+            }
+            return { out: await r.restore(plan, held), withdrawn };
+          });
+        }
+        if (done === null) throw new McpRegistryError(409, 'registry_busy', 'servers kept being registered while the restore was taking their locks; nothing was restored: try again');
+        const { out, withdrawn } = done;
+        const body: McpRegistryRestoreResponse = { ...out, withdrawnApprovals: withdrawn };
+        deps.audit.record('mcp.registry.restored', actor, { detail: { restored: generation, generation: out.generation, servers: out.servers, disabled: out.disabled, queryReset: out.queryReset, writesReset: out.writesReset, withdrawnApprovals: withdrawn } });
+        return body;
+      } catch (err) {
+        return fail(reply, err, actor);
       }
     },
   );

@@ -21,6 +21,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
 import type { McpAuthConfig, McpRestMapping, McpToolAnnotations, McpUpstreamKind } from '../core/types.js';
+import type { ToolboxSourceEntry } from '../knowledge/registry/entry.js';
 import { addressPolicyOf, type AddressPolicy, boundFetch, type DialOptions, DialRedirectRefusedError, DialRefusedError, type DialRefusalCode } from '../sources/dialer.js';
 import { SourceQueryError } from '../sources/drivers/types.js';
 import { describeSource, type SourceDescription, type SqlSourceConfig } from '../sources/kinds.js';
@@ -58,6 +59,14 @@ export interface McpUpstreamConfig {
   sql?: SqlSourceConfig | null;
   /** (DES-APPS-001 §5.3) `sql` only: views (and materialized views) a read may name, `schema.view`. */
   viewsAllowed?: string[] | null;
+  /** (DES-KNOWLEDGE-DATA-001 §5.1) The registry entry's immutable id; absent for a config not yet saved. */
+  id?: string;
+  /**
+   * (DES-KNOWLEDGE-DATA-001 §5.1, §5.4) A database source's stored form: Toolbox's source document, its runtime,
+   * TLS choice and descriptor version. A native-runtime entry ALSO carries the K1 projection (`kind: 'sql'`,
+   * `sql`), which is what every existing consumer reads.
+   */
+  entry?: ToolboxSourceEntry | null;
 }
 
 export interface ProbedTool {

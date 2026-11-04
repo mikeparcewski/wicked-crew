@@ -3,20 +3,25 @@
  * Sources are entries of crew's ONE connector registry (`/mcp/servers` previews and saves them);
  * these routes are what the source sheet needs beyond that:
  *
- *   GET  /sources/:name/catalog           observer   structure only (`crew` = the built-in source)
- *   POST /sources/:name/describe          operator   describe again now (catalog; Postgres privileges)
- *   POST /sources/:name/privileges        operator   Postgres: the report, with the exact missing GRANTs per declared write
- *   POST /sources/:name/check             operator   the per-kind check: read policy, then prepare/describe, never execute
- *   POST /sources/:name/safety            operator   Postgres: the table safety check and its fingerprint
+ *   GET  /sources/:name/catalog           observer, human only   structure only (`crew` = the built-in source)
+ *   POST /sources/:name/describe          operator, human only   describe again now (catalog; Postgres privileges)
+ *   POST /sources/:name/privileges        operator, human only   Postgres: the report, with the exact missing GRANTs per declared write
+ *   POST /sources/:name/check             operator, human only   the per-kind check: read policy, then prepare/describe, never execute
+ *   POST /sources/:name/safety            operator, human only   Postgres: the table safety check and its fingerprint
  *   PUT  /sources/:name/allow-writes      HUMAN      the Allow writes switch (audited; off withdraws row-write grants)
  *   POST /sources/:name/test-call         HUMAN      G6: name the one request, then send exactly it (reads only)
- *   POST /sources/:name/test              operator   Test connection: connect, describe (saved) and a probe read check
+ *   POST /sources/:name/test              operator, human only   Test connection: connect, describe (saved) and a probe read check
  *   POST /sources/:name/ask               HUMAN      a seat drafts one read from the structure; crew checks it; nothing runs
  *   POST /sources/:name/query             HUMAN      check SQL, or run exactly the checked text: READ ONLY, 10 s, 50 rows
  *   POST /apps/uploads?name=&filename=    operator   a file becomes a `sql`/`sqlite` source (sample rows: humans only)
  *
  * Every connection is the dialer's, under the source's confirmed ranges; every secret is resolved at
  * the call and scrubbed from what is answered.
+ *
+ * (DES-KNOWLEDGE-DATA-001 §5.2, crew#1310) "Human only": the management reads (catalog, describe, privileges,
+ * check, safety, test) keep their trust level AND are a HUMAN actor's only: `api/auth.ts` answers any other actor
+ * 403 `human_only` before the route runs, whatever its trust (an operator-trust agent bearer included). Agents get
+ * a source's structure only through estate and the gate.
  */
 
 import { createHash } from 'node:crypto';
@@ -209,7 +214,7 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
 
   app.get<{ Params: { name: string } }>(
     `${V}/sources/:name/catalog`,
-    { config: { manifest: { responseType: 'SourceCatalogResponse', statusCodes: [200, 400, 404, 503] } } },
+    { config: { manifest: { responseType: 'SourceCatalogResponse', statusCodes: [200, 400, 403, 404, 503] } } },
     async (req, reply) => {
       if (req.params.name === CREW_SOURCE) {
         const body: SourceCatalogResponse = { name: CREW_SOURCE, kind: 'crew', catalog: crewSourceCatalog(), descriptorHash: null };
@@ -236,7 +241,7 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
 
   app.post<{ Params: { name: string } }>(
     `${V}/sources/:name/describe`,
-    { config: { manifest: { responseType: 'SourceCatalogResponse', statusCodes: [200, 400, 404, 409, 502, 503, 504] } } },
+    { config: { manifest: { responseType: 'SourceCatalogResponse', statusCodes: [200, 400, 403, 404, 409, 502, 503, 504] } } },
     async (req, reply) => {
       const r = registry(reply);
       if (r === null) return reply;
@@ -254,7 +259,7 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
 
   app.post<{ Params: { name: string } }>(
     `${V}/sources/:name/privileges`,
-    { config: { manifest: { requestType: 'SourcePrivilegesBody', responseType: 'SourcePrivilegeReport', statusCodes: [200, 400, 404, 409, 502, 503, 504] } } },
+    { config: { manifest: { requestType: 'SourcePrivilegesBody', responseType: 'SourcePrivilegeReport', statusCodes: [200, 400, 403, 404, 409, 502, 503, 504] } } },
     async (req, reply) => {
       const parsed = SourcePrivilegesSchema.safeParse(req.body ?? {});
       if (!parsed.success) return invalid(reply, parsed.error);
@@ -272,7 +277,7 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
 
   app.post<{ Params: { name: string } }>(
     `${V}/sources/:name/check`,
-    { config: { manifest: { requestType: 'SourceCheckBody', responseType: 'SourceCheckResponse', statusCodes: [200, 400, 404, 409, 502, 503, 504] } } },
+    { config: { manifest: { requestType: 'SourceCheckBody', responseType: 'SourceCheckResponse', statusCodes: [200, 400, 403, 404, 409, 502, 503, 504] } } },
     async (req, reply) => {
       const parsed = SourceCheckSchema.safeParse(req.body);
       if (!parsed.success) return invalid(reply, parsed.error);
@@ -305,7 +310,7 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
 
   app.post<{ Params: { name: string } }>(
     `${V}/sources/:name/safety`,
-    { config: { manifest: { requestType: 'SourceSafetyBody', responseType: 'SourceSafetyResponse', statusCodes: [200, 400, 404, 409, 502, 503, 504] } } },
+    { config: { manifest: { requestType: 'SourceSafetyBody', responseType: 'SourceSafetyResponse', statusCodes: [200, 400, 403, 404, 409, 502, 503, 504] } } },
     async (req, reply) => {
       const parsed = SourceSafetySchema.safeParse(req.body);
       if (!parsed.success) return invalid(reply, parsed.error);
@@ -406,7 +411,7 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
 
   app.post<{ Params: { name: string } }>(
     `${V}/sources/:name/test`,
-    { config: { manifest: { responseType: 'SourceConnectionTestResponse', statusCodes: [200, 400, 404, 503] } } },
+    { config: { manifest: { responseType: 'SourceConnectionTestResponse', statusCodes: [200, 400, 403, 404, 503] } } },
     async (req, reply) => {
       const r = registry(reply);
       if (r === null) return reply;
