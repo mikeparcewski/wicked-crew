@@ -1400,7 +1400,7 @@ export interface RuntimeDeps {
    *  injects one (so a test never makes a repo under the real `~/.wicked/apps`). */
   apps?: AppStore;
   /** (DES-APPS-001 K5) A unit token → its run and step, for `POST /apps/check`; absent = that route answers 503. */
-  appsVerifyUnitToken?: (token: string) => Promise<{ runId: string; phase?: string } | null>;
+  appsVerifyUnitToken?: (token: string) => Promise<{ runId: string; phase: string } | null>;
   /** (K2b) Grants and action records (`daemon-apps-actions.json`); with `apps`, the action routes serve for real. */
   appsActions?: AppActionStore;
   /** (K2b) Who a viewer is (email, name) for viewer-bound parameters; default: the global git identity for the local actor. */

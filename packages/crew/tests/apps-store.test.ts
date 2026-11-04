@@ -69,7 +69,7 @@ function fakeRegistry(fail: () => boolean = () => false) {
   return { registry, repos };
 }
 
-function setup(opts: { auth?: boolean; stage?: AppSourceStage | null; turns?: AppTurnLauncher | null; failRegister?: () => boolean; verifyUnitToken?: (t: string) => Promise<{ runId: string } | null> } = {}) {
+function setup(opts: { auth?: boolean; stage?: AppSourceStage | null; turns?: AppTurnLauncher | null; failRegister?: () => boolean; verifyUnitToken?: (t: string) => Promise<{ runId: string; phase: string } | null> } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'apps-store-'));
   dirs.push(dir);
   const reg = fakeRegistry(opts.failRegister);
@@ -753,7 +753,7 @@ describe('apps: the check route, plugin actors and a broken state file (pi r1 on
   it('the check route takes no bearer, verifies the unit token, and checks only the turn in flight', async () => {
     const t: AppTurnLauncher = { launch: async () => undefined, isActive: async () => true };
     let turnRun = '';
-    const s = setup({ auth: true, turns: t, verifyUnitToken: async (tok) => (tok === 'unit-ok' ? { runId: turnRun } : tok === 'unit-other' ? { runId: 'apps-other-run' } : null) });
+    const s = setup({ auth: true, turns: t, verifyUnitToken: async (tok) => (tok === 'unit-ok' ? { runId: turnRun, phase: 'check' } : tok === 'unit-other' ? { runId: 'apps-other-run', phase: 'check' } : null) });
     await newApp(s, 'escalations', 'human');
     turnRun = (await s.call('POST', '/apps/escalations/turns', { base: 1, message: 'x' }, 'human')).body['runId'] as string;
     const head = git(join(s.dir, 'apps', 'escalations'), 'rev-parse', 'refs/heads/main');

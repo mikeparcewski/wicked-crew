@@ -14,7 +14,7 @@ import { launchRosterNaming, registerRoutes } from './routes.js';
 import { APPS_ACTIONS_STATE_FILENAME, AppActionStore } from '../apps/actions/store.js';
 import { AppsSourceStage } from '../apps/exec/source-stage.js';
 import { APPS_STATE_FILENAME, AppStore, defaultAppsRoot } from '../apps/store.js';
-import { AppTurnService, RegistryKnowledge } from '../apps/turns.js';
+import { AppTurnService, RegistryKnowledge, appsUnitResolver } from '../apps/turns.js';
 import { askStructure } from '../sources/ask.js';
 import type { SqlCatalog } from '../sources/catalog/types.js';
 import type { GraphqlCatalog } from '../sources/graphql.js';
@@ -2702,22 +2702,11 @@ export async function createServer(
       // (DES-APPS-001 K5) `POST /apps/check`: the engine resolves the unit's token; crew reads which step it is.
       ...(appStore !== null && CoreAdapter.estateScopeResolver() !== null
         ? {
-            appsVerifyUnitToken: async (token: string) => {
+            appsVerifyUnitToken: appsUnitResolver((req) => {
               const resolve = CoreAdapter.estateScopeResolver();
-              if (resolve === null) return null;
-              let unit: { runId?: unknown; ord?: unknown } | undefined;
-              try {
-                unit = (JSON.parse(await resolve(JSON.stringify({ token }))) as { unit?: { runId?: unknown; ord?: unknown } }).unit;
-              } catch {
-                return null;
-              }
-              if (typeof unit?.runId !== 'string' || typeof unit.ord !== 'number') return null;
-              const runId = unit.runId;
-              const view = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
-              const u = view?.units.find((x) => x.ord === unit!.ord);
-              // A unit crew cannot place is no step at all: refused as an unnamed one.
-              return { runId, phase: u === undefined ? '(unknown)' : u.id.startsWith(`${runId}:`) ? u.id.slice(runId.length + 1) : u.id };
-            },
+              if (resolve === null) return Promise.reject(new Error('no resolver'));
+              return resolve(req);
+            }, () => adapter.sessionsDetail()),
           }
         : {}),
       ...(appStore !== null && appActions !== null ? { appsActions: appActions } : {}),

@@ -292,12 +292,14 @@ export class AppStore {
     await this.requireGit();
     const a = this.app(slug);
     await this.refreshTurn(a, { locked: false });
-    // One snapshot: the summary, versions and pointer are taken together with the head whose files are
-    // read, so a landing during the read cannot pair a new base with an old spec (codex r1 on the store).
-    const snap = structuredClone({ summary: this.summary(a), versions: a.versions, history: this.historyOf(a), root: a.root });
-    const files = await this.files({ ...a, root: snap.root }, snap.summary.head.tree);
-    const turns = structuredClone((a.turnLog ?? []).slice(-TURN_LOG_SHOWN));
-    return { ...snap.summary, spec: files.spec, lock: files.lock, queryText: { ...files.queryText }, versions: snap.versions, history: snap.history, turns };
+    // The record may have been replaced meanwhile (a settlement's rollback swaps in a clone): read it again.
+    const now = this.app(slug);
+    // One snapshot: the summary, versions, pointer AND turn log are taken together with the head whose files are
+    // read, so a landing during the read cannot pair a new base with an old spec (codex r1 on the store), nor a
+    // turn log that says landed with the head before it (xreview r1 on K5).
+    const snap = structuredClone({ summary: this.summary(now), versions: now.versions, history: this.historyOf(now), root: now.root, turns: (now.turnLog ?? []).slice(-TURN_LOG_SHOWN) });
+    const files = await this.files({ ...now, root: snap.root }, snap.summary.head.tree);
+    return { ...snap.summary, spec: files.spec, lock: files.lock, queryText: { ...files.queryText }, versions: snap.versions, history: snap.history, turns: snap.turns };
   }
 
   /** (K5) The app whose turn in flight is `runId`, or `null`. */
@@ -425,15 +427,20 @@ export class AppStore {
         await this.landTurnLocked(a, { runId, commit: t.checked ?? '', builder: outcome.builder, reviewer: outcome.reviewer, summary: outcome.summary, change: outcome.change });
         return;
       } catch (err) {
-        const e = err instanceof AppStoreError ? err : null;
-        outcome = { kind: 'end', state: 'refused', code: e?.code ?? 'land_failed', reason: e?.message ?? (err instanceof Error ? err.message : String(err)) };
+        // Only crew's own refusal ends the turn: a failure to write the record (a full disk) leaves the turn in
+        // flight, to settle on the next read, rather than recording an outcome the file does not hold (xreview r1).
+        if (!(err instanceof AppStoreError)) throw err;
+        outcome = { kind: 'end', state: 'refused', code: err.code, reason: err.message };
       }
     }
     this.log(`[apps] turn ${runId} of ${a.slug} ended (${outcome.state}: ${outcome.code}); nothing landed, and the app is editable again`);
     const ended = outcome;
+    // The record as it is now (a rolled-back transaction replaces it with a clone).
+    const cur = this.app(a.slug);
+    if (cur.turn?.runId !== runId) return;
     this.transact(a.slug, () => {
-      a.turn = null;
-      this.patchTurnRecord(a, runId, { state: ended.state, endedAt: this.now(), code: ended.code, reason: ended.reason.slice(0, 2000) });
+      cur.turn = null;
+      this.patchTurnRecord(cur, runId, { state: ended.state, endedAt: this.now(), code: ended.code, reason: ended.reason.slice(0, 2000) });
     });
     await this.git(a).dropRef(['wicked', 'apps-checked', runId]).catch(() => undefined);
   }
@@ -620,12 +627,13 @@ export class AppStore {
       const receipt: AppReceipt = { kind: 'reviewed', tree, version, at, actor: t.launchedBy, review: { runId: t.runId, builder: input.builder, reviewer: input.reviewer } };
       // The version is a commit on the head whose tree is the checked one (the builder's intermediate
       // commits stay on the run's branch).
-      const commit = await git.commitTree(tree, this.head(a).commit, `v${version}: ${input.summary}`, at);
+      const commit = await git.commitTree(tree, this.head(a).commit, `v${version}: ${(input.change ?? input.summary).replace(/\s+/g, ' ').trim()}`, at);
       const check: AppCheckSummary = t.checkedSummary ?? { level: 'data', checked: [] };
       const name = (await this.files(a, tree)).spec.name;
       let landed: AppVersion | null = null;
       this.transact(slug, () => {
-        landed = this.record(a, { commit, tree, at, author: { kind: 'seat', id: input.builder }, receipt, summary: input.summary, check, base: t.base });
+        // The version strip's summary is one line (the turn record keeps the builder's lines as written).
+        landed = this.record(a, { commit, tree, at, author: { kind: 'seat', id: input.builder }, receipt, summary: (input.change ?? input.summary).replace(/\s+/g, ' ').trim() || 'A turn', check, base: t.base });
         a.turn = null;
         this.pushHistory(a, landed.version);
         // The app is called what its spec calls it (a turn or an edit may rename it).

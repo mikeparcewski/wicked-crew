@@ -10,7 +10,7 @@
  *  - actions (prepare, run, records, grant, revoke; HUMAN operator): the write path (K2b, `actions/`) when the
  *    daemon has one, else `501` after the human check; `GET …/actions/:id/grant` (observer) reads a grant.
  *    Publish: `501` after the human check.
- *  - `POST /apps/:app/turns` (operator): launch an `apps-turn` run and hold the app (`501` while this daemon
+ *  - `POST /apps/:app/turns` (HUMAN operator, K5): one message launches one `apps-turn` run and holds the app (`501` while this daemon
  *    has no launcher).
  *  - `POST /apps/check {token, app, commit}`: the `apps_check` Tool's route, authenticated by the unit's
  *    capability token (bearer-exempt like `/mcp/call`); `503` while the engine cannot verify one.
@@ -52,7 +52,7 @@ export interface AppRoutesDeps {
    * Verifies a unit's capability token for `POST /apps/check` and answers the run it belongs to. Absent
    * until the engine carries one: the route answers 503 and does nothing.
    */
-  verifyUnitToken?: (token: string) => Promise<{ runId: string; phase?: string } | null>;
+  verifyUnitToken?: (token: string) => Promise<{ runId: string; phase: string } | null>;
   /** (K2b) The executor; absent = the query route checks the receipt and answers 501. */
   executor?: AppExecutor;
   /** (K2b) The write path; absent = the action routes answer 501 after the human check. */
@@ -412,7 +412,8 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
     if (unit === null) return reply.code(401).send({ code: 'invalid_token', error: 'the unit token is not valid' });
     // Only the turn's `check` step may check it: a builder's or a reviewer's token is refused (they are the
     // seats the check judges and the seat that judges after it).
-    if (unit.phase !== undefined && unit.phase !== 'check') {
+    // Fail closed: a unit crew cannot attest as the check step (an unknown or absent step included) is refused.
+    if (unit.phase !== 'check') {
       return refuse(reply, 403, { code: 'not_the_check', error: `the ${unit.phase} step of run ${unit.runId} cannot run the Apps check; only its check step can` });
     }
     const slug = 'tree' in parsed.data ? store.turnApp(unit.runId) : parsed.data.app;

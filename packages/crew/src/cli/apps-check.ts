@@ -4,17 +4,24 @@
  * The engine runs it in the turn's worktree with the unit's capability token (`WICKED_MCP_TOKEN`), this
  * daemon's URL (`WICKED_CREW_URL`) and its snapshot of the builder's worktree (`WICKED_TREE`, a tree in the app
  * repo's objects). It asks crew to check that tree (`POST /apps/check`); crew does the work from the app repo's
- * own objects and writes the lock. On a pass it writes the checked tree's files into the worktree, so the review
+ * own objects and writes the lock. On a pass it puts the checked tree's files in the worktree, so the review
  * step is dispatched on exactly the tree that can land. It runs no git, no hook and nothing from the worktree.
  *
- * Writing into a worktree an agent seat had: every path is one crew named (`apps.json`, `apps.lock.json`,
- * `queries/<id>.<ext>`), checked against that shape again here; a symlink, or a directory where a file belongs
- * (or a non-directory where `queries/` belongs), is refused rather than followed; files are opened with
- * `O_NOFOLLOW` and left `0644`; a stale file under `queries/` crew did not name is removed (only a file or a link,
- * never followed). Exit 0: checked and written. Exit 1: refused (the findings are printed). Exit 2: could not ask.
+ * The worktree is a directory an agent seat had, so nothing is ever written THROUGH an entry the seat could have
+ * made (xreview r1: a raced parent directory, a hard link to a file elsewhere):
+ *  - every path is one crew named (`apps.json`, `apps.lock.json`, `queries/<id>.<ext>`), checked against that
+ *    shape again here;
+ *  - each file is written to a FRESH inode (`O_CREAT | O_EXCL | O_NOFOLLOW`, a random name crew chose, `0644`) and
+ *    renamed over its entry: an existing file, link or hard link there is replaced as a directory entry, never
+ *    opened, truncated or chmodded;
+ *  - `queries/` is built as a fresh directory and swapped in by rename; the old entry (whatever it is) is renamed
+ *    out of the worktree into a private temporary directory before it is removed, so nothing in it is followed.
+ * Exit 0: checked and written. Exit 1: refused (the findings are printed). Exit 2: could not ask.
  */
 
-import { constants, closeSync, fchmodSync, lstatSync, mkdirSync, openSync, readdirSync, rmdirSync, unlinkSync, writeSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { constants, closeSync, fchmodSync, lstatSync, mkdirSync, mkdtempSync, openSync, renameSync, rmSync, writeSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 /** The paths a checked tree may hold (query ids: `APP_NAMED_ID_RE`; extensions: `QUERY_EXT`). */
@@ -37,33 +44,41 @@ type CheckAnswer =
   | { ok: true; commit: string; tree: string; summary?: { level?: string; checked?: unknown[] }; files?: CheckedFile[] }
   | { ok: false; code?: string; findings?: Array<{ code?: string; path?: string; message?: string }> };
 
-/** A path under `root` that is a regular file or absent; anything else is a refusal naming it. */
-function plainOrAbsent(path: string, label: string): void {
-  let st;
-  try {
-    st = lstatSync(path);
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw e;
-  }
-  if (!st.isFile()) throw new Error(`${label} in the worktree is not a regular file (${st.isSymbolicLink() ? 'a symlink' : 'a directory or special file'}); nothing was written`);
-}
-
-function writePlain(path: string, text: string): void {
-  // O_NOFOLLOW: a symlink planted between the check above and this open is refused by the kernel, not followed.
-  const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o644);
+/** A new file at `path` (which must not exist), holding `text`, mode 0644. */
+function writeFresh(path: string, text: string): void {
+  const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644);
   try {
     const buf = Buffer.from(text, 'utf8');
     let off = 0;
     while (off < buf.length) off += writeSync(fd, buf, off, buf.length - off);
-    // An executable bit left on the file would make the worktree's tree differ from the checked one.
-    fchmodSync(fd, 0o644);
+    fchmodSync(fd, 0o644); // our own fresh inode: the umask may have narrowed it
   } finally {
     closeSync(fd);
   }
 }
 
-/** Write `files` (crew's checked tree) into `root`, removing what crew did not name under `queries/`. */
+const exists = (path: string): boolean => {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw e;
+  }
+};
+
+/** Move the entry at `path` out of the worktree (into `trash`), whatever it is; then it can be removed safely. */
+function moveOut(path: string, trash: string, name: string): void {
+  try {
+    renameSync(path, join(trash, name));
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EXDEV') throw e;
+    // Another filesystem: removed in place (rm never follows a link; a directory's own entries are removed by name).
+    rmSync(path, { recursive: true, force: true });
+  }
+}
+
+/** Put `files` (crew's checked tree) in the worktree `root`: fresh inodes renamed into place, `queries/` swapped whole. */
 export function materialize(root: string, files: readonly CheckedFile[]): void {
   const seen = new Set<string>();
   for (const f of files) {
@@ -73,30 +88,30 @@ export function materialize(root: string, files: readonly CheckedFile[]): void {
     seen.add(f.path);
   }
   if (!seen.has('apps.json') || !seen.has('apps.lock.json')) throw new Error('crew answered without apps.json and apps.lock.json; nothing was written');
-  const qdir = join(root, 'queries');
-  let qdirState: 'absent' | 'dir';
-  try {
-    const st = lstatSync(qdir);
-    if (st.isSymbolicLink() || !st.isDirectory()) throw new Error('queries in the worktree is not a directory (a symlink or a file); nothing was written');
-    qdirState = 'dir';
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
-    qdirState = 'absent';
+  for (const name of ['apps.json', 'apps.lock.json']) {
+    const st = exists(join(root, name)) ? lstatSync(join(root, name)) : null;
+    if (st !== null && st.isDirectory()) throw new Error(`${name} in the worktree is a directory; nothing was written`);
   }
-  // Every target is checked before anything is written.
-  for (const f of files) plainOrAbsent(join(root, f.path), f.path);
-  const queryFiles = files.filter((f) => f.path.startsWith('queries/'));
-  if (queryFiles.length > 0 && qdirState === 'absent') mkdirSync(qdir, { mode: 0o755 });
-  for (const f of files) writePlain(join(root, f.path), f.text);
-  if (qdirState === 'dir' || queryFiles.length > 0) {
-    for (const name of readdirSync(qdir)) {
-      if (seen.has(`queries/${name}`)) continue;
-      const p = join(qdir, name);
-      const st = lstatSync(p);
-      if (st.isDirectory() && !st.isSymbolicLink()) throw new Error(`queries/${name} is a directory crew did not name; the worktree differs from the checked tree`);
-      unlinkSync(p); // a file or a link (the link itself, never what it points at)
+  const tag = randomBytes(8).toString('hex');
+  const trash = mkdtempSync(join(tmpdir(), 'wicked-apps-check-'));
+  try {
+    // The query directory first, built fresh beside the files and swapped in by rename.
+    const queries = files.filter((f) => f.path.startsWith('queries/'));
+    const fresh = join(root, `.wicked-apps-check-${tag}-queries`);
+    if (queries.length > 0) {
+      mkdirSync(fresh, { mode: 0o755 });
+      for (const f of queries) writeFresh(join(fresh, f.path.slice('queries/'.length)), f.text);
     }
-    if (queryFiles.length === 0) rmdirSync(qdir);
+    if (exists(join(root, 'queries'))) moveOut(join(root, 'queries'), trash, 'queries');
+    if (queries.length > 0) renameSync(fresh, join(root, 'queries'));
+    // Then each root file: a fresh inode renamed over the entry (a link or a hard link there is replaced, never opened).
+    for (const f of files.filter((x) => !x.path.includes('/'))) {
+      const tmp = join(root, `.wicked-apps-check-${tag}-${f.path}`);
+      writeFresh(tmp, f.text);
+      renameSync(tmp, join(root, f.path));
+    }
+  } finally {
+    rmSync(trash, { recursive: true, force: true });
   }
 }
 
