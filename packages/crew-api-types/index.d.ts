@@ -13475,7 +13475,7 @@ export interface SourceAllowWritesResponse {
 }
 
 /**
- * (api-types KD_B2_VERSION, DES-KNOWLEDGE-DATA-001 §7.1) A live source's agent switches. Agents reach a source
+ * (api-types 0.184.0, DES-KNOWLEDGE-DATA-001 §7.1) A live source's agent switches. Agents reach a source
  * only through crew's data gate (`mcp:<source>/<tool>` through the broker); Apps units get none of its tools,
  * whatever this says (D-7). Never a write, never a credential.
  */
@@ -13545,7 +13545,7 @@ export interface RunDataUseResponse {
 }
 
 /**
- * (api-types KD_B2_VERSION, DES-KNOWLEDGE-DATA-001 §7.8) What a unit's rows tool (`mcp:<source>/execute_sql`)
+ * (api-types 0.184.0, DES-KNOWLEDGE-DATA-001 §7.8) What a unit's rows tool (`mcp:<source>/execute_sql`)
  * answers through the gate: one JSON object inside the MCP result's text, citable like knowledge, fenced as
  * untrusted data.
  */

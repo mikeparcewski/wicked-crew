@@ -12,6 +12,36 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **The data gate: live sources reach agents through ONE governed path (api-types 0.184.0, DES-KNOWLEDGE-DATA-001
+  §7, build B2).** A governed unit or a chat answer step reads a live source as `mcp:<source>/<tool>` through the
+  broker (`list_tables` = structure, `execute_sql` = rows; Toolbox's names on both runtimes): the unit is the
+  engine's binding of its token, the engine judges the exact subject (an Apps unit gets none, D-7), and ONE predicate
+  over the source's on/off and its switches decides by the tool's disclosure class (`rows` needs "query", structure
+  needs "see", no reviewed class means no agent). The switches are human-only: `PUT /sources/:name/agents {see,
+  query, projects, everyProject}` (403 `agents_switch_human_only` for any agent-kind actor; "see" on, "query" off,
+  no project by default; "query" off again on a descriptor change), each change audited `knowledge.source.*`.
+  Structure answers from crew's stored catalog and never dials. A read goes through K1's libpg_query policy (`SET`,
+  `BEGIN`, DDL, DML, two statements and unlisted functions refused before anything runs), the source's ONE scheduler
+  (concurrency 4, 1 without a source-side deadline; person > app > unit > describe; a bounded queue, `busy`; unit 30
+  a minute; backoff after connection failures), the `LIMIT <cap+1>` rewrite and, on the native runtime, a per-cell
+  projection built from prepare inside the read's transaction (variable-length columns cut at the source with
+  `left(…, 2001)`, `bytea` by `substring`; numbers, booleans, times and uuids keep their types; an int8 inside 2^53
+  is a JSON number). A unit gets at most 200 rows, 64 KB of rows and 2,000-character cells, in one envelope
+  (`untrusted` first, `cite: src:<name>@<at>#<hash>`, `deps: ["source:<id>"]`); errors are the class and the
+  SQLSTATE only. Rows are released in two durable steps (`mcp/source-queries.ndjson`: an unconfirmed entry, the
+  release check again, the broker's call record, then the released entry), backing `GET /sources/:name/agent-queries`
+  and `GET /runs/:id/data-use` (`known: false` when the record is unreadable). The person's query run goes through the
+  same scheduler and rewrite and answers as before. **The Toolbox runtime** (a `toolbox-source` entry with `runtime:
+  toolbox`, Postgres): MCP Toolbox for Databases v1.15.0 pinned per platform by sha256, downloaded once into
+  `<state home>/mcp/adapters/toolbox/` and verified before it is made executable; one `--stdio` process per source
+  (no listener), spawned from crew's own document (an allowlist at spawn; crew writes `default_transaction_read_only`,
+  `search_path`, `standard_conforming_strings`, `statement_timeout`, `application_name` and `sslmode`, and verifies
+  them on open), the secret only in that process's environment as a YAML-escaped double-quoted body (quotes and
+  newlines connect), stderr kept only scrubbed, each answer read with a 1 MiB bound and the process killed past it or
+  at the 10 s deadline. Host mode admits only an IP literal the dialer checked. After a kill on a source with no
+  source-side deadline the source stays closed (`remote_work_pending`) until its session is seen gone at the source,
+  re-checked every 60 s, closed while unknown. A Toolbox source's Test describes it through its own `list_tables`.
+
 - **The one registry: entry ids, Toolbox documents, two views and generations (api-types 0.183.0,
   DES-KNOWLEDGE-DATA-001 §5, brief B1; crew#1310).** Every registry entry has an immutable `id` (estate's source
   documents, `deps`, grants and records key on it, never on the name). A Postgres data source is stored as MCP Toolbox
