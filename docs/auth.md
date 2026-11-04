@@ -60,9 +60,12 @@ receipt, and a `plugin` actor). And the routes that accept a version or a grant
 (`POST /apps/:app/edits`, `undo`, `redo`, `restore`, the actions routes and
 `publish`) need a **human** actor at `operator` or above: an authenticated
 `kind: agent` token is refused with 403 `human_only` whatever its trust.
-`POST /apps/:app/turns` is deliberately `operator`, not human-only: a turn
-mints no receipt itself; its tree is accepted only after a review by a
-seat distinct from its builder.
+`POST /apps/:app/turns` (a chat message to an app, K5) is human-only too: a turn
+is a person's message, so an agent-kind token cannot start one (403 `human_only`)
+and no seat can drive an app's changes. Its tree is accepted only after a review by
+a seat distinct from its builder. `POST /apps/check` is the turn's check step only:
+it is authenticated by the unit's capability token in the body (bearer-exempt, like
+`/mcp/call`), and any unit but the run's `check` step is refused (403 `not_the_check`).
 
 The implicit local actor is `admin`: a solo deployment has one human and no
 boundary worth drawing between that human and the daemon.

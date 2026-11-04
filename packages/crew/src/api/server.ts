@@ -10,10 +10,14 @@ import { DecisionLedger } from '../decisions/ledger.js';
 import type { ChatDecisionRecorder } from '../decisions/chat-recorder.js';
 import type { ConsiderationService } from '../decisions/consider.js';
 import { requestOrigin, shellCsp } from '../editors/csp.js';
-import { registerRoutes } from './routes.js';
+import { launchRosterNaming, registerRoutes } from './routes.js';
 import { APPS_ACTIONS_STATE_FILENAME, AppActionStore } from '../apps/actions/store.js';
 import { AppsSourceStage } from '../apps/exec/source-stage.js';
 import { APPS_STATE_FILENAME, AppStore, defaultAppsRoot } from '../apps/store.js';
+import { AppTurnService, RegistryKnowledge, appsUnitResolver } from '../apps/turns.js';
+import { askStructure } from '../sources/ask.js';
+import type { SqlCatalog } from '../sources/catalog/types.js';
+import type { GraphqlCatalog } from '../sources/graphql.js';
 import { freshenCheckout } from './chat-freshness.js';
 import { ErrorRing, teeStreamWithErrorRing } from './diagnostics.js';
 import { GateCache } from './gate-cache.js';
@@ -2577,6 +2581,43 @@ export async function createServer(
       sourceStage: new AppsSourceStage({ registry: mcpRegistry }),
       log: (m) => app.log.warn(m),
     });
+    // (DES-APPS-001 K5) Chat turns: each message is one `apps-turn` run; its outcome lands or ends with a reason.
+    const store = appStore;
+    const turnService = new AppTurnService({
+      engine: adapter,
+      roster: async () => {
+        await rosterWithStanding.ready?.();
+        return JSON.stringify(launchRosterNaming(rosterWithStanding(), undefined));
+      },
+      knowledge: new RegistryKnowledge({
+        list: async () => (await mcpRegistry.list()).servers.map((s) => ({ name: s.name, kind: s.kind, enabled: s.enabled !== false })),
+        structure: async (name) => {
+          const src = await mcpRegistry.source(name).catch(() => null);
+          if (src === null || src.description === null) return null;
+          if (src.config.kind === 'sql') {
+            const cat = src.description.catalog as SqlCatalog;
+            return { kind: cat.dialect, structure: askStructure(cat, src.config.viewsAllowed ?? []) };
+          }
+          if (src.config.kind === 'graphql') {
+            const g = src.description.catalog as GraphqlCatalog;
+            return { kind: 'graphql', structure: { queries: g.queries.slice(0, 200), mutations: g.mutations.slice(0, 100), enums: g.enums.slice(0, 100) } };
+          }
+          return null;
+        },
+      }, (m) => app.log.warn(m)),
+      store: () => store,
+      log: (m) => app.log.info(m),
+    });
+    if (typeof (adapter as { cancelRun?: unknown }).cancelRun === 'function' && typeof (adapter as { onEvent?: unknown }).onEvent === 'function') {
+      appStore.turns = turnService;
+      turnService.attach();
+      // The engine's Tool step runs `wicked-crew apps-check`: point it at THIS crew's CLI (under `npx` there is no
+      // `wicked-crew` on PATH). An operator's own setting wins.
+      if ((process.env['WICKED_CREW_BIN'] ?? '').trim() === '') {
+        const cli = fileURLToPath(new URL('../cli/index.js', import.meta.url));
+        if (existsSync(cli)) process.env['WICKED_CREW_BIN'] = cli;
+      }
+    }
     // A crash between an app's record and its registration is finished here, off the boot path.
     void appStore.reconcile();
     // (K2b) Grants and action records; every `running` record of an earlier process becomes `unknown` here.
@@ -2658,6 +2699,16 @@ export async function createServer(
       mcp: mcpRegistry,
       // DES-APPS-001 (K2a): the app store (`daemon-apps.json` in the state home; repos under the apps root).
       ...(appStore !== null ? { apps: appStore } : {}),
+      // (DES-APPS-001 K5) `POST /apps/check`: the engine resolves the unit's token; crew reads which step it is.
+      ...(appStore !== null && CoreAdapter.estateScopeResolver() !== null
+        ? {
+            appsVerifyUnitToken: appsUnitResolver((req) => {
+              const resolve = CoreAdapter.estateScopeResolver();
+              if (resolve === null) return Promise.reject(new Error('no resolver'));
+              return resolve(req);
+            }, () => adapter.sessionsDetail()),
+          }
+        : {}),
       ...(appStore !== null && appActions !== null ? { appsActions: appActions } : {}),
       // DES-MCP-TOOLS-001 S3: the broker's call path over that registry.
       mcpBroker,

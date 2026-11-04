@@ -34,6 +34,7 @@ import type {
   AppReceiptKind,
   AppSpec,
   AppSummary,
+  AppTurnRecord,
   AppTurnState,
   AppVersion,
   AppsCheckResponse,
@@ -93,18 +94,41 @@ interface StoredApp {
   receipts: Record<string, AppReceipt[]>;
   history: { states: number[]; pointer: number };
   turn: StoredTurn | null;
+  /** (K5) The app's turns, oldest first, the last {@link TURN_LOG_MAX}: the chat reads them (no new thread store). */
+  turnLog?: AppTurnRecord[];
 }
+
+/** How many turns an app's record keeps, and how many its detail answers. */
+export const TURN_LOG_MAX = 50;
+export const TURN_LOG_SHOWN = 20;
+
+/** How a turn whose run is no longer running ends: it lands, or it ends with a reason (DES §9.2). */
+export type AppTurnSettlement =
+  | { kind: 'land'; builder: string; reviewer: string; summary: string; change: string }
+  | { kind: 'end'; state: 'refused' | 'failed' | 'cancelled'; code: string; reason: string }
+  /** Not known yet (the engine did not answer, or would not stop a refused run): the turn stays in flight. */
+  | { kind: 'pending'; why: string };
 
 interface StateFile {
   version: 1;
   apps: Record<string, StoredApp>;
 }
 
-/** The turn seam: launching an `apps-turn` run, and asking whether one still runs. */
+/** The turn seam: launching an `apps-turn` run, asking whether one still runs, and how one that ended ends. */
 export interface AppTurnLauncher {
   /** Launch the run under `runId`, which crew chose and recorded first (a crash between the two leaves a turn crew can check). */
-  launch(input: { runId: string; app: string; repoId: string; base: number; message: string; about: string[]; actor: Actor }): Promise<void>;
+  launch(input: {
+    runId: string; app: string; repoId: string; base: number; message: string; about: string[]; actor: Actor;
+    /** (K5) The app as the builder starts from it: its project, name, spec at head and last turns. */
+    projectId?: string; name?: string; spec?: AppSpec; recent?: AppTurnRecord[];
+  }): Promise<void>;
   isActive(runId: string): Promise<boolean>;
+  /**
+   * (K5) How a turn whose run is no longer running ends, read from the engine's record (never from the
+   * worker): `land` only when its review by a seat distinct from its builder passed on exactly `checkedTree`.
+   * Absent on a launcher that cannot tell: the turn then ends with no version.
+   */
+  settlement?(input: { slug: string; runId: string; checkedTree: string | null; base: () => Promise<AppFiles>; landedSpec: (tree: string) => Promise<AppFiles> }): Promise<AppTurnSettlement>;
 }
 
 /** crew's repo registry, as the store needs it. */
@@ -270,11 +294,31 @@ export class AppStore {
     await this.requireGit();
     const a = this.app(slug);
     await this.refreshTurn(a, { locked: false });
-    // One snapshot: the summary, versions and pointer are taken together with the head whose files are
-    // read, so a landing during the read cannot pair a new base with an old spec (codex r1 on the store).
-    const snap = structuredClone({ summary: this.summary(a), versions: a.versions, history: this.historyOf(a), root: a.root });
-    const files = await this.files({ ...a, root: snap.root }, snap.summary.head.tree);
-    return { ...snap.summary, spec: files.spec, lock: files.lock, queryText: { ...files.queryText }, versions: snap.versions, history: snap.history };
+    // The record may have been replaced meanwhile (a settlement's rollback swaps in a clone): read it again.
+    const now = this.app(slug);
+    // One snapshot: the summary, versions, pointer AND turn log are taken together with the head whose files are
+    // read, so a landing during the read cannot pair a new base with an old spec (codex r1 on the store), nor a
+    // turn log that says landed with the head before it (xreview r1 on K5).
+    const snap = structuredClone({ summary: this.summary(now), versions: now.versions, history: this.historyOf(now), root: now.root, turns: (now.turnLog ?? []).slice(-TURN_LOG_SHOWN) });
+    const files = await this.files({ ...now, root: snap.root }, snap.summary.head.tree);
+    return { ...snap.summary, spec: files.spec, lock: files.lock, queryText: { ...files.queryText }, versions: snap.versions, history: snap.history, turns: snap.turns };
+  }
+
+  /** (K5) The app whose turn in flight is `runId`, or `null`. */
+  turnApp(runId: string): string | null {
+    for (const a of Object.values(this.state.apps)) if (a.turn?.runId === runId) return a.slug;
+    return null;
+  }
+
+  /** (K5) The turns of `slug`, oldest first (at most {@link TURN_LOG_SHOWN}). */
+  turnLog(slug: string): AppTurnRecord[] {
+    return structuredClone((this.app(slug).turnLog ?? []).slice(-TURN_LOG_SHOWN));
+  }
+
+  /** (K5) Write `patch` onto `runId`'s turn record (inside a transaction). */
+  private patchTurnRecord(a: StoredApp, runId: string, patch: Partial<AppTurnRecord>): void {
+    const r = (a.turnLog ?? []).find((x) => x.runId === runId);
+    if (r !== undefined) Object.assign(r, patch);
   }
 
   /**
@@ -355,16 +399,80 @@ export class AppStore {
       this.log(`[apps] cannot tell whether turn ${runId} of ${a.slug} still runs (it keeps the app read-only): ${err instanceof Error ? err.message : String(err)}`);
     }
     if (active) return;
-    const clear = async (): Promise<void> => {
+    const settle = async (): Promise<void> => {
       const current = Object.hasOwn(this.state.apps, a.slug) ? this.state.apps[a.slug]! : undefined;
       if (current === undefined || current.turn?.runId !== runId || this.launching.has(runId)) return;
-      this.log(`[apps] turn ${runId} of ${a.slug} is no longer running; the app is editable again`);
-      this.transact(a.slug, () => {
-        current.turn = null;
-      });
+      await this.settleLocked(current, runId);
     };
-    if (opts.locked) await clear();
-    else await this.withApp(a.slug, clear);
+    if (opts.locked) await settle();
+    else await this.withApp(a.slug, settle);
+  }
+
+  /**
+   * (K5) A turn whose run ended, settled under the app's lock: it lands as a `reviewed` version only when the
+   * launcher's reading of the engine's record says its review by a distinct seat passed on the tree the check
+   * offered; otherwise it ends with the reason, and nothing lands. Either way the app is editable again.
+   */
+  private async settleLocked(a: StoredApp, runId: string): Promise<void> {
+    const t = a.turn;
+    if (t === null || t.runId !== runId) return;
+    let outcome: AppTurnSettlement;
+    if (this.turns?.settlement === undefined) {
+      outcome = { kind: 'end', state: 'failed', code: 'unknown', reason: 'this daemon cannot read how the turn ended, so nothing landed' };
+    } else {
+      try {
+        // The head's files are read only when a landed turn's change line needs them (xreview r4: a cold read failing
+        // must never end a turn whose run is still parked).
+        outcome = await this.turns.settlement({ slug: a.slug, runId, checkedTree: t.checkedTree ?? null, base: () => this.files(a, this.head(a).tree), landedSpec: (tree) => this.files(a, tree) });
+      } catch (err) {
+        // The launcher throws only for a run the engine says has ENDED (a parked or running one answers `pending`):
+        // a defect then ends the turn (failed), so the app is never wedged read-only (xreview r3, r4).
+        outcome = { kind: 'end', state: 'failed', code: 'unknown', reason: `crew could not read how the turn ended (${err instanceof Error ? err.message : String(err)}), so nothing landed` };
+      }
+    }
+    if (outcome.kind === 'pending') {
+      // Not known yet: the turn stays in flight and settles on a later read; nothing is recorded that the engine's
+      // record does not say, and no other turn starts meanwhile (xreview r2, r3).
+      this.log(`[apps] turn ${runId} of ${a.slug} is not settled yet (it stays read-only): ${outcome.why}`);
+      return;
+    }
+    if (outcome.kind === 'land') {
+      try {
+        await this.landTurnLocked(a, { runId, commit: t.checked ?? '', builder: outcome.builder, reviewer: outcome.reviewer, summary: outcome.summary, change: outcome.change });
+        return;
+      } catch (err) {
+        // Only crew's own refusal ends the turn: a failure to write the record (a full disk) leaves the turn in
+        // flight, to settle on the next read, rather than recording an outcome the file does not hold (xreview r1).
+        if (!(err instanceof AppStoreError)) throw err;
+        outcome = { kind: 'end', state: 'refused', code: err.code, reason: err.message };
+      }
+    }
+    this.log(`[apps] turn ${runId} of ${a.slug} ended (${outcome.state}: ${outcome.code}); nothing landed, and the app is editable again`);
+    const ended = outcome;
+    // The record as it is now (a rolled-back transaction replaces it with a clone).
+    const cur = this.app(a.slug);
+    if (cur.turn?.runId !== runId) return;
+    this.transact(a.slug, () => {
+      cur.turn = null;
+      this.patchTurnRecord(cur, runId, { state: ended.state, endedAt: this.now(), code: ended.code, reason: ended.reason.slice(0, 2000) });
+    });
+    await this.git(a).dropRef(['wicked', 'apps-checked', runId]).catch(() => undefined);
+  }
+
+  /** (K5) Settle `runId`'s turn now (its run ended): the event path's entry. A turn still running is left alone. */
+  async settleTurn(slug: string, runId: string): Promise<void> {
+    if (!this.has(slug)) return;
+    await this.withApp(slug, async () => {
+      const a = this.app(slug);
+      if (a.turn?.runId !== runId || this.launching.has(runId)) return;
+      let active = true;
+      try {
+        active = this.turns === null ? false : await this.turns.isActive(runId);
+      } catch {
+        active = true;
+      }
+      if (!active) await this.settleLocked(a, runId);
+    });
   }
 
   private turnInFlight(a: StoredApp, what: string): AppStoreError {
@@ -376,7 +484,8 @@ export class AppStore {
 
   /** The guard every change runs first: no turn in flight, the base is the head, `main` mirrors the head. */
   private async guard(a: StoredApp, base: number, what: string, opts: { turnRun?: string } = {}): Promise<void> {
-    await this.refreshTurn(a, { locked: true });
+    // Landing a turn is that turn settling: asking the engine about it again would settle it twice.
+    if (opts.turnRun === undefined) await this.refreshTurn(a, { locked: true });
     if (a.turn !== null && a.turn.runId !== opts.turnRun) throw this.turnInFlight(a, what);
     const h = this.head(a);
     if (base !== h.version) {
@@ -395,20 +504,31 @@ export class AppStore {
     return this.withApp(slug, async () => {
       const a = this.app(slug);
       await this.guard(a, input.base, 'a new turn');
+      if (a.repoId === '') throw new AppStoreError(409, 'not_registered', `${slug}'s repository is not registered yet, so no turn can work in it; try again in a moment`);
       // The turn is recorded under the run id crew chose BEFORE the run starts, so a crash between the two
       // leaves a turn crew can ask about, never a run with no lock (codex r1 on the store).
       const runId = `apps-${slug}-${randomBytes(6).toString('hex')}`;
       const turn: StoredTurn = { runId, startedAt: this.now(), base: input.base, actor: input.actor.id, launchedBy: input.actor, checked: null, checkedTree: null, checkedSummary: null };
       this.launching.add(runId);
+      const record: AppTurnRecord = {
+        runId, at: turn.startedAt, actor: input.actor.id, message: input.message, about: [...input.about], base: input.base,
+        state: 'running', endedAt: null, version: null, change: null, summary: null, builder: null, reviewer: null, code: null, reason: null,
+      };
       try {
         this.transact(slug, () => {
           a.turn = turn;
+          a.turnLog = [...(a.turnLog ?? []), record].slice(-TURN_LOG_MAX);
         });
-        await turns.launch({ runId, app: slug, repoId: a.repoId, base: input.base, message: input.message, about: input.about, actor: input.actor });
+        const head = await this.files(a, this.head(a).tree);
+        const recent = structuredClone((a.turnLog ?? []).filter((r) => r.runId !== runId).slice(-5));
+        await turns.launch({ runId, app: slug, repoId: a.repoId, base: input.base, message: input.message, about: input.about, actor: input.actor, projectId: a.projectId, name: a.name, spec: head.spec, recent });
       } catch (err) {
         if (a.turn?.runId === runId) {
+          // A launch the engine refused is a turn that never ran: its record says why, and nothing landed.
+          const reason = (err instanceof Error ? err.message : String(err)).slice(0, 2000);
           this.transact(slug, () => {
             a.turn = null;
+            this.patchTurnRecord(a, runId, { state: 'refused', endedAt: this.now(), code: err instanceof AppStoreError ? err.code : 'launch_refused', reason });
           });
         }
         throw err;
@@ -420,12 +540,13 @@ export class AppStore {
   }
 
   /** The turn's run ended (any outcome): the app is editable again. Idempotent; another run's end is ignored. */
-  async endTurn(slug: string, runId: string): Promise<void> {
+  async endTurn(slug: string, runId: string, outcome: { state: 'refused' | 'failed' | 'cancelled'; code: string; reason: string } = { state: 'cancelled', code: 'ended', reason: 'the turn ended' }): Promise<void> {
     await this.withApp(slug, async () => {
       const a = this.app(slug);
       if (a.turn?.runId !== runId) return;
       this.transact(slug, () => {
         a.turn = null;
+        this.patchTurnRecord(a, runId, { state: outcome.state, endedAt: this.now(), code: outcome.code, reason: outcome.reason.slice(0, 2000) });
       });
       await this.git(a).dropRef(['wicked', 'apps-checked', runId]);
     });
@@ -437,20 +558,36 @@ export class AppStore {
    * and commits it on the candidate. That commit is the tree the turn offers, and the only one a review
    * can land.
    */
-  async checkTurn(slug: string, runId: string, candidate: string): Promise<AppsCheckResponse> {
+  async checkTurn(slug: string, runId: string, given: string | { commit: string } | { tree: string }): Promise<AppsCheckResponse> {
     return this.withApp(slug, async () => {
       const a = this.app(slug);
       if (a.turn?.runId !== runId) throw new AppStoreError(409, 'not_this_turn', `run ${runId} is not ${slug}'s turn in flight`);
       const git = this.git(a);
-      const tree = await git.treeOf(candidate.toLowerCase());
-      if (tree === null) throw new AppStoreError(404, 'unknown_version', `${slug}'s repo has no commit ${candidate}`);
+      let candidate: string;
+      let tree: string | null;
+      if (typeof given === 'string' || 'commit' in given) {
+        candidate = (typeof given === 'string' ? given : given.commit).toLowerCase();
+        tree = await git.treeOf(candidate);
+        if (tree === null) throw new AppStoreError(404, 'unknown_version', `${slug}'s repo has no commit ${candidate}`);
+      } else {
+        // (K5) The engine's snapshot of the builder's worktree, a TREE in the app repo's objects (`WICKED_TREE`):
+        // crew makes the candidate commit itself, on the head, reading only verified objects.
+        tree = given.tree.toLowerCase();
+        if (!SHA_RE.test(tree)) throw new AppStoreError(400, 'bad_request', 'tree must be a 40-hex object id');
+        try {
+          await git.readTree(tree);
+        } catch {
+          throw new AppStoreError(404, 'unknown_version', `${slug}'s repo has no tree ${tree}`);
+        }
+        candidate = await git.commitTree(tree, this.head(a).commit, `apps-turn ${runId}: the builder's tree`, this.now());
+      }
       const read = await readAppTree(git, tree);
       if (!read.ok) return { ok: false, code: 'check_failed', findings: read.findings };
       const base = await this.files(a, this.head(a).tree);
       const outcome = await stagedCheck({ app: slug, spec: read.files.spec, queryText: read.files.queryText, base, level: 'auto', sourceStage: this.sourceStage });
       if (!outcome.ok) return { ok: false, code: outcome.code, findings: outcome.findings };
       const checkedTree = await this.writeTree(git, read.files.spec, read.files.queryText, outcome.lock);
-      const commit = await git.commitTree(checkedTree, candidate.toLowerCase(), `apps-check: lock for turn ${runId}`, this.now());
+      const commit = await git.commitTree(checkedTree, candidate, `apps-check: lock for turn ${runId}`, this.now());
       const t = a.turn;
       // Anchored under a crew ref so a gc in the builder's seat cannot prune it before it lands (pi r3).
       await git.writeRef(['wicked', 'apps-checked', runId], commit);
@@ -459,8 +596,20 @@ export class AppStore {
         t.checkedTree = checkedTree;
         t.checkedSummary = outcome.summary;
       });
-      return { ok: true, commit, tree: checkedTree, summary: outcome.summary };
+      return { ok: true, commit, tree: checkedTree, summary: outcome.summary, files: this.treeFiles(read.files.spec, read.files.queryText, outcome.lock) };
     });
+  }
+
+  /**
+   * (K5) The files of a tree {@link writeTree} makes, as text: what `wicked-crew apps-check` writes into the
+   * turn's worktree so the review is dispatched on exactly the checked tree.
+   */
+  private treeFiles(spec: AppSpec, queryText: Record<string, string>, lock: AppLock): Array<{ path: string; text: string }> {
+    return [
+      { path: SPEC_PATH, text: specBytes(spec) },
+      { path: LOCK_PATH, text: lockBytes(lock) },
+      ...spec.queries.map((q) => ({ path: `${QUERIES_DIR}/${q.id}.${QUERY_EXT[q.kind]}`, text: ownText(queryText, q.id) ?? '' })),
+    ];
   }
 
   /**
@@ -468,9 +617,13 @@ export class AppStore {
    * Refused unless `commit` is exactly the tree this turn's check offered, the seats differ, and the app is
    * still at the turn's base.
    */
-  async landTurn(slug: string, input: { runId: string; commit: string; builder: string; reviewer: string; summary: string }): Promise<AppVersion> {
-    return this.withApp(slug, async () => {
-      const a = this.app(slug);
+  async landTurn(slug: string, input: { runId: string; commit: string; builder: string; reviewer: string; summary: string; change?: string }): Promise<AppVersion> {
+    return this.withApp(slug, async () => this.landTurnLocked(this.app(slug), input));
+  }
+
+  private async landTurnLocked(a: StoredApp, input: { runId: string; commit: string; builder: string; reviewer: string; summary: string; change?: string }): Promise<AppVersion> {
+    const slug = a.slug;
+    {
       const t = a.turn;
       if (t === null || t.runId !== input.runId) throw new AppStoreError(409, 'not_this_turn', `run ${input.runId} is not ${slug}'s turn in flight`);
       if (t.checked === null || t.checked !== input.commit.toLowerCase()) {
@@ -488,18 +641,26 @@ export class AppStore {
       const receipt: AppReceipt = { kind: 'reviewed', tree, version, at, actor: t.launchedBy, review: { runId: t.runId, builder: input.builder, reviewer: input.reviewer } };
       // The version is a commit on the head whose tree is the checked one (the builder's intermediate
       // commits stay on the run's branch).
-      const commit = await git.commitTree(tree, this.head(a).commit, `v${version}: ${input.summary}`, at);
+      const commit = await git.commitTree(tree, this.head(a).commit, `v${version}: ${(input.change ?? input.summary).replace(/\s+/g, ' ').trim()}`, at);
       const check: AppCheckSummary = t.checkedSummary ?? { level: 'data', checked: [] };
+      const name = (await this.files(a, tree)).spec.name;
       let landed: AppVersion | null = null;
       this.transact(slug, () => {
-        landed = this.record(a, { commit, tree, at, author: { kind: 'seat', id: input.builder }, receipt, summary: input.summary, check, base: t.base });
+        // The version strip's summary is one line (the turn record keeps the builder's lines as written).
+        landed = this.record(a, { commit, tree, at, author: { kind: 'seat', id: input.builder }, receipt, summary: (input.change ?? input.summary).replace(/\s+/g, ' ').trim() || 'A turn', check, base: t.base });
         a.turn = null;
         this.pushHistory(a, landed.version);
+        // The app is called what its spec calls it (a turn or an edit may rename it).
+        if (typeof name === 'string' && name.trim() !== '') a.name = name;
+        this.patchTurnRecord(a, t.runId, {
+          state: 'landed', endedAt: at, version: landed.version, change: (input.change ?? '').slice(0, 300) || null,
+          summary: input.summary.slice(0, 600) || null, builder: input.builder, reviewer: input.reviewer, code: null, reason: null,
+        });
       });
       await this.mirror(a, commit);
       await git.dropRef(['wicked', 'apps-checked', t.runId]);
       return landed!;
-    });
+    }
   }
 
   // ── Creating an app ─────────────────────────────────────────────────────────────────────────────
@@ -712,6 +873,7 @@ export class AppStore {
     this.transact(a.slug, () => {
       landed = this.record(a, { commit, tree, at, author: humanAuthor(opts.actor), receipt: opts.receipt(version, tree, at), summary: opts.summary, check: outcome.summary, base: h.version });
       opts.history(version);
+      if (candidate.spec.name.trim() !== '') a.name = candidate.spec.name;
     });
     await this.mirror(a, commit);
     return landed!;

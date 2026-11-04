@@ -7,7 +7,8 @@
  * its spec's actions hold a row write's table and columns and an API action's call (a GraphQL mutation
  * document). A human actor (studio's app viewers) reads it whole. Any other actor ({@link viewOf} `agent`)
  * reads the lock's sources reduced to `{kind, descriptorHash}`, no `queryText`, and each action as what it
- * is, not what it touches (`{id, kind, source, op, description}`). Everything else passes through. Crew's
+ * is, not what it touches (`{id, kind, source, op, description}`), and no `turns` (the app's chat, K5). Everything
+ * else passes through. Crew's
  * own readers (the K5 builder's turn, the check, the executor) call the store in process, not the route, so
  * they keep the full detail.
  */
@@ -19,7 +20,7 @@ import type { Actor, AppAction, AppDetail, AppLock, AppLockSource, AppSpec } fro
 export type AppActionAgentView = Pick<AppAction, 'id' | 'kind' | 'source' | 'description'> & { op?: 'insert' | 'update' | 'delete' };
 
 /** The agent-safe form of the Apps detail. Crew-local (api-types unchanged). */
-export type AppDetailAgentView = Omit<AppDetail, 'queryText' | 'lock' | 'spec'> & {
+export type AppDetailAgentView = Omit<AppDetail, 'queryText' | 'lock' | 'spec' | 'turns'> & {
   spec: Omit<AppSpec, 'actions'> & { actions: AppActionAgentView[] };
   lock: Omit<AppLock, 'sources'> & { sources: Record<string, Pick<AppLockSource, 'kind' | 'descriptorHash'>> };
 };
@@ -39,9 +40,12 @@ export function appDetailFor(actor: Actor | null | undefined, detail: AppDetail)
   if (viewOf(actor) === 'full') return detail;
   const view: Partial<AppDetail> = { ...detail };
   delete view.queryText;
+  // (K5) The app's chat is the person's: its messages and crew's reasons (a check's findings name queries and
+  // relations; a builder's words) are not an agent's to read.
+  delete view.turns;
   const sources = Object.fromEntries(Object.entries(detail.lock.sources).map(([name, s]) => [name, { kind: s.kind, descriptorHash: s.descriptorHash }]));
   return {
-    ...(view as Omit<AppDetail, 'queryText' | 'lock' | 'spec'>),
+    ...(view as Omit<AppDetail, 'queryText' | 'lock' | 'spec' | 'turns'>),
     spec: { ...detail.spec, actions: (detail.spec.actions ?? []).map(actionFor) },
     // pi r2: the lock is built from its known fields, so a field added to it later stays out of the agent form.
     lock: { schema: detail.lock.schema, sources, queries: detail.lock.queries, actions: detail.lock.actions, uploads: detail.lock.uploads },

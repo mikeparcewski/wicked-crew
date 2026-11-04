@@ -10,7 +10,7 @@
  *  - actions (prepare, run, records, grant, revoke; HUMAN operator): the write path (K2b, `actions/`) when the
  *    daemon has one, else `501` after the human check; `GET …/actions/:id/grant` (observer) reads a grant.
  *    Publish: `501` after the human check.
- *  - `POST /apps/:app/turns` (operator): launch an `apps-turn` run and hold the app (`501` while this daemon
+ *  - `POST /apps/:app/turns` (HUMAN operator, K5): one message launches one `apps-turn` run and holds the app (`501` while this daemon
  *    has no launcher).
  *  - `POST /apps/check {token, app, commit}`: the `apps_check` Tool's route, authenticated by the unit's
  *    capability token (bearer-exempt like `/mcp/call`); `503` while the engine cannot verify one.
@@ -52,7 +52,7 @@ export interface AppRoutesDeps {
    * Verifies a unit's capability token for `POST /apps/check` and answers the run it belongs to. Absent
    * until the engine carries one: the route answers 503 and does nothing.
    */
-  verifyUnitToken?: (token: string) => Promise<{ runId: string } | null>;
+  verifyUnitToken?: (token: string) => Promise<{ runId: string; phase: string } | null>;
   /** (K2b) The executor; absent = the query route checks the receipt and answers 501. */
   executor?: AppExecutor;
   /** (K2b) The write path; absent = the action routes answer 501 after the human check. */
@@ -109,7 +109,11 @@ export const AppTurnSchema = z.object({ base, message: z.string().min(1).max(800
 export const AppActionPrepareSchema = z.object({ version, params: z.record(z.unknown()).optional() }).strict();
 export const AppActionRunSchema = z.object({ record: z.string().uuid() }).strict();
 export const AppActionGrantSchema = z.object({ version }).strict();
-export const AppsCheckSchema = z.object({ token: z.string().min(1).max(4096), app: slugParam, commit: z.string().regex(/^[0-9a-fA-F]{40}$/), manifest: z.unknown().optional() }).strict();
+export const AppsCheckSchema = z.union([
+  // (K5) The Tool's form: the engine's snapshot of the builder's worktree; crew finds the app by the unit's run.
+  z.object({ token: z.string().min(1).max(4096), tree: z.string().regex(/^[0-9a-fA-F]{40}$/), manifest: z.unknown().optional() }).strict(),
+  z.object({ token: z.string().min(1).max(4096), app: slugParam, commit: z.string().regex(/^[0-9a-fA-F]{40}$/), manifest: z.unknown().optional() }).strict(),
+]);
 
 export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): void {
   const { store } = deps;
@@ -373,8 +377,11 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
 
   app.post(
     `${V}/apps/:app/turns`,
-    { config: { manifest: { requestType: 'AppTurnBody', responseType: 'AppTurnResponse', statusCodes: [202, 400, 404, 409, 501, 503] } } },
+    { config: { manifest: { requestType: 'AppTurnBody', responseType: 'AppTurnResponse', statusCodes: [202, 400, 403, 404, 409, 501, 503] } } },
     async (req, reply) => {
+      // (K5) A turn is a person's message: an agent-kind caller (whatever its trust) cannot start one, so no seat can
+      // drive an app's changes or mint a `reviewed` version for a message nobody sent.
+      if (!humanOnly(req, reply, 'send a message to an app')) return reply;
       const slug = slugOf(req, reply);
       if (slug === null) return reply;
       if (overLong(req.body, 'about', 20)) return refuse(reply, 400, { code: 'bad_request', error: 'a turn is about at most 20 components' });
@@ -394,18 +401,25 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
   // verified on every call. Nothing here reads `req.actor`.
   app.post(
     `${V}/apps/check`,
-    { config: { manifest: { requestType: 'AppsCheckBody', responseType: 'AppsCheckResponse', statusCodes: [200, 400, 401, 404, 409, 503] } } },
+    { config: { manifest: { requestType: 'AppsCheckBody', responseType: 'AppsCheckResponse', statusCodes: [200, 400, 401, 403, 404, 409, 503] } } },
     async (req, reply) => {
     if (deps.verifyUnitToken === undefined) {
       return refuse(reply, 503, { code: 'apps_unavailable', error: "this engine cannot verify a unit's token for apps_check yet; nothing was checked" });
     }
     const parsed = AppsCheckSchema.safeParse(req.body);
-    if (!parsed.success) return refuse(reply, 400, { code: 'bad_request', error: 'body must be { token, app, commit }' });
+    if (!parsed.success) return refuse(reply, 400, { code: 'bad_request', error: 'body must be { token, tree } or { token, app, commit }' });
     const unit = await deps.verifyUnitToken(parsed.data.token);
     if (unit === null) return reply.code(401).send({ code: 'invalid_token', error: 'the unit token is not valid' });
-    if (!store.has(parsed.data.app)) return refuse(reply, 404, { code: 'unknown_app', error: `no app ${parsed.data.app}` });
+    // Only the turn's `check` step may check it: a builder's or a reviewer's token is refused (they are the
+    // seats the check judges and the seat that judges after it).
+    // Fail closed: a unit crew cannot attest as the check step (an unknown or absent step included) is refused.
+    if (unit.phase !== 'check') {
+      return refuse(reply, 403, { code: 'not_the_check', error: `the ${unit.phase} step of run ${unit.runId} cannot run the Apps check; only its check step can` });
+    }
+    const slug = 'tree' in parsed.data ? store.turnApp(unit.runId) : parsed.data.app;
+    if (slug === null || !store.has(slug)) return refuse(reply, 404, { code: 'unknown_app', error: 'tree' in parsed.data ? `run ${unit.runId} is no app's turn in flight` : `no app ${slug}` });
     try {
-      return await store.checkTurn(parsed.data.app, unit.runId, parsed.data.commit);
+      return await store.checkTurn(slug, unit.runId, 'tree' in parsed.data ? { tree: parsed.data.tree } : { commit: parsed.data.commit });
     } catch (err) {
       return fail(reply, err);
     }
