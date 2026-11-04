@@ -15,7 +15,7 @@ import { registerMcpRoutes } from '../src/api/mcp.js';
 import type { McpCallResponse } from '../src/core/types.js';
 import { agentAccessOf, type SourceAgentAccess } from '../src/knowledge/gate/access.js';
 import type { GateSource } from '../src/knowledge/gate/sources.js';
-import { KNOWLEDGE_PACKAGE_MAX_BYTES, knowledgePackageFor, packageJson, visibleDeps } from '../src/knowledge/package.js';
+import { KNOWLEDGE_PACKAGE_MAX_BYTES, knowledgePackageFor, packageJson, projectionKey, visibleDeps } from '../src/knowledge/package.js';
 import { DOC_RECORD_MAX_BYTES, PROJECTION_CONCURRENCY, PROJECTION_FORMAT, relationKey, SourceProjector, sourceGeneration } from '../src/knowledge/projector.js';
 import { McpBroker } from '../src/mcp/broker.js';
 import { McpCallRecordFile } from '../src/mcp/call-records.js';
@@ -135,7 +135,14 @@ describe('knowledgePackageFor: one predicate, structure only (§8.1, §9.3)', ()
     const ticked = [source('support-pg', SUPPORT_ID, { projects: ['proj_a'] })];
     expect(visibleDeps(ticked, 'proj_a', [], () => null)).toEqual([]);
     expect(visibleDeps(ticked, 'proj_a', [], () => 'an-earlier-descriptor')).toEqual([]);
-    expect(visibleDeps(ticked, 'proj_a', [], () => 'h')).toEqual([`source:${SUPPORT_ID}`]);
+    expect(visibleDeps(ticked, 'proj_a', [], () => 'h')).toEqual([]);
+    expect(visibleDeps(ticked, 'proj_a', [], () => projectionKey(ticked[0]!))).toEqual([`source:${SUPPORT_ID}`]);
+    // The views a person allowed are part of what estate holds: a projection taken with s.private_view allowed is
+    // not this source's once the view is taken off the list (codex r3).
+    const withView = source('support-pg', SUPPORT_ID, { projects: ['proj_a'] }, { viewsAllowed: ['s.private_view'] });
+    const acked = projectionKey(withView);
+    expect(visibleDeps([withView], 'proj_a', [], () => acked)).toEqual([`source:${SUPPORT_ID}`]);
+    expect(visibleDeps([{ ...withView, viewsAllowed: [] } as GateSource], 'proj_a', [], () => acked)).toEqual([]);
   });
 
   it('the package is bounded on its FINAL bytes, the omitted count included (codex r1: 500 sources)', async () => {
@@ -170,6 +177,9 @@ describe('the chat block (§8.1): sources and knowledge', () => {
     const on = (await chatKnowledgeFor(gateOf([source('support-pg', SUPPORT_ID, { query: true, projects: ['proj_a'] }), mysql]), 'proj_a')) ?? '';
     expect(on).toMatch(/only support-pg may be queried/);
     expect(on).toContain('agents cannot query a mysql source in this release');
+    // Query on, rows tool not offered: the remedy is the tool, not the switch (codex r3).
+    const both = (await chatKnowledgeFor(gateOf([source('ok-pg', OTHER_ID, { query: true, projects: ['proj_a'] }), unreviewed]), 'proj_a')) ?? '';
+    expect(both).toContain("support-pg may not be queried: answer from its structure, and say its rows tool is switched off or not reviewed on the source's sheet");
   });
 
   it('names execute_sql and the src: citation only when query is on', async () => {
@@ -436,7 +446,7 @@ describe('the describe -> knowledge.replace_source projection (§4.1): value-fre
     expect(held.map((h) => h.keys)).toEqual([['s.first'], ['s.second']]);
     held[1]!.release(true);
     await tick();
-    expect(projector.projectedDescriptor(records[0]!.id)).toBe(hash);
+    expect(projector.projectedDescriptor(records[0]!.id)).toBe(projectionKey({ descriptorHash: hash, viewsAllowed: [] }));
     // Across sources: at most PROJECTION_CONCURRENCY estate writes at once.
     for (const n of ['src-b', 'src-c', 'src-d']) projector.written(n);
     await tick();

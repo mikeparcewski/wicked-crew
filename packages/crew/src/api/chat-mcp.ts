@@ -178,7 +178,13 @@ export function chatKnowledgeStatement(pkg: KnowledgePackage): string | null {
   }
   for (const s of pkg.sources.filter((x) => !offersRows(x) && prose(x.name))) {
     if (queryable.length === 0) break;
-    lines.push('', `${s.name} may not be queried: answer from its structure, ${s.kind === 'postgres' ? 'and say a person can turn querying on' : `and say agents cannot query a ${s.kind} source in this release`}.`);
+    const why =
+      s.kind !== 'postgres'
+        ? `and say agents cannot query a ${s.kind} source in this release`
+        : s.query
+          ? "and say its rows tool is switched off or not reviewed on the source's sheet"
+          : 'and say a person can turn querying on';
+    lines.push('', `${s.name} may not be queried: answer from its structure, ${why}.`);
   }
   lines.push('', "Recall what the record knows about these tables (documents, decisions, linked code) with the wicked-garden-mem skill's `answer`.");
   return lines.join('\n');

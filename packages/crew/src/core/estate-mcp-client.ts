@@ -216,8 +216,15 @@ export function resolveMemoryDb(env: NodeJS.ProcessEnv = process.env): { path: s
  */
 export function estateKnowledgeEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const explicit = env['WICKED_KNOWLEDGE_DB'];
-  if ((explicit !== undefined && explicit !== '') || inDefaultStateHome()) return {};
-  return { WICKED_KNOWLEDGE_DB: join(mcpStateDir(), 'knowledge.db') };
+  if (explicit !== undefined && explicit !== '') return {};
+  if (!inDefaultStateHome()) return { WICKED_KNOWLEDGE_DB: join(mcpStateDir(), 'knowledge.db') };
+  // The default home keeps estate's own default; an EMPTY value would name a temporary database instead, so it is
+  // pinned to that default rather than passed through.
+  if (explicit === '') {
+    const home = env['WICKED_HOME'];
+    return { WICKED_KNOWLEDGE_DB: join(home !== undefined && home !== '' ? home : join(homedir(), '.wicked'), 'knowledge.db') };
+  }
+  return {};
 }
 
 /**
@@ -455,6 +462,12 @@ export async function callEstateToolRaw(
           ),
         ),
       );
+    });
+
+    // A server that exits while its input is still buffered (a large tools/call, a crashed start-up) makes stdin
+    // emit EPIPE on its own: without a listener that error is unhandled and takes the daemon down with it.
+    stdin.on('error', (err) => {
+      finish(() => rejectPromise(new EstateMcpError(`wicked-estate-mcp stopped reading its input before ${tool} was sent: ${err.message}`)));
     });
 
     // Handshake + call, then EOF so the server drains its buffered lines and exits cleanly.

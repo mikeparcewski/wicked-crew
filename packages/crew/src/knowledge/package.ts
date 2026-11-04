@@ -139,6 +139,14 @@ export function packageJson(pkg: KnowledgePackage, maxBytes: number = KNOWLEDGE_
   return render();
 }
 
+/**
+ * What a projection of `s` stood on: its descriptor AND the views a person allowed (the descriptor leaves them out,
+ * yet they decide which views estate holds). The projector acknowledges this key; the visible set requires it.
+ */
+export function projectionKey(s: Pick<GateSource, 'descriptorHash' | 'viewsAllowed'>): string {
+  return `${s.descriptorHash}\u0000${JSON.stringify([...new Set(s.viewsAllowed)].sort())}`;
+}
+
 /** Estate's spelling of a repo dep. */
 export const repoDep = (repoId: string): string => `repo:${repoId}`;
 /** Estate's spelling of a source dep (the registry id, never the name). */
@@ -154,7 +162,7 @@ export function visibleDeps(
   sources: readonly GateSource[],
   projectId: string | null,
   repos: readonly string[],
-  /** The descriptor whose structure estate holds per source id (the projector's acknowledgements); absent = trust the stored description. */
+  /** The {@link projectionKey} estate holds per source id (the projector's acknowledgements); absent = trust the stored description. */
   projected?: (sourceId: string) => string | null,
 ): string[] {
   const out = new Set<string>();
@@ -162,7 +170,7 @@ export function visibleDeps(
     if (s.description === null || !agentMay(s.access, s, projectId, 'see')) continue;
     // What estate holds must be this descriptor's: a projection still pending, or one that failed after a
     // descriptor change, leaves the earlier descriptor's structure in estate, and it is never released.
-    if (projected !== undefined && projected(s.id) !== s.descriptorHash) continue;
+    if (projected !== undefined && projected(s.id) !== projectionKey(s)) continue;
     out.add(sourceDep(s.id));
   }
   for (const r of repos) if (typeof r === 'string' && r.trim() !== '') out.add(repoDep(r));

@@ -31,6 +31,7 @@ import { ASK_ENUM_MAX, ASK_NAME_MAX } from '../sources/ask.js';
 import type { SqlCatalog } from '../sources/catalog/types.js';
 import type { SourceCatalogStore } from '../sources/store.js';
 import { gateSourceOf, type GateSource } from './gate/sources.js';
+import { projectionKey } from './package.js';
 
 /** Bumped when the documents' shape changes, so an unchanged catalog is projected again in the new shape. */
 export const PROJECTION_FORMAT = 1;
@@ -245,7 +246,7 @@ export class SourceProjector {
   private readonly chains = new Map<string, Promise<void>>();
   /** The last generation sent per source id (this process): the next is always higher. */
   private readonly sent = new Map<string, number>();
-  /** Per source id, the descriptor whose catalog estate last ACCEPTED (this process). */
+  /** Per source id, the projection key (descriptor and allowed views) estate last ACCEPTED (this process). */
   private readonly acked = new Map<string, string>();
   private readonly gate = new Semaphore(PROJECTION_CONCURRENCY);
 
@@ -308,17 +309,21 @@ export class SourceProjector {
     const s = await gateSourceOf(r, this.deps.catalogs);
     if (s === null) return false;
     if (s.description === null) return false;
-    const gen = sourceGeneration(s, this.nextGeneration(s.id));
-    if (gen === null) return false;
-    await this.gate.run(() => this.call('knowledge.replace_source', gen as unknown as Record<string, unknown>));
-    this.acked.set(s.id, s.descriptorHash);
-    return true;
+    // The slot is taken BEFORE the generation is built, so a backfill holds at most this many generations.
+    return this.gate.run(async () => {
+      const gen = sourceGeneration(s, this.nextGeneration(s.id));
+      if (gen === null) return false;
+      await this.call('knowledge.replace_source', gen as unknown as Record<string, unknown>);
+      this.acked.set(s.id, projectionKey(s));
+      return true;
+    });
   }
 
   /**
-   * The descriptor whose structure estate holds for `sourceId`, as this process last saw estate accept it; `null`
-   * until then. The relay's visible set admits a source only while this equals its current descriptor, so what
-   * estate still holds of an earlier descriptor (a projection pending or failed) is never released.
+   * The {@link projectionKey} (descriptor and allowed views) whose structure estate holds for `sourceId`, as this
+   * process last saw estate accept it; `null` until then. The relay's visible set admits a source only while this
+   * equals the source's current key, so what estate still holds of an earlier descriptor or an earlier view
+   * allowlist (a projection pending or failed, a restored registry generation) is never released.
    */
   projectedDescriptor(sourceId: string): string | null {
     return this.acked.get(sourceId) ?? null;
