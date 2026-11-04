@@ -509,6 +509,9 @@ describe('apps turns: check, land, refuse', () => {
     expect(res.body.code).toBe('human_only');
     expect(s.launched).toHaveLength(0);
     expect((await s.call('POST', '/apps/escalations/turns', { base: 1, message: 'add a chart' }, 'human')).status).toBe(202);
+    // The app's chat is the person's: an agent-kind reader of the detail gets no turns.
+    expect((await s.call('GET', '/apps/escalations', undefined, 'human')).body.app.turns).toHaveLength(1);
+    expect((await s.call('GET', '/apps/escalations', undefined, 'agent')).body.app.turns).toBeUndefined();
   });
 
   it('the check route takes the engine\'s tree, finds the app by the run, and refuses any step but check', async () => {
