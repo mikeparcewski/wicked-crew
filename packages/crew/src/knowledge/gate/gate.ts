@@ -96,6 +96,12 @@ export interface DataGateDeps {
   resolver: () => ((requestJson: string) => Promise<string>) | null;
   /** `Core.listMcpTools`, read per call; `null` = the linked engine has none (every call refused). */
   lister: () => ((requestJson: string) => Promise<string>) | null;
+  /**
+   * `Core.judgeMcpCall` (crew#1337), read per call: one call judged WITH its arguments and recorded nowhere, so an
+   * operator rule that triggers on them fires. Absent, or `null` (an engine that predates it): the call is judged by
+   * the tool list, with no arguments, and a rule that triggers only on arguments cannot fire.
+   */
+  judge?: () => ((requestJson: string) => Promise<string>) | null;
   /** The Toolbox runtime; absent = Toolbox entries answer `toolbox_unavailable`. */
   toolbox?: ToolboxSupervisor;
   dial?: DialOptions;
@@ -209,32 +215,45 @@ export class DataGate {
   }
 
   /**
-   * The subjects the ENGINE lets this unit try, of `calls` (`listMcpTools`, which records nothing): absence is a
-   * deny (an operator policy; D-7 denies an Apps unit only write tools, and these go as reads). An `ask` the
-   * engine marks `firstUseOnly` is admitted: the server's first use is its only reason (every other rule that
-   * fired, such as the `mcp-defaults` read posture, allows), and the person's per-source switches are that
-   * consent (crew#1333). An `ask` for any other reason (an operator's asking rule), or from an engine that
-   * predates the mark, stands. `null` = the linked engine has no lister.
+   * The subjects the ENGINE lets this unit try, of `calls`, recording nothing: absence is a deny (an operator policy;
+   * D-7 denies an Apps unit only write tools, and these go as reads). Each call is judged WITH its arguments
+   * (`judgeMcpCall`, crew#1337), so an operator rule whose trigger matches them (a word in the SQL) fires; an engine
+   * that predates it judges by its tool list (`listMcpTools`), with no arguments. An `ask` the engine marks
+   * `firstUseOnly` is admitted: the server's first use is its only reason (every other rule that fired, such as the
+   * `mcp-defaults` read posture, allows), and the person's per-source switches are that consent (crew#1333). An `ask`
+   * for any other reason (an operator's asking rule), or from an engine that predates the mark, stands. `null` = the
+   * linked engine has neither.
    */
-  async admitted(token: string, calls: ReadonlyArray<{ server: string; tool: string; disclosure: string | null }>): Promise<Map<string, 'allow' | 'ask'> | null> {
+  async admitted(
+    token: string,
+    calls: ReadonlyArray<{ server: string; tool: string; disclosure: string | null; args?: Record<string, unknown> }>,
+  ): Promise<Map<string, 'allow' | 'ask'> | null> {
+    const wire = (c: (typeof calls)[number]) => ({ server: c.server, tool: c.tool, annotations: { readOnlyHint: true }, classOverride: 'read', registered: true, kind: 'mcp-stdio', carrier: 'shim' });
+    const engine = async (fn: (requestJson: string) => Promise<string>, request: unknown): Promise<string> => {
+      try {
+        return await fn(JSON.stringify(request));
+      } catch (err) {
+        const msg = message(err);
+        if (msg.startsWith('invalid_token') || msg.startsWith('bad_request')) throw new GateTokenError(msg);
+        throw err;
+      }
+    };
+    const out = new Map<string, 'allow' | 'ask'>();
+    const take = (subject: unknown, t: { decision?: unknown; firstUseOnly?: unknown }): void => {
+      if (typeof subject !== 'string') return;
+      if (t.decision === 'allow') out.set(subject, 'allow');
+      else if (t.decision === 'ask') out.set(subject, t.firstUseOnly === true ? 'allow' : 'ask');
+    };
+    const judge = this.deps.judge?.() ?? null;
+    if (judge !== null) {
+      // Keyed by the call asked about: the verdict answers exactly that one call.
+      for (const c of calls) take(`mcp:${c.server}/${c.tool}`, JSON.parse(await engine(judge, { token, call: { ...wire(c), args: c.args ?? {} } })) as { decision?: unknown; firstUseOnly?: unknown });
+      return out;
+    }
     const lister = this.deps.lister();
     if (lister === null) return null;
-    const req = calls.map((c) => ({ server: c.server, tool: c.tool, annotations: { readOnlyHint: true }, classOverride: 'read', registered: true, kind: 'mcp-stdio', carrier: 'shim' }));
-    let raw: string;
-    try {
-      raw = await lister(JSON.stringify({ token, calls: req }));
-    } catch (err) {
-      const msg = message(err);
-      if (msg.startsWith('invalid_token') || msg.startsWith('bad_request')) throw new GateTokenError(msg);
-      throw err;
-    }
-    const judged = JSON.parse(raw) as { tools?: Array<{ subject?: unknown; decision?: unknown; firstUseOnly?: unknown }> };
-    const out = new Map<string, 'allow' | 'ask'>();
-    for (const t of judged.tools ?? []) {
-      if (typeof t.subject !== 'string') continue;
-      if (t.decision === 'allow') out.set(t.subject, 'allow');
-      else if (t.decision === 'ask') out.set(t.subject, t.firstUseOnly === true ? 'allow' : 'ask');
-    }
+    const judged = JSON.parse(await engine(lister, { token, calls: calls.map(wire) })) as { tools?: Array<{ subject?: unknown; decision?: unknown; firstUseOnly?: unknown }> };
+    for (const t of judged.tools ?? []) take(t.subject, t);
     return out;
   }
 
@@ -306,8 +325,10 @@ export class DataGate {
     if (typeof sqlText !== 'string' || sqlText.trim() === '' || Buffer.byteLength(sqlText, 'utf8') > UNIT_SQL_MAX) {
       return refusal('bad_request', `sql is a non-empty string of at most ${UNIT_SQL_MAX} bytes`);
     }
-    if (!Array.isArray(rawParams) || rawParams.length > UNIT_PARAMS_MAX || !rawParams.every((p) => p === null || ['string', 'number', 'boolean'].includes(typeof p))) {
-      return refusal('bad_request', `params is an array of at most ${UNIT_PARAMS_MAX} strings, numbers, booleans or nulls`);
+    // A number must be finite: JSON has no Infinity (an overflowing literal parses to it), so the engine judged the
+    // call's arguments with a null there (crew#1337), and the read must never run a value other than the judged one.
+    if (!Array.isArray(rawParams) || rawParams.length > UNIT_PARAMS_MAX || !rawParams.every((p) => p === null || typeof p === 'string' || typeof p === 'boolean' || (typeof p === 'number' && Number.isFinite(p)))) {
+      return refusal('bad_request', `params is an array of at most ${UNIT_PARAMS_MAX} strings, finite numbers, booleans or nulls`);
     }
     if (s.runtime === 'toolbox' && rawParams.length > 0) return refusal('params_unsupported', `${s.name}'s execute_sql binds no parameters: write the values into the query`);
     if (s.dialect !== 'postgres' || !s.queryable) return refusal('query_off', `agents may not read rows from ${s.name} in this release`);

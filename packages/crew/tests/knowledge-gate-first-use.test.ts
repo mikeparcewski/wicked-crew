@@ -17,6 +17,10 @@
 //   (iv)  an operator deny: `denied`, the tool is not listed;
 //   (v)   an ordinary registered MCP server's first use: the engine marks its read first-use-only too, and it still
 //         asks (listed `ask`, a call answers `pending_approval`): the mark is honoured for a live source only.
+//   (vi)  an operator deny that triggers on the call's arguments (a word in the SQL, crew#1337): the call is judged
+//         with them (`judgeMcpCall`), so it is `denied` and nothing runs; the same read without the word runs, and
+//         the tool stays listed (the list judges with no arguments). An engine without `judgeMcpCall` judges by the
+//         list, where that rule cannot fire.
 
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -113,6 +117,9 @@ describe.skipIf(process.platform === 'win32')('the data gate admits a first-use 
   let adapter: CoreAdapter;
   let sup: ToolboxSupervisor;
   let app: FastifyInstance;
+  /** Whether the engine has `judgeMcpCall` (false: one that predates crew#1337). */
+  let judgeArgs = true;
+  let record: SourceReadLog;
 
   /** The real engine's evaluation of `calls` for the token's unit (`Core.previewMcpCalls` for its cell). */
   const judge = async (token: string, calls: unknown[]) => {
@@ -133,6 +140,12 @@ describe.skipIf(process.platform === 'win32')('the data gate admits a first-use 
         : [{ subject: v.subject, class: v.class, decision: v.decision, ruleIds: v.ruleIds, ...(v.reason !== undefined ? { reason: v.reason } : {}), ...(v.firstUseOnly !== undefined ? { firstUseOnly: v.firstUseOnly } : {}) }],
     );
     return JSON.stringify({ unit: unitOf(token), tools });
+  };
+  /** `judgeMcpCall`: ONE call, its arguments included, by the same real evaluation, recorded nowhere. */
+  const judgeCall = () => async (json: string) => {
+    const { token, call } = JSON.parse(json) as { token: string; call: Record<string, unknown> };
+    const v = (await judge(token, [call]))[0]!;
+    return JSON.stringify({ ...v, claimId: '', unit: unitOf(token) });
   };
   /** `evaluateMcpCall` for an ordinary server's call: the same real evaluation, as the call verdict. */
   const engineGate = {
@@ -200,7 +213,7 @@ describe.skipIf(process.platform === 'win32')('the data gate admits a first-use 
       toolboxProbe: (c, s) => (prober as DataGate).toolboxProbe(c, s),
     });
     const audit = new AuditLog(join(base, 'audit.log'), () => undefined);
-    const record = new SourceReadLog(mcpDir);
+    record = new SourceReadLog(mcpDir);
     sup = new ToolboxSupervisor({ binary: async () => bin, runRoot: join(mcpDir, 'adapters', 'toolbox', 'run') });
     const gate = new DataGate({
       store,
@@ -210,6 +223,7 @@ describe.skipIf(process.platform === 'win32')('the data gate admits a first-use 
       audit,
       resolver,
       lister,
+      judge: () => (judgeArgs ? judgeCall() : null),
       toolbox: sup,
       deadlineMs: 5_000,
       recheckMs: 60_000,
@@ -306,5 +320,41 @@ describe.skipIf(process.platform === 'win32')('the data gate admits a first-use 
     expect(asked.status, JSON.stringify(asked.body)).toBe(409);
     expect(asked.body).toMatchObject({ outcome: 'pending_approval', ruleIds: ['engine:mcp-first-use', 'MCP-POSTURE-READ'] });
     expect(existsSync(join(base, 'counters', 'wt_echo.count')), 'the upstream was never invoked').toBe(false);
+  });
+
+  it('(vi) an operator deny that triggers on the SQL fires for a live-source call: judged with its arguments (crew#1337)', async () => {
+    await upsert({ id: 'SEC-NO-SALARY', applies_to: ['mcp:tb/execute_sql'], effect: 'deny', severity: 'critical', trigger: { contains: 'salary' } });
+    const salary = 'SELECT t.a AS salary, t.b FROM s.t AS t';
+    try {
+      const reads = (await record.all())?.length;
+      const denied = await call('wmt_balanced', 'mcp:tb/execute_sql', { sql: salary });
+      expect(denied.status, JSON.stringify(denied.body)).toBe(403);
+      expect(denied.body).toMatchObject({ outcome: 'denied' });
+      expect(denied.answer).toBeNull();
+      // Refused before the gate's read: no read record, so no policy check, slot or process was spent on it.
+      expect((await record.all())?.length).toBe(reads);
+      // A number JSON cannot hold (an overflowing literal parses to Infinity, which the engine is sent as null) is
+      // refused: what runs is never other than what was judged.
+      const raw = await app.inject({
+        method: 'POST',
+        url: '/api/v1/mcp/call',
+        headers: { 'content-type': 'application/json' },
+        payload: `{"token":"wmt_balanced","subject":"mcp:tb/execute_sql","args":{"sql":"SELECT t.a FROM s.t AS t WHERE t.a < $1","params":[1e400]}}`,
+      });
+      const rawText = (raw.json() as McpCallResponse & { result?: { content?: Array<{ text: string }> } }).result?.content?.[0]?.text;
+      expect(rawText !== undefined ? JSON.parse(rawText) : raw.json(), raw.body).toMatchObject({ refused: 'bad_request' });
+      // The same read without the word runs, and the tool stays listed: the list judges with no arguments.
+      const ok = await call('wmt_balanced', 'mcp:tb/execute_sql', { sql: Q });
+      expect(ok.status, JSON.stringify(ok.body)).toBe(200);
+      expect(ok.answer).toMatchObject({ rows: [[1, 'x'], [2, 'y']] });
+      expect(await listed('wmt_balanced', 'tb')).toContainEqual(['mcp:tb/execute_sql', 'allow']);
+      // An engine that predates judgeMcpCall judges by the bare list, where the rule cannot fire (the documented gap).
+      judgeArgs = false;
+      const bare = await call('wmt_balanced', 'mcp:tb/execute_sql', { sql: salary });
+      expect(bare.status, JSON.stringify(bare.body)).toBe(200);
+    } finally {
+      judgeArgs = true;
+      await adapter.upsertConformanceRule({ ...(await adapter.listConformanceRules()).find((r) => r.id === 'SEC-NO-SALARY')!, retired: true });
+    }
   });
 });

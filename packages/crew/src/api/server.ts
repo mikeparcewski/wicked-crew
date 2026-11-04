@@ -2527,6 +2527,7 @@ export async function createServer(
     audit,
     resolver: () => CoreAdapter.estateScopeResolver(),
     lister: () => CoreAdapter.mcpToolLister(),
+    judge: () => CoreAdapter.mcpCallJudge(),
     toolbox: toolboxSupervisor,
     log: (m) => app.log.warn(m),
   });

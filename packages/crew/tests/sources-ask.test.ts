@@ -4,7 +4,7 @@
 // query (check typed SQL, or run exactly the text crew checked: READ ONLY, the deadline at the source, 50
 // rows), against REAL Postgres (APPS_PG16_URL / APPS_PG17_URL), a real upload and the GraphQL fixture.
 
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,6 +30,7 @@ import { registerSourceRoutes } from '../src/sources/routes.js';
 import { sqliteInspect, sqliteRead } from '../src/sources/drivers/sqlite.js';
 import { seatTurn, type SeatTurnInput, type SeatTurnOutcome } from '../src/standing-orders/parse.js';
 import { startGraphqlServer } from './fixtures/apps-sources/servers.mjs';
+import { removeScratch } from './setup/scratch.js';
 import { DB_REQUIRED, type FreshMysql, type FreshPg, freshMysqlDatabase, freshPgDatabase, LOOPBACK, MYSQL_TARGETS, PG_TARGETS } from './support/sources-db.js';
 
 const AGENT: Actor = { id: 'worker-1', kind: 'agent', trust: 'admin' };
@@ -101,11 +102,19 @@ async function harness(draft: (input: SeatTurnInput) => Promise<SeatTurnOutcome>
     setActor: (a) => {
       actor = a;
     },
-    close: async () => {
-      await app.close();
-      rmSync(base, { recursive: true, force: true });
-    },
+    close: () => closeHarness(app, audit, base),
   };
+}
+
+/**
+ * crew#1331: the audit trail appends fire-and-forget, so a line can still be landing under `base` when the test is
+ * done; a plain `rmSync` then loses that race (ENOTEMPTY). Await the trail, then remove with the shared bounded
+ * retries (`removeScratch`, crew#429).
+ */
+async function closeHarness(app: FastifyInstance, audit: AuditLog, base: string): Promise<void> {
+  await app.close();
+  await audit.flush();
+  removeScratch(base);
 }
 
 /** A harness whose daemon has no seat path (no `draft`). */
@@ -117,12 +126,30 @@ async function harnessWithout(): Promise<Harness> {
   const app = Fastify({ logger: false });
   registerSourceRoutes(app, { registry, audit, actorOf: () => LOCAL_ACTOR });
   await app.ready();
-  return { app, audit, secrets, base, setActor: () => undefined, close: async () => { await app.close(); rmSync(base, { recursive: true, force: true }); } };
+  return { app, audit, secrets, base, setActor: () => undefined, close: () => closeHarness(app, audit, base) };
 }
 
 const post = (h: Harness, url: string, payload?: unknown) => h.app.inject({ method: 'POST', url: `/api/v1${url}`, ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}) });
 
 describe('the ask pieces (no database)', () => {
+  it("the harness's close awaits the audit trail before it removes its scratch directory (crew#1331)", async () => {
+    const h = await harnessWithout();
+    const flush = h.audit.flush.bind(h.audit);
+    let flushed = 0;
+    let presentAtFlush = false;
+    h.audit.flush = async () => {
+      presentAtFlush = existsSync(h.base);
+      await flush();
+      flushed += 1;
+    };
+    // A line still landing when the test is done (the trail appends fire-and-forget).
+    h.audit.record('test.late_line', LOCAL_ACTOR);
+    await h.close();
+    expect(flushed).toBe(1);
+    expect(presentAtFlush, 'the trail is awaited before the directory is removed').toBe(true);
+    expect(existsSync(h.base)).toBe(false);
+  });
+
   it('the draft is the last JSON object with a string sql in the seat\'s words; anything else is no draft', () => {
     expect(draftFromAnswer('Here you go:\n```json\n{"sql": "SELECT 1", "explanation": "One.\\nTwo."}\n```')).toEqual({ sql: 'SELECT 1', explanation: 'One. Two.' });
     expect(draftFromAnswer('{"note": 1} then {"sql": " SELECT 2 ", "explanation": "x"}')).toEqual({ sql: 'SELECT 2', explanation: 'x' });
