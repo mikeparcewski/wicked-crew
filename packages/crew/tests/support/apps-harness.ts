@@ -32,7 +32,9 @@ export const PRIYA: Actor = { id: 'priya', kind: 'human', trust: 'operator' };
 export const SAM: Actor = { id: 'sam', kind: 'human', trust: 'operator' };
 export const SEAT: Actor = { id: 'seat-codex', kind: 'agent', trust: 'operator' };
 export const VIEWER: Actor = { id: 'olga', kind: 'human', trust: 'observer' };
-const TOKENS: Record<string, Actor> = { priya: PRIYA, sam: SAM, seat: SEAT, olga: VIEWER };
+/** (crew#1325) A system-kind bearer (automation): it may run an app's query, and reads a refusal as its code. */
+export const CI: Actor = { id: 'ci', kind: 'system', trust: 'operator' };
+const TOKENS: Record<string, Actor> = { priya: PRIYA, sam: SAM, seat: SEAT, olga: VIEWER, ci: CI };
 
 export interface Harness {
   dir: string;

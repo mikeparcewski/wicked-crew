@@ -24,7 +24,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
-import { LOCAL_ACTOR, trustAtLeast } from '../api/auth.js';
+import { LOCAL_ACTOR, trustAtLeast, viewOf } from '../api/auth.js';
 import type { AuditLog } from '../api/audit.js';
 import type { Actor, AppEditOp, AppErrorBody } from '../core/types.js';
 import { APP_NAMED_ID_RE, parseSpec } from './spec.js';
@@ -33,7 +33,7 @@ import { QUERY_TEXT_MAX_BYTES } from './check.js';
 import { AppWriteError, type AppWritePath } from './actions/write-path.js';
 import { AppExecError, type AppExecutor } from './exec/executor.js';
 import { AppGitError } from './git.js';
-import { appDetailFor } from './views.js';
+import { appDetailFor, appRefusalFor, type AppRefusal } from './views.js';
 
 const V = '/api/v1';
 
@@ -78,15 +78,23 @@ function overLong(body: unknown, key: string, max: number): boolean {
   return Array.isArray(v) && v.length > max;
 }
 
-function fail(reply: FastifyReply, err: unknown): FastifyReply {
-  if (err instanceof AppStoreError) return reply.code(err.status).send({ code: err.code, error: err.message, ...err.extra });
+/** `reader`: the actor the refusal is answered to as {@link appRefusalFor} reduces it (the query route); absent = whole. */
+function fail(reply: FastifyReply, err: unknown, reader?: Actor): FastifyReply {
+  const send = (status: number, body: AppRefusal): FastifyReply => reply.code(status).send(reader === undefined ? body : appRefusalFor(reader, body));
+  if (err instanceof AppStoreError) return send(err.status, { code: err.code, error: err.message, ...err.extra });
   if (err instanceof AppExecError || err instanceof AppWriteError) {
     if (err.extra.retryAfterMs !== undefined) void reply.header('retry-after', String(Math.max(1, Math.ceil(err.extra.retryAfterMs / 1000))));
-    return reply.code(err.status).send({ code: err.code, error: err.message, ...err.extra });
+    return send(err.status, { code: err.code, error: err.message, ...err.extra });
   }
   // The app repo was changed in a way crew refuses to read or write through (a link, a commondir file, an
   // object that does not hash to its id): nothing landed.
-  if (err instanceof AppGitError && err.code === 'corrupt') return refuse(reply, 409, { code: 'unreadable_tree', error: err.message });
+  if (err instanceof AppGitError && err.code === 'corrupt') return send(409, { code: 'unreadable_tree', error: err.message });
+  // (crew#1325, codex r1) An error crew did not name (a store's parse error quotes the text it stopped in) is a 500
+  // as before; a non-human reader's carries no words. The error itself is logged.
+  if (reader !== undefined && viewOf(reader) === 'agent') {
+    reply.log.error({ err }, 'an app query failed');
+    throw new Error('the query was not answered (internal error)');
+  }
   throw err;
 }
 
@@ -258,7 +266,7 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
           const auth = req.headers.authorization;
           return await deps.executor.runQuery({ app: slug, version: parsed.data.version, query: parsed.data.query, ...(parsed.data.params !== undefined ? { params: parsed.data.params } : {}), actor, ...(typeof auth === 'string' ? { authorization: auth } : {}) });
         } catch (err) {
-          return fail(reply, err);
+          return fail(reply, err, actor);
         }
       }
       try {
@@ -269,7 +277,7 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
         }
         return refuse(reply, 501, { code: 'not_implemented', error: 'queries do not run on this daemon yet; nothing was sent to a source' });
       } catch (err) {
-        return fail(reply, err);
+        return fail(reply, err, actor);
       }
     },
   );

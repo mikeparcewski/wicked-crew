@@ -259,6 +259,15 @@ export class AppStore {
     return Object.hasOwn(this.state.apps, slug);
   }
 
+  /**
+   * (crew#1324) Each app's repository: its registry id (`''` until registered) and its root, where its files and its
+   * turns' worktrees live (an app made under an earlier `WICKED_CREW_APPS_ROOT` keeps its root). A repo made by
+   * `POST /repos {create: true}` under the apps root is no app's: it has no record here.
+   */
+  appRepos(): Array<{ repoId: string; root: string }> {
+    return Object.values(this.state.apps).map((a) => ({ repoId: a.repoId, root: a.root }));
+  }
+
   private summary(a: StoredApp): AppSummary {
     const h = this.head(a);
     const turn = a.turn === null ? null : { runId: a.turn.runId, startedAt: a.turn.startedAt, base: a.turn.base, actor: a.turn.actor };

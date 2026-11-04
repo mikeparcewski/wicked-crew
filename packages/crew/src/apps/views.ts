@@ -51,3 +51,17 @@ export function appDetailFor(actor: Actor | null | undefined, detail: AppDetail)
     lock: { schema: detail.lock.schema, sources, queries: detail.lock.queries, actions: detail.lock.actions, uploads: detail.lock.uploads },
   };
 }
+
+/** A refusal body of the Apps routes (`AppErrorBody` plus what the error carries). */
+export type AppRefusal = { code: string; error: string; retryAfterMs?: number } & Record<string, unknown>;
+
+/**
+ * (crew#1325) A refusal of `POST /apps/:app/query` as `actor` may read it. Its words can name what the query
+ * reads: the read policy's detail names a relation, and a tree's findings name queries and files. A human gets
+ * it whole. Any other actor (the route refuses agent and plugin actors first, so a `system` one) gets the
+ * code, and how long to wait when it was rate limited; never the words or the findings.
+ */
+export function appRefusalFor(actor: Actor | null | undefined, body: AppRefusal): AppRefusal {
+  if (viewOf(actor) === 'full') return body;
+  return { code: body.code, error: `the query was not answered (${body.code})`, ...(body.retryAfterMs !== undefined ? { retryAfterMs: body.retryAfterMs } : {}) };
+}

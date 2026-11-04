@@ -7,7 +7,7 @@
 // receive the path verbatim as one argument.
 
 import { spawn } from 'node:child_process';
-import { realpathSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 
@@ -43,6 +43,58 @@ export function isInsideRoot(root: string, target: string): boolean {
   if (rel === '') return true; // the root itself
   if (isAbsolute(rel)) return false; // different drive/tree entirely (win32)
   return rel.split(sep)[0] !== '..';
+}
+
+/** `target` under `root` by the path text alone (both resolved, nothing read from disk). */
+function lexicallyInside(root: string, target: string): boolean {
+  const rel = relative(resolve(root), resolve(target));
+  return rel === '' || (!isAbsolute(rel) && rel.split(sep)[0] !== '..');
+}
+
+/**
+ * {@link isInsideRoot} for a DENY check (crew#1324): may `target` be inside `root`? Judged by directory IDENTITY
+ * (device and inode), not by spelling: `target`'s deepest existing ancestor, links resolved, is walked up to the
+ * filesystem root, and any directory on the way that IS `root` answers `true`. So another spelling of a name on a
+ * case-insensitive or casefolded filesystem (macOS, Windows, ext4 `+F`), a link, or a bind mount cannot read as
+ * outside, and two distinct directories whose names differ only in case are never confused. When `root` does not
+ * exist nothing on disk is inside it, and when it cannot be read its membership is judged by the path text; a
+ * `target` that cannot be read fails closed (`true`).
+ */
+export function mayBeInsideRoot(root: string, target: string): boolean {
+  const idOf = (p: string): string => {
+    const s = statSync(p, { bigint: true });
+    return `${s.dev}:${s.ino}`;
+  };
+  let rootId: string;
+  try {
+    rootId = idOf(root);
+  } catch {
+    return lexicallyInside(root, target);
+  }
+  /** The deepest existing ancestor of `p` (or `p`), links resolved; `null` when it cannot be read. */
+  const existing = (p: string): string | null => {
+    const abs = resolve(p);
+    try {
+      return realpathSync(abs);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') return null;
+      const parent = dirname(abs);
+      return parent === abs ? null : existing(parent);
+    }
+  };
+  let cur = existing(target);
+  if (cur === null) return true;
+  for (;;) {
+    try {
+      if (idOf(cur) === rootId) return true;
+    } catch {
+      return true;
+    }
+    const parent = dirname(cur);
+    if (parent === cur) return false;
+    cur = parent;
+  }
 }
 
 /** The session fields the root set is derived from — structural on purpose, so this stays a leaf
