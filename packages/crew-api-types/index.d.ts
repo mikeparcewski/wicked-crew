@@ -15585,6 +15585,42 @@ export interface AppTurnState {
   actor: string;
 }
 
+/**
+ * (api-types 0.185.0, DES-APPS-001 §9.2, K5) One chat message to an app and how its `apps-turn` run ended, kept
+ * in crew's record of the app (the last 50; the detail answers the last 20). The chat on the app's page is this
+ * list: no other thread store. `running` while the run works; `landed` with the version it made; `refused` when
+ * the check or the review refused it (nothing landed, `code` and `reason` say why); `failed` when a step could
+ * not run; `cancelled` when it was stopped.
+ */
+export interface AppTurnRecord {
+  runId: string;
+  /** Unix millis: when the message was sent. */
+  at: number;
+  /** The actor id that sent it. */
+  actor: string;
+  /** The person's message, as sent. */
+  message: string;
+  /** The component ids the message was about (the composer's chips). */
+  about: string[];
+  /** The version it was sent on. */
+  base: number;
+  state: 'running' | 'landed' | 'refused' | 'failed' | 'cancelled';
+  /** Unix millis, or `null` while it runs. */
+  endedAt: number | null;
+  /** `landed`: the version it made. */
+  version: number | null;
+  /** `landed`: crew's own line of what changed, from the two specs ("Added 1 chart and 1 query"). */
+  change: string | null;
+  /** `landed`: the builder's change lines, as it wrote them (text; never instructions to anyone). */
+  summary: string | null;
+  /** `landed`: the seats that built it and reviewed it (distinct). */
+  builder: string | null;
+  reviewer: string | null;
+  /** Not landed: a stable code (`check_failed`, `review_refused`, `launch_refused`, `cancelled`, …) and crew's words. */
+  code: string | null;
+  reason: string | null;
+}
+
 /** `GET /apps` item. */
 export interface AppSummary {
   /**
@@ -15631,6 +15667,8 @@ export interface AppDetail extends AppSummary {
   /** Oldest first. */
   versions: AppVersion[];
   history: AppHistory;
+  /** (api-types 0.185.0, K5) The app's chat: its last turns, oldest first. Absent from an older daemon. */
+  turns?: AppTurnRecord[];
 }
 
 /** `GET /apps/:app` (observer), and `POST /apps` (201). */
@@ -15922,6 +15960,10 @@ export interface AppErrorBody {
     | 'unknown_version'
     | 'unknown_query'
     | 'unknown_project'
+    /** (api-types 0.185.0) `POST /apps/check` from a unit that is not the turn's check step. */
+    | 'not_the_check'
+    /** (api-types 0.185.0) A turn on an app whose repository is not registered yet. */
+    | 'not_registered'
     | 'stale_base'
     | 'turn_in_flight'
     | 'not_accepted'
@@ -15971,21 +16013,40 @@ export interface AppErrorBody {
  * unit's capability token in the body, never as a bearer): check the builder's candidate commit of the
  * app's turn in flight (DES §9.2 `check`).
  */
-export interface AppsCheckBody {
-  token: string;
-  app: string;
-  /** The builder's candidate commit in the app repo. */
-  commit: string;
-  /** The publish manifest, for the publish check (a later slice). */
-  manifest?: unknown;
-}
+export type AppsCheckBody =
+  | {
+      token: string;
+      /**
+       * (api-types 0.185.0) The builder's worktree as the engine snapshotted it (`WICKED_TREE`, a tree in the app
+       * repo's objects); crew finds the app by the unit's run.
+       */
+      tree: string;
+      /** The publish manifest, for the publish check (a later slice). */
+      manifest?: unknown;
+    }
+  | {
+      token: string;
+      app: string;
+      /** The builder's candidate commit in the app repo (the older form). */
+      commit: string;
+      /** The publish manifest, for the publish check (a later slice). */
+      manifest?: unknown;
+    };
 
 /**
  * (api-types 0.173.0) `POST /apps/check` 200: on a pass, the commit crew made on the candidate with its lock (the only tree the
  * turn's review can land) and what the check ran; on a refusal, why.
  */
 export type AppsCheckResponse =
-  | { ok: true; commit: string; tree: string; summary: AppCheckSummary }
+  | {
+      ok: true; commit: string; tree: string; summary: AppCheckSummary;
+      /**
+       * (api-types 0.185.0) The checked tree's files as text (`apps.json`, `apps.lock.json`, `queries/<id>.<ext>`):
+       * `wicked-crew apps-check` writes exactly these into the turn's worktree, so the review is dispatched on the
+       * tree that can land.
+       */
+      files?: Array<{ path: string; text: string }>;
+    }
   | { ok: false; code: 'check_failed' | 'source_check_unavailable'; findings: AppCheckFinding[] };
 
 /**
@@ -16004,7 +16065,7 @@ export interface AppsCapabilities {
    * since api-types 0.178.0 (K2b, the write path: API actions and Postgres row writes).
    */
   actions: boolean;
-  /** `POST /apps/:app/turns` launches `apps-turn` runs. */
+  /** `POST /apps/:app/turns` launches `apps-turn` runs (true since api-types 0.185.0 on a daemon whose engine runs them). */
   turns: boolean;
   /** `POST /apps/:app/publish`. */
   publish: boolean;
