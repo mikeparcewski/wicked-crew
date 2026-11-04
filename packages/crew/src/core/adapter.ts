@@ -691,6 +691,10 @@ interface CoreConstructor {
   evaluateMcpOutput?(requestJson: string): Promise<string>;
   /** DES-MCP-TOOLS-001 S4: the token's unit's visible tool list, judged and recorded nowhere. */
   listMcpTools?(requestJson: string): Promise<string>;
+  /** crew#1337 (wicked-core-ts ≥ the release carrying it): ONE call judged for the token's unit WITH its arguments,
+   *  recorded nowhere (the verdict `evaluateMcpCall` answers). Rejects with `invalid_token:`, `bad_request:` or
+   *  `guard_error:`. */
+  judgeMcpCall?(requestJson: string): Promise<string>;
   /** wicked-core#1018 (wicked-core-ts ≥ the release carrying it): the estate relay's scope for a
    *  token, `{ unit, projectId, repoId, codeGraphDb }`. Rejects with `invalid_token:` or `bad_request:`. */
   resolveEstateScope?(requestJson: string): Promise<string>;
@@ -1436,6 +1440,17 @@ export class CoreAdapter {
     const list = Core.listMcpTools;
     if (typeof list !== 'function') return null;
     return (requestJson: string) => list.call(Core, requestJson);
+  }
+
+  /**
+   * The engine's judgment of ONE call WITH its arguments, recorded nowhere (`Core.judgeMcpCall`, crew#1337), or
+   * `null` on an addon without it: the data gate then judges a live source's call by the tool list, with no
+   * arguments. Read at call time: tests swap the static.
+   */
+  static mcpCallJudge(): ((requestJson: string) => Promise<string>) | null {
+    const judge = Core.judgeMcpCall;
+    if (typeof judge !== 'function') return null;
+    return (requestJson: string) => judge.call(Core, requestJson);
   }
 
   /**

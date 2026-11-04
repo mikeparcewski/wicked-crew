@@ -476,7 +476,7 @@ export class McpBroker {
 
   /**
    * `mcp:<source>/<tool>` through the data gate (DES-KNOWLEDGE-DATA-001 §7, §8.1). The token is resolved to its
-   * unit and run project by the ENGINE; the engine then judges the exact subject for that unit (absent = denied:
+   * unit and run project by the ENGINE; the engine then judges the exact call, its arguments included (crew#1337), for that unit (absent = denied:
    * an operator's policy, or an Apps unit's write tool, D-7 as §9.3 narrows it; a first-use ask is admitted, the per-source switch being
    * the consent); the unit's budget is spent; the gate answers (structure from crew's stored catalog, or one
    * read through the policy, the scheduler and the adapter); the call is recorded like any brokered call (never
@@ -488,7 +488,7 @@ export class McpBroker {
     let admitted: Awaited<ReturnType<DataGate['admitted']>>;
     try {
       scope = await gate.resolve(body.token);
-      admitted = scope === null ? null : await gate.admitted(body.token, [{ server, tool, disclosure: null }]);
+      admitted = scope === null ? null : await gate.admitted(body.token, [{ server, tool, disclosure: null, args: body.args ?? {} }]);
     } catch (err) {
       const msg = message(err);
       if (err instanceof GateTokenError) {

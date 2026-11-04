@@ -296,6 +296,13 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **An operator rule that triggers on a call's arguments fires for a live-source call (crew#1337).** The data gate
+  judged `mcp:<source>/<tool>` by the engine's tool list, which judges every call with no arguments, so a rule such
+  as `{applies_to: ["mcp:support-pg/execute_sql"], effect: "deny", trigger: {contains: "salary"}}` never fired and
+  the read ran. The gate now judges each call WITH its arguments through the engine's `judgeMcpCall` (wicked-core,
+  recorded nowhere): such a deny answers `denied` and nothing runs; subject rules, the first-use admission
+  (crew#1333) and an asking rule behave as before. On an engine without `judgeMcpCall` the gate keeps the list's
+  judgment, where an argument-only rule cannot fire.
 - **A live source's first-use ask is admitted by its switches on a real engine (crew#1333).** With "Agents can query
   this source" on, a chat's `mcp:<source>/execute_sql` (and the structure tool) was refused `pending_approval` on any
   daemon with the `mcp-defaults` pack, and studio has no way to approve it. The data gate turned an engine ask into

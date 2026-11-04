@@ -96,6 +96,12 @@ export interface DataGateDeps {
   resolver: () => ((requestJson: string) => Promise<string>) | null;
   /** `Core.listMcpTools`, read per call; `null` = the linked engine has none (every call refused). */
   lister: () => ((requestJson: string) => Promise<string>) | null;
+  /**
+   * `Core.judgeMcpCall` (crew#1337), read per call: one call judged WITH its arguments and recorded nowhere, so an
+   * operator rule that triggers on them fires. Absent, or `null` (an engine that predates it): the call is judged by
+   * the tool list, with no arguments, and a rule that triggers only on arguments cannot fire.
+   */
+  judge?: () => ((requestJson: string) => Promise<string>) | null;
   /** The Toolbox runtime; absent = Toolbox entries answer `toolbox_unavailable`. */
   toolbox?: ToolboxSupervisor;
   dial?: DialOptions;
@@ -209,32 +215,46 @@ export class DataGate {
   }
 
   /**
-   * The subjects the ENGINE lets this unit try, of `calls` (`listMcpTools`, which records nothing): absence is a
-   * deny (an operator policy; D-7 denies an Apps unit only write tools, and these go as reads). An `ask` the
-   * engine marks `firstUseOnly` is admitted: the server's first use is its only reason (every other rule that
-   * fired, such as the `mcp-defaults` read posture, allows), and the person's per-source switches are that
-   * consent (crew#1333). An `ask` for any other reason (an operator's asking rule), or from an engine that
-   * predates the mark, stands. `null` = the linked engine has no lister.
+   * The subjects the ENGINE lets this unit try, of `calls`, recording nothing: absence is a deny (an operator policy;
+   * D-7 denies an Apps unit only write tools, and these go as reads). Each call is judged WITH its arguments
+   * (`judgeMcpCall`, crew#1337), so an operator rule whose trigger matches them (a word in the SQL) fires; an engine
+   * that predates it judges by its tool list (`listMcpTools`), with no arguments. An `ask` the engine marks
+   * `firstUseOnly` is admitted: the server's first use is its only reason (every other rule that fired, such as the
+   * `mcp-defaults` read posture, allows), and the person's per-source switches are that consent (crew#1333). An `ask`
+   * for any other reason (an operator's asking rule), or from an engine that predates the mark, stands. `null` = the
+   * linked engine has neither.
    */
-  async admitted(token: string, calls: ReadonlyArray<{ server: string; tool: string; disclosure: string | null }>): Promise<Map<string, 'allow' | 'ask'> | null> {
-    const lister = this.deps.lister();
-    if (lister === null) return null;
-    const req = calls.map((c) => ({ server: c.server, tool: c.tool, annotations: { readOnlyHint: true }, classOverride: 'read', registered: true, kind: 'mcp-stdio', carrier: 'shim' }));
-    let raw: string;
-    try {
-      raw = await lister(JSON.stringify({ token, calls: req }));
-    } catch (err) {
-      const msg = message(err);
-      if (msg.startsWith('invalid_token') || msg.startsWith('bad_request')) throw new GateTokenError(msg);
-      throw err;
-    }
-    const judged = JSON.parse(raw) as { tools?: Array<{ subject?: unknown; decision?: unknown; firstUseOnly?: unknown }> };
+  async admitted(
+    token: string,
+    calls: ReadonlyArray<{ server: string; tool: string; disclosure: string | null; args?: Record<string, unknown> }>,
+  ): Promise<Map<string, 'allow' | 'ask'> | null> {
+    const wire = (c: (typeof calls)[number]) => ({ server: c.server, tool: c.tool, annotations: { readOnlyHint: true }, classOverride: 'read', registered: true, kind: 'mcp-stdio', carrier: 'shim' });
+    const engine = async (fn: (requestJson: string) => Promise<string>, request: unknown): Promise<string> => {
+      try {
+        return await fn(JSON.stringify(request));
+      } catch (err) {
+        const msg = message(err);
+        if (msg.startsWith('invalid_token') || msg.startsWith('bad_request')) throw new GateTokenError(msg);
+        throw err;
+      }
+    };
     const out = new Map<string, 'allow' | 'ask'>();
-    for (const t of judged.tools ?? []) {
-      if (typeof t.subject !== 'string') continue;
+    const take = (t: { subject?: unknown; decision?: unknown; firstUseOnly?: unknown }): void => {
+      if (typeof t.subject !== 'string') return;
       if (t.decision === 'allow') out.set(t.subject, 'allow');
       else if (t.decision === 'ask') out.set(t.subject, t.firstUseOnly === true ? 'allow' : 'ask');
+    };
+    const judge = this.deps.judge?.() ?? null;
+    if (judge !== null) {
+      for (const c of calls) {
+        take(JSON.parse(await engine(judge, { token, call: { ...wire(c), args: c.args ?? {} } })) as { subject?: unknown; decision?: unknown; firstUseOnly?: unknown });
+      }
+      return out;
     }
+    const lister = this.deps.lister();
+    if (lister === null) return null;
+    const judged = JSON.parse(await engine(lister, { token, calls: calls.map(wire) })) as { tools?: Array<{ subject?: unknown; decision?: unknown; firstUseOnly?: unknown }> };
+    for (const t of judged.tools ?? []) take(t);
     return out;
   }
 
