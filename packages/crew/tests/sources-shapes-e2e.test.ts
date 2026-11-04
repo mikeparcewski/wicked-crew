@@ -138,7 +138,8 @@ for (const target of EXE === '' ? [] : PG_TARGETS) {
           spawn: () =>
             spawn(EXE, [], {
               stdio: ['pipe', 'pipe', 'pipe'],
-              env: { PATH: process.env['PATH'] ?? '', HOME: stores, WICKED_HOME: stores, WICKED_ESTATE_DB: join(stores, 'estate.db'), WICKED_MEMORY_DB: join(stores, 'memory.db'), WICKED_KNOWLEDGE_DB: join(stores, 'knowledge.db'), WICKED_XEDGE_DB: join(stores, 'xedge.db') },
+              // The hermetic arming stays (tests/setup/hermetic-home.ts); every store is this test's own.
+              env: { ...process.env, HOME: stores, WICKED_HOME: stores, WICKED_ESTATE_DB: join(stores, 'estate.db'), WICKED_MEMORY_DB: join(stores, 'memory.db'), WICKED_KNOWLEDGE_DB: join(stores, 'knowledge.db'), WICKED_XEDGE_DB: join(stores, 'xedge.db') },
             }),
         });
       // B3b's describe writer: every stored catalog is projected into estate as one generation.

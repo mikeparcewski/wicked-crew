@@ -31,7 +31,8 @@ describe.skipIf(EXE === '')('data shapes through a real wicked-estate-mcp', () =
         spawn(EXE, [], {
           stdio: ['pipe', 'pipe', 'pipe'],
           env: {
-            PATH: process.env['PATH'] ?? '',
+            // The hermetic arming stays (tests/setup/hermetic-home.ts); every store is this test's own.
+            ...process.env,
             HOME: dir,
             WICKED_HOME: dir,
             WICKED_ESTATE_DB: join(dir, 'estate.db'),
