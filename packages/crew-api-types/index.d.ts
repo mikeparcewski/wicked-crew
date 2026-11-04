@@ -12687,8 +12687,10 @@ export interface McpRegistryRestoreBody {
  * back OFF; a server whose secret reference resolves to nothing comes back DISABLED (`secret_missing`); MCP
  * approvals whose tool schema differs from the restored one are withdrawn first (a failed withdrawal refuses the
  * restore, 500 `withdraw_failed`). A generation that is not kept is a 404 `unknown_generation`; one that does not
- * parse a 409 `generation_unreadable`, and nothing changes. The registry in force before the restore is kept as
- * a generation too.
+ * parse, or holds a record crew could not have written, a 409 `generation_unreadable`, and nothing changes. The
+ * withdrawal and the commit hold every affected server's lock; when servers keep being registered meanwhile the
+ * restore gives up with a 409 `registry_busy`, having changed nothing. The registry in force before the restore is
+ * kept as a generation too.
  */
 export interface McpRegistryRestoreResponse {
   restored: number;
@@ -12824,6 +12826,8 @@ export interface SaveMcpServerBody {
    */
   disclosures?: Record<string, McpToolDisclosure>;
 }
+// (api-types 0.183.0) A save of a name that is NOT registered withdraws any approval still naming it first (audited
+// `mcp.approval.withdrawn`, why `not_registered`): a new registration never inherits one.
 
 /**
  * (api-types 0.112.0, G2, DES-data-connectors §3) A `rest` server's egress as its preview found it.

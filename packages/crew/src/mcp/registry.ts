@@ -49,7 +49,7 @@ import type {
 } from '../core/types.js';
 import { agentAccessOf, effectiveDisclosure, legacyEntryId, proposedDisclosure, type ToolboxSourceEntry, type ToolDisclosure, type ToolDisclosureClass } from '../knowledge/registry/entry.js';
 import { checkSourceDocument, DeploymentPolicyError, policyVersionOf } from '../knowledge/registry/policy.js';
-import { canonicalJson, deriveToolClass, effectiveToolClass, ESTATE_SERVER, type HashedRestTarget, type HashedToolShape, mcpSubject, parseMcpSubject, sha256Hex, toolSchemaHash } from './classify.js';
+import { canonicalJson, deriveToolClass, effectiveToolClass, ESTATE_SERVER, type HashedRestTarget, type HashedToolShape, MCP_SERVER_NAME_RE, mcpSubject, parseMcpSubject, sha256Hex, toolSchemaHash } from './classify.js';
 import type { McpUpstreamConfig, ProbedTool, ProbeResult, Prober } from './probe.js';
 import { GENERATIONS_KEPT, type McpRegistryFile, type McpRegistryStore, type McpServerRecord, type McpToolRecord } from './registry-store.js';
 import { restTarget } from './rest.js';
@@ -119,7 +119,11 @@ export interface McpCallableTool {
 /** A kept generation read, normalized and validated once ({@link McpRegistry.planRestore}). */
 export interface RestorePlan {
   readonly generation: number;
+  /** The generation's servers, ALREADY reconciled (switches off, missing secrets disabled): what the commit writes. */
   readonly servers: readonly McpServerRecord[];
+  readonly disabled: ReadonlyArray<{ name: string; code: 'secret_missing' }>;
+  readonly queryReset: readonly string[];
+  readonly writesReset: readonly string[];
 }
 
 interface HeldPreview {
@@ -842,11 +846,19 @@ export class McpRegistry {
   // ── Generations (DES-KNOWLEDGE-DATA-001 §5.5) ──────────────────────────────────────────────
 
   /**
-   * Read, normalize and VALIDATE a kept generation, with no side effect (§5.5): the one snapshot a restore plans its
-   * approval withdrawals against and then commits, so nothing is withdrawn for a restore that is then refused, and a
-   * generation pruned meanwhile cannot fail it half-way. 404 `unknown_generation` when it is not kept; 409
-   * `generation_unreadable` when it cannot be read or does not parse; 400 with the policy's code when a database
-   * source in it fails the deployment policy (a hand edit).
+   * Read, normalize, VALIDATE and RECONCILE a kept generation, with no side effect on the registry (§5.5): the one
+   * snapshot a restore plans its approval withdrawals against and then commits as it is, so a restore refused for
+   * any reason withdraws nothing, and a generation pruned meanwhile cannot fail it half-way. 404
+   * `unknown_generation` when it is not kept; 409 `generation_unreadable` when it cannot be read, does not parse, or
+   * holds a record crew could not have written; 400 with the policy's code when a database source fails the
+   * deployment policy (a hand edit).
+   *
+   * The reconciliation fails closed:
+   * - "Query" and Allow writes come back OFF on every source: a person turns them on again.
+   * - A server whose secret reference does not RESOLVE to a value (a keychain entry gone or unreadable, an env
+   *   variable unset, a keychain reference on a daemon with no keychain, or any error reading it) comes back
+   *   DISABLED, `secret_missing`. The value is read only to be compared with nothing, and is dropped at once.
+   * - Grants stay bound to their descriptors and are judged where they are used.
    */
   async planRestore(generation: number): Promise<RestorePlan> {
     let kept: McpRegistryFile | null;
@@ -859,7 +871,11 @@ export class McpRegistry {
     if (kept === null) throw new McpRegistryError(404, 'unknown_generation', `generation ${generation} is not kept (the registry keeps the last ${GENERATIONS_KEPT})`);
     let servers: McpServerRecord[];
     try {
-      servers = normalizeRegistryFile(kept).servers;
+      for (const raw of kept.servers) {
+        const problem = recordShapeProblem(raw);
+        if (problem !== null) throw new Error(`${String((raw as { name?: unknown }).name)}: ${problem}`);
+      }
+      servers = structuredClone(normalizeRegistryFile(kept).servers);
     } catch (err) {
       const why = err instanceof Error ? err.message : String(err);
       throw new McpRegistryError(409, 'generation_unreadable', `generation ${generation} is not a registry crew can read: ${why}`);
@@ -872,23 +888,7 @@ export class McpRegistry {
         throw policyRefusal(err);
       }
     }
-    return Object.freeze({ generation, servers: Object.freeze(structuredClone(servers)) as readonly McpServerRecord[] });
-  }
-
-  /**
-   * Commit a planned restore, reconciled so it fails closed (§5.5). The generation in force when this runs is itself
-   * kept, so a restore can be undone the same way.
-   *
-   * - "Query" and Allow writes come back OFF on every source: a person turns them on again.
-   * - A server whose secret reference does not RESOLVE to a value (a keychain entry gone or unreadable, an env
-   *   variable unset, a keychain reference on a daemon with no keychain, or any error reading it) comes back
-   *   DISABLED, `secret_missing`. The value is read only to be compared with nothing, and is dropped at once.
-   * - Grants stay bound to their descriptors and are judged where they are used; approvals the route withdraws
-   *   (under every affected server's lock) before calling this.
-   */
-  async restore(plan: RestorePlan): Promise<McpRegistryRestoreResponse> {
-    const servers = structuredClone(plan.servers) as McpServerRecord[];
-    const disabled: McpRegistryRestoreResponse['disabled'] = [];
+    const disabled: Array<{ name: string; code: 'secret_missing' }> = [];
     const queryReset: string[] = [];
     const writesReset: string[] = [];
     const stamp = new Date(this.now()).toISOString();
@@ -907,11 +907,22 @@ export class McpRegistry {
         s.updatedAt = stamp;
       }
     }
+    return Object.freeze({ generation, servers: Object.freeze(servers), disabled: Object.freeze(disabled), queryReset: Object.freeze(queryReset), writesReset: Object.freeze(writesReset) });
+  }
+
+  /**
+   * Commit a planned restore (§5.5): the plan's reconciled servers, as they are. The generation in force when this
+   * runs is itself kept, so a restore can be undone the same way. Approvals the route withdraws (under every
+   * server's lock) before calling this; only a failing write can still refuse it after that, which leaves the
+   * registry unchanged and those approvals withdrawn (the safe direction).
+   */
+  async restore(plan: RestorePlan): Promise<McpRegistryRestoreResponse> {
+    const servers = structuredClone(plan.servers) as McpServerRecord[];
     const current = await this.mutate((file) => {
       file.servers = servers;
       return file.generation ?? 0;
     });
-    return { restored: plan.generation, generation: current + 1, servers: servers.length, disabled, queryReset, writesReset };
+    return { restored: plan.generation, generation: current + 1, servers: servers.length, disabled: [...plan.disabled], queryReset: [...plan.queryReset], writesReset: [...plan.writesReset] };
   }
 
   /** Whether a secret reference resolves to a non-empty value now; any error reading it counts as no (fail closed). */
@@ -1338,4 +1349,37 @@ export function agentServerView(s: McpServer): McpServerAgentView {
     tools: s.tools.filter((t) => t.status !== 'gone').map((t) => ({ name: t.name, subject: t.subject, class: t.class, disclosure: t.disclosure, enabled: t.enabled, status: t.status })),
     ...(s.agents !== undefined ? { agents: { see: s.agents.see, query: s.agents.query } } : {}),
   };
+}
+
+const RECORD_KINDS: ReadonlySet<string> = new Set(['mcp-stdio', 'mcp-http', 'rest', 'sql', 'graphql', 'toolbox-source']);
+
+/**
+ * Why a stored record is not one crew could have written (`null`: it is): the fields every reader and a restore
+ * use. A restore refuses a generation holding one (409) before anything changes (codex r2).
+ */
+export function recordShapeProblem(raw: unknown): string | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return 'not an object';
+  const s = raw as Record<string, unknown>;
+  const str = (v: unknown): boolean => typeof v === 'string';
+  const strOrNull = (v: unknown): boolean => v === null || typeof v === 'string';
+  if (!str(s['name']) || !MCP_SERVER_NAME_RE.test(s['name'] as string)) return 'no valid name';
+  if (!str(s['kind']) || !RECORD_KINDS.has(s['kind'] as string)) return 'an unknown kind';
+  if (!strOrNull(s['command']) || !Array.isArray(s['args']) || !strOrNull(s['url'])) return 'no command, args or url';
+  const auth = s['auth'];
+  if (auth !== null && (typeof auth !== 'object' || !str((auth as Record<string, unknown>)['ref']))) return 'auth is neither null nor a reference';
+  if (typeof s['enabled'] !== 'boolean' || typeof s['health'] !== 'object' || s['health'] === null) return 'no enabled switch or health';
+  if (!str(s['registeredAt']) || !str(s['updatedAt'])) return 'no registeredAt or updatedAt';
+  if (s['id'] !== undefined && !str(s['id'])) return 'an id that is not a string';
+  if (!Array.isArray(s['tools'])) return 'no tools';
+  for (const t of s['tools'] as unknown[]) {
+    if (typeof t !== 'object' || t === null) return 'a tool that is not an object';
+    const r = t as Record<string, unknown>;
+    if (!str(r['name']) || !strOrNull(r['schemaHash']) || !str(r['observedSchemaHash']) || typeof r['present'] !== 'boolean' || typeof r['enabled'] !== 'boolean') return `tool ${String(r['name'])} is malformed`;
+  }
+  if (s['kind'] === 'toolbox-source') {
+    const tls = s['tls'] as Record<string, unknown> | undefined;
+    if (typeof s['toolbox'] !== 'object' || s['toolbox'] === null || (s['runtime'] !== 'native' && s['runtime'] !== 'toolbox') || typeof tls !== 'object' || tls === null || (tls['mode'] !== 'verify-full' && tls['mode'] !== 'disable')) return 'a database source without its document, runtime or TLS choice';
+  }
+  if (s['agents'] !== undefined && (typeof s['agents'] !== 'object' || s['agents'] === null)) return 'agents is not an object';
+  return null;
 }

@@ -287,6 +287,16 @@ describe('the one registry over its routes', () => {
     expect(readFileSync(join(base, 'mcp', 'registry.json'), 'utf8')).toBe(before);
   });
 
+  it('codex r2: a write that changes only the runtime a document is judged for is checked too', async () => {
+    const { auth: _auth, ...noPassword } = SQL_BODY;
+    void _auth;
+    expect((await save(noPassword)).status).toBe(201); // passwordless: valid for the native runtime only
+    const before = readFileSync(join(base, 'mcp', 'registry.json'), 'utf8');
+    const mutate = (registry as unknown as { mutate(fn: (f: McpRegistryFile) => void): Promise<void> }).mutate.bind(registry);
+    await expect(mutate((f) => void (f.servers[0]!.runtime = 'toolbox'))).rejects.toMatchObject({ code: 'missing_field' });
+    expect(readFileSync(join(base, 'mcp', 'registry.json'), 'utf8')).toBe(before);
+  });
+
   it('NEGATIVE CONTROL (crew#1310): an agent-kind bearer gets the projection on GET /mcp/servers, and 403 on every management read', async () => {
     expect((await save(SQL_BODY)).status).toBe(201);
     expect((await save({ name: 'fx', kind: 'mcp-stdio', command: process.execPath, args: [FIXTURE_SERVER, specPath] })).status).toBe(201);
@@ -442,7 +452,10 @@ class StubPolicies {
   failWithdraw = false;
   gate: Promise<void> | null = null;
   private readonly tails = new Map<string, Promise<unknown>>();
+  /** Every lock asked for, in order. */
+  readonly asked: string[] = [];
   exclusive<T>(server: string, fn: () => Promise<T>): Promise<T> {
+    this.asked.push(server);
     const result = (this.tails.get(server) ?? Promise.resolve()).then(fn);
     this.tails.set(server, result.catch(() => undefined));
     return result;
@@ -548,6 +561,52 @@ describe('a restore withdraws the approvals the restored generation does not cov
     expect([r.status, r.body.code]).toEqual([500, 'withdraw_failed']);
     expect(readFileSync(join(base, 'mcp', 'registry.json'), 'utf8')).toBe(before);
     expect([...policies.tokens]).toEqual(['mcp:fx/wt_echo']);
+  });
+
+  it('codex r2: a generation holding a record crew could not have written is refused before anything is withdrawn', async () => {
+    await save(fx());
+    const kept = await current();
+    spec([tool('wt_echo', ['text', 'more'])]);
+    await save(fx());
+    policies.tokens.add('mcp:fx/wt_echo');
+    const genPath = join(base, 'mcp', `registry.json.${kept}`);
+    const edited = JSON.parse(readFileSync(genPath, 'utf8')) as { servers: Array<Record<string, unknown>> };
+    delete edited.servers[0]!['auth'];
+    writeFileSync(genPath, JSON.stringify(edited));
+    const before = readFileSync(join(base, 'mcp', 'registry.json'), 'utf8');
+    const r = await call('POST', '/mcp/registry/restore', { generation: kept });
+    expect([r.status, r.body.code]).toEqual([409, 'generation_unreadable']);
+    expect(policies.withdrawCalls).toEqual([]);
+    expect([...policies.tokens]).toEqual(['mcp:fx/wt_echo']);
+    expect(readFileSync(join(base, 'mcp', 'registry.json'), 'utf8')).toBe(before);
+  });
+
+  it('codex r2: a server registered while the restore waits for its locks is covered too (its approval is withdrawn)', async () => {
+    await save(fx());
+    const kept = await current();
+    await registry.setServerEnabled('fx', true); // generation `kept` is now a kept file
+    let release!: () => void;
+    const holding = policies.exclusive('fx', () => new Promise<void>((resolve) => (release = resolve)));
+    const restoring = call('POST', '/mcp/registry/restore', { generation: kept });
+    while (policies.asked.filter((n) => n === 'fx').length < 2) await new Promise((r) => setTimeout(r, 5)); // it waits for fx's lock
+    await save(fx('fx2')); // a new server, and its approval, while the restore waits
+    policies.tokens.add('mcp:fx2/wt_echo');
+    release();
+    await holding;
+    const r = await restoring;
+    expect(r.status, r.text).toBe(200);
+    expect(r.body['withdrawnApprovals']).toEqual(['mcp:fx2/wt_echo']);
+    expect([...policies.tokens]).toEqual([]);
+    expect((await registry.list()).servers.map((s) => s.name)).toEqual(['fx']);
+    expect(policies.asked.filter((n) => n === 'fx2')).toHaveLength(2); // the save's, then the restore's second pass
+  });
+
+  it('codex r2: an approval naming a server that is not registered is withdrawn by the save that registers that name', async () => {
+    policies.tokens.add('mcp:ghost/wt_echo');
+    policies.tokens.add('mcp:ghost');
+    await save(fx('ghost'));
+    expect(policies.withdrawCalls.map((c) => [...c].sort())).toEqual([['mcp:ghost', 'mcp:ghost/wt_echo']]);
+    expect([...policies.tokens]).toEqual([]);
   });
 
   it('an approval that arrives while a restore withdraws is judged against the registration the restore left', async () => {

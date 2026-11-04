@@ -574,10 +574,15 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
         if (held !== null && confirmsAddress(held.address) && !mayGrantWrite(deps.actorOf(req))) return addressConfirmRefused(reply, deps.actorOf(req));
         const commit = async (): Promise<McpServer> => {
           if (held !== null && deps.policies !== undefined) {
-            const tokens = await deps.policies.withdrawnBySave(held);
+            // (DES-KNOWLEDGE-DATA-001 §5.5, codex r2) An approval naming a server that is NOT registered covers nothing
+            // anyone reviewed (a restore that dropped the server, a removal whose withdrawal failed): a new
+            // registration under that name never inherits it.
+            const registered = (await r.inspectTarget(held.name)) !== null;
+            const stale = registered ? [] : await deps.policies.tokensOf(held.name);
+            const tokens = registered ? await deps.policies.withdrawnBySave(held) : stale;
             if (tokens.length > 0) {
               const rules = await deps.policies.withdraw(tokens).catch((e: unknown) => { auditPartial(deps, req, e, tokens); throw e; });
-              deps.audit.record('mcp.approval.withdrawn', deps.actorOf(req), { detail: { subjects: tokens, rules, why: 'schema_changed' } });
+              deps.audit.record('mcp.approval.withdrawn', deps.actorOf(req), { detail: { subjects: tokens, rules, why: registered ? 'schema_changed' : 'not_registered' } });
               for (const id of rules) deps.audit.record('governance.rule.upserted', deps.actorOf(req), { detail: { id, source: 'mcp-approval' } });
             }
           }
@@ -813,29 +818,43 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
         // a document the policy refuses) withdraws nothing, and a generation pruned meanwhile cannot fail it half-way.
         const plan = await r.planRestore(generation);
         const p = deps.policies;
-        const names = [...new Set([...(await r.list()).servers.map((s) => s.name), ...plan.servers.map((s) => s.name)])].sort();
+        const planned = plan.servers.map((s) => s.name);
         // (crew#993) The withdrawal and the commit are one step for EVERY server they touch: each server's lock, in
         // name order (every other holder takes one lock, so the order cannot deadlock), so no approval, save or
-        // removal of those servers lands between them.
-        const locked = <T>(fn: () => Promise<T>): Promise<T> => (p === undefined ? fn() : names.reduceRight<() => Promise<T>>((inner, name) => () => p.exclusive(name, inner), fn)());
-        const { out, withdrawn } = await locked(async () => {
-          let withdrawn: string[] = [];
-          if (p !== undefined) {
-            withdrawn = await restoreWithdrawals(p, (await r.list()).servers, plan.servers);
-            if (withdrawn.length > 0) {
-              let rules: string[];
-              try {
-                rules = await p.withdraw(withdrawn);
-              } catch (err) {
-                auditPartial(deps, req, err, withdrawn);
-                throw new McpRegistryError(500, 'withdraw_failed', `the registry was not restored: approvals that generation ${generation} does not cover could not be withdrawn (${err instanceof Error ? err.message : String(err)})`);
-              }
-              deps.audit.record('mcp.approval.withdrawn', actor, { detail: { subjects: withdrawn, rules, why: 'registry_restored' } });
-              for (const id of rules) deps.audit.record('governance.rule.upserted', actor, { detail: { id, source: 'mcp-approval' } });
+        // removal of those servers lands between them. A server registered while the locks were being taken is not
+        // covered: then nothing is done, and the locks are taken again over the larger set (codex r2).
+        const locked = <T>(names: readonly string[], fn: () => Promise<T>): Promise<T> => (p === undefined ? fn() : names.reduceRight<() => Promise<T>>((inner, name) => () => p.exclusive(name, inner), fn)());
+        let names = [...new Set([...(await r.list()).servers.map((s) => s.name), ...planned])].sort();
+        let done: { out: Awaited<ReturnType<McpRegistry['restore']>>; withdrawn: string[] } | null = null;
+        for (let attempt = 0; attempt < 3 && done === null; attempt++) {
+          const held = names;
+          done = await locked(held, async () => {
+            const now = (await r.list()).servers;
+            const wider = now.map((s) => s.name).filter((n) => !held.includes(n));
+            if (wider.length > 0) {
+              names = [...new Set([...held, ...wider])].sort();
+              return null;
             }
-          }
-          return { out: await r.restore(plan), withdrawn };
-        });
+            let withdrawn: string[] = [];
+            if (p !== undefined) {
+              withdrawn = await restoreWithdrawals(p, now, plan.servers);
+              if (withdrawn.length > 0) {
+                let rules: string[];
+                try {
+                  rules = await p.withdraw(withdrawn);
+                } catch (err) {
+                  auditPartial(deps, req, err, withdrawn);
+                  throw new McpRegistryError(500, 'withdraw_failed', `the registry was not restored: approvals that generation ${generation} does not cover could not be withdrawn (${err instanceof Error ? err.message : String(err)})`);
+                }
+                deps.audit.record('mcp.approval.withdrawn', actor, { detail: { subjects: withdrawn, rules, why: 'registry_restored' } });
+                for (const id of rules) deps.audit.record('governance.rule.upserted', actor, { detail: { id, source: 'mcp-approval' } });
+              }
+            }
+            return { out: await r.restore(plan), withdrawn };
+          });
+        }
+        if (done === null) throw new McpRegistryError(409, 'registry_busy', 'servers kept being registered while the restore was taking their locks; nothing was restored: try again');
+        const { out, withdrawn } = done;
         const body: McpRegistryRestoreResponse = { ...out, withdrawnApprovals: withdrawn };
         deps.audit.record('mcp.registry.restored', actor, { detail: { restored: generation, generation: out.generation, servers: out.servers, disabled: out.disabled, queryReset: out.queryReset, writesReset: out.writesReset, withdrawnApprovals: withdrawn } });
         return body;
