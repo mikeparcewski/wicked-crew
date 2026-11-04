@@ -16,7 +16,7 @@ import type { McpCallResponse } from '../src/core/types.js';
 import { agentAccessOf, type SourceAgentAccess } from '../src/knowledge/gate/access.js';
 import type { GateSource } from '../src/knowledge/gate/sources.js';
 import { KNOWLEDGE_PACKAGE_MAX_BYTES, knowledgePackageFor, packageJson, visibleDeps } from '../src/knowledge/package.js';
-import { DOC_RECORD_MAX_BYTES, PROJECTION_FORMAT, relationKey, SourceProjector, sourceGeneration } from '../src/knowledge/projector.js';
+import { DOC_RECORD_MAX_BYTES, PROJECTION_CONCURRENCY, PROJECTION_FORMAT, relationKey, SourceProjector, sourceGeneration } from '../src/knowledge/projector.js';
 import { McpBroker } from '../src/mcp/broker.js';
 import { McpCallRecordFile } from '../src/mcp/call-records.js';
 import { effectiveDeps, EstateRelay, type EstateRelayInvocation, type EstateUnitScope, releaseVisible, UNREADABLE_DEPS, type VisibleRelease } from '../src/mcp/estate-relay.js';
@@ -131,6 +131,11 @@ describe('knowledgePackageFor: one predicate, structure only (§8.1, §9.3)', ()
     // A restored registry generation (or any descriptor change) leaves the catalog under another descriptor: what
     // estate holds of it stays hidden until it is described again (codex r1).
     expect(visibleDeps([source('support-pg', SUPPORT_ID, { projects: ['proj_a'] }, { description: null })], 'proj_a', [])).toEqual([]);
+    // With the projector's acknowledgements: only while estate holds THIS descriptor's projection (codex r2).
+    const ticked = [source('support-pg', SUPPORT_ID, { projects: ['proj_a'] })];
+    expect(visibleDeps(ticked, 'proj_a', [], () => null)).toEqual([]);
+    expect(visibleDeps(ticked, 'proj_a', [], () => 'an-earlier-descriptor')).toEqual([]);
+    expect(visibleDeps(ticked, 'proj_a', [], () => 'h')).toEqual([`source:${SUPPORT_ID}`]);
   });
 
   it('the package is bounded on its FINAL bytes, the omitted count included (codex r1: 500 sources)', async () => {
@@ -140,6 +145,8 @@ describe('knowledgePackageFor: one predicate, structure only (§8.1, §9.3)', ()
     const out = JSON.parse(text) as { sources: unknown[]; sourcesNotListed: number };
     expect(out.sources.length + out.sourcesNotListed).toBe(500);
     for (const max of [3_000, 10_000, 20_000]) expect(Buffer.byteLength(packageJson(await knowledgePackageFor({ projectId: 'proj_a' }, gateOf(many)), max), 'utf8')).toBeLessThanOrEqual(max);
+    // A bound the envelope alone cannot meet is an error, never an oversized package (codex r2).
+    expect(() => packageJson({ package: 'wicked.knowledge/v1', projectId: 'proj_a', sources: [] }, 1)).toThrow(/needs at least/);
   });
 });
 
@@ -151,6 +158,18 @@ describe('the chat block (§8.1): sources and knowledge', () => {
     expect(after).toContain('support-pg');
     expect(after).toContain('support.tickets');
     expect(after).toContain('mcp:<source>/list_tables');
+  });
+
+  it('advertises a query only where execute_sql is OFFERED, and names why a source cannot be queried (codex r2)', async () => {
+    const unreviewed = source('support-pg', SUPPORT_ID, { query: true, projects: ['proj_a'] });
+    unreviewed.tools[1] = { ...unreviewed.tools[1]!, disclosure: null };
+    const mysql = source('shop-mysql', OTHER_ID, { query: true, projects: ['proj_a'] }, { dialect: 'mysql', queryable: false } as Partial<GateSource>);
+    const off = (await chatKnowledgeFor(gateOf([unreviewed, mysql]), 'proj_a')) ?? '';
+    expect(off).not.toContain('mcp:<source>/execute_sql');
+    expect(off).toMatch(/no source here may be queried/);
+    const on = (await chatKnowledgeFor(gateOf([source('support-pg', SUPPORT_ID, { query: true, projects: ['proj_a'] }), mysql]), 'proj_a')) ?? '';
+    expect(on).toMatch(/only support-pg may be queried/);
+    expect(on).toContain('agents cannot query a mysql source in this release');
   });
 
   it('names execute_sql and the src: citation only when query is on', async () => {
@@ -342,6 +361,38 @@ describe('the describe -> knowledge.replace_source projection (§4.1): value-fre
     expect(doc.entry['foreignKeysNotListed']).toBeGreaterThan(0);
   });
 
+  it('projects EVERY readable relation (no prompt budget): 201 relations are 201 docs, a very wide one costs the others nothing (codex r2)', () => {
+    const many = Array.from({ length: 201 }, (_, i) => rel('s', `t${i}`, { foreignKeys: [] }));
+    expect(sourceGeneration(source('pg', SUPPORT_ID, {}, { description: { catalog: catalog(many), descriptorHash: 'h' } }), 1)!.docs).toHaveLength(201);
+    const wide = rel('s', 'wide', { columns: Array.from({ length: 2_000 }, (_, c) => ({ name: `column_${c}_padded_to_take_room`, type: 'text', nullable: true })) });
+    const gen = sourceGeneration(source('pg', SUPPORT_ID, {}, { description: { catalog: catalog([wide, rel('s', 'small', { foreignKeys: [] })]), descriptorHash: 'h' } }), 1)!;
+    expect(gen.docs.map((d) => d.key)).toEqual(['s.wide', 's.small']);
+    // A foreign table, and a view nobody allowed, are never projected.
+    const g2 = sourceGeneration(source('pg', SUPPORT_ID, {}, { description: { catalog: catalog([rel('s', 'f', { kind: 'foreign' } as Partial<CatalogRelation>), rel('s', 'v', { kind: 'view' }), rel('s', 'ok', { foreignKeys: [] })]), descriptorHash: 'h' } }), 1)!;
+    expect(g2.docs.map((d) => d.key)).toEqual(['s.ok']);
+  });
+
+  it('refuses a source over one generation rather than send a partial one that would tombstone the rest', () => {
+    const huge = Array.from({ length: 5_001 }, (_, i) => rel('s', `t${i}`, { columns: [], primaryKey: [], foreignKeys: [] }));
+    expect(() => sourceGeneration(source('pg', SUPPORT_ID, {}, { description: { catalog: catalog(huge), descriptorHash: 'h' } }), 1)).toThrow(/over what one estate generation holds/);
+  });
+
+  it('a legal name with a control character, a quote or a backslash is a distinct, control-free key and title; a long one is hashed (codex r2)', () => {
+    const names = ['a\nb', 'a\\u000ab', 'q"x', 'Δ'.repeat(260)];
+    const keys = names.map((n) => relationKey('s', n));
+    // eslint-disable-next-line no-control-regex
+    for (const k of keys) expect(k).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+    expect(new Set(keys).size).toBe(names.length);
+    expect(keys[0]).toBe('s."a\\u000ab"');
+    expect(keys[1]).toBe('s."a\\\\u000ab"');
+    expect(keys[2]).toBe('s."q""x"');
+    expect(keys[3]).toMatch(/^relation:[0-9a-f]{32}$/);
+    const gen = sourceGeneration(source('pg', SUPPORT_ID, {}, { description: { catalog: catalog([rel('s', 'a\nb')]), descriptorHash: 'h' } }), 1)!;
+    // eslint-disable-next-line no-control-regex
+    expect(gen.docs[0]!.title).not.toMatch(/[\u0000-\u001f]/);
+    expect(gen.docs[0]!.entry['name']).toBe('a\nb');
+  });
+
   it('keys relations unambiguously when a part holds a dot (codex r1), and as written otherwise', () => {
     expect(relationKey('support', 'tickets')).toBe('support.tickets');
     expect(relationKey(null, 'tickets')).toBe('tickets');
@@ -349,6 +400,56 @@ describe('the describe -> knowledge.replace_source projection (§4.1): value-fre
     const keys = gen.docs.map((d) => d.key);
     expect(new Set(keys).size).toBe(2);
     expect(keys).toEqual(['"a.b".c', 'a."b.c"']);
+  });
+
+  it('runs one projection of a source at a time, reads the catalog stored when it runs, acknowledges only what estate took, and bounds estate writes across sources (codex r2)', async () => {
+    const { sourceDescriptorHash } = await import('../src/sources/kinds.js');
+    const { configOf } = await import('../src/mcp/registry.js');
+    const mk = (name: string, id: string) => ({ id, name, kind: 'sql', command: null, args: [], url: null, auth: null, enabled: true, health: { state: 'ok', consecutiveFailures: 0, checkedAt: DESCRIBED_AT, lastError: null }, registeredAt: DESCRIBED_AT, updatedAt: DESCRIBED_AT, tools: [], sql: { driver: 'postgres', host: 'db.test', port: 5432, database: 'd', user: 'u', tls: 'disable' }, viewsAllowed: [], address: { allow: ['127.0.0.0/8'], plaintext: false } });
+    const records = ['a', 'b', 'c', 'd'].map((n, i) => mk(`src-${n}`, `3f0c9a1e-0000-4000-8000-0000000c000${i}`));
+    const hash = sourceDescriptorHash(configOf(records[0] as never));
+    let stored = catalog([rel('s', 'first', { foreignKeys: [] })]);
+    const held: Array<{ name: string; keys: string[]; release: (ok: boolean) => void }> = [];
+    let running = 0;
+    let peak = 0;
+    const projector = new SourceProjector({
+      store: { read: async () => ({ version: 1, servers: records }) as never, settled: async () => undefined },
+      catalogs: { read: async () => ({ catalog: stored, descriptorHash: hash }) } as never,
+      call: (_tool, args) => {
+        running++;
+        peak = Math.max(peak, running);
+        return new Promise((resolve, reject) => {
+          held.push({ name: String(args['label']), keys: (args['docs'] as Array<{ key: string }>).map((d) => d.key), release: (ok) => { running--; if (ok) resolve({}); else reject(new Error('estate refused')); } });
+        });
+      },
+    });
+    const tick = () => new Promise((r) => setTimeout(r, 10));
+    projector.written('src-a');
+    projector.written('src-a');
+    await tick();
+    expect(held.map((h) => h.name)).toEqual(['src-a']);
+    // The second job reads the catalog stored when IT runs.
+    stored = catalog([rel('s', 'second', { foreignKeys: [] })]);
+    held[0]!.release(false); // estate refused the first: nothing acknowledged, and the next still runs
+    await tick();
+    expect(projector.projectedDescriptor(records[0]!.id)).toBeNull();
+    expect(held.map((h) => h.keys)).toEqual([['s.first'], ['s.second']]);
+    held[1]!.release(true);
+    await tick();
+    expect(projector.projectedDescriptor(records[0]!.id)).toBe(hash);
+    // Across sources: at most PROJECTION_CONCURRENCY estate writes at once.
+    for (const n of ['src-b', 'src-c', 'src-d']) projector.written(n);
+    await tick();
+    expect(running).toBe(PROJECTION_CONCURRENCY);
+    while (held.some((h, i) => i >= 2 && running > 0)) {
+      const next = held.find((h, i) => i >= 2 && !(h as { done?: boolean }).done);
+      if (next === undefined) break;
+      (next as { done?: boolean }).done = true;
+      next.release(true);
+      await tick();
+    }
+    await projector.idle();
+    expect(peak).toBeLessThanOrEqual(PROJECTION_CONCURRENCY);
   });
 
   it('the projector waits for the registry write, calls estate once per stored catalog, and never throws on a refusal', async () => {

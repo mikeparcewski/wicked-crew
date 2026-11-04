@@ -18,7 +18,7 @@
 import { deriveToolClass, MCP_SERVER_NAME_RE, mcpSubject } from '../mcp/classify.js';
 import type { McpCallableTool } from '../mcp/registry.js';
 import type { GateSource } from '../knowledge/gate/sources.js';
-import { type KnowledgePackage, knowledgePackageFor, packageJson } from '../knowledge/package.js';
+import { type KnowledgePackage, knowledgePackageFor, packageJson, type PackageSource } from '../knowledge/package.js';
 
 /** At most this many tools are named; the rest are counted (the shim's `list` has them all). */
 export const CHAT_MCP_TOOLS_SHOWN = 30;
@@ -135,7 +135,10 @@ export function chatKnowledgeStatement(pkg: KnowledgePackage): string | null {
   if (pkg.sources.length === 0) return null;
   // Names reach prose only in the registry's own spelling ([a-z0-9_-]); anything else stays inside the data block.
   const prose = (name: string): boolean => MCP_SERVER_NAME_RE.test(name);
-  const queryable = pkg.sources.filter((s) => s.query && prose(s.name)).map((s) => s.name);
+  // What a chat may query is what it is OFFERED (the package's subjects), not the switch alone: an unreviewed or
+  // disabled rows tool is not offered.
+  const offersRows = (s: PackageSource): boolean => s.tools.includes(`mcp:${s.name}/execute_sql`);
+  const queryable = pkg.sources.filter((s) => offersRows(s) && prose(s.name)).map((s) => s.name);
   const lines: string[] = [
     "## Live data sources this chat's project may use",
     '',
@@ -170,10 +173,12 @@ export function chatKnowledgeStatement(pkg: KnowledgePackage): string | null {
     );
   } else {
     lines.push('Rows: no source here may be queried by agents. Answer from the structure, and say that a person can');
-    lines.push('turn on "Agents can query this source" on its sheet. Never invent a number a query would have given.');
+    lines.push('turn on "Agents can query this source" on its sheet (Postgres sources; agents cannot query other kinds in this');
+    lines.push('release). Never invent a number a query would have given.');
   }
-  for (const s of pkg.sources.filter((x) => !x.query && prose(x.name))) {
-    if (queryable.length > 0) lines.push('', `${s.name} may not be queried: answer from its structure, and say a person can turn querying on.`);
+  for (const s of pkg.sources.filter((x) => !offersRows(x) && prose(x.name))) {
+    if (queryable.length === 0) break;
+    lines.push('', `${s.name} may not be queried: answer from its structure, ${s.kind === 'postgres' ? 'and say a person can turn querying on' : `and say agents cannot query a ${s.kind} source in this release`}.`);
   }
   lines.push('', "Recall what the record knows about these tables (documents, decisions, linked code) with the wicked-garden-mem skill's `answer`.");
   return lines.join('\n');

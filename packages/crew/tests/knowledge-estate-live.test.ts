@@ -114,6 +114,12 @@ describe.skipIf(EXE === '' || process.platform === 'win32')('the knowledge packa
     const second = (await write('knowledge.replace_source', sourceGeneration(source(['tickets'], '2026-11-04T04:00:00Z'), 2000)! as never)) as { tombstoned: { doc_count: number; docs: string[] } };
     expect(second.tombstoned.doc_count).toBe(1);
     expect(second.tombstoned.docs).toEqual(['support.customers']);
+    // A legal name with a newline (quoted SQL identifier) is a key estate's validator takes (codex r2).
+    const odd = source(['tickets'], '2026-11-04T04:30:00Z');
+    (odd.description!.catalog as SqlCatalog).relations.push(rel('a\nb'), rel('q"x'));
+    const third = (await write('knowledge.replace_source', sourceGeneration(odd, 3000)! as never)) as Record<string, unknown>;
+    expect(third).toMatchObject({ docs: 3 });
+    expect((await write('knowledge.replace_source', sourceGeneration(source(['tickets'], '2026-11-04T04:40:00Z'), 4000)! as never)) as Record<string, unknown>).toMatchObject({ docs: 1 });
     // An older describe is refused and changes nothing.
     await expect(write('knowledge.replace_source', sourceGeneration(source(['tickets', 'customers'], '2026-11-04T02:00:00Z'), 500)! as never)).rejects.toThrow();
   }, 120_000);

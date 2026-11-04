@@ -122,6 +122,8 @@ export async function knowledgePackageFor(ctx: { projectId: string | null }, dep
  */
 export function packageJson(pkg: KnowledgePackage, maxBytes: number = KNOWLEDGE_PACKAGE_MAX_BYTES): string {
   const listed: PackageSource[] = [];
+  const empty = JSON.stringify({ package: pkg.package, projectId: pkg.projectId, sources: [], sourcesNotListed: pkg.sources.length });
+  if (Buffer.byteLength(empty, 'utf8') > maxBytes) throw new Error(`a knowledge package needs at least ${Buffer.byteLength(empty, 'utf8')} bytes (bound ${maxBytes})`);
   const render = (): string => JSON.stringify({ package: pkg.package, projectId: pkg.projectId, sources: listed, sourcesNotListed: pkg.sources.length - listed.length });
   // Each candidate is checked with the count the final rendering would carry if nothing more were listed; listing
   // more only lowers that count, so the final rendering fits whenever the last check did.
@@ -148,9 +150,21 @@ export const sourceDep = (sourceId: string): string => `source:${sourceId}`;
  * restored registry generation's for instance, stays hidden until it is described again), and the repos named
  * (the run's own, its project's). Sorted and unique.
  */
-export function visibleDeps(sources: readonly GateSource[], projectId: string | null, repos: readonly string[]): string[] {
+export function visibleDeps(
+  sources: readonly GateSource[],
+  projectId: string | null,
+  repos: readonly string[],
+  /** The descriptor whose structure estate holds per source id (the projector's acknowledgements); absent = trust the stored description. */
+  projected?: (sourceId: string) => string | null,
+): string[] {
   const out = new Set<string>();
-  for (const s of sources) if (s.description !== null && agentMay(s.access, s, projectId, 'see')) out.add(sourceDep(s.id));
+  for (const s of sources) {
+    if (s.description === null || !agentMay(s.access, s, projectId, 'see')) continue;
+    // What estate holds must be this descriptor's: a projection still pending, or one that failed after a
+    // descriptor change, leaves the earlier descriptor's structure in estate, and it is never released.
+    if (projected !== undefined && projected(s.id) !== s.descriptorHash) continue;
+    out.add(sourceDep(s.id));
+  }
   for (const r of repos) if (typeof r === 'string' && r.trim() !== '') out.add(repoDep(r));
   return [...out].sort();
 }

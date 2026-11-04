@@ -2552,7 +2552,7 @@ export async function createServer(
         // An engine that cannot list members leaves the run's own repo.
       }
     }
-    return visibleDeps(await dataGate.sources(), scope.projectId, repos);
+    return visibleDeps(await dataGate.sources(), scope.projectId, repos, (id) => sourceProjector.projectedDescriptor(id));
   };
   const mcpBroker = new McpBroker({
     registry: mcpRegistry,
