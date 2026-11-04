@@ -12826,8 +12826,6 @@ export interface SaveMcpServerBody {
    */
   disclosures?: Record<string, McpToolDisclosure>;
 }
-// (api-types 0.183.0) A save of a name that is NOT registered withdraws any approval still naming it first (audited
-// `mcp.approval.withdrawn`, why `not_registered`): a new registration never inherits one.
 
 /**
  * (api-types 0.112.0, G2, DES-data-connectors §3) A `rest` server's egress as its preview found it.

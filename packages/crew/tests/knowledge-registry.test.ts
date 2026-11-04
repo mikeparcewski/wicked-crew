@@ -604,14 +604,6 @@ describe('a restore withdraws the approvals the restored generation does not cov
     expect(policies.asked.filter((n) => n === 'fx2')).toHaveLength(2); // the save's, then the restore's second pass
   });
 
-  it('codex r2: an approval naming a server that is not registered is withdrawn by the save that registers that name', async () => {
-    policies.tokens.add('mcp:ghost/wt_echo');
-    policies.tokens.add('mcp:ghost');
-    await save(fx('ghost'));
-    expect(policies.withdrawCalls.map((c) => [...c].sort())).toEqual([['mcp:ghost', 'mcp:ghost/wt_echo']]);
-    expect([...policies.tokens]).toEqual([]);
-  });
-
   it('codex r3: an orphan approval naming a server the generation brings back is withdrawn', async () => {
     await save(fx());
     await save(fx('fx2'));

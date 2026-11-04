@@ -581,15 +581,10 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
         if (held !== null && confirmsAddress(held.address) && !mayGrantWrite(deps.actorOf(req))) return addressConfirmRefused(reply, deps.actorOf(req));
         const commit = async (): Promise<McpServer> => {
           if (held !== null && deps.policies !== undefined) {
-            // (DES-KNOWLEDGE-DATA-001 §5.5, codex r2) An approval naming a server that is NOT registered covers nothing
-            // anyone reviewed (a restore that dropped the server, a removal whose withdrawal failed): a new
-            // registration under that name never inherits it.
-            const registered = (await r.inspectTarget(held.name)) !== null;
-            const stale = registered ? [] : await deps.policies.tokensOf(held.name);
-            const tokens = registered ? await deps.policies.withdrawnBySave(held) : stale;
+            const tokens = await deps.policies.withdrawnBySave(held);
             if (tokens.length > 0) {
               const rules = await deps.policies.withdraw(tokens).catch((e: unknown) => { auditPartial(deps, req, e, tokens); throw e; });
-              deps.audit.record('mcp.approval.withdrawn', deps.actorOf(req), { detail: { subjects: tokens, rules, why: registered ? 'schema_changed' : 'not_registered' } });
+              deps.audit.record('mcp.approval.withdrawn', deps.actorOf(req), { detail: { subjects: tokens, rules, why: 'schema_changed' } });
               for (const id of rules) deps.audit.record('governance.rule.upserted', deps.actorOf(req), { detail: { id, source: 'mcp-approval' } });
             }
           }

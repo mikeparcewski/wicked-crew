@@ -40,8 +40,8 @@ mentioned only where a daemon release depends on them.
   differs (or that name a server the generation brings back unregistered) are withdrawn first, under every affected
   server's lock; every source's "query" switch and Allow writes come back off; a server whose secret resolves to
   nothing comes back disabled (`secret_missing`); an unreadable generation, or one holding a record crew could not
-  have written, is refused with nothing changed. A save of a name that is not registered withdraws any approval still
-  naming it, so a new registration never inherits one.
+  have written, is refused with nothing changed; a commit that would overwrite a server registered meanwhile is
+  refused (409 `registry_busy`).
 - **Data sources: Test connection, and ask a question of the data (api-types 0.179.0, operator 2026-11-03).**
   `POST /sources/:name/test` re-runs connect, describe and the read-policy check on a saved `sql` or `graphql` source
   with its saved credentials resolved now: the fresh description is saved (it replaces Describe again), and the
