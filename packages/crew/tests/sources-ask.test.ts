@@ -136,7 +136,9 @@ describe('the ask pieces (no database)', () => {
     const h = await harnessWithout();
     const flush = h.audit.flush.bind(h.audit);
     let flushed = 0;
+    let presentAtFlush = false;
     h.audit.flush = async () => {
+      presentAtFlush = existsSync(h.base);
       await flush();
       flushed += 1;
     };
@@ -144,6 +146,7 @@ describe('the ask pieces (no database)', () => {
     h.audit.record('test.late_line', LOCAL_ACTOR);
     await h.close();
     expect(flushed).toBe(1);
+    expect(presentAtFlush, 'the trail is awaited before the directory is removed').toBe(true);
     expect(existsSync(h.base)).toBe(false);
   });
 
