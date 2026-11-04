@@ -380,7 +380,7 @@ import {
   type DeliverScriptResult,
   type WorktreeReprovisioner,
 } from './post-hoc-deliver.js';
-import { LOCAL_ACTOR, type AuthMode, trustAtLeast } from './auth.js';
+import { LOCAL_ACTOR, type AuthMode, trustAtLeast, viewOf } from './auth.js';
 // Re-exported so existing `import { API_PREFIX } from './routes.js'` callers keep working; the
 // value lives in the leaf module api-prefix.ts to keep unit-output.ts out of this file's cycle.
 export { API_PREFIX } from './api-prefix.js';
@@ -403,7 +403,7 @@ import { AppExecutor } from '../apps/exec/executor.js';
 import { localViewerOf, type Viewer } from '../apps/exec/viewer.js';
 import type { Actor as AppsActor } from '../core/types.js';
 import { registerAppRoutes } from '../apps/routes.js';
-import { AppStoreError, type AppStore } from '../apps/store.js';
+import { AppStoreError, defaultAppsRoot, type AppStore } from '../apps/store.js';
 import { registerMcpInspectRoutes } from '../mcp-inspect/routes.js';
 import { discoverLivePlugin } from '../skills/plugin-source.js';
 import type { DecisionBusEmit } from '../decisions/events.js';
@@ -2530,6 +2530,32 @@ export function registerRoutes(
     return { session, target };
   };
 
+  /**
+   * (crew#1324, DES-KNOWLEDGE-DATA-001 §5.2) An app repo's files are a person's to read: its `apps.lock.json`
+   * pins each source's connection descriptor, `queries/` holds SQL that names relations, `apps.json` holds what
+   * its actions write. A non-human actor ({@link viewOf} `agent`) is refused both reads when the path, the run's
+   * worktree or the run's repository is under an app file root; `GET /apps/:app` answers it the agent-safe
+   * view. Humans (studio's run pages) are unchanged. With no app store (an unreadable one leaves Apps off) the
+   * apps root still holds the repos, so it is still checked. Returns `true` after replying.
+   */
+  const appFilesRefused = async (
+    req: FastifyRequest,
+    reply: FastifyReply,
+    session: SessionView['session'],
+    target: string | undefined,
+  ): Promise<boolean> => {
+    if (viewOf(actorOf(req)) === 'full') return false;
+    const roots = runtime.apps?.fileRoots() ?? [defaultAppsRoot()];
+    const repoRoot = session.repo_ref !== null ? await repoRootOf(session.repo_ref) : undefined;
+    const paths = [target, session.workdir, repoRoot].filter((p): p is string => typeof p === 'string' && p.length > 0);
+    if (!paths.some((p) => roots.some((root) => isInsideRoot(root, p)))) return false;
+    await reply.code(403).send({
+      code: 'app_files_human_only',
+      error: "an app's files are read by people; GET /apps/:app answers the agent-safe view of the app",
+    });
+    return true;
+  };
+
   // Fastify parses a repeated param as string[] (Copilot, #250/#266). These are FILE-READ
   // routes: `?path=a&path=b` is rejected outright (400) rather than silently reading as
   // either (Copilot, #305).
@@ -2553,6 +2579,7 @@ export function registerRoutes(
     }
     const resolved = await resolveRunPath(reply, id, rawPath);
     if (resolved === null) return reply;
+    if (await appFilesRefused(req, reply, resolved.session, resolved.target)) return reply;
     const target = resolved.target as string;
     try {
       const read = await readFileCapped(target);
@@ -2589,6 +2616,7 @@ export function registerRoutes(
     }
     const resolved = await resolveRunPath(reply, id, rawPath);
     if (resolved === null) return reply;
+    if (await appFilesRefused(req, reply, resolved.session, resolved.target)) return reply;
     const workdir = resolved.session.workdir;
     /** The route's one error mapping, shared by the worktree and the branch reads. */
     const diffError = (err: unknown) => {

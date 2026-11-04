@@ -444,6 +444,26 @@ for (const target of PG_TARGETS) {
       await new Promise((x) => setTimeout(x, 300)); // an uncaught error from the driver would surface here
     });
 
+    it("crew#1325: after the catalog moves, a system bearer's refusal is its code; a person reads which relation", async () => {
+      await db.admin.unsafe('ALTER TABLE s.kids RENAME TO kids_moved');
+      try {
+        expect((await h.call('POST', '/sources/support/describe', {})).status).toBe(200);
+        const person = await query('kids');
+        expect([person.status, person.body.code]).toEqual([409, 'query_refused']);
+        expect(String(person.body.error)).toContain('"s"."kids" is not a table');
+        const ci = await h.call('POST', '/apps/tickets/query', { version: 2, query: 'kids' }, 'ci');
+        expect(ci.status).toBe(409);
+        expect(ci.body).toEqual({ code: 'query_refused', error: 'the query was not answered (query_refused)' });
+        expect(JSON.stringify(ci.body)).not.toContain('kids');
+      } finally {
+        await db.admin.unsafe('ALTER TABLE s.kids_moved RENAME TO kids');
+        await h.call('POST', '/sources/support/describe', {});
+      }
+      expect((await query('kids')).status).toBe(200);
+      // A system bearer's read that passes is answered in full (the rows reach the automation that asked).
+      expect((await h.call('POST', '/apps/tickets/query', { version: 2, query: 'search' }, 'ci')).status).toBe(200);
+    });
+
     it('codex r1: a source switched off reads nothing', async () => {
       await h.registry.setServerEnabled('support', false);
       try {

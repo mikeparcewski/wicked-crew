@@ -259,6 +259,14 @@ export class AppStore {
     return Object.hasOwn(this.state.apps, slug);
   }
 
+  /**
+   * (crew#1324) Where app files live on disk: the apps root, and each app's own repo root (an app made under an
+   * earlier `WICKED_CREW_APPS_ROOT` keeps its root). A turn's worktree is under its app's root.
+   */
+  fileRoots(): string[] {
+    return [this.appsRoot, ...Object.values(this.state.apps).map((a) => a.root)];
+  }
+
   private summary(a: StoredApp): AppSummary {
     const h = this.head(a);
     const turn = a.turn === null ? null : { runId: a.turn.runId, startedAt: a.turn.startedAt, base: a.turn.base, actor: a.turn.actor };
