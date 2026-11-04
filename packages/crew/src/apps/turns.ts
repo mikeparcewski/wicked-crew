@@ -196,6 +196,32 @@ export function packageJson(pkg: KnowledgePackage): string {
   return render(pkg.sources.length - listed.length);
 }
 
+/**
+ * The spec's exact shape, as crew's check reads it (`apps/spec.ts`), shown to the builder with one worked example
+ * (K5 live run 2026-11-04: a builder put `query` beside `data` and copied Postgres type names into `output`). crew's
+ * own words: nothing in it comes from a seat or a source.
+ */
+export const SPEC_SHAPE_GUIDE = [
+  'The spec\'s exact shape (crew\'s check refuses anything else; keep `schema: "wicked.apps/v1"`, `name`, `pages`, `queries`, `actions`, `linkHosts`):',
+  '- Every component: `id`, `type`, `box` {x, y, w, h} on a 12-column grid (x + w <= 12), optional `title`. A component reads a query ONLY through `data`: {"query": "<query id>", "params": {"<param>": "filter.<filter id>"}}.',
+  '- kpi: `data`, `value` (the output column shown), optional `caption`, `format`, `delta`. chart: `chart` (line | bar | area | pie), `data`, `x` (a column), `series` [{"column": "<column>", "label": "..."}]. table: `data`, optional `columns` [{"column": "...", "label": "..."}], `pageSize`. text: `text`, optional `style` (heading | body | caption). filter: `filter` (select | date-range | search), `label`, for select `options` {"kind": "query", "query": {"query": "<id>"}, "value": "<column>"} or {"kind": "values", "values": [{"value": "..."}]}.',
+  '- A query: `id` (lower-case, also its file name `queries/<id>.sql`), `source`, `kind: "sql"`, `output` [{"name": "<column>", "type": T}] where T is ONLY string | number | integer | boolean | date | datetime (map the catalog: int2/int4/int8/bigint -> integer; numeric/real/double -> number; text/varchar/char/uuid/enum -> string; bool -> boolean; date -> date; timestamp/timestamptz -> datetime). Cast a count so it is an integer (`count(*)::int AS n`). Optional `params` {"type": "object", "properties": {"region": {"type": "string"}}}: `$1`, `$2`, ... in the SQL are those properties in declaration order; a filter binds one through a component\'s `data.params`.',
+  'Example (one KPI and one chart over one query each):',
+  '```json',
+  JSON.stringify({
+    pages: [{ id: 'overview', title: 'Overview', components: [
+      { id: 'kpi_open', type: 'kpi', title: 'Open tickets', box: { x: 0, y: 0, w: 3, h: 2 }, data: { query: 'open_count' }, value: 'open' },
+      { id: 'by_region', type: 'chart', chart: 'bar', title: 'Open by region', box: { x: 3, y: 0, w: 9, h: 5 }, data: { query: 'open_by_region' }, x: 'region', series: [{ column: 'open', label: 'Open' }] },
+    ] }],
+    queries: [
+      { id: 'open_count', source: '<source>', kind: 'sql', output: [{ name: 'open', type: 'integer' }] },
+      { id: 'open_by_region', source: '<source>', kind: 'sql', output: [{ name: 'region', type: 'string' }, { name: 'open', type: 'integer' }] },
+    ],
+  }),
+  '```',
+  'with queries/open_count.sql `SELECT count(*)::int AS open FROM <schema>.<table> WHERE <column> = \'open\'`.',
+].join('\n');
+
 export function turnProblem(input: {
   slug: string; name: string; base: number; message: string; about: string[]; spec: AppSpec; recent: AppTurnRecord[]; knowledge: KnowledgePackage;
 }): string {
@@ -227,6 +253,8 @@ export function turnProblem(input: {
     '```json',
     packageJson(input.knowledge),
     '```',
+    '',
+    SPEC_SHAPE_GUIDE,
     '',
     'Using it:',
     '- A query reads exactly one source: set its `source` to that source\'s name. An app may read several sources, one query per source each.',
@@ -387,7 +415,7 @@ export class AppTurnService implements AppTurnLauncher {
     return parkedRefusal(v, events) === null;
   }
 
-  async settlement(input: { slug: string; runId: string; checkedTree: string | null; base: AppFiles; landedSpec: (tree: string) => Promise<AppFiles> }): Promise<AppTurnSettlement> {
+  async settlement(input: { slug: string; runId: string; checkedTree: string | null; base: () => Promise<AppFiles>; landedSpec: (tree: string) => Promise<AppFiles> }): Promise<AppTurnSettlement> {
     let v: SessionView | null;
     try {
       v = await this.view(input.runId);
@@ -395,6 +423,18 @@ export class AppTurnService implements AppTurnLauncher {
       return { kind: 'pending', why: `the engine did not answer (${err instanceof Error ? err.message : String(err)})` };
     }
     if (v === null) return { kind: 'end', state: 'failed', code: 'unknown_run', reason: 'the engine has no record of this turn\'s run, so nothing landed' };
+    const view = v;
+    try {
+      return await this.settleView(input, view);
+    } catch (err) {
+      // Anything unexpected: a run that has ended may be released (the caller records it failed); one still running or
+      // parked keeps its turn, so no other turn starts beside it (xreview r4).
+      if (TERMINAL.has(String(view.session?.status))) throw err;
+      return { kind: 'pending', why: `its settlement could not be read yet (${err instanceof Error ? err.message : String(err)})` };
+    }
+  }
+
+  private async settleView(input: { slug: string; runId: string; checkedTree: string | null; base: () => Promise<AppFiles>; landedSpec: (tree: string) => Promise<AppFiles> }, v: SessionView): Promise<AppTurnSettlement> {
     const unit = (phase: string) => v.units.find((u) => u.id === `${input.runId}:${phase}`) ?? null;
     const status = v.session.status;
     if (status === 'completed') {
@@ -420,7 +460,7 @@ export class AppTurnService implements AppTurnLauncher {
       }
       let change = 'Changed the app';
       try {
-        change = changeLine(input.base, await input.landedSpec(input.checkedTree!));
+        change = changeLine(await input.base(), await input.landedSpec(input.checkedTree!));
       } catch {
         /* the line is crew's description only; the landing does not depend on it */
       }

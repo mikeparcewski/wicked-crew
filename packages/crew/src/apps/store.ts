@@ -128,7 +128,7 @@ export interface AppTurnLauncher {
    * worker): `land` only when its review by a seat distinct from its builder passed on exactly `checkedTree`.
    * Absent on a launcher that cannot tell: the turn then ends with no version.
    */
-  settlement?(input: { slug: string; runId: string; checkedTree: string | null; base: AppFiles; landedSpec: (tree: string) => Promise<AppFiles> }): Promise<AppTurnSettlement>;
+  settlement?(input: { slug: string; runId: string; checkedTree: string | null; base: () => Promise<AppFiles>; landedSpec: (tree: string) => Promise<AppFiles> }): Promise<AppTurnSettlement>;
 }
 
 /** crew's repo registry, as the store needs it. */
@@ -421,9 +421,12 @@ export class AppStore {
       outcome = { kind: 'end', state: 'failed', code: 'unknown', reason: 'this daemon cannot read how the turn ended, so nothing landed' };
     } else {
       try {
-        outcome = await this.turns.settlement({ slug: a.slug, runId, checkedTree: t.checkedTree ?? null, base: await this.files(a, this.head(a).tree), landedSpec: (tree) => this.files(a, tree) });
+        // The head's files are read only when a landed turn's change line needs them (xreview r4: a cold read failing
+        // must never end a turn whose run is still parked).
+        outcome = await this.turns.settlement({ slug: a.slug, runId, checkedTree: t.checkedTree ?? null, base: () => this.files(a, this.head(a).tree), landedSpec: (tree) => this.files(a, tree) });
       } catch (err) {
-        // A defect, not a wait: the turn ends (failed) so the app is never wedged read-only (xreview r3).
+        // The launcher throws only for a run the engine says has ENDED (a parked or running one answers `pending`):
+        // a defect then ends the turn (failed), so the app is never wedged read-only (xreview r3, r4).
         outcome = { kind: 'end', state: 'failed', code: 'unknown', reason: `crew could not read how the turn ended (${err instanceof Error ? err.message : String(err)}), so nothing landed` };
       }
     }
