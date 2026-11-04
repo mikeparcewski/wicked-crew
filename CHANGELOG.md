@@ -12,6 +12,34 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **The one registry: entry ids, Toolbox documents, two views and generations (api-types 0.183.0,
+  DES-KNOWLEDGE-DATA-001 §5, brief B1; crew#1310).** Every registry entry has an immutable `id` (estate's source
+  documents, `deps`, grants and records key on it, never on the name). A Postgres data source is stored as MCP Toolbox
+  for Databases' own source document (`kind: 'toolbox-source'`, `runtime: 'native'`; the password is the placeholder
+  `"${WICKED_SRC_1}"` naming `auth.ref`), and the registry's read path projects it back to K1's `kind: 'sql'` and
+  `config.sql`, so the Apps executor, the write path, publish and the source routes read exactly what they did. A
+  K1 record is mapped on read as descriptor version 1 only when its descriptor hash stays the same (accepted app
+  versions, their locks, action grants and Allow writes stay valid with no re-lock); a save writes version 2, the
+  canonical execution descriptor, which resets Allow writes and the agents' "query" switch like any descriptor
+  change. MySQL sources and SQLite uploads keep K1's form for now. The Postgres **deployment policy** for Toolbox
+  v1.15.0 refuses `connectionString` (it would bypass the address check), driver tuning and unknown fields, fields
+  only crew writes (`name`, `queryParams`, `connectTimeout`), a literal password, `${` anywhere else (Toolbox expands
+  environment variables) and a host list or socket path, at the preview and again when the write lands
+  (`POST /mcp/servers/preview` also takes `kind: "toolbox-source"` with the document; `runtime: "toolbox"` is a 501
+  `runtime_unavailable` until the Toolbox runtime lands). Each tool carries a reviewed **disclosure class** (`none`,
+  `structure`, `rows`) bound to its saved schema hash: proposed at the preview, set by `disclosures` on the save or
+  `disclosure` on `PATCH /mcp/tools/:subject` (a human operator's only, audited `mcp.tool.disclosure_reviewed`);
+  the gate that enforces it lands next. **Two views:** `GET /mcp/servers` is the full view for a human actor; any
+  other actor, and `?view=agent`, gets the agent-safe projection (id, name, kind, on/off, health state, tools with
+  their classes, a source's see/query switches: no host, port, database, login, url, command, path, address,
+  secret reference or descriptor), as do the answers of a save, `PATCH /mcp/servers/:name` and a test; a source's
+  management reads (`/sources/:name/{catalog,describe,privileges,check,safety,test}`) answer 403 `human_only` to
+  any non-human actor, whatever its trust. **Generations:** every registry write keeps the file it replaces as
+  `registry.json.<n>` (the last 10). `GET /mcp/registry/generations` and `POST /mcp/registry/restore {generation}`
+  (human operator only, audited `mcp.registry.restored`) restore one, failing closed: approvals whose tool schema
+  differs are withdrawn first, every source's "query" switch and Allow writes come back off, a server whose secret
+  resolves to nothing comes back disabled (`secret_missing`), and an unreadable generation is refused with nothing
+  changed.
 - **Data sources: Test connection, and ask a question of the data (api-types 0.179.0, operator 2026-11-03).**
   `POST /sources/:name/test` re-runs connect, describe and the read-policy check on a saved `sql` or `graphql` source
   with its saved credentials resolved now: the fresh description is saved (it replaces Describe again), and the

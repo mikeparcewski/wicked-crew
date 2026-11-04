@@ -12,7 +12,7 @@ function dataOf(text: string): Array<{ subject: string; class: string; descripti
 }
 
 const tool = (server: string, name: string, extra: Partial<McpCallableTool> = {}): McpCallableTool => ({
-  server, tool: name, kind: 'mcp-stdio', annotations: { readOnlyHint: true }, classOverride: null, description: `${name} does it`, inputSchema: null, ...extra,
+  server, id: `id-${server}`, tool: name, kind: 'mcp-stdio', disclosure: null, annotations: { readOnlyHint: true }, classOverride: null, description: `${name} does it`, inputSchema: null, ...extra,
 });
 
 describe('chatMcpToolsStatement', () => {

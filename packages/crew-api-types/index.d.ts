@@ -12316,7 +12316,61 @@ export interface PutDeliveryFreezeBody {
  * sources: registered through the same preview/save, but with NO tools — nothing of theirs is ever
  * offered to a governed run. Their preview answers {@link McpPreviewResponse.source} (the catalog).
  */
-export type McpUpstreamKind = 'mcp-stdio' | 'mcp-http' | 'rest' | 'sql' | 'graphql';
+export type McpUpstreamKind = 'mcp-stdio' | 'mcp-http' | 'rest' | 'sql' | 'graphql' | 'toolbox-source';
+
+// ── The one registry's entry (api-types 0.183.0, DES-KNOWLEDGE-DATA-001 §5) ─────────────────────
+
+/**
+ * (api-types 0.183.0, DES-KNOWLEDGE-DATA-001 §5.1) A database source as MCP Toolbox for Databases models it: its
+ * own source document (`kind: source`, `type`, that type's fields), which the registry stores as the source of
+ * truth for `kind: 'toolbox-source'`. Checked against crew's deployment policy for the pinned Toolbox release
+ * (v1.15.0) at preview and at save: a field that bypasses the address check (`connectionString`), names a host
+ * path, or tunes the driver is a 400 `refused_field`; a field only crew writes (`name`, `queryParams`,
+ * `connectTimeout`: the TLS settings, startup parameters and timeouts) a 400 `crew_written_field`; any other
+ * unknown field a 400 `unknown_field`. `password` is exactly `"${WICKED_SRC_1}"`, the placeholder naming
+ * `auth.ref`'s secret (a value is a 400 `secret_literal`); `${` anywhere else is a 400 `interpolation`.
+ */
+// A type alias (not an interface) so it is assignable to a plain record: the route takes any object and the
+// deployment policy judges each field.
+export type ToolboxSourceDocument = {
+  kind: 'source';
+  /** v1: `postgres` only (any other type is a 400 `unsupported_type`). */
+  type: 'postgres';
+  /** One host name or IP address. */
+  host: string;
+  /** Toolbox takes the port as a string, `"1"`-`"65535"`. */
+  port: string;
+  database: string;
+  user: string;
+  password?: string;
+};
+
+/**
+ * (api-types 0.183.0) How crew reads a database source: `native` (crew's own adapter: K1's driver, dialer and
+ * read policy; Postgres) or `toolbox` (one Toolbox process per source; a preview is a 501 `runtime_unavailable`
+ * on a daemon without the Toolbox runtime).
+ */
+export type McpSourceRuntime = 'native' | 'toolbox';
+
+/**
+ * (api-types 0.183.0, DES-KNOWLEDGE-DATA-001 §7.1) What a tool's answer discloses: `rows` (needs a source's
+ * "query" switch), `structure` (needs "see"), or `none`. Reviewed at preview, bound to the tool's saved schema
+ * hash; `null` = not reviewed, or reviewed against a schema that has since changed. A tool with no class in force
+ * is offered to no agent.
+ */
+export type McpToolDisclosure = 'none' | 'structure' | 'rows';
+
+/**
+ * (api-types 0.183.0, DES-KNOWLEDGE-DATA-001 §7.1) A data source's agent switches: `see` (on by default),
+ * `query` (off by default; needs `see`; turned off again by a descriptor change and by a restore), `projects`
+ * (none by default) and `everyProject` (an explicit choice). Set by a human operator only.
+ */
+export interface McpSourceAgents {
+  see: boolean;
+  query: boolean;
+  projects: string[];
+  everyProject: boolean;
+}
 /**
  * A tool's class, from its own `tools/list` annotations (never from a carrier): `read` when
  * `readOnlyHint` is true; else `destructive` unless `destructiveHint` is false; else `write`. A tool
@@ -12419,6 +12473,16 @@ export interface McpServerConfigBody {
    */
   sql?: SqlSourceConfigBody;
   /**
+   * (api-types 0.183.0, DES-KNOWLEDGE-DATA-001 §5.1) `toolbox-source` only: Toolbox's own source document. Its
+   * password is the secret behind `auth.ref` (`auth` takes only `ref`). A `sql` body with Postgres settings is
+   * saved as the same document.
+   */
+  toolbox?: ToolboxSourceDocument;
+  /** (api-types 0.183.0) `toolbox-source` only: default `native`. */
+  runtime?: McpSourceRuntime;
+  /** (api-types 0.183.0) `toolbox-source` only: the TLS choice crew writes the driver's settings from; default `verify-full`. */
+  tls?: { mode: 'verify-full' | 'disable'; ca?: string };
+  /**
    * (api-types 0.175.0) `sql` only: the views (and materialized views) a read may name, as
    * `schema.view` (MySQL `database.view`). A view not listed is refused by the read policy.
    */
@@ -12488,9 +12552,16 @@ export interface McpTool {
   schemaHash: string | null;
   /** The hash the last probe saw. */
   observedSchemaHash: string;
+  /** (api-types 0.183.0) The disclosure class in force; `null` = none reviewed for the saved schema. */
+  disclosure: McpToolDisclosure | null;
 }
 
 export interface McpServer {
+  /**
+   * (api-types 0.183.0, DES-KNOWLEDGE-DATA-001 §5.1) The entry's immutable id. Estate's source documents, `deps`,
+   * grants and records key on it, never on the name: a name removed and registered again is a new id.
+   */
+  id: string;
   name: string;
   kind: McpUpstreamKind;
   command: string | null;
@@ -12518,6 +12589,19 @@ export interface McpServer {
    * `allowWrites`). Queries, actions and grants bind to it.
    */
   descriptorHash?: string;
+  /**
+   * (api-types 0.183.0, DES-KNOWLEDGE-DATA-001 §5.1, §5.4) A database source stored as its Toolbox document. A
+   * `native` one still answers `kind: 'sql'` and `sql` (the read-path projection every existing reader uses).
+   * `descriptorVersion` 1 = mapped from a K1 record, hashed with K1's function (locks and grants unchanged);
+   * 2 = written by a save, hashed over the canonical execution descriptor.
+   */
+  runtime?: McpSourceRuntime;
+  toolbox?: ToolboxSourceDocument;
+  descriptorVersion?: 1 | 2;
+  /** The deployment policy the document was checked under, e.g. `postgres/1@toolbox-v1.15.0`. */
+  policyVersion?: string;
+  /** (api-types 0.183.0) Data sources only: the agent switches (defaults filled in). */
+  agents?: McpSourceAgents;
   /**
    * (api-types 0.174.0) `mcp-http` and `rest` only: the ranges confirmed for this server's
    * connections. A server saved before 0.174.0 shows what crew re-derived for it: the IP literal or
@@ -12549,10 +12633,73 @@ export interface McpDiscoveredServer {
   managed: boolean;
 }
 
-/** `GET /mcp/servers`. */
+/**
+ * `GET /mcp/servers`, for a human actor. (api-types 0.183.0, DES-KNOWLEDGE-DATA-001 §5.2, crew#1310) Any other
+ * actor, and `?view=agent`, gets {@link McpServersAgentResponse} instead; so do the answers of a save, a
+ * `PATCH /mcp/servers/:name` and a test for a non-human actor.
+ */
 export interface McpServersResponse {
   servers: McpServer[];
   discovered: McpDiscoveredServer[];
+}
+
+/**
+ * (api-types 0.183.0, DES-KNOWLEDGE-DATA-001 §5.2) A server as an agent may know it: no host, port, database,
+ * login, url, command, arguments, path, address, secret reference or descriptor.
+ */
+export interface McpServerAgentView {
+  id: string;
+  name: string;
+  kind: McpUpstreamKind;
+  enabled: boolean;
+  health: { state: McpHealthState };
+  /** The tools that are not `gone`. */
+  tools: Array<{ name: string; subject: string; class: McpToolClass; disclosure: McpToolDisclosure | null; enabled: boolean; status: McpToolStatus }>;
+  /** Data sources only. */
+  agents?: { see: boolean; query: boolean };
+}
+
+/** (api-types 0.183.0) `GET /mcp/servers?view=agent`, and `GET /mcp/servers` for any non-human actor. */
+export interface McpServersAgentResponse {
+  view: 'agent';
+  servers: McpServerAgentView[];
+}
+
+/**
+ * (api-types 0.183.0, DES-KNOWLEDGE-DATA-001 §5.5) `GET /mcp/registry/generations` (human operator only). Every
+ * write keeps the registry it replaces; the last 10 are kept.
+ */
+export interface McpRegistryGenerationsResponse {
+  /** The generation in force. */
+  current: number;
+  /** Newest first. */
+  generations: Array<{ generation: number; savedAt: string }>;
+}
+
+/** (api-types 0.183.0) `POST /mcp/registry/restore`. */
+export interface McpRegistryRestoreBody {
+  generation: number;
+}
+
+/**
+ * (api-types 0.183.0, DES-KNOWLEDGE-DATA-001 §5.5) `POST /mcp/registry/restore`'s 200 (human operator only;
+ * audited `mcp.registry.restored`). A restore fails closed: every source's "query" switch and Allow writes come
+ * back OFF; a server whose secret reference resolves to nothing comes back DISABLED (`secret_missing`); MCP
+ * approvals whose tool schema differs from the restored one are withdrawn first (a failed withdrawal refuses the
+ * restore, 500 `withdraw_failed`). A generation that is not kept is a 404 `unknown_generation`; one that does not
+ * parse a 409 `generation_unreadable`, and nothing changes. The registry in force before the restore is kept as
+ * a generation too.
+ */
+export interface McpRegistryRestoreResponse {
+  restored: number;
+  /** The generation the restore wrote. */
+  generation: number;
+  servers: number;
+  disabled: Array<{ name: string; code: 'secret_missing' }>;
+  queryReset: string[];
+  writesReset: string[];
+  /** The approval tokens withdrawn first. */
+  withdrawnApprovals?: string[];
 }
 
 /** The difference between the registered tools and a probe, by tool name. */
@@ -12587,6 +12734,11 @@ export interface McpPreviewTool {
    * approving it: `MCP-FIRST-USE` still asks on its first call.
    */
   enabledOnSave: boolean;
+  /**
+   * (api-types 0.183.0) The disclosure class a save gives the tool when `disclosures` does not name it: its
+   * class while its schema is unchanged, crew's own class for a tool of crew's Toolbox configuration, else `null`.
+   */
+  disclosure: McpToolDisclosure | null;
 }
 
 /**
@@ -12611,6 +12763,11 @@ export interface McpPreviewResponse {
     /** (api-types 0.175.0) `sql` only. */
     sql?: SqlSourceView;
     viewsAllowed?: string[];
+    /** (api-types 0.183.0) A database source: the Toolbox document the save will store. */
+    runtime?: McpSourceRuntime;
+    toolbox?: ToolboxSourceDocument;
+    descriptorVersion?: 1 | 2;
+    policyVersion?: string;
   };
   /**
    * (api-types 0.175.0, DES-APPS-001 §5.1) `sql`/`graphql` only: what the describe found —
@@ -12659,6 +12816,13 @@ export interface SaveMcpServerBody {
    * `egress_not_rest` for a server that is not `rest`.
    */
   allowOrigin?: string;
+  /**
+   * (api-types 0.183.0, DES-KNOWLEDGE-DATA-001 §5.1) The operator's review of what each tool discloses, by tool
+   * name (`McpPreviewTool.disclosure` is what a tool not named here gets). A name the preview does not list is a
+   * 400 `unknown_tool`. Human operator only (403 `disclosure_review_human_only`); audited
+   * `mcp.tool.disclosure_reviewed`.
+   */
+  disclosures?: Record<string, McpToolDisclosure>;
 }
 
 /**
@@ -12712,6 +12876,13 @@ export interface PatchMcpServerBody {
 export interface PatchMcpToolBody {
   enabled?: boolean;
   classOverride?: McpToolClass | null;
+  /**
+   * (api-types 0.183.0) Review what the tool discloses, against its saved schema (409 `not_registered` when the
+   * schema changed since the save). Setting a class is a human operator's only (403
+   * `disclosure_review_human_only`), audited `mcp.tool.disclosure_reviewed`; `null` clears it (the tool is then
+   * offered to no agent).
+   */
+  disclosure?: McpToolDisclosure | null;
 }
 
 /** `POST /mcp/servers/:name/test`'s 200: a failed probe is `ok: false` and counts toward `failing`. */

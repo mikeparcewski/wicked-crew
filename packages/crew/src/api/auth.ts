@@ -660,6 +660,19 @@ const APP_QUERY_PATH = new RegExp(`^${API_PREFIX}/apps/[^/]+/query$`);
 const PROJECT_DETAIL_PATH = new RegExp(`^${API_PREFIX}/projects/[^/]+$`);
 
 /**
+ * (DES-KNOWLEDGE-DATA-001 §5.2, crew#1310) A source's MANAGEMENT READS: its catalog, a describe, its privilege
+ * report, a query check, the table safety check and Test connection. They answer a source's structure or what its
+ * login can do, so they are a HUMAN actor's only, whatever another actor's trust: agents get structure only through
+ * estate and the gate. (`test-call`, `ask`, `query` and `allow-writes` are human-only in their routes already.)
+ */
+const SOURCE_MANAGEMENT_READ = new RegExp(`^${API_PREFIX}/sources/[^/]+/(?:catalog|describe|privileges|check|safety|test)$`);
+
+/** Whether a request is a human actor's only (403 `human_only` for any other actor; see {@link SOURCE_MANAGEMENT_READ}). */
+export function humanOnlyRoute(path: string): boolean {
+  return SOURCE_MANAGEMENT_READ.test(path);
+}
+
+/**
  * Minimum trust for a request. Minimal by design (the task's rule: no
  * deny-by-default registry over unknown routes):
  *
@@ -809,6 +822,10 @@ export function registerAuthHooks(app: FastifyInstance, auth: ResolvedAuth): voi
     // Spike 3: a plugin actor (observer) writes its OWN working-document lines; the route checks that it writes only
     // as itself and only its own section. Nothing else a plugin sends passes this boundary.
     if (req.actor?.kind === 'plugin' && req.method === 'POST' && WORKING_DOC_VERSIONS_PATH.test(path)) return;
+    // (DES-KNOWLEDGE-DATA-001 §5.2) A management read of a source is a human's, at any trust.
+    if (humanOnlyRoute(path) && req.actor.kind !== 'human') {
+      return reply.code(403).send({ error: `a source's management reads are a human operator's only; you are ${req.actor.kind}/${req.actor.trust}`, code: 'human_only' });
+    }
     const need = requiredTrust(req.method, path, req.body);
     if (!trustAtLeast(req.actor, need)) {
       // RETURN the reply — the idiomatic guarantee that the lifecycle stops

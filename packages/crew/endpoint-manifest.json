@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.180.0",
+  "apiTypesVersion": "0.183.0",
   "endpoints": [
     {
       "method": "GET",
@@ -1094,11 +1094,38 @@
     },
     {
       "method": "GET",
-      "path": "/api/v1/mcp/servers",
+      "path": "/api/v1/mcp/registry/generations",
       "requestType": null,
-      "responseType": "McpServersResponse",
+      "responseType": "McpRegistryGenerationsResponse",
       "statusCodes": [
         200,
+        403,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/mcp/registry/restore",
+      "requestType": "McpRegistryRestoreBody",
+      "responseType": "McpRegistryRestoreResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        500,
+        503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/mcp/servers",
+      "requestType": null,
+      "responseType": "McpServersResponse | McpServersAgentResponse",
+      "statusCodes": [
+        200,
+        400,
         503
       ]
     },
@@ -2669,6 +2696,7 @@
       "statusCodes": [
         200,
         400,
+        403,
         404,
         503
       ]
@@ -2681,6 +2709,7 @@
       "statusCodes": [
         200,
         400,
+        403,
         404,
         409,
         502,
@@ -2696,6 +2725,7 @@
       "statusCodes": [
         200,
         400,
+        403,
         404,
         409,
         502,
@@ -2711,6 +2741,7 @@
       "statusCodes": [
         200,
         400,
+        403,
         404,
         409,
         502,
@@ -2742,6 +2773,7 @@
       "statusCodes": [
         200,
         400,
+        403,
         404,
         409,
         502,
@@ -2757,6 +2789,7 @@
       "statusCodes": [
         200,
         400,
+        403,
         404,
         503
       ]

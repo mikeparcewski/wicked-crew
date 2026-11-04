@@ -66,6 +66,8 @@ export async function lookupSource(registry: Pick<AppSourceRegistry, 'snapshot' 
     const base = { name, pin: pinOf(s.config), config: s.config, description: s.description, allowWrites: s.allowWrites, enabled: s.enabled };
     return s.config.kind === 'sql' ? { ...base, kind: 'sql' } : { ...base, kind: 'graphql' };
   }
+  // (DES-KNOWLEDGE-DATA-001 §6.3) A Toolbox-runtime database source is no Apps source in v1 (a native one reads as `sql`).
+  if (config.kind === 'toolbox-source') return null;
   // A server switched off is part of the snapshot for every kind (codex r2 on the write path).
   return { name, kind: config.kind, pin: pinOf(config), config, enabled: snap.enabled };
 }
