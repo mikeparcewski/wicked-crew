@@ -235,6 +235,18 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **Agent-kind bearers no longer reach a source's stored secret or connection data outside the registry (crew#1316,
+  crew#1317, DES-KNOWLEDGE-DATA-001 §5.2).** One rule throughout: the full view is a human actor's, and every other
+  actor (agent, plugin, system) gets the agent-safe one. `POST /mcp/servers/preview` answers 403
+  `stored_secret_human_only` to a non-human whose `auth.ref` names a secret it did not stage with the preview (an
+  `env:` reference, or a keychain entry crew already holds), so crew no longer probes a host the caller chose with
+  that secret; a staged secret previews as before. `GET /audit` gives a non-human reader the `mcp.*`, `apps.source.*`,
+  `apps.action.*` and `knowledge.source.*` lines with their detail reduced to an allowlist per action (no secret
+  reference, ranges, origin, base path, resolved address, test-call URL, relations or action operation); the trail on
+  disk is unchanged. `GET /apps/:app` (and `POST /apps`'s answer) gives a non-human the lock's sources as `{kind,
+  descriptorHash}`, no `queryText`, and each action as `{id, kind, source, op, description}`. Humans, studio's app
+  viewers and crew's in-process readers keep the full view. No api-types change.
+
 - **"Ask a question of this data" no longer fails on a correct short draft (crew#1311; needs wicked-core with
   `answer_only`, so core-ts above 0.15.22).** The one-shot seat turn (`seatTurn`, shared by the standing-order parse
   and the ask) declares its one `understand` step `answer_only`: its answer is read by crew, so the engine's substance

@@ -678,6 +678,16 @@ export function humanOnlyRoute(routeUrl: string | undefined, path: string): bool
 }
 
 /**
+ * (DES-KNOWLEDGE-DATA-001 §5.2) Which view of a source's connection data an actor gets. The FULL view is a human
+ * actor's; every other actor (agent, plugin, system) gets the agent-safe projection: no host, port, database,
+ * login, URL, path, secret reference or descriptor. The one rule behind `GET /mcp/servers`, the preview,
+ * `GET /audit` (crew#1317) and the Apps detail (crew#1317).
+ */
+export function viewOf(actor: Actor | null | undefined): 'full' | 'agent' {
+  return actor?.kind === 'human' ? 'full' : 'agent';
+}
+
+/**
  * Minimum trust for a request. Minimal by design (the task's rule: no
  * deny-by-default registry over unknown routes):
  *

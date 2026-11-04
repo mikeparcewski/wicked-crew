@@ -341,9 +341,11 @@ describe('the one registry over its routes', () => {
     const rekey = await call('PUT', '/mcp/servers/wh/secret', 'agent', { value: 'another-value-1' });
     expect([rekey.status, rekey.body.code]).toEqual([400, 'secret_not_referenced']);
     expect(rekey.text).not.toContain('KD_WH_PASSWORD');
-    // A preview by an agent answers no structure of the source.
-    const p = await call('POST', '/mcp/servers/preview', 'agent', SQL_BODY);
-    expect(p.status).toBe(200);
+    // A preview by an agent answers no structure of the source. (crew#1316) It names no secret crew already holds:
+    // SQL_BODY's env: reference is refused, so the agent stages its own value.
+    expect((await call('POST', '/mcp/servers/preview', 'agent', SQL_BODY)).body.code).toBe('stored_secret_human_only');
+    const p = await call('POST', '/mcp/servers/preview', 'agent', { ...SQL_BODY, auth: { ref: 'keychain:wicked-mcp/wh' }, secret: 'agent-staged-value-1' });
+    expect(p.status, p.text).toBe(200);
     expect((p.body as unknown as McpPreviewResponse).source).toBeUndefined();
   });
 
