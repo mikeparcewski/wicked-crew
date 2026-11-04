@@ -449,7 +449,8 @@ function toConfig(body: z.infer<typeof McpServerConfigSchema>): McpUpstreamConfi
  * (DES-KNOWLEDGE-DATA-001 §5.5) The approval tokens a restore withdraws: an approval covers a tool's SAVED schema,
  * not its name. Every held token of a tool whose restored record is absent, was never saved (`schemaHash` null) or
  * was saved under another schema is withdrawn, with its server's own token (a server-wide approval cannot leave one
- * tool out); every token of a server the generation does not hold, or of a `rest` server whose target differs.
+ * tool out); every token of a server the generation does not hold, or of a `rest` server whose target differs; and
+ * every token naming a server the generation brings back that is not registered now (an orphan).
  */
 export async function restoreWithdrawals(p: Pick<McpPolicies, 'tokensOf'>, current: readonly McpServer[], restored: readonly McpServerRecord[]): Promise<string[]> {
   const out = new Set<string>();
@@ -470,6 +471,12 @@ export async function restoreWithdrawals(p: Pick<McpPolicies, 'tokensOf'>, curre
       .map((t) => t.subject);
     const drop = new Set([...changed, ...(changed.length > 0 ? [`mcp:${now.name}`] : [])]);
     for (const t of held) if (drop.has(t)) out.add(t);
+  }
+  // codex r3: an approval naming a server that is not registered now covers nothing anyone reviewed; a restore that
+  // brings the name back must not hand it to that registration.
+  for (const then of restored) {
+    if (current.some((c) => c.name === then.name)) continue;
+    for (const t of await p.tokensOf(then.name)) out.add(t);
   }
   return [...out].sort();
 }
@@ -850,7 +857,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
                 for (const id of rules) deps.audit.record('governance.rule.upserted', actor, { detail: { id, source: 'mcp-approval' } });
               }
             }
-            return { out: await r.restore(plan), withdrawn };
+            return { out: await r.restore(plan, held), withdrawn };
           });
         }
         if (done === null) throw new McpRegistryError(409, 'registry_busy', 'servers kept being registered while the restore was taking their locks; nothing was restored: try again');

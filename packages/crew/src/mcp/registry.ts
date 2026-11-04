@@ -119,9 +119,8 @@ export interface McpCallableTool {
 /** A kept generation read, normalized and validated once ({@link McpRegistry.planRestore}). */
 export interface RestorePlan {
   readonly generation: number;
-  /** The generation's servers, ALREADY reconciled (switches off, missing secrets disabled): what the commit writes. */
+  /** The generation's servers, validated, with every source's switches already off. */
   readonly servers: readonly McpServerRecord[];
-  readonly disabled: ReadonlyArray<{ name: string; code: 'secret_missing' }>;
   readonly queryReset: readonly string[];
   readonly writesReset: readonly string[];
 }
@@ -853,12 +852,10 @@ export class McpRegistry {
    * holds a record crew could not have written; 400 with the policy's code when a database source fails the
    * deployment policy (a hand edit).
    *
-   * The reconciliation fails closed:
-   * - "Query" and Allow writes come back OFF on every source: a person turns them on again.
-   * - A server whose secret reference does not RESOLVE to a value (a keychain entry gone or unreadable, an env
-   *   variable unset, a keychain reference on a daemon with no keychain, or any error reading it) comes back
-   *   DISABLED, `secret_missing`. The value is read only to be compared with nothing, and is dropped at once.
-   * - Grants stay bound to their descriptors and are judged where they are used.
+   * The reconciliation fails closed: "query" and Allow writes come back OFF on every source (a person turns them on
+   * again); a missing secret disables its server at the commit ({@link restore}); grants stay bound to their
+   * descriptors and are judged where they are used. The secret check reads the value only to compare it with
+   * nothing, and drops it at once.
    */
   async planRestore(generation: number): Promise<RestorePlan> {
     let kept: McpRegistryFile | null;
@@ -888,41 +885,49 @@ export class McpRegistry {
         throw policyRefusal(err);
       }
     }
-    const disabled: Array<{ name: string; code: 'secret_missing' }> = [];
     const queryReset: string[] = [];
     const writesReset: string[] = [];
-    const stamp = new Date(this.now()).toISOString();
     for (const s of servers) {
-      if (isSourceRecord(s)) {
-        const a = agentAccessOf(s);
-        if (a.query) queryReset.push(s.name);
-        if (s.agents !== undefined || a.query) s.agents = { ...a, query: false };
-        if (s.allowWrites === true) writesReset.push(s.name);
-        if (isPostgresRecord(s)) s.allowWrites = false;
-      }
-      if (s.auth !== null && !(await this.secretResolves(s.auth))) {
-        if (s.enabled) disabled.push({ name: s.name, code: 'secret_missing' });
-        s.enabled = false;
-        s.health = { ...s.health, checkedAt: stamp, lastError: `secret_missing: ${s.auth.ref} resolves to no secret; set it, then switch ${s.name} on` };
-        s.updatedAt = stamp;
-      }
+      if (!isSourceRecord(s)) continue;
+      const a = agentAccessOf(s);
+      if (a.query) queryReset.push(s.name);
+      if (s.agents !== undefined || a.query) s.agents = { ...a, query: false };
+      if (s.allowWrites === true) writesReset.push(s.name);
+      if (isPostgresRecord(s)) s.allowWrites = false;
     }
-    return Object.freeze({ generation, servers: Object.freeze(servers), disabled: Object.freeze(disabled), queryReset: Object.freeze(queryReset), writesReset: Object.freeze(writesReset) });
+    return Object.freeze({ generation, servers: Object.freeze(servers), queryReset: Object.freeze(queryReset), writesReset: Object.freeze(writesReset) });
   }
 
   /**
-   * Commit a planned restore (§5.5): the plan's reconciled servers, as they are. The generation in force when this
-   * runs is itself kept, so a restore can be undone the same way. Approvals the route withdraws (under every
-   * server's lock) before calling this; only a failing write can still refuse it after that, which leaves the
-   * registry unchanged and those approvals withdrawn (the safe direction).
+   * Commit a planned restore (§5.5). The route calls it under every affected server's lock, after its approval
+   * withdrawals, so the secrets are judged HERE, after any removal of those servers has finished (codex r3): a server
+   * whose secret reference does not RESOLVE to a value now comes back DISABLED, `secret_missing`. Nothing here can
+   * throw on a planned record, so after the withdrawals only a failing write refuses a restore (the registry is then
+   * unchanged and the approvals withdrawn: the safe direction).
+   *
+   * `expected` is the set of servers the route locked and judged. A server registered after that (it holds no lock of
+   * the restore's) is not overwritten: the restore is refused, 409 `registry_busy`, and nothing is written.
    */
-  async restore(plan: RestorePlan): Promise<McpRegistryRestoreResponse> {
+  async restore(plan: RestorePlan, expected?: readonly string[]): Promise<McpRegistryRestoreResponse> {
     const servers = structuredClone(plan.servers) as McpServerRecord[];
+    const disabled: McpRegistryRestoreResponse['disabled'] = [];
+    const stamp = new Date(this.now()).toISOString();
+    for (const s of servers) {
+      if (s.auth === null || (await this.secretResolves(s.auth))) continue;
+      if (s.enabled) disabled.push({ name: s.name, code: 'secret_missing' });
+      s.enabled = false;
+      s.health = { ...s.health, checkedAt: stamp, lastError: `secret_missing: ${s.auth.ref} resolves to no secret; set it, then switch ${s.name} on` };
+      s.updatedAt = stamp;
+    }
     const current = await this.mutate((file) => {
+      if (expected !== undefined) {
+        const late = file.servers.map((s) => s.name).filter((n) => !expected.includes(n));
+        if (late.length > 0) throw new McpRegistryError(409, 'registry_busy', `${late.join(', ')} was registered while the restore ran; nothing was restored: try again`);
+      }
       file.servers = servers;
       return file.generation ?? 0;
     });
-    return { restored: plan.generation, generation: current + 1, servers: servers.length, disabled: [...plan.disabled], queryReset: [...plan.queryReset], writesReset: [...plan.writesReset] };
+    return { restored: plan.generation, generation: current + 1, servers: servers.length, disabled, queryReset: [...plan.queryReset], writesReset: [...plan.writesReset] };
   }
 
   /** Whether a secret reference resolves to a non-empty value now; any error reading it counts as no (fail closed). */

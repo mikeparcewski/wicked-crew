@@ -484,6 +484,7 @@ describe('a restore withdraws the approvals the restored generation does not cov
   let registry: McpRegistry;
   let policies: StubPolicies;
   let specPath: string;
+  let env: Record<string, string>;
   const tool = (name: string, props: string[]) => ({ name, description: name, inputSchema: { type: 'object', properties: Object.fromEntries(props.map((p) => [p, { type: 'string' }])) }, annotations: { readOnlyHint: true } });
   const spec = (tools: Array<ReturnType<typeof tool>>): void => writeFileSync(specPath, JSON.stringify({ tools }));
   const fx = (name = 'fx') => ({ name, kind: 'mcp-stdio', command: process.execPath, args: [FIXTURE_SERVER, specPath] });
@@ -492,7 +493,8 @@ describe('a restore withdraws the approvals the restored generation does not cov
     base = mkdtempSync(join(tmpdir(), 'kd-b1-restore-'));
     specPath = join(base, 'spec.json');
     spec([tool('wt_echo', ['text'])]);
-    registry = new McpRegistry({ store: new McpRegistryStore(join(base, 'mcp')), secrets: new MemorySecrets(), probe: probeMcpServer, discover: () => [], env: {} });
+    env = {};
+    registry = new McpRegistry({ store: new McpRegistryStore(join(base, 'mcp')), secrets: new MemorySecrets(), probe: probeMcpServer, discover: () => [], env });
     policies = new StubPolicies();
     app = Fastify({ logger: false });
     registerAuthHooks(app, { mode: 'required', verifiers: [{ name: 'test', verify: async (t) => TOKENS[t] ?? null }], allowedOrigins: null });
@@ -585,13 +587,14 @@ describe('a restore withdraws the approvals the restored generation does not cov
     await save(fx());
     const kept = await current();
     await registry.setServerEnabled('fx', true); // generation `kept` is now a kept file
-    let release!: () => void;
+    let release: (() => void) | undefined;
     const holding = policies.exclusive('fx', () => new Promise<void>((resolve) => (release = resolve)));
+    const asked = policies.asked.filter((n) => n === 'fx').length;
     const restoring = call('POST', '/mcp/registry/restore', { generation: kept });
-    while (policies.asked.filter((n) => n === 'fx').length < 2) await new Promise((r) => setTimeout(r, 5)); // it waits for fx's lock
+    while (policies.asked.filter((n) => n === 'fx').length === asked || release === undefined) await new Promise((r) => setTimeout(r, 5)); // it waits for fx's lock
     await save(fx('fx2')); // a new server, and its approval, while the restore waits
     policies.tokens.add('mcp:fx2/wt_echo');
-    release();
+    release!();
     await holding;
     const r = await restoring;
     expect(r.status, r.text).toBe(200);
@@ -607,6 +610,55 @@ describe('a restore withdraws the approvals the restored generation does not cov
     await save(fx('ghost'));
     expect(policies.withdrawCalls.map((c) => [...c].sort())).toEqual([['mcp:ghost', 'mcp:ghost/wt_echo']]);
     expect([...policies.tokens]).toEqual([]);
+  });
+
+  it('codex r3: an orphan approval naming a server the generation brings back is withdrawn', async () => {
+    await save(fx());
+    await save(fx('fx2'));
+    const kept = await current();
+    await registry.remove('fx2'); // a removal that left an approval behind (its withdrawal is the route's)
+    policies.tokens.add('mcp:fx2/wt_echo');
+    const r = await call('POST', '/mcp/registry/restore', { generation: kept });
+    expect(r.status, r.text).toBe(200);
+    expect(r.body['withdrawnApprovals']).toEqual(['mcp:fx2/wt_echo']);
+    expect((await registry.list()).servers.map((s) => s.name)).toEqual(['fx', 'fx2']);
+  });
+
+  it('codex r3: a server registered after the restore judged its locked set refuses the commit; nothing is overwritten', async () => {
+    await save(fx());
+    const kept = await current();
+    spec([tool('wt_echo', ['text', 'more'])]);
+    await save(fx());
+    policies.tokens.add('mcp:fx/wt_echo');
+    let open!: () => void;
+    policies.gate = new Promise<void>((resolve) => (open = resolve));
+    const restoring = call('POST', '/mcp/registry/restore', { generation: kept });
+    while (policies.withdrawCalls.length === 0) await new Promise((r) => setTimeout(r, 5));
+    await save(fx('late')); // takes no lock the restore holds
+    open();
+    const r = await restoring;
+    expect([r.status, r.body.code]).toEqual([409, 'registry_busy']);
+    expect((await registry.list()).servers.map((s) => s.name).sort()).toEqual(['fx', 'late']);
+    expect((await registry.get('fx')).tools[0]?.inputSchema).toMatchObject({ properties: { more: { type: 'string' } } });
+  });
+
+  it('codex r3: a secret removed while the restore waits for its locks is judged at the commit (disabled)', async () => {
+    env['KD_FX'] = 'kd-b1-fx-token';
+    await save({ ...fx('fxa'), auth: { ref: 'env:KD_FX', env: 'FX_TOKEN' } });
+    const kept = await current();
+    await registry.setServerEnabled('fxa', true);
+    let release: (() => void) | undefined;
+    const holding = policies.exclusive('fxa', () => new Promise<void>((resolve) => (release = resolve)));
+    const asked = policies.asked.filter((n) => n === 'fxa').length;
+    const restoring = call('POST', '/mcp/registry/restore', { generation: kept });
+    while (policies.asked.filter((n) => n === 'fxa').length === asked || release === undefined) await new Promise((r) => setTimeout(r, 5)); // the restore planned and waits
+    delete env['KD_FX'];
+    release!();
+    await holding;
+    const r = await restoring;
+    expect(r.status, r.text).toBe(200);
+    expect(r.body['disabled']).toEqual([{ name: 'fxa', code: 'secret_missing' }]);
+    expect((await registry.get('fxa')).enabled).toBe(false);
   });
 
   it('an approval that arrives while a restore withdraws is judged against the registration the restore left', async () => {
