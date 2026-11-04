@@ -241,45 +241,68 @@ for (const target of MYSQL_TARGETS) {
         }
       }, 15_000);
 
-      /** A proxy in front of the server; `rule(conn, command)` per client command packet: forward, swallow (stall), or `hold` the whole connection. */
-      async function packetProxy(rule: (conn: number, command: number | null) => 'forward' | 'swallow' | 'hold') {
+      /**
+       * A proxy in front of the server; `rule(conn, command)` per client command packet: forward, swallow (stall), or
+       * `hold` the whole connection. `opts.delayMs(conn)` holds a connection at the door that long before it reaches the
+       * server. `opts.holdReplies` holds the server's replies to `conn` from the moment it forwards `command` until
+       * `until` settles. `closing[conn]` settles with the time the client side of `conn` closed.
+       */
+      async function packetProxy(
+        rule: (conn: number, command: number | null) => 'forward' | 'swallow' | 'hold',
+        opts: { delayMs?: (conn: number) => number; holdReplies?: { conn: number; command: number; until: Promise<unknown> } } = {},
+      ) {
         const sockets = new Set<Socket>();
         const closed: Array<number | null> = [];
+        const closing: Array<Promise<number>> = [];
         let n = 0;
         const server = createServer((client) => {
           const idx = n++;
           closed[idx] = null;
           sockets.add(client);
           client.on('error', () => undefined);
-          client.on('close', () => (closed[idx] = Date.now()));
+          closing[idx] = new Promise<number>((r) => client.on('close', () => r((closed[idx] = Date.now()))));
           if (rule(idx, null) === 'hold') return;
-          const up = connect(db.port, '127.0.0.1');
-          sockets.add(up);
-          up.on('error', () => client.destroy());
-          up.pipe(client);
-          client.on('close', () => up.destroy());
-          let buf = Buffer.alloc(0);
-          let stalled = false;
-          client.on('data', (c: Buffer) => {
-            if (stalled) return;
-            buf = Buffer.concat([buf, c]);
-            while (buf.length >= 4) {
-              const len = buf.readUIntLE(0, 3);
-              if (buf.length < 4 + len) break;
-              const packet = buf.subarray(0, 4 + len);
-              buf = buf.subarray(4 + len);
-              if (packet[3] === 0 && rule(idx, packet[4] ?? null) === 'swallow') {
-                stalled = true;
-                return;
+          client.pause();
+          const open = (): void => {
+            if (client.destroyed) return;
+            const up = connect(db.port, '127.0.0.1');
+            sockets.add(up);
+            up.on('error', () => client.destroy());
+            // The server's bytes, in order, each after `replies` settles (it is settled until `holdReplies` starts).
+            let replies: Promise<unknown> = Promise.resolve();
+            up.on('data', (c: Buffer) => void replies.finally(() => client.write(c)));
+            up.on('end', () => void replies.finally(() => client.end()));
+            client.on('close', () => up.destroy());
+            let buf = Buffer.alloc(0);
+            let stalled = false;
+            client.on('data', (c: Buffer) => {
+              if (stalled) return;
+              buf = Buffer.concat([buf, c]);
+              while (buf.length >= 4) {
+                const len = buf.readUIntLE(0, 3);
+                if (buf.length < 4 + len) break;
+                const packet = buf.subarray(0, 4 + len);
+                buf = buf.subarray(4 + len);
+                if (packet[3] === 0 && rule(idx, packet[4] ?? null) === 'swallow') {
+                  stalled = true;
+                  return;
+                }
+                up.write(packet);
+                const hold = opts.holdReplies;
+                if (hold !== undefined && hold.conn === idx && packet[3] === 0 && packet[4] === hold.command) replies = hold.until;
               }
-              up.write(packet);
-            }
-          });
+            });
+            client.resume();
+          };
+          const delay = opts.delayMs?.(idx) ?? 0;
+          if (delay > 0) setTimeout(open, delay);
+          else open();
         });
         await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
         return {
           port: (server.address() as AddressInfo).port,
           closed,
+          closing,
           close: async () => {
             for (const sk of sockets) sk.destroy();
             await new Promise<void>((r) => server.close(() => r()));
@@ -300,26 +323,45 @@ for (const target of MYSQL_TARGETS) {
         }
       }, 20_000);
 
-      it('an established KILL connection whose KILL never answers is dropped with the call (codex r5)', async () => {
-        // The KILL connection passes its handshake and session statements but swallows the KILL (COM_QUERY 0x03 after setup).
-        let killerQueries = 0;
-        const px = await packetProxy((conn, cmd) => {
-          if (conn !== 1 || cmd !== 0x03) return 'forward';
-          killerQueries++;
-          return killerQueries > 2 ? 'swallow' : 'forward'; // the two SET statements pass; the KILL does not
-        });
-        try {
-          const args = { ...reader(), source: { ...reader().source, port: px.port } };
-          await expect(mysqlRead(args, 'SELECT SUM(a.n + b.n + c.n) AS s FROM big a, big b, big c', [], { deadlineMs: 500 })).rejects.toBeDefined();
-          const ended = Date.now();
-          for (let i = 0; i < 40 && px.closed[1] == null; i++) await new Promise((r) => setTimeout(r, 100));
-          expect(px.closed[1]).not.toBeNull();
-          expect(killerQueries).toBeGreaterThanOrEqual(3); // the KILL itself was sent and swallowed (codex r6)
-          expect((px.closed[1] ?? Infinity) - ended).toBeLessThan(1_500);
-        } finally {
-          await px.close();
-        }
-      }, 20_000);
+      // crew#1322: the source stops the read itself at max_execution_time (the same 500 ms as the call's deadline). When
+      // that came first, the call ended while the KILL connection was still connecting, so it was abandoned before it
+      // sent anything (CI saw killerQueries 0 on a loaded runner). The read's answer is now held until the KILL has
+      // been sent (bounded at 10 s), so the case under test always happens: the call ends while an established KILL
+      // connection waits on a KILL that never answers. The slow variant is the loaded runner, every time.
+      for (const slowMs of [0, 1_200]) {
+        it(`an established KILL connection whose KILL never answers is dropped with the call (codex r5)${slowMs > 0 ? `; its connection is ${slowMs} ms slow (crew#1322)` : ''}`, async () => {
+          // The KILL connection passes its handshake and session statements but swallows the KILL (COM_QUERY 0x03 after setup).
+          let killerQueries = 0;
+          let killSent: () => void = () => undefined;
+          const sent = new Promise<void>((r) => (killSent = r));
+          const px = await packetProxy(
+            (conn, cmd) => {
+              if (conn !== 1 || cmd !== 0x03) return 'forward';
+              killerQueries++;
+              if (killerQueries <= 2) return 'forward'; // the two SET statements pass
+              killSent();
+              return 'swallow'; // the KILL does not
+            },
+            {
+              delayMs: (conn) => (conn === 1 ? slowMs : 0),
+              // The read's answer to its statement (COM_STMT_EXECUTE 0x17) waits for the KILL to be sent.
+              holdReplies: { conn: 0, command: 0x17, until: Promise.race([sent, new Promise((r) => setTimeout(r, 10_000))]) },
+            },
+          );
+          try {
+            const args = { ...reader(), source: { ...reader().source, port: px.port } };
+            await expect(mysqlRead(args, 'SELECT SUM(a.n + b.n + c.n) AS s FROM big a, big b, big c', [], { deadlineMs: 500 })).rejects.toBeDefined();
+            const ended = Date.now();
+            // The KILL connection's close, waited for (at most 5 s), not polled for.
+            const closedAt = await Promise.race([px.closing[1] ?? Promise.resolve(null), new Promise<null>((r) => setTimeout(() => r(null), 5_000))]);
+            expect(closedAt).not.toBeNull();
+            expect(killerQueries).toBeGreaterThanOrEqual(3); // the KILL itself was sent and swallowed (codex r6)
+            expect((closedAt ?? Infinity) - ended).toBeLessThan(1_500);
+          } finally {
+            await px.close();
+          }
+        }, 20_000);
+      }
 
       it('one deadline from entry (codex r3): a connection slower than the deadline is a timeout, not a fresh 10 s after it', async () => {
         const slow = (async (host: string) => {
