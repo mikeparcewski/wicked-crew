@@ -14,10 +14,7 @@ import { launchRosterNaming, registerRoutes } from './routes.js';
 import { APPS_ACTIONS_STATE_FILENAME, AppActionStore } from '../apps/actions/store.js';
 import { AppsSourceStage } from '../apps/exec/source-stage.js';
 import { APPS_STATE_FILENAME, AppStore, defaultAppsRoot } from '../apps/store.js';
-import { AppTurnService, RegistryKnowledge, appsUnitResolver } from '../apps/turns.js';
-import { askStructure } from '../sources/ask.js';
-import type { SqlCatalog } from '../sources/catalog/types.js';
-import type { GraphqlCatalog } from '../sources/graphql.js';
+import { AppTurnService, PackageKnowledge, appsUnitResolver } from '../apps/turns.js';
 import { freshenCheckout } from './chat-freshness.js';
 import { ErrorRing, teeStreamWithErrorRing } from './diagnostics.js';
 import { GateCache } from './gate-cache.js';
@@ -2609,22 +2606,8 @@ export async function createServer(
         await rosterWithStanding.ready?.();
         return JSON.stringify(launchRosterNaming(rosterWithStanding(), undefined));
       },
-      knowledge: new RegistryKnowledge({
-        list: async () => (await mcpRegistry.list()).servers.map((s) => ({ name: s.name, kind: s.kind, enabled: s.enabled !== false })),
-        structure: async (name) => {
-          const src = await mcpRegistry.source(name).catch(() => null);
-          if (src === null || src.description === null) return null;
-          if (src.config.kind === 'sql') {
-            const cat = src.description.catalog as SqlCatalog;
-            return { kind: cat.dialect, structure: askStructure(cat, src.config.viewsAllowed ?? []) };
-          }
-          if (src.config.kind === 'graphql') {
-            const g = src.description.catalog as GraphqlCatalog;
-            return { kind: 'graphql', structure: { queries: g.queries.slice(0, 200), mutations: g.mutations.slice(0, 100), enums: g.enums.slice(0, 100) } };
-          }
-          return null;
-        },
-      }, (m) => app.log.warn(m)),
+      // DES-KNOWLEDGE-DATA-001 §9.3: the builder gets the app's project's knowledge package, as a chat there does.
+      knowledge: new PackageKnowledge(dataGate, (m) => app.log.warn(m)),
       store: () => store,
       log: (m) => app.log.info(m),
     });
