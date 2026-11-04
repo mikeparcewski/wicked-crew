@@ -6025,6 +6025,14 @@ export function registerRoutes(
       // checks below are the ones the record confirms ({@link gateForDecision}).
       const decided = await gateForDecision(run, parsed.data.ord, { declining: !parsed.data.approve });
       if ('refusal' in decided) return decided.refusal;
+      // (crew#1139) A note on a plan approval needs an engine that lands it. An older one refuses it with
+      // words that predate notes ("send the edited steps"), so the daemon says what to do instead.
+      if (
+        parsed.data.approve && decided.gateKind === 'plan_approval' && (parsed.data.amend ?? '').trim() !== ''
+        && !(typeof adapter.supportsPlanGateNote === 'function' && adapter.supportsPlanGateNote())
+      ) {
+        return { code: 501, body: { error: message(new PlanGateNoteUnsupportedError()) } };
+      }
       const analysis = parsed.data.approve ? analysisPlanRefusal(id, { plan: parsed.data.plan }) : null;
       if (analysis !== null) return analysis;
       // The gated unit and its receipt as it stands when the person decides (wicked-core#850: every

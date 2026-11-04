@@ -202,6 +202,31 @@ describe('POST /runs {plan} and the plan_approval gate — HTTP contract (shadow
     );
   });
 
+  it('crew#1139: a note on a PLAIN plan approval on an engine without plan-gate notes is a 501 that says so', async () => {
+    // The record's open gate is the plan gate.
+    ctx.adapter.interactionRequests = async () =>
+      [{ id: 'g1', kind: 'gate', ord: 1, status: 'open', gate_kind: 'plan_approval', prompt: 'approve the plan', created_at: 1 }] as never;
+    await withCapability(
+      ctx.adapter,
+      true,
+      async () => {
+        const res = await fetch(`${ctx.baseUrl}/api/v1/runs/r1/gate`, json({ approve: true, amend: 'a note' }));
+        expect(res.status).toBe(501);
+        expect(((await res.json()) as { error: string }).error).toMatch(/supportsPlanGateNote/);
+        expect(gated).toHaveLength(0);
+        // Without a note, and with the capability, the approve goes to the engine.
+        expect((await fetch(`${ctx.baseUrl}/api/v1/runs/r1/gate`, json({ approve: true }))).status).toBe(200);
+        expect(gated).toHaveLength(1);
+      },
+      false,
+    );
+    await withCapability(ctx.adapter, true, async () => {
+      const res = await fetch(`${ctx.baseUrl}/api/v1/runs/r1/gate`, json({ approve: true, amend: 'a note' }));
+      expect(res.status, await res.clone().text()).toBe(200);
+      expect(gated.at(-1)?.slice(0, 3)).toEqual(['r1', true, 'a note']);
+    });
+  });
+
   it('crew#1139: /health.capabilities.planGateNote says whether the engine lands a plan approval\'s note', async () => {
     for (const on of [true, false]) {
       await withCapability(
