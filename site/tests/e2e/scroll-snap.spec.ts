@@ -390,41 +390,65 @@ test.describe('touch, on a touch screen 1024px wide and up (a tablet in landscap
     expect(Math.abs(y - tops[2]), `rested at ${y}; it skipped past ${tops[2]}`).toBeLessThanOrEqual(2);
   });
 
+  /** What the page saw of one swipe and its PageUp (performance.now() times; -1: not seen). */
+  type Swipe = { glides: number[]; moveAt: number; liftAt: number; pageUpAt: number; yAtKey: number; lastY: number | null };
+  /** Why an attempt did not set up the case under test (null: it did). Each limit sits inside settle.js's own:
+   *  a lift over 150 ms after the last clear move reads as held still (touchTarget), a key over 600 ms after
+   *  the last input starts a new gesture (begin), and once the settle glides a key counts from the glide. */
+  function setupMissed(s: Swipe, top2: number): string | null {
+    if (s.pageUpAt < 0 || s.liftAt < 0 || s.moveAt < 0) return 'the swipe or the PageUp never reached the page';
+    if (s.liftAt - s.moveAt > 100) return `the finger lifted ${Math.round(s.liftAt - s.moveAt)} ms after it last moved`;
+    if (s.pageUpAt - s.liftAt > 400) return `the PageUp came ${Math.round(s.pageUpAt - s.liftAt)} ms after the lift`;
+    if (s.glides.some((t) => t < s.pageUpAt)) return 'the settle began its glide before the PageUp arrived';
+    if (s.yAtKey <= top2 + 100) return `the swipe had moved the page only to ${s.yAtKey} when the key came`;
+    return null;
+  }
+
   test('a key pressed after a swipe takes over: PageUp during the momentum goes up', async ({ page }) => {
-    // The key has to reach the page before the settle rests the swipe. Once the settle's own glide to the
-    // next frame is under way, a key counts from the frame that glide was going to (settle.js, begin()),
-    // so PageUp lands back on tops[2]: right for a key during a glide, but not this test. A fixed 250 ms
-    // wait after the swipe raced the momentum: on CI the fling, and the settle's 140 ms pause after it,
-    // sometimes ended first, and the run rested at tops[2] (wicked-crew#1315). The key now goes as the
-    // finger lifts, the first moment of the momentum (the settle never rests sooner than 140 ms after the
-    // scroll ends), and the page records its glides, so a run that still came too late says so.
+    // The key has to reach the page after the swipe moved it and before the settle rests the swipe. Once the
+    // settle's own glide to the next frame is under way, a key counts from the frame that glide was going to
+    // (settle.js, begin()), so PageUp lands back on tops[2]: right for a key during a glide, not this test. A
+    // fixed 250 ms wait after the swipe raced the momentum: on CI the fling, and the settle's 140 ms pause
+    // after it, sometimes ended first, and the run rested at tops[2] (wicked-crew#1315). The key now goes as
+    // the finger lifts, and the page records what it saw. An attempt the runner delivered too late to set up
+    // this case (see setupMissed) is tried again on a fresh page, at most three times; once one sets it up,
+    // its rest is asserted.
     await page.addInitScript(() => {
-      const w = window as unknown as { __glides: number[]; __pageUpAt: number };
-      w.__glides = [];
-      w.__pageUpAt = -1;
+      const s: Swipe = { glides: [], moveAt: -1, liftAt: -1, pageUpAt: -1, yAtKey: -1, lastY: null };
+      (window as unknown as { __swipe: Swipe }).__swipe = s;
       const scrollTo = window.scrollTo.bind(window) as (...a: unknown[]) => void;
       window.scrollTo = ((...a: unknown[]) => {
         const o = a[0];
-        if (o !== null && typeof o === 'object' && (o as ScrollToOptions).behavior === 'smooth') w.__glides.push(performance.now());
+        if (o !== null && typeof o === 'object' && (o as ScrollToOptions).behavior === 'smooth') s.glides.push(performance.now());
         scrollTo(...a);
       }) as typeof window.scrollTo;
-      window.addEventListener('keydown', (e) => { if (e.key === 'PageUp' && w.__pageUpAt < 0) w.__pageUpAt = performance.now(); }, { capture: true });
+      // the settle's glides count from the swipe on; a clear move is 4px or more, as settle.js reads one
+      window.addEventListener('touchstart', (e) => { s.glides = []; s.lastY = e.touches[0] ? e.touches[0].clientY : null; }, { capture: true, passive: true });
+      window.addEventListener('touchmove', (e) => {
+        const y = e.touches[0] ? e.touches[0].clientY : null;
+        if (y !== null && s.lastY !== null && Math.abs(s.lastY - y) > 4) { s.moveAt = performance.now(); s.lastY = y; }
+      }, { capture: true, passive: true });
+      window.addEventListener('touchend', () => { s.liftAt = performance.now(); }, { capture: true, passive: true });
+      window.addEventListener('keydown', (e) => {
+        if (e.key === 'PageUp' && s.pageUpAt < 0) { s.pageUpAt = performance.now(); s.yAtKey = Math.round(window.scrollY); }
+      }, { capture: true });
     });
-    await page.goto('/');
-    await page.waitForTimeout(400);
-    const tops = await frameTops(page);
-    await atTop(page, tops[2]);
-    await drag(page, steps(500, 300, 6), 12);          // a swipe down the page, and PageUp as the finger lifts
-    await page.keyboard.press('PageUp');
-    const y = await settled(page);
-    const { glides, pageUpAt } = await page.evaluate(() => {
-      const w = window as unknown as { __glides: number[]; __pageUpAt: number };
-      return { glides: w.__glides, pageUpAt: w.__pageUpAt };
-    });
-    expect(pageUpAt, 'the PageUp never reached the page').toBeGreaterThan(0);
-    expect(glides.filter((t) => t < pageUpAt), 'the settle began its glide before the PageUp arrived: too late to test a key during the momentum').toEqual([]);
-    expect(y, `rested at ${y}: the swipe's direction overrode the PageUp`).toBeLessThan(tops[2] - 2);
-    expect(onAFrame(y, await restTops(page))).toBe(true);
+    const missed: string[] = [];
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await page.goto('/');
+      await page.waitForTimeout(400);
+      const tops = await frameTops(page);
+      await atTop(page, tops[2]);
+      await drag(page, steps(500, 300, 6), 12);          // a swipe down the page, and PageUp as the finger lifts
+      await page.keyboard.press('PageUp');
+      const y = await settled(page);
+      const why = setupMissed(await page.evaluate(() => (window as unknown as { __swipe: Swipe }).__swipe), tops[2]);
+      if (why !== null) { missed.push(`attempt ${attempt}: ${why}`); continue; }
+      expect(y, `rested at ${y}: the swipe's direction overrode the PageUp`).toBeLessThan(tops[2] - 2);
+      expect(onAFrame(y, await restTops(page))).toBe(true);
+      return;
+    }
+    throw new Error(`no attempt set up a key during the swipe's momentum: ${missed.join('; ')}`);
   });
 
   test('a fast fling ends on a frame top after its momentum', async ({ page }) => {
