@@ -20,6 +20,7 @@ import { registerMcpRoutes } from '../src/api/mcp.js';
 import { pinOf } from '../src/apps/exec/sources.js';
 import type { Actor, AppQuery, AppQueryResponse, McpPreviewResponse, McpServer, McpServersAgentResponse, McpServersResponse } from '../src/core/types.js';
 import { checkSourceDocument, DeploymentPolicyError } from '../src/knowledge/registry/policy.js';
+import type { McpPolicies } from '../src/mcp/policies.js';
 import { canonicalJson } from '../src/mcp/classify.js';
 import { probeMcpServer, type Prober } from '../src/mcp/probe.js';
 import { configOf, McpRegistry, normalizeRegistryFile } from '../src/mcp/registry.js';
@@ -175,8 +176,10 @@ const fakeDescribe: Prober = async (config, secret) => {
 class MemorySecrets implements SecretStore {
   readonly available = true;
   readonly values = new Map<string, string>();
+  /** A keychain whose metadata answers while reading the value does not (codex r1 #2). */
+  unreadable = false;
   async get(a: string) {
-    return this.values.get(a) ?? null;
+    return this.unreadable ? null : (this.values.get(a) ?? null);
   }
   async has(a: string) {
     return this.values.has(a);
@@ -196,6 +199,7 @@ describe('the one registry over its routes', () => {
   let store: McpRegistryStore;
   let env: Record<string, string>;
   let specPath: string;
+  let secrets: MemorySecrets;
   const SQL_BODY = { name: 'wh', kind: 'sql', sql: { driver: 'postgres', host: 'pg.internal.test', port: 6543, database: 'warehouse_db', user: 'reader_login', tls: 'disable' }, auth: { ref: 'env:KD_WH_PASSWORD' } };
 
   beforeEach(async () => {
@@ -204,7 +208,8 @@ describe('the one registry over its routes', () => {
     writeFileSync(specPath, JSON.stringify({ tools: [{ name: 'wt_echo', description: 'echo', inputSchema: { type: 'object', properties: { text: { type: 'string' } } }, annotations: { readOnlyHint: true } }] }));
     env = { KD_WH_PASSWORD: 'kd-b1-fixture-password' };
     store = new McpRegistryStore(join(base, 'mcp'));
-    registry = new McpRegistry({ store, secrets: new MemorySecrets(), probe: fakeDescribe, discover: () => [], env });
+    secrets = new MemorySecrets();
+    registry = new McpRegistry({ store, secrets, probe: fakeDescribe, discover: () => [], env });
     app = Fastify({ logger: false });
     registerAuthHooks(app, { mode: 'required', verifiers: [{ name: 'test', verify: async (t) => TOKENS[t] ?? null }], allowedOrigins: null });
     const audit = new AuditLog(join(base, 'audit.log'), () => undefined);
@@ -317,6 +322,15 @@ describe('the one registry over its routes', () => {
       expect([url, r.status, r.body.code]).toEqual([url, 403, 'human_only']);
     }
     expect((await call('GET', '/sources/wh/catalog', 'human')).status).toBe(200);
+    // codex r1 #6: another spelling of the same route (the router decodes it) is the same route.
+    expect((await call('GET', '/sources/wh/%63atalog', 'human')).status).toBe(200);
+    expect((await call('GET', '/sources/wh/%63atalog', 'agent')).body.code).toBe('human_only');
+    // pi r1 S1: an unknown query parameter is ignored, as it always was.
+    expect((await call('GET', '/mcp/servers?_=1', 'human')).status).toBe(200);
+    // codex r1 #9: a refused re-key does not echo the stored reference.
+    const rekey = await call('PUT', '/mcp/servers/wh/secret', 'agent', { value: 'another-value-1' });
+    expect([rekey.status, rekey.body.code]).toEqual([400, 'secret_not_referenced']);
+    expect(rekey.text).not.toContain('KD_WH_PASSWORD');
     // A preview by an agent answers no structure of the source.
     const p = await call('POST', '/mcp/servers/preview', 'agent', SQL_BODY);
     expect(p.status).toBe(200);
@@ -357,10 +371,27 @@ describe('the one registry over its routes', () => {
     expect((await call('GET', '/mcp/registry/generations', 'agent')).status).toBe(403);
   });
 
+  it('codex r1 #1 / pi r1 C2: pruning that fails after the write committed never fails the write', async () => {
+    expect((await save(SQL_BODY)).status).toBe(201);
+    for (let i = 0; i < 3; i++) await registry.setServerEnabled('wh', true);
+    // Generation 1 becomes something rm cannot remove; it is pruned (never kept again) once 11 more writes land.
+    const g1 = join(base, 'mcp', 'registry.json.1');
+    removeScratch(g1);
+    mkdirSync(join(g1, 'held'), { recursive: true });
+    for (let i = 0; i < 11; i++) await registry.setServerEnabled('wh', i % 2 === 0);
+    expect(onDisk().generation).toBe(15);
+    expect((await registry.get('wh')).enabled).toBe(true); // the last write (i = 10) landed
+    expect(readdirSync(join(base, 'mcp'))).toContain('registry.json.1'); // the prune that failed is retried next time
+    // codex r1 #12: a generation holding JSON null is unreadable (409), not a crash.
+    writeFileSync(join(base, 'mcp', 'registry.json.14'), 'null');
+    expect((await call('POST', '/mcp/registry/restore', 'human', { generation: 14 })).body.code).toBe('generation_unreadable');
+  });
+
   it('NEGATIVE CONTROL: a restored generation comes back with "query" off, Allow writes off, and a server whose secret is gone disabled', async () => {
     expect((await save(SQL_BODY)).status).toBe(201);
     env['KD_GONE'] = 'kd-b1-gone-password';
     expect((await save({ ...SQL_BODY, name: 'wh-env', auth: { ref: 'env:KD_GONE' } })).status).toBe(201);
+    expect((await save({ ...SQL_BODY, name: 'wh-kc', auth: { ref: 'keychain:wicked-mcp/wh-kc' }, secret: 'kd-b1-keychain-pass' })).status).toBe(201);
     // The person's switches as they stand in this generation: query on (B2's route sets it), Allow writes on.
     await store.mutate((file) => {
       for (const s of file.servers) s.agents = { see: true, query: true, projects: ['proj_1'], everyProject: false };
@@ -369,20 +400,172 @@ describe('the one registry over its routes', () => {
     const kept = (await registry.generations()).current;
     expect((await call('PATCH', '/mcp/servers/wh', 'human', { enabled: true })).status).toBe(200); // one more write
     delete env['KD_GONE'];
+    secrets.unreadable = true; // codex r1 #2: the entry is listed, its value cannot be read
     expect((await call('POST', '/mcp/registry/restore', 'agent', { generation: kept })).status).toBe(403);
+    // codex r1 #10: a generation edited to judge its document for another runtime is checked too (passwordless
+    // is native-only), and refused with nothing changed.
+    const genPath = join(base, 'mcp', `registry.json.${kept}`);
+    const original = readFileSync(genPath, 'utf8');
+    const edited = JSON.parse(original) as McpRegistryFile;
+    edited.servers[0]!.runtime = 'toolbox';
+    delete (edited.servers[0]!.toolbox as { password?: string }).password;
+    writeFileSync(genPath, JSON.stringify(edited));
+    const before = readFileSync(join(base, 'mcp', 'registry.json'), 'utf8');
+    expect((await call('POST', '/mcp/registry/restore', 'human', { generation: kept })).body.code).toBe('missing_field');
+    expect(readFileSync(join(base, 'mcp', 'registry.json'), 'utf8')).toBe(before);
+    writeFileSync(genPath, original);
     const r = await call('POST', '/mcp/registry/restore', 'human', { generation: kept });
     expect(r.status, r.text).toBe(200);
-    expect(r.body).toMatchObject({ restored: kept, queryReset: ['wh', 'wh-env'], writesReset: ['wh'], disabled: [{ name: 'wh-env', code: 'secret_missing' }] });
+    expect(r.body).toMatchObject({ restored: kept, queryReset: ['wh', 'wh-env', 'wh-kc'], writesReset: ['wh'], disabled: [{ name: 'wh-env', code: 'secret_missing' }, { name: 'wh-kc', code: 'secret_missing' }] });
+    expect(r.text).not.toContain('kd-b1-keychain-pass');
     const list = (await registry.list()).servers;
     expect(list.find((s) => s.name === 'wh')).toMatchObject({ enabled: true, allowWrites: false, agents: { see: true, query: false, projects: ['proj_1'] } });
     expect(list.find((s) => s.name === 'wh-env')).toMatchObject({ enabled: false, agents: { query: false } });
     expect(list.find((s) => s.name === 'wh-env')?.health.lastError).toMatch(/^secret_missing/);
+    expect(list.find((s) => s.name === 'wh-kc')).toMatchObject({ enabled: false });
+    for (const f of readdirSync(join(base, 'mcp'))) if (f.startsWith('registry.json')) expect(readFileSync(join(base, 'mcp', f), 'utf8')).not.toContain('kd-b1-keychain-pass');
     // The registry in force before the restore was kept, so the restore can be undone.
     expect((await registry.generations()).generations.some((x) => x.generation === kept + 1)).toBe(true);
     expect((await call('POST', '/mcp/registry/restore', 'human', { generation: 999 })).body.code).toBe('unknown_generation');
     writeFileSync(join(base, 'mcp', `registry.json.${kept}`), '{torn');
     const torn = await call('POST', '/mcp/registry/restore', 'human', { generation: kept });
     expect([torn.status, torn.body.code]).toEqual([409, 'generation_unreadable']);
+  });
+});
+
+// ── Restore and approvals (codex r1 #3, #4, #5, #13; pi r1 C1, T1) ─────────────────────────────────
+
+/** The approvals ledger's stand-in: the real per-server lock, the real token naming, a withdrawal that can fail. */
+class StubPolicies {
+  readonly tokens = new Set<string>();
+  readonly withdrawCalls: string[][] = [];
+  failWithdraw = false;
+  gate: Promise<void> | null = null;
+  private readonly tails = new Map<string, Promise<unknown>>();
+  exclusive<T>(server: string, fn: () => Promise<T>): Promise<T> {
+    const result = (this.tails.get(server) ?? Promise.resolve()).then(fn);
+    this.tails.set(server, result.catch(() => undefined));
+    return result;
+  }
+  async tokensOf(server: string): Promise<string[]> {
+    return [...this.tokens].filter((t) => t === `mcp:${server}` || t.startsWith(`mcp:${server}/`));
+  }
+  async withdraw(tokens: readonly string[]): Promise<string[]> {
+    this.withdrawCalls.push([...tokens]);
+    if (this.gate !== null) await this.gate;
+    if (this.failWithdraw) throw new Error('the ledger is down');
+    for (const t of tokens) this.tokens.delete(t);
+    return ['MCP-FIRST-USE'];
+  }
+  async withdrawnBySave(): Promise<string[]> {
+    return [];
+  }
+  async previewUnsaved(): Promise<null> {
+    return null;
+  }
+}
+
+describe('a restore withdraws the approvals the restored generation does not cover, under every server lock', () => {
+  let base: string;
+  let app: FastifyInstance;
+  let registry: McpRegistry;
+  let policies: StubPolicies;
+  let specPath: string;
+  const tool = (name: string, props: string[]) => ({ name, description: name, inputSchema: { type: 'object', properties: Object.fromEntries(props.map((p) => [p, { type: 'string' }])) }, annotations: { readOnlyHint: true } });
+  const spec = (tools: Array<ReturnType<typeof tool>>): void => writeFileSync(specPath, JSON.stringify({ tools }));
+  const fx = (name = 'fx') => ({ name, kind: 'mcp-stdio', command: process.execPath, args: [FIXTURE_SERVER, specPath] });
+
+  beforeEach(async () => {
+    base = mkdtempSync(join(tmpdir(), 'kd-b1-restore-'));
+    specPath = join(base, 'spec.json');
+    spec([tool('wt_echo', ['text'])]);
+    registry = new McpRegistry({ store: new McpRegistryStore(join(base, 'mcp')), secrets: new MemorySecrets(), probe: probeMcpServer, discover: () => [], env: {} });
+    policies = new StubPolicies();
+    app = Fastify({ logger: false });
+    registerAuthHooks(app, { mode: 'required', verifiers: [{ name: 'test', verify: async (t) => TOKENS[t] ?? null }], allowedOrigins: null });
+    const actorOf = (req: { actor?: Actor | null }): Actor => req.actor ?? LOCAL_ACTOR;
+    registerMcpRoutes(app, { registry, audit: new AuditLog(join(base, 'audit.log'), () => undefined), actorOf, policies: policies as unknown as McpPolicies });
+    await app.ready();
+  });
+  afterEach(async () => {
+    await app.close();
+    removeScratch(base);
+  });
+  const call = async (method: 'GET' | 'POST', url: string, payload?: unknown) => {
+    const res = await app.inject({ method, url: `/api/v1${url}`, headers: { authorization: 'Bearer human' }, ...(payload !== undefined ? { payload: payload as object } : {}) });
+    return { status: res.statusCode, body: res.json() as Record<string, unknown> & { code?: string }, text: res.body };
+  };
+  const save = async (config: Record<string, unknown>) => {
+    const p = await call('POST', '/mcp/servers/preview', config);
+    expect(p.status, p.text).toBe(200);
+    const s = await call('POST', '/mcp/servers', { previewHash: (p.body as unknown as McpPreviewResponse).previewHash });
+    expect(s.status, s.text).toBe(201);
+  };
+  const current = async (): Promise<number> => (await registry.generations()).current;
+
+  it('a changed schema, a tool saved only since (null hash then), and a server added since lose their approvals', async () => {
+    await save(fx());
+    spec([tool('wt_echo', ['text']), tool('wt_new', ['q'])]);
+    expect((await call('POST', '/mcp/servers/fx/test')).status).toBe(200); // wt_new seen, never saved: schemaHash null
+    const kept = await current();
+    spec([tool('wt_echo', ['text', 'more']), tool('wt_new', ['q'])]);
+    await save(fx()); // wt_echo's schema changed, wt_new saved
+    await save(fx('fx2'));
+    for (const t of ['mcp:fx', 'mcp:fx/wt_echo', 'mcp:fx/wt_new', 'mcp:fx2/wt_echo']) policies.tokens.add(t);
+    const r = await call('POST', '/mcp/registry/restore', { generation: kept });
+    expect(r.status, r.text).toBe(200);
+    expect(r.body['withdrawnApprovals']).toEqual(['mcp:fx', 'mcp:fx/wt_echo', 'mcp:fx/wt_new', 'mcp:fx2/wt_echo']);
+    expect([...policies.tokens]).toEqual([]);
+    expect((await registry.list()).servers.map((s) => s.name)).toEqual(['fx']);
+  });
+
+  it('an approval for a tool the restored generation saved under the same schema survives', async () => {
+    await save(fx());
+    const kept = await current();
+    await registry.setServerEnabled('fx', true);
+    policies.tokens.add('mcp:fx/wt_echo');
+    const r = await call('POST', '/mcp/registry/restore', { generation: kept });
+    expect(r.body['withdrawnApprovals']).toEqual([]);
+    expect([...policies.tokens]).toEqual(['mcp:fx/wt_echo']);
+  });
+
+  it('a refused generation withdraws nothing; a failed withdrawal restores nothing', async () => {
+    await save(fx());
+    const kept = await current();
+    spec([tool('wt_echo', ['text', 'more'])]);
+    await save(fx());
+    policies.tokens.add('mcp:fx/wt_echo');
+    writeFileSync(join(base, 'mcp', `registry.json.${kept}`), '{torn');
+    expect((await call('POST', '/mcp/registry/restore', { generation: kept })).body.code).toBe('generation_unreadable');
+    expect(policies.withdrawCalls).toEqual([]);
+    await registry.setServerEnabled('fx', true);
+    const kept2 = (await current()) - 1;
+    spec([tool('wt_echo', ['text', 'more', 'again'])]);
+    await save(fx());
+    policies.failWithdraw = true;
+    const before = readFileSync(join(base, 'mcp', 'registry.json'), 'utf8');
+    const r = await call('POST', '/mcp/registry/restore', { generation: kept2 });
+    expect([r.status, r.body.code]).toEqual([500, 'withdraw_failed']);
+    expect(readFileSync(join(base, 'mcp', 'registry.json'), 'utf8')).toBe(before);
+    expect([...policies.tokens]).toEqual(['mcp:fx/wt_echo']);
+  });
+
+  it('an approval that arrives while a restore withdraws is judged against the registration the restore left', async () => {
+    await save(fx());
+    const kept = await current();
+    const restoredHash = (await registry.get('fx')).tools[0]!.schemaHash;
+    spec([tool('wt_echo', ['text', 'more'])]);
+    await save(fx());
+    policies.tokens.add('mcp:fx/wt_echo');
+    let open!: () => void;
+    policies.gate = new Promise<void>((resolve) => (open = resolve));
+    const restoring = call('POST', '/mcp/registry/restore', { generation: kept });
+    while (policies.withdrawCalls.length === 0) await new Promise((r) => setTimeout(r, 5));
+    // An approval of fx queued now (the approve route takes fx's lock the same way) waits for the commit.
+    const seen = policies.exclusive('fx', async () => (await registry.get('fx')).tools[0]!.schemaHash);
+    open();
+    expect((await restoring).status).toBe(200);
+    expect(await seen).toBe(restoredHash);
   });
 });
 

@@ -17,8 +17,10 @@
  * `${VAR:default}` across the whole document before it parses it, so `${` anywhere else is refused: it would
  * read the adapter's environment.
  *
- * The check runs at preview, at save (the registry store refuses a new or changed document that fails it),
- * at spawn (B2) and at publish. Never only in the UI.
+ * The check runs at the preview, and inside every registry write for each document that is new or changed (or
+ * judged for another runtime), so no path stores one it refuses; a restore checks every document of the
+ * generation before anything changes. The Toolbox runtime runs it again at spawn, and publish will (next briefs).
+ * Never only in the UI.
  */
 
 /** The Toolbox release the schema below was derived from (`internal/sources/postgres/postgres.go`). */

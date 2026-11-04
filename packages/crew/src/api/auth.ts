@@ -666,10 +666,15 @@ const PROJECT_DETAIL_PATH = new RegExp(`^${API_PREFIX}/projects/[^/]+$`);
  * estate and the gate. (`test-call`, `ask`, `query` and `allow-writes` are human-only in their routes already.)
  */
 const SOURCE_MANAGEMENT_READ = new RegExp(`^${API_PREFIX}/sources/[^/]+/(?:catalog|describe|privileges|check|safety|test)$`);
+const SOURCE_MANAGEMENT_ROUTES: ReadonlySet<string> = new Set(['catalog', 'describe', 'privileges', 'check', 'safety', 'test'].map((r) => `${API_PREFIX}/sources/:name/${r}`));
 
-/** Whether a request is a human actor's only (403 `human_only` for any other actor; see {@link SOURCE_MANAGEMENT_READ}). */
-export function humanOnlyRoute(path: string): boolean {
-  return SOURCE_MANAGEMENT_READ.test(path);
+/**
+ * Whether a request is a human actor's only (403 `human_only` for any other actor; see {@link SOURCE_MANAGEMENT_READ}).
+ * Judged on the route the router MATCHED (`routeUrl`, the registered pattern), so another spelling of the same path
+ * (percent-encoding the router decodes) cannot slip past, and on the raw path as well.
+ */
+export function humanOnlyRoute(routeUrl: string | undefined, path: string): boolean {
+  return (routeUrl !== undefined && SOURCE_MANAGEMENT_ROUTES.has(routeUrl)) || SOURCE_MANAGEMENT_READ.test(path);
 }
 
 /**
@@ -823,8 +828,8 @@ export function registerAuthHooks(app: FastifyInstance, auth: ResolvedAuth): voi
     // as itself and only its own section. Nothing else a plugin sends passes this boundary.
     if (req.actor?.kind === 'plugin' && req.method === 'POST' && WORKING_DOC_VERSIONS_PATH.test(path)) return;
     // (DES-KNOWLEDGE-DATA-001 §5.2) A management read of a source is a human's, at any trust.
-    if (humanOnlyRoute(path) && req.actor.kind !== 'human') {
-      return reply.code(403).send({ error: `a source's management reads are a human operator's only; you are ${req.actor.kind}/${req.actor.trust}`, code: 'human_only' });
+    if (humanOnlyRoute(req.routeOptions?.url, path) && req.actor?.kind !== 'human') {
+      return reply.code(403).send({ error: `a source's management reads are a human operator's only; you are ${req.actor?.kind ?? 'unknown'}/${req.actor?.trust ?? 'none'}`, code: 'human_only' });
     }
     const need = requiredTrust(req.method, path, req.body);
     if (!trustAtLeast(req.actor, need)) {

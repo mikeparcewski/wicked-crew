@@ -231,7 +231,10 @@ export class McpRegistryStore {
       await rm(tmp, { force: true });
       throw err;
     }
-    await this.prune(file.generation);
+    // The write has COMMITTED: pruning is housekeeping, so its failure is never the write's (a save that
+    // reported failure here would roll its secret back under a record that already landed). The next write
+    // prunes again.
+    await this.prune(file.generation).catch(() => undefined);
   }
 
   private async currentGeneration(): Promise<number> {
@@ -272,8 +275,9 @@ function parseRegistry(text: string, path: string): McpRegistryFile {
   } catch {
     throw new McpRegistryCorruptError(`${path} is not valid JSON; fix or remove it`);
   }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new McpRegistryCorruptError(`${path} is not a version 1 MCP registry`);
   const file = parsed as Partial<McpRegistryFile>;
-  if (file.version !== 1 || !Array.isArray(file.servers)) {
+  if (file.version !== 1 || !Array.isArray(file.servers) || !file.servers.every((s) => typeof s === 'object' && s !== null && typeof (s as { name?: unknown }).name === 'string')) {
     throw new McpRegistryCorruptError(`${path} is not a version 1 MCP registry`);
   }
   return file as McpRegistryFile;

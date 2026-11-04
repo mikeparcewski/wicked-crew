@@ -1133,7 +1133,7 @@
       "method": "POST",
       "path": "/api/v1/mcp/servers",
       "requestType": "SaveMcpServerBody",
-      "responseType": "McpServer",
+      "responseType": "McpServer | McpServerAgentView",
       "statusCodes": [
         201,
         400,
@@ -1161,7 +1161,7 @@
       "method": "PATCH",
       "path": "/api/v1/mcp/servers/:name",
       "requestType": "PatchMcpServerBody",
-      "responseType": "McpServer",
+      "responseType": "McpServer | McpServerAgentView",
       "statusCodes": [
         200,
         400,
@@ -1187,7 +1187,7 @@
       "method": "POST",
       "path": "/api/v1/mcp/servers/:name/test",
       "requestType": null,
-      "responseType": "McpServerTestResponse",
+      "responseType": "McpServerTestResponse | McpServerTestAgentResponse",
       "statusCodes": [
         200,
         404,

@@ -74,8 +74,8 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
-import type { Actor, McpApprovalResponse, McpCallDecision, McpPreviewResponse, McpRegistryRestoreResponse, McpServer, McpServerAgentView, McpServerTestResponse, McpUsageResponse } from '../core/types.js';
-import { MCP_SERVER_NAME_RE } from '../mcp/classify.js';
+import type { Actor, McpApprovalResponse, McpCallDecision, McpPreviewResponse, McpRegistryRestoreResponse, McpServer, McpServerAgentView, McpServerTestAgentResponse, McpServerTestResponse, McpUsageResponse } from '../core/types.js';
+import { canonicalJson, MCP_SERVER_NAME_RE } from '../mcp/classify.js';
 import type { McpBroker } from '../mcp/broker.js';
 import type { AskServer } from '../mcp/ask-server.js';
 import type { McpPolicies } from '../mcp/policies.js';
@@ -83,7 +83,7 @@ import { MCP_PREVIEW_ROLES, MCP_RUN_MODES, McpLedgerEditError } from '../mcp/pol
 import { agentServerView, configOf, isWriteGrant, McpRegistryError, type McpRegistry } from '../mcp/registry.js';
 import { restTarget } from '../mcp/rest.js';
 import { listUnitTools } from '../mcp/tool-list.js';
-import { McpRegistryCorruptError } from '../mcp/registry-store.js';
+import { McpRegistryCorruptError, type McpServerRecord } from '../mcp/registry-store.js';
 import { parseSecretRef, SecretStoreError } from '../mcp/secrets.js';
 import type { McpCallRecordSource } from '../mcp/call-records.js';
 import { foldMcpUsage, MCP_USAGE_DECISIONS, MCP_USAGE_DEFAULT_DAYS, MCP_USAGE_MAX_DAYS } from '../mcp/usage.js';
@@ -268,7 +268,8 @@ export const PatchMcpToolSchema = z
   .object({ enabled: z.boolean().optional(), classOverride: toolClass.nullable().optional(), disclosure: disclosureClass.nullable().optional() })
   .strict()
   .refine((p) => p.enabled !== undefined || p.classOverride !== undefined || p.disclosure !== undefined, { message: 'set enabled, classOverride, disclosure or a combination' });
-export const McpServersQuerySchema = z.object({ view: z.enum(['full', 'agent']).optional() }).strict();
+/** Unknown query parameters (a cache-buster) are ignored, as they always were. */
+export const McpServersQuerySchema = z.object({ view: z.enum(['full', 'agent']).optional() });
 export const McpRegistryRestoreSchema = z.object({ generation: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER) }).strict();
 export const PutMcpSecretSchema = z.object({ value: secretValue }).strict();
 
@@ -444,6 +445,35 @@ function toConfig(body: z.infer<typeof McpServerConfigSchema>): McpUpstreamConfi
   };
 }
 
+/**
+ * (DES-KNOWLEDGE-DATA-001 §5.5) The approval tokens a restore withdraws: an approval covers a tool's SAVED schema,
+ * not its name. Every held token of a tool whose restored record is absent, was never saved (`schemaHash` null) or
+ * was saved under another schema is withdrawn, with its server's own token (a server-wide approval cannot leave one
+ * tool out); every token of a server the generation does not hold, or of a `rest` server whose target differs.
+ */
+export async function restoreWithdrawals(p: Pick<McpPolicies, 'tokensOf'>, current: readonly McpServer[], restored: readonly McpServerRecord[]): Promise<string[]> {
+  const out = new Set<string>();
+  for (const now of current) {
+    const held = await p.tokensOf(now.name);
+    if (held.length === 0) continue;
+    const then = restored.find((x) => x.name === now.name);
+    const targetChanged = then !== undefined && (now.kind === 'rest' || then.kind === 'rest') && canonicalJson(now.kind === 'rest' ? restTarget(now) : null) !== canonicalJson(then.kind === 'rest' ? restTarget(configOf(then)) : null);
+    if (then === undefined || targetChanged) {
+      for (const t of held) out.add(t);
+      continue;
+    }
+    const changed = now.tools
+      .filter((t) => {
+        const was = then.tools.find((x) => x.name === t.name);
+        return was === undefined || was.schemaHash === null || was.schemaHash !== t.schemaHash;
+      })
+      .map((t) => t.subject);
+    const drop = new Set([...changed, ...(changed.length > 0 ? [`mcp:${now.name}`] : [])]);
+    for (const t of held) if (drop.has(t)) out.add(t);
+  }
+  return [...out].sort();
+}
+
 export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): void {
   // The MCP ask tool (streamable HTTP, stateless): worker-facing, the unit token in Authorization.
   app.post(`${V}/mcp/ask`, { config: { manifest: { statusCodes: [200, 401, 503] } } }, async (req, reply) => {
@@ -514,7 +544,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
 
   app.post(
     `${V}/mcp/servers`,
-    { config: { manifest: { requestType: 'SaveMcpServerBody', responseType: 'McpServer', statusCodes: [201, 400, 403, 409, 500, 502, 503] } } },
+    { config: { manifest: { requestType: 'SaveMcpServerBody', responseType: 'McpServer | McpServerAgentView', statusCodes: [201, 400, 403, 409, 500, 502, 503] } } },
     async (req, reply) => {
       const r = registry(reply);
       if (r === null) return reply;
@@ -593,7 +623,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
 
   app.patch<{ Params: { name: string } }>(
     `${V}/mcp/servers/:name`,
-    { config: { manifest: { requestType: 'PatchMcpServerBody', responseType: 'McpServer', statusCodes: [200, 400, 404, 503] } } },
+    { config: { manifest: { requestType: 'PatchMcpServerBody', responseType: 'McpServer | McpServerAgentView', statusCodes: [200, 400, 404, 503] } } },
     async (req, reply) => {
       const r = registry(reply);
       if (r === null) return reply;
@@ -640,7 +670,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
 
   app.post<{ Params: { name: string } }>(
     `${V}/mcp/servers/:name/test`,
-    { config: { manifest: { responseType: 'McpServerTestResponse', statusCodes: [200, 404, 409, 503] } } },
+    { config: { manifest: { responseType: 'McpServerTestResponse | McpServerTestAgentResponse', statusCodes: [200, 404, 409, 503] } } },
     async (req, reply) => {
       const r = registry(reply);
       if (r === null) return reply;
@@ -648,7 +678,8 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
         const t: McpServerTestResponse = await r.test(req.params.name);
         if (sees(deps.actorOf(req)) === 'full') return t;
         // A probe's error can name the host it could not reach: an agent gets that it failed.
-        return { ok: t.ok, error: t.error === null ? null : 'the probe failed', diff: t.diff, server: agentServerView(t.server) };
+        const agentAnswer: McpServerTestAgentResponse = { ok: t.ok, error: t.error === null ? null : 'the probe failed', diff: t.diff, server: agentServerView(t.server) };
+        return agentAnswer;
       } catch (err) {
         return fail(reply, err);
       }
@@ -778,45 +809,33 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       if (!parsed.success) return invalidBody(reply, parsed.error);
       const generation = parsed.data.generation;
       try {
-        // Approvals cover a tool's schema, not its name: every approval whose tool the restored generation saved
-        // under another schema (or does not hold) is withdrawn FIRST, and a failed withdrawal refuses the restore.
-        const restored = await r.generationServers(generation);
-        let withdrawn: string[] = [];
-        if (deps.policies !== undefined) {
-          const p = deps.policies;
-          const current = (await r.list()).servers;
-          const tokens = new Set<string>();
-          for (const now of current) {
-            const then = restored.find((x) => x.name === now.name);
-            const held = await p.tokensOf(now.name);
-            if (then === undefined) {
-              for (const t of held) tokens.add(t);
-              continue;
+        // ONE snapshot, read and validated before anything changes: a restore that is refused (unknown, unreadable,
+        // a document the policy refuses) withdraws nothing, and a generation pruned meanwhile cannot fail it half-way.
+        const plan = await r.planRestore(generation);
+        const p = deps.policies;
+        const names = [...new Set([...(await r.list()).servers.map((s) => s.name), ...plan.servers.map((s) => s.name)])].sort();
+        // (crew#993) The withdrawal and the commit are one step for EVERY server they touch: each server's lock, in
+        // name order (every other holder takes one lock, so the order cannot deadlock), so no approval, save or
+        // removal of those servers lands between them.
+        const locked = <T>(fn: () => Promise<T>): Promise<T> => (p === undefined ? fn() : names.reduceRight<() => Promise<T>>((inner, name) => () => p.exclusive(name, inner), fn)());
+        const { out, withdrawn } = await locked(async () => {
+          let withdrawn: string[] = [];
+          if (p !== undefined) {
+            withdrawn = await restoreWithdrawals(p, (await r.list()).servers, plan.servers);
+            if (withdrawn.length > 0) {
+              let rules: string[];
+              try {
+                rules = await p.withdraw(withdrawn);
+              } catch (err) {
+                auditPartial(deps, req, err, withdrawn);
+                throw new McpRegistryError(500, 'withdraw_failed', `the registry was not restored: approvals that generation ${generation} does not cover could not be withdrawn (${err instanceof Error ? err.message : String(err)})`);
+              }
+              deps.audit.record('mcp.approval.withdrawn', actor, { detail: { subjects: withdrawn, rules, why: 'registry_restored' } });
+              for (const id of rules) deps.audit.record('governance.rule.upserted', actor, { detail: { id, source: 'mcp-approval' } });
             }
-            const changed = await p.withdrawnBySave({
-              name: then.name,
-              tools: then.tools.filter((t) => t.schemaHash !== null).map((t) => ({ name: t.name, schemaHash: t.schemaHash as string })),
-              target: then.kind === 'rest' ? restTarget(configOf(then)) : null,
-            });
-            // A tool the restored generation does not hold at all: its approval would outlive it.
-            const absent = now.tools.filter((t) => !then.tools.some((x) => x.name === t.name)).map((t) => t.subject);
-            const drop = new Set([...changed, ...absent, ...(absent.length > 0 ? [`mcp:${now.name}`] : [])]);
-            for (const t of held) if (drop.has(t)) tokens.add(t);
           }
-          withdrawn = [...tokens];
-          if (withdrawn.length > 0) {
-            let rules: string[];
-            try {
-              rules = await p.withdraw(withdrawn);
-            } catch (err) {
-              auditPartial(deps, req, err, withdrawn);
-              throw new McpRegistryError(500, 'withdraw_failed', `the registry was not restored: approvals that generation ${generation} does not cover could not be withdrawn (${err instanceof Error ? err.message : String(err)})`);
-            }
-            deps.audit.record('mcp.approval.withdrawn', actor, { detail: { subjects: withdrawn, rules, why: 'registry_restored' } });
-            for (const id of rules) deps.audit.record('governance.rule.upserted', actor, { detail: { id, source: 'mcp-approval' } });
-          }
-        }
-        const out = await r.restore(generation);
+          return { out: await r.restore(plan), withdrawn };
+        });
         const body: McpRegistryRestoreResponse = { ...out, withdrawnApprovals: withdrawn };
         deps.audit.record('mcp.registry.restored', actor, { detail: { restored: generation, generation: out.generation, servers: out.servers, disabled: out.disabled, queryReset: out.queryReset, writesReset: out.writesReset, withdrawnApprovals: withdrawn } });
         return body;

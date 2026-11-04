@@ -12885,6 +12885,18 @@ export interface PatchMcpToolBody {
   disclosure?: McpToolDisclosure | null;
 }
 
+/**
+ * (api-types 0.183.0, DES-KNOWLEDGE-DATA-001 §5.2) `POST /mcp/servers/:name/test`'s 200 for a NON-HUMAN actor: the
+ * server as the agent-safe projection, and `error` reduced to `"the probe failed"` (a probe's words can name the host).
+ * A save and `PATCH /mcp/servers/:name` likewise answer an {@link McpServerAgentView} to a non-human actor.
+ */
+export interface McpServerTestAgentResponse {
+  ok: boolean;
+  error: string | null;
+  diff: McpToolDiff | null;
+  server: McpServerAgentView;
+}
+
 /** `POST /mcp/servers/:name/test`'s 200: a failed probe is `ok: false` and counts toward `failing`. */
 export interface McpServerTestResponse {
   ok: boolean;
