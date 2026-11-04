@@ -181,11 +181,11 @@ describe('the Postgres rewrite (§6.3, §7.2)', () => {
 });
 
 describe('the Toolbox document (§5.1 deployment policy at spawn, §7.5 host mode, §7.6 secrets)', () => {
-  const base = { kind: 'source', name: 'support-pg', type: 'postgres', host: '127.0.0.1', port: 55431, user: 'reader', password: '${WICKED_SRC_1}', database: 'support' };
+  const base = { kind: 'source', type: 'postgres', host: '127.0.0.1', port: '55431', user: 'reader', password: '${WICKED_SRC_1}', database: 'support' };
   const input = (document: Record<string, unknown>, extra: Partial<Parameters<typeof toolboxDocument>[0]> = {}) =>
     toolboxDocument({ id: '3f0c9a1e-0000-4000-8000-000000000001', document, address: { ...LOOPBACK, plaintext: false }, tls: 'disable', statementTimeoutMs: 10_000, ...extra });
   it('refuses connectionString, queryExecMode, queryParams and any field off the allowlist', async () => {
-    for (const f of ['connectionString', 'queryExecMode', 'queryParams', 'sqlCommenter', 'tnsAdmin']) {
+    for (const f of ['connectionString', 'queryExecMode', 'queryParams', 'sqlCommenter', 'tnsAdmin', 'name', 'connectTimeout']) {
       await expect(input({ ...base, [f]: 'x' })).rejects.toMatchObject({ code: 'field_refused' });
     }
   });

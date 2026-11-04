@@ -110,6 +110,7 @@ export class ToolboxProcess {
     await mkdir(this.runDir, { recursive: true, mode: 0o700 });
     const config = join(this.runDir, 'tools.yaml');
     await writeFile(config, this.doc.yaml, { mode: 0o600 });
+    if (this.doc.caPem !== null) await writeFile(join(this.runDir, 'ca.pem'), this.doc.caPem, { mode: 0o600 });
     const env: Record<string, string> = { PATH: process.platform === 'win32' ? (process.env['PATH'] ?? '') : '/usr/bin:/bin', HOME: this.runDir, TMPDIR: this.runDir };
     if (process.platform === 'win32' && process.env['SystemRoot'] !== undefined) env['SystemRoot'] = process.env['SystemRoot'];
     if (this.doc.secretVar !== null) env[this.doc.secretVar] = yamlQuotedBody(this.secret ?? '');
@@ -161,6 +162,19 @@ export class ToolboxProcess {
       throw new ToolboxCallError('adapter_unverified', 'the source session does not hold the settings crew wrote (read-only, search_path, standard_conforming_strings), so crew does not serve it');
     }
     return v;
+  }
+
+  /** `tools/list` (the registry's preview of a Toolbox source). */
+  async listTools(): Promise<Array<{ name: string; description: string | null; inputSchema: Record<string, unknown> | null; annotations: Record<string, unknown> | null }>> {
+    const r = (await this.request('tools/list', {}, INTERNAL_BYTES, TOOLBOX_START_MS)) as { tools?: Array<Record<string, unknown>> };
+    return (r.tools ?? [])
+      .filter((t) => typeof t['name'] === 'string')
+      .map((t) => ({
+        name: t['name'] as string,
+        description: typeof t['description'] === 'string' ? t['description'] : null,
+        inputSchema: t['inputSchema'] !== null && typeof t['inputSchema'] === 'object' ? (t['inputSchema'] as Record<string, unknown>) : null,
+        annotations: t['annotations'] !== null && typeof t['annotations'] === 'object' ? (t['annotations'] as Record<string, unknown>) : null,
+      }));
   }
 
   /** `tools/call` with a byte cap on the answer and a deadline; either one kills the process. */
@@ -317,7 +331,7 @@ export class ToolboxSupervisor {
 
   /** The running, verified process for `id` (started now if needed; spawn is not counted against a deadline). */
   async get(id: string, doc: ToolboxDocument, secret: string | null): Promise<ToolboxProcess> {
-    const key = createHash('sha256').update(`${doc.yaml}\u0000${secret ?? ''}`).digest('hex');
+    const key = createHash('sha256').update(`${doc.yaml}\u0000${secret ?? ''}\u0000${doc.caPem ?? ''}`).digest('hex');
     let slot = this.procs.get(id);
     if (slot !== undefined && slot.key !== key) {
       slot.proc?.stop();
@@ -342,6 +356,21 @@ export class ToolboxSupervisor {
       entry.starting = null;
     });
     return entry.starting;
+  }
+
+  /**
+   * A throwaway process for one preview (the registry's probe of a source not yet saved): started, handed to `fn`,
+   * and stopped whatever `fn` does. Never kept in the map, so no saved source shares it.
+   */
+  async once<T>(label: string, doc: ToolboxDocument, secret: string | null, fn: (p: ToolboxProcess) => Promise<T>): Promise<T> {
+    const bin = await this.deps.binary();
+    const p = new ToolboxProcess(bin, join(this.deps.runRoot, `preview-${label.replace(/[^A-Za-z0-9_-]/g, '_')}`), doc, secret, this.deps.idleMs ?? TOOLBOX_IDLE_MS, () => undefined);
+    try {
+      await p.start();
+      return await fn(p);
+    } finally {
+      p.kill();
+    }
   }
 
   /** The source's current process, if one runs (for diagnostics and tests). */

@@ -1,11 +1,12 @@
 /**
  * The Toolbox document crew writes for one source (DES-KNOWLEDGE-DATA-001 §5.1, §7.2, §7.5, §7.6).
  *
- * - **Spawn-time deployment policy.** The stored source document passes an ALLOWLIST: `kind`, `name`, `type`,
- *   `host`, `port`, `user`, `password`, `database`. Everything else is refused here even if a save let it
- *   through: `connectionString` (bypasses the address check), `queryExecMode` (`simple_protocol` would run
- *   several statements), `queryParams` (crew writes them), `sqlCommenter`, any path. B2 runs `type: postgres`
- *   only on this runtime.
+ * - **Spawn-time deployment policy.** The stored source document passes the registry's deployment policy again
+ *   (`checkSourceDocument`, §5.1: enforced at preview, save, spawn and publish), then this file's own ALLOWLIST:
+ *   `kind`, `name`, `type`, `host`, `port`, `user`, `password`, `database`. Everything else is refused here even if
+ *   a save let it through: `connectionString` (bypasses the address check), `queryExecMode` (`simple_protocol`
+ *   would run several statements), `queryParams` (crew writes them), `sqlCommenter`, any path. B2 runs
+ *   `type: postgres` only on this runtime.
  * - **Secrets** appear only as the double-quoted placeholder `"${WICKED_SRC_<n>}"`. At spawn the value goes
  *   into that one process's environment as the YAML-escaped BODY of a double-quoted scalar: Toolbox
  *   substitutes `${VAR}` as text before it parses YAML (`cmd/internal/config.go`, single pass, never inside a
@@ -24,6 +25,7 @@
 import { isIP } from 'node:net';
 
 import { type AddressPolicy, DialRefusedError, plaintextAllowed, resolveTarget } from '../../../sources/dialer.js';
+import { checkSourceDocument, DeploymentPolicyError } from '../../registry/policy.js';
 
 /** The fields a stored Postgres source document may carry. */
 const ALLOWED_FIELDS = new Set(['kind', 'name', 'type', 'host', 'port', 'user', 'password', 'database']);
@@ -49,6 +51,8 @@ export interface ToolboxDocumentInput {
   address: AddressPolicy;
   /** The person's TLS choice; `disable` only where the dialer allows plaintext for the address. */
   tls: 'verify-full' | 'disable';
+  /** The person's CA (PEM) for verify-full; `null` = the system roots. Written beside the document, never a path they name. */
+  ca?: string | null;
   /** The gate's deadline, written as `statement_timeout`. */
   statementTimeoutMs: number;
   /** TESTS ONLY (the reservation's simulation, §19 B2): write no `statement_timeout`. */
@@ -67,6 +71,8 @@ export interface ToolboxDocument {
   /** The checked address (an IP literal). */
   host: string;
   port: number;
+  /** The CA to write as `ca.pem` in the run directory (the document names it relatively), or `null`. */
+  caPem: string | null;
 }
 
 /** A YAML double-quoted scalar's BODY for `value`: the parser turns it back into exactly `value`. */
@@ -94,6 +100,12 @@ export function applicationNameOf(id: string): string {
 /** Check the stored document against the spawn policy and write crew's `tools.yaml`. */
 export async function toolboxDocument(input: ToolboxDocumentInput): Promise<ToolboxDocument> {
   const d = input.document;
+  try {
+    checkSourceDocument(d, { runtime: 'toolbox' });
+  } catch (err) {
+    if (err instanceof DeploymentPolicyError) throw new ToolboxDocumentError(err.code === 'refused_field' || err.code === 'crew_written_field' || err.code === 'unknown_field' ? 'field_refused' : err.code === 'unsupported_type' ? 'type_unsupported' : err.code === 'secret_literal' ? 'secret_inline' : 'field_invalid', `the source document is refused at spawn: ${err.message}`, 'save the source again');
+    throw err;
+  }
   for (const k of Object.keys(d)) {
     if (!ALLOWED_FIELDS.has(k)) {
       throw new ToolboxDocumentError('field_refused', `the source document's field "${k}" is refused on the Toolbox runtime (crew writes its own connection parameters)`, 'remove the field and save the source again');
@@ -147,6 +159,8 @@ export async function toolboxDocument(input: ToolboxDocumentInput): Promise<Tool
     ...(sourceDeadline ? ([['statement_timeout', String(Math.max(1, Math.floor(input.statementTimeoutMs)))]] as Array<[string, string]>) : []),
     ['idle_in_transaction_session_timeout', String(Math.max(1, Math.floor(input.statementTimeoutMs)) + 5_000)],
     ['sslmode', input.tls === 'disable' ? 'disable' : 'verify-full'],
+    // A CA the person gave: crew writes it beside the document (the process runs in its run directory).
+    ...(input.tls !== 'disable' && input.ca != null && input.ca !== '' ? ([['sslrootcert', 'ca.pem']] as Array<[string, string]>) : []),
   ];
   const lines = [
     'kind: source',
@@ -174,5 +188,5 @@ export async function toolboxDocument(input: ToolboxDocumentInput): Promise<Tool
     'description: List tables with columns, constraints and indexes.',
     '',
   ];
-  return { yaml: lines.join('\n'), secretVar, applicationName, sourceDeadline, host: bare, port };
+  return { yaml: lines.join('\n'), secretVar, applicationName, sourceDeadline, host: bare, port, caPem: input.tls !== 'disable' && input.ca != null && input.ca !== '' ? input.ca : null };
 }

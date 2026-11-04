@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.183.0",
+  "apiTypesVersion": "0.184.0",
   "endpoints": [
     {
       "method": "GET",
@@ -1948,6 +1948,16 @@
       "statusCodes": []
     },
     {
+      "method": "GET",
+      "path": "/api/v1/runs/:id/data-use",
+      "requestType": null,
+      "responseType": "RunDataUseResponse",
+      "statusCodes": [
+        200,
+        503
+      ]
+    },
+    {
       "method": "POST",
       "path": "/api/v1/runs/:id/deliver",
       "requestType": null,
@@ -2653,6 +2663,31 @@
       "statusCodes": [
         200,
         400,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/sources/:name/agent-queries",
+      "requestType": null,
+      "responseType": "SourceAgentQueriesResponse",
+      "statusCodes": [
+        200,
+        400,
+        503
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/sources/:name/agents",
+      "requestType": "SourceAgentAccessBody",
+      "responseType": "SourceAgentAccessResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
         409,
         503
       ]

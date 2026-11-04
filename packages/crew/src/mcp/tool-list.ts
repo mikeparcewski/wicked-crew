@@ -33,7 +33,7 @@ async function gatedToolsFor(gate: McpToolListDeps['gate'], token: string): Prom
     const reach = await gate.reach(scope.projectId);
     return {
       servers,
-      tools: reach.map((t): McpCallableTool => ({ server: t.server, tool: t.tool, kind: 'mcp-stdio', annotations: { readOnlyHint: true }, classOverride: 'read', description: t.description, inputSchema: t.inputSchema })),
+      tools: reach.map((t): McpCallableTool => ({ server: t.server, id: t.id, tool: t.tool, disclosure: t.disclosure, kind: 'mcp-stdio', annotations: { readOnlyHint: true }, classOverride: 'read', description: t.description, inputSchema: t.inputSchema })),
     };
   } catch {
     // A token the engine does not know is the lister's to answer (401); anything else leaves them out.

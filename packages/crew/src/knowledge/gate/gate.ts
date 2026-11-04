@@ -17,21 +17,24 @@
  * any record or audit line.
  */
 
+import { randomUUID } from 'node:crypto';
+
 import type { Actor } from '../../core/types.js';
+import { normalizeAnnotations, type McpUpstreamConfig, type ProbeResult } from '../../mcp/probe.js';
 import type { McpRegistryStore } from '../../mcp/registry-store.js';
 import { scrubSecrets } from '../../mcp/secrets.js';
 import { askStructure } from '../../sources/ask.js';
 import { policyCatalog, type SqlCatalog } from '../../sources/catalog/types.js';
-import type { DialOptions } from '../../sources/dialer.js';
-import { DialRefusedError } from '../../sources/dialer.js';
+import { type DialOptions, DialRefusedError, NO_CONFIRMATION } from '../../sources/dialer.js';
 import { type SqlReadResult, SourceQueryError, STATEMENT_DEADLINE_MS } from '../../sources/drivers/types.js';
 import { sqlConnectArgs } from '../../sources/kinds.js';
 import type { SourceCatalogStore } from '../../sources/store.js';
 import { nativePgRead } from '../adapters/native.js';
+import { ToolboxBinaryError } from '../adapters/toolbox/binary.js';
 import { FOREIGN_BELOW_SQL, toolboxCatalog } from '../adapters/toolbox/catalog.js';
 import { toolboxDocument, ToolboxDocumentError, type ToolboxDocument } from '../adapters/toolbox/document.js';
 import { ToolboxCallError, toolboxErrorText, toolboxRows, type ToolboxProcess, type ToolboxSupervisor } from '../adapters/toolbox/supervisor.js';
-import { agentMay, neededFor, type SourceAgentAccess } from './access.js';
+import { agentMay, type DisclosureClass, neededFor, type SourceAgentAccess } from './access.js';
 import {
   citeOf,
   type EnvelopeColumn,
@@ -71,7 +74,10 @@ export type GateUnitResult =
 /** A tool a unit may see in its list, for `mcp/tool-list.ts`. */
 export interface GateListedTool {
   server: string;
+  /** The source's registry id. */
+  id: string;
   tool: string;
+  disclosure: DisclosureClass;
   description: string;
   inputSchema: Record<string, unknown>;
 }
@@ -234,7 +240,7 @@ export class DataGate {
       for (const t of s.tools) {
         const need = neededFor(t.disclosure);
         if (need === null || !agentMay(s.access, s, projectId, need)) continue;
-        out.push({ server: s.name, tool: t.name, description: t.description, inputSchema: SQL_TOOL_SCHEMAS[t.name] ?? { type: 'object' } });
+        out.push({ server: s.name, id: s.id, tool: t.name, disclosure: t.disclosure as DisclosureClass, description: t.description, inputSchema: SQL_TOOL_SCHEMAS[t.name] ?? { type: 'object' } });
       }
     }
     return out;
@@ -488,7 +494,7 @@ export class DataGate {
     if (sup === undefined) return { refused: 'toolbox_unavailable', reason: 'this daemon runs no Toolbox adapter', remedy: 'use the native runtime for this source' };
     let doc: ToolboxDocument;
     try {
-      doc = await toolboxDocument({ id: s.id, document: s.document, address: s.address, tls: s.tls, statementTimeoutMs: this.deadline, omitStatementTimeout: this.deps.omitStatementTimeout?.(s.id) === true });
+      doc = await toolboxDocument({ id: s.id, document: s.document, address: s.address, tls: s.tls, ca: s.ca, statementTimeoutMs: this.deadline, omitStatementTimeout: this.deps.omitStatementTimeout?.(s.id) === true });
     } catch (err) {
       if (err instanceof ToolboxDocumentError) return { refused: err.code, reason: err.message, remedy: err.remedy };
       throw err;
@@ -506,8 +512,8 @@ export class DataGate {
         this.deps.log?.(`[gate] the Toolbox adapter for ${s.name} did not start (${err.code})`);
         return { refused: err.code, reason: err.code === 'adapter_unverified' ? err.message : `${s.name}'s adapter did not start`, remedy: 'a person tests the source on its sheet', connection: true };
       }
-      if (err instanceof Error && 'code' in err && typeof (err as { code?: unknown }).code === 'string' && String((err as { code: string }).code).startsWith('toolbox_')) {
-        return { refused: (err as { code: string }).code, reason: err.message, remedy: 'the operator checks the daemon can reach the Toolbox release, or uses the native runtime' };
+      if (err instanceof ToolboxBinaryError) {
+        return { refused: err.code, reason: err.message, remedy: 'the operator checks the daemon can reach the Toolbox release, or uses the native runtime' };
       }
       throw err;
     }
@@ -613,6 +619,53 @@ export class DataGate {
       throw err;
     } finally {
       lease.done(end);
+    }
+  }
+
+  // ── The registry's preview of a Toolbox source (B1's `toolboxProbe`) ────────────────────────────
+
+  /**
+   * Probe a `runtime: 'toolbox'` source for its preview: a throwaway process from crew's own document (the spawn
+   * policy and host mode apply, the secret only in its environment), its `tools/list`, and its structure through
+   * `list_tables` and crew's foreign-below query. Structure only; the process is stopped after.
+   */
+  async toolboxProbe(config: McpUpstreamConfig, secret: string | null): Promise<ProbeResult> {
+    const sup = this.deps.toolbox;
+    if (sup === undefined) return { ok: false, error: 'this daemon runs no Toolbox adapter' };
+    const entry = config.entry ?? null;
+    if (entry === null || entry.runtime !== 'toolbox') return { ok: false, error: 'not a Toolbox-runtime source' };
+    const label = config.id ?? randomUUID();
+    let doc: ToolboxDocument;
+    try {
+      doc = await toolboxDocument({ id: label, document: entry.toolbox as unknown as Record<string, unknown>, address: config.address ?? { ...NO_CONFIRMATION, allow: [] }, tls: entry.tls.mode, ca: entry.tls.ca, statementTimeoutMs: this.deadline });
+    } catch (err) {
+      if (err instanceof ToolboxDocumentError) {
+        const dial = (['address_refused', 'address_unconfirmed', 'plaintext_refused', 'unresolved'] as const).find((c) => c === err.code);
+        return { ok: false, error: `${err.message} (${err.remedy})`, ...(dial !== undefined ? { refusal: dial } : {}) };
+      }
+      throw err;
+    }
+    try {
+      return await sup.once(label, doc, secret, async (p) => {
+        const tools = await p.listTools();
+        const listed = await p.callTool('list_tables', { output_format: 'detailed', table_names: '' }, 8 * 1024 * 1024, 30_000);
+        const foreign = await p.callTool('execute_sql', { sql: FOREIGN_BELOW_SQL }, 1024 * 1024, 30_000);
+        if (listed.isError || foreign.isError) {
+          const sqlstate = sqlstateOf(toolboxErrorText(listed.isError ? listed : foreign));
+          return { ok: false as const, error: `the source answered an error${sqlstate !== null ? ` (SQLSTATE ${sqlstate})` : ''}` };
+        }
+        const catalog = scrubSecrets(toolboxCatalog(listed, foreign, new Date(this.now()).toISOString()), p.secrets);
+        return {
+          ok: true as const,
+          serverInfo: { name: 'Toolbox', version: 'v1.15.0' },
+          tools: tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema, outputSchema: null, annotations: normalizeAnnotations(t.annotations) })),
+          source: { catalog },
+        };
+      });
+    } catch (err) {
+      if (err instanceof ToolboxCallError) return { ok: false, error: `the Toolbox process did not answer (${err.code})` };
+      if (err instanceof ToolboxBinaryError) return { ok: false, error: err.message };
+      throw err;
     }
   }
 

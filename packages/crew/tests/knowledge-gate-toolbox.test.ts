@@ -39,6 +39,7 @@ const SECRET_FORMS = [SECRET, yamlQuotedBody(SECRET), JSON.stringify(SECRET).sli
 const AGENT: Actor = { id: 'worker-1', kind: 'agent', trust: 'admin' };
 const TB_ID = '3f0c9a1e-0000-4000-8000-0000000000b2';
 const NODL_ID = '3f0c9a1e-0000-4000-8000-0000000000b3';
+const UNBOUND_ID = '3f0c9a1e-0000-4000-8000-0000000000b4';
 
 class NoSecrets implements SecretStore {
   readonly available = true;
@@ -86,6 +87,21 @@ interface Rig {
   setAfterRead: (fn: (() => Promise<void>) | null) => void;
 }
 
+const gatedTools = () =>
+  ['list_tables', 'execute_sql'].map((name) => ({
+    name,
+    description: null,
+    inputSchema: null,
+    outputSchema: null,
+    annotations: null,
+    classOverride: null,
+    enabled: true,
+    schemaHash: `h-${name}`,
+    observedSchemaHash: `h-${name}`,
+    present: true,
+    disclosure: { class: name === 'execute_sql' ? 'rows' : 'structure', schemaHash: `h-${name}` },
+  }));
+
 function toolboxRecord(name: string, id: string): Record<string, unknown> {
   const stamp = new Date().toISOString();
   return {
@@ -96,16 +112,17 @@ function toolboxRecord(name: string, id: string): Record<string, unknown> {
     command: null,
     args: [],
     url: null,
-    auth: null,
-    toolbox: { kind: 'source', name, type: 'postgres', host: '127.0.0.1', port: 55431, user: 'reader', password: '${WICKED_SRC_1}', database: 'support' },
-    secretRefs: { WICKED_SRC_1: 'env:KD_B2_FAKE_SECRET' },
+    auth: { ref: 'env:KD_B2_FAKE_SECRET' },
+    toolbox: { kind: 'source', type: 'postgres', host: '127.0.0.1', port: '55431', user: 'reader', password: '${WICKED_SRC_1}', database: 'support' },
     address: { allow: ['127.0.0.0/8'], plaintext: false },
-    tls: 'disable',
+    tls: { mode: 'disable', ca: null },
+    descriptorVersion: 2,
+    policyVersion: 'postgres/1@toolbox-v1.15.0',
     enabled: true,
     health: { state: 'ok', consecutiveFailures: 0, checkedAt: stamp, lastError: null },
     registeredAt: stamp,
     updatedAt: stamp,
-    tools: [],
+    tools: gatedTools(),
   };
 }
 
@@ -113,12 +130,24 @@ async function rig(): Promise<Rig> {
   const base = mkdtempSync(join(tmpdir(), 'kd-b2-gate-'));
   const mcpDir = join(base, 'mcp');
   mkdirSync(mcpDir, { recursive: true });
-  writeFileSync(join(mcpDir, 'registry.json'), JSON.stringify({ version: 1, servers: [toolboxRecord('tb', TB_ID), toolboxRecord('tb-nodl', NODL_ID)] }));
+  // `tb-unbound`: its execute_sql class was reviewed against another schema, so none is in force.
+  const unbound = toolboxRecord('tb-unbound', UNBOUND_ID);
+  (unbound['tools'] as Array<{ name: string; disclosure: { schemaHash: string } }>).find((t) => t.name === 'execute_sql')!.disclosure.schemaHash = 'h-older-schema';
+  unbound['agents'] = { see: true, query: true, projects: ['proj_a'], everyProject: false };
+  writeFileSync(join(mcpDir, 'registry.json'), JSON.stringify({ version: 1, servers: [toolboxRecord('tb', TB_ID), toolboxRecord('tb-nodl', NODL_ID), unbound] }));
   const bin = join(base, 'toolbox');
   writeFileSync(bin, `#!/bin/sh\nexec "${process.execPath}" "${FAKE}" "$@"\n`);
   chmodSync(bin, 0o755);
   const store = new McpRegistryStore(mcpDir);
-  const registry = new McpRegistry({ store, secrets: new NoSecrets(), probe: async () => ({ ok: false, error: 'no probe' }) as never, discover: () => [] });
+  let prober: DataGate | null = null;
+  const registry = new McpRegistry({
+    store,
+    secrets: new NoSecrets(),
+    probe: async () => ({ ok: false, error: 'no probe' }) as never,
+    discover: () => [],
+    env: { KD_B2_FAKE_SECRET: SECRET },
+    toolboxProbe: (c, s) => (prober as DataGate).toolboxProbe(c, s),
+  });
   const audit = new AuditLog(join(base, 'audit.log'), () => undefined);
   const record = new SourceReadLog(mcpDir);
   const sup = new ToolboxSupervisor({ binary: async () => bin, runRoot: join(mcpDir, 'adapters', 'toolbox', 'run') });
@@ -143,6 +172,7 @@ async function rig(): Promise<Rig> {
       if (fn !== null) await fn();
     },
   });
+  prober = gate;
   const broker = new McpBroker({ registry, engine: () => null, records: new McpCallRecordFile(mcpDir), gate });
   let actor: Actor = LOCAL_ACTOR;
   const app = Fastify({ logger: false });
@@ -219,7 +249,7 @@ describe.skipIf(process.platform === 'win32')('the gate on a Toolbox-runtime sou
     expect(t.statusCode, t.body).toBe(200);
     expect(t.json()).toMatchObject({ ok: true, catalog: { catalog: { dialect: 'postgres', relations: [{ schema: 's', name: 't', primaryKey: ['a'] }] } } });
     expect((await r.app.inject({ method: 'POST', url: '/api/v1/sources/tb-nodl/test' })).json()).toMatchObject({ ok: true });
-    expect((await listed(r, 'wmt_a')).filter((x) => x.subject.startsWith('mcp:tb'))).toEqual([]);
+    expect((await listed(r, 'wmt_a')).filter((x) => x.subject.startsWith('mcp:tb/') || x.subject.startsWith('mcp:tb-nodl/'))).toEqual([]);
     const hidden = await call(r, 'wmt_a', 'mcp:tb/list_tables');
     expect(hidden.answer).toMatchObject({ refused: 'unknown_source' });
   });
@@ -361,6 +391,33 @@ describe.skipIf(process.platform === 'win32')('the gate on a Toolbox-runtime sou
     const ask = await call(r, 'wmt_ask', 'mcp:tb/execute_sql', { sql: Q });
     expect(ask.status).toBe(409);
     expect(ask.body).toMatchObject({ outcome: 'pending_approval' });
+  });
+
+  it('a tool whose disclosure class is not in force (reviewed against another schema) is offered to no agent', async () => {
+    const tools = (await listed(r, 'wmt_a')).filter((x) => x.subject.startsWith('mcp:tb-unbound/')).map((x) => x.subject);
+    expect(tools).toEqual(['mcp:tb-unbound/list_tables']);
+    const res = await call(r, 'wmt_a', 'mcp:tb-unbound/execute_sql', { sql: Q });
+    expect(res.answer).toMatchObject({ refused: 'tool_unreviewed' });
+  });
+
+  it("the registry previews a Toolbox-runtime source through the gate's probe: its tools and structure, from a throwaway process", async () => {
+    const res = await r.app.inject({
+      method: 'POST',
+      url: '/api/v1/mcp/servers/preview',
+      payload: { name: 'tb-new', kind: 'toolbox-source', runtime: 'toolbox', toolbox: { kind: 'source', type: 'postgres', host: '127.0.0.1', port: '55431', user: 'reader', password: '${WICKED_SRC_1}', database: 'support' }, tls: { mode: 'disable' }, auth: { ref: 'env:KD_B2_FAKE_SECRET' }, address: { allow: ['127.0.0.0/8'], plaintext: false } },
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    const body = res.json() as { tools: Array<{ name: string; disclosure?: string | null }> };
+    expect(body.tools.map((t) => t.name).sort()).toEqual(['execute_sql', 'list_tables']);
+    for (const s of SECRET_FORMS) expect(res.body.includes(s)).toBe(false);
+    // a host name is refused by host mode before any process starts
+    const named = await r.app.inject({
+      method: 'POST',
+      url: '/api/v1/mcp/servers/preview',
+      payload: { name: 'tb-named', kind: 'toolbox-source', runtime: 'toolbox', toolbox: { kind: 'source', type: 'postgres', host: 'db.example.com', port: '5432', user: 'reader', password: '${WICKED_SRC_1}', database: 'support' }, tls: { mode: 'verify-full' }, auth: { ref: 'env:KD_B2_FAKE_SECRET' } },
+    });
+    expect(named.statusCode).toBeGreaterThanOrEqual(400);
+    expect(named.body).toContain('container runtime');
   });
 
   it('a scan finds the secret in no file, log or answer', async () => {

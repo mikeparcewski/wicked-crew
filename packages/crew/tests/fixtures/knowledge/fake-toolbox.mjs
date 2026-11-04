@@ -34,6 +34,11 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   }
   if (msg.id === undefined) return;
   if (msg.method === 'initialize') return send({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'fake-toolbox', version: '0' } } });
+  if (msg.method === 'tools/list') {
+    const sqlSchema = { type: 'object', properties: { sql: { type: 'string', description: 'The sql to execute.' } }, required: ['sql'] };
+    const listSchema = { type: 'object', properties: { output_format: { type: 'string' }, table_names: { type: 'string' } }, required: [] };
+    return send({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'execute_sql', description: 'Run one SQL statement.', inputSchema: sqlSchema, annotations: { readOnlyHint: false, destructiveHint: true } }, { name: 'list_tables', description: 'List tables.', inputSchema: listSchema, annotations: { readOnlyHint: true } }] } });
+  }
   if (msg.method !== 'tools/call') return send({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'no such method' } });
   const name = msg.params?.name;
   const sql = String(msg.params?.arguments?.sql ?? '');

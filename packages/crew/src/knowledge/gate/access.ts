@@ -16,41 +16,16 @@
  * `structure` or `none` tool needs "see"; a tool with no reviewed class is unavailable to agents.
  */
 
-/** A source's agent controls as the registry stores them. */
-export interface SourceAgentAccess {
-  see: boolean;
-  query: boolean;
-  /** The project ids whose runs and chats may use it: sorted, without duplicates. */
-  projects: string[];
-  /** Every project on this daemon (and runs or chats in none): a separate, explicit choice. */
-  everyProject: boolean;
-}
+import { AGENT_ACCESS_DEFAULT, AGENT_PROJECT_RE, agentAccessOf, type SourceAgentAccess, type ToolDisclosureClass } from '../registry/entry.js';
+
+// The switches' shape, defaults and parse are the registry entry's (B1, `knowledge/registry/entry.ts`).
+export { AGENT_ACCESS_DEFAULT, AGENT_PROJECT_RE, agentAccessOf, type SourceAgentAccess };
 
 /** What a tool can disclose (§5.1): reviewed per tool and bound to its schema. */
-export type DisclosureClass = 'none' | 'structure' | 'rows';
+export type DisclosureClass = ToolDisclosureClass;
 
-/** A new source: "see" on, "query" off, in no project (nothing reaches an agent until a person names one). */
-export const AGENT_ACCESS_DEFAULT: Readonly<SourceAgentAccess> = Object.freeze({ see: true, query: false, projects: Object.freeze([]) as unknown as string[], everyProject: false });
-
-/** A project id as crew's projects spell them (`proj_…`, `default`): a bounded token. */
-export const AGENT_PROJECT_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 /** A source names at most this many projects. */
 export const AGENT_PROJECTS_MAX = 64;
-
-/** The controls a stored record holds, with the defaults filled in (a record from before the gate has none). */
-export function agentAccessOf(rec: { agents?: Partial<SourceAgentAccess> | null }): SourceAgentAccess {
-  const a = rec.agents ?? {};
-  const see = typeof a.see === 'boolean' ? a.see : AGENT_ACCESS_DEFAULT.see;
-  // Query never outlives see: a record that says otherwise is read as query off.
-  const query = see && a.query === true;
-  const projects = Array.isArray(a.projects) ? normalizeProjects(a.projects) : [];
-  return { see, query, projects, everyProject: a.everyProject === true };
-}
-
-/** Sorted, unique, valid project ids. */
-export function normalizeProjects(ids: readonly unknown[]): string[] {
-  return [...new Set(ids.filter((p): p is string => typeof p === 'string' && AGENT_PROJECT_RE.test(p)))].sort();
-}
 
 /** The switch a tool of `cls` needs; `null` = no reviewed class, so no agent may use it. */
 export function neededFor(cls: DisclosureClass | null | undefined): 'see' | 'query' | null {

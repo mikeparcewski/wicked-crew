@@ -11,15 +11,13 @@
  * GraphQL and every other kind are not gated sources here: agents get none of their tools through the gate.
  */
 
-import { createHash } from 'node:crypto';
-
-import { canonicalJson } from '../../mcp/classify.js';
-import { configOf } from '../../mcp/registry.js';
+import { configOf, entryId, normalizeRegistryFile } from '../../mcp/registry.js';
 import type { McpRegistryStore, McpServerRecord } from '../../mcp/registry-store.js';
 import type { McpUpstreamConfig } from '../../mcp/probe.js';
 import { addressPolicyOf, type AddressPolicy, NO_CONFIRMATION } from '../../sources/dialer.js';
 import { sourceDescriptorHash } from '../../sources/kinds.js';
 import type { SourceCatalogStore, StoredDescription } from '../../sources/store.js';
+import { effectiveDisclosure, entrySecretRefs } from '../registry/entry.js';
 import { agentAccessOf, type DisclosureClass, type SourceAgentAccess } from './access.js';
 
 /** A tool a gated source serves, with its reviewed disclosure class (§5.1). */
@@ -40,17 +38,8 @@ export const SQL_SOURCE_TOOLS: readonly GateTool[] = Object.freeze([
   },
 ]);
 
-/** The B1 fields this file reads, until B1's record type lands on main. */
-type SourceRecord = McpServerRecord & {
-  id?: string;
-  runtime?: 'native' | 'toolbox';
-  toolbox?: Record<string, unknown>;
-  secretRefs?: Record<string, string>;
-  tls?: 'verify-full' | 'disable';
-};
-
 interface GateSourceBase {
-  /** The registry id (§5.1); a K1 entry from before B1 has none, and is keyed `name:<name>`. */
+  /** The registry id (§5.1): the security identity. */
   id: string;
   name: string;
   enabled: boolean;
@@ -73,40 +62,43 @@ export type GateSource =
       /** Placeholder variable (`WICKED_SRC_<n>`) -> secret reference. */
       secretRefs: Record<string, string>;
       tls: 'verify-full' | 'disable';
+      /** The person's CA (PEM) for verify-full, or `null` for the system roots. */
+      ca: string | null;
     });
 
-/** The Toolbox entry's descriptor hash (until B1's v2 function lands): the document, the secret refs, the address, the runtime. */
-export function toolboxDescriptorHash(r: Pick<SourceRecord, 'toolbox' | 'secretRefs' | 'address' | 'tls'>): string {
-  return createHash('sha256')
-    .update(canonicalJson({ v: 2, runtime: 'toolbox', toolbox: r.toolbox ?? null, secretRefs: r.secretRefs ?? {}, address: r.address ?? null, tls: r.tls ?? 'verify-full' }))
-    .digest('hex');
-}
-
-function toolsOf(r: SourceRecord): GateTool[] {
-  // B1's reviewed classes win where it set them; crew's own tools otherwise.
+/**
+ * The tools a gated source serves, with the class in force. The native adapter's tools are crew's own code, so
+ * their classes are crew's reviewed constants; a Toolbox entry's are the ones its preview recorded, bound to their
+ * saved schema (`effectiveDisclosure`): a tool with no class in force, or switched off, is offered to no agent.
+ */
+function toolsOf(r: McpServerRecord, runtime: 'native' | 'toolbox'): GateTool[] {
   return SQL_SOURCE_TOOLS.map((t) => {
-    const stored = (r.tools as Array<{ name: string; disclosure?: DisclosureClass | null }>).find((x) => x.name === t.name);
-    return stored !== undefined && stored.disclosure !== undefined ? { ...t, disclosure: stored.disclosure } : { ...t };
+    const stored = r.tools.find((x) => x.name === t.name);
+    if (runtime === 'native' && stored === undefined) return { ...t };
+    if (stored === undefined || stored.enabled === false) return { ...t, disclosure: null };
+    return { ...t, disclosure: effectiveDisclosure(stored) };
   });
 }
 
-/** One stored entry as the gate reads it; `null` = not a gated source. */
-export async function gateSourceOf(r: SourceRecord, catalogs: SourceCatalogStore): Promise<GateSource | null> {
-  const id = typeof r.id === 'string' && r.id !== '' ? r.id : `name:${r.name}`;
+/** One stored entry (normalized: ids, K1 Postgres mapped) as the gate reads it; `null` = not a gated source. */
+export async function gateSourceOf(r: McpServerRecord, catalogs: SourceCatalogStore): Promise<GateSource | null> {
+  const id = entryId(r);
+  const config = configOf(r);
+  const descriptorHash = sourceDescriptorHash(config);
   const stored = await catalogs.read(r.name);
-  if (r.kind === 'sql' && r.sql !== undefined) {
-    const config = configOf(r);
-    const descriptorHash = sourceDescriptorHash(config);
-    const dialect = r.sql.driver;
+  const description = stored !== null && stored.descriptorHash === descriptorHash ? stored : null;
+  // A K1 `sql` record, or a native-runtime `toolbox-source` entry through the read-path projection.
+  if (config.kind === 'sql' && config.sql != null) {
+    const dialect = config.sql.driver;
     return {
       id,
       name: r.name,
       enabled: r.enabled,
       access: agentAccessOf(r),
       descriptorHash,
-      description: stored !== null && stored.descriptorHash === descriptorHash ? stored : null,
-      viewsAllowed: dialect === 'sqlite' ? [] : [...(r.viewsAllowed ?? [])],
-      tools: toolsOf(r),
+      description,
+      viewsAllowed: dialect === 'sqlite' ? [] : [...(config.viewsAllowed ?? [])],
+      tools: toolsOf(r, 'native'),
       address: dialect === 'sqlite' ? { ...NO_CONFIRMATION, allow: [] } : addressPolicyOf(config),
       runtime: 'native',
       dialect,
@@ -115,24 +107,24 @@ export async function gateSourceOf(r: SourceRecord, catalogs: SourceCatalogStore
       queryable: dialect === 'postgres',
     };
   }
-  if ((r.kind as string) === 'toolbox-source' && r.runtime === 'toolbox' && r.toolbox !== undefined && r.toolbox['type'] === 'postgres') {
-    const descriptorHash = toolboxDescriptorHash(r);
+  if (r.kind === 'toolbox-source' && r.runtime === 'toolbox' && r.toolbox !== undefined && r.toolbox.type === 'postgres') {
     return {
       id,
       name: r.name,
       enabled: r.enabled,
       access: agentAccessOf(r),
       descriptorHash,
-      description: stored !== null && stored.descriptorHash === descriptorHash ? stored : null,
+      description,
       viewsAllowed: [],
-      tools: toolsOf(r),
+      tools: toolsOf(r, 'toolbox'),
       address: r.address ?? { ...NO_CONFIRMATION, allow: [] },
       runtime: 'toolbox',
       dialect: 'postgres',
       queryable: true,
-      document: { ...r.toolbox },
-      secretRefs: { ...(r.secretRefs ?? {}) },
-      tls: r.tls === 'disable' ? 'disable' : 'verify-full',
+      document: { ...(r.toolbox as unknown as Record<string, unknown>) },
+      secretRefs: entrySecretRefs(r),
+      tls: r.tls?.mode === 'disable' ? 'disable' : 'verify-full',
+      ca: r.tls?.ca ?? null,
     };
   }
   return null;
@@ -141,7 +133,7 @@ export async function gateSourceOf(r: SourceRecord, catalogs: SourceCatalogStore
 /** Every gated source, from ONE read of the registry. */
 export async function gateSources(store: Pick<McpRegistryStore, 'read'>, catalogs: SourceCatalogStore): Promise<GateSource[]> {
   const out: GateSource[] = [];
-  for (const r of (await store.read()).servers as SourceRecord[]) {
+  for (const r of normalizeRegistryFile(await store.read()).servers) {
     const g = await gateSourceOf(r, catalogs);
     if (g !== null) out.push(g);
   }
@@ -150,9 +142,10 @@ export async function gateSources(store: Pick<McpRegistryStore, 'read'>, catalog
 
 /** Whether `server` names a gated source (the broker's routing question), from one read. */
 export async function isGatedSource(store: Pick<McpRegistryStore, 'read'>, server: string): Promise<boolean> {
-  const r = (await store.read()).servers.find((s) => s.name === server) as SourceRecord | undefined;
+  const r = normalizeRegistryFile(await store.read()).servers.find((s) => s.name === server);
   if (r === undefined) return false;
-  return (r.kind === 'sql' && r.sql !== undefined) || ((r.kind as string) === 'toolbox-source' && r.runtime === 'toolbox');
+  const c = configOf(r);
+  return (c.kind === 'sql' && c.sql != null) || (r.kind === 'toolbox-source' && r.runtime === 'toolbox');
 }
 
 /** The agent controls of `name`, before and after `patch`, written inside one registry mutation (§7.1). */
@@ -163,9 +156,9 @@ export async function setAgentAccess(
   now: () => number = Date.now,
 ): Promise<{ before: SourceAgentAccess; after: SourceAgentAccess } | { error: 'unknown_source' | 'not_a_source' | 'see_off' }> {
   return store.mutate((file) => {
-    const s = file.servers.find((x) => x.name === name) as SourceRecord | undefined;
+    const s = file.servers.find((x) => x.name === name);
     if (s === undefined) return { error: 'unknown_source' as const };
-    if (!((s.kind === 'sql' && s.sql !== undefined) || (s.kind as string) === 'toolbox-source')) return { error: 'not_a_source' as const };
+    if (!((s.kind === 'sql' && s.sql !== undefined) || s.kind === 'toolbox-source')) return { error: 'not_a_source' as const };
     const before = agentAccessOf(s);
     const see = patch.see ?? before.see;
     if (patch.query === true && !see) return { error: 'see_off' as const };

@@ -2495,9 +2495,12 @@ export async function createServer(
   // DES-MCP-TOOLS-001 S2: the registry over `<state home>/mcp` (created on the first save).
   const mcpRegistryStore = new McpRegistryStore();
   const mcpSecrets = platformSecretStore();
+  // The data gate (below) probes a Toolbox-runtime source's preview; the registry is built first.
+  let toolboxProber: DataGate | null = null;
   const mcpRegistry = new McpRegistry({
     store: mcpRegistryStore,
     secrets: mcpSecrets,
+    toolboxProbe: (config, secret) => (toolboxProber === null ? Promise.resolve({ ok: false as const, error: 'the data gate is not ready' }) : toolboxProber.toolboxProbe(config, secret)),
     probe: probeMcpServer,
     // Read the worker home at request time: `PUT /settings` can move it (applyWorkerConfigRoot).
     discover: (managed) => discoverMcpServers({ home: homedir(), workerHome: process.env['WICKED_WORKER_HOME'] ?? null }, managed),
@@ -2524,6 +2527,7 @@ export async function createServer(
     toolbox: toolboxSupervisor,
     log: (m) => app.log.warn(m),
   });
+  toolboxProber = dataGate;
   app.addHook('onClose', async () => {
     toolboxSupervisor.stopAll();
   });

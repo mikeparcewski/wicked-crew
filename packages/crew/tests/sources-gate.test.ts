@@ -71,6 +71,21 @@ const lister = () => async (json: string) => {
   return JSON.stringify({ unit: UNIT, tools: calls.map((c) => ({ subject: `mcp:${c.server}/${c.tool}`, class: 'read', decision: 'ask', ruleIds: ['engine:mcp-first-use'] })) });
 };
 
+const gatedTools = () =>
+  ['list_tables', 'execute_sql'].map((name) => ({
+    name,
+    description: null,
+    inputSchema: null,
+    outputSchema: null,
+    annotations: null,
+    classOverride: null,
+    enabled: true,
+    schemaHash: `h-${name}`,
+    observedSchemaHash: `h-${name}`,
+    present: true,
+    disclosure: { class: name === 'execute_sql' ? 'rows' : 'structure', schemaHash: `h-${name}` },
+  }));
+
 const stamp = new Date().toISOString();
 const common = { command: null, args: [], url: null, enabled: true, health: { state: 'ok', consecutiveFailures: 0, checkedAt: stamp, lastError: null }, registeredAt: stamp, updatedAt: stamp, tools: [], agents: { see: true, query: true, projects: ['proj_g'], everyProject: false } };
 
@@ -107,7 +122,7 @@ for (const target of PG_TARGETS) {
       base = mkdtempSync(join(tmpdir(), 'kd-b2-db-'));
       const mcpDir = join(base, 'mcp');
       mkdirSync(mcpDir, { recursive: true });
-      const doc = (name: string) => ({ kind: 'source', name, type: 'postgres', host: '127.0.0.1', port: db.port, user: role, password: '${WICKED_SRC_1}', database: db.database });
+      const doc = () => ({ kind: 'source', type: 'postgres', host: '127.0.0.1', port: String(db.port), user: role, password: '${WICKED_SRC_1}', database: db.database });
       const servers: Array<Record<string, unknown>> = [
         {
           ...common,
@@ -125,7 +140,7 @@ for (const target of PG_TARGETS) {
           [TB_ID, 'pg-tb'],
           [NODL_ID, 'pg-tb-nodl'],
         ] as const) {
-          servers.push({ ...common, id, name, kind: 'toolbox-source', runtime: 'toolbox', auth: null, toolbox: doc(name), secretRefs: { WICKED_SRC_1: 'env:KD_B2_PG_SECRET' }, address: LOOPBACK, tls: 'disable' });
+          servers.push({ ...common, id, name, kind: 'toolbox-source', runtime: 'toolbox', auth: { ref: 'env:KD_B2_PG_SECRET' }, toolbox: doc(), address: LOOPBACK, tls: { mode: 'disable', ca: null }, descriptorVersion: 2, policyVersion: 'postgres/1@toolbox-v1.15.0', tools: gatedTools() });
         }
       }
       writeFileSync(join(mcpDir, 'registry.json'), JSON.stringify({ version: 1, servers }));
