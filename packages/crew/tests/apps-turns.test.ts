@@ -460,6 +460,15 @@ describe('apps turns: check, land, refuse', () => {
     expect(s.launched[1]!.problem).not.toContain('pg_sleep is refused');
   });
 
+  it('a build refused for another reason keeps that reason (only "left no change" is no_change)', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    s.set(runId, 'failed', { build: { status: 'rejected', denial_reason: 'the seat could not start: image missing' } });
+    s.emit({ type: 'sessionFailed', session: runId });
+    await vi.waitFor(async () => expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull());
+    expect((await s.call('GET', '/apps/escalations')).body.app.turns![0]).toMatchObject({ state: 'failed', code: 'step_failed', reason: expect.stringContaining('image missing') });
+  });
+
   it('(kept) an approval gate stays the person\'s', async () => {
     const s = setup();
     await startTurn(s);

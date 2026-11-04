@@ -231,7 +231,7 @@ export const SPEC_SHAPE_GUIDE = [
   'The spec\'s exact shape (crew\'s check refuses anything else; keep `schema: "wicked.apps/v1"`, `name`, `pages`, `queries`, `actions`, `linkHosts`):',
   '- Every component: `id`, `type`, `box` {x, y, w, h} on a 12-column grid (x + w <= 12), optional `title`. A component reads a query ONLY through `data`: {"query": "<query id>", "params": {"<param>": "filter.<filter id>"}}.',
   '- kpi: `data`, `value` (the output column shown), optional `caption`, `format`, `delta`. chart: `chart` (line | bar | area | pie), `data`, `x` (a column), `series` [{"column": "<column>", "label": "..."}]. table: `data`, optional `columns` [{"column": "...", "label": "..."}], `pageSize`. text: `text`, optional `style` (heading | body | caption). filter: `filter` (select | date-range | search), `label`, for select `options` {"kind": "query", "query": {"query": "<id>"}, "value": "<column>"} or {"kind": "values", "values": [{"value": "..."}]}.',
-  '- A query: `id` (lower-case, also its file name `queries/<id>.sql`), `source`, `kind: "sql"`, `output` [{"name": "<column>", "type": T}] where T is ONLY string | number | integer | boolean | date | datetime (map the catalog: int2/int4/int8/bigint -> integer; numeric/real/double -> number; text/varchar/char/uuid/enum -> string; bool -> boolean; date -> date; timestamp/timestamptz -> datetime). Cast a count so it is an integer (`count(*)::int AS n`). Optional `params` {"type": "object", "properties": {"region": {"type": "string"}}}: `$1`, `$2`, ... in the SQL are those properties in declaration order; a filter binds one through a component\'s `data.params`.',
+  '- A query: `id` (lower-case, also its file name), `source`, `kind` (`sql` for a postgres, mysql or sqlite source, its text in `queries/<id>.sql`; `graphql` for a graphql source, the document in `queries/<id>.graphql` plus a `rowPath` such as `$.data.items[*]`), `output` [{"name": "<column>", "type": T}] where T is ONLY string | number | integer | boolean | date | datetime (map the catalog: int2/int4/int8/bigint -> integer; numeric/real/double -> number; text/varchar/char/uuid/enum -> string; bool -> boolean; date -> date; timestamp/timestamptz/datetime -> datetime). Make a count an integer in the source\'s own dialect (Postgres `count(*)::int AS n`; MySQL or SQLite `CAST(count(*) AS SIGNED)` / `CAST(count(*) AS INTEGER)`). Optional `params` {"type": "object", "properties": {"region": {"type": "string"}}}: `$1`, `$2`, ... in the SQL are those properties in declaration order; a filter binds one through a component\'s `data.params`.',
   'Example (one KPI and one chart over one query each):',
   '```json',
   JSON.stringify({
@@ -517,7 +517,12 @@ export class AppTurnService implements AppTurnLauncher {
         this.log(`[apps] turn ${input.runId} of ${input.slug} was refused at ${refused.phase}; its run was stopped`);
       }
       let reason = refused.reason;
-      if (refused.phase === 'build') {
+      let code = refused.code;
+      // Only a build the engine refused for leaving NO change is `no_change` (the builder may have declined); any
+      // other build refusal keeps its own reason (xreview r5).
+      const buildUnit = v.units.find((x) => x.id === `${input.runId}:build`);
+      const noChange = refused.phase === 'build' && /left no change|no change in the worktree|unchanged/i.test(buildUnit?.denial_reason ?? '');
+      if (noChange) {
         // A build that made no change usually SAYS why (it declined, or the catalog had no such table): the person
         // reads the builder's own words here. They are shown, never handed to a later turn (that gets the code only).
         let said = '';
@@ -528,8 +533,9 @@ export class AppTurnService implements AppTurnLauncher {
           said = '';
         }
         reason = said !== '' ? `The builder made no change it could hand on. It said: “${said}” Nothing landed.` : 'The builder made no change it could hand on. Nothing landed.';
+        code = 'no_change';
       }
-      return { kind: 'end', state: refused.code === 'step_failed' ? 'failed' : 'refused', code: refused.phase === 'build' ? 'no_change' : refused.code, reason };
+      return { kind: 'end', state: code === 'step_failed' || code === 'no_change' ? 'failed' : 'refused', code, reason };
     }
     if (status === 'failed') {
       const check = unit('check');
