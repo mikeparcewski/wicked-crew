@@ -187,6 +187,7 @@ import type { McpBroker } from '../mcp/broker.js';
 import type { DataGate } from '../knowledge/gate/gate.js';
 import type { SourceReadLog } from '../knowledge/gate/record.js';
 import { registerGateRoutes } from '../knowledge/gate/routes.js';
+import { registerShapeRoutes } from '../knowledge/shapes/routes.js';
 import type { McpRegistryStore } from '../mcp/registry-store.js';
 import type { McpCallRecordSource } from '../mcp/call-records.js';
 import { McpPolicies } from '../mcp/policies.js';
@@ -8509,6 +8510,18 @@ export function registerRoutes(
     },
   );
 
+  // A data shape (`knowledge` proposal) is reviewed by a human: an agent-kind actor, whatever its trust, is refused.
+  // Only a non-human's decision costs the extra queue read.
+  const knowledgeReviewRefused = async (req: FastifyRequest, id: string): Promise<boolean> => {
+    if (actorOf(req).kind === 'human') return false;
+    const pending = (await estateTool('proposal.list', { kind_type: 'knowledge', state: 'pending' })) as ListProposalsResponse;
+    return pending.proposals.some((p) => p.id === id);
+  };
+  const KNOWLEDGE_REVIEW_HUMAN_ONLY = (actor: ReturnType<typeof actorOf>) => ({
+    error: `a data shape is approved or declined by a person; you are ${actor.kind}/${actor.trust}`,
+    code: 'knowledge_review_human_only',
+  });
+
   // POST /proposals/:id/approve → proposal.approve →
   //   { outcome:'promoted', active_id }              — a MEMORY proposal, now an active memory (complete);
   //   { outcome:'handed_off', payload, landing }     — a POLICY proposal, LANDED here as a steering rule.
@@ -8529,7 +8542,7 @@ export function registerRoutes(
           requestType: 'ApproveProposalBody',
           responseType: 'ApproveProposalResponse',
           // 404: an accept-with-edit naming no pending proposal; 409: one already in flight for it.
-          statusCodes: [200, 400, 404, 409, 502],
+          statusCodes: [200, 400, 403, 404, 409, 502],
         },
       },
     },
@@ -8540,6 +8553,12 @@ export function registerRoutes(
     const id = (req.params as { id: string }).id.trim();
     if (id === '') {
       return reply.code(400).send({ error: '`id` is required' });
+    }
+    // DES-KNOWLEDGE-DATA-001 §10.1: a data shape becomes knowledge only when a PERSON approves it.
+    try {
+      if (await knowledgeReviewRefused(req, id)) return reply.code(403).send(KNOWLEDGE_REVIEW_HUMAN_ONLY(actorOf(req)));
+    } catch (err) {
+      return estateUpstreamError(reply, err);
     }
     // An accept WITH an edit (capture review, api-types 0.49.0): the edited copy replaces the
     // original in the same queue — see `approveEdited`. No body / `{}` is the plain approve below.
@@ -8714,7 +8733,7 @@ export function registerRoutes(
   app.post(
     `${V}/proposals/:id/reject`,
     // 409: an accept-with-edit of this proposal is in flight (api/capture.ts).
-    { config: { manifest: { responseType: 'RejectProposalResponse', statusCodes: [200, 400, 409, 502] } } },
+    { config: { manifest: { responseType: 'RejectProposalResponse', statusCodes: [200, 400, 403, 409, 502] } } },
     async (req, reply) => {
     const { id } = req.params as { id: string };
     if (id.trim() === '') {
@@ -8722,6 +8741,12 @@ export function registerRoutes(
     }
     if (editInFlight(id.trim())) {
       return reply.code(409).send({ error: `proposal ${id.trim()} is being accepted` });
+    }
+    // DES-KNOWLEDGE-DATA-001 §10.1: a data shape is declined by a person, as it is approved by one.
+    try {
+      if (await knowledgeReviewRefused(req, id.trim())) return reply.code(403).send(KNOWLEDGE_REVIEW_HUMAN_ONLY(actorOf(req)));
+    } catch (err) {
+      return estateUpstreamError(reply, err);
     }
     // DC-S4a B12: rejecting a decision's proposal dismisses the decision too (one object, two places).
     const rejectedDecision = decisions?.deps.ledger.decisionForProposal(id.trim()) ?? null;
@@ -9295,6 +9320,15 @@ export function registerRoutes(
   registerGateRoutes(app, {
     ...(runtime.mcpRegistryStore !== undefined ? { store: runtime.mcpRegistryStore } : {}),
     ...(runtime.sourceReads !== undefined ? { record: runtime.sourceReads } : {}),
+    audit,
+    actorOf,
+  });
+  // DES-KNOWLEDGE-DATA-001 §10 (B4): profile a source into data-shape proposals, and the Knowledge map (both human-only).
+  registerShapeRoutes(app, {
+    ...(runtime.mcp !== undefined ? { registry: runtime.mcp } : {}),
+    ...(runtime.dataGate !== undefined ? { gate: runtime.dataGate } : {}),
+    estate: estateTool,
+    repos: () => adapter.listRepos(),
     audit,
     actorOf,
   });
