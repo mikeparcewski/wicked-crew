@@ -44,6 +44,10 @@ describe('the publish run (crew side)', () => {
   let endpoints = { authorization: 'https://dex.apps.test/auth', token: 'https://dex.apps.test/token' };
   let svc: AppPublishService;
   const built: string[] = [];
+  /** The base the engine recorded per run (default: the commit the launcher was handed, as a real launch mints it). */
+  const bases = new Map<string, string | null>();
+  /** TESTS: hold the image build until released. */
+  let holdBuild: Promise<void> | null = null;
 
   beforeAll(async () => {
     h = await appsHarness();
@@ -67,6 +71,7 @@ describe('the publish run (crew side)', () => {
       executor: h.executor,
       writePath: h.writePath,
       unitOf: async (token) => units.get(token) ?? null,
+      runBase: async (runId) => (bases.has(runId) ? bases.get(runId)! : ((launched.find((l) => l['runId'] === runId)?.['commit'] as string | undefined) ?? null)),
       discover: async () => endpoints,
       runtimeDir: () => join(dir, 'rt'),
       serverArtifact: () => join(dir, 'art'),
@@ -75,6 +80,7 @@ describe('the publish run (crew side)', () => {
         // The context crew packed: the product Dockerfile, the site from the tree, no test host build.
         expect(existsSync(join(ctx, 'Dockerfile'))).toBe(true);
         expect(JSON.parse(readFileSync(join(ctx, 'site', 'manifest.json'), 'utf8')).app.slug).toBe('esc');
+        if (holdBuild !== null) await holdBuild;
         built.push(tag);
         return { id: `sha256:${'a'.repeat(64)}`, log: 'built' };
       },
@@ -154,6 +160,68 @@ describe('the publish run (crew side)', () => {
     expect(zipNames(pkg)).toEqual(['manifest.json', 'color.png', 'outline.png']);
     // The same publish cannot produce twice.
     await expect(svc.produce('tok-produce')).rejects.toMatchObject({ code: 'not_publishing' });
+  });
+
+  it('check and produce refuse a run the engine did not start on the bound commit (its recorded base), or recorded no base for', async () => {
+    active = false;
+    const { runId } = await svc.start('esc', await oidcBody(), { id: 'priya', kind: 'human', trust: 'operator' });
+    units.set('tok-check-base', { runId, step: 'check', tool: true });
+    units.set('tok-produce-base', { runId, step: 'produce', tool: true });
+    bases.set(runId, 'f'.repeat(40));
+    const moved = await svc.check('tok-check-base');
+    expect(moved.ok).toBe(false);
+    expect(moved.findings).toContainEqual(expect.objectContaining({ code: 'base_mismatch', message: expect.stringContaining('ffffffffffff') }));
+    await expect(svc.produce('tok-produce-base')).rejects.toMatchObject({ status: 409, code: 'base_mismatch' });
+    bases.set(runId, null);
+    expect((await svc.check('tok-check-base')).findings.map((f) => f.code)).toContain('base_mismatch');
+    const before = built.length;
+    await expect(svc.produce('tok-produce-base')).rejects.toMatchObject({ code: 'base_mismatch' });
+    expect(built.length).toBe(before); // nothing was built
+    bases.delete(runId);
+    expect((await svc.check('tok-check-base')).ok).toBe(true);
+    await h.store.endPublish(runId);
+  });
+
+  it('a second produce of the same run while the first builds is refused before it writes anything, and the package served is the recorded one', async () => {
+    active = false;
+    const body = await oidcBody({ targets: ['site', 'teams'], identity: { profile: 'entra', issuer: `https://login.microsoftonline.com/${TENANT}/v2.0`, clientId: CLIENT, tenantId: TENANT }, audience: { kind: 'entra-roles', roles: ['Apps.Viewer'] } });
+    const { runId } = await svc.start('esc', body, { id: 'priya', kind: 'human', trust: 'operator' });
+    units.set('tok-produce-twice', { runId, step: 'produce', tool: true });
+    let release!: () => void;
+    holdBuild = new Promise((r) => (release = r));
+    const first = svc.produce('tok-produce-twice');
+    await new Promise((r) => setTimeout(r, 20));
+    await expect(svc.produce('tok-produce-twice')).rejects.toMatchObject({ status: 409, code: 'produce_in_flight' });
+    release();
+    holdBuild = null;
+    const out = await first;
+    const pkg = readFileSync(join(dir, 'published', 'esc', runId.slice(-12), 'teams.zip'));
+    const { createHash } = await import('node:crypto');
+    expect(createHash('sha256').update(pkg).digest('hex')).toBe(out.published.teamsPackage!.sha256);
+    // After it finished, a retry finds the publish ended (and writes nothing either).
+    await expect(svc.produce('tok-produce-twice')).rejects.toMatchObject({ code: 'not_publishing' });
+    expect(createHash('sha256').update(readFileSync(join(dir, 'published', 'esc', runId.slice(-12), 'teams.zip'))).digest('hex')).toBe(out.published.teamsPackage!.sha256);
+  });
+
+  it('a publish starts only with HEAD following main: a HEAD moved elsewhere is re-pointed, one that cannot be is refused with nothing launched', async () => {
+    active = false;
+    const root = (h.store as unknown as { state: { apps: Record<string, { root: string }> } }).state.apps['esc']!.root;
+    const headFile = join(root, '.git', 'HEAD');
+    writeFileSync(headFile, 'ref: refs/heads/elsewhere\n');
+    const ok = await svc.start('esc', await oidcBody(), { id: 'priya', kind: 'human', trust: 'operator' });
+    expect(readFileSync(headFile, 'utf8')).toBe('ref: refs/heads/main\n');
+    await h.store.endPublish(ok.runId);
+    // HEAD replaced by a directory (it cannot be rewritten): refused, and the launcher was not called.
+    rmSync(headFile);
+    mkdirSync(join(headFile, 'x'), { recursive: true });
+    const count = launched.length;
+    try {
+      await expect(svc.start('esc', await oidcBody(), { id: 'priya', kind: 'human', trust: 'operator' })).rejects.toMatchObject({ status: 409, code: 'repo_unrepaired' });
+      expect(launched.length).toBe(count);
+    } finally {
+      rmSync(headFile, { recursive: true, force: true });
+      writeFileSync(headFile, 'ref: refs/heads/main\n');
+    }
   });
 
   it('a failed image build answers a code (502 image_build_failed), and nothing is published', async () => {

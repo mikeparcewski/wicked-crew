@@ -398,7 +398,7 @@ import { localViewerOf, type Viewer } from '../apps/exec/viewer.js';
 import type { Actor as AppsActor } from '../core/types.js';
 import { registerAppRoutes } from '../apps/routes.js';
 import { AppPublishService } from '../apps/publish/service.js';
-import { discoverIssuer, type PublishAdapter, runtimeDir as appsRuntimeDir, serverArtifact as appsServerArtifact, unitOfToken } from '../apps/publish/wire.js';
+import { APPS_PUBLISH_RUN_PREFIX, discoverIssuer, type PublishAdapter, runBaseOf, runtimeDir as appsRuntimeDir, serverArtifact as appsServerArtifact, unitOfToken } from '../apps/publish/wire.js';
 import { AppStoreError, type AppStore } from '../apps/store.js';
 import { registerMcpInspectRoutes } from '../mcp-inspect/routes.js';
 import { discoverLivePlugin } from '../skills/plugin-source.js';
@@ -1786,6 +1786,7 @@ export function registerRoutes(
           executor: appsExecutor,
           writePath: appsWritePath ?? null,
           unitOf: unitOfToken(adapter as unknown as PublishAdapter),
+          runBase: runBaseOf(adapter as unknown as PublishAdapter),
           discover: discoverIssuer,
           runtimeDir: () => appsRuntimeDir(),
           serverArtifact: () => appsServerArtifact(),
@@ -5890,9 +5891,12 @@ export function registerRoutes(
   /**
    * (DES-APPS-001 §9.3, K6) An Apps publish's gates are the person's: its `produce` step's consent is THE approval of
    * what ships, and no agent-kind operator, plugin or standing order answers it, by any path (gate, resume, approve).
+   * A publish run is known by its id for its whole life (crew names it `apps-publish-…`), not only while the app's
+   * record points at it: a replaced or abandoned publish keeps the rule.
    */
   const appsPublishGateRefusal = (runId: string, actor: import('../core/types.js').Actor): { code: number; body: unknown } | null => {
-    if (runtime.apps?.publishingOf(runId) == null || isHumanOperator(actor)) return null;
+    const isPublish = runId.startsWith(APPS_PUBLISH_RUN_PREFIX) || runtime.apps?.publishingOf(runId) != null;
+    if (!isPublish || isHumanOperator(actor)) return null;
     audit.record('gate.apps_publish_refused', actor, { runId, detail: { reason: 'human_operator_only' } });
     return { code: 403, body: { error: `only a human operator can answer an Apps publish's gates (you are ${actor.kind}/${actor.trust})`, code: 'human_operator_only' } };
   };
@@ -6430,9 +6434,12 @@ export function registerRoutes(
   // executing run has a cursor unit to reassign.
   app.post(
     `${V}/runs/:id/reassign`,
-    { config: { manifest: { requestType: 'ReassignRequest', statusCodes: [200, 400, 404, 409] } } },
+    { config: { manifest: { requestType: 'ReassignRequest', statusCodes: [200, 400, 403, 404, 409] } } },
     async (req, reply) => {
     const { id } = req.params as { id: string };
+    // (K6) A reassign of an Apps publish (it can approve the produce consent) is a human operator's only.
+    const publishRefused = appsPublishGateRefusal(id, actorOf(req));
+    if (publishRefused !== null) return reply.code(publishRefused.code).send(publishRefused.body);
     const parsed = ReassignSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
@@ -6520,8 +6527,6 @@ export function registerRoutes(
     const cursor = resolveCursorUnit(run);
     const ord = cursor?.ord ?? run.session.unit_ix;
     let noteRode = false;
-    const publishRefused = appsPublishGateRefusal(id, actorOf(req));
-    if (publishRefused !== null) return reply.code(publishRefused.code).send(publishRefused.body);
     const approve = async (): Promise<void> => {
       if (typeof adapter.confirmGate !== 'function') return; // refused above for a gated run
       const who = actorOf(req);

@@ -15674,8 +15674,13 @@ export interface AppErrorBody {
     | 'unknown_record'
     | 'missing_grants'
     // (api-types 0.181.0, K6) Publish: one runs already; the token is not this publish step's; no publish runs as
-    // that run; this crew carries no runtime or server artifact to build with; no Teams package was produced.
+    // that run; this crew carries no runtime or server artifact to build with; no Teams package was produced; the
+    // app's repository could not be pointed at the head (nothing launched); this run's produce step is already running;
+    // the run's worktree did not start on the bound commit (the engine's `runBaseResolved`).
     | 'publish_in_flight'
+    | 'repo_unrepaired'
+    | 'produce_in_flight'
+    | 'base_mismatch'
     | 'not_this_step'
     | 'not_publishing'
     | 'no_runtime'

@@ -113,6 +113,9 @@ export function buildersSince(versions: readonly AppVersion[], publishedVersion:
   return [...builders].sort();
 }
 
+/** Every publish run's id begins so (`apps-publish-<slug>-<12 hex>`, chosen in `beginPublish`): the gates know it by it. */
+export const APPS_PUBLISH_RUN_PREFIX = 'apps-publish-';
+
 /** (K6, DES §9.3) A publish in flight: the run, and the tree and manifest it is bound to. */
 export interface StoredPublishing {
   runId: string;
@@ -493,13 +496,24 @@ export class AppStore {
       // The base is the head, no turn runs, and `main` points at the head commit: the run starts on the bound tree.
       await this.guard(a, input.base, 'a publish');
       const h = this.head(a);
+      // The engine mints the run's worktree from the repo's `HEAD` (an app repo has no origin): `HEAD` must follow
+      // `main` and `main` must be the head commit, or nothing launches (the guard's repair is best effort; this is
+      // not). The check step then verifies the base the engine recorded (`runBaseResolved`).
+      const git = this.git(a);
+      if (!(await git.headIsMain())) {
+        this.log(`[apps] ${slug}: HEAD did not follow main; re-pointing it before a publish`);
+        await git.setHeadToMain().catch(() => undefined);
+      }
+      if ((await git.main()) !== h.commit || !(await git.headIsMain())) {
+        throw new AppStoreError(409, 'repo_unrepaired', `${slug}'s repository could not be pointed at v${h.version}: nothing was launched`);
+      }
       if (this.acceptedReceipt(slug, h.tree) === null) throw new AppStoreError(409, 'not_accepted', `v${h.version} holds no accepted receipt: it cannot be published`);
       const inFlight = a.publishing ?? null;
       if (inFlight !== null && (await launcher.isActive(inFlight.runId).catch(() => true))) {
         throw new AppStoreError(409, 'publish_in_flight', `a publish of ${slug} is running (${inFlight.runId}): wait for it to end`);
       }
       const prepared = await input.prepare({ version: h.version, tree: h.tree, commit: h.commit, files: await this.files(a, h.tree), name: a.name });
-      const runId = `apps-publish-${slug}-${randomBytes(6).toString('hex')}`;
+      const runId = `${APPS_PUBLISH_RUN_PREFIX}${slug}-${randomBytes(6).toString('hex')}`;
       const publishing: StoredPublishing = { runId, version: h.version, tree: h.tree, commit: h.commit, ...prepared, excludeSeats: this.buildersSinceLastPublish(a), actor: input.actor, startedAt: this.now() };
       this.transact(slug, () => {
         a.publishing = publishing;

@@ -19,7 +19,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -27,7 +27,7 @@ import type { Actor, AppPublished, AppPublishBody, AppPublishManifest } from '..
 import type { AppSourceRegistry } from '../exec/sources.js';
 import type { AppExecutor } from '../exec/executor.js';
 import type { AppWritePath } from '../actions/write-path.js';
-import { AppStoreError, type AppStore } from '../store.js';
+import { AppStoreError, type AppStore, type StoredPublishing } from '../store.js';
 import { buildManifest, type PublishFinding } from './manifest.js';
 import { PackError, writeImageContext } from './pack.js';
 import { buildImage, ImageBuildError } from './image.js';
@@ -57,6 +57,11 @@ export interface PublishDeps {
   writePath: Pick<AppWritePath, 'getGrant' | 'checkAction'> | null;
   /** The unit a capability token belongs to: its run and its step (`phase_ref`), and whether it is a Tool unit. */
   unitOf: (token: string) => Promise<{ runId: string; step: string | null; tool: boolean } | null>;
+  /**
+   * The commit the engine minted the run's worktree from (its `runBaseResolved` record), or `null` when it recorded
+   * none: the check step refuses a run not started on the bound commit (the QE seat examines that worktree).
+   */
+  runBase: (runId: string) => Promise<string | null>;
   /** The issuer's endpoints from its discovery document, through the dialer (`null` = could not be read). */
   discover: (issuer: string, allowRanges: string[]) => Promise<{ authorization: string; token: string; idTokenAlgs?: string[] } | null>;
   /** The wicked-apps runtime's standalone build (`<studio dist>/apps-standalone`). */
@@ -112,6 +117,8 @@ export function consentCard(m: AppPublishManifest): string {
 
 export class AppPublishService {
   private readonly now: () => number;
+  /** The publish runs whose produce step is running now: one at a time per run, so a second attempt writes nothing. */
+  private readonly producing = new Set<string>();
 
   constructor(private readonly deps: PublishDeps) {
     this.now = deps.now ?? Date.now;
@@ -167,9 +174,17 @@ export class AppPublishService {
   /** The publish check (the `check` step): unwaivable, nothing runs. */
   async check(token: string): Promise<{ ok: boolean; card: string; findings: PublishFinding[] }> {
     const { slug, publishing: p } = await this.unit(token, 'check');
+    const findings: PublishFinding[] = [];
+    // The run's worktree must be the bound commit's (the engine's own record of its base, not anything the repo says).
+    const base = await this.deps.runBase(p.runId).catch(() => null);
+    if (base !== p.commit) {
+      findings.push({
+        code: 'base_mismatch',
+        message: base === null ? `the engine recorded no base for run ${p.runId}: it cannot be shown to start on v${p.version}; publish again` : `the run started on ${base.slice(0, 12)}, not v${p.version}'s commit ${p.commit.slice(0, 12)}: publish again`,
+      });
+    }
     const at = await this.deps.store.acceptedFiles(slug, p.commit);
     const again = await this.manifestFor(slug, { version: p.version, tree: p.tree, commit: p.commit, name: p.manifest.app.name, files: at.files }, p.body);
-    const findings: PublishFinding[] = [];
     if (!again.ok) findings.push(...again.findings);
     else if (again.digest !== p.digest) findings.push({ code: 'manifest_changed', message: 'what this publish would ship changed since it started (a grant, a source or the issuer): publish again' });
     for (const q of at.files.spec.queries) {
@@ -195,11 +210,26 @@ export class AppPublishService {
 
   /** The produce step: pack, build, record. */
   async produce(token: string): Promise<{ published: AppPublished; log: string }> {
-    const { slug, publishing: p } = await this.unit(token, 'produce');
+    const { publishing: bound } = await this.unit(token, 'produce');
+    // One produce per run at a time, reserved before anything is built or written (a retried step while the first is
+    // still building would otherwise overwrite this run's image tag and Teams package after the record was written).
+    if (this.producing.has(bound.runId)) throw new PublishError(409, 'produce_in_flight', `run ${bound.runId} is producing its image already`);
+    this.producing.add(bound.runId);
+    try {
+      // Re-read the binding inside the reservation: a produce that finished meanwhile ended this publish.
+      const { slug, publishing: p } = await this.unit(token, 'produce');
+      return await this.produceBound(slug, p);
+    } finally {
+      this.producing.delete(bound.runId);
+    }
+  }
+
+  private async produceBound(slug: string, p: StoredPublishing): Promise<{ published: AppPublished; log: string }> {
     const runtime = this.deps.runtimeDir();
     const server = this.deps.serverArtifact();
-    if (runtime === null || !existsSync(join(runtime, 'runtime.js'))) throw new PublishError(503, 'no_runtime', 'this crew carries no wicked-apps standalone runtime (a studio build with apps-standalone)');
-    if (server === null || !existsSync(join(server, 'Dockerfile'))) throw new PublishError(503, 'no_server', 'this crew carries no app server artifact (packages/apps-server dist)');
+    if (runtime === null) throw new PublishError(503, 'no_runtime', 'this crew carries no wicked-apps standalone runtime (a studio build with apps-standalone)');
+    if (server === null) throw new PublishError(503, 'no_server', 'this crew carries no app server artifact (packages/apps-server dist)');
+    if ((await this.deps.runBase(p.runId).catch(() => null)) !== p.commit) throw new PublishError(409, 'base_mismatch', `run ${p.runId} did not start on v${p.version}'s commit: publish again`);
     const texts = await this.deps.store.treeTexts(slug, p.tree);
     const ctx = mkdtempSync(join(tmpdir(), `wicked-apps-${slug}-`));
     // Everything this produce writes is THIS run's (its image tag, its Teams package): a stale or duplicate produce

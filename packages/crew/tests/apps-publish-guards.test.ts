@@ -2,7 +2,7 @@
 // (the engine's real unit shape), the QE exclusion is every builder since the last published VERSION, an Apps publish's
 // gates are a human operator's only (by every path), and the Teams package's details.
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { inflateSync } from 'node:zlib';
@@ -17,7 +17,7 @@ import { GateCache } from '../src/api/gate-cache.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { buildersSince } from '../src/apps/store.js';
 import { outlinePng, teamsManifest } from '../src/apps/publish/teams.js';
-import { unitOfToken, type PublishAdapter } from '../src/apps/publish/wire.js';
+import { runBaseOf, runtimeDir, serverArtifact, unitOfToken, type PublishAdapter } from '../src/apps/publish/wire.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { AppVersion } from '../src/core/types.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
@@ -30,6 +30,7 @@ describe('the step token resolver (the engine`s unit shape)', () => {
     seatsForWorkflow: async () => [],
     sessionsDetail: async () => [{ session: { id: runId, status: 'executing' }, units }],
     askUnit: async () => ({ runId, ord }),
+    runEvents: async () => [],
   });
   const units = [
     { id: `${RUN}:check`, ord: 0, tool_cmd: ['wicked-crew', 'apps-check', '--publish'] },
@@ -46,6 +47,43 @@ describe('the step token resolver (the engine`s unit shape)', () => {
     expect(await unitOfToken(adapter([{ id: 'other-run:check', ord: 0, tool_cmd: ['x'] }], 0))('t')).toEqual({ runId: RUN, step: null, tool: true });
     const bad: PublishAdapter = { ...adapter(units, 0), askUnit: async () => Promise.reject(new Error('invalid_token')) };
     expect(await unitOfToken(bad)('t')).toBeNull();
+  });
+});
+
+describe('the run`s base, as the engine recorded it', () => {
+  const C1 = '1'.repeat(40);
+  const C2 = '2'.repeat(40);
+  it('is the run`s own runBaseResolved commit; another run`s, a malformed one, or none answers what it should', async () => {
+    const of = (events: Array<Record<string, unknown>> | null) => runBaseOf({ runEvents: async () => events })(RUN);
+    expect(await of([{ type: 'sessionStarted', session: RUN }, { type: 'runBaseResolved', session: RUN, baseCommit: C1 }])).toBe(C1);
+    expect(await of([{ type: 'runBaseResolved', session: 'other', baseCommit: C2 }])).toBeNull();
+    expect(await of([{ type: 'runBaseResolved', session: RUN, baseCommit: 'HEAD' }])).toBeNull();
+    expect(await of([])).toBeNull();
+    expect(await of(null)).toBeNull();
+  });
+});
+
+describe('the runtime and the server artifact (Publish is offered only when produce can run)', () => {
+  it('answers a configured directory only when every part produce reads is there', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'k6-art-'));
+    try {
+      expect(runtimeDir({ WICKED_APPS_RUNTIME_DIR: join(dir, 'missing') })).toBeNull();
+      mkdirSync(join(dir, 'rt'));
+      writeFileSync(join(dir, 'rt', 'runtime.js'), '');
+      expect(runtimeDir({ WICKED_APPS_RUNTIME_DIR: join(dir, 'rt') })).toBeNull(); // no runtime.css
+      writeFileSync(join(dir, 'rt', 'runtime.css'), '');
+      expect(runtimeDir({ WICKED_APPS_RUNTIME_DIR: join(dir, 'rt') })).toBe(join(dir, 'rt'));
+      expect(serverArtifact({ WICKED_APPS_SERVER_ARTIFACT: join(dir, 'missing') })).toBeNull();
+      mkdirSync(join(dir, 'art', 'server', 'lib', 'bundle'), { recursive: true });
+      writeFileSync(join(dir, 'art', 'Dockerfile'), 'FROM scratch\n');
+      expect(serverArtifact({ WICKED_APPS_SERVER_ARTIFACT: join(dir, 'art') })).toBeNull(); // a Dockerfile alone
+      writeFileSync(join(dir, 'art', 'server', 'lib', 'bundle', 'server.mjs'), '');
+      mkdirSync(join(dir, 'art', 'runners'));
+      writeFileSync(join(dir, 'art', 'runners', 'sqlite-runner.mjs'), '');
+      expect(serverArtifact({ WICKED_APPS_SERVER_ARTIFACT: join(dir, 'art') })).toBe(join(dir, 'art'));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -113,7 +151,19 @@ describe('an Apps publish`s gates are a human operator`s only', () => {
       const r = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUN}/resume`, headers: { 'x-test-actor': actor } });
       expect(r.statusCode, `${actor} resume: ${r.body}`).toBe(403);
     }
+    // A publish the app's record no longer points at (replaced after it failed) keeps the rule for its whole life,
+    // and a reassign (which can approve) is refused the same way.
+    const replaced = 'apps-publish-esc-ffffffffffff';
+    for (const actor of ['agent/operator', 'system/operator']) {
+      const g = await app.inject({ method: 'POST', url: `/api/v1/runs/${replaced}/gate`, headers: { 'x-test-actor': actor }, payload: { approve: true } });
+      expect(g.statusCode, `${actor} replaced gate: ${g.body}`).toBe(403);
+      expect(g.json().code).toBe('human_operator_only');
+      const ra = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUN}/reassign`, headers: { 'x-test-actor': actor }, payload: {} });
+      expect(ra.statusCode, `${actor} reassign: ${ra.body}`).toBe(403);
+      expect(ra.json().code).toBe('human_operator_only');
+    }
     expect(confirmCalls).toEqual([]);
+    expect((audit.record as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'gate.apps_publish_refused').length).toBeGreaterThanOrEqual(12);
     // A human operator passes this guard (whatever the gate then answers).
     const human = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUN}/gate`, headers: { 'x-test-actor': 'human/operator' }, payload: { approve: true } });
     expect(human.json().code).not.toBe('human_operator_only');

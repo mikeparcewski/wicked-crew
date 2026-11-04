@@ -26,7 +26,7 @@
 
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { lstat, mkdir, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { devNull } from 'node:os';
 import { join } from 'node:path';
 import { deflateSync } from 'node:zlib';
@@ -35,6 +35,8 @@ import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 
 /** A full object id (SHA-1 repositories only). */
 export const SHA_RE = /^[0-9a-f]{40}$/;
+/** The `HEAD` an app repo keeps: `main`, symbolically (the engine bases a run with no origin on `HEAD`). */
+const HEAD_MAIN = 'ref: refs/heads/main';
 
 const OUTPUT_CAP = 16 * 1024 * 1024;
 const TIMEOUT_MS = 30_000;
@@ -315,6 +317,26 @@ export class AppGit {
   /** Point `main` at `commit` as a DIRECT ref (a symbolic `main` is replaced, never followed). */
   async setMain(commit: string): Promise<void> {
     await this.writeRef(['heads', 'main'], commit);
+  }
+
+  /**
+   * Whether `HEAD` is a plain file naming `main` symbolically. The engine mints a run worktree from the repo's
+   * `HEAD` when it has no origin (an app repo has none), so a publish starts only when `HEAD` follows `main`.
+   */
+  async headIsMain(): Promise<boolean> {
+    try {
+      const file = join(this.gitDir, 'HEAD');
+      const st = await lstat(file);
+      return st.isFile() && !st.isSymbolicLink() && (await readFile(file, 'utf8')) === `${HEAD_MAIN}\n`;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Point `HEAD` at `main` (symbolically), replacing whatever is there (a link is replaced, never followed). */
+  async setHeadToMain(): Promise<void> {
+    await this.ensureDirs([this.gitDir]);
+    await this.place(this.gitDir, 'HEAD', `${HEAD_MAIN}\n`, 0o644);
   }
 
   /** The object `sha` of `type`, its bytes verified against the id (at most `cap` bytes). */

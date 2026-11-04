@@ -19,9 +19,11 @@ export interface PublishAdapter {
   seatsForWorkflow(workflow: string): Promise<unknown>;
   sessionsDetail(): Promise<Array<{ session: { id: string; status: string }; units: Array<{ id: string; ord: number; tool_cmd?: string[] | null }> }>>;
   askUnit(token: string): Promise<{ runId: string; ord: number }>;
+  runEvents(runId: string): Promise<Array<Record<string, unknown>> | null>;
 }
 
 export const APPS_PUBLISH_WORKFLOW = 'apps-publish';
+export { APPS_PUBLISH_RUN_PREFIX } from '../store.js';
 /** The ID-token algorithms the site's verifier (crew's `api/auth.ts`) checks, by their exact JOSE names. */
 const JOSE_ALGS = new Set(['RS256', 'RS384', 'RS512', 'PS256', 'PS384', 'PS512', 'ES256', 'ES384', 'ES512']);
 const DISCOVERY_MAX_BYTES = 1024 * 1024;
@@ -70,6 +72,18 @@ export function unitOfToken(adapter: PublishAdapter): (token: string) => Promise
   };
 }
 
+/** The commit the engine minted a run's worktree from: its last `runBaseResolved` record for that run, or `null`. */
+export function runBaseOf(adapter: Pick<PublishAdapter, 'runEvents'>): (runId: string) => Promise<string | null> {
+  return async (runId) => {
+    const events = (await adapter.runEvents(runId)) ?? [];
+    let base: string | null = null;
+    for (const e of events) {
+      if (e['type'] === 'runBaseResolved' && e['session'] === runId && typeof e['baseCommit'] === 'string' && /^[0-9a-f]{40}$/.test(e['baseCommit'])) base = e['baseCommit'];
+    }
+    return base;
+  };
+}
+
 /** The issuer's endpoints from its discovery document, through the dialer (`oidcAddressPolicy`); `null` on any failure. */
 export async function discoverIssuer(issuer: string, allowRanges: string[]): Promise<{ authorization: string; token: string; idTokenAlgs?: string[] } | null> {
   if (!issuer.startsWith('https://')) return null;
@@ -109,18 +123,20 @@ export async function discoverIssuer(issuer: string, allowRanges: string[]): Pro
 
 const crewDist = (): string => join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
+/** What a runtime and a server artifact hold, at least; Publish is offered (and produce runs) only when every part is there. */
+const RUNTIME_PARTS = ['runtime.js', 'runtime.css'];
+const SERVER_PARTS = ['Dockerfile', 'server/lib/bundle/server.mjs', 'runners/sqlite-runner.mjs'];
+
 /** The runtime's standalone build: `WICKED_APPS_RUNTIME_DIR`, else the bundled studio's `apps-standalone`. */
 export function runtimeDir(env: NodeJS.ProcessEnv = process.env): string | null {
   const set = env['WICKED_APPS_RUNTIME_DIR'];
-  if (set !== undefined && set !== '') return set;
-  const bundled = join(crewDist(), 'studio', 'apps-standalone');
-  return existsSync(join(bundled, 'runtime.js')) ? bundled : null;
+  const dir = set !== undefined && set !== '' ? set : join(crewDist(), 'studio', 'apps-standalone');
+  return RUNTIME_PARTS.every((f) => existsSync(join(dir, f))) ? dir : null;
 }
 
 /** The app server artifact: `WICKED_APPS_SERVER_ARTIFACT`, else crew's `dist/apps-server` (copied at build). */
 export function serverArtifact(env: NodeJS.ProcessEnv = process.env): string | null {
   const set = env['WICKED_APPS_SERVER_ARTIFACT'];
-  if (set !== undefined && set !== '') return set;
-  const bundled = join(crewDist(), 'apps-server');
-  return existsSync(join(bundled, 'Dockerfile')) ? bundled : null;
+  const dir = set !== undefined && set !== '' ? set : join(crewDist(), 'apps-server');
+  return SERVER_PARTS.every((f) => existsSync(join(dir, f))) ? dir : null;
 }
