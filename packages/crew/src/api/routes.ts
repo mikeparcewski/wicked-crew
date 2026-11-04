@@ -4661,7 +4661,7 @@ export function registerRoutes(
     };
     try {
       const rules = (await considerations.inForceFor(scope?.projectId ?? null)).rules;
-      mcpTools = await chatMcpToolsFor(runtime.mcp, runtime.dataGate);
+      mcpTools = await chatMcpToolsFor(runtime.mcp);
       knowledgeBlock = await chatKnowledgeFor(runtime.dataGate, scope?.projectId ?? null);
       // crew#1020: a project/everything chat must see repos attached since open. Admission was
       // under this scope KIND and the kind stays the same, so do not re-run seat admission.

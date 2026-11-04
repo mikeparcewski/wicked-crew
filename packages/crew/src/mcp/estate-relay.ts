@@ -34,9 +34,11 @@
  *   carries `visible`, the `source:<id>` / `repo:<id>` set crew computes for the unit's project from
  *   the registry (the data gate's predicate, `agentMay`); a worker's own `visible` is replaced. Estate
  *   filters before it ranks; the relay then re-checks every item against a FRESH read before release
- *   ({@link releaseVisible}): an item with a dep outside the set is dropped, a source catalog outside
- *   it is withheld, a block the relay cannot check is dropped, and an answer with nothing it can check
- *   is withheld (fail closed).
+ *   ({@link releaseVisible}): an item is kept only when every one of its deps is in the set (an item
+ *   with no deps is dep-free knowledge, and is kept); one whose deps cannot be read is dropped; a
+ *   source catalog outside the set is withheld; a block that is not a JSON object is dropped; the
+ *   envelope is rebuilt from the checked blocks alone; and an answer with nothing it can check is
+ *   withheld (fail closed).
  * - **How much**: numeric size arguments are clamped ({@link ARG_CAPS}), each call has a deadline
  *   ({@link ESTATE_RELAY_TIMEOUT_MS}), at most {@link ESTATE_RELAY_CONCURRENCY} run at once, and
  *   a result over {@link ESTATE_RELAY_MAX_RESULT_BYTES} is withheld with a remedy. The broker's
@@ -360,13 +362,26 @@ export function proposalIdOf(result: Record<string, unknown>): string | null {
   }
 }
 
+/** A dep no visible set holds: a record whose `deps` the relay cannot read is never released. */
+export const UNREADABLE_DEPS = 'deps:unreadable';
+
 /**
  * The deps an estate knowledge record stands on: its own `deps`, plus the source its scope or its citation names
- * (`source:<id>`, `source:<id>/<key>…`), so a record from an estate that predates `deps` is still gated by its source.
+ * (`source:<id>`, `source:<id>/<key>…`). Only `source:` is reconstructed from a scope or a citation.
+ *
+ * `deps` present but not an array of strings is unreadable, so the record is withheld. `deps` ABSENT is an estate
+ * that predates the knowledge plane (estate#389 always writes the field), which can hold no dep-bearing record of
+ * its own: its records are gated by the source their scope or citation names, and are otherwise dep-free. (A store
+ * a knowledge-plane estate wrote shapes into, read back by an older binary, is the one case this cannot see; crew
+ * ships with the knowledge-plane estate.)
  */
 export function effectiveDeps(rec: Record<string, unknown>): string[] {
   const out = new Set<string>();
-  if (Array.isArray(rec['deps'])) for (const d of rec['deps']) if (typeof d === 'string') out.add(d);
+  const deps = rec['deps'];
+  if (deps !== undefined) {
+    if (!Array.isArray(deps) || !deps.every((d) => typeof d === 'string')) return [UNREADABLE_DEPS];
+    for (const d of deps as string[]) out.add(d);
+  }
   for (const field of ['scope', 'source']) {
     const v = rec[field];
     if (typeof v !== 'string' || !v.startsWith('source:')) continue;
@@ -410,7 +425,8 @@ export function releaseVisible(tool: string, result: Record<string, unknown>, vi
       if (items === null) return { ok: false, reason: 'mcp:estate/knowledge.recall answered no items list, so the answer is withheld' };
       const kept = items.filter((i) => isRecord(i) && within(i, visible));
       dropped += items.length - kept.length;
-      payload = { ...payload, items: kept };
+      // Only the checked list leaves: any other field estate might add is not passed unchecked.
+      payload = { items: kept };
     } else if (tool === 'knowledge.source_catalog') {
       const id = payload['sourceId'];
       if (typeof id !== 'string' || !visible.has(`source:${id}`)) {
@@ -420,15 +436,22 @@ export function releaseVisible(tool: string, result: Record<string, unknown>, vi
       const nodes = Array.isArray(payload['nodes']) ? payload['nodes'] : null;
       const edges = Array.isArray(payload['edges']) ? payload['edges'] : null;
       if (nodes === null || edges === null) return { ok: false, reason: 'mcp:estate/knowledge.neighbors answered no nodes and edges, so the answer is withheld' };
-      const keptNodes = nodes.filter((n) => isRecord(n) && within(n, visible));
-      const ids = new Set(keptNodes.map((n) => `${String((n as Record<string, unknown>)['store'])}\u0000${String((n as Record<string, unknown>)['id'])}`));
-      const end = (e: unknown): string => (isRecord(e) ? `${String(e['store'])}\u0000${String(e['id'])}` : '');
-      const keptEdges = edges.filter((e) => isRecord(e) && ids.has(end(e['from'])) && ids.has(end(e['to'])) && (!isRecord(e['meta']) || within({ deps: e['meta']['deps'] }, visible)));
+      // A node is addressed by (store, id); one with either missing is dropped, never aliased.
+      const key = (n: unknown): string | null => (isRecord(n) && typeof n['store'] === 'string' && typeof n['id'] === 'string' ? `${n['store']}\u0000${n['id']}` : null);
+      const keptNodes = nodes.filter((n) => isRecord(n) && key(n) !== null && within(n, visible));
+      const ids = new Set(keptNodes.map((n) => key(n) as string));
+      const linked = (e: unknown): boolean => {
+        const k = key(e);
+        return k !== null && ids.has(k);
+      };
+      const keptEdges = edges.filter((e) => isRecord(e) && linked(e['from']) && linked(e['to']) && (!isRecord(e['meta']) || within({ deps: e['meta']['deps'] ?? [] }, visible)));
       dropped += nodes.length - keptNodes.length + edges.length - keptEdges.length;
-      payload = { ...payload, nodes: keptNodes, edges: keptEdges };
+      payload = { nodes: keptNodes, edges: keptEdges, truncated: payload['truncated'] === true };
     }
-    checked.push({ ...(block as Record<string, unknown>), text: JSON.stringify(payload) });
+    checked.push({ type: 'text', text: JSON.stringify(payload) });
   }
   if (checked.length === 0) return { ok: false, reason: `mcp:estate/${tool} answered nothing the relay can check, so the answer is withheld` };
-  return { ok: true, result: { ...result, content: checked }, dropped };
+  // The released envelope is built, not copied: a second copy of the records (`structuredContent`, or any field
+  // the relay does not know) never rides along unchecked.
+  return { ok: true, result: { content: checked, isError: false }, dropped };
 }

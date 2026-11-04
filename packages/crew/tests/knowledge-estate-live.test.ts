@@ -109,13 +109,13 @@ describe.skipIf(EXE === '' || process.platform === 'win32')('the knowledge packa
   };
 
   it('estate takes the generation, and a later one without a relation tombstones it', async () => {
-    const first = (await write('knowledge.replace_source', sourceGeneration(source(['tickets', 'customers'], '2026-11-04T03:00:00Z'))! as never)) as Record<string, unknown>;
+    const first = (await write('knowledge.replace_source', sourceGeneration(source(['tickets', 'customers'], '2026-11-04T03:00:00Z'), 1000)! as never)) as Record<string, unknown>;
     expect(first).toMatchObject({ sourceId: SOURCE_ID, docs: 2 });
-    const second = (await write('knowledge.replace_source', sourceGeneration(source(['tickets'], '2026-11-04T04:00:00Z'))! as never)) as { tombstoned: { doc_count: number; docs: string[] } };
+    const second = (await write('knowledge.replace_source', sourceGeneration(source(['tickets'], '2026-11-04T04:00:00Z'), 2000)! as never)) as { tombstoned: { doc_count: number; docs: string[] } };
     expect(second.tombstoned.doc_count).toBe(1);
     expect(second.tombstoned.docs).toEqual(['support.customers']);
     // An older describe is refused and changes nothing.
-    await expect(write('knowledge.replace_source', sourceGeneration(source(['tickets', 'customers'], '2026-11-04T02:00:00Z'))! as never)).rejects.toThrow();
+    await expect(write('knowledge.replace_source', sourceGeneration(source(['tickets', 'customers'], '2026-11-04T02:00:00Z'), 500)! as never)).rejects.toThrow();
   }, 120_000);
 
   it("a unit sees the source's structure through the relay only once its project is ticked", async () => {

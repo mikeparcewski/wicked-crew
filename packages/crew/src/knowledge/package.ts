@@ -33,7 +33,10 @@ export const KNOWLEDGE_PACKAGE = 'wicked.knowledge/v1';
 
 /** One relation as a package carries it: structure only. */
 export interface PackageRelation {
+  /** `schema.name` as a read names it; `schema` and `name` are the identifiers themselves (a part may hold a dot). */
   table: string;
+  schema: string | null;
+  name: string;
   kind: string;
   columns: Array<{ name: string; type: string; nullable: boolean; enum?: string[] }>;
   columnsNotListed?: number;
@@ -74,6 +77,8 @@ function structureOf(s: GateSource): NonNullable<PackageSource['structure']> {
   return {
     relations: st.relations.map((r) => ({
       table: r.table,
+      schema: r.schema,
+      name: r.name,
       kind: r.kind,
       columns: r.columns,
       ...(r.columnsNotListed !== undefined ? { columnsNotListed: r.columnsNotListed } : {}),
@@ -117,18 +122,19 @@ export async function knowledgePackageFor(ctx: { projectId: string | null }, dep
  */
 export function packageJson(pkg: KnowledgePackage, maxBytes: number = KNOWLEDGE_PACKAGE_MAX_BYTES): string {
   const listed: PackageSource[] = [];
-  const render = (notListed: number): string => JSON.stringify({ package: pkg.package, projectId: pkg.projectId, sources: listed, sourcesNotListed: notListed });
-  const fits = (notListed: number): boolean => Buffer.byteLength(render(notListed), 'utf8') <= maxBytes;
-  pkg.sources.forEach((s, i) => {
-    const left = pkg.sources.length - i - 1;
+  const render = (): string => JSON.stringify({ package: pkg.package, projectId: pkg.projectId, sources: listed, sourcesNotListed: pkg.sources.length - listed.length });
+  // Each candidate is checked with the count the final rendering would carry if nothing more were listed; listing
+  // more only lowers that count, so the final rendering fits whenever the last check did.
+  const fits = (): boolean => Buffer.byteLength(render(), 'utf8') <= maxBytes;
+  for (const s of pkg.sources) {
     listed.push(s);
-    if (fits(left)) return;
+    if (fits()) continue;
     const bare: PackageSource = { ...s, note: 'its structure is left out: the package is full (mcp:<source>/list_tables has it)' };
     delete bare.structure;
     listed[listed.length - 1] = bare;
-    if (!fits(left)) listed.pop();
-  });
-  return render(pkg.sources.length - listed.length);
+    if (!fits()) listed.pop();
+  }
+  return render();
 }
 
 /** Estate's spelling of a repo dep. */
@@ -137,12 +143,14 @@ export const repoDep = (repoId: string): string => `repo:${repoId}`;
 export const sourceDep = (sourceId: string): string => `source:${sourceId}`;
 
 /**
- * The deps a project's agents may see (§4.3): every source the predicate lets the project see, and the repos
- * named (the run's own, its project's). Sorted and unique.
+ * The deps a project's agents may see (§4.3): every source the predicate lets the project see AND that holds a
+ * description under its current descriptor (what estate has of a source described under another descriptor, a
+ * restored registry generation's for instance, stays hidden until it is described again), and the repos named
+ * (the run's own, its project's). Sorted and unique.
  */
 export function visibleDeps(sources: readonly GateSource[], projectId: string | null, repos: readonly string[]): string[] {
   const out = new Set<string>();
-  for (const s of sources) if (agentMay(s.access, s, projectId, 'see')) out.add(sourceDep(s.id));
+  for (const s of sources) if (s.description !== null && agentMay(s.access, s, projectId, 'see')) out.add(sourceDep(s.id));
   for (const r of repos) if (typeof r === 'string' && r.trim() !== '') out.add(repoDep(r));
   return [...out].sort();
 }
