@@ -24,6 +24,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 
+import { childEnvWithBootEstateDb, ESTATE_DB_ENGINE_ENV } from '../../../core/governance-store.js';
 import { scrubSecrets } from '../../../mcp/secrets.js';
 import { type ToolboxDocument, yamlQuotedBody } from './document.js';
 
@@ -173,9 +174,12 @@ export class ToolboxProcess {
     const env: Record<string, string> = { PATH: process.platform === 'win32' ? (process.env['PATH'] ?? '') : '/usr/bin:/bin', HOME: this.runDir, TMPDIR: this.runDir, GOMEMLIMIT: '256MiB' };
     if (process.platform === 'win32' && process.env['SystemRoot'] !== undefined) env['SystemRoot'] = process.env['SystemRoot'];
     if (this.doc.secretVar !== null) env[this.doc.secretVar] = yamlQuotedBody(this.secret ?? '');
+    // crew#495: every crew child routes its env through the boot-value helper; the adapter then gets no store at all.
+    const childEnv = childEnvWithBootEstateDb(env);
+    delete childEnv[ESTATE_DB_ENGINE_ENV];
     const child = spawn(this.bin, ['--stdio', '--config', config, '--disable-reload', '--disable-version-check', '--log-level', 'ERROR'], {
       cwd: this.runDir,
-      env,
+      env: childEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     });

@@ -20,7 +20,9 @@ const raw = readFileSync(config, 'utf8').replace(/\$\{(\w+)(:([^}]*))?\}/g, (_m,
 const docs = parseAllDocuments(raw).map((d) => d.toJS());
 const source = docs.find((d) => d.kind === 'source');
 const qp = source.queryParams ?? {};
-const leaked = Object.keys(process.env).filter((k) => k.startsWith('PG') || k === 'WICKED_STATE_HOME' || k === 'GH_TOKEN');
+// What the adapter must never get from the daemon: libpq's PG* defaults, crew's own WICKED_* (the estate store included;
+// only its own WICKED_SRC_<n> placeholder value is given), a token.
+const leaked = Object.keys(process.env).filter((k) => k.startsWith('PG') || (k.startsWith('WICKED_') && !/^WICKED_SRC_\d+$/.test(k)) || k === 'GH_TOKEN');
 
 const send = (msg) => process.stdout.write(`${JSON.stringify(msg)}\n`);
 const text = (o) => ({ type: 'text', text: JSON.stringify(o) });
