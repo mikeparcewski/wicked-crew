@@ -17,7 +17,7 @@ import type {
 } from '../core/types.js';
 import { isCodeWorkDef } from '../api/delivery-index.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
-import { CATALOG_CATEGORIES, CATALOG_EXCLUDED, CATALOG_SEEDS, CATEGORY_ORDER, type CatalogSeed } from './catalog-data.js';
+import { CATALOG_CATEGORIES, CATALOG_EXCLUDED, CATALOG_EXCLUDED_DEFS, CATALOG_SEEDS, CATEGORY_ORDER, type CatalogSeed } from './catalog-data.js';
 
 /** One run as the catalog reads it. Times are unix SECONDS (the served run's `created_at`/`ended_at`). */
 export interface CatalogRun {
@@ -89,6 +89,8 @@ const presetRequiresQe = (p: Preset): boolean =>
 const presetDelivers = (p: Preset): WorkflowCatalogEntry['delivers'] => (p.steps.some((s) => s.catalog === 'build') ? 'pr' : 'report');
 const savedSummary = (p: Preset): string => `Your saved steps: ${p.steps.map((s) => s.id || s.catalog).join(', ')}.`;
 const isExcluded = (name: string): boolean => Object.hasOwn(CATALOG_EXCLUDED, name);
+/** A served def left out (a saved preset of its name is still the operator's, listed under `yours`). */
+const isExcludedDef = (name: string): boolean => isExcluded(name) || Object.hasOwn(CATALOG_EXCLUDED_DEFS, name);
 
 export function buildWorkflowCatalog(input: CatalogInputs): WorkflowCatalogResponse {
   const defs = new Map(input.defs.map((d) => [d.id, d]));
@@ -180,7 +182,7 @@ export function buildWorkflowCatalog(input: CatalogInputs): WorkflowCatalogRespo
   // Never lose a launchable workflow: a served non-system def nobody seeded joins `more`, unless a saved
   // preset of its name shadows it (that one joins `yours` below, as what a launch runs).
   for (const def of input.defs) {
-    if (def.is_system === true || claimed.has(def.id) || isExcluded(def.id) || savedByName.has(def.id)) continue;
+    if (def.is_system === true || claimed.has(def.id) || isExcludedDef(def.id) || savedByName.has(def.id)) continue;
     claimed.add(def.id);
     const id = runCardId(def.id);
     ids.add(id);

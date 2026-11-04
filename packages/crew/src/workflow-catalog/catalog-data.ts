@@ -484,7 +484,14 @@ export const CATALOG_SEEDS: readonly CatalogSeed[] = [
  */
 export const CATALOG_EXCLUDED: Readonly<Record<string, string>> = {
   'distill-learnings': 'runs by itself after each finished run, on that run',
-  // DES-APPS-001: both run on one app, started from that app (DES-CATALOG-002 Q12 leaves them out of v2 too).
+};
+
+/**
+ * Served workflow DEFS the catalog leaves out, while an operator's saved preset of the same name is still listed under
+ * `yours` (it is theirs, and launchable: codex r1 on crew#1349). DES-APPS-001: both run on one app and are started from
+ * that app; DES-CATALOG-002 Q12 leaves them out of v2 too.
+ */
+export const CATALOG_EXCLUDED_DEFS: Readonly<Record<string, string>> = {
   'apps-turn': "runs one message of an app's chat, started from that app's chat",
   'apps-publish': "publishes an app, started from that app's Share",
 };

@@ -149,6 +149,16 @@ describe('buildWorkflowCatalog', () => {
     expect(ids).not.toContain('apps-publish');
   });
 
+  it("keeps an operator's saved preset named like an app's own run, global or in a project (codex r1: never lose it)", () => {
+    const { defs, presets } = served([def('apps-turn'), def('apps-publish')]);
+    const saved = (name: string, scope: string): Preset => ({ ...builtin(name), created_by: 'api', scope, steps: [{ id: 's', catalog: 'build' }] } as unknown as Preset);
+    for (const scope of ['global', 'p']) {
+      const out = buildWorkflowCatalog({ defs, presets: [...presets, saved('apps-turn', scope), saved('apps-publish', scope)], runs: [], actorId: 'local', projectId: scope === 'global' ? null : 'p' });
+      const yours = out.entries.filter((e) => e.category === 'yours').map((e) => [e.id, e.launch]);
+      expect(yours, scope).toEqual(expect.arrayContaining([['apps-publish', { kind: 'run', workflow: 'apps-publish' }], ['apps-turn', { kind: 'run', workflow: 'apps-turn' }]]));
+    }
+  });
+
   it('never loses a launchable workflow: an unseeded non-system def joins more; system and excluded ones do not', () => {
     const { defs, presets } = served([
       def('brand-new'),
