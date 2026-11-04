@@ -203,6 +203,11 @@ export class McpRegistryStore {
     return parseRegistry(text, path);
   }
 
+  /** Resolves once every mutation queued so far has landed (or failed). Never awaited from inside a mutation. */
+  settled(): Promise<void> {
+    return this.tail.then(() => undefined);
+  }
+
   /** Read, apply `fn`, write back, one mutation at a time. `fn`'s result is returned. */
   mutate<T>(fn: (file: McpRegistryFile) => T | Promise<T>): Promise<T> {
     const next = this.tail.then(async () => {

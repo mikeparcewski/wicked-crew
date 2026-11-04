@@ -16,6 +16,7 @@ import {
   EstateMcpError,
   estateMcpExe,
   memoryStoreIsolationNotice,
+  estateKnowledgeEnv,
   resolveMemoryDb,
   sameDirectory,
   resolveMemoryDbPath,
@@ -158,6 +159,19 @@ describe('callEstateTool', () => {
     expect((err as EstateMcpError).spawnCode).toBeUndefined();
   });
 
+  it('a server that exits without reading a large call is a rejected call, never an unhandled EPIPE (codex r3)', async () => {
+    // The describe projector writes whole source generations (megabytes) into estate's stdin; a server that dies at
+    // start-up used to make stdin emit an unhandled 'error' and take the daemon down.
+    const big = { sourceId: 's', generation: 1, docs: [{ key: 'k', sections: [{ key: 'c', text: 'x'.repeat(4 * 1024 * 1024) }] }] };
+    const err = await callEstateTool(
+      'knowledge.replace_source',
+      big,
+      { spawn: () => spawn(process.execPath, ['-e', 'process.stdin.destroy(); process.exit(0)'], { stdio: ['pipe', 'pipe', 'pipe'] }), timeoutMs: 10_000 },
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(EstateMcpError);
+    expect((err as EstateMcpError).message).toMatch(/stopped reading its input|exited before answering/);
+  });
+
   it('carries the OS code when the server cannot be spawned at all (crew#1213)', async () => {
     const err = await callEstateTool(
       'memory.coverage',
@@ -230,6 +244,21 @@ describe('resolveMemoryDbPath', () => {
   it('WICKED_MEMORY_DB still outranks the state home — the explicit instruction is the specific one', () => {
     setCrewStateHome('/scratch/rig-a');
     expect(resolveMemoryDbPath({ WICKED_MEMORY_DB: '/custom/mem.db' })).toBe('/custom/mem.db');
+  });
+
+  // DES-KNOWLEDGE-DATA-001 §4.1: crew now WRITES source structure into the knowledge store, so a rig or a test
+  // daemon must never reach the operator's global one; the default daemon keeps estate's default (garden's CLI).
+  it('the knowledge store takes the same ladder: an isolated home its own, the default home and an explicit pin estate\'s', async () => {
+    const { estateRelayEnv } = await import('../src/mcp/estate-relay.js');
+    expect(estateKnowledgeEnv({})).toEqual({});
+    // An EMPTY value would name a temporary database: the default home pins estate's own default instead (codex r3).
+    expect(estateKnowledgeEnv({ WICKED_KNOWLEDGE_DB: '', WICKED_HOME: '/opt/wk' })).toEqual({ WICKED_KNOWLEDGE_DB: join('/opt/wk', 'knowledge.db') });
+    setCrewStateHome('/scratch/rig-a');
+    expect(estateKnowledgeEnv({ WICKED_KNOWLEDGE_DB: '' })).toEqual({ WICKED_KNOWLEDGE_DB: join('/scratch/rig-a', 'mcp', 'knowledge.db') });
+    expect(estateKnowledgeEnv({})).toEqual({ WICKED_KNOWLEDGE_DB: join('/scratch/rig-a', 'mcp', 'knowledge.db') });
+    expect(estateKnowledgeEnv({ WICKED_KNOWLEDGE_DB: '/custom/k.db' })).toEqual({});
+    const scope = { unit: { runId: 'r', ord: 1, attempt: 1, phase: 'unit-1', seat: 'pi' }, projectId: null, repoId: null, codeGraphDb: null };
+    expect(estateRelayEnv(scope, {})['WICKED_KNOWLEDGE_DB']).toBe(join('/scratch/rig-a', 'mcp', 'knowledge.db'));
   });
 
   // codex review of this PR, MEDIUM: an operator who has always run ONE daemon on a CUSTOM --db

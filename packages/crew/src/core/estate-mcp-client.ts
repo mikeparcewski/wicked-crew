@@ -207,6 +207,27 @@ export function resolveMemoryDb(env: NodeJS.ProcessEnv = process.env): { path: s
 }
 
 /**
+ * (DES-KNOWLEDGE-DATA-001 §4.1) The knowledge store this daemon's estate reads and writes, by the memory store's
+ * ladder: an explicit `WICKED_KNOWLEDGE_DB` wins (it is passed through as it is); an ISOLATED state home gets its
+ * own (`<state home>/mcp/knowledge.db`), so a rig, a test daemon or a second port never writes a source's structure
+ * into the operator's global store; the default state home keeps estate's own default (the operator's global
+ * store, which garden's CLI reads). Every crew spawn of estate (this client, the relay, the describe projector)
+ * takes the same answer. The cross-edge store stays estate's default: memory's edges already live there.
+ */
+export function estateKnowledgeEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const explicit = env['WICKED_KNOWLEDGE_DB'];
+  if (explicit !== undefined && explicit !== '') return {};
+  if (!inDefaultStateHome()) return { WICKED_KNOWLEDGE_DB: join(mcpStateDir(), 'knowledge.db') };
+  // The default home keeps estate's own default; an EMPTY value would name a temporary database instead, so it is
+  // pinned to that default rather than passed through.
+  if (explicit === '') {
+    const home = env['WICKED_HOME'];
+    return { WICKED_KNOWLEDGE_DB: join(home !== undefined && home !== '' ? home : join(homedir(), '.wicked'), 'knowledge.db') };
+  }
+  return {};
+}
+
+/**
  * The one line an isolated daemon prints when its OWN memory store does not exist yet while the
  * operator's global store does: the migration case said out loud instead of silently showing an
  * empty Memories page (codex review of this PR, MEDIUM). `null` whenever there is nothing to say —
@@ -261,16 +282,17 @@ function defaultSpawn(env: NodeJS.ProcessEnv): ChildProcess {
   // `WICKED_MEMORY_DB` with daemon privileges is not this function's business (codex review, LOW).
   // A parent that cannot be created is the server's error to report, and it does: the client caps
   // and surfaces the child's stderr on `EstateMcpError`.
-  if (source !== 'explicit') {
+  const knowledge = estateKnowledgeEnv(env);
+  for (const path of [...(source !== 'explicit' ? [memoryDb] : []), ...Object.values(knowledge)]) {
     try {
-      mkdirSync(dirname(memoryDb), { recursive: true });
+      mkdirSync(dirname(path), { recursive: true });
     } catch {
       // Left to the server to report with its own message.
     }
   }
   return nodeSpawn(estateMcpExe(env), [], {
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...childEnvWithBootEstateDb(env), WICKED_MEMORY_DB: memoryDb },
+    env: { ...childEnvWithBootEstateDb(env), WICKED_MEMORY_DB: memoryDb, ...knowledge },
     windowsHide: true,
   });
 }
@@ -440,6 +462,12 @@ export async function callEstateToolRaw(
           ),
         ),
       );
+    });
+
+    // A server that exits while its input is still buffered (a large tools/call, a crashed start-up) makes stdin
+    // emit EPIPE on its own: without a listener that error is unhandled and takes the daemon down with it.
+    stdin.on('error', (err) => {
+      finish(() => rejectPromise(new EstateMcpError(`wicked-estate-mcp stopped reading its input before ${tool} was sent: ${err.message}`)));
     });
 
     // Handshake + call, then EOF so the server drains its buffered lines and exits cleanly.

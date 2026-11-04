@@ -63,7 +63,16 @@ import { scrubResult } from './redact.js';
 import { UpstreamCallError } from './upstream-error.js';
 import type { McpRegistry } from './registry.js';
 import { scrubSecrets } from './secrets.js';
-import { ESTATE_PROPOSAL_TOOL, proposalIdOf, rpcErrorEnvelope, scopeEstateArgs, type EstateRelay } from './estate-relay.js';
+import {
+  ESTATE_PROPOSAL_TOOL,
+  ESTATE_VISIBLE_TOOLS,
+  proposalIdOf,
+  releaseVisible,
+  rpcErrorEnvelope,
+  scopeEstateArgs,
+  type EstateRelay,
+  type VisibleRelease,
+} from './estate-relay.js';
 import { type DataGate, GateTokenError } from '../knowledge/gate/gate.js';
 
 /** The bus event each call record rides. */
@@ -407,7 +416,18 @@ export class McpBroker {
     this.used.set(unitKey, used + 1);
     while (this.used.size > BUDGET_UNITS_MAX) this.used.delete(this.used.keys().next().value as string);
 
-    const args = scopeEstateArgs(tool, body.args ?? {}, scope);
+    // (DES-KNOWLEDGE-DATA-001 §4.3) A knowledge read carries the unit's visible set, read from the registry now.
+    const gated = ESTATE_VISIBLE_TOOLS.has(tool);
+    let visible: string[] = [];
+    if (gated) {
+      try {
+        visible = await relay.visibleFor(scope);
+      } catch (err) {
+        this.deps.log?.(`[mcp] ${body.subject}: the unit's visible set could not be read: ${message(err)}`);
+        return this.refuse(span, 'guard_error', 'guard_error', 'broker:estate', [], 'the registry could not be read to decide what this step may see, so nothing ran', 'try again, and report it if it persists', null, null);
+      }
+    }
+    const args = scopeEstateArgs(tool, body.args ?? {}, scope, visible);
     let result: Record<string, unknown>;
     try {
       const answer = await relay.run({ tool, args, scope, timeoutMs: relay.timeoutMs });
@@ -416,6 +436,18 @@ export class McpBroker {
       const failure = classifyUpstreamError(err);
       const timedOut = /did not answer .* within/.test(failure.message);
       return this.refuse(span, 'upstream_error', 'allow', 'broker:estate', [], `mcp:estate/${tool} failed: ${failure.message}`, write ? 'keep the proposal in your output; it may or may not have landed' : 'continue without it, or try again later', timedOut ? 'timeout' : failure.errorClass, null);
+    }
+    if (gated) {
+      // The release re-check, against a FRESH read: a switch turned off while estate answered holds now.
+      let released: VisibleRelease;
+      try {
+        released = releaseVisible(tool, result, new Set(await relay.visibleFor(scope)));
+      } catch (err) {
+        this.deps.log?.(`[mcp] ${body.subject}: the release check could not run: ${message(err)}`);
+        released = { ok: false, reason: 'the registry could not be read to re-check what this step may see, so the answer is withheld' };
+      }
+      if (!released.ok) return this.refuse(span, 'withheld', 'deny', 'broker:estate-visible', ['estate:visible'], released.reason, 'work from what this step may see; a person decides which sources a project sees on the source sheet', null, null);
+      result = released.result;
     }
     const scrubbed = scrubResult(result, []);
     const raw = JSON.stringify(scrubbed);
@@ -445,7 +477,7 @@ export class McpBroker {
   /**
    * `mcp:<source>/<tool>` through the data gate (DES-KNOWLEDGE-DATA-001 §7, §8.1). The token is resolved to its
    * unit and run project by the ENGINE; the engine then judges the exact subject for that unit (absent = denied:
-   * D-7 for every Apps unit, or an operator's policy; a first-use ask is admitted, the per-source switch being
+   * an operator's policy, or an Apps unit's write tool, D-7 as §9.3 narrows it; a first-use ask is admitted, the per-source switch being
    * the consent); the unit's budget is spent; the gate answers (structure from crew's stored catalog, or one
    * read through the policy, the scheduler and the adapter); the call is recorded like any brokered call (never
    * its arguments), and a read's rows are released only after the gate's two-step record.
@@ -472,7 +504,7 @@ export class McpBroker {
     span.verdict = { decision: 'allow', subject: body.subject, class: 'read', ruleIds: [], obligations: [], claimId: '', unit: scope.unit };
     const judged = admitted.get(body.subject);
     if (judged === undefined) {
-      return this.refuse(span, 'denied', 'deny', 'engine:gated-tool', ['engine:gated-tool'], `${body.subject} is refused for this unit by the engine (a unit of an Apps run gets no source tool; otherwise a policy denies it)`, 'work from the files and the task as given', null, null);
+      return this.refuse(span, 'denied', 'deny', 'engine:gated-tool', ['engine:gated-tool'], `${body.subject} is refused for this unit by the engine (an operator policy, or an engine that predates DES-KNOWLEDGE-DATA-001 §9.3 and gives an Apps run no source tool)`, 'work from the files and the task as given', null, null);
     }
     if (judged === 'ask') {
       return this.refuse(span, 'pending_approval', 'ask', 'engine:gated-tool', ['engine:gated-tool'], `an operator policy asks for approval of ${body.subject}; a live source's tools are allowed by its switches, never by a per-call approval`, 'the operator changes the policy, or the switches on the source sheet', null, null);
