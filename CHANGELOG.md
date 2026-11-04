@@ -369,6 +369,14 @@ mentioned only where a daemon release depends on them.
   local program the person installed).
 
 ### Security
+- **Linked-issue text cannot end its background block early.** At launch the daemon appends the issues an intent
+  names inside a marked background block. Every HTML comment in the issue text it appends (title, state, body,
+  comments, authors, a read error) is now escaped as `&lt;!--` and still reads as written, so that text can neither
+  close the block nor open another one. The delivery text reads the person's intent as the words before the
+  daemon's first block, so the PR title, body and closing references (`Fixes #N`) come from the intent alone,
+  for runs recorded earlier too. A workflow launch whose problem carries an earlier run's blocks (a retry sends
+  the earlier run's whole problem) drops them before it reads the issues again, so they are never stacked or
+  passed on. The open marker is the daemon's: words after it are not read as the intent.
 - **`@modelcontextprotocol/sdk` 1.31.0 -> 1.32.2, and the ask MCP endpoint caps a call's argument elements.**
   GHSA-46jr-4wx8-v453 (high): the SDK validated every array element and object key of a tool call, so one request
   inside the body limit could exhaust the heap; the fix is an opt-in `maxToolInputElements`, which crew's one HTTP
