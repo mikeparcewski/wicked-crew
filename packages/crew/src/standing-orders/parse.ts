@@ -95,6 +95,12 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
       const decided = new Promise<TurnEnd | null>((resolve) => {
         decide = resolve;
       });
+      // Resolves at the deadline or a park, never at a terminal frame: what may end the turn while the
+      // launch is still pending (an early terminal frame must not disarm the deadline, codex r2).
+      let stop: () => void = () => undefined;
+      const stopped = new Promise<null>((resolve) => {
+        stop = () => resolve(null);
+      });
       off = adapter.onEvent((e: CoreEvent) => {
         const ev = e as unknown as { type?: string; session?: string; stepStatus?: string; failureKind?: string };
         if (ev.session !== sessionId && (runId === undefined || ev.session !== runId)) return;
@@ -111,6 +117,7 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
           // answer" (crew#1311).
           end = { ok: false, parked: true };
           decide(end);
+          stop();
         }
       });
       // Inside the try: instructions that fail to build (a project list) are the turn's 502, never an unhandled 500.
@@ -119,6 +126,7 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
       timer = setTimeout(() => {
         timedOut = true;
         decide(null);
+        stop();
       }, timeoutMs);
       const launch = adapter.launchRun({
         problem: input.problem,
@@ -143,8 +151,8 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
       let launched: string | null;
       try {
         // The deadline or a park ends the turn even while the launch is pending; a terminal frame
-        // waits for the launch, which names the run.
-        launched = await Promise.race([launch, decided.then((d) => (d === null || d.parked === true ? null : launch))]);
+        // waits for the launch, which names the run (and the deadline still bounds that wait).
+        launched = await Promise.race([launch, stopped]);
       } catch (err) {
         return { ok: false, code: 502, error: `the ${seat} seat could not open: ${err instanceof Error ? err.message : String(err)}` };
       }

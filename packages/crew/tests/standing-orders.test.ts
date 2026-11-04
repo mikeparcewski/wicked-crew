@@ -618,6 +618,24 @@ describe('the seat parse', () => {
     expect(calls).toEqual([`cancel ${sessionId}`, `cancel ${sessionId}`]);
   });
 
+  it('a terminal frame before a launch that hangs leaves the deadline armed: the timeout 502, no listener left, and no cancel of the ended run (codex r2)', async () => {
+    const { adapter, calls } = fakeAdapter(null);
+    let listener: ((e: CoreEvent) => void) | null = null;
+    (adapter as unknown as { onEvent: unknown }).onEvent = (fn: (e: CoreEvent) => void) => { listener = fn; return () => { listener = null; }; };
+    let release: (id: string) => void = () => undefined;
+    let sessionId = '';
+    (adapter as unknown as { launchRun: unknown }).launchRun = (input: Record<string, unknown>) => {
+      sessionId = String(input['sessionId']);
+      listener?.({ type: 'sessionCompleted', session: sessionId } as unknown as CoreEvent);
+      return new Promise<string>((r) => { release = r; });
+    };
+    expect(await seatParser({ adapter, roster, timeoutMs: 30 })('x')).toMatchObject({ ok: false, code: 502, error: 'the claude seat did not answer in 0.03 s' });
+    expect(listener).toBeNull();
+    release(sessionId);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(calls).toEqual([]);
+  });
+
   it('a run that parks and then ends is not cancelled: the turn is still the park\'s failure (codex r1)', async () => {
     const { adapter, calls } = fakeAdapter(null);
     let listener: ((e: CoreEvent) => void) | null = null;
