@@ -12,6 +12,24 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **Data shapes: profile a source, review its shapes, see them on a Knowledge map (api-types 0.186.0,
+  DES-KNOWLEDGE-DATA-001 §10, build B4).** `POST /sources/:name/profile` (a human operator's only; 403
+  `profile_human_only`) profiles a described native Postgres source through the data gate's person read at the
+  `profile` priority: fixed aggregate SQL only (`count(*)`, `count(c)`, `count(DISTINCT c)`, and key overlap as
+  `count(DISTINCT a.c) FILTER (WHERE EXISTS (… b.k = a.c))`), so every answer is a count and no value enters crew.
+  It keeps bands only (rows by order of magnitude, nulls to the nearest 5 %, a cardinality class, key candidate,
+  an overlap band), finds joins (declared foreign keys, and `<x>_id` by name and type when most or all values
+  match) and exact-name `describes` candidates in the repos' code graphs, and files ONE `knowledge` proposal per
+  relation into estate's review queue (`class: concept`, scoped to the source's registry id, `relate[]` to the
+  relation's catalog document and each join, `relate_code[]` to each code entity; estate derives the deps at
+  approve). Nothing is knowledge until a person approves it: `POST /proposals/:id/{approve,reject}` refuses an
+  agent-kind actor on a `knowledge` proposal (403 `knowledge_review_human_only`). An identical shape (same bands and
+  links) already in the queue, declined ones included, is not filed again; a source whose structure estate does not
+  hold yet answers 409 `not_in_knowledge`; a source switched off, removed or saved again mid-profile stops the next
+  read and files nothing (409 `source_changed`). Audited
+  `knowledge.source.profiled` (counts only). `GET /knowledge/map` (human-only) answers the source catalogs and the
+  APPROVED shapes estate holds live, with their typed edges (`knowledge.neighbors`, depth 2), for Understand's
+  Knowledge view; a pending or declined shape is never in it.
 - **Apps: a chat message is one governed turn (DES-APPS-001 §6.2, §9.2, K5; api-types 0.185.0; core-ts ^0.15.22).**
   `POST /apps/:app/turns {base, message, about?}` (now HUMAN operator only: an agent-kind token gets `403
   human_only`, so no seat can drive an app's changes) launches one `apps-turn` run (build → check → review on a
