@@ -12,7 +12,7 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
-- **Apps: Publish, the share link (api-types 0.181.0, DES-APPS-001 §9.3, slice K6; core-ts ^0.15.22).**
+- **Apps: Publish, the share link (api-types 0.182.0, DES-APPS-001 §9.3, slice K6; core-ts ^0.15.22).**
   `POST /apps/:app/publish` (a human operator) binds the head tree and the publish settings. Those settings are the
   targets, the site's address (the share link), the issuer and client, the audience and any embed origins. The route
   then runs the deterministic publish check and launches an `apps-publish` run: QE is forced by the preset, and the

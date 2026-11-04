@@ -15587,7 +15587,7 @@ export interface AppActionRevokeResponse {
 
 /** One reason a check refused a tree. `path` is a JSON path into `apps.json`, or a repo path. */
 export interface AppCheckFinding {
-  /** (api-types 0.181.0) `publish`: the publish check (`POST /apps/:app/publish`, path `$`). */
+  /** (api-types 0.182.0) `publish`: the publish check (`POST /apps/:app/publish`, path `$`). */
   stage: 'spec' | 'files' | 'policy' | 'source' | 'publish';
   code: string;
   path: string;
@@ -15673,7 +15673,7 @@ export interface AppErrorBody {
     | 'unknown_action'
     | 'unknown_record'
     | 'missing_grants'
-    // (api-types 0.181.0, K6) Publish: one runs already; the token is not this publish step's; no publish runs as
+    // (api-types 0.182.0, K6) Publish: one runs already; the token is not this publish step's; no publish runs as
     // that run; this crew carries no runtime or server artifact to build with; no Teams package was produced; the
     // app's repository could not be pointed at the head (nothing launched); this run's produce step is already running;
     // the run's worktree did not start on the bound commit (the engine's `runBaseResolved`).
@@ -15831,7 +15831,7 @@ export interface AppPublishBody {
   embedOrigins?: string[];
 }
 
-/** (api-types 0.181.0, K6 publish run) `POST /apps/:app/publish` 202: the `apps-publish` run, bound to the head tree and this manifest digest. */
+/** (api-types 0.182.0, K6 publish run) `POST /apps/:app/publish` 202: the `apps-publish` run, bound to the head tree and this manifest digest. */
 export interface AppPublishResponse {
   runId: string;
   manifestDigest: string;
