@@ -301,8 +301,9 @@ mentioned only where a daemon release depends on them.
   as `{applies_to: ["mcp:support-pg/execute_sql"], effect: "deny", trigger: {contains: "salary"}}` never fired and
   the read ran. The gate now judges each call WITH its arguments through the engine's `judgeMcpCall` (wicked-core,
   recorded nowhere): such a deny answers `denied` and nothing runs; subject rules, the first-use admission
-  (crew#1333) and an asking rule behave as before. On an engine without `judgeMcpCall` the gate keeps the list's
-  judgment, where an argument-only rule cannot fire.
+  (crew#1333) and an asking rule behave as before. A rows call's parameter must be a finite number (JSON has no
+  Infinity; the engine is sent `null` for one), so what runs is never other than what was judged. On an engine
+  without `judgeMcpCall` the gate keeps the list's judgment, where an argument-only rule cannot fire.
 - **A live source's first-use ask is admitted by its switches on a real engine (crew#1333).** With "Agents can query
   this source" on, a chat's `mcp:<source>/execute_sql` (and the structure tool) was refused `pending_approval` on any
   daemon with the `mcp-defaults` pack, and studio has no way to approve it. The data gate turned an engine ask into

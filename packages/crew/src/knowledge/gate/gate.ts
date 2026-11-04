@@ -239,22 +239,21 @@ export class DataGate {
       }
     };
     const out = new Map<string, 'allow' | 'ask'>();
-    const take = (t: { subject?: unknown; decision?: unknown; firstUseOnly?: unknown }): void => {
-      if (typeof t.subject !== 'string') return;
-      if (t.decision === 'allow') out.set(t.subject, 'allow');
-      else if (t.decision === 'ask') out.set(t.subject, t.firstUseOnly === true ? 'allow' : 'ask');
+    const take = (subject: unknown, t: { decision?: unknown; firstUseOnly?: unknown }): void => {
+      if (typeof subject !== 'string') return;
+      if (t.decision === 'allow') out.set(subject, 'allow');
+      else if (t.decision === 'ask') out.set(subject, t.firstUseOnly === true ? 'allow' : 'ask');
     };
     const judge = this.deps.judge?.() ?? null;
     if (judge !== null) {
-      for (const c of calls) {
-        take(JSON.parse(await engine(judge, { token, call: { ...wire(c), args: c.args ?? {} } })) as { subject?: unknown; decision?: unknown; firstUseOnly?: unknown });
-      }
+      // Keyed by the call asked about: the verdict answers exactly that one call.
+      for (const c of calls) take(`mcp:${c.server}/${c.tool}`, JSON.parse(await engine(judge, { token, call: { ...wire(c), args: c.args ?? {} } })) as { decision?: unknown; firstUseOnly?: unknown });
       return out;
     }
     const lister = this.deps.lister();
     if (lister === null) return null;
     const judged = JSON.parse(await engine(lister, { token, calls: calls.map(wire) })) as { tools?: Array<{ subject?: unknown; decision?: unknown; firstUseOnly?: unknown }> };
-    for (const t of judged.tools ?? []) take(t);
+    for (const t of judged.tools ?? []) take(t.subject, t);
     return out;
   }
 
@@ -326,8 +325,10 @@ export class DataGate {
     if (typeof sqlText !== 'string' || sqlText.trim() === '' || Buffer.byteLength(sqlText, 'utf8') > UNIT_SQL_MAX) {
       return refusal('bad_request', `sql is a non-empty string of at most ${UNIT_SQL_MAX} bytes`);
     }
-    if (!Array.isArray(rawParams) || rawParams.length > UNIT_PARAMS_MAX || !rawParams.every((p) => p === null || ['string', 'number', 'boolean'].includes(typeof p))) {
-      return refusal('bad_request', `params is an array of at most ${UNIT_PARAMS_MAX} strings, numbers, booleans or nulls`);
+    // A number must be finite: JSON has no Infinity (an overflowing literal parses to it), so the engine judged the
+    // call's arguments with a null there (crew#1337), and the read must never run a value other than the judged one.
+    if (!Array.isArray(rawParams) || rawParams.length > UNIT_PARAMS_MAX || !rawParams.every((p) => p === null || typeof p === 'string' || typeof p === 'boolean' || (typeof p === 'number' && Number.isFinite(p)))) {
+      return refusal('bad_request', `params is an array of at most ${UNIT_PARAMS_MAX} strings, finite numbers, booleans or nulls`);
     }
     if (s.runtime === 'toolbox' && rawParams.length > 0) return refusal('params_unsupported', `${s.name}'s execute_sql binds no parameters: write the values into the query`);
     if (s.dialect !== 'postgres' || !s.queryable) return refusal('query_off', `agents may not read rows from ${s.name} in this release`);

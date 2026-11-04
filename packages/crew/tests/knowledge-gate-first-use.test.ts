@@ -119,6 +119,7 @@ describe.skipIf(process.platform === 'win32')('the data gate admits a first-use 
   let app: FastifyInstance;
   /** Whether the engine has `judgeMcpCall` (false: one that predates crew#1337). */
   let judgeArgs = true;
+  let record: SourceReadLog;
 
   /** The real engine's evaluation of `calls` for the token's unit (`Core.previewMcpCalls` for its cell). */
   const judge = async (token: string, calls: unknown[]) => {
@@ -212,7 +213,7 @@ describe.skipIf(process.platform === 'win32')('the data gate admits a first-use 
       toolboxProbe: (c, s) => (prober as DataGate).toolboxProbe(c, s),
     });
     const audit = new AuditLog(join(base, 'audit.log'), () => undefined);
-    const record = new SourceReadLog(mcpDir);
+    record = new SourceReadLog(mcpDir);
     sup = new ToolboxSupervisor({ binary: async () => bin, runRoot: join(mcpDir, 'adapters', 'toolbox', 'run') });
     const gate = new DataGate({
       store,
@@ -325,10 +326,23 @@ describe.skipIf(process.platform === 'win32')('the data gate admits a first-use 
     await upsert({ id: 'SEC-NO-SALARY', applies_to: ['mcp:tb/execute_sql'], effect: 'deny', severity: 'critical', trigger: { contains: 'salary' } });
     const salary = 'SELECT t.a AS salary, t.b FROM s.t AS t';
     try {
+      const reads = (await record.all())?.length;
       const denied = await call('wmt_balanced', 'mcp:tb/execute_sql', { sql: salary });
       expect(denied.status, JSON.stringify(denied.body)).toBe(403);
       expect(denied.body).toMatchObject({ outcome: 'denied' });
       expect(denied.answer).toBeNull();
+      // Refused before the gate's read: no read record, so no policy check, slot or process was spent on it.
+      expect((await record.all())?.length).toBe(reads);
+      // A number JSON cannot hold (an overflowing literal parses to Infinity, which the engine is sent as null) is
+      // refused: what runs is never other than what was judged.
+      const raw = await app.inject({
+        method: 'POST',
+        url: '/api/v1/mcp/call',
+        headers: { 'content-type': 'application/json' },
+        payload: `{"token":"wmt_balanced","subject":"mcp:tb/execute_sql","args":{"sql":"SELECT t.a FROM s.t AS t WHERE t.a < $1","params":[1e400]}}`,
+      });
+      const rawText = (raw.json() as McpCallResponse & { result?: { content?: Array<{ text: string }> } }).result?.content?.[0]?.text;
+      expect(rawText !== undefined ? JSON.parse(rawText) : raw.json(), raw.body).toMatchObject({ refused: 'bad_request' });
       // The same read without the word runs, and the tool stays listed: the list judges with no arguments.
       const ok = await call('wmt_balanced', 'mcp:tb/execute_sql', { sql: Q });
       expect(ok.status, JSON.stringify(ok.body)).toBe(200);
