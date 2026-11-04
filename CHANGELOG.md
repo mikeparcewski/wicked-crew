@@ -37,9 +37,11 @@ mentioned only where a daemon release depends on them.
   any non-human actor, whatever its trust. **Generations:** every registry write keeps the file it replaces as
   `registry.json.<n>` (the last 10). `GET /mcp/registry/generations` and `POST /mcp/registry/restore {generation}`
   (human operator only, audited `mcp.registry.restored`) restore one, failing closed: approvals whose tool schema
-  differs are withdrawn first, every source's "query" switch and Allow writes come back off, a server whose secret
-  resolves to nothing comes back disabled (`secret_missing`), and an unreadable generation is refused with nothing
-  changed.
+  differs (or that name a server the generation brings back unregistered) are withdrawn first, under every affected
+  server's lock; every source's "query" switch and Allow writes come back off; a server whose secret resolves to
+  nothing comes back disabled (`secret_missing`); an unreadable generation, or one holding a record crew could not
+  have written, is refused with nothing changed. A save of a name that is not registered withdraws any approval still
+  naming it, so a new registration never inherits one.
 - **Data sources: Test connection, and ask a question of the data (api-types 0.179.0, operator 2026-11-03).**
   `POST /sources/:name/test` re-runs connect, describe and the read-policy check on a saved `sql` or `graphql` source
   with its saved credentials resolved now: the fresh description is saved (it replaces Describe again), and the

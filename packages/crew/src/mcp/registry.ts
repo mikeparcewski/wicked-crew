@@ -119,7 +119,10 @@ export interface McpCallableTool {
 /** A kept generation read, normalized and validated once ({@link McpRegistry.planRestore}). */
 export interface RestorePlan {
   readonly generation: number;
-  /** The generation's servers, validated, with every source's switches already off. */
+  /**
+   * The generation's servers, validated, with every source's switches already off. Their `enabled` is still the
+   * generation's: the commit ({@link McpRegistry.restore}) disables a server whose secret does not resolve then.
+   */
   readonly servers: readonly McpServerRecord[];
   readonly queryReset: readonly string[];
   readonly writesReset: readonly string[];
