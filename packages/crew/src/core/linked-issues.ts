@@ -18,7 +18,9 @@
  *
  * The block is fenced by {@link LINKED_ISSUES_OPEN} / {@link LINKED_ISSUES_CLOSE} so the deliver
  * text can take it back out ({@link stripLinkedIssues}): a PR body names the intent, not the issue
- * text the daemon attached to it.
+ * text the daemon attached to it. Issue text is written by whoever filed or commented on the issue,
+ * not by the person launching, so it can never end the block early or open another one: every
+ * HTML comment in it is made inert ({@link inertIssueText}) before it enters the block.
  */
 
 import { issueRefs } from './deliver-text.js';
@@ -68,6 +70,16 @@ interface GhIssue {
   comments?: Array<{ author?: { login?: unknown } | null; body?: unknown }> | null;
 }
 
+/**
+ * Issue text made safe to sit inside the block: every `<!--` becomes `&lt;!--`, so the block's
+ * content holds no HTML comment at all, and so neither of its markers nor anything shaped like one.
+ * The text stays readable (an issue template's `<!-- … -->` reads as written). The result contains
+ * no `<!--`: the replacement has no `<`, and `<!--` cannot overlap itself.
+ */
+export function inertIssueText(text: string): string {
+  return text.replaceAll('<!--', '&lt;!--');
+}
+
 function capped(text: string, max: number): string {
   const t = text.replace(/\r\n?/g, '\n').trim();
   return t.length <= max ? t : `${t.slice(0, max).trimEnd()}\n_(cut at ${max} characters)_`;
@@ -84,7 +96,7 @@ async function readOne(ref: string, cwd: string | undefined, exec: GhExec): Prom
   const target = ghTarget(ref);
   const fail = (error: string): { issue: LinkedIssue; text: string } => ({
     issue: { ref, resolved: false, error },
-    text: `### ${ref}: could not be read (${error})`,
+    text: inertIssueText(`### ${ref}: could not be read (${error})`),
   });
   if (target === null) return fail('no owner/repo to read it from');
   if (target.length === 1 && cwd === undefined) return fail('the run has no repository to read it from');
@@ -121,7 +133,8 @@ async function readOne(ref: string, cwd: string | undefined, exec: GhExec): Prom
       lines.push('', `- ${who}: ${text.replace(/\n/g, '\n  ')}`);
     }
   }
-  const text = lines.join('\n');
+  // Title, state, body, comments and their authors are all issue text: made inert as one string.
+  const text = inertIssueText(lines.join('\n'));
   return { issue: { ref, resolved: true, title, chars: text.length }, text };
 }
 
@@ -174,17 +187,23 @@ export async function resolveLinkedIssues(
     '',
     LINKED_ISSUES_PREFACE,
     '',
-    sections.join('\n\n'),
+    // Each section is already inert; this keeps the invariant for the whole content (a no-op today).
+    inertIssueText(sections.join('\n\n')),
     LINKED_ISSUES_CLOSE,
   ].join('\n');
   return { issues: [...read.map((r) => r.issue), ...skipped, ...excluded], block };
 }
 
-/** `problem` with the daemon's linked-issues block (if any) taken back out. */
+/**
+ * `problem` with the daemon's linked-issues block taken back out: the text BEFORE its first
+ * {@link LINKED_ISSUES_OPEN}. The daemon appends its blocks after the person's words (the intent,
+ * then this block, then the learnings block), so nothing from the first open marker on is theirs.
+ * Cutting there, rather than at the first close marker, also holds for a block recorded before its
+ * text was made inert, and for the stacked blocks a retry carries (it relaunches with the earlier
+ * run's whole problem). The working document's Goal reads the intent the same way (`goalFrom`).
+ */
 export function stripLinkedIssues(problem: string): string {
   const at = problem.indexOf(LINKED_ISSUES_OPEN);
   if (at === -1) return problem;
-  const end = problem.indexOf(LINKED_ISSUES_CLOSE, at);
-  const tail = end === -1 ? '' : problem.slice(end + LINKED_ISSUES_CLOSE.length);
-  return `${problem.slice(0, at)}${tail}`.trimEnd();
+  return problem.slice(0, at).trimEnd();
 }
