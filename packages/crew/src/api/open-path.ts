@@ -7,7 +7,7 @@
 // receive the path verbatim as one argument.
 
 import { spawn } from 'node:child_process';
-import { realpathSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 
@@ -45,33 +45,56 @@ export function isInsideRoot(root: string, target: string): boolean {
   return rel.split(sep)[0] !== '..';
 }
 
+/** `target` under `root` by the path text alone (both resolved, nothing read from disk). */
+function lexicallyInside(root: string, target: string): boolean {
+  const rel = relative(resolve(root), resolve(target));
+  return rel === '' || (!isAbsolute(rel) && rel.split(sep)[0] !== '..');
+}
+
 /**
- * {@link isInsideRoot} for a DENY check (crew#1324): may `target` be inside `root`? Both are judged in the
- * filesystem's own spelling (`realpathSync.native`): on a case-insensitive filesystem (macOS, Windows) `realpathSync`
- * keeps the caller's spelling, so `<root's parent>/APPS/...` names a file inside `<root's parent>/apps` and would
- * read as outside it. A missing leaf is judged through its deepest existing ancestor, as there. Any filesystem error
- * other than ENOENT answers `true`: a deny check that cannot tell fails closed.
+ * {@link isInsideRoot} for a DENY check (crew#1324): may `target` be inside `root`? Judged by directory IDENTITY
+ * (device and inode), not by spelling: `target`'s deepest existing ancestor, links resolved, is walked up to the
+ * filesystem root, and any directory on the way that IS `root` answers `true`. So another spelling of a name on a
+ * case-insensitive or casefolded filesystem (macOS, Windows, ext4 `+F`), a link, or a bind mount cannot read as
+ * outside, and two distinct directories whose names differ only in case are never confused. When `root` does not
+ * exist nothing on disk is inside it, and when it cannot be read its membership is judged by the path text; a
+ * `target` that cannot be read fails closed (`true`).
  */
 export function mayBeInsideRoot(root: string, target: string): boolean {
-  const spelt = (p: string): string | null => {
+  const idOf = (p: string): string => {
+    const s = statSync(p, { bigint: true });
+    return `${s.dev}:${s.ino}`;
+  };
+  let rootId: string;
+  try {
+    rootId = idOf(root);
+  } catch {
+    return lexicallyInside(root, target);
+  }
+  /** The deepest existing ancestor of `p` (or `p`), links resolved; `null` when it cannot be read. */
+  const existing = (p: string): string | null => {
     const abs = resolve(p);
     try {
-      return realpathSync.native(abs);
+      return realpathSync(abs);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') return null;
       const parent = dirname(abs);
-      if (parent === abs) return abs;
-      const rp = spelt(parent);
-      return rp === null ? null : join(rp, basename(abs));
+      return parent === abs ? null : existing(parent);
     }
   };
-  const realRoot = spelt(root);
-  const realTarget = spelt(target);
-  if (realRoot === null || realTarget === null) return true;
-  const rel = relative(realRoot, realTarget);
-  if (rel === '') return true;
-  if (isAbsolute(rel)) return false;
-  return rel.split(sep)[0] !== '..';
+  let cur = existing(target);
+  if (cur === null) return true;
+  for (;;) {
+    try {
+      if (idOf(cur) === rootId) return true;
+    } catch {
+      return true;
+    }
+    const parent = dirname(cur);
+    if (parent === cur) return false;
+    cur = parent;
+  }
 }
 
 /** The session fields the root set is derived from — structural on purpose, so this stays a leaf

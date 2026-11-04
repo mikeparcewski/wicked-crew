@@ -260,11 +260,12 @@ export class AppStore {
   }
 
   /**
-   * (crew#1324) Where app files live on disk: the apps root, and each app's own repo root (an app made under an
-   * earlier `WICKED_CREW_APPS_ROOT` keeps its root). A turn's worktree is under its app's root.
+   * (crew#1324) Each app's repository: its registry id (`''` until registered) and its root, where its files and its
+   * turns' worktrees live (an app made under an earlier `WICKED_CREW_APPS_ROOT` keeps its root). A repo made by
+   * `POST /repos {create: true}` under the apps root is no app's: it has no record here.
    */
-  fileRoots(): string[] {
-    return [this.appsRoot, ...Object.values(this.state.apps).map((a) => a.root)];
+  appRepos(): Array<{ repoId: string; root: string }> {
+    return Object.values(this.state.apps).map((a) => ({ repoId: a.repoId, root: a.root }));
   }
 
   private summary(a: StoredApp): AppSummary {

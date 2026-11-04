@@ -6,7 +6,7 @@
 //   refused first) its status and code, never the policy detail that names the relation. A human reads it whole.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -81,6 +81,7 @@ describe('crew#1324: a non-human GET /runs/:id/files and /diff refuse an app rep
   let worktree: string;
   let external: string;
   let oldRoot: string;
+  let plain: string;
   let other: string;
   let caseVariant: string | null;
   let app: FastifyInstance;
@@ -89,31 +90,39 @@ describe('crew#1324: a non-human GET /runs/:id/files and /diff refuse an app rep
   beforeAll(async () => {
     base = mkdtempSync(join(tmpdir(), 'kd-sec-views-2-files-'));
     const appsRoot = join(base, 'apps');
-    appRoot = join(appsRoot, 'desk');
-    mkdirSync(appRoot, { recursive: true });
-    git(appRoot, 'init', '-q');
-    git(appRoot, 'commit', '-q', '--allow-empty', '-m', 'v0');
-    const baseCommit = git(appRoot, 'rev-parse', 'HEAD').trim();
-    // A finished turn: its worktree is gone and its work is on its run branch.
-    git(appRoot, 'checkout', '-q', '-b', 'wicked/run-gone');
-    writeApp(appRoot);
-    git(appRoot, 'add', '.');
-    git(appRoot, 'commit', '-q', '-m', 'the builder’s tree');
-    git(appRoot, 'checkout', '-q', 'main');
-    // A live turn: the engine's worktree under the app repo, the builder's files on disk.
-    worktree = join(appRoot, 'wicked-worktrees', 'run-app');
-    git(appRoot, 'worktree', 'add', '-q', '-b', 'wicked/run-app', worktree);
-    writeApp(worktree);
-    // codex r1: a worktree of the app repo outside its root (only the run's repository says it is an app's).
-    external = join(base, 'ext-wt');
-    git(appRoot, 'worktree', 'add', '-q', '-b', 'wicked/run-ext', external);
-    writeApp(external);
-    // codex r1: an app made under an earlier apps root, recorded in the store (the root moved since).
     const stateFile = join(base, 'daemon-apps.json');
     const registry = { register: async (name: string, root: string) => repo(name, root), idTaken: async () => false };
+    // codex r1: an app made under an earlier apps root, recorded in the store (the root moved since).
     await new AppStore({ stateFile, appsRoot: join(base, 'old-apps'), registry }).create({ slug: 'old', name: 'Old', projectId: 'p1', actor: HUMAN });
     oldRoot = join(base, 'old-apps', 'old');
     writeApp(join(oldRoot, 'stray'));
+    // codex r2: a recorded app whose root can no longer be read (a file where its parent was) blocks nothing else.
+    await new AppStore({ stateFile, appsRoot: join(base, 'gone-apps'), registry }).create({ slug: 'gone', name: 'Gone', projectId: 'p1', actor: HUMAN });
+    rmSync(join(base, 'gone-apps'), { recursive: true, force: true });
+    writeFileSync(join(base, 'gone-apps'), 'not a directory\n');
+    // The app the runs work on, made by crew under the current apps root.
+    const store = new AppStore({ stateFile, appsRoot, registry });
+    await store.create({ slug: 'desk', name: 'Desk', projectId: 'p1', actor: HUMAN });
+    appRoot = join(appsRoot, 'desk');
+    const baseCommit = git(appRoot, 'rev-parse', 'main').trim();
+    // A finished turn: its worktree is gone and its work is on its run branch.
+    const scratch = join(base, 'scratch-wt');
+    git(appRoot, 'worktree', 'add', '-q', '-b', 'wicked/run-gone', scratch, 'main');
+    writeApp(scratch);
+    git(scratch, 'add', '.');
+    git(scratch, 'commit', '-q', '-m', 'the builder’s tree');
+    git(appRoot, 'worktree', 'remove', '--force', scratch);
+    // A live turn: the engine's worktree under the app repo, the builder's files on disk.
+    worktree = join(appRoot, 'wicked-worktrees', 'run-app');
+    git(appRoot, 'worktree', 'add', '-q', '-b', 'wicked/run-app', worktree, 'main');
+    writeApp(worktree);
+    // codex r1: a worktree of the app repo outside its root (only the run's repository says it is an app's).
+    external = join(base, 'ext-wt');
+    git(appRoot, 'worktree', 'add', '-q', '-b', 'wicked/run-ext', external, 'main');
+    writeApp(external);
+    // codex r2: a repo `POST /repos {create: true}` made under the apps root is no app's.
+    plain = (await store.createRepo('plain')).root;
+    writeFileSync(join(plain, 'notes.md'), 'plain notes\n');
     // A run on another repo, with a link into the app's worktree (pi r1).
     other = join(base, 'other');
     mkdirSync(other);
@@ -133,13 +142,14 @@ describe('crew#1324: a non-human GET /runs/:id/files and /diff refuse an app rep
       view('run-ext', external, 'desk'),
       view('run-null', worktree, null),
       view('run-old', join(oldRoot, 'wicked-worktrees', 'run-old'), 'old'),
+      view('run-plain', plain, 'plain'),
       view('run-other', other, null),
       view('run-extra', other, null, { extra_write_roots: [worktree] }),
       // A write root above the apps root: containment admits any spelling below it.
       view('run-wide', other, null, { extra_write_roots: [base] }),
     ];
-    const repos = [repo('desk', appRoot), repo('old', oldRoot), repo('other', other)];
-    app = await routeSet(runs, repos, new AppStore({ stateFile, appsRoot, registry }));
+    const repos = [repo('desk', appRoot), repo('old', oldRoot), repo('plain', plain), repo('other', other)];
+    app = await routeSet(runs, repos, store);
     storeOff = await routeSet(runs, repos, undefined);
   });
   afterAll(async () => {
@@ -200,21 +210,38 @@ describe('crew#1324: a non-human GET /runs/:id/files and /diff refuse an app rep
     expect((await get('human', '/runs/run-app/files', { path: join(worktree, 'apps.lock.json') }, storeOff)).body['content']).toBe(LOCK);
   });
 
-  it('the case-insensitive filesystem check runs where it can (macOS, Windows)', () => {
-    if (process.platform === 'darwin') expect(caseVariant, 'the fixture names the lock in another spelling').not.toBeNull();
-  });
-
-  it('mayBeInsideRoot: the filesystem’s spelling, a missing leaf through its ancestor, a sibling outside, and an unreadable path fails closed', () => {
+  it('mayBeInsideRoot: by identity: another spelling, a missing leaf through its ancestor, a sibling outside, an unreadable target fails closed, an unreadable root by its path', () => {
     const appsRoot = join(base, 'apps');
-    expect(mayBeInsideRoot(appsRoot, join(worktree, 'gone', 'x.sql'))).toBe(true);
+    expect(mayBeInsideRoot(appRoot, join(worktree, 'gone', 'x.sql'))).toBe(true);
+    expect(mayBeInsideRoot(appRoot, join(appRoot, 'wicked-worktrees', 'run-gone'))).toBe(true);
     expect(mayBeInsideRoot(appsRoot, join(base, 'apps-sibling', 'x'))).toBe(false);
-    expect(mayBeInsideRoot(appsRoot, other)).toBe(false);
-    if (caseVariant !== null) expect(mayBeInsideRoot(appsRoot, caseVariant)).toBe(true);
+    expect(mayBeInsideRoot(appRoot, plain)).toBe(false);
+    expect(mayBeInsideRoot(appRoot, other)).toBe(false);
+    expect(mayBeInsideRoot(appRoot, join(other, 'lock-link'))).toBe(true);
+    if (caseVariant !== null) expect(mayBeInsideRoot(appRoot, caseVariant)).toBe(true);
     const loop = join(base, 'loop');
     mkdirSync(loop);
     symlinkSync(join(loop, 'b'), join(loop, 'a'));
     symlinkSync(join(loop, 'a'), join(loop, 'b'));
-    expect(mayBeInsideRoot(appsRoot, join(loop, 'a', 'x'))).toBe(true);
+    expect(mayBeInsideRoot(appRoot, join(loop, 'a', 'x'))).toBe(true);
+    const unreadable = join(base, 'gone-apps', 'gone');
+    expect(mayBeInsideRoot(unreadable, join(other, 'README.md'))).toBe(false);
+    expect(mayBeInsideRoot(unreadable, join(unreadable, 'apps.lock.json'))).toBe(true);
+    // codex r2: where names are case-sensitive, two directories that differ only in case are two directories.
+    const cs = join(base, 'cs');
+    mkdirSync(join(cs, 'apps'), { recursive: true });
+    if (!existsSync(join(cs, 'Apps'))) {
+      mkdirSync(join(cs, 'Apps'));
+      expect(mayBeInsideRoot(join(cs, 'apps'), join(cs, 'Apps', 'x'))).toBe(false);
+    }
+  });
+
+  it('REGRESSION (codex r2): a non-human reads a repo POST /repos {create: true} made under the apps root, and an unreadable app root blocks nothing else', async () => {
+    const f = await get('agent', '/runs/run-plain/files', { path: join(plain, 'notes.md') });
+    expect([f.status, f.body['content']], f.text).toEqual([200, 'plain notes\n']);
+    const d = await get('system', '/runs/run-plain/diff');
+    expect(d.status, d.text).toBe(200);
+    expect(String(d.body['diff'])).toContain('plain notes');
   });
 
   it("REGRESSION: a human's run files and diff are unchanged (operator and observer)", async () => {

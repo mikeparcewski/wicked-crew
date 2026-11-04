@@ -2533,11 +2533,11 @@ export function registerRoutes(
   /**
    * (crew#1324, DES-KNOWLEDGE-DATA-001 §5.2) An app repo's files are a person's to read: its `apps.lock.json`
    * pins each source's connection descriptor, `queries/` holds SQL that names relations, `apps.json` holds what
-   * its actions write. A non-human actor ({@link viewOf} `agent`) is refused both reads when the path, the run's
-   * worktree or the run's repository is under an app file root (so every file of an app's run, not only those
-   * three, and the run branch's diff); `GET /apps/:app` answers it the agent-safe view. With no app store (an
-   * unreadable one leaves Apps off) crew cannot tell an app's files from any other, so a non-human reads no run
-   * file or diff. Humans (studio's run pages) are unchanged. Returns `true` after replying.
+   * its actions write. A non-human actor ({@link viewOf} `agent`) is refused both reads when the run works in an
+   * app's repository, or the path or the run's worktree is inside one (so every file of an app's run, and the run
+   * branch's diff); `GET /apps/:app` answers it the agent-safe view. With no app store (an unreadable one leaves
+   * Apps off) crew cannot tell an app's files from any other, so a non-human reads no run file or diff. Humans
+   * (studio's run pages) are unchanged. Returns `true` after replying.
    */
   const appFilesRefused = async (
     req: FastifyRequest,
@@ -2546,19 +2546,19 @@ export function registerRoutes(
     target: string | undefined,
   ): Promise<boolean> => {
     if (viewOf(actorOf(req)) === 'full') return false;
-    const refuse = async (): Promise<true> => {
-      await reply.code(403).send({
-        code: 'app_files_human_only',
-        error: "an app's files are read by people; GET /apps/:app answers the agent-safe view of the app",
-      });
-      return true;
+    const repos = runtime.apps?.appRepos();
+    const appRun = (): boolean => {
+      if (repos === undefined) return true;
+      if (session.repo_ref !== null && repos.some((r) => r.repoId !== '' && r.repoId === session.repo_ref)) return true;
+      const paths = [target, session.workdir].filter((p): p is string => typeof p === 'string' && p.length > 0);
+      return paths.some((p) => repos.some((r) => mayBeInsideRoot(r.root, p)));
     };
-    const store = runtime.apps;
-    if (store === undefined) return refuse();
-    const roots = store.fileRoots();
-    const repoRoot = session.repo_ref !== null ? await repoRootOf(session.repo_ref) : undefined;
-    const paths = [target, session.workdir, repoRoot].filter((p): p is string => typeof p === 'string' && p.length > 0);
-    return paths.some((p) => roots.some((root) => mayBeInsideRoot(root, p))) ? refuse() : false;
+    if (!appRun()) return false;
+    await reply.code(403).send({
+      code: 'app_files_human_only',
+      error: "an app's files are read by people; GET /apps/:app answers the agent-safe view of the app",
+    });
+    return true;
   };
 
   // Fastify parses a repeated param as string[] (Copilot, #250/#266). These are FILE-READ
