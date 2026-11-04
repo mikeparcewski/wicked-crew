@@ -319,6 +319,9 @@ describe('the agent tools on an uploaded source', () => {
     });
     const mid = await call(r, 'wmt_a', 'query', { name: 'tix', sql: 'SELECT id, title FROM "tickets"' });
     expect(mid.body).toMatchObject({ outcome: 'withheld', ruleIds: ['sources:changed'] });
+    // The broker's own record of the call says withheld too, never answered (codex r4 #3).
+    const spans = readFileSync(r.records.path, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { spanId: string; outcome: string });
+    expect(spans.filter((x) => x.spanId === mid.body.callId).map((x) => x.outcome)).toEqual(['withheld']);
     expect(mid.raw).not.toContain(ROW_MARK);
     expect((await call(r, 'wmt_a', 'query', { name: 'tix', sql: 'SELECT 1' })).answer).toMatchObject({ refused: 'query_off' });
     // Narrowing the projects mid-read withholds too (the whole predicate is read again).
@@ -625,6 +628,9 @@ describe('review r2 folds (codex)', () => {
       };
       const c = await call(r, 'wmt_a', 'query', { name: 'tix', sql: 'SELECT id FROM "tickets"' });
       expect(c.body).toMatchObject({ outcome: 'guard_error' });
+      // The attempt is audited though the broker could not record it (codex r4 P3).
+      await r.audit.flush();
+      expect(readFileSync(join(r.base, 'audit.log'), 'utf8')).toContain('"outcome":"record_failed"');
       // A daemon started afresh reads the same file: the call is still not released (no correction to lose).
       expect(await new SourceAgentQueryLog(join(r.base, 'mcp')).dataUse('run-a')).toEqual([expect.objectContaining({ queries: 1, released: 0, rows: 0 })]);
       expect((await new SourceAgentQueryLog(join(r.base, 'mcp')).recent('tix'))![0]).toMatchObject({ outcome: 'unconfirmed', released: false });

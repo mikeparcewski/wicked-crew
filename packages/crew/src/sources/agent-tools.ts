@@ -73,7 +73,7 @@ export interface SourcesUnitScope {
 
 /** What a tool answered: an answer for the agent (`isError` = the tool refused, as data), or a refusal the broker records. */
 export type SourcesToolResult =
-  | { ok: true; answer: Record<string, unknown>; isError: boolean; commit?: () => Promise<{ ok: true } | { ok: false; ruleId: string; reason: string }> }
+  | { ok: true; answer: Record<string, unknown>; isError: boolean; abandon?: () => void; commit?: () => Promise<{ ok: true } | { ok: false; ruleId: string; reason: string }> }
   | { ok: false; outcome: 'guard_error' | 'withheld'; ruleId: string; reason: string; remedy: string };
 
 type AgentSource = Awaited<ReturnType<McpRegistry['agentSources']>>[number];
@@ -542,11 +542,10 @@ export class SourcesAgentTools {
       ms: res.ms,
     };
 
-    // Rows are released in TWO durable steps (codex r3): an UNCONFIRMED entry now (released: false), then, at the
-    // release boundary (`commit`, after the broker's own call record), the release check and the final entry
-    // (released: true). Whatever fails or crashes in between, the last entry for the call says the rows were
-    // NOT released, which is then true: there is no correction to lose, before or after a restart.
-    const pending = entry('unconfirmed', { rows: fit.rows.length, truncated });
+    // Rows are released in TWO durable steps (codex r3): an UNCONFIRMED entry now (released: false), and the final
+    // entry (released: true) at the release boundary (`commit`, after the broker's own call record). Whatever
+    // fails or crashes in between, the call's last entry says the rows were NOT released, which is then true.
+    const pending = entry('unconfirmed', { rows: fit.rows.length, truncated, released: false });
     try {
       await this.deps.queries.append(pending);
     } catch (err) {
@@ -554,18 +553,24 @@ export class SourcesAgentTools {
       this.deps.log?.(`[sources] the agent-query record for ${s.name} could not be written (${message(err)}); its rows are withheld`);
       return { ok: false, outcome: 'withheld', ruleId: 'sources:record', reason: 'the query ran, but crew could not record it, so its rows are withheld', remedy: 'try again; report it if it persists' };
     }
+    // The release check, read again NOW, after the read and the first record (codex r1 #3): the whole predicate
+    // must still hold for this unit, on the same connection and the same views. It runs BEFORE the broker records
+    // the call, so a switch turned off while a query runs is never recorded as an answered call (codex r4 #3).
+    // What is left after it is two local appends (the broker's record, the final entry): a switch flipped inside
+    // those milliseconds is the snapshot race K1's run check documents, with no actor (codex r4 #1, rejected).
+    const now = (await this.sources()).find((x) => x.name === s.name);
+    if (now === undefined || !agentMay(now.agents, now, scope.projectId, 'query') || now.descriptorHash !== s.descriptorHash || !sameViews(now.viewsAllowed, s.viewsAllowed)) {
+      await settle(entry('changed_while_running', { rows: fit.rows.length, truncated, released: false }));
+      return { ok: false, outcome: 'withheld', ruleId: 'sources:changed', reason: `${s.name} was switched off, hidden, narrowed or saved again while the query ran, so its rows are withheld`, remedy: 'ask the person; nothing of the result is shown' };
+    }
     return {
       ok: true,
       isError: false,
       answer: safe,
+      // The broker could not record the call: the rows stay unreleased (the last entry is still unconfirmed), and
+      // the attempt is audited (codex r4 P3).
+      abandon: () => audit({ ...pending, outcome: 'record_failed', released: false }),
       commit: async () => {
-        // The release check, read again NOW (codex r1 #3): the whole predicate must still hold for this unit, on
-        // the same connection and the same views.
-        const now = (await this.sources()).find((x) => x.name === s.name);
-        if (now === undefined || !agentMay(now.agents, now, scope.projectId, 'query') || now.descriptorHash !== s.descriptorHash || !sameViews(now.viewsAllowed, s.viewsAllowed)) {
-          await settle(entry('changed_while_running', { rows: fit.rows.length, truncated }));
-          return { ok: false, ruleId: 'sources:changed', reason: `${s.name} was switched off, hidden, narrowed or saved again while the query ran, so its rows are withheld` };
-        }
         const done = entry('ok', { rows: fit.rows.length, truncated, released: true });
         try {
           await this.deps.queries.append(done);

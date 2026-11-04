@@ -495,6 +495,7 @@ export class McpBroker {
     } catch (err) {
       // A query's rows stay unreleased: its source record's last entry is still "unconfirmed" (codex r1 #1, r3).
       this.deps.log?.(`[mcp] the call record for ${body.subject} could not be written (${message(err)}); its result is withheld`);
+      out.abandon?.();
       return {
         status: OUTCOME_STATUS.guard_error,
         body: { outcome: 'guard_error', subject: body.subject, callId: null, ruleIds: [], reason: 'the call could not be recorded (D-3); its result is withheld', remedy: 'the call ran; its result is not shown' },
@@ -510,9 +511,9 @@ export class McpBroker {
         c = { ok: false, ruleId: 'sources:record', reason: 'crew could not record the release, so the rows are withheld' };
       }
       if (!c.ok) {
-        // The span above is already recorded as answered; the withholding is the source record's (its last entry).
+        // Only a failed local append reaches here (the release check ran before the span was recorded): the span
+        // says answered, the source record's last entry says unreleased, and the result is withheld.
         this.deps.log?.(`[mcp] ${body.subject}: the result was withheld at release (${c.ruleId})`);
-        this.publish(record);
         return { status: OUTCOME_STATUS.withheld, body: { outcome: 'withheld', subject: body.subject, callId: span.spanId, ruleIds: [c.ruleId], reason: c.reason, remedy: 'ask the person; nothing of the result is shown', denied: true } };
       }
     }
