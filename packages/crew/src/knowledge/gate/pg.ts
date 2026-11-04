@@ -9,7 +9,9 @@
  *   swallow the closing parenthesis).
  * - The **LIMIT rewrite**: `SELECT … FROM (\n<q>\n) AS q LIMIT <cap+1>`, so no adapter buffers past the cap.
  * - For `unit`, the **per-cell projection** (§6.3), from the column types prepare reported: a type bounded by
- *   its type keeps it (numbers, booleans, dates and times, uuid, network addresses); `bytea` is cut by
+ *   its type keeps it (fixed-size numbers, booleans, dates and times, uuid, network addresses); `numeric` is not
+ *   (an unconstrained one holds up to 131,072 digits, and prepare reports no typmod), and postgres.js gives it
+ *   as text anyway, so cutting it changes no value under the cap; `bytea` is cut by
  *   `substring`; EVERYTHING else (text, varchar, json/jsonb, xml, arrays, enums, domains, …) is
  *   `left(c::text, cells + 1)`, so a cell longer than the cap is cut at the source and the gate marks it
  *   `truncated`. The list is of what keeps, so an unknown type is cut, never sent whole.
@@ -26,7 +28,6 @@ import { checkReadPolicy } from '../../sources/policy/index.js';
 const BOUNDED_TYPE = new RegExp(
   [
     '^(smallint|integer|bigint|real|double precision|boolean|date|uuid|oid|money|inet|cidr|macaddr|macaddr8)$',
-    '^numeric(\\(\\d+(,\\d+)?\\))?$',
     '^(time|timestamp)(\\(\\d\\))? (with|without) time zone$',
     '^interval( [a-z ]+)?(\\(\\d\\))?$',
   ].join('|'),

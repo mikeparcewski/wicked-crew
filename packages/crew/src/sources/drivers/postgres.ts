@@ -366,7 +366,8 @@ export async function pgRead(
       let run = text;
       let described: SqlColumn[] | null = null;
       if (opts.shape !== undefined) {
-        const d = (await tx.unsafe(text).describe()) as unknown as { columns: Array<{ name: string; type: number }> | null };
+        // Prepared with the read's own parameters, so the types the server infers are the ones the read runs with.
+        const d = (await tx.unsafe(text, params as never).describe()) as unknown as { columns: Array<{ name: string; type: number }> | null };
         const cols = d.columns ?? [];
         const dn = await typeNames(tx, [...new Set(cols.map((c) => c.type))]);
         described = cols.map((c) => ({ name: c.name, type: dn.get(c.type) ?? `oid ${c.type}` }));

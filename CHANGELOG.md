@@ -23,13 +23,15 @@ mentioned only where a daemon release depends on them.
   Structure answers from crew's stored catalog and never dials. A read goes through K1's libpg_query policy (`SET`,
   `BEGIN`, DDL, DML, two statements and unlisted functions refused before anything runs), the source's ONE scheduler
   (concurrency 4, 1 without a source-side deadline; person > app > unit > describe; a bounded queue, `busy`; unit 30
-  a minute; backoff after connection failures), the `LIMIT <cap+1>` rewrite and, on the native runtime, a per-cell
+  a minute; backoff after connection failures; in this release it schedules agent reads, the person's query run and a
+  Toolbox describe, and the Apps executor moves onto it with M3b), the `LIMIT <cap+1>` rewrite and, on the native runtime, a per-cell
   projection built from prepare inside the read's transaction (variable-length columns cut at the source with
   `left(…, 2001)`, `bytea` by `substring`; numbers, booleans, times and uuids keep their types; an int8 inside 2^53
   is a JSON number). A unit gets at most 200 rows, 64 KB of rows and 2,000-character cells, in one envelope
   (`untrusted` first, `cite: src:<name>@<at>#<hash>`, `deps: ["source:<id>"]`); errors are the class and the
-  SQLSTATE only. Rows are released in two durable steps (`mcp/source-queries.ndjson`: an unconfirmed entry, the
-  release check again, the broker's call record, then the released entry), backing `GET /sources/:name/agent-queries`
+  SQLSTATE only. Rows are released in two durable steps (`mcp/source-queries.ndjson`, each append synced: an unconfirmed
+  entry, the release check again (the tool's class in force included), the broker's call record, the check once more,
+  then the released entry; a corrupt record reads as unknown), backing `GET /sources/:name/agent-queries`
   and `GET /runs/:id/data-use` (`known: false` when the record is unreadable). The person's query run goes through the
   same scheduler and rewrite and answers as before. **The Toolbox runtime** (a `toolbox-source` entry with `runtime:
   toolbox`, Postgres): MCP Toolbox for Databases v1.15.0 pinned per platform by sha256, downloaded once into
@@ -38,9 +40,14 @@ mentioned only where a daemon release depends on them.
   `search_path`, `standard_conforming_strings`, `statement_timeout`, `application_name` and `sslmode`, and verifies
   them on open), the secret only in that process's environment as a YAML-escaped double-quoted body (quotes and
   newlines connect), stderr kept only scrubbed, each answer read with a 1 MiB bound and the process killed past it or
-  at the 10 s deadline. Host mode admits only an IP literal the dialer checked. After a kill on a source with no
-  source-side deadline the source stays closed (`remote_work_pending`) until its session is seen gone at the source,
-  re-checked every 60 s, closed while unknown. A Toolbox source's Test describes it through its own `list_tables`.
+  at the 10 s deadline (each process in its own run directory, removed when it exits; a soft `GOMEMLIMIT`, the hard
+  memory limit coming with the per-source runner container). Toolbox answers rows as objects, so a query with two
+  output columns of one name is refused (`ambiguous_columns`). Host mode admits only an IP literal the dialer checked. After a kill (or any lost process)
+  on a source with no source-side deadline (none written, or one longer than the gate's) the source stays closed
+  (`remote_work_pending`) until its session is seen gone at the source, re-checked every 60 s, closed while unknown;
+  a fresh process checks first. The open check also requires the application name crew wrote and, for verify-full,
+  TLS. A Toolbox source previews (B1's `toolboxProbe`) and saves with its tools on: crew's own tools carry read
+  annotations, being read-only through the gate. A Toolbox source's Test describes it through its own `list_tables`.
 
 - **The one registry: entry ids, Toolbox documents, two views and generations (api-types 0.183.0,
   DES-KNOWLEDGE-DATA-001 §5, brief B1; crew#1310).** Every registry entry has an immutable `id` (estate's source

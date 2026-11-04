@@ -13513,7 +13513,7 @@ export interface SourceAgentQuery {
   rows: number;
   truncated: boolean;
   ms: number;
-  /** Whether rows reached the agent. */
+  /** Whether rows were released to the agent's answer (written before the answer is sent: it may over-state, never under-state). */
   released: boolean;
   sqlstate?: string;
 }

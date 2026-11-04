@@ -41,6 +41,8 @@ import { readSqlQuery } from '../src/sources/sql.js';
 import { countingResolver, DB_HOST, DB_REQUIRED, type FreshPg, freshPgDatabase, PG_TARGETS } from './support/sources-db.js';
 
 const TOOLBOX_BIN = process.env['WICKED_TOOLBOX_BIN'] ?? '';
+// CI's sources-db job fetches the pinned binary and sets WICKED_TOOLBOX=required: a missing one fails, never skips.
+if (process.env['WICKED_TOOLBOX'] === 'required' && TOOLBOX_BIN === '') throw new Error('WICKED_TOOLBOX=required, but WICKED_TOOLBOX_BIN is not set');
 const SECRET = `kd"b2\nreader'pw\\${randomUUID().slice(0, 8)}`;
 const SECRET_FORMS = [SECRET, yamlQuotedBody(SECRET), JSON.stringify(SECRET).slice(1, -1)];
 const LOOPBACK = { allow: ['127.0.0.0/8'], plaintext: false };
@@ -146,7 +148,15 @@ for (const target of PG_TARGETS) {
       writeFileSync(join(mcpDir, 'registry.json'), JSON.stringify({ version: 1, servers }));
       const store = new McpRegistryStore(mcpDir);
       const dial = { resolver: countingResolver() };
-      const registry = new McpRegistry({ store, secrets: new NoSecrets(), probe: async () => ({ ok: false, error: 'no probe' }) as never, discover: () => [], env: { KD_B2_PG_SECRET: SECRET } });
+      let prober: DataGate | null = null;
+      const registry = new McpRegistry({
+        store,
+        secrets: new NoSecrets(),
+        probe: async () => ({ ok: false, error: 'no probe' }) as never,
+        discover: () => [],
+        env: { KD_B2_PG_SECRET: SECRET },
+        toolboxProbe: (c, s) => (prober as DataGate).toolboxProbe(c, s),
+      });
       audit = new AuditLog(join(base, 'audit.log'), () => undefined);
       const record = new SourceReadLog(mcpDir);
       sup = new ToolboxSupervisor({ binary: async () => TOOLBOX_BIN, runRoot: join(mcpDir, 'adapters', 'toolbox', 'run') });
@@ -165,6 +175,7 @@ for (const target of PG_TARGETS) {
         omitStatementTimeout: (id) => id === NODL_ID,
         onText: (t) => texts.push(t),
       });
+      prober = gate;
       const broker = new McpBroker({ registry, engine: () => null, records: new McpCallRecordFile(mcpDir), gate });
       app = Fastify({ logger: false });
       registerMcpRoutes(app, { registry, broker, toolLister: lister, gate, audit, actorOf: () => LOCAL_ACTOR });
@@ -310,6 +321,28 @@ for (const target of PG_TARGETS) {
       for (let i = 0; i < 40 && (await activeWith(marker)) > 0; i++) await new Promise((res) => setTimeout(res, 250));
       expect(await sched?.recheck()).toBe(true);
       expect((await call('pg-tb-nodl', 'SELECT count(*) AS n FROM s.wide AS w')).answer).toMatchObject({ rows: [[600]] });
+    }, 120_000);
+
+    it('a parameterized read is prepared with its own parameters', async () => {
+      const res = await app.inject({ method: 'POST', url: '/api/v1/mcp/call', payload: { token: 'wmt_g', subject: 'mcp:pg/execute_sql', args: { sql: "SELECT w.id, w.note FROM s.wide AS w WHERE w.id = $1 AND w.note = $2 ORDER BY w.id", params: [7, 'row-7'] } } });
+      answers.push(res.body);
+      const body = res.json() as McpCallResponse;
+      const a = JSON.parse((body.result as { content: Array<{ text: string }> }).content[0]?.text ?? '{}') as Record<string, unknown>;
+      expect(a, res.body.slice(0, 400)).toMatchObject({ rows: [[7, 'row-7']] });
+    });
+
+    it.skipIf(TOOLBOX_BIN === '')('a Toolbox source previewed and saved the ordinary way serves reads once a person switches query on', async () => {
+      const body = { name: 'pg-tb-saved', kind: 'toolbox-source', runtime: 'toolbox', toolbox: { kind: 'source', type: 'postgres', host: '127.0.0.1', port: String(db.port), user: role, password: '${WICKED_SRC_1}', database: db.database }, tls: { mode: 'disable' }, auth: { ref: 'env:KD_B2_PG_SECRET' }, address: LOOPBACK };
+      const p = await app.inject({ method: 'POST', url: '/api/v1/mcp/servers/preview', payload: body });
+      expect(p.statusCode, p.body).toBe(200);
+      for (const f of SECRET_FORMS) expect(p.body.includes(f)).toBe(false);
+      const saved = await app.inject({ method: 'POST', url: '/api/v1/mcp/servers', payload: { previewHash: (p.json() as { previewHash: string }).previewHash } });
+      expect(saved.statusCode, saved.body).toBeLessThan(300);
+      expect((await app.inject({ method: 'POST', url: '/api/v1/sources/pg-tb-saved/test' })).json()).toMatchObject({ ok: true, tls: 'off' });
+      const off = await call('pg-tb-saved', 'SELECT count(*) AS n FROM s.wide AS w');
+      expect(off.answer).toMatchObject({ refused: 'unknown_source' });
+      expect((await app.inject({ method: 'PUT', url: '/api/v1/sources/pg-tb-saved/agents', payload: { projects: ['proj_g'], query: true } })).statusCode).toBe(200);
+      expect((await call('pg-tb-saved', 'SELECT count(*) AS n FROM s.wide AS w')).answer).toMatchObject({ rows: [[600]] });
     }, 120_000);
 
     it("the person's query runs through the gate (scheduler, LIMIT rewrite) and answers as before", async () => {

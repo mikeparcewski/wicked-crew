@@ -7,7 +7,7 @@
  */
 
 import type { McpToolsResponse, McpVisibleTool } from '../core/types.js';
-import type { DataGate } from '../knowledge/gate/gate.js';
+import { type DataGate, firstUseOnly } from '../knowledge/gate/gate.js';
 import { mcpSubject } from './classify.js';
 import type { McpCallableTool } from './registry.js';
 
@@ -89,13 +89,13 @@ export async function listUnitTools(deps: McpToolListDeps, token: string): Promi
     const t = bySubject.get(j.subject);
     if (t === undefined) continue;
     // A gated tool's first-use ask is the switch's to answer (it is already on); any other ask stands.
-    const firstUseOnly = gated.has(j.subject) && j.decision === 'ask' && j.ruleIds.every((r) => r === 'engine:mcp-first-use');
+    const firstUse = gated.has(j.subject) && j.decision === 'ask' && firstUseOnly(j.ruleIds);
     tools.push({
       subject: j.subject,
       class: j.class,
-      decision: firstUseOnly ? 'allow' : j.decision,
-      ruleIds: firstUseOnly ? [] : j.ruleIds,
-      ...(j.reason !== undefined && !firstUseOnly ? { reason: j.reason } : {}),
+      decision: firstUse ? 'allow' : j.decision,
+      ruleIds: firstUse ? [] : j.ruleIds,
+      ...(j.reason !== undefined && !firstUse ? { reason: j.reason } : {}),
       description: t.description,
       inputSchema: t.inputSchema,
     });

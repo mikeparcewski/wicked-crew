@@ -14,7 +14,7 @@
  * workers are fenced out of, mode 0600.
  */
 
-import { appendFile, mkdir, open, readFile } from 'node:fs/promises';
+import { mkdir, open, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import { mcpStateDir } from '../../mcp/registry-store.js';
@@ -70,7 +70,15 @@ export class SourceReadLog {
   append(entry: SourceAgentQueryEntry): Promise<void> {
     const next = this.chain.then(async () => {
       await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
-      await appendFile(this.path, `${(await this.endsTorn()) ? '\n' : ''}${JSON.stringify(entry)}\n`, { encoding: 'utf8', mode: 0o600 });
+      const line = `${(await this.endsTorn()) ? '\n' : ''}${JSON.stringify(entry)}\n`;
+      // Synced before it resolves: the release that follows is never ahead of the record on disk.
+      const fh = await open(this.path, 'a', 0o600);
+      try {
+        await fh.writeFile(line, 'utf8');
+        await fh.sync();
+      } finally {
+        await fh.close();
+      }
     });
     this.chain = next.catch(() => undefined);
     return next;
@@ -105,19 +113,41 @@ export class SourceReadLog {
       return null;
     }
     const last = new Map<string, SourceAgentQueryEntry>();
-    for (const line of text.split('\n')) {
+    const lines = text.split('\n');
+    for (const [i, line] of lines.entries()) {
       if (line.trim() === '') continue;
+      let e: SourceAgentQueryEntry;
       try {
-        const e = JSON.parse(line) as SourceAgentQueryEntry;
-        if (typeof e.runId === 'string' && typeof e.source === 'string' && typeof e.callId === 'string') {
-          last.delete(e.callId);
-          last.set(e.callId, e);
-        }
+        e = JSON.parse(line) as SourceAgentQueryEntry;
       } catch {
-        // A torn line (a crash mid-append, never released) is skipped; the rest still reads.
+        // A torn LAST line (a crash mid-append, never released) is skipped. A line that does not parse anywhere
+        // else is corruption: the record cannot say what was used, so it is unknown.
+        if (i === lines.length - 1) continue;
+        if (lines.slice(i + 1).every((l) => l.trim() === '')) continue;
+        // An append after a torn line starts with a newline (`endsTorn`), so the torn line is followed by a whole one.
+        if (!line.trimStart().startsWith('{') || !this.tornThenWhole(lines, i)) return null;
+        continue;
       }
+      if (typeof e.runId !== 'string' || typeof e.source !== 'string' || typeof e.callId !== 'string' || typeof e.released !== 'boolean' || typeof e.rows !== 'number') return null;
+      last.delete(e.callId);
+      last.set(e.callId, e);
     }
     return [...last.values()];
+  }
+
+  /**
+   * Whether line `i` is a torn append (a crash mid-write): it parses as no JSON, and the next line is a whole
+   * entry. A torn append is never released (the rows go out only after an append resolves), so skipping it is true.
+   */
+  private tornThenWhole(lines: readonly string[], i: number): boolean {
+    const next = lines[i + 1];
+    if (next === undefined) return true;
+    try {
+      JSON.parse(next);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** The most recent `n` entries for `source`, newest first; `null` = the record cannot be read. */

@@ -156,6 +156,8 @@ export function agentStructure(catalog: SqlCatalog, viewsAllowed: readonly strin
 export class DataGate {
   private readonly now: () => number;
   readonly schedulers: GateSchedulers;
+  /** The Toolbox processes whose source had no earlier work left running when they first served (no-deadline sources). */
+  private readonly reconciled = new WeakSet<ToolboxProcess>();
 
   constructor(private readonly deps: DataGateDeps) {
     this.now = deps.now ?? Date.now;
@@ -228,7 +230,7 @@ export class DataGate {
       if (typeof t.subject !== 'string') continue;
       const rules = Array.isArray(t.ruleIds) ? t.ruleIds.filter((r): r is string => typeof r === 'string') : [];
       if (t.decision === 'allow') out.set(t.subject, 'allow');
-      else if (t.decision === 'ask') out.set(t.subject, rules.every((r) => r === 'engine:mcp-first-use') ? 'allow' : 'ask');
+      else if (t.decision === 'ask') out.set(t.subject, firstUseOnly(rules) ? 'allow' : 'ask');
     }
     return out;
   }
@@ -260,7 +262,7 @@ export class DataGate {
       return refusal('query_off', `agents may not read rows from ${s.name}: a person has not turned on "Agents can query this source"`, { remedy: 'work from its structure (list_tables), or ask the person to turn querying on' });
     }
     if (t.disclosure === 'structure') return this.structure(s, args, need === 'see' && agentMay(s.access, s, scope.projectId, 'query'));
-    return this.query(s, args, scope, callId);
+    return this.query(s, tool, args, scope, callId);
   }
 
   private structure(s: GateSource, args: Record<string, unknown>, mayQuery: boolean): GateUnitResult {
@@ -295,7 +297,7 @@ export class DataGate {
     };
   }
 
-  private async query(s: GateSource, args: Record<string, unknown>, scope: GateUnitScope, callId: string): Promise<GateUnitResult> {
+  private async query(s: GateSource, tool: string, args: Record<string, unknown>, scope: GateUnitScope, callId: string): Promise<GateUnitResult> {
     const sqlText = args['sql'];
     const rawParams = args['params'] ?? [];
     if (typeof sqlText !== 'string' || sqlText.trim() === '' || Buffer.byteLength(sqlText, 'utf8') > UNIT_SQL_MAX) {
@@ -340,7 +342,7 @@ export class DataGate {
       await this.deps.record.append(e).catch((err: unknown) => this.deps.log?.(`[gate] the agent-query record for ${s.name} (${e.outcome}) could not be written: ${message(err)}`));
     };
     try {
-      return await this.queryAdmitted(s, sqlText, params, scope, { entry, audit, settle });
+      return await this.queryAdmitted(s, tool, sqlText, params, scope, { entry, audit, settle });
     } catch (err) {
       // Every query that reached the gate leaves ONE final record, an unexpected failure included.
       await settle(entry('failed'));
@@ -350,6 +352,7 @@ export class DataGate {
 
   private async queryAdmitted(
     s: GateSource,
+    tool: string,
     sqlText: string,
     params: unknown[],
     scope: GateUnitScope,
@@ -382,7 +385,10 @@ export class DataGate {
     let end: LeaseEnd = { outcome: 'error' };
     let read: { columns: EnvelopeColumn[]; rows: unknown[][]; truncated: boolean; ms: number; secrets: string[] };
     try {
-      const r = s.runtime === 'native' ? await this.nativeUnitRead(s, catalog, adm.statement, adm.policy.keys ?? [], params) : await this.toolboxUnitRead(s, adm.statement, pc, (e) => (end = e));
+      const r =
+        s.runtime === 'native'
+          ? await this.nativeUnitRead(s, catalog, adm.statement, adm.policy.keys ?? [], params)
+          : await this.toolboxUnitRead(s, adm.statement, adm.policy.columns ?? null, pc, (e) => (end = e));
       if ('refused' in r) {
         if (end.outcome !== 'killed') end = { outcome: r.connection === true ? 'error' : 'ok', connection: r.connection === true };
         await settle(entry(r.refused, r.sqlstate !== undefined ? { sqlstate: r.sqlstate } : {}));
@@ -429,8 +435,13 @@ export class DataGate {
     }
     // The release check, read again NOW, after the read and the first record: the whole predicate must still
     // hold for this unit, on the same descriptor and views. It runs BEFORE the broker records the call.
-    const now = (await this.sources()).find((x) => x.name === s.name);
-    if (now === undefined || now.id !== s.id || !agentMay(now.access, now, scope.projectId, 'query') || now.descriptorHash !== s.descriptorHash || !sameViews(now.viewsAllowed, s.viewsAllowed)) {
+    // The exact tool must still carry a rows class in force (a disclosure cleared, or the tool switched off, withholds).
+    const stillAllowed = async (): Promise<boolean> => {
+      const now = (await this.sources()).find((x) => x.name === s.name);
+      if (now === undefined || now.id !== s.id || !agentMay(now.access, now, scope.projectId, 'query') || now.descriptorHash !== s.descriptorHash || !sameViews(now.viewsAllowed, s.viewsAllowed)) return false;
+      return neededFor(now.tools.find((t) => t.name === tool)?.disclosure) === 'query';
+    };
+    if (!(await stillAllowed())) {
       await settle(entry('changed_while_running', { rows: fit.rows.length, truncated, released: false }));
       return { ok: false, outcome: 'withheld', ruleId: 'gate:changed', reason: `${s.name} was switched off, hidden, narrowed or saved again while the query ran, so its rows are withheld`, remedy: 'ask the person; nothing of the result is shown' };
     }
@@ -440,6 +451,12 @@ export class DataGate {
       answer: envelope as unknown as Record<string, unknown>,
       abandon: () => audit({ ...pending, outcome: 'record_failed', released: false }),
       commit: async () => {
+        // Once more after the broker's own record: a switch turned off while it was written withholds too. What is
+        // left is this one local append (the snapshot race #1309 r4 recorded, with no actor).
+        if (!(await stillAllowed())) {
+          await settle(entry('changed_while_running', { rows: fit.rows.length, truncated, released: false }));
+          return { ok: false, ruleId: 'gate:changed', reason: `${s.name} was switched off, hidden, narrowed or saved again while the query ran, so its rows are withheld` };
+        }
         const done = entry('ok', { rows: fit.rows.length, truncated, released: true });
         try {
           await this.deps.record.append(done);
@@ -496,7 +513,8 @@ export class DataGate {
     try {
       doc = await toolboxDocument({ id: s.id, document: s.document, address: s.address, tls: s.tls, ca: s.ca, statementTimeoutMs: this.deadline, omitStatementTimeout: this.deps.omitStatementTimeout?.(s.id) === true });
     } catch (err) {
-      if (err instanceof ToolboxDocumentError) return { refused: err.code, reason: err.message, remedy: err.remedy };
+      // A unit gets crew's code and a fixed sentence: the policy's words can name the host or its address.
+      if (err instanceof ToolboxDocumentError) return { refused: err.code, reason: `${s.name}'s adapter is refused by crew's spawn policy (${err.code})`, remedy: 'a person tests the source on its sheet' };
       throw err;
     }
     let secret: string | null = null;
@@ -523,9 +541,15 @@ export class DataGate {
   private async toolboxUnitRead(
     s: Extract<GateSource, { runtime: 'toolbox' }>,
     statement: string,
+    expected: readonly string[] | null,
     pc: ReturnType<typeof policyCatalog>,
     setEnd: (e: LeaseEnd) => void,
   ): Promise<{ columns: EnvelopeColumn[]; rows: unknown[][]; truncated: boolean; ms: number; secrets: string[] } | GateRefused> {
+    // Toolbox answers each row as an object keyed by column name, so two output columns of one name would
+    // collapse into one. Refused rather than answered short: the policy walker names the columns.
+    if (expected !== null && new Set(expected).size !== expected.length) {
+      return { refused: 'ambiguous_columns', reason: 'two output columns of this query share a name (or have none), which this source answers as one', remedy: 'give each output column its own name (… AS name)' };
+    }
     const text = limitRewrite(statement, UNIT_ROW_CAP);
     const ok = await recheckPg(text, pc);
     if (!ok.ok) return { refused: ok.code, reason: ok.detail };
@@ -534,7 +558,19 @@ export class DataGate {
     const { proc, doc, secret } = got;
     // The source's own deadline, as verified on open (not as written): without one, concurrency 1 and the reservation.
     const sourceDeadline = doc.sourceDeadline && proc.verified?.sourceDeadline === true;
-    if (!sourceDeadline) this.schedulers.for(s.id, s.name, this.limitsFor(s, false));
+    if (!sourceDeadline) {
+      const sched = this.schedulers.for(s.id, s.name, this.limitsFor(s, false));
+      // The first read on this process: work a previous process (or a previous daemon) left at the source may
+      // still run, and nothing would stop it. Checked before anything new is admitted (fail closed).
+      if (!this.reconciled.has(proc)) {
+        const state = await this.remoteCheck(s, doc, secret)().catch(() => 'unknown' as const);
+        if (state !== 'gone') {
+          sched.reserve(this.remoteCheck(s, doc, secret));
+          return { refused: 'remote_work_pending', reason: `${s.name} is closed: crew has not confirmed that earlier work ended at the source`, remedy: 'try again in a minute; crew re-checks the source' };
+        }
+        this.reconciled.add(proc);
+      }
+    }
     const started = this.now();
     let r;
     try {
@@ -551,6 +587,8 @@ export class DataGate {
           : { refused: 'too_large', reason: `the answer passed the ${UNIT_ADAPTER_BYTES / 1024} KiB read bound, so the read was stopped` };
       }
       if (err instanceof ToolboxCallError) {
+        // The process was lost mid-read: on a source with no source-side deadline its query may still run.
+        if (!sourceDeadline) setEnd({ outcome: 'killed', remoteCheck: this.remoteCheck(s, doc, secret) });
         this.warm(s, doc, secret);
         return { refused: err.code, reason: `${s.name}'s adapter failed (${err.code})`, connection: true };
       }
@@ -564,6 +602,10 @@ export class DataGate {
     }
     const objs = toolboxRows(r);
     const names = objs.length === 0 ? [] : Object.keys(objs[0] as Record<string, unknown>);
+    // Fewer keys than the walker's columns: names collapsed at the source (belt and braces to the check above).
+    if (expected !== null && objs.length > 0 && names.length < expected.length) {
+      return { refused: 'ambiguous_columns', reason: 'the answer has fewer columns than the query names, so some collapsed', remedy: 'give each output column its own name (… AS name)' };
+    }
     const rows = objs.map((o) => names.map((n) => o[n] ?? null));
     return { columns: names.map((n) => ({ name: n, type: null })), rows, truncated: rows.length > UNIT_ROW_CAP, ms: this.now() - started, secrets: proc.secrets };
   }
@@ -658,7 +700,10 @@ export class DataGate {
         return {
           ok: true as const,
           serverInfo: { name: 'Toolbox', version: 'v1.15.0' },
-          tools: tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema, outputSchema: null, annotations: normalizeAnnotations(t.annotations) })),
+          // crew's own tools of crew's own document are read-only THROUGH THE GATE (policy first, a verified
+          // read-only session): their annotations are crew's, so a save keeps them on (Toolbox marks
+          // execute_sql destructive by default, which would leave it off until "granted" as a write).
+          tools: tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema, outputSchema: null, annotations: t.name === 'execute_sql' || t.name === 'list_tables' ? { readOnlyHint: true } : normalizeAnnotations(t.annotations) })),
           source: { catalog },
         };
       });
@@ -680,25 +725,29 @@ export class DataGate {
    * Describe a Toolbox source through its own `list_tables` (and crew's foreign-below query), and store the
    * catalog bound to the descriptor it was taken under (a save that lands meanwhile wins).
    */
-  async describeToolbox(name: string): Promise<{ ok: true; catalog: SqlCatalog; descriptorHash: string; ms: number } | { ok: false; code: string; error: string; ms: number }> {
+  async describeToolbox(name: string): Promise<{ ok: true; catalog: SqlCatalog; descriptorHash: string; ms: number; tls: 'verified' | 'off' } | { ok: false; code: string; error: string; ms: number; tls: 'verified' | 'off' }> {
     const started = this.now();
     const s = (await this.sources()).find((x) => x.name === name);
-    if (s === undefined || s.runtime !== 'toolbox') return { ok: false, code: 'not_a_source', error: `${name} is not a Toolbox source`, ms: 0 };
+    if (s === undefined || s.runtime !== 'toolbox') return { ok: false, code: 'not_a_source', error: `${name} is not a Toolbox source`, ms: 0, tls: 'verified' };
+    const tls = s.tls === 'disable' ? ('off' as const) : ('verified' as const);
     let lease;
     try {
       lease = await this.scheduler(s).admit('describe');
     } catch (err) {
-      if (err instanceof GateBusyError) return { ok: false, code: err.code, error: err.message, ms: this.now() - started };
+      if (err instanceof GateBusyError) return { ok: false, code: err.code, error: err.message, ms: this.now() - started, tls };
       throw err;
     }
+    let end: LeaseEnd = { outcome: 'error' };
+    let got: Awaited<ReturnType<DataGate['toolboxProcess']>> | null = null;
     try {
-      const got = await this.toolboxProcess(s);
-      if ('refused' in got) return { ok: false, code: got.refused, error: got.reason, ms: this.now() - started };
+      got = await this.toolboxProcess(s);
+      if ('refused' in got) return { ok: false, code: got.refused, error: got.reason, ms: this.now() - started, tls };
       const listed = await got.proc.callTool('list_tables', { output_format: 'detailed', table_names: '' }, 8 * 1024 * 1024, 30_000);
       const foreign = await got.proc.callTool('execute_sql', { sql: FOREIGN_BELOW_SQL }, 1024 * 1024, 30_000);
+      end = { outcome: 'ok' };
       if (listed.isError || foreign.isError) {
         const sqlstate = sqlstateOf(toolboxErrorText(listed.isError ? listed : foreign));
-        return { ok: false, code: 'source_error', error: `the source answered an error${sqlstate !== null ? ` (SQLSTATE ${sqlstate})` : ''}`, ms: this.now() - started };
+        return { ok: false, code: 'source_error', error: `the source answered an error${sqlstate !== null ? ` (SQLSTATE ${sqlstate})` : ''}`, ms: this.now() - started, tls };
       }
       const catalog = scrubSecrets(toolboxCatalog(listed, foreign, new Date(this.now()).toISOString()), got.proc.secrets);
       const written = await this.deps.store.mutate(async () => {
@@ -707,13 +756,19 @@ export class DataGate {
         await this.deps.catalogs.write(name, { catalog, descriptorHash: s.descriptorHash });
         return true;
       });
-      if (!written) return { ok: false, code: 'server_changed', error: `${name} was saved again while it was being described; describe it again`, ms: this.now() - started };
-      return { ok: true, catalog, descriptorHash: s.descriptorHash, ms: this.now() - started };
+      if (!written) return { ok: false, code: 'server_changed', error: `${name} was saved again while it was being described; describe it again`, ms: this.now() - started, tls };
+      return { ok: true, catalog, descriptorHash: s.descriptorHash, ms: this.now() - started, tls };
     } catch (err) {
-      if (err instanceof ToolboxCallError) return { ok: false, code: err.code, error: `${name}'s adapter failed (${err.code})`, ms: this.now() - started };
+      if (err instanceof ToolboxCallError) {
+        // A describe that lost its process on a source with no source-side deadline may have left work running.
+        if (got !== null && !('refused' in got) && !(got.doc.sourceDeadline && got.proc.verified?.sourceDeadline === true)) {
+          end = { outcome: 'killed', remoteCheck: this.remoteCheck(s, got.doc, got.secret) };
+        } else end = { outcome: 'error', connection: true };
+        return { ok: false, code: err.code, error: `${name}'s adapter failed (${err.code})`, ms: this.now() - started, tls };
+      }
       throw err;
     } finally {
-      lease.done({ outcome: 'ok' });
+      lease.done(end);
     }
   }
 }
@@ -743,6 +798,11 @@ function sourceRefusal(err: unknown): GateRefused {
   }
   if (err instanceof DialRefusedError) return { refused: err.code, reason: `the connection was refused (${err.code})`, connection: true };
   throw err;
+}
+
+/** An engine `ask` that only says "first use": a non-empty rule list of exactly that rule. Any other ask stands. */
+export function firstUseOnly(ruleIds: readonly string[]): boolean {
+  return ruleIds.length > 0 && ruleIds.every((r) => r === 'engine:mcp-first-use');
 }
 
 function sameViews(a: readonly string[], b: readonly string[]): boolean {

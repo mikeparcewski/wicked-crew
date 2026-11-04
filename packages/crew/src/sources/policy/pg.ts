@@ -508,13 +508,14 @@ export async function checkPgRead(text: string, catalog: PolicyCatalog): Promise
   const stmts = tree.stmts ?? [];
   if (stmts.length !== 1) return { ok: false, code: 'statements', detail: `a query is exactly one statement (found ${stmts.length})` };
   const w = new Walker({ catalog });
+  let columns: string[];
   try {
-    w.select(stmts[0]?.stmt, null);
+    columns = w.select(stmts[0]?.stmt, null);
   } catch (err) {
     if (err instanceof Refusal) return { ok: false, code: err.code, detail: err.message };
     throw err;
   }
-  return { ok: true, relations: [...w.relations].map(relLabel).sort(), keys: [...w.relations].sort(), functions: [...w.functions].sort(), params: w.params };
+  return { ok: true, relations: [...w.relations].map(relLabel).sort(), keys: [...w.relations].sort(), functions: [...w.functions].sort(), params: w.params, columns };
 }
 
 /**

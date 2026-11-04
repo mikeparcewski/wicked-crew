@@ -102,6 +102,10 @@ export class SourceScheduler {
   /** Take a slot for one call of `cls`, or be refused (`busy`, `rate_limited`, `remote_work_pending`). */
   admit(cls: CallerClass): Promise<Lease> {
     if (this.reservation !== null) return Promise.reject(this.pending());
+    // Capacity first: a call refused for a full queue never spends the class's rate.
+    if (this.queue.length >= this.limits.queueMax) {
+      return Promise.reject(new GateBusyError('busy', `${this.label} has ${this.queue.length} reads waiting already`, 'try again when one has finished'));
+    }
     const cap = this.limits.perMinute[cls];
     if (cap !== undefined) {
       const at = this.now();
@@ -111,9 +115,6 @@ export class SourceScheduler {
         return Promise.reject(new GateBusyError('rate_limited', `${this.label} has had ${cap} ${cls} reads in the last minute`, 'wait a minute, or fold several questions into one query'));
       }
       window.push(at);
-    }
-    if (this.queue.length >= this.limits.queueMax) {
-      return Promise.reject(new GateBusyError('busy', `${this.label} has ${this.queue.length} reads waiting already`, 'try again when one has finished'));
     }
     return new Promise<Lease>((resolve, reject) => {
       const w: Waiter = {

@@ -150,6 +150,8 @@ export class ToolboxBinary {
       await fh.close();
       const got = h.digest('hex');
       if (got !== pin) throw new ToolboxBinaryError('toolbox_checksum_mismatch', `the MCP Toolbox ${TOOLBOX_VERSION} download does not match its pinned sha256 (got ${got.slice(0, 12)}…)`);
+      // The bytes ON DISK are what will run: hashed again (a short write would otherwise pass on the stream's hash).
+      if ((await sha256File(tmp)) !== pin) throw new ToolboxBinaryError('toolbox_checksum_mismatch', `the MCP Toolbox ${TOOLBOX_VERSION} file written does not match its pinned sha256`);
       await chmod(tmp, 0o700);
       await rename(tmp, path);
     } catch (err) {

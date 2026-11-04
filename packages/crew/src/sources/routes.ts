@@ -429,8 +429,8 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
           const d = await deps.gate.describeToolbox(req.params.name);
           const testedAt = new Date().toISOString();
           const tested: SourceConnectionTestResponse = d.ok
-            ? { name: req.params.name, kind: 'sql', driver: 'postgres', ok: true, ms: d.ms, testedAt, tls: 'verified', catalog: { name: req.params.name, kind: 'sql', catalog: d.catalog, descriptorHash: d.descriptorHash }, readCheck: null }
-            : { name: req.params.name, kind: 'sql', driver: 'postgres', ok: false, ms: d.ms, testedAt, tls: 'verified', code: d.code, error: human ? d.error : `the test failed (${d.code})` };
+            ? { name: req.params.name, kind: 'sql', driver: 'postgres', ok: true, ms: d.ms, testedAt, tls: d.tls, catalog: { name: req.params.name, kind: 'sql', catalog: d.catalog, descriptorHash: d.descriptorHash }, readCheck: null }
+            : { name: req.params.name, kind: 'sql', driver: 'postgres', ok: false, ms: d.ms, testedAt, tls: d.tls, code: d.code, error: human ? d.error : `the test failed (${d.code})` };
           return tested;
         }
         return await testConnection({ registry: r, dial, ...(deps.snapshotDir !== undefined ? { snapshotDir: deps.snapshotDir } : {}) }, req.params.name, deps.actorOf(req).kind === 'human');

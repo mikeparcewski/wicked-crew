@@ -43,6 +43,12 @@ export type PolicyResult =
       functions: string[];
       /** The highest positional parameter (Postgres `$n`), or the count of `?` (MySQL). */
       params: number;
+      /**
+       * Postgres: the output column names as the walker resolved them (`?column?` where Postgres's own name is not
+       * certain; a `*` expanded from the described catalog). The gate uses them to refuse an answer whose columns
+       * an adapter would collapse (duplicate names on the Toolbox runtime).
+       */
+      columns?: string[];
     }
   | {
       ok: false;

@@ -68,6 +68,10 @@ export interface ToolboxDocument {
   applicationName: string;
   /** Whether a source-side deadline was written (else: concurrency 1 and the reservation after a kill). */
   sourceDeadline: boolean;
+  /** The `statement_timeout` written, in ms (the gate's deadline); verified on open. */
+  statementTimeoutMs: number;
+  /** Whether the session must be on TLS (verified on open). */
+  tlsRequired: boolean;
   /** The checked address (an IP literal). */
   host: string;
   port: number;
@@ -188,5 +192,5 @@ export async function toolboxDocument(input: ToolboxDocumentInput): Promise<Tool
     'description: List tables with columns, constraints and indexes.',
     '',
   ];
-  return { yaml: lines.join('\n'), secretVar, applicationName, sourceDeadline, host: bare, port, caPem: input.tls !== 'disable' && input.ca != null && input.ca !== '' ? input.ca : null };
+  return { yaml: lines.join('\n'), secretVar, applicationName, sourceDeadline, statementTimeoutMs: Math.max(1, Math.floor(input.statementTimeoutMs)), tlsRequired: input.tls !== 'disable', host: bare, port, caPem: input.tls !== 'disable' && input.ca != null && input.ca !== '' ? input.ca : null };
 }

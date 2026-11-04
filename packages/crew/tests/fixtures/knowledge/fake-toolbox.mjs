@@ -5,7 +5,7 @@
 // echoes a value, STDERR writes the decoded password to stderr. Never writes a file.
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 
 import { parseAllDocuments } from 'yaml';
@@ -55,14 +55,17 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   }
   if (sql.startsWith("SELECT current_setting('default_transaction_read_only')")) {
     const ro = source.database === 'unverified' ? 'off' : qp.default_transaction_read_only;
-    return ok([text({ ro, tro: ro, sp: String(qp.search_path ?? '').replace(',', ', '), scs: qp.standard_conforming_strings, st: qp.statement_timeout === undefined ? '0' : `${qp.statement_timeout}ms` })]);
+    const app = source.database === 'wrongapp' ? 'someone-else' : qp.application_name;
+    return ok([text({ ro, tro: ro, sp: String(qp.search_path ?? '').replace(',', ', '), scs: qp.standard_conforming_strings, st: qp.statement_timeout === undefined ? '0' : `${qp.statement_timeout}ms`, st_ms: qp.statement_timeout ?? '0', app, ssl: qp.sslmode !== 'disable' })]);
   }
-  // The reservation's check: the test leaves `remote-running` in the process's HOME (its run dir) while the remote work "runs".
-  if (sql.includes('pg_stat_activity')) return ok([text({ n: existsSync(join(process.env.HOME ?? '.', 'remote-running')) ? 1 : 0 })]);
+  // The reservation's check: the test leaves `remote-running` in the source's run directory while the remote work "runs".
+  if (sql.includes('pg_stat_activity')) return ok([text({ n: existsSync(join(dirname(dirname(config)), 'remote-running')) ? 1 : 0 })]);
   if (sql.includes('pg_inherits')) return ok([]);
   if (sql.includes('HANG')) return;
   if (sql.includes('BIG')) return ok([text({ big: 'x'.repeat(2 * 1024 * 1024) })]);
   if (sql.includes('ERROR')) return send({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: `error processing request: unable to execute query: ERROR: invalid input syntax for type integer: "${source.password}" (SQLSTATE 22P02)` }], isError: true } });
-  if (sql.includes('STDERR')) process.stderr.write(`fake-toolbox: connecting with ${source.password}\n`);
+  if (sql.includes('STDERRPART')) process.stderr.write(`fake-toolbox: half a write ${String(source.password).slice(0, 6)}`);
+  else if (sql.includes('STDERR')) process.stderr.write(`fake-toolbox: connecting with ${source.password}\n`);
+  if (sql.includes('DUPCOLS')) return ok([{ type: 'text', text: '{"a":1,"a":2}' }]);
   return ok([text({ a: 1, b: 'x' }), text({ a: 2, b: 'y' })]);
 });

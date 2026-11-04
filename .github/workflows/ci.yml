@@ -322,9 +322,24 @@ jobs:
         working-directory: wicked-crew
         run: npm ci
 
+      # DES-KNOWLEDGE-DATA-001 B2: the data gate's Toolbox leg runs the REAL pinned MCP Toolbox v1.15.0 (linux/amd64),
+      # fetched through crew's own ToolboxBinary (sha256-verified before chmod) and cached across runs.
+      - name: Cache the pinned MCP Toolbox binary
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/wicked-toolbox
+          key: mcp-toolbox-v1.15.0-linux-x64
+
+      - name: Fetch the pinned MCP Toolbox binary (verified)
+        id: toolbox
+        working-directory: wicked-crew/packages/crew
+        run: echo "bin=$(npx tsx scripts/fetch-toolbox.ts "$HOME/.cache/wicked-toolbox")" >> "$GITHUB_OUTPUT"
+
       - name: Apps source and executor tests on real databases
         working-directory: wicked-crew/packages/crew
         env:
+          WICKED_TOOLBOX_BIN: ${{ steps.toolbox.outputs.bin }}
+          WICKED_TOOLBOX: required
           WICKED_SOURCES_DB: required
           APPS_PG16_URL: postgres://postgres:apps@127.0.0.1:55416/postgres
           APPS_PG17_URL: postgres://postgres:apps@127.0.0.1:55417/postgres

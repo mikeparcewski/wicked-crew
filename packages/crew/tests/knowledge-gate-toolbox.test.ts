@@ -40,6 +40,7 @@ const AGENT: Actor = { id: 'worker-1', kind: 'agent', trust: 'admin' };
 const TB_ID = '3f0c9a1e-0000-4000-8000-0000000000b2';
 const NODL_ID = '3f0c9a1e-0000-4000-8000-0000000000b3';
 const UNBOUND_ID = '3f0c9a1e-0000-4000-8000-0000000000b4';
+const WRONGAPP_ID = '3f0c9a1e-0000-4000-8000-0000000000b5';
 
 class NoSecrets implements SecretStore {
   readonly available = true;
@@ -54,11 +55,12 @@ class NoSecrets implements SecretStore {
 }
 
 const unit = (runId: string) => ({ runId, ord: 2, attempt: 1, phase: 'unit-2', seat: 'claude' });
-const TOKENS: Record<string, { unit: ReturnType<typeof unit>; projectId: string | null; apps?: boolean; policyAsk?: boolean }> = {
+const TOKENS: Record<string, { unit: ReturnType<typeof unit>; projectId: string | null; apps?: boolean; policyAsk?: boolean; bareAsk?: boolean }> = {
   wmt_a: { unit: unit('run-a'), projectId: 'proj_a' },
   wmt_b: { unit: unit('run-b'), projectId: 'proj_b' },
   wmt_apps: { unit: unit('run-apps'), projectId: 'proj_a', apps: true },
   wmt_ask: { unit: unit('run-ask'), projectId: 'proj_a', policyAsk: true },
+  wmt_bare: { unit: unit('run-bare'), projectId: 'proj_a', bareAsk: true },
 };
 
 const resolver = () => async (json: string) => {
@@ -71,7 +73,7 @@ const lister = () => async (json: string) => {
   const t = TOKENS[token];
   if (t === undefined) throw new Error('invalid_token: unknown');
   // D-7: an Apps unit is denied everything (and the list leaves denies out). Otherwise a first use asks.
-  const tools = t.apps === true ? [] : calls.map((c) => ({ subject: `mcp:${c.server}/${c.tool}`, class: 'read', decision: 'ask', ruleIds: t.policyAsk === true ? ['policy:ask-data'] : ['engine:mcp-first-use'] }));
+  const tools = t.apps === true ? [] : calls.map((c) => ({ subject: `mcp:${c.server}/${c.tool}`, class: 'read', decision: 'ask', ruleIds: t.bareAsk === true ? [] : t.policyAsk === true ? ['policy:ask-data'] : ['engine:mcp-first-use'] }));
   return JSON.stringify({ unit: t.unit, tools });
 };
 
@@ -85,6 +87,8 @@ interface Rig {
   answers: string[];
   setActor: (a: Actor) => void;
   setAfterRead: (fn: (() => Promise<void>) | null) => void;
+  setFailRecord: (fn: ((e: { outcome: string }) => boolean) | null) => void;
+  setOnBrokerRecord: (fn: (() => Promise<void>) | null) => void;
 }
 
 const gatedTools = () =>
@@ -134,7 +138,11 @@ async function rig(): Promise<Rig> {
   const unbound = toolboxRecord('tb-unbound', UNBOUND_ID);
   (unbound['tools'] as Array<{ name: string; disclosure: { schemaHash: string } }>).find((t) => t.name === 'execute_sql')!.disclosure.schemaHash = 'h-older-schema';
   unbound['agents'] = { see: true, query: true, projects: ['proj_a'], everyProject: false };
-  writeFileSync(join(mcpDir, 'registry.json'), JSON.stringify({ version: 1, servers: [toolboxRecord('tb', TB_ID), toolboxRecord('tb-nodl', NODL_ID), unbound] }));
+  // `tb-wrongapp`: its session does not carry the application name crew wrote (the open check refuses it).
+  const wrongapp = toolboxRecord('tb-wrongapp', WRONGAPP_ID);
+  (wrongapp['toolbox'] as Record<string, unknown>)['database'] = 'wrongapp';
+  wrongapp['agents'] = { see: true, query: true, projects: ['proj_a'], everyProject: false };
+  writeFileSync(join(mcpDir, 'registry.json'), JSON.stringify({ version: 1, servers: [toolboxRecord('tb', TB_ID), toolboxRecord('tb-nodl', NODL_ID), unbound, wrongapp] }));
   const bin = join(base, 'toolbox');
   writeFileSync(bin, `#!/bin/sh\nexec "${process.execPath}" "${FAKE}" "$@"\n`);
   chmodSync(bin, 0o755);
@@ -150,6 +158,14 @@ async function rig(): Promise<Rig> {
   });
   const audit = new AuditLog(join(base, 'audit.log'), () => undefined);
   const record = new SourceReadLog(mcpDir);
+  let failRecord: ((e: { outcome: string }) => boolean) | null = null;
+  const recordSink = {
+    append: (e: Parameters<SourceReadLog['append']>[0]) => (failRecord !== null && failRecord(e) ? Promise.reject(new Error('disk full')) : record.append(e)),
+    recent: (n: string, k?: number) => record.recent(n, k),
+    dataUse: (id: string) => record.dataUse(id),
+  };
+  let onBrokerRecord: (() => Promise<void>) | null = null;
+  const calls = new McpCallRecordFile(mcpDir);
   const sup = new ToolboxSupervisor({ binary: async () => bin, runRoot: join(mcpDir, 'adapters', 'toolbox', 'run') });
   const texts: string[] = [];
   let afterRead: (() => Promise<void>) | null = null;
@@ -157,7 +173,7 @@ async function rig(): Promise<Rig> {
     store,
     catalogs: registry.catalogs,
     secret: async (ref) => (ref === 'env:KD_B2_FAKE_SECRET' ? SECRET : null),
-    record,
+    record: recordSink,
     audit,
     resolver,
     lister,
@@ -173,12 +189,24 @@ async function rig(): Promise<Rig> {
     },
   });
   prober = gate;
-  const broker = new McpBroker({ registry, engine: () => null, records: new McpCallRecordFile(mcpDir), gate });
+  const broker = new McpBroker({
+    registry,
+    engine: () => null,
+    records: {
+      append: async (rec) => {
+        const fn = onBrokerRecord;
+        onBrokerRecord = null;
+        if (fn !== null) await fn();
+        return calls.append(rec);
+      },
+    },
+    gate,
+  });
   let actor: Actor = LOCAL_ACTOR;
   const app = Fastify({ logger: false });
   registerMcpRoutes(app, { registry, broker, toolLister: lister, gate, audit, actorOf: () => actor });
   registerSourceRoutes(app, { registry, audit, actorOf: () => actor, gate });
-  registerGateRoutes(app, { store, record, audit, actorOf: () => actor });
+  registerGateRoutes(app, { store, record: recordSink, audit, actorOf: () => actor });
   await app.ready();
   return {
     app,
@@ -193,6 +221,12 @@ async function rig(): Promise<Rig> {
     },
     setAfterRead: (fn) => {
       afterRead = fn;
+    },
+    setFailRecord: (fn) => {
+      failRecord = fn;
+    },
+    setOnBrokerRecord: (fn) => {
+      onBrokerRecord = fn;
     },
   };
 }
@@ -244,10 +278,10 @@ describe.skipIf(process.platform === 'win32')('the gate on a Toolbox-runtime sou
     rmSync(r.base, { recursive: true, force: true });
   });
 
-  it('describes through Toolbox on Test, and lists nothing to any unit until a person names its project', async () => {
+  it('describes through Toolbox on Test, and lists nothing to any unit until a person names its project', { timeout: 90_000 }, async () => {
     const t = await r.app.inject({ method: 'POST', url: '/api/v1/sources/tb/test' });
     expect(t.statusCode, t.body).toBe(200);
-    expect(t.json()).toMatchObject({ ok: true, catalog: { catalog: { dialect: 'postgres', relations: [{ schema: 's', name: 't', primaryKey: ['a'] }] } } });
+    expect(t.json()).toMatchObject({ ok: true, tls: 'off', catalog: { catalog: { dialect: 'postgres', relations: [{ schema: 's', name: 't', primaryKey: ['a'] }] } } });
     expect((await r.app.inject({ method: 'POST', url: '/api/v1/sources/tb-nodl/test' })).json()).toMatchObject({ ok: true });
     expect((await listed(r, 'wmt_a')).filter((x) => x.subject.startsWith('mcp:tb/') || x.subject.startsWith('mcp:tb-nodl/'))).toEqual([]);
     const hidden = await call(r, 'wmt_a', 'mcp:tb/list_tables');
@@ -315,7 +349,7 @@ describe.skipIf(process.platform === 'win32')('the gate on a Toolbox-runtime sou
     expect(JSON.stringify(res.body)).not.toContain('invalid input syntax');
   });
 
-  it('the deadline kills only that process; the next call finds a warm one', async () => {
+  it('the deadline kills only that process; the next call finds a warm one', { timeout: 60_000 }, async () => {
     const before = r.sup.current(TB_ID)?.pid ?? null;
     expect(alive(before)).toBe(true);
     const res = await call(r, 'wmt_a', 'mcp:tb/execute_sql', { sql: "SELECT t.a FROM s.t AS t WHERE t.b = 'HANG'" });
@@ -352,7 +386,7 @@ describe.skipIf(process.platform === 'win32')('the gate on a Toolbox-runtime sou
     expect(err).toContain('[redacted:secret]');
   });
 
-  it('with no source-side deadline (timeout removed), a kill holds the source closed until its session is confirmed gone', async () => {
+  it('with no source-side deadline (timeout removed), a kill holds the source closed until its session is confirmed gone', { timeout: 60_000 }, async () => {
     expect((await put(r, 'tb-nodl', { projects: ['proj_a'], query: true })).statusCode).toBe(200);
     expect((await call(r, 'wmt_a', 'mcp:tb-nodl/execute_sql', { sql: Q })).answer).toMatchObject({ rowCount: 2 });
     const runDir = join(r.base, 'mcp', 'adapters', 'toolbox', 'run', NODL_ID);
@@ -419,6 +453,89 @@ describe.skipIf(process.platform === 'win32')('the gate on a Toolbox-runtime sou
     expect(named.statusCode).toBeGreaterThanOrEqual(400);
     expect(named.body).toContain('container runtime');
   });
+
+  it('a tool class cleared, or a switch turned off while the broker records the call, withholds the rows', async () => {
+    // the class cleared during the read
+    r.setAfterRead(async () => {
+      const file = JSON.parse(readFileSync(join(r.base, 'mcp', 'registry.json'), 'utf8')) as { servers: Array<{ name: string; tools: Array<{ name: string; disclosure: unknown }> }> };
+      const t = file.servers.find((x) => x.name === 'tb')?.tools.find((x) => x.name === 'execute_sql');
+      if (t !== undefined) t.disclosure = null;
+      writeFileSync(join(r.base, 'mcp', 'registry.json'), JSON.stringify(file));
+    });
+    const cleared = await call(r, 'wmt_a', 'mcp:tb/execute_sql', { sql: Q });
+    expect(cleared.body).toMatchObject({ outcome: 'withheld', ruleIds: ['gate:changed'] });
+    const file = JSON.parse(readFileSync(join(r.base, 'mcp', 'registry.json'), 'utf8')) as { servers: Array<{ name: string; tools: unknown[] }> };
+    (file.servers.find((x) => x.name === 'tb') as { tools: unknown[] }).tools = gatedTools();
+    writeFileSync(join(r.base, 'mcp', 'registry.json'), JSON.stringify(file));
+    // the switch turned off while the broker writes its own call record
+    r.setOnBrokerRecord(async () => {
+      await put(r, 'tb', { query: false });
+    });
+    const flipped = await call(r, 'wmt_a', 'mcp:tb/execute_sql', { sql: Q });
+    expect(flipped.body).toMatchObject({ outcome: 'withheld', ruleIds: ['gate:changed'] });
+    expect(JSON.stringify(flipped.body)).not.toContain('"rows"');
+    const lines = readFileSync(join(r.base, 'mcp', 'source-queries.ndjson'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(lines.filter((l) => l['callId'] === flipped.body.callId).at(-1)).toMatchObject({ released: false });
+    expect((await put(r, 'tb', { query: true })).statusCode).toBe(200);
+  });
+
+  it('a record that cannot be written withholds the rows, at either step', async () => {
+    r.setFailRecord((e) => e.outcome === 'unconfirmed');
+    const first = await call(r, 'wmt_a', 'mcp:tb/execute_sql', { sql: Q });
+    expect(first.body).toMatchObject({ outcome: 'withheld', ruleIds: ['gate:record'] });
+    r.setFailRecord((e) => e.outcome === 'ok');
+    const second = await call(r, 'wmt_a', 'mcp:tb/execute_sql', { sql: Q });
+    expect(second.body).toMatchObject({ outcome: 'withheld', ruleIds: ['gate:record'] });
+    r.setFailRecord(null);
+    const lines = readFileSync(join(r.base, 'mcp', 'source-queries.ndjson'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(lines.filter((l) => l['callId'] === second.body.callId).at(-1)).toMatchObject({ outcome: 'unconfirmed', released: false });
+  });
+
+  it('a record corrupted mid-file is unknown, never "no data used"; a torn last line is skipped', async () => {
+    const path = join(r.base, 'mcp', 'source-queries.ndjson');
+    const good = readFileSync(path, 'utf8');
+    writeFileSync(path, `${good}{"callId":"torn`);
+    expect(((await r.app.inject({ method: 'GET', url: '/api/v1/runs/run-a/data-use' })).json() as RunDataUseResponse).known).toBe(true);
+    writeFileSync(path, `garbage line\n${good}`);
+    expect(((await r.app.inject({ method: 'GET', url: '/api/v1/runs/run-a/data-use' })).json() as RunDataUseResponse).known).toBe(false);
+    writeFileSync(path, good);
+  });
+
+  it('an ask with no rule ids is not first use: it stays pending', async () => {
+    const bare = await call(r, 'wmt_bare', 'mcp:tb/execute_sql', { sql: Q });
+    expect(bare.status).toBe(409);
+    expect((await listed(r, 'wmt_bare')).find((x) => x.subject === 'mcp:tb/execute_sql')?.decision).toBe('ask');
+  });
+
+  it('two output columns of one name are refused on the Toolbox runtime, never answered short', async () => {
+    const dup = await call(r, 'wmt_a', 'mcp:tb/execute_sql', { sql: 'SELECT t.a, t.a FROM s.t AS t' });
+    expect(dup.answer).toMatchObject({ refused: 'ambiguous_columns' });
+    const collapsed = await call(r, 'wmt_a', 'mcp:tb/execute_sql', { sql: "SELECT t.a, t.b AS c FROM s.t AS t WHERE t.b = 'DUPCOLS'" });
+    expect(collapsed.answer).toMatchObject({ refused: 'ambiguous_columns' });
+  });
+
+  it('a session without the application name crew wrote is refused at open; a half-written secret never shows in stderr', async () => {
+    const wrong = (await r.app.inject({ method: 'POST', url: '/api/v1/sources/tb-wrongapp/test' })).json() as { ok: boolean; code?: string };
+    expect(wrong).toMatchObject({ ok: false, code: 'adapter_unverified' });
+    expect(r.sup.current(WRONGAPP_ID)).toBeNull();
+    await call(r, 'wmt_a', 'mcp:tb/execute_sql', { sql: "SELECT t.a FROM s.t AS t WHERE t.b = 'STDERRPART'" });
+    await until(() => (r.sup.current(TB_ID)?.stderr ?? '').includes('half a write'));
+    const err = r.sup.current(TB_ID)?.stderr ?? '';
+    expect(err.endsWith(SECRET.slice(0, 6))).toBe(false);
+    expect(err).not.toContain(SECRET.slice(0, 6));
+  });
+
+  it("a preview of a Toolbox source saves with its tools on: preview -> save -> the person's switch -> a read", async () => {
+    const body = { name: 'tb-saved', kind: 'toolbox-source', runtime: 'toolbox', toolbox: { kind: 'source', type: 'postgres', host: '127.0.0.1', port: '55431', user: 'reader', password: '${WICKED_SRC_1}', database: 'support' }, tls: { mode: 'disable' }, auth: { ref: 'env:KD_B2_FAKE_SECRET' }, address: { allow: ['127.0.0.0/8'], plaintext: false } };
+    const p = await r.app.inject({ method: 'POST', url: '/api/v1/mcp/servers/preview', payload: body });
+    expect(p.statusCode, p.body).toBe(200);
+    const saved = await r.app.inject({ method: 'POST', url: '/api/v1/mcp/servers', payload: { previewHash: (p.json() as { previewHash: string }).previewHash } });
+    expect(saved.statusCode, saved.body).toBeLessThan(300);
+    expect((await r.app.inject({ method: 'POST', url: '/api/v1/sources/tb-saved/test' })).json()).toMatchObject({ ok: true });
+    expect((await put(r, 'tb-saved', { projects: ['proj_a'], query: true })).statusCode).toBe(200);
+    expect((await listed(r, 'wmt_a')).filter((x) => x.subject.startsWith('mcp:tb-saved/')).map((x) => x.subject).sort()).toEqual(['mcp:tb-saved/execute_sql', 'mcp:tb-saved/list_tables']);
+    expect((await call(r, 'wmt_a', 'mcp:tb-saved/execute_sql', { sql: Q })).answer).toMatchObject({ rowCount: 2 });
+  }, 60_000);
 
   it('a scan finds the secret in no file, log or answer', async () => {
     await r.audit.flush();

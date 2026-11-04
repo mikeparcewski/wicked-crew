@@ -19,9 +19,10 @@
  */
 
 import { type ChildProcess, spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 
 import { scrubSecrets } from '../../../mcp/secrets.js';
 import { type ToolboxDocument, yamlQuotedBody } from './document.js';
@@ -73,7 +74,10 @@ export class ToolboxProcess {
   private line: Buffer[] = [];
   private lineBytes = 0;
   private stderrTail = '';
+  private readonly stderrDecoder = new StringDecoder('utf8');
   private exited = false;
+  /** Set the moment a stop begins: a process being stopped is never handed out again, even before it exits. */
+  private stopping = false;
   private idleTimer: NodeJS.Timeout | null = null;
   verified: ToolboxVerified | null = null;
   readonly secrets: string[];
@@ -97,12 +101,24 @@ export class ToolboxProcess {
   }
 
   get alive(): boolean {
-    return this.child !== null && !this.exited;
+    return this.child !== null && !this.exited && !this.stopping;
   }
 
-  /** The last stderr, scrubbed of the secret's forms: for a human's diagnostics only. */
+  /**
+   * The last stderr, scrubbed of the secret's forms: for a human's diagnostics only. A tail that ends in the
+   * beginning of a secret form (a write the process had not finished) is cut there, so no fragment is shown.
+   */
   get stderr(): string {
-    return this.stderrTail;
+    let t = this.stderrTail;
+    for (const f of this.secrets) {
+      for (let k = Math.min(f.length - 1, t.length); k > 0; k--) {
+        if (t.endsWith(f.slice(0, k))) {
+          t = t.slice(0, t.length - k);
+          break;
+        }
+      }
+    }
+    return t;
   }
 
   /** Spawn, initialize and verify the session settings. */
@@ -111,7 +127,9 @@ export class ToolboxProcess {
     const config = join(this.runDir, 'tools.yaml');
     await writeFile(config, this.doc.yaml, { mode: 0o600 });
     if (this.doc.caPem !== null) await writeFile(join(this.runDir, 'ca.pem'), this.doc.caPem, { mode: 0o600 });
-    const env: Record<string, string> = { PATH: process.platform === 'win32' ? (process.env['PATH'] ?? '') : '/usr/bin:/bin', HOME: this.runDir, TMPDIR: this.runDir };
+    // GOMEMLIMIT is a SOFT bound (the Go runtime collects harder near it); the hard memory limit of §7.4 comes with
+    // the per-source runner container (§7.5). Host mode's residual: a process can still grow past it.
+    const env: Record<string, string> = { PATH: process.platform === 'win32' ? (process.env['PATH'] ?? '') : '/usr/bin:/bin', HOME: this.runDir, TMPDIR: this.runDir, GOMEMLIMIT: '256MiB' };
     if (process.platform === 'win32' && process.env['SystemRoot'] !== undefined) env['SystemRoot'] = process.env['SystemRoot'];
     if (this.doc.secretVar !== null) env[this.doc.secretVar] = yamlQuotedBody(this.secret ?? '');
     const child = spawn(this.bin, ['--stdio', '--config', config, '--disable-reload', '--disable-version-check', '--log-level', 'ERROR'], {
@@ -123,7 +141,9 @@ export class ToolboxProcess {
     this.child = child;
     child.stdout?.on('data', (chunk: Buffer) => this.onData(chunk));
     child.stderr?.on('data', (chunk: Buffer) => {
-      this.stderrTail = scrubSecrets(`${this.stderrTail}${chunk.toString('utf8')}`, this.secrets).slice(-STDERR_KEEP);
+      // One streaming decoder (a multi-byte character split across chunks decodes whole), scrubbed over the
+      // kept tail plus the new text (a secret split across chunks is whole there), then cut to the tail.
+      this.stderrTail = scrubSecrets(`${this.stderrTail}${this.stderrDecoder.write(chunk)}`, this.secrets).slice(-STDERR_KEEP);
     });
     child.on('error', () => this.onExit());
     child.on('exit', () => this.onExit());
@@ -144,23 +164,29 @@ export class ToolboxProcess {
     const r = await this.callTool(
       'execute_sql',
       {
-        sql: "SELECT current_setting('default_transaction_read_only') AS ro, current_setting('transaction_read_only') AS tro, current_setting('search_path') AS sp, current_setting('standard_conforming_strings') AS scs, current_setting('statement_timeout') AS st",
+        sql: "SELECT current_setting('default_transaction_read_only') AS ro, current_setting('transaction_read_only') AS tro, current_setting('search_path') AS sp, current_setting('standard_conforming_strings') AS scs, current_setting('statement_timeout') AS st, (SELECT s.setting FROM pg_catalog.pg_settings s WHERE s.name = 'statement_timeout') AS st_ms, current_setting('application_name') AS app, COALESCE((SELECT l.ssl FROM pg_catalog.pg_stat_ssl l WHERE l.pid = pg_catalog.pg_backend_pid()), false) AS ssl",
       },
       INTERNAL_BYTES,
       TOOLBOX_START_MS,
     );
     const row = toolboxRows(r)[0];
     if (r.isError || row === undefined) throw new ToolboxCallError('adapter_unverified', 'crew could not read the session settings it wrote for this source');
+    const ms = Number(row['st_ms']);
     const v: ToolboxVerified = {
       readOnly: row['ro'] === 'on' && row['tro'] === 'on',
       searchPath: String(row['sp'] ?? ''),
       standardStrings: row['scs'] === 'on',
       statementTimeout: String(row['st'] ?? ''),
-      sourceDeadline: typeof row['st'] === 'string' && row['st'] !== '0' && row['st'] !== '',
+      // A source-side deadline holds only when it is in force AND no longer than the gate's: a longer one could leave
+      // work running after a kill, so it counts as none (concurrency 1 and the reservation).
+      sourceDeadline: Number.isFinite(ms) && ms > 0 && ms <= this.doc.statementTimeoutMs,
     };
     if (!v.readOnly || v.searchPath.replace(/\s/g, '') !== 'pg_catalog,pg_temp' || !v.standardStrings) {
       throw new ToolboxCallError('adapter_unverified', 'the source session does not hold the settings crew wrote (read-only, search_path, standard_conforming_strings), so crew does not serve it');
     }
+    // The reservation finds this source's sessions by the name crew wrote, and verify-full must be on TLS.
+    if (row['app'] !== this.doc.applicationName) throw new ToolboxCallError('adapter_unverified', 'the source session does not carry the application name crew wrote, so crew does not serve it');
+    if (this.doc.tlsRequired && row['ssl'] !== true) throw new ToolboxCallError('adapter_unverified', 'the source session is not on TLS, so crew does not serve it');
     return v;
   }
 
@@ -268,7 +294,8 @@ export class ToolboxProcess {
     const p = this.pending;
     this.pending = null;
     p?.reject(new ToolboxCallError('adapter_exited', 'the Toolbox process for this source exited during the call'));
-    void rm(join(this.runDir, 'tools.yaml'), { force: true }).catch(() => undefined);
+    // The process's own directory (its document, its CA): nothing of it outlives the process.
+    void rm(this.runDir, { recursive: true, force: true }).catch(() => undefined);
     this.onGone(this);
   }
 
@@ -280,11 +307,13 @@ export class ToolboxProcess {
 
   /** Kill at once (a deadline, a cap): stdio cancel is ignored, so this is the stop. */
   kill(): void {
+    this.stopping = true;
     if (this.child !== null && !this.exited) this.child.kill('SIGKILL');
   }
 
   /** A graceful stop (idle reap, shutdown). */
   stop(): void {
+    this.stopping = true;
     if (this.child !== null && !this.exited) {
       this.child.kill('SIGTERM');
       const c = this.child;
@@ -323,9 +352,17 @@ export interface SupervisorDeps {
   idleMs?: number;
 }
 
+interface Slot {
+  key: string;
+  proc: ToolboxProcess | null;
+  starting: Promise<ToolboxProcess> | null;
+  /** Replaced or shut down: a start that resolves later is stopped at once. */
+  retired: boolean;
+}
+
 /** The daemon's Toolbox processes, by source id; a changed document or secret restarts the source's process. */
 export class ToolboxSupervisor {
-  private readonly procs = new Map<string, { key: string; proc: ToolboxProcess | null; starting: Promise<ToolboxProcess> | null }>();
+  private readonly procs = new Map<string, Slot>();
 
   constructor(private readonly deps: SupervisorDeps) {}
 
@@ -334,28 +371,40 @@ export class ToolboxSupervisor {
     const key = createHash('sha256').update(`${doc.yaml}\u0000${secret ?? ''}\u0000${doc.caPem ?? ''}`).digest('hex');
     let slot = this.procs.get(id);
     if (slot !== undefined && slot.key !== key) {
-      slot.proc?.stop();
+      // A new document or secret: the old generation is stopped, a start still in flight included (it is stopped
+      // the moment it resolves), and never handed out again.
+      this.retire(slot);
       this.procs.delete(id);
       slot = undefined;
     }
     if (slot?.proc?.alive === true) return slot.proc;
     if (slot?.starting != null) return slot.starting;
-    const entry = slot ?? { key, proc: null, starting: null };
+    const entry: Slot = slot ?? { key, proc: null, starting: null, retired: false };
     this.procs.set(id, entry);
-    const dir = join(this.deps.runRoot, id.replace(/[^A-Za-z0-9_-]/g, '_'));
+    // A directory per process: two processes of one source (two generations, or a respawn racing the old one's
+    // exit) never share, overwrite or delete one another's document.
+    const dir = join(this.deps.runRoot, id.replace(/[^A-Za-z0-9_-]/g, '_'), `${key.slice(0, 12)}-${randomBytes(4).toString('hex')}`);
     entry.starting = (async () => {
       const bin = await this.deps.binary();
       const p = new ToolboxProcess(bin, dir, doc, secret, this.deps.idleMs ?? TOOLBOX_IDLE_MS, (gone) => {
-        const s = this.procs.get(id);
-        if (s?.proc === gone) s.proc = null;
+        if (entry.proc === gone) entry.proc = null;
       });
       await p.start();
+      if (entry.retired) {
+        p.stop();
+        throw new ToolboxCallError('adapter_exited', 'the source was saved again while its adapter started');
+      }
       entry.proc = p;
       return p;
     })().finally(() => {
       entry.starting = null;
     });
     return entry.starting;
+  }
+
+  private retire(slot: Slot): void {
+    slot.retired = true;
+    slot.proc?.stop();
   }
 
   /**
@@ -370,6 +419,7 @@ export class ToolboxSupervisor {
       return await fn(p);
     } finally {
       p.kill();
+      await rm(join(this.deps.runRoot, `preview-${label.replace(/[^A-Za-z0-9_-]/g, '_')}`), { recursive: true, force: true }).catch(() => undefined);
     }
   }
 
@@ -380,7 +430,7 @@ export class ToolboxSupervisor {
   }
 
   stopAll(): void {
-    for (const s of this.procs.values()) s.proc?.stop();
+    for (const s of this.procs.values()) this.retire(s);
     this.procs.clear();
   }
 }

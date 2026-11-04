@@ -63,6 +63,15 @@ describe('one scheduler per source (§7.4) and the remote-work reservation (§7.
     await all;
     expect(order).toEqual(['p1', 'u1', 'u2', 'd1']);
   });
+  it('a call refused for a full queue does not spend the rate', async () => {
+    const s = new SourceScheduler({ ...DEFAULT_LIMITS, concurrency: 1, queueMax: 1, perMinute: { unit: 2 } }, 'src');
+    const held = await s.admit('unit');
+    const queued = s.admit('unit');
+    for (let i = 0; i < 5; i++) await expect(s.admit('unit')).rejects.toMatchObject({ code: 'busy' });
+    held.done({ outcome: 'ok' });
+    (await queued).done({ outcome: 'ok' });
+    await expect(s.admit('unit')).rejects.toMatchObject({ code: 'rate_limited' }); // 2 spent: the held and the queued
+  });
   it('a full queue is busy, the unit rate is 30 a minute', async () => {
     const s = new SourceScheduler({ ...DEFAULT_LIMITS, concurrency: 1, queueMax: 1, perMinute: { unit: 2 } }, 'src');
     const held = await s.admit('person');
@@ -163,7 +172,9 @@ describe('the Postgres rewrite (§6.3, §7.2)', () => {
   });
   it('the unit projection: bounded types keep, bytea is cut by substring, everything else by left(c::text)', async () => {
     expect(boundedType('bigint')).toBe(true);
-    expect(boundedType('numeric(10,2)')).toBe(true);
+    // numeric is not bounded by its type (prepare reports no typmod; an unconstrained one holds 131,072 digits)
+    expect(boundedType('numeric')).toBe(false);
+    expect(cellExpression('q."c1"', 'numeric', 2000)).toBe('pg_catalog.left(q."c1"::pg_catalog.text, 2001)');
     expect(boundedType('timestamp(3) with time zone')).toBe(true);
     expect(boundedType('text')).toBe(false);
     expect(boundedType('support.ticket_status')).toBe(false);
