@@ -16,6 +16,7 @@ import {
   EstateMcpError,
   estateMcpExe,
   memoryStoreIsolationNotice,
+  estateKnowledgeEnv,
   resolveMemoryDb,
   sameDirectory,
   resolveMemoryDbPath,
@@ -230,6 +231,18 @@ describe('resolveMemoryDbPath', () => {
   it('WICKED_MEMORY_DB still outranks the state home — the explicit instruction is the specific one', () => {
     setCrewStateHome('/scratch/rig-a');
     expect(resolveMemoryDbPath({ WICKED_MEMORY_DB: '/custom/mem.db' })).toBe('/custom/mem.db');
+  });
+
+  // DES-KNOWLEDGE-DATA-001 §4.1: crew now WRITES source structure into the knowledge store, so a rig or a test
+  // daemon must never reach the operator's global one; the default daemon keeps estate's default (garden's CLI).
+  it('the knowledge store takes the same ladder: an isolated home its own, the default home and an explicit pin estate\'s', async () => {
+    const { estateRelayEnv } = await import('../src/mcp/estate-relay.js');
+    expect(estateKnowledgeEnv({})).toEqual({});
+    setCrewStateHome('/scratch/rig-a');
+    expect(estateKnowledgeEnv({})).toEqual({ WICKED_KNOWLEDGE_DB: join('/scratch/rig-a', 'mcp', 'knowledge.db') });
+    expect(estateKnowledgeEnv({ WICKED_KNOWLEDGE_DB: '/custom/k.db' })).toEqual({});
+    const scope = { unit: { runId: 'r', ord: 1, attempt: 1, phase: 'unit-1', seat: 'pi' }, projectId: null, repoId: null, codeGraphDb: null };
+    expect(estateRelayEnv(scope, {})['WICKED_KNOWLEDGE_DB']).toBe(join('/scratch/rig-a', 'mcp', 'knowledge.db'));
   });
 
   // codex review of this PR, MEDIUM: an operator who has always run ONE daemon on a CUSTOM --db
