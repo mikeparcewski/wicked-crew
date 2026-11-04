@@ -2,9 +2,15 @@
 
 **The harness for your agent harnesses** — run the coding-agent CLIs you already use as governed
 workers through durable, multi-agent workflows. Intent in, gated work out: gates are
-deny-dominates, "done" is re-derived from evidence instead of asserted, and review goes to a seat
-other than the creator's whenever the roster has an eligible one — team runs require it, and an ordinary run
-that cannot meet it says so on the run ("evaluator ≠ creator not held").
+deny-dominates, "done" is re-derived from evidence instead of asserted, and by default review goes to
+an agent other than the one that built the work. When none can review it, the run stops unless you
+launch it as "reduced assurance", which is labelled on the run, every gate and the delivery; crew never
+turns that on for you.
+
+Apps and data, through one gate: register your databases, files, APIs and issue trackers (GitHub
+Issues, Jira), build dashboards over them by chat, and let agents read your databases only where you
+allow it. An agent's read of a database is one checked, read-only query with a 10 s deadline and at
+most 200 rows, marked as untrusted data and cited.
 
 Local-first: loopback only, no accounts, no billing, no model reselling. Crew drives the agents
 *you* already pay for, on *your* auth and *your* plan.
@@ -13,16 +19,17 @@ Local-first: loopback only, no accounts, no billing, no model reselling. Crew dr
 
 Before you start, you need:
 
-- **Node.js ≥ 22.**
+- **Node.js ≥ 22** (uploading a file or a SQLite database as a data source needs 24.12, 25.1 or later).
 - **A container runtime** (Rancher Desktop, Docker, Podman, Colima or OrbStack), running. Governed
   agents work in a hardened seat container, and you sign each one in from studio's Agents tab in a
   login container. `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead.
 - **At least one coding-agent CLI** you can sign in (Claude Code, Codex, GitHub Copilot, OpenCode or Pi).
-- **wicked-garden ≥ 12.64.0**, the skills every governed worker follows. crew does not vendor it, and
-  without it every launch is refused: `npx wicked-installer install wicked-garden`, then restart
-  `wicked-crew serve`.
-- Optional: **wicked-estate** (`wicked-estate-mcp` on PATH) for code graphs and memory. It installs
-  with cargo today, so it needs a Rust toolchain.
+- **wicked-garden ≥ 12.64.0**, the skills every governed worker follows (including the Apps skill an
+  app's chat builds with). crew does not vendor it, and without it every launch is refused:
+  `npx wicked-installer install wicked-garden`, then restart `wicked-crew serve`.
+- Optional: **wicked-estate** (`wicked-estate-mcp` on PATH) for code graphs and memory, and, from
+  wicked-estate 0.32.0, the knowledge store that holds your data sources' structure (never their
+  values) so agents can recall it. It installs with cargo today, so it needs a Rust toolchain.
 
 ```bash
 npm install -g wicked-crew
@@ -99,6 +106,17 @@ by a versioned skill on an assigned CLI worker; the gates decide, and every deci
 The engine underneath is [wicked-core](https://github.com/mikeparcewski/wicked-core) (Rust,
 single-writer), embedded via the `wicked-core-ts` napi bridge — the daemon is a thin REST+WS
 layer over it.
+
+## Apps and data sources
+
+Data sources are Postgres, MySQL, uploads (CSV, XLSX, `.sqlite`), GraphQL, REST and MCP servers, issue
+trackers and crew itself, in one registry with Test connection, and "Ask a question of this data" for
+SQL sources. An app is a dashboard built by chat: each message is one governed job whose change lands
+only after a different agent reviews it. Agents read a database only through the data gate, under three
+switches a person sets on the source (see its structure, query its rows, which projects); rows are
+Postgres-only in this release. A REST or MCP server's tools reach agents as MCP tools, under your MCP
+approvals and policies. Trackers (GitHub Issues, Jira) link to projects and repositories, and a job sees only the
+trackers of its project and repositories. Details: [data sources](https://github.com/mikeparcewski/wicked-crew/blob/main/docs/data-sources.md).
 
 ## The acceptance gate
 

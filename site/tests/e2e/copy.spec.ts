@@ -96,9 +96,16 @@ test.describe('the reviewed messaging', () => {
     // each row is exactly "<name> <line>": the space between them is the guard
     const news = (await page.locator('.news-list li').allTextContents()).map((t) => t.replace(/\s+/g, ' ').trim());
     expect(news.length).toBe(6);
-    expect(news[0]).toMatch(/^01 Power mode On by default/);
-    expect(news[3]).toMatch(/^04 Voice Transcription on your machine/);
-    expect(news[5]).toMatch(/^06 Sandbox images On Docker/);
+    expect(news[0]).toMatch(/^01 Apps Dashboards and small tools over your data, built by chat\./);
+    expect(news[2]).toMatch(/^03 What agents can read Switches only you set/);
+    expect(news[3]).toMatch(/^04 Trackers GitHub Issues and Jira/);
+    expect(news[5]).toMatch(/^06 Dashboards on Report Switch on “Show on Report”/);
+    // crew 0.17.0's scope: GitLab and Azure DevOps trackers are a later wave, never named as shipped
+    expect(news.join(' ')).not.toMatch(/GitLab|Azure DevOps/);
+    // the data gate's fact card, in the Deliver beat
+    expect(await text('#deliver')).toContain('Your data, through one gate. Agents read a database only where you allow it');
+    // the garden floor names the release that ships the Apps skill
+    expect(await text('#get')).toContain('wicked-garden 12.64.0 or later');
     // What's new comes after the proofs
     const order = await page.evaluate(() => Array.from(document.querySelectorAll('section[id]')).map((s) => s.id));
     expect(order.indexOf('news')).toBeGreaterThan(order.indexOf('deliver'));

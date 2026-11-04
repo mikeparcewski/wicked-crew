@@ -24,7 +24,9 @@ actually ran, and an unverified pass is labelled. Built-in feature, bug-fix, mig
 and editor-plugin jobs pass acceptance testing before delivery, unless a labelled waiver or skip
 says otherwise; a plan you compose yourself, or a build continued from a chat, requires none.
 Studio is where you direct the work, crew runs and checks it, garden supplies the skills, and
-estate holds the record.
+estate holds the record. crew also connects your databases, files, APIs and issue trackers: apps you
+build by chat read them, and agents read a database only through one data gate, under switches only a
+person sets.
 
 - **Your agents, sandboxed.** The coding-agent CLIs you already use (Claude Code, Codex, GitHub
   Copilot, OpenCode, Pi) run as workers in hardened containers, on your own accounts and plans.
@@ -50,12 +52,14 @@ engine underneath is **wicked-core**. (In the API and the code a job is a *run*,
 
 > **One machine today.** Loopback only, in-process engine, local bus. Agents run in containers on
 > this machine, and model traffic leaves through the credential broker to the providers you signed
-> in. The execution seam is built for a remote runner, but remote/distributed execution is **not
-> shipped**: crew runs on a single host. No cluster, no horizontal scale.
+> in. crew itself also connects to the data sources and trackers you register, and the first time a
+> Toolbox-run source is used it downloads MCP Toolbox for Databases (about 155 MB) from Google's
+> release bucket. The execution seam is built for a remote runner, but remote/distributed execution
+> is **not shipped**: crew runs on a single host. No cluster, no horizontal scale.
 
 ## Install & quickstart
 
-Requires Node.js ≥ 22 and a container runtime (Rancher Desktop, Docker, Podman, Colima or OrbStack):
+Requires Node.js ≥ 22 (uploading a file or a SQLite database as a data source needs 24.12, 25.1 or later) and a container runtime (Rancher Desktop, Docker, Podman, Colima or OrbStack):
 governed agents run each CLI's headless mode in a hardened seat container (crew builds the seat images
 on first use), and you sign each agent in once from studio's Agents page. Claude Code and GitHub
 Copilot sign in through a login container; Codex, Pi and OpenCode sign in with their host CLIs and a
@@ -76,7 +80,8 @@ Or use the family installer — [`npx wicked-installer`](https://www.npmjs.com/p
 installs/updates the whole wicked-\* family, crew included.
 
 **crew needs wicked-garden ≥ 12.64.0.** Garden ships the skills every governed worker follows,
-including the base skill `wicked-garden-governed-worker`. crew does not vendor it, so install it once:
+including the base skill `wicked-garden-governed-worker` and the `wicked-garden-apps` skill an app's
+chat builds with. crew does not vendor it, so install it once:
 
 ```bash
 npx wicked-installer install wicked-garden    # or install the wicked-garden plugin in Claude Code
@@ -276,6 +281,48 @@ PATH, or `WICKED_CREW_WHISPER_BIN`. Crew does not install it; `GET /api/v1/voice
 install command for your platform. The model (`ggml-base.en.bin`, 142 MiB) is downloaded only when you
 consent, and the audio is held in memory for that one call: never written to disk, never kept with a
 run.
+
+## Apps and data sources *(crew 0.17.0)*
+
+**Data sources.** crew's one registry holds the things your work reads from: Postgres, MySQL, uploaded
+files (CSV, XLSX or `.sqlite`, each kept as a SQLite snapshot), GraphQL, REST and MCP servers, issue
+trackers, and crew itself. **Test connection** reconnects with the saved credentials and says how long it
+took, the TLS state and, for a native Postgres source, whether the login is read-only. **Ask a question of this data** (SQL
+sources) has one agent draft one read query from the structure alone. crew checks it, nothing runs until you click
+Run, and the rows (at most 50) go to you only. **Allow writes** is a per-source switch for Postgres, off by
+default and a person's only: with it on, an app's row write can be granted. crew's connections go through
+one dialer that reaches private addresses only in a range you confirmed (a local MCP server's own
+connections are its own). The registry stores only a reference
+to each secret (a keychain entry or an environment variable), and no reply carries its value.
+
+**Apps.** An app is a dashboard or a small tool over your sources, kept as its own git repository. You
+build it by chat: each message is one governed `apps-turn` job (build, crew's check, review by a different
+agent), and a chat's change lands as a version only after that review. Every SQL query is checked by the
+read policy before it reaches the source, and runs read-only with a 10 s deadline. crew keeps each app's
+versions, with undo and redo; studio draws the app and can show up to four apps' live numbers on its Report
+page.
+
+**What agents can read.** Agents reach a live database only through the **data gate** (a REST or MCP
+server's tools reach them as MCP tools, under your MCP approvals and policies), and each database source
+has three switches that only a person sets: **see** its structure (on by default), **query** its rows (off by
+default; Postgres only in this release; the rows go to the agent's model provider) and the **projects**
+whose jobs and chats may use it (none by default). Structure comes from crew's stored catalog and never
+dials the source. A read must be one `SELECT` (or `WITH … SELECT`) that passes the read policy, runs in a
+read-only session with a 10 s deadline, and returns at most 200 rows, 64 KB of rows and 2,000 characters
+a cell. Errors are a class and a SQLSTATE, never the source's words. Every answer is marked as untrusted
+data and cited `src:<source>@<time>#<hash>`, and a job's gates and delivery say which sources its agents
+read. Each database's structure is also projected, value-free, into wicked-estate's knowledge store, so
+recall finds tables beside code, only for projects allowed to see them.
+
+**Trackers.** Register GitHub Issues or Jira through the vendor's own MCP server, with a token kept in the
+keychain, and link trackers (a GitHub repository's issues, a Jira project) to studio projects, to
+repositories, or both. A job or chat in a project sees its project's trackers plus its repositories'
+trackers, under the source's switches, and every tracker call is held to that set. You can start a job from
+an issue, and the delivery names the issues it closes in each tracker's own form. GitLab and Azure DevOps
+are not in this release.
+
+The details, limits and routes are in [docs/data-sources.md](docs/data-sources.md); who may change what is
+in [docs/auth.md](docs/auth.md#non-human-actors).
 
 ## Gates: generated, grounded, dual validators *(built — `wicked-core`, DES-EXEC-001 rev0.4)*
 
@@ -501,8 +548,8 @@ typecheck if the daemon's responses ever stop satisfying it.
 
 - `.product/` — requirements and design notes (REQ-*, DES-*). Gitignored and in no commit, so a fresh
   clone has none; a `.product/…` path cited in a source comment may not exist where you read it.
-- `docs/` — operator docs: [auth](docs/auth.md), [seats](docs/seats.md),
-  [campaign budgets](docs/campaign-budgets.md).
+- `docs/` — operator docs: [data sources](docs/data-sources.md), [auth](docs/auth.md),
+  [seats](docs/seats.md), [campaign budgets](docs/campaign-budgets.md).
 - **The execution engine is [`wicked-core`](https://github.com/mikeparcewski/wicked-core)** — the
   single-writer runtime that owns the workflow-as-data model, data-driven planning, skills-driven
   invocation, and the gate ladder. Its `README.md` and `DESIGN.md` describe the engine.

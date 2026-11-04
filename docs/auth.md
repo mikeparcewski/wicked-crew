@@ -45,7 +45,7 @@ Minimal by design: three rungs, `admin` > `operator` > `observer`.
 
 | Trust | May do |
 |---|---|
-| `observer` | Every read: all GETs, the `/ws` event stream, the audit trail. |
+| `observer` | The reads: GETs, the `/ws` event stream, the audit trail. A few reads need a human operator (`GET /knowledge/map`, `GET /mcp/registry/generations`, an app's action record), and a non-human actor gets some reads in an agent-safe view (see [Non-human actors](#non-human-actors)). |
 | `operator` | The work: launch/steer/cancel runs, answer gates and elicitations, open chats and terminals, register repos and workflows, project CRUD and membership. |
 | `admin` | The governance surface: policy/rule writes and retirements, `PUT /settings`, project **archive/restore**. |
 
@@ -69,6 +69,59 @@ it is authenticated by the unit's capability token in the body (bearer-exempt, l
 
 The implicit local actor is `admin`: a solo deployment has one human and no
 boundary worth drawing between that human and the daemon.
+
+### Non-human actors
+
+Trust is not the only test. Some routes look at the actor's `kind` too: a person (`human`, with the trust the
+route needs) gets them, and every other actor (`agent`, `plugin`, `system`) does not, whatever its trust. They are
+the routes that name a data source's connection, change what agents may read, or widen a project. In local
+mode (auth off) every caller is the local human, so these rules matter once tokens are in use.
+
+The trust check runs first: a token below the route's rung gets the trust check's own 403, which carries no
+`code`. The codes below are what a non-human actor at or above the rung gets. A source's management reads are
+the exception: they answer `human_only` at any trust.
+
+**Refused to a non-human actor** (403, with the code in brackets):
+
+- a data source's management reads: `GET /sources/:name/catalog`, and `POST …/describe`, `…/privileges`,
+  `…/check`, `…/safety` and `…/test` (`human_only`);
+- asking and querying a source: `POST /sources/:name/ask` (`ask_human_only`), `…/query`
+  (`query_human_only`), `…/test-call` (`test_call_human_only`), and `POST /sources/:name/profile`
+  (`profile_human_only`);
+- the switches: `PUT /sources/:name/agents` (`agents_switch_human_only`) and `PUT /sources/:name/allow-writes`
+  (`writes_switch_human_only`);
+- in the registry: confirming an address range or an egress (`address_confirm_human_only`,
+  `egress_confirm_human_only`), enabling a write tool (`write_grant_human_only`), reviewing what a tool
+  discloses (`disclosure_review_human_only`), a preview whose `auth.ref` names a secret it did not send with the
+  preview, such as an `env:` reference or a keychain entry crew already holds (`stored_secret_human_only`), and reading or restoring the registry's generations (`human_only`,
+  `restore_human_only`);
+- `GET /knowledge/map` (`knowledge_map_human_only`), and approving or declining a `knowledge` proposal
+  (`knowledge_review_human_only`);
+- trackers: `GET`, `POST` and `DELETE /tracker-links`, and `GET /sources/:name/trackers`
+  (`tracker_links_human_only`); registering a GitHub Issues or Jira source (`pm_source_human_only`);
+  attaching a repository to a project (`repo_attach_human_only`); and `POST /repos` that would point an
+  existing repository id at another checkout (409 `repo_exists`);
+- an app's changes and grants (`human_only`): `POST /apps/:app/edits`, `undo`, `redo`, `restore`, `turns` and
+  `publish`; `POST` and `DELETE /apps/:app/actions/:id/grant`, `POST …/prepare` and `…/run`; and
+  `GET /apps/:app/actions/records/:id`. (`GET /apps/:app/actions/:id/grant` stays an observer read.);
+- reading an app's rows, `POST /apps/:app/query`, for an `agent` or `plugin` actor (`human_only`); a `system`
+  actor may make it, and a refusal tells it only the status and code;
+- `GET /runs/:id/files` and `GET /runs/:id/diff` when the run works in an app's repository
+  (`app_files_human_only`).
+
+**Answered in the agent-safe view.** `GET /mcp/servers` (and `?view=agent` for anyone), the answers of a save,
+`PATCH /mcp/servers/:name` and a test, `GET /audit` and `GET /apps/:app` give a non-human actor no host, port,
+database, login, URL, command, path, address, secret reference or connection descriptor. The audit lines of
+the `mcp.*`, `apps.source.*`, `apps.action.*` and `knowledge.source.*` families keep only an allowlist of
+their fields. The trail on disk is unchanged, and a person reads every line whole.
+
+**Known open risk (crew#1323).** In required mode, a non-human token with `operator` trust can make crew run a
+program it chooses on the daemon host. An `mcp-stdio` preview (`POST /mcp/servers/preview` with
+`kind: "mcp-stdio"`) starts the command it names as the daemon's user, before any MCP handshake, and
+`/ws/terminals` opens a terminal at `operator` trust. Either can read that user's files and keychain and reach
+the network. Until the fix lands, give agent and CI tokens `observer` trust unless they need operator work,
+and treat an `operator` token as host access. Local mode is not affected: every caller is the local person, and
+governed workers hold unit tokens, not bearers.
 
 ### Deny semantics
 
@@ -197,12 +250,28 @@ actor provenance is recorded crew-side:
 - **The audit trail** — one JSON line per privileged action in
   `~/.wicked-crew/audit.log` (override: `WICKED_CREW_AUDIT_LOG`), read back by
   `GET /api/v1/audit` (`?runId=` / `?action=` / `?limit=`, newest first).
-  Recorded actions: `run.launched`, `gate.decided` (including approve-via-resume),
-  `run.cancelled`, `run.resumed`, `run.injected`, `elicitation.resolved`,
-  `governance.policy.upserted|retired`, `governance.rule.upserted|retired`,
-  `settings.updated`, `workflow.registered`, `project.created`,
-  `project.archived`. Appends are loud-non-fatal: an unwritable trail never
-  turns a valid gate approval into a 500, but it is said, not swallowed.
+  Recorded actions, by family (`?action=` takes the full name):
+  - runs and gates: `run.launched`, `run.cancelled`, `run.resumed`, `run.injected`, `run.reassigned`,
+    `run.resolved`, `run.delivered`, `run.ended`, `run.landing_failed`, `run.rigor.raised`,
+    `run.power_mode.toggled`, `run.power_mode.paused`, `gate.decided` (including approve-via-resume),
+    `gate.qe_skipped`, `elicitation.resolved`, `guidance.set`, `unit.inspected`;
+  - governance: `governance.policy.upserted|retired`, `governance.rule.upserted|retired`,
+    `governance.steering.imported|declined`, `governance.deadletters.replayed`;
+  - settings, projects and presets: `settings.updated`, `project.created`, `project.archived`,
+    `repo.created`, `preset.saved|deleted`, `persona.saved|removed`, `schedule.saved|deleted|run_now`;
+  - Apps: `apps.app.created`, `apps.version.landed`, `apps.turn.launched`, `apps.action.granted|revoked|ran`,
+    `apps.source.uploaded|asked|queried|test_call|writes_allowed|writes_disallowed`;
+  - agents and data: `knowledge.source.catalog_visible|catalog_hidden`,
+    `knowledge.source.agent_query_allowed|agent_query_disallowed`, `knowledge.source.agent_projects_set`,
+    `knowledge.source.agent_query`, `knowledge.source.profiled`,
+    `knowledge.source.tracker_linked|tracker_unlinked`;
+  - the registry: `mcp.server.saved|enabled|disabled|removed|address_confirmed|egress_confirmed`,
+    `mcp.secret.set`, `mcp.tool.updated|write_granted|disclosure_reviewed`,
+    `mcp.approval.granted|revoked|withdrawn|partial`, `mcp.registry.restored`;
+  - and others, among them chats' proposals, campaigns, Learn's schedules, insights and voice.
+
+  Appends are loud-non-fatal: an unwritable trail never turns a valid gate approval into a 500, but it is
+  said, not swallowed.
 - **Bus events** — every `wicked.crew.project.*` emit's `actor` field is the
   authenticated actor id (the attaching *surface* — studio/interactive/cli/api
   — still rides separately where it always did).
