@@ -51,8 +51,9 @@ describe.skipIf(EXE === '' || process.platform === 'win32')('the knowledge packa
   let base: string;
   let app: FastifyInstance;
   let projects: string[] = [];
+  // The hermetic arming rides along (...process.env, tests/setup/hermetic-home.ts); every estate store is pinned here.
   const env = (): NodeJS.ProcessEnv => ({
-    PATH: process.env['PATH'] ?? '',
+    ...process.env,
     HOME: base,
     WICKED_HOME: join(base, 'wicked'),
     WICKED_MEMORY_DB: join(base, 'memory.db'),
@@ -60,7 +61,7 @@ describe.skipIf(EXE === '' || process.platform === 'win32')('the knowledge packa
     WICKED_XEDGE_DB: join(base, 'xedge.db'),
     WICKED_ESTATE_DB: ':memory:',
   });
-  const write = (tool: string, args: Record<string, unknown>) => callEstateTool(tool, args, { spawn: () => spawn(EXE, [], { stdio: ['pipe', 'pipe', 'pipe'], env: env() }), timeoutMs: 60_000 });
+  const write = (tool: string, args: Record<string, unknown>) => callEstateTool(tool, args, { spawn: () => spawn(EXE, [], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...env() } }), timeoutMs: 60_000 });
   const source = (names: string[], at: string): GateSource =>
     ({
       id: SOURCE_ID,
@@ -80,7 +81,7 @@ describe.skipIf(EXE === '' || process.platform === 'win32')('the knowledge packa
     base = mkdtempSync(join(tmpdir(), 'kd-b3b-estate-'));
     const relay = new EstateRelay({
       resolver: () => async () => JSON.stringify({ unit: { runId: 'run-live', ord: 1, attempt: 1, phase: 'unit-1', seat: 'claude' }, projectId: 'proj_a', repoId: null, codeGraphDb: null }),
-      invoke: defaultEstateInvoker({ spawn: () => spawn(EXE, ['--readonly'], { stdio: ['pipe', 'pipe', 'pipe'], env: env() }) }),
+      invoke: defaultEstateInvoker({ spawn: () => spawn(EXE, ['--readonly'], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...env() } }) }),
       visible: async (scope) => visibleDeps([source([], '2026-11-04T00:00:00Z')], scope.projectId, []),
       timeoutMs: 60_000,
     });
