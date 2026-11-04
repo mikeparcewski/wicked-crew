@@ -285,6 +285,7 @@ import { MembershipIndex } from '../projects/membership-index.js';
 import { MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
 import { resolveLinkedIssues, type LinkedIssue, type LinkedIssuesResult } from '../core/linked-issues.js';
 import { AuditLog } from './audit.js';
+import { auditFor } from './audit-view.js';
 import {
   AcpFoldCache,
   EngineVersionCache,
@@ -2328,7 +2329,8 @@ export function registerRoutes(
           ...(limit !== undefined ? { limit } : {}),
           ...(since !== undefined ? { since } : {}),
         });
-        return { entries };
+        // (crew#1317) A non-human reader gets the MCP and source lines without their connection data.
+        return { entries: auditFor(actorOf(req), entries) };
       } catch (err) {
         return reply.code(500).send({ error: message(err) });
       }

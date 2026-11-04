@@ -33,6 +33,7 @@ import { QUERY_TEXT_MAX_BYTES } from './check.js';
 import { AppWriteError, type AppWritePath } from './actions/write-path.js';
 import { AppExecError, type AppExecutor } from './exec/executor.js';
 import { AppGitError } from './git.js';
+import { appDetailFor } from './views.js';
 
 const V = '/api/v1';
 
@@ -147,7 +148,7 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
       }
       const detail = await store.create({ slug, name: parsed.data.name ?? slug, projectId, actor: actorOf(req) });
       deps.audit.record('apps.app.created', actorOf(req), { detail: { app: slug, projectId, repoId: detail.repoId, receipt: detail.head.receipt } });
-      return reply.code(201).send({ app: detail });
+      return reply.code(201).send({ app: appDetailFor(actorOf(req), detail) });
     } catch (err) {
       return fail(reply, err);
     }
@@ -157,7 +158,7 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
     const slug = slugOf(req, reply);
     if (slug === null) return reply;
     try {
-      return { app: await store.detail(slug) };
+      return { app: appDetailFor(actorOf(req), await store.detail(slug)) };
     } catch (err) {
       return fail(reply, err);
     }

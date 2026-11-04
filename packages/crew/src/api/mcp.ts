@@ -20,6 +20,9 @@
  *                                       through the one dialer: a loopback/private host needs `address.allow` on
  *                                       the PREVIEW (which dials) and the save, human operator only (403
  *                                       `address_confirm_human_only`), audited `mcp.server.address_confirmed`
+ *                                       (crew#1316) a preview whose `auth.ref` names a secret it does not stage (an
+ *                                       `env:` reference, a keychain entry crew already holds) probes with that
+ *                                       secret: human operator only (403 `stored_secret_human_only`)
  *   PATCH  /mcp/servers/:name           `{enabled}`
  *   DELETE /mcp/servers/:name           remove the server and the keychain secret it owns
  *   POST   /mcp/servers/:name/test      probe again: health plus the tool diff
@@ -94,7 +97,7 @@ import { NO_CONFIRMATION, validateAllowRanges } from '../sources/dialer.js';
 import type { ToolboxSourceEntry } from '../knowledge/registry/entry.js';
 import { API_PREFIX } from './api-prefix.js';
 import type { AuditLog } from './audit.js';
-import { trustAtLeast } from './auth.js';
+import { trustAtLeast, viewOf } from './auth.js';
 
 const V = API_PREFIX;
 const serverName = z.string().regex(MCP_SERVER_NAME_RE, 'a server name is 1-63 of a-z 0-9 _ -, starting with a letter or digit');
@@ -355,9 +358,7 @@ function mayGrantWrite(actor: Actor): boolean {
 }
 
 /** (DES-KNOWLEDGE-DATA-001 §5.2) The full view is a human actor's; every other actor gets the agent-safe one. */
-function sees(actor: Actor): 'full' | 'agent' {
-  return actor.kind === 'human' ? 'full' : 'agent';
-}
+const sees = viewOf;
 
 /** A server answer as `actor` may see it. */
 function serverFor(actor: Actor, server: McpServer): McpServer | McpServerAgentView {
@@ -384,6 +385,23 @@ function addressConfirmRefused(reply: FastifyReply, actor: Actor): FastifyReply 
   return reply.code(403).send({
     error: `only a human operator can confirm a loopback or private range (or plaintext) for a server's connections; you are ${actor.kind}/${actor.trust}`,
     code: 'address_confirm_human_only',
+  });
+}
+
+/**
+ * (crew#1316) Whether a preview names a secret the caller did not stage with it: an `env:` variable of the daemon,
+ * or a keychain entry crew already holds (another server's, or this name's own saved one). The preview probes with
+ * that secret, so it would go to a host the caller chose. A staged secret is the caller's own value, and the
+ * registry pins it to this server's own keychain reference (`secret_not_staged_here`), so it is not one.
+ */
+function namesStoredSecret(body: { auth?: { ref: string } | null | undefined; secret?: string | undefined }): boolean {
+  return body.auth != null && body.secret === undefined;
+}
+
+function storedSecretRefused(reply: FastifyReply, actor: Actor): FastifyReply {
+  return reply.code(403).send({
+    error: `only a human operator can preview a server with a secret crew already holds (an env: reference, or a keychain entry this preview did not stage); you are ${actor.kind}/${actor.trust}`,
+    code: 'stored_secret_human_only',
   });
 }
 
@@ -533,6 +551,8 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       // (DES-APPS-001 §5.2) The preview DIALS: a confirmed private range is used now, so only a
       // human operator may name one, here as at the save.
       if (confirmsAddress(parsed.data.address) && !mayGrantWrite(deps.actorOf(req))) return addressConfirmRefused(reply, deps.actorOf(req));
+      // (crew#1316) It also PROBES with the secret `auth.ref` names: a secret crew already holds is a human operator's to send.
+      if (namesStoredSecret(parsed.data) && !mayGrantWrite(deps.actorOf(req))) return storedSecretRefused(reply, deps.actorOf(req));
       try {
         const full = await r.preview(toConfig(parsed.data), parsed.data.secret ?? null);
         // (DES-KNOWLEDGE-DATA-001 §5.2) A source's structure reaches an agent only through estate and the gate.
