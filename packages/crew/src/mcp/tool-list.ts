@@ -7,7 +7,7 @@
  */
 
 import type { McpToolsResponse, McpVisibleTool } from '../core/types.js';
-import { type DataGate, firstUseOnly } from '../knowledge/gate/gate.js';
+import type { DataGate } from '../knowledge/gate/gate.js';
 import { mcpSubject } from './classify.js';
 import type { McpCallableTool } from './registry.js';
 
@@ -48,7 +48,7 @@ export interface McpToolListAnswer {
 
 interface EngineList {
   unit: McpToolsResponse['unit'];
-  tools: Array<Pick<McpVisibleTool, 'subject' | 'class' | 'decision' | 'ruleIds' | 'reason'>>;
+  tools: Array<Pick<McpVisibleTool, 'subject' | 'class' | 'decision' | 'ruleIds' | 'reason'> & { firstUseOnly?: boolean }>;
 }
 
 export async function listUnitTools(deps: McpToolListDeps, token: string): Promise<McpToolListAnswer> {
@@ -88,8 +88,9 @@ export async function listUnitTools(deps: McpToolListDeps, token: string): Promi
   for (const j of judged.tools) {
     const t = bySubject.get(j.subject);
     if (t === undefined) continue;
-    // A gated tool's first-use ask is the switch's to answer (it is already on); any other ask stands.
-    const firstUse = gated.has(j.subject) && j.decision === 'ask' && firstUseOnly(j.ruleIds);
+    // A gated tool's first-use ask is the switch's to answer (it is already on): the engine marks an ask whose only
+    // reason is first use (crew#1333); any other ask stands.
+    const firstUse = gated.has(j.subject) && j.decision === 'ask' && j.firstUseOnly === true;
     tools.push({
       subject: j.subject,
       class: j.class,

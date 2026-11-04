@@ -70,7 +70,8 @@ const resolver = () => async (json: string) => {
 };
 const lister = () => async (json: string) => {
   const { calls } = JSON.parse(json) as { calls: Array<{ server: string; tool: string }> };
-  return JSON.stringify({ unit: UNIT, tools: calls.map((c) => ({ subject: `mcp:${c.server}/${c.tool}`, class: 'read', decision: 'ask', ruleIds: ['engine:mcp-first-use'] })) });
+  // The engine's first-use ask for a gated read on a store with the mcp-defaults pack (crew#1333).
+  return JSON.stringify({ unit: UNIT, tools: calls.map((c) => ({ subject: `mcp:${c.server}/${c.tool}`, class: 'read', decision: 'ask', ruleIds: ['engine:mcp-first-use', 'MCP-POSTURE-READ'], firstUseOnly: true })) });
 };
 
 const gatedTools = () =>

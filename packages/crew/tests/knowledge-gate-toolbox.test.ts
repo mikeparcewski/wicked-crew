@@ -55,12 +55,13 @@ class NoSecrets implements SecretStore {
 }
 
 const unit = (runId: string) => ({ runId, ord: 2, attempt: 1, phase: 'unit-2', seat: 'claude' });
-const TOKENS: Record<string, { unit: ReturnType<typeof unit>; projectId: string | null; apps?: boolean; policyAsk?: boolean; bareAsk?: boolean }> = {
+const TOKENS: Record<string, { unit: ReturnType<typeof unit>; projectId: string | null; apps?: boolean; policyAsk?: boolean; bareAsk?: boolean; unmarked?: boolean }> = {
   wmt_a: { unit: unit('run-a'), projectId: 'proj_a' },
   wmt_b: { unit: unit('run-b'), projectId: 'proj_b' },
   wmt_apps: { unit: unit('run-apps'), projectId: 'proj_a', apps: true },
   wmt_ask: { unit: unit('run-ask'), projectId: 'proj_a', policyAsk: true },
   wmt_bare: { unit: unit('run-bare'), projectId: 'proj_a', bareAsk: true },
+  wmt_unmarked: { unit: unit('run-unmarked'), projectId: 'proj_a', unmarked: true },
 };
 
 const resolver = () => async (json: string) => {
@@ -72,8 +73,20 @@ const lister = () => async (json: string) => {
   const { token, calls } = JSON.parse(json) as { token: string; calls: Array<{ server: string; tool: string }> };
   const t = TOKENS[token];
   if (t === undefined) throw new Error('invalid_token: unknown');
-  // D-7: an Apps unit is denied everything (and the list leaves denies out). Otherwise a first use asks.
-  const tools = t.apps === true ? [] : calls.map((c) => ({ subject: `mcp:${c.server}/${c.tool}`, class: 'read', decision: 'ask', ruleIds: t.bareAsk === true ? [] : t.policyAsk === true ? ['policy:ask-data'] : ['engine:mcp-first-use'] }));
+  // D-7: an Apps unit is denied everything (and the list leaves denies out). Otherwise a first use asks, as the real engine
+  // answers it on a store with the mcp-defaults pack (crew#1333): the read posture's allow fired too, and `firstUseOnly`
+  // says first use is the only ask. An operator's asking rule leads with first use as well, and carries no mark.
+  const ask = (ruleIds: string[], firstUseOnly: boolean) => calls.map((c) => ({ subject: `mcp:${c.server}/${c.tool}`, class: 'read', decision: 'ask', ruleIds, ...(firstUseOnly ? { firstUseOnly } : {}) }));
+  const tools =
+    t.apps === true
+      ? []
+      : t.bareAsk === true
+        ? ask([], false)
+        : t.policyAsk === true
+          ? ask(['engine:mcp-first-use', 'MCP-POSTURE-READ', 'policy:ask-data'], false)
+          : t.unmarked === true
+            ? ask(['engine:mcp-first-use'], false)
+            : ask(['engine:mcp-first-use', 'MCP-POSTURE-READ'], true);
   return JSON.stringify({ unit: t.unit, tools });
 };
 
@@ -549,6 +562,17 @@ describe.skipIf(process.platform === 'win32')('the gate on a Toolbox-runtime sou
     const bare = await call(r, 'wmt_bare', 'mcp:tb/execute_sql', { sql: Q });
     expect(bare.status).toBe(409);
     expect((await listed(r, 'wmt_bare')).find((x) => x.subject === 'mcp:tb/execute_sql')?.decision).toBe('ask');
+  });
+
+  it("an ask the engine does not mark first-use-only stays pending, whatever its rule ids say (crew#1333)", async () => {
+    // An engine before the mark: the rule ids name first use alone, and the gate does not guess from them.
+    const unmarked = await call(r, 'wmt_unmarked', 'mcp:tb/execute_sql', { sql: Q });
+    expect(unmarked.status).toBe(409);
+    expect(unmarked.body).toMatchObject({ outcome: 'pending_approval' });
+    expect((await listed(r, 'wmt_unmarked')).find((x) => x.subject === 'mcp:tb/execute_sql')?.decision).toBe('ask');
+    // An operator's asking rule leads with first use too, and stays pending.
+    expect((await call(r, 'wmt_ask', 'mcp:tb/execute_sql', { sql: Q })).body).toMatchObject({ outcome: 'pending_approval' });
+    expect((await listed(r, 'wmt_ask')).find((x) => x.subject === 'mcp:tb/execute_sql')?.decision).toBe('ask');
   });
 
   it('two output columns of one name are refused on the Toolbox runtime, never answered short', async () => {

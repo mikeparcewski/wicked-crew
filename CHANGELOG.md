@@ -296,6 +296,16 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **A live source's first-use ask is admitted by its switches on a real engine (crew#1333).** With "Agents can query
+  this source" on, a chat's `mcp:<source>/execute_sql` (and the structure tool) was refused `pending_approval` on any
+  daemon with the `mcp-defaults` pack, and studio has no way to approve it. The data gate turned an engine ask into
+  an allow only when every rule id was `engine:mcp-first-use`, but MCP-POSTURE-READ (an allow) fires on every read,
+  so that never held, and the ids cannot tell a first-use ask from an operator's own asking rule (both lead with
+  first use). The gate (`DataGate.admitted`, the broker's gated call) and the unit's tool list now admit an ask only
+  when the engine marks it `firstUseOnly` (wicked-core-ts >= 0.15.24): the server's first use is its only reason,
+  and the person's per-source switches are that consent. An operator's asking rule still answers
+  `pending_approval`, a deny still denies, query off still refuses rows, and an engine without the mark keeps
+  every ask pending. The rule-id heuristic `firstUseOnly(ruleIds)` is removed.
 - **Agent-kind bearers no longer reach a source's stored secret or connection data outside the registry (crew#1316,
   crew#1317, DES-KNOWLEDGE-DATA-001 §5.2).** One rule throughout: the full view is a human actor's, and every other
   actor (agent, plugin, system) gets the agent-safe one. `POST /mcp/servers/preview` answers 403
