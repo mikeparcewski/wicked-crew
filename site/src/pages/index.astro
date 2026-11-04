@@ -52,7 +52,7 @@
  *  - Gate labels (studio GateVerdict.tsx): "floor only" = a pass where the floor (incl. the repo
  *    checks) ran and no distinct judge reviewed it; "approved by default, not verified" = nothing
  *    gated the phase. The receipt explorer marks only the layers each label speaks about.
- *  - Needs wicked-garden >= 12.40.0 (the governed-worker base skill), Node >= 22, a container runtime.
+ *  - Needs wicked-garden >= 12.64.0 (the governed-worker base skill and the Apps skill), Node >= 22, a container runtime.
  * The demo is scripted and says so. Never hardcode a version in prose (build-injected stamp only).
  * The words are the reviewed copy (messaging COPY.md rev 5, crew#1260): moved, split and visualized
  * here, never reworded into new claims.
@@ -477,7 +477,7 @@ const crewVersion = __WICKED_CREW_VERSION__;
           <ul class="needs" role="list">
             <li>Node 22 or later</li>
             <li>A container runtime: Docker, Podman, Rancher Desktop, Colima or OrbStack</li>
-            <li>wicked-garden 12.40.0 or later, for the skills every agent follows</li>
+            <li>wicked-garden 12.64.0 or later, for the skills every agent follows</li>
           </ul>
           <p class="get-tos">
             <b>Terms of service:</b> crew drives CLIs you installed under your own accounts. Check

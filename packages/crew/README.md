@@ -18,7 +18,7 @@ Before you start, you need:
   agents work in a hardened seat container, and you sign each one in from studio's Agents tab in a
   login container. `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead.
 - **At least one coding-agent CLI** you can sign in (Claude Code, Codex, GitHub Copilot, OpenCode or Pi).
-- **wicked-garden ≥ 12.40.0**, the skills every governed worker follows. crew does not vendor it, and
+- **wicked-garden ≥ 12.64.0**, the skills every governed worker follows. crew does not vendor it, and
   without it every launch is refused: `npx wicked-installer install wicked-garden`, then restart
   `wicked-crew serve`.
 - Optional: **wicked-estate** (`wicked-estate-mcp` on PATH) for code graphs and memory. It installs

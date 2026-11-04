@@ -12,7 +12,7 @@ import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import { AuditLog } from '../src/api/audit.js';
-import { REQUIRED_GARDEN_VERSION, livePluginCacheDir } from '../src/skills/plugin-source.js';
+import { REQUIRED_GARDEN_VERSION, gardenMeetsMinimum, livePluginCacheDir } from '../src/skills/plugin-source.js';
 import { gardenTooOldFinding, refusalPath, SkillsRuntime } from '../src/skills/runtime.js';
 import { noVenv } from '../src/skills/venv.js';
 import { SkillsStore } from '../src/skills/store.js';
@@ -138,5 +138,17 @@ describe('crew#753 — garden is required, and a refused onboard creates no repo
         else process.env[k] = v;
       }
     }
+  });
+});
+
+// crew 0.17.0: an Apps turn and an Apps publish tell their units to follow wicked-garden-apps
+// (apps/turns.ts), which first ships in wicked-garden 12.64.0, so an older garden is too old.
+describe('the floor is the garden that ships wicked-garden-apps', () => {
+  it('12.64.0 is required: 12.63.x is refused, 12.64.0 and later pass', () => {
+    expect(REQUIRED_GARDEN_VERSION).toBe('12.64.0');
+    for (const v of ['12.40.0', '12.63.0', '12.63.9']) expect(gardenMeetsMinimum(v)).toBe(false);
+    for (const v of ['12.64.0', '12.64.1', '12.65.0', '13.0.0']) expect(gardenMeetsMinimum(v)).toBe(true);
+    expect(gardenTooOldFinding({ version: '12.63.0', path: '/cfg/plugins/wicked-garden' }, 'the installed plugin').message)
+      .toContain('wicked-garden 12.63.0 (the installed plugin at /cfg/plugins/wicked-garden) is older than the required 12.64.0');
   });
 });
