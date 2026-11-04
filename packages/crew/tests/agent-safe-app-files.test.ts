@@ -6,7 +6,7 @@
 //   refused first) its status and code, never the policy detail that names the relation. A human reads it whole.
 
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -15,12 +15,13 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { AuditLog } from '../src/api/audit.js';
 import { registerAuthHooks } from '../src/api/auth.js';
+import { mayBeInsideRoot } from '../src/api/open-path.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { AppExecError, type AppExecutor } from '../src/apps/exec/executor.js';
 import { registerAppRoutes } from '../src/apps/routes.js';
-import { AppStore } from '../src/apps/store.js';
+import { AppStore, AppStoreError } from '../src/apps/store.js';
 import { appRefusalFor } from '../src/apps/views.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { Actor } from '../src/core/types.js';
@@ -62,12 +63,28 @@ function view(id: string, workdir: string, repoRef: string | null, extra: Record
   };
 }
 
+/** The route set over `runs` and `repos`, with `store` (none = a daemon whose app store could not be read). */
+async function routeSet(runs: unknown[], repos: unknown[], store: AppStore | undefined): Promise<FastifyInstance> {
+  const adapter = { sessionsDetail: vi.fn().mockResolvedValue(runs), listRepos: vi.fn().mockResolvedValue(repos) };
+  const app = Fastify({ logger: false });
+  registerAuthHooks(app, { mode: 'required', verifiers: [{ name: 'test', verify: async (t) => TOKENS[t] ?? null }], allowedOrigins: null });
+  registerRoutes(app, adapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit: AuditLog.noop(), authMode: 'required' }, store !== undefined ? { apps: store } : {});
+  await app.ready();
+  return app;
+}
+
+const repo = (id: string, root: string) => ({ id, name: id, root_path: root, registered_at: 1, default_branch: 'main' });
+
 describe('crew#1324: a non-human GET /runs/:id/files and /diff refuse an app repo’s files', () => {
   let base: string;
   let appRoot: string;
   let worktree: string;
+  let external: string;
+  let oldRoot: string;
   let other: string;
+  let caseVariant: string | null;
   let app: FastifyInstance;
+  let storeOff: FastifyInstance;
 
   beforeAll(async () => {
     base = mkdtempSync(join(tmpdir(), 'kd-sec-views-2-files-'));
@@ -87,7 +104,17 @@ describe('crew#1324: a non-human GET /runs/:id/files and /diff refuse an app rep
     worktree = join(appRoot, 'wicked-worktrees', 'run-app');
     git(appRoot, 'worktree', 'add', '-q', '-b', 'wicked/run-app', worktree);
     writeApp(worktree);
-    // A run on another repo.
+    // codex r1: a worktree of the app repo outside its root (only the run's repository says it is an app's).
+    external = join(base, 'ext-wt');
+    git(appRoot, 'worktree', 'add', '-q', '-b', 'wicked/run-ext', external);
+    writeApp(external);
+    // codex r1: an app made under an earlier apps root, recorded in the store (the root moved since).
+    const stateFile = join(base, 'daemon-apps.json');
+    const registry = { register: async (name: string, root: string) => repo(name, root), idTaken: async () => false };
+    await new AppStore({ stateFile, appsRoot: join(base, 'old-apps'), registry }).create({ slug: 'old', name: 'Old', projectId: 'p1', actor: HUMAN });
+    oldRoot = join(base, 'old-apps', 'old');
+    writeApp(join(oldRoot, 'stray'));
+    // A run on another repo, with a link into the app's worktree (pi r1).
     other = join(base, 'other');
     mkdirSync(other);
     git(other, 'init', '-q');
@@ -95,57 +122,99 @@ describe('crew#1324: a non-human GET /runs/:id/files and /diff refuse an app rep
     git(other, 'add', '.');
     git(other, 'commit', '-q', '-m', 'base');
     writeFileSync(join(other, 'README.md'), 'hello, changed\n');
+    symlinkSync(join(worktree, 'apps.lock.json'), join(other, 'lock-link'), 'file');
+    // codex r1: on a case-insensitive filesystem (macOS, Windows) another spelling names the same file.
+    const variant = join(base, 'APPS', 'Desk', 'wicked-worktrees', 'run-app', 'apps.lock.json');
+    caseVariant = existsSync(variant) ? variant : null;
 
-    const adapter = {
-      sessionsDetail: vi.fn().mockResolvedValue([
-        view('run-app', worktree, 'desk'),
-        view('run-gone', join(appRoot, 'wicked-worktrees', 'run-gone'), 'desk', { run_branch: 'wicked/run-gone', base_commit: baseCommit }),
-        view('run-other', other, null),
-      ]),
-      listRepos: vi.fn().mockResolvedValue([
-        { id: 'desk', name: 'desk', root_path: appRoot, registered_at: 1, default_branch: 'main' },
-        { id: 'other', name: 'other', root_path: other, registered_at: 1, default_branch: 'main' },
-      ]),
-    };
-    const store = new AppStore({ stateFile: join(base, 'daemon-apps.json'), appsRoot, registry: { register: async () => { throw new Error('not in this test'); }, idTaken: async () => false } });
-    app = Fastify({ logger: false });
-    registerAuthHooks(app, { mode: 'required', verifiers: [{ name: 'test', verify: async (t) => TOKENS[t] ?? null }], allowedOrigins: null });
-    registerRoutes(app, adapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit: AuditLog.noop(), authMode: 'required' }, { apps: store });
-    await app.ready();
+    const runs = [
+      view('run-app', worktree, 'desk'),
+      view('run-gone', join(appRoot, 'wicked-worktrees', 'run-gone'), 'desk', { run_branch: 'wicked/run-gone', base_commit: baseCommit }),
+      view('run-ext', external, 'desk'),
+      view('run-null', worktree, null),
+      view('run-old', join(oldRoot, 'wicked-worktrees', 'run-old'), 'old'),
+      view('run-other', other, null),
+      view('run-extra', other, null, { extra_write_roots: [worktree] }),
+      // A write root above the apps root: containment admits any spelling below it.
+      view('run-wide', other, null, { extra_write_roots: [base] }),
+    ];
+    const repos = [repo('desk', appRoot), repo('old', oldRoot), repo('other', other)];
+    app = await routeSet(runs, repos, new AppStore({ stateFile, appsRoot, registry }));
+    storeOff = await routeSet(runs, repos, undefined);
   });
   afterAll(async () => {
-    await app.close();
+    await app?.close();
+    await storeOff?.close();
     removeScratch(base);
   });
 
-  const get = async (as: keyof typeof TOKENS, url: string, query: Record<string, string> = {}) => {
-    const res = await app.inject({ method: 'GET', url: `/api/v1${url}`, query, headers: { authorization: `Bearer ${as}` } });
+  const get = async (as: keyof typeof TOKENS, url: string, query: Record<string, string> = {}, on: FastifyInstance = app) => {
+    const res = await on.inject({ method: 'GET', url: `/api/v1${url}`, query, headers: { authorization: `Bearer ${as}` } });
     return { status: res.statusCode, body: res.json() as Record<string, unknown>, text: res.body };
   };
   /** Every read a non-human could reach an app's files by. */
-  const reads = () => [
+  const reads = (): Array<[string, Record<string, string>]> => [
     ['/runs/run-app/files', { path: join(worktree, 'apps.lock.json') }],
     ['/runs/run-app/files', { path: join(worktree, 'queries', 'pay.sql') }],
     ['/runs/run-app/files', { path: join(worktree, 'apps.json') }],
+    ['/runs/run-app/files', { path: `${join(worktree, 'apps.lock.json')}/` }],
     // Another run's id: every registered repo root is a contained root, the app's among them.
     ['/runs/run-other/files', { path: join(worktree, 'apps.lock.json') }],
+    ['/runs/run-other/files', { path: join(other, 'lock-link') }],
+    ['/runs/run-extra/files', { path: join(worktree, 'queries', 'pay.sql') }],
+    ['/runs/run-other/files', { path: join(oldRoot, 'stray', 'apps.lock.json') }],
+    ...(caseVariant !== null ? [['/runs/run-wide/files', { path: caseVariant }] as [string, Record<string, string>]] : []),
     ['/runs/run-app/diff', {}],
     ['/runs/run-app/diff', { path: join(worktree, 'queries', 'pay.sql') }],
+    ['/runs/run-app/diff', { base: 'main' }],
+    // Each guard on its own: the run's repository (a worktree outside the app root), the run's worktree (no repository).
+    ['/runs/run-ext/diff', {}],
+    ['/runs/run-null/diff', {}],
     // The run branch, after the worktree was removed.
     ['/runs/run-gone/diff', {}],
-  ] as Array<[string, Record<string, string>]>;
+    ['/runs/run-gone/diff', { base: 'main' }],
+    ['/runs/run-gone/diff', { path: join(appRoot, 'queries', 'pay.sql') }],
+    ['/runs/run-old/diff', {}],
+  ];
+  /** Each read's answer, all of them before any is judged, so a red run lists every one that leaks. */
+  const answers = async (as: keyof typeof TOKENS, on: FastifyInstance = app) => {
+    const seen: Array<{ read: string; status: number; code: unknown; leaked: string[] }> = [];
+    for (const [url, query] of reads()) {
+      const r = await get(as, url, query, on);
+      seen.push({ read: `${as} ${url} ${JSON.stringify(query).split(base).join('<base>')}`, status: r.status, code: r.body['code'], leaked: LEAKS.filter((l) => r.text.includes(l)) });
+    }
+    return seen;
+  };
+  const refused = (seen: Array<{ read: string }>) => seen.map(({ read }) => ({ read, status: 403, code: 'app_files_human_only', leaked: [] }));
 
   it('NEGATIVE CONTROL: agent, plugin and system bearers get 403 app_files_human_only: no descriptor host, no query text', async () => {
-    // Every read is answered before any is judged, so a red run lists each one that leaks.
-    const seen: Array<{ read: string; status: number; code: unknown; leaked: string[] }> = [];
-    for (const as of ['agent', 'plugin', 'system'] as const) {
-      for (const [url, query] of reads()) {
-        const r = await get(as, url, query);
-        const read = `${as} ${url}${query['path'] !== undefined ? ` ${query['path'].slice(worktree.length - 'run-app'.length)}` : ''}`;
-        seen.push({ read, status: r.status, code: r.body['code'], leaked: LEAKS.filter((l) => r.text.includes(l)) });
-      }
-    }
-    expect(seen).toEqual(seen.map(({ read }) => ({ read, status: 403, code: 'app_files_human_only', leaked: [] })));
+    const seen = [...(await answers('agent')), ...(await answers('plugin')), ...(await answers('system'))];
+    expect(seen).toEqual(refused(seen));
+  });
+
+  it('NEGATIVE CONTROL (codex r1): with no app store crew cannot tell an app’s files, so a non-human reads no run file or diff', async () => {
+    const seen = await answers('agent', storeOff);
+    expect(seen).toEqual(refused(seen));
+    const plain = await get('system', '/runs/run-other/files', { path: join(other, 'README.md') }, storeOff);
+    expect([plain.status, plain.body['code']]).toEqual([403, 'app_files_human_only']);
+    expect((await get('human', '/runs/run-app/files', { path: join(worktree, 'apps.lock.json') }, storeOff)).body['content']).toBe(LOCK);
+  });
+
+  it('the case-insensitive filesystem check runs where it can (macOS, Windows)', () => {
+    if (process.platform === 'darwin') expect(caseVariant, 'the fixture names the lock in another spelling').not.toBeNull();
+  });
+
+  it('mayBeInsideRoot: the filesystem’s spelling, a missing leaf through its ancestor, a sibling outside, and an unreadable path fails closed', () => {
+    const appsRoot = join(base, 'apps');
+    expect(mayBeInsideRoot(appsRoot, join(worktree, 'gone', 'x.sql'))).toBe(true);
+    expect(mayBeInsideRoot(appsRoot, join(base, 'apps-sibling', 'x'))).toBe(false);
+    expect(mayBeInsideRoot(appsRoot, other)).toBe(false);
+    if (caseVariant !== null) expect(mayBeInsideRoot(appsRoot, caseVariant)).toBe(true);
+    const loop = join(base, 'loop');
+    mkdirSync(loop);
+    symlinkSync(join(loop, 'b'), join(loop, 'a'));
+    symlinkSync(join(loop, 'a'), join(loop, 'b'));
+    expect(mayBeInsideRoot(appsRoot, join(loop, 'a', 'x'))).toBe(true);
   });
 
   it("REGRESSION: a human's run files and diff are unchanged (operator and observer)", async () => {
@@ -155,9 +224,12 @@ describe('crew#1324: a non-human GET /runs/:id/files and /diff refuse an app rep
       expect(lock.body['content']).toBe(LOCK);
       expect((await get(as, '/runs/run-app/files', { path: join(worktree, 'queries', 'pay.sql') })).body['content']).toBe(QUERY);
       expect((await get(as, '/runs/run-other/files', { path: join(worktree, 'apps.json') })).body['content']).toBe(SPEC);
-      const live = await get(as, '/runs/run-app/diff');
-      expect([live.status, live.body['source']], live.text).toEqual([200, 'worktree']);
-      for (const leak of LEAKS) expect(String(live.body['diff']), leak).toContain(leak);
+      expect((await get(as, '/runs/run-other/files', { path: join(other, 'lock-link') })).body['content']).toBe(LOCK);
+      for (const run of ['run-app', 'run-ext', 'run-null']) {
+        const live = await get(as, `/runs/${run}/diff`);
+        expect([live.status, live.body['source']], `${run} ${live.text}`).toEqual([200, 'worktree']);
+        for (const leak of LEAKS) expect(String(live.body['diff']), `${run} ${leak}`).toContain(leak);
+      }
       const gone = await get(as, '/runs/run-gone/diff');
       expect([gone.status, gone.body['source']], gone.text).toEqual([200, 'branch']);
       for (const leak of LEAKS) expect(String(gone.body['diff']), leak).toContain(leak);
@@ -172,8 +244,9 @@ describe('crew#1324: a non-human GET /runs/:id/files and /diff refuse an app rep
     expect(String(d.body['diff'])).toContain('hello, changed');
   });
 
-  it('the containment ladder still answers first: an unknown run 404s and a path outside every root 403s as before', async () => {
+  it('the containment ladder still answers first: an unknown run 404s, a relative path 400s, a path outside every root 403s as before', async () => {
     expect((await get('agent', '/runs/nope/files', { path: join(worktree, 'apps.lock.json') })).status).toBe(404);
+    expect((await get('agent', '/runs/run-app/files', { path: 'apps.lock.json' })).status).toBe(400);
     const outside = await get('agent', '/runs/run-app/files', { path: join(tmpdir(), 'nowhere.txt') });
     expect([outside.status, outside.body['code']]).toEqual([403, undefined]);
   });
@@ -183,7 +256,7 @@ describe('crew#1325: a non-human’s refused app query answers its code, never t
   const DETAIL = `the read policy refuses query pay now (relation): ${RELATION} is not a table of this source's catalog (describe the source again if it is new)`;
   let base: string;
   let app: FastifyInstance;
-  let thrown: AppExecError;
+  let thrown: unknown;
 
   beforeAll(async () => {
     base = mkdtempSync(join(tmpdir(), 'kd-sec-views-2-query-'));
@@ -218,6 +291,25 @@ describe('crew#1325: a non-human’s refused app query answers its code, never t
     thrown = new AppExecError(409, 'query_refused', DETAIL);
     expect((await query('human')).body).toEqual({ code: 'query_refused', error: DETAIL });
     for (const as of ['agent', 'plugin'] as const) expect((await query(as)).body['code']).toBe('human_only');
+  });
+
+  it('codex r1: through the route, a human keeps a refusal’s findings and extras; a system bearer gets the code only', async () => {
+    const findings = [{ code: 'bad_query', path: 'queries/pay.sql', message: `${RELATION} is not a table` }];
+    thrown = new AppStoreError(409, 'unreadable_tree', `desk tree t cannot be read: ${RELATION}`, { findings: findings as never, head: 2 });
+    expect((await query('human')).body).toEqual({ code: 'unreadable_tree', error: `desk tree t cannot be read: ${RELATION}`, findings, head: 2 });
+    const sys = await query('system');
+    expect([sys.status, sys.body]).toEqual([409, { code: 'unreadable_tree', error: 'the query was not answered (unreadable_tree)' }]);
+  });
+
+  it('NEGATIVE CONTROL (codex r1): an error crew did not name answers a system bearer a 500 with no words; a person’s 500 is as before', async () => {
+    thrown = new SyntaxError(`Unexpected token 'f', "{"relations": [${RELATION}]}" is not valid JSON`);
+    const sys = await query('system');
+    expect(sys.status).toBe(500);
+    expect(sys.text).not.toContain(RELATION);
+    expect(sys.body['message']).toBe('the query was not answered (internal error)');
+    const person = await query('human');
+    expect(person.status).toBe(500);
+    expect(person.text).toContain(RELATION);
   });
 
   it('a rate-limited system bearer still learns how long to wait', async () => {

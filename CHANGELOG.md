@@ -311,13 +311,15 @@ mentioned only where a daemon release depends on them.
 - **A non-human bearer no longer reads an app repo's files or a query refusal's detail (crew#1324, crew#1325,
   DES-KNOWLEDGE-DATA-001 §5.2).** The same rule (`viewOf`): `GET /runs/:id/files` and `GET /runs/:id/diff` answer a
   non-human actor 403 `app_files_human_only` when the path, the run's worktree or the run's repository is under an
-  app's files (the apps root, or an app's own repo root), so a turn's `apps.lock.json` (each source's connection
-  descriptor), `queries/` and `apps.json` are no longer served through them, from a live worktree, from the run
-  branch after the worktree is gone, or through another run's id. `GET /apps/:app` remains the agent-safe view of an
-  app. A refused `POST /apps/:app/query` answers a non-human (a `system` bearer: agent and plugin actors are refused
-  before the executor) its status and code, and `retryAfterMs` when rate limited; never the read policy's detail,
-  which names the relation. Humans, studio's run pages and crew's in-process readers are unchanged. No api-types
-  change.
+  app's files (the apps root, or an app's own repo root, judged in the filesystem's own spelling so another case
+  of a name on macOS does not read as outside), so a turn's `apps.lock.json` (each source's connection descriptor),
+  `queries/` and `apps.json` are no longer served through them, from a live worktree, from the run branch after the
+  worktree is gone, through a link, or through another run's id. While the app store cannot be read (Apps is off),
+  crew cannot tell an app's files from others, so a non-human reads no run file or diff. `GET /apps/:app` remains the
+  agent-safe view of an app. A refused `POST /apps/:app/query` answers a non-human (a `system` bearer: agent and
+  plugin actors are refused before the executor) its status and code, and `retryAfterMs` when rate limited; never
+  the read policy's detail, which names the relation, nor a finding; an error crew does not name is its 500 with no
+  words. Humans, studio's run pages and crew's in-process readers are unchanged. No api-types change.
 
 - **"Ask a question of this data" no longer fails on a correct short draft (crew#1311; needs wicked-core with
   `answer_only`, so core-ts above 0.15.22).** The one-shot seat turn (`seatTurn`, shared by the standing-order parse

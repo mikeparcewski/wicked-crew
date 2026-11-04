@@ -45,6 +45,35 @@ export function isInsideRoot(root: string, target: string): boolean {
   return rel.split(sep)[0] !== '..';
 }
 
+/**
+ * {@link isInsideRoot} for a DENY check (crew#1324): may `target` be inside `root`? Both are judged in the
+ * filesystem's own spelling (`realpathSync.native`): on a case-insensitive filesystem (macOS, Windows) `realpathSync`
+ * keeps the caller's spelling, so `<root's parent>/APPS/...` names a file inside `<root's parent>/apps` and would
+ * read as outside it. A missing leaf is judged through its deepest existing ancestor, as there. Any filesystem error
+ * other than ENOENT answers `true`: a deny check that cannot tell fails closed.
+ */
+export function mayBeInsideRoot(root: string, target: string): boolean {
+  const spelt = (p: string): string | null => {
+    const abs = resolve(p);
+    try {
+      return realpathSync.native(abs);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+      const parent = dirname(abs);
+      if (parent === abs) return abs;
+      const rp = spelt(parent);
+      return rp === null ? null : join(rp, basename(abs));
+    }
+  };
+  const realRoot = spelt(root);
+  const realTarget = spelt(target);
+  if (realRoot === null || realTarget === null) return true;
+  const rel = relative(realRoot, realTarget);
+  if (rel === '') return true;
+  if (isAbsolute(rel)) return false;
+  return rel.split(sep)[0] !== '..';
+}
+
 /** The session fields the root set is derived from — structural on purpose, so this stays a leaf
  *  module (routes.ts hands it the wire-shape `SessionView.session`; tests hand it a literal). */
 export interface RootSourceSession {

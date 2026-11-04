@@ -24,7 +24,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
-import { LOCAL_ACTOR, trustAtLeast } from '../api/auth.js';
+import { LOCAL_ACTOR, trustAtLeast, viewOf } from '../api/auth.js';
 import type { AuditLog } from '../api/audit.js';
 import type { Actor, AppEditOp, AppErrorBody } from '../core/types.js';
 import { APP_NAMED_ID_RE, parseSpec } from './spec.js';
@@ -89,6 +89,12 @@ function fail(reply: FastifyReply, err: unknown, reader?: Actor): FastifyReply {
   // The app repo was changed in a way crew refuses to read or write through (a link, a commondir file, an
   // object that does not hash to its id): nothing landed.
   if (err instanceof AppGitError && err.code === 'corrupt') return send(409, { code: 'unreadable_tree', error: err.message });
+  // (crew#1325, codex r1) An error crew did not name (a store's parse error quotes the text it stopped in) is a 500
+  // as before; a non-human reader's carries no words. The error itself is logged.
+  if (reader !== undefined && viewOf(reader) === 'agent') {
+    reply.log.error({ err }, 'an app query failed');
+    throw new Error('the query was not answered (internal error)');
+  }
   throw err;
 }
 

@@ -3,6 +3,7 @@
 // the lock → the read → projection, coercion, row and more paths → cache with generation. Against the K1
 // test services (REST, MCP, GraphQL), the built-in crew source and, when set, real Postgres 16 and 17.
 
+import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -299,6 +300,25 @@ describe('the executor over the K1 test services and the crew source', () => {
     expect(JSON.stringify(h.executor.callRecords('desk'))).not.toContain('OPEN'); // no row in a call record
   });
 
+  it("crew#1325 (codex r1): an error crew did not name (a source's stored description that no longer parses) answers a system bearer a 500 with no words", async () => {
+    const catalog = join(h.dir, 'mcp', 'catalogs', 'tix.json');
+    const saved = readFileSync(catalog, 'utf8');
+    // JSON.parse's message quotes the text around where it stopped: here, a relation name.
+    writeFileSync(catalog, '{"relations": [finance.payroll]}');
+    try {
+      const person = await query('gql');
+      expect(person.status).toBe(500);
+      expect(JSON.stringify(person.body)).toContain('finance.pay');
+      const ci = await h.call('POST', '/apps/desk/query', { version: 2, query: 'gql' }, 'ci');
+      expect(ci.status).toBe(500);
+      expect(JSON.stringify(ci.body)).not.toContain('finance');
+      expect(ci.body['message']).toBe('the query was not answered (internal error)');
+    } finally {
+      writeFileSync(catalog, saved);
+    }
+    expect((await query('gql')).status).toBe(200);
+  });
+
   it('S14: a source whose connection changed under an accepted version refuses its queries until the version is checked again; other sources still run', async () => {
     await h.register({ name: 'ref', kind: 'mcp-http', url: `${mcp2.origin}/mcp`, address: LOOP });
     expect((await query('mcp_open')).body).toMatchObject({ code: 'contract_changed' });
@@ -461,7 +481,10 @@ for (const target of PG_TARGETS) {
       }
       expect((await query('kids')).status).toBe(200);
       // A system bearer's read that passes is answered in full (the rows reach the automation that asked).
-      expect((await h.call('POST', '/apps/tickets/query', { version: 2, query: 'search' }, 'ci')).status).toBe(200);
+      const rows = await h.call('POST', '/apps/tickets/query', { version: 2, query: 'search' }, 'ci');
+      expect(rows.status, JSON.stringify(rows.body)).toBe(200);
+      expect((rows.body as unknown as AppQueryResponse).columns.map((c) => c.name)).toEqual(['id', 'owner']);
+      expect((rows.body as unknown as AppQueryResponse).rows).toEqual([[4821, 'nobody'], [4822, 'nobody']]);
     });
 
     it('codex r1: a source switched off reads nothing', async () => {
