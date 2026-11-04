@@ -181,7 +181,7 @@ import { registerSkillsRoutes } from './skills.js';
 import { registerSourceRoutes } from '../sources/routes.js';
 import { seatTurn } from '../standing-orders/parse.js';
 import { registerMcpRoutes } from './mcp.js';
-import { chatMcpToolsFor } from './chat-mcp.js';
+import { chatKnowledgeFor, chatMcpToolsFor } from './chat-mcp.js';
 import type { AskServer } from '../mcp/ask-server.js';
 import type { McpBroker } from '../mcp/broker.js';
 import type { DataGate } from '../knowledge/gate/gate.js';
@@ -4653,13 +4653,16 @@ export function registerRoutes(
     // crew#1155: the installed MCP tools and the one command that reaches them (the broker), read
     // per turn so a server installed or disabled since the last turn is reflected.
     let mcpTools: string | null = null;
+    // DES-KNOWLEDGE-DATA-001 §8.1: the live sources the chat's project may use (structure, switches, commands).
+    let knowledgeBlock: string | null = null;
     const withPreface = (preface: string | null): string => {
-      const body = mcpTools !== null ? `${mcpTools}\n\n${seatText}` : seatText;
+      const body = [mcpTools, knowledgeBlock, seatText].filter((x): x is string => x !== null).join('\n\n');
       return preface !== null ? `${preface}\n\n${body}` : body;
     };
     try {
       const rules = (await considerations.inForceFor(scope?.projectId ?? null)).rules;
-      mcpTools = await chatMcpToolsFor(runtime.mcp);
+      mcpTools = await chatMcpToolsFor(runtime.mcp, runtime.dataGate);
+      knowledgeBlock = await chatKnowledgeFor(runtime.dataGate, scope?.projectId ?? null);
       // crew#1020: a project/everything chat must see repos attached since open. Admission was
       // under this scope KIND and the kind stays the same, so do not re-run seat admission.
       const scopeRequest = chatScopes.requestOf(id);

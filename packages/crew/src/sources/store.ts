@@ -19,6 +19,12 @@ export interface StoredDescription extends SourceDescription {
 }
 
 export class SourceCatalogStore {
+  /**
+   * Told the name of each catalog once it is stored (DES-KNOWLEDGE-DATA-001 §4.1: the describe -> estate projector).
+   * Called inside the registry mutation that wrote it, so it must not await that mutation; it never throws into it.
+   */
+  onWritten: ((name: string) => void) | null = null;
+
   constructor(private readonly dir: string = join(mcpStateDir(), 'catalogs')) {}
 
   private path(name: string): string {
@@ -44,6 +50,11 @@ export class SourceCatalogStore {
     } catch (err) {
       await rm(tmp, { force: true });
       throw err;
+    }
+    try {
+      this.onWritten?.(name);
+    } catch {
+      // The catalog is stored; a listener's failure is its own to report.
     }
   }
 

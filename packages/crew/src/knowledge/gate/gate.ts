@@ -4,7 +4,8 @@
  *
  * - `unit`: a governed unit or a chat answer step, through the broker (`mcp:<source>/<tool>`). The unit is
  *   the ENGINE's binding of its token, never anything the worker sends; the engine judges the exact subject
- *   (`listMcpTools`: absent = denied, D-7 for every Apps unit); ONE predicate (`agentMay`) over the source's
+ *   (`listMcpTools`: absent = denied; D-7 refuses an Apps unit write tools only, §9.3, and every gated tool goes
+ *   to the engine as a read, so rows and visibility are this gate's); ONE predicate (`agentMay`) over the source's
  *   on/off, its switches and its projects, by the tool's disclosure class, read from the registry on every
  *   call. A structure tool answers from crew's stored catalog and never dials. A rows tool runs: the read
  *   policy -> the source's scheduler -> the adapter (native: K1's driver, the per-cell projection, READ ONLY,
@@ -209,7 +210,7 @@ export class DataGate {
 
   /**
    * The subjects the ENGINE lets this unit try, of `calls` (`listMcpTools`, which records nothing): absence is a
-   * deny (D-7 for an Apps unit, then any operator policy). A first-use `ask` is admitted (the person's per-source
+   * deny (an operator policy; D-7 denies an Apps unit only write tools, and these go as reads). A first-use `ask` is admitted (the person's per-source
    * switches are the consent); an `ask` for any other reason is not. `null` = the linked engine has no lister.
    */
   async admitted(token: string, calls: ReadonlyArray<{ server: string; tool: string; disclosure: string | null }>): Promise<Map<string, 'allow' | 'ask'> | null> {

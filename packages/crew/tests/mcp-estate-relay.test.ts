@@ -304,6 +304,8 @@ describe('the broker relays mcp:estate/<tool>', () => {
 
   it("spends the unit's call budget", async () => {
     await boot(2);
+    // A knowledge read answers its items list (the release check withholds any other shape).
+    answer = async (c) => ({ result: envelope(c.tool === 'knowledge.recall' ? { items: [] } : { dependents: ['a', 'b'] }) });
     expect((await call('mcp:estate/memory.recall', { query: 'a' })).status).toBe(200);
     expect((await call('mcp:estate/knowledge.recall', { query: 'b' })).status).toBe(200);
     const third = await call('mcp:estate/memory.recall', { query: 'c' });

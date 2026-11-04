@@ -30,6 +30,13 @@
  *   project and repo (and a project or repo the run does not have is removed), so a worker
  *   neither reads another project's faceted memories nor files a proposal under one. Provenance
  *   (`run_id`, `run_unit`, `run_agent`) is stamped by the server from the unit, never from args.
+ * - **What it may see** (DES-KNOWLEDGE-DATA-001 §4.3): a knowledge read ({@link ESTATE_VISIBLE_TOOLS})
+ *   carries `visible`, the `source:<id>` / `repo:<id>` set crew computes for the unit's project from
+ *   the registry (the data gate's predicate, `agentMay`); a worker's own `visible` is replaced. Estate
+ *   filters before it ranks; the relay then re-checks every item against a FRESH read before release
+ *   ({@link releaseVisible}): an item with a dep outside the set is dropped, a source catalog outside
+ *   it is withheld, a block the relay cannot check is dropped, and an answer with nothing it can check
+ *   is withheld (fail closed).
  * - **How much**: numeric size arguments are clamped ({@link ARG_CAPS}), each call has a deadline
  *   ({@link ESTATE_RELAY_TIMEOUT_MS}), at most {@link ESTATE_RELAY_CONCURRENCY} run at once, and
  *   a result over {@link ESTATE_RELAY_MAX_RESULT_BYTES} is withheld with a remedy. The broker's
@@ -42,7 +49,7 @@
 import { existsSync } from 'node:fs';
 import { spawn as nodeSpawn } from 'node:child_process';
 
-import { callEstateToolRaw, estateMcpExe, resolveMemoryDbPath, type EstateMcpIo } from '../core/estate-mcp-client.js';
+import { callEstateToolRaw, estateKnowledgeEnv, estateMcpExe, resolveMemoryDbPath, type EstateMcpIo } from '../core/estate-mcp-client.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 
 export { ESTATE_SERVER } from './classify.js';
@@ -61,8 +68,14 @@ export const ESTATE_GRAPH_TOOLS: ReadonlySet<string> = new Set([
   'rules.recall',
 ]);
 
-/** Every read-only tool the relay answers: the graph lookups plus memory and knowledge recall. */
-export const ESTATE_READ_TOOLS: ReadonlySet<string> = new Set([...ESTATE_GRAPH_TOOLS, 'memory.recall', 'knowledge.recall']);
+/**
+ * The knowledge reads that carry `visible` (DES-KNOWLEDGE-DATA-001 §4.3): recall, a source's typed catalog and
+ * the combined view's neighbourhood. Each is filtered by estate before ranking and re-checked here before release.
+ */
+export const ESTATE_VISIBLE_TOOLS: ReadonlySet<string> = new Set(['knowledge.recall', 'knowledge.source_catalog', 'knowledge.neighbors']);
+
+/** Every read-only tool the relay answers: the graph lookups, memory recall and the knowledge reads. */
+export const ESTATE_READ_TOOLS: ReadonlySet<string> = new Set([...ESTATE_GRAPH_TOOLS, 'memory.recall', ...ESTATE_VISIBLE_TOOLS]);
 
 /** The one write: an inert proposal for human review. */
 export const ESTATE_PROPOSAL_TOOL = 'proposal.submit';
@@ -170,8 +183,10 @@ function scopeFacets(facets: unknown, scope: EstateUnitScope): Record<string, un
  * A proposal for a run with no project keeps the worker's own `facets.project` (garden requires
  * one), since there is no run project to set; only `repo` is then the run's.
  */
-export function scopeEstateArgs(tool: string, args: Record<string, unknown>, scope: EstateUnitScope): Record<string, unknown> {
+export function scopeEstateArgs(tool: string, args: Record<string, unknown>, scope: EstateUnitScope, visible: readonly string[] = []): Record<string, unknown> {
   const out = clampArgs(args);
+  // crew's set, never the worker's (an absent set is estate's empty one: dep-free knowledge only).
+  if (ESTATE_VISIBLE_TOOLS.has(tool)) out['visible'] = [...visible];
   if (tool === 'memory.recall') {
     out['intent'] = scopeFacets(out['intent'], scope);
   } else if (tool === ESTATE_PROPOSAL_TOOL) {
@@ -194,6 +209,8 @@ export function estateRelayEnv(scope: EstateUnitScope, base: NodeJS.ProcessEnv =
   return {
     ...env,
     WICKED_MEMORY_DB: resolveMemoryDbPath(base),
+    // The knowledge store the describe projector writes (an isolated state home's own; DES-KNOWLEDGE-DATA-001 §4.1).
+    ...estateKnowledgeEnv(base),
     // Never the daemon's boot store (its governance store): the run's graph, or nothing.
     WICKED_ESTATE_DB: scope.codeGraphDb ?? ':memory:',
     WICKED_RUN_ID: scope.unit.runId,
@@ -269,6 +286,11 @@ export interface EstateRelayDeps {
   maxResultBytes?: number;
   /** Called once per landed proposal. Never throws into the call. */
   onProposal?: (landed: EstateProposalLanded) => void;
+  /**
+   * (DES-KNOWLEDGE-DATA-001 §4.3) The deps the unit may see (`source:<id>`, `repo:<id>`), read anew per call from
+   * the registry. Absent = the empty set: only dep-free knowledge reaches a worker. Throws = the call is refused.
+   */
+  visible?: (scope: EstateUnitScope) => Promise<string[]>;
 }
 
 /** The relay's resolved dependencies, as the broker drives them. */
@@ -296,6 +318,11 @@ export class EstateRelay {
       repoId: typeof parsed.repoId === 'string' ? parsed.repoId : null,
       codeGraphDb: typeof parsed.codeGraphDb === 'string' ? parsed.codeGraphDb : null,
     };
+  }
+
+  /** The unit's visible set (module doc), read now. */
+  async visibleFor(scope: EstateUnitScope): Promise<string[]> {
+    return this.deps.visible === undefined ? [] : [...(await this.deps.visible(scope))];
   }
 
   refusal(tool: string, scope: EstateUnitScope): EstateRefusal | null {
@@ -331,4 +358,77 @@ export function proposalIdOf(result: Record<string, unknown>): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The deps an estate knowledge record stands on: its own `deps`, plus the source its scope or its citation names
+ * (`source:<id>`, `source:<id>/<key>…`), so a record from an estate that predates `deps` is still gated by its source.
+ */
+export function effectiveDeps(rec: Record<string, unknown>): string[] {
+  const out = new Set<string>();
+  if (Array.isArray(rec['deps'])) for (const d of rec['deps']) if (typeof d === 'string') out.add(d);
+  for (const field of ['scope', 'source']) {
+    const v = rec[field];
+    if (typeof v !== 'string' || !v.startsWith('source:')) continue;
+    const id = v.slice('source:'.length).split(/[/#]/, 1)[0] ?? '';
+    if (id !== '') out.add(`source:${id}`);
+  }
+  return [...out];
+}
+
+const within = (rec: Record<string, unknown>, visible: ReadonlySet<string>): boolean => effectiveDeps(rec).every((d) => visible.has(d));
+
+/** What {@link releaseVisible} decided: the result to hand back (possibly narrowed), or a withhold. */
+export type VisibleRelease = { ok: true; result: Record<string, unknown>; dropped: number } | { ok: false; reason: string };
+
+/**
+ * The release re-check of a knowledge read (module doc): every record is checked against `visible`, read again just
+ * before release. A tool error (estate's own words, no record) passes as it is.
+ */
+export function releaseVisible(tool: string, result: Record<string, unknown>, visible: ReadonlySet<string>): VisibleRelease {
+  if (!ESTATE_VISIBLE_TOOLS.has(tool) || result['isError'] === true) return { ok: true, result, dropped: 0 };
+  const content = result['content'];
+  if (!Array.isArray(content)) return { ok: false, reason: `mcp:estate/${tool} answered no content the relay can check` };
+  let dropped = 0;
+  const checked: unknown[] = [];
+  for (const block of content) {
+    // A block the relay cannot check (not JSON text, or not an object: a diagnostics line) is dropped, never passed.
+    let payload: unknown = null;
+    if (isRecord(block) && block['type'] === 'text' && typeof block['text'] === 'string') {
+      try {
+        payload = JSON.parse(block['text']);
+      } catch {
+        payload = null;
+      }
+    }
+    if (!isRecord(payload)) {
+      dropped += 1;
+      continue;
+    }
+    if (tool === 'knowledge.recall') {
+      const items = Array.isArray(payload['items']) ? payload['items'] : null;
+      if (items === null) return { ok: false, reason: 'mcp:estate/knowledge.recall answered no items list, so the answer is withheld' };
+      const kept = items.filter((i) => isRecord(i) && within(i, visible));
+      dropped += items.length - kept.length;
+      payload = { ...payload, items: kept };
+    } else if (tool === 'knowledge.source_catalog') {
+      const id = payload['sourceId'];
+      if (typeof id !== 'string' || !visible.has(`source:${id}`)) {
+        return { ok: false, reason: 'no visible catalog for that source: a person has not let this project see it' };
+      }
+    } else {
+      const nodes = Array.isArray(payload['nodes']) ? payload['nodes'] : null;
+      const edges = Array.isArray(payload['edges']) ? payload['edges'] : null;
+      if (nodes === null || edges === null) return { ok: false, reason: 'mcp:estate/knowledge.neighbors answered no nodes and edges, so the answer is withheld' };
+      const keptNodes = nodes.filter((n) => isRecord(n) && within(n, visible));
+      const ids = new Set(keptNodes.map((n) => `${String((n as Record<string, unknown>)['store'])}\u0000${String((n as Record<string, unknown>)['id'])}`));
+      const end = (e: unknown): string => (isRecord(e) ? `${String(e['store'])}\u0000${String(e['id'])}` : '');
+      const keptEdges = edges.filter((e) => isRecord(e) && ids.has(end(e['from'])) && ids.has(end(e['to'])) && (!isRecord(e['meta']) || within({ deps: e['meta']['deps'] }, visible)));
+      dropped += nodes.length - keptNodes.length + edges.length - keptEdges.length;
+      payload = { ...payload, nodes: keptNodes, edges: keptEdges };
+    }
+    checked.push({ ...(block as Record<string, unknown>), text: JSON.stringify(payload) });
+  }
+  if (checked.length === 0) return { ok: false, reason: `mcp:estate/${tool} answered nothing the relay can check, so the answer is withheld` };
+  return { ok: true, result: { ...result, content: checked }, dropped };
 }

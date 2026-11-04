@@ -97,7 +97,9 @@ import { homedir } from 'node:os';
 import { discoverMcpServers } from '../mcp/discovery.js';
 import { probeMcpServer } from '../mcp/probe.js';
 import { budgetFromEnv, MCP_CALL_COMPLETED, McpBroker } from '../mcp/broker.js';
-import { EstateRelay } from '../mcp/estate-relay.js';
+import { EstateRelay, type EstateUnitScope } from '../mcp/estate-relay.js';
+import { visibleDeps } from '../knowledge/package.js';
+import { SourceProjector } from '../knowledge/projector.js';
 import { McpCallRecordFile } from '../mcp/call-records.js';
 import { emitOnBus, type BusEvent } from '../core/bus.js';
 import { McpRegistry } from '../mcp/registry.js';
@@ -2535,6 +2537,23 @@ export async function createServer(
   app.addHook('onClose', async () => {
     toolboxSupervisor.stopAll();
   });
+  // DES-KNOWLEDGE-DATA-001 §4.1: every stored catalog's STRUCTURE (never a row) is projected into estate's knowledge
+  // plane, keyed by the registry id; what was described before this release is projected once, off the boot path.
+  const sourceProjector = new SourceProjector({ store: mcpRegistryStore, catalogs: mcpRegistry.catalogs, log: (m) => app.log.warn(m) });
+  mcpRegistry.catalogs.onWritten = (name) => sourceProjector.written(name);
+  void sourceProjector.backfill();
+  // §4.3: what a unit's knowledge reads may see — the sources its project may see (the gate's predicate) and its repos.
+  const unitVisible = async (scope: EstateUnitScope): Promise<string[]> => {
+    const repos = scope.repoId !== null ? [scope.repoId] : [];
+    if (scope.projectId !== null) {
+      try {
+        for (const m of await adapter.projectMembers(scope.projectId)) if (m.member_kind === 'crew.repo') repos.push(m.member_ref);
+      } catch {
+        // An engine that cannot list members leaves the run's own repo.
+      }
+    }
+    return visibleDeps(await dataGate.sources(), scope.projectId, repos);
+  };
   const mcpBroker = new McpBroker({
     registry: mcpRegistry,
     engine: options?.mcpEngineGate ?? (() => CoreAdapter.mcpEngineGate()),
@@ -2546,6 +2565,7 @@ export async function createServer(
     // landed proposal is also written to the audit trail against its run (`estate.proposal.submitted`).
     estate: new EstateRelay({
       resolver: () => CoreAdapter.estateScopeResolver(),
+      visible: unitVisible,
       onProposal: (p) =>
         audit.record('estate.proposal.submitted', { id: `seat:${p.seat}`, kind: 'agent', trust: 'observer' }, {
           runId: p.runId,
