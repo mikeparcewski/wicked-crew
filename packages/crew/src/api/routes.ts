@@ -285,6 +285,13 @@ import type { DocLedgerSweep } from '../interactive/doc-ledger-sweep.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
 import { resolveLinkedIssues, stripLinkedIssues, type LinkedIssue, type LinkedIssuesResult } from '../core/linked-issues.js';
+import { reRegisterRefusal } from '../projects/repo-guard.js';
+import type { PmLinkedIssueReader } from '../core/linked-issues.js';
+import type { RunAddress, TrackerAddresses } from '../knowledge/trackers/addresses.js';
+import { registerTrackerActionRoutes } from '../knowledge/trackers/actions.js';
+import { pmRegistered, readPmIssues } from '../knowledge/trackers/issues.js';
+import type { TrackerProjector } from '../knowledge/trackers/projector.js';
+import { registerTrackerRoutes } from '../knowledge/trackers/routes.js';
 import { AuditLog } from './audit.js';
 import { auditFor } from './audit-view.js';
 import {
@@ -1237,6 +1244,8 @@ export interface RuntimeDeps {
     repoRoot: string | undefined,
     repoRef: string | undefined,
     exclude?: readonly string[],
+    /** (DES-PM-001 §3.2) The launch's project: with a registered PM source, refs resolve through its tracker set. */
+    projectId?: string | null,
   ) => Promise<LinkedIssuesResult>;
   seatHealth?: SeatHealthTracker;
   /** wicked-studio#284: the stall watchdog's remembered frames for a run — merged into
@@ -1432,6 +1441,10 @@ export interface RuntimeDeps {
   mcpRegistryStore?: McpRegistryStore;
   /** The gate's read record (`GET /sources/:name/agent-queries`, `GET /runs/:id/data-use`). */
   sourceReads?: SourceReadLog;
+  /** (DES-PM-001 §3.4) The tracker projector: links and addressed issues into estate, reconciled. */
+  trackerProjector?: TrackerProjector;
+  /** (DES-PM-001 §3.2) The issues each run's launch resolved through a registered PM source. */
+  trackerAddresses?: TrackerAddresses;
   askServer?: AskServer;
   /** The broker's call records (DES-MCP-TOOLS-001 S7), the ones `GET /mcp/usage` folds; absent → 503. */
   mcpCalls?: McpCallRecordSource;
@@ -1817,10 +1830,21 @@ export function registerRoutes(
   /** DES-L9: PR number → head branch, through `gh pr view` unless the runtime injected an answerer. */
   const resolvePullRequest = runtime.resolvePullRequest ?? resolvePullRequestViaGh;
   /** crew#627: the intent's linked issues, read under the daemon's identity at launch. */
+  /** (DES-PM-001 §3.2) A project's live `crew.repo` members, for a tracker set. */
+  const repoMembersOf = async (projectId: string): Promise<string[]> => (await adapter.projectMembers(projectId)).filter((m) => m.member_kind === 'crew.repo').map((m) => m.member_ref);
+  /** (Q-PM5) With a PM source registered, its system's refs resolve only through the launch's tracker set. */
+  const pmIssueReader = async (projectId: string | null, repoRef: string | null): Promise<PmLinkedIssueReader | undefined> => {
+    const gate = runtime.dataGate;
+    if (gate === undefined) return undefined;
+    const entries = await gate.pm.entries();
+    if (entries.length === 0) return undefined;
+    const { systems, jiraKeys } = pmRegistered(entries);
+    return { systems, jiraKeys, read: (refs) => readPmIssues(gate.pm, entries, { projectId, repoId: repoRef }, repoMembersOf, refs, () => gate.pm.entries()) };
+  };
   const readLinkedIssues =
     runtime.resolveLinkedIssues ??
-    ((p: string, root: string | undefined, ref: string | undefined, exclude?: readonly string[]) =>
-      resolveLinkedIssues(p, root, ref, undefined, exclude));
+    (async (p: string, root: string | undefined, ref: string | undefined, exclude?: readonly string[], projectId?: string | null) =>
+      resolveLinkedIssues(p, root, ref, undefined, exclude, await pmIssueReader(projectId ?? null, ref ?? null)));
   /** crew#550 P-7: the follow-ups the run's evaluator units flagged, read from their captured output.
    *  A unit whose output cannot be read contributes nothing (the section then says what WAS read);
    *  an adapter without transcripts (a directly-driven route set) reads as "not read" — absent. */
@@ -2111,6 +2135,8 @@ export function registerRoutes(
       runChatId: true,
       // crew#825: `LaunchRunBody.excludeLinkedIssues` + `POST /linked-issues/preview` are served.
       linkedIssuesExclude: true,
+      // DES-PM-001 PM-1: PM sources, tracker links, tracker sets in linked issues, tracker actions.
+      trackerLinks: true,
       // ASK-C1 (DES-ASK-TEAM-CHAT-001 §5.1): an ask starts a path — the whole contract is the
       // pinned core-ts floor the adapter reports; an older studio reads ABSENT as "every helper
       // answers", a newer one renders the one PA voice.
@@ -2854,6 +2880,9 @@ export function registerRoutes(
     const refused = await onboardRefusal();
     if (refused !== null) return reply.code(refused.status).send(refused.body);
     const { name, rootPath, gitUrl, projectId, channel, actor, autoCapture } = parsed.data;
+    // (DES-PM-001 Q-PM2) Re-pointing an existing repo id at another checkout keeps its projects and tracker links.
+    const repointed = await reRegisterRefusal(actorOf(req), name, rootPath, Boolean(gitUrl), () => adapter.listRepos());
+    if (repointed !== null) return reply.code(repointed.status).send(repointed.body);
     let repo: RepoEntry | undefined;
     let runId: string;
     try {
@@ -2913,6 +2942,8 @@ export function registerRoutes(
       problem: z.string().min(1),
       repoRef: z.string().min(1).optional(),
       excludeLinkedIssues: ExcludeLinkedIssuesSchema,
+      // (DES-PM-001 §3.2) The project the launch would be filed in: its tracker set reads the refs.
+      projectId: z.string().min(1).max(128).optional(),
     })
     .strict();
   app.post(
@@ -2926,7 +2957,7 @@ export function registerRoutes(
       // intent alone, so the preview answers "nothing appended" and says why — never a 500.
       try {
         const root = b.repoRef !== undefined ? await repoRootOf(b.repoRef) : undefined;
-        const linked = await readLinkedIssues(b.problem, root, b.repoRef, b.excludeLinkedIssues ?? []);
+        const linked = await readLinkedIssues(b.problem, root, b.repoRef, b.excludeLinkedIssues ?? [], b.projectId ?? null);
         return { issues: linked.issues, appendedChars: linked.block === null ? 0 : linked.block.length + 2 };
       } catch (err) {
         req.log.warn(`linked-issue preview failed; a launch would run on the intent alone: ${message(err)}`);
@@ -3221,6 +3252,7 @@ export function registerRoutes(
     // problem, inside a marked block the deliver text takes back out. Workflow launches only: the
     // free-text planner turns sentences into units, so issue text there would become work units.
     let linkedIssues: LinkedIssue[] | undefined;
+    let linkedAddresses: RunAddress[] | undefined;
     if (b.workflow !== undefined) {
       // A retry relaunches with the earlier run's whole problem (studio sends its `problem`), daemon
       // blocks included. They are dropped before anything is read, whatever the read answers, and
@@ -3232,10 +3264,11 @@ export function registerRoutes(
       // fault (the repo list unreadable, say) launches the run on its intent alone and is logged.
       try {
         const root = b.repoRef !== undefined ? await repoRootOf(b.repoRef) : undefined;
-        const linked = await readLinkedIssues(intent, root, b.repoRef, b.excludeLinkedIssues ?? []);
+        const linked = await readLinkedIssues(intent, root, b.repoRef, b.excludeLinkedIssues ?? [], b.projectId ?? null);
         if (linked.block !== null) input.problem = `${intent.trimEnd()}\n\n${linked.block}`;
         // crew#825: an all-excluded intent appends nothing but still answers what it left out.
         if (linked.issues.length > 0) linkedIssues = linked.issues;
+        if (linked.addresses !== undefined && linked.addresses.length > 0) linkedAddresses = linked.addresses;
       } catch (err) {
         req.log.warn(`linked-issue resolution failed; launching on the intent alone: ${message(err)}`);
       }
@@ -3354,6 +3387,24 @@ export function registerRoutes(
       }
       if (b.retryOf !== undefined) retryIndex.set(runId, b.retryOf);
       if (revisesPr !== undefined) retryIndex.setRevisesPr(runId, revisesPr);
+      // (DES-PM-001 §3.2, §4) The issues this run addresses, as its tracker set resolved them: delivery links them
+      // back, the deliver gate's actions are offered for them, and the projection draws the trail.
+      if (linkedAddresses !== undefined && runtime.trackerAddresses !== undefined) {
+        // Retried: a run that addresses issues but has no record of them would deliver and project as if it did not.
+        for (let attempt = 1; ; attempt++) {
+          try {
+            await runtime.trackerAddresses.record(runId, linkedAddresses, { projectId: b.projectId ?? null, repoId: b.repoRef ?? null });
+            runtime.trackerProjector?.changed();
+            break;
+          } catch (err) {
+            if (attempt >= 3) {
+              req.log.error(`[trackers] the issues run ${runId} addresses could not be recorded after ${attempt} attempts: ${message(err)}`);
+              break;
+            }
+            await new Promise((r) => setTimeout(r, 200 * attempt));
+          }
+        }
+      }
       if (b.campaignId !== undefined) groupIndex.set(runId, { campaignId: b.campaignId });
       else if (b.groupLabel !== undefined) groupIndex.set(runId, { label: b.groupLabel });
       if (b.projectId !== undefined) {
@@ -3748,9 +3799,12 @@ export function registerRoutes(
       const reports = await seatReports(run);
       // crew#1192: the QE check the deliver gate reads, so a required QE that passed says so.
       const qeAcceptance = await qeAcceptanceCheckFor(run);
+      // (DES-PM-001 §6 step 3) Each addressed issue links back in its tracker's own form.
+      const trackerRefs = ((await runtime.trackerAddresses?.of(id).catch(() => [])) ?? []).map((a) => ({ system: a.system, ref: a.ref, ...(a.asked !== undefined ? { asked: a.asked } : {}) }));
       // The run's preset or workflow NAME, as the engine recorded it (seam X2).
       const text = composeDeliverText(
         factsFromRun(decorateRun(run), runUrlFor(configuredPublicOrigin(), id), {
+          ...(trackerRefs.length > 0 ? { trackerRefs } : {}),
           workflowId: runIdentityOf(run).name,
           revisesPr: retryIndex.revisesPrFor(id) ?? null,
           ...(followUps !== undefined ? { followUps } : {}),
@@ -3926,10 +3980,13 @@ export function registerRoutes(
             }
             const followUps = await evaluatorFollowUps(run);
             const reports = await seatReports(run);
+            // (DES-PM-001 §6 step 3) The post-hoc PR links back in each tracker's own form, as the deliver phase's does.
+            const trackerRefs = ((await runtime.trackerAddresses?.of(id).catch(() => [])) ?? []).map((a) => ({ system: a.system, ref: a.ref, ...(a.asked !== undefined ? { asked: a.asked } : {}) }));
             result = await deliverExec(workdir, s.problem ?? undefined, {
               runId: id,
               apiOrigin: origin,
               facts: factsFromRun(run, runUrlFor(configuredPublicOrigin(), id), {
+                ...(trackerRefs.length > 0 ? { trackerRefs } : {}),
                 workflowId: workflowName,
                 revisesPr: revisesPr === null ? null : { number: revisesPr.number, url: revisesPr.url },
                 ...(followUps !== undefined ? { followUps } : {}),
@@ -4702,7 +4759,7 @@ export function registerRoutes(
     try {
       const rules = (await considerations.inForceFor(scope?.projectId ?? null)).rules;
       mcpTools = await chatMcpToolsFor(runtime.mcp);
-      knowledgeBlock = await chatKnowledgeFor(runtime.dataGate, scope?.projectId ?? null);
+      knowledgeBlock = await chatKnowledgeFor(runtime.dataGate, scope?.projectId ?? null, (scope?.repos ?? []).map((r) => r.id));
       // crew#1020: a project/everything chat must see repos attached since open. Admission was
       // under this scope KIND and the kind stays the same, so do not re-run seat admission.
       const scopeRequest = chatScopes.requestOf(id);
@@ -9362,6 +9419,35 @@ export function registerRoutes(
     audit,
     actorOf,
   });
+  // DES-PM-001 §3.3: tracker links (human-only), on the PM source's registry entry, projected into estate.
+  registerTrackerRoutes(app, {
+    ...(runtime.mcpRegistryStore !== undefined ? { store: runtime.mcpRegistryStore } : {}),
+    ...(runtime.dataGate !== undefined ? { pm: runtime.dataGate.pm } : {}),
+    projects: {
+      get: (id) => adapter.projectGet(id),
+      repos: (id) => repoMembersOf(id),
+      ofRepo: (id) => adapter.memberProjects('crew.repo', id),
+      allRepos: async () => (await adapter.listRepos()).map((r) => r.id),
+    },
+    audit,
+    actorOf,
+    ...(runtime.trackerProjector !== undefined ? { projection: runtime.trackerProjector.projection, changed: (_source: string, trackerId: string) => runtime.trackerProjector?.changed(trackerId) } : {}),
+  });
+  // DES-PM-001 §5: governed actions on a run's issues (comment, transition), human-only, asked every time in v1.
+  registerTrackerActionRoutes(app, {
+    ...(runtime.mcpRegistryStore !== undefined ? { store: runtime.mcpRegistryStore } : {}),
+    ...(runtime.dataGate !== undefined ? { pm: runtime.dataGate.pm } : {}),
+    ...(runtime.trackerAddresses !== undefined ? { addresses: runtime.trackerAddresses } : {}),
+    runScope: async (runId) => {
+      const run = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
+      if (run === undefined) return null;
+      const projectId = projects.index.projectOf(runId) ?? (await adapter.memberProjects('crew.run', runId).catch(() => []))[0] ?? null;
+      return { projectId, repoId: run.session.repo_ref ?? null };
+    },
+    members: repoMembersOf,
+    audit,
+    actorOf,
+  });
   // DES-KNOWLEDGE-DATA-001 §10 (B4): profile a source into data-shape proposals, and the Knowledge map (both human-only).
   registerShapeRoutes(app, {
     ...(runtime.mcp !== undefined ? { registry: runtime.mcp } : {}),
@@ -9370,6 +9456,12 @@ export function registerRoutes(
     repos: () => adapter.listRepos(),
     audit,
     actorOf,
+    ...(runtime.dataGate !== undefined
+      ? {
+          trackers: async () => (await runtime.dataGate!.pm.entries()).flatMap((e) => e.trackers.map((t) => ({ id: t.id, source: e.name, key: t.key, label: t.label }))),
+          projects: async () => (await adapter.projectList()).map((p) => ({ id: p.id, name: p.name })),
+        }
+      : {}),
   });
 
   // ── The wicked-interactive bridge, reverse-proxied (DES-MERGE-001 §5.3/§7.2) ──

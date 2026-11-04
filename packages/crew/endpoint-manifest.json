@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.186.0",
+  "apiTypesVersion": "0.187.0",
   "endpoints": [
     {
       "method": "GET",
@@ -1165,6 +1165,7 @@
       "responseType": "{ removed: string }",
       "statusCodes": [
         200,
+        403,
         404,
         500,
         502,
@@ -1179,6 +1180,7 @@
       "statusCodes": [
         200,
         400,
+        403,
         404,
         503
       ]
@@ -1191,6 +1193,7 @@
       "statusCodes": [
         200,
         400,
+        403,
         404,
         501,
         502,
@@ -2247,6 +2250,32 @@
       ]
     },
     {
+      "method": "GET",
+      "path": "/api/v1/runs/:id/tracker-actions",
+      "requestType": null,
+      "responseType": "RunTrackerIssuesResponse",
+      "statusCodes": [
+        200,
+        403,
+        404,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/:id/tracker-actions",
+      "requestType": "TrackerActionBody",
+      "responseType": "TrackerActionResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        503
+      ]
+    },
+    {
       "method": "POST",
       "path": "/api/v1/runs/:id/units/:ord/inspect",
       "requestType": null,
@@ -2878,6 +2907,20 @@
     },
     {
       "method": "GET",
+      "path": "/api/v1/sources/:name/trackers",
+      "requestType": null,
+      "responseType": "SourceTrackersResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/api/v1/standing-orders",
       "requestType": null,
       "responseType": "StandingOrdersState",
@@ -3089,6 +3132,58 @@
         409,
         500,
         501
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/tracker-links",
+      "requestType": null,
+      "responseType": "TrackerLinksResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/tracker-links",
+      "requestType": "CreateTrackerLinkBody",
+      "responseType": "TrackerLink",
+      "statusCodes": [
+        200,
+        201,
+        400,
+        403,
+        404,
+        409,
+        422,
+        503
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/tracker-links/:id",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": [
+        204,
+        403,
+        404,
+        503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/tracker-links/issues",
+      "requestType": null,
+      "responseType": "TrackerIssuesResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        503
       ]
     },
     {

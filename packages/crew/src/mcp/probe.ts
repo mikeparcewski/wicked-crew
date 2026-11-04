@@ -21,7 +21,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
 import type { McpAuthConfig, McpRestMapping, McpToolAnnotations, McpUpstreamKind } from '../core/types.js';
-import type { ToolboxSourceEntry } from '../knowledge/registry/entry.js';
+import type { PmMarker, ToolboxSourceEntry } from '../knowledge/registry/entry.js';
 import { addressPolicyOf, type AddressPolicy, boundFetch, type DialOptions, DialRedirectRefusedError, DialRefusedError, type DialRefusalCode } from '../sources/dialer.js';
 import { SourceQueryError } from '../sources/drivers/types.js';
 import { describeSource, type SourceDescription, type SqlSourceConfig } from '../sources/kinds.js';
@@ -67,6 +67,8 @@ export interface McpUpstreamConfig {
    * `sql`), which is what every existing consumer reads.
    */
   entry?: ToolboxSourceEntry | null;
+  /** (DES-PM-001 §3) `mcp-http` / `mcp-stdio` only: a project-management system's own MCP server. */
+  pm?: PmMarker | null;
 }
 
 export interface ProbedTool {
@@ -154,7 +156,8 @@ export function transportFor(config: McpUpstreamConfig, secret: string | null, d
  * Postgres login's privilege report). It has no tools. Every string is scrubbed of the secret.
  */
 async function probeSourceKind(config: McpUpstreamConfig, secret: string | null, dial: DialOptions): Promise<ProbeResult> {
-  const secrets = secret === null ? [] : [secret];
+  // The value as sent and JSON-escaped: a server can echo either in its errors, its stderr or its tool metadata.
+  const secrets = secret === null ? [] : [...new Set([secret, JSON.stringify(secret).slice(1, -1)])];
   try {
     const source = await describeSource(config, secret, dial);
     const name = config.kind === 'graphql' ? 'graphql' : (config.sql?.driver ?? 'sql');
@@ -219,7 +222,8 @@ export const probeMcpServer: Prober = async (config, secret) => probeMcpServerWi
 export async function probeMcpServerWithin(config: McpUpstreamConfig, secret: string | null, budget: ProbeBudget, dial: DialOptions = {}): Promise<ProbeResult> {
   if (config.kind === 'rest') return probeRestServer(config, secret);
   if (config.kind === 'sql' || config.kind === 'graphql') return probeSourceKind(config, secret, dial);
-  const secrets = secret === null ? [] : [secret];
+  // The value as sent and JSON-escaped: a server can echo either in its errors, its stderr or its tool metadata.
+  const secrets = secret === null ? [] : [...new Set([secret, JSON.stringify(secret).slice(1, -1)])];
   const end = budget.now() + budget.budgetMs;
   let lastTail = '';
   for (let attempt = 0; ; attempt++) {

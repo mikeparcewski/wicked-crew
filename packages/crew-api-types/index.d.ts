@@ -260,6 +260,12 @@ export interface HealthCapabilities {
    */
   linkedIssuesExclude?: boolean;
   /**
+   * (api-types 0.187.0, DES-PM-001 PM-1) This daemon serves project-management sources: the `pm` registration field,
+   * the human-only `/tracker-links` routes (and `/tracker-links/issues`), `GET /sources/:name/trackers`, the tracker
+   * set in linked issues (`LinkedIssuesPreviewBody.projectId`), and `/runs/:id/tracker-actions`. Absent = none of it.
+   */
+  trackerLinks?: boolean;
+  /**
    * Repo-bound runs get an EVIDENCE ROOT for walkthroughs (WT-W1, api-types 0.74.0): the engine
    * addon takes `LaunchOptions.evidenceRoot` (wicked-core-ts ≥ 0.7.35), so a walkthrough step on a
    * run launched now can record and pass. `GET /runs/:id/walkthrough` answers on every daemon that
@@ -6034,6 +6040,11 @@ export interface LinkedIssuesPreviewBody {
   problem: string;
   repoRef?: string;
   excludeLinkedIssues?: string[];
+  /**
+   * (api-types 0.187.0, DES-PM-001 §3.2) The project the launch is filed in: with a registered PM source, a
+   * reference resolves only through the tracker set of this project and `repoRef`.
+   */
+  projectId?: string;
 }
 
 /** The `POST /linked-issues/preview` 200 body: the same reading `POST /runs` does, nothing launched. */
@@ -6064,6 +6075,23 @@ export interface LinkedIssue {
   chars?: number;
   /** (crew#825; additive) `true` when the launch left this ref out (`excludeLinkedIssues`). */
   excluded?: true;
+  /**
+   * (api-types 0.187.0, DES-PM-001 §3.2, Q-PM5) Read through a registered PM source: the tracker that admitted it,
+   * that source's registry name, and its system. Absent on the daemon's `gh` path (no GitHub source registered).
+   */
+  trackerId?: string;
+  source?: string;
+  system?: PmSystem;
+  /**
+   * (api-types 0.187.0) Why it was not read, as a code: `not_linked` (no tracker of the run's project or repos has
+   * it), `ambiguous` (two trackers in the set share the key: pick one, which writes `<source>:<KEY-N>`), `hidden`
+   * (the source's Agents switches keep this project out), `query_off`, `unavailable` (the vendor could not be
+   * read), `not_found`. To pick among `ambiguous` candidates, write `<source>:<KEY-N>` (two sources) or
+   * `<source>@<tenant>:<KEY-N>` (two sites behind one source).
+   */
+  code?: 'not_linked' | 'ambiguous' | 'hidden' | 'query_off' | 'unavailable' | 'not_found';
+  /** (api-types 0.187.0) `ambiguous` only: the trackers that share the key, for the composer to pick from. */
+  candidates?: Array<{ source: string; tenant: string; tenantLabel?: string; key: string; trackerId: string }>;
 }
 
 /** The `POST /runs` 201 body. `linkedIssues` (crew#627, additive) is present when the intent of a
@@ -12497,6 +12525,35 @@ export interface McpServerConfigBody {
    * response, log, audit entry or file.
    */
   secret?: string;
+  /**
+   * (api-types 0.187.0, DES-PM-001 §3) `mcp-http` and `mcp-stdio` only: this server is a project-management
+   * system's own MCP server (GitHub's `github-mcp-server`, the Atlassian remote server). Its calls then go through
+   * crew's data gate with resource bindings (§3.1), and trackers of it can be linked to projects and repos. A
+   * human operator's only, at the preview and at the save (else 403 `pm_source_human_only`). PM-1 registers `github`
+   * and `jira`; a re-save of a PM source must name the same system (409 `pm_marker_fixed`).
+   */
+  pm?: { system: 'github' | 'jira' };
+}
+
+/** (api-types 0.187.0, DES-PM-001 §1) The project-management system a registry entry is. PM-1 registers `github` and `jira`. */
+export interface McpPmMarker {
+  system: PmSystem;
+}
+
+/** (api-types 0.187.0) A project-management system. `gitlab` and `ado` are wave PM-2: a registration naming them is a 400 today. */
+export type PmSystem = 'github' | 'jira' | 'gitlab' | 'ado';
+
+/**
+ * (api-types 0.187.0, DES-PM-001 §3.1) A PM tool's resource binding as crew holds it: crew's binding for the tool
+ * (`policy`, e.g. `jira/getJiraIssue@1`), bound to the schema it was reviewed against. In force only while both
+ * match: a changed schema, or a new binding-policy version, makes the tool unavailable to agents until a person
+ * saves the server again. `null` = crew has no binding for this tool, so no agent may use it.
+ */
+export interface McpToolBinding {
+  policy: string;
+  schemaHash: string;
+  /** Whether it is in force now (the saved schema is the reviewed one and the policy is crew's current one). */
+  inForce: boolean;
 }
 
 /**
@@ -12554,6 +12611,8 @@ export interface McpTool {
   observedSchemaHash: string;
   /** (api-types 0.183.0) The disclosure class in force; `null` = none reviewed for the saved schema. */
   disclosure: McpToolDisclosure | null;
+  /** (api-types 0.187.0) PM entries only: the tool's resource binding; `null` = unbound, so unavailable to agents. */
+  binding?: McpToolBinding | null;
 }
 
 export interface McpServer {
@@ -12602,6 +12661,13 @@ export interface McpServer {
   policyVersion?: string;
   /** (api-types 0.183.0) Data sources only: the agent switches (defaults filled in). */
   agents?: McpSourceAgents;
+  /** (api-types 0.187.0, DES-PM-001) A project-management system's server: its system. */
+  pm?: McpPmMarker;
+  /**
+   * (api-types 0.187.0) PM entries only: the trackers linked to projects or repos, with their links (read-only
+   * here; written only through `POST`/`DELETE /tracker-links`).
+   */
+  trackers?: TrackerLink[];
   /**
    * (api-types 0.174.0) `mcp-http` and `rest` only: the ranges confirmed for this server's
    * connections. A server saved before 0.174.0 shows what crew re-derived for it: the IP literal or
@@ -12657,6 +12723,8 @@ export interface McpServerAgentView {
   tools: Array<{ name: string; subject: string; class: McpToolClass; disclosure: McpToolDisclosure | null; enabled: boolean; status: McpToolStatus }>;
   /** Data sources only. */
   agents?: { see: boolean; query: boolean };
+  /** (api-types 0.187.0) PM entries only. */
+  pm?: McpPmMarker;
 }
 
 /** (api-types 0.183.0) `GET /mcp/servers?view=agent`, and `GET /mcp/servers` for any non-human actor. */
@@ -12741,6 +12809,8 @@ export interface McpPreviewTool {
    * class while its schema is unchanged, crew's own class for a tool of crew's Toolbox configuration, else `null`.
    */
   disclosure: McpToolDisclosure | null;
+  /** (api-types 0.187.0) PM entries only: the binding a save gives the tool; `null` = crew has none, so agents never get it. */
+  binding?: { policy: string } | null;
 }
 
 /**
@@ -13655,8 +13725,15 @@ export interface KnowledgeShapeRecord {
 /** (api-types 0.186.0) A node of the Knowledge map. `key` is `<store>:<id>` (`source:`, `repo:`, `knowledge:`, `estate:`). */
 export interface KnowledgeMapNode {
   key: string;
-  kind: 'source' | 'table' | 'shape' | 'code' | 'repo' | 'knowledge';
+  /**
+   * (api-types 0.187.0, DES-PM-001 §3.4) `tracker`: a linked tracker; `project`: a studio project a tracker is
+   * `tracked_in`; `issue`: an issue a run addresses (an `issue_ref`, only its key); `run`: the job that addresses it;
+   * `pr`: the pull request that run delivered (`closes` the issue; `repo` names its repo).
+   */
+  kind: 'source' | 'table' | 'shape' | 'code' | 'repo' | 'knowledge' | 'tracker' | 'project' | 'issue' | 'run' | 'pr';
   label: string;
+  /** (api-types 0.187.0) A tracker node's PM source (registry name) and key. */
+  tracker?: { source: string; key: string };
   /** A table's source name. */
   source?: string;
   /** A code entity's repo id. */
@@ -13697,6 +13774,171 @@ export interface KnowledgeMapResponse {
   skipped: number;
   truncated: boolean;
   notes: string[];
+}
+
+// ── Project-management trackers (DES-PM-001 rev 4, PM-1; api-types 0.187.0) ───────────────────────────────
+
+/**
+ * What a tracker link points at: a studio project (`proj_…`) or a registered repo. A tracker linked to a repo is in
+ * the tracker set of every project that repo belongs to, and of any run that targets it; a tracker linked to a
+ * project reaches only units filed in that project, never another project through a shared repo (§3.2).
+ */
+export type TrackerLinkTarget = { kind: 'project'; id: string } | { kind: 'repo'; id: string };
+
+/**
+ * One link of one tracker (§3.3). A tracker is (source, tenant, key): one project inside one tenant of a registered PM
+ * system (a Jira project on one site, a GitHub repo's issues). Ids are derived: `trk_` + 16 hex of
+ * sha256(source id, tenant, key) and `tl_` + 16 hex of sha256(tracker id, kind, id), so linking twice is one link.
+ */
+export interface TrackerLink {
+  /** `tl_<hash16>` */
+  id: string;
+  /** `trk_<hash16>` */
+  trackerId: string;
+  /** The PM source's registry name, for display. */
+  source: string;
+  /** The PM source's registry id. */
+  sourceId: string;
+  system: PmSystem;
+  /** Jira: the site's `cloudId`; GitHub: the host (`github.com`). */
+  tenant: string;
+  /** The tenant as a person reads it (a Jira site's name or URL host); absent when not known. */
+  tenantLabel?: string;
+  /** Jira: the project key (`PROJA`); GitHub: `owner/repo`. */
+  key: string;
+  /** The vendor's name for it, at most 120 characters. Vendor text: render it as text. */
+  label: string;
+  target: TrackerLinkTarget;
+  linkedAt: string;
+  /** The person who linked it (the actor id). */
+  linkedBy: string;
+  /** Whether estate holds the link yet (Understand follows when it lands; access follows the registry at once). */
+  projection: 'current' | 'pending' | 'failed';
+}
+
+/** `POST /tracker-links` (human-only). */
+export interface CreateTrackerLinkBody {
+  /** The PM source's registry name. */
+  source: string;
+  tenant: string;
+  key: string;
+  target: TrackerLinkTarget;
+}
+
+/**
+ * `GET /tracker-links?project=<id>`, `?repo=<id>`, or both (human-only; 403 `tracker_links_human_only` for any other
+ * actor). With both, `links` + `viaRepos` are the tracker set a run in that project targeting that repo would have.
+ */
+export interface TrackerLinksResponse {
+  target: { project?: string; repo?: string };
+  /** Linked to the target itself (the project, or with only `repo`, that repo). */
+  links: TrackerLink[];
+  /** With a project: the links of its member repos (and of `repo`, when given), each marked with the repo it comes through. */
+  viaRepos: Array<TrackerLink & { viaRepo: string }>;
+  /** With only a repo: the projects the repo is in (its links reach each of them). */
+  projects: Array<{ id: string; name: string }>;
+  /** With a project: for each PM source with a link here, whether its Agents switches let this project see / query it. */
+  agents: Array<{ source: string; see: boolean; query: boolean }>;
+}
+
+/**
+ * `GET /sources/:name/trackers?q=<text>&cursor=<c>&tenant=<t>` (human-only): one page of the projects the PM source
+ * lists NOW (a live read with the source's own credential), each with its links. `next` is the following page's
+ * cursor, `null` at the end. 503 `source_unavailable` when the vendor cannot be reached; 409 `not_a_tracker` for a
+ * source that is not a PM system.
+ */
+export interface SourceTrackersResponse {
+  name: string;
+  trackers: Array<{ tenant: string; tenantLabel?: string; key: string; label: string; links: TrackerLink[] }>;
+  next: string | null;
+}
+
+/**
+ * `GET /tracker-links/issues?project=<id>&repo=<id>&q=<text>` (human-only): for "Start a job from an issue" (§6 step 1),
+ * the issues of each tracker in the tracker set that project and repo would give a run (under the sources' Agents
+ * switches), read live through the same bindings and response projectors an agent's reads go through. `key` is the
+ * reference a launch intent takes (`PROJA-12`, `owner/repo#212`). A tracker that cannot be read says why in `error`
+ * (`query_off`, `unavailable`, `tool_unbound`) and has no issues.
+ */
+export interface TrackerIssuesResponse {
+  trackers: Array<{
+    trackerId: string;
+    source: string;
+    system: PmSystem;
+    key: string;
+    label: string;
+    tenantLabel?: string;
+    via: { kind: 'project' } | { kind: 'repo'; id: string };
+    /** Jira: the site's cloudId; GitHub: the host. */
+    tenant: string;
+    /** `ref`: the reference a launch intent takes for it (`<source>@<tenant>:KEY-N` when two trackers share the key). */
+    issues: Array<{ key: string; ref: string; title: string; state: string | null }>;
+    error?: string;
+  }>;
+}
+
+/**
+ * (DES-PM-001 §5) A governed action on an issue of a run's tracker set: a comment, a transition, or both on one card.
+ * `POST /runs/:id/tracker-actions` (human-only). Without `confirm` it does NOTHING and answers the card (exactly what
+ * would be posted, as whom, from and to which state, and the link that admits the issue) and its `actionHash`; with
+ * `confirm` equal to that hash it does exactly that. An issue outside the run's tracker set has no card: 404
+ * `issue_not_in_tracker_set`. Recorded against the run and audited `knowledge.tracker.action`.
+ */
+export interface TrackerActionBody {
+  /**
+   * Jira `PROJA-1` (`<source>:PROJA-1` or `<source>@<cloudId>:PROJA-1` picks one of several trackers with that key);
+   * GitHub `owner/repo#42` (or `#42` for the run's own repo).
+   */
+  issue: string;
+  /** The exact comment text (at most 8,000 characters). */
+  comment?: string;
+  /** The state to move it to, by name: a Jira transition's target status (`In Review`), or GitHub `closed` / `open`. */
+  transition?: string;
+  confirm?: string;
+}
+
+export interface TrackerActionCard {
+  runId: string;
+  source: string;
+  system: PmSystem;
+  tenant: string;
+  tenantLabel?: string;
+  /** The issue as the tracker names it (`PROJA-1`, `owner/repo#42`). */
+  issue: string;
+  /** The issue's title; vendor text, render it as text. `null` when it could not be read. */
+  title: string | null;
+  /** Who the tracker will say did it (the registered credential's account), `null` when it could not be read. */
+  identity: string | null;
+  comment?: string;
+  transition?: {
+    from: string | null;
+    to: string;
+    /** The states mapped to `todo` / `doing` / `done` (Jira status categories; GitHub open = todo, closed = done). */
+    mapped: { from: 'todo' | 'doing' | 'done' | null; to: 'todo' | 'doing' | 'done' | null };
+  };
+  /** The link that admits the issue for this run: to its project, or through one of its repos. */
+  admittedBy: { kind: 'project'; id: string } | { kind: 'repo'; id: string };
+}
+
+export type TrackerActionResponse =
+  | { done: false; card: TrackerActionCard; actionHash: string }
+  | {
+      done: true;
+      card: TrackerActionCard;
+      at: string;
+      /** Each part as it went; a transition after a failed comment is not attempted. */
+      results: Array<{ part: 'comment' | 'transition'; ok: boolean; error?: string }>;
+    };
+
+/**
+ * `GET /runs/:id/tracker-actions` (human-only): the issues this run addresses (resolved at launch through its tracker
+ * set) that a governed action can be proposed for, each with the link that still admits it (`null`: no longer in the
+ * run's tracker set, so no card).
+ */
+export interface RunTrackerIssuesResponse {
+  runId: string;
+  /** `ref`: the reference `POST` takes for it (`<source>@<tenant>:KEY-N` when two trackers of the run's set share the key). */
+  issues: Array<{ issue: string; ref: string; source: string; system: PmSystem; trackerId: string; admittedBy: TrackerActionCard['admittedBy'] | null }>;
 }
 
 /**

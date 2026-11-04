@@ -92,6 +92,11 @@ export type Invoker = (
    * not known without an answer; before it, nothing was sent.
    */
   onDispatch?: () => void,
+  /**
+   * (DES-PM-001 §5) Awaited once the server is connected and initialized, immediately before `tools/call`: a throw
+   * sends nothing (a governed write whose admission no longer holds). MCP servers only.
+   */
+  beforeCall?: () => Promise<void>,
 ) => Promise<UpstreamToolResult>;
 
 /**
@@ -115,7 +120,7 @@ export function classifyUpstreamError(err: unknown): UpstreamCallError {
 }
 
 /** The real invoker. */
-export const invokeMcpTool: Invoker = async (config, secret, tool, args, timeoutMs, rest = null, onDispatch) => {
+export const invokeMcpTool: Invoker = async (config, secret, tool, args, timeoutMs, rest = null, onDispatch, beforeCall) => {
   if (config.kind === 'rest') {
     // A REST tool is one pinned HTTP request, built from its allowlisted arguments (I6).
     if (rest === null) throw new UpstreamCallError('protocol', false, `${tool} has no REST mapping; test and save the server again`);
@@ -143,6 +148,7 @@ export const invokeMcpTool: Invoker = async (config, secret, tool, args, timeout
   const work = (async (): Promise<UpstreamToolResult> => {
     await client.connect(transport, sdkTimeout);
     connected = true;
+    if (beforeCall !== undefined) await beforeCall();
     onDispatch?.();
     return (await client.callTool({ name: tool, arguments: args }, undefined, sdkTimeout)) as UpstreamToolResult;
   })();

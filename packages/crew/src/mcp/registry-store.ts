@@ -22,7 +22,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
 import type { McpAuthConfig, McpHealth, McpRestMapping, McpToolAnnotations, McpToolClass, McpUpstreamKind } from '../core/types.js';
-import type { DescriptorVersion, SourceAgentAccess, SourceRuntime, SourceTls, ToolboxSourceDocument, ToolDisclosure } from '../knowledge/registry/entry.js';
+import type { DescriptorVersion, PmMarker, RetiredTracker, SourceAgentAccess, SourceRuntime, SourceTls, StoredTracker, ToolBinding, ToolboxSourceDocument, ToolDisclosure } from '../knowledge/registry/entry.js';
 import { crewStateHome } from '../projects/state-home.js';
 import type { AddressPolicy } from '../sources/dialer.js';
 import type { SqlSourceConfig } from '../sources/kinds.js';
@@ -60,6 +60,11 @@ export interface McpToolRecord {
    * the tool to no agent.
    */
   disclosure?: ToolDisclosure | null;
+  /**
+   * (DES-PM-001 §3, §3.1) PM entries only: crew's resource binding for the tool, bound to the schema hash it was
+   * reviewed against. Absent/`null` = unbound: the gate offers the tool to no agent.
+   */
+  binding?: ToolBinding | null;
 }
 
 export interface McpServerRecord {
@@ -116,6 +121,15 @@ export interface McpServerRecord {
    * off again by a descriptor change and by a restore.
    */
   agents?: SourceAgentAccess;
+  /**
+   * (DES-PM-001 §3) `mcp-http` / `mcp-stdio` only: this entry is a project-management system's own MCP server. Set at
+   * registration by a human operator. Its calls go through the data gate (resource bindings), never the plain path.
+   */
+  pm?: PmMarker;
+  /** (DES-PM-001 §3) PM entries only: the trackers linked to projects or repos. Written only by the tracker-links routes. */
+  trackers?: StoredTracker[];
+  /** (DES-PM-001 §3.4) PM entries only: trackers whose last link went, kept until estate takes their empty generation. */
+  retired?: RetiredTracker[];
   enabled: boolean;
   health: McpHealth;
   registeredAt: string;

@@ -183,6 +183,13 @@ export interface DeliverTextFacts {
    *  ({@link reportsFromOutputs}). `[]` = read, nothing reportable; absent = the outputs could not
    *  be read (a definition-time composition, or an adapter without transcripts) — said in the body. */
   reports?: DeliverReportFact[];
+  /**
+   * (DES-PM-001 §6 step 3) The issues the run addresses, as its launch resolved them through a registered PM source
+   * (the run's `addresses` record). Each tracker's own form links back: a Jira key leads the PR title (Jira links a
+   * pull request whose title names the key) and rides a `Tracks:` line; a GitHub issue keeps `Fixes #N` / `Refs:`,
+   * which the intent's own words decide. Absent = none recorded.
+   */
+  trackerRefs?: Array<{ system: 'github' | 'jira' | 'gitlab' | 'ado'; ref: string; asked?: string }>;
 }
 
 export interface DeliverText {
@@ -551,8 +558,18 @@ export function composeDeliverText(raw: DeliverTextFacts, links: IssueRefs = iss
   // and a cut through a home path would no longer match it (codex on crew#887). The output pass
   // below stays as the backstop.
   const f = redactFacts(raw);
-  const title = deliverTitle(intentOnly(f.intent), f.runId, f.workflowId);
-  const { fixes, refs } = links;
+  const jiraKeys = [...new Set((f.trackerRefs ?? []).filter((t) => t.system === 'jira' && /^[A-Z][A-Z0-9_]{0,19}-[1-9][0-9]{0,9}$/.test(t.ref)).map((t) => t.ref))];
+  const bare = deliverTitle(intentOnly(f.intent), f.runId, f.workflowId);
+  // A Jira key the title does not already name leads it, so a cut at the title's bound never drops it.
+  const missing = jiraKeys.filter((k) => !new RegExp(`(?<![\\w-])${k}(?![\\w-])`).test(bare));
+  const title = missing.length === 0 ? bare : boundedTitle(`${missing.join(' ')} ${bare}`);
+  // (DES-PM-001 §6 step 3) A bare `#N` the launch resolved through the run repo's linked GitHub tracker is THAT
+  // tracker's issue: it links back as `owner/repo#N`, so a tracker in another repository is named, never guessed.
+  // Keyed by the reference as the intent spelled it, so `#42` and `owner/other#42` never stand in for each other.
+  const viaTracker = new Map((f.trackerRefs ?? []).filter((t) => t.system === 'github' && t.asked !== undefined && t.asked.startsWith('#') && /^[\w.-]+\/[\w.-]+#\d+$/.test(t.ref)).map((t) => [t.asked!, t.ref]));
+  const canon = (r: string): string => (r.startsWith('#') ? (viaTracker.get(r) ?? r) : r);
+  const fixes = links.fixes.map(canon);
+  const refs = links.refs.map(canon);
   const intent = intentOnly(f.intent).replace(/\r\n?/g, '\n').replace(CONTROL_CHARS, ' ').trim();
   const out: string[] = [];
 
@@ -566,6 +583,7 @@ export function composeDeliverText(raw: DeliverTextFacts, links: IssueRefs = iss
     }
     out.push('');
   }
+  if (jiraKeys.length > 0) out.push(`Tracks: ${jiraKeys.join(', ')} (Jira)`, '');
 
   out.push('## Run', '');
   // The label is the same one-line code span as the unlinked form — a caller-supplied id cannot
@@ -1151,6 +1169,8 @@ export function factsFromRun(
     /** crew#1192: the run's QE acceptance check as delivery reads it (`qeAcceptanceCheckFor`), when
      *  the caller read it: a satisfied `required` check with a verdict reads "QE acceptance passed". */
     qeAcceptance?: { status?: string; satisfied: boolean; verdictId: string | null; reviewer: string | null } | null;
+    /** (DES-PM-001) The issues the run's launch resolved through a registered PM source. */
+    trackerRefs?: DeliverTextFacts['trackerRefs'];
   } = {},
 ): DeliverTextFacts {
   const s = view.session;
@@ -1195,6 +1215,7 @@ export function factsFromRun(
     ...(resolved.followUps !== undefined ? { followUps: resolved.followUps } : {}),
     ...(resolved.reports !== undefined ? { reports: resolved.reports } : {}),
     ...(assurance !== undefined ? { assurance } : {}),
+    ...(resolved.trackerRefs !== undefined && resolved.trackerRefs.length > 0 ? { trackerRefs: resolved.trackerRefs } : {}),
   };
 }
 

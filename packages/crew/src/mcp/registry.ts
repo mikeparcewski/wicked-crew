@@ -46,8 +46,11 @@ import type {
   McpUpstreamKind,
   McpServerAgentView,
   McpRegistryRestoreResponse,
+  TrackerLink,
 } from '../core/types.js';
-import { agentAccessOf, effectiveDisclosure, legacyEntryId, proposedDisclosure, type ToolboxSourceEntry, type ToolDisclosure, type ToolDisclosureClass } from '../knowledge/registry/entry.js';
+import { agentAccessOf, effectiveDisclosure, hasPmMarker, legacyEntryId, pmOf, type PmSystem, proposedDisclosure, type ToolboxSourceEntry, type ToolDisclosure, type ToolDisclosureClass, trackersOf } from '../knowledge/registry/entry.js';
+import { bindingFor, bindingInForce, bindingOnSave } from '../knowledge/trackers/bindings.js';
+import { PROJECTION_UNKNOWN, type TrackerProjectionLookup, trackerLinkViews } from '../knowledge/trackers/view.js';
 import { checkSourceDocument, DeploymentPolicyError, policyVersionOf } from '../knowledge/registry/policy.js';
 import { canonicalJson, deriveToolClass, effectiveToolClass, ESTATE_SERVER, type HashedRestTarget, type HashedToolShape, MCP_SERVER_NAME_RE, mcpSubject, parseMcpSubject, sha256Hex, toolSchemaHash } from './classify.js';
 import type { McpUpstreamConfig, ProbedTool, ProbeResult, Prober } from './probe.js';
@@ -99,6 +102,8 @@ export interface McpCallTarget {
    * target was changed outside a save): refused until the operator previews and saves it again.
    */
   resaveRequired: boolean;
+  /** (DES-PM-001 §3) The server is a PM entry: its calls are the data gate's, never the plain upstream path. */
+  pm?: boolean;
 }
 
 /** A registered, enabled tool, as the tool list judges it (`callableTools`). */
@@ -176,6 +181,10 @@ export class McpRegistry {
    * belongs to a later descriptor still needs a describe). A listener's failure never fails the restore.
    */
   onSourceChanged: ((name: string) => void) | null = null;
+  /** (DES-PM-001 §3.4) Whether estate holds each tracker's links yet; the daemon points it at the tracker projector. */
+  trackerProjection: TrackerProjectionLookup = PROJECTION_UNKNOWN;
+  /** (DES-PM-001 §3.4) Called once a restore has landed (the daemon points it at the tracker projector). */
+  onRestored: (() => void) | undefined;
 
   constructor(private readonly deps: McpRegistryDeps) {
     this.now = deps.now ?? Date.now;
@@ -273,7 +282,7 @@ export class McpRegistry {
       return w !== undefined && w.schemaHash === t.schemaHash ? w.classOverride : null;
     };
     // (DES-KNOWLEDGE-DATA-001 §5.1) The disclosure class a save gives each tool when the body names none.
-    const reviewed = (t: { name: string; schemaHash: string }): ToolDisclosureClass | null => disclosureOnSave(t, was(t.name), undefined, config.kind)?.class ?? null;
+    const reviewed = (t: { name: string; schemaHash: string }): ToolDisclosureClass | null => disclosureOnSave(t, was(t.name), undefined, config.kind, config.pm?.system ?? null)?.class ?? null;
     return {
       previewHash,
       expiresAt: new Date(expiresAt).toISOString(),
@@ -290,6 +299,7 @@ export class McpRegistry {
         schemaHash: t.schemaHash,
         enabledOnSave: enabledOnSave(was(t.name), t),
         disclosure: reviewed(t),
+        ...(config.pm != null ? { binding: bindingOnSave(config.pm.system, t) === null ? null : { policy: bindingOnSave(config.pm.system, t)!.policy } } : {}),
         ...(config.kind === 'rest' ? { rest: t.rest ?? null } : {}),
       })),
       diff: existing === undefined ? null : diffTools(existing.tools, tools),
@@ -346,10 +356,23 @@ export class McpRegistry {
     // whose registry write then failed used to leave the NEW secret behind under an unchanged row:
     // the credential its running calls use had silently changed, which is a worse outcome than the
     // orphan this was written to prevent. `null` = no prior value, and then the rollback deletes.
+    // (DES-PM-001 §3) A save that would drop or change a PM source's marker is refused BEFORE any credential is
+    // written (the mutation refuses it again, under the store's chain, for a marker set meanwhile).
+    const existing = (await this.readFile()).servers.find((s) => s.name === held.config.name);
+    const existingPm = existing === undefined ? null : pmOf(existing);
+    if (existingPm !== null && (held.config.pm == null || held.config.pm.system !== existingPm.system)) {
+      throw new McpRegistryError(409, 'pm_marker_fixed', `${held.config.name} is registered as a ${existingPm.system} project-management source; save it with pm.system "${existingPm.system}", or remove it and register it again`);
+    }
     const prior = held.secret === null ? null : await this.deps.secrets.get(held.config.name);
     if (held.secret !== null) await this.deps.secrets.set(held.config.name, held.secret);
     const saved = await this.restoreSecretOnFailure(held.config.name, held.secret !== null, prior, () => this.mutate(async (file) => {
       const prior = file.servers.find((s) => s.name === held.config.name);
+      // (DES-PM-001 §3) A PM entry stays the PM system it was registered as: a re-save that drops the marker, or
+      // names another system, would hand its tools to the plain path (or its links to another vendor).
+      const priorPm = prior === undefined ? null : pmOf(prior);
+      if (priorPm !== null && (held.config.pm == null || held.config.pm.system !== priorPm.system)) {
+        throw new McpRegistryError(409, 'pm_marker_fixed', `${held.config.name} is registered as a ${priorPm.system} project-management source; save it with pm.system "${priorPm.system}", or remove it and register it again`);
+      }
       // (G2) Re-judged against the record as it is NOW, inside the write: a confirmation the
       // preview inherited from a server since removed or re-pointed does not carry over.
       if (held.egress !== null) {
@@ -370,7 +393,9 @@ export class McpRegistry {
           observedSchemaHash: t.schemaHash,
           present: true,
           ...(t.rest != null ? { rest: t.rest } : {}),
-          disclosure: disclosureOnSave(t, was, disclosures[t.name], held.config.kind),
+          disclosure: disclosureOnSave(t, was, disclosures[t.name], held.config.kind, held.config.pm?.system ?? null),
+          // (DES-PM-001 §3) A PM tool's binding: crew's current policy, bound to the schema this save registers.
+          ...(held.config.pm != null ? { binding: bindingOnSave(held.config.pm.system, t) } : {}),
         };
       });
       for (const old of prior?.tools ?? []) {
@@ -379,7 +404,7 @@ export class McpRegistry {
       const origin = held.egress?.origin ?? null;
       // The confirmed origin is kept while the server still goes there: named now, or by an earlier save.
       const allowedOrigin = origin !== null && (allowOrigin === origin || prior?.allowedOrigin === origin) ? origin : null;
-      const { address, sql, viewsAllowed, entry, id: _unsavedId, ...config } = held.config;
+      const { address, sql, viewsAllowed, entry, id: _unsavedId, pm: heldPm, ...config } = held.config;
       void _unsavedId;
       // (DES-KNOWLEDGE-DATA-001 §5.1) A database source is stored as its Toolbox document (no `sql`): the read
       // path projects it. A re-save keeps the entry's id; a new name gets a new one.
@@ -394,6 +419,7 @@ export class McpRegistry {
         ...config,
         ...stored,
         ...(address != null ? { address } : {}),
+        ...(heldPm != null ? { pm: { system: heldPm.system } } : {}),
         ...(viewsAllowed != null ? { viewsAllowed } : {}),
         ...(allowedOrigin !== null ? { allowedOrigin } : {}),
         enabled: prior?.enabled ?? true,
@@ -410,6 +436,17 @@ export class McpRegistry {
       if (prior !== undefined && prior.agents !== undefined && isSourceRecord(prior) && isSourceRecord(record)) {
         const was = agentAccessOf(prior);
         record.agents = { ...was, query: was.query && sameDescriptor };
+      }
+      // (DES-PM-001 §3) A PM entry under the source safeguards: a re-save keeps its switches and its links, and turns
+      // "query" off when its execution descriptor changed (no issue is read until a person turns it on again).
+      if (prior !== undefined && priorPm !== null) {
+        const samePm = pmDescriptorHash(configOf(prior)) === pmDescriptorHash(configOf(record));
+        if (prior.agents !== undefined) {
+          const was = agentAccessOf(prior);
+          record.agents = { ...was, query: was.query && samePm };
+        }
+        if (prior.trackers !== undefined) record.trackers = structuredClone(prior.trackers);
+        if (prior.retired !== undefined) record.retired = structuredClone(prior.retired);
       }
       file.servers = [...file.servers.filter((s) => s.name !== record.name), record];
       // The description lands INSIDE the record's own write (the store serializes mutations), so a
@@ -530,10 +567,11 @@ export class McpRegistry {
   }
 
   /** What a held preview would register: its server name and each tool's schema hash (S6). */
-  peekPreview(previewHash: string): { name: string; tools: Array<{ name: string; schemaHash: string }>; egress: McpRestEgress | null; target: HashedRestTarget | null; address: AddressPolicy | null } | null {
+  peekPreview(previewHash: string): { name: string; tools: Array<{ name: string; schemaHash: string }>; egress: McpRestEgress | null; target: HashedRestTarget | null; address: AddressPolicy | null; pm: { system: PmSystem } | null } | null {
     const held = this.previews.get(previewHash);
     if (held === undefined || held.expiresAt <= this.now()) return null;
     return {
+      pm: held.config.pm ?? null,
       address: held.config.address ?? null,
       name: held.config.name,
       tools: held.tools.map((t) => ({ name: t.name, schemaHash: t.schemaHash })),
@@ -708,6 +746,7 @@ export class McpRegistry {
       id: entryId(s),
       registered: s.enabled && t !== undefined && t.enabled && statusOf(s, t) === 'registered',
       resaveRequired: t !== undefined && !targetBound(s, t),
+      ...(hasPmMarker(s) ? { pm: true } : {}),
     };
   }
 
@@ -719,7 +758,8 @@ export class McpRegistry {
   async callableTools(): Promise<McpCallableTool[]> {
     const out: McpCallableTool[] = [];
     for (const s of (await this.readFile()).servers) {
-      if (!s.enabled) continue;
+      // (DES-PM-001 §3.1) A PM entry's tools are the gate's to list, bound to the unit's tracker set; never raw.
+      if (!s.enabled || hasPmMarker(s)) continue;
       for (const t of s.tools) {
         if (!t.enabled || statusOf(s, t) !== 'registered') continue;
         out.push({
@@ -784,6 +824,8 @@ export class McpRegistry {
   async appTool(server: string, tool: string): Promise<{ config: McpUpstreamConfig; tool: McpToolRecord; bound: boolean } | null> {
     const s = (await this.readFile()).servers.find((x) => x.name === server);
     if (s === undefined || (s.kind !== 'rest' && s.kind !== 'mcp-http' && s.kind !== 'mcp-stdio')) return null;
+    // (DES-PM-001) PM-1 gives Apps no PM entry: its tools are read only through the gate's bindings.
+    if (hasPmMarker(s)) return null;
     const t = s.tools.find((x) => x.name === tool);
     if (t === undefined) return null;
     return { config: configOf(s), tool: structuredClone(t), bound: s.enabled && statusOf(s, t) === 'registered' };
@@ -907,7 +949,7 @@ export class McpRegistry {
     const queryReset: string[] = [];
     const writesReset: string[] = [];
     for (const s of servers) {
-      if (!isSourceRecord(s)) continue;
+      if (!isGovernedRecord(s)) continue;
       const a = agentAccessOf(s);
       if (a.query) queryReset.push(s.name);
       if (s.agents !== undefined || a.query) s.agents = { ...a, query: false };
@@ -947,6 +989,8 @@ export class McpRegistry {
       return file.generation ?? 0;
     });
     for (const s of servers) if (isSourceRecord(s)) this.sourceChanged(s.name);
+    // (DES-PM-001 §3.4) A restored generation brings its tracker links back: the projection reconciles to them.
+    this.onRestored?.();
     return { restored: plan.generation, generation: current + 1, servers: servers.length, disabled, queryReset: [...plan.queryReset], writesReset: [...plan.writesReset] };
   }
 
@@ -1059,15 +1103,23 @@ export class McpRegistry {
     return (await secretIsSet(auth.ref, this.deps.secrets, this.env)) ? 'set' : 'missing';
   }
 
+  /** A PM entry's links as the sheet shows them (read-only there; written only through the tracker-links routes). */
+  private trackerLinksOf(s: McpServerRecord): TrackerLink[] {
+    const pm = pmOf(s);
+    return pm === null ? [] : trackerLinkViews({ id: entryId(s), name: s.name, system: pm.system }, trackersOf(s), this.trackerProjection);
+  }
+
   private async view(s: McpServerRecord): Promise<McpServer> {
     const tools = s.tools.map((t) => toolView(s, t));
     const live = tools.filter((t) => t.status !== 'gone');
     const isSource = isSourceRecord(s);
+    const pm = pmOf(s);
     return {
       id: entryId(s),
       ...configView(configOf(s)),
       ...(isPostgresRecord(s) ? { allowWrites: s.allowWrites === true } : {}),
       ...(isSource ? { descriptorHash: sourceDescriptorHash(configOf(s)), agents: agentAccessOf(s) } : {}),
+      ...(pm !== null ? { agents: agentAccessOf(s), trackers: this.trackerLinksOf(s) } : {}),
       authState: await this.authState(s.auth),
       enabled: s.enabled,
       health: s.health,
@@ -1093,7 +1145,8 @@ export class McpRegistry {
  * `runtime: 'toolbox'` entry keeps `kind: 'toolbox-source'` and has no `sql`: Apps cannot read it in v1 (§6.3).
  */
 export function configOf(s: McpServerRecord): McpUpstreamConfig {
-  const base: McpUpstreamConfig = { name: s.name, kind: s.kind, command: s.command, args: s.args, url: s.url, auth: s.auth, ...(s.id !== undefined ? { id: s.id } : {}) };
+  const pm = pmOf(s);
+  const base: McpUpstreamConfig = { name: s.name, kind: s.kind, command: s.command, args: s.args, url: s.url, auth: s.auth, ...(s.id !== undefined ? { id: s.id } : {}), ...(pm !== null ? { pm } : {}) };
   if (s.kind === 'toolbox-source') {
     const entry = entryOf(s);
     const address = s.address ?? { ...NO_CONFIRMATION, allow: [] };
@@ -1147,11 +1200,13 @@ interface ConfigView {
   toolbox?: ToolboxSourceEntry['toolbox'];
   descriptorVersion?: 1 | 2;
   policyVersion?: string;
+  pm?: { system: PmSystem };
 }
 
 /** What a response shows of a config. A pasted OpenAPI document is not echoed back. */
 function configView(c: McpUpstreamConfig): ConfigView {
   const view: ConfigView = { name: c.name, kind: c.kind, command: c.command, args: c.args, url: c.url, auth: c.auth };
+  if (c.pm != null) view.pm = { system: c.pm.system };
   if (c.kind === 'rest') {
     view.openapiUrl = c.openapiUrl ?? null;
     view.operations = c.operations ?? null;
@@ -1246,6 +1301,7 @@ function statusOf(s: McpServerRecord, t: McpToolRecord): McpToolStatus {
 
 function toolView(s: McpServerRecord, t: McpToolRecord): McpTool {
   const derivedClass = deriveToolClass(t.annotations);
+  const pm = pmOf(s);
   return {
     name: t.name,
     ...(t.rest != null ? { rest: t.rest } : {}),
@@ -1261,6 +1317,7 @@ function toolView(s: McpServerRecord, t: McpToolRecord): McpTool {
     schemaHash: t.schemaHash,
     observedSchemaHash: t.observedSchemaHash,
     disclosure: effectiveDisclosure(t),
+    ...(pm !== null ? { binding: t.binding == null ? null : { policy: t.binding.policy, schemaHash: t.binding.schemaHash, inForce: bindingInForce(pm.system, t) !== null } } : {}),
   };
 }
 
@@ -1284,6 +1341,20 @@ export function diffTools(registered: ReadonlyArray<Pick<McpToolRecord, 'name' |
 /** A data source of any form: K1 `sql`/`graphql`, or a Toolbox-form database source. */
 export function isSourceRecord(s: Pick<McpServerRecord, 'kind'>): boolean {
   return s.kind === 'sql' || s.kind === 'graphql' || s.kind === 'toolbox-source';
+}
+
+/** (DES-PM-001 §3) A record under the source safeguards: a data source, or a PM entry (Agents switches, restore resets). */
+export function isGovernedRecord(s: Pick<McpServerRecord, 'kind' | 'pm'>): boolean {
+  return isSourceRecord(s) || pmOf(s) !== null;
+}
+
+/**
+ * (DES-PM-001 §3) A PM entry's execution descriptor: the MCP descriptor Apps already uses (command, arguments, URL),
+ * the secret reference's identity and where it is injected, the confirmed ranges and the PM system. A change turns
+ * "query" off, as a source's descriptor change does. Never a secret value.
+ */
+export function pmDescriptorHash(c: McpUpstreamConfig): string {
+  return sha256Hex(canonicalJson({ v: 1, kind: c.kind, command: c.command, args: c.args, url: c.url, auth: c.auth, address: c.address ?? null, pm: c.pm?.system ?? null }));
 }
 
 /** A network Postgres source, in either form (the one kind with row writes in v1). */
@@ -1351,11 +1422,14 @@ export function disclosureOnSave(
   was: Pick<McpToolRecord, 'disclosure'> | undefined,
   reviewed: ToolDisclosureClass | undefined,
   kind: McpUpstreamKind,
+  pm: PmSystem | null = null,
 ): ToolDisclosure | null {
   if (reviewed !== undefined) return { class: reviewed, schemaHash: t.schemaHash };
   const prior = was?.disclosure ?? null;
   if (prior !== null && prior.schemaHash === t.schemaHash) return prior;
-  const proposed = proposedDisclosure(kind, t.name);
+  // (DES-PM-001 §3.1) A PM entry's bound read tools are `rows` (issue content); its other tools get no class.
+  const bound = pm === null ? null : bindingFor(pm, t.name);
+  const proposed = bound !== null ? bound.disclosure : proposedDisclosure(kind, t.name);
   return proposed === null ? null : { class: proposed, schemaHash: t.schemaHash };
 }
 
@@ -1371,8 +1445,10 @@ export function agentServerView(s: McpServer): McpServerAgentView {
     kind: s.kind,
     enabled: s.enabled,
     health: { state: s.health.state },
-    tools: s.tools.filter((t) => t.status !== 'gone').map((t) => ({ name: t.name, subject: t.subject, class: t.class, disclosure: t.disclosure, enabled: t.enabled, status: t.status })),
+    // (DES-PM-001 §3.1) A PM source's tools reach an agent only through the gate's scope-aware list: none here.
+    tools: s.pm !== undefined ? [] : s.tools.filter((t) => t.status !== 'gone').map((t) => ({ name: t.name, subject: t.subject, class: t.class, disclosure: t.disclosure, enabled: t.enabled, status: t.status })),
     ...(s.agents !== undefined ? { agents: { see: s.agents.see, query: s.agents.query } } : {}),
+    ...(s.pm !== undefined ? { pm: { system: s.pm.system } } : {}),
   };
 }
 
@@ -1406,5 +1482,9 @@ export function recordShapeProblem(raw: unknown): string | null {
     if (typeof s['toolbox'] !== 'object' || s['toolbox'] === null || (s['runtime'] !== 'native' && s['runtime'] !== 'toolbox') || typeof tls !== 'object' || tls === null || (tls['mode'] !== 'verify-full' && tls['mode'] !== 'disable')) return 'a database source without its document, runtime or TLS choice';
   }
   if (s['agents'] !== undefined && (typeof s['agents'] !== 'object' || s['agents'] === null)) return 'agents is not an object';
+  if (s['pm'] !== undefined && (typeof s['pm'] !== 'object' || s['pm'] === null || (s['kind'] !== 'mcp-http' && s['kind'] !== 'mcp-stdio'))) return 'a pm marker on a server that is not an MCP server';
+  // A marker this release cannot read would leave the entry ungoverned: refused as a record crew could not have written.
+  if (s['pm'] !== undefined && !['github', 'jira'].includes(String((s['pm'] as Record<string, unknown>)['system']))) return 'a pm marker naming a system this release does not govern';
+  if (s['trackers'] !== undefined && !Array.isArray(s['trackers'])) return 'trackers is not a list';
   return null;
 }

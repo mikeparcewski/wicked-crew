@@ -97,6 +97,9 @@ import { budgetFromEnv, MCP_CALL_COMPLETED, McpBroker } from '../mcp/broker.js';
 import { EstateRelay, type EstateUnitScope } from '../mcp/estate-relay.js';
 import { visibleDeps } from '../knowledge/package.js';
 import { SourceProjector } from '../knowledge/projector.js';
+import { TrackerAddresses } from '../knowledge/trackers/addresses.js';
+import { TrackerProjector } from '../knowledge/trackers/projector.js';
+import { unitTrackerIds } from '../knowledge/trackers/visible.js';
 import { McpCallRecordFile } from '../mcp/call-records.js';
 import { emitOnBus, type BusEvent } from '../core/bus.js';
 import { McpRegistry } from '../mcp/registry.js';
@@ -2530,6 +2533,8 @@ export async function createServer(
     judge: () => CoreAdapter.mcpCallJudge(),
     toolbox: toolboxSupervisor,
     log: (m) => app.log.warn(m),
+    // DES-PM-001 §3.2: a project's live repo members, for every tracker set (read on each call).
+    members: async (projectId) => (await adapter.projectMembers(projectId)).filter((m) => m.member_kind === 'crew.repo').map((m) => m.member_ref),
   });
   toolboxProber = dataGate;
   app.addHook('onClose', async () => {
@@ -2542,6 +2547,17 @@ export async function createServer(
   // crew#1328: a restored generation changes what estate must hold for a source with no catalog written.
   mcpRegistry.onSourceChanged = (name) => sourceProjector.written(name);
   void sourceProjector.backfill();
+  // DES-PM-001 §3.4: every linked tracker (and every retired one) projected into estate, reconciled; a tracker's
+  // link state shows on its TrackerLink. The boot backfill sends what estate may not hold yet.
+  const trackerAddresses = new TrackerAddresses();
+  const trackerProjector = new TrackerProjector({ store: mcpRegistryStore, addresses: () => trackerAddresses.all(), delivered: (runId) => deliveryIndex.urlFor(runId), log: (m) => app.log.warn(m) });
+  // A delivered PR joins the trail (`closes`) at the next reconcile; this one runs every ten minutes as well.
+  const trackerTimer = setInterval(() => trackerProjector.changed(), 10 * 60_000);
+  trackerTimer.unref?.();
+  app.addHook('onClose', async () => clearInterval(trackerTimer));
+  mcpRegistry.trackerProjection = trackerProjector.projection;
+  mcpRegistry.onRestored = () => trackerProjector.changed();
+  trackerProjector.changed();
   // §4.3: what a unit's knowledge reads may see — the sources its project may see (the gate's predicate) and its repos.
   const unitVisible = async (scope: EstateUnitScope): Promise<string[]> => {
     const repos = scope.repoId !== null ? [scope.repoId] : [];
@@ -2552,7 +2568,14 @@ export async function createServer(
         // An engine that cannot list members leaves the run's own repo.
       }
     }
-    return visibleDeps(await dataGate.sources(), scope.projectId, repos, (id) => sourceProjector.projectedDescriptor(id));
+    // DES-PM-001 §3.4: the unit's trackers (T(u), once estate holds them) and its project join the set.
+    let trackers: string[] = [];
+    try {
+      trackers = await unitTrackerIds(dataGate.pm, (id) => trackerProjector.acknowledged(id), { projectId: scope.projectId, repoId: scope.repoId });
+    } catch {
+      trackers = [];
+    }
+    return visibleDeps(await dataGate.sources(), scope.projectId, repos, (id) => sourceProjector.projectedDescriptor(id), trackers);
   };
   const mcpBroker = new McpBroker({
     registry: mcpRegistry,
@@ -2722,6 +2745,8 @@ export async function createServer(
       dataGate,
       mcpRegistryStore,
       sourceReads,
+      trackerProjector,
+      trackerAddresses,
       ...(typeof adapter.askSupported === 'function' && adapter.askSupported() ? { askServer } : {}),
       // DES-MCP-TOOLS-001 S7: the call records the usage fold reads.
       mcpCalls: mcpCallRecords,
