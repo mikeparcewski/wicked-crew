@@ -248,6 +248,9 @@ export function turnProblem(input: {
     `Apps turn · ${input.slug}: ${first}`,
     '',
     `Change the app ${input.slug} (at v${input.base}) as the person's message asks. Follow the wicked-garden-apps skill: the build step edits apps.json and files under queries/ only; the check is crew's; the review judges the tree it is on and names it.`,
+    ...(recent.length === 0 && input.base === 1
+      ? ['', 'This app is new: its `name` in apps.json is a placeholder made from the message. Set it to a short title (2-5 words) for what the app shows, and give its first page a fitting `title` too.']
+      : []),
     '',
     'The person\'s message, in their own words:',
     '<<<',

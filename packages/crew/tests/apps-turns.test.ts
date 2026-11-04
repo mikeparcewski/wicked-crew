@@ -214,7 +214,11 @@ describe('apps turns: the builder\'s task', () => {
     const parsed = parseSpec({ schema: 'wicked.apps/v1', name: 'Example', actions: [], linkHosts: [], ...example });
     expect(parsed.findings).toStrictEqual([]);
     expect(parsed.spec).not.toBeNull();
-    expect(turnProblem({ slug: 'x', name: 'X', base: 1, message: 'm', about: [], spec: spec('X'), recent: [], knowledge: { sources: [] } })).toContain(SPEC_SHAPE_GUIDE);
+    const first = turnProblem({ slug: 'x', name: 'X', base: 1, message: 'm', about: [], spec: spec('X'), recent: [], knowledge: { sources: [] } });
+    expect(first).toContain(SPEC_SHAPE_GUIDE);
+    // A new app's first turn names it; a later turn does not rename it unasked.
+    expect(first).toContain('This app is new');
+    expect(turnProblem({ slug: 'x', name: 'X', base: 4, message: 'm', about: [], spec: spec('X'), recent: [], knowledge: { sources: [] } })).not.toContain('This app is new');
   });
 
   it('lists every enabled source, says which are not described, and keeps to the package budget', async () => {
