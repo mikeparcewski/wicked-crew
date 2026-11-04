@@ -427,6 +427,17 @@ describe.skipIf(process.platform === 'win32')('the gate on a Toolbox-runtime sou
     expect(ask.body).toMatchObject({ outcome: 'pending_approval' });
   });
 
+  it("a catalog that cannot be read is that source's own problem: the others and the tool list still answer", async () => {
+    expect((await r.app.inject({ method: 'POST', url: '/api/v1/sources/tb-unbound/test' })).json()).toMatchObject({ ok: true });
+    const path = join(r.base, 'mcp', 'catalogs', 'tb-unbound.json');
+    const good = readFileSync(path, 'utf8');
+    writeFileSync(path, '{ not json');
+    expect((await listed(r, 'wmt_a')).some((x) => x.subject === 'mcp:tb/execute_sql')).toBe(true);
+    expect((await call(r, 'wmt_a', 'mcp:tb/execute_sql', { sql: Q })).answer).toMatchObject({ rowCount: 2 });
+    expect((await call(r, 'wmt_a', 'mcp:tb-unbound/list_tables')).answer).toMatchObject({ refused: 'not_described' });
+    writeFileSync(path, good);
+  });
+
   it('a tool whose disclosure class is not in force (reviewed against another schema) is offered to no agent', async () => {
     const tools = (await listed(r, 'wmt_a')).filter((x) => x.subject.startsWith('mcp:tb-unbound/')).map((x) => x.subject);
     expect(tools).toEqual(['mcp:tb-unbound/list_tables']);

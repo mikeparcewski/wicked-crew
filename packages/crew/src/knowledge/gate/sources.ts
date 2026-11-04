@@ -84,8 +84,12 @@ function toolsOf(r: McpServerRecord, runtime: 'native' | 'toolbox'): GateTool[] 
 export async function gateSourceOf(r: McpServerRecord, catalogs: SourceCatalogStore): Promise<GateSource | null> {
   const id = entryId(r);
   const config = configOf(r);
+  const gated = (config.kind === 'sql' && config.sql != null) || (r.kind === 'toolbox-source' && r.runtime === 'toolbox' && r.toolbox?.type === 'postgres');
+  if (!gated) return null;
   const descriptorHash = sourceDescriptorHash(config);
-  const stored = await catalogs.read(r.name);
+  // A catalog that cannot be read is that source's own problem: it reads as not described, and no other source
+  // (nor the unit's tool list) fails with it.
+  const stored = await catalogs.read(r.name).catch(() => null);
   const description = stored !== null && stored.descriptorHash === descriptorHash ? stored : null;
   // A K1 `sql` record, or a native-runtime `toolbox-source` entry through the read-path projection.
   if (config.kind === 'sql' && config.sql != null) {
