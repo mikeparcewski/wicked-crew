@@ -79,7 +79,7 @@ export class SourceScheduler {
   private errorStreak = 0;
   private backoffUntil = 0;
   private pumpTimer: NodeJS.Timeout | null = null;
-  private reservation: { check: RemoteCheck; timer: NodeJS.Timeout | null; checking: boolean } | null = null;
+  private reservation: { check: RemoteCheck; timer: NodeJS.Timeout | null; inflight: Promise<boolean> | null } | null = null;
 
   constructor(
     private limits: SchedulerLimits,
@@ -184,7 +184,7 @@ export class SourceScheduler {
       this.reservation.check = check;
       return;
     }
-    this.reservation = { check, timer: null, checking: false };
+    this.reservation = { check, timer: null, inflight: null };
     // Callers already queued are refused too: none of them may run while the source is closed.
     for (const w of this.queue.splice(0)) {
       clearTimeout(w.timer);
@@ -193,30 +193,40 @@ export class SourceScheduler {
     void this.recheck();
   }
 
-  /** Run the reservation's check now (tests and the periodic timer). Resolves with whether the source opened. */
+  /**
+   * Run the reservation's check now (the periodic timer, and tests). A check already running is waited for
+   * first, so the answer is always a check that started after the call. Resolves with whether the source opened.
+   */
   async recheck(): Promise<boolean> {
     const r = this.reservation;
     if (r === null) return true;
-    if (r.checking) return false;
-    r.checking = true;
+    if (r.inflight !== null) await r.inflight;
+    if (this.reservation !== r) return this.reservation === null;
     if (r.timer !== null) clearTimeout(r.timer);
     r.timer = null;
-    let state: 'gone' | 'running' | 'unknown';
+    const run = (async (): Promise<boolean> => {
+      let state: 'gone' | 'running' | 'unknown';
+      try {
+        state = await r.check();
+      } catch {
+        state = 'unknown';
+      }
+      if (this.reservation !== r) return this.reservation === null;
+      if (state === 'gone') {
+        this.reservation = null;
+        this.pump();
+        return true;
+      }
+      r.timer = setTimeout(() => void this.recheck(), this.limits.recheckMs);
+      r.timer.unref();
+      return false;
+    })();
+    r.inflight = run;
     try {
-      state = await r.check();
-    } catch {
-      state = 'unknown';
+      return await run;
+    } finally {
+      if (r.inflight === run) r.inflight = null;
     }
-    r.checking = false;
-    if (this.reservation !== r) return this.reservation === null;
-    if (state === 'gone') {
-      this.reservation = null;
-      this.pump();
-      return true;
-    }
-    r.timer = setTimeout(() => void this.recheck(), this.limits.recheckMs);
-    r.timer.unref();
-    return false;
   }
 }
 
