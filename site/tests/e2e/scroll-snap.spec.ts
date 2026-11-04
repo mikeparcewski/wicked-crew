@@ -391,17 +391,38 @@ test.describe('touch, on a touch screen 1024px wide and up (a tablet in landscap
   });
 
   test('a key pressed after a swipe takes over: PageUp during the momentum goes up', async ({ page }) => {
-    // Fails on CI for commits that passed before (the runner's momentum timing changed), passes locally:
-    // wicked-crew#1315 makes it independent of the momentum's timing.
-    test.fixme(!!process.env.CI, 'wicked-crew#1315: momentum timing on the CI runner');
+    // The key has to reach the page before the settle rests the swipe. Once the settle's own glide to the
+    // next frame is under way, a key counts from the frame that glide was going to (settle.js, begin()),
+    // so PageUp lands back on tops[2]: right for a key during a glide, but not this test. A fixed 250 ms
+    // wait after the swipe raced the momentum: on CI the fling, and the settle's 140 ms pause after it,
+    // sometimes ended first, and the run rested at tops[2] (wicked-crew#1315). The key now goes as the
+    // finger lifts, the first moment of the momentum (the settle never rests sooner than 140 ms after the
+    // scroll ends), and the page records its glides, so a run that still came too late says so.
+    await page.addInitScript(() => {
+      const w = window as unknown as { __glides: number[]; __pageUpAt: number };
+      w.__glides = [];
+      w.__pageUpAt = -1;
+      const scrollTo = window.scrollTo.bind(window) as (...a: unknown[]) => void;
+      window.scrollTo = ((...a: unknown[]) => {
+        const o = a[0];
+        if (o !== null && typeof o === 'object' && (o as ScrollToOptions).behavior === 'smooth') w.__glides.push(performance.now());
+        scrollTo(...a);
+      }) as typeof window.scrollTo;
+      window.addEventListener('keydown', (e) => { if (e.key === 'PageUp' && w.__pageUpAt < 0) w.__pageUpAt = performance.now(); }, { capture: true });
+    });
     await page.goto('/');
     await page.waitForTimeout(400);
     const tops = await frameTops(page);
     await atTop(page, tops[2]);
-    await drag(page, steps(500, 300, 6), 12);          // a swipe down the page
-    await page.waitForTimeout(250);
+    await drag(page, steps(500, 300, 6), 12);          // a swipe down the page, and PageUp as the finger lifts
     await page.keyboard.press('PageUp');
     const y = await settled(page);
+    const { glides, pageUpAt } = await page.evaluate(() => {
+      const w = window as unknown as { __glides: number[]; __pageUpAt: number };
+      return { glides: w.__glides, pageUpAt: w.__pageUpAt };
+    });
+    expect(pageUpAt, 'the PageUp never reached the page').toBeGreaterThan(0);
+    expect(glides.filter((t) => t < pageUpAt), 'the settle began its glide before the PageUp arrived: too late to test a key during the momentum').toEqual([]);
     expect(y, `rested at ${y}: the swipe's direction overrode the PageUp`).toBeLessThan(tops[2] - 2);
     expect(onAFrame(y, await restTops(page))).toBe(true);
   });
