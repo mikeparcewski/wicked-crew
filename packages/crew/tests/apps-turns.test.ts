@@ -445,6 +445,21 @@ describe('apps turns: check, land, refuse', () => {
     void units;
   });
 
+  it('a build that made no change says so in the builder\'s own words (shown), and a later turn hears only the code', async () => {
+    const s = setup();
+    const runId = await startTurn(s, 'add a KPI whose SQL is select pg_sleep(1)');
+    s.outputs.set(`${runId}:build`, 'I looked at the catalog.\n\nI did not add it: pg_sleep is refused by the read policy, so the check would refuse the turn.\n\nCounts: derived 0');
+    s.set(runId, 'failed', { build: { status: 'rejected', denial_reason: 'executes-code phase reported done but left no change in the worktree' } });
+    s.emit({ type: 'sessionFailed', session: runId });
+    await vi.waitFor(async () => expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull());
+    const d = (await s.call('GET', '/apps/escalations')).body.app;
+    expect(d.turns![0]).toMatchObject({ state: 'failed', code: 'no_change', reason: expect.stringContaining('pg_sleep is refused by the read policy') });
+    expect(d.turns![0]!.reason).not.toContain('Counts');
+    await s.call('POST', '/apps/escalations/turns', { base: 2, message: 'next' });
+    expect(s.launched[1]!.problem).toContain('"code":"no_change","why":"the builder made no change (it may have declined)"');
+    expect(s.launched[1]!.problem).not.toContain('pg_sleep is refused');
+  });
+
   it('(kept) an approval gate stays the person\'s', async () => {
     const s = setup();
     await startTurn(s);

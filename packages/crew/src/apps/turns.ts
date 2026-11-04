@@ -128,6 +128,21 @@ export function changeLine(before: { spec: AppSpec; queryText: Record<string, st
   return `${line[0]!.toUpperCase()}${line.slice(1)}`;
 }
 
+/** The last paragraph of a seat's answer (code fences and verdict lines left out), or ''. */
+function lastParagraph(output: string | null): string {
+  if (output === null) return '';
+  // The skill's own bookkeeping lines (counts, memories, verdict, tree) are not what it said about the change.
+  const lines = output.replace(/\r/g, '').split('\n').map((l) => l.trim()).filter((l) => !/^(VERDICT|TREE|Counts|Memories proposed)\b/i.test(l));
+  while (lines.length > 0 && (lines[lines.length - 1] === '' || lines[lines.length - 1]!.startsWith('```'))) lines.pop();
+  const tail: string[] = [];
+  for (let i = lines.length - 1; i >= 0 && tail.length < 6; i--) {
+    const l = lines[i]!;
+    if (l === '' || l.startsWith('```')) break;
+    tail.unshift(l);
+  }
+  return tail.join(' ');
+}
+
 /** A builder's change line ("Added KPI `kpi-open` over query `open_count`"), as the skill asks it to end with. */
 const CHANGE_LINE_RE = /^(?:[-*•]\s+)?(?:added|changed|removed|renamed|moved|replaced|made|set|bound|kept|split|merged|turned|updated|deleted|fixed)\b/i;
 
@@ -173,6 +188,7 @@ const ENDED_WORDS: Record<string, string> = {
   review_refused: 'the reviewer refused it',
   not_reviewed: 'it was not reviewed on the tree crew checked',
   step_failed: 'a step could not finish',
+  no_change: 'the builder made no change (it may have declined)',
   launch_refused: 'the run could not start',
   cancelled: 'it was stopped',
 };
@@ -500,7 +516,20 @@ export class AppTurnService implements AppTurnLauncher {
         }
         this.log(`[apps] turn ${input.runId} of ${input.slug} was refused at ${refused.phase}; its run was stopped`);
       }
-      return { kind: 'end', state: refused.code === 'step_failed' ? 'failed' : 'refused', code: refused.code, reason: refused.reason };
+      let reason = refused.reason;
+      if (refused.phase === 'build') {
+        // A build that made no change usually SAYS why (it declined, or the catalog had no such table): the person
+        // reads the builder's own words here. They are shown, never handed to a later turn (that gets the code only).
+        let said = '';
+        try {
+          const b = v.units.find((x) => x.id === `${input.runId}:build`);
+          said = b === undefined ? '' : oneLine(lastParagraph(await this.deps.engine.workOutput(b.id)), 400);
+        } catch {
+          said = '';
+        }
+        reason = said !== '' ? `The builder made no change it could hand on. It said: “${said}” Nothing landed.` : 'The builder made no change it could hand on. Nothing landed.';
+      }
+      return { kind: 'end', state: refused.code === 'step_failed' ? 'failed' : 'refused', code: refused.phase === 'build' ? 'no_change' : refused.code, reason };
     }
     if (status === 'failed') {
       const check = unit('check');
