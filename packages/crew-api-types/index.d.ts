@@ -7392,6 +7392,10 @@ export interface WorkflowCatalogInput {
  * How a client starts an entry: `run` = `POST /runs {workflow}`; `demo` = `POST /projects/:id/demo`;
  * `compose` = `POST /projects/:id/product/compose` (draft epics); `document` = a new interactive document
  * of that style (its draft run); `chat` = a chat on its own page; `none` = nothing to launch (coming soon).
+ * (api-types 0.187.0, additive) `app` = a new app by chat: `POST /apps` in the project, then the words as its
+ * first turn, `POST /apps/:app/turns` (DES-APPS-001 §6.2); offered only where `GET /health.capabilities.apps.turns`
+ * is true; `repo` = register a repository, which onboards it (`POST /repos`; studio's Add a repository). A
+ * client that does not know a kind shows the entry and does not start it.
  */
 export type WorkflowCatalogLaunch =
   | { kind: 'run'; workflow: string }
@@ -7399,6 +7403,8 @@ export type WorkflowCatalogLaunch =
   | { kind: 'compose' }
   | { kind: 'document'; style: 'web' | 'doc' | 'ppt' | 'brochure' }
   | { kind: 'chat' }
+  | { kind: 'app' }
+  | { kind: 'repo' }
   | { kind: 'none' };
 
 /** The requesting operator's use of an entry (scope: {@link WorkflowCatalogResponse.usage}). */

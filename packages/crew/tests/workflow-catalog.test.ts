@@ -114,10 +114,39 @@ describe('buildWorkflowCatalog', () => {
   it('lists coming-soon cards unlaunchable, and studio flows with their own launch kind', () => {
     const { defs, presets } = served();
     const out = buildWorkflowCatalog({ defs, presets, runs: [], actorId: 'local', projectId: null });
-    const create = out.entries.find((e) => e.id === 'apps')!;
-    expect([create.status, create.launch, create.source]).toEqual(['coming_soon', { kind: 'none' }, 'none']);
+    const plugin = out.entries.find((e) => e.id === 'phase-plugin')!;
+    expect([plugin.status, plugin.launch, plugin.source]).toEqual(['coming_soon', { kind: 'none' }, 'none']);
     expect(out.entries.find((e) => e.id === 'presentation')!.launch).toEqual({ kind: 'document', style: 'ppt' });
     expect(out.entries.find((e) => e.id === 'demo-video')!.launch).toEqual({ kind: 'demo' });
+  });
+
+  // ux-tonight (operator 2026-11-04: "are apps showing as coming soon (in chat)"): chat-first Apps shipped (crew#1312).
+  it('offers Apps as a new app by chat where this daemon runs app turns, and lists it not available elsewhere', () => {
+    const { defs, presets } = served();
+    const on = buildWorkflowCatalog({ defs, presets, runs: [], actorId: 'local', projectId: null, appsByChat: true }).entries.find((e) => e.id === 'apps')!;
+    expect([on.status, on.statusNote, on.launch, on.source, on.needs]).toEqual(['available', null, { kind: 'app' }, 'studio', ['project']]);
+    expect(on.inputs.map((i) => [i.id, i.kind, i.required])).toEqual([['intent', 'text', true], ['project', 'project', true]]);
+    for (const appsByChat of [false, undefined]) {
+      const off = buildWorkflowCatalog({ defs, presets, runs: [], actorId: 'local', projectId: null, ...(appsByChat === undefined ? {} : { appsByChat }) })
+        .entries.find((e) => e.id === 'apps')!;
+      expect([off.status, off.launch], String(appsByChat)).toEqual(['unavailable', { kind: 'app' }]);
+      expect(off.statusNote, String(appsByChat)).toMatch(/does not run app chats/);
+    }
+  });
+
+  // ux-tonight (operator 2026-11-04: "don't I see a way to onboard a repo anymore").
+  it('offers Add a repository (registering onboards it) to every daemon, needing nothing', () => {
+    const { defs, presets } = served();
+    const add = buildWorkflowCatalog({ defs, presets, runs: [], actorId: 'local', projectId: null }).entries.find((e) => e.id === 'add-repo')!;
+    expect([add.status, add.launch, add.needs, add.category, add.title]).toEqual(['available', { kind: 'repo' }, ['nothing'], 'more', 'Add a repository']);
+    expect(add.synonyms).toEqual(expect.arrayContaining(['onboard', 'register']));
+  });
+
+  it("leaves the apps' own machine runs out: apps-turn and apps-publish are started from an app", () => {
+    const { defs, presets } = served([def('apps-turn'), def('apps-publish')]);
+    const ids = buildWorkflowCatalog({ defs, presets, runs: [], actorId: 'local', projectId: null }).entries.map((e) => e.id);
+    expect(ids).not.toContain('apps-turn');
+    expect(ids).not.toContain('apps-publish');
   });
 
   it('never loses a launchable workflow: an unseeded non-system def joins more; system and excluded ones do not', () => {

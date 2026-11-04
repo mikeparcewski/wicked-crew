@@ -311,6 +311,13 @@ mentioned only where a daemon release depends on them.
   (crew#1333) and an asking rule behave as before. A rows call's numeric parameters must be finite (JSON has no
   Infinity; the engine is sent `null` for one), so what runs is never other than what was judged. On an engine
   without `judgeMcpCall` the gate keeps the list's judgment, where an argument-only rule cannot fire.
+- **The workflow catalog: Apps is a new app by chat, Add a repository is a card, and the apps' own runs are left out
+  (api-types 0.187.0).** The `apps` card said "coming soon" in New job and every `/` menu although chat-first Apps
+  shipped (crew#1312): it now launches `{kind: 'app'}` (a new app by chat, the words its first turn) and is available
+  where the daemon runs app turns (`apps.turns`), listed as not available elsewhere. A new `add-repo` card ("Add a
+  repository", `{kind: 'repo'}`) opens studio's register form, which onboards the repository, so onboarding is
+  reachable from the `/` menu ("onboard", "register"). `apps-turn` and `apps-publish` (started from an app) no longer
+  join `more`. `phase-plugin` stays coming soon (no phase plugin is built).
 - **A live source's first-use ask is admitted by its switches on a real engine (crew#1333).** With "Agents can query
   this source" on, a chat's `mcp:<source>/execute_sql` (and the structure tool) was refused `pending_approval` on any
   daemon with the `mcp-defaults` pack, and studio has no way to approve it. The data gate turned an engine ask into

@@ -41,6 +41,8 @@ export interface CatalogInputs {
   runs: readonly CatalogRun[];
   actorId: string;
   projectId: string | null;
+  /** This daemon runs app turns (`GET /health.capabilities.apps.turns`): the `app` launch kind is offered. Absent = no. */
+  appsByChat?: boolean;
 }
 
 export const TOP_MAX = 6;
@@ -160,13 +162,15 @@ export function buildWorkflowCatalog(input: CatalogInputs): WorkflowCatalogRespo
       continue;
     }
     if (key !== null) claimed.add(key);
+    // A new app by chat needs this daemon's app turns; without them the card is listed, not offered.
+    const noApps = seed.launch.kind === 'app' && input.appsByChat !== true;
     entries.push({
       ...rest,
       title: title ?? seed.id,
       summary: summary ?? '',
       useWhen: useWhen ?? [],
-      status: status ?? 'available',
-      statusNote: statusNote ?? null,
+      status: noApps ? 'unavailable' : (status ?? 'available'),
+      statusNote: noApps ? 'This daemon does not run app chats (no app store, or its engine has no apps-turn).' : (statusNote ?? null),
       requiresQe: false,
       source: seed.launch.kind === 'none' ? 'none' : 'studio',
       usage: usageOf(key, mine),
