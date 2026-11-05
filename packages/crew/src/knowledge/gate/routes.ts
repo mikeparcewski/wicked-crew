@@ -24,15 +24,15 @@ import { setAgentAccess } from './sources.js';
 
 const V = API_PREFIX;
 
-export const SourceAgentAccessSchema = z
-  .object({
+export const SourceAgentAccessSchema = z.strictObject({
     see: z.boolean().optional(),
     query: z.boolean().optional(),
     projects: z.array(z.string().regex(AGENT_PROJECT_RE)).max(AGENT_PROJECTS_MAX).optional(),
     everyProject: z.boolean().optional(),
   })
-  .strict()
-  .refine((b) => b.see !== undefined || b.query !== undefined || b.projects !== undefined || b.everyProject !== undefined, { message: 'set see, query, projects or everyProject' });
+  .refine((b) => b.see !== undefined || b.query !== undefined || b.projects !== undefined || b.everyProject !== undefined, {
+      error: 'set see, query, projects or everyProject'
+});
 
 export interface GateRouteDeps {
   store?: Pick<McpRegistryStore, 'mutate'>;

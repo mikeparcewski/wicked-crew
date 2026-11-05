@@ -84,46 +84,40 @@ function invalidBody(err: z.ZodError, what: string): { error: string; details: z
 // entry's payload is validated shape-wise by the ENGINE's normalize/validate path (fail-closed
 // per entry) — the route checks only "is an object", so engine-side validation stays the ONE
 // spelling of what a rule is.
-const ImportDocSchema = z
-  .object({
+const ImportDocSchema = z.strictObject({
     kind: z.literal('doc'),
     name: z.string().min(1).max(256).optional(),
     content: z.string().min(1),
-  })
-  .strict();
-const ImportRuleSchema = z
-  .object({
+  });
+const ImportRuleSchema = z.strictObject({
     kind: z.literal('rule'),
     rule: z.custom<import('../core/types.js').ConformanceRule>(
       (v) => typeof v === 'object' && v !== null && !Array.isArray(v),
-      { message: '`rule` must be a rule object' },
+      {
+          error: '`rule` must be a rule object'
+    },
     ),
-  })
-  .strict();
+  });
 
-export const SteeringImportSchema = z
-  .object({
+export const SteeringImportSchema = z.strictObject({
     type: z.enum(STEERING_TYPE_VALUES).optional(),
     entries: z
       .array(z.discriminatedUnion('kind', [ImportDocSchema, ImportRuleSchema]))
       .min(1)
       .max(STEERING_IMPORT_MAX_ENTRIES),
-  })
-  .strict();
+  });
 
-export const SteeringAuthorSchema = z
-  .object({
+export const SteeringAuthorSchema = z.strictObject({
     instructions: z.string().min(1),
     type: z.enum(STEERING_TYPE_VALUES).optional(),
     paths: z.array(z.string().min(1)).max(32).optional(),
     documents: z
-      .array(z.object({ name: z.string().min(1).max(128), content: z.string().min(1) }).strict())
+      .array(z.strictObject({ name: z.string().min(1).max(128), content: z.string().min(1) }))
       .max(32)
       .optional(),
     repoRef: z.string().min(1).optional(),
     sessionId: z.string().min(1).optional(),
-  })
-  .strict();
+  });
 
 /**
  * Where the author route lands inline documents so the run can read them: a per-run inbox on the

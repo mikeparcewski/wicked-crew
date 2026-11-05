@@ -74,32 +74,26 @@ const KIND_WORDS: Record<string, string> = { doc: 'document', source: 'document'
 const STYLE_WORDS: Record<string, string> = { ppt: 'slides', web: 'web page', doc: 'document', brochure: 'brochure' };
 
 /** The strict wire schema of `ChatMessageBody.context` (api-types 0.169.0). */
-export const ChatMessageContextSchema = z
-  .object({
-    artifact: z
-      .object({
-        ref: z.string().regex(ARTIFACT_REF, 'artifact.ref must be <mount>/<doc>'),
-        // Version 0 is a version: a document's first (crew#1273).
-        version: z.number().int().min(0).max(1_000_000),
-        anchors: z.array(z.string().regex(ANCHOR_WID, 'each anchor must be a data-wid')).max(CONTEXT_ANCHORS_MAX).optional(),
-      })
-      .strict()
+export const ChatMessageContextSchema = z.strictObject({
+    artifact: z.strictObject({
+              ref: z.string().regex(ARTIFACT_REF, 'artifact.ref must be <mount>/<doc>'),
+              // Version 0 is a version: a document's first (crew#1273).
+              version: z.int().min(0).max(1_000_000),
+              anchors: z.array(z.string().regex(ANCHOR_WID, 'each anchor must be a data-wid')).max(CONTEXT_ANCHORS_MAX).optional(),
+            })
       .optional(),
-    appearance: z
-      .object({
-        theme: z.string().regex(/^[a-z0-9-]{1,64}$/).optional(),
-        accent_h: z.number().min(0).max(360).optional(),
-        accent_s: z.number().min(0).max(100).optional(),
-        accent_l: z.number().min(0).max(100).optional(),
-        ambient: z.boolean().optional(),
-        ambient_still: z.boolean().optional(),
-        previewOf: z.string().max(120).optional(),
-      })
-      .strict()
+    appearance: z.strictObject({
+            theme: z.string().regex(/^[a-z0-9-]{1,64}$/).optional(),
+            accent_h: z.number().min(0).max(360).optional(),
+            accent_s: z.number().min(0).max(100).optional(),
+            accent_l: z.number().min(0).max(100).optional(),
+            ambient: z.boolean().optional(),
+            ambient_still: z.boolean().optional(),
+            previewOf: z.string().max(120).optional(),
+          })
       .optional(),
     page: z.string().max(CONTEXT_PAGE_MAX).optional(),
-  })
-  .strict();
+  });
 
 /** The parsed body field (the wire's `ChatMessageContext`, as zod reads it). */
 export type ParsedChatMessageContext = z.infer<typeof ChatMessageContextSchema>;

@@ -38,22 +38,18 @@ import { PlanSchema, toLaunchPlan } from '../api/plan-schema.js';
 const V = API_PREFIX;
 
 // Exported for tests/wire-contract.test.ts (the request-direction drift guard).
-export const EditPlanSchema = z
-  .object({ plan: PlanSchema, requestId: z.string().min(1).max(128).optional() })
-  .strict();
+export const EditPlanSchema = z.strictObject({ plan: PlanSchema, requestId: z.string().min(1).max(128).optional() });
 
 /** The engine's refusal of a gate edit when the paused run's open gate is not a plan approval:
  *  the run is paused at another gate, so the edit is a mid-run one. */
 const NO_PLAN_GATE = /no plan_approval gate open/;
-export const PlanPreviewSchema = z
-  .object({
+export const PlanPreviewSchema = z.strictObject({
     plan: PlanSchema,
     projectId: z.string().min(1).optional(),
     humanConfirm: z.string().min(1).optional(),
     repoRef: z.string().min(1).optional(),
     deliver: z.enum(['pr', 'none']).optional(),
-  })
-  .strict();
+  });
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);

@@ -26,7 +26,7 @@ import { VOICE_MAX_AUDIO_BYTES, VoiceError, type VoiceService } from './service.
 
 const V = API_PREFIX;
 
-export const PostVoiceModelSchema = z.object({ consent: z.literal(true) }).strict();
+export const PostVoiceModelSchema = z.strictObject({ consent: z.literal(true) });
 
 export interface VoiceRouteDeps {
   voice: VoiceService;

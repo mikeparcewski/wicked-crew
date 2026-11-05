@@ -15,16 +15,14 @@ import { MAX_EVERY_HOURS, MIN_EVERY_HOURS, SCHEDULE_ID, type ScheduleStore, type
 
 const V = API_PREFIX;
 
-export const SchedulePutSchema = z
-  .object({
+export const SchedulePutSchema = z.strictObject({
     workflow: z.string().min(1).max(128),
-    everyHours: z.number().int().min(MIN_EVERY_HOURS).max(MAX_EVERY_HOURS),
+    everyHours: z.int().min(MIN_EVERY_HOURS).max(MAX_EVERY_HOURS),
     enabled: z.boolean().optional(),
     projectIds: z.array(z.string().min(1).max(128)).max(64).optional(),
     repoRef: z.string().min(1).max(256).nullable().optional(),
     problem: z.string().trim().min(1).max(4000).nullable().optional(),
-  })
-  .strict();
+  });
 
 export interface ScheduleRouteDeps {
   store: ScheduleStore;

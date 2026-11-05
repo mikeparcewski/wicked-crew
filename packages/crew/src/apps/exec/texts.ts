@@ -16,15 +16,13 @@ import type { AppToolQueryText, AppCrewQueryText } from '../../core/types.js';
 
 const PARAM = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const Arg = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('param'), name: z.string().regex(PARAM) }).strict(),
-  z.object({ kind: z.literal('literal'), value: z.union([z.string().max(1000), z.number().finite(), z.boolean(), z.null()]) }).strict(),
+  z.strictObject({ kind: z.literal('param'), name: z.string().regex(PARAM) }),
+  z.strictObject({ kind: z.literal('literal'), value: z.union([z.string().max(1000), z.number().finite(), z.boolean(), z.null()]) }),
 ]);
 const Args = z.record(z.string().min(1).max(128), Arg).refine((r) => Object.keys(r).length <= 50, 'at most 50 arguments');
 
-export const ToolQueryTextSchema = z.object({ tool: z.string().min(1).max(128), args: Args.optional() }).strict();
-export const CrewQueryTextSchema = z
-  .object({ route: z.string().min(1).max(128), params: z.record(z.string().regex(PARAM), Arg).optional(), query: Args.optional() })
-  .strict();
+export const ToolQueryTextSchema = z.strictObject({ tool: z.string().min(1).max(128), args: Args.optional() });
+export const CrewQueryTextSchema = z.strictObject({ route: z.string().min(1).max(128), params: z.record(z.string().regex(PARAM), Arg).optional(), query: Args.optional() });
 
 export type QueryArg = z.infer<typeof Arg>;
 

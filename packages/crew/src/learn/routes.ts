@@ -17,16 +17,14 @@ import { LEARN_SLUG, MAX_EVERY_HOURS, MIN_EVERY_HOURS, scheduleId, type LearnSch
 
 const V = API_PREFIX;
 
-export const LearnSchedulePutSchema = z
-  .object({
+export const LearnSchedulePutSchema = z.strictObject({
     repoRef: z.string().min(1).max(256),
     slug: z.string().regex(LEARN_SLUG, 'slug is kebab-case, at most 64 characters'),
     topic: z.string().trim().min(1).max(200),
-    everyHours: z.number().int().min(MIN_EVERY_HOURS).max(MAX_EVERY_HOURS),
+    everyHours: z.int().min(MIN_EVERY_HOURS).max(MAX_EVERY_HOURS),
     enabled: z.boolean().optional(),
     projectId: z.string().min(1).max(128).optional(),
-  })
-  .strict();
+  });
 
 export interface LearnRouteDeps {
   store: LearnScheduleStore;

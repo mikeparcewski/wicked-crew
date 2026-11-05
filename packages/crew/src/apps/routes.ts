@@ -98,29 +98,29 @@ function fail(reply: FastifyReply, err: unknown, reader?: Actor): FastifyReply {
   throw err;
 }
 
-const base = z.number().int().min(1);
+const base = z.int().min(1);
 const slugParam = z.string().regex(APP_SLUG_RE);
-export const AppCreateSchema = z.object({ slug: z.string().min(1).max(64), name: z.string().min(1).max(120).optional(), projectId: z.string().min(1).max(128) }).strict();
+export const AppCreateSchema = z.strictObject({ slug: z.string().min(1).max(64), name: z.string().min(1).max(120).optional(), projectId: z.string().min(1).max(128) });
 // The spec rides as `unknown` and is parsed by `parseSpec` (the structure bound, then the schema) in the
 // handler, so an over-large document never reaches zod whole (codex r1 on the schema PR).
 const EditOpSchema = z.discriminatedUnion('op', [
-  z.object({ op: z.literal('spec'), spec: z.unknown() }).strict(),
-  z.object({ op: z.literal('query-text'), query: z.string().regex(APP_NAMED_ID_RE), text: z.string().max(QUERY_TEXT_MAX_BYTES) }).strict(),
+  z.strictObject({ op: z.literal('spec'), spec: z.unknown() }),
+  z.strictObject({ op: z.literal('query-text'), query: z.string().regex(APP_NAMED_ID_RE), text: z.string().max(QUERY_TEXT_MAX_BYTES) }),
 ]);
-export const AppEditsSchema = z.object({ base, ops: z.array(EditOpSchema).min(1).max(50), summary: z.string().min(1).max(200).optional() }).strict();
-export const AppHistoryMoveSchema = z.object({ base }).strict();
-const version = z.union([z.number().int().min(1), z.string().regex(/^[0-9a-fA-F]{40}$/)]);
-export const AppRestoreSchema = z.object({ base, version }).strict();
-export const AppQuerySchema = z.object({ version, query: z.string().regex(APP_NAMED_ID_RE), params: z.record(z.unknown()).optional() }).strict();
-export const AppTurnSchema = z.object({ base, message: z.string().min(1).max(8000), about: z.array(z.string().min(1).max(64)).max(20).optional() }).strict();
+export const AppEditsSchema = z.strictObject({ base, ops: z.array(EditOpSchema).min(1).max(50), summary: z.string().min(1).max(200).optional() });
+export const AppHistoryMoveSchema = z.strictObject({ base });
+const version = z.union([z.int().min(1), z.string().regex(/^[0-9a-fA-F]{40}$/)]);
+export const AppRestoreSchema = z.strictObject({ base, version });
+export const AppQuerySchema = z.strictObject({ version, query: z.string().regex(APP_NAMED_ID_RE), params: z.record(z.string(), z.unknown()).optional() });
+export const AppTurnSchema = z.strictObject({ base, message: z.string().min(1).max(8000), about: z.array(z.string().min(1).max(64)).max(20).optional() });
 /** `commit`: the builder's candidate COMMIT in the app repo (crew reads its tree and writes the lock on it). */
-export const AppActionPrepareSchema = z.object({ version, params: z.record(z.unknown()).optional() }).strict();
-export const AppActionRunSchema = z.object({ record: z.string().uuid() }).strict();
-export const AppActionGrantSchema = z.object({ version }).strict();
+export const AppActionPrepareSchema = z.strictObject({ version, params: z.record(z.string(), z.unknown()).optional() });
+export const AppActionRunSchema = z.strictObject({ record: z.uuid() });
+export const AppActionGrantSchema = z.strictObject({ version });
 export const AppsCheckSchema = z.union([
   // (K5) The Tool's form: the engine's snapshot of the builder's worktree; crew finds the app by the unit's run.
-  z.object({ token: z.string().min(1).max(4096), tree: z.string().regex(/^[0-9a-fA-F]{40}$/), manifest: z.unknown().optional() }).strict(),
-  z.object({ token: z.string().min(1).max(4096), app: slugParam, commit: z.string().regex(/^[0-9a-fA-F]{40}$/), manifest: z.unknown().optional() }).strict(),
+  z.strictObject({ token: z.string().min(1).max(4096), tree: z.string().regex(/^[0-9a-fA-F]{40}$/), manifest: z.unknown().optional() }),
+  z.strictObject({ token: z.string().min(1).max(4096), app: slugParam, commit: z.string().regex(/^[0-9a-fA-F]{40}$/), manifest: z.unknown().optional() }),
 ]);
 
 export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): void {

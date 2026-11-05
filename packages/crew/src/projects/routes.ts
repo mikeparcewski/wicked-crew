@@ -82,15 +82,12 @@ function notQueryableError(status: ProjectGraphStatus): string {
 }
 
 // Exported for tests/wire-contract.test.ts (the request-direction drift guard).
-export const CreateProjectSchema = z
-  .object({
+export const CreateProjectSchema = z.strictObject({
     name: z.string().min(1).max(120),
     description: z.string().optional(),
-  })
-  .strict();
+  });
 
-export const UpdateProjectSchema = z
-  .object({
+export const UpdateProjectSchema = z.strictObject({
     name: z.string().min(1).max(120).optional(),
     description: z.string().optional(),
     status: z.enum(['active', 'archived']).optional(),
@@ -100,27 +97,22 @@ export const UpdateProjectSchema = z
     interactiveRoot: z.string().min(1).nullable().optional(),
     /** crew#552 — override `onboardingAutoCapture` for this project; null clears it. Crew-side. */
     autoCapture: z.boolean().nullable().optional(),
-  })
-  .strict();
+  });
 
 /** `POST /projects/:id/graph/refresh` body — optional; `{}` (or no body) is the plain refresh.
  *  `force: true` is the post-estate-upgrade migration path: it bypasses the clean-HEAD skip and
  *  passes `--force` to `wicked-estate index` (see `RefreshProjectGraphBody` in the wire types). */
-export const RefreshProjectGraphSchema = z
-  .object({
+export const RefreshProjectGraphSchema = z.strictObject({
     force: z.boolean().optional(),
-  })
-  .strict();
+  });
 
 /** `<product>.<noun>` — the engine re-validates; this is the 400-with-names layer. */
-export const AttachMemberSchema = z
-  .object({
+export const AttachMemberSchema = z.strictObject({
     kind: z.string().min(3).max(64).regex(/^[a-z0-9_-]+\.[a-z0-9_-]+$/, 'kind must be <product>.<noun>, lowercase'),
     ref: z.string().min(1).max(512),
     meta: z.record(z.string(), z.unknown()).optional(),
     attachedBy: z.enum(['studio', 'interactive', 'cli', 'api']).optional(),
-  })
-  .strict();
+  });
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);

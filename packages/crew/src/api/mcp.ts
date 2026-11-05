@@ -109,41 +109,39 @@ const secretValue = z
   .string()
   .min(8, 'a secret is at least 8 characters')
   .max(8192)
-  .refine((v) => !/[\r\n\0]/.test(v), { message: 'a secret is one line' });
+  .refine((v) => !/[\r\n\0]/.test(v), {
+      error: 'a secret is one line'
+});
 
-const AuthSchema = z
-  .object({
-    ref: z.string().refine((r) => parseSecretRef(r) !== null, { message: 'ref must be keychain:wicked-mcp/<name> or env:<NAME>' }),
+const AuthSchema = z.strictObject({
+    ref: z.string().refine((r) => parseSecretRef(r) !== null, {
+        error: 'ref must be keychain:wicked-mcp/<name> or env:<NAME>'
+    }),
     env: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/).optional(),
     header: z.string().regex(/^[A-Za-z0-9-]{1,64}$/).optional(),
     prefix: z.string().max(32).optional(),
-  })
-  .strict();
+  });
 
 /** (DES-APPS-001 §5.2) A source's address confirmation: CIDRs inside loopback/private ranges only. */
-export const AddressSchema = z
-  .object({
+export const AddressSchema = z.strictObject({
     allow: z.array(z.string().min(1).max(64)).max(16),
     plaintext: z.boolean().optional(),
   })
-  .strict()
   .superRefine((a, ctx) => {
     const problem = validateAllowRanges(a.allow);
-    if (problem !== null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['allow'], message: problem });
+    if (problem !== null) ctx.addIssue({ code: "custom", path: ['allow'], message: problem });
   });
 
 /** (DES-APPS-001 §5.1) A network SQL source's settings; the password is `auth.ref`'s secret. */
-export const SqlSourceSchema = z
-  .object({
+export const SqlSourceSchema = z.strictObject({
     driver: z.enum(['postgres', 'mysql']),
     host: z.string().min(1).max(253).regex(/^[^\s/@?#]+$/, 'a host name or IP address'),
-    port: z.number().int().min(1).max(65_535).optional(),
+    port: z.int().min(1).max(65_535).optional(),
     database: z.string().min(1).max(128),
     user: z.string().min(1).max(128),
     tls: z.enum(['verify-full', 'disable']).optional(),
     ca: z.string().min(1).max(65_536).optional(),
-  })
-  .strict();
+  });
 
 /**
  * (DES-KNOWLEDGE-DATA-001 §5.1) Toolbox's source document, as sent: an object of at most 32 fields, each judged
@@ -151,11 +149,12 @@ export const SqlSourceSchema = z
  */
 const ToolboxDocumentSchema = z
   .record(z.string().max(64), z.union([z.string().max(4096), z.number(), z.boolean(), z.null(), z.record(z.string(), z.unknown()), z.array(z.unknown())]))
-  .refine((d) => Object.keys(d).length <= 32, { message: 'a Toolbox source document has at most 32 fields' });
+  .refine((d) => Object.keys(d).length <= 32, {
+      error: 'a Toolbox source document has at most 32 fields'
+});
 
 // Exported so tests/wire-contract.test.ts can pin the published bodies against them.
-export const McpServerConfigSchema = z
-  .object({
+export const McpServerConfigSchema = z.strictObject({
     name: serverName,
     kind: z.enum(['mcp-stdio', 'mcp-http', 'rest', 'sql', 'graphql', 'toolbox-source']),
     command: z.string().min(1).max(4096).optional(),
@@ -183,7 +182,7 @@ export const McpServerConfigSchema = z
     /** (DES-KNOWLEDGE-DATA-001 §5.1) `toolbox-source` only: Toolbox's own source document, its runtime and TLS choice. */
     toolbox: ToolboxDocumentSchema.optional(),
     runtime: z.enum(['native', 'toolbox']).optional(),
-    tls: z.object({ mode: z.enum(['verify-full', 'disable']), ca: z.string().min(1).max(65_536).optional() }).strict().optional(),
+    tls: z.strictObject({ mode: z.enum(['verify-full', 'disable']), ca: z.string().min(1).max(65_536).optional() }).optional(),
     /**
      * (crew#719) The secret VALUE this server's keychain entry will hold. The preview is probed
      * with it and it is held with the preview; `POST /mcp/servers` writes it to the OS store as
@@ -195,11 +194,10 @@ export const McpServerConfigSchema = z
      * (DES-PM-001 §3) `mcp-http` / `mcp-stdio` only: this server is a project-management system's own MCP server. A
      * human operator's only (403 `pm_source_human_only`). `gitlab` and `ado` are wave PM-2.
      */
-    pm: z.object({ system: z.enum(['github', 'jira']) }).strict().optional(),
+    pm: z.strictObject({ system: z.enum(['github', 'jira']) }).optional(),
   })
-  .strict()
   .superRefine((c, ctx) => {
-    const issue = (path: string, message: string): void => ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message });
+    const issue = (path: string, message: string): void => ctx.addIssue({ code: "custom", path: [path], message });
     const httpUrl = (raw: string | undefined): boolean => {
       try {
         const u = new URL(raw ?? '');
@@ -262,37 +260,34 @@ export const McpServerConfigSchema = z
       if (c.auth != null && (c.auth.header === undefined || c.auth.env !== undefined)) issue('auth', 'an mcp-http server injects its secret into one header: auth.header, no auth.env');
     }
   });
-export const SaveMcpServerSchema = z
-  .object({
+export const SaveMcpServerSchema = z.strictObject({
     previewHash: z.string().min(1).max(128).optional(),
     /** (G1) The write/destructive tools of the preview the operator grants: registered enabled. */
     enabledWrites: z.array(z.string().min(1).max(256)).max(512).optional(),
     /** (G2) The exact origin a `rest` server's calls go to, confirmed by a human operator. */
     allowOrigin: z.string().min(1).max(4096).optional(),
     /** (DES-KNOWLEDGE-DATA-001 §5.1) Each tool's disclosure class, reviewed by a human operator. */
-    disclosures: z.record(z.string().min(1).max(256), disclosureClass).refine((d) => Object.keys(d).length <= 512, { message: 'at most 512 tools' }).optional(),
-  })
-  .strict();
-export const PatchMcpServerSchema = z.object({ enabled: z.boolean() }).strict();
-export const PatchMcpToolSchema = z
-  .object({ enabled: z.boolean().optional(), classOverride: toolClass.nullable().optional(), disclosure: disclosureClass.nullable().optional() })
-  .strict()
-  .refine((p) => p.enabled !== undefined || p.classOverride !== undefined || p.disclosure !== undefined, { message: 'set enabled, classOverride, disclosure or a combination' });
+    disclosures: z.record(z.string().min(1).max(256), disclosureClass).refine((d) => Object.keys(d).length <= 512, {
+        error: 'at most 512 tools'
+    }).optional(),
+  });
+export const PatchMcpServerSchema = z.strictObject({ enabled: z.boolean() });
+export const PatchMcpToolSchema = z.strictObject({ enabled: z.boolean().optional(), classOverride: toolClass.nullable().optional(), disclosure: disclosureClass.nullable().optional() })
+  .refine((p) => p.enabled !== undefined || p.classOverride !== undefined || p.disclosure !== undefined, {
+      error: 'set enabled, classOverride, disclosure or a combination'
+});
 /** Unknown query parameters (a cache-buster) are ignored, as they always were. */
 export const McpServersQuerySchema = z.object({ view: z.enum(['full', 'agent']).optional() });
-export const McpRegistryRestoreSchema = z.object({ generation: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER) }).strict();
-export const PutMcpSecretSchema = z.object({ value: secretValue }).strict();
+export const McpRegistryRestoreSchema = z.strictObject({ generation: z.int().min(1).max(Number.MAX_SAFE_INTEGER) });
+export const PutMcpSecretSchema = z.strictObject({ value: secretValue });
 
-export const McpCallSchema = z
-  .object({
+export const McpCallSchema = z.strictObject({
     token: z.string().min(1).max(256),
     subject: z.string().min(1).max(512),
     args: z.record(z.string(), z.unknown()).optional(),
-  })
-  .strict();
-export const McpToolsSchema = z.object({ token: z.string().min(1).max(256) }).strict();
-export const McpPolicyPreviewSchema = z
-  .object({
+  });
+export const McpToolsSchema = z.strictObject({ token: z.string().min(1).max(256) });
+export const McpPolicyPreviewSchema = z.strictObject({
     subject: z.string().min(1).max(256).optional(),
     server: serverName.optional(),
     phaseRole: z.enum(MCP_PREVIEW_ROLES as [string, ...string[]]).optional(),
@@ -300,17 +295,16 @@ export const McpPolicyPreviewSchema = z
     mode: z.enum(MCP_RUN_MODES as [string, ...string[]]).optional(),
     phaseId: z.string().regex(/^[A-Za-z0-9_.-]{1,128}$/).optional(),
   })
-  .strict()
-  .refine((b) => b.subject === undefined || b.server === undefined, { message: 'give subject or server, not both' });
-export const McpApprovalSchema = z.object({ subject: z.string().min(5).max(256) }).strict();
-export const McpUsageQuerySchema = z
-  .object({
+  .refine((b) => b.subject === undefined || b.server === undefined, {
+      error: 'give subject or server, not both'
+});
+export const McpApprovalSchema = z.strictObject({ subject: z.string().min(5).max(256) });
+export const McpUsageQuerySchema = z.strictObject({
     days: z.coerce.number().int().min(1).max(MCP_USAGE_MAX_DAYS).optional(),
     subject: z.string().min(1).max(512).optional(),
     seat: z.string().regex(/^[A-Za-z0-9_.-]{1,64}$/).optional(),
     decision: z.enum(MCP_USAGE_DECISIONS as [string, ...string[]]).optional(),
-  })
-  .strict();
+  });
 
 export interface McpRouteDeps {
   askServer?: AskServer;

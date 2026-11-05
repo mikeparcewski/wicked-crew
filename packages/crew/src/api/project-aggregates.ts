@@ -116,8 +116,8 @@ export const ProjectRequirementsQuerySchema = z
     risk: z.enum(['risk', 'no-risk']).optional(),
     category: z.enum(['functional', 'config-data']).optional(),
     domain: z.string().optional(),
-    offset: z.coerce.number().int().min(0).default(0),
-    limit: z.coerce.number().int().min(1).max(200).default(50),
+    offset: z.coerce.number().int().min(0).prefault(0),
+    limit: z.coerce.number().int().min(1).max(200).prefault(50),
   })
   .strict();
 

@@ -74,8 +74,7 @@ const REPOS = z.array(z.string().trim().min(1).max(200)).max(8).default([]);
 const REASON = z.string().max(600).optional();
 
 /** studio's appearance scalars (`theming/appearance.ts`), as a partial patch: only the keys that change. */
-export const ThemePatchSchema = z
-  .object({
+export const ThemePatchSchema = z.strictObject({
     theme: z.enum(['wicked-dark', 'wicked-light']).optional(),
     accent_h: z.number().min(0).max(360).optional(),
     accent_s: z.number().min(0).max(100).optional(),
@@ -83,7 +82,6 @@ export const ThemePatchSchema = z
     ambient: z.boolean().optional(),
     ambient_still: z.boolean().optional(),
   })
-  .strict()
   .refine((p) => Object.keys(p).length > 0, 'a theme patch changes at least one key');
 
 const EntryBlock = z.object({

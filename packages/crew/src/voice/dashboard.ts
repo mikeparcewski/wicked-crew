@@ -27,43 +27,49 @@ const plainTitle = z.string().trim().min(1).max(40).refine((s) => !/[\r\n<>]/u.t
 /** A field path into the source's JSON: `infra[key=load].details.load1`, `runs.length`, `toReview`. */
 export const METRIC_PATH = /^[A-Za-z_][A-Za-z0-9_]*(?:\[[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9_.:-]{1,64}\])?(?:\.[A-Za-z_][A-Za-z0-9_]*(?:\[[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9_.:-]{1,64}\])?){0,7}$/u;
 
-export const VoicePanelDeclSchema = z.object({
+export const VoicePanelDeclSchema = z.strictObject({
   slot: z.literal(VOICE_DASHBOARD_SLOT),
   id: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/u),
   title: plainTitle,
-  order: z.number().int().min(1).max(99),
-}).strict();
+  order: z.int().min(1).max(99),
+});
 
 /** A user-made metric widget: a declarative plugin manifest (api-types `VoiceWidgetManifest`). */
-export const VoiceWidgetManifestSchema = z.object({
+export const VoiceWidgetManifestSchema = z.strictObject({
   id: z.string().regex(/^user\.[a-z0-9][a-z0-9-]{0,39}$/u, 'a user widget id is `user.<slug>`'),
   title: plainTitle,
   version: z.literal(1),
   kind: z.literal('metric'),
   panels: z.array(VoicePanelDeclSchema).length(1),
-  metric: z.object({
-    source: z.enum(['system', 'diagnostics']),
-    path: z.string().max(160).regex(METRIC_PATH, 'a field path like `infra[key=load].details.load1`'),
-    display: z.enum(['number', 'chart']),
-    unit: z.string().trim().max(12).optional(),
-  }).strict(),
+  metric: z.strictObject({
+      source: z.enum(['system', 'diagnostics']),
+      path: z.string().max(160).regex(METRIC_PATH, 'a field path like `infra[key=load].details.load1`'),
+      display: z.enum(['number', 'chart']),
+      unit: z.string().trim().max(12).optional(),
+    }),
   createdAt: z.string().max(40).optional(),
-}).strict();
+});
 
 const LAYOUT_ID = /^(?:builtin|user)\.[a-z0-9][a-z0-9-]{0,39}$/u;
 
-export const PutVoiceDashboardSchema = z.object({
+export const PutVoiceDashboardSchema = z.strictObject({
   layout: z.array(z.string().regex(LAYOUT_ID)).max(VOICE_DASHBOARD_MAX_LAYOUT),
   widgets: z.array(VoiceWidgetManifestSchema).max(VOICE_DASHBOARD_MAX_WIDGETS),
-}).strict().refine(
+}).refine(
   (b) => new Set(b.widgets.map((w) => w.id)).size === b.widgets.length,
-  { message: 'two user widgets share an id', path: ['widgets'] },
+  { path: ['widgets'],
+      error: 'two user widgets share an id'
+},
 ).refine(
   (b) => new Set(b.layout).size === b.layout.length,
-  { message: 'a widget is on the layout twice', path: ['layout'] },
+  { path: ['layout'],
+      error: 'a widget is on the layout twice'
+},
 ).refine(
   (b) => b.layout.every((id) => id.startsWith('builtin.') || b.widgets.some((w) => w.id === id)),
-  { message: 'the layout names a user widget that is not in `widgets`', path: ['layout'] },
+  { path: ['layout'],
+      error: 'the layout names a user widget that is not in `widgets`'
+},
 );
 
 export type VoiceWidgetManifest = z.infer<typeof VoiceWidgetManifestSchema>;

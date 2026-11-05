@@ -17,7 +17,7 @@ import { voiceBlock } from './voice.js';
 
 const V = API_PREFIX;
 
-export const PersonaPutSchema = z.object({ scope: z.string().min(1).max(200), persona: PersonaInputSchema }).strict();
+export const PersonaPutSchema = z.strictObject({ scope: z.string().min(1).max(200), persona: PersonaInputSchema });
 
 export interface PersonaRouteDeps {
   store: PersonaStore;

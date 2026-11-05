@@ -57,48 +57,42 @@ const column = z.string().regex(COLUMN_RE, 'a column is 1-128 of A-Z a-z 0-9 _ -
 const color = z.string().regex(COLOR_RE, 'a colour is #rrggbb');
 const text = (max: number) => z.string().min(1).max(max);
 const binding = z.custom<AppBindingRef>((v) => typeof v === 'string' && BINDING_RE.test(v), {
-  message: 'a binding is filter.<id>, form.<field>, row.<column> or url.<name>',
+    error: 'a binding is filter.<id>, form.<field>, row.<column> or url.<name>'
 });
 const bindings = z.record(z.string().regex(PARAM_RE), binding).refine((r) => Object.keys(r).length <= 30, 'at most 30 bindings');
 
-const BoxSchema = z
-  .object({
-    x: z.number().int().min(0).max(11),
-    y: z.number().int().min(0).max(999),
-    w: z.number().int().min(1).max(12),
-    h: z.number().int().min(1).max(50),
+const BoxSchema = z.strictObject({
+    x: z.int().min(0).max(11),
+    y: z.int().min(0).max(999),
+    w: z.int().min(1).max(12),
+    h: z.int().min(1).max(50),
   })
-  .strict()
-  .refine((b) => b.x + b.w <= 12, { message: 'x + w must be at most 12', path: ['w'] });
+  .refine((b) => b.x + b.w <= 12, { path: ['w'],
+      error: 'x + w must be at most 12'
+});
 
-const ThemeSchema = z
-  .object({
+const ThemeSchema = z.strictObject({
     mode: z.enum(['light', 'dark', 'auto']).optional(),
     accent: color.optional(),
     palette: z.array(color).max(12).optional(),
     density: z.enum(['comfortable', 'compact']).optional(),
-  })
-  .strict();
+  });
 
 const FormatSchema = z.union([
-  z
-    .object({
-      kind: z.literal('currency'),
-      currency: z.string().regex(/^[A-Z]{3}$/, 'a currency is an ISO 4217 code'),
-      decimals: z.number().int().min(0).max(10).optional(),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.enum(['text', 'number', 'percent', 'date', 'datetime', 'duration']),
-      decimals: z.number().int().min(0).max(10).optional(),
-    })
-    .strict(),
+  z.strictObject({
+          kind: z.literal('currency'),
+          currency: z.string().regex(/^[A-Z]{3}$/, 'a currency is an ISO 4217 code'),
+          decimals: z.int().min(0).max(10).optional(),
+        }),
+  z.strictObject({
+          kind: z.enum(['text', 'number', 'percent', 'date', 'datetime', 'duration']),
+          decimals: z.int().min(0).max(10).optional(),
+        }),
 ]);
 
-const QueryBindingSchema = z.object({ query: namedId, params: bindings.optional() }).strict();
-const ActionBindingSchema = z.object({ label: text(60), action: namedId, params: bindings.optional() }).strict();
-const OptionSchema = z.object({ value: z.string().max(200), label: z.string().max(200).optional() }).strict();
+const QueryBindingSchema = z.strictObject({ query: namedId, params: bindings.optional() });
+const ActionBindingSchema = z.strictObject({ label: text(60), action: namedId, params: bindings.optional() });
+const OptionSchema = z.strictObject({ value: z.string().max(200), label: z.string().max(200).optional() });
 
 const base = {
   id,
@@ -107,35 +101,30 @@ const base = {
   hideOnPhone: z.boolean().optional(),
 };
 
-const TableSchema = z
-  .object({
+const TableSchema = z.strictObject({
     ...base,
     type: z.literal('table'),
     data: QueryBindingSchema,
     columns: z
-      .array(z.object({ column, label: z.string().max(120).optional(), format: FormatSchema.optional() }).strict())
+      .array(z.strictObject({ column, label: z.string().max(120).optional(), format: FormatSchema.optional() }))
       .min(1)
       .max(200)
       .optional(),
     rowActions: z.array(ActionBindingSchema).max(4).optional(),
-    pageSize: z.number().int().min(5).max(500).optional(),
-  })
-  .strict();
+    pageSize: z.int().min(5).max(500).optional(),
+  });
 
-const ChartSchema = z
-  .object({
+const ChartSchema = z.strictObject({
     ...base,
     type: z.literal('chart'),
     chart: z.enum(['line', 'bar', 'area', 'pie']),
     data: QueryBindingSchema,
     x: column,
-    series: z.array(z.object({ column, label: z.string().max(120).optional(), color: color.optional() }).strict()).min(1).max(12),
+    series: z.array(z.strictObject({ column, label: z.string().max(120).optional(), color: color.optional() })).min(1).max(12),
     stacked: z.boolean().optional(),
-  })
-  .strict();
+  });
 
-const KpiSchema = z
-  .object({
+const KpiSchema = z.strictObject({
     ...base,
     type: z.literal('kpi'),
     data: QueryBindingSchema,
@@ -143,55 +132,45 @@ const KpiSchema = z
     format: FormatSchema.optional(),
     delta: column.optional(),
     caption: z.string().max(120).optional(),
-  })
-  .strict();
+  });
 
-const TextSchema = z
-  .object({ ...base, type: z.literal('text'), text: text(4000), style: z.enum(['heading', 'body', 'caption']).optional() })
-  .strict();
+const TextSchema = z.strictObject({ ...base, type: z.literal('text'), text: text(4000), style: z.enum(['heading', 'body', 'caption']).optional() });
 
-const FilterSchema = z
-  .object({
+const FilterSchema = z.strictObject({
     ...base,
     type: z.literal('filter'),
     filter: z.enum(['select', 'date-range', 'search']),
     label: z.string().max(120).optional(),
     options: z
       .discriminatedUnion('kind', [
-        z.object({ kind: z.literal('query'), query: QueryBindingSchema, value: column, label: column.optional() }).strict(),
-        z.object({ kind: z.literal('values'), values: z.array(OptionSchema).min(1).max(200) }).strict(),
+        z.strictObject({ kind: z.literal('query'), query: QueryBindingSchema, value: column, label: column.optional() }),
+        z.strictObject({ kind: z.literal('values'), values: z.array(OptionSchema).min(1).max(200) }),
       ])
       .optional(),
-    default: z.union([z.string().max(200), z.object({ lastDays: z.number().int().min(1).max(3660) }).strict()]).optional(),
-  })
-  .strict();
+    default: z.union([z.string().max(200), z.strictObject({ lastDays: z.int().min(1).max(3660) })]).optional(),
+  });
 
-const FormSchema = z
-  .object({
+const FormSchema = z.strictObject({
     ...base,
     type: z.literal('form'),
     fields: z
       .array(
-        z
-          .object({
-            name: z.string().regex(FIELD_RE, 'a field name is 1-64 of a-z 0-9 _, starting with a letter'),
-            label: z.string().max(120).optional(),
-            input: z.enum(['text', 'textarea', 'number', 'date', 'checkbox', 'select']),
-            required: z.boolean().optional(),
-            options: z.array(OptionSchema).min(1).max(200).optional(),
-          })
-          .strict(),
+        z.strictObject({
+                      name: z.string().regex(FIELD_RE, 'a field name is 1-64 of a-z 0-9 _, starting with a letter'),
+                      label: z.string().max(120).optional(),
+                      input: z.enum(['text', 'textarea', 'number', 'date', 'checkbox', 'select']),
+                      required: z.boolean().optional(),
+                      options: z.array(OptionSchema).min(1).max(200).optional(),
+                    }),
       )
       .min(1)
       .max(30),
     submit: ActionBindingSchema,
-  })
-  .strict();
+  });
 
-const ButtonSchema = z.object({ ...base, type: z.literal('button'), action: ActionBindingSchema }).strict();
+const ButtonSchema = z.strictObject({ ...base, type: z.literal('button'), action: ActionBindingSchema });
 
-const ImageSchema = z
-  .object({
+const ImageSchema = z.strictObject({
     ...base,
     type: z.literal('image'),
     src: z
@@ -203,20 +182,17 @@ const ImageSchema = z
         return n !== null && n <= IMAGE_MAX_BYTES;
       }, 'an image is whole base64 of at most 256 KB'),
     alt: z.string().max(300),
-  })
-  .strict();
+  });
 
-const LinkSchema = z
-  .object({
+const LinkSchema = z.strictObject({
     ...base,
     type: z.literal('link'),
     label: text(120),
     to: z.discriminatedUnion('kind', [
-      z.object({ kind: z.literal('page'), page: id, params: bindings.optional() }).strict(),
-      z.object({ kind: z.literal('href'), href: z.string().max(2048) }).strict(),
+      z.strictObject({ kind: z.literal('page'), page: id, params: bindings.optional() }),
+      z.strictObject({ kind: z.literal('href'), href: z.string().max(2048) }),
     ]),
-  })
-  .strict();
+  });
 
 const ComponentSchema = z.discriminatedUnion('type', [
   TableSchema,
@@ -230,84 +206,75 @@ const ComponentSchema = z.discriminatedUnion('type', [
   LinkSchema,
 ]);
 
-const PageSchema = z.object({ id, title: text(80), components: z.array(ComponentSchema).max(100) }).strict();
+const PageSchema = z.strictObject({ id, title: text(80), components: z.array(ComponentSchema).max(100) });
 
 const scalar = z.union([z.string().max(1000), z.number().finite(), z.boolean()]);
 
-const ParamSchema = z
-  .object({
+const ParamSchema = z.strictObject({
     type: z.enum(['string', 'number', 'integer', 'boolean', 'array']),
-    items: z.object({ type: z.enum(['string', 'number', 'integer']) }).strict().optional(),
+    items: z.strictObject({ type: z.enum(['string', 'number', 'integer']) }).optional(),
     format: z.enum(['date', 'date-time', 'uuid', 'email']).optional(),
     enum: z.array(z.union([z.string().max(200), z.number().finite()])).min(1).max(200).optional(),
     minimum: z.number().finite().optional(),
     maximum: z.number().finite().optional(),
-    minLength: z.number().int().min(0).max(100_000).optional(),
-    maxLength: z.number().int().min(0).max(100_000).optional(),
+    minLength: z.int().min(0).max(100_000).optional(),
+    maxLength: z.int().min(0).max(100_000).optional(),
     default: scalar.optional(),
     description: z.string().max(500).optional(),
     from: z.enum(['viewer.email', 'viewer.name', 'viewer.id', 'viewer.groups']).optional(),
-  })
-  .strict();
+  });
 
-const ParamsSchema = z
-  .object({
+const ParamsSchema = z.strictObject({
     type: z.literal('object'),
     properties: z.record(z.string().regex(PARAM_RE, 'a parameter name is 1-64 of A-Z a-z 0-9 _'), ParamSchema),
     required: z.array(z.string()).max(30).optional(),
   })
-  .strict()
   .refine((p) => Object.keys(p.properties).length <= 30, 'at most 30 parameters');
 
 const RefreshSchema = z.union([
-  z.object({ mode: z.literal('load') }).strict(),
-  z.object({ mode: z.literal('every'), seconds: z.number().int().min(15).max(86_400) }).strict(),
-  z.object({ mode: z.literal('events') }).strict(),
+  z.strictObject({ mode: z.literal('load') }),
+  z.strictObject({ mode: z.literal('every'), seconds: z.int().min(15).max(86_400) }),
+  z.strictObject({ mode: z.literal('events') }),
 ]);
 
-const QuerySchema = z
-  .object({
+const QuerySchema = z.strictObject({
     id: namedId,
     source: sourceName,
     kind: z.enum(['sql', 'graphql', 'rest', 'mcp', 'crew']),
     description: z.string().max(500).optional(),
     params: ParamsSchema.optional(),
-    output: z.array(z.object({ name: column, type: z.enum(['string', 'number', 'integer', 'boolean', 'date', 'datetime']), nullable: z.boolean().optional() }).strict()).min(1).max(200),
+    output: z.array(z.strictObject({ name: column, type: z.enum(['string', 'number', 'integer', 'boolean', 'date', 'datetime']), nullable: z.boolean().optional() })).min(1).max(200),
     rowPath: z.string().max(256).regex(JSON_PATH_RE, 'a row path is $ then .name, [*] or [n] steps').optional(),
     morePath: z.string().max(256).regex(JSON_PATH_RE, 'a more path is $ then .name, [*] or [n] steps').optional(),
     refresh: RefreshSchema.optional(),
     public: z.boolean().optional(),
-  })
-  .strict();
+  });
 
-const ParamValueSchema = z.object({ kind: z.literal('param'), name: z.string().regex(PARAM_RE) }).strict();
+const ParamValueSchema = z.strictObject({ kind: z.literal('param'), name: z.string().regex(PARAM_RE) });
 const ValueSchema = z.discriminatedUnion('kind', [
   ParamValueSchema,
-  z.object({ kind: z.literal('literal'), value: z.union([z.string().max(1000), z.number().finite(), z.boolean(), z.null()]) }).strict(),
-  z.object({ kind: z.literal('viewer'), claim: z.enum(['email', 'name', 'id']) }).strict(),
-  z.object({ kind: z.literal('crew'), value: z.enum(['now', 'uuid']) }).strict(),
+  z.strictObject({ kind: z.literal('literal'), value: z.union([z.string().max(1000), z.number().finite(), z.boolean(), z.null()]) }),
+  z.strictObject({ kind: z.literal('viewer'), claim: z.enum(['email', 'name', 'id']) }),
+  z.strictObject({ kind: z.literal('crew'), value: z.enum(['now', 'uuid']) }),
 ]);
 
-const ApiActionSchema = z
-  .object({
+const ApiActionSchema = z.strictObject({
     id: namedId,
     kind: z.literal('api'),
     source: sourceName,
     call: z.discriminatedUnion('kind', [
-      z.object({ kind: z.literal('tool'), tool: z.string().regex(TOOL_RE, 'a tool name is 1-128 of A-Z a-z 0-9 _ . -') }).strict(),
-      z.object({
-        kind: z.literal('mutation'),
-        mutation: text(16_384).refine((m) => Buffer.byteLength(m, 'utf8') <= 16_384, 'a mutation is at most 16 KB of UTF-8'),
-      }).strict(),
+      z.strictObject({ kind: z.literal('tool'), tool: z.string().regex(TOOL_RE, 'a tool name is 1-128 of A-Z a-z 0-9 _ . -') }),
+      z.strictObject({
+                kind: z.literal('mutation'),
+                mutation: text(16_384).refine((m) => Buffer.byteLength(m, 'utf8') <= 16_384, 'a mutation is at most 16 KB of UTF-8'),
+              }),
     ]),
     args: z.record(z.string().min(1).max(128), ValueSchema).refine((r) => Object.keys(r).length <= 50, 'at most 50 arguments'),
     params: ParamsSchema.optional(),
     description: z.string().max(500).optional(),
-  })
-  .strict();
+  });
 
-const RowWriteActionSchema = z
-  .object({
+const RowWriteActionSchema = z.strictObject({
     id: namedId,
     kind: z.literal('row-write'),
     source: sourceName,
@@ -322,14 +289,12 @@ const RowWriteActionSchema = z
       .refine((k) => Object.keys(k).length >= 1 && Object.keys(k).length <= 16, 'a key names 1-16 columns'),
     params: ParamsSchema.optional(),
     description: z.string().max(500).optional(),
-  })
-  .strict();
+  });
 
 const ActionSchema = z.discriminatedUnion('kind', [ApiActionSchema, RowWriteActionSchema]);
 
 /** The whole `apps.json`. */
-export const AppSpecSchema = z
-  .object({
+export const AppSpecSchema = z.strictObject({
     schema: z.literal('wicked.apps/v1'),
     name: text(120),
     description: z.string().max(2000).optional(),
@@ -338,8 +303,7 @@ export const AppSpecSchema = z
     queries: z.array(QuerySchema).max(100),
     actions: z.array(ActionSchema).max(50),
     linkHosts: z.array(z.string().regex(HOST_RE, 'a link host is a lower-case host name, no scheme or port')).max(50),
-  })
-  .strict();
+  });
 
 /** The largest `apps.json` crew reads (the spec, images included). */
 export const APP_SPEC_MAX_BYTES = 2 * 1024 * 1024;
@@ -470,7 +434,7 @@ function budgetedFindings(value: unknown): AppCheckFinding[] {
   // A root that is not an object (null, a list, a scalar) has no pieces to walk (codex r5).
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return out;
   const doc = value as { pages?: unknown; queries?: unknown; actions?: unknown };
-  const lists: Array<[unknown, z.ZodTypeAny, (i: number, p?: number) => (string | number)[]]> = [];
+  const lists: Array<[unknown, z.ZodType, (i: number, p?: number) => (string | number)[]]> = [];
   if (Array.isArray(doc.pages)) {
     doc.pages.forEach((page, pi) => {
       const comps = (page as { components?: unknown } | null)?.components;

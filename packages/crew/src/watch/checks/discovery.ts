@@ -195,8 +195,8 @@ function coverageOf(state: RunWatchState, run?: { ended: boolean }): { state: 'c
 export const addedByHandCheck: WatchCheck<AddedByHandParams, AddedByHandThreshold> = {
   name: 'deterministic:added_by_hand',
   lane: 'deterministic',
-  paramsSchema: z.object({ catalog: z.array(z.string().min(1).max(64)).min(1).max(32) }).strict() as unknown as z.ZodType<AddedByHandParams>,
-  thresholdSchema: z.object({ consecutive: z.number().int().min(2).max(100).default(5) }).strict() as unknown as z.ZodType<AddedByHandThreshold>,
+  paramsSchema: z.strictObject({ catalog: z.array(z.string().min(1).max(64)).min(1).max(32) }) as unknown as z.ZodType<AddedByHandParams>,
+  thresholdSchema: z.strictObject({ consecutive: z.int().min(2).max(100).default(5) }) as unknown as z.ZodType<AddedByHandThreshold>,
   evaluate: (input, state, params, threshold, ctx) => discover(input, state, ctx, (snap) => addedByHandProposals(snap, params, threshold)),
   coverage: coverageOf,
   describe: (t) => `When a step you added by hand appears in ${t.consecutive} consecutive runs of a project (a testing rule to make it the default)`,
@@ -205,10 +205,8 @@ export const addedByHandCheck: WatchCheck<AddedByHandParams, AddedByHandThreshol
 export const whatCatchesCheck: WatchCheck<Record<string, never>, WhatCatchesThreshold> = {
   name: 'deterministic:what_catches',
   lane: 'deterministic',
-  paramsSchema: z.object({}).strict() as unknown as z.ZodType<Record<string, never>>,
-  thresholdSchema: z
-    .object({ times: z.number().int().min(1).max(100).default(3), window_days: z.number().int().min(1).max(365).default(30) })
-    .strict() as unknown as z.ZodType<WhatCatchesThreshold>,
+  paramsSchema: z.strictObject({}) as unknown as z.ZodType<Record<string, never>>,
+  thresholdSchema: z.strictObject({ times: z.int().min(1).max(100).default(3), window_days: z.int().min(1).max(365).default(30) }) as unknown as z.ZodType<WhatCatchesThreshold>,
   evaluate: (input, state, _params, threshold, ctx) => discover(input, state, ctx, (snap) => whatCatchesProposals(snap, threshold, ctx.now())),
   coverage: coverageOf,
   describe: (t) => `When a walkthrough fails while the same run's tests passed ${t.times} times in ${t.window_days} days (hold ${TST_1002})`,

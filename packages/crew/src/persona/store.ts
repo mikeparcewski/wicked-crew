@@ -24,20 +24,18 @@ export type PersonaDialName = (typeof PERSONA_DIALS)[number];
 export const PERSONA_HABITS = ['says-unchecked', 'tables', 'cites', 'names'] as const;
 export type PersonaHabit = (typeof PERSONA_HABITS)[number];
 
-const Dial = z.number().int().min(0).max(2);
+const Dial = z.int().min(0).max(2);
 
 /** What a person sends (`PUT /persona`): the server adds `version` and `updatedAt`. */
-export const PersonaInputSchema = z
-  .object({
+export const PersonaInputSchema = z.strictObject({
     // One line of plain text: a line break or control character could open a section of its own in the
     // chat statement the voice block rides (codex + agy on #1236).
     name: z.string().trim().min(1).max(40).regex(/^[^\p{Cc}\p{Zl}\p{Zp}]+$/u, 'name is one line of text'),
     colour: z.string().regex(/^#[0-9a-fA-F]{6}$/u, 'colour is a #rrggbb hex'),
-    dials: z.object({ length: Dial, warmth: Dial, pushback: Dial, initiative: Dial }).strict(),
+    dials: z.strictObject({ length: Dial, warmth: Dial, pushback: Dial, initiative: Dial }),
     habits: z.array(z.enum(PERSONA_HABITS)).max(PERSONA_HABITS.length),
     notes: z.string().trim().max(500).optional(),
-  })
-  .strict();
+  });
 export type PersonaInput = z.infer<typeof PersonaInputSchema>;
 
 export interface Persona extends PersonaInput {
@@ -60,10 +58,10 @@ export function parseScope(raw: unknown): PersonaScope | null {
   return PROJECT_ID.test(id) ? `project:${id}` : null;
 }
 
-const StoredSchema = PersonaInputSchema.extend({
-  version: z.number().int().min(1),
-  updatedAt: z.number().int().min(0),
-}).strict();
+const StoredSchema = z.strictObject(PersonaInputSchema.extend({
+  version: z.int().min(1),
+  updatedAt: z.int().min(0),
+}).shape);
 
 interface PersistedState {
   v: 1;

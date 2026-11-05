@@ -64,12 +64,10 @@ export const EMITTABLE_TYPES: readonly string[] = [
 
 /** The request body: a whitelisted type plus that type's own payload. Strict — an unknown key is
  *  a 400, not a silently-dropped field. */
-export const EmitInteractiveEventSchema = z
-  .object({
+export const EmitInteractiveEventSchema = z.strictObject({
     type: z.string().min(1).max(128),
     payload: z.record(z.string(), z.unknown()).optional(),
-  })
-  .strict();
+  });
 
 export interface InteractiveRelay {
   /**

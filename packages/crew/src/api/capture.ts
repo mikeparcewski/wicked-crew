@@ -50,37 +50,29 @@ export const CAPTURE_IMAGE_TYPES: Readonly<Record<string, readonly string[]>> = 
 };
 
 const NameSchema = z.string().min(1).max(128);
-const CaptureTextFileSchema = z.object({ name: NameSchema, text: z.string() }).strict();
-const CaptureImageFileSchema = z
-  .object({ name: NameSchema, mediaType: z.string().min(1), dataBase64: z.string().min(1) })
-  .strict();
+const CaptureTextFileSchema = z.strictObject({ name: NameSchema, text: z.string() });
+const CaptureImageFileSchema = z.strictObject({ name: NameSchema, mediaType: z.string().min(1), dataBase64: z.string().min(1) });
 
-export const CaptureSchema = z
-  .object({
+export const CaptureSchema = z.strictObject({
     notes: z.string().optional(),
     files: z.array(z.union([CaptureTextFileSchema, CaptureImageFileSchema])).max(CAPTURE_MAX_FILES).optional(),
     /** wicked-core#850 — the explicit reduced-assurance opt-in, forwarded to `POST /runs` only when `true`. */
     reducedAssurance: z.boolean().optional(),
-  })
-  .strict();
+  });
 
 /** `POST /proposals/:id/approve` body — present only for an accept WITH an edit. */
-export const ApproveEditSchema = z
-  .object({
+export const ApproveEditSchema = z.strictObject({
     content: z.string().trim().min(1).max(16 * 1024).optional(),
     reach: z.enum(['project', 'pattern', 'operator']).optional(),
-  })
-  .strict();
+  });
 
 /** `POST /proposals` body — one preference a person files from a skin (studio's takes). Strict: the
  *  kind, tier and capture marker are the daemon's, never the caller's. */
-export const FileProposalSchema = z
-  .object({
+export const FileProposalSchema = z.strictObject({
     content: z.string().trim().min(1).max(4000),
     project: z.string().trim().min(1).max(128).optional(),
     source: z.string().trim().min(1).max(256).optional(),
-  })
-  .strict();
+  });
 
 /** Where a capture's materials land: a per-run inbox on the daemon host (the steering-author
  *  pattern — runs read the daemon's filesystem; only paths ride the problem statement). */

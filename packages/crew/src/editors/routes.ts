@@ -140,7 +140,7 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
     },
   );
 
-  const InstallSchema = z.object({ packRoot: z.string().min(1), enabled: z.boolean().optional() }).strict();
+  const InstallSchema = z.strictObject({ packRoot: z.string().min(1), enabled: z.boolean().optional() });
   app.post(
     `${V}/editors`,
     { config: { manifest: { responseType: 'InstallEditorResponse', statusCodes: [200, 400, 403, 404, 409, 422, 501] } } },
@@ -206,7 +206,7 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
     },
   );
 
-  const EnabledSchema = z.object({ enabled: z.boolean() }).strict();
+  const EnabledSchema = z.strictObject({ enabled: z.boolean() });
   app.post(
     `${V}/editors/:id/enabled`,
     { config: { manifest: { responseType: 'EditorView', statusCodes: [200, 400, 403, 404] } } },

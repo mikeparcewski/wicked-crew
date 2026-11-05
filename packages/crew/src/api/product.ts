@@ -29,16 +29,14 @@ export const COMPOSE_MAX_REQUIREMENTS = 40;
  *  instructions at 8 KB on `plan.proposed`, and a cut there would lose the artifact shape). */
 export const COMPOSE_INSTRUCTIONS_MAX_BYTES = 7600;
 
-export const ProductComposeSchema = z
-  .object({
+export const ProductComposeSchema = z.strictObject({
     requirements: z
-      .array(z.object({ repoId: z.string().min(1), key: z.string().min(1) }).strict())
+      .array(z.strictObject({ repoId: z.string().min(1), key: z.string().min(1) }))
       .min(1)
       .max(COMPOSE_MAX_REQUIREMENTS),
     /** The operator's own steer for the draft (grouping, scope, tone). */
     instructions: z.string().max(500).optional(),
-  })
-  .strict();
+  });
 
 const oneLine = (s: string): string => s.replace(/\s+/gu, ' ').trim();
 /** `s` cut to at most `max` UTF-8 bytes on a character boundary, `…` marking a cut. */

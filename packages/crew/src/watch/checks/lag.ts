@@ -10,12 +10,10 @@
 import { z } from 'zod';
 import type { WatchCheck } from '../types.js';
 
-const Threshold = z
-  .object({
-    queue_depth: z.number().int().min(1).max(100_000),
-    tail_lag_ms: z.number().int().min(1_000).max(3_600_000),
-  })
-  .strict();
+const Threshold = z.strictObject({
+    queue_depth: z.int().min(1).max(100_000),
+    tail_lag_ms: z.int().min(1_000).max(3_600_000),
+  });
 type Threshold = z.infer<typeof Threshold>;
 
 interface LagBag {
@@ -26,7 +24,7 @@ interface LagBag {
 export const lagCheck: WatchCheck<Record<string, never>, Threshold> = {
   name: 'deterministic:lag',
   lane: 'deterministic',
-  paramsSchema: z.object({}).strict() as unknown as z.ZodType<Record<string, never>>,
+  paramsSchema: z.strictObject({}) as unknown as z.ZodType<Record<string, never>>,
   thresholdSchema: Threshold,
   evaluate(_input, state, _params, t, ctx) {
     const s = ctx.stats();

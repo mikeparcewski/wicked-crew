@@ -51,8 +51,8 @@ afterEach(async () => {
 const pointCheck: WatchCheck = {
   name: 'deterministic:test_point',
   lane: 'deterministic',
-  paramsSchema: z.object({}).strict() as unknown as z.ZodType<Record<string, unknown>>,
-  thresholdSchema: z.object({}).strict() as unknown as z.ZodType<Record<string, unknown>>,
+  paramsSchema: z.strictObject({}) as unknown as z.ZodType<Record<string, unknown>>,
+  thresholdSchema: z.strictObject({}) as unknown as z.ZodType<Record<string, unknown>>,
   evaluate(input) {
     const e = (input.source === 'bus' ? input.event['payload'] : input.event) as { ord?: number; attempt?: number; clear?: boolean };
     const subject = `${e.ord}:${e.attempt}:testPoint`;

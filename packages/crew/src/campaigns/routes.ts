@@ -55,29 +55,24 @@ function invalidBody(err: z.ZodError, what: string): { error: string; details: z
   return { error, details: err.issues };
 }
 
-const ScenarioSchema = z
-  .object({
+const ScenarioSchema = z.strictObject({
     id: z.string().min(1),
     title: z.string().optional(),
     deps: z.array(z.string()).optional(),
     depsCondition: z.enum(['on_success', 'on_terminal']).optional(),
-    tool: z.object({ cmd: z.array(z.string()).min(1) }).strict().optional(),
-    agent: z
-      .object({ problem: z.string().min(1), workflow: z.string().optional() })
-      .strict()
+    tool: z.strictObject({ cmd: z.array(z.string()).min(1) }).optional(),
+    agent: z.strictObject({ problem: z.string().min(1), workflow: z.string().optional() })
       .optional(),
     repoRef: z.string().optional(),
-  })
-  .strict();
+  });
 
 // Exported for tests/wire-contract.test.ts — the request-direction drift pin (task #84).
-export const LaunchCampaignSchema = z
-  .object({
+export const LaunchCampaignSchema = z.strictObject({
     id: z.string().optional(),
     name: z.string().max(200).optional(),
     scenarios: z.array(ScenarioSchema).min(1),
     policy: z.enum(['fail_fast', 'continue_independent', 'human_gate_on_failure']).optional(),
-    maxConcurrency: z.number().int().min(1).max(64).optional(),
+    maxConcurrency: z.int().min(1).max(64).optional(),
     // (DES-L1 PR-1D / core #484, wicked-core ≥ 0.7.27) What an UNATTENDED campaign does when a node
     // parks at the engine's ESCALATION gate: `hold` (engine default — the node waits for a human) or
     // `auto_reject` (the campaign answers that gate with Reject; the node cancels, dependents follow
@@ -93,8 +88,7 @@ export const LaunchCampaignSchema = z
       .array(z.string().min(1))
       .min(1, 'repoRefs must name at least one registered repo — omit the field to scope by project alone')
       .optional(),
-  })
-  .strict();
+  });
 
 export interface CampaignRoutesDeps extends RollupDeps {
   audit: AuditLog;

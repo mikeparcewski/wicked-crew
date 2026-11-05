@@ -37,7 +37,7 @@ export const HELP_ANSWERED_TYPE = 'wicked.team.help.answered';
 const TEXT_MAX = 160;
 
 type Empty = Record<string, never>;
-const empty = z.object({}).strict() as unknown as z.ZodType<Empty>;
+const empty = z.strictObject({}) as unknown as z.ZodType<Empty>;
 
 /** The team envelope + payload of a pulled bus row (`{…, payload:{run_id, ord, attempt, by, …}}`). */
 function payloadOf(input: KeyPointInput): Record<string, unknown> {

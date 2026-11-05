@@ -47,13 +47,11 @@ export interface DefaultEvalDeps {
   newId?: () => string;
 }
 
-const RunBody = z
-  .object({
+const RunBody = z.strictObject({
     project: z.string().trim().min(1).max(200).optional(),
     suites: z.array(z.enum(SUITE_IDS)).min(1).optional(),
     baseline: z.boolean().optional(),
-  })
-  .strict();
+  });
 
 /** The cases this daemon's own store yields right now (and the baseline, when asked for). */
 export async function gatherCases(deps: DefaultEvalDeps, opts: { baseline: boolean }): Promise<EvalCase[]> {

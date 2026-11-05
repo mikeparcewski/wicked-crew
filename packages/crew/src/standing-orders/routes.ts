@@ -20,11 +20,9 @@ import { refusal, StandingOrderRuleSchema, type StandingOrderRule, type Standing
 
 const V = API_PREFIX;
 
-export const CreateStandingOrderSchema = z
-  .object({ text: z.string().trim().min(1).max(500), rule: StandingOrderRuleSchema })
-  .strict();
-export const ParseStandingOrderSchema = z.object({ text: z.string().trim().min(1).max(500) }).strict();
-export const StandingAwaySchema = z.object({ away: z.boolean() }).strict();
+export const CreateStandingOrderSchema = z.strictObject({ text: z.string().trim().min(1).max(500), rule: StandingOrderRuleSchema });
+export const ParseStandingOrderSchema = z.strictObject({ text: z.string().trim().min(1).max(500) });
+export const StandingAwaySchema = z.strictObject({ away: z.boolean() });
 
 /** The seat's parse: a rule it produced, or why it could not (its own answer, for the person). */
 export type ParseOutcome =
