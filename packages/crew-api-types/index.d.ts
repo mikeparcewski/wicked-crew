@@ -360,7 +360,7 @@ export interface HealthCapabilities {
    */
   powerMode?: boolean | undefined;
   /**
-   * (api-types 0.187.0, crew#1139) A `plan_approval` approval carries the operator's note: `GateDecision.amend`
+   * (api-types 0.188.0, crew#1139) A `plan_approval` approval carries the operator's note: `GateDecision.amend`
    * on `{approve: true}` or `{approve: true, plan}` at a plan gate lands on the first creator step the plan
    * releases (else its first step) as `unitReworkAmended`. ABSENT or `false` (an engine without it refuses the
    * note): offer no note field on the plan card.
@@ -2478,7 +2478,7 @@ export interface GateDecision {
    * phase at or after the cursor receives it (`unitReworkAmended{scope: 'creator'}`) while the
    * cursor dispatches unamended: the intake steer that must reach the fix phase, not triage.
    * Identical text already present on the target is not appended twice. At a `plan_approval` gate
-   * it does not apply (api-types 0.187.0): the note lands as {@link GateDecision.plan} says.
+   * it does not apply (api-types 0.188.0): the note lands as {@link GateDecision.plan} says.
    */
   amendScope?: 'cursor' | 'creator';
   /**
@@ -2490,7 +2490,7 @@ export interface GateDecision {
    * and `action` omitted or `'edit_plan'`; no `amendScope` (a 400). A plain approve (no `plan`)
    * releases the held plan as it is; `approve: false` rejects (cancels).
    *
-   * THE OPERATOR'S NOTE (api-types 0.187.0, crew#1139; {@link HealthCapabilities.planGateNote}): `amend`
+   * THE OPERATOR'S NOTE (api-types 0.188.0, crew#1139; {@link HealthCapabilities.planGateNote}): `amend`
    * on a plan gate's approve, with or without `plan`, is carried to the steps the plan releases. It lands
    * once the answer applies (after an edit's re-plan, so on the edited plan's units) on the FIRST CREATOR
    * step at or after the cursor (`unitReworkAmended{scope: 'creator'}`), else on the cursor step

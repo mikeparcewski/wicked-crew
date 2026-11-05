@@ -47,7 +47,7 @@ mentioned only where a daemon release depends on them.
   Q-PM2: attaching a `crew.repo` member is a person's (403 `repo_attach_human_only`), and a non-human re-registering
   an existing repo id at another checkout gets 409 `repo_exists`. `GET /health` `capabilities.trackerLinks: true`.
 
-- **A plan approval carries the operator's note (api-types 0.187.0, crew#1139).** `POST /runs/:id/gate` at a
+- **A plan approval carries the operator's note (api-types 0.188.0, crew#1139).** `POST /runs/:id/gate` at a
   `plan_approval` gate takes `amend` on `{approve: true}` and on `{approve: true, plan}`: the engine lands it on the
   first creator step the plan releases (after an edit's re-plan), else its first step, as `unitReworkAmended`. A blank
   note is no note; `amendScope` beside `plan` is still a 400. `GET /health.capabilities.planGateNote` says whether the

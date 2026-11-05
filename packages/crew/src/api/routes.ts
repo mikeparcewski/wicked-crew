@@ -2176,7 +2176,7 @@ export function registerRoutes(
       workingDoc: app.hasRoute({ method: 'GET', url: `${V}/runs/:id/working-doc` }),
       // (api-types 0.149.0) Power mode: the routes are served AND the engine runs it.
       powerMode: powerSupported(),
-      // (api-types 0.187.0, crew#1139) A plan approval carries the operator's note (`GateDecision.amend` at a
+      // (api-types 0.188.0, crew#1139) A plan approval carries the operator's note (`GateDecision.amend` at a
       // plan_approval gate, with or without `plan`): the engine lands it on the plan's first creator step.
       planGateNote: typeof adapter.supportsPlanGateNote === 'function' && adapter.supportsPlanGateNote(),
       // (api-types 0.156.0, DES-VOICE) Voice mode's routes are served: local speech to text, the model with
