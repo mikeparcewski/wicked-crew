@@ -30,7 +30,7 @@ import { configOf, pmDescriptorHash } from '../../mcp/registry.js';
 import { mcpStateDir, type McpRegistryStore } from '../../mcp/registry-store.js';
 import { bindingInForce } from './bindings.js';
 import type { TrackerAddresses } from './addresses.js';
-import { type PmGate, projectOptsOf } from './gate-pm.js';
+import { type PmGate, projectOptsVia } from './gate-pm.js';
 import { candidatesFor, githubRef, jiraRefs, type PmRef } from './issues.js';
 import { jiraCategory, readPayload } from './bindings.js';
 import { linkedSetOf, type PmEntry, pmEntriesOf, type TrackerSetEntry, trackerSetOf, unitRepos } from './set.js';
@@ -135,7 +135,7 @@ async function plan(deps: TrackerActionDeps, runId: string, body: z.infer<typeof
     const prepared = binding.bindArgs(ref.system === 'jira' ? { cloudId: t.tenant, issueIdOrKey: key } : { method: 'get', owner, repo, issue_number: ref.number }, linked);
     if (prepared.ok) {
       const r = await pm.vendorRead(e, readTool, prepared.args, 'person');
-      const p = r.ok ? binding.project(r.result, prepared, projectOptsOf(e)) : null;
+      const p = r.ok ? binding.project(r.result, prepared, await projectOptsVia(pm, e)) : null;
       const v = p !== null && p.ok && p.items.length === 1 ? p.items[0]!.value : null;
       if (v !== null) {
         title = String((e.system === 'jira' ? v['summary'] : v['title']) ?? '') || null;
@@ -222,7 +222,9 @@ async function act(deps: TrackerActionDeps, runId: string, issue: string, p: Pla
       return;
     }
     const r = await pm.vendorRead(e, tool, args, 'person', admittedFor(tool), p.credential ?? undefined);
-    results.push(r.ok && r.result['isError'] !== true ? { part, ok: true } : { part, ok: false, error: r.ok ? `the tracker refused the ${part}` : r.reason });
+    // An error answered as data (the Atlassian server's `{error: true, statusCode}`, often without `isError`) is a refusal.
+    const answered = r.ok ? readPayload(r.result, e.name) : null;
+    results.push(r.ok && answered !== null && (answered.ok || answered.code !== 'vendor_error') ? { part, ok: true } : { part, ok: false, error: r.ok ? `the tracker refused the ${part}${answered !== null && !answered.ok ? ` (${answered.reason})` : ''}` : r.reason });
   };
   if (p.card.comment !== undefined) {
     await send('comment', e.system === 'jira' ? 'addOrEditJiraIssueComment' : 'add_issue_comment', e.system === 'jira' ? { cloudId: t.tenant, issueIdOrKey: key, commentBody: p.card.comment } : { owner, repo, issue_number: ref.number, body: p.card.comment });

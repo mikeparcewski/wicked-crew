@@ -58,12 +58,17 @@ export interface PmItem {
 export type Projected = { ok: true; items: PmItem[]; next: string | null } | { ok: false; code: string; reason: string };
 
 /**
- * What the projector may lean on besides the answer itself. `vendorBindsTenant`: the entry talks to the vendor's own
- * server (`https://mcp.atlassian.com`), which runs each call against the `cloudId` crew set; see {@link jiraProof}.
+ * What the projector may lean on besides the answer itself (see {@link jiraAdmit}): `vendorBindsTenant`, the entry talks
+ * to the vendor's own server (`https://mcp.atlassian.com`), which runs each call against the `cloudId` crew set; and
+ * `soleSite`, the one site the entry's credential reaches, read from the vendor just now (`null`: several, or unknown).
  */
 export interface ProjectOpts {
   vendorBindsTenant?: boolean;
+  soleSite?: string | null;
 }
+
+/** Whether an item without an address may be admitted on the tenant crew bound (both conditions of {@link ProjectOpts}). */
+const tenantProves = (opts: ProjectOpts | undefined, tenant: string): boolean => opts?.vendorBindsTenant === true && typeof opts.soleSite === 'string' && opts.soleSite === tenant;
 
 export interface PmToolBinding {
   system: PmSystem;
@@ -134,8 +139,21 @@ export function unwrapData(p: unknown): unknown {
   return isObj(p['data']) || Array.isArray(p['data']) ? p['data'] : p;
 }
 
-/** A plain field name, which an outline may print (a key built from vendor data, like `PROJA-1` or a label, is not). */
-const PLAIN_KEY = /^[A-Za-z_][A-Za-z0-9_]{0,39}$/;
+/**
+ * The field names an outline may print: the schema of the answers crew reads (MCP, Atlassian v2 and REST, GitHub). Any
+ * other key may be vendor data (a custom field's label, a customer's name, an issue key), so it is only counted.
+ */
+const KNOWN_KEYS: ReadonlySet<string> = new Set([
+  'content', 'type', 'text', 'isError', 'structuredContent', 'data', 'error', 'message', 'statusCode', 'status', 'errorMessages', 'errors', 'context', 'appliedContentFormat',
+  'resources', 'sites', 'accessibleResources', 'cloudId', 'id', 'url', 'name', 'products', 'access', 'scopes', 'avatarUrl', 'accountId', 'account_id',
+  'issues', 'nodes', 'totalCount', 'total', 'remainingCount', 'pageInfo', 'hasNextPage', 'endCursor', 'isLast', 'nextPageToken', 'startAt', 'maxResults', 'values', 'projects',
+  'key', 'self', 'webUrl', 'fields', 'summary', 'description', 'issuetype', 'priority', 'assignee', 'reporter', 'labels', 'created', 'updated', 'project', 'statusCategory', 'customFields', 'attachment', 'comment',
+  'comments', 'author', 'body', 'displayName', 'visibility', 'jsdPublic', 'parentId', 'issueKey', 'issueId', 'transitions', 'to',
+  'items', 'total_count', 'incomplete_results', 'number', 'title', 'state', 'html_url', 'user', 'login', 'full_name', 'result', 'results', 'warnings',
+]);
+const BLOCK_TYPES: ReadonlySet<string> = new Set(['text', 'image', 'audio', 'resource', 'resource_link']);
+const OUTLINE_MAX = 700;
+const cap = (s: string): string => (s.length <= OUTLINE_MAX ? s : `${s.slice(0, OUTLINE_MAX)}…`);
 
 /**
  * The value-free outline of a JSON value, for a diagnosis: its type, its plain field names and array lengths, a few
@@ -143,16 +161,21 @@ const PLAIN_KEY = /^[A-Za-z_][A-Za-z0-9_]{0,39}$/;
  * only counted.
  */
 export function outlineOf(v: unknown, depth = 3): string {
+  return cap(outline(v, depth));
+}
+
+function outline(v: unknown, depth: number): string {
   if (v === null) return 'null';
-  if (Array.isArray(v)) return `array(${v.length})${v.length > 0 && depth > 0 ? `[${outlineOf(v[0], depth - 1)}]` : ''}`;
+  if (Array.isArray(v)) return `array(${v.length})${v.length > 0 && depth > 0 ? `[${outline(v[0], depth - 1)}]` : ''}`;
   if (typeof v !== 'object') return typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean' ? typeof v : 'other';
   const keys = Object.keys(v);
-  const plain = keys.filter((k) => PLAIN_KEY.test(k));
-  const shown = plain.slice(0, 12);
+  const shown = keys.filter((k) => KNOWN_KEYS.has(k)).slice(0, 12);
   const more = keys.length - shown.length;
-  const parts = shown.map((k) => (depth > 0 ? `${k}:${outlineOf((v as Record<string, unknown>)[k], depth - 1)}` : k));
+  const parts = shown.map((k) => (depth > 0 ? `${k}:${outline((v as Record<string, unknown>)[k], depth - 1)}` : k));
   if (more > 0) parts.push(`+${more} other key${more === 1 ? '' : 's'}`);
-  return `object{${parts.join(',')}}`;
+  // Bounded as it is built: a wide tree stops growing once the outline is longer than any reason shows.
+  const out = `object{${parts.join(',')}}`;
+  return out.length <= OUTLINE_MAX * 2 ? out : `${out.slice(0, OUTLINE_MAX * 2)}…}`;
 }
 
 /** The value-free outline of a whole tool result: its error flag, its content blocks (type; JSON outline or text length). */
@@ -165,7 +188,7 @@ export function resultOutline(result: unknown): string {
   else {
     const blocks = content.slice(0, 4).map((c) => {
       if (!isObj(c)) return outlineOf(c, 0);
-      const type = typeof c['type'] === 'string' && PLAIN_KEY.test(c['type']) ? c['type'] : 'untyped';
+      const type = typeof c['type'] === 'string' && BLOCK_TYPES.has(c['type']) ? c['type'] : 'other';
       if (type !== 'text') return type;
       const text = typeof c['text'] === 'string' ? c['text'] : null;
       if (text === null) return 'text without text';
@@ -178,19 +201,22 @@ export function resultOutline(result: unknown): string {
     parts.push(`content ${content.length} block${content.length === 1 ? '' : 's'}: [${blocks.join('; ')}${content.length > 4 ? '; …' : ''}]`);
   }
   parts.push(`structuredContent ${result['structuredContent'] === undefined ? 'absent' : 'present (not read)'}`);
-  const out = parts.join(', ');
-  return out.length <= 700 ? out : `${out.slice(0, 700)}…`;
+  return cap(parts.join(', '));
 }
 
 /** `{"error": true, "message", "statusCode"}` (the Atlassian server, often without `isError`) or Jira's `{errorMessages}`. */
 function isErrorEnvelope(p: unknown): p is Record<string, unknown> {
   if (!isObj(p)) return false;
-  if (p['error'] === true || (isObj(p['error']) && !('data' in p))) return true;
+  // An error beside data is an error: a contradictory answer is not read as a success.
+  if (p['error'] === true || isObj(p['error'])) return true;
   return Array.isArray(p['errorMessages']) && p['errorMessages'].length > 0 && !('issues' in p) && !('key' in p);
 }
 
-/** A scope name as Atlassian spells one (`read:jira-work`, `read:account`): letters, digits, `-`, `_`, `:`, `.`. */
-const SCOPE = /^[a-z][a-z0-9_.-]{0,40}(?::[a-z0-9_.-]{1,40}){1,3}$/;
+/**
+ * An Atlassian scope crew may repeat (`read:jira-work`, `read:account`, `search:jira:agent-interface`): an Atlassian verb
+ * and a product word. Anything else in the vendor's sentence is not repeated.
+ */
+const SCOPE = /^(?:read|write|search|delete|manage|admin):(?:me|account|jira|jira-work|jira-user|confluence|jira-service-management|servicedesk|compass|bitbucket|teamwork|[a-z-]{1,30}:(?:jira|confluence|jira-work|agent-interface|jira-service-management|compass|bitbucket|teamwork-graph))(?::(?:jira|confluence|agent-interface))?$/;
 
 /**
  * What an error answer may say: its HTTP status, and the scopes the vendor says are missing (each checked to be a
@@ -242,7 +268,10 @@ export function readPayload(result: Record<string, unknown>, who = 'the tracker'
   if (!Array.isArray(content) || jsons.length !== 1) return refuse('unknown_shape', `${who} answered a shape crew does not know (${resultOutline(result)})`);
   const p = jsons[0];
   if (isErrorEnvelope(p)) return refuse('vendor_error', vendorErrorReason(who, p));
-  return { ok: true, payload: unwrapData(p) };
+  const inner = unwrapData(p);
+  // An error wrapped in `data` is an error too.
+  if (inner !== p && isErrorEnvelope(inner)) return refuse('vendor_error', vendorErrorReason(who, inner));
+  return { ok: true, payload: inner };
 }
 
 /** {@link readPayload} for the projectors. */
@@ -328,19 +357,22 @@ export function jiraProof(x: Record<string, unknown>, tenant: string, siteHost: 
   const addrs = jiraAddresses(x);
   if (addrs.length === 0) return 'absent';
   for (const a of addrs) {
-    const gw = /^https:\/\/api\.atlassian\.com\/ex\/jira\/([A-Za-z0-9-]{1,64})\//.exec(a);
-    if (gw !== null) {
-      if (gw[1] !== tenant) return 'contradicted';
+    // Judged on the parsed URL; a path with dot segments or encoded separators cannot be judged.
+    if (/%2e|%2f|%5c|\\|\/\.\.?(?:\/|$)/i.test(a)) return 'contradicted';
+    let u: URL;
+    try {
+      u = new URL(a);
+    } catch {
+      return 'contradicted';
+    }
+    if (u.protocol !== 'https:' || u.username !== '' || u.password !== '') return 'contradicted';
+    const host = u.host.toLowerCase();
+    if (host === 'api.atlassian.com') {
+      const gw = /^\/ex\/jira\/([A-Za-z0-9-]{1,64})\//.exec(u.pathname);
+      if (gw === null || gw[1] !== tenant) return 'contradicted';
       continue;
     }
-    let host: string | null = null;
-    try {
-      const u = new URL(a);
-      host = u.protocol === 'https:' && u.username === '' && u.password === '' ? u.host.toLowerCase() : null;
-    } catch {
-      host = null;
-    }
-    if (host === null || siteHost == null || host !== siteHost.toLowerCase()) return 'contradicted';
+    if (siteHost == null || host !== siteHost.toLowerCase()) return 'contradicted';
   }
   return 'proved';
 }
@@ -353,11 +385,12 @@ export function jiraProof(x: Record<string, unknown>, tenant: string, siteHost: 
  * - its own address (`self`, `webUrl`) names the site, as {@link jiraProof} reads it; an address that names another
  *   site, or that cannot be judged, is never admitted, whatever else holds;
  * - it carries NO address, and `bound` holds: the call went to Atlassian's own server with the `cloudId` crew set from
- *   the linked tracker (the vendor resolves the site from it), and the whole answer carries no address either (a
- *   server that addresses some items and not others is not trusted for the rest).
+ *   the linked tracker, the credential reaches that ONE site and no other (read from the vendor just now: so a server
+ *   that ran the call on another site has no other site to have read), and the whole answer carries no address either
+ *   (a server that addresses some items and not others is not trusted for the rest).
  *
- * `self` was always the server's own string, so on the vendor's server it never proved more than the `cloudId` crew
- * bound; on any other server (a proxy, a fake) an issue without an address still proves nothing and is not admitted.
+ * A credential that reaches several sites gets no tenant proof: an address-free answer from it is `site_unproven`.
+ * On any other server (a proxy, a fake) an issue without an address proves nothing and is not admitted.
  */
 function jiraAdmit(issue: unknown, tenant: string, linked: readonly LinkedTracker[], bound: boolean): { tracker: LinkedTracker; key: string } | { unproven: true } | null {
   if (!isObj(issue)) return null;
@@ -374,6 +407,10 @@ function jiraAdmit(issue: unknown, tenant: string, linked: readonly LinkedTracke
   if (proof === 'proved' || (proof === 'absent' && bound)) return { tracker, key };
   return proof === 'absent' ? { unproven: true } : null;
 }
+
+/** Why an address-free answer is not shown. */
+const UNPROVEN = (what: string): string =>
+  `Jira answered ${what} without an address, so crew cannot prove the site; it trusts the site it named only on Atlassian's own server and when the credential reaches that one site (use a token or account that reaches only the linked site); nothing is shown`;
 
 const admitted = (a: ReturnType<typeof jiraAdmit>): a is { tracker: LinkedTracker; key: string } => a !== null && 'tracker' in a;
 
@@ -402,9 +439,9 @@ const jiraGetIssue: PmToolBinding = {
     const p = payloadOf(result);
     if (!p.ok) return p;
     if (!isObj(p.payload) || str(p.payload['key']) === null) return unknownShape('the tracker', 'the issue', p.payload);
-    const a = jiraAdmit(p.payload, prepared.tenant, prepared.trackers, opts?.vendorBindsTenant === true);
+    const a = jiraAdmit(p.payload, prepared.tenant, prepared.trackers, tenantProves(opts, prepared.tenant));
     // Said apart, so a server that answers no address at all is seen at once: nothing can prove its site.
-    if (a !== null && 'unproven' in a) return refuse('site_unproven', 'Jira answered the issue without its own address, so crew cannot prove it is on the linked site; nothing is shown');
+    if (a !== null && 'unproven' in a) return refuse('site_unproven', UNPROVEN('the issue'));
     // The issue asked for is not the one answered, or not a linked one: nothing of it is shown.
     if (!admitted(a) || a.key !== prepared.args['issueIdOrKey']) return refuse('outside_linked_set', 'the tracker answered an issue outside the projects linked to this step, so nothing is shown');
     return { ok: true, items: [{ trackerId: a.tracker.trackerId, ref: a.key, value: jiraIssueValue(p.payload) }], next: null };
@@ -453,7 +490,7 @@ const jiraSearch: PmToolBinding = {
     const list = jiraIssueList(p.payload);
     if (list === null) return unknownShape('the tracker', 'its search', p.payload);
     // The tenant proof holds only for an answer with no address anywhere: one that addresses some items proves each.
-    const bound = opts?.vendorBindsTenant === true && !list.some((i) => isObj(i) && jiraAddresses(i).length > 0);
+    const bound = tenantProves(opts, prepared.tenant) && !list.some((i) => isObj(i) && jiraAddresses(i).length > 0);
     const items: PmItem[] = [];
     let unproven = 0;
     for (const issue of list) {
@@ -466,7 +503,7 @@ const jiraSearch: PmToolBinding = {
     }
     // Nothing admitted, and the linked items were answered without an address: say so, rather than an empty page that
     // reads as "no issues".
-    if (items.length === 0 && unproven > 0) return refuse('site_unproven', 'Jira answered its issues without their own addresses, so crew cannot prove they are on the linked site; nothing is shown');
+    if (items.length === 0 && unproven > 0) return refuse('site_unproven', UNPROVEN('its issues'));
     // Vendor cursors are not passed on: a cursor is the vendor's text, which nothing here can judge (narrow the JQL).
     return { ok: true, items: items.slice(0, PM_PAGE_MAX), next: null };
   },
@@ -501,17 +538,27 @@ const jiraComments: PmToolBinding = {
     // When the answer names its issue, it must be the one asked for.
     const named = isObj(p.payload) ? str(p.payload['issueKey']) ?? str(p.payload['key']) : null;
     if (named !== null && named !== key) return refuse('outside_linked_set', 'the tracker answered the comments of another issue, so nothing is shown');
-    const bound = opts?.vendorBindsTenant === true && !list.some((c) => isObj(c) && jiraAddresses(c).length > 0);
+    const bound = tenantProves(opts, prepared.tenant) && !list.some((c) => isObj(c) && jiraAddresses(c).length > 0);
+    // Every comment that names its issue (`.../issue/<id>/comment/<id>`, an `issueId`) must name the same one: an answer
+    // that mixes issues is not the one issue crew asked for.
+    const parents = new Set<string>();
     const comments: Array<Record<string, unknown>> = [];
     let withheld = 0;
+    let cut = 0;
     for (const c of list.slice(0, 200)) {
-      if (comments.length >= PM_COMMENTS_MAX) break;
       if (!isObj(c)) continue;
       const proof = jiraProof(c, prepared.tenant, tracker.siteHost);
       if (proof === 'contradicted') return refuse('outside_linked_set', 'the tracker answered a comment from another site, so nothing is shown');
-      if (proof === 'absent' && !bound) return refuse('site_unproven', 'Jira answered comments without their own addresses, so crew cannot prove they are on the linked site; nothing is shown');
+      if (proof === 'absent' && !bound) return refuse('site_unproven', UNPROVEN('the comments'));
+      const ref = /\/issue\/([0-9]{1,20})\/comment\//.exec(typeof c['self'] === 'string' ? c['self'] : '')?.[1] ?? (typeof c['issueId'] === 'string' || typeof c['issueId'] === 'number' ? String(c['issueId']) : null);
+      if (ref !== null) parents.add(ref);
+      if (parents.size > 1) return refuse('outside_linked_set', 'the tracker answered comments of more than one issue, so nothing is shown');
       if (jiraCommentRestricted(c)) {
         withheld++;
+        continue;
+      }
+      if (comments.length >= PM_COMMENTS_MAX) {
+        cut++;
         continue;
       }
       const author = isObj(c['author']) ? str(c['author']['displayName']) ?? str(c['author']['name']) : null;
@@ -519,8 +566,9 @@ const jiraComments: PmToolBinding = {
     }
     const pl = isObj(p.payload) ? p.payload : {};
     const total = typeof pl['total'] === 'number' && Number.isInteger(pl['total']) ? pl['total'] : null;
-    const isLast = typeof pl['isLast'] === 'boolean' ? pl['isLast'] : null;
-    return { ok: true, items: [{ trackerId: tracker.trackerId, ref: key, value: { key, comments, total, isLast, ...(withheld > 0 ? { withheld } : {}) } }], next: null };
+    // A page crew cut is not the last one, whatever the vendor said.
+    const isLast = cut > 0 || list.length > 200 ? false : typeof pl['isLast'] === 'boolean' ? pl['isLast'] : null;
+    return { ok: true, items: [{ trackerId: tracker.trackerId, ref: key, value: { key, comments, total, isLast, ...(withheld > 0 ? { withheld } : {}), ...(cut > 0 ? { cut } : {}) } }], next: null };
   },
 };
 
@@ -562,17 +610,35 @@ export function jiraSitesOf(p: unknown): Array<{ id: string; label: string; host
     const id = str(s['cloudId']) ?? str(s['id']);
     if (id === null || !/^[A-Za-z0-9-]{1,64}$/.test(id)) continue;
     readable++;
-    // A site the answer says has no Jira (a Confluence-only site) is no tracker's site.
+    // A site the answer says has no Jira (a Confluence-only site, an empty product list; the REST shape's entry whose
+    // scopes are all another product's) is no tracker's site.
     const products = Array.isArray(s['products']) ? (s['products'] as unknown[]) : null;
-    if (products !== null && products.length > 0 && !products.some((x) => /^jira/i.test(String(isObj(x) ? x['id'] ?? x['name'] ?? '' : x)))) continue;
+    if (products !== null && !products.some((x) => /^jira/i.test(String(isObj(x) ? x['id'] ?? x['key'] ?? x['name'] ?? '' : x)))) continue;
+    const scopes = products === null && Array.isArray(s['scopes']) ? (s['scopes'] as unknown[]) : null;
+    if (scopes !== null && scopes.length > 0 && !scopes.some((x) => typeof x === 'string' && /jira/i.test(x))) continue;
     const h = host(s['url']);
     const was = out.get(id);
     const name = typeof s['name'] === 'string' && s['name'].trim() !== '' ? vendorText(s['name'], 100) : null;
-    out.set(id, { id, label: name ?? was?.label ?? h ?? id, host: was?.host ?? h });
+    // One site named at two hosts: neither is confirmed (a site-form address then proves nothing; the gateway form does).
+    const conflict = was !== undefined && (was.host === null || (h !== null && h !== was.host));
+    out.set(id, { id, label: name ?? was?.label ?? h ?? id, host: conflict ? null : (was?.host ?? h) });
   }
   // Entries, none of them readable as a site: not a shape crew knows.
   if (list.length > 0 && readable === 0) return null;
   return [...out.values()];
+}
+
+/** Every distinct site id an answer to `getAccessibleAtlassianResources` names, whatever its products; `null`: not that shape. */
+export function atlassianSiteIdsOf(p: unknown): string[] | null {
+  const list = Array.isArray(p) ? p : isObj(p) ? [p['resources'], p['sites'], p['accessibleResources']].find(Array.isArray) ?? null : null;
+  if (!Array.isArray(list)) return null;
+  const ids = new Set<string>();
+  for (const s of list) {
+    const id = isObj(s) ? str(s['cloudId']) ?? str(s['id']) : null;
+    if (id === null || !/^[A-Za-z0-9-]{1,64}$/.test(id)) return null;
+    ids.add(id);
+  }
+  return [...ids];
 }
 
 /** The sites of `getAccessibleAtlassianResources`, cut to the tenants linked to this step: `{cloudId, url}` each. */

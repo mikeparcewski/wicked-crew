@@ -27,7 +27,7 @@ import { DEFAULT_PROJECT_ID } from '../../projects/default-project.js';
 import { agentMay } from '../gate/access.js';
 import { type StoredTracker, type TrackerLinkTarget, type TrackerStructure, trackerIdOf, trackerLabel, trackerLinkIdOf, trackersOf } from '../registry/entry.js';
 import { bindingInForce, GITHUB_TENANT, jiraSitesOf, outlineOf, readPayload } from './bindings.js';
-import { type PmGate, projectOptsOf } from './gate-pm.js';
+import { type PmGate, projectOptsVia } from './gate-pm.js';
 import { type PmEntry, pmEntriesOf } from './set.js';
 import { PROJECTION_UNKNOWN, type TrackerProjectionLookup, trackerLinkView } from './view.js';
 
@@ -386,7 +386,7 @@ export function registerTrackerRoutes(app: FastifyInstance, deps: TrackerRouteDe
           continue;
         }
         const r = await pm.vendorRead(e, tool, prepared.args, 'person');
-        const p = r.ok ? binding.project(r.result, prepared, projectOptsOf(e)) : null;
+        const p = r.ok ? binding.project(r.result, prepared, await projectOptsVia(pm, e)) : null;
         if (p === null || !p.ok) {
           row.error = 'unavailable';
           continue;

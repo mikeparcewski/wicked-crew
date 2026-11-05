@@ -4,12 +4,14 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { bindingFor, type LinkedTracker, outlineOf, readPayload, resultOutline, vendorBindsTenant } from '../src/knowledge/trackers/bindings.js';
+import { atlassianSiteIdsOf, bindingFor, jiraProof, jiraSitesOf, type LinkedTracker, outlineOf, readPayload, resultOutline, vendorBindsTenant } from '../src/knowledge/trackers/bindings.js';
+import { PmGate } from '../src/knowledge/trackers/gate-pm.js';
 import { listSourceTrackers, lookupTracker } from '../src/knowledge/trackers/routes.js';
 import type { PmEntry } from '../src/knowledge/trackers/set.js';
 import { atlassianV2, githubMcp, SITE_HOST, SITE_ID, SITE_URL } from './fixtures/pm/recorded-shapes.js';
 
-const V2 = { vendorBindsTenant: true };
+/** Atlassian's own server, and a credential that reaches the linked site only (read from the vendor at call time). */
+const V2 = { vendorBindsTenant: true, soleSite: SITE_ID };
 const linked: LinkedTracker[] = [{ trackerId: 'trk_sqr', tenant: SITE_ID, key: 'SQR', siteHost: SITE_HOST }];
 
 function entry(system: 'jira' | 'github', tools: string[], url = system === 'jira' ? 'https://mcp.atlassian.com/v2/mcp' : 'https://api.githubcopilot.com/mcp/'): PmEntry {
@@ -84,7 +86,7 @@ describe('an unknown shape names its structure, never a value', () => {
   it('the outline names block types, field names and lengths', () => {
     const o = resultOutline(weird);
     expect(o).toContain('content 2 blocks');
-    expect(o).toContain('text JSON object{result:object{sites:string,items:array(1)[object{cloud,n}],+1 other key}}');
+    expect(o).toContain('text JSON object{result:object{sites:string,items:array(1)[object{+2 other keys}],+1 other key}}');
     expect(o).toContain('image');
     expect(o).not.toContain(secretish);
     expect(o).not.toContain('none');
@@ -95,15 +97,22 @@ describe('an unknown shape names its structure, never a value', () => {
     const page = await listSourceTrackers(pm, entry('jira', ['getAccessibleAtlassianResources']), '', {}, null);
     expect(page).toMatchObject({ ok: false, code: 'unknown_shape' });
     if (!page.ok) {
-      expect(page.reason).toContain('object{sites2:array(1)[object{cloud:string}]}');
+      expect(page.reason).toContain('(got object{+1 other key})');
       expect(page.reason).not.toContain(secretish);
     }
-    const two = readPayload({ content: [{ type: 'text', text: '{"a":1}' }, { type: 'text', text: '{"b":"x"}' }] }, 'jira (t)');
+    const two = readPayload({ content: [{ type: 'text', text: '{"total":1,"alice":2}' }, { type: 'text', text: '{"key":"x"}' }] }, 'jira (t)');
     expect(two).toMatchObject({ ok: false, code: 'unknown_shape' });
-    expect(two.ok === false && two.reason).toContain('content 2 blocks: [text JSON object{a:number}; text JSON object{b:string}]');
+    expect(two.ok === false && two.reason).toContain('content 2 blocks: [text JSON object{total:number,+1 other key}; text JSON object{key:string}]');
+    expect(two.ok === false && two.reason).not.toContain('alice');
   });
   it('a value that is not a plain field name is counted, not printed', () => {
-    expect(outlineOf({ 'PROJA-1': { x: 1 }, 'Story Points': 3, ok: true })).toBe('object{ok:boolean,+2 other keys}');
+    // Only crew's known field names are printed: a plain-looking key may be vendor data (a customer's name).
+    expect(outlineOf({ 'PROJA-1': { x: 1 }, 'Story Points': 3, ConfidentialCustomerName: 1, key: 'K' })).toBe('object{key:string,+3 other keys}');
+    expect(resultOutline({ content: [{ type: 'secret-ish-type', text: 'x' }] })).toContain('[other]');
+    // Bounded, whatever the tree.
+    const wide: Record<string, unknown> = {};
+    for (const k of ['data', 'issues', 'fields', 'summary', 'status', 'key', 'self', 'id', 'url', 'name', 'items', 'values']) wide[k] = { data: { issues: { fields: { summary: { status: 1, key: 2, self: 3, id: 4, url: 5, name: 6 } } } } };
+    expect(outlineOf(wide, 6).length).toBeLessThanOrEqual(701);
   });
 });
 
@@ -153,6 +162,33 @@ describe('Jira v2 issues: no `self`, the site the gate bound is the proof', () =
     expect(vendorBindsTenant({ kind: 'mcp-stdio', url: null }, 'jira')).toBe(false);
     expect(vendorBindsTenant({ kind: 'mcp-http', url: 'https://mcp.atlassian.com/v2/mcp' }, 'github')).toBe(false);
   });
+  it('the tenant proves an address-free answer only when the credential reaches that one site', () => {
+    const { b, p } = prep('getJiraIssue', { issueIdOrKey: 'SQR-1' });
+    expect(b.project(atlassianV2.issue, p, { vendorBindsTenant: true, soleSite: null })).toMatchObject({ ok: false, code: 'site_unproven', reason: expect.stringContaining('reaches that one site') });
+    expect(b.project(atlassianV2.issue, p, { vendorBindsTenant: true, soleSite: 'another-site' })).toMatchObject({ ok: false, code: 'site_unproven' });
+    expect(b.project(atlassianV2.issue, p, { vendorBindsTenant: false, soleSite: SITE_ID })).toMatchObject({ ok: false, code: 'site_unproven' });
+    const s = prep('searchJiraIssuesUsingJql', { jql: '' });
+    expect(s.b.project(atlassianV2.search, s.p, { vendorBindsTenant: true, soleSite: null })).toMatchObject({ ok: false, code: 'site_unproven' });
+  });
+  it('an address is judged on the parsed URL: dot segments, encoded separators and another gateway tenant prove nothing', () => {
+    expect(jiraProof({ self: `https://api.atlassian.com/ex/jira/${SITE_ID}/rest/api/3/issue/1` }, SITE_ID, SITE_HOST)).toBe('proved');
+    expect(jiraProof({ webUrl: `https://api.atlassian.com/ex/jira/${SITE_ID}/../other/rest/api/3/issue/1` }, SITE_ID, SITE_HOST)).toBe('contradicted');
+    expect(jiraProof({ self: `https://api.atlassian.com/ex/jira/${SITE_ID}%2F..%2Fother/x` }, SITE_ID, SITE_HOST)).toBe('contradicted');
+    expect(jiraProof({ webUrl: `${SITE_URL}/browse/SQR-1` }, SITE_ID, SITE_HOST)).toBe('proved');
+    expect(jiraProof({ webUrl: `https://user@${SITE_HOST}/browse/SQR-1` }, SITE_ID, SITE_HOST)).toBe('contradicted');
+    expect(jiraProof({ self: 7 }, SITE_ID, SITE_HOST)).toBe('contradicted');
+  });
+  it('an error wrapped in data, or an error beside data, is the vendor error', () => {
+    expect(readPayload({ content: [{ type: 'text', text: '{"data":{"error":true,"statusCode":403}}' }] })).toMatchObject({ ok: false, code: 'vendor_error', reason: expect.stringContaining('HTTP 403') });
+    expect(readPayload({ content: [{ type: 'text', text: '{"error":{"status":401},"data":{"key":"SQR-1"}}' }] })).toMatchObject({ ok: false, code: 'vendor_error', reason: expect.stringContaining('HTTP 401') });
+  });
+  it('only an Atlassian scope is repeated from an error; any other text is not', () => {
+    const r = (m: string) => readPayload({ content: [{ type: 'text', text: JSON.stringify({ error: true, message: m, statusCode: 403 }) }] });
+    expect(r('Insufficient scopes. Required: read:me, read:account').ok === false && (r('Insufficient scopes. Required: read:me, read:account') as { reason: string }).reason).toContain('read:me, read:account');
+    const leak = r('Insufficient scopes. Required: customer:confidential');
+    expect(leak.ok === false && leak.reason).not.toContain('confidential');
+    expect(leak.ok === false && leak.reason).toContain('HTTP 403');
+  });
   it('an error answered as data is the vendor error, not an empty page', () => {
     const { b, p } = prep('searchJiraIssuesUsingJql', { jql: '' });
     expect(b.project(atlassianV2.authError, p, V2)).toMatchObject({ ok: false, code: 'vendor_error' });
@@ -175,6 +211,63 @@ describe('listJiraIssueComments: bound to a linked key, restricted comments with
     expect(JSON.stringify(value)).not.toContain('Admins only');
     expect(JSON.stringify(value)).not.toContain('internal note');
     expect(b.project(atlassianV2.comments, p)).toMatchObject({ ok: false, code: 'site_unproven' });
+  });
+});
+
+describe('listJiraIssueComments: one issue, and a cut page is not the last', () => {
+  const answer = (comments: unknown[], extra: Record<string, unknown> = {}) => ({ content: [{ type: 'text', text: JSON.stringify({ data: { comments, isLast: true, ...extra } }) }] });
+  const at = (issue: string, id: number) => ({ id: String(id), self: `https://api.atlassian.com/ex/jira/${SITE_ID}/rest/api/3/issue/${issue}/comment/${id}`, body: `c${id}`, author: { displayName: 'P' } });
+  it('comments of two issues in one answer are refused; an answer naming another issue is refused', () => {
+    const { b, p } = prep('listJiraIssueComments', { issueIdOrKey: 'SQR-1' });
+    expect(b.project(answer([at('10036', 1), at('10036', 2)]), p)).toMatchObject({ ok: true });
+    expect(b.project(answer([at('10036', 1), at('20001', 2)]), p)).toMatchObject({ ok: false, code: 'outside_linked_set' });
+    expect(b.project(answer([at('10036', 1)], { issueKey: 'OTHER-9' }), p)).toMatchObject({ ok: false, code: 'outside_linked_set' });
+  });
+  it('a page crew cut says so and is not the last, whatever the vendor said', () => {
+    const { b, p } = prep('listJiraIssueComments', { issueIdOrKey: 'SQR-1' });
+    const r = b.project(answer(Array.from({ length: 25 }, (_, i) => at('10036', i + 1))), p);
+    expect(r).toMatchObject({ ok: true, items: [{ value: { isLast: false, cut: 5 } }] });
+    expect(r.ok && (r.items[0]!.value['comments'] as unknown[]).length).toBe(20);
+  });
+});
+
+describe('the sites a credential reaches', () => {
+  const sites = (list: unknown[]) => jiraSitesOf({ resources: list });
+  it('an empty product list, or REST scopes of another product only, is no Jira site', () => {
+    expect(sites([{ cloudId: 'a', url: 'https://a.atlassian.net', products: [] }])).toEqual([]);
+    expect(jiraSitesOf([{ id: 'a', url: 'https://a.atlassian.net', scopes: ['read:page:confluence'] }])).toEqual([]);
+    expect(jiraSitesOf([{ id: 'a', url: 'https://a.atlassian.net', scopes: [] }])).toHaveLength(1);
+  });
+  it('one site named at two hosts confirms neither host', () => {
+    expect(jiraSitesOf([{ id: 'a', url: 'https://a.atlassian.net', scopes: ['read:jira-work'] }, { id: 'a', url: 'https://evil.atlassian.net', scopes: ['read:jira-work'] }])).toEqual([{ id: 'a', label: 'a.atlassian.net', host: null }]);
+  });
+  it('every distinct site id counts toward the sole site, whatever its products', () => {
+    expect(atlassianSiteIdsOf({ resources: [{ cloudId: 'a', products: [{ id: 'jira' }] }, { cloudId: 'b', products: [{ id: 'confluence' }] }] })).toEqual(['a', 'b']);
+    expect(atlassianSiteIdsOf([{ id: 'a' }, { id: 'a' }])).toEqual(['a']);
+    expect(atlassianSiteIdsOf({ resources: [{ name: 'no id' }] })).toBeNull();
+  });
+  it('the gate reads the sole site from the vendor (Atlassian\'s own server only) and keeps it a minute', async () => {
+    const invoked: string[] = [];
+    let answer = atlassianV2.resources;
+    const gate = new PmGate({
+      store: { read: async () => ({ version: 1, servers: [] }) as never },
+      secret: async () => 'not-a-real-credential',
+      record: { append: async () => undefined },
+      audit: { record: () => undefined },
+      schedulers: { for: () => ({ admit: async () => ({ done: () => undefined }) }) } as never,
+      invoke: (async (_config: unknown, _secret: unknown, tool: string) => { invoked.push(tool); return answer; }) as never,
+      now: () => 1_000,
+    });
+    const e = { ...entry('jira', ['getAccessibleAtlassianResources']), record: { ...entry('jira', ['getAccessibleAtlassianResources']).record, auth: { ref: 'keychain:wicked-mcp/jira', header: 'Authorization', prefix: 'Basic ' } } as PmEntry['record'] };
+    expect(await gate.projectOpts(e)).toEqual({ vendorBindsTenant: true, soleSite: SITE_ID });
+    answer = { content: [{ type: 'text', text: JSON.stringify({ data: { resources: [{ cloudId: SITE_ID }, { cloudId: 'other' }] } }) }] };
+    expect(await gate.projectOpts(e)).toEqual({ vendorBindsTenant: true, soleSite: SITE_ID });
+    expect(invoked).toEqual(['getAccessibleAtlassianResources']);
+    const two = { ...e, id: 'e2' };
+    expect(await gate.projectOpts(two)).toEqual({ vendorBindsTenant: true, soleSite: null });
+    const proxy = { ...e, id: 'e3', record: { ...e.record, url: 'https://jira-proxy.example/mcp' } as PmEntry['record'] };
+    expect(await gate.projectOpts(proxy)).toEqual({ vendorBindsTenant: false, soleSite: null });
+    expect(invoked).toHaveLength(2);
   });
 });
 
