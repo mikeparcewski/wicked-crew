@@ -10,25 +10,15 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
-### Fixed
+## [0.17.0] — 2026-11-05
 
-- **Nerve Center stays green when a CLI nobody set up is signed out (operator, 2026-11-05).** Yellow is kept for a
-  fix the person can make. When no seat of a CLI is signed in, its missing seat image no longer degrades the
-  `seat_images` row; the row names it instead ("not needed until signed in: opencode"). Two new yellow `slows` items
-  in `attention[]` cover the seat cases that do matter. `cli:one-reviewer` fires when fewer than two distinct CLIs
-  are signed in, so no different agent can review; its headline is "Sign in a second agent so a different one can
-  review". `cli:out:<seat>` fires when a signed-out seat has a job's work on it, meaning a step not yet done (running or
-  waiting) is assigned to it. Being listed in a default pool is not need, and a job held for want of a reviewer keeps
-  the seat in its own item. The judges card reads `degraded`
-  rather than `down` while no job is held by the missing reviewer.
-
-- **A steering rule whose subject only exists at delivery no longer holds review and QE (api-types 0.191.0, SWAP 6).**
-  The wire gains the `deferred` rule status: the engine defers a rule to delivery by a recorded fact (obligations
-  `evidence:delivery`, or `applies_to` naming only the deliver step) and the deliver step judges it against the pull
-  request's text. The delivery's worst-row-per-rule lets the deliver verdict replace a review's deferral, and the PR
-  body's rule line counts "N deferred to delivery". The deliver script hands the engine the text it publishes
-  (title, blank line, body) in the file `WICKED_DELIVER_TEXT_OUT` names, before the push, so the deferred rules are
-  judged on exactly that text. Needs the engine after wicked-core's deferral fix.
+A feature release on wicked-core-ts ^0.15.28 and wicked-crew-api-types 0.191.0, bundling wicked-studio 0.15.0, and
+needing wicked-garden 12.64.0 (the Apps skill) and, for the knowledge plane, wicked-estate 0.32.0. It carries the 39
+PRs since 0.16.13: Apps built by chat on live data sources (a chat message is one governed apps-turn), the data gate
+and the knowledge package (one governed path from a project's live sources to its agents, structure only unless a
+person turns query on), data shapes and the Knowledge map, project-management trackers (Jira and GitHub Issues,
+PM-1), the plan gate's note, every in-force steering rule checked at review (and a delivery rule at the deliver
+step), the zod 4 move, and security fixes for linked-issue text, agent-safe views and dependency highs.
 
 ### Added
 
@@ -407,7 +397,33 @@ mentioned only where a daemon release depends on them.
   `AppErrorBody` codes (`unreadable_tree`, `invalid_token`, `not_this_turn`, `not_checked`,
   `reviewer_not_distinct`).
 
+### Changed
+
+- **crew needs wicked-garden 12.64.0 or later.** An Apps turn and an Apps publish tell their units to follow
+  `wicked-garden-apps`, which first ships in garden 12.64.0, so automatic discovery passes over an older garden with
+  the blocking `skills.garden` finding (`REQUIRED_GARDEN_VERSION` was 12.40.0). An explicit `WICKED_CREW_SKILLS_SOURCE`
+  is still not judged. The READMEs and the site say 12.64.0.
+
 ### Fixed
+
+- **Nerve Center stays green when a CLI nobody set up is signed out (operator, 2026-11-05).** Yellow is kept for a
+  fix the person can make. When no seat of a CLI is signed in, its missing seat image no longer degrades the
+  `seat_images` row; the row names it instead ("not needed until signed in: opencode"). Two new yellow `slows` items
+  in `attention[]` cover the seat cases that do matter. `cli:one-reviewer` fires when fewer than two distinct CLIs
+  are signed in, so no different agent can review; its headline is "Sign in a second agent so a different one can
+  review". `cli:out:<seat>` fires when a signed-out seat has a job's work on it, meaning a step not yet done (running or
+  waiting) is assigned to it. Being listed in a default pool is not need, and a job held for want of a reviewer keeps
+  the seat in its own item. The judges card reads `degraded`
+  rather than `down` while no job is held by the missing reviewer.
+
+- **A steering rule whose subject only exists at delivery no longer holds review and QE (api-types 0.191.0, SWAP 6).**
+  The wire gains the `deferred` rule status: the engine defers a rule to delivery by a recorded fact (obligations
+  `evidence:delivery`, or `applies_to` naming only the deliver step) and the deliver step judges it against the pull
+  request's text. The delivery's worst-row-per-rule lets the deliver verdict replace a review's deferral, and the PR
+  body's rule line counts "N deferred to delivery". The deliver script hands the engine the text it publishes
+  (title, blank line, body) in the file `WICKED_DELIVER_TEXT_OUT` names, before the push, so the deferred rules are
+  judged on exactly that text. Needs the engine after wicked-core's deferral fix.
+
 
 - **PM-1 against the real Atlassian v2 and GitHub MCP servers (built and tested only against fake stdio servers
   before).** A saved Jira source answered `GET /sources/:name/trackers` with 503 "answered its sites in a shape crew
@@ -536,6 +552,7 @@ mentioned only where a daemon release depends on them.
   local program the person installed).
 
 ### Security
+
 - **Linked-issue text cannot end its background block early.** At launch the daemon appends the issues an intent
   names inside a marked background block. Every HTML comment in the issue text it appends (title, state, body,
   comments, authors, a read error) is now escaped as `&lt;!--` and still reads as written, so that text can neither
@@ -5898,7 +5915,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.13...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.13...v0.17.0
 [0.16.13]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.12...v0.16.13
 [0.16.12]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.11...v0.16.12
 [0.16.11]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.10...v0.16.11

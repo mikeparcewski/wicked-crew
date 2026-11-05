@@ -75,7 +75,7 @@ wicked-crew serve
 Or use the family installer — [`npx wicked-installer`](https://www.npmjs.com/package/wicked-installer)
 installs/updates the whole wicked-\* family, crew included.
 
-**crew needs wicked-garden ≥ 12.40.0.** Garden ships the skills every governed worker follows,
+**crew needs wicked-garden ≥ 12.64.0.** Garden ships the skills every governed worker follows,
 including the base skill `wicked-garden-governed-worker`. crew does not vendor it, so install it once:
 
 ```bash
@@ -87,7 +87,8 @@ the installer's copy (`<config dir>/plugins/wicked-garden`), where `<config dir>
 `$CLAUDE_CONFIG_DIR` or `~/.claude`. To use another garden root on purpose, point
 `WICKED_CREW_SKILLS_SOURCE` at it. Without garden, `/health` reports the missing base skill as an
 error. Every launch and every **Register & onboard** is refused with that reason, and nothing is
-registered. A garden older than 12.40.0 is never used. At first boot, `/health` carries a
+registered. A garden older than 12.64.0 that discovery finds is never used (a `WICKED_CREW_SKILLS_SOURCE` you set
+is not judged). At first boot, `/health` carries a
 `skills.garden` error that names the version found, where it was found, and the version required.
 Launches and onboarding answer `422 garden_required` until a newer garden is installed and the
 daemon restarts. A refresh (`POST /api/v1/skills/refresh-baseline`) from an older garden is refused
