@@ -16,8 +16,16 @@ protocol, where things live) are in the parent `../CLAUDE.md`.
   Source in `src/`, one directory per surface (`api`, `cli`, `core`, `events`, `interactive`,
   `projects`, `qe`, and newer ones such as `voice`, `learnings`, `persona`, `inspect`,
   `working-doc`); tests in `tests/` (vitest). The QE acceptance assessment reads the repo's
-  wicked-ledger store via `src/qe/`.
+  wicked-ledger store via `src/qe/`. Apps and data live in `src/apps` (the app store, versions,
+  turns, the query executor, actions, publish), `src/sources` (the SQL and GraphQL kinds, uploads,
+  the read policy, the dialer, Test connection and Ask), `src/mcp` (the one connector registry,
+  secrets, the broker and the estate relay) and `src/knowledge` (the data gate, the registry entry
+  shapes, the Toolbox adapter, the knowledge package, the projection into estate, data shapes and
+  the trackers).
   `build:with-studio` bundles wicked-studio's dist as the default local UI.
+- `packages/apps-server` — `wicked-apps-server`, the standalone site an Apps publish puts in its
+  container image (one app's page, spec, named queries and granted actions; crew's own executor,
+  bundled).
 - `packages/crew-api-types` — the published wire contract of `/api/v1` + `/ws` (types only,
   zero runtime); wicked-studio builds against this, never against crew internals.
 - No ACP bridges any more (C5): governed seats run each CLI's headless mode, in a hardened seat

@@ -4,6 +4,14 @@
 agents — but the project is young, local-first, and evolving. Treat it as a working
 research vehicle, not a finished product.*
 
+*A note from 2026-11: this article was first written in 2026-07, and two of the mechanisms it
+describes have changed since. Councils no longer vote on every unit: a unit is routed by skills, and a
+council is convened only to settle a concrete dispute, such as a reviewer's finding the builder
+declines. And a job no longer "degrades" to whatever agents it finds: by default a different agent
+reviews the work, and when none can, the job stops unless you launch it as "reduced assurance", which
+is labelled on the job, every gate and the delivery. The passages below that say otherwise are kept as
+the record of what was tried.*
+
 *Two kinds of verification appear in this article, and they are not the same thing.
 Claims tagged *(observed)* are backed by incidents from real working runs. Claims tagged
 *(fault-injected)* are backed by deliberately broken configurations built to test a
@@ -265,5 +273,5 @@ node packages/crew/dist/cli/index.js serve
 # open http://127.0.0.1:7701
 ```
 
-Install and authenticate whichever agent CLIs you want on the roster; crew degrades
-gracefully to whatever subset it finds.
+Sign in whichever agent CLIs you want on the roster; crew works with any subset. With only one, a job
+stops at review unless you launch it as "reduced assurance", because no other agent can review it.
