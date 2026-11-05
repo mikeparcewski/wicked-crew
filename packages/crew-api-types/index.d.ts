@@ -3326,8 +3326,11 @@ export interface AssuranceReceipt {
  *  `unchecked` (no judge ruled; holds the gate) · `skipped` (the operator skipped it, with a reason;
  *  a confirmed waiver reads `waived by instruction (…), confirmed by <who>: <reason>`) · `waived`
  *  (the person's own instruction conflicts with the rule: holds the gate until the person confirms
- *  it with a reason through `skip_rules`; never kept, never skipped silently). */
-export type RuleVerdictStatus = 'kept' | 'broken' | 'n_a' | 'unchecked' | 'skipped' | 'waived';
+ *  it with a reason through `skip_rules`; never kept, never skipped silently) · `deferred` (api-types
+ *  0.191.0: the rule's subject only exists at delivery, by recorded fact: obligations
+ *  `evidence:delivery` or `applies_to` naming only the deliver step; it does not hold review or QE,
+ *  and the deliver step's receipt carries its verdict on the pull request's text). */
+export type RuleVerdictStatus = 'kept' | 'broken' | 'n_a' | 'unchecked' | 'skipped' | 'waived' | 'deferred';
 /** How it was reached: `fact` (a recorded fact ruled it out) · `judge` (a seat distinct from the
  *  creators ruled) · `machine` (an engine check, e.g. `check:test-fails-on-base`) · `cache` (an
  *  earlier verdict on the same rule and evidence) · `operator` (skipped) · `none` (unchecked). */

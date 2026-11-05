@@ -1374,6 +1374,12 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     //   2. the ref ON THE REMOTE is ahead of origin's default branch by at least one commit.
     "  URL=$(printf '%s\\n' \"$OUT\" | grep -Eo 'https://[^[:space:]]+/pull/[0-9]+' | tail -1 || true)",
     '  [ -n "$URL" ] || { echo "deliver: gh pr create exited 0 but produced no PR URL for $B — refusing to report a delivery nothing can be pointed at"; exit 1; }',
+    // (wicked-core SWAP 6) The engine checks the steering rules deferred to delivery against the
+    // pull request text: handed back ONLY once gh has opened the PR with exactly this title and body
+    // (a PR this run already had, a revision's comment, a push-only or Azure DevOps delivery hand
+    // back nothing, so the engine holds those rules for a person rather than judge text that is not
+    // the PR's description).
+    '  if [ -z "${EXISTING:-}" ] && [ -n "${WICKED_DELIVER_TEXT_OUT:-}" ]; then { printf \'%s\\n\\n\' "$TITLE"; cat "$TD/body"; } > "$WICKED_DELIVER_TEXT_OUT" 2>/dev/null || true; fi',
     '  P=$(git rev-list --count "$D..origin/$B")',
     '  [ "$P" -ge 1 ] || { echo "deliver: $B is not ahead of $D on the remote after the push — refusing to report a delivery with no commits"; exit 1; }',
     '  if [ -n "${EXISTING:-}" ]; then',

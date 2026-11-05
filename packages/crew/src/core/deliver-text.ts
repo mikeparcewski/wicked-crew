@@ -1063,6 +1063,7 @@ export function rulesSummaryLine(rows: ReadonlyArray<{ ruleId?: unknown; status?
   const n = (s: string) => rows.filter((r) => r.status === s).length;
   let line = `${rows.length} rules checked: ${n('kept')} kept, ${n('broken')} broken, ${n('n_a')} not applicable`;
   if (n('waived') > 0) line += `, ${n('waived')} waived by instruction (to confirm)`;
+  if (n('deferred') > 0) line += `, ${n('deferred')} deferred to delivery`;
   if (n('unchecked') > 0) line += `, ${n('unchecked')} unchecked`;
   const skipped = rows.filter((r) => r.status === 'skipped');
   if (skipped.length > 0) {

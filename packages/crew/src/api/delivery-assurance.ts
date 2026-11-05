@@ -225,7 +225,7 @@ export function aggregateReceipt(view: SessionView, tree: string | null): Assura
   };
 }
 
-const RULE_RANK: Record<RuleVerdict['status'], number> = { broken: 4, unchecked: 3, waived: 3, skipped: 2, kept: 1, n_a: 0 };
+const RULE_RANK: Record<RuleVerdict['status'], number> = { broken: 5, unchecked: 4, waived: 4, skipped: 3, kept: 2, n_a: 1, deferred: 0 };
 
 /** (DES-RULE-CHECK-001 S4) One row per rule, the worst status winning, in first-seen order. */
 export function worstRulePerRule(rows: readonly RuleVerdict[]): RuleVerdict[] {
