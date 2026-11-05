@@ -17,7 +17,7 @@ import type {
 } from '../core/types.js';
 import { isCodeWorkDef } from '../api/delivery-index.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
-import { CATALOG_CATEGORIES, CATALOG_EXCLUDED, CATALOG_SEEDS, CATEGORY_ORDER, type CatalogSeed } from './catalog-data.js';
+import { CATALOG_CATEGORIES, CATALOG_EXCLUDED, CATALOG_EXCLUDED_DEFS, CATALOG_SEEDS, CATEGORY_ORDER, type CatalogSeed } from './catalog-data.js';
 
 /** One run as the catalog reads it. Times are unix SECONDS (the served run's `created_at`/`ended_at`). */
 export interface CatalogRun {
@@ -41,6 +41,8 @@ export interface CatalogInputs {
   runs: readonly CatalogRun[];
   actorId: string;
   projectId: string | null;
+  /** This daemon runs app turns (`GET /health.capabilities.apps.turns`): the `app` launch kind is offered. Absent = no. */
+  appsByChat?: boolean;
 }
 
 export const TOP_MAX = 6;
@@ -87,6 +89,8 @@ const presetRequiresQe = (p: Preset): boolean =>
 const presetDelivers = (p: Preset): WorkflowCatalogEntry['delivers'] => (p.steps.some((s) => s.catalog === 'build') ? 'pr' : 'report');
 const savedSummary = (p: Preset): string => `Your saved steps: ${p.steps.map((s) => s.id || s.catalog).join(', ')}.`;
 const isExcluded = (name: string): boolean => Object.hasOwn(CATALOG_EXCLUDED, name);
+/** A served def left out (a saved preset of its name is still the operator's, listed under `yours`). */
+const isExcludedDef = (name: string): boolean => isExcluded(name) || Object.hasOwn(CATALOG_EXCLUDED_DEFS, name);
 
 export function buildWorkflowCatalog(input: CatalogInputs): WorkflowCatalogResponse {
   const defs = new Map(input.defs.map((d) => [d.id, d]));
@@ -160,13 +164,15 @@ export function buildWorkflowCatalog(input: CatalogInputs): WorkflowCatalogRespo
       continue;
     }
     if (key !== null) claimed.add(key);
+    // A new app by chat needs this daemon's app turns; without them the card is listed, not offered.
+    const noApps = seed.launch.kind === 'app' && input.appsByChat !== true;
     entries.push({
       ...rest,
       title: title ?? seed.id,
       summary: summary ?? '',
       useWhen: useWhen ?? [],
-      status: status ?? 'available',
-      statusNote: statusNote ?? null,
+      status: noApps ? 'unavailable' : (status ?? 'available'),
+      statusNote: noApps ? 'This daemon does not run app chats (no app store, or its engine has no apps-turn).' : (statusNote ?? null),
       requiresQe: false,
       source: seed.launch.kind === 'none' ? 'none' : 'studio',
       usage: usageOf(key, mine),
@@ -176,7 +182,7 @@ export function buildWorkflowCatalog(input: CatalogInputs): WorkflowCatalogRespo
   // Never lose a launchable workflow: a served non-system def nobody seeded joins `more`, unless a saved
   // preset of its name shadows it (that one joins `yours` below, as what a launch runs).
   for (const def of input.defs) {
-    if (def.is_system === true || claimed.has(def.id) || isExcluded(def.id) || savedByName.has(def.id)) continue;
+    if (def.is_system === true || claimed.has(def.id) || isExcludedDef(def.id) || savedByName.has(def.id)) continue;
     claimed.add(def.id);
     const id = runCardId(def.id);
     ids.add(id);

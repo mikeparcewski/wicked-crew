@@ -6,7 +6,7 @@
  * presets (wicked-core `src/presets/*.json`) or crew's own defs (`workflows/*.json`), its title,
  * summary and use-when on the def (core's `builtin_preset_descriptor`, C2). A `run` seed never repeats
  * them (pinned by a test), so there is no second copy to drift. Only a seed with no def (studio's own
- * flows, coming soon) carries its own copy.
+ * flows, Apps, Add a repository, coming soon) carries its own copy.
  *
  * Copy here is a product claim: a card promises only what works today (approved messaging rules N5, N7, N8;
  * pinned by tests/workflow-catalog.test.ts). Search-only `synonyms` may name what people type for it.
@@ -106,24 +106,24 @@ const RUN_ON_REPO = (label: string): WorkflowCatalogInput[] => [INTENT(label), R
 export const CATALOG_SEEDS: readonly CatalogSeed[] = [
   // ── Create ──
   {
-    // Operator ruling 2026-11-02: the data builder (was Vibe, working name Create) is named Apps.
+    // Operator ruling 2026-11-02: the data builder (was Vibe, working name Create) is named Apps. Chat-first Apps
+    // shipped (crew#1312 K5, studio#968): a pick starts a new app by chat, the words its first turn (DES-APPS-001
+    // §6.2). Available where this daemon runs app turns (`apps.turns`); listed as not available elsewhere.
     id: 'apps',
     category: 'create',
     subcategory: 'apps',
     title: 'Apps',
     summary: 'Build a live app, dashboard or tool over your own data and APIs by describing it.',
     useWhen: ['a dashboard over your data', 'an internal tool without a codebase'],
-    outcome: 'Live apps and dashboards over your APIs and databases.',
+    outcome: 'A live app or dashboard over your data sources, built from your words and reviewed by another agent.',
     needs: ['project'],
-    inputs: [],
+    inputs: [INTENT('What should the app show?'), PROJECT_REQUIRED],
     typicalMinutes: null,
-    cost: null,
+    cost: 'medium',
     tags: ['app', 'dashboard', 'no-code'],
     synonyms: ['apps', 'app', 'dashboard', 'data app', 'internal tool', 'vibe', 'vibe code', 'ui builder', 'create', 'prototype', 'build an app'],
-    launch: { kind: 'none' },
+    launch: { kind: 'app' },
     delivers: 'none',
-    status: 'coming_soon',
-    statusNote: 'Design in progress.',
   },
   {
     id: 'feature',
@@ -395,6 +395,26 @@ export const CATALOG_SEEDS: readonly CatalogSeed[] = [
   },
   // ── More ──
   {
+    // ux-tonight (operator 2026-11-04: "don't I see a way to onboard a repo anymore"): registering a repository
+    // onboards it (`POST /repos` starts the system `onboarding` run), so the card opens studio's Add a repository,
+    // in the project the pick is made in. The `onboarding` workflow itself stays machine-owned (system).
+    id: 'add-repo',
+    category: 'more',
+    subcategory: null,
+    title: 'Add a repository',
+    summary: 'Register a repository from this computer or a URL; onboarding then builds its code map.',
+    useWhen: ['work on a repository studio does not have yet', 'onboard a repository'],
+    outcome: 'The repository registered and onboarded, ready for jobs and chats.',
+    needs: ['nothing'],
+    inputs: [PROJECT],
+    typicalMinutes: null,
+    cost: 'low',
+    tags: ['repository', 'onboarding'],
+    synonyms: ['onboard', 'onboarding', 'register', 'add repo', 'new repo', 'connect a repo', 'import', 'clone', 'repository', 'index'],
+    launch: { kind: 'repo' },
+    delivers: 'none',
+  },
+  {
     id: 'start-chat',
     category: 'more',
     subcategory: null,
@@ -464,6 +484,16 @@ export const CATALOG_SEEDS: readonly CatalogSeed[] = [
  */
 export const CATALOG_EXCLUDED: Readonly<Record<string, string>> = {
   'distill-learnings': 'runs by itself after each finished run, on that run',
+};
+
+/**
+ * Served workflow DEFS the catalog leaves out, while an operator's saved preset of the same name is still listed under
+ * `yours` (it is theirs, and launchable: codex r1 on crew#1349). DES-APPS-001: both run on one app and are started from
+ * that app; DES-CATALOG-002 Q12 leaves them out of v2 too.
+ */
+export const CATALOG_EXCLUDED_DEFS: Readonly<Record<string, string>> = {
+  'apps-turn': "runs one message of an app's chat, started from that app's chat",
+  'apps-publish': "publishes an app, started from that app's Share",
 };
 
 /** The categories' display order, for sorting. */

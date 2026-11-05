@@ -7497,7 +7497,11 @@ export function registerRoutes(
       retryOf: retryIndex.retryOfFor(view.session.id),
       principal: runTimingIndex.principalFor(view.session.id),
     }));
-    const body: WorkflowCatalogResponse = buildWorkflowCatalog({ defs: workflows, presets, runs, actorId: me, projectId });
+    const body: WorkflowCatalogResponse = buildWorkflowCatalog({
+      defs: workflows, presets, runs, actorId: me, projectId,
+      // The same rule as `GET /health.capabilities.apps.turns`.
+      appsByChat: runtime.apps !== undefined && runtime.apps.turns !== null,
+    });
     return body;
     },
   );
