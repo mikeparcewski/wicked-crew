@@ -10,6 +10,14 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A steering rule whose subject only exists at delivery no longer holds review and QE (api-types 0.191.0, SWAP 6).**
+  The wire gains the `deferred` rule status: the engine defers a rule to delivery by a recorded fact (obligations
+  `evidence:delivery`, or `applies_to` naming only the deliver step) and the deliver step judges it against the pull
+  request's text. The delivery's worst-row-per-rule lets the deliver verdict replace a review's deferral, and the PR
+  body's rule line counts "N deferred to delivery". Needs the engine after wicked-core's deferral fix.
+
 ### Added
 
 - **The review's steering-rule check on the wire, the gate answers and the rule line on the delivery

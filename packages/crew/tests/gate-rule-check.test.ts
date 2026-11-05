@@ -157,3 +157,13 @@ describe('the rule verdicts on the delivery and the PR body', () => {
     expect(rulesLabel({})).toBeNull();
   });
 });
+
+describe('(SWAP 6) a rule deferred to delivery', () => {
+  it('is counted on the line and the delivery verdict replaces it', () => {
+    expect(rulesSummaryLine([row('A', 'kept'), row('learn-linked-issue', 'deferred')])).toBe(
+      '2 rules checked: 1 kept, 0 broken, 0 not applicable, 1 deferred to delivery',
+    );
+    expect(worstRulePerRule([row('learn-linked-issue', 'deferred'), row('learn-linked-issue', 'broken')]).map((r) => r.status)).toEqual(['broken']);
+    expect(worstRulePerRule([row('learn-linked-issue', 'deferred'), row('learn-linked-issue', 'n_a')]).map((r) => r.status)).toEqual(['n_a']);
+  });
+});
