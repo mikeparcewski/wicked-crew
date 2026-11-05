@@ -274,6 +274,12 @@ export class AppStore {
     return { slug: a.slug, name: a.name, projectId: a.projectId, repoId: a.repoId, createdAt: a.createdAt, head: { version: h.version, tree: h.tree, receipt: h.receipt?.kind ?? null }, turn };
   }
 
+  /** The project an app belongs to, or `null` when there is no such app (a knowledge query reads only its project's). */
+  projectOf(slug: string): string | null {
+    const a = Object.hasOwn(this.state.apps, slug) ? this.state.apps[slug] : undefined;
+    return a === undefined || typeof a.projectId !== 'string' || a.projectId === '' ? null : a.projectId;
+  }
+
   list(projectId?: string): AppSummary[] {
     return Object.values(this.state.apps)
       .filter((a) => projectId === undefined || a.projectId === projectId)

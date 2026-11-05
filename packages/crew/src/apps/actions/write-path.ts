@@ -155,7 +155,7 @@ export class AppWritePath {
   }
 
   private async secret(s: AppSource): Promise<string | null> {
-    if (s.kind === 'crew') return null;
+    if (s.kind === 'crew' || s.kind === 'estate') return null;
     const r = await this.deps.registry!.callSecret(s.config);
     if (r.missing) throw refuse(409, 'source_failed', `${s.name}'s secret resolves to nothing; set it first`);
     return r.secret;
@@ -254,6 +254,8 @@ export class AppWritePath {
     if (source === null || source.pin.descriptorHash !== grant.descriptorHash || (record !== undefined && record.descriptorHash !== source.pin.descriptorHash)) {
       return this.withdraw(app, action.id, 'source_changed', 'contract_changed', `${action.source}'s connection changed since the grant: the grant is withdrawn`, grant);
     }
+    // The system's knowledge (`estate`) is read by recall queries only: it takes no action.
+    if (source.kind === 'estate') throw refuse(409, 'contract_changed', `${action.source} takes no action`);
     if (source.kind !== 'crew' && !source.enabled) throw refuse(409, 'contract_changed', `${action.source} is switched off`);
     if (action.kind === 'row-write' && (source.kind !== 'sql' || !source.allowWrites)) throw refuse(409, 'writes_off', `${action.source}'s Allow writes switch is off`);
     let resolved: Resolved;
@@ -498,6 +500,7 @@ export class AppWritePath {
       if (g === null || g.actionHash !== r.actionHash || g.contractHash !== r.contractHash || g.descriptorHash !== r.descriptorHash) throw refuse(409, 'not_granted', `action ${id} was revoked or granted again`);
       // The source the call goes to is the one checked: its descriptor is the record's, for every kind (codex r1).
       if (now === null || now.pin.descriptorHash !== r.descriptorHash || resolved.source.pin.descriptorHash !== r.descriptorHash) throw refuse(409, 'contract_changed', `${action.source} changed while the action was starting`);
+      if (now.kind === 'estate') throw refuse(409, 'contract_changed', `${action.source} takes no action`);
       if (now.kind !== 'crew' && !now.enabled) throw refuse(409, 'contract_changed', `${action.source} is switched off`);
       if (action.kind === 'row-write' && (now.kind !== 'sql' || !now.allowWrites)) throw refuse(409, 'writes_off', `${action.source}'s Allow writes switch is off`);
       return structuredClone(tx.update(r, { state: 'running', startedAt: this.now(), epoch: this.deps.actions.epoch }));

@@ -204,6 +204,14 @@ export function crewQueryContract(route: { path: string; responseType: string })
 }
 
 /**
+ * A knowledge query (`recall`, DES-KNOWLEDGE-DATA-001 §9.1): what it reads and how it is grouped, and the registry
+ * id behind a named source (a name that later points at another entry is a change).
+ */
+export function recallQueryContract(input: { from: string; group: string | null; sourceId: string | null; columns: readonly string[] }): string {
+  return sha({ v: CONTRACT_VERSION, kind: 'recall', from: input.from, group: input.group, sourceId: input.sourceId, columns: [...input.columns].sort() });
+}
+
+/**
  * A row write: the table, the operation, the columns it sets and keys on, and the table safety check's
  * fingerprint (which hashes every definition the check reads, columns and types included, DES §7.4). A
  * grant binds to this; any change to the table withdraws it.

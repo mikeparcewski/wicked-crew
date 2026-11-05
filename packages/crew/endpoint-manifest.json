@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.188.0",
+  "apiTypesVersion": "0.189.0",
   "endpoints": [
     {
       "method": "GET",
@@ -893,6 +893,18 @@
         200,
         403,
         502,
+        503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/knowledge/summary",
+      "requestType": null,
+      "responseType": "KnowledgeSummaryResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
         503
       ]
     },

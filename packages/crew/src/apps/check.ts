@@ -29,7 +29,7 @@ export const QUERIES_DIR = 'queries';
 export const QUERY_TEXT_MAX_BYTES = 64 * 1024;
 const LOCK_MAX_BYTES = 1024 * 1024;
 
-export const QUERY_EXT: Record<AppQueryKind, string> = { sql: 'sql', graphql: 'graphql', rest: 'json', mcp: 'json', crew: 'json' };
+export const QUERY_EXT: Record<AppQueryKind, string> = { sql: 'sql', graphql: 'graphql', rest: 'json', mcp: 'json', crew: 'json', recall: 'json' };
 
 export const EMPTY_LOCK: AppLock = { schema: 'wicked.apps.lock/v1', sources: {}, queries: {}, actions: {}, uploads: {} };
 

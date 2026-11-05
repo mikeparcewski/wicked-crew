@@ -16,6 +16,7 @@ import { AppActionStore } from '../../src/apps/actions/store.js';
 import type { WriteHooks } from '../../src/apps/actions/pg-write.js';
 import { AppWritePath } from '../../src/apps/actions/write-path.js';
 import { AppExecutor } from '../../src/apps/exec/executor.js';
+import type { AppKnowledgeDeps } from '../../src/apps/exec/recall.js';
 import type { Viewer } from '../../src/apps/exec/params.js';
 import { AppsSourceStage } from '../../src/apps/exec/source-stage.js';
 import { registerAppRoutes } from '../../src/apps/routes.js';
@@ -64,7 +65,7 @@ export interface Harness {
   close(): Promise<void>;
 }
 
-export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick<Harness, 'registry' | 'store' | 'audit' | 'executor'>) => void | Promise<void>; now?: () => number; crewDeadlineMs?: number } = {}): Promise<Harness> {
+export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick<Harness, 'registry' | 'store' | 'audit' | 'executor'>) => void | Promise<void>; now?: () => number; crewDeadlineMs?: number; knowledge?: AppKnowledgeDeps } = {}): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), 'apps-k2b-'));
   const env: Record<string, string> = {};
   const secrets: SecretStore = { available: false, get: async () => null, has: async () => false, set: async () => undefined, delete: async () => undefined };
@@ -78,7 +79,11 @@ export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick
     },
     idTaken: async (id) => repos.has(id),
   };
-  const store = new AppStore({ stateFile: join(dir, 'daemon-apps.json'), appsRoot: join(dir, 'apps'), registry: repoRegistry, sourceStage: new AppsSourceStage({ registry }) });
+  // (DES-KNOWLEDGE-DATA-001 §9.1) With `knowledge`, recall queries are checked and read against it, in the app's project.
+  let storeRef: AppStore | null = null;
+  const projectOf = (slug: string): string | null => storeRef?.projectOf(slug) ?? null;
+  const store = new AppStore({ stateFile: join(dir, 'daemon-apps.json'), appsRoot: join(dir, 'apps'), registry: repoRegistry, sourceStage: new AppsSourceStage({ registry, ...(opts.knowledge !== undefined ? { knowledge: opts.knowledge, projectOf } : {}) }) });
+  storeRef = store;
   const app = Fastify({ logger: false });
   const viewers: Record<string, Viewer> = {};
   const viewerOf = async (a: Actor): Promise<Viewer> => viewers[a.id] ?? { id: a.id, email: `${a.id}@example.com`, name: a.id, groups: null };
@@ -92,6 +97,7 @@ export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick
     viewerOf,
     ...(opts.now !== undefined ? { now: opts.now } : {}),
     ...(opts.crewDeadlineMs !== undefined ? { crewDeadlineMs: opts.crewDeadlineMs } : {}),
+    ...(opts.knowledge !== undefined ? { knowledge: opts.knowledge, projectOf } : {}),
   });
   const actions = new AppActionStore(join(dir, 'daemon-apps-actions.json'), opts.now);
   const writeEnv: Record<string, string> = {};

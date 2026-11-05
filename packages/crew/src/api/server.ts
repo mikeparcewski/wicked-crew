@@ -2563,11 +2563,11 @@ export async function createServer(
   mcpRegistry.onRestored = () => trackerProjector.changed();
   trackerProjector.changed();
   // §4.3: what a unit's knowledge reads may see — the sources its project may see (the gate's predicate) and its repos.
-  const unitVisible = async (scope: EstateUnitScope): Promise<string[]> => {
-    const repos = scope.repoId !== null ? [scope.repoId] : [];
-    if (scope.projectId !== null) {
+  const projectVisible = async (projectId: string | null, repoId: string | null = null): Promise<string[]> => {
+    const repos = repoId !== null ? [repoId] : [];
+    if (projectId !== null) {
       try {
-        for (const m of await adapter.projectMembers(scope.projectId)) if (m.member_kind === 'crew.repo') repos.push(m.member_ref);
+        for (const m of await adapter.projectMembers(projectId)) if (m.member_kind === 'crew.repo') repos.push(m.member_ref);
       } catch {
         // An engine that cannot list members leaves the run's own repo.
       }
@@ -2575,12 +2575,15 @@ export async function createServer(
     // DES-PM-001 §3.4: the unit's trackers (T(u), once estate holds them) and its project join the set.
     let trackers: string[] = [];
     try {
-      trackers = await unitTrackerIds(dataGate.pm, (id) => trackerProjector.acknowledged(id), { projectId: scope.projectId, repoId: scope.repoId });
+      trackers = await unitTrackerIds(dataGate.pm, (id) => trackerProjector.acknowledged(id), { projectId: projectId, repoId: repoId });
     } catch {
       trackers = [];
     }
-    return visibleDeps(await dataGate.sources(), scope.projectId, repos, (id) => sourceProjector.projectedDescriptor(id), trackers);
+    return visibleDeps(await dataGate.sources(), projectId, repos, (id) => sourceProjector.projectedDescriptor(id), trackers);
   };
+  const unitVisible = (scope: EstateUnitScope): Promise<string[]> => projectVisible(scope.projectId, scope.repoId);
+  // DES-KNOWLEDGE-DATA-001 §9.1: an app's knowledge query sees what a unit in the APP'S project sees (the same set).
+  const appsKnowledgeVisible = (projectId: string): Promise<string[]> => projectVisible(projectId);
   const mcpBroker = new McpBroker({
     registry: mcpRegistry,
     engine: options?.mcpEngineGate ?? (() => CoreAdapter.mcpEngineGate()),
@@ -2625,7 +2628,12 @@ export async function createServer(
       },
       // (K2b) The source stage: the read policy and the per-kind source check over the connector registry,
       // so a version holding queries or actions lands when they pass (DES §9.2 step 3).
-      sourceStage: new AppsSourceStage({ registry: mcpRegistry }),
+      sourceStage: new AppsSourceStage({
+        registry: mcpRegistry,
+        // (DES-KNOWLEDGE-DATA-001 §9.1) A `recall` query is checked against what its app's project may see.
+        knowledge: { sources: () => dataGate.sources(), visible: appsKnowledgeVisible },
+        projectOf: (slug) => appStore?.projectOf(slug) ?? null,
+      }),
       log: (m) => app.log.warn(m),
     });
     // (DES-APPS-001 K5) Chat turns: each message is one `apps-turn` run; its outcome lands or ends with a reason.
@@ -2637,7 +2645,13 @@ export async function createServer(
         return JSON.stringify(launchRosterNaming(rosterWithStanding(), undefined));
       },
       // DES-KNOWLEDGE-DATA-001 §9.3: the builder gets the app's project's knowledge package, as a chat there does.
-      knowledge: new PackageKnowledge(dataGate, (m) => app.log.warn(m)),
+      knowledge: new PackageKnowledge(dataGate, (m) => app.log.warn(m), {
+        sources: () => dataGate.sources(),
+        visible: appsKnowledgeVisible,
+        // Each call bounded (the summary as a whole has its own budget): a slow estate never holds a turn's launch.
+        estate: (tool, args) => callEstateTool(tool, args, { timeoutMs: 5_000 }),
+        rules: () => adapter.listConformanceRules(),
+      }),
       store: () => store,
       log: (m) => app.log.info(m),
     });
@@ -2751,6 +2765,7 @@ export async function createServer(
       sourceReads,
       trackerProjector,
       trackerAddresses,
+      appsKnowledgeVisible,
       ...(typeof adapter.askSupported === 'function' && adapter.askSupported() ? { askServer } : {}),
       // DES-MCP-TOOLS-001 S7: the call records the usage fold reads.
       mcpCalls: mcpCallRecords,

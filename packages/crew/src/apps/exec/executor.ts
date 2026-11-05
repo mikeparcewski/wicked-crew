@@ -20,7 +20,7 @@ import { createHash } from 'node:crypto';
 
 import { buildClientSchema, getVariableValues, type IntrospectionQuery, Kind, parse } from 'graphql';
 
-import type { Actor, AppCell, AppLock, AppQuery, AppQueryResponse } from '../../core/types.js';
+import type { Actor, AppCell, AppLock, AppQuery, AppQueryResponse, AppRecallQueryText } from '../../core/types.js';
 import { canonicalJson, deriveToolClass, effectiveToolClass } from '../../mcp/classify.js';
 import { McpRegistryError } from '../../mcp/registry.js';
 import { invokeMcpTool } from '../../mcp/invoke.js';
@@ -37,12 +37,13 @@ import { readSqlQuery, SourcePolicyError, type SqlSourceHandle } from '../../sou
 import { snapshotPath } from '../../sources/uploads.js';
 import type { AppStore } from '../store.js';
 import { AppReadCache, ttlOf } from './cache.js';
-import { crewQueryContract, graphqlQueryContract, graphqlRootSignatures, sqlQueryContract, toolQueryContract } from './contract.js';
+import { crewQueryContract, recallQueryContract, graphqlQueryContract, graphqlRootSignatures, sqlQueryContract, toolQueryContract } from './contract.js';
 import { AppLimits, RateLimited } from './limits.js';
 import { bindParams, ParamError, type Viewer } from './params.js';
 import { morePathSays, projectRows, RESULT_LIMITS, ResultError, selectPath, sqlRowObjects } from './project.js';
 import { lookupSource, pinOf, queryKindFits, type AppSource, type AppSourceRegistry } from './sources.js';
-import { parseCrewQueryText, parseToolQueryText, type QueryArg } from './texts.js';
+import { parseCrewQueryText, parseRecallQueryText, parseToolQueryText, type QueryArg } from './texts.js';
+import { type AppKnowledgeDeps, readRecall, RecallDeadline, RecallRefusal, recallProblem, RECALL_COLUMNS, RECALL_GROUP_COLUMNS, visibleSource } from './recall.js';
 
 /** A refusal or failure of the query route, as `AppErrorBody` carries it. */
 export class AppExecError extends Error {
@@ -89,17 +90,27 @@ export interface ExecutorDeps {
   now?: () => number;
   /** How long a crew-source read may take (default: the 10 s statement deadline). */
   crewDeadlineMs?: number;
+  /**
+   * (DES-KNOWLEDGE-DATA-001 §9.1) What a `recall` query reads, host side. Absent (the published app server) = a recall
+   * query answers 503: knowledge queries are studio-hosted only in v1.
+   */
+  knowledge?: AppKnowledgeDeps;
+  /** The project an app belongs to (crew's app store); `null` = unknown. Recall reads only that project's knowledge. */
+  projectOf?: (app: string) => string | null;
 }
 
 const sha = (v: unknown): string => createHash('sha256').update(canonicalJson(v)).digest('hex');
 const CALLS_PER_APP = 200;
+/** The longest a knowledge (`recall`) answer is cached, whatever the query's refresh says. */
+export const RECALL_CACHE_MAX_MS = 60_000;
 
 /** What a query needs to run, once its contract has been recomputed. */
 type Plan =
   | { kind: 'sql'; source: Extract<AppSource, { kind: 'sql' }>; driver: 'postgres' | 'mysql' | 'sqlite'; catalog: SqlCatalog }
   | { kind: 'graphql'; source: Extract<AppSource, { kind: 'graphql' }> }
   | { kind: 'tool'; source: Extract<AppSource, { kind: 'rest' | 'mcp-http' | 'mcp-stdio' }>; tool: McpToolRecord; args: Record<string, QueryArg> }
-  | { kind: 'crew'; route: string; params: Record<string, QueryArg>; query: Record<string, QueryArg> };
+  | { kind: 'crew'; route: string; params: Record<string, QueryArg>; query: Record<string, QueryArg> }
+  | { kind: 'recall'; text: AppRecallQueryText; projectId: string; visibleHash: string; stamp?: string };
 
 const argValue = (a: QueryArg, byName: Record<string, unknown>): unknown => (a.kind === 'literal' ? a.value : byName[a.name]);
 
@@ -146,7 +157,7 @@ export class AppExecutor {
       throw err;
     }
     const text = Object.hasOwn(files.queryText, q.id) ? files.queryText[q.id]! : '';
-    const first = await this.plan(q, text, files.lock, bound.byName);
+    const first = await this.plan(q, text, files.lock, bound.byName, input.app);
     const { plan, contractHash, descriptorHash } = first;
     // The secret resolved now: its digest keys the cache, so rows read under a credential that has since been
     // rotated are never served under the new one (codex r1); it is never stored.
@@ -157,17 +168,23 @@ export class AppExecutor {
       if (err instanceof RateLimited) throw new AppExecError(429, 'rate_limited', err.message, { retryAfterMs: err.retryAfterMs });
       throw err;
     }
-    const key = sha({ tree, query: q.id, params: bound.byName, descriptorHash, contractHash, credential: secret === null ? null : createHash('sha256').update(secret).digest('hex'), ...(plan.kind === 'crew' ? { actor: input.actor.id } : {}) });
+    // A recall's answer is keyed by what the project may see: a narrowed set never serves a wider cached answer.
+    const key = sha({ tree, query: q.id, params: bound.byName, descriptorHash, contractHash, credential: secret === null ? null : createHash('sha256').update(secret).digest('hex'), ...(plan.kind === 'crew' ? { actor: input.actor.id } : {}), ...(plan.kind === 'recall' ? { visible: plan.visibleHash, stamp: plan.stamp ?? null } : {}) });
     try {
-      const sourceName = plan.kind === 'crew' ? 'crew' : plan.source.name;
-      const r = await this.cache.read(input.app, key, ttlOf(q.refresh), () =>
+      const sourceName = plan.kind === 'crew' ? 'crew' : plan.kind === 'recall' ? 'estate' : plan.source.name;
+      // A knowledge answer lives at most a minute: a memory re-faceted or a rule re-scoped is never served for long.
+      // Memories are never stored (coalesced only): a memory re-faceted away from the project is never served from cache.
+      const ttl = plan.kind === 'recall' ? (plan.text.from === 'memories' ? 0 : Math.min(ttlOf(q.refresh), RECALL_CACHE_MAX_MS)) : ttlOf(q.refresh);
+      const r = await this.cache.read(input.app, key, ttl, () =>
         this.limits.run(input.app, sourceName, async () => {
           // Planned again once the slot is held: a read that waited never runs a plan the source has since
           // changed under (codex r1).
-          const now = await this.plan(q, text, files.lock, bound.byName);
+          const now = await this.plan(q, text, files.lock, bound.byName, input.app);
           // A credential removed while it waited is a change like any other (codex r2).
           const nowSecret = await this.secret(now.plan).catch(() => undefined);
-          if (now.contractHash !== contractHash || now.descriptorHash !== descriptorHash || nowSecret !== secret) {
+          // A recall's set or (steering) its rules moved while it waited: the key no longer says what it would read.
+          const visibleMoved = now.plan.kind === 'recall' && plan.kind === 'recall' && (now.plan.visibleHash !== plan.visibleHash || (now.plan.stamp ?? null) !== (plan.stamp ?? null));
+          if (now.contractHash !== contractHash || now.descriptorHash !== descriptorHash || nowSecret !== secret || visibleMoved) {
             throw new AppExecError(409, 'contract_changed', `${q.source} changed while query ${q.id} waited: run it again`);
           }
           return this.execute(q, text, now.plan, bound, input.authorization, secret);
@@ -197,7 +214,7 @@ export class AppExecutor {
     if (q === undefined) throw new AppExecError(404, 'unknown_query', `this version of ${app} has no query ${query}`);
     const text = Object.hasOwn(files.queryText, q.id) ? files.queryText[q.id]! : '';
     try {
-      const { contractHash, descriptorHash } = await this.plan(q, text, files.lock, {});
+      const { contractHash, descriptorHash } = await this.plan(q, text, files.lock, {}, app);
       return { contractHash, descriptorHash };
     } catch (err) {
       throw this.failure(err);
@@ -205,7 +222,7 @@ export class AppExecutor {
   }
 
   /** Step 4: the descriptor and the contract recomputed now, against the lock. */
-  private async plan(q: AppQuery, text: string, lock: AppLock, byName: Record<string, unknown>): Promise<{ plan: Plan; contractHash: string; descriptorHash: string }> {
+  private async plan(q: AppQuery, text: string, lock: AppLock, byName: Record<string, unknown>, app: string): Promise<{ plan: Plan; contractHash: string; descriptorHash: string }> {
     void byName;
     const locked = Object.hasOwn(lock.queries, q.id) ? lock.queries[q.id]! : undefined;
     const pinned = Object.hasOwn(lock.sources, q.source) ? lock.sources[q.source]! : undefined;
@@ -224,7 +241,26 @@ export class AppExecutor {
     const changed = (): AppExecError => new AppExecError(409, 'contract_changed', `what query ${q.id} reads at ${q.source} changed since this version was checked: check it again`);
     let plan: Plan;
     let contract: string | null;
-    if (source.kind === 'crew') {
+    if (source.kind === 'estate') {
+      const t = parseRecallQueryText(text);
+      if (!t.ok || recallProblem(q, t.value) !== null) throw changed();
+      const knowledge = this.deps.knowledge;
+      if (knowledge === undefined) throw new AppExecError(503, 'apps_unavailable', 'this server does not read the system\'s knowledge: knowledge queries run in studio only');
+      const projectId = this.deps.projectOf?.(app) ?? null;
+      if (projectId === null) throw new AppExecError(409, 'query_refused', `${app} belongs to no project, so it reads no knowledge`);
+      let sourceId: string | null = null;
+      try {
+        if (t.value.source !== undefined) sourceId = (await visibleSource(knowledge, projectId, t.value.source)).id;
+      } catch (err) {
+        if (err instanceof RecallRefusal) throw new AppExecError(409, 'query_refused', err.message);
+        throw err;
+      }
+      const visible = await knowledge.visible(projectId);
+      // Steering's rows stand on the rules as they are now (a rule re-scoped to another project changes the key).
+      const stamp = t.value.from === 'steering' ? sha((await knowledge.rules()).map((r) => [r.id, r.retired === true, r.targets?.project ?? null, r.statement, r.steering_type ?? null, r.severity])) : null;
+      contract = recallQueryContract({ from: t.value.from, group: t.value.group ?? null, sourceId, columns: Object.keys(t.value.group !== undefined ? RECALL_GROUP_COLUMNS : RECALL_COLUMNS[t.value.from]) });
+      plan = { kind: 'recall', text: t.value, projectId, visibleHash: sha([...visible].sort()), ...(stamp !== null ? { stamp } : {}) };
+    } else if (source.kind === 'crew') {
       const t = parseCrewQueryText(text);
       const route = t.ok ? CREW_SOURCE_ROUTES.find((r) => r.path === t.value.route) : undefined;
       if (!t.ok || route === undefined) throw changed();
@@ -266,7 +302,40 @@ export class AppExecutor {
     let rows: Array<Record<string, unknown>>;
     let truncated = false;
     let hasMore = false;
-    if (plan.kind === 'sql') {
+    if (plan.kind === 'recall') {
+      const knowledge = this.deps.knowledge!;
+      const arg = plan.text.query;
+      const value = arg === undefined ? null : argValue(arg, bound.byName);
+      const queryText = typeof value === 'string' ? value : value === null || value === undefined ? null : String(value);
+      if ((plan.text.from === 'knowledge' || plan.text.from === 'memories') && (queryText === null || queryText.trim() === '')) {
+        // Nothing to recall yet (an empty search box): no rows, nothing read.
+        rows = [];
+      } else {
+        let timer: NodeJS.Timeout | undefined;
+        const ms = this.deps.crewDeadlineMs ?? STATEMENT_DEADLINE_MS;
+        const timedOut = (): AppExecError => new AppExecError(504, 'source_timeout', `the knowledge plane did not answer within ${Math.round(ms / 1000)} s`);
+        const deadline = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(timedOut()), ms);
+        });
+        let r: Awaited<ReturnType<typeof readRecall>>;
+        try {
+          // Past the deadline the read starts no further estate call (each call is bounded on its own), so a timed-out
+          // read stops working soon after its slot is released.
+          r = await Promise.race([readRecall(knowledge, plan.projectId, plan.text, queryText, { deadlineAt: this.now() + ms, now: this.now }), deadline]).finally(() => clearTimeout(timer));
+        } catch (err) {
+          if (err instanceof AppExecError) throw err;
+          if (err instanceof RecallDeadline) throw timedOut();
+          if (err instanceof RecallRefusal) throw new AppExecError(err.code === 'unavailable' ? 502 : 409, err.code === 'unavailable' ? 'source_failed' : 'query_refused', err.message);
+          throw new AppExecError(502, 'source_failed', 'the knowledge plane did not answer the recall');
+        }
+        // The answer is cached under the set planned; it must be the set it was released under, or it is not kept.
+        if (r.released !== null && sha([...r.released].sort()) !== plan.visibleHash) {
+          throw new AppExecError(409, 'contract_changed', `what ${q.id}'s project may see changed while it ran: run it again`);
+        }
+        rows = r.rows;
+        truncated = r.truncated;
+      }
+    } else if (plan.kind === 'sql') {
       let handle: SqlSourceHandle;
       if (plan.driver === 'sqlite') {
         handle = { driver: 'sqlite', snapshotPath: snapshotPath(plan.source.config.sql?.snapshot ?? '', this.deps.snapshotDir), catalog: plan.catalog };
@@ -335,7 +404,7 @@ export class AppExecutor {
   }
 
   private async secret(plan: Plan): Promise<string | null> {
-    if (plan.kind === 'crew' || (plan.kind === 'sql' && plan.driver === 'sqlite')) return null;
+    if (plan.kind === 'crew' || plan.kind === 'recall' || (plan.kind === 'sql' && plan.driver === 'sqlite')) return null;
     const s = plan.source;
     const r = await this.deps.registry!.callSecret(s.config);
     if (r.missing) throw new AppExecError(409, 'source_failed', `${s.name}'s secret resolves to nothing; set it first`);
