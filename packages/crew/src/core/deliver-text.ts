@@ -33,10 +33,11 @@ import { homedir } from 'node:os';
 import type { GateSpec, PhaseDef, SessionView, WorkUnit } from './types.js';
 import { stripLinkedIssues } from './linked-issues.js';
 import { stripRunLearnings } from '../learnings/recall.js';
+import { stripRulesBrief } from '../decisions/rules-brief.js';
 
-/** The intent without the daemon's appended blocks: linked-issue text (crew#627) and approved learnings. */
+/** The intent without the daemon's appended blocks: linked-issue text (crew#627), approved learnings and the rules. */
 function intentOnly(problem: string): string {
-  return stripRunLearnings(stripLinkedIssues(problem));
+  return stripRulesBrief(stripRunLearnings(stripLinkedIssues(problem)));
 }
 import { rewriteHostPaths, withRootAliases, type ChatRepoRoot } from './host-paths.js';
 
