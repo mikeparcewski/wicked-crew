@@ -24,7 +24,7 @@
  * Coverage: "not checked" when no floor ran for the run (the gate's `floorNote` says why).
  */
 
-import { z } from 'zod';
+import { z } from '../../zod.js';
 import type { CheckOutput, WatchCheck } from '../types.js';
 
 interface Floor {
@@ -91,8 +91,8 @@ function raise(bag: Bag, ord: number, out: Extract<CheckOutput, { op: 'raise' }>
 export const claimVsEvidenceCheck: WatchCheck<Record<string, never>, Record<string, never>> = {
   name: 'deterministic:claim_vs_evidence',
   lane: 'deterministic',
-  paramsSchema: z.object({}).strict() as unknown as z.ZodType<Record<string, never>>,
-  thresholdSchema: z.object({}).strict() as unknown as z.ZodType<Record<string, never>>,
+  paramsSchema: z.strictObject({}) as unknown as z.ZodType<Record<string, never>>,
+  thresholdSchema: z.strictObject({}) as unknown as z.ZodType<Record<string, never>>,
   evaluate(input, state) {
     const bag =
       (state.bag.get('claim') as Bag | undefined) ??

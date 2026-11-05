@@ -14,7 +14,7 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { z } from 'zod';
+import { z } from '../zod.js';
 
 import type { AuditLog } from '../api/audit.js';
 import { API_PREFIX } from '../api/api-prefix.js';
@@ -26,7 +26,7 @@ import { VOICE_MAX_AUDIO_BYTES, VoiceError, type VoiceService } from './service.
 
 const V = API_PREFIX;
 
-export const PostVoiceModelSchema = z.object({ consent: z.literal(true) }).strict();
+export const PostVoiceModelSchema = z.strictObject({ consent: z.literal(true) });
 
 export interface VoiceRouteDeps {
   voice: VoiceService;

@@ -24,7 +24,7 @@ import { defaultLaunchRoster } from '../core/opt-in-seats.js';
 import { randomUUID } from 'node:crypto';
 
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { z } from 'zod';
+import { z } from '../zod.js';
 
 import {
   GovernanceEvalsUnsupportedError,
@@ -89,12 +89,10 @@ function invalidBody(err: z.ZodError, what: string): { error: string; details: z
 import { ImportEvalCorpusSchema } from './eval-sample.js';
 export { ImportEvalCorpusSchema };
 
-export const RunGovernanceEvalsSchema = z
-  .object({
-    type: z.enum(STEERING_TYPE_VALUES).optional(),
-    corpus: z.string().min(1).optional(),
-  })
-  .strict();
+export const RunGovernanceEvalsSchema = z.strictObject({
+  type: z.enum(STEERING_TYPE_VALUES).optional(),
+  corpus: z.string().min(1).optional(),
+});
 
 // The recon trigger's body (the pinned multiscope wire — see api/multiscope.ts): the operator's
 // brief verbatim (`problem` — studio composes its own recon framing, this route never rewrites
@@ -102,41 +100,37 @@ export const RunGovernanceEvalsSchema = z
 // sibling pauses at its intake gate BY DEFAULT — the posture the launch banner promises — and
 // an unattended fan is an EXPLICIT request, never a silent default. Strict: a misspelled field
 // must 400 by name, never launch a recon the caller believed was different (FINDING-031).
-export const TestingReconSchema = z
-  .object({
-    problem: z.string().min(1),
-    projectId: z.string().min(1).optional(),
-    repoRefs: z
-      .array(z.string().min(1))
-      .min(1, 'repoRefs must name at least one registered repo — omit the field to scope by project alone')
-      .optional(),
-    ungated: z.boolean().optional(),
-    clisJson: z.string().optional(),
-    channel: z.enum(['studio', 'cli', 'api']).optional(),
-    actor: z.string().min(1).max(256).optional(),
-  })
-  .strict();
+export const TestingReconSchema = z.strictObject({
+  problem: z.string().min(1),
+  projectId: z.string().min(1).optional(),
+  repoRefs: z
+    .array(z.string().min(1))
+    .min(1, 'repoRefs must name at least one registered repo — omit the field to scope by project alone')
+    .optional(),
+  ungated: z.boolean().optional(),
+  clisJson: z.string().optional(),
+  channel: z.enum(['studio', 'cli', 'api']).optional(),
+  actor: z.string().min(1).max(256).optional(),
+});
 
 // The test-authoring launch (wave 6, F-7R2-003/004/014 + F-075): the operator's intent + scope,
 // launched as the `qe-author-tests` WORKFLOW (never a free-text plan). Same scope fields and the
 // same intake-gate default as the recon body; `deliver` is the run's delivery mode — `pr` (the
 // default: the ENGINE's deliver phase opens the PR, never a worker) or `none` (leave the tests on
 // the run branch, `delivery: 'stranded'` on the wire, liftable post-hoc). Strict (FINDING-031).
-export const TestingAuthorSchema = z
-  .object({
-    problem: z.string().min(1),
-    projectId: z.string().min(1).optional(),
-    repoRefs: z
-      .array(z.string().min(1))
-      .min(1, 'repoRefs must name at least one registered repo — omit the field to scope by project alone')
-      .optional(),
-    ungated: z.boolean().optional(),
-    deliver: z.enum(['pr', 'none']).optional(),
-    clisJson: z.string().optional(),
-    channel: z.enum(['studio', 'cli', 'api']).optional(),
-    actor: z.string().min(1).max(256).optional(),
-  })
-  .strict();
+export const TestingAuthorSchema = z.strictObject({
+  problem: z.string().min(1),
+  projectId: z.string().min(1).optional(),
+  repoRefs: z
+    .array(z.string().min(1))
+    .min(1, 'repoRefs must name at least one registered repo — omit the field to scope by project alone')
+    .optional(),
+  ungated: z.boolean().optional(),
+  deliver: z.enum(['pr', 'none']).optional(),
+  clisJson: z.string().optional(),
+  channel: z.enum(['studio', 'cli', 'api']).optional(),
+  actor: z.string().min(1).max(256).optional(),
+});
 
 /** Returned when `clisJson` names a seat key that is not present in the current roster (#631). */
 export const SEAT_UNAVAILABLE_REASON =

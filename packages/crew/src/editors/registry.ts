@@ -27,7 +27,7 @@
 import { createHash } from 'node:crypto';
 import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { z } from 'zod';
+import { z } from '../zod.js';
 
 import type { EditorPermission, EditorView, EditorVisuals } from '../core/types.js';
 import { parseSurfaces } from './surfaces.js';
@@ -68,39 +68,39 @@ const KIND = /^[a-z][a-z0-9-]{1,40}$/u;
 
 /** Protocol 2's `surfaces` (DES-EDITOR-PLUGIN-CONTRACT-001 §5.2), parsed strictly to the wire shape: any
  *  violation refuses the editor, with the host's own reason. */
-const SurfacesField = z.unknown().optional().transform((raw, ctx) => {
+const SurfacesField = z.unknown().transform((raw, ctx) => {
   if (raw === undefined) return undefined;
   const parsed = parseSurfaces(raw);
   if (!parsed.ok) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: parsed.reason });
+    ctx.addIssue({ code: 'custom', message: parsed.reason });
     return z.NEVER;
   }
   return parsed.value;
-});
+}).optional();
 
 /** §8.2: `surfaces` is required when `protocol` lists 2, and refused when it doesn't. */
 function surfacesMatchProtocol(m: { protocol: number[]; surfaces?: unknown }, ctx: z.RefinementCtx): void {
   const speaks2 = m.protocol.includes(2);
-  if (speaks2 && m.surfaces === undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['surfaces'], message: 'a protocol-2 editor declares its surfaces' });
-  if (!speaks2 && m.surfaces !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['surfaces'], message: 'surfaces are a protocol-2 field' });
+  if (speaks2 && m.surfaces === undefined) ctx.addIssue({ code: 'custom', path: ['surfaces'], message: 'a protocol-2 editor declares its surfaces' });
+  if (!speaks2 && m.surfaces !== undefined) ctx.addIssue({ code: 'custom', path: ['surfaces'], message: 'surfaces are a protocol-2 field' });
 }
 
 const EditorManifestFields = z.object({
   id: z.string().max(64).regex(EDITOR_ID),
   title: z.string().min(1).regex(/\S/u),
   version: z.string().regex(EDITOR_VERSION),
-  protocol: z.array(z.number().int().min(1)).min(1),
+  protocol: z.array(z.int().min(1)).min(1),
   kinds: z.array(z.string().regex(KIND)).min(1),
   entry: z.string().regex(/\.html$/u).default('index.html'),
-  sizes: z.array(z.enum(['inline', 'pane', 'full'])).refine((s) => s.includes('inline'), { message: "'inline' is required" }),
+  sizes: z.array(z.enum(['inline', 'pane', 'full'])).refine((s) => s.includes('inline'), { error: "'inline' is required" }),
   panels: z.array(z.enum(['checks'])).optional(),
   permissions: z.array(z.object({ id: z.enum(EDITOR_PERMISSIONS), why: z.string().min(1) })),
-  limits: z.object({ bundleBytes: z.number().int().min(1).max(HOST_BUNDLE_CAP_BYTES) }).optional(),
+  limits: z.object({ bundleBytes: z.int().min(1).max(HOST_BUNDLE_CAP_BYTES) }).optional(),
   surfaces: SurfacesField,
   /** The Plugins page's one line and look (program DES-LEARN §2). Cosmetic: a malformed value is dropped, never a
    *  reason to refuse the editor. */
-  description: z.unknown().optional().transform(declaredDescription),
-  visuals: z.unknown().optional().transform(declaredVisuals),
+  description: z.unknown().transform(declaredDescription).optional(),
+  visuals: z.unknown().transform(declaredVisuals).optional(),
 });
 export const EditorManifestSchema = EditorManifestFields.superRefine(surfacesMatchProtocol);
 export type EditorManifest = z.infer<typeof EditorManifestFields>;

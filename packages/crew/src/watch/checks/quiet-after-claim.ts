@@ -13,7 +13,7 @@
  * (`workerStallMinutes`), so this entry has none of its own.
  */
 
-import { z } from 'zod';
+import { z } from '../../zod.js';
 import type { WatchCheck } from '../types.js';
 
 interface Claim {
@@ -34,8 +34,8 @@ interface Bag {
 export const quietAfterClaimCheck: WatchCheck<Record<string, never>, Record<string, never>> = {
   name: 'deterministic:quiet_after_claim',
   lane: 'deterministic',
-  paramsSchema: z.object({}).strict() as unknown as z.ZodType<Record<string, never>>,
-  thresholdSchema: z.object({}).strict() as unknown as z.ZodType<Record<string, never>>,
+  paramsSchema: z.strictObject({}) as unknown as z.ZodType<Record<string, never>>,
+  thresholdSchema: z.strictObject({}) as unknown as z.ZodType<Record<string, never>>,
   evaluate(input, state) {
     const bag = (state.bag.get('quiet') as Bag | undefined) ?? { claims: new Map(), lastOrd: null, seen: 0 };
     state.bag.set('quiet', bag);

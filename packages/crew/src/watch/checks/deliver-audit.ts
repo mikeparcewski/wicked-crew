@@ -15,7 +15,7 @@
  * - `unchanged` → nothing.
  */
 
-import { z } from 'zod';
+import { z } from '../../zod.js';
 import type { CheckOutput, WatchCheck } from '../types.js';
 
 interface Lift {
@@ -36,8 +36,8 @@ const keyOf = (ord: number, attempt: number): string => `${ord}:${attempt}`;
 export const deliverAuditCheck: WatchCheck<Record<string, never>, Record<string, never>> = {
   name: 'deterministic:deliver_audit',
   lane: 'deterministic',
-  paramsSchema: z.object({}).strict() as unknown as z.ZodType<Record<string, never>>,
-  thresholdSchema: z.object({}).strict() as unknown as z.ZodType<Record<string, never>>,
+  paramsSchema: z.strictObject({}) as unknown as z.ZodType<Record<string, never>>,
+  thresholdSchema: z.strictObject({}) as unknown as z.ZodType<Record<string, never>>,
   evaluate(input, state) {
     const bag = (state.bag.get('deliver') as Bag | undefined) ?? { lifts: new Map(), outcomes: 0 };
     state.bag.set('deliver', bag);

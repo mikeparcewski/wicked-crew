@@ -25,4 +25,17 @@ export default tseslint.config(
     ],
   },
   ...tseslint.configs.recommended,
+  {
+    // crew takes `z` from src/zod.js, which installs zod 3's English messages as zod 4's global error
+    // map before anything parses (crew quotes zod's messages on the wire). A direct `zod` import would
+    // still share that config, but only if src/zod.js had loaded first: route every import through it.
+    files: ['packages/crew/src/**/*.{ts,js}', 'packages/crew/tests/**/*.{ts,js,mjs}'],
+    ignores: ['packages/crew/src/zod.js', 'packages/crew/tests/fixtures/**'],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': ['error', {
+        paths: [{ name: 'zod', message: "import { z } from src/zod.js (it installs zod 3's messages)", allowTypeImports: true }],
+        patterns: [{ group: ['zod/*'], message: 'import { z } from src/zod.js', allowTypeImports: true }],
+      }],
+    },
+  },
 );

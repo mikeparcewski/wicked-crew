@@ -24,7 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { CreateTrackerLinkSchema } from '../src/knowledge/trackers/routes.js';
 import { TrackerActionSchema } from '../src/knowledge/trackers/actions.js';
 import { describe, expect, it } from 'vitest';
-import type { z } from 'zod';
+import type { z } from '../src/zod.js';
 import type * as Wire from 'wicked-crew-api-types';
 import type { UnitDistributedEventJson } from 'wicked-core-ts';
 import type { ChatSummary, CoreAdapter } from '../src/core/adapter.js';

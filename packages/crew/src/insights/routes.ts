@@ -4,7 +4,7 @@
  */
 
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { z } from 'zod';
+import { z } from '../zod.js';
 import type { Actor } from '../core/types.js';
 import { API_PREFIX } from '../api/api-prefix.js';
 import { LOCAL_ACTOR } from '../api/auth.js';
@@ -16,7 +16,7 @@ import { RecommendationError, type ReviewService } from './review-service.js';
 import type { InsightsStore } from './store.js';
 
 const V = API_PREFIX;
-const DismissSchema = z.object({ reason: z.string().trim().min(1).max(500) }).strict();
+const DismissSchema = z.strictObject({ reason: z.string().trim().min(1).max(500) });
 
 export interface InsightsRouteDeps {
   store: InsightsStore;

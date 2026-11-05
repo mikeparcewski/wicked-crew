@@ -6,7 +6,7 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { z } from 'zod';
+import { z } from '../zod.js';
 
 import { LOCAL_ACTOR, trustAtLeast } from '../api/auth.js';
 import { API_PREFIX } from '../api/api-prefix.js';
@@ -16,17 +16,13 @@ import type { DecisionFilter } from './ledger.js';
 
 const V = API_PREFIX;
 const STEERING = z.enum(['architecture', 'development', 'security', 'testing', 'operations', 'compliance', 'design-ux']);
-const RememberSchema = z
-  .object({
-    scope: z.enum(['project', 'everywhere']).optional(),
-    steering_type: STEERING.optional(),
-    statement: z.string().trim().min(1).max(500).optional(),
-  })
-  .strict();
-const DismissSchema = z
-  .object({ reason: z.enum(['not-a-rule', 'one-off', 'wrong-type', 'wrong-scope', 'not-the-same', 'undone']) })
-  .strict();
-const SameSchema = z.object({ same: z.boolean() }).strict();
+const RememberSchema = z.strictObject({
+  scope: z.enum(['project', 'everywhere']).optional(),
+  steering_type: STEERING.optional(),
+  statement: z.string().trim().min(1).max(500).optional(),
+});
+const DismissSchema = z.strictObject({ reason: z.enum(['not-a-rule', 'one-off', 'wrong-type', 'wrong-scope', 'not-the-same', 'undone']) });
+const SameSchema = z.strictObject({ same: z.boolean() });
 const STATES = new Set(['recorded', 'offered', 'remembered', 'undone', 'dismissed', 'restated', 'widened', 'landing_failed']);
 
 export function registerDecisionRoutes(app: FastifyInstance, service: DecisionService): void {

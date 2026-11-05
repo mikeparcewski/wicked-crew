@@ -19,7 +19,7 @@
  */
 
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
+import { z } from '../zod.js';
 import type { AuditLog } from './audit.js';
 import type { Actor, AuditEntry } from '../core/types.js';
 import { API_PREFIX } from './api-prefix.js';
@@ -30,9 +30,7 @@ const V = API_PREFIX;
 
 export const DELIVERY_FREEZE_ACTIONS = ['deliveries.frozen', 'deliveries.unfrozen'] as const;
 
-export const PutDeliveryFreezeSchema = z
-  .object({ frozen: z.boolean(), reason: z.string().trim().min(1).max(500).optional() })
-  .strict();
+export const PutDeliveryFreezeSchema = z.strictObject({ frozen: z.boolean(), reason: z.string().trim().min(1).max(500).optional() });
 
 export interface DeliveryFreezeState {
   frozen: boolean;

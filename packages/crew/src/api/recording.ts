@@ -60,7 +60,7 @@ import { constants as fsConstants, createReadStream, promises as fsp } from 'nod
 import { tmpdir } from 'node:os';
 import { extname, join, relative, resolve, sep } from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
+import { z, zod3Url } from '../zod.js';
 import type {
   DemoDocumentResponse,
   DemoChapter,
@@ -168,27 +168,25 @@ export async function existingDemoRootDir(runId: string): Promise<string> {
  */
 export const demoLaunchRoots = new Map<string, string>();
 
-export const DemoLaunchSchema = z
-  .object({
-    url: z.string().trim().url().max(2048).refine((u) => /^https?:\/\//i.test(u), 'url must be http(s)'),
-    audience: z.string().trim().min(1).max(2000),
-    show: z.string().trim().min(1).max(4000),
-    clisJson: z.string().optional(),
-    /** wicked-core#850 — the explicit reduced-assurance opt-in, forwarded to `POST /runs` only when `true`. */
-    reducedAssurance: z.boolean().optional(),
-  })
-  .strict();
+export const DemoLaunchSchema = z.strictObject({
+  url: z.string().trim().superRefine(zod3Url).max(2048).refine((u) => /^https?:\/\//i.test(u), 'url must be http(s)'),
+  audience: z.string().trim().min(1).max(2000),
+  show: z.string().trim().min(1).max(4000),
+  clisJson: z.string().optional(),
+  /** wicked-core#850 — the explicit reduced-assurance opt-in, forwarded to `POST /runs` only when `true`. */
+  reducedAssurance: z.boolean().optional(),
+});
 
-export const DemoScriptSchema = z.object({ content: z.string().min(1) }).strict();
+export const DemoScriptSchema = z.strictObject({ content: z.string().min(1) });
 
-export const DemoExportSchema = z
-  .object({
-    format: z.enum(['gif', 'poster']),
-    /** The poster's frame, in seconds from the start. Poster only. */
-    atSec: z.number().finite().min(0).max(24 * 60 * 60).optional(),
-  })
-  .strict()
-  .refine((b) => b.format === 'poster' || b.atSec === undefined, { message: '`atSec` applies to a poster only', path: ['atSec'] });
+export const DemoExportSchema = z.strictObject({
+  format: z.enum(['gif', 'poster']),
+  /** The poster's frame, in seconds from the start. Poster only. */
+  atSec: z.number().finite().min(0).max(24 * 60 * 60).optional(),
+})
+  .refine((b) => b.format === 'poster' || b.atSec === undefined, { path: ['atSec'],
+  error: '`atSec` applies to a poster only',
+});
 
 /**
  * How long one encode may run before it is killed (EP-C3). A GIF re-encodes the whole video (the bound

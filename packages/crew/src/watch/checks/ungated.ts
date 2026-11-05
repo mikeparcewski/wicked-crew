@@ -8,7 +8,7 @@
  * from the unit's `unitOutputCaptured`, emitted before the gate runs (joined).
  */
 
-import { z } from 'zod';
+import { z } from '../../zod.js';
 import type { WatchCheck } from '../types.js';
 
 interface Bag {
@@ -24,8 +24,8 @@ const REASON_MAX = 200;
 export const ungatedCheck: WatchCheck<Record<string, never>, Record<string, never>> = {
   name: 'deterministic:ungated',
   lane: 'deterministic',
-  paramsSchema: z.object({}).strict() as unknown as z.ZodType<Record<string, never>>,
-  thresholdSchema: z.object({}).strict() as unknown as z.ZodType<Record<string, never>>,
+  paramsSchema: z.strictObject({}) as unknown as z.ZodType<Record<string, never>>,
+  thresholdSchema: z.strictObject({}) as unknown as z.ZodType<Record<string, never>>,
   evaluate(input, state) {
     const bag = (state.bag.get('ungated') as Bag | undefined) ?? { attemptByOrd: new Map(), gates: 0, silent: 0 };
     state.bag.set('ungated', bag);

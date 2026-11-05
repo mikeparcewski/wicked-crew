@@ -25,7 +25,7 @@
  * message (`noteSend`, from the route), so an agent token's chat message records nothing.
  */
 
-import { z } from 'zod';
+import { z } from '../zod.js';
 
 import type { ChatTranscriptStore } from '../api/chat-transcripts.js';
 import { chatTurnStaleAfterMs } from '../api/chat-turns.js';

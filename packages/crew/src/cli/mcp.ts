@@ -13,7 +13,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { z } from 'zod';
+import { z } from '../zod.js';
 
 import { missingBearerAdvice, withBearerHeader } from './bearer.js';
 
@@ -158,7 +158,7 @@ export async function runMcpServer(port: number): Promise<void> {
     'The daemon returns all events; `limit` truncates client-side (most-recent last).',
     {
       run_id: z.string().min(1).describe('The run ID'),
-      limit: z.number().int().min(1).max(1000).optional().describe(
+      limit: z.int().min(1).max(1000).optional().describe(
         'Maximum number of events to return. Truncated from the tail (most-recent). Default: all.',
       ),
     },

@@ -18,7 +18,7 @@
  */
 
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
+import { z } from '../zod.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import { PresetsUnsupportedError } from '../core/adapter.js';
 import type { Actor, Preset, PresetListResponse, PresetResponse, PresetStep } from '../core/types.js';
@@ -30,17 +30,15 @@ const V = API_PREFIX;
 
 /** One plan step. The engine owns the step rules (`plan::compose`, `deny_unknown_fields`), so
  *  this layer checks only the two keys every step carries and passes the rest through. */
-const PresetStepSchema = z.object({ catalog: z.string().min(1), id: z.string().min(1) }).passthrough();
+const PresetStepSchema = z.looseObject({ catalog: z.string().min(1), id: z.string().min(1) });
 
 // Exported for tests/wire-contract.test.ts (the request-direction drift guard).
-export const PutPresetSchema = z
-  .object({
-    steps: z.array(PresetStepSchema).min(1),
-    projectId: z.string().min(1).optional(),
-  })
-  .strict();
+export const PutPresetSchema = z.strictObject({
+  steps: z.array(PresetStepSchema).min(1),
+  projectId: z.string().min(1).optional(),
+});
 
-const ScopeQuerySchema = z.object({ projectId: z.string().min(1).optional() }).strict();
+const ScopeQuerySchema = z.strictObject({ projectId: z.string().min(1).optional() });
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);

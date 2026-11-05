@@ -15,7 +15,7 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { z } from 'zod';
+import { z } from '../../zod.js';
 
 import { API_PREFIX } from '../../api/api-prefix.js';
 import { trustAtLeast } from '../../api/auth.js';
@@ -61,22 +61,20 @@ function humanOnly(reply: FastifyReply, actor: Actor): FastifyReply {
 }
 
 const TargetSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('project'), id: z.string().min(1).max(128).regex(/^[A-Za-z0-9_.:-]+$/) }).strict(),
-  z.object({ kind: z.literal('repo'), id: z.string().min(1).max(128).regex(/^[A-Za-z0-9_.:-]+$/) }).strict(),
+  z.strictObject({ kind: z.literal('project'), id: z.string().min(1).max(128).regex(/^[A-Za-z0-9_.:-]+$/) }),
+  z.strictObject({ kind: z.literal('repo'), id: z.string().min(1).max(128).regex(/^[A-Za-z0-9_.:-]+$/) }),
 ]);
 
-export const CreateTrackerLinkSchema = z
-  .object({
-    source: z.string().min(1).max(63),
-    tenant: z.string().min(1).max(256),
-    key: z.string().min(1).max(201),
-    target: TargetSchema,
-  })
-  .strict();
+export const CreateTrackerLinkSchema = z.strictObject({
+  source: z.string().min(1).max(63),
+  tenant: z.string().min(1).max(256),
+  key: z.string().min(1).max(201),
+  target: TargetSchema,
+});
 
-const ListQuery = z.object({ project: z.string().min(1).max(128).optional(), repo: z.string().min(1).max(128).optional() }).strict();
-const IssuesQuery = z.object({ project: z.string().min(1).max(128).optional(), repo: z.string().min(1).max(128).optional(), q: z.string().max(200).optional() }).strict();
-const SourceTrackersQuery = z.object({ q: z.string().max(200).optional(), cursor: z.string().max(400).optional(), tenant: z.string().max(256).optional() }).strict();
+const ListQuery = z.strictObject({ project: z.string().min(1).max(128).optional(), repo: z.string().min(1).max(128).optional() });
+const IssuesQuery = z.strictObject({ project: z.string().min(1).max(128).optional(), repo: z.string().min(1).max(128).optional(), q: z.string().max(200).optional() });
+const SourceTrackersQuery = z.strictObject({ q: z.string().max(200).optional(), cursor: z.string().max(400).optional(), tenant: z.string().max(256).optional() });
 
 /** A Jira project key, or a GitHub `owner/repo`: one key names one project (no wildcard, JQL or whole site). */
 export function validTrackerKey(system: string, key: string): boolean {

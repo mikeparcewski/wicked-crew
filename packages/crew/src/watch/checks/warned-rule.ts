@@ -20,7 +20,7 @@
  * carry no `firedPolicies` is "too old"; a store that cannot be read is "not readable".
  */
 
-import { z } from 'zod';
+import { z } from '../../zod.js';
 import type { CheckOutput, WatchCheck, WatchRuleBrief } from '../types.js';
 
 /** A frame whose fired rules could not be classified yet (the store read was refused or slow). */
@@ -68,8 +68,8 @@ export function watchSeverityOf(ruleSeverity: string | undefined): 'high' | 'med
 export const warnedRuleCheck: WatchCheck<Record<string, never>, Record<string, never>> = {
   name: 'deterministic:warned_rule',
   lane: 'deterministic',
-  paramsSchema: z.object({}).strict() as unknown as z.ZodType<Record<string, never>>,
-  thresholdSchema: z.object({}).strict() as unknown as z.ZodType<Record<string, never>>,
+  paramsSchema: z.strictObject({}) as unknown as z.ZodType<Record<string, never>>,
+  thresholdSchema: z.strictObject({}) as unknown as z.ZodType<Record<string, never>>,
   async evaluate(input, state, _params, _threshold, ctx) {
     const bag = (state.bag.get('warned') as Bag | undefined) ?? ({ hooks: 0, silent: 0, waiting: [], lost: 0, raised: new Set() } satisfies Bag);
     state.bag.set('warned', bag);

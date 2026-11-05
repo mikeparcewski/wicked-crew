@@ -5,7 +5,7 @@
  */
 
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { z } from 'zod';
+import { z } from '../zod.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import type { Actor } from '../core/types.js';
 import { API_PREFIX } from '../api/api-prefix.js';
@@ -17,16 +17,14 @@ import { LEARN_SLUG, MAX_EVERY_HOURS, MIN_EVERY_HOURS, scheduleId, type LearnSch
 
 const V = API_PREFIX;
 
-export const LearnSchedulePutSchema = z
-  .object({
-    repoRef: z.string().min(1).max(256),
-    slug: z.string().regex(LEARN_SLUG, 'slug is kebab-case, at most 64 characters'),
-    topic: z.string().trim().min(1).max(200),
-    everyHours: z.number().int().min(MIN_EVERY_HOURS).max(MAX_EVERY_HOURS),
-    enabled: z.boolean().optional(),
-    projectId: z.string().min(1).max(128).optional(),
-  })
-  .strict();
+export const LearnSchedulePutSchema = z.strictObject({
+  repoRef: z.string().min(1).max(256),
+  slug: z.string().regex(LEARN_SLUG, 'slug is kebab-case, at most 64 characters'),
+  topic: z.string().trim().min(1).max(200),
+  everyHours: z.int().min(MIN_EVERY_HOURS).max(MAX_EVERY_HOURS),
+  enabled: z.boolean().optional(),
+  projectId: z.string().min(1).max(128).optional(),
+});
 
 export interface LearnRouteDeps {
   store: LearnScheduleStore;

@@ -17,35 +17,31 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { z } from 'zod';
+import { z } from '../zod.js';
 import type { AuditLog } from '../api/audit.js';
 import type { Actor, AuditEntry } from '../core/types.js';
 
-export const StandingOrderRuleSchema = z
-  .object({
-    scope: z.discriminatedUnion('kind', [
-      z.object({ kind: z.literal('all') }).strict(),
-      z.object({ kind: z.literal('project'), projectId: z.string().min(1) }).strict(),
-    ]),
-    trigger: z.discriminatedUnion('kind', [
-      // `phase`: the phase the gate reviews (the reviewed unit's `phase_ref`), `intake` (the gate
-      // before the run's first unit), or `*` for any gate. `band` (optional): only a run whose
-      // accepted plan landed in that band (`"0-19"`, …); a run with no scored plan never matches.
-      // `preset` (optional): only a run launched from that preset (`team_plan.preset`).
-      z
-        .object({
-          kind: z.literal('gate'),
-          phase: z.string().min(1).max(64),
-          band: z.string().min(1).max(16).optional(),
-          preset: z.string().min(1).max(128).optional(),
-        })
-        .strict(),
-      z.object({ kind: z.literal('finding'), severity: z.enum(['high', 'medium', '*']) }).strict(),
-    ]),
-    action: z.enum(['approve', 'hold', 'notify']),
-    activeWhen: z.enum(['away', 'always']),
-  })
-  .strict();
+export const StandingOrderRuleSchema = z.strictObject({
+  scope: z.discriminatedUnion('kind', [
+    z.strictObject({ kind: z.literal('all') }),
+    z.strictObject({ kind: z.literal('project'), projectId: z.string().min(1) }),
+  ]),
+  trigger: z.discriminatedUnion('kind', [
+    // `phase`: the phase the gate reviews (the reviewed unit's `phase_ref`), `intake` (the gate
+    // before the run's first unit), or `*` for any gate. `band` (optional): only a run whose
+    // accepted plan landed in that band (`"0-19"`, …); a run with no scored plan never matches.
+    // `preset` (optional): only a run launched from that preset (`team_plan.preset`).
+    z.strictObject({
+                kind: z.literal('gate'),
+                phase: z.string().min(1).max(64),
+                band: z.string().min(1).max(16).optional(),
+                preset: z.string().min(1).max(128).optional(),
+              }),
+    z.strictObject({ kind: z.literal('finding'), severity: z.enum(['high', 'medium', '*']) }),
+  ]),
+  action: z.enum(['approve', 'hold', 'notify']),
+  activeWhen: z.enum(['away', 'always']),
+});
 
 export type StandingOrderRule = z.infer<typeof StandingOrderRuleSchema>;
 

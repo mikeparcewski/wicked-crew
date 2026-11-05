@@ -18,7 +18,7 @@
 
 import { isAbsolute } from 'node:path';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { z } from 'zod';
+import { record, z, zod3Url } from '../zod.js';
 
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
@@ -107,34 +107,31 @@ export const openTransport: TransportOpener = (spec) => {
 
 const NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/u;
 const HEADER = /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,128}$/u;
-const Env = z.record(z.string().regex(NAME), z.string().max(8192)).refine((r) => Object.keys(r).length <= 32, 'at most 32 env vars');
-const Headers = z.record(z.string().regex(HEADER), z.string().max(8192)).refine((r) => Object.keys(r).length <= 32, 'at most 32 headers');
+const Env = record(z.string().regex(NAME), z.string().max(8192)).refine((r) => Object.keys(r).length <= 32, 'at most 32 env vars');
+const Headers = record(z.string().regex(HEADER), z.string().max(8192)).refine((r) => Object.keys(r).length <= 32, 'at most 32 headers');
 const Target = z.union([
-  z.object({ server: z.string().min(1).max(128) }).strict(),
-  z
-    .object({
-      command: z.string().min(1).max(4096),
-      args: z.array(z.string().max(4096)).max(64).optional(),
-      env: Env.optional(),
-      cwd: z.string().min(1).max(4096).refine((p) => isAbsolute(p), 'cwd must be an absolute path').optional(),
-    })
-    .strict(),
-  z
-    .object({
-      url: z.string().url().max(4096).refine((u) => /^https?:\/\//iu.test(u), 'an http(s) URL'),
-      transport: z.enum(['streamable-http', 'sse']).optional(),
-      headers: Headers.optional(),
-      /** (DES-APPS-001 §5.2) Loopback/private ranges the typed host may reach (a private host NAME needs one). */
-      address: z
-        .object({ allow: z.array(z.string().min(1).max(64)).max(16), plaintext: z.boolean().optional() })
-        .strict()
-        .refine((a) => validateAllowRanges(a.allow) === null, (a) => ({ message: validateAllowRanges(a.allow) ?? '' }))
-        .optional(),
-    })
-    .strict(),
+  z.strictObject({ server: z.string().min(1).max(128) }),
+  z.strictObject({
+    command: z.string().min(1).max(4096),
+    args: z.array(z.string().max(4096)).max(64).optional(),
+    env: Env.optional(),
+    cwd: z.string().min(1).max(4096).refine((p) => isAbsolute(p), 'cwd must be an absolute path').optional(),
+  }),
+  z.strictObject({
+    url: z.string().superRefine(zod3Url).max(4096).refine((u) => /^https?:\/\//iu.test(u), 'an http(s) URL'),
+    transport: z.enum(['streamable-http', 'sse']).optional(),
+    headers: Headers.optional(),
+    /** (DES-APPS-001 §5.2) Loopback/private ranges the typed host may reach (a private host NAME needs one). */
+    address: z.strictObject({ allow: z.array(z.string().min(1).max(64)).max(16), plaintext: z.boolean().optional() })
+      .superRefine((a, ctx) => {
+        const problem = validateAllowRanges(a.allow);
+        if (problem !== null) ctx.addIssue({ code: 'custom', message: problem });
+      })
+      .optional(),
+  }),
 ]);
-const StartSchema = z.object({ target: Target }).strict();
-const RpcSchema = z.object({ method: z.string().min(1).max(128), params: z.record(z.unknown()).optional() }).strict();
+const StartSchema = z.strictObject({ target: Target });
+const RpcSchema = z.strictObject({ method: z.string().min(1).max(128), params: record(z.string(), z.unknown()).optional() });
 
 export interface InspectRoutesDeps {
   /** Absent: no MCP registry on this daemon, so `{server}` targets answer 404. */

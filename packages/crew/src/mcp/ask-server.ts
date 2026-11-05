@@ -3,7 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import { z } from 'zod';
+import { z } from '../zod.js';
 import { AskError, AskUnsupportedError, type AskAdapter, type AskTicket, type AskUnit, type CoreEvent } from '../core/types.js';
 
 const CONTINUE = 'Continue with your best judgment and state the assumption in your output.';
@@ -13,15 +13,15 @@ const CONTINUE = 'Continue with your best judgment and state the assumption in y
  * choices, multi's 2), so a call far over that is refused before its schema runs.
  */
 export const ASK_MAX_INPUT_ELEMENTS = 1_000;
-const inputSchema = z.object({
+const inputSchema = z.strictObject({
   question: z.string().min(1).max(8192),
   choices: z.array(z.string().min(1).max(512)).min(2).max(100).optional(),
-  recommended: z.number().int().min(0).describe('index into choices you recommend').optional(),
-  multi: z.object({
-    min: z.number().int().min(1).optional(),
-    max: z.number().int().min(1).optional(),
-  }).strict().describe('let the operator pick several of choices: at least min (default 1), at most max (default all)').optional(),
-}).strict();
+  recommended: z.int().min(0).describe('index into choices you recommend').optional(),
+  multi: z.strictObject({
+    min: z.int().min(1).optional(),
+    max: z.int().min(1).optional(),
+  }).describe('let the operator pick several of choices: at least min (default 1), at most max (default all)').optional(),
+});
 const outputSchema = z.object({
   status: z.enum(['answered', 'declined', 'no_answer']),
   answer: z.string().optional(),

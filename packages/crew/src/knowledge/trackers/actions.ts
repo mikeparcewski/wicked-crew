@@ -20,7 +20,7 @@ import { appendFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { z } from 'zod';
+import { z } from '../../zod.js';
 
 import { API_PREFIX } from '../../api/api-prefix.js';
 import { trustAtLeast } from '../../api/auth.js';
@@ -52,15 +52,13 @@ export interface TrackerActionDeps {
   now?: () => number;
 }
 
-export const TrackerActionSchema = z
-  .object({
-    issue: z.string().min(2).max(300),
-    comment: z.string().min(1).max(ACTION_COMMENT_MAX).optional(),
-    transition: z.string().min(1).max(120).optional(),
-    confirm: z.string().regex(/^[0-9a-f]{64}$/).optional(),
-  })
-  .strict()
-  .refine((b) => b.comment !== undefined || b.transition !== undefined, { message: 'name a comment, a transition, or both' });
+export const TrackerActionSchema = z.strictObject({
+  issue: z.string().min(2).max(300),
+  comment: z.string().min(1).max(ACTION_COMMENT_MAX).optional(),
+  transition: z.string().min(1).max(120).optional(),
+  confirm: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+})
+  .refine((b) => b.comment !== undefined || b.transition !== undefined, { error: 'name a comment, a transition, or both' });
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const sha = (v: unknown): string => createHash('sha256').update(canonicalJson(v)).digest('hex');

@@ -7,15 +7,13 @@
  * failed check never emits "fine": its runs' coverage already says it did not check.
  */
 
-import { z } from 'zod';
+import { z } from '../../zod.js';
 import type { CheckOutput, WatchCheck } from '../types.js';
 
-const Threshold = z
-  .object({
-    failures: z.number().int().min(1).max(1_000),
-    window_minutes: z.number().int().min(1).max(1_440),
-  })
-  .strict();
+const Threshold = z.strictObject({
+  failures: z.int().min(1).max(1_000),
+  window_minutes: z.int().min(1).max(1_440),
+});
 type Threshold = z.infer<typeof Threshold>;
 
 interface Episode {
@@ -26,7 +24,7 @@ interface Episode {
 export const checkFailedCheck: WatchCheck<Record<string, never>, Threshold> = {
   name: 'deterministic:check_failed',
   lane: 'deterministic',
-  paramsSchema: z.object({}).strict() as unknown as z.ZodType<Record<string, never>>,
+  paramsSchema: z.strictObject({}) as unknown as z.ZodType<Record<string, never>>,
   thresholdSchema: Threshold,
   evaluate(input, state, _params, t, ctx) {
     const entryId = typeof input.event['entry_id'] === 'string' ? input.event['entry_id'] : null;

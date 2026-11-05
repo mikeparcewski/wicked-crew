@@ -31,7 +31,7 @@
  *     (§4.4: "a truncated list still names its first 200 paths and says so").
  */
 
-import { z } from 'zod';
+import { z } from '../../zod.js';
 import type { CheckOutput, RunWatchState, WatchCheck } from '../types.js';
 
 /** The bus row the check joins to (TR-W1a). The entry's `join` names it; the loader checks the grammar. */
@@ -171,8 +171,8 @@ function judge(bag: Bag, floor: Floor, threshold: ScopeDriftThreshold, kept: boo
 export const scopeDriftCheck: WatchCheck<Record<string, never>, ScopeDriftThreshold> = {
   name: 'deterministic:scope_drift',
   lane: 'deterministic',
-  paramsSchema: z.object({}).strict() as unknown as z.ZodType<Record<string, never>>,
-  thresholdSchema: z.object({ min_paths: z.number().int().min(1).max(200).default(1) }).strict() as unknown as z.ZodType<ScopeDriftThreshold>,
+  paramsSchema: z.strictObject({}) as unknown as z.ZodType<Record<string, never>>,
+  thresholdSchema: z.strictObject({ min_paths: z.int().min(1).max(200).default(1) }) as unknown as z.ZodType<ScopeDriftThreshold>,
   evaluate(input, state, _params, threshold) {
     const bag = bagOf(state);
     if (input.source === 'bus' && input.type === PLAN_ACCEPTED_TYPE) {

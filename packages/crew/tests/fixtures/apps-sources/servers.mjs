@@ -156,7 +156,7 @@ export async function startMcpServer() {
     );
     mcp.registerTool(
       'assign_ticket',
-      { description: 'Assign a ticket', inputSchema: { id: z.number().int(), owner: z.string() }, annotations: { readOnlyHint: false, destructiveHint: false } },
+      { description: 'Assign a ticket', inputSchema: { id: z.int(), owner: z.string() }, annotations: { readOnlyHint: false, destructiveHint: false } },
       async ({ id, owner }) => {
         const t = tickets.find((x) => x.id === id);
         if (t !== undefined) t.owner = owner;

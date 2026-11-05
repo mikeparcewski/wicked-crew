@@ -17,7 +17,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { z } from 'zod';
+import { record, z } from '../zod.js';
 import type { WatchSettings } from 'wicked-crew-api-types';
 import type { LoadedEntry, WatchCheck } from './types.js';
 
@@ -27,32 +27,28 @@ export const SHIPPED_ENTRIES_DIR = fileURLToPath(new URL('../../watch/entries', 
 const ID = /^[a-z0-9-]{3,48}$/;
 const BUS_TYPE = /^wicked\.[a-z0-9_]+\.[a-z0-9_]+\.[a-z0-9_]+$/;
 
-const EntrySchema = z
-  .object({
-    id: z.string().regex(ID, 'id must be [a-z0-9-]{3,48}'),
-    version: z.number().int().min(1),
-    on: z.object({ source: z.enum(['core', 'bus', 'watchdog', 'internal']), type: z.string().min(1).max(128) }).strict(),
-    join: z
-      .array(z.object({ source: z.enum(['core', 'bus', 'watchdog']), type: z.string().min(1).max(128) }).strict())
-      .max(4)
-      .optional(),
-    filter: z.record(z.unknown()).default({}),
-    check: z.string().min(1),
-    params: z.record(z.unknown()).default({}),
-    threshold: z.record(z.unknown()).default({}),
-    emit: z
-      .object({
-        as: z.enum(['finding', 'flag', 'proposal']),
-        severity: z.enum(['high', 'medium', 'info']),
-        watch_kind: z.enum(['problem', 'decision', 'done', 'quiet', 'delivery']),
-        attach: z.enum(['gate']).nullable().default(null),
-        rate: z.object({ per_run: z.number().int().min(1).max(1_000) }).strict(),
-      })
-      .strict(),
-    priority: z.enum(['p0', 'p1', 'p2']),
-    enabled: z.boolean(),
-  })
-  .strict();
+const EntrySchema = z.strictObject({
+  id: z.string().regex(ID, 'id must be [a-z0-9-]{3,48}'),
+  version: z.int().min(1),
+  on: z.strictObject({ source: z.enum(['core', 'bus', 'watchdog', 'internal']), type: z.string().min(1).max(128) }),
+  join: z
+    .array(z.strictObject({ source: z.enum(['core', 'bus', 'watchdog']), type: z.string().min(1).max(128) }))
+    .max(4)
+    .optional(),
+  filter: record(z.string(), z.unknown()).default({}),
+  check: z.string().min(1),
+  params: record(z.string(), z.unknown()).default({}),
+  threshold: record(z.string(), z.unknown()).default({}),
+  emit: z.strictObject({
+          as: z.enum(['finding', 'flag', 'proposal']),
+          severity: z.enum(['high', 'medium', 'info']),
+          watch_kind: z.enum(['problem', 'decision', 'done', 'quiet', 'delivery']),
+          attach: z.enum(['gate']).nullable().default(null),
+          rate: z.strictObject({ per_run: z.int().min(1).max(1_000) }),
+        }),
+  priority: z.enum(['p0', 'p1', 'p2']),
+  enabled: z.boolean(),
+});
 
 export interface Refusal {
   id: string;

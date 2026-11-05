@@ -27,7 +27,7 @@
 import { createHash } from 'node:crypto';
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { z } from 'zod';
+import { record, z } from '../zod.js';
 
 import type { AuditLog } from '../api/audit.js';
 import { trustAtLeast } from '../api/auth.js';
@@ -90,30 +90,24 @@ export interface SourceRouteDeps {
 }
 
 const name = z.string().regex(MCP_SERVER_NAME_RE);
-const RowWriteSchema = z
-  .object({
-    schema: z.string().min(1).max(128),
-    table: z.string().min(1).max(128),
-    op: z.enum(['insert', 'update', 'delete']),
-    set: z.array(z.string().min(1).max(128)).max(200),
-    key: z.array(z.string().min(1).max(128)).min(1).max(32),
-  })
-  .strict();
-export const SourcePrivilegesSchema = z.object({ writes: z.array(RowWriteSchema).max(50).optional() }).strict();
-export const SourceCheckSchema = z.object({ text: z.string().min(1).max(64 * 1024) }).strict();
-export const SourceSafetySchema = z
-  .object({
-    schema: z.string().min(1).max(128),
-    table: z.string().min(1).max(128),
-    write: z.object({ op: z.enum(['insert', 'update', 'delete']), set: z.array(z.string().min(1).max(128)).max(200), key: z.array(z.string().min(1).max(128)).min(1).max(32) }).strict().optional(),
-  })
-  .strict();
-export const SourceAllowWritesSchema = z.object({ allowed: z.boolean() }).strict();
-export const SourceAskSchema = z.object({ question: z.string().trim().min(1).max(ASK_QUESTION_MAX) }).strict();
-export const SourceQuerySchema = z.object({ sql: z.string().min(1).max(64 * 1024), confirm: z.string().regex(/^[0-9a-f]{64}$/).optional() }).strict();
-export const SourceTestCallSchema = z
-  .object({ target: z.string().min(1).max(64 * 1024), args: z.record(z.string(), z.unknown()).optional(), confirm: z.string().regex(/^[0-9a-f]{64}$/).optional() })
-  .strict();
+const RowWriteSchema = z.strictObject({
+  schema: z.string().min(1).max(128),
+  table: z.string().min(1).max(128),
+  op: z.enum(['insert', 'update', 'delete']),
+  set: z.array(z.string().min(1).max(128)).max(200),
+  key: z.array(z.string().min(1).max(128)).min(1).max(32),
+});
+export const SourcePrivilegesSchema = z.strictObject({ writes: z.array(RowWriteSchema).max(50).optional() });
+export const SourceCheckSchema = z.strictObject({ text: z.string().min(1).max(64 * 1024) });
+export const SourceSafetySchema = z.strictObject({
+  schema: z.string().min(1).max(128),
+  table: z.string().min(1).max(128),
+  write: z.strictObject({ op: z.enum(['insert', 'update', 'delete']), set: z.array(z.string().min(1).max(128)).max(200), key: z.array(z.string().min(1).max(128)).min(1).max(32) }).optional(),
+});
+export const SourceAllowWritesSchema = z.strictObject({ allowed: z.boolean() });
+export const SourceAskSchema = z.strictObject({ question: z.string().trim().min(1).max(ASK_QUESTION_MAX) });
+export const SourceQuerySchema = z.strictObject({ sql: z.string().min(1).max(64 * 1024), confirm: z.string().regex(/^[0-9a-f]{64}$/).optional() });
+export const SourceTestCallSchema = z.strictObject({ target: z.string().min(1).max(64 * 1024), args: record(z.string(), z.unknown()).optional(), confirm: z.string().regex(/^[0-9a-f]{64}$/).optional() });
 
 function isHumanOperator(actor: Actor): boolean {
   return actor.kind === 'human' && trustAtLeast(actor, 'operator');

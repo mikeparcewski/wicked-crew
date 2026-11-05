@@ -25,7 +25,7 @@
  * does not run and its open rows clear only by dismissal (the same rule as `scope-drift`).
  */
 
-import { z } from 'zod';
+import { z } from '../../zod.js';
 import type { CheckOutput, KeyPointInput, RunWatchState, WatchCheck } from '../types.js';
 
 export const PATH_REPICKED_TYPE = 'wicked.team.path.repicked';
@@ -37,7 +37,7 @@ export const HELP_ANSWERED_TYPE = 'wicked.team.help.answered';
 const TEXT_MAX = 160;
 
 type Empty = Record<string, never>;
-const empty = z.object({}).strict() as unknown as z.ZodType<Empty>;
+const empty = z.strictObject({}) as unknown as z.ZodType<Empty>;
 
 /** The team envelope + payload of a pulled bus row (`{…, payload:{run_id, ord, attempt, by, …}}`). */
 function payloadOf(input: KeyPointInput): Record<string, unknown> {

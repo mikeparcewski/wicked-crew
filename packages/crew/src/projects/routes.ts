@@ -31,7 +31,7 @@
 import { codeGraphErrorStatus } from '../core/repoPaths.js';
 import { mayAttachRepo } from './repo-guard.js';
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
+import { record, z } from '../zod.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import { ProjectsUnsupportedError } from '../core/adapter.js';
 import type { Project, ProjectMember, InteractionRequest } from '../core/types.js';
@@ -82,45 +82,37 @@ function notQueryableError(status: ProjectGraphStatus): string {
 }
 
 // Exported for tests/wire-contract.test.ts (the request-direction drift guard).
-export const CreateProjectSchema = z
-  .object({
-    name: z.string().min(1).max(120),
-    description: z.string().optional(),
-  })
-  .strict();
+export const CreateProjectSchema = z.strictObject({
+  name: z.string().min(1).max(120),
+  description: z.string().optional(),
+});
 
-export const UpdateProjectSchema = z
-  .object({
-    name: z.string().min(1).max(120).optional(),
-    description: z.string().optional(),
-    status: z.enum(['active', 'archived']).optional(),
-    /** DES-MERGE-001 §7.1 — the project's wicked-interactive docs root. Explicitly NULLABLE:
-     *  null clears the binding back to the shared default root, which is a different act from
-     *  omitting the key (leave it alone). Stored crew-side (see settings.ts), not in the engine. */
-    interactiveRoot: z.string().min(1).nullable().optional(),
-    /** crew#552 — override `onboardingAutoCapture` for this project; null clears it. Crew-side. */
-    autoCapture: z.boolean().nullable().optional(),
-  })
-  .strict();
+export const UpdateProjectSchema = z.strictObject({
+  name: z.string().min(1).max(120).optional(),
+  description: z.string().optional(),
+  status: z.enum(['active', 'archived']).optional(),
+  /** DES-MERGE-001 §7.1 — the project's wicked-interactive docs root. Explicitly NULLABLE:
+   *  null clears the binding back to the shared default root, which is a different act from
+   *  omitting the key (leave it alone). Stored crew-side (see settings.ts), not in the engine. */
+  interactiveRoot: z.string().min(1).nullable().optional(),
+  /** crew#552 — override `onboardingAutoCapture` for this project; null clears it. Crew-side. */
+  autoCapture: z.boolean().nullable().optional(),
+});
 
 /** `POST /projects/:id/graph/refresh` body — optional; `{}` (or no body) is the plain refresh.
  *  `force: true` is the post-estate-upgrade migration path: it bypasses the clean-HEAD skip and
  *  passes `--force` to `wicked-estate index` (see `RefreshProjectGraphBody` in the wire types). */
-export const RefreshProjectGraphSchema = z
-  .object({
-    force: z.boolean().optional(),
-  })
-  .strict();
+export const RefreshProjectGraphSchema = z.strictObject({
+  force: z.boolean().optional(),
+});
 
 /** `<product>.<noun>` — the engine re-validates; this is the 400-with-names layer. */
-export const AttachMemberSchema = z
-  .object({
-    kind: z.string().min(3).max(64).regex(/^[a-z0-9_-]+\.[a-z0-9_-]+$/, 'kind must be <product>.<noun>, lowercase'),
-    ref: z.string().min(1).max(512),
-    meta: z.record(z.string(), z.unknown()).optional(),
-    attachedBy: z.enum(['studio', 'interactive', 'cli', 'api']).optional(),
-  })
-  .strict();
+export const AttachMemberSchema = z.strictObject({
+  kind: z.string().min(3).max(64).regex(/^[a-z0-9_-]+\.[a-z0-9_-]+$/, 'kind must be <product>.<noun>, lowercase'),
+  ref: z.string().min(1).max(512),
+  meta: record(z.string(), z.unknown()).optional(),
+  attachedBy: z.enum(['studio', 'interactive', 'cli', 'api']).optional(),
+});
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
