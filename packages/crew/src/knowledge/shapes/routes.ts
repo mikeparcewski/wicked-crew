@@ -3,6 +3,7 @@
  *
  *   POST /sources/:name/profile   HUMAN   profile a source (value-free), file its shapes as proposals for review
  *   GET  /knowledge/map           HUMAN   the approved shapes and the source catalogs, as nodes and typed edges
+ *   GET  /knowledge/summary       HUMAN   what an app in a project can be built on: counts and names only (§9.1)
  *
  * Both are a human operator's only: an agent-kind actor, whatever its trust, gets 403 (the profile reads the
  * person's source through the `person` context; the map is the person's full view of every source and repo).
@@ -25,6 +26,7 @@ import type { DataGate } from '../gate/gate.js';
 import type { GateSource } from '../gate/sources.js';
 import { type NameLookup, searchableRepos, searchEntities } from './code-search.js';
 import { buildKnowledgeMap } from './map.js';
+import { type KnowledgeSummaryDeps, projectKnowledge } from '../summary.js';
 import { entityNames, PROFILE_BUDGET_MS, profileSource, type ProfileRelation } from './profile.js';
 import { CatalogChangedError, type EstateCall, fileShapes, readCatalog, shapeProposals } from './shapes.js';
 
@@ -49,6 +51,8 @@ export interface ShapeRouteDeps {
   trackers?: () => Promise<MapTracker[]>;
   /** (DES-PM-001 §3.4) The studio projects, for the labels of `project:` ends. */
   projects?: () => Promise<Array<{ id: string; name: string }>>;
+  /** (DES-KNOWLEDGE-DATA-001 §9.1) What `GET /knowledge/summary` counts; absent = 503. */
+  knowledge?: KnowledgeSummaryDeps;
 }
 
 function isHumanOperator(actor: Actor): boolean {
@@ -274,6 +278,29 @@ export function registerShapeRoutes(app: FastifyInstance, deps: ShapeRouteDeps):
         return await withTrackers(deps.estate, map, trackers, projects, [...sources.map((s) => `source:${s.id}`), ...repos.map((r) => `repo:${r}`)]);
       } catch (err) {
         return reply.code(502).send({ error: `estate could not be read: ${capped(err)}`, code: 'estate_unavailable' });
+      }
+    },
+  );
+
+  // What an app in a project can be built on (studio's Apps suggestions): counts and registry names only, the same
+  // summary the apps builder's package carries. A person's view: an agent-kind actor gets 403.
+  app.get(
+    `${V}/knowledge/summary`,
+    { config: { manifest: { responseType: 'KnowledgeSummaryResponse', statusCodes: [200, 400, 403, 503] } } },
+    async (req, reply) => {
+      const actor = deps.actorOf(req);
+      if (!isHumanOperator(actor)) {
+        return reply.code(403).send({ error: `the knowledge summary is a human operator's view; you are ${actor.kind}/${actor.trust}`, code: 'knowledge_summary_human_only' });
+      }
+      const raw = (req.query as { project?: unknown } | undefined)?.project;
+      const project = Array.isArray(raw) ? raw[0] : raw;
+      if (typeof project !== 'string' || project.trim() === '' || project.length > 128) return reply.code(400).send({ error: 'name the project: ?project=<id>', code: 'bad_project' });
+      if (deps.knowledge === undefined) return reply.code(503).send({ error: 'this daemon runs no knowledge plane for apps', code: 'knowledge_unavailable' });
+      try {
+        return await projectKnowledge(project, deps.knowledge);
+      } catch (err) {
+        if (err instanceof McpRegistryCorruptError) return reply.code(503).send({ error: err.message, code: 'registry_corrupt' });
+        return reply.code(503).send({ error: 'the connector registry could not be read', code: 'registry_unavailable' });
       }
     },
   );

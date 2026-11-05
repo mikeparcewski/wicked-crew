@@ -15,6 +15,7 @@ import type { AppLockSource, AppQueryKind } from '../../core/types.js';
 import { canonicalJson } from '../../mcp/classify.js';
 import type { McpUpstreamConfig } from '../../mcp/probe.js';
 import type { McpRegistry } from '../../mcp/registry.js';
+import { ESTATE_SERVER } from '../../mcp/classify.js';
 import { CREW_SOURCE, sourceDescriptor } from '../../sources/kinds.js';
 import type { StoredDescription } from '../../sources/store.js';
 
@@ -39,6 +40,12 @@ export const CREW_PIN: AppLockSource = (() => {
   return { kind: 'crew', descriptor, descriptorHash: sha(descriptor) };
 })();
 
+/** (DES-KNOWLEDGE-DATA-001 §9.1) The system's knowledge, read by `recall` queries: one fixed descriptor. */
+export const ESTATE_PIN: AppLockSource = (() => {
+  const descriptor = { kind: 'estate' };
+  return { kind: 'estate', descriptor, descriptorHash: sha(descriptor) };
+})();
+
 export function pinOf(config: McpUpstreamConfig): AppLockSource {
   const descriptor = appSourceDescriptor(config);
   return { kind: config.kind, descriptor, descriptorHash: sha(descriptor) };
@@ -47,6 +54,7 @@ export function pinOf(config: McpUpstreamConfig): AppLockSource {
 /** A source resolved for one check, read or write. */
 export type AppSource =
   | { name: typeof CREW_SOURCE; kind: 'crew'; pin: AppLockSource }
+  | { name: typeof ESTATE_SERVER; kind: 'estate'; pin: AppLockSource }
   | { name: string; kind: 'sql'; pin: AppLockSource; config: McpUpstreamConfig; description: StoredDescription | null; allowWrites: boolean; enabled: boolean }
   | { name: string; kind: 'graphql'; pin: AppLockSource; config: McpUpstreamConfig; description: StoredDescription | null; allowWrites: boolean; enabled: boolean }
   | { name: string; kind: 'rest' | 'mcp-http' | 'mcp-stdio'; pin: AppLockSource; config: McpUpstreamConfig; enabled: boolean };
@@ -54,6 +62,8 @@ export type AppSource =
 /** Look a source up now; `null` = no such source in the registry. */
 export async function lookupSource(registry: Pick<AppSourceRegistry, 'snapshot' | 'source'> | null, name: string): Promise<AppSource | null> {
   if (name === CREW_SOURCE) return { name: CREW_SOURCE, kind: 'crew', pin: CREW_PIN };
+  // Reserved for every registry kind (the broker's relay), so it is never a person's source.
+  if (name === ESTATE_SERVER) return { name: ESTATE_SERVER, kind: 'estate', pin: ESTATE_PIN };
   if (registry === null) return null;
   // One read of the store: the config, its kind and (for a tool server) its switch belong together (codex r4).
   const snap = await registry.snapshot(name);
@@ -75,6 +85,7 @@ export async function lookupSource(registry: Pick<AppSourceRegistry, 'snapshot' 
 /** Whether a query of `kind` reads a source of this kind. */
 export function queryKindFits(kind: AppQueryKind, source: AppSource): boolean {
   if (kind === 'crew') return source.kind === 'crew';
+  if (kind === 'recall') return source.kind === 'estate';
   if (kind === 'sql') return source.kind === 'sql';
   if (kind === 'graphql') return source.kind === 'graphql';
   if (kind === 'rest') return source.kind === 'rest';

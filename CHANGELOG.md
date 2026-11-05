@@ -12,6 +12,24 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **Apps on the system's knowledge: the `recall` query kind and the knowledge summary (api-types 0.189.0,
+  DES-KNOWLEDGE-DATA-001 §9.1, M6 part 1).** An app's query can now read what its project KNOWS, not only a data
+  source's rows: `source: "estate"` (already reserved for every registry kind, so no person's source can hold it),
+  `kind: "recall"`, text `queries/<id>.json` = `{from, query?, source?, group?, limit?}`. `from: knowledge` is estate
+  recall (documents, data-source structure, approved data shapes; `source` keeps only what one source was derived
+  from), `memories` is memory recall under the project's facet, `steering` is the active rules that apply to the
+  project, and `tables` is one source's catalog with each table's approved shape (which says what it joins). Rows are crew's own
+  columns (`title`, `content`, `cite`, `kind`, plus per-`from` ones; text cut, a `cite` on every row, source-derived
+  text `untrusted`); `group` turns them into `key`/`count` for a chart. The project is the APP'S own (never the
+  request's) and `visible` is the relay's set for it (one function shared with a unit's), read before the call and
+  re-checked before release, so a switch turned off between the two drops the rows; a source the project cannot see
+  is refused at check (`not_visible`, `not_described`) and at run (409 `query_refused`). The check validates the
+  text, the columns and types, and the parameters; the lock pins `estate`; the cache key holds the visible set.
+  Studio-hosted only in v1: Publish refuses `estate` beside `crew`, and an executor without the knowledge seam (the app
+  server) answers 503. `GET /knowledge/summary?project=` (a human operator's) answers counts and names only (the
+  sources the project may see and whether their structure is in estate, approved shapes per source, memories a
+  project recall reaches, active steering rules by type); the apps builder gets the same summary beside its knowledge
+  package, plus a `recall` section with a worked example in its guide.
 - **A launch's brief lists every steering rule in force, matched against the job, none cut (DES-RULE-CHECK-001 S1).**
   The rules block stopped at 20 rules in severity order, so on the end-to-end pass a bug job's brief left out
   `learn-tests-with-fixes` behind 14 MCP-server and review-loop rules. Each rule is now matched against the job (the

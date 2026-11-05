@@ -120,6 +120,17 @@ describe('the publish manifest', () => {
     expect(r.findings.filter((f) => f.code === 'blocked_source').map((f) => f.message).join(' ')).toMatch(/crew source.*query runs[\s\S]*local MCP server: remove query local_q/);
   });
 
+  it('(DES-KNOWLEDGE-DATA-001 §9.1) refuses a knowledge query: recall is studio-hosted only in v1', async () => {
+    const recallQ = { id: 'rules', source: 'estate', kind: 'recall', output: [{ name: 'title', type: 'string' }] } as AppSpec['queries'][number];
+    const { input } = fixture({ queries: [recallQ], actions: [] });
+    const r = await buildManifest(input());
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    const blocked = r.findings.filter((f) => f.code === 'blocked_source').map((f) => f.message).join(' ');
+    expect(blocked).toMatch(/system's knowledge.*remove query rules/);
+    expect(r.findings.map((f) => f.code)).not.toContain('unknown_source');
+  });
+
   it('targets and audience fit: embed is public only, Teams needs Entra, a public app holds no action and only public queries', async () => {
     const { input } = fixture();
     expect(await codes(input({ targets: ['embed'], embedOrigins: ['https://intranet.example.com'] }))).toContain('embed_needs_public');

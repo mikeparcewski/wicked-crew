@@ -256,7 +256,13 @@ const CATALOG_ATTEMPTS = 3;
  * caller never holds a mix of two generations or a silently partial list. `null` = estate holds no structure for the
  * source that `visible` lets this caller see. `truncated` = more pages than {@link CATALOG_PAGES_MAX}.
  */
-export async function readCatalog(estate: EstateCall, sourceId: string, visible: readonly string[]): Promise<{ docs: Array<{ key: string; title: string | null; entry: unknown }>; generation: number | null; truncated: boolean } | null> {
+export async function readCatalog(
+  estate: EstateCall,
+  sourceId: string,
+  visible: readonly string[],
+  /** `owner`: every page must say it is `sourceId`'s (an answer of another source, or one that does not say, is refused). */
+  opts: { owner?: boolean } = {},
+): Promise<{ docs: Array<{ key: string; title: string | null; entry: unknown }>; generation: number | null; truncated: boolean } | null> {
   const replaced = (err: unknown): boolean => /changed|generation/i.test(err instanceof Error ? err.message : String(err));
   for (let attempt = 0; attempt < CATALOG_ATTEMPTS; attempt++) {
     const docs: Array<{ key: string; title: string | null; entry: unknown }> = [];
@@ -264,7 +270,7 @@ export async function readCatalog(estate: EstateCall, sourceId: string, visible:
     let truncated = false;
     let complete = true;
     for (let page = 0; page < CATALOG_PAGES_MAX; page++) {
-      let got: { pages?: unknown; generation?: unknown; docs?: Array<{ key?: unknown; title?: unknown; entry?: unknown }> } | null;
+      let got: { sourceId?: unknown; pages?: unknown; generation?: unknown; docs?: Array<{ key?: unknown; title?: unknown; entry?: unknown }> } | null;
       try {
         got = (await estate('knowledge.source_catalog', { sourceId, page, visible: [...visible], ...(generation !== null ? { generation } : {}) })) as typeof got;
       } catch (err) {
@@ -282,6 +288,7 @@ export async function readCatalog(estate: EstateCall, sourceId: string, visible:
         complete = false;
         break;
       }
+      if (opts.owner === true && got.sourceId !== sourceId) throw new Error(`estate answered a catalog that is not source ${sourceId}'s`);
       if (typeof got.generation === 'number') generation = got.generation;
       for (const d of got.docs ?? []) if (typeof d.key === 'string') docs.push({ key: d.key, title: typeof d.title === 'string' ? d.title : null, entry: d.entry ?? null });
       const pages = typeof got.pages === 'number' ? got.pages : 1;

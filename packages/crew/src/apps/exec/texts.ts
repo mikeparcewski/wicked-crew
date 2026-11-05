@@ -5,6 +5,7 @@
  *
  *   rest / mcp:  { "tool": "<registry tool>", "args": { "<arg>": {"kind": "param", "name": "<param>"} | {"kind": "literal", "value": <scalar>} } }
  *   crew:        { "route": "/runs/:id", "params": { "id": <arg> }, "query": { "<name>": <arg> } }
+ *   recall:      { "from": "knowledge"|"memories"|"steering"|"tables", "query"?: <arg>, "source"?: "<name>", "group"?: "kind", "limit"?: 20 }
  *
  * GraphQL documents take their variables from the query's parameters by name; SQL binds `$n` / `?` to the
  * n-th declared parameter.
@@ -12,7 +13,8 @@
 
 import { record, z } from '../../zod.js';
 
-import type { AppToolQueryText, AppCrewQueryText } from '../../core/types.js';
+import type { AppToolQueryText, AppCrewQueryText, AppRecallQueryText } from '../../core/types.js';
+import { MCP_SERVER_NAME_RE } from '../../mcp/classify.js';
 
 const PARAM = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const Arg = z.discriminatedUnion('kind', [
@@ -23,6 +25,15 @@ const Args = record(z.string().min(1).max(128), Arg).refine((r) => Object.keys(r
 
 export const ToolQueryTextSchema = z.strictObject({ tool: z.string().min(1).max(128), args: Args.optional() });
 export const CrewQueryTextSchema = z.strictObject({ route: z.string().min(1).max(128), params: record(z.string().regex(PARAM), Arg).optional(), query: Args.optional() });
+
+/** (DES-KNOWLEDGE-DATA-001 §9.1) A `recall` query's text: what it reads of the app's project's knowledge. */
+export const RecallQueryTextSchema = z.strictObject({
+  from: z.enum(['knowledge', 'memories', 'steering', 'tables']),
+  query: Arg.optional(),
+  source: z.string().regex(MCP_SERVER_NAME_RE, 'a source name is 1-63 of a-z 0-9 _ -, starting with a letter or digit').optional(),
+  group: z.enum(['kind', 'source', 'severity']).optional(),
+  limit: z.number().int().min(1).max(50).optional(),
+});
 
 export type QueryArg = z.infer<typeof Arg>;
 
@@ -56,6 +67,13 @@ export function parseToolQueryText(text: string): Parsed<AppToolQueryText> {
 export function parseCrewQueryText(text: string): Parsed<AppCrewQueryText> {
   const r = parseJson(text, CrewQueryTextSchema);
   return r.ok ? { ok: true, value: { route: r.value.route, params: r.value.params ?? {}, query: r.value.query ?? {} } } : r;
+}
+
+export function parseRecallQueryText(text: string): Parsed<AppRecallQueryText> {
+  const r = parseJson(text, RecallQueryTextSchema);
+  if (!r.ok) return r;
+  const v = r.value;
+  return { ok: true, value: { from: v.from, ...(v.query !== undefined ? { query: v.query } : {}), ...(v.source !== undefined ? { source: v.source } : {}), ...(v.group !== undefined ? { group: v.group } : {}), ...(v.limit !== undefined ? { limit: v.limit } : {}) } };
 }
 
 /** A value a crew-source path segment may take (the reader refuses the rest before any request). */

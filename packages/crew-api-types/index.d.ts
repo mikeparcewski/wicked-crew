@@ -15692,8 +15692,12 @@ export interface AppLinkComponent extends AppComponentBase {
   to: AppLinkTarget;
 }
 
-/** A source kind a query reads; it names the text file: `sql` `.sql`, `graphql` `.graphql`, else `.json`. */
-export type AppQueryKind = 'sql' | 'graphql' | 'rest' | 'mcp' | 'crew';
+/**
+ * A source kind a query reads; it names the text file: `sql` `.sql`, `graphql` `.graphql`, else `.json`.
+ * (api-types 0.189.0) `recall` reads the system's KNOWLEDGE (DES-KNOWLEDGE-DATA-001 §9.1) in the app's own project,
+ * on the reserved source `estate`: its text is an {@link AppRecallQueryText}. Studio-hosted only: Publish refuses it.
+ */
+export type AppQueryKind = 'sql' | 'graphql' | 'rest' | 'mcp' | 'crew' | 'recall';
 
 /** A declared output column's type. A value the source cannot confirm is validated on every row (DES §7.2). */
 export type AppColumnType = 'string' | 'number' | 'integer' | 'boolean' | 'date' | 'datetime';
@@ -15877,6 +15881,80 @@ export interface AppCrewQueryText {
   route: string;
   params: Record<string, AppQueryArg>;
   query: Record<string, AppQueryArg>;
+}
+
+/**
+ * (api-types 0.189.0, DES-KNOWLEDGE-DATA-001 §9.1) `queries/<id>.json` of a `recall` query (source `estate`): one
+ * read of the knowledge the APP'S project may see (crew computes `visible` from the app's project, never from the
+ * request, and re-checks every item before release). `from` names what is read:
+ *
+ * - `knowledge`: documents, source structure and approved data shapes (estate recall); needs `query`; `source`
+ *   keeps only what was derived from that registry source;
+ * - `memories`: what the project remembers (estate memory recall, the project's facet); needs `query`;
+ * - `steering`: the active steering rules that apply to the project; `query` keeps rules whose statement holds its
+ *   words;
+ * - `tables`: one registry source's tables as estate holds them (structure, never rows), with each table's approved
+ *   data shape (its text says what the table joins); needs `source`, takes no `query`.
+ *
+ * Rows have the columns of {@link AppRecallColumns} for that `from` (an app's `output` declares a subset, with
+ * exactly these types); with `group` they are `key` (string) and `count` (integer) per value of that column instead.
+ * `limit` is 1-50 (default 20). Text from a source's structure is marked `untrusted`.
+ */
+export interface AppRecallQueryText {
+  from: AppRecallFrom;
+  /**
+   * The words recalled: a literal of 1-200 characters, or the query's ONE parameter (a string, never viewer-bound:
+   * no `from`), which a search filter binds.
+   */
+  query?: AppQueryArg;
+  /** A registry source name (`tables`: required; `knowledge`: optional). */
+  source?: string;
+  group?: 'kind' | 'source' | 'severity';
+  limit?: number;
+}
+
+export type AppRecallFrom = 'knowledge' | 'memories' | 'steering' | 'tables';
+
+/**
+ * (api-types 0.189.0) The columns a `recall` query answers, per `from`, with their types. Every `from` has `title`,
+ * `content`, `cite` (where it came from: `memory:<id>`, `rule:<id>`, `src:<source>/<table>`, a document's
+ * provenance) and `kind` (document, table, shape or note; a memory's tier; a rule's steering type).
+ */
+export interface AppRecallColumns {
+  knowledge: 'title' | 'content' | 'cite' | 'kind' | 'source' | 'score' | 'untrusted';
+  memories: 'title' | 'content' | 'cite' | 'kind' | 'score';
+  steering: 'title' | 'content' | 'cite' | 'kind' | 'severity';
+  tables: 'title' | 'content' | 'cite' | 'kind' | 'columns' | 'shape' | 'untrusted';
+}
+
+/**
+ * (api-types 0.189.0) `GET /knowledge/summary?project=<id>` (a HUMAN operator): what knowledge an app in that project
+ * can be built on, as counts and registry names only (never a row, a document's text or a memory's words). The same
+ * summary is in the apps builder's knowledge package, so a suggestion never names knowledge the builder cannot use.
+ */
+export interface KnowledgeSummaryResponse {
+  projectId: string;
+  /** The data sources the project may see (the agents switch `see`), in name order. */
+  sources: Array<{
+    name: string;
+    /** Its structure is in estate under its current description (a `tables` query can read it). */
+    described: boolean;
+    /** Agents may read its rows for this project. */
+    query: boolean;
+    /**
+     * Approved data shapes on it that the project may see, each verified against estate's own node and deps, counted
+     * up to 5. `null` = the count could not be established (the review queue or a shape's node could not be read, or
+     * the summary's budget ran out before enough were checked): unknown, not zero.
+     */
+    shapes: number | null;
+  }>;
+  /**
+   * Memories a recall in this project can reach (every facet of a memory must match the project's: faceted to it, or
+   * to nothing), working memories left out (an app's memory recall leaves them out too). `null` = estate did not answer.
+   */
+  memories: { project: number; shared: number } | null;
+  /** Active steering rules that apply to this project, by steering type. `null` = the engine did not answer. */
+  steering: { total: number; byType: Partial<Record<SteeringType, number>> } | null;
 }
 
 // How a query's text binds its parameters (api-types 0.176.0): SQL `$n` (Postgres) and the n-th `?` (MySQL,

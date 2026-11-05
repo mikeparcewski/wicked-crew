@@ -44,12 +44,20 @@ import { generateStatement } from '../actions/pg-write.js';
 import { crewNow, crewValueFits, inputForm, paramFits, writableKind } from '../actions/values.js';
 import { ArgTypeError, checkGraphqlVariables, checkToolArgs, type Provider, providerOf } from './arg-types.js';
 import type { AppSourceStage, AppSourceStageInput, AppSourceStageResult } from '../check.js';
-import { crewQueryContract, graphqlMutationContract, graphqlQueryContract, graphqlRootSignatures, paramOrder, relationTerms, rowWriteContract, splitTable, sqlQueryContract, toolActionContract, toolQueryContract } from './contract.js';
+import { crewQueryContract, recallQueryContract, graphqlMutationContract, graphqlQueryContract, graphqlRootSignatures, paramOrder, relationTerms, rowWriteContract, splitTable, sqlQueryContract, toolActionContract, toolQueryContract } from './contract.js';
 import { lookupSource, pinOf, queryKindFits, type AppSource } from './sources.js';
-import { crewPathValueOk, parseCrewQueryText, parseToolQueryText, type QueryArg } from './texts.js';
+import { crewPathValueOk, parseCrewQueryText, parseRecallQueryText, parseToolQueryText, type QueryArg } from './texts.js';
+import { type AppKnowledgeDeps, RecallRefusal, recallProblem, RECALL_COLUMNS, RECALL_GROUP_COLUMNS, visibleSource } from './recall.js';
 
 export interface SourceStageDeps {
   registry: McpRegistry | null;
+  /**
+   * (DES-KNOWLEDGE-DATA-001 §9.1) What a `recall` query is checked against: the registry as the gate reads it and the
+   * visible set of the app's project. Absent = this crew checks no recall query (it is refused, never passed).
+   */
+  knowledge?: Pick<AppKnowledgeDeps, 'sources' | 'visible'>;
+  /** The project an app belongs to (crew's app store); `null` = no such app. */
+  projectOf?: (app: string) => string | null;
   /** Tests: how connections resolve. */
   dial?: DialOptions;
   /** Tests: where upload snapshots are. */
@@ -204,7 +212,7 @@ export class AppsSourceStage implements AppSourceStage {
         const s = await source(q.source);
         if (s === null) throw new Refused('unknown_source', `no source named ${q.source}`);
         if (!queryKindFits(q.kind, s)) throw new Refused('source_kind', `a ${q.kind} query cannot read ${q.source}, a ${s.kind} source`);
-        out.queries[q.id] = await this.query(q, Object.hasOwn(input.queryText, q.id) ? input.queryText[q.id]! : '', s, secretOf);
+        out.queries[q.id] = await this.query(q, Object.hasOwn(input.queryText, q.id) ? input.queryText[q.id]! : '', s, secretOf, input.app);
         pinSource(s);
       } catch (err) {
         const r = unreachable(err);
@@ -231,7 +239,27 @@ export class AppsSourceStage implements AppSourceStage {
     return out;
   }
 
-  private async query(q: AppQuery, text: string, s: AppSource, secretOf: SecretOf): Promise<string> {
+  private async query(q: AppQuery, text: string, s: AppSource, secretOf: SecretOf, app: string): Promise<string> {
+    if (s.kind === 'estate') {
+      const parsed = parseRecallQueryText(text);
+      if (!parsed.ok) throw new Refused('query_text', parsed.why, 'spec');
+      const problem = recallProblem(q, parsed.value);
+      if (problem !== null) throw new Refused('recall_text', problem, 'spec');
+      const knowledge = this.deps.knowledge;
+      const projectId = this.deps.projectOf?.(app) ?? null;
+      if (knowledge === undefined || projectId === null) throw new Refused('recall_unavailable', 'this crew cannot check a knowledge query (no knowledge plane, or the app has no project)');
+      let sourceId: string | null = null;
+      if (parsed.value.source !== undefined) {
+        try {
+          sourceId = (await visibleSource(knowledge, projectId, parsed.value.source)).id;
+        } catch (err) {
+          if (err instanceof RecallRefusal) throw new Refused(err.code, err.message);
+          throw err;
+        }
+      }
+      const columns = Object.keys(parsed.value.group !== undefined ? RECALL_GROUP_COLUMNS : RECALL_COLUMNS[parsed.value.from]);
+      return recallQueryContract({ from: parsed.value.from, group: parsed.value.group ?? null, sourceId, columns });
+    }
     if (s.kind === 'crew') {
       const parsed = parseCrewQueryText(text);
       if (!parsed.ok) throw new Refused('query_text', parsed.why, 'spec');

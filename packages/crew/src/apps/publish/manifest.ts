@@ -24,7 +24,7 @@ import { isIP } from 'node:net';
 import type { AppActionGrant, AppAudienceRule, AppManifestSource, AppPublishBody, AppPublishManifest, AppSpec } from '../../core/types.js';
 import type { AppFiles } from '../check.js';
 import { actionHash } from '../check.js';
-import { canonicalJson } from '../../mcp/classify.js';
+import { canonicalJson, ESTATE_SERVER } from '../../mcp/classify.js';
 import type { McpToolRecord } from '../../mcp/registry-store.js';
 import { classifyAddress } from '../../sources/dialer.js';
 import { CREW_SOURCE, DEFAULT_PORT } from '../../sources/kinds.js';
@@ -167,6 +167,8 @@ export async function buildManifest(input: ManifestInput): Promise<ManifestOutco
   for (const q of spec.queries) usesOf.set(q.source, [...(usesOf.get(q.source) ?? []), `query ${q.id}`]);
   for (const a of spec.actions) usesOf.set(a.source, [...(usesOf.get(a.source) ?? []), `action ${a.id}`]);
   if (usesOf.has(CREW_SOURCE)) find('blocked_source', `The standalone site cannot read the crew source (crew is local): remove ${usesOf.get(CREW_SOURCE)!.join(', ')}`);
+  // (DES-KNOWLEDGE-DATA-001 §9.1) Knowledge queries are studio-hosted only in v1: an image carries no knowledge plane.
+  if (usesOf.has(ESTATE_SERVER)) find('blocked_source', `The standalone site cannot read the system's knowledge (knowledge queries run in studio only): remove ${usesOf.get(ESTATE_SERVER)!.join(', ')}`);
   if (isPublic) {
     if (spec.actions.length > 0) find('public_has_actions', `A public app is read-only: remove ${spec.actions.map((a) => a.id).join(', ')}`);
     const closed = spec.queries.filter((q) => q.public !== true).map((q) => q.id);
@@ -185,9 +187,9 @@ export async function buildManifest(input: ManifestInput): Promise<ManifestOutco
   for (const a of spec.actions) if (a.kind !== 'row-write' && a.call.kind === 'tool') toolsUsed.set(a.source, new Set([...(toolsUsed.get(a.source) ?? []), a.call.tool]));
 
   for (const name of [...usesOf.keys()].sort()) {
-    if (name === CREW_SOURCE) continue;
+    if (name === CREW_SOURCE || name === ESTATE_SERVER) continue;
     const src = await lookupSource(input.registry, name).catch(() => null);
-    if (src === null || src.kind === 'crew') {
+    if (src === null || src.kind === 'crew' || src.kind === 'estate') {
       find('unknown_source', `${name} is not a source on this crew any more (used by ${usesOf.get(name)!.join(', ')})`);
       continue;
     }

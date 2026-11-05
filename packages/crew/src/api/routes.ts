@@ -189,6 +189,8 @@ import type { DataGate } from '../knowledge/gate/gate.js';
 import type { SourceReadLog } from '../knowledge/gate/record.js';
 import { registerGateRoutes } from '../knowledge/gate/routes.js';
 import { registerShapeRoutes } from '../knowledge/shapes/routes.js';
+import type { AppKnowledgeDeps } from '../apps/exec/recall.js';
+import { STATEMENT_DEADLINE_MS } from '../sources/drivers/types.js';
 import type { McpRegistryStore } from '../mcp/registry-store.js';
 import type { McpCallRecordSource } from '../mcp/call-records.js';
 import { McpPolicies } from '../mcp/policies.js';
@@ -1438,6 +1440,11 @@ export interface RuntimeDeps {
   mcpBroker?: McpBroker;
   /** (DES-KNOWLEDGE-DATA-001 §7) The data gate over the same registry; absent → no live source reaches an agent. */
   dataGate?: DataGate;
+  /**
+   * (DES-KNOWLEDGE-DATA-001 §9.1) The deps a unit in a project may see (the relay's own set), for an app's knowledge
+   * queries and the knowledge summary. Absent (with `dataGate`) = knowledge queries read nothing (refused).
+   */
+  appsKnowledgeVisible?: (projectId: string) => Promise<string[]>;
   /** The registry's store, for the gate's switches route (`PUT /sources/:name/agents`). */
   mcpRegistryStore?: McpRegistryStore;
   /** The gate's read record (`GET /sources/:name/agent-queries`, `GET /runs/:id/data-use`). */
@@ -1778,11 +1785,25 @@ export function registerRoutes(
   });
   // DES-APPS-001 §7.6 (K2a): the app store's routes, when this daemon has a store.
   // (K2b) The executor: queries of an accepted version run for real (DES §7.2), crew-source reads in process.
+  // (DES-KNOWLEDGE-DATA-001 §9.1) What an app's knowledge query reads: the gate's registry, the app's project's
+  // visible set, estate (this daemon's stores) and the engine's rules. Absent pieces = no knowledge query runs.
+  const appsKnowledge: AppKnowledgeDeps | undefined =
+    runtime.dataGate !== undefined && runtime.appsKnowledgeVisible !== undefined
+      ? {
+          sources: () => runtime.dataGate!.sources(),
+          visible: runtime.appsKnowledgeVisible,
+          // Each estate call of an app's read is bounded by the read's own deadline (10 s), not the operator client's 30 s.
+          estate: runtime.callEstateTool ?? ((tool, args) => callEstateTool(tool, args, { timeoutMs: STATEMENT_DEADLINE_MS })),
+          rules: () => adapter.listConformanceRules(),
+        }
+      : undefined;
   const appsExecutor =
     runtime.apps !== undefined
       ? new AppExecutor({
           store: runtime.apps,
           registry: runtime.mcp ?? null,
+          ...(appsKnowledge !== undefined ? { knowledge: appsKnowledge } : {}),
+          projectOf: (slug) => runtime.apps!.projectOf(slug),
           crewInject: async (r) => {
             const res = await app.inject({ method: r.method, url: r.url, headers: r.headers });
             return { statusCode: res.statusCode, body: res.body };
@@ -9522,6 +9543,7 @@ export function registerRoutes(
           projects: async () => (await adapter.projectList()).map((p) => ({ id: p.id, name: p.name })),
         }
       : {}),
+    ...(appsKnowledge !== undefined ? { knowledge: appsKnowledge } : {}),
   });
 
   // ── The wicked-interactive bridge, reverse-proxied (DES-MERGE-001 §5.3/§7.2) ──

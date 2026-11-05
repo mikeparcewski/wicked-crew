@@ -238,7 +238,7 @@ const RefreshSchema = z.union([
 const QuerySchema = z.strictObject({
   id: namedId,
   source: sourceName,
-  kind: z.enum(['sql', 'graphql', 'rest', 'mcp', 'crew']),
+  kind: z.enum(['sql', 'graphql', 'rest', 'mcp', 'crew', 'recall']),
   description: z.string().max(500).optional(),
   params: ParamsSchema.optional(),
   output: z.array(z.strictObject({ name: column, type: z.enum(['string', 'number', 'integer', 'boolean', 'date', 'datetime']), nullable: z.boolean().optional() })).min(1).max(200),
@@ -645,6 +645,10 @@ export function checkSpec(spec: AppSpec): AppCheckFinding[] {
     if (q.refresh?.mode === 'events' && q.source !== 'crew') push('bad_refresh', ['queries', i, 'refresh'], 'refresh on events is for the built-in crew source only');
     if (q.kind === 'crew' && q.source !== 'crew') push('bad_source', ['queries', i, 'source'], 'a crew query reads the built-in crew source');
     if (q.kind !== 'crew' && q.source === 'crew') push('bad_source', ['queries', i, 'kind'], 'the built-in crew source is read by a crew query');
+    if (q.kind === 'recall' && q.source !== 'estate') push('bad_source', ['queries', i, 'source'], 'a recall query reads the system\'s knowledge, source estate');
+    if (q.kind !== 'recall' && q.source === 'estate') push('bad_source', ['queries', i, 'kind'], 'source estate (the system\'s knowledge) is read by a recall query');
+    if (q.kind === 'recall' && (q.rowPath !== undefined || q.morePath !== undefined)) push('bad_path', ['queries', i], 'a recall query has no row or more path');
+    if (q.kind === 'recall' && q.public === true) push('bad_source', ['queries', i, 'public'], 'a recall query reads the system\'s knowledge, which no public app may show');
     if (q.kind === 'sql' && (q.rowPath !== undefined || q.morePath !== undefined)) push('bad_path', ['queries', i], 'a SQL query has no row or more path');
     dup(q.output.map((c) => c.name), 'output column', (ci) => ['queries', i, 'output', ci, 'name']);
   });
