@@ -133,7 +133,7 @@ function write(w: World): void {
   ];
   writeFileSync(join(mcpDir, 'registry.json'), JSON.stringify({ version: 1, servers }));
   members = w.members ?? { [P]: ['r'], [Q]: ['r'] };
-  for (const d of Object.values(logs)) for (const f of ['calls.ndjson', 'overbroad', 'body.txt', 'siteform']) rmSync(join(d, f), { force: true });
+  for (const d of Object.values(logs)) for (const f of ['calls.ndjson', 'overbroad', 'body.txt', 'siteform', 'commenterror']) rmSync(join(d, f), { force: true });
 }
 
 const calls = (which: keyof typeof logs): Array<{ tool: string; args: Record<string, unknown> }> =>
@@ -687,6 +687,19 @@ describe('§5 governed actions at the deliver gate: a card first, then exactly t
       { tool: 'addOrEditJiraIssueComment', args: { cloudId: 'c1', issueIdOrKey: 'PROJA-1', commentBody: 'Delivered in the PR.' } },
       { tool: 'transitionJiraIssue', args: { cloudId: 'c1', issueIdOrKey: 'PROJA-1', transition: { id: '21' } } },
     ]);
+  });
+
+  it('a write the tracker refuses as data (no isError) is not reported done, and the transition after it is not sent', async () => {
+    const c = (await post({ issue: 'PROJA-1', comment: 'Refused.', transition: 'In Review' })).json() as { actionHash: string };
+    writeFileSync(join(logs.jira, 'commenterror'), '');
+    try {
+      const done = await post({ issue: 'PROJA-1', comment: 'Refused.', transition: 'In Review', confirm: c.actionHash });
+      expect(done.json()).toMatchObject({ done: true, results: [{ part: 'comment', ok: false, error: expect.stringContaining('HTTP 403') }] });
+      expect((done.json() as { results: unknown[] }).results).toHaveLength(1);
+      expect(calls('jira').filter((x) => x.tool === 'transitionJiraIssue')).toEqual([]);
+    } finally {
+      rmSync(join(logs.jira, 'commenterror'), { force: true });
+    }
   });
 
   it('a link removed after the card is confirmed but before the write is sent sends nothing (dispatch-time admission)', async () => {

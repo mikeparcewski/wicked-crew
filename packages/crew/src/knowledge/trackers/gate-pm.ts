@@ -37,7 +37,7 @@ import type { GateListedTool, GateUnitResult, GateUnitScope } from '../gate/gate
 import type { SourceAgentQueryEntry, SourceReadLog } from '../gate/record.js';
 import { GateBusyError, type GateSchedulers, DEFAULT_LIMITS } from '../gate/scheduler.js';
 import { effectiveDisclosure } from '../registry/entry.js';
-import { bindingInForce, type PmItem } from './bindings.js';
+import { atlassianSiteIdsOf, bindingInForce, type PmItem, type ProjectOpts, readPayload, vendorBindsTenant } from './bindings.js';
 import { linkedSetOf, type PmEntry, pmEntriesOf, type TrackerScope, type TrackerSetEntry, trackerSetOf, unitRepos } from './set.js';
 
 export interface PmGateDeps {
@@ -123,6 +123,24 @@ export function scrubDecoded(result: Record<string, unknown>, secret: string | n
   };
 }
 
+/** How long the one site a credential reaches is trusted before it is read again. */
+export const SOLE_SITE_TTL_MS = 60_000;
+
+/** What a projector may lean on, through the gate when the caller holds one; anything else gets no tenant proof. */
+export async function projectOptsVia(pm: object, e: PmEntry, credential: string | null, cls: 'unit' | 'person' = 'person'): Promise<ProjectOpts> {
+  const f = (pm as Partial<Pick<PmGate, 'projectOpts'>>).projectOpts;
+  return typeof f === 'function' ? f.call(pm, e, credential, cls) : {};
+}
+
+/** Why a vendor call failed, as a class (and an HTTP status when the transport saw one): never the vendor's words. */
+export function upstreamFailure(err: unknown): string {
+  const cls = classifyUpstreamError(err).errorClass;
+  const code = (err as { code?: unknown } | null)?.code;
+  const status = cls === 'http' && typeof code === 'number' && Number.isInteger(code) && code >= 100 && code <= 599 ? ` ${code}` : '';
+  const words: Record<string, string> = { transport: 'the connection failed', timeout: 'it did not answer in time', http: 'the server answered HTTP', protocol: 'the MCP exchange failed', boundary: 'crew stopped the call at its boundary' };
+  return `${words[cls] ?? cls}${status}`;
+}
+
 /** Whether a stored tool is registered as saved (its schema the one last seen) and switched on. */
 export function liveTool(t: McpToolRecord | undefined): t is McpToolRecord {
   return t !== undefined && t.present && t.enabled && t.schemaHash !== null && t.schemaHash === t.observedSchemaHash;
@@ -131,10 +149,37 @@ export function liveTool(t: McpToolRecord | undefined): t is McpToolRecord {
 export class PmGate {
   private readonly invoke: Invoker;
   private readonly now: () => number;
+  /** entry id + descriptor -> the one site its credential reached when last read (`null`: several, or unknown). */
+  private readonly soleSites = new Map<string, { at: number; site: string | null; credential: string | null }>();
 
   constructor(private readonly deps: PmGateDeps) {
     this.invoke = deps.invoke ?? invokeMcpTool;
     this.now = deps.now ?? Date.now;
+  }
+
+  /**
+   * What a projector may lean on for `e` ({@link ProjectOpts}): whether its server is Atlassian's own, and the one site
+   * its credential reaches (read with `getAccessibleAtlassianResources`, kept {@link SOLE_SITE_TTL_MS}). Only then may
+   * an address-free Jira answer prove its site by the `cloudId` crew bound. `credential` is the hash of the credential
+   * the answer being judged was read with (`vendorRead`'s): the sites must have been read with the same one.
+   */
+  async projectOpts(e: PmEntry, credential: string | null, cls: 'unit' | 'person' = 'person'): Promise<ProjectOpts> {
+    if (!vendorBindsTenant(configOf(e.record), e.system)) return { vendorBindsTenant: false, soleSite: null };
+    const k = `${e.id}\u0000${pmDescriptorHash(configOf(e.record))}`;
+    const hit = this.soleSites.get(k);
+    if (hit !== undefined && this.now() - hit.at < SOLE_SITE_TTL_MS && hit.credential === credential) return { vendorBindsTenant: true, soleSite: hit.site };
+    let site: string | null = null;
+    let readWith: string | null = null;
+    if (e.record.tools.some((t) => t.name === 'getAccessibleAtlassianResources' && t.present)) {
+      const r = await this.vendorRead(e, 'getAccessibleAtlassianResources', {}, cls);
+      const p = r.ok ? readPayload(r.result) : null;
+      const ids = p !== null && p.ok ? atlassianSiteIdsOf(p.payload) : null;
+      readWith = r.ok ? r.credential : null;
+      site = ids !== null && ids.length === 1 ? ids[0]! : null;
+    }
+    this.soleSites.set(k, { at: this.now(), site, credential: readWith });
+    // Read with another credential than the answer's (it changed in between): no proof.
+    return { vendorBindsTenant: true, soleSite: readWith === credential ? site : null };
   }
 
   /** Every PM entry, read now. */
@@ -236,7 +281,7 @@ export class PmGate {
       return refusal(read.code, read.reason);
     }
     await this.deps.afterRead?.();
-    const projected = binding.project(read.result, prepared);
+    const projected = binding.project(read.result, prepared, await this.projectOpts(e, read.credential, 'unit'));
     if (!projected.ok) {
       await settle(entry(projected.code));
       return refusal(projected.code, projected.reason);
@@ -388,8 +433,9 @@ export class PmGate {
         return { ok: false, code: 'changed', reason: `${e.name} or this issue's link changed before the call was sent; nothing was sent` };
       }
       // The vendor's words (a JSON-RPC error, its stderr) can echo a credential in any form: only the class is kept.
-      this.deps.log?.(`[gate] ${e.name}/${tool} failed upstream (${classifyUpstreamError(err).errorClass})`);
-      return { ok: false, code: 'unavailable', reason: `${e.name} could not be read now; nothing is shown` };
+      const why = upstreamFailure(err);
+      this.deps.log?.(`[gate] ${e.name}/${tool} failed upstream (${classifyUpstreamError(err).errorClass}: ${why})`);
+      return { ok: false, code: 'unavailable', reason: `${e.name} could not be read now (${tool}: ${why}); nothing is shown` };
     }
   }
 
