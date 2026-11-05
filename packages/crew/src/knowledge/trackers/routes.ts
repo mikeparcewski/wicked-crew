@@ -26,8 +26,8 @@ import { McpRegistryCorruptError, type McpRegistryStore } from '../../mcp/regist
 import { DEFAULT_PROJECT_ID } from '../../projects/default-project.js';
 import { agentMay } from '../gate/access.js';
 import { type StoredTracker, type TrackerLinkTarget, type TrackerStructure, trackerIdOf, trackerLabel, trackerLinkIdOf, trackersOf } from '../registry/entry.js';
-import { bindingInForce, GITHUB_TENANT, unwrapData } from './bindings.js';
-import type { PmGate } from './gate-pm.js';
+import { bindingInForce, GITHUB_TENANT, jiraSitesOf, outlineOf, readPayload } from './bindings.js';
+import { type PmGate, projectOptsOf } from './gate-pm.js';
 import { type PmEntry, pmEntriesOf } from './set.js';
 import { PROJECTION_UNKNOWN, type TrackerProjectionLookup, trackerLinkView } from './view.js';
 
@@ -90,47 +90,46 @@ const PAGE = 50;
 export const TRACKER_LINKS_MAX = 200;
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
-/** The single JSON payload of a person read (the same rule the projectors use). */
+/** The single JSON payload of a person read (the same rule the projectors use), or `null`. */
 function payload(result: Record<string, unknown>): unknown {
-  const c = result['content'];
-  if (result['isError'] === true || !Array.isArray(c) || c.length !== 1 || !isObj(c[0]) || c[0]['type'] !== 'text') return null;
-  try {
-    return unwrapData(JSON.parse(String(c[0]['text'])) as unknown);
-  } catch {
-    return null;
-  }
+  const r = readPayload(result);
+  return r.ok ? r.payload : null;
+}
+
+type Fail = { ok: false; code: string; reason: string };
+
+/**
+ * A person read's payload, or why there is none, said so the next attempt is diagnosable: the vendor's error with its
+ * HTTP status, or the outline of a shape crew does not know (block types, field names, array lengths; never a value).
+ */
+function read(e: PmEntry, tool: string, result: Record<string, unknown>): { ok: true; payload: unknown } | Fail {
+  return readPayload(result, `${e.name} (${tool})`);
 }
 
 type Listed = { tenant: string; tenantLabel?: string; key: string; label: string };
-type Lister = { ok: true; rows: Listed[]; next: string | null } | { ok: false; code: string; reason: string };
+type Lister = { ok: true; rows: Listed[]; next: string | null } | Fail;
 
-/** Jira sites the credential reaches (`getAccessibleAtlassianResources`): `[{id: cloudId, name, url}]`. */
-async function jiraSites(pm: Pick<PmGate, 'personCall'>, e: PmEntry): Promise<{ ok: true; sites: Array<{ id: string; label: string; host: string | null }> } | { ok: false; code: string; reason: string }> {
+/** Jira sites the credential reaches (`getAccessibleAtlassianResources`): v2 `{resources: [{cloudId, url, products}]}`. */
+async function jiraSites(pm: Pick<PmGate, 'personCall'>, e: PmEntry): Promise<{ ok: true; sites: Array<{ id: string; label: string; host: string | null }> } | Fail> {
   const r = await pm.personCall(e, 'getAccessibleAtlassianResources', {});
   if (!r.ok) return r;
-  const p = payload(r.result);
-  const list = Array.isArray(p) ? p : isObj(p) && Array.isArray(p['resources']) ? (p['resources'] as unknown[]) : null;
-  if (list === null) return { ok: false, code: 'source_unavailable', reason: `${e.name} answered its sites in a shape crew does not know` };
-  const host = (u: unknown): string | null => {
-    try {
-      const x = new URL(String(u));
-      return x.protocol === 'https:' ? x.host.toLowerCase() : null;
-    } catch {
-      return null;
-    }
-  };
-  const sites = list.filter(isObj).map((s) => ({ id: typeof s['id'] === 'string' ? s['id'] : '', label: trackerLabel(s['name'] ?? s['url'], String(s['id'] ?? '')), host: host(s['url']) })).filter((s) => s.id !== '');
-  return { ok: true, sites };
+  const p = read(e, 'getAccessibleAtlassianResources', r.result);
+  if (!p.ok) return p;
+  const sites = jiraSitesOf(p.payload);
+  if (sites === null) return { ok: false, code: 'unknown_shape', reason: `${e.name} answered its sites in a shape crew does not know (got ${outlineOf(p.payload)})` };
+  return { ok: true, sites: sites.map((s) => ({ ...s, label: trackerLabel(s.label, s.id) })) };
 }
 
 /** One page of a Jira site's projects (`listJiraProjects`). */
-async function jiraProjects(pm: Pick<PmGate, 'personOp'>, e: PmEntry, cloudId: string, q: string, startAt: number): Promise<{ ok: true; rows: Array<{ key: string; label: string }>; more: boolean } | { ok: false; code: string; reason: string }> {
+async function jiraProjects(pm: Pick<PmGate, 'personOp'>, e: PmEntry, cloudId: string, q: string, startAt: number): Promise<{ ok: true; rows: Array<{ key: string; label: string }>; more: boolean } | Fail> {
   // A non-primary operation on the Atlassian v2 server: by name, or through its executeRead meta-tool.
   const r = await pm.personOp(e, 'listJiraProjects', cloudId, { ...(q !== '' ? { searchString: q } : {}), startAt, maxResults: PAGE });
   if (!r.ok) return r;
-  const p = payload(r.result);
+  const pr = read(e, 'listJiraProjects', r.result);
+  if (!pr.ok) return pr;
+  const p = pr.payload;
   const list = Array.isArray(p) ? p : isObj(p) && Array.isArray(p['values']) ? (p['values'] as unknown[]) : isObj(p) && Array.isArray(p['projects']) ? (p['projects'] as unknown[]) : null;
-  if (list === null) return { ok: false, code: 'source_unavailable', reason: `${e.name} answered its projects in a shape crew does not know` };
+  if (list === null) return { ok: false, code: 'unknown_shape', reason: `${e.name} answered its projects in a shape crew does not know (got ${outlineOf(p)})` };
   const rows = list.filter(isObj).filter((x) => typeof x['key'] === 'string' && validTrackerKey('jira', x['key'])).map((x) => ({ key: x['key'] as string, label: trackerLabel(x['name'], x['key'] as string) }));
   const more = isObj(p) && p['isLast'] === false ? true : isObj(p) && typeof p['total'] === 'number' ? startAt + list.length < p['total'] : list.length >= PAGE;
   return { ok: true, rows, more };
@@ -140,8 +139,10 @@ async function jiraProjects(pm: Pick<PmGate, 'personOp'>, e: PmEntry, cloudId: s
 async function githubRepos(pm: Pick<PmGate, 'personCall'>, e: PmEntry, query: string, page: number): Promise<{ ok: true; rows: Array<{ key: string; label: string }>; more: boolean } | { ok: false; code: string; reason: string }> {
   const r = await pm.personCall(e, 'search_repositories', { query, page, perPage: PAGE });
   if (!r.ok) return r;
-  const p = payload(r.result);
-  if (!isObj(p) || !Array.isArray(p['items'])) return { ok: false, code: 'source_unavailable', reason: `${e.name} answered its repositories in a shape crew does not know` };
+  const pr = read(e, 'search_repositories', r.result);
+  if (!pr.ok) return pr;
+  const p = pr.payload;
+  if (!isObj(p) || !Array.isArray(p['items'])) return { ok: false, code: 'unknown_shape', reason: `${e.name} answered its repositories in a shape crew does not know (got ${outlineOf(p)})` };
   const rows = (p['items'] as unknown[]).filter(isObj).filter((x) => typeof x['full_name'] === 'string' && validTrackerKey('github', x['full_name'])).map((x) => ({ key: x['full_name'] as string, label: trackerLabel(x['full_name'], x['full_name'] as string) }));
   const total = typeof p['total_count'] === 'number' ? p['total_count'] : 0;
   return { ok: true, rows, more: page * PAGE < Math.min(total, 1000) };
@@ -172,9 +173,11 @@ export async function listSourceTrackers(pm: Pick<PmGate, 'personCall' | 'person
     if (query === '') {
       const me = await pm.personCall(e, 'get_me', {});
       if (!me.ok) return me;
-      const p = payload(me.result);
+      const pr = read(e, 'get_me', me.result);
+      if (!pr.ok) return pr;
+      const p = pr.payload;
       const login = isObj(p) && typeof p['login'] === 'string' ? p['login'] : null;
-      if (login === null) return { ok: false, code: 'source_unavailable', reason: `${e.name} did not say whose credential it holds` };
+      if (login === null) return { ok: false, code: 'unknown_shape', reason: `${e.name} did not say whose credential it holds (get_me answered ${outlineOf(p)})` };
       query = `user:${login}`;
     } else {
       query = `${query.replace(/[^\w./ -]/g, ' ')} in:name`;
@@ -205,24 +208,24 @@ export async function listSourceTrackers(pm: Pick<PmGate, 'personCall' | 'person
 }
 
 /** The direct live lookup a link needs (§3.3): the tracker's label, or why it cannot be linked. */
-export async function lookupTracker(pm: Pick<PmGate, 'personCall' | 'personOp'>, e: PmEntry, tenant: string, key: string): Promise<{ ok: true; key: string; label: string; tenantLabel: string | null; siteHost?: string | null } | { ok: false; code: string; reason: string; status: number }> {
+export async function lookupTracker(pm: Pick<PmGate, 'personCall' | 'personOp'>, e: PmEntry, tenant: string, key: string): Promise<{ ok: true; key: string; label: string; tenantLabel: string | null; siteHost?: string | null } | { ok: false; code: string; reason: string; status: number; cause?: string }> {
   if (!validTrackerKey(e.system, key)) return { ok: false, status: 422, code: 'tracker_unknown', reason: e.system === 'jira' ? 'a Jira tracker is one project key, such as PROJA' : 'a GitHub tracker is one owner/repo' };
   if (e.system === 'github') {
     if (tenant !== GITHUB_TENANT) return { ok: false, status: 422, code: 'tracker_unknown', reason: `a GitHub source's tenant is ${GITHUB_TENANT}` };
     const r = await githubRepos(pm, e, `repo:${key}`, 1);
-    if (!r.ok) return { ...r, status: 503, code: 'source_unavailable' };
+    if (!r.ok) return { ...r, status: 503, code: 'source_unavailable', cause: r.code };
     const hit = r.rows.find((x) => x.key.toLowerCase() === key.toLowerCase());
     if (hit === undefined) return { ok: false, status: 422, code: 'tracker_unknown', reason: `${e.name} finds no repository ${key}` };
     return { ok: true, key: hit.key, label: hit.label, tenantLabel: null };
   }
   const sites = await jiraSites(pm, e);
-  if (!sites.ok) return { ...sites, status: 503, code: 'source_unavailable' };
+  if (!sites.ok) return { ...sites, status: 503, code: 'source_unavailable', cause: sites.code };
   const site = sites.sites.find((s) => s.id === tenant);
   if (site === undefined) return { ok: false, status: 422, code: 'tracker_unknown', reason: `${e.name}'s credential reaches no Jira site ${tenant}` };
   // Every page of the key's search, until the exact key is found or the site says it was the last page.
   for (let page = 0; page < 20; page++) {
     const r = await jiraProjects(pm, e, tenant, key, page * PAGE);
-    if (!r.ok) return { ...r, status: 503, code: 'source_unavailable' };
+    if (!r.ok) return { ...r, status: 503, code: 'source_unavailable', cause: r.code };
     const hit = r.rows.find((x) => x.key === key);
     if (hit !== undefined) return { ok: true, key: hit.key, label: hit.label, tenantLabel: site.label, siteHost: site.host };
     if (!r.more) return { ok: false, status: 422, code: 'tracker_unknown', reason: `${site.label} has no project ${key}` };
@@ -383,7 +386,7 @@ export function registerTrackerRoutes(app: FastifyInstance, deps: TrackerRouteDe
           continue;
         }
         const r = await pm.vendorRead(e, tool, prepared.args, 'person');
-        const p = r.ok ? binding.project(r.result, prepared) : null;
+        const p = r.ok ? binding.project(r.result, prepared, projectOptsOf(e)) : null;
         if (p === null || !p.ok) {
           row.error = 'unavailable';
           continue;
@@ -427,7 +430,7 @@ export function registerTrackerRoutes(app: FastifyInstance, deps: TrackerRouteDe
         return reply.code(404).send({ error: `no repo ${b.target.id}`, code: 'repo_not_found' });
       }
       const found = await lookupTracker(deps.pm, e, b.tenant, b.key);
-      if (!found.ok) return reply.code(found.status).send({ error: found.reason, code: found.code });
+      if (!found.ok) return reply.code(found.status).send({ error: found.reason, code: found.code, ...(found.cause !== undefined ? { cause: found.cause } : {}) });
       const structure = await readStructure(deps.pm, e, b.tenant, found.key);
       const trackerId = trackerIdOf(e.id, b.tenant, found.key);
       const target: TrackerLinkTarget = b.target.kind === 'project' ? { kind: 'project', id: b.target.id } : { kind: 'repo', id: b.target.id };
@@ -532,7 +535,8 @@ export function registerTrackerRoutes(app: FastifyInstance, deps: TrackerRouteDe
       const e = pmEntriesOf(file).find((x) => x.name === req.params.name);
       if (e === undefined) return reply.code(409).send({ error: `${req.params.name} is not a project-management source`, code: 'not_a_tracker' });
       const page = await listSourceTrackers(deps.pm, e, q.data.q ?? '', cursor, q.data.tenant ?? null);
-      if (!page.ok) return reply.code(503).send({ error: page.reason, code: 'source_unavailable' });
+      // `cause` is the lister's own class (vendor_error, unknown_shape, unavailable, secret_missing, …): the reason names it.
+      if (!page.ok) return reply.code(503).send({ error: page.reason, code: 'source_unavailable', cause: page.code });
       const links = allLinks([e]);
       const body: SourceTrackersResponse = {
         name: e.name,

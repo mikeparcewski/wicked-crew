@@ -37,7 +37,7 @@ import type { GateListedTool, GateUnitResult, GateUnitScope } from '../gate/gate
 import type { SourceAgentQueryEntry, SourceReadLog } from '../gate/record.js';
 import { GateBusyError, type GateSchedulers, DEFAULT_LIMITS } from '../gate/scheduler.js';
 import { effectiveDisclosure } from '../registry/entry.js';
-import { bindingInForce, type PmItem } from './bindings.js';
+import { bindingInForce, type PmItem, type ProjectOpts, vendorBindsTenant } from './bindings.js';
 import { linkedSetOf, type PmEntry, pmEntriesOf, type TrackerScope, type TrackerSetEntry, trackerSetOf, unitRepos } from './set.js';
 
 export interface PmGateDeps {
@@ -121,6 +121,20 @@ export function scrubDecoded(result: Record<string, unknown>, secret: string | n
       }
     }),
   };
+}
+
+/** What a projector may lean on for an entry: whether its server is the vendor's own (`vendorBindsTenant`). */
+export function projectOptsOf(e: PmEntry): ProjectOpts {
+  return { vendorBindsTenant: vendorBindsTenant(configOf(e.record), e.system) };
+}
+
+/** Why a vendor call failed, as a class (and an HTTP status when the transport saw one): never the vendor's words. */
+export function upstreamFailure(err: unknown): string {
+  const cls = classifyUpstreamError(err).errorClass;
+  const code = (err as { code?: unknown } | null)?.code;
+  const status = cls === 'http' && typeof code === 'number' && Number.isInteger(code) && code >= 100 && code <= 599 ? ` ${code}` : '';
+  const words: Record<string, string> = { transport: 'the connection failed', timeout: 'it did not answer in time', http: 'the server answered HTTP', protocol: 'the MCP exchange failed', boundary: 'crew stopped the call at its boundary' };
+  return `${words[cls] ?? cls}${status}`;
 }
 
 /** Whether a stored tool is registered as saved (its schema the one last seen) and switched on. */
@@ -236,7 +250,7 @@ export class PmGate {
       return refusal(read.code, read.reason);
     }
     await this.deps.afterRead?.();
-    const projected = binding.project(read.result, prepared);
+    const projected = binding.project(read.result, prepared, projectOptsOf(e));
     if (!projected.ok) {
       await settle(entry(projected.code));
       return refusal(projected.code, projected.reason);
@@ -388,8 +402,9 @@ export class PmGate {
         return { ok: false, code: 'changed', reason: `${e.name} or this issue's link changed before the call was sent; nothing was sent` };
       }
       // The vendor's words (a JSON-RPC error, its stderr) can echo a credential in any form: only the class is kept.
-      this.deps.log?.(`[gate] ${e.name}/${tool} failed upstream (${classifyUpstreamError(err).errorClass})`);
-      return { ok: false, code: 'unavailable', reason: `${e.name} could not be read now; nothing is shown` };
+      const why = upstreamFailure(err);
+      this.deps.log?.(`[gate] ${e.name}/${tool} failed upstream (${classifyUpstreamError(err).errorClass}: ${why})`);
+      return { ok: false, code: 'unavailable', reason: `${e.name} could not be read now (${tool}: ${why}); nothing is shown` };
     }
   }
 

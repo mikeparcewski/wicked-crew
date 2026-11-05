@@ -18,7 +18,7 @@ import type { LinkedIssue, PmSystem } from '../../core/types.js';
 import { agentMay } from '../gate/access.js';
 import { configOf, pmDescriptorHash } from '../../mcp/registry.js';
 import { bindingInForce, GITHUB_TENANT, type PmItem } from './bindings.js';
-import { liveTool, type PmGate } from './gate-pm.js';
+import { liveTool, type PmGate, projectOptsOf } from './gate-pm.js';
 import { effectiveDisclosure } from '../registry/entry.js';
 import { linkedSetOf, type PmEntry, type TrackerScope, type TrackerSetEntry, trackerSetOf, unitRepos } from './set.js';
 
@@ -164,7 +164,7 @@ export async function readPmIssues(
       out.push(fail(r.ref, 'unavailable', read.reason));
       continue;
     }
-    const projected = binding.project(read.result, prepared);
+    const projected = binding.project(read.result, prepared, projectOptsOf(e));
     if (!projected.ok || projected.items.length !== 1) {
       out.push(fail(r.ref, projected.ok ? 'not_found' : projected.code === 'vendor_error' ? 'not_found' : 'unavailable', projected.ok ? 'the tracker answered no such issue' : projected.reason));
       continue;

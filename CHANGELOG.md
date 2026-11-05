@@ -347,6 +347,22 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **PM-1 against the real Atlassian v2 and GitHub MCP servers (built and tested only against fake stdio servers
+  before).** A saved Jira source answered `GET /sources/:name/trackers` with 503 "answered its sites in a shape crew
+  does not know". The v2 server answers `{"data":{"resources":[{"cloudId","url","products"}]}}` (crew read `id`), puts
+  metadata beside `data` (`context`), answers errors as `{"error":true,"message","statusCode"}` often without
+  `isError`, and answers issues with no `self`. Now: one payload reader for every PM read (the JSON text block, `data`
+  unwrapped beside metadata, an error envelope = `vendor_error` with its HTTP status and, when the vendor names them,
+  the missing scopes); an unknown shape names its structure (block types, field names, array lengths, never a value);
+  sites read `cloudId` or `id`, skip a site without Jira, and merge a site listed once per product; the 503 carries
+  `cause`; an upstream failure names its class and HTTP status. Site proof for Jira items: an address (`self`,
+  `webUrl`), when present, must still name the linked site; an item with none is admitted only on Atlassian's own
+  server (`https://mcp.atlassian.com`), which runs the call against the `cloudId` crew set, and only when no item of
+  the answer carries an address. Bound `listJiraIssueComments` (key-bound; role-limited and JSM-internal comments
+  withheld and counted), and `atlassianUserInfo` / `getAccessibleAtlassianResources` as `structure` account metadata
+  (the account id; the linked trackers' sites only). A tracker action reads the v2 account (`accountId`). GitHub
+  (github-mcp-server main 99d6d65): its shapes already parse; recorded fixtures guard them.
+
 - **A restored registry generation re-projects its sources' structure into estate (crew#1328 item 3).** A restore
   changes a source's projection key (its descriptor and allowed views) without writing a catalog, so nothing
   re-projected it, and the visible set hid the source's estate structure until the next describe or boot. The
