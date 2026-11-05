@@ -198,7 +198,7 @@ A tracker is one project inside one issue tracker: a GitHub repository's issues,
   linked trackers, never through the daemon's own `gh`.
 - Understand's **Knowledge map** draws the links between trackers, projects and repositories.
 
-GitLab and Azure DevOps trackers are not in this release.
+The trackers crew links are GitHub Issues and Jira.
 
 ## Audit
 
