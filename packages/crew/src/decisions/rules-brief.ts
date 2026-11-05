@@ -16,8 +16,10 @@ import { inertIssueText } from '../core/linked-issues.js';
 
 export const RULES_BRIEF_OPEN = '<!-- wicked-crew:rules -->';
 export const RULES_BRIEF_CLOSE = '<!-- /wicked-crew:rules -->';
-/** A statement's longest brief text: the Remember route's own maximum, so no accepted rule is cut (xreview r1). */
-const MAX_RULE_CHARS = 500;
+/** The rule lines' total budget (xreview r1/r2): a statement is listed WHOLE or not at all (never cut, so no
+ *  obligation or exception is lost); rules past the budget are counted in "N more", and the block stays far under the
+ *  128 KiB single-argument limit of the host floor's argv prompt. */
+const MAX_RULE_LINES_CHARS = 16_000;
 /** A listable id: one token of at most 120 characters (the `[rule:<id>]` citation's own bound), never mangled. */
 const LISTABLE_ID = /^[^\s<>]{1,120}$/u;
 
@@ -25,8 +27,7 @@ const LISTABLE_ID = /^[^\s<>]{1,120}$/u;
  *  issues' invariant), so no spelling of a daemon marker survives into the brief (xreview r1). */
 function ruleLine(r: Pick<ConformanceRule, 'id' | 'severity' | 'statement'>): string {
   const folded = r.statement.replace(/\s+/gu, ' ').trim();
-  const t = folded.length > MAX_RULE_CHARS ? `${folded.slice(0, MAX_RULE_CHARS - 1)}…` : folded;
-  return `- ${r.id} (${r.severity}): ${inertIssueText(t).replaceAll('-->', '--&gt;')}`;
+  return `- ${r.id} (${r.severity}): ${inertIssueText(folded).replaceAll('-->', '--&gt;')}`;
 }
 
 /** The marked block, or `null` when no rule is in force. An id that is not one bounded token is not listed (it is
@@ -34,13 +35,22 @@ function ruleLine(r: Pick<ConformanceRule, 'id' | 'severity' | 'statement'>): st
 export function rulesBriefBlock(rules: ReadonlyArray<Pick<ConformanceRule, 'id' | 'severity' | 'statement'>>): string | null {
   const ordered = orderBySeverity(rules).filter((r) => LISTABLE_ID.test(r.id) && r.statement.trim() !== '');
   if (ordered.length === 0) return null;
-  const shown = ordered.slice(0, RULES_STATEMENT_CAP);
+  const shown: string[] = [];
+  let used = 0;
+  for (const r of ordered) {
+    if (shown.length >= RULES_STATEMENT_CAP) break;
+    const line = ruleLine(r);
+    if (used + line.length > MAX_RULE_LINES_CHARS) continue;
+    shown.push(line);
+    used += line.length + 1;
+  }
+  if (shown.length === 0) return null;
   const more = rules.length - shown.length;
   return [
     RULES_BRIEF_OPEN,
     'Steering rules in force for this project. The review and QE steps check the work against each one (kept, broken',
     'or not applicable, with evidence); a broken rule fails review. The step that builds does not mark its own compliance.',
-    ...shown.map(ruleLine),
+    ...shown,
     ...(more > 0 ? [`- … and ${more} more rule${more === 1 ? '' : 's'} in force, not listed here.`] : []),
     RULES_BRIEF_CLOSE,
   ].join('\n');

@@ -53,6 +53,17 @@ describe('the rules block', () => {
     expect(goalFrom(problem)).toBe('Fix it');
   });
 
+  it('(xreview r2) a statement past 500 characters is listed whole, never cut; a block past its budget lists fewer, never cuts', () => {
+    const long = `${'Use the established conventions for the affected module. '.repeat(9)}Always add a regression test for bug fixes.`;
+    expect(long.length).toBeGreaterThan(500);
+    expect(rulesBriefBlock([{ id: 'LONG', severity: 'warn', statement: long } as ConformanceRule])!).toContain('Always add a regression test for bug fixes.');
+    const huge = Array.from({ length: 5 }, (_, i) => ({ id: `H-${i}`, severity: 'warn', statement: `${'x'.repeat(5_000)} end-${i}` }) as ConformanceRule);
+    const block = rulesBriefBlock(huge)!;
+    expect(block.length).toBeLessThan(17_000);
+    for (const l of block.split('\n').filter((x) => x.startsWith('- H-'))) expect(l).toMatch(/end-\d$/);
+    expect(block).toMatch(/… and \d more rules in force/);
+  });
+
   it('(xreview r1) a statement up to the Remember maximum is listed whole; an id that is not one bounded token is not listed, never mangled', () => {
     const long = `${'a'.repeat(400)} and it MUST add a test`;
     const block = rulesBriefBlock([
