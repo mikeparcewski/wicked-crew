@@ -1256,6 +1256,10 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '  { echo; echo "---"; echo; echo "**Unverified delivery.** This pull request was delivered post-hoc (\\`POST /runs/$RUNID/deliver\\`), so no engine lift re-verified the tree it pushes. Run tree before the lift: \\`${TB:-unknown}\\`; delivered tree: \\`${TA:-unknown}\\` ($MOVED). Review it as unverified work."; } >> "$TD/body"',
     `  echo "${DELIVER_UNVERIFIED_MARKER} tree-before=\${TB:-unknown} tree-after=\${TA:-unknown}"`,
     'fi',
+    // (wicked-core SWAP 6) The engine checks the steering rules deferred to delivery against the
+    // text this delivery PUBLISHES (the PR description, or its comment on an existing PR): written,
+    // final, to the file the engine names, before anything leaves the machine.
+    '[ -n "${WICKED_DELIVER_TEXT_OUT:-}" ] && { printf \'%s\\n\\n\' "$TITLE"; cat "$TD/body"; } > "$WICKED_DELIVER_TEXT_OUT" 2>/dev/null || true',
     // (d) Push. Any push failure happens AFTER the work was committed and its branch was proven
     // ahead, whether the remote branch moved, auth returned 403, the transport is down, or a hook
     // rejected it. It is a REFUSAL BY THE REMOTE, not a lift collision (N4): the lift already came

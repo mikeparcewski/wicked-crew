@@ -16,7 +16,9 @@ mentioned only where a daemon release depends on them.
   The wire gains the `deferred` rule status: the engine defers a rule to delivery by a recorded fact (obligations
   `evidence:delivery`, or `applies_to` naming only the deliver step) and the deliver step judges it against the pull
   request's text. The delivery's worst-row-per-rule lets the deliver verdict replace a review's deferral, and the PR
-  body's rule line counts "N deferred to delivery". Needs the engine after wicked-core's deferral fix.
+  body's rule line counts "N deferred to delivery". The deliver script hands the engine the text it publishes
+  (title, blank line, body) in the file `WICKED_DELIVER_TEXT_OUT` names, before the push, so the deferred rules are
+  judged on exactly that text. Needs the engine after wicked-core's deferral fix.
 
 ### Added
 

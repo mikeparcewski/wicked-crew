@@ -122,6 +122,18 @@ describe('deliverPrScript (the hardened field script)', () => {
     expect(script.split('\n').filter((l) => l.includes('LIFT-CONFLICT')).length).toBe(1);
   });
 
+  it('(wicked-core SWAP 6) hands the engine the text it publishes, before the push, when asked', () => {
+    const line = script.split('\n').find((l) => l.includes('WICKED_DELIVER_TEXT_OUT'))!;
+    const lines = script.split('\n');
+    expect(lines.indexOf(line)).toBeLessThan(lines.findIndex((l) => l.includes('gh pr create')));
+    const dir = execFileSync('mktemp', ['-d'], { encoding: 'utf8' }).trim();
+    const out = `${dir}/text.md`;
+    execFileSync('bash', ['-c', `TD=${dir}; TITLE='Fix sum()'; printf 'Fixes #12\\n' > "$TD/body"; WICKED_DELIVER_TEXT_OUT=${out}; ${line.trim()}`], { encoding: 'utf8' });
+    expect(execFileSync('cat', [out], { encoding: 'utf8' })).toBe('Fix sum()\n\nFixes #12\n');
+    // Unasked (an older engine), it writes nothing and never fails the delivery.
+    expect(execFileSync('bash', ['-c', `TD=${dir}; TITLE=x; unset WICKED_DELIVER_TEXT_OUT; ${line.trim()}; echo ok`], { encoding: 'utf8' }).trim()).toBe('ok');
+  });
+
   it('pushes -u and opens the PR with gh, URL as the last line', () => {
     expect(script).toContain('git push -u origin "$B"');
     // R1: bound to the repository the consent card named when the origin is github.com (empty
