@@ -3268,9 +3268,11 @@ export function registerRoutes(
     // with the fact; none is cut. The steps are not known at launch (a run may be planned into catalog steps whose ids
     // are the planner's), so step scopes decide nothing here; the def's kinds only order the list. Governed launches
     // only (a named workflow or an explicit plan); best-effort: an unreadable store launches without it.
-    const briefRules = async (workflow: string | null, kinds: string[] | null): Promise<void> => {
+    const briefRules = async (workflow: string | null): Promise<void> => {
       try {
         const read = await considerations.inForceFor(b.projectId ?? null);
+        const def = workflow === null ? null : adapter.getWorkflow(workflow);
+        const kinds = def === null ? null : def.phases.map((p) => String(p.kind ?? 'build'));
         const rules = read.source === 'unavailable' ? [] : read.rules;
         const job = { workflow, steps: null, kinds, project: b.projectId ?? null };
         const matches = await matchRulesForJob(rules, job, runtime.matchRules ?? CoreAdapter.ruleMatcher(), (m) => req.log.warn(m));
@@ -3317,14 +3319,11 @@ export function registerRoutes(
           req.log.warn(`[learnings] the memory store could not be read; launching without approved learnings: ${message(err)}`);
         }
       }
-      if (!NO_LEARNINGS_WORKFLOWS.has(b.workflow)) {
-        const def = adapter.getWorkflow(b.workflow);
-        await briefRules(b.workflow, def === null ? null : def.phases.map((p) => String(p.kind ?? 'build')));
-      }
+      if (!NO_LEARNINGS_WORKFLOWS.has(b.workflow)) await briefRules(b.workflow);
     } else if (b.plan !== undefined) {
       // (xreview r2 on S1) A launch with an explicit plan is governed like a named workflow (its steps are given, so
       // no prose planner reads the brief): its rules ride along too, an inherited block replaced.
-      await briefRules(null, null);
+      await briefRules(null);
     }
     // DES-RUNS-REVIEW-001 §3: a hand launch of the run review (`/workflow-review-recent-work`) is prepared like a
     // scheduled one: its snapshot written, repo-less, one seat, its review directory as the only write root.
