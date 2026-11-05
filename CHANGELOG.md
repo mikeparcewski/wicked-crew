@@ -347,6 +347,26 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **PM-1 against the real Atlassian v2 and GitHub MCP servers (built and tested only against fake stdio servers
+  before).** A saved Jira source answered `GET /sources/:name/trackers` with 503 "answered its sites in a shape crew
+  does not know". The v2 server answers `{"data":{"resources":[{"cloudId","url","products"}]}}` (crew read `id`), puts
+  metadata beside `data` (`context`), answers errors as `{"error":true,"message","statusCode"}` often without
+  `isError`, and answers issues with no `self`. Now: one payload reader for every PM read (the JSON text block, `data`
+  unwrapped beside metadata, an error envelope = `vendor_error` with its HTTP status and, when the vendor names them,
+  the missing scopes); an unknown shape names its structure (block types, field names, array lengths, never a value);
+  sites read `cloudId` or `id`, skip a site without Jira, and merge a site listed once per product; the 503 carries
+  `cause`; an upstream failure names its class. Site proof for Jira items: an address (`self`, `webUrl`), when
+  present, must still name the linked site (judged on the parsed URL); an item with none is admitted only on
+  Atlassian's own server (`https://mcp.atlassian.com`), only when the credential reaches that ONE site (read with
+  `getAccessibleAtlassianResources`, kept a minute), and only when no item of the answer carries an address. A token
+  that reaches several sites gets `site_unproven`, said in words. Bound `listJiraIssueComments` (key-bound, one issue
+  per answer; role-limited and JSM-internal comments withheld and counted; a page crew cuts is not the last), and
+  `atlassianUserInfo` / `getAccessibleAtlassianResources` as `structure` account metadata (the account id; the linked
+  trackers' sites only). A tracker action reads the v2 account (`accountId`), and a write the tracker refuses as data
+  is not reported done. The new bindings reach agents once the source is tested and saved again; the link picker and
+  the existing bindings need no new save. GitHub (github-mcp-server main 99d6d65): its shapes already parse; recorded
+  fixtures guard them.
+
 - **A restored registry generation re-projects its sources' structure into estate (crew#1328 item 3).** A restore
   changes a source's projection key (its descriptor and allowed views) without writing a catalog, so nothing
   re-projected it, and the visible set hid the source's estate structure until the next describe or boot. The

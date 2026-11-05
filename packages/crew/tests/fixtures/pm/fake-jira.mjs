@@ -96,6 +96,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     case 'transitionJiraIssue':
       return json({ ok: true });
     case 'addOrEditJiraIssueComment':
+      // `<log-dir>/commenterror`: the Atlassian v2 server's error answer, as data and without `isError`.
+      if (existsSync(join(dir, 'commenterror'))) return json({ error: true, message: 'addOrEditJiraIssueComment failed: 403', statusCode: 403 });
       return json({ id: 'cm-1', body: args.commentBody });
     case 'listJiraProjectIssueTypesMetadata':
       return json({ issueTypes: [{ id: '1', name: 'Task' }, { id: '2', name: 'Bug' }], total: 2 });

@@ -30,9 +30,9 @@ import { configOf, pmDescriptorHash } from '../../mcp/registry.js';
 import { mcpStateDir, type McpRegistryStore } from '../../mcp/registry-store.js';
 import { bindingInForce } from './bindings.js';
 import type { TrackerAddresses } from './addresses.js';
-import type { PmGate } from './gate-pm.js';
+import { type PmGate, projectOptsVia } from './gate-pm.js';
 import { candidatesFor, githubRef, jiraRefs, type PmRef } from './issues.js';
-import { unwrapData } from './bindings.js';
+import { jiraCategory, readPayload } from './bindings.js';
 import { linkedSetOf, type PmEntry, pmEntriesOf, type TrackerSetEntry, trackerSetOf, unitRepos } from './set.js';
 
 const V = API_PREFIX;
@@ -66,14 +66,10 @@ const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object
 const sha = (v: unknown): string => createHash('sha256').update(canonicalJson(v)).digest('hex');
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
+/** The single JSON payload of a person read, or `null` (the rule the projectors use). */
 function payload(result: Record<string, unknown>): unknown {
-  const c = result['content'];
-  if (result['isError'] === true || !Array.isArray(c) || c.length !== 1 || !isObj(c[0]) || c[0]['type'] !== 'text') return null;
-  try {
-    return unwrapData(JSON.parse(String(c[0]['text'])) as unknown);
-  } catch {
-    return null;
-  }
+  const r = readPayload(result);
+  return r.ok ? r.payload : null;
 }
 
 /** A reference as a card takes it: `PROJA-1`, `<source>:PROJA-1`, `owner/repo#42`, `#42`. */
@@ -139,7 +135,7 @@ async function plan(deps: TrackerActionDeps, runId: string, body: z.infer<typeof
     const prepared = binding.bindArgs(ref.system === 'jira' ? { cloudId: t.tenant, issueIdOrKey: key } : { method: 'get', owner, repo, issue_number: ref.number }, linked);
     if (prepared.ok) {
       const r = await pm.vendorRead(e, readTool, prepared.args, 'person');
-      const p = r.ok ? binding.project(r.result, prepared) : null;
+      const p = r.ok ? binding.project(r.result, prepared, await projectOptsVia(pm, e, r.credential)) : null;
       const v = p !== null && p.ok && p.items.length === 1 ? p.items[0]!.value : null;
       if (v !== null) {
         title = String((e.system === 'jira' ? v['summary'] : v['title']) ?? '') || null;
@@ -151,8 +147,9 @@ async function plan(deps: TrackerActionDeps, runId: string, body: z.infer<typeof
   // Who the tracker will say did it.
   const who = await pm.vendorRead(e, e.system === 'jira' ? 'atlassianUserInfo' : 'get_me', {}, 'person');
   const me = who.ok ? payload(who.result) : null;
-  const identity = isObj(me) ? String(me['login'] ?? me['name'] ?? me['displayName'] ?? me['nickname'] ?? me['account_id'] ?? '') || null : null;
-  const principal = isObj(me) ? String(me['account_id'] ?? me['id'] ?? me['login'] ?? '') || null : null;
+  // GitHub `get_me`: {login}; Atlassian v2 `atlassianUserInfo`: {accountId} (the older shape: {account_id, name}).
+  const identity = isObj(me) ? String(me['login'] ?? me['name'] ?? me['displayName'] ?? me['nickname'] ?? me['account_id'] ?? me['accountId'] ?? '') || null : null;
+  const principal = isObj(me) ? String(me['account_id'] ?? me['accountId'] ?? me['id'] ?? me['login'] ?? '') || null : null;
   // The credential the posting account was read with: the write is sent only with the same one.
   const credential = who.ok ? who.credential : null;
   // A card is offered only when crew could read what it acts on and as whom: nothing is approved blind.
@@ -179,8 +176,7 @@ async function plan(deps: TrackerActionDeps, runId: string, body: z.infer<typeof
         return { ok: false, status: 409, code: 'transition_unavailable', error: `${key} cannot move to ${body.transition} now; it can move to ${names.join(', ') || 'nothing'}` };
       }
       const to = isObj(hit['to']) ? hit['to'] : {};
-      const cat = isObj(to['statusCategory']) ? String(to['statusCategory']['key'] ?? '') : '';
-      transition = { from: state, to: String(to['name'] ?? hit['name'] ?? body.transition), mapped: { from: category, to: cat === 'new' ? 'todo' : cat === 'indeterminate' ? 'doing' : cat === 'done' ? 'done' : null } };
+      transition = { from: state, to: String(to['name'] ?? hit['name'] ?? body.transition), mapped: { from: category, to: jiraCategory(to['statusCategory']) } };
       transitionId = String(hit['id'] ?? '');
       if (transitionId === '') return { ok: false, status: 503, code: 'source_unavailable', error: `${e.name} answered a transition with no id` };
     }
@@ -226,7 +222,14 @@ async function act(deps: TrackerActionDeps, runId: string, issue: string, p: Pla
       return;
     }
     const r = await pm.vendorRead(e, tool, args, 'person', admittedFor(tool), p.credential ?? undefined);
-    results.push(r.ok && r.result['isError'] !== true ? { part, ok: true } : { part, ok: false, error: r.ok ? `the tracker refused the ${part}` : r.reason });
+    // Done only on an answer crew can read as one: an error answered as data (the Atlassian server's `{error: true,
+    // statusCode}`, often without `isError`) is a refusal, and an answer crew cannot read leaves the outcome unknown;
+    // either way, nothing after it is sent.
+    const answered = r.ok ? readPayload(r.result, e.name) : null;
+    if (!r.ok) results.push({ part, ok: false, error: r.reason });
+    else if (answered !== null && answered.ok) results.push({ part, ok: true });
+    else if (answered !== null && answered.code === 'vendor_error') results.push({ part, ok: false, error: `the tracker refused the ${part} (${answered.reason})` });
+    else results.push({ part, ok: false, error: `the tracker's answer to the ${part} could not be read, so crew cannot say whether it landed: check the issue` });
   };
   if (p.card.comment !== undefined) {
     await send('comment', e.system === 'jira' ? 'addOrEditJiraIssueComment' : 'add_issue_comment', e.system === 'jira' ? { cloudId: t.tenant, issueIdOrKey: key, commentBody: p.card.comment } : { owner, repo, issue_number: ref.number, body: p.card.comment });
