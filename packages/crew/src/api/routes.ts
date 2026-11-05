@@ -894,7 +894,14 @@ export const LaunchSchema = z.strictObject({
  *  re-runs the judge of a `judge_unavailable` gate on the same work, the step's seat not run again.
  *  The ENGINE refuses each at any other gate (a 409 naming the gate it answers) — and `rejudge`
  *  while no judge seat is eligible ({@link GateInfo.rejudge} says beforehand). */
-export const ESCALATION_ACTIONS = ['extend', 'targeted', 'accept_partial', 'accept_suggestion', 'rejudge'] as const;
+export const ESCALATION_ACTIONS = ['extend', 'targeted', 'accept_partial', 'accept_suggestion', 'rejudge', 'retry_rules'] as const;
+/** (DES-RULE-CHECK-001 S2, api-types 0.190.0) At a `rules_unchecked` gate (a steering rule no judge
+ *  ruled on): `retry_rules` (an escalation arm above) re-runs the rule check on the same work, the
+ *  step's seat not run again; `skip_rules` skips unchecked rules, each with a written reason
+ *  (`skipRules: [{id, reason}]`, required), then re-runs it. A skip is labelled on the run, the gate
+ *  and the delivery receipts. The engine refuses both at any other gate, and a skip of a rule that
+ *  is not unchecked (a broken rule denies). Skipping is the human operator's call alone. */
+export const SKIP_RULES_ACTION = 'skip_rules' as const;
 /** (core#820) A consent gate's answer token: `consent:<choice id>` approves that row of the dry-run
  *  plan (the engine refuses an id its plan does not offer); `reject` stays the decline. */
 export const CONSENT_CHOICE_ACTION = /^consent:[A-Za-z0-9_-]{1,32}$/u; // core `parse_plan` caps a choice id at 32
@@ -931,6 +938,11 @@ export const OPERATOR_JUDGMENT_ACTION = 'operator_judgment' as const;
  *  denied (it counts), or a failed floor's gate with QE behind it (it re-opens on the floor alone).
  *  Refused (409, gate left open) everywhere else and on a run that does not require QE. */
 export const SKIP_QE_ACTION = 'skip_qe' as const;
+/** (DES-RULE-CHECK-001 S2) The engine's `skip_rules` amend: `[{"id", "reason"}]`, reasons trimmed. */
+export function skipRulesAmend(skips: ReadonlyArray<{ id: string; reason: string }>): string {
+  return JSON.stringify(skips.map((s) => ({ id: s.id.trim(), reason: s.reason.trim() })));
+}
+
 /** (studio#923) The label an operator's QE skip carries on the run, every later gate and the
  *  delivery — the engine's words ("QE acceptance skipped by operator: <reason>"). */
 export const QE_SKIPPED_BY_OPERATOR_LABEL = 'QE acceptance skipped by operator' as const;
@@ -940,7 +952,7 @@ export const GateSchema = z.strictObject({
   amend: z.string().optional(),
   action: z
     .union([
-      z.enum(['approve', 'request_changes', 'reject', 'edit_plan', 'amend_intent', OPERATOR_JUDGMENT_ACTION, SKIP_QE_ACTION, ...ESCALATION_ACTIONS]),
+      z.enum(['approve', 'request_changes', 'reject', 'edit_plan', 'amend_intent', OPERATOR_JUDGMENT_ACTION, SKIP_QE_ACTION, SKIP_RULES_ACTION, ...ESCALATION_ACTIONS]),
       z.string().regex(CONSENT_CHOICE_ACTION, 'a consent choice is `consent:<choice id>`'),
     ])
     .optional(),
@@ -958,13 +970,29 @@ export const GateSchema = z.strictObject({
    *  declined. Absent = every drafted rule lands, as before. 409 `no_draft` unless the run waits at its
    *  steering-author propose gate with a readable draft; 400 with anything but a plain approve. */
   keepRules: z.array(z.string().min(1).max(256)).max(500).optional(),
+  /** (DES-RULE-CHECK-001 S2, api-types 0.190.0) With `action: 'skip_rules'`: the unchecked rules to
+   *  skip, each with the person's written reason. */
+  skipRules: z
+    .array(z.strictObject({ id: z.string().trim().min(1).max(256), reason: z.string().trim().min(1).max(2000) }))
+    .min(1)
+    .max(500)
+    .optional(),
 }).refine(
+  (b) => (b.action === SKIP_RULES_ACTION) === (b.skipRules !== undefined),
+  { path: ['skipRules'], error: 'skip_rules needs `skipRules`: [{id, reason}] for each unchecked rule you skip, each with your written reason; skipRules goes with skip_rules only' },
+).refine(
+  (b) => b.action !== SKIP_RULES_ACTION || (b.approve && b.amend === undefined && b.amendScope === undefined && b.plan === undefined),
+  { path: ['action'], error: 'skip_rules takes approve: true and no amend, amendScope or plan — the reasons ride skipRules' },
+).refine(
+  (b) => b.skipRules === undefined || new Set(b.skipRules.map((r) => r.id)).size === b.skipRules.length,
+  { path: ['skipRules'], error: 'skipRules names a rule twice' },
+).refine(
   (b) => b.keepRules === undefined || (b.approve && (b.action === undefined || b.action === 'approve') && b.plan === undefined),
   { path: ['keepRules'], error: 'keepRules goes with a plain approve (no action other than approve, no plan) of a steering-author propose gate' },
 ).refine(
   (b) => b.action === undefined
-    || (b.action === 'approve' || b.action === 'edit_plan' || b.action === 'amend_intent' || b.action === OPERATOR_JUDGMENT_ACTION || b.action === SKIP_QE_ACTION || isEscalationAction(b.action)) === b.approve,
-  { path: ['action'], error: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve, edit_plan, amend_intent, operator_judgment, skip_qe, extend, targeted, accept_partial, accept_suggestion, rejudge and consent:<id> require approve: true' },
+    || (b.action === 'approve' || b.action === 'edit_plan' || b.action === 'amend_intent' || b.action === OPERATOR_JUDGMENT_ACTION || b.action === SKIP_QE_ACTION || b.action === SKIP_RULES_ACTION || isEscalationAction(b.action)) === b.approve,
+  { path: ['action'], error: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve, edit_plan, amend_intent, operator_judgment, skip_qe, skip_rules, extend, targeted, accept_partial, accept_suggestion, rejudge, retry_rules and consent:<id> require approve: true' },
 ).refine(
   // (operator ruling 2026-10-21) The override's rationale IS its record: a blank one is a 400 here,
   // before the engine is asked.
@@ -991,7 +1019,7 @@ export const GateSchema = z.strictObject({
   { path: ['amendScope'], error: 'amend_intent takes no amendScope or plan — an intent amendment reaches every unit at or after the cursor, which is what makes it reach the evaluator' },
 ).refine(
   (b) => !isEscalationAction(b.action) || (b.amend === undefined && b.amendScope === undefined && b.plan === undefined),
-  { path: ['action'], error: 'extend, targeted, accept_partial, accept_suggestion, rejudge and consent:<id> take no amend, amendScope or plan — the engine re-runs the floor, adopts the pinned edit, re-runs the judge, or runs the chosen install as it stands' },
+  { path: ['action'], error: 'extend, targeted, accept_partial, accept_suggestion, rejudge, retry_rules and consent:<id> take no amend, amendScope or plan — the engine re-runs the floor, adopts the pinned edit, re-runs the judge or the rule check, or runs the chosen install as it stands' },
 ).refine(
   (b) => (b.action === 'edit_plan') === (b.plan !== undefined) || (b.action === undefined && b.plan !== undefined),
   { path: ['plan'], error: 'an edited plan answers a plan_approval gate: `plan` needs approve: true with `action` omitted or edit_plan, and edit_plan needs `plan`' },
@@ -3288,7 +3316,8 @@ export function registerRoutes(
         const def = workflow === null ? null : adapter.getWorkflow(workflow);
         const kinds = def === null ? null : def.phases.map((p) => String(p.kind ?? 'build'));
         const rules = read.source === 'unavailable' ? [] : read.rules;
-        const job = { workflow, steps: null, kinds, project: b.projectId ?? null };
+        // (coord, E7 rerun) The job's repository: a rule that names it (its statement or its source doc) applies.
+        const job = { workflow, steps: null, kinds, project: b.projectId ?? null, repo: b.repoRef ?? null };
         const matches = await matchRulesForJob(rules, job, runtime.matchRules ?? CoreAdapter.ruleMatcher(), (m) => req.log.warn(m));
         const briefed = withRulesBrief(input.problem, rules, matches);
         input.problem = briefed.problem;
@@ -6049,6 +6078,20 @@ export function registerRoutes(
     // (studio#923) Skipping QE acceptance is the human operator's call alone: a seat's token, a
     // standing order or any other non-human actor is refused before anything is read, and the
     // attempt is audited. The engine records WHO skipped it from the same actor (recordGateActor).
+    // (DES-RULE-CHECK-001 S2) …and so is skipping a steering rule no judge ruled on.
+    if (parsed.data.action === SKIP_RULES_ACTION && !isHumanOperator(actor)) {
+      audit.record('gate.skip_rules_refused', actor, {
+        runId: id,
+        detail: { reason: 'human_operator_only', ...(parsed.data.ord !== undefined ? { ord: parsed.data.ord } : {}) },
+      });
+      return {
+        code: 403,
+        body: {
+          error: `only a human operator can skip a steering rule (you are ${actor.kind}/${actor.trust})`,
+          code: 'human_operator_only',
+        },
+      };
+    }
     if (parsed.data.action === SKIP_QE_ACTION && !isHumanOperator(actor)) {
       audit.record('gate.skip_qe_refused', actor, {
         runId: id,
@@ -6134,7 +6177,8 @@ export function registerRoutes(
         const status = await adapter.confirmGate(
           id,
           parsed.data.approve,
-          parsed.data.amend,
+          // (DES-RULE-CHECK-001 S2) The engine takes a rule skip's reasons in `amend` as JSON.
+          parsed.data.action === SKIP_RULES_ACTION ? skipRulesAmend(parsed.data.skipRules ?? []) : parsed.data.amend,
           parsed.data.action,
           parsed.data.amendScope,
           parsed.data.plan !== undefined ? toLaunchPlan(parsed.data.plan) : undefined,
@@ -6148,6 +6192,13 @@ export function registerRoutes(
           audit.record('gate.qe_skipped', actor, {
             runId: id,
             detail: { reason: parsed.data.amend ?? '', ...(gated !== undefined ? { ord: gated.ord } : {}), status },
+          });
+        }
+        // (DES-RULE-CHECK-001 S2) Each skipped rule with its reason, on its own audit line.
+        if (parsed.data.action === SKIP_RULES_ACTION) {
+          audit.record('gate.rules_skipped', actor, {
+            runId: id,
+            detail: { skips: parsed.data.skipRules ?? [], ...(gated !== undefined ? { ord: gated.ord } : {}), status },
           });
         }
         audit.record('gate.decided', actor, {

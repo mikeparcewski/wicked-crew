@@ -2469,6 +2469,18 @@ export interface GateDecision {
      *  `operator_judgment` then applies). Refused (409, gate left open) at every other gate and on a
      *  run that does not require QE acceptance. Engine: wicked-core-ts after 0.16.3. */
     | 'skip_qe'
+    /** (api-types 0.190.0, DES-RULE-CHECK-001 S2) At a `rules_unchecked` gate (a steering rule no
+     *  judge ruled on), with `approve: true` and no `amend` / `amendScope` / `plan`: RE-RUN THE RULE
+     *  CHECK on the same work (the step's seat does not run again; every verdict whose rule and
+     *  evidence are unchanged is reused). The engine refuses it at any other gate (409). */
+    | 'retry_rules'
+    /** (api-types 0.190.0) SKIP UNCHECKED STEERING RULES, each with the person's written reason in
+     *  {@link GateDecision.skipRules} (required), `approve: true`, no `amend` / `amendScope` / `plan`;
+     *  then the check re-runs. A skipped rule's row is `skipped`, labelled with its reason on the
+     *  gate receipt and the delivery. Only a rule the gate holds as `unchecked` can be skipped (a
+     *  `broken` one denies); the human operator's call alone (a seat or standing order: 403
+     *  `human_operator_only`). Refused (409, gate left open) at any other gate. */
+    | 'skip_rules'
     /** (core#820) A `consent` gate's choice from its dry-run plan (`awaitingHuman.choices`), with
      *  `approve: true`: `consent:worker` (the default), `consent:operator`, …; `reject` declines. */
     | `consent:${string}`;
@@ -2532,6 +2544,9 @@ export interface GateDecision {
    * draft, **409** `draft_changed` when an id is not in the draft as it reads now (the gate stays open).
    */
   keepRules?: string[];
+  /** (api-types 0.190.0) With `action: 'skip_rules'` (and only with it): each unchecked rule to
+   *  skip, with the person's written reason (both non-empty, no rule twice). */
+  skipRules?: RuleSkipAnswer[];
 }
 
 /**
@@ -3300,6 +3315,47 @@ export interface AssuranceReceipt {
    *  ABSENT when every judge was the run's own (the routine case) or on an older engine. A unit
    *  receipt carries at most one; a delivery receipt lists the run's. */
   judgeFallbacks?: JudgeFallback[];
+  /** (api-types 0.190.0, DES-RULE-CHECK-001 S2) Every steering rule in force and its verdict at this
+   *  gate (the review step's rule check), or, on a delivery receipt, the worst row per rule across
+   *  the run's gates. ABSENT when no rule check ran (not a review gate, no rule store, no change, an
+   *  older engine). Deny-dominates: a `broken` row denied the gate, an `unchecked` row held it. */
+  rules?: RuleVerdict[];
+}
+
+/** (api-types 0.190.0) A steering rule's verdict: `kept` · `broken` · `n_a` (not applicable) ·
+ *  `unchecked` (no judge ruled; holds the gate) · `skipped` (the operator skipped it, with a reason;
+ *  a confirmed waiver reads `waived by instruction (…), confirmed by <who>: <reason>`) · `waived`
+ *  (the person's own instruction conflicts with the rule: holds the gate until the person confirms
+ *  it with a reason through `skip_rules`; never kept, never skipped silently). */
+export type RuleVerdictStatus = 'kept' | 'broken' | 'n_a' | 'unchecked' | 'skipped' | 'waived';
+/** How it was reached: `fact` (a recorded fact ruled it out) · `judge` (a seat distinct from the
+ *  creators ruled) · `machine` (an engine check, e.g. `check:test-fails-on-base`) · `cache` (an
+ *  earlier verdict on the same rule and evidence) · `operator` (skipped) · `none` (unchecked). */
+export type RuleVerdictHow = 'fact' | 'judge' | 'machine' | 'cache' | 'operator' | 'none';
+
+/** (api-types 0.190.0) One steering rule's row on an assurance receipt. */
+export interface RuleVerdict {
+  ruleId: string;
+  status: RuleVerdictStatus;
+  how: RuleVerdictHow;
+  /** Why, in words: the fact, the cite, the skip's reason (`skipped by <who>: <reason>`), or why nobody ruled. */
+  reason: string;
+  /** The evidence the judge or the machine check cited, when one ruled. */
+  cite?: string;
+  /** The seat that ruled. */
+  judge?: string;
+  /** SHA-256 of the rule's judged content (statement, criteria, obligations, facets). */
+  ruleKey: string;
+  /** SHA-256 of the evidence the verdict read; absent on a `fact` row. */
+  evidenceKey?: string;
+}
+
+/** (api-types 0.190.0) One skip in a `skip_rules` gate answer. */
+export interface RuleSkipAnswer {
+  /** The unchecked rule's id. */
+  id: string;
+  /** The person's written reason (labelled on the run, the gate and the delivery). */
+  reason: string;
 }
 
 /**
@@ -3626,7 +3682,10 @@ export interface GateEscalatedEvent {
    * (0.7.27) · `governance` · `same_seat_evaluator` (a `dead_seat` condition: the review ran on its
    * builder's seat — core-ts 0.7.46, EX-01) · `evaluator_error` · `judge_unavailable` (a
    * `judge_unavailable` condition; since core-ts 0.7.46 also a required judge with no distinct
-   * seat — EX-02). `""` (EMPTY) = a hook veto whose source identity was folded away
+   * seat — EX-02) · `rule_check` (a `rule_broken` condition: a steering rule the review's rule check
+   * found broken, api-types 0.190.0) · `rules_unchecked` (a `rules_unchecked` condition: a rule no
+   * judge ruled on, answered by `retry_rules` / `skip_rules`). `""` (EMPTY) = a hook veto whose
+   * source identity was folded away
    * (`actor.rs` `boundary_deny` arm with no structured denial) — a reader keys copy on
    * `(condition, denialSource)` and treats `""` beside `boundary_deny` as input governance.
    */

@@ -1044,6 +1044,35 @@ export function operatorJudgedLabel(u: { assurance?: unknown }): string | null {
   return lines.join('; ');
 }
 
+/** The gate cell with its steering-rule line beside it, when the gate checked rules. */
+function withRules(gate: string, rules: string | null): string {
+  return rules === null ? gate : `${gate} · ${rules}`;
+}
+
+/** (DES-RULE-CHECK-001 S4) `N rules checked: K kept, B broken, X not applicable` (and the unchecked
+ *  and skipped ones, each skip with its reason) for a gate whose receipt carries rule verdicts
+ *  (`assurance.rules`, api-types 0.190.0); else `null`. */
+export function rulesLabel(u: { assurance?: unknown }): string | null {
+  const rows = (u.assurance as { rules?: unknown } | null | undefined)?.rules;
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  return rulesSummaryLine(rows as Array<{ ruleId?: unknown; status?: unknown; reason?: unknown }>);
+}
+
+/** The summary line over rule rows (one wording for the PR body and the delivery). */
+export function rulesSummaryLine(rows: ReadonlyArray<{ ruleId?: unknown; status?: unknown; reason?: unknown }>): string {
+  const n = (s: string) => rows.filter((r) => r.status === s).length;
+  let line = `${rows.length} rules checked: ${n('kept')} kept, ${n('broken')} broken, ${n('n_a')} not applicable`;
+  if (n('waived') > 0) line += `, ${n('waived')} waived by instruction (to confirm)`;
+  if (n('unchecked') > 0) line += `, ${n('unchecked')} unchecked`;
+  const skipped = rows.filter((r) => r.status === 'skipped');
+  if (skipped.length > 0) {
+    line += `, ${skipped.length} skipped by operator (${skipped
+      .map((r) => `${String(r.ruleId)}: ${typeof r.reason === 'string' ? r.reason.replace(/^skipped by [^:]*:\s*/u, '') : ''}`)
+      .join('; ')})`;
+  }
+  return line;
+}
+
 /** (operator ruling 2026-10-14) The engine's disclosure line — `judge: agy (fallback; codex benched: …)` — when
  *  this phase's gate was judged by a fallback seat (`assurance.judgeFallbacks`, api-types 0.121.0); else `null`. */
 export function judgeFallbackLabel(u: { assurance?: unknown }): string | null {
@@ -1195,7 +1224,7 @@ export function factsFromRun(
         id,
         stage: u.stage,
         role: u.role ?? 'neutral',
-        gate: withJudgeFallback(operatorJudgedLabel(u) ?? gateLabel(u.gate), judgeFallbackLabel(u)),
+        gate: withRules(withJudgeFallback(operatorJudgedLabel(u) ?? gateLabel(u.gate), judgeFallbackLabel(u)), rulesLabel(u)),
         seat: seatOf(u),
         outcome: id === 'deliver' && running ? 'this PR' : (u.phase_status ?? u.status),
       };

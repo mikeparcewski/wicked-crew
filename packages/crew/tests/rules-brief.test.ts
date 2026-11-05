@@ -325,3 +325,16 @@ describe("POST /runs: a workflow launch carries the project's rules in force, ma
     }
   });
 });
+
+describe('(coord, E7 rerun) the launch hands the engine the job repository', () => {
+  it('matchRulesForJob forwards `repo`, so a rule naming the repository can apply', async () => {
+    let sent: { job?: { repo?: unknown } } = {};
+    const match = async (argsJson: string): Promise<string> => {
+      sent = JSON.parse(argsJson) as typeof sent;
+      return JSON.stringify({ matches: [{ rule_id: LEARN.id, status: 'applies', facts: [{ kind: 'repo', detail: "it names this job's repository tiny-math" }] }] });
+    };
+    const out = await matchRulesForJob([LEARN], { workflow: 'bug', steps: null, kinds: null, project: null, repo: 'tiny-math' }, match);
+    expect(sent.job?.repo).toBe('tiny-math');
+    expect(out[0]).toMatchObject({ rule_id: LEARN.id, status: 'applies' });
+  });
+});

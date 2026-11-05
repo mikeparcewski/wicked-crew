@@ -30,6 +30,7 @@ import type {
   OperatorJudgment,
   QeAcceptanceCheck,
   QeAcceptanceRefusal,
+  RuleVerdict,
   SessionView,
   WorkUnit,
 } from '../core/types.js';
@@ -203,6 +204,9 @@ export function aggregateReceipt(view: SessionView, tree: string | null): Assura
     }
   }
   if (operatorJudges.length > 0 && !ran.includes('operator_judge')) ran.push('operator_judge');
+  // (DES-RULE-CHECK-001 S4) Every steering rule's verdict across the gates, the worst row per rule
+  // (deny-dominates), as the engine's delivery receipt aggregates it; a skip keeps its reason.
+  const rules = worstRulePerRule(receipts.flatMap((r) => r.rules ?? []));
   return {
     mode: contract.mode,
     required: [...contract.required],
@@ -217,7 +221,21 @@ export function aggregateReceipt(view: SessionView, tree: string | null): Assura
     ...(councils.length > 0 ? { councils } : {}),
     ...(judgeFallbacks.length > 0 ? { judgeFallbacks } : {}),
     ...(operatorJudges.length > 0 ? { operatorJudges } : {}),
+    ...(rules.length > 0 ? { rules } : {}),
   };
+}
+
+const RULE_RANK: Record<RuleVerdict['status'], number> = { broken: 4, unchecked: 3, waived: 3, skipped: 2, kept: 1, n_a: 0 };
+
+/** (DES-RULE-CHECK-001 S4) One row per rule, the worst status winning, in first-seen order. */
+export function worstRulePerRule(rows: readonly RuleVerdict[]): RuleVerdict[] {
+  const out: RuleVerdict[] = [];
+  for (const r of rows) {
+    const i = out.findIndex((o) => o.ruleId === r.ruleId);
+    if (i < 0) out.push(r);
+    else if ((RULE_RANK[r.status] ?? 0) > (RULE_RANK[out[i]!.status] ?? 0)) out[i] = r;
+  }
+  return out;
 }
 
 /** The post-hoc delivery's assurance (EX-04): never verified, both trees named. */
