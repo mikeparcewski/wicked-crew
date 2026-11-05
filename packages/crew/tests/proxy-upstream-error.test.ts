@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer as createHttpServer, type Server } from 'node:http';
+import { gzipSync } from 'node:zlib';
 import Fastify, { type FastifyInstance } from 'fastify';
 
 import { registerInteractiveProxy } from '../src/interactive/proxy-routes.js';
@@ -28,6 +29,12 @@ beforeAll(async () => {
     if (req.url?.includes('boom500')) {
       res.writeHead(500, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: `cannot read ${DOC}`, docId: 'gen' }));
+    } else if (req.url?.includes('gzip503')) {
+      res.writeHead(503, { 'content-type': 'application/json', 'content-encoding': 'gzip' });
+      res.end(gzipSync(JSON.stringify({ error: `renderer down: ${DOC} locked`, code: 'renderer_down' })));
+    } else if (req.url?.includes('huge502')) {
+      res.writeHead(502, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: `${'x'.repeat(300 * 1024)} ${DOC}`, code: 'big' }));
     } else if (req.url?.includes('boom503')) {
       res.writeHead(503, { 'content-type': 'text/plain' });
       res.end(`renderer down: ${DOC} locked`);
@@ -64,6 +71,20 @@ describe('an upstream server error through the interactive proxy', () => {
     const res = await app.inject({ method: 'GET', url: '/api/v1/projects/default/interactive/boom503' });
     expect(res.statusCode).toBe(503);
     expect(res.body).toBe('renderer down: <path> locked');
+  });
+
+  it('(xreview r2) a compressed 503 is decoded, its path taken out, and sent uncompressed', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/v1/projects/default/interactive/gzip503', headers: { 'accept-encoding': 'gzip' } });
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['content-encoding']).toBeUndefined();
+    expect(res.json()).toEqual({ error: 'renderer down: <path> locked', code: 'renderer_down' });
+  });
+
+  it('(xreview r2) a 5xx too large to read answers the generic envelope, never a truncated prefix', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/v1/projects/default/interactive/huge502' });
+    expect(res.statusCode).toBe(502);
+    expect(res.body).not.toMatch(ABSOLUTE);
+    expect(res.json()).toMatchObject({ error: INTERNAL_ERROR_MESSAGE, code: 'upstream_error' });
   });
 
   it('a success is forwarded unchanged', async () => {

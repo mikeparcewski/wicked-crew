@@ -36,10 +36,11 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { InteractiveDocCreateRequest } from 'wicked-crew-api-types';
 import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage } from 'node:http';
+import { brotliDecompressSync, gunzipSync, inflateSync } from 'node:zlib';
 import { requestOrigin } from '../editors/csp.js';
 import { API_PREFIX } from '../api/api-prefix.js';
 import { keepFrameGuard } from '../api/frame-guard.js';
-import { sanitizeServerErrorBody } from '../api/server-error-body.js';
+import { internalErrorBody, sanitizeServerErrorBody } from '../api/server-error-body.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
 import type { ProjectSettingsStore } from '../projects/settings.js';
@@ -89,19 +90,38 @@ const UPSTREAM_ERROR_BODY_MAX = 256 * 1024;
 /**
  * crew#1359: the body a hijacked reply writes for an upstream answer (the daemon's onSend hook never sees it). A server
  * error is sanitized like the daemon's own (a 500 answers a code and a generic message, other 5xx lose file paths),
- * the original kept in the log; `headers` are adjusted to match. An encoded (compressed) body cannot be read as text:
- * a 500 still answers the generic body, another 5xx passes through as it came. Anything below 500 is unchanged.
+ * the original kept in the log; `headers` are adjusted to match. A compressed body is decoded first (gzip, deflate,
+ * br, within {@link UPSTREAM_ERROR_BODY_MAX}); a body that is too large, cannot be decoded or uses another encoding is
+ * never forwarded as it came: it answers the generic envelope with the upstream's status (xreview r2). Below 500 the
+ * body is unchanged.
  */
-function upstreamErrorBody(req: FastifyRequest, status: number, raw: Buffer, headers: Record<string, string | string[]>): Buffer {
+function upstreamErrorBody(req: FastifyRequest, status: number, raw: Buffer, overflow: boolean, headers: Record<string, string | string[]>): Buffer {
   if (status < 500) return raw;
-  const encoding = String(headers['content-encoding'] ?? '').toLowerCase();
-  const encoded = encoding !== '' && encoding !== 'identity';
-  if (encoded && status !== 500) return raw;
-  const text = encoded ? '' : raw.toString('utf8');
-  const safe = sanitizeServerErrorBody(status, text, req.id);
-  if (safe === null) return raw;
-  req.log.error({ statusCode: status, body: encoded ? `<${raw.length} encoded bytes>` : text }, '[server-error] the interactive bridge answered a server error; the detail is kept here only');
+  const encoding = String(headers['content-encoding'] ?? '').toLowerCase().trim();
+  let text: string | null = null;
+  if (!overflow) {
+    try {
+      const opts = { maxOutputLength: UPSTREAM_ERROR_BODY_MAX };
+      const decoded =
+        encoding === '' || encoding === 'identity' ? raw
+        : encoding === 'gzip' || encoding === 'x-gzip' ? gunzipSync(raw, opts)
+        : encoding === 'deflate' ? inflateSync(raw, opts)
+        : encoding === 'br' ? brotliDecompressSync(raw, opts)
+        : null;
+      text = decoded === null ? null : decoded.toString('utf8');
+    } catch {
+      text = null;
+    }
+  }
   delete headers['content-encoding'];
+  if (text === null) {
+    req.log.error({ statusCode: status, bytes: raw.length, encoding, overflow }, '[server-error] the interactive bridge answered a server error the daemon could not read; answered the generic body');
+    headers['content-type'] = 'application/json; charset=utf-8';
+    return Buffer.from(JSON.stringify({ ...internalErrorBody('', req.id), code: status === 500 ? 'internal_error' : 'upstream_error' }), 'utf8');
+  }
+  const safe = sanitizeServerErrorBody(status, text, req.id);
+  if (safe === null) return Buffer.from(text, 'utf8');
+  req.log.error({ statusCode: status, body: text }, '[server-error] the interactive bridge answered a server error; the detail is kept here only');
   if (safe.json) headers['content-type'] = 'application/json; charset=utf-8';
   return Buffer.from(safe.body, 'utf8');
 }
@@ -892,7 +912,7 @@ function forwardCreate(
             out[name] = name === 'location' && typeof value === 'string' ? rewriteLocation(value, bridge, prefix) : value;
           }
           // crew#1359: a hijacked reply skips the daemon's onSend hook, so an upstream 5xx is sanitized here.
-          const sent = upstreamErrorBody(req, status, body, out);
+          const sent = upstreamErrorBody(req, status, body, false, out);
           out['content-length'] = String(sent.length);
           const createCsp = keepFrameGuard(reply.raw, out['content-security-policy']);
           if (createCsp !== undefined) out['content-security-policy'] = createCsp;
@@ -1082,11 +1102,11 @@ function forward(
           const chunks: Buffer[] = [];
           let size = 0;
           res.on('data', (c: Buffer) => {
-            if (size < UPSTREAM_ERROR_BODY_MAX) chunks.push(c);
             size += c.length;
+            if (size <= UPSTREAM_ERROR_BODY_MAX) chunks.push(c);
           });
           res.on('end', () => {
-            const out = upstreamErrorBody(req, status, Buffer.concat(chunks), headers);
+            const out = upstreamErrorBody(req, status, Buffer.concat(chunks), size > UPSTREAM_ERROR_BODY_MAX, headers);
             delete headers['transfer-encoding'];
             headers['content-length'] = String(out.length);
             reply.raw.writeHead(status, headers);

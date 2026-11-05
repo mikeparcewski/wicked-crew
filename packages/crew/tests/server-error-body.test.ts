@@ -2,7 +2,7 @@
 // goes to the daemon log only); other 5xx bodies keep their shape with paths taken out. Over the REAL server assembly
 // (createServer's hooks and Fastify's default error handler), not a bare Fastify.
 
-import { mkdtempSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -12,6 +12,7 @@ import type { CoreAdapter } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
 import { INTERNAL_ERROR_MESSAGE, internalErrorBody, redactPaths, sanitizeServerErrorBody } from '../src/api/server-error-body.js';
 import { removeScratch } from './setup/scratch.js';
+import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 
 const STATE = '/home/someone/.wicked-crew/state/repos/app-one/graph.db';
 const ABSOLUTE = /(^|[\s"'(=])(\/(Users|home|private|var|tmp|srv)\/|[A-Za-z]:\\)/u;
@@ -32,12 +33,13 @@ beforeAll(async () => {
     listRepos: async () => [
       { id: 'unindexed', name: 'unindexed', root_path: scratch, default_branch: 'main', registered_at: 1, code_graph_db: join(scratch, 'repo-graphs', 'unindexed', 'estate.db') },
       { id: 'locked', name: 'locked', root_path: scratch, default_branch: 'main', registered_at: 1, code_graph_db: scratch },
+      { id: 'sealed', name: 'sealed', root_path: scratch, default_branch: 'main', registered_at: 1, code_graph_db: join(scratch, 'sealed', 'estate.db') },
     ],
     getCoverageReportForRepo: async () => {
       throw new Error(`storage error: unable to open database file: ${STATE}`);
     },
     getGraphKindsForRepo: async (repo: string) => {
-      if (repo === 'unindexed' || repo === 'locked') throw new Error(`storage error: unable to open database file: ${STATE}`);
+      if (repo === 'unindexed' || repo === 'locked' || repo === 'sealed') throw new Error(`storage error: unable to open database file: ${STATE}`);
       throw new Error(`storage error: disk I/O error at ${STATE}`);
     },
   } as unknown as CoreAdapter;
@@ -102,11 +104,20 @@ describe('a server error body', () => {
     }
   });
 
-  it('(xreview r1) a graph file that exists but cannot open is still a server error, not "not indexed"', async () => {
-    const res = await app.inject({ method: 'GET', url: '/api/v1/governance/graph?repo=locked' });
-    expect(res.statusCode).toBe(500);
-    expect(res.json()).toMatchObject({ error: INTERNAL_ERROR_MESSAGE, code: 'internal_error' });
-    expect(res.body).not.toMatch(ABSOLUTE);
+  it('(xreview r1/r2) a graph file that exists but cannot open, or sits under a folder that cannot be searched, is still a server error, not "not indexed"', async () => {
+    const sealed = join(scratch, 'sealed');
+    mkdirSync(sealed);
+    chmodSync(sealed, 0o000);
+    try {
+      for (const repo of ['locked', ...(process.getuid?.() === 0 ? [] : ['sealed'])]) {
+        const res = await app.inject({ method: 'GET', url: `/api/v1/governance/graph?repo=${repo}` });
+        expect(res.statusCode, repo).toBe(500);
+        expect(res.json()).toMatchObject({ error: INTERNAL_ERROR_MESSAGE, code: 'internal_error' });
+        expect(res.body).not.toMatch(ABSOLUTE);
+      }
+    } finally {
+      chmodSync(sealed, 0o755);
+    }
   });
 });
 
@@ -122,12 +133,40 @@ describe('redactPaths / internalErrorBody / sanitizeServerErrorBody', () => {
     expect(redactPaths('relative src/math.js stays')).toBe('relative src/math.js stays');
   });
 
-  it("a 500 keeps only identifiers from the route's fields (run ids, counts) and drops every free-text string, nested ones too", () => {
+  it("(xreview r2) a 500 keeps only the named structured fields (run ids, an MCP subject), never nested detail", () => {
     const body = internalErrorBody(
-      JSON.stringify({ error: `failed at ${STATE}`, message: 'm', runIds: ['r-1'], launched: 1, reason: 'engine said: disk full', ledger: { errors: [{ id: 'd1', error: `unlink ${STATE}` }] } }),
+      JSON.stringify({
+        error: `failed at ${STATE}`,
+        message: 'm',
+        runIds: ['r-1'],
+        launched: 1,
+        subject: 'mcp:estate/proposal.submit',
+        ruleIds: ['POL-1/a'],
+        reason: 'engine said: disk full',
+        ledger: { errors: [{ id: 'd1', error: 'poisoned' }] },
+        files: { [STATE]: false },
+      }),
       'r9',
     );
-    expect(body).toEqual({ runIds: ['r-1'], launched: 1, ledger: { errors: [{ id: 'd1' }] }, error: INTERNAL_ERROR_MESSAGE, code: 'internal_error', requestId: 'r9' });
+    expect(body).toEqual({
+      runIds: ['r-1'],
+      launched: 1,
+      subject: 'mcp:estate/proposal.submit',
+      ruleIds: ['POL-1/a'],
+      error: INTERNAL_ERROR_MESSAGE,
+      code: 'internal_error',
+      requestId: 'r9',
+    });
+  });
+
+  it('(xreview r2) a state home outside the usual roots is matched literally', () => {
+    const before = crewStateHome();
+    setCrewStateHome('/customer-state');
+    try {
+      expect(redactPaths('open /customer-state/repo-graphs/app/estate.db failed')).toBe('open <path> failed');
+    } finally {
+      setCrewStateHome(before);
+    }
   });
 
   it('keeps only a plain token code', () => {
@@ -142,6 +181,8 @@ describe('redactPaths / internalErrorBody / sanitizeServerErrorBody', () => {
     const win = JSON.stringify({ error: 'skills root C:\\Users\\someone\\state\\skills is not seeded' });
     expect(JSON.parse(sanitizeServerErrorBody(503, win, 'r1')!.body)).toEqual({ error: 'skills root <path> is not seeded' });
     expect(sanitizeServerErrorBody(503, JSON.stringify({ error: 'no path here' }), 'r1')).toBeNull();
+    // (xreview r2) a path in a key is taken out too
+    expect(JSON.parse(sanitizeServerErrorBody(503, JSON.stringify({ files: { [STATE]: false } }), 'r1')!.body)).toEqual({ files: { '<path>': false } });
     expect(sanitizeServerErrorBody(404, quoted, 'r1')).toBeNull();
   });
 });

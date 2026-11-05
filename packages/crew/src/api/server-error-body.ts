@@ -4,11 +4,13 @@
  * message, with the request id to find the detail in the daemon log; the detail goes to the log only.
  *
  *  - 500: `error` is a generic message and `requestId` points at the log line; `code` is the route's own code when it
- *    set a plain token one (a client may branch on it), else `internal_error`. Of the route's other fields only
- *    identifiers survive (numbers, booleans and token strings such as run ids, so a mid-fan failure still names what
- *    launched); every free-text string, nested ones included, goes to the log only (xreview r1).
+ *    set a plain token one (a client may branch on it), else `internal_error`. Of the route's other fields only the
+ *    named structured ones a client reads survive ({@link SAFE_500_FIELDS}: run ids a partial fan-out launched, an MCP
+ *    call's outcome and subject), as scalars or lists of scalars with paths taken out; everything else goes to the
+ *    log only (xreview r1/r2).
  *  - Any other 5xx keeps its body (studio branches on 501/502/503 codes and messages), with every absolute file path
- *    in its decoded strings replaced by `<path>` and the JSON serialized again (never substituted into JSON text).
+ *    in its decoded strings AND keys replaced by `<path>` and the JSON serialized again (never substituted into JSON
+ *    text). The daemon's own state home, home and temp folders are matched literally, wherever they live.
  *
  * One `onSend` hook over every route, so a route that forgets (or a thrown error that reaches Fastify's default
  * handler) is covered too. A hijacked reply bypasses `onSend`: the interactive proxy calls
@@ -17,11 +19,13 @@
 
 import { homedir, tmpdir } from 'node:os';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { crewStateHome } from '../projects/state-home.js';
 
 export const INTERNAL_ERROR_MESSAGE = 'The daemon hit an internal error. Its log has the detail (look up the requestId).';
 const CODE_TOKEN = /^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/u;
-/** A string a 500 may keep: one identifier-like token (a run id, a repo id, a status word). No space, no slash. */
-const ID_TOKEN = /^[A-Za-z0-9][A-Za-z0-9_.:@#+-]{0,127}$/u;
+/** The structured fields a 500 keeps (scalars or lists of scalars): what launched before a fan-out failed, and the
+ *  MCP call response's own fields (`McpCallResponse`). Every other field is the route's detail, kept in the log. */
+export const SAFE_500_FIELDS: ReadonlySet<string> = new Set(['runIds', 'runId', 'launched', 'outcome', 'subject', 'callId', 'ruleIds', 'denied', 'document_id', 'docId']);
 
 /**
  * The top directories of an absolute filesystem path (POSIX). A route pointer such as `/skills/publish` or
@@ -39,16 +43,22 @@ function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 }
 
-/** This host's own home and temp folders, matched literally first (a folder name with a space is still caught). */
-const OWN_ROOTS: RegExp[] = [homedir(), tmpdir()]
-  .filter((p) => p.length > 1)
-  .sort((a, b) => b.length - a.length)
-  .map((p) => new RegExp(escapeRegExp(p), 'gu'));
+/** The daemon's own state home, home and temp folders, matched literally first: a folder name with a space, or a
+ *  state home outside the usual roots, is still caught (xreview r2). Longest first, so the most specific wins. */
+function ownRoots(): string[] {
+  const roots = [homedir(), tmpdir()];
+  try {
+    roots.push(crewStateHome());
+  } catch {
+    // under a test runner with no configured state home: home and temp still apply
+  }
+  return [...new Set(roots.filter((p) => p.length > 1))].sort((a, b) => b.length - a.length);
+}
 
 /** `text` with every absolute (or home-relative) file path replaced by `<path>`. */
 export function redactPaths(text: string): string {
   let out = text;
-  for (const own of OWN_ROOTS) out = out.replace(own, '~');
+  for (const own of ownRoots()) out = out.replace(new RegExp(`${escapeRegExp(own)}(?:[\\/][^\\s"'\`<>()[\\]{},;]*)?`, 'gu'), '<path>');
   return out
     .replace(WINDOWS_PATH, '<path>')
     .replace(POSIX_PATH, '<path>')
@@ -56,48 +66,48 @@ export function redactPaths(text: string): string {
     .replace(DOT_DIR_PATH, '<path>');
 }
 
-/** Every string in `v` with its paths taken out (structure kept). */
+/** Every string in `v`, keys included, with its paths taken out (structure kept; on a key collision the first stays). */
 function scrub(v: unknown): unknown {
   if (typeof v === 'string') return redactPaths(v);
   if (Array.isArray(v)) return v.map(scrub);
-  if (v !== null && typeof v === 'object') return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, scrub(x)]));
+  if (v !== null && typeof v === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+      const key = redactPaths(k);
+      if (!(key in out)) out[key] = scrub(x);
+    }
+    return out;
+  }
   return v;
 }
 
-const DROP = Symbol('drop');
-/** Only identifiers survive a 500: numbers, booleans, null, token strings; arrays and objects of them. */
-function identifiersOnly(v: unknown): unknown {
+/** A safe field's value: a scalar, or a list of scalars, strings with paths taken out. Anything else is not kept. */
+function safeValue(v: unknown): unknown {
   if (v === null || typeof v === 'number' || typeof v === 'boolean') return v;
-  if (typeof v === 'string') return ID_TOKEN.test(v) ? v : DROP;
-  if (Array.isArray(v)) return v.map(identifiersOnly).filter((x) => x !== DROP);
-  if (typeof v === 'object') {
-    const kept = Object.entries(v as Record<string, unknown>)
-      .map(([k, x]) => [k, identifiersOnly(x)] as const)
-      .filter(([, x]) => x !== DROP);
-    return Object.fromEntries(kept);
-  }
-  return DROP;
+  if (typeof v === 'string') return redactPaths(v);
+  if (Array.isArray(v) && v.every((x) => x === null || ['string', 'number', 'boolean'].includes(typeof x))) return v.map(safeValue);
+  return undefined;
 }
-
-/** Fields a 500 never keeps from the route's body (its own message, Fastify's default fields). */
-const MESSAGE_FIELDS = new Set(['error', 'message', 'detail', 'stack', 'statusCode', 'code']);
 
 /** The body a 500 answers instead of `original` (pure; the caller logs `original`). */
 export function internalErrorBody(original: string, requestId: string): Record<string, unknown> & { error: string; code: string; requestId: string } {
   let code = 'internal_error';
-  let rest: Record<string, unknown> = {};
+  const kept: Record<string, unknown> = {};
   try {
     const parsed = JSON.parse(original) as unknown;
     if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
       const obj = parsed as Record<string, unknown>;
       const own = obj['code'];
       if (typeof own === 'string' && CODE_TOKEN.test(own)) code = own;
-      rest = identifiersOnly(Object.fromEntries(Object.entries(obj).filter(([k]) => !MESSAGE_FIELDS.has(k)))) as Record<string, unknown>;
+      for (const field of SAFE_500_FIELDS) {
+        const value = field in obj ? safeValue(obj[field]) : undefined;
+        if (value !== undefined) kept[field] = value;
+      }
     }
   } catch {
     // not JSON: the generic body stands
   }
-  return { ...rest, error: INTERNAL_ERROR_MESSAGE, code, requestId };
+  return { ...kept, error: INTERNAL_ERROR_MESSAGE, code, requestId };
 }
 
 /**

@@ -7273,14 +7273,17 @@ export function registerRoutes(
   const repoReadStatus = (msg: string): number => (/no registered repo/i.test(msg) ? 404 : 500);
   // crew#1359: a registered repo with no code graph yet is "not indexed", a 404 with a code, never a 500. Only a
   // CONFIRMED missing graph file says so (the engine resolves the path, `code_graph_db`); any other open failure (a
-  // permissions problem, a path that is a directory) stays a server error, its detail in the log (xreview r1).
+  // permissions problem, a path that is a directory) stays a server error, its detail in the log (xreview r1/r2).
   const repoNotIndexed = async (repo: string): Promise<boolean> => {
     try {
       const entry = (await adapter.listRepos()).find((r) => r.id === repo || r.name === repo);
       const db = entry?.code_graph_db;
-      return typeof db === 'string' && db !== '' && !existsSync(db);
-    } catch {
+      if (typeof db !== 'string' || db === '') return false;
+      // (xreview r2) Only ENOENT means "absent": existsSync is also false when a parent cannot be searched (EACCES).
+      await fsp.stat(db);
       return false;
+    } catch (err) {
+      return (err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
     }
   };
   const repoReadFailure = async (reply: FastifyReply, repo: string, err: unknown) => {
