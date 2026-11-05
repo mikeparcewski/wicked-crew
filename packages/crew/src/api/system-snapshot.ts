@@ -1332,7 +1332,10 @@ export function buildGovernance(g: GovernanceInput): SystemGovernanceCard[] {
   const cards: SystemGovernanceCard[] = [];
   const judges = g.clis.filter((c) => c.councilEligible).map((c) => c.cli);
   const pair = distinctJudgePair(g.clis);
-  const ok = pair !== null && g.judgeGapCount === 0;
+  // A bench lifts by itself: a pair that exists once it does is no fix for the person to make.
+  const benched = g.clis.filter((c) => c.state === 'benched');
+  const pairAfterBench = pair ?? (benched.length > 0 ? distinctJudgePair(g.clis.map((c) => (c.state === 'benched' ? { ...c, state: 'signed_in', workEligible: true, councilEligible: true } : c))) : null);
+  const ok = pairAfterBench !== null && g.judgeGapCount === 0;
   // No distinct pair while no job is held by it and some seat can judge: governed work would need
   // reduced assurance, a fix the person can make (sign in a second agent), not a block.
   cards.push({
@@ -1343,7 +1346,9 @@ export function buildGovernance(g: GovernanceInput): SystemGovernanceCard[] {
     reason:
       judges.length === 0
         ? 'no seat can judge: every gate holds for want of a judge'
-        : pair === null
+        : pair === null && pairAfterBench !== null && g.judgeGapCount === 0
+          ? `a distinct judge can be seated once ${benched.map((c) => c.cli).join(', ')} ${benched.length === 1 ? 'is' : 'are'} back from the bench; ${judges.join(', ')} can judge now`
+          : pair === null
           ? `no seat that can work has a judge distinct from it (${judges.join(', ')} can judge)`
           : g.judgeGapCount > 0
             ? `${g.judgeGapCount} run(s) have no judge distinct from their creator in their pool (${judges.join(', ')} can judge)`

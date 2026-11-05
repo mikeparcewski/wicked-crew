@@ -350,7 +350,7 @@ import {
   type RosterSeatLike,
   type RunEvidence,
 } from './system-snapshot.js';
-import { parseSeatImageStatus, probeSeatImages, SeatImageRebuilder, type SeatImageStatus } from './seat-images.js';
+import { idleClis, parseSeatImageStatus, probeSeatImages, SeatImageRebuilder, type SeatImageStatus } from './seat-images.js';
 import { RunCostCache } from './needs.js';
 import { governanceStoreFix, legacyHomeOutboxPath } from '../core/governance-store.js';
 import { UsageError, replayOutboxInto } from '../cli/governance.js';
@@ -9633,6 +9633,13 @@ export function registerRoutes(
       }
     });
   // The roster's seats (on the container floor every seat runs in an image); `null` when unreadable.
+  const rosterSeatsNow = (): RosterSeatLike[] => {
+    try {
+      return rosterWithStanding() as unknown as RosterSeatLike[];
+    } catch {
+      return [];
+    }
+  };
   const rosterSeatClis = (): string[] | null => {
     try {
       return rosterWithStanding().map((r) => String(r.key));
@@ -9781,8 +9788,10 @@ export function registerRoutes(
         probeSeatImages({
           containerFloor,
           clis: rosterSeatClis(),
-          // A seat nobody signed in needs no image yet (it is built on its first unit after a sign-in).
-          idle: roster.filter((r) => r.auth === 'signed_out' || (r.auth === undefined && r.signed_in === false)).map((r) => r.key),
+          // A CLI none of whose seats is signed in needs no image yet. Read after the image status
+          // settles, from the roster as it stands then (the broker probe refreshes sign-ins meanwhile);
+          // a CLI with any signed-in seat (`claude#2`) keeps its image.
+          idle: () => idleClis(rosterSeatsNow()),
           status: seatImageStatus,
           rebuild: () => seatImageRebuilder.current(),
         }),

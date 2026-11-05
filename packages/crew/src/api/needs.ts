@@ -514,16 +514,19 @@ export function buildNeeds(input: NeedsInput): Needs {
     });
   }
   const outSeats = input.clis.filter((c) => c.state === 'signed_out');
-  if (outSeats.length > 0) {
-    // The jobs that still need a seat: unfinished, not superseded, not an answered ask, not at the
-    // terminal gate (its work is done). A job that already has its own item (held, failed, waiting
-    // on you, no reviewer) keeps the seat in that item's words: the seat item is for the jobs that
-    // are still running on a pool with a seat gone.
-    const owned = new Set([...members.map((m) => m.runId), ...[...groups.values()].flatMap((g) => g.members.map((m) => m.runId))]);
-    const needing = input.runs.filter((r) => eligible(r.runId) && r.gate?.kind !== 'terminal' && !owned.has(r.runId));
+  // With no seat able to work at all, `cli:none` is the one cause.
+  if (anyWorker && outSeats.length > 0) {
+    // A job NEEDS a seat when its work is on it: the seat its current step runs on, or a step not yet
+    // done that is assigned to it. Pool membership is not need (a default launch's pool lists every
+    // seat but the opt-in ones, signed in or not). Exact seat keys: `pi#2` is not `pi`. The jobs:
+    // unfinished, not superseded, not an answered ask, not at the terminal gate (its work is done).
+    // A job with its own item (held, waiting on you) is counted here too: its item says why it
+    // waits, this one says the seat its next step needs is signed out.
+    const needing = input.runs.filter((r) => eligible(r.runId) && r.gate?.kind !== 'terminal');
+    const onSeat = (r: SystemRun, seat: string): boolean =>
+      r.seat === seat || (byId.get(r.runId)?.units ?? []).some((u) => u.assigned_cli === seat && (u.status === 'pending' || u.status === 'distributed'));
     for (const c of outSeats) {
-      const key = cliKeyOf(c.cli);
-      const named = needing.filter((r) => (byId.get(r.runId)?.session.clis ?? []).some((k) => k === c.cli || cliKeyOf(k) === key));
+      const named = needing.filter((r) => onSeat(r, c.cli));
       if (named.length === 0) continue;
       groups.set(`cli:out:${c.cli}`, {
         key: `cli:out:${c.cli}`,
@@ -534,8 +537,8 @@ export function buildNeeds(input: NeedsInput): Needs {
           source: 'cli',
           kind: 'slows',
           title: `${c.label} is signed out`,
-          reason: `${plural(ms.length, 'job')} you picked it for ${ms.length === 1 ? 'needs' : 'need'} it, and it can’t take ${ms.length === 1 ? 'its' : 'their'} work until it is signed in again`,
-          remedy: `Sign ${c.label} in again, or let the ${ms.length === 1 ? 'job' : 'jobs'} carry on with the other agents.`,
+          reason: `${plural(ms.length, 'job')} ${ms.length === 1 ? 'has' : 'have'} work on it, and it can’t take that work until it is signed in again`,
+          remedy: `Sign ${c.label} in again, or reassign the step to another agent.`,
           target: { kind: 'cli', cli: c.cli },
           action: c.canSignIn ? { kind: 'sign_in', label: 'Sign in' } : null,
         }),
