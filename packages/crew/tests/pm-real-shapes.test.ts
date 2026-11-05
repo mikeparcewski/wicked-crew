@@ -2,6 +2,8 @@
 // Atlassian's v2 remote MCP server and github/github-mcp-server. Each parser test fails on the PM-1 code that was
 // built against fake stdio servers only (the lane's red runs are in its ledger lines).
 
+import { createHash } from 'node:crypto';
+
 import { describe, expect, it } from 'vitest';
 
 import { atlassianSiteIdsOf, bindingFor, jiraProof, jiraSitesOf, type LinkedTracker, outlineOf, readPayload, resultOutline, vendorBindsTenant } from '../src/knowledge/trackers/bindings.js';
@@ -185,9 +187,33 @@ describe('Jira v2 issues: no `self`, the site the gate bound is the proof', () =
   it('only an Atlassian scope is repeated from an error; any other text is not', () => {
     const r = (m: string) => readPayload({ content: [{ type: 'text', text: JSON.stringify({ error: true, message: m, statusCode: 403 }) }] });
     expect(r('Insufficient scopes. Required: read:me, read:account').ok === false && (r('Insufficient scopes. Required: read:me, read:account') as { reason: string }).reason).toContain('read:me, read:account');
+    const shaped = r('Insufficient scopes. Required: read:acme-customer-x:jira');
+    expect(shaped.ok === false && shaped.reason).not.toContain('acme');
     const leak = r('Insufficient scopes. Required: customer:confidential');
     expect(leak.ok === false && leak.reason).not.toContain('confidential');
     expect(leak.ok === false && leak.reason).toContain('HTTP 403');
+  });
+  it('an address that names another issue than the one answered is refused, even on its own site', () => {
+    const { b, p } = prep('getJiraIssue', { issueIdOrKey: 'SQR-1' });
+    const at = (extra: Record<string, unknown>) => ({ content: [{ type: 'text', text: JSON.stringify({ data: { key: 'SQR-1', id: '10036', fields: {}, ...extra } }) }] });
+    expect(b.project(at({ webUrl: `${SITE_URL}/browse/SQR-1` }), p, V2)).toMatchObject({ ok: true });
+    expect(b.project(at({ webUrl: `${SITE_URL}/browse/OTHER-9` }), p, V2)).toMatchObject({ ok: false, code: 'outside_linked_set' });
+    expect(b.project(at({ self: `https://api.atlassian.com/ex/jira/${SITE_ID}/rest/api/3/issue/10036` }), p, V2)).toMatchObject({ ok: true });
+    expect(b.project(at({ self: `https://api.atlassian.com/ex/jira/${SITE_ID}/rest/api/3/issue/20001` }), p, V2)).toMatchObject({ ok: false });
+  });
+  it('an embedded comment from another site or another issue is left out of the issue', () => {
+    const { b, p } = prep('getJiraIssue', { issueIdOrKey: 'SQR-1' });
+    const c = (self: string, body: string) => ({ self, body, author: { displayName: 'P' } });
+    const r = b.project({ content: [{ type: 'text', text: JSON.stringify({ data: { key: 'SQR-1', id: '10036', fields: { comment: { comments: [
+      c(`https://api.atlassian.com/ex/jira/${SITE_ID}/rest/api/3/issue/10036/comment/1`, 'mine'),
+      c(`https://api.atlassian.com/ex/jira/${SITE_ID}/rest/api/3/issue/20001/comment/2`, 'other issue'),
+      c('https://api.atlassian.com/ex/jira/other-site/rest/api/3/issue/10036/comment/3', 'other site'),
+    ] } } } }) }] }, p, V2);
+    expect(r.ok && (r.items[0]!.value['comments'] as Array<{ body: string }>).map((x) => x.body)).toEqual(['mine']);
+  });
+  it('Jira errorMessages dominate the data beside them; a flagged error inside data keeps its status', () => {
+    expect(readPayload({ content: [{ type: 'text', text: '{"errorMessages":["x"],"issues":[{"key":"SQR-1"}]}' }] })).toMatchObject({ ok: false, code: 'vendor_error' });
+    expect(readPayload({ isError: true, content: [{ type: 'text', text: '{"data":{"error":true,"statusCode":401}}' }] })).toMatchObject({ ok: false, code: 'vendor_error', reason: expect.stringContaining('HTTP 401') });
   });
   it('an error answered as data is the vendor error, not an empty page', () => {
     const { b, p } = prep('searchJiraIssuesUsingJql', { jql: '' });
@@ -217,11 +243,15 @@ describe('listJiraIssueComments: bound to a linked key, restricted comments with
 describe('listJiraIssueComments: one issue, and a cut page is not the last', () => {
   const answer = (comments: unknown[], extra: Record<string, unknown> = {}) => ({ content: [{ type: 'text', text: JSON.stringify({ data: { comments, isLast: true, ...extra } }) }] });
   const at = (issue: string, id: number) => ({ id: String(id), self: `https://api.atlassian.com/ex/jira/${SITE_ID}/rest/api/3/issue/${issue}/comment/${id}`, body: `c${id}`, author: { displayName: 'P' } });
-  it('comments of two issues in one answer are refused; an answer naming another issue is refused', () => {
+  it('comments of two issues in one answer are refused; an answer naming another issue anywhere is refused', () => {
     const { b, p } = prep('listJiraIssueComments', { issueIdOrKey: 'SQR-1' });
     expect(b.project(answer([at('10036', 1), at('10036', 2)]), p)).toMatchObject({ ok: true });
     expect(b.project(answer([at('10036', 1), at('20001', 2)]), p)).toMatchObject({ ok: false, code: 'outside_linked_set' });
     expect(b.project(answer([at('10036', 1)], { issueKey: 'OTHER-9' }), p)).toMatchObject({ ok: false, code: 'outside_linked_set' });
+    expect(b.project(answer([at('10036', 1)], { issueKey: 'SQR-1', key: 'OTHER-9' }), p)).toMatchObject({ ok: false, code: 'outside_linked_set' });
+    expect(b.project(answer([{ ...at('10036', 1), issueId: '20001' }]), p)).toMatchObject({ ok: false, code: 'outside_linked_set' });
+    expect(b.project(answer([{ ...at('10036', 1), issueKey: 'OTHER-9' }]), p)).toMatchObject({ ok: false, code: 'outside_linked_set' });
+    expect(b.project(answer(Array.from({ length: 201 }, (_, i) => at('10036', i + 1))), p)).toMatchObject({ ok: false, code: 'unknown_shape' });
   });
   it('a page crew cut says so and is not the last, whatever the vendor said', () => {
     const { b, p } = prep('listJiraIssueComments', { issueIdOrKey: 'SQR-1' });
@@ -246,28 +276,48 @@ describe('the sites a credential reaches', () => {
     expect(atlassianSiteIdsOf([{ id: 'a' }, { id: 'a' }])).toEqual(['a']);
     expect(atlassianSiteIdsOf({ resources: [{ name: 'no id' }] })).toBeNull();
   });
-  it('the gate reads the sole site from the vendor (Atlassian\'s own server only) and keeps it a minute', async () => {
+  it('the gate reads the sole site from the vendor (Atlassian\'s own server only), with the answer\'s credential, for a minute', async () => {
     const invoked: string[] = [];
     let answer = atlassianV2.resources;
+    let clock = 1_000;
+    let secret = 'not-a-real-credential';
+    const cred = (x: string) => createHash('sha256').update(x).digest('hex');
     const gate = new PmGate({
       store: { read: async () => ({ version: 1, servers: [] }) as never },
-      secret: async () => 'not-a-real-credential',
+      secret: async () => secret,
       record: { append: async () => undefined },
       audit: { record: () => undefined },
       schedulers: { for: () => ({ admit: async () => ({ done: () => undefined }) }) } as never,
       invoke: (async (_config: unknown, _secret: unknown, tool: string) => { invoked.push(tool); return answer; }) as never,
-      now: () => 1_000,
+      now: () => clock,
     });
     const e = { ...entry('jira', ['getAccessibleAtlassianResources']), record: { ...entry('jira', ['getAccessibleAtlassianResources']).record, auth: { ref: 'keychain:wicked-mcp/jira', header: 'Authorization', prefix: 'Basic ' } } as PmEntry['record'] };
-    expect(await gate.projectOpts(e)).toEqual({ vendorBindsTenant: true, soleSite: SITE_ID });
+    const c1 = cred(secret);
+    expect(await gate.projectOpts(e, c1)).toEqual({ vendorBindsTenant: true, soleSite: SITE_ID });
     answer = { content: [{ type: 'text', text: JSON.stringify({ data: { resources: [{ cloudId: SITE_ID }, { cloudId: 'other' }] } }) }] };
-    expect(await gate.projectOpts(e)).toEqual({ vendorBindsTenant: true, soleSite: SITE_ID });
+    // Kept: within the minute, same credential.
+    expect(await gate.projectOpts(e, c1)).toEqual({ vendorBindsTenant: true, soleSite: SITE_ID });
     expect(invoked).toEqual(['getAccessibleAtlassianResources']);
-    const two = { ...e, id: 'e2' };
-    expect(await gate.projectOpts(two)).toEqual({ vendorBindsTenant: true, soleSite: null });
-    const proxy = { ...e, id: 'e3', record: { ...e.record, url: 'https://jira-proxy.example/mcp' } as PmEntry['record'] };
-    expect(await gate.projectOpts(proxy)).toEqual({ vendorBindsTenant: false, soleSite: null });
+    // Past the minute: read again, and the token now reaches two sites.
+    clock += 60_000;
+    expect(await gate.projectOpts(e, c1)).toEqual({ vendorBindsTenant: true, soleSite: null });
     expect(invoked).toHaveLength(2);
+    // The credential changed under the same reference: the cached proof is not reused, and a proof read with another
+    // credential than the answer's proves nothing.
+    answer = atlassianV2.resources;
+    clock += 1;
+    secret = 'another-credential';
+    expect(await gate.projectOpts(e, c1)).toEqual({ vendorBindsTenant: true, soleSite: null });
+    expect(await gate.projectOpts(e, cred('another-credential'))).toEqual({ vendorBindsTenant: true, soleSite: SITE_ID });
+    expect(invoked).toHaveLength(3);
+    const proxy = { ...e, id: 'e3', record: { ...e.record, url: 'https://jira-proxy.example/mcp' } as PmEntry['record'] };
+    expect(await gate.projectOpts(proxy, c1)).toEqual({ vendorBindsTenant: false, soleSite: null });
+    expect(invoked).toHaveLength(3);
+  });
+  it('two site lists, or a site whose cloudId and id disagree, prove no sole site; hosts conflict across products', () => {
+    expect(atlassianSiteIdsOf({ resources: [{ cloudId: 'a' }], sites: [{ cloudId: 'a' }, { cloudId: 'b' }] })).toBeNull();
+    expect(atlassianSiteIdsOf({ resources: [{ cloudId: 'a', id: 'b' }] })).toBeNull();
+    expect(jiraSitesOf({ resources: [{ cloudId: 'a', url: 'https://a.atlassian.net', products: [{ id: 'jira' }] }, { cloudId: 'a', url: 'https://b.atlassian.net', products: [{ id: 'confluence' }] }] })).toEqual([{ id: 'a', label: 'a.atlassian.net', host: null }]);
   });
 });
 

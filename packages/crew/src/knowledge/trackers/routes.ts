@@ -386,7 +386,7 @@ export function registerTrackerRoutes(app: FastifyInstance, deps: TrackerRouteDe
           continue;
         }
         const r = await pm.vendorRead(e, tool, prepared.args, 'person');
-        const p = r.ok ? binding.project(r.result, prepared, await projectOptsVia(pm, e)) : null;
+        const p = r.ok ? binding.project(r.result, prepared, await projectOptsVia(pm, e, r.credential)) : null;
         if (p === null || !p.ok) {
           row.error = 'unavailable';
           continue;

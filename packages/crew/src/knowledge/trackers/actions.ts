@@ -135,7 +135,7 @@ async function plan(deps: TrackerActionDeps, runId: string, body: z.infer<typeof
     const prepared = binding.bindArgs(ref.system === 'jira' ? { cloudId: t.tenant, issueIdOrKey: key } : { method: 'get', owner, repo, issue_number: ref.number }, linked);
     if (prepared.ok) {
       const r = await pm.vendorRead(e, readTool, prepared.args, 'person');
-      const p = r.ok ? binding.project(r.result, prepared, await projectOptsVia(pm, e)) : null;
+      const p = r.ok ? binding.project(r.result, prepared, await projectOptsVia(pm, e, r.credential)) : null;
       const v = p !== null && p.ok && p.items.length === 1 ? p.items[0]!.value : null;
       if (v !== null) {
         title = String((e.system === 'jira' ? v['summary'] : v['title']) ?? '') || null;
@@ -222,9 +222,14 @@ async function act(deps: TrackerActionDeps, runId: string, issue: string, p: Pla
       return;
     }
     const r = await pm.vendorRead(e, tool, args, 'person', admittedFor(tool), p.credential ?? undefined);
-    // An error answered as data (the Atlassian server's `{error: true, statusCode}`, often without `isError`) is a refusal.
+    // Done only on an answer crew can read as one: an error answered as data (the Atlassian server's `{error: true,
+    // statusCode}`, often without `isError`) is a refusal, and an answer crew cannot read leaves the outcome unknown;
+    // either way, nothing after it is sent.
     const answered = r.ok ? readPayload(r.result, e.name) : null;
-    results.push(r.ok && answered !== null && (answered.ok || answered.code !== 'vendor_error') ? { part, ok: true } : { part, ok: false, error: r.ok ? `the tracker refused the ${part}${answered !== null && !answered.ok ? ` (${answered.reason})` : ''}` : r.reason });
+    if (!r.ok) results.push({ part, ok: false, error: r.reason });
+    else if (answered !== null && answered.ok) results.push({ part, ok: true });
+    else if (answered !== null && answered.code === 'vendor_error') results.push({ part, ok: false, error: `the tracker refused the ${part} (${answered.reason})` });
+    else results.push({ part, ok: false, error: `the tracker's answer to the ${part} could not be read, so crew cannot say whether it landed: check the issue` });
   };
   if (p.card.comment !== undefined) {
     await send('comment', e.system === 'jira' ? 'addOrEditJiraIssueComment' : 'add_issue_comment', e.system === 'jira' ? { cloudId: t.tenant, issueIdOrKey: key, commentBody: p.card.comment } : { owner, repo, issue_number: ref.number, body: p.card.comment });

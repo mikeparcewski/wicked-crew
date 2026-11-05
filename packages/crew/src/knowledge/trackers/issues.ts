@@ -164,7 +164,7 @@ export async function readPmIssues(
       out.push(fail(r.ref, 'unavailable', read.reason));
       continue;
     }
-    const projected = binding.project(read.result, prepared, await projectOptsVia(pm, e));
+    const projected = binding.project(read.result, prepared, await projectOptsVia(pm, e, read.credential));
     if (!projected.ok || projected.items.length !== 1) {
       out.push(fail(r.ref, projected.ok ? 'not_found' : projected.code === 'vendor_error' ? 'not_found' : 'unavailable', projected.ok ? 'the tracker answered no such issue' : projected.reason));
       continue;

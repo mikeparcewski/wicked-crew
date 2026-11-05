@@ -127,9 +127,9 @@ export function scrubDecoded(result: Record<string, unknown>, secret: string | n
 export const SOLE_SITE_TTL_MS = 60_000;
 
 /** What a projector may lean on, through the gate when the caller holds one; anything else gets no tenant proof. */
-export async function projectOptsVia(pm: object, e: PmEntry, cls: 'unit' | 'person' = 'person'): Promise<ProjectOpts> {
+export async function projectOptsVia(pm: object, e: PmEntry, credential: string | null, cls: 'unit' | 'person' = 'person'): Promise<ProjectOpts> {
   const f = (pm as Partial<Pick<PmGate, 'projectOpts'>>).projectOpts;
-  return typeof f === 'function' ? f.call(pm, e, cls) : {};
+  return typeof f === 'function' ? f.call(pm, e, credential, cls) : {};
 }
 
 /** Why a vendor call failed, as a class (and an HTTP status when the transport saw one): never the vendor's words. */
@@ -150,7 +150,7 @@ export class PmGate {
   private readonly invoke: Invoker;
   private readonly now: () => number;
   /** entry id + descriptor -> the one site its credential reached when last read (`null`: several, or unknown). */
-  private readonly soleSites = new Map<string, { at: number; site: string | null }>();
+  private readonly soleSites = new Map<string, { at: number; site: string | null; credential: string | null }>();
 
   constructor(private readonly deps: PmGateDeps) {
     this.invoke = deps.invoke ?? invokeMcpTool;
@@ -160,22 +160,26 @@ export class PmGate {
   /**
    * What a projector may lean on for `e` ({@link ProjectOpts}): whether its server is Atlassian's own, and the one site
    * its credential reaches (read with `getAccessibleAtlassianResources`, kept {@link SOLE_SITE_TTL_MS}). Only then may
-   * an address-free Jira answer prove its site by the `cloudId` crew bound.
+   * an address-free Jira answer prove its site by the `cloudId` crew bound. `credential` is the hash of the credential
+   * the answer being judged was read with (`vendorRead`'s): the sites must have been read with the same one.
    */
-  async projectOpts(e: PmEntry, cls: 'unit' | 'person' = 'person'): Promise<ProjectOpts> {
+  async projectOpts(e: PmEntry, credential: string | null, cls: 'unit' | 'person' = 'person'): Promise<ProjectOpts> {
     if (!vendorBindsTenant(configOf(e.record), e.system)) return { vendorBindsTenant: false, soleSite: null };
     const k = `${e.id}\u0000${pmDescriptorHash(configOf(e.record))}`;
     const hit = this.soleSites.get(k);
-    if (hit !== undefined && this.now() - hit.at < SOLE_SITE_TTL_MS) return { vendorBindsTenant: true, soleSite: hit.site };
+    if (hit !== undefined && this.now() - hit.at < SOLE_SITE_TTL_MS && hit.credential === credential) return { vendorBindsTenant: true, soleSite: hit.site };
     let site: string | null = null;
+    let readWith: string | null = null;
     if (e.record.tools.some((t) => t.name === 'getAccessibleAtlassianResources' && t.present)) {
       const r = await this.vendorRead(e, 'getAccessibleAtlassianResources', {}, cls);
       const p = r.ok ? readPayload(r.result) : null;
       const ids = p !== null && p.ok ? atlassianSiteIdsOf(p.payload) : null;
+      readWith = r.ok ? r.credential : null;
       site = ids !== null && ids.length === 1 ? ids[0]! : null;
     }
-    this.soleSites.set(k, { at: this.now(), site });
-    return { vendorBindsTenant: true, soleSite: site };
+    this.soleSites.set(k, { at: this.now(), site, credential: readWith });
+    // Read with another credential than the answer's (it changed in between): no proof.
+    return { vendorBindsTenant: true, soleSite: readWith === credential ? site : null };
   }
 
   /** Every PM entry, read now. */
@@ -277,7 +281,7 @@ export class PmGate {
       return refusal(read.code, read.reason);
     }
     await this.deps.afterRead?.();
-    const projected = binding.project(read.result, prepared, await this.projectOpts(e, 'unit'));
+    const projected = binding.project(read.result, prepared, await this.projectOpts(e, read.credential, 'unit'));
     if (!projected.ok) {
       await settle(entry(projected.code));
       return refusal(projected.code, projected.reason);
