@@ -27,6 +27,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { INTERNAL_ERROR_MESSAGE } from '../src/api/server-error-body.js';
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -391,7 +392,8 @@ describe('POST /api/v1/governance/steering/import', () => {
       entries: [{ kind: 'doc', content: '# doc' }],
     });
     expect(status).toBe(500);
-    expect(body['error']).toMatch(/store handle poisoned/);
+    // (crew#1359) a 500 answers the generic message; the engine's text stays in the log.
+    expect(body['error']).toBe(INTERNAL_ERROR_MESSAGE);
     importThrows = null;
   });
 });

@@ -14,6 +14,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { INTERNAL_ERROR_MESSAGE } from '../src/api/server-error-body.js';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -303,7 +304,8 @@ describe('POST /testing/recon', () => {
       repoRefs: ['repo-alpha', 'repo-beta'],
     });
     expect(boom.status).toBe(500);
-    expect(boom.body['error']).toMatch(/campaign store exploded/);
+    // (crew#1359) a 500 answers the generic message; the engine's text stays in the log.
+    expect(boom.body['error']).toBe(INTERNAL_ERROR_MESSAGE);
 
     launchCampaignError = new Error("campaign 'recon-x' already exists");
     const dup = await post('/api/v1/testing/recon', {
@@ -424,7 +426,8 @@ describe('POST /testing/recon', () => {
       repoRefs: ['repo-alpha', 'repo-beta'],
     });
     expect(res.status).toBe(500);
-    expect(res.body['error']).toMatch(/failed on repo 'repo-beta' after 1 run\(s\) launched/);
+    // (crew#1359) a 500 answers the generic message; the engine's text stays in the log; the structured runIds still name what launched.
+    expect(res.body['error']).toBe(INTERNAL_ERROR_MESSAGE);
     expect(res.body['runIds']).toEqual([runLaunches[0]!.sessionId]);
   });
 

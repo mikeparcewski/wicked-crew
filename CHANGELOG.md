@@ -347,6 +347,14 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **A server error answers a code and a generic message; the detail stays in the daemon log (#1359).** A 500 body now
+  carries `error` (a fixed message), `code` (the route's own code token, else `internal_error`) and `requestId` (to
+  find the log line), plus any structured fields the route set, with file paths taken out; the route's own message
+  goes to the log only. Other 5xx bodies keep their code and message with any absolute file path replaced by `<path>`.
+  One `onSend` hook covers every route and Fastify's default error handler (`src/api/server-error-body.ts`).
+  `GET /governance/graph` and `GET /governance/coverage` answer a registered repository with no code graph yet as a
+  404 `not_indexed` instead of a 500.
+
 - **A restored registry generation re-projects its sources' structure into estate (crew#1328 item 3).** A restore
   changes a source's projection key (its descriptor and allowed views) without writing a catalog, so nothing
   re-projected it, and the visible set hid the source's estate structure until the next describe or boot. The
