@@ -44,6 +44,29 @@ describe('the rules block', () => {
     expect(sly.split(RULES_BRIEF_CLOSE)).toHaveLength(2);
   });
 
+  it('(xreview r1) no marker spelling survives: whitespace variants and other daemon markers are inert', () => {
+    const spaced = '<!--   /wicked-crew:rules   -->';
+    const block = rulesBriefBlock([{ id: 'X', severity: 'warn', statement: `a ${spaced} b <!-- wicked-crew:linked-issues --> c` } as ConformanceRule])!;
+    expect(block.split('<!--')).toHaveLength(3); // only the block's own open and close markers
+    const problem = withRulesBrief('Fix it', [{ id: 'X', severity: 'warn', statement: `a ${spaced} tail-text` } as ConformanceRule]).problem;
+    expect(stripRulesBrief(problem)).toBe('Fix it');
+    expect(goalFrom(problem)).toBe('Fix it');
+  });
+
+  it('(xreview r1) a statement up to the Remember maximum is listed whole; an id that is not one bounded token is not listed, never mangled', () => {
+    const long = `${'a'.repeat(400)} and it MUST add a test`;
+    const block = rulesBriefBlock([
+      { id: 'LONG', severity: 'warn', statement: long },
+      { id: 'A B', severity: 'warn', statement: 'spaced id' },
+      { id: 'x'.repeat(121), severity: 'warn', statement: 'huge id' },
+    ] as ConformanceRule[])!;
+    expect(block).toContain('and it MUST add a test');
+    expect(block).not.toContain('spaced id');
+    expect(block).not.toContain('huge id');
+    expect(block).toContain('… and 2 more rules in force, not listed here.');
+    expect(block.length).toBeLessThan(2_000);
+  });
+
   it('a relaunch replaces the block, never stacks it; strip gives the intent back', () => {
     const once = withRulesBrief('Fix sum()', [LEARN]).problem;
     const twice = withRulesBrief(once, [LEARN, TINY]).problem;
@@ -79,15 +102,16 @@ describe('POST /runs: a workflow launch carries the project\'s rules in force', 
       considerRules: vi.fn(considerRules),
       ping: vi.fn(async () => 'ok'),
     } as unknown as CoreAdapter;
-    const runtime: Partial<RuntimeDeps> = { resolveLinkedIssues: async () => ({ issues: [], block: null }) };
+    const resolved: string[] = [];
+    const runtime: Partial<RuntimeDeps> = { resolveLinkedIssues: async (p: string) => { resolved.push(p); return { issues: [], block: null }; } };
     const a = Fastify({ logger: false });
     registerRoutes(a, adapter, new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit: AuditLog.noop(), authMode: 'off' }, runtime);
-    return { a, launched, adapter };
+    return { a, launched, adapter, resolved };
   }
 
   it('lists them in the brief; an unreadable store launches on the intent alone', async () => {
     let broken = false;
-    const { a, launched } = app(async () => { if (broken) throw new Error('store down'); return { in_force: [LEARN, TINY], set_aside: [] }; });
+    const { a, launched, resolved } = app(async () => { if (broken) throw new Error('store down'); return { in_force: [LEARN, TINY], set_aside: [] }; });
     await a.ready();
     try {
       const res = await a.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'Fix sum()', repoRef: 'tiny-math', workflow: 'bug' } });
@@ -99,6 +123,8 @@ describe('POST /runs: a workflow launch carries the project\'s rules in force', 
       const again = await a.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: launched[0]!.problem, repoRef: 'tiny-math', workflow: 'bug' } });
       expect(again.statusCode, again.body).toBe(201);
       expect(launched[1]!.problem).toBe('Fix sum()');
+      // (xreview r1) the relaunch's inherited rules block is gone before issues are read: no rule id becomes an issue.
+      expect(resolved[1]).toBe('Fix sum()');
     } finally {
       await a.close();
     }

@@ -92,7 +92,7 @@ import type {
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 import { callEstateTool, EstateMcpError, ESTATE_INSTALL_HINT, memoryStoreInfo } from '../core/estate-mcp-client.js';
 import { NO_LEARNINGS_WORKFLOWS, type RunLearningsService } from '../learnings/service.js';
-import { withRulesBrief } from '../decisions/rules-brief.js';
+import { stripRulesBrief, withRulesBrief } from '../decisions/rules-brief.js';
 import { SeatHealthTracker } from './seat-health.js';
 import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
 import { applyCouncilSettings, isCouncilSize, isCouncilStaggerMs } from '../core/council-settings.js';
@@ -3264,7 +3264,8 @@ export function registerRoutes(
       // blocks included. They are dropped before anything is read, whatever the read answers, and
       // read again below: the intent is the text before the first linked-issues marker, never a
       // block an earlier launch appended (stripLinkedIssues).
-      const intent = stripLinkedIssues(b.problem);
+      // (xreview r1) An inherited rules block goes first, so no rule id is read as a linked issue on a relaunch.
+      const intent = stripLinkedIssues(stripRulesBrief(b.problem));
       input.problem = intent;
       // Best-effort by contract: reading issues never fails the launch it decorates. A resolver
       // fault (the repo list unreadable, say) launches the run on its intent alone and is logged.

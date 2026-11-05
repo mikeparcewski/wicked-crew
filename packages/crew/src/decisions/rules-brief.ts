@@ -12,32 +12,36 @@
 
 import type { ConformanceRule } from '../core/types.js';
 import { orderBySeverity, RULES_STATEMENT_CAP } from './rules-text.js';
+import { inertIssueText } from '../core/linked-issues.js';
 
 export const RULES_BRIEF_OPEN = '<!-- wicked-crew:rules -->';
 export const RULES_BRIEF_CLOSE = '<!-- /wicked-crew:rules -->';
-/** One rule line's longest statement. */
-const MAX_RULE_CHARS = 300;
+/** A statement's longest brief text: the Remember route's own maximum, so no accepted rule is cut (xreview r1). */
+const MAX_RULE_CHARS = 500;
+/** A listable id: one token of at most 120 characters (the `[rule:<id>]` citation's own bound), never mangled. */
+const LISTABLE_ID = /^[^\s<>]{1,120}$/u;
 
-/** A statement as one brief line: whitespace folded, capped, never able to open or close the block. */
+/** A statement as one brief line: whitespace folded first, then every HTML-comment opener made inert (the linked
+ *  issues' invariant), so no spelling of a daemon marker survives into the brief (xreview r1). */
 function ruleLine(r: Pick<ConformanceRule, 'id' | 'severity' | 'statement'>): string {
-  const t = r.statement.replaceAll(RULES_BRIEF_OPEN, '').replaceAll(RULES_BRIEF_CLOSE, '').replace(/\s+/gu, ' ').trim();
-  const s = t.length > MAX_RULE_CHARS ? `${t.slice(0, MAX_RULE_CHARS - 1)}…` : t;
-  const id = r.id.replaceAll(RULES_BRIEF_OPEN, '').replaceAll(RULES_BRIEF_CLOSE, '').replace(/\s+/gu, '');
-  return `- ${id} (${r.severity}): ${s}`;
+  const folded = r.statement.replace(/\s+/gu, ' ').trim();
+  const t = folded.length > MAX_RULE_CHARS ? `${folded.slice(0, MAX_RULE_CHARS - 1)}…` : folded;
+  return `- ${r.id} (${r.severity}): ${inertIssueText(t).replaceAll('-->', '--&gt;')}`;
 }
 
-/** The marked block, or `null` when no rule is in force. */
+/** The marked block, or `null` when no rule is in force. An id that is not one bounded token is not listed (it is
+ *  counted with the rest), so the block stays bounded and every listed id is the rule's own. */
 export function rulesBriefBlock(rules: ReadonlyArray<Pick<ConformanceRule, 'id' | 'severity' | 'statement'>>): string | null {
-  const ordered = orderBySeverity(rules).filter((r) => r.id.trim() !== '' && r.statement.trim() !== '');
+  const ordered = orderBySeverity(rules).filter((r) => LISTABLE_ID.test(r.id) && r.statement.trim() !== '');
   if (ordered.length === 0) return null;
   const shown = ordered.slice(0, RULES_STATEMENT_CAP);
-  const more = ordered.length - shown.length;
+  const more = rules.length - shown.length;
   return [
     RULES_BRIEF_OPEN,
     'Steering rules in force for this project. The review and QE steps check the work against each one (kept, broken',
     'or not applicable, with evidence); a broken rule fails review. The step that builds does not mark its own compliance.',
     ...shown.map(ruleLine),
-    ...(more > 0 ? [`- … and ${more} more rule${more === 1 ? '' : 's'} in force (lower severity), not listed here.`] : []),
+    ...(more > 0 ? [`- … and ${more} more rule${more === 1 ? '' : 's'} in force, not listed here.`] : []),
     RULES_BRIEF_CLOSE,
   ].join('\n');
 }
@@ -58,5 +62,5 @@ export function withRulesBrief(raw: string, rules: ReadonlyArray<Pick<Conformanc
   const problem = stripRulesBrief(raw);
   const block = rulesBriefBlock(rules);
   if (block === null) return { problem, listed: 0 };
-  return { problem: `${problem.trimEnd()}\n\n${block}`, listed: Math.min(rules.length, RULES_STATEMENT_CAP) };
+  return { problem: `${problem.trimEnd()}\n\n${block}`, listed: block.split('\n').filter((l) => l.startsWith('- ') && !l.startsWith('- … and')).length };
 }
