@@ -3,14 +3,14 @@
 // (createServer's hooks and Fastify's default error handler), not a bare Fastify.
 
 import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
-import { INTERNAL_ERROR_MESSAGE, internalErrorBody, redactPaths } from '../src/api/server-error-body.js';
+import { INTERNAL_ERROR_MESSAGE, internalErrorBody, redactPaths, sanitizeServerErrorBody } from '../src/api/server-error-body.js';
 import { removeScratch } from './setup/scratch.js';
 
 const STATE = '/home/someone/.wicked-crew/state/repos/app-one/graph.db';
@@ -28,8 +28,16 @@ beforeAll(async () => {
     onLaunch: (): (() => void) => () => undefined,
     onEvent: () => () => {},
     // The engine's own message names the store file it could not open (what the rig answered).
+    // `unindexed`: its graph file does not exist. `locked`: the file exists (here a directory) and still cannot open.
+    listRepos: async () => [
+      { id: 'unindexed', name: 'unindexed', root_path: scratch, default_branch: 'main', registered_at: 1, code_graph_db: join(scratch, 'repo-graphs', 'unindexed', 'estate.db') },
+      { id: 'locked', name: 'locked', root_path: scratch, default_branch: 'main', registered_at: 1, code_graph_db: scratch },
+    ],
+    getCoverageReportForRepo: async () => {
+      throw new Error(`storage error: unable to open database file: ${STATE}`);
+    },
     getGraphKindsForRepo: async (repo: string) => {
-      if (repo === 'unindexed') throw new Error(`storage error: unable to open database file: ${STATE}`);
+      if (repo === 'unindexed' || repo === 'locked') throw new Error(`storage error: unable to open database file: ${STATE}`);
       throw new Error(`storage error: disk I/O error at ${STATE}`);
     },
   } as unknown as CoreAdapter;
@@ -85,29 +93,55 @@ describe('a server error body', () => {
     expect(res.json()).toEqual({ error: 'source down: config at <path> unreadable; see /api/v1/sources', code: 'source_unavailable' });
   });
 
-  it('a registered repo with no code graph yet is a 404 not_indexed, not a 500', async () => {
-    const res = await app.inject({ method: 'GET', url: '/api/v1/governance/graph?repo=unindexed' });
-    expect(res.statusCode).toBe(404);
-    expect(res.json()).toMatchObject({ code: 'not_indexed' });
+  it('a registered repo with no code graph yet is a 404 not_indexed, not a 500 (graph and coverage)', async () => {
+    for (const url of ['/api/v1/governance/graph?repo=unindexed', '/api/v1/governance/coverage?repo=unindexed']) {
+      const res = await app.inject({ method: 'GET', url });
+      expect(res.statusCode, url).toBe(404);
+      expect(res.json()).toMatchObject({ code: 'not_indexed' });
+      expect(res.body).not.toMatch(ABSOLUTE);
+    }
+  });
+
+  it('(xreview r1) a graph file that exists but cannot open is still a server error, not "not indexed"', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/v1/governance/graph?repo=locked' });
+    expect(res.statusCode).toBe(500);
+    expect(res.json()).toMatchObject({ error: INTERNAL_ERROR_MESSAGE, code: 'internal_error' });
     expect(res.body).not.toMatch(ABSOLUTE);
   });
 });
 
-describe('redactPaths / internalErrorBody', () => {
-  it('takes out POSIX, home-relative and Windows paths, and leaves URLs and /api routes', () => {
+describe('redactPaths / internalErrorBody / sanitizeServerErrorBody', () => {
+  it('takes out POSIX, file:, home-relative, dot-folder and Windows paths, and leaves URLs and route pointers', () => {
     expect(redactPaths(`open ${STATE} failed`)).toBe('open <path> failed');
-    expect(redactPaths('at ~/x/y.db and D:\\a\\b.db')).toBe('at <path> and <path>');
-    expect(redactPaths('see https://example.com/a/b and POST /api/v1/governance/rules')).toBe('see https://example.com/a/b and POST /api/v1/governance/rules');
+    expect(redactPaths('at ~/x/y.db and D:\\a\\b.db and C:/Data/x/y.db')).toBe('at <path> and <path> and <path>');
+    expect(redactPaths('file:/home/someone/.wicked-crew/state/estate.db')).toBe('file:<path>');
+    expect(redactPaths('at /opt2/x/.wicked-crew/state/x.db')).toBe('at <path>');
+    expect(redactPaths(`at ${homedir()}/.wicked-crew/a.db`)).toBe('at <path>');
+    const pointers = 'see https://example.com/home/x, POST /api/v1/governance/rules, re-publish (POST /skills/publish), GET /runs/abc';
+    expect(redactPaths(pointers)).toBe(pointers);
     expect(redactPaths('relative src/math.js stays')).toBe('relative src/math.js stays');
   });
 
-  it("keeps a 500's structured fields (paths taken out) and drops its free text", () => {
-    const body = internalErrorBody(JSON.stringify({ error: `failed at ${STATE}`, message: 'm', runIds: ['r-1'], where: STATE }), 'r9');
-    expect(body).toEqual({ runIds: ['r-1'], where: '<path>', error: INTERNAL_ERROR_MESSAGE, code: 'internal_error', requestId: 'r9' });
+  it("a 500 keeps only identifiers from the route's fields (run ids, counts) and drops every free-text string, nested ones too", () => {
+    const body = internalErrorBody(
+      JSON.stringify({ error: `failed at ${STATE}`, message: 'm', runIds: ['r-1'], launched: 1, reason: 'engine said: disk full', ledger: { errors: [{ id: 'd1', error: `unlink ${STATE}` }] } }),
+      'r9',
+    );
+    expect(body).toEqual({ runIds: ['r-1'], launched: 1, ledger: { errors: [{ id: 'd1' }] }, error: INTERNAL_ERROR_MESSAGE, code: 'internal_error', requestId: 'r9' });
   });
 
   it('keeps only a plain token code', () => {
     expect(internalErrorBody(JSON.stringify({ error: 'x', code: '/etc/passwd' }), 'r1').code).toBe('internal_error');
     expect(internalErrorBody('not json', 'r1')).toEqual({ error: INTERNAL_ERROR_MESSAGE, code: 'internal_error', requestId: 'r1' });
+  });
+
+  it('(xreview r1) another 5xx is scrubbed on its decoded strings and stays valid JSON (quoted and Windows paths)', () => {
+    const quoted = JSON.stringify({ error: `open estate store at "${STATE}": unable to open database file`, code: 'store' });
+    const out = sanitizeServerErrorBody(502, quoted, 'r1')!;
+    expect(JSON.parse(out.body)).toEqual({ error: 'open estate store at "<path>": unable to open database file', code: 'store' });
+    const win = JSON.stringify({ error: 'skills root C:\\Users\\someone\\state\\skills is not seeded' });
+    expect(JSON.parse(sanitizeServerErrorBody(503, win, 'r1')!.body)).toEqual({ error: 'skills root <path> is not seeded' });
+    expect(sanitizeServerErrorBody(503, JSON.stringify({ error: 'no path here' }), 'r1')).toBeNull();
+    expect(sanitizeServerErrorBody(404, quoted, 'r1')).toBeNull();
   });
 });

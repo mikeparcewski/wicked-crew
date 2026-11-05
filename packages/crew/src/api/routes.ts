@@ -7271,15 +7271,25 @@ export function registerRoutes(
   // An unknown repo is the CALLER's error (404); a binding/parse failure is OURS (500). Don't collapse
   // them (Copilot #227). Core spells the not-found case `no registered repo '<ref>'`.
   const repoReadStatus = (msg: string): number => (/no registered repo/i.test(msg) ? 404 : 500);
-  // crew#1359: a registered repo with no code graph yet (its store file does not exist) is "not indexed", a 404 with a
-  // code, never a 500 carrying the engine's message (which names a file under the daemon's state folder).
-  const NOT_INDEXED = /unable to open database file/i;
-  const repoReadFailure = (reply: FastifyReply, err: unknown) => {
+  // crew#1359: a registered repo with no code graph yet is "not indexed", a 404 with a code, never a 500. Only a
+  // CONFIRMED missing graph file says so (the engine resolves the path, `code_graph_db`); any other open failure (a
+  // permissions problem, a path that is a directory) stays a server error, its detail in the log (xreview r1).
+  const repoNotIndexed = async (repo: string): Promise<boolean> => {
+    try {
+      const entry = (await adapter.listRepos()).find((r) => r.id === repo || r.name === repo);
+      const db = entry?.code_graph_db;
+      return typeof db === 'string' && db !== '' && !existsSync(db);
+    } catch {
+      return false;
+    }
+  };
+  const repoReadFailure = async (reply: FastifyReply, repo: string, err: unknown) => {
     const msg = message(err);
-    if (NOT_INDEXED.test(msg)) {
+    const status = repoReadStatus(msg);
+    if (status === 500 && (await repoNotIndexed(repo))) {
       return reply.code(404).send({ error: 'this repository has no code graph yet: index it first', code: 'not_indexed' });
     }
-    return reply.code(repoReadStatus(msg)).send({ error: msg });
+    return reply.code(status).send({ error: msg });
   };
 
   app.get(`${V}/governance/coverage`, async (req, reply) => {
@@ -7292,7 +7302,7 @@ export function registerRoutes(
         const report = await adapter.getCoverageReportForRepo(repo);
         return { report };
       } catch (err) {
-        return repoReadFailure(reply, err);
+        return repoReadFailure(reply, repo, err);
       }
     }
     const report = await adapter.getCoverageReport();
@@ -7312,7 +7322,7 @@ export function registerRoutes(
       const kinds = await adapter.getGraphKindsForRepo(repo);
       return { kinds };
     } catch (err) {
-      return repoReadFailure(reply, err);
+      return repoReadFailure(reply, repo, err);
     }
   });
 

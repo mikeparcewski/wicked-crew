@@ -39,6 +39,7 @@ import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage 
 import { requestOrigin } from '../editors/csp.js';
 import { API_PREFIX } from '../api/api-prefix.js';
 import { keepFrameGuard } from '../api/frame-guard.js';
+import { sanitizeServerErrorBody } from '../api/server-error-body.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
 import type { ProjectSettingsStore } from '../projects/settings.js';
@@ -82,6 +83,29 @@ function proxyValidateClisJson(clisJson: string, roster: unknown[]): string | nu
 }
 
 /** Per-hop headers that must never be forwarded across a proxy (RFC 9110 §7.6.1). */
+/** crew#1359: the most of an upstream 5xx body read for sanitizing (an error body, never a document). */
+const UPSTREAM_ERROR_BODY_MAX = 256 * 1024;
+
+/**
+ * crew#1359: the body a hijacked reply writes for an upstream answer (the daemon's onSend hook never sees it). A server
+ * error is sanitized like the daemon's own (a 500 answers a code and a generic message, other 5xx lose file paths),
+ * the original kept in the log; `headers` are adjusted to match. An encoded (compressed) body cannot be read as text:
+ * a 500 still answers the generic body, another 5xx passes through as it came. Anything below 500 is unchanged.
+ */
+function upstreamErrorBody(req: FastifyRequest, status: number, raw: Buffer, headers: Record<string, string | string[]>): Buffer {
+  if (status < 500) return raw;
+  const encoding = String(headers['content-encoding'] ?? '').toLowerCase();
+  const encoded = encoding !== '' && encoding !== 'identity';
+  if (encoded && status !== 500) return raw;
+  const text = encoded ? '' : raw.toString('utf8');
+  const safe = sanitizeServerErrorBody(status, text, req.id);
+  if (safe === null) return raw;
+  req.log.error({ statusCode: status, body: encoded ? `<${raw.length} encoded bytes>` : text }, '[server-error] the interactive bridge answered a server error; the detail is kept here only');
+  delete headers['content-encoding'];
+  if (safe.json) headers['content-type'] = 'application/json; charset=utf-8';
+  return Buffer.from(safe.body, 'utf8');
+}
+
 const HOP_BY_HOP = new Set([
   'connection',
   'keep-alive',
@@ -867,11 +891,13 @@ function forwardCreate(
             if (HOP_BY_HOP.has(name) || value === undefined || name === 'content-length') continue;
             out[name] = name === 'location' && typeof value === 'string' ? rewriteLocation(value, bridge, prefix) : value;
           }
-          out['content-length'] = String(body.length);
+          // crew#1359: a hijacked reply skips the daemon's onSend hook, so an upstream 5xx is sanitized here.
+          const sent = upstreamErrorBody(req, status, body, out);
+          out['content-length'] = String(sent.length);
           const createCsp = keepFrameGuard(reply.raw, out['content-security-policy']);
           if (createCsp !== undefined) out['content-security-policy'] = createCsp;
           reply.raw.writeHead(status, out);
-          reply.raw.end(body);
+          reply.raw.end(sent);
           resolvePromise();
         });
       },
@@ -1049,11 +1075,31 @@ function forward(
         // The daemon's clickjacking guard (frame-guard.ts) stays beside whatever policy this writes.
         const csp = keepFrameGuard(reply.raw, headers['content-security-policy']);
         if (csp !== undefined) headers['content-security-policy'] = csp;
-        reply.raw.writeHead(res.statusCode ?? 502, headers);
-        // No `pipeline` and no buffering layer: `pipe` forwards each chunk as it lands, and
-        // Node flushes it because we never set a highWaterMark barrier in between.
-        res.pipe(reply.raw);
-        res.on('end', () => resolvePromise());
+        const status = res.statusCode ?? 502;
+        if (status >= 500) {
+          // crew#1359: a hijacked reply skips the daemon's onSend hook. An upstream server error is read whole (bounded)
+          // and sanitized like the daemon's own: a 500 answers a code and a generic message, other 5xx lose file paths.
+          const chunks: Buffer[] = [];
+          let size = 0;
+          res.on('data', (c: Buffer) => {
+            if (size < UPSTREAM_ERROR_BODY_MAX) chunks.push(c);
+            size += c.length;
+          });
+          res.on('end', () => {
+            const out = upstreamErrorBody(req, status, Buffer.concat(chunks), headers);
+            delete headers['transfer-encoding'];
+            headers['content-length'] = String(out.length);
+            reply.raw.writeHead(status, headers);
+            reply.raw.end(out);
+            resolvePromise();
+          });
+        } else {
+          reply.raw.writeHead(status, headers);
+          // No `pipeline` and no buffering layer: `pipe` forwards each chunk as it lands, and
+          // Node flushes it because we never set a highWaterMark barrier in between.
+          res.pipe(reply.raw);
+          res.on('end', () => resolvePromise());
+        }
         res.on('error', (err) => {
           if (clientGone && isClientGoneError(err)) {
             req.log.info({ method: req.method, url: req.url }, 'proxy: client disconnected before upstream finished');
