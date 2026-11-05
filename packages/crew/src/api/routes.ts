@@ -9778,7 +9778,14 @@ export function registerRoutes(
         }),
         probeVault({ vault: adapter.vaultBin != null ? vaultDiagnostics(adapter.vaultBin) : null, exec: systemExec }),
         diskRow(stateHome),
-        probeSeatImages({ containerFloor, clis: rosterSeatClis(), status: seatImageStatus, rebuild: () => seatImageRebuilder.current() }),
+        probeSeatImages({
+          containerFloor,
+          clis: rosterSeatClis(),
+          // A seat nobody signed in needs no image yet (it is built on its first unit after a sign-in).
+          idle: roster.filter((r) => r.auth === 'signed_out' || (r.auth === undefined && r.signed_in === false)).map((r) => r.key),
+          status: seatImageStatus,
+          rebuild: () => seatImageRebuilder.current(),
+        }),
       ]);
 
       const [views, settings, openGates, diag, ping, rules, gatesByYou, infraProbed, reposRead] = await Promise.all([

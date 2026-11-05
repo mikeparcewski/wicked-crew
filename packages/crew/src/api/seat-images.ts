@@ -116,6 +116,10 @@ export interface SeatImagesProbeInput {
   containerFloor: boolean;
   /** The roster's seat CLIs; `null` when the roster could not be read. */
   clis: string[] | null;
+  /** Roster CLIs nobody has signed in (operator 2026-11-05: a CLI someone never set up is not a
+   *  problem). Their images are not needed until they are signed in: a missing one is said, never
+   *  degraded. */
+  idle?: readonly string[];
   /** A fresh `seat-image status --json` read. */
   status: () => Promise<SeatImageStatus | null>;
   /** The rebuild, read AFTER the status settles (a rebuild that ends during the read is seen). */
@@ -149,8 +153,12 @@ export async function probeSeatImages(input: SeatImagesProbeInput): Promise<Syst
     return infraRow('seat_images', 'unknown', 'the roster could not be read, so which seat images matter is not known', 'Re-check.', started, { rebuild }, timeoutMs);
   }
   const st = settled.value;
-  const roster = new Set(input.clis);
+  const idleSet = new Set(input.idle ?? []);
+  const roster = new Set(input.clis.filter((c) => !idleSet.has(c)));
   const seats = st.seats.filter((s) => roster.has(s.cli));
+  // Not set up: built on the first unit after a sign-in, like any missing image.
+  const idleMissing = st.seats.filter((s) => idleSet.has(s.cli) && !s.present).map((s) => s.cli);
+  const idleWords = idleMissing.length > 0 ? `; not built until signed in: ${idleMissing.join(', ')}` : '';
   const missing = seats.filter((s) => !s.present && !s.operatorImage).map((s) => s.cli);
   const operatorMissing = seats.filter((s) => !s.present && s.operatorImage).map((s) => s.cli);
   // The operator base matters only to a seat the engine builds (an operator image does not build
@@ -169,6 +177,7 @@ export async function probeSeatImages(input: SeatImagesProbeInput): Promise<Syst
     images: { base, baseRecipe: st.baseRecipe, holdSupported: st.holdSupported, floor: st.floor, seats },
     disk,
     missing,
+    idleMissing,
     unheld,
     imageGcHighPct: st.imageGcHighPct,
     rebuild,
@@ -229,7 +238,7 @@ export async function probeSeatImages(input: SeatImagesProbeInput): Promise<Syst
     }
     const n = seats.length + 1 + (base !== null ? 1 : 0);
     const heldWord = st.holdSupported ? 'present and held' : 'present (this runtime cannot hold them against image cleanup)';
-    return infraRow('seat_images', 'ok', `${n} seat image(s) ${heldWord}; ${diskWords}${rebuilding ? rebuildWords : ''}`, null, started, details, timeoutMs);
+    return infraRow('seat_images', 'ok', `${n} seat image(s) ${heldWord}; ${diskWords}${idleWords}${rebuilding ? rebuildWords : ''}`, null, started, details, timeoutMs);
   }
   const diskPressed = disk !== null && disk.usedPct >= SEAT_DISK_WARN_PCT;
   // Every image the seats use is there and held: only then do they survive the cleanup.
@@ -253,7 +262,7 @@ export async function probeSeatImages(input: SeatImagesProbeInput): Promise<Syst
           : '';
   // A pressed disk comes first: building onto it makes it worse.
   const remedy = diskPressed ? `${freeDisk}${fix !== '' ? ` Then: ${fix}` : ''}` : fix || 'Re-check.';
-  return infraRow('seat_images', state, `${problems.join('; ')}${rebuildWords}`, remedy, started, details, timeoutMs);
+  return infraRow('seat_images', state, `${problems.join('; ')}${idleWords}${rebuildWords}`, remedy, started, details, timeoutMs);
 }
 
 /** A running rebuild: `onLine` per output line; `started` settles once the engine process exists

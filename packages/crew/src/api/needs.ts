@@ -67,6 +67,23 @@ const JUDGE_DENIAL = /distinct[_ ]evaluator|no distinct judge|could not be judge
 /** A dead-seat denial: every eligible seat failed the unit. */
 const DEAD_SEAT = /dead seat|every eligible seat has (now )?failed/i;
 
+/** A seat's CLI identity: `codex#2` is a second codex seat, not a distinct judge for codex work. */
+export const cliKeyOf = (seat: string): string => seat.split('#', 1)[0] ?? seat;
+
+/** THE SEAT-POOL RULE (evaluator ≠ creator): some seat that can work, and a seat that can judge it
+ *  distinct from it — or `null` when none (fewer than two distinct CLIs can take part). */
+export function distinctJudgePair(clis: readonly SystemCli[]): { creator: string; judge: string } | null {
+  for (const c of clis) {
+    if (!c.workEligible || c.state === 'signed_out' || c.state === 'benched') continue;
+    const j = clis.find((x) => x.councilEligible && cliKeyOf(x.cli) !== cliKeyOf(c.cli));
+    if (j !== undefined) return { creator: c.cli, judge: j.cli };
+  }
+  return null;
+}
+
+/** The headline for "too few signed-in seats": what the person does about it, in one line. */
+export const SECOND_AGENT_TITLE = 'Sign in a second agent so a different one can review';
+
 export interface RunCost {
   costUsd: number | null;
   tokens: { input: number; output: number } | null;
@@ -466,6 +483,64 @@ export function buildNeeds(input: NeedsInput): Needs {
         action: input.clis.some((c) => c.canSignIn) ? { kind: 'sign_in', label: 'Sign in' } : null,
       }),
     });
+  }
+
+  // Seats are a fix the person can make only when the work needs them (operator 2026-11-05: a CLI
+  // someone never set up is not yellow). So a signed-out seat counts only when it is
+  //  - the reason no second agent can review (fewer than two distinct seats can take part), or
+  //  - named in the pool of a job that still needs seats (its explicit pick, not the default roster).
+  // Every other signed-out CLI is optional, said quietly by the skin, never an item.
+  // Fewer than two distinct CLIs signed in (a second seat of one CLI is not a second agent; a benched
+  // one is still signed in, and its bench lifts by itself). A job already held for want of a reviewer
+  // says it in its own item: one cause, one item.
+  const signedKeys = [...new Set(input.clis.filter((c) => c.state === 'signed_in' || c.state === 'benched').map((c) => cliKeyOf(c.cli)))];
+  if (anyWorker && signedKeys.length < 2 && distinctJudgePair(input.clis) === null && !input.gaps.some((g) => eligible(g.run.runId))) {
+    const only = [...new Set(input.clis.filter((c) => c.workEligible && c.state === 'signed_in').map((c) => cliKeyOf(c.cli)))];
+    const signable = input.clis.find((c) => c.canSignIn && c.state === 'signed_out' && !only.includes(cliKeyOf(c.cli)));
+    groups.set('cli:one-reviewer', {
+      key: 'cli:one-reviewer',
+      members: [],
+      build: () => ({
+        id: 'cli:one-reviewer',
+        severity: 'yellow',
+        source: 'cli',
+        kind: 'slows',
+        title: SECOND_AGENT_TITLE,
+        reason: `${only.length === 1 ? `Only ${only[0]} is signed in` : 'Only one agent is signed in'}, so no different agent can review its work: governed jobs would need reduced assurance`,
+        remedy: 'Sign in another agent on the Agents page.',
+        target: { kind: 'cli', cli: (signable ?? input.clis[0]!).cli },
+        action: signable !== undefined ? { kind: 'sign_in', label: 'Sign in' } : null,
+      }),
+    });
+  }
+  const outSeats = input.clis.filter((c) => c.state === 'signed_out');
+  if (outSeats.length > 0) {
+    // The jobs that still need a seat: unfinished, not superseded, not an answered ask, not at the
+    // terminal gate (its work is done). A job that already has its own item (held, failed, waiting
+    // on you, no reviewer) keeps the seat in that item's words: the seat item is for the jobs that
+    // are still running on a pool with a seat gone.
+    const owned = new Set([...members.map((m) => m.runId), ...[...groups.values()].flatMap((g) => g.members.map((m) => m.runId))]);
+    const needing = input.runs.filter((r) => eligible(r.runId) && r.gate?.kind !== 'terminal' && !owned.has(r.runId));
+    for (const c of outSeats) {
+      const key = cliKeyOf(c.cli);
+      const named = needing.filter((r) => (byId.get(r.runId)?.session.clis ?? []).some((k) => k === c.cli || cliKeyOf(k) === key));
+      if (named.length === 0) continue;
+      groups.set(`cli:out:${c.cli}`, {
+        key: `cli:out:${c.cli}`,
+        members: named.map((r) => ({ runId: r.runId, view: byId.get(r.runId), run: r, severity: 'yellow' as const, waitedMs: null })),
+        build: (ms) => ({
+          id: `cli:out:${c.cli}`,
+          severity: 'yellow',
+          source: 'cli',
+          kind: 'slows',
+          title: `${c.label} is signed out`,
+          reason: `${plural(ms.length, 'job')} you picked it for ${ms.length === 1 ? 'needs' : 'need'} it, and it can’t take ${ms.length === 1 ? 'its' : 'their'} work until it is signed in again`,
+          remedy: `Sign ${c.label} in again, or let the ${ms.length === 1 ? 'job' : 'jobs'} carry on with the other agents.`,
+          target: { kind: 'cli', cli: c.cli },
+          action: c.canSignIn ? { kind: 'sign_in', label: 'Sign in' } : null,
+        }),
+      });
+    }
   }
 
   const items: SystemAttentionItem[] = [];
