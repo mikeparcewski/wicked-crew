@@ -17,7 +17,7 @@ import type { McpUpstreamConfig } from '../../mcp/probe.js';
 import { addressPolicyOf, type AddressPolicy, NO_CONFIRMATION } from '../../sources/dialer.js';
 import { sourceDescriptorHash } from '../../sources/kinds.js';
 import type { SourceCatalogStore, StoredDescription } from '../../sources/store.js';
-import { effectiveDisclosure, entrySecretRefs } from '../registry/entry.js';
+import { effectiveDisclosure, entrySecretRefs, hasPmMarker, pmOf } from '../registry/entry.js';
 import { agentAccessOf, type DisclosureClass, type SourceAgentAccess } from './access.js';
 
 /** A tool a gated source serves, with its reviewed disclosure class (§5.1). */
@@ -149,7 +149,8 @@ export async function isGatedSource(store: Pick<McpRegistryStore, 'read'>, serve
   const r = normalizeRegistryFile(await store.read()).servers.find((s) => s.name === server);
   if (r === undefined) return false;
   const c = configOf(r);
-  return (c.kind === 'sql' && c.sql != null) || (r.kind === 'toolbox-source' && r.runtime === 'toolbox');
+  // (DES-PM-001 §3.1) A PM entry is the gate's too: its tools reach a unit only through their bindings.
+  return (c.kind === 'sql' && c.sql != null) || (r.kind === 'toolbox-source' && r.runtime === 'toolbox') || hasPmMarker(r);
 }
 
 /** The agent controls of `name`, before and after `patch`, written inside one registry mutation (§7.1). */
@@ -162,7 +163,7 @@ export async function setAgentAccess(
   return store.mutate((file) => {
     const s = file.servers.find((x) => x.name === name);
     if (s === undefined) return { error: 'unknown_source' as const };
-    if (!((s.kind === 'sql' && s.sql !== undefined) || s.kind === 'toolbox-source')) return { error: 'not_a_source' as const };
+    if (!((s.kind === 'sql' && s.sql !== undefined) || s.kind === 'toolbox-source' || pmOf(s) !== null)) return { error: 'not_a_source' as const };
     const before = agentAccessOf(s);
     const see = patch.see ?? before.see;
     if (patch.query === true && !see) return { error: 'see_off' as const };

@@ -55,6 +55,8 @@ import { admitPg, limitRewrite, recheckPg } from './pg.js';
 import type { SourceAgentQueryEntry, SourceReadLog } from './record.js';
 import { type CallerClass, DEFAULT_LIMITS, GateBusyError, GateSchedulers, type LeaseEnd, type RemoteCheck, type SchedulerLimits } from './scheduler.js';
 import { type GateSource, gateSources, isGatedSource } from './sources.js';
+import { PmGate } from '../trackers/gate-pm.js';
+import type { Invoker } from '../../mcp/invoke.js';
 
 /** What the driver holds at most while reading a unit's rows (approximate), before the exact 64 KB cap. */
 export const UNIT_READ_BYTES = 256 * 1024;
@@ -65,6 +67,8 @@ export const UNIT_LIST_MAX = 50;
 export interface GateUnitScope {
   unit: { runId: string; ord: number; attempt: number; phase: string; seat: string };
   projectId: string | null;
+  /** (DES-PM-001 §3.2) The run's own repo, as the engine bound it; absent/`null` = none. */
+  repoId?: string | null;
 }
 
 /** What the gate answered a unit: data for the agent (`isError`: the tool refused, as data), or a refusal the broker records. */
@@ -119,6 +123,10 @@ export interface DataGateDeps {
   afterRead?: () => Promise<void>;
   /** TESTS ONLY: sees each text the native adapter runs. */
   onText?: (text: string) => void;
+  /** (DES-PM-001 §3.2) A project's live `crew.repo` members (the engine's); absent = a unit's own repo only. */
+  members?: (projectId: string) => Promise<string[]>;
+  /** (DES-PM-001) How a PM entry's tool is called; production: the broker's MCP invoker. */
+  pmInvoke?: Invoker;
 }
 
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -166,9 +174,25 @@ export class DataGate {
   /** The Toolbox processes whose source had no earlier work left running when they first served (no-deadline sources). */
   private readonly reconciled = new WeakSet<ToolboxProcess>();
 
+  /** (DES-PM-001 §3.1) The PM half: tracker sets, bindings and response projectors. */
+  readonly pm: PmGate;
+
   constructor(private readonly deps: DataGateDeps) {
     this.now = deps.now ?? Date.now;
     this.schedulers = new GateSchedulers(this.now);
+    this.pm = new PmGate({
+      store: deps.store,
+      secret: deps.secret,
+      record: deps.record,
+      audit: deps.audit,
+      schedulers: this.schedulers,
+      ...(deps.members !== undefined ? { members: deps.members } : {}),
+      ...(deps.pmInvoke !== undefined ? { invoke: deps.pmInvoke } : {}),
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+      ...(deps.log !== undefined ? { log: deps.log } : {}),
+      ...(deps.deadlineMs !== undefined ? { deadlineMs: deps.deadlineMs } : {}),
+      ...(deps.afterRead !== undefined ? { afterRead: deps.afterRead } : {}),
+    });
   }
 
   private get deadline(): number {
@@ -210,8 +234,12 @@ export class DataGate {
       if (msg.startsWith('invalid_token') || msg.startsWith('bad_request')) throw new GateTokenError(msg);
       throw err;
     }
-    const parsed = JSON.parse(raw) as { unit: GateUnitScope['unit']; projectId?: unknown };
-    return { unit: parsed.unit, projectId: typeof parsed.projectId === 'string' && parsed.projectId.trim() !== '' ? parsed.projectId : null };
+    const parsed = JSON.parse(raw) as { unit: GateUnitScope['unit']; projectId?: unknown; repoId?: unknown };
+    return {
+      unit: parsed.unit,
+      projectId: typeof parsed.projectId === 'string' && parsed.projectId.trim() !== '' ? parsed.projectId : null,
+      repoId: typeof parsed.repoId === 'string' && parsed.repoId.trim() !== '' ? parsed.repoId : null,
+    };
   }
 
   /**
@@ -257,9 +285,12 @@ export class DataGate {
     return out;
   }
 
-  /** The gated tools a unit in `projectId` may use: structure tools of sources it may see, rows tools of those it may query. */
-  async reach(projectId: string | null): Promise<GateListedTool[]> {
-    const out: GateListedTool[] = [];
+  /**
+   * The gated tools a unit in `projectId` may use: structure tools of sources it may see, rows tools of those it may
+   * query, and (DES-PM-001 §3.1) the bound tools of each PM source whose linked set for the unit is not empty.
+   */
+  async reach(projectId: string | null, repoId: string | null = null): Promise<GateListedTool[]> {
+    const out: GateListedTool[] = await this.pm.reach({ projectId, repoId });
     for (const s of (await this.sources()).sort((a, b) => a.name.localeCompare(b.name))) {
       for (const t of s.tools) {
         const need = neededFor(t.disclosure);
@@ -273,6 +304,9 @@ export class DataGate {
   // ── A unit's call ────────────────────────────────────────────────────────────────────────────────
 
   async unitCall(scope: GateUnitScope, server: string, tool: string, args: Record<string, unknown>, callId: string): Promise<GateUnitResult> {
+    // (DES-PM-001 §3.1) A PM entry's tools: bindings, the unit's tracker set, the response projector.
+    const pmEntry = (await this.pm.entries()).find((e) => e.name === server);
+    if (pmEntry !== undefined) return this.pm.unitCall(scope, pmEntry, tool, args, callId);
     const s = (await this.sources()).find((x) => x.name === server);
     // A hidden or unknown source is the same answer (no oracle).
     if (s === undefined || !agentMay(s.access, s, scope.projectId, 'see')) return refusal('unknown_source', 'no data source of that name is available to this step: list the tools with the shim');

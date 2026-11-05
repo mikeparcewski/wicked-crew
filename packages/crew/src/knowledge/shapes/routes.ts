@@ -8,6 +8,7 @@
  * person's source through the `person` context; the map is the person's full view of every source and repo).
  */
 
+import { type MapTracker, withTrackers } from '../trackers/map.js';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 
 import { API_PREFIX } from '../../api/api-prefix.js';
@@ -44,6 +45,10 @@ export interface ShapeRouteDeps {
   deadlineMs?: number;
   /** TESTS: the whole profile's time (production: {@link PROFILE_BUDGET_MS}). */
   budgetMs?: number;
+  /** (DES-PM-001 §3.4) Every linked tracker estate may hold, for the map; absent = no trackers drawn. */
+  trackers?: () => Promise<MapTracker[]>;
+  /** (DES-PM-001 §3.4) The studio projects, for the labels of `project:` ends. */
+  projects?: () => Promise<Array<{ id: string; name: string }>>;
 }
 
 function isHumanOperator(actor: Actor): boolean {
@@ -262,7 +267,11 @@ export function registerShapeRoutes(app: FastifyInstance, deps: ShapeRouteDeps):
         return reply.code(503).send({ error: 'the repositories could not be read', code: 'repos_unavailable' });
       }
       try {
-        return await buildKnowledgeMap(deps.estate, sources, repos);
+        const map = await buildKnowledgeMap(deps.estate, sources, repos);
+        // DES-PM-001 §3.4: the trackers, their tracked_in links and the issues runs address.
+        if (deps.trackers === undefined) return map;
+        const [trackers, projects] = await Promise.all([deps.trackers().catch(() => []), (deps.projects?.() ?? Promise.resolve([])).catch(() => [])]);
+        return await withTrackers(deps.estate, map, trackers, projects, [...sources.map((s) => `source:${s.id}`), ...repos.map((r) => `repo:${r}`)]);
       } catch (err) {
         return reply.code(502).send({ error: `estate could not be read: ${capped(err)}`, code: 'estate_unavailable' });
       }

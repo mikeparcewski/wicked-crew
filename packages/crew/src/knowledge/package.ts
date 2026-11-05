@@ -24,6 +24,7 @@ import type { SqlCatalog } from '../sources/catalog/types.js';
 import { agentMay } from './gate/access.js';
 import { agentStructure } from './gate/gate.js';
 import type { GateSource } from './gate/sources.js';
+import type { TrackerSetEntry } from './trackers/set.js';
 
 /** The whole package's JSON, at most, in UTF-8 bytes (Ask's projection bound, DES-APPS-001 §5.4). */
 export const KNOWLEDGE_PACKAGE_MAX_BYTES = 48 * 1024;
@@ -60,15 +61,31 @@ export interface PackageSource {
   note?: string;
 }
 
+/**
+ * (DES-PM-001 §3.2) One tracker of the unit's tracker set: its PM source, its key, the vendor's label (untrusted text,
+ * inside the package's data fence) and how it is linked (to the project, or through a named repo).
+ */
+export interface PackageTracker {
+  source: string;
+  system: string;
+  key: string;
+  label: string;
+  via: Array<{ kind: 'project' } | { kind: 'repo'; id: string }>;
+}
+
 export interface KnowledgePackage {
   package: typeof KNOWLEDGE_PACKAGE;
   projectId: string | null;
   sources: PackageSource[];
+  /** (DES-PM-001 §3.2) The tracker set: present when the unit has one. */
+  trackers?: PackageTracker[];
 }
 
 /** What the package reads: the gate's view of the registry (one read, the switches as stored now). */
 export interface KnowledgePackageDeps {
   sources: () => Promise<GateSource[]>;
+  /** (DES-PM-001 §3.2) The unit's tracker set T(u), read now; absent = no trackers in the package. */
+  trackers?: (scope: { projectId: string | null; repoId: string | null }) => Promise<TrackerSetEntry[]>;
 }
 
 /** The structure of a described source, as the package carries it: the agent's projection with no row estimate. */
@@ -93,7 +110,7 @@ function structureOf(s: GateSource): NonNullable<PackageSource['structure']> {
  * The package for a project's agents (module doc). `projectId: null` (a chat or run in no project) reaches only
  * sources set to every project, as the gate decides for a unit in no project.
  */
-export async function knowledgePackageFor(ctx: { projectId: string | null }, deps: KnowledgePackageDeps): Promise<KnowledgePackage> {
+export async function knowledgePackageFor(ctx: { projectId: string | null; repoId?: string | null }, deps: KnowledgePackageDeps): Promise<KnowledgePackage> {
   const sources: PackageSource[] = [];
   for (const s of [...(await deps.sources())].sort((a, b) => a.name.localeCompare(b.name))) {
     if (!agentMay(s.access, s, ctx.projectId, 'see')) continue;
@@ -112,7 +129,12 @@ export async function knowledgePackageFor(ctx: { projectId: string | null }, dep
       sources.push({ ...base, note: 'its structure could not be read' });
     }
   }
-  return { package: KNOWLEDGE_PACKAGE, projectId: ctx.projectId, sources };
+  const set = deps.trackers === undefined ? [] : await deps.trackers({ projectId: ctx.projectId, repoId: ctx.repoId ?? null }).catch(() => []);
+  // Bounded so the trackers alone always fit the package: 50 trackers, each with at most 8 ways it is linked.
+  const trackers: PackageTracker[] = set.slice(0, 50).map((t) => ({ source: t.source, system: t.system, key: t.key, label: t.label, via: t.via.slice(0, 8).map((v) => ({ ...v })) }));
+  // And by their serialized bytes (repo ids can be long): at most 16 KiB, the rest left out from the end.
+  while (trackers.length > 0 && Buffer.byteLength(JSON.stringify(trackers), 'utf8') > 16 * 1024) trackers.pop();
+  return { package: KNOWLEDGE_PACKAGE, projectId: ctx.projectId, sources, ...(trackers.length > 0 ? { trackers } : {}) };
 }
 
 /**
@@ -122,9 +144,11 @@ export async function knowledgePackageFor(ctx: { projectId: string | null }, dep
  */
 export function packageJson(pkg: KnowledgePackage, maxBytes: number = KNOWLEDGE_PACKAGE_MAX_BYTES): string {
   const listed: PackageSource[] = [];
-  const empty = JSON.stringify({ package: pkg.package, projectId: pkg.projectId, sources: [], sourcesNotListed: pkg.sources.length });
+  // (DES-PM-001) The tracker set rides first: it is small (keys and labels), and it says what the issues tools reach.
+  const trackers = pkg.trackers !== undefined && pkg.trackers.length > 0 ? { trackers: pkg.trackers.slice(0, 50) } : {};
+  const empty = JSON.stringify({ package: pkg.package, projectId: pkg.projectId, ...trackers, sources: [], sourcesNotListed: pkg.sources.length });
   if (Buffer.byteLength(empty, 'utf8') > maxBytes) throw new Error(`a knowledge package needs at least ${Buffer.byteLength(empty, 'utf8')} bytes (bound ${maxBytes})`);
-  const render = (): string => JSON.stringify({ package: pkg.package, projectId: pkg.projectId, sources: listed, sourcesNotListed: pkg.sources.length - listed.length });
+  const render = (): string => JSON.stringify({ package: pkg.package, projectId: pkg.projectId, ...trackers, sources: listed, sourcesNotListed: pkg.sources.length - listed.length });
   // Each candidate is checked with the count the final rendering would carry if nothing more were listed; listing
   // more only lowers that count, so the final rendering fits whenever the last check did.
   const fits = (): boolean => Buffer.byteLength(render(), 'utf8') <= maxBytes;
@@ -164,8 +188,12 @@ export function visibleDeps(
   repos: readonly string[],
   /** The {@link projectionKey} estate holds per source id (the projector's acknowledgements); absent = trust the stored description. */
   projected?: (sourceId: string) => string | null,
+  /** (DES-PM-001 §3.4) The unit's trackers (T(u)) whose projection estate has taken: each is `source:<tracker id>`, and the project joins as `project:<id>`. */
+  trackers: readonly string[] = [],
 ): string[] {
   const out = new Set<string>();
+  for (const t of trackers) if (typeof t === 'string' && t !== '') out.add(sourceDep(t));
+  if (trackers.length > 0 && projectId !== null) out.add(`project:${projectId}`);
   for (const s of sources) {
     if (s.description === null || !agentMay(s.access, s, projectId, 'see')) continue;
     // What estate holds must be this descriptor's: a projection still pending, or one that failed after a

@@ -25,6 +25,8 @@
 
 import { issueRefs } from './deliver-text.js';
 import { defaultGhExec, type GhExec } from './deliver.js';
+import type { RunAddress } from '../knowledge/trackers/addresses.js';
+import { githubRef, jiraRefs, type PmIssueRead, type PmRef } from '../knowledge/trackers/issues.js';
 
 export const LINKED_ISSUES_OPEN = '<!-- wicked-crew:linked-issues -->';
 export const LINKED_ISSUES_CLOSE = '<!-- /wicked-crew:linked-issues -->';
@@ -54,12 +56,33 @@ export interface LinkedIssue {
   chars?: number;
   /** crew#825: `true` when the launch left this ref out (`excludeLinkedIssues`); never read. */
   excluded?: true;
+  /** (DES-PM-001) Read through a registered PM source: the tracker that admitted it, its source and system. */
+  trackerId?: string;
+  source?: string;
+  system?: 'github' | 'jira' | 'gitlab' | 'ado';
+  /** (DES-PM-001) Why it was not read, as a code (api-types `LinkedIssue.code`). */
+  code?: 'not_linked' | 'ambiguous' | 'hidden' | 'query_off' | 'unavailable' | 'not_found';
+  candidates?: Array<{ source: string; tenant: string; tenantLabel?: string; key: string; trackerId: string }>;
 }
 
 export interface LinkedIssuesResult {
   issues: LinkedIssue[];
   /** The marked block to append to the problem, or `null` when the intent names no issue. */
   block: string | null;
+  /** (DES-PM-001 §3.2) The issues read through a registered PM source: the run's `addresses` record. */
+  addresses?: RunAddress[];
+}
+
+/**
+ * (DES-PM-001 §3.2, Q-PM5) Linked issues through the registry: once a PM source of a system is registered, that
+ * system's references resolve ONLY through the launch's tracker set (`read`), never through the daemon's `gh`.
+ */
+export interface PmLinkedIssueReader {
+  /** The systems a PM source is registered for. */
+  systems: ReadonlySet<string>;
+  /** Every key a registered Jira tracker has: only these are Jira references (so `UTF-8` is not one). */
+  jiraKeys: ReadonlySet<string>;
+  read(refs: readonly PmRef[]): Promise<PmIssueRead[]>;
 }
 
 interface GhIssue {
@@ -163,17 +186,37 @@ export async function resolveLinkedIssues(
   repoRef: string | undefined,
   exec: GhExec = defaultGhExec,
   exclude: readonly string[] = [],
+  pm?: PmLinkedIssueReader,
 ): Promise<LinkedIssuesResult> {
-  const { fixes, refs } = issueRefs(stripLinkedIssues(problem), repoRef ?? null);
-  const named = [...fixes, ...refs];
+  const intent = stripLinkedIssues(problem);
+  const { fixes, refs } = issueRefs(intent, repoRef ?? null);
+  // (DES-PM-001) Jira references exist only once a Jira source is registered, and only for its trackers' keys.
+  const jira = pm !== undefined && pm.systems.has('jira') ? jiraRefs(intent, pm.jiraKeys) : [];
+  const named = [...fixes, ...refs, ...jira.map((r) => r.ref)];
   if (named.length === 0) return { issues: [], block: null };
-  const leftOut = new Set(exclude.map((r) => normalizeIssueRef(r, repoRef)).filter((r): r is string => r !== null));
+  const leftOut = new Set(exclude.map((r) => (jira.some((j) => j.ref === r.trim()) ? r.trim() : normalizeIssueRef(r, repoRef))).filter((r): r is string => r !== null));
   const excluded: LinkedIssue[] = named
     .filter((ref) => leftOut.has(ref))
     .map((ref) => ({ ref, resolved: false, excluded: true as const, error: 'left out by the launch (excludeLinkedIssues)' }));
   const all = named.filter((ref) => !leftOut.has(ref));
   if (all.length === 0) return { issues: excluded, block: null };
-  const read = await Promise.all(all.slice(0, MAX_LINKED_ISSUES).map((ref) => readOne(ref, repoRoot, exec)));
+  // (Q-PM5) With a GitHub source registered, no GitHub reference is read through `gh`: an unlinked one is reported.
+  const viaPm = (ref: string): boolean => pm !== undefined && (jira.some((j) => j.ref === ref) || (pm.systems.has('github') && !ref.includes(':')));
+  const reading = all.slice(0, MAX_LINKED_ISSUES);
+  const pmRefs = reading.filter(viaPm).map((ref) => jira.find((j) => j.ref === ref) ?? githubRef(ref) ?? ref);
+  const pmRead = pm === undefined || pmRefs.length === 0 ? [] : await pm.read(pmRefs.filter((r): r is PmRef => typeof r !== 'string'));
+  const pmByRef = new Map(pmRead.map((r) => [r.issue.ref, r]));
+  const read: Array<{ issue: LinkedIssue; text: string; address?: RunAddress }> = await Promise.all(
+    reading.map(async (ref): Promise<{ issue: LinkedIssue; text: string; address?: RunAddress }> => {
+      if (!viaPm(ref)) return readOne(ref, repoRoot, exec);
+      const hit = pmByRef.get(ref);
+      if (hit !== undefined) return hit;
+      // A GitHub reference PM cannot name (an owner-less `repo#N` of another repo): reported, never read by `gh`.
+      return { issue: { ref, resolved: false, code: 'not_linked' as const, error: 'name it as owner/repo#N of a linked GitHub tracker' }, text: `### ${ref}: not read (name it as owner/repo#N of a linked GitHub tracker)` };
+    }),
+  );
+  const addresses: RunAddress[] = [];
+  for (const r of read) if (r.address !== undefined) addresses.push({ ...r.address, closing: r.address.system === 'jira' || fixes.includes(r.issue.ref) });
   const skipped: LinkedIssue[] = all.slice(MAX_LINKED_ISSUES).map((ref) => ({
     ref,
     resolved: false,
@@ -192,7 +235,7 @@ export async function resolveLinkedIssues(
     inertIssueText(sections.join('\n\n')),
     LINKED_ISSUES_CLOSE,
   ].join('\n');
-  return { issues: [...read.map((r) => r.issue), ...skipped, ...excluded], block };
+  return { issues: [...read.map((r) => r.issue), ...skipped, ...excluded], block, ...(addresses.length > 0 ? { addresses } : {}) };
 }
 
 /**

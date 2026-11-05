@@ -230,6 +230,10 @@ export class McpBroker {
       return this.refuse(span, 'guard_error', 'guard_error', 'broker', [], `the MCP registry could not be read: ${message(err)}`, 'the operator fixes the registry in studio → MCP tools');
     }
     span.kind = target?.config.kind ?? null;
+    // (DES-PM-001 §3.1) A PM entry is never reached as a plain upstream, even on a broker with no gate.
+    if (target?.pm === true) {
+      return this.refuse(span, 'guard_error', 'guard_error', 'broker:gate', [], `${body.subject} is a project-management source's tool: only crew's data gate may call it, and this daemon has none`, 'nothing ran; report it', null, null);
+    }
     const call = {
       server: parts.server,
       tool: parts.tool,

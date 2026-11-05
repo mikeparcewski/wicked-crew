@@ -21,6 +21,8 @@
 
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { CreateTrackerLinkSchema } from '../src/knowledge/trackers/routes.js';
+import { TrackerActionSchema } from '../src/knowledge/trackers/actions.js';
 import { describe, expect, it } from 'vitest';
 import type { z } from 'zod';
 import type * as Wire from 'wicked-crew-api-types';
@@ -1109,6 +1111,9 @@ accepts<z.input<typeof ReplaceSkillSchema>, Wire.ReplaceSkillBody>();
 // ── api-types 0.58.0 — the MCP tools registry (DES-MCP-TOOLS-001 S2) ─────────────────────────────
 accepts<z.input<typeof McpServerConfigSchema>, Wire.McpServerConfigBody>();
 accepts<z.input<typeof SaveMcpServerSchema>, Wire.SaveMcpServerBody>();
+// DES-PM-001 PM-1 (api-types 0.187.0): the tracker-links and tracker-actions bodies parse.
+accepts<z.input<typeof CreateTrackerLinkSchema>, Wire.CreateTrackerLinkBody>();
+accepts<z.input<typeof TrackerActionSchema>, Wire.TrackerActionBody>();
 // Apps data sources (DES-APPS-001 K1, api-types 0.175.0): each published body passes its route's schema,
 // and what the code produces fits each published response.
 accepts<z.input<typeof SourceCheckSchema>, Wire.SourceCheckBody>();

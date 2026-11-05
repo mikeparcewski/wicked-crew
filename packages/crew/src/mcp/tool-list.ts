@@ -30,7 +30,7 @@ async function gatedToolsFor(gate: McpToolListDeps['gate'], token: string): Prom
   try {
     const scope = await gate.resolve(token);
     if (scope === null) return { tools: [], servers };
-    const reach = await gate.reach(scope.projectId);
+    const reach = await gate.reach(scope.projectId, scope.repoId ?? null);
     return {
       servers,
       tools: reach.map((t): McpCallableTool => ({ server: t.server, id: t.id, tool: t.tool, disclosure: t.disclosure, kind: 'mcp-stdio', annotations: { readOnlyHint: true }, classOverride: 'read', description: t.description, inputSchema: t.inputSchema })),

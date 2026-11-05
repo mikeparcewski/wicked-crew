@@ -191,6 +191,11 @@ export const McpServerConfigSchema = z
      * `auth.ref` = `keychain:wicked-mcp/<name>`. It is in no response, log, audit entry or file.
      */
     secret: secretValue.optional(),
+    /**
+     * (DES-PM-001 §3) `mcp-http` / `mcp-stdio` only: this server is a project-management system's own MCP server. A
+     * human operator's only (403 `pm_source_human_only`). `gitlab` and `ado` are wave PM-2.
+     */
+    pm: z.object({ system: z.enum(['github', 'jira']) }).strict().optional(),
   })
   .strict()
   .superRefine((c, ctx) => {
@@ -207,6 +212,7 @@ export const McpServerConfigSchema = z
       issue('openapi', 'openapiUrl, openapi and operations are for a rest server');
     }
     if (c.kind !== 'sql' && c.sql !== undefined) issue('sql', 'sql is for a sql source');
+    if (c.pm !== undefined && c.kind !== 'mcp-http' && c.kind !== 'mcp-stdio') issue('pm', 'pm marks a project-management system\'s own MCP server: kind mcp-http or mcp-stdio');
     if (c.kind !== 'sql' && c.kind !== 'toolbox-source' && c.viewsAllowed !== undefined) issue('viewsAllowed', 'viewsAllowed is for a sql or toolbox-source source');
     if (c.kind !== 'toolbox-source' && (c.toolbox !== undefined || c.runtime !== undefined || c.tls !== undefined)) issue('toolbox', 'toolbox, runtime and tls are for a toolbox-source');
     if (c.kind === 'toolbox-source') {
@@ -419,6 +425,7 @@ function toConfig(body: z.infer<typeof McpServerConfigSchema>): McpUpstreamConfi
     command: body.command ?? null,
     args: body.args ?? [],
     url: body.url ?? null,
+    ...(body.pm !== undefined ? { pm: { system: body.pm.system } } : {}),
     ...(body.kind === 'rest'
       ? { openapiUrl: body.openapiUrl ?? null, openapi: body.openapi ?? null, operations: body.operations ?? null }
       : {}),
@@ -554,6 +561,10 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       if (confirmsAddress(parsed.data.address) && !mayGrantWrite(actor)) return addressConfirmRefused(reply, actor);
       // (crew#1316) It also PROBES with the secret `auth.ref` names: a secret crew already holds is a human operator's to send.
       if (namesStoredSecret(parsed.data) && !mayGrantWrite(actor)) return storedSecretRefused(reply, actor);
+      // (DES-PM-001 §3) A PM source gains tracker links and the gate's bindings: only a person registers one, or
+      // previews a save over one.
+      const over = await r.get(parsed.data.name).catch(() => null);
+      if ((parsed.data.pm !== undefined || over?.pm !== undefined) && !mayGrantWrite(actor)) return humanOperatorOnly(reply, actor, 'register a project-management source', 'pm_source_human_only');
       try {
         const full = await r.preview(toConfig(parsed.data), parsed.data.secret ?? null);
         // (DES-KNOWLEDGE-DATA-001 §5.2) A source's structure reaches an agent only through estate and the gate.
@@ -603,6 +614,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
         const held = parsed.data.previewHash === undefined ? null : r.peekPreview(parsed.data.previewHash);
         // The confirmation rides in the previewed config; saving it is the human operator's, too.
         if (held !== null && confirmsAddress(held.address) && !mayGrantWrite(deps.actorOf(req))) return addressConfirmRefused(reply, deps.actorOf(req));
+        if (held !== null && held.pm != null && !mayGrantWrite(deps.actorOf(req))) return humanOperatorOnly(reply, deps.actorOf(req), 'register a project-management source', 'pm_source_human_only');
         const commit = async (): Promise<McpServer> => {
           if (held !== null && deps.policies !== undefined) {
             const tokens = await deps.policies.withdrawnBySave(held);
@@ -654,14 +666,21 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
 
   app.patch<{ Params: { name: string } }>(
     `${V}/mcp/servers/:name`,
-    { config: { manifest: { requestType: 'PatchMcpServerBody', responseType: 'McpServer | McpServerAgentView', statusCodes: [200, 400, 404, 503] } } },
+    { config: { manifest: { requestType: 'PatchMcpServerBody', responseType: 'McpServer | McpServerAgentView', statusCodes: [200, 400, 403, 404, 503] } } },
     async (req, reply) => {
       const r = registry(reply);
       if (r === null) return reply;
       const parsed = PatchMcpServerSchema.safeParse(req.body);
       if (!parsed.success) return invalidBody(reply, parsed.error);
       try {
-        const server = await r.setServerEnabled(req.params.name, parsed.data.enabled);
+        // (DES-PM-001 §3) Switching a PM source on or off changes what its links reach: a person's only. Judged and
+        // done inside the server's lock, so a save that makes the name a PM source cannot slip between.
+        const actor = deps.actorOf(req);
+        const server = await exclusive(req.params.name, async () => {
+          if ((await r.get(req.params.name)).pm !== undefined && !mayGrantWrite(actor)) return null;
+          return r.setServerEnabled(req.params.name, parsed.data.enabled);
+        });
+        if (server === null) return humanOperatorOnly(reply, actor, 'switch a project-management source on or off', 'pm_source_human_only');
         deps.audit.record(parsed.data.enabled ? 'mcp.server.enabled' : 'mcp.server.disabled', deps.actorOf(req), { detail: { name: server.name } });
         return serverFor(deps.actorOf(req), server);
       } catch (err) {
@@ -672,15 +691,21 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
 
   app.delete<{ Params: { name: string } }>(
     `${V}/mcp/servers/:name`,
-    { config: { manifest: { responseType: '{ removed: string }', statusCodes: [200, 404, 500, 502, 503] } } },
+    { config: { manifest: { responseType: '{ removed: string }', statusCodes: [200, 403, 404, 500, 502, 503] } } },
     async (req, reply) => {
       const r = registry(reply);
       if (r === null) return reply;
       try {
         // (crew#993) One step for the server, like the save: no approval lands between the
         // withdrawal and the removal.
+        let refused = false;
         await exclusive(req.params.name, async () => {
-          await r.get(req.params.name); // 404 before anything is withdrawn
+          // (DES-PM-001 §3.2, Q-PM5) Removing a PM source drops its links, and the last GitHub one would hand `#N` back
+          // to the daemon's own `gh`: a person's only. Judged on the record being removed, inside the server's lock.
+          if ((await r.get(req.params.name)).pm !== undefined && !mayGrantWrite(deps.actorOf(req))) {
+            refused = true;
+            return;
+          }
           if (deps.policies !== undefined) {
             const tokens = await deps.policies.tokensOf(req.params.name);
             if (tokens.length > 0) {
@@ -691,6 +716,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
           }
           await r.remove(req.params.name);
         });
+        if (refused) return humanOperatorOnly(reply, deps.actorOf(req), 'remove a project-management source', 'pm_source_human_only');
         deps.audit.record('mcp.server.removed', deps.actorOf(req), { detail: { name: req.params.name } });
         return { removed: req.params.name };
       } catch (err) {
@@ -791,7 +817,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
   app.put<{ Params: { name: string } }>(
     `${V}/mcp/servers/:name/secret`,
     {
-      config: { manifest: { requestType: 'PutMcpSecretBody', responseType: 'McpSecretResponse', statusCodes: [200, 400, 404, 501, 502, 503] } },
+      config: { manifest: { requestType: 'PutMcpSecretBody', responseType: 'McpSecretResponse', statusCodes: [200, 400, 403, 404, 501, 502, 503] } },
     },
     async (req, reply) => {
       const r = registry(reply);
@@ -801,7 +827,15 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       const parsed = PutMcpSecretSchema.safeParse(req.body);
       if (!parsed.success) return invalidBody(reply, parsed.error);
       try {
-        const ref = await r.setSecret(name.data, parsed.data.value);
+        // (DES-PM-001 §5) A PM source's credential is the identity its approved actions post as: a person re-keys it.
+        // Judged and written inside the server's lock, so a save that makes the name a PM source cannot slip between.
+        const actor = deps.actorOf(req);
+        const ref = await exclusive(name.data, async () => {
+          // An unknown name is setSecret's to answer (its own refusals come first, as before).
+          if ((await r.get(name.data).catch(() => null))?.pm !== undefined && !mayGrantWrite(actor)) return null;
+          return r.setSecret(name.data, parsed.data.value);
+        });
+        if (ref === null) return humanOperatorOnly(reply, actor, "re-key a project-management source's credential", 'pm_source_human_only');
         deps.audit.record('mcp.secret.set', deps.actorOf(req), { detail: { name: name.data, ref } });
         return { ref, set: true as const };
       } catch (err) {

@@ -29,6 +29,7 @@
  */
 
 import { codeGraphErrorStatus } from '../core/repoPaths.js';
+import { mayAttachRepo } from './repo-guard.js';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { CoreAdapter } from '../core/adapter.js';
@@ -387,6 +388,10 @@ export function registerProjectRoutes(
       // unknown run/repo — but a member may legitimately outlive what it points to later.
       if (kind === 'crew.run' && !(await adapter.sessions()).includes(ref)) {
         return reply.code(404).send({ error: `Run ${ref} not found` });
+      }
+      // (DES-PM-001 Q-PM2) A repo joining a project widens the project's code and its tracker set: a person's only.
+      if (kind === 'crew.repo' && !mayAttachRepo(actorOf(req))) {
+        return reply.code(403).send({ error: `only a person attaches a repo to a project (it widens what the project's agents can read); you are ${actorOf(req).kind}/${actorOf(req).trust}`, code: 'repo_attach_human_only' });
       }
       if (kind === 'crew.repo' && !(await adapter.listRepos()).some((r) => r.id === ref)) {
         return reply.code(404).send({ error: `Repo ${ref} not found` });

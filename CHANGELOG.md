@@ -12,6 +12,41 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **Project-management systems as knowledge, linked to projects and repos (api-types 0.187.0, DES-PM-001 PM-1:
+  GitHub and Jira).** A PM system is a registry entry on the vendor's own MCP server (`github/github-mcp-server`, the
+  Atlassian remote server), marked by `pm: {system}` at registration (a human operator's only: 403
+  `pm_source_human_only`; a re-save must keep it, 409 `pm_marker_fixed`). PM entries are under the source safeguards:
+  the Agents switches (`PUT /sources/:name/agents`), switches and links kept across a re-save, "query" turned off by an
+  execution-descriptor change and by a restore. Each bound tool's resource binding is stored with its disclosure
+  class, bound to the saved schema and to crew's binding-policy version; any other tool of the entry (Rovo `search`,
+  writes, `get_me`) is unavailable to agents, and PM entries never reach the broker's plain path, the shim's raw list
+  or Apps. **Tracker links** (`GET/POST/DELETE /tracker-links`, `GET /tracker-links/issues`,
+  `GET /sources/:name/trackers`; all human-only, 403 `tracker_links_human_only`) live on the PM source's entry:
+  a tracker (`trk_…`, one Jira project on one site, or one GitHub repo) links to studio projects (`proj_…`) and repos
+  (`tl_…`), after a direct live lookup (422 `tracker_unknown`, 503 `source_unavailable`); audited
+  `knowledge.source.tracker_linked` / `tracker_unlinked`. **The tracker set T(u)**, computed on every call from the
+  registry and the engine's memberships: the trackers linked to the unit's project plus those linked to its repos
+  (its own and its project's), under the sources' switches; a project's links never reach another project through a
+  shared repo. **The gate owns every PM call**, in every agent context: it sets the tenant (the Jira site's
+  `cloudId`), rewrites or refuses the project argument to stay inside the unit's linked set (`project in (…) AND
+  (…)`; GitHub `repo:` qualifiers), rebuilds the answer from admitted items only (a Jira key on the site crew called,
+  a GitHub `html_url` of a linked repo; totals recomputed, pagination kept only when nothing was dropped, unknown
+  shapes refused), answers in an untrusted envelope cited `pm:<system>/<key>@<time>`, and recomputes T(u) before it
+  releases an answer. A unit with no linked tracker of a source gets no tool of it, whether or not it has a project.
+  **Linked issues** at launch resolve through the launch's tracker set once a PM source is registered (Jira keys only
+  for registered trackers' keys; `<source>:KEY-N` / `<source>@<site>:KEY-N` disambiguates; codes `not_linked`,
+  `ambiguous`, `hidden`, `query_off`, `unavailable`), and `gh` is never read for a system that has a registered source
+  (Q-PM5); `LinkedIssuesPreviewBody.projectId`. The run keeps what it `addresses`; a Jira key leads the PR title and
+  rides a `Tracks:` line. **Governed actions** (`GET/POST /runs/:id/tracker-actions`, human-only): a comment and/or a
+  transition on an issue of the run's tracker set, a card first (what, as whom, from and to which state mapped to
+  todo/doing/done, the admitting link), then exactly that on `confirm`; audited `knowledge.tracker.action`.
+  **Projection**: each tracker is its own catalog in estate (`knowledge.replace_source {sourceId: trk_…}`) with
+  document-owned `tracked_in` links to `control` endpoints (`project:`, `repo:`) and `issue_ref` documents owning
+  `run:<id> addresses`, reconciled (pending/current/failed on each link, retried, retired trackers tombstoned); a
+  unit's visible set gains its trackers and project; the Knowledge map draws trackers, projects, issues and runs.
+  Q-PM2: attaching a `crew.repo` member is a person's (403 `repo_attach_human_only`), and a non-human re-registering
+  an existing repo id at another checkout gets 409 `repo_exists`. `GET /health` `capabilities.trackerLinks: true`.
+
 - **Data shapes: profile a source, review its shapes, see them on a Knowledge map (api-types 0.186.0,
   DES-KNOWLEDGE-DATA-001 §10, build B4).** `POST /sources/:name/profile` (a human operator's only; 403
   `profile_human_only`) profiles a described native Postgres source through the data gate's person read at the
