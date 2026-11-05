@@ -92,6 +92,7 @@ import type {
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 import { callEstateTool, EstateMcpError, ESTATE_INSTALL_HINT, memoryStoreInfo } from '../core/estate-mcp-client.js';
 import { NO_LEARNINGS_WORKFLOWS, type RunLearningsService } from '../learnings/service.js';
+import { withRulesBrief } from '../decisions/rules-brief.js';
 import { SeatHealthTracker } from './seat-health.js';
 import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
 import { applyCouncilSettings, isCouncilSize, isCouncilStaggerMs } from '../core/council-settings.js';
@@ -3287,6 +3288,19 @@ export function registerRoutes(
           if (recalled.recalled > 0) req.log.info(`[learnings] ${input.sessionId}: ${recalled.recalled} approved learning(s) in the brief`);
         } catch (err) {
           req.log.warn(`[learnings] the memory store could not be read; launching without approved learnings: ${message(err)}`);
+        }
+      }
+      // E7 (operator ruling 2026-11-05): the project's in-force steering rules ride in the brief, in a marked block the
+      // deliver text takes back out (decisions/rules-brief.ts), so the review and QE seats can judge the work against
+      // them. Same scope as the learnings (workflow launches only); best-effort: an unreadable store launches without it.
+      if (!NO_LEARNINGS_WORKFLOWS.has(b.workflow)) {
+        try {
+          const read = await considerations.inForceFor(b.projectId ?? null);
+          const briefed = withRulesBrief(input.problem, read.source === 'unavailable' ? [] : read.rules);
+          input.problem = briefed.problem;
+          if (briefed.listed > 0) req.log.info(`[rules] ${input.sessionId}: ${briefed.listed} steering rule(s) in the brief`);
+        } catch (err) {
+          req.log.warn(`[rules] the rules in force could not be read; launching without them: ${message(err)}`);
         }
       }
     }

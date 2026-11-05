@@ -19,6 +19,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { stripRulesBrief } from '../decisions/rules-brief.js';
 
 import type { CoreEvent } from '../core/types.js';
 import {
@@ -144,7 +145,7 @@ const LINKED_ISSUES_MARKER = '<!-- wicked-crew:linked-issues -->';
 
 /** The run's problem as Goal text: the hidden linked-issues block dropped, cut at a word boundary with an ellipsis if too long. */
 export function goalFrom(problem: string): string {
-  const text = problem.replace(/\r\n?/g, '\n');
+  const text = stripRulesBrief(problem).replace(/\r\n?/g, '\n');
   const at = text.indexOf(LINKED_ISSUES_MARKER);
   const body = (at === -1 ? text : text.slice(0, at)).trim();
   if (body.length <= GOAL_MAX_CHARS) return body;

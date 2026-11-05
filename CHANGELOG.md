@@ -12,6 +12,15 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **A governed run's brief carries the steering rules in force for its project, for the reviewer to check (operator
+  ruling 2026-11-05, end-to-end pass E7).** A workflow launch appends a marked block (`<!-- wicked-crew:rules -->`) that
+  lists the project's in-force rules (the same `considerRules` read `/considered` uses), severity first and capped at
+  20. It says the review and QE steps check the work against each one, and that the step that builds does not mark its
+  own compliance. So every unit's description, the reviewer's brief and the gate judge's criterion carry them, and
+  garden's governed-worker E7 has the evaluator answer each one as KEPT, BROKEN, N/A or DEFERRED (a broken rule fails
+  review). The deliver text, the working doc's Goal and a relaunch take the block back out; an unreadable store
+  launches on the intent alone. Per-rule verdicts in the assurance receipt stay DES-rule-check (post-mvp).
+
 - **Project-management systems as knowledge, linked to projects and repos (api-types 0.187.0, DES-PM-001 PM-1:
   GitHub and Jira).** A PM system is a registry entry on the vendor's own MCP server (`github/github-mcp-server`, the
   Atlassian remote server), marked by `pm: {system}` at registration (a human operator's only: 403
