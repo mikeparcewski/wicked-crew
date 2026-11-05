@@ -542,7 +542,13 @@ describe('governance cards over a fixture store', () => {
       skillsFindings: [], decisions: null, clis: clis.slice(0, 1), judgeGapCount: 0, week: null, gatesByYou: null, steeringRules: null,
     });
     const s = Object.fromEntries(solo.map((c) => [c.key, c]));
-    expect(s['judges']!.state).toBe('down');
+    // Nothing is held by it yet: governed work would need reduced assurance, a fix the person can make
+    // (sign in a second agent), so the card says it without going red (nerve-tone, 2026-11-05).
+    expect(s['judges']!.state).toBe('degraded');
+    const soloHeld = buildGovernance({
+      governance: null, skillsFindings: [], decisions: null, clis: clis.slice(0, 1), judgeGapCount: 1, week: null, gatesByYou: null, steeringRules: null,
+    });
+    expect(soloHeld.find((c) => c.key === 'judges')!.state).toBe('down');
     expect(s['floor_outcomes']).toMatchObject({ state: 'unknown', value: null });
     expect(s['gates_answered']).toMatchObject({ state: 'unknown', value: null });
     expect(s['store']!.state).toBe('down');

@@ -12,6 +12,16 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **Nerve Center stays green when a CLI nobody set up is signed out (operator, 2026-11-05).** Yellow is kept for a
+  fix the person can make. When no seat of a CLI is signed in, its missing seat image no longer degrades the
+  `seat_images` row; the row names it instead ("not needed until signed in: opencode"). Two new yellow `slows` items
+  in `attention[]` cover the seat cases that do matter. `cli:one-reviewer` fires when fewer than two distinct CLIs
+  are signed in, so no different agent can review; its headline is "Sign in a second agent so a different one can
+  review". `cli:out:<seat>` fires when a signed-out seat has a job's work on it, meaning a step not yet done (running or
+  waiting) is assigned to it. Being listed in a default pool is not need, and a job held for want of a reviewer keeps
+  the seat in its own item. The judges card reads `degraded`
+  rather than `down` while no job is held by the missing reviewer.
+
 - **A steering rule whose subject only exists at delivery no longer holds review and QE (api-types 0.191.0, SWAP 6).**
   The wire gains the `deferred` rule status: the engine defers a rule to delivery by a recorded fact (obligations
   `evidence:delivery`, or `applies_to` naming only the deliver step) and the deliver step judges it against the pull

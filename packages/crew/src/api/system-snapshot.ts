@@ -45,7 +45,7 @@ import type {
   SystemState,
   SystemUnresolvedItem,
 } from '../core/types.js';
-import { needsLevel } from './needs.js';
+import { cliKeyOf, distinctJudgePair, needsLevel } from './needs.js';
 import { callEstateToolRaw, estateMcpExe, ESTATE_INSTALL_HINT } from '../core/estate-mcp-client.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { runTouchesWindow } from './seat-record.js';
@@ -1272,18 +1272,9 @@ export function sortRuns(runs: SystemRun[]): SystemRun[] {
 
 // ── Judges ──────────────────────────────────────────────────────────────────
 
-/** A seat's CLI identity: `codex#2` is a second codex seat, not a distinct judge for codex work. */
-const cliKeyOf = (seat: string): string => seat.split('#', 1)[0] ?? seat;
-
-/** Some seat that can work, and a seat that can judge it distinct from it — or `null` when none. */
-export function distinctJudgePair(clis: SystemCli[]): { creator: string; judge: string } | null {
-  for (const c of clis) {
-    if (!c.workEligible || c.state === 'signed_out' || c.state === 'benched') continue;
-    const j = clis.find((x) => x.councilEligible && cliKeyOf(x.cli) !== cliKeyOf(c.cli));
-    if (j !== undefined) return { creator: c.cli, judge: j.cli };
-  }
-  return null;
-}
+// The seat-pool rule (`distinctJudgePair`, `cliKeyOf`) lives in needs.ts, beside the attention item
+// that says it ("Sign in a second agent so a different one can review").
+export { distinctJudgePair } from './needs.js';
 
 /** For each unfinished run: the seats that could judge its next gate distinct from its creator, and,
  *  when there are none, the seats in its pool that cannot (with why). */
@@ -1342,10 +1333,12 @@ export function buildGovernance(g: GovernanceInput): SystemGovernanceCard[] {
   const judges = g.clis.filter((c) => c.councilEligible).map((c) => c.cli);
   const pair = distinctJudgePair(g.clis);
   const ok = pair !== null && g.judgeGapCount === 0;
+  // No distinct pair while no job is held by it and some seat can judge: governed work would need
+  // reduced assurance, a fix the person can make (sign in a second agent), not a block.
   cards.push({
     key: 'judges',
     label: 'Judges available',
-    state: ok ? 'ok' : 'down',
+    state: ok ? 'ok' : judges.length > 0 && g.judgeGapCount === 0 ? 'degraded' : 'down',
     value: judges.length,
     reason:
       judges.length === 0

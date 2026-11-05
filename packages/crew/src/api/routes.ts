@@ -350,7 +350,7 @@ import {
   type RosterSeatLike,
   type RunEvidence,
 } from './system-snapshot.js';
-import { parseSeatImageStatus, probeSeatImages, SeatImageRebuilder, type SeatImageStatus } from './seat-images.js';
+import { idleClis, parseSeatImageStatus, probeSeatImages, SeatImageRebuilder, type SeatImageStatus } from './seat-images.js';
 import { RunCostCache } from './needs.js';
 import { governanceStoreFix, legacyHomeOutboxPath } from '../core/governance-store.js';
 import { UsageError, replayOutboxInto } from '../cli/governance.js';
@@ -9633,6 +9633,13 @@ export function registerRoutes(
       }
     });
   // The roster's seats (on the container floor every seat runs in an image); `null` when unreadable.
+  const rosterSeatsNow = (): RosterSeatLike[] => {
+    try {
+      return rosterWithStanding() as unknown as RosterSeatLike[];
+    } catch {
+      return [];
+    }
+  };
   const rosterSeatClis = (): string[] | null => {
     try {
       return rosterWithStanding().map((r) => String(r.key));
@@ -9756,13 +9763,16 @@ export function registerRoutes(
       const interactiveRoots = [...new Set([defaultInteractiveRoot(stateHome ?? undefined), ...interactiveBridges.keys()])];
       const watch = runtime.watchRegistry?.() ?? null;
       const watchHealth = watch !== null ? (() => { try { return watch.health(); } catch { return null; } })() : null;
+      // The broker probe refreshes each container seat's sign-in: the seat images row reads which CLIs
+      // are signed in only after it, as the CLI cards do.
+      const brokerP = probeBroker({
+        containerFloor,
+        clis: roster.map((r) => r.key).filter((k) => isContainerLoginCli(k)),
+        status: (cli) => containerStatus.refreshFresh(cli),
+      });
       const infraP = Promise.all([
         probeGateway({ containerFloor, gatewayDir, runtime: containerFloor ? resolveContainerRuntime() : null, exec: systemExec }),
-        probeBroker({
-          containerFloor,
-          clis: roster.map((r) => r.key).filter((k) => isContainerLoginCli(k)),
-          status: (cli) => containerStatus.refreshFresh(cli),
-        }),
+        brokerP,
         probeInteractive({
           roots: interactiveRoots,
           readLock: (root) => readBridgeLockAsync(root),
@@ -9778,7 +9788,18 @@ export function registerRoutes(
         }),
         probeVault({ vault: adapter.vaultBin != null ? vaultDiagnostics(adapter.vaultBin) : null, exec: systemExec }),
         diskRow(stateHome),
-        probeSeatImages({ containerFloor, clis: rosterSeatClis(), status: seatImageStatus, rebuild: () => seatImageRebuilder.current() }),
+        probeSeatImages({
+          containerFloor,
+          clis: rosterSeatClis(),
+          // A CLI none of whose seats is signed in needs no image yet, read after the broker's refresh;
+          // a CLI with any signed-in seat (`claude#2`) keeps its image.
+          idle: async () => {
+            await brokerP;
+            return idleClis(rosterSeatsNow());
+          },
+          status: seatImageStatus,
+          rebuild: () => seatImageRebuilder.current(),
+        }),
       ]);
 
       const [views, settings, openGates, diag, ping, rules, gatesByYou, infraProbed, reposRead] = await Promise.all([
