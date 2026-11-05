@@ -15,7 +15,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CoreAdapter, addonSupportsLaunchDeliverables, engineSupportsPlanLaunch } from '../src/core/adapter.js';
+import { CoreAdapter, addonSupportsLaunchDeliverables, engineSupportsPlanGateNote, engineSupportsPlanLaunch } from '../src/core/adapter.js';
 import { DELIVER_PHASE_ID, EVIDENCE_FLOOR_PIN } from '../src/core/deliver.js';
 import { createServer } from '../src/api/server.js';
 import type { LaunchOptions } from 'wicked-core-ts';
@@ -24,6 +24,8 @@ import { removeScratch } from './setup/scratch.js';
 import { baseSkillOff } from './setup/base-skill-off.js';
 
 const ENGINE_HAS_PLAN_GATE = engineSupportsPlanLaunch();
+/** (crew#1139) The linked addon lands a plan approval's note (`Core.supportsPlanGateNote`). */
+const ENGINE_HAS_PLAN_NOTE = ENGINE_HAS_PLAN_GATE && engineSupportsPlanGateNote();
 
 const SEATS = JSON.stringify([
   { key: 'alpha', display_name: 'Alpha', binary: 'alpha', headless_invocation: 'alpha {PROMPT}' },
@@ -51,9 +53,11 @@ function stubCore(a: CoreAdapter, name: string, impl: unknown) {
   (a as unknown as { core: Record<string, unknown> }).core[name] = impl;
 }
 
-/** Run a body with the engine's plan gate present or absent (`CoreAdapter.supportsPlanLaunch`). */
-async function withCapability<T>(a: CoreAdapter, present: boolean, body: () => Promise<T>): Promise<T> {
+/** Run a body with the engine's plan gate present or absent (`CoreAdapter.supportsPlanLaunch`), and
+ *  its plan-gate notes (`CoreAdapter.supportsPlanGateNote`, crew#1139) present or absent (default: as the gate). */
+async function withCapability<T>(a: CoreAdapter, present: boolean, body: () => Promise<T>, note: boolean = present): Promise<T> {
   a.supportsPlanLaunch = () => present;
+  a.supportsPlanGateNote = () => note;
   return body();
 }
 
@@ -163,6 +167,82 @@ describe('POST /runs {plan} and the plan_approval gate — HTTP contract (shadow
     });
   });
 
+  it('crew#1139: an edited plan approval carries the operator\'s note to the engine as amend', async () => {
+    await withCapability(ctx.adapter, true, async () => {
+      const plan = { steps: [{ catalog: 'build', id: 'make' }] };
+      const res = await fetch(
+        `${ctx.baseUrl}/api/v1/runs/r1/gate`,
+        json({ approve: true, plan, amend: 'keep the list in the fixture, not a const' }),
+      );
+      expect(res.status, await res.clone().text()).toBe(200);
+      // A blank note is no note: the engine is handed none.
+      const blank = await fetch(`${ctx.baseUrl}/api/v1/runs/r1/gate`, json({ approve: true, plan, amend: '  ' }));
+      expect(blank.status).toBe(200);
+      expect(gated).toEqual([
+        ['r1', true, 'keep the list in the fixture, not a const', 'edit_plan', undefined, JSON.stringify(plan)],
+        ['r1', true, undefined, 'edit_plan', undefined, JSON.stringify(plan)],
+      ]);
+    });
+  });
+
+  it('crew#1139: a note beside an edited plan on an addon without plan-gate notes is a 501, never dropped', async () => {
+    await withCapability(
+      ctx.adapter,
+      true,
+      async () => {
+        const res = await fetch(
+          `${ctx.baseUrl}/api/v1/runs/r1/gate`,
+          json({ approve: true, plan: { steps: [{ catalog: 'build' }] }, amend: 'a note' }),
+        );
+        expect(res.status).toBe(501);
+        expect(((await res.json()) as { error: string }).error).toMatch(/supportsPlanGateNote/);
+        expect(gated).toHaveLength(0);
+      },
+      false,
+    );
+  });
+
+  it('crew#1139: a note on a PLAIN plan approval on an engine without plan-gate notes is a 501 that says so', async () => {
+    // The record's open gate is the plan gate.
+    ctx.adapter.interactionRequests = async () =>
+      [{ id: 'g1', kind: 'gate', ord: 1, status: 'open', gate_kind: 'plan_approval', prompt: 'approve the plan', created_at: 1 }] as never;
+    await withCapability(
+      ctx.adapter,
+      true,
+      async () => {
+        const res = await fetch(`${ctx.baseUrl}/api/v1/runs/r1/gate`, json({ approve: true, amend: 'a note' }));
+        expect(res.status).toBe(501);
+        expect(((await res.json()) as { error: string }).error).toMatch(/supportsPlanGateNote/);
+        expect(gated).toHaveLength(0);
+        // Without a note, and with the capability, the approve goes to the engine.
+        expect((await fetch(`${ctx.baseUrl}/api/v1/runs/r1/gate`, json({ approve: true }))).status).toBe(200);
+        expect(gated).toHaveLength(1);
+      },
+      false,
+    );
+    await withCapability(ctx.adapter, true, async () => {
+      const res = await fetch(`${ctx.baseUrl}/api/v1/runs/r1/gate`, json({ approve: true, amend: 'a note' }));
+      expect(res.status, await res.clone().text()).toBe(200);
+      expect(gated.at(-1)?.slice(0, 3)).toEqual(['r1', true, 'a note']);
+    });
+  });
+
+  it('crew#1139: /health.capabilities.planGateNote says whether the engine lands a plan approval\'s note', async () => {
+    for (const on of [true, false]) {
+      await withCapability(
+        ctx.adapter,
+        true,
+        async () => {
+          const health = (await (await fetch(`${ctx.baseUrl}/api/v1/health`)).json()) as {
+            capabilities?: { planGateNote?: boolean };
+          };
+          expect(health.capabilities?.planGateNote).toBe(on);
+        },
+        on,
+      );
+    }
+  });
+
   it('a plain approve and a reject keep the existing arity (no plan)', async () => {
     await withCapability(ctx.adapter, true, async () => {
       expect((await fetch(`${ctx.baseUrl}/api/v1/runs/r1/gate`, json({ approve: true }))).status).toBe(200);
@@ -182,8 +262,8 @@ describe('POST /runs {plan} and the plan_approval gate — HTTP contract (shadow
         { approve: false, plan },
         { approve: true, action: 'edit_plan' },
         { approve: true, action: 'approve', plan },
-        { approve: true, plan, amend: 'also do x' },
         { approve: true, plan, amendScope: 'creator' },
+        { approve: true, plan, amend: 'also do x', amendScope: 'cursor' },
       ];
       for (const body of cases) {
         const res = await fetch(`${ctx.baseUrl}/api/v1/runs/r1/gate`, json(body));
@@ -412,6 +492,35 @@ describe.skipIf(!ENGINE_HAS_PLAN_GATE)('the plan approval gate through the real 
       'review',
       'security_review',
     ]);
+  });
+
+  it.skipIf(!ENGINE_HAS_PLAN_NOTE)('crew#1139: a plain plan approval with a note lands it on the plan\'s first creator step', async () => {
+    await launch('t3-n', { steps: [{ catalog: 'build' }], touch: TOUCH });
+    const note = 'keep the OS-metadata list in the mirrored fixture';
+    const res = await fetch(`${ctx.baseUrl}/api/v1/runs/t3-n/gate`, json({ approve: true, amend: note }));
+    expect(res.status, await res.clone().text()).toBe(200);
+    const v = await waitFor('the note on the build step', async () => {
+      const view = await viewOf(ctx.adapter, 't3-n');
+      return view?.units.some((u) => u.description.includes(`(operator amendment: ${note})`)) ? view : undefined;
+    });
+    const noted = v.units.filter((u) => u.description.includes(`(operator amendment: ${note})`));
+    expect(ids('t3-n', noted)).toEqual(['build']);
+  });
+
+  it.skipIf(!ENGINE_HAS_PLAN_NOTE)('crew#1139: an edited plan approval with a note lands it on the edited plan\'s first creator step', async () => {
+    await launch('t3-en', { steps: [{ catalog: 'build' }], touch: TOUCH });
+    const note = 'answer in a table';
+    const res = await fetch(
+      `${ctx.baseUrl}/api/v1/runs/t3-en/gate`,
+      json({ approve: true, amend: note, plan: { steps: [{ catalog: 'build', id: 'make' }, { catalog: 'test', id: 'prove' }] } }),
+    );
+    expect(res.status, await res.clone().text()).toBe(200);
+    const v = await waitFor('the note on make', async () => {
+      const view = await viewOf(ctx.adapter, 't3-en');
+      return view?.units.some((u) => u.description.includes(`(operator amendment: ${note})`)) ? view : undefined;
+    });
+    const noted = v.units.filter((u) => u.description.includes(`(operator amendment: ${note})`));
+    expect(ids('t3-en', noted)).toEqual(['make']);
   });
 
   it('reject cancels', async () => {
