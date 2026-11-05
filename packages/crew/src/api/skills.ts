@@ -67,17 +67,17 @@ export const SKILL_FILES_MAX_ENTRIES = 256;
 const revision = z.int().nonnegative();
 const filesMap = record(z.string().min(1), z.string())
   .refine((files) => Object.keys(files).length <= SKILL_FILES_MAX_ENTRIES, {
-    message: `files must carry at most ${SKILL_FILES_MAX_ENTRIES} entries`,
+    error: `files must carry at most ${SKILL_FILES_MAX_ENTRIES} entries`,
   })
   .refine((files) => Object.values(files).every((text) => Buffer.byteLength(text, 'utf8') <= FILE_CONTENT_CAP_BYTES), {
-    message: `every file must be at most ${FILE_CONTENT_CAP_BYTES} bytes of UTF-8`,
+    error: `every file must be at most ${FILE_CONTENT_CAP_BYTES} bytes of UTF-8`,
   });
 
 // Exported so tests/wire-contract.test.ts can pin the published bodies against them.
 export const SkillRevisionSchema = z.strictObject({ expectedRevision: revision });
 export const PutSkillFileSchema = z.strictObject({
   content: z.string().refine((text) => Buffer.byteLength(text, 'utf8') <= FILE_CONTENT_CAP_BYTES, {
-    message: `content must be at most ${FILE_CONTENT_CAP_BYTES} bytes of UTF-8`,
+    error: `content must be at most ${FILE_CONTENT_CAP_BYTES} bytes of UTF-8`,
   }),
   expectedRevision: revision,
 });

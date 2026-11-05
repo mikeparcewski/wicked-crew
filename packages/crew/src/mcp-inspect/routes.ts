@@ -18,7 +18,7 @@
 
 import { isAbsolute } from 'node:path';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { record, z } from '../zod.js';
+import { record, z, zod3Url } from '../zod.js';
 
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
@@ -118,7 +118,7 @@ const Target = z.union([
     cwd: z.string().min(1).max(4096).refine((p) => isAbsolute(p), 'cwd must be an absolute path').optional(),
   }),
   z.strictObject({
-    url: z.url().max(4096).refine((u) => /^https?:\/\//iu.test(u), 'an http(s) URL'),
+    url: z.string().superRefine(zod3Url).max(4096).refine((u) => /^https?:\/\//iu.test(u), 'an http(s) URL'),
     transport: z.enum(['streamable-http', 'sse']).optional(),
     headers: Headers.optional(),
     /** (DES-APPS-001 §5.2) Loopback/private ranges the typed host may reach (a private host NAME needs one). */

@@ -57,19 +57,13 @@ export const PutVoiceDashboardSchema = z.strictObject({
   widgets: z.array(VoiceWidgetManifestSchema).max(VOICE_DASHBOARD_MAX_WIDGETS),
 }).refine(
   (b) => new Set(b.widgets.map((w) => w.id)).size === b.widgets.length,
-  { path: ['widgets'],
-      error: 'two user widgets share an id'
-},
+  { path: ['widgets'], error: 'two user widgets share an id' },
 ).refine(
   (b) => new Set(b.layout).size === b.layout.length,
-  { path: ['layout'],
-      error: 'a widget is on the layout twice'
-},
+  { path: ['layout'], error: 'a widget is on the layout twice' },
 ).refine(
   (b) => b.layout.every((id) => id.startsWith('builtin.') || b.widgets.some((w) => w.id === id)),
-  { path: ['layout'],
-      error: 'the layout names a user widget that is not in `widgets`'
-},
+  { path: ['layout'], error: 'the layout names a user widget that is not in `widgets`' },
 );
 
 export type VoiceWidgetManifest = z.infer<typeof VoiceWidgetManifestSchema>;

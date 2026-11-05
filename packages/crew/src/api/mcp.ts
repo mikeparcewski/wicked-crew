@@ -156,7 +156,7 @@ export const McpServerConfigSchema = z.strictObject({
   auth: AuthSchema.nullable().optional(),
   openapiUrl: z.string().max(4096).optional(),
   openapi: record(z.string(), z.unknown())
-    .refine((d) => Buffer.byteLength(JSON.stringify(d), 'utf8') <= REST_SPEC_MAX_BYTES, { message: `the OpenAPI document is at most ${REST_SPEC_MAX_BYTES} bytes` })
+    .refine((d) => Buffer.byteLength(JSON.stringify(d), 'utf8') <= REST_SPEC_MAX_BYTES, { error: `the OpenAPI document is at most ${REST_SPEC_MAX_BYTES} bytes` })
     .optional(),
   operations: z.array(z.string().min(1).max(256)).min(1).max(512).optional(),
   /**

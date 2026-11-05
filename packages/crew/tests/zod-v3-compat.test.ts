@@ -2,9 +2,10 @@
 // Every expected message below was recorded from zod 3.25.76 (the version crew ran before) on the same
 // schema and input.
 import { describe, expect, it } from 'vitest';
-import { record, z } from '../src/zod.js';
+import { record, z, zod3Url } from '../src/zod.js';
 import { AppActionRunSchema, AppEditsSchema } from '../src/apps/routes.js';
 import { AddSkillSchema } from '../src/api/skills.js';
+import { DemoLaunchSchema } from '../src/api/recording.js';
 
 const issues = (s: z.ZodType, v: unknown): [string, string][] => {
   const r = s.safeParse(v);
@@ -76,6 +77,39 @@ describe("record(): an own __proto__ entry is validated, as zod 3 did (zod 4's z
     expect(issues(files, { 'a.md': 5 })).toEqual([['a.md', 'Expected string, received number']]);
     expect(issues(files, 'x')).toEqual([['', 'Expected object, received string']]);
     expect(issues(z.object({ files }), {})).toEqual([['files', 'Required']]);
+  });
+});
+
+describe("zod3Url: zod 3's .url(), which never rewrites the value (zod 4's z.url() trims it and strips tabs and newlines)", () => {
+  const http = z.string().superRefine(zod3Url).max(40).refine((u) => /^https?:\/\//iu.test(u), 'an http(s) URL');
+  const trimmed = z.string().trim().superRefine(zod3Url).max(40).refine((u) => /^https?:\/\//i.test(u), 'url must be http(s)');
+  const padded = 'https://example.com/' + '\n'.repeat(30) + 'x';
+
+  it('refuses what zod 3 refused: a leading space before the http check, newline padding past the max', () => {
+    expect(issues(http, ' https://example.com')).toEqual([['', 'an http(s) URL']]);
+    expect(issues(http, padded)).toEqual([['', 'String must contain at most 40 character(s)']]);
+    expect(issues(trimmed, padded)).toEqual([['', 'String must contain at most 40 character(s)']]);
+    expect(issues(http, 'nope')).toEqual([['', 'Invalid url'], ['', 'an http(s) URL']]);
+    // plain zod 4 passes both: the check is load-bearing.
+    expect(z.url().max(40).refine((u) => /^https?:\/\//iu.test(u)).safeParse(' https://example.com').success).toBe(true);
+    expect(z.url().max(40).safeParse(padded).success).toBe(true);
+  });
+
+  it('a route body: POST /projects/:id/demo refuses a url padded past 2048 characters with newlines, as on zod 3', () => {
+    const url = 'https://example.com/' + '\n'.repeat(2048) + 'x';
+    expect(issues(DemoLaunchSchema, { url, audience: 'a', show: 'b' })).toEqual([['url', 'String must contain at most 2048 character(s)']]);
+  });
+
+  it('keeps the value as sent (only an explicit .trim() trims)', () => {
+    expect(http.parse('https://exa\nmple.com/')).toBe('https://exa\nmple.com/');
+    expect(trimmed.parse('  https://example.com  ')).toBe('https://example.com');
+  });
+});
+
+describe('non-finite numbers (JSON 1e400 is Infinity)', () => {
+  it("are refused by zod 4's number itself, and read as zod 3's `.finite()` refusal", () => {
+    expect(issues(z.number().max(360), JSON.parse('1e400'))).toEqual([['', 'Number must be finite']]);
+    expect(issues(z.int(), -Infinity)).toEqual([['', 'Number must be finite']]);
   });
 });
 

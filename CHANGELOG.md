@@ -506,15 +506,21 @@ mentioned only where a daemon release depends on them.
   requirement moves `qs` to 6.17.1, which closes GHSA-6pq8-jhm2-2vcw (medium).
 - **`zod` 3.25.76 -> 4.6.7** (GHSA-mrhx-c7xc-m3w5, high: zod collected an issue for every failing element of an
   array however long it was, so one oversized body could exhaust memory; there is no 3.x fix). Every schema moved
-  to zod 4 (the `zod-v3-to-v4` codemod, then hand fixes), and what zod 3 refused is still refused, with the same
-  messages: crew takes `z` from `src/zod.js` (eslint holds every other import to it), which installs zod 3's
-  English messages as zod 4's error map, and its `record()` still validates an own `__proto__` entry, which zod 4
-  skips (crew's JSON body parser keeps one as an own key). What differs: an integer field refuses a value beyond
-  ±2^53 (zod 4's `.int()` is a safe integer, and the `ask` MCP tool's schema now says so with a `maximum`); an
-  array over its maximum is refused on its length alone; a string or array field sent the wrong type can carry a
-  second, length issue; a union refused for a non-integer can read `Invalid input` where zod 3 named the integer;
-  and a 400's `details[]` are zod 4 issue objects (the same `path` and `message`, zod 4's `code` names such as
-  `invalid_value` and `invalid_format`, no `received`).
+  to zod 4 (the `zod-v3-to-v4` codemod, then hand fixes), and nothing zod 3 refused is accepted: a differential
+  over 211 schemas and 43,610 generated inputs, and 503 requests through the daemon, found none. crew takes `z`
+  from `src/zod.js` (eslint holds every other import to it), which installs zod 3's English messages as zod 4's
+  error map; its `record()` still validates an own `__proto__` entry, which zod 4 skips (crew's JSON body parser
+  keeps one as an own key); and URL fields keep zod 3's check, which never rewrites the value (zod 4's `z.url()`
+  trims it and strips tabs and newlines before the checks after it). What differs: an integer field refuses a
+  value beyond ±2^53 (zod 4's `.int()` is a safe integer; the `ask` MCP tool's schema now says so with a
+  `maximum`); a number field refuses ±Infinity (JSON's `1e400`; zod 3 accepted it where no `.finite()` was
+  declared, and it was then stored as `null`), as "Number must be finite"; an array over its maximum is refused
+  on its length alone; a body with several problems can list a different set of them (a second, length issue
+  for a string or array sent the wrong type; one issue for a refused record key; `Invalid input` for a union two
+  of whose shapes nearly match, or one refused for a non-integer); a 400's `details[]` are zod 4 issue objects
+  (the same `path` and `message`, zod 4's `code` names such as `invalid_value` and `invalid_format`, no
+  `received`), as is the issue list `POST /governance/deadletters/replay` quotes; and the MCP SDK's own protocol
+  errors read in zod 3's words too.
 
 ## [0.16.13] — 2026-11-03
 

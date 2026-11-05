@@ -66,7 +66,7 @@ const BoxSchema = z.strictObject({
   h: z.int().min(1).max(50),
 })
   .refine((b) => b.x + b.w <= 12, { path: ['w'],
-      error: 'x + w must be at most 12'
+  error: 'x + w must be at most 12',
 });
 
 const ThemeSchema = z.strictObject({
