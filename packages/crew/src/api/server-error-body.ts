@@ -37,9 +37,10 @@ const MESSAGE_FIELDS: ReadonlySet<string> = new Set(['error', 'message', 'detail
  */
 const FS_ROOTS: ReadonlySet<string> = new Set(['Users', 'home', 'private', 'var', 'tmp', 'opt', 'root', 'srv', 'Volumes', 'etc', 'mnt', 'usr', 'Library', 'System', 'Applications', 'run', 'nix', 'data', 'workspace', 'workspaces', 'media', 'snap', 'code', 'src']);
 /**
- * The first segments of the daemon's own routes (`/api/v1/skills/publish` gives `api` and `skills`), filled as routes
- * register. A 5xx message that points at a route (`POST /skills/publish`, `GET /runs/abc`) keeps the pointer; any
- * other absolute path of two or more segments, whatever its root, is a file path and is taken out (xreview r3).
+ * The first segments of the daemon's own routes (`/api/v1/skills/publish` gives `skills`), filled as routes register.
+ * A 5xx message that points at a route (`POST /skills/publish`, `GET /runs/abc`, anything under `/api/`) keeps the
+ * pointer; any other absolute path of two or more segments, whatever its root, is a file path and is taken out
+ * (xreview r3/r4).
  */
 const ROUTE_ROOTS = new Set<string>(['api']);
 export function noteRoute(url: string): void {
@@ -47,6 +48,12 @@ export function noteRoute(url: string): void {
   const rest = parts[0] === 'api' && /^v\d+$/u.test(parts[1] ?? '') ? parts.slice(2) : parts;
   const first = rest[0];
   if (first !== undefined && !first.startsWith(':') && !FS_ROOTS.has(first)) ROUTE_ROOTS.add(first);
+}
+/** An HTTP pointer, never a file path: under `/api/`, or one of the daemon's route segments right after a method
+ *  (`POST /skills/publish`). A bare `/projects/acme/...` is a file path even though `projects` is a route (xreview r4). */
+const METHOD_BEFORE = /(?:GET|POST|PUT|PATCH|DELETE|HEAD) $/u;
+function isRoutePointer(first: string, before: string): boolean {
+  return first === 'api' || (ROUTE_ROOTS.has(first) && METHOD_BEFORE.test(before));
 }
 /** An absolute POSIX path of two or more segments (optionally `file:` / `file://`), not inside a URL. */
 const POSIX_PATH = /(?<![A-Za-z0-9_.~:/-])(file:(?:\/\/)?)?\/([^\s/"'`<>()[\]{},;:]+)((?:\/[^\s"'`<>()[\]{},;:]*)+)/gu;
@@ -78,7 +85,9 @@ export function redactPaths(text: string): string {
   for (const own of ownRoots()) out = out.replace(new RegExp(`${escapeRegExp(own)}(?:[\\/][^\\s"'\`<>()[\\]{},;]*)?`, 'gu'), '<path>');
   return out
     .replace(WINDOWS_PATH, '<path>')
-    .replace(POSIX_PATH, (whole: string, file: string | undefined, first: string) => (file === undefined && ROUTE_ROOTS.has(first) ? whole : '<path>'))
+    .replace(POSIX_PATH, (whole: string, file: string | undefined, first: string, _rest: string, at: number, all: string) =>
+      file === undefined && isRoutePointer(first, all.slice(Math.max(0, at - 8), at)) ? whole : '<path>',
+    )
     .replace(HOME_PATH, '<path>')
     .replace(DOT_DIR_PATH, '<path>');
 }

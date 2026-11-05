@@ -136,6 +136,10 @@ describe('redactPaths / internalErrorBody / sanitizeServerErrorBody', () => {
     // (xreview r3) any other root is a file path: the open route's real failure shape
     expect(redactPaths('could not open /code/acme/report.html: spawn xdg-open ENOENT')).toBe('could not open <path>: spawn xdg-open ENOENT');
     expect(redactPaths('at /customer/x/y.db')).toBe('at <path>');
+    // (xreview r4) a route segment exempts only a pointer after a method, never a bare path under it
+    noteRoute('/api/v1/projects/:id');
+    expect(redactPaths('could not open /projects/acme/report.html: spawn')).toBe('could not open <path>: spawn');
+    expect(redactPaths('see GET /projects/acme')).toBe('see GET /projects/acme');
   });
 
   it("(xreview r2) a 500 keeps only the named structured fields (run ids, an MCP subject), never nested detail", () => {
