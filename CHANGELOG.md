@@ -12,10 +12,22 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **A launch's brief lists every steering rule in force, matched against the job, none cut (DES-RULE-CHECK-001 S1).**
+  The rules block stopped at 20 rules in severity order, so on the end-to-end pass a bug job's brief left out
+  `learn-tests-with-fixes` behind 14 MCP-server and review-loop rules. Each rule is now matched against the job (the
+  engine's `matchRules`) and listed as `[applies]` or `[may apply]` with its statement whole and no count cap, or under
+  "Not applicable to this job" with the fact that rules it out (at launch: rules scoped only to MCP or editor tool
+  tokens, which those gates judge per call; a run's steps are set with its plan, so step scopes stay "may apply"). The
+  whole block is bounded at 24 KiB of UTF-8 (the engine puts the task and up to 96 KiB of earlier output into one argv
+  argument under the host floor's 128 KiB): every rule is named first, statements and facts are added while they fit,
+  ids are listed whole (an id that is not one plain token as escaped JSON), and ids that cannot fit (hundreds of long
+  ids) are counted on one line; the review reads every rule from the store. On
+  an engine without `matchRules` (or a failed match) every rule is listed as "may apply". A relaunch, workflow or free
+  text, drops an inherited block.
 - **A governed run's brief carries the steering rules in force for its project, for the reviewer to check (operator
   ruling 2026-11-05, end-to-end pass E7).** A workflow launch appends a marked block (`<!-- wicked-crew:rules -->`) that
-  lists the project's in-force rules (the same `considerRules` read `/considered` uses), severity first and capped at
-  20, each statement whole (a rule past the block's budget is counted, never cut). It says the review and QE steps check the work against each one, and that the step that builds does not mark its
+  lists the project's in-force rules (the same `considerRules` read `/considered` uses), each matched against the job
+  and none cut (the DES-RULE-CHECK-001 S1 entry above). It says the review and QE steps check the work against each one, and that the step that builds does not mark its
   own compliance. So every unit's description, the reviewer's brief and the gate judge's criterion carry them, and
   garden's governed-worker E7 has the evaluator answer each one as KEPT, BROKEN, N/A or DEFERRED (a broken rule fails
   review). The deliver text, the working doc's Goal and a relaunch take the block back out; an unreadable store

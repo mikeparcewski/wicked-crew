@@ -703,6 +703,9 @@ interface CoreConstructor {
   /** wicked-core#1018 (wicked-core-ts ≥ the release carrying it): the estate relay's scope for a
    *  token, `{ unit, projectId, repoId, codeGraphDb }`. Rejects with `invalid_token:` or `bad_request:`. */
   resolveEstateScope?(requestJson: string): Promise<string>;
+  /** DES-RULE-CHECK-001 S1 (wicked-core-ts ≥ the release carrying it): which in-force rules a job is checked
+   *  against, one match per rule with the facts that decided it. Pure. Rejects with `bad_request:`. */
+  matchRules?(argsJson: string): Promise<string>;
 }
 
 /** The engine's two MCP broker calls (`Core.evaluateMcpCall` / `Core.evaluateMcpOutput`). */
@@ -1475,6 +1478,16 @@ export class CoreAdapter {
     const judge = Core.judgeMcpCall;
     if (typeof judge !== 'function') return null;
     return (requestJson: string) => judge.call(Core, requestJson);
+  }
+
+  /**
+   * The engine's rule match (`Core.matchRules`, DES-RULE-CHECK-001 S1), or `null` on an addon without it: a launch
+   * then lists every in-force rule as "may apply", none cut. Read at call time: tests swap the static.
+   */
+  static ruleMatcher(): ((argsJson: string) => Promise<string>) | null {
+    const match = Core.matchRules;
+    if (typeof match !== 'function') return null;
+    return (argsJson: string) => match.call(Core, argsJson);
   }
 
   /**

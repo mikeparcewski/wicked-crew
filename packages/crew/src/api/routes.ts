@@ -92,7 +92,7 @@ import type {
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 import { callEstateTool, EstateMcpError, ESTATE_INSTALL_HINT, memoryStoreInfo } from '../core/estate-mcp-client.js';
 import { NO_LEARNINGS_WORKFLOWS, type RunLearningsService } from '../learnings/service.js';
-import { stripRulesBrief, withRulesBrief } from '../decisions/rules-brief.js';
+import { matchRulesForJob, stripRulesBrief, withRulesBrief } from '../decisions/rules-brief.js';
 import { SeatHealthTracker } from './seat-health.js';
 import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
 import { applyCouncilSettings, isCouncilSize, isCouncilStaggerMs } from '../core/council-settings.js';
@@ -1250,6 +1250,9 @@ export interface RuntimeDeps {
     /** (DES-PM-001 §3.2) The launch's project: with a registered PM source, refs resolve through its tracker set. */
     projectId?: string | null,
   ) => Promise<LinkedIssuesResult>;
+  /** DES-RULE-CHECK-001 S1: the engine's rule match (`Core.matchRules`). Injectable so route tests answer without
+   *  the addon; production uses `CoreAdapter.ruleMatcher()` (null on an addon without it: every rule may apply). */
+  matchRules?: (argsJson: string) => Promise<string>;
   seatHealth?: SeatHealthTracker;
   /** wicked-studio#284: the stall watchdog's remembered frames for a run — merged into
    *  `GET /runs/:id/events` at serve time so a reloaded page sees the `workerStalled` /
@@ -3038,7 +3041,9 @@ export function registerRoutes(
     // missing or stale login check, so the standing below is the seats' own answer.
     if (b.clisJson === undefined) await rosterWithStanding.ready?.();
     const input: LaunchRunInput = {
-      problem: b.problem,
+      // (xreview r1 on S1) An inherited rules block never rides a relaunch, workflow or free text: the workflow path
+      // below lists the rules afresh; a free-text launch carries none (its planner would turn rule lines into units).
+      problem: stripRulesBrief(b.problem),
       sessionId: b.sessionId ?? randomUUID(),
       // The default roster carries crew's STANDING (wave 6, the crew half of F-7R2-006): the adapter
       // translates `council_eligible: false` into the engine's per-seat bench verdict at launch
@@ -3257,6 +3262,29 @@ export function registerRoutes(
     // worker cannot read GitHub. The daemon reads each linked issue now and appends its text to the
     // problem, inside a marked block the deliver text takes back out. Workflow launches only: the
     // free-text planner turns sentences into units, so issue text there would become work units.
+    // E7 (operator ruling 2026-11-05) + DES-RULE-CHECK-001 S1: the project's in-force steering rules ride in the brief,
+    // in a marked block the deliver text takes back out (decisions/rules-brief.ts), so the review and QE seats can judge
+    // the work against them. Every rule is matched against the job and listed as applies / may apply / not applicable
+    // with the fact; none is cut. The steps are not known at launch (a run may be planned into catalog steps whose ids
+    // are the planner's), so step scopes decide nothing here; the def's kinds only order the list. Governed launches
+    // only (a named workflow or an explicit plan); best-effort: an unreadable store launches without it.
+    const briefRules = async (workflow: string | null): Promise<void> => {
+      try {
+        const read = await considerations.inForceFor(b.projectId ?? null);
+        const def = workflow === null ? null : adapter.getWorkflow(workflow);
+        const kinds = def === null ? null : def.phases.map((p) => String(p.kind ?? 'build'));
+        const rules = read.source === 'unavailable' ? [] : read.rules;
+        const job = { workflow, steps: null, kinds, project: b.projectId ?? null };
+        const matches = await matchRulesForJob(rules, job, runtime.matchRules ?? CoreAdapter.ruleMatcher(), (m) => req.log.warn(m));
+        const briefed = withRulesBrief(input.problem, rules, matches);
+        input.problem = briefed.problem;
+        if (matches.length > 0) {
+          req.log.info(`[rules] ${input.sessionId}: ${briefed.listed} steering rule(s) to check, ${briefed.notApplicable} not applicable, in the brief`);
+        }
+      } catch (err) {
+        req.log.warn(`[rules] the rules in force could not be read; launching without them: ${message(err)}`);
+      }
+    };
     let linkedIssues: LinkedIssue[] | undefined;
     let linkedAddresses: RunAddress[] | undefined;
     if (b.workflow !== undefined) {
@@ -3291,19 +3319,11 @@ export function registerRoutes(
           req.log.warn(`[learnings] the memory store could not be read; launching without approved learnings: ${message(err)}`);
         }
       }
-      // E7 (operator ruling 2026-11-05): the project's in-force steering rules ride in the brief, in a marked block the
-      // deliver text takes back out (decisions/rules-brief.ts), so the review and QE seats can judge the work against
-      // them. Same scope as the learnings (workflow launches only); best-effort: an unreadable store launches without it.
-      if (!NO_LEARNINGS_WORKFLOWS.has(b.workflow)) {
-        try {
-          const read = await considerations.inForceFor(b.projectId ?? null);
-          const briefed = withRulesBrief(input.problem, read.source === 'unavailable' ? [] : read.rules);
-          input.problem = briefed.problem;
-          if (briefed.listed > 0) req.log.info(`[rules] ${input.sessionId}: ${briefed.listed} steering rule(s) in the brief`);
-        } catch (err) {
-          req.log.warn(`[rules] the rules in force could not be read; launching without them: ${message(err)}`);
-        }
-      }
+      if (!NO_LEARNINGS_WORKFLOWS.has(b.workflow)) await briefRules(b.workflow);
+    } else if (b.plan !== undefined) {
+      // (xreview r2 on S1) A launch with an explicit plan is governed like a named workflow (its steps are given, so
+      // no prose planner reads the brief): its rules ride along too, an inherited block replaced.
+      await briefRules(null);
     }
     // DES-RUNS-REVIEW-001 §3: a hand launch of the run review (`/workflow-review-recent-work`) is prepared like a
     // scheduled one: its snapshot written, repo-less, one seat, its review directory as the only write root.
