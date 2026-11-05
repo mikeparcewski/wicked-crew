@@ -23,6 +23,7 @@ import { AskServer } from '../mcp/ask-server.js';
 import { registerAuthHooks, resolveAuth, type AuthOptions } from './auth.js';
 import { corsAllowed, refuseRequest } from './origin-guard.js';
 import { guardUpgrades, registerFrameGuard } from './frame-guard.js';
+import { registerServerErrorBody } from './server-error-body.js';
 import { AuditLog } from './audit.js';
 import { defaultEvalStoreRoot, EvalRunStore } from './eval-store.js';
 import { DefaultEvalStore } from '../evals/store.js';
@@ -2416,6 +2417,9 @@ export async function createServer(
   // Clickjacking guard (frame-guard.ts): who may frame the daemon's pages, on every response. FIRST
   // onRequest hook, so a preflight 204, a 403 or a 401 answered by a later hook carries it too.
   const frameDirective = registerFrameGuard(app, { allowedOrigins: auth.allowedOrigins });
+  // crew#1359: a 500 answers a code and a generic message (the detail stays in the log); other 5xx bodies lose any
+  // absolute file path. One hook over every route, thrown errors included (server-error-body.ts).
+  registerServerErrorBody(app);
 
   app.addHook('onRequest', async (req, reply) => {
     const origin = req.headers.origin;

@@ -7271,6 +7271,29 @@ export function registerRoutes(
   // An unknown repo is the CALLER's error (404); a binding/parse failure is OURS (500). Don't collapse
   // them (Copilot #227). Core spells the not-found case `no registered repo '<ref>'`.
   const repoReadStatus = (msg: string): number => (/no registered repo/i.test(msg) ? 404 : 500);
+  // crew#1359: a registered repo with no code graph yet is "not indexed", a 404 with a code, never a 500. Only a
+  // CONFIRMED missing graph file says so (the engine resolves the path, `code_graph_db`); any other open failure (a
+  // permissions problem, a path that is a directory) stays a server error, its detail in the log (xreview r1/r2).
+  const repoNotIndexed = async (repo: string): Promise<boolean> => {
+    try {
+      const entry = (await adapter.listRepos()).find((r) => r.id === repo || r.name === repo);
+      const db = entry?.code_graph_db;
+      if (typeof db !== 'string' || db === '') return false;
+      // (xreview r2) Only ENOENT means "absent": existsSync is also false when a parent cannot be searched (EACCES).
+      await fsp.stat(db);
+      return false;
+    } catch (err) {
+      return (err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
+    }
+  };
+  const repoReadFailure = async (reply: FastifyReply, repo: string, err: unknown) => {
+    const msg = message(err);
+    const status = repoReadStatus(msg);
+    if (status === 500 && (await repoNotIndexed(repo))) {
+      return reply.code(404).send({ error: 'this repository has no code graph yet: index it first', code: 'not_indexed' });
+    }
+    return reply.code(status).send({ error: msg });
+  };
 
   app.get(`${V}/governance/coverage`, async (req, reply) => {
     // FINDING-009: with `?repo=<ref>`, report coverage over THAT repo's own code graph. The bare
@@ -7282,8 +7305,7 @@ export function registerRoutes(
         const report = await adapter.getCoverageReportForRepo(repo);
         return { report };
       } catch (err) {
-        const msg = message(err);
-        return reply.code(repoReadStatus(msg)).send({ error: msg });
+        return repoReadFailure(reply, repo, err);
       }
     }
     const report = await adapter.getCoverageReport();
@@ -7303,8 +7325,7 @@ export function registerRoutes(
       const kinds = await adapter.getGraphKindsForRepo(repo);
       return { kinds };
     } catch (err) {
-      const msg = message(err);
-      return reply.code(repoReadStatus(msg)).send({ error: msg });
+      return repoReadFailure(reply, repo, err);
     }
   });
 

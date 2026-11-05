@@ -367,6 +367,18 @@ mentioned only where a daemon release depends on them.
   the existing bindings need no new save. GitHub (github-mcp-server main 99d6d65): its shapes already parse; recorded
   fixtures guard them.
 
+- **A server error answers a code and a generic message; the detail stays in the daemon log (#1359).** A 500 body now
+  carries `error` (a fixed message), `code` (the route's own code token, else `internal_error`) and `requestId` (to
+  find the log line). Of the route's other fields only a named few stay (run ids a partial fan-out launched, an MCP
+  call's outcome and subject, a partial delete's `name` and `ledger` counts); everything else goes to the log only.
+  Other 5xx bodies keep their code and message, with any absolute file path in their decoded strings and keys
+  replaced by `<path>`: any root except the daemon's own route segments (a `POST /skills/publish` pointer stays), and
+  the daemon's state home, home and temp folders matched literally. One `onSend` hook covers every route and
+  Fastify's default error handler (`src/api/server-error-body.ts`); the interactive proxy, which writes its reply
+  itself, sanitizes an upstream 5xx the same way (a compressed one decoded first; one too large to read answers the
+  generic body). `GET /governance/graph` and `GET /governance/coverage` answer a
+  registered repository whose code graph file does not exist yet as a 404 `not_indexed` instead of a 500.
+
 - **A restored registry generation re-projects its sources' structure into estate (crew#1328 item 3).** A restore
   changes a source's projection key (its descriptor and allowed views) without writing a catalog, so nothing
   re-projected it, and the visible set hid the source's estate structure until the next describe or boot. The

@@ -28,6 +28,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { INTERNAL_ERROR_MESSAGE } from '../src/api/server-error-body.js';
 import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -482,7 +483,9 @@ describe('POST /api/v1/testing/evals/run', () => {
     evalsThrows = new Error('store exploded');
     const res = await post('/api/v1/testing/evals/run', {});
     expect(res.status).toBe(500);
-    expect(res.body['error']).toBe('store exploded');
+    // (crew#1359) a 500 answers the generic message; the engine's text stays in the log.
+    expect(res.body['error']).toBe(INTERNAL_ERROR_MESSAGE);
+    expect(res.body['code']).toBe('internal_error');
   });
 });
 
@@ -560,7 +563,8 @@ describe('POST /api/v1/testing/corpora/import', () => {
     importThrows = new Error('knowledge store locked');
     const res = await post('/api/v1/testing/corpora/import', VALID);
     expect(res.status).toBe(500);
-    expect(res.body['error']).toBe('knowledge store locked');
+    // (crew#1359) a 500 answers the generic message; the engine's text stays in the log.
+    expect(res.body['error']).toBe(INTERNAL_ERROR_MESSAGE);
   });
 });
 
