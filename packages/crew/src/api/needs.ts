@@ -516,15 +516,16 @@ export function buildNeeds(input: NeedsInput): Needs {
   const outSeats = input.clis.filter((c) => c.state === 'signed_out');
   // With no seat able to work at all, `cli:none` is the one cause.
   if (anyWorker && outSeats.length > 0) {
-    // A job NEEDS a seat when its work is on it: the seat its current step runs on, or a step not yet
-    // done that is assigned to it. Pool membership is not need (a default launch's pool lists every
+    // A job NEEDS a seat when its work is on it: a step not yet done (running or waiting) assigned to it. Pool membership is not need (a default launch's pool lists every
     // seat but the opt-in ones, signed in or not). Exact seat keys: `pi#2` is not `pi`. The jobs:
     // unfinished, not superseded, not an answered ask, not at the terminal gate (its work is done).
     // A job with its own item (held, waiting on you) is counted here too: its item says why it
     // waits, this one says the seat its next step needs is signed out.
-    const needing = input.runs.filter((r) => eligible(r.runId) && r.gate?.kind !== 'terminal');
+    // A job held for want of a reviewer already names the seats in its judge item: one cause, one item.
+    const needing = input.runs.filter((r) => eligible(r.runId) && r.gate?.kind !== 'terminal' && !gapByRun.has(r.runId));
+    // The unit is the evidence (`run.seat` can be a finished step's, at a deliver gate).
     const onSeat = (r: SystemRun, seat: string): boolean =>
-      r.seat === seat || (byId.get(r.runId)?.units ?? []).some((u) => u.assigned_cli === seat && (u.status === 'pending' || u.status === 'distributed'));
+      (byId.get(r.runId)?.units ?? []).some((u) => u.assigned_cli === seat && (u.status === 'pending' || u.status === 'distributed'));
     for (const c of outSeats) {
       const named = needing.filter((r) => onSeat(r, c.cli));
       if (named.length === 0) continue;

@@ -117,9 +117,9 @@ export interface SeatImagesProbeInput {
   /** The roster's seat CLIs; `null` when the roster could not be read. */
   clis: string[] | null;
   /** The roster CLIs no seat of which is signed in (operator 2026-11-05: a CLI someone never set up is
-   *  not a problem), read AFTER the status settles so it is as fresh as the image reading. Their
+   *  not a problem), read AFTER the status settles (the route also waits for the broker's sign-in refresh). Their
    *  images are not needed until one is signed in: a missing one is said, never degraded. */
-  idle?: () => readonly string[];
+  idle?: () => readonly string[] | Promise<readonly string[]>;
   /** A fresh `seat-image status --json` read. */
   status: () => Promise<SeatImageStatus | null>;
   /** The rebuild, read AFTER the status settles (a rebuild that ends during the read is seen). */
@@ -161,7 +161,7 @@ export async function probeSeatImages(input: SeatImagesProbeInput): Promise<Syst
     return infraRow('seat_images', 'unknown', 'the roster could not be read, so which seat images matter is not known', 'Re-check.', started, { rebuild }, timeoutMs);
   }
   const st = settled.value;
-  const idleSet = new Set(input.idle?.() ?? []);
+  const idleSet = new Set((await input.idle?.()) ?? []);
   const roster = new Set(input.clis.filter((c) => !idleSet.has(c)));
   const seats = st.seats.filter((s) => roster.has(s.cli));
   // Not set up: its image is needed only once it is signed in (the engine builds its own on the

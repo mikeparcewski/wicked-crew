@@ -9763,13 +9763,16 @@ export function registerRoutes(
       const interactiveRoots = [...new Set([defaultInteractiveRoot(stateHome ?? undefined), ...interactiveBridges.keys()])];
       const watch = runtime.watchRegistry?.() ?? null;
       const watchHealth = watch !== null ? (() => { try { return watch.health(); } catch { return null; } })() : null;
+      // The broker probe refreshes each container seat's sign-in: the seat images row reads which CLIs
+      // are signed in only after it, as the CLI cards do.
+      const brokerP = probeBroker({
+        containerFloor,
+        clis: roster.map((r) => r.key).filter((k) => isContainerLoginCli(k)),
+        status: (cli) => containerStatus.refreshFresh(cli),
+      });
       const infraP = Promise.all([
         probeGateway({ containerFloor, gatewayDir, runtime: containerFloor ? resolveContainerRuntime() : null, exec: systemExec }),
-        probeBroker({
-          containerFloor,
-          clis: roster.map((r) => r.key).filter((k) => isContainerLoginCli(k)),
-          status: (cli) => containerStatus.refreshFresh(cli),
-        }),
+        brokerP,
         probeInteractive({
           roots: interactiveRoots,
           readLock: (root) => readBridgeLockAsync(root),
@@ -9788,10 +9791,12 @@ export function registerRoutes(
         probeSeatImages({
           containerFloor,
           clis: rosterSeatClis(),
-          // A CLI none of whose seats is signed in needs no image yet. Read after the image status
-          // settles, from the roster as it stands then (the broker probe refreshes sign-ins meanwhile);
+          // A CLI none of whose seats is signed in needs no image yet, read after the broker's refresh;
           // a CLI with any signed-in seat (`claude#2`) keeps its image.
-          idle: () => idleClis(rosterSeatsNow()),
+          idle: async () => {
+            await brokerP;
+            return idleClis(rosterSeatsNow());
+          },
           status: seatImageStatus,
           rebuild: () => seatImageRebuilder.current(),
         }),

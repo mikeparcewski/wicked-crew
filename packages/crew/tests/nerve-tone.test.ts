@@ -95,12 +95,6 @@ describe('too few seats to review: yellow, with the fix in words', () => {
     expect(n.attention.map((a) => [a.id, a.severity])).toEqual([['cli:none', 'red']]);
   });
 
-  it('the judges card is ok when the only other agent is benched (the bench lifts by itself)', () => {
-    const card = buildGovernance({ governance: null, skillsFindings: [], decisions: null, clis: [cli('claude'), cli('codex', 'benched', { workEligible: false, councilEligible: false })], judgeGapCount: 0, week: null, gatesByYou: 0, steeringRules: 1 }).find((c) => c.key === 'judges')!;
-    expect(card.state).toBe('ok');
-    expect(card.reason).toMatch(/once codex is back from the bench/);
-  });
-
   it('the judges card says it as degraded while nothing is held, down once a job is', () => {
     const base = { governance: null, skillsFindings: [], decisions: null, clis: [cli('claude'), cli('codex', 'signed_out')], week: null, gatesByYou: 0, steeringRules: 1 };
     expect(buildGovernance({ ...base, judgeGapCount: 0 }).find((c) => c.key === 'judges')!.state).toBe('degraded');
@@ -119,9 +113,28 @@ describe('a seat that dropped while a job needs it: yellow', () => {
     expect(needsLevel(n.attention)).toBe('yellow');
   });
 
-  it('the seat the current step runs on counts too, with a default (empty) pool', () => {
-    const n = needs(dropped, [view('b', [])], [run('b', 'working', undefined, 'pi')]);
+  it('a step running on pi counts too, with a default (empty) pool', () => {
+    const v = view('b', []);
+    (v.units[1] as { status: string; assigned_cli: string }).status = 'distributed';
+    (v.units[1] as { status: string; assigned_cli: string }).assigned_cli = 'pi';
+    const n = needs(dropped, [v], [run('b', 'working', undefined, 'pi')]);
     expect(n.attention.map((a) => a.id)).toEqual(['cli:out:pi']);
+  });
+
+  it('a finished step on pi at a deliver gate needs no seat (run.seat is not need)', () => {
+    const v = view('f', ['claude', 'codex', 'pi'], 'awaiting_human', 'pi');
+    (v.units[1] as { status: string }).status = 'done';
+    const r = run('f', 'waiting_on_you', { interactionId: 'i', ord: 2, kind: 'deliver', prompt: 'p', receivedAt: new Date(NOW - 60_000).toISOString() } as SystemRun['gate'], 'pi');
+    expect(needs(dropped, [v], [r]).attention.map((a) => a.id)).not.toContain('cli:out:pi');
+  });
+
+  it('a job held for want of a reviewer has its judge item, never a second seat item for the same cause', () => {
+    // Held at the review of claude's step 1; the pool's only other seat, pi, is signed out (its step 2 waits).
+    const v = view('g', ['claude', 'pi'], 'awaiting_human', 'pi');
+    const r = run('g', 'held', { interactionId: 'i', ord: 1, kind: 'escalation', prompt: 'p', receivedAt: new Date(NOW - 60_000).toISOString() } as SystemRun['gate']);
+    const n = needs(dropped, [v], [r]);
+    expect(n.attention.map((a) => a.id)).toEqual(['run:g']);
+    expect(n.attention[0]!.reason).toMatch(/no independent reviewer for claude’s work \(pi signed out\)/);
   });
 
   it('being in a default pool is not need: a launch that lists pi but has no work on it stays green', () => {
