@@ -53,6 +53,8 @@ export interface RuleMatchJob {
   /** The step kinds the workflow runs (`build`, `test`, …), for the reading order only. */
   kinds?: string[] | null;
   project?: string | null;
+  /** (DES-RULE-CHECK-001, coord E7 rerun) The job's repository: a rule that names it applies. */
+  repo?: string | null;
 }
 
 type BriefRule = Pick<ConformanceRule, 'id' | 'severity' | 'statement'> & Partial<ConformanceRule>;

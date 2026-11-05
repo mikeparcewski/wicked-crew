@@ -12,6 +12,18 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **The review's steering-rule check on the wire, the gate answers and the rule line on the delivery
+  (DES-RULE-CHECK-001 S2/S4; api-types 0.190.0).** Every rule's verdict rides the assurance receipt
+  (`AssuranceReceipt.rules`: `kept` · `broken` · `n_a` · `unchecked` · `skipped` · `waived`, with how, why, cite
+  and judge); a post-hoc delivery's receipt keeps the worst row per rule across the gates, and the PR body's gate
+  cell says "N rules checked: K kept, B broken, X not applicable" (and the unchecked, waived and skipped ones, each
+  skip with its reason). `POST /runs/:id/gate` takes `retry_rules` (re-run the rule check on the same work) and
+  `skip_rules` with `skipRules: [{id, reason}]` (skip an unchecked rule, or confirm a rule the person's own
+  instruction waived, each with a written reason; the engine gets the skips as JSON in `amend`). A skip is the
+  human operator's call alone (a seat or a standing order: 403 `human_operator_only`, audited
+  `gate.skip_rules_refused`), audited `gate.rules_skipped` with each reason. The launch hands the engine the job's
+  repository (`job.repo`), so a rule that names it applies. Needs an engine with the rule check (core-ts after
+  core feat/rule-check-s3); an older one simply carries no `rules`.
 - **Apps on the system's knowledge: the `recall` query kind and the knowledge summary (api-types 0.189.0,
   DES-KNOWLEDGE-DATA-001 §9.1, M6 part 1).** An app's query can now read what its project KNOWS, not only a data
   source's rows: `source: "estate"` (already reserved for every registry kind, so no person's source can hold it),
