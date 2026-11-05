@@ -10,7 +10,7 @@ import type { FastifyInstance } from 'fastify';
 
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
-import { INTERNAL_ERROR_MESSAGE, internalErrorBody, redactPaths, sanitizeServerErrorBody } from '../src/api/server-error-body.js';
+import { INTERNAL_ERROR_MESSAGE, internalErrorBody, noteRoute, redactPaths, sanitizeServerErrorBody } from '../src/api/server-error-body.js';
 import { removeScratch } from './setup/scratch.js';
 import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 
@@ -125,12 +125,17 @@ describe('redactPaths / internalErrorBody / sanitizeServerErrorBody', () => {
   it('takes out POSIX, file:, home-relative, dot-folder and Windows paths, and leaves URLs and route pointers', () => {
     expect(redactPaths(`open ${STATE} failed`)).toBe('open <path> failed');
     expect(redactPaths('at ~/x/y.db and D:\\a\\b.db and C:/Data/x/y.db')).toBe('at <path> and <path> and <path>');
-    expect(redactPaths('file:/home/someone/.wicked-crew/state/estate.db')).toBe('file:<path>');
+    expect(redactPaths('file:/home/someone/.wicked-crew/state/estate.db')).toBe('<path>');
     expect(redactPaths('at /opt2/x/.wicked-crew/state/x.db')).toBe('at <path>');
     expect(redactPaths(`at ${homedir()}/.wicked-crew/a.db`)).toBe('at <path>');
+    noteRoute('/api/v1/skills/publish');
+    noteRoute('/api/v1/runs/:id');
     const pointers = 'see https://example.com/home/x, POST /api/v1/governance/rules, re-publish (POST /skills/publish), GET /runs/abc';
     expect(redactPaths(pointers)).toBe(pointers);
     expect(redactPaths('relative src/math.js stays')).toBe('relative src/math.js stays');
+    // (xreview r3) any other root is a file path: the open route's real failure shape
+    expect(redactPaths('could not open /code/acme/report.html: spawn xdg-open ENOENT')).toBe('could not open <path>: spawn xdg-open ENOENT');
+    expect(redactPaths('at /customer/x/y.db')).toBe('at <path>');
   });
 
   it("(xreview r2) a 500 keeps only the named structured fields (run ids, an MCP subject), never nested detail", () => {
@@ -167,6 +172,24 @@ describe('redactPaths / internalErrorBody / sanitizeServerErrorBody', () => {
     } finally {
       setCrewStateHome(before);
     }
+  });
+
+  it("(xreview r3) a partial delete's 500 keeps name and ledger (ok, removed keys) so studio can tell it apart; never its errors", () => {
+    const body = internalErrorBody(
+      JSON.stringify({
+        error: 'partial delete: retired, but crew could not drop its handoff-ledger row(s)',
+        name: 'gen',
+        interactive: { ok: true, path: STATE },
+        ledger: { ok: false, removed_keys: ['k1'], errors: [{ ledger: 'drafts', error: `unlink ${STATE}` }] },
+      }),
+      'r2',
+    );
+    expect(body).toEqual({ name: 'gen', ledger: { ok: false, removed_keys: ['k1'] }, error: INTERNAL_ERROR_MESSAGE, code: 'internal_error', requestId: 'r2' });
+  });
+
+  it('(xreview r3) a path-named field loses an absolute value of any depth, one segment included', () => {
+    const out = sanitizeServerErrorBody(503, JSON.stringify({ error: 'browsers missing', browsers_path: '/ms-playwright' }), 'r1')!;
+    expect(JSON.parse(out.body)).toEqual({ error: 'browsers missing', browsers_path: '<path>' });
   });
 
   it('keeps only a plain token code', () => {

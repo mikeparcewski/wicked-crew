@@ -24,15 +24,32 @@ import { crewStateHome } from '../projects/state-home.js';
 export const INTERNAL_ERROR_MESSAGE = 'The daemon hit an internal error. Its log has the detail (look up the requestId).';
 const CODE_TOKEN = /^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/u;
 /** The structured fields a 500 keeps (scalars or lists of scalars): what launched before a fan-out failed, and the
- *  MCP call response's own fields (`McpCallResponse`). Every other field is the route's detail, kept in the log. */
-export const SAFE_500_FIELDS: ReadonlySet<string> = new Set(['runIds', 'runId', 'launched', 'outcome', 'subject', 'callId', 'ruleIds', 'denied', 'document_id', 'docId']);
+ *  MCP call response's own fields (`McpCallResponse`), and a partial delete's `name` and `ledger` (its counts and
+ *  removed keys, never its errors: studio tells a partial delete by `ledger`, xreview r3). Every other field is the
+ *  route's detail, kept in the log. */
+export const SAFE_500_FIELDS: ReadonlySet<string> = new Set(['runIds', 'runId', 'launched', 'outcome', 'subject', 'callId', 'ruleIds', 'denied', 'document_id', 'docId', 'name', 'ledger']);
+
+/** Message fields a partial-success object (`ledger`) never keeps inside a 500. */
+const MESSAGE_FIELDS: ReadonlySet<string> = new Set(['error', 'message', 'detail', 'stack', 'statusCode', 'code', 'hint', 'reason']);
 
 /**
- * The top directories of an absolute filesystem path (POSIX). A route pointer such as `/skills/publish` or
- * `/api/v1/runs` is not one of them, so a 501/503's remediation pointer survives (xreview r1).
+ * The top directories of a filesystem path. A route segment never exempts one of these (xreview r3).
  */
-const FS_ROOTS = ['Users', 'home', 'private', 'var', 'tmp', 'opt', 'root', 'srv', 'Volumes', 'etc', 'mnt', 'usr', 'Library', 'System', 'Applications', 'run', 'nix', 'data', 'workspace', 'workspaces', 'media', 'snap'];
-const POSIX_PATH = new RegExp(`(?<![A-Za-z0-9_])(?:file://)?/(?:${FS_ROOTS.join('|')})(?![A-Za-z0-9_.-])(?:/[^\\s"'\`<>()[\\]{},;]*)?`, 'gu');
+const FS_ROOTS: ReadonlySet<string> = new Set(['Users', 'home', 'private', 'var', 'tmp', 'opt', 'root', 'srv', 'Volumes', 'etc', 'mnt', 'usr', 'Library', 'System', 'Applications', 'run', 'nix', 'data', 'workspace', 'workspaces', 'media', 'snap', 'code', 'src']);
+/**
+ * The first segments of the daemon's own routes (`/api/v1/skills/publish` gives `api` and `skills`), filled as routes
+ * register. A 5xx message that points at a route (`POST /skills/publish`, `GET /runs/abc`) keeps the pointer; any
+ * other absolute path of two or more segments, whatever its root, is a file path and is taken out (xreview r3).
+ */
+const ROUTE_ROOTS = new Set<string>(['api']);
+export function noteRoute(url: string): void {
+  const parts = url.split('/').filter((p) => p !== '');
+  const rest = parts[0] === 'api' && /^v\d+$/u.test(parts[1] ?? '') ? parts.slice(2) : parts;
+  const first = rest[0];
+  if (first !== undefined && !first.startsWith(':') && !FS_ROOTS.has(first)) ROUTE_ROOTS.add(first);
+}
+/** An absolute POSIX path of two or more segments (optionally `file:` / `file://`), not inside a URL. */
+const POSIX_PATH = /(?<![A-Za-z0-9_.~:/-])(file:(?:\/\/)?)?\/([^\s/"'`<>()[\]{},;:]+)((?:\/[^\s"'`<>()[\]{},;:]*)+)/gu;
 /** A drive path with either separator (`C:\\Users\\x`, `C:/Data/x`). */
 const WINDOWS_PATH = /(?<![A-Za-z0-9_])[A-Za-z]:[\\/][^\s"'`<>()[\]{},;]*/gu;
 /** A home-relative path, and any path through a dot-folder (`…/.wicked-crew/…`), whatever its root. */
@@ -61,31 +78,51 @@ export function redactPaths(text: string): string {
   for (const own of ownRoots()) out = out.replace(new RegExp(`${escapeRegExp(own)}(?:[\\/][^\\s"'\`<>()[\\]{},;]*)?`, 'gu'), '<path>');
   return out
     .replace(WINDOWS_PATH, '<path>')
-    .replace(POSIX_PATH, '<path>')
+    .replace(POSIX_PATH, (whole: string, file: string | undefined, first: string) => (file === undefined && ROUTE_ROOTS.has(first) ? whole : '<path>'))
     .replace(HOME_PATH, '<path>')
     .replace(DOT_DIR_PATH, '<path>');
 }
 
+/** A field named as a path (`browsers_path`, `root`, `dir`): any absolute value is a file path, one segment or many. */
+const PATH_FIELD = /(?:path|dir|directory|root|folder|file|home)$/iu;
+const ABSOLUTE_VALUE = /^(?:\/|~[\\/]|[A-Za-z]:[\\/]|file:)/u;
+
 /** Every string in `v`, keys included, with its paths taken out (structure kept; on a key collision the first stays). */
-function scrub(v: unknown): unknown {
-  if (typeof v === 'string') return redactPaths(v);
-  if (Array.isArray(v)) return v.map(scrub);
+function scrub(v: unknown, key = ''): unknown {
+  if (typeof v === 'string') return PATH_FIELD.test(key) && ABSOLUTE_VALUE.test(v) ? '<path>' : redactPaths(v);
+  if (Array.isArray(v)) return v.map((x) => scrub(x, key));
   if (v !== null && typeof v === 'object') {
     const out: Record<string, unknown> = {};
     for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
-      const key = redactPaths(k);
-      if (!(key in out)) out[key] = scrub(x);
+      const safeKey = redactPaths(k);
+      if (!(safeKey in out)) out[safeKey] = scrub(x, k);
     }
     return out;
   }
   return v;
 }
 
-/** A safe field's value: a scalar, or a list of scalars, strings with paths taken out. Anything else is not kept. */
-function safeValue(v: unknown): unknown {
-  if (v === null || typeof v === 'number' || typeof v === 'boolean') return v;
-  if (typeof v === 'string') return redactPaths(v);
-  if (Array.isArray(v) && v.every((x) => x === null || ['string', 'number', 'boolean'].includes(typeof x))) return v.map(safeValue);
+function isScalar(x: unknown): boolean {
+  return x === null || ['string', 'number', 'boolean'].includes(typeof x);
+}
+
+/**
+ * A safe field's value: a scalar or a list of scalars (strings with paths taken out); for an object (the partial
+ * delete's `ledger`, which studio reads to tell a partial delete from a failure), its scalar and scalar-list fields
+ * other than message ones. Anything else is not kept.
+ */
+function safeValue(v: unknown, key: string, depth = 0): unknown {
+  if (isScalar(v)) return scrub(v, key);
+  if (Array.isArray(v)) return v.every(isScalar) ? v.map((x) => scrub(x, key)) : undefined;
+  if (depth === 0 && v !== null && typeof v === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+      if (MESSAGE_FIELDS.has(k) || k === 'errors') continue;
+      const kept = safeValue(x, k, 1);
+      if (kept !== undefined && !(typeof kept === 'object' && kept !== null && !Array.isArray(kept))) out[redactPaths(k)] = kept;
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
+  }
   return undefined;
 }
 
@@ -100,7 +137,7 @@ export function internalErrorBody(original: string, requestId: string): Record<s
       const own = obj['code'];
       if (typeof own === 'string' && CODE_TOKEN.test(own)) code = own;
       for (const field of SAFE_500_FIELDS) {
-        const value = field in obj ? safeValue(obj[field]) : undefined;
+        const value = field in obj ? safeValue(obj[field], field) : undefined;
         if (value !== undefined) kept[field] = value;
       }
     }
@@ -135,6 +172,7 @@ function asText(payload: unknown): string | null {
 }
 
 export function registerServerErrorBody(app: FastifyInstance): void {
+  app.addHook('onRoute', (route) => noteRoute(route.url));
   app.addHook('onSend', async (req: FastifyRequest, reply: FastifyReply, payload: unknown) => {
     const status = reply.statusCode;
     if (status < 500) return payload;
