@@ -23,7 +23,7 @@ import { MembershipIndex } from '../src/projects/membership-index.js';
 import { AuditLog } from '../src/api/audit.js';
 import { DEMO_EXPORT_TIMEOUT_MS } from '../src/api/recording.js';
 import type { DemoExportSchema } from '../src/api/recording.js';
-import type { z } from 'zod';
+import type { z } from '../src/zod.js';
 import type { DemoExportBody, DemoExportResponse } from 'wicked-crew-api-types';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { removeScratch } from './setup/scratch.js';

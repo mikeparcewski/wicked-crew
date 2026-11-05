@@ -14,7 +14,7 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { z } from 'zod';
+import { z } from '../zod.js';
 
 import type { AuditLog } from '../api/audit.js';
 import { API_PREFIX } from '../api/api-prefix.js';

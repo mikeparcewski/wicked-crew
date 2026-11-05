@@ -8,7 +8,7 @@
  * from the unit's `unitOutputCaptured`, emitted before the gate runs (joined).
  */
 
-import { z } from 'zod';
+import { z } from '../../zod.js';
 import type { WatchCheck } from '../types.js';
 
 interface Bag {

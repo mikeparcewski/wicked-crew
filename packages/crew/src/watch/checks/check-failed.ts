@@ -7,13 +7,13 @@
  * failed check never emits "fine": its runs' coverage already says it did not check.
  */
 
-import { z } from 'zod';
+import { z } from '../../zod.js';
 import type { CheckOutput, WatchCheck } from '../types.js';
 
 const Threshold = z.strictObject({
-    failures: z.int().min(1).max(1_000),
-    window_minutes: z.int().min(1).max(1_440),
-  });
+  failures: z.int().min(1).max(1_000),
+  window_minutes: z.int().min(1).max(1_440),
+});
 type Threshold = z.infer<typeof Threshold>;
 
 interface Episode {

@@ -25,7 +25,7 @@
  * message (`noteSend`, from the route), so an agent token's chat message records nothing.
  */
 
-import { z } from 'zod';
+import { z } from '../zod.js';
 
 import type { ChatTranscriptStore } from '../api/chat-transcripts.js';
 import { chatTurnStaleAfterMs } from '../api/chat-turns.js';
@@ -454,7 +454,7 @@ export class ChatDecisionRecorder {
     const key = ChatDecisionRecorder.key(turn.chat, turn.turnId);
     if (this.turns.get(key) !== turn) return;
     this.turns.delete(key);
-    const work = this.record(z.string(), turn).catch((err: unknown) =>
+    const work = this.record(turn).catch((err: unknown) =>
       this.log(`[decisions] chat ${turn.chat} turn ${turn.turnId}: ${err instanceof Error ? err.message : String(err)}`),
     );
     this.track(work);

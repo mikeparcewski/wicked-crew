@@ -15,7 +15,7 @@
  * - `unchanged` → nothing.
  */
 
-import { z } from 'zod';
+import { z } from '../../zod.js';
 import type { CheckOutput, WatchCheck } from '../types.js';
 
 interface Lift {

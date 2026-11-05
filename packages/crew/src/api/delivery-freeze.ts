@@ -19,7 +19,7 @@
  */
 
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
+import { z } from '../zod.js';
 import type { AuditLog } from './audit.js';
 import type { Actor, AuditEntry } from '../core/types.js';
 import { API_PREFIX } from './api-prefix.js';

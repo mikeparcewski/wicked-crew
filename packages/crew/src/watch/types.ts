@@ -169,8 +169,8 @@ export interface WatchCheck<P = Record<string, unknown>, T = Record<string, unkn
   /** `"deterministic:<name>"` (`"llm:<prompt-ref>@<n>"` lands with TR-W9). */
   name: string;
   lane: 'deterministic' | 'llm';
-  paramsSchema: ZodType<P, P>;
-  thresholdSchema: ZodType<T, T>;
+  paramsSchema: ZodType<P>;
+  thresholdSchema: ZodType<T>;
   /** Pure over (input, the run's folded state); 0..n outputs. A throw is counted by the lane, never escapes. */
   evaluate(input: KeyPointInput, state: RunWatchState, params: P, threshold: T, ctx: CheckCtx): Promise<CheckOutput[]> | CheckOutput[];
   /**

@@ -29,7 +29,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { z } from 'zod';
+import { z } from '../../zod.js';
 import type { CheckCtx, CheckOutput, DiscoveryRun, DiscoverySnapshot, KeyPointInput, RunWatchState, WatchCheck } from '../types.js';
 
 export type DiscoveryQuery = 'added_by_hand' | 'what_catches';

@@ -15,7 +15,7 @@
  * staged check, the builder and `apps_check` all name the same place.
  */
 
-import { z } from 'zod';
+import { record, z } from '../zod.js';
 
 import type { AppBindingRef, AppCheckFinding, AppParamSchema, AppParamsSchema, AppSpec, AppValue } from '../core/types.js';
 import { MCP_SERVER_NAME_RE } from '../mcp/classify.js';
@@ -56,38 +56,36 @@ const sourceName = z.string().regex(MCP_SERVER_NAME_RE, 'a source name is 1-63 o
 const column = z.string().regex(COLUMN_RE, 'a column is 1-128 of A-Z a-z 0-9 _ -, starting with a letter or _');
 const color = z.string().regex(COLOR_RE, 'a colour is #rrggbb');
 const text = (max: number) => z.string().min(1).max(max);
-const binding = z.custom<AppBindingRef>((v) => typeof v === 'string' && BINDING_RE.test(v), {
-    error: 'a binding is filter.<id>, form.<field>, row.<column> or url.<name>'
-});
-const bindings = z.record(z.string().regex(PARAM_RE), binding).refine((r) => Object.keys(r).length <= 30, 'at most 30 bindings');
+const binding = z.custom<AppBindingRef>((v) => typeof v === 'string' && BINDING_RE.test(v), { error: 'a binding is filter.<id>, form.<field>, row.<column> or url.<name>' });
+const bindings = record(z.string().regex(PARAM_RE), binding).refine((r) => Object.keys(r).length <= 30, 'at most 30 bindings');
 
 const BoxSchema = z.strictObject({
-    x: z.int().min(0).max(11),
-    y: z.int().min(0).max(999),
-    w: z.int().min(1).max(12),
-    h: z.int().min(1).max(50),
-  })
+  x: z.int().min(0).max(11),
+  y: z.int().min(0).max(999),
+  w: z.int().min(1).max(12),
+  h: z.int().min(1).max(50),
+})
   .refine((b) => b.x + b.w <= 12, { path: ['w'],
       error: 'x + w must be at most 12'
 });
 
 const ThemeSchema = z.strictObject({
-    mode: z.enum(['light', 'dark', 'auto']).optional(),
-    accent: color.optional(),
-    palette: z.array(color).max(12).optional(),
-    density: z.enum(['comfortable', 'compact']).optional(),
-  });
+  mode: z.enum(['light', 'dark', 'auto']).optional(),
+  accent: color.optional(),
+  palette: z.array(color).max(12).optional(),
+  density: z.enum(['comfortable', 'compact']).optional(),
+});
 
 const FormatSchema = z.union([
   z.strictObject({
-          kind: z.literal('currency'),
-          currency: z.string().regex(/^[A-Z]{3}$/, 'a currency is an ISO 4217 code'),
-          decimals: z.int().min(0).max(10).optional(),
-        }),
+    kind: z.literal('currency'),
+    currency: z.string().regex(/^[A-Z]{3}$/, 'a currency is an ISO 4217 code'),
+    decimals: z.int().min(0).max(10).optional(),
+  }),
   z.strictObject({
-          kind: z.enum(['text', 'number', 'percent', 'date', 'datetime', 'duration']),
-          decimals: z.int().min(0).max(10).optional(),
-        }),
+    kind: z.enum(['text', 'number', 'percent', 'date', 'datetime', 'duration']),
+    decimals: z.int().min(0).max(10).optional(),
+  }),
 ]);
 
 const QueryBindingSchema = z.strictObject({ query: namedId, params: bindings.optional() });
@@ -102,97 +100,97 @@ const base = {
 };
 
 const TableSchema = z.strictObject({
-    ...base,
-    type: z.literal('table'),
-    data: QueryBindingSchema,
-    columns: z
-      .array(z.strictObject({ column, label: z.string().max(120).optional(), format: FormatSchema.optional() }))
-      .min(1)
-      .max(200)
-      .optional(),
-    rowActions: z.array(ActionBindingSchema).max(4).optional(),
-    pageSize: z.int().min(5).max(500).optional(),
-  });
+  ...base,
+  type: z.literal('table'),
+  data: QueryBindingSchema,
+  columns: z
+    .array(z.strictObject({ column, label: z.string().max(120).optional(), format: FormatSchema.optional() }))
+    .min(1)
+    .max(200)
+    .optional(),
+  rowActions: z.array(ActionBindingSchema).max(4).optional(),
+  pageSize: z.int().min(5).max(500).optional(),
+});
 
 const ChartSchema = z.strictObject({
-    ...base,
-    type: z.literal('chart'),
-    chart: z.enum(['line', 'bar', 'area', 'pie']),
-    data: QueryBindingSchema,
-    x: column,
-    series: z.array(z.strictObject({ column, label: z.string().max(120).optional(), color: color.optional() })).min(1).max(12),
-    stacked: z.boolean().optional(),
-  });
+  ...base,
+  type: z.literal('chart'),
+  chart: z.enum(['line', 'bar', 'area', 'pie']),
+  data: QueryBindingSchema,
+  x: column,
+  series: z.array(z.strictObject({ column, label: z.string().max(120).optional(), color: color.optional() })).min(1).max(12),
+  stacked: z.boolean().optional(),
+});
 
 const KpiSchema = z.strictObject({
-    ...base,
-    type: z.literal('kpi'),
-    data: QueryBindingSchema,
-    value: column,
-    format: FormatSchema.optional(),
-    delta: column.optional(),
-    caption: z.string().max(120).optional(),
-  });
+  ...base,
+  type: z.literal('kpi'),
+  data: QueryBindingSchema,
+  value: column,
+  format: FormatSchema.optional(),
+  delta: column.optional(),
+  caption: z.string().max(120).optional(),
+});
 
 const TextSchema = z.strictObject({ ...base, type: z.literal('text'), text: text(4000), style: z.enum(['heading', 'body', 'caption']).optional() });
 
 const FilterSchema = z.strictObject({
-    ...base,
-    type: z.literal('filter'),
-    filter: z.enum(['select', 'date-range', 'search']),
-    label: z.string().max(120).optional(),
-    options: z
-      .discriminatedUnion('kind', [
-        z.strictObject({ kind: z.literal('query'), query: QueryBindingSchema, value: column, label: column.optional() }),
-        z.strictObject({ kind: z.literal('values'), values: z.array(OptionSchema).min(1).max(200) }),
-      ])
-      .optional(),
-    default: z.union([z.string().max(200), z.strictObject({ lastDays: z.int().min(1).max(3660) })]).optional(),
-  });
+  ...base,
+  type: z.literal('filter'),
+  filter: z.enum(['select', 'date-range', 'search']),
+  label: z.string().max(120).optional(),
+  options: z
+    .discriminatedUnion('kind', [
+      z.strictObject({ kind: z.literal('query'), query: QueryBindingSchema, value: column, label: column.optional() }),
+      z.strictObject({ kind: z.literal('values'), values: z.array(OptionSchema).min(1).max(200) }),
+    ])
+    .optional(),
+  default: z.union([z.string().max(200), z.strictObject({ lastDays: z.int().min(1).max(3660) })]).optional(),
+});
 
 const FormSchema = z.strictObject({
-    ...base,
-    type: z.literal('form'),
-    fields: z
-      .array(
-        z.strictObject({
-                      name: z.string().regex(FIELD_RE, 'a field name is 1-64 of a-z 0-9 _, starting with a letter'),
-                      label: z.string().max(120).optional(),
-                      input: z.enum(['text', 'textarea', 'number', 'date', 'checkbox', 'select']),
-                      required: z.boolean().optional(),
-                      options: z.array(OptionSchema).min(1).max(200).optional(),
-                    }),
-      )
-      .min(1)
-      .max(30),
-    submit: ActionBindingSchema,
-  });
+  ...base,
+  type: z.literal('form'),
+  fields: z
+    .array(
+      z.strictObject({
+                    name: z.string().regex(FIELD_RE, 'a field name is 1-64 of a-z 0-9 _, starting with a letter'),
+                    label: z.string().max(120).optional(),
+                    input: z.enum(['text', 'textarea', 'number', 'date', 'checkbox', 'select']),
+                    required: z.boolean().optional(),
+                    options: z.array(OptionSchema).min(1).max(200).optional(),
+                  }),
+    )
+    .min(1)
+    .max(30),
+  submit: ActionBindingSchema,
+});
 
 const ButtonSchema = z.strictObject({ ...base, type: z.literal('button'), action: ActionBindingSchema });
 
 const ImageSchema = z.strictObject({
-    ...base,
-    type: z.literal('image'),
-    src: z
-      .string()
-      .max(IMAGE_MAX_BASE64 + 32)
-      .regex(IMAGE_RE, 'an image is a data:image/(png|jpeg|gif|webp);base64 URI')
-      .refine((s) => {
-        const n = base64Bytes(s.slice(s.indexOf(',') + 1));
-        return n !== null && n <= IMAGE_MAX_BYTES;
-      }, 'an image is whole base64 of at most 256 KB'),
-    alt: z.string().max(300),
-  });
+  ...base,
+  type: z.literal('image'),
+  src: z
+    .string()
+    .max(IMAGE_MAX_BASE64 + 32)
+    .regex(IMAGE_RE, 'an image is a data:image/(png|jpeg|gif|webp);base64 URI')
+    .refine((s) => {
+      const n = base64Bytes(s.slice(s.indexOf(',') + 1));
+      return n !== null && n <= IMAGE_MAX_BYTES;
+    }, 'an image is whole base64 of at most 256 KB'),
+  alt: z.string().max(300),
+});
 
 const LinkSchema = z.strictObject({
-    ...base,
-    type: z.literal('link'),
-    label: text(120),
-    to: z.discriminatedUnion('kind', [
-      z.strictObject({ kind: z.literal('page'), page: id, params: bindings.optional() }),
-      z.strictObject({ kind: z.literal('href'), href: z.string().max(2048) }),
-    ]),
-  });
+  ...base,
+  type: z.literal('link'),
+  label: text(120),
+  to: z.discriminatedUnion('kind', [
+    z.strictObject({ kind: z.literal('page'), page: id, params: bindings.optional() }),
+    z.strictObject({ kind: z.literal('href'), href: z.string().max(2048) }),
+  ]),
+});
 
 const ComponentSchema = z.discriminatedUnion('type', [
   TableSchema,
@@ -211,24 +209,24 @@ const PageSchema = z.strictObject({ id, title: text(80), components: z.array(Com
 const scalar = z.union([z.string().max(1000), z.number().finite(), z.boolean()]);
 
 const ParamSchema = z.strictObject({
-    type: z.enum(['string', 'number', 'integer', 'boolean', 'array']),
-    items: z.strictObject({ type: z.enum(['string', 'number', 'integer']) }).optional(),
-    format: z.enum(['date', 'date-time', 'uuid', 'email']).optional(),
-    enum: z.array(z.union([z.string().max(200), z.number().finite()])).min(1).max(200).optional(),
-    minimum: z.number().finite().optional(),
-    maximum: z.number().finite().optional(),
-    minLength: z.int().min(0).max(100_000).optional(),
-    maxLength: z.int().min(0).max(100_000).optional(),
-    default: scalar.optional(),
-    description: z.string().max(500).optional(),
-    from: z.enum(['viewer.email', 'viewer.name', 'viewer.id', 'viewer.groups']).optional(),
-  });
+  type: z.enum(['string', 'number', 'integer', 'boolean', 'array']),
+  items: z.strictObject({ type: z.enum(['string', 'number', 'integer']) }).optional(),
+  format: z.enum(['date', 'date-time', 'uuid', 'email']).optional(),
+  enum: z.array(z.union([z.string().max(200), z.number().finite()])).min(1).max(200).optional(),
+  minimum: z.number().finite().optional(),
+  maximum: z.number().finite().optional(),
+  minLength: z.int().min(0).max(100_000).optional(),
+  maxLength: z.int().min(0).max(100_000).optional(),
+  default: scalar.optional(),
+  description: z.string().max(500).optional(),
+  from: z.enum(['viewer.email', 'viewer.name', 'viewer.id', 'viewer.groups']).optional(),
+});
 
 const ParamsSchema = z.strictObject({
-    type: z.literal('object'),
-    properties: z.record(z.string().regex(PARAM_RE, 'a parameter name is 1-64 of A-Z a-z 0-9 _'), ParamSchema),
-    required: z.array(z.string()).max(30).optional(),
-  })
+  type: z.literal('object'),
+  properties: record(z.string().regex(PARAM_RE, 'a parameter name is 1-64 of A-Z a-z 0-9 _'), ParamSchema),
+  required: z.array(z.string()).max(30).optional(),
+})
   .refine((p) => Object.keys(p.properties).length <= 30, 'at most 30 parameters');
 
 const RefreshSchema = z.union([
@@ -238,17 +236,17 @@ const RefreshSchema = z.union([
 ]);
 
 const QuerySchema = z.strictObject({
-    id: namedId,
-    source: sourceName,
-    kind: z.enum(['sql', 'graphql', 'rest', 'mcp', 'crew']),
-    description: z.string().max(500).optional(),
-    params: ParamsSchema.optional(),
-    output: z.array(z.strictObject({ name: column, type: z.enum(['string', 'number', 'integer', 'boolean', 'date', 'datetime']), nullable: z.boolean().optional() })).min(1).max(200),
-    rowPath: z.string().max(256).regex(JSON_PATH_RE, 'a row path is $ then .name, [*] or [n] steps').optional(),
-    morePath: z.string().max(256).regex(JSON_PATH_RE, 'a more path is $ then .name, [*] or [n] steps').optional(),
-    refresh: RefreshSchema.optional(),
-    public: z.boolean().optional(),
-  });
+  id: namedId,
+  source: sourceName,
+  kind: z.enum(['sql', 'graphql', 'rest', 'mcp', 'crew']),
+  description: z.string().max(500).optional(),
+  params: ParamsSchema.optional(),
+  output: z.array(z.strictObject({ name: column, type: z.enum(['string', 'number', 'integer', 'boolean', 'date', 'datetime']), nullable: z.boolean().optional() })).min(1).max(200),
+  rowPath: z.string().max(256).regex(JSON_PATH_RE, 'a row path is $ then .name, [*] or [n] steps').optional(),
+  morePath: z.string().max(256).regex(JSON_PATH_RE, 'a more path is $ then .name, [*] or [n] steps').optional(),
+  refresh: RefreshSchema.optional(),
+  public: z.boolean().optional(),
+});
 
 const ParamValueSchema = z.strictObject({ kind: z.literal('param'), name: z.string().regex(PARAM_RE) });
 const ValueSchema = z.discriminatedUnion('kind', [
@@ -259,51 +257,49 @@ const ValueSchema = z.discriminatedUnion('kind', [
 ]);
 
 const ApiActionSchema = z.strictObject({
-    id: namedId,
-    kind: z.literal('api'),
-    source: sourceName,
-    call: z.discriminatedUnion('kind', [
-      z.strictObject({ kind: z.literal('tool'), tool: z.string().regex(TOOL_RE, 'a tool name is 1-128 of A-Z a-z 0-9 _ . -') }),
-      z.strictObject({
-                kind: z.literal('mutation'),
-                mutation: text(16_384).refine((m) => Buffer.byteLength(m, 'utf8') <= 16_384, 'a mutation is at most 16 KB of UTF-8'),
-              }),
-    ]),
-    args: z.record(z.string().min(1).max(128), ValueSchema).refine((r) => Object.keys(r).length <= 50, 'at most 50 arguments'),
-    params: ParamsSchema.optional(),
-    description: z.string().max(500).optional(),
-  });
+  id: namedId,
+  kind: z.literal('api'),
+  source: sourceName,
+  call: z.discriminatedUnion('kind', [
+    z.strictObject({ kind: z.literal('tool'), tool: z.string().regex(TOOL_RE, 'a tool name is 1-128 of A-Z a-z 0-9 _ . -') }),
+    z.strictObject({
+              kind: z.literal('mutation'),
+              mutation: text(16_384).refine((m) => Buffer.byteLength(m, 'utf8') <= 16_384, 'a mutation is at most 16 KB of UTF-8'),
+            }),
+  ]),
+  args: record(z.string().min(1).max(128), ValueSchema).refine((r) => Object.keys(r).length <= 50, 'at most 50 arguments'),
+  params: ParamsSchema.optional(),
+  description: z.string().max(500).optional(),
+});
 
 const RowWriteActionSchema = z.strictObject({
-    id: namedId,
-    kind: z.literal('row-write'),
-    source: sourceName,
-    table: z.string().regex(TABLE_RE, 'a table is schema.table'),
-    op: z.enum(['insert', 'update', 'delete']),
-    set: z
-      .record(z.string().regex(SQL_IDENT_RE, 'a column is a plain SQL identifier'), ValueSchema)
-      .refine((r) => Object.keys(r).length <= 200, 'at most 200 columns')
-      .optional(),
-    key: z
-      .record(z.string().regex(SQL_IDENT_RE, 'a key column is a plain SQL identifier'), ParamValueSchema)
-      .refine((k) => Object.keys(k).length >= 1 && Object.keys(k).length <= 16, 'a key names 1-16 columns'),
-    params: ParamsSchema.optional(),
-    description: z.string().max(500).optional(),
-  });
+  id: namedId,
+  kind: z.literal('row-write'),
+  source: sourceName,
+  table: z.string().regex(TABLE_RE, 'a table is schema.table'),
+  op: z.enum(['insert', 'update', 'delete']),
+  set: record(z.string().regex(SQL_IDENT_RE, 'a column is a plain SQL identifier'), ValueSchema)
+    .refine((r) => Object.keys(r).length <= 200, 'at most 200 columns')
+    .optional(),
+  key: record(z.string().regex(SQL_IDENT_RE, 'a key column is a plain SQL identifier'), ParamValueSchema)
+    .refine((k) => Object.keys(k).length >= 1 && Object.keys(k).length <= 16, 'a key names 1-16 columns'),
+  params: ParamsSchema.optional(),
+  description: z.string().max(500).optional(),
+});
 
 const ActionSchema = z.discriminatedUnion('kind', [ApiActionSchema, RowWriteActionSchema]);
 
 /** The whole `apps.json`. */
 export const AppSpecSchema = z.strictObject({
-    schema: z.literal('wicked.apps/v1'),
-    name: text(120),
-    description: z.string().max(2000).optional(),
-    theme: ThemeSchema.optional(),
-    pages: z.array(PageSchema).min(1).max(20),
-    queries: z.array(QuerySchema).max(100),
-    actions: z.array(ActionSchema).max(50),
-    linkHosts: z.array(z.string().regex(HOST_RE, 'a link host is a lower-case host name, no scheme or port')).max(50),
-  });
+  schema: z.literal('wicked.apps/v1'),
+  name: text(120),
+  description: z.string().max(2000).optional(),
+  theme: ThemeSchema.optional(),
+  pages: z.array(PageSchema).min(1).max(20),
+  queries: z.array(QuerySchema).max(100),
+  actions: z.array(ActionSchema).max(50),
+  linkHosts: z.array(z.string().regex(HOST_RE, 'a link host is a lower-case host name, no scheme or port')).max(50),
+});
 
 /** The largest `apps.json` crew reads (the spec, images included). */
 export const APP_SPEC_MAX_BYTES = 2 * 1024 * 1024;
@@ -359,13 +355,14 @@ const normalise = (path: ReadonlyArray<string | number>): string =>
 
 const own = (o: object, k: string): boolean => Object.hasOwn(o, k);
 
-function pathOf(path: ReadonlyArray<string | number>): string {
+function pathOf(path: ReadonlyArray<PropertyKey>): string {
   let out = '$';
-  for (const p of path) out += typeof p === 'number' ? `[${p}]` : /^[A-Za-z_][A-Za-z0-9_]*$/.test(p) ? `.${p}` : `[${JSON.stringify(p)}]`;
+  // zod 4 types an issue path as PropertyKey[]; a JSON document never yields a symbol key.
+  for (const p of path) out += typeof p === 'number' ? `[${p}]` : typeof p === 'symbol' ? `[${String(p)}]` : /^[A-Za-z_][A-Za-z0-9_]*$/.test(p) ? `.${p}` : `[${JSON.stringify(p)}]`;
   return out;
 }
 
-function finding(code: string, path: ReadonlyArray<string | number>, message: string): AppCheckFinding {
+function finding(code: string, path: ReadonlyArray<PropertyKey>, message: string): AppCheckFinding {
   return { stage: 'spec', code, path: pathOf(path), message };
 }
 

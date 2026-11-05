@@ -15,7 +15,7 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { z } from 'zod';
+import { z } from '../../zod.js';
 
 import { API_PREFIX } from '../../api/api-prefix.js';
 import { trustAtLeast } from '../../api/auth.js';
@@ -66,11 +66,11 @@ const TargetSchema = z.discriminatedUnion('kind', [
 ]);
 
 export const CreateTrackerLinkSchema = z.strictObject({
-    source: z.string().min(1).max(63),
-    tenant: z.string().min(1).max(256),
-    key: z.string().min(1).max(201),
-    target: TargetSchema,
-  });
+  source: z.string().min(1).max(63),
+  tenant: z.string().min(1).max(256),
+  key: z.string().min(1).max(201),
+  target: TargetSchema,
+});
 
 const ListQuery = z.strictObject({ project: z.string().min(1).max(128).optional(), repo: z.string().min(1).max(128).optional() });
 const IssuesQuery = z.strictObject({ project: z.string().min(1).max(128).optional(), repo: z.string().min(1).max(128).optional(), q: z.string().max(200).optional() });
@@ -439,7 +439,7 @@ export function registerTrackerRoutes(app: FastifyInstance, deps: TrackerRouteDe
         out = await deps.store.mutate((f) => {
           const s = f.servers.find((x) => x.name === b.source);
           // Saved again as another entry (a new id), or re-pointed at another server, since the lookup: nothing is linked.
-          if (s === undefined || s.id !== e.id || pmDescriptorHash(configOf(s)) !== pmDescriptorHash(configOf(z.string(), e.record))) return { gone: true as const };
+          if (s === undefined || s.id !== e.id || pmDescriptorHash(configOf(s)) !== pmDescriptorHash(configOf(e.record))) return { gone: true as const };
           const trackers = trackersOf(s);
           let t = trackers.find((x) => x.id === trackerId);
           if (t === undefined) {

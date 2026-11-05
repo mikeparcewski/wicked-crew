@@ -24,7 +24,7 @@ import { randomUUID } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import { basename, extname, join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
+import { z } from '../zod.js';
 import { API_PREFIX } from './api-prefix.js';
 
 const V = API_PREFIX;
@@ -54,25 +54,25 @@ const CaptureTextFileSchema = z.strictObject({ name: NameSchema, text: z.string(
 const CaptureImageFileSchema = z.strictObject({ name: NameSchema, mediaType: z.string().min(1), dataBase64: z.string().min(1) });
 
 export const CaptureSchema = z.strictObject({
-    notes: z.string().optional(),
-    files: z.array(z.union([CaptureTextFileSchema, CaptureImageFileSchema])).max(CAPTURE_MAX_FILES).optional(),
-    /** wicked-core#850 — the explicit reduced-assurance opt-in, forwarded to `POST /runs` only when `true`. */
-    reducedAssurance: z.boolean().optional(),
-  });
+  notes: z.string().optional(),
+  files: z.array(z.union([CaptureTextFileSchema, CaptureImageFileSchema])).max(CAPTURE_MAX_FILES).optional(),
+  /** wicked-core#850 — the explicit reduced-assurance opt-in, forwarded to `POST /runs` only when `true`. */
+  reducedAssurance: z.boolean().optional(),
+});
 
 /** `POST /proposals/:id/approve` body — present only for an accept WITH an edit. */
 export const ApproveEditSchema = z.strictObject({
-    content: z.string().trim().min(1).max(16 * 1024).optional(),
-    reach: z.enum(['project', 'pattern', 'operator']).optional(),
-  });
+  content: z.string().trim().min(1).max(16 * 1024).optional(),
+  reach: z.enum(['project', 'pattern', 'operator']).optional(),
+});
 
 /** `POST /proposals` body — one preference a person files from a skin (studio's takes). Strict: the
  *  kind, tier and capture marker are the daemon's, never the caller's. */
 export const FileProposalSchema = z.strictObject({
-    content: z.string().trim().min(1).max(4000),
-    project: z.string().trim().min(1).max(128).optional(),
-    source: z.string().trim().min(1).max(256).optional(),
-  });
+  content: z.string().trim().min(1).max(4000),
+  project: z.string().trim().min(1).max(128).optional(),
+  source: z.string().trim().min(1).max(256).optional(),
+});
 
 /** Where a capture's materials land: a per-run inbox on the daemon host (the steering-author
  *  pattern — runs read the daemon's filesystem; only paths ride the problem statement). */

@@ -4,7 +4,7 @@
  */
 
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { z } from 'zod';
+import { z } from '../zod.js';
 import type { Actor } from '../core/types.js';
 import { API_PREFIX } from '../api/api-prefix.js';
 import { LOCAL_ACTOR } from '../api/auth.js';
@@ -16,13 +16,13 @@ import { MAX_EVERY_HOURS, MIN_EVERY_HOURS, SCHEDULE_ID, type ScheduleStore, type
 const V = API_PREFIX;
 
 export const SchedulePutSchema = z.strictObject({
-    workflow: z.string().min(1).max(128),
-    everyHours: z.int().min(MIN_EVERY_HOURS).max(MAX_EVERY_HOURS),
-    enabled: z.boolean().optional(),
-    projectIds: z.array(z.string().min(1).max(128)).max(64).optional(),
-    repoRef: z.string().min(1).max(256).nullable().optional(),
-    problem: z.string().trim().min(1).max(4000).nullable().optional(),
-  });
+  workflow: z.string().min(1).max(128),
+  everyHours: z.int().min(MIN_EVERY_HOURS).max(MAX_EVERY_HOURS),
+  enabled: z.boolean().optional(),
+  projectIds: z.array(z.string().min(1).max(128)).max(64).optional(),
+  repoRef: z.string().min(1).max(256).nullable().optional(),
+  problem: z.string().trim().min(1).max(4000).nullable().optional(),
+});
 
 export interface ScheduleRouteDeps {
   store: ScheduleStore;

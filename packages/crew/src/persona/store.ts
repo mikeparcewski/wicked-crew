@@ -11,7 +11,7 @@
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { z } from 'zod';
+import { z } from '../zod.js';
 import { crewStateHome } from '../projects/state-home.js';
 
 export const PERSONA_STATE_FILENAME = 'daemon-persona.json';
@@ -28,14 +28,14 @@ const Dial = z.int().min(0).max(2);
 
 /** What a person sends (`PUT /persona`): the server adds `version` and `updatedAt`. */
 export const PersonaInputSchema = z.strictObject({
-    // One line of plain text: a line break or control character could open a section of its own in the
-    // chat statement the voice block rides (codex + agy on #1236).
-    name: z.string().trim().min(1).max(40).regex(/^[^\p{Cc}\p{Zl}\p{Zp}]+$/u, 'name is one line of text'),
-    colour: z.string().regex(/^#[0-9a-fA-F]{6}$/u, 'colour is a #rrggbb hex'),
-    dials: z.strictObject({ length: Dial, warmth: Dial, pushback: Dial, initiative: Dial }),
-    habits: z.array(z.enum(PERSONA_HABITS)).max(PERSONA_HABITS.length),
-    notes: z.string().trim().max(500).optional(),
-  });
+  // One line of plain text: a line break or control character could open a section of its own in the
+  // chat statement the voice block rides (codex + agy on #1236).
+  name: z.string().trim().min(1).max(40).regex(/^[^\p{Cc}\p{Zl}\p{Zp}]+$/u, 'name is one line of text'),
+  colour: z.string().regex(/^#[0-9a-fA-F]{6}$/u, 'colour is a #rrggbb hex'),
+  dials: z.strictObject({ length: Dial, warmth: Dial, pushback: Dial, initiative: Dial }),
+  habits: z.array(z.enum(PERSONA_HABITS)).max(PERSONA_HABITS.length),
+  notes: z.string().trim().max(500).optional(),
+});
 export type PersonaInput = z.infer<typeof PersonaInputSchema>;
 
 export interface Persona extends PersonaInput {

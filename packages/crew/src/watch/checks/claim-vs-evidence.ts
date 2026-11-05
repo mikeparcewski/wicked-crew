@@ -24,7 +24,7 @@
  * Coverage: "not checked" when no floor ran for the run (the gate's `floorNote` says why).
  */
 
-import { z } from 'zod';
+import { z } from '../../zod.js';
 import type { CheckOutput, WatchCheck } from '../types.js';
 
 interface Floor {

@@ -25,7 +25,7 @@
  * does not run and its open rows clear only by dismissal (the same rule as `scope-drift`).
  */
 
-import { z } from 'zod';
+import { z } from '../../zod.js';
 import type { CheckOutput, KeyPointInput, RunWatchState, WatchCheck } from '../types.js';
 
 export const PATH_REPICKED_TYPE = 'wicked.team.path.repicked';

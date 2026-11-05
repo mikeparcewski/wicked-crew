@@ -32,7 +32,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
+import { record, z } from '../zod.js';
 import { broadcast } from '../events/bus.js';
 import { API_PREFIX } from '../api/api-prefix.js';
 import { LOCAL_ACTOR } from '../api/auth.js';
@@ -65,9 +65,9 @@ export const EMITTABLE_TYPES: readonly string[] = [
 /** The request body: a whitelisted type plus that type's own payload. Strict — an unknown key is
  *  a 400, not a silently-dropped field. */
 export const EmitInteractiveEventSchema = z.strictObject({
-    type: z.string().min(1).max(128),
-    payload: z.record(z.string(), z.unknown()).optional(),
-  });
+  type: z.string().min(1).max(128),
+  payload: record(z.string(), z.unknown()).optional(),
+});
 
 export interface InteractiveRelay {
   /**

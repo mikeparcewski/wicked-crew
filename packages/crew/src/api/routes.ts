@@ -4,7 +4,7 @@ import { busSeamsOffWarning, busUnavailableWarning } from '../core/bus-notice.js
 import { vaultBinWarning, vaultDiagnostics } from '../core/vault-bin.js';
 import { PlanSchema, toLaunchPlan } from './plan-schema.js';
 import type { RecordedStallFrame } from './stall-frame-index.js';
-import { z } from 'zod';
+import { record, z } from '../zod.js';
 import {
   listRequirements,
   listRequirementsRead,
@@ -660,27 +660,27 @@ const RULE_STATUSES: ReadonlySet<string> = new Set(['active', 'retired', 'all'])
 const SAFE_REPO_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 
 export const RegisterRepoSchema = z.strictObject({
-    name: z
-      .string()
-      .min(1)
-      .max(128)
-      .regex(SAFE_REPO_NAME, 'Repository name must start with a letter/digit and contain only letters, digits, dots, hyphens, and underscores'),
-    // For local registration: path to an existing git repo on disk.
-    // For remote clone: optional clone destination (absolute path); if omitted,
-    // defaults to ~/.wicked/repos/<name>.
-    rootPath: z.string().optional(),
-    gitUrl: z.string().optional(),
-    /** crew#496: the project the register form had selected — the onboarding run is filed there
-     *  (membership `crew.run`), not left unfiled while the repo joins the project. */
-    projectId: z.string().min(1).max(128).optional(),
-    /** crew#496 / crew#632: the launch surface and caller, recorded on the run's launch entry. */
-    channel: z.enum(['studio', 'cli', 'api']).optional(),
-    actor: z.string().min(1).max(256).optional(),
-    /** crew#552: `false` = this onboarding chains no capture-learnings run (a one-off). */
-    autoCapture: z.boolean().optional(),
-    /** (api-types 0.172.0, DES-APPS-001) A new empty repo under the apps root; no onboarding. */
-    create: z.literal(true).optional(),
-  })
+  name: z
+    .string()
+    .min(1)
+    .max(128)
+    .regex(SAFE_REPO_NAME, 'Repository name must start with a letter/digit and contain only letters, digits, dots, hyphens, and underscores'),
+  // For local registration: path to an existing git repo on disk.
+  // For remote clone: optional clone destination (absolute path); if omitted,
+  // defaults to ~/.wicked/repos/<name>.
+  rootPath: z.string().optional(),
+  gitUrl: z.string().optional(),
+  /** crew#496: the project the register form had selected — the onboarding run is filed there
+   *  (membership `crew.run`), not left unfiled while the repo joins the project. */
+  projectId: z.string().min(1).max(128).optional(),
+  /** crew#496 / crew#632: the launch surface and caller, recorded on the run's launch entry. */
+  channel: z.enum(['studio', 'cli', 'api']).optional(),
+  actor: z.string().min(1).max(256).optional(),
+  /** crew#552: `false` = this onboarding chains no capture-learnings run (a one-off). */
+  autoCapture: z.boolean().optional(),
+  /** (api-types 0.172.0, DES-APPS-001) A new empty repo under the apps root; no onboarding. */
+  create: z.literal(true).optional(),
+})
   .refine(
     (d) => {
       const hasRemote = typeof d.gitUrl === 'string' && d.gitUrl.length > 0;
@@ -689,19 +689,17 @@ export const RegisterRepoSchema = z.strictObject({
       // to custom path), or rootPath alone (register existing local repo) — all valid.
       return d.create === true ? !hasRemote && !hasLocal : hasRemote || hasLocal;
     },
-    {
-        error: 'Provide create (a new empty repo), or gitUrl (remote clone) or rootPath (local registration), or both of those.'
-    },
+    { error: 'Provide create (a new empty repo), or gitUrl (remote clone) or rootPath (local registration), or both of those.' },
   );
 
 /** `POST /repos/:id/onboard`'s optional body (crew#496): where to file the run, and who asked. */
 const OnboardBodySchema = z.strictObject({
-    projectId: z.string().min(1).max(128).optional(),
-    channel: z.enum(['studio', 'cli', 'api']).optional(),
-    actor: z.string().min(1).max(256).optional(),
-    /** crew#552: `false` = this onboarding chains no capture-learnings run (a one-off). */
-    autoCapture: z.boolean().optional(),
-  });
+  projectId: z.string().min(1).max(128).optional(),
+  channel: z.enum(['studio', 'cli', 'api']).optional(),
+  actor: z.string().min(1).max(256).optional(),
+  /** crew#552: `false` = this onboarding chains no capture-learnings run (a one-off). */
+  autoCapture: z.boolean().optional(),
+});
 
 /**
  * The launch body. Every field but `problem` is optional, which is what made stripping dangerous:
@@ -862,28 +860,28 @@ export const LaunchSchema = z.strictObject({
   forceQeAcceptance: z.boolean().optional(),
 }).refine((b) => b.skipQeAcceptance === undefined || b.forceQeAcceptance !== true, {
   path: ['forceQeAcceptance'],
-    error: 'skipQeAcceptance and forceQeAcceptance are mutually exclusive — skip it with a reason, or force it'
+  error: 'skipQeAcceptance and forceQeAcceptance are mutually exclusive — skip it with a reason, or force it',
 }).refine((b) => b.plan === undefined || b.workflow === undefined, {
   path: ['plan'],
-    error: 'plan and workflow are mutually exclusive — a launch carries a plan or names a preset, not both'
+  error: 'plan and workflow are mutually exclusive — a launch carries a plan or names a preset, not both',
 }).refine((b) => b.plan !== undefined || b.deliver !== 'pr' || b.workflow !== undefined, {
   path: ['deliver'],
-    error: 'deliver: "pr" requires a workflow — a free-text run has no def to append the deliver phase to'
+  error: 'deliver: "pr" requires a workflow — a free-text run has no def to append the deliver phase to',
 }).refine((b) => b.deliverGate === undefined || b.deliver !== 'none', {
   // F-E2E-030: a deliver-gate posture on a launch that declines delivery is a contradiction the
   // caller should hear about, not a silent no-op. (A launch that OMITS `deliver` may still
   // resolve to no deliver unit — repo-less, free-text, read-only def; the field is then inert.)
   path: ['deliverGate'],
-    error: 'deliverGate has no meaning with deliver: "none" — there is no deliver phase to gate'
+  error: 'deliverGate has no meaning with deliver: "none" — there is no deliver phase to gate',
 }).refine((b) => b.campaignId === undefined || b.groupLabel === undefined, {
   path: ['groupLabel'],
-    error: 'campaignId and groupLabel are mutually exclusive — a run files onto ONE grouping surface (an existing campaign, or a label group)'
+  error: 'campaignId and groupLabel are mutually exclusive — a run files onto ONE grouping surface (an existing campaign, or a label group)',
 }).refine((b) => b.revisesPr === undefined || (b.repoRef !== undefined && b.workflow !== undefined), {
   path: ['revisesPr'],
-    error: 'revisesPr needs repoRef and workflow — a revision bases a repo-scoped, def-driven run on the pull request\'s branch'
+  error: 'revisesPr needs repoRef and workflow — a revision bases a repo-scoped, def-driven run on the pull request\'s branch',
 }).refine((b) => b.revisesPr === undefined || b.deliver !== 'none', {
   path: ['revisesPr'],
-    error: 'revisesPr needs deliver: "pr" — a launch that declines delivery has no phase to push the revision with'
+  error: 'revisesPr needs deliver: "pr" — a launch that declines delivery has no phase to push the revision with',
 });
 
 /** The escalation arms (wicked-core#469 / #467): approve-shaped, no `amend` / `amendScope`.
@@ -960,73 +958,49 @@ export const GateSchema = z.strictObject({
   keepRules: z.array(z.string().min(1).max(256)).max(500).optional(),
 }).refine(
   (b) => b.keepRules === undefined || (b.approve && (b.action === undefined || b.action === 'approve') && b.plan === undefined),
-  { path: ['keepRules'],
-      error: 'keepRules goes with a plain approve (no action other than approve, no plan) of a steering-author propose gate'
-},
+  { path: ['keepRules'], error: 'keepRules goes with a plain approve (no action other than approve, no plan) of a steering-author propose gate' },
 ).refine(
   (b) => b.action === undefined
     || (b.action === 'approve' || b.action === 'edit_plan' || b.action === 'amend_intent' || b.action === OPERATOR_JUDGMENT_ACTION || b.action === SKIP_QE_ACTION || isEscalationAction(b.action)) === b.approve,
-  { path: ['action'],
-      error: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve, edit_plan, amend_intent, operator_judgment, skip_qe, extend, targeted, accept_partial, accept_suggestion, rejudge and consent:<id> require approve: true'
-},
+  { path: ['action'], error: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve, edit_plan, amend_intent, operator_judgment, skip_qe, extend, targeted, accept_partial, accept_suggestion, rejudge and consent:<id> require approve: true' },
 ).refine(
   // (operator ruling 2026-10-21) The override's rationale IS its record: a blank one is a 400 here,
   // before the engine is asked.
   (b) => b.action !== OPERATOR_JUDGMENT_ACTION || (b.amend !== undefined && b.amend.trim() !== ''),
-  { path: ['amend'],
-      error: 'operator_judgment needs `amend`: your written rationale — why the failed floor is not the work\'s (an empty one is refused)'
-},
+  { path: ['amend'], error: 'operator_judgment needs `amend`: your written rationale — why the failed floor is not the work\'s (an empty one is refused)' },
 ).refine(
   (b) => b.action !== OPERATOR_JUDGMENT_ACTION || (b.amendScope === undefined && b.plan === undefined),
-  { path: ['amendScope'],
-      error: 'operator_judgment takes no amendScope or plan — it answers the failed floor of the gated unit'
-},
+  { path: ['amendScope'], error: 'operator_judgment takes no amendScope or plan — it answers the failed floor of the gated unit' },
 ).refine(
   // (j4-gates) A QE skip's reason IS its record, as at launch: a blank one is a 400 here.
   (b) => b.action !== SKIP_QE_ACTION || (b.amend !== undefined && b.amend.trim() !== ''),
-  { path: ['amend'],
-      error: 'skip_qe needs `amend`: your written reason for skipping QE acceptance (an empty one is refused)'
-},
+  { path: ['amend'], error: 'skip_qe needs `amend`: your written reason for skipping QE acceptance (an empty one is refused)' },
 ).refine(
   (b) => b.action !== SKIP_QE_ACTION || (b.amendScope === undefined && b.plan === undefined),
-  { path: ['amendScope'],
-      error: 'skip_qe takes no amendScope or plan — it answers the run\'s QE acceptance'
-},
+  { path: ['amendScope'], error: 'skip_qe takes no amendScope or plan — it answers the run\'s QE acceptance' },
 ).refine(
   // (wicked-core#555) An intent amendment IS its text: an empty one amends nothing, and the arm's
   // scope is every unit at or after the cursor — which is what makes it reach the evaluator — so
   // `amendScope` cannot narrow it. Both are 400s here rather than a 409 from the engine.
   (b) => b.action !== 'amend_intent' || (b.amend !== undefined && b.amend.trim() !== ''),
-  { path: ['amend'],
-      error: 'amend_intent needs `amend`: what the run\'s acceptance list now says (approve without an action to proceed unamended)'
-},
+  { path: ['amend'], error: 'amend_intent needs `amend`: what the run\'s acceptance list now says (approve without an action to proceed unamended)' },
 ).refine(
   (b) => b.action !== 'amend_intent' || (b.amendScope === undefined && b.plan === undefined),
-  { path: ['amendScope'],
-      error: 'amend_intent takes no amendScope or plan — an intent amendment reaches every unit at or after the cursor, which is what makes it reach the evaluator'
-},
+  { path: ['amendScope'], error: 'amend_intent takes no amendScope or plan — an intent amendment reaches every unit at or after the cursor, which is what makes it reach the evaluator' },
 ).refine(
   (b) => !isEscalationAction(b.action) || (b.amend === undefined && b.amendScope === undefined && b.plan === undefined),
-  { path: ['action'],
-      error: 'extend, targeted, accept_partial, accept_suggestion, rejudge and consent:<id> take no amend, amendScope or plan — the engine re-runs the floor, adopts the pinned edit, re-runs the judge, or runs the chosen install as it stands'
-},
+  { path: ['action'], error: 'extend, targeted, accept_partial, accept_suggestion, rejudge and consent:<id> take no amend, amendScope or plan — the engine re-runs the floor, adopts the pinned edit, re-runs the judge, or runs the chosen install as it stands' },
 ).refine(
   (b) => (b.action === 'edit_plan') === (b.plan !== undefined) || (b.action === undefined && b.plan !== undefined),
-  { path: ['plan'],
-      error: 'an edited plan answers a plan_approval gate: `plan` needs approve: true with `action` omitted or edit_plan, and edit_plan needs `plan`'
-},
+  { path: ['plan'], error: 'an edited plan answers a plan_approval gate: `plan` needs approve: true with `action` omitted or edit_plan, and edit_plan needs `plan`' },
 ).refine(
   // (crew#1139) `amend` beside a plan is the operator's note to the steps it releases (the engine lands
   // it on the plan's first creator step); a plan gate's note has no scope to choose.
   (b) => b.plan === undefined || (b.approve && b.amendScope === undefined),
-  { path: ['plan'],
-      error: '`plan` is an approve WITH an edited plan: approve: true, and no amendScope (a note in `amend` lands on the plan\'s first creator step)'
-},
+  { path: ['plan'], error: '`plan` is an approve WITH an edited plan: approve: true, and no amendScope (a note in `amend` lands on the plan\'s first creator step)' },
 ).refine(
   (b) => b.amendScope === undefined || b.approve,
-  { path: ['amendScope'],
-      error: '`amendScope` applies to an approve only (approve: true)'
-},
+  { path: ['amendScope'], error: '`amendScope` applies to an approve only (approve: true)' },
 );
 
 /** `PUT /runs/:id/guidance` (DES-UX-002 §7.2, CREW-UX-7) — the durable pre-gate note body.
@@ -2968,12 +2942,12 @@ export function registerRoutes(
   // so the composer shows "N linked issues will be appended (≈K chars)" with a way to leave one out
   // (`excludeLinkedIssues`). Read-only: nothing launches, nothing is stored.
   const LinkedIssuesPreviewSchema = z.strictObject({
-        problem: z.string().min(1),
-        repoRef: z.string().min(1).optional(),
-        excludeLinkedIssues: ExcludeLinkedIssuesSchema,
-        // (DES-PM-001 §3.2) The project the launch would be filed in: its tracker set reads the refs.
-        projectId: z.string().min(1).max(128).optional(),
-      });
+    problem: z.string().min(1),
+    repoRef: z.string().min(1).optional(),
+    excludeLinkedIssues: ExcludeLinkedIssuesSchema,
+    // (DES-PM-001 §3.2) The project the launch would be filed in: its tracker set reads the refs.
+    projectId: z.string().min(1).max(128).optional(),
+  });
   app.post(
     `${V}/linked-issues/preview`,
     { config: { manifest: { requestType: 'LinkedIssuesPreviewBody', responseType: 'LinkedIssuesPreviewResponse', statusCodes: [200, 400] } } },
@@ -3624,9 +3598,9 @@ export function registerRoutes(
 
   // ── Run archival (crew#265) — write-off, not delete ────────────────────────
   const ArchiveSchema = z.strictObject({
-      archived: z.boolean(),
-      note: z.string().max(500).optional(),
-    });
+    archived: z.boolean(),
+    note: z.string().max(500).optional(),
+  });
   app.post(`${V}/runs/:id/archive`, async (req, reply) => {
     const { id } = req.params as { id: string };
     const parsed = ArchiveSchema.safeParse(req.body ?? {});
@@ -3701,9 +3675,9 @@ export function registerRoutes(
 
   // Bulk write-off for campaign backlogs — explicit ids only, never implicit age selection.
   const BulkArchiveSchema = z.strictObject({
-      ids: z.array(z.string().min(1)).min(1).max(200),
-      note: z.string().max(500).optional(),
-    });
+    ids: z.array(z.string().min(1)).min(1).max(200),
+    note: z.string().max(500).optional(),
+  });
   app.post(`${V}/runs/archive`, async (req, reply) => {
     const parsed = BulkArchiveSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -4610,13 +4584,13 @@ export function registerRoutes(
   });
 
   const ChatMessageSchema = z.strictObject({
-      text: z.string().min(1).max(65536),
-      targets: z.array(z.string().min(1)).min(1).max(8).optional(),
-      /** (api-types 0.137.0) Attachment ids from `POST /chats/:id/attachments`. */
-      attachments: z.array(z.string().min(1).max(64)).optional(),
-      /** (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §5.1) What studio shows beside the message. */
-      context: ChatMessageContextSchema.optional(),
-    });
+    text: z.string().min(1).max(65536),
+    targets: z.array(z.string().min(1)).min(1).max(8).optional(),
+    /** (api-types 0.137.0) Attachment ids from `POST /chats/:id/attachments`. */
+    attachments: z.array(z.string().min(1).max(64)).optional(),
+    /** (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §5.1) What studio shows beside the message. */
+    context: ChatMessageContextSchema.optional(),
+  });
   // DES-CHAT-ARTIFACTS-001 §5.1 (A1): what a turn's block reads — the docs roots, the decorated runs (project,
   // document and chat ids), unit outputs and the acceptance line. One set of deps, so the block and the run pages
   // read the same records.
@@ -5094,23 +5068,23 @@ export function registerRoutes(
   // the proposal's lock and looks for what already happened before any state check.
   const ProposalPatchValue = z.union([z.string().max(200), z.number(), z.boolean()]);
   const ProposalDecisionSchema = z.strictObject({
-      decision: z.enum(['go', 'not_now']),
-      edits: z.strictObject({
-            title: z.string().max(400).optional(),
-            brief: z.string().max(16000).optional(),
-            sources: z.array(z.string().min(1).max(300)).max(32).optional(),
-            repos: z.array(z.string().min(1).max(200)).max(16).optional(),
-            project: z.string().max(200).nullable().optional(),
-            ask: z.string().max(8000).optional(),
-            allow: z.array(z.string().min(1).max(128)).max(64).optional(),
-            name: z.string().max(200).optional(),
-            patch: z.record(z.string().max(40), ProposalPatchValue).optional(),
-            url: z.string().max(2048).optional(),
-            audience: z.string().max(800).optional(),
-            show: z.string().max(4000).optional(),
-            helpers: z.array(z.string().min(1).max(64)).max(8).optional(),
-          }).optional(),
-    });
+    decision: z.enum(['go', 'not_now']),
+    edits: z.strictObject({
+      title: z.string().max(400).optional(),
+      brief: z.string().max(16000).optional(),
+      sources: z.array(z.string().min(1).max(300)).max(32).optional(),
+      repos: z.array(z.string().min(1).max(200)).max(16).optional(),
+      project: z.string().max(200).nullable().optional(),
+      ask: z.string().max(8000).optional(),
+      allow: z.array(z.string().min(1).max(128)).max(64).optional(),
+      name: z.string().max(200).optional(),
+      patch: record(z.string().max(40), ProposalPatchValue).optional(),
+      url: z.string().max(2048).optional(),
+      audience: z.string().max(800).optional(),
+      show: z.string().max(4000).optional(),
+      helpers: z.array(z.string().min(1).max(64)).max(8).optional(),
+    }).optional(),
+  });
   app.post(
     `${V}/chats/:id/proposals/:pid`,
     { config: { manifest: { requestType: 'ChatProposalDecisionBody', responseType: 'ChatProposalDecisionResponse', statusCodes: [200, 400, 403, 404, 409, 502] } } },
@@ -5142,8 +5116,8 @@ export function registerRoutes(
     },
   );
   const ChatSeatsSchema = z.strictObject({
-      clis: z.array(z.string().min(1)).min(1).max(8),
-    });
+    clis: z.array(z.string().min(1)).min(1).max(8),
+  });
   app.post(
     `${V}/chats/:id/seats`,
     // Typed like every neighbouring chat route (review HIGH-1): the names bind the 0.39.0 api-types
@@ -6921,20 +6895,20 @@ export function registerRoutes(
   });
 
   const ElicitationRespondSchema = z.strictObject({
-        /** Guards against stale-tab submissions: must match the current elicitation's id. */
-        elicitationId: z.string().min(1),
-        action: z.enum(['accept', 'decline', 'cancel']),
-        /** Required when action is "accept"; must be absent for decline/cancel. `response` answers a free-text or
-         *  single-choice question; `values` (api-types 0.158.0) a multi-select one. */
-        content: z.union([
-          z.strictObject({ response: z.string().min(1) }),
-          z.strictObject({ values: z.array(z.string().min(1)).min(1).max(100) }),
-        ]).optional(),
-      })
+    /** Guards against stale-tab submissions: must match the current elicitation's id. */
+    elicitationId: z.string().min(1),
+    action: z.enum(['accept', 'decline', 'cancel']),
+    /** Required when action is "accept"; must be absent for decline/cancel. `response` answers a free-text or
+     *  single-choice question; `values` (api-types 0.158.0) a multi-select one. */
+    content: z.union([
+      z.strictObject({ response: z.string().min(1) }),
+      z.strictObject({ values: z.array(z.string().min(1)).min(1).max(100) }),
+    ]).optional(),
+  })
     .superRefine((val, ctx) => {
       if (val.action !== 'accept' && val.content !== undefined) {
         ctx.addIssue({
-          code: "custom",
+          code: 'custom',
           path: ['content'],
           message: 'content must only be provided when action is "accept"',
         });
@@ -7775,18 +7749,16 @@ export function registerRoutes(
   });
 
   const ReqPatchSchema = z.strictObject({
-        title: z.string().min(1).max(500).optional(),
-        notes: z.string().max(5000).optional(),
-        status: z.enum(['active', 'deprecated', 'review']).optional(),
-        risk: z.boolean().optional(),
-      })
+    title: z.string().min(1).max(500).optional(),
+    notes: z.string().max(5000).optional(),
+    status: z.enum(['active', 'deprecated', 'review']).optional(),
+    risk: z.boolean().optional(),
+  })
     // `.strict()` BEFORE `.refine()`: the refine runs on the parsed object, so with stripping still
     // in effect `{"title":"x","note":"y"}` would pass the non-empty check having silently discarded
     // the edit the caller cared about. Every field here is optional, which is exactly the shape
     // FINDING-031 makes dangerous.
-    .refine((b) => Object.keys(b).length > 0, {
-        error: 'empty patch'
-    });
+    .refine((b) => Object.keys(b).length > 0, { error: 'empty patch' });
   app.patch(`${V}/repos/:id/requirements/:key`, async (req, reply) => {
     const { id, key } = req.params as { id: string; key: string };
     const repos = await adapter.listRepos();
@@ -8809,7 +8781,7 @@ export function registerRoutes(
       // proposal crew filed but has not linked yet (the publish window, or a crash in it) names a
       // decision this ledger HOLDS — it must still land through `remember()` (codex on DC-S4a).
       const named = (row?.payload as { decision?: { id?: unknown } } | undefined)?.decision?.id;
-      if (typeof named === 'string' && decisions.deps.ledger.record(z.string(), named) !== null) decisionId = named;
+      if (typeof named === 'string' && decisions.deps.ledger.record(named) !== null) decisionId = named;
     }
     if (decisions !== null && decisionId !== null) {
       try {

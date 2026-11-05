@@ -4,7 +4,7 @@
  */
 
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { z } from 'zod';
+import { z } from '../zod.js';
 import type { Actor } from '../core/types.js';
 import { API_PREFIX } from '../api/api-prefix.js';
 import { LOCAL_ACTOR } from '../api/auth.js';

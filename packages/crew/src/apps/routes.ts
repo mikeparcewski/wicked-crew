@@ -22,7 +22,7 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { z } from 'zod';
+import { record, z } from '../zod.js';
 
 import { LOCAL_ACTOR, trustAtLeast, viewOf } from '../api/auth.js';
 import type { AuditLog } from '../api/audit.js';
@@ -104,18 +104,21 @@ export const AppCreateSchema = z.strictObject({ slug: z.string().min(1).max(64),
 // The spec rides as `unknown` and is parsed by `parseSpec` (the structure bound, then the schema) in the
 // handler, so an over-large document never reaches zod whole (codex r1 on the schema PR).
 const EditOpSchema = z.discriminatedUnion('op', [
-  z.strictObject({ op: z.literal('spec'), spec: z.unknown() }),
+  // `.optional()`: zod 4 requires a `z.unknown()` key to be present; zod 3 let it be absent (then
+  // `parseSpec` refuses the missing document with its own findings), and so does this.
+  z.strictObject({ op: z.literal('spec'), spec: z.unknown().optional() }),
   z.strictObject({ op: z.literal('query-text'), query: z.string().regex(APP_NAMED_ID_RE), text: z.string().max(QUERY_TEXT_MAX_BYTES) }),
 ]);
 export const AppEditsSchema = z.strictObject({ base, ops: z.array(EditOpSchema).min(1).max(50), summary: z.string().min(1).max(200).optional() });
 export const AppHistoryMoveSchema = z.strictObject({ base });
 const version = z.union([z.int().min(1), z.string().regex(/^[0-9a-fA-F]{40}$/)]);
 export const AppRestoreSchema = z.strictObject({ base, version });
-export const AppQuerySchema = z.strictObject({ version, query: z.string().regex(APP_NAMED_ID_RE), params: z.record(z.string(), z.unknown()).optional() });
+export const AppQuerySchema = z.strictObject({ version, query: z.string().regex(APP_NAMED_ID_RE), params: record(z.string(), z.unknown()).optional() });
 export const AppTurnSchema = z.strictObject({ base, message: z.string().min(1).max(8000), about: z.array(z.string().min(1).max(64)).max(20).optional() });
 /** `commit`: the builder's candidate COMMIT in the app repo (crew reads its tree and writes the lock on it). */
-export const AppActionPrepareSchema = z.strictObject({ version, params: z.record(z.string(), z.unknown()).optional() });
-export const AppActionRunSchema = z.strictObject({ record: z.uuid() });
+export const AppActionPrepareSchema = z.strictObject({ version, params: record(z.string(), z.unknown()).optional() });
+// `z.guid()`: any 8-4-4-4-12 hex id, as zod 3's `.uuid()` accepted (zod 4's `z.uuid()` also checks the RFC variant).
+export const AppActionRunSchema = z.strictObject({ record: z.guid() });
 export const AppActionGrantSchema = z.strictObject({ version });
 export const AppsCheckSchema = z.union([
   // (K5) The Tool's form: the engine's snapshot of the builder's worktree; crew finds the app by the unit's run.

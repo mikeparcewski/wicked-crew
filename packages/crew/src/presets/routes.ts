@@ -18,7 +18,7 @@
  */
 
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
+import { z } from '../zod.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import { PresetsUnsupportedError } from '../core/adapter.js';
 import type { Actor, Preset, PresetListResponse, PresetResponse, PresetStep } from '../core/types.js';
@@ -34,9 +34,9 @@ const PresetStepSchema = z.looseObject({ catalog: z.string().min(1), id: z.strin
 
 // Exported for tests/wire-contract.test.ts (the request-direction drift guard).
 export const PutPresetSchema = z.strictObject({
-    steps: z.array(PresetStepSchema).min(1),
-    projectId: z.string().min(1).optional(),
-  });
+  steps: z.array(PresetStepSchema).min(1),
+  projectId: z.string().min(1).optional(),
+});
 
 const ScopeQuerySchema = z.strictObject({ projectId: z.string().min(1).optional() });
 

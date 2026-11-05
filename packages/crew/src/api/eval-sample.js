@@ -22,27 +22,27 @@
  */
 
 import { createHash } from 'node:crypto';
-import { z } from 'zod';
+import { z } from '../zod.js';
 
 export const EvalSignalsSchema = z.strictObject({
-    phase: z.string().optional(),
-    tool: z.string().optional(),
-    files: z.array(z.string()).optional(),
-    content: z.string().optional(),
-  });
+  phase: z.string().optional(),
+  tool: z.string().optional(),
+  files: z.array(z.string()).optional(),
+  content: z.string().optional(),
+});
 
 export const EvalSampleSchema = z.strictObject({
-    id: z.string().min(1),
-    description: z.string().min(1),
-    kind: z.enum(['good', 'bad']),
-    steering_type: z.string().min(1),
-    signals: EvalSignalsSchema,
-  });
+  id: z.string().min(1),
+  description: z.string().min(1),
+  kind: z.enum(['good', 'bad']),
+  steering_type: z.string().min(1),
+  signals: EvalSignalsSchema,
+});
 
 export const ImportEvalCorpusSchema = z.strictObject({
-    name: z.string().min(1),
-    samples: z.array(EvalSampleSchema).min(1),
-  });
+  name: z.string().min(1),
+  samples: z.array(EvalSampleSchema).min(1),
+});
 
 /** The shape of a payload hash: `sha256:` + 64 lowercase hex digits. */
 export const PAYLOAD_HASH_RE = /^sha256:[0-9a-f]{64}$/;

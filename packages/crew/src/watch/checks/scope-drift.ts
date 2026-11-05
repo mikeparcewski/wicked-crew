@@ -31,7 +31,7 @@
  *     (§4.4: "a truncated list still names its first 200 paths and says so").
  */
 
-import { z } from 'zod';
+import { z } from '../../zod.js';
 import type { CheckOutput, RunWatchState, WatchCheck } from '../types.js';
 
 /** The bus row the check joins to (TR-W1a). The entry's `join` names it; the loader checks the grammar. */

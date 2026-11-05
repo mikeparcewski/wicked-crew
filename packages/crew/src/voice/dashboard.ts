@@ -15,7 +15,7 @@
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { z } from 'zod';
+import { z } from '../zod.js';
 
 export const VOICE_DASHBOARD_FILENAME = 'daemon-voice-dashboard.json';
 export const VOICE_DASHBOARD_SLOT = 'voice-dashboard';
@@ -42,11 +42,11 @@ export const VoiceWidgetManifestSchema = z.strictObject({
   kind: z.literal('metric'),
   panels: z.array(VoicePanelDeclSchema).length(1),
   metric: z.strictObject({
-      source: z.enum(['system', 'diagnostics']),
-      path: z.string().max(160).regex(METRIC_PATH, 'a field path like `infra[key=load].details.load1`'),
-      display: z.enum(['number', 'chart']),
-      unit: z.string().trim().max(12).optional(),
-    }),
+    source: z.enum(['system', 'diagnostics']),
+    path: z.string().max(160).regex(METRIC_PATH, 'a field path like `infra[key=load].details.load1`'),
+    display: z.enum(['number', 'chart']),
+    unit: z.string().trim().max(12).optional(),
+  }),
   createdAt: z.string().max(40).optional(),
 });
 

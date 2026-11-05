@@ -18,7 +18,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { z } from 'zod';
+import { z } from '../src/zod.js';
 import type { RecordedEvent, WatchFinding } from 'wicked-crew-api-types';
 import { busTesting, readBus } from '../src/core/bus.js';
 import type { CoreEvent } from '../src/core/types.js';

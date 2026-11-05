@@ -27,7 +27,7 @@
 
 import { createHash } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { z } from 'zod';
+import { z } from '../zod.js';
 
 import { LOCAL_ACTOR, trustAtLeast } from '../api/auth.js';
 import type { Actor, ConformanceRule, EditorGrantsResponse, ListEditorsResponse } from '../core/types.js';

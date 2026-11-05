@@ -13,7 +13,7 @@
  * (`workerStallMinutes`), so this entry has none of its own.
  */
 
-import { z } from 'zod';
+import { z } from '../../zod.js';
 import type { WatchCheck } from '../types.js';
 
 interface Claim {

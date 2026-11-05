@@ -20,7 +20,7 @@
  * carry no `firedPolicies` is "too old"; a store that cannot be read is "not readable".
  */
 
-import { z } from 'zod';
+import { z } from '../../zod.js';
 import type { CheckOutput, WatchCheck, WatchRuleBrief } from '../types.js';
 
 /** A frame whose fired rules could not be classified yet (the store read was refused or slow). */

@@ -35,7 +35,7 @@
 import { createHash } from 'node:crypto';
 import { lstatSync, realpathSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { z } from 'zod';
+import { z } from '../zod.js';
 
 import type { ChatContextBinding, ChatTranscriptRecord, SessionView } from '../core/types.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
@@ -75,25 +75,25 @@ const STYLE_WORDS: Record<string, string> = { ppt: 'slides', web: 'web page', do
 
 /** The strict wire schema of `ChatMessageBody.context` (api-types 0.169.0). */
 export const ChatMessageContextSchema = z.strictObject({
-    artifact: z.strictObject({
-              ref: z.string().regex(ARTIFACT_REF, 'artifact.ref must be <mount>/<doc>'),
-              // Version 0 is a version: a document's first (crew#1273).
-              version: z.int().min(0).max(1_000_000),
-              anchors: z.array(z.string().regex(ANCHOR_WID, 'each anchor must be a data-wid')).max(CONTEXT_ANCHORS_MAX).optional(),
-            })
-      .optional(),
-    appearance: z.strictObject({
-            theme: z.string().regex(/^[a-z0-9-]{1,64}$/).optional(),
-            accent_h: z.number().min(0).max(360).optional(),
-            accent_s: z.number().min(0).max(100).optional(),
-            accent_l: z.number().min(0).max(100).optional(),
-            ambient: z.boolean().optional(),
-            ambient_still: z.boolean().optional(),
-            previewOf: z.string().max(120).optional(),
+  artifact: z.strictObject({
+            ref: z.string().regex(ARTIFACT_REF, 'artifact.ref must be <mount>/<doc>'),
+            // Version 0 is a version: a document's first (crew#1273).
+            version: z.int().min(0).max(1_000_000),
+            anchors: z.array(z.string().regex(ANCHOR_WID, 'each anchor must be a data-wid')).max(CONTEXT_ANCHORS_MAX).optional(),
           })
-      .optional(),
-    page: z.string().max(CONTEXT_PAGE_MAX).optional(),
-  });
+    .optional(),
+  appearance: z.strictObject({
+          theme: z.string().regex(/^[a-z0-9-]{1,64}$/).optional(),
+          accent_h: z.number().min(0).max(360).optional(),
+          accent_s: z.number().min(0).max(100).optional(),
+          accent_l: z.number().min(0).max(100).optional(),
+          ambient: z.boolean().optional(),
+          ambient_still: z.boolean().optional(),
+          previewOf: z.string().max(120).optional(),
+        })
+    .optional(),
+  page: z.string().max(CONTEXT_PAGE_MAX).optional(),
+});
 
 /** The parsed body field (the wire's `ChatMessageContext`, as zod reads it). */
 export type ParsedChatMessageContext = z.infer<typeof ChatMessageContextSchema>;

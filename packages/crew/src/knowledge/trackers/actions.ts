@@ -20,7 +20,7 @@ import { appendFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { z } from 'zod';
+import { z } from '../../zod.js';
 
 import { API_PREFIX } from '../../api/api-prefix.js';
 import { trustAtLeast } from '../../api/auth.js';
@@ -53,14 +53,12 @@ export interface TrackerActionDeps {
 }
 
 export const TrackerActionSchema = z.strictObject({
-    issue: z.string().min(2).max(300),
-    comment: z.string().min(1).max(ACTION_COMMENT_MAX).optional(),
-    transition: z.string().min(1).max(120).optional(),
-    confirm: z.string().regex(/^[0-9a-f]{64}$/).optional(),
-  })
-  .refine((b) => b.comment !== undefined || b.transition !== undefined, {
-      error: 'name a comment, a transition, or both'
-});
+  issue: z.string().min(2).max(300),
+  comment: z.string().min(1).max(ACTION_COMMENT_MAX).optional(),
+  transition: z.string().min(1).max(120).optional(),
+  confirm: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+})
+  .refine((b) => b.comment !== undefined || b.transition !== undefined, { error: 'name a comment, a transition, or both' });
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const sha = (v: unknown): string => createHash('sha256').update(canonicalJson(v)).digest('hex');
@@ -196,7 +194,7 @@ async function plan(deps: TrackerActionDeps, runId: string, body: z.infer<typeof
     admittedBy: via.kind === 'project' ? { kind: 'project', id: a.scope.projectId ?? '' } : { kind: 'repo', id: via.id },
   };
   // Bound to what would act: the card, the tracker, the source's execution descriptor and the vendor principal.
-  const hash = sha({ v: 1, card, sourceId: e.id, trackerId: t.trackerId, transitionId, descriptor: pmDescriptorHash(configOf(z.string(), e.record)), principal, credential });
+  const hash = sha({ v: 1, card, sourceId: e.id, trackerId: t.trackerId, transitionId, descriptor: pmDescriptorHash(configOf(e.record)), principal, credential });
   return { ok: true, plan: { card, hash, transitionId, credential }, a };
 }
 
@@ -210,7 +208,7 @@ async function act(deps: TrackerActionDeps, runId: string, issue: string, p: Pla
   const admittedFor = (tool: string) => async (): Promise<PmEntry | null> => {
     const again = await admit(deps, runId, issue).catch(() => null);
     if (again === null || !again.ok || again.t.trackerId !== t.trackerId) return null;
-    if (pmDescriptorHash(configOf(z.string(), again.e.record)) !== pmDescriptorHash(configOf(z.string(), e.record)) || !registered(again.e, tool)) return null;
+    if (pmDescriptorHash(configOf(again.e.record)) !== pmDescriptorHash(configOf(e.record)) || !registered(again.e, tool)) return null;
     return again.e;
   };
   const key = issueKey(ref, t);

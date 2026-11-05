@@ -37,7 +37,7 @@
 import { createHash } from 'node:crypto';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { z } from 'zod';
+import { z } from '../zod.js';
 
 import type {
   Actor,
@@ -75,13 +75,13 @@ const REASON = z.string().max(600).optional();
 
 /** studio's appearance scalars (`theming/appearance.ts`), as a partial patch: only the keys that change. */
 export const ThemePatchSchema = z.strictObject({
-    theme: z.enum(['wicked-dark', 'wicked-light']).optional(),
-    accent_h: z.number().min(0).max(360).optional(),
-    accent_s: z.number().min(0).max(100).optional(),
-    accent_l: z.number().min(0).max(100).optional(),
-    ambient: z.boolean().optional(),
-    ambient_still: z.boolean().optional(),
-  })
+  theme: z.enum(['wicked-dark', 'wicked-light']).optional(),
+  accent_h: z.number().min(0).max(360).optional(),
+  accent_s: z.number().min(0).max(100).optional(),
+  accent_l: z.number().min(0).max(100).optional(),
+  ambient: z.boolean().optional(),
+  ambient_still: z.boolean().optional(),
+})
   .refine((p) => Object.keys(p).length > 0, 'a theme patch changes at least one key');
 
 const EntryBlock = z.object({

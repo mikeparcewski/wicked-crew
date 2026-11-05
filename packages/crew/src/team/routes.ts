@@ -15,7 +15,7 @@
 
 import type { FastifyInstance } from 'fastify';
 import { randomUUID } from 'node:crypto';
-import { z } from 'zod';
+import { z } from '../zod.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import { PlanLaunchUnsupportedError, TeamUnsupportedError } from '../core/adapter.js';
 import { readBus } from '../core/bus.js';
@@ -44,12 +44,12 @@ export const EditPlanSchema = z.strictObject({ plan: PlanSchema, requestId: z.st
  *  the run is paused at another gate, so the edit is a mid-run one. */
 const NO_PLAN_GATE = /no plan_approval gate open/;
 export const PlanPreviewSchema = z.strictObject({
-    plan: PlanSchema,
-    projectId: z.string().min(1).optional(),
-    humanConfirm: z.string().min(1).optional(),
-    repoRef: z.string().min(1).optional(),
-    deliver: z.enum(['pr', 'none']).optional(),
-  });
+  plan: PlanSchema,
+  projectId: z.string().min(1).optional(),
+  humanConfirm: z.string().min(1).optional(),
+  repoRef: z.string().min(1).optional(),
+  deliver: z.enum(['pr', 'none']).optional(),
+});
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);

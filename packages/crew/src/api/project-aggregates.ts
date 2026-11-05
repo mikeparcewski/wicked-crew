@@ -15,7 +15,7 @@
  */
 
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
+import { z } from '../zod.js';
 
 import type { CoreAdapter } from '../core/adapter.js';
 import { ProjectsUnsupportedError } from '../core/adapter.js';

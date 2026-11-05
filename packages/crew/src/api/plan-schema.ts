@@ -3,7 +3,7 @@
  * `POST /runs/:id/plan` and `POST /plans/preview` (DES-TEAMING-002 T3/T8).
  */
 
-import { z } from 'zod';
+import { z } from '../zod.js';
 import type { LaunchPlan } from '../core/types.js';
 
 /** DES-TEAMING-002 §8.4 (seam T3) — a USER-COMPOSED plan: `steps[]` over the phase catalog (a

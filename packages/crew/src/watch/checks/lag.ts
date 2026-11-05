@@ -7,13 +7,13 @@
  * studio"); the episode's flag clears when a tick finds the registry caught up.
  */
 
-import { z } from 'zod';
+import { z } from '../../zod.js';
 import type { WatchCheck } from '../types.js';
 
 const Threshold = z.strictObject({
-    queue_depth: z.int().min(1).max(100_000),
-    tail_lag_ms: z.int().min(1_000).max(3_600_000),
-  });
+  queue_depth: z.int().min(1).max(100_000),
+  tail_lag_ms: z.int().min(1_000).max(3_600_000),
+});
 type Threshold = z.infer<typeof Threshold>;
 
 interface LagBag {
