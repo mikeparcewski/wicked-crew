@@ -235,6 +235,12 @@ describe('chat proposals (server, A2)', () => {
     expect(words.json()).toMatchObject({ code: 'catalog_unavailable' });
   });
 
+  it('(Lane D) a reshape names its plan version whole: ord and planRev together, or neither', async () => {
+    const out = await authed.inject({ method: 'POST', url: '/api/v1/runs/some-run/reshape', payload: { card: 'bug', requestId: 'r1', planRev: 2 }, ...auth('owner-token') });
+    expect(out.statusCode).toBe(400);
+    expect(out.body).toMatch(/together/u);
+  });
+
   it('an information-only reply makes no proposal', async () => {
     await turn(stub, stubListeners, 'info-1', 'What did run 29bbbfb1 measure?', null);
     const instructions = (launches.at(-1)!.plan as unknown as { steps: Array<{ instructions: string }> }).steps[0]!.instructions;

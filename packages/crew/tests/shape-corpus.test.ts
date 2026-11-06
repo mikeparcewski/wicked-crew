@@ -144,6 +144,13 @@ describe('the shape suite in the default evals', () => {
       { session: { id: 'b', title: 'Focus: flaky tests', problem: 'Focus: flaky tests\n\nthe search tests time out at random', shape: { card: 'suite-health', option: 'flaky', by: 'detected' } }, units: [] },
     ];
     expect(auditSample(shapeLaunchesOf(twin), 50, 1).denominator).toBe(2);
+    // Two long requests that differ only after the display cut, or only in case, are two requests (codex r2).
+    const shared = 'x'.repeat(2500);
+    const longTwins = [
+      { session: { id: 'c', problem: `${shared} then fix ParseDate`, shape: { card: 'bug', option: null, by: 'detected' } }, units: [] },
+      { session: { id: 'd', problem: `${shared} then fix parsedate`, shape: { card: 'bug', option: null, by: 'detected' } }, units: [] },
+    ];
+    expect(auditSample(shapeLaunchesOf(longTwins), 50, 1).denominator).toBe(2);
   });
 });
 

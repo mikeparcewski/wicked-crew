@@ -79,6 +79,10 @@ describe('the digest (§2.3 catalogDigest)', () => {
     expect(catalogDigest('classify', { status })).toMatch(/- review-change [^\n]*NOT ON THIS DAEMON/u);
     // The chat seat is not offered a card it could not start here.
     expect(catalogDigest('chat', { status })).not.toMatch(/review-change/u);
+    // A card stays while any option is available; an unavailable default is not named (codex r2).
+    const migrate = catalogDigest('chat', { status: (card, option) => (card === 'migrate' && (option === null || option === 'in-place') ? 'unavailable' : 'available') });
+    expect(migrate).toMatch(/migrate \(move\|upgrade\)/u);
+    expect(migrate).not.toMatch(/default in-place/u);
   });
 });
 
@@ -111,6 +115,11 @@ describe('the words ask for an outcome, and say a depth (codex r1)', () => {
     expect(outcomeConflict('Plan how to upgrade Node', 'migrate')).toBe(true);
     expect(outcomeConflict('Plan how to upgrade Node', 'plan-it')).toBe(false);
     expect(outcomeConflict('upgrade Node 18 to 22', 'migrate')).toBe(false);
+    // Every outcome asked must be the card's: a review of a subject inside a plan, an explanation or a write-up does not
+    // let the subject's card decide (codex r2).
+    for (const t of ['Plan a security review of our authentication and authorization security vulnerabilities', 'Explain the security review findings and authentication vulnerabilities', 'Document the incident root cause outage timeline']) {
+      expect(detect({ text: t, seat: null, source: 'classify', catalogRev: REV }).guess.band, t).not.toBe('sure');
+    }
   });
 
   it('an Investigate card decided by the words keeps the depth the words say', () => {
@@ -167,6 +176,9 @@ describe('validateGuess (§2.3)', () => {
   it('keeps a coming card named, unavailable (its nearest is offered by the proposal)', () => {
     const d = detect({ text: 'what are competitors doing for usage-based pricing?', seat: { card: 'competitive', confidence: 0.9, reason: 'market analysis' }, source: 'classify', catalogRev: REV });
     expect(d.guess).toMatchObject({ card: 'competitive', available: false });
+    // Never sure on a job this daemon cannot start, even when the words decide it (pi r2).
+    const off = detect({ text: 'modernize the legacy .NET Framework monolith into microservices on Kubernetes', seat: null, source: 'classify', catalogRev: REV, available: () => false });
+    expect(off.guess).toMatchObject({ card: 'migrate', available: false, band: 'likely' });
   });
 
   it('an ask list of valid shapes asks between them; invalid entries are dropped', () => {

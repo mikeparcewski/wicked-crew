@@ -782,6 +782,8 @@ function keepReshape(next: ArtifactProposal, from: ArtifactProposal): ArtifactPr
     ...(from.relaunch !== undefined ? { relaunch: from.relaunch } : {}),
     ...(from.reducedAssurance === true ? { reducedAssurance: true as const } : {}),
     ...(from.heldRejected === true ? { heldRejected: true as const } : {}),
+    // The plan version the reshape was offered on stays with every descendant (codex r2 on Lane D).
+    ...(from.heldPlan !== undefined ? { heldPlan: from.heldPlan } : {}),
   };
 }
 
@@ -1835,7 +1837,8 @@ export class ChatProposals {
     const jc = this.jobChat(chatId);
     if (jc === null) return null;
     const pid = `${chatId}:${turnId}`;
-    const words = turnWords(records, turnId).slice(0, 8000);
+    // The whole message: the job's words are what the person said, never silently clipped (codex r2).
+    const words = turnWords(records, turnId);
     try {
       const ctx = await this.jobContext(chatId, pid, turnId, seat, jc, { revises: null, lineage: null, notes: [] });
       const available = (card: string, option: string | null): boolean => resolveOption(card, option, ctx.served)?.resolved.status === 'available';
@@ -2280,7 +2283,14 @@ export class ChatProposals {
     let candidate: ArtifactProposal | null = null;
     let candidateErr: unknown = null;
     try {
-      candidate = keepReshape(await this.proposalOf(chatId, src.pid, { ...merged.facts, by: fromPerson ? 'person' : merged.facts.by, source: src.source }, ctx, records, allowHidden), parent.proposal);
+      // A revision is not the detection any more: an unsure first guess (`ask`) is not carried onto a startable shape,
+      // and a changed card or option drops the guess it no longer describes (codex r2 on Lane D).
+      const g = merged.facts.guess;
+      const stale = g !== undefined && (g.band === 'ask' || g.card !== merged.facts.card || g.option !== optionFor(CATALOG_V2_CARDS.find((c) => c.id === merged.facts.card)!, merged.facts.option));
+      const { guess: _g, ...unguessed } = merged.facts;
+      void _g;
+      const factsNow: JobFacts = stale ? unguessed : merged.facts;
+      candidate = keepReshape(await this.proposalOf(chatId, src.pid, { ...factsNow, by: fromPerson ? 'person' : factsNow.by, source: src.source }, ctx, records, allowHidden), parent.proposal);
     } catch (err) {
       candidateErr = err;
     }
@@ -2508,7 +2518,8 @@ export class ChatProposals {
       lead: p.seats?.lead ?? null,
       seats: p.seats?.keys ?? [],
     };
-    const pid = `${p.pid}:c:${this.now().toString(36)}`;
+    // One refresh suffix, not one per refresh: the id stays bounded however often the catalog changes (codex r2).
+    const pid = `${p.pid.replace(/(?::c:[0-9a-z]+)+$/u, '')}:c:${this.now().toString(36)}`;
     let ctx: JobContext;
     try {
       ctx = await this.jobContext(chatId, pid, p.turnId, p.seat, chat, { revises: p.pid, lineage: p.lineage ?? p.pid, notes: ['The catalog changed since this was proposed: check it again before starting.'] });

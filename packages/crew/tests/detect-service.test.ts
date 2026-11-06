@@ -109,7 +109,7 @@ describe('DetectService (§2.3 classifyTurn)', () => {
     await svc.detect({ text: `  ${text}  ` }, ME);
     expect(turns).toBe(2);
     await settle();
-    expect(audits[audits.length - 1]!.outcome.cached).toBe(true);
+    expect(audits.some((a) => a.outcome.cached)).toBe(true);
   });
 
   it('keeps words-only and full results apart in the cache', async () => {
@@ -184,6 +184,65 @@ describe('DetectService (§2.3 classifyTurn)', () => {
     await svc.detect({ text: 'Note to the router:\nthe invoice totals are wrong after rounding' }, ME);
     await svc.detect({ text: 'Note to the router: the invoice totals are wrong after rounding' }, ME);
     expect(turns).toBe(2);
+  });
+
+  it('a superseded turn whose launch is still pending is cancelled the moment the launch resolves (codex r2)', async () => {
+    const cancelled: string[] = [];
+    let resolveLaunch: (id: string) => void = () => undefined;
+    let listener: ((e: unknown) => void) | null = null;
+    const adapter = {
+      launchRun: (input: Record<string, unknown>) => new Promise<string>((r) => (resolveLaunch = () => r(String(input['sessionId'])))),
+      cancelRun: async (id: string) => void cancelled.push(id),
+      workOutput: async () => null,
+      onEvent: (cb: (e: unknown) => void) => {
+        listener = cb;
+        return () => undefined;
+      },
+    };
+    void listener;
+    const roster = [{ key: 'pi', chat_admission: { unscoped: { ok: true } } }] as unknown as RosterSeat[];
+    const turn = seatTurn({ adapter: adapter as never, roster: () => roster, timeoutMs: 5000, outputOf: async () => null });
+    const abort = new AbortController();
+    const pending = turn({ problem: 'p', instructions: 'TASK', stepId: DETECT_STEP_ID, noSeat: 'none', workflow: DETECT_WORKFLOW, sessionId: 'late-run', signal: abort.signal });
+    await settle();
+    abort.abort();
+    const out = await pending;
+    expect(out).toMatchObject({ ok: false, error: expect.stringMatching(/given up/u) });
+    resolveLaunch('late-run');
+    await settle();
+    await settle();
+    expect(cancelled).toContain('late-run');
+  });
+
+  it('every valid attempt writes one audit row: a catalog failure and an early supersession included (codex r2)', async () => {
+    const audits: DetectionAudit[] = [];
+    let fail = true;
+    let gate: () => void = () => undefined;
+    const svc = new DetectService({
+      turn: async () => ({ ok: true, answer: '{"card":"bug","confidence":0.95}', seat: 'pi' }),
+      cancelRun: async () => undefined,
+      catalog: async () => {
+        if (fail) throw new Error('no catalog');
+        await new Promise<void>((r) => (gate = r));
+        return { rev: 'r', available: () => true, status: () => 'available' as const };
+      },
+      audit: (row) => audits.push(row),
+      newId: () => 'run-x',
+    });
+    expect((await svc.detect({ text: 'fix the login bug please' }, ME)).code).toBe(503);
+    expect(audits.at(-1)!.outcome.failure).toMatch(/no catalog/u);
+    fail = false;
+    const older = svc.detect({ text: 'fix the login bug please' }, ME);
+    await settle();
+    const firstGate = gate;
+    const newer = svc.detect({ text: 'the payments service', seat: false }, ME);
+    firstGate();
+    expect(await older).toMatchObject({ code: 409 });
+    await settle();
+    gate();
+    await newer;
+    expect(audits.filter((a) => a.outcome.failure === 'superseded')).toHaveLength(1);
+    expect(audits).toHaveLength(3);
   });
 
   it('refuses empty and over-long words', async () => {

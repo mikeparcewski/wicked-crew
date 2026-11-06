@@ -1,5 +1,5 @@
 {
- "$comment": "DES-CATALOG-002 §9 detection corpus v1 (synthetic, real-looking; no client content). expect.card[:option] is the shape a person would launch; expect.ask lists the acceptable shapes when the right answer is to ask ONE question; expect.coming names a coming card and expect.nearest the card offered today. kind: clear | variant | combined | ambiguous | coming | depth | context | adversarial. expect.depth is scored apart (depth is a brief line, never a plan change). adversarial cases carry an instruction aimed at the classifier inside the person's words; the expected shape is the real ask. The nearest card for a coming card is catalog data (cards.json `nearest`), not a detection output. planChanging marks a case whose variant selects a different preset (a wrong option there is a wrong plan, not a wrong brief line). Lane D (cat2-crew-detect) adds w1-w15 (every option at least 2 cases) and z5-z8 (adversarial: an option substituted within a card; an instruction inside quoted chat or a pasted document); their seat answers were recorded the same way as spike 2's (prompt2's header, pi, no tools, high thinking, blind). w16-w19 (review round 1): an outcome asked of another job's subject (a plan of an upgrade, a review of a migration, an explanation) and a depth stated in words; recorded the same way.",
+ "$comment": "DES-CATALOG-002 §9 detection corpus v1 (synthetic, real-looking; no client content). expect.card[:option] is the shape a person would launch; expect.ask lists the acceptable shapes when the right answer is to ask ONE question; expect.coming names a coming card and expect.nearest the card offered today. kind: clear | variant | combined | ambiguous | coming | depth | context | adversarial. expect.depth is scored apart (depth is a brief line, never a plan change). adversarial cases carry an instruction aimed at the classifier inside the person's words; the expected shape is the real ask. The nearest card for a coming card is catalog data (cards.json `nearest`), not a detection output. planChanging marks a case whose variant selects a different preset (a wrong option there is a wrong plan, not a wrong brief line). Lane D (cat2-crew-detect) adds w1-w15 (every option at least 2 cases) and z5-z8 (adversarial: an option substituted within a card; an instruction inside quoted chat or a pasted document); their seat answers were recorded the same way as spike 2's (prompt2's header, pi, no tools, high thinking, blind). w16-w19 (review round 1): an outcome asked of another job's subject (a plan of an upgrade, a review of a migration, an explanation) and a depth stated in words; recorded the same way. w20 (review round 2): a plan asked of a review, recorded the same way.",
  "cases": [
   {
    "id": "p1",
@@ -1770,6 +1770,14 @@
    "expect": {
     "card": "incident",
     "depth": "deep"
+   }
+  },
+  {
+   "id": "w20",
+   "kind": "clear",
+   "text": "Plan a security review of our authentication and authorization code for next quarter",
+   "expect": {
+    "card": "plan-it"
    }
   }
  ]

@@ -199,6 +199,9 @@ export interface CorrectionView {
   seatRules: string[];
   skipQe: string | null;
   details: string[];
+  /** The job's own words and its input values: a correction never changes them unless the case expects it. */
+  words: string;
+  inputs: string;
   notes: string[];
   question: ArtifactProposal['question'] | null;
 }
@@ -217,6 +220,8 @@ export function viewOfProposal(p: ArtifactProposal): CorrectionView {
     seatRules: [...(p.seatRules ?? [])].sort(),
     skipQe: p.skipQe?.reason ?? null,
     details: [...(p.details ?? [])],
+    words: p.words ?? '',
+    inputs: JSON.stringify(p.inputs ?? {}),
     notes: [...(p.sentence?.notes ?? [])],
     question: p.question ?? null,
   };
@@ -303,6 +308,12 @@ export function judgeCorrection(c: CorrectionCase, parent: CorrectionView, now: 
     if ((FIELDS as readonly string[]).includes(f) && !same(f)) why.push(`kept ${k} changed`);
   }
   if (e.wordsAdded !== undefined && !now.details.some((d) => d.includes(e.wordsAdded!))) why.push('words lost');
+  // The whole result, not only the fields named (codex r2): the job's words and inputs never change unless expected,
+  // and every carried detail comes from the person's own message (a seat's unrelated addition fails the case).
+  if (now.words !== parent.words && parent.kind === now.kind) why.push('the job\'s words changed');
+  if (now.inputs !== parent.inputs && parent.kind === now.kind) why.push('inputs changed');
+  const said = (c.text ?? (c.turns ?? []).join('\n')).toLowerCase();
+  for (const d of now.details) if (!parent.details.includes(d) && !said.includes(d.toLowerCase())) why.push(`carried words the person did not say: “${d}”`);
   if (e.refusedPart !== undefined && /parity/iu.test(e.refusedPart) && !now.gate.includes('parity')) why.push('parity dropped');
   return why;
 }

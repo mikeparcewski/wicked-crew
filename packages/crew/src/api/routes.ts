@@ -4626,7 +4626,9 @@ export function registerRoutes(
         }
       }
       const chatId = seedChatId ?? b.chatId ?? randomUUID();
-      if (b.accepts !== undefined) chatAccepts.set(chatId, b.accepts.includes('job'));
+      // A new chat's declaration is its own (an omitted one is "no job cards"): an id reused after a close never inherits
+      // the previous chat's (codex r2 on Lane D).
+      chatAccepts.set(chatId, b.accepts?.includes('job') === true);
       const requestedRefs = [...(b.repoRef !== undefined ? [b.repoRef] : []), ...(b.repoRefs ?? [])];
       // The scope kind as the open resolves it: the request's, unless an Ask-about-this seed names the repositories.
       let scopeKind = b.scopeKind;
@@ -5189,7 +5191,6 @@ export function registerRoutes(
     if (!parsed.success) {
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     }
-    if (parsed.data.accepts !== undefined) chatAccepts.set(id, parsed.data.accepts.includes('job'));
     // DES-ASK-TEAM-CHAT-001 §3, §5.1 (ASK-C1): the first message of a chat LAUNCHES one team path
     // — a user-composed plan of one `understand` step with its gate raised to the turn gate, one
     // reviewer asked for, the eligible roster as `clis`, the operator's choice as `primary`; every
@@ -5273,6 +5274,9 @@ export function registerRoutes(
     // logged, never a retraction of a turn that is already being answered (codex on #808 r2, 9).
     const persistAccepted = (preface: string | null, after: () => void): void => {
       try {
+        // DES-CATALOG-002 §4.6: the client's declaration takes effect with an ACCEPTED message only (a refused one, a
+        // second tab's 409, never changes how a turn in flight is read; codex r2 on Lane D).
+        if (parsed.data.accepts !== undefined) chatAccepts.set(id, parsed.data.accepts.includes('job'));
         after();
         if (preface !== null) chatTranscripts?.appendSystem(id, turnId, preface);
         chatTranscripts?.appendUser(id, turnId, text, voice, attached.map(attachmentWire), contextAllowed);
@@ -5452,8 +5456,13 @@ export function registerRoutes(
       }
       // A2: the per-message digest of what the chat can make now (advertised operations only; never in an analysis).
       const makeDigest = path.workflow === undefined ? chatMakeDigest(chatProposals.digest(id)) : '';
-      if (makeDigest !== '') seatText = `${seatText}\n\n${makeDigest}`;
-      if (jobTurn !== null) seatText = `${seatText}\n\n${chatJobTurnLines(jobTurn.mode, jobTurn.context)}`;
+      // DES-CATALOG-002 §2.3: with job cards, the make digest rides INSIDE the job block, under its one 2 KB budget.
+      if (jobTurn !== null && jobTurn.mode === 'cards') {
+        seatText = `${seatText}\n\n${chatJobTurnLines(jobTurn.mode, { ...jobTurn.context, preface: makeDigest })}`;
+      } else {
+        if (makeDigest !== '') seatText = `${seatText}\n\n${makeDigest}`;
+        if (jobTurn !== null) seatText = `${seatText}\n\n${chatJobTurnLines(jobTurn.mode, jobTurn.context)}`;
+      }
       voice = path.pa !== null ? [path.pa] : [];
       // A random pick reserves every eligible seat until the relay names the PA.
       audience = voice.length > 0 ? voice : path.eligible;
@@ -6889,10 +6898,10 @@ export function registerRoutes(
     requestId: z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9._-]+$/),
     /** The person's press on the reshape question: the loss ids it was shown. */
     confirmLoss: z.array(z.string().min(1).max(40)).min(1).max(12).optional(),
-    /** (api-types 0.194.0) The plan version a `plan_offer` was made on. */
+    /** (api-types 0.194.0) The plan version a `plan_offer` was made on: both or neither. */
     ord: z.number().int().min(0).optional(),
     planRev: z.number().int().min(0).optional(),
-  });
+  }).refine((b) => (b.ord === undefined) === (b.planRev === undefined), { message: 'send `ord` and `planRev` together (the plan version the offer was made on)' });
   app.post(
     `${V}/runs/:id/reshape`,
     { config: { manifest: { requestType: 'ReshapeRunBody', responseType: 'ReshapeRunResponse', statusCodes: [200, 400, 403, 404, 409, 502] } } },
@@ -6917,7 +6926,7 @@ export function registerRoutes(
       if (chatProposals.proposalOfPid(chatId, pid)?.heldRejected !== true) {
         const elig = await reshapeEligibility(id);
         if ('refusal' in elig) return reply.code(elig.refusal.code).send(elig.refusal.body);
-        if (parsed.data.planRev !== undefined && (parsed.data.planRev !== elig.planRev || (parsed.data.ord !== undefined && parsed.data.ord !== elig.ord))) {
+        if (parsed.data.planRev !== undefined && (parsed.data.planRev !== elig.planRev || parsed.data.ord !== elig.ord)) {
           return reply.code(409).send({ code: 'gate_changed', error: `run ${id}'s plan changed since this was offered (now version ${elig.planRev}); look at it again`, openOrd: elig.ord, planRev: elig.planRev });
         }
       }

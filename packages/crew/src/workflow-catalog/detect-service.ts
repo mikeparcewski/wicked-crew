@@ -95,7 +95,7 @@ export type DetectAnswer = { code: 200; body: ShapeGuess } | { code: 400 | 409 |
 export class DetectService {
   private readonly cache = new Map<string, { at: number; guess: ShapeGuess }>();
   /** Per person: the newest request's token and its run (a newer request cancels the older). */
-  private readonly inflight = new Map<string, { token: number; runId: string | null }>();
+  private readonly inflight = new Map<string, { token: number; runId: string | null; abort: AbortController }>();
   private seq = 0;
   private readonly now: () => number;
 
@@ -111,8 +111,11 @@ export class DetectService {
     // catalog read or its seat) is superseded now, its run cancelled, whatever this one turns out to need.
     const token = ++this.seq;
     const prior = this.inflight.get(actor.id);
+    // The older turn is given up now: a launch still pending is cancelled the moment it resolves (seatTurn's signal).
+    prior?.abort.abort();
     if (prior?.runId !== null && prior?.runId !== undefined) void this.deps.cancelRun(prior.runId).catch(() => undefined);
-    this.inflight.set(actor.id, { token, runId: null });
+    const abort = new AbortController();
+    this.inflight.set(actor.id, { token, runId: null, abort });
     const owns = (): boolean => this.inflight.get(actor.id)?.token === token;
     const superseded: DetectAnswer = { code: 409, body: { code: 'detection_superseded', error: 'a newer detection replaced this one' } };
     const done = (a: DetectAnswer): DetectAnswer => {
@@ -120,17 +123,11 @@ export class DetectService {
       return a;
     };
     const started = this.now();
-    let catalog: Awaited<ReturnType<DetectServiceDeps['catalog']>>;
-    try {
-      catalog = await this.deps.catalog(req.projectId ?? null);
-    } catch (err) {
-      return done({ code: 503, body: { code: 'catalog_unavailable', error: err instanceof Error ? err.message : String(err) } });
-    }
-    if (!owns()) return superseded;
-    const seatWanted = req.seat !== false;
-    // The whole canonical input: the exact words (line breaks matter to what is taken out of them), the project, the
-    // catalog revision and the mode.
-    const key = JSON.stringify([seatWanted ? 'full' : 'words', text, req.projectId ?? null, catalog.rev]);
+    // Every valid attempt writes its one row, a failure before any reading included (codex r2).
+    const failedRow = (failure: string): DetectionAudit => ({
+      actor: actor.id, chat: req.chatId ?? null, source: 'classify', latencyMs: this.now() - started, seat: null, runId: null, costUsd: null,
+      outcome: { band: 'ask', card: '', option: null, cached: false, failure: failure.slice(0, 200) },
+    });
     const audit = (d: Detection | { guess: ShapeGuess }, extra: { seat: string | null; runId: string | null; cached: boolean; failure: string | null }): void => {
       const row: DetectionAudit = {
         actor: actor.id,
@@ -148,10 +145,36 @@ export class DetectService {
       }
       // Recorded with its cost: the run's own, read once it has ended (best effort; the row is written either way).
       const runId = extra.runId;
-      void this.deps.costOf(runId)
-        .catch(() => null)
-        .then((cost) => this.deps.audit({ ...row, costUsd: cost ?? null }));
+      // The cost read is bounded: the row is written within 15 s with or without it.
+      let costTimer: ReturnType<typeof setTimeout> | undefined;
+      void Promise.race([
+        this.deps.costOf(runId).catch(() => null),
+        new Promise<null>((resolve) => {
+          costTimer = setTimeout(() => resolve(null), 15_000);
+          costTimer.unref?.();
+        }),
+      ])
+        .then((cost) => {
+          clearTimeout(costTimer);
+          this.deps.audit({ ...row, costUsd: cost ?? null });
+        });
     };
+    let catalog: Awaited<ReturnType<DetectServiceDeps['catalog']>>;
+    try {
+      catalog = await this.deps.catalog(req.projectId ?? null);
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err);
+      this.deps.audit(failedRow(why));
+      return done({ code: 503, body: { code: 'catalog_unavailable', error: why } });
+    }
+    if (!owns()) {
+      this.deps.audit(failedRow('superseded'));
+      return superseded;
+    }
+    const seatWanted = req.seat !== false;
+    // The whole canonical input: the exact words (line breaks matter to what is taken out of them), the project, the
+    // catalog revision and the mode.
+    const key = JSON.stringify([seatWanted ? 'full' : 'words', text, req.projectId ?? null, catalog.rev]);
     const hit = this.cache.get(key);
     if (hit !== undefined && this.now() - hit.at <= (this.deps.cacheTtlMs ?? 10 * 60_000)) {
       audit({ guess: hit.guess }, { seat: null, runId: null, cached: true, failure: null });
@@ -166,7 +189,7 @@ export class DetectService {
       if (!seatWanted) return null;
       // Fenced BEFORE the launch: a unit's first call can land before the launch answers.
       FENCED_RUNS.add(runId);
-      this.inflight.set(actor.id, { token, runId });
+      if (owns()) this.inflight.set(actor.id, { token, runId, abort });
       const out = await this.deps.turn({
         problem: "Detect the shape of a person's words.",
         instructions: detectTask(text, catalogDigest('classify', { status: catalog.status })),
@@ -174,6 +197,7 @@ export class DetectService {
         noSeat: 'no seat can read the words now; pick a job from the / list',
         workflow: DETECT_WORKFLOW,
         sessionId: runId,
+        signal: abort.signal,
       });
       if (!out.ok) {
         failure = out.error.slice(0, 200);

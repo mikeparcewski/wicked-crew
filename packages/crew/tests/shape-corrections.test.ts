@@ -19,7 +19,7 @@ import {
   scoreCorrections,
   CorrectionChat,
 } from '../src/evals/shape-corrections.js';
-import { mergeRevision } from '../src/api/chat-jobs.js';
+import { lowersCheck, mergeRevision } from '../src/api/chat-jobs.js';
 import { removeScratch } from './setup/scratch.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'shape-corr-'));
@@ -119,11 +119,29 @@ describe('the adapter catches a hostile block (its own negative tests)', () => {
     expect(r.result!.notes.join(' ')).toMatch(/scope/u);
   });
 
+  it('the scorer compares the whole result: an unrelated detail or a replaced intent fails the case (codex r2)', async () => {
+    const extra = await run('k2', open({ repoRef: 'billing-api', detail: { add: ['also add an unrelated dashboard'] } }));
+    expect(extra.right).toBe(false);
+    expect(extra.why.join(' ')).toMatch(/did not say/u);
+    const intent = await run('k2', open({ repoRef: 'billing-api', inputs: { intent: { kind: 'text', value: 'rewrite everything' } } }));
+    expect(intent.result!.words).toBe(intent.parent!.words);
+    expect(intent.result!.notes.join(' ')).toMatch(/own words are yours/u);
+  });
+
   it('the scorer itself fails a wrong answer: a wrong option, a lost keep field', async () => {
     const wrong = await run('k1', open({ option: 'upgrade' }));
     expect(wrong.right).toBe(false);
     const lostRepo = await run('k2', open({ repoRef: 'billing-api', option: 'move' }));
     expect(lostRepo.why.join(' ')).toMatch(/unexpected option|kept option changed/u);
+  });
+});
+
+describe('lowersCheck (the words that would lower a check)', () => {
+  it('reads requests to lower, prohibitions and ship steps; keeps descriptions and requests to keep a check', () => {
+    const lowers = ['skip parity', 'skip QE acceptance', 'without the review', 'drop the tests', 'skip cited findings', 'skip the distinct reviewer', 'drop the separate judge', "ship this without running the reviewer's checks", 'waive QE', 'fewer reviewers', 'remove the parity check', 'no review needed', 'turn QE off', 'Do not review this', 'Do not run QE acceptance', 'Never run the tests', 'and tag it when you are done', 'merge it when green'];
+    const keeps = ['without downtime', 'no downtime', "don't fix anything", '.NET 8 on Linux', 'There are no tests for this module', 'no tests failed', 'Do not drop parity checks', 'Fix the bug without skipping QE acceptance', 'do not skip the tests', 'reduce the cache size', 'so agents can call it', 'never touch the billing tables'];
+    for (const t of lowers) expect(lowersCheck(t), t).toBe(true);
+    for (const t of keeps) expect(lowersCheck(t), t).toBe(false);
   });
 });
 

@@ -70,6 +70,9 @@ export interface SeatTurnInput {
   sessionId?: string;
   /** Called with the run id once the launch is armed (before it resolves), so a newer request can cancel it. */
   onRun?: (runId: string) => void;
+  /** The caller gave the turn up (a newer request superseded it): it ends now, and a launch still pending is cancelled
+   *  the moment it resolves (codex r2 on DES-CATALOG-002 Lane D). */
+  signal?: AbortSignal;
 }
 
 /**
@@ -95,6 +98,7 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
     // Cleared in `finally`: an early return must not leave it armed.
     let timer: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
+    let aborted = false;
     let deadlineAt = Date.now() + timeoutMs;
     // How the run's turn came out, the first frame that decides it: a terminal frame, or a park
     // (`parked`: the run stopped at a gate and has NOT ended).
@@ -139,6 +143,12 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
           stop();
         }
       });
+      if (input.signal?.aborted === true) return { ok: false, code: 502, error: `the ${seat} seat's turn was given up` };
+      input.signal?.addEventListener('abort', () => {
+        aborted = true;
+        decide(null);
+        stop();
+      }, { once: true });
       // Inside the try: instructions that fail to build (a project list) are the turn's 502, never an unhandled 500.
       const instructions = typeof input.instructions === 'string' ? input.instructions : await input.instructions();
       // ONE deadline over the launch and the answer: a launch that hangs is the same 502.
@@ -166,7 +176,7 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
       // A launch that resolves after the turn gave up (the deadline, or a park) must not outlive it.
       launch.then(
         (id) => {
-          if ((timedOut || parked()) && !runEnded) void adapter.cancelRun(id).catch(() => undefined);
+          if ((timedOut || parked() || aborted) && !runEnded) void adapter.cancelRun(id).catch(() => undefined);
         },
         () => undefined,
       );
@@ -181,12 +191,13 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
         return { ok: false, code: 502, error: `the ${seat} seat could not open: ${err instanceof Error ? err.message : String(err)}` };
       }
       if (launched === null) {
+        if (aborted) return { ok: false, code: 502, error: `the ${seat} seat's turn was given up` };
         return timedOut ? { ok: false, code: 502, error: `the ${seat} seat did not answer in ${timeoutMs / 1000} s` } : { ok: false, code: 502, error: parkedMessage() };
       }
       runId = launched;
       const id = launched;
       const ended = await decided;
-      if (ended === null) return { ok: false, code: 502, error: `the ${seat} seat did not answer in ${timeoutMs / 1000} s` };
+      if (ended === null) return { ok: false, code: 502, error: aborted ? `the ${seat} seat's turn was given up` : `the ${seat} seat did not answer in ${timeoutMs / 1000} s` };
       // A parked turn's answer is not read: it is a failure, and the read must not hold the cancel.
       if (ended.parked === true) return { ok: false, code: 502, error: parkedMessage() };
       // The answer's read is inside the same deadline (at least a second for a fast local read): a stalled read is the
@@ -215,7 +226,7 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
       // A run that has not ended (the seat went quiet, it parked, or the launch hung past the
       // deadline — the run id is the session id it was launched under) must not outlive the turn.
       // The cancel is bounded too: the turn answers within its budget, and the cancel goes on without it.
-      if (!runEnded && (runId !== undefined || timedOut || parked())) {
+      if (!runEnded && (runId !== undefined || timedOut || parked() || aborted)) {
         let cancelTimer: ReturnType<typeof setTimeout> | undefined;
         await Promise.race([
           adapter.cancelRun(runId ?? sessionId).catch(() => undefined),

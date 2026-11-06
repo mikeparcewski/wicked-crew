@@ -516,6 +516,11 @@ const CONTROL = String.raw`(?:the\s+|any\s+|a\s+|all\s+)?(?:distinct\s+|independ
 // A lowering verb, then the control, with at most two words between ("without running the reviewer's checks").
 const LOWER_VERB = new RegExp(String.raw`\b(skip(?:ping)?|drop(?:ping)?|remov(?:e|ing)|disabl(?:e|ing)|bypass(?:ing)?|omit(?:ting)?|cut(?:ting)?|ditch(?:ing)?|waiv(?:e|ing)|forget|lighten|reduc(?:e|ing)|fewer|less|turn(?:ing)?\s+off|get\s+rid\s+of|ignor(?:e|ing)|without|no\s+need\s+for|(?:don'?t|do\s+not)\s+need)(?:\s+[\w'’-]+){0,2}?\s+${CONTROL}\b`, 'giu');
 const NO_CONTROL = /\bno\s+(?:qe|parity|review|reviewer|judge)\b/giu;
+/** A prohibition of the control itself ("do not review this", "never run the tests"), apart from a negation that keeps
+ *  a check ("do not drop parity": no control verb follows). */
+const PROHIBIT = /\b(?:don'?t|do\s+not|never|no\s+need\s+to)\s+(?:(?:run|do|perform|use|have|bother\s+(?:with|to)|need)\s+)?(?:the\s+|a\s+|any\s+)?(?:review(?:s|ing)?|test(?:s|ing)?|check(?:s|ing)?|judg(?:e|es|ing)|qe(?:\s+acceptance)?|parity(?:\s+checks?)?|acceptance)\b/giu;
+/** A control turned off with the control between ("turn QE off"). */
+const TURN_OFF = new RegExp(String.raw`\bturn(?:ing)?\s+${CONTROL}\s+off\b`, 'giu');
 const SHIP = /\b(?:tag(?:ging)?\s+(?:it|the\s+release|a\s+release|v?\d[\w.]*)|publish(?:ing)?\s+(?:it|the\s+package|to\s+npm)|merg(?:e|ing)\s+(?:it|the\s+pr)|push(?:ing)?\s+(?:it\s+)?to\s+main)\b/giu;
 /** A negation just before a match makes it a request to KEEP the check ("do not drop parity", "without skipping QE"). */
 const NEGATED_BEFORE = /\b(?:don'?t|do\s+not|never|not|without|no)\s+(?:\w+\s+){0,2}$/iu;
@@ -526,7 +531,7 @@ const NEGATED_BEFORE = /\b(?:don'?t|do\s+not|never|not|without|no)\s+(?:\w+\s+){
  * module", "no tests failed") and requests to keep a check ("do not drop parity", "without skipping QE") do not.
  */
 export function lowersCheck(text: string): boolean {
-  for (const re of [LOWER_VERB, NO_CONTROL, SHIP]) {
+  for (const re of [PROHIBIT, TURN_OFF, LOWER_VERB, NO_CONTROL, SHIP]) {
     re.lastIndex = 0;
     for (let m = re.exec(text); m !== null; m = re.exec(text)) {
       const verb = (m[1] ?? m[0]).toLowerCase();
@@ -536,7 +541,7 @@ export function lowersCheck(text: string): boolean {
         re.lastIndex = m.index + verb.length;
         continue;
       }
-      if (!verb.startsWith('without') && NEGATED_BEFORE.test(text.slice(0, m.index))) continue;
+      if (re !== PROHIBIT && !verb.startsWith('without') && NEGATED_BEFORE.test(text.slice(0, m.index))) continue;
       return true;
     }
   }

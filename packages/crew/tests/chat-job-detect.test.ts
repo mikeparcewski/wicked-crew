@@ -211,6 +211,28 @@ describe('a seat\'s job block → a detected job proposal (§2.3)', () => {
     expect(r.launcher.launched).toEqual([]);
   });
 
+  it('an unsure reading answered by a typed clarification becomes startable (the old ask is not carried; codex r2)', async () => {
+    const r = rig();
+    await turn(r, 't1', 'tests for checkout', [{ entry: 'write-tests', confidence: 0.4, reason: 'tests' }]);
+    const asked = open(r)!;
+    expect(asked.shape!.guess!.band).toBe('ask');
+    await turn(r, 't2', 'write the tests for the checkout service, I want them in the repo', [{ revises: asked.pid, edits: { detail: { add: ['in the repo'] } } }]);
+    const clear = open(r)!;
+    expect(clear.shape!.guess).toBeUndefined();
+    expect(clear.blocked).toBeNull();
+    const go = await r.svc.decide(CHAT, clear.pid, { decision: 'go' }, ME, 'i1');
+    expect(go.code, JSON.stringify(go.body)).toBe(200);
+    expect(r.launcher.launched).toHaveLength(1);
+    expect(r.launcher.launched[0]!.resolution.shape).not.toHaveProperty('guess');
+  });
+
+  it('the job\'s words are the whole message, never clipped (codex r2)', async () => {
+    const r = rig();
+    const long = `${'log line\n'.repeat(1200)}and the actual ask: fix the rounding bug in invoices`;
+    await turn(r, 't1', long, [{ entry: 'bug', confidence: 0.9 }]);
+    expect(open(r)!.words).toBe(long);
+  });
+
   it('(d) a block naming an unknown card asks, with the words\' candidates', async () => {
     const r = rig();
     await turn(r, 't1', 'the invoice totals are wrong after rounding', [{ entry: 'fix-everything', confidence: 0.99 }]);
@@ -323,6 +345,18 @@ describe('typed at a held plan: wicked\'s offer, never a decision (§2.4, §2.5,
     // The ids the seat must name are never cut.
     expect(lines).toContain(`c1:${'t'.repeat(120)}`);
     expect(lines).toContain(`{"planEdit":"${'r'.repeat(64)}"}`);
+  });
+
+  it('the make digest rides inside the job block, under one 2 KB budget (codex r2)', () => {
+    const long = 'x'.repeat(400);
+    const lines = chatJobTurnLines('cards', {
+      preface: chatMakeDigest({ create: false, refine: true, theme: true, demo: false, entries: [], jobs: 'cards' }),
+      digest: `${'card-id (a|b|c); '.repeat(100)}`,
+      open: { pid: 'c1:t1', label: long, card: 'migrate', option: 'upgrade', repo: long, seats: ['a'], checks: long },
+      heldPlan: { runId: 'r'.repeat(64), pid: 'c1:t0', label: long, version: 3, lead: long },
+    });
+    expect(lines.startsWith('### What this chat can start now')).toBe(true);
+    expect(Buffer.byteLength(lines, 'utf8')).toBeLessThanOrEqual(2048);
   });
 
   it('offers nothing once the work plan was accepted, while the run works, or for another run', async () => {

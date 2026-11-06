@@ -13,6 +13,7 @@
  * - **Real cases** carry one of four labels ({@link ShapeLabel}); deployment accuracy is estimated only from an audited,
  *   stratified random sample ({@link auditSample}).
  */
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -265,8 +266,10 @@ export interface ShapeLaunch {
   card: string;
   option: string | null;
   by: 'person' | 'detected';
-  /** The words the shape was detected from (scrubbed, short). */
+  /** The words the shape was detected from (shortened for display). */
   words: string;
+  /** The whole input, as one key (its hash): what makes two launches the same request. */
+  inputKey?: string;
   /** A later run reshaped it (`retryOf` names this run), or its proposal was revised before Start. */
   corrected: boolean;
 }
@@ -304,7 +307,8 @@ export function auditSample(launches: readonly ShapeLaunch[], n = 50, seed = 1):
   const seen = new Set<string>();
   const pool: ShapeLaunch[] = [];
   for (const l of launches) {
-    const k = `${l.place ?? ''}\u0000${l.words.trim().toLowerCase()}`;
+    // The same request in the same place counts once: keyed on the WHOLE input (case kept), never the display text.
+    const k = `${l.place ?? ''}\u0000${l.inputKey ?? l.words.trim()}`;
     if (seen.has(k)) continue;
     seen.add(k);
     pool.push(l);
@@ -419,6 +423,7 @@ export function shapeLaunchesOf(runs: readonly RunLike[]): ShapeLaunch[] {
       option: typeof shape.option === 'string' ? shape.option : null,
       by: shape.by === 'detected' ? 'detected' : 'person',
       words: typeof title === 'string' ? title.slice(0, 2000) : '',
+      inputKey: createHash('sha256').update(typeof title === 'string' ? title : id).digest('hex').slice(0, 32),
       corrected: retried.has(id),
     });
   }

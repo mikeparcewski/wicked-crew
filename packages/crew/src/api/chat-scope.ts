@@ -805,6 +805,8 @@ export function chatJobLines(mode: 'cards' | 'prose'): string[] {
 
 /** What the per-message job lines read (DES-CATALOG-002 §2.3, §4.6): crew's records, said as ids the seat may name. */
 export interface JobTurnContext {
+  /** What the chat can start now (`chatMakeDigest` in cards mode): rendered first, inside the one budget. */
+  preface?: string;
   /** The chat catalog digest (`workflow-catalog/detect.ts` `catalogDigest('chat')`, at most 2 KB). */
   digest: string;
   /** The chat's open job proposal, if any. */
@@ -841,7 +843,8 @@ export function chatJobTurnLines(mode: 'cards' | 'prose', ctx: JobTurnContext): 
       state.push(`The job \`${ctx.running.runId}\` (${cap(ctx.running.label, 60)}) is running in this chat: a request to add to it is answered in prose, pointing at its plan Edit. New work is started in a new thread.`);
     }
   }
-  const render = (digest: string): string => ['### Jobs (crew)', '', digest, ...state.flatMap((x) => ['', x])].join('\n');
+  const preface = ctx.preface !== undefined && ctx.preface.trim() !== '' ? [ctx.preface.trim(), ''] : [];
+  const render = (digest: string): string => [...preface, '### Jobs (crew)', '', digest, ...state.flatMap((x) => ['', x])].join('\n');
   let digest = ctx.digest;
   let out = render(digest);
   if (bytes(out) > JOB_TURN_MAX_BYTES) {
@@ -851,6 +854,12 @@ export function chatJobTurnLines(mode: 'cards' | 'prose', ctx: JobTurnContext): 
   while (bytes(out) > JOB_TURN_MAX_BYTES && digest.length > 0) {
     digest = digest.slice(0, Math.max(0, digest.length - Math.max(16, bytes(out) - JOB_TURN_MAX_BYTES)));
     out = render(`${digest}…`);
+  }
+  // The state alone over budget (ids are bounded, so only prose can be): its sentences after the first are dropped,
+  // ids kept.
+  if (bytes(out) > JOB_TURN_MAX_BYTES) {
+    for (let i = 0; i < state.length; i += 1) state[i] = state[i]!.replace(/\. (?:A change|New work|A request)[^]*$/u, '.');
+    out = render(digest === '' ? '' : `${digest}…`);
   }
   return out;
 }

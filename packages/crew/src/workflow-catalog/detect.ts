@@ -103,10 +103,12 @@ export function catalogDigest(mode: DigestMode, view: DigestView = {}): string {
         coming.push(c.id);
         continue;
       }
-      // A card this daemon cannot run is not offered to the chat seat to route to (the classify digest says why).
-      if (st === 'unavailable') continue;
+      // Only what this daemon can run is offered to the chat seat (the classify digest says why the rest is not): a card
+      // with options stays while ANY option is available, its default named only when it is one of them (codex r2).
       const opts = (c.variant?.options ?? []).filter((o) => status(c, o) === 'available').map((o) => o.id);
-      live.push(`${c.id}${isInvestigate(c) ? ' [depth]' : ''}${opts.length > 0 ? ` (${opts.join('|')}${c.variant !== undefined ? `; default ${c.variant.default}` : ''})` : ''}`);
+      if (c.variant === undefined ? st === 'unavailable' : opts.length === 0) continue;
+      const dflt = c.variant !== undefined && opts.includes(c.variant.default) ? `; default ${c.variant.default}` : '';
+      live.push(`${c.id}${isInvestigate(c) ? ' [depth]' : ''}${opts.length > 0 ? ` (${opts.join('|')}${dflt})` : ''}`);
     }
     return [
       'Job cards (id [depth: Investigate, takes quick|standard|deep] (options; default)):',
@@ -331,8 +333,9 @@ const OUTCOME_CUES: ReadonlyArray<{ re: RegExp; cards: readonly string[] }> = [
 
 /** Whether the words ask for an outcome the card does not deliver (then they do not decide alone). */
 export function outcomeConflict(text: string, card: string): boolean {
-  const asked = OUTCOME_CUES.filter((c) => c.re.test(text));
-  return asked.length > 0 && !asked.some((c) => c.cards.includes(card));
+  // Every outcome the words ask for must be one the card delivers: "Plan a security review" asks for a plan of a review,
+  // and a review card alone does not decide it (codex r2).
+  return OUTCOME_CUES.some((c) => c.re.test(text) && !c.cards.includes(card));
 }
 
 /** An Investigate card's depth when the words say it ("a quick look", "deep dive"); `null` = they do not. */
@@ -583,18 +586,23 @@ export function detect(input: DetectInput): Detection {
     const seed = byId(card);
     return seed !== undefined && !comingCard(seed, seed.variant?.options.find((o) => o.id === option) ?? null);
   };
-  const make = (card: string, option: string | null, depth: ShapeGuess['depth'], confidence: number, band: Band, reason: string, source: ShapeGuess['source'], ask: ShapeGuess['question']): ShapeGuess => ({
-    card,
-    option,
-    depth,
-    confidence: Math.round(confidence * 1000) / 1000,
-    band,
-    reason,
-    available: availableOf(card, option),
-    question: band === 'ask' ? ask : null,
-    source,
-    catalogRev: input.catalogRev,
-  });
+  const make = (card: string, option: string | null, depth: ShapeGuess['depth'], confidence: number, banded: Band, reason: string, source: ShapeGuess['source'], ask: ShapeGuess['question']): ShapeGuess => {
+    const available = availableOf(card, option);
+    // A job this daemon cannot start is never shown as sure (pi r2): at most likely, with its nearest offered.
+    const band: Band = banded === 'sure' && !available ? 'likely' : banded;
+    return {
+      card,
+      option,
+      depth,
+      confidence: Math.round(confidence * 1000) / 1000,
+      band,
+      reason,
+      available,
+      question: band === 'ask' ? ask : null,
+      source,
+      catalogRev: input.catalogRev,
+    };
+  };
   if (words.sure && words.card !== null) {
     const wordsSeed = byId(words.card)!;
     // A seat that read the words differently (another card, or an option that runs another plan) outranks a word
