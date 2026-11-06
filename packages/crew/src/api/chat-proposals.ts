@@ -46,6 +46,7 @@ import type {
   CatalogGateId,
   ChatArtifactsCapabilities,
   ChatContextBinding,
+  ChatPlanOffer,
   ChatProposalFrame,
   ChatProposalView,
   ChatTranscriptRecord,
@@ -91,7 +92,8 @@ import {
 } from './chat-jobs.js';
 import { artifactExists, artifactHead, chatMount, parseArtifactRef, UNFILED_MOUNT } from './chat-context.js';
 import { tornTailPrefix } from './chat-transcripts.js';
-import type { MakeDigest } from './chat-scope.js';
+import type { JobTurnContext, MakeDigest } from './chat-scope.js';
+import { catalogDigest, detect, detectable } from '../workflow-catalog/detect.js';
 
 // ── the block ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -116,6 +118,11 @@ export const ThemePatchSchema = z.strictObject({
 
 const EntryBlock = z.object({
   entry: z.string().trim().min(1).max(80),
+  // DES-CATALOG-002 §2.3: a job routing block names the card's option, an Investigate card's depth, and how sure the
+  // seat is (garden classify's catalog mode). Validated, cross-checked and banded by crew (`workflow-catalog/detect.ts`).
+  option: z.string().trim().max(80).nullable().optional(),
+  depth: z.enum(['quick', 'standard', 'deep']).nullable().optional(),
+  confidence: z.number().optional(),
   title: z.string().trim().max(200).optional(),
   brief: z.string().max(8000).optional(),
   url: z.string().trim().max(2048).optional(),
@@ -206,6 +213,27 @@ export function parseRevisionBlock(body: string): ProposalRevision | null {
   return { revises: o['revises'], edits: edits.data as ProposalRevisionEdits };
 }
 
+/** (DES-CATALOG-002 §2.4) A seat's plan-edit block at a held plan: `{"planEdit":"<run id>"}`. `null` for anything else. */
+export function parsePlanEditBlock(body: string): string | null {
+  try {
+    const o = JSON.parse(body) as unknown;
+    if (o === null || typeof o !== 'object' || Array.isArray(o)) return null;
+    const v = (o as Record<string, unknown>)['planEdit'];
+    return typeof v === 'string' && v.trim() !== '' && v.length <= 128 ? v.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+/** (DES-CATALOG-002 §2.3) The FIRST block of a reply that parses: one request yields at most one actionable card. */
+export function firstValidBlock(bodies: readonly string[]): ParsedMake | null {
+  for (const b of bodies) {
+    const parsed = parseMakeBlock(b);
+    if (parsed !== null) return parsed;
+  }
+  return null;
+}
+
 /** The last block of a reply that parses (DES §4.1: the last valid block wins), or `null`. */
 export function lastValidBlock(bodies: readonly string[]): ParsedMake | null {
   for (let i = bodies.length - 1; i >= 0; i -= 1) {
@@ -245,7 +273,7 @@ export function proposalDocName(pid: string, title: string): string {
 
 // ── the fold ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
-type ProposalRecord = Extract<ChatTranscriptRecord, { kind: 'proposal' | 'proposal_accepting' | 'proposal_decided' | 'proposal_revising' | 'proposal_released' }>;
+type ProposalRecord = Extract<ChatTranscriptRecord, { kind: 'proposal' | 'proposal_accepting' | 'proposal_decided' | 'proposal_revising' | 'proposal_released' | 'plan_offer' }>;
 
 /** A folded proposal plus what the accept path needs that the wire view does not carry. */
 export interface FoldedProposal extends ChatProposalView {
@@ -560,6 +588,11 @@ export interface ProposalChat {
   analysis: boolean;
 }
 
+/** A chat job's run, as typed plan edits read it (DES-CATALOG-002 §2.4). */
+export type HeldPlan =
+  | { state: 'held'; ord: number; planRev: number; reshapeable: boolean; lead: string | null }
+  | { state: 'running' | 'ended' };
+
 export interface ChatProposalDeps {
   /** The operations crew advertises (and `proposals`). */
   flags(): ChatArtifactsCapabilities;
@@ -611,6 +644,12 @@ export interface ChatProposalDeps {
   acceptsJobs?(chatId: string): boolean;
   /** What the v2 catalog resolves against now, as a launch filed in `projectId` reads it. */
   served?(projectId: string | null): Promise<ServedState & { rev: string }>;
+  /**
+   * (DES-CATALOG-002 §2.4, §2.5) The state of a chat job's run: `held` at a plan gate (its ord and plan revision, and
+   * whether it is still its FIRST work-plan approval, where a reshape is possible), `running` past it, `ended`. `null` =
+   * no such run. Absent = plan offers are off.
+   */
+  heldPlan?(runId: string): Promise<HeldPlan | null>;
   /** Whether a chat turn is still live (a seat of it has not answered, and it has not gone stale). Absent = unknown
    *  (treated as live). */
   turnLive?(chatId: string, turnId: string): boolean;
@@ -687,6 +726,19 @@ function personWords(records: readonly ChatTranscriptRecord[], turnId: string): 
   return out.join('\n');
 }
 
+/** (DES-CATALOG-002 §2.3) Whether an entry block routes a job card of the v2 catalog (its id is a detectable card's,
+ *  or it carries the routing fields a job block has). */
+export function isJobCardEntry(block: { entry: string; option?: string | null | undefined; confidence?: number | undefined }): boolean {
+  const card = CATALOG_V2_CARDS.find((c) => c.id === block.entry);
+  return (card !== undefined && detectable(card)) || block.option !== undefined || block.confidence !== undefined;
+}
+
+/** The person's own words of ONE turn (the message the seat's block answers). */
+function turnWords(records: readonly ChatTranscriptRecord[], turnId: string): string {
+  const r = records.find((x): x is Extract<ChatTranscriptRecord, { kind: 'user' }> => x.kind === 'user' && x.turnId === turnId && x.owner === true);
+  return r?.text ?? '';
+}
+
 /**
  * Whether the person's own words name a document by its whole ref (`mount/doc`, or `doc:mount/doc`; studio's `default`
  * mount alias for an Unfiled one): a longer name or path (`mount/doc-2`, `mount/doc_x`, `mount/doc/notes`,
@@ -751,8 +803,9 @@ export class ChatProposals {
     this.log = deps.log ?? (() => undefined);
   }
 
-  /** What a seat may be told it can make now (`chat-scope.ts`'s per-message digest). */
-  digest(): MakeDigest {
+  /** What a seat may be told it can make now (`chat-scope.ts`'s per-message digest). With a chat id, how the chat routes
+   *  new work too (DES-CATALOG-002 §2.3: job cards for a client that renders them, a command line for an older one). */
+  digest(chatId?: string): MakeDigest {
     const f = this.deps.flags();
     const on = f.proposals;
     const entries = on
@@ -764,12 +817,14 @@ export class ChatProposals {
         })
       : [];
     // A create or demo with no catalog entry to name is not on (the seat is told nothing it could propose).
+    const jobs: MakeDigest['jobs'] = chatId === undefined || !this.jobsOn() ? undefined : this.acceptsJobs(chatId) ? 'cards' : 'prose';
     return {
       create: on && f.create && entries.some((e) => e.kind === 'document'),
       refine: on && f.refine,
       theme: on && f.theme,
       demo: on && f.demo && entries.some((e) => e.kind === 'demo'),
       entries,
+      ...(jobs !== undefined ? { jobs } : {}),
     };
   }
 
@@ -787,7 +842,12 @@ export class ChatProposals {
     this.onTurnReply(frame);
     if (frame.blocks.length === 0 || frame.turnId === undefined || !frame.ok) return;
     if (!this.deps.flags().proposals) return;
-    const block = lastValidBlock(frame.blocks);
+    // DES-CATALOG-002 §2.3: with job routing on, one routing protocol: the FIRST valid block is the one actionable card,
+    // and at a job's held plan a plan edit or a change of job becomes wicked's offer instead.
+    // An older client (no job cards) keeps today's reading: the last valid block, no plan offers it could not draw.
+    const jobs = this.jobsOn() && this.acceptsJobs(frame.chat);
+    if (jobs && this.onPlanReply(frame)) return;
+    const block = jobs ? firstValidBlock(frame.blocks) : lastValidBlock(frame.blocks);
     if (block === null) {
       this.log(`[proposals] chat ${frame.chat}: ${frame.blocks.length} wicked-make block(s) from ${frame.cliKey}, none valid — no card`);
       return;
@@ -816,7 +876,12 @@ export class ChatProposals {
         await new Promise((res) => setTimeout(res, 200));
       }
       if (this.deps.instanceOf(frame.chat) !== instance || has()) return;
-      const proposal = await this.resolve({ chatId: frame.chat, turnId, seat: frame.cliKey, block, records: this.deps.records(frame.chat) });
+      // An older client draws no job card: its statement asks for the command in prose, and its artifact entries (the
+      // documents and the demo) keep today's path.
+      const jobBlock = jobs && block.op === 'entry' && isJobCardEntry(block);
+      const proposal = jobBlock
+        ? await this.resolveDetected({ chatId: frame.chat, turnId, seat: frame.cliKey, block: block as Extract<ParsedMake, { op: 'entry' }>, records: this.deps.records(frame.chat) })
+        : await this.resolve({ chatId: frame.chat, turnId, seat: frame.cliKey, block, records: this.deps.records(frame.chat) });
       if (proposal === null) return;
       // Published under the chat's lock, so it never lands between an accept's checks and its record.
       await this.lock.run(`chat\u0000${instance ?? frame.chat}`, async () => {
@@ -1744,6 +1809,239 @@ export class ChatProposals {
    *  an older client gets the prose command line instead (Lane D's chat statement). */
   acceptsJobs(chatId: string): boolean {
     return this.jobsOn() && this.deps.acceptsJobs?.(chatId) === true;
+  }
+
+  /**
+   * (DES-CATALOG-002 §2.3) A seat's job routing block → a DETECTED job proposal: the block is a guess like any other,
+   * validated against the catalog, cross-checked with the words layer over the person's own message of that turn and
+   * banded (the chat door is capped at likely unless the words agree). An unsure reading is ONE question: the proposal
+   * holds no Start, and its `shape.guess.question` lists the shapes to pick from (a pick is a person-made proposal).
+   * `null` when nothing can be proposed (the chat ended, an analysis, a refusal).
+   */
+  async resolveDetected(input: { chatId: string; turnId: string; seat: string; block: Extract<ParsedMake, { op: 'entry' }>; records: readonly ChatTranscriptRecord[] }): Promise<ArtifactProposal | null> {
+    const { chatId, turnId, seat, block, records } = input;
+    const chat = this.deps.chat(chatId);
+    if (chat === null) return null;
+    if (chat.analysis) {
+      this.log(`[proposals] chat ${chatId} is an analysis: it proposes nothing — no card`);
+      return null;
+    }
+    const jc = this.jobChat(chatId);
+    if (jc === null) return null;
+    const pid = `${chatId}:${turnId}`;
+    const words = turnWords(records, turnId).slice(0, 8000);
+    try {
+      const ctx = await this.jobContext(chatId, pid, turnId, seat, jc, { revises: null, lineage: null, notes: [] });
+      const available = (card: string, option: string | null): boolean => resolveOption(card, option, ctx.served)?.resolved.status === 'available';
+      const d = detect({
+        text: words,
+        seat: { entry: block.entry, option: block.option ?? null, depth: block.depth ?? null, confidence: block.confidence, reason: block.reason },
+        source: 'chat',
+        catalogRev: ctx.served.rev,
+        available,
+      });
+      const g = d.guess;
+      // The repository the block names, when it is one of this chat's (else the chat's own rule picks it).
+      const named = block.repos.map((want) => jc.repos.filter((r) => r.name === want || r.id === want)).find((hits) => hits.length === 1)?.[0];
+      // A demo's address only from the person's own words (DES-CHAT-ARTIFACTS-001 §4.3), never the model's.
+      const inputs: JobFacts['inputs'] = {};
+      if (block.url !== undefined && block.url !== '' && personUrls(words).has(block.url)) inputs['url'] = { kind: 'url', value: block.url };
+      const facts: JobFacts = {
+        card: g.card,
+        option: g.option,
+        depth: g.depth,
+        words,
+        details: [],
+        repoRef: named?.id ?? null,
+        projectId: jc.projectId,
+        lead: null,
+        seats: null,
+        inputs,
+        skipQe: null,
+        by: 'detected',
+        source: 'chat',
+        guess: g,
+      };
+      let proposal = await this.proposalOf(chatId, pid, facts, ctx, records);
+      if (g.band === 'ask' && g.question !== null) {
+        // ONE question, never a Start: each choice names a shape (a pick is a person-made proposal).
+        proposal = {
+          ...proposal,
+          blocked: g.question.text,
+          question: null,
+          suggestions: [],
+          ...(proposal.sentence !== undefined ? { sentence: { ...proposal.sentence, ask: g.question.text } } : {}),
+        };
+      }
+      this.deps.audit('chat.detect', { id: `seat:${seat}`, kind: 'agent', trust: 'observer' }, {
+        chatId, turnId, source: g.source, seat, card: g.card, option: g.option, band: g.band, confidence: g.confidence, dropped: d.seat?.dropped ?? null,
+      });
+      return proposal;
+    } catch (err) {
+      const refused = this.refusalOf(err);
+      if (refused === null) throw err;
+      this.log(`[proposals] chat ${chatId}: turn ${turnId}'s job block could not be proposed (${String((refused.body as { code?: unknown }).code ?? refused.code)})`);
+      return null;
+    }
+  }
+
+  /** The chat's newest job that Go started: its proposal and run (`null` when none). */
+  private launchedJob(chatId: string): { proposal: ArtifactProposal; runId: string } | null {
+    const folded = [...foldProposals(this.deps.records(chatId)).values()];
+    for (let i = folded.length - 1; i >= 0; i -= 1) {
+      const f = folded[i]!;
+      if (f.state === 'decided' && f.decision === 'go' && f.result?.runId !== undefined && f.proposal.kind === 'job' && f.proposal.shape !== undefined) {
+        return { proposal: f.accepting?.resolution ?? f.proposal, runId: f.result.runId };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * (DES-CATALOG-002 §2.4, §2.5) Typed at a job's held plan without Change: the seat's `planEdit` block becomes wicked's
+   * send-back offer quoting the person's own words, and a revision block that changes the job's card, option or depth
+   * becomes the "start it again as…" offer naming what it gives up and what it needs. An offer decides nothing: only the
+   * person's press calls the gate or the reshape route, bound to the plan version. `true` when the reply was one of these
+   * (handled here, whatever the outcome); `false` to read it as anything else.
+   */
+  private onPlanReply(frame: { chat: string; cliKey: string; turnId?: string; ok: boolean; blocks: readonly string[] }): boolean {
+    const turnId = frame.turnId;
+    if (turnId === undefined || this.deps.heldPlan === undefined) return false;
+    const job = this.launchedJob(frame.chat);
+    if (job === null) return false;
+    let planEdit: string | null = null;
+    let rev: ProposalRevision | null = null;
+    for (const b of frame.blocks) {
+      planEdit ??= parsePlanEditBlock(b);
+      const r = parseRevisionBlock(b);
+      if (rev === null && r !== null && r.revises === job.proposal.pid) rev = r;
+    }
+    if (planEdit === null && rev === null) return false;
+    const instance = this.deps.instanceOf(frame.chat);
+    const work = this.order.run(`chat\u0000${frame.chat}`, async () => {
+      if (this.deps.instanceOf(frame.chat) !== instance) return;
+      if (planEdit !== null && planEdit !== job.runId) {
+        this.log(`[proposals] chat ${frame.chat}: turn ${turnId}'s plan edit names ${planEdit.slice(0, 64)}, not the chat's job ${job.runId} — dropped`);
+        return;
+      }
+      const held = await this.deps.heldPlan!(job.runId);
+      if (held === null || held.state !== 'held') {
+        this.log(`[proposals] chat ${frame.chat}: turn ${turnId}'s plan reply, but job ${job.runId} is not waiting at its plan — no offer`);
+        return;
+      }
+      // The person's words, waited for as the turn's own record (the route writes it after the engine took it).
+      for (let i = 0; i < 25 && turnWords(this.deps.records(frame.chat), turnId) === ''; i += 1) await new Promise((res) => setTimeout(res, 200));
+      const message = turnWords(this.deps.records(frame.chat), turnId).trim();
+      const base = { id: `${frame.chat}:offer:${turnId}`, runId: job.runId, pid: job.proposal.pid, ord: held.ord, planRev: held.planRev };
+      let offer: ChatPlanOffer | null = null;
+      const shapeEdit = rev === null ? null : { ...(rev.edits.card !== undefined ? { card: rev.edits.card } : {}), ...(rev.edits.option !== undefined ? { option: rev.edits.option } : {}), ...(rev.edits.depth !== undefined ? { depth: rev.edits.depth } : {}) };
+      if (shapeEdit !== null && Object.keys(shapeEdit).length > 0) {
+        if (!held.reshapeable) {
+          this.log(`[proposals] chat ${frame.chat}: turn ${turnId} changes the job, but its work plan was already accepted — no reshape offer`);
+          return;
+        }
+        offer = await this.reshapeOffer(frame.chat, job.proposal, shapeEdit, base);
+      } else if (planEdit !== null) {
+        if (message === '') return;
+        const leadKey = held.lead ?? job.proposal.seats?.lead ?? null;
+        const lead = leadKey === null ? 'the lead' : (this.deps.rosterEligible().find((s) => s.key === leadKey)?.name ?? leadKey);
+        const note = message.slice(0, 2000);
+        offer = {
+          ...base,
+          kind: 'send_back',
+          text: `Send it back to ${lead} with: “${note.length > 200 ? `${note.slice(0, 199)}…` : note}”?`,
+          note,
+          choices: [{ label: 'Send it back', action: 'send_back' }, { label: 'No', action: 'dismiss' }],
+        };
+      }
+      if (offer === null) return;
+      this.write(frame.chat, { at: this.now(), turnId, kind: 'plan_offer', offer }, instance);
+    })
+      .catch((err: unknown) => this.log(`[proposals] chat ${frame.chat}: turn ${turnId}'s plan offer failed: ${err instanceof Error ? err.message : String(err)}`))
+      .finally(() => this.pending.delete(work));
+    this.pending.add(work);
+    return true;
+  }
+
+  /** The "start it again as…" offer: the new shape resolved like a revision, its losses and missing inputs named. */
+  private async reshapeOffer(chatId: string, held: ArtifactProposal, edits: Pick<ProposalRevisionEdits, 'card' | 'option' | 'depth'>, base: Pick<ChatPlanOffer, 'id' | 'runId' | 'pid' | 'ord' | 'planRev'>): Promise<ChatPlanOffer | null> {
+    const chat = this.jobChat(chatId);
+    if (chat === null) return null;
+    const ctx = await this.jobContext(chatId, base.id, null, 'person', chat, { revises: held.pid, lineage: held.lineage ?? held.pid, notes: [] });
+    const merged = mergeRevision(held, edits, { chat, served: ctx.served, roster: ctx.roster });
+    const card = CATALOG_V2_CARDS.find((c) => c.id === merged.facts.card);
+    if (card === undefined || (merged.facts.card === held.shape?.card && optionFor(card, merged.facts.option) === held.shape?.option && merged.facts.depth === held.shape?.depth)) return null;
+    const option = optionFor(card, merged.facts.option);
+    let needs: string[] = [];
+    let command: string | null = card.command;
+    try {
+      const p = await this.proposalOf(chatId, base.id, { ...merged.facts, by: 'person', source: 'reshape' }, ctx, this.deps.records(chatId));
+      if (p.kind !== 'job') {
+        this.log(`[proposals] chat ${chatId}: a change of job to ${card.id} makes a document — no reshape offer (it is a new proposal)`);
+        return null;
+      }
+      if (p.coming !== undefined) return null;
+      needs = (p.needs ?? []).filter((n) => n.required && n.status === 'missing').map((n) => n.label);
+      command = p.command ?? command;
+    } catch (err) {
+      if (this.refusalOf(err) === null) throw err;
+      return null;
+    }
+    const noun = nounOf(card, option);
+    const words = [...merged.lost.map((g) => checksLabel([g])), ...merged.lostSeats.map((k) => SEAT_WORDS[k])];
+    const lostText = words.length <= 1 ? (words[0] ?? '') : `${words.slice(0, -1).join(', ')} and ${words[words.length - 1]}`;
+    const text = [
+      `That's a different job: start it again as ${noun}?`,
+      ...(words.length > 0 ? [`It would no longer have ${lostText}.`] : []),
+      ...(needs.length > 0 ? [`It needs: ${needs.join(', ')}.`] : []),
+      'Edits to this plan are not carried.',
+    ].join(' ');
+    return {
+      ...base,
+      kind: 'reshape',
+      text,
+      reshape: { card: card.id, option, depth: merged.facts.depth, label: nounOf(card, option), command: command ?? null, lost: merged.lost, lostSeats: merged.lostSeats, needs },
+      choices: [{ label: 'Start again', action: 'reshape' }, { label: 'Keep this plan', action: 'dismiss' }],
+    };
+  }
+
+  /**
+   * (DES-CATALOG-002 §2.3, §4.6) The per-message job lines for this chat: how it routes new work, the chat catalog
+   * digest, and what is open, held at its plan or running. `null` when job routing is off.
+   */
+  async jobTurn(chatId: string): Promise<{ mode: 'cards' | 'prose'; context: JobTurnContext } | null> {
+    if (!this.jobsOn()) return null;
+    const mode: 'cards' | 'prose' = this.acceptsJobs(chatId) ? 'cards' : 'prose';
+    const chat = this.jobChat(chatId);
+    let status: ((card: string, option: string | null) => 'available' | 'coming_soon' | 'unavailable') | undefined;
+    try {
+      const served = await this.deps.served!(chat?.projectId ?? null);
+      status = (card, option) => resolveOption(card, option, served)?.resolved.status ?? 'unavailable';
+    } catch {
+      status = undefined;
+    }
+    const context: JobTurnContext = { digest: catalogDigest('chat', status !== undefined ? { status } : {}) };
+    if (mode === 'prose') {
+      // The command line names the command: the chat digest's cards with their commands.
+      context.digest = `${context.digest}\nCommands: ${CATALOG_V2_CARDS.filter((c) => detectable(c) && c.command !== null).map((c) => `${c.id} ${c.command}`).join('; ')}.`;
+      return { mode, context };
+    }
+    const open = [...foldProposals(this.deps.records(chatId)).values()].find((f) => (f.state === 'open' || f.state === 'revising') && f.proposal.shape !== undefined);
+    if (open !== undefined) {
+      const p = open.proposal;
+      context.open = { pid: p.pid, label: p.what.label, card: p.shape!.card, option: p.shape!.option, repo: p.repos[0] ?? null, seats: [...(p.seats?.keys ?? [])], checks: checksLabel(p.gate ?? []) };
+    }
+    const job = this.launchedJob(chatId);
+    if (job !== null && this.deps.heldPlan !== undefined) {
+      const held = await this.deps.heldPlan(job.runId).catch(() => null);
+      if (held?.state === 'held') {
+        const leadKey = held.lead ?? job.proposal.seats?.lead ?? null;
+        context.heldPlan = { runId: job.runId, pid: job.proposal.pid, label: job.proposal.what.label, version: held.planRev, lead: leadKey === null ? null : (this.deps.rosterEligible().find((s) => s.key === leadKey)?.name ?? leadKey) };
+      } else if (held?.state === 'running') {
+        context.running = { runId: job.runId, label: job.proposal.what.label };
+      }
+    }
+    return { mode, context };
   }
 
   /** The chat as a job's resolution sees it, or `null` once it has ended. */

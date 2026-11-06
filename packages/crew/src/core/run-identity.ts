@@ -43,6 +43,9 @@ export const SYSTEM_WORKFLOWS: ReadonlySet<string> = new Set([
   'analyze',
   // The in-flight check on a working step (src/inspect): crew's own one-turn, read-only run.
   'inspect-unit',
+  // DES-CATALOG-002 §2.3: crew's one-turn reading of words typed into the `/` list (workflow-catalog/detect.ts). It
+  // proposes and starts nothing, and its fence is its identity (mcp/run-fence.ts): hidden from Jobs, pickers and usage.
+  'detect-shape',
   'onboarding',
   'capture-learnings',
   'steering-author',

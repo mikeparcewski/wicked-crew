@@ -511,6 +511,9 @@ export function inputsOfProposal(p: ArtifactProposal): Record<string, ProposalIn
   return { ...(p.inputs ?? {}) };
 }
 
+/** Words that, carried into a brief, would ask to lower a check (§9.1 "carried words must never carry a skip"). */
+export const LOWERING_WORDS = /\b(?:(?:skip(?:ping)?|without|no|drop(?:ping)?|bypass(?:ing)?|don'?t|do not|never)\s+(?:the\s+|any\s+|a\s+)?(?:reviews?|reviewers?|parity(?:\s+checks?)?|qe(?:\s+acceptance)?|tests?|testing|checks?|judge|judging|acceptance)|tag\s+(?:it|the\s+release|a\s+release)|publish\s+(?:it|the\s+package|to\s+npm))\b/iu;
+
 // ── the merge (§4.6) ───────────────────────────────────────────────────────────────────────────────────────────────
 
 /** What a merge produced: the facts to resolve, the notes, and the checks it would lose. */
@@ -690,6 +693,12 @@ export function mergeRevision(
     for (const d of edits.detail.remove ?? []) facts.details = facts.details.filter((x) => x !== d);
     for (const d of edits.detail.add ?? []) {
       const t = d.trim().slice(0, 200);
+      // DES-CATALOG-002 §9.1: carried words never carry a lowered check ("skip parity" as a detail would reach the
+      // lead's brief): refused with a note, the rest of the revision standing.
+      if (LOWERING_WORDS.test(t)) {
+        notes.push(`Not changed: “${t.slice(0, 60)}” would ask the job to drop a check, and its checks are its own`);
+        continue;
+      }
       if (t !== '' && !facts.details.includes(t) && !facts.words.includes(t)) facts.details.push(t);
     }
     facts.details = facts.details.slice(0, 12);

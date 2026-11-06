@@ -31,6 +31,7 @@
   },
   "files": [
     "dist",
+    "evals",
     "skills",
     "watch",
     "endpoint-manifest.json",

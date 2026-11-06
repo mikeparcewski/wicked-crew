@@ -10,8 +10,9 @@
 
 import type * as W from 'wicked-crew-api-types';
 
-/** The eight inference points (DES §2). */
+/** The inference points (DES §2), and the shape of the work (DES-CATALOG-002 §9). */
 export const SUITE_IDS = [
+  'shape',
   'needs-you',
   'floor-class',
   'qe-verdict',

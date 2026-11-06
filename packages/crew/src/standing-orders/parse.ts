@@ -39,7 +39,14 @@ function chatSeat(roster: RosterSeat[]): RosterSeat | undefined {
   );
 }
 
-export type SeatTurnDeps = Omit<SeatParserDeps, 'adapter'> & { adapter: Pick<CoreAdapter, 'launchRun' | 'cancelRun' | 'workOutput' | 'onEvent'> };
+export type SeatTurnDeps = Omit<SeatParserDeps, 'adapter'> & {
+  adapter: Pick<CoreAdapter, 'launchRun' | 'cancelRun' | 'workOutput' | 'onEvent'>;
+  /** (DES-CATALOG-002 §2.3) The answer of a turn launched under a registered `workflow` (its one unit's output: the
+   *  engine names a def's units, so crew reads the run). Required for a {@link SeatTurnInput.workflow} turn. */
+  outputOf?: (runId: string) => Promise<string | null>;
+  /** Pick the seat: the roster's first unscoped-chat seat by default. */
+  pickSeat?: (roster: RosterSeat[]) => RosterSeat | undefined;
+};
 
 /** One seat's one turn: its answer text, or why there is none (`409` no seat, `502` it failed or went quiet). */
 export type SeatTurnOutcome = { ok: true; answer: string; seat: string } | { ok: false; code: 409 | 502; error: string; answer?: string };
@@ -52,6 +59,17 @@ export interface SeatTurnInput {
   stepId: string;
   /** What the person is told when no seat can take the turn. */
   noSeat: string;
+  /**
+   * (DES-CATALOG-002 §2.3) Launch under this registered workflow (a system def whose identity is its capability fence,
+   * `detect-shape`) instead of an inline one-step plan: `instructions` is then the run's problem (the def's phase
+   * carries its own instructions), and `stepId` is the def's phase id.
+   */
+  workflow?: string;
+  /** The run id to launch under (default a fresh one): a caller that must know it before the launch (a fence, a
+   *  cancel) passes its own. */
+  sessionId?: string;
+  /** Called with the run id once the launch is armed (before it resolves), so a newer request can cancel it. */
+  onRun?: (runId: string) => void;
 }
 
 /**
@@ -64,14 +82,14 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
   const { adapter } = deps;
   const timeoutMs = deps.timeoutMs ?? 120_000;
   return async (input) => {
-    const entry = chatSeat(deps.roster());
+    const entry = (deps.pickSeat ?? chatSeat)(deps.roster());
     if (entry === undefined) {
       return { ok: false, code: 409, error: input.noSeat };
     }
     const seat = String(entry.key);
     // The run id IS the session id the launch names, so the frames are filtered on it from before
     // the launch: a fast run's terminal frame may land before `launchRun` resolves.
-    const sessionId = randomUUID();
+    const sessionId = input.sessionId ?? randomUUID();
     let runId: string | undefined;
     let off: () => void = () => undefined;
     // Cleared in `finally`: an early return must not leave it armed.
@@ -128,17 +146,21 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
         decide(null);
         stop();
       }, timeoutMs);
-      const launch = adapter.launchRun({
-        problem: input.problem,
-        sessionId,
-        clisJson: JSON.stringify([entry]),
-        primary: seat,
-        plan: {
-          // `answer_only`: the turn's one step is its last, runs no code, and crew reads its answer.
-          steps: [{ catalog: 'understand', id: input.stepId, budget_secs: Math.max(1, Math.ceil(timeoutMs / 1000)), instructions, answer_only: true }],
-          monitors: { asked: 0 },
-        },
-      });
+      input.onRun?.(sessionId);
+      const launch = input.workflow !== undefined
+        // A registered def: its phase carries the instructions, so the turn's own text is the run's task.
+        ? adapter.launchRun({ problem: instructions, sessionId, clisJson: JSON.stringify([entry]), primary: seat, workflow: input.workflow })
+        : adapter.launchRun({
+          problem: input.problem,
+          sessionId,
+          clisJson: JSON.stringify([entry]),
+          primary: seat,
+          plan: {
+            // `answer_only`: the turn's one step is its last, runs no code, and crew reads its answer.
+            steps: [{ catalog: 'understand', id: input.stepId, budget_secs: Math.max(1, Math.ceil(timeoutMs / 1000)), instructions, answer_only: true }],
+            monitors: { asked: 0 },
+          },
+        });
       // A launch that resolves after the turn gave up (the deadline, or a park) must not outlive it.
       launch.then(
         (id) => {
@@ -165,7 +187,9 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
       if (ended === null) return { ok: false, code: 502, error: `the ${seat} seat did not answer in ${timeoutMs / 1000} s` };
       // A parked turn's answer is not read: it is a failure, and the read must not hold the cancel.
       if (ended.parked === true) return { ok: false, code: 502, error: parkedMessage() };
-      const answer = await adapter.workOutput(`${id}:${input.stepId}`).catch(() => null);
+      const answer = input.workflow !== undefined
+        ? await (deps.outputOf?.(id) ?? Promise.resolve(null)).catch(() => null)
+        : await adapter.workOutput(`${id}:${input.stepId}`).catch(() => null);
       // A failed step is a failure, whatever its text holds — never a rule to confirm (codex on #686).
       if (!ended.ok || answer === null || (stepStatus !== undefined && stepStatus !== 'ok')) {
         const why = failureKind !== undefined ? ` (${failureKind})` : '';

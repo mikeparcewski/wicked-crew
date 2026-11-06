@@ -11,6 +11,7 @@ import type { ReplaySet } from './replay.js';
 import { SUITE_IDS, type DefaultEvalReport, type DefaultEvalSummary, type EvalCase, type SliceScore, type SuiteId, type SuiteScore } from './types.js';
 
 export const SUITE_TITLES: Record<SuiteId, string> = {
+  shape: 'The shape of the work: which job, which option, and when to ask',
   'needs-you': 'What needs you: what counts, and what is one item',
   'floor-class': 'Floor decisions: pass, real failure, base red, inconclusive, boundary deny',
   'qe-verdict': 'QE verdicts: pass, fail, inconclusive, and one answer per tree',
@@ -134,6 +135,10 @@ export async function runDefaultEvals(input: RunInput): Promise<{ report: Defaul
     const extra = notes.get(suite) ?? [];
     if (mine.length === 0) extra.push('no cases yet');
     if (suite === 'needs-you' && input.project !== null) extra.push('what needs you is daemon-wide: run every project to score it');
+    if (suite === 'shape') {
+      extra.push('exact scoring: a case is right only when the card and the option both match; an ambiguous case only when it asks or lands on a listed shape');
+      extra.push('corpus cases replay today\'s detection with the recorded seat answers; real cases are corrections only, a diagnostic slice (deployment accuracy comes from the audited sample)');
+    }
     if (suite === 'recall' && mine.length === 0) {
       extra.push('no labelled recall cases: run the steering eval with a memory store and samples that name expected_memories');
     }

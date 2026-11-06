@@ -1,0 +1,186 @@
+{
+ "$comment": "DES-CATALOG-002 §9.1-9.2: the recorded seat fixture for the typed-corrections corpus. Correction spike 2 (§9.3): pi, blind, given the open proposal and the person's words as <request> data (design lanes/catalog-v2-design/spike/prompt-corr2.txt, answers in spike/pi-corr2.log). Each answer is mapped mechanically to the ProposalRevision block the chat statement asks the seat for: card, option (its card: prefix dropped), repo -> repoRef, a seat list -> addSeats/removeSeats against the open proposal's seats, lead, depth, skipQeReason -> skipQe.reason, wordsAdded -> detail.add; `unchanged` -> null (the seat answers in prose and sends no block). `$open` is the open proposal's pid. k33 (multi-turn) has no recorded answer: only the real chat path scores it.",
+ "answers": {
+  "k1": {
+   "revises": "$open",
+   "edits": {
+    "option": "move",
+    "detail": {
+     "add": [
+      ".NET 8 on Linux"
+     ]
+    }
+   }
+  },
+  "k2": {
+   "revises": "$open",
+   "edits": {
+    "repoRef": "billing-api"
+   }
+  },
+  "k3": {
+   "revises": "$open",
+   "edits": {
+    "lead": "claude"
+   }
+  },
+  "k4": null,
+  "k5": {
+   "revises": "$open",
+   "edits": {
+    "card": "bug",
+    "detail": {
+     "add": [
+      "it used to work"
+     ]
+    }
+   }
+  },
+  "k6": {
+   "revises": "$open",
+   "edits": {
+    "card": "incident",
+    "detail": {
+     "add": [
+      "don't fix anything"
+     ]
+    }
+   }
+  },
+  "k7": {
+   "revises": "$open",
+   "edits": {
+    "option": "presentation"
+   }
+  },
+  "k8": {
+   "revises": "$open",
+   "edits": {
+    "option": "repo-docs"
+   }
+  },
+  "k9": {
+   "revises": "$open",
+   "edits": {
+    "card": "map-requirements"
+   }
+  },
+  "k10": {
+   "revises": "$open",
+   "edits": {
+    "option": "mcp-server",
+    "detail": {
+     "add": [
+      "so agents can call it"
+     ]
+    }
+   }
+  },
+  "k11": {
+   "revises": "$open",
+   "edits": {
+    "option": "cli"
+   }
+  },
+  "k12": {
+   "revises": "$open",
+   "edits": {
+    "option": "privacy",
+    "detail": {
+     "add": [
+      "GDPR and personal data"
+     ]
+    }
+   }
+  },
+  "k13": {
+   "revises": "$open",
+   "edits": {
+    "depth": "quick"
+   }
+  },
+  "k14": {
+   "revises": "$open",
+   "edits": {
+    "depth": "deep",
+    "detail": {
+     "add": [
+      "it keeps happening"
+     ]
+    }
+   }
+  },
+  "k15": {
+   "revises": "$open",
+   "edits": {
+    "option": "polish"
+   }
+  },
+  "k16": {
+   "revises": "$open",
+   "edits": {
+    "option": "slow"
+   }
+  },
+  "k17": {
+   "revises": "$open",
+   "edits": {
+    "addSeats": [
+     "pi"
+    ]
+   }
+  },
+  "k18": {
+   "revises": "$open",
+   "edits": {
+    "skipQe": {
+     "reason": "it's a prototype nobody uses"
+    }
+   }
+  },
+  "k19": null,
+  "k20": {
+   "revises": "$open",
+   "edits": {
+    "option": "tasks"
+   }
+  },
+  "k21": {
+   "revises": "$open",
+   "edits": {
+    "option": "status-update",
+    "detail": {
+     "add": [
+      "weekly"
+     ]
+    }
+   }
+  },
+  "k22": {
+   "revises": "$open",
+   "edits": {
+    "option": "rules"
+   }
+  },
+  "k23": null,
+  "k24": null,
+  "k25": {
+   "revises": "$open",
+   "edits": {
+    "card": "write-tests"
+   }
+  },
+  "k26": null,
+  "k27": null,
+  "k28": null,
+  "k29": null,
+  "k30": {
+   "revises": "$open",
+   "edits": {
+    "repoRef": "billing-api"
+   }
+  },
+  "k31": null,
+  "k32": null
+ }
+}

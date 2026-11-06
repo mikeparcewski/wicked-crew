@@ -52,6 +52,8 @@ export const MAX_LEARNING_CHARS = 1500;
 export const NO_LEARNINGS_WORKFLOWS: ReadonlySet<string> = new Set([
   DISTILL_WORKFLOW,
   'inspect-unit',
+  // DES-CATALOG-002 §2.3: crew's one-turn reading of words; it does no work to learn from.
+  'detect-shape',
   'capture-learnings',
   'review-recent-work',
   'run-evals',

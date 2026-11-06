@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.193.0",
+  "apiTypesVersion": "0.194.0",
   "endpoints": [
     {
       "method": "GET",
@@ -3123,6 +3123,16 @@
     },
     {
       "method": "GET",
+      "path": "/api/v1/testing/default-evals/shape-sample",
+      "requestType": null,
+      "responseType": "ShapeAuditSampleResponse",
+      "statusCodes": [
+        200,
+        400
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/api/v1/testing/default-evals/suites",
       "requestType": null,
       "responseType": "DefaultEvalSuitesResponse",
@@ -3380,6 +3390,19 @@
       "statusCodes": [
         200,
         400,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/workflows/catalog/detect",
+      "requestType": "DetectShapeRequest",
+      "responseType": "ShapeGuess",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        409,
         503
       ]
     },

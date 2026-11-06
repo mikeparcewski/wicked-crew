@@ -22,6 +22,7 @@ import { readRunVerdicts, runQeLedgerRoot } from '../qe/ledger.js';
 import { captureAll, type CaptureInput, type DecisionLike, type EventLike, type QeVerdictLike, type RunLike } from './capture.js';
 import type { ReplaySet } from './replay.js';
 import { runDefaultEvals, SUITE_TITLES } from './runner.js';
+import { auditSample, captureShapeCases, shapeCorpusCases, shapeLabelCounts, shapeLaunchesOf } from './shape.js';
 import { needsYouSeed } from './seed-needs-you.js';
 import { RIG_SEED } from './seed-rig.js';
 import { steeringCasesFrom } from './steering.js';
@@ -71,7 +72,8 @@ export async function gatherCases(deps: DefaultEvalDeps, opts: { baseline: boole
     }
   }
   const input: CaptureInput = { runs, events: (id) => events.get(id) ?? [], decisions: deps.decisions(), qeVerdicts };
-  const live = captureAll(input);
+  // DES-CATALOG-002 §9: the shape corpus (replayed through today's detection) and this daemon's corrected launches.
+  const live = [...captureAll(input), ...captureShapeCases(runs)];
   let steering: EvalCase[] = [];
   if (deps.steeringEvals !== undefined) {
     const latest = (await deps.steeringEvals.list())[0];
@@ -80,7 +82,7 @@ export async function gatherCases(deps: DefaultEvalDeps, opts: { baseline: boole
   const baseline = opts.baseline ? [...RIG_SEED, ...needsYouSeed()] : [];
   // Live cases come last: a live capture of a baseline case replaces it (same id), so nothing counts twice.
   const liveIds = new Set(live.map((c) => c.id));
-  return [...baseline.filter((c) => !liveIds.has(c.id)), ...live, ...steering];
+  return [...baseline.filter((c) => !liveIds.has(c.id)), ...shapeCorpusCases(), ...live, ...steering];
 }
 
 /** Run the default evals over this daemon's store and keep the report: the one path the route, the `run-evals`
@@ -146,6 +148,21 @@ export function registerDefaultEvalRoutes(app: FastifyInstance, deps: DefaultEva
     `${V}/testing/default-evals`,
     { config: { manifest: { responseType: 'ListDefaultEvalRunsResponse', statusCodes: [200] } } },
     async () => ({ runs: deps.store !== undefined ? await deps.store.list() : [] }),
+  );
+
+  // DES-CATALOG-002 §9.1: the audited random sample of shaped launches, for a person to label: stratified by card,
+  // repeats of the same words in the same place counted once, the denominator reported; and the label counts.
+  const SampleQuery = z.object({ n: z.coerce.number().int().min(1).max(200).optional(), seed: z.coerce.number().int().min(0).max(2 ** 31).optional() });
+  app.get(
+    `${V}/testing/default-evals/shape-sample`,
+    { config: { manifest: { responseType: 'ShapeAuditSampleResponse', statusCodes: [200, 400] } } },
+    async (req, reply) => {
+      const q = SampleQuery.safeParse(req.query ?? {});
+      if (!q.success) return reply.code(400).send({ error: '`n` is 1-200 and `seed` a whole number' });
+      const runs = await deps.runs();
+      const s = auditSample(shapeLaunchesOf(runs), q.data.n ?? 50, q.data.seed ?? 1);
+      return { ...s, counts: shapeLabelCounts(runs) };
+    },
   );
 
   app.get(
