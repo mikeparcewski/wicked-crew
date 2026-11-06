@@ -28,7 +28,7 @@ import {
 } from './sections.js';
 import type { DocAuthor, SteerRecord, TrailEntry, WorkingDocRecord, WorkingDocStore } from './store.js';
 import {
-  LINE_EVENTS, PHASE_REPORT_AUTHOR, docLines, foldLines, personNotes, planApproach, planSettled, reconcileSection, type AuditLike,
+  LINE_EVENTS, PHASE_REPORT_AUTHOR, docLines, foldLines, planApproach, planSettled, reconcileSection, type PersonNote,
 } from './event-lines.js';
 
 /** How crew reads and writes interactive documents (the bridge in production, a fake in tests). */
@@ -79,9 +79,9 @@ export interface WorkingDocDeps {
   /** The run's recorded events (the engine's log), from which crew writes the document's event-derived lines
    *  (Decisions answered, Open questions, Next). `null` when the log cannot be read. Absent: no such lines. */
   events?(runId: string): Promise<readonly CoreEvent[] | null>;
-  /** (workdoc-all-runs) The run's audit entries (crew's trail): a person's answers with their words become Decisions.
-   *  Absent: no such lines. */
-  answers?(runId: string): Promise<readonly AuditLike[]>;
+  /** (workdoc-all-runs) A person's answers with their words, from crew's trail (`PersonNotesIndex`), oldest first: they
+   *  become Decisions. Absent: no such lines. */
+  notes?(runId: string): Promise<readonly PersonNote[]>;
   /** (workdoc-all-runs) The runs not finished (not completed, cancelled or failed), for the start-up catch-up. */
   liveRuns?(): Promise<ReadonlyArray<{ runId: string; createdAt: number }>>;
   /** How long after a line-relevant event the lines are brought up to date (one write per burst). */
@@ -122,10 +122,14 @@ export interface ProposeInput {
 const PLUGIN_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 const PLUGIN_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u;
 
-/** A unit's step name: its `phase_ref`, else its description's head ("pa-scope — Fixes …" → "pa-scope"). */
+/** A unit's step name: its `phase_ref`, unless that is the engine's execution id (`wf-<run>:unit-4:a1`, which a run's
+ *  unit carries once it ran: xreview r2, rig run W12), else its description's head ("pa-scope — Fixes …" → "pa-scope"). */
 export function workingDocStep(u: { phase_ref?: string | null; description?: unknown } | undefined): string | null {
   if (u === undefined) return null;
-  return u.phase_ref ?? (typeof u.description === 'string' ? (u.description.split(/\s+[—-]\s+/u)[0] ?? null) : null);
+  const ref = u.phase_ref;
+  if (typeof ref === 'string' && ref !== '' && !/^wf-|:unit-\d/u.test(ref)) return ref;
+  const head = typeof u.description === 'string' ? (u.description.split(/\s+[—-]\s+/u)[0]?.trim() ?? '') : '';
+  return head === '' ? null : head;
 }
 
 /** A doc name interactive accepts (lowercase, digits, hyphens; ≤ 64): one per run. */
@@ -495,12 +499,12 @@ export class WorkingDocService {
     // A power run makes its document on any sync, as before; any other run when a live event or the catch-up asks.
     if (this.d.store.get(runId) === undefined && !create && !model.power) return null;
     if (!(await this.ensureDoc(runId))) return null;
-    let notes: ReturnType<typeof personNotes> = [];
-    if (this.d.answers !== undefined) {
+    let notes: readonly PersonNote[] = [];
+    if (this.d.notes !== undefined) {
       // The person's words are an addition: a trail that cannot be read leaves the engine-derived lines to be written
       // (xreview r1), and Decisions never takes a line back, so the ones already there stay.
       try {
-        notes = personNotes(await this.d.answers(runId));
+        notes = await this.d.notes(runId);
       } catch (err) {
         this.d.log?.(`[working-doc] the person's answers for ${runId} could not be read: ${String(err)}`);
       }
@@ -525,7 +529,14 @@ export class WorkingDocService {
         // the run's own trail as it is then.
         const personsApproach = (): boolean =>
           [...(this.d.store.get(runId)?.trail ?? [])].reverse().find((t) => t.sections.includes('approach'))?.author.kind === 'human';
-        const r = await this.writeAs(runId, rec, approach.author, () => (personsApproach() ? {} : { approach: approach.text.slice(0, SECTION_MAX_CHARS) }));
+        let r: number | 'same' | null;
+        try {
+          r = await this.writeAs(runId, rec, approach.author, () => (personsApproach() ? {} : { approach: approach.text.slice(0, SECTION_MAX_CHARS) }));
+        } catch (err) {
+          // Not known whether it landed: the lines wait for it to settle, then come (xreview r2: they were stranded).
+          if (err instanceof UndeterminedWriteError) this.linesSoon(runId, this.d.linesRetryMs ?? 15_000);
+          throw err;
+        }
         // Only a settled outcome is remembered: a write that gave up is tried again on the next sync (xreview r1).
         if (r !== null) this.planChecked.set(runId, approach.key);
         if (typeof r === 'number') wrote = r;
@@ -620,7 +631,8 @@ export class WorkingDocService {
   private rememberPending(runId: string, expectHead: number, author: DocAuthor, surface: string | null, values: Partial<Record<SectionId, string>>, actor: { id: string; kind: string }, spoken?: 'voice'): void {
     this.d.store.update(runId, (r) => { r.pending = { expectHead, author, surface, values, at: this.now(), actor: { id: actor.id, kind: actor.kind }, ...(spoken !== undefined ? { input: spoken } : {}) }; });
     for (const ms of [30_000, 75_000]) {
-      const t = setTimeout(() => { void this.exclusive(runId, () => this.reconcile(runId)).catch(() => undefined); }, ms);
+      // Once settled, the event lines come too: a write that stalled may have kept them from being written (xreview r2).
+      const t = setTimeout(() => { void this.exclusive(runId, () => this.reconcile(runId)).then(() => this.linesSoon(runId), () => undefined); }, ms);
       (t as { unref?: () => void }).unref?.();
     }
   }

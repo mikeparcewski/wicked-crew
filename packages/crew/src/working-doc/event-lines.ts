@@ -21,7 +21,12 @@ export const PHASE_REPORT_WRITER = { id: 'wicked-phase-report', version: '0.14.0
 export const PHASE_REPORT_AUTHOR = `plugin:${PHASE_REPORT_WRITER.id}@${PHASE_REPORT_WRITER.version}`;
 
 export type PauseChoice = 'continue_high' | 'continue' | 'switch_phased' | 'stop';
-interface GateInfo { ord: number; kind: string; openedAt: number; answeredAt: number | null; reviewingOrd: number | null }
+interface GateInfo {
+  ord: number; kind: string; openedAt: number; answeredAt: number | null; reviewingOrd: number | null;
+  /** A plan gate only: when the plan it held started (a step at or after the gate's ord ran). A plan sent back re-runs
+   *  the step that wrote it (an earlier ord), so it is answered but never approved (xreview r2). */
+  approvedAt: number | null;
+}
 interface PauseInfo { n: number; at: number; kinds: string[]; choice: PauseChoice | null; byPerson: boolean; answeredAt: number | null }
 export interface LinesModel {
   gates: GateInfo[];
@@ -92,10 +97,13 @@ export function foldLines(events: readonly CoreEvent[]): LinesModel {
       case 'unitExecuting':
         if (m.finished !== null && at >= m.finished) m.finished = null;
         for (const g of m.gates) if (g.answeredAt === null && g.openedAt <= at) g.answeredAt = at;
-        if (e.type === 'unitExecuting' && ord !== null && !m.started.includes(ord)) m.started.push(ord);
+        if (e.type === 'unitExecuting' && ord !== null) {
+          if (!m.started.includes(ord)) m.started.push(ord);
+          for (const g of m.gates) if (g.kind === 'plan_approval' && g.approvedAt === null && g.openedAt <= at && ord >= g.ord) g.approvedAt = at;
+        }
         break;
       case 'awaitingHuman':
-        if (ord !== null) m.gates.push({ ord, kind: word(ev['gateKind']) ?? 'question', openedAt: at, answeredAt: null, reviewingOrd: num(ev['reviewingOrd']) });
+        if (ord !== null) m.gates.push({ ord, kind: word(ev['gateKind']) ?? 'question', openedAt: at, answeredAt: null, reviewingOrd: num(ev['reviewingOrd']), approvedAt: null });
         break;
       case 'powerIntakePlanned':
         m.power = true;
@@ -277,31 +285,33 @@ export function noteLine(n: PersonNote): string {
 }
 
 /**
- * (workdoc-all-runs) When a phased run's plan is SETTLED, from its events: no plan-approval gate is open, and either one
- * was answered (the newest answered one: when, and which step wrote the plan) or a step after the first has started (a
- * plan no gate held). `null` while the plan may still change at a gate, or before any work started on it. What the plan
+ * (workdoc-all-runs) When a phased run's plan is SETTLED, from its events: the newest plan-approval gate was APPROVED
+ * (the work it held started: when, and which step wrote the plan), or no plan gate ever opened and a step after the
+ * first has started (a plan no gate held). `null` while a plan gate is open or its plan was sent back (the step that
+ * wrote it runs again), or before any work started: the Approach then keeps the last approved plan. What the plan
  * IS comes from the run's own unit list, not from these events: on a replan the engine announces only FRESH units
  * (`UnitPlanned`, core `src/actor/team_gate.rs:3757`), never the kept or removed ones.
  */
 export function planSettled(m: LinesModel): { approvedAt: number | null; authorOrd: number | null } | null {
-  const plans = m.gates.filter((g) => g.kind === 'plan_approval');
-  if (plans.some((g) => g.answeredAt === null)) return null;
-  const last = plans.at(-1);
-  if (last !== undefined) return { approvedAt: last.answeredAt, authorOrd: last.reviewingOrd };
+  const last = m.gates.filter((g) => g.kind === 'plan_approval').at(-1);
+  if (last !== undefined) return last.approvedAt === null ? null : { approvedAt: last.approvedAt, authorOrd: last.reviewingOrd };
   return m.started.length >= 2 ? { approvedAt: null, authorOrd: null } : null;
 }
 
-/** A step's name as the Approach says it: a closed pattern ("test_plan" → "test plan"), or nothing. */
+/** A step's name as the Approach says it: a closed pattern of at most four plain words ("test_plan" → "test plan"),
+ *  or nothing. */
 export function stepWord(name: string | null | undefined): string | null {
-  if (typeof name !== 'string' || !/^[A-Za-z0-9_.:-]{1,40}$/u.test(name)) return null;
+  if (typeof name !== 'string' || name.length > 40 || !/^[A-Za-z0-9_.:-]+(?: [A-Za-z0-9_.:-]+){0,3}$/u.test(name)) return null;
   return name.replace(/[_-]+/gu, ' ').trim() || null;
 }
 
-/** The Approach crew writes for a phased run: the settled plan's steps in one or two plain sentences. */
+/** The Approach crew writes for a phased run: the settled plan's steps in one or two plain sentences. Every step
+ *  counts; a step whose name is not a plain word is counted, not named. */
 export function planApproach(steps: ReadonlyArray<string | null>, approvedAt: number | null): string | null {
   const words = steps.map(stepWord).filter((w): w is string => w !== null);
   if (words.length === 0) return null;
-  const head = `${approvedAt !== null ? 'The approved plan' : 'The plan'}, ${words.length} step${words.length === 1 ? '' : 's'}: ${words.join(', ')}.`;
+  const unnamed = steps.length - words.length;
+  const head = `${approvedAt !== null ? 'The approved plan' : 'The plan'}, ${steps.length} step${steps.length === 1 ? '' : 's'}: ${words.join(', ')}${unnamed > 0 ? ` and ${unnamed} more` : ''}.`;
   return approvedAt !== null ? `${head} Approved ${clock(approvedAt)}.` : head;
 }
 

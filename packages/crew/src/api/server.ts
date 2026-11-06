@@ -2907,6 +2907,14 @@ export async function createServer(
   // `phase-report` — and the steering notes a person's edits of it become. Steering rides the engine's operator
   // inject only; nothing here answers a gate.
   const workingDocNotes = new PersonNotesIndex();
+  // The start-up read of the trail for the person's answers; every document sync waits for it (never rejects).
+  const workingDocNotesRead: Promise<string[]> = audit.readAll().then(
+    (entries) => workingDocNotes.hydrate(entries),
+    (err: unknown) => {
+      app.log.warn(`[working-doc] the trail could not be read for the person's answers: ${String(err)}`);
+      return workingDocNotes.hydrate([]);
+    },
+  );
   const workingDocs = new WorkingDocService({
     store: new WorkingDocStore({ log: (m) => app.log.warn(m) }),
     backend: bridgeBackend(interactiveBridges, (projectId) => workingDocRoot(adapter, projectSettings, projectId)),
@@ -2925,8 +2933,9 @@ export async function createServer(
         steps: v.units.map((u) => ({ ord: u.ord, name: workingDocStep(u), seat: u.assigned_cli ?? null })),
       };
     },
-    // A person's answers with their words (crew's own trail: the engine's log does not say who, or why), from memory.
-    answers: async (runId) => workingDocNotes.of(runId),
+    // A person's answers with their words (crew's own trail: the engine's log does not say who, or why), from memory,
+    // once the start-up read of the trail is in (so a line never lands ahead of an older one).
+    notes: async (runId) => { await workingDocNotesRead; return workingDocNotes.of(runId); },
     // The launch time is crew's (the run-timing index, from `run.launched`); a run with none sorts oldest.
     liveRuns: async () => (await adapter.sessionsDetail())
       .filter((v) => !['completed', 'cancelled', 'failed'].includes(v.session.status) && v.session.archived_at == null)
@@ -2941,17 +2950,14 @@ export async function createServer(
   workingDocTap = (e) => workingDocs.onEvent(e);
   // A person's answer recorded in the trail (a gate note, a skip reason, guidance) brings the run's document up to date:
   // some come with no engine event at all (guidance), and a gate's is recorded after the engine's answer.
-  audit.onRecord((entry) => { if (workingDocNotes.add(entry) && entry.runId !== undefined) workingDocs.nudge(entry.runId); });
-  // After a restart no further event may come for a run: read the person's answers from the trail once, then bring
-  // every held document up to date and make the newest live runs' documents (bounded, one at a time; never rejects).
-  void (async () => {
-    try {
-      workingDocNotes.hydrate(await audit.readAll());
-    } catch (err) {
-      app.log.warn(`[working-doc] the trail could not be read for the person's answers: ${String(err)}`);
-    }
+  audit.onRecord((entry) => { const runId = workingDocNotes.add(entry); if (runId !== null) workingDocs.nudge(runId); });
+  // After a restart no further event may come for a run: once the person's answers are read from the trail, bring every
+  // held document up to date and make the newest live runs' documents (bounded, one at a time; never rejects). Answers
+  // recorded while the trail was read bring their run's document up to date too.
+  void workingDocNotesRead.then(async (touched) => {
+    for (const runId of touched) workingDocs.nudge(runId);
     await workingDocs.catchUp();
-  })();
+  });
   registerWorkingDocRoutes(app, { service: workingDocs, exists: async (id) => (await adapter.sessions()).includes(id) });
   registerStandingOrderRoutes(app, {
     store: standingOrders,
