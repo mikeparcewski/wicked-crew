@@ -10,6 +10,47 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+
+- **The catalog by verb, and jobs started in the chat (DES-CATALOG-002 Lane C; api-types 0.192.0; needs
+  wicked-core-ts with the plan-gate send-back, after 0.15.28).**
+  - **One launch path.** `POST /runs` is now a shared launch function (DES-CHAT-FIRST-001 C3): the compose and demo
+    routes, a chat job's Go and a reshape call it directly, with the same launch policy and provenance.
+  - **`GET /workflows/catalog?v=2`** (`capabilities.workflowCatalogV2`): ten verbs, one card per needs, delivers or gate
+    shape, variants as options, every card and option with its slash command and old `/workflow-<key>` aliases bound to
+    their exact option; the hidden `test-analysis` card is reachable only by its alias. What a card is checked by is
+    derived from the plan the engine serves (each step's `rubric`, consent gates, the instruments, the launch kind, and
+    the proposal-only predicate for Improve cards). A saved shadow with fewer checks than the built-in turns its option
+    off; an unserved preset is `unavailable`, never dropped; served defs no card launches and every saved preset join
+    Yours; usage counts by the recorded shape. v1 (no `v`) is unchanged.
+  - **`shape` on every launch** (`capabilities.launchShape`): `POST /runs`, the demo and the compose take an optional
+    `LaunchShape`, judged against the current catalog before anything starts (400 `shape_mismatch`, 409
+    `catalog_changed`, `shape_ask`, `card_not_available`); a framing option's brief and an Investigate card's depth line
+    are crew's, put first in the brief. `run.launched` records the shape, the launch envelope and the proposal; the run
+    DTO carries `shape` and `from_proposal`. The QE mirror gains `modernize`, `refactor`, `release` and `scaffold`, so an
+    unattended delivery of each without a PASS or a skip is refused. Backlog's compose takes a level (epics, stories,
+    tasks).
+  - **Job proposals** (`capabilities.chatJobProposals`): `POST /chats/:id/proposals` (a person's pick, command or
+    revision; idempotent by `requestId`) and `POST /chats {seed, requestId}` (the chat and proposal ids derive from the
+    person and the request). A job proposal carries what Start runs and the conversation's facts, all crew's: the shape,
+    `catalogRev` and the resolution fingerprint, the command, needs, checks, seats, the sentence with its tokens, swaps,
+    notes and its closing `ask`, at most two suggestions, the one question, the starting `sketch`, and `revises` /
+    `lineage`. Go launches through one launcher per kind (run, compose, demo) with the identity derived from the
+    proposal, the chat filing, the shape and the first plan held (`before:1`, power off); a changed catalog is 409
+    `catalog_changed` with the refreshed proposal.
+  - **Corrections** are a `ProposalRevision` merged by fixed rules; a person's message holds the open proposal
+    `revising` until its seat turn settles (Go: 409 `proposal_revising`; a gone turn reopens it with a note), a stale
+    parent is 409 `proposal_stale`, and a revision that loses a check is never written from a seat's block: wicked asks,
+    naming what is lost, and only the person's press (`confirmLoss`) applies it. A QE skip counts only with the person's
+    own unquoted, unreported reason from the message that turn answers.
+  - **Plan answers bound to the plan on screen:** `POST /runs/:id/gate` takes `planRev`, passed with `ord` into the
+    engine's own decision; a run launched from a chat proposal requires it on every approving plan answer and send-back.
+    A stale answer is 409 `gate_changed` with the current `openOrd` and `planRev`.
+  - **`POST /runs/:id/reshape`** (`capabilities.reshapeRun`): a run held at its first work-plan approval starts again as
+    another card or option, under the chat's lock: validated, the held plan answered Reject (`reshaped`), and the
+    replacement launched from the held run's envelope (`retryOf`, held at its plan, reduced assurance only when the held
+    run had it). 409 `reshape_after_work` once a work plan was accepted.
+
 ## [0.17.0] — 2026-11-05
 
 A feature release on wicked-core-ts ^0.15.28 and wicked-crew-api-types 0.191.0, bundling wicked-studio 0.15.0, and

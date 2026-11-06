@@ -45,6 +45,8 @@ export function phaseOfStep(step: PresetStep, entry: CatalogEntry | undefined, p
     allowed_skills: own<string[]>(step, 'allowed_skills', []),
     validator_pin: own(step, 'validator_pin', entry.validator_pin),
     ...(executor !== undefined ? { executor } : {}),
+    // (DES-CATALOG-002 §5.2) The step's gate rubric, as core's compose carries it on the composed phase.
+    ...(typeof step.rubric === 'string' && step.rubric !== '' ? { rubric: step.rubric } : {}),
   };
 }
 

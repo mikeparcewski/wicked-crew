@@ -98,6 +98,34 @@ export async function busRows(busDbPath: string | undefined, runId: string): Pro
 }
 
 /**
+ * (DES-CATALOG-002 §2.5) Whether a WORK plan was accepted on this run (a `plan.accepted` with any step beyond a PA's
+ * scope-only `understand`): past that, a run is not reshaped.
+ */
+export function workPlanAccepted(rows: readonly TeamRow[]): boolean {
+  return rows.some((r) => {
+    if (r.event_type !== 'wicked.team.plan.accepted') return false;
+    const steps = (r.payload as unknown as { steps?: Array<{ catalog?: unknown }> } | null)?.steps ?? [];
+    return steps.some((st) => st.catalog !== 'understand');
+  });
+}
+
+/**
+ * (DES-CATALOG-002 §4.6) The plan revision the OPEN plan gate holds (`gate.opened{kind:"plan_approval"}.plan_rev`, the
+ * newest no `gate.decided` answered), or `undefined` when no plan gate is open or its row names no revision.
+ */
+export function openPlanGateRev(rows: readonly TeamRow[]): number | undefined {
+  const sorted = [...rows].sort((a, b) => a.event_id - b.event_id);
+  const payload = (r: TeamRow): Record<string, unknown> => (r.payload ?? {}) as unknown as Record<string, unknown>;
+  const decided = new Set(sorted.filter((r) => r.event_type === 'wicked.team.gate.decided').map((r) => payload(r)['gate_id']));
+  const open = sorted
+    .filter((r) => r.event_type === 'wicked.team.gate.opened' && payload(r)['kind'] === 'plan_approval')
+    .filter((r) => !decided.has(payload(r)['gate_id']))
+    .pop();
+  const rev = open === undefined ? undefined : payload(open)['plan_rev'];
+  return typeof rev === 'number' && Number.isInteger(rev) ? rev : undefined;
+}
+
+/**
  * The OPEN plan gate's own reading of the plan it holds: the newest `gate.opened{kind:"plan_approval"}`
  * no `gate.decided` answered, with its `band` and `high_risk` (brainstorm idea 13 — a plan-approval
  * trust order re-reads these before it answers). `undefined` when no plan gate is open or the row

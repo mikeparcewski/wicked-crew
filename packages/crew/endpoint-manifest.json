@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.191.0",
+  "apiTypesVersion": "0.192.0",
   "endpoints": [
     {
       "method": "GET",
@@ -359,6 +359,7 @@
       "requestType": "ChatOpenBody",
       "responseType": "ChatOpenResponse",
       "statusCodes": [
+        200,
         201,
         400,
         403,
@@ -428,6 +429,20 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/chats/:id/proposals",
+      "requestType": "PersonProposalBody | PersonRevisionBody",
+      "responseType": "PersonProposalResponse",
+      "statusCodes": [
+        200,
+        201,
+        400,
+        403,
+        404,
+        409
+      ]
     },
     {
       "method": "POST",
@@ -2225,6 +2240,20 @@
     },
     {
       "method": "POST",
+      "path": "/api/v1/runs/:id/reshape",
+      "requestType": "ReshapeRunBody",
+      "responseType": "ReshapeRunResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        502
+      ]
+    },
+    {
+      "method": "POST",
       "path": "/api/v1/runs/:id/resolve",
       "requestType": "ResolveRunRequest",
       "responseType": "ResolveRunResponse",
@@ -3346,10 +3375,11 @@
       "method": "GET",
       "path": "/api/v1/workflows/catalog",
       "requestType": null,
-      "responseType": "WorkflowCatalogResponse",
+      "responseType": "WorkflowCatalogResponse | WorkflowCatalogV2Response",
       "statusCodes": [
         200,
-        400
+        400,
+        503
       ]
     },
     {

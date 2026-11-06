@@ -2165,7 +2165,9 @@ export async function createServer(
         const block = rewritten.type === 'chatReply' ? chatTranscripts.takeDecisionsBlock(chat, cliKey) : null;
         // A2: the reply's `wicked-make` blocks (cut above, never shown) become a proposal card, resolved off this path.
         const makeBlocks = rewritten.type === 'chatReply' ? chatTranscripts.takeMakeBlocks(chat, cliKey) : [];
-        if (makeBlocks.length > 0) {
+        // DES-CATALOG-002 §4.6: every settled seat part of a turn (a reply with or without blocks, or a failed seat) also
+        // settles the turn's hold on a job proposal, so a correction that wrote no revision releases it at once.
+        if (makeBlocks.length > 0 || typeof f['turn_id'] === 'string') {
           chatProposals?.onReply({
             chat,
             cliKey,

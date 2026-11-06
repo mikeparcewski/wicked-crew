@@ -16,7 +16,7 @@
  */
 
 import type { AuditLog } from './audit.js';
-import type { Actor, AuditEntry, RecordedEvent, SessionView } from '../core/types.js';
+import type { Actor, AuditEntry, LaunchEnvelope, LaunchShape, RecordedEvent, SessionView } from '../core/types.js';
 
 /** The run statuses that are terminal (`SessionStatus`): the only runs `ended_at` may date. */
 const TERMINAL_STATUSES: ReadonlySet<string> = new Set(['completed', 'cancelled', 'failed']);
@@ -78,6 +78,9 @@ export class RunTimingIndex {
   private readonly runToProposal = new Map<string, { proposalId: string; artifactRef: string }>();
   /** A3 (§6.2): a proposal-bound attempt that ended without landing (`run.landing_failed`). */
   private readonly runToLandingFailed = new Map<string, { reason: string; at: number }>();
+  /** (DES-CATALOG-002 §4.4) The launch's shape, its envelope and the chat proposal whose Go launched it (`detail.shape`,
+   *  `detail.envelope`, `detail.fromProposal`): usage by shape, the reshape's relaunch, and the plan-gate binding. */
+  private readonly runToLaunchFacts = new Map<string, { shape?: LaunchShape; envelope?: LaunchEnvelope; fromProposal?: string }>();
 
   /**
    * Consume pre-read `run.launched` entries — the seam that lets `createServer` feed this index
@@ -120,7 +123,36 @@ export class RunTimingIndex {
       if (deliver === 'pr' || deliver === 'none') this.runToLaunchDeliver.set(runId, deliver);
       this.noteProposal(runId, detail);
       this.noteChain(runId, detail);
+      // Newest first: a reused id keeps its newest launch's facts.
+      if (!this.runToLaunchFacts.has(runId)) this.noteLaunchFacts(runId, detail);
     }
+  }
+
+  /** (DES-CATALOG-002 §4.4) A launch entry's shape, envelope and proposal, as recorded. */
+  noteLaunchFacts(runId: string, detail: Record<string, unknown> | undefined): void {
+    const shape = detail?.['shape'];
+    const envelope = detail?.['envelope'];
+    const from = detail?.['fromProposal'];
+    const facts: { shape?: LaunchShape; envelope?: LaunchEnvelope; fromProposal?: string } = {};
+    if (shape !== null && typeof shape === 'object' && typeof (shape as { card?: unknown }).card === 'string') facts.shape = shape as LaunchShape;
+    if (envelope !== null && typeof envelope === 'object') facts.envelope = envelope as LaunchEnvelope;
+    if (typeof from === 'string' && from !== '') facts.fromProposal = from;
+    if (Object.keys(facts).length > 0) this.runToLaunchFacts.set(runId, facts);
+  }
+
+  /** The shape a run was launched as, or `undefined`. */
+  shapeOf(runId: string): LaunchShape | undefined {
+    return this.runToLaunchFacts.get(runId)?.shape;
+  }
+
+  /** What a run was launched with (a reshape relaunches from it), or `undefined` for a run from before it was recorded. */
+  envelopeOf(runId: string): LaunchEnvelope | undefined {
+    return this.runToLaunchFacts.get(runId)?.envelope;
+  }
+
+  /** The chat proposal whose Go launched a run, or `undefined`. */
+  fromProposalOf(runId: string): string | undefined {
+    return this.runToLaunchFacts.get(runId)?.fromProposal;
   }
 
   /** A3: a launch entry's proposal facts (`proposalId`, `artifactRef`), both or neither. */
@@ -434,6 +466,8 @@ export function recordRunLaunched(
   runTimingIndex?.noteChain(runId, detail);
   // A3: the proposal facts, live — the same fields a restart rehydrates.
   runTimingIndex?.noteProposal(runId, detail);
+  // DES-CATALOG-002 §4.4: the shape, envelope and proposal, live — the same fields a restart rehydrates.
+  runTimingIndex?.noteLaunchFacts(runId, detail);
   // crew#762: the launch's delivery decision, live — the same field a restart rehydrates.
   const deliver = detail['deliver'];
   if ((deliver === 'pr' || deliver === 'none') && runTimingIndex !== undefined) {

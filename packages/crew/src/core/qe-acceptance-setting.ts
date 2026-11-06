@@ -32,6 +32,12 @@ export const QE_PRESETS: ReadonlySet<string> = new Set([
   // wicked-core catalog.rs builtin_preset_instruments (core-ts 0.10.0): the editor-plugin workflow
   // changes the application too.
   'editor-plugin',
+  // (DES-CATALOG-002 §5.1, wicked-core#1284) The catalog's new application-changing presets: without them here an
+  // unattended delivery of each would push past the verdict check.
+  'modernize',
+  'refactor',
+  'release',
+  'scaffold',
 ]);
 
 export type QeAcceptanceMode = 'required' | 'off';

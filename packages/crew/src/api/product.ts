@@ -12,10 +12,14 @@
  * yet. An absent route is the honest answer until it does.
  */
 
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyBaseLogger, FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from '../zod.js';
 
 import type { CoreAdapter } from '../core/adapter.js';
+import type { Actor } from '../core/types.js';
+import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
+import { LaunchShapeSchema } from '../workflow-catalog/shape.js';
+import { LOCAL_ACTOR } from './auth.js';
 import { codeGraphErrorStatus } from '../core/repoPaths.js';
 import { AggregateHttpError, membersOf } from './project-aggregates.js';
 import { getRequirement } from './requirements.js';
@@ -36,7 +40,40 @@ export const ProductComposeSchema = z.strictObject({
     .max(COMPOSE_MAX_REQUIREMENTS),
   /** The operator's own steer for the draft (grouping, scope, tone). */
   instructions: z.string().max(500).optional(),
+  /** (api-types 0.192.0, DES-CATALOG-002 §4.4) What this compose is the shape of: a Backlog option, whose compose level
+   *  decides how far down the draft goes. */
+  shape: LaunchShapeSchema.optional(),
 });
+
+/** How far down a draft goes (DES-CATALOG-002 §3.1 Backlog): epics, stories (today's default), or tasks too. */
+export type ComposeLevel = 'epics' | 'stories' | 'tasks';
+
+/** The compose level a Backlog shape names (the seed's own data; the shape itself is judged by the shared launch). */
+export function composeLevelOf(shape: { card: string; option: string | null } | undefined): ComposeLevel {
+  if (shape === undefined) return 'stories';
+  const card = CATALOG_V2_CARDS.find((c) => c.id === shape.card);
+  const option = card?.variant?.options.find((o) => o.id === (shape.option ?? card.variant!.default));
+  return option?.compose?.level ?? 'stories';
+}
+
+const LEVEL_LINES: Readonly<Record<ComposeLevel, string>> = {
+  epics: 'Level: epics. Draft the epics and their features only; leave the stories out (features: [] stories).',
+  stories: '',
+  tasks: 'Level: tasks. Under every story, add its tasks: `tasks: [{title}]`, each small enough for one change, traced to the story.',
+};
+
+/** What a compose launches with besides its body: crew's own, never a client's. */
+export interface ComposeLaunchExtra {
+  /** A chat job's launch fields (`jobLaunchCommon`): its derived run id (a retry adopts it), chat, seats, QE as shown
+   *  and a reshape's lineage. Merged into the launch; the shape stays the body's. */
+  common?: Record<string, unknown>;
+  fromProposal?: string;
+  /** Hold the run at its plan (a chat launch always does). */
+  humanConfirm?: string;
+}
+
+/** The shared launch function's shape here (DES-CHAT-FIRST-001 C3): the routes module passes its own. */
+export type ComposeLaunchRun = (raw: unknown, ctx: { actor: Actor; log: Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>; fromProposal?: string; target?: 'compose' }) => Promise<{ statusCode: number; payload: unknown }>;
 
 const oneLine = (s: string): string => s.replace(/\s+/gu, ' ').trim();
 /** `s` cut to at most `max` UTF-8 bytes on a character boundary, `…` marking a cut. */
@@ -100,13 +137,65 @@ export function reviewInstructions(projectId: string, rows: ReadonlyArray<Compos
   ]);
 }
 
-export function registerProductRoutes(app: FastifyInstance, adapter: CoreAdapter): void {
-  app.post(
-    `${V}/projects/:id/product/compose`,
-    { config: { manifest: { requestType: 'ProductComposeBody', responseType: 'ProductComposeResponse', statusCodes: [202, 400, 404, 409, 422, 501, 503] } } },
-    async (req: FastifyRequest, reply) => {
-      const { id } = req.params as { id: string };
-      const parsed = ProductComposeSchema.safeParse(req.body);
+/**
+ * (DES-CATALOG-002 §4.6) What a compose of these requirements would refuse, checked before anything changes (a chat
+ * reshape answers its held plan only for a launch that can start): the project, each requirement's repository being one
+ * of its members, and each key existing. `null` = it would launch.
+ */
+export async function composePreflight(adapter: CoreAdapter, id: string, refs: ReadonlyArray<{ repoId: string; key: string }>, instructions?: string): Promise<string | null> {
+  if (refs.length === 0) return 'pick at least one requirement';
+  if (refs.length > COMPOSE_MAX_REQUIREMENTS) return `pick at most ${COMPOSE_MAX_REQUIREMENTS} requirements`;
+  let members;
+  try {
+    members = await membersOf(adapter, id);
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+  const rows: Array<{ repoId: string; key: string; title: string; statement: string }> = [];
+  for (const ref of refs) {
+    const repo = members.find((m) => m.ref === ref.repoId)?.repo ?? null;
+    if (repo === null) return `${ref.repoId} is not a registered repository of this project`;
+    try {
+      const detail = await getRequirement(repo, ref.key, adapter);
+      if (detail === null) return `${ref.repoId} has no requirement ${ref.key}`;
+      rows.push({ ...ref, title: detail.title, statement: detail.statement });
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+  }
+  // The same instruction builders the launch runs, so their budget refuses here, before anything changes (codex r5).
+  try {
+    composeInstructions(id, rows, instructions);
+    reviewInstructions(id, rows);
+  } catch (err) {
+    if (err instanceof ComposeSelectionTooLargeError) return `${err.message}: select fewer requirements`;
+    throw err;
+  }
+  return null;
+}
+
+/**
+ * One compose launch (DES-CATALOG-002 §4.6: the `compose` launcher): the route's and a chat Backlog job's Go. Every
+ * requirement is re-read from its repository first; then the shared launch function runs the plan, judging the shape
+ * as a compose.
+ */
+export async function composeLaunch(
+  adapter: CoreAdapter,
+  launchRun: ComposeLaunchRun,
+  id: string,
+  body: unknown,
+  ctx: { actor: Actor; log: Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'> },
+  extra: ComposeLaunchExtra = {},
+): Promise<{ code: number; body: unknown }> {
+  const reply = {
+    statusCode: 200,
+    payload: undefined as unknown,
+    code(n: number) { this.statusCode = n; return this; },
+    send(p: unknown) { this.payload = p; return { code: this.statusCode, body: p }; },
+  };
+  {
+    {
+      const parsed = ProductComposeSchema.safeParse(body);
       if (!parsed.success) return reply.code(400).send({ error: 'Invalid body', issues: parsed.error.issues });
       let members;
       try {
@@ -143,8 +232,10 @@ export function registerProductRoutes(app: FastifyInstance, adapter: CoreAdapter
       }
       let draft: string;
       let review: string;
+      const level = composeLevelOf(parsed.data.shape);
       try {
         draft = composeInstructions(id, rows, parsed.data.instructions);
+        if (LEVEL_LINES[level] !== '') draft = `${draft}\n\n${LEVEL_LINES[level]}`;
         review = reviewInstructions(id, rows);
       } catch (err) {
         if (err instanceof ComposeSelectionTooLargeError) {
@@ -152,19 +243,15 @@ export function registerProductRoutes(app: FastifyInstance, adapter: CoreAdapter
         }
         throw err;
       }
-      const launch = await app.inject({
-        method: 'POST',
-        url: `${V}/runs`,
-        // The caller's own credentials: the launch is THEIR run, audited as theirs.
-        headers: {
-          'content-type': 'application/json',
-          ...(req.headers.authorization !== undefined ? { authorization: req.headers.authorization } : {}),
-          ...(req.headers.cookie !== undefined ? { cookie: req.headers.cookie } : {}),
-        },
-        payload: {
+      // The shared launch function (DES-CHAT-FIRST-001 C3), as the caller: the launch is THEIR run, audited as theirs.
+      const launch = await launchRun(
+        {
           problem: `Compose the product plan for project ${id} (${rows.length} requirement(s))`,
           projectId: id,
           deliver: 'none',
+          ...Object.fromEntries(Object.entries(extra.common ?? {}).filter(([k]) => k !== 'shape')),
+          ...(extra.humanConfirm !== undefined ? { humanConfirm: extra.humanConfirm } : {}),
+          ...(parsed.data.shape !== undefined ? { shape: parsed.data.shape } : {}),
           plan: {
             steps: [
               { catalog: 'produce', id: 'draft', instructions: draft },
@@ -172,12 +259,25 @@ export function registerProductRoutes(app: FastifyInstance, adapter: CoreAdapter
             ],
           },
         },
-      });
+        { ...ctx, target: 'compose', ...(extra.fromProposal !== undefined ? { fromProposal: extra.fromProposal } : {}) },
+      );
       // POST /runs' own refusal (no eligible seat, a busy engine, an archived project, …) is
       // relayed as it answered; its 201 `{runId}` becomes this route's 202.
-      const body = launch.json() as Record<string, unknown>;
-      if (launch.statusCode !== 201) return reply.code(launch.statusCode).send(body);
-      return reply.code(202).send({ runId: body['runId'], requirements: rows.length });
+      const out = launch.payload as Record<string, unknown>;
+      if (launch.statusCode !== 201) return reply.code(launch.statusCode).send(out);
+      return reply.code(202).send({ runId: out['runId'], requirements: rows.length });
+    }
+  }
+}
+
+export function registerProductRoutes(app: FastifyInstance, adapter: CoreAdapter, launchRun: ComposeLaunchRun): void {
+  app.post(
+    `${V}/projects/:id/product/compose`,
+    { config: { manifest: { requestType: 'ProductComposeBody', responseType: 'ProductComposeResponse', statusCodes: [202, 400, 404, 409, 422, 501, 503] } } },
+    async (req: FastifyRequest & { actor?: Actor }, reply) => {
+      const { id } = req.params as { id: string };
+      const out = await composeLaunch(adapter, launchRun, id, req.body, { actor: req.actor ?? LOCAL_ACTOR, log: req.log });
+      return reply.code(out.code).send(out.body);
     },
   );
 }
