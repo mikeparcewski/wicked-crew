@@ -161,7 +161,9 @@ export function registerDefaultEvalRoutes(app: FastifyInstance, deps: DefaultEva
       if (!q.success) return reply.code(400).send({ error: '`n` is 1-200 and `seed` a whole number' });
       const runs = await deps.runs();
       const s = auditSample(shapeLaunchesOf(runs), q.data.n ?? 50, q.data.seed ?? 1);
-      return { ...s, counts: shapeLabelCounts(runs) };
+      // The wire shape only (codex r4): the display words, never the internal whole-input key or text.
+      const sample = s.sample.map((l) => ({ runId: l.runId, place: l.place, card: l.card, option: l.option, by: l.by, words: l.words.slice(0, 500), corrected: l.corrected }));
+      return { sample, denominator: s.denominator, size: s.size, counts: shapeLabelCounts(runs) };
     },
   );
 

@@ -335,17 +335,20 @@ const OUTCOME_CUES: ReadonlyArray<{ re: RegExp; cards: readonly string[] }> = [
  * Work the words name only to rule it out or to refer to it ("do not modernize…", "leave the migration alone", "instead
  * of a rewrite", "summarize the migration ticket"): the words then do not decide alone (codex r3).
  */
-const NEGATED_WORK = /\b(?:don'?t|do\s+not|never|no\s+longer)\s+(?:\w+\s+){0,2}?(?:modernize|migrate|upgrade|move|port|rewrite|refactor|build|implement|fix|release|plan|review|test|change|touch)\b|\bleave\b[^.;]*\balone\b/iu;
+const WORK_VERB = String.raw`(?:moderniz|migrat|upgrad|mov|port|rewrit|refactor|build|implement|fix|releas|plan|review|test|chang|touch)\w*`;
+const NEGATED_WORK = new RegExp(String.raw`\b(?:don'?t|do\s+not|never|no\s+longer|instead\s+of|avoid(?:ing)?|rather\s+than)\s+(?:\w+\s+){0,2}?${WORK_VERB}\b|\bleave\b[^.;]*\balone\b`, 'iu');
 const REFERENCED_WORK = /\b(?:summari[sz]e|summary\s+of|recap|the\s+ticket|ticket\s+for)\b/iu;
 
 /** Whether the words rule the work out ("do not modernize…", "leave the migration alone"). */
+const straight = (t: string): string => t.replace(/[\u2018\u2019]/gu, "'");
+
 export function negatedWork(text: string): boolean {
-  return NEGATED_WORK.test(text);
+  return NEGATED_WORK.test(straight(text));
 }
 
 /** Whether the words rule out or only refer to work (then they do not decide alone). */
 export function negatedOrReferenced(text: string): boolean {
-  return NEGATED_WORK.test(text) || REFERENCED_WORK.test(text);
+  return NEGATED_WORK.test(straight(text)) || REFERENCED_WORK.test(text);
 }
 
 /** Whether the words ask for an outcome the card does not deliver (then they do not decide alone). */

@@ -220,7 +220,13 @@ describe('a seat\'s job block → a detected job proposal (§2.3)', () => {
     // A correction that does not name the shape (a detail, a repository) leaves the question standing (codex r3).
     await turn(r, 't2', 'it is in the repo', [{ revises: asked.pid, edits: { detail: { add: ['in the repo'] } } }]);
     expect(open(r)!.blocked).toBe(asked.shape!.guess!.question!.text);
-    await turn(r, 't3', 'write the tests for the checkout service', [{ revises: open(r)!.pid, edits: { card: 'write-tests' } }]);
+    // A refused shape field is not a clarification (codex r4).
+    await turn(r, 't3', 'it is the checkout service', [{ revises: open(r)!.pid, edits: { option: 'nonexistent' } }]);
+    expect(open(r)!.blocked).toBe(asked.shape!.guess!.question!.text);
+    // Go with edits on an unsure reading is refused before anything is recorded (the overlay is applied to every rebuild).
+    expect((await r.svc.decide(CHAT, open(r)!.pid, { decision: 'go', edits: { repoRef: 'r-pay' } }, ME, 'i1')).code).toBeGreaterThanOrEqual(400);
+    expect(r.records.some((x) => x.kind === 'proposal_accepting')).toBe(false);
+    await turn(r, 't4', 'write the tests for the checkout service', [{ revises: open(r)!.pid, edits: { card: 'write-tests' } }]);
     const clear = open(r)!;
     expect(clear.shape!.guess).toBeUndefined();
     expect(clear.blocked).toBeNull();
@@ -289,6 +295,15 @@ describe('a seat\'s job block → a detected job proposal (§2.3)', () => {
     const now = open(r)!;
     expect(now.shape!.card).toBe('bug');
     expect(now.seats!.keys).toContain('pi');
+  });
+
+  it('a slow seat\'s root block never appears after a newer message (codex r4)', async () => {
+    const r = rig();
+    r.records.push({ at: 2, turnId: 't1', kind: 'user', text: 'sum([1,2,3]) returns 5 instead of 6 in tiny-math', seats: ['claude'], owner: true });
+    r.records.push({ at: 3, turnId: 't2', kind: 'user', text: 'never mind, keep everything as it is', seats: ['claude'], owner: true });
+    r.svc.onReply({ chat: CHAT, cliKey: 'claude', turnId: 't1', ok: true, blocks: [JSON.stringify({ entry: 'bug', confidence: 0.95 })] });
+    await r.svc.settled();
+    expect(proposals(r)).toEqual([]);
   });
 
   it('a new root block while the job lineage is open never replaces it (a change is a revision)', async () => {

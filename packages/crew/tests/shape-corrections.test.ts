@@ -139,6 +139,31 @@ describe('the adapter catches a hostile block (its own negative tests)', () => {
     expect(judgeCorrection(caseOf('k7'), r.parent!, { ...r.result!, kind: 'create', words: 'something else' }, 1).join(' ')).toMatch(/words changed/u);
   });
 
+  it('the oracle holds the pre-press proposal to its parent\'s checks, questions or not, and compares unchanged cases whole (codex r4)', async () => {
+    const r = await run('k32', open({ card: 'feature' }));
+    expect(r.result!.question?.kind).toBe('lost_check');
+    const early = { ...r.result!, gate: r.result!.gate.filter((g) => g !== 'parity') };
+    expect(judgeCorrection(caseOf('k32'), r.parent!, early, 1).join(' ')).toMatch(/lost the parity check/u);
+    const k4 = await run('k4', null);
+    expect(judgeCorrection(caseOf('k4'), k4.parent!, { ...k4.result!, words: 'something else' }, 0).join(' ')).toMatch(/words changed/u);
+    expect(judgeCorrection(caseOf('k4'), k4.parent!, { ...k4.result!, inputs: '{"show":{"kind":"text","value":"x"}}' }, 0).join(' ')).toMatch(/inputs changed/u);
+  });
+
+  it('a seat\'s removal of a carried detail needs the person to ask for it, never for one that names a check (codex r4)', async () => {
+    const chat = new CorrectionChat(served, scope);
+    await chat.pick('migrate', 'upgrade', 'bump node');
+    await chat.swap({ repoRef: 'r-payments-service', detail: { add: ['a separate judge for the release'] } });
+    const pid = chat.current()!.pid;
+    await chat.correct('keep a separate judge for the release', { revises: pid, edits: { detail: { remove: ['a separate judge for the release'] } } });
+    expect(chat.current()!.details).toEqual(['a separate judge for the release']);
+    await chat.swap({ detail: { add: ['on .NET 8'] } });
+    await chat.correct('remove on .NET 8 please', { revises: chat.current()!.pid, edits: { detail: { remove: ['on .NET 8'] } } });
+    expect(chat.current()!.details).toEqual(['a separate judge for the release']);
+    // An ordinary noun is not reported speech: "requests that time out" is the person's own.
+    await chat.correct('add retries for requests that time out', { revises: chat.current()!.pid, edits: { detail: { add: ['requests that time out'] } } });
+    expect(chat.current()!.details).toContain('requests that time out');
+  });
+
   it('the scorer itself fails a wrong answer: a wrong option, a lost keep field', async () => {
     const wrong = await run('k1', open({ option: 'upgrade' }));
     expect(wrong.right).toBe(false);
@@ -149,8 +174,8 @@ describe('the adapter catches a hostile block (its own negative tests)', () => {
 
 describe('lowersCheck (the words that would lower a check)', () => {
   it('reads requests to lower, prohibitions and ship steps; keeps descriptions and requests to keep a check', () => {
-    const lowers = ['skip parity', 'skip QE acceptance', 'without the review', 'drop the tests', 'skip cited findings', 'skip the distinct reviewer', 'drop the separate judge', "ship this without running the reviewer's checks", 'waive QE', 'fewer reviewers', 'remove the parity check', 'no review needed', 'turn QE off', 'Do not review this', 'Do not run QE acceptance', 'Never run the tests', 'and tag it when you are done', 'merge it when green', 'do not run the independent review', 'Do not perform any distinct review', 'turn the QE acceptance check off', 'do not run the reviewer', 'never run the second judge'];
-    const keeps = ['without downtime', 'no downtime', "don't fix anything", '.NET 8 on Linux', 'There are no tests for this module', 'no tests failed', 'Do not drop parity checks', 'Fix the bug without skipping QE acceptance', 'do not skip the tests', 'reduce the cache size', 'so agents can call it', 'never touch the billing tables', "don't review the generated files", 'do not test in production', 'no need to check twice'];
+    const lowers = ['skip parity', 'skip QE acceptance', 'without the review', 'drop the tests', 'skip cited findings', 'skip the distinct reviewer', 'drop the separate judge', "ship this without running the reviewer's checks", 'waive QE', 'fewer reviewers', 'remove the parity check', 'no review needed', 'turn QE off', 'Do not review this', 'Do not run QE acceptance', 'Never run the tests', 'and tag it when you are done', 'merge it when green', 'do not run the independent review', 'Do not perform any distinct review', 'turn the QE acceptance check off', 'do not run the reviewer', 'never run the second judge', 'do not review', 'never test', 'no need to review', 'Don\u2019t run the tests'];
+    const keeps = ['without downtime', 'no downtime', "don't fix anything", '.NET 8 on Linux', 'There are no tests for this module', 'no tests failed', 'Do not drop parity checks', 'Fix the bug without skipping QE acceptance', 'do not skip the tests', 'reduce the cache size', 'so agents can call it', 'never touch the billing tables', "don't review the generated files", 'do not test in production', 'no need to check twice', 'Don\u2019t skip QE acceptance'];
     for (const t of lowers) expect(lowersCheck(t), t).toBe(true);
     for (const t of keeps) expect(lowersCheck(t), t).toBe(false);
   });

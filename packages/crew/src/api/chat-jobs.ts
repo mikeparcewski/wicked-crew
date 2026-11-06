@@ -519,7 +519,7 @@ const NO_CONTROL = /\bno\s+(?:qe|parity|review|reviewer|judge)\b/giu;
 /** A prohibition of a check itself ("do not run the independent review", "never run the tests", "do not review it"),
  *  apart from a negation that keeps one ("do not drop parity": no performing verb) or scopes the work ("don't review the
  *  generated files": the object is not a check; pi r3). */
-const PROHIBIT = new RegExp(String.raw`\b(?:don'?t|do\s+not|never|no\s+need\s+to)\s+(?:(?:run|do|perform|use|have|bother\s+(?:with|to)|need)\s+${CONTROL}|(?:review|test|check|judge)\s+(?:it|this|that|the\s+(?:change|work|pr|fix|code|job))\b)`, 'giu');
+const PROHIBIT = new RegExp(String.raw`\b(?:don'?t|do\s+not|never|no\s+need\s+to)\s+(?:(?:run|do|perform|use|have|bother\s+(?:with|to)|need)\s+${CONTROL}|(?:review|test|check|judge)\s+(?:it|this|that|the\s+(?:change|work|pr|fix|code|job))\b|(?:review|test|check|judge)(?=\s*(?:$|[.,;:!?)])))`, 'giu');
 /** A control turned off with the control between ("turn QE off"). */
 const TURN_OFF = new RegExp(String.raw`\bturn(?:ing)?\s+${CONTROL}\s+off\b`, 'giu');
 const SHIP = /\b(?:tag(?:ging)?\s+(?:it|the\s+release|a\s+release|v?\d[\w.]*)|publish(?:ing)?\s+(?:it|the\s+package|to\s+npm)|merg(?:e|ing)\s+(?:it|the\s+pr)|push(?:ing)?\s+(?:it\s+)?to\s+main)\b/giu;
@@ -531,7 +531,8 @@ const NEGATED_BEFORE = /\b(?:don'?t|do\s+not|never|not|without|no)\s+(?:\w+\s+){
  * publish or merge (§9.1 "carried words must never carry a skip"). Descriptive facts ("there are no tests for this
  * module", "no tests failed") and requests to keep a check ("do not drop parity", "without skipping QE") do not.
  */
-export function lowersCheck(text: string): boolean {
+export function lowersCheck(raw: string): boolean {
+  const text = raw.replace(/[\u2018\u2019]/gu, "'");
   for (const re of [PROHIBIT, TURN_OFF, LOWER_VERB, NO_CONTROL, SHIP]) {
     re.lastIndex = 0;
     for (let m = re.exec(text); m !== null; m = re.exec(text)) {
@@ -771,14 +772,17 @@ export function ownWords(message: string): string {
   let t = message
     .replace(/(^|[\s(])\u2018[^\u2019]*\u2019(?![a-z])/giu, '$1 ')
     .replace(/(?<=[a-z])\u2019(?=[a-z])/giu, "'")
-    .replace(/```[\s\S]*?```/gu, ' ')
+    // Fenced blocks of any supported length, backtick or tilde (codex r4).
+    .replace(/(`{3,}|~{3,})[\s\S]*?\1/gu, ' ')
     .replace(/`[^`]*`/gu, ' ')
     .split('\n')
     .filter((line) => !/^\s*>/u.test(line))
     .join('\n');
   t = t.replace(/“[^”]*”|"[^"]*"|«[^»]*»|(^|[\s(])'[^']*'(?=$|[\s).,;:!?])/gu, (_m, lead?: string) => `${lead ?? ''} `);
   // Reported speech: whatever follows "X said:" / "they asked" / "told me to" is someone else's.
-  t = t.replace(/\b(said|says|asked|asks|told (me|us)( to)?|wrote|writes|wants (me|us) to|requested|requests|mentioned|suggested|according to|per)\b[\s\S]*$/iu, ' ');
+  // A speaker's words, said as such ("the PM said:", "per the PM", "requested by legal"): an ordinary noun or preposition
+  // ("requests that time out", "100 per minute") is not reported speech (codex r4).
+  t = t.replace(/\b(said|says|asked|asks|told (me|us)( to)?|wrote|writes|wants (me|us) to|requested|mentioned|suggested|according to|per (?:the|my|our|their|his|her|\w+'s)\s+(?:pm|manager|lead|boss|team|client|customer|ticket|email|message|thread))\b[\s\S]*$/iu, ' ');
   return t;
 }
 

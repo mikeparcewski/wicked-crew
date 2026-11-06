@@ -899,18 +899,31 @@ export class ChatProposals {
         ? await this.resolveDetected({ chatId: frame.chat, turnId, seat: frame.cliKey, block: block as Extract<ParsedMake, { op: 'entry' }>, records: this.deps.records(frame.chat) })
         : await this.resolve({ chatId: frame.chat, turnId, seat: frame.cliKey, block, records: this.deps.records(frame.chat) });
       if (proposal === null) return;
+      // A job card never appears after the person has written again (codex r4): a newer message ("never mind") supersedes a
+      // slow reply's detection.
+      if (jobBlock && this.newerMessage(frame.chat, turnId)) {
+        this.log(`[proposals] chat ${frame.chat}: turn ${turnId}'s job card came after a newer message — dropped`);
+        return;
+      }
       // Published under the chat's lock, so it never lands between an accept's checks and its record.
       await this.lock.run(`chat\u0000${instance ?? frame.chat}`, async () => {
         // DES-CATALOG-002 §4.6 (codex r1): a chat whose job lineage is open is changed only through a revision (merged,
         // loss-checked); a seat's root block never replaces it.
         const jobOpen = [...foldProposals(this.deps.records(frame.chat)).values()].some((f) => f.proposal.shape !== undefined && (f.state === 'open' || f.state === 'revising'));
         if (jobOpen) this.log(`[proposals] chat ${frame.chat}: turn ${turnId}'s block would replace the open job; a change to it is a revision — dropped`);
-        else if (!has()) this.write(frame.chat, { at: this.now(), turnId, kind: 'proposal', proposal }, instance);
+        else if (!has() && !(jobBlock && this.newerMessage(frame.chat, turnId))) this.write(frame.chat, { at: this.now(), turnId, kind: 'proposal', proposal }, instance);
       });
     })
       .catch((err: unknown) => this.log(`[proposals] chat ${frame.chat}: turn ${turnId}'s proposal could not be resolved: ${err instanceof Error ? err.message : String(err)}`))
       .finally(() => this.pending.delete(job));
     this.pending.add(job);
+  }
+
+  /** Whether the person has written again since `turnId` (its reply is then an older one). */
+  private newerMessage(chatId: string, turnId: string): boolean {
+    const order = this.deps.records(chatId).filter((r) => r.kind === 'user').map((r) => r.turnId);
+    const mine = order.indexOf(turnId);
+    return mine !== -1 && mine < order.length - 1;
   }
 
   /** Append a record and send it on `/ws` — only while the chat is still the instance the caller acted on. */
@@ -2151,8 +2164,9 @@ export class ChatProposals {
   private async proposalOf(chatId: string, pid: string, facts: JobFacts, ctx: JobContext, records: readonly ChatTranscriptRecord[], allowHidden = false): Promise<ArtifactProposal> {
     const card = CATALOG_V2_CARDS.find((c) => c.id === facts.card);
     const r = card === undefined ? null : resolveOption(card.id, optionFor(card, facts.option), ctx.served);
-    if (r !== null && proposalKindOf(r) === 'create') return this.documentProposal(chatId, pid, facts, ctx, records);
-    return resolveJob(facts, ctx, { allowHidden });
+    // An unsure reading holds no Start wherever the proposal is rebuilt (a Go's edits, a refresh; codex r4).
+    if (r !== null && proposalKindOf(r) === 'create') return withAskOverlay(await this.documentProposal(chatId, pid, facts, ctx, records));
+    return withAskOverlay(resolveJob(facts, ctx, { allowHidden }));
   }
 
   private refusalOf(err: unknown): DecideResult | null {
@@ -2287,8 +2301,13 @@ export class ChatProposals {
       const fromThem = (t: string): boolean => t.trim() !== '' && said.includes(t.trim().toLowerCase());
       if (edits.detail !== undefined) {
         const add = (edits.detail.add ?? []).filter((d) => fromThem(d));
-        const remove = (edits.detail.remove ?? []).filter((d) => fromThem(d));
-        for (const d of [...(edits.detail.add ?? []), ...(edits.detail.remove ?? [])]) if (!fromThem(d)) extraNotes.push(`Not changed: “${d.slice(0, 60)}” isn't in what you said`);
+        // A removal needs the person to ask for one, and a carried fact that names a check is never dropped from a
+        // seat's block (codex r4: "keep a separate judge" mentions the detail, it does not remove it).
+        const asksRemoval = /\b(?:remove|drop|forget|scrap|undo|take\s+out|no\s+longer|don'?t\s+need)\b/iu.test(said);
+        const namesCheck = (d: string): boolean => /\b(?:reviews?|reviewers?|judges?|parity|qe|acceptance|tests?|checks?|cited\s+findings|floor|gates?)\b/iu.test(d);
+        const remove = (edits.detail.remove ?? []).filter((d) => fromThem(d) && asksRemoval && !namesCheck(d));
+        for (const d of edits.detail.add ?? []) if (!fromThem(d)) extraNotes.push(`Not changed: “${d.slice(0, 60)}” isn't in what you said`);
+        for (const d of edits.detail.remove ?? []) if (!remove.includes(d)) extraNotes.push(`Not changed: “${d.slice(0, 60)}” stays (say to remove it${namesCheck(d) ? '; it names a check, so it stays' : ''})`);
         edits.detail = { ...(add.length > 0 ? { add } : {}), ...(remove.length > 0 ? { remove } : {}) };
       }
       if (edits.inputs !== undefined) {
@@ -2323,7 +2342,11 @@ export class ChatProposals {
     // standing (codex r3).
     const g = merged.facts.guess;
     const seed = CATALOG_V2_CARDS.find((c) => c.id === merged.facts.card);
-    const namesShape = rev.edits.card !== undefined || rev.edits.option !== undefined;
+    // Named AND taken: a refused card or option leaves the question standing (codex r4).
+    const namesShape = seed !== undefined
+      && (rev.edits.card !== undefined || rev.edits.option !== undefined)
+      && (rev.edits.card === undefined || rev.edits.card === merged.facts.card)
+      && (rev.edits.option === undefined || optionFor(seed, rev.edits.option) === optionFor(seed, merged.facts.option));
     const moved = g !== undefined && (seed === undefined || g.card !== merged.facts.card || optionFor(seed, g.option) !== optionFor(seed, merged.facts.option));
     const stale = g !== undefined && (moved || (g.band === 'ask' && namesShape));
     try {

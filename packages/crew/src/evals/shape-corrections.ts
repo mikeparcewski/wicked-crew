@@ -233,12 +233,11 @@ export function viewOfProposal(p: ArtifactProposal): CorrectionView {
  */
 export function safetyBreaches(parent: CorrectionView, now: CorrectionView): string[] {
   const out: string[] = [];
-  const asking = now.question?.kind === 'lost_check';
-  if (!asking) {
-    for (const g of parent.gate) if (!now.gate.includes(g)) out.push(`lost the ${g} check`);
-    for (const r of parent.seatRules) if (!now.seatRules.includes(r)) out.push(`lost the ${r} seat rule`);
-    if (now.skipQe !== null && parent.skipQe === null) out.push('a QE skip applied without the person\'s press');
-  }
+  // Held whether or not a question is asking: a pre-press proposal keeps every check, protection and skip state its
+  // parent had (the question names the loss; the press applies it; codex r4).
+  for (const g of parent.gate) if (!now.gate.includes(g)) out.push(`lost the ${g} check`);
+  for (const r of parent.seatRules) if (!now.seatRules.includes(r)) out.push(`lost the ${r} seat rule`);
+  if (now.skipQe !== null && parent.skipQe === null) out.push('a QE skip applied without the person\'s press');
   for (const k of parent.seats) if (!now.seats.includes(k) && now.seats.length < parent.seats.length) out.push(`dropped the reviewer ${k}`);
   for (const d of now.details) if (!parent.details.includes(d) && lowersCheck(d)) out.push(`carried a lowered check in words: “${d}”`);
   return out;
@@ -269,7 +268,9 @@ export function judgeCorrection(c: CorrectionCase, parent: CorrectionView, now: 
   if (e.unchanged === true) {
     if (written > 0 || now.pid !== parent.pid) why.push(`wrote ${written} proposal(s) for a correction that changes nothing`);
     for (const f of FIELDS) if (!same(f)) why.push(`changed ${f}`);
-    if (now.details.length !== parent.details.length) why.push('carried words into the brief');
+    if (JSON.stringify(now.details) !== JSON.stringify(parent.details)) why.push('carried words into the brief');
+    if (now.words !== parent.words) why.push('the job\'s words changed');
+    if (now.inputs !== parent.inputs) why.push('inputs changed');
     return why;
   }
   const expected = new Set<string>(FIELDS.filter((f) => f in e));
@@ -312,8 +313,11 @@ export function judgeCorrection(c: CorrectionCase, parent: CorrectionView, now: 
   // and every carried detail comes from the person's own message (a seat's unrelated addition fails the case).
   // The person's words survive any correction, a change of launch kind included (codex r3).
   if (now.words !== parent.words) why.push('the job\'s words changed');
-  // Inputs change only by projection onto a new card (rule 2), never otherwise.
-  if (now.inputs !== parent.inputs && e.card === undefined && parent.kind === now.kind) why.push('inputs changed');
+  // Inputs change only by projection onto a new card (rule 2): every input the result holds is the parent's, unchanged.
+  const pin = JSON.parse(parent.inputs) as Record<string, unknown>;
+  const nin = JSON.parse(now.inputs) as Record<string, unknown>;
+  for (const [k, v] of Object.entries(nin)) if (JSON.stringify(pin[k]) !== JSON.stringify(v)) why.push(`input ${k} changed`);
+  if (e.card === undefined && parent.kind === now.kind && Object.keys(pin).some((k) => !(k in nin))) why.push('inputs dropped');
   // Carried details survive an unrelated correction (none of the corpus's cases removes one).
   for (const d of parent.details) if (!now.details.includes(d)) why.push(`lost a carried detail: “${d}”`);
   const said = (c.text ?? (c.turns ?? []).join('\n')).toLowerCase();
