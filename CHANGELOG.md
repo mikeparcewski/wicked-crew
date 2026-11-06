@@ -50,6 +50,17 @@ mentioned only where a daemon release depends on them.
     another card or option, under the chat's lock: validated, the held plan answered Reject (`reshaped`), and the
     replacement launched from the held run's envelope (`retryOf`, held at its plan, reduced assurance only when the held
     run had it). 409 `reshape_after_work` once a work plan was accepted.
+- **A disputed steering rule on the wire (DES-RULE-CHECK-001 rev 2 A.5; api-types 0.193.0; wicked-core-ts
+  ^0.15.30).** When the engine's rule judge and the reviewer disagree on a rule, the engine puts it to a council of
+  three other seats. Rule rows can now carry `status: 'disputed'` (no council ruling, so the gate holds like an
+  unchecked rule) and `how: 'council'`, plus `origin`, `judgeIds`, `evidenceComplete`, `party`, `blocking`, `reviewer`
+  and `council` (`RuleCouncilRecord`: both readings, every vote and whether it counted, the seats, the seed and why
+  there is no ruling). Crew passes them to the skin as the engine wrote them. `retry_rules` and `skip_rules` are
+  documented where the engine now takes them: wherever a rule layer is in the gated unit's denial record, behind a
+  reviewer's FAIL and at `review_adjudication` included. A skip takes an unchecked, waived or disputed row, and a
+  skip naming a broken row is still a 409. The PR body and delivery line add "N disputed (you decide)" and "N settled
+  by council (<rule>: <ruling> 2-1)". Process rules (`blocking: false`) are reported apart from the gate's counts.
+  The post-hoc delivery ranks a disputed row like an unchecked one, so a later gate's kept row no longer hides it.
 
 ### Fixed
 

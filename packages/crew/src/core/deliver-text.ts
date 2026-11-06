@@ -1135,13 +1135,13 @@ function withRules(gate: string, rules: string | null): string {
   return rules === null ? gate : `${gate} · ${rules}`;
 }
 
-/** (DES-RULE-CHECK-001 S4) `N rules checked: K kept, B broken, X not applicable` (and the unchecked
- *  and skipped ones, each skip with its reason) for a gate whose receipt carries rule verdicts
+/** (DES-RULE-CHECK-001 S4) `N rules checked: K kept, B broken, X not applicable` (and the held, disputed and
+ *  skipped ones, each skip with its reason, and each council ruling with its vote) for a gate whose receipt carries rule verdicts
  *  (`assurance.rules`, api-types 0.190.0); else `null`. */
 export function rulesLabel(u: { assurance?: unknown }): string | null {
   const rows = (u.assurance as { rules?: unknown } | null | undefined)?.rules;
   if (!Array.isArray(rows) || rows.length === 0) return null;
-  return rulesSummaryLine(rows as Array<{ ruleId?: unknown; status?: unknown; reason?: unknown }>);
+  return rulesSummaryLine(rows as RuleRowLike[]);
 }
 
 /**
@@ -1164,13 +1164,41 @@ export function ruleSkipsAsked(units: readonly WorkUnit[]): string[] {
   return ids;
 }
 
-/** The summary line over rule rows (one wording for the PR body and the delivery). */
-export function rulesSummaryLine(rows: ReadonlyArray<{ ruleId?: unknown; status?: unknown; reason?: unknown }>): string {
+/** A rule row as the summary reads it: the receipt's JSON, every field optional (an older engine sends fewer). */
+type RuleRowLike = { ruleId?: unknown; status?: unknown; how?: unknown; reason?: unknown; origin?: unknown; blocking?: unknown; council?: unknown };
+
+/** The summary line over rule rows (one wording for the PR body and the delivery). A process rule
+ *  (`blocking: false`, DES-RULE-CHECK-001 rev 2 B.4) never decides the gate, so it is left out of the
+ *  "N rules checked" counts and reported after them. */
+export function rulesSummaryLine(rows: ReadonlyArray<RuleRowLike>): string {
+  const gate = rows.filter((r) => r.blocking !== false);
+  const process = rows.filter((r) => r.blocking === false);
+  let line = gateRulesLine(gate);
+  if (process.length > 0) {
+    const n = (s: string) => process.filter((r) => r.status === s).length;
+    line += `; ${process.length} process rules reported (do not block): ${n('kept')} kept, ${n('broken')} broken, ${n('n_a')} not applicable`;
+    const other = process.length - n('kept') - n('broken') - n('n_a');
+    if (other > 0) line += `, ${other} not ruled`;
+  }
+  return line;
+}
+
+/** Statuses the line names after kept / broken / not applicable, in the engine's order (core `summary()`). */
+const HELD_WORDS: ReadonlyArray<readonly [string, string]> = [
+  ['waived', 'waived by instruction (to confirm)'],
+  ['deferred', 'deferred to delivery'],
+  ['unchecked', 'unchecked'],
+  ['disputed', 'disputed (you decide)'],
+];
+const NAMED_STATUSES = new Set(['kept', 'broken', 'n_a', 'skipped', ...HELD_WORDS.map(([s]) => s)]);
+
+function gateRulesLine(rows: ReadonlyArray<RuleRowLike>): string {
   const n = (s: string) => rows.filter((r) => r.status === s).length;
   let line = `${rows.length} rules checked: ${n('kept')} kept, ${n('broken')} broken, ${n('n_a')} not applicable`;
-  if (n('waived') > 0) line += `, ${n('waived')} waived by instruction (to confirm)`;
-  if (n('deferred') > 0) line += `, ${n('deferred')} deferred to delivery`;
-  if (n('unchecked') > 0) line += `, ${n('unchecked')} unchecked`;
+  for (const [status, word] of HELD_WORDS) if (n(status) > 0) line += `, ${n(status)} ${word}`;
+  // A status this crew does not know yet holds the gate in the engine: counted, never dropped from the line.
+  const unknown = rows.filter((r) => !NAMED_STATUSES.has(String(r.status))).length;
+  if (unknown > 0) line += `, ${unknown} not ruled`;
   const skipped = rows.filter((r) => r.status === 'skipped');
   if (skipped.length > 0) {
     line += `, ${skipped.length} skipped by operator (${skipped
@@ -1178,7 +1206,31 @@ export function rulesSummaryLine(rows: ReadonlyArray<{ ruleId?: unknown; status?
       .map((r) => `${String(r.ruleId)}: ${typeof r.reason === 'string' ? r.reason.replace(/^skipped by [^:]*:\s*/u, '').replace(/#(?=\d)/g, '# ') : ''}`)
       .join('; ')})`;
   }
+  // A ruling a council reached (DES-RULE-CHECK-001 rev 2 A.5): the rule, the ruling and the vote. Engine words
+  // only (ids, statuses, counts), never a seat's free text.
+  const settled = rows.flatMap((r) => {
+    const t = councilRuling(r);
+    return t === null ? [] : [`${String(r.ruleId)}: ${t}`];
+  });
+  if (settled.length > 0) line += `, ${settled.length} settled by council (${settled.join('; ')})`;
   return line;
+}
+
+const RULING_WORD: Record<string, string> = { kept: 'kept', broken: 'broken', n_a: 'not applicable', waived: 'waived by instruction' };
+
+/** `broken 2-1` for a row a council ruled on (origin `council`, a ruling it holds); else `null`. The tally is the
+ *  engine's (`RuleCouncil::tally`): the counted votes for the ruling (a kept vote counts toward a waiver), then the
+ *  rest of the counted votes. */
+export function councilRuling(r: RuleRowLike): string | null {
+  if (r.origin !== 'council' || typeof r.council !== 'object' || r.council === null) return null;
+  const c = r.council as { ruling?: unknown; votes?: unknown };
+  if (typeof c.ruling !== 'string' || c.ruling !== r.status || RULING_WORD[c.ruling] === undefined) return null;
+  const counted = (Array.isArray(c.votes) ? c.votes : [])
+    .filter((v): v is { status?: unknown; counted?: unknown } => typeof v === 'object' && v !== null)
+    .filter((v) => v.counted === true && typeof v.status === 'string')
+    .map((v) => v.status as string);
+  const won = counted.filter((s) => s === c.ruling || (c.ruling === 'waived' && s === 'kept')).length;
+  return `${RULING_WORD[c.ruling]!} ${won}-${counted.length - won}`;
 }
 
 /** (operator ruling 2026-10-14) The engine's disclosure line — `judge: agy (fallback; codex benched: …)` — when
