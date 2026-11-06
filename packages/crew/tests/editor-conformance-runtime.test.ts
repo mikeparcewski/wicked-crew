@@ -276,10 +276,12 @@ describe('the engine\'s conformance step inputs', () => {
     env[CONFORMANCE_PLAYWRIGHT_ENV] = '1.70.1';
     exportEngineConformanceEnv(null, env, 'win32');
     expect(env[ENGINE_CONFORMANCE_PYTHON_ENV]).toBe(join(dir, 'rt', 'venv-playwright-1.70.1', 'Scripts', 'python.exe'));
-    // A relative runtime override is made absolute (the engine runs only an absolute interpreter).
-    const rel: NodeJS.ProcessEnv = { [CONFORMANCE_RUNTIME_DIR_ENV]: 'rel-rt' };
-    exportEngineConformanceEnv(null, rel, 'darwin');
-    expect(rel[ENGINE_CONFORMANCE_PYTHON_ENV]!.startsWith('/')).toBe(true);
+    // A relative runtime override, or an empty or relative cache variable, never yields a relative interpreter
+    // (the engine runs only an absolute one).
+    for (const e of [{ [CONFORMANCE_RUNTIME_DIR_ENV]: 'rel-rt' }, { XDG_CACHE_HOME: '' }, { XDG_CACHE_HOME: 'rel-cache' }] as NodeJS.ProcessEnv[]) {
+      exportEngineConformanceEnv(null, e, 'linux');
+      expect(e[ENGINE_CONFORMANCE_PYTHON_ENV]!.startsWith('/'), JSON.stringify(e)).toBe(true);
+    }
   });
 
   it('starts making the runtime when an editor-plugin run is launched, never for another run or an operator\'s own interpreter', async () => {

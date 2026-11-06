@@ -21,7 +21,7 @@
 
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, posix, resolve, win32 } from 'node:path';
 
 import { execCapped } from '../core/exec.js';
 
@@ -40,12 +40,16 @@ export function conformanceRuntimeRoot(env: NodeJS.ProcessEnv = process.env, pla
   const override = (env[CONFORMANCE_RUNTIME_DIR_ENV] ?? '').trim();
   // Absolute, always: the engine runs only an absolute interpreter path (a relative one would refuse forever).
   if (override !== '') return resolve(override);
+  // An empty or relative cache variable is unset (the engine runs only an absolute interpreter path).
+  const isAbs = platform === 'win32' ? win32.isAbsolute : posix.isAbsolute;
+  const absolute = (v: string | undefined): string | undefined => (v !== undefined && isAbs(v) ? v : undefined);
   const cache = platform === 'darwin'
     ? join(home, 'Library', 'Caches')
     : platform === 'win32'
-      ? (env['LOCALAPPDATA'] ?? join(home, 'AppData', 'Local'))
-      : (env['XDG_CACHE_HOME'] ?? join(home, '.cache'));
-  return join(cache, 'wicked-crew', 'editor-conformance');
+      ? (absolute(env['LOCALAPPDATA']) ?? join(home, 'AppData', 'Local'))
+      : (absolute(env['XDG_CACHE_HOME']) ?? join(home, '.cache'));
+  const root = join(cache, 'wicked-crew', 'editor-conformance');
+  return isAbs(root) ? root : resolve(root);
 }
 
 /** The Playwright pin crew provisions: {@link CONFORMANCE_PLAYWRIGHT_ENV} when it is a version, else the default. */
