@@ -11,8 +11,11 @@
  *  - STEERING. A person's version becomes ONE note for the run, sent through the operator's existing back-channel
  *    (`injectWorkerMessage`, the `POST /runs/:id/inject` path): queued by the engine, it rides the next step's
  *    prompt as an operator context block, and `workerMessageInjected` says which step picked it up.
- *    Goal, Approach and Next go to the next step once; Constraints and steering is a STANDING steer, re-sent before
- *    every later step until a later edit replaces it. Decisions and Open questions are recorded, not sent.
+ *    The person's CURRENT Goal, Approach and Constraints (each section whose latest version is a person's) are ONE
+ *    STANDING steer, re-sent before every later worker step until a later edit replaces it (operator ruling 2026-11-06:
+ *    the bridge until the engine keeps a per-run context block, `SteerEngine.supportsRunContext`; then only Constraints
+ *    stands here and crew feeds the block). Next goes to the next step once. Decisions and Open questions are recorded,
+ *    not sent.
  *  - DOCUMENT TEXT HAS NO POWER OVER GATES. This module calls `injectWorkerMessage` and nothing else on the engine:
  *    no gate answer, no plan edit, no intent amendment, no rigor change. A note says in its first line that it
  *    adds to the step's brief and changes no gate, check or review. (Tested: `tests/working-doc.test.ts`.)
@@ -45,9 +48,59 @@ export interface DocBackend {
     Promise<{ version: number; parent: number } | { headMoved: true; head: number }>;
 }
 
-/** The ONLY engine call steering makes. */
+/** The ONLY engine call steering makes (and one read of what the engine can do). */
 export interface SteerEngine {
   injectWorkerMessage(runId: string, message: string, target: string): Promise<string>;
+  /** (core lane context-block-core) The engine keeps a per-run context block it hands every seat it spawns. Absent or
+   *  false: crew's STANDING CONTEXT NOTE carries the person's Goal, Approach and Constraints to every later worker step
+   *  instead (the bridge). True: the note retires itself (crew feeds the block; until then only Constraints stands). */
+  supportsRunContext?(): boolean;
+}
+
+/** The sections a person's context is made of (what every later step hears, the bridge to the engine's block). */
+export const CONTEXT_SECTIONS: readonly SectionId[] = ['goal', 'approach', 'constraints'];
+/** Most characters of one section, and of all of them, a standing context note carries (DESIGN §8 caps). */
+export const CONTEXT_SECTION_MAX = 1_500;
+export const CONTEXT_MAX = 4_000;
+
+/** A person's section cut to `max` characters at a word boundary, saying so. */
+export function capContext(text: string, max: number): string {
+  const t = text.trim();
+  if (t.length <= max) return t;
+  const tail = ` … (cut at ${max.toLocaleString('en-US')} characters)`;
+  const room = Math.max(1, max - tail.length);
+  let end = room;
+  const space = t.lastIndexOf(' ', room);
+  if (space > room / 2) end = space;
+  const last = t.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return `${t.slice(0, end).trimEnd()}${tail}`;
+}
+
+/** The person's current context as note lines: each section capped so that all of them fit {@link CONTEXT_MAX}. */
+export function contextLines(context: ReadonlyArray<{ id: SectionId; text: string }>): string[] {
+  const per = Math.min(CONTEXT_SECTION_MAX, Math.floor(CONTEXT_MAX / Math.max(1, context.length)));
+  return context.map((c) => `- ${SECTION_LABELS[c.id]}: ${capContext(c.text, per)}`);
+}
+
+/** (bridge) The one note a person's version becomes when it touches their context: the context, standing, and any
+ *  one-step section (Next) or cleared section with it. */
+export function contextSteerNote(version: number, by: string, context: ReadonlyArray<{ id: SectionId; text: string }>, once: Array<{ id: SectionId; text: string }>, marker: string): string {
+  const head = context.length > 0
+    ? `Operator steering from the job's working document (version ${version}, by ${by}). The person's ${context.map((c) => SECTION_LABELS[c.id]).join(', ')} below are standing: follow them in this step and every later one until they are replaced. They replace any standing context or constraint from an earlier version.`
+    : `Operator steering from the job's working document (version ${version}, by ${by}).`;
+  const rest = once.map((t) => `- ${SECTION_LABELS[t.id]}${t.id === 'next' && context.length > 0 ? ' (this step)' : ''}: ${t.text.trim() === '' ? '(cleared)' : t.text.trim()}`);
+  return [head, NO_GATE_LINE, ...contextLines(context), ...rest, marker].join('\n');
+}
+
+/** (bridge) The person's context alone, re-sent before every later step. */
+export function contextStandingNote(version: number, by: string, context: ReadonlyArray<{ id: SectionId; text: string }>, marker: string): string {
+  return [
+    `Standing operator context from the job's working document (version ${version}, by ${by}): the person's current ${context.map((c) => SECTION_LABELS[c.id]).join(', ')}. Follow it in this step and every later one until it is replaced. If you also see standing context from a later version, that one applies instead.`,
+    NO_GATE_LINE,
+    ...contextLines(context),
+    marker,
+  ].join('\n');
 }
 
 export interface RunFacts {
@@ -725,23 +778,43 @@ export class WorkingDocService {
   private async steer(runId: string, version: number, changed: SectionId[], values: Partial<Record<SectionId, string>>, by: string, spoken?: 'voice'): Promise<SteerRecord | null> {
     const steered = changed.filter((id) => SECTION_STEER[id] !== 'record');
     if (steered.length === 0) return null;
-    const constraints = values.constraints;
-    const standing = steered.includes('constraints') && constraints !== undefined && constraints.trim() !== '';
     const who = by === 'local' ? 'the operator' : by;
     const id = randomUUID().slice(0, 8);
     const marker = steerMarker(runId, id);
+    let standing: boolean;
+    let note: string;
+    let standingText: string | null = null;
+    // Which earlier standing steer this one replaces: any edit of the sections that stand.
+    let replaces: boolean;
+    if (this.d.engine.supportsRunContext?.() !== true) {
+      // (bridge, operator ruling 2026-11-06) The person's CURRENT Goal, Approach and Constraints (each section whose
+      // latest version is a person's, never crew's or an agent's) stand together, re-sent before every later worker step
+      // until the engine keeps a context block of its own. Next is still for the next step only.
+      replaces = steered.some((x) => CONTEXT_SECTIONS.includes(x));
+      const context = replaces ? await this.personContext(runId, version, changed, values) : [];
+      standing = context.length > 0;
+      const inContext = new Set(context.map((c) => c.id));
+      note = contextSteerNote(version, who, context, steered.filter((x) => !inContext.has(x)).map((x) => ({ id: x, text: values[x] ?? '' })), marker);
+      if (standing) standingText = contextStandingNote(version, who, context, marker);
+    } else {
+      const constraints = values.constraints;
+      standing = steered.includes('constraints') && constraints !== undefined && constraints.trim() !== '';
+      replaces = steered.includes('constraints');
+      note = steerNote(version, who, standing, steered.map((x) => ({ id: x, text: values[x] ?? '' })), marker);
+      if (standing) standingText = standingNote(version, who, constraints ?? '', marker);
+    }
     const s: SteerRecord = {
       id, version, sections: steered, kind: standing ? 'standing' : 'next',
-      note: steerNote(version, who, standing, steered.map((x) => ({ id: x, text: values[x] ?? '' })), marker),
-      ...(standing ? { standingNote: standingNote(version, who, constraints ?? '', marker), supersededBy: null, renewals: 0 } : {}),
+      note,
+      ...(standingText !== null ? { standingNote: standingText, supersededBy: null, renewals: 0 } : {}),
       at: this.now(), by, queuedAt: null, pickedUp: null, error: null,
       ...(spoken !== undefined ? { input: spoken } : {}),
     };
     const run = await this.d.run(runId);
     if (run === null || run.terminal) s.error = 'the job has ended, so there is no next step to steer';
     this.d.store.update(runId, (r) => {
-      // Any edit of Constraints (a new one, or emptied) replaces the standing one before it.
-      if (steered.includes('constraints')) for (const old of r.steers) if (old.kind === 'standing' && old.supersededBy == null) old.supersededBy = id;
+      // An edit of what stands (a new text, or emptied) replaces the standing steer before it.
+      if (replaces) for (const old of r.steers) if (old.kind === 'standing' && old.supersededBy == null) old.supersededBy = id;
       r.steers.push(s);
     });
     if (s.error !== null) return s;
@@ -752,6 +825,25 @@ export class WorkingDocService {
       this.d.store.update(runId, (r) => { const x = r.steers.find((y) => y.id === id); if (x !== undefined) x.error = err instanceof Error ? err.message : String(err); });
     }
     return this.d.store.get(runId)?.steers.find((y) => y.id === id) ?? s;
+  }
+
+  /**
+   * (bridge) The person's current context after `version`: each of Goal, Approach and Constraints whose latest write is
+   * a person's (this version's sections are), with its text in that version. Crew's seeded Goal, a plan's Approach and
+   * an agent's notes are never in it: only a person's words steer.
+   */
+  private async personContext(runId: string, version: number, changed: SectionId[], values: Partial<Record<SectionId, string>>): Promise<Array<{ id: SectionId; text: string }>> {
+    const rec = this.d.store.get(runId);
+    if (rec === undefined) return [];
+    let texts: Partial<Record<SectionId, string>> = {};
+    if (CONTEXT_SECTIONS.some((x) => !changed.includes(x))) texts = sectionsOf((await this.d.backend.readVersion(rec.projectId, rec.docId, version)) ?? '');
+    const out: Array<{ id: SectionId; text: string }> = [];
+    for (const sid of CONTEXT_SECTIONS) {
+      const persons = changed.includes(sid) || [...rec.trail].reverse().find((t) => t.sections.includes(sid))?.author.kind === 'human';
+      const text = (changed.includes(sid) ? values[sid] : texts[sid]) ?? '';
+      if (persons && text.trim() !== '') out.push({ id: sid, text });
+    }
+    return out;
   }
 
   /**

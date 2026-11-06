@@ -53,6 +53,16 @@ mentioned only where a daemon release depends on them.
 
 ### Changed
 
+- **A person's Goal, Approach and Constraints in the working document now reach every later worker step, not only
+  the next one (operator ruling 2026-11-06; the bridge until the engine keeps a per-run context block).** The
+  person's CURRENT Goal, Approach and Constraints are one standing note, re-sent before every later worker step until
+  a later edit of them replaces it. That covers each section whose latest version is a person's; crew's seeded Goal,
+  the plan's or the orchestrator's Approach and every generated line are never included. Each section is capped so
+  that all of them fit in 4,000 characters, and the note says where a person's text was cut. Next still goes to the
+  next step once. The note retires itself when the engine reports `supportsRunContext()` (core lane
+  context-block-core); crew then feeds that block and only Constraints stands here until it does. Judges, QE and
+  councils hear the person's context only once the engine block lands.
+
 - **Editor installs require the behaviour cases 7 and 18 (G9b).** `CONFORMANCE_CASES` adds `7-edit` (an editor that
   asks `artifact.write` saves an edit through its own UI: its `data-wicked-save` control lands one version; a viewer
   passes) and `18-shows` (it asks `artifact.read`, shows the page it is handed and reads again when another version

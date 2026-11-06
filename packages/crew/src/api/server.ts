@@ -2932,7 +2932,10 @@ export async function createServer(
   const workingDocs = new WorkingDocService({
     store: new WorkingDocStore({ log: (m) => app.log.warn(m) }),
     backend: bridgeBackend(interactiveBridges, (projectId) => workingDocRoot(adapter, projectSettings, projectId)),
-    engine: { injectWorkerMessage: (runId, message, target) => adapter.injectWorkerMessage(runId, message, target) },
+    engine: {
+      injectWorkerMessage: (runId, message, target) => adapter.injectWorkerMessage(runId, message, target),
+      supportsRunContext: () => typeof adapter.supportsRunContext === 'function' && adapter.supportsRunContext(),
+    },
     run: async (runId) => {
       const v = (await workingDocViews()).find((x) => x.session.id === runId);
       if (v === undefined) return null;
