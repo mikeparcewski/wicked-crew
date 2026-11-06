@@ -2509,6 +2509,17 @@ export interface GateDecision {
      *  standing order: 403 `human_operator_only`). Taken where `retry_rules` is; refused (409, gate
      *  left open) at any other gate. */
     | 'skip_rules'
+    /** (api-types 0.195.0, e2e-1105 F23) REDO THE QE CHECK, with `approve: true` and no `amend` / `amendScope` /
+     *  `plan`, at the escalation gate of the run's QE step whose isolated reviewer gave NO VERDICT on the work: it
+     *  recorded INCONCLUSIVE (it could not run its checks), no reviewer seat could run, or no verdict could be bound.
+     *  The engine runs the QE step again from fresh evidence (the QE run it redoes is retired, never resumed) and a new
+     *  isolated reviewer session judges it, trying a seat that gave no verdict on that tree last; who may review is
+     *  unchanged (never an author of the work outside reduced assurance). It is NEVER a verdict: no operator judgment
+     *  is recorded, the run's QE decision stays required, and only that reviewer's bound PASS counts the step
+     *  (deny-dominates). At most 2 redos per QE step and tree. Refused (409, gate left open) at any other gate, for a
+     *  recorded FAIL, at the cap, and when no reviewer seat can run now. A plain approve there is still the
+     *  operator's own judgment. Engine: wicked-core core#1312 (the core-ts release after 0.15.31). */
+    | 'retry_qe'
     /** (core#820) A `consent` gate's choice from its dry-run plan (`awaitingHuman.choices`), with
      *  `approve: true`: `consent:worker` (the default), `consent:operator`, …; `reject` declines. */
     | `consent:${string}`;

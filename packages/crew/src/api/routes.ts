@@ -937,7 +937,13 @@ export const LaunchSchema = z.strictObject({
  *  re-runs the judge of a `judge_unavailable` gate on the same work, the step's seat not run again.
  *  The ENGINE refuses each at any other gate (a 409 naming the gate it answers) — and `rejudge`
  *  while no judge seat is eligible ({@link GateInfo.rejudge} says beforehand). */
-export const ESCALATION_ACTIONS = ['extend', 'targeted', 'accept_partial', 'accept_suggestion', 'rejudge', 'retry_rules'] as const;
+export const ESCALATION_ACTIONS = ['extend', 'targeted', 'accept_partial', 'accept_suggestion', 'rejudge', 'retry_rules', 'retry_qe'] as const;
+/** (e2e-1105 F23, api-types 0.195.0) `retry_qe` (an escalation arm above): REDO THE QE CHECK at the gate of the run's QE
+ *  step whose isolated reviewer gave no verdict on the work (INCONCLUSIVE, no reviewer seat, or no bound verdict). The
+ *  engine (wicked-core `HumanDecision::RetryQe`, core#1312) runs the QE step again from fresh evidence with a new
+ *  isolated reviewer session, never on an author of the work; it is never a verdict (QE stays required, only that
+ *  reviewer's PASS counts) and is capped at 2 per QE step and tree. The engine refuses it (409) at any other gate,
+ *  at the cap, and when no reviewer seat can run now. */
 /** (DES-RULE-CHECK-001 S2, api-types 0.190.0) At a gate the steering-rule check holds or denies:
  *  `retry_rules` (an escalation arm above) re-runs the rule check on the same work, the step's seat
  *  not run again; `skip_rules` skips held rules (unchecked, a waiver to confirm, or, rev 2 / api-types
@@ -1042,7 +1048,7 @@ export const GateSchema = z.strictObject({
 ).refine(
   (b) => b.action === undefined
     || (b.action === 'approve' || b.action === 'edit_plan' || b.action === 'amend_intent' || b.action === OPERATOR_JUDGMENT_ACTION || b.action === SKIP_QE_ACTION || b.action === SKIP_RULES_ACTION || isEscalationAction(b.action)) === b.approve,
-  { path: ['action'], error: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve, edit_plan, amend_intent, operator_judgment, skip_qe, skip_rules, extend, targeted, accept_partial, accept_suggestion, rejudge, retry_rules and consent:<id> require approve: true' },
+  { path: ['action'], error: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve, edit_plan, amend_intent, operator_judgment, skip_qe, skip_rules, extend, targeted, accept_partial, accept_suggestion, rejudge, retry_rules, retry_qe and consent:<id> require approve: true' },
 ).refine(
   // (operator ruling 2026-10-21) The override's rationale IS its record: a blank one is a 400 here,
   // before the engine is asked.
@@ -1069,7 +1075,7 @@ export const GateSchema = z.strictObject({
   { path: ['amendScope'], error: 'amend_intent takes no amendScope or plan — an intent amendment reaches every unit at or after the cursor, which is what makes it reach the evaluator' },
 ).refine(
   (b) => !isEscalationAction(b.action) || (b.amend === undefined && b.amendScope === undefined && b.plan === undefined),
-  { path: ['action'], error: 'extend, targeted, accept_partial, accept_suggestion, rejudge, retry_rules and consent:<id> take no amend, amendScope or plan — the engine re-runs the floor, adopts the pinned edit, re-runs the judge or the rule check, or runs the chosen install as it stands' },
+  { path: ['action'], error: 'extend, targeted, accept_partial, accept_suggestion, rejudge, retry_rules, retry_qe and consent:<id> take no amend, amendScope or plan — the engine re-runs the floor, adopts the pinned edit, re-runs the judge, the rule check or the QE check, or runs the chosen install as it stands' },
 ).refine(
   (b) => (b.action === 'edit_plan') === (b.plan !== undefined) || (b.action === undefined && b.plan !== undefined),
   { path: ['plan'], error: 'an edited plan answers a plan_approval gate: `plan` needs approve: true with `action` omitted or edit_plan, and edit_plan needs `plan`' },

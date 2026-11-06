@@ -149,4 +149,33 @@ describe('POST /runs/:id/gate — the escalation arms reach the engine', () => {
     expect(res.statusCode).toBe(400);
     expect(confirmCalls).toEqual([]);
   });
+
+  it('F23: `retry_qe` reaches the engine as the arm; an unknown action is a 400 that never does', async () => {
+    const ok = await gate({ approve: true, action: 'retry_qe' });
+    expect(ok.statusCode).toBe(200);
+    expect(confirmCalls).toEqual([['run-gated', true, undefined, 'retry_qe', undefined, undefined]]);
+    confirmCalls.length = 0;
+    const bad = await gate({ approve: true, action: 'retry_qe_forever' });
+    expect(bad.statusCode).toBe(400);
+    expect(confirmCalls).toEqual([]);
+  });
+});
+
+// e2e-1105 F23 (api-types 0.195.0): `retry_qe` redoes the QE check at a gate whose isolated QE reviewer gave no verdict.
+// It is an escalation arm like the rest (the it.each rows above cover its schema and pass-through); these pin the token
+// by name, so dropping it from ESCALATION_ACTIONS fails here, and keep the negative control next to it.
+describe('retry_qe — redo the QE check (F23)', () => {
+  it('is an escalation arm: approve-shaped, nothing beside it', () => {
+    expect((ESCALATION_ACTIONS as readonly string[]).includes('retry_qe')).toBe(true);
+    const body: GateDecision = { approve: true, action: 'retry_qe' };
+    expect(GateSchema.safeParse(body).success).toBe(true);
+    expect(GateSchema.safeParse({ approve: false, action: 'retry_qe' }).success).toBe(false);
+    expect(GateSchema.safeParse({ approve: true, action: 'retry_qe', amend: 'the reviewer had no sandbox' }).success).toBe(false);
+  });
+
+  it('an unknown QE-ish action is still refused', () => {
+    for (const bad of ['retry_qe_forever', 'redo_qe', 'RETRY_QE', 'retry_qe ']) {
+      expect(GateSchema.safeParse({ approve: true, action: bad }).success, bad).toBe(false);
+    }
+  });
 });
