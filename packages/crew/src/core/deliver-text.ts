@@ -1165,7 +1165,7 @@ export function ruleSkipsAsked(units: readonly WorkUnit[]): string[] {
 }
 
 /** A rule row as the summary reads it: the receipt's JSON, every field optional (an older engine sends fewer). */
-type RuleRowLike = { ruleId?: unknown; status?: unknown; reason?: unknown; origin?: unknown; blocking?: unknown; council?: unknown };
+type RuleRowLike = { ruleId?: unknown; status?: unknown; how?: unknown; reason?: unknown; origin?: unknown; blocking?: unknown; council?: unknown };
 
 /** The summary line over rule rows (one wording for the PR body and the delivery). A process rule
  *  (`blocking: false`, DES-RULE-CHECK-001 rev 2 B.4) never decides the gate, so it is left out of the

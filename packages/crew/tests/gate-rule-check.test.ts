@@ -87,7 +87,7 @@ const DISPUTED: RuleVerdict = {
     reason: 'no_quorum',
   },
 };
-const settled = (status: 'kept' | 'broken' | 'n_a', votes: Array<[string, RuleVerdict['status'], boolean]>): RuleVerdict => ({
+const settled = (status: 'kept' | 'broken' | 'n_a' | 'waived', votes: Array<[string, RuleVerdict['status'], boolean]>): RuleVerdict => ({
   ...row('S', status),
   how: 'council',
   origin: 'council',
@@ -101,7 +101,7 @@ function view(id: string, denial: Record<string, unknown> = { source: 'rules_unc
   return {
     session: {
       id, workflow_id: 'bug', problem: 'p', entity_mode: 'shared', collection_scope: null,
-      clis: ['claude', 'pi'], status: 'awaiting_human', human_confirm: 'none', unit_ix: 3, attempt: 2,
+      clis: ['claude', 'pi'], status: 'awaiting_human', human_confirm: 'none', unit_ix: 0, attempt: 2,
       workdir: null, repo_ref: null, extra_write_roots: [], archived_at: null, archive_note: null,
     },
     units: [
@@ -164,7 +164,11 @@ describe('POST /runs/:id/gate — the rule answers reach the engine; a skip is a
     const res = await post({ approve: true, action: 'skip_rules', skipRules });
     expect(res.statusCode, res.body).toBe(200);
     expect(confirmCalls).toEqual([['run-rules', true, JSON.stringify(skipRules), 'skip_rules', undefined, undefined]]);
-    expect(audited('gate.rules_skipped')).toHaveLength(1);
+    // The decision resolved the held unit (ord 4): its receipt, council and all, is the one the answer carries.
+    expect(res.json().assurance.rules[0]).toEqual(DISPUTED);
+    const lines = audited('gate.rules_skipped');
+    expect(lines).toHaveLength(1);
+    expect(lines[0]![2]).toMatchObject({ runId: 'run-rules', detail: { ord: 4, skips: skipRules } });
   });
 
   it('(rev 2) GET /runs/:id carries the disputed row, its parties, votes and seed as the engine wrote them', async () => {
@@ -176,10 +180,14 @@ describe('POST /runs/:id/gate — the rule answers reach the engine; a skip is a
   });
 
   it('(rev 2) behind a reviewer FAIL, retry_rules and a skip of the disputed row still reach the engine (crew does not filter by the winning denial)', async () => {
-    expect((await post({ approve: true, action: 'retry_rules' }, 'human/operator', 'run-fail')).statusCode).toBe(200);
+    const retry = await post({ approve: true, action: 'retry_rules' }, 'human/operator', 'run-fail');
+    expect(retry.statusCode, retry.body).toBe(200);
+    expect(retry.json().assurance.rules[0]).toEqual(DISPUTED);
     const skipRules = [{ id: 'DEV-TINYMATH-2', reason: 'reviewed it myself' }];
-    expect((await post({ approve: true, action: 'skip_rules', skipRules }, 'human/operator', 'run-fail')).statusCode).toBe(200);
+    const skip = await post({ approve: true, action: 'skip_rules', skipRules }, 'human/operator', 'run-fail');
+    expect(skip.statusCode, skip.body).toBe(200);
     expect(confirmCalls.map((c) => [c[0], c[3]])).toEqual([['run-fail', 'retry_rules'], ['run-fail', 'skip_rules']]);
+    expect(audited('gate.rules_skipped')[0]![2]).toMatchObject({ runId: 'run-fail', detail: { ord: 4 } });
   });
 
   it('negative control: a skip naming a broken row is still a 409 with the engine\'s words, the gate left open and no skip audited', async () => {
@@ -280,8 +288,17 @@ describe('(DES-RULE-CHECK-001 rev 2) disputed rows, council rulings and process 
     expect(rulesSummaryLine([settled('broken', [['agy', 'broken', true], ['pi', 'broken', true], ['opencode', 'kept', false]])])).toBe(
       '1 rules checked: 0 kept, 1 broken, 0 not applicable, 1 settled by council (S: broken 2-0)',
     );
-    // No ruling (a disputed row) and a plain judge row are not "settled".
+    // A ruling reused from the cache (`how: 'cache'`, origin kept) is still the council's.
+    expect(rulesSummaryLine([{ ...settled('n_a', [['agy', 'n_a', true], ['pi', 'n_a', true], ['opencode', 'n_a', true]]), how: 'cache' }])).toBe(
+      '1 rules checked: 0 kept, 0 broken, 1 not applicable, 1 settled by council (S: not applicable 3-0)',
+    );
+    // A kept vote that rested on the person's instruction counts toward a waiver, which still holds.
+    expect(rulesSummaryLine([settled('waived', [['agy', 'kept', true], ['pi', 'kept', true], ['opencode', 'broken', true]])])).toBe(
+      '1 rules checked: 0 kept, 0 broken, 0 not applicable, 1 waived by instruction (to confirm), 1 settled by council (S: waived by instruction 2-1)',
+    );
+    // No ruling (a disputed row), a plain judge row, and a ruling that is not the row's status are not "settled".
     expect(rulesSummaryLine([DISPUTED, row('J', 'kept')])).not.toContain('settled by council');
+    expect(rulesSummaryLine([{ ...settled('kept', [['agy', 'kept', true]]), status: 'broken' }])).not.toContain('settled by council');
   });
   it('process rows (blocking: false) stay out of the gate counts and are reported apart', () => {
     const proc = (id: string, status: RuleVerdict['status']): RuleVerdict => ({ ...row(id, status), party: 'reviewer', blocking: false });
