@@ -329,6 +329,18 @@ describe('the engine\'s conformance step inputs', () => {
     })();
     expect(seen.length).toBeGreaterThan(0);
     expect(seen.every((e) => e['XDG_CACHE_HOME'] === undefined)).toBe(true);
+    // The install-time run resolves the same cache (codex, crew review r4).
+    const runEnvs: NodeJS.ProcessEnv[] = [];
+    const run = gardenConformance(garden, () => 'http://127.0.0.1:1', {
+      env: { PLAYWRIGHT_BROWSERS_PATH: 'rel-browsers', XDG_CACHE_HOME: '/abs-cache' },
+      exec: (async (_bin: string, _args: string[], opts: { env: NodeJS.ProcessEnv }) => {
+        runEnvs.push(opts.env);
+        return { stdout: PASSED, stderr: '' };
+      }) as never,
+    });
+    await run('/pack', []);
+    expect(runEnvs[0]?.['PLAYWRIGHT_BROWSERS_PATH']).toBeUndefined();
+    expect(runEnvs[0]?.['XDG_CACHE_HOME']).toBe('/abs-cache');
   });
 
   it('a resume or gate answer on an editor-plugin run starts the runtime when it is not made yet (the retry path)', async () => {

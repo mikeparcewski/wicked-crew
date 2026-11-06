@@ -24,7 +24,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import type { EditorConformanceSummary, InstallEditorRefusal, InstallEditorResponse, PackCheckResult } from '../core/types.js';
 import { execCapped } from '../core/exec.js';
 import { EditorInstallConflict, EditorRegistry, PackEditorSchema, editorEntryDigest, type InstalledPack } from './registry.js';
-import { needsBrowserRuntime, type ConformanceProvisioner } from './conformance-runtime.js';
+import { absoluteCacheEnv, needsBrowserRuntime, type ConformanceProvisioner } from './conformance-runtime.js';
 
 export type PackCheckRunner = (packRoot: string) => Promise<PackCheckResult>;
 
@@ -188,7 +188,8 @@ export function gardenConformance(
     // garden's runner gets the very bound the cap was sized from (any spelling of the env var it would
     // read differently, e.g. non-ASCII digits, cannot make the two disagree — codex r2).
     const loadS = conformanceLoadSeconds(deps.env);
-    const childEnv: NodeJS.ProcessEnv = { ...(deps.env ?? process.env), [CONFORMANCE_TIMEOUT_ENV]: String(loadS) };
+    // The same browser-cache resolution the provisioner installed under (absolute cache variables only).
+    const childEnv: NodeJS.ProcessEnv = { ...absoluteCacheEnv(deps.env ?? process.env), [CONFORMANCE_TIMEOUT_ENV]: String(loadS) };
     const runWith = async (bins: readonly string[]): Promise<EditorConformanceSummary> => {
       let stdout = '';
       for (const bin of bins) {
