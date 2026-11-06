@@ -12,6 +12,15 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **Apps: archive with Restore, and an earlier version read (plugins G16, G3; operator ruling D5; api-types 0.196.0).**
+  `POST /apps/:app/archive` and `/unarchive` (human operator) hide an app from `GET /apps` and refuse its version
+  changes (edits, undo, redo, restore, new turns: `409 app_archived`) until it is restored; nothing is deleted. Reads,
+  queries and the action routes are unchanged. Each runs under the app's lock, and archive is refused
+  while a chat turn runs, so no turn lands into a hidden app. `GET /apps?archived=active|archived|all` (default
+  `active`). `AppSummary.archived` is `null` on an active app, so a client can tell a daemon that archives from an older
+  one. `GET /apps/:app/versions/:version` (observer) reads an accepted version as it was (by number or commit), with
+  the detail's reduction for a non-human reader.
+
 - **Redo the QE check at a QE gate with no verdict (e2e-1105 F23; api-types 0.195.0).** `POST /runs/:id/gate` takes
   `{approve: true, action: 'retry_qe'}` (no `amend` / `amendScope` / `plan`) and forwards it to the engine
   (wicked-core core#1312). There, it re-runs the QE step from fresh evidence with a new isolated reviewer session,

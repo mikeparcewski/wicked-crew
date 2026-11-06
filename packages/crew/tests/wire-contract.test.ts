@@ -111,7 +111,7 @@ import type { CreateStandingOrderSchema, ParseStandingOrderSchema, StandingAwayS
 import type { StandingOrdersState as ServedStandingOrdersState } from '../src/standing-orders/store.js';
 import type { DEFAULT_SETTINGS, RecordedEvent } from '../src/core/types.js';
 import type { AppSpecSchema } from '../src/apps/spec.js';
-import type { AppActionGrantSchema, AppActionPrepareSchema, AppActionRunSchema, AppCreateSchema, AppEditsSchema, AppHistoryMoveSchema, AppQuerySchema, AppRestoreSchema, AppsCheckSchema, AppTurnSchema } from '../src/apps/routes.js';
+import type { AppActionGrantSchema, AppActionPrepareSchema, AppActionRunSchema, AppArchiveSchema, AppCreateSchema, AppEditsSchema, AppHistoryMoveSchema, AppQuerySchema, AppRestoreSchema, AppsCheckSchema, AppTurnSchema } from '../src/apps/routes.js';
 import type { AppWritePath } from '../src/apps/actions/write-path.js';
 import type { AppExecutor } from '../src/apps/exec/executor.js';
 import type { AppToolQueryText as ToolText, AppCrewQueryText as CrewText } from '../src/core/types.js';
@@ -1180,6 +1180,8 @@ accepts<z.input<typeof AppCreateSchema>, Wire.CreateAppBody>();
 accepts<z.input<typeof AppEditsSchema>, Wire.AppEditsBody>();
 accepts<z.input<typeof AppHistoryMoveSchema>, Wire.AppHistoryMoveBody>();
 accepts<z.input<typeof AppRestoreSchema>, Wire.AppRestoreBody>();
+// (api-types 0.196.0, G16) Archive and unarchive take `{}`.
+accepts<z.input<typeof AppArchiveSchema>, Wire.AppArchiveBody>();
 accepts<z.input<typeof AppQuerySchema>, Wire.AppQueryBody>();
 accepts<z.input<typeof AppTurnSchema>, Wire.AppTurnBody>();
 accepts<z.input<typeof RegisterRepoSchema>, Wire.RegisterRepoBody>();
@@ -1199,6 +1201,8 @@ respondsWith<CrewText, Extract<ReturnType<typeof parseCrewQueryText>, { ok: true
 respondsWith<Wire.AppDetail, Awaited<ReturnType<AppStore['detail']>>>();
 respondsWith<Wire.AppSummary[], ReturnType<AppStore['list']>>();
 respondsWith<Wire.AppVersion, Awaited<ReturnType<AppStore['edit']>>>();
+// (api-types 0.196.0, G3) The version read is what the store produces.
+respondsWith<Wire.AppVersionRead, Awaited<ReturnType<AppStore['versionRead']>>>();
 respondsWith<Wire.AppTurnState, Awaited<ReturnType<AppStore['beginTurn']>>>();
 respondsWith<Wire.AppsCheckResponse, Awaited<ReturnType<AppStore['checkTurn']>>>();
 // The variants are exclusive in the contract as they are in the schema (codex r1): one kind each.
