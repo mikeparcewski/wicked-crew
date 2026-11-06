@@ -377,6 +377,22 @@ export interface HealthCapabilities {
    * requesting operator's usage ({@link WorkflowCatalogResponse}). ABSENT on an older daemon: read as `false`.
    */
   workflowCatalog?: boolean;
+  /** (api-types 0.192.0, DES-CATALOG-002 §4.1) `GET /workflows/catalog?v=2` is served ({@link WorkflowCatalogV2Response}).
+   *  ABSENT on an older daemon: read as `false`. */
+  workflowCatalogV2?: boolean;
+  /** (api-types 0.192.0) `POST /workflows/catalog/detect` is served ({@link ShapeGuess}). ABSENT: read as `false`. */
+  detectShape?: boolean;
+  /** (api-types 0.192.0) Every launch route takes `shape` ({@link LaunchShape}). ABSENT: send none. */
+  launchShape?: boolean;
+  /** (api-types 0.192.0) `POST /runs/:id/reshape` is served ({@link ReshapeRunBody}). ABSENT: read as `false`. */
+  reshapeRun?: boolean;
+  /**
+   * (api-types 0.192.0, DES-CATALOG-002 §4.6) Job proposals: `POST /chats/:id/proposals` and `POST /chats {seed}`, the
+   * `job` kind with its conversational fields, revisions and the `revising` hold, and plan-gate answers bound to
+   * `ord` + `planRev` (a run launched from a chat proposal REQUIRES `planRev` on every plan-gate answer). ABSENT on an
+   * older daemon: today's flow; send no `accepts`, `planRev` or person proposals.
+   */
+  chatJobProposals?: boolean;
   /**
    * (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §14) What a chat can do with artifacts, one flag per operation, each
    * true only once its slice ships. `context`: `ChatMessageBody.context` is accepted ({@link ChatMessageContext}),
@@ -1344,6 +1360,10 @@ export interface AgentSession {
    * from this path. ABSENT on a repo-less run, on an engine before the field, and on older runs.
    */
   evidence_root?: string;
+  /** (api-types 0.192.0) The shape the run was launched as, from its `run.launched` record; ABSENT when none was sent. */
+  shape?: LaunchShape;
+  /** (api-types 0.192.0) The chat proposal (pid) whose Go launched it: its plan-gate answers must carry `planRev`. */
+  from_proposal?: string;
 }
 
 /**
@@ -2530,6 +2550,16 @@ export interface GateDecision {
    * `POST /runs/:id/resume` or `/reassign`.
    */
   ord?: number;
+  /**
+   * (api-types 0.192.0, DES-CATALOG-002 §4.6) At a `plan_approval` gate: the plan revision this answer was made on
+   * (`RunTeamResponse.planRev`, the plan message's version). Passed with `ord` into the engine's own decision, which
+   * compares both inside its serialized path: an answer to a replaced revision (a reopened gate on the same ord, a second
+   * tab, a re-plan landing after the read, an Approve during re-planning) is **409** `gate_changed` with the current
+   * plan (`openOrd`, `planRev`). REQUIRED on every plan-gate answer of a run launched from a chat proposal
+   * (`AgentSession.from_proposal`), whichever client answers; a plan-gate send-back (`request_changes` with the person's
+   * words in `amend`) needs it on any run. Send only where `chatJobProposals` is true.
+   */
+  planRev?: number;
   /**
    * (api-types 0.156.0, DES-VOICE) The person answered by voice: studio matched the spoken words to this
    * answer, showed it on screen and the person confirmed it, then the usual undo window ran. Recorded on the
@@ -6111,6 +6141,9 @@ export interface LaunchRunBody {
    * `false` is the same as omitting it. 400 beside `skipQeAcceptance`.
    */
   forceQeAcceptance?: boolean;
+  /** (api-types 0.192.0, DES-CATALOG-002 §4.4) What this launch is the shape of ({@link LaunchShape}). Send only where
+   *  `GET /health.capabilities.launchShape` is true. */
+  shape?: LaunchShape;
 }
 
 /** `POST /linked-issues/preview` (crew#825): what a workflow launch of `problem` WOULD append. */
@@ -6379,6 +6412,8 @@ export type PhaseExecutor =
 export interface PhaseDef {
   id: string;
   kind: StageKindPhase;
+  /** (api-types 0.192.0) The step's gate rubric ({@link PresetStep.rubric}), as the composed phase carries it. */
+  rubric?: string;
   /**
    * (crew#894, wicked-core#810) The phase's worker pool, `1..=4` (absent = 1): one creator plus
    * `pool - 1` monitors, inside a TEAM run only. A user workflow declaring `pool > 1` is refused at
@@ -7414,6 +7449,9 @@ export interface PresetStep {
   /** (crew#928, wicked-core#854) The step changes no file in the run's tree; see
    *  {@link TeamPlanStep.writes_nothing}. */
   writes_nothing?: boolean;
+  /** (api-types 0.192.0, DES-CATALOG-002 §5.2) The gate rubric this step is judged by (`parity`, `cited-findings`,
+   *  `fidelity-to-source`): core expands it into the step's instructions and refuses an unknown or misplaced one. */
+  rubric?: string;
   [k: string]: unknown;
 }
 
@@ -7582,6 +7620,233 @@ export interface WorkflowCatalogResponse {
     /** Runs counted across every entry. */
     launches: number;
   };
+}
+
+// ── The workflow catalog, v2: by verb (api-types 0.192.0, DES-CATALOG-002 §4) ───────────────────────────────────────
+//
+// `GET /workflows/catalog?v=2[&projectId=]` (advertised by `GET /health.capabilities.workflowCatalogV2`). Without `v=2`
+// the route answers v1 exactly as before: every v1 type and union above is unchanged.
+
+/** A v2 category: the ten verbs, plus `yours` (saved presets and unseeded served workflows, when any). */
+export type CatalogCategoryV2Id =
+  | 'plan' | 'build' | 'test' | 'investigate' | 'analyze' | 'judge' | 'create' | 'estimate' | 'organize' | 'improve' | 'yours';
+export type CatalogRelease = '1.0' | '1.1' | '1.2' | 'deferred' | 'as-is';
+/** v2-only: v1's {@link WorkflowCatalogInput.kind} is not widened. A client that meets a kind it does not know shows
+ *  the card as "Needs a newer studio" and never starts it. */
+export type CatalogInputKindV2 = 'text' | 'repo' | 'project' | 'url' | 'requirements' | 'seats' | 'documents' | 'sources';
+export type CatalogNeedV2 = 'repo' | 'project' | 'running_app' | 'requirements' | 'documents' | 'sources' | 'runs' | 'nothing';
+/** What checks a card's work (DES-CATALOG-002 §5). DERIVED from the composed plan and its instruments, never typed. */
+export type CatalogGateId =
+  | 'qe-acceptance' | 'parity' | 'cited-findings' | 'fidelity-to-source' | 'proposal-only'
+  | 'evidence-floor' | 'install-consent' | 'walkthrough' | 'pick' | 'draft-floor' | 'traces-to-requirements' | 'review';
+
+/** One field a card or option takes before it starts. */
+export interface CatalogInputV2 {
+  id: string;
+  label: string;
+  kind: CatalogInputKindV2;
+  required: boolean;
+}
+
+/** What one card, or one of its options, resolves to: every field studio renders and every field a launch checks. */
+export interface CatalogResolved {
+  launch: WorkflowCatalogLaunch;
+  /** The framing line crew puts first in the brief for this option (derived server-side; a client never sends it). */
+  brief: string | null;
+  compose: { level: 'epics' | 'stories' | 'tasks' } | null;
+  /** An option whose launch or compose level differs from the default option's (so its gate, needs and delivers may). */
+  changesPlan: boolean;
+  inputs: CatalogInputV2[];
+  needs: CatalogNeedV2[];
+  delivers: 'pr' | 'document' | 'video' | 'report' | 'answer' | 'proposals' | 'none';
+  /** What the run may change. */
+  writes: 'nothing' | 'repo' | 'domain-artifacts' | 'documents' | 'proposals';
+  /** Derived from the composed plan (each step's rubric, its pins and consent gates), the instruments and the
+   *  proposal-only predicate. A saved shadow's own steps and instruments decide it. */
+  gate: CatalogGateId[];
+  requiresQe: boolean;
+  seats: {
+    distinctEvaluator: boolean;
+    distinctJudge: boolean;
+    excludeChangeAuthors: boolean;
+    proposalOnly: boolean;
+    notRunSeat: boolean;
+    /** `false` in 1.0. */
+    council: boolean;
+  };
+  /** garden archetype, for the eval labels. */
+  archetype: string | null;
+  typicalMinutes: [number, number] | null;
+  cost: 'low' | 'medium' | 'high' | null;
+  /** `unavailable`: this daemon cannot start it now (its engine does not serve the preset, or a saved shadow has fewer
+   *  instruments than the built-in); `statusNote` says why. Never dropped from the wire. */
+  status: 'available' | 'coming_soon' | 'unavailable';
+  statusNote: string | null;
+  release: CatalogRelease;
+  /** `saved`: "Your version" (a saved shadow with at least the built-in's instruments). */
+  source: 'builtin' | 'crew' | 'saved' | 'studio' | 'none';
+  /** (DES-CATALOG-002 §4.6) A fingerprint of what this resolves to (the effective preset or style, its gate and its
+   *  needs): a proposal freezes it, and Go refuses a changed one (`catalog_changed`). */
+  resolution: string;
+}
+
+/** An old command that lands on one exact option: `/workflow-migration` → Migrate · In place. */
+export interface CatalogAliasV2 {
+  command: string;
+  option: string | null;
+}
+
+export interface CatalogOptionV2 extends CatalogResolved {
+  id: string;
+  title: string;
+  summary: string;
+  words: string[];
+  /** `/migrate upgrade`: the card's command and this option's word. */
+  command: string | null;
+  /** The option's word in the command grammar (`upgrade`), its own field, never the detection `words`. */
+  optionWord: string | null;
+}
+
+/** One card. Its own resolution is its default option's, or its own launch. */
+export interface CatalogCardV2 extends CatalogResolved {
+  id: string;
+  category: CatalogCategoryV2Id;
+  title: string;
+  summary: string;
+  outcome: string;
+  useWhen: string[];
+  tags: string[];
+  /** The words layer of detection and search. */
+  words: string[];
+  /** Investigate cards: quick · standard · deep (a brief line, never a plan change). */
+  depth: boolean;
+  variant: {
+    axis: 'kind' | 'lens' | 'docStyle';
+    label: string;
+    default: string;
+    options: CatalogOptionV2[];
+  } | null;
+  handoff: { card: string; option: string | null } | null;
+  /** A coming card: what to do today. */
+  nearest: { card: string; option: string | null } | null;
+  later: { release: CatalogRelease; adds: CatalogInputKindV2; note: string }[];
+  /** `/migrate`; `null` for a card without one (a hidden card, a deferred one). */
+  command: string | null;
+  aliases: CatalogAliasV2[];
+  /** Not in the `/` list, the detection digest, a swap or a suggestion; reachable only by its alias. */
+  hidden: boolean;
+  usage: WorkflowCatalogUsage & { byOption: Record<string, number> };
+}
+
+/** `GET /workflows/catalog?v=2[&projectId=]`. */
+export interface WorkflowCatalogV2Response {
+  version: 2;
+  /** Changes when any card, option, status or effective preset changes. A proposal freezes it. */
+  rev: string;
+  categories: { id: CatalogCategoryV2Id; title: string; summary: string }[];
+  /** Coming and hidden cards included (each says so). */
+  cards: CatalogCardV2[];
+  /** `card` or `card:option` keys, at most 6, by this operator's launches. */
+  top: string[];
+  /** The input kinds this daemon's launch routes accept. */
+  inputKinds: CatalogInputKindV2[];
+  usage: WorkflowCatalogResponse['usage'];
+}
+
+// ── Detection (api-types 0.192.0, DES-CATALOG-002 §2.2; the detect route is advertised by `detectShape`) ─────────────
+
+export interface ShapeGuess {
+  card: string;
+  option: string | null;
+  depth: 'quick' | 'standard' | 'deep' | null;
+  /** 0..1 */
+  confidence: number;
+  band: 'sure' | 'likely' | 'ask';
+  /** One plain-text line (≤ 140 chars): the detector's words. */
+  reason: string;
+  /** `false` for a coming card: offer its `nearest` instead. */
+  available: boolean;
+  question: { text: string; choices: { label: string; card: string; option: string | null }[] } | null;
+  source: 'words' | 'classify' | 'chat';
+  catalogRev: string;
+}
+
+/** `POST /workflows/catalog/detect` body. */
+export interface DetectShapeRequest {
+  text: string;
+  /** `false`: words only (the `/` list's instant row). */
+  seat?: boolean;
+  projectId?: string;
+}
+
+// ── The shape on every launch (api-types 0.192.0, DES-CATALOG-002 §4.4, `capabilities.launchShape`) ───────────────────
+
+/**
+ * What a launch was started as. Optional on `POST /runs`, `POST /projects/:id/demo`, `POST /projects/:id/product/compose`
+ * and a new document's draft; send it only where `GET /health.capabilities.launchShape` is true (an older daemon's
+ * strict schema refuses the field). Crew resolves it against the CURRENT catalog: a card or option that does not launch
+ * what the route launches is **400** `shape_mismatch`; a catalog revision that changed since `catalogRev` is **409**
+ * `catalog_changed`; a detected shape still at `band: 'ask'` is **409** `shape_ask`; a coming or unavailable card is
+ * **409** `card_not_available`. A framing option's brief (and an Investigate card's depth line) is crew's, put first in
+ * the run's brief. The run records it (`AgentSession.shape`), and usage counts by it.
+ */
+export interface LaunchShape {
+  card: string;
+  option: string | null;
+  depth: 'quick' | 'standard' | 'deep' | null;
+  by: 'person' | 'detected';
+  catalogRev: string;
+  guess?: { confidence: number; band: 'sure' | 'likely' | 'ask'; source: 'words' | 'classify' | 'chat'; reason: string; detectionRunId: string | null };
+}
+
+/**
+ * What a run was launched with, recorded on its `run.launched` entry (DES-CATALOG-002 §2.5): a reshape launches the
+ * replacement from it. Absent fields were not sent.
+ */
+export interface LaunchEnvelope {
+  words: string;
+  repoRef?: string;
+  projectId?: string;
+  clisJson?: string;
+  primary?: string;
+  humanConfirm?: string;
+  deliver: 'pr' | 'none';
+  deliverGate?: 'human' | 'auto';
+  chatId?: string;
+  skipQeAcceptance?: { reason: string };
+  forceQeAcceptance?: true;
+  reducedAssurance?: true;
+  power?: boolean;
+  revisesPr?: number;
+  campaignId?: string;
+  groupLabel?: string;
+  baseRef?: string;
+  shape?: LaunchShape;
+  /** The chat proposal (pid) whose Go launched it. */
+  fromProposal?: string;
+}
+
+/**
+ * `POST /runs/:id/reshape` body (`capabilities.reshapeRun`): start a run held at its FIRST work-plan approval again as
+ * another card or option. Crew writes the crew-made proposal `<chatId>:reshape:<runId>:<requestId>` and runs its Go
+ * under the chat's lock: the replacement is validated, the held plan gate is answered Reject (`reshaped`), and the
+ * replacement launches from the held run's launch envelope (`retryOf` the held run, `shape.by: 'person'`, its plan
+ * held). A repeated `requestId` is idempotent. **409** `reshape_after_work` once a work plan was accepted (use the
+ * plan's own edit); **409** `reshape_not_chat` for a run not launched from a chat proposal; **409** `proposal_blocked`
+ * when the new card needs an input the run lacks (send it in `inputs`); the launch side's own refusals as `POST /runs`
+ * answers them. A failed launch after the reject leaves the reshape proposal accepting: the same request, or Go on its
+ * pid, tries again.
+ */
+export interface ReshapeRunBody {
+  card: string;
+  option?: string | null;
+  depth?: 'quick' | 'standard' | 'deep' | null;
+  inputs?: Record<string, ProposalInputValue>;
+  requestId: string;
+}
+
+export interface ReshapeRunResponse {
+  view: ChatProposalView;
 }
 
 // ── Projects (DES-PROJECT-001) — the experience-plane keystone ─────────────────
@@ -8218,6 +8483,17 @@ export interface ChatOpenBody {
    * `GET /health.capabilities.chatArtifacts.context === true`.
    */
   seedFromArtifact?: string;
+  /**
+   * (api-types 0.192.0, DES-CATALOG-002 §4.6) A `/` pick or a command with no chat open: the chat opens with this
+   * person-made proposal in it. Needs `requestId`: the chat id and the proposal id derive from (the person, it), so a
+   * retry after a lost response returns the same chat and proposal (completing the proposal if it was missing); a
+   * `chatId` beside it is a 400. A person only (403 `proposal_refused`, before the chat is created or a seat warmed).
+   * Send only where `chatJobProposals` is true.
+   */
+  seed?: ChatSeed;
+  requestId?: string;
+  /** (api-types 0.192.0) As {@link ChatMessageBody.accepts}. */
+  accepts?: Array<'job'>;
 }
 
 /** The scope a `POST /chats` caller may name (api-types 0.39.0, studio#323 R4). */
@@ -8368,6 +8644,8 @@ export interface ChatOpenResponse {
   singleSeat?: ChatSingleSeatDegradation;
   /** (api-types 0.141.0, crew#1157) The workflow every turn runs, when the open named one. */
   workflow?: string;
+  /** (api-types 0.192.0) The proposal a `seed` made (the same one on a retry with the same `requestId`). */
+  proposal?: ChatProposalView;
 }
 
 /** `POST /chats/:id/messages` → 202. */
@@ -8576,7 +8854,13 @@ export type ChatTranscriptRecord =
   /** (api-types 0.170.0, §4.3 step 2) A person said go: what was accepted, written before anything starts. */
   | ({ at: number; turnId: string; kind: 'proposal_accepting' } & ProposalAccepting)
   /** (api-types 0.170.0) The proposal's answer: go (with what it started) or not now. */
-  | ({ at: number; turnId: string; kind: 'proposal_decided' } & ProposalDecided);
+  | ({ at: number; turnId: string; kind: 'proposal_decided' } & ProposalDecided)
+  /** (api-types 0.192.0, DES-CATALOG-002 §4.6) The person's message of `turnId` holds proposal `pid` while its seat
+   *  turn may revise it. Written with the message, under the lock Go takes. */
+  | { at: number; turnId: string; kind: 'proposal_revising'; pid: string }
+  /** (api-types 0.192.0) The hold of `turnId` on `pid` ended: its revision was published or refused, the turn wrote
+   *  none, or the turn is gone (`note`: "Your change wasn't applied: say it again"). */
+  | { at: number; turnId: string; kind: 'proposal_released'; pid: string; note: string | null };
 
 // ── Chat proposals (api-types 0.170.0, DES-CHAT-ARTIFACTS-001 §4, slice A2) ─────────────────────────────────────────
 //
@@ -8585,9 +8869,181 @@ export type ChatTranscriptRecord =
 // frame. The card's facts are crew's, never the seat's. Only `POST /chats/:id/proposals/:pid` (a person, the chat's
 // owner) starts anything. Capabilities: `GET /health.capabilities.chatArtifacts.proposals` and one flag per operation.
 
+// ── Job proposals: the conversation (api-types 0.192.0, DES-CATALOG-002 §2.4, §4.6; `capabilities.chatJobProposals`) ─
+//
+// A `job` proposal is work in a chat: a card (and option) of the v2 catalog whose resolved launch is `run`, `compose`
+// or `demo` (a `document` option is an artifact `create` proposal, carrying the same conversational fields). Every
+// fact on it is crew's, rendered from its own resolution: the seat's prose is a lead-in only. Only a person's Go starts
+// it; a repository job launched from a chat always stops at its first plan.
+
+/** The value of one input, the same discriminated shape in a revision and in Go's edits. */
+export type ProposalInputValue =
+  | { kind: 'text'; value: string }
+  | { kind: 'url'; value: string }
+  | { kind: 'requirements'; refs: { repoId: string; key: string }[] };
+
+/** What a proposal is the shape of. A person-made proposal has no `guess`. */
+export interface ProposalShape {
+  card: string;
+  option: string | null;
+  depth: 'quick' | 'standard' | 'deep' | null;
+  by: 'person' | 'detected';
+  source: 'chat' | 'pick' | 'command' | 'question' | 'swap' | 'suggestion' | 'reshape';
+  guess?: ShapeGuess;
+}
+
+/** One input the job takes, met or missing. `choices` come from the chat's scope (a repository's id as `value`). */
+export interface ProposalNeed {
+  id: string;
+  label: string;
+  kind: CatalogInputKindV2;
+  required: boolean;
+  status: 'met' | 'missing';
+  value?: string;
+  choices?: { label: string; value: string }[];
+}
+
+/**
+ * The edits of a {@link ProposalRevision}: the fields a correction may change. A field outside the type is dropped
+ * with a note.
+ */
+export interface ProposalRevisionEdits {
+  card?: string;
+  option?: string | null;
+  depth?: 'quick' | 'standard' | 'deep' | null;
+  repoRef?: string;
+  project?: string | null;
+  /** Seat keys. */
+  lead?: string;
+  addSeats?: string[];
+  removeSeats?: string[];
+  inputs?: Record<string, ProposalInputValue>;
+  /** Facts carried from the person's corrections into the brief (".NET 8 on Linux"). */
+  detail?: { add?: string[]; remove?: string[] };
+  /** A QE acceptance skip with the person's reason. From a seat's block, written only when the reason appears, unquoted,
+   *  in the person's own message that turn answers; otherwise it becomes the lost-check question. */
+  skipQe?: { reason: string };
+  /** Only on the person route: a press on the lost-check question (or a swap or suggestion naming the check it drops). */
+  confirmLoss?: true;
+}
+
+/**
+ * A correction of the open proposal (DES-CATALOG-002 §4.6): a swap, a suggestion or a question's choice through
+ * `POST /chats/:id/proposals`, or the seat's typed revision (bound by crew to the person's message its turn answers).
+ * Crew merges it by fixed rules, re-checks the result as Go does, and writes a new proposal superseding the parent.
+ * A result with fewer checks than its parent is never written from a seat's block: it becomes the lost-check question.
+ */
+export interface ProposalRevision {
+  revises: string;
+  edits: ProposalRevisionEdits;
+}
+
+/** A tappable part of the sentence. `swap` is `null` for `checks` (a tap explains them; they are the card's own). */
+export interface ProposalToken {
+  id: string;
+  kind: 'card' | 'option' | 'repo' | 'project' | 'seats' | 'depth' | 'checks' | 'detail';
+  label: string;
+  /** At most four choices, each a revision's edits; "Something else…" is the client's own. */
+  swap: { choices: { label: string; edit: ProposalRevisionEdits }[] } | null;
+}
+
+/**
+ * The proposal sentence, from wicked ("what Start runs"): `text` holds `{token id}` placeholders, one template per
+ * card; `notes` are crew's own ("Not changed: parity stays, it is the migration's own check"); `ask` is the closing
+ * question ("Start?", or the question when something is missing), never part of `text` (rev 6).
+ */
+export interface ProposalSentence {
+  text: string;
+  tokens: ProposalToken[];
+  notes: string[];
+  ask: string | null;
+}
+
+/** A quick reply that changes the proposal: pressing it is the person's words plus this revision. */
+export interface ProposalSuggestion {
+  label: string;
+  edit: ProposalRevisionEdits;
+}
+
+/**
+ * A question wicked asks instead of "Start?": a missing input (its choices fill it), or a revision that would lose a
+ * check (`lost` names it; the lossy choice carries `confirmLoss`, which only the person route takes). `input`: the
+ * answer is typed (a QE skip's reason), bound to the question by the client and sent as the choice's edit.
+ */
+export interface ProposalQuestion {
+  kind: 'missing' | 'lost_check';
+  text: string;
+  choices: { label: string; edit: ProposalRevisionEdits }[];
+  lost?: CatalogGateId[];
+  /** The typed answer's place in the edit: `skipQe.reason`, or `inputs.<id>` (a missing text input). */
+  input?: { kind: 'text'; label: string; edit: 'skipQe.reason' | `inputs.${string}` };
+}
+
+/** The starting shape (rev 6): the card's composed steps, labelled as such because the lead plans the real ones. */
+export interface ProposalSketch {
+  steps: { label: string; asks: boolean }[];
+}
+
+/** The seats a job runs with: who leads, and who else works or checks. */
+export interface ProposalSeats {
+  lead: string | null;
+  keys: string[];
+  label: string;
+}
+
+/** A proposal for a coming card: the release and what to do today. It has no Start. */
+export interface ProposalComing {
+  release: CatalogRelease;
+  note: string | null;
+  nearest: { card: string; option: string | null } | null;
+}
+
+/** `POST /chats/:id/proposals`: a person-made proposal (a `/` pick, a typed command, a question's choice). */
+export interface PersonProposalBody {
+  card: string;
+  option?: string | null;
+  depth?: 'quick' | 'standard' | 'deep' | null;
+  /** The person's words after the command, the job's intent. */
+  words?: string;
+  source: 'pick' | 'command' | 'question' | 'suggestion' | 'swap';
+  requestId: string;
+}
+
+/** `POST /chats/:id/proposals`: a revision of the open proposal (a token swap, a suggestion, a question's choice). */
+export interface PersonRevisionBody {
+  revises: string;
+  edits: ProposalRevisionEdits;
+  source: 'swap' | 'suggestion' | 'question';
+  requestId: string;
+  /** A suggestion's label: appended to the transcript as the person's words, marked as typed by a suggestion. */
+  words?: string;
+}
+
+/**
+ * `POST /chats/:id/proposals` → 201 `{ view }` (a repeated `requestId` with the same body answers the same proposal;
+ * another body under it is **409** `request_reused`). Only a person (403 `proposal_refused`); 404 for a chat that is
+ * not the caller's; **409** `proposal_stale` for a revision whose parent is not the lineage's open proposal (superseded,
+ * accepted, decided, or revising under a turn), `proposal_revising`, `card_not_available`, `catalog_changed`;
+ * **400** `edits_invalid` / `card_unknown` / `card_hidden` (a hidden card is reached only by its alias, as `card`).
+ */
+export interface PersonProposalResponse {
+  view: ChatProposalView;
+}
+
+/** `POST /chats {seed}`: a `/` pick or a command with no chat open. The chat and proposal ids derive from (the
+ *  person, `requestId`), so a retry returns the same chat and proposal. Needs `requestId` and a person. */
+export interface ChatSeed {
+  card: string;
+  option?: string | null;
+  depth?: 'quick' | 'standard' | 'deep' | null;
+  words?: string;
+  source: 'pick' | 'command';
+}
+
 /** What a proposal makes. `create` and `demo` come from a catalog entry; `refine` changes a document; `theme` is a
- *  studio appearance patch. */
-export type ArtifactProposalKind = 'create' | 'refine' | 'theme' | 'demo';
+ *  studio appearance patch. (api-types 0.192.0) `job`: work from the v2 catalog whose launch is a run, a compose or a
+ *  demo (DES-CATALOG-002 §4.6). */
+export type ArtifactProposalKind = 'create' | 'refine' | 'theme' | 'demo' | 'job';
 
 /** One "From" chip: a source the block named, as crew resolved and authorized it. */
 export interface ProposalSource {
@@ -8666,6 +9122,50 @@ export interface ArtifactProposal {
   demo?: { url: string; audience: string | null; show: string | null };
   /** Go is refused with this reason ("Needs a second helper to check it"); the card shows it. `null` = Go is open. */
   blocked: string | null;
+  // ── (api-types 0.192.0, DES-CATALOG-002 §4.6) a `job`, and a `create` from the v2 catalog ──
+  /** What Start runs: the card, option and depth, and who chose them. */
+  shape?: ProposalShape;
+  /** The catalog revision and the resolution fingerprint ({@link CatalogResolved.resolution}) it was resolved against:
+   *  Go refuses a changed one (**409** `catalog_changed`, with the refreshed proposal). */
+  catalogRev?: string;
+  resolution?: string;
+  /** `run` | `compose` | `demo` for a job; `document` for a create. */
+  launch?: 'run' | 'compose' | 'demo' | 'document';
+  /** The card's command and the option's title (`what.label` is "Migrate or modernize · Upgrade"). */
+  command?: string | null;
+  needs?: ProposalNeed[];
+  gate?: CatalogGateId[];
+  seats?: ProposalSeats;
+  /** The person's first words (the job's intent) and the details carried from corrections, in order. */
+  words?: string;
+  details?: string[];
+  /** The values given for the job's other inputs (a demo's address, the requirements picked), as Go launches them. */
+  inputs?: Record<string, ProposalInputValue>;
+  /** A QE skip the person gave (shown in the sentence, carried in the launch). */
+  skipQe?: { reason: string } | null;
+  /** A coming card: no Start. */
+  coming?: ProposalComing;
+  sentence?: ProposalSentence;
+  /** At most two. */
+  suggestions?: ProposalSuggestion[];
+  /** When set, the sentence ends with it and Start is absent. */
+  question?: ProposalQuestion | null;
+  /** (rev 6) A job's starting shape. */
+  sketch?: ProposalSketch;
+  /** (rev 6) The proposal this one revises (`null` for a root), and the lineage's root pid: one job across swaps,
+   *  corrections, a change of launch kind and a reshape. */
+  revises?: string | null;
+  lineage?: string;
+  /** The person's message (its `turnId`) a typed revision answers. */
+  answers?: string;
+  /** A person-made proposal's request (`requestId` and a digest of its body): a retry answers the same proposal. */
+  request?: { id: string; digest: string };
+  /** (§2.5) A reshape: the held run this replaces (its `retryOf`), and reduced assurance carried over only when the
+   *  held run had it (disclosed). */
+  reshapes?: string;
+  reducedAssurance?: true;
+  /** (§2.5) What else a reshape launches with, from the held run's launch envelope. */
+  relaunch?: Pick<LaunchEnvelope, 'deliver' | 'deliverGate' | 'campaignId' | 'groupLabel' | 'revisesPr' | 'forceQeAcceptance' | 'clisJson'>;
 }
 
 /**
@@ -8698,6 +9198,12 @@ export interface ProposalEdits {
   show?: string;
   /** any kind with a run */
   helpers?: string[];
+  /** (api-types 0.192.0) job: merged by the revision rules before Go (a change that loses a check is refused). */
+  option?: string | null;
+  depth?: 'quick' | 'standard' | 'deep' | null;
+  repoRef?: string;
+  seats?: string[];
+  inputs?: Record<string, ProposalInputValue>;
 }
 
 /** What the accepted proposal is named by: the artifact, and the run derived from the pid. */
@@ -8741,7 +9247,14 @@ export interface ProposalDecided {
 export interface ChatProposalView {
   proposal: ArtifactProposal;
   /** `accepting`: Go was recorded and its result was not (an interrupted Go: "Go again" resumes the same identity). */
-  state: 'open' | 'accepting' | 'decided' | 'superseded';
+  /** (api-types 0.192.0) `revising`: a typed correction is in flight (the person's message is written and its seat turn
+   *  has not settled): Go answers **409** `proposal_revising` until it does. */
+  state: 'open' | 'revising' | 'accepting' | 'decided' | 'superseded';
+  /** (api-types 0.192.0) The turn whose message holds it, while `revising`. */
+  revisingTurn?: string;
+  /** (api-types 0.192.0) crew's word on the last hold that ended without a change ("Your change wasn't applied: say it
+   *  again"), until a newer proposal replaces it. */
+  note?: string;
   decision?: 'go' | 'not_now';
   result?: ProposalResult | null;
   /** Unix millis of the decision. */
@@ -8778,7 +9291,7 @@ export type ChatProposalFrame = {
   type: 'chatProposal';
   chat: string;
   turn_id: string;
-  record: Extract<ChatTranscriptRecord, { kind: 'proposal' | 'proposal_accepting' | 'proposal_decided' }>;
+  record: Extract<ChatTranscriptRecord, { kind: 'proposal' | 'proposal_accepting' | 'proposal_decided' | 'proposal_revising' | 'proposal_released' }>;
   project_id?: string;
 };
 
@@ -8924,6 +9437,9 @@ export interface ChatMessageBody {
    * record says what it was given.
    */
   context?: ChatMessageContext;
+  /** (api-types 0.192.0, DES-CATALOG-002 §4.6) What this client renders: `['job']` once it draws job proposals. Crew makes
+   *  job proposals only for a chat whose newest declaration accepts them. Send only where `chatJobProposals` is true. */
+  accepts?: Array<'job'>;
 }
 
 /** {@link ChatMessageBody.context} (api-types 0.169.0). */
@@ -10747,6 +11263,8 @@ export interface DemoLaunchBody {
   url: string;
   audience: string;
   show: string;
+  /** (api-types 0.192.0) As {@link LaunchRunBody.shape}: must name a card whose launch is `demo`. */
+  shape?: LaunchShape;
   /** The roster to seat the team from, as `POST /runs` takes it. Omit for the daemon's roster. */
   clisJson?: string;
   /** (crew ≥ 0.9.0) The explicit reduced-assurance opt-in, as `LaunchRunBody.reducedAssurance`. */
@@ -14722,6 +15240,9 @@ export interface ProductComposeBody {
   requirements: Array<{ repoId: string; key: string }>;
   /** The operator's steer for the draft (≤ 500 chars). */
   instructions?: string;
+  /** (api-types 0.192.0) As {@link LaunchRunBody.shape}: must name a card option whose launch is `compose`; its compose
+   *  level (`epics` · `stories` · `tasks`) decides how far down the draft goes. */
+  shape?: LaunchShape;
 }
 
 /** `POST /projects/:id/product/compose` 202. */

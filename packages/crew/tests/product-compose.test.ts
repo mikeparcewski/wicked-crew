@@ -57,11 +57,11 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
       getRequirementsGraphForRepo: vi.fn(async (ref: string) => ({ graph: ref === 'alpha' ? estateGraph : null, coverage: null })),
     };
     app = Fastify({ logger: false });
-    app.post('/api/v1/runs', async (req, reply) => {
-      launched.push({ body: req.body as Record<string, unknown>, auth: req.headers.authorization });
-      return reply.code(runsAnswer.status).send(runsAnswer.body);
+    // DES-CHAT-FIRST-001 C3: the compose launches through the shared launch function, as the caller.
+    registerProductRoutes(app, adapter as unknown as CoreAdapter, async (raw, ctx) => {
+      launched.push({ body: raw as Record<string, unknown>, auth: `${ctx.actor.id}:${ctx.target ?? ''}` });
+      return { statusCode: runsAnswer.status, payload: runsAnswer.body };
     });
-    registerProductRoutes(app, adapter as unknown as CoreAdapter);
     await app.ready();
   });
   beforeEach(() => {
@@ -92,7 +92,7 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
     expect(res.json()).toEqual({ runId: 'run-compose-1', requirements: 2 });
     expect(launched).toHaveLength(1);
     const body = launched[0]!.body;
-    expect(launched[0]!.auth).toBe('Bearer t0k'); // the caller's run, audited as theirs
+    expect(launched[0]!.auth).toBe('local:compose'); // the caller's run, audited as theirs, judged as a compose
     expect(body).toMatchObject({ projectId: 'p1', deliver: 'none' });
     const steps = (body['plan'] as { steps: Array<Record<string, unknown>> }).steps;
     expect(steps.map((s) => [s['catalog'], s['id']])).toEqual([['produce', 'draft'], ['review', 'review']]);

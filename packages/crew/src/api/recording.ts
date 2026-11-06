@@ -59,7 +59,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { constants as fsConstants, createReadStream, promises as fsp } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { extname, join, relative, resolve, sep } from 'node:path';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyBaseLogger, FastifyInstance } from 'fastify';
+import { LaunchShapeSchema } from '../workflow-catalog/shape.js';
 import { z, zod3Url } from '../zod.js';
 import type {
   DemoDocumentResponse,
@@ -175,7 +176,72 @@ export const DemoLaunchSchema = z.strictObject({
   clisJson: z.string().optional(),
   /** wicked-core#850 — the explicit reduced-assurance opt-in, forwarded to `POST /runs` only when `true`. */
   reducedAssurance: z.boolean().optional(),
+  /** (api-types 0.192.0, DES-CATALOG-002 §4.4) What this demo is the shape of (the Demo video card). */
+  shape: LaunchShapeSchema.optional(),
 });
+
+/** What a demo launches with besides its body: crew's own (a chat proposal's derived run id, its chat), never a client's. */
+export interface DemoLaunchExtra {
+  sessionId?: string;
+  chatId?: string;
+  fromProposal?: string;
+}
+
+/** The shared launch function's shape here (DES-CHAT-FIRST-001 C3): the routes module passes its own. */
+export type DemoLaunchRun = (raw: unknown, ctx: { actor: Actor; log: Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>; fromProposal?: string }) => Promise<{ statusCode: number; payload: unknown }>;
+
+/**
+ * One demo launch (DES-CATALOG-002 §4.6: the `demo` launcher): the route's and a chat Demo video job's Go. It mints the
+ * run's demo root and brief, then the shared launch function runs the demo preset (its own plan gate is the hold). A
+ * chat Go passes the proposal's derived run id: a retry finds that run and adopts it instead.
+ */
+export async function demoLaunch(
+  launchRun: DemoLaunchRun,
+  projectId: string,
+  body: unknown,
+  ctx: { actor: Actor; log: Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'> },
+  extra: DemoLaunchExtra = {},
+): Promise<{ code: number; body: unknown }> {
+  const parsed = DemoLaunchSchema.safeParse(body ?? {});
+  if (!parsed.success) {
+    return { code: 400, body: { error: 'Invalid demo body', details: parsed.error.issues } };
+  }
+  const runId = extra.sessionId ?? randomUUID();
+  const root = demoRootDir(runId);
+  await fsp.mkdir(root, { recursive: true });
+  const briefPath = join(root, 'BRIEF.md');
+  await fsp.writeFile(briefPath, demoBrief(root, parsed.data), 'utf8');
+  demoLaunchRoots.set(runId, root);
+  let launched: { statusCode: number; payload: unknown };
+  try {
+    launched = await launchRun(
+      {
+        // ONE path (the worker's only way to the brief; the brief names the root). crew#813 made it
+        // follow the state home — studio masks the path where it prints the problem (studio#520).
+        problem: `Make a demo of ${parsed.data.url} with the wicked-garden-demo skill: follow the demo brief at ${briefPath} — its directory is the demo root, where every file this demo makes goes.`,
+        sessionId: runId,
+        // Unfiled (studio's `default` mount) is no project to file into: the run launches unfiled.
+        ...(projectId !== UNFILED_PROJECT ? { projectId } : {}),
+        workflow: DEMO_PRESET,
+        deliver: 'none',
+        ...(parsed.data.clisJson !== undefined ? { clisJson: parsed.data.clisJson } : {}),
+        ...(parsed.data.reducedAssurance === true ? { reducedAssurance: true } : {}),
+        ...(parsed.data.shape !== undefined ? { shape: parsed.data.shape } : {}),
+        ...(extra.chatId !== undefined ? { chatId: extra.chatId } : {}),
+      },
+      { ...ctx, ...(extra.fromProposal !== undefined ? { fromProposal: extra.fromProposal } : {}) },
+    );
+  } finally {
+    demoLaunchRoots.delete(runId);
+  }
+  if (launched.statusCode !== 201) {
+    await fsp.rm(root, { recursive: true, force: true });
+    return { code: launched.statusCode, body: launched.payload };
+  }
+  // wicked-core#850: the launch's one-CLI assurance notice reaches the caller (codex r2 on crew#923).
+  const { assuranceNotice } = launched.payload as { assuranceNotice?: unknown };
+  return { code: 201, body: { runId, ...(assuranceNotice !== undefined ? { assuranceNotice } : {}) } };
+}
 
 export const DemoScriptSchema = z.strictObject({ content: z.string().min(1) });
 
@@ -807,7 +873,7 @@ export function parseRange(header: string | undefined, size: number): { start: n
   return { start, end };
 }
 
-export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter): void {
+export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter, launchRun: DemoLaunchRun): void {
   // One encode per run and format at a time, since each format writes one file. An identical request
   // (a double click) joins the encode in flight; a different poster frame is refused until it ends,
   // so two encodes never race to replace the same file.
@@ -840,44 +906,9 @@ export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter): 
       },
     },
     async (req, reply) => {
-      const parsed = DemoLaunchSchema.safeParse(req.body ?? {});
-      if (!parsed.success) {
-        return reply.code(400).send({ error: 'Invalid demo body', details: parsed.error.issues });
-      }
       const projectId = (req.params as { id: string }).id;
-      const runId = randomUUID();
-      const root = demoRootDir(runId);
-      await fsp.mkdir(root, { recursive: true });
-      const briefPath = join(root, 'BRIEF.md');
-      await fsp.writeFile(briefPath, demoBrief(root, parsed.data), 'utf8');
-      const auth = req.headers.authorization;
-      demoLaunchRoots.set(runId, root);
-      const launched = await app
-        .inject({
-          method: 'POST',
-          url: `${V}/runs`,
-          headers: { 'content-type': 'application/json', ...(auth !== undefined ? { authorization: auth } : {}) },
-          payload: {
-            // ONE path (the worker's only way to the brief; the brief names the root). crew#813 made it
-            // follow the state home — studio masks the path where it prints the problem (studio#520).
-            problem: `Make a demo of ${parsed.data.url} with the wicked-garden-demo skill: follow the demo brief at ${briefPath} — its directory is the demo root, where every file this demo makes goes.`,
-            sessionId: runId,
-            // Unfiled (studio's `default` mount) is no project to file into: the run launches unfiled.
-            ...(projectId !== UNFILED_PROJECT ? { projectId } : {}),
-            workflow: DEMO_PRESET,
-            deliver: 'none',
-            ...(parsed.data.clisJson !== undefined ? { clisJson: parsed.data.clisJson } : {}),
-            ...(parsed.data.reducedAssurance === true ? { reducedAssurance: true } : {}),
-          },
-        })
-        .finally(() => demoLaunchRoots.delete(runId));
-      if (launched.statusCode !== 201) {
-        await fsp.rm(root, { recursive: true, force: true });
-        return reply.code(launched.statusCode).type('application/json').send(launched.body);
-      }
-      // wicked-core#850: the launch's one-CLI assurance notice reaches the caller (codex r2 on crew#923).
-      const { assuranceNotice } = launched.json() as { assuranceNotice?: unknown };
-      return reply.code(201).send({ runId, ...(assuranceNotice !== undefined ? { assuranceNotice } : {}) });
+      const out = await demoLaunch(launchRun, projectId, req.body, { actor: (req as { actor?: Actor }).actor ?? LOCAL_ACTOR, log: req.log });
+      return reply.code(out.code).send(out.body);
     },
   );
 

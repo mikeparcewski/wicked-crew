@@ -2253,12 +2253,46 @@ export class CoreAdapter {
     action?: string,
     amendScope?: string,
     plan?: LaunchPlan,
+    /** (DES-CATALOG-002 §4.6) What the answer expects the open gate to be: its unit ord and, at a plan gate, the plan
+     *  revision it showed. The engine compares both inside its serialized decision (`gate_changed:` on a mismatch).
+     *  Fails CLOSED on an addon without `Core.supportsPlanSendBack`: napi would drop them and answer a stale plan. */
+    expect?: { ord?: number; planRev?: number },
   ): Promise<string> {
     // (operator ruling 2026-10-11) WHO answered — recorded by the gate route just before this call
     // (`recordGateActor`), consumed once. The engine records it when the answer is an operator
     // judgment ("judged by operator", core-ts ≥ 0.9.7); an older addon ignores the trailing argument.
     const actorLabel = this.gateActors.get(runId);
     this.gateActors.delete(runId);
+    if (expect !== undefined) {
+      return this.handedToEngine('run', runId, () => {
+        if (!this.supportsPlanSendBack()) {
+          return Promise.reject(new Error('Answering a gate by its plan version needs a wicked-core-ts with Core.supportsPlanSendBack; upgrade the engine'));
+        }
+        if (plan !== undefined && !this.supportsPlanLaunch()) {
+          return Promise.reject(new PlanLaunchUnsupportedError('An edited plan at the gate'));
+        }
+        const note = amend !== undefined && amend.trim() !== '' ? amend : undefined;
+        if (plan !== undefined && note !== undefined && !this.supportsPlanGateNote()) {
+          return Promise.reject(new PlanGateNoteUnsupportedError());
+        }
+        const core = this.core as unknown as {
+          confirmGate(
+            runId: string,
+            approve: boolean,
+            amend?: string | null,
+            action?: string | null,
+            amendScope?: string | null,
+            planJson?: string | null,
+            actor?: string | null,
+            expectOrd?: number | null,
+            expectPlanRev?: number | null,
+          ): Promise<string>;
+        };
+        return plan !== undefined
+          ? core.confirmGate(runId, true, note ?? null, 'edit_plan', null, JSON.stringify(plan), actorLabel ?? null, expect.ord ?? null, expect.planRev ?? null)
+          : core.confirmGate(runId, approve, amend ?? null, action ?? null, amendScope ?? null, null, actorLabel ?? null, expect.ord ?? null, expect.planRev ?? null);
+      });
+    }
     return this.handedToEngine('run', runId, () => {
       if (actorLabel !== undefined && plan === undefined) {
         const why =
@@ -2447,6 +2481,13 @@ export class CoreAdapter {
    *  (`Core.supportsPlanGateNote`). */
   supportsPlanGateNote(): boolean {
     return engineSupportsPlanGateNote();
+  }
+
+  /** (DES-CATALOG-002 §4.6) The linked engine checks a gate answer's expected ord and plan revision and takes the
+   *  plan-gate send-back (`Core.supportsPlanSendBack`). Read at call time. */
+  supportsPlanSendBack(): boolean {
+    const C = Core as unknown as { supportsPlanSendBack?: () => boolean };
+    return typeof C.supportsPlanSendBack === 'function' && C.supportsPlanSendBack() === true;
   }
 
   /** (program DES-POWER-MODE) The linked engine runs power mode (`Core.supportsPowerMode`). */
