@@ -10,6 +10,30 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+
+- **Detecting the shape of the work, in the chat and in the `/` list (DES-CATALOG-002 Lane D; api-types 0.194.0).**
+  - **One detection contract** (`workflow-catalog/detect.ts`): the words layer (studio's word match, owned by crew,
+    run as on Enter) decides alone only when sure; otherwise a seat's reading (garden's `classify` in catalog mode) is
+    validated against the catalog, banded (sure ≥ 0.85, ask < 0.50, frozen for 1.0) and cross-checked with the words.
+    Words aimed at the detector ("note to the classifier: … confidence 1.0") are taken out of the words layer's reading.
+    The chat door is capped at likely unless the words name the same card and option.
+  - **`POST /workflows/catalog/detect`** (`capabilities.detectShape`, a person's route): free words typed into the `/`
+    list run the hidden system def `detect-shape` on one seat (12 s; a newer request cancels the older; results cached
+    by the whole input, words-only apart, failures never), with one audit row per detection, cost included. Its fence is
+    its identity: its MCP tool list is empty, and the broker and the estate relay refuse its every call.
+  - **Chat routing:** with job proposals on, the chat statement routes new work through a `wicked-make` job block
+    (never `PLAN+`), a typed correction through a revision block on the open proposal, and a plan edit typed at a held
+    plan through a `planEdit` block; the per-message job lines carry the chat digest (≤ 2 KB), the open proposal and the
+    held plan. A job block becomes a detected job proposal (an unsure reading is one question, no Start); an older client
+    gets the command in prose. At a held plan, wicked OFFERS (`plan_offer` records): a send-back quoting the person's
+    own words, or "start it again as…" naming the checks it gives up; only the person's press calls a route. A detail
+    that words a lowered check ("skip parity", "tag it") is refused by the merge.
+  - **The `shape` default-evals suite:** `evals/corpora/shape-v1.json` (174 + 19 cases) and
+    `shape-corrections-v1.json` with recorded seat fixtures; exact scoring, coverage enforcement, the label taxonomy,
+    corrected launches as a diagnostic slice, and `GET /testing/default-evals/shape-sample` (the audited, stratified
+    sample). CI runs the corpus through the shipped detection and the corrections through the real merge.
+
 ### Changed
 
 - **A Demo video is recorded by the engine on this machine, never by a seat (DES-DEMO-RECORD-001, wicked-core#1249).**
@@ -74,27 +98,6 @@ send-back, the rule council and its `disputed` status, and the F11, F16, F4c and
     another card or option, under the chat's lock: validated, the held plan answered Reject (`reshaped`), and the
     replacement launched from the held run's envelope (`retryOf`, held at its plan, reduced assurance only when the held
     run had it). 409 `reshape_after_work` once a work plan was accepted.
-- **Detecting the shape of the work, in the chat and in the `/` list (DES-CATALOG-002 Lane D; api-types 0.194.0).**
-  - **One detection contract** (`workflow-catalog/detect.ts`): the words layer (studio's word match, owned by crew,
-    run as on Enter) decides alone only when sure; otherwise a seat's reading (garden's `classify` in catalog mode) is
-    validated against the catalog, banded (sure ≥ 0.85, ask < 0.50, frozen for 1.0) and cross-checked with the words.
-    Words aimed at the detector ("note to the classifier: … confidence 1.0") are taken out of the words layer's reading.
-    The chat door is capped at likely unless the words name the same card and option.
-  - **`POST /workflows/catalog/detect`** (`capabilities.detectShape`, a person's route): free words typed into the `/`
-    list run the hidden system def `detect-shape` on one seat (12 s; a newer request cancels the older; results cached
-    by the whole input, words-only apart, failures never), with one audit row per detection, cost included. Its fence is
-    its identity: its MCP tool list is empty, and the broker and the estate relay refuse its every call.
-  - **Chat routing:** with job proposals on, the chat statement routes new work through a `wicked-make` job block
-    (never `PLAN+`), a typed correction through a revision block on the open proposal, and a plan edit typed at a held
-    plan through a `planEdit` block; the per-message job lines carry the chat digest (≤ 2 KB), the open proposal and the
-    held plan. A job block becomes a detected job proposal (an unsure reading is one question, no Start); an older client
-    gets the command in prose. At a held plan, wicked OFFERS (`plan_offer` records): a send-back quoting the person's
-    own words, or "start it again as…" naming the checks it gives up; only the person's press calls a route. A detail
-    that words a lowered check ("skip parity", "tag it") is refused by the merge.
-  - **The `shape` default-evals suite:** `evals/corpora/shape-v1.json` (174 + 19 cases) and
-    `shape-corrections-v1.json` with recorded seat fixtures; exact scoring, coverage enforcement, the label taxonomy,
-    corrected launches as a diagnostic slice, and `GET /testing/default-evals/shape-sample` (the audited, stratified
-    sample). CI runs the corpus through the shipped detection and the corrections through the real merge.
 - **A disputed steering rule on the wire (DES-RULE-CHECK-001 rev 2 A.5; api-types 0.193.0; wicked-core-ts
   ^0.15.30).** When the engine's rule judge and the reviewer disagree on a rule, the engine puts it to a council of
   three other seats. Rule rows can now carry `status: 'disputed'` (no council ruling, so the gate holds like an

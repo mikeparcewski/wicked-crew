@@ -77,7 +77,7 @@
     "undici": "^6.28.1",
     "vitest": "^5.0.2",
     "wicked-bus": "^2.5.0",
-    "wicked-crew-api-types": "^0.193.0",
+    "wicked-crew-api-types": "^0.194.0",
     "wicked-studio": "^0.15.0"
   },
   "engines": {
