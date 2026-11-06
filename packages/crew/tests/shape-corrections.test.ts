@@ -149,6 +149,12 @@ describe('the adapter catches a hostile block (its own negative tests)', () => {
     expect(judgeCorrection(caseOf('k4'), k4.parent!, { ...k4.result!, inputs: '{"show":{"kind":"text","value":"x"}}' }, 0).join(' ')).toMatch(/inputs changed/u);
   });
 
+  it('the oracle compares what holds Start on an unchanged case (codex r5)', async () => {
+    const k27 = await run('k27', null);
+    expect(judgeCorrection(caseOf('k27'), { ...k27.parent!, blocked: 'Which repository?' }, k27.result!, 0).join(' ')).toMatch(/holds Start/u);
+    expect(judgeCorrection(caseOf('k27'), { ...k27.parent!, guessBand: 'ask' }, k27.result!, 0).join(' ')).toMatch(/guess changed/u);
+  });
+
   it('a seat\'s removal of a carried detail needs the person to ask for it, never for one that names a check (codex r4)', async () => {
     const chat = new CorrectionChat(served, scope);
     await chat.pick('migrate', 'upgrade', 'bump node');
@@ -159,6 +165,10 @@ describe('the adapter catches a hostile block (its own negative tests)', () => {
     await chat.swap({ detail: { add: ['on .NET 8'] } });
     await chat.correct('remove on .NET 8 please', { revises: chat.current()!.pid, edits: { detail: { remove: ['on .NET 8'] } } });
     expect(chat.current()!.details).toEqual(['a separate judge for the release']);
+    // A removal the person negates is not a removal (codex r5).
+    await chat.swap({ detail: { add: ['on .NET 9'] } });
+    await chat.correct('do not remove on .NET 9; it stays', { revises: chat.current()!.pid, edits: { detail: { remove: ['on .NET 9'] } } });
+    expect(chat.current()!.details).toContain('on .NET 9');
     // An ordinary noun is not reported speech: "requests that time out" is the person's own.
     await chat.correct('add retries for requests that time out', { revises: chat.current()!.pid, edits: { detail: { add: ['requests that time out'] } } });
     expect(chat.current()!.details).toContain('requests that time out');
@@ -174,7 +184,7 @@ describe('the adapter catches a hostile block (its own negative tests)', () => {
 
 describe('lowersCheck (the words that would lower a check)', () => {
   it('reads requests to lower, prohibitions and ship steps; keeps descriptions and requests to keep a check', () => {
-    const lowers = ['skip parity', 'skip QE acceptance', 'without the review', 'drop the tests', 'skip cited findings', 'skip the distinct reviewer', 'drop the separate judge', "ship this without running the reviewer's checks", 'waive QE', 'fewer reviewers', 'remove the parity check', 'no review needed', 'turn QE off', 'Do not review this', 'Do not run QE acceptance', 'Never run the tests', 'and tag it when you are done', 'merge it when green', 'do not run the independent review', 'Do not perform any distinct review', 'turn the QE acceptance check off', 'do not run the reviewer', 'never run the second judge', 'do not review', 'never test', 'no need to review', 'Don\u2019t run the tests'];
+    const lowers = ['skip parity', 'skip QE acceptance', 'without the review', 'drop the tests', 'skip cited findings', 'skip the distinct reviewer', 'drop the separate judge', "ship this without running the reviewer's checks", 'waive QE', 'fewer reviewers', 'remove the parity check', 'no review needed', 'turn QE off', 'Do not review this', 'Do not run QE acceptance', 'Never run the tests', 'do not review or test this change', 'and tag it when you are done', 'merge it when green', 'do not run the independent review', 'Do not perform any distinct review', 'turn the QE acceptance check off', 'do not run the reviewer', 'never run the second judge', 'do not review', 'never test', 'no need to review', 'Don\u2019t run the tests'];
     const keeps = ['without downtime', 'no downtime', "don't fix anything", '.NET 8 on Linux', 'There are no tests for this module', 'no tests failed', 'Do not drop parity checks', 'Fix the bug without skipping QE acceptance', 'do not skip the tests', 'reduce the cache size', 'so agents can call it', 'never touch the billing tables', "don't review the generated files", 'do not test in production', 'no need to check twice', 'Don\u2019t skip QE acceptance'];
     for (const t of lowers) expect(lowersCheck(t), t).toBe(true);
     for (const t of keeps) expect(lowersCheck(t), t).toBe(false);

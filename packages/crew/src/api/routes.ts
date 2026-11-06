@@ -158,7 +158,7 @@ import { registerProjectAggregateRoutes } from './project-aggregates.js';
 import { composeLaunch, composePreflight, registerProductRoutes } from './product.js';
 import { buildWorkflowCatalogV2, parseCommand, resolveOption } from '../workflow-catalog/build-v2.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
-import { DETECT_TIMEOUT_MS, DetectService } from '../workflow-catalog/detect-service.js';
+import { DETECT_TIMEOUT_MS, DETECT_WORKFLOW, DetectService } from '../workflow-catalog/detect-service.js';
 import { checkLaunchShape, LaunchShapeSchema, launchShapeOf, servedFor, withBriefLines, type LaunchTarget, type ShapeReads } from '../workflow-catalog/shape.js';
 import { registerPresetRoutes } from '../presets/routes.js';
 import { busRows, openPlanGateRev, registerTeamRoutes, workPlanAccepted } from '../team/routes.js';
@@ -8401,7 +8401,7 @@ export function registerRoutes(
       const served = await servedFor(shapeReads, projectId ?? undefined);
       const status = (card: string, option: string | null): 'available' | 'coming_soon' | 'unavailable' =>
         resolveOption(card, option, served)?.resolved.status ?? 'unavailable';
-      return { rev: served.rev, status, available: (card, option) => status(card, option) === 'available' };
+      return { rev: served.rev, status, available: (card, option) => status(card, option) === 'available', detectShadowed: served.saved.has(DETECT_WORKFLOW) };
     },
     costOf: async (runId) => {
       const view = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);

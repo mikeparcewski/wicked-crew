@@ -297,6 +297,28 @@ describe('a seat\'s job block → a detected job proposal (§2.3)', () => {
     expect(now.seats!.keys).toContain('pi');
   });
 
+  it('the next turn\'s job lines wait for the earlier turn\'s revision, so its ids are the ones its hold binds (codex r5)', async () => {
+    const r = rig();
+    await turn(r, 't1', 'sum([1,2,3]) returns 5 instead of 6 in tiny-math', [{ entry: 'bug', confidence: 0.95 }]);
+    const p0 = open(r)!;
+    r.records.push({ at: 2, turnId: 't2', kind: 'user', text: 'it happens on Linux', seats: ['claude'], owner: true });
+    r.live.add('t2');
+    await r.svc.holdForMessage(CHAT, 't2');
+    r.svc.onReply({ chat: CHAT, cliKey: 'claude', turnId: 't2', ok: true, blocks: [JSON.stringify({ revises: p0.pid, edits: { detail: { add: ['on Linux'] } } })] });
+    r.live.delete('t2');
+    const t = await r.svc.jobTurn(CHAT);
+    expect(t!.context.open!.pid).not.toBe(p0.pid);
+    expect(t!.context.open!.pid).toBe(open(r)!.pid);
+  });
+
+  it('a revision naming another proposal than the one its message held is said, not silently dropped (codex r5)', async () => {
+    const r = rig();
+    await turn(r, 't1', 'sum([1,2,3]) returns 5 instead of 6 in tiny-math', [{ entry: 'bug', confidence: 0.95 }]);
+    await turn(r, 't2', 'add pi too', [{ revises: 'c1:some-other', edits: { addSeats: ['pi'] } }]);
+    const released = r.records.filter((x): x is Extract<ChatTranscriptRecord, { kind: 'proposal_released' }> => x.kind === 'proposal_released').at(-1)!;
+    expect(released.note).toMatch(/wasn't applied/u);
+  });
+
   it('a slow seat\'s root block never appears after a newer message (codex r4)', async () => {
     const r = rig();
     r.records.push({ at: 2, turnId: 't1', kind: 'user', text: 'sum([1,2,3]) returns 5 instead of 6 in tiny-math', seats: ['claude'], owner: true });

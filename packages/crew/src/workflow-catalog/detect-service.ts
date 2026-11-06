@@ -70,7 +70,13 @@ export interface DetectServiceDeps {
   turn: (input: SeatTurnInput) => Promise<SeatTurnOutcome>;
   cancelRun: (runId: string) => Promise<void>;
   /** The catalog as a launch in `projectId` reads it: its revision and each card's (or option's) availability. */
-  catalog: (projectId: string | null) => Promise<{ rev: string; available: (card: string, option: string | null) => boolean; status: (card: string, option: string | null) => 'available' | 'coming_soon' | 'unavailable' }>;
+  catalog: (projectId: string | null) => Promise<{
+    rev: string;
+    available: (card: string, option: string | null) => boolean;
+    status: (card: string, option: string | null) => 'available' | 'coming_soon' | 'unavailable';
+    /** A saved preset shadows `detect-shape` (it would run in the turn's place): the seat is not asked. */
+    detectShadowed?: boolean;
+  }>;
   /** The detection run's cost once it reported one (`null` = none reported). */
   costOf?: (runId: string) => Promise<number | null>;
   audit: (row: DetectionAudit) => void;
@@ -202,6 +208,11 @@ export class DetectService {
     const d = await classifyPath(base, async () => {
       // The instant row asks for nothing more than the words.
       if (!seatWanted) return null;
+      // Fail closed on a shadowed detector: a saved preset under its name would run instead of it (codex r5).
+      if (catalog.detectShadowed === true) {
+        failure = `a saved preset named ${DETECT_WORKFLOW} shadows the detector; answered from the words`;
+        return null;
+      }
       // Fenced BEFORE the launch: a unit's first call can land before the launch answers.
       FENCED_RUNS.add(runId);
       if (owns()) this.inflight.set(actor.id, { token, runId, abort });

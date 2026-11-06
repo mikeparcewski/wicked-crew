@@ -293,6 +293,25 @@ describe('DetectService (§2.3 classifyTurn)', () => {
     expect(audits).toHaveLength(3);
   });
 
+  it('a saved preset shadowing detect-shape is never run: the words answer (codex r5)', async () => {
+    let turns = 0;
+    const audits: DetectionAudit[] = [];
+    const svc = new DetectService({
+      turn: async () => {
+        turns += 1;
+        return { ok: true, answer: '{"card":"bug","confidence":0.95}', seat: 'pi' };
+      },
+      cancelRun: async () => undefined,
+      catalog: async () => ({ rev: 'r', available: () => true, status: () => 'available' as const, detectShadowed: true }),
+      audit: (row) => audits.push(row),
+      newId: () => 'run-s',
+    });
+    const out = await svc.detect({ text: 'sum([1,2,3]) returns 5 instead of 6 in tiny-math' }, ME);
+    expect(out.code).toBe(200);
+    expect(turns).toBe(0);
+    expect(audits[0]!.outcome.failure).toMatch(/shadows the detector/u);
+  });
+
   it('refuses empty and over-long words', async () => {
     const { svc } = service(async () => ({ ok: false, code: 409, error: 'x' }));
     expect((await svc.detect({ text: '   ' }, ME)).code).toBe(400);

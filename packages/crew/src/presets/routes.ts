@@ -17,6 +17,7 @@
  * An addon without the bindings answers 501 (PresetsUnsupportedError), never 400.
  */
 
+import { FENCED_WORKFLOWS } from '../mcp/run-fence.js';
 import type { FastifyInstance } from 'fastify';
 import { z } from '../zod.js';
 import type { CoreAdapter } from '../core/adapter.js';
@@ -92,6 +93,11 @@ export function registerPresetRoutes(
     const parsed = PutPresetSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+    }
+    // DES-CATALOG-002 §2.3: a fenced system run's name (crew's detection turn) is crew's; a saved preset under it would
+    // run in that turn's place (codex r5 on Lane D).
+    if (FENCED_WORKFLOWS.has(req.params.name)) {
+      return reply.code(409).send({ code: 'reserved_name', error: `\`${req.params.name}\` is crew's own system workflow; save your preset under another name` });
     }
     try {
       const preset = await adapter.putPreset(

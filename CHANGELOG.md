@@ -29,7 +29,7 @@ mentioned only where a daemon release depends on them.
     gets the command in prose. At a held plan, wicked OFFERS (`plan_offer` records): a send-back quoting the person's
     own words, or "start it again as…" naming the checks it gives up; only the person's press calls a route. A detail
     that words a lowered check ("skip parity", "tag it") is refused by the merge.
-  - **The `shape` default-evals suite:** `evals/corpora/shape-v1.json` (174 + 19 cases) and
+  - **The `shape` default-evals suite:** `evals/corpora/shape-v1.json` (the design's corpus plus cases recorded the same blind way) and
     `shape-corrections-v1.json` with recorded seat fixtures; exact scoring, coverage enforcement, the label taxonomy,
     corrected launches as a diagnostic slice, and `GET /testing/default-evals/shape-sample` (the audited, stratified
     sample). CI runs the corpus through the shipped detection and the corrections through the real merge.

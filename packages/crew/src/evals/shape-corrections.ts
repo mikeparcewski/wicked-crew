@@ -204,6 +204,9 @@ export interface CorrectionView {
   inputs: string;
   notes: string[];
   question: ArtifactProposal['question'] | null;
+  /** Start is blocked (and why), and the detection's band when it is still a guess. */
+  blocked: string | null;
+  guessBand: string | null;
 }
 
 export function viewOfProposal(p: ArtifactProposal): CorrectionView {
@@ -224,6 +227,8 @@ export function viewOfProposal(p: ArtifactProposal): CorrectionView {
     inputs: JSON.stringify(p.inputs ?? {}),
     notes: [...(p.sentence?.notes ?? [])],
     question: p.question ?? null,
+    blocked: p.blocked ?? null,
+    guessBand: p.shape?.guess?.band ?? null,
   };
 }
 
@@ -259,6 +264,14 @@ export interface CorrectionResult {
 
 const FIELDS = ['card', 'option', 'repo', 'seats', 'depth', 'lead', 'skipQe'] as const;
 
+/** Two inputs objects (JSON) hold the same values, key order aside. */
+function sameInputs(a: string, b: string): boolean {
+  const x = JSON.parse(a) as Record<string, unknown>;
+  const y = JSON.parse(b) as Record<string, unknown>;
+  const keys = new Set([...Object.keys(x), ...Object.keys(y)]);
+  return [...keys].every((k) => JSON.stringify(x[k]) === JSON.stringify(y[k]));
+}
+
 /** Compare a result with the case's whole expectation (product semantics, module doc). */
 export function judgeCorrection(c: CorrectionCase, parent: CorrectionView, now: CorrectionView, written: number, asked: CorrectionView | null = null): string[] {
   const e = c.expect;
@@ -268,9 +281,13 @@ export function judgeCorrection(c: CorrectionCase, parent: CorrectionView, now: 
   if (e.unchanged === true) {
     if (written > 0 || now.pid !== parent.pid) why.push(`wrote ${written} proposal(s) for a correction that changes nothing`);
     for (const f of FIELDS) if (!same(f)) why.push(`changed ${f}`);
-    if (JSON.stringify(now.details) !== JSON.stringify(parent.details)) why.push('carried words into the brief');
+    if (JSON.stringify([...now.details].sort()) !== JSON.stringify([...parent.details].sort())) why.push('carried words into the brief');
     if (now.words !== parent.words) why.push('the job\'s words changed');
-    if (now.inputs !== parent.inputs) why.push('inputs changed');
+    if (!sameInputs(parent.inputs, now.inputs)) why.push('inputs changed');
+    // Nothing that holds Start may go: a pending question, a block, an unsure guess (codex r5).
+    if (JSON.stringify(now.question) !== JSON.stringify(parent.question)) why.push('the pending question changed');
+    if (now.blocked !== parent.blocked) why.push('what holds Start changed');
+    if (now.guessBand !== parent.guessBand) why.push('the detection guess changed');
     return why;
   }
   const expected = new Set<string>(FIELDS.filter((f) => f in e));
@@ -316,8 +333,12 @@ export function judgeCorrection(c: CorrectionCase, parent: CorrectionView, now: 
   // Inputs change only by projection onto a new card (rule 2): every input the result holds is the parent's, unchanged.
   const pin = JSON.parse(parent.inputs) as Record<string, unknown>;
   const nin = JSON.parse(now.inputs) as Record<string, unknown>;
-  for (const [k, v] of Object.entries(nin)) if (JSON.stringify(pin[k]) !== JSON.stringify(v)) why.push(`input ${k} changed`);
-  if (e.card === undefined && parent.kind === now.kind && Object.keys(pin).some((k) => !(k in nin))) why.push('inputs dropped');
+  // Across launch kinds the new kind's inputs are its own (§4.6 "Across kinds"); within one, each kept input is the parent's.
+  if (parent.kind === now.kind) for (const [k, v] of Object.entries(nin)) if (JSON.stringify(pin[k]) !== JSON.stringify(v)) why.push(`input ${k} changed`);
+  // Within one card nothing is dropped; a card change keeps what the new card takes (rule 2), which the merge's notes
+  // name for each input it leaves out.
+  if (now.card === parent.card && parent.kind === now.kind && Object.keys(pin).some((k) => !(k in nin))) why.push('inputs dropped');
+  if (now.card !== parent.card) for (const k of Object.keys(pin)) if (!(k in nin) && !now.notes.some((n) => n.includes(`takes no ${k}`))) why.push(`input ${k} dropped unsaid`);
   // Carried details survive an unrelated correction (none of the corpus's cases removes one).
   for (const d of parent.details) if (!now.details.includes(d)) why.push(`lost a carried detail: “${d}”`);
   const said = (c.text ?? (c.turns ?? []).join('\n')).toLowerCase();
