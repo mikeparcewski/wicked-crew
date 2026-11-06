@@ -310,8 +310,12 @@ export function judgeCorrection(c: CorrectionCase, parent: CorrectionView, now: 
   if (e.wordsAdded !== undefined && !now.details.some((d) => d.includes(e.wordsAdded!))) why.push('words lost');
   // The whole result, not only the fields named (codex r2): the job's words and inputs never change unless expected,
   // and every carried detail comes from the person's own message (a seat's unrelated addition fails the case).
-  if (now.words !== parent.words && parent.kind === now.kind) why.push('the job\'s words changed');
-  if (now.inputs !== parent.inputs && parent.kind === now.kind) why.push('inputs changed');
+  // The person's words survive any correction, a change of launch kind included (codex r3).
+  if (now.words !== parent.words) why.push('the job\'s words changed');
+  // Inputs change only by projection onto a new card (rule 2), never otherwise.
+  if (now.inputs !== parent.inputs && e.card === undefined && parent.kind === now.kind) why.push('inputs changed');
+  // Carried details survive an unrelated correction (none of the corpus's cases removes one).
+  for (const d of parent.details) if (!now.details.includes(d)) why.push(`lost a carried detail: “${d}”`);
   const said = (c.text ?? (c.turns ?? []).join('\n')).toLowerCase();
   for (const d of now.details) if (!parent.details.includes(d) && !said.includes(d.toLowerCase())) why.push(`carried words the person did not say: “${d}”`);
   if (e.refusedPart !== undefined && /parity/iu.test(e.refusedPart) && !now.gate.includes('parity')) why.push('parity dropped');

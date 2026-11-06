@@ -331,10 +331,27 @@ const OUTCOME_CUES: ReadonlyArray<{ re: RegExp; cards: readonly string[] }> = [
   { re: /\b(?:should we|decide|choose between|which is better)\b/iu, cards: ['decide'] },
 ];
 
+/**
+ * Work the words name only to rule it out or to refer to it ("do not modernize…", "leave the migration alone", "instead
+ * of a rewrite", "summarize the migration ticket"): the words then do not decide alone (codex r3).
+ */
+const NEGATED_WORK = /\b(?:don'?t|do\s+not|never|no\s+longer)\s+(?:\w+\s+){0,2}?(?:modernize|migrate|upgrade|move|port|rewrite|refactor|build|implement|fix|release|plan|review|test|change|touch)\b|\bleave\b[^.;]*\balone\b/iu;
+const REFERENCED_WORK = /\b(?:summari[sz]e|summary\s+of|recap|the\s+ticket|ticket\s+for)\b/iu;
+
+/** Whether the words rule the work out ("do not modernize…", "leave the migration alone"). */
+export function negatedWork(text: string): boolean {
+  return NEGATED_WORK.test(text);
+}
+
+/** Whether the words rule out or only refer to work (then they do not decide alone). */
+export function negatedOrReferenced(text: string): boolean {
+  return NEGATED_WORK.test(text) || REFERENCED_WORK.test(text);
+}
+
 /** Whether the words ask for an outcome the card does not deliver (then they do not decide alone). */
 export function outcomeConflict(text: string, card: string): boolean {
-  // Every outcome the words ask for must be one the card delivers: "Plan a security review" asks for a plan of a review,
-  // and a review card alone does not decide it (codex r2).
+  // Every outcome the words ask for must be one the card delivers, for the words to decide alone: "Plan a security
+  // review" is a plan of a review, and the review card does not decide it (codex r2). The seat then reads it.
   return OUTCOME_CUES.some((c) => c.re.test(text) && !c.cards.includes(card));
 }
 
@@ -372,6 +389,7 @@ export function wordsLayer(raw: string): WordsResult {
   }
   const sure = seed !== undefined
     && !outcomeConflict(text, seed.id)
+    && !negatedOrReferenced(text)
     && words >= WORDS_SURE.minWords
     && top >= WORDS_SURE.minScore
     && top >= WORDS_SURE.ratio * Math.max(runnerUp, 0.01)
@@ -590,11 +608,13 @@ export function detect(input: DetectInput): Detection {
     const available = availableOf(card, option);
     // A job this daemon cannot start is never shown as sure (pi r2): at most likely, with its nearest offered.
     const band: Band = banded === 'sure' && !available ? 'likely' : banded;
+    // A demoted reading reports a confidence its band can hold (pi r3).
+    const shown = band === 'likely' ? Math.min(confidence, DETECT_BANDS.sure - 0.01) : confidence;
     return {
       card,
       option,
       depth,
-      confidence: Math.round(confidence * 1000) / 1000,
+      confidence: Math.round(shown * 1000) / 1000,
       band,
       reason,
       available,
@@ -634,7 +654,12 @@ export function detect(input: DetectInput): Detection {
     };
   }
   const banded = bandOf(seat.confidence, seat.ask.length > 0);
-  const band = crossCheck({ card: seat.card, option: seat.option, band: banded, source: input.source }, words);
+  const checked = crossCheck({ card: seat.card, option: seat.option, band: banded, source: input.source }, words);
+  // A seat sure of work the words rule out ("do not fix…", "leave … alone") is held as likely (codex r3). The outcome
+  // cues are NOT applied to a seat's reading: which of nested outcomes is asked is the seat's to read (classify's first
+  // rule), and outcome words double as subjects ("our code review conventions", "repo-audit", "should we test"): on the
+  // corpus the veto held 6 more right answers as likely and prevented no wrong sure.
+  const band: Band = checked === 'sure' && negatedWork(withoutAimed(input.text)) ? 'likely' : checked;
   const choices = seat.ask.length > 0 ? seat.ask : [{ card: seat.card, option: seat.option }, ...wordsChoices(words)];
   return { guess: make(seat.card, seat.option, seat.depth, seat.confidence, band, seat.reason, input.source, questionOf(choices)), words, seat };
 }

@@ -71,6 +71,7 @@ import { parseCommand, resolveOption } from '../workflow-catalog/build-v2.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
 import {
   checksLabel,
+  ownWords,
   factsOf,
   JobRefusal,
   mergeRevision,
@@ -726,6 +727,13 @@ function personWords(records: readonly ChatTranscriptRecord[], turnId: string): 
   return out.join('\n');
 }
 
+/** (DES-CATALOG-002 §2.3) A proposal whose detection is still unsure (`ask`) holds no Start: its question is the guess's. */
+export function withAskOverlay(p: ArtifactProposal): ArtifactProposal {
+  const q = p.shape?.guess?.band === 'ask' ? p.shape.guess.question : null;
+  if (q === null || q === undefined) return p;
+  return { ...p, blocked: q.text, question: null, suggestions: [], ...(p.sentence !== undefined ? { sentence: { ...p.sentence, ask: q.text } } : {}) };
+}
+
 /** (DES-CATALOG-002 §2.3) Whether an entry block routes a job card of the v2 catalog (its id is a detectable card's,
  *  or it carries the routing fields a job block has). */
 export function isJobCardEntry(block: { entry: string; option?: string | null | undefined; confidence?: number | undefined }): boolean {
@@ -807,7 +815,7 @@ export class ChatProposals {
 
   /** What a seat may be told it can make now (`chat-scope.ts`'s per-message digest). With a chat id, how the chat routes
    *  new work too (DES-CATALOG-002 §2.3: job cards for a client that renders them, a command line for an older one). */
-  digest(chatId?: string): MakeDigest {
+  digest(chatId?: string, accepts?: boolean): MakeDigest {
     const f = this.deps.flags();
     const on = f.proposals;
     const entries = on
@@ -819,7 +827,7 @@ export class ChatProposals {
         })
       : [];
     // A create or demo with no catalog entry to name is not on (the seat is told nothing it could propose).
-    const jobs: MakeDigest['jobs'] = chatId === undefined || !this.jobsOn() ? undefined : this.acceptsJobs(chatId) ? 'cards' : 'prose';
+    const jobs: MakeDigest['jobs'] = chatId === undefined || !this.jobsOn() ? undefined : (accepts ?? this.acceptsJobs(chatId)) ? 'cards' : 'prose';
     return {
       create: on && f.create && entries.some((e) => e.kind === 'document'),
       refine: on && f.refine,
@@ -842,7 +850,7 @@ export class ChatProposals {
   onReply(frame: { chat: string; cliKey: string; turnId?: string; ok: boolean; blocks: readonly string[] }): void {
     // DES-CATALOG-002 §2.3: for a client that draws job cards, one request yields at most one actionable block: the
     // FIRST valid one of any kind (a job, a revision, a plan edit, a refine, a theme), and only it is read (codex r1).
-    if (frame.blocks.length > 1 && this.jobsOn() && this.acceptsJobs(frame.chat)) {
+    if (frame.blocks.length > 1 && this.jobsOn() && this.acceptsTurn(frame.chat, frame.turnId)) {
       const first = frame.blocks.find((b) => parseMakeBlock(b) !== null || parseRevisionBlock(b) !== null || parsePlanEditBlock(b) !== null);
       frame = { ...frame, blocks: first === undefined ? [] : [first] };
     }
@@ -853,7 +861,7 @@ export class ChatProposals {
     // DES-CATALOG-002 §2.3: with job routing on, one routing protocol: the FIRST valid block is the one actionable card,
     // and at a job's held plan a plan edit or a change of job becomes wicked's offer instead.
     // An older client (no job cards) keeps today's reading: the last valid block, no plan offers it could not draw.
-    const jobs = this.jobsOn() && this.acceptsJobs(frame.chat);
+    const jobs = this.jobsOn() && this.acceptsTurn(frame.chat, frame.turnId);
     if (jobs && this.onPlanReply(frame)) return;
     const block = jobs ? firstValidBlock(frame.blocks) : lastValidBlock(frame.blocks);
     if (block === null) {
@@ -1819,6 +1827,21 @@ export class ChatProposals {
     return this.jobsOn() && this.deps.acceptsJobs?.(chatId) === true;
   }
 
+  /** Per accepted turn: whether its client draws job cards, as the turn's instructions were written (codex r3). */
+  private readonly turnAccepts = new Map<string, boolean>();
+
+  /** The route records the declaration a turn's instructions were written for, before the seat can answer it. */
+  noteTurnAccepts(chatId: string, turnId: string, accepts: boolean): void {
+    this.turnAccepts.set(`${chatId}\u0000${turnId}`, accepts);
+    while (this.turnAccepts.size > 2000) this.turnAccepts.delete(this.turnAccepts.keys().next().value as string);
+  }
+
+  /** How a reply to `turnId` is read: as its instructions were written, else the chat's declaration now. */
+  private acceptsTurn(chatId: string, turnId: string | undefined): boolean {
+    const noted = turnId === undefined ? undefined : this.turnAccepts.get(`${chatId}\u0000${turnId}`);
+    return this.jobsOn() && (noted ?? this.deps.acceptsJobs?.(chatId) === true);
+  }
+
   /**
    * (DES-CATALOG-002 §2.3) A seat's job routing block → a DETECTED job proposal: the block is a guess like any other,
    * validated against the catalog, cross-checked with the words layer over the person's own message of that turn and
@@ -1871,17 +1894,9 @@ export class ChatProposals {
         source: 'chat',
         guess: g,
       };
-      let proposal = await this.proposalOf(chatId, pid, facts, ctx, records);
-      if (g.band === 'ask' && g.question !== null) {
-        // ONE question, never a Start: each choice names a shape (a pick is a person-made proposal).
-        proposal = {
-          ...proposal,
-          blocked: g.question.text,
-          question: null,
-          suggestions: [],
-          ...(proposal.sentence !== undefined ? { sentence: { ...proposal.sentence, ask: g.question.text } } : {}),
-        };
-      }
+      // ONE question, never a Start, while the reading is unsure: each choice names a shape (a pick is a person-made
+      // proposal).
+      const proposal = withAskOverlay(await this.proposalOf(chatId, pid, facts, ctx, records));
       this.deps.audit('chat.detect', { id: `seat:${seat}`, kind: 'agent', trust: 'observer' }, {
         chatId, turnId, source: g.source, seat, card: g.card, option: g.option, band: g.band, confidence: g.confidence, dropped: d.seat?.dropped ?? null,
       });
@@ -2032,9 +2047,9 @@ export class ChatProposals {
    * (DES-CATALOG-002 §2.3, §4.6) The per-message job lines for this chat: how it routes new work, the chat catalog
    * digest, and what is open, held at its plan or running. `null` when job routing is off.
    */
-  async jobTurn(chatId: string): Promise<{ mode: 'cards' | 'prose'; context: JobTurnContext } | null> {
+  async jobTurn(chatId: string, accepts?: boolean): Promise<{ mode: 'cards' | 'prose'; context: JobTurnContext } | null> {
     if (!this.jobsOn()) return null;
-    const mode: 'cards' | 'prose' = this.acceptsJobs(chatId) ? 'cards' : 'prose';
+    const mode: 'cards' | 'prose' = (accepts ?? this.acceptsJobs(chatId)) ? 'cards' : 'prose';
     const chat = this.jobChat(chatId);
     let status: ((card: string, option: string | null) => 'available' | 'coming_soon' | 'unavailable') | undefined;
     try {
@@ -2265,6 +2280,26 @@ export class ChatProposals {
       else if (personAskedSkip(src.message)) qe = { reason: null };
       else extraNotes.push('Not changed: QE acceptance stays. Skipping it needs your own reason, in your own words.');
     }
+    // What a seat's block carries into the brief must be the person's own (codex r3): a detail added or removed, and a
+    // text input, appear in their message (outside quotes and reported speech); anything else is refused with a note.
+    if (!fromPerson) {
+      const said = ownWords(src.message ?? '').toLowerCase();
+      const fromThem = (t: string): boolean => t.trim() !== '' && said.includes(t.trim().toLowerCase());
+      if (edits.detail !== undefined) {
+        const add = (edits.detail.add ?? []).filter((d) => fromThem(d));
+        const remove = (edits.detail.remove ?? []).filter((d) => fromThem(d));
+        for (const d of [...(edits.detail.add ?? []), ...(edits.detail.remove ?? [])]) if (!fromThem(d)) extraNotes.push(`Not changed: “${d.slice(0, 60)}” isn't in what you said`);
+        edits.detail = { ...(add.length > 0 ? { add } : {}), ...(remove.length > 0 ? { remove } : {}) };
+      }
+      if (edits.inputs !== undefined) {
+        const kept: NonNullable<ProposalRevisionEdits['inputs']> = {};
+        for (const [k, v] of Object.entries(edits.inputs)) {
+          if (v.kind === 'requirements' || fromThem(v.value)) kept[k] = v;
+          else extraNotes.push(`Not changed: ${k.slice(0, 40)} must be in your own words`);
+        }
+        edits.inputs = kept;
+      }
+    }
     // The job's own words are the person's (§4.6 rule 6): a seat's block may fill a missing intent, never replace it
     // (codex r1 on Lane D: the brief the lead reads is never the seat's rewrite).
     if (!fromPerson && edits.inputs !== undefined && Object.hasOwn(edits.inputs, 'intent') && (parent.proposal.words ?? '').trim() !== '') {
@@ -2282,15 +2317,20 @@ export class ChatProposals {
     // are compared with the parent's too, so nothing is lost unseen (codex r2).
     let candidate: ArtifactProposal | null = null;
     let candidateErr: unknown = null;
+    // A revision is not the detection any more: a changed card or option drops the guess it no longer describes (codex
+    // r2), and an unsure guess is cleared only by a revision that names the shape (a card or an option: the seat's
+    // reading of the person's clarification, the same card included); a repository or a detail leaves the question
+    // standing (codex r3).
+    const g = merged.facts.guess;
+    const seed = CATALOG_V2_CARDS.find((c) => c.id === merged.facts.card);
+    const namesShape = rev.edits.card !== undefined || rev.edits.option !== undefined;
+    const moved = g !== undefined && (seed === undefined || g.card !== merged.facts.card || optionFor(seed, g.option) !== optionFor(seed, merged.facts.option));
+    const stale = g !== undefined && (moved || (g.band === 'ask' && namesShape));
     try {
-      // A revision is not the detection any more: an unsure first guess (`ask`) is not carried onto a startable shape,
-      // and a changed card or option drops the guess it no longer describes (codex r2 on Lane D).
-      const g = merged.facts.guess;
-      const stale = g !== undefined && (g.band === 'ask' || g.card !== merged.facts.card || g.option !== optionFor(CATALOG_V2_CARDS.find((c) => c.id === merged.facts.card)!, merged.facts.option));
       const { guess: _g, ...unguessed } = merged.facts;
       void _g;
       const factsNow: JobFacts = stale ? unguessed : merged.facts;
-      candidate = keepReshape(await this.proposalOf(chatId, src.pid, { ...factsNow, by: fromPerson ? 'person' : factsNow.by, source: src.source }, ctx, records, allowHidden), parent.proposal);
+      candidate = withAskOverlay(keepReshape(await this.proposalOf(chatId, src.pid, { ...factsNow, by: fromPerson ? 'person' : factsNow.by, source: src.source }, ctx, records, allowHidden), parent.proposal));
     } catch (err) {
       candidateErr = err;
     }
@@ -2355,7 +2395,7 @@ export class ChatProposals {
       return { code: 201, body: { view: view !== undefined ? viewOf(view) : { proposal: asked, state: 'open' } } };
     }
     // A seat's revision that changes nothing and says nothing re-proposes nothing ("skip parity": the seat says why).
-    if (!fromPerson && merged.unchanged && merged.notes.length === 0) return { code: 200, body: { view: viewOf(parent) } };
+    if (!fromPerson && merged.unchanged && merged.notes.length === 0 && !stale) return { code: 200, body: { view: viewOf(parent) } };
     if (candidate === null) throw candidateErr;
     const proposal = candidate;
     if (!this.write(chatId, { at: this.now(), turnId: src.turnId ?? `person:${src.pid.slice(src.pid.lastIndexOf(':') + 1)}`, kind: 'proposal', proposal }, instance)) return this.gone(chatId);
@@ -2619,7 +2659,10 @@ export class ChatProposals {
             if (wantCard === undefined || merged.facts.card !== wantCard.id || !optionOk || !depthOk || !inputsOk) {
               return { code: 400, body: { code: 'edits_invalid', error: merged.notes[0] ?? `there is no ${String(x.edits.card)}${x.edits.option !== undefined && x.edits.option !== null ? ` · ${String(x.edits.option)}` : ''} to start it again as`, notes: merged.notes } };
             }
-            facts = { ...merged.facts, skipQe: null, by: 'person', source: 'reshape' };
+            // A reshape is the person's shape: no detection guess describing the held job rides on it (codex r3).
+            const { guess: _old, ...personFacts } = merged.facts;
+            void _old;
+            facts = { ...personFacts, skipQe: null, by: 'person', source: 'reshape' };
             ctx.notes.push(...merged.notes);
           }
           proposal = await this.proposalOf(chatId, x.pid, facts, ctx, this.deps.records(chatId));

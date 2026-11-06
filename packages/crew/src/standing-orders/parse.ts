@@ -99,6 +99,7 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
     let timer: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
     let aborted = false;
+    let onAbort: (() => void) | null = null;
     let deadlineAt = Date.now() + timeoutMs;
     // How the run's turn came out, the first frame that decides it: a terminal frame, or a park
     // (`parked`: the run stopped at a gate and has NOT ended).
@@ -144,11 +145,12 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
         }
       });
       if (input.signal?.aborted === true) return { ok: false, code: 502, error: `the ${seat} seat's turn was given up` };
-      input.signal?.addEventListener('abort', () => {
+      onAbort = () => {
         aborted = true;
         decide(null);
         stop();
-      }, { once: true });
+      };
+      input.signal?.addEventListener('abort', onAbort, { once: true });
       // Inside the try: instructions that fail to build (a project list) are the turn's 502, never an unhandled 500.
       const instructions = typeof input.instructions === 'string' ? input.instructions : await input.instructions();
       // ONE deadline over the launch and the answer: a launch that hangs is the same 502.
@@ -211,7 +213,10 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
         new Promise<null>((resolve) => {
           readTimer = setTimeout(() => resolve(null), Math.max(1000, deadlineAt - Date.now()));
         }),
+        // A turn given up while its answer is read ends now (codex r3).
+        stopped,
       ]).finally(() => clearTimeout(readTimer));
+      if (aborted) return { ok: false, code: 502, error: `the ${seat} seat's turn was given up` };
       // A failed step is a failure, whatever its text holds — never a rule to confirm (codex on #686).
       if (!ended.ok || answer === null || (stepStatus !== undefined && stepStatus !== 'ok')) {
         const why = failureKind !== undefined ? ` (${failureKind})` : '';
@@ -223,6 +228,7 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
     } finally {
       clearTimeout(timer);
       off();
+      if (onAbort !== null) input.signal?.removeEventListener('abort', onAbort);
       // A run that has not ended (the seat went quiet, it parked, or the launch hung past the
       // deadline — the run id is the session id it was launched under) must not outlive the turn.
       // The cancel is bounded too: the turn answers within its budget, and the cancel goes on without it.

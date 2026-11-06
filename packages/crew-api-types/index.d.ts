@@ -7944,22 +7944,25 @@ export interface LaunchEnvelope {
  * stays accepting, and the same request, or Go on the reshape (or on its corrected descendant), tries again: Go on a
  * reshape that has not answered the held plan yet answers it first, as this route does.
  */
-export interface ReshapeRunBody {
+export interface ReshapeRunShape {
   card: string;
   option?: string | null;
   depth?: 'quick' | 'standard' | 'deep' | null;
   inputs?: Record<string, ProposalInputValue>;
   requestId: string;
-  /** (api-types 0.194.0) The plan version the person was offered this on (a `plan_offer`'s `ord` and `planRev`). When
-   *  sent, a held plan revised since is **409** `gate_changed` and nothing is answered. */
-  ord?: number;
-  planRev?: number;
   /** The person's press on the reshape question naming what the new shape gives up: the ids it was shown (the 409's
    *  `lost` and `lostSeats`). Without them, a replacement with fewer checks or seat rules than the held job is **409**
    *  `reshape_loses_check` with `lost` (check ids) and `lostSeats` (seat rules), and nothing is answered; a loss beyond
    *  the ids sent is refused the same way. */
   confirmLoss?: string[];
 }
+
+/**
+ * {@link ReshapeRunShape}, with (api-types 0.194.0) the plan version the person was offered it on: a `plan_offer`'s `ord`
+ * and `planRev`, BOTH or neither (one alone is **400**). When sent, a held plan revised since is **409** `gate_changed`
+ * and nothing is answered.
+ */
+export type ReshapeRunBody = ReshapeRunShape & ({ ord: number; planRev: number } | { ord?: never; planRev?: never });
 
 export interface ReshapeRunResponse {
   view: ChatProposalView;

@@ -214,6 +214,54 @@ describe('DetectService (§2.3 classifyTurn)', () => {
     expect(cancelled).toContain('late-run');
   });
 
+  it('a request superseded while its catalog read hangs answers at once, with its one audit row (codex r3)', async () => {
+    const audits: DetectionAudit[] = [];
+    let calls = 0;
+    const svc = new DetectService({
+      turn: async () => ({ ok: true, answer: '{"card":"bug","confidence":0.95}', seat: 'pi' }),
+      cancelRun: async () => undefined,
+      catalog: async () => {
+        calls += 1;
+        if (calls === 1) return new Promise(() => undefined);
+        return { rev: 'r', available: () => true, status: () => 'available' as const };
+      },
+      audit: (row) => audits.push(row),
+      newId: () => 'run-y',
+    });
+    const older = svc.detect({ text: 'fix the login bug please' }, ME);
+    await settle();
+    await svc.detect({ text: 'the payments service', seat: false }, ME);
+    expect(await older).toMatchObject({ code: 409, body: { code: 'detection_superseded' } });
+    expect(audits.filter((a) => a.outcome.failure === 'superseded')).toHaveLength(1);
+  });
+
+  it('a turn given up while its answer is read ends now, never as a success (codex r3)', async () => {
+    let listener: ((e: unknown) => void) | null = null;
+    const adapter = {
+      launchRun: async (input: Record<string, unknown>) => {
+        setTimeout(() => listener?.({ type: 'sessionCompleted', session: input['sessionId'] }), 0);
+        return String(input['sessionId']);
+      },
+      cancelRun: async () => undefined,
+      workOutput: async () => null,
+      onEvent: (cb: (e: unknown) => void) => {
+        listener = cb;
+        return () => undefined;
+      },
+    };
+    let release: (v: string) => void = () => undefined;
+    let reading = false;
+    const roster = [{ key: 'pi', chat_admission: { unscoped: { ok: true } } }] as unknown as RosterSeat[];
+    const turn = seatTurn({ adapter: adapter as never, roster: () => roster, timeoutMs: 5000, outputOf: () => { reading = true; return new Promise<string>((r) => (release = r)); } });
+    const abort = new AbortController();
+    const pending = turn({ problem: 'p', instructions: 'TASK', stepId: DETECT_STEP_ID, noSeat: 'none', workflow: DETECT_WORKFLOW, sessionId: 'reading', signal: abort.signal });
+    for (let i = 0; i < 20 && !reading; i += 1) await settle();
+    expect(reading).toBe(true);
+    abort.abort();
+    expect(await pending).toMatchObject({ ok: false, error: expect.stringMatching(/given up/u) });
+    release('{"card":"bug"}');
+  });
+
   it('every valid attempt writes one audit row: a catalog failure and an early supersession included (codex r2)', async () => {
     const audits: DetectionAudit[] = [];
     let fail = true;

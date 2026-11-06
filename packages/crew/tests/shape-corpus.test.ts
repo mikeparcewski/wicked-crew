@@ -151,6 +151,13 @@ describe('the shape suite in the default evals', () => {
       { session: { id: 'd', problem: `${shared} then fix parsedate`, shape: { card: 'bug', option: null, by: 'detected' } }, units: [] },
     ];
     expect(auditSample(shapeLaunchesOf(longTwins), 50, 1).denominator).toBe(2);
+    // And a corrected case keeps the whole request, keyed by it (codex r3).
+    const corrected = captureShapeCases([
+      { session: { id: 'e', problem: `${shared} then fix ParseDate`, shape: { card: 'migrate', option: 'move', by: 'detected' } }, units: [] },
+      { session: { id: 'f', retry_of: 'e', problem: `${shared} then fix ParseDate`, shape: { card: 'bug', option: null, by: 'person' } }, units: [] },
+    ]);
+    expect(corrected[0]!.input['text']).toBe(`${shared} then fix ParseDate`);
+    expect(corrected[0]!.inputKey).not.toContain(shared);
   });
 });
 

@@ -159,15 +159,30 @@ export class DetectService {
           this.deps.audit({ ...row, costUsd: cost ?? null });
         });
     };
-    let catalog: Awaited<ReturnType<DetectServiceDeps['catalog']>>;
+    // The catalog read races supersession and its own bound: a superseded request answers at once (codex r3).
+    let catalog: Awaited<ReturnType<DetectServiceDeps['catalog']>> | 'superseded';
+    let catalogTimer: ReturnType<typeof setTimeout> | undefined;
     try {
-      catalog = await this.deps.catalog(req.projectId ?? null);
+      catalog = await Promise.race([
+        this.deps.catalog(req.projectId ?? null),
+        new Promise<'superseded'>((resolve) => abort.signal.addEventListener('abort', () => resolve('superseded'), { once: true })),
+        new Promise<never>((_, reject) => {
+          catalogTimer = setTimeout(() => reject(new Error('the catalog did not answer in 10 s')), 10_000);
+          catalogTimer.unref?.();
+        }),
+      ]);
     } catch (err) {
+      if (!owns()) {
+        this.deps.audit(failedRow('superseded'));
+        return superseded;
+      }
       const why = err instanceof Error ? err.message : String(err);
       this.deps.audit(failedRow(why));
       return done({ code: 503, body: { code: 'catalog_unavailable', error: why } });
+    } finally {
+      clearTimeout(catalogTimer);
     }
-    if (!owns()) {
+    if (catalog === 'superseded' || !owns()) {
       this.deps.audit(failedRow('superseded'));
       return superseded;
     }

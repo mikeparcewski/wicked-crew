@@ -122,6 +122,18 @@ describe('the words ask for an outcome, and say a depth (codex r1)', () => {
     }
   });
 
+  it('work the words rule out never decides, and a seat sure of it is held (codex r3)', () => {
+    for (const source of ['chat', 'classify'] as const) {
+      // Work the words rule out: held, whatever the seat's confidence (and its reported confidence fits its band).
+      const n = detect({ text: 'do not fix the rounding bug in invoices, leave the totals alone', seat: { card: 'bug', confidence: 0.95 }, source, catalogRev: REV });
+      expect(n.guess.band, source).toBe('likely');
+      expect(n.guess.confidence).toBeLessThan(0.85);
+    }
+    for (const t of ['Do not modernize the legacy .NET Framework monolith into microservices on Kubernetes; leave the migration alone', 'summarize the ticket for modernizing the legacy .NET Framework monolith into microservices on Kubernetes']) {
+      expect(detect({ text: t, seat: null, source: 'classify', catalogRev: REV }).guess.band, t).not.toBe('sure');
+    }
+  });
+
   it('an Investigate card decided by the words keeps the depth the words say', () => {
     expect(detect({ text: 'Deep investigation of this production outage and its root cause', seat: null, source: 'classify', catalogRev: REV }).guess).toMatchObject({ card: 'incident', depth: 'deep' });
     expect(depthFromWords('just a quick look at the outage')).toBe('quick');

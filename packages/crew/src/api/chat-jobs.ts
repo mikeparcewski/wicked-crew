@@ -512,13 +512,14 @@ export function inputsOfProposal(p: ArtifactProposal): Record<string, ProposalIn
 }
 
 /** The controls a job's words must never lower: its checks and its seat protections, by any of their names. */
-const CONTROL = String.raw`(?:the\s+|any\s+|a\s+|all\s+)?(?:distinct\s+|independent\s+|separate\s+|second\s+|other\s+)?(?:reviews?|reviewers?|review\s+step|judges?|judging|parity(?:\s+checks?)?|qe(?:\s+acceptance)?|acceptance(?:\s+checks?)?|tests?|testing|checks?|cited\s+findings|citations|evidence\s+floor|floor|plan\s+(?:gate|approval)|gates?)`;
+const CONTROL = String.raw`(?:the\s+|any\s+|a\s+|all\s+)?(?:distinct\s+|independent\s+|separate\s+|second\s+|other\s+)?(?:reviews?|reviewers?|review\s+step|judges?|judging|parity|qe(?:\s+acceptance)?|acceptance|tests?|testing|checks?|cited\s+findings|citations|evidence\s+floor|floor|plan\s+(?:gate|approval)|gates?)(?:\s+checks?)?`;
 // A lowering verb, then the control, with at most two words between ("without running the reviewer's checks").
 const LOWER_VERB = new RegExp(String.raw`\b(skip(?:ping)?|drop(?:ping)?|remov(?:e|ing)|disabl(?:e|ing)|bypass(?:ing)?|omit(?:ting)?|cut(?:ting)?|ditch(?:ing)?|waiv(?:e|ing)|forget|lighten|reduc(?:e|ing)|fewer|less|turn(?:ing)?\s+off|get\s+rid\s+of|ignor(?:e|ing)|without|no\s+need\s+for|(?:don'?t|do\s+not)\s+need)(?:\s+[\w'’-]+){0,2}?\s+${CONTROL}\b`, 'giu');
 const NO_CONTROL = /\bno\s+(?:qe|parity|review|reviewer|judge)\b/giu;
-/** A prohibition of the control itself ("do not review this", "never run the tests"), apart from a negation that keeps
- *  a check ("do not drop parity": no control verb follows). */
-const PROHIBIT = /\b(?:don'?t|do\s+not|never|no\s+need\s+to)\s+(?:(?:run|do|perform|use|have|bother\s+(?:with|to)|need)\s+)?(?:the\s+|a\s+|any\s+)?(?:review(?:s|ing)?|test(?:s|ing)?|check(?:s|ing)?|judg(?:e|es|ing)|qe(?:\s+acceptance)?|parity(?:\s+checks?)?|acceptance)\b/giu;
+/** A prohibition of a check itself ("do not run the independent review", "never run the tests", "do not review it"),
+ *  apart from a negation that keeps one ("do not drop parity": no performing verb) or scopes the work ("don't review the
+ *  generated files": the object is not a check; pi r3). */
+const PROHIBIT = new RegExp(String.raw`\b(?:don'?t|do\s+not|never|no\s+need\s+to)\s+(?:(?:run|do|perform|use|have|bother\s+(?:with|to)|need)\s+${CONTROL}|(?:review|test|check|judge)\s+(?:it|this|that|the\s+(?:change|work|pr|fix|code|job))\b)`, 'giu');
 /** A control turned off with the control between ("turn QE off"). */
 const TURN_OFF = new RegExp(String.raw`\bturn(?:ing)?\s+${CONTROL}\s+off\b`, 'giu');
 const SHIP = /\b(?:tag(?:ging)?\s+(?:it|the\s+release|a\s+release|v?\d[\w.]*)|publish(?:ing)?\s+(?:it|the\s+package|to\s+npm)|merg(?:e|ing)\s+(?:it|the\s+pr)|push(?:ing)?\s+(?:it\s+)?to\s+main)\b/giu;

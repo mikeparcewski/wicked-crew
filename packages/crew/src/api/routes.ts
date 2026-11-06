@@ -4628,7 +4628,7 @@ export function registerRoutes(
       const chatId = seedChatId ?? b.chatId ?? randomUUID();
       // A new chat's declaration is its own (an omitted one is "no job cards"): an id reused after a close never inherits
       // the previous chat's (codex r2 on Lane D).
-      chatAccepts.set(chatId, b.accepts?.includes('job') === true);
+      const openAccepts = b.accepts?.includes('job') === true;
       const requestedRefs = [...(b.repoRef !== undefined ? [b.repoRef] : []), ...(b.repoRefs ?? [])];
       // The scope kind as the open resolves it: the request's, unless an Ask-about-this seed names the repositories.
       let scopeKind = b.scopeKind;
@@ -4739,7 +4739,7 @@ export function registerRoutes(
         if (!resolved.ok) return reply.code(resolved.status).send({ error: resolved.error });
         workflow = resolved.workflow;
       }
-      const statementOpts = { analysis: workflow !== undefined, make: chatProposals.digest(chatId) };
+      const statementOpts = { analysis: workflow !== undefined, make: chatProposals.digest(chatId, openAccepts) };
       // A chat id this daemon already holds a scope for is LIVE: re-preparing its scratch root and
       // re-opening it would overwrite the statement its seats are reading and (on a changed scope)
       // evict them mid-conversation (Copilot, #518). Close it first, or let the daemon mint the id.
@@ -4755,6 +4755,9 @@ export function registerRoutes(
                 : `chat ${chatId} is already open on this daemon; DELETE /chats/${chatId} first, or omit chatId to mint a fresh one`,
         });
       }
+      // DES-CATALOG-002 §4.6: this open owns the id now: its declaration is the chat's (an omitted one is "no job cards").
+      // A refused open (409 above) never touched the live chat's (codex r3).
+      chatAccepts.set(chatId, openAccepts);
       // DC-S7: the in-force rules the statement lists; recorded as "told" only once the open succeeds.
       let inForceAtOpen: ConformanceRule[] = [];
       // Everything below either ends in `chatScopes.set(chatId, …, token)` or releases the reservation.
@@ -5388,7 +5391,10 @@ export function registerRoutes(
       const pending = await considerations.pendingPreface(id, { inForce: rules });
       // DES-CATALOG-002 §2.3, §4.6: the per-message job lines (the chat catalog digest, the open proposal, the held plan),
       // read here, before the last check (no await after it). Never in an analysis.
-      const jobTurn = path.workflow === undefined ? await chatProposals.jobTurn(id).catch(() => null) : null;
+      // The declaration this message's instructions are written for: its own, else the chat's (applied to the chat only
+      // once the message is accepted; the reply to this turn is read the same way, codex r3).
+      const turnAccepts = parsed.data.accepts !== undefined ? parsed.data.accepts.includes('job') : chatAccepts.get(id) === true;
+      const jobTurn = path.workflow === undefined ? await chatProposals.jobTurn(id, turnAccepts).catch(() => null) : null;
       // DES-CHAT-ARTIFACTS-001 §5.1 (A1): the turn's block — scope checked before anything is read or copied; the
       // copies and briefs land in the scratch root's `open/` and `context/`, read roots of the chat's run.
       // Built in memory here (it awaits); its files are written only after the last check below, with no await between.
@@ -5423,7 +5429,7 @@ export function registerRoutes(
       }
       if (storedScope !== undefined && scope !== undefined && engine !== undefined &&
         (JSON.stringify(scope) !== JSON.stringify(storedScope) || JSON.stringify(engine) !== JSON.stringify(chatScopes.engineOf(id)))) {
-        prepareChatScratch(id, scope, rules, { analysis: path.workflow !== undefined, make: chatProposals.digest(id), ...voiceFor(scope.projectId) });
+        prepareChatScratch(id, scope, rules, { analysis: path.workflow !== undefined, make: chatProposals.digest(id, turnAccepts), ...voiceFor(scope.projectId) });
         if (chatScopes.refresh(id, storedScope, scope, engine)) {
           chatTranscripts?.registerRoots(id, scope.repos.map((r) => ({ absRoot: resolve(r.rootPath), name: r.name })));
         }
@@ -5455,7 +5461,7 @@ export function registerRoutes(
         seatText = `${seatText}\n\n${contextBlock}`;
       }
       // A2: the per-message digest of what the chat can make now (advertised operations only; never in an analysis).
-      const makeDigest = path.workflow === undefined ? chatMakeDigest(chatProposals.digest(id)) : '';
+      const makeDigest = path.workflow === undefined ? chatMakeDigest(chatProposals.digest(id, turnAccepts)) : '';
       // DES-CATALOG-002 §2.3: with job cards, the make digest rides INSIDE the job block, under its one 2 KB budget.
       if (jobTurn !== null && jobTurn.mode === 'cards') {
         seatText = `${seatText}\n\n${chatJobTurnLines(jobTurn.mode, { ...jobTurn.context, preface: makeDigest })}`;
@@ -5468,12 +5474,13 @@ export function registerRoutes(
       audience = voice.length > 0 ? voice : path.eligible;
       turn = chatTurns.begin(id, audience, text, ASK_TURN_BUDGET_SECS);
       turnId = turn?.turnId ?? turnId;
+      chatProposals.noteTurnAccepts(id, turnId, turnAccepts);
       // A repo-bound path can deliver; project and multi-repo scopes remain read-only asks. A workflow
       // chat (crew#1157) never delivers: it is bound to its repository read-only, with no deliver.
       const repoRef = scope?.kind === 'repos' && scope.repos.length === 1 ? scope.repos[0]!.id : undefined;
       const delivers = repoRef !== undefined && path.workflow === undefined;
       // A2: the per-message digest of what the chat can make now (advertised operations only).
-      const statementOpts = { analysis: path.workflow !== undefined, make: chatProposals.digest(id), ...voiceFor(scope?.projectId) };
+      const statementOpts = { analysis: path.workflow !== undefined, make: chatProposals.digest(id, turnAccepts), ...voiceFor(scope?.projectId) };
       const projectId = scope?.projectId;
       if (path.runId === undefined) {
         const stepId = 'answer-1';

@@ -105,6 +105,7 @@ function rig(o: { accepts?: boolean; repos?: Array<{ id: string; name: string }>
     served: async () => served,
     acceptsJobs: () => r.accepts,
     heldPlan: async () => r.held,
+    reshapeReject: async () => null,
     turnLive: (_c, t) => r.live.has(t),
     broadcast: () => undefined,
     audit: () => undefined,
@@ -216,7 +217,10 @@ describe('a seat\'s job block → a detected job proposal (§2.3)', () => {
     await turn(r, 't1', 'tests for checkout', [{ entry: 'write-tests', confidence: 0.4, reason: 'tests' }]);
     const asked = open(r)!;
     expect(asked.shape!.guess!.band).toBe('ask');
-    await turn(r, 't2', 'write the tests for the checkout service, I want them in the repo', [{ revises: asked.pid, edits: { detail: { add: ['in the repo'] } } }]);
+    // A correction that does not name the shape (a detail, a repository) leaves the question standing (codex r3).
+    await turn(r, 't2', 'it is in the repo', [{ revises: asked.pid, edits: { detail: { add: ['in the repo'] } } }]);
+    expect(open(r)!.blocked).toBe(asked.shape!.guess!.question!.text);
+    await turn(r, 't3', 'write the tests for the checkout service', [{ revises: open(r)!.pid, edits: { card: 'write-tests' } }]);
     const clear = open(r)!;
     expect(clear.shape!.guess).toBeUndefined();
     expect(clear.blocked).toBeNull();
@@ -224,6 +228,30 @@ describe('a seat\'s job block → a detected job proposal (§2.3)', () => {
     expect(go.code, JSON.stringify(go.body)).toBe(200);
     expect(r.launcher.launched).toHaveLength(1);
     expect(r.launcher.launched[0]!.resolution.shape).not.toHaveProperty('guess');
+  });
+
+  it('a reply is read as its turn\'s instructions were written, whatever the chat declares later (codex r3)', async () => {
+    const r = rig({ accepts: false });
+    r.svc.noteTurnAccepts(CHAT, 't1', true);
+    await turn(r, 't1', 'sum([1,2,3]) returns 5 instead of 6 in tiny-math', [{ entry: 'bug', confidence: 0.95 }]);
+    expect(proposals(r).map((p) => p.shape?.card)).toEqual(['bug']);
+    const older = rig({ accepts: true });
+    older.svc.noteTurnAccepts(CHAT, 't1', false);
+    await turn(older, 't1', 'fix the login bug', [{ entry: 'bug', confidence: 0.95 }]);
+    expect(proposals(older).filter((p) => p.kind === 'job')).toEqual([]);
+  });
+
+  it('a reshape from a detected job carries no guess describing the held job (codex r3)', async () => {
+    const r = rig();
+    await turn(r, 't1', 'sum([1,2,3]) returns 5 instead of 6 in tiny-math', [{ entry: 'bug', confidence: 0.95 }]);
+    const held = open(r)!;
+    expect(held.shape!.guess).toBeDefined();
+    await r.svc.decide(CHAT, held.pid, { decision: 'go' }, ME, 'i1');
+    const facts = { card: 'incident', option: undefined, depth: null, words: held.words!, details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person' as const, source: 'reshape' as const };
+    await r.svc.reshape(CHAT, { pid: `${CHAT}:reshape:run1:z`, oldRunId: 'run1', parentPid: held.pid, facts, edits: { card: 'incident' }, reducedAssurance: false, relaunch: { deliver: 'pr' as const }, request: { id: 'z', digest: 'dz' }, confirmLoss: ['qe-acceptance', 'distinctJudge', 'review', 'evidence-floor'] }, ME, 'i1');
+    const reshaped = foldProposals(r.records).get(`${CHAT}:reshape:run1:z`)!.proposal;
+    expect(reshaped.shape).toMatchObject({ card: 'incident', by: 'person' });
+    expect(reshaped.shape).not.toHaveProperty('guess');
   });
 
   it('the job\'s words are the whole message, never clipped (codex r2)', async () => {

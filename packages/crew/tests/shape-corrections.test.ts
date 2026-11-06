@@ -18,6 +18,7 @@ import {
   runCorrection,
   scoreCorrections,
   CorrectionChat,
+  judgeCorrection,
 } from '../src/evals/shape-corrections.js';
 import { lowersCheck, mergeRevision } from '../src/api/chat-jobs.js';
 import { removeScratch } from './setup/scratch.js';
@@ -120,12 +121,22 @@ describe('the adapter catches a hostile block (its own negative tests)', () => {
   });
 
   it('the scorer compares the whole result: an unrelated detail or a replaced intent fails the case (codex r2)', async () => {
+    // Production refuses the seat's unrelated detail (it is not in the person's message); the oracle would fail it too.
     const extra = await run('k2', open({ repoRef: 'billing-api', detail: { add: ['also add an unrelated dashboard'] } }));
-    expect(extra.right).toBe(false);
-    expect(extra.why.join(' ')).toMatch(/did not say/u);
+    expect(extra.result!.details).toEqual([]);
+    expect(judgeCorrection(caseOf('k2'), extra.parent!, { ...extra.result!, details: ['also add an unrelated dashboard'] }, 1).join(' ')).toMatch(/did not say/u);
     const intent = await run('k2', open({ repoRef: 'billing-api', inputs: { intent: { kind: 'text', value: 'rewrite everything' } } }));
     expect(intent.result!.words).toBe(intent.parent!.words);
-    expect(intent.result!.notes.join(' ')).toMatch(/own words are yours/u);
+    expect(intent.result!.notes.join(' ')).toMatch(/own words/u);
+  });
+
+  it('a seat\'s carried detail must be in the person\'s own words; the oracle catches a lost one (codex r3)', async () => {
+    const r = await run('k2', open({ repoRef: 'billing-api', detail: { add: ['add a dashboard nobody asked for'] } }));
+    expect(r.result!.details).toEqual([]);
+    expect(r.result!.notes.join(' ')).toMatch(/isn't in what you said/u);
+    const parent = { ...r.parent!, details: ['on .NET 8'] };
+    expect(judgeCorrection(caseOf('k2'), parent, { ...r.result!, details: [] }, 1).join(' ')).toMatch(/lost a carried detail/u);
+    expect(judgeCorrection(caseOf('k7'), r.parent!, { ...r.result!, kind: 'create', words: 'something else' }, 1).join(' ')).toMatch(/words changed/u);
   });
 
   it('the scorer itself fails a wrong answer: a wrong option, a lost keep field', async () => {
@@ -138,8 +149,8 @@ describe('the adapter catches a hostile block (its own negative tests)', () => {
 
 describe('lowersCheck (the words that would lower a check)', () => {
   it('reads requests to lower, prohibitions and ship steps; keeps descriptions and requests to keep a check', () => {
-    const lowers = ['skip parity', 'skip QE acceptance', 'without the review', 'drop the tests', 'skip cited findings', 'skip the distinct reviewer', 'drop the separate judge', "ship this without running the reviewer's checks", 'waive QE', 'fewer reviewers', 'remove the parity check', 'no review needed', 'turn QE off', 'Do not review this', 'Do not run QE acceptance', 'Never run the tests', 'and tag it when you are done', 'merge it when green'];
-    const keeps = ['without downtime', 'no downtime', "don't fix anything", '.NET 8 on Linux', 'There are no tests for this module', 'no tests failed', 'Do not drop parity checks', 'Fix the bug without skipping QE acceptance', 'do not skip the tests', 'reduce the cache size', 'so agents can call it', 'never touch the billing tables'];
+    const lowers = ['skip parity', 'skip QE acceptance', 'without the review', 'drop the tests', 'skip cited findings', 'skip the distinct reviewer', 'drop the separate judge', "ship this without running the reviewer's checks", 'waive QE', 'fewer reviewers', 'remove the parity check', 'no review needed', 'turn QE off', 'Do not review this', 'Do not run QE acceptance', 'Never run the tests', 'and tag it when you are done', 'merge it when green', 'do not run the independent review', 'Do not perform any distinct review', 'turn the QE acceptance check off', 'do not run the reviewer', 'never run the second judge'];
+    const keeps = ['without downtime', 'no downtime', "don't fix anything", '.NET 8 on Linux', 'There are no tests for this module', 'no tests failed', 'Do not drop parity checks', 'Fix the bug without skipping QE acceptance', 'do not skip the tests', 'reduce the cache size', 'so agents can call it', 'never touch the billing tables', "don't review the generated files", 'do not test in production', 'no need to check twice'];
     for (const t of lowers) expect(lowersCheck(t), t).toBe(true);
     for (const t of keeps) expect(lowersCheck(t), t).toBe(false);
   });

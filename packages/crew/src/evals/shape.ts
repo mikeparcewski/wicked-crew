@@ -270,6 +270,8 @@ export interface ShapeLaunch {
   words: string;
   /** The whole input, as one key (its hash): what makes two launches the same request. */
   inputKey?: string;
+  /** The whole input, as asked (the display `words` may be shortened). */
+  fullText?: string;
   /** A later run reshaped it (`retryOf` names this run), or its proposal was revised before Start. */
   corrected: boolean;
 }
@@ -424,6 +426,7 @@ export function shapeLaunchesOf(runs: readonly RunLike[]): ShapeLaunch[] {
       by: shape.by === 'detected' ? 'detected' : 'person',
       words: typeof title === 'string' ? title.slice(0, 2000) : '',
       inputKey: createHash('sha256').update(typeof title === 'string' ? title : id).digest('hex').slice(0, 32),
+      ...(typeof title === 'string' ? { fullText: title } : {}),
       corrected: retried.has(id),
     });
   }
@@ -454,8 +457,9 @@ export function captureShapeCases(runs: readonly RunLike[]): EvalCase[] {
       source: 'real',
       project: before.place,
       surface: 'corrected',
-      inputKey: `shape:${before.words.toLowerCase()}`,
-      input: { text: before.words },
+      // The whole request, case kept: two requests that differ after the display cut are two inputs (codex r3).
+      inputKey: `shape:${before.inputKey ?? before.words}`,
+      input: { text: before.fullText ?? before.words },
       observed: { label: key(before.card, before.option), by: 'recorded' },
       expected: { label: key(after.card, after.option), by: 'operator', why: 'the person started it again as another job' },
       evidence: { runId: before.runId },
