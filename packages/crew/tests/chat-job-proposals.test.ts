@@ -21,12 +21,15 @@ import {
   type ProposalDispatch,
   type ProposalDispatcher,
 } from '../src/api/chat-proposals.js';
-import { ownWords, personAskedSkip, qeSkipBound } from '../src/api/chat-jobs.js';
+import { jobLaunchCommon, ownWords, personAskedSkip, qeSkipBound } from '../src/api/chat-jobs.js';
 import { removeScratch } from './setup/scratch.js';
 
 const ME: Actor = { id: 'maria', kind: 'human', trust: 'operator' };
 const dir = mkdtempSync(join(tmpdir(), 'chat-jobs-'));
 let served: ServedState & { rev: string };
+let defsAll: WorkflowDef[];
+let presetsAll: Preset[];
+let entriesAll: CatalogEntry[];
 
 beforeAll(async () => {
   const adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
@@ -35,6 +38,9 @@ beforeAll(async () => {
   const presets: Preset[] = await adapter.listPresets();
   const entries: CatalogEntry[] = await adapter.catalog();
   served = { ...servedState({ defs, presets, entries }), rev: buildWorkflowCatalogV2({ defs, presets, entries, runs: [], actorId: '', projectId: null }).rev };
+  defsAll = defs;
+  presetsAll = presets;
+  entriesAll = entries;
   adapter.close();
 });
 afterAll(() => removeScratch(dir));
@@ -53,6 +59,8 @@ interface Rig {
   live: Set<string>;
   roster: Array<{ key: string; name: string }>;
   chat: ProposalChat;
+  served: ServedState & { rev: string };
+  qeOff: boolean;
 }
 
 const CHAT = 'c1';
@@ -65,6 +73,8 @@ function rig(o: { roster?: Array<{ key: string; name: string }>; repos?: Array<{
     live: new Set(),
     roster: o.roster ?? [{ key: 'claude', name: 'Claude' }, { key: 'codex', name: 'Codex' }, { key: 'pi', name: 'pi' }],
     chat: { projectId: null, repos: o.repos ?? [{ id: 'r-pay', name: 'payments-service' }, { id: 'r-bill', name: 'billing-api' }], lead: 'claude', seats: ['claude'], analysis: false },
+    served,
+    qeOff: false,
   };
   const registry = new LaunchOnceRegistry();
   registry.register('job', r.launcher);
@@ -90,7 +100,8 @@ function rig(o: { roster?: Array<{ key: string; name: string }>; repos?: Array<{
     runCostUsd: async () => null,
     registry,
     jobs: () => true,
-    served: async () => served,
+    served: async () => r.served,
+    qeOff: async () => r.qeOff,
     turnLive: (_c, turnId) => r.live.has(turnId),
     broadcast: () => undefined,
     audit: () => undefined,
@@ -326,5 +337,161 @@ describe('across kinds', () => {
     const out = await swap(r, q.pid, q.question!.choices[0]!.edit, 'deck-press');
     expect(out.body).toMatchObject({ code: 'operation_unavailable' });
     expect(CATALOG_V2_CARDS.find((c) => c.id === 'document')).toBeDefined();
+  });
+});
+
+
+describe('codex/pi r1 folds', () => {
+  const withShadow = (preset: Preset): ServedState & { rev: string } => {
+    const presets = [...presetsAll, preset];
+    return { ...servedState({ defs: defsAll, presets, entries: entriesAll }), rev: buildWorkflowCatalogV2({ defs: defsAll, presets, entries: entriesAll, runs: [], actorId: '', projectId: null }).rev };
+  };
+
+  it('a card change drops an earlier QE skip: the new card asks for its own (pi P2)', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'feature');
+    await swap(r, open(r).pid, { skipQe: { reason: 'a prototype' }, confirmLoss: true }, 'skip');
+    expect(open(r).skipQe).toEqual({ reason: 'a prototype' });
+    await swap(r, open(r).pid, { card: 'bug' }, 'to-bug');
+    expect(open(r)).toMatchObject({ shape: { card: 'bug' }, skipQe: null });
+    expect(open(r).gate).toContain('qe-acceptance');
+    // And a skip can be taken back.
+    await swap(r, open(r).pid, { skipQe: { reason: 'again' }, confirmLoss: true }, 'skip2');
+    await swap(r, open(r).pid, { restoreQe: true }, 'restore');
+    expect(open(r).skipQe).toBeNull();
+  });
+
+  it("a lost-check choice carries only the edits crew kept, never a seat's refused QE skip (codex 8)", async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'refactor', { option: 'refactor' });
+    const parent = open(r);
+    await say(r, 't1', 'make it a feature');
+    await reply(r, 't1', { revises: parent.pid, edits: { card: 'feature', skipQe: { reason: 'invented reason' } } });
+    const q = open(r);
+    expect(q.question?.lost).toEqual(['parity']);
+    expect(q.question!.choices[0]!.edit).not.toHaveProperty('skipQe');
+  });
+
+  it('a seat root block never replaces an open job; it changes only through a revision (codex 9)', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'migrate', { option: 'upgrade' });
+    const job = open(r);
+    await say(r, 't1', 'actually write it up');
+    await reply(r, 't1', { entry: 'document-static', title: 'x', sources: ['chat'] });
+    expect(open(r).pid).toBe(job.pid);
+  });
+
+  it('a catalog refresh that would drop a check is a question, not a startable proposal (codex 10)', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'migrate', { option: 'in-place' });
+    const p = open(r);
+    expect(p.gate).toContain('parity');
+    // A saved migration with the built-in's instruments and no parity rubric.
+    r.served = withShadow({ name: 'migration', steps: [{ catalog: 'build', id: 'execute' }, { catalog: 'test', id: 'verify' }], created_by: 'me', scope: 'global', required_instruments: ['distinct_evaluator', 'judge', 'qe_acceptance'] } as unknown as Preset);
+    const go = await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1');
+    expect(go.body).toMatchObject({ code: 'catalog_changed' });
+    const fresh = open(r);
+    expect(fresh.question).toMatchObject({ kind: 'lost_check', lost: ['parity'] });
+    expect((await r.svc.decide(CHAT, fresh.pid, { decision: 'go' }, ME, 'i1')).body).toMatchObject({ code: 'proposal_blocked' });
+    expect(r.launcher.launched).toEqual([]);
+  });
+
+  it('a change that gives up a seat protection asks first, like a check (codex 13)', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'retro');
+    const p = open(r);
+    await say(r, 't1', 'make it a risk analysis');
+    await reply(r, 't1', { revises: p.pid, edits: { card: 'risk' } });
+    expect(open(r).question).toMatchObject({ kind: 'lost_check', lostSeats: expect.arrayContaining(['notRunSeat']) });
+  });
+
+  it.each([
+    ['> skip QE acceptance, a prototype nobody uses', 'a prototype nobody uses'],
+    ['`skip QE acceptance` a prototype nobody uses', 'a prototype nobody uses'],
+    ['the lead requested we skip QE acceptance, a prototype nobody uses', 'a prototype nobody uses'],
+    ['do not ever, under any circumstances, skip QE acceptance for a prototype nobody uses', 'a prototype nobody uses'],
+  ])('(codex 14) "%s" is not the person\'s own skip', (message, reason) => {
+    expect(qeSkipBound(reason, message)).toBe(false);
+  });
+
+  it('a hidden card reached by its alias can be started with edits, never a server error (codex 23)', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, '/workflow-test-analysis');
+    const p = open(r);
+    const go = await r.svc.decide(CHAT, p.pid, { decision: 'go', edits: {} }, ME, 'i1');
+    expect(go.code, JSON.stringify(go.body)).toBe(200);
+  });
+
+  it('an answered turn whose revision is still queued is not released by a read (codex 28)', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'migrate', { option: 'upgrade' });
+    const p = open(r);
+    await say(r, 't1', 'make it a move');
+    r.svc.onReply({ chat: CHAT, cliKey: 'claude', turnId: 't1', ok: true, blocks: [JSON.stringify({ revises: p.pid, edits: { option: 'move' } })] });
+    r.live.delete('t1');
+    expect(await r.svc.reopenStale(CHAT, 'i1')).toBe(false);
+    await r.svc.settled();
+    expect(open(r).shape?.option).toBe('move');
+  });
+
+  it('an input is checked against the card (kind, non-blank); a long backlog steer blocks Start', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'migrate', { option: 'upgrade' });
+    await swap(r, open(r).pid, { inputs: { requirements: { kind: 'text', value: 'x' } } }, 'bad-input');
+    expect(open(r).sentence!.notes.join(' ')).toMatch(/takes no/);
+    r.chat.projectId = 'p1';
+    await pick(r, 'backlog', { option: 'tasks', words: 'x'.repeat(600) });
+    expect(open(r).blocked).toMatch(/500 characters/);
+  });
+
+  it('with QE acceptance off on the daemon, the proposal says so instead of promising it', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    r.qeOff = true;
+    await pick(r, 'feature');
+    expect(open(r).gate).not.toContain('qe-acceptance');
+    expect(open(r).sentence!.notes.join(' ')).toMatch(/off on this daemon/);
+  });
+});
+
+describe('reshape (§2.5)', () => {
+  const facts = (card: string): Parameters<ChatProposals['reshape']>[1]['facts'] => ({
+    card, option: undefined, depth: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape',
+  });
+
+  it('a replacement with fewer checks is refused until the person confirms; then the held plan is rejected and it launches once', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'migrate', { option: 'in-place' });
+    const held = open(r);
+    await r.svc.decide(CHAT, held.pid, { decision: 'go' }, ME, 'i1');
+    let rejected = 0;
+    const rejectHeld = async () => { rejected += 1; return null; };
+    const base = { pid: `${CHAT}:reshape:run1:a`, oldRunId: 'run1', parentPid: held.pid, facts: facts('feature'), reducedAssurance: false, relaunch: { deliver: 'pr' as const }, request: { id: 'a', digest: 'd1' } };
+    const refused = await r.svc.reshape(CHAT, { ...base, confirmLoss: false }, ME, 'i1', rejectHeld);
+    expect(refused.body).toMatchObject({ code: 'reshape_loses_check', lost: ['parity'] });
+    expect(rejected).toBe(0);
+    const ok = await r.svc.reshape(CHAT, { ...base, pid: `${CHAT}:reshape:run1:b`, request: { id: 'b', digest: 'd2' }, confirmLoss: true }, ME, 'i1', rejectHeld);
+    expect(ok.code, JSON.stringify(ok.body)).toBe(200);
+    expect(rejected).toBe(1);
+    const launched = r.launcher.launched.at(-1)!;
+    expect(launched.resolution).toMatchObject({ reshapes: 'run1', shape: { card: 'feature', source: 'reshape' }, revises: held.pid, lineage: held.lineage });
+    // Idempotent by its request: the same reshape answers its decision and launches nothing more.
+    const again = await r.svc.reshape(CHAT, { ...base, pid: `${CHAT}:reshape:run1:b`, request: { id: 'b', digest: 'd2' }, confirmLoss: true }, ME, 'i1', rejectHeld);
+    expect(again.code).toBe(200);
+    expect(r.launcher.launched.filter((d) => d.resolution.reshapes === 'run1')).toHaveLength(1);
+  });
+});
+
+describe('what Go sends (codex 4, 7, 12)', () => {
+  it('carries the derived identity, the chat, the shape, the seats shown, QE as shown and a reshape\'s lineage', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'feature');
+    const p = { ...open(r), reshapes: 'old-run', reducedAssurance: true as const };
+    const body = jobLaunchCommon(p, { runId: 'rid', chatId: CHAT }, { clisJson: '[]', qeSettingOff: true, selfSeated: false });
+    expect(body).toMatchObject({ sessionId: 'rid', chatId: CHAT, primary: 'claude', clisJson: '[]', forceQeAcceptance: true, retryOf: 'old-run', reducedAssurance: true, shape: { card: 'feature', catalogRev: served.rev } });
+    const skipped = jobLaunchCommon({ ...p, skipQe: { reason: 'r' } }, { runId: 'rid', chatId: CHAT }, { qeSettingOff: true, selfSeated: true });
+    expect(skipped).toMatchObject({ skipQeAcceptance: { reason: 'r' } });
+    expect(skipped).not.toHaveProperty('forceQeAcceptance');
+    expect(skipped).not.toHaveProperty('primary');
+    expect(jobLaunchCommon(p, { runId: 'rid', chatId: CHAT }, { qeSettingOff: false, selfSeated: false })).not.toHaveProperty('forceQeAcceptance');
   });
 });

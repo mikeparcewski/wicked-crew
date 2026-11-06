@@ -182,8 +182,9 @@ export const DemoLaunchSchema = z.strictObject({
 
 /** What a demo launches with besides its body: crew's own (a chat proposal's derived run id, its chat), never a client's. */
 export interface DemoLaunchExtra {
-  sessionId?: string;
-  chatId?: string;
+  /** A chat job's launch fields (`jobLaunchCommon`): its derived run id, chat, seats, QE as shown and a reshape's
+   *  lineage. Merged into the launch; the shape stays the body's. */
+  common?: Record<string, unknown>;
   fromProposal?: string;
 }
 
@@ -206,7 +207,8 @@ export async function demoLaunch(
   if (!parsed.success) {
     return { code: 400, body: { error: 'Invalid demo body', details: parsed.error.issues } };
   }
-  const runId = extra.sessionId ?? randomUUID();
+  const derived = extra.common?.['sessionId'];
+  const runId = typeof derived === 'string' ? derived : randomUUID();
   const root = demoRootDir(runId);
   await fsp.mkdir(root, { recursive: true });
   const briefPath = join(root, 'BRIEF.md');
@@ -226,8 +228,8 @@ export async function demoLaunch(
         deliver: 'none',
         ...(parsed.data.clisJson !== undefined ? { clisJson: parsed.data.clisJson } : {}),
         ...(parsed.data.reducedAssurance === true ? { reducedAssurance: true } : {}),
+        ...Object.fromEntries(Object.entries(extra.common ?? {}).filter(([k]) => k !== 'shape' && k !== 'sessionId')),
         ...(parsed.data.shape !== undefined ? { shape: parsed.data.shape } : {}),
-        ...(extra.chatId !== undefined ? { chatId: extra.chatId } : {}),
       },
       { ...ctx, ...(extra.fromProposal !== undefined ? { fromProposal: extra.fromProposal } : {}) },
     );

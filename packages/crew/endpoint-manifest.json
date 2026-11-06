@@ -3374,7 +3374,7 @@
       "method": "GET",
       "path": "/api/v1/workflows/catalog",
       "requestType": null,
-      "responseType": "WorkflowCatalogResponse",
+      "responseType": "WorkflowCatalogResponse | WorkflowCatalogV2Response",
       "statusCodes": [
         200,
         400

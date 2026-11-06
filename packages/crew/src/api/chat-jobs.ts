@@ -152,6 +152,8 @@ export interface JobContext {
   notes: string[];
   answers?: string;
   request?: { id: string; digest: string };
+  /** The daemon's QE acceptance setting is off: QE is not shown as a check (the launch would skip it by setting). */
+  qeOff?: boolean;
 }
 
 export class JobRefusal extends Error {
@@ -274,13 +276,17 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
   const r = resolveOption(card.id, optionId, ctx.served);
   if (r === null) throw new JobRefusal('card_unknown', `${card.title} has no option “${String(optionId).slice(0, 80)}”`);
   if (facts.depth !== null && card.depth !== true) throw new JobRefusal('edits_invalid', `${card.title} takes no depth`);
+  // An Investigate card's depth is always one of three: the default is standard, shown and launched alike.
+  if (card.depth === true && facts.depth === null) facts = { ...facts, depth: 'standard' };
   const kind = proposalKindOf(r);
   if (kind !== 'job') throw new JobRefusal('not_a_job', `${card.title} makes a document: it is proposed as one`);
   const notes = [...ctx.notes];
   const repo = repoOf(facts, ctx.chat);
   const { seats, short } = seatsOf(facts, ctx, r);
   const needs = needsOf({ ...facts, repoRef: repo?.id ?? null }, ctx, r);
-  const gate = checksOf(r, facts.skipQe);
+  const qeOffHere = ctx.qeOff === true && facts.skipQe === null && r.resolved.gate.includes('qe-acceptance');
+  const gate = checksOf(r, facts.skipQe).filter((g) => !(qeOffHere && g === 'qe-acceptance'));
+  if (qeOffHere) notes.push('QE acceptance is off on this daemon (Settings), so this job runs without it, labelled.');
   const launch = r.resolved.launch.kind as 'run' | 'compose' | 'demo' | 'none';
   const shape: ProposalShape = {
     card: card.id,
@@ -301,6 +307,7 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
   } else if (r.resolved.status === 'unavailable') {
     blockedBy.push(r.resolved.statusNote ?? `${label} can't start on this daemon`);
   }
+  if (launch === 'compose' && briefOf(facts).length > 500) blockedBy.push('A backlog takes a steer of at most 500 characters: say it shorter');
   if (short && coming === undefined) blockedBy.push(`Needs ${seatsNeeded(r)} seats that can work now (one builds, the others check it); sign another seat in`);
   // The one question: the first required need that is missing.
   let question: ProposalQuestion | null = null;
@@ -496,13 +503,31 @@ export function inputsOfProposal(p: ArtifactProposal): Record<string, ProposalIn
 export interface MergeResult {
   facts: JobFacts;
   notes: string[];
-  /** Checks the result has that the parent had not, never; checks the parent had that the result lacks. */
+  /** The checks the parent had that the result lacks. */
   lost: CatalogGateId[];
+  /** The seat protections the parent's card had that the result's lacks (a distinct reviewer or judge, the change's
+   *  authors excluded, a seat that did not run the work, proposal-only). A loss like a check's (codex r1). */
+  lostSeats: SeatProtection[];
   /** The result keeps its parent's shape whole (the revision changed nothing). */
   unchanged: boolean;
 }
 
-const KNOWN_EDITS: ReadonlySet<string> = new Set(['card', 'option', 'depth', 'repoRef', 'project', 'lead', 'addSeats', 'removeSeats', 'inputs', 'detail', 'skipQe', 'confirmLoss']);
+const KNOWN_EDITS: ReadonlySet<string> = new Set(['card', 'option', 'depth', 'repoRef', 'project', 'lead', 'addSeats', 'removeSeats', 'inputs', 'detail', 'skipQe', 'restoreQe', 'confirmLoss']);
+
+/** A seat rule a card guarantees (§3 "Seat rules"). */
+export type SeatProtection = 'distinctEvaluator' | 'distinctJudge' | 'excludeChangeAuthors' | 'notRunSeat' | 'proposalOnly';
+export const SEAT_WORDS: Readonly<Record<SeatProtection, string>> = {
+  distinctEvaluator: 'a reviewer who did not build it',
+  distinctJudge: 'a separate judge',
+  excludeChangeAuthors: "a reviewer who wrote none of the change",
+  notRunSeat: 'a reviewer who ran none of the work',
+  proposalOnly: 'your approval of everything it proposes',
+};
+export function seatProtections(r: ResolvedOption | null): SeatProtection[] {
+  if (r === null) return [];
+  const s = r.resolved.seats;
+  return (['distinctEvaluator', 'distinctJudge', 'excludeChangeAuthors', 'notRunSeat', 'proposalOnly'] as const).filter((k) => s[k]);
+}
 
 /**
  * Merge a revision into its parent by the rules of §4.6, in order. Pure over its inputs: the caller decides what a
@@ -526,7 +551,9 @@ export function mergeRevision(
     } else {
       facts.card = target.id;
       facts.option = target.variant?.default ?? null;
-      facts.depth = null;
+      facts.depth = target.depth === true ? 'standard' : null;
+      // A QE skip was given for the old card: the new card's checks are its own, so it asks again (pi r1).
+      facts.skipQe = null;
       const r = resolveOption(target.id, facts.option, ctx.served);
       const takes = new Set((r?.resolved.inputs ?? []).map((i) => i.id));
       if (!takes.has('repo') && facts.repoRef !== null) {
@@ -588,9 +615,21 @@ export function mergeRevision(
       if (facts.lead !== null && !kept.includes(facts.lead)) facts.lead = kept[0] ?? null;
     }
   }
-  // 5. Inputs fill or replace the needs they name (validated as Go validates them).
+  // 5. Inputs fill or replace the needs they name, each validated against the card's own input (its kind, non-blank).
   if (edits.inputs !== undefined) {
+    const card5 = CATALOG_V2_CARDS.find((c) => c.id === facts.card)!;
+    const defs5 = resolveOption(facts.card, optionFor(card5, facts.option), ctx.served)?.resolved.inputs ?? [];
     for (const [id, v] of Object.entries(edits.inputs)) {
+      const def = defs5.find((d) => d.id === id);
+      const kindOk = def !== undefined && (def.kind === v.kind || (def.kind === 'text' && v.kind === 'text'));
+      if (!kindOk) {
+        notes.push(`Not changed: ${card5.title} takes no ${def === undefined ? '' : `${v.kind} `}${id.slice(0, 40)}`);
+        continue;
+      }
+      if ((v.kind === 'text' || v.kind === 'url') && v.value.trim() === '') {
+        notes.push(`Not changed: ${def.label} can't be blank`);
+        continue;
+      }
       if (id === 'intent' && v.kind === 'text') {
         facts.words = v.value.slice(0, 8000);
         continue;
@@ -621,26 +660,41 @@ export function mergeRevision(
     facts.details = facts.details.slice(0, 12);
   }
   if (edits.skipQe !== undefined) facts.skipQe = { reason: edits.skipQe.reason.trim().slice(0, 600) };
+  if (edits.restoreQe === true) facts.skipQe = null;
   // 7. The checks compared with the parent's: what the result lacks is lost (the caller asks before writing it).
   const card = CATALOG_V2_CARDS.find((c) => c.id === facts.card)!;
   const r = resolveOption(facts.card, optionFor(card, facts.option), ctx.served);
+  // A skip on a shape with no QE acceptance to skip is dropped (the engine refuses one there).
+  if (facts.skipQe !== null && r !== null && !r.resolved.gate.includes('qe-acceptance')) facts.skipQe = null;
   const after = r === null ? [] : checksOf(r, facts.skipQe);
   const lost = (parent.gate ?? []).filter((g) => !after.includes(g));
-  return { facts, notes, lost, unchanged: JSON.stringify(facts) === before };
+  const parentCard = parent.shape === undefined ? null : CATALOG_V2_CARDS.find((c) => c.id === parent.shape!.card) ?? null;
+  const before7 = parentCard === null ? [] : seatProtections(resolveOption(parentCard.id, optionFor(parentCard, parent.shape!.option), ctx.served));
+  const after7 = seatProtections(r);
+  const lostSeats = before7.filter((k) => !after7.includes(k));
+  return { facts, notes, lost, lostSeats, unchanged: JSON.stringify(facts) === before };
 }
 
 // ── the QE skip, bound to the person's own words (§2.4, §9.2 (ac)) ─────────────────────────────────────────────────
 
 /** The text outside quotes and reported speech ("the PM said: …"): only that is the person's own ask. */
 export function ownWords(message: string): string {
-  let t = message.replace(/“[^”]*”|"[^"]*"|«[^»]*»|(^|[\s(])'[^']*'(?=$|[\s).,;:!?])/gu, (_m, lead?: string) => `${lead ?? ''} `);
+  // Quoted material in the chat's own formats: block quotes, code spans and fences.
+  let t = message
+    .replace(/```[\s\S]*?```/gu, ' ')
+    .replace(/`[^`]*`/gu, ' ')
+    .split('\n')
+    .filter((line) => !/^\s*>/u.test(line))
+    .join('\n');
+  t = t.replace(/“[^”]*”|"[^"]*"|«[^»]*»|(^|[\s(])'[^']*'(?=$|[\s).,;:!?])/gu, (_m, lead?: string) => `${lead ?? ''} `);
   // Reported speech: whatever follows "X said:" / "they asked" / "told me to" is someone else's.
-  t = t.replace(/\b(said|says|asked|asks|told (me|us)( to)?|wrote|wants (me|us) to)\b[\s\S]*$/iu, ' ');
+  t = t.replace(/\b(said|says|asked|asks|told (me|us)( to)?|wrote|writes|wants (me|us) to|requested|requests|mentioned|suggested|according to|per)\b[\s\S]*$/iu, ' ');
   return t;
 }
 
 const SKIP_ASK = /\b(skip(ping)?|drop(ping)?|without|no)\s+(the\s+)?qe(\s+acceptance)?\b/iu;
-const NEGATED = /\b(don'?t|do not|never|not|no need to|shouldn'?t)\s+(\w+\s+){0,2}$/iu;
+/** A negation anywhere earlier in the same sentence makes the ask not one (conservative: ask the person instead). */
+const NEGATED = /\b(don'?t|do not|never|not|no need to|shouldn'?t|mustn'?t|won'?t|can'?t|cannot)\b[^.!?\n]*$/iu;
 
 /** Whether the person's own words (not quoted, not reported, not negated) ask to skip QE acceptance. */
 export function personAskedSkip(message: string | null): boolean {
@@ -681,3 +735,59 @@ export function personPid(chatId: string, actorId: string, requestId: string): s
 }
 
 export const depthLine = (d: 'quick' | 'standard' | 'deep'): string => DEPTH_LINES[d];
+
+// ── what Go launches (DES-CATALOG-002 §4.6) ────────────────────────────────────────────────────────────────────────
+
+/** Workflows whose launch picks its own seat (the run review's R≠ rule, the default evals' Tool step): the proposal's
+ *  seats are not what runs there, so they are neither shown as choosable nor sent. */
+export const SELF_SEATED: ReadonlySet<string> = new Set(['review-recent-work', 'run-evals']);
+
+/** The inputs a run launch carries in its brief (beside the intent, the repository and the project), as plain lines. */
+export function inputLines(p: Pick<ArtifactProposal, 'inputs' | 'needs'>): string[] {
+  const out: string[] = [];
+  for (const [id, v] of Object.entries(p.inputs ?? {})) {
+    if (id === 'intent') continue;
+    const label = p.needs?.find((n) => n.id === id)?.label ?? id;
+    if (v.kind === 'requirements') out.push(`${label}: ${v.refs.map((r) => `${r.repoId} ${r.key}`).join(', ')}`);
+    else out.push(`${label}: ${v.value}`);
+  }
+  return out;
+}
+
+/** The launch's `LaunchShape` from a proposal's frozen shape. */
+export function launchShapeOfProposal(p: ArtifactProposal): import('../core/types.js').LaunchShape {
+  const shape = p.shape!;
+  return {
+    card: shape.card,
+    option: shape.option,
+    depth: shape.depth,
+    by: shape.by === 'detected' ? 'detected' : 'person',
+    catalogRev: p.catalogRev!,
+    ...(shape.guess !== undefined ? { guess: { confidence: shape.guess.confidence, band: shape.guess.band, source: shape.guess.source, reason: shape.guess.reason, detectionRunId: null } } : {}),
+  };
+}
+
+/**
+ * The common launch fields of a job's Go, for every launch kind: the derived identity, the chat, the shape, the seats
+ * the person saw, the plan held, QE as shown (forced when the daemon's setting is off but the proposal promised it),
+ * and a reshape's lineage and envelope.
+ */
+export function jobLaunchCommon(
+  p: ArtifactProposal,
+  d: { runId: string; chatId: string },
+  o: { clisJson?: string; qeSettingOff: boolean; selfSeated: boolean },
+): Record<string, unknown> {
+  const lead = p.seats?.lead ?? undefined;
+  const qeShown = (p.gate ?? []).includes('qe-acceptance');
+  const skip = p.skipQe ?? null;
+  return {
+    sessionId: d.runId,
+    chatId: d.chatId,
+    ...(!o.selfSeated && lead !== undefined ? { primary: lead } : {}),
+    ...(p.relaunch?.clisJson !== undefined ? { clisJson: p.relaunch.clisJson } : !o.selfSeated && o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
+    shape: launchShapeOfProposal(p),
+    ...(skip !== null ? { skipQeAcceptance: { reason: skip.reason } } : qeShown && (o.qeSettingOff || p.relaunch?.forceQeAcceptance === true) ? { forceQeAcceptance: true } : {}),
+    ...(p.reshapes !== undefined ? { retryOf: p.reshapes } : {}),
+    ...(p.reducedAssurance === true ? { reducedAssurance: true } : {}),
+  };
+}

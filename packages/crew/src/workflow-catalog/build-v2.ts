@@ -57,6 +57,15 @@ const V2_EXCLUDED: ReadonlySet<string> = new Set([...Object.keys(CATALOG_EXCLUDE
 
 export const TOP_MAX_V2 = 6;
 
+/**
+ * Cards whose crew-side piece is not built yet (DES-CATALOG-002 §3.2 "Truly missing"): listed, not offered, with why.
+ * Review a change must never seat the authors of a run that contributed to the change; until crew excludes them, it
+ * would launch below its own seat rule.
+ */
+const CREW_PENDING: Readonly<Record<string, string>> = {
+  'review-change': 'Comes once crew excludes the authors of every run that contributed to the change from its reviewers; today, Risk analysis or Security review read a change on a seat that did not build it.',
+};
+
 /** The input kinds this daemon's launch routes take (1.1's `documents` and 1.2's `sources` are not yet). */
 export const INPUT_KINDS_V2: readonly CatalogInputKindV2[] = ['text', 'repo', 'project', 'url', 'requirements', 'seats'];
 
@@ -337,7 +346,12 @@ export function resolveOption(cardId: string, optionId: string | null, served: S
     }
   } else if (launch.kind === 'document') {
     style = launch.style;
-  } else if (launch.kind === 'demo') {
+  }
+  if (!coming && status === 'available' && Object.hasOwn(CREW_PENDING, card.id)) {
+    status = 'unavailable';
+    statusNote = CREW_PENDING[card.id]!;
+  }
+  if (launch.kind === 'demo') {
     const demo = served.builtins.get('demo');
     if (demo !== undefined) steps = demo.steps;
   }
@@ -368,7 +382,9 @@ export function resolveOption(cardId: string, optionId: string | null, served: S
     source,
   } satisfies Omit<CatalogResolved, 'resolution'>;
   // What a launch checks: the effective steps (with their rubrics), the instruments, the gate and the needs.
-  const resolution = fingerprint({ launch, steps, requiresQe, gate, needs, brief, compose, inputs: inputs.map((i) => [i.id, i.required]), status });
+  // The served def is the effective one (its composed phases, instructions and executors), not only the preset rows.
+  const def = workflow === null ? null : served.defs.get(workflow) ?? null;
+  const resolution = fingerprint({ launch, steps, def, requiresQe, gate, needs, brief, compose, inputs: inputs.map((i) => [i.id, i.required]), status, seats: base.seats });
   return { card, option, resolved: { ...base, resolution }, workflow, style, steps };
 }
 

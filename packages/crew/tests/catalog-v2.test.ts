@@ -65,7 +65,8 @@ describe('the v2 wire', () => {
       .filter((c) => c.release === '1.0')
       .flatMap((c) => (c.variant?.options ?? [c]).map((o) => ({ card: c.id, option: 'id' in o && o !== c ? o.id : null, status: o.status, note: o.statusNote })))
       .filter((o) => o.status !== 'available' && !(o.card === 'studio-plugin' && o.option === 'phase'));
-    expect(off).toEqual([]);
+    // Review a change waits for crew's contributing-author exclusion (its seat rule): listed, not offered.
+    expect(off).toEqual([{ card: 'review-change', option: null, status: 'unavailable', note: expect.stringMatching(/authors/) }]);
   });
 
   it("a card's gate is what its composed plan carries: every check the design names is on the plan", () => {

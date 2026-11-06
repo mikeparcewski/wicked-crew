@@ -95,6 +95,13 @@ describe('Lane C routes', () => {
     expect(confirmCalls.at(-1)).toEqual(['run-plain', false, 'add a rollback step', 'request_changes', undefined, undefined, { ord: 1, planRev: 1 }]);
   });
 
+  it('(codex 15) every other way to approve a chat-launched plan is refused: it is answered by its version', async () => {
+    const res = await app.inject({ method: 'POST', url: '/api/v1/runs/run-chat/resume', payload: {} });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ code: 'gate_changed' });
+    expect(confirmCalls).toEqual([]);
+  });
+
   it('the catalog answers v1 unchanged without `v`, v2 on `v=2`, and refuses another version', async () => {
     const v1 = await app.inject({ method: 'GET', url: '/api/v1/workflows/catalog' });
     expect(v1.statusCode).toBe(200);

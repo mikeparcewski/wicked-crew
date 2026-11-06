@@ -64,9 +64,9 @@ const LEVEL_LINES: Readonly<Record<ComposeLevel, string>> = {
 
 /** What a compose launches with besides its body: crew's own, never a client's. */
 export interface ComposeLaunchExtra {
-  /** A chat proposal's derived run id (a retry adopts it) and the chat it is filed under. */
-  sessionId?: string;
-  chatId?: string;
+  /** A chat job's launch fields (`jobLaunchCommon`): its derived run id (a retry adopts it), chat, seats, QE as shown
+   *  and a reshape's lineage. Merged into the launch; the shape stays the body's. */
+  common?: Record<string, unknown>;
   fromProposal?: string;
   /** Hold the run at its plan (a chat launch always does). */
   humanConfirm?: string;
@@ -212,8 +212,7 @@ export async function composeLaunch(
           problem: `Compose the product plan for project ${id} (${rows.length} requirement(s))`,
           projectId: id,
           deliver: 'none',
-          ...(extra.sessionId !== undefined ? { sessionId: extra.sessionId } : {}),
-          ...(extra.chatId !== undefined ? { chatId: extra.chatId } : {}),
+          ...Object.fromEntries(Object.entries(extra.common ?? {}).filter(([k]) => k !== 'shape')),
           ...(extra.humanConfirm !== undefined ? { humanConfirm: extra.humanConfirm } : {}),
           ...(parsed.data.shape !== undefined ? { shape: parsed.data.shape } : {}),
           plan: {

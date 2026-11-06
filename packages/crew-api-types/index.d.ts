@@ -380,7 +380,8 @@ export interface HealthCapabilities {
   /** (api-types 0.192.0, DES-CATALOG-002 §4.1) `GET /workflows/catalog?v=2` is served ({@link WorkflowCatalogV2Response}).
    *  ABSENT on an older daemon: read as `false`. */
   workflowCatalogV2?: boolean;
-  /** (api-types 0.192.0) `POST /workflows/catalog/detect` is served ({@link ShapeGuess}). ABSENT: read as `false`. */
+  /** (api-types 0.192.0) `POST /workflows/catalog/detect` is served ({@link ShapeGuess}). ABSENT: read as `false` (not
+   *  served by this release: detection lands with the chat statement's routing; send `by: 'person'` shapes). */
   detectShape?: boolean;
   /** (api-types 0.192.0) Every launch route takes `shape` ({@link LaunchShape}). ABSENT: send none. */
   launchShape?: boolean;
@@ -2555,9 +2556,11 @@ export interface GateDecision {
    * (`RunTeamResponse.planRev`, the plan message's version). Passed with `ord` into the engine's own decision, which
    * compares both inside its serialized path: an answer to a replaced revision (a reopened gate on the same ord, a second
    * tab, a re-plan landing after the read, an Approve during re-planning) is **409** `gate_changed` with the current
-   * plan (`openOrd`, `planRev`). REQUIRED on every plan-gate answer of a run launched from a chat proposal
-   * (`AgentSession.from_proposal`), whichever client answers; a plan-gate send-back (`request_changes` with the person's
-   * words in `amend`) needs it on any run. Send only where `chatJobProposals` is true.
+   * plan (`openOrd`, `planRev`). On a run launched from a chat proposal (`AgentSession.from_proposal`) it is REQUIRED on
+   * every approving plan answer and send-back (`request_changes` with the person's words in `amend`), whichever client
+   * answers; a Reject (which cancels the run whatever revision it holds) need not carry it, and every other way to approve
+   * that plan (a gated resume or reassign, a plan edit at the gate, a standing order) is refused there. On any other run
+   * it is optional (the engine itself refuses a plan send-back without it). Send only where `chatJobProposals` is true.
    */
   planRev?: number;
   /**
@@ -7744,7 +7747,8 @@ export interface WorkflowCatalogV2Response {
   /** Changes when any card, option, status or effective preset changes. A proposal freezes it. */
   rev: string;
   categories: { id: CatalogCategoryV2Id; title: string; summary: string }[];
-  /** Coming and hidden cards included (each says so). */
+  /** Coming and hidden cards included (each says so). A `yours` card has no command and no shape: launch it by its
+   *  workflow (`POST /runs {workflow}`) as before; a shape names a seeded card only. */
   cards: CatalogCardV2[];
   /** `card` or `card:option` keys, at most 6, by this operator's launches. */
   top: string[];
@@ -7782,8 +7786,8 @@ export interface DetectShapeRequest {
 // ── The shape on every launch (api-types 0.192.0, DES-CATALOG-002 §4.4, `capabilities.launchShape`) ───────────────────
 
 /**
- * What a launch was started as. Optional on `POST /runs`, `POST /projects/:id/demo`, `POST /projects/:id/product/compose`
- * and a new document's draft; send it only where `GET /health.capabilities.launchShape` is true (an older daemon's
+ * What a launch was started as. Optional on `POST /runs`, `POST /projects/:id/demo` and
+ * `POST /projects/:id/product/compose` (a chat's document proposal carries it on the proposal); send it only where `GET /health.capabilities.launchShape` is true (an older daemon's
  * strict schema refuses the field). Crew resolves it against the CURRENT catalog: a card or option that does not launch
  * what the route launches is **400** `shape_mismatch`; a catalog revision that changed since `catalogRev` is **409**
  * `catalog_changed`; a detected shape still at `band: 'ask'` is **409** `shape_ask`; a coming or unavailable card is
@@ -8646,6 +8650,10 @@ export interface ChatOpenResponse {
   workflow?: string;
   /** (api-types 0.192.0) The proposal a `seed` made (the same one on a retry with the same `requestId`). */
   proposal?: ChatProposalView;
+  /** (api-types 0.192.0) The chat opened, but its seed proposal was refused (why, as `POST /chats/:id/proposals` says). */
+  seedRefused?: { code: string; error: string };
+  /** (api-types 0.192.0) A seeded retry: this request's chat already exists (200), answered with its proposal. */
+  adopted?: true;
 }
 
 /** `POST /chats/:id/messages` → 202. */
@@ -8923,6 +8931,8 @@ export interface ProposalRevisionEdits {
   /** A QE acceptance skip with the person's reason. From a seat's block, written only when the reason appears, unquoted,
    *  in the person's own message that turn answers; otherwise it becomes the lost-check question. */
   skipQe?: { reason: string };
+  /** Take back a QE skip given earlier (QE acceptance runs again). */
+  restoreQe?: true;
   /** Only on the person route: a press on the lost-check question (or a swap or suggestion naming the check it drops). */
   confirmLoss?: true;
 }
@@ -8975,6 +8985,8 @@ export interface ProposalQuestion {
   text: string;
   choices: { label: string; edit: ProposalRevisionEdits }[];
   lost?: CatalogGateId[];
+  /** Seat protections the change gives up (a reviewer who did not build it, the change's authors excluded, …). */
+  lostSeats?: Array<'distinctEvaluator' | 'distinctJudge' | 'excludeChangeAuthors' | 'notRunSeat' | 'proposalOnly'>;
   /** The typed answer's place in the edit: `skipQe.reason`, or `inputs.<id>` (a missing text input). */
   input?: { kind: 'text'; label: string; edit: 'skipQe.reason' | `inputs.${string}` };
 }
@@ -9015,7 +9027,7 @@ export interface PersonRevisionBody {
   edits: ProposalRevisionEdits;
   source: 'swap' | 'suggestion' | 'question';
   requestId: string;
-  /** A suggestion's label: appended to the transcript as the person's words, marked as typed by a suggestion. */
+  /** A suggestion's label (the person's words). Kept on the request's digest only in 1.0; the transcript is unchanged. */
   words?: string;
 }
 

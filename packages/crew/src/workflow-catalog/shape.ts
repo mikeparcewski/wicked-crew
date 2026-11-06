@@ -37,8 +37,18 @@ export interface ShapeReads {
   entries(): Promise<CatalogEntry[]>;
 }
 
+/** The catalog could not be read: a shaped launch or proposal fails closed (it could not see a saved shadow the engine
+ *  would run). */
+export class CatalogUnavailableError extends Error {}
+
 export async function servedFor(reads: ShapeReads, projectId: string | undefined): Promise<ServedState & { rev: string }> {
-  const [presets, entries] = await Promise.all([reads.presets(projectId).catch(() => [] as Preset[]), reads.entries().catch(() => [] as CatalogEntry[])]);
+  let presets: Preset[];
+  let entries: CatalogEntry[];
+  try {
+    [presets, entries] = await Promise.all([reads.presets(projectId), reads.entries()]);
+  } catch (err) {
+    throw new CatalogUnavailableError(`the catalog could not be read (${err instanceof Error ? err.message : String(err)}); nothing was started`);
+  }
   const input = { defs: reads.defs(), presets, entries };
   const rev = buildWorkflowCatalogV2({ ...input, runs: [], actorId: '', projectId: projectId ?? null }).rev;
   return { ...servedState(input), rev };
