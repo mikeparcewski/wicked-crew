@@ -495,14 +495,25 @@ export class WorkingDocService {
     // A power run makes its document on any sync, as before; any other run when a live event or the catch-up asks.
     if (this.d.store.get(runId) === undefined && !create && !model.power) return null;
     if (!(await this.ensureDoc(runId))) return null;
-    const notes = this.d.answers !== undefined ? personNotes(await this.d.answers(runId)) : [];
+    let notes: ReturnType<typeof personNotes> = [];
+    if (this.d.answers !== undefined) {
+      // The person's words are an addition: a trail that cannot be read leaves the engine-derived lines to be written
+      // (xreview r1), and Decisions never takes a line back, so the ones already there stay.
+      try {
+        notes = personNotes(await this.d.answers(runId));
+      } catch (err) {
+        this.d.log?.(`[working-doc] the person's answers for ${runId} could not be read: ${String(err)}`);
+      }
+    }
     const lines = docLines(model, notes);
     const approach = await this.planText(runId, model);
     return this.exclusive(runId, async () => {
+      if (this.d.store.get(runId) === undefined) return null;
+      await this.reconcile(runId);
+      // Read after `reconcile`: it may just have recorded a person's write (xreview r1).
       const rec = this.d.store.get(runId);
       if (rec === undefined) return null;
-      await this.reconcile(runId);
-      if (this.d.store.get(runId)?.pending != null) {
+      if (rec.pending != null) {
         // A person's write of unknown outcome is still settling: try again once it has (it settles within ~75 s).
         this.planChecked.delete(runId);
         this.linesSoon(runId, this.d.linesRetryMs ?? 15_000);
@@ -510,11 +521,14 @@ export class WorkingDocService {
       }
       let wrote: number | null = null;
       if (approach !== null) {
-        // A person's Approach stands: a plan (even a revised one) never replaces it.
-        const last = [...rec.trail].reverse().find((t) => t.sections.includes('approach'));
-        if (last?.author.kind !== 'human') {
-          wrote = await this.writeAs(runId, rec, approach.author, () => ({ approach: approach.text.slice(0, SECTION_MAX_CHARS) })) ?? wrote;
-        }
+        // A person's Approach stands: a plan (even a revised one) never replaces it. Asked again on every try, against
+        // the run's own trail as it is then.
+        const personsApproach = (): boolean =>
+          [...(this.d.store.get(runId)?.trail ?? [])].reverse().find((t) => t.sections.includes('approach'))?.author.kind === 'human';
+        const r = await this.writeAs(runId, rec, approach.author, () => (personsApproach() ? {} : { approach: approach.text.slice(0, SECTION_MAX_CHARS) }));
+        // Only a settled outcome is remembered: a write that gave up is tried again on the next sync (xreview r1).
+        if (r !== null) this.planChecked.set(runId, approach.key);
+        if (typeof r === 'number') wrote = r;
       }
       const v = await this.writeAs(runId, rec, { kind: 'plugin', id: PHASE_REPORT_AUTHOR }, (before) => {
         const wanted: Partial<Record<SectionId, string>> = {};
@@ -524,8 +538,14 @@ export class WorkingDocService {
         }
         return wanted;
       });
-      return v ?? wrote;
+      return typeof v === 'number' ? v : wrote;
     });
+  }
+
+  /** (workdoc-all-runs) Something the run's document shows changed outside the engine's log (a person's answer
+   *  recorded in crew's trail): bring it up to date shortly, making it if the run has none. */
+  nudge(runId: string): void {
+    this.linesSoon(runId, undefined, true);
   }
 
   /**
@@ -533,25 +553,25 @@ export class WorkingDocService {
    * unit list, by the seat that wrote the plan (the plan gate's reviewed step) when known, else by crew. `null` for a
    * power run (its orchestrator writes Approach), before the plan is settled, or when nothing moved since the last look.
    */
-  private async planText(runId: string, model: ReturnType<typeof foldLines>): Promise<{ text: string; author: DocAuthor } | null> {
+  private async planText(runId: string, model: ReturnType<typeof foldLines>): Promise<{ text: string; author: DocAuthor; key: string } | null> {
     if (model.power || this.approachNoted.has(runId)) return null;
     const settled = planSettled(model);
     if (settled === null) return null;
-    const key = `${settled.approvedAt}|${settled.authorOrd}|${model.started.join(',')}|${model.gates.length}`;
+    const key = `${settled.approvedAt}|${settled.authorOrd}|${model.started.join(',')}|${model.gates.length}|${model.planned}`;
     if (this.planChecked.get(runId) === key) return null;
     const run = await this.d.run(runId);
     if (run === null || run.power === true || run.steps === undefined) return null;
-    this.planChecked.set(runId, key);
     const steps = [...run.steps].sort((a, b) => a.ord - b.ord);
     const text = planApproach(steps.map((x) => x.name), settled.approvedAt);
     if (text === null) return null;
     const seat = settled.authorOrd !== null ? steps.find((x) => x.ord === settled.authorOrd)?.seat ?? null : null;
-    return { text, author: seat !== null && AGENT_SEAT.test(seat) ? { kind: 'agent', id: `agent:${seat}` } : { kind: 'system', id: 'crew' } };
+    return { text, key, author: seat !== null && AGENT_SEAT.test(seat) ? { kind: 'agent', id: `agent:${seat}` } : { kind: 'system', id: 'crew' } };
   }
 
   /** Crew's own write of some sections, as `author` (never a person, so it never steers), on the newest head; a person's
-   *  edit racing it wins and the sections are computed again on top of it (3 tries at most). Inside the run's turn. */
-  private async writeAs(runId: string, rec: WorkingDocRecord, author: DocAuthor, compute: (before: Record<SectionId, string>) => Partial<Record<SectionId, string>>): Promise<number | null> {
+   *  edit racing it wins and the sections are computed again on top of it (3 tries at most). Inside the run's turn.
+   *  Resolves to the version written, `'same'` when nothing needed changing, or `null` (gave up, or the doc is gone). */
+  private async writeAs(runId: string, rec: WorkingDocRecord, author: DocAuthor, compute: (before: Record<SectionId, string>) => Partial<Record<SectionId, string>>): Promise<number | 'same' | null> {
     const batchAuthor = author.kind === 'system' ? 'crew' : author.id;
     for (let attempt = 0; attempt < 3; attempt++) {
       const head = await this.d.backend.read(rec.projectId, rec.docId);
@@ -559,7 +579,7 @@ export class WorkingDocService {
       const before = { ...blankSections(), ...sectionsOf(head.html) };
       const wanted = compute(before);
       const changed = changedSections(before, wanted);
-      if (changed.length === 0) return null;
+      if (changed.length === 0) return 'same';
       const values: Partial<Record<SectionId, string>> = {};
       for (const sid of changed) values[sid] = wanted[sid] ?? '';
       let written: { version: number; parent: number } | { headMoved: true; head: number };

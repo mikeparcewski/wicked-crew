@@ -11,9 +11,11 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { CoreEvent } from '../src/core/types.js';
+import { AuditLog } from '../src/api/audit.js';
 import {
-  NOTE_WORDS_MAX, PHASE_REPORT_AUTHOR, clock, isGenerated, noteLine, personNotes, planApproach, type AuditLike,
+  NOTE_WORDS_MAX, PHASE_REPORT_AUTHOR, clock, isGenerated, noteLine, personNotes, planApproach, reconcileSection, type AuditLike,
 } from '../src/working-doc/event-lines.js';
+import { PersonNotesIndex } from '../src/working-doc/notes-index.js';
 import { sectionsOf } from '../src/working-doc/sections.js';
 import { CATCH_UP_LIVE_MAX, WorkingDocService, workingDocStep, type DocBackend, type RunFacts } from '../src/working-doc/service.js';
 import { WorkingDocStore } from '../src/working-doc/store.js';
@@ -292,5 +294,89 @@ describe('a person’s answers as lines', () => {
     expect(planApproach([null], 5)).toBeNull();
     expect(workingDocStep({ phase_ref: null, description: 'cutover — Fixes tiny-math issue #12' })).toBe('cutover');
     expect(workingDocStep({ phase_ref: 'fix', description: 'x' })).toBe('fix');
+  });
+});
+
+// xreview r1 (codex gpt-6.1-sol, pi): a person's edited note line trimmed by shape, a failed Approach write never
+// retried, an unreadable trail blocking the engine's lines, same-millisecond answers reversed, a person's answer with
+// no engine event (guidance) never shown, and one full parse of the trail per sync.
+describe('xreview r1 folds', () => {
+  it('a Decisions line a person edited into the generated shape is theirs: never trimmed when the section is full', () => {
+    const mine = 'You · 10:00 · approved: “Only after staging passes.”';
+    const wanted = Array.from({ length: 200 }, (_, i) => `A failed check or review · answered ${String(10 + (i % 10)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')} #${i}`.replace(/ #\d+$/u, ''));
+    const out = reconcileSection('decisions', mine, wanted, 4_000) ?? mine;
+    expect(out.split('\n')[0]).toBe(mine);
+    expect(out.length).toBeLessThanOrEqual(4_000);
+  });
+
+  it('an Approach write that failed is tried again on the next sync', async () => {
+    const backend = new FakeBackend();
+    const edit = backend.edit.bind(backend);
+    let fail = true;
+    backend.edit = async (p, d, batch) => {
+      if (fail && batch.author === 'agent:claude') { fail = false; throw new Error('interactive is restarting'); }
+      return edit(p, d, batch);
+    };
+    const t = setup({ log: phasedRun(), backend });
+    await expect(t.service.syncLines('run-1', { create: true })).rejects.toThrow('interactive is restarting');
+    expect(t.sections().approach).toBe('');
+    await t.service.syncLines('run-1');
+    expect(t.sections().approach).toContain('The approved plan, 4 steps:');
+  });
+
+  it('a trail that cannot be read still lets the engine’s lines be written', async () => {
+    seq = 0;
+    const log = [ev('awaitingHuman', min(1), { ord: 1, gateKind: 'deliver' })];
+    const backend = new FakeBackend();
+    const service = new WorkingDocService({
+      store: new WorkingDocStore({ stateHome: home() }), backend,
+      engine: { injectWorkerMessage: async () => 'q' },
+      run: async () => ({ title: 'x', problem: 'p', projectId: 'default', terminal: false, stepOf: () => null }),
+      events: async () => log,
+      answers: async () => { throw new Error('EACCES'); },
+    });
+    await service.syncLines('run-1', { create: true });
+    expect(sectionsOf(backend.latest('run-1')!.html).questions).toBe(`Waiting on you · Deliver · since ${clock(min(1))}`);
+  });
+
+  it('the notes index keeps people’s entries once each, in recorded order, from the trail and live', () => {
+    const idx = new PersonNotesIndex();
+    const a = { ts: 5, action: 'guidance.set', runId: 'r', actor: human, detail: { text: 'first' } };
+    const b = { ts: 5, action: 'guidance.set', runId: 'r', actor: human, detail: { text: 'second' } };
+    idx.hydrate([b, a]); // readAll answers newest first
+    expect(idx.add(b)).toBe(false); // the same line live: once
+    expect(idx.add({ ts: 6, action: 'gate.decided', runId: 'r', actor: { id: 'standing-order:x', kind: 'system' }, detail: { amend: 'x' } })).toBe(false);
+    expect(idx.add({ ts: 6, action: 'run.launched', runId: 'r', actor: human, detail: {} })).toBe(false);
+    expect(personNotes(idx.of('r')).map((n) => n.words)).toEqual(['first', 'second']);
+    expect(idx.of('other')).toEqual([]);
+  });
+
+  it('the audit trail tells its listeners each entry as it is recorded; a disabled trail tells none', async () => {
+    const path = join(home(), 'audit.log');
+    const log = new AuditLog(path, () => undefined);
+    const heard: string[] = [];
+    const off = log.onRecord((e) => heard.push(`${e.action}:${e.runId ?? ''}`));
+    log.onRecord(() => { throw new Error('a bad listener'); });
+    log.record('guidance.set', { id: 'local', kind: 'human', trust: 'admin' } as never, { runId: 'r', detail: { text: 't' } });
+    off();
+    log.record('guidance.set', { id: 'local', kind: 'human', trust: 'admin' } as never, { runId: 'r2', detail: { text: 't' } });
+    await log.flush();
+    expect(heard).toEqual(['guidance.set:r']);
+    const silent = AuditLog.noop();
+    silent.onRecord(() => heard.push('noop'));
+    silent.record('guidance.set', { id: 'local', kind: 'human', trust: 'admin' } as never, { runId: 'r' });
+    expect(heard).toEqual(['guidance.set:r']);
+  });
+
+  it('a person’s answer with no engine event (guidance on a parked run) reaches the document via nudge', async () => {
+    seq = 0;
+    const log = [ev('awaitingHuman', min(1), { ord: 1, gateKind: 'deliver' })];
+    const audit: AuditLike[] = [];
+    const t = setup({ log, audit });
+    audit.push({ ts: min(5), action: 'guidance.set', actor: human, detail: { text: 'Keep the old PDF endpoint.' } });
+    t.service.nudge('run-1');
+    await tick();
+    expect(t.sections().decisions).toBe(`You · ${clock(min(5))} · set guidance: “Keep the old PDF endpoint.”`);
+    expect(t.injected).toEqual([]);
   });
 });

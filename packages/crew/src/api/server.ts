@@ -156,6 +156,7 @@ import { callEstateTool } from '../core/estate-mcp-client.js';
 import { seatParser } from '../standing-orders/parse.js';
 import { registerGateHistoryRoute, runBand, runPreset, runProject } from '../standing-orders/history.js';
 import { WorkingDocService, workingDocStep } from '../working-doc/service.js';
+import { PersonNotesIndex } from '../working-doc/notes-index.js';
 import { WorkingDocStore } from '../working-doc/store.js';
 import { isWorkingDoc as isWorkingDocAt } from '../interactive/chat-events.js';
 import { DocBindingStore } from '../interactive/doc-binding.js';
@@ -2905,6 +2906,7 @@ export async function createServer(
   // Program DES-POWER-MODE §8.3/§9 (spike 3): the run's working document — a wicked-interactive document of kind
   // `phase-report` — and the steering notes a person's edits of it become. Steering rides the engine's operator
   // inject only; nothing here answers a gate.
+  const workingDocNotes = new PersonNotesIndex();
   const workingDocs = new WorkingDocService({
     store: new WorkingDocStore({ log: (m) => app.log.warn(m) }),
     backend: bridgeBackend(interactiveBridges, (projectId) => workingDocRoot(adapter, projectSettings, projectId)),
@@ -2923,14 +2925,12 @@ export async function createServer(
         steps: v.units.map((u) => ({ ord: u.ord, name: workingDocStep(u), seat: u.assigned_cli ?? null })),
       };
     },
-    // A person's answers with their words (crew's own trail: the engine's log does not say who, or why).
-    answers: (runId) => audit.readAll({ runId }),
+    // A person's answers with their words (crew's own trail: the engine's log does not say who, or why), from memory.
+    answers: async (runId) => workingDocNotes.of(runId),
+    // The launch time is crew's (the run-timing index, from `run.launched`); a run with none sorts oldest.
     liveRuns: async () => (await adapter.sessionsDetail())
       .filter((v) => !['completed', 'cancelled', 'failed'].includes(v.session.status) && v.session.archived_at == null)
-      .map((v) => {
-        const at = (v.session as { created_at?: unknown }).created_at;
-        return { runId: v.session.id, createdAt: typeof at === 'number' ? at : 0 };
-      }),
+      .map((v) => ({ runId: v.session.id, createdAt: runTimingIndex.createdAtFor(v.session.id) ?? 0 })),
     changed: (runId, head) => broadcast({ type: 'workingDocChanged', session: runId, head } as unknown as Parameters<typeof broadcast>[0]),
     audit: (action, actor, runId, detail) => audit.record(action, actor as Parameters<typeof audit.record>[1], { runId, detail }),
     // The run's own log: crew writes the event-derived lines (Decisions, Open questions, Next) whether or not a tab
@@ -2939,9 +2939,19 @@ export async function createServer(
     log: (m) => app.log.warn(m),
   });
   workingDocTap = (e) => workingDocs.onEvent(e);
-  // After a restart no further event may come for a run: bring every held document's lines up to date once, and make
-  // the newest live runs' documents (bounded, one at a time; never rejects).
-  void workingDocs.catchUp();
+  // A person's answer recorded in the trail (a gate note, a skip reason, guidance) brings the run's document up to date:
+  // some come with no engine event at all (guidance), and a gate's is recorded after the engine's answer.
+  audit.onRecord((entry) => { if (workingDocNotes.add(entry) && entry.runId !== undefined) workingDocs.nudge(entry.runId); });
+  // After a restart no further event may come for a run: read the person's answers from the trail once, then bring
+  // every held document up to date and make the newest live runs' documents (bounded, one at a time; never rejects).
+  void (async () => {
+    try {
+      workingDocNotes.hydrate(await audit.readAll());
+    } catch (err) {
+      app.log.warn(`[working-doc] the trail could not be read for the person's answers: ${String(err)}`);
+    }
+    await workingDocs.catchUp();
+  })();
   registerWorkingDocRoutes(app, { service: workingDocs, exists: async (id) => (await adapter.sessions()).includes(id) });
   registerStandingOrderRoutes(app, {
     store: standingOrders,

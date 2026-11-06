@@ -32,6 +32,8 @@ export interface LinesModel {
   power: boolean;
   /** The units that started (`unitExecuting`), distinct ords in order: a plan with a second step started is settled. */
   started: number[];
+  /** How many units the engine announced (`unitPlanned`): a replan announces its fresh units. */
+  planned: number;
 }
 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
@@ -72,7 +74,7 @@ function answerPause(m: LinesModel, choice: PauseChoice, byPerson: boolean, at: 
 
 /** Fold a run's events (its recorded log, in `seq` order) into what the lines need. */
 export function foldLines(events: readonly CoreEvent[]): LinesModel {
-  const m: LinesModel = { gates: [], pauses: [], checkpoints: [], handoff: null, finished: null, power: false, started: [] };
+  const m: LinesModel = { gates: [], pauses: [], checkpoints: [], handoff: null, finished: null, power: false, started: [], planned: 0 };
   const sorted = [...events].sort((a, b) => (num((a as unknown as Record<string, unknown>)['seq']) ?? 0) - (num((b as unknown as Record<string, unknown>)['seq']) ?? 0));
   for (const e of sorted) {
     const ev = e as unknown as Record<string, unknown>;
@@ -97,6 +99,9 @@ export function foldLines(events: readonly CoreEvent[]): LinesModel {
         break;
       case 'powerIntakePlanned':
         m.power = true;
+        break;
+      case 'unitPlanned':
+        m.planned += 1;
         break;
       case 'rigorRescored': {
         m.power = true;
@@ -197,7 +202,10 @@ export type NoteVerb = (typeof NOTE_VERBS)[number];
 export const NOTE_WORDS_MAX = 280;
 
 /** An audit entry, as far as these lines read it (`api/audit.ts` `AuditEntry`). */
-export interface AuditLike { ts: number; action: string; actor?: { id?: unknown; kind?: unknown } | null; detail?: Record<string, unknown> | null }
+export interface AuditLike { ts: number; action: string; runId?: string; actor?: { id?: unknown; kind?: unknown } | null; detail?: Record<string, unknown> | null }
+
+/** The audit actions a person's words may come from ({@link personNotes}). */
+export const NOTE_ACTIONS: ReadonlySet<string> = new Set(['gate.decided', 'gate.rules_skipped', 'gate.qe_skipped', 'run.cancelled', 'guidance.set']);
 
 /** A person's words on one line: whitespace collapsed, cut at a word boundary with an ellipsis. */
 function oneLine(v: unknown): string {
@@ -229,7 +237,8 @@ function gateVerb(d: Record<string, unknown>): NoteVerb {
   }
 }
 
-/** The person's answers with words, oldest first, from the run's audit entries (any order). */
+/** The person's answers with words, oldest first, from the run's audit entries in APPEND order (oldest first: two
+ *  entries of the same millisecond keep the order they were recorded in). */
 export function personNotes(entries: readonly AuditLike[]): PersonNote[] {
   const out: PersonNote[] = [];
   for (const e of entries) {
@@ -347,7 +356,10 @@ export function isGenerated(section: 'decisions' | 'questions' | 'next', line: s
  */
 export function reconcileSection(section: 'decisions' | 'questions' | 'next', current: string, wanted: readonly string[], max = Infinity): string | null {
   const lines = current.split('\n').map((l) => l.trim()).filter((l) => l !== '');
-  const human = lines.filter((l) => !isGenerated(section, l));
+  // A Decisions line that only LOOKS generated but is not one crew writes now is a person's (one they edited, or
+  // typed in that shape): text shape is no proof of authorship, and Decisions never takes a line back (xreview r1).
+  const mine = (l: string): boolean => isGenerated(section, l) && (section !== 'decisions' || wanted.includes(l));
+  const human = lines.filter((l) => !mine(l));
   let room = max - human.join('\n').length - (human.length > 0 ? 1 : 0);
   const fits: string[] = [];
   for (let i = wanted.length - 1; i >= 0; i -= 1) {
@@ -359,7 +371,7 @@ export function reconcileSection(section: 'decisions' | 'questions' | 'next', cu
   const capped = fits.length === wanted.length;
   const kept = section === 'decisions' && capped
     ? lines
-    : lines.filter((l) => !isGenerated(section, l) || fits.includes(l));
+    : lines.filter((l) => !mine(l) || fits.includes(l));
   const add = fits.filter((w) => !kept.includes(w));
   const out = [...kept, ...add];
   return out.join('\n') === lines.join('\n') ? null : out.join('\n');
