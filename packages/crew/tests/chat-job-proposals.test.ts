@@ -418,11 +418,11 @@ describe('codex/pi r1 folds', () => {
 
   it('a change that gives up a seat protection asks first, like a check (codex 13)', async () => {
     const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
-    await pick(r, 'retro');
+    await pick(r, 'review-change');
     const p = open(r);
     await say(r, 't1', 'make it a risk analysis');
     await reply(r, 't1', { revises: p.pid, edits: { card: 'risk' } });
-    expect(open(r).question).toMatchObject({ kind: 'lost_check', lostSeats: expect.arrayContaining(['notRunSeat']) });
+    expect(open(r).question).toMatchObject({ kind: 'lost_check', lostSeats: ['excludeChangeAuthors'] });
   });
 
   it.each([
