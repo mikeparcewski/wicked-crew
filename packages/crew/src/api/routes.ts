@@ -412,7 +412,7 @@ import { registerDecisionRoutes } from '../decisions/routes.js';
 import { ChatDecisionRecorder } from '../decisions/chat-recorder.js';
 import { ConsiderationService } from '../decisions/consider.js';
 import { gardenConformance, gardenPackCheck, type ConformanceRunner, type PackCheckRunner } from '../editors/pack-install.js';
-import { conformanceProvisioner, conformanceRuntimeRoot } from '../editors/conformance-runtime.js';
+import { conformanceProvisioner, conformanceRuntimeRoot, conformanceVenvDir, provisionOnEditorPluginLaunch, venvPython } from '../editors/conformance-runtime.js';
 import { EditorRegistry } from '../editors/registry.js';
 import { registerEditorRoutes } from '../editors/routes.js';
 import type { AppActionStore } from '../apps/actions/store.js';
@@ -1914,6 +1914,14 @@ export function registerRoutes(
     ...(runtime.studioRoot !== undefined ? { studioRoot: runtime.studioRoot } : {}),
     log: (m) => app.log.warn(m),
   });
+  // (DES-EDITOR-CONFORMANCE-HOST) An editor-plugin run's conformance step runs on this host under crew's runtime:
+  // start making it when such a run starts, so it is ready when the build is done.
+  if (runtime.editorConformance === undefined && typeof (adapter as { onLaunch?: unknown }).onLaunch === 'function') {
+    const managed = venvPython(conformanceVenvDir(conformanceRuntimeRoot()));
+    adapter.onLaunch((notice) => {
+      provisionOnEditorPluginLaunch(notice, editorConformanceRuntime, (m) => app.log.warn(m), process.env, managed);
+    });
+  }
   registerEditorRoutes(app, {
     registry: editorRegistry,
     adapter,

@@ -36,6 +36,21 @@ mentioned only where a daemon release depends on them.
 
 ### Changed
 
+- **An editor-plugin run's conformance cases run on this machine, from crew's own runtime (e2e F18,
+  DES-EDITOR-CONFORMANCE-HOST).** The engine now runs the editor-plugin workflow's conformance cases itself, as an
+  `editor_conformance` Tool step jailed to one loopback port (wicked-core). It also no longer asks the review seat to
+  run them, because a seat has no headless browser and that review could never pass. Crew supplies what the step
+  runs on:
+  - At boot, crew exports `WICKED_EDITOR_CONFORMANCE_PYTHON`: the interpreter of its private Playwright venv, at its
+    fixed path even before the venv exists.
+  - At boot, crew also exports `WICKED_EDITOR_CONFORMANCE_STUDIO_DIST`: its bundled studio dist, when that dist holds
+    `index.html`. The step serves the conformance host page from this dist, so the browser never reaches the
+    daemon's API.
+  - An operator's own setting of either variable wins.
+  - When an editor-plugin run is launched, crew starts making that venv in the background (the same deduped
+    provisioner the install uses), so it is ready when the build is done. If it is not ready, the step refuses and
+    its gate offers a retry.
+  - Crew's install-time conformance run is unchanged.
 - **A Demo video is recorded by the engine on this machine, never by a seat (DES-DEMO-RECORD-001, wicked-core#1249).**
   `POST /projects/:id/demo` now lays the demo root out for the engine's `demo_probe` and `demo_record` Tools
   (wicked-core#1303, wicked-garden#1415). The run's ONLY write root is `<root>/plan` (brief, script, chapters, `storyline.json`).

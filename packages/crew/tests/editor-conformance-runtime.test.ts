@@ -11,9 +11,14 @@ import {
   CONFORMANCE_PLAYWRIGHT_VERSION,
   CONFORMANCE_RUNTIME_DIR_ENV,
   PROVISIONED_MARKER,
+  ENGINE_CONFORMANCE_PYTHON_ENV,
+  ENGINE_CONFORMANCE_STUDIO_ENV,
   conformanceProvisioner,
   conformanceRuntimeRoot,
+  conformanceVenvDir,
+  exportEngineConformanceEnv,
   needsBrowserRuntime,
+  provisionOnEditorPluginLaunch,
   venvPython,
 } from '../src/editors/conformance-runtime.js';
 import { gardenConformance } from '../src/editors/pack-install.js';
@@ -217,5 +222,62 @@ describe('conformanceProvisioner', () => {
     expect(existsSync(join(dir, 'rt4', `venv-playwright-${CONFORMANCE_PLAYWRIGHT_VERSION}`))).toBe(false);
     fail = false;
     expect((await provision()).ok).toBe(true);
+  });
+});
+
+// (DES-EDITOR-CONFORMANCE-HOST, e2e F18) The engine runs an editor-plugin run's conformance cases on this host, from
+// crew's runtime and studio dist, which crew names in the daemon's environment at boot.
+describe('the engine\'s conformance step inputs', () => {
+  it('names crew\'s pinned venv interpreter (the one the provisioner makes) and its studio dist; an operator\'s own setting wins', async () => {
+    const studio = join(dir, 'studio');
+    mkdirSync(studio, { recursive: true });
+    writeFileSync(join(studio, 'index.html'), '<!doctype html>');
+    const env: NodeJS.ProcessEnv = { [CONFORMANCE_RUNTIME_DIR_ENV]: join(dir, 'rt') };
+    const set = exportEngineConformanceEnv(studio, env, 'darwin');
+    const python = venvPython(conformanceVenvDir(join(dir, 'rt'), env), 'darwin');
+    expect(set).toEqual({ python, studio });
+    expect(env[ENGINE_CONFORMANCE_PYTHON_ENV]).toBe(python);
+    expect(env[ENGINE_CONFORMANCE_STUDIO_ENV]).toBe(studio);
+    expect(python).toBe(join(dir, 'rt', `venv-playwright-${CONFORMANCE_PLAYWRIGHT_VERSION}`, 'bin', 'python'));
+    // The path the provisioner reports for the same root is the one named at boot.
+    const made = await conformanceProvisioner(() => join(dir, 'rt'), {
+      env,
+      platform: 'darwin',
+      exec: (async (_bin: string, args: string[]) => {
+        if (args[0] === '-m' && args[1] === 'venv') mkdirSync(join(String(args[2]), 'bin'), { recursive: true });
+        if (args[0] === '-m' && args[1] === 'venv') writeFileSync(join(String(args[2]), 'bin', 'python'), '');
+        return { stdout: '', stderr: '' };
+      }) as never,
+    })();
+    expect(made).toEqual({ ok: true, python });
+    const own: NodeJS.ProcessEnv = { [ENGINE_CONFORMANCE_PYTHON_ENV]: '/opt/py', [ENGINE_CONFORMANCE_STUDIO_ENV]: '/opt/dist' };
+    expect(exportEngineConformanceEnv(studio, own, 'darwin')).toEqual({});
+    expect(own[ENGINE_CONFORMANCE_PYTHON_ENV]).toBe('/opt/py');
+    // A bundle with no index.html (a headless daemon) names no dist: the engine's step then refuses with a retry.
+    const headless: NodeJS.ProcessEnv = {};
+    expect(exportEngineConformanceEnv(join(dir, 'nothing'), headless, 'darwin').studio).toBeUndefined();
+    expect(headless[ENGINE_CONFORMANCE_STUDIO_ENV]).toBeUndefined();
+  });
+
+  it('starts making the runtime when an editor-plugin run is launched, never for another run or an operator\'s own interpreter', async () => {
+    let calls = 0;
+    const logs: string[] = [];
+    const provision = async () => {
+      calls += 1;
+      return { ok: false as const, error: 'crew could not provision the conformance browser: no index' };
+    };
+    const managed = '/rt/venv/bin/python';
+    const env: NodeJS.ProcessEnv = { [ENGINE_CONFORMANCE_PYTHON_ENV]: managed };
+    const fire = (n: { kind: string; status: string; workflow?: string }, e = env) =>
+      provisionOnEditorPluginLaunch(n, provision, (m) => logs.push(m), e, managed);
+    expect(fire({ kind: 'run', status: 'handed', workflow: 'feature' })).toBe(false);
+    expect(fire({ kind: 'campaign', status: 'handed', workflow: 'editor-plugin' })).toBe(false);
+    expect(fire({ kind: 'run', status: 'rejected', workflow: 'editor-plugin' })).toBe(false);
+    expect(fire({ kind: 'run', status: 'handed', workflow: 'editor-plugin' }, { [ENGINE_CONFORMANCE_PYTHON_ENV]: '/opt/py' })).toBe(false);
+    expect(calls).toBe(0);
+    expect(fire({ kind: 'run', status: 'handed', workflow: 'editor-plugin' })).toBe(true);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls).toBe(1);
+    expect(logs.join('\n')).toContain('crew could not provision the conformance browser');
   });
 });
