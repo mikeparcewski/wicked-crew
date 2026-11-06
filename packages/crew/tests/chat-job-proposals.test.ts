@@ -318,7 +318,12 @@ describe('across kinds', () => {
     await pick(r, 'document', { option: 'repo-docs' });
     const job = open(r);
     expect(job.kind).toBe('job');
-    const out = await swap(r, job.pid, { option: 'presentation' }, 'deck');
+    // The deck drops the check against its sources: wicked asks first.
+    await swap(r, job.pid, { option: 'presentation' }, 'deck');
+    const q = open(r);
+    expect(q.question).toMatchObject({ kind: 'lost_check', lost: ['fidelity-to-source'] });
+    // The press: a document is an artifact create, which this daemon (create off) cannot start from a chat.
+    const out = await swap(r, q.pid, q.question!.choices[0]!.edit, 'deck-press');
     expect(out.body).toMatchObject({ code: 'operation_unavailable' });
     expect(CATALOG_V2_CARDS.find((c) => c.id === 'document')).toBeDefined();
   });

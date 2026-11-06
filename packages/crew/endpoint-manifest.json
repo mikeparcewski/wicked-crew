@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.191.0",
+  "apiTypesVersion": "0.192.0",
   "endpoints": [
     {
       "method": "GET",
@@ -428,6 +428,20 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/chats/:id/proposals",
+      "requestType": "PersonProposalBody | PersonRevisionBody",
+      "responseType": "PersonProposalResponse",
+      "statusCodes": [
+        200,
+        201,
+        400,
+        403,
+        404,
+        409
+      ]
     },
     {
       "method": "POST",
@@ -2221,6 +2235,20 @@
         400,
         404,
         409
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/:id/reshape",
+      "requestType": "ReshapeRunBody",
+      "responseType": "ReshapeRunResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        502
       ]
     },
     {

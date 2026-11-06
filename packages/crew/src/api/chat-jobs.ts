@@ -394,7 +394,7 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     const other = ctx.chat.repos.find((x) => x.id !== repo?.id);
     if (other !== undefined && r.resolved.inputs.some((i) => i.id === 'repo')) suggestions.push({ label: `Use ${other.name}`, edit: { repoRef: other.id } });
   }
-  const brief = briefOf(facts, r);
+  const brief = briefOf(facts);
   return {
     pid: ctx.pid,
     chatId: ctx.chatId,
@@ -458,7 +458,7 @@ function swapChoice(
  * The brief a launch runs on (§4.6 rule 6): the person's first words plus the current details, so removing a detail
  * removes it from the brief. Crew's framing line and depth line are put first by the launch itself (shape.ts).
  */
-export function briefOf(facts: Pick<JobFacts, 'words' | 'details'>, _r?: ResolvedOption): string {
+export function briefOf(facts: Pick<JobFacts, 'words' | 'details'>): string {
   const words = facts.words.trim();
   if (facts.details.length === 0) return words;
   return `${words}\n\nAlso: ${facts.details.join('; ')}.`;

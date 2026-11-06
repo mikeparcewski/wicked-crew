@@ -135,14 +135,6 @@ function unconditionalGate(gate: unknown): boolean {
   return hc !== null && typeof hc === 'object' && (hc as { unconditional?: unknown }).unconditional === true;
 }
 
-/** A step's gate holds for the person in any case (`human_confirm`, `human_confirm_if`, `consent_before`). */
-function asksPerson(gate: unknown): boolean {
-  if (gate === 'consent_before') return true;
-  if (gate === null || typeof gate !== 'object') return false;
-  const g = gate as Record<string, unknown>;
-  return g['human_confirm'] !== undefined || g['human_confirm_if'] !== undefined;
-}
-
 /** Each step laid over its phase-catalog entry (role, pin, gate), the way crew reads a composed plan. */
 interface ReadStep {
   id: string;

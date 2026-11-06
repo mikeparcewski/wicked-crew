@@ -2,7 +2,7 @@
 // engine serves, commands are unique and never collide with the composer's step commands or the phase catalog, the
 // one hidden card is reachable only by its alias, a saved shadow below the built-in's checks turns its option off,
 // an unserved preset is `unavailable` (never dropped), and a shape on a launch is judged against the current catalog.
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -32,7 +32,9 @@ let entries: CatalogEntry[];
 beforeAll(async () => {
   adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
   await adapter.loadBuiltinCatalog(() => undefined);
-  defs = adapter.listWorkflows();
+  // crew's own defs the daemon registers at boot (the run review and the default evals).
+  const crewDef = (name: string): WorkflowDef => JSON.parse(readFileSync(new URL(`../workflows/${name}.json`, import.meta.url), 'utf8')) as WorkflowDef;
+  defs = [...adapter.listWorkflows(), crewDef('run-evals'), crewDef('review-recent-work')];
   presets = await adapter.listPresets();
   entries = await adapter.catalog();
 });
@@ -74,7 +76,8 @@ describe('the v2 wire', () => {
       for (const o of card.variant?.options ?? [null]) {
         if (o?.status === 'coming_soon') continue;
         const r = resolveOption(card.id, o?.id ?? null, served)!;
-        const seeded = o?.gate ?? card.gate ?? [];
+        // §3.1: Analyze a codebase · Domain is judged by its own coverage judge, not cited findings (its row says so).
+        const seeded = (o?.gate ?? card.gate ?? []).filter((g) => !(card.id === 'analyze-codebase' && o?.id === 'domain' && g === 'cited-findings'));
         for (const g of seeded) if (!r.resolved.gate.includes(g)) missing.push(`${card.id}:${o?.id ?? '-'} lacks ${g} (has ${r.resolved.gate.join(',')})`);
       }
     }
