@@ -10,6 +10,14 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.17.1] — 2026-11-06
+
+The catalog by verb with jobs started in the chat (DES-CATALOG-002 Lane C, #1376), a disputed steering rule on the
+wire (DES-RULE-CHECK-001 rev 2 A.5, #1380), and a "Fix <repo> issue #N" job that closes its issue and whose PR text
+can be judged and corrected (e2e-1105 F4, #1378). api-types 0.193.0. Engine: wicked-core-ts ^0.15.31 (the plan-gate
+send-back, the rule council and its `disputed` status, and the F11, F16, F4c and F8 fixes). Bundles wicked-studio
+0.15.0.
+
 ### Added
 
 - **The catalog by verb, and jobs started in the chat (DES-CATALOG-002 Lane C; api-types 0.192.0; needs
@@ -5980,7 +5988,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.17.1...HEAD
+[0.17.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.13...v0.17.0
 [0.16.13]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.12...v0.16.13
 [0.16.12]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.11...v0.16.12
