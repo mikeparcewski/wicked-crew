@@ -107,6 +107,10 @@ const humanStep = (id: string): string => {
   return words === '' ? id : `${words[0]!.toUpperCase()}${words.slice(1)}`;
 };
 
+/** Workflows whose launch picks its own seat (the run review's preparer, the default evals' Tool step): the proposal's
+ *  seats are not what runs there, so they are neither shown as choosable nor sent (codex r2). */
+export const SELF_SEATED: ReadonlySet<string> = new Set(['review-recent-work', 'run-evals']);
+
 // ── the inputs of a resolution ─────────────────────────────────────────────────────────────────────────────────────
 
 /** The chat as a job's resolution sees it. */
@@ -336,12 +340,12 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
   const kindSwap = (card.variant?.options ?? [])
     .filter((o) => o.id !== r.option?.id && o.status !== 'coming_soon')
     .slice(0, 4)
-    .map((o) => swapChoice(nounOf(card, o.id), { option: o.id }, gate, card.id, o.id, ctx.served, facts.skipQe));
+    .map((o) => swapChoice(nounOf(card, o.id), { option: o.id }, gate, card.id, o.id, ctx.served, facts.skipQe, seatProtections(r)));
   const cardTok = t({
     id: 'kind',
     kind: card.variant !== undefined ? 'option' : 'card',
     label: nounOf(card, r.option?.id ?? null),
-    swap: kindSwap.length > 0 ? { choices: kindSwap } : visibleCards.length > 0 ? { choices: visibleCards.slice(0, 4).map((c) => swapChoice(nounOf(c, optionFor(c, undefined)), { card: c.id }, gate, c.id, optionFor(c, undefined), ctx.served, facts.skipQe)) } : null,
+    swap: kindSwap.length > 0 ? { choices: kindSwap } : visibleCards.length > 0 ? { choices: visibleCards.slice(0, 4).map((c) => swapChoice(nounOf(c, optionFor(c, undefined)), { card: c.id }, gate, c.id, optionFor(c, undefined), ctx.served, facts.skipQe, seatProtections(r))) } : null,
   });
   const parts: string[] = [];
   const delivers = r.resolved.delivers;
@@ -351,11 +355,12 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     label: repo.name,
     swap: ctx.chat.repos.length > 1 ? { choices: ctx.chat.repos.filter((x) => x.id !== repo.id).slice(0, 4).map((x) => ({ label: x.name, edit: { repoRef: x.id } })) } : null,
   });
+  const selfSeated = r.workflow !== null && SELF_SEATED.has(r.workflow);
   const seatsTok = t({
     id: 'seats',
     kind: 'seats',
-    label: seats.label,
-    swap: ctx.roster.length > 1 ? { choices: ctx.roster.filter((s) => s.key !== seats.lead).slice(0, 4).map((s) => ({ label: `${s.name} leads`, edit: { lead: s.key } })) } : null,
+    label: selfSeated ? (r.workflow === 'run-evals' ? 'no seat (the evals compute every number)' : 'a seat the review picks itself') : seats.label,
+    swap: !selfSeated && ctx.roster.length > 1 ? { choices: ctx.roster.filter((s) => s.key !== seats.lead).slice(0, 4).map((s) => ({ label: `${s.name} leads`, edit: { lead: s.key } })) } : null,
   });
   const checksTok = t({ id: 'checks', kind: 'checks', label: checksLabel(gate), swap: null });
   if (launch === 'compose') {
@@ -395,7 +400,7 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
   } else if (question === null) {
     const alt = (card.variant?.options ?? []).find((o) => o.id !== r.option?.id && o.status !== 'coming_soon' && JSON.stringify(o.launch) !== JSON.stringify(r.resolved.launch));
     if (alt !== undefined) {
-      const c = swapChoice(nounOf(card, alt.id), { option: alt.id }, gate, card.id, alt.id, ctx.served, facts.skipQe);
+      const c = swapChoice(nounOf(card, alt.id), { option: alt.id }, gate, card.id, alt.id, ctx.served, facts.skipQe, seatProtections(r));
       suggestions.push({ label: `Make it ${c.label}`, edit: c.edit });
     }
     const other = ctx.chat.repos.find((x) => x.id !== repo?.id);
@@ -427,6 +432,7 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     needs,
     gate,
     seats,
+    seatRules: seatProtections(r),
     words: facts.words,
     details: [...facts.details],
     inputs: { ...facts.inputs },
@@ -453,12 +459,15 @@ function swapChoice(
   option: string | null,
   served: ServedState,
   skipQe: JobFacts['skipQe'],
+  protections: readonly SeatProtection[] = [],
 ): { label: string; edit: ProposalRevisionEdits } {
   const r = resolveOption(card, option, served);
   if (r === null) return { label, edit };
   const lost = gate.filter((g) => !checksOf(r, skipQe).includes(g));
-  if (lost.length === 0) return { label, edit };
-  return { label: `${label}, without ${list(lost.map((g) => GATE_WORDS[g]))}`, edit: { ...edit, confirmLoss: true } };
+  const lostSeats = protections.filter((k) => !seatProtections(r).includes(k));
+  if (lost.length === 0 && lostSeats.length === 0) return { label, edit };
+  // Every loss the press confirms is named in its own label (codex r2).
+  return { label: `${label}, without ${list([...lost.map((g) => GATE_WORDS[g]), ...lostSeats.map((k) => SEAT_WORDS[k])])}`, edit: { ...edit, confirmLoss: true } };
 }
 
 /**
@@ -588,7 +597,17 @@ export function mergeRevision(
     else facts.repoRef = hit.id;
   }
   if (edits.project !== undefined && edits.project !== facts.projectId) notes.push("Not changed: the project is the chat's own");
-  // 4. Seats: the lead, added seats; removing the card's only distinct reviewer or judge is refused.
+  // 4. Seats: the lead, added seats; removing the card's only distinct reviewer or judge is refused. A self-seated
+  //    workflow picks its own seat: a seat edit there changes nothing (codex r2).
+  const card4 = CATALOG_V2_CARDS.find((c) => c.id === facts.card)!;
+  const r4 = resolveOption(card4.id, optionFor(card4, facts.option), ctx.served);
+  if (r4?.workflow !== null && r4?.workflow !== undefined && SELF_SEATED.has(r4.workflow) && (edits.lead !== undefined || edits.addSeats !== undefined || edits.removeSeats !== undefined)) {
+    notes.push(`Not changed: ${card4.title} picks its own seat`);
+    edits = { ...edits };
+    delete edits.lead;
+    delete edits.addSeats;
+    delete edits.removeSeats;
+  }
   const can = new Set(ctx.roster.map((s) => s.key));
   const nameOf = (k: string): string => ctx.roster.find((s) => s.key === k)?.name ?? k;
   if (edits.lead !== undefined) {
@@ -667,11 +686,15 @@ export function mergeRevision(
   // A skip on a shape with no QE acceptance to skip is dropped (the engine refuses one there).
   if (facts.skipQe !== null && r !== null && !r.resolved.gate.includes('qe-acceptance')) facts.skipQe = null;
   const after = r === null ? [] : checksOf(r, facts.skipQe);
-  const lost = (parent.gate ?? []).filter((g) => !after.includes(g));
+  // A loss the parent's own question is still asking about stays a loss until the person's press (codex r2).
+  const pending = parent.question?.kind === 'lost_check' ? (parent.question.lost ?? []) : [];
+  const lost = [...new Set([...(parent.gate ?? []), ...pending])].filter((g) => !after.includes(g));
   const parentCard = parent.shape === undefined ? null : CATALOG_V2_CARDS.find((c) => c.id === parent.shape!.card) ?? null;
-  const before7 = parentCard === null ? [] : seatProtections(resolveOption(parentCard.id, optionFor(parentCard, parent.shape!.option), ctx.served));
+  // The parent's frozen seat rules (a catalog change since never erases one), else read from its card.
+  const before7 = parent.seatRules ?? (parentCard === null ? [] : seatProtections(resolveOption(parentCard.id, optionFor(parentCard, parent.shape!.option), ctx.served)));
   const after7 = seatProtections(r);
-  const lostSeats = before7.filter((k) => !after7.includes(k));
+  const pendingSeats = parent.question?.kind === 'lost_check' ? (parent.question.lostSeats ?? []) : [];
+  const lostSeats = [...new Set([...before7, ...pendingSeats])].filter((k) => !after7.includes(k));
   return { facts, notes, lost, lostSeats, unchanged: JSON.stringify(facts) === before };
 }
 
@@ -738,9 +761,6 @@ export const depthLine = (d: 'quick' | 'standard' | 'deep'): string => DEPTH_LIN
 
 // ── what Go launches (DES-CATALOG-002 §4.6) ────────────────────────────────────────────────────────────────────────
 
-/** Workflows whose launch picks its own seat (the run review's R≠ rule, the default evals' Tool step): the proposal's
- *  seats are not what runs there, so they are neither shown as choosable nor sent. */
-export const SELF_SEATED: ReadonlySet<string> = new Set(['review-recent-work', 'run-evals']);
 
 /** The inputs a run launch carries in its brief (beside the intent, the repository and the project), as plain lines. */
 export function inputLines(p: Pick<ArtifactProposal, 'inputs' | 'needs'>): string[] {
@@ -775,7 +795,7 @@ export function launchShapeOfProposal(p: ArtifactProposal): import('../core/type
 export function jobLaunchCommon(
   p: ArtifactProposal,
   d: { runId: string; chatId: string },
-  o: { clisJson?: string; qeSettingOff: boolean; selfSeated: boolean },
+  o: { clisJson?: string; selfSeated: boolean },
 ): Record<string, unknown> {
   const lead = p.seats?.lead ?? undefined;
   const qeShown = (p.gate ?? []).includes('qe-acceptance');
@@ -784,9 +804,12 @@ export function jobLaunchCommon(
     sessionId: d.runId,
     chatId: d.chatId,
     ...(!o.selfSeated && lead !== undefined ? { primary: lead } : {}),
-    ...(p.relaunch?.clisJson !== undefined ? { clisJson: p.relaunch.clisJson } : !o.selfSeated && o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
+    ...(!o.selfSeated && o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
     shape: launchShapeOfProposal(p),
-    ...(skip !== null ? { skipQeAcceptance: { reason: skip.reason } } : qeShown && (o.qeSettingOff || p.relaunch?.forceQeAcceptance === true) ? { forceQeAcceptance: true } : {}),
+    // QE as the person saw it (codex r2): promised, it is forced (no setting or score drops it unseen); skipped, the
+    // person's own skip with their reason.
+    ...(skip !== null ? { skipQeAcceptance: { reason: skip.reason } } : qeShown ? { forceQeAcceptance: true } : {}),
+    ...(p.relaunch?.campaignId !== undefined ? { campaignId: p.relaunch.campaignId } : p.relaunch?.groupLabel !== undefined ? { groupLabel: p.relaunch.groupLabel } : {}),
     ...(p.reshapes !== undefined ? { retryOf: p.reshapes } : {}),
     ...(p.reducedAssurance === true ? { reducedAssurance: true } : {}),
   };

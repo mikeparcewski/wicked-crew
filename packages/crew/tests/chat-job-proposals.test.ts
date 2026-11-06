@@ -394,6 +394,26 @@ describe('codex/pi r1 folds', () => {
     expect(fresh.question).toMatchObject({ kind: 'lost_check', lost: ['parity'] });
     expect((await r.svc.decide(CHAT, fresh.pid, { decision: 'go' }, ME, 'i1')).body).toMatchObject({ code: 'proposal_blocked' });
     expect(r.launcher.launched).toEqual([]);
+    // An unrelated correction cannot clear the question (codex r2): the loss still needs the press.
+    await swap(r, fresh.pid, { detail: { add: ['on Linux'] } }, 'detail');
+    expect(open(r).question).toMatchObject({ kind: 'lost_check', lost: ['parity'] });
+    // The press: a startable proposal without parity, and one launch; the old pid stays unlaunchable.
+    await swap(r, open(r).pid, { confirmLoss: true }, 'accept');
+    const accepted = open(r);
+    expect(accepted.question).toBeNull();
+    expect(accepted.gate).not.toContain('parity');
+    expect((await r.svc.decide(CHAT, accepted.pid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
+    expect(r.launcher.launched).toHaveLength(1);
+    expect((await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1')).body).toMatchObject({ code: 'proposal_superseded' });
+  });
+
+  it('a self-seated card shows no seat choice and refuses seat edits (codex r2)', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'review-recent-work');
+    const p = open(r);
+    expect(p.sentence!.tokens.find((t) => t.kind === 'seats')).toMatchObject({ label: 'a seat the review picks itself', swap: null });
+    await swap(r, p.pid, { lead: 'codex' }, 'lead');
+    expect(open(r).sentence!.notes.join(' ')).toMatch(/picks its own seat/);
   });
 
   it('a change that gives up a seat protection asks first, like a check (codex 13)', async () => {
@@ -465,7 +485,7 @@ describe('reshape (§2.5)', () => {
     await r.svc.decide(CHAT, held.pid, { decision: 'go' }, ME, 'i1');
     let rejected = 0;
     const rejectHeld = async () => { rejected += 1; return null; };
-    const base = { pid: `${CHAT}:reshape:run1:a`, oldRunId: 'run1', parentPid: held.pid, facts: facts('feature'), reducedAssurance: false, relaunch: { deliver: 'pr' as const }, request: { id: 'a', digest: 'd1' } };
+    const base = { pid: `${CHAT}:reshape:run1:a`, oldRunId: 'run1', parentPid: held.pid, facts: facts('feature'), edits: { card: 'feature' }, reducedAssurance: false, relaunch: { deliver: 'pr' as const }, request: { id: 'a', digest: 'd1' } };
     const refused = await r.svc.reshape(CHAT, { ...base, confirmLoss: false }, ME, 'i1', rejectHeld);
     expect(refused.body).toMatchObject({ code: 'reshape_loses_check', lost: ['parity'] });
     expect(rejected).toBe(0);
@@ -486,12 +506,13 @@ describe('what Go sends (codex 4, 7, 12)', () => {
     const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
     await pick(r, 'feature');
     const p = { ...open(r), reshapes: 'old-run', reducedAssurance: true as const };
-    const body = jobLaunchCommon(p, { runId: 'rid', chatId: CHAT }, { clisJson: '[]', qeSettingOff: true, selfSeated: false });
+    const body = jobLaunchCommon(p, { runId: 'rid', chatId: CHAT }, { clisJson: '[]', selfSeated: false });
     expect(body).toMatchObject({ sessionId: 'rid', chatId: CHAT, primary: 'claude', clisJson: '[]', forceQeAcceptance: true, retryOf: 'old-run', reducedAssurance: true, shape: { card: 'feature', catalogRev: served.rev } });
-    const skipped = jobLaunchCommon({ ...p, skipQe: { reason: 'r' } }, { runId: 'rid', chatId: CHAT }, { qeSettingOff: true, selfSeated: true });
+    const skipped = jobLaunchCommon({ ...p, skipQe: { reason: 'r' } }, { runId: 'rid', chatId: CHAT }, { selfSeated: true });
     expect(skipped).toMatchObject({ skipQeAcceptance: { reason: 'r' } });
     expect(skipped).not.toHaveProperty('forceQeAcceptance');
     expect(skipped).not.toHaveProperty('primary');
-    expect(jobLaunchCommon(p, { runId: 'rid', chatId: CHAT }, { qeSettingOff: false, selfSeated: false })).not.toHaveProperty('forceQeAcceptance');
+    // QE as shown: a proposal without QE acceptance sends no force.
+    expect(jobLaunchCommon({ ...p, gate: ['parity'] }, { runId: 'rid', chatId: CHAT }, { selfSeated: false })).not.toHaveProperty('forceQeAcceptance');
   });
 });

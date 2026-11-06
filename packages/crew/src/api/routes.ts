@@ -3765,12 +3765,20 @@ export function registerRoutes(
       // The seats the person saw: the lead, and the roster narrowed to the proposal's keys.
       const lead = p.seats?.lead ?? undefined;
       const keys = p.seats?.keys ?? [];
-      const roster = launchRosterNaming(rosterWithStanding(), lead);
+      // A reshape inherits the held run's roster configuration; its membership is still the proposal's seats (codex r2).
+      let inherited: Array<{ key?: unknown }> | null = null;
+      if (p.relaunch?.clisJson !== undefined) {
+        try {
+          const parsedRoster = JSON.parse(p.relaunch.clisJson) as unknown;
+          if (Array.isArray(parsedRoster)) inherited = parsedRoster as Array<{ key?: unknown }>;
+        } catch {
+          inherited = null;
+        }
+      }
+      const roster = inherited ?? launchRosterNaming(rosterWithStanding(), lead);
       const narrowed = keys.length > 0 ? roster.filter((s) => keys.includes(String(s.key))) : roster;
-      const qeSettingOff = addonSupportsQeOverride() && (await qeAcceptanceNow()) === 'off';
       const common = jobLaunchCommon(p, { runId: d.identity.runId, chatId: d.chatId }, {
-        ...(narrowed.length !== roster.length && narrowed.length > 0 ? { clisJson: JSON.stringify(narrowed) } : {}),
-        qeSettingOff,
+        ...((inherited !== null || narrowed.length !== roster.length) && narrowed.length > 0 ? { clisJson: JSON.stringify(narrowed) } : {}),
         selfSeated,
       });
       if (p.launch === 'run' || p.launch === undefined) {
@@ -3789,7 +3797,6 @@ export function registerRoutes(
             // §2.5: a reshape's replacement keeps the held run's delivery and grouping.
             ...(p.relaunch?.deliver !== undefined ? { deliver: p.relaunch.deliver } : {}),
             ...(p.relaunch?.deliverGate !== undefined && p.relaunch.deliver !== 'none' ? { deliverGate: p.relaunch.deliverGate } : {}),
-            ...(p.relaunch?.campaignId !== undefined ? { campaignId: p.relaunch.campaignId } : p.relaunch?.groupLabel !== undefined ? { groupLabel: p.relaunch.groupLabel } : {}),
             ...(p.relaunch?.revisesPr !== undefined && p.relaunch.deliver === 'pr' && p.repoRefs?.[0] !== undefined ? { revisesPr: p.relaunch.revisesPr } : {}),
           },
           { ...ctx, fromProposal: d.pid },
@@ -4469,6 +4476,18 @@ export function registerRoutes(
 
   /** (DES-CATALOG-002 §4.6) Chats whose client renders job proposals (`accepts: ['job']`), by its newest declaration. */
   const chatAccepts = new Map<string, boolean>();
+  /** A seed as the person route's body (one spelling, so its request digest is the same on every retry). */
+  const seedBody = (
+    seed: { card: string; option?: string | null | undefined; depth?: 'quick' | 'standard' | 'deep' | null | undefined; words?: string | undefined; source: 'pick' | 'command' },
+    requestId: string,
+  ): import('../core/types.js').PersonProposalBody => ({
+    card: seed.card,
+    ...(seed.option !== undefined ? { option: seed.option } : {}),
+    ...(seed.depth !== undefined ? { depth: seed.depth } : {}),
+    ...(seed.words !== undefined ? { words: seed.words } : {}),
+    source: seed.source,
+    requestId,
+  });
   /** The seeded chat's person-made proposal (`POST /chats {seed}`), made or found by its request id. */
   const seedProposal = async (
     chatId: string,
@@ -4477,19 +4496,7 @@ export function registerRoutes(
     actor: import('../core/types.js').Actor,
   ): Promise<{ view: import('../core/types.js').ChatProposalView } | { refused: { code: string; error: string } }> => {
     const instance = chatHistory?.stateOf(chatId)?.instance ?? null;
-    const out = await chatProposals.propose(
-      chatId,
-      {
-        card: seed.card,
-        ...(seed.option !== undefined ? { option: seed.option } : {}),
-        ...(seed.depth !== undefined ? { depth: seed.depth } : {}),
-        ...(seed.words !== undefined ? { words: seed.words } : {}),
-        source: seed.source,
-        requestId,
-      },
-      actor,
-      instance,
-    );
+    const out = await chatProposals.propose(chatId, seedBody(seed, requestId), actor, instance);
     if (out.code >= 300) {
       const b = out.body as { code?: unknown; error?: unknown };
       app.log.warn(`[proposals] chat ${chatId}: its seed proposal was refused (${String(b.code ?? out.code)})`);
@@ -4540,6 +4547,10 @@ export function registerRoutes(
         const open = askPaths.get(seedChatId) !== undefined || chatScopes.get(seedChatId) !== undefined;
         if (open || chatHistory?.stateOf(seedChatId) !== undefined) {
           let view = chatProposals.viewOfPid(seedChatId, personPid(seedChatId, seedActor.id, b.requestId!));
+          // The same request id with another seed is not a retry (codex r2).
+          if (view !== null && view.proposal.request?.digest !== requestDigest(seedBody(b.seed, b.requestId!))) {
+            return reply.code(409).send({ code: 'request_reused', error: 'this requestId already started a chat with another job', chatId: seedChatId });
+          }
           if (view === null && open) {
             const seeded = await seedProposal(seedChatId, b.seed, b.requestId!, seedActor);
             if ('refused' in seeded) return reply.code(409).send({ ...seeded.refused, chatId: seedChatId });
@@ -6767,8 +6778,9 @@ export function registerRoutes(
       let heldOrd: number | undefined;
       let heldRev: number | undefined;
       const ended = ['completed', 'cancelled', 'failed'].includes(String(run.session.status));
-      // A retry after the Reject (the run ended, the reshape proposal exists) goes straight to its launch.
-      if (!(ended && chatProposals.viewOfPid(chatId, pid) !== null)) {
+      // A retry after THIS reshape's Reject (recorded on its proposal) goes straight to its launch; a run that ended any
+      // other way is past reshaping (codex r2).
+      if (!(ended && chatProposals.proposalOfPid(chatId, pid)?.heldRejected === true)) {
         if (run.session.status !== 'awaiting_human') return reply.code(after().code).send(after().body);
         const held = await gateOfRecord(run, undefined);
         if ('refusal' in held || held.gateKind !== 'plan_approval') return reply.code(after().code).send(after().body);
@@ -6817,6 +6829,12 @@ export function registerRoutes(
           oldRunId: id,
           parentPid: fromProposal,
           facts,
+          edits: {
+            card: parsed.data.card,
+            ...(parsed.data.option !== undefined ? { option: parsed.data.option } : {}),
+            ...(parsed.data.depth !== undefined ? { depth: parsed.data.depth } : {}),
+            ...(parsed.data.inputs !== undefined ? { inputs: parsed.data.inputs as Record<string, import('../core/types.js').ProposalInputValue> } : {}),
+          },
           reducedAssurance: envelope.reducedAssurance === true,
           relaunch: {
             deliver: envelope.deliver,
@@ -8191,10 +8209,15 @@ export function registerRoutes(
       principal: runTimingIndex.principalFor(view.session.id),
     }));
     if (version === '2') {
-      const entries = await adapter.catalog().catch((err: unknown) => {
-        app.log.warn(`workflows/catalog?v=2: the phase catalog could not be read (${message(err)}); saved presets are read without it`);
-        return [];
-      });
+      // v2 fails closed (codex r2): a catalog read without the project's presets or the phase catalog would show checks
+      // and a revision a launch could not honour. v1 keeps its fallback below.
+      let entries: import('../core/types.js').CatalogEntry[];
+      try {
+        entries = await adapter.catalog();
+        presets = await adapter.listPresets(projectId ?? undefined);
+      } catch (err) {
+        return reply.code(503).send({ code: 'catalog_unavailable', error: `the catalog could not be read: ${message(err)}` });
+      }
       return buildWorkflowCatalogV2({
         defs: workflows, presets, entries, actorId: me, projectId,
         runs: runs.map((r) => {

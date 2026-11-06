@@ -7847,6 +7847,11 @@ export interface ReshapeRunBody {
   depth?: 'quick' | 'standard' | 'deep' | null;
   inputs?: Record<string, ProposalInputValue>;
   requestId: string;
+  /** The person's press on the reshape question naming what the new shape gives up. Without it, a replacement with
+   *  fewer checks or seat rules than the held job is **409** `reshape_loses_check` with `lost` (check ids) and
+   *  `lostSeats` (seat rules), and nothing is answered; send the same request again with `confirmLoss: true` (a new
+   *  `requestId`) once the person confirms. */
+  confirmLoss?: true;
 }
 
 export interface ReshapeRunResponse {
@@ -9148,6 +9153,8 @@ export interface ArtifactProposal {
   needs?: ProposalNeed[];
   gate?: CatalogGateId[];
   seats?: ProposalSeats;
+  /** The seat rules the card guarantees, frozen with the proposal (a later catalog never erases one unseen). */
+  seatRules?: Array<'distinctEvaluator' | 'distinctJudge' | 'excludeChangeAuthors' | 'notRunSeat' | 'proposalOnly'>;
   /** The person's first words (the job's intent) and the details carried from corrections, in order. */
   words?: string;
   details?: string[];
@@ -9176,6 +9183,8 @@ export interface ArtifactProposal {
    *  held run had it (disclosed). */
   reshapes?: string;
   reducedAssurance?: true;
+  /** (§2.5) The held run's plan was answered Reject for this reshape (a retry after that launches the replacement). */
+  heldRejected?: true;
   /** (§2.5) What else a reshape launches with, from the held run's launch envelope. */
   relaunch?: Pick<LaunchEnvelope, 'deliver' | 'deliverGate' | 'campaignId' | 'groupLabel' | 'revisesPr' | 'forceQeAcceptance' | 'clisJson'>;
 }
