@@ -1967,10 +1967,14 @@ export class ChatProposals {
     // (catalog-derived, named in its label). A loss beyond that asks again.
     const uncovered = confirmIds === null ? [...merged.lost, ...merged.lostSeats] : [...merged.lost, ...merged.lostSeats].filter((k) => !confirmIds.has(k));
     const covered = confirmed && uncovered.length === 0;
-    // A candidate the daemon cannot make is said at once, never behind a question it could not honour (codex r4).
+    // A candidate the daemon cannot make is said at once, never behind a question it could not honour (codex r4, r5):
+    // a refusal, or a candidate blocked for a reason no answer fixes (unavailable, coming).
     if (candidate === null && candidateErr !== null && loses && !covered) {
       const refused = this.refusalOf(candidateErr);
       if (refused !== null) return refused;
+    }
+    if (candidate !== null && loses && !covered && (candidate.question ?? null) === null && candidate.blocked !== null && candidate.coming === undefined) {
+      return { code: 409, body: { code: 'card_not_available', error: candidate.blocked, view: viewOf(parent) } };
     }
     if (qe !== null || (loses && !covered)) {
       const base = keepReshape(await this.proposalOf(chatId, src.pid, factsOf(parent.proposal), ctx, records, true), parent.proposal);

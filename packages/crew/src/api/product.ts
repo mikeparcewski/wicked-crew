@@ -142,7 +142,7 @@ export function reviewInstructions(projectId: string, rows: ReadonlyArray<Compos
  * reshape answers its held plan only for a launch that can start): the project, each requirement's repository being one
  * of its members, and each key existing. `null` = it would launch.
  */
-export async function composePreflight(adapter: CoreAdapter, id: string, refs: ReadonlyArray<{ repoId: string; key: string }>): Promise<string | null> {
+export async function composePreflight(adapter: CoreAdapter, id: string, refs: ReadonlyArray<{ repoId: string; key: string }>, instructions?: string): Promise<string | null> {
   if (refs.length === 0) return 'pick at least one requirement';
   if (refs.length > COMPOSE_MAX_REQUIREMENTS) return `pick at most ${COMPOSE_MAX_REQUIREMENTS} requirements`;
   let members;
@@ -151,14 +151,25 @@ export async function composePreflight(adapter: CoreAdapter, id: string, refs: R
   } catch (err) {
     return err instanceof Error ? err.message : String(err);
   }
+  const rows: Array<{ repoId: string; key: string; title: string; statement: string }> = [];
   for (const ref of refs) {
     const repo = members.find((m) => m.ref === ref.repoId)?.repo ?? null;
     if (repo === null) return `${ref.repoId} is not a registered repository of this project`;
     try {
-      if ((await getRequirement(repo, ref.key, adapter)) === null) return `${ref.repoId} has no requirement ${ref.key}`;
+      const detail = await getRequirement(repo, ref.key, adapter);
+      if (detail === null) return `${ref.repoId} has no requirement ${ref.key}`;
+      rows.push({ ...ref, title: detail.title, statement: detail.statement });
     } catch (err) {
       return err instanceof Error ? err.message : String(err);
     }
+  }
+  // The same instruction builders the launch runs, so their budget refuses here, before anything changes (codex r5).
+  try {
+    composeInstructions(id, rows, instructions);
+    reviewInstructions(id, rows);
+  } catch (err) {
+    if (err instanceof ComposeSelectionTooLargeError) return `${err.message}: select fewer requirements`;
+    throw err;
   }
   return null;
 }

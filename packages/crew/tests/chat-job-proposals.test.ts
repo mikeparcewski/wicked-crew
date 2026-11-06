@@ -63,6 +63,8 @@ interface Rig {
   qeOff: boolean;
   /** The held-plan Reject a reshape asks for: counted, answered with `rejectAnswer`. */
   rejects: number;
+  /** What the preflight says a launch would refuse (`null`: nothing). */
+  preflightAnswer: string | null;
   rejectAnswer: { code: number; body: Record<string, unknown> } | null;
 }
 
@@ -80,6 +82,7 @@ function rig(o: { roster?: Array<{ key: string; name: string }>; repos?: Array<{
     qeOff: false,
     rejects: 0,
     rejectAnswer: null,
+    preflightAnswer: null,
   };
   const registry = new LaunchOnceRegistry();
   registry.register('job', r.launcher);
@@ -107,6 +110,7 @@ function rig(o: { roster?: Array<{ key: string; name: string }>; repos?: Array<{
     jobs: () => true,
     served: async () => r.served,
     qeOff: async () => r.qeOff,
+    preflight: async () => r.preflightAnswer,
     reshapeReject: async () => {
       r.rejects += 1;
       return r.rejectAnswer;
@@ -587,5 +591,30 @@ describe('codex r3 folds', () => {
     const p = open(r);
     expect(p.seats).toMatchObject({ lead: null, keys: [] });
     expect(p.blocked ?? '').not.toMatch(/seats that can work/);
+  });
+});
+
+describe('codex r5 folds', () => {
+  const facts = (card: string): Parameters<ChatProposals['reshape']>[1]['facts'] => ({
+    card, option: undefined, depth: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape',
+  });
+
+  it('a launch the preflight says would refuse never answers the held plan', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'feature');
+    const held = open(r);
+    await r.svc.decide(CHAT, held.pid, { decision: 'go' }, ME, 'i1');
+    r.preflightAnswer = "payments-service's folder is missing";
+    const out = await r.svc.reshape(CHAT, { pid: `${CHAT}:reshape:run1:p`, oldRunId: 'run1', parentPid: held.pid, facts: facts('bug'), edits: { card: 'bug' }, reducedAssurance: false, relaunch: { deliver: 'pr' }, request: { id: 'p', digest: 'dp' }, confirmLoss: [] }, ME, 'i1');
+    expect(out.body).toMatchObject({ code: 'proposal_blocked', error: expect.stringMatching(/folder/) });
+    expect(r.rejects).toBe(0);
+    expect(r.launcher.launched).toHaveLength(1);
+  });
+
+  it("a variant card's null option is its default, in a revision and a reshape", async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'migrate', { option: 'upgrade' });
+    await swap(r, open(r).pid, { option: null }, 'null-opt');
+    expect(open(r).shape?.option).toBe('in-place');
   });
 });

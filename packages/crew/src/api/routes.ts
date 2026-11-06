@@ -5064,11 +5064,21 @@ export function registerRoutes(
     jobs: () => chatJobProposalsOn,
     reshapeReject,
     preflight: async (p) => {
+      // A repository job's repository is still registered and its folder is still there (the launch's own refusal,
+      // checked before a reshape answers its held plan; codex r5).
+      const repoRef = p.repoRefs?.[0];
+      if (repoRef !== undefined) {
+        const entry = (await adapter.listRepos().catch(() => [])).find((r) => r.id === repoRef);
+        if (entry === undefined) return `${p.repos[0] ?? repoRef} is no longer registered on this daemon`;
+        const missing = repoFolderMissing(entry);
+        if (missing !== null) return String((repoFolderMissingBody(missing) as { error?: unknown }).error ?? `${entry.name}'s folder is missing`);
+      }
       if (p.launch !== 'compose') return null;
       const req = p.inputs?.['requirements'];
       if (p.filedIn.projectId === null) return 'a backlog needs a project';
       if (req === undefined || req.kind !== 'requirements') return 'pick the requirements first';
-      return composePreflight(adapter, p.filedIn.projectId, req.refs);
+      const steer = (p.brief ?? p.words ?? '').trim();
+      return composePreflight(adapter, p.filedIn.projectId, req.refs, steer === '' ? undefined : steer);
     },
     qeOff: async () => addonSupportsQeOverride() && (await qeAcceptanceNow()) === 'off',
     acceptsJobs: (chatId) => chatAccepts.get(chatId) === true,
@@ -8201,7 +8211,7 @@ export function registerRoutes(
     } catch (err) {
       // An unknown project: the global presets (built-in attribution and saved ones still hold, agy r1).
       // An engine without presets lists the served defs only. Either way, said once in the log.
-      app.log.warn(`workflows/catalog: the presets could not be read${projectId !== null ? ` for project ${projectId}` : ''} (${message(err)}); listing ${projectId !== null ? 'the global ones' : 'the served workflows only'}`);
+      app.log.warn(`workflows/catalog: the presets could not be read${projectId !== null ? ` for project ${projectId}` : ''} (${message(err)}); v1 lists ${projectId !== null ? 'the global ones' : 'the served workflows only'}, v2 answers 503 if no presets read succeeds`);
       presetsRead = false;
       if (projectId !== null) {
         try {

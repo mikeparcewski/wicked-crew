@@ -8935,8 +8935,10 @@ export interface ProposalRevisionEdits {
   inputs?: Record<string, ProposalInputValue>;
   /** Facts carried from the person's corrections into the brief (".NET 8 on Linux"). */
   detail?: { add?: string[]; remove?: string[] };
-  /** A QE acceptance skip with the person's reason. From a seat's block, written only when the reason appears, unquoted,
-   *  in the person's own message that turn answers; otherwise it becomes the lost-check question. */
+  /** A QE acceptance skip with the person's reason. Never applied from a seat's block: when the person's own message that
+   *  turn answers asks for the skip (not quoted, reported or negated), wicked asks the lost-check question, quoting their
+   *  reason when it appears there unquoted and otherwise asking for one; when it does not ask, QE stays (with a note).
+   *  On the person route, only a press that confirms it (`confirmLoss`) applies it. */
   skipQe?: { reason: string };
   /** Take back a QE skip given earlier (QE acceptance runs again). */
   restoreQe?: true;

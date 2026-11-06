@@ -585,10 +585,11 @@ export function mergeRevision(
   // 3. An option or depth change keeps everything else.
   if (edits.option !== undefined) {
     const card = CATALOG_V2_CARDS.find((c) => c.id === facts.card)!;
-    if (edits.option === null ? card.variant !== undefined : card.variant?.options.some((o) => o.id === edits.option) !== true) {
+    // `null` on a card with variants is its default option, as the resolver reads it (codex r5).
+    if (edits.option !== null && card.variant?.options.some((o) => o.id === edits.option) !== true) {
       notes.push(`Not changed: ${card.title} has no option “${String(edits.option).slice(0, 60)}”`);
     } else {
-      facts.option = edits.option;
+      facts.option = edits.option === null ? (card.variant?.default ?? null) : edits.option;
     }
   }
   if (edits.depth !== undefined) {
