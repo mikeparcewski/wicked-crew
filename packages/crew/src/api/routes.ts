@@ -1,5 +1,5 @@
 import { REVIEW_WORKFLOW } from '../insights/workflow.js';
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyBaseLogger, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { busSeamsOffWarning, busUnavailableWarning } from '../core/bus-notice.js';
 import { vaultBinWarning, vaultDiagnostics } from '../core/vault-bin.js';
 import { PlanSchema, toLaunchPlan } from './plan-schema.js';
@@ -494,7 +494,12 @@ function codeGraphDbOr503(repo: RepoEntry, reply: FastifyReply): string | null {
  * there: Node reports a missing spawn `cwd` as `spawn <binary> ENOENT`, which named an installed
  * binary as the fault (rig, tiny-math). The words are the finding's, the same everywhere.
  */
-function refusedMissingFolder(repo: RepoEntry, reply: FastifyReply): boolean {
+/** A reply a refusal can be sent on: fastify's, or the shared launch function's {@link LaunchReply}. */
+interface SendsReply {
+  code(statusCode: number): { send(payload?: unknown): unknown };
+}
+
+function refusedMissingFolder(repo: RepoEntry, reply: SendsReply): boolean {
   const missing = repoFolderMissing(repo);
   if (missing === null) return false;
   void reply.code(409).send(repoFolderMissingBody(missing));
@@ -503,6 +508,29 @@ function refusedMissingFolder(repo: RepoEntry, reply: FastifyReply): boolean {
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * What the shared launch function answers (DES-CHAT-FIRST-001 C3): the status and body `POST /runs` sends. Shaped like
+ * the reply the route body was written against, so the launch policy reads the same in one place for every launcher.
+ */
+export class LaunchReply {
+  statusCode = 200;
+  payload: unknown = undefined;
+  code(statusCode: number): this {
+    this.statusCode = statusCode;
+    return this;
+  }
+  send(payload?: unknown): this {
+    this.payload = payload;
+    return this;
+  }
+}
+
+/** Who launches, and where the launch logs. */
+export interface LaunchContext {
+  actor: import('../core/types.js').Actor;
+  log: Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>;
 }
 
 /**
@@ -3017,27 +3045,15 @@ export function registerRoutes(
     },
   );
 
-  // Launch a run (replaces POST /sessions). `clisJson` defaults to the roster;
-  // `sessionId` is minted if the client omits it.
-  app.post(
-    `${V}/runs`,
-    {
-      config: {
-        manifest: {
-          requestType: 'LaunchRunBody',
-          responseType: 'LaunchRunResponse',
-          // 404/409: unknown project / unknown campaignId (wicked-studio#27) /
-          // archived-or-synthesized project + busy engine + the state-home blocker
-          // (`state_home_unregistered`) + a roster with no eligible seat (`no_eligible_seat`,
-          // wicked-core#461 — see the catch below); 400: zod reject or a retryOf naming no
-          // existing run; 422: the base-skill intake refusal (`base_skill_refused`, crew#554);
-          // 501: campaignId attach on an engine addon without the campaign bindings ("upgrade
-          // the engine").
-          statusCodes: [201, 400, 404, 409, 422, 501],
-        },
-      },
-    },
-    async (req, reply) => {
+  /**
+   * (DES-CHAT-FIRST-001 C3, DES-CATALOG-002 §4.6) THE launch: the whole launch policy and provenance path of
+   * `POST /runs`, shared by that route and every other launcher of a run (a chat job proposal's Go, a reshape). The
+   * route parses nothing itself: the body is checked here, by the same schema, so no launcher has a side path.
+   * `internal` carries what only crew may set (never a client field): the proposal a run was launched from.
+   */
+  const launchRun = async (raw: unknown, ctx: LaunchContext): Promise<LaunchReply> => {
+    const reply = new LaunchReply();
+    const req = { body: raw, log: ctx.log, actor: ctx.actor };
     const parsed = LaunchSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
@@ -3580,7 +3596,33 @@ export function registerRoutes(
       const busy = /busy|in flight|already/i.test(msg);
       return reply.code(busy ? 409 : 400).send({ error: msg });
     }
-  });
+  };
+
+  // Launch a run (replaces POST /sessions). `clisJson` defaults to the roster;
+  // `sessionId` is minted if the client omits it.
+  app.post(
+    `${V}/runs`,
+    {
+      config: {
+        manifest: {
+          requestType: 'LaunchRunBody',
+          responseType: 'LaunchRunResponse',
+          // 404/409: unknown project / unknown campaignId (wicked-studio#27) /
+          // archived-or-synthesized project + busy engine + the state-home blocker
+          // (`state_home_unregistered`) + a roster with no eligible seat (`no_eligible_seat`,
+          // wicked-core#461 — see the catch below); 400: zod reject or a retryOf naming no
+          // existing run; 422: the base-skill intake refusal (`base_skill_refused`, crew#554);
+          // 501: campaignId attach on an engine addon without the campaign bindings ("upgrade
+          // the engine").
+          statusCodes: [201, 400, 404, 409, 422, 501],
+        },
+      },
+    },
+    async (req, reply) => {
+      const out = await launchRun(req.body, { actor: actorOf(req), log: req.log });
+      return reply.code(out.statusCode).send(out.payload);
+    },
+  );
 
   // Run list (replaces GET /sessions). Actionable-first; reconciles the gate and elicitation caches
   // so that terminal-run entries are pruned even when their terminal CoreEvent was missed.
