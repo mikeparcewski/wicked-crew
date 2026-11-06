@@ -988,13 +988,16 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // and must not become the PR text (Copilot on #525).
     "_framed() { [ -s \"$1\" ] && [ -n \"$(sed -n 1p \"$1\")\" ] && [ -z \"$(sed -n 2p \"$1\")\" ] && [ -n \"$(sed -n '3,$p' \"$1\" | tr -d '[:space:]' | head -c 1)\" ]; }",
     `API='${api}'`,
+    // (e2e-1105 F4c) Set only when the text below is the run record: only that text may replace an
+    // existing PR's description (the launch-time fallback knows no correction given since).
+    "FROMRUN=''",
     'if [ -z "$API" ]; then',
     '  echo "deliver: no daemon origin was known when this run launched — using the launch-time PR text"',
     'elif ! command -v curl >/dev/null 2>&1; then',
     '  echo "deliver: curl is not available in this shell — using the launch-time PR text"',
     // `--noproxy "*"`: the daemon is loopback; an operator shell's http_proxy must not swallow it.
     'elif curl -fsS -m 20 --noproxy "*" -H "Accept: text/plain" "$API/api/v1/runs/$RUNID/deliver-text" -o "$TD/text" 2>/dev/null && _framed "$TD/text"; then',
-    '  echo "deliver: PR text composed from the run record ($API)"',
+    '  echo "deliver: PR text composed from the run record ($API)"; FROMRUN=1',
     'else',
     '  rm -f "$TD/text"',
     '  echo "deliver: the daemon at $API did not answer with the run record — using the launch-time PR text"',
@@ -1362,7 +1365,8 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // \"main\" already exists: <url>"). That is the delivery, not a failure: only gh's diagnostic
     // naming THIS branch qualifies (a PR some other branch holds never does), the URL is gh's own,
     // and done is re-derived below exactly as on the create path (URL + remote ahead of base). The
-    // new attempt's run record rides `gh pr comment`, as a revision's does.
+    // new attempt's run record rewrites the PR's description (e2e-1105 F4c; a comment only when it
+    // cannot), and the PR's text is read back for the rules deferred to delivery.
     `      *"for branch \\"$B\\""*"already exists"*) EXISTING=1;;`,
     '      *) echo "deliver: gh pr create failed for $B — no PR was opened"; exit 1;;',
     '    esac',
@@ -1375,16 +1379,33 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     "  URL=$(printf '%s\\n' \"$OUT\" | grep -Eo 'https://[^[:space:]]+/pull/[0-9]+' | tail -1 || true)",
     '  [ -n "$URL" ] || { echo "deliver: gh pr create exited 0 but produced no PR URL for $B — refusing to report a delivery nothing can be pointed at"; exit 1; }',
     // (wicked-core SWAP 6) The engine checks the steering rules deferred to delivery against the
-    // pull request text: handed back ONLY once gh has opened the PR with exactly this title and body
-    // (a PR this run already had, a revision's comment, a push-only or Azure DevOps delivery hand
-    // back nothing, so the engine holds those rules for a person rather than judge text that is not
-    // the PR's description).
+    // pull request text: handed back once gh has opened the PR with exactly this title and body. A
+    // PR this run already had hands back ITS text as GitHub holds it (below); a revision's comment, a
+    // push-only or Azure DevOps delivery hand back nothing, so the engine holds those rules for a
+    // person rather than judge text that is not the PR's description.
     '  if [ -z "${EXISTING:-}" ] && [ -n "${WICKED_DELIVER_TEXT_OUT:-}" ]; then { printf \'%s\\n\\n\' "$TITLE"; cat "$TD/body"; } > "$WICKED_DELIVER_TEXT_OUT" 2>/dev/null || true; fi',
     '  P=$(git rev-list --count "$D..origin/$B")',
     '  [ "$P" -ge 1 ] || { echo "deliver: $B is not ahead of $D on the remote after the push — refusing to report a delivery with no commits"; exit 1; }',
     '  if [ -n "${EXISTING:-}" ]; then',
     '    echo "deliver: pull request $URL already exists for $B (an earlier attempt of this run opened it); the push updated it with $P commit(s) on top of $D — recorded as this run\'s delivery"',
-    '    if COUT=$(_gh pr comment "$URL" --body-file "$TD/body" 2>&1); then echo "deliver: run record commented on $URL"; else echo "$COUT"; echo "deliver: could not comment on $URL — the commits landed; the record is in the commit message"; fi',
+    // (e2e-1105 F4c) The PR this run opened carries the run record as its description, so a re-run
+    // rewrites it from THIS attempt's run record: a correction the person gave at the deliver gate (a
+    // closing line) reaches the PR, and the description never goes stale behind the gate that judges
+    // it. The launch-time fallback never replaces it (it knows no later correction), and when the
+    // rewrite fails the record rides a comment, as it did before.
+    '    EDITED=no',
+    '    if [ -z "$FROMRUN" ]; then echo "deliver: the PR text is the launch-time fallback, not the run record — the description of $URL is left as it is"',
+    '    elif EOUT=$(_gh pr edit "$URL" --title "$TITLE" --body-file "$TD/body" 2>&1); then EDITED=yes; echo "deliver: description of $URL rewritten from the run record"',
+    '    else echo "$EOUT"; echo "deliver: could not rewrite the description of $URL — it keeps its earlier text, and the rules deferred to delivery are judged on that text (correct it on GitHub, then re-check the rules)"; fi',
+    '    if [ "$EDITED" = no ]; then',
+    '      if COUT=$(_gh pr comment "$URL" --body-file "$TD/body" 2>&1); then echo "deliver: run record commented on $URL"; else echo "$COUT"; echo "deliver: could not comment on $URL — the commits landed; the record is in the commit message"; fi',
+    '    fi',
+    // ...and hands the engine the PR's text AS GITHUB HOLDS IT now (title, blank line, body), so the
+    // rules deferred to delivery are judged on what the PR says. Unreadable: nothing is handed back
+    // and the engine holds those rules for a person (re-check, or skip with a reason).
+    '    if [ -n "${WICKED_DELIVER_TEXT_OUT:-}" ]; then',
+    '      if _gh pr view "$URL" --json title,body -q \'.title + "\\n\\n" + (.body // "")\' > "$TD/prtext" 2>/dev/null && [ -s "$TD/prtext" ]; then cp "$TD/prtext" "$WICKED_DELIVER_TEXT_OUT" 2>/dev/null || true; else echo "deliver: could not read back the text of $URL — the steering rules deferred to delivery are held for you"; fi',
+    '    fi',
     '  fi',
     '  fi',
     'fi',

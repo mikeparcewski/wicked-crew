@@ -130,7 +130,8 @@ describe('deliverPrScript (the hardened field script)', () => {
     const dir = execFileSync('mktemp', ['-d'], { encoding: 'utf8' }).trim();
     const out = `${dir}/text.md`;
     execFileSync('bash', ['-c', `TD=${dir}; TITLE='Fix sum()'; printf 'Fixes #12\\n' > "$TD/body"; WICKED_DELIVER_TEXT_OUT=${out}; ${line.trim()}`], { encoding: 'utf8' });
-    // A PR this run already had: nothing handed back (its description is not this text).
+    // A PR this run already had: not THIS line (that PR's text is read back from GitHub, e2e-1105 F4c — see
+    // deliver-script-exec's existing-PR cases).
     const out2 = `${dir}/text2.md`;
     execFileSync('bash', ['-c', `TD=${dir}; TITLE=x; EXISTING=1; WICKED_DELIVER_TEXT_OUT=${out2}; ${line.trim()}; true`], { encoding: 'utf8' });
     expect(execFileSync('bash', ['-c', `test -e ${out2} && echo yes || echo no`], { encoding: 'utf8' }).trim()).toBe('no');
