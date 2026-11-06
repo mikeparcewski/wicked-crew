@@ -10,6 +10,22 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Changed
+
+- **A Demo video is recorded by the engine on this machine, never by a seat (DES-DEMO-RECORD-001, wicked-core#1249).**
+  `POST /projects/:id/demo` now lays the demo root out for the engine's `demo_probe` and `demo_record` Tools
+  (wicked-core#1303, wicked-garden#1415). The run's ONLY write root is `<root>/plan` (brief, script, chapters, `storyline.json`).
+  The root itself is handed as the run's evidence root, with a `launch.json` saying what crew decided about the app:
+  its loopback origin and launch path, whether it is one of crew's own apps (`/apps/<id>` on crew's port, whose one
+  query and `/ws` the recorder may use), and whether its rows may reach a model (every source it reads lets agents
+  query it, DES-APPS-001 S5). The probe (and, only when rows may reach a model, the review sheets) are read-only
+  mounts. An app whose rows may not reach a model launches `demo-human-review`: no model review step, the person
+  reviews the take at the record gate. A URL that is not on this machine (127.0.0.1, localhost, [::1]) is refused
+  (a remote app is wicked-core#1296). The demo view reads the plan from `plan/` and the chapters and storyline from
+  the engine's approved snapshot (falling back to a pre-change demo's root files), reads the recorder's `record.json`,
+  and gains `producer` (the engine and its jail) and `storyline` (wicked-crew-api-types: two optional `DemoView`
+  fields). An engine without the `demo_record` Tool refuses a demo launch (501).
+
 ## [0.17.1] — 2026-11-06
 
 The catalog by verb with jobs started in the chat (DES-CATALOG-002 Lane C, #1376), a disputed steering rule on the
@@ -82,21 +98,6 @@ send-back, the rule council and its `disputed` status, and the F11, F16, F4c and
   delivery are judged instead of looping on "rules unchecked"; if the rewrite fails, the record rides a comment as
   before. A rule the person asked to skip at the deliver gate is named in the PR text that follows (its reason stays
   on the run record).
-### Changed
-
-- **A Demo video is recorded by the engine on this machine, never by a seat (DES-DEMO-RECORD-001, wicked-core#1249).**
-  `POST /projects/:id/demo` now lays the demo root out for the engine's `demo_probe` and `demo_record` Tools
-  (wicked-core#1303, wicked-garden#1415). The run's ONLY write root is `<root>/plan` (brief, script, chapters, `storyline.json`).
-  The root itself is handed as the run's evidence root, with a `launch.json` saying what crew decided about the app:
-  its loopback origin and launch path, whether it is one of crew's own apps (`/apps/<id>` on crew's port, whose one
-  query and `/ws` the recorder may use), and whether its rows may reach a model (every source it reads lets agents
-  query it, DES-APPS-001 S5). The probe (and, only when rows may reach a model, the review sheets) are read-only
-  mounts. An app whose rows may not reach a model launches `demo-human-review`: no model review step, the person
-  reviews the take at the record gate. A URL that is not on this machine (127.0.0.1, localhost, [::1]) is refused
-  (a remote app is wicked-core#1296). The demo view reads the plan from `plan/` and the chapters and storyline from
-  the engine's approved snapshot (falling back to a pre-change demo's root files), reads the recorder's `record.json`,
-  and gains `producer` (the engine and its jail) and `storyline` (wicked-crew-api-types: two optional `DemoView`
-  fields). An addon that cannot take an evidence root refuses a demo launch.
 
 ## [0.17.0] — 2026-11-05
 
