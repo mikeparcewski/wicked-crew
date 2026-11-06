@@ -2907,6 +2907,9 @@ export async function createServer(
   // `phase-report` — and the steering notes a person's edits of it become. Steering rides the engine's operator
   // inject only; nothing here answers a gate.
   const workingDocNotes = new PersonNotesIndex();
+  /** How long after start the working documents' catch-up begins (`WICKED_WORKING_DOC_CATCHUP_MS`, default 10 s). */
+  const catchUpEnv = Number(process.env['WICKED_WORKING_DOC_CATCHUP_MS']);
+  const WORKING_DOC_CATCH_UP_DELAY_MS = process.env['WICKED_WORKING_DOC_CATCHUP_MS'] !== undefined && Number.isFinite(catchUpEnv) && catchUpEnv >= 0 ? catchUpEnv : 10_000;
   // The start-up read of the trail for the person's answers; every document sync waits for it (never rejects).
   const workingDocNotesRead: Promise<string[]> = audit.readAll().then(
     (entries) => workingDocNotes.hydrate(entries),
@@ -2954,10 +2957,16 @@ export async function createServer(
   // After a restart no further event may come for a run: once the person's answers are read from the trail, bring every
   // held document up to date and make the newest live runs' documents (bounded, one at a time; never rejects). Answers
   // recorded while the trail was read bring their run's document up to date too.
-  void workingDocNotesRead.then(async (touched) => {
-    for (const runId of touched) workingDocs.nudge(runId);
-    await workingDocs.catchUp();
-  });
+  // It starts a little after the daemon is up (a boot is busy enough), and never after it has closed.
+  let workingDocCatchUp: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+    workingDocCatchUp = null;
+    void workingDocNotesRead.then(async (touched) => {
+      for (const runId of touched) workingDocs.nudge(runId);
+      await workingDocs.catchUp();
+    });
+  }, WORKING_DOC_CATCH_UP_DELAY_MS);
+  workingDocCatchUp.unref?.();
+  app.addHook('onClose', async () => { if (workingDocCatchUp !== null) clearTimeout(workingDocCatchUp); });
   registerWorkingDocRoutes(app, { service: workingDocs, exists: async (id) => (await adapter.sessions()).includes(id) });
   registerStandingOrderRoutes(app, {
     store: standingOrders,
