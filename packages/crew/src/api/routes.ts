@@ -276,6 +276,7 @@ import {
 } from './chat-context.js';
 import { createDocInProcess, registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { CreateLauncher } from '../interactive/proposal-create.js';
+import { ThemeLauncher } from './proposal-theme.js';
 import type { DocBindingStore } from '../interactive/doc-binding.js';
 import type { BoundDraft } from '../interactive/draft-events.js';
 import { buildRunBrief } from './run-brief.js';
@@ -1795,19 +1796,21 @@ export function registerRoutes(
   const chatTranscripts = runtime.chatTranscripts;
   const chatAttachments = runtime.chatAttachments ?? new ChatAttachmentStore();
   const chatHistory = runtime.chatHistory ?? (chatTranscripts !== undefined ? new ChatHistoryStore(chatTranscripts, chatAttachments) : null);
-  // DES-CHAT-ARTIFACTS-001 §14 (A2): what a chat can do with artifacts. Production: `proposals` on and every operation
-  // off — each later slice turns its own on and registers its launcher. The TEST configuration (§13 A2) turns every
+  // DES-CHAT-ARTIFACTS-001 §14 (A2): what a chat can do with artifacts. Production: `proposals` on, and each operation
+  // on once its slice registers its launcher (A3 create, A7 theme). The TEST configuration (§13 A2) turns every
   // operation's resolution on and registers a recording stub that starts nothing.
   const chatArtifactsStub = runtime.chatArtifactsStub === true;
   // A3: a real `create` exists whenever the draft seam can launch a proposal-bound draft (the launcher is registered
   // below, once the bridge pool exists). Production advertises it; the test configuration keeps the recording stub only
   // for the operations whose slices have not landed.
   const realCreate = runtime.docBindings !== undefined && runtime.launchBoundDraft !== undefined;
-  const stubOps: import('../core/types.js').ArtifactProposalKind[] = realCreate ? ['refine', 'theme', 'demo'] : ['create', 'refine', 'theme', 'demo'];
+  // A7: a theme starts no run (§15.2), so its launcher is always real: studio applies the patch, Go records it.
+  const stubOps: import('../core/types.js').ArtifactProposalKind[] = realCreate ? ['refine', 'demo'] : ['create', 'refine', 'demo'];
   const chatArtifactFlags: import('../core/types.js').ChatArtifactsCapabilities = chatArtifactsStub
     ? { context: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps }
-    : { context: true, proposals: true, create: realCreate, refine: false, theme: false, demo: false };
+    : { context: true, proposals: true, create: realCreate, refine: false, theme: true, demo: false };
   const proposalLaunchers = new LaunchOnceRegistry();
+  proposalLaunchers.register('theme', new ThemeLauncher());
   /** (DES-CATALOG-002 §4.6) Job proposals in a chat: on wherever chat proposals are. */
   const chatJobProposalsOn = chatArtifactFlags.proposals;
   if (chatArtifactsStub) {
