@@ -37,12 +37,12 @@ class FakeBackend implements DocBackend {
 
 const HUMAN: Actor = { id: 'local', kind: 'human', trust: 'admin' };
 
-function setup(o: { block?: boolean } = {}) {
-  const backend = new FakeBackend();
+function setup(o: { block?: boolean; store?: WorkingDocStore; backend?: FakeBackend } = {}) {
+  const backend = o.backend ?? new FakeBackend();
   const injected: string[] = [];
   const facts: RunFacts = { title: 'Fix it', problem: 'Invoice PDFs show $ for EUR accounts.', projectId: 'default', terminal: false, stepOf: () => null };
   const service = new WorkingDocService({
-    store: new WorkingDocStore({ stateHome: home() }),
+    store: o.store ?? new WorkingDocStore({ stateHome: home() }),
     backend,
     engine: {
       injectWorkerMessage: async (_r: string, m: string) => { injected.push(m); return 'queued'; },
@@ -147,5 +147,36 @@ describe('the person’s context stands for every later worker step (bridge)', (
     const c = await t.edit({ constraints: 'C' });
     expect(c.steer?.kind).toBe('standing');
     expect(c.steer?.standingNote).toMatch(/^Standing operator constraint/u);
+  });
+
+  // xreview b1 (codex): a second, fallible read of the version lost a committed person's write or dropped their Goal;
+  // a bridge note kept being re-sent after the engine gained its block.
+  it('a person’s context comes from the version as written: no second read of it, so a failed read loses nothing', async () => {
+    const t = setup();
+    await t.service.ensure('run-1');
+    await t.edit({ goal: 'G1' });
+    t.backend.readVersion = async () => { throw new Error('interactive is restarting'); };
+    const r = await t.edit({ constraints: 'C1' });
+    expect(r.steer?.standingNote).toContain('- Goal: G1');
+    expect(r.steer?.standingNote).toContain('- Constraints and steering: C1');
+    expect((await t.service.view('run-1')).trail.at(-1)?.steerId).toBe(r.steer?.id);
+  });
+
+  it('once the engine keeps a context block, a bridge note is never re-sent and the next context edit replaces it', async () => {
+    const store = new WorkingDocStore({ stateHome: home() });
+    const backend = new FakeBackend();
+    const before = setup({ store, backend });
+    await before.service.ensure('run-1');
+    const old = await before.edit({ goal: 'OLD' });
+    expect(old.steer?.context).toBe(true);
+    const after = setup({ store, backend, block: true });
+    // Picked up under the new engine: no copy follows.
+    await after.pickUp(6, before.injected[0]!);
+    expect(after.injected).toEqual([]);
+    const fresh = await after.edit({ goal: 'NEW' });
+    expect(store.get('run-1')?.steers.find((x) => x.id === old.steer?.id)?.supersededBy).toBe(fresh.steer?.id);
+    after.service.onEvent({ type: 'unitDone', session: 'run-1', ord: 6 } as unknown as CoreEvent);
+    for (let i = 0; i < 6; i += 1) await new Promise((r) => setTimeout(r, 0));
+    expect(after.injected.some((m) => m.includes('OLD'))).toBe(false);
   });
 });

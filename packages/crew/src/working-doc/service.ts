@@ -460,7 +460,8 @@ export class WorkingDocService {
       throw err;
     }
     if ('headMoved' in written) return { ok: false, code: 409, error: 'the working document changed since', head: written.head };
-    const steer = await this.record(runId, written.version, written.parent, author, surface, changed, values, actor, input.input);
+    // The version's sections, from what it was made on and what it changed (never a second, fallible read: xreview b1).
+    const steer = await this.record(runId, written.version, written.parent, author, surface, changed, values, actor, input.input, { ...before, ...values });
     return { ok: true, version: written.version, unchanged: false, steer, view: await this.view(runId) };
   }
 
@@ -732,8 +733,8 @@ export class WorkingDocService {
   }
 
   /** A version that landed: its trail entry, its steer (a person's only), its audit line and the change frame. */
-  private async record(runId: string, version: number, parent: number, author: DocAuthor, surface: string | null, changed: SectionId[], values: Partial<Record<SectionId, string>>, actor: { id: string; kind: string }, spoken?: 'voice'): Promise<SteerRecord | null> {
-    const steer = author.kind === 'human' ? await this.steer(runId, version, changed, values, author.id, spoken) : null;
+  private async record(runId: string, version: number, parent: number, author: DocAuthor, surface: string | null, changed: SectionId[], values: Partial<Record<SectionId, string>>, actor: { id: string; kind: string }, spoken?: 'voice', after?: Partial<Record<SectionId, string>>): Promise<SteerRecord | null> {
+    const steer = author.kind === 'human' ? await this.steer(runId, version, changed, values, author.id, spoken, after ?? values) : null;
     const entry: TrailEntry = { version, parent, author, surface, sections: changed, at: this.now(), steerId: steer?.id ?? null };
     this.d.store.update(runId, (r) => { r.trail.push(entry); });
     this.d.audit?.('run.steered.doc', actor, runId, {
@@ -766,16 +767,18 @@ export class WorkingDocService {
     // One save: the write settled and, if it was crew's lines and landed, the ownership it carries (xreview r7).
     this.d.store.update(runId, (r) => { r.pending = null; if (landed && p.ownedDecisions !== undefined) r.ownedDecisions = p.ownedDecisions; });
     if (landed) {
-      await this.record(runId, v, p.expectHead, p.author, p.surface, ids, p.values, p.actor, p.input);
+      await this.record(runId, v, p.expectHead, p.author, p.surface, ids, p.values, p.actor, p.input, got);
     }
   }
 
   /**
-   * A person's version → ONE steering note for the run (§9): Goal, Approach and Next for the next step, and Constraints
-   * and steering as a standing constraint (an emptied Constraints is said once, as cleared). The record is stored
-   * BEFORE the engine is asked, so a pickup reported at once is never lost.
+   * A person's version → ONE steering note for the run (§9). Until the engine keeps a context block (the bridge): the
+   * person's CURRENT Goal, Approach and Constraints stand together, replaced by the next edit of any of them, with Next
+   * for the next step and a cleared section said once. With the block: Goal, Approach and Next for the next step and
+   * Constraints standing (crew feeds the block). The record is stored BEFORE the engine is asked, so a pickup reported at
+   * once is never lost. `after` is the version's sections as written.
    */
-  private async steer(runId: string, version: number, changed: SectionId[], values: Partial<Record<SectionId, string>>, by: string, spoken?: 'voice'): Promise<SteerRecord | null> {
+  private async steer(runId: string, version: number, changed: SectionId[], values: Partial<Record<SectionId, string>>, by: string, spoken: 'voice' | undefined, after: Partial<Record<SectionId, string>>): Promise<SteerRecord | null> {
     const steered = changed.filter((id) => SECTION_STEER[id] !== 'record');
     if (steered.length === 0) return null;
     const who = by === 'local' ? 'the operator' : by;
@@ -791,7 +794,7 @@ export class WorkingDocService {
       // latest version is a person's, never crew's or an agent's) stand together, re-sent before every later worker step
       // until the engine keeps a context block of its own. Next is still for the next step only.
       replaces = steered.some((x) => CONTEXT_SECTIONS.includes(x));
-      const context = replaces ? await this.personContext(runId, version, changed, values) : [];
+      const context = replaces ? this.personContext(runId, changed, after) : [];
       standing = context.length > 0;
       const inContext = new Set(context.map((c) => c.id));
       note = contextSteerNote(version, who, context, steered.filter((x) => !inContext.has(x)).map((x) => ({ id: x, text: values[x] ?? '' })), marker);
@@ -799,12 +802,15 @@ export class WorkingDocService {
     } else {
       const constraints = values.constraints;
       standing = steered.includes('constraints') && constraints !== undefined && constraints.trim() !== '';
-      replaces = steered.includes('constraints');
+      // A bridge note from before the engine had its block is replaced by any edit of what it carried (xreview b1).
+      replaces = steered.includes('constraints') || (steered.some((x) => CONTEXT_SECTIONS.includes(x))
+        && (this.d.store.get(runId)?.steers ?? []).some((o) => o.kind === 'standing' && o.supersededBy == null && o.context === true));
       note = steerNote(version, who, standing, steered.map((x) => ({ id: x, text: values[x] ?? '' })), marker);
       if (standing) standingText = standingNote(version, who, constraints ?? '', marker);
     }
     const s: SteerRecord = {
       id, version, sections: steered, kind: standing ? 'standing' : 'next',
+      ...(standing && this.d.engine.supportsRunContext?.() !== true ? { context: true } : {}),
       note,
       ...(standingText !== null ? { standingNote: standingText, supersededBy: null, renewals: 0 } : {}),
       at: this.now(), by, queuedAt: null, pickedUp: null, error: null,
@@ -828,19 +834,17 @@ export class WorkingDocService {
   }
 
   /**
-   * (bridge) The person's current context after `version`: each of Goal, Approach and Constraints whose latest write is
-   * a person's (this version's sections are), with its text in that version. Crew's seeded Goal, a plan's Approach and
+   * (bridge) The person's current context in a version (`after`, its sections as written): each of Goal, Approach and
+   * Constraints whose latest write is a person's (this version's sections are). Crew's seeded Goal, a plan's Approach and
    * an agent's notes are never in it: only a person's words steer.
    */
-  private async personContext(runId: string, version: number, changed: SectionId[], values: Partial<Record<SectionId, string>>): Promise<Array<{ id: SectionId; text: string }>> {
+  private personContext(runId: string, changed: SectionId[], after: Partial<Record<SectionId, string>>): Array<{ id: SectionId; text: string }> {
     const rec = this.d.store.get(runId);
     if (rec === undefined) return [];
-    let texts: Partial<Record<SectionId, string>> = {};
-    if (CONTEXT_SECTIONS.some((x) => !changed.includes(x))) texts = sectionsOf((await this.d.backend.readVersion(rec.projectId, rec.docId, version)) ?? '');
     const out: Array<{ id: SectionId; text: string }> = [];
     for (const sid of CONTEXT_SECTIONS) {
       const persons = changed.includes(sid) || [...rec.trail].reverse().find((t) => t.sections.includes(sid))?.author.kind === 'human';
-      const text = (changed.includes(sid) ? values[sid] : texts[sid]) ?? '';
+      const text = after[sid] ?? '';
       if (persons && text.trim() !== '') out.push({ id: sid, text });
     }
     return out;
@@ -935,6 +939,8 @@ export class WorkingDocService {
     void this.exclusive(runId, async () => {
       const current = this.d.store.get(runId)?.steers.find((x) => x.id === steerId);
       if (current === undefined || current.supersededBy != null || current.error !== null || current.standingNote == null) { this.queued.set(steerId, false); return; }
+      // A bridge note is not re-sent once the engine keeps a context block of its own (xreview b1): crew feeds that.
+      if (current.context === true && this.d.engine.supportsRunContext?.() === true) { this.queued.set(steerId, false); return; }
       const run = await this.d.run(runId);
       if (run === null || run.terminal || this.d.store.get(runId)?.steers.find((x) => x.id === steerId)?.supersededBy != null) { this.queued.set(steerId, false); return; }
       await this.d.engine.injectWorkerMessage(runId, current.standingNote, 'all');
