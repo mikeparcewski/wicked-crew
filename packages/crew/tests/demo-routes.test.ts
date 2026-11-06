@@ -19,7 +19,7 @@ import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import { AuditLog } from '../src/api/audit.js';
-import { demoRootDir, demoRootsBesideStateHome, existingDemoRootDir, legacyDemoRootDir, parseRange, parseReview } from '../src/api/recording.js';
+import { crewAppOf, crewAppRowsMayReachModels, demoAppTarget, demoRootDir, demoRootsBesideStateHome, demoStage, existingDemoRootDir, legacyDemoRootDir, parseRange, parseReview } from '../src/api/recording.js';
 import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { LaunchRunInput } from '../src/core/types.js';
@@ -105,7 +105,7 @@ describe('the Demo experience routes', () => {
     removeScratch(demos);
   });
 
-  it('launches the demo preset through POST /runs with the minted demo root as its only write root', async () => {
+  it('launches the demo preset through POST /runs: the demo root is the evidence root, its plan directory the only write root', async () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/projects/proj-1/demo',
@@ -120,13 +120,23 @@ describe('the Demo experience routes', () => {
     expect(input.workflow).toBe('demo');
     expect(input.projectId).toBe('proj-1');
     expect(input.repoRef).toBeUndefined();
-    expect(input.extraWriteRoots).toEqual([root]);
-    expect(input.problem).toContain(join(root, 'BRIEF.md'));
+    // (DES-DEMO-RECORD-001 §3.2) The seat writes only the plan; the engine's Tools write the rest of the root.
+    expect(input.extraWriteRoots).toEqual([join(root, 'plan')]);
+    expect(input.demoRoot).toBe(root);
+    expect(input.extraReadRoots).toEqual([join(root, 'probe'), join(root, 'review')]);
+    expect(input.problem).toContain(join(root, 'plan', 'BRIEF.md'));
+    expect(JSON.parse(readFileSync(join(root, 'launch.json'), 'utf8'))).toEqual({
+      app_origin: 'http://127.0.0.1:5173',
+      launch_path: '/',
+      target: { kind: 'loopback_app' },
+      live_data_to_models: true,
+    });
+    for (const d of ['plan', 'probe', 'demo-video', 'review']) expect(existsSync(join(root, d))).toBe(true);
     expect(input.problem).toContain('wicked-garden-demo');
     // Worker prompts are single-line and capped: the brief carries the words, the problem only points.
     expect(input.problem).not.toContain('\n');
     expect(Buffer.byteLength(input.problem)).toBeLessThan(600);
-    const brief = readFileSync(join(root, 'BRIEF.md'), 'utf8');
+    const brief = readFileSync(join(root, 'plan', 'BRIEF.md'), 'utf8');
     expect(brief).toContain('http://127.0.0.1:5173/');
     expect(brief).toContain('New team leads');
     expect(brief).toContain('Launch a run and approve its plan');
@@ -144,6 +154,39 @@ describe('the Demo experience routes', () => {
     const input = launchRun.mock.calls[0]![0] as LaunchRunInput;
     expect(input.projectId).toBeUndefined();
     expect(input.workflow).toBe('demo');
+  });
+
+  it('refuses an app that is not on this machine: the recorder reaches one loopback port and nothing else', async () => {
+    for (const url of ['https://example.com/app', 'http://10.0.0.5:8080/', 'http://user:pw@127.0.0.1:5173/']) {
+      const res = await app.inject({ method: 'POST', url: '/api/v1/projects/proj-1/demo', payload: { url, audience: 'a', show: 'b' } });
+      expect(res.statusCode, url).toBe(400);
+    }
+    expect(launchRun).not.toHaveBeenCalled();
+  });
+
+  it("a crew app whose rows cannot be shown to a model launches the human-review preset, with no review sheets mounted", async () => {
+    const prevUrl = process.env.WICKED_CREW_URL;
+    process.env.WICKED_CREW_URL = 'http://127.0.0.1:7721';
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/v1/projects/proj-1/demo',
+        payload: { url: 'http://127.0.0.1:7721/apps/escalations', audience: 'a', show: 'b' },
+      });
+      expect(res.statusCode, res.body).toBe(201);
+      const input = launchRun.mock.calls[0]![0] as LaunchRunInput;
+      const root = join(demos, input.sessionId);
+      // No apps store on this daemon: the safe reading (the rows stay out of model context).
+      expect(input.workflow).toBe('demo-human-review');
+      expect(input.extraReadRoots).toEqual([join(root, 'probe')]);
+      expect(JSON.parse(readFileSync(join(root, 'launch.json'), 'utf8'))).toMatchObject({
+        target: { kind: 'crew_app', id: 'escalations' },
+        live_data_to_models: false,
+      });
+    } finally {
+      if (prevUrl === undefined) delete process.env.WICKED_CREW_URL;
+      else process.env.WICKED_CREW_URL = prevUrl;
+    }
   });
 
   it('POST /runs refuses the demo preset launched directly: it would have no demo root or brief', async () => {
@@ -241,6 +284,35 @@ describe('the Demo experience routes', () => {
     expect(v.seats).toEqual({ recorder: 'claude', reviewer: 'codex' });
     expect(v.syntheticLabelled).toBe(true);
     expect(workOutput).toHaveBeenCalledWith('r1:review');
+  });
+
+  it('an engine-recorded demo: the plan from plan/, the APPROVED storyline and chapters, record.json, the engine as producer', async () => {
+    const root = join(demos, 'e1');
+    mkdirSync(join(root, 'plan'), { recursive: true });
+    mkdirSync(join(root, 'approved', '1'), { recursive: true });
+    mkdirSync(join(root, 'demo-video'), { recursive: true });
+    // The seat edited the brief's app line; the engine records crew's manifest, and the view says so.
+    writeFileSync(join(root, 'plan', 'BRIEF.md'), '# Demo brief\n\n- **App:** http://127.0.0.1:9999/elsewhere\n\n## Who it is for\n\nLeads\n\n## What to show\n\nx\n');
+    writeFileSync(join(root, 'launch.json'), JSON.stringify({ app_origin: 'http://127.0.0.1:7721', launch_path: '/apps/esc', target: { kind: 'crew_app', id: 'esc' }, live_data_to_models: true }));
+    writeFileSync(join(root, 'plan', 'script.md'), '# Script\n');
+    // The seat edited its plan after the gate opened: the view (and the recorder) still read the approval.
+    writeFileSync(join(root, 'plan', 'chapters.json'), JSON.stringify([{ key: '09-late', title: 'Edited later' }]));
+    writeFileSync(join(root, 'plan', 'storyline.json'), JSON.stringify({ title: 'edited later' }));
+    writeFileSync(join(root, 'approved', 'current.json'), JSON.stringify({ gen: 1, run: 'e1', step: 'plan', storyline_sha: 'x', chapter_keys: ['01-a'], intro: false }));
+    writeFileSync(join(root, 'approved', '1', 'chapters.json'), JSON.stringify([{ key: '01-a', title: 'Approved' }]));
+    writeFileSync(join(root, 'approved', '1', 'storyline.json'), JSON.stringify({ title: 'approved' }));
+    writeFileSync(join(root, 'demo-video', 'record.json'), JSON.stringify({ overall: 'PASS', read_only: true, jail: 'sandbox-exec' }));
+    const run = demoRun('e1', 'review', 'awaiting_human');
+    (run.units[2] as { catalog?: string }).catalog = 'demo_record';
+    sessionsDetail.mockResolvedValue([run]);
+    const v = (await app.inject({ method: 'GET', url: '/api/v1/runs/e1/demo' })).json();
+    expect(v.url).toBe('http://127.0.0.1:7721/apps/esc');
+    expect(v.script).toBe('# Script\n');
+    expect(v.chapters.map((c: { key: string }) => c.key)).toEqual(['01-a']);
+    expect(v.storyline).toEqual({ title: 'approved' });
+    expect(v.recording).toEqual({ readOnly: true });
+    expect(v.producer).toEqual({ kind: 'engine', tool: 'demo_record', jail: 'sandbox-exec' });
+    expect(v.seats.recorder).toBeNull();
   });
 
   it('the view follows no symlink a worker made out of the root', async () => {
@@ -407,6 +479,54 @@ describe('the Demo experience routes', () => {
     expect(big.statusCode).toBe(413);
   });
 
+  it("edits only the plan's own script, never through a link a seat made into the engine's files", async () => {
+    const root = join(demos, 'p1');
+    mkdirSync(join(root, 'plan'), { recursive: true });
+    writeFileSync(join(root, 'launch.json'), '{"app_origin":"http://127.0.0.1:1","launch_path":"/"}');
+    symlinkSync(join(root, 'launch.json'), join(root, 'plan', 'script.md'));
+    sessionsDetail.mockResolvedValue([demoRun('p1', 'plan', 'awaiting_human')]);
+    const res = await app.inject({ method: 'PUT', url: '/api/v1/runs/p1/demo/script', payload: { content: 'owned' } });
+    expect(res.statusCode).toBe(409);
+    expect(readFileSync(join(root, 'launch.json'), 'utf8')).toContain('app_origin');
+  });
+
+  it('refuses an app URL with a #fragment (its client-side route the recorder cannot open)', async () => {
+    const res = await app.inject({ method: 'POST', url: '/api/v1/projects/proj-1/demo', payload: { url: 'http://localhost:5173/#/reports', audience: 'a', show: 'b' } });
+    expect(res.statusCode).toBe(400);
+    expect(launchRun).not.toHaveBeenCalled();
+  });
+
+  it('a dangling approval pointer or one that is not an object shows no plan', async () => {
+    for (const [id, make] of [
+      ['d1', (root: string) => symlinkSync(join(root, 'nowhere.json'), join(root, 'approved', 'current.json'))],
+      ['d2', (root: string) => writeFileSync(join(root, 'approved', 'current.json'), 'null')],
+    ] as const) {
+      const root = join(demos, id);
+      mkdirSync(join(root, 'plan'), { recursive: true });
+      mkdirSync(join(root, 'approved'), { recursive: true });
+      writeFileSync(join(root, 'plan', 'chapters.json'), JSON.stringify([{ key: '09-live', title: 'Live edit' }]));
+      make(root);
+      sessionsDetail.mockResolvedValue([demoRun(id, 'record', 'executing')]);
+      const res = await app.inject({ method: 'GET', url: `/api/v1/runs/${id}/demo` });
+      expect(res.statusCode, `${id}: ${res.body}`).toBe(200);
+      expect(res.json().chapters, id).toEqual([]);
+    }
+  });
+
+  it("an approval that is not this run's, or is broken, shows no plan rather than the live files", async () => {
+    const root = join(demos, 'w1');
+    mkdirSync(join(root, 'plan'), { recursive: true });
+    mkdirSync(join(root, 'approved', '1'), { recursive: true });
+    writeFileSync(join(root, 'plan', 'chapters.json'), JSON.stringify([{ key: '09-live', title: 'Live edit' }]));
+    writeFileSync(join(root, 'approved', '1', 'chapters.json'), JSON.stringify([{ key: '01-a', title: 'A' }]));
+    writeFileSync(join(root, 'approved', '1', 'storyline.json'), '{}');
+    writeFileSync(join(root, 'approved', 'current.json'), JSON.stringify({ gen: 1, run: 'another-run' }));
+    sessionsDetail.mockResolvedValue([demoRun('w1', 'record', 'executing')]);
+    const v = (await app.inject({ method: 'GET', url: '/api/v1/runs/w1/demo' })).json();
+    expect(v.chapters).toEqual([]);
+    expect(v.storyline).toBeNull();
+  });
+
   it('refuses a demo root inside the state home at boot', () => {
     const home = mkdtempSync(join(tmpdir(), 'state-home-'));
     try {
@@ -505,11 +625,12 @@ describe('the demo root follows the daemon state home, never the operator HOME (
     expect(res.statusCode, res.body).toBe(201);
     const { runId } = res.json() as { runId: string };
     const root = join(demoRootsBesideStateHome(), runId);
-    expect(existsSync(join(root, 'BRIEF.md'))).toBe(true);
+    expect(existsSync(join(root, 'plan', 'BRIEF.md'))).toBe(true);
     expect(existsSync(join(fakeHome, '.wicked', 'demos', runId))).toBe(false);
     const input = launchRun.mock.calls[0]![0] as LaunchRunInput;
-    expect(input.extraWriteRoots).toEqual([root]);
-    expect(input.problem).toContain(join(root, 'BRIEF.md'));
+    expect(input.extraWriteRoots).toEqual([join(root, 'plan')]);
+    expect(input.demoRoot).toBe(root);
+    expect(input.problem).toContain(join(root, 'plan', 'BRIEF.md'));
     expect(input.problem).not.toContain(join(fakeHome, '.wicked'));
     expect(input.problem).not.toContain('\n');
     expect(Buffer.byteLength(input.problem)).toBeLessThan(600);
@@ -536,3 +657,53 @@ describe('the demo root follows the daemon state home, never the operator HOME (
     expect(await existingDemoRootDir('old-1')).toBe(current);
   });
 });
+
+describe('the demo target (DES-DEMO-RECORD-001 §3.7)', () => {
+  it('splits a loopback URL into its origin, with an explicit port, and its path', () => {
+    expect(demoAppTarget('http://localhost/apps/x?y=1')).toEqual({ appOrigin: 'http://localhost:80', launchPath: '/apps/x?y=1' });
+    expect(demoAppTarget('http://[::1]:3000/')).toEqual({ appOrigin: 'http://[::1]:3000', launchPath: '/' });
+    expect(demoAppTarget('https://example.com/')).toBeNull();
+    expect(demoAppTarget("http://127.0.0.1:5173/a'b")).toBeNull();
+  });
+
+  it("is a crew app only on crew's own port and /apps/<id>", () => {
+    const crew = 'http://127.0.0.1:7721';
+    expect(crewAppOf('http://127.0.0.1:7721', '/apps/esc', crew)).toBe('esc');
+    expect(crewAppOf('http://localhost:7721', '/apps/esc/x', crew)).toBe('esc');
+    expect(crewAppOf('http://127.0.0.1:5173', '/apps/esc', crew)).toBeNull();
+    expect(crewAppOf('http://127.0.0.1:7721', '/projects', crew)).toBeNull();
+    expect(crewAppOf('http://127.0.0.1:7721', '/apps/esc', undefined)).toBeNull();
+    // A default port, written out on one side and dropped by the URL API on the other.
+    expect(crewAppOf('http://127.0.0.1:80', '/apps/esc', 'http://127.0.0.1')).toBe('esc');
+    expect(crewAppOf(demoAppTarget('http://localhost/apps/esc')!.appOrigin, '/apps/esc', 'http://127.0.0.1:80')).toBe('esc');
+  });
+
+  it("lets a crew app's rows reach a model only when every source it reads lets agents query it", async () => {
+    const allowed = new Set(['open']);
+    const deps = (sources: string[] | null) => ({
+      appSources: async () => sources,
+      agentQueryAllowed: (s: string, project: string | null) => allowed.has(s) && project === 'proj-1',
+    });
+    expect(await crewAppRowsMayReachModels('esc', deps(['crew', 'open']), 'proj-1')).toBe(true);
+    // The source lets proj-1's agents query it, not this demo's project.
+    expect(await crewAppRowsMayReachModels('esc', deps(['crew', 'open']), 'proj-2')).toBe(false);
+    expect(await crewAppRowsMayReachModels('esc', deps(['crew', 'support-pg']), 'proj-1')).toBe(false);
+    expect(await crewAppRowsMayReachModels('esc', deps(null))).toBe(false);
+    expect(await crewAppRowsMayReachModels('esc', {})).toBe(false);
+  });
+
+  it('maps the probe to planning, and the human-review preset reviews at the record gate', () => {
+    const run = (cursorIx: number, status: string, recordStatus: string) => ({
+      session: { id: 'h', status, unit_ix: cursorIx, team_plan: { rev: 1, accepted_rev: 1, preset: 'demo-human-review' } },
+      units: [
+        { id: 'h:probe', ord: 1, status: cursorIx > 0 ? 'done' : 'pending' },
+        { id: 'h:plan', ord: 2, status: cursorIx > 1 ? 'done' : 'pending' },
+        { id: 'h:record', ord: 3, status: recordStatus },
+      ],
+    });
+    expect(demoStage(run(0, 'executing', 'pending') as never)).toBe('planning');
+    expect(demoStage(run(2, 'awaiting_human', 'pending') as never)).toBe('plan_gate');
+    expect(demoStage(run(2, 'awaiting_human', 'done') as never)).toBe('review_gate');
+  });
+});
+

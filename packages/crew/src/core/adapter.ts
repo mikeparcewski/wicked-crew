@@ -2190,6 +2190,16 @@ export class CoreAdapter {
     // its pinned validator); a launch the engine refuses removes the root only when THIS launch
     // created it — a duplicate run id must never delete the first run's evidence (codex on #758). A
     // caller-chosen run id that is not one plain path segment gets no root at all.
+    // (DES-DEMO-RECORD-001) A Demo video's demo root is its evidence root: minted by the demo route, never
+    // removed here. An addon that cannot take the field cannot record a demo: refuse rather than launch a run
+    // whose recorder could never find its root.
+    if (input.demoRoot !== undefined) {
+      if (!this.evidenceRootsSupported()) {
+        throw new Error('this wicked-core addon cannot take a demo root (evidenceRoot, wicked-core-ts >= 0.7.35): upgrade it to record a demo');
+      }
+      (opts as LaunchOptions & { evidenceRoot?: string }).evidenceRoot = input.demoRoot;
+      return await this.handedToEngine('run', input.sessionId, () => this.core.launchRun(opts), input.workflow);
+    }
     const evidenceRoot =
       input.repoRef !== undefined && isPlainRunId(input.sessionId) && this.evidenceRootsSupported()
         ? walkthroughRootDir(input.sessionId)

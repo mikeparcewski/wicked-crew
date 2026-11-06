@@ -179,7 +179,8 @@ import { defaultReplaySet } from '../evals/replay.js';
 import type { DefaultEvalStore } from '../evals/store.js';
 import type { DecisionLike, EventLike, RunLike } from '../evals/capture.js';
 import { gardenRootFor } from '../learn/scheduler.js';
-import { DEMO_PRESET, demoLaunch, demoLaunchRoots, registerDemoDocumentRoute, registerDemoRoutes, registerWalkthroughRoutes, walkthroughAcceptance, type BridgeCall } from './recording.js';
+import { agentMay } from '../knowledge/gate/access.js';
+import { DEMO_PRESETS, demoLaunch, demoLaunchRoots, registerDemoDocumentRoute, registerDemoRoutes, registerWalkthroughRoutes, walkthroughAcceptance, type BridgeCall, type DemoRouteDeps } from './recording.js';
 import { projectDocsRoot } from '../interactive/project-root.js';
 import { registerSkillsRoutes } from './skills.js';
 import { registerSourceRoutes } from '../sources/routes.js';
@@ -1715,6 +1716,49 @@ export function registerRoutes(
   // real OS opener — tests inject both through this seam.
   runtime: RuntimeDeps = {},
 ): RegisteredRoutes {
+  // (DES-DEMO-RECORD-001 §3.7) The seams a demo launch reads to decide what the app may show a model, and whether
+  // the engine records demos on the host at all. One object for the route and a chat's Demo video job.
+  const demoDeps: DemoRouteDeps = {
+    engineRecordsDemos: async () => (typeof adapter.catalog === 'function' ? (await adapter.catalog()).some((e) => e.id === 'demo_record') : true),
+    // (DES-DEMO-RECORD-001 §3.7) The sources a crew app reads, and whether agents may query each: a demo of an app
+    // whose rows may not reach a model records with no model review.
+    ...(runtime.apps !== undefined
+      ? {
+          // Every source any version of the app reads (the head, and every accepted version the page may serve):
+          // the person's page picks its version, so the decision covers them all. `null` when the head spec
+          // cannot be read (the decision then keeps the rows private).
+          appSources: async (slug: string) => {
+            const store = runtime.apps!;
+            const detail = await store.detail(slug);
+            if (detail.spec === null || detail.spec === undefined) return null;
+            const sourcesOf = (spec: unknown): string[] =>
+              ((spec as { queries?: Array<{ source?: unknown }> } | null)?.queries ?? [])
+                .map((q) => q.source)
+                .filter((x): x is string => typeof x === 'string');
+            const all = new Set(sourcesOf(detail.spec));
+            for (const v of detail.versions) {
+              try {
+                for (const s of sourcesOf((await store.acceptedSpec(slug, v.version)).spec)) all.add(s);
+              } catch (err) {
+                // A version that was never accepted never runs against a source; anything else is unreadable.
+                if ((err as { code?: unknown }).code !== 'not_accepted') return null;
+              }
+            }
+            return [...all];
+          },
+        }
+      : {}),
+    ...(runtime.dataGate !== undefined
+      ? {
+          // The data gate's own predicate (DES-APPS-001 S5): the source on, query on, and the run's project in its
+          // scope. A source the gate does not know keeps the rows private.
+          agentQueryAllowed: async (source: string, projectId: string | null) => {
+            const s = (await runtime.dataGate!.sources()).find((x) => x.name === source);
+            return s !== undefined && agentMay(s.access, s, projectId, 'query');
+          },
+        }
+      : {}),
+  };
   const { audit } = security;
   const seatHealth = runtime.seatHealth ?? new SeatHealthTracker();
   const deliveryFreeze = runtime.deliveryFreeze ?? new DeliveryFreeze();
@@ -3121,7 +3165,7 @@ export function registerRoutes(
     if (b.shape !== undefined) {
       const target: LaunchTarget = ctx.target === 'compose'
         ? { kind: 'compose' }
-        : b.workflow === DEMO_PRESET
+        : b.workflow !== undefined && DEMO_PRESETS.includes(b.workflow)
           ? { kind: 'demo' }
           : { kind: 'run', workflow: b.workflow };
       if (ctx.target !== 'compose' && b.plan !== undefined) {
@@ -3140,7 +3184,7 @@ export function registerRoutes(
     }
     // The demo preset launches only from POST /projects/:id/demo (api/recording.ts), which mints the run's
     // demo root and brief first: launched here directly it would have neither.
-    if (b.workflow === DEMO_PRESET && (b.sessionId === undefined || !demoLaunchRoots.has(b.sessionId))) {
+    if (b.workflow !== undefined && DEMO_PRESETS.includes(b.workflow) && (b.sessionId === undefined || !demoLaunchRoots.has(b.sessionId))) {
       return reply.code(400).send({
         error: 'the demo preset launches from POST /projects/:id/demo, which makes its demo root and brief; POST /runs does not take it directly',
       });
@@ -3201,9 +3245,15 @@ export function registerRoutes(
     }
     const captureRoot = captureLaunchRoots.get(input.sessionId);
     if (captureRoot !== undefined) input.extraWriteRoots = [captureRoot];
-    // A demo launch (api/recording.ts) writes every file into the demo root the demo route minted for it.
-    const demoRoot = demoLaunchRoots.get(input.sessionId);
-    if (demoRoot !== undefined) input.extraWriteRoots = [demoRoot];
+    // A demo launch (api/recording.ts, DES-DEMO-RECORD-001 §3.2): the demo root is the run's evidence root (the
+    // engine's Tools record under it); the plan directory is its ONLY write root; the probe (and the review
+    // sheets, when the rows may reach a model) are read-only mounts.
+    const demo = demoLaunchRoots.get(input.sessionId);
+    if (demo !== undefined) {
+      input.extraWriteRoots = [demo.write];
+      input.extraReadRoots = demo.read;
+      input.demoRoot = demo.root;
+    }
     if (b.entityMode !== undefined) input.entityMode = b.entityMode;
     if (b.humanConfirm !== undefined) input.humanConfirm = b.humanConfirm;
     // F-E2E-030: only the explicit `'auto'` opts out of the engine's deliver gate. `'human'` and
@@ -3835,7 +3885,7 @@ export function registerRoutes(
         const out = await demoLaunch(launchRun, projectId ?? DEFAULT_PROJECT_ID, { url: v('url') ?? '', audience: v('audience') ?? '', show, shape: common['shape'] }, ctx, {
           fromProposal: d.pid,
           common,
-        });
+        }, demoDeps);
         if (out.code !== 201) throw new Error(jobRefusalText(out.body));
         return;
       }
@@ -10039,7 +10089,7 @@ export function registerRoutes(
   // proposals in the queue above; the launch is POST /runs itself (api/capture.ts).
   registerCaptureRoutes(app);
   // The Demo experience (studio#373): the demo preset's launch, view, files and script edit.
-  registerDemoRoutes(app, adapter, launchRun);
+  registerDemoRoutes(app, adapter, launchRun, demoDeps);
   // WT-W3: the storyline PUT checks the open gate through the same resolution the gate routes use.
   registerWalkthroughRoutes(app, adapter, { resolveOpenGate, audit });
 
