@@ -312,7 +312,8 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     blockedBy.push(r.resolved.statusNote ?? `${label} can't start on this daemon`);
   }
   if (launch === 'compose' && briefOf(facts).length > 500) blockedBy.push('A backlog takes a steer of at most 500 characters: say it shorter');
-  if (short && coming === undefined) blockedBy.push(`Needs ${seatsNeeded(r)} seats that can work now (one builds, the others check it); sign another seat in`);
+  // A self-seated workflow picks its own seat at launch: the roster's count is not its requirement (codex r3).
+  if (short && coming === undefined && !(r.workflow !== null && SELF_SEATED.has(r.workflow))) blockedBy.push(`Needs ${seatsNeeded(r)} seats that can work now (one builds, the others check it); sign another seat in`);
   // The one question: the first required need that is missing.
   let question: ProposalQuestion | null = null;
   const missing = needs.find((n) => n.required && n.status === 'missing');
@@ -431,7 +432,8 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     command: command ?? null,
     needs,
     gate,
-    seats,
+    // A self-seated workflow has no membership of the proposal's choosing (codex r3).
+    seats: selfSeated ? { lead: null, keys: [], label: tokens.find((x) => x.id === 'seats')?.label ?? seats.label } : seats,
     seatRules: seatProtections(r),
     words: facts.words,
     details: [...facts.details],
@@ -649,6 +651,16 @@ export function mergeRevision(
         notes.push(`Not changed: ${def.label} can't be blank`);
         continue;
       }
+      // The launch's own limits, checked here so Start never shows for a launch that would refuse (codex r3).
+      const LIMIT: Readonly<Record<string, number>> = { audience: 2000, show: 4000, url: 2048 };
+      if ((v.kind === 'text' || v.kind === 'url') && LIMIT[id] !== undefined && v.value.length > LIMIT[id]!) {
+        notes.push(`Not changed: ${def.label} is over ${LIMIT[id]} characters`);
+        continue;
+      }
+      if (v.kind === 'requirements' && v.refs.length > 40) {
+        notes.push('Not changed: pick at most 40 requirements');
+        continue;
+      }
       if (id === 'intent' && v.kind === 'text') {
         facts.words = v.value.slice(0, 8000);
         continue;
@@ -702,8 +714,10 @@ export function mergeRevision(
 
 /** The text outside quotes and reported speech ("the PM said: …"): only that is the person's own ask. */
 export function ownWords(message: string): string {
-  // Quoted material in the chat's own formats: block quotes, code spans and fences.
+  // Quoted material in the chat's own formats: block quotes, code spans and fences; curly apostrophes read as straight.
   let t = message
+    .replace(/(^|[\s(])\u2018[^\u2019]*\u2019(?![a-z])/giu, '$1 ')
+    .replace(/(?<=[a-z])\u2019(?=[a-z])/giu, "'")
     .replace(/```[\s\S]*?```/gu, ' ')
     .replace(/`[^`]*`/gu, ' ')
     .split('\n')
@@ -716,6 +730,8 @@ export function ownWords(message: string): string {
 }
 
 const SKIP_ASK = /\b(skip(ping)?|drop(ping)?|without|no)\s+(the\s+)?qe(\s+acceptance)?\b/iu;
+/** "No skipping QE…", "no need to skip…": a refusal phrased as a skip. */
+const NO_SKIP = /\bno\s+(skipping|dropping|need\s+to)\b/iu;
 /** A negation anywhere earlier in the same sentence makes the ask not one (conservative: ask the person instead). */
 const NEGATED = /\b(don'?t|do not|never|not|no need to|shouldn'?t|mustn'?t|won'?t|can'?t|cannot)\b[^.!?\n]*$/iu;
 
@@ -724,7 +740,7 @@ export function personAskedSkip(message: string | null): boolean {
   if (message === null) return false;
   const own = ownWords(message);
   const m = SKIP_ASK.exec(own);
-  return m !== null && !NEGATED.test(own.slice(0, m.index));
+  return m !== null && !NEGATED.test(own.slice(0, m.index)) && !NO_SKIP.test(own);
 }
 
 /**
@@ -737,7 +753,7 @@ export function qeSkipBound(reason: string, message: string | null): boolean {
   const own = ownWords(message);
   const m = SKIP_ASK.exec(own);
   if (m === null) return false;
-  if (NEGATED.test(own.slice(0, m.index))) return false;
+  if (NEGATED.test(own.slice(0, m.index)) || NO_SKIP.test(own)) return false;
   const r = reason.trim().toLowerCase().replace(/[.!?,;:]+$/u, '');
   const bare = r.replace(/\b(qe|acceptance|skip|the|it|because|since)\b/gu, '').replace(/[^\p{L}\p{N}]+/gu, '');
   if (r.length < 3 || bare.length < 3) return false;

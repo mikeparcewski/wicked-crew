@@ -7836,10 +7836,11 @@ export interface LaunchEnvelope {
  * under the chat's lock: the replacement is validated, the held plan gate is answered Reject (`reshaped`), and the
  * replacement launches from the held run's launch envelope (`retryOf` the held run, `shape.by: 'person'`, its plan
  * held). A repeated `requestId` is idempotent. **409** `reshape_after_work` once a work plan was accepted (use the
- * plan's own edit); **409** `reshape_not_chat` for a run not launched from a chat proposal; **409** `proposal_blocked`
- * when the new card needs an input the run lacks (send it in `inputs`); the launch side's own refusals as `POST /runs`
- * answers them. A failed launch after the reject leaves the reshape proposal accepting: the same request, or Go on its
- * pid, tries again.
+ * plan's own edit) or when the run ended before its plan was answered; **409** `reshape_not_chat` for a run not
+ * launched from a chat proposal; **409** `proposal_blocked` when the new card needs an input the run lacks (send it in
+ * `inputs`); **409** `reshape_loses_check` (see `confirmLoss`); **400** `edits_invalid` for a card or option that does
+ * not exist. A launch refused after the Reject is **502** `launch_failed` with the refusal's words: the reshape proposal
+ * stays accepting, and the same request tries again (a plain Go on a reshape is **409** `reshape_pending`).
  */
 export interface ReshapeRunBody {
   card: string;
@@ -7849,8 +7850,8 @@ export interface ReshapeRunBody {
   requestId: string;
   /** The person's press on the reshape question naming what the new shape gives up. Without it, a replacement with
    *  fewer checks or seat rules than the held job is **409** `reshape_loses_check` with `lost` (check ids) and
-   *  `lostSeats` (seat rules), and nothing is answered; send the same request again with `confirmLoss: true` (a new
-   *  `requestId`) once the person confirms. */
+   *  `lostSeats` (seat rules), and nothing is answered; send the same request again with `confirmLoss: true` once the
+   *  person confirms. */
   confirmLoss?: true;
 }
 

@@ -3377,7 +3377,8 @@
       "responseType": "WorkflowCatalogResponse | WorkflowCatalogV2Response",
       "statusCodes": [
         200,
-        400
+        400,
+        503
       ]
     },
     {

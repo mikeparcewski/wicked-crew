@@ -516,3 +516,55 @@ describe('what Go sends (codex 4, 7, 12)', () => {
     expect(jobLaunchCommon({ ...p, gate: ['parity'] }, { runId: 'rid', chatId: CHAT }, { selfSeated: false })).not.toHaveProperty('forceQeAcceptance');
   });
 });
+
+describe('codex r3 folds', () => {
+  const facts = (card: string): Parameters<ChatProposals['reshape']>[1]['facts'] => ({
+    card, option: undefined, depth: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape',
+  });
+
+  it('a reshape to a card that does not exist answers nothing; a plain Go on a reshape is refused', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'feature');
+    const held = open(r);
+    await r.svc.decide(CHAT, held.pid, { decision: 'go' }, ME, 'i1');
+    let rejected = 0;
+    const base = { oldRunId: 'run1', parentPid: held.pid, facts: facts('nope'), reducedAssurance: false, relaunch: { deliver: 'pr' as const }, confirmLoss: true };
+    const bad = await r.svc.reshape(CHAT, { ...base, pid: `${CHAT}:reshape:run1:x`, edits: { card: 'nope' }, request: { id: 'x', digest: 'dx' } }, ME, 'i1', async () => { rejected += 1; return null; });
+    expect(bad.body).toMatchObject({ code: 'edits_invalid' });
+    expect(rejected).toBe(0);
+    // A reshape whose Reject is refused stays open; a plain Go on it never launches around that.
+    const refused = await r.svc.reshape(CHAT, { ...base, pid: `${CHAT}:reshape:run1:y`, edits: { card: 'bug' }, facts: facts('bug'), request: { id: 'y', digest: 'dy' } }, ME, 'i1', async () => ({ code: 409, body: { code: 'gate_changed' } }));
+    expect(refused.body).toMatchObject({ code: 'gate_changed' });
+    const go = await r.svc.decide(CHAT, `${CHAT}:reshape:run1:y`, { decision: 'go' }, ME, 'i1');
+    expect(go.body).toMatchObject({ code: 'reshape_pending' });
+    expect(r.launcher.launched).toHaveLength(1);
+  });
+
+  it('a press confirms only the losses it was shown: a QE loss from a setting since asks again', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'migrate', { option: 'in-place' });
+    await swap(r, open(r).pid, { card: 'feature' }, 'feat');
+    const q = open(r);
+    expect(q.question?.lost).toEqual(['parity']);
+    r.qeOff = true;
+    await r.svc.propose(CHAT, { revises: q.pid, edits: q.question!.choices[0]!.edit, source: 'question', requestId: 'press' }, ME, 'i1');
+    expect(open(r).question).toMatchObject({ kind: 'lost_check', lost: expect.arrayContaining(['qe-acceptance']) });
+  });
+
+  it.each([
+    ["Don’t skip QE acceptance because this is a prototype", 'this is a prototype'],
+    ['No skipping QE acceptance, this is a prototype', 'this is a prototype'],
+    ['‘skip QE acceptance because this is a prototype’', 'this is a prototype'],
+  ])('"%s" is not the person\'s own skip', (message, reason) => {
+    expect(qeSkipBound(reason, message)).toBe(false);
+    expect(personAskedSkip(message)).toBe(false);
+  });
+
+  it('a self-seated job names no seats of its own and is not blocked for a short roster', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], roster: [{ key: 'claude', name: 'Claude' }] });
+    await pick(r, 'analyze-runs');
+    const p = open(r);
+    expect(p.seats).toMatchObject({ lead: null, keys: [] });
+    expect(p.blocked ?? '').not.toMatch(/seats that can work/);
+  });
+});

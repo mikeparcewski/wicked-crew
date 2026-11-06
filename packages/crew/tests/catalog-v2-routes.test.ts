@@ -29,6 +29,7 @@ describe('Lane C routes', () => {
   let app: FastifyInstance;
   const confirmCalls: unknown[][] = [];
   let engineRefuses: string | null = null;
+  let catalogFails = false;
   let actor: Actor = { id: 'local', kind: 'human', trust: 'admin' };
   const audit = { record: vi.fn(() => Date.now()) } as unknown as AuditLog;
   const timing = new RunTimingIndex();
@@ -42,7 +43,10 @@ describe('Lane C routes', () => {
       listWorkflows: () => BUILTIN_WORKFLOWS,
       workflowCatalog: async () => ({ workflows: BUILTIN_WORKFLOWS, unavailable: [] }),
       listPresets: async () => [],
-      catalog: async () => [],
+      catalog: async () => {
+        if (catalogFails) throw new Error('engine catalog unreadable');
+        return [];
+      },
       interactionRequests: vi.fn(async () => [{ kind: 'gate', ord: 1, gate_kind: 'plan_approval', prompt: 'Approve the plan?', created_at: '2026-11-05T10:00:00Z' }]),
       runEvents: vi.fn(async () => null),
       supportsPlanSendBack: () => true,
@@ -111,6 +115,16 @@ describe('Lane C routes', () => {
     expect(v2.statusCode).toBe(200);
     expect(v2.json()).toMatchObject({ version: 2, rev: expect.any(String) });
     expect((await app.inject({ method: 'GET', url: '/api/v1/workflows/catalog?v=3' })).statusCode).toBe(400);
+    // v2 fails closed when the catalog cannot be read; v1 keeps answering.
+    catalogFails = true;
+    try {
+      const closed = await app.inject({ method: 'GET', url: '/api/v1/workflows/catalog?v=2' });
+      expect(closed.statusCode).toBe(503);
+      expect(closed.json()).toMatchObject({ code: 'catalog_unavailable' });
+      expect((await app.inject({ method: 'GET', url: '/api/v1/workflows/catalog' })).statusCode).toBe(200);
+    } finally {
+      catalogFails = false;
+    }
   });
 
   it('a shaped launch that names another workflow is a 400 before anything starts', async () => {

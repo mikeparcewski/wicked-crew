@@ -3775,8 +3775,12 @@ export function registerRoutes(
           inherited = null;
         }
       }
-      const roster = inherited ?? launchRosterNaming(rosterWithStanding(), lead);
+      const current = launchRosterNaming(rosterWithStanding(), lead);
+      // Inherited configuration for the seats it names; the current roster's entry for a seat added since (codex r3).
+      const roster = inherited === null ? current : [...inherited, ...current.filter((s) => !inherited!.some((i) => i.key === s.key))];
       const narrowed = keys.length > 0 ? roster.filter((s) => keys.includes(String(s.key))) : roster;
+      const missingSeat = keys.find((k) => !roster.some((s) => String(s.key) === k));
+      if (missingSeat !== undefined) throw new Error(`${missingSeat} is not on this daemon's roster; change who works on it`);
       const common = jobLaunchCommon(p, { runId: d.identity.runId, chatId: d.chatId }, {
         ...((inherited !== null || narrowed.length !== roster.length) && narrowed.length > 0 ? { clisJson: JSON.stringify(narrowed) } : {}),
         selfSeated,
@@ -3821,7 +3825,8 @@ export function registerRoutes(
           return x !== undefined && (x.kind === 'text' || x.kind === 'url') ? x.value : undefined;
         };
         // What to show is the person's own field, with the corrections carried (§4.6 rule 6).
-        const show = [v('show') ?? p.words ?? '', ...(p.details ?? [])].filter((x) => x.trim() !== '').join('\n');
+        // What to show: the person's first words, their show field and the corrections, together (codex r3).
+        const show = [...new Set([p.words ?? '', v('show') ?? '', ...(p.details ?? [])])].filter((x) => x.trim() !== '').join('\n').slice(0, 4000);
         const out = await demoLaunch(launchRun, projectId ?? DEFAULT_PROJECT_ID, { url: v('url') ?? '', audience: v('audience') ?? '', show, shape: common['shape'] }, ctx, {
           fromProposal: d.pid,
           common,
@@ -6814,8 +6819,10 @@ export function registerRoutes(
       };
       const rejectHeld = async (): Promise<{ code: number; body: Record<string, unknown> } | null> => {
         const fresh = (await adapter.sessionsDetail()).find((v) => v.session.id === id);
-        // Already answered (a retry after the reject): nothing to answer again.
-        if (fresh === undefined || ['completed', 'cancelled', 'failed'].includes(String(fresh.session.status))) return null;
+        // Only an actual version-bound Reject counts (codex r3): a run that ended meanwhile is past reshaping.
+        if (fresh === undefined || ['completed', 'cancelled', 'failed'].includes(String(fresh.session.status))) {
+          return { code: 409, body: { code: 'reshape_after_work', error: `run ${id} ended before its plan could be answered; start a new job instead` } };
+        }
         if (heldOrd === undefined || heldRev === undefined) {
           return { code: 409, body: { code: 'reshape_after_work', error: `the plan run ${id} was held at could not be read again; check it and start again` } };
         }
@@ -8169,7 +8176,7 @@ export function registerRoutes(
   // workflow is and does stays on its def; usage is derived from the runs and the launch trail.
   app.get(
     `${V}/workflows/catalog`,
-    { config: { manifest: { responseType: 'WorkflowCatalogResponse | WorkflowCatalogV2Response', statusCodes: [200, 400] } } },
+    { config: { manifest: { responseType: 'WorkflowCatalogResponse | WorkflowCatalogV2Response', statusCodes: [200, 400, 503] } } },
     async (req, reply) => {
     const raw = (req.query as { projectId?: unknown } | undefined)?.projectId;
     if (raw !== undefined && (typeof raw !== 'string' || raw.length > 200)) {
@@ -8184,13 +8191,23 @@ export function registerRoutes(
     const projectId = typeof raw === 'string' && raw !== '' ? raw : null;
     const { workflows } = await adapter.workflowCatalog();
     let presets: Preset[] = [];
+    // v2 serves only presets it actually read (an unknown project's global ones included); no read at all is a 503.
+    let presetsRead = true;
     try {
       presets = await adapter.listPresets(projectId ?? undefined);
     } catch (err) {
       // An unknown project: the global presets (built-in attribution and saved ones still hold, agy r1).
       // An engine without presets lists the served defs only. Either way, said once in the log.
       app.log.warn(`workflows/catalog: the presets could not be read${projectId !== null ? ` for project ${projectId}` : ''} (${message(err)}); listing ${projectId !== null ? 'the global ones' : 'the served workflows only'}`);
-      if (projectId !== null) presets = await adapter.listPresets().catch(() => []);
+      presetsRead = false;
+      if (projectId !== null) {
+        try {
+          presets = await adapter.listPresets();
+          presetsRead = true;
+        } catch {
+          presets = [];
+        }
+      }
     }
     const views = await adapter.sessionsDetail();
     // codex r1: date terminal runs that have no `run.ended` entry from their event log, as GET /runs
@@ -8214,10 +8231,10 @@ export function registerRoutes(
       let entries: import('../core/types.js').CatalogEntry[];
       try {
         entries = await adapter.catalog();
-        presets = await adapter.listPresets(projectId ?? undefined);
       } catch (err) {
         return reply.code(503).send({ code: 'catalog_unavailable', error: `the catalog could not be read: ${message(err)}` });
       }
+      if (!presetsRead) return reply.code(503).send({ code: 'catalog_unavailable', error: 'the presets could not be read' });
       return buildWorkflowCatalogV2({
         defs: workflows, presets, entries, actorId: me, projectId,
         runs: runs.map((r) => {
