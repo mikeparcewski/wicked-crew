@@ -5064,10 +5064,17 @@ export function registerRoutes(
     jobs: () => chatJobProposalsOn,
     reshapeReject,
     preflight: async (p) => {
+      // The project it files into still takes runs: an archived one refuses every new attachment (codex r6).
+      if (p.filedIn.projectId !== null && p.filedIn.projectId !== DEFAULT_PROJECT_ID) {
+        const project = await adapter.projectGet(p.filedIn.projectId).catch(() => null);
+        if (project === null) return `the project ${p.filedIn.label} is no longer on this daemon`;
+        if (project.status === 'archived') return `the project ${p.filedIn.label} is archived; restore it first`;
+      }
       // A repository job's repository is still registered and its folder is still there (the launch's own refusal,
       // checked before a reshape answers its held plan; codex r5).
       const repoRef = p.repoRefs?.[0];
-      if (repoRef !== undefined) {
+      // A compose reads its requirements' own repositories (checked below), not the chat's (pi r6).
+      if (repoRef !== undefined && p.launch !== 'compose') {
         const entry = (await adapter.listRepos().catch(() => [])).find((r) => r.id === repoRef);
         if (entry === undefined) return `${p.repos[0] ?? repoRef} is no longer registered on this daemon`;
         const missing = repoFolderMissing(entry);
@@ -5078,6 +5085,7 @@ export function registerRoutes(
       if (p.filedIn.projectId === null) return 'a backlog needs a project';
       if (req === undefined || req.kind !== 'requirements') return 'pick the requirements first';
       const steer = (p.brief ?? p.words ?? '').trim();
+      if (steer.length > 500) return 'A backlog takes a steer of at most 500 characters: say it shorter';
       return composePreflight(adapter, p.filedIn.projectId, req.refs, steer === '' ? undefined : steer);
     },
     qeOff: async () => addonSupportsQeOverride() && (await qeAcceptanceNow()) === 'off',

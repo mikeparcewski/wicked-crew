@@ -618,3 +618,24 @@ describe('codex r5 folds', () => {
     expect(open(r).shape?.option).toBe('in-place');
   });
 });
+
+describe('codex r6 folds', () => {
+  it('a reshape with option null starts the default option, and an unmakeable target is said before any loss question', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'feature');
+    const held = open(r);
+    await r.svc.decide(CHAT, held.pid, { decision: 'go' }, ME, 'i1');
+    const out = await r.svc.reshape(CHAT, {
+      pid: `${CHAT}:reshape:run1:n`, oldRunId: 'run1', parentPid: held.pid,
+      facts: { card: 'migrate', option: undefined, depth: null, words: 'w', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape' },
+      edits: { card: 'migrate', option: null }, reducedAssurance: false, relaunch: { deliver: 'pr' }, request: { id: 'n', digest: 'dn' }, confirmLoss: [],
+    }, ME, 'i1');
+    expect(out.code, JSON.stringify(out.body)).toBe(200);
+    expect(r.launcher.launched.at(-1)!.resolution.shape).toMatchObject({ card: 'migrate', option: 'in-place' });
+    // A coming card never shows a loss question first.
+    await pick(r, 'bug', { requestId: 'b2' } as never);
+    const bug = open(r);
+    const res = await swap(r, bug.pid, { card: 'competitive' }, 'to-coming');
+    expect(res.body).toMatchObject({ code: 'card_not_available' });
+  });
+});

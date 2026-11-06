@@ -9303,7 +9303,10 @@ export interface ChatProposalDecisionBody {
  * disclosed), 409 `proposal_superseded` | `proposal_decided` | `proposal_blocked` | `operation_unavailable` |
  * `chat_busy` | `document_busy` | `source_gone` | `helper_unavailable` | `chat_gone` | `proposal_reresolved` (the
  * document moved: `view.proposal` is the fresh one), 400 `edits_invalid`, 502 `launch_failed` (accepting stays
- * recorded; Go again resumes the same identity). A 409 carries the current `view` when there is one.
+ * recorded; Go again resumes the same identity). (api-types 0.192.0) A job's Go adds 409 `proposal_revising` (a
+ * correction is in flight), `proposal_reopened` (a gone turn's hold was released: look again), `catalog_changed` (the
+ * refreshed proposal is the `view`), `card_not_available`, `proposal_stale`, and for a reshape the held plan's own
+ * answers (`reshape_after_work`, `gate_changed`). A 409 carries the current `view` when there is one.
  */
 export interface ChatProposalDecisionResponse {
   view: ChatProposalView;

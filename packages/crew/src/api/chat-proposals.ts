@@ -1973,7 +1973,9 @@ export class ChatProposals {
       const refused = this.refusalOf(candidateErr);
       if (refused !== null) return refused;
     }
-    if (candidate !== null && loses && !covered && (candidate.question ?? null) === null && candidate.blocked !== null && candidate.coming === undefined) {
+    // Unmakeable = coming, or blocked for a reason other than the one question an answer fixes (codex r6).
+    const unmakeable = candidate !== null && (candidate.coming !== undefined || (candidate.blocked !== null && candidate.blocked !== (candidate.question?.text ?? null)));
+    if (candidate !== null && loses && !covered && unmakeable) {
       return { code: 409, body: { code: 'card_not_available', error: candidate.blocked, view: viewOf(parent) } };
     }
     if (qe !== null || (loses && !covered)) {
@@ -2219,8 +2221,9 @@ export class ChatProposals {
    * `POST /runs/:id/reshape` (§2.5) after the route's checks (a person, the chat is theirs, the run is held at its first
    * work-plan approval): under the chat's lock, so another proposal's Start waits for it — the crew-made reshape
    * proposal `<chatId>:reshape:<run>:<requestId>` is written (or found: a repeated request is idempotent), validated
-   * like any Go, the held plan gate is answered Reject (`reshaped`, by `rejectHeld`), and its Go launches the
-   * replacement. A failed launch after the reject leaves it accepting: the same request, or Go on it, tries again.
+   * against the held job's checks, then Go's one reshape transition (preflight, the held plan answered Reject through
+   * `deps.reshapeReject`, `heldRejected` recorded, the launch). A failed launch after the Reject leaves it accepting:
+   * the same request, or Go on it, tries again.
    */
   reshape(
     chatId: string,
@@ -2270,7 +2273,8 @@ export class ChatProposals {
             const merged = mergeRevision(heldP, x.edits as ProposalRevisionEdits, { chat, served: ctx.served, roster: ctx.roster });
             // Nothing is answered for a shape, or an input, that is not the one asked for (codex r3, r4).
             const wantCard = CATALOG_V2_CARDS.find((c) => c.id === (x.edits.card ?? merged.facts.card));
-            const optionOk = wantCard !== undefined && (x.edits.option === undefined || optionFor(wantCard, merged.facts.option) === optionFor(wantCard, x.edits.option));
+            const norm = (o: string | null | undefined): string | null => (wantCard === undefined ? null : o === null || o === undefined ? (wantCard.variant?.default ?? null) : o);
+            const optionOk = wantCard !== undefined && (x.edits.option === undefined || norm(merged.facts.option) === norm(x.edits.option));
             const depthOk = x.edits.depth === undefined || x.edits.depth === null || merged.facts.depth === x.edits.depth;
             const inputsOk = Object.entries(x.edits.inputs ?? {}).every(([k, v]) => (k === 'intent' ? merged.facts.words === (v.kind === 'text' ? v.value.slice(0, 8000) : '') : JSON.stringify(merged.facts.inputs[k]) === JSON.stringify(v)));
             if (wantCard === undefined || merged.facts.card !== wantCard.id || !optionOk || !depthOk || !inputsOk) {

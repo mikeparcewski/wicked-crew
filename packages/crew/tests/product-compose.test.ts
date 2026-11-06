@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { COMPOSE_MAX_REQUIREMENTS, ComposeSelectionTooLargeError, composeInstructions, registerProductRoutes, reviewInstructions } from '../src/api/product.js';
+import { COMPOSE_MAX_REQUIREMENTS, ComposeSelectionTooLargeError, composeInstructions, composePreflight, registerProductRoutes, reviewInstructions } from '../src/api/product.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 
 describe('POST /projects/:id/product/compose (crew#372)', () => {
@@ -15,6 +15,7 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
   let app: FastifyInstance;
   const launched: Array<{ body: Record<string, unknown>; auth: string | undefined }> = [];
   let runsAnswer: { status: number; body: unknown } = { status: 201, body: { runId: 'run-compose-1' } };
+  let adapterRef: CoreAdapter;
 
   beforeAll(async () => {
     base = mkdtempSync(join(tmpdir(), 'product-compose-'));
@@ -56,6 +57,7 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
       listRepos: vi.fn(async () => repos),
       getRequirementsGraphForRepo: vi.fn(async (ref: string) => ({ graph: ref === 'alpha' ? estateGraph : null, coverage: null })),
     };
+    adapterRef = adapter as unknown as CoreAdapter;
     app = Fastify({ logger: false });
     // DES-CHAT-FIRST-001 C3: the compose launches through the shared launch function, as the caller.
     registerProductRoutes(app, adapter as unknown as CoreAdapter, async (raw, ctx) => {
@@ -107,6 +109,14 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
     const review = String(steps[1]!['instructions']);
     expect(review).toContain('alpha billing::r1: Invoices are numbered');
     expect(review).toContain('alpha billing::r2: Refunds need approval');
+  });
+
+  it('(DES-CATALOG-002 §4.6) the preflight says what a compose would refuse before anything changes, and nothing for one that launches', async () => {
+    expect(await composePreflight(adapterRef, 'p1', [{ repoId: 'alpha', key: 'billing::r1' }], 'one epic per domain')).toBeNull();
+    expect(await composePreflight(adapterRef, 'p1', [{ repoId: 'outsider', key: 'billing::r1' }])).toMatch(/not a registered repository of this project/);
+    expect(await composePreflight(adapterRef, 'p1', [{ repoId: 'alpha', key: 'billing::nope' }])).toMatch(/no requirement/);
+    expect(await composePreflight(adapterRef, 'p1', [])).toMatch(/at least one/);
+    expect(launched).toEqual([]);
   });
 
   it('an unknown key or a repo that is not the project\'s is a 400 naming each; nothing launches', async () => {
