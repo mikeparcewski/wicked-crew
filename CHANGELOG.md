@@ -12,6 +12,14 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **Redo the QE check at a QE gate with no verdict (e2e-1105 F23; api-types 0.195.0).** `POST /runs/:id/gate` takes
+  `{approve: true, action: 'retry_qe'}` (no `amend` / `amendScope` / `plan`) and forwards it to the engine
+  (wicked-core core#1312). There, it re-runs the QE step from fresh evidence with a new isolated reviewer session,
+  when the reviewer recorded INCONCLUSIVE, no reviewer seat could run, or no verdict could be bound. It is never a
+  verdict: QE acceptance stays required, and only that reviewer's PASS counts. The engine caps it at 2 redos per QE
+  step and tree, and refuses it (409) everywhere else. An unknown action is still a 400. `wicked-crew-api-types`
+  0.195.0 adds `'retry_qe'` to `GateDecision.action`.
+
 - **Detecting the shape of the work, in the chat and in the `/` list (DES-CATALOG-002 Lane D; api-types 0.194.0).**
   - **One detection contract** (`workflow-catalog/detect.ts`): the words layer (studio's word match, owned by crew,
     run as on Enter) decides alone only when sure; otherwise a seat's reading (garden's `classify` in catalog mode) is
