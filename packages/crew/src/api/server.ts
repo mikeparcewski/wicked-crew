@@ -155,7 +155,7 @@ import type { SearchService } from './search-routes.js';
 import { callEstateTool } from '../core/estate-mcp-client.js';
 import { seatParser } from '../standing-orders/parse.js';
 import { registerGateHistoryRoute, runBand, runPreset, runProject } from '../standing-orders/history.js';
-import { WorkingDocService } from '../working-doc/service.js';
+import { WorkingDocService, workingDocStep } from '../working-doc/service.js';
 import { WorkingDocStore } from '../working-doc/store.js';
 import { isWorkingDoc as isWorkingDocAt } from '../interactive/chat-events.js';
 import { DocBindingStore } from '../interactive/doc-binding.js';
@@ -2917,12 +2917,20 @@ export async function createServer(
         problem: v.session.problem ?? '',
         projectId: runProject(v, runId, (id) => membershipIndex.projectOf(id)) ?? WORKING_DOC_DEFAULT_PROJECT,
         terminal: ['completed', 'cancelled', 'failed'].includes(v.session.status),
-        stepOf: (ord) => {
-          const u = v.units.find((x) => x.ord === ord);
-          return u?.phase_ref ?? (typeof u?.description === 'string' ? (u.description.split(/\s+[—-]\s+/u)[0] ?? null) : null);
-        },
+        stepOf: (ord) => workingDocStep(v.units.find((x) => x.ord === ord)),
+        power: v.session.power != null,
+        // The run's current plan (the engine's unit list): what a phased run's Approach says once its plan settles.
+        steps: v.units.map((u) => ({ ord: u.ord, name: workingDocStep(u), seat: u.assigned_cli ?? null })),
       };
     },
+    // A person's answers with their words (crew's own trail: the engine's log does not say who, or why).
+    answers: (runId) => audit.readAll({ runId }),
+    liveRuns: async () => (await adapter.sessionsDetail())
+      .filter((v) => !['completed', 'cancelled', 'failed'].includes(v.session.status) && v.session.archived_at == null)
+      .map((v) => {
+        const at = (v.session as { created_at?: unknown }).created_at;
+        return { runId: v.session.id, createdAt: typeof at === 'number' ? at : 0 };
+      }),
     changed: (runId, head) => broadcast({ type: 'workingDocChanged', session: runId, head } as unknown as Parameters<typeof broadcast>[0]),
     audit: (action, actor, runId, detail) => audit.record(action, actor as Parameters<typeof audit.record>[1], { runId, detail }),
     // The run's own log: crew writes the event-derived lines (Decisions, Open questions, Next) whether or not a tab
@@ -2931,8 +2939,9 @@ export async function createServer(
     log: (m) => app.log.warn(m),
   });
   workingDocTap = (e) => workingDocs.onEvent(e);
-  // After a restart no further event may come for a run: bring every held document's lines up to date once.
-  workingDocs.catchUp();
+  // After a restart no further event may come for a run: bring every held document's lines up to date once, and make
+  // the newest live runs' documents (bounded, one at a time; never rejects).
+  void workingDocs.catchUp();
   registerWorkingDocRoutes(app, { service: workingDocs, exists: async (id) => (await adapter.sessions()).includes(id) });
   registerStandingOrderRoutes(app, {
     store: standingOrders,

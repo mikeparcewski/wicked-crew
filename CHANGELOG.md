@@ -75,6 +75,22 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **Every run's working document is made and filled by crew, whether or not anyone views or edits it (rig run W12
+  9dd4f6d1).** Before, crew made a document only for power runs; a governed run got one only when a person or plugin
+  proposed an edit, so a phased run nobody edited had no document at all.
+  - A run of any kind gets its document on its first line event (a gate opening or answered, a step starting, the run
+    ending). At daemon start, crew brings every held document up to date and makes the documents of the 40 newest live
+    runs that have none, one at a time. A finished run's document is never made in bulk; opening one for editing still
+    makes it.
+  - A phased run's **Approach** is its settled plan: once no plan gate is open and the plan was approved (or a second
+    step started), crew writes its steps from the run's own unit list ("The approved plan, 10 steps: pa scope, test
+    plan, … Approved 11:27."), as the seat that wrote the plan. A revised plan replaces it; a person's Approach is never
+    replaced. Step names pass a closed pattern. Power runs are unchanged (their orchestrator writes Approach).
+  - **Decisions** now carry a person's answers with their words, from crew's audit trail, people only: a gate answered
+    with a note, a floor override, a send-back, a rule or QE skip with its reason, a stop with a reason, guidance set
+    ("You · 11:46 · overrode a failed check: “The failing tests are …”"). Gate kinds `def`, `team_dispute` and
+    `review_adjudication` read as words. Like every line crew writes, none of these steers the run.
+
 - **QE records keep their run stamps (wicked-ledger ^0.6.1, F23).** wicked-ledger 0.6.1's `get` / `list` / `search`
   keep a record's keys beyond the schema columns, so an isolated QE reviewer that resumes its run sees `crew_run_id`
   instead of returning INCONCLUSIVE. The lockfile is re-stamped to 0.6.1.

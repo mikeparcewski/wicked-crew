@@ -27,7 +27,9 @@ import {
   sectionsOf, type SectionId,
 } from './sections.js';
 import type { DocAuthor, SteerRecord, TrailEntry, WorkingDocRecord, WorkingDocStore } from './store.js';
-import { LINE_EVENTS, PHASE_REPORT_AUTHOR, docLines, foldLines, reconcileSection } from './event-lines.js';
+import {
+  LINE_EVENTS, PHASE_REPORT_AUTHOR, docLines, foldLines, personNotes, planApproach, planSettled, reconcileSection, type AuditLike,
+} from './event-lines.js';
 
 /** How crew reads and writes interactive documents (the bridge in production, a fake in tests). */
 export interface DocBackend {
@@ -56,7 +58,15 @@ export interface RunFacts {
   terminal: boolean;
   /** A unit's step id (its `phase_ref`), for "picked up at Fix". */
   stepOf(ord: number): string | null;
+  /** (workdoc-all-runs) A power run: its Approach is the orchestrator's, never the plan's. */
+  power?: boolean;
+  /** (workdoc-all-runs) The run's current plan, the engine's own unit list: each step's name and the seat it ran on. */
+  steps?: ReadonlyArray<{ ord: number; name: string | null; seat: string | null }>;
 }
+
+/** How many live runs with no document a daemon start brings up to date (newest first, one at a time). The rest get
+ *  theirs on their next event. Rig 2026-11-06: 98 parked runs, 26 of them from the last day. */
+export const CATCH_UP_LIVE_MAX = 40;
 
 export interface WorkingDocDeps {
   store: WorkingDocStore;
@@ -69,6 +79,11 @@ export interface WorkingDocDeps {
   /** The run's recorded events (the engine's log), from which crew writes the document's event-derived lines
    *  (Decisions answered, Open questions, Next). `null` when the log cannot be read. Absent: no such lines. */
   events?(runId: string): Promise<readonly CoreEvent[] | null>;
+  /** (workdoc-all-runs) The run's audit entries (crew's trail): a person's answers with their words become Decisions.
+   *  Absent: no such lines. */
+  answers?(runId: string): Promise<readonly AuditLike[]>;
+  /** (workdoc-all-runs) The runs not finished (not completed, cancelled or failed), for the start-up catch-up. */
+  liveRuns?(): Promise<ReadonlyArray<{ runId: string; createdAt: number }>>;
   /** How long after a line-relevant event the lines are brought up to date (one write per burst). */
   linesDelayMs?: number;
   /** How long to wait before trying the lines again while a person's write of unknown outcome settles. */
@@ -106,6 +121,12 @@ export interface ProposeInput {
 
 const PLUGIN_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 const PLUGIN_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u;
+
+/** A unit's step name: its `phase_ref`, else its description's head ("pa-scope — Fixes …" → "pa-scope"). */
+export function workingDocStep(u: { phase_ref?: string | null; description?: unknown } | undefined): string | null {
+  if (u === undefined) return null;
+  return u.phase_ref ?? (typeof u.description === 'string' ? (u.description.split(/\s+[—-]\s+/u)[0] ?? null) : null);
+}
 
 /** A doc name interactive accepts (lowercase, digits, hyphens; ≤ 64): one per run. */
 export function workingDocName(runId: string): string {
@@ -204,6 +225,11 @@ export class WorkingDocService {
   private eventLog: boolean | null = null;
   /** Runs whose orchestrator wrote its own APPROACH line: its turn summaries then never replace it. */
   private readonly approachNoted = new Set<string>();
+  /** Runs whose pending line sync may MAKE the document (a live event came for it, or the start-up catch-up chose it). */
+  private readonly mayCreate = new Set<string>();
+  /** Per run, the settled plan's event signature the Approach was last checked against (the run's view is read again
+   *  only when it moves). */
+  private readonly planChecked = new Map<string, string>();
 
   constructor(private readonly d: WorkingDocDeps) {
     this.now = d.now ?? Date.now;
@@ -241,9 +267,31 @@ export class WorkingDocService {
     return this.eventLog;
   }
 
-  /** Catch up every document crew holds (after a daemon restart, no further event may come for a run). */
-  catchUp(): void {
-    for (const rec of this.d.store.all()) this.linesSoon(rec.runId);
+  /**
+   * After a daemon restart no further event may come for a run (a parked run waits on a person): bring every document
+   * crew holds up to date, and make one for the {@link CATCH_UP_LIVE_MAX} newest live runs that have none (rig run W12
+   * 9dd4f6d1: parked, never viewed, no document). One run at a time, so a start is never a storm. A finished run with no
+   * document gets none here: hundreds of finished runs would each be a document nobody asked for. Resolves when done;
+   * never rejects.
+   */
+  async catchUp(): Promise<void> {
+    if (this.d.events === undefined) return;
+    const held = this.d.store.all().map((r) => r.runId);
+    let fresh: string[] = [];
+    if (this.d.liveRuns !== undefined) {
+      try {
+        const have = new Set(held);
+        fresh = [...await this.d.liveRuns()]
+          .filter((r) => !have.has(r.runId))
+          .sort((a, b) => b.createdAt - a.createdAt)
+          .slice(0, CATCH_UP_LIVE_MAX)
+          .map((r) => r.runId);
+      } catch (err) {
+        this.d.log?.(`[working-doc] catch-up could not list live runs: ${String(err)}`);
+      }
+    }
+    for (const runId of held) await this.syncLines(runId).catch((err: unknown) => this.d.log?.(`[working-doc] catch-up ${runId}: ${String(err)}`));
+    for (const runId of fresh) await this.syncLines(runId, { create: true }).catch((err: unknown) => this.d.log?.(`[working-doc] catch-up ${runId}: ${String(err)}`));
   }
 
   /** The run's working document, created on first ask (its Goal seeded from the run's intent, by crew). The view is
@@ -418,21 +466,24 @@ export class WorkingDocService {
    * The document's EVENT-DERIVED lines (Decisions answered, Open questions, Next), brought up to date from the run's
    * own recorded events and written by crew as the Phase report plugin's actor ({@link PHASE_REPORT_AUTHOR}), whether
    * or not anyone has the run open (rig run ea73afc0: only a viewing tab wrote them). Like every plugin line they
-   * never steer, and a person's own lines in those sections stay as they are, in place. A power run gets its document
-   * here if it has none; any other run only once it has one. A person's edit racing this write wins: crew re-reads and
-   * writes again on top of it (3 tries at most). Resolves to the version written, or `null` (nothing to change, no
-   * log, no document).
+   * never steer, and a person's own lines in those sections stay as they are, in place. With `create` (a live event
+   * came for the run, or the start-up catch-up chose it) a run of any kind gets its document here if it has none
+   * (workdoc-all-runs, rig run W12: only power runs did). A phased run's Approach is its settled plan
+   * ({@link planApproach}), written as the plan's author seat. A person's edit racing a write wins: crew re-reads and
+   * writes again on top of it (3 tries at most). Resolves to the last version written, or `null` (nothing to change,
+   * no log, no document).
    */
-  async syncLines(runId: string): Promise<number | null> {
+  async syncLines(runId: string, opts: { create?: boolean } = {}): Promise<number | null> {
     // One sync per run at a time, each reading the log afresh (xreview on #1224: two overlapping reads could let an
     // older snapshot restore an answered question after a newer one wrote).
+    const create = opts.create === true;
     const prev = this.linesChain.get(runId) ?? Promise.resolve();
-    const next = prev.then(() => this.syncLinesNow(runId), () => this.syncLinesNow(runId));
+    const next = prev.then(() => this.syncLinesNow(runId, create), () => this.syncLinesNow(runId, create));
     this.linesChain.set(runId, next.catch(() => null));
     return next;
   }
 
-  private async syncLinesNow(runId: string): Promise<number | null> {
+  private async syncLinesNow(runId: string, create: boolean): Promise<number | null> {
     if (this.d.events === undefined) return null;
     const events = await this.d.events(runId);
     if (events === null) {
@@ -441,57 +492,104 @@ export class WorkingDocService {
     }
     this.eventLog = true;
     const model = foldLines(events);
-    if (!model.power && this.d.store.get(runId) === undefined) return null;
+    // A power run makes its document on any sync, as before; any other run when a live event or the catch-up asks.
+    if (this.d.store.get(runId) === undefined && !create && !model.power) return null;
     if (!(await this.ensureDoc(runId))) return null;
-    const lines = docLines(model);
-    const id = PHASE_REPORT_AUTHOR;
+    const notes = this.d.answers !== undefined ? personNotes(await this.d.answers(runId)) : [];
+    const lines = docLines(model, notes);
+    const approach = await this.planText(runId, model);
     return this.exclusive(runId, async () => {
       const rec = this.d.store.get(runId);
       if (rec === undefined) return null;
       await this.reconcile(runId);
       if (this.d.store.get(runId)?.pending != null) {
         // A person's write of unknown outcome is still settling: try again once it has (it settles within ~75 s).
+        this.planChecked.delete(runId);
         this.linesSoon(runId, this.d.linesRetryMs ?? 15_000);
         return null;
       }
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const head = await this.d.backend.read(rec.projectId, rec.docId);
-        if (head === null) return null;
-        const before = { ...blankSections(), ...sectionsOf(head.html) };
+      let wrote: number | null = null;
+      if (approach !== null) {
+        // A person's Approach stands: a plan (even a revised one) never replaces it.
+        const last = [...rec.trail].reverse().find((t) => t.sections.includes('approach'));
+        if (last?.author.kind !== 'human') {
+          wrote = await this.writeAs(runId, rec, approach.author, () => ({ approach: approach.text.slice(0, SECTION_MAX_CHARS) })) ?? wrote;
+        }
+      }
+      const v = await this.writeAs(runId, rec, { kind: 'plugin', id: PHASE_REPORT_AUTHOR }, (before) => {
         const wanted: Partial<Record<SectionId, string>> = {};
         for (const sid of ['decisions', 'questions', 'next'] as const) {
           const text = reconcileSection(sid, before[sid], lines[sid], SECTION_MAX_CHARS);
           if (text !== null) wanted[sid] = text;
         }
-        const changed = changedSections(before, wanted);
-        if (changed.length === 0) return null;
-        const values: Partial<Record<SectionId, string>> = {};
-        for (const sid of changed) values[sid] = wanted[sid] ?? '';
-        let written: { version: number; parent: number } | { headMoved: true; head: number };
-        try {
-          written = await this.d.backend.edit(rec.projectId, rec.docId, {
-            expectHead: head.head,
-            items: changed.map((sid) => ({ selector: anchorOf(sid), value: encodeSectionText(values[sid] ?? '') })),
-            author: id,
-          });
-        } catch (err) {
-          if (err instanceof UndeterminedWriteError) this.rememberPending(runId, head.head, { kind: 'plugin', id }, null, values, { id, kind: 'plugin' });
-          throw err;
-        }
-        if ('headMoved' in written) continue;
-        await this.record(runId, written.version, written.parent, { kind: 'plugin', id }, null, changed, values, { id, kind: 'plugin' });
-        return written.version;
-      }
-      return null;
+        return wanted;
+      });
+      return v ?? wrote;
     });
   }
 
-  /** Bring the event-derived lines up to date shortly (a burst of events becomes one write). */
-  private linesSoon(runId: string, delayMs?: number): void {
-    if (this.d.events === undefined || this.linesDue.has(runId)) return;
+  /**
+   * (workdoc-all-runs) A phased run's Approach: its plan once settled ({@link planSettled}), read from the run's own
+   * unit list, by the seat that wrote the plan (the plan gate's reviewed step) when known, else by crew. `null` for a
+   * power run (its orchestrator writes Approach), before the plan is settled, or when nothing moved since the last look.
+   */
+  private async planText(runId: string, model: ReturnType<typeof foldLines>): Promise<{ text: string; author: DocAuthor } | null> {
+    if (model.power || this.approachNoted.has(runId)) return null;
+    const settled = planSettled(model);
+    if (settled === null) return null;
+    const key = `${settled.approvedAt}|${settled.authorOrd}|${model.started.join(',')}|${model.gates.length}`;
+    if (this.planChecked.get(runId) === key) return null;
+    const run = await this.d.run(runId);
+    if (run === null || run.power === true || run.steps === undefined) return null;
+    this.planChecked.set(runId, key);
+    const steps = [...run.steps].sort((a, b) => a.ord - b.ord);
+    const text = planApproach(steps.map((x) => x.name), settled.approvedAt);
+    if (text === null) return null;
+    const seat = settled.authorOrd !== null ? steps.find((x) => x.ord === settled.authorOrd)?.seat ?? null : null;
+    return { text, author: seat !== null && AGENT_SEAT.test(seat) ? { kind: 'agent', id: `agent:${seat}` } : { kind: 'system', id: 'crew' } };
+  }
+
+  /** Crew's own write of some sections, as `author` (never a person, so it never steers), on the newest head; a person's
+   *  edit racing it wins and the sections are computed again on top of it (3 tries at most). Inside the run's turn. */
+  private async writeAs(runId: string, rec: WorkingDocRecord, author: DocAuthor, compute: (before: Record<SectionId, string>) => Partial<Record<SectionId, string>>): Promise<number | null> {
+    const batchAuthor = author.kind === 'system' ? 'crew' : author.id;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const head = await this.d.backend.read(rec.projectId, rec.docId);
+      if (head === null) return null;
+      const before = { ...blankSections(), ...sectionsOf(head.html) };
+      const wanted = compute(before);
+      const changed = changedSections(before, wanted);
+      if (changed.length === 0) return null;
+      const values: Partial<Record<SectionId, string>> = {};
+      for (const sid of changed) values[sid] = wanted[sid] ?? '';
+      let written: { version: number; parent: number } | { headMoved: true; head: number };
+      try {
+        written = await this.d.backend.edit(rec.projectId, rec.docId, {
+          expectHead: head.head,
+          items: changed.map((sid) => ({ selector: anchorOf(sid), value: encodeSectionText(values[sid] ?? '') })),
+          author: batchAuthor,
+        });
+      } catch (err) {
+        if (err instanceof UndeterminedWriteError) this.rememberPending(runId, head.head, author, null, values, { id: batchAuthor, kind: author.kind });
+        throw err;
+      }
+      if ('headMoved' in written) continue;
+      await this.record(runId, written.version, written.parent, author, null, changed, values, { id: batchAuthor, kind: author.kind });
+      return written.version;
+    }
+    return null;
+  }
+
+  /** Bring the event-derived lines up to date shortly (a burst of events becomes one write). `create`: the sync may
+   *  make the run's document (a live event came for it). */
+  private linesSoon(runId: string, delayMs?: number, create = false): void {
+    if (this.d.events === undefined) return;
+    if (create) this.mayCreate.add(runId);
+    if (this.linesDue.has(runId)) return;
     const t = setTimeout(() => {
       this.linesDue.delete(runId);
-      void this.syncLines(runId).catch((err: unknown) => this.d.log?.(`[working-doc] lines for ${runId}: ${String(err)}`));
+      const made = this.mayCreate.delete(runId);
+      void this.syncLines(runId, { create: made }).catch((err: unknown) => this.d.log?.(`[working-doc] lines for ${runId}: ${String(err)}`));
     }, delayMs ?? this.d.linesDelayMs ?? 1_500);
     (t as { unref?: () => void }).unref?.();
     this.linesDue.set(runId, t);
@@ -595,7 +693,8 @@ export class WorkingDocService {
     const ev = e as unknown as Record<string, unknown>;
     const runId = typeof ev['session'] === 'string' ? ev['session'] : null;
     if (runId === null) return;
-    if (LINE_EVENTS.has(ev['type'] as string)) this.linesSoon(runId);
+    // Any run, power or not, viewed or not: a live line event makes the run's document if it has none (rig run W12).
+    if (LINE_EVENTS.has(ev['type'] as string)) this.linesSoon(runId, undefined, true);
     if ((ev['type'] as string) === 'powerTurnCompleted') {
       // (rig run 1d372696) The orchestrator wrote no APPROACH line, so the document stayed empty. Its own turn
       // summary is the Approach, as the agent, unless it stated one itself or a person wrote it (agentNotes).
