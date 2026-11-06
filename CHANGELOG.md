@@ -26,6 +26,18 @@ mentioned only where a daemon release depends on them.
   and gains `producer` (the engine and its jail) and `storyline` (wicked-crew-api-types: two optional `DemoView`
   fields). An engine without the `demo_record` Tool refuses a demo launch (501).
 
+### Fixed
+
+- **An app turn held on steering rules waits for the person instead of being cancelled (F22).** When the review's
+  rule check leaves a rule unchecked, waived by instruction or disputed, the engine holds the gate (`rules_unchecked`:
+  "the work was not rejected"). crew read that hold as a refusal and cancelled the run about 3 seconds later, so an app
+  by chat could never land while a judge left one rule unanswered. The hold, read from this attempt's structured record (the
+  newest `gateEscalated` or `gateEvaluated.denial` since the step's last dispatch, else the unit's own
+  `denial.source`), is now no refusal: the turn stays `running`,
+  the app stays read-only, and the person answers the gate (re-check the rules, or confirm or skip with a reason) on
+  the run page. A Stop on the hold ends the turn `cancelled`. A BROKEN rule (`rule_check`) and every other refusal
+  still stop the run and record why. No wire change.
+
 ## [0.17.1] — 2026-11-06
 
 The catalog by verb with jobs started in the chat (DES-CATALOG-002 Lane C, #1376), a disputed steering rule on the
