@@ -466,3 +466,35 @@ describe('xreview r3 folds', () => {
     expect(reads).toBeGreaterThanOrEqual(2);
   });
 });
+
+// xreview r5 (codex): crew's older note lines, whose notes left the index, read as a person's and blocked newer ones.
+describe('xreview r5 folds', () => {
+  it('crew’s own older lines stay crew’s when their notes are gone: trimmed first, a person’s line kept, the newest shown', async () => {
+    seq = 0;
+    const log = [ev('awaitingHuman', min(1), { ord: 1, gateKind: 'escalation' })];
+    const words = (i: number) => `${`reason ${i} `.repeat(30)}`.slice(0, 270);
+    let audit: AuditLike[] = Array.from({ length: 12 }, (_, i) => ({ ts: min(2 + i), action: 'guidance.set', actor: human, detail: { text: words(i) } }));
+    const backend = new FakeBackend();
+    const service = new WorkingDocService({
+      store: new WorkingDocStore({ stateHome: home() }), backend,
+      engine: { injectWorkerMessage: async () => 'q' },
+      run: async () => ({ title: 'x', problem: 'p', projectId: 'default', terminal: false, stepOf: () => null }),
+      events: async () => log,
+      // The index keeps the newest 160 notes: here, the old ones are gone once the big skip lands.
+      notes: async () => personNotes(audit).slice(-160),
+    });
+    await service.syncLines('run-1', { create: true });
+    const head = backend.docs.get('working-run-1')!.length - 1;
+    const d0 = sectionsOf(backend.latest('run-1')!.html).decisions ?? '';
+    expect(d0.split('\n')).toHaveLength(12);
+    expect((await service.propose('run-1', { base: head, sections: { decisions: `Mine: ship it Friday.\n${d0}` }, author: 'operator' }, human)).ok).toBe(true);
+    // One rule-skip answer with 160 reasons.
+    audit = [...audit, { ts: min(40), action: 'gate.rules_skipped', actor: human, detail: { skips: Array.from({ length: 160 }, (_, i) => ({ id: `R-${i}`, reason: words(100 + i) })) } }];
+    await service.syncLines('run-1');
+    const d1 = (sectionsOf(backend.latest('run-1')!.html).decisions ?? '').split('\n');
+    expect(d1[0]).toBe('Mine: ship it Friday.');
+    expect(d1.at(-1)).toContain('skipped rule R-159');
+    expect(d1.some((l) => l.includes('reason 0 '))).toBe(false); // the oldest crew lines went first
+    expect(d1.join('\n').length).toBeLessThanOrEqual(4_000);
+  });
+});

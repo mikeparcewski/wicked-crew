@@ -28,7 +28,7 @@ import {
 } from './sections.js';
 import type { DocAuthor, SteerRecord, TrailEntry, WorkingDocRecord, WorkingDocStore } from './store.js';
 import {
-  LINE_EVENTS, PHASE_REPORT_AUTHOR, docLines, foldLines, planApproach, planSettled, reconcileSection, type PersonNote,
+  LINE_EVENTS, PHASE_REPORT_AUTHOR, docLines, foldLines, isGenerated, planApproach, planSettled, reconcileSection, type PersonNote,
 } from './event-lines.js';
 
 /** How crew reads and writes interactive documents (the bridge in production, a fake in tests). */
@@ -541,14 +541,26 @@ export class WorkingDocService {
         if (r !== null) this.planChecked.set(runId, approach.key);
         if (typeof r === 'number') wrote = r;
       }
+      let owned = new Set<string>();
+      let decisionsAfter = '';
       const v = await this.writeAs(runId, rec, { kind: 'plugin', id: PHASE_REPORT_AUTHOR }, (before) => {
+        owned = new Set(this.d.store.get(runId)?.ownedDecisions ?? []);
         const wanted: Partial<Record<SectionId, string>> = {};
         for (const sid of ['decisions', 'questions', 'next'] as const) {
-          const text = reconcileSection(sid, before[sid], lines[sid], SECTION_MAX_CHARS);
+          const text = reconcileSection(sid, before[sid], lines[sid], SECTION_MAX_CHARS, sid === 'decisions' ? owned : undefined);
           if (text !== null) wanted[sid] = text;
         }
+        decisionsAfter = wanted.decisions ?? before.decisions;
         return wanted;
       });
+      if (v !== null) {
+        // What crew's lines in Decisions are now (a person's edit of one makes it theirs: its text no longer matches).
+        const mineNow = decisionsAfter.split('\n').map((l) => l.trim())
+          .filter((l) => l !== '' && isGenerated('decisions', l) && (lines.decisions.includes(l) || owned.has(l)));
+        if (mineNow.join('\n') !== (this.d.store.get(runId)?.ownedDecisions ?? []).join('\n')) {
+          this.d.store.update(runId, (r) => { r.ownedDecisions = mineNow; });
+        }
+      }
       return typeof v === 'number' ? v : wrote;
     });
   }

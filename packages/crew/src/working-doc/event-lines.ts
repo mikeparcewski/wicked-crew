@@ -364,10 +364,16 @@ export function isGenerated(section: 'decisions' | 'questions' | 'next', line: s
  * gives the same text (xreview on wicked-crew#1224: trimming from the top deleted a person's line, and a long history
  * re-added what it had trimmed on every sync).
  */
-export function reconcileSection(section: 'decisions' | 'questions' | 'next', current: string, wanted: readonly string[], max = Infinity): string | null {
+export function reconcileSection(section: 'decisions' | 'questions' | 'next', current: string, wantedNow: readonly string[], max = Infinity, owned?: ReadonlySet<string>): string | null {
   const lines = current.split('\n').map((l) => l.trim()).filter((l) => l !== '');
-  // A Decisions line that only LOOKS generated but is not one crew writes now is a person's (one they edited, or
-  // typed in that shape): text shape is no proof of authorship, and Decisions never takes a line back (xreview r1).
+  // (xreview r5) Decisions lines crew wrote earlier and no longer has a source for (`owned`: what its last write left
+  // there) are still crew's: the oldest of its lines, trimmed first when the section is full, never a person's.
+  const stale = section === 'decisions' && owned !== undefined
+    ? lines.filter((l) => owned.has(l) && !wantedNow.includes(l) && isGenerated(section, l))
+    : [];
+  const wanted = stale.length > 0 ? [...stale, ...wantedNow] : wantedNow;
+  // A Decisions line that only LOOKS generated but is not one crew writes (or wrote) is a person's (one they edited,
+  // or typed in that shape): text shape is no proof of authorship, and Decisions never takes a line back (xreview r1).
   const mine = (l: string): boolean => isGenerated(section, l) && (section !== 'decisions' || wanted.includes(l));
   const human = lines.filter((l) => !mine(l));
   let room = max - human.join('\n').length - (human.length > 0 ? 1 : 0);
