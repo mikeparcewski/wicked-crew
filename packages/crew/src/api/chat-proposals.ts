@@ -1842,6 +1842,9 @@ export class ChatProposals {
 
   /** Holds whose release waits for the held-plan path's outcome (`<chat>\0<turn>`). */
   private readonly deferredRelease = new Set<string>();
+  /** Turns whose held-plan work is queued (set before the turn's own release runs; pi r8: a deferral only ever waits on
+   *  work that exists). */
+  private readonly planScheduled = new Set<string>();
 
   /** Per accepted turn: whether its client draws job cards, as the turn's instructions were written (codex r3). */
   private readonly turnAccepts = new Map<string, boolean>();
@@ -1959,19 +1962,28 @@ export class ChatProposals {
     if (planEdit === null && rev === null) return false;
     const instance = this.deps.instanceOf(frame.chat);
     let published = false;
+    const scheduledKey = `${frame.chat}\u0000${turnId}`;
+    this.planScheduled.add(scheduledKey);
     const work = this.order.run(`chat\u0000${frame.chat}`, async () => {
       try {
         await this.planReplyWork(frame, turnId, job, planEdit, rev, instance, () => {
           published = true;
         });
       } finally {
+        this.planScheduled.delete(scheduledKey);
         // A hold this turn's message took on another open proposal is released now, saying whether the change landed.
         const key = `${frame.chat}\u0000${turnId}`;
         if (this.deferredRelease.delete(key)) {
-          await this.lock.run(`chat\u0000${instance ?? frame.chat}`, async () => {
-            const f = [...foldProposals(this.deps.records(frame.chat)).values()].find((x) => x.state === 'revising' && x.hold === turnId);
-            if (f !== undefined) this.write(frame.chat, { at: this.now(), turnId, kind: 'proposal_released', pid: f.proposal.pid, note: published ? null : "Your change wasn't applied: say it again." }, instance);
-          });
+          try {
+            await this.lock.run(`chat\u0000${instance ?? frame.chat}`, async () => {
+              const f = [...foldProposals(this.deps.records(frame.chat)).values()].find((x) => x.state === 'revising' && x.hold === turnId);
+              if (f !== undefined) this.write(frame.chat, { at: this.now(), turnId, kind: 'proposal_released', pid: f.proposal.pid, note: published ? null : "Your change wasn't applied: say it again." }, instance);
+            });
+          } finally {
+            const n = (this.settling.get(key) ?? 1) - 1;
+            if (n <= 0) this.settling.delete(key);
+            else this.settling.set(key, n);
+          }
         }
       }
     })
@@ -2533,10 +2545,12 @@ export class ChatProposals {
               this.log(`[proposals] chat ${frame.chat}: turn ${turnId}'s revision failed: ${err instanceof Error ? err.message : String(err)}`);
             }
           } else if (rev !== null) {
-            if (this.launchedJob(frame.chat)?.proposal.pid === rev.revises && this.deps.heldPlan !== undefined && this.acceptsTurn(frame.chat, turnId)) {
+            if (this.planScheduled.has(key)) {
               // It names the chat's launched job: the held-plan path answers it, and releases this hold after it, saying
               // whether an offer came of it (codex r7).
               this.deferredRelease.add(key);
+              // Still settling until the plan path releases it: a chat read must not reopen it first (codex r8).
+              this.settling.set(key, (this.settling.get(key) ?? 0) + 1);
               return;
             }
             // Said, not silently dropped: the person's change did not land (codex r5).

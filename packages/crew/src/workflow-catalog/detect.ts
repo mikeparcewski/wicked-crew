@@ -402,6 +402,7 @@ export function wordsLayer(raw: string): WordsResult {
   const sure = seed !== undefined
     && !outcomeConflict(text, seed.id)
     && !negatedOrReferenced(text)
+    && !writingAskedOf(text, seed.id)
     && words >= WORDS_SURE.minWords
     && top >= WORDS_SURE.minScore
     && top >= WORDS_SURE.ratio * Math.max(runnerUp, 0.01)

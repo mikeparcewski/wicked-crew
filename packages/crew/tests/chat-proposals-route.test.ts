@@ -209,8 +209,8 @@ describe('chat proposals (server, A2)', () => {
     const instructions = (launches.at(-1)!.plan as unknown as { steps: Array<{ instructions: string }> }).steps[0]!.instructions;
     expect(instructions).not.toContain('wicked-make');
     expect(instructions).not.toContain('What this chat can make now');
-    // DES-CATALOG-002 §2.3 (u): job proposals are on and this client declared no `accepts: ['job']`: new work is named
-    // with its command in prose, never a PLAN+ line, and nothing about making.
+    // DES-CATALOG-002 §2.3 (u): job proposals are on and this client declared no `accepts: ['job']`: today's flow, with
+    // the job commands offered beside it (this chat has no repository, so no PLAN+ line), and nothing about making.
     expect(instructions).toContain('type `<its command>` to start it');
     expect(instructions).not.toMatch(/^\s*PLAN\+ \{/mu);
     await new Promise((r) => setTimeout(r, 100));

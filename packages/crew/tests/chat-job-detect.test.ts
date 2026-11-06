@@ -154,6 +154,10 @@ describe('the chat statement routes new work (§2.3)', () => {
     const st = chatScopeStatement(CHAT, SCOPE, [], { make });
     expect(st).toMatch(/type `<its command>` to start it/u);
     expect(st).not.toMatch(/"entry":"<card id>"/u);
+    // Today's flow stays whole, and a card crew cannot start yet is never offered (codex r8).
+    expect(st).toMatch(/PLAN\+ \{"steps"/u);
+    expect(st).toMatch(/`\/bug`/u);
+    expect(st).not.toMatch(/`\/review-change`/u);
   });
 
   it('an analysis chat is unchanged: it proposes nothing', () => {
@@ -439,6 +443,35 @@ describe('typed at a held plan: wicked\'s offer, never a decision (§2.4, §2.5,
     const { r, pid } = await started();
     await r.svc.propose(CHAT, { card: 'bug', source: 'pick', requestId: 'req-2', words: 'and the rounding bug' } as never, ME, 'i1');
     await turn(r, 't9', 'make it a move', [{ revises: pid, edits: { option: 'move' } }]);
+    expect(offers(r).map((o) => o.kind)).toEqual(['reshape']);
+    const released = r.records.filter((x): x is Extract<ChatTranscriptRecord, { kind: 'proposal_released' }> => x.kind === 'proposal_released').at(-1)!;
+    expect(released.note).toBeNull();
+  });
+
+  it('a chat read while the plan path works never reopens the deferred hold early (codex r8)', async () => {
+    const { r, pid } = await started();
+    await r.svc.propose(CHAT, { card: 'bug', source: 'pick', requestId: 'req-4', words: 'and the rounding bug' } as never, ME, 'i1');
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((res) => (release = res));
+    const held = r.held;
+    r.svc = r.svc as ChatProposals;
+    (r as unknown as { held: HeldPlan | null }).held = held;
+    // Suspend the plan read, read the chat (reopenStale) meanwhile, then let it finish with an offer.
+    const deps = (r.svc as unknown as { deps: { heldPlan: (id: string) => Promise<HeldPlan | null> } }).deps;
+    const original = deps.heldPlan;
+    deps.heldPlan = async (id) => {
+      await gate;
+      return original(id);
+    };
+    r.records.push({ at: 2, turnId: 't10', kind: 'user', text: 'make it a move', seats: ['claude'], owner: true });
+    r.live.add('t10');
+    await r.svc.holdForMessage(CHAT, 't10');
+    r.svc.onReply({ chat: CHAT, cliKey: 'claude', turnId: 't10', ok: true, blocks: [JSON.stringify({ revises: pid, edits: { option: 'move' } })] });
+    r.live.delete('t10');
+    await new Promise((res) => setTimeout(res, 20));
+    expect(await r.svc.reopenStale(CHAT, 'i1')).toBe(false);
+    release();
+    await r.svc.settled();
     expect(offers(r).map((o) => o.kind)).toEqual(['reshape']);
     const released = r.records.filter((x): x is Extract<ChatTranscriptRecord, { kind: 'proposal_released' }> => x.kind === 'proposal_released').at(-1)!;
     expect(released.note).toBeNull();

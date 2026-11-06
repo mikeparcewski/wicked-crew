@@ -42,6 +42,7 @@
 import { rulesStatementLines } from '../decisions/rules-text.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
 import { detectable } from '../workflow-catalog/detect.js';
+import { crewPending } from '../workflow-catalog/build-v2.js';
 import type { ConformanceRule } from '../core/types.js';
 import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -807,7 +808,7 @@ export function chatJobLines(mode: 'cards' | 'prose'): string[] {
 }
 
 /** Every job card's command, for an older client's statement (the card's id names it). */
-const JOB_COMMANDS = CATALOG_V2_CARDS.filter((c) => detectable(c) && c.command !== null && c.status !== 'coming_soon')
+const JOB_COMMANDS = CATALOG_V2_CARDS.filter((c) => detectable(c) && c.command !== null && c.status !== 'coming_soon' && !crewPending(c.id))
   .map((c) => `${c.title} \`${c.command}\``)
   .join('; ');
 
