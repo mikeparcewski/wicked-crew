@@ -797,7 +797,7 @@ export class WorkingDocService {
       const context = replaces ? this.personContext(runId, changed, after) : [];
       standing = context.length > 0;
       const inContext = new Set(context.map((c) => c.id));
-      note = contextSteerNote(version, who, context, steered.filter((x) => !inContext.has(x)).map((x) => ({ id: x, text: values[x] ?? '' })), marker);
+      note = contextSteerNote(version, who, context, steered.filter((x) => !inContext.has(x)).map((x) => ({ id: x, text: after[x] ?? values[x] ?? '' })), marker);
       if (standing) standingText = contextStandingNote(version, who, context, marker);
     } else {
       const constraints = values.constraints;
