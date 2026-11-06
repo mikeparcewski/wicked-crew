@@ -934,12 +934,16 @@ export const LaunchSchema = z.strictObject({
  *  The ENGINE refuses each at any other gate (a 409 naming the gate it answers) — and `rejudge`
  *  while no judge seat is eligible ({@link GateInfo.rejudge} says beforehand). */
 export const ESCALATION_ACTIONS = ['extend', 'targeted', 'accept_partial', 'accept_suggestion', 'rejudge', 'retry_rules'] as const;
-/** (DES-RULE-CHECK-001 S2, api-types 0.190.0) At a `rules_unchecked` gate (a steering rule no judge
- *  ruled on): `retry_rules` (an escalation arm above) re-runs the rule check on the same work, the
- *  step's seat not run again; `skip_rules` skips unchecked rules, each with a written reason
- *  (`skipRules: [{id, reason}]`, required), then re-runs it. A skip is labelled on the run, the gate
- *  and the delivery receipts. The engine refuses both at any other gate, and a skip of a rule that
- *  is not unchecked (a broken rule denies). Skipping is the human operator's call alone. */
+/** (DES-RULE-CHECK-001 S2, api-types 0.190.0) At a gate the steering-rule check holds or denies:
+ *  `retry_rules` (an escalation arm above) re-runs the rule check on the same work, the step's seat
+ *  not run again; `skip_rules` skips held rules (unchecked, a waiver to confirm, or, rev 2 / api-types
+ *  0.193.0, disputed: no council ruling), each with a written reason (`skipRules: [{id, reason}]`,
+ *  required), then re-runs it. A skip is labelled on the run, the gate and the delivery receipts.
+ *  Since wicked-core-ts 0.15.30 the engine takes both wherever a rule layer is in the gated unit's
+ *  denial record (behind a reviewer's FAIL, at `review_adjudication`), refuses them at any other
+ *  gate, and refuses a skip of a rule that is not held (a broken rule denies, a council's broken
+ *  ruling too): crew forwards both unfiltered, so the engine is the one check, and its refusal is
+ *  the 409. Skipping is the human operator's call alone. */
 export const SKIP_RULES_ACTION = 'skip_rules' as const;
 /** (core#820) A consent gate's answer token: `consent:<choice id>` approves that row of the dry-run
  *  plan (the engine refuses an id its plan does not offer); `reject` stays the decline. */
@@ -1012,8 +1016,8 @@ export const GateSchema = z.strictObject({
    *  declined. Absent = every drafted rule lands, as before. 409 `no_draft` unless the run waits at its
    *  steering-author propose gate with a readable draft; 400 with anything but a plain approve. */
   keepRules: z.array(z.string().min(1).max(256)).max(500).optional(),
-  /** (DES-RULE-CHECK-001 S2, api-types 0.190.0) With `action: 'skip_rules'`: the unchecked rules to
-   *  skip, each with the person's written reason. */
+  /** (DES-RULE-CHECK-001 S2, api-types 0.190.0) With `action: 'skip_rules'`: the held rules to skip
+   *  (unchecked, waived or disputed), each with the person's written reason. */
   skipRules: z
     .array(z.strictObject({ id: z.string().trim().min(1).max(256), reason: z.string().trim().min(1).max(2000) }))
     .min(1)
@@ -1021,7 +1025,7 @@ export const GateSchema = z.strictObject({
     .optional(),
 }).refine(
   (b) => (b.action === SKIP_RULES_ACTION) === (b.skipRules !== undefined),
-  { path: ['skipRules'], error: 'skip_rules needs `skipRules`: [{id, reason}] for each unchecked rule you skip, each with your written reason; skipRules goes with skip_rules only' },
+  { path: ['skipRules'], error: 'skip_rules needs `skipRules`: [{id, reason}] for each rule you skip (unchecked, waived or disputed), each with your written reason; skipRules goes with skip_rules only' },
 ).refine(
   (b) => b.action !== SKIP_RULES_ACTION || (b.approve && b.amend === undefined && b.amendScope === undefined && b.plan === undefined),
   { path: ['action'], error: 'skip_rules takes approve: true and no amend, amendScope or plan — the reasons ride skipRules' },

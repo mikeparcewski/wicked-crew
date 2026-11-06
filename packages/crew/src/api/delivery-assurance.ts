@@ -225,7 +225,10 @@ export function aggregateReceipt(view: SessionView, tree: string | null): Assura
   };
 }
 
-const RULE_RANK: Record<RuleVerdict['status'], number> = { broken: 5, unchecked: 4, waived: 4, skipped: 3, kept: 2, n_a: 1, deferred: 0 };
+// The engine's own ranking (core `RuleStatus::severity`): a `disputed` row holds like an unchecked one, so a later
+// gate's kept row never hides it. A status this crew does not know yet ranks as a hold too.
+const RULE_RANK: Record<RuleVerdict['status'], number> = { broken: 5, unchecked: 4, waived: 4, disputed: 4, skipped: 3, kept: 2, n_a: 1, deferred: 0 };
+const UNKNOWN_RULE_RANK = 4;
 
 /** (DES-RULE-CHECK-001 S4) One row per rule, the worst status winning, in first-seen order. */
 export function worstRulePerRule(rows: readonly RuleVerdict[]): RuleVerdict[] {
@@ -233,7 +236,7 @@ export function worstRulePerRule(rows: readonly RuleVerdict[]): RuleVerdict[] {
   for (const r of rows) {
     const i = out.findIndex((o) => o.ruleId === r.ruleId);
     if (i < 0) out.push(r);
-    else if ((RULE_RANK[r.status] ?? 0) > (RULE_RANK[out[i]!.status] ?? 0)) out[i] = r;
+    else if ((RULE_RANK[r.status] ?? UNKNOWN_RULE_RANK) > (RULE_RANK[out[i]!.status] ?? UNKNOWN_RULE_RANK)) out[i] = r;
   }
   return out;
 }

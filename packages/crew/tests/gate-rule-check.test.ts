@@ -52,7 +52,52 @@ describe('GateSchema — retry_rules and skip_rules', () => {
   });
 });
 
-function view(id: string) {
+// (DES-RULE-CHECK-001 rev 2, wicked-core-ts >= 0.15.30) A dispute no council settled, as the engine serializes it
+// (core `RuleVerdict` / `RuleCouncil`, camelCase): every field must reach the skin as the engine wrote it.
+const DISPUTED: RuleVerdict = {
+  ruleId: 'DEV-TINYMATH-2',
+  status: 'disputed',
+  how: 'council',
+  reason: 'no_quorum: 1 of 3 seats answered',
+  judge: 'claude',
+  ruleKey: 'k'.repeat(64),
+  evidenceKey: 'e'.repeat(64),
+  origin: 'council',
+  judgeIds: ['claude'],
+  evidenceComplete: true,
+  reviewer: { by: 'reviewer', seat: 'codex', status: 'kept', cite: 'src/add.rs:3 adds the overflow check', ids: ['codex'] },
+  council: {
+    taskId: 'council-7',
+    positions: [
+      { by: 'rule_judge', seat: 'claude', status: 'broken', cite: 'no test covers the overflow', ids: ['claude'] },
+      { by: 'reviewer', seat: 'codex', status: 'kept', cite: 'src/add.rs:3 adds the overflow check', ids: ['codex'] },
+    ],
+    votes: [
+      { seat: 'agy', status: 'kept', counted: false, whyNot: 'names no changed file' },
+      { seat: 'pi', counted: false, whyNot: 'no framed answer' },
+      { seat: 'opencode', status: 'broken', counted: true },
+    ],
+    seated: 3,
+    returned: 1,
+    agreementPct: 0,
+    consensus: false,
+    seed: 2 ** 53 - 1,
+    eligible: ['agy', 'pi', 'opencode', 'copilot'],
+    ballotsIn: 'seat containers',
+    reason: 'no_quorum',
+  },
+};
+const settled = (status: 'kept' | 'broken' | 'n_a', votes: Array<[string, RuleVerdict['status'], boolean]>): RuleVerdict => ({
+  ...row('S', status),
+  how: 'council',
+  origin: 'council',
+  council: {
+    taskId: 't', positions: [], ruling: status, seated: 3, returned: votes.length, agreementPct: 67, consensus: true, seed: 1, eligible: [],
+    votes: votes.map(([seat, st, counted]) => ({ seat, status: st, counted })),
+  },
+});
+
+function view(id: string, denial: Record<string, unknown> = { source: 'rules_unchecked', reason: 'x' }) {
   return {
     session: {
       id, workflow_id: 'bug', problem: 'p', entity_mode: 'shared', collection_scope: null,
@@ -60,7 +105,10 @@ function view(id: string) {
       workdir: null, repo_ref: null, extra_write_roots: [], archived_at: null, archive_note: null,
     },
     units: [
-      { id: `${id}:verify`, session_id: id, ord: 4, description: 'verify', status: 'rejected', assigned_cli: 'pi', denial: { source: 'rules_unchecked', reason: 'x' } },
+      {
+        id: `${id}:verify`, session_id: id, ord: 4, description: 'verify', status: 'rejected', assigned_cli: 'pi', denial,
+        assurance: { mode: 'full', required: [], ran: [], skipped: [], creator: null, evaluator: null, judge: null, tree: null, attempt: 2, rules: [DISPUTED, row('BROKEN-1', 'broken')] },
+      },
     ],
   };
 }
@@ -73,11 +121,19 @@ describe('POST /runs/:id/gate — the rule answers reach the engine; a skip is a
 
   beforeAll(async () => {
     const mockAdapter = {
-      sessionsDetail: vi.fn().mockResolvedValue([view('run-rules')]),
+      // `run-fail`: the disputed row is BEHIND the reviewer's FAIL (the winning denial is the verdict's).
+      sessionsDetail: vi.fn().mockResolvedValue([
+        view('run-rules'),
+        view('run-fail', { source: 'evaluator_verdict', reason: 'FAIL' }),
+      ]),
       listRepos: vi.fn().mockResolvedValue([]),
       listWorkflows: () => BUILTIN_WORKFLOWS,
       confirmGate: vi.fn(async (...args: unknown[]) => {
         confirmCalls.push(args);
+        // The engine's own refusal (core `rules_recheck_request`): only a held row can be skipped.
+        if (args[3] === 'skip_rules' && String(args[2]).includes('BROKEN-1')) {
+          throw new Error('rule `BROKEN-1` is not an unchecked rule (nor a disputed one) of unit 4 — only a rule no judge or council ruled on can be skipped (a broken rule denies the gate)');
+        }
         return 'executing';
       }),
     };
@@ -100,8 +156,45 @@ describe('POST /runs/:id/gate — the rule answers reach the engine; a skip is a
     await app.close();
   });
 
-  const post = (body: Record<string, unknown>, actor = 'human/operator') =>
-    app.inject({ method: 'POST', url: '/api/v1/runs/run-rules/gate', headers: { 'x-test-actor': actor }, payload: body });
+  const post = (body: Record<string, unknown>, actor = 'human/operator', run = 'run-rules') =>
+    app.inject({ method: 'POST', url: `/api/v1/runs/${run}/gate`, headers: { 'x-test-actor': actor }, payload: body });
+
+  it('(rev 2) a skip of a disputed row reaches the engine, audited with its reason', async () => {
+    const skipRules = [{ id: 'DEV-TINYMATH-2', reason: 'the council could not rule; I read the diff and the test is there' }];
+    const res = await post({ approve: true, action: 'skip_rules', skipRules });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(confirmCalls).toEqual([['run-rules', true, JSON.stringify(skipRules), 'skip_rules', undefined, undefined]]);
+    expect(audited('gate.rules_skipped')).toHaveLength(1);
+  });
+
+  it('(rev 2) GET /runs/:id carries the disputed row, its parties, votes and seed as the engine wrote them', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/v1/runs/run-rules', headers: { 'x-test-actor': 'human/operator' } });
+    expect(res.statusCode, res.body).toBe(200);
+    const rules = res.json().run.units[0].assurance.rules;
+    expect(rules[0]).toEqual(DISPUTED);
+    expect(rules[0].council.seed).toBe(2 ** 53 - 1);
+  });
+
+  it('(rev 2) behind a reviewer FAIL, retry_rules and a skip of the disputed row still reach the engine (crew does not filter by the winning denial)', async () => {
+    expect((await post({ approve: true, action: 'retry_rules' }, 'human/operator', 'run-fail')).statusCode).toBe(200);
+    const skipRules = [{ id: 'DEV-TINYMATH-2', reason: 'reviewed it myself' }];
+    expect((await post({ approve: true, action: 'skip_rules', skipRules }, 'human/operator', 'run-fail')).statusCode).toBe(200);
+    expect(confirmCalls.map((c) => [c[0], c[3]])).toEqual([['run-fail', 'retry_rules'], ['run-fail', 'skip_rules']]);
+  });
+
+  it('negative control: a skip naming a broken row is still a 409 with the engine\'s words, the gate left open and no skip audited', async () => {
+    const res = await post({ approve: true, action: 'skip_rules', skipRules: [{ id: 'BROKEN-1', reason: 'I disagree' }] });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toMatch(/BROKEN-1.*broken rule denies the gate/u);
+    expect(audited('gate.rules_skipped')).toHaveLength(0);
+    expect(audited('gate.decided')).toHaveLength(0);
+  });
+
+  it('negative control: a seat cannot skip a disputed row either (403, nothing reaches the engine)', async () => {
+    const res = await post({ approve: true, action: 'skip_rules', skipRules: [{ id: 'DEV-TINYMATH-2', reason: 'x' }] }, 'agent/operator');
+    expect(res.statusCode, res.body).toBe(403);
+    expect(confirmCalls).toEqual([]);
+  });
 
   it('retry_rules goes to confirmGate as an approve with nothing else', async () => {
     const res = await post({ approve: true, action: 'retry_rules' });
@@ -165,5 +258,42 @@ describe('(SWAP 6) a rule deferred to delivery', () => {
     );
     expect(worstRulePerRule([row('learn-linked-issue', 'deferred'), row('learn-linked-issue', 'broken')]).map((r) => r.status)).toEqual(['broken']);
     expect(worstRulePerRule([row('learn-linked-issue', 'deferred'), row('learn-linked-issue', 'n_a')]).map((r) => r.status)).toEqual(['n_a']);
+  });
+});
+
+describe('(DES-RULE-CHECK-001 rev 2) disputed rows, council rulings and process rows on the line and the delivery', () => {
+  it('a disputed row is named on the line, never folded into the counts silently', () => {
+    expect(rulesSummaryLine([row('A', 'kept'), row('U', 'unchecked'), DISPUTED])).toBe(
+      '3 rules checked: 1 kept, 0 broken, 0 not applicable, 1 unchecked, 1 disputed (you decide)',
+    );
+  });
+  it('a status this crew does not know yet is counted as not ruled', () => {
+    expect(rulesSummaryLine([row('A', 'kept'), { ...row('X', 'kept'), status: 'contested' as RuleVerdict['status'] }])).toBe(
+      '2 rules checked: 1 kept, 0 broken, 0 not applicable, 1 not ruled',
+    );
+  });
+  it('a council ruling names the rule, the ruling and the counted vote', () => {
+    expect(rulesSummaryLine([settled('kept', [['agy', 'kept', true], ['pi', 'kept', true], ['opencode', 'broken', true]])])).toBe(
+      '1 rules checked: 1 kept, 0 broken, 0 not applicable, 1 settled by council (S: kept 2-1)',
+    );
+    // An uncounted vote is not in the tally.
+    expect(rulesSummaryLine([settled('broken', [['agy', 'broken', true], ['pi', 'broken', true], ['opencode', 'kept', false]])])).toBe(
+      '1 rules checked: 0 kept, 1 broken, 0 not applicable, 1 settled by council (S: broken 2-0)',
+    );
+    // No ruling (a disputed row) and a plain judge row are not "settled".
+    expect(rulesSummaryLine([DISPUTED, row('J', 'kept')])).not.toContain('settled by council');
+  });
+  it('process rows (blocking: false) stay out of the gate counts and are reported apart', () => {
+    const proc = (id: string, status: RuleVerdict['status']): RuleVerdict => ({ ...row(id, status), party: 'reviewer', blocking: false });
+    expect(rulesSummaryLine([row('A', 'kept'), row('B', 'n_a'), proc('RVWL-1001', 'broken'), proc('RVWL-1004', 'kept')])).toBe(
+      '2 rules checked: 1 kept, 0 broken, 1 not applicable; 2 process rules reported (do not block): 1 kept, 1 broken, 0 not applicable',
+    );
+  });
+  it('the delivery keeps a disputed row over a later kept one (it held), and a broken one over it', () => {
+    expect(worstRulePerRule([DISPUTED, { ...row('DEV-TINYMATH-2', 'kept') }]).map((r) => r.status)).toEqual(['disputed']);
+    expect(worstRulePerRule([{ ...row('DEV-TINYMATH-2', 'n_a') }, DISPUTED]).map((r) => r.status)).toEqual(['disputed']);
+    expect(worstRulePerRule([DISPUTED, row('DEV-TINYMATH-2', 'broken')]).map((r) => r.status)).toEqual(['broken']);
+    // The kept row loses whole: the council record stays on the delivery.
+    expect(worstRulePerRule([row('DEV-TINYMATH-2', 'kept'), DISPUTED])[0]).toEqual(DISPUTED);
   });
 });

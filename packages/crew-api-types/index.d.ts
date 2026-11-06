@@ -2490,17 +2490,24 @@ export interface GateDecision {
      *  `operator_judgment` then applies). Refused (409, gate left open) at every other gate and on a
      *  run that does not require QE acceptance. Engine: wicked-core-ts after 0.16.3. */
     | 'skip_qe'
-    /** (api-types 0.190.0, DES-RULE-CHECK-001 S2) At a `rules_unchecked` gate (a steering rule no
-     *  judge ruled on), with `approve: true` and no `amend` / `amendScope` / `plan`: RE-RUN THE RULE
-     *  CHECK on the same work (the step's seat does not run again; every verdict whose rule and
-     *  evidence are unchanged is reused). The engine refuses it at any other gate (409). */
+    /** (api-types 0.190.0, DES-RULE-CHECK-001 S2) At a gate held or denied by the steering-rule
+     *  check, with `approve: true` and no `amend` / `amendScope` / `plan`: RE-RUN THE RULE CHECK on
+     *  the same work (the step's seat does not run again; every verdict whose rule and evidence are
+     *  unchanged is reused, a council ruling included; a `disputed` row goes to a council again,
+     *  within the run's budget). (api-types 0.193.0, wicked-core-ts ≥ 0.15.30) Taken wherever a rule
+     *  layer (`rules_unchecked` or `rule_check`) is in the gated unit's denial record, the winning
+     *  denial or one behind it, so also behind a reviewer's FAIL and at `review_adjudication`. The
+     *  engine refuses it at any other gate (409). */
     | 'retry_rules'
-    /** (api-types 0.190.0) SKIP UNCHECKED STEERING RULES, each with the person's written reason in
-     *  {@link GateDecision.skipRules} (required), `approve: true`, no `amend` / `amendScope` / `plan`;
-     *  then the check re-runs. A skipped rule's row is `skipped`, labelled with its reason on the
-     *  gate receipt and the delivery. Only a rule the gate holds as `unchecked` can be skipped (a
-     *  `broken` one denies); the human operator's call alone (a seat or standing order: 403
-     *  `human_operator_only`). Refused (409, gate left open) at any other gate. */
+    /** (api-types 0.190.0) SKIP STEERING RULES THE GATE HOLDS, each with the person's written reason
+     *  in {@link GateDecision.skipRules} (required), `approve: true`, no `amend` / `amendScope` /
+     *  `plan`; then the check re-runs. A skipped rule's row is `skipped`, labelled with its reason on
+     *  the gate receipt and the delivery; it resolves only that rule (every other layer of the gate
+     *  still denies). Only a rule held as `unchecked`, `waived` (the confirm) or (api-types 0.193.0,
+     *  wicked-core-ts ≥ 0.15.30) `disputed` can be skipped: a skip naming a `broken` row (a council's
+     *  ruling included) is refused, 409, gate left open. The human operator's call alone (a seat or
+     *  standing order: 403 `human_operator_only`). Taken where `retry_rules` is; refused (409, gate
+     *  left open) at any other gate. */
     | 'skip_rules'
     /** (core#820) A `consent` gate's choice from its dry-run plan (`awaitingHuman.choices`), with
      *  `approve: true`: `consent:worker` (the default), `consent:operator`, …; `reject` declines. */
@@ -2577,8 +2584,9 @@ export interface GateDecision {
    * draft, **409** `draft_changed` when an id is not in the draft as it reads now (the gate stays open).
    */
   keepRules?: string[];
-  /** (api-types 0.190.0) With `action: 'skip_rules'` (and only with it): each unchecked rule to
-   *  skip, with the person's written reason (both non-empty, no rule twice). */
+  /** (api-types 0.190.0) With `action: 'skip_rules'` (and only with it): each held rule to skip
+   *  (`unchecked`, `waived` or `disputed`), with the person's written reason (both non-empty, no rule
+   *  twice). */
   skipRules?: RuleSkipAnswer[];
 }
 
@@ -3351,7 +3359,9 @@ export interface AssuranceReceipt {
   /** (api-types 0.190.0, DES-RULE-CHECK-001 S2) Every steering rule in force and its verdict at this
    *  gate (the review step's rule check), or, on a delivery receipt, the worst row per rule across
    *  the run's gates. ABSENT when no rule check ran (not a review gate, no rule store, no change, an
-   *  older engine). Deny-dominates: a `broken` row denied the gate, an `unchecked` row held it. */
+   *  older engine). Deny-dominates: a `broken` row denied the gate, an `unchecked`, `waived` or
+   *  (api-types 0.193.0) `disputed` row held it. A row with `blocking: false` (a process rule) did
+   *  neither. */
   rules?: RuleVerdict[];
 }
 
@@ -3362,12 +3372,22 @@ export interface AssuranceReceipt {
  *  it with a reason through `skip_rules`; never kept, never skipped silently) · `deferred` (api-types
  *  0.191.0: the rule's subject only exists at delivery, by recorded fact: obligations
  *  `evidence:delivery` or `applies_to` naming only the deliver step; it does not hold review or QE,
- *  and the deliver step's receipt carries its verdict on the pull request's text). */
-export type RuleVerdictStatus = 'kept' | 'broken' | 'n_a' | 'unchecked' | 'skipped' | 'waived' | 'deferred';
+ *  and the deliver step's receipt carries its verdict on the pull request's text) · `disputed`
+ *  (api-types 0.193.0, DES-RULE-CHECK-001 rev 2, wicked-core-ts ≥ 0.15.30: the rule judge and the
+ *  reviewer disagreed on it, exactly one saying broken, and no council ruling settled it; `council`
+ *  says why. It HOLDS the gate like `unchecked`, never passes it: the person re-checks it
+ *  (`retry_rules`), confirms or skips it with a reason (`skip_rules`), or sends the work back). A
+ *  reader that does not know a status treats it as `unchecked` (it holds). */
+export type RuleVerdictStatus = 'kept' | 'broken' | 'n_a' | 'unchecked' | 'skipped' | 'waived' | 'deferred' | 'disputed';
 /** How it was reached: `fact` (a recorded fact ruled it out) · `judge` (a seat distinct from the
  *  creators ruled) · `machine` (an engine check, e.g. `check:test-fails-on-base`) · `cache` (an
- *  earlier verdict on the same rule and evidence) · `operator` (skipped) · `none` (unchecked). */
-export type RuleVerdictHow = 'fact' | 'judge' | 'machine' | 'cache' | 'operator' | 'none';
+ *  earlier verdict on the same rule and evidence; {@link RuleVerdict.origin} says who reached it) ·
+ *  `operator` (skipped) · `council` (api-types 0.193.0: a council settled a dispute on it, or could
+ *  not: `disputed`) · `none` (unchecked). */
+export type RuleVerdictHow = 'fact' | 'judge' | 'machine' | 'cache' | 'operator' | 'council' | 'none';
+/** (api-types 0.193.0) Who reached a row's verdict, kept when the row is reused from the cache (where
+ *  `how` becomes `cache`): a cached `machine` or `council` row is still a fact or a settled ruling. */
+export type RuleVerdictOrigin = 'fact' | 'judge' | 'machine' | 'council' | 'operator';
 
 /** (api-types 0.190.0) One steering rule's row on an assurance receipt. */
 export interface RuleVerdict {
@@ -3378,17 +3398,97 @@ export interface RuleVerdict {
   reason: string;
   /** The evidence the judge or the machine check cited, when one ruled. */
   cite?: string;
-  /** The seat that ruled. */
+  /** The seat that ruled (on a `cache` row, the seat that ruled first). */
   judge?: string;
   /** SHA-256 of the rule's judged content (statement, criteria, obligations, facets). */
   ruleKey: string;
   /** SHA-256 of the evidence the verdict read; absent on a `fact` row. */
   evidenceKey?: string;
+  /** (api-types 0.193.0) Who reached the verdict, through the cache. ABSENT on a row recorded before it
+   *  existed (or by an older engine). */
+  origin?: RuleVerdictOrigin;
+  /** (api-types 0.193.0) Every identity the judge that ruled it may execute, recorded when it ruled: a
+   *  council never seats it. ABSENT when none was recorded. */
+  judgeIds?: string[];
+  /** (api-types 0.193.0) Whether the judge saw the whole evidence (its diff was not cut). Only a whole
+   *  reading goes to a council. ABSENT when no judge read evidence. */
+  evidenceComplete?: boolean;
+  /** (api-types 0.193.0) On a process rule: whose conduct it is about (`reviewer`, `engine`, `person`).
+   *  ABSENT on a rule about the work. */
+  party?: string;
+  /** (api-types 0.193.0) `false` on a process rule: reported, never a deny or a hold, and left out of
+   *  the gate's "N rules checked" counts. ABSENT = it blocks like any rule. */
+  blocking?: boolean;
+  /** (api-types 0.193.0) The reviewer's own reading of the rule (its `RULE <id>:` line), when it wrote
+   *  one. */
+  reviewer?: RulePosition;
+  /** (api-types 0.193.0) The council a dispute on this rule went to: its ruling (`status` is it, with
+   *  `how: 'council'` or `cache`), or why there is none (`status: 'disputed'`). */
+  council?: RuleCouncilRecord;
+}
+
+/** (api-types 0.193.0) One side's reading of a rule in a dispute. */
+export interface RulePosition {
+  /** `rule_judge` (the engine's rule judge) or `reviewer` (the review seat). */
+  by: 'rule_judge' | 'reviewer' | (string & {});
+  /** The seat that read it. */
+  seat: string;
+  /** Its reading (`kept`, `broken`, `n_a` or `deferred`). */
+  status: RuleVerdictStatus;
+  /** Its evidence, as it wrote it (bounded). */
+  cite: string;
+  /** Every identity that seat may have executed when it read the rule (kept out of a later council).
+   *  ABSENT when none was recorded. */
+  ids?: string[];
+}
+
+/** (api-types 0.193.0) One council seat's vote on a disputed rule, and whether it passed the vote bars
+ *  (a kept vote names a changed file; a not-applicable vote quotes the rule's own scope). */
+export interface RuleCouncilVote {
+  seat: string;
+  /** The position it named. ABSENT: it named none. */
+  status?: RuleVerdictStatus;
+  /** Whether it counted toward the ruling. */
+  counted: boolean;
+  /** Why it was not counted. ABSENT on a counted vote. */
+  whyNot?: string;
+}
+
+/** (api-types 0.193.0, DES-RULE-CHECK-001 rev 2 A.5) The council a disputed rule went to, on its row.
+ *  Three seats distinct from the creators, the rule judge and the reviewer; a ruling stands only on
+ *  a strict majority of the counted votes (a final 2-1 stands). */
+export interface RuleCouncilRecord {
+  /** The council task. EMPTY when none was convened (too few seats, an identity that could not be
+   *  established, incomplete evidence, a cap). */
+  taskId: string;
+  /** The rule judge's reading and the reviewer's. */
+  positions: RulePosition[];
+  /** The ruling, when the counted votes reached one (`broken`, `kept`, `n_a`, or `waived` when a
+   *  kept vote rested on the person's instruction). ABSENT: no ruling, so the row is `disputed`. */
+  ruling?: RuleVerdictStatus;
+  /** Every seat's vote, in seat order. */
+  votes: RuleCouncilVote[];
+  /** Seats drawn. */
+  seated: number;
+  /** Seats that answered. */
+  returned: number;
+  /** The final ballot's agreement, 0–100. */
+  agreementPct: number;
+  consensus: boolean;
+  /** The seat draw's seed (53 bits, exact in JavaScript). */
+  seed: number;
+  /** The seats the draw could take. */
+  eligible: string[];
+  /** Where the ballots ran. ABSENT when none ran. */
+  ballotsIn?: string;
+  /** Why there is no ruling: `no_quorum`, `timeout`, `seats_benched`, `cap`, `error`,
+   *  `incomplete_evidence` or `identity_unknown`, then the detail. ABSENT on a ruling. */
+  reason?: string;
 }
 
 /** (api-types 0.190.0) One skip in a `skip_rules` gate answer. */
 export interface RuleSkipAnswer {
-  /** The unchecked rule's id. */
+  /** The id of a rule the gate holds: `unchecked`, `waived` or (api-types 0.193.0) `disputed`. */
   id: string;
   /** The person's written reason (labelled on the run, the gate and the delivery). */
   reason: string;
@@ -3719,8 +3819,9 @@ export interface GateEscalatedEvent {
    * builder's seat — core-ts 0.7.46, EX-01) · `evaluator_error` · `judge_unavailable` (a
    * `judge_unavailable` condition; since core-ts 0.7.46 also a required judge with no distinct
    * seat — EX-02) · `rule_check` (a `rule_broken` condition: a steering rule the review's rule check
-   * found broken, api-types 0.190.0) · `rules_unchecked` (a `rules_unchecked` condition: a rule no
-   * judge ruled on, answered by `retry_rules` / `skip_rules`). `""` (EMPTY) = a hook veto whose
+   * found broken, api-types 0.190.0; a council's broken ruling too) · `rules_unchecked` (a
+   * `rules_unchecked` condition: a rule no judge ruled on, a waiver to confirm, or (api-types 0.193.0)
+   * a dispute no council settled, answered by `retry_rules` / `skip_rules`). `""` (EMPTY) = a hook veto whose
    * source identity was folded away
    * (`actor.rs` `boundary_deny` arm with no structured denial) — a reader keys copy on
    * `(condition, denialSource)` and treats `""` beside `boundary_deny` as input governance.
