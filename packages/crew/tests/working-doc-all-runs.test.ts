@@ -120,6 +120,7 @@ function setup(o: {
     ...(o.live !== undefined ? { liveRuns: async () => o.live! } : {}),
     linesDelayMs: 0,
     linesRetryMs: 5,
+    catchUpGapMs: 0,
     now: () => 1_000,
   });
   const sections = (runId = 'run-1') => sectionsOf(backend.latest(runId)!.html);

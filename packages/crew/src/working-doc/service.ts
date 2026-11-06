@@ -82,6 +82,8 @@ export interface WorkingDocDeps {
   /** (workdoc-all-runs) A person's answers with their words, from crew's trail (`PersonNotesIndex`), oldest first: they
    *  become Decisions. Absent: no such lines. */
   notes?(runId: string): Promise<readonly PersonNote[]>;
+  /** (workdoc-all-runs) How long the start-up catch-up waits between runs (default 250 ms: it never crowds the engine). */
+  catchUpGapMs?: number;
   /** (workdoc-all-runs) The runs not finished (not completed, cancelled or failed), for the start-up catch-up. */
   liveRuns?(): Promise<ReadonlyArray<{ runId: string; createdAt: number }>>;
   /** How long after a line-relevant event the lines are brought up to date (one write per burst). */
@@ -294,8 +296,16 @@ export class WorkingDocService {
         this.d.log?.(`[working-doc] catch-up could not list live runs: ${String(err)}`);
       }
     }
-    for (const runId of held) await this.syncLines(runId).catch((err: unknown) => this.d.log?.(`[working-doc] catch-up ${runId}: ${String(err)}`));
-    for (const runId of fresh) await this.syncLines(runId, { create: true }).catch((err: unknown) => this.d.log?.(`[working-doc] catch-up ${runId}: ${String(err)}`));
+    const gap = this.d.catchUpGapMs ?? 250;
+    const pause = (): Promise<void> => (gap > 0 ? new Promise((r) => { const t = setTimeout(r, gap); (t as { unref?: () => void }).unref?.(); }) : Promise.resolve());
+    for (const runId of held) {
+      await this.syncLines(runId).catch((err: unknown) => this.d.log?.(`[working-doc] catch-up ${runId}: ${String(err)}`));
+      await pause();
+    }
+    for (const runId of fresh) {
+      await this.syncLines(runId, { create: true }).catch((err: unknown) => this.d.log?.(`[working-doc] catch-up ${runId}: ${String(err)}`));
+      await pause();
+    }
   }
 
   /** The run's working document, created on first ask (its Goal seeded from the run's intent, by crew). The view is

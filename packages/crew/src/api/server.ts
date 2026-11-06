@@ -2907,6 +2907,17 @@ export async function createServer(
   // `phase-report` — and the steering notes a person's edits of it become. Steering rides the engine's operator
   // inject only; nothing here answers a gate.
   const workingDocNotes = new PersonNotesIndex();
+  // The working documents read the run views (the engine's whole-store fold) at most once per 2 s between them: the
+  // catch-up and a burst of syncs share one read instead of one each (crew#944: run reads must stay fast).
+  let workingDocViewsRead: { at: number; views: Promise<SessionView[]> } | null = null;
+  const workingDocViews = (): Promise<SessionView[]> => {
+    if (workingDocViewsRead === null || Date.now() - workingDocViewsRead.at > 2_000) {
+      const views = adapter.sessionsDetail();
+      workingDocViewsRead = { at: Date.now(), views };
+      views.catch(() => { if (workingDocViewsRead?.views === views) workingDocViewsRead = null; });
+    }
+    return workingDocViewsRead.views;
+  };
   /** How long after start the working documents' catch-up begins (`WICKED_WORKING_DOC_CATCHUP_MS`, default 10 s). */
   const catchUpEnv = Number(process.env['WICKED_WORKING_DOC_CATCHUP_MS']);
   const WORKING_DOC_CATCH_UP_DELAY_MS = process.env['WICKED_WORKING_DOC_CATCHUP_MS'] !== undefined && Number.isFinite(catchUpEnv) && catchUpEnv >= 0 ? catchUpEnv : 10_000;
@@ -2923,7 +2934,7 @@ export async function createServer(
     backend: bridgeBackend(interactiveBridges, (projectId) => workingDocRoot(adapter, projectSettings, projectId)),
     engine: { injectWorkerMessage: (runId, message, target) => adapter.injectWorkerMessage(runId, message, target) },
     run: async (runId) => {
-      const v = (await adapter.sessionsDetail()).find((x) => x.session.id === runId);
+      const v = (await workingDocViews()).find((x) => x.session.id === runId);
       if (v === undefined) return null;
       return {
         title: workingDocTitle(v.session.problem),
@@ -2940,7 +2951,7 @@ export async function createServer(
     // once the start-up read of the trail is in (so a line never lands ahead of an older one).
     notes: async (runId) => { await workingDocNotesRead; return workingDocNotes.of(runId); },
     // The launch time is crew's (the run-timing index, from `run.launched`); a run with none sorts oldest.
-    liveRuns: async () => (await adapter.sessionsDetail())
+    liveRuns: async () => (await workingDocViews())
       .filter((v) => !['completed', 'cancelled', 'failed'].includes(v.session.status) && v.session.archived_at == null)
       .map((v) => ({ runId: v.session.id, createdAt: runTimingIndex.createdAtFor(v.session.id) ?? 0 })),
     changed: (runId, head) => broadcast({ type: 'workingDocChanged', session: runId, head } as unknown as Parameters<typeof broadcast>[0]),
