@@ -351,6 +351,15 @@ export function negatedOrReferenced(text: string): boolean {
   return NEGATED_WORK.test(straight(text)) || REFERENCED_WORK.test(text);
 }
 
+/** An explicit writing request ("write the release notes for…", "draft a summary of…"): an unambiguous outcome. */
+const WRITING_ASK = /\b(?:write|draft|prepare|put\s+together|compose)\s+(?:\w+\s+){0,2}?(?:release\s+notes|changelog|announcement|status\s+update|summary|write-?up|readme|docs?|documentation|deck|slides|presentation|memo|email|message)\b/iu;
+const WRITING_CARDS: ReadonlySet<string> = new Set(['document', 'communicate', 'interactive-page', 'operating-model', 'release', 'analyze-codebase']);
+
+/** Whether the words explicitly ask to WRITE something the card does not make (a seat's sure is then held; codex r7). */
+export function writingAskedOf(text: string, card: string): boolean {
+  return WRITING_ASK.test(text) && !WRITING_CARDS.has(card);
+}
+
 /** Whether the words ask for an outcome the card does not deliver (then they do not decide alone). */
 export function outcomeConflict(text: string, card: string): boolean {
   // Every outcome the words ask for must be one the card delivers, for the words to decide alone: "Plan a security
@@ -662,7 +671,8 @@ export function detect(input: DetectInput): Detection {
   // cues are NOT applied to a seat's reading: which of nested outcomes is asked is the seat's to read (classify's first
   // rule), and outcome words double as subjects ("our code review conventions", "repo-audit", "should we test"): on the
   // corpus the veto held 6 more right answers as likely and prevented no wrong sure.
-  const band: Band = checked === 'sure' && negatedWork(withoutAimed(input.text)) ? 'likely' : checked;
+  const cleaned = withoutAimed(input.text);
+  const band: Band = checked === 'sure' && (negatedWork(cleaned) || writingAskedOf(cleaned, seat.card)) ? 'likely' : checked;
   const choices = seat.ask.length > 0 ? seat.ask : [{ card: seat.card, option: seat.option }, ...wordsChoices(words)];
   return { guess: make(seat.card, seat.option, seat.depth, seat.confidence, band, seat.reason, input.source, questionOf(choices)), words, seat };
 }

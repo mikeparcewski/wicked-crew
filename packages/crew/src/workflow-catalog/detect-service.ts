@@ -49,6 +49,15 @@ export function detectShadowedIn(presets: ReadonlyArray<{ name: string; created_
   return presets.some((p) => p.name === DETECT_WORKFLOW && p.created_by !== 'builtin');
 }
 
+/** The shadow check over a read of the saved rows: a read that fails is a shadow (fail closed: the seat is not asked). */
+export async function shadowCheck(read: () => Promise<ReadonlyArray<{ name: string; created_by?: unknown }>>): Promise<boolean> {
+  try {
+    return detectShadowedIn(await read());
+  } catch {
+    return true;
+  }
+}
+
 /** The task the seat reads: the classify digest, then the person's words as data. */
 export function detectTask(text: string, digest: string): string {
   return [
@@ -221,7 +230,7 @@ export class DetectService {
       if (!seatWanted) return null;
       // Fail closed on a shadowed detector: a saved preset under its name would run instead of it (codex r5).
       if (catalog.detectShadowed === true) {
-        failure = `a saved preset named ${DETECT_WORKFLOW} shadows the detector; answered from the words`;
+        failure = `a saved preset named ${DETECT_WORKFLOW} shadows the detector (or the presets could not be read to check); answered from the words`;
         return null;
       }
       // Fenced BEFORE the launch: a unit's first call can land before the launch answers.

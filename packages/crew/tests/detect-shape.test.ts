@@ -124,6 +124,9 @@ describe('the words ask for an outcome, and say a depth (codex r1)', () => {
 
   it('work the words rule out never decides, and a seat sure of it is held (codex r3)', () => {
     for (const source of ['chat', 'classify'] as const) {
+      // An explicit writing request: a seat sure of the subject's work card is held (codex r7).
+      const w = detect({ text: 'Our migration is finished; write the release notes for the upgrade from Node 18 to Node 22.', seat: { card: 'migrate', option: 'upgrade', confidence: 0.95 }, source, catalogRev: REV });
+      expect(w.guess.band, source).toBe('likely');
       // Work the words rule out: held, whatever the seat's confidence (and its reported confidence fits its band).
       const n = detect({ text: 'do not fix the rounding bug in invoices, leave the totals alone', seat: { card: 'bug', confidence: 0.95 }, source, catalogRev: REV });
       expect(n.guess.band, source).toBe('likely');

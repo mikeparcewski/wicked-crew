@@ -158,7 +158,7 @@ import { registerProjectAggregateRoutes } from './project-aggregates.js';
 import { composeLaunch, composePreflight, registerProductRoutes } from './product.js';
 import { buildWorkflowCatalogV2, parseCommand, resolveOption } from '../workflow-catalog/build-v2.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
-import { DETECT_MAX_CHARS, DETECT_TIMEOUT_MS, DetectService, detectShadowedIn } from '../workflow-catalog/detect-service.js';
+import { DETECT_MAX_CHARS, DETECT_TIMEOUT_MS, DetectService, shadowCheck } from '../workflow-catalog/detect-service.js';
 import { checkLaunchShape, LaunchShapeSchema, launchShapeOf, servedFor, withBriefLines, type LaunchTarget, type ShapeReads } from '../workflow-catalog/shape.js';
 import { registerPresetRoutes } from '../presets/routes.js';
 import { busRows, openPlanGateRev, registerTeamRoutes, workPlanAccepted } from '../team/routes.js';
@@ -5465,9 +5465,9 @@ export function registerRoutes(
       // DES-CATALOG-002 §2.3: with job cards, the make digest rides INSIDE the job block, under its one 2 KB budget.
       if (jobTurn !== null && jobTurn.mode === 'cards') {
         seatText = `${seatText}\n\n${chatJobTurnLines(jobTurn.mode, { ...jobTurn.context, preface: makeDigest })}`;
-      } else {
-        if (makeDigest !== '') seatText = `${seatText}\n\n${makeDigest}`;
-        if (jobTurn !== null) seatText = `${seatText}\n\n${chatJobTurnLines(jobTurn.mode, jobTurn.context)}`;
+      } else if (makeDigest !== '') {
+        // An older client's message is today's (its statement lists the job commands).
+        seatText = `${seatText}\n\n${makeDigest}`;
       }
       voice = path.pa !== null ? [path.pa] : [];
       // A random pick reserves every eligible seat until the relay names the PA.
@@ -8402,8 +8402,9 @@ export function registerRoutes(
       const status = (card: string, option: string | null): 'available' | 'coming_soon' | 'unavailable' =>
         resolveOption(card, option, served)?.resolved.status ?? 'unavailable';
       // The detect turn launches repo-less and project-less: the global rows (and the project's) are what could shadow it.
-      const rows = [...(await adapter.listPresets().catch(() => [])), ...(projectId !== null ? await adapter.listPresets(projectId).catch(() => []) : [])];
-      return { rev: served.rev, status, available: (card, option) => status(card, option) === 'available', detectShadowed: detectShadowedIn(rows) };
+      // A read that fails is a shadow: the seat is not asked (codex r7).
+      const detectShadowed = await shadowCheck(async () => [...(await adapter.listPresets()), ...(projectId !== null ? await adapter.listPresets(projectId) : [])]);
+      return { rev: served.rev, status, available: (card, option) => status(card, option) === 'available', detectShadowed };
     },
     costOf: async (runId) => {
       const view = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);

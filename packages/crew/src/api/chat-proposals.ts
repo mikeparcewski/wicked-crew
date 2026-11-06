@@ -1840,6 +1840,9 @@ export class ChatProposals {
     return this.jobsOn() && this.deps.acceptsJobs?.(chatId) === true;
   }
 
+  /** Holds whose release waits for the held-plan path's outcome (`<chat>\0<turn>`). */
+  private readonly deferredRelease = new Set<string>();
+
   /** Per accepted turn: whether its client draws job cards, as the turn's instructions were written (codex r3). */
   private readonly turnAccepts = new Map<string, boolean>();
 
@@ -1955,7 +1958,39 @@ export class ChatProposals {
     }
     if (planEdit === null && rev === null) return false;
     const instance = this.deps.instanceOf(frame.chat);
+    let published = false;
     const work = this.order.run(`chat\u0000${frame.chat}`, async () => {
+      try {
+        await this.planReplyWork(frame, turnId, job, planEdit, rev, instance, () => {
+          published = true;
+        });
+      } finally {
+        // A hold this turn's message took on another open proposal is released now, saying whether the change landed.
+        const key = `${frame.chat}\u0000${turnId}`;
+        if (this.deferredRelease.delete(key)) {
+          await this.lock.run(`chat\u0000${instance ?? frame.chat}`, async () => {
+            const f = [...foldProposals(this.deps.records(frame.chat)).values()].find((x) => x.state === 'revising' && x.hold === turnId);
+            if (f !== undefined) this.write(frame.chat, { at: this.now(), turnId, kind: 'proposal_released', pid: f.proposal.pid, note: published ? null : "Your change wasn't applied: say it again." }, instance);
+          });
+        }
+      }
+    })
+      .catch((err: unknown) => this.log(`[proposals] chat ${frame.chat}: turn ${turnId}'s plan offer failed: ${err instanceof Error ? err.message : String(err)}`))
+      .finally(() => this.pending.delete(work));
+    this.pending.add(work);
+    return true;
+  }
+
+  private async planReplyWork(
+    frame: { chat: string },
+    turnId: string,
+    job: { proposal: ArtifactProposal; runId: string },
+    planEdit: string | null,
+    rev: ProposalRevision | null,
+    instance: string | null,
+    onPublished: () => void,
+  ): Promise<void> {
+    {
       if (this.deps.instanceOf(frame.chat) !== instance) return;
       if (planEdit !== null && planEdit !== job.runId) {
         this.log(`[proposals] chat ${frame.chat}: turn ${turnId}'s plan edit names ${planEdit.slice(0, 64)}, not the chat's job ${job.runId} — dropped`);
@@ -2005,13 +2040,9 @@ export class ChatProposals {
       // Published under the chat's lock, re-checked there (a newer message may have landed while it resolved).
       await this.lock.run(`chat\u0000${instance ?? frame.chat}`, async () => {
         if (this.deps.instanceOf(frame.chat) !== instance || !isNewest()) return;
-        this.write(frame.chat, { at: this.now(), turnId, kind: 'plan_offer', offer: offer! }, instance);
+        if (this.write(frame.chat, { at: this.now(), turnId, kind: 'plan_offer', offer: offer! }, instance)) onPublished();
       });
-    })
-      .catch((err: unknown) => this.log(`[proposals] chat ${frame.chat}: turn ${turnId}'s plan offer failed: ${err instanceof Error ? err.message : String(err)}`))
-      .finally(() => this.pending.delete(work));
-    this.pending.add(work);
-    return true;
+    }
   }
 
   /** The "start it again as…" offer: the new shape resolved like a revision, its losses and missing inputs named. */
@@ -2313,7 +2344,7 @@ export class ChatProposals {
           // The removal verb in the same clause, right before the detail, and not itself negated ("do not remove …").
           const m = /\b(?:remove|drop|forget|scrap|undo|take\s+out|no\s+longer|don'?t\s+need)\b(?:\s+[^\s.;,]+){0,4}\s*$/iu.exec(before);
           // Not negated, and no keeping or new clause between the verb and the detail ("remove X and keep <detail>").
-          return m !== null && !/\b(?:don'?t|do\s+not|never|not)\s+$/iu.test(before.slice(0, m.index)) && !/\b(?:keep|retain|and|but|then)\b/iu.test(before.slice(m.index).replace(/^\S+/u, ''));
+          return m !== null && !/\b(?:don'?t|do\s+not|never|not)\s+$/iu.test(before.slice(0, m.index)) && !/\b(?:keep|keeping|retain|retaining|and|but|then|while|whilst)\b/iu.test(before.slice(m.index).replace(/^\S+/u, ''));
         };
         const namesCheck = (d: string): boolean => /\b(?:reviews?|reviewers?|judges?|parity|qe|acceptance|tests?|checks?|cited\s+findings|floor|gates?)\b/iu.test(d);
         const remove = (edits.detail.remove ?? []).filter((d) => fromThem(d) && asksRemoval(d) && !namesCheck(d));
@@ -2502,9 +2533,14 @@ export class ChatProposals {
               this.log(`[proposals] chat ${frame.chat}: turn ${turnId}'s revision failed: ${err instanceof Error ? err.message : String(err)}`);
             }
           } else if (rev !== null) {
-            // Said, not silently dropped: the person's change did not land (codex r5) — unless it names the chat's
-            // launched job, whose held plan answers it with an offer (pi r6).
-            if (this.launchedJob(frame.chat)?.proposal.pid !== rev.revises) note = "Your change wasn't applied: say it again.";
+            if (this.launchedJob(frame.chat)?.proposal.pid === rev.revises && this.deps.heldPlan !== undefined && this.acceptsTurn(frame.chat, turnId)) {
+              // It names the chat's launched job: the held-plan path answers it, and releases this hold after it, saying
+              // whether an offer came of it (codex r7).
+              this.deferredRelease.add(key);
+              return;
+            }
+            // Said, not silently dropped: the person's change did not land (codex r5).
+            note = "Your change wasn't applied: say it again.";
             this.log(`[proposals] chat ${frame.chat}: turn ${turnId}'s revision names ${rev.revises}, not the proposal its message held — dropped`);
           }
         }

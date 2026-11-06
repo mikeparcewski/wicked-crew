@@ -40,6 +40,8 @@
  */
 
 import { rulesStatementLines } from '../decisions/rules-text.js';
+import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
+import { detectable } from '../workflow-catalog/detect.js';
 import type { ConformanceRule } from '../core/types.js';
 import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -744,14 +746,15 @@ export function makesAnything(make: MakeDigest | undefined): make is MakeDigest 
  */
 export function chatJobLines(mode: 'cards' | 'prose'): string[] {
   if (mode === 'prose') {
+    // An older client keeps today's flow whole (its artifact cards, its PLAN+ continuation, Continue in Build): the
+    // command is offered beside it, never instead of a path it can draw (§2.3, §9.2 (u)).
     return [
-      '## Starting work',
+      '## Job commands',
       '',
-      'This chat starts work by command. A document, deck, page, demo or theme this chat can make (the section above,',
-      'when there is one) keeps its own proposal block. Any OTHER request for work is never attempted here, and gets no',
-      'plan line: answer in a sentence or two, then name the ONE job it is, from the job cards the message carries, on',
-      'a line of its own: "This looks like <job title>: type `<its command>` to start it". When you cannot tell which',
-      'job it is, ask ONE question instead. Nothing starts until the person types the command and presses Start.',
+      'When the latest message asks for a kind of work one of these jobs does, also name it on a line of its own:',
+      '"This looks like <job>: type `<its command>` to start it". Nothing starts until the person types it and',
+      'presses Start. The jobs and their commands:',
+      JOB_COMMANDS,
     ];
   }
   return [
@@ -802,6 +805,11 @@ export function chatJobLines(mode: 'cards' | 'prose'): string[] {
     '**While a job runs**, a request to add to it is answered in prose, pointing at the job\'s own plan Edit; no block.',
   ];
 }
+
+/** Every job card's command, for an older client's statement (the card's id names it). */
+const JOB_COMMANDS = CATALOG_V2_CARDS.filter((c) => detectable(c) && c.command !== null && c.status !== 'coming_soon')
+  .map((c) => `${c.title} \`${c.command}\``)
+  .join('; ');
 
 /** What the per-message job lines read (DES-CATALOG-002 §2.3, §4.6): crew's records, said as ids the seat may name. */
 export interface JobTurnContext {
@@ -1025,11 +1033,11 @@ export function chatWorkRequestLines(scope: Pick<ChatScope, 'kind' | 'repos'>, o
   // DES-CATALOG-002 §2.3: with job routing on, new work is the job block ("Starting work" above), never a `PLAN+` line;
   // `PLAN+`'s parser and its meaning (the chat's own plan amendment) are unchanged.
   const make = opts.make;
-  if (make?.jobs !== undefined) {
+  if (make?.jobs === 'cards') {
     const artifacts = make.create || make.refine || make.theme || make.demo;
     return [
       ...(artifacts || make.jobs === 'cards' ? [...chatMakeLines(make), ''] : []),
-      ...chatJobLines(make.jobs),
+      ...chatJobLines('cards'),
       '',
       '## Requests for work',
       '',
@@ -1049,6 +1057,7 @@ export function chatWorkRequestLines(scope: Pick<ChatScope, 'kind' | 'repos'>, o
       : 'asks for work (build, fix, add, change, write code or docs), do NOT attempt it. Answer with a',
     'short plan: what changes, in which files, and how it will be checked.',
   ];
+  const commands = opts.make?.jobs === 'prose' ? ['', ...chatJobLines('prose')] : [];
   if (scope.kind === 'repos' && scope.repos.length === 1) {
     return [
       ...head,
@@ -1058,12 +1067,14 @@ export function chatWorkRequestLines(scope: Pick<ChatScope, 'kind' | 'repos'>, o
       '    PLAN+ {"steps":[{"catalog":"build"}],"touch":["<path>"],"reason":"<one line>"}',
       '',
       'The operator approves it as Continue in Build; the line itself is not shown to them.',
+      ...commands,
     ];
   }
   return [
     ...head,
     'Then tell the operator to start it with Continue in Build and to pick the repository there:',
     'this chat has no single repository a build could run in.',
+    ...commands,
   ];
 }
 

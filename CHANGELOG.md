@@ -26,7 +26,7 @@ mentioned only where a daemon release depends on them.
     (never `PLAN+`), a typed correction through a revision block on the open proposal, and a plan edit typed at a held
     plan through a `planEdit` block; the per-message job lines carry the chat digest (≤ 2 KB), the open proposal and the
     held plan. A job block becomes a detected job proposal (an unsure reading is one question, no Start); an older client
-    gets the command in prose. At a held plan, wicked OFFERS (`plan_offer` records): a send-back quoting the person's
+    keeps today's flow, with the job commands offered beside it. At a held plan, wicked OFFERS (`plan_offer` records): a send-back quoting the person's
     own words, or "start it again as…" naming the checks it gives up; only the person's press calls a route. A detail
     that words a lowered check ("skip parity", "tag it") is refused by the merge.
   - **The `shape` default-evals suite:** `evals/corpora/shape-v1.json` (198 cases: the design's 174 plus 24 recorded the same blind way) and

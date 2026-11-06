@@ -12,7 +12,7 @@ import { listUnitTools } from '../src/mcp/tool-list.js';
 import { isSystemWorkflow } from '../src/core/run-identity.js';
 import { NO_LEARNINGS_WORKFLOWS } from '../src/learnings/service.js';
 import { seatTurn, type SeatTurnInput, type SeatTurnOutcome } from '../src/standing-orders/parse.js';
-import { DETECT_STEP_ID, DETECT_WORKFLOW, DetectService, detectShadowedIn, detectTask, loadDetectWorkflow, type DetectionAudit } from '../src/workflow-catalog/detect-service.js';
+import { DETECT_STEP_ID, DETECT_WORKFLOW, DetectService, detectShadowedIn, detectTask, shadowCheck, loadDetectWorkflow, type DetectionAudit } from '../src/workflow-catalog/detect-service.js';
 
 const ME: Actor = { id: 'maria', kind: 'human', trust: 'operator' };
 const catalog = async () => ({ rev: 'rev-1', available: () => true, status: () => 'available' as const });
@@ -320,6 +320,11 @@ describe('DetectService (§2.3 classifyTurn)', () => {
     // The listing marks a system-named row system: true (withPresetSystemFlag); the shadow check still sees it.
     expect(detectShadowedIn([{ name: 'detect-shape', created_by: 'api', system: true } as never])).toBe(true);
     expect(detectShadowedIn([{ name: 'feature', created_by: 'builtin' }, { name: 'my-flow', created_by: 'api' }])).toBe(false);
+  });
+
+  it('a shadow check whose read fails is a shadow: the seat is not asked (codex r7)', async () => {
+    expect(await shadowCheck(async () => { throw new Error('engine busy'); })).toBe(true);
+    expect(await shadowCheck(async () => [{ name: 'my-flow', created_by: 'api' }])).toBe(false);
   });
 
   it('a fallback that launched nothing names no run and reads no cost (codex r6)', async () => {

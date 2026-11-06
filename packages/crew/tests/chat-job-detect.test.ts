@@ -424,6 +424,17 @@ describe('typed at a held plan: wicked\'s offer, never a decision (§2.4, §2.5,
     expect(Buffer.byteLength(lines, 'utf8')).toBeLessThanOrEqual(2048);
   });
 
+  it('a change naming the held job that comes to no offer releases the open proposal saying so (codex r7)', async () => {
+    const { r, pid } = await started();
+    await r.svc.propose(CHAT, { card: 'bug', source: 'pick', requestId: 'req-3', words: 'and the rounding bug' } as never, ME, 'i1');
+    r.held = { state: 'running' };
+    await turn(r, 't9', 'make it a move', [{ revises: pid, edits: { option: 'move' } }]);
+    expect(offers(r)).toEqual([]);
+    const released = r.records.filter((x): x is Extract<ChatTranscriptRecord, { kind: 'proposal_released' }> => x.kind === 'proposal_released').at(-1)!;
+    expect(released.note).toMatch(/wasn't applied/u);
+    expect(open(r)!.shape!.card).toBe('bug');
+  });
+
   it('a change naming the held job, while another proposal is open, is offered without a misleading note (pi r6)', async () => {
     const { r, pid } = await started();
     await r.svc.propose(CHAT, { card: 'bug', source: 'pick', requestId: 'req-2', words: 'and the rounding bug' } as never, ME, 'i1');

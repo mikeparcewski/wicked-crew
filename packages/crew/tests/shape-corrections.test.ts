@@ -179,6 +179,11 @@ describe('the adapter catches a hostile block (its own negative tests)', () => {
     await chat.swap({ detail: { add: ['on .NET 10'] } });
     await chat.correct('remove old target and keep on .NET 10', { revises: chat.current()!.pid, edits: { detail: { remove: ['on .NET 10'] } } });
     expect(chat.current()!.details).toContain('on .NET 10');
+    await chat.correct('remove old target while keeping on .NET 10', { revises: chat.current()!.pid, edits: { detail: { remove: ['on .NET 10'] } } });
+    expect(chat.current()!.details).toContain('on .NET 10');
+    // Reported speech in any capitalisation is not the person's own (codex r7).
+    await chat.correct('Per Alice, add a nightly backfill', { revises: chat.current()!.pid, edits: { detail: { add: ['add a nightly backfill'] } } });
+    expect(chat.current()!.details).not.toContain('add a nightly backfill');
     // A removal the person negates is not a removal (codex r5).
     await chat.swap({ detail: { add: ['on .NET 9'] } });
     await chat.correct('do not remove on .NET 9; it stays', { revises: chat.current()!.pid, edits: { detail: { remove: ['on .NET 9'] } } });
