@@ -220,6 +220,21 @@ describe('chat proposals (server, A2)', () => {
     expect(seat !== undefined && seat.kind === 'seat' ? seat.text : null).toBe('I can make that.');
   });
 
+  it('(DES-CATALOG-002 Lane D) POST /workflows/catalog/detect: a person\'s route, advertised, failing closed without a catalog', async () => {
+    const url = '/api/v1/workflows/catalog/detect';
+    expect(((await authed.inject({ method: 'GET', url: '/api/v1/health', ...auth('owner-token') })).json() as HealthResponse).capabilities?.detectShape).toBe(true);
+    const agent = await authed.inject({ method: 'POST', url, payload: { text: 'fix the login bug please now' }, ...auth('agent-token') });
+    expect(agent.statusCode).toBe(403);
+    expect(agent.json()).toMatchObject({ code: 'detect_refused' });
+    expect((await authed.inject({ method: 'POST', url, payload: { text: '  ' }, ...auth('owner-token') })).statusCode).toBe(400);
+    expect((await authed.inject({ method: 'POST', url, payload: { text: 'x', extra: 1 }, ...auth('owner-token') })).statusCode).toBe(400);
+    // This harness's engine serves no phase catalog: detection fails closed (it never guesses against a catalog it
+    // could not read). The service's answers are covered in tests/detect-service.test.ts.
+    const words = await authed.inject({ method: 'POST', url, payload: { text: 'modernize the legacy .NET Framework monolith into microservices on Kubernetes', seat: false }, ...auth('owner-token') });
+    expect(words.statusCode, words.body).toBe(503);
+    expect(words.json()).toMatchObject({ code: 'catalog_unavailable' });
+  });
+
   it('an information-only reply makes no proposal', async () => {
     await turn(stub, stubListeners, 'info-1', 'What did run 29bbbfb1 measure?', null);
     const instructions = (launches.at(-1)!.plan as unknown as { steps: Array<{ instructions: string }> }).steps[0]!.instructions;

@@ -98,11 +98,14 @@ export function catalogDigest(mode: DigestMode, view: DigestView = {}): string {
     const live: string[] = [];
     const coming: string[] = [];
     for (const c of DETECTABLE) {
-      if (status(c, null) === 'coming_soon') {
+      const st = status(c, null);
+      if (st === 'coming_soon') {
         coming.push(c.id);
         continue;
       }
-      const opts = (c.variant?.options ?? []).filter((o) => status(c, o) !== 'coming_soon').map((o) => o.id);
+      // A card this daemon cannot run is not offered to the chat seat to route to (the classify digest says why).
+      if (st === 'unavailable') continue;
+      const opts = (c.variant?.options ?? []).filter((o) => status(c, o) === 'available').map((o) => o.id);
       live.push(`${c.id}${isInvestigate(c) ? ' [depth]' : ''}${opts.length > 0 ? ` (${opts.join('|')}${c.variant !== undefined ? `; default ${c.variant.default}` : ''})` : ''}`);
     }
     return [
@@ -310,6 +313,35 @@ export function withoutAimed(text: string): string {
   return kept.join(' ');
 }
 
+/**
+ * What the person asks to GET BACK, when their words say it outright: a plan, a review, an explanation, a write-up, an
+ * investigation, an estimate, a decision. The words layer ranks cards by the work's SUBJECT too ("Plan how to upgrade
+ * Node" scores the upgrade), so when the words ask for an outcome the top card does not deliver, they do not decide
+ * alone: the seat reads the outcome (classify's first rule).
+ */
+const OUTCOME_CUES: ReadonlyArray<{ re: RegExp; cards: readonly string[] }> = [
+  { re: /\b(?:plan(?:ning)?|roadmap|break (?:it |this |the work )?down)\b/iu, cards: ['plan-it', 'plan-tests', 'backlog', 'release'] },
+  { re: /\b(?:review|reviewing|audit|assess|critique|poke holes)\b/iu, cards: ['review-change', 'risk', 'security', 'review-recent-work', 'critique', 'retro', 'analyze-runs', 'evaluate-rules', 'release'] },
+  { re: /\b(?:explain|walk me through|overview of|how does)\b/iu, cards: ['analyze-codebase', 'map-requirements', 'document', 'communicate'] },
+  { re: /\b(?:document|documentation|write[- ]up|readme|deck|slides|presentation)\b/iu, cards: ['document', 'communicate', 'interactive-page', 'operating-model', 'analyze-codebase'] },
+  { re: /\b(?:root cause|investigate|what happened|why (?:is|did|does|do|are))\b/iu, cards: ['incident', 'reconstruct', 'research', 'bug'] },
+  { re: /\b(?:estimate|how long will|how much will)\b/iu, cards: ['estimate-price', 'run-cost'] },
+  { re: /\b(?:should we|decide|choose between|which is better)\b/iu, cards: ['decide'] },
+];
+
+/** Whether the words ask for an outcome the card does not deliver (then they do not decide alone). */
+export function outcomeConflict(text: string, card: string): boolean {
+  const asked = OUTCOME_CUES.filter((c) => c.re.test(text));
+  return asked.length > 0 && !asked.some((c) => c.cards.includes(card));
+}
+
+/** An Investigate card's depth when the words say it ("a quick look", "deep dive"); `null` = they do not. */
+export function depthFromWords(text: string): 'quick' | 'deep' | null {
+  if (/\b(?:deep(?:ly)?|deep[- ]dive|thorough(?:ly)?|exhaustive|in[- ]depth|full timeline|every (?:cause|release|step))\b/iu.test(text)) return 'deep';
+  if (/\b(?:quick(?:ly)?|brief(?:ly)?|fast look|just a look|short look|skim)\b/iu.test(text)) return 'quick';
+  return null;
+}
+
 /** Rank every detectable card for `text` and say whether the words alone decide (§2.3 `wordsLayer`). */
 export function wordsLayer(raw: string): WordsResult {
   const text = withoutAimed(raw);
@@ -336,6 +368,7 @@ export function wordsLayer(raw: string): WordsResult {
     }
   }
   const sure = seed !== undefined
+    && !outcomeConflict(text, seed.id)
     && words >= WORDS_SURE.minWords
     && top >= WORDS_SURE.minScore
     && top >= WORDS_SURE.ratio * Math.max(runnerUp, 0.01)
@@ -569,13 +602,15 @@ export function detect(input: DetectInput): Detection {
     // told to read past it. Neither is then sure: the seat's reading is shown, held as likely (§9.2 (i)).
     const conflict = seat !== null && seat.card !== null && (seat.card !== words.card || (seat.option !== words.option && differentPlan(wordsSeed, seat.option, words.option)));
     if (!conflict) {
-      const depth = seat !== null && seat.card === words.card ? seat.depth : null;
+      // An Investigate card's depth: the seat's when it read the same card, else what the words say (§2.2).
+      const depth = seat !== null && seat.card === words.card && seat.depth !== null ? seat.depth : isInvestigate(wordsSeed) ? depthFromWords(withoutAimed(input.text)) : null;
       return { guess: make(words.card, words.option, depth, 0.9, 'sure', 'the words name this job clearly', 'words', null), words, seat };
     }
   }
   if (seat === null) {
     if (words.card !== null && words.top >= WORDS_SURE.minScore) {
-      return { guess: make(words.card, words.option, null, 0.6, 'likely', 'the words point to this job', 'words', null), words, seat };
+      const seed = byId(words.card)!;
+      return { guess: make(words.card, words.option, isInvestigate(seed) ? depthFromWords(withoutAimed(input.text)) : null, 0.6, 'likely', 'the words point to this job', 'words', null), words, seat };
     }
     const choices = wordsChoices(words);
     return { guess: make(choices[0]?.card ?? 'plan-it', choices[0]?.option ?? null, null, 0, 'ask', 'the words alone do not say which job', 'words', questionOf(choices)), words, seat };
@@ -594,6 +629,23 @@ export function detect(input: DetectInput): Detection {
   const band = crossCheck({ card: seat.card, option: seat.option, band: banded, source: input.source }, words);
   const choices = seat.ask.length > 0 ? seat.ask : [{ card: seat.card, option: seat.option }, ...wordsChoices(words)];
   return { guess: make(seat.card, seat.option, seat.depth, seat.confidence, band, seat.reason, input.source, questionOf(choices)), words, seat };
+}
+
+/**
+ * The `detect-shape` path's orchestration (§2.3), shared by the service and the corpus scorer so CI scores what ships:
+ * the words alone when they are sure (no seat is asked), else the seat's reading. `seat` is asked only then.
+ */
+export async function classifyPath(input: Omit<DetectInput, 'seat' | 'source'>, seat: () => Promise<RawGuess | null>): Promise<Detection & { asked: boolean }> {
+  const words = detect({ ...input, seat: null, source: 'classify' });
+  if (words.guess.band === 'sure') return { ...words, asked: false };
+  return { ...detect({ ...input, seat: await seat(), source: 'classify' }), asked: true };
+}
+
+/** {@link classifyPath} with a seat answer already in hand (the corpus fixture): synchronous, the same decisions. */
+export function classifyPathSync(input: Omit<DetectInput, 'seat' | 'source'>, seat: RawGuess | null): Detection & { asked: boolean } {
+  const words = detect({ ...input, seat: null, source: 'classify' });
+  if (words.guess.band === 'sure') return { ...words, asked: false };
+  return { ...detect({ ...input, seat, source: 'classify' }), asked: true };
 }
 
 // ── parsing a seat's answer ────────────────────────────────────────────────────────────────────────────────────────

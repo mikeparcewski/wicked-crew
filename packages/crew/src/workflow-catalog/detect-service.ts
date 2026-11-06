@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url';
 import type { Actor, ShapeGuess, WorkflowDef } from '../core/types.js';
 import { FENCED_RUNS } from '../mcp/run-fence.js';
 import type { SeatTurnInput, SeatTurnOutcome } from '../standing-orders/parse.js';
-import { catalogDigest, detect, parseClassifyAnswer, type Detection } from './detect.js';
+import { catalogDigest, classifyPath, parseClassifyAnswer, type Detection } from './detect.js';
 
 export const DETECT_WORKFLOW = 'detect-shape';
 export const DETECT_WORKFLOW_FILE = fileURLToPath(new URL('../../workflows/detect-shape.json', import.meta.url));
@@ -107,15 +107,30 @@ export class DetectService {
     const text = req.text.trim();
     if (text === '') return { code: 400, body: { code: 'bad_request', error: 'say what the job is in words' } };
     if (text.length > DETECT_MAX_CHARS) return { code: 400, body: { code: 'bad_request', error: `at most ${DETECT_MAX_CHARS} characters; a longer ask is a chat's to read` } };
+    // The newest request of this person owns the detection from its first moment: an older one still waiting (on the
+    // catalog read or its seat) is superseded now, its run cancelled, whatever this one turns out to need.
+    const token = ++this.seq;
+    const prior = this.inflight.get(actor.id);
+    if (prior?.runId !== null && prior?.runId !== undefined) void this.deps.cancelRun(prior.runId).catch(() => undefined);
+    this.inflight.set(actor.id, { token, runId: null });
+    const owns = (): boolean => this.inflight.get(actor.id)?.token === token;
+    const superseded: DetectAnswer = { code: 409, body: { code: 'detection_superseded', error: 'a newer detection replaced this one' } };
+    const done = (a: DetectAnswer): DetectAnswer => {
+      if (owns()) this.inflight.delete(actor.id);
+      return a;
+    };
     const started = this.now();
     let catalog: Awaited<ReturnType<DetectServiceDeps['catalog']>>;
     try {
       catalog = await this.deps.catalog(req.projectId ?? null);
     } catch (err) {
-      return { code: 503, body: { code: 'catalog_unavailable', error: err instanceof Error ? err.message : String(err) } };
+      return done({ code: 503, body: { code: 'catalog_unavailable', error: err instanceof Error ? err.message : String(err) } });
     }
+    if (!owns()) return superseded;
     const seatWanted = req.seat !== false;
-    const key = JSON.stringify([seatWanted ? 'full' : 'words', text.replace(/\s+/gu, ' '), req.projectId ?? null, catalog.rev]);
+    // The whole canonical input: the exact words (line breaks matter to what is taken out of them), the project, the
+    // catalog revision and the mode.
+    const key = JSON.stringify([seatWanted ? 'full' : 'words', text, req.projectId ?? null, catalog.rev]);
     const audit = (d: Detection | { guess: ShapeGuess }, extra: { seat: string | null; runId: string | null; cached: boolean; failure: string | null }): void => {
       const row: DetectionAudit = {
         actor: actor.id,
@@ -140,57 +155,47 @@ export class DetectService {
     const hit = this.cache.get(key);
     if (hit !== undefined && this.now() - hit.at <= (this.deps.cacheTtlMs ?? 10 * 60_000)) {
       audit({ guess: hit.guess }, { seat: null, runId: null, cached: true, failure: null });
-      return { code: 200, body: hit.guess };
+      return done({ code: 200, body: hit.guess });
     }
-    const base = { text, source: 'classify' as const, catalogRev: catalog.rev, available: catalog.available };
-    const words = detect({ ...base, seat: null });
-    // The words decide alone when they are sure, and the instant row asks for nothing more.
-    if (words.guess.band === 'sure' || !seatWanted) {
-      this.put(key, words.guess);
-      audit(words, { seat: null, runId: null, cached: false, failure: null });
-      return { code: 200, body: words.guess };
-    }
-    // A newer request from the same person cancels the older one's run.
-    const token = ++this.seq;
-    const prior = this.inflight.get(actor.id);
-    if (prior?.runId !== null && prior?.runId !== undefined) void this.deps.cancelRun(prior.runId).catch(() => undefined);
-    this.inflight.set(actor.id, { token, runId: null });
+    const base = { text, catalogRev: catalog.rev, available: catalog.available };
+    let turnSeat: string | null = null;
+    let failure: string | null = null;
     const runId = this.deps.newId();
-    // Fenced BEFORE the launch: a unit's first call can land before the launch answers.
-    FENCED_RUNS.add(runId);
-    const out = await this.deps.turn({
-      problem: "Detect the shape of a person's words.",
-      instructions: detectTask(text, catalogDigest('classify', { status: catalog.status })),
-      stepId: DETECT_STEP_ID,
-      noSeat: 'no seat can read the words now; pick a job from the / list',
-      workflow: DETECT_WORKFLOW,
-      sessionId: runId,
-      onRun: (id) => {
-        const cur = this.inflight.get(actor.id);
-        if (cur?.token === token) this.inflight.set(actor.id, { token, runId: id });
-      },
+    const d = await classifyPath(base, async () => {
+      // The instant row asks for nothing more than the words.
+      if (!seatWanted) return null;
+      // Fenced BEFORE the launch: a unit's first call can land before the launch answers.
+      FENCED_RUNS.add(runId);
+      this.inflight.set(actor.id, { token, runId });
+      const out = await this.deps.turn({
+        problem: "Detect the shape of a person's words.",
+        instructions: detectTask(text, catalogDigest('classify', { status: catalog.status })),
+        stepId: DETECT_STEP_ID,
+        noSeat: 'no seat can read the words now; pick a job from the / list',
+        workflow: DETECT_WORKFLOW,
+        sessionId: runId,
+      });
+      if (!out.ok) {
+        failure = out.error.slice(0, 200);
+        this.deps.log?.(`[detect] the ${DETECT_WORKFLOW} turn failed (${out.error}); answered from the words`);
+        return null;
+      }
+      turnSeat = out.seat;
+      const raw = parseClassifyAnswer(out.answer);
+      if (raw === null) failure = 'unparsable answer';
+      return raw;
     });
-    const superseded = this.inflight.get(actor.id)?.token !== token;
-    if (!superseded) this.inflight.delete(actor.id);
-    if (superseded) {
-      audit(words, { seat: out.ok ? out.seat : null, runId, cached: false, failure: 'superseded' });
-      return { code: 409, body: { code: 'detection_superseded', error: 'a newer detection replaced this one' } };
+    const ran = d.asked && seatWanted;
+    if (!owns()) {
+      audit(d, { seat: turnSeat, runId: ran ? runId : null, cached: false, failure: 'superseded' });
+      return superseded;
     }
-    if (!out.ok) {
-      // Never sure, never cached: the words layer's reading, said as such.
-      audit(words, { seat: null, runId, cached: false, failure: out.error.slice(0, 200) });
-      this.deps.log?.(`[detect] the ${DETECT_WORKFLOW} turn failed (${out.error}); answered from the words`);
-      return { code: 200, body: words.guess };
-    }
-    const raw = parseClassifyAnswer(out.answer);
-    if (raw === null) {
-      audit(words, { seat: out.seat, runId, cached: false, failure: 'unparsable answer' });
-      return { code: 200, body: words.guess };
-    }
-    const d = detect({ ...base, seat: raw });
-    this.put(key, d.guess);
-    audit(d, { seat: out.seat, runId, cached: false, failure: d.seat?.dropped ?? null });
-    return { code: 200, body: d.guess };
+    const dropped = d.seat?.dropped ?? null;
+    // Cached only when it stands on its own: the words decided, or the seat's valid reading. A failure (no seat, a
+    // timeout, an unparsable answer, a reading the validator dropped) is never cached: the next ask tries again.
+    if (failure === null && dropped === null && (!d.asked || !seatWanted || d.seat !== null)) this.put(key, d.guess);
+    audit(d, { seat: turnSeat, runId: ran ? runId : null, cached: false, failure: failure ?? dropped });
+    return done({ code: 200, body: d.guess });
   }
 
   private put(key: string, guess: ShapeGuess): void {

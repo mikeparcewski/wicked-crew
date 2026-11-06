@@ -423,7 +423,7 @@ import type { Actor as AppsActor } from '../core/types.js';
 import { registerAppRoutes } from '../apps/routes.js';
 import { AppStoreError, type AppStore } from '../apps/store.js';
 import { registerMcpInspectRoutes } from '../mcp-inspect/routes.js';
-import { daemonRunFence } from '../mcp/run-fence.js';
+import { daemonRunFence, fencedRunId } from '../mcp/run-fence.js';
 import { discoverLivePlugin } from '../skills/plugin-source.js';
 import type { DecisionBusEmit } from '../decisions/events.js';
 import { resolveDecisionsMode, type DecisionsMode } from '../decisions/types.js';
@@ -4737,7 +4737,7 @@ export function registerRoutes(
         if (!resolved.ok) return reply.code(resolved.status).send({ error: resolved.error });
         workflow = resolved.workflow;
       }
-      const statementOpts = { analysis: workflow !== undefined, make: chatProposals.digest() };
+      const statementOpts = { analysis: workflow !== undefined, make: chatProposals.digest(chatId) };
       // A chat id this daemon already holds a scope for is LIVE: re-preparing its scratch root and
       // re-opening it would overwrite the statement its seats are reading and (on a changed scope)
       // evict them mid-conversation (Copilot, #518). Close it first, or let the daemon mint the id.
@@ -5069,9 +5069,14 @@ export function registerRoutes(
     return { ord: held.gated.ord, planRev };
   };
   /** The held plan answered Reject (`reshaped`) for a reshape, bound to the ord and revision just read. */
-  const reshapeReject = async (runId: string, actor: import('../core/types.js').Actor, pid: string): Promise<{ code: number; body: Record<string, unknown> } | null> => {
+  const reshapeReject = async (runId: string, actor: import('../core/types.js').Actor, pid: string, expect?: { ord: number; planRev: number }): Promise<{ code: number; body: Record<string, unknown> } | null> => {
     const elig = await reshapeEligibility(runId);
     if ('refusal' in elig) return elig.refusal;
+    // A reshape offered on one plan version answers only that version (Lane D, codex r1): a plan revised since is
+    // gate_changed, and the engine checks the same expectation inside its decision.
+    if (expect !== undefined && (expect.ord !== elig.ord || expect.planRev !== elig.planRev)) {
+      return { code: 409, body: { code: 'gate_changed', error: `run ${runId}'s plan changed since this was offered (now version ${elig.planRev}); look at it again`, openOrd: elig.ord, planRev: elig.planRev } };
+    }
     const out = await decideGate(runId, { approve: false, action: 'reject', amend: 'reshaped', ord: elig.ord, planRev: elig.planRev }, actor, { reshape: pid });
     return out.code === 200 ? null : { code: out.code, body: (out.body ?? {}) as Record<string, unknown> };
   };
@@ -6884,6 +6889,9 @@ export function registerRoutes(
     requestId: z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9._-]+$/),
     /** The person's press on the reshape question: the loss ids it was shown. */
     confirmLoss: z.array(z.string().min(1).max(40)).min(1).max(12).optional(),
+    /** (api-types 0.194.0) The plan version a `plan_offer` was made on. */
+    ord: z.number().int().min(0).optional(),
+    planRev: z.number().int().min(0).optional(),
   });
   app.post(
     `${V}/runs/:id/reshape`,
@@ -6909,6 +6917,9 @@ export function registerRoutes(
       if (chatProposals.proposalOfPid(chatId, pid)?.heldRejected !== true) {
         const elig = await reshapeEligibility(id);
         if ('refusal' in elig) return reply.code(elig.refusal.code).send(elig.refusal.body);
+        if (parsed.data.planRev !== undefined && (parsed.data.planRev !== elig.planRev || (parsed.data.ord !== undefined && parsed.data.ord !== elig.ord))) {
+          return reply.code(409).send({ code: 'gate_changed', error: `run ${id}'s plan changed since this was offered (now version ${elig.planRev}); look at it again`, openOrd: elig.ord, planRev: elig.planRev });
+        }
       }
       const old = chatProposals.proposalOfPid(chatId, fromProposal);
       const base = old !== null && old.shape !== undefined ? factsOf(old) : null;
@@ -6953,6 +6964,7 @@ export function registerRoutes(
           },
           request: { id: parsed.data.requestId, digest: requestDigest({ card: parsed.data.card, option: parsed.data.option ?? null, depth: parsed.data.depth ?? null, inputs: parsed.data.inputs ?? null }) },
           confirmLoss: parsed.data.confirmLoss ?? [],
+          ...(parsed.data.ord !== undefined && parsed.data.planRev !== undefined ? { heldPlan: { ord: parsed.data.ord, planRev: parsed.data.planRev } } : {}),
         },
         gate.actor,
         gate.instance,
@@ -8380,7 +8392,8 @@ export function registerRoutes(
       return view === undefined ? null : runCostFromEvents(view, (await adapter.runEvents(runId)) as Array<Record<string, unknown>>);
     },
     audit: (row) => audit.record('workflow.detect', { id: row.actor, kind: 'human', trust: 'operator' }, { ...(row.runId !== null ? { runId: row.runId } : {}), detail: { ...row } }),
-    newId: () => randomUUID(),
+    // A detect-shape run's id carries its fence (mcp/run-fence.ts), across a restart.
+    newId: () => fencedRunId(),
     log: (m) => app.log.warn(m),
   });
   const DetectSchema = z.strictObject({

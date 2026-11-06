@@ -66,6 +66,8 @@ interface Rig {
   /** What the preflight says a launch would refuse (`null`: nothing). */
   preflightAnswer: string | null;
   rejectAnswer: { code: number; body: Record<string, unknown> } | null;
+  /** (Lane D) The plan version the last Reject was bound to. */
+  rejectExpect?: { ord: number; planRev: number } | null;
 }
 
 const CHAT = 'c1';
@@ -111,8 +113,9 @@ function rig(o: { roster?: Array<{ key: string; name: string }>; repos?: Array<{
     served: async () => r.served,
     qeOff: async () => r.qeOff,
     preflight: async () => r.preflightAnswer,
-    reshapeReject: async () => {
+    reshapeReject: async (_run, _actor, _pid, expect) => {
       r.rejects += 1;
+      r.rejectExpect = expect ?? null;
       return r.rejectAnswer;
     },
     turnLive: (_c, turnId) => r.live.has(turnId),
@@ -523,6 +526,19 @@ describe('what Go sends (codex 4, 7, 12)', () => {
     expect(skipped).not.toHaveProperty('primary');
     // QE as shown: a proposal without QE acceptance sends no force.
     expect(jobLaunchCommon({ ...p, gate: ['parity'] }, { runId: 'rid', chatId: CHAT }, { selfSeated: false })).not.toHaveProperty('forceQeAcceptance');
+  });
+});
+
+describe('Lane D: a reshape offered on a plan version answers only that version', () => {
+  it('passes the offered ord and planRev to the held plan\'s Reject', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'migrate', { option: 'upgrade' });
+    const held = open(r);
+    await r.svc.decide(CHAT, held.pid, { decision: 'go' }, ME, 'i1');
+    const facts: Parameters<ChatProposals['reshape']>[1]['facts'] = { card: 'migrate', option: 'move', depth: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape' };
+    const out = await r.svc.reshape(CHAT, { pid: `${CHAT}:reshape:run1:o`, oldRunId: 'run1', parentPid: held.pid, facts, edits: { option: 'move' }, reducedAssurance: false, relaunch: { deliver: 'pr' as const }, request: { id: 'o', digest: 'do' }, confirmLoss: [], heldPlan: { ord: 1, planRev: 2 } }, ME, 'i1');
+    expect(out.code, JSON.stringify(out.body)).toBe(200);
+    expect(r.rejectExpect).toEqual({ ord: 1, planRev: 2 });
   });
 });
 

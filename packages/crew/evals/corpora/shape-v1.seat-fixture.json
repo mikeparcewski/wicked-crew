@@ -1,5 +1,5 @@
 {
- "$comment": "DES-CATALOG-002 §9.2: the recorded seat-answer fixture for the shape corpus. Spike 2 (§9.3): pi, no tools, high thinking, blind to the labels, the classify digest and anchors with the words as <request> data (design lanes/catalog-v2-design/spike/prompt2.txt); each value is that seat's one-line answer, verbatim. CI runs the corpus through crew's shipped words layer, validator, cross-check and bands with these answers: deterministic and model-free. The live numbers are the integrator's (run-evals with the real chat seat on the rig). Lane D's w1-w15 and z5-z8 were answered the same way (the spike-2 prompt's header with only those requests; pi, no tools, high thinking, blind), recorded verbatim.",
+ "$comment": "DES-CATALOG-002 §9.2: the recorded seat-answer fixture for the shape corpus. Spike 2 (§9.3): pi, no tools, high thinking, blind to the labels, the classify digest and anchors with the words as <request> data (design lanes/catalog-v2-design/spike/prompt2.txt); each value is that seat's one-line answer, verbatim. CI runs the corpus through crew's shipped words layer, validator, cross-check and bands with these answers: deterministic and model-free. The live numbers are the integrator's (run-evals with the real chat seat on the rig). Lane D's w1-w15 and z5-z8 were answered the same way (the spike-2 prompt's header with only those requests; pi, no tools, high thinking, blind), recorded verbatim. w16-w19 likewise (review round 1).",
  "answers": {
   "p1": {
    "card": "plan-it",
@@ -1427,6 +1427,34 @@
    "confidence": 0.92,
    "ask": null,
    "reason": "summarize progress as status update"
+  },
+  "w16": {
+   "card": "plan-it",
+   "option": null,
+   "depth": null,
+   "confidence": 0.7,
+   "reason": "Wants a plan for the upgrade work"
+  },
+  "w17": {
+   "card": "review-change",
+   "option": null,
+   "depth": null,
+   "confidence": 0.95,
+   "reason": "Verdict on a branch before merge"
+  },
+  "w18": {
+   "card": "analyze-codebase",
+   "option": "analyze-codebase:overview",
+   "depth": null,
+   "confidence": 0.9,
+   "reason": "Explain how a flow works, cited"
+  },
+  "w19": {
+   "card": "incident",
+   "option": null,
+   "depth": "deep",
+   "confidence": 0.95,
+   "reason": "Deep root cause of production outage"
   }
  }
 }

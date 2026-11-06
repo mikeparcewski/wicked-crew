@@ -4,10 +4,24 @@
  * Its fence is the run's identity, checked where a unit reaches anything: its MCP tool list is empty, and the broker and
  * the estate relay refuse every call (a read, a proposal) before anything runs.
  *
- * A fence answers from crew's own registry of the runs it launched under a fenced name, and, for a run it no longer
- * holds (a restart), from the name the engine recorded at launch. A fence that cannot read the run fails closed for a
- * registered id and open only when the run is unknown everywhere (an ordinary run's call must not depend on it).
+ * A fence answers from the run id itself (a fenced run's id carries {@link FENCED_ID_PREFIX}), crew's registry of the
+ * runs it launched under a fenced name, and the name the engine recorded at launch. An ordinary run's call never
+ * depends on a read: a run is fenced by what it provably is.
  */
+
+import { randomUUID } from 'node:crypto';
+
+/**
+ * A fenced run's id carries its fence (codex r1): every `detect-shape` run id starts with this prefix (a valid UUID head),
+ * so the fence holds without any state, across a restart and whatever the engine's log can be read. An ordinary run
+ * drawing the same 32-bit head by chance is fenced too: the safe direction.
+ */
+export const FENCED_ID_PREFIX = 'de7ec75e-';
+
+/** A new run id for a fenced run (`de7ec75e-xxxx-4xxx-yxxx-xxxxxxxxxxxx`). */
+export function fencedRunId(): string {
+  return `${FENCED_ID_PREFIX}${randomUUID().slice(FENCED_ID_PREFIX.length)}`;
+}
 
 /** Whether a run is fenced off every capability. */
 export type RunFence = (runId: string) => Promise<boolean>;
@@ -25,7 +39,7 @@ export function runFence(o: {
   names: ReadonlySet<string>;
 }): RunFence {
   return async (runId) => {
-    if (o.registered(runId)) return true;
+    if (runId.startsWith(FENCED_ID_PREFIX) || o.registered(runId)) return true;
     if (o.launchedAs === undefined) return false;
     try {
       const name = await o.launchedAs(runId);

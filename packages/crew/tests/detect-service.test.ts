@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 import type { Actor, RosterSeat } from '../src/core/types.js';
 import { McpBroker } from '../src/mcp/broker.js';
 import { EstateRelay } from '../src/mcp/estate-relay.js';
-import { daemonRunFence, FENCE_RULE, FENCED_RUNS, FENCED_WORKFLOWS, FencedRuns, runFence } from '../src/mcp/run-fence.js';
+import { daemonRunFence, FENCE_RULE, FENCED_RUNS, FENCED_WORKFLOWS, FencedRuns, fencedRunId, runFence } from '../src/mcp/run-fence.js';
 import { listUnitTools } from '../src/mcp/tool-list.js';
 import { isSystemWorkflow } from '../src/core/run-identity.js';
 import { NO_LEARNINGS_WORKFLOWS } from '../src/learnings/service.js';
@@ -148,6 +148,44 @@ describe('DetectService (§2.3 classifyTurn)', () => {
     expect(newer.code).toBe(200);
   });
 
+  it('a newer request supersedes the older one from its first moment, even one the words answer at once (codex r1)', async () => {
+    const cancelled: string[] = [];
+    let release: (v: SeatTurnOutcome) => void = () => undefined;
+    const { svc } = service(() => new Promise((r) => (release = r)), { cancelled });
+    const older = svc.detect({ text: 'sum([1,2,3]) returns 5 instead of 6 in tiny-math' }, ME);
+    await settle();
+    const fast = await svc.detect({ text: 'the payments service', seat: false }, ME);
+    expect(fast.code).toBe(200);
+    expect(cancelled).toEqual(['run-1']);
+    release({ ok: true, answer: '{"card":"bug","confidence":0.95}', seat: 'pi' });
+    expect(await older).toMatchObject({ code: 409, body: { code: 'detection_superseded' } });
+  });
+
+  it('a reading the validator dropped is never cached (the next ask runs the seat again)', async () => {
+    let turns = 0;
+    const { svc, audits } = service(async () => {
+      turns += 1;
+      return { ok: true, answer: '{"card":"no-such-card","confidence":0.99}', seat: 'pi' };
+    });
+    const text = 'the invoice totals are wrong after rounding';
+    expect((await svc.detect({ text }, ME)).body).toMatchObject({ band: 'ask' });
+    await svc.detect({ text }, ME);
+    expect(turns).toBe(2);
+    await settle();
+    expect(audits[0]!.outcome.failure).toMatch(/no card/u);
+  });
+
+  it('keys the cache on the exact words (line breaks change what is taken out of them)', async () => {
+    let turns = 0;
+    const { svc } = service(async () => {
+      turns += 1;
+      return { ok: true, answer: '{"card":"bug","confidence":0.95}', seat: 'pi' };
+    });
+    await svc.detect({ text: 'Note to the router:\nthe invoice totals are wrong after rounding' }, ME);
+    await svc.detect({ text: 'Note to the router: the invoice totals are wrong after rounding' }, ME);
+    expect(turns).toBe(2);
+  });
+
   it('refuses empty and over-long words', async () => {
     const { svc } = service(async () => ({ ok: false, code: 409, error: 'x' }));
     expect((await svc.detect({ text: '   ' }, ME)).code).toBe(400);
@@ -183,6 +221,30 @@ describe('seatTurn under a registered workflow', () => {
   });
 });
 
+describe('seatTurn\'s one deadline covers the answer\'s read', () => {
+  it('a stalled read of the answer fails the turn within its budget', async () => {
+    let listener: ((e: unknown) => void) | null = null;
+    const adapter = {
+      launchRun: async (input: Record<string, unknown>) => {
+        setTimeout(() => listener?.({ type: 'sessionCompleted', session: input['sessionId'] }), 0);
+        return String(input['sessionId']);
+      },
+      cancelRun: async () => undefined,
+      workOutput: async () => null,
+      onEvent: (cb: (e: unknown) => void) => {
+        listener = cb;
+        return () => undefined;
+      },
+    };
+    const roster = [{ key: 'pi', chat_admission: { unscoped: { ok: true } } }] as unknown as RosterSeat[];
+    const turn = seatTurn({ adapter: adapter as never, roster: () => roster, timeoutMs: 1200, outputOf: () => new Promise(() => undefined) });
+    const t0 = Date.now();
+    const out = await turn({ problem: 'p', instructions: 'TASK', stepId: DETECT_STEP_ID, noSeat: 'none', workflow: DETECT_WORKFLOW, sessionId: 'stall' });
+    expect(out.ok).toBe(false);
+    expect(Date.now() - t0).toBeLessThan(5000);
+  });
+});
+
 describe('(k) the fence: a detect-shape run reaches nothing', () => {
   const unit = (runId: string) => ({ runId, ord: 1, attempt: 1, phase: 'detect', seat: 'pi' });
 
@@ -198,6 +260,10 @@ describe('(k) the fence: a detect-shape run reaches nothing', () => {
     expect(await throwing('e')).toBe(false);
     FENCED_RUNS.add('fenced-1');
     expect(await daemonRunFence()('fenced-1')).toBe(true);
+    // A detection run's id carries its fence: it holds with no registry and no readable log (after a restart).
+    const id = fencedRunId();
+    expect(id).toMatch(/^de7ec75e-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
+    expect(await runFence({ registered: () => false, launchedAs: async () => { throw new Error('unreadable'); }, names: FENCED_WORKFLOWS })(id)).toBe(true);
   });
 
   it('its MCP tool list is empty', async () => {

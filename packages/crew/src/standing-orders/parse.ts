@@ -95,6 +95,7 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
     // Cleared in `finally`: an early return must not leave it armed.
     let timer: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
+    let deadlineAt = Date.now() + timeoutMs;
     // How the run's turn came out, the first frame that decides it: a terminal frame, or a park
     // (`parked`: the run stopped at a gate and has NOT ended).
     type TurnEnd = { ok: boolean; parked?: true };
@@ -141,6 +142,7 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
       // Inside the try: instructions that fail to build (a project list) are the turn's 502, never an unhandled 500.
       const instructions = typeof input.instructions === 'string' ? input.instructions : await input.instructions();
       // ONE deadline over the launch and the answer: a launch that hangs is the same 502.
+      deadlineAt = Date.now() + timeoutMs;
       timer = setTimeout(() => {
         timedOut = true;
         decide(null);
@@ -187,9 +189,18 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
       if (ended === null) return { ok: false, code: 502, error: `the ${seat} seat did not answer in ${timeoutMs / 1000} s` };
       // A parked turn's answer is not read: it is a failure, and the read must not hold the cancel.
       if (ended.parked === true) return { ok: false, code: 502, error: parkedMessage() };
-      const answer = input.workflow !== undefined
-        ? await (deps.outputOf?.(id) ?? Promise.resolve(null)).catch(() => null)
-        : await adapter.workOutput(`${id}:${input.stepId}`).catch(() => null);
+      // The answer's read is inside the same deadline (at least a second for a fast local read): a stalled read is the
+      // turn's failure, never a hang past its budget (codex r1 on DES-CATALOG-002 Lane D).
+      const read = input.workflow !== undefined
+        ? (deps.outputOf?.(id) ?? Promise.resolve(null)).catch(() => null)
+        : adapter.workOutput(`${id}:${input.stepId}`).catch(() => null);
+      let readTimer: ReturnType<typeof setTimeout> | undefined;
+      const answer = await Promise.race([
+        read,
+        new Promise<null>((resolve) => {
+          readTimer = setTimeout(() => resolve(null), Math.max(1000, deadlineAt - Date.now()));
+        }),
+      ]).finally(() => clearTimeout(readTimer));
       // A failed step is a failure, whatever its text holds — never a rule to confirm (codex on #686).
       if (!ended.ok || answer === null || (stepStatus !== undefined && stepStatus !== 'ok')) {
         const why = failureKind !== undefined ? ` (${failureKind})` : '';
@@ -203,7 +214,16 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
       off();
       // A run that has not ended (the seat went quiet, it parked, or the launch hung past the
       // deadline — the run id is the session id it was launched under) must not outlive the turn.
-      if (!runEnded && (runId !== undefined || timedOut || parked())) await adapter.cancelRun(runId ?? sessionId).catch(() => undefined);
+      // The cancel is bounded too: the turn answers within its budget, and the cancel goes on without it.
+      if (!runEnded && (runId !== undefined || timedOut || parked())) {
+        let cancelTimer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+          adapter.cancelRun(runId ?? sessionId).catch(() => undefined),
+          new Promise<void>((resolve) => {
+            cancelTimer = setTimeout(resolve, 5000);
+          }),
+        ]).finally(() => clearTimeout(cancelTimer));
+      }
     }
   };
 }

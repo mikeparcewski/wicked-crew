@@ -7950,6 +7950,10 @@ export interface ReshapeRunBody {
   depth?: 'quick' | 'standard' | 'deep' | null;
   inputs?: Record<string, ProposalInputValue>;
   requestId: string;
+  /** (api-types 0.194.0) The plan version the person was offered this on (a `plan_offer`'s `ord` and `planRev`). When
+   *  sent, a held plan revised since is **409** `gate_changed` and nothing is answered. */
+  ord?: number;
+  planRev?: number;
   /** The person's press on the reshape question naming what the new shape gives up: the ids it was shown (the 409's
    *  `lost` and `lostSeats`). Without them, a replacement with fewer checks or seat rules than the held job is **409**
    *  `reshape_loses_check` with `lost` (check ids) and `lostSeats` (seat rules), and nothing is answered; a loss beyond
@@ -8993,7 +8997,8 @@ export type ChatTranscriptRecord =
  *   `note` is the person's own message, verbatim (never the seat's paraphrase).
  * - `reshape`: "That's a different job: start it again as a move?" naming the checks it would give up and the inputs it
  *   needs. **Start again** → `POST /runs/:runId/reshape` `{card, option, depth, requestId, confirmLoss: [...lost,
- *   ...lostSeats]}` (offered only while the run waits at its FIRST work-plan approval); **Keep this plan** dismisses.
+ *   ...lostSeats], ord, planRev}` (offered only while the run waits at its FIRST work-plan approval; a plan revised
+ *   since is 409 `gate_changed`); **Keep this plan** dismisses.
  *
  * Bound to `ord` and `planRev`: a plan revised since makes the press a 409 `gate_changed` (or `reshape_after_work`),
  * and a newer offer for the same run replaces this one.
@@ -9338,6 +9343,9 @@ export interface ArtifactProposal {
   reducedAssurance?: true;
   /** (§2.5) The held run's plan was answered Reject for this reshape (a retry after that launches the replacement). */
   heldRejected?: true;
+  /** (api-types 0.194.0) The held plan this reshape was offered for (a `plan_offer`'s `ord` and `planRev`): its Reject is
+   *  bound to that version, so a plan revised since is 409 `gate_changed`, never rejected unseen. */
+  heldPlan?: { ord: number; planRev: number };
   /** (§2.5) What else a reshape launches with, from the held run's launch envelope. */
   relaunch?: Pick<LaunchEnvelope, 'deliver' | 'deliverGate' | 'campaignId' | 'groupLabel' | 'revisesPr' | 'forceQeAcceptance' | 'clisJson'>;
 }

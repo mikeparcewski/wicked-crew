@@ -174,6 +174,9 @@ describe('the chat statement routes new work (§2.3)', () => {
     expect(lines).toMatch(/\{"planEdit":"run-9"\}/u);
     const prose = await rig({ accepts: false }).svc.jobTurn(CHAT);
     expect(prose!.context.digest).toMatch(/Commands: .*migrate \/migrate/u);
+    expect(Buffer.byteLength(prose!.context.digest, 'utf8')).toBeLessThanOrEqual(CHAT_DIGEST_MAX_BYTES);
+    // The whole per-message job block, with an open proposal and a held plan, stays small too.
+    expect(Buffer.byteLength(lines, 'utf8')).toBeLessThanOrEqual(CHAT_DIGEST_MAX_BYTES);
   });
 });
 
@@ -226,6 +229,16 @@ describe('a seat\'s job block → a detected job proposal (§2.3)', () => {
     const r = rig();
     await turn(r, 't1', 'sum([1,2,3]) returns 5 instead of 6 in tiny-math', [{ entry: 'bug', confidence: 0.95 }, { entry: 'feature', confidence: 0.95 }]);
     expect(proposals(r).map((p) => p.shape?.card)).toEqual(['bug']);
+  });
+
+  it('the first valid block of ANY kind is the only one read (a revision first: a later job block is not made)', async () => {
+    const r = rig();
+    await turn(r, 't1', 'sum([1,2,3]) returns 5 instead of 6 in tiny-math', [{ entry: 'bug', confidence: 0.95 }]);
+    const p = open(r)!;
+    await turn(r, 't2', 'add pi too, and also go deep', [{ revises: p.pid, edits: { addSeats: ['pi'] } }, { revises: p.pid, edits: { card: 'incident' } }]);
+    const now = open(r)!;
+    expect(now.shape!.card).toBe('bug');
+    expect(now.seats!.keys).toContain('pi');
   });
 
   it('a new root block while the job lineage is open never replaces it (a change is a revision)', async () => {
@@ -288,6 +301,28 @@ describe('typed at a held plan: wicked\'s offer, never a decision (§2.4, §2.5,
     expect(f.reshape!.lost).toContain('parity');
     expect(f.text).toMatch(/no longer have a parity check/u);
     expect(toFeature.r.launcher.launched).toHaveLength(1);
+  });
+
+  it('a slow seat\'s reply to an older message never publishes an offer over a newer message', async () => {
+    const { r, runId } = await started();
+    r.records.push({ at: 2, turnId: 't8', kind: 'user', text: 'add a rollback step', seats: ['claude'], owner: true });
+    r.records.push({ at: 3, turnId: 't9', kind: 'user', text: 'actually, keep it as it is', seats: ['claude'], owner: true });
+    r.svc.onReply({ chat: CHAT, cliKey: 'claude', turnId: 't8', ok: true, blocks: [JSON.stringify({ planEdit: runId })] });
+    await r.svc.settled();
+    expect(offers(r)).toEqual([]);
+  });
+
+  it('the whole per-message job block stays within 2 KB, whatever the facts\' sizes', () => {
+    const long = 'x'.repeat(400);
+    const lines = chatJobTurnLines('cards', {
+      digest: `${'card-id (a|b|c); '.repeat(100)}\nComing (name one only when it is the right shape): ${'c, '.repeat(60)}`,
+      open: { pid: `c1:${'t'.repeat(120)}`, label: long, card: 'migrate', option: 'upgrade', repo: long, seats: ['a', 'b', 'c', 'd', 'e', 'f'], checks: long },
+      heldPlan: { runId: 'r'.repeat(64), pid: `c1:${'t'.repeat(120)}`, label: long, version: 12, lead: long },
+    });
+    expect(Buffer.byteLength(lines, 'utf8')).toBeLessThanOrEqual(2048);
+    // The ids the seat must name are never cut.
+    expect(lines).toContain(`c1:${'t'.repeat(120)}`);
+    expect(lines).toContain(`{"planEdit":"${'r'.repeat(64)}"}`);
   });
 
   it('offers nothing once the work plan was accepted, while the run works, or for another run', async () => {

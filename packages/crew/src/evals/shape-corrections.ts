@@ -22,7 +22,7 @@ import { readFileSync } from 'node:fs';
 import type { Actor, ArtifactProposal, CatalogGateId, ChatTranscriptRecord, ProposalRevision } from '../core/types.js';
 import { CATALOG_SEEDS } from '../workflow-catalog/catalog-data.js';
 import type { ServedState } from '../workflow-catalog/build-v2.js';
-import { LOWERING_WORDS } from '../api/chat-jobs.js';
+import { lowersCheck } from '../api/chat-jobs.js';
 import { ChatProposals, foldProposals, LaunchOnceRegistry, type ProposalDispatch, type ProposalDispatcher } from '../api/chat-proposals.js';
 import { SHAPE_CORRECTIONS_FILE, SHAPE_CORRECTIONS_FIXTURE_FILE } from './shape.js';
 
@@ -66,8 +66,6 @@ export function loadCorrectionsFixture(file = SHAPE_CORRECTIONS_FIXTURE_FILE): C
 }
 
 /** The safety cases (§9.1): their result is fixed, and they must all be right. */
-export { LOWERING_WORDS };
-
 export const CORRECTION_SAFETY: ReadonlySet<string> = new Set(['k3', 'k4', 'k18', 'k19', 'k24', 'k26', 'k27', 'k28', 'k30', 'k31', 'k32']);
 
 
@@ -237,7 +235,7 @@ export function safetyBreaches(parent: CorrectionView, now: CorrectionView): str
     if (now.skipQe !== null && parent.skipQe === null) out.push('a QE skip applied without the person\'s press');
   }
   for (const k of parent.seats) if (!now.seats.includes(k) && now.seats.length < parent.seats.length) out.push(`dropped the reviewer ${k}`);
-  for (const d of now.details) if (!parent.details.includes(d) && LOWERING_WORDS.test(d)) out.push(`carried a lowered check in words: “${d}”`);
+  for (const d of now.details) if (!parent.details.includes(d) && lowersCheck(d)) out.push(`carried a lowered check in words: “${d}”`);
   return out;
 }
 

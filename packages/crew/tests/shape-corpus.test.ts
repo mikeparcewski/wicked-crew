@@ -9,12 +9,14 @@ import { defaultReplaySet } from '../src/evals/replay.js';
 import {
   auditSample,
   captureShapeCases,
+  exactRight,
   loadShapeCorpus,
   loadShapeFixture,
   scoreShapeCorpus,
   shapeCorpusCases,
   shapeCoverage,
   shapeLabelCounts,
+  shapeLaunchesOf,
   shapeReport,
   type ShapeLaunch,
 } from '../src/evals/shape.js';
@@ -38,7 +40,8 @@ describe('the shape corpus through the shipped detection (§9.2)', () => {
     expect(m.right / m.clear).toBeGreaterThanOrEqual(0.95);
     expect(m.wrongAtSure).toEqual([]);
     expect(m.ambiguousUnacceptable).toEqual([]);
-    expect(m.planChangingWrong).toEqual([]);
+    // A wrong answer that runs another plan (derived from the catalog for every case) is never sure.
+    expect(m.wrongPlanAtSure).toEqual([]);
   });
 
   it('targets: held as likely ≤ 10 %, asked on a clear case ≤ 5 %, ambiguous asked ≥ 60 %, adversarial 100 %, coming named 100 %, words precision 1.0', () => {
@@ -54,13 +57,20 @@ describe('the shape corpus through the shipped detection (§9.2)', () => {
     expect(m.depthRight).toBe(m.depth);
   });
 
+  it('an omitted option is the card\'s default, in both scorers (codex r1)', () => {
+    const r5 = corpus.cases.find((x) => x.id === 'r5')!;
+    expect(r5.expect.option).toBeUndefined();
+    expect(scoreShapeCorpus({ cases: [r5] }, { r5: { card: 'refactor', option: 'polish', confidence: 0.95 } }).right).toBe(0);
+    expect(shapeCorpusCases({ cases: [r5] }, {})[0]!.expected.label).toBe('refactor:refactor');
+  });
+
   it('scores exactly: a right card with the wrong option is wrong, for every option', () => {
-    const c = corpus.cases.find((x) => x.id === 'm1')!;
-    const wrongOption = scoreShapeCorpus({ cases: [c] }, { m1: { card: 'migrate', option: 'move', confidence: 0.6 } });
-    expect(wrongOption.right).toBe(0);
-    const framing = corpus.cases.find((x) => x.id === 'c11')!;
-    const wrongFraming = scoreShapeCorpus({ cases: [framing] }, { c11: { card: 'communicate', option: 'message', confidence: 0.6 } });
-    expect(wrongFraming.right).toBe(0);
+    const m1 = corpus.cases.find((x) => x.id === 'm1')!;
+    expect(exactRight(m1, { card: 'migrate', option: 'upgrade' })).toBe(true);
+    expect(exactRight(m1, { card: 'migrate', option: 'move' })).toBe(false);
+    const c11 = corpus.cases.find((x) => x.id === 'c11')!;
+    // A framing option is scored as exactly as a plan-changing one.
+    expect(exactRight(c11, { card: 'communicate', option: 'message' })).toBe(false);
   });
 
   it('a hostile seat naming a wrong card at 1.0 is held as likely unless the words rank that card close (the cross-check)', () => {
@@ -119,12 +129,21 @@ describe('the shape suite in the default evals', () => {
     const runs = [
       { session: { id: 'r1', title: 'move the service to node 22', shape: { card: 'migrate', option: 'move', by: 'detected' }, project_id: 'p1' }, units: [] },
       { session: { id: 'r2', title: 'move the service to node 22', retry_of: 'r1', shape: { card: 'migrate', option: 'upgrade', by: 'person' }, project_id: 'p1' }, units: [] },
+      // An ordinary retry of the same job is not a correction.
+      { session: { id: 'r5', title: 'add dark mode', shape: { card: 'feature', option: null, by: 'detected' } }, units: [] },
+      { session: { id: 'r6', title: 'add dark mode', retry_of: 'r5', shape: { card: 'feature', option: null, by: 'detected' } }, units: [] },
       { session: { id: 'r3', title: 'fix the login bug', shape: { card: 'bug', option: null, by: 'detected' } }, units: [] },
       { session: { id: 'r4', title: 'review it', shape: { card: 'risk', option: null, by: 'person' } }, units: [] },
     ];
     const cases = captureShapeCases(runs);
     expect(cases).toEqual([expect.objectContaining({ id: 'shape:corrected:r1', source: 'real', surface: 'corrected', observed: { label: 'migrate:move', by: 'recorded' }, expected: expect.objectContaining({ label: 'migrate:upgrade', by: 'operator' }) })]);
-    expect(shapeLabelCounts(runs)).toEqual({ 'suggested-accepted': 1, selected: 2, corrected: 1 });
+    expect(shapeLabelCounts(runs)).toEqual({ 'suggested-accepted': 3, selected: 2, corrected: 1 });
+    // The audit reads the words the job was asked in (its brief), never a title two requests can share.
+    const twin = [
+      { session: { id: 'a', title: 'Focus: flaky tests', problem: 'Focus: flaky tests\n\nthe checkout e2e suite fails one run in five', shape: { card: 'suite-health', option: 'flaky', by: 'detected' } }, units: [] },
+      { session: { id: 'b', title: 'Focus: flaky tests', problem: 'Focus: flaky tests\n\nthe search tests time out at random', shape: { card: 'suite-health', option: 'flaky', by: 'detected' } }, units: [] },
+    ];
+    expect(auditSample(shapeLaunchesOf(twin), 50, 1).denominator).toBe(2);
   });
 });
 
@@ -145,6 +164,12 @@ describe('the audited sample (§9.1)', () => {
     // Deterministic for its seed; another seed draws another sample.
     expect(auditSample(launches, 50, 7).sample.map((l) => l.runId)).toEqual(s.sample.map((l) => l.runId));
     expect(auditSample(launches, 50, 8).sample.map((l) => l.runId)).not.toEqual(s.sample.map((l) => l.runId));
+  });
+
+  it('a sample smaller than the number of cards draws its cards at random (seeded)', () => {
+    const picks = new Set<string>();
+    for (let seed = 1; seed <= 20; seed += 1) for (const l of auditSample(launches, 3, seed).sample) picks.add(l.card);
+    expect(picks.size).toBeGreaterThan(3);
   });
 
   it('a pool smaller than n is sampled whole', () => {

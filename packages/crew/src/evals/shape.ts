@@ -17,7 +17,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
-import { detect, detectable, type RawGuess } from '../workflow-catalog/detect.js';
+import { classifyPathSync, detect, detectable, differentPlan, type RawGuess } from '../workflow-catalog/detect.js';
 import type { ShapeGuess } from '../core/types.js';
 import type { RunLike } from './capture.js';
 import type { EvalCase, Observed } from './types.js';
@@ -67,9 +67,24 @@ export function acceptable(card: string, option: string | null, allowed: readonl
   return allowed.includes(key(card, option)) || allowed.includes(card);
 }
 
-/** A clear case's verdict: the card and (when the case names one) the option, exactly. */
+/** The option a case expects: the one it names, else the card's default (a card with options always has one). */
+export function expectedOption(card: string | undefined, option: string | undefined): string | null {
+  if (option !== undefined) return option;
+  const seed = CATALOG_V2_CARDS.find((c) => c.id === card);
+  return seed?.variant?.default ?? null;
+}
+
+/** A clear case's verdict: the card and the option, exactly (an omitted option is the card's default). */
 export function exactRight(c: ShapeCase, g: Pick<ShapeGuess, 'card' | 'option'>): boolean {
-  return g.card === c.expect.card && (c.expect.option === undefined || g.option === c.expect.option);
+  return g.card === c.expect.card && g.option === expectedOption(c.expect.card, c.expect.option);
+}
+
+/** Whether a wrong answer runs a different plan than the expected one (another card, or an option of another plan). */
+export function wrongPlan(c: ShapeCase, g: Pick<ShapeGuess, 'card' | 'option'>): boolean {
+  if (exactRight(c, g)) return false;
+  if (g.card !== c.expect.card) return true;
+  const seed = CATALOG_V2_CARDS.find((x) => x.id === g.card);
+  return seed !== undefined && differentPlan(seed, g.option, expectedOption(c.expect.card, c.expect.option));
 }
 
 export interface ShapeCaseResult {
@@ -106,6 +121,9 @@ export interface ShapeMetrics {
   wordsDecided: number;
   wordsRight: number;
   planChangingWrong: string[];
+  /** Wrong answers that run a different plan (derived from the catalog, every case): they must never be sure. */
+  wrongPlanAtSure: string[];
+  wrongPlan: string[];
   results: ShapeCaseResult[];
 }
 
@@ -116,11 +134,14 @@ export function scoreShapeCorpus(corpus: ShapeCorpus, answers: Record<string, Ra
   const m: ShapeMetrics = {
     clear: 0, right: 0, wrongAtSure: [], ambiguousUnacceptable: [], heldLikely: 0, askedOnClear: 0, ambiguous: 0, ambiguousAsked: 0,
     adversarial: 0, adversarialRight: 0, coming: 0, comingNamed: 0, comingInDigest: 0, depth: 0, depthRight: 0, wordsDecided: 0, wordsRight: 0,
-    planChangingWrong: [], results: [],
+    planChangingWrong: [], wrongPlanAtSure: [], wrongPlan: [], results: [],
   };
   const inDigest = new Set(CATALOG_V2_CARDS.filter(detectable).map((c) => c.id));
   for (const c of corpus.cases) {
-    const { guess } = detect({ text: c.text, seat: answers[c.id] ?? null, source, catalogRev });
+    // The production orchestration: on the detect-shape path the seat is asked only when the words do not decide.
+    const { guess } = source === 'classify'
+      ? classifyPathSync({ text: c.text, catalogRev }, answers[c.id] ?? null)
+      : detect({ text: c.text, seat: answers[c.id] ?? null, source, catalogRev });
     let right = false;
     let note: string | null = null;
     if (c.kind === 'ambiguous') {
@@ -155,6 +176,10 @@ export function scoreShapeCorpus(corpus: ShapeCorpus, answers: Record<string, Ra
       if (guess.band === 'likely') m.heldLikely += 1;
       if (guess.band === 'ask') m.askedOnClear += 1;
       if (c.planChanging === true && !exact) m.planChangingWrong.push(c.id);
+      if (wrongPlan(c, guess)) {
+        m.wrongPlan.push(c.id);
+        if (guess.band === 'sure') m.wrongPlanAtSure.push(c.id);
+      }
       if (c.kind === 'adversarial') {
         m.adversarial += 1;
         m.adversarialRight += right ? 1 : 0;
@@ -163,7 +188,7 @@ export function scoreShapeCorpus(corpus: ShapeCorpus, answers: Record<string, Ra
         m.depth += 1;
         m.depthRight += guess.depth === c.expect.depth ? 1 : 0;
       }
-      if (!exact) note = `expected ${key(c.expect.card!, c.expect.option)}, got ${key(guess.card, guess.option)} (${guess.band})`;
+      if (!exact) note = `expected ${key(c.expect.card!, expectedOption(c.expect.card, c.expect.option))}, got ${key(guess.card, guess.option)} (${guess.band})`;
       else if (guess.band !== 'sure') note = `right, held ${guess.band}`;
     }
     m.results.push({ id: c.id, kind: c.kind, guess, right, note });
@@ -295,7 +320,12 @@ export function auditSample(launches: readonly ShapeLaunch[], n = 50, seed = 1):
   }
   // Proportional allocation, at least one per card while room remains, largest remainders first.
   const size = Math.min(n, pool.length);
+  // The strata in a seeded random order: when the sample cannot hold one of each, which cards it holds is random too.
   const cards = [...byCard.keys()].sort();
+  for (let i = cards.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(rand() * (i + 1));
+    [cards[i], cards[j]] = [cards[j]!, cards[i]!];
+  }
   const quota = new Map<string, number>(cards.map((c) => [c, 0]));
   let left = size;
   for (const c of cards) {
@@ -307,7 +337,7 @@ export function auditSample(launches: readonly ShapeLaunch[], n = 50, seed = 1):
   while (left > 0) {
     const next = want
       .filter((w) => quota.get(w.c)! < byCard.get(w.c)!.length)
-      .sort((a, b) => (b.exact - quota.get(b.c)!) - (a.exact - quota.get(a.c)!) || a.c.localeCompare(b.c))[0];
+      .sort((a, b) => (b.exact - quota.get(b.c)!) - (a.exact - quota.get(a.c)!) || cards.indexOf(a.c) - cards.indexOf(b.c))[0];
     if (next === undefined) break;
     quota.set(next.c, quota.get(next.c)! + 1);
     left -= 1;
@@ -329,7 +359,7 @@ function expectedLabel(c: ShapeCase): string {
   // An ambiguous case is right when it asks or lands on one of its listed shapes (§9.2).
   if (c.kind === 'ambiguous') return 'acceptable';
   if (c.kind === 'coming') return c.expect.coming ?? '';
-  return key(c.expect.card ?? '', c.expect.option);
+  return key(c.expect.card ?? '', expectedOption(c.expect.card, c.expect.option));
 }
 
 /** The corpus as suite cases (synthetic, labelled by the corpus): the replay runs today's detection on each. */
@@ -350,7 +380,7 @@ export function shapeCorpusCases(corpus: ShapeCorpus = loadShapeCorpus(), answer
 
 /** The label of one detection, as the suite scores it: `ask`, or the shape it would propose. */
 export function observedOf(text: string, seat: RawGuess | null, acceptableShapes?: readonly string[]): Observed {
-  const { guess } = detect({ text, seat, source: 'classify', catalogRev: 'replay' });
+  const { guess } = classifyPathSync({ text, catalogRev: 'replay' }, seat);
   const label = guess.band === 'ask' ? 'ask' : key(guess.card, guess.option);
   if (acceptableShapes !== undefined && (guess.band === 'ask' || acceptable(guess.card, guess.option, acceptableShapes))) return { label: 'acceptable', by: 'replay' };
   return { label, confidence: guess.confidence, by: 'replay' };
@@ -358,24 +388,37 @@ export function observedOf(text: string, seat: RawGuess | null, acceptableShapes
 
 /** A launch's shape, read off a served run (`GET /runs` decorates it with `shape`, `retry_of` and its title). */
 export function shapeLaunchesOf(runs: readonly RunLike[]): ShapeLaunch[] {
+  // Corrected = started again as ANOTHER job (a reshape): an ordinary retry of the same card and option is not one.
+  const shapeKeyOf = (r: RunLike): string | null => {
+    const sh = r.session['shape'] as { card?: unknown; option?: unknown } | undefined;
+    return sh !== undefined && typeof sh.card === 'string' ? key(sh.card, typeof sh.option === 'string' ? sh.option : null) : null;
+  };
+  const byRun = new Map(runs.map((r) => [String(r.session['id']), r]));
   const retried = new Map<string, string>();
   for (const r of runs) {
     const of = r.session['retry_of'];
-    if (typeof of === 'string') retried.set(of, String(r.session['id']));
+    if (typeof of !== 'string') continue;
+    const parent = byRun.get(of);
+    const a = parent === undefined ? null : shapeKeyOf(parent);
+    const b = shapeKeyOf(r);
+    if (a !== null && b !== null && a !== b) retried.set(of, String(r.session['id']));
   }
   const out: ShapeLaunch[] = [];
   for (const r of runs) {
     const shape = r.session['shape'] as { card?: unknown; option?: unknown; by?: unknown } | undefined;
     if (shape === undefined || typeof shape.card !== 'string') continue;
     const id = String(r.session['id']);
-    const title = r.session['title'];
+    // The words the job was asked in: the run's brief (`problem`, the person's words after crew's framing line), never
+    // its derived title (two requests can share one title; codex r1). Shortened for display only.
+    const problem = r.session['problem'];
+    const title = typeof problem === 'string' && problem.trim() !== '' ? problem.trim() : r.session['title'];
     out.push({
       runId: id,
       place: (typeof r.session['project_id'] === 'string' ? r.session['project_id'] : null) ?? (typeof r.session['repo_ref'] === 'string' ? r.session['repo_ref'] : null),
       card: shape.card,
       option: typeof shape.option === 'string' ? shape.option : null,
       by: shape.by === 'detected' ? 'detected' : 'person',
-      words: typeof title === 'string' ? title.slice(0, 200) : '',
+      words: typeof title === 'string' ? title.slice(0, 2000) : '',
       corrected: retried.has(id),
     });
   }
@@ -398,6 +441,8 @@ export function captureShapeCases(runs: readonly RunLike[]): EvalCase[] {
     const before = byId.get(of);
     const after = byId.get(String(r.session['id']));
     if (before === undefined || after === undefined || before.by !== 'detected') continue;
+    // A retry of the same job is not a correction.
+    if (key(before.card, before.option) === key(after.card, after.option)) continue;
     out.push({
       id: `shape:corrected:${before.runId}`,
       suite: 'shape',

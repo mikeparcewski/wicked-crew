@@ -747,8 +747,9 @@ export function chatJobLines(mode: 'cards' | 'prose'): string[] {
     return [
       '## Starting work',
       '',
-      'This chat starts work by command. When the latest message asks for work, do NOT attempt it, and propose no',
-      'plan line. Answer in a sentence or two, then name the ONE job it is, from the job cards the message carries, on',
+      'This chat starts work by command. A document, deck, page, demo or theme this chat can make (the section above,',
+      'when there is one) keeps its own proposal block. Any OTHER request for work is never attempted here, and gets no',
+      'plan line: answer in a sentence or two, then name the ONE job it is, from the job cards the message carries, on',
       'a line of its own: "This looks like <job title>: type `<its command>` to start it". When you cannot tell which',
       'job it is, ask ONE question instead. Nothing starts until the person types the command and presses Start.',
     ];
@@ -814,22 +815,44 @@ export interface JobTurnContext {
   running?: { runId: string; label: string };
 }
 
-/** The per-message job lines: the cards, then what is open, held or running in this chat. */
+/** The per-message job block's budget (§2.3: it rides every chat turn). */
+export const JOB_TURN_MAX_BYTES = 2048;
+
+const cap = (t: string, n: number): string => (t.length <= n ? t : `${t.slice(0, n - 1)}…`);
+const bytes = (t: string): number => Buffer.byteLength(t, 'utf8');
+
+/**
+ * The per-message job lines: the cards, then what is open, held or running in this chat. The WHOLE block stays within
+ * {@link JOB_TURN_MAX_BYTES}: each fact is capped, then the coming cards' line goes, then the cards line is cut (the
+ * ids the seat must name, the open proposal's and the held run's, are never cut).
+ */
 export function chatJobTurnLines(mode: 'cards' | 'prose', ctx: JobTurnContext): string {
-  const lines = ['### Jobs (crew)', '', ctx.digest];
+  const state: string[] = [];
   if (mode === 'cards') {
     if (ctx.open !== undefined) {
       const o = ctx.open;
-      lines.push('', `The open proposal is \`${o.pid}\`: ${o.label} (card \`${o.card}\`${o.option !== null ? `, option \`${o.option}\`` : ''})${o.repo !== null ? ` on ${o.repo}` : ''}, with ${o.seats.length > 0 ? o.seats.join(', ') : 'the roster'}, checked by ${o.checks}. A change to it is a revision block naming this id; new work while it is open is a question, not a block.`);
+      const seats = o.seats.length > 0 ? cap(o.seats.slice(0, 4).join(', '), 60) : 'the roster';
+      state.push(`The open proposal is \`${o.pid}\`: ${cap(o.label, 60)} (card \`${o.card}\`${o.option !== null ? `, option \`${o.option}\`` : ''})${o.repo !== null ? ` on ${cap(o.repo, 60)}` : ''}, with ${seats}, checked by ${cap(o.checks, 160)}. A change to it is a revision block naming this id; new work while it is open is a question, not a block.`);
     }
     if (ctx.heldPlan !== undefined) {
       const h = ctx.heldPlan;
-      lines.push('', `The job \`${h.runId}\` (${h.label}, proposal \`${h.pid}\`) is waiting at its plan, version ${h.version}${h.lead !== null ? `, by ${h.lead}` : ''}. A change to the plan is \`{"planEdit":"${h.runId}"}\`; a change of the kind of job is a revision block naming \`${h.pid}\`.`);
+      state.push(`The job \`${h.runId}\` (${cap(h.label, 60)}, proposal \`${h.pid}\`) is waiting at its plan, version ${h.version}${h.lead !== null ? `, by ${cap(h.lead, 40)}` : ''}. A change to the plan is \`{"planEdit":"${h.runId}"}\`; a change of the kind of job is a revision block naming \`${h.pid}\`.`);
     } else if (ctx.running !== undefined) {
-      lines.push('', `The job \`${ctx.running.runId}\` (${ctx.running.label}) is running in this chat: a request to add to it is answered in prose, pointing at its plan Edit. New work is started in a new thread.`);
+      state.push(`The job \`${ctx.running.runId}\` (${cap(ctx.running.label, 60)}) is running in this chat: a request to add to it is answered in prose, pointing at its plan Edit. New work is started in a new thread.`);
     }
   }
-  return lines.join('\n');
+  const render = (digest: string): string => ['### Jobs (crew)', '', digest, ...state.flatMap((x) => ['', x])].join('\n');
+  let digest = ctx.digest;
+  let out = render(digest);
+  if (bytes(out) > JOB_TURN_MAX_BYTES) {
+    digest = digest.split('\n').filter((l) => !l.startsWith('Coming')).join('\n');
+    out = render(digest);
+  }
+  while (bytes(out) > JOB_TURN_MAX_BYTES && digest.length > 0) {
+    digest = digest.slice(0, Math.max(0, digest.length - Math.max(16, bytes(out) - JOB_TURN_MAX_BYTES)));
+    out = render(`${digest}…`);
+  }
+  return out;
 }
 
 /**

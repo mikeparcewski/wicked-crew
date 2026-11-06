@@ -511,8 +511,37 @@ export function inputsOfProposal(p: ArtifactProposal): Record<string, ProposalIn
   return { ...(p.inputs ?? {}) };
 }
 
-/** Words that, carried into a brief, would ask to lower a check (§9.1 "carried words must never carry a skip"). */
-export const LOWERING_WORDS = /\b(?:(?:skip(?:ping)?|without|no|drop(?:ping)?|bypass(?:ing)?|don'?t|do not|never)\s+(?:the\s+|any\s+|a\s+)?(?:reviews?|reviewers?|parity(?:\s+checks?)?|qe(?:\s+acceptance)?|tests?|testing|checks?|judge|judging|acceptance)|tag\s+(?:it|the\s+release|a\s+release)|publish\s+(?:it|the\s+package|to\s+npm))\b/iu;
+/** The controls a job's words must never lower: its checks and its seat protections, by any of their names. */
+const CONTROL = String.raw`(?:the\s+|any\s+|a\s+|all\s+)?(?:distinct\s+|independent\s+|separate\s+|second\s+|other\s+)?(?:reviews?|reviewers?|review\s+step|judges?|judging|parity(?:\s+checks?)?|qe(?:\s+acceptance)?|acceptance(?:\s+checks?)?|tests?|testing|checks?|cited\s+findings|citations|evidence\s+floor|floor|plan\s+(?:gate|approval)|gates?)`;
+// A lowering verb, then the control, with at most two words between ("without running the reviewer's checks").
+const LOWER_VERB = new RegExp(String.raw`\b(skip(?:ping)?|drop(?:ping)?|remov(?:e|ing)|disabl(?:e|ing)|bypass(?:ing)?|omit(?:ting)?|cut(?:ting)?|ditch(?:ing)?|waiv(?:e|ing)|forget|lighten|reduc(?:e|ing)|fewer|less|turn(?:ing)?\s+off|get\s+rid\s+of|ignor(?:e|ing)|without|no\s+need\s+for|(?:don'?t|do\s+not)\s+need)(?:\s+[\w'’-]+){0,2}?\s+${CONTROL}\b`, 'giu');
+const NO_CONTROL = /\bno\s+(?:qe|parity|review|reviewer|judge)\b/giu;
+const SHIP = /\b(?:tag(?:ging)?\s+(?:it|the\s+release|a\s+release|v?\d[\w.]*)|publish(?:ing)?\s+(?:it|the\s+package|to\s+npm)|merg(?:e|ing)\s+(?:it|the\s+pr)|push(?:ing)?\s+(?:it\s+)?to\s+main)\b/giu;
+/** A negation just before a match makes it a request to KEEP the check ("do not drop parity", "without skipping QE"). */
+const NEGATED_BEFORE = /\b(?:don'?t|do\s+not|never|not|without|no)\s+(?:\w+\s+){0,2}$/iu;
+
+/**
+ * Whether words, carried into a job's brief, would ask the lead to lower a check, drop a protected seat, or tag,
+ * publish or merge (§9.1 "carried words must never carry a skip"). Descriptive facts ("there are no tests for this
+ * module", "no tests failed") and requests to keep a check ("do not drop parity", "without skipping QE") do not.
+ */
+export function lowersCheck(text: string): boolean {
+  for (const re of [LOWER_VERB, NO_CONTROL, SHIP]) {
+    re.lastIndex = 0;
+    for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+      const verb = (m[1] ?? m[0]).toLowerCase();
+      // Another lowering verb between this one and the control ("without SKIPPING QE"): the inner one is the request,
+      // read with its own negation; scan on from just after this verb.
+      if (re === LOWER_VERB && /\b(?:skip|drop|remov|disabl|bypass|omit|cut|ditch|waiv|ignor)/iu.test(m[0].slice(verb.length))) {
+        re.lastIndex = m.index + verb.length;
+        continue;
+      }
+      if (!verb.startsWith('without') && NEGATED_BEFORE.test(text.slice(0, m.index))) continue;
+      return true;
+    }
+  }
+  return false;
+}
 
 // ── the merge (§4.6) ───────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -668,6 +697,11 @@ export function mergeRevision(
         notes.push('Not changed: pick at most 40 requirements');
         continue;
       }
+      // Words that would lower a check never reach the brief through an input either (codex r1).
+      if (v.kind === 'text' && lowersCheck(v.value)) {
+        notes.push(`Not changed: ${def.label} would ask the job to drop a check, and its checks are its own`);
+        continue;
+      }
       if (id === 'intent' && v.kind === 'text') {
         facts.words = v.value.slice(0, 8000);
         continue;
@@ -695,7 +729,7 @@ export function mergeRevision(
       const t = d.trim().slice(0, 200);
       // DES-CATALOG-002 §9.1: carried words never carry a lowered check ("skip parity" as a detail would reach the
       // lead's brief): refused with a note, the rest of the revision standing.
-      if (LOWERING_WORDS.test(t)) {
+      if (lowersCheck(t)) {
         notes.push(`Not changed: “${t.slice(0, 60)}” would ask the job to drop a check, and its checks are its own`);
         continue;
       }

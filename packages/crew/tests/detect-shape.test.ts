@@ -16,6 +16,9 @@ import {
   plainReason,
   tokens,
   validateGuess,
+  classifyPathSync,
+  depthFromWords,
+  outcomeConflict,
   withoutAimed,
   wordsLayer,
 } from '../src/workflow-catalog/detect.js';
@@ -72,8 +75,10 @@ describe('the digest (§2.3 catalogDigest)', () => {
   });
 
   it('says what this daemon cannot run (the resolved catalog), not only the seeds', () => {
-    const d = catalogDigest('classify', { status: (card) => (card === 'review-change' ? 'unavailable' : 'available') });
-    expect(d).toMatch(/- review-change [^\n]*NOT ON THIS DAEMON/u);
+    const status = (card: string): 'available' | 'unavailable' => (card === 'review-change' ? 'unavailable' : 'available');
+    expect(catalogDigest('classify', { status })).toMatch(/- review-change [^\n]*NOT ON THIS DAEMON/u);
+    // The chat seat is not offered a card it could not start here.
+    expect(catalogDigest('chat', { status })).not.toMatch(/review-change/u);
   });
 });
 
@@ -94,6 +99,31 @@ describe('the words layer (§2.3 wordsLayer, studio scoreEntry on Enter)', () =>
 
   it('matches whole words only (Enter mode): a prefix is not a word', () => {
     expect(wordsLayer('auth').ranked.find((r) => r.card === 'operating-model')).toBeUndefined();
+  });
+});
+
+describe('the words ask for an outcome, and say a depth (codex r1)', () => {
+  it('words asking for a plan, a review or an explanation of another job\'s subject do not decide alone', () => {
+    for (const t of ['Plan how to upgrade Node 18 to 22', 'Review the plan to modernize the legacy .NET Framework monolith into microservices on Kubernetes']) {
+      const d = detect({ text: t, seat: null, source: 'classify', catalogRev: REV });
+      expect(d.guess.band, t).not.toBe('sure');
+    }
+    expect(outcomeConflict('Plan how to upgrade Node', 'migrate')).toBe(true);
+    expect(outcomeConflict('Plan how to upgrade Node', 'plan-it')).toBe(false);
+    expect(outcomeConflict('upgrade Node 18 to 22', 'migrate')).toBe(false);
+  });
+
+  it('an Investigate card decided by the words keeps the depth the words say', () => {
+    expect(detect({ text: 'Deep investigation of this production outage and its root cause', seat: null, source: 'classify', catalogRev: REV }).guess).toMatchObject({ card: 'incident', depth: 'deep' });
+    expect(depthFromWords('just a quick look at the outage')).toBe('quick');
+    expect(depthFromWords('why did the outage happen')).toBeNull();
+  });
+
+  it('the classify path asks the seat only when the words do not decide', () => {
+    const sure = classifyPathSync({ text: 'modernize the legacy .NET Framework monolith into microservices on Kubernetes', catalogRev: REV }, { card: 'bug', confidence: 1 });
+    expect(sure).toMatchObject({ asked: false, guess: { card: 'migrate', source: 'words' } });
+    const asked = classifyPathSync({ text: 'sum([1,2,3]) returns 5 instead of 6 in tiny-math', catalogRev: REV }, { card: 'bug', confidence: 0.95 });
+    expect(asked).toMatchObject({ asked: true, guess: { card: 'bug', source: 'classify' } });
   });
 });
 
