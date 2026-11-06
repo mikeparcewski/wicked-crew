@@ -191,6 +191,14 @@ export interface DeliverTextFacts {
    * which the intent's own words decide. Absent = none recorded.
    */
   trackerRefs?: Array<{ system: 'github' | 'jira' | 'gitlab' | 'ado'; ref: string; asked?: string }>;
+  /**
+   * (e2e-1105 F4c) The person's notes at the deliver gate ("Retry this step with a note": the `amend` rulings the engine
+   * recorded on the deliver unit), oldest first. A ref one says this PR closes joins the closing line
+   * ({@link issueRefs}); their text is not published. Absent = none.
+   */
+  deliveryNotes?: string[];
+  /** (e2e-1105 F4c) The rules the person asked to skip at a gate ({@link ruleSkipsAsked}). Absent = none. */
+  ruleSkipsAsked?: string[];
 }
 
 export interface DeliverText {
@@ -205,6 +213,8 @@ export interface IssueRefs {
   fixes: string[];
   /** Every other issue mention — emitted as `Refs: …`. */
   refs: string[];
+  /** (e2e-1105 F4c) The `fixes` the person's note at the deliver gate added (the intent did not say them). */
+  byNote?: string[];
 }
 
 // ── the title ──────────────────────────────────────────────────────────────────────────────────
@@ -403,18 +413,67 @@ export function commitSubject(title: string): string {
 /** One `#N` / `repo#N` / `owner/repo#N` inside a closing list. */
 const ONE_REF = String.raw`(?:(?:[\w.-]+\/)?[\w.-]+)?#\d+\b`;
 /**
- * `fix issue #214`, `fixes #7`, `closes wicked-studio#3`, `resolved: #9` — a closing verb + a ref —
+ * `fix issue #214`, `fixes #7`, `fix the bug #3`, `closes wicked-studio#3`, `resolved: #9` — a closing verb + a ref —
  * and a LIST after one verb (crew#635: `fix #618, #619 and #620` closed only #618, so every merge
  * left the rest open): refs joined by `,` / `and` / `&` / `+` / `/` all ride the one verb.
  */
 const CLOSING_LIST = new RegExp(
-  String.raw`\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?)\b(?:\s+(?:issues?|bugs?|for))?\s*:?\s*(` +
+  String.raw`\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?)\b(?:\s+the)?(?:\s+(?:issues?|bugs?|for))?\s*:?\s*(` +
     ONE_REF +
     String.raw`(?:\s*(?:,|&|\+|\/|\band\b)?\s*` +
     ONE_REF +
     `)*)`,
   'gi',
 );
+/**
+ * (e2e-1105 F4) A closing verb its own sentence negates — "does not fix #1", "don't close #2", "cannot resolve #3",
+ * "does not, in this PR, close #4", "do not under any circumstances close #5" — never closes: the ref stays a mention.
+ * The negation is looked for in the verb's sentence or clause only (back to `.` `;` `!` `?` or a blank line), so
+ * "It never renders.\n\nFix #6" still closes #6, and "not only fixes #7" closes #7. Erring here leaves an issue open
+ * for a person to close (or to say so in a note at the deliver gate); it never closes one the words did not claim.
+ */
+const NEGATION = /(?:\b(?:not|never|neither|nor|cannot|no longer)\b|n['\u2019]t\b)(?![ \t]+only\b)/i;
+/** A clause boundary: `.` `;` `!` `?` before whitespace (not the dot of `e.g.` / `i.e.` / `etc.` / `vs.`), or a blank line. */
+const CLAUSE_START = /(?<!\b(?:e\.g|i\.e|etc|vs))[.;!?](?=\s)|\n[ \t]*\n/gi;
+
+/** Whether the clause before `index` in `text` (the closing verb's own) carries a negation. */
+function negatedBefore(text: string, index: number): boolean {
+  const before = text.slice(0, index);
+  let from = 0;
+  for (const m of before.matchAll(CLAUSE_START)) from = m.index + m[0].length;
+  return NEGATION.test(before.slice(from));
+}
+
+/**
+ * `text` with what it quotes blanked — fenced code, `>` quote lines, and "…", “…”, `…`, '…' spans, across lines — and
+ * the daemon's appended blocks removed: words a note quotes are someone else's, not the note's claim.
+ */
+function unquoted(text: string): string {
+  return intentOnly(text)
+    .replace(/(^|\n)[ \t]*(```|~~~)[^\n]*\n[\s\S]*?(\n[ \t]*\2[^\n]*|$)/g, '$1 ')
+    // A `>` quote runs to the next blank line (Markdown's lazy continuation); indented code is quoted too.
+    .replace(/(^|\n)[ \t]*>[^\n]*(?:\n(?![ \t]*\n)[^\n]*)*/g, '$1 ')
+    .replace(/(^|\n)(?: {4}|\t)[^\n]*/g, '$1 ')
+    .replace(/"[^"]*"|\u201c[^\u201d]*\u201d|\u2018[^\u2019]*\u2019|`[^`]*`|(?<!\w)'[^']*'(?!\w)/g, ' ');
+}
+
+const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * (e2e-1105 F4) `tiny-math issue #1`, `owner/tiny-math bug #1`: an issue of the DELIVERY repository named by its repo
+ * and the word `issue` / `bug`, the job-title form studio and chat write ("Fix tiny-math issue #1: sum() …"). It is the
+ * same reference as `tiny-math#1` (`owner/tiny-math#1`), so it is rewritten to that before the scan, and from there it
+ * is read exactly as that spelling always was: "Fix tiny-math issue #1" closes #1, "Fix owner/tiny-math issue #1"
+ * closes `owner/tiny-math#1` as written, and "(tiny-math issue #1)" with no verb stays a mention. Only the delivery
+ * repo's own name qualifies: "Fix other-repo issue #1" or "Fix login issue #1" is left as written, so another
+ * repository's #1 never becomes this one's `Fixes #1`.
+ */
+function sameRepoIssueWords(text: string, repoRef: string | null | undefined): string {
+  if (repoRef === undefined || repoRef === null || repoRef === '') return text;
+  const words = new RegExp(String.raw`(?<![\w./#-])((?:[\w.-]+\/)?${escapeRe(repoRef)})\s+(?:issues?|bugs?)\s*:?\s*(?=#\d)`, 'gi');
+  return text.replace(words, '$1');
+}
+
 /** Any `#N`, `repo#N` or `owner/repo#N` not glued to a word/path (so `a/b#1` is one ref, `#1a` none). */
 const ANY_REF = /(?<![\w/#])((?:[\w.-]+\/)?[\w.-]+)?#(\d+)\b/g;
 
@@ -434,25 +493,47 @@ function sameRepo(ref: string, repoRef: string | null | undefined): boolean {
  * on a wicked-studio delivery must close #214). Any other owner-less `repo#N` rides verbatim as
  * information; `owner/repo#N` is left exactly as written.
  */
-export function issueRefs(rawIntent: string, repoRef?: string | null): IssueRefs {
+export function issueRefs(rawIntent: string, repoRef?: string | null, notes: readonly string[] = []): IssueRefs {
   // The daemon's linked-issues block (crew#627) is issue TEXT, not the intent: its mentions are
   // never the run's references.
-  const intent = intentOnly(rawIntent);
+  const intent = sameRepoIssueWords(intentOnly(rawIntent), repoRef);
   const normalize = (prefix: string | undefined, n: string): string => {
     if (prefix === undefined || prefix === '') return `#${n}`;
-    if (!prefix.includes('/') && repoRef !== undefined && repoRef !== null && prefix === repoRef) return `#${n}`;
+    if (!prefix.includes('/') && repoRef !== undefined && repoRef !== null && prefix.toLowerCase() === repoRef.toLowerCase()) return `#${n}`;
     return `${prefix}#${n}`;
   };
-  const fixes: string[] = [];
+  /** The refs `text` says it closes, and the ones it says it does NOT close (a negated verb). */
+  const closing = (text: string): { closes: string[]; notCloses: string[] } => {
+    const closes: string[] = [];
+    const notCloses: string[] = [];
+    for (const list of text.matchAll(CLOSING_LIST)) {
+      const negated = negatedBefore(text, list.index);
+      // Inside a matched list a ref may follow `/` (`#618/#619`), which ANY_REF's guard refuses.
+      for (const m of list[1]!.matchAll(/((?:[\w.-]+\/)?[\w.-]+)?#(\d+)\b/g)) {
+        const ref = normalize(m[1], m[2]!);
+        // crew#635: an `owner/repo#N` in ANOTHER repository stays `Refs:` even under a closing verb —
+        // merging this PR must not close an issue whose share of the work lives elsewhere.
+        if (ref.includes('/') && !sameRepo(ref, repoRef)) continue;
+        const into = negated ? notCloses : closes;
+        if (!into.includes(ref)) into.push(ref);
+      }
+    }
+    return { closes, notCloses };
+  };
+  const said = closing(intent);
+  // A negated verb wins over a closing one for the same ref: closing is the claim that needs the words.
+  const fixes = said.closes.filter((r) => !said.notCloses.includes(r));
   const refs: string[] = [];
-  for (const list of intent.matchAll(CLOSING_LIST)) {
-    // Inside a matched list a ref may follow `/` (`#618/#619`), which ANY_REF's guard refuses.
-    for (const m of list[1]!.matchAll(/((?:[\w.-]+\/)?[\w.-]+)?#(\d+)\b/g)) {
-      const ref = normalize(m[1], m[2]!);
-      // crew#635: an `owner/repo#N` in ANOTHER repository stays `Refs:` even under a closing verb —
-      // merging this PR must not close an issue whose share of the work lives elsewhere.
-      if (ref.includes('/') && !sameRepo(ref, repoRef)) continue;
+  const byNote: string[] = [];
+  // (e2e-1105 F4c) The person's notes at the deliver gate add to the closing line: a ref a note says this PR closes
+  // (not negated, not inside quotes, which are someone else's words) is closed. The person's word, never a seat's: a
+  // note is an operator ruling the engine recorded on the deliver unit. A note cannot un-close what the intent closes:
+  // the intent is published in the body, where its own words would still close it.
+  for (const note of notes) {
+    const n = closing(sameRepoIssueWords(unquoted(note), repoRef));
+    for (const ref of n.closes.filter((r) => !n.notCloses.includes(r))) {
       if (!fixes.includes(ref)) fixes.push(ref);
+      if (!said.closes.filter((r) => !said.notCloses.includes(r)).includes(ref) && !byNote.includes(ref)) byNote.push(ref);
     }
   }
   for (const m of intent.matchAll(ANY_REF)) {
@@ -466,7 +547,7 @@ export function issueRefs(rawIntent: string, repoRef?: string | null): IssueRefs
     const ref = `${m[1]}/${m[2]}#${m[3]}`;
     if (!fixes.includes(ref) && !refs.includes(ref)) refs.push(ref);
   }
-  return { fixes, refs };
+  return byNote.length > 0 ? { fixes, refs, byNote } : { fixes, refs };
 }
 
 /**
@@ -512,7 +593,7 @@ export function boundIntentForEmbedding(intent: string): string {
  * and the reference is not.
  */
 export function composeEmbeddedDeliverText(f: DeliverTextFacts): DeliverText {
-  return composeDeliverText({ ...f, intent: boundIntentForEmbedding(f.intent) }, issueRefs(f.intent, f.repoRef));
+  return composeDeliverText({ ...f, intent: boundIntentForEmbedding(f.intent) }, issueRefs(f.intent, f.repoRef, f.deliveryNotes));
 }
 
 // ── the body ───────────────────────────────────────────────────────────────────────────────────
@@ -554,7 +635,7 @@ const FOOTER_LINK = '[wicked-crew](https://wc.wickedagile.com)';
  * `links` defaults to the issue references of `f.intent`; the embedded-fallback path passes the
  * references of the FULL intent while `f.intent` is the bounded copy ({@link composeEmbeddedDeliverText}).
  */
-export function composeDeliverText(raw: DeliverTextFacts, links: IssueRefs = issueRefs(intentOnly(raw.intent), raw.repoRef)): DeliverText {
+export function composeDeliverText(raw: DeliverTextFacts, links: IssueRefs = issueRefs(intentOnly(raw.intent), raw.repoRef, raw.deliveryNotes)): DeliverText {
   // crew#886: redact the FACTS, not only the text — the title and table cells are cut to a width,
   // and a cut through a home path would no longer match it (codex on crew#887). The output pass
   // below stays as the backstop.
@@ -577,6 +658,8 @@ export function composeDeliverText(raw: DeliverTextFacts, links: IssueRefs = iss
   out.push('## Intent', '', intent === '' ? '_(the run recorded no intent)_' : intent, '');
   if (fixes.length > 0 || refs.length > 0) {
     for (const x of fixes) out.push(`Fixes ${x}`);
+    const noted = (links.byNote ?? []).map(canon).filter((x) => fixes.includes(x));
+    if (noted.length > 0) out.push('', `_${noted.join(', ')} closed on the word of the person who answered the deliver gate (the intent did not say it)._`);
     if (refs.length > 0) {
       out.push(`Refs: ${refs.join(', ')}`);
       // crew#635: say why a Refs issue stays open, so "a human closes it" is a stated step.
@@ -623,6 +706,9 @@ export function composeDeliverText(raw: DeliverTextFacts, links: IssueRefs = iss
     }
   }
   out.push('');
+  if (f.ruleSkipsAsked !== undefined && f.ruleSkipsAsked.length > 0) {
+    out.push(`Steering rules the person asked to skip at a gate, each with a written reason on the run record: ${f.ruleSkipsAsked.map((id) => code(oneLine(id))).join(', ')}.`, '');
+  }
 
   out.push('## Repo checks', '');
   if (f.source === 'workflow') {
@@ -1058,6 +1144,26 @@ export function rulesLabel(u: { assurance?: unknown }): string | null {
   return rulesSummaryLine(rows as Array<{ ruleId?: unknown; status?: unknown; reason?: unknown }>);
 }
 
+/**
+ * (e2e-1105 F4c) The rules the person asked to skip at a gate of this run (`rule_skips`, recorded by the gate's
+ * `skip_rules` before the step runs again), so a delivery that runs after a skip says so in its own text: the check
+ * that records the skip on the receipt runs only after the PR text is written. Rule ids only, every one (listed
+ * after the phases table, not in a bounded cell): the written reasons are on the run record and the delivery
+ * receipt, never copied here (free text could carry a closing keyword).
+ */
+export function ruleSkipsAsked(units: readonly WorkUnit[]): string[] {
+  const ids: string[] = [];
+  for (const u of units) {
+    const skips = (u as { rule_skips?: unknown }).rule_skips;
+    if (!Array.isArray(skips)) continue;
+    for (const x of skips as unknown[]) {
+      const id = typeof x === 'object' && x !== null ? (x as { ruleId?: unknown }).ruleId : undefined;
+      if (typeof id === 'string' && id.trim() !== '' && !ids.includes(id)) ids.push(id);
+    }
+  }
+  return ids;
+}
+
 /** The summary line over rule rows (one wording for the PR body and the delivery). */
 export function rulesSummaryLine(rows: ReadonlyArray<{ ruleId?: unknown; status?: unknown; reason?: unknown }>): string {
   const n = (s: string) => rows.filter((r) => r.status === s).length;
@@ -1068,7 +1174,8 @@ export function rulesSummaryLine(rows: ReadonlyArray<{ ruleId?: unknown; status?
   const skipped = rows.filter((r) => r.status === 'skipped');
   if (skipped.length > 0) {
     line += `, ${skipped.length} skipped by operator (${skipped
-      .map((r) => `${String(r.ruleId)}: ${typeof r.reason === 'string' ? r.reason.replace(/^skipped by [^:]*:\s*/u, '') : ''}`)
+      // A reason is the person's free text: a `#N` in it is never published as a reference (e2e-1105 F4c).
+      .map((r) => `${String(r.ruleId)}: ${typeof r.reason === 'string' ? r.reason.replace(/^skipped by [^:]*:\s*/u, '').replace(/#(?=\d)/g, '# ') : ''}`)
       .join('; ')})`;
   }
   return line;
@@ -1247,7 +1354,34 @@ export function factsFromRun(
     ...(resolved.reports !== undefined ? { reports: resolved.reports } : {}),
     ...(assurance !== undefined ? { assurance } : {}),
     ...(resolved.trackerRefs !== undefined && resolved.trackerRefs.length > 0 ? { trackerRefs: resolved.trackerRefs } : {}),
+    ...(() => {
+      const notes = deliveryNotesOf(units);
+      return notes.length > 0 ? { deliveryNotes: notes } : {};
+    })(),
+    ...(() => {
+      const asked = ruleSkipsAsked(units);
+      return asked.length > 0 ? { ruleSkipsAsked: asked } : {};
+    })(),
   };
+}
+
+/**
+ * (e2e-1105 F4c) The person's notes at the deliver gate, oldest first: the `amend` rulings the engine recorded on the
+ * deliver unit (`operator_rulings`, written only by a person's gate answer). A seat's output never lands there.
+ */
+export function deliveryNotesOf(units: readonly WorkUnit[]): string[] {
+  const amends: Array<{ text: string; at: number }> = [];
+  for (const u of units) {
+    if (phaseIdOf(u) !== 'deliver' && u.catalog !== 'deliver') continue;
+    const rulings: unknown = u.operator_rulings;
+    if (!Array.isArray(rulings)) continue;
+    for (const r of rulings as unknown[]) {
+      if (typeof r !== 'object' || r === null) continue;
+      const { action, text, at } = r as { action?: unknown; text?: unknown; at?: unknown };
+      if (action === 'amend' && typeof text === 'string' && text.trim() !== '') amends.push({ text, at: typeof at === 'number' ? at : 0 });
+    }
+  }
+  return amends.sort((a, b) => a.at - b.at).map((a) => a.text);
 }
 
 /** What is known at LAUNCH, from the workflow definition — the script's embedded fallback. */

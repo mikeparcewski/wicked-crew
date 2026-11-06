@@ -144,6 +144,14 @@ interface GhStub {
   prState?: string;
   /** stderr text + exit 1 from `gh pr comment`. */
   commentFailWith?: string;
+  /** (e2e-1105 F4c) stderr text + exit 1 from `gh pr edit`. */
+  editFailWith?: string;
+  /** (e2e-1105 F4c) The PR text `gh pr view --json title,body` answers when no edit was recorded. */
+  prText?: string;
+  /** (e2e-1105 F4c) What `gh pr view --json title,body` answers whatever was edited (GitHub's own copy). */
+  viewText?: string;
+  /** (e2e-1105 F4c) Make `gh pr view --json title,body` fail. */
+  viewFails?: boolean;
   /** (crew#737) `gh auth token --user <tokenFor>` prints a token; any other account fails. */
   tokenFor?: string;
   /** (crew#737) The login `gh api user` answers while that token is exported as GH_TOKEN. */
@@ -206,7 +214,11 @@ async function runDeliver(
       '  pr)',
       '    case "$2" in',
       // DES-L9 revision mode: `gh pr view N --json state -q .state` and `gh pr comment N --body-file`.
-      '      view) echo "${GH_STUB_PR_STATE:-OPEN}";;',
+      // (e2e-1105 F4c) `gh pr view <url> --json title,body`: the PR's text as GitHub holds it — the edit this stub
+      // recorded, else GH_STUB_PR_TEXT; GH_STUB_VIEW_FAIL makes the read fail.
+      '      view) case " $* " in *" title,body "*) if [ -n "${GH_STUB_VIEW_FAIL:-}" ]; then echo "gh: HTTP 502" >&2; exit 1; fi; if [ -n "${GH_STUB_VIEW_TEXT:-}" ]; then printf "%s\\n" "$GH_STUB_VIEW_TEXT"; elif [ -f "$GH_STUB_RECORD.edit" ]; then cat "$GH_STUB_RECORD.edit"; else printf "%s\\n" "$GH_STUB_PR_TEXT"; fi;; *) echo "${GH_STUB_PR_STATE:-OPEN}";; esac;;',
+      // (e2e-1105 F4c) `gh pr edit <url> --title T --body-file F`: recorded as the PR's new text (title, blank, body).
+      '      edit) T=""; BF=""; while [ $# -gt 0 ]; do case "$1" in --title) T="$2"; shift;; --body-file) BF="$2"; shift;; esac; shift; done; if [ -n "${GH_STUB_EDIT_FAIL:-}" ]; then echo "$GH_STUB_EDIT_FAIL" >&2; exit 1; fi; { printf "%s\\n\\n" "$T"; cat "$BF"; } > "$GH_STUB_RECORD.edit";;',
       '      comment) BF=""; while [ $# -gt 0 ]; do case "$1" in --body-file) BF="$2"; shift;; esac; shift; done; if [ -n "$BF" ]; then cp "$BF" "$GH_STUB_RECORD.comment"; fi; if [ -n "${GH_STUB_COMMENT_FAIL:-}" ]; then echo "$GH_STUB_COMMENT_FAIL" >&2; exit 1; fi; echo "https://github.com/o/r/pull/273#issuecomment-1";;',
       '      *)',
       // Record what the PR was opened WITH (crew#524): the title and the body file's content.
@@ -291,6 +303,10 @@ async function runDeliver(
           GH_STUB_API_FAIL: opts.gh?.apiFails === true ? '1' : '',
           GH_STUB_PR_STATE: opts.gh?.prState ?? '',
           GH_STUB_COMMENT_FAIL: opts.gh?.commentFailWith ?? '',
+          GH_STUB_EDIT_FAIL: opts.gh?.editFailWith ?? '',
+          GH_STUB_PR_TEXT: opts.gh?.prText ?? '',
+          GH_STUB_VIEW_FAIL: opts.gh?.viewFails === true ? '1' : '',
+          GH_STUB_VIEW_TEXT: opts.gh?.viewText ?? '',
           GH_STUB_TOKEN_FOR: opts.gh?.tokenFor ?? '',
           GH_STUB_TOKEN_LOGIN: opts.gh?.tokenLogin ?? '',
           GH_STUB_TOKEN_USER_FLAG: opts.gh?.tokenUserFlag === true ? '1' : '',
@@ -1077,22 +1093,94 @@ describe('deliver script, driven for real (crew#317)', () => {
 
   // crew#885: a rework re-runs deliver for the same run branch; the push updates the PR the first
   // attempt opened and gh refuses a second — that IS the delivery, recorded from gh's own URL.
-  it('DELIVERS when this run branch already has its PR (crew#885): records gh’s URL and comments the run record', async () => {
+  it('DELIVERS when this run branch already has its PR (crew#885): records gh’s URL and rewrites its description from the run record', async () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'work.ts'), 'export const again = 2;\n');
     const ghErr = `a pull request for branch "wicked/${RUN_ID}" into branch "main" already exists:\nhttps://github.com/o/r/pull/1`;
+    const out = join(fx.root, 'pr-text.md');
+    const runText = framedDeliverText({ title: 'Fixes #1: sum() skips the first element', body: '## Intent\n\nFixes #1: sum() skips the first element\n\nFixes #1\n' });
+    const daemon = await fakeDaemon((id) => (id === RUN_ID ? { status: 200, body: runText } : null));
 
-    const r = await runDeliver(fx, { gh: { failWith: ghErr } });
+    const r = await runDeliver(fx, { gh: { failWith: ghErr }, env: { WICKED_DELIVER_TEXT_OUT: out }, script: { runId: RUN_ID, apiOrigin: daemon.origin } }).finally(() => daemon.close());
 
     expect(r.status, r.output).toBe(0);
     expect(r.lastLine).toBe('https://github.com/o/r/pull/1');
     expect(r.output).not.toContain('deliver: gh pr create failed');
     expect(r.output).toContain(`deliver: pull request https://github.com/o/r/pull/1 already exists for wicked/${RUN_ID}`);
-    // The new attempt's run record rides a comment on the existing PR.
-    expect(r.comment).not.toBeNull();
-    expect(r.ghCalls.some((c) => c.startsWith('pr comment https://github.com/o/r/pull/1'))).toBe(true);
+    // (e2e-1105 F4c) The run's own PR gets THIS attempt's text as its description; no comment.
+    expect(r.ghCalls.some((c) => c.startsWith('pr edit https://github.com/o/r/pull/1 --title'))).toBe(true);
+    expect(r.output).toContain('deliver: description of https://github.com/o/r/pull/1 rewritten from the run record');
+    expect(r.comment).toBeNull();
+    // ...and hands the engine the PR's text as GitHub holds it, so the deferred rules can be checked.
+    const handed = readFileSync(out, 'utf8');
+    expect(handed.startsWith('Fixes #1: sum() skips the first element\n\n## Intent')).toBe(true);
+    expect(handed).toContain('\nFixes #1\n');
+  }, 120_000);
+
+  it('(e2e-1105 F4c) after a rewrite, the text handed back is what GitHub answers, never the local composition', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const again = 5;\n');
+    const ghErr = `a pull request for branch "wicked/${RUN_ID}" into branch "main" already exists:\nhttps://github.com/o/r/pull/1`;
+    const out = join(fx.root, 'pr-text.md');
+    const daemon = await fakeDaemon((id) => (id === RUN_ID ? { status: 200, body: framedDeliverText({ title: 'Composed', body: 'Fixes #1' }) } : null));
+
+    const r = await runDeliver(fx, { gh: { failWith: ghErr, viewText: 'GitHub title\n\nGitHub body' }, env: { WICKED_DELIVER_TEXT_OUT: out }, script: { runId: RUN_ID, apiOrigin: daemon.origin } }).finally(() => daemon.close());
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.ghCalls.some((c) => c.startsWith('pr edit'))).toBe(true);
+    expect(readFileSync(out, 'utf8')).toBe('GitHub title\n\nGitHub body\n');
     // The daemon records it as delivered: the transcript's verdict is that URL.
     expect(deliveryRecordFrom(r.output)).toEqual({ url: 'https://github.com/o/r/pull/1' });
+  }, 120_000);
+
+  it('(e2e-1105 F4c) an existing PR whose description cannot be rewritten: the record rides a comment and the PR’s own text is handed back', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const again = 3;\n');
+    const ghErr = `a pull request for branch "wicked/${RUN_ID}" into branch "main" already exists:\nhttps://github.com/o/r/pull/1`;
+    const out = join(fx.root, 'pr-text.md');
+
+    const daemon = await fakeDaemon((id) => (id === RUN_ID ? { status: 200, body: framedDeliverText({ title: 'T', body: 'Fixes #1' }) } : null));
+
+    const r = await runDeliver(fx, { gh: { failWith: ghErr, editFailWith: 'GraphQL: Resource not accessible', prText: 'Hand title\n\nFixes #1 by hand' }, env: { WICKED_DELIVER_TEXT_OUT: out }, script: { runId: RUN_ID, apiOrigin: daemon.origin } }).finally(() => daemon.close());
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.output).toContain('could not rewrite the description of https://github.com/o/r/pull/1');
+    expect(r.comment).not.toBeNull();
+    expect(readFileSync(out, 'utf8')).toBe('Hand title\n\nFixes #1 by hand\n');
+  }, 120_000);
+
+  it('(e2e-1105 F4c) a rewrite that lands but cannot be read back hands back nothing (never the local composition)', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const again = 6;\n');
+    const ghErr = `a pull request for branch "wicked/${RUN_ID}" into branch "main" already exists:\nhttps://github.com/o/r/pull/1`;
+    const out = join(fx.root, 'pr-text.md');
+    const daemon = await fakeDaemon((id) => (id === RUN_ID ? { status: 200, body: framedDeliverText({ title: 'Composed', body: 'Fixes #1' }) } : null));
+
+    const r = await runDeliver(fx, { gh: { failWith: ghErr, viewFails: true }, env: { WICKED_DELIVER_TEXT_OUT: out }, script: { runId: RUN_ID, apiOrigin: daemon.origin } }).finally(() => daemon.close());
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.ghCalls.some((c) => c.startsWith('pr edit'))).toBe(true);
+    expect(r.output).toContain('could not read back the text of https://github.com/o/r/pull/1');
+    expect(existsSync(out)).toBe(false);
+  }, 120_000);
+
+  it('(e2e-1105 F4c) an existing PR whose text cannot be read back hands back nothing (the engine holds the rules) and still delivers', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const again = 4;\n');
+    const ghErr = `a pull request for branch "wicked/${RUN_ID}" into branch "main" already exists:\nhttps://github.com/o/r/pull/1`;
+    const out = join(fx.root, 'pr-text.md');
+
+    const r = await runDeliver(fx, { gh: { failWith: ghErr, viewFails: true }, env: { WICKED_DELIVER_TEXT_OUT: out } });
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.lastLine).toBe('https://github.com/o/r/pull/1');
+    expect(r.output).toContain('could not read back the text of https://github.com/o/r/pull/1');
+    expect(existsSync(out)).toBe(false);
+    // No daemon answered: the launch-time fallback never replaces the PR's description (it knows no
+    // correction given since); the record rides a comment.
+    expect(r.ghCalls.some((c) => c.startsWith('pr edit'))).toBe(false);
+    expect(r.output).toContain('the PR text is the launch-time fallback, not the run record');
+    expect(r.comment).not.toBeNull();
   }, 120_000);
 
   it('still FAILS when the existing PR gh names is for ANOTHER branch (crew#885)', async () => {

@@ -51,6 +51,19 @@ mentioned only where a daemon release depends on them.
     replacement launched from the held run's envelope (`retryOf`, held at its plan, reduced assurance only when the held
     run had it). 409 `reshape_after_work` once a work plan was accepted.
 
+### Fixed
+
+- **A "Fix <repo> issue #N" job can be delivered (e2e-1105 F4).** The intent "Fix tiny-math issue #1: …", the job
+  title studio writes for an issue, now closes #1 (`Fixes #1`) when the named repo is the delivery repo; another
+  repo's issue, any other word before `issue`, a negated verb ("does not fix #1") and a plain mention still ride as
+  `Refs:`; an owner-qualified "owner/tiny-math issue #1" closes `owner/tiny-math#1` as written. The person's note at
+  the deliver gate ("Retry this step with a note: this PR fixes #1") adds to the closing line (quoted or negated words
+  in it do not). A deliver re-run on the run's own pull request rewrites its description from the run record (never
+  from the launch-time fallback) and hands the engine the PR's text as GitHub holds it, so the rules deferred to
+  delivery are judged instead of looping on "rules unchecked"; if the rewrite fails, the record rides a comment as
+  before. A rule the person asked to skip at the deliver gate is named in the PR text that follows (its reason stays
+  on the run record).
+
 ## [0.17.0] — 2026-11-05
 
 A feature release on wicked-core-ts ^0.15.28 and wicked-crew-api-types 0.191.0, bundling wicked-studio 0.15.0, and
