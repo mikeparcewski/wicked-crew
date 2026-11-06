@@ -412,7 +412,7 @@ import { registerDecisionRoutes } from '../decisions/routes.js';
 import { ChatDecisionRecorder } from '../decisions/chat-recorder.js';
 import { ConsiderationService } from '../decisions/consider.js';
 import { gardenConformance, gardenPackCheck, type ConformanceRunner, type PackCheckRunner } from '../editors/pack-install.js';
-import { conformanceProvisioner, conformanceRuntimeRoot } from '../editors/conformance-runtime.js';
+import { conformanceProvisioner, conformanceRuntimeReady, conformanceRuntimeRoot, conformanceVenvDir, editorPluginLaunchListener, venvPython } from '../editors/conformance-runtime.js';
 import { EditorRegistry } from '../editors/registry.js';
 import { registerEditorRoutes } from '../editors/routes.js';
 import type { AppActionStore } from '../apps/actions/store.js';
@@ -1914,6 +1914,25 @@ export function registerRoutes(
     ...(runtime.studioRoot !== undefined ? { studioRoot: runtime.studioRoot } : {}),
     log: (m) => app.log.warn(m),
   });
+  // (DES-EDITOR-CONFORMANCE-HOST) An editor-plugin run's conformance step runs on this host under crew's runtime:
+  // start making it when such a run starts, so it is ready when the build is done.
+  if (runtime.editorConformance === undefined && typeof (adapter as { onLaunch?: unknown }).onLaunch === 'function') {
+    const root = conformanceRuntimeRoot();
+    const off = adapter.onLaunch(editorPluginLaunchListener({
+      provision: editorConformanceRuntime,
+      log: (m) => app.log.warn(m),
+      managed: venvPython(conformanceVenvDir(root)),
+      ready: () => conformanceRuntimeReady(root),
+      workflowOf: async (runId) => {
+        const events = await adapter.runEvents(runId);
+        const started = events?.find((e) => e.type === 'sessionStarted') as { workflowId?: unknown } | undefined;
+        return typeof started?.workflowId === 'string' ? started.workflowId : undefined;
+      },
+    }));
+    app.addHook('onClose', async () => {
+      off();
+    });
+  }
   registerEditorRoutes(app, {
     registry: editorRegistry,
     adapter,

@@ -117,3 +117,8 @@ process.env['WICKED_CREW_SKILLS_SOURCE'] = join(base, 'no-plugin-source');
 // `default_seat_floor()`). Clear an operator's ambient value so the seat readings under test are
 // the unset (embedder) default; a test that wants a floor sets it and restores it itself.
 delete process.env['WICKED_SEAT_FLOOR'];
+
+// (DES-EDITOR-CONFORMANCE-HOST) An editor-plugin launch under a test server would start crew's real conformance
+// runtime (a venv, pip and Chromium in the OS cache). An interpreter named here is "the operator's own", which crew
+// never provisions for; a test of the provisioning hook drives it with its own environment.
+process.env['WICKED_EDITOR_CONFORMANCE_PYTHON'] = join(base, 'no-conformance-python');

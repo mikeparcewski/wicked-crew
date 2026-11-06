@@ -11,9 +11,16 @@ import {
   CONFORMANCE_PLAYWRIGHT_VERSION,
   CONFORMANCE_RUNTIME_DIR_ENV,
   PROVISIONED_MARKER,
+  ENGINE_CONFORMANCE_PYTHON_ENV,
+  ENGINE_CONFORMANCE_STUDIO_ENV,
+  absoluteCacheEnv,
   conformanceProvisioner,
   conformanceRuntimeRoot,
+  conformanceVenvDir,
+  editorPluginLaunchListener,
+  exportEngineConformanceEnv,
   needsBrowserRuntime,
+  provisionOnEditorPluginLaunch,
   venvPython,
 } from '../src/editors/conformance-runtime.js';
 import { gardenConformance } from '../src/editors/pack-install.js';
@@ -217,5 +224,153 @@ describe('conformanceProvisioner', () => {
     expect(existsSync(join(dir, 'rt4', `venv-playwright-${CONFORMANCE_PLAYWRIGHT_VERSION}`))).toBe(false);
     fail = false;
     expect((await provision()).ok).toBe(true);
+  });
+});
+
+// (DES-EDITOR-CONFORMANCE-HOST, e2e F18) The engine runs an editor-plugin run's conformance cases on this host, from
+// crew's runtime and studio dist, which crew names in the daemon's environment at boot.
+describe('the engine\'s conformance step inputs', () => {
+  it('names crew\'s pinned venv interpreter (the one the provisioner makes) and its studio dist; an operator\'s own setting wins', async () => {
+    const studio = join(dir, 'studio');
+    mkdirSync(studio, { recursive: true });
+    writeFileSync(join(studio, 'index.html'), '<!doctype html>');
+    const env: NodeJS.ProcessEnv = { [CONFORMANCE_RUNTIME_DIR_ENV]: join(dir, 'rt') };
+    const set = exportEngineConformanceEnv(studio, env, 'darwin');
+    const python = venvPython(conformanceVenvDir(join(dir, 'rt'), env), 'darwin');
+    expect(set).toEqual({ python, studio });
+    expect(env[ENGINE_CONFORMANCE_PYTHON_ENV]).toBe(python);
+    expect(env[ENGINE_CONFORMANCE_STUDIO_ENV]).toBe(studio);
+    expect(python).toBe(join(dir, 'rt', `venv-playwright-${CONFORMANCE_PLAYWRIGHT_VERSION}`, 'bin', 'python'));
+    // The path the provisioner reports for the same root is the one named at boot.
+    const made = await conformanceProvisioner(() => join(dir, 'rt'), {
+      env,
+      platform: 'darwin',
+      exec: (async (_bin: string, args: string[]) => {
+        if (args[0] === '-m' && args[1] === 'venv') mkdirSync(join(String(args[2]), 'bin'), { recursive: true });
+        if (args[0] === '-m' && args[1] === 'venv') writeFileSync(join(String(args[2]), 'bin', 'python'), '');
+        return { stdout: '', stderr: '' };
+      }) as never,
+    })();
+    expect(made).toEqual({ ok: true, python });
+    const own: NodeJS.ProcessEnv = { [ENGINE_CONFORMANCE_PYTHON_ENV]: '/opt/py', [ENGINE_CONFORMANCE_STUDIO_ENV]: '/opt/dist' };
+    expect(exportEngineConformanceEnv(studio, own, 'darwin')).toEqual({});
+    expect(own[ENGINE_CONFORMANCE_PYTHON_ENV]).toBe('/opt/py');
+    // A bundle with no index.html (a headless daemon) names no dist: the engine's step then refuses with a retry.
+    const headless: NodeJS.ProcessEnv = {};
+    expect(exportEngineConformanceEnv(join(dir, 'nothing'), headless, 'darwin').studio).toBeUndefined();
+    expect(headless[ENGINE_CONFORMANCE_STUDIO_ENV]).toBeUndefined();
+  });
+
+  it('refreshes its own exports on a later boot (never mistaking them for an operator\'s), and follows the pin and the platform', () => {
+    const a = join(dir, 'studio-a');
+    const b = join(dir, 'studio-b');
+    for (const d of [a, b]) {
+      mkdirSync(d, { recursive: true });
+      writeFileSync(join(d, 'index.html'), '<!doctype html>');
+    }
+    const env: NodeJS.ProcessEnv = { [CONFORMANCE_RUNTIME_DIR_ENV]: join(dir, 'rt') };
+    exportEngineConformanceEnv(a, env, 'darwin');
+    exportEngineConformanceEnv(b, env, 'darwin');
+    expect(env[ENGINE_CONFORMANCE_STUDIO_ENV]).toBe(b);
+    exportEngineConformanceEnv(null, env, 'darwin'); // a headless boot after them
+    expect(env[ENGINE_CONFORMANCE_STUDIO_ENV]).toBeUndefined();
+    env[CONFORMANCE_PLAYWRIGHT_ENV] = '1.70.1';
+    exportEngineConformanceEnv(null, env, 'win32');
+    expect(env[ENGINE_CONFORMANCE_PYTHON_ENV]).toBe(join(dir, 'rt', 'venv-playwright-1.70.1', 'Scripts', 'python.exe'));
+    // A relative runtime override, or an empty or relative cache variable, never yields a relative interpreter
+    // (the engine runs only an absolute one).
+    for (const e of [{ [CONFORMANCE_RUNTIME_DIR_ENV]: 'rel-rt' }, { XDG_CACHE_HOME: '' }, { XDG_CACHE_HOME: 'rel-cache' }] as NodeJS.ProcessEnv[]) {
+      exportEngineConformanceEnv(null, e, 'linux');
+      expect(e[ENGINE_CONFORMANCE_PYTHON_ENV]!.startsWith('/'), JSON.stringify(e)).toBe(true);
+    }
+  });
+
+  it('starts making the runtime when an editor-plugin run is launched, never for another run or an operator\'s own interpreter', async () => {
+    let calls = 0;
+    const logs: string[] = [];
+    const provision = async () => {
+      calls += 1;
+      return { ok: false as const, error: 'crew could not provision the conformance browser: no index' };
+    };
+    const managed = '/rt/venv/bin/python';
+    const env: NodeJS.ProcessEnv = { [ENGINE_CONFORMANCE_PYTHON_ENV]: managed, [ENGINE_CONFORMANCE_STUDIO_ENV]: '/studio' };
+    const fire = (n: { kind: string; status: string; workflow?: string }, e = env) =>
+      provisionOnEditorPluginLaunch(n, provision, (m) => logs.push(m), e, managed);
+    expect(fire({ kind: 'run', status: 'handed', workflow: 'feature' })).toBe(false);
+    expect(fire({ kind: 'campaign', status: 'handed', workflow: 'editor-plugin' })).toBe(false);
+    expect(fire({ kind: 'run', status: 'rejected', workflow: 'editor-plugin' })).toBe(false);
+    expect(fire({ kind: 'run', status: 'handed', workflow: 'editor-plugin' }, { [ENGINE_CONFORMANCE_PYTHON_ENV]: '/opt/py', [ENGINE_CONFORMANCE_STUDIO_ENV]: '/studio' })).toBe(false);
+    // A headless daemon (no studio dist): the step can never pass there, so nothing is downloaded.
+    expect(fire({ kind: 'run', status: 'handed', workflow: 'editor-plugin' }, { [ENGINE_CONFORMANCE_PYTHON_ENV]: managed })).toBe(false);
+    // `accepted` follows `handed` for the same launch: one hand-off, one start.
+    expect(fire({ kind: 'run', status: 'accepted', workflow: 'editor-plugin' })).toBe(false);
+    expect(calls).toBe(0);
+    expect(fire({ kind: 'run', status: 'handed', workflow: 'editor-plugin' })).toBe(true);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls).toBe(1);
+    expect(logs.join('\n')).toContain('crew could not provision the conformance browser');
+  });
+
+  it('provisions with absolute browser-cache variables only (the engine runs the cases from another directory)', async () => {
+    expect(absoluteCacheEnv({ XDG_CACHE_HOME: 'rel', PLAYWRIGHT_BROWSERS_PATH: 'pw', HOME: '/h' }, 'linux')).toEqual({ HOME: '/h' });
+    expect(absoluteCacheEnv({ XDG_CACHE_HOME: '/abs' }, 'linux')).toEqual({ XDG_CACHE_HOME: '/abs' });
+    const seen: NodeJS.ProcessEnv[] = [];
+    await conformanceProvisioner(() => join(dir, 'rt2'), {
+      env: { XDG_CACHE_HOME: 'rel-cache' },
+      platform: 'linux',
+      exec: (async (_bin: string, args: string[], opts: { env: NodeJS.ProcessEnv }) => {
+        seen.push(opts.env);
+        if (args[1] === 'venv') {
+          mkdirSync(join(String(args[2]), 'bin'), { recursive: true });
+          writeFileSync(join(String(args[2]), 'bin', 'python'), '');
+        }
+        return { stdout: '', stderr: '' };
+      }) as never,
+    })();
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((e) => e['XDG_CACHE_HOME'] === undefined)).toBe(true);
+    // The install-time run resolves the same cache (codex, crew review r4).
+    const runEnvs: NodeJS.ProcessEnv[] = [];
+    const run = gardenConformance(garden, () => 'http://127.0.0.1:1', {
+      env: { PLAYWRIGHT_BROWSERS_PATH: 'rel-browsers', XDG_CACHE_HOME: '/abs-cache' },
+      exec: (async (_bin: string, _args: string[], opts: { env: NodeJS.ProcessEnv }) => {
+        runEnvs.push(opts.env);
+        return { stdout: PASSED, stderr: '' };
+      }) as never,
+    });
+    await run('/pack', []);
+    expect(runEnvs[0]?.['PLAYWRIGHT_BROWSERS_PATH']).toBeUndefined();
+    expect(runEnvs[0]?.['XDG_CACHE_HOME']).toBe('/abs-cache');
+  });
+
+  it('a resume or gate answer on an editor-plugin run starts the runtime when it is not made yet (the retry path)', async () => {
+    let calls = 0;
+    const provision = async () => {
+      calls += 1;
+      return { ok: true as const, python: '/rt/venv/bin/python' };
+    };
+    const env: NodeJS.ProcessEnv = { [ENGINE_CONFORMANCE_PYTHON_ENV]: '/rt/venv/bin/python', [ENGINE_CONFORMANCE_STUDIO_ENV]: '/studio' };
+    let ready = false;
+    const looked: string[] = [];
+    const listen = editorPluginLaunchListener({
+      provision,
+      log: () => undefined,
+      managed: '/rt/venv/bin/python',
+      ready: () => ready,
+      workflowOf: async (id) => {
+        looked.push(id);
+        return id === 'ep-run' ? 'editor-plugin' : 'feature';
+      },
+      env,
+    });
+    listen({ kind: 'run', id: 'ep-run', status: 'handed' });
+    listen({ kind: 'run', id: 'other', status: 'handed' });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls).toBe(1);
+    expect(looked).toEqual(['ep-run', 'other']);
+    ready = true; // made: a resume reads nothing
+    listen({ kind: 'run', id: 'ep-run', status: 'handed' });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(looked).toHaveLength(2);
   });
 });

@@ -10,6 +10,7 @@ import { DecisionLedger } from '../decisions/ledger.js';
 import type { ChatDecisionRecorder } from '../decisions/chat-recorder.js';
 import type { ConsiderationService } from '../decisions/consider.js';
 import { requestOrigin, shellCsp } from '../editors/csp.js';
+import { exportEngineConformanceEnv } from '../editors/conformance-runtime.js';
 import { launchRosterNaming, registerRoutes } from './routes.js';
 import { APPS_ACTIONS_STATE_FILENAME, AppActionStore } from '../apps/actions/store.js';
 import { AppsSourceStage } from '../apps/exec/source-stage.js';
@@ -2514,6 +2515,9 @@ export async function createServer(
   // diagnostics reads the bundle's shipped version manifest from the same root the static
   // handler serves. One resolution, two consumers.
   const studioRoot = options?.studioRoot ?? defaultStudioRoot();
+  // (DES-EDITOR-CONFORMANCE-HOST, e2e F18) The engine runs an editor-plugin run's conformance cases on this host: it
+  // reads crew's conformance runtime and this studio dist from the daemon's environment.
+  exportEngineConformanceEnv(studioRoot);
 
   // DES-MCP-TOOLS-001 S2: the registry over `<state home>/mcp` (created on the first save).
   const mcpRegistryStore = new McpRegistryStore();

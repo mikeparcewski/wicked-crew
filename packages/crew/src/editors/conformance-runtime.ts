@@ -21,7 +21,7 @@
 
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, posix, resolve, win32 } from 'node:path';
 
 import { execCapped } from '../core/exec.js';
 
@@ -38,13 +38,129 @@ export const PROVISIONED_MARKER = '.wicked-provisioned';
 /** The OS cache directory's `wicked-crew/editor-conformance`, or the override. */
 export function conformanceRuntimeRoot(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform, home: string = homedir()): string {
   const override = (env[CONFORMANCE_RUNTIME_DIR_ENV] ?? '').trim();
-  if (override !== '') return override;
+  // Absolute, always: the engine runs only an absolute interpreter path (a relative one would refuse forever).
+  if (override !== '') return resolve(override);
+  // An empty or relative cache variable is unset (the engine runs only an absolute interpreter path).
+  const isAbs = platform === 'win32' ? win32.isAbsolute : posix.isAbsolute;
+  const absolute = (v: string | undefined): string | undefined => (v !== undefined && isAbs(v) ? v : undefined);
   const cache = platform === 'darwin'
     ? join(home, 'Library', 'Caches')
     : platform === 'win32'
-      ? (env['LOCALAPPDATA'] ?? join(home, 'AppData', 'Local'))
-      : (env['XDG_CACHE_HOME'] ?? join(home, '.cache'));
-  return join(cache, 'wicked-crew', 'editor-conformance');
+      ? (absolute(env['LOCALAPPDATA']) ?? join(home, 'AppData', 'Local'))
+      : (absolute(env['XDG_CACHE_HOME']) ?? join(home, '.cache'));
+  const root = join(cache, 'wicked-crew', 'editor-conformance');
+  return isAbs(root) ? root : resolve(root);
+}
+
+/** The Playwright pin crew provisions: {@link CONFORMANCE_PLAYWRIGHT_ENV} when it is a version, else the default. */
+export function conformancePin(env: NodeJS.ProcessEnv = process.env): string {
+  const v = (env[CONFORMANCE_PLAYWRIGHT_ENV] ?? '').trim();
+  return /^\d+\.\d+\.\d+$/.test(v) ? v : CONFORMANCE_PLAYWRIGHT_VERSION;
+}
+
+/**
+ * `env` without a relative browser-cache variable (`XDG_CACHE_HOME`, `PLAYWRIGHT_BROWSERS_PATH`): Playwright would
+ * install Chromium relative to the daemon's working directory, while the engine runs the cases from its own temp
+ * dir (and passes only absolute path variables), so the two would never meet.
+ */
+export function absoluteCacheEnv(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
+  const isAbs = platform === 'win32' ? win32.isAbsolute : posix.isAbsolute;
+  const out: NodeJS.ProcessEnv = { ...env };
+  for (const k of ['XDG_CACHE_HOME', 'PLAYWRIGHT_BROWSERS_PATH']) {
+    const v = out[k];
+    if (v !== undefined && !isAbs(v)) delete out[k];
+  }
+  return out;
+}
+
+/** The pinned venv's directory under the runtime root (the one {@link conformanceProvisioner} makes). */
+export function conformanceVenvDir(root: string, env: NodeJS.ProcessEnv = process.env): string {
+  return join(root, `venv-playwright-${conformancePin(env)}`);
+}
+
+/**
+ * (DES-EDITOR-CONFORMANCE-HOST, e2e F18) The daemon variable naming the interpreter of crew's conformance runtime,
+ * read by the engine when it runs an editor-plugin run's `conformance` step on the host
+ * (wicked-core `editor_conformance::PYTHON_ENV`).
+ */
+export const ENGINE_CONFORMANCE_PYTHON_ENV = 'WICKED_EDITOR_CONFORMANCE_PYTHON';
+/** The daemon variable naming the studio dist that step serves its host page from (`editor_conformance::STUDIO_DIST_ENV`). */
+export const ENGINE_CONFORMANCE_STUDIO_ENV = 'WICKED_EDITOR_CONFORMANCE_STUDIO_DIST';
+
+/**
+ * At boot: tell the in-process engine where crew's conformance runtime is (its pinned venv's interpreter; the path is
+ * fixed, so it is named even before the venv is made, and the engine's step refuses with a retry until it exists)
+ * and which studio dist to serve the host page from (crew's own bundle, when it holds `index.html`). An operator's
+ * own setting of either wins. The engine reads the daemon's environment at each dispatch, as it does
+ * `WICKED_CREW_BIN`. Returns what it set.
+ */
+export function exportEngineConformanceEnv(
+  studioRoot: string | null,
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): { python?: string; studio?: string } {
+  // What crew itself exported into this environment before (a server booted earlier in the same process):
+  // crew's own values are refreshed on every boot; only a value crew did not write is the operator's.
+  const mine = crewExports.get(env) ?? {};
+  const operators = (key: string, crew: string | undefined): boolean => {
+    const v = (env[key] ?? '').trim();
+    return v !== '' && v !== crew;
+  };
+  const out: { python?: string; studio?: string } = {};
+  if (!operators(ENGINE_CONFORMANCE_PYTHON_ENV, mine.python)) {
+    out.python = venvPython(conformanceVenvDir(conformanceRuntimeRoot(env, platform), env), platform);
+    env[ENGINE_CONFORMANCE_PYTHON_ENV] = out.python;
+  }
+  if (!operators(ENGINE_CONFORMANCE_STUDIO_ENV, mine.studio)) {
+    if (studioRoot !== null && existsSync(join(studioRoot, 'index.html'))) {
+      out.studio = studioRoot;
+      env[ENGINE_CONFORMANCE_STUDIO_ENV] = studioRoot;
+    } else if (mine.studio !== undefined) {
+      // A headless boot after one that served a studio: the old dist is not this server's.
+      delete env[ENGINE_CONFORMANCE_STUDIO_ENV];
+    }
+  }
+  crewExports.set(env, { ...mine, ...out });
+  return out;
+}
+
+/** The values crew exported into each environment object (by identity), so a later boot can tell them from an operator's. */
+const crewExports = new WeakMap<NodeJS.ProcessEnv, { python?: string; studio?: string }>();
+
+/** Whether crew's managed runtime at `root` is fully made (the provisioner's marker beside its interpreter). */
+export function conformanceRuntimeReady(root: string, env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): boolean {
+  const venv = conformanceVenvDir(root, env);
+  return existsSync(join(venv, PROVISIONED_MARKER)) && existsSync(venvPython(venv, platform));
+}
+
+/**
+ * (DES-EDITOR-CONFORMANCE-HOST) When an editor-plugin run is launched (the adapter's launch notice, every launch
+ * path), make crew's conformance runtime in the background
+ * (deduped; a made one is reused at once), so the engine's `conformance` step finds it after the build. Nothing is
+ * installed when an operator named their own interpreter. A failure is logged with crew's fix line; the step then
+ * refuses and its gate offers a retry.
+ */
+export function provisionOnEditorPluginLaunch(
+  notice: { kind: string; status: string; workflow?: string },
+  provision: ConformanceProvisioner,
+  log: (m: string) => void,
+  env: NodeJS.ProcessEnv = process.env,
+  managed: string | undefined = undefined,
+): boolean {
+  // One notice per hand-off: `handed` (the `accepted` that follows it is the same launch).
+  if (notice.kind !== 'run' || notice.status !== 'handed' || notice.workflow !== 'editor-plugin') return false;
+  // An operator's own interpreter: crew provisions nothing (only crew's managed path is crew's to make).
+  if (managed !== undefined && (env[ENGINE_CONFORMANCE_PYTHON_ENV] ?? '') !== managed) return false;
+  // No studio dist to serve the host page from (a headless daemon): the step can never pass here, so nothing
+  // is downloaded for it.
+  if ((env[ENGINE_CONFORMANCE_STUDIO_ENV] ?? '').trim() === '') return false;
+  void provision().then(
+    (r) => {
+      if (!r.ok) log(`[editors] an editor-plugin run started, but ${r.error}`);
+    },
+    (err: unknown) => log(`[editors] provisioning the conformance runtime failed: ${err instanceof Error ? err.message : String(err)}`),
+  );
+  return true;
 }
 
 /** Bounds on each provisioning step. */
@@ -88,13 +204,10 @@ export function conformanceProvisioner(root: () => string, deps: ProvisionDeps =
   const env = deps.env ?? process.env;
   const platform = deps.platform ?? process.platform;
   let inFlight: Promise<Provisioned> | null = null;
-  const pin = (): string => {
-    const v = (env[CONFORMANCE_PLAYWRIGHT_ENV] ?? '').trim();
-    return /^\d+\.\d+\.\d+$/.test(v) ? v : CONFORMANCE_PLAYWRIGHT_VERSION;
-  };
+  const pin = (): string => conformancePin(env);
   const run = async (): Promise<Provisioned> => {
     const dir = root();
-    const venv = join(dir, `venv-playwright-${pin()}`);
+    const venv = conformanceVenvDir(dir, env);
     const python = venvPython(venv, platform);
     const marker = join(venv, PROVISIONED_MARKER);
     // A venv every step finished in is reused as is: no package index, no browser download.
@@ -107,7 +220,7 @@ export function conformanceProvisioner(root: () => string, deps: ProvisionDeps =
     };
     const step = async (what: string, file: string, args: string[], timeout: number): Promise<{ missing: boolean; error: string } | null> => {
       try {
-        await exec(file, args, { timeout, windowsHide: true, env });
+        await exec(file, args, { timeout, windowsHide: true, env: absoluteCacheEnv(env, platform) });
         return null;
       } catch (err) {
         return { missing: (err as NodeJS.ErrnoException).code === 'ENOENT', error: `${what} failed: ${message(err)}` };
@@ -145,5 +258,35 @@ export function conformanceProvisioner(root: () => string, deps: ProvisionDeps =
       });
     }
     return inFlight;
+  };
+}
+
+/**
+ * (DES-EDITOR-CONFORMANCE-HOST) The launch listener crew registers: a new editor-plugin launch starts the
+ * runtime ({@link provisionOnEditorPluginLaunch}); a resume or a gate answer on a run (its notice names no
+ * workflow) does too when the runtime is not made yet and the run is an editor-plugin run, so the conformance
+ * step's retry after a failed or interrupted provisioning is not a refusal forever.
+ */
+export function editorPluginLaunchListener(deps: {
+  provision: ConformanceProvisioner;
+  log: (m: string) => void;
+  managed: string;
+  ready: () => boolean;
+  workflowOf: (runId: string) => Promise<string | undefined>;
+  env?: NodeJS.ProcessEnv;
+}): (notice: { kind: string; id: string; status: string; workflow?: string }) => void {
+  const env = deps.env ?? process.env;
+  return (notice) => {
+    if (notice.workflow !== undefined) {
+      provisionOnEditorPluginLaunch(notice, deps.provision, deps.log, env, deps.managed);
+      return;
+    }
+    if (notice.kind !== 'run' || notice.status !== 'handed' || deps.ready()) return;
+    void deps.workflowOf(notice.id).then(
+      (workflow) => {
+        if (workflow !== undefined) provisionOnEditorPluginLaunch({ ...notice, workflow }, deps.provision, deps.log, env, deps.managed);
+      },
+      () => undefined,
+    );
   };
 }
