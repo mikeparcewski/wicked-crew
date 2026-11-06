@@ -941,7 +941,7 @@ export const ESCALATION_ACTIONS = ['extend', 'targeted', 'accept_partial', 'acce
 /** (e2e-1105 F23, api-types 0.195.0) `retry_qe` (an escalation arm above): REDO THE QE CHECK at the gate of the run's QE
  *  step whose isolated reviewer gave no verdict on the work (INCONCLUSIVE, no reviewer seat, or no bound verdict). The
  *  engine (wicked-core `HumanDecision::RetryQe`, core#1312) runs the QE step again from fresh evidence with a new
- *  isolated reviewer session, never on an author of the work; it is never a verdict (QE stays required, only that
+ *  isolated reviewer session, never on an author of the work outside reduced assurance; it is never a verdict (QE stays required, only that
  *  reviewer's PASS counts) and is capped at 2 per QE step and tree. The engine refuses it (409) at any other gate,
  *  at the cap, and when no reviewer seat can run now. */
 /** (DES-RULE-CHECK-001 S2, api-types 0.190.0) At a gate the steering-rule check holds or denies:
