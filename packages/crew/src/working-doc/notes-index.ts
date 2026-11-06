@@ -9,7 +9,8 @@
  *  - In recorded order: entries recorded while the start-up read is in flight wait, and join after it (xreview r2).
  *  - Bounded: each kept note is the line's own compact form (words already cut to 280 characters), at most
  *    {@link NOTES_PER_RUN} per run (the newest; Decisions holds 4,000 characters) and {@link NOTES_TOTAL} in all, the run
- *    heard from longest ago dropped first. The trail itself keeps everything.
+ *    heard from longest ago dropped first. The trail itself keeps everything: a dropped run is read back from it the
+ *    next time its document is brought up to date ({@link needsReload}, xreview r3), so its lines never go missing.
  */
 
 import { NOTE_ACTIONS, personNotes, type AuditLike, type PersonNote } from './event-lines.js';
@@ -29,6 +30,8 @@ export class PersonNotesIndex {
   private total = 0;
   private ready = false;
   private waiting: Array<AuditLike & { runId: string }> = [];
+  /** Runs whose notes the bound dropped: read back from the trail when next needed. */
+  private readonly dropped = new Set<string>();
 
   constructor(private readonly limits: { perRun?: number; total?: number } = {}) {}
 
@@ -54,7 +57,11 @@ export class PersonNotesIndex {
       this.keep(e);
     }
     const touched = new Set<string>();
-    for (const e of this.waiting) if (!seen.has(keyOf(e)) && this.keep(e)) touched.add(e.runId);
+    // Every answer that arrived meanwhile names its run (its document is brought up to date), whether or not the read
+    // already had it (xreview r3); it is kept once.
+    for (const e of this.waiting) {
+      if (seen.has(keyOf(e)) ? personNotes([e]).length > 0 : this.keep(e)) touched.add(e.runId);
+    }
     this.waiting = [];
     this.ready = true;
     return [...touched];
@@ -65,9 +72,26 @@ export class PersonNotesIndex {
     return this.byRun.get(runId) ?? [];
   }
 
+  /** The bound dropped this run's notes: read them back ({@link reload}) before using {@link of}. */
+  needsReload(runId: string): boolean {
+    return this.dropped.has(runId);
+  }
+
+  /** The run's own trail entries (newest first, as `AuditLog.readAll({runId})` answers), replacing what is kept. */
+  reload(runId: string, newestFirst: readonly AuditLike[]): void {
+    this.dropped.delete(runId);
+    const old = this.byRun.get(runId);
+    if (old !== undefined) { this.total -= old.length; this.byRun.delete(runId); }
+    for (let i = newestFirst.length - 1; i >= 0; i -= 1) {
+      const e = newestFirst[i]!;
+      if (relevant(e) && e.runId === runId) this.keep(e);
+    }
+  }
+
   private keep(e: AuditLike & { runId: string }): boolean {
     const notes = personNotes([e]);
     if (notes.length === 0) return false;
+    // (A dropped run stays marked: what is kept for it now is partial until it is read back whole.)
     const list = this.byRun.get(e.runId) ?? [];
     // Most recently heard from last (Map order), so the bound drops the run quietest the longest.
     this.byRun.delete(e.runId);
@@ -80,6 +104,7 @@ export class PersonNotesIndex {
     for (const [runId, l] of this.byRun) {
       if (this.total <= max || runId === e.runId) break;
       this.byRun.delete(runId);
+      this.dropped.add(runId);
       this.total -= l.length;
     }
     return true;

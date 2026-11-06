@@ -132,6 +132,7 @@ describe('every run gets its working document, filled from its own records (W12)
     const t = setup({ log, audit: w12Audit() });
     t.service.onEvent(log.at(-1)!);
     await tick();
+    await t.service.syncLines('run-1'); // the live sync's turn has ended
     expect(t.backend.creates).toBe(1);
     const s = t.sections();
     expect(s.goal).toBe('Fixes tiny-math issue #12.');
@@ -166,6 +167,7 @@ describe('every run gets its working document, filled from its own records (W12)
     const t = setup({ log, audit });
     t.service.onEvent(log[1]!);
     await tick();
+    await t.service.syncLines('run-1');
     expect(t.sections().decisions?.split('\n')).toEqual([
       `You · ${clock(min(2))} · overrode a failed check: “The failing tests are the existing sum() bug on main (tiny-math issue #1), not this change.”`,
       `A failed check or review · answered ${clock(min(3))}`,
@@ -181,6 +183,7 @@ describe('every run gets its working document, filled from its own records (W12)
     const t = setup({ log, facts });
     t.service.onEvent(log.at(-1)!);
     await tick();
+    await t.service.syncLines('run-1'); // the live sync's turn has ended
     expect(t.sections().approach).toBe('');
     // Approved: the plan is the Approach.
     log.push(ev('resumed', min(4), { ord: 2 }), ev('unitExecuting', min(4), { ord: 2 }));
@@ -205,6 +208,7 @@ describe('every run gets its working document, filled from its own records (W12)
     const t = setup({ log });
     t.service.onEvent(log.at(-1)!);
     await tick();
+    await t.service.syncLines('run-1'); // the live sync's turn has ended
     expect(t.backend.creates).toBe(1);
     expect(t.sections().approach).toBe('');
     // A run the session marks power, before any power event, likewise.
@@ -348,7 +352,8 @@ describe('xreview r1 folds', () => {
     const b = { ts: 5, action: 'guidance.set', runId: 'r', actor: human, detail: { text: 'second' } };
     // xreview r2: B is recorded live while the start-up read (which has A and B) is in flight: A, B, not B, A.
     expect(idx.add(b)).toBeNull();
-    expect(idx.hydrate([b, a])).toEqual([]); // readAll answers newest first; B was already in the read
+    // readAll answers newest first; B was already in the read, kept once, and still names its run (xreview r3).
+    expect(idx.hydrate([b, a])).toEqual(['r']);
     expect(idx.of('r').map((n) => n.words)).toEqual(['first', 'second']);
     // Live after the read: kept and named for a nudge; a seat's, or an entry with no words, never.
     expect(idx.add({ ts: 6, action: 'gate.decided', runId: 'r', actor: { id: 'standing-order:x', kind: 'system' }, detail: { amend: 'x' } })).toBeNull();
@@ -374,6 +379,11 @@ describe('xreview r1 folds', () => {
     expect(idx.of('a')).toEqual([]); // 3 + 2 + 1 > 5: the quietest run goes
     expect(idx.of('b')).toHaveLength(2);
     expect(idx.of('c')).toHaveLength(1);
+    // xreview r3: a dropped run is read back from the trail when next needed, so its lines never go missing.
+    expect(idx.needsReload('a')).toBe(true);
+    idx.reload('a', [5, 4, 3, 2, 1].map((ts) => ({ ts, action: 'guidance.set', runId: 'a', actor: human, detail: { text: `a-${ts}` } })));
+    expect(idx.needsReload('a')).toBe(false);
+    expect(idx.of('a').map((n) => n.words)).toEqual(['a-3', 'a-4', 'a-5']);
   });
 
   it('the audit trail tells its listeners each entry as it is recorded; a disabled trail tells none', async () => {
@@ -442,5 +452,25 @@ describe('xreview r2 folds', () => {
     expect(t.sections().questions).toBe(`Waiting on you · A failed check or review · since ${clock(min(22))}`);
     const view = await t.service.view('run-1');
     expect(view.trail.find((x) => x.sections.includes('approach'))?.author).toEqual({ kind: 'agent', id: 'agent:claude' });
+  });
+});
+
+// xreview r3 (codex gpt-6.1-sol): a revised plan landing between the event read and the unit-list read.
+describe('xreview r3 folds', () => {
+  it('a revision that lands between the two reads is never written as the approved plan', async () => {
+    const approved = phasedRun();
+    const revised = [...approved, ev('awaitingHuman', min(30), { ord: 4, gateKind: 'plan_approval', reviewingOrd: 3 })];
+    let reads = 0;
+    const backend = new FakeBackend();
+    const service = new WorkingDocService({
+      store: new WorkingDocStore({ stateHome: home() }), backend,
+      engine: { injectWorkerMessage: async () => 'q' },
+      // The unit list already shows the revision (a fifth step) when it is read.
+      run: async () => ({ title: 'x', problem: 'p', projectId: 'default', terminal: false, stepOf: () => null, steps: [...W12_STEPS, { ord: 5, name: 'parity', seat: 'codex' }] }),
+      events: async () => { reads += 1; return reads === 1 ? approved : revised; },
+    });
+    await service.syncLines('run-1', { create: true });
+    expect(sectionsOf(backend.latest('run-1')!.html).approach).toBe('');
+    expect(reads).toBeGreaterThanOrEqual(2);
   });
 });

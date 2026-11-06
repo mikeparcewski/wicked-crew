@@ -572,6 +572,13 @@ export class WorkingDocService {
     if (this.planChecked.get(runId) === key) return null;
     const run = await this.d.run(runId);
     if (run === null || run.power === true || run.steps === undefined) return null;
+    // The plan the unit list shows must be the one the events settled: a revision (and its new plan gate) landing
+    // between the two reads would be written as approved (xreview r3). The event that changed it brings its own sync.
+    const again = this.d.events !== undefined ? await this.d.events(runId) : null;
+    if (again === null) return null;
+    const now = foldLines(again);
+    const settledNow = planSettled(now);
+    if (settledNow === null || `${settledNow.approvedAt}|${settledNow.authorOrd}|${now.started.join(',')}|${now.gates.length}|${now.planned}` !== key) return null;
     const steps = [...run.steps].sort((a, b) => a.ord - b.ord);
     const text = planApproach(steps.map((x) => x.name), settled.approvedAt);
     if (text === null) return null;
