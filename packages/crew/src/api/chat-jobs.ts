@@ -511,6 +511,45 @@ export function inputsOfProposal(p: ArtifactProposal): Record<string, ProposalIn
   return { ...(p.inputs ?? {}) };
 }
 
+/** The controls a job's words must never lower: its checks and its seat protections, by any of their names. */
+const CONTROL = String.raw`(?:the\s+|any\s+|a\s+|all\s+)?(?:distinct\s+|independent\s+|separate\s+|second\s+|other\s+)?(?:reviews?|reviewers?|review\s+step|judges?|judging|parity|qe(?:\s+acceptance)?|acceptance|tests?|testing|checks?|cited\s+findings|citations|evidence\s+floor|floor|plan\s+(?:gate|approval)|gates?)(?:\s+checks?)?`;
+// A lowering verb, then the control, with at most two words between ("without running the reviewer's checks").
+const LOWER_VERB = new RegExp(String.raw`\b(skip(?:ping)?|drop(?:ping)?|remov(?:e|ing)|disabl(?:e|ing)|bypass(?:ing)?|omit(?:ting)?|cut(?:ting)?|ditch(?:ing)?|waiv(?:e|ing)|forget|lighten|reduc(?:e|ing)|fewer|less|turn(?:ing)?\s+off|get\s+rid\s+of|ignor(?:e|ing)|without|no\s+need\s+for|(?:don'?t|do\s+not)\s+need)(?:\s+[\w'’-]+){0,2}?\s+${CONTROL}\b`, 'giu');
+const NO_CONTROL = /\bno\s+(?:qe|parity|review|reviewer|judge)\b/giu;
+/** A prohibition of a check itself ("do not run the independent review", "never run the tests", "do not review it"),
+ *  apart from a negation that keeps one ("do not drop parity": no performing verb) or scopes the work ("don't review the
+ *  generated files": the object is not a check; pi r3). */
+const PROHIBIT = new RegExp(String.raw`\b(?:don'?t|do\s+not|never|no\s+need\s+to)\s+(?:(?:run|do|perform|use|have|bother\s+(?:with|to)|need)\s+${CONTROL}|(?:review|test|check|judge)\s+(?:it|this|that|the\s+(?:change|work|pr|fix|code|job))\b|(?:review|test|check|judge)(?=\s*(?:$|[.,;:!?)]))|(?:review|test|check|judge)\s+(?:or|and|nor)\s+(?:review|test|check|judge)\b)`, 'giu');
+/** A control turned off with the control between ("turn QE off"). */
+const TURN_OFF = new RegExp(String.raw`\bturn(?:ing)?\s+${CONTROL}\s+off\b`, 'giu');
+const SHIP = /\b(?:tag(?:ging)?\s+(?:it|the\s+release|a\s+release|v?\d[\w.]*)|publish(?:ing)?\s+(?:it|the\s+package|to\s+npm)|merg(?:e|ing)\s+(?:it|the\s+pr)|push(?:ing)?\s+(?:it\s+)?to\s+main)\b/giu;
+/** A negation just before a match makes it a request to KEEP the check ("do not drop parity", "without skipping QE"). */
+const NEGATED_BEFORE = /\b(?:don'?t|do\s+not|never|not|without|no)\s+(?:\w+\s+){0,2}$/iu;
+
+/**
+ * Whether words, carried into a job's brief, would ask the lead to lower a check, drop a protected seat, or tag,
+ * publish or merge (§9.1 "carried words must never carry a skip"). Descriptive facts ("there are no tests for this
+ * module", "no tests failed") and requests to keep a check ("do not drop parity", "without skipping QE") do not.
+ */
+export function lowersCheck(raw: string): boolean {
+  const text = raw.replace(/[\u2018\u2019]/gu, "'");
+  for (const re of [PROHIBIT, TURN_OFF, LOWER_VERB, NO_CONTROL, SHIP]) {
+    re.lastIndex = 0;
+    for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+      const verb = (m[1] ?? m[0]).toLowerCase();
+      // Another lowering verb between this one and the control ("without SKIPPING QE"): the inner one is the request,
+      // read with its own negation; scan on from just after this verb.
+      if (re === LOWER_VERB && /\b(?:skip|drop|remov|disabl|bypass|omit|cut|ditch|waiv|ignor)/iu.test(m[0].slice(verb.length))) {
+        re.lastIndex = m.index + verb.length;
+        continue;
+      }
+      if (re !== PROHIBIT && !verb.startsWith('without') && NEGATED_BEFORE.test(text.slice(0, m.index))) continue;
+      return true;
+    }
+  }
+  return false;
+}
+
 // ── the merge (§4.6) ───────────────────────────────────────────────────────────────────────────────────────────────
 
 /** What a merge produced: the facts to resolve, the notes, and the checks it would lose. */
@@ -665,6 +704,11 @@ export function mergeRevision(
         notes.push('Not changed: pick at most 40 requirements');
         continue;
       }
+      // Words that would lower a check never reach the brief through an input either (codex r1).
+      if (v.kind === 'text' && lowersCheck(v.value)) {
+        notes.push(`Not changed: ${def.label} would ask the job to drop a check, and its checks are its own`);
+        continue;
+      }
       if (id === 'intent' && v.kind === 'text') {
         facts.words = v.value.slice(0, 8000);
         continue;
@@ -690,6 +734,12 @@ export function mergeRevision(
     for (const d of edits.detail.remove ?? []) facts.details = facts.details.filter((x) => x !== d);
     for (const d of edits.detail.add ?? []) {
       const t = d.trim().slice(0, 200);
+      // DES-CATALOG-002 §9.1: carried words never carry a lowered check ("skip parity" as a detail would reach the
+      // lead's brief): refused with a note, the rest of the revision standing.
+      if (lowersCheck(t)) {
+        notes.push(`Not changed: “${t.slice(0, 60)}” would ask the job to drop a check, and its checks are its own`);
+        continue;
+      }
       if (t !== '' && !facts.details.includes(t) && !facts.words.includes(t)) facts.details.push(t);
     }
     facts.details = facts.details.slice(0, 12);
@@ -722,14 +772,19 @@ export function ownWords(message: string): string {
   let t = message
     .replace(/(^|[\s(])\u2018[^\u2019]*\u2019(?![a-z])/giu, '$1 ')
     .replace(/(?<=[a-z])\u2019(?=[a-z])/giu, "'")
-    .replace(/```[\s\S]*?```/gu, ' ')
+    // Fenced blocks of any supported length, backtick or tilde (codex r4).
+    .replace(/(`{3,}|~{3,})[\s\S]*?(?:\1|$)/gu, ' ')
     .replace(/`[^`]*`/gu, ' ')
     .split('\n')
     .filter((line) => !/^\s*>/u.test(line))
     .join('\n');
   t = t.replace(/“[^”]*”|"[^"]*"|«[^»]*»|(^|[\s(])'[^']*'(?=$|[\s).,;:!?])/gu, (_m, lead?: string) => `${lead ?? ''} `);
   // Reported speech: whatever follows "X said:" / "they asked" / "told me to" is someone else's.
-  t = t.replace(/\b(said|says|asked|asks|told (me|us)( to)?|wrote|writes|wants (me|us) to|requested|requests|mentioned|suggested|according to|per)\b[\s\S]*$/iu, ' ');
+  // A speaker's words, said as such ("the PM said:", "per the PM", "requested by legal"): an ordinary noun or preposition
+  // ("requests that time out", "100 per minute") is not reported speech (codex r4).
+  t = t.replace(/\b(said|says|asked|asks|told (me|us)( to)?|wrote|writes|wants (me|us) to|requested|mentioned|suggested|according to|per (?:the|my|our|their|his|her|\w+'s)\s+(?:pm|manager|lead|boss|team|client|customer|ticket|email|message|thread))\b[\s\S]*$/iu, ' ');
+  // A named speaker ("per Alice, …"), case-sensitive so a rate ("per second, …") is not one (codex r6).
+  t = t.replace(/\b(?:[Pp]er|PER)\s+\p{Lu}\p{L}*\s*,[\s\S]*$/u, ' ');
   return t;
 }
 

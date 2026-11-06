@@ -10,6 +10,7 @@ import type { McpToolsResponse, McpVisibleTool } from '../core/types.js';
 import type { DataGate } from '../knowledge/gate/gate.js';
 import { mcpSubject } from './classify.js';
 import type { McpCallableTool } from './registry.js';
+import type { RunFence } from './run-fence.js';
 
 export interface McpToolListDeps {
   registry: { callableTools(): Promise<McpCallableTool[]> };
@@ -21,6 +22,8 @@ export interface McpToolListDeps {
    * with the registry's tools. A source's own registry rows are never listed raw.
    */
   gate?: Pick<DataGate, 'resolve' | 'reach' | 'sources'>;
+  /** (DES-CATALOG-002 §2.3) A fenced run's units are listed no tool at all (the `detect-shape` turn). */
+  fence?: RunFence;
 }
 
 /** The gated tools a unit's project reaches, as registry-shaped tools (judged like the rest), and every gated server's name. */
@@ -83,6 +86,8 @@ export async function listUnitTools(deps: McpToolListDeps, token: string): Promi
     if (msg.startsWith('bad_request')) return { status: 400, body: { error: msg, code: 'bad_request' } };
     return { status: 500, body: { error: `the tools could not be judged: ${msg}`, code: 'guard_error' } };
   }
+  // A fenced run reaches nothing: its list is empty (and a fence that cannot answer lists nothing either).
+  if (deps.fence !== undefined && (await deps.fence(judged.unit.runId).catch(() => true))) return { status: 200, body: { unit: judged.unit, tools: [] } };
   const bySubject = new Map(callable.map((t) => [mcpSubject(t.server, t.tool), t]));
   const tools: McpVisibleTool[] = [];
   for (const j of judged.tools) {

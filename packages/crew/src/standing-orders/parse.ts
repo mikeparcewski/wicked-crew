@@ -39,7 +39,14 @@ function chatSeat(roster: RosterSeat[]): RosterSeat | undefined {
   );
 }
 
-export type SeatTurnDeps = Omit<SeatParserDeps, 'adapter'> & { adapter: Pick<CoreAdapter, 'launchRun' | 'cancelRun' | 'workOutput' | 'onEvent'> };
+export type SeatTurnDeps = Omit<SeatParserDeps, 'adapter'> & {
+  adapter: Pick<CoreAdapter, 'launchRun' | 'cancelRun' | 'workOutput' | 'onEvent'>;
+  /** (DES-CATALOG-002 §2.3) The answer of a turn launched under a registered `workflow` (its one unit's output: the
+   *  engine names a def's units, so crew reads the run). Required for a {@link SeatTurnInput.workflow} turn. */
+  outputOf?: (runId: string) => Promise<string | null>;
+  /** Pick the seat: the roster's first unscoped-chat seat by default. */
+  pickSeat?: (roster: RosterSeat[]) => RosterSeat | undefined;
+};
 
 /** One seat's one turn: its answer text, or why there is none (`409` no seat, `502` it failed or went quiet). */
 export type SeatTurnOutcome = { ok: true; answer: string; seat: string } | { ok: false; code: 409 | 502; error: string; answer?: string };
@@ -52,6 +59,20 @@ export interface SeatTurnInput {
   stepId: string;
   /** What the person is told when no seat can take the turn. */
   noSeat: string;
+  /**
+   * (DES-CATALOG-002 §2.3) Launch under this registered workflow (a system def whose identity is its capability fence,
+   * `detect-shape`) instead of an inline one-step plan: `instructions` is then the run's problem (the def's phase
+   * carries its own instructions), and `stepId` is the def's phase id.
+   */
+  workflow?: string;
+  /** The run id to launch under (default a fresh one): a caller that must know it before the launch (a fence, a
+   *  cancel) passes its own. */
+  sessionId?: string;
+  /** Called with the run id once the launch is armed (before it resolves), so a newer request can cancel it. */
+  onRun?: (runId: string) => void;
+  /** The caller gave the turn up (a newer request superseded it): it ends now, and a launch still pending is cancelled
+   *  the moment it resolves (codex r2 on DES-CATALOG-002 Lane D). */
+  signal?: AbortSignal;
 }
 
 /**
@@ -64,19 +85,22 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
   const { adapter } = deps;
   const timeoutMs = deps.timeoutMs ?? 120_000;
   return async (input) => {
-    const entry = chatSeat(deps.roster());
+    const entry = (deps.pickSeat ?? chatSeat)(deps.roster());
     if (entry === undefined) {
       return { ok: false, code: 409, error: input.noSeat };
     }
     const seat = String(entry.key);
     // The run id IS the session id the launch names, so the frames are filtered on it from before
     // the launch: a fast run's terminal frame may land before `launchRun` resolves.
-    const sessionId = randomUUID();
+    const sessionId = input.sessionId ?? randomUUID();
     let runId: string | undefined;
     let off: () => void = () => undefined;
     // Cleared in `finally`: an early return must not leave it armed.
     let timer: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
+    let aborted = false;
+    let onAbort: (() => void) | null = null;
+    let deadlineAt = Date.now() + timeoutMs;
     // How the run's turn came out, the first frame that decides it: a terminal frame, or a park
     // (`parked`: the run stopped at a gate and has NOT ended).
     type TurnEnd = { ok: boolean; parked?: true };
@@ -120,29 +144,41 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
           stop();
         }
       });
+      if (input.signal?.aborted === true) return { ok: false, code: 502, error: `the ${seat} seat's turn was given up` };
+      onAbort = () => {
+        aborted = true;
+        decide(null);
+        stop();
+      };
+      input.signal?.addEventListener('abort', onAbort, { once: true });
       // Inside the try: instructions that fail to build (a project list) are the turn's 502, never an unhandled 500.
       const instructions = typeof input.instructions === 'string' ? input.instructions : await input.instructions();
       // ONE deadline over the launch and the answer: a launch that hangs is the same 502.
+      deadlineAt = Date.now() + timeoutMs;
       timer = setTimeout(() => {
         timedOut = true;
         decide(null);
         stop();
       }, timeoutMs);
-      const launch = adapter.launchRun({
-        problem: input.problem,
-        sessionId,
-        clisJson: JSON.stringify([entry]),
-        primary: seat,
-        plan: {
-          // `answer_only`: the turn's one step is its last, runs no code, and crew reads its answer.
-          steps: [{ catalog: 'understand', id: input.stepId, budget_secs: Math.max(1, Math.ceil(timeoutMs / 1000)), instructions, answer_only: true }],
-          monitors: { asked: 0 },
-        },
-      });
+      input.onRun?.(sessionId);
+      const launch = input.workflow !== undefined
+        // A registered def: its phase carries the instructions, so the turn's own text is the run's task.
+        ? adapter.launchRun({ problem: instructions, sessionId, clisJson: JSON.stringify([entry]), primary: seat, workflow: input.workflow })
+        : adapter.launchRun({
+          problem: input.problem,
+          sessionId,
+          clisJson: JSON.stringify([entry]),
+          primary: seat,
+          plan: {
+            // `answer_only`: the turn's one step is its last, runs no code, and crew reads its answer.
+            steps: [{ catalog: 'understand', id: input.stepId, budget_secs: Math.max(1, Math.ceil(timeoutMs / 1000)), instructions, answer_only: true }],
+            monitors: { asked: 0 },
+          },
+        });
       // A launch that resolves after the turn gave up (the deadline, or a park) must not outlive it.
       launch.then(
         (id) => {
-          if ((timedOut || parked()) && !runEnded) void adapter.cancelRun(id).catch(() => undefined);
+          if ((timedOut || parked() || aborted) && !runEnded) void adapter.cancelRun(id).catch(() => undefined);
         },
         () => undefined,
       );
@@ -157,15 +193,30 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
         return { ok: false, code: 502, error: `the ${seat} seat could not open: ${err instanceof Error ? err.message : String(err)}` };
       }
       if (launched === null) {
+        if (aborted) return { ok: false, code: 502, error: `the ${seat} seat's turn was given up` };
         return timedOut ? { ok: false, code: 502, error: `the ${seat} seat did not answer in ${timeoutMs / 1000} s` } : { ok: false, code: 502, error: parkedMessage() };
       }
       runId = launched;
       const id = launched;
       const ended = await decided;
-      if (ended === null) return { ok: false, code: 502, error: `the ${seat} seat did not answer in ${timeoutMs / 1000} s` };
+      if (ended === null) return { ok: false, code: 502, error: aborted ? `the ${seat} seat's turn was given up` : `the ${seat} seat did not answer in ${timeoutMs / 1000} s` };
       // A parked turn's answer is not read: it is a failure, and the read must not hold the cancel.
       if (ended.parked === true) return { ok: false, code: 502, error: parkedMessage() };
-      const answer = await adapter.workOutput(`${id}:${input.stepId}`).catch(() => null);
+      // The answer's read is inside the same deadline (at least a second for a fast local read): a stalled read is the
+      // turn's failure, never a hang past its budget (codex r1 on DES-CATALOG-002 Lane D).
+      const read = input.workflow !== undefined
+        ? (deps.outputOf?.(id) ?? Promise.resolve(null)).catch(() => null)
+        : adapter.workOutput(`${id}:${input.stepId}`).catch(() => null);
+      let readTimer: ReturnType<typeof setTimeout> | undefined;
+      const answer = await Promise.race([
+        read,
+        new Promise<null>((resolve) => {
+          readTimer = setTimeout(() => resolve(null), Math.max(1000, deadlineAt - Date.now()));
+        }),
+        // A turn given up while its answer is read ends now (codex r3).
+        stopped,
+      ]).finally(() => clearTimeout(readTimer));
+      if (aborted) return { ok: false, code: 502, error: `the ${seat} seat's turn was given up` };
       // A failed step is a failure, whatever its text holds — never a rule to confirm (codex on #686).
       if (!ended.ok || answer === null || (stepStatus !== undefined && stepStatus !== 'ok')) {
         const why = failureKind !== undefined ? ` (${failureKind})` : '';
@@ -177,9 +228,19 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
     } finally {
       clearTimeout(timer);
       off();
+      if (onAbort !== null) input.signal?.removeEventListener('abort', onAbort);
       // A run that has not ended (the seat went quiet, it parked, or the launch hung past the
       // deadline — the run id is the session id it was launched under) must not outlive the turn.
-      if (!runEnded && (runId !== undefined || timedOut || parked())) await adapter.cancelRun(runId ?? sessionId).catch(() => undefined);
+      // The cancel is bounded too: the turn answers within its budget, and the cancel goes on without it.
+      if (!runEnded && (runId !== undefined || timedOut || parked() || aborted)) {
+        let cancelTimer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+          adapter.cancelRun(runId ?? sessionId).catch(() => undefined),
+          new Promise<void>((resolve) => {
+            cancelTimer = setTimeout(resolve, 5000);
+          }),
+        ]).finally(() => clearTimeout(cancelTimer));
+      }
     }
   };
 }

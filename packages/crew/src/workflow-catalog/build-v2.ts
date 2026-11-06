@@ -66,6 +66,9 @@ const CREW_PENDING: Readonly<Record<string, string>> = {
   'review-change': 'Comes once crew excludes the authors of every run that contributed to the change from its reviewers; today, Risk analysis or Security review read a change on a seat that did not build it.',
 };
 
+/** Whether a card waits on a crew piece not built yet (listed, never offered). */
+export const crewPending = (cardId: string): boolean => Object.hasOwn(CREW_PENDING, cardId);
+
 /** The input kinds this daemon's launch routes take (1.1's `documents` and 1.2's `sources` are not yet). */
 export const INPUT_KINDS_V2: readonly CatalogInputKindV2[] = ['text', 'repo', 'project', 'url', 'requirements', 'seats'];
 

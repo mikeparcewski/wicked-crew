@@ -66,6 +66,8 @@ interface Rig {
   /** What the preflight says a launch would refuse (`null`: nothing). */
   preflightAnswer: string | null;
   rejectAnswer: { code: number; body: Record<string, unknown> } | null;
+  /** (Lane D) The plan version the last Reject was bound to. */
+  rejectExpect?: { ord: number; planRev: number } | null;
 }
 
 const CHAT = 'c1';
@@ -111,8 +113,9 @@ function rig(o: { roster?: Array<{ key: string; name: string }>; repos?: Array<{
     served: async () => r.served,
     qeOff: async () => r.qeOff,
     preflight: async () => r.preflightAnswer,
-    reshapeReject: async () => {
+    reshapeReject: async (_run, _actor, _pid, expect) => {
       r.rejects += 1;
+      r.rejectExpect = expect ?? null;
       return r.rejectAnswer;
     },
     turnLive: (_c, turnId) => r.live.has(turnId),
@@ -523,6 +526,50 @@ describe('what Go sends (codex 4, 7, 12)', () => {
     expect(skipped).not.toHaveProperty('primary');
     // QE as shown: a proposal without QE acceptance sends no force.
     expect(jobLaunchCommon({ ...p, gate: ['parity'] }, { runId: 'rid', chatId: CHAT }, { selfSeated: false })).not.toHaveProperty('forceQeAcceptance');
+  });
+});
+
+describe('Lane D: a reshape offered on a plan version answers only that version', () => {
+  it('passes the offered ord and planRev to the held plan\'s Reject', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'migrate', { option: 'upgrade' });
+    const held = open(r);
+    await r.svc.decide(CHAT, held.pid, { decision: 'go' }, ME, 'i1');
+    const facts: Parameters<ChatProposals['reshape']>[1]['facts'] = { card: 'migrate', option: 'move', depth: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape' };
+    const out = await r.svc.reshape(CHAT, { pid: `${CHAT}:reshape:run1:o`, oldRunId: 'run1', parentPid: held.pid, facts, edits: { option: 'move' }, reducedAssurance: false, relaunch: { deliver: 'pr' as const }, request: { id: 'o', digest: 'do' }, confirmLoss: [], heldPlan: { ord: 1, planRev: 2 } }, ME, 'i1');
+    expect(out.code, JSON.stringify(out.body)).toBe(200);
+    expect(r.rejectExpect).toEqual({ ord: 1, planRev: 2 });
+  });
+
+  it('the binding survives a refused Reject and Go again (every reshape descendant keeps it; codex r2)', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'migrate', { option: 'upgrade' });
+    const held = open(r);
+    await r.svc.decide(CHAT, held.pid, { decision: 'go' }, ME, 'i1');
+    const facts: Parameters<ChatProposals['reshape']>[1]['facts'] = { card: 'migrate', option: 'move', depth: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape' };
+    r.rejectAnswer = { code: 409, body: { code: 'gate_changed' } };
+    const refused = await r.svc.reshape(CHAT, { pid: `${CHAT}:reshape:run1:p`, oldRunId: 'run1', parentPid: held.pid, facts, edits: { option: 'move' }, reducedAssurance: false, relaunch: { deliver: 'pr' as const }, request: { id: 'p', digest: 'dp' }, confirmLoss: [], heldPlan: { ord: 1, planRev: 3 } }, ME, 'i1');
+    expect(refused.body).toMatchObject({ code: 'gate_changed' });
+    // A refresh against a changed catalog re-resolves it: the binding stays.
+    r.served = { ...r.served, rev: 'rev-x' };
+    r.rejectAnswer = null;
+    r.rejectExpect = null;
+    await r.svc.decide(CHAT, `${CHAT}:reshape:run1:p`, { decision: 'go' }, ME, 'i1');
+    const fresh = open(r);
+    expect(fresh.heldPlan).toEqual({ ord: 1, planRev: 3 });
+    await r.svc.decide(CHAT, fresh.pid, { decision: 'go' }, ME, 'i1');
+    expect(r.rejectExpect).toEqual({ ord: 1, planRev: 3 });
+  });
+
+  it('a proposal refreshed against a changed catalog again and again keeps one refresh suffix (bounded ids; codex r2)', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'feature');
+    for (const rev of ['rev-a', 'rev-b', 'rev-c']) {
+      r.served = { ...r.served, rev };
+      const go = await r.svc.decide(CHAT, open(r).pid, { decision: 'go' }, ME, 'i1');
+      expect(go.body).toMatchObject({ code: 'catalog_changed' });
+    }
+    expect(open(r).pid.split(':c:')).toHaveLength(2);
   });
 });
 

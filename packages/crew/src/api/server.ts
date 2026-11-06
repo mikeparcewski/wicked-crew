@@ -32,6 +32,7 @@ import { GroupIndex } from './group-index.js';
 import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
 import { OnboardingCaptureChain } from './onboarding-capture.js';
 import { INSPECT_WORKFLOW, InspectService, defaultInspectionsDir, loadInspectWorkflow } from '../inspect/service.js';
+import { DETECT_WORKFLOW, loadDetectWorkflow } from '../workflow-catalog/detect-service.js';
 import { registerInspectRoutes } from '../inspect/routes.js';
 import { DISTILL_WORKFLOW, RunLearningsService, defaultLearningsDir, loadDistillWorkflow, runLearningsMode } from '../learnings/service.js';
 import { memoryContents, proposalRows, submitLearning } from '../learnings/estate.js';
@@ -104,6 +105,7 @@ import { unitTrackerIds } from '../knowledge/trackers/visible.js';
 import { McpCallRecordFile } from '../mcp/call-records.js';
 import { emitOnBus, type BusEvent } from '../core/bus.js';
 import { McpRegistry } from '../mcp/registry.js';
+import { daemonRunFence } from '../mcp/run-fence.js';
 import { McpRegistryStore } from '../mcp/registry-store.js';
 import { resolveSecret } from '../mcp/secrets.js';
 import { DataGate } from '../knowledge/gate/gate.js';
@@ -1532,6 +1534,15 @@ export async function createServer(
       app.log.warn(`[inspect] could not register the '${INSPECT_WORKFLOW}' workflow — checks answer with crew's own reading: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+  // DES-CATALOG-002 §2.3: the hidden detect-shape turn (POST /workflows/catalog/detect). Without it, detection answers
+  // from the words layer alone, never sure.
+  if (typeof (adapter as Partial<CoreAdapter>).registerWorkflow === 'function') {
+    try {
+      await adapter.registerWorkflow(loadDetectWorkflow());
+    } catch (err) {
+      app.log.warn(`[detect] could not register the '${DETECT_WORKFLOW}' workflow — detection answers from the words alone: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
   // A check a restart interrupted is stopped and answered now, so it never runs on unwatched past its bound.
   void unitInspect.recover();
   registerInspectRoutes(app, { service: unitInspect, audit });
@@ -2588,6 +2599,8 @@ export async function createServer(
   const appsKnowledgeVisible = (projectId: string): Promise<string[]> => projectVisible(projectId);
   const mcpBroker = new McpBroker({
     registry: mcpRegistry,
+    // DES-CATALOG-002 §2.3: a `detect-shape` run reaches nothing (its fence is its identity).
+    fence: daemonRunFence((runId) => adapter.launchedWorkflowOfRun(runId)),
     engine: options?.mcpEngineGate ?? (() => CoreAdapter.mcpEngineGate()),
     records: mcpCallRecords,
     budgetPerUnit: budgetFromEnv(),

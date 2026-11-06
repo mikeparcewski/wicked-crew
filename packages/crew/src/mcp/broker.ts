@@ -62,6 +62,7 @@ import {
 import { scrubResult } from './redact.js';
 import { UpstreamCallError } from './upstream-error.js';
 import type { McpRegistry } from './registry.js';
+import { FENCE_REASON, FENCE_REMEDY, FENCE_RULE, type RunFence } from './run-fence.js';
 import { scrubSecrets } from './secrets.js';
 import {
   ESTATE_PROPOSAL_TOOL,
@@ -149,6 +150,9 @@ export interface McpBrokerDeps {
    * where a source has no registered tool, so they are refused (D-5).
    */
   gate?: DataGate;
+  /** (DES-CATALOG-002 §2.3) A run fenced off every capability (the `detect-shape` turn): each of its calls is refused
+   *  once its unit is known, before anything runs. Absent = no run is fenced. */
+  fence?: RunFence;
 }
 
 interface BreakerState {
@@ -200,6 +204,16 @@ export class McpBroker {
     this.budget = deps.budgetPerUnit ?? budgetFromEnv();
     this.timeoutMs = deps.timeoutMs ?? MCP_CALL_TIMEOUT_MS;
     this.load = deps.load ?? hostLoad;
+  }
+
+  /** Whether the unit's run is fenced; a fence that throws fences (it was asked because a fence exists). */
+  private async fenced(runId: string): Promise<boolean> {
+    if (this.deps.fence === undefined) return false;
+    try {
+      return await this.deps.fence(runId);
+    } catch {
+      return true;
+    }
   }
 
   async call(body: McpCallBody): Promise<McpBrokerAnswer> {
@@ -254,6 +268,7 @@ export class McpBroker {
       return this.refuse(span, 'guard_error', 'guard_error', 'engine', [], `the call could not be judged or recorded: ${msg}`, 'nothing ran; try again, and report it if it persists');
     }
     span.verdict = verdict;
+    if (await this.fenced(verdict.unit.runId)) return this.refuse(span, 'denied', 'deny', FENCE_RULE, [FENCE_RULE], FENCE_REASON, FENCE_REMEDY);
     if (verdict.decision === 'deny' && target?.resaveRequired === true) {
       // (G2) The engine denied an unregistered tool (D-5); say the one thing that fixes it.
       return this.refuse(span, 'denied', 'deny', verdict.ruleIds[0] ?? 'policy', verdict.ruleIds, resaveReason(body.subject), RESAVE_REMEDY);
@@ -408,6 +423,7 @@ export class McpBroker {
     const write = tool === ESTATE_PROPOSAL_TOOL;
     span.kind = 'mcp-stdio';
     span.verdict = { decision: 'allow', subject: body.subject, class: write ? 'write' : 'read', ruleIds: [], obligations: [], claimId: '', unit: scope.unit };
+    if (await this.fenced(scope.unit.runId)) return this.refuse(span, 'denied', 'deny', FENCE_RULE, [FENCE_RULE], FENCE_REASON, FENCE_REMEDY, null, null);
     const refused = relay.refusal(tool, scope);
     if (refused !== null) return this.refuse(span, 'denied', 'deny', refused.ruleId, [refused.ruleId], refused.reason, refused.remedy, null, null);
 
@@ -506,6 +522,7 @@ export class McpBroker {
       return this.refuse(span, 'guard_error', 'guard_error', 'broker:gate', [], 'the linked engine cannot bind or judge a data-source call (wicked-core-ts predates resolveEstateScope or listMcpTools)', 'upgrade the engine; no data-source call runs unjudged', null, null);
     }
     span.verdict = { decision: 'allow', subject: body.subject, class: 'read', ruleIds: [], obligations: [], claimId: '', unit: scope.unit };
+    if (await this.fenced(scope.unit.runId)) return this.refuse(span, 'denied', 'deny', FENCE_RULE, [FENCE_RULE], FENCE_REASON, FENCE_REMEDY, null, null);
     const judged = admitted.get(body.subject);
     if (judged === undefined) {
       return this.refuse(span, 'denied', 'deny', 'engine:gated-tool', ['engine:gated-tool'], `${body.subject} is refused for this unit by the engine (an operator policy, or an engine that predates DES-KNOWLEDGE-DATA-001 §9.3 and gives an Apps run no source tool)`, 'work from the files and the task as given', null, null);

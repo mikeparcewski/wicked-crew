@@ -209,12 +209,36 @@ describe('chat proposals (server, A2)', () => {
     const instructions = (launches.at(-1)!.plan as unknown as { steps: Array<{ instructions: string }> }).steps[0]!.instructions;
     expect(instructions).not.toContain('wicked-make');
     expect(instructions).not.toContain('What this chat can make now');
-    expect(instructions).toContain('write code or docs');
+    // DES-CATALOG-002 §2.3 (u): job proposals are on and this client declared no `accepts: ['job']`: today's flow, with
+    // the job commands offered beside it (this chat has no repository, so no PLAN+ line), and nothing about making.
+    expect(instructions).toContain('type `<its command>` to start it');
+    expect(instructions).not.toMatch(/^\s*PLAN\+ \{/mu);
     await new Promise((r) => setTimeout(r, 100));
     const recs = await records(prod, 'prod-1');
     expect(recs.filter((r) => r.kind === 'proposal')).toEqual([]);
     const seat = recs.find((r) => r.kind === 'seat');
     expect(seat !== undefined && seat.kind === 'seat' ? seat.text : null).toBe('I can make that.');
+  });
+
+  it('(DES-CATALOG-002 Lane D) POST /workflows/catalog/detect: a person\'s route, advertised, failing closed without a catalog', async () => {
+    const url = '/api/v1/workflows/catalog/detect';
+    expect(((await authed.inject({ method: 'GET', url: '/api/v1/health', ...auth('owner-token') })).json() as HealthResponse).capabilities?.detectShape).toBe(true);
+    const agent = await authed.inject({ method: 'POST', url, payload: { text: 'fix the login bug please now' }, ...auth('agent-token') });
+    expect(agent.statusCode).toBe(403);
+    expect(agent.json()).toMatchObject({ code: 'detect_refused' });
+    expect((await authed.inject({ method: 'POST', url, payload: { text: '  ' }, ...auth('owner-token') })).statusCode).toBe(400);
+    expect((await authed.inject({ method: 'POST', url, payload: { text: 'x', extra: 1 }, ...auth('owner-token') })).statusCode).toBe(400);
+    // This harness's engine serves no phase catalog: detection fails closed (it never guesses against a catalog it
+    // could not read). The service's answers are covered in tests/detect-service.test.ts.
+    const words = await authed.inject({ method: 'POST', url, payload: { text: 'modernize the legacy .NET Framework monolith into microservices on Kubernetes', seat: false }, ...auth('owner-token') });
+    expect(words.statusCode, words.body).toBe(503);
+    expect(words.json()).toMatchObject({ code: 'catalog_unavailable' });
+  });
+
+  it('(Lane D) a reshape names its plan version whole: ord and planRev together, or neither', async () => {
+    const out = await authed.inject({ method: 'POST', url: '/api/v1/runs/some-run/reshape', payload: { card: 'bug', requestId: 'r1', planRev: 2 }, ...auth('owner-token') });
+    expect(out.statusCode).toBe(400);
+    expect(out.body).toMatch(/together/u);
   });
 
   it('an information-only reply makes no proposal', async () => {

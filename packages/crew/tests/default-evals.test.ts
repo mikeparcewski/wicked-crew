@@ -629,7 +629,7 @@ describe('the run-evals workflow (data)', () => {
     expect(launched[0]).toMatchObject({ workflow: 'run-evals', clisJson: '[]' });
     const report = JSON.parse(readFileSync(join(dir, launched[0]!.sessionId, 'report.json'), 'utf8')) as DefaultEvalReport;
     expect(report.project).toBeNull();
-    expect(report.suites.length).toBe(8);
+    expect(report.suites.length).toBe(9);
     await app.close();
   });
 });

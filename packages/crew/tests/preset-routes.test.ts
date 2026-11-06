@@ -157,6 +157,12 @@ describe('/api/v1/presets — HTTP contract (stubbed adapter)', () => {
     expect(((await weak.json()) as { error: string }).error).toMatch(/^preset_invalid_steps: pin_removed/);
   });
 
+  it('(DES-CATALOG-002 Lane D) refuses a preset under crew\'s detection turn\'s name (409 reserved_name)', async () => {
+    const res = await fetch(`${ctx.baseUrl}/api/v1/presets/detect-shape`, { method: 'PUT', ...json({ steps: MY_FLOW }) });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'reserved_name' });
+  });
+
   it('refuses an unknown body key, a step without catalog/id, and empty steps (400)', async () => {
     for (const body of [
       { steps: MY_FLOW, stepz: [] },

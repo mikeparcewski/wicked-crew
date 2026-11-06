@@ -13,6 +13,8 @@ import { join } from 'node:path';
 
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 
+import type { RawGuess } from '../workflow-catalog/detect.js';
+import { observedOf } from './shape.js';
 import type { EvalCase, Observed, SuiteId } from './types.js';
 
 export interface ReplayAdapter {
@@ -86,6 +88,28 @@ export function archetypeAdapter(gardenRoot: string | null, run: RunPython = run
   };
 }
 
+/**
+ * (DES-CATALOG-002 §9.2) The shape adapter: today's detection (the shipped words layer, validator, cross-check and
+ * bands) on a case's words, with the seat answer the case recorded (a corpus fixture) or none (the words alone, never
+ * sure). Deterministic and model-free; the live seat's numbers are the integrator's.
+ */
+export function shapeAdapter(): ReplayAdapter {
+  return {
+    suite: 'shape',
+    async replay(cases) {
+      const out = new Map<string, Observed>();
+      for (const c of cases) {
+        const text = c.input['text'];
+        if (typeof text !== 'string') continue;
+        const seat = (c.input['seat'] ?? null) as RawGuess | null;
+        const acceptableShapes = Array.isArray(c.input['acceptable']) ? (c.input['acceptable'] as string[]) : undefined;
+        out.set(c.id, observedOf(text, seat, acceptableShapes));
+      }
+      return out;
+    },
+  };
+}
+
 export const NO_REPLAY: Partial<Record<SuiteId, string>> = {
   'floor-class': 'the floor class is decided inside the engine (core), which has no replay entry yet',
   'qe-verdict': 'a QE verdict is a model’s judgment; only recorded verdicts are scored',
@@ -95,7 +119,7 @@ export const NO_REPLAY: Partial<Record<SuiteId, string>> = {
 
 export function defaultReplaySet(opts: { gardenRoot: string | null; run?: RunPython }): ReplaySet {
   const missing: Partial<Record<SuiteId, string>> = { ...NO_REPLAY };
-  const adapters: Partial<Record<SuiteId, ReplayAdapter>> = {};
+  const adapters: Partial<Record<SuiteId, ReplayAdapter>> = { shape: shapeAdapter() };
   const a = archetypeAdapter(opts.gardenRoot, opts.run);
   if (a !== null) adapters.archetype = a;
   else missing.archetype = 'garden’s archetype classifier was not found (set WICKED_GARDEN_ROOT)';

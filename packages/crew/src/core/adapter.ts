@@ -2607,6 +2607,26 @@ export class CoreAdapter {
   }
 
   /**
+   * (DES-CATALOG-002 §2.3) The name one run was launched under, as the engine recorded it (`sessionStarted.workflowId`):
+   * the run fence's fallback for a run crew no longer holds in memory. Memoized once found; `undefined` = not known.
+   */
+  async launchedWorkflowOfRun(runId: string): Promise<string | null | undefined> {
+    if (this.launchedWorkflows.has(runId)) return this.launchedWorkflows.get(runId);
+    let events: RecordedEvent[] | null;
+    try {
+      events = await this.runEvents(runId);
+    } catch {
+      return undefined;
+    }
+    const started = events?.find((e) => e.type === 'sessionStarted') as Record<string, unknown> | undefined;
+    if (started === undefined) return undefined;
+    const raw = started['workflowId'];
+    const launched = typeof raw === 'string' ? raw : null;
+    this.launchedWorkflows.set(runId, launched);
+    return launched;
+  }
+
+  /**
    * Every run + its ordered units, each with its `run_identity` (seam X2) resolved from the engine's
    * record — its plan state, else its recorded launch — never from its phase sequence.
    *

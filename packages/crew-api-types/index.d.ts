@@ -7944,7 +7944,7 @@ export interface LaunchEnvelope {
  * stays accepting, and the same request, or Go on the reshape (or on its corrected descendant), tries again: Go on a
  * reshape that has not answered the held plan yet answers it first, as this route does.
  */
-export interface ReshapeRunBody {
+export interface ReshapeRunShape {
   card: string;
   option?: string | null;
   depth?: 'quick' | 'standard' | 'deep' | null;
@@ -7956,6 +7956,13 @@ export interface ReshapeRunBody {
    *  the ids sent is refused the same way. */
   confirmLoss?: string[];
 }
+
+/**
+ * {@link ReshapeRunShape}, with (api-types 0.194.0) the plan version the person was offered it on: a `plan_offer`'s `ord`
+ * and `planRev`, BOTH or neither (one alone is **400**). When sent, a held plan revised since is **409** `gate_changed`
+ * and nothing is answered.
+ */
+export type ReshapeRunBody = ReshapeRunShape & ({ ord: number; planRev: number } | { ord?: never; planRev?: never });
 
 export interface ReshapeRunResponse {
   view: ChatProposalView;
@@ -8976,7 +8983,54 @@ export type ChatTranscriptRecord =
   | { at: number; turnId: string; kind: 'proposal_revising'; pid: string }
   /** (api-types 0.192.0) The hold of `turnId` on `pid` ended: its revision was published or refused, the turn wrote
    *  none, or the turn is gone (`note`: "Your change wasn't applied: say it again"). */
-  | { at: number; turnId: string; kind: 'proposal_released'; pid: string; note: string | null };
+  | { at: number; turnId: string; kind: 'proposal_released'; pid: string; note: string | null }
+  /**
+   * (api-types 0.194.0, DES-CATALOG-002 §2.4, §2.5) Typed at a job's held plan without Change: the seat read the
+   * person's words as a plan edit or a change of job, and wicked OFFERS it ({@link ChatPlanOffer}). An offer decides
+   * nothing: only the person's press on one of its choices calls a route, bound to the plan version it was made for.
+   */
+  | { at: number; turnId: string; kind: 'plan_offer'; offer: ChatPlanOffer };
+
+/**
+ * (api-types 0.194.0, DES-CATALOG-002 §2.4 "Typing at the plan without Change", §2.5) wicked's offer at a job's held
+ * plan, from the seat's reading of what the person typed. Crew's words, never the seat's.
+ *
+ * - `send_back`: "Send it back to Codex with: “add a rollback step”?" **Send it back** → `POST /runs/:runId/gate`
+ *   `{approve: false, action: 'request_changes', amend: note, ord, planRev}` (the plan send-back); **No** dismisses.
+ *   `note` is the person's own message, verbatim (never the seat's paraphrase).
+ * - `reshape`: "That's a different job: start it again as a move?" naming the checks it would give up and the inputs it
+ *   needs. **Start again** → `POST /runs/:runId/reshape` `{card, option, depth, requestId, confirmLoss: [...lost,
+ *   ...lostSeats], ord, planRev}` (offered only while the run waits at its FIRST work-plan approval; a plan revised
+ *   since is 409 `gate_changed`); **Keep this plan** dismisses.
+ *
+ * Bound to `ord` and `planRev`: a plan revised since makes the press a 409 `gate_changed` (or `reshape_after_work`),
+ * and a newer offer for the same run replaces this one.
+ */
+export interface ChatPlanOffer {
+  id: string;
+  kind: 'send_back' | 'reshape';
+  runId: string;
+  /** The job proposal the run was launched from. */
+  pid: string;
+  ord: number;
+  planRev: number;
+  text: string;
+  /** `send_back`: the person's words, as sent to the lead. */
+  note?: string;
+  /** `reshape`: the new shape, what it gives up, and what it still needs. */
+  reshape?: {
+    card: string;
+    option: string | null;
+    depth: 'quick' | 'standard' | 'deep' | null;
+    label: string;
+    command: string | null;
+    lost: CatalogGateId[];
+    lostSeats: Array<'distinctEvaluator' | 'distinctJudge' | 'excludeChangeAuthors' | 'notRunSeat' | 'proposalOnly'>;
+    /** Labels of the required inputs the held job lacks (send them in `inputs`). */
+    needs: string[];
+  };
+  choices: Array<{ label: string; action: 'send_back' | 'reshape' | 'dismiss' }>;
+}
 
 // ── Chat proposals (api-types 0.170.0, DES-CHAT-ARTIFACTS-001 §4, slice A2) ─────────────────────────────────────────
 //
@@ -9292,6 +9346,9 @@ export interface ArtifactProposal {
   reducedAssurance?: true;
   /** (§2.5) The held run's plan was answered Reject for this reshape (a retry after that launches the replacement). */
   heldRejected?: true;
+  /** (api-types 0.194.0) The held plan this reshape was offered for (a `plan_offer`'s `ord` and `planRev`): its Reject is
+   *  bound to that version, so a plan revised since is 409 `gate_changed`, never rejected unseen. */
+  heldPlan?: { ord: number; planRev: number };
   /** (§2.5) What else a reshape launches with, from the held run's launch envelope. */
   relaunch?: Pick<LaunchEnvelope, 'deliver' | 'deliverGate' | 'campaignId' | 'groupLabel' | 'revisesPr' | 'forceQeAcceptance' | 'clisJson'>;
 }
@@ -9422,7 +9479,7 @@ export type ChatProposalFrame = {
   type: 'chatProposal';
   chat: string;
   turn_id: string;
-  record: Extract<ChatTranscriptRecord, { kind: 'proposal' | 'proposal_accepting' | 'proposal_decided' | 'proposal_revising' | 'proposal_released' }>;
+  record: Extract<ChatTranscriptRecord, { kind: 'proposal' | 'proposal_accepting' | 'proposal_decided' | 'proposal_revising' | 'proposal_released' | 'plan_offer' }>;
   project_id?: string;
 };
 
@@ -15860,8 +15917,9 @@ export interface SearchResponse {
 // steering firing, recall, prompt routing, normalization) scored against what really happened. One case shape for
 // every suite; real, synthetic, combined and model-labelled figures are always reported apart.
 
-/** The eight inference points. */
+/** The inference points (api-types 0.194.0: `shape`, DES-CATALOG-002 §9: detection of the shape of the work). */
 export type DefaultEvalSuiteId =
+  | 'shape'
   | 'needs-you'
   | 'floor-class'
   | 'qe-verdict'
@@ -16025,6 +16083,18 @@ export interface DefaultEvalSummary {
   suites: Array<{ suite: DefaultEvalSuiteId; agreement: number | null; n: number; tooFew: boolean; trend: DefaultEvalTrend }>;
   drift: number;
   counts: DefaultEvalReport['counts'];
+}
+
+/**
+ * (api-types 0.194.0, DES-CATALOG-002 §9.1) `GET /testing/default-evals/shape-sample?n=50&seed=1`: the audited random
+ * sample of shaped launches for a person to label (stratified by card; the same words in the same place counted
+ * once; `denominator` = the launches it was drawn from), and how this daemon's launches are labelled so far.
+ */
+export interface ShapeAuditSampleResponse {
+  sample: Array<{ runId: string; place: string | null; card: string; option: string | null; by: 'person' | 'detected'; words: string; corrected: boolean }>;
+  denominator: number;
+  size: number;
+  counts: { 'suggested-accepted': number; selected: number; corrected: number };
 }
 
 /** `GET /testing/default-evals/suites`. */

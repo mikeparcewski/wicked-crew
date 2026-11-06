@@ -120,6 +120,7 @@ import { ChatTurnIndex } from './chat-turns.js';
 import type { ChatRepoRoot, ChatTranscriptStore } from './chat-transcripts.js';
 import {
   CHAT_ID,
+  chatJobTurnLines,
   chatMakeDigest,
   ChatScopeIndex,
   chatScopeDeps,
@@ -157,6 +158,7 @@ import { registerProjectAggregateRoutes } from './project-aggregates.js';
 import { composeLaunch, composePreflight, registerProductRoutes } from './product.js';
 import { buildWorkflowCatalogV2, parseCommand, resolveOption } from '../workflow-catalog/build-v2.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
+import { DETECT_MAX_CHARS, DETECT_TIMEOUT_MS, DetectService, shadowCheck } from '../workflow-catalog/detect-service.js';
 import { checkLaunchShape, LaunchShapeSchema, launchShapeOf, servedFor, withBriefLines, type LaunchTarget, type ShapeReads } from '../workflow-catalog/shape.js';
 import { registerPresetRoutes } from '../presets/routes.js';
 import { busRows, openPlanGateRev, registerTeamRoutes, workPlanAccepted } from '../team/routes.js';
@@ -421,6 +423,7 @@ import type { Actor as AppsActor } from '../core/types.js';
 import { registerAppRoutes } from '../apps/routes.js';
 import { AppStoreError, type AppStore } from '../apps/store.js';
 import { registerMcpInspectRoutes } from '../mcp-inspect/routes.js';
+import { daemonRunFence, fencedRunId } from '../mcp/run-fence.js';
 import { discoverLivePlugin } from '../skills/plugin-source.js';
 import type { DecisionBusEmit } from '../decisions/events.js';
 import { resolveDecisionsMode, type DecisionsMode } from '../decisions/types.js';
@@ -2347,6 +2350,8 @@ export function registerRoutes(
       // DES-CATALOG-002 §4.1: `?v=2` on the same route, and `shape` on every launch route.
       workflowCatalogV2: app.hasRoute({ method: 'GET', url: `${V}/workflows/catalog` }),
       launchShape: true,
+      // DES-CATALOG-002 §2.3: `POST /workflows/catalog/detect` (the words layer, then the hidden detect-shape turn).
+      detectShape: app.hasRoute({ method: 'POST', url: `${V}/workflows/catalog/detect` }),
       // DES-CATALOG-002 §4.6: person-made and revised job proposals, the revising hold, plan answers bound to planRev.
       chatJobProposals: chatJobProposalsOn,
       reshapeRun: chatJobProposalsOn,
@@ -4621,7 +4626,9 @@ export function registerRoutes(
         }
       }
       const chatId = seedChatId ?? b.chatId ?? randomUUID();
-      if (b.accepts !== undefined) chatAccepts.set(chatId, b.accepts.includes('job'));
+      // A new chat's declaration is its own (an omitted one is "no job cards"): an id reused after a close never inherits
+      // the previous chat's (codex r2 on Lane D).
+      const openAccepts = b.accepts?.includes('job') === true;
       const requestedRefs = [...(b.repoRef !== undefined ? [b.repoRef] : []), ...(b.repoRefs ?? [])];
       // The scope kind as the open resolves it: the request's, unless an Ask-about-this seed names the repositories.
       let scopeKind = b.scopeKind;
@@ -4732,7 +4739,7 @@ export function registerRoutes(
         if (!resolved.ok) return reply.code(resolved.status).send({ error: resolved.error });
         workflow = resolved.workflow;
       }
-      const statementOpts = { analysis: workflow !== undefined, make: chatProposals.digest() };
+      const statementOpts = { analysis: workflow !== undefined, make: chatProposals.digest(chatId, openAccepts) };
       // A chat id this daemon already holds a scope for is LIVE: re-preparing its scratch root and
       // re-opening it would overwrite the statement its seats are reading and (on a changed scope)
       // evict them mid-conversation (Copilot, #518). Close it first, or let the daemon mint the id.
@@ -4748,6 +4755,9 @@ export function registerRoutes(
                 : `chat ${chatId} is already open on this daemon; DELETE /chats/${chatId} first, or omit chatId to mint a fresh one`,
         });
       }
+      // DES-CATALOG-002 §4.6: this open owns the id now: its declaration is the chat's (an omitted one is "no job cards").
+      // A refused open (409 above) never touched the live chat's (codex r3).
+      chatAccepts.set(chatId, openAccepts);
       // DC-S7: the in-force rules the statement lists; recorded as "told" only once the open succeeds.
       let inForceAtOpen: ConformanceRule[] = [];
       // Everything below either ends in `chatScopes.set(chatId, …, token)` or releases the reservation.
@@ -5064,9 +5074,14 @@ export function registerRoutes(
     return { ord: held.gated.ord, planRev };
   };
   /** The held plan answered Reject (`reshaped`) for a reshape, bound to the ord and revision just read. */
-  const reshapeReject = async (runId: string, actor: import('../core/types.js').Actor, pid: string): Promise<{ code: number; body: Record<string, unknown> } | null> => {
+  const reshapeReject = async (runId: string, actor: import('../core/types.js').Actor, pid: string, expect?: { ord: number; planRev: number }): Promise<{ code: number; body: Record<string, unknown> } | null> => {
     const elig = await reshapeEligibility(runId);
     if ('refusal' in elig) return elig.refusal;
+    // A reshape offered on one plan version answers only that version (Lane D, codex r1): a plan revised since is
+    // gate_changed, and the engine checks the same expectation inside its decision.
+    if (expect !== undefined && (expect.ord !== elig.ord || expect.planRev !== elig.planRev)) {
+      return { code: 409, body: { code: 'gate_changed', error: `run ${runId}'s plan changed since this was offered (now version ${elig.planRev}); look at it again`, openOrd: elig.ord, planRev: elig.planRev } };
+    }
     const out = await decideGate(runId, { approve: false, action: 'reject', amend: 'reshaped', ord: elig.ord, planRev: elig.planRev }, actor, { reshape: pid });
     return out.code === 200 ? null : { code: out.code, body: (out.body ?? {}) as Record<string, unknown> };
   };
@@ -5117,6 +5132,20 @@ export function registerRoutes(
     // DES-CATALOG-002 §4.6: job proposals, resolved against the catalog a launch in the chat's project reads.
     jobs: () => chatJobProposalsOn,
     reshapeReject,
+    // DES-CATALOG-002 §2.4: a chat job's run as typed plan edits read it (held at a plan gate, its ord and revision).
+    heldPlan: async (runId) => {
+      const run = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
+      if (run === undefined) return null;
+      if (['completed', 'failed', 'cancelled'].includes(String(run.session.status))) return { state: 'ended' };
+      if (run.session.status !== 'awaiting_human') return { state: 'running' };
+      const held = await gateOfRecord(run, undefined);
+      if ('refusal' in held || held.gateKind !== 'plan_approval' || held.gated === undefined) return { state: 'running' };
+      const rows = await busRows(adapter.busDbPath, runId);
+      const planRev = openPlanGateRev(rows);
+      if (planRev === undefined) return { state: 'running' };
+      const lead = (run.session as { primary?: unknown }).primary;
+      return { state: 'held', ord: held.gated.ord, planRev, reshapeable: !workPlanAccepted(rows), lead: typeof lead === 'string' ? lead : null };
+    },
     preflight: async (p) => {
       // The project it files into still takes runs: an archived one refuses every new attachment (codex r6).
       if (p.filedIn.projectId !== null && p.filedIn.projectId !== DEFAULT_PROJECT_ID) {
@@ -5165,7 +5194,6 @@ export function registerRoutes(
     if (!parsed.success) {
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     }
-    if (parsed.data.accepts !== undefined) chatAccepts.set(id, parsed.data.accepts.includes('job'));
     // DES-ASK-TEAM-CHAT-001 §3, §5.1 (ASK-C1): the first message of a chat LAUNCHES one team path
     // — a user-composed plan of one `understand` step with its gate raised to the turn gate, one
     // reviewer asked for, the eligible roster as `clis`, the operator's choice as `primary`; every
@@ -5249,6 +5277,9 @@ export function registerRoutes(
     // logged, never a retraction of a turn that is already being answered (codex on #808 r2, 9).
     const persistAccepted = (preface: string | null, after: () => void): void => {
       try {
+        // DES-CATALOG-002 §4.6: the client's declaration takes effect with an ACCEPTED message only (a refused one, a
+        // second tab's 409, never changes how a turn in flight is read; codex r2 on Lane D).
+        if (parsed.data.accepts !== undefined) chatAccepts.set(id, parsed.data.accepts.includes('job'));
         after();
         if (preface !== null) chatTranscripts?.appendSystem(id, turnId, preface);
         chatTranscripts?.appendUser(id, turnId, text, voice, attached.map(attachmentWire), contextAllowed);
@@ -5358,6 +5389,12 @@ export function registerRoutes(
         });
       }
       const pending = await considerations.pendingPreface(id, { inForce: rules });
+      // DES-CATALOG-002 §2.3, §4.6: the per-message job lines (the chat catalog digest, the open proposal, the held plan),
+      // read here, before the last check (no await after it). Never in an analysis.
+      // The declaration this message's instructions are written for: its own, else the chat's (applied to the chat only
+      // once the message is accepted; the reply to this turn is read the same way, codex r3).
+      const turnAccepts = parsed.data.accepts !== undefined ? parsed.data.accepts.includes('job') : chatAccepts.get(id) === true;
+      const jobTurn = path.workflow === undefined ? await chatProposals.jobTurn(id, turnAccepts).catch(() => null) : null;
       // DES-CHAT-ARTIFACTS-001 §5.1 (A1): the turn's block — scope checked before anything is read or copied; the
       // copies and briefs land in the scratch root's `open/` and `context/`, read roots of the chat's run.
       // Built in memory here (it awaits); its files are written only after the last check below, with no await between.
@@ -5392,7 +5429,7 @@ export function registerRoutes(
       }
       if (storedScope !== undefined && scope !== undefined && engine !== undefined &&
         (JSON.stringify(scope) !== JSON.stringify(storedScope) || JSON.stringify(engine) !== JSON.stringify(chatScopes.engineOf(id)))) {
-        prepareChatScratch(id, scope, rules, { analysis: path.workflow !== undefined, make: chatProposals.digest(), ...voiceFor(scope.projectId) });
+        prepareChatScratch(id, scope, rules, { analysis: path.workflow !== undefined, make: chatProposals.digest(id, turnAccepts), ...voiceFor(scope.projectId) });
         if (chatScopes.refresh(id, storedScope, scope, engine)) {
           chatTranscripts?.registerRoots(id, scope.repos.map((r) => ({ absRoot: resolve(r.rootPath), name: r.name })));
         }
@@ -5424,19 +5461,26 @@ export function registerRoutes(
         seatText = `${seatText}\n\n${contextBlock}`;
       }
       // A2: the per-message digest of what the chat can make now (advertised operations only; never in an analysis).
-      const makeDigest = path.workflow === undefined ? chatMakeDigest(chatProposals.digest()) : '';
-      if (makeDigest !== '') seatText = `${seatText}\n\n${makeDigest}`;
+      const makeDigest = path.workflow === undefined ? chatMakeDigest(chatProposals.digest(id, turnAccepts)) : '';
+      // DES-CATALOG-002 §2.3: with job cards, the make digest rides INSIDE the job block, under its one 2 KB budget.
+      if (jobTurn !== null && jobTurn.mode === 'cards') {
+        seatText = `${seatText}\n\n${chatJobTurnLines(jobTurn.mode, { ...jobTurn.context, preface: makeDigest })}`;
+      } else if (makeDigest !== '') {
+        // An older client's message is today's (its statement lists the job commands).
+        seatText = `${seatText}\n\n${makeDigest}`;
+      }
       voice = path.pa !== null ? [path.pa] : [];
       // A random pick reserves every eligible seat until the relay names the PA.
       audience = voice.length > 0 ? voice : path.eligible;
       turn = chatTurns.begin(id, audience, text, ASK_TURN_BUDGET_SECS);
       turnId = turn?.turnId ?? turnId;
+      chatProposals.noteTurnAccepts(id, turnId, turnAccepts);
       // A repo-bound path can deliver; project and multi-repo scopes remain read-only asks. A workflow
       // chat (crew#1157) never delivers: it is bound to its repository read-only, with no deliver.
       const repoRef = scope?.kind === 'repos' && scope.repos.length === 1 ? scope.repos[0]!.id : undefined;
       const delivers = repoRef !== undefined && path.workflow === undefined;
       // A2: the per-message digest of what the chat can make now (advertised operations only).
-      const statementOpts = { analysis: path.workflow !== undefined, make: chatProposals.digest(), ...voiceFor(scope?.projectId) };
+      const statementOpts = { analysis: path.workflow !== undefined, make: chatProposals.digest(id, turnAccepts), ...voiceFor(scope?.projectId) };
       const projectId = scope?.projectId;
       if (path.runId === undefined) {
         const stepId = 'answer-1';
@@ -6861,7 +6905,10 @@ export function registerRoutes(
     requestId: z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9._-]+$/),
     /** The person's press on the reshape question: the loss ids it was shown. */
     confirmLoss: z.array(z.string().min(1).max(40)).min(1).max(12).optional(),
-  });
+    /** (api-types 0.194.0) The plan version a `plan_offer` was made on: both or neither. */
+    ord: z.number().int().min(0).optional(),
+    planRev: z.number().int().min(0).optional(),
+  }).refine((b) => (b.ord === undefined) === (b.planRev === undefined), { message: 'send `ord` and `planRev` together (the plan version the offer was made on)' });
   app.post(
     `${V}/runs/:id/reshape`,
     { config: { manifest: { requestType: 'ReshapeRunBody', responseType: 'ReshapeRunResponse', statusCodes: [200, 400, 403, 404, 409, 502] } } },
@@ -6886,6 +6933,9 @@ export function registerRoutes(
       if (chatProposals.proposalOfPid(chatId, pid)?.heldRejected !== true) {
         const elig = await reshapeEligibility(id);
         if ('refusal' in elig) return reply.code(elig.refusal.code).send(elig.refusal.body);
+        if (parsed.data.planRev !== undefined && (parsed.data.planRev !== elig.planRev || parsed.data.ord !== elig.ord)) {
+          return reply.code(409).send({ code: 'gate_changed', error: `run ${id}'s plan changed since this was offered (now version ${elig.planRev}); look at it again`, openOrd: elig.ord, planRev: elig.planRev });
+        }
       }
       const old = chatProposals.proposalOfPid(chatId, fromProposal);
       const base = old !== null && old.shape !== undefined ? factsOf(old) : null;
@@ -6930,6 +6980,7 @@ export function registerRoutes(
           },
           request: { id: parsed.data.requestId, digest: requestDigest({ card: parsed.data.card, option: parsed.data.option ?? null, depth: parsed.data.depth ?? null, inputs: parsed.data.inputs ?? null }) },
           confirmLoss: parsed.data.confirmLoss ?? [],
+          ...(parsed.data.ord !== undefined && parsed.data.planRev !== undefined ? { heldPlan: { ord: parsed.data.ord, planRev: parsed.data.planRev } } : {}),
         },
         gate.actor,
         gate.instance,
@@ -8324,6 +8375,63 @@ export function registerRoutes(
       appsByChat: runtime.apps !== undefined && runtime.apps.turns !== null,
     });
     return body;
+    },
+  );
+
+  /**
+   * (DES-CATALOG-002 §2.3, api-types 0.192.0 `DetectShapeRequest` → `ShapeGuess`) Free words typed into the `/` list
+   * that match no command: the words layer, then (unless `seat: false`) the hidden `detect-shape` turn on one seat,
+   * validated, cross-checked and banded. A person's route: it spends a seat's turn, and it proposes and starts nothing.
+   */
+  const detectService = new DetectService({
+    turn: seatTurn({
+      adapter,
+      roster: rosterWithStanding,
+      timeoutMs: DETECT_TIMEOUT_MS,
+      outputOf: async (runId) => {
+        const view = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
+        const unit = view?.units.find((u) => u.ord === 1) ?? view?.units[0];
+        return view !== undefined && unit !== undefined ? adapter.workOutput(coreUnitId(runId, unit)) : null;
+      },
+    }),
+    cancelRun: async (runId) => {
+      await adapter.cancelRun(runId);
+    },
+    catalog: async (projectId) => {
+      const served = await servedFor(shapeReads, projectId ?? undefined);
+      const status = (card: string, option: string | null): 'available' | 'coming_soon' | 'unavailable' =>
+        resolveOption(card, option, served)?.resolved.status ?? 'unavailable';
+      // The detect turn launches repo-less and project-less: the global rows (and the project's) are what could shadow it.
+      // A read that fails is a shadow: the seat is not asked (codex r7).
+      const detectShadowed = await shadowCheck(async () => [...(await adapter.listPresets()), ...(projectId !== null ? await adapter.listPresets(projectId) : [])]);
+      return { rev: served.rev, status, available: (card, option) => status(card, option) === 'available', detectShadowed };
+    },
+    costOf: async (runId) => {
+      const view = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
+      return view === undefined ? null : runCostFromEvents(view, (await adapter.runEvents(runId)) as Array<Record<string, unknown>>);
+    },
+    audit: (row) => audit.record('workflow.detect', { id: row.actor, kind: 'human', trust: 'operator' }, { ...(row.runId !== null ? { runId: row.runId } : {}), detail: { ...row } }),
+    // A detect-shape run's id carries its fence (mcp/run-fence.ts), across a restart.
+    newId: () => fencedRunId(),
+    log: (m) => app.log.warn(m),
+  });
+  const DetectSchema = z.strictObject({
+    text: z.string().max(DETECT_MAX_CHARS),
+    seat: z.boolean().optional(),
+    projectId: z.string().trim().min(1).max(200).optional(),
+  });
+  app.post(
+    `${V}/workflows/catalog/detect`,
+    { config: { manifest: { requestType: 'DetectShapeRequest', responseType: 'ShapeGuess', statusCodes: [200, 400, 403, 409, 503] } } },
+    async (req, reply) => {
+      const actor = actorOf(req);
+      if (!isHumanOperator(actor)) {
+        return reply.code(403).send({ code: 'detect_refused', error: `only a person asks what job their words are (you are ${actor.kind}/${actor.trust})` });
+      }
+      const parsed = DetectSchema.safeParse(req.body);
+      if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
+      const out = await detectService.detect({ text: parsed.data.text, ...(parsed.data.seat !== undefined ? { seat: parsed.data.seat } : {}), projectId: parsed.data.projectId ?? null }, actor);
+      return reply.code(out.code).send(out.body);
     },
   );
 
@@ -10216,6 +10324,8 @@ export function registerRoutes(
   registerMcpRoutes(app, {
     ...(runtime.askServer !== undefined ? { askServer: runtime.askServer } : {}),
     ...(runtime.mcp !== undefined ? { registry: runtime.mcp, toolLister: () => CoreAdapter.mcpToolLister() } : {}),
+    // DES-CATALOG-002 §2.3: a `detect-shape` run is listed no tool (its fence is its identity).
+    fence: daemonRunFence((runId) => adapter.launchedWorkflowOfRun(runId)),
     ...(runtime.mcpBroker !== undefined ? { broker: runtime.mcpBroker } : {}),
     ...(runtime.dataGate !== undefined ? { gate: runtime.dataGate } : {}),
     ...(mcpPolicies !== undefined ? { policies: mcpPolicies } : {}),
