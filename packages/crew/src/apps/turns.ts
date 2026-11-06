@@ -366,7 +366,7 @@ export function rulesHeldOrd(v: SessionView, events: ReadonlyArray<Record<string
         const source = typeof e['denialSource'] === 'string' ? e['denialSource'] : '';
         return source !== '' ? source === RULES_HOLD_SOURCE : e['condition'] === RULES_HOLD_SOURCE;
       }
-      if (e['type'] === 'gateEvaluated' && isRecord(e['denial']) && typeof e['denial']['source'] === 'string') return e['denial']['source'] === RULES_HOLD_SOURCE;
+      if (e['type'] === 'gateEvaluated') return isRecord(e['denial']) && e['denial']['source'] === RULES_HOLD_SOURCE;
     }
     const denial = (u as unknown as { denial?: unknown }).denial;
     return isRecord(denial) && denial['source'] === RULES_HOLD_SOURCE;
