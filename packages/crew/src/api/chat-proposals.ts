@@ -1527,7 +1527,8 @@ export class ChatProposals {
     // Every source and the target still exist, and are still where they were authorized.
     const gone = await this.firstGone(chatId, resolution);
     if (gone !== null) return { code: 409, body: { code: 'source_gone', error: gone, view: viewOf(folded) } };
-    const busy = await this.busy(chatId, identity.artifactRef, resolution);
+    // A theme is no job (§15.2): applying colours never waits for a run of this chat.
+    const busy = kind === 'theme' ? null : await this.busy(chatId, identity.artifactRef, resolution);
     if (busy !== null) return { code: 409, body: { code: busy.code, error: busy.reason, view: viewOf(folded) } };
     // A refine is on the head it was proposed on; else the card re-resolves (same pid, the new base). Read last, right
     // before the record: the landing itself is checked against this base (`expect_head`, slices I1 and A5).
