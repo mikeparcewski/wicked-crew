@@ -28,7 +28,7 @@ import {
 } from './sections.js';
 import type { DocAuthor, SteerRecord, TrailEntry, WorkingDocRecord, WorkingDocStore } from './store.js';
 import {
-  LINE_EVENTS, PHASE_REPORT_AUTHOR, docLines, foldLines, isGenerated, planApproach, planSettled, reconcileSection, type PersonNote,
+  LEGACY_GENERATED_DECISION, LINE_EVENTS, PHASE_REPORT_AUTHOR, docLines, foldLines, isGenerated, planApproach, planSettled, reconcileSection, type PersonNote,
 } from './event-lines.js';
 
 /** How crew reads and writes interactive documents (the bridge in production, a fake in tests). */
@@ -548,7 +548,10 @@ export class WorkingDocService {
       const mineAfter = (): string[] => decisionsAfter.split('\n').map((l) => l.trim())
         .filter((l) => l !== '' && isGenerated('decisions', l) && (lines.decisions.includes(l) || owned.has(l)));
       const v = await this.writeAs(runId, rec, { kind: 'plugin', id: PHASE_REPORT_AUTHOR }, (before) => {
-        owned = new Set(this.d.store.get(runId)?.ownedDecisions ?? []);
+        // A record from before crew kept its own lines: the lines main treated as crew's (the legacy generated shape),
+        // so nothing a person had is newly treated as crew's (xreview r7: renamed gate words, refined pauses).
+        const kept = this.d.store.get(runId)?.ownedDecisions;
+        owned = new Set(kept ?? before.decisions.split('\n').map((l) => l.trim()).filter((l) => LEGACY_GENERATED_DECISION.test(l)));
         const wanted: Partial<Record<SectionId, string>> = {};
         for (const sid of ['decisions', 'questions', 'next'] as const) {
           const text = reconcileSection(sid, before[sid], lines[sid], SECTION_MAX_CHARS, sid === 'decisions' ? owned : undefined);
@@ -622,14 +625,8 @@ export class WorkingDocService {
           author: batchAuthor,
         });
       } catch (err) {
-        if (err instanceof UndeterminedWriteError) {
-          this.rememberPending(runId, head.head, author, null, values, { id: batchAuthor, kind: author.kind });
-          // Crew's own Decisions lines if this write landed: installed when it is confirmed (xreview r6).
-          if (ownedAfter !== undefined) {
-            const owned = ownedAfter();
-            this.d.store.update(runId, (r) => { if (r.pending != null) r.pending.ownedDecisions = owned; });
-          }
-        }
+        // Crew's own Decisions lines if this write landed travel with it, installed when it is confirmed (xreview r6).
+        if (err instanceof UndeterminedWriteError) this.rememberPending(runId, head.head, author, null, values, { id: batchAuthor, kind: author.kind }, undefined, ownedAfter?.());
         throw err;
       }
       if ('headMoved' in written) continue;
@@ -656,8 +653,14 @@ export class WorkingDocService {
 
   /** A write whose outcome is not known: remembered, so a later read attributes it if it lands, never to the next
    *  caller, and looked at again on its own shortly, so its steer (a person's) is not left waiting for a reader. */
-  private rememberPending(runId: string, expectHead: number, author: DocAuthor, surface: string | null, values: Partial<Record<SectionId, string>>, actor: { id: string; kind: string }, spoken?: 'voice'): void {
-    this.d.store.update(runId, (r) => { r.pending = { expectHead, author, surface, values, at: this.now(), actor: { id: actor.id, kind: actor.kind }, ...(spoken !== undefined ? { input: spoken } : {}) }; });
+  private rememberPending(runId: string, expectHead: number, author: DocAuthor, surface: string | null, values: Partial<Record<SectionId, string>>, actor: { id: string; kind: string }, spoken?: 'voice', ownedDecisions?: string[]): void {
+    // One save: the write and (crew's lines write only) the ownership it carries (xreview r7).
+    this.d.store.update(runId, (r) => {
+      r.pending = {
+        expectHead, author, surface, values, at: this.now(), actor: { id: actor.id, kind: actor.kind },
+        ...(spoken !== undefined ? { input: spoken } : {}), ...(ownedDecisions !== undefined ? { ownedDecisions } : {}),
+      };
+    });
     for (const ms of [30_000, 75_000]) {
       // Once settled, the event lines come too: a write that stalled may have kept them from being written (xreview r2).
       const t = setTimeout(() => { void this.exclusive(runId, () => this.reconcile(runId)).then(() => this.linesSoon(runId), () => undefined); }, ms);
@@ -696,9 +699,10 @@ export class WorkingDocService {
     }
     const got = sectionsOf(html);
     const ids = Object.keys(p.values) as SectionId[];
-    this.d.store.update(runId, (r) => { r.pending = null; });
-    if (ids.every((id) => got[id] === p.values[id])) {
-      if (p.ownedDecisions !== undefined) { const owned = p.ownedDecisions; this.d.store.update(runId, (r) => { r.ownedDecisions = owned; }); }
+    const landed = ids.every((id) => got[id] === p.values[id]);
+    // One save: the write settled and, if it was crew's lines and landed, the ownership it carries (xreview r7).
+    this.d.store.update(runId, (r) => { r.pending = null; if (landed && p.ownedDecisions !== undefined) r.ownedDecisions = p.ownedDecisions; });
+    if (landed) {
       await this.record(runId, v, p.expectHead, p.author, p.surface, ids, p.values, p.actor, p.input);
     }
   }

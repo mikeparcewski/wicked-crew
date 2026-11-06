@@ -527,4 +527,30 @@ describe('xreview r5 folds', () => {
     expect(d.at(-1)).toContain('skipped rule R-159');
     expect(d.some((l) => l.includes('reason 0 '))).toBe(false);
   });
+
+  it('a document from before crew kept its own lines: the old generated shape is crew’s, so a newer note still fits (xreview r7)', async () => {
+    seq = 0;
+    const log: CoreEvent[] = [];
+    let audit: AuditLike[] = [];
+    const backend = new FakeBackend();
+    const store = new WorkingDocStore({ stateHome: home() });
+    const service = new WorkingDocService({
+      store, backend,
+      engine: { injectWorkerMessage: async () => 'q' },
+      run: async () => ({ title: 'x', problem: 'p', projectId: 'default', terminal: false, stepOf: () => null }),
+      events: async () => log,
+      notes: async () => personNotes(audit),
+    });
+    await service.ensure('run-1');
+    // What an older daemon's plugin wrote: 190 lines in the old words ("Def"), 3,989 characters, no ownership kept.
+    const old = Array.from({ length: 190 }, (_, i) => `Def · answered ${String(10 + Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}`).join('\n');
+    const head = backend.docs.get('working-run-1')!.length - 1;
+    expect((await service.propose('run-1', { base: head, sections: { decisions: old }, author: 'plugin', plugin: { id: 'wicked-phase-report', version: '0.14.0' } }, human)).ok).toBe(true);
+    expect(store.get('run-1')?.ownedDecisions).toBeUndefined();
+    audit = [{ ts: min(50), action: 'guidance.set', actor: human, detail: { text: 'Keep the old PDF endpoint.' } }];
+    await service.syncLines('run-1');
+    const d = (sectionsOf(backend.latest('run-1')!.html).decisions ?? '').split('\n');
+    expect(d.at(-1)).toBe(`You · ${clock(min(50))} · set guidance: “Keep the old PDF endpoint.”`);
+    expect(d.join('\n').length).toBeLessThanOrEqual(4_000);
+  });
 });

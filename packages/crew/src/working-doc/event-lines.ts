@@ -344,6 +344,10 @@ export function docLines(m: LinesModel, notes: readonly PersonNote[] = []): { de
 
 /** The lines these sections take back (the plugin's `MINE`): an open question, a hand-off follow-up. */
 const MINE: Readonly<Record<'questions' | 'next', RegExp>> = { questions: /^Waiting on you · /u, next: /^After hand-off round \d+ · /u };
+/** The generated Decisions shape before crew kept its own lines (an answered gate, an answered pause): a record with no
+ *  `ownedDecisions` seeds them from it, exactly what main treated as crew's. */
+export const LEGACY_GENERATED_DECISION = /^(?:.+ · answered \d{2}:\d{2}|Checkpoint \d+ pause.* · \d{2}:\d{2})$/u;
+
 /** A generated decision line (an answered gate, an answered pause, a person's recorded answer): only these are ever
  *  trimmed. */
 const GENERATED_DECISION = new RegExp(
