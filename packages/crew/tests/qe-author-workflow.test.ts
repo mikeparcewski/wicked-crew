@@ -492,6 +492,73 @@ describe.skipIf(!bashAvailable)('the verify phase RUNS the produced tests under 
     expect(report.checks[0]).toMatchObject({ exit: 1, class: 'pre-existing-on-base' });
   }, VERIFY_TEST_TIMEOUT_MS);
 
+  /** e2e F30: a node:test repo whose main already has a red test file (2 of 3 tests fail); the run branch adds
+   *  tests to THAT file. Returns the root and the base commit the engine records for the run. */
+  function redOnMainRepo(name: string, added: string[]): { root: string; runBase: string } {
+    const root = join(base, name);
+    mkdirSync(join(root, 'test'), { recursive: true });
+    mkdirSync(join(root, 'lib'), { recursive: true });
+    mkdirSync(join(root, 'tests'), { recursive: true });
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ name, private: true, scripts: { test: 'node --test' } }));
+    writeFileSync(join(root, 'lib', 'm.js'), 'exports.add = (a, b) => a + b;\nexports.clamp = (x, lo, hi) => Math.min(Math.max(x, lo), hi);\n');
+    const head = "const test = require('node:test'); const assert = require('node:assert'); const m = require('../lib/m.js');";
+    const mainTests = [
+      "test('add', () => assert.equal(m.add(1, 2), 3));",
+      "test('red on main 1', () => assert.equal(m.add(1, 1), 3));",
+      "test('red on main 2', () => assert.equal(m.add(2, 2), 5));",
+    ];
+    writeFileSync(join(root, 'test', 'm.test.js'), [head, ...mainTests].join('\n') + '\n');
+    const git = (...args: string[]) =>
+      execFileSync('git', ['-c', 'user.email=t@test', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe' });
+    git('init', '-q', '-b', 'main');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'main with a red test file');
+    const runBase = git('rev-parse', 'HEAD').toString().trim();
+    git('checkout', '-q', '-b', 'wicked/run-verify');
+    writeFileSync(join(root, 'test', 'm.test.js'), [head, ...mainTests, ...added].join('\n') + '\n');
+    writeFileSync(join(root, 'tests', 'PLAN-clamp.md'), '# plan\n');
+    return { root, runBase };
+  }
+
+  it('#624b (e2e F30): tests ADDED to a file that already fails on main verify — the file is pre-existing-on-base, failed=0 failed_on_base=1, PASS', () => {
+    const { root, runBase } = redOnMainRepo('red-on-main-added-pass', [
+      "test('clamp low', () => assert.equal(m.clamp(-1, 0, 5), 0));",
+      "test('clamp high', () => assert.equal(m.clamp(9, 0, 5), 5));",
+    ]);
+    const { status, out } = runVerify(root, { TMPDIR: mkdtempSync(join(base, 'f30-pass-tmp-')), WICKED_RUN_BASE: runBase });
+    expect(out).toMatch(/QE-VERIFY-BASE ref=run-base commit=/);
+    expect(out).toMatch(/file=test\/m\.test\.js harness=node-test .*exit=1 .*status=failed class=pre-existing-on-base/);
+    expect(out).toContain('failed=0 not_executed=0 failed_on_base=1');
+    expect(out).toContain('fail on main too');
+    expect(status).toBe(0);
+    const report = parseQeVerifyOutput(out)!;
+    expect(report.failed).toBe(0);
+    expect(report.checksFailed).toBe(0);
+  }, VERIFY_TEST_TIMEOUT_MS);
+
+  it('#624b negative (e2e F30): one more FAILING test in the file that is red on main is the run\'s own failure — FAIL', () => {
+    const { root, runBase } = redOnMainRepo('red-on-main-added-fail', [
+      "test('clamp low', () => assert.equal(m.clamp(-1, 0, 5), 0));",
+      "test('clamp wrong', () => assert.equal(m.clamp(9, 0, 5), 9));",
+    ]);
+    const { status, out } = runVerify(root, { TMPDIR: mkdtempSync(join(base, 'f30-fail-tmp-')), WICKED_RUN_BASE: runBase });
+    expect(out).toMatch(/file=test\/m\.test\.js .*status=failed class=produced-test-failure/);
+    expect(out).toContain('failed=1 not_executed=0 failed_on_base=0');
+    expect(out).toContain('qe-verify: FAIL');
+    expect(status).not.toBe(0);
+    expect(parseQeVerifyOutput(out)!.failed).toBe(1);
+  }, VERIFY_TEST_TIMEOUT_MS);
+
+  it('#624b (e2e F30): with no base recorded by the engine, main\'s failures are not told apart — the file counts, FAIL', () => {
+    const { root } = redOnMainRepo('red-on-main-no-base', [
+      "test('clamp low', () => assert.equal(m.clamp(-1, 0, 5), 0));",
+    ]);
+    const { status, out } = runVerify(root, { TMPDIR: mkdtempSync(join(base, 'f30-nobase-tmp-')), WICKED_RUN_BASE: '' });
+    expect(out).toContain('no base recorded by the engine');
+    expect(out).toContain('failed=1 not_executed=0 failed_on_base=0');
+    expect(status).not.toBe(0);
+  }, VERIFY_TEST_TIMEOUT_MS);
+
   it('acceptance criterion 5: mktemp uses ${TMPDIR:-/tmp}/qe-verify.XXXXXX — a fixture-local TMPDIR is honoured', () => {
     const root = join(base, 'tmpdir-check');
     mkdirSync(root);
