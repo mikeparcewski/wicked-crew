@@ -339,12 +339,15 @@ export function turnProblem(input: {
  */
 /**
  * (F22) The ord of the step a parked (or stopped) run is held at on steering rules, or `null`. Read from structured
- * fields only, never a prompt's prose: the unit's own `denial.source` (the engine's record of its last gate), else,
- * for a unit that carries no denial, the newest `gateEscalated` at that ord since its last dispatch (`denialSource`,
- * else `condition`). The step is the one the open gate is at when the frames name one, else the rejected step.
+ * fields only, never a prompt's prose, and only THIS attempt's: the newest `gateEscalated` (`denialSource`, else
+ * `condition`) or `gateEvaluated.denial.source` at that ord since the step's last dispatch (a dispatch after a hold
+ * voids it). A log that never mentions the step (or could not be read) leaves it to the unit's own `denial.source`,
+ * the engine's record of its last gate (on the runs wire; not yet in the api-types `WorkUnit`). The step is the one
+ * the open gate is at when the frames name one, else the rejected step.
  */
 export function rulesHeldOrd(v: SessionView, events: ReadonlyArray<Record<string, unknown>> | null = null): number | null {
   if (v.session.status !== 'awaiting_human' && v.session.status !== 'cancelled') return null;
+  const isRecord = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null;
   let gateOrd: number | null = null;
   if (events !== null) {
     let open: Record<string, unknown> | null = null;
@@ -355,19 +358,18 @@ export function rulesHeldOrd(v: SessionView, events: ReadonlyArray<Record<string
     if (open !== null && typeof open['ord'] === 'number') gateOrd = open['ord'];
   }
   const held = (u: { ord: number }): boolean => {
-    const denial = (u as unknown as { denial?: unknown }).denial;
-    if (typeof denial === 'object' && denial !== null) return (denial as Record<string, unknown>)['source'] === RULES_HOLD_SOURCE;
-    if (events === null) return false;
-    for (let i = events.length - 1; i >= 0; i--) {
-      const e = events[i]!;
+    for (let i = (events?.length ?? 0) - 1; i >= 0; i--) {
+      const e = events![i]!;
       if (e['ord'] !== u.ord) continue;
       if (e['type'] === 'unitDispatched') return false;
       if (e['type'] === 'gateEscalated') {
         const source = typeof e['denialSource'] === 'string' ? e['denialSource'] : '';
         return source !== '' ? source === RULES_HOLD_SOURCE : e['condition'] === RULES_HOLD_SOURCE;
       }
+      if (e['type'] === 'gateEvaluated' && isRecord(e['denial']) && typeof e['denial']['source'] === 'string') return e['denial']['source'] === RULES_HOLD_SOURCE;
     }
-    return false;
+    const denial = (u as unknown as { denial?: unknown }).denial;
+    return isRecord(denial) && denial['source'] === RULES_HOLD_SOURCE;
   };
   const at = gateOrd !== null ? v.units.find((u) => u.ord === gateOrd) : v.units.find((u) => u.status === 'rejected');
   return at !== undefined && held(at) ? at.ord : null;

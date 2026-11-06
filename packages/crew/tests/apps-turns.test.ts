@@ -626,6 +626,42 @@ describe('apps turns: a review held on steering rules waits for the person (F22)
     expect(d.turns![0]).toMatchObject({ state: 'refused', code: 'review_refused' });
   });
 
+  it('a stale rules denial on the unit does not hold a later attempt: re-dispatched, then refused, the turn is refused (codex r1)', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    // The unit record still carries the old hold; the log says the step ran again and its new gate is a failure.
+    s.set(runId, 'awaiting_human', { build: { status: 'done' }, check: { status: 'done' }, review: { ...held('rules_unchecked'), denial_reason: 'the seat crashed' } });
+    s.events.set(runId, [...holdFrames(runId), { type: 'gateDecided', session: runId, ord: 3, allow: true }, { type: 'unitDispatched', session: runId, ord: 3 }, { type: 'awaitingHuman', session: runId, ord: 3, gateKind: 'failure', prompt: 'the seat crashed' }]);
+    const d = (await s.call('GET', '/apps/escalations')).body.app;
+    expect(d.turn).toBeNull();
+    expect(s.cancelled).toEqual([runId]);
+    expect(d.turns![0]).toMatchObject({ state: 'refused', code: 'review_refused', reason: expect.stringContaining('seat crashed') });
+  });
+
+  it('a re-check that finds the rule BROKEN (log only, no unit denial) is refused: the rule check re-ran without a new dispatch', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    const broken = '1 steering rule(s) broken: learn-accessible - a chart has no text alternative';
+    s.set(runId, 'awaiting_human', { build: { status: 'done' }, check: { status: 'done' }, review: { status: 'rejected', denial_reason: broken } });
+    s.events.set(runId, [...holdFrames(runId), { type: 'gateDecided', session: runId, ord: 3, allow: true },
+      { type: 'gateEvaluated', session: runId, ord: 3, denial: { source: 'rule_check', reason: broken } },
+      { type: 'gateEscalated', session: runId, ord: 3, attempt: 0, condition: 'rule_broken', denialSource: 'rule_check', verdictSummary: broken },
+      { type: 'awaitingHuman', session: runId, ord: 3, gateKind: 'escalation', prompt: broken }]);
+    const d = (await s.call('GET', '/apps/escalations')).body.app;
+    expect(d.turn).toBeNull();
+    expect(s.cancelled).toEqual([runId]);
+    expect(d.turns![0]).toMatchObject({ state: 'refused', code: 'review_refused', reason: expect.stringContaining('learn-accessible') });
+  });
+
+  it('an engine with no event log keeps a hold the unit record names (it is never taken for a refusal)', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    (s.engine as { runEvents?: unknown }).runEvents = undefined;
+    s.set(runId, 'awaiting_human', { build: { status: 'done' }, check: { status: 'done' }, review: held('rules_unchecked') });
+    expect((await s.call('GET', '/apps/escalations')).body.app.turn).toMatchObject({ runId });
+    expect(s.cancelled).toEqual([]);
+  });
+
   it('NEGATIVE CONTROL: a BROKEN rule (rule_check) is still a refusal: the run is stopped and the turn recorded refused', async () => {
     const s = setup();
     const runId = await startTurn(s);

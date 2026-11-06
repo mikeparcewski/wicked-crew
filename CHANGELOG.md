@@ -31,8 +31,9 @@ mentioned only where a daemon release depends on them.
 - **An app turn held on steering rules waits for the person instead of being cancelled (F22).** When the review's
   rule check leaves a rule unchecked, waived by instruction or disputed, the engine holds the gate (`rules_unchecked`:
   "the work was not rejected"). crew read that hold as a refusal and cancelled the run about 3 seconds later, so an app
-  by chat could never land while a judge left one rule unanswered. The hold, read from the unit's `denial.source` (or,
-  without one, the newest `gateEscalated` since the step's last dispatch), is now no refusal: the turn stays `running`,
+  by chat could never land while a judge left one rule unanswered. The hold, read from this attempt's structured record (the
+  newest `gateEscalated` or `gateEvaluated.denial` since the step's last dispatch, else the unit's own
+  `denial.source`), is now no refusal: the turn stays `running`,
   the app stays read-only, and the person answers the gate (re-check the rules, or confirm or skip with a reason) on
   the run page. A Stop on the hold ends the turn `cancelled`. A BROKEN rule (`rule_check`) and every other refusal
   still stop the run and record why. No wire change.
