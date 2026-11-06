@@ -79,6 +79,18 @@ describe('the evidence root minted at launch (WT-W1)', () => {
     expect(existsSync(join(walkDir, 'run-c'))).toBe(false);
   });
 
+  it("(DES-DEMO-RECORD-001) a demo launch's demo root is its evidence root, never a write root and never removed here", async () => {
+    const demoRoot = join(dir, 'demos', 'run-demo');
+    mkdirSync(join(demoRoot, 'plan'), { recursive: true });
+    await adapter.launchRun({ problem: 'p', sessionId: 'run-demo', clisJson: '[]', workflow: 'demo', demoRoot, extraWriteRoots: [join(demoRoot, 'plan')] });
+    expect(launched[0]!.evidenceRoot).toBe(demoRoot);
+    expect(launched[0]!.extraWriteRoots).toEqual([join(demoRoot, 'plan')]);
+    expect(existsSync(join(walkDir, 'run-demo'))).toBe(false);
+    // An addon that cannot take it refuses the demo rather than launch a run whose recorder has no root.
+    (adapter as unknown as { evidenceRootsSupported: () => boolean }).evidenceRootsSupported = () => false;
+    await expect(adapter.launchRun({ problem: 'p', sessionId: 'run-demo2', clisJson: '[]', workflow: 'demo', demoRoot })).rejects.toThrow('demo root');
+  });
+
   it('an addon that cannot take the field gets none (it would drop it silently), and nothing is created', async () => {
     (adapter as unknown as { evidenceRootsSupported: () => boolean }).evidenceRootsSupported = () => false;
     await adapter.launchRun({ problem: 'p', sessionId: 'run-d', clisJson: '[]', workflow: 'bug', repoRef: 'shop' });

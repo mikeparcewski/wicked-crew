@@ -139,6 +139,11 @@ export interface LaunchRunInput {
    */
   extraWriteRoots?: string[];
   /**
+   * (DES-DEMO-RECORD-001) A Demo video's demo root, minted by the demo route: handed to the engine as the run's
+   * evidence root (its jailed Tools record under it; it is never a write root). Only the demo route sets it.
+   */
+  demoRoot?: string;
+  /**
    * ADDITIONAL absolute READ-ONLY roots for the run (wicked-core#294): reads inside them pass the
    * governed units' boundary, writes stay denied. A chat's ask run declares its scope's
    * repositories here (crew#1034), so a project chat reads its repositories whether or not the

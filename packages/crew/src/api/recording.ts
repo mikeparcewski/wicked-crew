@@ -94,6 +94,20 @@ const V = API_PREFIX;
 
 /** The preset a demo run launches (wicked-core `builtin_presets`). */
 export const DEMO_PRESET = 'demo';
+/** (DES-DEMO-RECORD-001 §3.7) The preset for an app whose rows may not reach a model: no model review step; the
+ *  person reviews the take at the record step's own gate. */
+export const DEMO_HUMAN_REVIEW_PRESET = 'demo-human-review';
+export const DEMO_PRESETS: readonly string[] = [DEMO_PRESET, DEMO_HUMAN_REVIEW_PRESET];
+
+/**
+ * (DES-DEMO-RECORD-001 §3.2) The demo root's layout. The run's ONLY write root is `plan/` (the plan seat's brief,
+ * script, chapters and storyline); the engine's jailed Tools write `probe/`, `demo-video/` and `review/`; the engine
+ * writes `approved/` (the snapshot the plan gate shows and the recorder records) and `takes/`; crew writes
+ * `launch.json` (what it decided about the app) before the launch. A demo recorded before this layout keeps its
+ * files at the root: every read here tries `plan/` first, then the root.
+ */
+export const DEMO_PLAN_DIR = 'plan';
+const DEMO_TOOL_DIRS = ['probe', 'demo-video', 'review'] as const;
 
 /** Studio's Unfiled mount (`/p/default/…`): the daemon's synthesized project, never a launch's `projectId`. */
 const UNFILED_PROJECT = 'default';
@@ -167,7 +181,97 @@ export async function existingDemoRootDir(runId: string): Promise<string> {
  * takes no write roots from its body; it reads this in-process entry, so the root is never something a
  * caller can ask for (the capture route's pattern).
  */
-export const demoLaunchRoots = new Map<string, string>();
+export interface DemoLaunchRoots {
+  /** The demo root: the run's evidence root (the engine's Tools write under it). */
+  root: string;
+  /** `<root>/plan`: the run's only write root. */
+  write: string;
+  /** Read-only mounts: the probe (always), the review sheets (only when the app's rows may reach a model). */
+  read: string[];
+}
+export const demoLaunchRoots = new Map<string, DemoLaunchRoots>();
+
+/** What crew decided about the app at launch (`<root>/launch.json`, read by wicked-core). */
+export interface DemoLaunchManifest {
+  app_origin: string;
+  launch_path: string;
+  target: { kind: 'crew_app'; id: string } | { kind: 'loopback_app' };
+  live_data_to_models: boolean;
+}
+
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
+
+/**
+ * The app URL a demo may record: an http(s) URL on this machine (127.0.0.1, localhost or [::1]), split into its
+ * origin with an explicit port and its path (and query). `null` for any other host: the recorder's jail opens one
+ * loopback port and nothing else (a remote app is post-mvp, wicked-core#1296).
+ */
+export function demoAppTarget(url: string): { appOrigin: string; launchPath: string } | null {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  if (!/^https?:$/.test(u.protocol) || !LOOPBACK_HOSTS.has(u.hostname) || u.username !== '' || u.password !== '') return null;
+  const port = u.port !== '' ? u.port : u.protocol === 'https:' ? '443' : '80';
+  const launchPath = `${u.pathname || '/'}${u.search}`;
+  if (!/^\/[A-Za-z0-9._~%/?&=+-]*$/.test(launchPath) || launchPath.startsWith('//')) return null;
+  return { appOrigin: `${u.protocol}//${u.hostname}:${port}`, launchPath };
+}
+
+/** The crew app a demo URL names on THIS daemon (`/apps/<id>` on crew's own port), else `null`. */
+export function crewAppOf(appOrigin: string, launchPath: string, crewUrl: string | null | undefined): string | null {
+  if (crewUrl === null || crewUrl === undefined || crewUrl === '') return null;
+  let crew: URL;
+  try {
+    crew = new URL(crewUrl);
+  } catch {
+    return null;
+  }
+  const app = new URL(appOrigin);
+  // The URL API drops a default port (`:80`, `:443`): both sides are compared with it written out.
+  const portOf = (u: URL): string => (u.port !== '' ? u.port : u.protocol === 'https:' ? '443' : '80');
+  // Loopback names are one machine: 127.0.0.1 and localhost on crew's port are crew.
+  if (portOf(app) !== portOf(crew) || !LOOPBACK_HOSTS.has(crew.hostname) || app.protocol !== crew.protocol) return null;
+  const m = /^\/apps\/([A-Za-z0-9._-]{1,128})(?:[/?]|$)/.exec(launchPath);
+  return m?.[1] ?? null;
+}
+
+/** The seams the demo route reads to decide what an app may show a model (DES-APPS-001 S5). Optional: a daemon
+ *  without them treats every crew app's rows as private (the safe reading). */
+export interface DemoRouteDeps {
+  /** The sources an app's queries read (its accepted spec), or `null` when there is no such app. */
+  appSources?: (slug: string) => Promise<string[] | null>;
+  /** Whether the engine records demos on the host (its catalog has `demo_record`). Absent: assumed. */
+  engineRecordsDemos?: () => Promise<boolean>;
+  /** Whether a run filed into `projectId` (null: unfiled) may query a source (the data gate's `agentMay`). */
+  agentQueryAllowed?: (source: string, projectId: string | null) => Promise<boolean> | boolean;
+}
+
+/** The built-in sources whose rows are crew's own (its runs, its knowledge): not a person's data source. */
+const BUILTIN_APP_SOURCES = new Set(['crew', 'estate']);
+
+/** Whether a crew app's rows may reach a model: every source it reads is built-in or agent-queryable. */
+export async function crewAppRowsMayReachModels(slug: string, deps: DemoRouteDeps, projectId: string | null = null): Promise<boolean> {
+  if (deps.appSources === undefined || deps.agentQueryAllowed === undefined) return false;
+  let sources: string[] | null;
+  try {
+    sources = await deps.appSources(slug);
+  } catch {
+    return false;
+  }
+  if (sources === null) return false;
+  for (const src of sources) {
+    if (BUILTIN_APP_SOURCES.has(src)) continue;
+    try {
+      if ((await deps.agentQueryAllowed(src, projectId)) !== true) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
 
 export const DemoLaunchSchema = z.strictObject({
   url: z.string().trim().superRefine(zod3Url).max(2048).refine((u) => /^https?:\/\//i.test(u), 'url must be http(s)'),
@@ -202,29 +306,58 @@ export async function demoLaunch(
   body: unknown,
   ctx: { actor: Actor; log: Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'> },
   extra: DemoLaunchExtra = {},
+  deps: DemoRouteDeps = {},
 ): Promise<{ code: number; body: unknown }> {
   const parsed = DemoLaunchSchema.safeParse(body ?? {});
   if (!parsed.success) {
     return { code: 400, body: { error: 'Invalid demo body', details: parsed.error.issues } };
   }
+  // The engine must record on the host (wicked-core's `demo_record` Tool): an engine without it would hand the
+  // recording to a seat that cannot reach the app (wicked-core#1249). Refuse rather than launch a demo that can
+  // never reach its review gate.
+  if (deps.engineRecordsDemos !== undefined && !(await deps.engineRecordsDemos().catch(() => false))) {
+    return { code: 501, body: { error: 'this wicked-core cannot record a demo on the host (no demo_record Tool): upgrade wicked-core-ts' } };
+  }
+  const target = demoAppTarget(parsed.data.url);
+  if (target === null) {
+    return {
+      code: 400,
+      body: { error: 'a demo records an app on this machine: use http://127.0.0.1:<port>/…, http://localhost:<port>/… or http://[::1]:<port>/… (the recorder reaches no other host)' },
+    };
+  }
+  // (DES-DEMO-RECORD-001 §3.7) What crew decides about the app, from its own state: whether it is one of crew's
+  // apps (its one query and event stream are then the recorder's), and whether its rows may reach a model
+  // (DES-APPS-001 S5: every source it reads passes the data gate's predicate for this run's project).
+  const crewApp = crewAppOf(target.appOrigin, target.launchPath, process.env['WICKED_CREW_URL']);
+  const live = crewApp === null ? true : await crewAppRowsMayReachModels(crewApp, deps, projectId !== UNFILED_PROJECT ? projectId : null);
+  const manifest: DemoLaunchManifest = {
+    app_origin: target.appOrigin,
+    launch_path: target.launchPath,
+    target: crewApp === null ? { kind: 'loopback_app' } : { kind: 'crew_app', id: crewApp },
+    live_data_to_models: live,
+  };
   const derived = extra.common?.['sessionId'];
   const runId = typeof derived === 'string' ? derived : randomUUID();
   const root = demoRootDir(runId);
-  await fsp.mkdir(root, { recursive: true });
-  const briefPath = join(root, 'BRIEF.md');
-  await fsp.writeFile(briefPath, demoBrief(root, parsed.data), 'utf8');
-  demoLaunchRoots.set(runId, root);
+  const plan = join(root, DEMO_PLAN_DIR);
+  // Every directory a seat mounts must exist before the launch: the plan (write), the probe and, when the rows may
+  // reach a model, the review sheets (read-only).
+  for (const d of [plan, ...DEMO_TOOL_DIRS.map((t) => join(root, t))]) await fsp.mkdir(d, { recursive: true });
+  await fsp.writeFile(join(root, 'launch.json'), JSON.stringify(manifest, null, 2), 'utf8');
+  const briefPath = join(plan, 'BRIEF.md');
+  await fsp.writeFile(briefPath, demoBrief(plan, parsed.data), 'utf8');
+  demoLaunchRoots.set(runId, { root, write: plan, read: live ? [join(root, 'probe'), join(root, 'review')] : [join(root, 'probe')] });
   let launched: { statusCode: number; payload: unknown };
   try {
     launched = await launchRun(
       {
         // ONE path (the worker's only way to the brief; the brief names the root). crew#813 made it
         // follow the state home — studio masks the path where it prints the problem (studio#520).
-        problem: `Make a demo of ${parsed.data.url} with the wicked-garden-demo skill: follow the demo brief at ${briefPath} — its directory is the demo root, where every file this demo makes goes.`,
+        problem: `Make a demo of ${parsed.data.url} with the wicked-garden-demo skill: follow the demo brief at ${briefPath} — its directory is the plan directory, where your files go; the app's page summary is in ${join(root, 'probe')}.`,
         sessionId: runId,
         // Unfiled (studio's `default` mount) is no project to file into: the run launches unfiled.
         ...(projectId !== UNFILED_PROJECT ? { projectId } : {}),
-        workflow: DEMO_PRESET,
+        workflow: live ? DEMO_PRESET : DEMO_HUMAN_REVIEW_PRESET,
         deliver: 'none',
         ...(parsed.data.clisJson !== undefined ? { clisJson: parsed.data.clisJson } : {}),
         ...(parsed.data.reducedAssurance === true ? { reducedAssurance: true } : {}),
@@ -409,7 +542,7 @@ export function demoBrief(root: string, b: { url: string; audience: string; show
     '# Demo brief',
     '',
     `- **App:** ${b.url}`,
-    `- **Demo root:** ${root} (every file this demo makes goes here, nowhere else)`,
+    `- **Plan directory:** ${root} (your files go here, nowhere else: the recording is the engine's)`,
     '',
     '## Who it is for',
     '',
@@ -421,7 +554,9 @@ export function demoBrief(root: string, b: { url: string; audience: string; show
     '',
     '## Rules',
     '',
-    '- Use the wicked-garden-demo skill: plan, then record, then review.',
+    '- Use the wicked-garden-demo skill\'s `plan` action as its "In a crew Demo video run" section says: write',
+    '  `script.md`, `chapters.json` and `storyline.json` (data, never a module). The engine records it on this',
+    '  machine after the plan gate; nobody in the run records by hand.',
     '- Read-only against the app: navigate, hover, scroll, open panels and type, but never submit,',
     '  launch, approve, delete, create, cancel or save. The recorder blocks every write and fails the',
     '  chapter; show a control without pressing it.',
@@ -434,9 +569,9 @@ export function demoBrief(root: string, b: { url: string; audience: string; show
 /** A demo run: launched from the `demo` preset — read off the engine's plan state, or, before the
  *  launch is scored and `team_plan` exists, off the run's identity (resolved from the launch record). */
 export function isDemoRun(view: SessionView): boolean {
-  if (view.session.team_plan?.preset === DEMO_PRESET) return true;
+  if (DEMO_PRESETS.includes(view.session.team_plan?.preset ?? '')) return true;
   const id = (view.session as { run_identity?: { kind?: unknown; name?: unknown } | null }).run_identity;
-  return id?.kind === 'preset' && id.name === DEMO_PRESET;
+  return id?.kind === 'preset' && typeof id.name === 'string' && DEMO_PRESETS.includes(id.name);
 }
 
 /** The unit for one of the preset's steps (`<run>:plan` …). */
@@ -463,12 +598,14 @@ export function demoStage(view: SessionView): DemoStage {
     const done = (id: string): boolean => stepUnit(view, id)?.status === 'done';
     // After `review`: its own gate when it passed, the engine's escalation gate when it did not.
     if (done('review') || stepUnit(view, 'review')?.status === 'rejected') return 'review_gate';
+    // The human-review preset has no `review` step: the person reviews the take at `record`'s own gate.
+    if (stepUnit(view, 'review') === undefined && done('record')) return 'review_gate';
     // Only while `record` has not started: a record the engine rejected parks at ITS escalation gate,
     // which is no plan gate (the script is not editable once the recorder has run).
     const record = stepUnit(view, 'record')?.status;
     if (done('plan') && (record === 'pending' || record === 'distributed')) return 'plan_gate';
   }
-  if (step === 'plan') return 'planning';
+  if (step === 'plan' || step === 'probe') return 'planning';
   if (step === 'record') return 'recording';
   if (step === 'review') return 'reviewing';
   // The PA's scope step and any phase floor fill added run before `plan` or between the three.
@@ -593,18 +730,70 @@ function briefFields(brief: string | null): { url: string | null; audience: stri
   return { url, audience };
 }
 
+/** A plan file: `plan/<name>` (the layout since DES-DEMO-RECORD-001), else `<name>` at the root (a demo before it). */
+async function planText(root: string, name: string): Promise<string | null> {
+  return (await readText(root, `${DEMO_PLAN_DIR}/${name}`)) ?? (await readText(root, name));
+}
+
+/**
+ * The plan the person approves and the engine records (DES-DEMO-RECORD-001 §3.3), read as ONE pair from ONE pointer:
+ *   - `approved`: the engine's snapshot for THIS run (`approved/current.json` names the run and the generation);
+ *   - `none`: no snapshot yet (before the plan step passed, or a demo recorded before snapshots): the plan's own files;
+ *   - `unavailable`: a pointer that exists but cannot be trusted (another run's, malformed, a file missing): nothing is
+ *     shown as the plan, never the live, editable files in its place.
+ */
+async function approvedPlan(root: string, runId: string): Promise<
+  { state: 'approved'; chapters: string | null; storyline: string | null } | { state: 'none' } | { state: 'unavailable' }
+> {
+  const current = await readText(root, 'approved/current.json');
+  if (current === null) {
+    return (await containedPath(root, 'approved/current.json')) === null ? { state: 'none' } : { state: 'unavailable' };
+  }
+  let ptr: { gen?: unknown; run?: unknown };
+  try {
+    ptr = JSON.parse(current) as { gen?: unknown; run?: unknown };
+  } catch {
+    return { state: 'unavailable' };
+  }
+  const gen = ptr.gen;
+  if (typeof gen !== 'number' || !Number.isInteger(gen) || gen < 1 || ptr.run !== runId) return { state: 'unavailable' };
+  const [chapters, storyline] = await Promise.all([readText(root, `approved/${gen}/chapters.json`), readText(root, `approved/${gen}/storyline.json`)]);
+  if (chapters === null || storyline === null) return { state: 'unavailable' };
+  return { state: 'approved', chapters, storyline };
+}
+
+/** The app a modern demo records: crew's own `launch.json` (the seat cannot write it), else `null`. */
+async function launchManifest(root: string): Promise<DemoLaunchManifest | null> {
+  const raw = await readText(root, 'launch.json');
+  if (raw === null) return null;
+  try {
+    const m = JSON.parse(raw) as Partial<DemoLaunchManifest>;
+    return typeof m.app_origin === 'string' && typeof m.launch_path === 'string' ? (m as DemoLaunchManifest) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Everything studio renders for a demo run, read from its root and its units. */
 export async function demoView(adapter: CoreAdapter, view: SessionView): Promise<DemoView> {
   const runId = view.session.id;
   const root = await existingDemoRootDir(runId);
   // Every read is resolved inside the root: the run can write here, so a symlink it made is never followed out.
-  const [brief, script, chaptersRaw, markersRaw, recordingRaw] = await Promise.all([
-    readText(root, 'BRIEF.md'),
-    readText(root, 'script.md'),
-    readText(root, 'chapters.json'),
+  // The chapters and storyline the person approves (and the recorder records) are the engine's snapshot once the
+  // plan step passed; before that, the plan's own files.
+  const [brief, script, approved, manifest, planChapters, planStoryline, markersRaw, recordRaw, legacyRecordingRaw] = await Promise.all([
+    planText(root, 'BRIEF.md'),
+    planText(root, 'script.md'),
+    approvedPlan(root, runId),
+    launchManifest(root),
+    planText(root, 'chapters.json'),
+    planText(root, 'storyline.json'),
     readText(root, 'demo-video/chapters.md'),
+    readText(root, 'demo-video/record.json'),
     readText(root, 'demo-video/recording.json'),
   ]);
+  const chaptersRaw = approved.state === 'approved' ? approved.chapters : approved.state === 'none' ? planChapters : null;
+  const storylineRaw = approved.state === 'approved' ? approved.storyline : approved.state === 'none' ? planStoryline : null;
   const chapters: DemoChapter[] = await Promise.all(
     parseChapters(chaptersRaw).map(async (c) => ({
       ...c,
@@ -617,13 +806,33 @@ export async function demoView(adapter: CoreAdapter, view: SessionView): Promise
   }
   const videoBytes = await fileSize(root, 'demo-video/demo.mp4');
   const video: DemoView['video'] = videoBytes !== null && videoBytes > 0 ? { path: 'demo-video/demo.mp4', bytes: videoBytes } : null;
+  // The engine-run recorder's verdict (`record.json`, DES-DEMO-RECORD-001 §3.5), else a hand recorder's
+  // `recording.json`.
   let readOnly: boolean | null = null;
-  if (recordingRaw !== null) {
+  let jail: string | null = null;
+  const parsedRecord = (raw: string | null): Record<string, unknown> | null => {
+    if (raw === null) return null;
     try {
-      const r = JSON.parse(recordingRaw) as { readOnly?: unknown };
-      readOnly = typeof r.readOnly === 'boolean' ? r.readOnly : null;
+      const v = JSON.parse(raw) as unknown;
+      return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
     } catch {
-      readOnly = null;
+      return null;
+    }
+  };
+  const rec = parsedRecord(recordRaw);
+  if (rec !== null) {
+    readOnly = typeof rec.read_only === 'boolean' ? rec.read_only : null;
+    jail = typeof rec.jail === 'string' ? rec.jail : null;
+  } else {
+    const legacy = parsedRecord(legacyRecordingRaw);
+    readOnly = typeof legacy?.readOnly === 'boolean' ? legacy.readOnly : null;
+  }
+  let storyline: unknown = null;
+  if (storylineRaw !== null) {
+    try {
+      storyline = JSON.parse(storylineRaw) as unknown;
+    } catch {
+      storyline = null;
     }
   }
   const review = stepUnit(view, 'review');
@@ -633,7 +842,9 @@ export async function demoView(adapter: CoreAdapter, view: SessionView): Promise
   const { verdict, findings } = parseReview(reviewOutput);
   return {
     runId,
+    // The app the engine records is crew's own manifest's, never the brief's (the plan seat can edit the brief).
     ...briefFields(brief),
+    ...(manifest !== null ? { url: `${manifest.app_origin}${manifest.launch_path}` } : {}),
     stage: demoStage(view),
     script,
     chapters,
@@ -642,7 +853,10 @@ export async function demoView(adapter: CoreAdapter, view: SessionView): Promise
     video,
     recording: { readOnly },
     review: { verdict, findings, text: reviewOutput, rejected: review?.status === 'rejected' },
-    seats: { recorder: record?.assigned_cli ?? null, reviewer: review?.assigned_cli ?? null },
+    // A `demo_record` unit is the engine's own Tool: it has no seat (its `assigned_cli` names the Tool executor).
+    seats: { recorder: record?.catalog === 'demo_record' ? null : (record?.assigned_cli ?? null), reviewer: review?.assigned_cli ?? null },
+    producer: record?.catalog === 'demo_record' ? { kind: 'engine', tool: 'demo_record', jail } : record !== undefined ? { kind: 'seat', tool: null, jail: null } : null,
+    storyline,
     syntheticLabelled: script !== null && /synthetic/i.test(script),
     document: await demoDocumentLink(runId),
   };
@@ -769,7 +983,8 @@ export async function makeDemoDocument(view: SessionView, deps: DemoDocumentDeps
   // which could swap a segment's directory mid-read (codex on #1013).
   if (!DEMO_DOCUMENT_STATUSES.has(view.session.status)) return { status: 409, body: { error: 'a demo becomes a document once its run has completed (or was cancelled)' } };
   const root = await existingDemoRootDir(runId);
-  const chapters = parseChapters(await readText(root, 'chapters.json'));
+  const approved = await approvedPlan(root, runId);
+  const chapters = parseChapters(approved.state === 'approved' ? approved.chapters : approved.state === 'none' ? await planText(root, 'chapters.json') : null);
   if (chapters.length === 0) return { status: 409, body: { error: 'the demo has no chapters to import' } };
   for (const c of chapters) {
     if (!IMPORT_KEY.test(c.key)) return { status: 409, body: { error: `chapter key ${JSON.stringify(c.key)} cannot name a take` } };
@@ -780,7 +995,9 @@ export async function makeDemoDocument(view: SessionView, deps: DemoDocumentDeps
   const call = await deps.bridgeFor(projectId);
   if (call === null) return { status: 404, body: { error: `Project ${projectId} not found` } };
   const docId = `demo-${runId.replace(/[^a-z0-9]/giu, '').toLowerCase().slice(0, 12)}`;
-  const { url } = briefFields(await readText(root, 'BRIEF.md'));
+  const manifest = await launchManifest(root);
+  const { url: briefUrl } = briefFields(await planText(root, 'BRIEF.md'));
+  const url = manifest !== null ? `${manifest.app_origin}${manifest.launch_path}` : briefUrl;
   const title = `Demo of ${url ?? 'the app'}`.replace(/[\r\n]+/gu, ' ').slice(0, 80);
   const placeholder = `<main><h1>${title.replace(/[&<>"]/gu, '')}</h1><p>The run's demo, imported for editing.</p></main>`;
   const created = await call('POST', '/api/docs', { name: docId, html: placeholder, ...(projectId !== UNFILED_PROJECT ? { project: projectId } : {}) });
@@ -875,7 +1092,7 @@ export function parseRange(header: string | undefined, size: number): { start: n
   return { start, end };
 }
 
-export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter, launchRun: DemoLaunchRun): void {
+export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter, launchRun: DemoLaunchRun, deps: DemoRouteDeps = {}): void {
   // One encode per run and format at a time, since each format writes one file. An identical request
   // (a double click) joins the encode in flight; a different poster frame is refused until it ends,
   // so two encodes never race to replace the same file.
@@ -909,7 +1126,7 @@ export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter, l
     },
     async (req, reply) => {
       const projectId = (req.params as { id: string }).id;
-      const out = await demoLaunch(launchRun, projectId, req.body, { actor: (req as { actor?: Actor }).actor ?? LOCAL_ACTOR, log: req.log });
+      const out = await demoLaunch(launchRun, projectId, req.body, { actor: (req as { actor?: Actor }).actor ?? LOCAL_ACTOR, log: req.log }, {}, deps);
       return reply.code(out.code).send(out.body);
     },
   );
@@ -1021,7 +1238,18 @@ export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter, l
         return reply.code(409).send({ error: 'the script can be edited only while the plan gate is open' });
       }
       // The resolved file, never the joined name: a worker-made symlink is followed only inside the root.
-      const target = await containedPath(await existingDemoRootDir(id), 'script.md');
+      const demoRoot = await existingDemoRootDir(id);
+      // A demo with a plan directory edits ONLY its own `plan/script.md`, never through a link (a seat-made link
+      // could aim the person's save at the engine's files); a demo from before keeps its root-level script.
+      const planDir = join(demoRoot, DEMO_PLAN_DIR);
+      const hasPlanDir = await fsp.lstat(planDir).then((st) => st.isDirectory(), () => false);
+      let target: string | null;
+      if (hasPlanDir) {
+        const st = await fsp.lstat(join(planDir, 'script.md')).catch(() => null);
+        target = st !== null && st.isFile() ? await containedPath(planDir, 'script.md') : null;
+      } else {
+        target = await containedPath(demoRoot, 'script.md');
+      }
       if (target === null) return reply.code(409).send({ error: 'the plan has not written script.md' });
       await fsp.writeFile(target, parsed.data.content, 'utf8');
       return { bytes };

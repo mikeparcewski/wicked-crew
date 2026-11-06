@@ -11474,18 +11474,33 @@ export interface DemoView {
   /** Root-relative paths for `GET /runs/:id/demo/file?path=`. */
   sheets: Array<{ name: 'chapters' | 'joins' | 'end'; path: string }>;
   video: { path: string; bytes: number } | null;
-  /** From the recorder's `recording.json`: true only when every stitched segment was recorded read-only;
-   *  null before a stitch (or from a recorder without the guard). */
+  /** From the recorder's verdict (`record.json`; a hand recorder's `recording.json`): true only when every stitched
+   *  segment was recorded read-only; null before a stitch (or from a recorder without the guard). */
   recording: { readOnly: boolean | null };
   /**
    * The reviewer's last output and its parsed verdict block (empty until `review` has finished).
    * `rejected`: the engine judged the review NOT PASS, so the review gate is its escalation gate — a
    * failed review cannot be accepted: approve re-runs the reviewer, `request_changes` sends the note back
-   * to `record`, reject cancels the run.
+   * to `plan` (the engine records a new approved storyline, DES-DEMO-RECORD-001; a demo recorded by a seat
+   * before that sent it to `record`), reject cancels the run. The `demo-human-review` preset has no review
+   * step: the person reviews the take at the `record` gate, and this stays empty.
    */
   review: { verdict: 'accept' | 'changes' | null; findings: DemoFinding[]; text: string | null; rejected: boolean };
-  /** The seats that recorded and reviewed — evaluator ≠ creator puts them apart. */
+  /** The seats that recorded and reviewed — evaluator ≠ creator puts them apart. `recorder` is null when the
+   *  engine recorded (`producer.kind === 'engine'`). */
   seats: { recorder: string | null; reviewer: string | null };
+  /**
+   * (DES-DEMO-RECORD-001) Who made the recording: the engine's own `demo_record` Tool on the daemon host (`jail`:
+   * the OS jail it ran in, `sandbox-exec`; null before a take), or a seat (a demo recorded before the engine
+   * recorded them). Null before `record` exists. ABSENT from a daemon before this field.
+   */
+  producer?: { kind: 'engine'; tool: 'demo_record'; jail: string | null } | { kind: 'seat'; tool: null; jail: null } | null;
+  /**
+   * (DES-DEMO-RECORD-001 §3.3) The storyline as data (`storyline.json`): the APPROVED snapshot once the plan step
+   * passed (what the plan gate shows and the engine records), else the plan's own file; null when there is none
+   * or it is not JSON. Its shape is garden's demo skill `refs/storyline-json.md`. ABSENT from a daemon before this field.
+   */
+  storyline?: unknown | null;
   /** The script says which data is synthetic. */
   syntheticLabelled: boolean;
   /** The wicked-interactive document made from this run's demo (`POST /runs/:id/demo/document`), which the video
