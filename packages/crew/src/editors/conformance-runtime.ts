@@ -58,6 +58,21 @@ export function conformancePin(env: NodeJS.ProcessEnv = process.env): string {
   return /^\d+\.\d+\.\d+$/.test(v) ? v : CONFORMANCE_PLAYWRIGHT_VERSION;
 }
 
+/**
+ * `env` without a relative browser-cache variable (`XDG_CACHE_HOME`, `PLAYWRIGHT_BROWSERS_PATH`): Playwright would
+ * install Chromium relative to the daemon's working directory, while the engine runs the cases from its own temp
+ * dir (and passes only absolute path variables), so the two would never meet.
+ */
+export function absoluteCacheEnv(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
+  const isAbs = platform === 'win32' ? win32.isAbsolute : posix.isAbsolute;
+  const out: NodeJS.ProcessEnv = { ...env };
+  for (const k of ['XDG_CACHE_HOME', 'PLAYWRIGHT_BROWSERS_PATH']) {
+    const v = out[k];
+    if (v !== undefined && !isAbs(v)) delete out[k];
+  }
+  return out;
+}
+
 /** The pinned venv's directory under the runtime root (the one {@link conformanceProvisioner} makes). */
 export function conformanceVenvDir(root: string, env: NodeJS.ProcessEnv = process.env): string {
   return join(root, `venv-playwright-${conformancePin(env)}`);
@@ -205,7 +220,7 @@ export function conformanceProvisioner(root: () => string, deps: ProvisionDeps =
     };
     const step = async (what: string, file: string, args: string[], timeout: number): Promise<{ missing: boolean; error: string } | null> => {
       try {
-        await exec(file, args, { timeout, windowsHide: true, env });
+        await exec(file, args, { timeout, windowsHide: true, env: absoluteCacheEnv(env, platform) });
         return null;
       } catch (err) {
         return { missing: (err as NodeJS.ErrnoException).code === 'ENOENT', error: `${what} failed: ${message(err)}` };

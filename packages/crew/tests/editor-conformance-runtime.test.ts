@@ -13,6 +13,7 @@ import {
   PROVISIONED_MARKER,
   ENGINE_CONFORMANCE_PYTHON_ENV,
   ENGINE_CONFORMANCE_STUDIO_ENV,
+  absoluteCacheEnv,
   conformanceProvisioner,
   conformanceRuntimeRoot,
   conformanceVenvDir,
@@ -308,6 +309,26 @@ describe('the engine\'s conformance step inputs', () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(calls).toBe(1);
     expect(logs.join('\n')).toContain('crew could not provision the conformance browser');
+  });
+
+  it('provisions with absolute browser-cache variables only (the engine runs the cases from another directory)', async () => {
+    expect(absoluteCacheEnv({ XDG_CACHE_HOME: 'rel', PLAYWRIGHT_BROWSERS_PATH: 'pw', HOME: '/h' }, 'linux')).toEqual({ HOME: '/h' });
+    expect(absoluteCacheEnv({ XDG_CACHE_HOME: '/abs' }, 'linux')).toEqual({ XDG_CACHE_HOME: '/abs' });
+    const seen: NodeJS.ProcessEnv[] = [];
+    await conformanceProvisioner(() => join(dir, 'rt2'), {
+      env: { XDG_CACHE_HOME: 'rel-cache' },
+      platform: 'linux',
+      exec: (async (_bin: string, args: string[], opts: { env: NodeJS.ProcessEnv }) => {
+        seen.push(opts.env);
+        if (args[1] === 'venv') {
+          mkdirSync(join(String(args[2]), 'bin'), { recursive: true });
+          writeFileSync(join(String(args[2]), 'bin', 'python'), '');
+        }
+        return { stdout: '', stderr: '' };
+      }) as never,
+    })();
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((e) => e['XDG_CACHE_HOME'] === undefined)).toBe(true);
   });
 
   it('a resume or gate answer on an editor-plugin run starts the runtime when it is not made yet (the retry path)', async () => {
