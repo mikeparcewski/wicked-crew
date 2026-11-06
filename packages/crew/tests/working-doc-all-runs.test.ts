@@ -497,4 +497,34 @@ describe('xreview r5 folds', () => {
     expect(d1.some((l) => l.includes('reason 0 '))).toBe(false); // the oldest crew lines went first
     expect(d1.join('\n').length).toBeLessThanOrEqual(4_000);
   });
+
+  it('a Decisions write whose outcome was unknown keeps crew’s ownership once it is confirmed (xreview r6)', async () => {
+    seq = 0;
+    const log = [ev('awaitingHuman', min(1), { ord: 1, gateKind: 'escalation' })];
+    const words = (i: number) => `${`reason ${i} `.repeat(30)}`.slice(0, 270);
+    let audit: AuditLike[] = Array.from({ length: 12 }, (_, i) => ({ ts: min(2 + i), action: 'guidance.set', actor: human, detail: { text: words(i) } }));
+    const backend = new FakeBackend();
+    const edit = backend.edit.bind(backend);
+    let stall = true;
+    backend.edit = async (p, d, batch) => {
+      const r = await edit(p, d, batch);
+      if (stall && batch.author === PHASE_REPORT_AUTHOR) { stall = false; throw new UndeterminedWriteError('no version in time'); }
+      return r;
+    };
+    const service = new WorkingDocService({
+      store: new WorkingDocStore({ stateHome: home() }), backend,
+      engine: { injectWorkerMessage: async () => 'q' },
+      run: async () => ({ title: 'x', problem: 'p', projectId: 'default', terminal: false, stepOf: () => null }),
+      events: async () => log,
+      notes: async () => personNotes(audit).slice(-160),
+      linesRetryMs: 5,
+    });
+    await expect(service.syncLines('run-1', { create: true })).rejects.toThrow('no version in time');
+    audit = [...audit, { ts: min(40), action: 'gate.rules_skipped', actor: human, detail: { skips: Array.from({ length: 160 }, (_, i) => ({ id: `R-${i}`, reason: words(100 + i) })) } }];
+    await service.view('run-1'); // settles the write: it landed
+    await service.syncLines('run-1');
+    const d = (sectionsOf(backend.latest('run-1')!.html).decisions ?? '').split('\n');
+    expect(d.at(-1)).toContain('skipped rule R-159');
+    expect(d.some((l) => l.includes('reason 0 '))).toBe(false);
+  });
 });

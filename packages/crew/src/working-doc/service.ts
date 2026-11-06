@@ -543,6 +543,10 @@ export class WorkingDocService {
       }
       let owned = new Set<string>();
       let decisionsAfter = '';
+      // What crew's lines in Decisions are after the write (a person's edit of one makes it theirs: its text no longer
+      // matches).
+      const mineAfter = (): string[] => decisionsAfter.split('\n').map((l) => l.trim())
+        .filter((l) => l !== '' && isGenerated('decisions', l) && (lines.decisions.includes(l) || owned.has(l)));
       const v = await this.writeAs(runId, rec, { kind: 'plugin', id: PHASE_REPORT_AUTHOR }, (before) => {
         owned = new Set(this.d.store.get(runId)?.ownedDecisions ?? []);
         const wanted: Partial<Record<SectionId, string>> = {};
@@ -552,11 +556,9 @@ export class WorkingDocService {
         }
         decisionsAfter = wanted.decisions ?? before.decisions;
         return wanted;
-      });
+      }, mineAfter);
       if (v !== null) {
-        // What crew's lines in Decisions are now (a person's edit of one makes it theirs: its text no longer matches).
-        const mineNow = decisionsAfter.split('\n').map((l) => l.trim())
-          .filter((l) => l !== '' && isGenerated('decisions', l) && (lines.decisions.includes(l) || owned.has(l)));
+        const mineNow = mineAfter();
         if (mineNow.join('\n') !== (this.d.store.get(runId)?.ownedDecisions ?? []).join('\n')) {
           this.d.store.update(runId, (r) => { r.ownedDecisions = mineNow; });
         }
@@ -601,7 +603,7 @@ export class WorkingDocService {
   /** Crew's own write of some sections, as `author` (never a person, so it never steers), on the newest head; a person's
    *  edit racing it wins and the sections are computed again on top of it (3 tries at most). Inside the run's turn.
    *  Resolves to the version written, `'same'` when nothing needed changing, or `null` (gave up, or the doc is gone). */
-  private async writeAs(runId: string, rec: WorkingDocRecord, author: DocAuthor, compute: (before: Record<SectionId, string>) => Partial<Record<SectionId, string>>): Promise<number | 'same' | null> {
+  private async writeAs(runId: string, rec: WorkingDocRecord, author: DocAuthor, compute: (before: Record<SectionId, string>) => Partial<Record<SectionId, string>>, ownedAfter?: () => string[]): Promise<number | 'same' | null> {
     const batchAuthor = author.kind === 'system' ? 'crew' : author.id;
     for (let attempt = 0; attempt < 3; attempt++) {
       const head = await this.d.backend.read(rec.projectId, rec.docId);
@@ -620,7 +622,14 @@ export class WorkingDocService {
           author: batchAuthor,
         });
       } catch (err) {
-        if (err instanceof UndeterminedWriteError) this.rememberPending(runId, head.head, author, null, values, { id: batchAuthor, kind: author.kind });
+        if (err instanceof UndeterminedWriteError) {
+          this.rememberPending(runId, head.head, author, null, values, { id: batchAuthor, kind: author.kind });
+          // Crew's own Decisions lines if this write landed: installed when it is confirmed (xreview r6).
+          if (ownedAfter !== undefined) {
+            const owned = ownedAfter();
+            this.d.store.update(runId, (r) => { if (r.pending != null) r.pending.ownedDecisions = owned; });
+          }
+        }
         throw err;
       }
       if ('headMoved' in written) continue;
@@ -688,7 +697,10 @@ export class WorkingDocService {
     const got = sectionsOf(html);
     const ids = Object.keys(p.values) as SectionId[];
     this.d.store.update(runId, (r) => { r.pending = null; });
-    if (ids.every((id) => got[id] === p.values[id])) await this.record(runId, v, p.expectHead, p.author, p.surface, ids, p.values, p.actor, p.input);
+    if (ids.every((id) => got[id] === p.values[id])) {
+      if (p.ownedDecisions !== undefined) { const owned = p.ownedDecisions; this.d.store.update(runId, (r) => { r.ownedDecisions = owned; }); }
+      await this.record(runId, v, p.expectHead, p.author, p.surface, ids, p.values, p.actor, p.input);
+    }
   }
 
   /**
