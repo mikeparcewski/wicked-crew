@@ -16,7 +16,9 @@
  *    step that could not run ends it with that reason; nothing lands.
  *  - **Live**: the engine's frames settle a turn as soon as its run ends; a review the engine parks for a person
  *    (it refused, so the turn cannot land without overriding the reviewer) is cancelled and recorded as refused,
- *    so the app is editable again and the chat says why.
+ *    so the app is editable again and the chat says why. A review held on steering rules no judge ruled on
+ *    (`rules_unchecked`: "the work was not rejected") is NOT a refusal: the turn keeps running, the app stays
+ *    read-only, and the person answers the gate (re-check, or confirm or skip with a reason) or stops it (F22).
  */
 
 import type { AppSpec, AppTurnRecord, CoreEvent, KnowledgeSummaryResponse, LaunchRunInput, SessionView } from '../core/types.js';
@@ -96,6 +98,13 @@ export interface AppTurnServiceDeps {
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 /** The gate kinds the engine opens when a step did not pass: a turn never lands through one. */
 const REFUSAL_GATES = new Set(['escalation', 'failure', 'triage']);
+/**
+ * (F22) The engine's denial source of a gate held on steering rules no judge ruled on, a waiver to confirm or a
+ * dispute no council settled. The engine says "the work was not rejected" there: the person re-checks the rules or
+ * confirms or skips the unchecked ones with a reason (`retry_rules` / `skip_rules`), so it is never a refusal.
+ * A BROKEN rule (`rule_check`) is a refusal as before.
+ */
+export const RULES_HOLD_SOURCE = 'rules_unchecked';
 
 const q = (s: string): string => JSON.stringify(s);
 const oneLine = (s: string, max: number): string => {
@@ -328,8 +337,47 @@ export function turnProblem(input: {
  * The step of a turn's run that did not pass, from the engine's record: a `rejected` build, check or review unit
  * with its reason; `null` when none did. crew's words lead (the engine's reason follows, for the person only).
  */
+/**
+ * (F22) The ord of the step a parked (or stopped) run is held at on steering rules, or `null`. Read from structured
+ * fields only, never a prompt's prose: the unit's own `denial.source` (the engine's record of its last gate), else,
+ * for a unit that carries no denial, the newest `gateEscalated` at that ord since its last dispatch (`denialSource`,
+ * else `condition`). The step is the one the open gate is at when the frames name one, else the rejected step.
+ */
+export function rulesHeldOrd(v: SessionView, events: ReadonlyArray<Record<string, unknown>> | null = null): number | null {
+  if (v.session.status !== 'awaiting_human' && v.session.status !== 'cancelled') return null;
+  let gateOrd: number | null = null;
+  if (events !== null) {
+    let open: Record<string, unknown> | null = null;
+    for (const e of events) {
+      if (e['type'] === 'awaitingHuman') open = e;
+      else if (e['type'] === 'resumed' || e['type'] === 'gateDecided') open = null;
+    }
+    if (open !== null && typeof open['ord'] === 'number') gateOrd = open['ord'];
+  }
+  const held = (u: { ord: number }): boolean => {
+    const denial = (u as unknown as { denial?: unknown }).denial;
+    if (typeof denial === 'object' && denial !== null) return (denial as Record<string, unknown>)['source'] === RULES_HOLD_SOURCE;
+    if (events === null) return false;
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i]!;
+      if (e['ord'] !== u.ord) continue;
+      if (e['type'] === 'unitDispatched') return false;
+      if (e['type'] === 'gateEscalated') {
+        const source = typeof e['denialSource'] === 'string' ? e['denialSource'] : '';
+        return source !== '' ? source === RULES_HOLD_SOURCE : e['condition'] === RULES_HOLD_SOURCE;
+      }
+    }
+    return false;
+  };
+  const at = gateOrd !== null ? v.units.find((u) => u.ord === gateOrd) : v.units.find((u) => u.status === 'rejected');
+  return at !== undefined && held(at) ? at.ord : null;
+}
+
 export function parkedRefusal(v: SessionView, events: ReadonlyArray<Record<string, unknown>> | null = null): { phase: string; code: string; reason: string } | null {
   const runId = v.session.id;
+  // (F22) A step held on steering rules is waiting for the person (re-check, or confirm or skip with a reason), not
+  // refused: it is no refusal while parked, and a Stop on it ends the turn as stopped. Any other rejected step is.
+  const heldOrd = rulesHeldOrd(v, events);
   const refusal = (phase: string, detailText: string): { phase: string; code: string; reason: string } => {
     const code = phase === 'review' ? 'review_refused' : phase === 'check' ? 'check_failed' : 'step_failed';
     const what = phase === 'review' ? 'The reviewer refused the change' : phase === 'check' ? 'crew\'s check refused the change' : `${phase === 'build' ? 'The build' : 'A step'} did not pass`;
@@ -338,8 +386,9 @@ export function parkedRefusal(v: SessionView, events: ReadonlyArray<Record<strin
   };
   for (const phase of ['check', 'review', 'build']) {
     const u = v.units.find((x) => x.id === `${runId}:${phase}`);
-    if (u !== undefined && u.status === 'rejected') return refusal(phase, u.denial_reason ?? '');
+    if (u !== undefined && u.status === 'rejected' && u.ord !== heldOrd) return refusal(phase, u.denial_reason ?? '');
   }
+  if (heldOrd !== null) return null;
   // (xreview r2, r3) Parked on a refusal gate whose step does not (yet) read `rejected` — or stopped by crew while it
   // was — the engine's own recorded frame says so (the frame names crew's gate cache reads, `api/gate-cache.ts`).
   if ((v.session.status === 'awaiting_human' || v.session.status === 'cancelled') && events !== null) {

@@ -561,6 +561,95 @@ describe('apps turns: check, land, refuse', () => {
   });
 });
 
+describe('apps turns: a review held on steering rules waits for the person (F22)', () => {
+  const HOLD = '1 steering rule(s) need you: learn-accessible unchecked (the judge did not answer for it, in its batch or asked alone).';
+  /** The engine's record of a review held `rules_unchecked` (rig :7721, apps-table-escalated-tickets-2: seq 4105/4106). */
+  const holdFrames = (runId: string) => [
+    { type: 'unitDispatched', session: runId, ord: 3 },
+    { type: 'gateEscalated', session: runId, ord: 3, attempt: 0, condition: 'rules_unchecked', denialSource: 'rules_unchecked', verdictSummary: HOLD },
+    { type: 'awaitingHuman', session: runId, ord: 3, gateKind: 'escalation', prompt: `Unit 3's steering rules are UNCHECKED: ${HOLD} The work was not rejected.` },
+  ];
+  const held = (source: string) => ({ status: 'rejected', denial_reason: HOLD, denial: { phase: 'unit-3', source, reason: HOLD } });
+
+  it('a rules hold is not a refusal: no stop, the turn keeps running, the app stays read-only; an answered hold lands', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    const root = join(s.dir, 'apps', 'escalations');
+    const checked = await s.store.checkTurn('escalations', runId, { tree: snapshotTree(root, builtFiles()) });
+    const checkedTree = (checked as { tree: string }).tree;
+    s.set(runId, 'awaiting_human', { build: { status: 'done' }, check: { status: 'done' }, review: held('rules_unchecked') });
+    s.events.set(runId, holdFrames(runId));
+    s.emit({ type: 'awaitingHuman', session: runId, ord: 3, gateKind: 'escalation', prompt: 'held' });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(s.cancelled).toEqual([]);
+    const d = (await s.call('GET', '/apps/escalations')).body.app;
+    expect(d.turn).toMatchObject({ runId });
+    expect(d.turns![0]!.state).toBe('running');
+    // Nothing writes the app while the hold is open, and no other turn starts beside it.
+    expect((await s.call('POST', '/apps/escalations/edits', { base: 2, ops: [{ op: 'spec', spec: spec('x') }] })).status).toBe(409);
+    expect((await s.call('POST', '/apps/escalations/turns', { base: 2, message: 'another' })).status).toBe(409);
+    expect(s.launched).toHaveLength(1);
+    expect(d.head.version).toBe(2);
+    // The person skipped the unchecked rule with a reason: the review passes on the SAME checked tree and lands.
+    s.events.get(runId)!.push({ type: 'gateDecided', session: runId, ord: 3, allow: true });
+    s.set(runId, 'completed', { review: { status: 'done', denial_reason: null, denial: null, assurance: { mode: 'full', required: ['distinct_evaluator'], ran: ['distinct_evaluator', 'rule_check'], skipped: [], creator: 'claude', evaluator: 'codex', judge: 'pi', tree: checkedTree, attempt: 0 } } });
+    s.emit({ type: 'sessionCompleted', session: runId });
+    await vi.waitFor(async () => expect((await s.call('GET', '/apps/escalations')).body.app.head.version).toBe(3));
+    expect((await s.call('GET', '/apps/escalations')).body.app.turns![0]).toMatchObject({ state: 'landed', version: 3, reviewer: 'codex' });
+  });
+
+  it('after a restart (no frame, the unit record only) the hold still keeps the turn; a Stop on it ends the turn stopped, not refused', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    s.set(runId, 'awaiting_human', { build: { status: 'done' }, check: { status: 'done' }, review: held('rules_unchecked') });
+    expect((await s.call('GET', '/apps/escalations')).body.app.turn).toMatchObject({ runId });
+    expect(s.cancelled).toEqual([]);
+    // The person pressed Stop on the hold (the engine cancelled the run).
+    s.set(runId, 'cancelled');
+    s.emit({ type: 'runCancelled', session: runId });
+    await vi.waitFor(async () => expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull());
+    expect((await s.call('GET', '/apps/escalations')).body.app.turns![0]).toMatchObject({ state: 'cancelled', code: 'cancelled' });
+  });
+
+  it('a unit record with no denial falls back to the escalation frame since its last dispatch', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    s.set(runId, 'awaiting_human', { review: { status: 'rejected', denial_reason: HOLD } });
+    s.events.set(runId, holdFrames(runId));
+    expect((await s.call('GET', '/apps/escalations')).body.app.turn).toMatchObject({ runId });
+    expect(s.cancelled).toEqual([]);
+    // An escalation from BEFORE the step's newest dispatch is an earlier attempt's: it does not hold this one.
+    s.events.set(runId, [...holdFrames(runId).slice(0, 2), { type: 'unitDispatched', session: runId, ord: 3 }, { type: 'awaitingHuman', session: runId, ord: 3, gateKind: 'escalation', prompt: 'review failed' }]);
+    const d = (await s.call('GET', '/apps/escalations')).body.app;
+    expect(d.turn).toBeNull();
+    expect(s.cancelled).toEqual([runId]);
+    expect(d.turns![0]).toMatchObject({ state: 'refused', code: 'review_refused' });
+  });
+
+  it('NEGATIVE CONTROL: a BROKEN rule (rule_check) is still a refusal: the run is stopped and the turn recorded refused', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    const broken = '1 steering rule(s) broken: learn-tests-with-fixes - no test file is added or changed';
+    s.set(runId, 'awaiting_human', { build: { status: 'done' }, check: { status: 'done' }, review: { status: 'rejected', denial_reason: broken, denial: { phase: 'unit-3', source: 'rule_check', reason: broken } } });
+    s.events.set(runId, [{ type: 'gateEscalated', session: runId, ord: 3, attempt: 0, condition: 'rule_broken', denialSource: 'rule_check', verdictSummary: broken }, { type: 'awaitingHuman', session: runId, ord: 3, gateKind: 'escalation', prompt: broken }]);
+    s.emit({ type: 'awaitingHuman', session: runId, ord: 3, gateKind: 'escalation', prompt: broken });
+    await vi.waitFor(async () => expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull());
+    expect(s.cancelled).toEqual([runId]);
+    expect((await s.call('GET', '/apps/escalations')).body.app.turns![0]).toMatchObject({ state: 'refused', code: 'review_refused', reason: expect.stringContaining('learn-tests-with-fixes') });
+  });
+
+  it('a hold on the review does not hide a step that DID refuse at an open gate elsewhere (the open gate decides)', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    // A stale rules denial on the review, but the run is parked on the CHECK, which refused.
+    s.set(runId, 'awaiting_human', { check: { status: 'rejected', denial_reason: 'apps_check: refused', denial: { source: 'worker_failure', reason: 'apps_check: refused' } }, review: { status: 'pending', denial: { source: 'rules_unchecked', reason: HOLD } } });
+    s.events.set(runId, [{ type: 'awaitingHuman', session: runId, ord: 2, gateKind: 'escalation', prompt: 'apps_check: refused' }]);
+    const d = (await s.call('GET', '/apps/escalations')).body.app;
+    expect(d.turn).toBeNull();
+    expect(d.turns![0]).toMatchObject({ state: 'refused', code: 'check_failed' });
+  });
+});
+
 describe('wicked-crew apps-check: the worktree gets exactly the checked tree', () => {
   const files = [
     { path: 'apps.json', text: '{"a":1}\n' },
