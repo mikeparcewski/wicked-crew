@@ -52,6 +52,10 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **QE records keep their run stamps (wicked-ledger ^0.6.1, F23).** wicked-ledger 0.6.1's `get` / `list` / `search`
+  keep a record's keys beyond the schema columns, so an isolated QE reviewer that resumes its run sees `crew_run_id`
+  instead of returning INCONCLUSIVE. The lockfile is re-stamped to 0.6.1.
+
 - **An app turn held on steering rules waits for the person instead of being cancelled (F22).** When the review's
   rule check leaves a rule unchecked, waived by instruction or disputed, the engine holds the gate (`rules_unchecked`:
   "the work was not rejected"). crew read that hold as a refusal and cancelled the run about 3 seconds later, so an app
