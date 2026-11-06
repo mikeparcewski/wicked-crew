@@ -2935,12 +2935,7 @@ export async function createServer(
     },
     // A person's answers with their words (crew's own trail: the engine's log does not say who, or why), from memory,
     // once the start-up read of the trail is in (so a line never lands ahead of an older one).
-    notes: async (runId) => {
-      await workingDocNotesRead;
-      // A run whose notes the index's bound dropped is read back from the trail (its own entries only).
-      if (workingDocNotes.needsReload(runId)) workingDocNotes.reload(runId, await audit.readAll({ runId }));
-      return workingDocNotes.of(runId);
-    },
+    notes: async (runId) => { await workingDocNotesRead; return workingDocNotes.of(runId); },
     // The launch time is crew's (the run-timing index, from `run.launched`); a run with none sorts oldest.
     liveRuns: async () => (await adapter.sessionsDetail())
       .filter((v) => !['completed', 'cancelled', 'failed'].includes(v.session.status) && v.session.archived_at == null)

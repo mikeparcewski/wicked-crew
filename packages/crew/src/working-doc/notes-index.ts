@@ -7,16 +7,17 @@
  *
  *  - People only, and only entries that make a line (a bare approval makes none).
  *  - In recorded order: entries recorded while the start-up read is in flight wait, and join after it (xreview r2).
- *  - Bounded: each kept note is the line's own compact form (words already cut to 280 characters), at most
- *    {@link NOTES_PER_RUN} per run (the newest; Decisions holds 4,000 characters) and {@link NOTES_TOTAL} in all, the run
- *    heard from longest ago dropped first. The trail itself keeps everything: a dropped run is read back from it the
- *    next time its document is brought up to date ({@link needsReload}, xreview r3), so its lines never go missing.
+ *  - Bounded per run: each kept note is the line's compact form (words cut to 280 characters), at most
+ *    {@link NOTES_PER_RUN} per run, the newest. That is more than a full Decisions section can show (4,000 characters,
+ *    and the shortest line is 27), so a note leaves the document long before it leaves this index, and a line crew wrote
+ *    is never mistaken for a person's (xreview r3). Across runs the index grows with people's answers only, the posture
+ *    of the daemon's other trail-hydrated indexes (`RunTimingIndex`, `GuidanceIndex`: every run, for the daemon's life);
+ *    a global eviction and read-back was tried and dropped in xreview r4 (it lost live answers and thrashed the trail).
  */
 
 import { NOTE_ACTIONS, personNotes, type AuditLike, type PersonNote } from './event-lines.js';
 
-export const NOTES_PER_RUN = 60;
-export const NOTES_TOTAL = 20_000;
+export const NOTES_PER_RUN = 160;
 
 const relevant = (e: AuditLike): e is AuditLike & { runId: string } =>
   typeof e.runId === 'string' && e.runId !== '' && e.actor?.kind === 'human' && NOTE_ACTIONS.has(e.action) && typeof e.ts === 'number';
@@ -27,13 +28,10 @@ const keyOf = (e: AuditLike): string =>
 
 export class PersonNotesIndex {
   private readonly byRun = new Map<string, PersonNote[]>();
-  private total = 0;
   private ready = false;
   private waiting: Array<AuditLike & { runId: string }> = [];
-  /** Runs whose notes the bound dropped: read back from the trail when next needed. */
-  private readonly dropped = new Set<string>();
 
-  constructor(private readonly limits: { perRun?: number; total?: number } = {}) {}
+  constructor(private readonly perRun: number = NOTES_PER_RUN) {}
 
   /** A live entry. Resolves to the run whose document should be brought up to date, or `null` (no line, or the
    *  start-up read is still in flight: it joins after, and {@link hydrate} names its run). */
@@ -72,41 +70,14 @@ export class PersonNotesIndex {
     return this.byRun.get(runId) ?? [];
   }
 
-  /** The bound dropped this run's notes: read them back ({@link reload}) before using {@link of}. */
-  needsReload(runId: string): boolean {
-    return this.dropped.has(runId);
-  }
-
-  /** The run's own trail entries (newest first, as `AuditLog.readAll({runId})` answers), replacing what is kept. */
-  reload(runId: string, newestFirst: readonly AuditLike[]): void {
-    this.dropped.delete(runId);
-    const old = this.byRun.get(runId);
-    if (old !== undefined) { this.total -= old.length; this.byRun.delete(runId); }
-    for (let i = newestFirst.length - 1; i >= 0; i -= 1) {
-      const e = newestFirst[i]!;
-      if (relevant(e) && e.runId === runId) this.keep(e);
-    }
-  }
-
   private keep(e: AuditLike & { runId: string }): boolean {
     const notes = personNotes([e]);
     if (notes.length === 0) return false;
-    // (A dropped run stays marked: what is kept for it now is partial until it is read back whole.)
-    const list = this.byRun.get(e.runId) ?? [];
-    // Most recently heard from last (Map order), so the bound drops the run quietest the longest.
-    this.byRun.delete(e.runId);
-    this.byRun.set(e.runId, list);
-    list.push(...notes);
-    this.total += notes.length;
-    const perRun = this.limits.perRun ?? NOTES_PER_RUN;
-    while (list.length > perRun) { list.shift(); this.total -= 1; }
-    const max = this.limits.total ?? NOTES_TOTAL;
-    for (const [runId, l] of this.byRun) {
-      if (this.total <= max || runId === e.runId) break;
-      this.byRun.delete(runId);
-      this.dropped.add(runId);
-      this.total -= l.length;
-    }
+    const list = this.byRun.get(e.runId);
+    if (list === undefined) this.byRun.set(e.runId, notes);
+    else list.push(...notes);
+    const kept = this.byRun.get(e.runId)!;
+    if (kept.length > this.perRun) kept.splice(0, kept.length - this.perRun);
     return true;
   }
 }

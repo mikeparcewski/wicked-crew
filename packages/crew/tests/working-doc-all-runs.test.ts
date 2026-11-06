@@ -15,7 +15,7 @@ import { AuditLog } from '../src/api/audit.js';
 import {
   NOTE_WORDS_MAX, PHASE_REPORT_AUTHOR, clock, isGenerated, noteLine, personNotes, planApproach, reconcileSection, type AuditLike,
 } from '../src/working-doc/event-lines.js';
-import { PersonNotesIndex } from '../src/working-doc/notes-index.js';
+import { NOTES_PER_RUN, PersonNotesIndex } from '../src/working-doc/notes-index.js';
 import { sectionsOf } from '../src/working-doc/sections.js';
 import { CATCH_UP_LIVE_MAX, UndeterminedWriteError, WorkingDocService, workingDocStep, type DocBackend, type RunFacts } from '../src/working-doc/service.js';
 import { WorkingDocStore } from '../src/working-doc/store.js';
@@ -368,22 +368,14 @@ describe('xreview r1 folds', () => {
     expect(idx.of('other')).toEqual([]);
   });
 
-  it('the notes index is bounded: the newest per run, and the run heard from longest ago dropped first', () => {
-    const idx = new PersonNotesIndex({ perRun: 3, total: 5 });
+  it('the notes index is bounded per run (the newest), by more than a full Decisions section can show', () => {
+    const idx = new PersonNotesIndex(3);
     idx.hydrate([]);
-    const say = (runId: string, ts: number) => idx.add({ ts, action: 'guidance.set', runId, actor: human, detail: { text: `${runId}-${ts}` } });
-    for (let i = 1; i <= 5; i += 1) say('a', i);
+    for (let i = 1; i <= 5; i += 1) idx.add({ ts: i, action: 'guidance.set', runId: 'a', actor: human, detail: { text: `a-${i}` } });
     expect(idx.of('a').map((n) => n.words)).toEqual(['a-3', 'a-4', 'a-5']);
-    say('b', 6); say('b', 7);
-    say('c', 8);
-    expect(idx.of('a')).toEqual([]); // 3 + 2 + 1 > 5: the quietest run goes
-    expect(idx.of('b')).toHaveLength(2);
-    expect(idx.of('c')).toHaveLength(1);
-    // xreview r3: a dropped run is read back from the trail when next needed, so its lines never go missing.
-    expect(idx.needsReload('a')).toBe(true);
-    idx.reload('a', [5, 4, 3, 2, 1].map((ts) => ({ ts, action: 'guidance.set', runId: 'a', actor: human, detail: { text: `a-${ts}` } })));
-    expect(idx.needsReload('a')).toBe(false);
-    expect(idx.of('a').map((n) => n.words)).toEqual(['a-3', 'a-4', 'a-5']);
+    // The shortest line a note makes, and how many of those fit in Decisions: fewer than the index keeps.
+    const shortest = noteLine({ at: 0, who: 'You', verb: 'approved', subject: null, words: 'x' });
+    expect(Math.floor(4_000 / (shortest.length + 1))).toBeLessThan(NOTES_PER_RUN);
   });
 
   it('the audit trail tells its listeners each entry as it is recorded; a disabled trail tells none', async () => {
