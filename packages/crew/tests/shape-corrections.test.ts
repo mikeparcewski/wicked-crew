@@ -149,6 +149,16 @@ describe('the adapter catches a hostile block (its own negative tests)', () => {
     expect(judgeCorrection(caseOf('k4'), k4.parent!, { ...k4.result!, inputs: '{"show":{"kind":"text","value":"x"}}' }, 0).join(' ')).toMatch(/inputs changed/u);
   });
 
+  it('the oracle checks the pressed result against what the question named, and an unsure reading on ordinary edits (codex r6)', async () => {
+    const k6 = await run('k6', fixture['k6'] ?? null);
+    expect(k6.asked).toBe(true);
+    const asked = { ...k6.parent!, question: { kind: 'lost_check' as const, text: 'x', choices: [], lost: ['qe-acceptance' as const] } };
+    const bare = { ...k6.result!, gate: [], seatRules: [] };
+    expect(judgeCorrection(caseOf('k6'), k6.parent!, bare, 1, asked).join(' ')).toMatch(/unnamed by the question/u);
+    const k2 = await run('k2', fixture['k2'] ?? null);
+    expect(judgeCorrection(caseOf('k2'), { ...k2.parent!, guessBand: 'ask', blocked: 'Which job?' }, { ...k2.result!, guessBand: null, blocked: null }, 1).join(' ')).toMatch(/unsure reading became startable/u);
+  });
+
   it('the oracle compares what holds Start on an unchanged case (codex r5)', async () => {
     const k27 = await run('k27', null);
     expect(judgeCorrection(caseOf('k27'), { ...k27.parent!, blocked: 'Which repository?' }, k27.result!, 0).join(' ')).toMatch(/holds Start/u);
@@ -165,6 +175,10 @@ describe('the adapter catches a hostile block (its own negative tests)', () => {
     await chat.swap({ detail: { add: ['on .NET 8'] } });
     await chat.correct('remove on .NET 8 please', { revises: chat.current()!.pid, edits: { detail: { remove: ['on .NET 8'] } } });
     expect(chat.current()!.details).toEqual(['a separate judge for the release']);
+    // A removal of something else, then keeping this one, does not remove it (codex r6).
+    await chat.swap({ detail: { add: ['on .NET 10'] } });
+    await chat.correct('remove old target and keep on .NET 10', { revises: chat.current()!.pid, edits: { detail: { remove: ['on .NET 10'] } } });
+    expect(chat.current()!.details).toContain('on .NET 10');
     // A removal the person negates is not a removal (codex r5).
     await chat.swap({ detail: { add: ['on .NET 9'] } });
     await chat.correct('do not remove on .NET 9; it stays', { revises: chat.current()!.pid, edits: { detail: { remove: ['on .NET 9'] } } });

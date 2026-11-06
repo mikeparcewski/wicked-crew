@@ -158,7 +158,7 @@ import { registerProjectAggregateRoutes } from './project-aggregates.js';
 import { composeLaunch, composePreflight, registerProductRoutes } from './product.js';
 import { buildWorkflowCatalogV2, parseCommand, resolveOption } from '../workflow-catalog/build-v2.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
-import { DETECT_TIMEOUT_MS, DETECT_WORKFLOW, DetectService } from '../workflow-catalog/detect-service.js';
+import { DETECT_MAX_CHARS, DETECT_TIMEOUT_MS, DetectService, detectShadowedIn } from '../workflow-catalog/detect-service.js';
 import { checkLaunchShape, LaunchShapeSchema, launchShapeOf, servedFor, withBriefLines, type LaunchTarget, type ShapeReads } from '../workflow-catalog/shape.js';
 import { registerPresetRoutes } from '../presets/routes.js';
 import { busRows, openPlanGateRev, registerTeamRoutes, workPlanAccepted } from '../team/routes.js';
@@ -8401,7 +8401,9 @@ export function registerRoutes(
       const served = await servedFor(shapeReads, projectId ?? undefined);
       const status = (card: string, option: string | null): 'available' | 'coming_soon' | 'unavailable' =>
         resolveOption(card, option, served)?.resolved.status ?? 'unavailable';
-      return { rev: served.rev, status, available: (card, option) => status(card, option) === 'available', detectShadowed: served.saved.has(DETECT_WORKFLOW) };
+      // The detect turn launches repo-less and project-less: the global rows (and the project's) are what could shadow it.
+      const rows = [...(await adapter.listPresets().catch(() => [])), ...(projectId !== null ? await adapter.listPresets(projectId).catch(() => []) : [])];
+      return { rev: served.rev, status, available: (card, option) => status(card, option) === 'available', detectShadowed: detectShadowedIn(rows) };
     },
     costOf: async (runId) => {
       const view = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
@@ -8413,7 +8415,7 @@ export function registerRoutes(
     log: (m) => app.log.warn(m),
   });
   const DetectSchema = z.strictObject({
-    text: z.string().max(8000),
+    text: z.string().max(DETECT_MAX_CHARS),
     seat: z.boolean().optional(),
     projectId: z.string().trim().min(1).max(200).optional(),
   });

@@ -12,7 +12,7 @@ import { listUnitTools } from '../src/mcp/tool-list.js';
 import { isSystemWorkflow } from '../src/core/run-identity.js';
 import { NO_LEARNINGS_WORKFLOWS } from '../src/learnings/service.js';
 import { seatTurn, type SeatTurnInput, type SeatTurnOutcome } from '../src/standing-orders/parse.js';
-import { DETECT_STEP_ID, DETECT_WORKFLOW, DetectService, detectTask, loadDetectWorkflow, type DetectionAudit } from '../src/workflow-catalog/detect-service.js';
+import { DETECT_STEP_ID, DETECT_WORKFLOW, DetectService, detectShadowedIn, detectTask, loadDetectWorkflow, type DetectionAudit } from '../src/workflow-catalog/detect-service.js';
 
 const ME: Actor = { id: 'maria', kind: 'human', trust: 'operator' };
 const catalog = async () => ({ rev: 'rev-1', available: () => true, status: () => 'available' as const });
@@ -21,7 +21,11 @@ function service(turn: (i: SeatTurnInput) => Promise<SeatTurnOutcome>, extra: { 
   let n = 0;
   const audits = extra.audits ?? [];
   const svc = new DetectService({
-    turn,
+    // A launch is armed (seatTurn calls onRun before the launch resolves).
+    turn: (i) => {
+      i.onRun?.(i.sessionId!);
+      return turn(i);
+    },
     cancelRun: async (id) => {
       extra.cancelled?.push(id);
     },
@@ -310,6 +314,32 @@ describe('DetectService (§2.3 classifyTurn)', () => {
     expect(out.code).toBe(200);
     expect(turns).toBe(0);
     expect(audits[0]!.outcome.failure).toMatch(/shadows the detector/u);
+  });
+
+  it('the shadow is read from the rows as saved, not the catalog\'s served state (codex r6)', () => {
+    // The listing marks a system-named row system: true (withPresetSystemFlag); the shadow check still sees it.
+    expect(detectShadowedIn([{ name: 'detect-shape', created_by: 'api', system: true } as never])).toBe(true);
+    expect(detectShadowedIn([{ name: 'feature', created_by: 'builtin' }, { name: 'my-flow', created_by: 'api' }])).toBe(false);
+  });
+
+  it('a fallback that launched nothing names no run and reads no cost (codex r6)', async () => {
+    const audits: DetectionAudit[] = [];
+    let costReads = 0;
+    const svc = new DetectService({
+      turn: async () => ({ ok: false, code: 409, error: 'no seat' }),
+      cancelRun: async () => undefined,
+      catalog: async () => ({ rev: 'r', available: () => true, status: () => 'available' as const }),
+      costOf: async () => {
+        costReads += 1;
+        return 1;
+      },
+      audit: (row) => audits.push(row),
+      newId: () => 'never-launched',
+    });
+    await svc.detect({ text: 'sum([1,2,3]) returns 5 instead of 6 in tiny-math' }, ME);
+    await settle();
+    expect(audits[0]).toMatchObject({ runId: null, costUsd: null });
+    expect(costReads).toBe(0);
   });
 
   it('refuses empty and over-long words', async () => {

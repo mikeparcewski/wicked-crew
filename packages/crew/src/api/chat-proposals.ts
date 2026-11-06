@@ -2312,7 +2312,8 @@ export class ChatProposals {
           const before = said.slice(Math.max(0, at - 60), at);
           // The removal verb in the same clause, right before the detail, and not itself negated ("do not remove …").
           const m = /\b(?:remove|drop|forget|scrap|undo|take\s+out|no\s+longer|don'?t\s+need)\b(?:\s+[^\s.;,]+){0,4}\s*$/iu.exec(before);
-          return m !== null && !/\b(?:don'?t|do\s+not|never|not)\s+$/iu.test(before.slice(0, m.index));
+          // Not negated, and no keeping or new clause between the verb and the detail ("remove X and keep <detail>").
+          return m !== null && !/\b(?:don'?t|do\s+not|never|not)\s+$/iu.test(before.slice(0, m.index)) && !/\b(?:keep|retain|and|but|then)\b/iu.test(before.slice(m.index).replace(/^\S+/u, ''));
         };
         const namesCheck = (d: string): boolean => /\b(?:reviews?|reviewers?|judges?|parity|qe|acceptance|tests?|checks?|cited\s+findings|floor|gates?)\b/iu.test(d);
         const remove = (edits.detail.remove ?? []).filter((d) => fromThem(d) && asksRemoval(d) && !namesCheck(d));
@@ -2490,14 +2491,20 @@ export class ChatProposals {
             const message = this.deps.records(frame.chat).find((r): r is Extract<ChatTranscriptRecord, { kind: 'user' }> => r.kind === 'user' && r.turnId === turnId && r.owner === true)?.text ?? null;
             try {
               const out = await this.reviseLocked(frame.chat, rev, { person: null, source: 'chat', pid: `${frame.chat}:${turnId}`, turnId, message }, instance);
-              if (out.code >= 400) this.log(`[proposals] chat ${frame.chat}: turn ${turnId}'s revision was refused (${String((out.body as { code?: unknown }).code ?? out.code)})`);
+              if (out.code >= 400) {
+                // Said, not only logged (codex r6): the proposal is startable again as it was, and the person knows why.
+                const why = (out.body as { error?: unknown }).error;
+                note = `Your change wasn't applied${typeof why === 'string' && why !== '' ? `: ${why.slice(0, 160)}` : ''}.`;
+                this.log(`[proposals] chat ${frame.chat}: turn ${turnId}'s revision was refused (${String((out.body as { code?: unknown }).code ?? out.code)})`);
+              }
             } catch (err) {
               note = "Your change wasn't applied: say it again.";
               this.log(`[proposals] chat ${frame.chat}: turn ${turnId}'s revision failed: ${err instanceof Error ? err.message : String(err)}`);
             }
           } else if (rev !== null) {
-            // Said, not silently dropped: the person's change did not land (codex r5).
-            note = "Your change wasn't applied: say it again.";
+            // Said, not silently dropped: the person's change did not land (codex r5) — unless it names the chat's
+            // launched job, whose held plan answers it with an offer (pi r6).
+            if (this.launchedJob(frame.chat)?.proposal.pid !== rev.revises) note = "Your change wasn't applied: say it again.";
             this.log(`[proposals] chat ${frame.chat}: turn ${turnId}'s revision names ${rev.revises}, not the proposal its message held — dropped`);
           }
         }

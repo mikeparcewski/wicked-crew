@@ -40,6 +40,15 @@ export function loadDetectWorkflow(file = DETECT_WORKFLOW_FILE): WorkflowDef {
   return def as unknown as WorkflowDef;
 }
 
+/**
+ * Whether saved presets shadow the detector (codex r6): judged on the rows as saved, by name and provenance — the
+ * listing marks a system-named row `system: true`, which the catalog's served state leaves out, so it cannot be read
+ * from there.
+ */
+export function detectShadowedIn(presets: ReadonlyArray<{ name: string; created_by?: unknown }>): boolean {
+  return presets.some((p) => p.name === DETECT_WORKFLOW && p.created_by !== 'builtin');
+}
+
 /** The task the seat reads: the classify digest, then the person's words as data. */
 export function detectTask(text: string, digest: string): string {
   return [
@@ -203,6 +212,8 @@ export class DetectService {
     }
     const base = { text, catalogRev: catalog.rev, available: catalog.available };
     let turnSeat: string | null = null;
+    // A run was armed (not merely wanted): only then does the audit name it and read its cost (codex r6).
+    let launched = false;
     let failure: string | null = null;
     const runId = this.deps.newId();
     const d = await classifyPath(base, async () => {
@@ -224,6 +235,9 @@ export class DetectService {
         workflow: DETECT_WORKFLOW,
         sessionId: runId,
         signal: abort.signal,
+        onRun: () => {
+          launched = true;
+        },
       });
       if (!out.ok) {
         failure = out.error.slice(0, 200);
@@ -235,7 +249,7 @@ export class DetectService {
       if (raw === null) failure = 'unparsable answer';
       return raw;
     });
-    const ran = d.asked && seatWanted;
+    const ran = launched;
     if (!owns()) {
       audit(d, { seat: turnSeat, runId: ran ? runId : null, cached: false, failure: 'superseded' });
       return superseded;

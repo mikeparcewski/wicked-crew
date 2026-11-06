@@ -129,7 +129,7 @@ describe('the words ask for an outcome, and say a depth (codex r1)', () => {
       expect(n.guess.band, source).toBe('likely');
       expect(n.guess.confidence).toBeLessThan(0.85);
     }
-    for (const t of ['Do not modernize the legacy .NET Framework monolith into microservices on Kubernetes; leave the migration alone', 'summarize the ticket for modernizing the legacy .NET Framework monolith into microservices on Kubernetes', 'Don\u2019t fix the login bug that crashes checkout.', 'Instead of fixing the login bug, describe the symptom.']) {
+    for (const t of ['Do not modernize the legacy .NET Framework monolith into microservices on Kubernetes; leave the migration alone', 'summarize the ticket for modernizing the legacy .NET Framework monolith into microservices on Kubernetes', 'Don\u2019t fix the login bug that crashes checkout.', 'Instead of fixing the login bug, describe the symptom.', 'Our migration is finished; write the release notes for the upgrade from Node 18 to Node 22.']) {
       expect(detect({ text: t, seat: null, source: 'classify', catalogRev: REV }).guess.band, t).not.toBe('sure');
     }
   });

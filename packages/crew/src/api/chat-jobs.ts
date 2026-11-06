@@ -782,7 +782,9 @@ export function ownWords(message: string): string {
   // Reported speech: whatever follows "X said:" / "they asked" / "told me to" is someone else's.
   // A speaker's words, said as such ("the PM said:", "per the PM", "requested by legal"): an ordinary noun or preposition
   // ("requests that time out", "100 per minute") is not reported speech (codex r4).
-  t = t.replace(/\b(said|says|asked|asks|told (me|us)( to)?|wrote|writes|wants (me|us) to|requested|mentioned|suggested|according to|per (?:the|my|our|their|his|her|\w+'s)\s+(?:pm|manager|lead|boss|team|client|customer|ticket|email|message|thread)|per\s+\p{Lu}\p{L}+\s*,)[\s\S]*$/iu, ' ');
+  t = t.replace(/\b(said|says|asked|asks|told (me|us)( to)?|wrote|writes|wants (me|us) to|requested|mentioned|suggested|according to|per (?:the|my|our|their|his|her|\w+'s)\s+(?:pm|manager|lead|boss|team|client|customer|ticket|email|message|thread))\b[\s\S]*$/iu, ' ');
+  // A named speaker ("per Alice, …"), case-sensitive so a rate ("per second, …") is not one (codex r6).
+  t = t.replace(/\bper\s+\p{Lu}\p{Ll}+\s*,[\s\S]*$/u, ' ');
   return t;
 }
 

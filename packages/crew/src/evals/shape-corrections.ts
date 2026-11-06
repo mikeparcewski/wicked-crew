@@ -277,6 +277,14 @@ export function judgeCorrection(c: CorrectionCase, parent: CorrectionView, now: 
   const e = c.expect;
   // The invariant holds on what the seat's block wrote (before any press); after the person's press a loss is theirs.
   const why: string[] = [...safetyBreaches(parent, asked ?? now)];
+  // After the person's press, only what the question named may be gone (codex r6).
+  if (asked !== null) {
+    const named = new Set<string>([...(asked.question?.lost ?? []), ...(asked.question?.lostSeats ?? [])]);
+    for (const g of parent.gate) if (!now.gate.includes(g) && !named.has(g)) why.push(`lost the ${g} check, unnamed by the question`);
+    for (const r of parent.seatRules) if (!now.seatRules.includes(r) && !named.has(r)) why.push(`lost the ${r} seat rule, unnamed by the question`);
+  }
+  // An unresolved reading stays unresolved unless the case's expected change names the shape (codex r6).
+  if (parent.guessBand === 'ask' && e.card === undefined && e.option === undefined && (now.guessBand !== 'ask' || now.blocked === null)) why.push('an unsure reading became startable');
   const same = (f: (typeof FIELDS)[number]): boolean => JSON.stringify(parent[f]) === JSON.stringify(now[f]);
   if (e.unchanged === true) {
     if (written > 0 || now.pid !== parent.pid) why.push(`wrote ${written} proposal(s) for a correction that changes nothing`);

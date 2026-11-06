@@ -325,7 +325,7 @@ const OUTCOME_CUES: ReadonlyArray<{ re: RegExp; cards: readonly string[] }> = [
   { re: /\b(?:plan(?:ning)?|roadmap|break (?:it |this |the work )?down)\b/iu, cards: ['plan-it', 'plan-tests', 'backlog', 'release'] },
   { re: /\b(?:review|reviewing|audit|assess|critique|poke holes)\b/iu, cards: ['review-change', 'risk', 'security', 'review-recent-work', 'critique', 'retro', 'analyze-runs', 'evaluate-rules', 'release'] },
   { re: /\b(?:explain|walk me through|overview of|how does)\b/iu, cards: ['analyze-codebase', 'map-requirements', 'document', 'communicate'] },
-  { re: /\b(?:document|documentation|write[- ]up|readme|deck|slides|presentation)\b/iu, cards: ['document', 'communicate', 'interactive-page', 'operating-model', 'analyze-codebase'] },
+  { re: /\b(?:document|documentation|write[- ]up|readme|deck|slides|presentation|release notes|changelog|announcement|status update)\b/iu, cards: ['document', 'communicate', 'interactive-page', 'operating-model', 'analyze-codebase'] },
   { re: /\b(?:root cause|investigate|what happened|why (?:is|did|does|do|are))\b/iu, cards: ['incident', 'reconstruct', 'research', 'bug'] },
   { re: /\b(?:estimate|how long will|how much will)\b/iu, cards: ['estimate-price', 'run-cost'] },
   { re: /\b(?:should we|decide|choose between|which is better)\b/iu, cards: ['decide'] },
