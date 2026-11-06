@@ -490,6 +490,29 @@ describe('the Demo experience routes', () => {
     expect(readFileSync(join(root, 'launch.json'), 'utf8')).toContain('app_origin');
   });
 
+  it('refuses an app URL with a #fragment (its client-side route the recorder cannot open)', async () => {
+    const res = await app.inject({ method: 'POST', url: '/api/v1/projects/proj-1/demo', payload: { url: 'http://localhost:5173/#/reports', audience: 'a', show: 'b' } });
+    expect(res.statusCode).toBe(400);
+    expect(launchRun).not.toHaveBeenCalled();
+  });
+
+  it('a dangling approval pointer or one that is not an object shows no plan', async () => {
+    for (const [id, make] of [
+      ['d1', (root: string) => symlinkSync(join(root, 'nowhere.json'), join(root, 'approved', 'current.json'))],
+      ['d2', (root: string) => writeFileSync(join(root, 'approved', 'current.json'), 'null')],
+    ] as const) {
+      const root = join(demos, id);
+      mkdirSync(join(root, 'plan'), { recursive: true });
+      mkdirSync(join(root, 'approved'), { recursive: true });
+      writeFileSync(join(root, 'plan', 'chapters.json'), JSON.stringify([{ key: '09-live', title: 'Live edit' }]));
+      make(root);
+      sessionsDetail.mockResolvedValue([demoRun(id, 'record', 'executing')]);
+      const res = await app.inject({ method: 'GET', url: `/api/v1/runs/${id}/demo` });
+      expect(res.statusCode, `${id}: ${res.body}`).toBe(200);
+      expect(res.json().chapters, id).toEqual([]);
+    }
+  });
+
   it("an approval that is not this run's, or is broken, shows no plan rather than the live files", async () => {
     const root = join(demos, 'w1');
     mkdirSync(join(root, 'plan'), { recursive: true });

@@ -356,10 +356,13 @@ export function resolveOption(cardId: string, optionId: string | null, served: S
     if (demo !== undefined) steps = demo.steps;
     // A saved `demo` replaces the recorded walkthrough the card promises: the card is off; the saved one runs from
     // Yours (codex r4).
-    const shadow = served.saved.get('demo');
+    // (wicked-core#1249) Either demo preset may launch (`demo-human-review` for an app whose data stays out of model
+    // context): a saved shadow of either turns the card off.
+    const shadowName = ['demo', 'demo-human-review'].find((n) => served.saved.get(n) !== undefined);
+    const shadow = shadowName === undefined ? undefined : served.saved.get(shadowName);
     if (shadow !== undefined && !coming) {
       status = 'unavailable';
-      statusNote = 'Your saved `demo` replaces the built-in demo, so this card is off; start yours from Yours.';
+      statusNote = `Your saved \`${shadowName}\` replaces the built-in demo, so this card is off; start yours from Yours.`;
       steps = shadow.steps;
     }
   }

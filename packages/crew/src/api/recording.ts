@@ -8,21 +8,26 @@
  * The Demo experience (wicked-studio#373, migration M9b): a demo of a local app, made by a governed
  * run of the built-in `demo` preset — the wicked-garden demo skill's plan → record → review.
  *
- *   POST /projects/:id/demo        mints the run's DEMO ROOT (a per-run directory on the daemon host),
- *                                  writes the brief there, and launches `demo` THROUGH `POST /runs`
- *                                  (one launch path), with the root as the run's only extra write root.
+ *   POST /projects/:id/demo        mints the run's DEMO ROOT (a per-run directory on the daemon host) and
+ *                                  launches `demo` (or `demo-human-review`, for an app whose rows may not
+ *                                  reach a model) THROUGH `POST /runs` (one launch path). Since
+ *                                  DES-DEMO-RECORD-001 the run's only write root is `<root>/plan` (the brief,
+ *                                  script, chapters, storyline.json); the root is the run's evidence root,
+ *                                  where the engine's jailed Tools write `probe/`, `demo-video/`, `review/`,
+ *                                  and the engine `approved/` and `takes/`; crew writes `launch.json`.
  *   GET  /runs/:id/demo            what studio shows: the stage, the presenter script and chapter list
  *                                  (the plan gate), per-chapter record progress, the contact sheets and
  *                                  the reviewer's verdicts (the review gate), and the chaptered MP4.
  *   GET  /runs/:id/demo/file       one file of the root (a contact sheet, the MP4 — with Range).
- *   PUT  /runs/:id/demo/script     the presenter's edit of `script.md` while the plan gate is open.
+ *   PUT  /runs/:id/demo/script     the presenter's edit of `plan/script.md` while the plan gate is open.
  *   POST /runs/:id/demo/export     a GIF (`demo-video/demo.gif`) or a poster frame (`demo-video/poster.jpg`)
  *                                  of the stitched MP4, encoded by ffmpeg with an ASYNC spawn and a
  *                                  timeout (EP-C3): the daemon keeps answering while it encodes.
  *
  * The gates are the run's ordinary gates (`POST /runs/:id/gate`): approve, or `request_changes` with a
- * note — at the plan gate it re-runs `plan`, at the review gate it rewinds to `record` (re-record one
- * chapter). Nothing here decides a gate.
+ * note — at the plan gate it re-runs `plan`; at the review gate it goes back to `plan` too (the engine records
+ * a new approved storyline afresh; a demo a seat recorded before rewound to `record`). Nothing here decides a
+ * gate.
  *
  * Every file is read from the root the daemon minted for THIS run id, never from a path a caller or a
  * worker names: `path` is resolved inside it, symlinks included, and only the deliverable types studio
@@ -213,7 +218,9 @@ export function demoAppTarget(url: string): { appOrigin: string; launchPath: str
   } catch {
     return null;
   }
-  if (!/^https?:$/.test(u.protocol) || !LOOPBACK_HOSTS.has(u.hostname) || u.username !== '' || u.password !== '') return null;
+  // A fragment (`#/reports`) is the app's own client-side route, which the recorder cannot open: refused rather than
+  // silently recording the page without it.
+  if (!/^https?:$/.test(u.protocol) || !LOOPBACK_HOSTS.has(u.hostname) || u.username !== '' || u.password !== '' || u.hash !== '') return null;
   const port = u.port !== '' ? u.port : u.protocol === 'https:' ? '443' : '80';
   const launchPath = `${u.pathname || '/'}${u.search}`;
   if (!/^\/[A-Za-z0-9._~%/?&=+-]*$/.test(launchPath) || launchPath.startsWith('//')) return null;
@@ -322,7 +329,7 @@ export async function demoLaunch(
   if (target === null) {
     return {
       code: 400,
-      body: { error: 'a demo records an app on this machine: use http://127.0.0.1:<port>/…, http://localhost:<port>/… or http://[::1]:<port>/… (the recorder reaches no other host)' },
+      body: { error: 'a demo records an app on this machine: use http://127.0.0.1:<port>/…, http://localhost:<port>/… or http://[::1]:<port>/… (the recorder reaches no other host), with no #fragment' },
     };
   }
   // (DES-DEMO-RECORD-001 §3.7) What crew decides about the app, from its own state: whether it is one of crew's
@@ -745,13 +752,16 @@ async function planText(root: string, name: string): Promise<string | null> {
 async function approvedPlan(root: string, runId: string): Promise<
   { state: 'approved'; chapters: string | null; storyline: string | null } | { state: 'none' } | { state: 'unavailable' }
 > {
+  // Present at all (a dangling or outside link counts as present): only a pointer that is not there is "none".
+  const present = await fsp.lstat(join(root, 'approved', 'current.json')).then(() => true, () => false);
+  if (!present) return { state: 'none' };
   const current = await readText(root, 'approved/current.json');
-  if (current === null) {
-    return (await containedPath(root, 'approved/current.json')) === null ? { state: 'none' } : { state: 'unavailable' };
-  }
+  if (current === null) return { state: 'unavailable' };
   let ptr: { gen?: unknown; run?: unknown };
   try {
-    ptr = JSON.parse(current) as { gen?: unknown; run?: unknown };
+    const v = JSON.parse(current) as unknown;
+    if (v === null || typeof v !== 'object' || Array.isArray(v)) return { state: 'unavailable' };
+    ptr = v as { gen?: unknown; run?: unknown };
   } catch {
     return { state: 'unavailable' };
   }
@@ -1143,7 +1153,7 @@ export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter, l
 
   app.get(
     `${V}/runs/:id/demo/file`,
-    { config: { manifest: { responseType: 'binary (video/mp4, image/png, text)', statusCodes: [200, 206, 400, 404, 416] } } },
+    { config: { manifest: { responseType: 'binary (video/mp4, image/png, text)', statusCodes: [200, 206, 400, 403, 404, 416] } } },
     async (req, reply) => {
       const { id } = req.params as { id: string };
       const rel = (req.query as { path?: unknown }).path;
@@ -1153,7 +1163,17 @@ export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter, l
         return reply.code(400).send({ error: `\`path\` must be one of ${Object.keys(DEMO_FILE_TYPES).join(', ')}` });
       }
       if (!(await isKnownDemoRun(id))) return reply.code(404).send({ error: 'no demo run with that id' });
-      const target = await containedPath(await existingDemoRootDir(id), rel);
+      const demoRoot = await existingDemoRootDir(id);
+      // (wicked-core#1249, DES-APPS-001 S5) A demo of an app whose rows may not reach a model is a person's to watch:
+      // an agent or plugin actor gets none of its files (as `/apps/:app/query` refuses them the rows).
+      const actor = (req as { actor?: Actor }).actor ?? LOCAL_ACTOR;
+      if (actor.kind === 'agent' || actor.kind === 'plugin') {
+        const manifest = await launchManifest(demoRoot);
+        if (manifest !== null && manifest.live_data_to_models !== true) {
+          return reply.code(403).send({ error: "this demo shows an app's live data, which reaches a person only" });
+        }
+      }
+      const target = await containedPath(demoRoot, rel);
       if (target === null) return reply.code(404).send({ error: `no such demo file: ${rel}` });
       const st = await fsp.stat(target);
       if (!st.isFile()) return reply.code(404).send({ error: `no such demo file: ${rel}` });
@@ -1251,7 +1271,14 @@ export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter, l
         target = await containedPath(demoRoot, 'script.md');
       }
       if (target === null) return reply.code(409).send({ error: 'the plan has not written script.md' });
-      await fsp.writeFile(target, parsed.data.content, 'utf8');
+      // Never through a link, even one swapped in after the check above: the file is opened without following one.
+      const handle = await fsp.open(target, fsConstants.O_WRONLY | fsConstants.O_TRUNC | (fsConstants.O_NOFOLLOW ?? 0)).catch(() => null);
+      if (handle === null) return reply.code(409).send({ error: 'the plan has not written script.md' });
+      try {
+        await handle.writeFile(parsed.data.content, 'utf8');
+      } finally {
+        await handle.close();
+      }
       return { bytes };
     },
   );
