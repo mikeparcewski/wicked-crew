@@ -187,7 +187,7 @@ export const RevisionEditsSchema = z.looseObject({
   detail: z.strictObject({ add: z.array(z.string().max(200)).max(8).optional(), remove: z.array(z.string().max(200)).max(8).optional() }).optional(),
   skipQe: z.strictObject({ reason: z.string().trim().min(1).max(600) }).optional(),
   restoreQe: z.literal(true).optional(),
-  confirmLoss: z.literal(true).optional(),
+  confirmLoss: z.union([z.literal(true), z.array(z.string().min(1).max(40)).min(1).max(12)]).optional(),
 });
 
 /** A seat's typed revision block: `{"revises":"<pid>","edits":{…}}`. `null` for anything else. */
@@ -600,6 +600,11 @@ export interface ChatProposalDeps {
   registry: LaunchOnceRegistry;
   /** (DES-CATALOG-002 §4.6) Job proposals are on (`capabilities.chatJobProposals`). Absent = off. */
   jobs?(): boolean;
+  /** (§2.5) Answer a reshape's held plan Reject (`reshaped`), checked eligible and bound to its ord and plan revision
+   *  inside the engine's decision. `null` when it was answered; else the refusal. */
+  reshapeReject?(heldRunId: string, actor: Actor, pid: string): Promise<DecideResult | null>;
+  /** What a launch of this proposal would refuse that can be checked before anything changes; `null` = nothing. */
+  preflight?(p: ArtifactProposal): Promise<string | null>;
   /** The daemon's QE acceptance setting is off (the launch skips QE by setting, labelled). Absent = on. */
   qeOff?(): Promise<boolean>;
   /** Whether the chat's client renders job proposals (`accepts: ['job']`, its newest declaration). Absent = no. */
@@ -1319,9 +1324,6 @@ export class ChatProposals {
     }
     if (kind === 'job') {
       // A reshape starts only through its own transition (the held plan answered Reject first; codex r3).
-      if (folded.proposal.reshapes !== undefined && folded.proposal.heldRejected !== true) {
-        return { code: 409, body: { code: 'reshape_pending', error: 'start this one again through its reshape (it answers the held plan first)', view: viewOf(folded) } };
-      }
       // The seats the proposal names can still work, before any edit re-resolves them (codex r3).
       const can = new Set(this.deps.rosterEligible().map((x) => x.key));
       const gone = (folded.proposal.seats?.keys ?? []).filter((k) => !can.has(k));
@@ -1434,6 +1436,21 @@ export class ChatProposals {
       }
     }
 
+    // DES-CATALOG-002 §4.6/§2.5 (codex r4): what can be checked before anything changes is checked first (a Backlog's
+    // requirements, its project's members), so a reshape never answers its held plan for a launch that would refuse.
+    if (kind === 'job' && this.deps.preflight !== undefined) {
+      const why = await this.deps.preflight(resolution);
+      if (why !== null) return { code: 409, body: { code: 'proposal_blocked', error: why, view: viewOf(folded) } };
+    }
+    // §2.5: a reshape (or its corrected descendant) answers the held plan Reject first, in this one transition; the
+    // proposal then records that it did, so a retry launches without asking again.
+    if (resolution.reshapes !== undefined && resolution.heldRejected !== true) {
+      if (this.deps.reshapeReject === undefined) return { code: 409, body: { code: 'operation_unavailable', error: 'this daemon cannot answer the held plan for a reshape', view: viewOf(folded) } };
+      const refused = await this.deps.reshapeReject(resolution.reshapes, actor, pid);
+      if (refused !== null) return refused;
+      resolution = { ...resolution, heldRejected: true };
+      if (!this.write(chatId, { at: this.now(), turnId: folded.turnId, kind: 'proposal', proposal: { ...(now.accepting?.resolution ?? now.proposal), heldRejected: true } }, instance)) return this.gone(chatId);
+    }
     // Recorded before anything starts.
     const accepting: ProposalRecord = { at: this.now(), turnId: folded.turnId, kind: 'proposal_accepting', pid, actor: actor.id, edits, resolution, identity };
     if (!this.write(chatId, accepting, instance)) return this.gone(chatId);
@@ -1509,17 +1526,19 @@ export class ChatProposals {
    */
   private async busy(chatId: string, artifactRef: string | null, p: ArtifactProposal): Promise<{ code: 'chat_busy' | 'document_busy'; reason: string } | null> {
     const runs = await this.deps.runs();
+    // A reshape's held run is the one it replaces: answered Reject inside this Go, so it does not make the chat busy.
+    const held = p.reshapes !== undefined && p.heldRejected !== true ? p.reshapes : null;
     for (const f of foldProposals(this.deps.records(chatId)).values()) {
       if (f.proposal.pid === p.pid) continue;
       // Another proposal of this chat started a job (decided go, or accepting with its run launched) still live.
       const runId = f.state === 'decided' && f.decision === 'go' ? f.result?.runId ?? null
         : f.state === 'accepting' ? f.accepting?.identity.runId ?? null : null;
-      if (runId !== null && (await this.deps.registry.live(f.proposal.kind, runId))) {
+      if (runId !== null && runId !== held && (await this.deps.registry.live(f.proposal.kind, runId))) {
         return { code: 'chat_busy', reason: `This chat already has a job running (${f.proposal.what.label}). Wait, or stop that run.` };
       }
     }
     for (const v of runs) {
-      if (!isLive(v) || this.deps.chatOfRun(v.session.id) !== chatId || this.deps.isAskPath(v.session.id)) continue;
+      if (!isLive(v) || v.session.id === held || this.deps.chatOfRun(v.session.id) !== chatId || this.deps.isAskPath(v.session.id)) continue;
       return { code: 'chat_busy', reason: `This chat already has a job running (run ${v.session.id.slice(0, 8)}). Wait, or stop that run.` };
     }
     if (artifactRef !== null && (p.kind === 'refine' || (p.kind === 'create' && p.artifactRef !== undefined))) {
@@ -1894,7 +1913,16 @@ export class ChatProposals {
     const fromPerson = src.person !== null;
     // Only the person's own press can give up a check.
     const edits: ProposalRevisionEdits & Record<string, unknown> = { ...rev.edits };
-    const confirmed = fromPerson && edits.confirmLoss === true;
+    // What the press confirms (codex r4): `true` on a lost-check question covers exactly what that question names; a
+    // swap or suggestion carries the ids its own label named. Anything else covers nothing.
+    const confirmIds: ReadonlySet<string> | null = !fromPerson || edits.confirmLoss === undefined
+      ? null
+      : Array.isArray(edits.confirmLoss)
+        ? new Set(edits.confirmLoss)
+        : parent.proposal.question?.kind === 'lost_check'
+          ? new Set<string>([...(parent.proposal.question.lost ?? []), ...(parent.proposal.question.lostSeats ?? [])])
+          : new Set<string>();
+    const confirmed = confirmIds !== null;
     delete edits.confirmLoss;
     const ctx0 = await this.jobContext(chatId, src.pid, src.turnId, fromPerson ? 'person' : (parent.proposal.seat ?? 'seat'), chat, {
       revises: parent.proposal.pid,
@@ -1937,13 +1965,13 @@ export class ChatProposals {
     const loses = merged.lost.length > 0 || merged.lostSeats.length > 0;
     // A press confirms exactly what was disclosed to it (codex r3): the question's named losses, or a swap's own
     // (catalog-derived, named in its label). A loss beyond that asks again.
-    const disclosed = parent.proposal.question?.kind === 'lost_check'
-      ? new Set<string>([...(parent.proposal.question.lost ?? []), ...(parent.proposal.question.lostSeats ?? [])])
-      : null;
-    const uncovered = disclosed !== null
-      ? [...merged.lost, ...merged.lostSeats].filter((k) => !disclosed.has(k))
-      : extra;
+    const uncovered = confirmIds === null ? [...merged.lost, ...merged.lostSeats] : [...merged.lost, ...merged.lostSeats].filter((k) => !confirmIds.has(k));
     const covered = confirmed && uncovered.length === 0;
+    // A candidate the daemon cannot make is said at once, never behind a question it could not honour (codex r4).
+    if (candidate === null && candidateErr !== null && loses && !covered) {
+      const refused = this.refusalOf(candidateErr);
+      if (refused !== null) return refused;
+    }
     if (qe !== null || (loses && !covered)) {
       const base = keepReshape(await this.proposalOf(chatId, src.pid, factsOf(parent.proposal), ctx, records, true), parent.proposal);
       const newCard = CATALOG_V2_CARDS.find((c) => c.id === merged.facts.card)!;
@@ -2122,7 +2150,7 @@ export class ChatProposals {
     if (dropped.length > 0) throw new EditRefusal(`that would drop ${checksLabel(dropped)}; check the job again`);
     if (out.seats !== undefined && out.shape !== undefined) {
       const r = resolveOption(out.shape.card, out.shape.option, ctx.served);
-      if (r !== null && out.seats.keys.length < 1 + (r.resolved.seats.distinctEvaluator ? 1 : 0) + (r.resolved.seats.distinctJudge ? 1 : 0)) {
+      if (r !== null && !(r.workflow !== null && SELF_SEATED.has(r.workflow)) && out.seats.keys.length < 1 + (r.resolved.seats.distinctEvaluator ? 1 : 0) + (r.resolved.seats.distinctJudge ? 1 : 0)) {
         throw new EditRefusal('this job needs another seat to check the one that builds');
       }
     }
@@ -2202,11 +2230,11 @@ export class ChatProposals {
       reducedAssurance: boolean;
       relaunch: NonNullable<ArtifactProposal['relaunch']>;
       request: { id: string; digest: string };
-      confirmLoss: boolean;
+      /** The losses the person confirmed (the ids a previous `reshape_loses_check` named). */
+      confirmLoss: readonly string[];
     },
     actor: Actor,
     instance: string | null,
-    rejectHeld: () => Promise<DecideResult | null>,
   ): Promise<DecideResult> {
     return this.lock.run(`pid\u0000${x.pid}`, () => this.lock.run(`chat\u0000${instance ?? chatId}`, async () => {
       if (this.deps.instanceOf(chatId) !== instance) return this.gone(chatId);
@@ -2236,10 +2264,13 @@ export class ChatProposals {
           let facts = x.facts;
           if (heldP?.shape !== undefined) {
             const merged = mergeRevision(heldP, x.edits as ProposalRevisionEdits, { chat, served: ctx.served, roster: ctx.roster });
-            // Nothing is answered for a shape that is not the one asked for (codex r3).
-            const wantCard = x.edits.card ?? merged.facts.card;
-            if (merged.facts.card !== wantCard || (x.edits.option !== undefined && x.edits.option !== null && merged.facts.option !== x.edits.option)) {
-              return { code: 400, body: { code: 'edits_invalid', error: merged.notes[0] ?? `there is no ${String(x.edits.card)}${x.edits.option !== undefined ? ` · ${String(x.edits.option)}` : ''} to start it again as` } };
+            // Nothing is answered for a shape, or an input, that is not the one asked for (codex r3, r4).
+            const wantCard = CATALOG_V2_CARDS.find((c) => c.id === (x.edits.card ?? merged.facts.card));
+            const optionOk = wantCard !== undefined && (x.edits.option === undefined || optionFor(wantCard, merged.facts.option) === optionFor(wantCard, x.edits.option));
+            const depthOk = x.edits.depth === undefined || x.edits.depth === null || merged.facts.depth === x.edits.depth;
+            const inputsOk = Object.entries(x.edits.inputs ?? {}).every(([k, v]) => (k === 'intent' ? merged.facts.words === (v.kind === 'text' ? v.value.slice(0, 8000) : '') : JSON.stringify(merged.facts.inputs[k]) === JSON.stringify(v)));
+            if (wantCard === undefined || merged.facts.card !== wantCard.id || !optionOk || !depthOk || !inputsOk) {
+              return { code: 400, body: { code: 'edits_invalid', error: merged.notes[0] ?? `there is no ${String(x.edits.card)}${x.edits.option !== undefined && x.edits.option !== null ? ` · ${String(x.edits.option)}` : ''} to start it again as`, notes: merged.notes } };
             }
             facts = { ...merged.facts, skipQe: null, by: 'person', source: 'reshape' };
             ctx.notes.push(...merged.notes);
@@ -2254,13 +2285,14 @@ export class ChatProposals {
         // The held job's checks and seat protections are the parent's; a replacement with fewer is started only on the
         // person's press naming them (§2.5: the reshape question names the checks given up; codex r1).
         const held = parent?.accepting?.resolution ?? parent?.proposal;
-        if (held !== undefined && !x.confirmLoss) {
+        if (held !== undefined) {
           const lost = (held.gate ?? []).filter((g) => !(proposal.gate ?? []).includes(g));
           const heldCard = held.shape === undefined ? null : CATALOG_V2_CARDS.find((c) => c.id === held.shape!.card) ?? null;
           const before = held.seatRules ?? (heldCard === null ? [] : seatProtections(resolveOption(heldCard.id, optionFor(heldCard, held.shape!.option), (await this.deps.served!(chat.projectId)))));
           const after = proposal.seatRules ?? [];
           const lostSeats = before.filter((k) => !after.includes(k));
-          if (lost.length > 0 || lostSeats.length > 0) {
+          // Confirmed only for exactly what the person was shown (a loss since asks again; codex r4).
+          if ([...lost, ...lostSeats].some((k) => !x.confirmLoss.includes(k))) {
             const words = [...lost.map((g) => checksLabel([g])), ...lostSeats.map((k) => SEAT_WORDS[k])];
             return { code: 409, body: { code: 'reshape_loses_check', error: `started again like that, it would no longer have ${words.join(', ')}: confirm to give ${words.length === 1 ? 'it' : 'them'} up`, lost, lostSeats } };
           }
@@ -2292,16 +2324,6 @@ export class ChatProposals {
       if (stale !== null) return stale;
       if (folded.state !== 'accepting') {
         if (p.blocked !== null) return { code: 409, body: { code: 'proposal_blocked', error: p.blocked, view: viewOf(folded) } };
-        if (p.heldRejected !== true) {
-          // The held plan is answered Reject inside the engine's serialized gate path: a racing approval and this
-          // reshape cannot both win. A refusal leaves the reshape open, with nothing run.
-          const refused = await rejectHeld();
-          if (refused !== null) return refused;
-          // The durable evidence that THIS reshape answered the held plan: a retry launches without asking again.
-          const marked: ArtifactProposal = { ...p, heldRejected: true };
-          if (!this.write(chatId, { at: this.now(), turnId: folded.turnId, kind: 'proposal', proposal: marked }, instance)) return this.gone(chatId);
-          folded = foldProposals(this.deps.records(chatId)).get(x.pid)!;
-        }
       }
       const current = folded.state === 'accepting' && folded.accepting !== undefined ? folded.accepting.resolution : folded.proposal;
       const identity = folded.accepting?.identity ?? this.identityOf(current);

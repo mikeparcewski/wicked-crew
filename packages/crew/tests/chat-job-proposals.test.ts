@@ -61,6 +61,9 @@ interface Rig {
   chat: ProposalChat;
   served: ServedState & { rev: string };
   qeOff: boolean;
+  /** The held-plan Reject a reshape asks for: counted, answered with `rejectAnswer`. */
+  rejects: number;
+  rejectAnswer: { code: number; body: Record<string, unknown> } | null;
 }
 
 const CHAT = 'c1';
@@ -75,6 +78,8 @@ function rig(o: { roster?: Array<{ key: string; name: string }>; repos?: Array<{
     chat: { projectId: null, repos: o.repos ?? [{ id: 'r-pay', name: 'payments-service' }, { id: 'r-bill', name: 'billing-api' }], lead: 'claude', seats: ['claude'], analysis: false },
     served,
     qeOff: false,
+    rejects: 0,
+    rejectAnswer: null,
   };
   const registry = new LaunchOnceRegistry();
   registry.register('job', r.launcher);
@@ -102,6 +107,10 @@ function rig(o: { roster?: Array<{ key: string; name: string }>; repos?: Array<{
     jobs: () => true,
     served: async () => r.served,
     qeOff: async () => r.qeOff,
+    reshapeReject: async () => {
+      r.rejects += 1;
+      return r.rejectAnswer;
+    },
     turnLive: (_c, turnId) => r.live.has(turnId),
     broadcast: () => undefined,
     audit: () => undefined,
@@ -329,13 +338,11 @@ describe('across kinds', () => {
     await pick(r, 'document', { option: 'repo-docs' });
     const job = open(r);
     expect(job.kind).toBe('job');
-    // The deck drops the check against its sources: wicked asks first.
-    await swap(r, job.pid, { option: 'presentation' }, 'deck');
-    const q = open(r);
-    expect(q.question).toMatchObject({ kind: 'lost_check', lost: ['fidelity-to-source'] });
-    // The press: a document is an artifact create, which this daemon (create off) cannot start from a chat.
-    const out = await swap(r, q.pid, q.question!.choices[0]!.edit, 'deck-press');
+    // A deck is an artifact create, which this daemon (create off) cannot start from a chat: said at once, never behind
+    // a loss question it could not honour (codex r4).
+    const out = await swap(r, job.pid, { option: 'presentation' }, 'deck');
     expect(out.body).toMatchObject({ code: 'operation_unavailable' });
+    expect(open(r).pid).toBe(job.pid);
     expect(CATALOG_V2_CARDS.find((c) => c.id === 'document')).toBeDefined();
   });
 });
@@ -350,13 +357,13 @@ describe('codex/pi r1 folds', () => {
   it('a card change drops an earlier QE skip: the new card asks for its own (pi P2)', async () => {
     const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
     await pick(r, 'feature');
-    await swap(r, open(r).pid, { skipQe: { reason: 'a prototype' }, confirmLoss: true }, 'skip');
+    await swap(r, open(r).pid, { skipQe: { reason: 'a prototype' }, confirmLoss: ['qe-acceptance'] }, 'skip');
     expect(open(r).skipQe).toEqual({ reason: 'a prototype' });
     await swap(r, open(r).pid, { card: 'bug' }, 'to-bug');
     expect(open(r)).toMatchObject({ shape: { card: 'bug' }, skipQe: null });
     expect(open(r).gate).toContain('qe-acceptance');
     // And a skip can be taken back.
-    await swap(r, open(r).pid, { skipQe: { reason: 'again' }, confirmLoss: true }, 'skip2');
+    await swap(r, open(r).pid, { skipQe: { reason: 'again' }, confirmLoss: ['qe-acceptance'] }, 'skip2');
     await swap(r, open(r).pid, { restoreQe: true }, 'restore');
     expect(open(r).skipQe).toBeNull();
   });
@@ -483,19 +490,17 @@ describe('reshape (§2.5)', () => {
     await pick(r, 'migrate', { option: 'in-place' });
     const held = open(r);
     await r.svc.decide(CHAT, held.pid, { decision: 'go' }, ME, 'i1');
-    let rejected = 0;
-    const rejectHeld = async () => { rejected += 1; return null; };
     const base = { pid: `${CHAT}:reshape:run1:a`, oldRunId: 'run1', parentPid: held.pid, facts: facts('feature'), edits: { card: 'feature' }, reducedAssurance: false, relaunch: { deliver: 'pr' as const }, request: { id: 'a', digest: 'd1' } };
-    const refused = await r.svc.reshape(CHAT, { ...base, confirmLoss: false }, ME, 'i1', rejectHeld);
+    const refused = await r.svc.reshape(CHAT, { ...base, confirmLoss: [] }, ME, 'i1');
     expect(refused.body).toMatchObject({ code: 'reshape_loses_check', lost: ['parity'] });
-    expect(rejected).toBe(0);
-    const ok = await r.svc.reshape(CHAT, { ...base, pid: `${CHAT}:reshape:run1:b`, request: { id: 'b', digest: 'd2' }, confirmLoss: true }, ME, 'i1', rejectHeld);
+    expect(r.rejects).toBe(0);
+    const ok = await r.svc.reshape(CHAT, { ...base, pid: `${CHAT}:reshape:run1:b`, request: { id: 'b', digest: 'd2' }, confirmLoss: ['parity'] }, ME, 'i1');
     expect(ok.code, JSON.stringify(ok.body)).toBe(200);
-    expect(rejected).toBe(1);
+    expect(r.rejects).toBe(1);
     const launched = r.launcher.launched.at(-1)!;
     expect(launched.resolution).toMatchObject({ reshapes: 'run1', shape: { card: 'feature', source: 'reshape' }, revises: held.pid, lineage: held.lineage });
     // Idempotent by its request: the same reshape answers its decision and launches nothing more.
-    const again = await r.svc.reshape(CHAT, { ...base, pid: `${CHAT}:reshape:run1:b`, request: { id: 'b', digest: 'd2' }, confirmLoss: true }, ME, 'i1', rejectHeld);
+    const again = await r.svc.reshape(CHAT, { ...base, pid: `${CHAT}:reshape:run1:b`, request: { id: 'b', digest: 'd2' }, confirmLoss: ['parity'] }, ME, 'i1');
     expect(again.code).toBe(200);
     expect(r.launcher.launched.filter((d) => d.resolution.reshapes === 'run1')).toHaveLength(1);
   });
@@ -522,22 +527,38 @@ describe('codex r3 folds', () => {
     card, option: undefined, depth: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape',
   });
 
-  it('a reshape to a card that does not exist answers nothing; a plain Go on a reshape is refused', async () => {
+  it('a reshape to a card that does not exist answers nothing; Go on a reshape answers the held plan first, never around it', async () => {
     const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
     await pick(r, 'feature');
     const held = open(r);
     await r.svc.decide(CHAT, held.pid, { decision: 'go' }, ME, 'i1');
-    let rejected = 0;
-    const base = { oldRunId: 'run1', parentPid: held.pid, facts: facts('nope'), reducedAssurance: false, relaunch: { deliver: 'pr' as const }, confirmLoss: true };
-    const bad = await r.svc.reshape(CHAT, { ...base, pid: `${CHAT}:reshape:run1:x`, edits: { card: 'nope' }, request: { id: 'x', digest: 'dx' } }, ME, 'i1', async () => { rejected += 1; return null; });
+    const base = { oldRunId: 'run1', parentPid: held.pid, facts: facts('nope'), reducedAssurance: false, relaunch: { deliver: 'pr' as const }, confirmLoss: [] as string[] };
+    const bad = await r.svc.reshape(CHAT, { ...base, pid: `${CHAT}:reshape:run1:x`, edits: { card: 'nope' }, request: { id: 'x', digest: 'dx' } }, ME, 'i1');
     expect(bad.body).toMatchObject({ code: 'edits_invalid' });
-    expect(rejected).toBe(0);
-    // A reshape whose Reject is refused stays open; a plain Go on it never launches around that.
-    const refused = await r.svc.reshape(CHAT, { ...base, pid: `${CHAT}:reshape:run1:y`, edits: { card: 'bug' }, facts: facts('bug'), request: { id: 'y', digest: 'dy' } }, ME, 'i1', async () => ({ code: 409, body: { code: 'gate_changed' } }));
+    expect(r.rejects).toBe(0);
+    // The held plan's Reject is refused: the reshape stays open, and Go on it asks again (it never launches around it).
+    r.rejectAnswer = { code: 409, body: { code: 'gate_changed' } };
+    const refused = await r.svc.reshape(CHAT, { ...base, pid: `${CHAT}:reshape:run1:y`, edits: { card: 'bug' }, facts: facts('bug'), request: { id: 'y', digest: 'dy' } }, ME, 'i1');
     expect(refused.body).toMatchObject({ code: 'gate_changed' });
     const go = await r.svc.decide(CHAT, `${CHAT}:reshape:run1:y`, { decision: 'go' }, ME, 'i1');
-    expect(go.body).toMatchObject({ code: 'reshape_pending' });
+    expect(go.body).toMatchObject({ code: 'gate_changed' });
+    expect(r.rejects).toBe(2);
     expect(r.launcher.launched).toHaveLength(1);
+    // Once the Reject is answered, the same Go launches the replacement once, with its lineage.
+    r.rejectAnswer = null;
+    const ok = await r.svc.decide(CHAT, `${CHAT}:reshape:run1:y`, { decision: 'go' }, ME, 'i1');
+    expect(ok.code, JSON.stringify(ok.body)).toBe(200);
+    expect(r.launcher.launched.at(-1)!.resolution).toMatchObject({ reshapes: 'run1', heldRejected: true, shape: { card: 'bug' } });
+  });
+
+  it('a reshape whose requested input did not apply answers nothing (codex r4)', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'feature');
+    const held = open(r);
+    await r.svc.decide(CHAT, held.pid, { decision: 'go' }, ME, 'i1');
+    const out = await r.svc.reshape(CHAT, { pid: `${CHAT}:reshape:run1:z`, oldRunId: 'run1', parentPid: held.pid, facts: facts('bug'), edits: { card: 'bug', inputs: { requirements: { kind: 'text', value: 'x' } } }, reducedAssurance: false, relaunch: { deliver: 'pr' }, request: { id: 'z', digest: 'dz' }, confirmLoss: [] }, ME, 'i1');
+    expect(out.body).toMatchObject({ code: 'edits_invalid' });
+    expect(r.rejects).toBe(0);
   });
 
   it('a press confirms only the losses it was shown: a QE loss from a setting since asks again', async () => {

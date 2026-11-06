@@ -312,6 +312,9 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     blockedBy.push(r.resolved.statusNote ?? `${label} can't start on this daemon`);
   }
   if (launch === 'compose' && briefOf(facts).length > 500) blockedBy.push('A backlog takes a steer of at most 500 characters: say it shorter');
+  if (launch === 'demo' && demoShowOf({ words: facts.words, inputs: facts.inputs, details: facts.details }).length > 4000) {
+    blockedBy.push('What to show is over 4000 characters with your corrections: say it shorter');
+  }
   // A self-seated workflow picks its own seat at launch: the roster's count is not its requirement (codex r3).
   if (short && coming === undefined && !(r.workflow !== null && SELF_SEATED.has(r.workflow))) blockedBy.push(`Needs ${seatsNeeded(r)} seats that can work now (one builds, the others check it); sign another seat in`);
   // The one question: the first required need that is missing.
@@ -469,7 +472,7 @@ function swapChoice(
   const lostSeats = protections.filter((k) => !seatProtections(r).includes(k));
   if (lost.length === 0 && lostSeats.length === 0) return { label, edit };
   // Every loss the press confirms is named in its own label (codex r2).
-  return { label: `${label}, without ${list([...lost.map((g) => GATE_WORDS[g]), ...lostSeats.map((k) => SEAT_WORDS[k])])}`, edit: { ...edit, confirmLoss: true } };
+  return { label: `${label}, without ${list([...lost.map((g) => GATE_WORDS[g]), ...lostSeats.map((k) => SEAT_WORDS[k])])}`, edit: { ...edit, confirmLoss: [...lost, ...lostSeats] } };
 }
 
 /**
@@ -777,6 +780,13 @@ export const depthLine = (d: 'quick' | 'standard' | 'deep'): string => DEPTH_LIN
 
 // ── what Go launches (DES-CATALOG-002 §4.6) ────────────────────────────────────────────────────────────────────────
 
+
+/** A demo's brief: the person's first words, their show field and the corrections, together (one rendering for the
+ *  check before Start and the launch). */
+export function demoShowOf(p: Pick<ArtifactProposal, 'words' | 'inputs' | 'details'>): string {
+  const show = p.inputs?.['show'];
+  return [...new Set([p.words ?? '', show !== undefined && show.kind === 'text' ? show.value : '', ...(p.details ?? [])])].filter((x) => x.trim() !== '').join('\n');
+}
 
 /** The inputs a run launch carries in its brief (beside the intent, the repository and the project), as plain lines. */
 export function inputLines(p: Pick<ArtifactProposal, 'inputs' | 'needs'>): string[] {

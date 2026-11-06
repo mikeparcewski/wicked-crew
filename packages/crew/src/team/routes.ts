@@ -98,6 +98,18 @@ export async function busRows(busDbPath: string | undefined, runId: string): Pro
 }
 
 /**
+ * (DES-CATALOG-002 §2.5) Whether a WORK plan was accepted on this run (a `plan.accepted` with any step beyond a PA's
+ * scope-only `understand`): past that, a run is not reshaped.
+ */
+export function workPlanAccepted(rows: readonly TeamRow[]): boolean {
+  return rows.some((r) => {
+    if (r.event_type !== 'wicked.team.plan.accepted') return false;
+    const steps = (r.payload as unknown as { steps?: Array<{ catalog?: unknown }> } | null)?.steps ?? [];
+    return steps.some((st) => st.catalog !== 'understand');
+  });
+}
+
+/**
  * (DES-CATALOG-002 §4.6) The plan revision the OPEN plan gate holds (`gate.opened{kind:"plan_approval"}.plan_rev`, the
  * newest no `gate.decided` answered), or `undefined` when no plan gate is open or its row names no revision.
  */

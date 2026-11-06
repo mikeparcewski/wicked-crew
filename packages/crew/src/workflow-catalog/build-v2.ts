@@ -354,6 +354,14 @@ export function resolveOption(cardId: string, optionId: string | null, served: S
   if (launch.kind === 'demo') {
     const demo = served.builtins.get('demo');
     if (demo !== undefined) steps = demo.steps;
+    // A saved `demo` replaces the recorded walkthrough the card promises: the card is off; the saved one runs from
+    // Yours (codex r4).
+    const shadow = served.saved.get('demo');
+    if (shadow !== undefined && !coming) {
+      status = 'unavailable';
+      statusNote = 'Your saved `demo` replaces the built-in demo, so this card is off; start yours from Yours.';
+      steps = shadow.steps;
+    }
   }
   const read = readSteps(steps, served.entries);
   const gate = status === 'coming_soon' ? [...seededGate] : derivedGate(launch, read, requiresQe, seededGate, card.category === 'improve', delivers);

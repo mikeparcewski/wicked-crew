@@ -7840,7 +7840,8 @@ export interface LaunchEnvelope {
  * launched from a chat proposal; **409** `proposal_blocked` when the new card needs an input the run lacks (send it in
  * `inputs`); **409** `reshape_loses_check` (see `confirmLoss`); **400** `edits_invalid` for a card or option that does
  * not exist. A launch refused after the Reject is **502** `launch_failed` with the refusal's words: the reshape proposal
- * stays accepting, and the same request tries again (a plain Go on a reshape is **409** `reshape_pending`).
+ * stays accepting, and the same request, or Go on the reshape (or on its corrected descendant), tries again: Go on a
+ * reshape that has not answered the held plan yet answers it first, as this route does.
  */
 export interface ReshapeRunBody {
   card: string;
@@ -7848,11 +7849,11 @@ export interface ReshapeRunBody {
   depth?: 'quick' | 'standard' | 'deep' | null;
   inputs?: Record<string, ProposalInputValue>;
   requestId: string;
-  /** The person's press on the reshape question naming what the new shape gives up. Without it, a replacement with
-   *  fewer checks or seat rules than the held job is **409** `reshape_loses_check` with `lost` (check ids) and
-   *  `lostSeats` (seat rules), and nothing is answered; send the same request again with `confirmLoss: true` once the
-   *  person confirms. */
-  confirmLoss?: true;
+  /** The person's press on the reshape question naming what the new shape gives up: the ids it was shown (the 409's
+   *  `lost` and `lostSeats`). Without them, a replacement with fewer checks or seat rules than the held job is **409**
+   *  `reshape_loses_check` with `lost` (check ids) and `lostSeats` (seat rules), and nothing is answered; a loss beyond
+   *  the ids sent is refused the same way. */
+  confirmLoss?: string[];
 }
 
 export interface ReshapeRunResponse {
@@ -8939,8 +8940,10 @@ export interface ProposalRevisionEdits {
   skipQe?: { reason: string };
   /** Take back a QE skip given earlier (QE acceptance runs again). */
   restoreQe?: true;
-  /** Only on the person route: a press on the lost-check question (or a swap or suggestion naming the check it drops). */
-  confirmLoss?: true;
+  /** Only on the person route: a press on the lost-check question (`true`: exactly the losses that question names), or a
+   *  swap or suggestion naming what it drops (the ids its label names: check ids and seat rules). A loss beyond what the
+   *  press was shown asks again. */
+  confirmLoss?: true | string[];
 }
 
 /**

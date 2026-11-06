@@ -359,6 +359,7 @@
       "requestType": "ChatOpenBody",
       "responseType": "ChatOpenResponse",
       "statusCodes": [
+        200,
         201,
         400,
         403,

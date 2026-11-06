@@ -154,12 +154,12 @@ import { TestSetIndex } from '../qe/test-sets.js';
 import { estateExe, parseEstateTotals, readBlastRadiusPages, resolveProjectGraphBinding } from '../projects/graph.js';
 import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { registerProjectAggregateRoutes } from './project-aggregates.js';
-import { composeLaunch, registerProductRoutes } from './product.js';
+import { composeLaunch, composePreflight, registerProductRoutes } from './product.js';
 import { buildWorkflowCatalogV2, parseCommand, resolveOption } from '../workflow-catalog/build-v2.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
 import { checkLaunchShape, LaunchShapeSchema, launchShapeOf, servedFor, withBriefLines, type LaunchTarget, type ShapeReads } from '../workflow-catalog/shape.js';
 import { registerPresetRoutes } from '../presets/routes.js';
-import { busRows, openPlanGateRev, registerTeamRoutes } from '../team/routes.js';
+import { busRows, openPlanGateRev, registerTeamRoutes, workPlanAccepted } from '../team/routes.js';
 import { registerCampaignRoutes } from '../campaigns/routes.js';
 import { registerGovernanceWikiRoutes } from './governance-wiki.js';
 import {
@@ -283,7 +283,7 @@ const BRIEF_COPY_MAX = 512 * 1024;
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
 import { registerInteractiveDocChecks } from '../interactive/doc-checks-routes.js';
 import { crewStateHome, stateHomeOfDb } from '../projects/state-home.js';
-import { factsOf, inputLines, jobLaunchCommon, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
+import { demoShowOf, factsOf, inputLines, jobLaunchCommon, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
 import { ChatProposals, LaunchOnceRegistry, proposalRunId, RecordingStubDispatcher, RevisionEditsSchema, runCostFromEvents } from './chat-proposals.js';
 import { CATALOG_SEEDS } from '../workflow-catalog/catalog-data.js';
@@ -3825,8 +3825,9 @@ export function registerRoutes(
           return x !== undefined && (x.kind === 'text' || x.kind === 'url') ? x.value : undefined;
         };
         // What to show is the person's own field, with the corrections carried (§4.6 rule 6).
-        // What to show: the person's first words, their show field and the corrections, together (codex r3).
-        const show = [...new Set([p.words ?? '', v('show') ?? '', ...(p.details ?? [])])].filter((x) => x.trim() !== '').join('\n').slice(0, 4000);
+        // What to show: the person's first words, their show field and the corrections, together (codex r3); its length
+        // was checked before Start was offered (codex r4), never clipped here.
+        const show = demoShowOf(p);
         const out = await demoLaunch(launchRun, projectId ?? DEFAULT_PROJECT_ID, { url: v('url') ?? '', audience: v('audience') ?? '', show, shape: common['shape'] }, ctx, {
           fromProposal: d.pid,
           common,
@@ -4523,7 +4524,8 @@ export function registerRoutes(
         manifest: {
           requestType: 'ChatOpenBody',
           responseType: 'ChatOpenResponse',
-          statusCodes: [201, 400, 403, 404, 409, 500, 501],
+          // 200: a seeded retry answers the chat its request already opened (api-types 0.192.0).
+          statusCodes: [200, 201, 400, 403, 404, 409, 500, 501],
         },
       },
     },
@@ -4990,6 +4992,30 @@ export function registerRoutes(
   // A dollar figure only from a run whose EVERY dispatched attempt of every agent step reported a price (DES §4.2).
   const proposalCosts = async (view: SessionView): Promise<number | null> =>
     runCostFromEvents(view, (await adapter.runEvents(view.session.id)) as Array<Record<string, unknown>>);
+  /**
+   * (DES-CATALOG-002 §2.5) A run is reshapeable only while it waits at its first WORK-plan approval (a PA's scope-only
+   * rev 1 may be accepted): the gate's ord and plan revision as read, which the Reject is then bound to.
+   */
+  const reshapeEligibility = async (runId: string): Promise<{ refusal: { code: number; body: Record<string, unknown> } } | { ord: number; planRev: number }> => {
+    const after = (why: string) => ({ refusal: { code: 409, body: { code: 'reshape_after_work', error: `run ${runId} ${why}: change it with the plan's own edit, or start a new job` } } });
+    const run = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
+    if (run === undefined) return { refusal: { code: 404, body: { error: 'Run not found' } } };
+    if (run.session.status !== 'awaiting_human') return after('is not waiting at its plan');
+    const held = await gateOfRecord(run, undefined);
+    if ('refusal' in held || held.gateKind !== 'plan_approval' || held.gated === undefined) return after('is not waiting at its plan');
+    const rows = await busRows(adapter.busDbPath, runId);
+    if (workPlanAccepted(rows)) return after('is past its first plan approval');
+    const planRev = openPlanGateRev(rows);
+    if (planRev === undefined) return after('holds a plan whose version could not be read');
+    return { ord: held.gated.ord, planRev };
+  };
+  /** The held plan answered Reject (`reshaped`) for a reshape, bound to the ord and revision just read. */
+  const reshapeReject = async (runId: string, actor: import('../core/types.js').Actor, pid: string): Promise<{ code: number; body: Record<string, unknown> } | null> => {
+    const elig = await reshapeEligibility(runId);
+    if ('refusal' in elig) return elig.refusal;
+    const out = await decideGate(runId, { approve: false, action: 'reject', amend: 'reshaped', ord: elig.ord, planRev: elig.planRev }, actor, { reshape: pid });
+    return out.code === 200 ? null : { code: out.code, body: (out.body ?? {}) as Record<string, unknown> };
+  };
   const chatProposals = new ChatProposals({
     flags: () => chatArtifactFlags,
     catalog: CATALOG_SEEDS,
@@ -5036,6 +5062,14 @@ export function registerRoutes(
     registry: proposalLaunchers,
     // DES-CATALOG-002 §4.6: job proposals, resolved against the catalog a launch in the chat's project reads.
     jobs: () => chatJobProposalsOn,
+    reshapeReject,
+    preflight: async (p) => {
+      if (p.launch !== 'compose') return null;
+      const req = p.inputs?.['requirements'];
+      if (p.filedIn.projectId === null) return 'a backlog needs a project';
+      if (req === undefined || req.kind !== 'requirements') return 'pick the requirements first';
+      return composePreflight(adapter, p.filedIn.projectId, req.refs);
+    },
     qeOff: async () => addonSupportsQeOverride() && (await qeAcceptanceNow()) === 'off',
     acceptsJobs: (chatId) => chatAccepts.get(chatId) === true,
     served: (projectId) => servedFor(shapeReads, projectId ?? undefined),
@@ -6607,7 +6641,10 @@ export function registerRoutes(
         // confirm, which records it as the judge when this approve answers a `judge_unavailable`
         // gate ("judged by operator").
         adapter.recordGateActor?.(id, `${actor.id} (${actor.kind})`);
-        const status = await adapter.confirmGate(
+        // The expected ord and plan revision ride as the trailing argument only when sent (an answer without them keeps
+        // the confirm's existing arity; DES-CATALOG-002 §4.6).
+        const expect = parsed.data.planRev !== undefined ? { ...(gated !== undefined ? { ord: gated.ord } : parsed.data.ord !== undefined ? { ord: parsed.data.ord } : {}), planRev: parsed.data.planRev } : undefined;
+        const confirmArgs: Parameters<CoreAdapter['confirmGate']> = [
           id,
           parsed.data.approve,
           // (DES-RULE-CHECK-001 S2) The engine takes a rule skip's reasons in `amend` as JSON.
@@ -6615,9 +6652,9 @@ export function registerRoutes(
           parsed.data.action,
           parsed.data.amendScope,
           parsed.data.plan !== undefined ? toLaunchPlan(parsed.data.plan) : undefined,
-          // DES-CATALOG-002 §4.6: what the answer expects the open gate to be, checked by the engine.
-          parsed.data.planRev !== undefined ? { ...(gated !== undefined ? { ord: gated.ord } : parsed.data.ord !== undefined ? { ord: parsed.data.ord } : {}), planRev: parsed.data.planRev } : undefined,
-        );
+        ];
+        if (expect !== undefined) confirmArgs.push(expect);
+        const status = await adapter.confirmGate(...confirmArgs);
         // WHO approved/rejected — the gate-decision audit (task #88). The engine
         // records THAT the gate resolved (interaction_requests / gateDecided);
         // only this HTTP layer knows the authenticated principal behind it.
@@ -6750,8 +6787,8 @@ export function registerRoutes(
     depth: z.enum(['quick', 'standard', 'deep']).nullable().optional(),
     inputs: RevisionEditsSchema.shape.inputs,
     requestId: z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9._-]+$/),
-    /** The person's press on the reshape question naming the checks the new shape gives up. */
-    confirmLoss: z.literal(true).optional(),
+    /** The person's press on the reshape question: the loss ids it was shown. */
+    confirmLoss: z.array(z.string().min(1).max(40)).min(1).max(12).optional(),
   });
   app.post(
     `${V}/runs/:id/reshape`,
@@ -6772,32 +6809,11 @@ export function registerRoutes(
       const run = (await adapter.sessionsDetail()).find((v) => v.session.id === id);
       if (run === undefined) return reply.code(404).send({ error: 'Run not found' });
       const pid = `${chatId}:reshape:${id}:${parsed.data.requestId}`;
-      const after = (): { code: number; body: unknown } => ({
-        code: 409,
-        body: { code: 'reshape_after_work', error: `run ${id} is past its first plan approval: change it with the plan's own edit, or start a new job` },
-      });
-      // Eligible only while the run waits at its first WORK-plan approval (a PA's scope-only rev 1 may be accepted). A
-      // retry of the same request after the reject skips this: the reshape proposal already exists.
-      // The gate the reshape answers, as checked: the Reject is bound to it (its ord and plan revision) inside the
-      // engine's serialized decision, so an approval that won meanwhile makes the Reject (and the reshape) fail.
-      let heldOrd: number | undefined;
-      let heldRev: number | undefined;
-      const ended = ['completed', 'cancelled', 'failed'].includes(String(run.session.status));
-      // A retry after THIS reshape's Reject (recorded on its proposal) goes straight to its launch; a run that ended any
-      // other way is past reshaping (codex r2).
-      if (!(ended && chatProposals.proposalOfPid(chatId, pid)?.heldRejected === true)) {
-        if (run.session.status !== 'awaiting_human') return reply.code(after().code).send(after().body);
-        const held = await gateOfRecord(run, undefined);
-        if ('refusal' in held || held.gateKind !== 'plan_approval') return reply.code(after().code).send(after().body);
-        heldOrd = held.gated?.ord;
-        const rows = await busRows(adapter.busDbPath, id);
-        heldRev = openPlanGateRev(rows);
-        const workAccepted = rows.some((r) => {
-          if (r.event_type !== 'wicked.team.plan.accepted') return false;
-          const steps = (r.payload as { steps?: Array<{ catalog?: unknown }> } | null)?.steps ?? [];
-          return steps.some((st) => st.catalog !== 'understand');
-        });
-        if (workAccepted) return reply.code(after().code).send(after().body);
+      // Eligible only while the run waits at its first WORK-plan approval (a PA's scope-only rev 1 may be accepted); a
+      // retry after THIS reshape's own Reject (recorded on its proposal) goes on to its launch (codex r2).
+      if (chatProposals.proposalOfPid(chatId, pid)?.heldRejected !== true) {
+        const elig = await reshapeEligibility(id);
+        if ('refusal' in elig) return reply.code(elig.refusal.code).send(elig.refusal.body);
       }
       const old = chatProposals.proposalOfPid(chatId, fromProposal);
       const base = old !== null && old.shape !== undefined ? factsOf(old) : null;
@@ -6816,18 +6832,6 @@ export function registerRoutes(
         skipQe: null,
         by: 'person',
         source: 'reshape',
-      };
-      const rejectHeld = async (): Promise<{ code: number; body: Record<string, unknown> } | null> => {
-        const fresh = (await adapter.sessionsDetail()).find((v) => v.session.id === id);
-        // Only an actual version-bound Reject counts (codex r3): a run that ended meanwhile is past reshaping.
-        if (fresh === undefined || ['completed', 'cancelled', 'failed'].includes(String(fresh.session.status))) {
-          return { code: 409, body: { code: 'reshape_after_work', error: `run ${id} ended before its plan could be answered; start a new job instead` } };
-        }
-        if (heldOrd === undefined || heldRev === undefined) {
-          return { code: 409, body: { code: 'reshape_after_work', error: `the plan run ${id} was held at could not be read again; check it and start again` } };
-        }
-        const out = await decideGate(id, { approve: false, action: 'reject', amend: 'reshaped', ord: heldOrd, planRev: heldRev }, gate.actor, { reshape: pid });
-        return out.code === 200 ? null : { code: out.code, body: (out.body ?? {}) as Record<string, unknown> };
       };
       const out = await chatProposals.reshape(
         chatId,
@@ -6853,11 +6857,10 @@ export function registerRoutes(
             ...(envelope.clisJson !== undefined ? { clisJson: envelope.clisJson } : {}),
           },
           request: { id: parsed.data.requestId, digest: requestDigest({ card: parsed.data.card, option: parsed.data.option ?? null, depth: parsed.data.depth ?? null, inputs: parsed.data.inputs ?? null }) },
-          confirmLoss: parsed.data.confirmLoss === true,
+          confirmLoss: parsed.data.confirmLoss ?? [],
         },
         gate.actor,
         gate.instance,
-        rejectHeld,
       );
       return reply.code(out.code).send(out.body);
     },

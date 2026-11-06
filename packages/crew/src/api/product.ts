@@ -138,6 +138,32 @@ export function reviewInstructions(projectId: string, rows: ReadonlyArray<Compos
 }
 
 /**
+ * (DES-CATALOG-002 §4.6) What a compose of these requirements would refuse, checked before anything changes (a chat
+ * reshape answers its held plan only for a launch that can start): the project, each requirement's repository being one
+ * of its members, and each key existing. `null` = it would launch.
+ */
+export async function composePreflight(adapter: CoreAdapter, id: string, refs: ReadonlyArray<{ repoId: string; key: string }>): Promise<string | null> {
+  if (refs.length === 0) return 'pick at least one requirement';
+  if (refs.length > COMPOSE_MAX_REQUIREMENTS) return `pick at most ${COMPOSE_MAX_REQUIREMENTS} requirements`;
+  let members;
+  try {
+    members = await membersOf(adapter, id);
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+  for (const ref of refs) {
+    const repo = members.find((m) => m.ref === ref.repoId)?.repo ?? null;
+    if (repo === null) return `${ref.repoId} is not a registered repository of this project`;
+    try {
+      if ((await getRequirement(repo, ref.key, adapter)) === null) return `${ref.repoId} has no requirement ${ref.key}`;
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+  }
+  return null;
+}
+
+/**
  * One compose launch (DES-CATALOG-002 §4.6: the `compose` launcher): the route's and a chat Backlog job's Go. Every
  * requirement is re-read from its repository first; then the shared launch function runs the plan, judging the shape
  * as a compose.
