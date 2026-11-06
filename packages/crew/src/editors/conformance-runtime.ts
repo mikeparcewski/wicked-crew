@@ -21,7 +21,7 @@
 
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import { execCapped } from '../core/exec.js';
 
@@ -38,7 +38,8 @@ export const PROVISIONED_MARKER = '.wicked-provisioned';
 /** The OS cache directory's `wicked-crew/editor-conformance`, or the override. */
 export function conformanceRuntimeRoot(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform, home: string = homedir()): string {
   const override = (env[CONFORMANCE_RUNTIME_DIR_ENV] ?? '').trim();
-  if (override !== '') return override;
+  // Absolute, always: the engine runs only an absolute interpreter path (a relative one would refuse forever).
+  if (override !== '') return resolve(override);
   const cache = platform === 'darwin'
     ? join(home, 'Library', 'Caches')
     : platform === 'win32'
@@ -79,16 +80,38 @@ export function exportEngineConformanceEnv(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
 ): { python?: string; studio?: string } {
+  // What crew itself exported into this environment before (a server booted earlier in the same process):
+  // crew's own values are refreshed on every boot; only a value crew did not write is the operator's.
+  const mine = crewExports.get(env) ?? {};
+  const operators = (key: string, crew: string | undefined): boolean => {
+    const v = (env[key] ?? '').trim();
+    return v !== '' && v !== crew;
+  };
   const out: { python?: string; studio?: string } = {};
-  if ((env[ENGINE_CONFORMANCE_PYTHON_ENV] ?? '').trim() === '') {
+  if (!operators(ENGINE_CONFORMANCE_PYTHON_ENV, mine.python)) {
     out.python = venvPython(conformanceVenvDir(conformanceRuntimeRoot(env, platform), env), platform);
     env[ENGINE_CONFORMANCE_PYTHON_ENV] = out.python;
   }
-  if ((env[ENGINE_CONFORMANCE_STUDIO_ENV] ?? '').trim() === '' && studioRoot !== null && existsSync(join(studioRoot, 'index.html'))) {
-    out.studio = studioRoot;
-    env[ENGINE_CONFORMANCE_STUDIO_ENV] = studioRoot;
+  if (!operators(ENGINE_CONFORMANCE_STUDIO_ENV, mine.studio)) {
+    if (studioRoot !== null && existsSync(join(studioRoot, 'index.html'))) {
+      out.studio = studioRoot;
+      env[ENGINE_CONFORMANCE_STUDIO_ENV] = studioRoot;
+    } else if (mine.studio !== undefined) {
+      // A headless boot after one that served a studio: the old dist is not this server's.
+      delete env[ENGINE_CONFORMANCE_STUDIO_ENV];
+    }
   }
+  crewExports.set(env, { ...mine, ...out });
   return out;
+}
+
+/** The values crew exported into each environment object (by identity), so a later boot can tell them from an operator's. */
+const crewExports = new WeakMap<NodeJS.ProcessEnv, { python?: string; studio?: string }>();
+
+/** Whether crew's managed runtime at `root` is fully made (the provisioner's marker beside its interpreter). */
+export function conformanceRuntimeReady(root: string, env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): boolean {
+  const venv = conformanceVenvDir(root, env);
+  return existsSync(join(venv, PROVISIONED_MARKER)) && existsSync(venvPython(venv, platform));
 }
 
 /**
@@ -105,9 +128,13 @@ export function provisionOnEditorPluginLaunch(
   env: NodeJS.ProcessEnv = process.env,
   managed: string | undefined = undefined,
 ): boolean {
-  if (notice.kind !== 'run' || notice.status === 'rejected' || notice.workflow !== 'editor-plugin') return false;
+  // One notice per hand-off: `handed` (the `accepted` that follows it is the same launch).
+  if (notice.kind !== 'run' || notice.status !== 'handed' || notice.workflow !== 'editor-plugin') return false;
   // An operator's own interpreter: crew provisions nothing (only crew's managed path is crew's to make).
   if (managed !== undefined && (env[ENGINE_CONFORMANCE_PYTHON_ENV] ?? '') !== managed) return false;
+  // No studio dist to serve the host page from (a headless daemon): the step can never pass here, so nothing
+  // is downloaded for it.
+  if ((env[ENGINE_CONFORMANCE_STUDIO_ENV] ?? '').trim() === '') return false;
   void provision().then(
     (r) => {
       if (!r.ok) log(`[editors] an editor-plugin run started, but ${r.error}`);
@@ -212,5 +239,35 @@ export function conformanceProvisioner(root: () => string, deps: ProvisionDeps =
       });
     }
     return inFlight;
+  };
+}
+
+/**
+ * (DES-EDITOR-CONFORMANCE-HOST) The launch listener crew registers: a new editor-plugin launch starts the
+ * runtime ({@link provisionOnEditorPluginLaunch}); a resume or a gate answer on a run (its notice names no
+ * workflow) does too when the runtime is not made yet and the run is an editor-plugin run, so the conformance
+ * step's retry after a failed or interrupted provisioning is not a refusal forever.
+ */
+export function editorPluginLaunchListener(deps: {
+  provision: ConformanceProvisioner;
+  log: (m: string) => void;
+  managed: string;
+  ready: () => boolean;
+  workflowOf: (runId: string) => Promise<string | undefined>;
+  env?: NodeJS.ProcessEnv;
+}): (notice: { kind: string; id: string; status: string; workflow?: string }) => void {
+  const env = deps.env ?? process.env;
+  return (notice) => {
+    if (notice.workflow !== undefined) {
+      provisionOnEditorPluginLaunch(notice, deps.provision, deps.log, env, deps.managed);
+      return;
+    }
+    if (notice.kind !== 'run' || notice.status !== 'handed' || deps.ready()) return;
+    void deps.workflowOf(notice.id).then(
+      (workflow) => {
+        if (workflow !== undefined) provisionOnEditorPluginLaunch({ ...notice, workflow }, deps.provision, deps.log, env, deps.managed);
+      },
+      () => undefined,
+    );
   };
 }
