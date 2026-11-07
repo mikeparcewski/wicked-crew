@@ -374,6 +374,13 @@ describe('chat proposals (server, A2)', () => {
     expect(stubRows().length).toBe(n);
   });
 
+  it('A5: a change says the sources it cannot use yet instead of showing them as used', async () => {
+    await turn(stub, stubListeners, 'src-1', `Use run ${RUN_A} to fix slide 1`, { refine: 'mikes/coverage-deck', ask: 'fix slide 1', sources: [`run:${RUN_A}`] }, { projectId: 'mikes', open: true });
+    const p = await proposalOf(stub, 'src-1');
+    expect(p.sources.every((s) => s.status === 'struck')).toBe(true);
+    expect(p.sources[0]?.reason).toContain('a change works from the document and your words');
+  });
+
   it('A5: only the person releases a protected edit, and only one the card shows (an unknown id is refused)', async () => {
     await turn(stub, stubListeners, 'allow-1', 'Retitle slide 1', { refine: 'mikes/coverage-deck', ask: 'retitle', touches: ['h'] }, { projectId: 'mikes', open: true });
     const p = await proposalOf(stub, 'allow-1');

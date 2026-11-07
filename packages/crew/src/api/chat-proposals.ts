@@ -1029,7 +1029,10 @@ export class ChatProposals {
           }
         }
       }
-      const sources = await this.resolveSources(block.sources, { chatId, turnId, records, binding, turnHas, chat, words, personNamed: false });
+      // A5: a change works from the document and the person's words; extra sources do not reach its run yet, so the
+      // card says so instead of showing them as used (codex A5 r1).
+      const sources = (await this.resolveSources(block.sources, { chatId, turnId, records, binding, turnHas, chat, words, personNamed: false })).map((src) =>
+        src.status === 'ok' ? { ...src, status: 'struck' as const, reason: 'a change works from the document and your words; make a new document to use this source' } : src);
       const helpers = this.helpers(chat);
       if (helpers === null) blocked.push(NEEDS_HELPER);
       const title = target?.title ?? (ref !== null ? humanDoc(ref.doc) : block.refine);
@@ -1607,6 +1610,15 @@ export class ChatProposals {
     if (this.deps.protectedEdits === undefined) return { entries: [] };
     const r = await this.deps.protectedEdits(ref, version, touch).catch((err: unknown) => ({ ok: false as const, error: err instanceof Error ? err.message : String(err) }));
     return r.ok ? { entries: r.entries } : { error: `Your own edits can't be checked on this host, so it can't be changed from chat (${r.error.slice(0, 200)})` };
+  }
+
+  /** A5: a refine at the document's current head (and that head's protected edits); unchanged when it is gone. */
+  private async refreshTarget(p: ArtifactProposal): Promise<ArtifactProposal> {
+    const ref = p.target === undefined ? null : parseArtifactRef(p.target.ref);
+    const root = ref === null ? null : await this.deps.docsRoot(ref.projectId);
+    const head = root === null || ref === null ? null : artifactHead(root, ref.doc);
+    if (head === null || p.target === undefined) return p;
+    return this.onNewHead({ ...p, target: { ...p.target, base: head } });
   }
 
   /** A5: a refine card re-resolved on a newer head: its protected edits are those of the new head (Keep preselected). */
@@ -2928,8 +2940,11 @@ export class ChatProposals {
       // Named by the chat's own id (an ended chat's archive alias still holds the same proposals).
       const pid = `${base.chatId}:retry:${runId}`;
       if (folded.has(pid)) return pid;
+      // A5 (codex r1): a refine's retry is drawn on the document as it is now (a conflict moved its head), with the
+      // protected edits of that head, Keep preselected for every one.
+      const fresh = base.kind === 'refine' && base.target !== undefined ? await this.refreshTarget(base) : base;
       const retry: ArtifactProposal = {
-        ...base,
+        ...fresh,
         pid,
         turnId: null,
         sourceRunId: runId,

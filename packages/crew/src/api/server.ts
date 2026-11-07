@@ -2775,8 +2775,9 @@ export async function createServer(
       docBindings,
       docLandings,
       ...(draftSub !== null ? { launchBoundDraft: draftSub.launchBound, fenceBoundDraft: draftSub.fenceBound } : {}),
-      // A5: a refine is real only when the chat seam is armed.
-      ...(chatSub !== null ? { launchBoundRefine: chatSub.launchBound } : {}),
+      // A5: a refine is real only when the chat seam is armed AND the draft seam is (its landing watch settles every
+      // proposal-bound attempt on `version.created` / `draft.conflict`; codex A5 r1).
+      ...(chatSub !== null && draftSub !== null ? { launchBoundRefine: chatSub.launchBound } : {}),
       // crew#899: a chat's checkouts are brought to their upstream (when clean) before it reads them.
       freshenCheckout: (root: string) => freshenCheckout(root),
       ...(skillsRuntime !== undefined ? { skills: skillsRuntime } : {}),
