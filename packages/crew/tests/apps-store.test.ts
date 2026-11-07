@@ -1108,3 +1108,178 @@ describe('apps: cleanup and replacement never act through a link (codex r4)', ()
     expect(git(root, 'rev-parse', 'refs/heads/main')).toBe((v2.body['landed'] as { commit: string }).commit);
   });
 });
+
+// ── G16 + G3 (plugins-S7, operator ruling D5): archive with Restore, and the version read ──────────
+
+describe('apps: archive hides an app and closes it to changes; unarchive brings it back as it was', () => {
+  it('lists only active apps by default; ?archived= picks archived or all; detail still answers', async () => {
+    const s = setup();
+    await newApp(s);
+    await newApp(s, 'refunds');
+    const archived = await s.call('POST', '/apps/escalations/archive', {});
+    expect(archived.status).toBe(200);
+    expect(archived.body.app.archived).toMatchObject({ by: 'local' });
+    expect(s.audit.record).toHaveBeenCalledWith('apps.app.archived', expect.anything(), { detail: { app: 'escalations' } });
+    const slugs = async (q: string) => ((await s.call('GET', `/apps${q}`)).body['apps'] as Array<{ slug: string }>).map((a) => a.slug);
+    expect(await slugs('')).toEqual(['refunds']);
+    expect(await slugs('?archived=active')).toEqual(['refunds']);
+    expect(await slugs('?archived=archived')).toEqual(['escalations']);
+    expect(await slugs('?archived=all')).toEqual(['escalations', 'refunds']);
+    expect(await slugs('?project=p1&archived=archived')).toEqual(['escalations']);
+    expect((await s.call('GET', '/apps?archived=yes')).status).toBe(400);
+    // An active app says so (null), so a client can tell a daemon that archives from an older one.
+    expect(((await s.call('GET', '/apps')).body['apps'] as Array<Record<string, unknown>>)[0]).toHaveProperty('archived', null);
+    // Opened by its address, an archived app still reads.
+    expect((await s.call('GET', '/apps/escalations')).body.app.archived).not.toBeNull();
+  });
+
+  it('refuses every change while archived (409 app_archived), and after unarchive they land on the same head', async () => {
+    const t: AppTurnLauncher = { launch: async () => undefined, isActive: async () => false };
+    const s = setup({ turns: t });
+    await newApp(s);
+    await edit(s, 'escalations', 1, 'two');
+    expect((await s.call('POST', '/apps/escalations/archive', {})).status).toBe(200);
+    for (const [url, body] of [
+      ['/apps/escalations/edits', { base: 2, ops: [{ op: 'spec', spec: textSpec('a', 'b') }] }],
+      ['/apps/escalations/undo', { base: 2 }],
+      ['/apps/escalations/redo', { base: 2 }],
+      ['/apps/escalations/restore', { base: 2, version: 1 }],
+      ['/apps/escalations/turns', { base: 2, message: 'change it' }],
+    ] as const) {
+      const res = await s.call('POST', url, body);
+      expect(res.status, url).toBe(409);
+      expect(res.body.code, url).toBe('app_archived');
+    }
+    // Twice changes nothing and is not audited twice.
+    expect((await s.call('POST', '/apps/escalations/archive')).status).toBe(200);
+    expect(s.audit.record.mock.calls.filter((c) => c[0] === 'apps.app.archived')).toHaveLength(1);
+    const back = await s.call('POST', '/apps/escalations/unarchive', {});
+    expect(back.status).toBe(200);
+    expect(back.body.app).toMatchObject({ archived: null, head: { version: 2 } });
+    expect(back.body.app.versions).toHaveLength(2);
+    expect((await s.call('POST', '/apps/escalations/restore', { base: 2, version: 1 })).body['landed']).toMatchObject({ version: 3, receipt: { kind: 'restored' } });
+    expect(((await s.call('GET', '/apps')).body['apps'] as unknown[])).toHaveLength(1);
+  });
+
+  it('archive is refused while a turn runs (it must not land into a hidden app); after the turn ends it archives', async () => {
+    let active = true;
+    const t: AppTurnLauncher = { launch: async () => undefined, isActive: async () => active };
+    const s = setup({ turns: t });
+    await newApp(s);
+    const turn = await s.call('POST', '/apps/escalations/turns', { base: 1, message: 'two pages' });
+    expect(turn.status).toBe(202);
+    const refused = await s.call('POST', '/apps/escalations/archive', {});
+    expect(refused.status).toBe(409);
+    expect(refused.body).toMatchObject({ code: 'turn_in_flight', turn: { runId: turn.body['runId'] } });
+    expect(((await s.call('GET', '/apps')).body['apps'] as unknown[])).toHaveLength(1);
+    active = false;
+    expect((await s.call('POST', '/apps/escalations/archive', {})).status).toBe(200);
+  });
+
+  it('an archive and an edit racing are serialised on the app lock: the edit lands before it or is refused, never after', async () => {
+    for (let i = 0; i < 4; i += 1) {
+      const s = setup();
+      await newApp(s);
+      const [e, a] = await Promise.all([edit(s, 'escalations', 1, 'racing'), s.call('POST', '/apps/escalations/archive', {})]);
+      expect(a.status).toBe(200);
+      expect(a.body.app.archived).not.toBeNull();
+      if (e.status === 200) expect(a.body.app.head.version).toBe(2);
+      else {
+        expect(e.body.code).toBe('app_archived');
+        expect(a.body.app.head.version).toBe(1);
+      }
+      expect((await s.call('GET', '/apps/escalations')).body.app.versions).toHaveLength(a.body.app.head.version);
+    }
+  });
+
+  it('only a human operator can archive or unarchive; an observer and an agent seat cannot', async () => {
+    const s = setup({ auth: true });
+    await newApp(s, 'escalations', 'human');
+    for (const who of ['agent', 'observer']) {
+      for (const url of ['/apps/escalations/archive', '/apps/escalations/unarchive']) {
+        expect((await s.call('POST', url, {}, who)).status, `${who} ${url}`).toBe(403);
+      }
+    }
+    expect((await s.call('POST', '/apps/escalations/archive', { force: true }, 'human')).status).toBe(400);
+    expect((await s.call('POST', '/apps/nope/archive', {}, 'human')).status).toBe(404);
+    expect((await s.call('POST', '/apps/escalations/archive', {}, 'human')).status).toBe(200);
+  });
+
+  it('the archived state survives a restart, and so does an unarchive', async () => {
+    const s = setup();
+    await newApp(s);
+    await s.call('POST', '/apps/escalations/archive', {});
+    const reopen = () => new AppStore({ stateFile: s.store.stateFile, appsRoot: s.store.appsRoot, registry: fakeRegistry().registry });
+    expect(reopen().list()).toEqual([]);
+    expect(reopen().list(undefined, 'archived').map((a) => a.slug)).toEqual(['escalations']);
+    await s.call('POST', '/apps/escalations/unarchive', {});
+    expect(reopen().list().map((a) => a.slug)).toEqual(['escalations']);
+    expect(reopen().list(undefined, 'archived')).toEqual([]);
+  });
+
+  it('an archive or unarchive whose state write fails changes nothing, in memory or on disk (codex/pi r1)', async () => {
+    const s = setup();
+    await newApp(s);
+    const reopen = () => new AppStore({ stateFile: s.store.stateFile, appsRoot: s.store.appsRoot, registry: fakeRegistry().registry });
+    const failing = async (url: string): Promise<number> => {
+      chmodSync(s.dir, 0o555);
+      try {
+        return (await s.app.inject({ method: 'POST', url: `/api/v1${url}`, payload: {} })).statusCode;
+      } finally {
+        chmodSync(s.dir, 0o755);
+      }
+    };
+    expect(await failing('/apps/escalations/archive')).toBe(500);
+    expect((await s.call('GET', '/apps/escalations')).body.app.archived).toBeNull();
+    expect(reopen().list().map((a) => a.slug)).toEqual(['escalations']);
+    expect((await s.call('POST', '/apps/escalations/archive', {})).status).toBe(200);
+    expect(await failing('/apps/escalations/unarchive')).toBe(500);
+    expect((await s.call('GET', '/apps/escalations')).body.app.archived).not.toBeNull();
+    expect(reopen().list()).toEqual([]);
+  });
+});
+
+describe('apps: the version read (an accepted version as it was)', () => {
+  it('answers an earlier version by number or commit, with its record, files and receipt', async () => {
+    const s = setup();
+    const a = await newApp(s);
+    await edit(s, 'escalations', 1, 'second');
+    await edit(s, 'escalations', 2, 'third');
+    const r = await s.call('GET', '/apps/escalations/versions/2');
+    expect(r.status).toBe(200);
+    const v = r.body['version'] as Record<string, unknown> & { spec: AppSpec };
+    expect(v).toMatchObject({ slug: 'escalations', version: { version: 2, base: 1 }, receipt: { kind: 'you', version: 2 } });
+    expect(JSON.stringify(v.spec)).toContain('second');
+    expect((await s.call('GET', '/apps/escalations')).body.app.spec.pages[0]!.components[0]).toMatchObject({ text: 'third' });
+    const byCommit = await s.call('GET', `/apps/escalations/versions/${a.versions[0]!.commit}`);
+    expect(byCommit.body['version']).toMatchObject({ version: { version: 1 }, tree: a.versions[0]!.tree });
+    expect((await s.call('GET', '/apps/escalations/versions/9')).body).toMatchObject({ code: 'unknown_version' });
+    expect((await s.call('GET', '/apps/escalations/versions/0')).status).toBe(404);
+    expect((await s.call('GET', '/apps/escalations/versions/..%2F..')).status).toBe(404);
+    // An archived app still reads: its versions included.
+    await s.call('POST', '/apps/escalations/archive', {});
+    expect((await s.call('GET', '/apps/escalations/versions/1')).status).toBe(200);
+  });
+
+  it('refuses a version with no accepted receipt (an agent-made first version)', async () => {
+    const s = setup({ auth: true });
+    await newApp(s, 'bot-app', 'agent');
+    const r = await s.call('GET', '/apps/bot-app/versions/1', undefined, 'human');
+    expect(r.status).toBe(409);
+    expect(r.body.code).toBe('not_accepted');
+  });
+
+  it('an agent reader gets the reduction the detail gives one: no query text, the lock reduced', async () => {
+    const stage = fakeStage();
+    const s = setup({ auth: true, stage });
+    await newApp(s, 'escalations', 'human');
+    const landed = await s.call('POST', '/apps/escalations/edits', { base: 1, ops: [{ op: 'spec', spec: dataSpec('x') }, { op: 'query-text', query: 'open_count', text: 'select count(*) as open from tickets' }] }, 'human');
+    expect(landed.status, JSON.stringify(landed.body)).toBe(200);
+    const human = (await s.call('GET', '/apps/escalations/versions/2', undefined, 'human')).body['version'] as Record<string, unknown> & { lock: { sources: Record<string, unknown> } };
+    expect(human['queryText']).toEqual({ open_count: 'select count(*) as open from tickets' });
+    expect(human.lock.sources['support-pg']).toHaveProperty('descriptor');
+    const agent = (await s.call('GET', '/apps/escalations/versions/2', undefined, 'agent')).body['version'] as Record<string, unknown> & { lock: { sources: Record<string, unknown> } };
+    expect(agent).not.toHaveProperty('queryText');
+    expect(agent.lock.sources['support-pg']).toEqual({ kind: 'sql', descriptorHash: 'd-support-pg' });
+  });
+});

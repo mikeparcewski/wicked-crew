@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.195.0",
+  "apiTypesVersion": "0.196.0",
   "endpoints": [
     {
       "method": "GET",
@@ -129,6 +129,20 @@
     },
     {
       "method": "POST",
+      "path": "/api/v1/apps/:app/archive",
+      "requestType": "AppArchiveBody",
+      "responseType": "AppDetailResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "POST",
       "path": "/api/v1/apps/:app/edits",
       "requestType": "AppEditsBody",
       "responseType": "AppLandedResponse",
@@ -219,6 +233,20 @@
     },
     {
       "method": "POST",
+      "path": "/api/v1/apps/:app/unarchive",
+      "requestType": "AppArchiveBody",
+      "responseType": "AppDetailResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "POST",
       "path": "/api/v1/apps/:app/undo",
       "requestType": "AppHistoryMoveBody",
       "responseType": "AppLandedResponse",
@@ -229,6 +257,18 @@
         404,
         409,
         422,
+        503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/apps/:app/versions/:version",
+      "requestType": null,
+      "responseType": "AppVersionReadResponse",
+      "statusCodes": [
+        200,
+        404,
+        409,
         503
       ]
     },

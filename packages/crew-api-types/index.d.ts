@@ -16922,11 +16922,59 @@ export interface AppSummary {
    * link); absent from an older daemon.
    */
   published?: AppPublished | null;
+  /**
+   * (api-types 0.196.0, G16) The app is archived: hidden from `GET /apps` (unless asked for), and its version changes
+   * (edits, undo, redo, restore, new turns) are `409 app_archived` until `POST /apps/:app/unarchive`; nothing is
+   * deleted. Reads, version reads, queries and the action routes are not changed by archiving. `null` = active. Always
+   * present on a daemon that archives; ABSENT from an older one (a client offers Archive only when the field is there).
+   * `AppDetail` extends this, so the detail carries it too.
+   */
+  archived?: AppArchived | null;
 }
 
-/** `GET /apps` (observer); `?project=<id>` keeps one project's apps. */
+/** (api-types 0.196.0) When an app was archived (Unix millis) and by whom (the actor's id). */
+export interface AppArchived {
+  at: number;
+  by: string;
+}
+
+/**
+ * `GET /apps` (observer); `?project=<id>` keeps one project's apps. (api-types 0.196.0) `?archived=` picks which:
+ * `active` (the default: archived apps are hidden from every lister), `archived`, or `all`.
+ */
 export interface AppsListResponse {
   apps: AppSummary[];
+}
+
+/**
+ * (api-types 0.196.0, G16) `POST /apps/:app/archive` and `POST /apps/:app/unarchive` (HUMAN operator only; body `{}`),
+ * answered with {@link AppDetailResponse}. Each runs under the app's lock, so it waits for a change in flight. Archive
+ * is refused while a turn runs (`409 turn_in_flight`); doing either twice changes nothing (200).
+ */
+export type AppArchiveBody = Record<string, never>;
+
+/**
+ * (api-types 0.196.0, G3/G16) `GET /apps/:app/versions/:version` (observer): an accepted version as it was. `:version`
+ * is a version number or a 40-hex commit of the app's repo; a version with no accepted receipt is `409 not_accepted`,
+ * an unknown one `404 unknown_version`. A non-human reader gets the reduction `GET /apps/:app` gives one: no
+ * `queryText`, the lock's sources as `{kind, descriptorHash}`, and each action as what it is.
+ */
+export interface AppVersionRead {
+  slug: string;
+  /** The version's record; `null` for a commit that is no version of this app (its tree holds an accepted receipt). */
+  version: AppVersion | null;
+  commit: string;
+  tree: string;
+  /** The accepted receipt the tree holds. */
+  receipt: AppReceipt;
+  spec: AppSpec;
+  lock: AppLock;
+  /** Query id → its text at that version. */
+  queryText: Record<string, string>;
+}
+
+export interface AppVersionReadResponse {
+  version: AppVersionRead;
 }
 
 /** `POST /apps` (operator): a new app, an empty repo in the project with crew's first version. */
@@ -17245,6 +17293,8 @@ export interface AppErrorBody {
     | 'not_registered'
     | 'stale_base'
     | 'turn_in_flight'
+    /** (api-types 0.196.0) A change to an archived app: restore it first. */
+    | 'app_archived'
     | 'not_accepted'
     | 'nothing_to_undo'
     | 'nothing_to_redo'
