@@ -109,27 +109,14 @@ export class ReviewService {
   async snapshot(projectIds: readonly string[], nowMs: number): Promise<Snapshot> {
     const { window, baselineWindows } = this.windowFor(nowMs, projectIds);
     const earliest = Math.min(...baselineWindows.map((w) => w.startMs), window.startMs);
-    const views = await this.deps.adapter.sessionsDetail();
-    const runs: RunFact[] = [];
-    for (const view of views) {
-      const s = view.session as unknown as Record<string, unknown>;
-      if (s['workflow_id'] === REVIEW_WORKFLOW) continue;
-      if (projectIds.length > 0 && !projectIds.includes(String(s['project_id'] ?? ''))) continue;
-      const dated = typeof s['created_at'] === 'number' ? (s['created_at'] < 1e12 ? s['created_at'] * 1000 : s['created_at']) : null;
-      // A run dated by the daemon's launch record outside every window is skipped without reading its events.
-      if (dated !== null && (dated < earliest || dated >= window.endMs)) continue;
-      let events: LooseEvent[] = [];
-      try {
-        events = (await this.deps.adapter.runEvents(String(s['id']))) ?? [];
-      } catch (err) {
-        this.deps.log(`[review] events of ${String(s['id'])} unreadable, counted from its record only: ${err instanceof Error ? err.message : String(err)}`);
-      }
-      // An undated run (no launch record: onboarding, campaign nodes, older runs) is dated by its first event.
-      const created = dated ?? Math.min(...events.map((e) => (typeof e.ts === 'number' ? e.ts : Number.POSITIVE_INFINITY)));
-      if (!Number.isFinite(created) || created < earliest || created >= window.endMs) continue;
-      runs.push(runFactOf(view, events, nowMs));
-    }
+    const runs = await this.collect({ startMs: earliest, endMs: window.endMs, projectIds, skipWorkflows: [REVIEW_WORKFLOW] }, nowMs);
     return { version: 1, generatedAtMs: nowMs, window, baselineWindows, projectIds: [...projectIds], runs };
+  }
+
+  /** (CS6) The run store's facts for an explicit window and scope ({@link collectRunFacts}), through this service's
+   *  run reads (the decorated views `GET /runs` serves). */
+  collect(opts: CollectOptions, nowMs: number): Promise<RunFact[]> {
+    return collectRunFacts(this.deps.adapter, opts, nowMs, this.deps.log);
   }
 
   /**
@@ -327,6 +314,57 @@ export class ReviewService {
     }
     return { kind: 'none' };
   }
+}
+
+/** What {@link collectRunFacts} reads: runs launched in `[startMs, endMs)`, of these projects (empty = every run). */
+export interface CollectOptions {
+  startMs: number;
+  endMs: number;
+  projectIds?: readonly string[];
+  /** Runs whose `workflow_id` is one of these are left out without reading their events. */
+  skipWorkflows?: readonly string[];
+}
+
+/**
+ * The review preparer (DES-RUNS-REVIEW-001 §3), with its window and scope explicit (CS6: the run-cost facts route
+ * reads it too): every run launched in the window, folded into a {@link RunFact}. A run dated by the daemon's launch
+ * record outside the window is skipped without reading its events; an undated one (no launch record: onboarding,
+ * campaign nodes, older runs) is dated by its first event. A run whose events could not be read is counted from its
+ * record only and says so (`eventsUnreadable`).
+ */
+export async function collectRunFacts(
+  adapter: Pick<ReviewServiceDeps['adapter'], 'sessionsDetail' | 'runEvents'>,
+  opts: CollectOptions,
+  nowMs: number,
+  log: (msg: string) => void,
+): Promise<RunFact[]> {
+  const projectIds = opts.projectIds ?? [];
+  const skip = new Set(opts.skipWorkflows ?? []);
+  const views = await adapter.sessionsDetail();
+  const runs: RunFact[] = [];
+  for (const view of views) {
+    const s = view.session as unknown as Record<string, unknown>;
+    if (typeof s['workflow_id'] === 'string' && skip.has(s['workflow_id'])) continue;
+    if (projectIds.length > 0 && !projectIds.includes(String(s['project_id'] ?? ''))) continue;
+    const dated = typeof s['created_at'] === 'number' ? (s['created_at'] < 1e12 ? s['created_at'] * 1000 : s['created_at']) : null;
+    if (dated !== null && (dated < opts.startMs || dated >= opts.endMs)) continue;
+    let events: LooseEvent[] = [];
+    let unreadable = false;
+    try {
+      const read = await adapter.runEvents(String(s['id']));
+      if (read === null) unreadable = true;
+      else events = read;
+    } catch (err) {
+      unreadable = true;
+      log(`[review] events of ${String(s['id'])} unreadable, counted from its record only: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    const created = dated ?? Math.min(...events.map((e) => (typeof e.ts === 'number' ? e.ts : Number.POSITIVE_INFINITY)));
+    if (!Number.isFinite(created) || created < opts.startMs || created >= opts.endMs) continue;
+    const fact = runFactOf(view, events, nowMs);
+    if (unreadable) fact.eventsUnreadable = true;
+    runs.push(fact);
+  }
+  return runs;
 }
 
 /** The scope a review covers, as one comparable key (its projects, sorted; `''` = every run). */

@@ -219,14 +219,26 @@ const inWindow = (w: Window) => (r: RunFact): boolean => r.createdAtMs >= w.star
 
 // ── words ───────────────────────────────────────────────────────────────────────────────────────────
 
-export function formatValue(def: MetricDef, v: number | null): string {
+/** `extra` = decimals beyond the default (used by {@link formatPair} to tell two values apart). */
+export function formatValue(def: MetricDef, v: number | null, extra = 0): string {
   if (v === null) return 'none';
   switch (def.unit) {
-    case 'ratio': return `${Math.round(v * 100)}%`;
-    case 'minutes': return v >= 120 ? `${(v / 60).toFixed(1)} h` : `${Math.round(v)} min`;
-    case 'usd': return `$${v.toFixed(2)}`;
-    case 'count': return v.toFixed(v % 1 === 0 ? 0 : 1);
+    case 'ratio': return extra === 0 ? `${Math.round(v * 100)}%` : `${(v * 100).toFixed(extra)}%`;
+    case 'minutes': return v >= 120 ? `${(v / 60).toFixed(1 + extra)} h` : extra === 0 ? `${Math.round(v)} min` : `${v.toFixed(extra)} min`;
+    case 'usd': return `$${v.toFixed(2 + extra)}`;
+    case 'count': return v.toFixed(v % 1 === 0 && extra === 0 ? 0 : 1 + extra);
   }
+}
+
+/**
+ * The extra decimals that make `a` and `b` read differently when they differ (a finding never reads "$0.16 against
+ * $0.16"): 0 when they already do, or are equal; at most 3.
+ */
+export function pairPrecision(def: MetricDef, a: number | null, b: number | null): number {
+  if (a === null || b === null || a === b) return 0;
+  let extra = 0;
+  while (extra < 3 && formatValue(def, a, extra) === formatValue(def, b, extra)) extra += 1;
+  return extra;
 }
 
 export function segmentWords(segment: string): string {
@@ -238,8 +250,9 @@ export function segmentWords(segment: string): string {
 
 function findingLine(def: MetricDef, r: MetricResult): string {
   const w = r.window;
-  const ci = w.interval !== null ? ` (95% CI ${formatValue(def, w.interval.lo)}–${formatValue(def, w.interval.hi)})` : '';
-  return `${def.label}, ${segmentWords(r.segment)}: ${formatValue(def, w.value)}${ci}, n=${w.n}, against ${formatValue(def, r.baseline.value)} before (n=${r.baseline.n}).`;
+  const x = pairPrecision(def, w.value, r.baseline.value);
+  const ci = w.interval !== null ? ` (95% CI ${formatValue(def, w.interval.lo, x)}–${formatValue(def, w.interval.hi, x)})` : '';
+  return `${def.label}, ${segmentWords(r.segment)}: ${formatValue(def, w.value, x)}${ci}, n=${w.n}, against ${formatValue(def, r.baseline.value, x)} before (n=${r.baseline.n}).`;
 }
 
 function confidenceOf(n: number, basis: 'notable' | 'pattern'): Confidence {

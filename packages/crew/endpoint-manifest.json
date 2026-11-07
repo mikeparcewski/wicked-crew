@@ -906,6 +906,19 @@
     },
     {
       "method": "POST",
+      "path": "/api/v1/insights/facts",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": [
+        200,
+        400,
+        401,
+        403,
+        503
+      ]
+    },
+    {
+      "method": "POST",
       "path": "/api/v1/insights/recommendations/:id/accept",
       "requestType": null,
       "responseType": "AcceptRecommendationResponse",

@@ -44,6 +44,16 @@ export interface RunFact {
   spendUsd: number;
   /** Whether any `cliUsage` frame carried a cost (an unreported CLI reads 0, which is not "free"). */
   spendReported: boolean;
+  /** (CS6) `cliUsage` frames that carried a cost, and frames that did not: a run is fully priced only when every
+   *  frame was (one priced frame is enough to set {@link spendReported}). */
+  pricedFrames: number;
+  unpricedFrames: number;
+  /** (CS6) When the run reached its terminal state, as RECORDED: its terminal event, else the engine's
+   *  `finished_at`; `null` when neither is (never the last event of some other kind, unlike {@link endedAtMs}). */
+  terminalAtMs: number | null;
+  /** (CS6) The run's events could not be read: its frame counts and {@link terminalAtMs} rest on its record only.
+   *  Set by the collector (`collectRunFacts`), never by {@link runFactOf}. */
+  eventsUnreadable?: boolean;
   tokens: number;
   /** Reassignments plus failed steps. */
   retries: number;
@@ -139,6 +149,9 @@ export function runFactOf(view: SessionView, events: readonly LooseEvent[], nowM
   let waitHumanMs = 0;
   let spendUsd = 0;
   let spendReported = false;
+  let pricedFrames = 0;
+  let unpricedFrames = 0;
+  let terminalEventAt: number | null = null;
   let tokens = 0;
   let retries = 0;
   let stalls = 0;
@@ -153,7 +166,10 @@ export function runFactOf(view: SessionView, events: readonly LooseEvent[], nowM
   for (const e of ordered) {
     const ts = num(e.ts);
     const ord = num(e.ord);
-    if (TERMINAL_EVENTS.has(e.type)) endedAtMs = ts;
+    if (TERMINAL_EVENTS.has(e.type)) {
+      endedAtMs = ts;
+      terminalEventAt = ts;
+    }
     if (e.type === 'repoChecksEvaluated' && Array.isArray(e['checks'])) {
       for (const c of e['checks'] as unknown[]) floorMs += num((c as Record<string, unknown> | null)?.['durationMs']);
     }
@@ -174,7 +190,11 @@ export function runFactOf(view: SessionView, events: readonly LooseEvent[], nowM
       escalated.delete(ord);
     }
     if (e.type === 'cliUsage') {
-      if (typeof e['costUsd'] === 'number') { spendUsd += num(e['costUsd']); spendReported = true; }
+      if (typeof e['costUsd'] === 'number' && Number.isFinite(e['costUsd'])) {
+        spendUsd += num(e['costUsd']);
+        spendReported = true;
+        pricedFrames += 1;
+      } else unpricedFrames += 1;
       tokens += num(e['inputTokens']) + num(e['outputTokens']);
     }
     if (e.type === 'unitReassigned') retries += 1;
@@ -229,6 +249,9 @@ export function runFactOf(view: SessionView, events: readonly LooseEvent[], nowM
     overrides,
     spendUsd,
     spendReported,
+    pricedFrames,
+    unpricedFrames,
+    terminalAtMs: terminal ? (terminalEventAt ?? (num(s['finished_at']) > 0 ? epochMs(s['finished_at']) : null)) : null,
     tokens,
     retries,
     stalls,

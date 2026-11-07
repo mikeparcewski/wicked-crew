@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { MAX_RECOMMENDATIONS, analyze, type Snapshot } from '../src/insights/analyze.js';
+import { METRICS, MAX_RECOMMENDATIONS, analyze, formatValue, pairPrecision, type Snapshot } from '../src/insights/analyze.js';
 import { FACTS_FILE, SNAPSHOT_FILE, runAnalyze, runDirFrom } from '../src/insights/analyze-cli.js';
 import { runFactOf, type LooseEvent, type RunFact } from '../src/insights/run-facts.js';
 import { MIN_SAMPLE, bootstrapMedianCI, compare, wilson } from '../src/insights/stats.js';
@@ -48,6 +48,9 @@ function run(at: number, over: Partial<RunFact> = {}): RunFact {
     overrides: [],
     spendUsd: 2,
     spendReported: true,
+    pricedFrames: 1,
+    unpricedFrames: 0,
+    terminalAtMs: createdAtMs + H,
     tokens: 1000,
     retries: 0,
     stalls: 0,
@@ -311,5 +314,35 @@ describe('a run folded into its facts', () => {
     expect(at('awaiting_human', null).unresolved).toBe(true);
     expect(at('cancelled', null).unresolved).toBe(false);
     expect(at('completed', null).outcome).toBe('passed');
+  });
+});
+
+describe('a finding never reads the same number twice (e2e f53e3f27: "$0.16 against $0.16")', () => {
+  const spend = METRICS.find((m) => m.id === 'spend')!;
+  it('adds the decimals that tell a value from its baseline, and none when they already differ or are equal', () => {
+    expect(pairPrecision(spend, 0.1649, 0.1612)).toBe(1);
+    expect(formatValue(spend, 0.1649, 1)).toBe('$0.165');
+    expect(formatValue(spend, 0.1612, 1)).toBe('$0.161');
+    expect(pairPrecision(spend, 0.21, 0.82)).toBe(0);
+    expect(pairPrecision(spend, 0.16, 0.16)).toBe(0);
+    expect(pairPrecision(spend, 0.16, null)).toBe(0);
+    const minutes = METRICS.find((m) => m.id === 'time_to_pr')!;
+    expect(formatValue(minutes, 34.4)).toBe(formatValue(minutes, 34.2));
+    expect(pairPrecision(minutes, 34.4, 34.2)).toBe(1);
+  });
+
+  it('a spend regression whose medians round alike at cents is worded with the digits that differ', () => {
+    // Window: 10 runs at $0.163; baseline: 10 runs at $0.161 (both "$0.16" at cents).
+    const runs = [...recent(10, (at) => run(at, { spendUsd: 0.163 })), ...baseline(10, (at) => run(at, { spendUsd: 0.161 }))];
+    const lines = analyze(snapshot(runs)).metrics.filter((m) => m.metric === 'spend' && m.segment === 'all');
+    expect(lines).toHaveLength(1);
+    const facts = analyze(snapshot(runs));
+    const all = [...facts.improvements, ...facts.regressions].filter((f) => f.metric === 'spend' && f.segment === 'all');
+    expect(all.map((f) => f.line)).toEqual([expect.stringMatching(/: \$0\.163 .*against \$0\.161 before/u)]);
+    // Whether or not it is flagged, no spend line anywhere reads the same two values.
+    for (const f of [...facts.improvements, ...facts.regressions]) {
+      const m = /: (\$[\d.]+).*against (\$[\d.]+) before/u.exec(f.line);
+      if (m !== null && f.metric === 'spend') expect(m[1]).not.toBe(m[2]);
+    }
   });
 });
