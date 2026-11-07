@@ -544,6 +544,9 @@ export interface LaunchContext {
   fromProposal?: string;
   /** The compose route's own plan launch: a `shape` is judged as a compose, not as a run. */
   target?: 'compose';
+  /** (api-types 0.196.0) A chat job's Start chose a power run: a launch that would run phased is refused (409
+   *  `power_unavailable`) before the engine is called, never started phased with a notice. */
+  powerRequired?: boolean;
 }
 
 /**
@@ -2379,6 +2382,7 @@ export function registerRoutes(
       detectShape: app.hasRoute({ method: 'POST', url: `${V}/workflows/catalog/detect` }),
       // DES-CATALOG-002 §4.6: person-made and revised job proposals, the revising hold, plan answers bound to planRev.
       chatJobProposals: chatJobProposalsOn,
+      chatJobPower: chatJobProposalsOn,
       reshapeRun: chatJobProposalsOn,
       // (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §14) Per operation: A1 serves `context` (the chat sees the open
       // artifact and the runs the person names; `seedFromArtifact`); A2 (0.170.0) `proposals`. The operations are later
@@ -3401,7 +3405,15 @@ export function registerRoutes(
         powerNotice = 'power mode runs a repo-scoped plan or preset launch; this launch runs phased';
       } else if (!powerSupported()) {
         powerNotice = 'this engine has no power mode; the launch runs phased';
-      } else {
+      } else if (ctx.powerRequired === true && ((await adapter.getSettings()).powerModeDefault ?? true) === false) {
+        // A chat job's power Start follows the setting up to the engine call (it may have been turned off meanwhile).
+        powerNotice = 'Power mode for new jobs is off on this daemon; the launch runs phased';
+      }
+      // A chat job's power Start is never run phased in its place (the person chose no plan review for a power run).
+      if (powerNotice !== null && ctx.powerRequired === true) {
+        return reply.code(409).send({ code: 'power_unavailable', error: `${powerNotice.replace(/; this launch runs phased|; the launch runs phased/u, '')}; press Start with Review plan on` });
+      }
+      if (powerNotice === null) {
         input.power = true;
         input.humanConfirm = 'none';
         // DES-LEARN §3.3 / wicked-core#1216: the orchestrator talks to the person in their personality
@@ -3823,12 +3835,42 @@ export function registerRoutes(
   /**
    * (DES-CATALOG-002 §4.6) The `job` launcher: a chat job proposal's Go, one launcher per launch kind, each with the
    * identity derived from the proposal (`sessionId` = its run id, so a retry finds and adopts it), the chat filing, the
-   * shape, and the plan held (a repository job launched from a chat always stops at its first plan, whatever the
-   * person's posture, so power mode is off for it).
+   * shape, and the plan held: a job launched from a chat stops at its first plan unless the person's Start chose a
+   * power run (`power: true`, api-types 0.196.0), which is refused unless this daemon can run that job as one.
    */
   const jobRefusalText = (payload: unknown): string => {
     const b = payload as { error?: unknown; code?: unknown } | undefined;
     return `${typeof b?.error === 'string' ? b.error : 'the launch was refused'}${typeof b?.code === 'string' ? ` (${b.code})` : ''}`;
+  };
+  /**
+   * (operator ruling 2026-11-06) Why a chat job can't run as a power run on this daemon now, else `null`: only a
+   * workflow run on a repository whose workflow is a preset, on an engine with power mode (launchRun's own rule, which
+   * would otherwise run it phased and only say so), with Power mode for new jobs on (chat starts follow the setting).
+   */
+  const chatJobPowerRefusal = async (p: import('../core/types.js').ArtifactProposal): Promise<string | null> => {
+    const askPlan = 'press Start with Review plan on';
+    if (p.launch !== 'run' && p.launch !== undefined) return `${p.what.label} can't run as a power run; ${askPlan}`;
+    if (p.repoRefs?.[0] === undefined) return `a power run works on a repository, and this job names none; ${askPlan}`;
+    if (!powerSupported()) return `this daemon's engine has no power mode; ${askPlan}`;
+    // The operator ruling: chat starts follow the Power-mode default; with it off, a chat job reviews its plan.
+    try {
+      if (((await adapter.getSettings()).powerModeDefault ?? true) === false) return `Power mode for new jobs is off on this daemon; ${askPlan}`;
+    } catch (err) {
+      return `the Power-mode setting could not be read (${err instanceof Error ? err.message : String(err)}); press Start again`;
+    }
+    if (p.shape === undefined) return `this proposal has no shape to launch; ${askPlan}`;
+    const projectId = p.filedIn.projectId;
+    let served: Awaited<ReturnType<typeof servedFor>>;
+    try {
+      served = await servedFor(shapeReads, projectId ?? undefined);
+    } catch (err) {
+      return `${err instanceof Error ? err.message : String(err)}; press Start again`;
+    }
+    const resolved = resolveOption(p.shape.card, p.shape.option, served);
+    if (resolved === null || resolved.workflow === null) return `${p.what.label} has no workflow to run; ${askPlan}`;
+    const scoped = projectId !== null && projectId !== DEFAULT_PROJECT_ID ? projectId : undefined;
+    if (!(await namesPreset(resolved.workflow, scoped))) return `${p.what.label} can't run as a power run (its workflow is not a preset); ${askPlan}`;
+    return null;
   };
   proposalLaunchers.register('job', {
     find: async (identity) => (await adapter.sessions()).includes(identity.runId),
@@ -3869,6 +3911,11 @@ export function registerRoutes(
         ...((inherited !== null || narrowed.length !== roster.length) && narrowed.length > 0 ? { clisJson: JSON.stringify(narrowed) } : {}),
         selfSeated,
       });
+      // A power Start was checked before accepting; checked again here, so it never runs phased behind the person's back.
+      if (d.power === true) {
+        const why = await chatJobPowerRefusal(p);
+        if (why !== null) throw new Error(why);
+      }
       if (p.launch === 'run' || p.launch === undefined) {
         if (resolved.workflow === null) throw new Error(`${p.what.label} has no workflow to run`);
         const lines = inputLines(p);
@@ -3879,15 +3926,18 @@ export function registerRoutes(
             ...(p.repoRefs?.[0] !== undefined ? { repoRef: p.repoRefs[0] } : {}),
             ...(projectId !== null && projectId !== DEFAULT_PROJECT_ID ? { projectId } : {}),
             ...common,
+            // A power run when the person's Start chose one (checked against this daemon just now); otherwise it
+            // stops at its first plan, as every chat job did before (operator ruling 2026-11-06).
+            // (A power launch overrides the plan hold; launchRun refuses rather than run it phased, `powerRequired`.)
             humanConfirm: 'before:1',
-            power: false,
+            power: d.power === true,
             channel: 'studio',
             // §2.5: a reshape's replacement keeps the held run's delivery and grouping.
             ...(p.relaunch?.deliver !== undefined ? { deliver: p.relaunch.deliver } : {}),
             ...(p.relaunch?.deliverGate !== undefined && p.relaunch.deliver !== 'none' ? { deliverGate: p.relaunch.deliverGate } : {}),
             ...(p.relaunch?.revisesPr !== undefined && p.relaunch.deliver === 'pr' && p.repoRefs?.[0] !== undefined ? { revisesPr: p.relaunch.revisesPr } : {}),
           },
-          { ...ctx, fromProposal: d.pid },
+          { ...ctx, fromProposal: d.pid, ...(d.power === true ? { powerRequired: true } : {}) },
         );
         if (out.statusCode !== 201) throw new Error(jobRefusalText(out.payload));
         return;
@@ -5197,6 +5247,12 @@ export function registerRoutes(
       return composePreflight(adapter, p.filedIn.projectId, req.refs, steer === '' ? undefined : steer);
     },
     qeOff: async () => addonSupportsQeOverride() && (await qeAcceptanceNow()) === 'off',
+    powerRefusal: chatJobPowerRefusal,
+    powerPresets: async (projectId) => {
+      if (!powerSupported() || ((await adapter.getSettings()).powerModeDefault ?? true) === false || typeof adapter.listPresets !== 'function') return null;
+      // The launch's own source (namesPreset): this project's presets, else the global ones.
+      return new Set((await adapter.listPresets(projectId !== null && projectId !== DEFAULT_PROJECT_ID ? projectId : undefined)).map((p) => p.name));
+    },
     acceptsJobs: (chatId) => chatAccepts.get(chatId) === true,
     served: (projectId) => servedFor(shapeReads, projectId ?? undefined),
     turnLive: (chatId, turnId) => chatTurns.turnsOf(chatId).some((t) => t.turnId === turnId),
@@ -5656,6 +5712,9 @@ export function registerRoutes(
       seats: z.array(z.string().min(1).max(64)).min(1).max(8).optional(),
       inputs: RevisionEditsSchema.shape.inputs,
     }).optional(),
+    // (api-types 0.196.0, operator ruling 2026-11-06) a job's Start chooses how it runs: `true` = a power run (no plan
+    // gate), `false` = it stops at its plan. Absent = it stops at its plan, as before.
+    power: z.boolean().optional(),
   });
   /** (api-types 0.192.0) `POST /chats/:id/proposals`: a person-made proposal, or a revision of the open one. */
   const PersonProposalSchema = z.union([
@@ -5732,7 +5791,11 @@ export function registerRoutes(
       const edits = parsed.data.edits === undefined
         ? undefined
         : (Object.fromEntries(Object.entries(parsed.data.edits).filter(([, v]) => v !== undefined)) as import('../core/types.js').ProposalEdits);
-      const out = await chatProposals.decide(id, pid, { decision: parsed.data.decision, ...(edits !== undefined ? { edits } : {}) }, actor, instance);
+      const out = await chatProposals.decide(id, pid, {
+        decision: parsed.data.decision,
+        ...(edits !== undefined ? { edits } : {}),
+        ...(parsed.data.power !== undefined ? { power: parsed.data.power } : {}),
+      }, actor, instance);
       return reply.code(out.code).send(out.body);
     },
   );

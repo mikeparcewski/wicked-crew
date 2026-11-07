@@ -365,6 +365,9 @@ export interface ProposalDispatch {
   actor: Actor;
   identity: ProposalIdentity;
   resolution: ArtifactProposal;
+  /** (api-types 0.196.0) A job's Start chose a power run (checked against the daemon before accepting). Absent = it
+   *  stops at its plan. */
+  power?: boolean;
 }
 
 /** One operation's launcher (A3 create, A5 refine, A7 theme, A8 demo register theirs). */
@@ -641,6 +644,11 @@ export interface ChatProposalDeps {
   preflight?(p: ArtifactProposal): Promise<string | null>;
   /** The daemon's QE acceptance setting is off (the launch skips QE by setting, labelled). Absent = on. */
   qeOff?(): Promise<boolean>;
+  /** (api-types 0.196.0) Why this job can't run as a power run on this daemon now; `null` = it can. Absent = no job can. */
+  powerRefusal?(p: ArtifactProposal): Promise<string | null>;
+  /** (api-types 0.196.0) Where this daemon has power mode and Power mode for new jobs is on, the presets a power launch
+   *  in `projectId` accepts (a job's Start then chooses how it runs); else `null`. Absent = none. */
+  powerPresets?(projectId: string | null): Promise<ReadonlySet<string> | null>;
   /** Whether the chat's client renders job proposals (`accepts: ['job']`, its newest declaration). Absent = no. */
   acceptsJobs?(chatId: string): boolean;
   /** What the v2 catalog resolves against now, as a launch filed in `projectId` reads it. */
@@ -1324,7 +1332,7 @@ export class ChatProposals {
    * instance those checks passed against: nothing is read for, or written to, a chat that reused the id since. One
    * lock per proposal: a second tab or a double click waits for the first and gets its result.
    */
-  decide(chatId: string, pid: string, body: { decision: 'go' | 'not_now'; edits?: ProposalEdits | undefined }, actor: Actor, instance: string | null): Promise<DecideResult> {
+  decide(chatId: string, pid: string, body: { decision: 'go' | 'not_now'; edits?: ProposalEdits | undefined; power?: boolean | undefined }, actor: Actor, instance: string | null): Promise<DecideResult> {
     // Keyed by the pid alone (it is unique: `<chat>:<turn uuid>`), so the same proposal answered through an ended chat's
     // archived alias still waits for an in-flight answer through its first name.
     return this.lock.run(`pid\u0000${pid}`, () => this.decideLocked(chatId, pid, body, actor, instance));
@@ -1334,12 +1342,16 @@ export class ChatProposals {
     return { code: 409, body: { code: 'chat_gone', error: `chat ${chatId} ended and its id was reused; this proposal can no longer be answered here` } };
   }
 
-  private async decideLocked(chatId: string, pid: string, body: { decision: 'go' | 'not_now'; edits?: ProposalEdits | undefined }, actor: Actor, instance: string | null): Promise<DecideResult> {
+  private async decideLocked(chatId: string, pid: string, body: { decision: 'go' | 'not_now'; edits?: ProposalEdits | undefined; power?: boolean | undefined }, actor: Actor, instance: string | null): Promise<DecideResult> {
     if (this.deps.instanceOf(chatId) !== instance) return this.gone(chatId);
     const records = this.deps.records(chatId);
     const folded = foldProposals(records).get(pid);
     if (folded === undefined) return { code: 404, body: { error: `no proposal ${pid} in chat ${chatId}` } };
     const kind = folded.proposal.kind;
+    // (api-types 0.196.0) How it runs is a job's Start's choice, and nothing else's.
+    if (body.power !== undefined && (kind !== 'job' || body.decision !== 'go')) {
+      return { code: 400, body: { code: 'power_not_applicable', error: kind !== 'job' ? 'only a job runs as a power run' : 'how a job runs is chosen with Start, not Not now' } };
+    }
     const reread = (): FoldedProposal => foldProposals(this.deps.records(chatId)).get(pid) ?? folded;
     const ok = (f: FoldedProposal): DecideResult => ({ code: 200, body: { view: viewOf(f) } });
 
@@ -1383,7 +1395,7 @@ export class ChatProposals {
           throw err;
         }
       }
-      return this.go(chatId, folded, again, again === acc.resolution ? acc.edits : { ...(acc.edits ?? {}), ...body.edits }, acc.identity, actor, instance);
+      return this.go(chatId, folded, again, again === acc.resolution ? acc.edits : { ...(acc.edits ?? {}), ...body.edits }, acc.identity, actor, instance, body.power);
     }
     if (folded.state === 'superseded') {
       return { code: 409, body: { code: 'proposal_superseded', error: 'a newer proposal in this chat replaced this one', view: viewOf(folded) } };
@@ -1436,23 +1448,23 @@ export class ChatProposals {
     if (effective.blocked !== null) {
       return { code: 409, body: { code: 'proposal_blocked', error: effective.blocked, view: viewOf(folded) } };
     }
-    return this.go(chatId, folded, effective, body.edits ?? null, this.identityOf(effective), actor, instance);
+    return this.go(chatId, folded, effective, body.edits ?? null, this.identityOf(effective), actor, instance, body.power);
   }
 
   /**
    * The state checks, then `accepting`, the launch, and `decided` — under the chat's lock and the document's, so two
    * proposals of one chat (or two chats changing one document) can never both pass the busy check.
    */
-  private go(chatId: string, folded: FoldedProposal, resolution: ArtifactProposal, edits: ProposalEdits | null, identity: ProposalIdentity, actor: Actor, instance: string | null): Promise<DecideResult> {
+  private go(chatId: string, folded: FoldedProposal, resolution: ArtifactProposal, edits: ProposalEdits | null, identity: ProposalIdentity, actor: Actor, instance: string | null, power?: boolean): Promise<DecideResult> {
     const docKey = (resolution.kind === 'refine' || (resolution.kind === 'create' && resolution.artifactRef !== undefined)) && identity.artifactRef !== null ? identity.artifactRef : null;
     // Keyed by the chat's instance (shared by its original id and an ended chat's archived alias), else its id.
     return this.lock.run(`chat\u0000${instance ?? chatId}`, () =>
       docKey === null
-        ? this.goLocked(chatId, folded, resolution, edits, identity, actor, instance)
-        : this.lock.run(`doc\u0000${docKey}`, () => this.goLocked(chatId, folded, resolution, edits, identity, actor, instance)));
+        ? this.goLocked(chatId, folded, resolution, edits, identity, actor, instance, power)
+        : this.lock.run(`doc\u0000${docKey}`, () => this.goLocked(chatId, folded, resolution, edits, identity, actor, instance, power)));
   }
 
-  private async goLocked(chatId: string, folded: FoldedProposal, resolution: ArtifactProposal, edits: ProposalEdits | null, identity: ProposalIdentity, actor: Actor, instance: string | null): Promise<DecideResult> {
+  private async goLocked(chatId: string, folded: FoldedProposal, resolution: ArtifactProposal, edits: ProposalEdits | null, identity: ProposalIdentity, actor: Actor, instance: string | null, power?: boolean): Promise<DecideResult> {
     const kind = resolution.kind;
     const pid = resolution.pid;
     // Under the chat's lock: a newer proposal published while this one was being checked supersedes it.
@@ -1536,6 +1548,12 @@ export class ChatProposals {
       const why = await this.deps.preflight(resolution);
       if (why !== null) return { code: 409, body: { code: 'proposal_blocked', error: why, view: viewOf(folded) } };
     }
+    // (api-types 0.196.0, operator ruling 2026-11-06) A power Start runs as one, or is refused before anything is
+    // recorded: never started phased behind the person's back.
+    if (power === true) {
+      const why = this.deps.powerRefusal === undefined ? "this daemon can't start a chat job as a power run; press Start with Review plan on" : await this.deps.powerRefusal(resolution);
+      if (why !== null) return { code: 409, body: { code: 'power_unavailable', error: why, view: viewOf(folded) } };
+    }
     // §2.5: a reshape (or its corrected descendant) answers the held plan Reject first, in this one transition; the
     // proposal then records that it did, so a retry launches without asking again.
     if (resolution.reshapes !== undefined && resolution.heldRejected !== true) {
@@ -1550,23 +1568,23 @@ export class ChatProposals {
     if (!this.write(chatId, accepting, instance)) return this.gone(chatId);
     let result: ProposalResult;
     try {
-      result = await this.deps.registry.launchOnce({ kind, pid, chatId, actor, identity, resolution });
+      result = await this.deps.registry.launchOnce({ kind, pid, chatId, actor, identity, resolution, ...(power !== undefined ? { power } : {}) });
     } catch (err) {
       // Accepting stays recorded: the card shows "Interrupted · Go again", which resumes the same identity.
       const msg = err instanceof Error ? err.message : String(err);
-      this.deps.audit('chat.proposal.launch_failed', actor, { chatId, pid, error: msg });
+      this.deps.audit('chat.proposal.launch_failed', actor, { chatId, pid, error: msg, ...(power !== undefined ? { power } : {}) });
       const after = foldProposals(this.deps.records(chatId)).get(pid);
       return { code: 502, body: { code: 'launch_failed', error: `could not start it: ${msg}. Go again resumes the same job.`, ...(after !== undefined ? { view: viewOf(after) } : {}) } };
     }
-    if (!this.decided(chatId, folded.turnId, pid, actor, 'go', result, resolution, edits, instance)) return this.gone(chatId);
+    if (!this.decided(chatId, folded.turnId, pid, actor, 'go', result, resolution, edits, instance, power)) return this.gone(chatId);
     const after = foldProposals(this.deps.records(chatId)).get(pid) ?? folded;
     return { code: 200, body: { view: viewOf(after) } };
   }
 
   /** Record the answer (and audit exactly what was answered); `false` when the chat is no longer this instance. */
-  private decided(chatId: string, turnId: string, pid: string, actor: Actor, decision: 'go' | 'not_now', result: ProposalResult | null, resolution: ArtifactProposal, edits: ProposalEdits | null, instance: string | null): boolean {
+  private decided(chatId: string, turnId: string, pid: string, actor: Actor, decision: 'go' | 'not_now', result: ProposalResult | null, resolution: ArtifactProposal, edits: ProposalEdits | null, instance: string | null, power?: boolean): boolean {
     if (!this.write(chatId, { at: this.now(), turnId, kind: 'proposal_decided', pid, actor: actor.id, decision, result }, instance)) return false;
-    this.deps.audit(decision === 'go' ? 'chat.proposal.accepted' : 'chat.proposal.declined', actor, { chatId, pid, kind: resolution.kind, resolution, edits, result });
+    this.deps.audit(decision === 'go' ? 'chat.proposal.accepted' : 'chat.proposal.declined', actor, { chatId, pid, kind: resolution.kind, resolution, edits, result, ...(power !== undefined ? { power } : {}) });
     return true;
   }
 
@@ -2156,7 +2174,8 @@ export class ChatProposals {
     }
     const projectLabel = chat.projectId === null ? 'Not in a project · this chat' : ((await this.deps.projectName(chat.projectId)) ?? chat.projectId);
     const qeOff = (await this.deps.qeOff?.().catch(() => false)) === true;
-    return { chatId, pid, turnId, seat, chat, served, roster: this.deps.rosterEligible(), projectLabel, qeOff, ...extra };
+    const powerPresets = (await this.deps.powerPresets?.(chat.projectId).catch(() => null)) ?? null;
+    return { chatId, pid, turnId, seat, chat, served, roster: this.deps.rosterEligible(), projectLabel, qeOff, powerPresets, ...extra };
   }
 
   /** Job proposals are on: the flag, the catalog read and the operation. */
