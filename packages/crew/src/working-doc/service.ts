@@ -114,6 +114,25 @@ export function capBlock<T extends { id: SectionId; text: string }>(sections: re
 export const CONTEXT_RECIPIENTS: ReadonlySet<string> = new Set(['unit', 'judge', 'triage', 'council', 'team_member', 'qe', 'team_review', 'send_back']);
 
 const EMPTY_SIG = '[]';
+
+/**
+ * Whether a document owes the engine a context set, from crew's own record alone (no engine call, no document read):
+ * a set owed or never answered, or a person's Goal, Approach or Constraints newer than the last block the engine took.
+ * A document with none of the person's context and nothing owed needs nothing at start-up (F35).
+ */
+export function contextOwed(rec: WorkingDocRecord): boolean {
+  const c = rec.context;
+  if (c?.retry === true) return true;
+  // A write of unknown outcome touching the person's context: settling it may set the block (xreview F35 r1).
+  if (rec.pending != null && Object.keys(rec.pending.values).some((k) => CONTEXT_SECTIONS.includes(k as SectionId))) return true;
+  if (c != null && c.attempted !== null && (c.sentVersion ?? -1) < c.attempted) return true;
+  let newest = -1;
+  for (const sid of CONTEXT_SECTIONS) {
+    const last = [...rec.trail].reverse().find((t) => t.sections.includes(sid));
+    if (last?.author.kind === 'human') newest = Math.max(newest, last.version);
+  }
+  return newest > (c?.sentVersion ?? -1);
+}
 /** What a block says (sections, their versions, authors and texts): an unchanged block is not sent again. */
 function contextSig(b: RunContextBlock): string {
   return JSON.stringify(b.sections.map((x) => [x.id, x.version, x.author.id, x.text]));
@@ -1134,25 +1153,31 @@ export class WorkingDocService {
    * unknown-outcome write has settled: at daemon start ({@link contextCatchUp}) and on a retry. A finished run is
    * skipped. Never rejects.
    */
-  async resyncContext(runId: string): Promise<void> {
+  async resyncContext(runId: string, knownLive = false): Promise<void> {
     if (!this.blockMode()) return;
     try {
-      const run = await this.d.run(runId);
-      if (run === null || run.terminal) return;
+      // `run()` reads every run's view (the engine's whole-store fold): the start-up sync passes `knownLive` from its one
+      // read instead of a fold per document (F35).
+      if (!knownLive) {
+        const run = await this.d.run(runId);
+        if (run === null || run.terminal) return;
+      }
       await this.exclusive(runId, async () => {
         await this.reconcile(runId);
         const now = this.d.store.get(runId);
         if (now === undefined) return;
         // A write of unknown outcome: its settling (`record`) sets the block, or the retry comes back for it.
-        if (now.pending != null) { if (now.context?.retry === true) this.scheduleContextRetry(runId); return; }
+        if (now.pending != null) { if (now.context?.retry === true || contextOwed(now)) this.scheduleContextRetry(runId); return; }
         const head = await this.d.backend.read(now.projectId, now.docId);
         if (head === null) return;
         await this.sendContext(runId, this.contextBlock(runId, head.head, sectionsOf(head.html), { kind: 'system', id: 'crew' }));
       });
     } catch (err) {
       this.d.log?.(`[working-doc] context sync ${runId}: ${String(err)}`);
-      // The document or the run could not be read: a retry owed stays owed.
-      if (this.d.store.get(runId)?.context?.retry === true) this.scheduleContextRetry(runId);
+      // The document or the run could not be read: a retry owed stays owed, and so does a person's context write still
+      // of unknown outcome (xreview F35 r2).
+      const rec = this.d.store.get(runId);
+      if (rec !== undefined && (rec.context?.retry === true || (rec.pending != null && contextOwed(rec)))) this.scheduleContextRetry(runId);
     }
   }
 
@@ -1162,7 +1187,26 @@ export class WorkingDocService {
   contextCatchUp(): Promise<void> {
     this.contextCaughtUp ??= (async () => {
       if (!this.blockMode()) return;
-      for (const rec of this.d.store.all()) await this.resyncContext(rec.runId);
+      // F35 (rig :7721 heap OOM): this used to visit EVERY held document (139 on the rig), each visit reading every run's
+      // view (`run()`, an engine whole-store fold of ~30 MB parsed per caller) and the document through interactive, at
+      // boot while studio's tabs reload. Now only the documents crew's own record says owe the engine a set are visited,
+      // and which runs are live is read ONCE.
+      const todo = this.d.store.all().filter((r) => contextOwed(r)).map((r) => r.runId);
+      if (todo.length === 0) return;
+      let live: Set<string> | null = null;
+      if (this.d.liveRuns !== undefined) {
+        try {
+          live = new Set((await this.d.liveRuns()).map((r) => r.runId));
+        } catch (err) {
+          this.d.log?.(`[working-doc] context catch-up could not list live runs: ${String(err)}`);
+        }
+      }
+      const gap = this.d.catchUpGapMs ?? 250;
+      for (const runId of todo) {
+        // Not in the live list (archived, or the list could not be read): its own check, bounded by the owed set.
+        await this.resyncContext(runId, live?.has(runId) === true);
+        if (gap > 0) await new Promise((r) => { const t = setTimeout(r, gap); (t as { unref?: () => void }).unref?.(); });
+      }
     })();
     return this.contextCaughtUp;
   }
