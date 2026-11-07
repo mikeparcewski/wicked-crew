@@ -35,6 +35,15 @@ export interface DocBindingAttempt {
   at: number;
   /** The document's head when the attempt started (0: a new document's placeholder). */
   base: number;
+  /** A5 (§6.2): a refine's accepted `allow` — the protected-edit ids the person let this run change. Released only when
+   *  a version this run made is on the lineage (it landed). */
+  allow?: string[];
+  /** A5: what this attempt is (absent = a create). */
+  op?: 'create' | 'refine';
+  /** A5: the chat a refine was accepted in (and its instance), when it is not the chat that made the document: its retry
+   *  card and its launch record go there. Absent = the binding's own chat. */
+  chatId?: string;
+  chatInstance?: string | null;
   /** Crew is handing the run to the engine (set right before the launch call, cleared if it throws): a crash between the
    *  engine accepting it and {@link launchedAt} still leaves the document busy until the boot reconcile looks. */
   launchingAt?: number;
@@ -181,7 +190,7 @@ export class DocBindingStore {
    * Record an attempt BEFORE anything is created or launched. The first attempt creates the binding from `init`; a
    * later one (Try again) is appended. Idempotent per run id: a retry of the same Go returns what is recorded.
    */
-  begin(init: Omit<DocBinding, 'packet' | 'tokens' | 'attempts' | 'createdAt'>, attempt: { pid: string; runId: string; base: number }): DocBinding {
+  begin(init: Omit<DocBinding, 'packet' | 'tokens' | 'attempts' | 'createdAt'>, attempt: { pid: string; runId: string; base: number; allow?: string[]; op?: 'create' | 'refine'; chatId?: string; chatInstance?: string | null }): DocBinding {
     this.load();
     const held = this.cache.get(init.ref);
     if (held !== undefined) {
@@ -260,6 +269,11 @@ export class DocBindingStore {
       a.retryPid = retryPid;
       return true;
     });
+  }
+
+  /** A5: the `allow` a run's attempt was accepted with (`[]` = none, or not a bound run). */
+  allowOf(runId: string): string[] {
+    return this.attemptOf(runId)?.attempt.allow ?? [];
   }
 
   /** An attempt that has no recorded outcome keeps the chat and the document busy (§6.2). */

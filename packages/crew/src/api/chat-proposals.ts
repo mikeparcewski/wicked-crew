@@ -56,6 +56,7 @@ import type {
   PersonRevisionBody,
   ProposalEdits,
   ProposalHelpers,
+  ProtectedEdit,
   ProposalRevision,
   ProposalRevisionEdits,
   ProposalShape,
@@ -600,6 +601,12 @@ export type HeldPlan =
 export interface ChatProposalDeps {
   /** The operations crew advertises (and `proposals`). */
   flags(): ChatArtifactsCapabilities;
+  /**
+   * A5 (DES §6.1-6.2): the person's protected edits of a document at a version (`interactive/protected-edits.ts`), with
+   * `touched` for the anchors given. An error = they cannot be read or checked on this host: a refine card is blocked
+   * (it could never land). Absent = refine is not built on this daemon (the card shows none).
+   */
+  protectedEdits?: (artifactRef: string, version: number, touch: readonly string[]) => Promise<{ ok: true; entries: ProtectedEdit[] } | { ok: false; error: string }>;
   /** The catalog entries (`workflow-catalog/catalog-data.ts`). */
   catalog: readonly CatalogSeed[];
   /** The chat's records: the live transcript, or the kept history copy once it has ended. */
@@ -995,6 +1002,7 @@ export class ChatProposals {
       if (!flags.refine) return this.refused(chatId, 'refine');
       const ref = parseArtifactRef(block.refine);
       let target: ArtifactProposal['target'];
+      let protectedList: ProtectedEdit[] | undefined;
       let projectId = chat.projectId;
       if (ref === null) {
         blocked.push(`“${block.refine}” is not a document studio knows`);
@@ -1013,6 +1021,11 @@ export class ChatProposals {
           else {
             target = { ref: ref.ref, title, base: head };
             projectId = projectOfMount(ref.mount);
+            // A5: the person's own edits this revision keeps (Keep it is the default; only they can let one change).
+            const touch = [...block.touches, ...(open ? binding?.artifact?.anchors ?? [] : [])];
+            const kept = await this.protectedOf(ref.ref, head, touch);
+            if ('error' in kept) blocked.push(kept.error);
+            else protectedList = kept.entries;
           }
         }
       }
@@ -1033,6 +1046,7 @@ export class ChatProposals {
         filedIn: await filedIn(projectId),
         ...(target !== undefined ? { target } : {}),
         ...(block.touches.length > 0 ? { touches: block.touches } : {}),
+        ...(protectedList !== undefined ? { protected: protectedList } : {}),
         blocked: blocked[0] ?? null,
       };
     }
@@ -1525,14 +1539,14 @@ export class ChatProposals {
         const pids = [...foldProposals(this.deps.records(chatId)).keys()];
         if (pids.indexOf(pid) < pids.length - 1) {
           const recordedOld = folded.proposal;
-          const freshOld: ArtifactProposal = { ...recordedOld, target: { ...(recordedOld.target ?? resolution.target), base: head } };
+          const freshOld: ArtifactProposal = await this.onNewHead({ ...recordedOld, target: { ...(recordedOld.target ?? resolution.target), base: head } });
           if (!this.write(chatId, { at: this.now(), turnId: folded.turnId, kind: 'proposal', proposal: freshOld }, instance)) return this.gone(chatId);
           const settled = foldProposals(this.deps.records(chatId)).get(pid);
           return { code: 409, body: { code: 'proposal_superseded', error: `${resolution.target.title} changed since this was proposed, and a newer proposal replaced it`, ...(settled !== undefined ? { view: viewOf(settled) } : {}) } };
         }
         // From the proposal as crew recorded it (never the refused request's edits): the person chooses again.
         const recorded = folded.proposal;
-        const fresh: ArtifactProposal = { ...recorded, target: { ...(recorded.target ?? resolution.target), base: head } };
+        const fresh: ArtifactProposal = await this.onNewHead({ ...recorded, target: { ...(recorded.target ?? resolution.target), base: head } });
         if (!this.write(chatId, { at: this.now(), turnId: folded.turnId, kind: 'proposal', proposal: fresh }, instance)) return this.gone(chatId);
         const after = foldProposals(this.deps.records(chatId)).get(pid);
         return {
@@ -1586,6 +1600,20 @@ export class ChatProposals {
     if (!this.write(chatId, { at: this.now(), turnId, kind: 'proposal_decided', pid, actor: actor.id, decision, result }, instance)) return false;
     this.deps.audit(decision === 'go' ? 'chat.proposal.accepted' : 'chat.proposal.declined', actor, { chatId, pid, kind: resolution.kind, resolution, edits, result, ...(power !== undefined ? { power } : {}) });
     return true;
+  }
+
+  /** A5: the protected edits of a document at a version, or the reason a refine card is blocked. */
+  private async protectedOf(ref: string, version: number, touch: readonly string[]): Promise<{ entries: ProtectedEdit[] } | { error: string }> {
+    if (this.deps.protectedEdits === undefined) return { entries: [] };
+    const r = await this.deps.protectedEdits(ref, version, touch).catch((err: unknown) => ({ ok: false as const, error: err instanceof Error ? err.message : String(err) }));
+    return r.ok ? { entries: r.entries } : { error: `Your own edits can't be checked on this host, so it can't be changed from chat (${r.error.slice(0, 200)})` };
+  }
+
+  /** A5: a refine card re-resolved on a newer head: its protected edits are those of the new head (Keep preselected). */
+  private async onNewHead(p: ArtifactProposal): Promise<ArtifactProposal> {
+    if (p.kind !== 'refine' || p.target === undefined) return p;
+    const kept = await this.protectedOf(p.target.ref, p.target.base, p.touches ?? []);
+    return 'error' in kept ? { ...p, protected: [], blocked: kept.error } : { ...p, protected: kept.entries, blocked: p.blocked };
   }
 
   /** The identity a Go is named by (DES §4.3 step 2). */
@@ -1682,7 +1710,7 @@ export class ChatProposals {
     if (p.kind === 'job') return this.applyJobEdits(chatId, f, edits);
     const allowed: Record<Exclude<ArtifactProposalKind, 'job'>, ReadonlyArray<keyof ProposalEdits>> = {
       create: p.artifactRef !== undefined ? ['title', 'brief', 'sources', 'helpers'] : ['title', 'brief', 'sources', 'helpers', 'repos', 'project'],
-      refine: ['ask', 'helpers'],
+      refine: ['ask', 'helpers', 'allow'],
       theme: ['name', 'patch'],
       demo: ['audience', 'show', 'helpers'],
     };
@@ -1705,6 +1733,14 @@ export class ChatProposals {
       const a = edits.ask.trim();
       if (a === '' || a.length > 4000) throw new EditRefusal('the ask must be 1 to 4000 characters');
       next = { ...next, brief: a };
+    }
+    if (edits.allow !== undefined) {
+      // A5 (§6.2): only the person releases a protected edit, and only one the card shows them (an id names one exact
+      // value; an edit made since the card was drawn has a new id and is kept).
+      const shown = new Set((p.protected ?? []).map((e) => e.id));
+      if (!Array.isArray(edits.allow) || edits.allow.length > 500 || edits.allow.some((id) => typeof id !== 'string' || !shown.has(id))) {
+        throw new EditRefusal('only edits shown on this card can be let change; check the card again');
+      }
     }
     if (edits.audience !== undefined || edits.show !== undefined) {
       if ((edits.audience?.length ?? 0) > 400 || (edits.show?.length ?? 0) > 2000) throw new EditRefusal('the audience or what to show is too long');
@@ -2898,7 +2934,9 @@ export class ChatProposals {
         turnId: null,
         sourceRunId: runId,
         artifactRef,
-        reason: `The last attempt ended without a draft: ${reason}. Try again fills the same document.`,
+        reason: base.kind === 'refine'
+          ? `The last change was not applied: ${reason}. Try again revises the latest version, and keeps your edits.`
+          : `The last attempt ended without a draft: ${reason}. Try again fills the same document.`,
         blocked: null,
       };
       return this.write(chatId, { at: this.now(), turnId: failed.turnId, kind: 'proposal', proposal: retry }, instance) ? pid : null;

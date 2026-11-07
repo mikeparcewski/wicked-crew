@@ -9301,6 +9301,22 @@ export interface PersonProposalBody {
   requestId: string;
 }
 
+/**
+ * (api-types 0.197.0) One edit a person made by hand that a refine keeps. The `id` carries a hash of the value it
+ * protects, so a later hand edit of the same part is a new id, kept again whatever was allowed before.
+ */
+export interface ProtectedEdit {
+  id: string;
+  /** `text` a leaf's words · `attr` an attribute of the node they edited · `added` a part they added · `gone` a part
+   *  they removed · `order` their slide order. */
+  kind: 'text' | 'attr' | 'added' | 'gone' | 'order';
+  /** Plain words: "slide 1 · heading “Release 0.17”", "removed slide 5", "your slide order". */
+  label: string;
+  /** The `data-wid` it is about; `null` for the slide order. */
+  wid: string | null;
+  touched: boolean;
+}
+
 /** `POST /chats/:id/proposals`: a revision of the open proposal (a token swap, a suggestion, a question's choice). */
 export interface PersonRevisionBody {
   revises: string;
@@ -9416,6 +9432,14 @@ export interface ArtifactProposal {
   target?: { ref: string; title: string; base: number };
   /** refine: the parts the seat pointed at (`data-wid`s); hand edits are kept unless the person says otherwise. */
   touches?: string[];
+  /**
+   * (api-types 0.197.0, DES-CHAT-ARTIFACTS-001 §6.1-6.2, A5) refine: the person's own edits this revision keeps,
+   * recomputed by crew from the document's version lineage on the proposal's `target.base`. Each is kept unless the
+   * person lets it change (`ProposalEdits.allow` names its `id`). `touched` = the seat's `touches` or the person's
+   * anchors overlap it (list those inline: "Your edit: … · Keep it / Let this change it"; the rest under "Keeping N more
+   * of your edits"). Absent on a non-refine proposal; `[]` = no edits of the person's to keep.
+   */
+  protected?: ProtectedEdit[];
   /** theme: the partial appearance patch and the keys it changes. */
   theme?: { name: string; patch: Record<string, string | number | boolean>; changes: string[] };
   /** demo: the app address (from the person's words), the audience and what to show. */
@@ -9495,6 +9519,8 @@ export interface ProposalEdits {
   project?: string | null;
   /** refine */
   ask?: string;
+  /** refine: the `ProtectedEdit.id`s the person lets this revision change (each must be on the card; api-types 0.197.0
+   *  accepts it on Go). Only these are released, and only when the revision lands. */
   allow?: string[];
   /** theme */
   name?: string;

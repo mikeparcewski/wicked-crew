@@ -374,6 +374,14 @@ describe('chat proposals (server, A2)', () => {
     expect(stubRows().length).toBe(n);
   });
 
+  it('A5: only the person releases a protected edit, and only one the card shows (an unknown id is refused)', async () => {
+    await turn(stub, stubListeners, 'allow-1', 'Retitle slide 1', { refine: 'mikes/coverage-deck', ask: 'retitle', touches: ['h'] }, { projectId: 'mikes', open: true });
+    const p = await proposalOf(stub, 'allow-1');
+    const refused = await decide(stub, 'allow-1', p.pid, { decision: 'go', edits: { allow: ['text:h#00000000'] } });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json()).toMatchObject({ code: 'edits_invalid', error: 'only edits shown on this card can be let change; check the card again' });
+  });
+
   it('a refine whose document moved re-resolves instead of starting', async () => {
     await turn(stub, stubListeners, 'moved-1', 'Retitle slide 1', { refine: 'mikes/coverage-deck', ask: 'retitle' }, { projectId: 'mikes', open: true });
     const p = await proposalOf(stub, 'moved-1');

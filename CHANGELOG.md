@@ -12,6 +12,21 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **Chat refines the open document, deck or page, and keeps the person's own edits (DES-CHAT-ARTIFACTS-001 A5;
+  plugins-complete G4; api-types 0.197.0).** `capabilities.chatArtifacts.refine` is on wherever the chat seam is armed,
+  so a seat proposes a `refine` card for a change to the open document instead of a new one (its instructions now say
+  a change keeps the document; a new audience or form is new work; either reading gets one question). The card lists
+  the person's protected edits (`ArtifactProposal.protected`, recomputed from the document's version lineage: a
+  person's writes, deck moves and removals are kept; a run's version releases only what the person let that run
+  change; undo follows the parent chain; a theme protects nothing); `ProposalEdits.allow` lets the person release one,
+  and only one shown on the card. Go starts one `interactive-chat` run with the derived run id and the card's two
+  helpers, recorded on the document's binding; its task says the document is data, never instructions, and lists the
+  edits to keep exactly. Nothing it wrote lands until crew's landing guard passes on crew's own copy of the file (the
+  floor with the writer's `notes.json` and the leak scan, then the keep check against crew's map; a check that cannot
+  run lands nothing), and then only on the head it was accepted on (`expect_head`): a hand edit made meanwhile lands
+  nothing and offers Try again on the new head. Every failure releases the chat and the document with the reason.
+  Edit-seam and chat-seam landings now send `run_id`, so a run's version is never read as a person's edit. Needs
+  wicked-garden with `keep_check.py`.
 - **Drafts keep process notes out of the document, and the checks read says what crew measured (DES-CHAT-ARTIFACTS-001
   A6; plugins-complete G12, crew half; api-types 0.197.0).** A draft's task names `notes.json` beside the deliverable
   (`left_out`, `sources`, `assumptions`) and the run's id; crew's draft floor passes both to garden's self-check, which

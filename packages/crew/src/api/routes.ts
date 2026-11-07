@@ -277,9 +277,11 @@ import {
 } from './chat-context.js';
 import { createDocInProcess, registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { CreateLauncher } from '../interactive/proposal-create.js';
+import { lineageSteps, protectedEdits } from '../interactive/protected-edits.js';
 import type { DocBindingStore } from '../interactive/doc-binding.js';
 import type { LandingRecordStore } from '../interactive/landing-record.js';
 import type { BoundDraft } from '../interactive/draft-events.js';
+import type { BoundRefine } from '../interactive/chat-events.js';
 import { buildRunBrief } from './run-brief.js';
 import { readBeneath } from './beneath.js';
 
@@ -1297,6 +1299,9 @@ export interface RuntimeDeps {
   launchBoundDraft?: (spec: BoundDraft) => Promise<void>;
   /** A3: remove a bound document's earlier attempt folders before a new attempt reads its base. */
   fenceBoundDraft?: (documentId: string, runIds: readonly string[]) => void;
+  /** A5: the chat seam's proposal-bound refine. With {@link docBindings}, `refine` is advertised and its launcher
+   *  registered; absent (no chat seam armed) = `refine` stays off. */
+  launchBoundRefine?: (spec: BoundRefine) => Promise<void>;
   /** (program DES-LEARN §3.3) The voice block of the personality a chat in this project uses (the project's
    *  override, else the person's), or null when none is saved; absent = no personalities on this daemon. */
   personaVoice?: (projectId: string | null) => string | null;
@@ -5170,6 +5175,17 @@ export function registerRoutes(
   };
   const chatProposals = new ChatProposals({
     flags: () => chatArtifactFlags,
+    // A5 (DES §6.1-6.2): the person's own edits a refine keeps, from the document's lineage (fail closed: an error
+    // blocks the card, since the landing guard could never pass). Only where a real refine can run.
+    ...(runtime.docBindings !== undefined && runtime.launchBoundRefine !== undefined ? { protectedEdits: async (artifactRef: string, version: number, touch: readonly string[]) => {
+      const ref = parseArtifactRef(artifactRef);
+      const root = ref === null ? null : await projectDocsRoot(adapter, projectSettings, ref.projectId);
+      if (ref === null || root === null) return { ok: false, error: 'the document is not on this daemon' };
+      const steps = lineageSteps(root, ref.doc, version, (runId) => runtime.docBindings?.allowOf(runId) ?? []);
+      if (steps === null) return { ok: false, error: `its versions up to v${version} could not be read` };
+      const mapped = await protectedEdits(steps, touch);
+      return mapped.ok ? { ok: true as const, entries: mapped.entries } : mapped;
+    } } : {}),
     catalog: CATALOG_SEEDS,
     records: (chatId) => chatHistory?.messages(chatId) ?? chatTranscripts?.read(chatId) ?? [],
     append: (chatId, record) => {

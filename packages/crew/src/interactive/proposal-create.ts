@@ -293,7 +293,8 @@ export async function reconcileBoundAttempts(deps: ReconcileDeps): Promise<void>
       continue;
     }
     deps.ensureLaunchRecord(b, a);
-    const chatNow = deps.chatIdOf(b.chatId, b.chatInstance);
+    // A5: a refine accepted in another chat is settled in that chat.
+    const chatNow = a.chatId !== undefined ? deps.chatIdOf(a.chatId, a.chatInstance ?? null) : deps.chatIdOf(b.chatId, b.chatInstance);
     if (chatNow !== null) await deps.settleAccepting(chatNow, a.pid).catch(() => false);
     if (a.emittedAt !== undefined) {
       const v = deps.docVersions(b.projectId, b.doc);

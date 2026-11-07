@@ -1121,14 +1121,16 @@ export async function createServer(
     }
     broadcast({ type: 'landingFailed', session: runId, artifact_ref: ref, reason: outcome.reason });
     if (hit === null || chatProposals === null) return;
-    const chatNow = chatHistory.idOfInstance(hit.binding.chatId, hit.binding.chatInstance);
+    // A5: a refine's retry card goes to the chat the refine was accepted in.
+    const chatOf = hit.attempt.chatId !== undefined ? { chatId: hit.attempt.chatId, chatInstance: hit.attempt.chatInstance ?? null } : hit.binding;
+    const chatNow = chatHistory.idOfInstance(chatOf.chatId, chatOf.chatInstance);
     if (chatNow === null) {
       app.log.warn(`[proposals] run ${runId} failed, and the chat it was made from is gone — no retry card`);
       docBindings.markPublished(ref, runId);
       return;
     }
     void chatProposals
-      .appendRetry(chatNow, hit.attempt.pid, runId, ref, outcome.reason, hit.binding.chatInstance)
+      .appendRetry(chatNow, hit.attempt.pid, runId, ref, outcome.reason, chatOf.chatInstance)
       .then((pid) => {
         if (pid !== null) docBindings.setRetry(ref, runId, pid);
         docBindings.markPublished(ref, runId);
@@ -1861,6 +1863,12 @@ export async function createServer(
         (draftSub?.inFlightDocs().includes(documentId) ?? false) ||
         (editSub?.inFlightDocs().includes(documentId) ?? false),
       onRunFiled: fileRun,
+      // DES-CHAT-ARTIFACTS-001 §6 (A5): a proposal-bound refine's attempt, launch record, landing record and outcome.
+      bindings: docBindings,
+      onBoundOutcome,
+      onRunLaunched: (runId, detail) => { recordRunLaunched(audit, runTimingIndex, DAEMON_ACTOR, runId, detail); },
+      landings: docLandings,
+      draftFloorIo: { chrome: floorChrome },
       log: (m) => app.log.warn(m),
       logError: (m) => app.log.error(m),
     });
@@ -2767,6 +2775,8 @@ export async function createServer(
       docBindings,
       docLandings,
       ...(draftSub !== null ? { launchBoundDraft: draftSub.launchBound, fenceBoundDraft: draftSub.fenceBound } : {}),
+      // A5: a refine is real only when the chat seam is armed.
+      ...(chatSub !== null ? { launchBoundRefine: chatSub.launchBound } : {}),
       // crew#899: a chat's checkouts are brought to their upstream (when clean) before it reads them.
       freshenCheckout: (root: string) => freshenCheckout(root),
       ...(skillsRuntime !== undefined ? { skills: skillsRuntime } : {}),

@@ -929,6 +929,12 @@ export function chatMakeLines(make: MakeDigest): string[] {
       '```',
       '',
       '`touches` is optional: the parts the change is about. The person keeps their own edits unless they say otherwise.',
+      'CHANGE or NEW? A change that keeps the open document what it is ("make it shorter", "fix slide 3",',
+      '"tighten the notes", "match the headings to my title") is a `refine` of THAT document: never a new',
+      'document, deck or page. An ask for a different audience or form, or one made from other files ("a',
+      'one-page summary of this deck for engineers", "turn this into a deck") is NEW work that names the open',
+      'document as a source. When either reading fits, ask ONE question (change this one, or make a new one?)',
+      'and propose nothing until they answer.',
       'A change to a document, deck or page that is neither open nor named in this chat is not code work:',
       'ask which one they mean (and propose nothing); never point it at Continue in Build.',
       '',
@@ -994,7 +1000,7 @@ export function chatMakeDigest(make: MakeDigest | undefined): string {
   // client (`prose`) keeps today's artifact digest.
   if (make.jobs === 'cards') {
     const extra: string[] = [];
-    if (make.refine) extra.push('a change to a document that is open or named in this chat (the `refine` block)');
+    if (make.refine) extra.push('a change to a document that is open or named in this chat (the `refine` block: a change keeps that document, never a new one)');
     if (make.theme) extra.push('a studio theme (the `theme` block)');
     return [
       '### What this chat can start now (crew)',
@@ -1006,7 +1012,7 @@ export function chatMakeDigest(make: MakeDigest | undefined): string {
   const can: string[] = [];
   if (make.create) can.push(...make.entries.filter((e) => e.kind === 'document').map((e) => `${e.title.toLowerCase()} (\`${e.id}\`)`));
   if (make.demo && make.entries.some((e) => e.kind === 'demo')) can.push('a demo video of an app on this machine (`demo-video`)');
-  if (make.refine) can.push('a change to a document that is open or named in this chat');
+  if (make.refine) can.push('a change to a document that is open or named in this chat (a `refine` of it, never a new document)');
   if (make.theme) can.push('a studio theme');
   return [
     '### What this chat can make now (crew)',
