@@ -1009,8 +1009,13 @@ describe('the list agrees with its header, or says why not (req-reconcile, api-t
     expect(engineRowOf({ src: { 'REQ-001': { real: false, uncounted: 'structural' } } }, 'src', 'REQ-001')).toEqual({
       real: false,
       uncounted: 'structural',
+      codeMismatch: null,
     });
-    expect(engineRowOf({ src: { 'REQ-001': { real: true, uncounted: null } } }, 'src', 'REQ-001')).toEqual({ real: true, uncounted: null });
+    expect(engineRowOf({ src: { 'REQ-001': { real: true, uncounted: null } } }, 'src', 'REQ-001')).toEqual({
+      real: true,
+      uncounted: null,
+      codeMismatch: null,
+    });
     expect(engineRowOf({ src: {} }, 'src', 'toString')).toBeNull();
     expect(engineRowOf({}, '__proto__', 'REQ-001')).toBeNull();
     expect(engineRowOf(null, 'src', 'REQ-001')).toBeNull();

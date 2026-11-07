@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.196.0",
+  "apiTypesVersion": "0.197.0",
   "endpoints": [
     {
       "method": "GET",
@@ -1939,6 +1939,20 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/repos/:id/requirements/minimum",
+      "requestType": "RequirementsMinimumBody",
+      "responseType": "RequirementsMinimumResponse",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409,
+        500,
+        503
+      ]
     },
     {
       "method": "GET",
