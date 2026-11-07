@@ -295,6 +295,27 @@ describe('chat sees artifacts and runs (server, A1)', () => {
     }
   });
 
+  it('a planted file where the artifact copies go costs only those: the requirements map is still read (crew#1412, codex r2)', async () => {
+    const root = join(scratch, 'repo-req2');
+    mkdirSync(join(root, '.codegraph'), { recursive: true });
+    writeFileSync(join(root, '.codegraph', 'estate.db'), '');
+    repos = [{ id: 'r-req', name: 'reqgraph-tm', root_path: root, default_branch: 'main', registered_at: 1, code_graph_db: join(root, '.codegraph', 'estate.db') } as (typeof repos)[number]];
+    try {
+      const opened = await open(app, { chatId: 'req-2', clis: ['claude'], repoRefs: ['r-req'] });
+      expect(opened.statusCode).toBe(201);
+      const cwd = realpathSync(JSON.parse(opened.body).scope.cwd as string);
+      writeFileSync(join(cwd, 'open'), 'not a folder');
+      expect((await send(app, 'req-2', { text: 'What does reqgraph-tm require?' })).statusCode).toBe(202);
+      const input = launches.at(-1)!;
+      expect(input.extraReadRoots).toEqual(expect.arrayContaining([join(cwd, 'requirements')]));
+      expect(input.extraReadRoots).not.toEqual(expect.arrayContaining([join(cwd, 'open')]));
+      const map = [...seatRead.keys()].find((k) => k.startsWith(join(cwd, 'requirements', 'r-req.')));
+      expect(seatRead.get(map!)).toContain('REQ-003');
+    } finally {
+      repos = [];
+    }
+  });
+
   it('refuses another project’s run and document in a project chat: nothing of them reaches the seat', async () => {
     expect((await open(app, { chatId: 'scope-1', projectId: 'mikes', clis: ['claude'] })).statusCode).toBe(201);
     const res = await send(app, 'scope-1', { text: 'Summarise run 0bad0bad', context: { artifact: { ref: 'other/their-deck', version: 1 } } });

@@ -49,16 +49,17 @@ function ensureDir(dir: string): string {
  *  root, as the seat sees them; none where the platform cannot open beneath a root, or when they cannot be made. */
 function turnReadRoots(scratchRoot: string): string[] {
   if (!beneathSupported()) return [];
+  const real = seatPathOf(scratchRoot);
+  const roots: string[] = [];
   try {
     ensureRealDir(contextReadRoots(scratchRoot).open);
     ensureRealDir(contextReadRoots(scratchRoot).context);
+    roots.push(join(real, 'open'), join(real, 'context'));
   } catch {
-    return [];
+    // no artifact copies or run briefs this run; the requirements maps are tried on their own
   }
-  const real = seatPathOf(scratchRoot);
-  const roots = [join(real, 'open'), join(real, 'context')];
-  // crew#1412: the requirements maps each message hands the seats (`chat-requirements.ts`). On its own: a folder that
-  // cannot be made costs only the maps (they then say they could not be handed over), never the other roots.
+  // crew#1412: the requirements maps each message hands the seats (`chat-requirements.ts`). Each folder on its own
+  // (codex r1/r2): one that cannot be made costs only what it holds, never the other roots.
   try {
     ensureRealDir(join(scratchRoot, REQUIREMENTS_MAP_DIR));
     roots.push(join(real, REQUIREMENTS_MAP_DIR));

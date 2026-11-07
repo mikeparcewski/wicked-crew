@@ -238,4 +238,18 @@ describe('chat requirements maps (crew#1412)', () => {
     const slowEngine = await buildRequirementsMaps(scopeOf([r], '/x'), { listRepos: async () => [r], reader: { getRequirementsGraphForRepo: () => never } }, 50);
     expect(slowEngine[0]!.entry.summary).toContain('could not be read (no answer in');
   });
+  it('a mismatch past the first rows is still listed first: both selections come from one index (codex r2)', async () => {
+    const r = await repo();
+    const many = Object.fromEntries(Array.from({ length: 400 }, (_, i) => [`REQ-${String(i).padStart(3, '0')}`, { title: `t${i}`, status: 'active', business_rules: [rule(`rule ${i}`)] }]));
+    const verdicts = Object.fromEntries(Object.keys(many).map((k) => [k, { real: true, uncounted: null, code_mismatch: k === 'REQ-399' ? 'the last one is wrong' : null }]));
+    const reader: RequirementsGraphReader = {
+      async getRequirementsGraphForRepo() {
+        return { graph: { metadata: { coverage: live }, domains: { src: { requirements: many } } }, coverage: live, rows: { src: verdicts } } as unknown as EstateRequirementsRead;
+      },
+    };
+    const [m] = await buildRequirementsMaps(scopeOf([r], '/x'), { listRepos: async () => [r], reader });
+    const text = m!.data!.toString();
+    expect(text).toContain('Code does not meet it: the last one is wrong');
+    expect(text.indexOf('REQ-399')).toBeLessThan(text.indexOf('REQ-000'));
+  });
 });

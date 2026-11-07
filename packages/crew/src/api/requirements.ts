@@ -827,6 +827,18 @@ export async function listRequirementsRead(
   return { page: pageOf(index, query), coverage, minimum };
 }
 
+/** {@link listRequirementsRead} for several queries over ONE engine read and one index (crew#1412: a chat's map takes
+ *  its mismatches and its rows from the same snapshot). `pages` is `null` when there is no graph yet. */
+export async function listRequirementsReadMany(
+  repo: RepoEntry,
+  queries: readonly RequirementsQuery[],
+  reader: RequirementsGraphReader,
+): Promise<{ pages: RequirementsPage[] | null; coverage: RequirementsCoverage | null; minimum: RequirementsMinimum | null }> {
+  const { index, coverage, minimum } = await buildIndexRead(repo, reader);
+  if (index === null) return { pages: null, coverage, minimum };
+  return { pages: queries.map((q) => pageOf(index, q)), coverage, minimum };
+}
+
 /**
  * A listed requirement that is a placeholder, not a real requirement: its statement is the engine's risk floor
  * ("[RISK] <title>: empty statement (model could not state a rule)", or a statement below the confidence threshold).

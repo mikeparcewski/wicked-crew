@@ -22,7 +22,7 @@ import { join, resolve } from 'node:path';
 
 import type { ChatScope, RepoEntry } from '../core/types.js';
 import { BeneathError, createBeneath, mkdirBeneath, readBeneath } from './beneath.js';
-import { listRequirementsRead, type RequirementSummary, type RequirementsGraphReader, type RequirementsPage } from './requirements.js';
+import { listRequirementsReadMany, type RequirementSummary, type RequirementsGraphReader, type RequirementsPage } from './requirements.js';
 
 /** The scratch-root folder the maps are written into. */
 export const REQUIREMENTS_MAP_DIR = 'requirements';
@@ -37,9 +37,6 @@ const TEXT_MAX = 600;
 /** How long the registry lookup and every repository's read together may take before the maps not read by then say
  *  they could not be read (codex r1: the message waits on it). */
 export const REQUIREMENTS_MAP_DEADLINE_MS = 8_000;
-/** Rows one read takes from the index: the whole map up to this, so the mismatches and the first rows come from ONE
- *  snapshot (codex r1: two reads could straddle a rebuild). */
-const SCAN_ROWS = 50_000;
 
 /** One repository's map as the statement names it. */
 export interface RequirementsMapEntry {
@@ -80,7 +77,7 @@ function ageOf(page: RequirementsPage): { label: string; stale: boolean } {
   const d = page.codeDrift;
   // Unknown age is treated as STALE (codex r1): the seat checks the code before relying on a row.
   if (d === null) return { label: 'code age unknown (this engine does not say what code the map was built from): treat the map as STALE', stale: true };
-  const from = `built from code at ${d.builtFromCommit.slice(0, 12)}${d.builtAt !== null ? ` (${line(d.builtAt, 64)})` : ''}`;
+  const from = `built from code at ${line(d.builtFromCommit, 12)}${d.builtAt !== null ? ` (${line(d.builtAt, 64)})` : ''}`;
   if (d.commitsBehind === null) {
     return { label: `${from}; the checkout does not hold that commit, so how far the code has moved since is unknown: treat the map as STALE`, stale: true };
   }
@@ -176,14 +173,24 @@ export function renderRequirementsMap(repo: { id: string; name: string }, page: 
 async function buildOne(repo: RepoEntry, reader: RequirementsGraphReader, signal: Deadline): Promise<BuiltRequirementsMap> {
   const base = { repoId: repo.id, name: repo.name };
   try {
-    // ONE read: the mismatches and the rows come from the same snapshot.
-    const all = await signal.race(listRequirementsRead(repo, { offset: 0, limit: SCAN_ROWS }, reader));
-    if (all.page === null) {
+    // ONE engine read and one index: the mismatches (filtered over the whole map, codex r2) and the first rows come
+    // from the same snapshot (codex r1: two reads could straddle a rebuild).
+    const all = await signal.race(
+      listRequirementsReadMany(
+        repo,
+        [
+          { offset: 0, limit: REQUIREMENTS_MAP_ROWS },
+          { mismatch: 'yes', offset: 0, limit: REQUIREMENTS_MAP_ROWS },
+        ],
+        reader,
+      ),
+    );
+    if (all.pages === null) {
       const so = all.coverage !== null ? ` (${all.coverage.realPct}% of its behaviours mapped so far)` : '';
       return { entry: { ...base, file: null, summary: `no requirements map yet${so}: say so, and that its Requirements page can generate one` }, data: null };
     }
-    const mismatched = all.page.items.filter((r) => r.codeMismatch !== null);
-    const { text, summary } = renderRequirementsMap(repo, all.page, mismatched);
+    const [page, mismatches] = all.pages as [RequirementsPage, RequirementsPage];
+    const { text, summary } = renderRequirementsMap(repo, page, mismatches.items);
     const data = Buffer.from(text, 'utf8');
     const hash = createHash('sha256').update(data).digest('hex').slice(0, 12);
     return { entry: { ...base, file: `${REQUIREMENTS_MAP_DIR}/${fileStem(repo.id)}.${hash}.md`, summary }, data };
