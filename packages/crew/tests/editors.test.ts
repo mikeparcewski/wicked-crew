@@ -17,7 +17,7 @@ import { registerFrameGuard } from '../src/api/frame-guard.js';
 import { BUNDLE_CSP_BASE, bundleHeaders, requestOrigin, shellCsp } from '../src/editors/csp.js';
 import { CONFORMANCE_CASES, gardenConformance, gardenPackCheck, installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from '../src/editors/pack-install.js';
 import { EditorRegistry, EDITORS_STATE_FILENAME, discoverStudioEditors, externalReferences, readCapped, sha256Of } from '../src/editors/registry.js';
-import { registerEditorRoutes, serveBundle } from '../src/editors/routes.js';
+import { registerEditorRoutes, serveBundle, unitTokenProbe, type UnitTokenVerdict } from '../src/editors/routes.js';
 import { readNoFollow } from '../src/editors/visuals.js';
 import { guardBundle } from '../src/editors/webrtc-guard.js';
 
@@ -444,7 +444,7 @@ describe('the routes', () => {
     for (const a of apps.splice(0)) await a.close();
   });
 
-  async function harness(opts: { grants?: boolean; packCheck?: PackCheckRunner; conformance?: ConformanceRunner; ledger?: { excludes: string[] } | null; home?: string; frameGuard?: boolean } = {}) {
+  async function harness(opts: { grants?: boolean; packCheck?: PackCheckRunner; conformance?: ConformanceRunner; ledger?: { excludes: string[] } | null; home?: string; frameGuard?: boolean; ledgerDecides?: boolean; isUnitToken?: (token: string) => Promise<UnitTokenVerdict> } = {}) {
     const root = studioRoot();
     const home = opts.home ?? mkdtempSync(join(tmpdir(), 'editors-home-'));
     if (opts.home === undefined) scratches.push(home);
@@ -455,7 +455,16 @@ describe('the routes', () => {
       sha256: req.sha256,
       project: req.project ?? null,
       firstParty: req.firstParty,
-      grants: req.permissions.map((p) => ({ permission: p, decision: p === 'network.media' && req.project === 'kestrel' ? 'deny' : 'allow', ruleIds: ['EDITOR-BUILTIN'], token: `editor:${req.editorId}@${req.version}#${req.sha256}/${p}` })),
+      grants: req.permissions.map((p) => {
+        const token = `editor:${req.editorId}@${req.version}#${req.sha256}/${p}`;
+        // F37: like the engine, the ledger allows its exact token; a project deny dominates; anything else asks.
+        if (opts.ledgerDecides === true) {
+          if (p === 'artifact.write' && req.project === 'kestrel') return { permission: p, decision: 'deny' as const, ruleIds: ['KESTREL-NO-WRITE'], token };
+          if (p === 'artifact.read') return { permission: p, decision: 'allow' as const, ruleIds: ['EDITOR-OPEN-DEFAULTS'], token };
+          return ledger?.excludes.includes(token) === true ? { permission: p, decision: 'allow' as const, ruleIds: ['EDITOR-GRANTS'], token } : { permission: p, decision: 'ask' as const, ruleIds: [], token };
+        }
+        return { permission: p, decision: p === 'network.media' && req.project === 'kestrel' ? 'deny' as const : 'allow' as const, ruleIds: ['EDITOR-BUILTIN'], token };
+      }),
     }));
     const ledger = opts.ledger ?? null;
     const upsertConformanceRule = vi.fn(async (rule: ConformanceRule) => {
@@ -477,7 +486,7 @@ describe('the routes', () => {
       }
     });
     const logs: string[] = [];
-    registerEditorRoutes(app, { registry, adapter, packCheck: opts.packCheck ?? (async () => ({ ok: true, errors: [], warnings: [] })), conformance: opts.conformance ?? conformant(), log: (m) => logs.push(m) });
+    registerEditorRoutes(app, { registry, adapter, packCheck: opts.packCheck ?? (async () => ({ ok: true, errors: [], warnings: [] })), conformance: opts.conformance ?? conformant(), ...(opts.isUnitToken !== undefined ? { isUnitToken: opts.isUnitToken } : {}), log: (m) => logs.push(m) });
     await app.ready();
     apps.push(app);
     return { app, registry, root, home, evaluateEditorGrants, logs, upsertConformanceRule };
@@ -662,7 +671,7 @@ describe('the routes', () => {
     const v2 = makePack({ id: 'acme-inspect', name: 'acme-inspect', version: '0.2.0', html: EDITOR_HTML.replace('</body>', '<!-- v2 --></body>') });
     const res = await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: v2 } });
     expect(res.statusCode, res.body).toBe(200);
-    expect((res.json() as InstallEditorResponse).grantError).toMatch(/earlier build's mcp\.session grant was not withdrawn: store busy/);
+    expect((res.json() as InstallEditorResponse).grantError).toMatch(/its earlier grants \(any permission you allowed\) were not withdrawn: store busy/);
   });
 
   it('codex r2: a removal and an install never interleave: the editor and its grant agree afterwards', async () => {
@@ -689,6 +698,159 @@ describe('the routes', () => {
     if (live === null) expect(ledger.excludes).toEqual([]);
     else expect(ledger.excludes).toEqual([`editor:acme-inspect@${live.manifest.version}#${live.sha256}/mcp.session`]);
     expect(live === null || live.manifest.version === '0.2.0').toBe(true);
+  });
+
+  // ── F37: the person's allow / revoke (DES-artifact-editor-plugins §6.2 ledger, §6.4 human-only) ──
+  const WRITER = [{ id: 'artifact.read', why: 'to read it' }, { id: 'artifact.write', why: 'to tick items as versions you can undo' }, { id: 'checks.read', why: 'to see the checks' }];
+  async function installed(h: Awaited<ReturnType<typeof harness>>, opts: Parameters<typeof makePack>[0] = {}): Promise<string> {
+    const res = await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: makePack({ id: 'acme-check', name: 'acme-check', permissions: WRITER, ...opts }) } });
+    expect(res.statusCode, res.body).toBe(200);
+    return h.registry.get('acme-check')!.sha256;
+  }
+  /** A press on the build the page shows now (its version + hash), unless the payload names another. */
+  const grant = (h: Awaited<ReturnType<typeof harness>>, payload: Record<string, unknown>, headers: Record<string, string> = HUMAN, id = 'acme-check') => {
+    const r = h.registry.get(id);
+    const shown = r !== null ? { version: r.manifest.version, sha256: r.sha256 } : { version: '0.1.0', sha256: 'f'.repeat(64) };
+    return h.app.inject({ method: 'POST', url: `/api/v1/editors/${id}/grants`, headers, payload: { ...shown, ...payload } });
+  };
+  const decisionOf = (body: EditorGrantsResponse, p: string): string | undefined => body.grants.find((g) => g.permission === p)?.decision;
+
+  it('F37: a person allows artifact.write: this build\'s token lands in EDITOR-GRANTS, GET then says allow, revoke makes it ask again', async () => {
+    const ledger = { excludes: ['mcp:unrelated'] };
+    const h = await harness({ ledger, ledgerDecides: true });
+    const sha = await installed(h);
+    const token = `editor:acme-check@0.1.0#${sha}/artifact.write`;
+    const before = (await h.app.inject({ method: 'GET', url: '/api/v1/editors/acme-check/grants', headers: HUMAN })).json() as EditorGrantsResponse;
+    expect(decisionOf(before, 'artifact.write')).toBe('ask');
+    const allowed = await grant(h, { permission: 'artifact.write', allow: true });
+    expect(allowed.statusCode, allowed.body).toBe(200);
+    expect(decisionOf(allowed.json() as EditorGrantsResponse, 'artifact.write')).toBe('allow');
+    expect(ledger.excludes).toEqual(['mcp:unrelated', token]);
+    // Only the permission pressed: checks.read still asks.
+    expect(decisionOf(allowed.json() as EditorGrantsResponse, 'checks.read')).toBe('ask');
+    const read = (await h.app.inject({ method: 'GET', url: '/api/v1/editors/acme-check/grants', headers: HUMAN })).json() as EditorGrantsResponse;
+    expect(read.grants.find((g) => g.permission === 'artifact.write')).toMatchObject({ decision: 'allow', ruleIds: ['EDITOR-GRANTS'] });
+    // The same press again changes nothing (no second write).
+    const writes = h.upsertConformanceRule.mock.calls.length;
+    expect((await grant(h, { permission: 'artifact.write', allow: true })).statusCode).toBe(200);
+    expect(h.upsertConformanceRule.mock.calls.length).toBe(writes);
+    const revoked = await grant(h, { permission: 'artifact.write', allow: false });
+    expect(revoked.statusCode, revoked.body).toBe(200);
+    expect(decisionOf(revoked.json() as EditorGrantsResponse, 'artifact.write')).toBe('ask');
+    expect(ledger.excludes).toEqual(['mcp:unrelated']);
+  });
+
+  it('F37: a governed seat cannot allow: an agent actor is 403, a request carrying a unit token is 403 seat_token, and the ledger is untouched', async () => {
+    const ledger = { excludes: [] as string[] };
+    const seen: string[] = [];
+    const h = await harness({ ledger, ledgerDecides: true, isUnitToken: async (t) => { seen.push(t); return t === 'unit-tok-1' ? 'unit' : t === 'flaky' ? 'unknown' : 'not_unit'; } });
+    await installed(h);
+    const writes = h.upsertConformanceRule.mock.calls.length;
+    const agent = await grant(h, { permission: 'artifact.write', allow: true }, AGENT);
+    expect(agent.statusCode).toBe(403);
+    // auth=off: the caller is the local human, but it SENT a governed unit's token: refused (the §6.4 tripwire).
+    // (No x-actor header: the request is the local human of auth=off, the only actor the tripwire checks.)
+    const seat = await grant(h, { permission: 'artifact.write', allow: true }, { authorization: 'Bearer unit-tok-1' });
+    expect(seat.statusCode, seat.body).toBe(403);
+    expect(seat.json()).toMatchObject({ code: 'seat_token' });
+    expect(seen).toEqual(['unit-tok-1']);
+    expect(h.logs.some((l) => /governed unit's token/.test(l))).toBe(true);
+    // codex r1: when crew cannot tell (the engine faulted), it refuses and changes nothing: the tripwire fails closed.
+    const unsure = await grant(h, { permission: 'artifact.write', allow: true }, { authorization: 'Bearer flaky' });
+    expect(unsure.statusCode).toBe(503);
+    // An observer (below operator) is refused too.
+    expect((await grant(h, { permission: 'artifact.write', allow: true }, OBSERVER)).statusCode).toBe(403);
+    expect(h.upsertConformanceRule.mock.calls.length).toBe(writes);
+    expect(ledger.excludes).toEqual([]);
+    // A verified human operator (auth=required) is not probed at all; nor is a local request with no bearer.
+    expect((await grant(h, { permission: 'artifact.write', allow: true }, { ...HUMAN, authorization: 'Bearer person-tok' })).statusCode).toBe(200);
+    expect(seen).toEqual(['unit-tok-1', 'flaky']);
+    expect(ledger.excludes).toHaveLength(1);
+    expect((await grant(h, { permission: 'artifact.write', allow: false }, {})).statusCode).toBe(200);
+    expect(ledger.excludes).toHaveLength(0);
+    // codex r2: an engine with no resolver cannot clear a bearer the local actor sends: 503, nothing written.
+    const blind = await harness({ ledger, ledgerDecides: true });
+    await installed(blind);
+    expect((await grant(blind, { permission: 'artifact.write', allow: true }, { authorization: 'Bearer unit-tok-1' })).statusCode).toBe(503);
+    expect(ledger.excludes).toHaveLength(0);
+  });
+
+  it('F37: refusals: mcp.session is the install consent\'s (409), an undeclared or unknown permission or a bad body is 400, an unknown editor 404, no binding 501, no ledger 503', async () => {
+    const ledger = { excludes: [] as string[] };
+    const h = await harness({ ledger, ledgerDecides: true });
+    await installed(h, { permissions: [...WRITER, { id: 'mcp.session', why: 'x' }] });
+    const before = [...ledger.excludes];
+    const mcp = await grant(h, { permission: 'mcp.session', allow: true });
+    expect(mcp.statusCode).toBe(409);
+    expect(mcp.json()).toMatchObject({ code: 'install_only' });
+    expect((await grant(h, { permission: 'mcp.session', allow: false })).statusCode).toBe(409);
+    expect(ledger.excludes).toEqual(before);
+    expect((await grant(h, { permission: 'artifact.export', allow: true })).statusCode).toBe(400);
+    expect((await grant(h, { permission: 'network.fetch', allow: true })).statusCode).toBe(400);
+    expect((await grant(h, { permission: 'artifact.write' })).statusCode).toBe(400);
+    expect((await grant(h, { permission: 'artifact.write', allow: true, sha256: 'not-a-hash' })).statusCode).toBe(400);
+    expect((await grant(h, { permission: 'artifact.write', allow: true, token: 'editor:acme-check@9#x/artifact.write' })).statusCode).toBe(400);
+    expect((await grant(h, { permission: 'artifact.write', allow: true }, HUMAN, 'nope')).statusCode).toBe(404);
+    expect(ledger.excludes).toEqual(before);
+    const old = await harness({ grants: false });
+    expect((await grant(old, { permission: 'artifact.write', allow: true }, HUMAN, 'wicked-page')).statusCode).toBe(501);
+    const unseeded = await harness({ ledger: null, ledgerDecides: true });
+    await installed(unseeded);
+    const res = await grant(unseeded, { permission: 'artifact.write', allow: true });
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toMatchObject({ error: expect.stringMatching(/not allowed: .*EDITOR-GRANTS ledger is not in the policy store/) });
+  });
+
+  it('F37 (codex r1): the press is bound to the build the person was shown: an update in between is a 409 and writes nothing', async () => {
+    const ledger = { excludes: [] as string[] };
+    const h = await harness({ ledger, ledgerDecides: true });
+    const sha1 = await installed(h);
+    await installed(h, { version: '0.2.0', html: EDITOR_HTML.replace('</body>', '<!-- v2 --></body>') });
+    const stale = await grant(h, { permission: 'artifact.write', allow: true, version: '0.1.0', sha256: sha1 });
+    expect(stale.statusCode, stale.body).toBe(409);
+    expect(stale.json()).toMatchObject({ code: 'build_changed' });
+    // Same version, another hash: still not the build that was shown.
+    expect((await grant(h, { permission: 'artifact.write', allow: true, version: '0.2.0', sha256: sha1 })).statusCode).toBe(409);
+    expect(ledger.excludes).toEqual([]);
+  });
+
+  it('F37 (codex r1): the tripwire probe: the engine naming a unit is "unit", its invalid_token refusal "not_unit", any other fault or answer "unknown"', async () => {
+    expect(unitTokenProbe(null)).toBeUndefined();
+    const probe = (answer: () => Promise<string>) => unitTokenProbe(async (req) => { expect(JSON.parse(req)).toEqual({ token: 'tok' }); return answer(); })!('tok');
+    expect(await probe(async () => JSON.stringify({ unit: { runId: 'r1', ord: 2 }, projectId: 'p' }))).toBe('unit');
+    expect(await probe(async () => { throw new Error('invalid_token: unknown token'); })).toBe('not_unit');
+    expect(await probe(async () => { throw new Error('guard_error: store locked'); })).toBe('unknown');
+    expect(await probe(async () => { throw new Error('bad_request: token missing'); })).toBe('unknown');
+    expect(await probe(async () => 'not json')).toBe('unknown');
+    expect(await probe(async () => JSON.stringify({ unit: null }))).toBe('unknown');
+  });
+
+  it('F37: the allow is per build: an update asks again, a project deny still dominates, and a removal withdraws every grant of the editor', async () => {
+    const ledger = { excludes: ['mcp:unrelated'] };
+    const h = await harness({ ledger, ledgerDecides: true });
+    await installed(h);
+    expect((await grant(h, { permission: 'artifact.write', allow: true })).statusCode).toBe(200);
+    expect((await grant(h, { permission: 'checks.read', allow: true })).statusCode).toBe(200);
+    // The project's deny rule wins over the person's allow, and the answer says so.
+    const kestrel = await grant(h, { permission: 'artifact.write', allow: true, project: 'kestrel' });
+    expect(kestrel.json()).toMatchObject({ project: 'kestrel' });
+    expect(decisionOf(kestrel.json() as EditorGrantsResponse, 'artifact.write')).toBe('deny');
+    // A new build is a new token: it asks again; allowing it drops the old build's token.
+    await installed(h, { version: '0.2.0', html: EDITOR_HTML.replace('</body>', '<!-- v2 --></body>') });
+    const sha2 = h.registry.get('acme-check')!.sha256;
+    const after = (await h.app.inject({ method: 'GET', url: '/api/v1/editors/acme-check/grants', headers: HUMAN })).json() as EditorGrantsResponse;
+    expect(decisionOf(after, 'artifact.write')).toBe('ask');
+    // pi r1: the update itself withdrew the old build's allows (every permission), so none pile up.
+    expect(ledger.excludes).toEqual(['mcp:unrelated']);
+    expect((await grant(h, { permission: 'artifact.write', allow: true })).statusCode).toBe(200);
+    expect(ledger.excludes.filter((t) => t.endsWith('/artifact.write'))).toEqual([`editor:acme-check@0.2.0#${sha2}/artifact.write`]);
+    // The same build installed again asks again too (codex r2: no "same build keeps" path for a failed cleanup to reuse).
+    await installed(h, { version: '0.2.0', html: EDITOR_HTML.replace('</body>', '<!-- v2 --></body>') });
+    expect(ledger.excludes).toEqual(['mcp:unrelated']);
+    expect((await grant(h, { permission: 'artifact.write', allow: true })).statusCode).toBe(200);
+    // Removing the editor withdraws all of its grants (not only the install's); other entries stay.
+    expect((await h.app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-check', headers: HUMAN })).statusCode).toBe(200);
+    expect(ledger.excludes).toEqual(['mcp:unrelated']);
   });
 
   it('an install whose mcp.session grant cannot be written still installs, and says it asks', async () => {

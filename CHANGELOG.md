@@ -12,6 +12,17 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **A person can allow or revoke what an installed editor asks for (F37; api-types `SetEditorGrantBody`, unreleased).**
+  `POST /api/v1/editors/:id/grants {permission, allow, version, sha256, project?}` is the human-only writer of the
+  `EDITOR-GRANTS` ledger the engine already reads. The press names the build the person was shown (409
+  `build_changed` when the editor was updated meanwhile); allow writes that build's token, built from crew's own
+  record, for every project; revoke drops every token of that editor and permission; the answer is the decided set
+  after the write (a project deny still dominates). `mcp.session` stays the install consent's (409 `install_only`).
+  Under `auth=off` a request carrying a governed unit's token is refused (403 `seat_token`; 503 when the engine cannot
+  tell, or has no way to). An install or update now withdraws every earlier grant of the editor (the same build's
+  too), and so does `DELETE /editors/:id`, so a new build, a reinstall or a reinstall after removal asks again. An
+  editor already open keeps the grants it opened with until it opens again. Until now an installed third-party editor
+  that asked for `artifact.write` could open a document but never save.
 - **The draft's page count is printed once, by the engine, with a browser that can print in its jail (PLAN G12, crew
   half; no api-types change).** Crew's managed renderer is now Playwright's headless shell
   (`chromium_headless_shell`), which `playwright install chromium` already installs beside Chrome for Testing: the full

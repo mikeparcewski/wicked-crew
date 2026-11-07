@@ -429,7 +429,7 @@ import { ConsiderationService } from '../decisions/consider.js';
 import { gardenConformance, gardenPackCheck, type ConformanceRunner, type PackCheckRunner } from '../editors/pack-install.js';
 import { conformanceProvisioner, conformanceRuntimeReady, conformanceRuntimeRoot, conformanceVenvDir, editorPluginLaunchListener, venvPython } from '../editors/conformance-runtime.js';
 import { EditorRegistry } from '../editors/registry.js';
-import { registerEditorRoutes } from '../editors/routes.js';
+import { registerEditorRoutes, unitTokenProbe, type UnitTokenVerdict } from '../editors/routes.js';
 import type { AppActionStore } from '../apps/actions/store.js';
 import { AppWritePath } from '../apps/actions/write-path.js';
 import { AppExecutor } from '../apps/exec/executor.js';
@@ -1517,6 +1517,8 @@ export interface RuntimeDeps {
   packCheck?: PackCheckRunner;
   /** (tests) the install-time conformance run `POST /editors` uses; default = garden's runner as a child. */
   editorConformance?: ConformanceRunner;
+  /** F37 (tests): is a bearer a governed unit's token (the grant write's tripwire); default = the engine's `resolveEstateScope`. */
+  editorUnitTokenProbe?: (token: string) => Promise<UnitTokenVerdict>;
   /** EP-C1 (tests): where `daemon-editors.json` lives; default = the crew state home. */
   editorsStateHome?: string;
   /** DES-APPS-001 (K2a): the app store behind `/apps` and `POST /repos {create}`. `createServer` builds it over
@@ -1971,6 +1973,11 @@ export function registerRoutes(
     adapter,
     packCheck: runtime.packCheck ?? gardenPackCheck(discoverLivePlugin()?.path ?? null),
     conformance: runtime.editorConformance ?? gardenConformance(discoverLivePlugin()?.path ?? null, () => process.env['WICKED_CREW_URL'] ?? null, { provision: editorConformanceRuntime }),
+    // F37: the grant write's §6.4 tripwire asks the engine whether a bearer is a governed unit's token.
+    ...(() => {
+      const probe = runtime.editorUnitTokenProbe !== undefined ? runtime.editorUnitTokenProbe : unitTokenProbe(CoreAdapter.estateScopeResolver());
+      return probe !== undefined ? { isUnitToken: probe } : {};
+    })(),
     log: (m) => app.log.warn(m),
   });
   // DES-APPS-001 §7.6 (K2a): the app store's routes, when this daemon has a store.
