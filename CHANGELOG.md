@@ -44,6 +44,13 @@ mentioned only where a daemon release depends on them.
 
 ### Changed
 
+- **Editor installs require the behaviour cases 7 and 18 (G9b).** `CONFORMANCE_CASES` adds `7-edit` (an editor that
+  asks `artifact.write` saves an edit through its own UI: its `data-wicked-save` control lands one version; a viewer
+  passes) and `18-shows` (it asks `artifact.read`, shows the page it is handed and reads again when another version
+  lands). A report without them is refused, so an editor that never reads what it opens no longer installs. Needs a
+  wicked-garden whose conformance runner reports both (release garden first); wicked-core's engine step
+  (`editor_conformance` `CASES`) gains the same two ids.
+
 - **An editor-plugin run's conformance cases run on this machine, from crew's own runtime (e2e F18,
   DES-EDITOR-CONFORMANCE-HOST).** The engine now runs the editor-plugin workflow's conformance cases itself, as an
   `editor_conformance` Tool step jailed to one loopback port (wicked-core). It also no longer asks the review seat to

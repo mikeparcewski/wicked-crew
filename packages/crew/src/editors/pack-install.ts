@@ -152,8 +152,13 @@ export function conformanceCapMs(editors: readonly Record<string, unknown>[], lo
   return Math.round(seconds * 1000);
 }
 
-/** The cases a conformance run must report passing for every editor (garden's runner: 0-6 and 8-12). */
-export const CONFORMANCE_CASES = ['0-manifest', '1-handshake', '2-sizes', '3-no-network', '4-permissions', '5-typing', '6-forwarding', '8-strict-input', '9-liveness', '10-keyboard', '11-theme', '12-hash-pinned'] as const;
+/** The cases a conformance run must report passing for every editor (garden's runner: 0-12 and 18; wicked-core's
+ *  editor_conformance `CASES` is the same list). 7 and 18 are behaviour (G9b): `7-edit`, an editor that asks
+ *  `artifact.write` saves an edit through its own UI (its `data-wicked-save` control lands one version; a viewer
+ *  passes), and `18-shows`, it asks `artifact.read`, shows the content it is handed and reads again when another
+ *  version lands. A garden runner before them reports neither, so every install is refused (fail closed) until
+ *  garden carries them. */
+export const CONFORMANCE_CASES = ['0-manifest', '1-handshake', '2-sizes', '3-no-network', '4-permissions', '5-typing', '6-forwarding', '7-edit', '8-strict-input', '9-liveness', '10-keyboard', '11-theme', '12-hash-pinned', '18-shows'] as const;
 /** The protocol-2 cases an editor whose `protocol` lists 2 must also pass (DES-EDITOR-PLUGIN-CONTRACT-001 §8.3):
  *  its surfaces, card, options and full screen. A garden runner before them reports none, so such an editor is
  *  refused (fail closed). Case 17 (protocol-1 compatibility) restates cases 1-12, so it is not required. */
