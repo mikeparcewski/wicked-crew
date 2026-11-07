@@ -216,6 +216,14 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **A `/` command picked in a new chat makes its proposal (F36; no api-types change).** `POST /chats {seed}` took
+  every first seeded open for a retry: its retry check compared the chat history's `stateOf` (which answers `null`
+  for an unknown id) with `undefined`, so it answered 200 `adopted` with no chat opened and no proposal. The check now
+  asks `ChatHistoryStore.has(id)`. Behind it, a new chat has no transcript until its first turn, so the seed's
+  proposal had nowhere to be recorded and came back `chat_gone`; the seeded open now starts the live chat's transcript
+  (`ChatTranscriptStore.start`) before it records the proposal. A retry with the same `requestId` still answers 200
+  `adopted` with the same chat and proposal. The repo page's Requirements -> "Generate it" opens through the same path.
+
 - **A repo chat answers from the repository's requirements map** (crew#1412). Asked what a repository requires, a
   repo-scoped chat said it "has no requirements map": nothing in the chat's grounding carried the map, and the
   estate shim shows its requirement nodes only as names. Each message now hands the seats every scoped repository's
