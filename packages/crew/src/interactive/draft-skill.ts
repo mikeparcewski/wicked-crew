@@ -530,7 +530,7 @@ export interface DraftFloorIo {
   timeoutMs?: number;
 }
 
-function runNode(argv: string[], timeoutMs: number, chrome?: string): Promise<{ stdout: string; code: number | null }> {
+export function runNode(argv: string[], timeoutMs: number, chrome?: string): Promise<{ stdout: string; code: number | null }> {
   return new Promise((resolvePromise, reject) => {
     // The child's env goes through `childEnvWithBootEstateDb` like every other spawn in src/
     // (crew#495, `tests/governance-child-env.test.ts`): a daemon-exported governance store must

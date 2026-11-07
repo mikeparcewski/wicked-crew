@@ -558,6 +558,8 @@ describe('startInteractiveEditSubscriber (real bus, fake engine)', () => {
     };
     expect(p.document_id).toBe('spike-doc');
     expect(p.version).toBe(2); // the handoff's parent version, not a head guess
+    // A5 (§6.2, I1): the version it lands records this run, so a refine never protects it as a person's hand edit.
+    expect((edit.payload as { run_id?: string }).run_id).toBe(engine.launches[0]!.sessionId);
     expect(p.results).toEqual([
       { selector: 'slide-2-heading-1', fragment: '<h2 data-wid="slide-2-heading-1">Punchier!</h2>' },
     ]);

@@ -1018,7 +1018,8 @@ export async function startInteractiveDraftSubscriber(
       // could not see it end in time) still ends its attempt: released, Try again offered. Never relaunched.
       if ((event.type === 'sessionCompleted' || event.type === 'sessionFailed' || event.type === 'runCancelled') && opts.bindings !== undefined && !finalizingRuns.has(runId)) {
         const hit = opts.bindings.attemptOf(runId);
-        if (hit !== null && hit.attempt.outcome === undefined && hit.attempt.emittedAt === undefined) {
+        // A refine's attempt is the chat seam's (it holds that flight, and settles its own orphan the same way).
+        if (hit !== null && hit.attempt.op !== 'refine' && hit.attempt.outcome === undefined && hit.attempt.emittedAt === undefined) {
           const outcome: BoundOutcome = { kind: 'failed', reason: 'interrupted by a restart' };
           if (opts.bindings.setOutcome(hit.binding.ref, runId, outcome)) {
             try {

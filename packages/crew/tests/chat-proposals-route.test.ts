@@ -374,6 +374,21 @@ describe('chat proposals (server, A2)', () => {
     expect(stubRows().length).toBe(n);
   });
 
+  it('A5: a change says the sources it cannot use yet instead of showing them as used', async () => {
+    await turn(stub, stubListeners, 'src-1', `Use run ${RUN_A} to fix slide 1`, { refine: 'mikes/coverage-deck', ask: 'fix slide 1', sources: [`run:${RUN_A}`] }, { projectId: 'mikes', open: true });
+    const p = await proposalOf(stub, 'src-1');
+    expect(p.sources.every((s) => s.status === 'struck')).toBe(true);
+    expect(p.sources[0]?.reason).toContain('a change works from the document and your words');
+  });
+
+  it('A5: only the person releases a protected edit, and only one the card shows (an unknown id is refused)', async () => {
+    await turn(stub, stubListeners, 'allow-1', 'Retitle slide 1', { refine: 'mikes/coverage-deck', ask: 'retitle', touches: ['h'] }, { projectId: 'mikes', open: true });
+    const p = await proposalOf(stub, 'allow-1');
+    const refused = await decide(stub, 'allow-1', p.pid, { decision: 'go', edits: { allow: ['text:h#00000000'] } });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json()).toMatchObject({ code: 'edits_invalid', error: 'only edits shown on this card can be let change; check the card again' });
+  });
+
   it('a refine whose document moved re-resolves instead of starting', async () => {
     await turn(stub, stubListeners, 'moved-1', 'Retitle slide 1', { refine: 'mikes/coverage-deck', ask: 'retitle' }, { projectId: 'mikes', open: true });
     const p = await proposalOf(stub, 'moved-1');
