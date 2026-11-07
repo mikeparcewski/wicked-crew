@@ -395,6 +395,11 @@ export interface HealthCapabilities {
    */
   chatJobProposals?: boolean;
   /**
+   * (api-types 0.196.0) A job proposal's Start takes `power` ({@link ChatProposalDecisionBody.power}). ABSENT on an
+   * older daemon: send no `power` (the strict body refuses it); a chat job then always stops at its first plan.
+   */
+  chatJobPower?: boolean;
+  /**
    * (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §14) What a chat can do with artifacts, one flag per operation, each
    * true only once its slice ships. `context`: `ChatMessageBody.context` is accepted ({@link ChatMessageContext}),
    * `POST /chats {seedFromArtifact}` is served, and each turn's seats get the open artifact, the runs the person names
@@ -9299,8 +9304,16 @@ export interface ArtifactProposal {
   helpers: ProposalHelpers | null;
   /** `null` for a theme. */
   time: ProposalTime | null;
-  /** "Stops for you if the check fails. The plan or an escalation may also ask." `null` for a theme. */
+  /** "Stops for you if the check fails. The plan or an escalation may also ask." `null` for a theme, and (api-types
+   *  0.196.0) for a job whose Start chooses how it runs ({@link ArtifactProposal.powerChoice}). */
   stops: string | null;
+  /**
+   * (api-types 0.196.0) A job whose Start chooses how it runs: this daemon has power mode, Power mode for new jobs was on
+   * when it was proposed, and the job can run as a power run (a workflow run on a repository, a preset workflow). Its
+   * sentence then promises no plan review and its `stops` is null: show the choice (Review plan) beside Start and send it
+   * as {@link ChatProposalDecisionBody.power}. ABSENT: the Start can't choose; send no `power`, it stops at its plan.
+   */
+  powerChoice?: boolean;
   /** The project the result is filed in; `label` is the project's name or "Not in a project · this chat". */
   filedIn: { projectId: string | null; label: string };
   /** refine: the document (`<mount>/<doc>`), its title, and the head it was proposed on. */
@@ -9463,6 +9476,20 @@ export interface ChatProposalView {
 export interface ChatProposalDecisionBody {
   decision: 'go' | 'not_now';
   edits?: ProposalEdits;
+  /**
+   * (api-types 0.196.0, operator ruling 2026-11-06) How a JOB's Start runs: `true` = a power run (one orchestrator
+   * session, no plan-approval gate; the deliver gate and what policy requires still hold), `false` = it stops at its
+   * first plan. ABSENT = it stops at its first plan, exactly as before. Send only where `chatJobPower` is true, only with
+   * `decision: 'go'` on a `job` proposal (else 400 `power_not_applicable`). `true` is honoured only when this daemon can
+   * run THIS job as a power run (a workflow run on a repository, a preset workflow, an engine with power mode) and its
+   * Power mode for new jobs (`powerModeDefault`) is on: chat starts follow the setting. Else 409 `power_unavailable`
+   * with the reason, and nothing is recorded or started. If that changes between this check and the engine call (the
+   * launcher checks again, as does the launch itself), the answer is 502 `launch_failed` with the reason and the
+   * proposal is interrupted: Go again resumes it with that press's choice. Never run phased silently. Where a job's
+   * Start can choose (power mode and the setting on, the job fits), its `sentence` promises no plan review and its
+   * `stops` is null: the client shows the choice beside Start.
+   */
+  power?: boolean;
 }
 
 /**
@@ -9477,7 +9504,8 @@ export interface ChatProposalDecisionBody {
  * recorded; Go again resumes the same identity). (api-types 0.192.0) A job's Go adds 409 `proposal_revising` (a
  * correction is in flight), `proposal_reopened` (a gone turn's hold was released: look again), `catalog_changed` (the
  * refreshed proposal is the `view`), `card_not_available`, `proposal_stale`, and for a reshape the held plan's own
- * answers (`reshape_after_work`, `gate_changed`). A 409 carries the current `view` when there is one.
+ * answers (`reshape_after_work`, `gate_changed`). (api-types 0.196.0) `power` adds 400 `power_not_applicable` and
+ * 409 `power_unavailable`. A 409 carries the current `view` when there is one.
  */
 export interface ChatProposalDecisionResponse {
   view: ChatProposalView;

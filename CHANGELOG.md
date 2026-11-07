@@ -12,6 +12,18 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **A chat job's Start chooses how it runs (operator ruling 2026-11-06; api-types 0.196.0).** `POST
+  /chats/:id/proposals/:pid` takes an optional `power` with `decision: 'go'` on a job proposal. `true` launches a power
+  run (no plan-approval gate; the deliver gate and what policy requires still hold). `false` or absent launches exactly
+  as before: the job stops at its first plan. `true` is honoured only when this daemon can run that job as a power run
+  (a workflow run on a repository, a preset workflow, an engine with power mode) and Power mode for new jobs is on.
+  Otherwise the Start is refused with 409 `power_unavailable` and its reason, before anything is recorded or started.
+  The launcher and the launch itself check again (`powerRequired`), so a chat job is never run phased in its place: a
+  change in between is a 502 `launch_failed` with the reason, and Go again resumes it. `power` with Not now, or on
+  another kind, is 400 `power_not_applicable`. Where the Start can choose, the proposal's sentence no longer promises
+  the plan review and its `stops` is null. Health advertises `capabilities.chatJobPower`; `wicked-crew-api-types`
+  0.196.0 types both.
+
 - **Apps: archive with Restore, and an earlier version read (plugins G16, G3; operator ruling D5; api-types 0.196.0).**
   `POST /apps/:app/archive` and `/unarchive` (human operator) hide an app from `GET /apps` and refuse its version
   changes (edits, undo, redo, restore, new turns: `409 app_archived`) until it is restored; nothing is deleted. Reads,
