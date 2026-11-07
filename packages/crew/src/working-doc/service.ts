@@ -123,6 +123,8 @@ const EMPTY_SIG = '[]';
 export function contextOwed(rec: WorkingDocRecord): boolean {
   const c = rec.context;
   if (c?.retry === true) return true;
+  // A write of unknown outcome touching the person's context: settling it may set the block (xreview F35 r1).
+  if (rec.pending != null && Object.keys(rec.pending.values).some((k) => CONTEXT_SECTIONS.includes(k as SectionId))) return true;
   if (c != null && c.attempted !== null && (c.sentVersion ?? -1) < c.attempted) return true;
   let newest = -1;
   for (const sid of CONTEXT_SECTIONS) {
@@ -1165,7 +1167,7 @@ export class WorkingDocService {
         const now = this.d.store.get(runId);
         if (now === undefined) return;
         // A write of unknown outcome: its settling (`record`) sets the block, or the retry comes back for it.
-        if (now.pending != null) { if (now.context?.retry === true) this.scheduleContextRetry(runId); return; }
+        if (now.pending != null) { if (now.context?.retry === true || contextOwed(now)) this.scheduleContextRetry(runId); return; }
         const head = await this.d.backend.read(now.projectId, now.docId);
         if (head === null) return;
         await this.sendContext(runId, this.contextBlock(runId, head.head, sectionsOf(head.html), { kind: 'system', id: 'crew' }));
@@ -1199,8 +1201,8 @@ export class WorkingDocService {
       }
       const gap = this.d.catchUpGapMs ?? 250;
       for (const runId of todo) {
-        if (live !== null && !live.has(runId)) continue;
-        await this.resyncContext(runId, live !== null);
+        // Not in the live list (archived, or the list could not be read): its own check, bounded by the owed set.
+        await this.resyncContext(runId, live?.has(runId) === true);
         if (gap > 0) await new Promise((r) => { const t = setTimeout(r, gap); (t as { unref?: () => void }).unref?.(); });
       }
     })();

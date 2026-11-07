@@ -83,5 +83,26 @@ describe('F35: the start-up context sync is bounded by what is owed, not by how 
     expect(contextOwed({ ...base, context: { ...ctx, retry: true } }), 'a set owed').toBe(true);
     expect(contextOwed({ ...base, context: { ...ctx, attempted: 3 } }), 'an attempt with no answer recorded').toBe(true);
     expect(contextOwed({ ...base, trail: base.trail.slice(0, 1) }), 'crew’s seeded Goal only').toBe(false);
+    const pending = { expectHead: 2, author: { kind: 'human' as const, id: 'local' }, surface: null, at: 0, actor: { id: 'local', kind: 'human' } };
+    expect(contextOwed({ ...base, context: ctx, pending: { ...pending, values: { goal: 'G' } } }), 'a person’s Goal write of unknown outcome').toBe(true);
+    expect(contextOwed({ ...base, context: ctx, pending: { ...pending, values: { next: 'N' } } }), 'a Next write of unknown outcome').toBe(false);
+  });
+
+  it('a person’s Goal write of unknown outcome left by a restart is settled at start-up and its block set', async () => {
+    const t = rig(new Set());
+    const store = (t.service as unknown as { d: { store: WorkingDocStore } }).d.store;
+    store.update('run-9', (r) => { r.pending = { expectHead: 0, author: { kind: 'human', id: 'local' }, surface: null, values: { goal: 'Keep /v1 working.' }, at: 0, actor: { id: 'local', kind: 'human' } }; });
+    await t.service.contextCatchUp();
+    expect(store.get('run-9')?.pending).toBeNull();
+    expect(t.counts.set).toBe(1);
+    expect(t.counts.run).toBe(0);
+  });
+
+  it('an owed document whose run is not in the live list (archived) still gets its own check', async () => {
+    const t = rig(new Set([5]));
+    const svc = t.service as unknown as { d: { liveRuns: () => Promise<Array<{ runId: string; createdAt: number }>> } };
+    svc.d.liveRuns = async () => { t.counts.liveRuns += 1; return []; };
+    await t.service.contextCatchUp();
+    expect(t.counts).toEqual({ run: 1, liveRuns: 1, read: 1, set: 1 });
   });
 });
