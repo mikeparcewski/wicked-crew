@@ -528,7 +528,8 @@ describe.skipIf(!bashAvailable)('the verify phase RUNS the produced tests under 
     const { status, out } = runVerify(root, { TMPDIR: mkdtempSync(join(base, 'f30-pass-tmp-')), WICKED_RUN_BASE: runBase });
     expect(out).toMatch(/QE-VERIFY-BASE ref=run-base commit=/);
     expect(out).toMatch(/file=test\/m\.test\.js harness=node-test .*exit=1 .*status=failed class=pre-existing-on-base/);
-    expect(out).toContain('failed=0 not_executed=0 failed_on_base=1');
+    expect(out).toContain('failed=0 not_executed=0 plan=');
+    expect(out).toMatch(/QE-VERIFY-SUMMARY: .* failed_on_base=1$/m);
     expect(out).toContain('fail on main too');
     expect(status).toBe(0);
     const report = parseQeVerifyOutput(out)!;
@@ -543,7 +544,8 @@ describe.skipIf(!bashAvailable)('the verify phase RUNS the produced tests under 
     ]);
     const { status, out } = runVerify(root, { TMPDIR: mkdtempSync(join(base, 'f30-fail-tmp-')), WICKED_RUN_BASE: runBase });
     expect(out).toMatch(/file=test\/m\.test\.js .*status=failed class=produced-test-failure/);
-    expect(out).toContain('failed=1 not_executed=0 failed_on_base=0');
+    expect(out).toContain('failed=1 not_executed=0 plan=');
+    expect(out).toMatch(/QE-VERIFY-SUMMARY: .* failed_on_base=0$/m);
     expect(out).toContain('qe-verify: FAIL');
     expect(status).not.toBe(0);
     expect(parseQeVerifyOutput(out)!.failed).toBe(1);
@@ -555,7 +557,7 @@ describe.skipIf(!bashAvailable)('the verify phase RUNS the produced tests under 
     ]);
     const { status, out } = runVerify(root, { TMPDIR: mkdtempSync(join(base, 'f30-nobase-tmp-')), WICKED_RUN_BASE: '' });
     expect(out).toContain('no base recorded by the engine');
-    expect(out).toContain('failed=1 not_executed=0 failed_on_base=0');
+    expect(out).toContain('failed=1 not_executed=0 plan=');
     expect(status).not.toBe(0);
   }, VERIFY_TEST_TIMEOUT_MS);
 
