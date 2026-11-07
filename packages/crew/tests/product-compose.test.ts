@@ -184,8 +184,15 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
         expect(step).not.toHaveProperty('validator_pin');
         const entry = entries.find((e) => e.id === step['catalog']);
         expect(entry, `catalog entry ${String(step['catalog'])}`).toBeDefined();
-        expect([step['id'], entry!.pinned, entry!.validator_pin]).toEqual([step['id'], false, null]);
+        expect([step['id'], entry!.pinned, entry!.validator_pin]).toEqual([step['id'], false, null]); // the id labels a failure
       }
+      // The engine's own composition of this plan with no repository (pi review): no phase carries a pin, and the floor
+      // adds no second critique beside the authored one.
+      const preview = await engine.previewPlan({ steps } as never, {});
+      const phases = preview.def.phases.map((ph) => [ph.id, ph.validator_pin]);
+      expect(phases).toEqual(expect.arrayContaining([['draft', null], ['review', null]]));
+      expect(phases.filter(([, pin]) => pin !== null)).toEqual([]);
+      expect(preview.steps.filter((s) => s.catalog === 'critique')).toHaveLength(1);
       // The review step is still a distinct evaluator behind the human gate.
       const review = steps.find((s) => s['id'] === 'review')!;
       expect(entries.find((e) => e.id === review['catalog'])!.role).toBe('evaluator');
