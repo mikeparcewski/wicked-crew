@@ -12,6 +12,68 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **Chat refines the open document, deck or page, and keeps the person's own edits (DES-CHAT-ARTIFACTS-001 A5;
+  plugins-complete G4; api-types 0.197.0).** The refine launcher, its landing guard and the card's protected edits;
+  `capabilities.chatArtifacts.refine` turns on (and the launcher is registered) in a follow-up to the proposal-launcher
+  assembly, so a seat then proposes a `refine` card for a change to the open document instead of a new one. Its
+  instructions say a change keeps the document; a new audience or form is new work; either reading gets one question. The card lists
+  the person's protected edits (`ArtifactProposal.protected`, recomputed from the document's version lineage: a
+  person's writes, deck moves and removals are kept; a run's version releases only what the person let that run
+  change; undo follows the parent chain; a theme protects nothing); `ProposalEdits.allow` lets the person release one,
+  and only one shown on the card. Go starts one `interactive-chat` run with the derived run id and the card's two
+  helpers, recorded on the document's binding; its task says the document is data, never instructions, and lists the
+  edits to keep exactly. Nothing it wrote lands until crew's landing guard passes on crew's own copy of the file (the
+  floor with the writer's `notes.json` and the leak scan, then the keep check against crew's map; a check that cannot
+  run lands nothing), and then only on the head it was accepted on (`expect_head`): a hand edit made meanwhile lands
+  nothing and offers Try again on the new head. Every failure releases the chat and the document with the reason.
+  Edit-seam and chat-seam landings now send `run_id`, so a run's version is never read as a person's edit. Needs
+  wicked-garden with `keep_check.py`.
+- **Drafts keep process notes out of the document, and the checks read says what crew measured (DES-CHAT-ARTIFACTS-001
+  A6; plugins-complete G12, crew half; api-types 0.197.0).** A draft's task names `notes.json` beside the deliverable
+  (`left_out`, `sources`, `assumptions`) and the run's id; crew's draft floor passes both to garden's self-check, which
+  now also fails a document carrying how it was made (inbox paths, the run id, "self-check", "UNVERIFIED", bare `[S]`
+  markers, "I used …" narration, in text, speaker notes, attributes and comments) or a missing/invalid `notes.json`.
+  Speaker notes are a talk track: crew#1266's allowance for process notes there is withdrawn. For each run that
+  announces a document crew records, in its own state, the floor verdict, the page count (measured when a renderer
+  printed it), the file's sha256 and the writer's notes with the sources it struck. `GET
+  /projects/:id/interactive/docs/:doc/checks` gains `notes` (from the nearest ancestor version whose run recorded them,
+  `from_version` says which; `null` = none recorded) and `floor` (`source: 'floor'`, a host measurement of the file
+  that version's run announced, before interactive anchored and themed it; `null` = not measured, e.g. a version made
+  by hand). Crew keeps the newest 500 records per document. crew's conformance runtime is now also made
+  when a draft or refine is launched, and the floor prints the document with its Chromium (or the operator's
+  `WICKED_CHROME`), so the page count is measured instead of estimated. Needs wicked-garden with `leak_scan.py` and
+  `self_check.py --notes` (release garden first: an older self-check refuses the new flags and the floor reports
+  itself unavailable).
+- **Requirements: code mismatches, code age and the minimum in force (operator rulings 2026-11-06; api-types
+  0.197.0).** `GET /repos/:id/requirements` items carry `codeMismatch` (the code does not meet the requirement, and
+  how; the requirement still counts), the page carries `mismatches` and takes `?mismatch=yes|no`, `codeDrift`
+  (`{builtFromCommit, builtAt, basis, commitsBehind, headCommit}`: how old the code behind the listed build is,
+  counted by the engine in the registered checkout) and `minimum` (`{pct, source: 'repo'|'settings', repoPct,
+  settingsPct}`; also on the notGenerated 404). New `PUT /repos/:id/requirements/minimum {minPct: 1..100 | null}`
+  sets or clears the repository's own minimum through the engine's `wicked-core requirements-target` (409 when the
+  repository has no code graph yet). Needs a wicked-core with the 2026-11-06 requirements read; an older engine
+  reads as before (`null` / 0).
+- **A chat job's Start chooses how it runs (operator ruling 2026-11-06; api-types 0.196.0).** `POST
+  /chats/:id/proposals/:pid` takes an optional `power` with `decision: 'go'` on a job proposal. `true` launches a power
+  run (no plan-approval gate; the deliver gate and what policy requires still hold). `false` or absent launches exactly
+  as before: the job stops at its first plan. `true` is honoured only when this daemon can run that job as a power run
+  (a workflow run on a repository, a preset workflow, an engine with power mode) and Power mode for new jobs is on.
+  Otherwise the Start is refused with 409 `power_unavailable` and its reason, before anything is recorded or started.
+  The launcher and the launch itself check again (`powerRequired`), so a chat job is never run phased in its place: a
+  change in between is a 502 `launch_failed` with the reason, and Go again resumes it. `power` with Not now, or on
+  another kind, is 400 `power_not_applicable`. Where the Start can choose, the proposal's sentence no longer promises
+  the plan review and its `stops` is null. Health advertises `capabilities.chatJobPower`; `wicked-crew-api-types`
+  0.196.0 types both.
+
+- **Apps: archive with Restore, and an earlier version read (plugins G16, G3; operator ruling D5; api-types 0.196.0).**
+  `POST /apps/:app/archive` and `/unarchive` (human operator) hide an app from `GET /apps` and refuse its version
+  changes (edits, undo, redo, restore, new turns: `409 app_archived`) until it is restored; nothing is deleted. Reads,
+  queries and the action routes are unchanged. Each runs under the app's lock, and archive is refused
+  while a chat turn runs, so no turn lands into a hidden app. `GET /apps?archived=active|archived|all` (default
+  `active`). `AppSummary.archived` is `null` on an active app, so a client can tell a daemon that archives from an older
+  one. `GET /apps/:app/versions/:version` (observer) reads an accepted version as it was (by number or commit), with
+  the detail's reduction for a non-human reader.
+
 - **Redo the QE check at a QE gate with no verdict (e2e-1105 F23; api-types 0.195.0).** `POST /runs/:id/gate` takes
   `{approve: true, action: 'retry_qe'}` (no `amend` / `amendScope` / `plan`) and forwards it to the engine
   (wicked-core core#1312). There, it re-runs the QE step from fresh evidence with a new isolated reviewer session,
@@ -44,6 +106,24 @@ mentioned only where a daemon release depends on them.
 
 ### Changed
 
+- **A person's Goal, Approach and Constraints in the working document now reach every later worker step, not only
+  the next one (operator ruling 2026-11-06; the bridge until the engine keeps a per-run context block).** The
+  person's CURRENT Goal, Approach and Constraints are one standing note, re-sent before every later worker step until
+  a later edit of them replaces it. That covers each section whose latest version is a person's; crew's seeded Goal,
+  the plan's or the orchestrator's Approach and every generated line are never included. Each section is capped so
+  that all of them fit in 4,000 characters, and the note says where a person's text was cut. Next still goes to the
+  next step once. The note retires itself when the engine reports `supportsRunContext()` (core lane
+  context-block-core); crew then feeds that block and only Constraints stands here until it does. Judges, QE and
+  councils hear the person's context only once the engine block lands.
+
+- **Editor installs require the behaviour cases 7 and 18 (G9b).** `CONFORMANCE_CASES` adds `7-edit` (an editor that
+  asks `artifact.write` saves an edit through its own UI: its `data-wicked-save` control lands one version; a viewer
+  passes) and `18-shows` (it asks `artifact.read`, shows the page it is handed and reads again when another version
+  lands). A report without them is refused, so an editor that never reads what it opens no longer installs. Needs a
+  wicked-garden whose conformance runner reports both (release garden first); wicked-core's engine step
+  (`editor_conformance` `CASES`) gains the same two ids. The install's overall cap gives each editor 25 s more for
+  the two cases' own deadlines (`CONFORMANCE_FIXED_WAITS_S` = 55 s).
+
 - **An editor-plugin run's conformance cases run on this machine, from crew's own runtime (e2e F18,
   DES-EDITOR-CONFORMANCE-HOST).** The engine now runs the editor-plugin workflow's conformance cases itself, as an
   `editor_conformance` Tool step jailed to one loopback port (wicked-core). It also no longer asks the review seat to
@@ -74,6 +154,31 @@ mentioned only where a daemon release depends on them.
   fields). An engine without the `demo_record` Tool refuses a demo launch (501).
 
 ### Fixed
+
+- **Jira: an API token Atlassian cannot find sites for now says why (operator report 2026-11-06).** Under API-token
+  sign-in, Atlassian's MCP server resolves the sites a token reaches on every site call, and a scoped token without
+  `read:account` gets an in-band `401 "Failed to fetch accessible products"` (atlassian-mcp-server#285, Atlassian's
+  answer there). The tracker picker and a link said "the credential was refused", though the sign-in had worked. They
+  now name the call and say to create the token again with `read:account` beside its Jira scopes. Any other Jira
+  in-band 401 says the sign-in reached the server and names the checks (scopes, the account email, the organization's
+  API-token setting); a GitHub one says only to check the token and its scopes. Atlassian's words are matched, never
+  repeated.
+
+- **Every run's working document is made and filled by crew, whether or not anyone views or edits it (rig run W12
+  9dd4f6d1).** Before, crew made a document only for power runs; a governed run got one only when a person or plugin
+  proposed an edit, so a phased run nobody edited had no document at all.
+  - A run of any kind gets its document on its first line event (a gate opening or answered, a step starting, the run
+    ending). At daemon start, crew brings every held document up to date and makes the documents of the 40 newest live
+    runs that have none, one at a time. A finished run's document is never made in bulk; opening one for editing still
+    makes it.
+  - A phased run's **Approach** is its settled plan: once no plan gate is open and the plan was approved (or a second
+    step started), crew writes its steps from the run's own unit list ("The approved plan, 10 steps: pa scope, test
+    plan, … Approved 11:27."), as the seat that wrote the plan. A revised plan replaces it; a person's Approach is never
+    replaced. Step names pass a closed pattern. Power runs are unchanged (their orchestrator writes Approach).
+  - **Decisions** now carry a person's answers with their words, from crew's audit trail, people only: a gate answered
+    with a note, a floor override, a send-back, a rule or QE skip with its reason, a stop with a reason, guidance set
+    ("You · 11:46 · overrode a failed check: “The failing tests are …”"). Gate kinds `def`, `team_dispute` and
+    `review_adjudication` read as words. Like every line crew writes, none of these steers the run.
 
 - **QE records keep their run stamps (wicked-ledger ^0.6.1, F23).** wicked-ledger 0.6.1's `get` / `list` / `search`
   keep a record's keys beyond the schema columns, so an isolated QE reviewer that resumes its run sees `crew_run_id`

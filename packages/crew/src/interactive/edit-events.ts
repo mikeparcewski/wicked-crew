@@ -647,9 +647,11 @@ export async function startInteractiveEditSubscriber(
     }
     // Announce with the handoff's version (the parent the service forks from) and the
     // deterministic doc+version key — a re-announce is a no-op (the key resolves to the existing row).
+    // `run_id` (DES-CHAT-ARTIFACTS-001 §6.2, slice I1): the version this lands records the run that made it, so a refine's
+    // protected-edits walk reads it as a run's step, never as a person's hand edit to keep.
     const emitted = await emitInteractive(
       EDIT_COMPLETED,
-      { ...docScope(documentId, projectId), version, results },
+      { ...docScope(documentId, projectId), version, results, run_id: runId },
       editIdempotencyKey(documentId, version),
     );
     if (!emitted) {

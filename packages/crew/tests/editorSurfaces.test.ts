@@ -144,6 +144,20 @@ describe('install conformance (§8.3)', () => {
     return { reg: new EditorRegistry({ stateHome: home }), home };
   };
 
+  it('requires the behaviour cases of every editor: 7 (saves through its UI) and 18 (shows what it is handed), G9b', () => {
+    // The same ids, in the same order, as garden's CASES_V1 and wicked-core's editor_conformance CASES.
+    expect([...CONFORMANCE_CASES]).toEqual(['0-manifest', '1-handshake', '2-sizes', '3-no-network', '4-permissions', '5-typing', '6-forwarding',
+      '7-edit', '8-strict-input', '9-liveness', '10-keyboard', '11-theme', '12-hash-pinned', '18-shows']);
+  });
+
+  it('an editor whose run never reports 7 and 18 (a garden before them) is refused, naming them', async () => {
+    const { reg } = registry();
+    const older = CONFORMANCE_CASES.filter((c) => c !== '7-edit' && c !== '18-shows');
+    const err = await installPack(pack([1]), undefined, { check: passCheck, conformance: run(older), registry: reg }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PackInstallError);
+    expect((err as PackInstallError).message).toContain('7-edit, 18-shows');
+  });
+
   it('requires cases 13-16 only of a protocol-2 editor', () => {
     expect(requiredCases({ protocol: [1] })).toEqual([...CONFORMANCE_CASES]);
     expect(requiredCases({ protocol: [1, 2] })).toEqual([...CONFORMANCE_CASES, ...CONFORMANCE_CASES_V2]);
@@ -166,7 +180,7 @@ describe('install conformance (§8.3)', () => {
     expect(new EditorRegistry({ stateHome: home }).get('acme-notes')?.manifest.surfaces?.card.aspect).toBe('auto');
   });
 
-  it('a protocol-1 editor still installs on cases 0-12 alone', async () => {
+  it('a protocol-1 editor still installs on cases 0-12 and 18 alone', async () => {
     const { reg } = registry();
     const res = await installPack(pack([1]), undefined, { check: passCheck, conformance: run(CONFORMANCE_CASES), registry: reg });
     expect(res.editors[0]?.surfaces).toBeUndefined();

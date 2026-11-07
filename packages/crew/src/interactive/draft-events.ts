@@ -46,6 +46,7 @@ import { reviewPartitionOf as projectPartitionOf } from './review-ledger.js';
 import {
   draftQualityClause,
   logDraftSkillArmLine,
+  notesPathOf,
   pageBudgetFor,
   PROCESS_NOTES_WHERE,
   runDraftFloor,
@@ -80,6 +81,7 @@ import {
 import { busSubscriberErrorReporter } from './bus-subscriber-errors.js';
 import { emitOnBus, requireEngineBus, tapBus, type BusEvent } from '../core/bus.js';
 import type { DocBindingStore } from './doc-binding.js';
+import { recordLanding, type LandingRecordStore } from './landing-record.js';
 import { UNFILED_MOUNT } from '../api/chat-context.js';
 import { packetClause, packetDirOf, type SourcePacket } from './source-packet.js';
 
@@ -766,6 +768,9 @@ export interface InteractiveDraftOptions {
   onBoundDocCreated?: (artifactRef: string, documentId: string) => Promise<void>;
   /** A bound attempt's outcome was recorded (landed, or failed with the reason). */
   onBoundOutcome?: (artifactRef: string, runId: string, outcome: BoundOutcome) => void;
+  /** A6 / G12: where crew records, per run, the floor it measured on the announced file and the writer's notes (served
+   *  on the document's checks read). Absent = nothing recorded. */
+  landings?: LandingRecordStore;
   /** Diagnostics sink (default: console.error). */
   log?: (message: string) => void;
   /** Error-level logger for connection-fatal subscriber errors (the /diagnostics ring folds it); defaults to `log`. */
@@ -821,7 +826,7 @@ interface InFlight {
   /** A3: the proposal-bound attempt this flight is (its outcome is recorded on the document's binding), its attempt
    *  folder (the packet copy, checked against crew's hashes at landing), its records folder (a claims source for the
    *  floor) and the head it started from (the announce's `expect_head`). */
-  bound?: { ref: string; runDir: string; attempt: string; attemptDir: string; files: Array<{ name: string; sha256: string; bytes: number }>; base: number } | undefined;
+  bound?: { ref: string; runDir: string; attempt: string; attemptDir: string; files: Array<{ name: string; sha256: string; bytes: number }>; base: number; struck?: Array<{ token: string; reason: string }> } | undefined;
   /** The handoff-ledger key this flight was launched under (a bound attempt's own; else the document's draft key). */
   ledgerKey?: string | undefined;
 }
@@ -1013,7 +1018,8 @@ export async function startInteractiveDraftSubscriber(
       // could not see it end in time) still ends its attempt: released, Try again offered. Never relaunched.
       if ((event.type === 'sessionCompleted' || event.type === 'sessionFailed' || event.type === 'runCancelled') && opts.bindings !== undefined && !finalizingRuns.has(runId)) {
         const hit = opts.bindings.attemptOf(runId);
-        if (hit !== null && hit.attempt.outcome === undefined && hit.attempt.emittedAt === undefined) {
+        // A refine's attempt is the chat seam's (it holds that flight, and settles its own orphan the same way).
+        if (hit !== null && hit.attempt.op !== 'refine' && hit.attempt.outcome === undefined && hit.attempt.emittedAt === undefined) {
           const outcome: BoundOutcome = { kind: 'failed', reason: 'interrupted by a restart' };
           if (opts.bindings.setOutcome(hit.binding.ref, runId, outcome)) {
             try {
@@ -1255,7 +1261,8 @@ export async function startInteractiveDraftSubscriber(
       // A3: the packet's records are a claims source too (the run briefs, documents and attachments a figure may cite),
       // read from crew's OWN copy of exactly the verified files, never the writable inbox.
       [...flight.snapshotDirs, ...(floorRecords !== null ? [floorRecords] : [])],
-      { ...(flight.floor !== undefined ? { style: flight.floor.style } : {}) },
+      // A6: the writer's notes.json beside the draft is required and valid, and the run's own id never in the document.
+      { ...(flight.floor !== undefined ? { style: flight.floor.style } : {}), notes: notesPathOf(outPath), runId },
       opts.draftFloorIo ?? {},
     );
     removeSnapshots(flight);
@@ -1294,6 +1301,20 @@ export async function startInteractiveDraftSubscriber(
       return;
     }
     if (flight.bound !== undefined) opts.bindings?.markEmitted(flight.bound.ref, runId);
+    // A6 / G12: what crew checked on exactly this file (the floor, its page count, the writer's notes), by run: the checks
+    // read finds it through the version interactive records this run on.
+    recordLanding(
+      opts.landings,
+      {
+        ref: flight.bound?.ref ?? `${projectId ?? UNFILED_MOUNT}/${documentId}`,
+        runId,
+        outPath,
+        notesPath: notesPathOf(outPath),
+        floor: floorVerdict,
+        ...(flight.bound?.struck !== undefined ? { struck: flight.bound.struck } : {}),
+      },
+      log,
+    );
     const emitted = await emitInteractive(
       DRAFT_COMPLETED,
       // `run_id` (DES §12): which attempt this draft is; interactive ≥ the I1 contract records it on the version. A bound
@@ -1400,7 +1421,7 @@ export async function startInteractiveDraftSubscriber(
       floor: { budget: pageBudgetFor(doc.brief, doc.style), style: doc.style },
       ledgerKey: key,
       ...(bound !== undefined
-        ? { bound: { ref: bound.artifactRef, runDir, attempt: attemptDirName(runId), attemptDir, files: bound.packet.files.map((f) => ({ name: f.name, sha256: f.sha256, bytes: f.bytes.length })), base: bound.base } }
+        ? { bound: { ref: bound.artifactRef, runDir, attempt: attemptDirName(runId), attemptDir, files: bound.packet.files.map((f) => ({ name: f.name, sha256: f.sha256, bytes: f.bytes.length })), base: bound.base, struck: bound.packet.struck } }
         : {}),
     };
     inFlight.set(runId, flight);
@@ -1636,6 +1657,8 @@ export async function startInteractiveDraftSubscriber(
       projectGraphBinding = decision.binding;
       log(`run ${runId}: ${decision.reason}`);
     }
+    // A6: an earlier run's notes beside this deliverable never stand in for this run's (the floor requires this run's).
+    rmSync(notesPathOf(outPath), { force: true });
     if (bound !== undefined) opts.bindings?.markLaunching(bound.artifactRef, runId);
     try {
       unitsByRun.set(runId, new RunUnits()); // before the launch: its first plan is announced during it
@@ -1663,7 +1686,7 @@ export async function startInteractiveDraftSubscriber(
             outPath,
             pageBudgetFor(doc.brief, doc.style),
             [...subjects.flatMap((s) => (s.snapshotDir !== undefined ? [s.snapshotDir] : [])), ...(bound !== undefined ? [join(attemptDir, 'records')] : [])],
-            { style: doc.style },
+            { style: doc.style, notes: notesPathOf(outPath), runId },
           ) +
           packetLine,
         sessionId: runId,

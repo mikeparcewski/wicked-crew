@@ -41,9 +41,14 @@ import { NO_ELIGIBLE_SEAT_CODE, noEligibleSeatBody } from '../src/core/engine-ro
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import type { GateCacheEntry } from '../src/api/gate-cache.js';
 import type { ElicitationEntry } from '../src/api/elicitation-cache.js';
-import type { RequirementDetail, RequirementsPage } from '../src/api/requirements.js';
+import type {
+  RequirementDetail,
+  RequirementsCodeDrift,
+  RequirementsMinimum,
+  RequirementsPage,
+} from '../src/api/requirements.js';
 import { REQUIREMENTS_NOT_GENERATED } from '../src/api/requirements.js';
-import type { ChatOpenSchema, GateSchema, GuidanceSchema, LaunchSchema, OpenPathSchema, OpenTerminalSchema, RepoGraphReply, RetireMemorySchema } from '../src/api/routes.js';
+import type { ChatOpenSchema, GateSchema, GuidanceSchema, LaunchSchema, OpenPathSchema, OpenTerminalSchema, RepoGraphReply, ReqMinimumSchema, RetireMemorySchema } from '../src/api/routes.js';
 import type { SteeringAuthorSchema, SteeringImportSchema } from '../src/api/governance-steering.js';
 import type {
   ImportEvalCorpusSchema,
@@ -111,7 +116,7 @@ import type { CreateStandingOrderSchema, ParseStandingOrderSchema, StandingAwayS
 import type { StandingOrdersState as ServedStandingOrdersState } from '../src/standing-orders/store.js';
 import type { DEFAULT_SETTINGS, RecordedEvent } from '../src/core/types.js';
 import type { AppSpecSchema } from '../src/apps/spec.js';
-import type { AppActionGrantSchema, AppActionPrepareSchema, AppActionRunSchema, AppCreateSchema, AppEditsSchema, AppHistoryMoveSchema, AppQuerySchema, AppRestoreSchema, AppsCheckSchema, AppTurnSchema } from '../src/apps/routes.js';
+import type { AppActionGrantSchema, AppActionPrepareSchema, AppActionRunSchema, AppArchiveSchema, AppCreateSchema, AppEditsSchema, AppHistoryMoveSchema, AppQuerySchema, AppRestoreSchema, AppsCheckSchema, AppTurnSchema } from '../src/apps/routes.js';
 import type { AppWritePath } from '../src/apps/actions/write-path.js';
 import type { AppExecutor } from '../src/apps/exec/executor.js';
 import type { AppToolQueryText as ToolText, AppCrewQueryText as CrewText } from '../src/core/types.js';
@@ -914,6 +919,11 @@ respondsWith<Wire.RequirementsPage, RequirementsPage>();
 respondsWith<Wire.RequirementDetail, RequirementDetail>();
 // The not-generated 404 is typed (0.154.0): `code` is the discriminator, never the sentence.
 respondsWith<Wire.RequirementsNotGenerated, typeof REQUIREMENTS_NOT_GENERATED>();
+// PUT /repos/:id/requirements/minimum (0.197.0): the minimum in force after the change.
+respondsWith<Wire.RequirementsMinimum, RequirementsMinimum>();
+respondsWith<Wire.RequirementsMinimumResponse, { minimum: RequirementsMinimum | null }>();
+accepts<z.input<typeof ReqMinimumSchema>, Wire.RequirementsMinimumBody>();
+respondsWith<Wire.RequirementsCodeDrift, RequirementsCodeDrift>();
 
 // GET/PUT /settings — persisted system settings (defaults applied server-side). Checked twice:
 // the compiled-in defaults, and the adapter's read shape (defaults + persisted patch), which
@@ -1180,6 +1190,8 @@ accepts<z.input<typeof AppCreateSchema>, Wire.CreateAppBody>();
 accepts<z.input<typeof AppEditsSchema>, Wire.AppEditsBody>();
 accepts<z.input<typeof AppHistoryMoveSchema>, Wire.AppHistoryMoveBody>();
 accepts<z.input<typeof AppRestoreSchema>, Wire.AppRestoreBody>();
+// (api-types 0.196.0, G16) Archive and unarchive take `{}`.
+accepts<z.input<typeof AppArchiveSchema>, Wire.AppArchiveBody>();
 accepts<z.input<typeof AppQuerySchema>, Wire.AppQueryBody>();
 accepts<z.input<typeof AppTurnSchema>, Wire.AppTurnBody>();
 accepts<z.input<typeof RegisterRepoSchema>, Wire.RegisterRepoBody>();
@@ -1199,6 +1211,8 @@ respondsWith<CrewText, Extract<ReturnType<typeof parseCrewQueryText>, { ok: true
 respondsWith<Wire.AppDetail, Awaited<ReturnType<AppStore['detail']>>>();
 respondsWith<Wire.AppSummary[], ReturnType<AppStore['list']>>();
 respondsWith<Wire.AppVersion, Awaited<ReturnType<AppStore['edit']>>>();
+// (api-types 0.196.0, G3) The version read is what the store produces.
+respondsWith<Wire.AppVersionRead, Awaited<ReturnType<AppStore['versionRead']>>>();
 respondsWith<Wire.AppTurnState, Awaited<ReturnType<AppStore['beginTurn']>>>();
 respondsWith<Wire.AppsCheckResponse, Awaited<ReturnType<AppStore['checkTurn']>>>();
 // The variants are exclusive in the contract as they are in the schema (codex r1): one kind each.

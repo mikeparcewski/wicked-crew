@@ -17,14 +17,19 @@
  * (`DemoView.review`).
  */
 
+import { lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import type { DocCheck, DocCheckFinding, DocCheckSource, DocChecksResponse, DocReviewerId } from 'wicked-crew-api-types';
+import type { DocCheck, DocCheckFinding, DocCheckSource, DocChecksResponse, DocFloorCheck, DocNotes, DocReviewerId } from 'wicked-crew-api-types';
+import { UNFILED_MOUNT } from '../api/chat-context.js';
 import { API_PREFIX } from '../api/api-prefix.js';
+import { BeneathError, readBeneath } from '../api/beneath.js';
 import { ProjectsUnsupportedError, type CoreAdapter } from '../core/adapter.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
 import { readDocReviewVerdicts, type DocReviewLedgerRow } from '../qe/ledger.js';
 import { DOC_NAME } from './draft-events.js';
 import { reviewRootOf } from './review-ledger.js';
+import type { LandingRecordStore } from './landing-record.js';
 
 const V = API_PREFIX;
 
@@ -93,7 +98,88 @@ export function newestPerReviewer(rows: readonly DocReviewLedgerRow[], version: 
 export interface DocChecksDeps {
   /** Where every document's review root lives (`<handoff root>/_reviews`), read at request time. */
   reviewsDir: () => string;
+  /** A6 / G12: the per-run record of what crew checked before a version landed (floor, notes). Absent = not served. */
+  landings?: LandingRecordStore;
+  /** The docs root of a route project (`default` = Unfiled), where the document's version lineage is read. */
+  docsRoot?: (projectId: string) => Promise<string | null>;
   log?: (msg: string) => void;
+}
+
+/** One version of a document's lineage: its parent and the run that made it (`null` = by hand; absent = not recorded). */
+export interface LineageEntry {
+  parent: number | null;
+  runId: string | null | undefined;
+}
+
+/** A document's head and lineage, read from its `versions.json` beneath the docs root (no link followed); `null` when
+ *  it cannot be read. */
+export function readLineage(docsRoot: string, doc: string): { head: number; versions: Map<number, LineageEntry> } | null {
+  if (!DOC_NAME.test(doc)) return null;
+  try {
+    const m = JSON.parse(readManifest(docsRoot, doc)) as { head?: unknown; versions?: unknown };
+    if (typeof m.head !== 'number' || !Number.isInteger(m.head) || m.head < 0) return null;
+    const versions = new Map<number, LineageEntry>();
+    for (const e of Array.isArray(m.versions) ? (m.versions as Array<Record<string, unknown>>) : []) {
+      if (e === null || typeof e !== 'object' || typeof e['version'] !== 'number') continue;
+      const parent = typeof e['parent'] === 'number' ? e['parent'] : null;
+      const runId = !('run_id' in e) ? undefined : typeof e['run_id'] === 'string' && e['run_id'] !== '' ? e['run_id'] : null;
+      versions.set(e['version'], { parent, runId });
+    }
+    return { head: m.head, versions };
+  } catch {
+    return null;
+  }
+}
+
+const MANIFEST_MAX = 4 * 1024 * 1024;
+
+/**
+ * A document's `versions.json`: opened beneath the docs root with no link followed, non-blocking, regular file only,
+ * bounded, all on one descriptor (`readBeneath`). Where the platform cannot open without following links (Windows),
+ * the same checks are made on the path before a plain read (codex r1-r3).
+ */
+export function readManifest(docsRoot: string, doc: string): string {
+  try {
+    return readBeneath(realpathSync(docsRoot), `${doc}/versions.json`, MANIFEST_MAX).data.toString('utf8');
+  } catch (err) {
+    if (!(err instanceof BeneathError) || err.code !== 'ENOTSUP') throw err;
+  }
+  const dir = join(docsRoot, doc);
+  const path = join(dir, 'versions.json');
+  const st = lstatSync(path);
+  if (lstatSync(dir).isSymbolicLink() || !st.isFile() || st.size > MANIFEST_MAX) throw new Error('not a regular manifest');
+  return readFileSync(path, 'utf8');
+}
+
+/**
+ * The notes and the floor record of `version` (DES §11.2; PLAN G12): the floor is that version's own run's (a version a
+ * person made has none: "not measured"); the notes are the nearest ancestor's on the parent chain, itself included,
+ * whose run recorded notes, labelled with the version they are from.
+ */
+export function landingFacts(
+  lineage: { versions: Map<number, LineageEntry> },
+  version: number,
+  ref: string,
+  landings: LandingRecordStore,
+): { notes: DocNotes | null; floor: DocFloorCheck | null } {
+  let floor: DocFloorCheck | null = null;
+  let notes: DocNotes | null = null;
+  const seen = new Set<number>();
+  for (let v: number | null = version; v !== null && !seen.has(v); v = lineage.versions.get(v)?.parent ?? null) {
+    seen.add(v);
+    const runId = lineage.versions.get(v)?.runId;
+    if (typeof runId !== 'string') continue;
+    const rec = landings.get(ref, runId);
+    if (rec === null) continue;
+    if (v === version) {
+      floor = { source: 'floor', version: v, run_id: runId, verdict: rec.floor.verdict, pages: rec.floor.pages, summary: rec.floor.summary, sha256: rec.sha256, at: rec.at };
+    }
+    if (rec.notes !== null) {
+      notes = { from_version: v, run_id: runId, ...rec.notes, struck: [...(rec.struck ?? [])] };
+      break;
+    }
+  }
+  return { notes, floor };
 }
 
 export function registerInteractiveDocChecks(app: FastifyInstance, adapter: CoreAdapter, deps: DocChecksDeps): void {
@@ -125,6 +211,15 @@ export function registerInteractiveDocChecks(app: FastifyInstance, adapter: Core
         return reply.code(500).send({ error: 'The recorded reviews of this document could not be read', detail: read.error });
       }
       const body: DocChecksResponse = { document_id: doc, version, checks: newestPerReviewer(read.rows, version) };
+      // A6 / G12: the writer's notes and the floor crew measured, for the asked version (the head when none was asked).
+      if (deps.landings !== undefined && deps.docsRoot !== undefined) {
+        const root = await deps.docsRoot(projectId);
+        const lineage = root === null ? null : readLineage(root, doc);
+        if (lineage !== null) {
+          const ref = `${projectId === DEFAULT_PROJECT_ID ? UNFILED_MOUNT : projectId}/${doc}`;
+          Object.assign(body, landingFacts(lineage, version ?? lineage.head, ref, deps.landings));
+        }
+      }
       return reply.send(body);
     },
   );

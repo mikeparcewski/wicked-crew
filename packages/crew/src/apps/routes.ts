@@ -1,8 +1,13 @@
 /**
  * `/api/v1/apps` (DES-APPS-001 §7.6), the app store's routes.
  *
- *  - `GET /apps[?project=]` (observer), `POST /apps {slug, name?, projectId}` (operator): list; add an app.
+ *  - `GET /apps[?project=][&archived=active|archived|all]` (observer), `POST /apps {slug, name?, projectId}` (operator):
+ *    list (the active apps unless asked); add an app.
  *  - `GET /apps/:app` (observer): the spec at head, the versions with their receipts, the undo pointer.
+ *  - `GET /apps/:app/versions/:version` (observer, G3/G16): an accepted version's files as they were.
+ *  - `POST /apps/:app/archive`, `/unarchive` (HUMAN operator, G16): hide the app from the list and refuse its version
+ *    changes (edits, undo, redo, restore, new turns), or open it again; nothing is deleted. Reads, queries and the
+ *    action routes are not changed by archiving.
  *  - `POST /apps/:app/edits`, `/undo`, `/redo`, `/restore` (HUMAN operator): each carries the version it was
  *    made on (`409 stale_base`); while a turn runs, `409 turn_in_flight`.
  *  - `POST /apps/:app/query` (observer, a person): the executor (K2b, `exec/executor.ts`) runs one named
@@ -33,7 +38,7 @@ import { QUERY_TEXT_MAX_BYTES } from './check.js';
 import { AppWriteError, type AppWritePath } from './actions/write-path.js';
 import { AppExecError, type AppExecutor } from './exec/executor.js';
 import { AppGitError } from './git.js';
-import { appDetailFor, appRefusalFor, type AppRefusal } from './views.js';
+import { appDetailFor, appRefusalFor, appVersionReadFor, type AppRefusal } from './views.js';
 
 const V = '/api/v1';
 
@@ -111,6 +116,9 @@ const EditOpSchema = z.discriminatedUnion('op', [
 ]);
 export const AppEditsSchema = z.strictObject({ base, ops: z.array(EditOpSchema).min(1).max(50), summary: z.string().min(1).max(200).optional() });
 export const AppHistoryMoveSchema = z.strictObject({ base });
+/** (G16) Archive and unarchive take no fields: `{}` (or no body). */
+export const AppArchiveSchema = z.strictObject({});
+const LIST_SCOPES = ['active', 'archived', 'all'] as const;
 const version = z.union([z.int().min(1), z.string().regex(/^[0-9a-fA-F]{40}$/)]);
 export const AppRestoreSchema = z.strictObject({ base, version });
 export const AppQuerySchema = z.strictObject({ version, query: z.string().regex(APP_NAMED_ID_RE), params: record(z.string(), z.unknown()).optional() });
@@ -147,9 +155,9 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
   };
 
   app.get(`${V}/apps`, { config: { manifest: { responseType: 'AppsListResponse', statusCodes: [200, 400] } } }, async (req, reply) => {
-    const q = z.object({ project: z.string().min(1).max(128).optional() }).safeParse(req.query ?? {});
+    const q = z.object({ project: z.string().min(1).max(128).optional(), archived: z.enum(LIST_SCOPES).optional() }).safeParse(req.query ?? {});
     if (!q.success) return badRequest(reply, q.error);
-    return { apps: store.list(q.data.project) };
+    return { apps: store.list(q.data.project, q.data.archived ?? 'active') };
   });
 
   app.post(`${V}/apps`, { config: { manifest: { requestType: 'CreateAppBody', responseType: 'AppDetailResponse', statusCodes: [201, 400, 404, 409, 422, 503] } } }, async (req, reply) => {
@@ -178,6 +186,43 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
       return fail(reply, err);
     }
   });
+
+  // (G3, G16b) An accepted version as it was: a version number, or a commit of the app's repo.
+  app.get(`${V}/apps/:app/versions/:version`, { config: { manifest: { responseType: 'AppVersionReadResponse', statusCodes: [200, 404, 409, 503] } } }, async (req, reply) => {
+    const slug = slugOf(req, reply);
+    if (slug === null) return reply;
+    const raw = String((req.params as { version?: string }).version ?? '');
+    const n = /^[1-9][0-9]{0,15}$/.test(raw) ? Number(raw) : null;
+    const version = n !== null && Number.isSafeInteger(n) ? n : /^[0-9a-fA-F]{40}$/.test(raw) ? raw : null;
+    if (version === null) return refuse(reply, 404, { code: 'unknown_version', error: `${slug} has no version ${JSON.stringify(raw.slice(0, 64))}` });
+    try {
+      return { version: appVersionReadFor(actorOf(req), await store.versionRead(slug, version)) };
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
+
+  // (G16, operator ruling D5) Archive with Restore: a person hides an app and closes it to changes, or opens it again.
+  for (const direction of ['archive', 'unarchive'] as const) {
+    app.post(
+      `${V}/apps/:app/${direction}`,
+      { config: { manifest: { requestType: 'AppArchiveBody', responseType: 'AppDetailResponse', statusCodes: [200, 400, 403, 404, 409, 503] } } },
+      async (req, reply) => {
+        if (!humanOnly(req, reply, `${direction} an app`)) return reply;
+        const slug = slugOf(req, reply);
+        if (slug === null) return reply;
+        const parsed = AppArchiveSchema.safeParse(req.body ?? {});
+        if (!parsed.success) return badRequest(reply, parsed.error);
+        try {
+          const changed = direction === 'archive' ? await store.archive(slug, { actor: actorOf(req) }) : await store.unarchive(slug);
+          if (changed) deps.audit.record(direction === 'archive' ? 'apps.app.archived' : 'apps.app.unarchived', actorOf(req), { detail: { app: slug } });
+          return { app: appDetailFor(actorOf(req), await store.detail(slug)) };
+        } catch (err) {
+          return fail(reply, err);
+        }
+      },
+    );
+  }
 
   app.post(
     `${V}/apps/:app/edits`,

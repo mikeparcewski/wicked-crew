@@ -158,6 +158,10 @@ export interface JobContext {
   request?: { id: string; digest: string };
   /** The daemon's QE acceptance setting is off: QE is not shown as a check (the launch would skip it by setting). */
   qeOff?: boolean;
+  /** (api-types 0.196.0) This daemon has power mode and Power mode for new jobs is on: the presets a power launch
+   *  accepts here (the launch's own `namesPreset` source). A job whose workflow is one is started as a power run or held
+   *  at its plan by the person's Start, so its sentence promises neither. `null`/absent = no Start chooses. */
+  powerPresets?: ReadonlySet<string> | null;
 }
 
 export class JobRefusal extends Error {
@@ -389,8 +393,12 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
   }
   if (facts.skipQe !== null) parts.push(`Without QE acceptance (you said: “${facts.skipQe.reason}”), labelled on the job.`);
   const time = minutesLabel(r.resolved.typicalMinutes);
-  const stops = launch === 'none' ? null : STOPS[launch];
-  if (coming === undefined) parts.push(`${time !== null ? `${time}, and ` : ''}${launch === 'run' ? "I'll show you the plan before anything changes." : (stops ?? '')}`.trim());
+  // The plan promise holds only where the Start can't choose a power run (crew 0.196.0): there, how it runs is the
+  // Start's own choice, shown beside it (studio's Review plan), never promised here first (nor in `stops`).
+  const startChooses = launch === 'run' && repo !== null && r.workflow !== null && ctx.powerPresets?.has(r.workflow) === true;
+  const stops = launch === 'none' || startChooses ? null : STOPS[launch];
+  const promise = launch === 'run' ? (startChooses ? '' : "I'll show you the plan before anything changes.") : (stops ?? '');
+  if (coming === undefined) parts.push(time !== null ? (promise !== '' ? `${time}, and ${promise}` : `${time}.`) : promise);
   const ask = coming !== undefined ? null : question !== null ? question.text : blockedBy.length > 0 ? null : 'Start?';
   const comingText = coming !== undefined
     ? `${label} comes in ${card.release}.${coming.nearest !== null ? ` Today, the closest is ${nounOf(CATALOG_V2_CARDS.find((c) => c.id === coming!.nearest!.card) ?? card, coming.nearest.option)}.` : ''}`
@@ -426,6 +434,7 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     helpers: null,
     time: { minutes: r.resolved.typicalMinutes, cost: r.resolved.cost, steps: r.steps.length > 0 ? r.steps.length : null, median: null, label: time ?? '' } satisfies ProposalTime,
     stops,
+    ...(startChooses ? { powerChoice: true } : {}),
     filedIn: { projectId: facts.projectId, label: ctx.projectLabel },
     blocked: blockedBy[0] ?? (question !== null ? question.text : null),
     shape,

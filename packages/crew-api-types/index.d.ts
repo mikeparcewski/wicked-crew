@@ -395,6 +395,11 @@ export interface HealthCapabilities {
    */
   chatJobProposals?: boolean;
   /**
+   * (api-types 0.196.0) A job proposal's Start takes `power` ({@link ChatProposalDecisionBody.power}). ABSENT on an
+   * older daemon: send no `power` (the strict body refuses it); a chat job then always stops at its first plan.
+   */
+  chatJobPower?: boolean;
+  /**
    * (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §14) What a chat can do with artifacts, one flag per operation, each
    * true only once its slice ships. `context`: `ChatMessageBody.context` is accepted ({@link ChatMessageContext}),
    * `POST /chats {seedFromArtifact}` is served, and each turn's seats get the open artifact, the runs the person names
@@ -7142,6 +7147,42 @@ export interface RequirementSummary {
    *  `corroboration: null` (a type has no callers; "dead code" would be wrong). `null` when it counts or the engine
    *  does not say; ABSENT from an older daemon. */
   uncounted?: 'structural' | 'not_product' | 'unindexed' | null;
+  /** (0.197.0) The code does not meet this requirement, and how (operator ruling 2026-11-06; e.g. "the loop starts
+   *  at index 1, so it skips the first element"): a finding shown beside it. The requirement still counts as real.
+   *  `null` when none was found or the engine does not say; ABSENT from an older daemon. */
+  codeMismatch?: string | null;
+}
+
+/** (0.197.0) How old the code behind the listed build is (operator ruling 2026-11-06): "Built from code N commits old
+ *  (date)". Counted by the engine with git in the REGISTERED checkout. `basis` `'build'`: the build recorded the
+ *  commit; `'index'`: an older build, so the store's indexed commit now. `commitsBehind` and `builtAt` are `null`
+ *  when the checkout does not hold that commit (unknown, never 0). */
+export interface RequirementsCodeDrift {
+  builtFromCommit: string;
+  builtAt: string | null;
+  basis: 'build' | 'index';
+  commitsBehind: number | null;
+  headCommit: string | null;
+}
+
+/** (0.197.0) The minimum in force for a repository and where it comes from: its own target (`'repo'`: set at a job's
+ *  "Lower the minimum" ask or on the requirements page) or the daemon-wide setting (`'settings'`). */
+export interface RequirementsMinimum {
+  pct: number;
+  source: 'repo' | 'settings';
+  repoPct: number | null;
+  settingsPct: number | null;
+}
+
+/** (0.197.0) `PUT /repos/:id/requirements/minimum`: set the repository's own minimum, or clear it (`null`: the
+ *  Settings minimum applies again). 409 when the repository has no code graph yet. */
+export interface RequirementsMinimumBody {
+  minPct: number | null;
+}
+
+/** (0.197.0) The answer to {@link RequirementsMinimumBody}: the minimum in force after the change. */
+export interface RequirementsMinimumResponse {
+  minimum: RequirementsMinimum | null;
 }
 
 export interface RequirementDetail extends RequirementSummary {
@@ -7197,6 +7238,15 @@ export interface RequirementsPage {
   /** (0.167.0) How many rows of the whole corpus are in each category, so a client can leave out an empty filter.
    *  ABSENT from an older daemon. */
   categories?: { functional: number; configData: number };
+  /** (0.197.0) How old the code behind the listed build is; `null` when the engine does not say. ABSENT from an older
+   *  daemon. */
+  codeDrift?: RequirementsCodeDrift | null;
+  /** (0.197.0) The minimum in force and where it comes from; `null` when the engine does not say. ABSENT from an
+   *  older daemon. */
+  minimum?: RequirementsMinimum | null;
+  /** (0.197.0) Rows of the whole corpus whose code does not meet them (`?mismatch=yes` lists them). ABSENT from an
+   *  older daemon. */
+  mismatches?: number;
 }
 
 /**
@@ -7216,6 +7266,8 @@ export interface RequirementsNotGenerated {
    * `minPct` is the target in force (the repository's own when lowered, else the daemon's).
    */
   coverage?: RequirementsCoverage;
+  /** (0.197.0) The minimum in force and where it comes from, when the repository has a store to read it from. */
+  minimum?: RequirementsMinimum;
 }
 
 export interface RequirementPatch {
@@ -8373,6 +8425,55 @@ export interface DocChecksResponse {
   /** The `version` asked for; `null` when the query named none. */
   version: number | null;
   checks: DocCheck[];
+  /**
+   * (api-types 0.197.0, DES-CHAT-ARTIFACTS-001 §11.2) What the writer could not confirm, listed BESIDE the document,
+   * never inside it: the notes of the asked version (the head when none was asked) or, for a version a person made by
+   * hand, of its nearest ancestor whose run recorded notes (`from_version` says which; show it labelled "from vN").
+   * `null` = no run on its lineage recorded notes ("No notes were recorded": a version from before notes were
+   * required, or one whose run's record expired: crew keeps the newest 500 per document). Absent on an older daemon.
+   */
+  notes?: DocNotes | null;
+  /**
+   * (api-types 0.197.0, PLAN G12) The floor crew measured on the file the asked version's run announced, right before
+   * it landed (interactive then adds its anchors and the document's theme): a HOST measurement (draw it "measured by the
+   * host"), never a review. `null` = not measured (a version a person made by hand, one from before this record, or one
+   * whose record expired: crew keeps the newest 500 per document). Absent on an older daemon.
+   */
+  floor?: DocFloorCheck | null;
+}
+
+/** (api-types 0.197.0) The writer's notes of one run (`notes.json`), as crew validated and stored them at landing. */
+export interface DocNotes {
+  /** The version these notes belong to: the asked version, or its nearest ancestor whose run recorded notes. */
+  from_version: number;
+  run_id: string;
+  /** Claims the writer left out because nothing confirmed them, each with why. */
+  left_out: Array<{ claim: string; why: string }>;
+  /** The source tokens the writer was given, and whether it used each. */
+  sources: Array<{ token: string; used: boolean }>;
+  assumptions: string[];
+  /** Sources CREW struck before that run (not authorized, gone, too large), with the reason: crew's own record, not the
+   *  writer's. */
+  struck: Array<{ token: string; reason: string }>;
+}
+
+/** (api-types 0.197.0) The document floor crew re-derived on a version's file before it landed (PLAN G12). */
+export interface DocFloorCheck {
+  /** Always `floor`: measured by the host, not a reviewer's verdict. */
+  source: 'floor';
+  version: number;
+  run_id: string;
+  /** `pass` every rule met; `unverified` no rule failed but something could not be measured (said in `summary`);
+   *  `unavailable` the floor could not run on this host. A failing floor lands nothing, so it is never recorded here. */
+  verdict: 'pass' | 'unverified' | 'unavailable';
+  /** The page count: `measured` = a renderer printed it (else a structural lower bound). `null` = no page budget. */
+  pages: { count: number; measured: boolean; budget: number | null; exact: boolean } | null;
+  /** One plain sentence. */
+  summary: string;
+  /** sha256 of the exact file the floor judged (as the run announced it, before interactive anchored and themed it). */
+  sha256: string;
+  /** ISO-8601. */
+  at: string;
 }
 
 /**
@@ -9200,6 +9301,22 @@ export interface PersonProposalBody {
   requestId: string;
 }
 
+/**
+ * (api-types 0.197.0) One edit a person made by hand that a refine keeps. The `id` carries a hash of the value it
+ * protects, so a later hand edit of the same part is a new id, kept again whatever was allowed before.
+ */
+export interface ProtectedEdit {
+  id: string;
+  /** `text` a leaf's words · `attr` an attribute of the node they edited · `added` a part they added · `gone` a part
+   *  they removed · `order` their slide order. */
+  kind: 'text' | 'attr' | 'added' | 'gone' | 'order';
+  /** Plain words: "slide 1 · heading “Release 0.17”", "removed slide 5", "your slide order". */
+  label: string;
+  /** The `data-wid` it is about; `null` for the slide order. */
+  wid: string | null;
+  touched: boolean;
+}
+
 /** `POST /chats/:id/proposals`: a revision of the open proposal (a token swap, a suggestion, a question's choice). */
 export interface PersonRevisionBody {
   revises: string;
@@ -9299,14 +9416,30 @@ export interface ArtifactProposal {
   helpers: ProposalHelpers | null;
   /** `null` for a theme. */
   time: ProposalTime | null;
-  /** "Stops for you if the check fails. The plan or an escalation may also ask." `null` for a theme. */
+  /** "Stops for you if the check fails. The plan or an escalation may also ask." `null` for a theme, and (api-types
+   *  0.196.0) for a job whose Start chooses how it runs ({@link ArtifactProposal.powerChoice}). */
   stops: string | null;
+  /**
+   * (api-types 0.196.0) A job whose Start chooses how it runs: this daemon has power mode, Power mode for new jobs was on
+   * when it was proposed, and the job can run as a power run (a workflow run on a repository, a preset workflow). Its
+   * sentence then promises no plan review and its `stops` is null: show the choice (Review plan) beside Start and send it
+   * as {@link ChatProposalDecisionBody.power}. ABSENT: the Start can't choose; send no `power`, it stops at its plan.
+   */
+  powerChoice?: boolean;
   /** The project the result is filed in; `label` is the project's name or "Not in a project · this chat". */
   filedIn: { projectId: string | null; label: string };
   /** refine: the document (`<mount>/<doc>`), its title, and the head it was proposed on. */
   target?: { ref: string; title: string; base: number };
   /** refine: the parts the seat pointed at (`data-wid`s); hand edits are kept unless the person says otherwise. */
   touches?: string[];
+  /**
+   * (api-types 0.197.0, DES-CHAT-ARTIFACTS-001 §6.1-6.2, A5) refine: the person's own edits this revision keeps,
+   * recomputed by crew from the document's version lineage on the proposal's `target.base`. Each is kept unless the
+   * person lets it change (`ProposalEdits.allow` names its `id`). `touched` = the seat's `touches` or the person's
+   * anchors overlap it (list those inline: "Your edit: … · Keep it / Let this change it"; the rest under "Keeping N more
+   * of your edits"). Absent on a non-refine proposal; `[]` = no edits of the person's to keep.
+   */
+  protected?: ProtectedEdit[];
   /** theme: the partial appearance patch and the keys it changes. */
   theme?: { name: string; patch: Record<string, string | number | boolean>; changes: string[] };
   /** demo: the app address (from the person's words), the audience and what to show. */
@@ -9386,6 +9519,8 @@ export interface ProposalEdits {
   project?: string | null;
   /** refine */
   ask?: string;
+  /** refine: the `ProtectedEdit.id`s the person lets this revision change (each must be on the card; api-types 0.197.0
+   *  accepts it on Go). Only these are released, and only when the revision lands. */
   allow?: string[];
   /** theme */
   name?: string;
@@ -9463,6 +9598,20 @@ export interface ChatProposalView {
 export interface ChatProposalDecisionBody {
   decision: 'go' | 'not_now';
   edits?: ProposalEdits;
+  /**
+   * (api-types 0.196.0, operator ruling 2026-11-06) How a JOB's Start runs: `true` = a power run (one orchestrator
+   * session, no plan-approval gate; the deliver gate and what policy requires still hold), `false` = it stops at its
+   * first plan. ABSENT = it stops at its first plan, exactly as before. Send only where `chatJobPower` is true, only with
+   * `decision: 'go'` on a `job` proposal (else 400 `power_not_applicable`). `true` is honoured only when this daemon can
+   * run THIS job as a power run (a workflow run on a repository, a preset workflow, an engine with power mode) and its
+   * Power mode for new jobs (`powerModeDefault`) is on: chat starts follow the setting. Else 409 `power_unavailable`
+   * with the reason, and nothing is recorded or started. If that changes between this check and the engine call (the
+   * launcher checks again, as does the launch itself), the answer is 502 `launch_failed` with the reason and the
+   * proposal is interrupted: Go again resumes it with that press's choice. Never run phased silently. Where a job's
+   * Start can choose (power mode and the setting on, the job fits), its `sentence` promises no plan review and its
+   * `stops` is null: the client shows the choice beside Start.
+   */
+  power?: boolean;
 }
 
 /**
@@ -9477,7 +9626,8 @@ export interface ChatProposalDecisionBody {
  * recorded; Go again resumes the same identity). (api-types 0.192.0) A job's Go adds 409 `proposal_revising` (a
  * correction is in flight), `proposal_reopened` (a gone turn's hold was released: look again), `catalog_changed` (the
  * refreshed proposal is the `view`), `card_not_available`, `proposal_stale`, and for a reshape the held plan's own
- * answers (`reshape_after_work`, `gate_changed`). A 409 carries the current `view` when there is one.
+ * answers (`reshape_after_work`, `gate_changed`). (api-types 0.196.0) `power` adds 400 `power_not_applicable` and
+ * 409 `power_unavailable`. A 409 carries the current `view` when there is one.
  */
 export interface ChatProposalDecisionResponse {
   view: ChatProposalView;
@@ -16922,11 +17072,59 @@ export interface AppSummary {
    * link); absent from an older daemon.
    */
   published?: AppPublished | null;
+  /**
+   * (api-types 0.196.0, G16) The app is archived: hidden from `GET /apps` (unless asked for), and its version changes
+   * (edits, undo, redo, restore, new turns) are `409 app_archived` until `POST /apps/:app/unarchive`; nothing is
+   * deleted. Reads, version reads, queries and the action routes are not changed by archiving. `null` = active. Always
+   * present on a daemon that archives; ABSENT from an older one (a client offers Archive only when the field is there).
+   * `AppDetail` extends this, so the detail carries it too.
+   */
+  archived?: AppArchived | null;
 }
 
-/** `GET /apps` (observer); `?project=<id>` keeps one project's apps. */
+/** (api-types 0.196.0) When an app was archived (Unix millis) and by whom (the actor's id). */
+export interface AppArchived {
+  at: number;
+  by: string;
+}
+
+/**
+ * `GET /apps` (observer); `?project=<id>` keeps one project's apps. (api-types 0.196.0) `?archived=` picks which:
+ * `active` (the default: archived apps are hidden from every lister), `archived`, or `all`.
+ */
 export interface AppsListResponse {
   apps: AppSummary[];
+}
+
+/**
+ * (api-types 0.196.0, G16) `POST /apps/:app/archive` and `POST /apps/:app/unarchive` (HUMAN operator only; body `{}`),
+ * answered with {@link AppDetailResponse}. Each runs under the app's lock, so it waits for a change in flight. Archive
+ * is refused while a turn runs (`409 turn_in_flight`); doing either twice changes nothing (200).
+ */
+export type AppArchiveBody = Record<string, never>;
+
+/**
+ * (api-types 0.196.0, G3/G16) `GET /apps/:app/versions/:version` (observer): an accepted version as it was. `:version`
+ * is a version number or a 40-hex commit of the app's repo; a version with no accepted receipt is `409 not_accepted`,
+ * an unknown one `404 unknown_version`. A non-human reader gets the reduction `GET /apps/:app` gives one: no
+ * `queryText`, the lock's sources as `{kind, descriptorHash}`, and each action as what it is.
+ */
+export interface AppVersionRead {
+  slug: string;
+  /** The version's record; `null` for a commit that is no version of this app (its tree holds an accepted receipt). */
+  version: AppVersion | null;
+  commit: string;
+  tree: string;
+  /** The accepted receipt the tree holds. */
+  receipt: AppReceipt;
+  spec: AppSpec;
+  lock: AppLock;
+  /** Query id → its text at that version. */
+  queryText: Record<string, string>;
+}
+
+export interface AppVersionReadResponse {
+  version: AppVersionRead;
 }
 
 /** `POST /apps` (operator): a new app, an empty repo in the project with crew's first version. */
@@ -17245,6 +17443,8 @@ export interface AppErrorBody {
     | 'not_registered'
     | 'stale_base'
     | 'turn_in_flight'
+    /** (api-types 0.196.0) A change to an archived app: restore it first. */
+    | 'app_archived'
     | 'not_accepted'
     | 'nothing_to_undo'
     | 'nothing_to_redo'

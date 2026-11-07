@@ -14,7 +14,7 @@
  */
 
 import { viewOf } from '../api/auth.js';
-import type { Actor, AppAction, AppDetail, AppLock, AppLockSource, AppSpec } from '../core/types.js';
+import type { Actor, AppAction, AppDetail, AppLock, AppLockSource, AppSpec, AppVersionRead } from '../core/types.js';
 
 /** An action as a non-human reader sees it: no table, columns, call, arguments or parameters. */
 export type AppActionAgentView = Pick<AppAction, 'id' | 'kind' | 'source' | 'description'> & { op?: 'insert' | 'update' | 'delete' };
@@ -35,6 +35,16 @@ function actionFor(a: AppAction): AppActionAgentView {
   };
 }
 
+/** The spec and lock as a non-human reader sees them (shared by the detail and the version read). */
+function reducedFiles(spec: AppSpec, lock: AppLock): Pick<AppDetailAgentView, 'spec' | 'lock'> {
+  const sources = Object.fromEntries(Object.entries(lock.sources).map(([name, s]) => [name, { kind: s.kind, descriptorHash: s.descriptorHash }]));
+  return {
+    spec: { ...spec, actions: (spec.actions ?? []).map(actionFor) },
+    // pi r2: the lock is built from its known fields, so a field added to it later stays out of the agent form.
+    lock: { schema: lock.schema, sources, queries: lock.queries, actions: lock.actions, uploads: lock.uploads },
+  };
+}
+
 /** `detail` as `actor` may read it. */
 export function appDetailFor(actor: Actor | null | undefined, detail: AppDetail): AppDetail | AppDetailAgentView {
   if (viewOf(actor) === 'full') return detail;
@@ -43,13 +53,18 @@ export function appDetailFor(actor: Actor | null | undefined, detail: AppDetail)
   // (K5) The app's chat is the person's: its messages and crew's reasons (a check's findings name queries and
   // relations; a builder's words) are not an agent's to read.
   delete view.turns;
-  const sources = Object.fromEntries(Object.entries(detail.lock.sources).map(([name, s]) => [name, { kind: s.kind, descriptorHash: s.descriptorHash }]));
-  return {
-    ...(view as Omit<AppDetail, 'queryText' | 'lock' | 'spec' | 'turns'>),
-    spec: { ...detail.spec, actions: (detail.spec.actions ?? []).map(actionFor) },
-    // pi r2: the lock is built from its known fields, so a field added to it later stays out of the agent form.
-    lock: { schema: detail.lock.schema, sources, queries: detail.lock.queries, actions: detail.lock.actions, uploads: detail.lock.uploads },
-  };
+  return { ...(view as Omit<AppDetail, 'queryText' | 'lock' | 'spec' | 'turns'>), ...reducedFiles(detail.spec, detail.lock) };
+}
+
+/** The agent-safe form of a version read (G3): the detail's reduction, and no `queryText`. Crew-local. */
+export type AppVersionReadAgentView = Omit<AppVersionRead, 'queryText' | 'lock' | 'spec'> & Pick<AppDetailAgentView, 'spec' | 'lock'>;
+
+/** A version read as `actor` may read it: whole for a person, else as {@link appDetailFor} reduces the detail. */
+export function appVersionReadFor(actor: Actor | null | undefined, read: AppVersionRead): AppVersionRead | AppVersionReadAgentView {
+  if (viewOf(actor) === 'full') return read;
+  const view: Partial<AppVersionRead> = { ...read };
+  delete view.queryText;
+  return { ...(view as Omit<AppVersionRead, 'queryText' | 'lock' | 'spec'>), ...reducedFiles(read.spec, read.lock) };
 }
 
 /** A refusal body of the Apps routes (`AppErrorBody` plus what the error carries). */

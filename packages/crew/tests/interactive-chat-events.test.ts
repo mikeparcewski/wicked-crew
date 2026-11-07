@@ -540,6 +540,8 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     const announce = probeEvents.find((e) => e.event_type === DRAFT_COMPLETED)!;
     expect((announce.payload as { html_path?: string }).html_path).toBe(outPath);
     expect((announce.payload as { document_id?: string }).document_id).toBe('iter-doc');
+    // A5 (§6.2, I1): the revision's version records this run (never read as a person's hand edit).
+    expect((announce.payload as { run_id?: string }).run_id).toBe(launch.sessionId);
     expect(announce.producer_id).toBe(INTERACTIVE_PRODUCER);
     expect(announce.idempotency_key).toBe(chatIdempotencyKey('iter-doc', event_id, 'm-1'));
 

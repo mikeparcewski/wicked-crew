@@ -147,7 +147,7 @@ describe('the working document', () => {
     expect(t.backend.versions).toHaveLength(1);
   });
 
-  it('a person’s edit is theirs (the plugin named as the surface) and becomes ONE note that rides the next step', async () => {
+  it('a person’s edit is theirs (the plugin named as the surface) and becomes ONE note: their Approach stands, Next rides the next step', async () => {
     const t = setup();
     await t.service.ensure('run-1');
     const r = await t.service.propose('run-1', { base: 0, author: 'operator', plugin: { id: 'wicked-phase-report', version: '0.13.1' }, sections: { approach: 'Pass the currency through formatMoney().', next: 'Add GBP and JPY tests.' } }, HUMAN);
@@ -159,9 +159,12 @@ describe('the working document', () => {
     const note = t.injected[0]!;
     expect(note).toMatchObject({ runId: 'run-1', target: 'all' });
     expect(note.message).toContain('- Approach: Pass the currency through formatMoney().');
-    expect(note.message).toContain('- Next and trailing work: Add GBP and JPY tests.');
+    expect(note.message).toContain('- Next and trailing work (this step): Add GBP and JPY tests.');
     expect(note.message).toContain(steerMarker('run-1', r.steer!.id));
-    expect(r.steer).toMatchObject({ kind: 'next', version: 1, queuedAt: 1_000, pickedUp: null, error: null });
+    expect(r.steer).toMatchObject({ kind: 'standing', version: 1, queuedAt: 1_000, pickedUp: null, error: null });
+    // The standing copy is the person's context alone: Next is not in it.
+    expect(r.steer?.standingNote).toContain('- Approach: Pass the currency through formatMoney().');
+    expect(r.steer?.standingNote).not.toContain('Next');
     expect(t.audits).toEqual([expect.objectContaining({ action: 'run.steered.doc', detail: expect.objectContaining({ version: 1, author: 'operator', surface: 'plugin:wicked-phase-report@0.13.1' }) })]);
   });
 
@@ -190,12 +193,12 @@ describe('the working document', () => {
     const r = await t.service.propose('run-1', { base: 0, author: 'operator', sections: { constraints: 'Keep /v1/invoice.pdf working.' } }, HUMAN);
     if (!r.ok) throw new Error(r.error);
     expect(r.steer?.kind).toBe('standing');
-    expect(t.injected[0]?.message).toContain('It replaces any standing constraint from an earlier version.');
+    expect(t.injected[0]?.message).toContain('They replace any standing context or constraint from an earlier version.');
     injectedAt(t, 6, t.injected[0]!.message);
     await settle();
     expect(t.injected).toHaveLength(2);
-    expect(t.injected[1]?.message).toMatch(/^Standing operator constraint/u);
-    expect(t.injected[1]?.message).toContain('If you also see a standing constraint from a later version, that one applies instead.');
+    expect(t.injected[1]?.message).toMatch(/^Standing operator context/u);
+    expect(t.injected[1]?.message).toContain('If you also see standing context from a later version, that one applies instead.');
     expect(t.injected[1]?.message).toContain('- Constraints and steering: Keep /v1/invoice.pdf working.');
     // The next step picks THAT copy up: one more copy for the step after it.
     injectedAt(t, 7, t.injected[1]!.message);

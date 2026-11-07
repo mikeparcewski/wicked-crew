@@ -8,6 +8,7 @@ import { record, z } from '../zod.js';
 import {
   listRequirements,
   listRequirementsRead,
+  setRepoMinimum,
   getRequirement,
   patchRequirement,
   readRequirementsGraph,
@@ -277,8 +278,11 @@ import {
 import { createDocInProcess, registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { CreateLauncher } from '../interactive/proposal-create.js';
 import { ThemeLauncher } from './proposal-theme.js';
+import { lineageSteps, protectedEdits } from '../interactive/protected-edits.js';
 import type { DocBindingStore } from '../interactive/doc-binding.js';
+import type { LandingRecordStore } from '../interactive/landing-record.js';
 import type { BoundDraft } from '../interactive/draft-events.js';
+import type { BoundRefine } from '../interactive/chat-events.js';
 import { buildRunBrief } from './run-brief.js';
 import { readBeneath } from './beneath.js';
 
@@ -545,6 +549,9 @@ export interface LaunchContext {
   fromProposal?: string;
   /** The compose route's own plan launch: a `shape` is judged as a compose, not as a run. */
   target?: 'compose';
+  /** (api-types 0.196.0) A chat job's Start chose a power run: a launch that would run phased is refused (409
+   *  `power_unavailable`) before the engine is called, never started phased with a notice. */
+  powerRequired?: boolean;
 }
 
 /**
@@ -702,6 +709,9 @@ const RULE_STATUSES: ReadonlySet<string> = new Set(['active', 'retired', 'all'])
 // Repo names become directory components under ~/.wicked/repos/ — reject anything
 // that would allow path traversal (slashes, dots-only segments, control chars).
 const SAFE_REPO_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+
+/** `PUT /repos/:id/requirements/minimum` (api-types 0.197.0 `RequirementsMinimumBody`): `null` clears. */
+export const ReqMinimumSchema = z.strictObject({ minPct: z.number().int().min(1).max(100).nullable() });
 
 export const RegisterRepoSchema = z.strictObject({
   name: z
@@ -1282,11 +1292,17 @@ export interface RuntimeDeps {
   chatArtifactsStub?: boolean;
   /** DES-CHAT-ARTIFACTS-001 §5.2 (A3): the durable bindings of chat-made documents (`interactive/doc-binding.ts`). */
   docBindings?: DocBindingStore;
+  /** A6 / PLAN G12: per run, the floor crew measured and the writer's notes (`interactive/landing-record.ts`), served on
+   *  a document's checks read. */
+  docLandings?: LandingRecordStore;
   /** A3: the draft seam's proposal-bound launch. With {@link docBindings}, `create` is advertised and its real launcher
    *  registered; absent (no draft seam armed) = `create` stays off. */
   launchBoundDraft?: (spec: BoundDraft) => Promise<void>;
   /** A3: remove a bound document's earlier attempt folders before a new attempt reads its base. */
   fenceBoundDraft?: (documentId: string, runIds: readonly string[]) => void;
+  /** A5: the chat seam's proposal-bound refine. With {@link docBindings}, `refine` is advertised and its launcher
+   *  registered; absent (no chat seam armed) = `refine` stays off. */
+  launchBoundRefine?: (spec: BoundRefine) => Promise<void>;
   /** (program DES-LEARN §3.3) The voice block of the personality a chat in this project uses (the project's
    *  override, else the person's), or null when none is saved; absent = no personalities on this daemon. */
   personaVoice?: (projectId: string | null) => string | null;
@@ -2382,6 +2398,7 @@ export function registerRoutes(
       detectShape: app.hasRoute({ method: 'POST', url: `${V}/workflows/catalog/detect` }),
       // DES-CATALOG-002 §4.6: person-made and revised job proposals, the revising hold, plan answers bound to planRev.
       chatJobProposals: chatJobProposalsOn,
+      chatJobPower: chatJobProposalsOn,
       reshapeRun: chatJobProposalsOn,
       // (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §14) Per operation: A1 serves `context` (the chat sees the open
       // artifact and the runs the person names; `seedFromArtifact`); A2 (0.170.0) `proposals`. The operations are later
@@ -3404,7 +3421,15 @@ export function registerRoutes(
         powerNotice = 'power mode runs a repo-scoped plan or preset launch; this launch runs phased';
       } else if (!powerSupported()) {
         powerNotice = 'this engine has no power mode; the launch runs phased';
-      } else {
+      } else if (ctx.powerRequired === true && ((await adapter.getSettings()).powerModeDefault ?? true) === false) {
+        // A chat job's power Start follows the setting up to the engine call (it may have been turned off meanwhile).
+        powerNotice = 'Power mode for new jobs is off on this daemon; the launch runs phased';
+      }
+      // A chat job's power Start is never run phased in its place (the person chose no plan review for a power run).
+      if (powerNotice !== null && ctx.powerRequired === true) {
+        return reply.code(409).send({ code: 'power_unavailable', error: `${powerNotice.replace(/; this launch runs phased|; the launch runs phased/u, '')}; press Start with Review plan on` });
+      }
+      if (powerNotice === null) {
         input.power = true;
         input.humanConfirm = 'none';
         // DES-LEARN §3.3 / wicked-core#1216: the orchestrator talks to the person in their personality
@@ -3826,12 +3851,42 @@ export function registerRoutes(
   /**
    * (DES-CATALOG-002 §4.6) The `job` launcher: a chat job proposal's Go, one launcher per launch kind, each with the
    * identity derived from the proposal (`sessionId` = its run id, so a retry finds and adopts it), the chat filing, the
-   * shape, and the plan held (a repository job launched from a chat always stops at its first plan, whatever the
-   * person's posture, so power mode is off for it).
+   * shape, and the plan held: a job launched from a chat stops at its first plan unless the person's Start chose a
+   * power run (`power: true`, api-types 0.196.0), which is refused unless this daemon can run that job as one.
    */
   const jobRefusalText = (payload: unknown): string => {
     const b = payload as { error?: unknown; code?: unknown } | undefined;
     return `${typeof b?.error === 'string' ? b.error : 'the launch was refused'}${typeof b?.code === 'string' ? ` (${b.code})` : ''}`;
+  };
+  /**
+   * (operator ruling 2026-11-06) Why a chat job can't run as a power run on this daemon now, else `null`: only a
+   * workflow run on a repository whose workflow is a preset, on an engine with power mode (launchRun's own rule, which
+   * would otherwise run it phased and only say so), with Power mode for new jobs on (chat starts follow the setting).
+   */
+  const chatJobPowerRefusal = async (p: import('../core/types.js').ArtifactProposal): Promise<string | null> => {
+    const askPlan = 'press Start with Review plan on';
+    if (p.launch !== 'run' && p.launch !== undefined) return `${p.what.label} can't run as a power run; ${askPlan}`;
+    if (p.repoRefs?.[0] === undefined) return `a power run works on a repository, and this job names none; ${askPlan}`;
+    if (!powerSupported()) return `this daemon's engine has no power mode; ${askPlan}`;
+    // The operator ruling: chat starts follow the Power-mode default; with it off, a chat job reviews its plan.
+    try {
+      if (((await adapter.getSettings()).powerModeDefault ?? true) === false) return `Power mode for new jobs is off on this daemon; ${askPlan}`;
+    } catch (err) {
+      return `the Power-mode setting could not be read (${err instanceof Error ? err.message : String(err)}); press Start again`;
+    }
+    if (p.shape === undefined) return `this proposal has no shape to launch; ${askPlan}`;
+    const projectId = p.filedIn.projectId;
+    let served: Awaited<ReturnType<typeof servedFor>>;
+    try {
+      served = await servedFor(shapeReads, projectId ?? undefined);
+    } catch (err) {
+      return `${err instanceof Error ? err.message : String(err)}; press Start again`;
+    }
+    const resolved = resolveOption(p.shape.card, p.shape.option, served);
+    if (resolved === null || resolved.workflow === null) return `${p.what.label} has no workflow to run; ${askPlan}`;
+    const scoped = projectId !== null && projectId !== DEFAULT_PROJECT_ID ? projectId : undefined;
+    if (!(await namesPreset(resolved.workflow, scoped))) return `${p.what.label} can't run as a power run (its workflow is not a preset); ${askPlan}`;
+    return null;
   };
   proposalLaunchers.register('job', {
     find: async (identity) => (await adapter.sessions()).includes(identity.runId),
@@ -3872,6 +3927,11 @@ export function registerRoutes(
         ...((inherited !== null || narrowed.length !== roster.length) && narrowed.length > 0 ? { clisJson: JSON.stringify(narrowed) } : {}),
         selfSeated,
       });
+      // A power Start was checked before accepting; checked again here, so it never runs phased behind the person's back.
+      if (d.power === true) {
+        const why = await chatJobPowerRefusal(p);
+        if (why !== null) throw new Error(why);
+      }
       if (p.launch === 'run' || p.launch === undefined) {
         if (resolved.workflow === null) throw new Error(`${p.what.label} has no workflow to run`);
         const lines = inputLines(p);
@@ -3882,15 +3942,18 @@ export function registerRoutes(
             ...(p.repoRefs?.[0] !== undefined ? { repoRef: p.repoRefs[0] } : {}),
             ...(projectId !== null && projectId !== DEFAULT_PROJECT_ID ? { projectId } : {}),
             ...common,
+            // A power run when the person's Start chose one (checked against this daemon just now); otherwise it
+            // stops at its first plan, as every chat job did before (operator ruling 2026-11-06).
+            // (A power launch overrides the plan hold; launchRun refuses rather than run it phased, `powerRequired`.)
             humanConfirm: 'before:1',
-            power: false,
+            power: d.power === true,
             channel: 'studio',
             // §2.5: a reshape's replacement keeps the held run's delivery and grouping.
             ...(p.relaunch?.deliver !== undefined ? { deliver: p.relaunch.deliver } : {}),
             ...(p.relaunch?.deliverGate !== undefined && p.relaunch.deliver !== 'none' ? { deliverGate: p.relaunch.deliverGate } : {}),
             ...(p.relaunch?.revisesPr !== undefined && p.relaunch.deliver === 'pr' && p.repoRefs?.[0] !== undefined ? { revisesPr: p.relaunch.revisesPr } : {}),
           },
-          { ...ctx, fromProposal: d.pid },
+          { ...ctx, fromProposal: d.pid, ...(d.power === true ? { powerRequired: true } : {}) },
         );
         if (out.statusCode !== 201) throw new Error(jobRefusalText(out.payload));
         return;
@@ -5115,6 +5178,17 @@ export function registerRoutes(
   };
   const chatProposals = new ChatProposals({
     flags: () => chatArtifactFlags,
+    // A5 (DES §6.1-6.2): the person's own edits a refine keeps, from the document's lineage (fail closed: an error
+    // blocks the card, since the landing guard could never pass). Only where a real refine can run.
+    ...(runtime.docBindings !== undefined && runtime.launchBoundRefine !== undefined ? { protectedEdits: async (artifactRef: string, version: number, touch: readonly string[]) => {
+      const ref = parseArtifactRef(artifactRef);
+      const root = ref === null ? null : await projectDocsRoot(adapter, projectSettings, ref.projectId);
+      if (ref === null || root === null) return { ok: false, error: 'the document is not on this daemon' };
+      const steps = lineageSteps(root, ref.doc, version, (runId) => runtime.docBindings?.allowOf(runId) ?? []);
+      if (steps === null) return { ok: false, error: `its versions up to v${version} could not be read` };
+      const mapped = await protectedEdits(steps, touch);
+      return mapped.ok ? { ok: true as const, entries: mapped.entries } : mapped;
+    } } : {}),
     catalog: CATALOG_SEEDS,
     records: (chatId) => chatHistory?.messages(chatId) ?? chatTranscripts?.read(chatId) ?? [],
     append: (chatId, record) => {
@@ -5200,6 +5274,12 @@ export function registerRoutes(
       return composePreflight(adapter, p.filedIn.projectId, req.refs, steer === '' ? undefined : steer);
     },
     qeOff: async () => addonSupportsQeOverride() && (await qeAcceptanceNow()) === 'off',
+    powerRefusal: chatJobPowerRefusal,
+    powerPresets: async (projectId) => {
+      if (!powerSupported() || ((await adapter.getSettings()).powerModeDefault ?? true) === false || typeof adapter.listPresets !== 'function') return null;
+      // The launch's own source (namesPreset): this project's presets, else the global ones.
+      return new Set((await adapter.listPresets(projectId !== null && projectId !== DEFAULT_PROJECT_ID ? projectId : undefined)).map((p) => p.name));
+    },
     acceptsJobs: (chatId) => chatAccepts.get(chatId) === true,
     served: (projectId) => servedFor(shapeReads, projectId ?? undefined),
     turnLive: (chatId, turnId) => chatTurns.turnsOf(chatId).some((t) => t.turnId === turnId),
@@ -5662,6 +5742,9 @@ export function registerRoutes(
       seats: z.array(z.string().min(1).max(64)).min(1).max(8).optional(),
       inputs: RevisionEditsSchema.shape.inputs,
     }).optional(),
+    // (api-types 0.196.0, operator ruling 2026-11-06) a job's Start chooses how it runs: `true` = a power run (no plan
+    // gate), `false` = it stops at its plan. Absent = it stops at its plan, as before.
+    power: z.boolean().optional(),
   });
   /** (api-types 0.192.0) `POST /chats/:id/proposals`: a person-made proposal, or a revision of the open one. */
   const PersonProposalSchema = z.union([
@@ -5738,7 +5821,11 @@ export function registerRoutes(
       const edits = parsed.data.edits === undefined
         ? undefined
         : (Object.fromEntries(Object.entries(parsed.data.edits).filter(([, v]) => v !== undefined)) as import('../core/types.js').ProposalEdits);
-      const out = await chatProposals.decide(id, pid, { decision: parsed.data.decision, ...(edits !== undefined ? { edits } : {}) }, actor, instance);
+      const out = await chatProposals.decide(id, pid, {
+        decision: parsed.data.decision,
+        ...(edits !== undefined ? { edits } : {}),
+        ...(parsed.data.power !== undefined ? { power: parsed.data.power } : {}),
+      }, actor, instance);
       return reply.code(out.code).send(out.body);
     },
   );
@@ -8583,6 +8670,7 @@ export function registerRoutes(
     q: z.string().optional(),
     risk: z.enum(['risk', 'no-risk']).optional(),
     category: z.enum(['functional', 'config-data']).optional(),
+    mismatch: z.enum(['yes', 'no']).optional(),
     domain: z.string().optional(),
     offset: z.coerce.number().int().min(0).prefault(0),
     limit: z.coerce.number().int().min(1).max(200).prefault(50),
@@ -8598,8 +8686,9 @@ export function registerRoutes(
     }
     let page: Awaited<ReturnType<typeof listRequirements>>;
     let coverage: Awaited<ReturnType<typeof listRequirementsRead>>['coverage'] = null;
+    let minimum: Awaited<ReturnType<typeof listRequirementsRead>>['minimum'] = null;
     try {
-      ({ page, coverage } = await listRequirementsRead(repo, parsed.data, adapter));
+      ({ page, coverage, minimum } = await listRequirementsRead(repo, parsed.data, adapter));
     } catch (err) {
       // wicked-core#406: a CURRENT engine with no repo-graph root is a 503, not a 500.
       const status = codeGraphErrorStatus(err);
@@ -8610,9 +8699,11 @@ export function registerRoutes(
       // Not generated yet is a state, typed by `code`, not a refusal (lane repo-page). It says how
       // far the repository is ("23% real requirements · 4397 placeholders · target 80%";
       // wicked-core#1233), from the very engine read the page used, when it has a store to count.
-      return reply
-        .code(404)
-        .send(coverage === null ? REQUIREMENTS_NOT_GENERATED : { ...REQUIREMENTS_NOT_GENERATED, coverage });
+      return reply.code(404).send({
+        ...REQUIREMENTS_NOT_GENERATED,
+        ...(coverage === null ? {} : { coverage }),
+        ...(minimum === null ? {} : { minimum }),
+      });
     }
     // Overrides keyed by ids the corpus no longer mints (an estate id-scheme migration re-keys
     // method/field SymbolIds) would otherwise vanish without a trace — the count is on the page
@@ -8625,6 +8716,34 @@ export function registerRoutes(
     }
     return page;
   });
+
+  // P3 (operator ruling 2026-11-06): raise, lower or clear a repository's OWN minimum from the requirements page.
+  // `minPct: null` clears it (the Settings minimum applies again).
+  app.put(
+    `${V}/repos/:id/requirements/minimum`,
+    { config: { manifest: { requestType: 'RequirementsMinimumBody', responseType: 'RequirementsMinimumResponse', statusCodes: [200, 400, 404, 409, 500, 503] } } },
+    async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const repos = await adapter.listRepos();
+    const repo = repos.find((r) => r.id === id);
+    if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+    const parsed = ReqMinimumSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid minimum'));
+    let set: boolean;
+    try {
+      set = await setRepoMinimum(repo, parsed.data.minPct);
+    } catch (err) {
+      const status = codeGraphErrorStatus(err);
+      if (status !== null) return reply.code(status).send({ error: message(err) });
+      return reply.code(500).send({ error: `the minimum could not be saved: ${message(err)}` });
+    }
+    if (!set) {
+      return reply.code(409).send({ error: `${repo.name} has no code graph yet, so it has no minimum of its own to set` });
+    }
+    const { minimum } = await listRequirementsRead(repo, { offset: 0, limit: 0 }, adapter);
+    return { minimum };
+    },
+  );
 
   app.get(`${V}/repos/:id/requirements/:key`, async (req, reply) => {
     const { id, key } = req.params as { id: string; key: string };
@@ -10991,6 +11110,8 @@ export function registerRoutes(
   // EP-C2: the ONE checks read of a document — the reviewers' recorded verdicts, read-only.
   registerInteractiveDocChecks(app, adapter, {
     reviewsDir: runtime.docReviewsDir ?? (() => join(crewStateHome(), 'interactive-edits', REVIEWS_DIRNAME)),
+    ...(runtime.docLandings !== undefined ? { landings: runtime.docLandings } : {}),
+    docsRoot: (projectId) => projectDocsRoot(adapter, projectSettings, projectId),
     log: (m) => app.log.warn(m),
   });
 
