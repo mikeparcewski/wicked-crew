@@ -36,6 +36,7 @@ import { existsSync } from 'node:fs';
 import { readFile, writeFile, rename, mkdir, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
+import { WICKED_CORE_EXE_NAME } from '../core/adapter.js';
 import { execCapped } from '../core/exec.js';
 import { codeGraphDb, requirementsOverrides } from '../core/repoPaths.js';
 import type { RepoEntry } from '../core/types.js';
@@ -166,10 +167,10 @@ export async function readRequirementsGraph(
 /** Runs `wicked-core <args>`; injectable for tests. */
 export type CoreCliRunner = (args: string[]) => Promise<unknown>;
 
+/** The engine CLI: the binary the daemon located at boot (`WICKED_CORE_EXE`, set by the adapter), else the one on
+ *  PATH (the same command a job's "Lower the minimum" answer runs). The write needs the CLI, not only the addon. */
 const runCoreCli: CoreCliRunner = (args) =>
-  execCapped(process.env['WICKED_CORE_EXE'] || (process.platform === 'win32' ? 'wicked-core.exe' : 'wicked-core'), args, {
-    timeout: 30_000,
-  });
+  execCapped(process.env['WICKED_CORE_EXE'] || WICKED_CORE_EXE_NAME, args, { timeout: 30_000 });
 
 /**
  * Set (`pct`) or clear (`null`) a repository's OWN minimum, kept in its store (operator ruling 2026-11-06, P3: the
@@ -507,7 +508,9 @@ export function minimumOf(
   if (raw === undefined || raw === null || typeof raw !== 'object') return null;
   const repoPct = pctOf(raw.repo);
   const settingsPct = pctOf(raw.daemon);
-  const pct = coverage?.minPct ?? repoPct ?? settingsPct;
+  // The number in force follows the source it is named after (pi r1): the label's own minimum only when the engine
+  // named neither.
+  const pct = repoPct ?? settingsPct ?? coverage?.minPct ?? null;
   if (pct === null) return null;
   return { pct, source: repoPct !== null ? 'repo' : 'settings', repoPct, settingsPct };
 }

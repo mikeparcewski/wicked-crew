@@ -706,6 +706,9 @@ const RULE_STATUSES: ReadonlySet<string> = new Set(['active', 'retired', 'all'])
 // that would allow path traversal (slashes, dots-only segments, control chars).
 const SAFE_REPO_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 
+/** `PUT /repos/:id/requirements/minimum` (api-types 0.196.0 `RequirementsMinimumBody`): `null` clears. */
+export const ReqMinimumSchema = z.strictObject({ minPct: z.number().int().min(1).max(100).nullable() });
+
 export const RegisterRepoSchema = z.strictObject({
   name: z
     .string()
@@ -8690,7 +8693,6 @@ export function registerRoutes(
 
   // P3 (operator ruling 2026-11-06): raise, lower or clear a repository's OWN minimum from the requirements page.
   // `minPct: null` clears it (the Settings minimum applies again).
-  const ReqMinimumSchema = z.strictObject({ minPct: z.number().int().min(1).max(100).nullable() });
   app.put(
     `${V}/repos/:id/requirements/minimum`,
     { config: { manifest: { requestType: 'RequirementsMinimumBody', responseType: 'RequirementsMinimumResponse', statusCodes: [200, 400, 404, 409, 500, 503] } } },

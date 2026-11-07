@@ -136,7 +136,7 @@ describe('requirements: mismatches, code age and the minimum in force (operator 
     };
     const out = await listRequirementsRead(r, { offset: 0, limit: 1 }, none);
     expect(out.page).toBeNull();
-    expect(out.minimum).toEqual({ pct: 66, source: 'settings', repoPct: null, settingsPct: 80 });
+    expect(out.minimum).toEqual({ pct: 80, source: 'settings', repoPct: null, settingsPct: 80 });
   });
 
   it('setRepoMinimum runs the engine command against the repository store: set, clear, and nothing without a store', async () => {
