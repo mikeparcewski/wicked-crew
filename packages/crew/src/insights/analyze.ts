@@ -232,12 +232,12 @@ export function formatValue(def: MetricDef, v: number | null, extra = 0): string
 
 /**
  * The extra decimals that make `a` and `b` read differently when they differ (a finding never reads "$0.16 against
- * $0.16"): 0 when they already do, or are equal; at most 3.
+ * $0.16"): 0 when they already do, or are equal; at most 6 (enough for minutes shown as hours).
  */
 export function pairPrecision(def: MetricDef, a: number | null, b: number | null): number {
   if (a === null || b === null || a === b) return 0;
   let extra = 0;
-  while (extra < 3 && formatValue(def, a, extra) === formatValue(def, b, extra)) extra += 1;
+  while (extra < 6 && formatValue(def, a, extra) === formatValue(def, b, extra)) extra += 1;
   return extra;
 }
 

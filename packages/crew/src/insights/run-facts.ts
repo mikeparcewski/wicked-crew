@@ -44,8 +44,9 @@ export interface RunFact {
   spendUsd: number;
   /** Whether any `cliUsage` frame carried a cost (an unreported CLI reads 0, which is not "free"). */
   spendReported: boolean;
-  /** (CS6) `cliUsage` frames that carried a cost, and frames that did not: a run is fully priced only when every
-   *  frame was (one priced frame is enough to set {@link spendReported}). */
+  /** (CS6) `cliUsage` frames that carried a cost, and usage that did not (a `cliUsage` frame with no cost, or a
+   *  `cliUsageUnreported` attempt): a run is fully priced only when every one was priced (one priced frame is enough to
+   *  set {@link spendReported}). */
   pricedFrames: number;
   unpricedFrames: number;
   /** (CS6) When the run reached its terminal state, as RECORDED: its terminal event, else the engine's
@@ -54,6 +55,11 @@ export interface RunFact {
   /** (CS6) The run's events could not be read: its frame counts and {@link terminalAtMs} rest on its record only.
    *  Set by the collector (`collectRunFacts`), never by {@link runFactOf}. */
   eventsUnreadable?: boolean;
+  /** (CS6) The run's resolved name (`run_identity.name`): `null` = unnamed (free text, a user plan, unknown);
+   *  absent when the view carried no identity. */
+  runName?: string | null;
+  /** (CS6) The run is a system run (`run_identity.system`); absent when the view carried no identity. */
+  system?: boolean;
   tokens: number;
   /** Reassignments plus failed steps. */
   retries: number;
@@ -78,6 +84,13 @@ export interface RunPowerFact {
   raised: boolean;
   estimateMinutes: number | null;
   actualMinutes: number | null;
+}
+
+/** The run identity the adapter attached (`session.run_identity`), when it did. */
+function identityOf(s: Record<string, unknown>): Pick<RunFact, 'runName' | 'system'> {
+  const id = s['run_identity'] as { name?: unknown; system?: unknown } | null | undefined;
+  if (id === null || id === undefined || typeof id !== 'object') return {};
+  return { runName: typeof id.name === 'string' && id.name !== '' ? id.name : null, system: id.system === true };
 }
 
 const RIGOR_RANK: Record<string, number> = { light: 0, standard: 1, high: 2, highest: 3 };
@@ -132,7 +145,8 @@ function outcomeOf(status: string, deliverRequested: boolean, delivered: boolean
   return 'open';
 }
 
-const TERMINAL_EVENTS = new Set(['sessionCompleted', 'sessionFailed', 'sessionCancelled']);
+// The engine's cancel frame is `runCancelled` (core `event.rs`); `sessionCancelled` is kept for older logs.
+const TERMINAL_EVENTS = new Set(['sessionCompleted', 'sessionFailed', 'runCancelled', 'sessionCancelled']);
 const PARK_EVENTS = new Set(['awaitingHuman', 'gateEscalated']);
 const UNPARK_EVENTS = new Set(['gateDecided', 'resumed']);
 
@@ -197,6 +211,8 @@ export function runFactOf(view: SessionView, events: readonly LooseEvent[], nowM
       } else unpricedFrames += 1;
       tokens += num(e['inputTokens']) + num(e['outputTokens']);
     }
+    // An agent attempt that reported no usage at all (`cliUsageUnreported`): its cost is missing from the sum.
+    if (e.type === 'cliUsageUnreported') unpricedFrames += 1;
     if (e.type === 'unitReassigned') retries += 1;
     if (e.type === 'stepFailed') {
       retries += 1;
@@ -259,5 +275,6 @@ export function runFactOf(view: SessionView, events: readonly LooseEvent[], nowM
     failureSignature,
     unresolved,
     power: powerFactOf(s),
+    ...identityOf(s),
   };
 }

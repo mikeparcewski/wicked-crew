@@ -329,6 +329,9 @@ describe('a finding never reads the same number twice (e2e f53e3f27: "$0.16 agai
     const minutes = METRICS.find((m) => m.id === 'time_to_pr')!;
     expect(formatValue(minutes, 34.4)).toBe(formatValue(minutes, 34.2));
     expect(pairPrecision(minutes, 34.4, 34.2)).toBe(1);
+    // Minutes shown as hours (codex r1: "2.0000 h against 2.0000 h").
+    const x = pairPrecision(minutes, 120.002, 120.001);
+    expect(formatValue(minutes, 120.002, x)).not.toBe(formatValue(minutes, 120.001, x));
   });
 
   it('a spend regression whose medians round alike at cents is worded with the digits that differ', () => {

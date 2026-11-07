@@ -28,9 +28,10 @@ export const RUN_COST_WORKFLOW = 'run-cost';
 export const RUN_COST_FACTS_STEP = 'facts';
 export const RUN_COST_FACTS_CMD: readonly string[] = ['wicked-crew', 'insights-facts'];
 /**
- * The most bytes the printed facts may take. The engine hands a prior output to the next steps clipped to a share of
- * 96 KB (48 KB at most, head and tail kept); the header and every group line always fit well inside this, and run rows
- * are added newest first until it is reached, the omitted count said.
+ * The most bytes the printed facts may take: the engine hands a prior output to the next steps clipped to a share of
+ * 96 KB (48 KB at most, its middle removed). The WHOLE block is budgeted: the header, then the groups largest first
+ * (each group's lines whole, a group that does not fit is named on one omitted line), then the runs newest first, each
+ * omission counted.
  */
 export const COST_TEXT_BUDGET = 36 * 1024;
 
@@ -71,7 +72,9 @@ export interface CostRow {
   launchedAtMs: number;
   /** Minutes, launch to the recorded terminal time; `null` when none was recorded. */
   wallMinutes: number | null;
-  spendUsd: number;
+  /** USD as recorded: the run's spend when fully priced, the lower bound when partly priced; `null` when no spend
+   *  was measured (unpriced, none, unknown), never a measured zero. */
+  spendUsd: number | null;
   pricing: Pricing;
   pricedFrames: number;
   unpricedFrames: number;
@@ -100,7 +103,12 @@ export const COST_RULES: readonly string[] = [
   'the values as printed are the record: cite them by id and do arithmetic on them as printed',
 ];
 
-const UNNAMED = (w: string): boolean => w === 'free-text' || w.startsWith('wf-') || w.includes(':plan-');
+/** Unnamed: the resolved identity has no name; only a fact with no identity falls back to the id's shape. */
+const unnamed = (r: RunFact): boolean =>
+  r.runName !== undefined ? r.runName === null : r.workflow === 'free-text' || r.workflow.startsWith('wf-') || r.workflow.includes(':plan-');
+const system = (r: RunFact): boolean => r.system === true || isSystemWorkflow(r.runName ?? r.workflow);
+/** The group a run counts in: its resolved name, else its workflow id. */
+const nameOf = (r: RunFact): string => r.runName ?? r.workflow;
 const TERMINAL: ReadonlySet<string> = new Set(['passed', 'failed', 'cancelled']);
 
 export function pricingOf(r: Pick<RunFact, 'pricedFrames' | 'unpricedFrames' | 'eventsUnreadable'>): Pricing {
@@ -133,12 +141,12 @@ export function costFacts(
     if (r.createdAtMs < opts.window.startMs || r.createdAtMs >= opts.window.endMs) continue;
     if (opts.excludeRunId != null && r.id === opts.excludeRunId) excluded.self += 1;
     else if (!TERMINAL.has(r.outcome)) excluded.open += 1;
-    else if (isSystemWorkflow(r.workflow)) excluded.system += 1;
-    else if (UNNAMED(r.workflow)) excluded.unnamed += 1;
+    else if (unnamed(r)) excluded.unnamed += 1;
+    else if (system(r)) excluded.system += 1;
     else kept.push(r);
   }
   const byWorkflow = new Map<string, RunFact[]>();
-  for (const r of kept) byWorkflow.set(r.workflow, [...(byWorkflow.get(r.workflow) ?? []), r]);
+  for (const r of kept) byWorkflow.set(nameOf(r), [...(byWorkflow.get(nameOf(r)) ?? []), r]);
   const order = [...byWorkflow.entries()].sort((a, b) => b[1].length - a[1].length || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   const groupOf = new Map<string, string>();
   const wallOf = (r: RunFact): number | null => (r.terminalAtMs === null ? null : Math.max(0, r.terminalAtMs - r.createdAtMs) / MIN_MS);
@@ -168,13 +176,13 @@ export function costFacts(
     .sort((a, b) => b.createdAtMs - a.createdAtMs || (a.id < b.id ? -1 : 1))
     .map((r, i) => ({
       id: `R${i + 1}`,
-      group: groupOf.get(r.workflow) as string,
+      group: groupOf.get(nameOf(r)) as string,
       run: r.id,
-      workflow: r.workflow,
+      workflow: nameOf(r),
       outcome: r.outcome as CostRow['outcome'],
       launchedAtMs: r.createdAtMs,
       wallMinutes: wallOf(r),
-      spendUsd: r.spendUsd,
+      spendUsd: pricingOf(r) === 'full' || pricingOf(r) === 'partial' ? r.spendUsd : null,
       pricing: pricingOf(r),
       pricedFrames: r.pricedFrames,
       unpricedFrames: r.unpricedFrames,
@@ -207,15 +215,19 @@ function groupLines(g: CostGroup): string[] {
 }
 
 function rowLine(r: CostRow): string {
-  return `${r.id} ${r.group} run=${r.run} outcome=${r.outcome} launched=${iso(r.launchedAtMs)} wall=${minutes(r.wallMinutes)} spend=${usd(r.spendUsd)} pricing=${r.pricing} frames=${r.pricedFrames}/${r.unpricedFrames} retries=${r.retries}`;
+  // A partly priced run's sum is a lower bound, and says so; a run with no measured spend reads `none`, never 0.
+  const spend = r.pricing === 'partial' ? `spend_at_least=${usd(r.spendUsd)}` : `spend=${usd(r.spendUsd)}`;
+  return `${r.id} ${r.group} run=${r.run} outcome=${r.outcome} launched=${iso(r.launchedAtMs)} wall=${minutes(r.wallMinutes)} ${spend} pricing=${r.pricing} frames=${r.pricedFrames}/${r.unpricedFrames} retries=${r.retries}`;
 }
 
 /**
- * The facts as the `facts` step prints them: a header (window, scope, what is left out, the rules, the citation
- * grammar), every group, then the runs newest first until {@link COST_TEXT_BUDGET} bytes, the omitted count said.
- * Every statistic is over every run of its group, shown or not.
+ * The facts as the `facts` step prints them, the whole block within `budget` bytes: a header (window, scope, what is left
+ * out, the rules, the citation grammar), the groups largest first (a group's lines whole; groups that do not fit are
+ * named on one line, as far as it fits, and counted), then the runs newest first, the omitted count said. Every
+ * statistic is over every run of its group, shown or not.
  */
 export function renderCostFacts(f: CostFacts, budget = COST_TEXT_BUDGET): string {
+  const bytes = (t: string): number => Buffer.byteLength(t);
   const head = [
     `RUN-COST FACTS v${f.version} (crew's run record, read by wicked-crew insights-facts; read-only)`,
     `taken: ${iso(f.generatedAtMs)}`,
@@ -225,21 +237,43 @@ export function renderCostFacts(f: CostFacts, budget = COST_TEXT_BUDGET): string
     'rules:',
     ...f.rules.map((r) => `- ${r}`),
     'cite: a group value as <group>.<line>.<key> (G1.wall.p75, G1.spend.p50, G1.spend.total, G1.pricing.full, G1.runs, G1.failed); a run as its R id',
-    `groups (${f.groups.length}):`,
-    ...(f.groups.length === 0 ? ['(none: no terminal named run in the window)'] : f.groups.flatMap(groupLines)),
-  ];
-  let text = `${head.join('\n')}\n`;
-  const rowsHead = (shown: number): string => `runs (newest first; ${shown} of ${f.rows.length} shown; every statistic above is over all ${f.rows.length}):\n`;
+  ].join('\n') + '\n';
+  // Room kept for the closing lines (the omitted-groups line is cut to fit what is left of it).
+  const RESERVE = 600;
+  let text = head;
+  const shown: string[] = [];
+  const omitted: CostFacts['groups'] = [];
+  for (const g of f.groups) {
+    const block = `${groupLines(g).join('\n')}\n`;
+    if (omitted.length === 0 && bytes(text) + bytes(block) + RESERVE <= budget) {
+      shown.push(block);
+      text += block;
+    } else omitted.push(g);
+  }
+  let out = `${head}groups (${shown.length} of ${f.groups.length} shown, largest first):\n`;
+  if (f.groups.length === 0) out += '(none: no terminal named run in the window)\n';
+  out += shown.join('');
+  if (omitted.length > 0) {
+    let line = `(${omitted.length} smaller groups omitted to fit the step's context:`;
+    for (const g of omitted) {
+      const part = ` ${g.id}:${g.workflow}=${g.runs}`;
+      if (bytes(out) + bytes(line) + bytes(part) + 2 > budget - 200) {
+        line += ' ...';
+        break;
+      }
+      line += part;
+    }
+    out += `${line})\n`;
+  }
+  const rowsHead = (n: number): string => `runs (newest first; ${n} of ${f.rows.length} shown; every statistic above is over all ${f.rows.length}):\n`;
+  const tail = (n: number): string => (n < f.rows.length ? `(${f.rows.length - n} older runs omitted to fit the step's context)\n` : '');
   const lines: string[] = [];
-  let size = Buffer.byteLength(text) + Buffer.byteLength(rowsHead(f.rows.length));
+  let size = bytes(out) + bytes(rowsHead(f.rows.length)) + bytes(tail(0));
   for (const r of f.rows) {
     const line = `${rowLine(r)}\n`;
-    const n = Buffer.byteLength(line);
-    if (size + n > budget) break;
-    size += n;
+    if (size + bytes(line) > budget) break;
+    size += bytes(line);
     lines.push(line);
   }
-  text += rowsHead(lines.length) + lines.join('');
-  if (lines.length < f.rows.length) text += `(${f.rows.length - lines.length} older runs omitted to fit the step's context)\n`;
-  return text;
+  return out + rowsHead(lines.length) + lines.join('') + tail(lines.length);
 }

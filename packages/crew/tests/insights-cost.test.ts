@@ -47,24 +47,32 @@ interface Fixture {
   endMin?: number | null;
   /** The engine's finished_at, minutes after launch. */
   finishedMin?: number;
-  costs?: Array<number | null>;
+  /** One usage record each: a priced `cliUsage`, a `cliUsage` with no cost (`null`), or an attempt that reported no
+   *  usage at all (`'unreported'`, the engine's `cliUsageUnreported`). */
+  costs?: Array<number | null | 'unreported'>;
   unreadable?: boolean;
+  /** The adapter resolved no name (free text, a user plan). */
+  unnamed?: boolean;
   units?: Array<{ ord: number; step: string; tool_cmd: string[] | null }>;
 }
 
 const FIXTURES: Fixture[] = [
   { id: 'bug-1', workflow: 'bug', daysAgo: 10, status: 'completed', endMin: 60, costs: [1.0, 0.5] },
-  { id: 'bug-2', workflow: 'bug', daysAgo: 5, status: 'failed', endMin: 30, costs: [2.0] },
-  // Cancelled, its terminal event missing: the engine's finished_at times it. One priced and one unpriced frame.
-  { id: 'bug-3', workflow: 'bug', daysAgo: 2, status: 'cancelled', endMin: null, finishedMin: 90, costs: [0.25, null] },
+  // Failed, its terminal event missing: the engine's finished_at times it.
+  { id: 'bug-2', workflow: 'bug', daysAgo: 5, status: 'failed', endMin: null, finishedMin: 30, costs: [2.0] },
+  // Cancelled (the engine's `runCancelled`, no finished_at). One priced frame and one attempt that reported no usage.
+  { id: 'bug-3', workflow: 'bug', daysAgo: 2, status: 'cancelled', endMin: 90, costs: [0.25, 'unreported'] },
   { id: 'bug-4', workflow: 'bug', daysAgo: 1, status: 'completed', endMin: 120, costs: [3.0] },
   // Events unreadable: pricing unknown, wall unmeasured.
   { id: 'bug-5', workflow: 'bug', daysAgo: 3, status: 'completed', unreadable: true },
-  { id: 'feature-1', workflow: 'feature', daysAgo: 4, status: 'completed', endMin: 200, costs: [] },
+  // Usage with no cost only: unpriced, its spend never read as 0.
+  { id: 'feature-1', workflow: 'feature', daysAgo: 4, status: 'completed', endMin: 200, costs: [null] },
+  // A saved preset whose NAME looks like an engine id: named, so it is a group of its own.
+  { id: 'wfbug-1', workflow: 'wf-bug', daysAgo: 6, status: 'completed', endMin: 10, costs: [] },
   // Left out: open, system, unnamed, the asking run, and a run older than the window.
   { id: 'bug-open', workflow: 'bug', daysAgo: 1, status: 'executing', costs: [9.0] },
   { id: 'chat-1', workflow: 'chat', daysAgo: 1, status: 'completed', endMin: 5, costs: [0.1] },
-  { id: 'free-1', workflow: 'wf-free-1', daysAgo: 1, status: 'completed', endMin: 5, costs: [0.1] },
+  { id: 'free-1', workflow: 'wf-free-1', daysAgo: 1, status: 'completed', endMin: 5, costs: [0.1], unnamed: true },
   {
     id: 'rc-1', workflow: 'run-cost', daysAgo: 0.01, status: 'executing',
     units: [{ ord: 1, step: 'facts', tool_cmd: FACTS_CMD }, { ord: 2, step: 'model', tool_cmd: null }, { ord: 3, step: 'check', tool_cmd: null }],
@@ -87,7 +95,7 @@ function views(): unknown[] {
       delivery: 'none',
       archived_at: null,
       workflow_id: f.workflow,
-      run_identity: f.workflow.startsWith('wf-') ? { kind: 'free_text', name: null, user_plan: false, system: false } : { kind: 'preset', name: f.workflow, user_plan: false, system: f.workflow === 'chat' },
+      run_identity: f.unnamed === true ? { kind: 'free_text', name: null, user_plan: false, system: false } : { kind: 'preset', name: f.workflow, user_plan: false, system: f.workflow === 'chat' },
       project_id: null,
       repo_ref: null,
       title: f.id,
@@ -102,9 +110,15 @@ function eventsOf(id: string): unknown[] {
   if (f.unreadable === true) throw new Error('log unreadable');
   const t0 = Math.floor(created(f) / 1000) * 1000;
   const out: Array<Record<string, unknown>> = [{ type: 'sessionStarted', ts: t0 }];
-  (f.costs ?? []).forEach((c, i) => out.push({ type: 'cliUsage', ts: t0 + (i + 1) * 1000, inputTokens: 10, outputTokens: 5, ...(c === null ? {} : { costUsd: c }) }));
+  (f.costs ?? []).forEach((c, i) =>
+    out.push(
+      c === 'unreported'
+        ? { type: 'cliUsageUnreported', ts: t0 + (i + 1) * 1000, ord: 1, attempt: 0, cli: 'codex' }
+        : { type: 'cliUsage', ts: t0 + (i + 1) * 1000, inputTokens: 10, outputTokens: 5, costUsd: c },
+    ),
+  );
   if (f.endMin != null) {
-    const type = f.status === 'failed' ? 'sessionFailed' : f.status === 'cancelled' ? 'sessionCancelled' : 'sessionCompleted';
+    const type = f.status === 'failed' ? 'sessionFailed' : f.status === 'cancelled' ? 'runCancelled' : 'sessionCompleted';
     out.push({ type, ts: t0 + f.endMin * MIN });
   }
   return out;
@@ -136,11 +150,11 @@ describe('the cost facts (hand-computed on the fixture store)', () => {
   it('states its population: terminal named runs of the window, grouped; open, system, unnamed and the asking run left out', async () => {
     const f = costFacts(await collected(), { window: costWindow(NOW), generatedAtMs: NOW, excludeRunId: 'rc-1' });
     expect(f.excluded).toEqual({ open: 3, system: 1, unnamed: 1, self: 1 });
-    expect(f.groups.map((g) => [g.id, g.workflow, g.runs])).toEqual([['G1', 'bug', 5], ['G2', 'feature', 1]]);
+    expect(f.groups.map((g) => [g.id, g.workflow, g.runs])).toEqual([['G1', 'bug', 5], ['G2', 'feature', 1], ['G3', 'wf-bug', 1]]);
     const bug = f.groups[0] as CostFacts['groups'][number];
     // Failed and cancelled runs count.
     expect(bug.outcomes).toEqual({ passed: 3, failed: 1, cancelled: 1 });
-    // Wall: 60, 30, 90 (finished_at, no terminal event) and 120 minutes; bug-5 has no recorded terminal time.
+    // Wall: 60, 30 (finished_at, no terminal event), 90 (runCancelled) and 120 minutes; bug-5 has no recorded time.
     expect(bug.wall).toEqual({ n: 4, unmeasured: 1, p50: 75, p75: 97.5, p90: 111 });
     expect(bug.pricing).toEqual({ full: 3, partial: 1, unpriced: 0, none: 0, unknown: 1 });
     // Spend over the fully priced runs only: 1.5, 2.0, 3.0.
@@ -151,13 +165,18 @@ describe('the cost facts (hand-computed on the fixture store)', () => {
     expect(bug.spend.total).toBeCloseTo(6.5, 12);
     expect(bug.partialTotal).toBeCloseTo(0.25, 12);
     const feature = f.groups[1] as CostFacts['groups'][number];
-    expect(feature.pricing.none).toBe(1);
+    expect(feature.pricing.unpriced).toBe(1);
+    expect(f.groups[2]?.pricing.none).toBe(1);
     expect(feature.spend).toEqual({ n: 0, p50: null, p75: null, p90: null, total: 0 });
     expect(feature.wall).toEqual({ n: 1, unmeasured: 0, p50: 200, p75: 200, p90: 200 });
     // Rows: newest first, every population run, each traceable to its recorded run.
-    expect(f.rows.map((r) => r.run)).toEqual(['bug-4', 'bug-3', 'bug-5', 'feature-1', 'bug-2', 'bug-1']);
+    expect(f.rows.map((r) => r.run)).toEqual(['bug-4', 'bug-3', 'bug-5', 'feature-1', 'bug-2', 'wfbug-1', 'bug-1']);
     expect(f.rows.find((r) => r.run === 'bug-3')).toMatchObject({ group: 'G1', outcome: 'cancelled', wallMinutes: 90, pricing: 'partial', pricedFrames: 1, unpricedFrames: 1 });
-    expect(f.rows.find((r) => r.run === 'bug-5')).toMatchObject({ wallMinutes: null, pricing: 'unknown' });
+    // No measured spend is never a measured zero; a partly priced sum is kept as a lower bound.
+    expect(f.rows.find((r) => r.run === 'bug-5')).toMatchObject({ wallMinutes: null, pricing: 'unknown', spendUsd: null });
+    expect(f.rows.find((r) => r.run === 'feature-1')).toMatchObject({ pricing: 'unpriced', spendUsd: null, pricedFrames: 0, unpricedFrames: 1 });
+    expect(f.rows.find((r) => r.run === 'wfbug-1')).toMatchObject({ pricing: 'none', spendUsd: null });
+    expect(f.rows.find((r) => r.run === 'bug-3')?.spendUsd).toBeCloseTo(0.25, 12);
   });
 
   it('the preparer extracted from the review keeps the review snapshot the same', async () => {
@@ -262,8 +281,10 @@ describe('POST /insights/facts', () => {
     expect(ok.out).toContain('G1.pricing (runs): full=3 partial=1 unpriced=0 none=0 unknown=1');
     expect(ok.out).toContain('G1.spend (USD, fully priced runs only): n=3 p50=2.000000 p75=2.500000 p90=2.800000 total=6.500000 partial_total=0.250000');
     expect(ok.out).toContain('G2.spend (USD, fully priced runs only): n=0 p50=none p75=none p90=none total=none partial_total=0.000000');
-    expect(ok.out).toMatch(/^R2 G1 run=bug-3 outcome=cancelled launched=2026-11-05T00:00:00\.000Z wall=90\.00 spend=0\.250000 pricing=partial frames=1\/1 retries=0$/mu);
-    expect(ok.out).toContain('runs (newest first; 6 of 6 shown');
+    expect(ok.out).toMatch(/^R2 G1 run=bug-3 outcome=cancelled launched=2026-11-05T00:00:00\.000Z wall=90\.00 spend_at_least=0\.250000 pricing=partial frames=1\/1 retries=0$/mu);
+    expect(ok.out).toMatch(/^R4 G2 run=feature-1 .* spend=none pricing=unpriced frames=0\/1 /mu);
+    expect(ok.out).toContain('groups (3 of 3 shown, largest first):');
+    expect(ok.out).toContain('runs (newest first; 7 of 7 shown');
 
     const refused = await run({ WICKED_MCP_TOKEN: 'model', WICKED_CREW_URL: 'http://127.0.0.1:7700' });
     expect(refused.code).toBe(1);
@@ -287,7 +308,7 @@ describe('the printed facts fit the step context', () => {
     }));
     const f = costFacts(many, { window: costWindow(NOW), generatedAtMs: NOW });
     const text = renderCostFacts(f);
-    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(COST_TEXT_BUDGET + 200);
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(COST_TEXT_BUDGET);
     expect(text).toContain('G1 workflow=bug runs=1000');
     expect(text).toContain('G2.spend (USD, fully priced runs only): n=1000');
     // Six decimals: a sub-cent spend is printed as recorded, not rounded away.
@@ -297,5 +318,28 @@ describe('the printed facts fit the step context', () => {
     expect(shown).toBeLessThan(2000);
     expect(text).toContain(`(${2000 - shown} older runs omitted to fit the step's context)`);
     expect(text).toContain('R1 G');
+  });
+});
+
+describe('the whole block is budgeted, groups included', () => {
+  it('many workflows: the largest groups are shown whole, the rest named and counted, never over the budget', () => {
+    const many: RunFact[] = Array.from({ length: 400 }, (_, i) => ({
+      id: `run-${i}`, title: 't', workflow: `a-saved-workflow-with-a-long-descriptive-name-number-${String(i % 300).padStart(3, '0')}`,
+      repo: null, projectId: null, agents: [], createdAtMs: NOW - (i + 1) * MIN, endedAtMs: NOW, terminalAtMs: NOW,
+      status: 'completed', outcome: 'passed', deliverRequested: false, delivered: false, archived: false, timeToPrMs: null,
+      floorMs: 0, waitHumanMs: 0, overrides: [], spendUsd: 1, spendReported: true, pricedFrames: 1, unpricedFrames: 0,
+      tokens: 0, retries: 0, stalls: 0, benched: [], failureSignature: null, unresolved: false,
+    }));
+    const f = costFacts(many, { window: costWindow(NOW), generatedAtMs: NOW });
+    expect(f.groups).toHaveLength(300);
+    const text = renderCostFacts(f);
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(COST_TEXT_BUDGET);
+    const shown = Number(/groups \((\d+) of 300 shown, largest first\)/u.exec(text)?.[1]);
+    expect(shown).toBeGreaterThan(10);
+    expect(shown).toBeLessThan(300);
+    expect(text).toContain(`(${300 - shown} smaller groups omitted to fit the step's context:`);
+    // The largest groups (two runs each) come first, each with all four of its lines.
+    expect(text).toContain('G1 workflow=a-saved-workflow-with-a-long-descriptive-name-number-000 runs=2');
+    expect(text).toContain('G1.spend (USD, fully priced runs only): n=2');
   });
 });
