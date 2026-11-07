@@ -22,7 +22,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { discoverLivePlugin } from '../skills/plugin-source.js';
 
@@ -124,7 +124,29 @@ export const DRAFT_SELF_CHECK_LAUNCHER = '"$WICKED_GARDEN_ROOT/scripts/wicked-ga
  * "Page count UNVERIFIED…" in its body. One sentence, used by every clause that says "disclose".
  */
 export const PROCESS_NOTES_WHERE =
-  'in your reply (the run keeps it), never in the document\'s visible text — a slide deck may also carry them in its hidden speaker notes';
+  'in notes.json beside the document (and in your reply), never in the document itself: not its visible text, not its speaker ' +
+  'notes (a talk track only), not an attribute or a comment';
+
+/**
+ * DES-CHAT-ARTIFACTS-001 §11.2 (A6): the writer's notes file, at this fixed name beside the deliverable it describes:
+ * `{left_out:[{claim, why}], sources:[{token, used}], assumptions:[]}`. The floor requires it, valid, before anything lands.
+ */
+export const NOTES_FILE = 'notes.json';
+
+/** Where a deliverable's `notes.json` is: beside it, in the run's own inbox folder. */
+export function notesPathOf(outPath: string): string {
+  return join(dirname(outPath), NOTES_FILE);
+}
+
+/** The one sentence that tells a writer to write the notes file, and what goes in it. */
+export function notesClause(notesPath: string): string {
+  return (
+    `NOTES (required): write ${notesPath} as JSON {"left_out":[{"claim":"…","why":"…"}],"sources":[{"token":"…","used":true}],` +
+    `"assumptions":["…"]} — every claim you left out because nothing confirmed it, each source token you were given and whether ` +
+    `you used it, and your assumptions (empty lists when there are none). How the draft was made goes there and in your reply, ` +
+    `never in the document: no paths, run ids, check names, [S] markers or "I used …" in its text, speaker notes, attributes or comments. `
+  );
+}
 
 /**
  * The single-line task clause (FINDING-011: no embedded newline) that hands the worker what the
@@ -136,7 +158,7 @@ export function draftQualityClause(
   outPath: string,
   budget: PageBudget,
   snapshotDirs: readonly string[],
-  opts: { revision?: boolean; style?: string } = {},
+  opts: { revision?: boolean; style?: string; notes?: string; runId?: string } = {},
 ): string {
   const pagesFlag =
     budget.pages !== null
@@ -157,16 +179,19 @@ export function draftQualityClause(
         ? '(no repository snapshot rides a revision — the claims scan checks placeholders and labels only)'
         : `(no repository snapshot is available — cite the estate tool results ${PROCESS_NOTES_WHERE}, and label every mock visibly)`;
   const modeFlag = opts.style === 'web' ? ' --mode screen --min-font-pt 0' : '';
+  // A6: the notes file is required and the run's own id must not appear in the document (the leak scan reads it).
+  const honest = `${opts.notes !== undefined ? ` --notes ${opts.notes}` : ''}${opts.runId !== undefined ? ` --run-id ${opts.runId}` : ''}`;
   const when =
     opts.revision === true
       ? 'A revision can re-introduce a defect (a pin that darkens a caption), so before you end the turn run the wicked-garden-draft self-check on the revised file'
       : 'Before you declare the draft done, run the wicked-garden-draft self-check on the SAVED file';
   return (
     `QUALITY FLOOR (skill wicked-garden-draft): page budget = ${budgetWords}. ${when}: ` +
-    `${DRAFT_SELF_CHECK_LAUNCHER} ${outPath} ${pagesFlag} --render${modeFlag} ${repos}; ` +
+    `${DRAFT_SELF_CHECK_LAUNCHER} ${outPath} ${pagesFlag} --render${modeFlag}${honest} ${repos}; ` +
     `fix the document (never the check) and re-run until it prints PASS; paste the verdict line into your reply — ` +
     `a FAIL is yours to fix before the turn ends, and an UNVERIFIED page count must be disclosed ${PROCESS_NOTES_WHERE}, ` +
-    `with the structural estimate, never stated as a count. `
+    `with the structural estimate, never stated as a count. ` +
+    (opts.notes !== undefined ? notesClause(opts.notes) : '')
   );
 }
 
@@ -255,6 +280,9 @@ export interface DraftFloorVerdict {
   breaches: string[];
   /** One line for the log / the thread: what was re-derived and what it found. */
   summary: string;
+  /** (PLAN G12) The page count the check reported: `measured` when a renderer printed it (else a structural lower
+   *  bound). `null` = no count in the report (no budget, or a floor that could not run). */
+  pages?: { count: number; measured: boolean; budget: number | null; exact: boolean } | null;
 }
 
 interface SelfCheckReport {
@@ -263,6 +291,8 @@ interface SelfCheckReport {
   unverified?: unknown;
   checks?: {
     claims?: { ok?: unknown; by_kind?: unknown; findings?: unknown; summary?: unknown };
+    leaks?: { ok?: unknown; by_kind?: unknown; summary?: unknown };
+    notes?: { ok?: unknown; findings?: unknown; summary?: unknown };
     contrast?: { ok?: unknown; contrast_failures?: unknown; size_failures?: unknown; summary?: unknown };
     pages?: { pages?: unknown; budget?: unknown; exact?: unknown; verified?: unknown; summary?: unknown };
   };
@@ -276,7 +306,7 @@ export function draftFloorArgv(
   outPath: string,
   budget: PageBudget,
   snapshotDirs: readonly string[],
-  opts: { style?: string } = {},
+  opts: { style?: string; notes?: string; runId?: string; render?: boolean } = {},
 ): string[] {
   const pages =
     budget.pages !== null
@@ -291,6 +321,11 @@ export function draftFloorArgv(
     ...pages,
     ...mode,
     ...snapshotDirs.flatMap((d) => ['--repo', d]),
+    // A6: the notes file must exist and be valid, and the run's own id must not appear in the document.
+    ...(opts.notes !== undefined ? ['--notes', opts.notes] : []),
+    ...(opts.runId !== undefined ? ['--run-id', opts.runId] : []),
+    // G12: with a renderer crew provisioned (`WICKED_CHROME` in the floor's env), the page count is measured.
+    ...(opts.render === true ? ['--render'] : []),
     '--json',
   ];
 }
@@ -351,7 +386,21 @@ export function draftFloorVerdict(report: unknown, budget: PageBudget): DraftFlo
   const claims = rep.checks?.claims;
   const contrast = rep.checks?.contrast;
   const pages = rep.checks?.pages;
+  const leaks = rep.checks?.leaks;
+  const notes = rep.checks?.notes;
   const breaches: string[] = [];
+  // A6 (DES §11.2): how the draft was made never ships inside it, and the writer's notes file is there and valid.
+  if (leaks !== undefined && leaks !== null && (leaks as { ok?: unknown }).ok === false) {
+    const kinds = kindList(leaks.by_kind);
+    breaches.push(
+      `leaks: ${kinds !== '' ? kinds : 'process notes'} in the document — how it was made (paths, run ids, check names, source ` +
+        `markers, "I used …") goes in notes.json and the reply, never in the document`,
+    );
+  }
+  if (notes !== undefined && notes !== null && (notes as { ok?: unknown }).ok === false) {
+    const first = Array.isArray(notes.findings) && typeof notes.findings[0] === 'string' ? notes.findings[0] : 'it is missing or invalid';
+    breaches.push(`notes: ${first} — notes.json lists what was left out, the sources used and the assumptions`);
+  }
   if (claims?.ok === false) {
     const kinds = kindList(claims.by_kind);
     breaches.push(
@@ -369,6 +418,8 @@ export function draftFloorVerdict(report: unknown, budget: PageBudget): DraftFlo
   }
   const count = typeof pages?.pages === 'number' ? pages.pages : null;
   const pagesUnverified = pages !== undefined && pages.verified === false;
+  const pagesRecord: DraftFloorVerdict['pages'] =
+    count !== null ? { count, measured: pages?.verified === true, budget: budget.pages, exact: budget.exact } : null;
   if (budget.pages !== null && count !== null && count > budget.pages) {
     breaches.push(
       `pages: the brief's budget is ${budget.pages} printed page(s)${budget.exact ? ' exactly' : ' at most'} and the ` +
@@ -403,6 +454,7 @@ export function draftFloorVerdict(report: unknown, budget: PageBudget): DraftFlo
       verdict: 'fail',
       breaches,
       summary: `the draft floor FAILED on the saved document: ${breaches.length} breach(es) — ${breaches.join(' | ')}`,
+      pages: pagesRecord,
     };
   }
   if (pagesUnverified) {
@@ -415,9 +467,10 @@ export function draftFloorVerdict(report: unknown, budget: PageBudget): DraftFlo
       summary:
         `the draft floor met every rule it could judge; the page count is UNVERIFIED — unmeasured without a render ` +
         `(${estimate}${against}; a lower bound only a render can confirm — the worker's own --render run is the measurement)`,
+      pages: pagesRecord,
     };
   }
-  return { verdict: 'pass', breaches: [], summary: 'the draft floor met every rule on the saved document' };
+  return { verdict: 'pass', breaches: [], summary: 'the draft floor met every rule on the saved document', pages: pagesRecord };
 }
 
 /** Where the live wicked-garden plugin is, or null when nothing is installed / discovery refused
@@ -433,12 +486,16 @@ export function gardenPluginRoot(): string | null {
 /** Injectable IO for {@link runDraftFloor} — tests substitute the spawn and the root. */
 export interface DraftFloorIo {
   gardenRoot?: () => string | null;
-  /** Runs `node <argv>` and resolves its stdout (the `--json` report). Default: `node:child_process`. */
-  run?: (argv: string[], timeoutMs: number) => Promise<{ stdout: string; code: number | null }>;
+  /** Runs `node <argv>` and resolves its stdout (the `--json` report). Default: `node:child_process`. `chrome` is the
+   *  renderer the check prints with (`WICKED_CHROME` in its env), when crew has one. */
+  run?: (argv: string[], timeoutMs: number, chrome?: string) => Promise<{ stdout: string; code: number | null }>;
+  /** (PLAN G12) The Chromium crew provisioned for this host (`conformance-runtime.ts`), or `null` when none is made yet:
+   *  with one, the floor renders the document and the page count is MEASURED. Default: none. */
+  chrome?: () => string | null;
   timeoutMs?: number;
 }
 
-function runNode(argv: string[], timeoutMs: number): Promise<{ stdout: string; code: number | null }> {
+function runNode(argv: string[], timeoutMs: number, chrome?: string): Promise<{ stdout: string; code: number | null }> {
   return new Promise((resolvePromise, reject) => {
     // The child's env goes through `childEnvWithBootEstateDb` like every other spawn in src/
     // (crew#495, `tests/governance-child-env.test.ts`): a daemon-exported governance store must
@@ -446,7 +503,7 @@ function runNode(argv: string[], timeoutMs: number): Promise<{ stdout: string; c
     const child = spawn(process.execPath, argv, {
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: timeoutMs,
-      env: childEnvWithBootEstateDb(),
+      env: chrome !== undefined ? { ...childEnvWithBootEstateDb(), WICKED_CHROME: chrome } : childEnvWithBootEstateDb(),
     });
     let stdout = '';
     child.stdout?.on('data', (d: Buffer) => {
@@ -468,7 +525,7 @@ export async function runDraftFloor(
   outPath: string,
   budget: PageBudget,
   snapshotDirs: readonly string[],
-  opts: { style?: string } = {},
+  opts: { style?: string; notes?: string; runId?: string } = {},
   io: DraftFloorIo = {},
 ): Promise<DraftFloorVerdict> {
   const root = (io.gardenRoot ?? gardenPluginRoot)();
@@ -481,10 +538,16 @@ export async function runDraftFloor(
         `${DRAFT_SELF_CHECK_SCRIPT} could not be run (install wicked-garden, or set WICKED_CREW_SKILLS_SOURCE)`,
     };
   }
-  const argv = draftFloorArgv(root, outPath, budget, snapshotDirs, opts);
+  let chrome: string | null = null;
+  try {
+    chrome = io.chrome?.() ?? null;
+  } catch {
+    chrome = null;
+  }
+  const argv = draftFloorArgv(root, outPath, budget, snapshotDirs, { ...opts, render: chrome !== null });
   let answer: { stdout: string; code: number | null };
   try {
-    answer = await (io.run ?? runNode)(argv, io.timeoutMs ?? DRAFT_FLOOR_TIMEOUT_MS);
+    answer = await (io.run ?? runNode)(argv, io.timeoutMs ?? DRAFT_FLOOR_TIMEOUT_MS, chrome ?? undefined);
   } catch (err) {
     return {
       verdict: 'unavailable',

@@ -8425,6 +8425,53 @@ export interface DocChecksResponse {
   /** The `version` asked for; `null` when the query named none. */
   version: number | null;
   checks: DocCheck[];
+  /**
+   * (api-types 0.197.0, DES-CHAT-ARTIFACTS-001 §11.2) What the writer could not confirm, listed BESIDE the document,
+   * never inside it: the notes of the asked version (the head when none was asked) or, for a version a person made by
+   * hand, of its nearest ancestor whose run recorded notes (`from_version` says which; show it labelled "from vN").
+   * `null` = no run on its lineage recorded notes ("No notes were recorded": a version from before notes were
+   * required). Absent on an older daemon.
+   */
+  notes?: DocNotes | null;
+  /**
+   * (api-types 0.197.0, PLAN G12) The floor crew measured on the asked version's own file before it landed: a HOST
+   * measurement (draw it "measured by the host"), never a review. `null` = not measured (a version a person made by
+   * hand, or one from before this record). Absent on an older daemon.
+   */
+  floor?: DocFloorCheck | null;
+}
+
+/** (api-types 0.197.0) The writer's notes of one run (`notes.json`), as crew validated and stored them at landing. */
+export interface DocNotes {
+  /** The version these notes belong to: the asked version, or its nearest ancestor whose run recorded notes. */
+  from_version: number;
+  run_id: string;
+  /** Claims the writer left out because nothing confirmed them, each with why. */
+  left_out: Array<{ claim: string; why: string }>;
+  /** The source tokens the writer was given, and whether it used each. */
+  sources: Array<{ token: string; used: boolean }>;
+  assumptions: string[];
+  /** Sources crew struck before the run (not authorized, gone, too large), with the reason. */
+  struck: Array<{ token: string; reason: string }>;
+}
+
+/** (api-types 0.197.0) The document floor crew re-derived on a version's file before it landed (PLAN G12). */
+export interface DocFloorCheck {
+  /** Always `floor`: measured by the host, not a reviewer's verdict. */
+  source: 'floor';
+  version: number;
+  run_id: string;
+  /** `pass` every rule met; `unverified` no rule failed but something could not be measured (said in `summary`);
+   *  `unavailable` the floor could not run on this host. A failing floor lands nothing, so it is never recorded here. */
+  verdict: 'pass' | 'unverified' | 'unavailable';
+  /** The page count: `measured` = a renderer printed it (else a structural lower bound). `null` = no page budget. */
+  pages: { count: number; measured: boolean; budget: number | null; exact: boolean } | null;
+  /** One plain sentence. */
+  summary: string;
+  /** sha256 of the exact file the floor judged. */
+  sha256: string;
+  /** ISO-8601. */
+  at: string;
 }
 
 /**
