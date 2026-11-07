@@ -59,7 +59,7 @@ export function bridgeBackend(pool: Pick<InteractiveBridgePool, 'ensure'>, rootF
       // The sidecar first: the document is a `phase-report` before any seam can see it.
       writeSidecar(join(root, docId), runId);
       const r = await call(bridge, 'POST', '/api/docs', { name: docId, html });
-      if (r.status >= 300) throw new Error(`interactive refused the working document (${r.status}): ${String(json(r.text)['error'] ?? r.text.slice(0, 200))}`);
+      if (r.status >= 300) throw new Error(`interactive refused the context document (${r.status}): ${String(json(r.text)['error'] ?? r.text.slice(0, 200))}`);
       const h = json(r.text)['head'];
       return { head: typeof h === 'number' ? h : 0 };
     },
@@ -85,7 +85,7 @@ export function bridgeBackend(pool: Pick<InteractiveBridgePool, 'ensure'>, rootF
       // which is sound only because crew is the document's one writer (the proxy refuses every browser event on it,
       // and the service writes one version per run at a time).
       const before = await head(bridge, docId);
-      if (before === null) throw new Error('the working document is gone');
+      if (before === null) throw new Error('the context document is gone');
       if (before !== batch.expectHead) return { headMoved: true, head: before };
       // From here on the batch may have reached interactive: ANY failure is an unknown outcome, never a plain error, so
       // its author and words are kept until a read shows whether it landed.

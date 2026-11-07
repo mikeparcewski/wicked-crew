@@ -2508,6 +2508,16 @@ export class CoreAdapter {
     return typeof C.supportsRunContext === 'function' && C.supportsRunContext() === true;
   }
 
+  /** (context-doc-switch; core#1325) Replace a run's context block whole (`Core.setRunContext`). Resolves to the version
+   *  in force and whether this set replaced it; rejects with the engine's `bad_request:` / `not_found:` / `conflict:`. */
+  async setRunContext(runId: string, ctx: unknown): Promise<{ version: number; accepted: boolean }> {
+    const c = this.core as unknown as { setRunContext?: (runId: string, json: string) => Promise<string> };
+    if (typeof c.setRunContext !== 'function') throw new Error('refused: this wicked-core build keeps no run context block');
+    const ack = JSON.parse(await c.setRunContext(runId, JSON.stringify(ctx))) as { version?: unknown; accepted?: unknown };
+    if (typeof ack.version !== 'number' || typeof ack.accepted !== 'boolean') throw new Error(`the engine answered a context set with ${JSON.stringify(ack).slice(0, 200)}`);
+    return { version: ack.version, accepted: ack.accepted };
+  }
+
   /** (program DES-POWER-MODE) The linked engine runs power mode (`Core.supportsPowerMode`). */
   supportsPowerMode(): boolean {
     return addonSupportsPowerModeStatic() && typeof this.core.setPowerMode === 'function';

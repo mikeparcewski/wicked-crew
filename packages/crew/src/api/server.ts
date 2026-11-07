@@ -2955,6 +2955,8 @@ export async function createServer(
     engine: {
       injectWorkerMessage: (runId, message, target) => adapter.injectWorkerMessage(runId, message, target),
       supportsRunContext: () => typeof adapter.supportsRunContext === 'function' && adapter.supportsRunContext(),
+      // (context-doc-switch) The person's Goal, Approach and Constraints as the engine's context block.
+      setRunContext: (runId, ctx) => adapter.setRunContext(runId, ctx),
     },
     run: async (runId) => {
       const v = (await workingDocViews()).find((x) => x.session.id === runId);

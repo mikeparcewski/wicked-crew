@@ -75,7 +75,7 @@ describe('the person’s context stands for every later worker step (bridge)', (
     await t.pickUp(7, t.injected[1]!);
     expect(t.injected).toHaveLength(3);
     for (const m of t.injected.slice(1)) {
-      expect(m).toMatch(/^Standing operator context from the job's working document \(version 1, by the operator\): the person's current Goal\./u);
+      expect(m).toMatch(/^Standing operator context from the job's context document \(version 1, by the operator\): the person's current Goal\./u);
       expect(m.split('\n')[1]).toBe(NO_GATE_LINE);
       expect(m).toContain('- Goal: EUR prints €1.240,00 and USD stays byte-identical.');
     }

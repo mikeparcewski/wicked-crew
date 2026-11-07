@@ -56,11 +56,11 @@ export function initialHtml(title: string, texts: Partial<Record<SectionId, stri
     + `<div class="wd-text" data-wid="${anchorOf(id)}">${escapeHtml((texts[id] ?? '').replace(/\r\n?/g, '\n'))}</div></section>`
   )).join('\n');
   return '<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><title>'
-    + escapeHtml(`Working document: ${title}`)
+    + escapeHtml(`Context document: ${title}`)
     + '</title><style>body{font:15px/1.55 system-ui,sans-serif;max-width:760px;margin:24px auto;padding:0 16px}'
     + 'h2{font-size:13px;letter-spacing:.06em;text-transform:uppercase;margin:22px 0 6px}'
     + '.wd-text{white-space:pre-wrap;min-height:1.4em}</style></head>\n<body>\n<h1>'
-    + escapeHtml(`Working document: ${title}`) + '</h1>\n' + sections + '\n</body></html>\n';
+    + escapeHtml(`Context document: ${title}`) + '</h1>\n' + sections + '\n</body></html>\n';
 }
 
 /** A numeric reference's character, or the reference as written when it names no character. */

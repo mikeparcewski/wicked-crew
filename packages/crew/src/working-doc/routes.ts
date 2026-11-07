@@ -31,20 +31,20 @@ export function registerWorkingDocRoutes(app: FastifyInstance, deps: { service: 
     try {
       return await deps.service.view(id);
     } catch (err) {
-      return reply.code(503).send({ error: `the working document could not be read: ${err instanceof Error ? err.message : String(err)}` });
+      return reply.code(503).send({ error: `the context document could not be read: ${err instanceof Error ? err.message : String(err)}` });
     }
   });
 
   app.post(`${V}/runs/:id/working-doc`, { config: { manifest: { responseType: 'WorkingDocView', statusCodes: [200, 403, 404, 503] } } }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    if (!operator(actorOf(req))) return reply.code(403).send({ error: 'making a working document needs operator trust' });
+    if (!operator(actorOf(req))) return reply.code(403).send({ error: 'making a context document needs operator trust' });
     if (!(await deps.exists(id))) return reply.code(404).send({ error: 'Run not found' });
     try {
       const view = await deps.service.ensure(id);
       if (view === null) return reply.code(404).send({ error: 'Run not found' });
       return view;
     } catch (err) {
-      return reply.code(503).send({ error: `the working document could not be made: ${err instanceof Error ? err.message : String(err)}` });
+      return reply.code(503).send({ error: `the context document could not be made: ${err instanceof Error ? err.message : String(err)}` });
     }
   });
 
@@ -56,7 +56,7 @@ export function registerWorkingDocRoutes(app: FastifyInstance, deps: { service: 
     const pluginSelf = actor.kind === 'plugin' && body['author'] === 'plugin'
       && typeof body['plugin'] === 'object' && body['plugin'] !== null
       && actor.id === `plugin:${String((body['plugin'] as Record<string, unknown>)['id'])}@${String((body['plugin'] as Record<string, unknown>)['version'])}`;
-    if (!operator(actor) && !pluginSelf) return reply.code(403).send({ error: 'editing the working document needs operator trust' });
+    if (!operator(actor) && !pluginSelf) return reply.code(403).send({ error: 'editing the context document needs operator trust' });
     const plugin = body['plugin'];
     const pluginRef = typeof plugin === 'object' && plugin !== null
       && typeof (plugin as Record<string, unknown>)['id'] === 'string' && typeof (plugin as Record<string, unknown>)['version'] === 'string'
