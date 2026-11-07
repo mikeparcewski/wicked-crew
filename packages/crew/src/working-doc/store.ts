@@ -65,6 +65,9 @@ export interface SteerRecord {
   renewals?: number;
   /** (DES-VOICE) The person said the edit and confirmed it on screen ("You (by voice)"). Absent = typed. */
   input?: 'voice';
+  /** (bridge) A standing note of the person's whole context (Goal, Approach, Constraints), made before the engine kept a
+   *  context block: not re-sent once it does, and replaced by any edit of those sections. */
+  context?: true;
 }
 
 export interface WorkingDocRecord {

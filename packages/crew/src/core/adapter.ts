@@ -2500,6 +2500,14 @@ export class CoreAdapter {
     return typeof C.supportsPlanSendBack === 'function' && C.supportsPlanSendBack() === true;
   }
 
+  /** (workdoc-all-runs; core lane context-block-core) The linked engine keeps a per-run CONTEXT BLOCK it hands every
+   *  seat it spawns (`Core.supportsRunContext`). Until it does, crew's working document re-sends the person's context
+   *  before each later worker step (the standing note). Read at call time. */
+  supportsRunContext(): boolean {
+    const C = Core as unknown as { supportsRunContext?: () => boolean };
+    return typeof C.supportsRunContext === 'function' && C.supportsRunContext() === true;
+  }
+
   /** (program DES-POWER-MODE) The linked engine runs power mode (`Core.supportsPowerMode`). */
   supportsPowerMode(): boolean {
     return addonSupportsPowerModeStatic() && typeof this.core.setPowerMode === 'function';
