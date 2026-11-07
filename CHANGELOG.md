@@ -49,7 +49,8 @@ mentioned only where a daemon release depends on them.
   passes) and `18-shows` (it asks `artifact.read`, shows the page it is handed and reads again when another version
   lands). A report without them is refused, so an editor that never reads what it opens no longer installs. Needs a
   wicked-garden whose conformance runner reports both (release garden first); wicked-core's engine step
-  (`editor_conformance` `CASES`) gains the same two ids.
+  (`editor_conformance` `CASES`) gains the same two ids. The install's overall cap gives each editor 25 s more for
+  the two cases' own deadlines (`CONFORMANCE_FIXED_WAITS_S` = 55 s).
 
 - **An editor-plugin run's conformance cases run on this machine, from crew's own runtime (e2e F18,
   DES-EDITOR-CONFORMANCE-HOST).** The engine now runs the editor-plugin workflow's conformance cases itself, as an

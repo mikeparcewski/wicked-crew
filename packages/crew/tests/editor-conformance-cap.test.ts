@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   CONFORMANCE_TIMEOUT_ENV,
   DEFAULT_CONFORMANCE_LOAD_S,
+  CONFORMANCE_FIXED_WAITS_S,
   conformanceCapMs,
   conformanceLoadSeconds,
   gardenConformance,
@@ -46,22 +47,25 @@ describe('the overall cap', () => {
   const V2_CONTROLS = { id: 'd', protocol: [1, 2], surfaces: { card: { actions: [] }, options: { tabs: [{ id: 'x', render: 'controls' }] } } };
 
   it('covers every host-page load at the full bound, every sequential answer, the fixed waits and the browser start', () => {
+    // The host-contract cases' waits, plus the behaviour cases 7 and 18 (G9b, codex on the diff: 30 s left them out).
+    const FIXED = 55;
+    expect(CONFORMANCE_FIXED_WAITS_S).toBe(FIXED);
     // Protocol 1: 2 loads, no surface answers.
-    expect(conformanceCapMs([V1], 120)).toBe((60 + 30 + 2 * 120) * 1000);
+    expect(conformanceCapMs([V1], 120)).toBe((60 + FIXED + 2 * 120) * 1000);
     // Protocol 2, no surfaces: + the card load; the two full-screen modes answer.
-    expect(conformanceCapMs([V2], 120)).toBe((60 + 30 + 2 * 2 + 3 * 120) * 1000);
+    expect(conformanceCapMs([V2], 120)).toBe((60 + FIXED + 2 * 2 + 3 * 120) * 1000);
     // Two plugin tabs: one options load each; 4 actions + 5 tabs + 2 modes answer.
-    expect(conformanceCapMs([V2_FULL], 120)).toBe((60 + 30 + 2 * 11 + 5 * 120) * 1000);
+    expect(conformanceCapMs([V2_FULL], 120)).toBe((60 + FIXED + 2 * 11 + 5 * 120) * 1000);
     // Controls tabs only: one options load.
-    expect(conformanceCapMs([V2_CONTROLS], 120)).toBe((60 + 30 + 2 * 3 + 4 * 120) * 1000);
+    expect(conformanceCapMs([V2_CONTROLS], 120)).toBe((60 + FIXED + 2 * 3 + 4 * 120) * 1000);
     // Several editors add up; the browser starts once.
-    expect(conformanceCapMs([V1, V2_FULL, V2_FULL], 120)).toBe((60 + (30 + 240) + 2 * (30 + 22 + 600)) * 1000);
+    expect(conformanceCapMs([V1, V2_FULL, V2_FULL], 120)).toBe((60 + (FIXED + 240) + 2 * (FIXED + 22 + 600)) * 1000);
     // Always more than garden's loads alone may take (the 249 s incident was a > 240 s run).
     expect(conformanceCapMs([V2_FULL], 120)).toBeGreaterThan(5 * 120 * 1000);
     // The bound moves the cap with it.
-    expect(conformanceCapMs([V2], 300)).toBe((60 + 30 + 4 + 3 * 300) * 1000);
+    expect(conformanceCapMs([V2], 300)).toBe((60 + FIXED + 4 + 3 * 300) * 1000);
     // No entries known: sized for one protocol-1 editor.
-    expect(conformanceCapMs([], 120)).toBe((60 + 30 + 2 * 120) * 1000);
+    expect(conformanceCapMs([], 120)).toBe((60 + FIXED + 2 * 120) * 1000);
   });
 });
 
@@ -85,7 +89,7 @@ describe('gardenConformance hands the derived cap to the runner process', () => 
     });
     await run('/pack', [V2]);
     expect(seen[0]?.timeout).toBe(conformanceCapMs([V2], 200));
-    expect(seen[0]?.timeout).toBe((60 + 34 + 3 * 200) * 1000);
+    expect(seen[0]?.timeout).toBe((60 + CONFORMANCE_FIXED_WAITS_S + 4 + 3 * 200) * 1000);
     // The child reads the very bound the cap was sized from.
     expect(seen[0]?.env?.[CONFORMANCE_TIMEOUT_ENV]).toBe('200');
   });
