@@ -47,23 +47,30 @@ class FakeEngine {
   injected: string[] = [];
   block = true;
   refuse: ((ctx: RunContextBlock) => string | null) | null = null;
-  async injectWorkerMessage(_r: string, m: string) { this.injected.push(m); return 'queued'; }
+  /** `lose`: the engine keeps the block but its answer never comes; `silent`: no answer and nothing kept. */
+  answer: 'ok' | 'lose' | 'silent' = 'ok';
+  /** Every engine call in order (sets and injects), to see what the next step got first. */
+  order: string[] = [];
+  async injectWorkerMessage(_r: string, m: string) { this.injected.push(m); this.order.push('inject'); return 'queued'; }
   supportsRunContext() { return this.block; }
   async setRunContext(runId: string, ctx: RunContextBlock) {
     this.calls.push({ runId, ctx: structuredClone(ctx) });
+    this.order.push(`set v${ctx.version}`);
+    if (this.answer === 'silent') return new Promise<never>(() => undefined);
     const why = this.refuse?.(ctx) ?? null;
     if (why !== null) throw new Error(why);
     const have = this.held.get(runId);
-    if (have !== undefined && ctx.version <= have.version) return { version: have.version, accepted: false };
-    this.held.set(runId, structuredClone(ctx));
-    return { version: ctx.version, accepted: true };
+    const ack = have !== undefined && ctx.version <= have.version ? { version: have.version, accepted: false } : { version: ctx.version, accepted: true };
+    if (ack.accepted) this.held.set(runId, structuredClone(ctx));
+    if (this.answer === 'lose') return new Promise<never>(() => undefined);
+    return ack;
   }
 }
 
 const HUMAN: Actor = { id: 'local', kind: 'human', trust: 'admin' };
 
-function setup(o: { engine?: FakeEngine; facts?: Record<string, Partial<RunFacts>>; store?: WorkingDocStore } = {}) {
-  const backend = new FakeBackend();
+function setup(o: { engine?: FakeEngine; facts?: Record<string, Partial<RunFacts>>; store?: WorkingDocStore; backend?: FakeBackend; retryMs?: number[] } = {}) {
+  const backend = o.backend ?? new FakeBackend();
   const engine = o.engine ?? new FakeEngine();
   const store = o.store ?? new WorkingDocStore({ stateHome: home() });
   const base: RunFacts = { title: 'Fix it', problem: 'Invoice PDFs show $ for EUR accounts.', projectId: 'default', terminal: false, stepOf: () => null };
@@ -74,6 +81,8 @@ function setup(o: { engine?: FakeEngine; facts?: Record<string, Partial<RunFacts
     engine,
     run: async (runId) => ({ ...base, ...(o.facts?.[runId] ?? {}) }),
     now: () => (clock += 1),
+    contextTimeoutMs: 20,
+    contextRetryMs: o.retryMs ?? [40, 40],
   });
   const head = (runId = 'run-1') => (backend.docs.get(`working-${runId}`)?.length ?? 0) - 1;
   const edit = async (sections: Record<string, string>, runId = 'run-1') => {
@@ -314,5 +323,130 @@ describe('the rename is user-facing only', () => {
     expect(html).toContain('<h1>Context document: Fix it</h1>');
     expect(html).not.toMatch(/Working document/u);
     expect(WORKING_DOC_REFUSED_MESSAGE).toMatch(/^This is a job's context document\./u);
+  });
+});
+
+describe('no stale block, no silent loss (xreview r1)', () => {
+  const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it('an unanswered set is said, retried from the document, and confirmed; the older block does not stay', async () => {
+    const t = setup();
+    await t.service.ensure('run-1');
+    await t.edit({ goal: 'Old goal.' });
+    t.engine.answer = 'silent';
+    await t.edit({ goal: 'New goal.' });
+    let v = await t.service.view('run-1');
+    expect(v.context?.error).toMatchObject({ version: 2, reason: 'the engine did not answer in time; trying again', cleared: false });
+    expect(t.engine.held.get('run-1')?.sections[0]?.text).toBe('Old goal.');
+    t.engine.answer = 'ok';
+    await wait(120);
+    expect(t.engine.held.get('run-1')?.sections[0]?.text).toBe('New goal.');
+    v = await t.service.view('run-1');
+    expect(v.context).toMatchObject({ version: 2, sections: ['goal'], error: null });
+  });
+
+  it('a first set whose answer was lost is still cleared when the person empties it', async () => {
+    const t = setup();
+    await t.service.ensure('run-1');
+    t.engine.answer = 'lose';
+    await t.edit({ constraints: 'Do not touch the renderer.' });
+    expect(t.engine.held.get('run-1')?.version).toBe(1);
+    t.engine.answer = 'ok';
+    await t.edit({ constraints: '' });
+    expect(t.engine.held.get('run-1')).toMatchObject({ version: 2, sections: [] });
+  });
+
+  it('a clear that fails after a refusal is tried again until the replaced block is out', async () => {
+    const t = setup();
+    await t.service.ensure('run-1');
+    await t.edit({ goal: 'Short.' });
+    let clears = 0;
+    t.engine.refuse = (ctx) => {
+      if (ctx.sections.length === 0) return clears++ === 0 ? 'internal: the engine is busy' : null;
+      return ctx.sections.some((x) => x.text.startsWith('LONG')) ? 'bad_request: run context refused: the block renders to 16000 bytes' : null;
+    };
+    await t.edit({ goal: 'LONG text' });
+    expect(t.engine.held.get('run-1')?.sections[0]?.text, 'the clear failed').toBe('Short.');
+    await wait(120);
+    expect(t.engine.held.get('run-1')).toMatchObject({ version: 2, sections: [] });
+    expect((await t.service.view('run-1')).context?.error).toMatchObject({ version: 2, cleared: true });
+  });
+
+  it('the first block refused says nothing was withdrawn (there was nothing in force)', async () => {
+    const t = setup();
+    await t.service.ensure('run-1');
+    t.engine.refuse = (ctx) => (ctx.sections.length > 0 ? 'bad_request: run context refused: too long' : null);
+    await t.edit({ goal: 'G' });
+    expect((await t.service.view('run-1')).context?.error).toMatchObject({ version: 1, reason: 'too long', cleared: false });
+  });
+
+  it('an edit of Goal and Next together: the block is set before the Next note is queued', async () => {
+    const t = setup();
+    await t.service.ensure('run-1');
+    await t.edit({ goal: 'G2', next: 'Add GBP tests.' });
+    expect(t.engine.order).toEqual(['set v1', 'inject']);
+  });
+
+  it('a delivery frame names who saw a version crew set; it never moves the version in force', async () => {
+    const t = setup();
+    await t.service.ensure('run-1');
+    await t.edit({ goal: 'G' });
+    const fire = (e: Record<string, unknown>) => t.service.onEvent({ type: 'runContextDelivered', session: 'run-1', ...e } as unknown as CoreEvent);
+    fire({ ord: 2, version: 1e100, recipient: 'unit', recipientCli: 'claude' });
+    fire({ ord: 2, version: 9, recipient: 'unit', recipientCli: 'claude' });
+    fire({ ord: -8, version: 1, recipient: 'judge', recipientCli: 'codex' });
+    fire({ ord: 2, version: 1, recipient: 'reviewer-of-everything', recipientCli: 'codex' });
+    fire({ ord: 2, version: 1, recipient: 'qe', recipientCli: 'Pi; rm -rf' });
+    const v = await t.service.view('run-1');
+    expect(v.context?.version).toBe(1);
+    expect(v.context?.seenBy).toEqual([{ recipient: 'judge', cli: 'codex', ord: 0 }, { recipient: 'qe', cli: '', ord: 2 }]);
+  });
+
+  it('after a restart: a block the engine took is not sent again; one whose answer was lost is confirmed', async () => {
+    const h = home();
+    const backend = new FakeBackend();
+    const engine = new FakeEngine();
+    // The first daemon's own retries are far off: only the second daemon's start-up is under test.
+    const a = setup({ engine, backend, store: new WorkingDocStore({ stateHome: h }), retryMs: [600_000] });
+    await a.service.ensure('run-1');
+    await a.service.ensure('run-2');
+    await a.edit({ goal: 'Kept.' });
+    engine.answer = 'lose';
+    await a.edit({ goal: 'Lost answer.' }, 'run-2');
+    engine.answer = 'ok';
+    const before = engine.calls.length;
+    const b = setup({ engine, backend, store: new WorkingDocStore({ stateHome: h }) });
+    await b.service.catchUp();
+    expect(engine.calls.slice(before).map((c) => [c.runId, c.ctx.version])).toEqual([['run-2', 1]]);
+    const v2 = await b.service.view('run-2');
+    expect(v2.context).toMatchObject({ version: 1, sections: ['goal'], error: null });
+    expect(v2.context?.at).not.toBeNull();
+  });
+
+  it('a write of unknown outcome is left to settle: the catch-up sends nothing for it', async () => {
+    const t = setup();
+    await t.service.ensure('run-1');
+    t.store.update('run-1', (r) => { r.pending = { expectHead: 0, author: { kind: 'human', id: 'local' }, surface: null, values: { goal: 'x' }, at: 1, actor: { id: 'local', kind: 'human' } }; });
+    t.backend.docs.get('working-run-1')!.push({ html: t.backend.docs.get('working-run-1')![0]!.html.replace(/(data-wid="wd-goal"[^>]*>)[^<]*/u, '$1y'), author: 'x' });
+    await t.service.catchUp();
+    expect(t.engine.calls).toEqual([]);
+  });
+
+  it('an author id the engine would refuse reads "a person"; the engine not knowing the job is said', async () => {
+    const t = setup();
+    await t.service.ensure('run-1');
+    await t.service.propose('run-1', { base: 0, author: 'operator', sections: { goal: 'G' } }, { id: 'eve\u0007', kind: 'human', trust: 'admin' } as Actor);
+    expect(t.engine.calls[0]!.ctx.sections[0]!.author.id).toBe('a person');
+    expect(t.engine.calls[0]!.ctx.set_by.id).toBe('a person');
+    t.engine.refuse = () => 'not_found: run run-1';
+    await t.edit({ goal: 'G2' });
+    expect((await t.service.view('run-1')).context?.error).toMatchObject({ reason: 'the engine does not know this job', cleared: false });
+  });
+
+  it('a cut falls on a line break too, never inside a word', async () => {
+    const t = setup();
+    await t.service.ensure('run-1');
+    await t.edit({ goal: 'longword\n'.repeat(400) });
+    expect(t.engine.calls.at(-1)!.ctx.sections[0]!.text).toMatch(/longword … \(cut at 1,500 characters\)$/u);
   });
 });

@@ -97,8 +97,11 @@ export interface ContextRecipient { recipient: string; cli: string; ord: number 
 
 /** What crew last sent the engine as the run's context block, and what the engine said. */
 export interface ContextRecord {
-  /** The block version the engine keeps in force, as crew last heard (the highest acknowledged; never moved back). */
+  /** The block version the engine keeps in force (a clear included), from the engine's answers to crew's own sets: the
+   *  highest acknowledged, never moved back. */
   inForce: number | null;
+  /** The highest version crew has asked the engine to hold (recorded before asking: an answer may be lost). */
+  attempted: number | null;
   /** The signature of the last block crew sent (sections, texts, authors): an unchanged block is not sent again. */
   sig: string | null;
   /** The version of the last block crew sent. */
@@ -109,7 +112,7 @@ export interface ContextRecord {
   cut: SectionId[];
   /** When the block in force was accepted. */
   at: number | null;
-  /** The last send that failed: its version, why, and whether the engine's block was cleared because of it. */
+  /** The last send that failed: its version, why, and whether a block that was in force was withdrawn because of it. */
   error: { version: number; reason: string; at: number; cleared: boolean } | null;
   /** The seats the engine handed version `seenVersion` to (newest version only; at most {@link CONTEXT_SEEN_MAX}). */
   seenVersion: number | null;

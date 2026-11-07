@@ -29,7 +29,7 @@ mentioned only where a daemon release depends on them.
   Edit-seam and chat-seam landings now send `run_id`, so a run's version is never read as a person's edit. Needs
   wicked-garden with `keep_check.py`.
 - **The run's working document is now its context document, and the name is true (operator ruling 2026-11-06; needs
-  wicked-core-ts with `Core.supportsRunContext`, core#1325; api-types 0.197.0).** When the engine keeps a per-run context
+  wicked-core-ts with `Core.supportsRunContext`, core#1325; api-types 0.198.0).** When the engine keeps a per-run context
   block, crew sets it from the person's own Goal, Approach and Constraints (each section whose latest write is a
   person's; crew's seeded Goal, a plan's or an agent's Approach and every plugin line never go in) after every version
   that touches them, and once per live document at daemon start. The engine hands it to every agent the run spawns

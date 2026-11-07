@@ -2987,6 +2987,9 @@ export async function createServer(
     log: (m) => app.log.warn(m),
   });
   workingDocTap = (e) => workingDocs.onEvent(e);
+  // (context-doc-switch) The engine's context blocks are set at once (one cheap call per live document, serial), not
+  // after the slower line catch-up below: a seat spawned meanwhile would miss a block the engine does not hold yet.
+  void workingDocs.contextCatchUp();
   // A person's answer recorded in the trail (a gate note, a skip reason, guidance) brings the run's document up to date:
   // some come with no engine event at all (guidance), and a gate's is recorded after the engine's answer.
   audit.onRecord((entry) => { const runId = workingDocNotes.add(entry); if (runId !== null) workingDocs.nudge(runId); });
