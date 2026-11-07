@@ -14,6 +14,8 @@
  *   POST /sources/:name/ask               HUMAN      a seat drafts one read from the structure; crew checks it; nothing runs
  *   POST /sources/:name/query             HUMAN      check SQL, or run exactly the checked text: READ ONLY, 10 s, 50 rows
  *   POST /apps/uploads?name=&filename=    operator   a file becomes a `sql`/`sqlite` source (sample rows: humans only)
+ *   GET  /sources/web/setup               observer   (CS9) what the web source's install puts here, before consent
+ *   POST /sources/web/install             HUMAN      (CS9) the consented install (`knowledge/adapters/web/routes.ts`)
  *
  * Every connection is the dialer's, under the source's confirmed ranges; every secret is resolved at
  * the call and scrubbed from what is answered.
@@ -55,6 +57,7 @@ import { checkSqlQuery, readSqlQuery, SourcePolicyError, type SqlCheckResult, ty
 import { ingestUpload, snapshotPath, UPLOAD_LIMITS, UploadError } from './uploads.js';
 import { type DataGate } from '../knowledge/gate/gate.js';
 import { GateBusyError } from '../knowledge/gate/scheduler.js';
+import { registerWebSourceRoutes } from '../knowledge/adapters/web/routes.js';
 
 const V = API_PREFIX;
 
@@ -86,7 +89,7 @@ export interface SourceRouteDeps {
    * (DES-KNOWLEDGE-DATA-001 §7) The data gate: a person's query run on Postgres goes through it (the source's
    * scheduler, the LIMIT rewrite), and a Toolbox-runtime source's Test is its describe.
    */
-  gate?: Pick<DataGate, 'personRead' | 'isToolbox' | 'describeToolbox'>;
+  gate?: Pick<DataGate, 'personRead' | 'isToolbox' | 'describeToolbox'> & Partial<Pick<DataGate, 'web' | 'webGate'>>;
 }
 
 const name = z.string().regex(MCP_SERVER_NAME_RE);
@@ -203,6 +206,15 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
     return deps.registry;
   };
   const dial = deps.dial ?? {};
+
+  // (CS9) The web source's sheet: what its install puts on this computer, and the consented install.
+  registerWebSourceRoutes(app, {
+    ...(deps.registry !== undefined ? { registry: deps.registry } : {}),
+    ...(deps.gate?.webGate !== undefined ? { gate: deps.gate.webGate } : {}),
+    ...(deps.gate?.web !== undefined ? { web: deps.gate.web } : {}),
+    audit: deps.audit,
+    actorOf: deps.actorOf,
+  });
 
   /** A source's handles, its secret resolved now (and remembered for scrubbing this request's errors). */
   const open = async (r: McpRegistry, sourceName: string, req: FastifyRequest) => {

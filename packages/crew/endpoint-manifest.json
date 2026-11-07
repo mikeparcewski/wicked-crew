@@ -2467,6 +2467,17 @@
     },
     {
       "method": "GET",
+      "path": "/api/v1/runs/:id/web-receipts",
+      "requestType": null,
+      "responseType": "RunWebReceiptsResponse",
+      "statusCodes": [
+        200,
+        403,
+        503
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/api/v1/runs/:id/working-doc",
       "requestType": null,
       "responseType": "WorkingDocView",
@@ -3012,6 +3023,31 @@
         403,
         404,
         409,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/sources/web/install",
+      "requestType": "WebSourceInstallBody",
+      "responseType": "WebSourceInstallResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        409,
+        422,
+        502,
+        503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/sources/web/setup",
+      "requestType": null,
+      "responseType": "WebSourceSetupResponse",
+      "statusCodes": [
+        200,
         503
       ]
     },

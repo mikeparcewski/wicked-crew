@@ -759,7 +759,8 @@ export class McpRegistry {
     const out: McpCallableTool[] = [];
     for (const s of (await this.readFile()).servers) {
       // (DES-PM-001 §3.1) A PM entry's tools are the gate's to list, bound to the unit's tracker set; never raw.
-      if (!s.enabled || hasPmMarker(s)) continue;
+      // (CS9) The web source's tools are the gate's to list too.
+      if (!s.enabled || hasPmMarker(s) || s.kind === 'web') continue;
       for (const t of s.tools) {
         if (!t.enabled || statusOf(s, t) !== 'registered') continue;
         out.push({
@@ -898,6 +899,39 @@ export class McpRegistry {
       };
       file.servers = [...file.servers.filter((s) => s.name !== name), record];
       await this.catalogs.write(name, { ...description, descriptorHash: sourceDescriptorHash(configOf(record)) });
+      return record;
+    });
+    return this.view(rec);
+  }
+
+  /**
+   * (CS9) The web source's entry, written by its consented install only (`POST /sources/web/install`): `kind: 'web'`,
+   * no command, URL, secret or raw tools (its tools are the gate's). A name held by another kind is refused. Every
+   * install, a new lock's included, leaves "Agents can query" OFF: the person turns it on again.
+   */
+  async registerWebSource(name = 'web'): Promise<McpServer> {
+    const stamp = new Date(this.now()).toISOString();
+    const rec = await this.mutate(async (file) => {
+      const prior = file.servers.find((s) => s.name === name);
+      if (prior !== undefined && prior.kind !== 'web') throw new McpRegistryError(409, 'name_taken', `${name} is already a registered ${prior.kind} server; rename or remove it first`);
+      const other = file.servers.find((s) => s.kind === 'web' && s.name !== name);
+      if (other !== undefined) throw new McpRegistryError(409, 'name_taken', `the web source is already registered as ${other.name}`);
+      const record: McpServerRecord = {
+        id: prior?.id ?? randomUUID(),
+        name,
+        kind: 'web',
+        command: null,
+        args: [],
+        url: null,
+        auth: null,
+        enabled: true,
+        health: { state: 'ok', consecutiveFailures: 0, checkedAt: stamp, lastError: null },
+        registeredAt: prior?.registeredAt ?? stamp,
+        updatedAt: stamp,
+        tools: [],
+        agents: { ...agentAccessOf(prior ?? {}), query: false },
+      };
+      file.servers = [...file.servers.filter((s) => s.name !== name), record];
       return record;
     });
     return this.view(rec);
@@ -1085,6 +1119,8 @@ export class McpRegistry {
    */
   private async probe(config: McpUpstreamConfig, staged: string | null = null): Promise<ProbeResult | { ok: false; error: string; missingSecret: true }> {
     // (DES-KNOWLEDGE-DATA-001 §6.3) A Toolbox-runtime source is probed by the Toolbox runtime, never as a server.
+    // (CS9) The web source is no MCP server: its sheet shows its own state.
+    if (config.kind === 'web') return { ok: false, error: 'the web source is checked on its own sheet (Settings → Sources → the web source)' };
     const prober = config.kind === 'toolbox-source' ? this.deps.toolboxProbe : this.deps.probe;
     if (prober === undefined) return { ok: false, error: 'this daemon has no Toolbox runtime' };
     if (config.auth === null) return prober(config, null);
@@ -1345,7 +1381,8 @@ export function isSourceRecord(s: Pick<McpServerRecord, 'kind'>): boolean {
 
 /** (DES-PM-001 §3) A record under the source safeguards: a data source, or a PM entry (Agents switches, restore resets). */
 export function isGovernedRecord(s: Pick<McpServerRecord, 'kind' | 'pm'>): boolean {
-  return isSourceRecord(s) || pmOf(s) !== null;
+  // (CS9) The web source too: a restore turns its "query" off like any source's.
+  return isSourceRecord(s) || pmOf(s) !== null || s.kind === 'web';
 }
 
 /**
@@ -1452,7 +1489,7 @@ export function agentServerView(s: McpServer): McpServerAgentView {
   };
 }
 
-const RECORD_KINDS: ReadonlySet<string> = new Set(['mcp-stdio', 'mcp-http', 'rest', 'sql', 'graphql', 'toolbox-source']);
+const RECORD_KINDS: ReadonlySet<string> = new Set(['mcp-stdio', 'mcp-http', 'rest', 'sql', 'graphql', 'toolbox-source', 'web']);
 
 /**
  * Why a stored record is not one crew could have written (`null`: it is): the fields every reader and a restore

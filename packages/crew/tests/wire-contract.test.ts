@@ -77,6 +77,7 @@ import type { SourceAgentAccess } from '../src/knowledge/gate/access.js';
 import type { SourceReadEnvelope } from '../src/knowledge/gate/envelope.js';
 import type { SourceAgentQueryEntry, SourceDataUse } from '../src/knowledge/gate/record.js';
 import type { SourceAgentAccessSchema } from '../src/knowledge/gate/routes.js';
+import type { WebSourceInstallSchema } from '../src/knowledge/adapters/web/routes.js';
 import type { graphqlCheckAnswer, SourceAllowWritesSchema, SourceAskSchema, SourceCheckSchema, SourcePrivilegesSchema, SourceQuerySchema, SourceSafetySchema, SourceTestCallSchema, sqlCheckAnswer } from '../src/sources/routes.js';
 import type { SafetyResult } from '../src/sources/safety/postgres.js';
 import type { PgPrivilegeReport } from '../src/sources/catalog/postgres.js';
@@ -1146,6 +1147,8 @@ accepts<z.input<typeof SourceQuerySchema>, Wire.SourceQueryBody>();
 // The data gate (api-types 0.184.0, DES-KNOWLEDGE-DATA-001 §7): the switch body both ways; what the registry, the
 // read record, the routes and the unit envelope produce is the contract's.
 accepts<z.input<typeof SourceAgentAccessSchema>, Wire.SourceAgentAccessBody>();
+// CS9: the web source's consented install body parses.
+accepts<z.input<typeof WebSourceInstallSchema>, Wire.WebSourceInstallBody>();
 respondsWith<Wire.SourceAgentAccess, SourceAgentAccess>();
 respondsWith<SourceAgentAccess, Wire.SourceAgentAccess>();
 respondsWith<Wire.SourceAgentQuery, SourceAgentQueryEntry>();

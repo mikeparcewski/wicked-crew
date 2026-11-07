@@ -56,6 +56,8 @@ import type { SourceAgentQueryEntry, SourceReadLog } from './record.js';
 import { type CallerClass, DEFAULT_LIMITS, GateBusyError, GateSchedulers, type LeaseEnd, type RemoteCheck, type SchedulerLimits } from './scheduler.js';
 import { type GateSource, gateSources, isGatedSource } from './sources.js';
 import { PmGate } from '../trackers/gate-pm.js';
+import { WebGate } from '../adapters/web/gate-web.js';
+import { WebSource } from '../adapters/web/source.js';
 import type { Invoker } from '../../mcp/invoke.js';
 
 /** What the driver holds at most while reading a unit's rows (approximate), before the exact 64 KB cap. */
@@ -127,6 +129,8 @@ export interface DataGateDeps {
   members?: (projectId: string) => Promise<string[]>;
   /** (DES-PM-001) How a PM entry's tool is called; production: the broker's MCP invoker. */
   pmInvoke?: Invoker;
+  /** (CS9) The web source's runtime; default: the state home's (nothing starts until a call or an install). */
+  web?: WebSource;
 }
 
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -177,6 +181,10 @@ export class DataGate {
   /** (DES-PM-001 §3.1) The PM half: tracker sets, bindings and response projectors. */
   readonly pm: PmGate;
 
+  /** (CS9) The web source: its runtime (install, search, fetch) and its gate half. */
+  readonly web: WebSource;
+  readonly webGate: WebGate;
+
   constructor(private readonly deps: DataGateDeps) {
     this.now = deps.now ?? Date.now;
     this.schedulers = new GateSchedulers(this.now);
@@ -192,6 +200,16 @@ export class DataGate {
       ...(deps.log !== undefined ? { log: deps.log } : {}),
       ...(deps.deadlineMs !== undefined ? { deadlineMs: deps.deadlineMs } : {}),
       ...(deps.afterRead !== undefined ? { afterRead: deps.afterRead } : {}),
+    });
+    this.web = deps.web ?? new WebSource({ ...(deps.log !== undefined ? { log: deps.log } : {}) });
+    this.webGate = new WebGate({
+      store: deps.store,
+      audit: deps.audit,
+      schedulers: this.schedulers,
+      web: this.web,
+      reads: deps.record,
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+      ...(deps.log !== undefined ? { log: deps.log } : {}),
     });
   }
 
@@ -290,7 +308,7 @@ export class DataGate {
    * query, and (DES-PM-001 §3.1) the bound tools of each PM source whose linked set for the unit is not empty.
    */
   async reach(projectId: string | null, repoId: string | null = null): Promise<GateListedTool[]> {
-    const out: GateListedTool[] = await this.pm.reach({ projectId, repoId });
+    const out: GateListedTool[] = [...(await this.pm.reach({ projectId, repoId })), ...(await this.webGate.reach(projectId))];
     for (const s of (await this.sources()).sort((a, b) => a.name.localeCompare(b.name))) {
       for (const t of s.tools) {
         const need = neededFor(t.disclosure);
@@ -307,6 +325,9 @@ export class DataGate {
     // (DES-PM-001 §3.1) A PM entry's tools: bindings, the unit's tracker set, the response projector.
     const pmEntry = (await this.pm.entries()).find((e) => e.name === server);
     if (pmEntry !== undefined) return this.pm.unitCall(scope, pmEntry, tool, args, callId);
+    // (CS9) The web source's tools: its own half, under the same switches.
+    const web = await this.webGate.entry();
+    if (web !== null && web.name === server) return this.webGate.unitCall(scope, server, tool, args, callId, web);
     const s = (await this.sources()).find((x) => x.name === server);
     // A hidden or unknown source is the same answer (no oracle).
     if (s === undefined || !agentMay(s.access, s, scope.projectId, 'see')) return refusal('unknown_source', 'no data source of that name is available to this step: list the tools with the shim');

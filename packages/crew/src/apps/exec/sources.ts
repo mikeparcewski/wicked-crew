@@ -78,6 +78,8 @@ export async function lookupSource(registry: Pick<AppSourceRegistry, 'snapshot' 
   }
   // (DES-KNOWLEDGE-DATA-001 §6.3) A Toolbox-runtime database source is no Apps source in v1 (a native one reads as `sql`).
   if (config.kind === 'toolbox-source') return null;
+  // (CS9) The web source is no Apps source: its tools are the data gate's, for agents only.
+  if (config.kind === 'web') return null;
   // A server switched off is part of the snapshot for every kind (codex r2 on the write path).
   return { name, kind: config.kind, pin: pinOf(config), config, enabled: snap.enabled };
 }
