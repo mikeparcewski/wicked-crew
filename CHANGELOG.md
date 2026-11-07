@@ -229,6 +229,7 @@ mentioned only where a daemon release depends on them.
   the number of runs once the snapshot is read. Concurrent callers share one parse (at most one fold running and one
   queued, as before). `GET /roster/record` runs one read per query at a time, shared, and keeps up to 16 answers
   while their snapshot is current (held weakly, so a kept answer never keeps an old snapshot alive).
+
 - **Draft epics can pass its review (F34).** The Backlog compose (`POST /projects/:id/product/compose`) authored its
   review as the catalog's `review` entry, which carries the engine's evidence floor ("the run left a change in its
   worktree"). A compose run has no repository and so no worktree, and the engine fails any validator pin closed

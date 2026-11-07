@@ -2653,10 +2653,23 @@ export function registerRoutes(
    * The seat record per query (`<days> <project>`), F35: one read at a time per query, which every
    * caller asking meanwhile shares, kept while the views snapshot it was read from is current (held
    * weakly: a kept answer never keeps an old snapshot alive). At most {@link SEAT_RECORDS_KEPT}
-   * answered queries are kept; a read in flight is never dropped, so it stays shared.
+   * answered queries are kept (trimmed as each read settles); a read in flight is never dropped, so it
+   * stays shared.
    */
   const seatRecords = new Map<string, { of: WeakRef<RunViewsSnapshot>; read: Promise<SeatRecordResponse | null>; settled: boolean }>();
   const SEAT_RECORDS_KEPT = 16;
+  /** Drop the oldest answered queries past {@link SEAT_RECORDS_KEPT}; a read in flight is never dropped. */
+  const trimSeatRecords = (): void => {
+    let answered = 0;
+    for (const kept of seatRecords.values()) if (kept.settled) answered++;
+    for (const [k, kept] of seatRecords) {
+      if (answered <= SEAT_RECORDS_KEPT) break;
+      if (kept.settled) {
+        seatRecords.delete(k);
+        answered--;
+      }
+    }
+  };
   const readSeatRecord = async (snapshot: RunViewsSnapshot, days: number, project: string | undefined): Promise<SeatRecordResponse | null> => {
     const detail = structuredClone(snapshot.views) as SessionView[];
     await backfillEndedAt(detail);
@@ -2707,13 +2720,10 @@ export function registerRoutes(
         const started = { of: new WeakRef(snapshot), read: readSeatRecord(snapshot, days, project), settled: false };
         seatRecords.delete(key);
         seatRecords.set(key, started);
-        for (const [k, kept] of seatRecords) {
-          if (seatRecords.size <= SEAT_RECORDS_KEPT) break;
-          if (kept.settled) seatRecords.delete(k);
-        }
         started.read.then(
           () => {
             started.settled = true;
+            trimSeatRecords();
           },
           () => {
             if (seatRecords.get(key) === started) seatRecords.delete(key);

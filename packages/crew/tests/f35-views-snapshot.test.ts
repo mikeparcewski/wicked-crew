@@ -310,4 +310,28 @@ describe('F35: run views are read through one shared snapshot', () => {
     expect((await first).statusCode).toBe(200);
     expect((await again).statusCode).toBe(200);
   });
+
+  it('/roster/record keeps at most 16 answers, even when more queries were in flight at once', async () => {
+    seed(1);
+    let logReads = 0;
+    let blocking = true;
+    const blocked: Array<() => void> = [];
+    core()['runEvents'] = () =>
+      new Promise<string>((resolve) => {
+        logReads++;
+        if (blocking) blocked.push(() => resolve('[]'));
+        else resolve('[]');
+      });
+    const server = await routes();
+    const reads = Array.from({ length: 20 }, (_, i) => server.inject({ method: 'GET', url: `/api/v1/roster/record?days=${i + 1}` }));
+    await vi.waitFor(() => expect(blocked).toHaveLength(20)); // 20 distinct queries in flight together
+    blocking = false;
+    while (blocked.length > 0) blocked.shift()!();
+    for (const r of await Promise.all(reads)) expect(r.statusCode).toBe(200);
+    expect(logReads).toBe(20);
+    await server.inject({ method: 'GET', url: '/api/v1/roster/record?days=20' });
+    expect(logReads).toBe(20); // kept
+    await server.inject({ method: 'GET', url: '/api/v1/roster/record?days=1' });
+    expect(logReads).toBe(21); // one of the 4 oldest answers dropped as the reads settled: read again
+  });
 });
