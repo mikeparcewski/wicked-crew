@@ -248,7 +248,7 @@ export class ChatHistoryStore {
    * its chat through this, never the other chat that reused the id.
    */
   idOfInstance(id: string, instance: string | null): string | null {
-    if (instance === null) return this.stateOf(id) !== null ? id : null;
+    if (instance === null) return this.has(id) ? id : null;
     if (this.stateOf(id)?.instance === instance) return id;
     if (!existsSync(this.dir)) return null;
     for (const f of readdirSync(this.dir)) {
@@ -257,6 +257,12 @@ export class ChatHistoryStore {
       if (this.stateOf(other)?.instance === instance) return other;
     }
     return null;
+  }
+
+  /** Whether this id has an entry (open, or kept after a close or a restart). Ask this, not `stateOf(id) !== undefined`:
+   *  `stateOf` answers `null` for an unknown id, so that comparison is always true (F36). */
+  has(id: string): boolean {
+    return this.read(id) !== null;
   }
 
   /** The entry's status, instance (its own nonce; `createdAt` for an older entry) and project, or null. */

@@ -4699,6 +4699,8 @@ export function registerRoutes(
     actor: import('../core/types.js').Actor,
   ): Promise<{ view: import('../core/types.js').ChatProposalView } | { refused: { code: string; error: string } }> => {
     const instance = chatHistory?.stateOf(chatId)?.instance ?? null;
+    // The chat is live and may have no turn yet (a new chat's seed always has none): its proposal starts the transcript.
+    chatTranscripts?.start(chatId);
     const out = await chatProposals.propose(chatId, seedBody(seed, requestId), actor, instance);
     if (out.code >= 300) {
       const b = out.body as { code?: unknown; error?: unknown };
@@ -4749,7 +4751,7 @@ export function registerRoutes(
         // A retry: this request's chat exists (open, or kept in history after a close or a restart). Answer it and its
         // proposal, completing the proposal while the chat is open; never open the id again (codex r1).
         const open = askPaths.get(seedChatId) !== undefined || chatScopes.get(seedChatId) !== undefined;
-        if (open || chatHistory?.stateOf(seedChatId) !== undefined) {
+        if (open || chatHistory?.has(seedChatId) === true) {
           let view = chatProposals.viewOfPid(seedChatId, personPid(seedChatId, seedActor.id, b.requestId!));
           // The same request id with another seed is not a retry (codex r2).
           if (view !== null && view.proposal.request?.digest !== requestDigest(seedBody(b.seed, b.requestId!))) {

@@ -152,12 +152,28 @@ export class ChatTranscriptStore {
     return CHAT_ID.test(chatId) ? join(this.dir, `${chatId}.jsonl`) : null;
   }
 
+  /**
+   * DES-CATALOG-002 §4.6 (F36): a seeded open's first record is its proposal, made before any turn. Called once that
+   * chat is live, it starts the chat's transcript (empty, owner-only) so `appendProposalRecord` has a file to land in;
+   * a transcript already there is left as it is. `false` for an id the chat-id guard refuses.
+   */
+  start(chatId: string): boolean {
+    const file = this.fileOf(chatId);
+    if (file === null) return false;
+    if (!existsSync(file)) this.write(file, '');
+    return true;
+  }
+
   private append(chatId: string, record: ChatTranscriptRecord): void {
     const file = this.fileOf(chatId);
     if (file === null) return;
+    this.write(file, `${existsSync(file) ? tornTailPrefix(file) : ''}${JSON.stringify(record)}\n`);
+  }
+
+  private write(file: string, text: string): void {
     mkdirSync(this.dir, { recursive: true, mode: 0o700 });
     const fresh = !existsSync(file);
-    appendFileSync(file, `${fresh ? '' : tornTailPrefix(file)}${JSON.stringify(record)}\n`, { mode: 0o600 });
+    appendFileSync(file, text, { mode: 0o600 });
     // `mode` applies on creation only; enforce on the first write and on the directory (mkdir's
     // `mode` is masked by the umask) — the transcript is the operator's conversation.
     if (process.platform !== 'win32') {
