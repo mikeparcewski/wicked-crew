@@ -522,6 +522,47 @@ describe('G12 (crew half) — the floor reuses the run\'s own draft_render count
     expect(v.pages).toEqual({ count: 2, measured: true, budget: 2, exact: true });
   });
 
+  it('review r1: only the page entry is replaced — another check the report fails or could not evaluate is kept', async () => {
+    const withOthers = (over: Record<string, unknown>) => async () => {
+      const seen = { argv: [] as string[] };
+      const base = unrendered() as Record<string, unknown>;
+      const v = await runDraftFloor('/out/doc.html', EXACT_2, [], { runId: 'run-1' }, {
+        gardenRoot: () => '/garden',
+        chrome: () => null,
+        readBytes: () => BYTES,
+        engineRender: async () => measured(),
+        run: async (argv) => {
+          seen.argv = argv;
+          return { stdout: JSON.stringify({ ...base, ...over }), code: 1 };
+        },
+      });
+      return v;
+    };
+    // A failure the floor has no rule for, named only in the report's own list: still a refusal.
+    expect((await withOthers({ failed: ['pages', 'fonts'] })()).verdict).toBe('fail');
+    // A FAIL with no reason given: still a refusal.
+    expect((await withOthers({ failed: [] })()).verdict).toBe('fail');
+    // A warning named only in the report's own list: still unverified, never a pass.
+    expect((await withOthers({ verdict: 'UNVERIFIED', failed: [], unverified: ['pages', 'contrast'] })()).verdict).toBe('unverified');
+  });
+
+  it('review r1: a run read that stalls does not hold the floor — it prints the draft itself', async () => {
+    let argvSeen: string[] = [];
+    const v = await runDraftFloor('/out/doc.html', EXACT_2, [], { runId: 'run-1' }, {
+      gardenRoot: () => '/garden',
+      chrome: () => '/cache/chrome-headless-shell',
+      readBytes: () => BYTES,
+      engineRender: () => new Promise(() => undefined),
+      engineRenderTimeoutMs: 20,
+      run: async (argv) => {
+        argvSeen = argv;
+        return { stdout: JSON.stringify(report({ pages: 2, pagesVerified: true })), code: 0 };
+      },
+    });
+    expect(argvSeen).toContain('--render');
+    expect(v.verdict).toBe('pass');
+  });
+
   it('a brief with no page budget does not ask for the record', async () => {
     const { seen } = await floor(measured(), NO_BUDGET);
     expect(seen.asked).toBe(0);

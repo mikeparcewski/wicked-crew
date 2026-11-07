@@ -526,6 +526,25 @@ describe('PLAN G12 (crew half): the managed headless shell as the daemon\'s WICK
     expect(starts).toBe(1);
   });
 
+  it('review r1 (pi): a made runtime whose recorded shell is gone asks again, and records the new one', async () => {
+    const root = join(dir, 'g12-stale');
+    made(root, join(dir, 'g12-stale-old', 'chrome-headless-shell'));
+    const venv = conformanceVenvDir(root, {});
+    writeFileSync(join(venv, CHROMIUM_PATH_FILE), `${join(dir, 'pruned', 'chrome-headless-shell')}\n`);
+    const fresh = join(dir, 'g12-stale-new', 'chrome-headless-shell');
+    mkdirSync(join(fresh, '..'), { recursive: true });
+    writeFileSync(fresh, '');
+    const env: NodeJS.ProcessEnv = {};
+    const provision = conformanceProvisioner(() => root, {
+      platform: 'linux',
+      env,
+      exec: (async (_bin: string, args: string[]) => ({ stdout: args[0] === '-c' ? `${fresh}\n` : '', stderr: '' })) as never,
+    });
+    expect((await provision()).ok).toBe(true);
+    expect(managedChromium(root, {}, 'linux')).toBe(fresh);
+    expect(env['WICKED_CHROME']).toBe(fresh);
+  });
+
   it('the provisioner exports the shell it recorded into the daemon environment it was given', async () => {
     const root = join(dir, 'g12-prov');
     const venv = conformanceVenvDir(root, {});

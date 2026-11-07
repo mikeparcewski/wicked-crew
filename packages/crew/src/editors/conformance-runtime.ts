@@ -345,7 +345,8 @@ export function conformanceProvisioner(root: () => string, deps: ProvisionDeps =
     };
     // A venv every step finished in is reused as is: no package index, no browser download.
     if (existsSync(marker) && existsSync(python)) {
-      if (!existsSync(chromiumFile)) await recordChromium();
+      // Asked again when nothing is recorded, or when the recorded browser is gone (a pruned cache, a moved revision).
+      if (managedChromium(dir, env, platform) === null) await recordChromium();
       exportManagedChrome(dir, env, platform);
       return { ok: true, python };
     }

@@ -522,12 +522,15 @@ export function gardenPluginRoot(): string | null {
 
 /**
  * (PLAN G12) What a `measured` page count means, for reuse: the counter, the renderer's print settings and where the
- * draft is printed from. It is the engine's `draft_render::PROFILE` (wicked-core), and it is also what this floor's own
+ * draft is printed from. It is byte for byte the engine's `draft_render::PROFILE` (wicked-core `src/draft_render.rs`; a
+ * drift only turns reuse off, never on: the floor then prints as before), and it is also what this floor's own
  * `--render` does (`self_check.py` → `page_count.py`'s `render_pdf`, the draft at its own path): a record with this
  * profile is the count this floor would print.
  */
 export const DRAFT_RENDER_PROFILE =
   'page_count.py --render: headless --print-to-pdf, no header/footer, offline host rules, 5 s virtual time; the draft at its own path';
+/** How long the floor waits for the run's record before it prints the draft itself. */
+export const DRAFT_RENDER_READ_TIMEOUT_MS = 10_000;
 /** The catalog id of the engine's page-count step (`WorkUnit.catalog`). */
 export const DRAFT_RENDER_CATALOG = 'draft_render';
 
@@ -561,8 +564,10 @@ export function reusablePageCount(record: Record<string, unknown> | null, sha256
 /**
  * The self-check's report with its page check replaced by a count measured elsewhere (the engine's `draft_render`
  * step), and its `failed` / `unverified` / `verdict` recomputed by `self_check.py`'s own rules (`run`: a check failed
- * when `ok` is false, or `pages` when it is not within its budget; unverified when `verified` is false). A report
- * without a page check is returned as it is.
+ * when `ok` is false, or `pages` when it is not within its budget; unverified when `verified` is false). Only the
+ * page entry changes: every other name the report's own `failed` / `unverified` lists carry is kept (a check this floor
+ * cannot read is still the check's refusal or warning), and a FAIL the report gives no reason for stays a FAIL. A
+ * report without a page check is returned as it is.
  */
 export function withMeasuredPages(report: unknown, count: number, budget: PageBudget): unknown {
   if (typeof report !== 'object' || report === null) return report;
@@ -586,11 +591,20 @@ export function withMeasuredPages(report: unknown, count: number, budget: PageBu
   };
   const next: Record<string, unknown> = { ...checks, pages };
   const rec = (v: unknown): Record<string, unknown> | null => (typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : null);
-  const failed = Object.entries(next)
-    .filter(([name, v]) => rec(v)?.['ok'] === false || (name === 'pages' && rec(v)?.['within_budget'] === false))
-    .map(([name]) => name);
-  const unverified = Object.entries(next).filter(([, v]) => rec(v)?.['verified'] === false).map(([name]) => name);
-  const verdict = failed.length > 0 ? 'FAIL' : unverified.length > 0 ? 'UNVERIFIED' : 'PASS';
+  const original = report as { failed?: unknown; unverified?: unknown; verdict?: unknown };
+  /** The report's own list without its `pages` entry (the one this replaces); every other entry, well-formed or not. */
+  const others = (list: unknown): unknown[] => (Array.isArray(list) ? list.filter((n) => n !== 'pages') : []);
+  const union = (a: unknown[], b: unknown[]): unknown[] => [...a, ...b.filter((n) => !a.includes(n))];
+  const failed = union(
+    Object.entries(next)
+      .filter(([name, v]) => rec(v)?.['ok'] === false || (name === 'pages' && rec(v)?.['within_budget'] === false))
+      .map(([name]) => name),
+    others(original.failed),
+  );
+  const unverified = union(Object.entries(next).filter(([, v]) => rec(v)?.['verified'] === false).map(([name]) => name), others(original.unverified));
+  // A refusal the report names no check for is not the page check's: it stays a refusal.
+  const unexplained = original.verdict === 'FAIL' && (!Array.isArray(original.failed) || original.failed.length === 0);
+  const verdict = failed.length > 0 || unexplained ? 'FAIL' : unverified.length > 0 ? 'UNVERIFIED' : 'PASS';
   return { ...(report as Record<string, unknown>), checks: next, failed, unverified, verdict, ok: verdict === 'PASS' };
 }
 
@@ -608,6 +622,8 @@ export interface DraftFloorIo {
   engineRender?: (runId: string) => Promise<Record<string, unknown> | null>;
   /** The draft's bytes, for the sha256 a reuse is matched on. Default: `readFileSync`. */
   readBytes?: (path: string) => Buffer;
+  /** How long {@link engineRender} may take before the floor prints instead. Default {@link DRAFT_RENDER_READ_TIMEOUT_MS}. */
+  engineRenderTimeoutMs?: number;
   timeoutMs?: number;
 }
 
@@ -659,12 +675,20 @@ export async function runDraftFloor(
   // read that fails) and the floor prints or estimates as before.
   let reused: number | null = null;
   if (budget.pages !== null && opts.runId !== undefined && io.engineRender !== undefined) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const record = await io.engineRender(opts.runId);
+      // Bounded: the record is an optimisation, and a read that stalls must not hold the floor (and the document's
+      // landing) — on expiry the floor prints as before.
+      const expiry = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('the run read took too long')), io.engineRenderTimeoutMs ?? DRAFT_RENDER_READ_TIMEOUT_MS);
+      });
+      const record = await Promise.race([io.engineRender(opts.runId), expiry]);
       const sha = createHash('sha256').update((io.readBytes ?? readFileSync)(outPath)).digest('hex');
       reused = reusablePageCount(record, sha);
     } catch {
       reused = null;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
   let chrome: string | null = null;
@@ -700,5 +724,7 @@ export async function runDraftFloor(
   }
   if (reused === null) return draftFloorVerdict(report, budget, { notes: opts.notes !== undefined });
   const verdict = draftFloorVerdict(withMeasuredPages(report, reused, budget), budget, { notes: opts.notes !== undefined });
-  return { ...verdict, summary: `${verdict.summary} (pages: ${reused}, printed by the run's own draft_render step on these exact bytes)` };
+  return verdict.verdict === 'unavailable'
+    ? verdict
+    : { ...verdict, summary: `${verdict.summary} (pages: ${reused}, printed by the run's own draft_render step on these exact bytes)` };
 }
