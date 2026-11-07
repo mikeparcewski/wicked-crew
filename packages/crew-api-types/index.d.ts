@@ -13346,7 +13346,8 @@ export interface PutDeliveryFreezeBody {
  * sources: registered through the same preview/save, but with NO tools — nothing of theirs is ever
  * offered to a governed run. Their preview answers {@link McpPreviewResponse.source} (the catalog).
  */
-export type McpUpstreamKind = 'mcp-stdio' | 'mcp-http' | 'rest' | 'sql' | 'graphql' | 'toolbox-source';
+/** `web` (CS9): the web source, written only by `POST /sources/web/install`; its tools are the data gate's. */
+export type McpUpstreamKind = 'mcp-stdio' | 'mcp-http' | 'rest' | 'sql' | 'graphql' | 'toolbox-source' | 'web';
 
 // ── The one registry's entry (api-types 0.183.0, DES-KNOWLEDGE-DATA-001 §5) ─────────────────────
 
@@ -13474,7 +13475,8 @@ export interface McpAddressPolicy {
 export interface McpServerConfigBody {
   /** 1–63 of `a-z 0-9 _ -`; the `<server>` of the subject `mcp:<server>/<tool>`. */
   name: string;
-  kind: McpUpstreamKind;
+  /** Every kind but `web`: the web source is written by its install route only (CS9). */
+  kind: Exclude<McpUpstreamKind, 'web'>;
   command?: string;
   args?: string[];
   url?: string;
@@ -14564,6 +14566,82 @@ export interface SourceAgentAccessBody {
 export interface SourceAgentAccessResponse {
   name: string;
   agents: SourceAgentAccess;
+}
+
+/** One pinned Python package of the web source's page reader (its hash lock). */
+export interface WebSourcePackage {
+  name: string;
+  version: string;
+  /** The environment marker when the pin applies to some Pythons or platforms only. */
+  markers: string | null;
+  /** Every distribution pip may install for this pin, by sha256. */
+  sha256: string[];
+}
+
+/**
+ * `GET /sources/web/setup` (CS9): what installing the web source puts on this computer, shown BEFORE consent, and
+ * where things stand. Search is SearXNG (AGPL-3.0, unmodified official image, pinned by digest) in the person's
+ * container engine; reading is `mcp-server-fetch` (MIT) from a hash lock.
+ */
+export interface WebSourceSetupResponse {
+  /** Registered, the reader installed for this lock, and the image present. */
+  installed: boolean;
+  /** The registry entry exists. */
+  registered: boolean;
+  installing: boolean;
+  /** The hash lock: its sha256 is what an install consents to. */
+  lock: { sha256: string; packages: WebSourcePackage[] };
+  reader: { name: string; version: string; license: string; sha256: string[]; installed: boolean };
+  image: { ref: string; version: string; digest: string; license: string; revision: string; source: string; note: string; present: boolean };
+  /** No container engine: `ready: false` and the plain reason; a job that needs the web is refused with it. */
+  search: { ready: boolean; engine: 'docker' | 'podman' | 'nerdctl' | null; reason: string | null };
+  python: { found: boolean; version: string | null; reason: string | null };
+  /** The source's agent switches once registered ("query" starts off); `null` before. */
+  agents: SourceAgentAccess | null;
+}
+
+/** `POST /sources/web/install` (a human operator only): the lock and image the person saw, echoed as consent. */
+export interface WebSourceInstallBody {
+  consent: { lock: string; image: string };
+}
+
+export interface WebSourceInstallResponse {
+  setup: WebSourceSetupResponse;
+}
+
+/**
+ * One web read whose answer reached a run's agents, as crew recorded it (CS9, for CS3's fidelity check): never page
+ * text. The HTTP status and the final URL after redirects are not observable, so not given; a 4xx/5xx is `tool_error`.
+ */
+export interface WebReceipt {
+  callId: string;
+  tool: 'search' | 'fetch';
+  unit: number;
+  attempt: number;
+  seat: string;
+  /** `ok`, `tool_error` or `too_large`. */
+  outcome: string;
+  /** Exactly the `fetched_at` / `searched_at` the agent's answer carried. */
+  observedAt: string;
+  url?: string;
+  hosts?: string[];
+  bytes?: number;
+  truncated?: boolean;
+  /** sha256 of the text the agent was given. */
+  contentSha256?: string;
+  query?: string;
+  resultUrls?: string[];
+}
+
+/**
+ * `GET /runs/:id/web-receipts` (a person only); `known: false` = the record could not be read (never "no web reads");
+ * `complete: false` = more receipts than one answer carries (500, or 2 MB of the run's record).
+ */
+export interface RunWebReceiptsResponse {
+  runId: string;
+  known: boolean;
+  complete: boolean;
+  receipts: WebReceipt[];
 }
 
 /** One agent read of a source (`GET /sources/:name/agent-queries`), as crew recorded it: never the SQL, a value or a source's words. */

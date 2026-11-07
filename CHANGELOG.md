@@ -67,6 +67,22 @@ mentioned only where a daemon release depends on them.
   sets or clears the repository's own minimum through the engine's `wicked-core requirements-target` (409 when the
   repository has no code graph yet). Needs a wicked-core with the 2026-11-06 requirements read; an older engine
   reads as before (`null` / 0).
+- **The web source: research reads the public web through crew's data gate (CS9; api-types: a `web` source kind and
+  the web source's setup and install types, unreleased).** Settings → Sources → the web source shows what it installs
+  before anything does: search is SearXNG (AGPL-3.0, its official image pinned by digest
+  `sha256:ffad724a…3cae`, run unmodified in your own container engine, Docker, Rancher Desktop or Podman, published on
+  127.0.0.1 only), and reading is `mcp-server-fetch` 2026.11.4 (MIT) from a hash lock that pins every dependency
+  (`packages/crew/adapters/web-source.lock`, shipped in the package). `POST /sources/web/install` is a human
+  operator's, with consent to that exact lock and image. With no container engine, the source says "Research needs a
+  container engine for web search: install Docker, Rancher Desktop or Podman", and install and search refuse with it.
+  Agents reach `mcp:web/search` and `mcp:web/fetch` only through the data gate, and only after a person turns "Agents
+  can query this source" on (off after every install). Every page read goes through a loopback egress proxy on crew's
+  dialer: the address is checked at connect time (DNS rebinding included), so private and cloud-metadata addresses are
+  refused. Downloads are cut at 2 MB, robots.txt is obeyed, no cookies or credentials are sent, and only ports 443
+  and 80 are reached. Each call's answer carries the URL and the fetch time, and so do its record line
+  (`web-calls.ndjson`) and its audit line (`knowledge.source.agent_web`). SearXNG's own requests go straight to its
+  four fixed engines: a container cannot reach the host's loopback proxy, and the agent picks only the query.
+
 - **A chat job's Start chooses how it runs (operator ruling 2026-11-06; api-types 0.196.0).** `POST
   /chats/:id/proposals/:pid` takes an optional `power` with `decision: 'go'` on a job proposal. `true` launches a power
   run (no plan-approval gate; the deliver gate and what policy requires still hold). `false` or absent launches exactly

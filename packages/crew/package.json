@@ -30,6 +30,7 @@
     "wicked-crew": "dist/cli/index.js"
   },
   "files": [
+    "adapters",
     "dist",
     "evals",
     "skills",

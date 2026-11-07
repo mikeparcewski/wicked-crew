@@ -8,6 +8,8 @@
  *   SQLite uploads are structure-only for agents until their gate read path lands;
  * - a `toolbox-source` entry on the `toolbox` runtime whose document is `type: postgres`: the Toolbox adapter.
  *
+ * - (CS9) the `web` entry: its two tools are the web half's (`knowledge/adapters/web/gate-web.ts`), not listed here.
+ *
  * GraphQL and every other kind are not gated sources here: agents get none of their tools through the gate.
  */
 
@@ -150,7 +152,8 @@ export async function isGatedSource(store: Pick<McpRegistryStore, 'read'>, serve
   if (r === undefined) return false;
   const c = configOf(r);
   // (DES-PM-001 §3.1) A PM entry is the gate's too: its tools reach a unit only through their bindings.
-  return (c.kind === 'sql' && c.sql != null) || (r.kind === 'toolbox-source' && r.runtime === 'toolbox') || hasPmMarker(r);
+  // (CS9) The web source's entry is the gate's too: its tools reach a unit only through the web half.
+  return (c.kind === 'sql' && c.sql != null) || (r.kind === 'toolbox-source' && r.runtime === 'toolbox') || hasPmMarker(r) || r.kind === 'web';
 }
 
 /** The agent controls of `name`, before and after `patch`, written inside one registry mutation (§7.1). */
@@ -163,7 +166,7 @@ export async function setAgentAccess(
   return store.mutate((file) => {
     const s = file.servers.find((x) => x.name === name);
     if (s === undefined) return { error: 'unknown_source' as const };
-    if (!((s.kind === 'sql' && s.sql !== undefined) || s.kind === 'toolbox-source' || pmOf(s) !== null)) return { error: 'not_a_source' as const };
+    if (!((s.kind === 'sql' && s.sql !== undefined) || s.kind === 'toolbox-source' || pmOf(s) !== null || s.kind === 'web')) return { error: 'not_a_source' as const };
     const before = agentAccessOf(s);
     const see = patch.see ?? before.see;
     if (patch.query === true && !see) return { error: 'see_off' as const };
