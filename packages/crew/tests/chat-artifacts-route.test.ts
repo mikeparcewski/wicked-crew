@@ -158,9 +158,9 @@ describe('chat sees artifacts and runs (server, A1)', () => {
   const send = async (a: FastifyInstance, chatId: string, body: Record<string, unknown>, token?: string) =>
     a.inject({ method: 'POST', url: `/api/v1/chats/${chatId}/messages`, payload: body, ...(token !== undefined ? { headers: { authorization: `Bearer ${token}` } } : {}) });
 
-  it('advertises chatArtifacts with context (and A2 proposals) on, every operation off', async () => {
+  it('advertises chatArtifacts with context (and A2 proposals) on; of the operations, only theme (A7, no run) without a draft seam', async () => {
     const health = (await app.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse;
-    expect(health.capabilities?.chatArtifacts).toEqual({ context: true, proposals: true, create: false, refine: false, theme: false, demo: false });
+    expect(health.capabilities?.chatArtifacts).toEqual({ context: true, proposals: true, create: false, refine: false, theme: true, demo: false });
   });
 
   it('a platform that cannot open beneath a root still chats: no turn read roots, the artifact refused with the reason, a seed answers 501', async () => {

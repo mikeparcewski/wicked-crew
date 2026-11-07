@@ -814,8 +814,10 @@ export class ChatProposals {
   }
 
   /** What a seat may be told it can make now (`chat-scope.ts`'s per-message digest). With a chat id, how the chat routes
-   *  new work too (DES-CATALOG-002 §2.3: job cards for a client that renders them, a command line for an older one). */
-  digest(chatId?: string, accepts?: boolean): MakeDigest {
+   *  new work too (DES-CATALOG-002 §2.3: job cards for a client that renders them, a command line for an older one).
+   *  `o.appearance` (A7): whether the message carried the tab's appearance. A client that sends none cannot preview or
+   *  apply a theme, so its seat is not told it can propose one (absent = not known here: the flag alone decides). */
+  digest(chatId?: string, accepts?: boolean, o: { appearance?: boolean } = {}): MakeDigest {
     const f = this.deps.flags();
     const on = f.proposals;
     const entries = on
@@ -831,7 +833,7 @@ export class ChatProposals {
     return {
       create: on && f.create && entries.some((e) => e.kind === 'document'),
       refine: on && f.refine,
-      theme: on && f.theme,
+      theme: on && f.theme && o.appearance !== false,
       demo: on && f.demo && entries.some((e) => e.kind === 'demo'),
       entries,
       ...(jobs !== undefined ? { jobs } : {}),
@@ -1498,7 +1500,8 @@ export class ChatProposals {
     // Every source and the target still exist, and are still where they were authorized.
     const gone = await this.firstGone(chatId, resolution);
     if (gone !== null) return { code: 409, body: { code: 'source_gone', error: gone, view: viewOf(folded) } };
-    const busy = await this.busy(chatId, identity.artifactRef, resolution);
+    // A theme is no job (§15.2): applying colours never waits for a run of this chat.
+    const busy = kind === 'theme' ? null : await this.busy(chatId, identity.artifactRef, resolution);
     if (busy !== null) return { code: 409, body: { code: busy.code, error: busy.reason, view: viewOf(folded) } };
     // A refine is on the head it was proposed on; else the card re-resolves (same pid, the new base). Read last, right
     // before the record: the landing itself is checked against this base (`expect_head`, slices I1 and A5).
