@@ -15,6 +15,8 @@ import { access, mkdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
 
+import { childEnvWithBootEstateDb } from '../../../core/governance-store.js';
+
 export const NO_ENGINE_REASON = 'Research needs a container engine for web search: install Docker, Rancher Desktop or Podman';
 
 export type EngineName = 'docker' | 'podman' | 'nerdctl';
@@ -32,7 +34,8 @@ export type Exec = (cmd: string, args: readonly string[], opts: { env?: Record<s
 /** The real exec: no shell, a deadline, output capped. */
 export const execCommand: Exec = (cmd, args, opts) =>
   new Promise((resolve) => {
-    execFile(cmd, [...args], { env: opts.env ?? process.env, timeout: opts.timeoutMs, maxBuffer: 4 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+    // (crew#495) The child never sees the daemon's exported governance store: its boot value, as every child crew spawns.
+    execFile(cmd, [...args], { env: childEnvWithBootEstateDb(opts.env ?? process.env), timeout: opts.timeoutMs, maxBuffer: 4 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
       const code = err === null ? 0 : typeof (err as { code?: unknown }).code === 'number' ? ((err as { code: number }).code) : null;
       resolve({ code, stdout: String(stdout), stderr: String(stderr) });
     });
