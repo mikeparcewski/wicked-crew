@@ -14,6 +14,7 @@ import { DocRunIndex, documentIdOfKey } from '../src/interactive/doc-run-index.j
 import { InteractiveHandoffLedger } from '../src/interactive/ledger.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 function view(id: string) {
   return {
@@ -128,7 +129,7 @@ describe('GET /runs — document_id on the DTO and the ?doc= filter', () => {
       listRepos: vi.fn().mockResolvedValue([]),
     };
     app = Fastify({ logger: false });
-    registerRoutes(app, mockAdapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, undefined, {
+    registerRoutes(app, withRunViews(mockAdapter as unknown as CoreAdapter), new GateCache(), new ElicitationCache(), undefined, undefined, {
       docRuns,
     });
     await app.ready();

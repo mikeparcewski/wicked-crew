@@ -20,6 +20,7 @@ import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import type { AuditLog } from '../src/api/audit.js';
 import { type CoreAdapter } from '../src/core/adapter.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
+import { withRunViews } from './support/run-views.js';
 
 describe('GateSchema — amend_intent', () => {
   it('parses with approve: true and the amendment text', () => {
@@ -108,7 +109,7 @@ describe('POST /runs/:id/gate — amend_intent reaches the engine', () => {
       }),
     };
     app = Fastify({ logger: false });
-    registerRoutes(app, mockAdapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, {
+    registerRoutes(app, withRunViews(mockAdapter as unknown as CoreAdapter), new GateCache(), new ElicitationCache(), undefined, {
       audit,
       authMode: 'off',
     });

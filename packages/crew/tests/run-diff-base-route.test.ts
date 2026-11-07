@@ -23,6 +23,7 @@ import { DIFF_OUTPUT_CAP_BYTES, isPlainRef } from '../src/api/run-files.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { FastifyInstance } from 'fastify';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 /** git with a hermetic identity — no dependence on the developer's ~/.gitconfig. */
 function git(cwd: string, ...args: string[]): string {
@@ -103,7 +104,7 @@ describe('GET /runs/:id/diff?base= (CREW-UX-1, DES-UX-001 §8.1)', () => {
     app = Fastify({ logger: false });
     registerRoutes(
       app,
-      mockAdapter as unknown as CoreAdapter,
+      withRunViews(mockAdapter as unknown as CoreAdapter),
       new GateCache(),
       new ElicitationCache(),
     );

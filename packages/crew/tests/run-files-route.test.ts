@@ -31,6 +31,7 @@ import {
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { FastifyInstance } from 'fastify';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 /** git with a hermetic identity — no dependence on the developer's ~/.gitconfig. */
 function git(cwd: string, ...args: string[]): string {
@@ -122,7 +123,7 @@ describe('GET /runs/:id/files + /runs/:id/diff (DES-FEEDBACK-002 CREW-1)', () =>
     app = Fastify({ logger: false });
     registerRoutes(
       app,
-      mockAdapter as unknown as CoreAdapter,
+      withRunViews(mockAdapter as unknown as CoreAdapter),
       new GateCache(),
       new ElicitationCache(),
     );
@@ -321,10 +322,10 @@ describe('GET /runs/:id/files + /runs/:id/diff (DES-FEEDBACK-002 CREW-1)', () =>
     const scoped = Fastify({ logger: false });
     registerRoutes(
       scoped,
-      {
+      withRunViews({
         sessionsDetail: vi.fn().mockResolvedValue([view('run-clean', clean, [])]),
         listRepos: vi.fn().mockResolvedValue([]),
-      } as unknown as CoreAdapter,
+      } as unknown as CoreAdapter),
       new GateCache(),
       new ElicitationCache(),
     );

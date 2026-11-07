@@ -21,6 +21,7 @@ import { registerWorkingDocRoutes } from '../src/working-doc/routes.js';
 import { WorkingDocStore } from '../src/working-doc/store.js';
 
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
+import { withRunViews } from './support/run-views.js';
 
 const RUN = 'run-voice-inject';
 const NOTE = 'Keep the old URL working';
@@ -130,7 +131,7 @@ describe('POST /runs/:id/inject {input: "voice"}', () => {
     };
     app = Fastify({ logger: false });
     app.addHook('onRequest', async (req) => { (req as { actor?: Actor }).actor = actor; });
-    registerRoutes(app, adapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, { audit, authMode: 'off' }, { voiceInputs });
+    registerRoutes(app, withRunViews(adapter as unknown as CoreAdapter), new GateCache(), new ElicitationCache(), undefined, { audit, authMode: 'off' }, { voiceInputs });
     await app.ready();
   });
   beforeEach(() => { injected.length = 0; cancelled.length = 0; recorded.length = 0; actor = { id: 'local', kind: 'human', trust: 'admin' }; });
@@ -192,7 +193,7 @@ describe('POST /runs/:id/cancel {reason, input}', () => {
     };
     app = Fastify({ logger: false });
     app.addHook('onRequest', async (req) => { (req as { actor?: Actor }).actor = actor; });
-    registerRoutes(app, adapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, { audit, authMode: 'off' });
+    registerRoutes(app, withRunViews(adapter as unknown as CoreAdapter), new GateCache(), new ElicitationCache(), undefined, { audit, authMode: 'off' });
     await app.ready();
   });
   beforeEach(() => { cancelled.length = 0; recorded.length = 0; actor = { id: 'local', kind: 'human', trust: 'admin' }; });

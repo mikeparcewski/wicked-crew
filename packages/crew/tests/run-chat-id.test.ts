@@ -23,6 +23,7 @@ import { AuditLog } from '../src/api/audit.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SessionView } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 function view(id: string, status: string): SessionView {
   return {
@@ -81,7 +82,7 @@ describe('C1 — chat_id on every run, capability runChatId', () => {
     });
     registerRoutes(
       app,
-      mockAdapter as unknown as CoreAdapter,
+      withRunViews(mockAdapter as unknown as CoreAdapter),
       new GateCache(),
       new ElicitationCache(),
       { bus: null, index: new MembershipIndex(), log: () => undefined },

@@ -18,6 +18,7 @@ import type { AuditLog } from '../src/api/audit.js';
 import { type CoreAdapter } from '../src/core/adapter.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import type { AuditEntry } from '../src/core/types.js';
+import { withRunViews } from './support/run-views.js';
 
 const RUN = 'run-deliver';
 const DELIVER_ORD = 5;
@@ -105,7 +106,7 @@ describe('/deliveries/freeze and the deliver gate', () => {
       }),
     };
     app = Fastify({ logger: false });
-    registerRoutes(app, mockAdapter as unknown as CoreAdapter, gateCache, new ElicitationCache(), undefined, {
+    registerRoutes(app, withRunViews(mockAdapter as unknown as CoreAdapter), gateCache, new ElicitationCache(), undefined, {
       audit,
       authMode: 'off',
     });
@@ -229,7 +230,7 @@ describe('every gate-confirming path shares one per-run lock (crew#1083 round 5)
       reassignUnit: vi.fn(async () => undefined),
     };
     app = Fastify({ logger: false });
-    registerRoutes(app, mockAdapter as unknown as CoreAdapter, gateCache, new ElicitationCache(), undefined, {
+    registerRoutes(app, withRunViews(mockAdapter as unknown as CoreAdapter), gateCache, new ElicitationCache(), undefined, {
       audit: { record: vi.fn(() => Date.now()) } as unknown as AuditLog,
       authMode: 'off',
     });

@@ -28,6 +28,7 @@ import type { AcceptanceView } from '../src/qe/acceptance.js';
 import { composeDeliverableFloor } from '../src/core/deliverable-floor.js';
 import { CREW_RUN_ID_FIELD } from '../src/qe/ledger.js';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 const DELIVER_ORD = 3;
 const RECEIPT = {
@@ -176,7 +177,7 @@ beforeAll(async () => {
     readAll: vi.fn(async () => []),
   } as unknown as AuditLog;
   app = Fastify({ logger: false });
-  registerRoutes(app, mockAdapter as unknown as CoreAdapter, gateCache, new ElicitationCache(), undefined, { audit, authMode: 'off' }, {
+  registerRoutes(app, withRunViews(mockAdapter as unknown as CoreAdapter), gateCache, new ElicitationCache(), undefined, { audit, authMode: 'off' }, {
     worktreeExists: () => true,
     deliverExec: async (workdir: string) => {
       deliverCalls.push(workdir);
@@ -335,12 +336,12 @@ describe('EX-03 at launch — a workflow that requires QE acceptance never deliv
   it('deliverGate: "auto" on such a workflow is a 400 naming why; nothing launches', async () => {
     const launched: unknown[] = [];
     const a = Fastify({ logger: false });
-    registerRoutes(a, {
+    registerRoutes(a, withRunViews({
       getWorkflow: (id: string) => (id === 'qe-gated' ? { id, phases: [], required_instruments: ['distinct_evaluator', 'judge', 'qe_acceptance'] } : null),
       listWorkflows: () => BUILTIN_WORKFLOWS,
       getSettings: async () => ({}),
       launchRun: vi.fn(async (input: unknown) => { launched.push(input); return 'x'; }),
-    } as unknown as CoreAdapter, new GateCache(), new ElicitationCache());
+    } as unknown as CoreAdapter), new GateCache(), new ElicitationCache());
     await a.ready();
     const res = await a.inject({
       method: 'POST',
@@ -429,12 +430,12 @@ describe('QE-IN-APP-WORKFLOWS at launch — the operator\'s explicit skip or for
   async function launchWith(payload: Record<string, unknown>) {
     const launched: Array<Record<string, unknown>> = [];
     const a = Fastify({ logger: false });
-    registerRoutes(a, {
+    registerRoutes(a, withRunViews({
       getWorkflow: (id: string) => (id === 'qe-gated' ? { id, phases: [], required_instruments: ['distinct_evaluator', 'judge', 'qe_acceptance'] } : null),
       listWorkflows: () => BUILTIN_WORKFLOWS,
       getSettings: async () => ({}),
       launchRun: vi.fn(async (input: Record<string, unknown>) => { launched.push(input); return 'x'; }),
-    } as unknown as CoreAdapter, new GateCache(), new ElicitationCache());
+    } as unknown as CoreAdapter), new GateCache(), new ElicitationCache());
     await a.ready();
     const res = await a.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'p', workflow: 'qe-gated', clisJson: '[]', ...payload } });
     await a.close();
@@ -464,12 +465,12 @@ describe('QE-IN-APP-WORKFLOWS at launch — the operator\'s explicit skip or for
   it('codex r1: a def that shadows a QE built-in preset\'s name never speaks for the preset the engine runs', async () => {
     const launched: unknown[] = [];
     const a = Fastify({ logger: false });
-    registerRoutes(a, {
+    registerRoutes(a, withRunViews({
       getWorkflow: (id: string) => ({ id, phases: [] }),
       listWorkflows: () => BUILTIN_WORKFLOWS,
       getSettings: async () => ({}),
       launchRun: vi.fn(async (input: unknown) => { launched.push(input); return 'x'; }),
-    } as unknown as CoreAdapter, new GateCache(), new ElicitationCache());
+    } as unknown as CoreAdapter), new GateCache(), new ElicitationCache());
     await a.ready();
     // core-ts 0.8.2: `bug` and `mcp-server` are QE presets too (codex r3 on crew A).
     for (const workflow of ['feature', 'migration', 'bug', 'mcp-server']) {

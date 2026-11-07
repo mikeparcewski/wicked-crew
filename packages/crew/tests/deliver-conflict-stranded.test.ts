@@ -36,6 +36,7 @@ import type { RuntimeDeps } from '../src/api/routes.js';
 import type { SessionView, WorkUnit } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 const RUN_ID = 'ab114181-1111-4222-8333-444455556666';
 
@@ -119,7 +120,7 @@ function buildApp(views: SessionView[], runtimeOver: Partial<RuntimeDeps> = {}):
   });
   registerRoutes(
     app,
-    adapter,
+    withRunViews(adapter),
     new GateCache(),
     new ElicitationCache(),
     { bus: null, index: new MembershipIndex(), log: () => undefined },

@@ -12,6 +12,7 @@ import type { AuditLog } from '../src/api/audit.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import { decidedGates } from '../src/standing-orders/history.js';
+import { withRunViews } from './support/run-views.js';
 
 const RUN = 'run-voice';
 
@@ -54,7 +55,7 @@ describe('POST /runs/:id/gate {input: "voice"}', () => {
       confirmGate: vi.fn(async (...args: unknown[]) => { confirmCalls.push(args); return 'executing'; }),
     };
     app = Fastify({ logger: false });
-    registerRoutes(app, adapter as unknown as CoreAdapter, gateCache, new ElicitationCache(), undefined, { audit, authMode: 'off' });
+    registerRoutes(app, withRunViews(adapter as unknown as CoreAdapter), gateCache, new ElicitationCache(), undefined, { audit, authMode: 'off' });
     await app.ready();
   });
   beforeEach(() => {

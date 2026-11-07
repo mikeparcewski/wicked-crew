@@ -24,6 +24,7 @@ import { registerRoutes } from '../src/api/routes.js';
 import { CoreAdapter } from '../src/core/adapter.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import * as projectGraph from '../src/projects/graph.js';
+import { withRunViews } from './support/run-views.js';
 
 let base: string;
 /** crew#823: the membership index the routes file runs into (a run of the chat's project). */
@@ -172,7 +173,7 @@ beforeEach(async () => {
   launchSafetyNetBinding = undefined;
   app = Fastify({ logger: false });
   adapter = fakeAdapter();
-  registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), { bus: null, index: membership, log: () => undefined }, undefined, {
+  registerRoutes(app, withRunViews(adapter), new GateCache(), new ElicitationCache(), { bus: null, index: membership, log: () => undefined }, undefined, {
     chatScopes,
     chatTurns,
     askPaths,

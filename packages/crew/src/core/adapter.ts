@@ -630,6 +630,103 @@ function holdStoreReadsUntilBooted(core: CoreHandleFull): CoreHandleFull {
   });
 }
 
+/**
+ * F35: the engine calls that change nothing a run view reads, so they leave the shared views snapshot
+ * valid (`CoreAdapter.viewsRead`). Reads only. Every call NOT named here counts as a possible
+ * write and invalidates the snapshot, so a binding added later is safe by default: it costs one
+ * refold, never a stale view.
+ */
+const VIEW_NEUTRAL_CALLS: ReadonlySet<string> = new Set([
+  ...STORE_READS_OFF_ACTOR,
+  'ping',
+  'busBridgeState',
+  'qeAcceptanceOff',
+  'busRead',
+  'campaignDetail',
+  'sessions',
+  'sessionsDetail',
+  'workOutput',
+  'unitTranscript',
+  'runEvents',
+  'rejudgeReadiness',
+  'listRepos',
+  'listPresets',
+  'runTeam',
+  'catalog',
+  'listMemories',
+  'recallKnowledge',
+]);
+
+/**
+ * F35: the live streams that write nothing a run view reads. Every other engine frame may follow a
+ * change to a run, so it invalidates the views snapshot.
+ */
+const VIEW_NEUTRAL_EVENTS: ReadonlySet<string> = new Set([
+  'heartbeat', // the actor's liveness answer (a `/health` ping)
+  'cliOutputDelta',
+  'unitOutputDelta',
+  'toolActivity', // a seat's live tool calls; the unit record is written when the turn ends, with its own frames
+  'chatDelta',
+  'terminalOutput',
+]);
+
+/**
+ * The engine handle with every call that may write reported to `changed`, once when it is made and
+ * once when it settles (F35). The second report matters: a fold that started after the call but before
+ * the write committed would otherwise stay valid with the write missing from it.
+ */
+function reportEngineWrites(core: CoreHandleFull, changed: () => void): CoreHandleFull {
+  return new Proxy(core, {
+    get(target, prop, receiver) {
+      const value: unknown = Reflect.get(target, prop, receiver);
+      if (typeof value !== 'function' || (typeof prop === 'string' && VIEW_NEUTRAL_CALLS.has(prop))) return value;
+      const method = value as (...args: unknown[]) => unknown;
+      return (...args: unknown[]) => {
+        changed();
+        let out: unknown;
+        try {
+          out = method.apply(target, args);
+        } catch (err) {
+          changed();
+          throw err;
+        }
+        if (out !== null && typeof out === 'object' && typeof (out as Promise<unknown>).then === 'function') {
+          (out as Promise<unknown>).then(changed, changed);
+        } else {
+          changed();
+        }
+        return out;
+      };
+    },
+  });
+}
+
+/** How long a views snapshot serves when nothing has changed (F35): the bound for a store change no frame reports. */
+export const VIEWS_SNAPSHOT_MAX_AGE_MS = 2_000;
+
+/**
+ * One fold of the engine's run views, parsed once and shared (F35). Deep-frozen, so it is the same
+ * object for every caller until the store may have changed: hand a caller a clone (`runView`,
+ * `sessionsDetail`), never these objects, since callers decorate views in place.
+ */
+export interface RunViewsSnapshot {
+  readonly views: readonly SessionView[];
+}
+
+/** A views snapshot with what the adapter keeps beside it: the version and the monotonic time its fold started. */
+interface ViewsRead {
+  readonly epoch: number;
+  readonly at: number;
+  readonly snapshot: RunViewsSnapshot;
+  readonly byId: ReadonlyMap<string, SessionView>;
+}
+
+function deepFreeze(value: unknown): void {
+  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return;
+  Object.freeze(value);
+  for (const v of Object.values(value)) deepFreeze(v);
+}
+
 /** The napi constructor surface — the static factories live on the class object. */
 interface CoreConstructor {
   spawn(path: string): CoreHandleFull;
@@ -1213,6 +1310,8 @@ export class CoreAdapter {
   private readonly core: CoreHandleFull;
   private readonly subscription: Subscription;
   private readonly listeners = new Set<CoreEventListener>();
+  /** F35: the views version, moved by every engine frame (bar the live streams) and every engine call that may write. */
+  private viewsEpoch = 0;
   private readonly launchListeners = new Set<LaunchListener>();
   /** crew#1145: what each engine launch awaits first (`setLaunchGate`); `null` = nothing. */
   private launchGate: (() => Promise<void>) | null = null;
@@ -1377,7 +1476,13 @@ export class CoreAdapter {
     if (diskQeAcceptanceMode() === 'off') process.env['WICKED_QE_ACCEPTANCE_OFF'] = QE_OFF_REASON;
     else delete process.env['WICKED_QE_ACCEPTANCE_OFF'];
     try {
-      this.core = holdStoreReadsUntilBooted(this.stub ? Core.spawnStub(opts.dbPath) : Core.spawn(opts.dbPath));
+      // F35: every engine call that may write moves the views version (`viewsRead`).
+      this.core = reportEngineWrites(
+        holdStoreReadsUntilBooted(this.stub ? Core.spawnStub(opts.dbPath) : Core.spawn(opts.dbPath)),
+        () => {
+          this.viewsEpoch++;
+        },
+      );
     } finally {
       // Read once, at spawn: never inherited by the workers this daemon starts.
       delete process.env['WICKED_QE_ACCEPTANCE_OFF'];
@@ -1418,22 +1523,28 @@ export class CoreAdapter {
     // The ONE subscribe() for the process. Error-first callback (index.d.ts:56):
     // one JSON string per CoreEvent, in emission order. A throw in a listener is
     // isolated so one bad consumer can never stall the pump or the others.
-    this.subscription = this.core.subscribe((err, json) => {
-      if (err) return;
-      let event: CoreEvent;
+    this.subscription = this.core.subscribe((err, json) => this.onEngineFrame(err, json));
+  }
+
+  /** One frame off the process's engine subscription: parsed once, handed to every listener. */
+  private onEngineFrame(err: Error | null, json: string): void {
+    if (err) return;
+    let event: CoreEvent;
+    try {
+      event = JSON.parse(json) as CoreEvent;
+    } catch {
+      return; // malformed frame — drop it rather than crash the pump
+    }
+    // F35: a frame may follow a change to a run, so the views snapshot is stale from here (before
+    // any listener runs, so a read a listener starts sees the change).
+    if (!VIEW_NEUTRAL_EVENTS.has(event.type)) this.viewsEpoch++;
+    for (const listener of this.listeners) {
       try {
-        event = JSON.parse(json) as CoreEvent;
+        listener(event);
       } catch {
-        return; // malformed frame — drop it rather than crash the pump
+        /* isolate a faulty listener */
       }
-      for (const listener of this.listeners) {
-        try {
-          listener(event);
-        } catch {
-          /* isolate a faulty listener */
-        }
-      }
-    });
+    }
   }
 
   /**
@@ -2651,9 +2762,98 @@ export class CoreAdapter {
    * `workflow_id` is still rewritten from the engine's synthetic `wf-<run>` to the resolved NAME
    * for skins that read it (studio's run-kind list, until it reads `run_identity.system`); a run
    * with no name (a user plan, free text, unknown) keeps the engine's id.
+   *
+   * The caller's own copy of the shared snapshot (`viewsRead`): it may decorate it in place.
+   * A caller that needs one run reads `runView` instead, which copies only that run (F35).
    */
   async sessionsDetail(): Promise<SessionView[]> {
-    const views = JSON.parse(await this.engineSessionsDetail()) as SessionView[];
+    return structuredClone((await this.viewsRead()).snapshot.views) as SessionView[];
+  }
+
+  /**
+   * One run's view (as `sessionsDetail` serves it), or `undefined` for an unknown id: the caller's own
+   * copy of that run only, so a request about one run costs O(1) in the number of runs on the store
+   * once the snapshot is read (F35). `fresh`: the caller holds a newer record of the store than the
+   * snapshot's (say a gate row the engine wrote before its frame landed), so the run is read from a
+   * fold that starts after this call.
+   */
+  async runView(runId: string, opts?: { fresh?: boolean }): Promise<SessionView | undefined> {
+    if (opts?.fresh === true) this.viewsEpoch++;
+    const view = (await this.viewsRead()).byId.get(runId);
+    return view === undefined ? undefined : structuredClone(view);
+  }
+
+  /**
+   * The shared, deep-frozen views snapshot itself — the same object for every caller until the store
+   * changes. For a cache derived from the views (keyed by this object); never mutate it (F35).
+   */
+  async runViewsSnapshot(): Promise<RunViewsSnapshot> {
+    return (await this.viewsRead()).snapshot;
+  }
+
+  /** The newest views snapshot read (F35). */
+  private viewsLatest: ViewsRead | null = null;
+  /** The fold running now, with the version and time it started at; the one fold queued behind it. */
+  private viewsRunning: { epoch: number; at: number; read: Promise<ViewsRead> } | null = null;
+  private viewsNext: Promise<ViewsRead> | null = null;
+
+  /**
+   * The engine's run views, read through ONE shared snapshot (F35). The engine's whole-store fold is
+   * parsed once per fold, not once per caller: a JS heap OOM on the rig came from every gate poll
+   * parsing every run, many polls at once.
+   *
+   * A fold serves while it started at the current views version (`viewsEpoch`: no engine frame
+   * other than the live streams and no engine call that may write since) less than
+   * {@link VIEWS_SNAPSHOT_MAX_AGE_MS} ago, on the monotonic clock; that holds for the last fold read
+   * and for the one running. Otherwise the caller takes the one fold queued behind the running one
+   * (crew#944: at most one running, one queued, since each fold holds a libuv worker on the engine's
+   * actor). So a caller never reads a fold that started before a change this adapter made or a frame
+   * it delivered, and a change it learned of no other way is at most that bound old.
+   */
+  private viewsRead(): Promise<ViewsRead> {
+    const epoch = this.viewsEpoch;
+    const fresh = (r: { epoch: number; at: number }): boolean => r.epoch === epoch && performance.now() - r.at < VIEWS_SNAPSHOT_MAX_AGE_MS;
+    const latest = this.viewsLatest;
+    if (latest !== null && fresh(latest)) return Promise.resolve(latest);
+    if (this.viewsRunning !== null && fresh(this.viewsRunning)) return this.viewsRunning.read;
+    if (this.viewsNext !== null) return this.viewsNext;
+    if (this.viewsRunning === null) return this.foldViews();
+    const next = this.viewsRunning.read
+      .catch(() => undefined)
+      .then(() => {
+        this.viewsNext = null;
+        return this.foldViews();
+      });
+    this.viewsNext = next;
+    return next;
+  }
+
+  private foldViews(): Promise<ViewsRead> {
+    const epoch = this.viewsEpoch;
+    const at = performance.now();
+    const read = (async (): Promise<ViewsRead> => {
+      const views = JSON.parse(await this.core.sessionsDetail()) as SessionView[];
+      await this.resolveIdentities(views);
+      deepFreeze(views);
+      const done: ViewsRead = { epoch, at, snapshot: Object.freeze({ views }), byId: new Map(views.map((v) => [v.session.id, v] as const)) };
+      this.viewsLatest = done;
+      return done;
+    })();
+    const running = { epoch, at, read };
+    this.viewsRunning = running;
+    read.then(
+      () => {
+        if (this.viewsRunning === running) this.viewsRunning = null;
+      },
+      () => {
+        if (this.viewsRunning === running) this.viewsRunning = null;
+      },
+    );
+    return read;
+  }
+
+  /** Attach each view's `run_identity` (seam X2), rewriting a synthetic `workflow_id` to its name. */
+  private async resolveIdentities(views: SessionView[]): Promise<void> {
     const needsLaunch = (v: SessionView): boolean =>
       (v.session as { team_plan?: unknown }).team_plan == null &&
       typeof v.session.workflow_id === 'string' &&
@@ -2673,42 +2873,6 @@ export class CoreAdapter {
         view.session.workflow_id = identity.name;
       }
     }
-    return views;
-  }
-
-  /** The engine's sessions-detail fold running now, and the one every caller that arrived during it shares. */
-  private detailRunning: Promise<string> | null = null;
-  private detailNext: Promise<string> | null = null;
-
-  /**
-   * The engine's whole-store sessions-detail read, at most one running and one queued (crew#944).
-   * Each call is a fold on the engine's single actor, and the binding holds a libuv worker thread
-   * blocked on the actor's reply until it is served. So N concurrent run reads used to queue N
-   * folds and pin the whole pool, and `/health` (its ping, its state-home readdir) waited behind
-   * all of them. A caller that arrives while a fold runs shares the NEXT fold, which starts after
-   * the running one ends. It never takes the running one's answer, so every caller still reads
-   * a fold that started after it asked (a write it saw committed is in it). Each caller parses its
-   * own copy of the JSON, because callers decorate the views they get in place.
-   */
-  private engineSessionsDetail(): Promise<string> {
-    if (this.detailNext !== null) return this.detailNext;
-    if (this.detailRunning === null) return this.startSessionsDetail();
-    const next = this.detailRunning
-      .catch(() => undefined)
-      .then(() => {
-        this.detailNext = null;
-        return this.startSessionsDetail();
-      });
-    this.detailNext = next;
-    return next;
-  }
-
-  private startSessionsDetail(): Promise<string> {
-    const running: Promise<string> = this.core.sessionsDetail().finally(() => {
-      if (this.detailRunning === running) this.detailRunning = null;
-    });
-    this.detailRunning = running;
-    return running;
   }
 
   /** A unit's captured transcript (string, or `null`). */

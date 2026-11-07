@@ -21,6 +21,7 @@ import type { ConformanceRule, DecisionView } from '../src/core/types.js';
 import { DecisionLedger } from '../src/decisions/ledger.js';
 import { DecisionService } from '../src/decisions/land.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
+import { withRunViews } from './support/run-views.js';
 
 interface Proposal {
   id: string;
@@ -162,7 +163,7 @@ async function harness(opts: { authMode?: 'off' | 'required'; mode?: 'off' | 'le
   });
   const registered = registerRoutes(
     app,
-    adapter as unknown as CoreAdapter,
+    withRunViews(adapter as unknown as CoreAdapter),
     new GateCache(),
     elicitations,
     { bus: null, index, log: () => undefined },

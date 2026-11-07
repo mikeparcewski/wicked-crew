@@ -19,6 +19,7 @@ import { type CoreAdapter } from '../src/core/adapter.js';
 import { operatorJudgedLabel } from '../src/core/deliver-text.js';
 import type { SessionView } from '../src/core/types.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
+import { withRunViews } from './support/run-views.js';
 
 const WHY = '27 head-only failures are load flakes in untouched files; each passes alone';
 
@@ -104,7 +105,7 @@ describe('POST /runs/:id/gate — operator_judgment reaches the engine', () => {
       }),
     };
     app = Fastify({ logger: false });
-    registerRoutes(app, mockAdapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, {
+    registerRoutes(app, withRunViews(mockAdapter as unknown as CoreAdapter), new GateCache(), new ElicitationCache(), undefined, {
       audit,
       authMode: 'off',
     });

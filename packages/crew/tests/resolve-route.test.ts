@@ -14,6 +14,7 @@ import type { HealthResponse, ResolveRunResponse, SystemSnapshot } from 'wicked-
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 const ENV_KEYS = ['WICKED_SEAT_FLOOR', 'WICKED_MEMORY_DB', 'WICKED_ESTATE_EXE', 'LOG_LEVEL'] as const;
 const saved: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
@@ -83,7 +84,7 @@ beforeAll(async () => {
     onEvent: () => () => {},
   } as unknown as CoreAdapter;
 
-  app = await createServer(adapter, {
+  app = await createServer(withRunViews(adapter), {
     auth: { mode: 'off' },
     auditPath: join(scratch, 'audit.log'),
     projectEvents: { disabled: true },

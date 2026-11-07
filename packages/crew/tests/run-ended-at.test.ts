@@ -30,6 +30,7 @@ import { CoreAdapter } from '../src/core/adapter.js';
 import type { AuditEntry, RecordedEvent, SessionView } from '../src/core/types.js';
 import type { LaunchOptions } from 'wicked-core-ts';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 function entry(runId: string, ts: number): AuditEntry {
   return { ts, action: 'run.ended', runId, actor: { id: 'daemon', kind: 'system', trust: 'admin' } } as unknown as AuditEntry;
@@ -106,7 +107,7 @@ describe('the run DTO echoes ended_at (GET /runs, GET /runs/:id) — ABSENT when
     app = Fastify({ logger: false });
     registerRoutes(
       app,
-      adapter as unknown as CoreAdapter,
+      withRunViews(adapter as unknown as CoreAdapter),
       new GateCache(),
       new ElicitationCache(),
       { bus: null, index: new MembershipIndex(), log: () => undefined },
@@ -278,7 +279,7 @@ describe('RunTimingIndex.backfillEndedFromEvents (crew#985)', () => {
     const app = Fastify({ logger: false });
     registerRoutes(
       app,
-      adapter as unknown as CoreAdapter,
+      withRunViews(adapter as unknown as CoreAdapter),
       new GateCache(),
       new ElicitationCache(),
       { bus: null, index: new MembershipIndex(), log: () => undefined },

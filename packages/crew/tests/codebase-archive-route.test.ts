@@ -18,6 +18,7 @@ import { CodebaseArchiveStore, deliverDispatchKey } from '../src/api/codebase-ar
 import { deliverPrScript } from '../src/core/deliver.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SessionView } from '../src/core/types.js';
+import { withRunViews } from './support/run-views.js';
 
 const RUN = 'c0debase-7200-4000-8000-000000000001';
 const roots: string[] = [];
@@ -63,7 +64,7 @@ async function app(views: SessionView[], store: CodebaseArchiveStore): Promise<F
     listRepos: vi.fn(async () => []),
   } as unknown as CoreAdapter;
   const a = Fastify({ logger: false });
-  registerRoutes(a, adapter, new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit: AuditLog.noop(), authMode: 'off' }, {
+  registerRoutes(a, withRunViews(adapter), new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit: AuditLog.noop(), authMode: 'off' }, {
     deliveryIndex: new DeliveryIndex(),
     codebaseArchives: store,
   });

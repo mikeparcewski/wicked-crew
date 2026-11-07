@@ -46,6 +46,7 @@ import { McpRegistry } from '../src/mcp/registry.js';
 import { McpRegistryStore } from '../src/mcp/registry-store.js';
 import type { SecretStore } from '../src/mcp/secrets.js';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 const ARTIFACT = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'mcp', 'unit-convert');
 const NPM = process.platform === 'win32' ? 'npm.cmd' : 'npm';
@@ -238,7 +239,7 @@ describe('crew#1155: the floating chat uses the installed MCP server', () => {
       chatList: async () => [],
       onboardedRepoOf: () => undefined,
     } as unknown as CoreAdapter;
-    chatApp = await createServer(adapter, {
+    chatApp = await createServer(withRunViews(adapter), {
       auth: { mode: 'off' },
       seats: { signedIn: () => true },
       auditPath: join(base, 'chat-audit.log'),

@@ -18,6 +18,7 @@ import type { AuditLog } from '../src/api/audit.js';
 import { type CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent } from '../src/core/types.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
+import { withRunViews } from './support/run-views.js';
 
 function view(id: string, status: string, unitIx: number) {
   return {
@@ -111,7 +112,7 @@ describe('POST /runs/:id/gate with ord', () => {
       }),
     };
     app = Fastify({ logger: false });
-    registerRoutes(app, mockAdapter as unknown as CoreAdapter, gateCache, new ElicitationCache(), undefined, {
+    registerRoutes(app, withRunViews(mockAdapter as unknown as CoreAdapter), gateCache, new ElicitationCache(), undefined, {
       audit,
       authMode: 'off',
     });
@@ -317,7 +318,7 @@ describe('POST /runs/:id/plan takes the decision lock and is judged by the recor
       }),
     };
     app = Fastify({ logger: false });
-    registerRoutes(app, mockAdapter as unknown as CoreAdapter, gateCache, new ElicitationCache(), undefined, {
+    registerRoutes(app, withRunViews(mockAdapter as unknown as CoreAdapter), gateCache, new ElicitationCache(), undefined, {
       audit: { record: vi.fn(() => Date.now()) } as unknown as AuditLog,
       authMode: 'off',
     });
@@ -378,7 +379,7 @@ describe('GET /runs/:id/gate: a stale frame folded during the status read is not
       confirmGate: vi.fn(async () => 'executing'),
     };
     app = Fastify({ logger: false });
-    registerRoutes(app, mockAdapter as unknown as CoreAdapter, gateCache, new ElicitationCache(), undefined, {
+    registerRoutes(app, withRunViews(mockAdapter as unknown as CoreAdapter), gateCache, new ElicitationCache(), undefined, {
       audit: { record: vi.fn(() => Date.now()) } as unknown as AuditLog,
       authMode: 'off',
     });

@@ -20,6 +20,7 @@ import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, LaunchRunInput, SessionView } from '../src/core/types.js';
 import { proposalRunId } from '../src/api/chat-proposals.js';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 const armedStateHome = crewStateHome();
 const RUN_A = '29bbbfb1-1111-4000-8000-000000000001';
@@ -122,11 +123,11 @@ describe('chat proposals (server, A2)', () => {
       stallWatchdog: { enabled: false },
       skills: { disabled: true },
     } as const;
-    stub = await createServer(makeAdapter(stubListeners), { ...opts, chatArtifactsStub: true, auth: { mode: 'off' }, auditPath: join(scratch, 'audit.log') });
+    stub = await createServer(withRunViews(makeAdapter(stubListeners)), { ...opts, chatArtifactsStub: true, auth: { mode: 'off' }, auditPath: join(scratch, 'audit.log') });
     await stub.ready();
-    authed = await createServer(makeAdapter(authedListeners), { ...opts, chatArtifactsStub: true, auth: { mode: 'required', tokensPath: tokens }, auditPath: join(scratch, 'audit-authed.log') });
+    authed = await createServer(withRunViews(makeAdapter(authedListeners)), { ...opts, chatArtifactsStub: true, auth: { mode: 'required', tokensPath: tokens }, auditPath: join(scratch, 'audit-authed.log') });
     await authed.ready();
-    prod = await createServer(makeAdapter(prodListeners), { ...opts, chatArtifactsStub: false, auth: { mode: 'off' }, auditPath: join(scratch, 'audit-prod.log') });
+    prod = await createServer(withRunViews(makeAdapter(prodListeners)), { ...opts, chatArtifactsStub: false, auth: { mode: 'off' }, auditPath: join(scratch, 'audit-prod.log') });
     await prod.ready();
     const mikes = ensureProjectInteractiveRoot('mikes', undefined, process.env, home);
     mkdirSync(join(mikes, 'coverage-deck'), { recursive: true });

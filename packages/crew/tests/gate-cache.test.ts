@@ -16,6 +16,7 @@ import { registerRoutes } from '../src/api/routes.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, SessionView } from '../src/core/types.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
+import { withRunViews } from './support/run-views.js';
 
 const RUN = 'verify-022-155143';
 
@@ -217,7 +218,7 @@ describe('GET /runs/:id/gate serves the offered choices (issue #969)', () => {
       }),
     };
     app = Fastify({ logger: false });
-    registerRoutes(app, mockAdapter as unknown as CoreAdapter, gateCache, new ElicitationCache(), undefined, {
+    registerRoutes(app, withRunViews(mockAdapter as unknown as CoreAdapter), gateCache, new ElicitationCache(), undefined, {
       audit: { record: vi.fn(() => Date.now()) } as unknown as AuditLog,
       authMode: 'off',
     });
@@ -490,7 +491,7 @@ describe('resolveOpenGate: neither a stale row nor a late frame wins a race (cre
       }),
     };
     app = Fastify({ logger: false });
-    registerRoutes(app, mockAdapter as unknown as CoreAdapter, gateCache, new ElicitationCache(), undefined, {
+    registerRoutes(app, withRunViews(mockAdapter as unknown as CoreAdapter), gateCache, new ElicitationCache(), undefined, {
       audit: { record: vi.fn(() => Date.now()) } as unknown as AuditLog,
       authMode: 'off',
     });

@@ -22,6 +22,7 @@ import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SessionView } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 /** A run view shaped enough for the reassign route's cursor resolution + seat-pool checks. */
 function view(
@@ -75,7 +76,7 @@ describe('POST /runs/:id/reassign — the manual operator lever (crew#442)', () 
     app = Fastify({ logger: false });
     registerRoutes(
       app,
-      mockAdapter,
+      withRunViews(mockAdapter),
       new GateCache(),
       new ElicitationCache(),
       undefined,
@@ -206,7 +207,7 @@ describe('POST /runs/:id/reassign — the operator note (crew#1153)', () => {
       },
     } as unknown as AuditLog;
     app = Fastify({ logger: false });
-    registerRoutes(app, mockAdapter, new GateCache(), new ElicitationCache(), undefined, { audit, authMode: 'off' });
+    registerRoutes(app, withRunViews(mockAdapter), new GateCache(), new ElicitationCache(), undefined, { audit, authMode: 'off' });
   });
 
   afterEach(async () => {

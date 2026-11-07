@@ -31,6 +31,7 @@ import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SessionView } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 const PR_URL = 'https://github.com/o/r/pull/1';
 /** The deliver phase's transcript tail on an unchanged lift: push output, then the URL twice. */
@@ -116,7 +117,7 @@ function harness(
   app = Fastify({ logger: false });
   registerRoutes(
     app,
-    adapter as unknown as CoreAdapter,
+    withRunViews(adapter as unknown as CoreAdapter),
     new GateCache(),
     new ElicitationCache(),
     { bus: null, index: new MembershipIndex(), log: () => undefined },

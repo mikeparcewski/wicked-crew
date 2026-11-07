@@ -23,6 +23,7 @@ import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent } from '../src/core/types.js';
 import { createServer } from '../src/api/server.js';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 function view(id: string, projectId: string, phases: string[]) {
   return {
@@ -71,7 +72,7 @@ function stubAdapter(): CoreAdapter {
 }
 
 async function boot(): Promise<FastifyInstance> {
-  const server = await createServer(stubAdapter(), {
+  const server = await createServer(withRunViews(stubAdapter()), {
     auth: { mode: 'off' },
     auditPath: join(scratch, 'audit.log'),
     projectEvents: { disabled: true },

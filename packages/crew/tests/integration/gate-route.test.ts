@@ -21,6 +21,7 @@ import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import type { RecordedEvent, SessionView } from '../../src/core/types.js';
 import { removeScratch } from '../setup/scratch.js';
+import { withRunViews } from '../support/run-views.js';
 
 const PARKED = 'parked-run';
 const FINISHED = 'finished-run';
@@ -60,7 +61,7 @@ beforeAll(() => {
 // hit while asserting nothing about the code path they name. Every case here starts cold, which is
 // also the only state FINDING-051 is about.
 beforeEach(async () => {
-  app = await createServer(adapter);
+  app = await createServer(withRunViews(adapter));
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();
   baseUrl = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;

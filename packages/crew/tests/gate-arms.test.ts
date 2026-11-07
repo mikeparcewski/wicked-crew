@@ -38,6 +38,7 @@ import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import type { AuditLog } from '../src/api/audit.js';
 import { ENGINE_TOO_OLD_RE, armsUnsupportedReason, type CoreAdapter } from '../src/core/adapter.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
+import { withRunViews } from './support/run-views.js';
 
 describe('the wave-3 arms fail CLOSED on an addon < 0.7.27 (review-L1-598 M1 — one rule for action/amendScope and denialGate)', () => {
   it('names the feature, the version floor and the remedy; null when the addon carries the arms', () => {
@@ -131,7 +132,7 @@ describe('POST /runs/:id/gate — the arms reach the adapter (DES-L1 PR-2)', () 
       }),
     };
     app = Fastify({ logger: false });
-    registerRoutes(app, mockAdapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, {
+    registerRoutes(app, withRunViews(mockAdapter as unknown as CoreAdapter), new GateCache(), new ElicitationCache(), undefined, {
       audit,
       authMode: 'off',
     });
