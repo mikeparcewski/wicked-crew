@@ -2952,7 +2952,8 @@ export class ChatProposals {
         reason: base.kind === 'refine'
           ? `The last change was not applied: ${reason}. Try again revises the latest version, and keeps your edits.`
           : `The last attempt ended without a draft: ${reason}. Try again fills the same document.`,
-        blocked: null,
+        // A refine whose edits cannot be read on the new head stays blocked with why (codex A5 r2).
+        blocked: fresh !== base ? fresh.blocked : null,
       };
       return this.write(chatId, { at: this.now(), turnId: failed.turnId, kind: 'proposal', proposal: retry }, instance) ? pid : null;
     });

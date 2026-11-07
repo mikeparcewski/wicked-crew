@@ -74,6 +74,7 @@ import type { DocBindingStore } from './doc-binding.js';
 import { guardRefine } from './landing-guard.js';
 import { recordLanding, type LandingRecordStore } from './landing-record.js';
 import { lineageSteps, protectedEdits, type GardenIo } from './protected-edits.js';
+import { rangeFloor, resolveInteractiveSpec } from './bridge-pool.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 import { resolveInteractiveRoot } from './bridge-root.js';
@@ -431,7 +432,9 @@ export function boundRefineProblem(
       : `The person's own edits to KEEP EXACTLY (their words, attributes, removals, additions and slide order, as they are now): ` +
         `${kept.map((k) => oneLine(k.label, 120)).join('; ')}. Before you end the turn run ` +
         `"$WICKED_GARDEN_ROOT/scripts/wicked-garden" run scripts/draft/keep_check.py check --map ${paths.map} ${paths.out}` +
-        `${spec.allow.map((id) => ` --allow ${id}`).join('')} ` +
+        // Only ids made of anchor characters reach the command (codex A5 r2: a `data-wid` is document data and must
+        // never become shell syntax); crew's own check releases every accepted id either way.
+        `${spec.allow.filter((id) => SHELL_SAFE_ID.test(id)).map((id) => ` --allow ${id}`).join('')} ` +
         `and fix the document until it prints that every edit is kept; crew runs the same check on its own copy before anything lands, and a broken edit lands nothing. `;
   return (
     `Revise the wicked-interactive document "${spec.documentId}" per the person's ask. ` +
@@ -455,6 +458,25 @@ export function bridgeVersionOf(docsRoot: string): string | null {
   } catch {
     return '';
   }
+}
+
+/** A protected-edit id that is safe to put in a command line as is. */
+const SHELL_SAFE_ID = /^[A-Za-z0-9_.:#-]{1,200}$/;
+
+/**
+ * Whether a refine on `docsRoot` lands only on the head it started from: the bridge serving it honours `expect_head`, or
+ * none serves it yet and the one the daemon would start is on a range at or past the I1 contract (an operator's override
+ * below it is not; codex A5 r2).
+ */
+export function refineCasHolds(docsRoot: string, env: NodeJS.ProcessEnv = process.env): { ok: true } | { ok: false; why: string } {
+  const bridge = bridgeVersionOf(docsRoot);
+  if (bridge !== null) {
+    return casCapable(bridge) ? { ok: true } : { ok: false, why: `the document service here (wicked-interactive ${bridge === '' ? 'of unknown version' : bridge}) cannot refuse a change made while it was being revised; restart it on 0.15 or later` };
+  }
+  const spec = resolveInteractiveSpec(env);
+  const floor = rangeFloor(spec.range);
+  if (floor === null || (floor[0] === 0 && floor[1] < 15)) return { ok: false, why: `this daemon starts wicked-interactive on ${spec.range}, which cannot refuse a change made while it was being revised; use 0.15 or later` };
+  return { ok: true };
 }
 
 /** Whether a bridge version honours `expect_head` (interactive's I1 contract, 0.15.0). */
@@ -985,6 +1007,8 @@ export async function startInteractiveChatSubscriber(
       { ...(opts.draftFloorIo !== undefined ? { floor: opts.draftFloorIo } : {}), ...(opts.gardenIo !== undefined ? { garden: opts.gardenIo } : {}) },
     );
     if (!guard.ok) return refuse(guard.reason);
+    const cas = refineCasHolds(bound.docsRoot);
+    if (!cas.ok) return refuse(cas.why);
     if (opts.bindings?.attemptOf(runId)?.attempt.outcome !== undefined) {
       log(`[interactive-chat] run ${runId}: its attempt already has an outcome — not announced`);
       return;
@@ -1021,10 +1045,8 @@ export async function startInteractiveChatSubscriber(
     if (doc.head !== spec.base) throw new Error(`${spec.artifactRef} changed since the card was drawn (now v${doc.head}); check the card again`);
     // T1 (codex A5 r1): the head's CAS is interactive's I1 contract (0.15.0). A bridge already serving this docs root
     // that is older (an adopted 0.14.x) would land over a hand edit made meanwhile: refuse rather than risk it.
-    const bridge = bridgeVersionOf(docsRoot);
-    if (bridge !== null && !casCapable(bridge)) {
-      throw new Error(`the document service here (wicked-interactive ${bridge === '' ? 'of unknown version' : bridge}) cannot refuse a change made while it was being revised; restart it on 0.15 or later`);
-    }
+    const cas = refineCasHolds(docsRoot);
+    if (!cas.ok) throw new Error(cas.why);
     // An earlier attempt's announced copy can no longer land once this one starts (a crash may have left its announce
     // on the bus): its crew-held file goes first.
     for (const a of opts.bindings?.get(spec.artifactRef)?.attempts ?? []) {
@@ -1063,8 +1085,10 @@ export async function startInteractiveChatSubscriber(
     };
     flight.heartbeat.unref?.();
     inFlight.set(spec.runId, flight);
-    opts.bindings?.markLaunching(spec.artifactRef, spec.runId);
     try {
+      opts.bindings?.markLaunching(spec.artifactRef, spec.runId);
+      // The handoff row exists before any terminal frame of this run can arrive (codex A5 r2).
+      ledger.recordLaunch(key, spec.runId);
       unitsByRun.set(spec.runId, new RunUnits());
       await adapter.launchRun({
         problem:
@@ -1082,12 +1106,16 @@ export async function startInteractiveChatSubscriber(
     } catch (err) {
       unitsByRun.delete(spec.runId);
       endFlight(spec.runId);
-      opts.bindings?.clearLaunching(spec.artifactRef, spec.runId);
+      try {
+        ledger.recordFailure(key);
+        opts.bindings?.clearLaunching(spec.artifactRef, spec.runId);
+      } catch {
+        /* the launch error below is the answer; Go again resumes the same identity */
+      }
       emitStatus({ ...docScope(spec.documentId, spec.projectId), state: 'error', message: `Crew could not start the change: ${err instanceof Error ? err.message : String(err)}. Go again on the card resumes it.` });
       throw err;
     }
     opts.bindings?.markLaunched(spec.artifactRef, spec.runId);
-    ledger.recordLaunch(key, spec.runId);
     if (spec.projectId !== undefined) opts.onRunFiled?.(spec.runId, spec.projectId);
     opts.onRunLaunched?.(spec.runId, {
       deliver: 'none',

@@ -368,6 +368,22 @@ describe('A5 r1 folds', () => {
   });
 });
 
+describe('A5 r2 folds', () => {
+  it('a hostile anchor never reaches the writer\'s command line, and a daemon on a pre-I1 range refuses', async () => {
+    const { boundRefineProblem: problem, refineCasHolds } = await import('../src/interactive/chat-events.js');
+    const p = problem({ documentId: 'deck', ask: 'x', runId: RUN, allow: ['text:p$(printf X)#11112222', ENTRY.id] }, { current: '/c', out: '/o', notes: '/n', map: '/m' }, [ENTRY]);
+    expect(p).toContain(`--allow ${ENTRY.id}`);
+    expect(p).not.toContain('$(printf');
+    const dir = mkdtempSync(join(tmpdir(), 'crew-cas-'));
+    try {
+      expect(refineCasHolds(dir, {}).ok).toBe(true);
+      expect(refineCasHolds(dir, { WICKED_INTERACTIVE_SPEC: '^0.14.1' })).toMatchObject({ ok: false, why: expect.stringContaining('0.14.1') });
+    } finally {
+      removeScratch(dir);
+    }
+  });
+});
+
 describe('A5: the refine launcher', () => {
   it('records the attempt (the person\'s allow, only ids the card showed) in the chat it was accepted in, then launches on the accepted base', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'crew-refine-l-'));

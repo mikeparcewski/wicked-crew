@@ -34,6 +34,9 @@ export interface RefineLauncherDeps {
   instanceOf(chatId: string): string | null;
   /** The launch roster of two seats, as `clisJson`; `null` when either can no longer work. */
   clisJsonFor(seats: readonly string[]): string | null;
+  /** The draft seam's fence: earlier attempts' draft folders go before this one starts, so an announce of an earlier
+   *  create still on the bus can no longer land over the refine (codex A5 r2). */
+  fence?: (documentId: string, runIds: readonly string[]) => void;
   log?: (msg: string) => void;
 }
 
@@ -94,6 +97,7 @@ export class RefineLauncher implements ProposalDispatcher {
       },
       { pid: d.pid, runId: d.identity.runId, base: target.base, allow, op: 'refine', chatId: d.chatId, chatInstance: instance },
     );
+    this.deps.fence?.(ref.doc, (this.deps.bindings.get(ref.ref)?.attempts ?? []).map((a) => a.runId).filter((id) => id !== d.identity.runId));
     this.deps.log?.(`[proposals] ${d.pid}: refine ${ref.ref} v${target.base} run ${d.identity.runId} — ${allow.length} edit(s) let change`);
     await launchBound({
       documentId: ref.doc,
