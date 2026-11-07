@@ -11,13 +11,14 @@
  *
  * Each map is a markdown file `requirements/<repo id>.<content hash>.md`, written once (never overwritten, the
  * scratch root is seat-writable) beneath the scratch root without following a link, and named by its real path in
- * the scope statement's Grounding section. The `requirements/` folder is a read root of the chat's run from launch
- * (routes `turnReadRoots`), since a repo-bound chat's seat works in the repository, not the scratch root. The statement rides every turn's instructions, so a seat always reads the name of
- * the map as it was read for that message. A map that cannot be read or written is said so; it never holds a turn.
+ * the scope statement's Grounding section (`### Requirements maps`). The `requirements/` folder is a read root of the
+ * chat's run from launch (routes `turnReadRoots`), since a repo-bound chat's seat works in the repository, not the
+ * scratch root. The statement rides every turn's instructions, so a seat always reads the name of the map as it was
+ * read for that message. A map that cannot be read or written is said so; it never holds a turn.
  */
 import { createHash } from 'node:crypto';
 import { lstatSync, realpathSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import type { ChatScope, RepoEntry } from '../core/types.js';
 import { BeneathError, createBeneath, mkdirBeneath, readBeneath } from './beneath.js';
@@ -33,8 +34,12 @@ export const REQUIREMENTS_MAP_ROWS = 300;
 export const REQUIREMENTS_MAP_BYTES = 96 * 1024;
 /** Characters of one statement, title or mismatch kept on its line. */
 const TEXT_MAX = 600;
-/** How long one repository's read may take before its map says it could not be read. */
-const READ_TIMEOUT_MS = 15_000;
+/** How long the registry lookup and every repository's read together may take before the maps not read by then say
+ *  they could not be read (codex r1: the message waits on it). */
+export const REQUIREMENTS_MAP_DEADLINE_MS = 8_000;
+/** Rows one read takes from the index: the whole map up to this, so the mismatches and the first rows come from ONE
+ *  snapshot (codex r1: two reads could straddle a rebuild). */
+const SCAN_ROWS = 50_000;
 
 /** One repository's map as the statement names it. */
 export interface RequirementsMapEntry {
@@ -43,7 +48,7 @@ export interface RequirementsMapEntry {
   /** The file: relative to the scratch root when built, the seat's absolute path once published; `null` when there
    *  is no file (`summary` says why). */
   file: string | null;
-  /** One line: "generation 2 · 100% real (4 of 4) · 2 the code does not meet · STALE (3 commits behind)". */
+  /** One line: "generation 2 · 100% real (4 of 4) · 2 the code does not meet · STALE". */
   summary: string;
 }
 
@@ -73,8 +78,9 @@ function fileStem(id: string): string {
 /** How old the code behind the map is, as the seat must say it. */
 function ageOf(page: RequirementsPage): { label: string; stale: boolean } {
   const d = page.codeDrift;
-  if (d === null) return { label: 'code age unknown (this engine does not say what code the map was built from)', stale: false };
-  const from = `built from code at ${d.builtFromCommit.slice(0, 12)}${d.builtAt !== null ? ` (${d.builtAt})` : ''}`;
+  // Unknown age is treated as STALE (codex r1): the seat checks the code before relying on a row.
+  if (d === null) return { label: 'code age unknown (this engine does not say what code the map was built from): treat the map as STALE', stale: true };
+  const from = `built from code at ${d.builtFromCommit.slice(0, 12)}${d.builtAt !== null ? ` (${line(d.builtAt, 64)})` : ''}`;
   if (d.commitsBehind === null) {
     return { label: `${from}; the checkout does not hold that commit, so how far the code has moved since is unknown: treat the map as STALE`, stale: true };
   }
@@ -107,7 +113,7 @@ export function renderRequirementsMap(repo: { id: string; name: string }, page: 
     gen !== undefined ? `generation ${gen}` : null,
     cov !== null ? `${cov.realPct}% real (${cov.real} of ${cov.behaviorBearing})` : null,
     `${page.mismatches} the code does not meet`,
-    age.stale ? 'STALE' : page.codeDrift !== null ? 'current' : 'code age unknown',
+    age.stale ? 'STALE' : 'current',
   ].filter((s): s is string => s !== null).join(' · ');
   const header = [
     `# Requirements map: ${line(repo.name, 120)} (\`${line(repo.id, 120)}\`)`,
@@ -127,124 +133,127 @@ export function renderRequirementsMap(repo: { id: string; name: string }, page: 
   ];
   const body: string[] = [];
   let bytes = Buffer.byteLength(header.join('\n'));
-  let listed = 0;
+  // One budget for both sections (codex r1): rows emitted, by key, and bytes.
+  const emitted = new Set<string>();
   let cut = false;
   const push = (lines: string[]): boolean => {
     const size = Buffer.byteLength(lines.join('\n')) + 1;
-    if (bytes + size > REQUIREMENTS_MAP_BYTES - 512) return false;
+    if (bytes + size > REQUIREMENTS_MAP_BYTES - 1024) return false;
     body.push(...lines);
     bytes += size;
     return true;
   };
+  const emit = (r: RequirementSummary): boolean => {
+    if (emitted.has(r.key)) return true;
+    if (emitted.size >= REQUIREMENTS_MAP_ROWS || !push(rowLine(r))) {
+      cut = true;
+      return false;
+    }
+    emitted.add(r.key);
+    return true;
+  };
   if (mismatched.length > 0) {
     push([`## Requirements the code does not meet (${page.mismatches})`, '']);
-    for (const r of mismatched) {
-      if (!push(rowLine(r))) {
-        cut = true;
-        break;
-      }
-    }
+    for (const r of mismatched) if (!emit(r)) break;
     push(['']);
   }
-  const listedKeys = new Set(mismatched.map((r) => r.key));
-  push([`## Requirements (first ${Math.min(page.items.length, REQUIREMENTS_MAP_ROWS)} of ${page.corpus}, in the page's order)`, '']);
-  for (const r of page.items) {
-    if (listedKeys.has(r.key)) {
-      listed += 1;
-      continue;
-    }
-    if (!push(rowLine(r))) {
-      cut = true;
-      break;
-    }
-    listed += 1;
+  if (!cut) {
+    push(['## Requirements, in the page\'s order', '']);
+    for (const r of page.items) if (!emit(r)) break;
   }
-  const left = page.corpus - listed;
-  if (left > 0 || cut) {
+  const left = page.corpus - emitted.size;
+  if (left > 0) {
     body.push(
       '',
-      `${left > 0 ? `${left} more row${left === 1 ? ' is' : 's are'} not listed here` : 'This list was cut to its size limit'}: ` +
+      `${left} more row${left === 1 ? ' is' : 's are'} not listed here (this file holds ${emitted.size} of ${page.corpus}): ` +
         "say so when it matters, and point the person at the repository's Requirements page in studio.",
     );
   }
   return { text: `${[...header, ...body].join('\n')}\n`, summary };
 }
 
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolvePromise, reject) => {
-    const t = setTimeout(() => reject(new Error(`no answer in ${Math.round(ms / 1000)} s`)), ms);
-    t.unref?.();
-    p.then(
-      (v) => {
-        clearTimeout(t);
-        resolvePromise(v);
-      },
-      (e: unknown) => {
-        clearTimeout(t);
-        reject(e instanceof Error ? e : new Error(String(e)));
-      },
-    );
-  });
-}
 
-async function buildOne(repo: RepoEntry, reader: RequirementsGraphReader): Promise<BuiltRequirementsMap> {
+async function buildOne(repo: RepoEntry, reader: RequirementsGraphReader, signal: Deadline): Promise<BuiltRequirementsMap> {
   const base = { repoId: repo.id, name: repo.name };
   try {
-    const read = withTimeout(
-      (async () => {
-        const all = await listRequirementsRead(repo, { offset: 0, limit: REQUIREMENTS_MAP_ROWS }, reader);
-        // The second read is served from the same engine read (the index is cached per content).
-        const miss = all.page !== null && all.page.mismatches > 0
-          ? await listRequirementsRead(repo, { mismatch: 'yes', offset: 0, limit: REQUIREMENTS_MAP_ROWS }, reader)
-          : null;
-        return { all, mismatched: miss?.page?.items ?? [] };
-      })(),
-      READ_TIMEOUT_MS,
-    );
-    const { all, mismatched } = await read;
+    // ONE read: the mismatches and the rows come from the same snapshot.
+    const all = await signal.race(listRequirementsRead(repo, { offset: 0, limit: SCAN_ROWS }, reader));
     if (all.page === null) {
       const so = all.coverage !== null ? ` (${all.coverage.realPct}% of its behaviours mapped so far)` : '';
       return { entry: { ...base, file: null, summary: `no requirements map yet${so}: say so, and that its Requirements page can generate one` }, data: null };
     }
+    const mismatched = all.page.items.filter((r) => r.codeMismatch !== null);
     const { text, summary } = renderRequirementsMap(repo, all.page, mismatched);
     const data = Buffer.from(text, 'utf8');
     const hash = createHash('sha256').update(data).digest('hex').slice(0, 12);
     return { entry: { ...base, file: `${REQUIREMENTS_MAP_DIR}/${fileStem(repo.id)}.${hash}.md`, summary }, data };
   } catch (err) {
-    return { entry: { ...base, file: null, summary: `its requirements map could not be read (${line(err instanceof Error ? err.message : String(err), 200)}): say so` }, data: null };
+    return { entry: { ...base, file: null, summary: unread(err) }, data: null };
   }
 }
+
+const unread = (err: unknown): string =>
+  `its requirements map could not be read (${line(err instanceof Error ? err.message : String(err), 200)}): say so`;
+
+/** One deadline for a message's maps: every await under it gives up when it passes. */
+interface Deadline {
+  race<T>(p: Promise<T>): Promise<T>;
+}
+
+function deadline(ms: number): Deadline & { clear(): void } {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`no answer in ${Math.round(ms / 1000)} s`)), ms);
+    timer.unref?.();
+  });
+  expired.catch(() => undefined);
+  return {
+    race: <T>(p: Promise<T>) => Promise.race([p, expired]),
+    clear: () => clearTimeout(timer),
+  };
+}
+
+const sameRoot = (a: string, b: string): boolean => resolve(a) === resolve(b);
 
 /**
  * Build the maps for the repositories in `scope` (at most {@link REQUIREMENTS_MAP_REPOS}), in memory. Never throws:
  * a repository whose map cannot be read gets an entry that says so. `[]` for a scope with no repositories.
  */
-export async function buildRequirementsMaps(scope: Pick<ChatScope, 'repos' | 'kind'>, deps: ChatRequirementsDeps): Promise<BuiltRequirementsMap[]> {
+export async function buildRequirementsMaps(
+  scope: Pick<ChatScope, 'repos' | 'kind'>,
+  deps: ChatRequirementsDeps,
+  ms: number = REQUIREMENTS_MAP_DEADLINE_MS,
+): Promise<BuiltRequirementsMap[]> {
   if (scope.kind === 'system' || scope.repos.length === 0) return [];
-  let registry: RepoEntry[];
+  const inScope = scope.repos.slice(0, REQUIREMENTS_MAP_REPOS);
+  const rest: BuiltRequirementsMap[] = scope.repos.slice(REQUIREMENTS_MAP_REPOS).map((r) => ({
+    entry: { repoId: r.id, name: r.name, file: null, summary: `no map handed (more than ${REQUIREMENTS_MAP_REPOS} repositories in scope): ask in a chat scoped to this repository` },
+    data: null,
+  }));
+  const signal = deadline(ms);
   try {
-    registry = await deps.listRepos();
-  } catch (err) {
-    return scope.repos.slice(0, REQUIREMENTS_MAP_REPOS).map((r) => ({
-      entry: { repoId: r.id, name: r.name, file: null, summary: `its requirements map could not be read (${line(err instanceof Error ? err.message : String(err), 200)}): say so` },
-      data: null,
-    }));
+    let registry: RepoEntry[];
+    try {
+      registry = await signal.race(deps.listRepos());
+    } catch (err) {
+      return [...inScope.map((r) => ({ entry: { repoId: r.id, name: r.name, file: null, summary: unread(err) }, data: null })), ...rest];
+    }
+    const byId = new Map(registry.map((r) => [r.id, r]));
+    const built = await Promise.all(
+      inScope.map(async (r): Promise<BuiltRequirementsMap> => {
+        const repo = byId.get(r.id);
+        if (repo === undefined) return { entry: { repoId: r.id, name: r.name, file: null, summary: 'no longer registered: no map' }, data: null };
+        // The chat reads the root it was scoped to (codex r1): a repository registered elsewhere since is not this one.
+        if (!sameRoot(repo.root_path, r.rootPath)) {
+          return { entry: { repoId: r.id, name: r.name, file: null, summary: 'registered at another folder since this chat opened: no map (start a new chat to read it)' }, data: null };
+        }
+        return buildOne(repo, deps.reader, signal);
+      }),
+    );
+    return [...built, ...rest];
+  } finally {
+    signal.clear();
   }
-  const byId = new Map(registry.map((r) => [r.id, r]));
-  const built = await Promise.all(
-    scope.repos.slice(0, REQUIREMENTS_MAP_REPOS).map(async (r): Promise<BuiltRequirementsMap> => {
-      const repo = byId.get(r.id);
-      if (repo === undefined) return { entry: { repoId: r.id, name: r.name, file: null, summary: 'no longer registered: no map' }, data: null };
-      return buildOne(repo, deps.reader);
-    }),
-  );
-  for (const r of scope.repos.slice(REQUIREMENTS_MAP_REPOS)) {
-    built.push({
-      entry: { repoId: r.id, name: r.name, file: null, summary: `no map handed (more than ${REQUIREMENTS_MAP_REPOS} repositories in scope): ask in a chat scoped to this repository` },
-      data: null,
-    });
-  }
-  return built;
 }
 
 /**

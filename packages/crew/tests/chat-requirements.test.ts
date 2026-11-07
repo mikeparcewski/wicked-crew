@@ -13,11 +13,20 @@ import { join } from 'node:path';
 import {
   buildRequirementsMaps,
   publishRequirementsMaps,
+  renderRequirementsMap,
   requirementsMapLines,
+  REQUIREMENTS_MAP_BYTES,
   REQUIREMENTS_MAP_REPOS,
+  REQUIREMENTS_MAP_ROWS,
 } from '../src/api/chat-requirements.js';
 import { chatScopeStatement } from '../src/api/chat-scope.js';
-import { forgetRequirementsReads, type EstateRequirementsRead, type RequirementsGraphReader } from '../src/api/requirements.js';
+import {
+  forgetRequirementsReads,
+  type EstateRequirementsRead,
+  type RequirementSummary,
+  type RequirementsGraphReader,
+  type RequirementsPage,
+} from '../src/api/requirements.js';
 import type { ChatScope, RepoEntry } from '../src/core/types.js';
 
 const live = { real_pct: 100, min_pct: 80, behavior_bearing: 3, real: 3, placeholders: 0, unmapped: 0, not_product: 5 };
@@ -171,5 +180,62 @@ describe('chat requirements maps (crew#1412)', () => {
     forgetRequirementsReads();
     const second = publishRequirementsMaps(scratch, await buildRequirementsMaps(scopeOf([r], scratch), deps));
     expect(second[0]!.file).toBe(first[0]!.file);
+  });
+  // --- review r1 folds ---
+
+  const row = (i: number, mismatch: string | null = null): RequirementSummary =>
+    ({ key: `d::REQ-${i}`, domain: 'd', reqId: `REQ-${i}`, title: `t${i}`, category: 'functional', statement: `rule ${i}`, status: 'active', risk: false, riskSource: null, edited: false, corroboration: null, placeholder: false, uncounted: null, codeMismatch: mismatch }) as RequirementSummary;
+  const pageOf = (items: RequirementSummary[], extra: Partial<RequirementsPage> = {}): RequirementsPage =>
+    ({ total: items.length, corpus: items.length, offset: 0, limit: items.length, items, source: 'store', orphanedOverrides: 0, coverage: null, graphBuild: null, corroboration: { validated: 0, unconfirmed: 0 }, uncounted: null, categories: { functional: items.length, configData: 0 }, codeDrift: null, minimum: null, mismatches: items.filter((r) => r.codeMismatch !== null).length, ...extra }) as RequirementsPage;
+
+  it('one row budget across both sections, and the count of rows left out is exact (codex r1)', () => {
+    const items = [...Array.from({ length: REQUIREMENTS_MAP_ROWS }, (_, i) => row(i)), row(900, 'x'), row(901, 'y')];
+    const { text } = renderRequirementsMap({ id: 'r', name: 'r' }, pageOf(items), items.filter((r) => r.codeMismatch !== null));
+    const listed = text.split('\n').filter((l) => l.startsWith('- **REQ-')).length;
+    expect(listed).toBe(REQUIREMENTS_MAP_ROWS);
+    expect(text).toContain('Code does not meet it: x');
+    expect(text).toContain(`2 more rows are not listed here (this file holds ${REQUIREMENTS_MAP_ROWS} of ${REQUIREMENTS_MAP_ROWS + 2})`);
+  });
+
+  it('an unknown code age is STALE, and a huge provenance string cannot grow the file past its limit (codex r1)', () => {
+    const unknown = renderRequirementsMap({ id: 'r', name: 'r' }, pageOf([row(1)]), []);
+    expect(unknown.summary).toContain('STALE');
+    expect(unknown.text).toContain('treat the map as STALE');
+    const drift = { builtFromCommit: 'a'.repeat(40), builtAt: `x\n${'y'.repeat(200_000)}`, basis: 'build' as const, commitsBehind: 0, headCommit: null };
+    const huge = renderRequirementsMap({ id: 'r', name: 'r' }, pageOf([row(1)], { codeDrift: drift }), []);
+    expect(Buffer.byteLength(huge.text)).toBeLessThanOrEqual(REQUIREMENTS_MAP_BYTES);
+    expect(huge.text.split('\n').some((l) => l === `${'y'.repeat(10)}`)).toBe(false);
+  });
+
+  it('reads each repository once per message: the mismatches and the rows are one snapshot (codex r1)', async () => {
+    const r = await repo();
+    let calls = 0;
+    const counting: RequirementsGraphReader = {
+      async getRequirementsGraphForRepo(id) {
+        calls += 1;
+        return engine().getRequirementsGraphForRepo(id);
+      },
+    };
+    const [m] = await buildRequirementsMaps(scopeOf([r], '/x'), { listRepos: async () => [r], reader: counting });
+    expect(calls).toBe(1);
+    expect(m!.data!.toString()).toContain('Code does not meet it: the loop starts at index 1');
+  });
+
+  it('a repository registered at another folder since the chat opened gets no map (codex r1)', async () => {
+    const r = await repo();
+    const scope = scopeOf([r], '/x');
+    const moved = { ...r, root_path: join(r.root_path, 'elsewhere') };
+    const [m] = await buildRequirementsMaps(scope, { listRepos: async () => [moved], reader: engine() });
+    expect(m!.data).toBeNull();
+    expect(m!.entry.summary).toContain('registered at another folder');
+  });
+
+  it('a registry or engine that never answers costs the message only its deadline (codex r1)', async () => {
+    const r = await repo();
+    const never = new Promise<never>(() => undefined);
+    const slowRegistry = await buildRequirementsMaps(scopeOf([r], '/x'), { listRepos: () => never, reader: engine() }, 50);
+    expect(slowRegistry[0]!.entry.summary).toContain('could not be read (no answer in');
+    const slowEngine = await buildRequirementsMaps(scopeOf([r], '/x'), { listRepos: async () => [r], reader: { getRequirementsGraphForRepo: () => never } }, 50);
+    expect(slowEngine[0]!.entry.summary).toContain('could not be read (no answer in');
   });
 });

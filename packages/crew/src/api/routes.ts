@@ -52,13 +52,20 @@ function turnReadRoots(scratchRoot: string): string[] {
   try {
     ensureRealDir(contextReadRoots(scratchRoot).open);
     ensureRealDir(contextReadRoots(scratchRoot).context);
-    // crew#1412: the requirements maps each message hands the seats (`chat-requirements.ts`).
-    ensureRealDir(join(scratchRoot, REQUIREMENTS_MAP_DIR));
   } catch {
     return [];
   }
   const real = seatPathOf(scratchRoot);
-  return [join(real, 'open'), join(real, 'context'), join(real, REQUIREMENTS_MAP_DIR)];
+  const roots = [join(real, 'open'), join(real, 'context')];
+  // crew#1412: the requirements maps each message hands the seats (`chat-requirements.ts`). On its own: a folder that
+  // cannot be made costs only the maps (they then say they could not be handed over), never the other roots.
+  try {
+    ensureRealDir(join(scratchRoot, REQUIREMENTS_MAP_DIR));
+    roots.push(join(real, REQUIREMENTS_MAP_DIR));
+  } catch {
+    // the maps' own publication reports it
+  }
+  return roots;
 }
 
 /** {@link registerRoutes}'s one reading of a run's open gate rows (see `recordedOpenGate`). */

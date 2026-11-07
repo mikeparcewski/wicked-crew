@@ -210,9 +210,10 @@ mentioned only where a daemon release depends on them.
   map (at most 8 per message) as a file in the chat's scratch root, `requirements/<repo id>.<hash>.md`. It is the
   requirements page's own read: the real share, placeholders and minimum, how old the code behind the map is (STALE
   when the checkout has moved on, or the age is unknown), every requirement the code does not meet, then the rows,
-  bounded to 300 rows and 96 KiB. The scope statement names the file and says to answer from it with REQ ids. The
-  folder is a read root of the chat's run. A map that cannot be read or written is named as such and never holds
-  the message.
+  bounded to 300 rows and 96 KiB, all from one read. The scope statement names the file and says to answer from it
+  with REQ ids. The folder is a read root of the chat's run. The maps have one 8 s deadline per message. A map that
+  cannot be read or written in time, or whose repository was registered at another folder since the chat opened,
+  is named as such and never holds the message.
 
 - **Draft epics can pass its review (F34).** The Backlog compose (`POST /projects/:id/product/compose`) authored its
   review as the catalog's `review` entry, which carries the engine's evidence floor ("the run left a change in its
