@@ -76,9 +76,34 @@ describe('getAccessibleAtlassianResources: the v2 site list (the 503 the operato
       expect(page.reason).toContain('read:me, read:account');
       expect(page.reason).not.toContain('Insufficient');
     }
+  });
+  it("Atlassian's 401 when it cannot find a token's sites names the call and read:account, not a refused credential (#285)", async () => {
     const auth = await listSourceTrackers(stub({ getAccessibleAtlassianResources: atlassianV2.authError }).pm, entry('jira', ['getAccessibleAtlassianResources']), '', {}, null);
-    expect(auth.ok === false && auth.reason).toMatch(/HTTP 401.*credential was refused/);
-    expect(auth.ok === false && auth.reason).not.toContain('accessible products');
+    expect(auth).toMatchObject({ ok: false, code: 'vendor_error' });
+    if (!auth.ok) {
+      expect(auth.reason).toContain('jira (getAccessibleAtlassianResources) answered an error (HTTP 401)');
+      expect(auth.reason).toContain('could not find the sites this API token reaches');
+      expect(auth.reason).toContain('read:account');
+      expect(auth.reason).not.toContain('credential was refused');
+      expect(auth.reason).not.toContain('accessible products');
+    }
+    // The same words on a site-scoped read (Atlassian answers them for every call) say the same.
+    const { b, p } = prep('searchJiraIssuesUsingJql', { jql: 'order by updated' });
+    const r = b.project(atlassianV2.authError, p, V2);
+    expect(r.ok === false && r.reason).toContain('read:account');
+    // Any other 401 says the sign-in reached the server and names the checks, repeating none of the vendor's words.
+    const other = readPayload({ content: [{ type: 'text', text: JSON.stringify({ error: true, message: 'Unauthorized for acme-customer-x', statusCode: 401 }) }] }, 'jira (getJiraIssue)');
+    expect(other).toMatchObject({ ok: false, code: 'vendor_error' });
+    if (!other.ok) {
+      expect(other.reason).toContain('jira (getJiraIssue) answered an error (HTTP 401)');
+      expect(other.reason).toContain('the sign-in reached it');
+      expect(other.reason).toContain('read:account');
+      expect(other.reason).not.toContain('credential was refused');
+      expect(other.reason).not.toContain('acme');
+    }
+    // The phrase only counts at the start of Atlassian's message: the same words later in it are another 401.
+    const later = readPayload({ content: [{ type: 'text', text: JSON.stringify({ error: true, message: 'x Failed to fetch accessible products', statusCode: 401 }) }] });
+    expect(later.ok === false && later.reason).not.toContain('could not find the sites');
   });
 });
 

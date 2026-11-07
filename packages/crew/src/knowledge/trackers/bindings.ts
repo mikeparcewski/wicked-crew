@@ -224,8 +224,16 @@ const SCOPES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Atlassian's fixed words when it cannot resolve the sites an API token reaches (atlassian-mcp-server#285): matched,
+ * never repeated. Its v2 server resolves them for every site-scoped call under token sign-in, whatever `cloudId` says,
+ * and a scoped token needs `read:account` for it (Atlassian's answer on #285).
+ */
+const NO_SITES = /^Failed to fetch accessible products\b/i;
+
+/**
  * What an error answer may say: its HTTP status, and the scopes the vendor says are missing (each checked to be a
- * scope name). The vendor's other words are not shown: they can echo a request.
+ * scope name), or what Atlassian's fixed "no sites" words mean. The vendor's other words are not shown: they can echo
+ * a request.
  */
 function vendorErrorReason(who: string, p: unknown): string {
   const env = isObj(p) ? p : {};
@@ -238,8 +246,10 @@ function vendorErrorReason(who: string, p: unknown): string {
   const hint =
     named.length > 0
       ? `: it says the token needs the scope${named.length === 1 ? '' : 's'} ${named.join(', ')}`
-      : status === 401
-        ? ': the credential was refused (check the account email and the API token, and that your organization allows API-token sign-in to its MCP server)'
+      : NO_SITES.test(msg.trim())
+        ? `: Atlassian could not find the sites this API token reaches, which it checks on every call. A scoped API token needs the read:account scope for that, beside its Jira scopes: create the token again with read:account and enter it again`
+        : status === 401
+        ? ': the server refused this call for the credential, although the sign-in reached it (check the token\'s scopes, for an Atlassian API token read:account and its Jira scopes; that the token belongs to the account email; and that your organization allows API-token sign-in to its MCP server)'
         : status === 403
           ? ': the credential is not allowed this (a scoped API token may lack a scope, or your organization has not allowed the tool)'
           : status === 404

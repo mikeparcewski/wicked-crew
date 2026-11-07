@@ -114,6 +114,14 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **Jira: an API token Atlassian cannot find sites for now says why (operator report 2026-11-06).** Under API-token
+  sign-in, Atlassian's MCP server resolves the sites a token reaches on every site call, and a scoped token without
+  `read:account` gets an in-band `401 "Failed to fetch accessible products"` (atlassian-mcp-server#285, Atlassian's
+  answer there). The tracker picker and a link said "the credential was refused", though the sign-in had worked. They
+  now name the call and say to create the token again with `read:account` beside its Jira scopes. Any other in-band 401
+  says the sign-in reached the server and names the checks (scopes, the account email, the organization's API-token
+  setting). Atlassian's words are matched, never repeated.
+
 - **Every run's working document is made and filled by crew, whether or not anyone views or edits it (rig run W12
   9dd4f6d1).** Before, crew made a document only for power runs; a governed run got one only when a person or plugin
   proposed an edit, so a phased run nobody edited had no document at all.

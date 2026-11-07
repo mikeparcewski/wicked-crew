@@ -133,7 +133,7 @@ function write(w: World): void {
   ];
   writeFileSync(join(mcpDir, 'registry.json'), JSON.stringify({ version: 1, servers }));
   members = w.members ?? { [P]: ['r'], [Q]: ['r'] };
-  for (const d of Object.values(logs)) for (const f of ['calls.ndjson', 'overbroad', 'body.txt', 'siteform', 'commenterror']) rmSync(join(d, f), { force: true });
+  for (const d of Object.values(logs)) for (const f of ['calls.ndjson', 'overbroad', 'body.txt', 'siteform', 'commenterror', 'nosites']) rmSync(join(d, f), { force: true });
 }
 
 const calls = (which: keyof typeof logs): Array<{ tool: string; args: Record<string, unknown> }> =>
@@ -540,6 +540,24 @@ describe('(v) only a person links or widens (control: operator trust accepted in
     expect(list.trackers.filter((t) => t.tenant === 'c1').map((t) => t.key)).toEqual(['PROJA', 'PROJB', 'PROJC', 'PROJX', 'PROJ']);
     expect(list.trackers.find((t) => t.key === 'PROJB')?.links).toHaveLength(1);
     expect(list.next).not.toBeNull();
+  });
+
+  it('a token Atlassian cannot find sites for: the picker and a link name the call and read:account, not a refused credential', async () => {
+    actor = { id: 'local', kind: 'human', trust: 'admin' };
+    writeFileSync(join(logs.jira, 'nosites'), '');
+    const list = await app.inject({ method: 'GET', url: '/api/v1/sources/jira/trackers' });
+    const link = await app.inject({ method: 'POST', url: '/api/v1/tracker-links', payload: { source: 'jira', tenant: 'c1', key: 'PROJB', target: { kind: 'project', id: P } } });
+    for (const r of [list, link]) {
+      expect(r.statusCode, r.body).toBe(503);
+      const b = r.json() as { error: string; code: string; cause: string };
+      expect(b).toMatchObject({ code: 'source_unavailable', cause: 'vendor_error' });
+      expect(b.error).toContain('jira (getAccessibleAtlassianResources) answered an error (HTTP 401)');
+      expect(b.error).toContain('read:account');
+      expect(b.error).not.toContain('credential was refused');
+      // Atlassian's own words are matched, never repeated; the credential never appears.
+      expect(b.error).not.toContain('accessible products');
+      for (const t of TOKEN_FORMS) expect(r.body).not.toContain(t);
+    }
   });
 });
 
