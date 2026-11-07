@@ -20,6 +20,8 @@ import {
   editorPluginLaunchListener,
   exportEngineConformanceEnv,
   needsBrowserRuntime,
+  managedChromium,
+  provisionOnDraftLaunch,
   provisionOnEditorPluginLaunch,
   venvPython,
 } from '../src/editors/conformance-runtime.js';
@@ -125,7 +127,83 @@ describe('conformanceProvisioner', () => {
       ['python3', '-m', 'venv', venv],
       [venvPython(venv, 'linux'), '-m', 'pip', 'install', '--disable-pip-version-check', '--quiet', `playwright==${CONFORMANCE_PLAYWRIGHT_VERSION}`],
       [venvPython(venv, 'linux'), '-m', 'playwright', 'install', 'chromium'],
+      // PLAN G12: where that Chromium is, for the draft floor's renderer (asked once).
+      [venvPython(venv, 'linux'), '-c', expect.stringContaining('chromium.executable_path')],
     ]);
+  });
+
+  it('PLAN G12: a failed Chromium query is asked again after 10 minutes, and never once the path is recorded (codex r3)', async () => {
+    const root = join(dir, 'rt-retry');
+    const venv = join(root, `venv-playwright-${CONFORMANCE_PLAYWRIGHT_VERSION}`);
+    const chromium = join(dir, 'chrome-retry');
+    writeFileSync(chromium, '');
+    let clock = 1_000_000;
+    let answer = '';
+    const queries: number[] = [];
+    const provision = conformanceProvisioner(() => root, {
+      platform: 'linux',
+      env: {},
+      now: () => clock,
+      exec: (async (_bin: string, args: string[]) => {
+        if (args[1] === 'venv') {
+          mkdirSync(join(venv, 'bin'), { recursive: true });
+          writeFileSync(venvPython(venv, 'linux'), '');
+        }
+        if (args[0] === '-c') queries.push(clock);
+        return { stdout: args[0] === '-c' ? answer : '', stderr: '' };
+      }) as never,
+    });
+    await provision(); // made; the query answers nothing
+    expect(queries).toHaveLength(1);
+    clock += 9 * 60_000;
+    await provision();
+    expect(queries).toHaveLength(1);
+    clock += 60_000;
+    answer = `${chromium}\n`;
+    await provision();
+    expect(queries).toHaveLength(2);
+    expect(managedChromium(root, {}, 'linux')).toBe(chromium);
+    clock += 60 * 60_000;
+    await provision();
+    expect(queries).toHaveLength(2);
+  });
+
+  it('PLAN G12: records the provisioned Chromium for the draft floor, and starts making it when a document run is launched', async () => {
+    const root = join(dir, 'rt-chrome');
+    const venv = join(root, `venv-playwright-${CONFORMANCE_PLAYWRIGHT_VERSION}`);
+    const chromium = join(dir, 'chrome-linux', 'chrome');
+    mkdirSync(join(dir, 'chrome-linux'), { recursive: true });
+    writeFileSync(chromium, '');
+    const provision = conformanceProvisioner(() => root, {
+      platform: 'linux',
+      env: {},
+      exec: (async (bin: string, args: string[]) => {
+        if (args[1] === 'venv') {
+          mkdirSync(join(venv, 'bin'), { recursive: true });
+          writeFileSync(venvPython(venv, 'linux'), '');
+        }
+        return { stdout: args[0] === '-c' ? `${chromium}\n` : '', stderr: '' };
+      }) as never,
+    });
+    expect(managedChromium(root, {}, 'linux')).toBeNull();
+    expect((await provision()).ok).toBe(true);
+    expect(managedChromium(root, {}, 'linux')).toBe(chromium);
+
+    let starts = 0;
+    const counted = async () => {
+      starts += 1;
+      return { ok: true as const, python: '/x' };
+    };
+    const managed = '/rt/venv/bin/python';
+    const env: NodeJS.ProcessEnv = { [ENGINE_CONFORMANCE_PYTHON_ENV]: managed };
+    expect(provisionOnDraftLaunch({ kind: 'run', status: 'handed', workflow: 'feature' }, counted, () => {}, env, managed)).toBe(false);
+    // An operator's own renderer: nothing is downloaded for the floor.
+    expect(provisionOnDraftLaunch({ kind: 'run', status: 'handed', workflow: 'interactive-draft' }, counted, () => {}, { ...env, WICKED_CHROME: '/opt/chrome' }, managed)).toBe(false);
+    // No studio dist needed: a document floor prints the document, it serves no host page.
+    expect(provisionOnDraftLaunch({ kind: 'run', status: 'handed', workflow: 'interactive-draft' }, counted, () => {}, env, managed)).toBe(true);
+    expect(provisionOnDraftLaunch({ kind: 'run', status: 'handed', workflow: 'interactive-chat' }, counted, () => {}, env, managed)).toBe(true);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(starts).toBe(2);
   });
 
   it('reuses a finished venv with no index or browser call, and rebuilds a half-made one', async () => {
@@ -134,14 +212,17 @@ describe('conformanceProvisioner', () => {
     mkdirSync(join(pinned, 'bin'), { recursive: true });
     writeFileSync(venvPython(pinned, 'linux'), '');
     const calls: string[][] = [];
+    const chromium = join(root, 'chrome');
     const exec = (async (bin: string, args: string[]) => {
       calls.push([bin, ...args]);
       // A real `venv` would create the interpreter again.
       if (args[1] === 'venv') {
         mkdirSync(join(pinned, 'bin'), { recursive: true });
         writeFileSync(venvPython(pinned, 'linux'), '');
+        writeFileSync(chromium, '');
       }
-      return { stdout: '', stderr: '' };
+      // The Chromium query answers a real path: recorded once, never asked again on reuse.
+      return { stdout: args[0] === '-c' ? `${chromium}\n` : '', stderr: '' };
     }) as never;
     const provision = conformanceProvisioner(() => root, { platform: 'linux', env: { [CONFORMANCE_PLAYWRIGHT_ENV]: '1.65.0' }, exec });
     // No marker (a venv a killed provisioning left): rebuilt from nothing, with the pin override.
@@ -150,6 +231,8 @@ describe('conformanceProvisioner', () => {
       ['python3', '-m', 'venv'],
       [venvPython(pinned, 'linux'), '-m', 'pip'],
       [venvPython(pinned, 'linux'), '-m', 'playwright'],
+      // PLAN G12: once, where its Chromium is (for the draft floor's renderer).
+      [venvPython(pinned, 'linux'), '-c', expect.stringContaining('chromium.executable_path')],
     ]);
     expect(calls[1]).toContain('playwright==1.65.0');
     expect(existsSync(join(pinned, PROVISIONED_MARKER))).toBe(true);

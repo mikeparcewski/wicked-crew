@@ -278,6 +278,7 @@ import {
 import { createDocInProcess, registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { CreateLauncher } from '../interactive/proposal-create.js';
 import type { DocBindingStore } from '../interactive/doc-binding.js';
+import type { LandingRecordStore } from '../interactive/landing-record.js';
 import type { BoundDraft } from '../interactive/draft-events.js';
 import { buildRunBrief } from './run-brief.js';
 import { readBeneath } from './beneath.js';
@@ -1288,6 +1289,9 @@ export interface RuntimeDeps {
   chatArtifactsStub?: boolean;
   /** DES-CHAT-ARTIFACTS-001 §5.2 (A3): the durable bindings of chat-made documents (`interactive/doc-binding.ts`). */
   docBindings?: DocBindingStore;
+  /** A6 / PLAN G12: per run, the floor crew measured and the writer's notes (`interactive/landing-record.ts`), served on
+   *  a document's checks read. */
+  docLandings?: LandingRecordStore;
   /** A3: the draft seam's proposal-bound launch. With {@link docBindings}, `create` is advertised and its real launcher
    *  registered; absent (no draft seam armed) = `create` stays off. */
   launchBoundDraft?: (spec: BoundDraft) => Promise<void>;
@@ -11084,6 +11088,8 @@ export function registerRoutes(
   // EP-C2: the ONE checks read of a document — the reviewers' recorded verdicts, read-only.
   registerInteractiveDocChecks(app, adapter, {
     reviewsDir: runtime.docReviewsDir ?? (() => join(crewStateHome(), 'interactive-edits', REVIEWS_DIRNAME)),
+    ...(runtime.docLandings !== undefined ? { landings: runtime.docLandings } : {}),
+    docsRoot: (projectId) => projectDocsRoot(adapter, projectSettings, projectId),
     log: (m) => app.log.warn(m),
   });
 

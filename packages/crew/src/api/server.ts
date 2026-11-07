@@ -10,7 +10,7 @@ import { DecisionLedger } from '../decisions/ledger.js';
 import type { ChatDecisionRecorder } from '../decisions/chat-recorder.js';
 import type { ConsiderationService } from '../decisions/consider.js';
 import { requestOrigin, shellCsp } from '../editors/csp.js';
-import { exportEngineConformanceEnv } from '../editors/conformance-runtime.js';
+import { conformanceRuntimeRoot, exportEngineConformanceEnv, managedChromium } from '../editors/conformance-runtime.js';
 import { launchRosterNaming, registerRoutes } from './routes.js';
 import { APPS_ACTIONS_STATE_FILENAME, AppActionStore } from '../apps/actions/store.js';
 import { AppsSourceStage } from '../apps/exec/source-stage.js';
@@ -160,6 +160,7 @@ import { PersonNotesIndex } from '../working-doc/notes-index.js';
 import { WorkingDocStore } from '../working-doc/store.js';
 import { isWorkingDoc as isWorkingDocAt } from '../interactive/chat-events.js';
 import { DocBindingStore } from '../interactive/doc-binding.js';
+import { LandingRecordStore } from '../interactive/landing-record.js';
 import { docVersionsOf, reconcileBoundAttempts, recoveredLaunchDetail } from '../interactive/proposal-create.js';
 import type { BoundOutcome } from '../interactive/draft-events.js';
 import { bridgeBackend } from '../working-doc/bridge-backend.js';
@@ -1097,6 +1098,11 @@ export async function createServer(
   // DES-CHAT-ARTIFACTS-001 §5.2 (A3): the durable binding of every chat-made document, under the registered `chats`
   // state-home entry (core's fence refuses a new top-level entry, and no worker reads the state home).
   const docBindings = new DocBindingStore(join(crewStateDir, 'chats', 'doc-bindings'));
+  // A6 / PLAN G12: per run, what crew checked on the file it announced (floor, page count, the writer's notes), under the
+  // same registered `chats` entry; the checks read serves it by the version interactive records each run on.
+  const docLandings = new LandingRecordStore(join(crewStateDir, 'chats', 'doc-landings'));
+  // G12: the floor prints the document with the operator's own renderer, else crew's provisioned Chromium when made.
+  const floorChrome = (): string | null => (process.env['WICKED_CHROME'] ?? '').trim() || managedChromium(conformanceRuntimeRoot());
   /**
    * A3 (§6.2): a proposal-bound attempt's outcome was recorded. A failure is said on the run (`run.landing_failed`, the
    * DTO's `landing_failed` and a `landingFailed` frame), releases the chat and the document (their busy checks read the
@@ -1706,6 +1712,8 @@ export async function createServer(
       bindings: docBindings,
       onBoundDocCreated: (ref) => onBoundDocCreated(ref),
       onBoundOutcome,
+      landings: docLandings,
+      draftFloorIo: { chrome: floorChrome },
       resolveDocsRoot: o.resolveDocsRoot ?? interactiveDocsRoot,
       log: (m) => app.log.warn(m),
       logError: (m) => app.log.error(m),
@@ -2757,6 +2765,7 @@ export async function createServer(
       docGrounding,
       // DES-CHAT-ARTIFACTS-001 §5.2 (A3): chat-made documents; `create` is real only when the draft seam is armed.
       docBindings,
+      docLandings,
       ...(draftSub !== null ? { launchBoundDraft: draftSub.launchBound, fenceBoundDraft: draftSub.fenceBound } : {}),
       // crew#899: a chat's checkouts are brought to their upstream (when clean) before it reads them.
       freshenCheckout: (root: string) => freshenCheckout(root),

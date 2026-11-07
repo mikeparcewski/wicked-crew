@@ -19,7 +19,7 @@
  * install, fail closed, but says what crew tried, what failed and the one command that fixes it.
  */
 
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, posix, resolve, win32 } from 'node:path';
 
@@ -34,6 +34,29 @@ export const CONFORMANCE_PLAYWRIGHT_ENV = 'WICKED_CONFORMANCE_PLAYWRIGHT';
 export const CONFORMANCE_RUNTIME_DIR_ENV = 'WICKED_CONFORMANCE_RUNTIME_DIR';
 /** Written into a venv only once every provisioning step succeeded. */
 export const PROVISIONED_MARKER = '.wicked-provisioned';
+/** (PLAN G12) Beside the marker: the path of the Chromium that venv's Playwright installed, one line. */
+export const CHROMIUM_PATH_FILE = '.wicked-chromium';
+
+/** The workflows whose documents crew's draft floor prints to measure their pages (PLAN G12). */
+export const DRAFT_RENDER_WORKFLOWS: ReadonlySet<string> = new Set(['interactive-draft', 'interactive-chat']);
+
+/**
+ * (PLAN G12) The Chromium crew provisioned for this host, as the draft floor's renderer (`WICKED_CHROME`), or `null`
+ * when the runtime is not made yet (or its browser is gone). Read from the file the provisioner writes; never spawns.
+ */
+export function managedChromium(root: string, env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string | null {
+  if (!conformanceRuntimeReady(root, env, platform)) return null;
+  try {
+    const path = readFileSync(join(conformanceVenvDir(root, env), CHROMIUM_PATH_FILE), 'utf8').trim();
+    return path !== '' && existsSync(path) ? path : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Asks the venv's Playwright where its Chromium is (printed on one line). */
+const CHROMIUM_PATH_PY =
+  'from playwright.sync_api import sync_playwright as s\np = s().start()\nprint(p.chromium.executable_path)\np.stop()';
 
 /** The OS cache directory's `wicked-crew/editor-conformance`, or the override. */
 export function conformanceRuntimeRoot(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform, home: string = homedir()): string {
@@ -163,6 +186,31 @@ export function provisionOnEditorPluginLaunch(
   return true;
 }
 
+/**
+ * (PLAN G12) When a document draft or a refine is launched, make the same runtime in the background, so crew's draft
+ * floor can PRINT the document and measure its pages ({@link managedChromium}) instead of estimating them. Nothing is
+ * installed when an operator named their own interpreter or their own `WICKED_CHROME`. A failure is logged; the floor
+ * then estimates the count and says it is unmeasured, as before.
+ */
+export function provisionOnDraftLaunch(
+  notice: { kind: string; status: string; workflow?: string },
+  provision: ConformanceProvisioner,
+  log: (m: string) => void,
+  env: NodeJS.ProcessEnv = process.env,
+  managed: string | undefined = undefined,
+): boolean {
+  if (notice.kind !== 'run' || notice.status !== 'handed' || notice.workflow === undefined || !DRAFT_RENDER_WORKFLOWS.has(notice.workflow)) return false;
+  if (managed !== undefined && (env[ENGINE_CONFORMANCE_PYTHON_ENV] ?? '') !== managed) return false;
+  if ((env['WICKED_CHROME'] ?? '').trim() !== '') return false;
+  void provision().then(
+    (r) => {
+      if (!r.ok) log(`[interactive] a document run started, but its page count stays unmeasured: ${r.error}`);
+    },
+    (err: unknown) => log(`[interactive] provisioning the document renderer failed: ${err instanceof Error ? err.message : String(err)}`),
+  );
+  return true;
+}
+
 /** Bounds on each provisioning step. */
 const VENV_TIMEOUT_MS = 120_000;
 const PIP_TIMEOUT_MS = 300_000;
@@ -190,6 +238,8 @@ function message(err: unknown): string {
 
 export interface ProvisionDeps {
   exec?: typeof execCapped;
+  /** The clock of the Chromium-path retry (tests). */
+  now?: () => number;
   env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
 }
@@ -203,15 +253,38 @@ export function conformanceProvisioner(root: () => string, deps: ProvisionDeps =
   const exec = deps.exec ?? execCapped;
   const env = deps.env ?? process.env;
   const platform = deps.platform ?? process.platform;
+  const now = deps.now ?? Date.now;
   let inFlight: Promise<Provisioned> | null = null;
+  // (PLAN G12) The Chromium path is asked for until it is recorded: a reused runtime with the path spawns nothing, and
+  // a failed query is asked again at most every 10 minutes (codex r1/r2).
+  const askedChromium = new Map<string, number>();
+  const CHROMIUM_RETRY_MS = 10 * 60_000;
   const pin = (): string => conformancePin(env);
   const run = async (): Promise<Provisioned> => {
     const dir = root();
     const venv = conformanceVenvDir(dir, env);
     const python = venvPython(venv, platform);
     const marker = join(venv, PROVISIONED_MARKER);
+    const chromiumFile = join(venv, CHROMIUM_PATH_FILE);
+    // (PLAN G12) Where Playwright put its Chromium, for the draft floor's renderer. Best-effort: without it the floor
+    // estimates the page count, as before.
+    const recordChromium = async (): Promise<void> => {
+      const last = askedChromium.get(venv);
+      if (last !== undefined && now() - last < CHROMIUM_RETRY_MS) return;
+      askedChromium.set(venv, now());
+      try {
+        const out = await exec(python, ['-c', CHROMIUM_PATH_PY], { timeout: VENV_TIMEOUT_MS, windowsHide: true, env: absoluteCacheEnv(env, platform) });
+        const path = out.stdout.trim().split('\n').pop()?.trim() ?? '';
+        if (path !== '' && existsSync(path)) writeFileSync(chromiumFile, `${path}\n`);
+      } catch {
+        /* the floor estimates instead */
+      }
+    };
     // A venv every step finished in is reused as is: no package index, no browser download.
-    if (existsSync(marker) && existsSync(python)) return { ok: true, python };
+    if (existsSync(marker) && existsSync(python)) {
+      if (!existsSync(chromiumFile)) await recordChromium();
+      return { ok: true, python };
+    }
     const fix = `pip install playwright==${pin()} && python -m playwright install chromium`;
     const refuse = (what: string): Provisioned => {
       // A half-made venv is never reused: the next install starts from nothing.
@@ -227,6 +300,7 @@ export function conformanceProvisioner(root: () => string, deps: ProvisionDeps =
       }
     };
     rmSync(venv, { recursive: true, force: true });
+    askedChromium.delete(venv);
     mkdirSync(dir, { recursive: true });
     let made: { missing: boolean; error: string } | null = { missing: true, error: 'no python interpreter found (python3 / python)' };
     for (const bin of platform === 'win32' ? ['python', 'python3'] : ['python3', 'python']) {
@@ -249,6 +323,7 @@ export function conformanceProvisioner(root: () => string, deps: ProvisionDeps =
     if (browser !== null) return refuse(browser.error);
     mkdirSync(venv, { recursive: true });
     writeFileSync(marker, `playwright==${pin()}\n`);
+    await recordChromium();
     return { ok: true, python };
   };
   return () => {
@@ -279,6 +354,7 @@ export function editorPluginLaunchListener(deps: {
   return (notice) => {
     if (notice.workflow !== undefined) {
       provisionOnEditorPluginLaunch(notice, deps.provision, deps.log, env, deps.managed);
+      provisionOnDraftLaunch(notice, deps.provision, deps.log, env, deps.managed);
       return;
     }
     if (notice.kind !== 'run' || notice.status !== 'handed' || deps.ready()) return;

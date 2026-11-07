@@ -47,6 +47,7 @@ import {
 } from '../src/interactive/draft-events.js';
 import { DocGroundingStore } from '../src/interactive/doc-grounding.js';
 import { DocBindingStore } from '../src/interactive/doc-binding.js';
+import { LandingRecordStore } from '../src/interactive/landing-record.js';
 import { buildSourcePacket } from '../src/interactive/source-packet.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, LaunchRunInput, WorkflowDef } from '../src/core/types.js';
@@ -1022,7 +1023,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
         gardenRoot: () => '/garden',
         run: async () => {
           await held; // the floor is still running
-          return { stdout: JSON.stringify({ checks: { claims: { ok: true }, contrast: { ok: true } } }), code: 0 };
+          return { stdout: JSON.stringify({ checks: { claims: { ok: true }, contrast: { ok: true }, leaks: { ok: true }, notes: { ok: true } } }), code: 0 };
         },
       },
       log: () => {},
@@ -1043,6 +1044,62 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     release!();
     await waitFor(() => sub!.ledger.get(keyOf('spike-doc'))?.emittedAt !== undefined);
     await waitFor(() => !sub!.inFlightDocs().includes('spike-doc'));
+  });
+
+  it('A6/G12: the floor requires this run\'s notes.json and run id, and what it checked is recorded by run', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    const draftDir = join(dir, 'drafts');
+    const landings = new LandingRecordStore(join(dir, 'landings'));
+    const argvs: string[] = [];
+    // A stale notes.json from an earlier run never stands in for this run's.
+    mkdirSync(join(draftDir, 'spike-doc'), { recursive: true });
+    writeFileSync(join(draftDir, 'spike-doc', 'notes.json'), '{"stale":true}', 'utf8');
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir,
+      clisJson: SEATS,
+      skillHeld: () => true,
+      landings,
+      draftFloorIo: {
+        gardenRoot: () => '/garden',
+        run: async (argv: string[]) => {
+          argvs.push(argv.join(' '));
+          return {
+            stdout: JSON.stringify({
+              checks: { claims: { ok: true }, contrast: { ok: true }, leaks: { ok: true }, notes: { ok: true }, pages: { pages: 1, verified: true } },
+            }),
+            code: 0,
+          };
+        },
+      },
+      log: () => {},
+    });
+    subs.push(sub!);
+
+    await emitDocCreated(bus, 'spike-doc', { project_id: 'proj-7', brief: 'a one-pager' });
+    await waitFor(() => engine.launches.length === 1);
+    const launch = engine.launches[0]!;
+    const notesPath = join(draftDir, 'spike-doc', 'notes.json');
+    expect(existsSync(notesPath)).toBe(false);
+    // The task names the notes file and the run id the leak scan reads.
+    expect(launch.problem).toContain(`--notes ${notesPath} --run-id ${launch.sessionId}`);
+    expect(launch.problem).toContain(`NOTES (required): write ${notesPath}`);
+    const outPath = join(draftDir, 'spike-doc', 'spike-doc-v1.html');
+    writeFileSync(outPath, '<html><body><h1>Draft</h1></body></html>', 'utf8');
+    writeFileSync(notesPath, JSON.stringify({ left_out: [{ claim: 'p95 40 ms', why: 'no record' }], sources: [], assumptions: [] }), 'utf8');
+    engine.fire({ type: 'sessionCompleted', session: launch.sessionId });
+
+    await waitFor(() => sub!.ledger.get(keyOf('spike-doc'))?.emittedAt !== undefined);
+    expect(argvs[0]).toContain(`--notes ${notesPath} --run-id ${launch.sessionId}`);
+    const rec = landings.get('proj-7/spike-doc', launch.sessionId!);
+    expect(rec?.floor).toEqual({ verdict: 'pass', pages: { count: 1, measured: true, budget: 1, exact: true }, summary: 'the draft floor met every rule on the saved document' });
+    expect(rec?.notes).toEqual({ left_out: [{ claim: 'p95 40 ms', why: 'no record' }], sources: [], assumptions: [] });
+    expect(rec?.struck).toEqual([]);
+    expect(rec?.sha256).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it('lands the draft when the floor passes, and discloses a floor that could not be re-derived', async () => {

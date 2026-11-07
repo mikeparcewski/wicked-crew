@@ -12,6 +12,22 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **Drafts keep process notes out of the document, and the checks read says what crew measured (DES-CHAT-ARTIFACTS-001
+  A6; plugins-complete G12, crew half; api-types 0.197.0).** A draft's task names `notes.json` beside the deliverable
+  (`left_out`, `sources`, `assumptions`) and the run's id; crew's draft floor passes both to garden's self-check, which
+  now also fails a document carrying how it was made (inbox paths, the run id, "self-check", "UNVERIFIED", bare `[S]`
+  markers, "I used …" narration, in text, speaker notes, attributes and comments) or a missing/invalid `notes.json`.
+  Speaker notes are a talk track: crew#1266's allowance for process notes there is withdrawn. For each run that
+  announces a document crew records, in its own state, the floor verdict, the page count (measured when a renderer
+  printed it), the file's sha256 and the writer's notes with the sources it struck. `GET
+  /projects/:id/interactive/docs/:doc/checks` gains `notes` (from the nearest ancestor version whose run recorded them,
+  `from_version` says which; `null` = none recorded) and `floor` (`source: 'floor'`, a host measurement of the file
+  that version's run announced, before interactive anchored and themed it; `null` = not measured, e.g. a version made
+  by hand). Crew keeps the newest 500 records per document. crew's conformance runtime is now also made
+  when a draft or refine is launched, and the floor prints the document with its Chromium (or the operator's
+  `WICKED_CHROME`), so the page count is measured instead of estimated. Needs wicked-garden with `leak_scan.py` and
+  `self_check.py --notes` (release garden first: an older self-check refuses the new flags and the floor reports
+  itself unavailable).
 - **Requirements: code mismatches, code age and the minimum in force (operator rulings 2026-11-06; api-types
   0.197.0).** `GET /repos/:id/requirements` items carry `codeMismatch` (the code does not meet the requirement, and
   how; the requirement still counts), the page carries `mismatches` and takes `?mismatch=yes|no`, `codeDrift`
