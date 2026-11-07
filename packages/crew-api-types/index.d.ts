@@ -15589,6 +15589,19 @@ export interface SetEditorEnabledBody {
   enabled: boolean;
 }
 
+/**
+ * `POST /editors/:id/grants` body (HUMAN-only; F37): allow or revoke one permission the editor declares.
+ * Allow writes this build's token (crew measures the version and hash) into the `EDITOR-GRANTS` ledger;
+ * revoke drops every token of that editor and permission. `mcp.session` is refused (409 `install_only`:
+ * its install consent grants it). A request carrying a governed unit's token is refused (403 `seat_token`).
+ * Answers the decided set after the write (`EditorGrantsResponse`, for `project` when given).
+ */
+export interface SetEditorGrantBody {
+  permission: EditorPermission | string;
+  allow: boolean;
+  project?: string;
+}
+
 /** One decided permission (the engine's `evaluate_editor_grants`, EP-K1). */
 export interface EditorGrant {
   permission: EditorPermission | string;

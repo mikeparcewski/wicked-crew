@@ -718,6 +718,22 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/api/v1/editors/:id/grants",
+      "requestType": "SetEditorGrantBody",
+      "responseType": "EditorGrantsResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        501,
+        502,
+        503
+      ]
+    },
+    {
       "method": "GET",
       "path": "/api/v1/gates/decided",
       "requestType": null,
