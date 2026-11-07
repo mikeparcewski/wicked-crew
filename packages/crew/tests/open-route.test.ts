@@ -16,6 +16,7 @@ import { isInsideRoot } from '../src/api/open-path.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { FastifyInstance } from 'fastify';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 const WORKDIR = '/tmp/wicked-open-test/work';
 const EXTRA_ROOT = '/tmp/wicked-open-test/extra';
@@ -71,7 +72,7 @@ describe('POST /open (crew#273)', () => {
     });
     registerRoutes(
       app,
-      mockAdapter as unknown as CoreAdapter,
+      withRunViews(mockAdapter as unknown as CoreAdapter),
       new GateCache(),
       new ElicitationCache(),
       undefined,

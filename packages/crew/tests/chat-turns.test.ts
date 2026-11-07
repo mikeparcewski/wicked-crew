@@ -23,6 +23,7 @@ import { AskPathIndex } from '../src/api/ask-paths.js';
 import { registerRoutes } from '../src/api/routes.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent } from '../src/core/types.js';
+import { withRunViews } from './support/run-views.js';
 
 describe('ChatTurnIndex', () => {
   it('begin → inFlight for the seats the send reached; a seat ends its part on chatReply / chatSessionFailed', () => {
@@ -196,7 +197,7 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
     app = Fastify({ logger: false });
     registerRoutes(
       app,
-      {
+      withRunViews({
         launchRun: async (input: Record<string, unknown>) => {
           launched.push(input);
           const n = launched.length;
@@ -228,7 +229,7 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
           cancelled.push(runId);
           return 'cancelled';
         },
-      } as unknown as CoreAdapter,
+      } as unknown as CoreAdapter),
       new GateCache(),
       new ElicitationCache(),
       undefined,

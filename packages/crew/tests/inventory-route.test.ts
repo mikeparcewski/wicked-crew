@@ -9,6 +9,7 @@ import { CoreAdapter } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
 import type { SessionView } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 let dir: string;
 let adapter: CoreAdapter;
@@ -38,7 +39,7 @@ beforeAll(async () => {
   };
   adapter.interactionRequests = async () => [];
   adapter.runEvents = async () => [];
-  app = await createServer(adapter, { auditPath: join(dir, 'audit.log') });
+  app = await createServer(withRunViews(adapter), { auditPath: join(dir, 'audit.log') });
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();
   baseUrl = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;

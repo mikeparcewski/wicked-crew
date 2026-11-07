@@ -34,6 +34,7 @@ import {
   walkthroughCheckStates,
 } from '../src/qe/walkthrough-acceptance.js';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 const RUN = 'run-w2';
 const STEP = 'walkthrough_review';
@@ -417,7 +418,7 @@ describe('GET /runs/:id/acceptance and the walkthrough view read the proof roots
     app = Fastify({ logger: false });
     registerRoutes(
       app,
-      {
+      withRunViews({
         sessionsDetail,
         workOutput,
         catalogIds,
@@ -427,7 +428,7 @@ describe('GET /runs/:id/acceptance and the walkthrough view read the proof roots
         projectMembers: vi.fn().mockResolvedValue([]),
         listConformanceClaims: vi.fn().mockResolvedValue([]),
         runEvents: vi.fn().mockResolvedValue([]),
-      } as unknown as CoreAdapter,
+      } as unknown as CoreAdapter),
       new GateCache(),
       new ElicitationCache(),
       { bus: null, index: new MembershipIndex(), log: () => undefined },

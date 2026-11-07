@@ -27,6 +27,7 @@ import type { CoreAdapter } from '../src/core/adapter.js';
 import type { Actor } from '../src/core/types.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 const HUMAN: Actor = { id: 'priya', kind: 'human', trust: 'operator' };
 const OBSERVER: Actor = { id: 'olga', kind: 'human', trust: 'observer' };
@@ -68,7 +69,7 @@ async function routeSet(runs: unknown[], repos: unknown[], store: AppStore | und
   const adapter = { sessionsDetail: vi.fn().mockResolvedValue(runs), listRepos: vi.fn().mockResolvedValue(repos) };
   const app = Fastify({ logger: false });
   registerAuthHooks(app, { mode: 'required', verifiers: [{ name: 'test', verify: async (t) => TOKENS[t] ?? null }], allowedOrigins: null });
-  registerRoutes(app, adapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit: AuditLog.noop(), authMode: 'required' }, store !== undefined ? { apps: store } : {});
+  registerRoutes(app, withRunViews(adapter as unknown as CoreAdapter), new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit: AuditLog.noop(), authMode: 'required' }, store !== undefined ? { apps: store } : {});
   await app.ready();
   return app;
 }

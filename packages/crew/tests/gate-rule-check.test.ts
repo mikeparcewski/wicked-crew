@@ -16,6 +16,7 @@ import { aggregateReceipt, worstRulePerRule } from '../src/api/delivery-assuranc
 import { rulesLabel, rulesSummaryLine } from '../src/core/deliver-text.js';
 import type { RuleVerdict, SessionView } from '../src/core/types.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
+import { withRunViews } from './support/run-views.js';
 
 const row = (ruleId: string, status: RuleVerdict['status'], reason = 'r'): RuleVerdict => ({
   ruleId,
@@ -145,7 +146,7 @@ describe('POST /runs/:id/gate — the rule answers reach the engine; a skip is a
         (req as unknown as { actor: unknown }).actor = { id: `test-${kind}`, kind, trust };
       }
     });
-    registerRoutes(app, mockAdapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, { audit, authMode: 'off' });
+    registerRoutes(app, withRunViews(mockAdapter as unknown as CoreAdapter), new GateCache(), new ElicitationCache(), undefined, { audit, authMode: 'off' });
     await app.ready();
   });
   beforeEach(() => {

@@ -33,6 +33,7 @@ import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SessionView } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 const SYSTEM_ACTOR = { id: 'daemon', kind: 'system', trust: 'admin' } as const;
 
@@ -231,7 +232,7 @@ describe('N1 — both run DTOs say the branch is on the remote', () => {
     app = Fastify({ logger: false });
     registerRoutes(
       app,
-      adapter as unknown as CoreAdapter,
+      withRunViews(adapter as unknown as CoreAdapter),
       new GateCache(),
       new ElicitationCache(),
       { bus: null, index: new MembershipIndex(), log: () => undefined },

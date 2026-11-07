@@ -48,6 +48,7 @@ import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import { DELIVER_PHASE_ID } from '../src/core/deliver.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SessionView, WorkUnit, WorkflowDef } from '../src/core/types.js';
+import { withRunViews } from './support/run-views.js';
 
 /** Every def crew ships: the built-ins plus the qe author def (`author-workflow.ts:291` executes_code). */
 const SHIPPED: WorkflowDef[] = [...BUILTIN_WORKFLOWS];
@@ -258,7 +259,7 @@ function build(
   const app = Fastify({ logger: false });
   registerRoutes(
     app,
-    adapter as unknown as CoreAdapter,
+    withRunViews(adapter as unknown as CoreAdapter),
     new GateCache(),
     new ElicitationCache(),
     { bus: null, index: new MembershipIndex(), log: () => undefined },

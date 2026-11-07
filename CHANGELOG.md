@@ -215,6 +215,16 @@ mentioned only where a daemon release depends on them.
   cannot be read or written in time, or whose repository was registered at another folder since the chat opened,
   is named as such and never holds the message.
 
+- **A request about one run no longer reads every run (F35: the daemon's JS heap ran out at 4 GB on the test rig).**
+  Studio polls `GET /runs/:id/gate` for every parked run from every open tab, and each poll folded and parsed the
+  whole store one to three times, one private copy per caller; `GET /roster/record` also re-read up to 200 run logs
+  per request. The adapter now reads the run views through one shared snapshot: one engine fold, parsed once and
+  frozen, shared by every caller until the store may have changed (an engine frame other than the live output
+  streams, an engine call that may write, or 2 s). `runView(id)` copies only the run asked for; the gate read and the
+  single-run reads (`GET /runs/:id`, `/power`, `/evidence`, `/acceptance`, `/inventory`, the unit output, and the
+  rest in the routes) use it, so they cost O(1) in the number of runs once the snapshot is read. Concurrent callers
+  share one parse (at most one fold running and one queued, as before), and a caller never takes a fold that started
+  before a change it could have seen. `GET /roster/record` is computed once per snapshot and query.
 - **Draft epics can pass its review (F34).** The Backlog compose (`POST /projects/:id/product/compose`) authored its
   review as the catalog's `review` entry, which carries the engine's evidence floor ("the run left a change in its
   worktree"). A compose run has no repository and so no worktree, and the engine fails any validator pin closed

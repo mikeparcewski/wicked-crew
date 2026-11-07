@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Fastify from 'fastify';
 import { afterAll, describe, expect, it, vi } from 'vitest';
+import { withRunViews } from './support/run-views.js';
 
 const race = vi.hoisted(() => ({ mode: 'spawn' as 'spawn' | 'running' | 'unlinked' | 'unlinked-after' | 'real' }));
 vi.mock('../src/api/run-files.js', async (importOriginal) => {
@@ -83,7 +84,7 @@ describe('GET /runs/:id/diff — the worktree vanished mid-request', () => {
       listRepos: vi.fn().mockResolvedValue([{ id: 'repo-1', name: 'repo', root_path: repo }]),
     };
     const app = Fastify({ logger: false });
-    registerRoutes(app, adapter as never, new GateCache(), new ElicitationCache());
+    registerRoutes(app, withRunViews(adapter as never), new GateCache(), new ElicitationCache());
     await app.ready();
     const res = await app.inject({ method: 'GET', url: '/api/v1/runs/run-v/diff' });
     expect(res.statusCode, res.body).toBe(200);
@@ -127,7 +128,7 @@ describe('GET /runs/:id/diff?base=merge-base — the sweep is removing the workt
       listRepos: vi.fn().mockResolvedValue([{ id: 'repo-1', name: 'repo', root_path: repo }]),
     };
     const app = Fastify({ logger: false });
-    registerRoutes(app, adapter as never, new GateCache(), new ElicitationCache());
+    registerRoutes(app, withRunViews(adapter as never), new GateCache(), new ElicitationCache());
     await app.ready();
     return { app, wt };
   };

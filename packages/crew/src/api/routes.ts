@@ -21,7 +21,7 @@ import { promises as fsp } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { videoPalette } from '../appearance/video-palette.js';
-import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanGateNoteUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, settingsFilePath } from '../core/adapter.js';
+import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanGateNoteUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, settingsFilePath, type RunViewsSnapshot } from '../core/adapter.js';
 import { codeGraphDb, codeGraphErrorStatus, repoFolderMissing, repoFolderMissingBody } from '../core/repoPaths.js';
 import type {
   ConformanceRule,
@@ -184,7 +184,7 @@ import {
 } from './governance-steering.js';
 import { atProposeGate, draftedSteeringRules, isSteeringAuthorRun, landSteeringProposal, type SteeringProposalSnapshot } from './steering-landing.js';
 import { inventoryComplete, parseInventoryClaims, type InventoryClaim } from '../core/inventory-claim.js';
-import type { RejudgeOffer, RunInventoryResponse, RunLearningsResponse, SkipQeOffer } from 'wicked-crew-api-types';
+import type { RejudgeOffer, RunInventoryResponse, RunLearningsResponse, SeatRecordResponse, SkipQeOffer } from 'wicked-crew-api-types';
 import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, FileProposalSchema, registerCaptureRoutes } from './capture.js';
 import { registerTestingRoutes } from './testing.js';
 import { registerDefaultEvalRoutes, runAndRecord, type DefaultEvalDeps } from '../evals/routes.js';
@@ -2649,6 +2649,26 @@ export function registerRoutes(
     }
   };
 
+  /** The seat records read for one views snapshot (F35), by `<days> <project>`; dropped when the snapshot changes. */
+  const seatRecords = new Map<string, Promise<SeatRecordResponse | null>>();
+  let seatRecordsOf: RunViewsSnapshot | null = null;
+  const readSeatRecord = async (snapshot: RunViewsSnapshot, days: number, project: string | undefined): Promise<SeatRecordResponse | null> => {
+    const detail = structuredClone(snapshot.views) as SessionView[];
+    await backfillEndedAt(detail);
+    const all = detail.map(decorateRun);
+    const views = project === undefined ? all : all.filter((v) => v.session.project_id === project);
+    return seatRecord(
+      views,
+      async (id) => {
+        const engine = await adapter.runEvents(id);
+        if (engine === null) return null;
+        const daemon = runtime.stallFrames?.(id) ?? [];
+        return daemon.length === 0 ? engine : [...engine, ...(daemon as unknown as RecordedEvent[])];
+      },
+      { days, now: Date.now() },
+    );
+  };
+
   // Each seat's week (studio's weekly 1:1 per agent; api-types 0.52.0): units, first pass, rework,
   // stalls, bench and cost, folded from the runs' durable event logs by `seatRecord` — nothing new
   // is stored. The daemon's remembered stall frames join the engine's, as on `/runs/:id/events`.
@@ -2673,20 +2693,24 @@ export function registerRoutes(
         return reply.code(400).send({ error: 'Invalid ?project — expected one project id' });
       }
       const project = rawProject?.trim();
-      const detail = await adapter.sessionsDetail();
-      await backfillEndedAt(detail);
-      const all = detail.map(decorateRun);
-      const views = project === undefined ? all : all.filter((v) => v.session.project_id === project);
-      const out = await seatRecord(
-        views,
-        async (id) => {
-          const engine = await adapter.runEvents(id);
-          if (engine === null) return null;
-          const daemon = runtime.stallFrames?.(id) ?? [];
-          return daemon.length === 0 ? engine : [...engine, ...(daemon as unknown as RecordedEvent[])];
-        },
-        { days, now: Date.now() },
-      );
+      // F35: one fold of the record per views snapshot and query, shared by every caller asking
+      // meanwhile — it reads up to SEAT_RECORD_RUN_CAP run logs, and studio asks from every tab.
+      const snapshot = await adapter.runViewsSnapshot();
+      if (snapshot !== seatRecordsOf) {
+        seatRecordsOf = snapshot;
+        seatRecords.clear();
+      }
+      const key = `${days} ${project ?? ''}`;
+      let read = seatRecords.get(key);
+      if (read === undefined) {
+        const started = readSeatRecord(snapshot, days, project);
+        read = started;
+        seatRecords.set(key, started);
+        started.catch(() => {
+          if (seatRecords.get(key) === started) seatRecords.delete(key);
+        });
+      }
+      const out = await read;
       if (out === null) {
         return reply.code(503).send({ error: 'Seat records are unavailable: this wicked-core build has no event-log read binding' });
       }
@@ -2714,8 +2738,7 @@ export function registerRoutes(
     try {
       let session: SessionView['session'] | undefined;
       if (runId !== undefined) {
-        const views = await adapter.sessionsDetail();
-        const view = views.find((v) => v.session.id === runId);
+        const view = await adapter.runView(runId);
         if (view === undefined) {
           return reply.code(404).send({ error: `unknown run: ${runId}` });
         }
@@ -2757,8 +2780,7 @@ export function registerRoutes(
     let session: SessionView['session'];
     let roots: string[];
     try {
-      const views = await adapter.sessionsDetail();
-      const view = views.find((v) => v.session.id === id);
+      const view = await adapter.runView(id);
       if (view === undefined) {
         await reply.code(404).send({ error: `unknown run: ${id}` });
         return null;
@@ -3899,7 +3921,7 @@ export function registerRoutes(
   proposalLaunchers.register('job', {
     find: async (identity) => (await adapter.sessions()).includes(identity.runId),
     live: async (runId) => {
-      const v = (await adapter.sessionsDetail()).find((x) => x.session.id === runId);
+      const v = await adapter.runView(runId);
       return v !== undefined && !['completed', 'cancelled', 'failed'].includes(String(v.session.status));
     },
     launch: async (d) => {
@@ -4107,12 +4129,11 @@ export function registerRoutes(
       // are one step, so a gate answered at the same moment can never be stopped by a resolve. The
       // status is read again inside the lock, right before the stop.
       const outcome = await decideExclusively(id, async (): Promise<{ code: number; body: unknown }> => {
-        const views = await adapter.sessionsDetail();
-        const run = views.find((v) => v.session.id === id);
+        const run = await adapter.runView(id);
         if (run === undefined) return { code: 404, body: { error: 'Run not found' } };
         if (b.action === 'superseded') {
           if (b.by === id) return { code: 400, body: { error: '`by` must name another run' } };
-          if (!views.some((v) => v.session.id === b.by)) return { code: 400, body: { error: `\`by\` names an unknown run: ${b.by}` } };
+          if ((await adapter.runView(b.by)) === undefined) return { code: 400, body: { error: `\`by\` names an unknown run: ${b.by}` } };
         }
         const status = run.session.status;
         if (status !== 'awaiting_human' && status !== 'failed' && status !== 'completed' && status !== 'cancelled') {
@@ -4168,8 +4189,7 @@ export function registerRoutes(
     { config: { manifest: { responseType: '{ run: SessionView }', statusCodes: [200, 404] } } },
     async (req, reply) => {
     const { id } = req.params as { id: string };
-    const views = await adapter.sessionsDetail();
-    const run = views.find((v) => v.session.id === id);
+    const run = await adapter.runView(id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
     await settleDeliveries([run]);
     await backfillEndedAt([run]);
@@ -4203,8 +4223,7 @@ export function registerRoutes(
     { config: { manifest: { responseType: 'SteeringDraftResponse', statusCodes: [200, 404, 500] } } },
     async (req, reply) => {
       const { runId } = req.params as { runId: string };
-      const views = await adapter.sessionsDetail();
-      const run = views.find((v) => v.session.id === runId);
+      const run = await adapter.runView(runId);
       if (!run) return reply.code(404).send({ error: 'Run not found' });
       if (!isSteeringAuthorRun(run)) return reply.code(404).send({ error: `run ${runId} is not a steering-author run`, code: 'not_steering_author' });
       const open = run.session.status === 'awaiting_human' ? await gateOfRecord(run, undefined) : null;
@@ -4239,8 +4258,7 @@ export function registerRoutes(
     },
     async (req, reply) => {
       const { id } = req.params as { id: string };
-      const views = await adapter.sessionsDetail();
-      const run = views.find((v) => v.session.id === id);
+      const run = await adapter.runView(id);
       if (!run) return reply.code(404).send({ error: 'Run not found' });
       if (typeof adapter.workOutput !== 'function') {
         return { runId: id, readable: false, complete: false, units: [], unreadUnits: [] } satisfies RunInventoryResponse;
@@ -4290,8 +4308,7 @@ export function registerRoutes(
     { config: { manifest: { statusCodes: [200, 404] } } },
     async (req, reply) => {
       const { id } = req.params as { id: string };
-      const views = await adapter.sessionsDetail();
-      const run = views.find((v) => v.session.id === id);
+      const run = await adapter.runView(id);
       if (!run) return reply.code(404).send({ error: 'Run not found' });
       const followUps = await evaluatorFollowUps(run);
       const reports = await seatReports(run);
@@ -4382,8 +4399,7 @@ export function registerRoutes(
       if (pushedAlready !== undefined) {
         return reply.code(409).send({ error: pushedOnlyRefusal(id, pushedAlready) });
       }
-      const views = await adapter.sessionsDetail();
-      const run = views.find((v) => v.session.id === id);
+      const run = await adapter.runView(id);
       if (!run) return reply.code(404).send({ error: 'Run not found' });
       // Freeze deliveries (idea 15): nothing pushes while the switch is on.
       if (deliveryFreeze.state().frozen) return reply.code(409).send(frozenRefusal(deliveryFreeze.state()));
@@ -5161,7 +5177,7 @@ export function registerRoutes(
    */
   const reshapeEligibility = async (runId: string): Promise<{ refusal: { code: number; body: Record<string, unknown> } } | { ord: number; planRev: number }> => {
     const after = (why: string) => ({ refusal: { code: 409, body: { code: 'reshape_after_work', error: `run ${runId} ${why}: change it with the plan's own edit, or start a new job` } } });
-    const run = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
+    const run = await adapter.runView(runId);
     if (run === undefined) return { refusal: { code: 404, body: { error: 'Run not found' } } };
     if (run.session.status !== 'awaiting_human') return after('is not waiting at its plan');
     const held = await gateOfRecord(run, undefined);
@@ -5244,7 +5260,7 @@ export function registerRoutes(
     reshapeReject,
     // DES-CATALOG-002 §2.4: a chat job's run as typed plan edits read it (held at a plan gate, its ord and revision).
     heldPlan: async (runId) => {
-      const run = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
+      const run = await adapter.runView(runId);
       if (run === undefined) return null;
       if (['completed', 'failed', 'cancelled'].includes(String(run.session.status))) return { state: 'ended' };
       if (run.session.status !== 'awaiting_human') return { state: 'running' };
@@ -5460,7 +5476,7 @@ export function registerRoutes(
         return reply.code(409).send({ error: `chat '${id}' was closed while the message was in flight; nothing was sent` });
       }
       if (path.runId !== undefined) {
-        const view = (await adapter.sessionsDetail()).find((v) => v.session.id === path.runId);
+        const view = await adapter.runView(path.runId);
         if (view === undefined) {
           askPaths.release(id, lease);
           return reply.code(409).send({ error: `chat '${id}': its path ${path.runId} is gone — open a new chat` });
@@ -5692,7 +5708,7 @@ export function registerRoutes(
       // The status read above is a pre-check that changes nothing; this read is the one that counts.
       const pathRunId = path.runId;
       const refused = await decideExclusively(pathRunId, async (): Promise<{ code: number; body: unknown } | null> => {
-        const view = (await adapter.sessionsDetail()).find((v) => v.session.id === pathRunId);
+        const view = await adapter.runView(pathRunId);
         if (view === undefined || view.session.status !== 'awaiting_human') {
           return { code: 409, body: {
             code: 'turn_in_flight',
@@ -6258,8 +6274,7 @@ export function registerRoutes(
 
   app.get(`${V}/runs/:id/units/:unitKey/output`, async (req, reply) => {
     const { id, unitKey } = req.params as { id: string; unitKey: string };
-    const views = await adapter.sessionsDetail();
-    const run = views.find((v) => v.session.id === id);
+    const run = await adapter.runView(id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
     const unit = resolveUnit(run, unitKey);
     if (!unit) {
@@ -6353,8 +6368,7 @@ export function registerRoutes(
   // per-run event log — what actually happened, not a re-derivation of it.
   app.get(`${V}/runs/:id/evidence`, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const views = await adapter.sessionsDetail();
-    const run = views.find((v) => v.session.id === id);
+    const run = await adapter.runView(id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
     const bundle = await buildEvidenceBundle(
       run,
@@ -6382,8 +6396,7 @@ export function registerRoutes(
     const q = req.query as { qeRun?: string | string[] };
     const qeRunRaw = Array.isArray(q.qeRun) ? q.qeRun[0] : q.qeRun;
     const qeRunId = qeRunRaw?.trim();
-    const views = await adapter.sessionsDetail();
-    const run = views.find((v) => v.session.id === id);
+    const run = await adapter.runView(id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
     return acceptanceViewOf(run, { ...(qeRunId !== undefined && qeRunId !== '' ? { qeRunId } : {}) });
   });
@@ -6795,8 +6808,7 @@ export function registerRoutes(
       };
     }
     return decideExclusively(id, async () => {
-      const views = await adapter.sessionsDetail();
-      const run = views.find((v) => v.session.id === id);
+      const run = await adapter.runView(id);
       if (!run) return { code: 404, body: { error: 'Run not found' } };
       if (run.session.status !== 'awaiting_human') {
         return { code: 409, body: { error: `Run is not awaiting a human gate (status: ${run.session.status})` } };
@@ -7054,7 +7066,7 @@ export function registerRoutes(
       }
       const gate = personChatGate(req, chatId, 'starts a run again');
       if ('refusal' in gate) return reply.code(gate.refusal.code).send(gate.refusal.body);
-      const run = (await adapter.sessionsDetail()).find((v) => v.session.id === id);
+      const run = await adapter.runView(id);
       if (run === undefined) return reply.code(404).send({ error: 'Run not found' });
       const pid = `${chatId}:reshape:${id}:${parsed.data.requestId}`;
       // Eligible only while the run waits at its first WORK-plan approval (a PA's scope-only rev 1 may be accepted); a
@@ -7129,8 +7141,7 @@ export function registerRoutes(
     const reason = parsed.data.reason !== undefined && parsed.data.reason !== '' ? parsed.data.reason : null;
     const spoken = parsed.data.input === 'voice';
     if (spoken && !isHumanOperator(actorOf(req))) return reply.code(403).send({ error: 'Only a person speaks: input "voice" is a person\'s stop' });
-    const views = await adapter.sessionsDetail();
-    const run = views.find((v) => v.session.id === id);
+    const run = await adapter.runView(id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
     try {
       const status = await adapter.cancelRun(id);
@@ -7147,8 +7158,7 @@ export function registerRoutes(
     const { id } = req.params as { id: string };
     // A gated resume confirms the gate: one decision at a time per run (crew#1083 round 5).
     return decideExclusively(id, async () => {
-    const views = await adapter.sessionsDetail();
-    const run = views.find((v) => v.session.id === id);
+    const run = await adapter.runView(id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
     // crew#418 A: a run stranded by a deliver-phase lift collision reads `failed` from the engine
     // but its work is complete and liftable — normalize to `completed` so the terminal branch
@@ -7310,7 +7320,7 @@ export function registerRoutes(
     return reply.code(409).send({ error: 'Refused', reason });
   };
   const powerView = async (id: string): Promise<{ runId: string } & Record<string, unknown> | null> => {
-    const view = (await adapter.sessionsDetail()).find((v) => v.session.id === id);
+    const view = await adapter.runView(id);
     if (view === undefined) return null;
     const power = (view.session as { power?: Record<string, unknown> | null }).power ?? null;
     if (power === null) {
@@ -7482,8 +7492,7 @@ export function registerRoutes(
     reassignsInFlight.add(id);
     try {
     return await decideExclusively(id, async () => {
-    const views = await adapter.sessionsDetail();
-    const run = views.find((v) => v.session.id === id);
+    const run = await adapter.runView(id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
     // Wave 6 (F-7R2-007 root fix): a run PARKED at a gate on a dead seat — the stall watchdog's
     // escalation gate, or a verdict escalation — is reassigned and approved in ONE call. crew#1058:
@@ -7621,9 +7630,12 @@ export function registerRoutes(
   // read it. A restart is routine: deploy, crash, laptop sleep.
   app.get(`${V}/runs/:id/gate`, async (req, reply) => {
     const { id } = req.params as { id: string };
+    // F35: this run's view, read once per request — never every run's (studio polls this route for
+    // every parked run, from every open tab).
+    let viewRead: Promise<SessionView | undefined> | null = null;
+    const runOf = (): Promise<SessionView | undefined> => (viewRead ??= adapter.runView(id));
     // wicked-core#850: the gate answer carries the gated unit's receipt — what assured the work it asks about.
-    const unitAt = async (ord: number): Promise<WorkUnit | undefined> =>
-      (await adapter.sessionsDetail()).find((v) => v.session.id === id)?.units?.find((u) => u.ord === ord);
+    const unitAt = async (ord: number): Promise<WorkUnit | undefined> => (await runOf())?.units?.find((u) => u.ord === ord);
     // (rejudge, api-types 0.134.0) A gate whose unit no judge could rule on says whether its judge
     // can be re-run now, and from which seats — the engine's own selection, read each time (a seat
     // signed in since the pause counts). Absent on every other gate and on an addon without the read.
@@ -7646,7 +7658,7 @@ export function registerRoutes(
     // recorded since the pause withdraws it). Absent on every other gate.
     const skipQeAt = async (gated: WorkUnit | undefined): Promise<{ skipQe?: SkipQeOffer }> => {
       if (gated === undefined || !isDeliverUnit(gated)) return {};
-      const run = (await adapter.sessionsDetail()).find((v) => v.session.id === id);
+      const run = await runOf();
       if (run === undefined) return {};
       const decision = qeDecisionOf(run);
       if (decision === null || qeDecisionBypasses(decision)) return {};
@@ -7682,8 +7694,7 @@ export function registerRoutes(
       const servable =
         recorded === null
         || (recorded.state === 'open' && cached.ord === recorded.ord)
-        || (recorded.state === 'none'
-          && (await adapter.sessionsDetail()).find((v) => v.session.id === id)?.session.status === 'awaiting_human');
+        || (recorded.state === 'none' && (await runOf())?.session.status === 'awaiting_human');
       if (servable) {
         // One read of the gated unit serves both its receipt and its re-judge offer.
         const gated = await unitAt(cached.ord);
@@ -7698,11 +7709,10 @@ export function registerRoutes(
     // common case here, since studio polls this route for runs that are merely finished.
     //
     // Reading status first is therefore CHEAPER than not reading it, the opposite of what the first
-    // cut of this assumed: it trades one `sessionsDetail()` for replaying an entire event history,
+    // cut of this assumed: it trades one read of the run's view for replaying an entire event history,
     // and it was that skipped check which made a completed run answer 503 on any build without the
     // binding (CI caught it) — an error where the honest, knowable answer was "no gate".
-    const views = await adapter.sessionsDetail();
-    const run = views.find((v) => v.session.id === id);
+    const run = await runOf();
     if (!run) return reply.code(404).send({ error: 'Run not found' });
     if (run.session.status !== 'awaiting_human') {
       return reply.code(404).send({ error: 'No open gate for this run' });
@@ -8518,7 +8528,7 @@ export function registerRoutes(
       roster: rosterWithStanding,
       timeoutMs: DETECT_TIMEOUT_MS,
       outputOf: async (runId) => {
-        const view = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
+        const view = await adapter.runView(runId);
         const unit = view?.units.find((u) => u.ord === 1) ?? view?.units[0];
         return view !== undefined && unit !== undefined ? adapter.workOutput(coreUnitId(runId, unit)) : null;
       },
@@ -8536,7 +8546,7 @@ export function registerRoutes(
       return { rev: served.rev, status, available: (card, option) => status(card, option) === 'available', detectShadowed };
     },
     costOf: async (runId) => {
-      const view = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
+      const view = await adapter.runView(runId);
       return view === undefined ? null : runCostFromEvents(view, (await adapter.runEvents(runId)) as Array<Record<string, unknown>>);
     },
     audit: (row) => audit.record('workflow.detect', { id: row.actor, kind: 'human', trust: 'operator' }, { ...(row.runId !== null ? { runId: row.runId } : {}), detail: { ...row } }),
@@ -10533,7 +10543,7 @@ export function registerRoutes(
     ...(runtime.dataGate !== undefined ? { pm: runtime.dataGate.pm } : {}),
     ...(runtime.trackerAddresses !== undefined ? { addresses: runtime.trackerAddresses } : {}),
     runScope: async (runId) => {
-      const run = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
+      const run = await adapter.runView(runId);
       if (run === undefined) return null;
       const projectId = projects.index.projectOf(runId) ?? (await adapter.memberProjects('crew.run', runId).catch(() => []))[0] ?? null;
       return { projectId, repoId: run.session.repo_ref ?? null };

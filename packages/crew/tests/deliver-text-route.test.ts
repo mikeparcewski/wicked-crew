@@ -16,6 +16,7 @@ import { AuditLog } from '../src/api/audit.js';
 import { parseFramedDeliverText } from '../src/core/deliver-text.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { PhaseDef, SessionView, WorkflowDef, WorkUnit } from '../src/core/types.js';
+import { withRunViews } from './support/run-views.js';
 
 const RUN_ID = 'd74e4e8f-bbc9-4697-8c30-181bae005217';
 
@@ -95,7 +96,7 @@ async function buildApp(
   const app = Fastify({ logger: false });
   registerRoutes(
     app,
-    mockAdapter,
+    withRunViews(mockAdapter),
     new GateCache(),
     new ElicitationCache(),
     { bus: null, index: new MembershipIndex(), log: () => undefined },

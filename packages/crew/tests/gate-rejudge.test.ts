@@ -13,6 +13,7 @@ import type { AuditLog } from '../src/api/audit.js';
 import { type CoreAdapter, type RejudgeReadiness } from '../src/core/adapter.js';
 import type { CoreEvent } from '../src/core/types.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
+import { withRunViews } from './support/run-views.js';
 
 const PROMPT =
   'Unit 4 could not be judged — no eligible judge seat remained: agent judge could not run — every eligible judge seat failed: pi (no_seat_image). ' +
@@ -58,7 +59,7 @@ describe('GET /runs/:id/gate — the re-judge offer', () => {
       }),
     };
     app = Fastify({ logger: false });
-    registerRoutes(app, mockAdapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, {
+    registerRoutes(app, withRunViews(mockAdapter as unknown as CoreAdapter), new GateCache(), new ElicitationCache(), undefined, {
       audit: { record: vi.fn(() => Date.now()) } as unknown as AuditLog,
       authMode: 'off',
     });
@@ -123,7 +124,7 @@ describe('GET /runs/:id/gate — the offer rides a cached gate too', () => {
       rejudgeReadiness: vi.fn(async () => READY),
     };
     app = Fastify({ logger: false });
-    registerRoutes(app, mockAdapter as unknown as CoreAdapter, gateCache, new ElicitationCache(), undefined, {
+    registerRoutes(app, withRunViews(mockAdapter as unknown as CoreAdapter), gateCache, new ElicitationCache(), undefined, {
       audit: { record: vi.fn(() => Date.now()) } as unknown as AuditLog,
       authMode: 'off',
     });
@@ -159,7 +160,7 @@ describe('POST /runs/:id/gate — `rejudge` reaches the engine, which may refuse
       }),
     };
     app = Fastify({ logger: false });
-    registerRoutes(app, mockAdapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, {
+    registerRoutes(app, withRunViews(mockAdapter as unknown as CoreAdapter), new GateCache(), new ElicitationCache(), undefined, {
       audit: { record: vi.fn(() => Date.now()) } as unknown as AuditLog,
       authMode: 'off',
     });

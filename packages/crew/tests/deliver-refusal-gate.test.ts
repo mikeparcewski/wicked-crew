@@ -34,6 +34,7 @@ import type { CoreAdapter } from '../src/core/adapter.js';
 import type { RuntimeDeps } from '../src/api/routes.js';
 import type { CoreEvent, SessionView, WorkUnit } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
+import { withRunViews } from './support/run-views.js';
 
 const RUN_ID = 'b7d2c3e4-1111-4222-8333-444455556666';
 const DELIVER_ORD = 5;
@@ -167,7 +168,7 @@ function buildApp(views: SessionView[], gateCache: GateCache, runEvents: CoreEve
   };
   registerRoutes(
     app,
-    adapter,
+    withRunViews(adapter),
     gateCache,
     new ElicitationCache(),
     { bus: null, index: new MembershipIndex(), log: () => undefined },

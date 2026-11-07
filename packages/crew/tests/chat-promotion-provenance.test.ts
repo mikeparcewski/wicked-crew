@@ -26,6 +26,7 @@ import type { CoreAdapter } from '../src/core/adapter.js';
 import type { ChatScope, SessionView } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 function view(id: string): SessionView {
   return {
@@ -82,7 +83,7 @@ describe('crew#641 item 5 — chat-promotion provenance is absent when the chat 
     });
     registerRoutes(
       app,
-      mockAdapter as unknown as CoreAdapter,
+      withRunViews(mockAdapter as unknown as CoreAdapter),
       new GateCache(),
       new ElicitationCache(),
       { bus: null, index: new MembershipIndex(), log: () => undefined },
@@ -190,7 +191,7 @@ describe('crew#655 — chat-promotion provenance on the path that carries a valu
     });
     registerRoutes(
       app,
-      mockAdapter as unknown as CoreAdapter,
+      withRunViews(mockAdapter as unknown as CoreAdapter),
       new GateCache(),
       new ElicitationCache(),
       { bus: null, index: new MembershipIndex(), log: () => undefined },

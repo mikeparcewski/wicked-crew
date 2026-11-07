@@ -17,6 +17,7 @@ import { AuditLog } from '../src/api/audit.js';
 import { removeScratch } from './setup/scratch.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SessionView } from '../src/core/types.js';
+import { withRunViews } from './support/run-views.js';
 
 const KEPT = 'run-kept';
 const TRIED = 'run-tried';
@@ -67,7 +68,7 @@ async function build(audit: AuditLog, hydrate: boolean): Promise<FastifyInstance
   const app = Fastify({ logger: false });
   registerRoutes(
     app,
-    adapter,
+    withRunViews(adapter),
     new GateCache(),
     new ElicitationCache(),
     { bus: null, index: new MembershipIndex(), log: () => undefined },

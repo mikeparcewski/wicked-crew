@@ -18,6 +18,7 @@ import { CoreAdapter } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
 import type { RunTeamResponse, SessionView, TeamLedger } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 const json = (body: unknown): RequestInit => ({
   method: 'POST',
@@ -31,7 +32,7 @@ async function boot(name: string, busDbPath?: string) {
   // The bus file the engine publishes on (the adapter's WICKED_BUS_DB), without handing the
   // shadowed engine a bus.
   if (busDbPath !== undefined) Object.defineProperty(adapter, 'busDbPath', { value: busDbPath });
-  const app = await createServer(adapter, {
+  const app = await createServer(withRunViews(adapter), {
     auditPath: join(dir, 'audit.log'),
     projectEvents: { disabled: true },
     interactiveWsRelay: { disabled: true },

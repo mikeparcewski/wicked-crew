@@ -43,6 +43,7 @@ import { buildGroups, sessionsById } from '../src/campaigns/rollup.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SessionView } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
+import { withRunViews } from './support/run-views.js';
 
 type MockAdapter = {
   sessionsDetail: Mock;
@@ -105,7 +106,7 @@ function build(
   const app = Fastify({ logger: false });
   registerRoutes(
     app,
-    adapter as unknown as CoreAdapter,
+    withRunViews(adapter as unknown as CoreAdapter),
     new GateCache(),
     new ElicitationCache(),
     { bus: null, index: new MembershipIndex(), log: () => undefined },

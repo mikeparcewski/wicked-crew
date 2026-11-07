@@ -13,6 +13,7 @@ import { RunTimingIndex } from '../src/api/run-timing-index.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { Actor } from '../src/core/types.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
+import { withRunViews } from './support/run-views.js';
 
 function view(id: string, status: string, unitIx: number) {
   return {
@@ -60,7 +61,7 @@ describe('Lane C routes', () => {
     app.addHook('onRequest', async (req) => {
       (req as unknown as { actor: Actor }).actor = actor;
     });
-    registerRoutes(app, mockAdapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, { audit, authMode: 'off' }, { runTimingIndex: timing });
+    registerRoutes(app, withRunViews(mockAdapter as unknown as CoreAdapter), new GateCache(), new ElicitationCache(), undefined, { audit, authMode: 'off' }, { runTimingIndex: timing });
     await app.ready();
   });
   beforeEach(() => {

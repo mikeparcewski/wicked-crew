@@ -26,6 +26,7 @@ import type { CoreAdapter } from '../src/core/adapter.js';
 import type { LaunchRunInput, SessionView } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 type MockAdapter = {
   sessionsDetail: Mock;
@@ -76,7 +77,7 @@ function buildApp(
   });
   registerRoutes(
     app,
-    mockAdapter as unknown as CoreAdapter,
+    withRunViews(mockAdapter as unknown as CoreAdapter),
     new GateCache(),
     new ElicitationCache(),
     { bus: null, index, log: () => undefined },

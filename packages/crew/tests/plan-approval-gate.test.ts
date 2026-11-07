@@ -22,6 +22,7 @@ import type { LaunchOptions } from 'wicked-core-ts';
 import type { SessionView, WorkUnit } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
 import { baseSkillOff } from './setup/base-skill-off.js';
+import { withRunViews } from './support/run-views.js';
 
 const ENGINE_HAS_PLAN_GATE = engineSupportsPlanLaunch();
 /** (crew#1139) The linked addon lands a plan approval's note (`Core.supportsPlanGateNote`). */
@@ -41,7 +42,7 @@ const json = (body: unknown): RequestInit => ({
 async function boot(name: string) {
   const dir = mkdtempSync(join(tmpdir(), `${name}-`));
   const adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
-  const app = await createServer(adapter, { auditPath: join(dir, 'audit.log') });
+  const app = await createServer(withRunViews(adapter), { auditPath: join(dir, 'audit.log') });
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();
   const baseUrl = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;

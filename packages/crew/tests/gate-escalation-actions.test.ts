@@ -17,6 +17,7 @@ import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import type { AuditLog } from '../src/api/audit.js';
 import { type CoreAdapter } from '../src/core/adapter.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
+import { withRunViews } from './support/run-views.js';
 
 describe('GateSchema — the escalation arms', () => {
   it.each(ESCALATION_ACTIONS)('`%s` with approve: true and nothing else parses', (action) => {
@@ -105,7 +106,7 @@ describe('POST /runs/:id/gate — the escalation arms reach the engine', () => {
       }),
     };
     app = Fastify({ logger: false });
-    registerRoutes(app, mockAdapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, {
+    registerRoutes(app, withRunViews(mockAdapter as unknown as CoreAdapter), new GateCache(), new ElicitationCache(), undefined, {
       audit,
       authMode: 'off',
     });

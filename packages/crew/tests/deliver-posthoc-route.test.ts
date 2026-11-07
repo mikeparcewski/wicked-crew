@@ -38,6 +38,7 @@ import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SessionView } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 const RUN_ID = '83052f0b-96a8-4a99-ad2a-c84b75111ff0';
 
@@ -174,7 +175,7 @@ function buildApp(views: SessionView[], env: Record<string, string>): App {
   });
   registerRoutes(
     app,
-    mockAdapter,
+    withRunViews(mockAdapter),
     new GateCache(),
     new ElicitationCache(),
     { bus: null, index: new MembershipIndex(), log: () => undefined },
@@ -390,7 +391,7 @@ describe('POST /runs/:id/deliver — post-hoc delivery, driven for real (crew#39
     const app = Fastify({ logger: false });
     registerRoutes(
       app,
-      mockAdapter,
+      withRunViews(mockAdapter),
       new GateCache(),
       new ElicitationCache(),
       { bus: null, index: new MembershipIndex(), log: () => undefined },
@@ -427,7 +428,7 @@ describe('POST /runs/:id/deliver — the post-hoc delivery carries the origin it
     const app = Fastify({ logger: false });
     registerRoutes(
       app,
-      mockAdapter,
+      withRunViews(mockAdapter),
       new GateCache(),
       new ElicitationCache(),
       { bus: null, index: new MembershipIndex(), log: () => undefined },
@@ -517,7 +518,7 @@ describe('POST /runs/:id/deliver — a stranded REVISION re-pushes onto the PR b
     });
     registerRoutes(
       app,
-      mockAdapter,
+      withRunViews(mockAdapter),
       new GateCache(),
       new ElicitationCache(),
       { bus: null, index: new MembershipIndex(), log: () => undefined },

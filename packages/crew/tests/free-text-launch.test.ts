@@ -18,6 +18,7 @@ import { MembershipIndex } from '../src/projects/membership-index.js';
 import { AuditLog } from '../src/api/audit.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { LaunchRunInput, SessionView } from '../src/core/types.js';
+import { withRunViews } from './support/run-views.js';
 
 function run(id: string, opts: { kind: 'free_text' | 'workflow'; status?: string; repo?: string | null; roots?: string[] }): SessionView {
   return {
@@ -47,7 +48,7 @@ describe('a launch with no workflow says what it ran, and a run that could chang
     app = Fastify({ logger: false });
     registerRoutes(
       app,
-      {
+      withRunViews({
         launchRun,
         sessionsDetail,
         sessions: vi.fn().mockResolvedValue([]),
@@ -56,7 +57,7 @@ describe('a launch with no workflow says what it ran, and a run that could chang
         projectMembers: vi.fn().mockResolvedValue([]),
         projectMemberAttach: vi.fn(),
         projectMemberDetach: vi.fn(),
-      } as unknown as CoreAdapter,
+      } as unknown as CoreAdapter),
       new GateCache(),
       new ElicitationCache(),
       { bus: null, index: new MembershipIndex(), log: () => undefined },

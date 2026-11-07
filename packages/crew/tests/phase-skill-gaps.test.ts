@@ -39,6 +39,7 @@ import { RunSkillGapIndex } from '../src/skills/phase-skill-gaps.js';
 import { SkillsRuntime } from '../src/skills/runtime.js';
 import { removeScratch } from './setup/scratch.js';
 import { FIXTURE_PLUGIN, scaffold, type Scaffold } from './support/skills-fixture.js';
+import { withRunViews } from './support/run-views.js';
 
 const savedSnapshotEnv = process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
 const savedBaseSkillEnv = process.env[BASE_SKILL_REF_ENGINE_ENV];
@@ -79,7 +80,7 @@ function routes(runtime: RuntimeDeps, adapter: Partial<Record<string, unknown>> 
   const app = Fastify({ logger: false });
   registerRoutes(
     app,
-    { ping: async () => 'pong', ...adapter } as unknown as CoreAdapter,
+    withRunViews({ ping: async () => 'pong', ...adapter } as unknown as CoreAdapter),
     new GateCache(),
     new ElicitationCache(),
     { bus: null, index: new MembershipIndex(), log: () => undefined },
@@ -172,7 +173,7 @@ describe('the daemon wiring (createServer): the interactive seams arm no skill g
     const core = (a as unknown as { core: { launchRun: (o: { sessionId?: string }) => Promise<string> } }).core;
     core.launchRun = async (o) => o.sessionId ?? 'x';
     const auditPath = join(dir, 'audit.log');
-    const app = await createServer(a, {
+    const app = await createServer(withRunViews(a), {
       auth: { mode: 'off' },
       auditPath,
       projectEvents: { disabled: true },

@@ -12,6 +12,7 @@ import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { AuditLog } from '../src/api/audit.js';
 import { type CoreAdapter } from '../src/core/adapter.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
+import { withRunViews } from './support/run-views.js';
 
 function view(id: string, status: string, unitIx: number, workflowId = 'wf-x') {
   return {
@@ -66,7 +67,7 @@ describe('POST /runs/:id/reassign on an awaiting_human run (F-7R2-007)', () => {
       }),
     };
     app = Fastify({ logger: false });
-    registerRoutes(app, mockAdapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, {
+    registerRoutes(app, withRunViews(mockAdapter as unknown as CoreAdapter), new GateCache(), new ElicitationCache(), undefined, {
       audit,
       authMode: 'off',
     });
@@ -195,7 +196,7 @@ describe('POST /runs/:id/reassign on a gate: the engine refuses before anything 
       }),
     };
     app = Fastify({ logger: false });
-    registerRoutes(app, mockAdapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, {
+    registerRoutes(app, withRunViews(mockAdapter as unknown as CoreAdapter), new GateCache(), new ElicitationCache(), undefined, {
       audit: { record: vi.fn((action: string) => { recorded.push(action); return Date.now(); }) } as unknown as AuditLog,
       authMode: 'off',
     });

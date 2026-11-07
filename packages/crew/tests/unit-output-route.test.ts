@@ -86,7 +86,7 @@ function buildApp(mockAdapter: MockAdapter): FastifyInstance {
   const app = Fastify({ logger: false });
   registerRoutes(
     app,
-    mockAdapter as unknown as CoreAdapter,
+    withRunViews(mockAdapter as unknown as CoreAdapter),
     new GateCache(),
     new ElicitationCache(),
   );
@@ -258,6 +258,7 @@ describe('GET /runs/:id/units/:unitKey/output', () => {
 // imported at the top of the file; the aliased re-import here was redundant (#217 review).
 import { API_PREFIX } from '../src/api/routes.js';
 import { outputUnavailableReason } from '../src/api/unit-output.js';
+import { withRunViews } from './support/run-views.js';
 describe('evidence URL matches the registered route prefix (FINDING-006/#215)', () => {
   it('names /api/v1/runs/:id/evidence, not a bare /runs path', () => {
     const msg = outputUnavailableReason({

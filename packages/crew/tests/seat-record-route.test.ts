@@ -19,6 +19,7 @@ import { MembershipIndex } from '../src/projects/membership-index.js';
 import { foldRunIntoSeats, seatRecord, SEAT_RECORD_RUN_CAP } from '../src/api/seat-record.js';
 import type { RecordedEvent, SeatRecord, SessionView } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 const NOW = Date.now();
 const HOUR = 3_600_000;
@@ -143,7 +144,7 @@ describe('GET /api/v1/roster/record', () => {
       sessionsDetail: async () => [structuredClone(RUN_A), structuredClone(RUN_B)],
       runEvents: async (id: string) => (!binding ? null : id === 'run-a' ? EVENTS_A : EVENTS_B),
     } as unknown as CoreAdapter;
-    app = await createServer(adapter, {
+    app = await createServer(withRunViews(adapter), {
       auth: { mode: 'off' },
       auditPath: join(scratch, 'audit.log'),
       projectEvents: { disabled: true },
@@ -231,7 +232,7 @@ describe('GET /api/v1/roster/record?project= folds only that project\'s runs', (
       runEvents: async (id: string) => (id === 'run-a' ? EVENTS_A : EVENTS_P),
     } as unknown as CoreAdapter;
     const app = Fastify({ logger: false });
-    registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), { bus: null, index, log: () => undefined }, { audit: AuditLog.noop(), authMode: 'off' });
+    registerRoutes(app, withRunViews(adapter), new GateCache(), new ElicitationCache(), { bus: null, index, log: () => undefined }, { audit: AuditLog.noop(), authMode: 'off' });
     await app.ready();
     const res = await app.inject({ method: 'GET', url: '/api/v1/roster/record?days=7&project=proj_p' });
     expect(res.statusCode).toBe(200);

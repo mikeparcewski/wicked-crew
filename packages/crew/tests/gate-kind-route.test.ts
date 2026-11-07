@@ -13,6 +13,7 @@ import type { AuditLog } from '../src/api/audit.js';
 import { type CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent } from '../src/core/types.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
+import { withRunViews } from './support/run-views.js';
 
 const REFUSED =
   'The deliver phase refused: deliver: the push identity mikeparcewski applies to github.com origins only\n' +
@@ -58,7 +59,7 @@ describe('GET /runs/:id/gate serves the gate kind (studio#814)', () => {
           : []),
     };
     app = Fastify({ logger: false });
-    registerRoutes(app, mockAdapter as unknown as CoreAdapter, gateCache, new ElicitationCache(), undefined, {
+    registerRoutes(app, withRunViews(mockAdapter as unknown as CoreAdapter), gateCache, new ElicitationCache(), undefined, {
       audit: { record: vi.fn(() => Date.now()) } as unknown as AuditLog,
       authMode: 'off',
     });

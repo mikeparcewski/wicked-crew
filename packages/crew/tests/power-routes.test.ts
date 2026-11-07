@@ -12,6 +12,7 @@ import { GateCache } from '../src/api/gate-cache.js';
 import { registerRoutes } from '../src/api/routes.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
+import { withRunViews } from './support/run-views.js';
 
 /** The engine's bus domain (spelled apart so the checkout-policy guard does not read it as a path). */
 const CORE_DOMAIN = ['wicked', 'core'].join('-');
@@ -78,7 +79,7 @@ async function harness(opts: { supports?: boolean; bus?: unknown } = {}): Promis
   });
   registerRoutes(
     app,
-    adapter as unknown as CoreAdapter,
+    withRunViews(adapter as unknown as CoreAdapter),
     new GateCache(),
     new ElicitationCache(),
     { bus: null, index: new MembershipIndex(), log: () => undefined },

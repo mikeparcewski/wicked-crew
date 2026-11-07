@@ -26,6 +26,7 @@ import { type CoreAdapter } from '../src/core/adapter.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import { CREW_RUN_ID_FIELD, readStampedVerdicts, runQeLedgerRoot } from '../src/qe/ledger.js';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 const DELIVER_ORD = 3;
 const REQUIRED = {
@@ -115,7 +116,7 @@ beforeAll(async () => {
   };
   const audit = { record: vi.fn(() => Date.now()), readAll: vi.fn(async () => []) } as unknown as AuditLog;
   app = Fastify({ logger: false });
-  registerRoutes(app, mockAdapter as unknown as CoreAdapter, gateCache, new ElicitationCache(), undefined, { audit, authMode: 'off' }, {
+  registerRoutes(app, withRunViews(mockAdapter as unknown as CoreAdapter), gateCache, new ElicitationCache(), undefined, { audit, authMode: 'off' }, {
     worktreeExists: () => true,
     deliverExec: async () => ({ status: 0, output: '' }),
   });

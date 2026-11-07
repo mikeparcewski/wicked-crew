@@ -27,6 +27,7 @@ import { type CoreAdapter } from '../src/core/adapter.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import { qeAttemptsFromEvents } from '../src/qe/acceptance.js';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 const DELIVER_ORD = 3;
 const QE_ORD = 2;
@@ -163,7 +164,7 @@ beforeAll(async () => {
       (req as unknown as { actor: unknown }).actor = { id: `test-${kind}`, kind, trust };
     }
   });
-  registerRoutes(app, mockAdapter as unknown as CoreAdapter, gateCache, new ElicitationCache(), undefined, { audit, authMode: 'off' }, {
+  registerRoutes(app, withRunViews(mockAdapter as unknown as CoreAdapter), gateCache, new ElicitationCache(), undefined, { audit, authMode: 'off' }, {
     worktreeExists: () => true,
     deliverExec: async () => ({ status: 0, output: '' }),
   });

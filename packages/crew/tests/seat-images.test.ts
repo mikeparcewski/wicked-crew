@@ -21,6 +21,7 @@ import {
 } from '../src/api/seat-images.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
+import { withRunViews } from './support/run-views.js';
 
 function status(over: Partial<SeatImageStatus> = {}, seats: Partial<Record<string, Partial<SeatImageStatus['seats'][number]>>> = {}): SeatImageStatus {
   return {
@@ -290,7 +291,7 @@ describe('POST /system/seat-images/rebuild', () => {
     const adapter = { sessionsDetail: async () => [], sessions: async () => [], listRepos: async () => [], getSettings: async () => ({}) };
     registerRoutes(
       app,
-      adapter as unknown as CoreAdapter,
+      withRunViews(adapter as unknown as CoreAdapter),
       new GateCache(),
       new ElicitationCache(),
       { bus: null, index: new MembershipIndex(), log: () => undefined },
