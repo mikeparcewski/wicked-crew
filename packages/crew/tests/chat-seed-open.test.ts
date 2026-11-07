@@ -83,8 +83,13 @@ describe('a seeded chat open makes its proposal the first time (F36)', () => {
   });
 
   // Studio's body for a `/migrate` pick in a new chat (no seats named, no scope).
-  const seededOpen = (requestId: string) =>
-    app.inject({ method: 'POST', url: '/api/v1/chats', payload: { seed: { card: 'migrate', source: 'pick' }, requestId, accepts: ['job'] } });
+  const seededOpen = (requestId: string, seed: Record<string, unknown> = { card: 'migrate', source: 'pick' }) =>
+    app.inject({ method: 'POST', url: '/api/v1/chats', payload: { seed, requestId, accepts: ['job'] } });
+  const proposalPids = async (chatId: string): Promise<string[]> => {
+    const read = await app.inject({ method: 'GET', url: `/api/v1/chats/${chatId}/messages` });
+    expect(read.statusCode, read.body).toBe(200);
+    return (read.json() as ChatMessagesResponse).messages.filter((r) => r.kind === 'proposal').map((r) => (r as { proposal: { pid: string } }).proposal.pid);
+  };
 
   it('a first seeded open with a fresh request id answers 201 with the chat and its proposal', async () => {
     const opened = await seededOpen(randomUUID());
@@ -96,10 +101,7 @@ describe('a seeded chat open makes its proposal the first time (F36)', () => {
     // The chat exists and holds the proposal.
     const chat = await app.inject({ method: 'GET', url: `/api/v1/chats/${body.chatId}` });
     expect(chat.statusCode, chat.body).toBe(200);
-    const read = await app.inject({ method: 'GET', url: `/api/v1/chats/${body.chatId}/messages` });
-    expect(read.statusCode, read.body).toBe(200);
-    const records = (read.json() as ChatMessagesResponse).messages;
-    expect(records.filter((r) => r.kind === 'proposal').map((r) => (r as { proposal: { pid: string } }).proposal.pid)).toEqual([body.proposal!.proposal.pid]);
+    expect(await proposalPids(body.chatId)).toEqual([body.proposal!.proposal.pid]);
   });
 
   it('a retry with the same request id is adopted: the same chat and the same proposal, nothing opened again', async () => {
@@ -112,6 +114,36 @@ describe('a seeded chat open makes its proposal the first time (F36)', () => {
     const adopted = again.json() as OpenBody;
     expect(adopted.adopted).toBe(true);
     expect(adopted.chatId).toBe(made.chatId);
+    expect(adopted.seats).toEqual([]);
     expect(adopted.proposal?.proposal.pid).toBe(made.proposal!.proposal.pid);
+    // Nothing was made again: the chat still holds exactly the one proposal record.
+    expect(await proposalPids(made.chatId)).toEqual([made.proposal!.proposal.pid]);
+  });
+
+  it('a typed command with words (Requirements -> "Generate it") makes its proposal the first time too', async () => {
+    const opened = await seededOpen(randomUUID(), { card: 'migrate', source: 'command', words: 'upgrade node to version 22 everywhere' });
+    expect(opened.statusCode, opened.body).toBe(201);
+    const body = opened.json() as OpenBody;
+    expect(body.proposal?.proposal.shape?.card, opened.body).toBe('migrate');
+    expect(body.proposal?.proposal.shape?.source).toBe('command');
+    expect(await proposalPids(body.chatId)).toEqual([body.proposal!.proposal.pid]);
+  });
+
+  it('a retry after the chat was closed is adopted from its kept history: nothing reopened, no second proposal', async () => {
+    const requestId = randomUUID();
+    const first = await seededOpen(requestId);
+    expect(first.statusCode, first.body).toBe(201);
+    const made = first.json() as OpenBody;
+    const closed = await app.inject({ method: 'POST', url: `/api/v1/chats/${made.chatId}/close` });
+    expect(closed.statusCode, closed.body).toBe(200);
+    const again = await seededOpen(requestId);
+    expect(again.statusCode, again.body).toBe(200);
+    const adopted = again.json() as OpenBody & { scope: unknown };
+    expect(adopted.adopted).toBe(true);
+    expect(adopted.chatId).toBe(made.chatId);
+    expect(adopted.seats).toEqual([]);
+    expect(adopted.scope).toBeNull();
+    expect(adopted.proposal?.proposal.pid).toBe(made.proposal!.proposal.pid);
+    expect(await proposalPids(made.chatId)).toEqual([made.proposal!.proposal.pid]);
   });
 });
