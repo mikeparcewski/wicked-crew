@@ -725,7 +725,7 @@ export function registerInteractiveProxy(app: FastifyInstance, adapter: CoreAdap
       // other request stays socket-to-socket transport.
       const pathDoc = pathDocumentId(req.method, target);
       if (pathDoc !== null && isWorkingDoc(root, pathDoc)) {
-        deps.log?.(`interactive ${req.method} on ${pathDoc} (project ${projectId}) refused before the bridge: it is a run's working document`);
+        deps.log?.(`interactive ${req.method} on ${pathDoc} (project ${projectId}) refused before the bridge: it is a run's context document`);
         return reply.code(403).send({ code: 'working_doc', document_id: pathDoc, error: WORKING_DOC_REFUSED_MESSAGE });
       }
       let create: PreparedCreate | null = null;
@@ -755,7 +755,7 @@ export function registerInteractiveProxy(app: FastifyInstance, adapter: CoreAdap
         // export request): crew writes it, from the run's block, and nothing about it launches a run.
         const target_doc = eventDocumentId(raw);
         if (target_doc !== null && isWorkingDoc(root, target_doc)) {
-          deps.log?.(`interactive event on ${target_doc} (project ${projectId}) refused before the bridge: it is a run's working document`);
+          deps.log?.(`interactive event on ${target_doc} (project ${projectId}) refused before the bridge: it is a run's context document`);
           return reply.code(403).send({ code: 'working_doc', document_id: target_doc, error: WORKING_DOC_REFUSED_MESSAGE });
         }
         const ask = askOf(raw);

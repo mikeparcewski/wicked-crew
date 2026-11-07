@@ -793,7 +793,7 @@ export async function startInteractiveReviewSubscriber(
     // Spike 3: a run's working document is never reviewed by a governed run.
     if (opts.isWorkingDoc?.(request.projectId, request.documentId) === true) {
       await emitStatus({ ...scope, state: 'error', message: WORKING_DOC_REFUSED_MESSAGE });
-      log(`[interactive-review] ${request.documentId} is a run's working document — no review run is launched (spike 3)`);
+      log(`[interactive-review] ${request.documentId} is a run's context document — no review run is launched (spike 3)`);
       return;
     }
     const key = reviewHandoffKey(request.documentId, request.version, request.reviewers, request.projectId);

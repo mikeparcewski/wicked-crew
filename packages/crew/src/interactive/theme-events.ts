@@ -584,7 +584,7 @@ export async function startInteractiveThemeSubscriber(
     // Spike 3: a run's working document is never themed by a governed run.
     if (opts.isWorkingDoc?.(learned.projectId, learned.documentId) === true) {
       await emitStatus({ ...docScope(learned.documentId, learned.projectId), state: 'error', message: WORKING_DOC_REFUSED_MESSAGE });
-      log(`[interactive-theme] ${learned.documentId} is a run's working document — no theme run is launched (spike 3)`);
+      log(`[interactive-theme] ${learned.documentId} is a run's context document — no theme run is launched (spike 3)`);
       return;
     }
     const key = themeHandoffKey(learned.documentId, learned.ts);

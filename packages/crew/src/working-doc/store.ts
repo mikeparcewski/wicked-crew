@@ -1,5 +1,6 @@
 /**
- * The working document's binding and trail (program DES-POWER-MODE §8.3, §9; spike 3).
+ * The run's context document (the working document; wire and file names keep `working-doc`): its binding and trail
+ * (program DES-POWER-MODE §8.3, §9; spike 3).
  *
  * ONE file, `<state home>/daemon-working-docs.json`, under the `daemon-` prefix the state-home fence already
  * classifies (as `daemon-editors.json`). Per run: the wicked-interactive document it is bound to (project + doc
@@ -87,7 +88,41 @@ export interface WorkingDocRecord {
     /** (xreview r6) Crew's own Decisions lines once THIS write lands: installed when it is confirmed. */
     ownedDecisions?: string[];
   } | null;
+  /** (context-doc-switch) The engine's CONTEXT BLOCK for the run, as crew last fed it (`setRunContext`). */
+  context?: ContextRecord;
 }
+
+/** Who saw the block: one seat the engine built a prompt for with it (`runContextDelivered`). */
+export interface ContextRecipient { recipient: string; cli: string; ord: number }
+
+/** What crew last sent the engine as the run's context block, and what the engine said. */
+export interface ContextRecord {
+  /** The block version the engine keeps in force (a clear included), from the engine's answers to crew's own sets: the
+   *  highest acknowledged, never moved back. */
+  inForce: number | null;
+  /** The highest version crew has asked the engine to hold (recorded before asking: an answer may be lost). */
+  attempted: number | null;
+  /** The signature of the last block crew sent (sections, texts, authors): an unchanged block is not sent again. */
+  sig: string | null;
+  /** The version of the last block crew sent. */
+  sentVersion: number | null;
+  /** The person's sections in the block in force (empty: none, or cleared). */
+  sections: SectionId[];
+  /** The sections crew cut to the caps (each says so in its text, and the document's thread says so). */
+  cut: SectionId[];
+  /** When the block in force was accepted. */
+  at: number | null;
+  /** The last send that failed: its version, why, and whether a block that was in force was withdrawn because of it. */
+  error: { version: number; reason: string; at: number; cleared: boolean } | null;
+  /** A set is owed (no answer, a failed clear): retried, and sent with the run's next version of any section. */
+  retry?: boolean;
+  /** The seats the engine handed version `seenVersion` to (newest version only; at most {@link CONTEXT_SEEN_MAX}). */
+  seenVersion: number | null;
+  seenBy: ContextRecipient[];
+}
+
+/** Most recipients kept for one version. */
+export const CONTEXT_SEEN_MAX = 24;
 
 interface FileShape { version: 1; runs: Record<string, WorkingDocRecord> }
 

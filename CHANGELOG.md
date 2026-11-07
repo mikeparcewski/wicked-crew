@@ -28,6 +28,20 @@ mentioned only where a daemon release depends on them.
   nothing and offers Try again on the new head. Every failure releases the chat and the document with the reason.
   Edit-seam and chat-seam landings now send `run_id`, so a run's version is never read as a person's edit. Needs
   wicked-garden with `keep_check.py`.
+- **The run's working document is now its context document, and the name is true (operator ruling 2026-11-06; needs
+  wicked-core-ts with `Core.supportsRunContext`, core#1325; api-types 0.198.0).** When the engine keeps a per-run context
+  block, crew sets it from the person's own Goal, Approach and Constraints (each section whose latest write is a
+  person's; crew's seeded Goal, a plan's or an agent's Approach and every plugin line never go in) after every version
+  that touches them, and once per live document at daemon start. The engine hands it to every agent the run spawns
+  (workers, gate and rule judges, QE, councils). Caps are visible: 1,500 characters a section and 4,000 in all, cut at a
+  word boundary with the text saying where, and the document names the cut sections. A block the engine refuses
+  (too long once framed) is said on the document with the engine's reason, and the earlier block is withdrawn, so no
+  words the person replaced stay in force; it is never clipped silently. No standing note is re-sent once the engine
+  holds the block; Next still goes to the next step once. `GET /runs/:id/working-doc` gains `context` (version in
+  force, sections, cut, the last refusal, and "seen by": the seats the engine handed it to, from
+  `runContextDelivered`). New documents are titled "Context document: …" and crew's texts say "context document";
+  existing documents keep their title, and the wire names (`/working-doc`, `WorkingDoc*`) are unchanged. Without the
+  engine block nothing changes (the standing-note bridge).
 - **Drafts keep process notes out of the document, and the checks read says what crew measured (DES-CHAT-ARTIFACTS-001
   A6; plugins-complete G12, crew half; api-types 0.197.0).** A draft's task names `notes.json` beside the deliverable
   (`left_out`, `sources`, `assumptions`) and the run's id; crew's draft floor passes both to garden's self-check, which

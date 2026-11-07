@@ -702,7 +702,7 @@ export async function startInteractiveEditSubscriber(
         state: 'error',
         message: WORKING_DOC_REFUSED_MESSAGE,
       });
-      log(`[interactive-edit] ${handoff.documentId} is a run's working document — no edit run is launched (spike 3)`);
+      log(`[interactive-edit] ${handoff.documentId} is a run's context document — no edit run is launched (spike 3)`);
       return;
     }
     if (head !== null && head.kind === 'demo') {

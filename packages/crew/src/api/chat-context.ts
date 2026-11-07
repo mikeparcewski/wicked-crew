@@ -70,7 +70,7 @@ const BRIEF_INLINE_MAX = 12 * 1024;
 /** Turn ids offered to the seat. */
 const RECENT_TURNS = 10;
 /** Interactive's manifest kinds crew names; anything else is "document". */
-const KIND_WORDS: Record<string, string> = { doc: 'document', source: 'document', demo: 'demo video', 'phase-report': 'working document' };
+const KIND_WORDS: Record<string, string> = { doc: 'document', source: 'document', demo: 'demo video', 'phase-report': 'context document' };
 const STYLE_WORDS: Record<string, string> = { ppt: 'slides', web: 'web page', doc: 'document', brochure: 'brochure' };
 
 /** The strict wire schema of `ChatMessageBody.context` (api-types 0.169.0). */

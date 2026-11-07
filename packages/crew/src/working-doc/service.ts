@@ -1,24 +1,32 @@
 /**
- * THE WORKING DOCUMENT AND STEERING FROM IT (program DES-POWER-MODE §8.3, §9; spike 3).
+ * THE CONTEXT DOCUMENT AND STEERING FROM IT (program DES-POWER-MODE §8.3, §9; spike 3). Called the working document
+ * before the engine kept a context block; the wire and code names (`/working-doc`, `WorkingDoc*`) are unchanged.
  *
- *  - Each run may have ONE working document: a wicked-interactive document (kind `phase-report`) in the run's
+ *  - Each run may have ONE context document: a wicked-interactive document (kind `phase-report`) in the run's
  *    project, bound by crew (`store.ts`). Versions are interactive's: write-once, parent-linked, each batch with
  *    its `author`. A section is rewritten with one deterministic `content-edit`: no model, never a governed run.
  *  - Attribution is crew's to decide. A person's edit (`author: 'operator'`) is accepted only from a HUMAN actor and
  *    is recorded as theirs, with the plugin that hosted it named as the surface. A plugin's own generated lines
  *    (`author: 'plugin'`) are recorded as `plugin:<id>@<version>` and may touch only the plugin's own section.
  *    Nothing a plugin writes is ever recorded as a person's, and a plugin's lines never steer.
- *  - STEERING. A person's version becomes ONE note for the run, sent through the operator's existing back-channel
+ *  - THE CONTEXT BLOCK (context-doc-switch, core#1325). When the engine keeps one (`supportsRunContext` +
+ *    `setRunContext`), the person's CURRENT Goal, Approach and Constraints (each section whose latest write is a
+ *    person's, capped visibly) are set as the run's block after every version that touches them and once per live
+ *    document at daemon start; the engine hands it to every seat the run spawns (workers, judges, rule judges, QE,
+ *    councils). Never clipped silently: a cut section says so in its text and on the view (`context.cut`); a refused
+ *    block's reason is on the view (`context.error`, which studio shows with the document) and the engine's block is
+ *    cleared; an unanswered set is retried.
+ *    Next still goes to the next step once, as a note.
+ *  - STEERING NOTES. A person's version becomes ONE note for the run, sent through the operator's existing back-channel
  *    (`injectWorkerMessage`, the `POST /runs/:id/inject` path): queued by the engine, it rides the next step's
  *    prompt as an operator context block, and `workerMessageInjected` says which step picked it up.
- *    The person's CURRENT Goal, Approach and Constraints (each section whose latest version is a person's) are ONE
- *    STANDING steer, re-sent before every later worker step until a later edit replaces it (operator ruling 2026-11-06:
- *    the bridge until the engine keeps a per-run context block, `SteerEngine.supportsRunContext`; then only Constraints
- *    stands here and crew feeds the block). Next goes to the next step once. Decisions and Open questions are recorded,
- *    not sent.
- *  - DOCUMENT TEXT HAS NO POWER OVER GATES. This module calls `injectWorkerMessage` and nothing else on the engine:
- *    no gate answer, no plan edit, no intent amendment, no rigor change. A note says in its first line that it
- *    adds to the step's brief and changes no gate, check or review. (Tested: `tests/working-doc.test.ts`.)
+ *    Without the engine's block (the bridge, operator ruling 2026-11-06), the person's CURRENT Goal, Approach and
+ *    Constraints are ONE STANDING steer, re-sent before every later worker step until a later edit replaces it. Next
+ *    goes to the next step once. Decisions and Open questions are recorded, not sent.
+ *  - DOCUMENT TEXT HAS NO POWER OVER GATES. Its only engine writes are `injectWorkerMessage` and `setRunContext`
+ *    (it also reads `supportsRunContext`): no gate answer, no plan edit, no intent amendment, no rigor change. A note says in its first
+ *    line that it adds to the step's brief and changes no gate, check or review; the block's framing is the engine's
+ *    and says the same. (Tested: `tests/working-doc.test.ts`.)
  */
 
 import { randomUUID } from 'node:crypto';
@@ -29,7 +37,7 @@ import {
   PLUGIN_SECTIONS, SECTION_LABELS, SECTION_MAX_CHARS, SECTION_STEER, anchorOf, changedSections, encodeSectionText, initialHtml, isSectionId,
   sectionsOf, type SectionId,
 } from './sections.js';
-import type { DocAuthor, SteerRecord, TrailEntry, WorkingDocRecord, WorkingDocStore } from './store.js';
+import { CONTEXT_SEEN_MAX, type ContextRecipient, type ContextRecord, type DocAuthor, type SteerRecord, type TrailEntry, type WorkingDocRecord, type WorkingDocStore } from './store.js';
 import {
   LEGACY_GENERATED_DECISION, LINE_EVENTS, PHASE_REPORT_AUTHOR, docLines, foldLines, isGenerated, planApproach, planSettled, reconcileSection, type PersonNote,
 } from './event-lines.js';
@@ -48,20 +56,74 @@ export interface DocBackend {
     Promise<{ version: number; parent: number } | { headMoved: true; head: number }>;
 }
 
-/** The ONLY engine call steering makes (and one read of what the engine can do). */
+/** The run's context block as crew hands it to the engine (core `run_context::RunContext`, whole-block replace). */
+export interface RunContextBlock {
+  /** The document version the block was read from. */
+  version: number;
+  /** Only a person's sections, in order; `[]` clears the block. */
+  sections: Array<{ id: SectionId; text: string; author: { kind: 'human'; id: string }; version: number }>;
+  set_by: { kind: 'human' | 'system'; id: string };
+}
+
+/** The engine calls steering makes (and one read of what the engine can do). Nothing here answers a gate. */
 export interface SteerEngine {
   injectWorkerMessage(runId: string, message: string, target: string): Promise<string>;
   /** (core lane context-block-core) The engine keeps a per-run context block it hands every seat it spawns. Absent or
    *  false: crew's STANDING CONTEXT NOTE carries the person's Goal, Approach and Constraints to every later worker step
-   *  instead (the bridge). True: the note retires itself (crew feeds the block; until then only Constraints stands). */
+   *  instead (the bridge). True (with {@link setRunContext}): crew feeds the block and the note retires itself. */
   supportsRunContext?(): boolean;
+  /** (core#1325) Replace the run's context block whole. Rejects `bad_request:` (refused whole, never clipped),
+   *  `not_found:` or `conflict:` (the run has ended). An older or equal version is a no-op (`accepted: false`). */
+  setRunContext?(runId: string, ctx: RunContextBlock): Promise<{ version: number; accepted: boolean }>;
 }
 
-/** The sections a person's context is made of (what every later step hears, the bridge to the engine's block). */
+/** The sections a person's context is made of (what every agent of the run hears). */
 export const CONTEXT_SECTIONS: readonly SectionId[] = ['goal', 'approach', 'constraints'];
-/** Most characters of one section, and of all of them, a standing context note carries (DESIGN §8 caps). */
+/** Most characters of one section, and of all of them, the context carries (DESIGN §8 caps; the engine refuses more). */
 export const CONTEXT_SECTION_MAX = 1_500;
 export const CONTEXT_MAX = 4_000;
+/** How long crew waits for the engine to answer a set before it records the set as unanswered. */
+export const CONTEXT_SET_TIMEOUT_MS = 10_000;
+
+/** A person's text in the shape the engine takes it: line breaks as LF, and the invisible characters it refuses (a
+ *  control character from a paste, a Unicode line separator) as LF or dropped. Nothing visible is changed. */
+export function contextText(text: string): string {
+  return text
+    .replace(/\r\n?|[\u2028\u2029\v\f]/gu, '\n')
+    .replace(/[\u0000-\u0008\u000e-\u001f\u007f-\u009f]/gu, '')
+    .trim();
+}
+
+/** The person's sections under the caps: each at most {@link CONTEXT_SECTION_MAX}, all of them at most
+ *  {@link CONTEXT_MAX} (short sections keep all of theirs, the long ones share the rest). A cut section ends saying where
+ *  it was cut, and is named in `cut` so the document's thread says so too: never a silent clip. */
+export function capBlock<T extends { id: SectionId; text: string }>(sections: readonly T[]): { sections: T[]; cut: SectionId[] } {
+  const len = sections.map((s) => Math.min(s.text.length, CONTEXT_SECTION_MAX));
+  let cap = CONTEXT_SECTION_MAX;
+  while (cap > 1 && len.reduce((a, l) => a + Math.min(l, cap), 0) > CONTEXT_MAX) cap -= 1;
+  const cut: SectionId[] = [];
+  const out = sections.map((s) => {
+    const text = capContext(s.text, cap);
+    if (text !== s.text.trim()) cut.push(s.id);
+    return { ...s, text };
+  });
+  return { sections: out, cut };
+}
+
+/** The seats the engine names in `runContextDelivered` (core `run_context`). */
+export const CONTEXT_RECIPIENTS: ReadonlySet<string> = new Set(['unit', 'judge', 'triage', 'council', 'team_member', 'qe', 'team_review', 'send_back']);
+
+const EMPTY_SIG = '[]';
+/** What a block says (sections, their versions, authors and texts): an unchanged block is not sent again. */
+function contextSig(b: RunContextBlock): string {
+  return JSON.stringify(b.sections.map((x) => [x.id, x.version, x.author.id, x.text]));
+}
+
+/** An author id as the seats read it (`local` is the operator); an id the engine would refuse reads "a person". */
+export function contextAuthorId(id: string): string {
+  if (id === 'local') return 'the operator';
+  return id.trim() === '' || id.length > 200 || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(id) ? 'a person' : id;
+}
 
 /** A person's section cut to `max` characters at a word boundary, saying so. */
 export function capContext(text: string, max: number): string {
@@ -70,7 +132,9 @@ export function capContext(text: string, max: number): string {
   const tail = ` … (cut at ${max.toLocaleString('en-US')} characters)`;
   const room = Math.max(1, max - tail.length);
   let end = room;
-  const space = t.lastIndexOf(' ', room);
+  // The last whitespace of any kind (a line break, a tab) at or before the cut; an unbroken run is cut where it is.
+  let space = room;
+  while (space > 0 && !/\s/u.test(t[space] ?? '')) space -= 1;
   if (space > room / 2) end = space;
   const last = t.charCodeAt(end - 1);
   if (last >= 0xd800 && last <= 0xdbff) end -= 1;
@@ -87,8 +151,8 @@ export function contextLines(context: ReadonlyArray<{ id: SectionId; text: strin
  *  one-step section (Next) or cleared section with it. */
 export function contextSteerNote(version: number, by: string, context: ReadonlyArray<{ id: SectionId; text: string }>, once: Array<{ id: SectionId; text: string }>, marker: string): string {
   const head = context.length > 0
-    ? `Operator steering from the job's working document (version ${version}, by ${by}). The person's ${context.map((c) => SECTION_LABELS[c.id]).join(', ')} below are standing: follow them in this step and every later one until they are replaced. They replace any standing context or constraint from an earlier version.`
-    : `Operator steering from the job's working document (version ${version}, by ${by}).`;
+    ? `Operator steering from the job's context document (version ${version}, by ${by}). The person's ${context.map((c) => SECTION_LABELS[c.id]).join(', ')} below are standing: follow them in this step and every later one until they are replaced. They replace any standing context or constraint from an earlier version.`
+    : `Operator steering from the job's context document (version ${version}, by ${by}).`;
   const rest = once.map((t) => `- ${SECTION_LABELS[t.id]}${t.id === 'next' && context.length > 0 ? ' (this step)' : ''}: ${t.text.trim() === '' ? '(cleared)' : t.text.trim()}`);
   return [head, NO_GATE_LINE, ...contextLines(context), ...rest, marker].join('\n');
 }
@@ -96,7 +160,7 @@ export function contextSteerNote(version: number, by: string, context: ReadonlyA
 /** (bridge) The person's context alone, re-sent before every later step. */
 export function contextStandingNote(version: number, by: string, context: ReadonlyArray<{ id: SectionId; text: string }>, marker: string): string {
   return [
-    `Standing operator context from the job's working document (version ${version}, by ${by}): the person's current ${context.map((c) => SECTION_LABELS[c.id]).join(', ')}. Follow it in this step and every later one until it is replaced. If you also see standing context from a later version, that one applies instead.`,
+    `Standing operator context from the job's context document (version ${version}, by ${by}): the person's current ${context.map((c) => SECTION_LABELS[c.id]).join(', ')}. Follow it in this step and every later one until it is replaced. If you also see standing context from a later version, that one applies instead.`,
     NO_GATE_LINE,
     ...contextLines(context),
     marker,
@@ -143,6 +207,10 @@ export interface WorkingDocDeps {
   linesDelayMs?: number;
   /** How long to wait before trying the lines again while a person's write of unknown outcome settles. */
   linesRetryMs?: number;
+  /** (context-doc-switch) How long a context set may take before it is recorded as unanswered and retried. */
+  contextTimeoutMs?: number;
+  /** (context-doc-switch) When an unanswered or failed context set is tried again (default 15 s, 1 min, 5 min). */
+  contextRetryMs?: readonly number[];
   now?(): number;
   log?(m: string): void;
 }
@@ -156,6 +224,27 @@ export interface WorkingDocView {
   steers: SteerRecord[];
   /** Crew writes the event-derived lines itself ({@link WorkingDocService.syncLines}): a host plugin writes none. */
   eventLines: boolean;
+  /** (context-doc-switch) The engine's context block: the person's Goal, Approach and Constraints in every agent the run
+   *  spawns. Absent when the engine keeps none and crew never fed one. */
+  context?: WorkingDocContextView;
+}
+
+/** What the document's thread says about the engine's context block. */
+export interface WorkingDocContextView {
+  /** The linked engine keeps a context block (crew feeds it; no standing note). */
+  engine: boolean;
+  /** The version of the block the engine holds (a block withdrawn after a refusal holds no sections), or null. */
+  version: number | null;
+  /** The person's sections in it (empty: none of the person's, or cleared after a refusal). */
+  sections: SectionId[];
+  /** Sections crew cut to fit the caps (each ends saying where it was cut). */
+  cut: SectionId[];
+  at: number | null;
+  /** The last version that did not reach the agents, and why (e.g. too long once framed). `cleared`: the earlier
+   *  block was withdrawn so no replaced words stay in force. */
+  error: { version: number; reason: string; at: number; cleared: boolean } | null;
+  /** The seats the engine handed `version` to (builder, reviewer, gate judge, rule judge, QE, council …). */
+  seenBy: ContextRecipient[];
 }
 
 export type ProposeResult =
@@ -201,8 +290,8 @@ export function steerMarker(runId: string, steerId: string): string {
 /** The one note a person's version becomes: the sections that steer once, and the standing constraint, together. */
 export function steerNote(version: number, by: string, standing: boolean, texts: Array<{ id: SectionId; text: string }>, marker: string): string {
   const head = standing
-    ? `Operator steering from the job's working document (version ${version}, by ${by}). Its Constraints and steering is standing: follow it in this step and every later one until it is replaced. It replaces any standing constraint from an earlier version.`
-    : `Operator steering from the job's working document (version ${version}, by ${by}).`;
+    ? `Operator steering from the job's context document (version ${version}, by ${by}). Its Constraints and steering is standing: follow it in this step and every later one until it is replaced. It replaces any standing constraint from an earlier version.`
+    : `Operator steering from the job's context document (version ${version}, by ${by}).`;
   const lines = texts.map((t) => `- ${SECTION_LABELS[t.id]}: ${t.text.trim() === '' ? '(cleared)' : t.text.trim()}`);
   return [head, NO_GATE_LINE, ...lines, marker].join('\n');
 }
@@ -210,7 +299,7 @@ export function steerNote(version: number, by: string, standing: boolean, texts:
 /** The standing constraint alone, re-sent before every later step. */
 export function standingNote(version: number, by: string, text: string, marker: string): string {
   return [
-    `Standing operator constraint from the job's working document (version ${version}, by ${by}). Follow it in this step and every later one until it is replaced. If you also see a standing constraint from a later version, that one applies instead.`,
+    `Standing operator constraint from the job's context document (version ${version}, by ${by}). Follow it in this step and every later one until it is replaced. If you also see a standing constraint from a later version, that one applies instead.`,
     NO_GATE_LINE,
     `- ${SECTION_LABELS.constraints}: ${text.trim()}`,
     marker,
@@ -289,6 +378,10 @@ export class WorkingDocService {
   /** Per run, the settled plan's event signature the Approach was last checked against (the run's view is read again
    *  only when it moves). */
   private readonly planChecked = new Map<string, string>();
+  /** (context-doc-switch) Per run, how many retries of an unanswered context set are scheduled so far. */
+  private readonly contextRetries = new Map<string, number>();
+  /** The start-up context catch-up (once per daemon). */
+  private contextCaughtUp: Promise<void> | null = null;
 
   constructor(private readonly d: WorkingDocDeps) {
     this.now = d.now ?? Date.now;
@@ -305,7 +398,11 @@ export class WorkingDocService {
     // An edit whose outcome was unknown is settled on every read, not only by the next edit.
     if (this.d.store.get(runId)?.pending != null) await this.exclusive(runId, () => this.reconcile(runId));
     const rec = this.d.store.get(runId);
-    const base = { runId, labels: { ...SECTION_LABELS }, trail: rec?.trail ?? [], steers: rec?.steers ?? [], eventLines: await this.eventLines(runId) };
+    const ctx = rec !== undefined ? this.contextView(rec) : null;
+    const base = {
+      runId, labels: { ...SECTION_LABELS }, trail: rec?.trail ?? [], steers: rec?.steers ?? [], eventLines: await this.eventLines(runId),
+      ...(ctx !== null ? { context: ctx } : {}),
+    };
     if (rec === undefined) return { ...base, doc: null, sections: null };
     const head = await this.d.backend.read(rec.projectId, rec.docId);
     if (head === null) return { ...base, doc: null, sections: null };
@@ -334,6 +431,7 @@ export class WorkingDocService {
    * never rejects.
    */
   async catchUp(): Promise<void> {
+    await this.contextCatchUp();
     if (this.d.events === undefined) return;
     const held = this.d.store.all().map((r) => r.runId);
     let fresh: string[] = [];
@@ -400,7 +498,7 @@ export class WorkingDocService {
 
   private async proposeNow(runId: string, input: ProposeInput, actor: { id: string; kind: string }): Promise<ProposeResult> {
     const rec = this.d.store.get(runId);
-    if (rec === undefined) return { ok: false, code: 404, error: 'this job has no working document yet' };
+    if (rec === undefined) return { ok: false, code: 404, error: 'this job has no context document yet' };
     if (!Number.isInteger(input.base)) return { ok: false, code: 400, error: 'base must be the version the edit was made on' };
     const plugin = input.plugin;
     if (plugin !== undefined && (!PLUGIN_ID.test(plugin.id) || !PLUGIN_VERSION.test(plugin.version))) {
@@ -412,7 +510,7 @@ export class WorkingDocService {
     let author: DocAuthor;
     if (input.author === 'operator') {
       // A person's words are a person's only: a worker, system or plugin caller never writes as the operator.
-      if (actor.kind !== 'human') return { ok: false, code: 403, error: 'only a person can edit the working document as the operator' };
+      if (actor.kind !== 'human') return { ok: false, code: 403, error: 'only a person can edit the context document as the operator' };
       author = { kind: 'human', id: actor.id };
     } else if (input.author === 'plugin') {
       if (plugin === undefined) return { ok: false, code: 400, error: 'a plugin-written version names its plugin' };
@@ -437,8 +535,8 @@ export class WorkingDocService {
     }
     await this.reconcile(runId);
     const head = await this.d.backend.read(rec.projectId, rec.docId);
-    if (head === null) return { ok: false, code: 404, error: 'the working document is gone' };
-    if (head.head !== input.base) return { ok: false, code: 409, error: 'the working document changed since', head: head.head };
+    if (head === null) return { ok: false, code: 404, error: 'the context document is gone' };
+    if (head.head !== input.base) return { ok: false, code: 409, error: 'the context document changed since', head: head.head };
     if (this.d.store.get(runId)?.pending != null) return { ok: false, code: 409, error: 'an earlier edit may still land; read the document again', head: head.head };
     const before = sectionsOf(head.html);
     const changed = changedSections(before, wanted);
@@ -459,7 +557,7 @@ export class WorkingDocService {
       if (err instanceof UndeterminedWriteError) this.rememberPending(runId, input.base, author, surface, values, actor, input.input);
       throw err;
     }
-    if ('headMoved' in written) return { ok: false, code: 409, error: 'the working document changed since', head: written.head };
+    if ('headMoved' in written) return { ok: false, code: 409, error: 'the context document changed since', head: written.head };
     // The version's sections, from what it was made on and what it changed (never a second, fallible read: xreview b1).
     const steer = await this.record(runId, written.version, written.parent, author, surface, changed, values, actor, input.input, { ...before, ...values });
     return { ok: true, version: written.version, unchanged: false, steer, view: await this.view(runId) };
@@ -523,7 +621,7 @@ export class WorkingDocService {
           throw err;
         }
         if ('headMoved' in written) continue;
-        await this.record(runId, written.version, written.parent, { kind: 'agent', id }, null, changed, values, { id, kind: 'agent' });
+        await this.record(runId, written.version, written.parent, { kind: 'agent', id }, null, changed, values, { id, kind: 'agent' }, undefined, { ...before, ...values });
         return written.version;
       }
       return null;
@@ -694,7 +792,7 @@ export class WorkingDocService {
         throw err;
       }
       if ('headMoved' in written) continue;
-      await this.record(runId, written.version, written.parent, author, null, changed, values, { id: batchAuthor, kind: author.kind });
+      await this.record(runId, written.version, written.parent, author, null, changed, values, { id: batchAuthor, kind: author.kind }, undefined, { ...before, ...values });
       return written.version;
     }
     return null;
@@ -734,14 +832,29 @@ export class WorkingDocService {
 
   /** A version that landed: its trail entry, its steer (a person's only), its audit line and the change frame. */
   private async record(runId: string, version: number, parent: number, author: DocAuthor, surface: string | null, changed: SectionId[], values: Partial<Record<SectionId, string>>, actor: { id: string; kind: string }, spoken?: 'voice', after?: Partial<Record<SectionId, string>>): Promise<SteerRecord | null> {
-    const steer = author.kind === 'human' ? await this.steer(runId, version, changed, values, author.id, spoken, after ?? values) : null;
-    const entry: TrailEntry = { version, parent, author, surface, sections: changed, at: this.now(), steerId: steer?.id ?? null };
+    // The version's trail entry first (its steer, if any, is named on it below): the block and the steer read the trail.
+    const entry: TrailEntry = { version, parent, author, surface, sections: changed, at: this.now(), steerId: null };
     this.d.store.update(runId, (r) => { r.trail.push(entry); });
+    // (context-doc-switch) A version that touched the person's context: the engine's block is set from THIS version's
+    // own sections and the trail up to it, inside the run's turn (so no later version is sent ahead of it), and BEFORE
+    // the version's Next note is queued, so the next step never takes Next under the context it replaced.
+    const owed = this.d.store.get(runId)?.context?.retry === true;
+    const block = this.blockMode() && (owed || changed.some((x) => CONTEXT_SECTIONS.includes(x))) && after !== undefined
+      ? this.contextBlock(runId, version, after, author.kind === 'human' ? { kind: 'human', id: contextAuthorId(author.id) } : { kind: 'system', id: 'crew' })
+      : null;
+    if (block !== null) {
+      // A new version gets its own retries.
+      this.contextRetries.delete(runId);
+      await this.sendContext(runId, block);
+    }
+    const steer = author.kind === 'human' ? await this.steer(runId, version, changed, values, author.id, spoken, after ?? values) : null;
+    if (steer !== null) this.d.store.update(runId, (r) => { const t = r.trail.find((x) => x.version === version && x.steerId === null); if (t !== undefined) t.steerId = steer.id; });
     this.d.audit?.('run.steered.doc', actor, runId, {
       version, sections: changed, author: author.kind === 'human' ? 'operator' : author.id,
       ...(surface !== null ? { surface } : {}),
       ...(steer !== null ? { steer: steer.id, kind: steer.kind, steered: steer.sections, sent: steer.error === null } : {}),
       ...(spoken !== undefined && author.kind === 'human' ? { input: spoken } : {}),
+      ...(block !== null ? { context: block.block.sections.map((x) => x.id) } : {}),
     });
     this.d.changed?.(runId, version);
     return steer;
@@ -772,10 +885,12 @@ export class WorkingDocService {
   }
 
   /**
-   * A person's version → ONE steering note for the run (§9). Until the engine keeps a context block (the bridge): the
-   * person's CURRENT Goal, Approach and Constraints stand together, replaced by the next edit of any of them, with Next
-   * for the next step and a cleared section said once. With the block: Goal, Approach and Next for the next step and
-   * Constraints standing (crew feeds the block). The record is stored BEFORE the engine is asked, so a pickup reported at
+   * A person's version → ONE steering note for the run (§9). With the engine's context block (`blockMode`): Goal,
+   * Approach and Constraints are in the block (set in `record`), every standing note is replaced, and only Next makes a
+   * note, for the next step. Without it (the bridge): the person's CURRENT Goal, Approach and Constraints stand together,
+   * replaced by the next edit of any of them, with Next for the next step and a cleared section said once. An engine
+   * that reports the block but has no way to set it (none in production): Goal, Approach and Next once, Constraints
+   * standing. The record is stored BEFORE the engine is asked, so a pickup reported at
    * once is never lost. `after` is the version's sections as written.
    */
   private async steer(runId: string, version: number, changed: SectionId[], values: Partial<Record<SectionId, string>>, by: string, spoken: 'voice' | undefined, after: Partial<Record<SectionId, string>>): Promise<SteerRecord | null> {
@@ -789,7 +904,20 @@ export class WorkingDocService {
     let standingText: string | null = null;
     // Which earlier standing steer this one replaces: any edit of the sections that stand.
     let replaces: boolean;
-    if (this.d.engine.supportsRunContext?.() !== true) {
+    if (this.blockMode()) {
+      // (context-doc-switch) The engine keeps the person's Goal, Approach and Constraints as the run's context block and
+      // hands it to every seat it spawns (crew sets it in `record`): no note carries them, and every standing note is
+      // replaced by an edit of them. Only Next still goes to the next step, once.
+      const once = steered.filter((x) => !CONTEXT_SECTIONS.includes(x));
+      replaces = steered.some((x) => CONTEXT_SECTIONS.includes(x));
+      if (replaces) {
+        this.d.store.update(runId, (r) => { for (const old of r.steers) if (old.kind === 'standing' && old.supersededBy == null) old.supersededBy = `v${version}`; });
+      }
+      if (once.length === 0) return null;
+      standing = false;
+      replaces = false;
+      note = steerNote(version, who, false, once.map((x) => ({ id: x, text: values[x] ?? '' })), marker);
+    } else if (this.d.engine.supportsRunContext?.() !== true) {
       // (bridge, operator ruling 2026-11-06) The person's CURRENT Goal, Approach and Constraints (each section whose
       // latest version is a person's, never crew's or an agent's) stand together, re-sent before every later worker step
       // until the engine keeps a context block of its own. Next is still for the next step only.
@@ -809,7 +937,7 @@ export class WorkingDocService {
       if (standing) standingText = standingNote(version, who, constraints ?? '', marker);
     }
     const s: SteerRecord = {
-      id, version, sections: steered, kind: standing ? 'standing' : 'next',
+      id, version, sections: this.blockMode() ? steered.filter((x) => !CONTEXT_SECTIONS.includes(x)) : steered, kind: standing ? 'standing' : 'next',
       ...(standing && this.d.engine.supportsRunContext?.() !== true ? { context: true } : {}),
       note,
       ...(standingText !== null ? { standingNote: standingText, supersededBy: null, renewals: 0 } : {}),
@@ -848,6 +976,239 @@ export class WorkingDocService {
       if (persons && text.trim() !== '') out.push({ id: sid, text });
     }
     return out;
+  }
+
+  // ── the engine's context block (context-doc-switch; core#1325) ────────────────────────────────────────────────────
+
+  /** The linked engine keeps a context block crew can set: the person's context goes there, not in notes. */
+  private blockMode(): boolean {
+    return this.d.engine.supportsRunContext?.() === true && typeof this.d.engine.setRunContext === 'function';
+  }
+
+  /** The engine holds the run's block at `version` or later (crew heard it say so). */
+  private blockCovers(runId: string, version: number): boolean {
+    const inForce = this.d.store.get(runId)?.context?.inForce;
+    return this.blockMode() && typeof inForce === 'number' && inForce >= version;
+  }
+
+  /**
+   * The block of one version: each of Goal, Approach and Constraints whose newest write at or before `version` is a
+   * person's (crew's trail), with that version's text. Crew's seeded Goal, a plan's Approach, an agent's or a plugin's
+   * lines are never in it. Capped visibly ({@link capBlock}). `sections` are the version's own sections as written.
+   */
+  private contextBlock(runId: string, version: number, sections: Partial<Record<SectionId, string>>, setBy: RunContextBlock['set_by']): { block: RunContextBlock; cut: SectionId[] } {
+    const trail = (this.d.store.get(runId)?.trail ?? []).filter((t) => t.version <= version);
+    const mine: Array<RunContextBlock['sections'][number]> = [];
+    for (const sid of CONTEXT_SECTIONS) {
+      const last = [...trail].reverse().find((t) => t.sections.includes(sid));
+      if (last === undefined || last.author.kind !== 'human') continue;
+      const text = contextText(sections[sid] ?? '');
+      if (text === '') continue;
+      mine.push({ id: sid, text, author: { kind: 'human', id: contextAuthorId(last.author.id) }, version: last.version });
+    }
+    const capped = capBlock(mine);
+    return { block: { version, sections: capped.sections, set_by: setBy }, cut: capped.cut };
+  }
+
+  /**
+   * Set the run's block (inside the run's turn), unless it is the block crew last set and the engine took (the engine
+   * keeps it durably). The engine keeps the higher version, so an older block sent late is a no-op.
+   *
+   *  - The attempt is recorded BEFORE the engine is asked: an answer lost (a timeout, a restart) never lets a later
+   *    empty block be skipped as "nothing was ever set".
+   *  - A refusal (`bad_request`, e.g. too long once framed) is recorded with the engine's reason, and the engine's block
+   *    is CLEARED at that version, so no words the person has since replaced stay in force.
+   *  - Any other failure (no answer in time, the engine down) and a clear that fails are retried from the document's
+   *    head ({@link resyncContext}) a few times, then at the next start or edit; the view says so meanwhile.
+   *  - An ended run (`conflict`) or one the engine does not know (`not_found`) is recorded, not retried.
+   *
+   * Never throws: the version is written whatever the engine says. The state is on the view (`context`), which studio
+   * shows with the document.
+   */
+  private async sendContext(runId: string, b: { block: RunContextBlock; cut: SectionId[] }): Promise<void> {
+    const set = this.d.engine.setRunContext;
+    if (set === undefined) return;
+    const v = b.block.version;
+    const sig = contextSig(b.block);
+    const prior = this.d.store.get(runId)?.context;
+    // An attempt whose answer crew never recorded (a restart mid-call) is unresolved: the block is sent again whatever
+    // its signature says (xreview r2).
+    const unresolved = (prior?.attempted ?? null) !== null && (prior?.sentVersion ?? -1) < (prior?.attempted ?? -1);
+    if (!unresolved && prior?.retry !== true && (prior?.sig ?? EMPTY_SIG) === sig && prior?.error == null) return;
+    // Nothing of the person's, and nothing ever tried: there is no block to clear.
+    if (b.block.sections.length === 0 && (prior?.attempted ?? null) === null) return;
+    const timeoutMs = this.d.contextTimeoutMs ?? CONTEXT_SET_TIMEOUT_MS;
+    const call = async (ctx: RunContextBlock): Promise<{ version: number; accepted: boolean }> => {
+      // The set is owed until the engine's answer is recorded (xreview r3): a restart mid-call leaves it owed, so every
+      // recovery path (the start-up sync, its re-arm, the next version) sends it again.
+      this.updateContext(runId, (c) => { c.attempted = Math.max(c.attempted ?? 0, ctx.version); c.retry = true; });
+      const answer = set.call(this.d.engine, runId, ctx);
+      // An answer after the timeout is not awaited by anyone: its rejection must not go unhandled.
+      answer.catch(() => undefined);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const late = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('the engine did not answer in time')), timeoutMs);
+        (timer as { unref?: () => void }).unref?.();
+      });
+      try {
+        return await Promise.race([answer, late]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+    };
+    /** The engine holds exactly version `v`: a block's content at a version is fixed by the trail up to it, so it is
+     *  this block (or, after a refusal, the clear). */
+    const holds = (c: ContextRecord, ack: { version: number }, sections: RunContextBlock['sections'], cut: SectionId[], s: string): void => {
+      c.inForce = Math.max(c.inForce ?? 0, ack.version);
+      if (ack.version !== v) return; // a newer block is in force: its metadata came with it
+      c.sig = s; c.sentVersion = v; c.sections = sections.map((x) => x.id); c.cut = cut; c.at = this.now();
+    };
+    let retry = false;
+    try {
+      const ack = await call(b.block);
+      this.updateContext(runId, (c) => {
+        holds(c, ack, b.block.sections, b.cut, sig);
+        if (c.error !== null && c.error.version <= Math.max(v, ack.version)) c.error = null;
+        c.retry = false;
+      });
+      this.contextRetries.delete(runId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      let reason = msg.replace(/^bad_request:\s*(run context refused:\s*)?/u, '');
+      let cleared = false;
+      if (/^conflict:/u.test(msg)) { reason = 'the job has ended'; this.updateContext(runId, (c) => { c.retry = false; }); }
+      else if (/^not_found:/u.test(msg)) { reason = 'the engine does not know this job'; this.updateContext(runId, (c) => { c.retry = false; }); }
+      else if (/^bad_request:/u.test(msg)) {
+        // Refused whole: withdraw the block in force, so the agents never keep the words the person has just replaced.
+        const hadBlock = (prior?.sections.length ?? 0) > 0;
+        try {
+          const ack = await call({ version: v, sections: [], set_by: b.block.set_by });
+          this.updateContext(runId, (c) => { holds(c, ack, [], [], EMPTY_SIG); c.retry = false; });
+          cleared = hadBlock && ack.version === v;
+          this.contextRetries.delete(runId);
+        } catch (e2) {
+          retry = true;
+          reason = `${reason}; the earlier context could not be taken out yet, trying again`;
+          this.d.log?.(`[working-doc] clearing the context block of ${runId} after a refusal failed: ${String(e2)}`);
+        }
+      } else {
+        retry = true;
+        reason = `${reason}; trying again`;
+      }
+      this.updateContext(runId, (c) => { c.error = { version: v, reason: reason.slice(0, 400), at: this.now(), cleared }; });
+      this.d.log?.(`[working-doc] the context block v${v} of ${runId} was not set: ${msg}`);
+    }
+    if (retry) this.updateContext(runId, (c) => { c.retry = true; });
+    this.d.changed?.(runId, null);
+    if (retry) this.scheduleContextRetry(runId);
+  }
+
+  private updateContext(runId: string, f: (c: ContextRecord) => void): void {
+    this.d.store.update(runId, (r) => {
+      r.context ??= { inForce: null, attempted: null, sig: null, sentVersion: null, sections: [], cut: [], at: null, error: null, retry: false, seenVersion: null, seenBy: [] };
+      f(r.context);
+    });
+  }
+
+  /** Try the run's block again later (a set with no answer, a clear that failed, a retry that could not read the
+   *  document): a few times, then the next start or the run's next version of any section (`record`). */
+  private scheduleContextRetry(runId: string): void {
+    const delays = this.d.contextRetryMs ?? [15_000, 60_000, 300_000];
+    const n = this.contextRetries.get(runId) ?? 0;
+    if (n >= delays.length) {
+      // Out of tries for now: the view stops promising one (pi r2). The next version of any section, or the next start,
+      // sends it again (`retry` stays set).
+      this.updateContext(runId, (c) => { if (c.error !== null) c.error.reason = c.error.reason.replace(/trying again$/u, 'tried again at your next edit or the next start'); });
+      this.d.changed?.(runId, null);
+      return;
+    }
+    this.contextRetries.set(runId, n + 1);
+    const t = setTimeout(() => {
+      void this.resyncContext(runId).catch((err: unknown) => this.d.log?.(`[working-doc] context retry ${runId}: ${String(err)}`));
+    }, delays[n]);
+    (t as { unref?: () => void }).unref?.();
+  }
+
+  /**
+   * Set the run's block from its document's head (one read: the version and its HTML), inside the run's turn, after an
+   * unknown-outcome write has settled: at daemon start ({@link contextCatchUp}) and on a retry. A finished run is
+   * skipped. Never rejects.
+   */
+  async resyncContext(runId: string): Promise<void> {
+    if (!this.blockMode()) return;
+    try {
+      const run = await this.d.run(runId);
+      if (run === null || run.terminal) return;
+      await this.exclusive(runId, async () => {
+        await this.reconcile(runId);
+        const now = this.d.store.get(runId);
+        if (now === undefined) return;
+        // A write of unknown outcome: its settling (`record`) sets the block, or the retry comes back for it.
+        if (now.pending != null) { if (now.context?.retry === true) this.scheduleContextRetry(runId); return; }
+        const head = await this.d.backend.read(now.projectId, now.docId);
+        if (head === null) return;
+        await this.sendContext(runId, this.contextBlock(runId, head.head, sectionsOf(head.html), { kind: 'system', id: 'crew' }));
+      });
+    } catch (err) {
+      this.d.log?.(`[working-doc] context sync ${runId}: ${String(err)}`);
+      // The document or the run could not be read: a retry owed stays owed.
+      if (this.d.store.get(runId)?.context?.retry === true) this.scheduleContextRetry(runId);
+    }
+  }
+
+  /** Once per document at daemon start (as soon as the daemon is up, ahead of the slower line catch-up): set every live
+   *  run's block from its head, so a block the engine lacks (an upgrade, a lost answer) is in force before the run's
+   *  next step. Serial, once per daemon; never rejects. */
+  contextCatchUp(): Promise<void> {
+    this.contextCaughtUp ??= (async () => {
+      if (!this.blockMode()) return;
+      for (const rec of this.d.store.all()) await this.resyncContext(rec.runId);
+    })();
+    return this.contextCaughtUp;
+  }
+
+  /** What the document's view says about the block, or null when there is nothing to say (no block engine, never fed). */
+  private contextView(rec: WorkingDocRecord): WorkingDocContextView | null {
+    const engine = this.blockMode();
+    const c = rec.context;
+    if (!engine && c === undefined) return null;
+    return {
+      engine,
+      version: c?.inForce ?? null,
+      sections: [...(c?.sections ?? [])],
+      cut: [...(c?.cut ?? [])],
+      at: c?.at ?? null,
+      error: c?.error ?? null,
+      seenBy: c !== undefined && c.seenVersion !== null && c.seenVersion === c.inForce ? [...c.seenBy] : [],
+    };
+  }
+
+  /**
+   * `runContextDelivered`: one seat the engine built a prompt for with the block (no text in the frame). It only names
+   * who saw a version crew itself set: a version crew never tried, a malformed value or an unknown recipient is dropped,
+   * and it never moves the version in force (only the engine's answers to crew's own sets do).
+   */
+  private delivered(runId: string, ev: Record<string, unknown>): void {
+    const version = ev['version'];
+    const recipient = ev['recipient'];
+    const cli = ev['recipientCli'];
+    const ord = ev['ord'];
+    if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 0) return;
+    if (typeof recipient !== 'string' || !CONTEXT_RECIPIENTS.has(recipient)) return;
+    const attempted = this.d.store.get(runId)?.context?.attempted ?? null;
+    if (attempted === null || version > attempted) return;
+    const seat = typeof cli === 'string' && /^[a-z0-9][a-z0-9._-]{0,39}$/u.test(cli) ? cli : '';
+    const at = typeof ord === 'number' && Number.isSafeInteger(ord) && ord >= 0 ? ord : 0;
+    let changed = false;
+    // One synchronous update (no await inside): atomic against the run's other context writes.
+    this.updateContext(runId, (c) => {
+      if (c.seenVersion !== null && version < c.seenVersion) return;
+      if (c.seenVersion !== version) { c.seenVersion = version; c.seenBy = []; changed = true; }
+      if (c.seenBy.some((x) => x.recipient === recipient && x.cli === seat) || c.seenBy.length >= CONTEXT_SEEN_MAX) return;
+      c.seenBy.push({ recipient, cli: seat, ord: at });
+      changed = true;
+    });
+    if (changed) this.d.changed?.(runId, null);
   }
 
   /**
@@ -904,6 +1265,7 @@ export class WorkingDocService {
     }
     const rec = this.d.store.get(runId);
     if (rec === undefined) return;
+    if ((ev['type'] as string) === 'runContextDelivered') { this.delivered(runId, ev); return; }
     if (e.type === 'unitDone' || e.type === 'unitDenied') {
       for (const s of rec.steers) {
         if (s.kind === 'standing' && s.supersededBy == null && s.error === null && s.pickedUp !== null && this.queued.get(s.id) !== true) this.renew(runId, s.id, null);
@@ -940,7 +1302,11 @@ export class WorkingDocService {
       const current = this.d.store.get(runId)?.steers.find((x) => x.id === steerId);
       if (current === undefined || current.supersededBy != null || current.error !== null || current.standingNote == null) { this.queued.set(steerId, false); return; }
       // A bridge note is not re-sent once the engine keeps a context block of its own (xreview b1): crew feeds that.
-      if (current.context === true && this.d.engine.supportsRunContext?.() === true) { this.queued.set(steerId, false); return; }
+      if (current.context === true && this.d.engine.supportsRunContext?.() === true && !this.blockMode()) { this.queued.set(steerId, false); return; }
+      // (context-doc-switch) No standing note is re-sent once the engine holds the run's block at this note's version or
+      // later: the block carries the person's context to every seat. Until then (a daemon just started, the catch-up not
+      // yet run) the note keeps the person's words in front of the next step.
+      if (this.blockCovers(runId, current.version)) { this.queued.set(steerId, false); return; }
       const run = await this.d.run(runId);
       if (run === null || run.terminal || this.d.store.get(runId)?.steers.find((x) => x.id === steerId)?.supersededBy != null) { this.queued.set(steerId, false); return; }
       await this.d.engine.injectWorkerMessage(runId, current.standingNote, 'all');

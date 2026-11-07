@@ -264,8 +264,8 @@ export function isWorkingDoc(docsRoot: string, documentId: string): boolean {
  *  run's working-document block, a person's edit steering the run's next step. No edit, ask, review or theme of it
  *  ever launches a governed run. */
 export const WORKING_DOC_REFUSED_MESSAGE =
-  "This is a job's working document. It is edited only in the job's conversation, where an edit steers the job's next " +
-  'step. Nothing was changed and nothing was launched.';
+  "This is a job's context document. It is edited only in the job's conversation, where a person's edit steers the " +
+  "job's agents. Nothing was changed and nothing was launched.";
 
 /** Why a demo DOCUMENT's feedback or ask has no answerer (studio#373, M9b): demos are made by a
  *  governed run of the `demo` preset, which re-records at its review gate. Studio's Demo mode is

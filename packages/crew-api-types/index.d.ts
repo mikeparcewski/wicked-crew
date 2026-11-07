@@ -482,7 +482,8 @@ export interface WorkingDocSteer {
   version: number;
   sections: WorkingDocSectionId[];
   /** `next`: the next step, once. `standing`: Constraints and steering, re-sent before every later step until a
-   *  later edit replaces it. */
+   *  later edit replaces it. With the engine's context block ({@link WorkingDocView.context}) only Next makes a steer:
+   *  Goal, Approach and Constraints go in the block. */
   kind: 'next' | 'standing';
   /** Exactly what was sent. */
   note: string;
@@ -514,6 +515,39 @@ export interface WorkingDocView {
    *  Next) from the run's own log, as `plugin:wicked-phase-report@…`: a host plugin then writes none of its own and
    *  only renders and takes a person's edits. ABSENT on an older daemon — read as `false` (the plugin keeps writing). */
   eventLines?: boolean;
+  /** (0.198.0, context-doc-switch) The engine's CONTEXT BLOCK: the person's own Goal, Approach and Constraints, which the
+   *  engine hands every agent the run spawns (workers, judges, rule judges, QE, councils). ABSENT when the engine keeps
+   *  no block and crew never set one (an older engine or daemon): edits steer through notes (`steers`). */
+  context?: WorkingDocContext;
+}
+
+/** One seat the engine handed the block to (`runContextDelivered`). `recipient`: `unit` | `judge` | `triage` |
+ *  `council` | `team_member` | `qe` | `team_review` | `send_back`. `cli` may be empty when the engine named none. */
+export interface WorkingDocContextRecipient {
+  recipient: string;
+  cli: string;
+  ord: number;
+}
+
+/** (0.198.0) What the document's view says about the engine's context block (studio shows it with the document). */
+export interface WorkingDocContext {
+  /** The linked engine keeps a block and crew feeds it (no standing note). */
+  engine: boolean;
+  /** The version of the block the engine holds (its `sections` are what every agent now gets; a block withdrawn after a
+   *  refusal holds none), or null (none set yet). */
+  version: number | null;
+  /** The person's sections in the block in force (empty: none, or withdrawn after a refusal). */
+  sections: WorkingDocSectionId[];
+  /** Sections crew cut to the caps (1,500 characters a section, 4,000 in all); each ends saying where it was cut. */
+  cut: WorkingDocSectionId[];
+  /** Unix millis the block in force was accepted, or null. */
+  at: number | null;
+  /** The last version that did not reach the agents, and why (e.g. too long once framed; "…; trying again" when the
+   *  engine did not answer and crew retries). `cleared`: a block that was in force was withdrawn, so no words the person
+   *  replaced stay in force. Null once a later version is in force. */
+  error: { version: number; reason: string; at: number; cleared: boolean } | null;
+  /** The seats the engine handed `version` to, first seen first (at most 24). */
+  seenBy: WorkingDocContextRecipient[];
 }
 
 /** `POST /runs/:id/working-doc/versions`. `author: 'operator'` only from a person; `author: 'plugin'` writes only the
