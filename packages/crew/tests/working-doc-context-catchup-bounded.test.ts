@@ -21,7 +21,7 @@ afterEach(() => { for (const h of homes.splice(0)) rmSync(h, { recursive: true, 
 
 const N = 200;
 
-function rig(owed: ReadonlySet<number>) {
+function rig(owed: ReadonlySet<number>, o: { retryMs?: number[]; versionFailures?: number } = {}) {
   const h = mkdtempSync(join(tmpdir(), 'wdf35-')); homes.push(h);
   const store = new WorkingDocStore({ stateHome: h });
   const html = initialHtml('t', { goal: 'Keep /v1 working.' });
@@ -40,7 +40,7 @@ function rig(owed: ReadonlySet<number>) {
   const backend: DocBackend = {
     create: async () => ({ head: 0 }),
     read: async () => { counts.read += 1; return { head: 1, html }; },
-    readVersion: async () => html,
+    readVersion: async () => { if ((o.versionFailures ?? 0) > 0) { o.versionFailures! -= 1; throw new Error('interactive is starting'); } return html; },
     edit: async () => ({ version: 1, parent: 0 }),
   };
   const facts: RunFacts = { title: 't', problem: 'p', projectId: 'p', terminal: false, stepOf: () => null };
@@ -55,6 +55,7 @@ function rig(owed: ReadonlySet<number>) {
     run: async () => { counts.run += 1; return facts; },
     liveRuns: async () => { counts.liveRuns += 1; return Array.from({ length: N }, (_, i) => ({ runId: `run-${i}`, createdAt: i })); },
     catchUpGapMs: 0,
+    ...(o.retryMs !== undefined ? { contextRetryMs: o.retryMs } : {}),
   });
   return { service, counts };
 }
@@ -96,6 +97,17 @@ describe('F35: the start-up context sync is bounded by what is owed, not by how 
     expect(store.get('run-9')?.pending).toBeNull();
     expect(t.counts.set).toBe(1);
     expect(t.counts.run).toBe(0);
+  });
+
+  it('a pending person write whose first reads fail is retried until interactive answers, then its block is set', async () => {
+    const t = rig(new Set(), { retryMs: [20, 20, 20], versionFailures: 2 });
+    const store = (t.service as unknown as { d: { store: WorkingDocStore } }).d.store;
+    store.update('run-9', (r) => { r.pending = { expectHead: 0, author: { kind: 'human', id: 'local' }, surface: null, values: { goal: 'Keep /v1 working.' }, at: 0, actor: { id: 'local', kind: 'human' } }; });
+    await t.service.contextCatchUp();
+    expect(t.counts.set, 'not yet: interactive did not answer').toBe(0);
+    await new Promise((r) => setTimeout(r, 150));
+    expect(store.get('run-9')?.pending).toBeNull();
+    expect(t.counts.set).toBe(1);
   });
 
   it('an owed document whose run is not in the live list (archived) still gets its own check', async () => {

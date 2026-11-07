@@ -1174,8 +1174,10 @@ export class WorkingDocService {
       });
     } catch (err) {
       this.d.log?.(`[working-doc] context sync ${runId}: ${String(err)}`);
-      // The document or the run could not be read: a retry owed stays owed.
-      if (this.d.store.get(runId)?.context?.retry === true) this.scheduleContextRetry(runId);
+      // The document or the run could not be read: a retry owed stays owed, and so does a person's context write still
+      // of unknown outcome (xreview F35 r2).
+      const rec = this.d.store.get(runId);
+      if (rec !== undefined && (rec.context?.retry === true || (rec.pending != null && contextOwed(rec)))) this.scheduleContextRetry(runId);
     }
   }
 
