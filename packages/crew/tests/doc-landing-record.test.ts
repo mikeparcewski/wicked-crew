@@ -12,6 +12,7 @@ import type { DocChecksResponse } from 'wicked-crew-api-types';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { registerInteractiveDocChecks } from '../src/interactive/doc-checks-routes.js';
 import { LandingRecordStore, parseNotes, recordLanding } from '../src/interactive/landing-record.js';
+import { readLineage } from '../src/interactive/doc-checks-routes.js';
 import { removeScratch } from './setup/scratch.js';
 
 describe('the landing record and the checks read', () => {
@@ -51,7 +52,8 @@ describe('the landing record and the checks read', () => {
       3,
     );
     record('run-a', true, [{ token: 'run:9f9f9f9f', reason: 'not named in this chat' }]);
-    record('run-b', false);
+    // codex r1: crew's struck sources on a run with no writer notes never stand in for notes (the ancestor's still show).
+    record('run-b', false, [{ token: 'run:1a1a1a1a', reason: 'gone' }]);
   });
   afterEach(async () => {
     await app.close();
@@ -83,9 +85,20 @@ describe('the landing record and the checks read', () => {
   });
 
   it('only the three fields a valid notes.json holds are kept', () => {
-    expect(parseNotes({ left_out: [], sources: [], assumptions: ['a'], steer: 'x' })).toEqual({ left_out: [], sources: [], assumptions: ['a'] });
+    expect(parseNotes({ left_out: [], sources: [], assumptions: ['a'] })).toEqual({ left_out: [], sources: [], assumptions: ['a'] });
+    // Anything else in it makes it not the one shape (as garden's notes_check says): never read past.
+    expect(parseNotes({ left_out: [], sources: [], assumptions: ['a'], steer: 'x' })).toBeNull();
     expect(parseNotes({ left_out: [] })).toBeNull();
     expect(parseNotes([])).toBeNull();
+    // Strict: one bad entry makes the file invalid (never a reduced valid-looking copy); lengths count code points.
+    expect(parseNotes({ left_out: [{ claim: 'x', why: 'y' }, { claim: '' }], sources: [], assumptions: [] })).toBeNull();
+    expect(parseNotes({ left_out: [], sources: [], assumptions: ['😀'.repeat(600)] })?.assumptions).toHaveLength(1);
+  });
+
+  it('a run id that is an object property is no record (codex r1)', async () => {
+    const lineage = readLineage(docs(), 'note')!;
+    lineage.versions.set(5, { parent: 3, runId: 'constructor' });
+    expect(store.get('kes/note', 'constructor')).toBeNull();
   });
 
   it('a failing floor lands nothing, so it is never recorded', () => {

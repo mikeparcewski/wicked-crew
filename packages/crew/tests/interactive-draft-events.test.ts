@@ -1023,7 +1023,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
         gardenRoot: () => '/garden',
         run: async () => {
           await held; // the floor is still running
-          return { stdout: JSON.stringify({ checks: { claims: { ok: true }, contrast: { ok: true } } }), code: 0 };
+          return { stdout: JSON.stringify({ checks: { claims: { ok: true }, contrast: { ok: true }, leaks: { ok: true }, notes: { ok: true } } }), code: 0 };
         },
       },
       log: () => {},
@@ -1097,7 +1097,8 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect(argvs[0]).toContain(`--notes ${notesPath} --run-id ${launch.sessionId}`);
     const rec = landings.get('proj-7/spike-doc', launch.sessionId!);
     expect(rec?.floor).toEqual({ verdict: 'pass', pages: { count: 1, measured: true, budget: 1, exact: true }, summary: 'the draft floor met every rule on the saved document' });
-    expect(rec?.notes).toEqual({ left_out: [{ claim: 'p95 40 ms', why: 'no record' }], sources: [], assumptions: [], struck: [] });
+    expect(rec?.notes).toEqual({ left_out: [{ claim: 'p95 40 ms', why: 'no record' }], sources: [], assumptions: [] });
+    expect(rec?.struck).toEqual([]);
     expect(rec?.sha256).toMatch(/^[0-9a-f]{64}$/);
   });
 

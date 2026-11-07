@@ -252,8 +252,9 @@ export function conformanceProvisioner(root: () => string, deps: ProvisionDeps =
   const env = deps.env ?? process.env;
   const platform = deps.platform ?? process.platform;
   let inFlight: Promise<Provisioned> | null = null;
-  // (PLAN G12) The Chromium path is asked for once per daemon: a reused runtime spawns nothing after that.
-  let askedChromium = false;
+  // (PLAN G12) The Chromium path is asked for once per made venv: a reused runtime spawns nothing after that, and a venv
+  // made again (or a query that failed on a fresh one) asks again (codex r1).
+  const askedChromium = new Set<string>();
   const pin = (): string => conformancePin(env);
   const run = async (): Promise<Provisioned> => {
     const dir = root();
@@ -264,8 +265,8 @@ export function conformanceProvisioner(root: () => string, deps: ProvisionDeps =
     // (PLAN G12) Where Playwright put its Chromium, for the draft floor's renderer. Best-effort: without it the floor
     // estimates the page count, as before.
     const recordChromium = async (): Promise<void> => {
-      if (askedChromium) return;
-      askedChromium = true;
+      if (askedChromium.has(venv)) return;
+      askedChromium.add(venv);
       try {
         const out = await exec(python, ['-c', CHROMIUM_PATH_PY], { timeout: VENV_TIMEOUT_MS, windowsHide: true, env: absoluteCacheEnv(env, platform) });
         const path = out.stdout.trim().split('\n').pop()?.trim() ?? '';
@@ -294,6 +295,7 @@ export function conformanceProvisioner(root: () => string, deps: ProvisionDeps =
       }
     };
     rmSync(venv, { recursive: true, force: true });
+    askedChromium.delete(venv);
     mkdirSync(dir, { recursive: true });
     let made: { missing: boolean; error: string } | null = { missing: true, error: 'no python interpreter found (python3 / python)' };
     for (const bin of platform === 'win32' ? ['python', 'python3'] : ['python3', 'python']) {

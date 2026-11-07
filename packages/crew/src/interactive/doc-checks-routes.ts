@@ -17,10 +17,10 @@
  * (`DemoView.review`).
  */
 
-import { realpathSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import type { DocCheck, DocCheckFinding, DocCheckSource, DocChecksResponse, DocFloorCheck, DocNotes, DocReviewerId } from 'wicked-crew-api-types';
-import { readBeneath } from '../api/beneath.js';
 import { UNFILED_MOUNT } from '../api/chat-context.js';
 import { API_PREFIX } from '../api/api-prefix.js';
 import { ProjectsUnsupportedError, type CoreAdapter } from '../core/adapter.js';
@@ -115,7 +115,11 @@ export interface LineageEntry {
 export function readLineage(docsRoot: string, doc: string): { head: number; versions: Map<number, LineageEntry> } | null {
   if (!DOC_NAME.test(doc)) return null;
   try {
-    const m = JSON.parse(readBeneath(realpathSync(docsRoot), `${doc}/versions.json`, 2 * 1024 * 1024).data.toString('utf8')) as { head?: unknown; versions?: unknown };
+    // A plain read (codex r1: `readBeneath` refuses Windows): the name is a validated slug, and the manifest is parsed
+    // as data, never followed anywhere.
+    const path = join(docsRoot, doc, 'versions.json');
+    if (statSync(path).size > 4 * 1024 * 1024) return null;
+    const m = JSON.parse(readFileSync(path, 'utf8')) as { head?: unknown; versions?: unknown };
     if (typeof m.head !== 'number' || !Number.isInteger(m.head) || m.head < 0) return null;
     const versions = new Map<number, LineageEntry>();
     for (const e of Array.isArray(m.versions) ? (m.versions as Array<Record<string, unknown>>) : []) {
@@ -154,7 +158,7 @@ export function landingFacts(
       floor = { source: 'floor', version: v, run_id: runId, verdict: rec.floor.verdict, pages: rec.floor.pages, summary: rec.floor.summary, sha256: rec.sha256, at: rec.at };
     }
     if (rec.notes !== null) {
-      notes = { from_version: v, run_id: runId, ...rec.notes };
+      notes = { from_version: v, run_id: runId, ...rec.notes, struck: [...(rec.struck ?? [])] };
       break;
     }
   }

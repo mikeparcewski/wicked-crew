@@ -216,6 +216,8 @@ function report(over: {
         size_failures: 0,
         summary: 'contrast: ok',
       },
+      // A6: the leak scan always runs (a report without it is not this floor's report).
+      leaks: { ok: true, by_kind: {}, findings: [], summary: 'leaks: none' },
       pages: {
         pages: over.pages === undefined ? 2 : over.pages,
         budget: 2,
@@ -383,6 +385,23 @@ describe('A6 — process notes stay out of the document, and notes.json is requi
     expect(clause).toContain('NOTES (required): write /out/notes.json');
     // A6 supersedes crew#1266's allowance: speaker notes are a talk track, never where process notes go.
     expect(clause).not.toContain('may also carry them in its hidden speaker notes');
+  });
+});
+
+describe('A6/G12 r1 folds — a check that did not run, or could not evaluate, is never a pass', () => {
+  it('a report without the leak scan, or without the notes check the floor asked for, is unavailable', () => {
+    const r = report() as { checks: Record<string, unknown> };
+    const noLeaks = Object.fromEntries(Object.entries(r.checks).filter(([k]) => k !== 'leaks'));
+    expect(draftFloorVerdict({ ...r, checks: noLeaks }, EXACT_2).verdict).toBe('unavailable');
+    expect(draftFloorVerdict(r, EXACT_2, { notes: true }).verdict).toBe('unavailable');
+    expect(draftFloorVerdict({ ...r, checks: { ...r.checks, notes: { ok: true } } }, EXACT_2, { notes: true }).verdict).toBe('pass');
+  });
+
+  it('an unverified contrast pair with a measured page count is unverified, not pass', () => {
+    const r = report() as Record<string, unknown>;
+    const v = draftFloorVerdict({ ...r, verdict: 'UNVERIFIED', unverified: ['contrast'] }, EXACT_2);
+    expect(v.verdict).toBe('unverified');
+    expect(v.summary).toContain('contrast could not be fully evaluated');
   });
 });
 

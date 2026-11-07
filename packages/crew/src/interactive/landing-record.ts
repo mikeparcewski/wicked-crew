@@ -30,8 +30,10 @@ export interface LandingRecord {
   /** sha256 of the file crew announced (the floor judged exactly these bytes). */
   sha256: string;
   floor: Omit<DocFloorCheck, 'version' | 'run_id' | 'source' | 'at' | 'sha256'>;
-  /** The writer's notes, as validated; `null` = this run recorded none (a run from before notes were required). */
-  notes: Omit<DocNotes, 'from_version' | 'run_id'> | null;
+  /** The writer's notes, as validated; `null` = this run recorded none (none written, or not the one valid shape). */
+  notes: Pick<DocNotes, 'left_out' | 'sources' | 'assumptions'> | null;
+  /** The sources CREW struck before the run (host-authored, kept apart from the writer's notes). */
+  struck: Array<{ token: string; reason: string }>;
 }
 
 interface File {
@@ -54,7 +56,9 @@ export class LandingRecordStore {
     if (path === null || !existsSync(path)) return { ref, runs: {} };
     try {
       const f = JSON.parse(readFileSync(path, 'utf8')) as File;
-      return f !== null && typeof f === 'object' && f.ref === ref && typeof f.runs === 'object' && f.runs !== null ? f : { ref, runs: {} };
+      if (f === null || typeof f !== 'object' || f.ref !== ref || typeof f.runs !== 'object' || f.runs === null) return { ref, runs: {} };
+      // A run id is data: never an inherited property (codex r1: `constructor`).
+      return { ref, runs: Object.assign(Object.create(null) as Record<string, LandingRecord>, f.runs) };
     } catch {
       return { ref, runs: {} };
     }
@@ -71,7 +75,8 @@ export class LandingRecordStore {
       const f = this.read(ref);
       f.runs[rec.runId] = rec;
       const ids = Object.keys(f.runs);
-      // Bounded: the oldest records go first (a document refined hundreds of times keeps its recent history).
+      // Bounded: the oldest records go first (a document refined hundreds of times keeps its recent history; an older
+      // version then reads "not recorded").
       if (ids.length > MAX_RUNS_PER_DOC) {
         for (const id of ids.sort((a, b) => f.runs[a]!.at.localeCompare(f.runs[b]!.at)).slice(0, ids.length - MAX_RUNS_PER_DOC)) delete f.runs[id];
       }
@@ -85,25 +90,43 @@ export class LandingRecordStore {
 
   /** The record of one run of a document, or `null`. */
   get(ref: string, runId: string): LandingRecord | null {
-    return this.read(ref).runs[runId] ?? null;
+    const runs = this.read(ref).runs;
+    return Object.hasOwn(runs, runId) ? runs[runId]! : null;
   }
 }
 
-/** The fields a valid `notes.json` holds, or `null` when it is not that (the floor already refused an invalid one). */
+/** Characters as garden counts them (code points, not UTF-16 units). */
+const chars = (v: string): number => [...v].length;
+
+/**
+ * The fields of a `notes.json` in the one shape garden's `notes_check.py` accepts, or `null` when it is not exactly
+ * that (codex r1: never a reduced, valid-looking copy of an invalid file).
+ */
 export function parseNotes(raw: unknown): Pick<DocNotes, 'left_out' | 'sources' | 'assumptions'> | null {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
   const o = raw as Record<string, unknown>;
-  const str = (v: unknown): v is string => typeof v === 'string' && v.trim() !== '' && v.length <= 1000;
-  if (!Array.isArray(o['left_out']) || !Array.isArray(o['sources']) || !Array.isArray(o['assumptions'])) return null;
-  const leftOut = (o['left_out'] as unknown[]).slice(0, 200).flatMap((x) => {
+  if (Object.keys(o).some((k) => k !== 'left_out' && k !== 'sources' && k !== 'assumptions')) return null;
+  const text = (v: unknown, cap: number): v is string => typeof v === 'string' && v.trim() !== '' && chars(v) <= cap;
+  const list = (v: unknown): v is unknown[] => Array.isArray(v) && v.length <= 200;
+  const keys = (r: object, want: string[]): boolean => Object.keys(r).length === want.length && want.every((k) => Object.hasOwn(r, k));
+  if (!list(o['left_out']) || !list(o['sources']) || !list(o['assumptions'])) return null;
+  const leftOut: DocNotes['left_out'] = [];
+  for (const x of o['left_out']) {
     const r = x as Record<string, unknown> | null;
-    return r !== null && typeof r === 'object' && str(r['claim']) && str(r['why']) ? [{ claim: r['claim'], why: r['why'] }] : [];
-  });
-  const sources = (o['sources'] as unknown[]).slice(0, 200).flatMap((x) => {
+    if (r === null || typeof r !== 'object' || !keys(r, ['claim', 'why']) || !text(r['claim'], 1000) || !text(r['why'], 1000)) return null;
+    leftOut.push({ claim: r['claim'], why: r['why'] });
+  }
+  const sources: DocNotes['sources'] = [];
+  for (const x of o['sources']) {
     const r = x as Record<string, unknown> | null;
-    return r !== null && typeof r === 'object' && str(r['token']) && typeof r['used'] === 'boolean' ? [{ token: r['token'], used: r['used'] }] : [];
-  });
-  const assumptions = (o['assumptions'] as unknown[]).slice(0, 200).filter(str);
+    if (r === null || typeof r !== 'object' || !keys(r, ['token', 'used']) || !text(r['token'], 300) || typeof r['used'] !== 'boolean') return null;
+    sources.push({ token: r['token'], used: r['used'] });
+  }
+  const assumptions: string[] = [];
+  for (const x of o['assumptions']) {
+    if (!text(x, 1000)) return null;
+    assumptions.push(x);
+  }
   return { left_out: leftOut, sources, assumptions };
 }
 
@@ -138,13 +161,11 @@ export function recordLanding(
   try {
     const st = lstatSync(input.notesPath);
     if (st.isFile() && st.size <= MAX_NOTES_BYTES) {
-      const parsed = parseNotes(JSON.parse(readFileSync(input.notesPath, 'utf8')));
-      if (parsed !== null) notes = { ...parsed, struck: [...(input.struck ?? [])] };
+      notes = parseNotes(JSON.parse(readFileSync(input.notesPath, 'utf8')));
     }
   } catch {
     notes = null; // no notes, or not readable: the record says none were recorded
   }
-  if (notes === null && (input.struck ?? []).length > 0) notes = { left_out: [], sources: [], assumptions: [], struck: [...input.struck!] };
   store.put(
     input.ref,
     {
@@ -153,6 +174,7 @@ export function recordLanding(
       sha256,
       floor: { verdict: input.floor.verdict, pages: input.floor.pages ?? null, summary: input.floor.summary },
       notes,
+      struck: [...(input.struck ?? [])],
     },
     log,
   );

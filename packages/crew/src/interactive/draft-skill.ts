@@ -249,8 +249,10 @@ export function draftSkillArmLine(seam: string, held: boolean): string {
 // ## The one divergence, and why it is safe
 //
 // The worker runs the check with `--render` (headless Chrome prints the document and the page count
-// is authoritative). Crew does not drive a browser at finalize, so its page count is the structural
-// estimate — a LOWER bound, which cannot see a wrapper that overflows its sheet. A breach is
+// is authoritative). Crew renders at finalize too when it has a renderer (PLAN G12: the operator's
+// `WICKED_CHROME`, else the Chromium of crew's conformance runtime, made on the first draft launch):
+// then the count is MEASURED and a count below an exact budget is a real refusal. Without one, its page
+// count is the structural estimate — a LOWER bound, which cannot see a wrapper that overflows its sheet. A breach is
 // therefore only reported when the count already EXCEEDS the budget (`> budget`): that direction is
 // proven without a render, while "fewer pages than an exact budget" is exactly what only a render
 // can judge and is left to the worker's own `--render` run and the page-count disclosure. The
@@ -299,8 +301,8 @@ interface SelfCheckReport {
 }
 
 /** `wicked-garden run scripts/draft/self_check.py …` as argv for `node <launcher>` — the same
- *  inputs the worker's clause names ({@link draftQualityClause}), minus `--render`: crew does not
- *  drive a browser at finalize (see the module note above). */
+ *  inputs the worker's clause names ({@link draftQualityClause}); `--render` only when crew has a renderer
+ *  (`opts.render`, see the module note above). */
 export function draftFloorArgv(
   gardenRoot: string,
   outPath: string,
@@ -359,7 +361,7 @@ function checkRecord(value: unknown): { ok?: unknown; [k: string]: unknown } | n
  * declares itself FAILED for a reason this floor does not recognise is a breach in its own right:
  * the floor reports the check's own `failed` list rather than passing a document the check refused.
  */
-export function draftFloorVerdict(report: unknown, budget: PageBudget): DraftFloorVerdict {
+export function draftFloorVerdict(report: unknown, budget: PageBudget, opts: { notes?: boolean } = {}): DraftFloorVerdict {
   if (typeof report !== 'object' || report === null) {
     return {
       verdict: 'unavailable',
@@ -452,8 +454,33 @@ export function draftFloorVerdict(report: unknown, budget: PageBudget): DraftFlo
   if (breaches.length > 0) {
     return {
       verdict: 'fail',
+      // (a breach the report proves stays a refusal whatever else it lacks)
       breaches,
       summary: `the draft floor FAILED on the saved document: ${breaches.length} breach(es) — ${breaches.join(' | ')}`,
+      pages: pagesRecord,
+    };
+  }
+  // A6 (codex/pi r1): the leak scan always runs, and the notes check whenever the floor named a notes file. A report
+  // without them (an older garden) did not run what this floor requires: never a pass.
+  const missing = [...(checkRecord(checks.leaks) === null ? ['leaks'] : []), ...(opts.notes === true && checkRecord(checks.notes) === null ? ['notes'] : [])];
+  if (missing.length > 0) {
+    return {
+      verdict: 'unavailable',
+      breaches: [],
+      summary:
+        `the draft floor could not be re-derived: the self-check did not run its ${missing.join(' and ')} check (a wicked-garden older ` +
+        `than the one with leak_scan.py and --notes?) — never a pass`,
+      pages: pagesRecord,
+    };
+  }
+  // codex r1: a check other than the page count that could not evaluate everything (a colour pair the contrast check
+  // cannot read) is unverified too, also when a renderer measured the pages: never recorded as a pass.
+  const otherUnverified = (Array.isArray(rep.unverified) ? rep.unverified : []).filter((n): n is string => typeof n === 'string' && n !== 'pages');
+  if (otherUnverified.length > 0 && !pagesUnverified) {
+    return {
+      verdict: 'unverified',
+      breaches: [],
+      summary: `the draft floor met every rule it could judge; ${otherUnverified.join(', ')} could not be fully evaluated (UNVERIFIED, not passed)`,
       pages: pagesRecord,
     };
   }
@@ -466,7 +493,8 @@ export function draftFloorVerdict(report: unknown, budget: PageBudget): DraftFlo
       breaches: [],
       summary:
         `the draft floor met every rule it could judge; the page count is UNVERIFIED — unmeasured without a render ` +
-        `(${estimate}${against}; a lower bound only a render can confirm — the worker's own --render run is the measurement)`,
+        `(${estimate}${against}; a lower bound only a render can confirm — the worker's own --render run is the measurement)` +
+        (otherUnverified.length > 0 ? `; ${otherUnverified.join(', ')} could not be fully evaluated either` : ''),
       pages: pagesRecord,
     };
   }
@@ -567,5 +595,5 @@ export async function runDraftFloor(
         `JSON report (is Python 3 installed for the wicked-garden launcher?)`,
     };
   }
-  return draftFloorVerdict(report, budget);
+  return draftFloorVerdict(report, budget, { notes: opts.notes !== undefined });
 }

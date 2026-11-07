@@ -8434,9 +8434,10 @@ export interface DocChecksResponse {
    */
   notes?: DocNotes | null;
   /**
-   * (api-types 0.197.0, PLAN G12) The floor crew measured on the asked version's own file before it landed: a HOST
-   * measurement (draw it "measured by the host"), never a review. `null` = not measured (a version a person made by
-   * hand, or one from before this record). Absent on an older daemon.
+   * (api-types 0.197.0, PLAN G12) The floor crew measured on the file the asked version's run announced, right before
+   * it landed (interactive then adds its anchors and the document's theme): a HOST measurement (draw it "measured by the
+   * host"), never a review. `null` = not measured (a version a person made by hand, one from before this record, or one
+   * whose record expired: crew keeps the newest 500 per document). Absent on an older daemon.
    */
   floor?: DocFloorCheck | null;
 }
@@ -8451,7 +8452,8 @@ export interface DocNotes {
   /** The source tokens the writer was given, and whether it used each. */
   sources: Array<{ token: string; used: boolean }>;
   assumptions: string[];
-  /** Sources crew struck before the run (not authorized, gone, too large), with the reason. */
+  /** Sources CREW struck before that run (not authorized, gone, too large), with the reason: crew's own record, not the
+   *  writer's. */
   struck: Array<{ token: string; reason: string }>;
 }
 
@@ -8468,7 +8470,7 @@ export interface DocFloorCheck {
   pages: { count: number; measured: boolean; budget: number | null; exact: boolean } | null;
   /** One plain sentence. */
   summary: string;
-  /** sha256 of the exact file the floor judged. */
+  /** sha256 of the exact file the floor judged (as the run announced it, before interactive anchored and themed it). */
   sha256: string;
   /** ISO-8601. */
   at: string;
