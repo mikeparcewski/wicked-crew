@@ -221,7 +221,8 @@ function rowLine(r: CostRow): string {
 }
 
 /**
- * The facts as the `facts` step prints them, the whole block within `budget` bytes: a header (window, scope, what is left
+ * The facts as the `facts` step prints them, the whole block within `budget` bytes (any budget above the fixed header
+ * and its closing lines, about 2 KB; the step prints with {@link COST_TEXT_BUDGET}): a header (window, scope, what is left
  * out, the rules, the citation grammar), the groups largest first (a group's lines whole; groups that do not fit are
  * named on one line, as far as it fits, and counted), then the runs newest first, the omitted count said. Every
  * statistic is over every run of its group, shown or not.
