@@ -407,7 +407,9 @@ describe('A6/G12 r1 folds — a check that did not run, or could not evaluate, i
   it('a page count with no verified flag, or one the report lists as UNVERIFIED, is never a pass (codex r3)', () => {
     const r = report() as { checks: Record<string, unknown> } & Record<string, unknown>;
     expect(draftFloorVerdict({ ...r, checks: { ...r.checks, pages: { pages: 2 } } }, EXACT_2).verdict).toBe('unavailable');
-    expect(draftFloorVerdict({ ...r, verdict: 'UNVERIFIED', unverified: ['pages'] }, EXACT_2).verdict).toBe('unverified');
+    const listed = draftFloorVerdict({ ...r, verdict: 'UNVERIFIED', unverified: ['pages'] }, EXACT_2);
+    expect(listed.verdict).toBe('unverified');
+    expect(listed.pages?.measured).toBe(false);
   });
 
   it('an unverified contrast pair with a measured page count is unverified, not pass', () => {

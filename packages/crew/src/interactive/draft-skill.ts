@@ -423,7 +423,7 @@ export function draftFloorVerdict(report: unknown, budget: PageBudget, opts: { n
   const pagesUnverified =
     (pages !== undefined && pages.verified === false) || (Array.isArray(rep.unverified) && rep.unverified.includes('pages'));
   const pagesRecord: DraftFloorVerdict['pages'] =
-    count !== null ? { count, measured: pages?.verified === true, budget: budget.pages, exact: budget.exact } : null;
+    count !== null ? { count, measured: pages?.verified === true && !pagesUnverified, budget: budget.pages, exact: budget.exact } : null;
   if (budget.pages !== null && count !== null && count > budget.pages) {
     breaches.push(
       `pages: the brief's budget is ${budget.pages} printed page(s)${budget.exact ? ' exactly' : ' at most'} and the ` +
