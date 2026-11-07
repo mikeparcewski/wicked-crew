@@ -493,6 +493,20 @@ describe('no stale block, no silent loss (xreview r1)', () => {
     expect(engine.held.get('run-1')?.sections[0]?.text).toBe('G2');
   });
 
+  it('an ended job, an unknown job and a refusal whose clear landed are not retried (no storm)', async () => {
+    for (const why of ['conflict: run run-1 has ended', 'not_found: run run-1', 'bad_request: run context refused: too long']) {
+      const t = setup({ retryMs: [20, 20, 20] });
+      await t.service.ensure('run-1');
+      await t.edit({ goal: 'G1' });
+      t.engine.refuse = (ctx) => (ctx.sections.length > 0 ? why : null);
+      await t.edit({ goal: 'G2' });
+      const calls = t.engine.calls.length;
+      await wait(100);
+      expect(t.engine.calls.length, why).toBe(calls);
+      expect(t.store.get('run-1')?.context?.retry, why).toBe(false);
+    }
+  });
+
   it('a clear that fails says the earlier context is still in force and is being retried', async () => {
     const t = setup({ retryMs: [600_000] });
     await t.service.ensure('run-1');
