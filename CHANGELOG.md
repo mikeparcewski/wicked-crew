@@ -13,9 +13,10 @@ mentioned only where a daemon release depends on them.
 ### Added
 
 - **Chat refines the open document, deck or page, and keeps the person's own edits (DES-CHAT-ARTIFACTS-001 A5;
-  plugins-complete G4; api-types 0.197.0).** `capabilities.chatArtifacts.refine` is on wherever the chat seam is armed,
-  so a seat proposes a `refine` card for a change to the open document instead of a new one (its instructions now say
-  a change keeps the document; a new audience or form is new work; either reading gets one question). The card lists
+  plugins-complete G4; api-types 0.197.0).** The refine launcher, its landing guard and the card's protected edits;
+  `capabilities.chatArtifacts.refine` turns on (and the launcher is registered) in a follow-up to the proposal-launcher
+  assembly, so a seat then proposes a `refine` card for a change to the open document instead of a new one. Its
+  instructions say a change keeps the document; a new audience or form is new work; either reading gets one question. The card lists
   the person's protected edits (`ArtifactProposal.protected`, recomputed from the document's version lineage: a
   person's writes, deck moves and removals are kept; a run's version releases only what the person let that run
   change; undo follows the parent chain; a theme protects nothing); `ProposalEdits.allow` lets the person release one,
