@@ -632,7 +632,7 @@ function holdStoreReadsUntilBooted(core: CoreHandleFull): CoreHandleFull {
 
 /**
  * F35: the engine calls that change nothing a run view reads, so they leave the shared views snapshot
- * valid (`CoreAdapter.viewsSnapshot`). Reads only. Every call NOT named here counts as a possible
+ * valid (`CoreAdapter.viewsRead`). Reads only. Every call NOT named here counts as a possible
  * write and invalidates the snapshot, so a binding added later is safe by default: it costs one
  * refold, never a stale view.
  */
@@ -661,7 +661,14 @@ const VIEW_NEUTRAL_CALLS: ReadonlySet<string> = new Set([
  * F35: the live streams that write nothing a run view reads. Every other engine frame may follow a
  * change to a run, so it invalidates the views snapshot.
  */
-const VIEW_NEUTRAL_EVENTS: ReadonlySet<string> = new Set(['unitOutputDelta', 'terminalOutput']);
+const VIEW_NEUTRAL_EVENTS: ReadonlySet<string> = new Set([
+  'heartbeat', // the actor's liveness answer (a `/health` ping)
+  'cliOutputDelta',
+  'unitOutputDelta',
+  'toolActivity', // a seat's live tool calls; the unit record is written when the turn ends, with its own frames
+  'chatDelta',
+  'terminalOutput',
+]);
 
 /**
  * The engine handle with every call that may write reported to `changed`, once when it is made and
@@ -698,11 +705,19 @@ function reportEngineWrites(core: CoreHandleFull, changed: () => void): CoreHand
 export const VIEWS_SNAPSHOT_MAX_AGE_MS = 2_000;
 
 /**
- * One fold of the engine's run views, parsed once and shared (F35). Deep-frozen: hand a caller a
- * clone (`runView`, `sessionsDetail`), never these objects, since callers decorate views in place.
+ * One fold of the engine's run views, parsed once and shared (F35). Deep-frozen, so it is the same
+ * object for every caller until the store may have changed: hand a caller a clone (`runView`,
+ * `sessionsDetail`), never these objects, since callers decorate views in place.
  */
 export interface RunViewsSnapshot {
   readonly views: readonly SessionView[];
+}
+
+/** A views snapshot with what the adapter keeps beside it: the version and the monotonic time its fold started. */
+interface ViewsRead {
+  readonly epoch: number;
+  readonly at: number;
+  readonly snapshot: RunViewsSnapshot;
   readonly byId: ReadonlyMap<string, SessionView>;
 }
 
@@ -1461,7 +1476,7 @@ export class CoreAdapter {
     if (diskQeAcceptanceMode() === 'off') process.env['WICKED_QE_ACCEPTANCE_OFF'] = QE_OFF_REASON;
     else delete process.env['WICKED_QE_ACCEPTANCE_OFF'];
     try {
-      // F35: every engine call that may write moves the views version (`viewsSnapshot`).
+      // F35: every engine call that may write moves the views version (`viewsRead`).
       this.core = reportEngineWrites(
         holdStoreReadsUntilBooted(this.stub ? Core.spawnStub(opts.dbPath) : Core.spawn(opts.dbPath)),
         () => {
@@ -2748,20 +2763,23 @@ export class CoreAdapter {
    * for skins that read it (studio's run-kind list, until it reads `run_identity.system`); a run
    * with no name (a user plan, free text, unknown) keeps the engine's id.
    *
-   * The caller's own copy of the shared snapshot (`viewsSnapshot`): it may decorate it in place.
+   * The caller's own copy of the shared snapshot (`viewsRead`): it may decorate it in place.
    * A caller that needs one run reads `runView` instead, which copies only that run (F35).
    */
   async sessionsDetail(): Promise<SessionView[]> {
-    return structuredClone((await this.viewsSnapshot()).views) as SessionView[];
+    return structuredClone((await this.viewsRead()).snapshot.views) as SessionView[];
   }
 
   /**
    * One run's view (as `sessionsDetail` serves it), or `undefined` for an unknown id: the caller's own
    * copy of that run only, so a request about one run costs O(1) in the number of runs on the store
-   * once the snapshot is read (F35).
+   * once the snapshot is read (F35). `fresh`: the caller holds a newer record of the store than the
+   * snapshot's (say a gate row the engine wrote before its frame landed), so the run is read from a
+   * fold that starts after this call.
    */
-  async runView(runId: string): Promise<SessionView | undefined> {
-    const view = (await this.viewsSnapshot()).byId.get(runId);
+  async runView(runId: string, opts?: { fresh?: boolean }): Promise<SessionView | undefined> {
+    if (opts?.fresh === true) this.viewsEpoch++;
+    const view = (await this.viewsRead()).byId.get(runId);
     return view === undefined ? undefined : structuredClone(view);
   }
 
@@ -2769,38 +2787,38 @@ export class CoreAdapter {
    * The shared, deep-frozen views snapshot itself — the same object for every caller until the store
    * changes. For a cache derived from the views (keyed by this object); never mutate it (F35).
    */
-  runViewsSnapshot(): Promise<RunViewsSnapshot> {
-    return this.viewsSnapshot();
+  async runViewsSnapshot(): Promise<RunViewsSnapshot> {
+    return (await this.viewsRead()).snapshot;
   }
 
-  /** The newest views snapshot read, with the version its fold started at and when (F35). */
-  private viewsLatest: (RunViewsSnapshot & { epoch: number; at: number }) | null = null;
-  /** The fold running now and the version it started at; the one fold queued behind it. */
-  private viewsRunning: { epoch: number; snapshot: Promise<RunViewsSnapshot> } | null = null;
-  private viewsNext: Promise<RunViewsSnapshot> | null = null;
+  /** The newest views snapshot read (F35). */
+  private viewsLatest: ViewsRead | null = null;
+  /** The fold running now, with the version and time it started at; the one fold queued behind it. */
+  private viewsRunning: { epoch: number; at: number; read: Promise<ViewsRead> } | null = null;
+  private viewsNext: Promise<ViewsRead> | null = null;
 
   /**
    * The engine's run views, read through ONE shared snapshot (F35). The engine's whole-store fold is
    * parsed once per fold, not once per caller: a JS heap OOM on the rig came from every gate poll
    * parsing every run, many polls at once.
    *
-   * A snapshot serves while its fold started at the current views version (`viewsEpoch`: no engine
-   * frame and no engine call that may write since) and is younger than
-   * {@link VIEWS_SNAPSHOT_MAX_AGE_MS}. Otherwise the caller joins the running fold when that started
-   * at the current version, else the one fold queued behind it (crew#944: at most one running, one
-   * queued, since each fold holds a libuv worker on the engine's actor). So a caller never reads a
-   * fold that started before a change it could have seen.
+   * A fold serves while it started at the current views version (`viewsEpoch`: no engine frame
+   * other than the live streams and no engine call that may write since) less than
+   * {@link VIEWS_SNAPSHOT_MAX_AGE_MS} ago, on the monotonic clock; that holds for the last fold read
+   * and for the one running. Otherwise the caller takes the one fold queued behind the running one
+   * (crew#944: at most one running, one queued, since each fold holds a libuv worker on the engine's
+   * actor). So a caller never reads a fold that started before a change this adapter made or a frame
+   * it delivered, and a change it learned of no other way is at most that bound old.
    */
-  private viewsSnapshot(): Promise<RunViewsSnapshot> {
+  private viewsRead(): Promise<ViewsRead> {
     const epoch = this.viewsEpoch;
+    const fresh = (r: { epoch: number; at: number }): boolean => r.epoch === epoch && performance.now() - r.at < VIEWS_SNAPSHOT_MAX_AGE_MS;
     const latest = this.viewsLatest;
-    if (latest !== null && latest.epoch === epoch && Date.now() - latest.at < VIEWS_SNAPSHOT_MAX_AGE_MS) {
-      return Promise.resolve(latest);
-    }
-    if (this.viewsRunning !== null && this.viewsRunning.epoch === epoch) return this.viewsRunning.snapshot;
+    if (latest !== null && fresh(latest)) return Promise.resolve(latest);
+    if (this.viewsRunning !== null && fresh(this.viewsRunning)) return this.viewsRunning.read;
     if (this.viewsNext !== null) return this.viewsNext;
     if (this.viewsRunning === null) return this.foldViews();
-    const next = this.viewsRunning.snapshot
+    const next = this.viewsRunning.read
       .catch(() => undefined)
       .then(() => {
         this.viewsNext = null;
@@ -2810,20 +2828,20 @@ export class CoreAdapter {
     return next;
   }
 
-  private foldViews(): Promise<RunViewsSnapshot> {
+  private foldViews(): Promise<ViewsRead> {
     const epoch = this.viewsEpoch;
-    const at = Date.now();
-    const snapshot = (async (): Promise<RunViewsSnapshot> => {
+    const at = performance.now();
+    const read = (async (): Promise<ViewsRead> => {
       const views = JSON.parse(await this.core.sessionsDetail()) as SessionView[];
       await this.resolveIdentities(views);
       deepFreeze(views);
-      const read = { epoch, at, views, byId: new Map(views.map((v) => [v.session.id, v] as const)) };
-      this.viewsLatest = read;
-      return read;
+      const done: ViewsRead = { epoch, at, snapshot: Object.freeze({ views }), byId: new Map(views.map((v) => [v.session.id, v] as const)) };
+      this.viewsLatest = done;
+      return done;
     })();
-    const running = { epoch, snapshot };
+    const running = { epoch, at, read };
     this.viewsRunning = running;
-    snapshot.then(
+    read.then(
       () => {
         if (this.viewsRunning === running) this.viewsRunning = null;
       },
@@ -2831,7 +2849,7 @@ export class CoreAdapter {
         if (this.viewsRunning === running) this.viewsRunning = null;
       },
     );
-    return snapshot;
+    return read;
   }
 
   /** Attach each view's `run_identity` (seam X2), rewriting a synthetic `workflow_id` to its name. */

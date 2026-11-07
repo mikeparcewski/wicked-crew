@@ -2649,9 +2649,13 @@ export function registerRoutes(
     }
   };
 
-  /** The seat records read for one views snapshot (F35), by `<days> <project>`; dropped when the snapshot changes. */
-  const seatRecords = new Map<string, Promise<SeatRecordResponse | null>>();
-  let seatRecordsOf: RunViewsSnapshot | null = null;
+  /**
+   * The seat record per query (`<days> <project>`), F35: one read at a time per query, which every
+   * caller asking meanwhile shares, kept while the views snapshot it was read from is current.
+   * At most {@link SEAT_RECORDS_KEPT} queries are kept.
+   */
+  const seatRecords = new Map<string, { of: RunViewsSnapshot; read: Promise<SeatRecordResponse | null>; settled: boolean }>();
+  const SEAT_RECORDS_KEPT = 16;
   const readSeatRecord = async (snapshot: RunViewsSnapshot, days: number, project: string | undefined): Promise<SeatRecordResponse | null> => {
     const detail = structuredClone(snapshot.views) as SessionView[];
     await backfillEndedAt(detail);
@@ -2693,24 +2697,27 @@ export function registerRoutes(
         return reply.code(400).send({ error: 'Invalid ?project — expected one project id' });
       }
       const project = rawProject?.trim();
-      // F35: one fold of the record per views snapshot and query, shared by every caller asking
-      // meanwhile — it reads up to SEAT_RECORD_RUN_CAP run logs, and studio asks from every tab.
+      // F35: it reads up to SEAT_RECORD_RUN_CAP run logs and studio asks from every tab, so one read
+      // per query runs at a time, shared, and is kept while its views snapshot is current.
       const snapshot = await adapter.runViewsSnapshot();
-      if (snapshot !== seatRecordsOf) {
-        seatRecordsOf = snapshot;
-        seatRecords.clear();
-      }
       const key = `${days} ${project ?? ''}`;
-      let read = seatRecords.get(key);
-      if (read === undefined) {
-        const started = readSeatRecord(snapshot, days, project);
-        read = started;
+      let entry = seatRecords.get(key);
+      if (entry === undefined || (entry.settled && entry.of !== snapshot)) {
+        const started = { of: snapshot, read: readSeatRecord(snapshot, days, project), settled: false };
+        seatRecords.delete(key);
         seatRecords.set(key, started);
-        started.catch(() => {
-          if (seatRecords.get(key) === started) seatRecords.delete(key);
-        });
+        if (seatRecords.size > SEAT_RECORDS_KEPT) seatRecords.delete(seatRecords.keys().next().value!);
+        started.read.then(
+          () => {
+            started.settled = true;
+          },
+          () => {
+            if (seatRecords.get(key) === started) seatRecords.delete(key);
+          },
+        );
+        entry = started;
       }
-      const out = await read;
+      const out = await entry.read;
       if (out === null) {
         return reply.code(503).send({ error: 'Seat records are unavailable: this wicked-core build has no event-log read binding' });
       }
@@ -4129,11 +4136,13 @@ export function registerRoutes(
       // are one step, so a gate answered at the same moment can never be stopped by a resolve. The
       // status is read again inside the lock, right before the stop.
       const outcome = await decideExclusively(id, async (): Promise<{ code: number; body: unknown }> => {
+        // The replacement is looked up first, so the run's own status is the last read before the stop.
+        const byKnown = b.action === 'superseded' && b.by !== id ? (await adapter.runView(b.by)) !== undefined : true;
         const run = await adapter.runView(id);
         if (run === undefined) return { code: 404, body: { error: 'Run not found' } };
         if (b.action === 'superseded') {
           if (b.by === id) return { code: 400, body: { error: '`by` must name another run' } };
-          if ((await adapter.runView(b.by)) === undefined) return { code: 400, body: { error: `\`by\` names an unknown run: ${b.by}` } };
+          if (!byKnown) return { code: 400, body: { error: `\`by\` names an unknown run: ${b.by}` } };
         }
         const status = run.session.status;
         if (status !== 'awaiting_human' && status !== 'failed' && status !== 'completed' && status !== 'cancelled') {
@@ -7630,10 +7639,10 @@ export function registerRoutes(
   // read it. A restart is routine: deploy, crash, laptop sleep.
   app.get(`${V}/runs/:id/gate`, async (req, reply) => {
     const { id } = req.params as { id: string };
-    // F35: this run's view, read once per request — never every run's (studio polls this route for
-    // every parked run, from every open tab).
-    let viewRead: Promise<SessionView | undefined> | null = null;
-    const runOf = (): Promise<SessionView | undefined> => (viewRead ??= adapter.runView(id));
+    // F35: this run's view only, never every run's (studio polls this route for every parked run, from
+    // every open tab). Each read is a copy of one run from the shared snapshot, so a read after an
+    // await sees a change that landed during it.
+    const runOf = (): Promise<SessionView | undefined> => adapter.runView(id);
     // wicked-core#850: the gate answer carries the gated unit's receipt — what assured the work it asks about.
     const unitAt = async (ord: number): Promise<WorkUnit | undefined> => (await runOf())?.units?.find((u) => u.ord === ord);
     // (rejudge, api-types 0.134.0) A gate whose unit no judge could rule on says whether its judge
@@ -7712,7 +7721,13 @@ export function registerRoutes(
     // cut of this assumed: it trades one read of the run's view for replaying an entire event history,
     // and it was that skipped check which made a completed run answer 503 on any build without the
     // binding (CI caught it) — an error where the honest, knowable answer was "no gate".
-    const run = await runOf();
+    let run = await runOf();
+    // F35: the engine's gate record was read before the view and outranks it. A record showing a gate
+    // open beside a view of a run still moving means the shared snapshot predates the pause (its frame
+    // has not landed yet): read the run from a fold that starts now.
+    if (run !== undefined && run.session.status !== 'awaiting_human' && recorded?.state === 'open') {
+      run = await adapter.runView(id, { fresh: true });
+    }
     if (!run) return reply.code(404).send({ error: 'Run not found' });
     if (run.session.status !== 'awaiting_human') {
       return reply.code(404).send({ error: 'No open gate for this run' });

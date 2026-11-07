@@ -26,6 +26,9 @@ let folds: number;
 /** JSON.parse calls on a fold's answer: how many whole-store copies the daemon built. */
 let fullParses: number;
 let store: unknown[];
+/** Set: each fold waits for the test to answer it (`held`), instead of answering on a later turn. */
+let holdFolds: boolean;
+let held: Array<() => void>;
 
 /** A parked run with a few units, about the size of a real one's view. */
 function parkedRun(id: string): unknown {
@@ -41,6 +44,9 @@ function parkedRun(id: string): unknown {
   };
 }
 
+/** One frame off the engine's subscription, as the binding delivers it. */
+const frame = (event: Record<string, unknown>): void =>
+  (adapter as unknown as { onEngineFrame: (e: Error | null, j: string) => void }).onEngineFrame(null, JSON.stringify(event));
 const core = (): Record<string, unknown> => (adapter as unknown as { core: Record<string, unknown> }).core;
 const tick = () => new Promise((r) => setImmediate(r));
 
@@ -56,14 +62,18 @@ beforeEach(() => {
   folds = 0;
   fullParses = 0;
   seed(150);
-  // The engine's whole-store fold: answered on a later turn, like the actor's reply.
+  holdFolds = false;
+  held = [];
+  // The engine's whole-store fold: the store as it is when the fold starts, answered on a later turn
+  // like the actor's reply (or when the test says, under `holdFolds`).
   core()['sessionsDetail'] = () =>
     new Promise<string>((resolve) => {
       folds++;
       // A fresh string per fold (as the binding returns), so parses of it can be told apart.
       const json = JSON.stringify(store) + ' '.repeat(folds);
       foldStrings.add(json);
-      setTimeout(() => resolve(json), 5);
+      if (holdFolds) held.push(() => resolve(json));
+      else setImmediate(() => resolve(json));
     });
   core()['interactionRequests'] = async (sessionId: string) =>
     JSON.stringify([{ id: `g-${sessionId}`, session_id: sessionId, kind: 'gate', ord: 2, prompt: 'Approve step 2?', status: 'open', created_at: 1_785_614_004_730 }]);
@@ -138,13 +148,15 @@ describe('F35: run views are read through one shared snapshot', () => {
     await adapter.runView('run-0');
     await adapter.sessionsDetail();
     expect(folds).toBe(1);
-    // A live output stream changes no view.
-    (adapter as unknown as { onEngineFrame: (e: Error | null, j: string) => void }).onEngineFrame(null, JSON.stringify({ type: 'unitOutputDelta', session: 'run-0' }));
+    // The live streams and the actor's liveness answer change no view.
+    for (const type of ['heartbeat', 'cliOutputDelta', 'unitOutputDelta', 'toolActivity', 'chatDelta', 'terminalOutput']) {
+      frame({ type, session: 'run-0' });
+    }
     await adapter.runView('run-0');
     expect(folds).toBe(1);
     // Any other frame may follow a change.
     store = [parkedRun('run-0'), { ...(parkedRun('run-1') as object), session: { id: 'run-1', status: 'completed', team_plan: { rev: 1 } } }];
-    (adapter as unknown as { onEngineFrame: (e: Error | null, j: string) => void }).onEngineFrame(null, JSON.stringify({ type: 'sessionCompleted', session: 'run-1' }));
+    frame({ type: 'sessionCompleted', session: 'run-1' });
     expect((await adapter.runView('run-1'))!.session.status).toBe('completed');
     expect(folds).toBe(2);
     // An engine call that may write (here a cancel) moves the version too: read-your-writes.
@@ -157,14 +169,54 @@ describe('F35: run views are read through one shared snapshot', () => {
     await adapter.sessions().catch(() => undefined);
     await adapter.runView('run-0');
     expect(folds).toBe(3);
-    // Age bounds a change no frame reported.
-    const now = Date.now();
-    vi.spyOn(Date, 'now').mockReturnValue(now + VIEWS_SNAPSHOT_MAX_AGE_MS + 1);
+    // Age, on the monotonic clock, bounds a change no frame reported.
+    const now = performance.now();
+    vi.spyOn(performance, 'now').mockReturnValue(now + VIEWS_SNAPSHOT_MAX_AGE_MS + 1);
     await adapter.runView('run-0');
     expect(folds).toBe(4);
+    // A caller holding a newer record asks for a fresh read.
+    await adapter.runView('run-0', { fresh: true });
+    expect(folds).toBe(5);
+  });
+
+  it('the shared snapshot cannot be changed through what runViewsSnapshot hands out', async () => {
+    const snap = await adapter.runViewsSnapshot();
+    expect(Object.isFrozen(snap)).toBe(true);
+    expect(Object.isFrozen(snap.views)).toBe(true);
+    expect(Object.keys(snap)).toEqual(['views']);
+    expect(await adapter.runViewsSnapshot()).toBe(snap);
+  });
+
+  it('a running fold older than the bound is not joined; the caller takes the queued one', async () => {
+    holdFolds = true;
+    const first = adapter.runView('run-0');
+    await tick();
+    expect(folds).toBe(1);
+    const now = performance.now();
+    vi.spyOn(performance, 'now').mockReturnValue(now + VIEWS_SNAPSHOT_MAX_AGE_MS + 1);
+    const late = adapter.runView('run-0');
+    await tick();
+    expect(folds).toBe(1);
+    held.shift()!();
+    await first;
+    await tick();
+    expect(folds).toBe(2);
+    held.shift()!();
+    await late;
+  });
+
+  it('a gate the record shows open is served even when the snapshot predates the pause', async () => {
+    store = store.map((v) => ({ ...(v as object), session: { ...(v as { session: object }).session, status: 'executing' } }));
+    await adapter.runView('run-0'); // the snapshot is read while the run executes
+    seed(150); // the engine parks it and writes the gate row; its frame has not landed
+    const server = await routes();
+    const res = await server.inject({ method: 'GET', url: '/api/v1/runs/run-0/gate' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toMatchObject({ runId: 'run-0', ord: 2 });
   });
 
   it('a caller never takes a fold that started before a change it saw; at most one fold runs and one is queued', async () => {
+    holdFolds = true;
     const first = adapter.runView('run-0');
     await tick();
     core()['cancelRun'] = async () => JSON.stringify('cancelled');
@@ -172,7 +224,11 @@ describe('F35: run views are read through one shared snapshot', () => {
     const later = Array.from({ length: 20 }, () => adapter.runView('run-0'));
     await tick();
     expect(folds).toBe(1); // the 20 wait for the queued fold; they do not start their own
+    held.shift()!();
     await first;
+    await tick();
+    expect(folds).toBe(2);
+    held.shift()!();
     await Promise.all(later);
     expect(folds).toBe(2);
     expect(fullParses).toBe(2);
@@ -194,5 +250,15 @@ describe('F35: run views are read through one shared snapshot', () => {
     // A read while the snapshot holds is served from that fold.
     await server.inject({ method: 'GET', url: '/api/v1/roster/record?days=7' });
     expect(logReads).toBe(150);
+    // Another query is its own read, not the first one's answer.
+    const other = await server.inject({ method: 'GET', url: '/api/v1/roster/record?days=8' });
+    expect(other.json()).toMatchObject({ days: 8, runsRead: 150 });
+    expect(logReads).toBe(300);
+    const scoped = await server.inject({ method: 'GET', url: '/api/v1/roster/record?days=7&project=nope' });
+    expect(scoped.json()).toMatchObject({ days: 7, project: 'nope', runsRead: 0 });
+    // Once the store may have changed, the record is read again.
+    frame({ type: 'unitDone', session: 'run-0', ord: 1 });
+    await server.inject({ method: 'GET', url: '/api/v1/roster/record?days=7' });
+    expect(logReads).toBe(450);
   });
 });
