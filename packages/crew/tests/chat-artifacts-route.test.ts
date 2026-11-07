@@ -102,6 +102,20 @@ describe('chat sees artifacts and runs (server, A1)', () => {
     chatClose: async () => undefined,
     chatList: async () => [],
     onboardedRepoOf: () => undefined,
+    // crew#1412: the requirements read of the one mapped repository (`r-req`); any other has none.
+    getRequirementsGraphForRepo: async (id: string) => {
+      if (id !== 'r-req') return { graph: null, coverage: null };
+      const cov = { real_pct: 100, min_pct: 80, behavior_bearing: 3, real: 3, placeholders: 0, unmapped: 0, not_product: 5 };
+      const req = (title: string, statement: string) => ({ title, status: 'active', business_rules: [{ id: 'RULE-1', statement, confidence: 0.9 }] });
+      return {
+        graph: { metadata: { coverage: cov }, domains: { src: { requirements: { 'REQ-001': req('clamp', 'clamp holds n in [lo, hi]'), 'REQ-002': req('mean', 'mean is the sum over the count'), 'REQ-003': req('sum', 'sum includes every element') } } } },
+        coverage: cov,
+        rows: { src: { 'REQ-001': { real: true, uncounted: null, code_mismatch: null }, 'REQ-002': { real: true, uncounted: null, code_mismatch: 'inherits sum’s skip' }, 'REQ-003': { real: true, uncounted: null, code_mismatch: 'the loop starts at index 1' } } },
+        build: { generation: 1, coverage: cov },
+        code: { built_from: { commit: '8cc32aabde358bf81042ed116623a51c0ef03a96', at: null, basis: 'build' }, head: '1111111111111111111111111111111111111111', commits_behind: 1 },
+        target: { repo: null, daemon: 80 },
+      };
+    },
   }) as unknown as CoreAdapter;
 
   beforeAll(async () => {
@@ -251,6 +265,55 @@ describe('chat sees artifacts and runs (server, A1)', () => {
       refused: [],
       page: true,
     });
+  });
+
+  it('a repo chat’s seat reads the repository’s requirements map: REQ ids, statements, mismatches, STALE (crew#1412)', async () => {
+    const root = join(scratch, 'repo-req');
+    mkdirSync(join(root, '.codegraph'), { recursive: true });
+    writeFileSync(join(root, '.codegraph', 'estate.db'), '');
+    repos = [{ id: 'r-req', name: 'reqgraph-tm', root_path: root, default_branch: 'main', registered_at: 1, code_graph_db: join(root, '.codegraph', 'estate.db') } as (typeof repos)[number]];
+    try {
+      const opened = await open(app, { chatId: 'req-1', clis: ['claude'], repoRefs: ['r-req'] });
+      expect(opened.statusCode).toBe(201);
+      const res = await send(app, 'req-1', { text: 'What does reqgraph-tm require, and which requirements does its code not meet?' });
+      expect(res.statusCode).toBe(202);
+      const input = launches.at(-1)!;
+      const instructions = (input.plan as unknown as { steps: Array<{ instructions: string }> }).steps[0]!.instructions;
+      expect(instructions).toContain('### Requirements maps');
+      const cwd = realpathSync(JSON.parse(opened.body).scope.cwd as string);
+      expect(input.extraReadRoots).toEqual(expect.arrayContaining([join(cwd, 'requirements')]));
+      // The seat could read the map it was handed, inside its read roots.
+      const map = [...seatRead.keys()].find((k) => k.startsWith(join(cwd, 'requirements', 'r-req.')));
+      expect(map).toMatch(/\.[0-9a-f]{12}\.md$/);
+      const text = seatRead.get(map!)!;
+      for (const id of ['REQ-001', 'REQ-002', 'REQ-003']) expect(text).toContain(id);
+      expect(text).toContain('Code does not meet it: the loop starts at index 1');
+      expect(text).toContain('Code does not meet it: inherits sum’s skip');
+      expect(text).toContain('STALE');
+    } finally {
+      repos = [];
+    }
+  });
+
+  it('a planted file where the artifact copies go costs only those: the requirements map is still read (crew#1412, codex r2)', async () => {
+    const root = join(scratch, 'repo-req2');
+    mkdirSync(join(root, '.codegraph'), { recursive: true });
+    writeFileSync(join(root, '.codegraph', 'estate.db'), '');
+    repos = [{ id: 'r-req', name: 'reqgraph-tm', root_path: root, default_branch: 'main', registered_at: 1, code_graph_db: join(root, '.codegraph', 'estate.db') } as (typeof repos)[number]];
+    try {
+      const opened = await open(app, { chatId: 'req-2', clis: ['claude'], repoRefs: ['r-req'] });
+      expect(opened.statusCode).toBe(201);
+      const cwd = realpathSync(JSON.parse(opened.body).scope.cwd as string);
+      writeFileSync(join(cwd, 'open'), 'not a folder');
+      expect((await send(app, 'req-2', { text: 'What does reqgraph-tm require?' })).statusCode).toBe(202);
+      const input = launches.at(-1)!;
+      expect(input.extraReadRoots).toEqual(expect.arrayContaining([join(cwd, 'requirements')]));
+      expect(input.extraReadRoots).not.toEqual(expect.arrayContaining([join(cwd, 'open')]));
+      const map = [...seatRead.keys()].find((k) => k.startsWith(join(cwd, 'requirements', 'r-req.')));
+      expect(seatRead.get(map!)).toContain('REQ-003');
+    } finally {
+      repos = [];
+    }
   });
 
   it('refuses another project’s run and document in a project chat: nothing of them reaches the seat', async () => {

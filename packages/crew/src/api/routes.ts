@@ -49,14 +49,24 @@ function ensureDir(dir: string): string {
  *  root, as the seat sees them; none where the platform cannot open beneath a root, or when they cannot be made. */
 function turnReadRoots(scratchRoot: string): string[] {
   if (!beneathSupported()) return [];
+  const real = seatPathOf(scratchRoot);
+  const roots: string[] = [];
   try {
     ensureRealDir(contextReadRoots(scratchRoot).open);
     ensureRealDir(contextReadRoots(scratchRoot).context);
+    roots.push(join(real, 'open'), join(real, 'context'));
   } catch {
-    return [];
+    // no artifact copies or run briefs this run; the requirements maps are tried on their own
   }
-  const real = seatPathOf(scratchRoot);
-  return [join(real, 'open'), join(real, 'context')];
+  // crew#1412: the requirements maps each message hands the seats (`chat-requirements.ts`). Each folder on its own
+  // (codex r1/r2): one that cannot be made costs only what it holds, never the other roots.
+  try {
+    ensureRealDir(join(scratchRoot, REQUIREMENTS_MAP_DIR));
+    roots.push(join(real, REQUIREMENTS_MAP_DIR));
+  } catch {
+    // the maps' own publication reports it
+  }
+  return roots;
 }
 
 /** {@link registerRoutes}'s one reading of a run's open gate rows (see `recordedOpenGate`). */
@@ -133,6 +143,7 @@ import {
   type ChatSeatRefusal,
   type ChatScopeRequest,
 } from './chat-scope.js';
+import { buildRequirementsMaps, publishRequirementsMaps, REQUIREMENTS_MAP_DIR } from './chat-requirements.js';
 import { ASK_TURN_BUDGET_SECS, AskPathIndex, isAskTurn } from './ask-paths.js';
 import { chatTurnStep, resolveChatWorkflow, servedChatWorkflows, writeCapableStep, type ChatWorkflow } from './chat-workflow.js';
 import { reassignRefusedSeats } from '../core/reassign-refusal.js';
@@ -5527,6 +5538,10 @@ export function registerRoutes(
           return reply.code(500).send({ error: `could not prepare what this message is about: ${message(err)}. Nothing was sent.` });
         }
       }
+      // crew#1412: each repository's requirements map, read for this message (never fails the turn; published below).
+      const requirementsBuilt = scope !== undefined
+        ? await buildRequirementsMaps(scope, { listRepos: () => adapter.listRepos(), reader: adapter }).catch(() => [])
+        : [];
       // The last await before delivery may also have closed/reopened the chat. From this check
       // through publication and the send there is no await, so no executing turn's files change.
       if (askPaths.get(id)?.generation !== lease || chatScopes.get(id) !== storedScope) {
@@ -5585,7 +5600,9 @@ export function registerRoutes(
       const repoRef = scope?.kind === 'repos' && scope.repos.length === 1 ? scope.repos[0]!.id : undefined;
       const delivers = repoRef !== undefined && path.workflow === undefined;
       // A2: the per-message digest of what the chat can make now (advertised operations only).
-      const statementOpts = { analysis: path.workflow !== undefined, make: chatProposals.digest(id, turnAccepts), ...voiceFor(scope?.projectId) };
+      // crew#1412: written after the last await and the generation check; a map that cannot be written says so.
+      const requirementsMaps = scope !== undefined ? publishRequirementsMaps(scope.cwd, requirementsBuilt) : [];
+      const statementOpts = { analysis: path.workflow !== undefined, make: chatProposals.digest(id, turnAccepts), requirementsMaps, ...voiceFor(scope?.projectId) };
       const projectId = scope?.projectId;
       if (path.runId === undefined) {
         const stepId = 'answer-1';
