@@ -249,7 +249,7 @@ function vendorErrorReason(who: string, p: unknown, system: PmSystem | null): st
     named.length > 0
       ? `: it says the token needs the scope${named.length === 1 ? '' : 's'} ${named.join(', ')}`
       : jira && status === 401 && NO_SITES.test(msg.trim())
-        ? ': Atlassian could not find the sites this API token reaches, which it checks on every call. A scoped API token needs the read:account scope for that, beside its Jira scopes: create the token again with read:account and enter it again'
+        ? ': Atlassian could not find the sites this API token reaches, which it checks on every site call. A scoped API token needs the read:account scope for that, beside its Jira scopes: create the token again with read:account and enter it again (if it has read:account, check that your organization allows API-token sign-in to its MCP server)'
         : status === 401
           ? jira
             ? ': Atlassian refused this call for the credential, although the sign-in reached its server (check the token\'s scopes: a scoped API token needs read:account and its Jira scopes; that the token belongs to the account email; and that your organization allows API-token sign-in to its MCP server)'

@@ -118,9 +118,10 @@ mentioned only where a daemon release depends on them.
   sign-in, Atlassian's MCP server resolves the sites a token reaches on every site call, and a scoped token without
   `read:account` gets an in-band `401 "Failed to fetch accessible products"` (atlassian-mcp-server#285, Atlassian's
   answer there). The tracker picker and a link said "the credential was refused", though the sign-in had worked. They
-  now name the call and say to create the token again with `read:account` beside its Jira scopes. Any other in-band 401
-  says the sign-in reached the server and names the checks (scopes, the account email, the organization's API-token
-  setting). Atlassian's words are matched, never repeated.
+  now name the call and say to create the token again with `read:account` beside its Jira scopes. Any other Jira
+  in-band 401 says the sign-in reached the server and names the checks (scopes, the account email, the organization's
+  API-token setting); a GitHub one says only to check the token and its scopes. Atlassian's words are matched, never
+  repeated.
 
 - **Every run's working document is made and filled by crew, whether or not anyone views or edits it (rig run W12
   9dd4f6d1).** Before, crew made a document only for power runs; a governed run got one only when a person or plugin
