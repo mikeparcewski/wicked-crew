@@ -40,6 +40,7 @@
  */
 
 import { rulesStatementLines } from '../decisions/rules-text.js';
+import { requirementsMapLines, type RequirementsMapEntry } from './chat-requirements.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
 import { detectable } from '../workflow-catalog/detect.js';
 import { crewPending } from '../workflow-catalog/build-v2.js';
@@ -1094,6 +1095,9 @@ export interface ChatStatementOptions {
   voice?: string;
   /** (DES-CHAT-ARTIFACTS-001 A2) What the chat can make now; absent or all off = nothing (today's wording). */
   make?: MakeDigest;
+  /** (crew#1412) The requirements maps handed to the seats for this message (`chat-requirements.ts`); absent or
+   *  empty = none named. */
+  requirementsMaps?: ReadonlyArray<RequirementsMapEntry>;
 }
 
 export function chatScopeStatement(
@@ -1219,6 +1223,8 @@ export function chatScopeStatement(
       '',
     );
   }
+  // crew#1412: what each repository requires, from its requirements map (read for this message).
+  lines.push(...requirementsMapLines(opts.requirementsMaps));
   // DES-L5 §5-a (P6 criterion 5): the reply is the answer — an agent's own handoff artefact
   // ("## Work State / ## Next Move / ## Relevant Files") leaked into a chat reply verbatim.
   lines.push('## Answer format', '');

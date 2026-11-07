@@ -204,6 +204,16 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **A repo chat answers from the repository's requirements map** (crew#1412). Asked what a repository requires, a
+  repo-scoped chat said it "has no requirements map": nothing in the chat's grounding carried the map, and the
+  estate shim shows its requirement nodes only as names. Each message now hands the seats every scoped repository's
+  map (at most 8 per message) as a file in the chat's scratch root, `requirements/<repo id>.<hash>.md`. It is the
+  requirements page's own read: the real share, placeholders and minimum, how old the code behind the map is (STALE
+  when the checkout has moved on, or the age is unknown), every requirement the code does not meet, then the rows,
+  bounded to 300 rows and 96 KiB. The scope statement names the file and says to answer from it with REQ ids. The
+  folder is a read root of the chat's run. A map that cannot be read or written is named as such and never holds
+  the message.
+
 - **Draft epics can pass its review (F34).** The Backlog compose (`POST /projects/:id/product/compose`) authored its
   review as the catalog's `review` entry, which carries the engine's evidence floor ("the run left a change in its
   worktree"). A compose run has no repository and so no worktree, and the engine fails any validator pin closed
