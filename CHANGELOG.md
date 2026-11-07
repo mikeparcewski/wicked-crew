@@ -12,6 +12,15 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **Requirements: code mismatches, code age and the minimum in force (operator rulings 2026-11-06; api-types
+  0.197.0).** `GET /repos/:id/requirements` items carry `codeMismatch` (the code does not meet the requirement, and
+  how; the requirement still counts), the page carries `mismatches` and takes `?mismatch=yes|no`, `codeDrift`
+  (`{builtFromCommit, builtAt, basis, commitsBehind, headCommit}`: how old the code behind the listed build is,
+  counted by the engine in the registered checkout) and `minimum` (`{pct, source: 'repo'|'settings', repoPct,
+  settingsPct}`; also on the notGenerated 404). New `PUT /repos/:id/requirements/minimum {minPct: 1..100 | null}`
+  sets or clears the repository's own minimum through the engine's `wicked-core requirements-target` (409 when the
+  repository has no code graph yet). Needs a wicked-core with the 2026-11-06 requirements read; an older engine
+  reads as before (`null` / 0).
 - **A chat job's Start chooses how it runs (operator ruling 2026-11-06; api-types 0.196.0).** `POST
   /chats/:id/proposals/:pid` takes an optional `power` with `decision: 'go'` on a job proposal. `true` launches a power
   run (no plan-approval gate; the deliver gate and what policy requires still hold). `false` or absent launches exactly

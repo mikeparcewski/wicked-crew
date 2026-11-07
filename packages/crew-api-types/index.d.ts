@@ -7147,6 +7147,42 @@ export interface RequirementSummary {
    *  `corroboration: null` (a type has no callers; "dead code" would be wrong). `null` when it counts or the engine
    *  does not say; ABSENT from an older daemon. */
   uncounted?: 'structural' | 'not_product' | 'unindexed' | null;
+  /** (0.196.0) The code does not meet this requirement, and how (operator ruling 2026-11-06; e.g. "the loop starts
+   *  at index 1, so it skips the first element"): a finding shown beside it. The requirement still counts as real.
+   *  `null` when none was found or the engine does not say; ABSENT from an older daemon. */
+  codeMismatch?: string | null;
+}
+
+/** (0.196.0) How old the code behind the listed build is (operator ruling 2026-11-06): "Built from code N commits old
+ *  (date)". Counted by the engine with git in the REGISTERED checkout. `basis` `'build'`: the build recorded the
+ *  commit; `'index'`: an older build, so the store's indexed commit now. `commitsBehind` and `builtAt` are `null`
+ *  when the checkout does not hold that commit (unknown, never 0). */
+export interface RequirementsCodeDrift {
+  builtFromCommit: string;
+  builtAt: string | null;
+  basis: 'build' | 'index';
+  commitsBehind: number | null;
+  headCommit: string | null;
+}
+
+/** (0.196.0) The minimum in force for a repository and where it comes from: its own target (`'repo'`: set at a job's
+ *  "Lower the minimum" ask or on the requirements page) or the daemon-wide setting (`'settings'`). */
+export interface RequirementsMinimum {
+  pct: number;
+  source: 'repo' | 'settings';
+  repoPct: number | null;
+  settingsPct: number | null;
+}
+
+/** (0.196.0) `PUT /repos/:id/requirements/minimum`: set the repository's own minimum, or clear it (`null`: the
+ *  Settings minimum applies again). 409 when the repository has no code graph yet. */
+export interface RequirementsMinimumBody {
+  minPct: number | null;
+}
+
+/** (0.196.0) The answer to {@link RequirementsMinimumBody}: the minimum in force after the change. */
+export interface RequirementsMinimumResponse {
+  minimum: RequirementsMinimum | null;
 }
 
 export interface RequirementDetail extends RequirementSummary {
@@ -7202,6 +7238,15 @@ export interface RequirementsPage {
   /** (0.167.0) How many rows of the whole corpus are in each category, so a client can leave out an empty filter.
    *  ABSENT from an older daemon. */
   categories?: { functional: number; configData: number };
+  /** (0.196.0) How old the code behind the listed build is; `null` when the engine does not say. ABSENT from an older
+   *  daemon. */
+  codeDrift?: RequirementsCodeDrift | null;
+  /** (0.196.0) The minimum in force and where it comes from; `null` when the engine does not say. ABSENT from an
+   *  older daemon. */
+  minimum?: RequirementsMinimum | null;
+  /** (0.196.0) Rows of the whole corpus whose code does not meet them (`?mismatch=yes` lists them). ABSENT from an
+   *  older daemon. */
+  mismatches?: number;
 }
 
 /**
@@ -7221,6 +7266,8 @@ export interface RequirementsNotGenerated {
    * `minPct` is the target in force (the repository's own when lowered, else the daemon's).
    */
   coverage?: RequirementsCoverage;
+  /** (0.196.0) The minimum in force and where it comes from, when the repository has a store to read it from. */
+  minimum?: RequirementsMinimum;
 }
 
 export interface RequirementPatch {

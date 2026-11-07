@@ -8,6 +8,7 @@ import { record, z } from '../zod.js';
 import {
   listRequirements,
   listRequirementsRead,
+  setRepoMinimum,
   getRequirement,
   patchRequirement,
   readRequirementsGraph,
@@ -8640,6 +8641,7 @@ export function registerRoutes(
     q: z.string().optional(),
     risk: z.enum(['risk', 'no-risk']).optional(),
     category: z.enum(['functional', 'config-data']).optional(),
+    mismatch: z.enum(['yes', 'no']).optional(),
     domain: z.string().optional(),
     offset: z.coerce.number().int().min(0).prefault(0),
     limit: z.coerce.number().int().min(1).max(200).prefault(50),
@@ -8655,8 +8657,9 @@ export function registerRoutes(
     }
     let page: Awaited<ReturnType<typeof listRequirements>>;
     let coverage: Awaited<ReturnType<typeof listRequirementsRead>>['coverage'] = null;
+    let minimum: Awaited<ReturnType<typeof listRequirementsRead>>['minimum'] = null;
     try {
-      ({ page, coverage } = await listRequirementsRead(repo, parsed.data, adapter));
+      ({ page, coverage, minimum } = await listRequirementsRead(repo, parsed.data, adapter));
     } catch (err) {
       // wicked-core#406: a CURRENT engine with no repo-graph root is a 503, not a 500.
       const status = codeGraphErrorStatus(err);
@@ -8667,9 +8670,11 @@ export function registerRoutes(
       // Not generated yet is a state, typed by `code`, not a refusal (lane repo-page). It says how
       // far the repository is ("23% real requirements · 4397 placeholders · target 80%";
       // wicked-core#1233), from the very engine read the page used, when it has a store to count.
-      return reply
-        .code(404)
-        .send(coverage === null ? REQUIREMENTS_NOT_GENERATED : { ...REQUIREMENTS_NOT_GENERATED, coverage });
+      return reply.code(404).send({
+        ...REQUIREMENTS_NOT_GENERATED,
+        ...(coverage === null ? {} : { coverage }),
+        ...(minimum === null ? {} : { minimum }),
+      });
     }
     // Overrides keyed by ids the corpus no longer mints (an estate id-scheme migration re-keys
     // method/field SymbolIds) would otherwise vanish without a trace — the count is on the page
@@ -8682,6 +8687,35 @@ export function registerRoutes(
     }
     return page;
   });
+
+  // P3 (operator ruling 2026-11-06): raise, lower or clear a repository's OWN minimum from the requirements page.
+  // `minPct: null` clears it (the Settings minimum applies again).
+  const ReqMinimumSchema = z.strictObject({ minPct: z.number().int().min(1).max(100).nullable() });
+  app.put(
+    `${V}/repos/:id/requirements/minimum`,
+    { config: { manifest: { requestType: 'RequirementsMinimumBody', responseType: 'RequirementsMinimumResponse', statusCodes: [200, 400, 404, 409, 500, 503] } } },
+    async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const repos = await adapter.listRepos();
+    const repo = repos.find((r) => r.id === id);
+    if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+    const parsed = ReqMinimumSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid minimum'));
+    let set: boolean;
+    try {
+      set = await setRepoMinimum(repo, parsed.data.minPct);
+    } catch (err) {
+      const status = codeGraphErrorStatus(err);
+      if (status !== null) return reply.code(status).send({ error: message(err) });
+      return reply.code(500).send({ error: `the minimum could not be saved: ${message(err)}` });
+    }
+    if (!set) {
+      return reply.code(409).send({ error: `${repo.name} has no code graph yet, so it has no minimum of its own to set` });
+    }
+    const { minimum } = await listRequirementsRead(repo, { offset: 0, limit: 0 }, adapter);
+    return { minimum };
+    },
+  );
 
   app.get(`${V}/repos/:id/requirements/:key`, async (req, reply) => {
     const { id, key } = req.params as { id: string; key: string };
