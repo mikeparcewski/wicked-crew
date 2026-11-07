@@ -61,9 +61,11 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   appendFileSync(join(dir, 'calls.ndjson'), `${JSON.stringify({ tool: name, args })}\n`);
   const site = SITES.find((s) => s.id === args.cloudId);
   // `<log-dir>/nosites`: an API token Atlassian cannot resolve sites for (a scoped token without read:account): every
-  // site call answers the v2 server's in-band 401, whatever cloudId says (atlassian-mcp-server#285).
+  // site call answers the v2 server's in-band 401, whatever cloudId says (atlassian-mcp-server#285). When the file
+  // says `echo`, the words go on with the credential and a private name (a server that echoes its request).
   if (existsSync(join(dir, 'nosites')) && (name === 'getAccessibleAtlassianResources' || args.cloudId !== undefined)) {
-    return json({ error: true, message: 'Failed to fetch accessible products: 401', statusCode: 401 });
+    const echo = readFileSync(join(dir, 'nosites'), 'utf8').trim() === 'echo' ? ` for ${token} ${JSON.stringify(token)} canary-private-77` : '';
+    return json({ error: true, message: `Failed to fetch accessible products: 401${echo}`, statusCode: 401 });
   }
   switch (name) {
     case 'getAccessibleAtlassianResources':

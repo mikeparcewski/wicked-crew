@@ -544,10 +544,16 @@ describe('(v) only a person links or widens (control: operator trust accepted in
 
   it('a token Atlassian cannot find sites for: the picker and a link name the call and read:account, not a refused credential', async () => {
     actor = { id: 'local', kind: 'human', trust: 'admin' };
-    writeFileSync(join(logs.jira, 'nosites'), '');
-    const list = await app.inject({ method: 'GET', url: '/api/v1/sources/jira/trackers' });
-    const link = await app.inject({ method: 'POST', url: '/api/v1/tracker-links', payload: { source: 'jira', tenant: 'c1', key: 'PROJB', target: { kind: 'project', id: P } } });
-    for (const r of [list, link]) {
+    const logFrom = gateLog.length;
+    const answers = [];
+    // As Atlassian answers it (#285), then with the credential and a private name after its words.
+    for (const mode of ['', 'echo']) {
+      writeFileSync(join(logs.jira, 'nosites'), mode);
+      answers.push(await app.inject({ method: 'GET', url: '/api/v1/sources/jira/trackers' }));
+      answers.push(await app.inject({ method: 'POST', url: '/api/v1/tracker-links', payload: { source: 'jira', tenant: 'c1', key: 'PROJB', target: { kind: 'project', id: P } } }));
+    }
+    for (const t of TOKEN_FORMS) expect(gateLog.slice(logFrom).join('\n')).not.toContain(t);
+    for (const r of answers) {
       expect(r.statusCode, r.body).toBe(503);
       const b = r.json() as { error: string; code: string; cause: string };
       expect(b).toMatchObject({ code: 'source_unavailable', cause: 'vendor_error' });
@@ -557,6 +563,7 @@ describe('(v) only a person links or widens (control: operator trust accepted in
       // Atlassian's own words are matched, never repeated; the credential never appears.
       expect(b.error).not.toContain('accessible products');
       for (const t of TOKEN_FORMS) expect(r.body).not.toContain(t);
+      expect(r.body).not.toContain('canary-private-77');
     }
   });
 });

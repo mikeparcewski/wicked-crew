@@ -223,7 +223,7 @@ async function act(deps: TrackerActionDeps, runId: string, issue: string, p: Pla
     // Done only on an answer crew can read as one: an error answered as data (the Atlassian server's `{error: true,
     // statusCode}`, often without `isError`) is a refusal, and an answer crew cannot read leaves the outcome unknown;
     // either way, nothing after it is sent.
-    const answered = r.ok ? readPayload(r.result, e.name) : null;
+    const answered = r.ok ? readPayload(r.result, e.name, e.system) : null;
     if (!r.ok) results.push({ part, ok: false, error: r.reason });
     else if (answered !== null && answered.ok) results.push({ part, ok: true });
     else if (answered !== null && answered.code === 'vendor_error') results.push({ part, ok: false, error: `the tracker refused the ${part} (${answered.reason})` });

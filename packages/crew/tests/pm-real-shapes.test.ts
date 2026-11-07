@@ -91,19 +91,39 @@ describe('getAccessibleAtlassianResources: the v2 site list (the 503 the operato
     const { b, p } = prep('searchJiraIssuesUsingJql', { jql: 'order by updated' });
     const r = b.project(atlassianV2.authError, p, V2);
     expect(r.ok === false && r.reason).toContain('read:account');
-    // Any other 401 says the sign-in reached the server and names the checks, repeating none of the vendor's words.
-    const other = readPayload({ content: [{ type: 'text', text: JSON.stringify({ error: true, message: 'Unauthorized for acme-customer-x', statusCode: 401 }) }] }, 'jira (getJiraIssue)');
+    // Any other Jira 401 says the sign-in reached the server and names the checks, repeating none of the vendor's words.
+    const env = (message: string, statusCode?: number) => ({ content: [{ type: 'text', text: JSON.stringify({ error: true, message, ...(statusCode !== undefined ? { statusCode } : {}) }) }] });
+    const other = readPayload(env('Unauthorized for acme-customer-x', 401), 'jira (getJiraIssue)', 'jira');
     expect(other).toMatchObject({ ok: false, code: 'vendor_error' });
     if (!other.ok) {
       expect(other.reason).toContain('jira (getJiraIssue) answered an error (HTTP 401)');
-      expect(other.reason).toContain('the sign-in reached it');
+      expect(other.reason).toContain('although the sign-in reached its server');
       expect(other.reason).toContain('read:account');
       expect(other.reason).not.toContain('credential was refused');
       expect(other.reason).not.toContain('acme');
     }
     // The phrase only counts at the start of Atlassian's message: the same words later in it are another 401.
-    const later = readPayload({ content: [{ type: 'text', text: JSON.stringify({ error: true, message: 'x Failed to fetch accessible products', statusCode: 401 }) }] });
+    const later = readPayload(env('x Failed to fetch accessible products', 401), 'jira (x)', 'jira');
     expect(later.ok === false && later.reason).not.toContain('could not find the sites');
+    // The same words on a 429, a 500 or with no status are not a scope problem: no token advice.
+    for (const st of [429, 500, undefined]) {
+      const r = readPayload(env('Failed to fetch accessible products: 500', st), 'jira (x)', 'jira');
+      expect(r.ok === false && r.reason, String(st)).not.toContain('read:account');
+    }
+    // Words after the recognised phrase (a credential, a private name) are never repeated.
+    const echo = readPayload(env('Failed to fetch accessible products: 401 for SECRET-zz9 canary-private-77', 401), 'jira (x)', 'jira');
+    expect(echo.ok === false && echo.reason).toContain('read:account');
+    expect(echo.ok === false && echo.reason).not.toMatch(/SECRET-zz9|canary-private-77/);
+  });
+  it("a GitHub source's in-band 401 (or one of an unnamed source) carries no Atlassian advice", async () => {
+    const env401 = (message: string) => ({ content: [{ type: 'text', text: JSON.stringify({ error: true, message, statusCode: 401 }) }] });
+    const gh = await listSourceTrackers(stub({ get_me: env401('Failed to fetch accessible products: 401') }).pm, entry('github', ['get_me', 'search_repositories']), '', {}, null);
+    expect(gh).toMatchObject({ ok: false, code: 'vendor_error' });
+    for (const r of [gh, readPayload(env401('Bad credentials')), readPayload(env401('Bad credentials'), 'gh (issue_read)', 'github')]) {
+      expect(r.ok === false && r.reason).toContain('HTTP 401');
+      expect(r.ok === false && r.reason).toContain('the sign-in reached it (check the token and its scopes)');
+      expect(r.ok === false && r.reason).not.toMatch(/Atlassian|read:account|Jira/);
+    }
   });
 });
 

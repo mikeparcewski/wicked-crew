@@ -225,17 +225,18 @@ const SCOPES: ReadonlySet<string> = new Set([
 
 /**
  * Atlassian's fixed words when it cannot resolve the sites an API token reaches (atlassian-mcp-server#285): matched,
- * never repeated. Its v2 server resolves them for every site-scoped call under token sign-in, whatever `cloudId` says,
- * and a scoped token needs `read:account` for it (Atlassian's answer on #285).
+ * never repeated, and read so only on a Jira source's in-band 401 (a 429 or 500 with the same words is not a scope
+ * problem). Its v2 server resolves them for every site-scoped call under token sign-in, whatever `cloudId` says, and
+ * a scoped token needs `read:account` for it (Atlassian's answer on #285).
  */
 const NO_SITES = /^Failed to fetch accessible products\b/i;
 
 /**
  * What an error answer may say: its HTTP status, and the scopes the vendor says are missing (each checked to be a
  * scope name), or what Atlassian's fixed "no sites" words mean. The vendor's other words are not shown: they can echo
- * a request.
+ * a request. Atlassian's advice is given only for a Jira source (`system`); any other gets the vendor-neutral words.
  */
-function vendorErrorReason(who: string, p: unknown): string {
+function vendorErrorReason(who: string, p: unknown, system: PmSystem | null): string {
   const env = isObj(p) ? p : {};
   const raw = env['statusCode'] ?? env['status'] ?? (isObj(env['error']) ? (env['error'] as Record<string, unknown>)['status'] : undefined);
   const status = typeof raw === 'number' && Number.isInteger(raw) && raw >= 100 && raw <= 599 ? raw : null;
@@ -243,13 +244,16 @@ function vendorErrorReason(who: string, p: unknown): string {
   const m = /Insufficient scopes?\.?\s*Required:\s*([^\n]{1,300})$/i.exec(msg.trim());
   const scopes = m === null ? [] : m[1]!.replace(/\.$/, '').split(/[\s,]+/).filter((x) => x !== '');
   const named = scopes.length > 0 && scopes.length <= 10 && scopes.every((x) => SCOPES.has(x)) ? scopes : [];
+  const jira = system === 'jira';
   const hint =
     named.length > 0
       ? `: it says the token needs the scope${named.length === 1 ? '' : 's'} ${named.join(', ')}`
-      : NO_SITES.test(msg.trim())
-        ? `: Atlassian could not find the sites this API token reaches, which it checks on every call. A scoped API token needs the read:account scope for that, beside its Jira scopes: create the token again with read:account and enter it again`
+      : jira && status === 401 && NO_SITES.test(msg.trim())
+        ? ': Atlassian could not find the sites this API token reaches, which it checks on every call. A scoped API token needs the read:account scope for that, beside its Jira scopes: create the token again with read:account and enter it again'
         : status === 401
-        ? ': the server refused this call for the credential, although the sign-in reached it (check the token\'s scopes, for an Atlassian API token read:account and its Jira scopes; that the token belongs to the account email; and that your organization allows API-token sign-in to its MCP server)'
+          ? jira
+            ? ': Atlassian refused this call for the credential, although the sign-in reached its server (check the token\'s scopes: a scoped API token needs read:account and its Jira scopes; that the token belongs to the account email; and that your organization allows API-token sign-in to its MCP server)'
+            : ': the server refused this call for the credential, although the sign-in reached it (check the token and its scopes)'
         : status === 403
           ? ': the credential is not allowed this (a scoped API token may lack a scope, or your organization has not allowed the tool)'
           : status === 404
@@ -266,7 +270,7 @@ export type PayloadRead = { ok: true; payload: unknown } | { ok: false; code: st
  * `isError` or answered as an error envelope, is `vendor_error` with its HTTP status; a shape no reader knows is
  * `unknown_shape` with the answer's outline (block types, field names, array lengths; never a value).
  */
-export function readPayload(result: Record<string, unknown>, who = 'the tracker'): PayloadRead {
+export function readPayload(result: Record<string, unknown>, who = 'the tracker', system: PmSystem | null = null): PayloadRead {
   const content = result['content'];
   const jsons: unknown[] = [];
   if (Array.isArray(content)) {
@@ -282,20 +286,20 @@ export function readPayload(result: Record<string, unknown>, who = 'the tracker'
   if (result['isError'] === true) {
     const j = jsons.length === 1 ? jsons[0] : null;
     const inner = unwrapData(j);
-    return refuse('vendor_error', vendorErrorReason(who, isErrorEnvelope(j) ? j : isErrorEnvelope(inner) ? inner : j));
+    return refuse('vendor_error', vendorErrorReason(who, isErrorEnvelope(j) ? j : isErrorEnvelope(inner) ? inner : j, system));
   }
   if (!Array.isArray(content) || jsons.length !== 1) return refuse('unknown_shape', `${who} answered a shape crew does not know (${resultOutline(result)})`);
   const p = jsons[0];
-  if (isErrorEnvelope(p)) return refuse('vendor_error', vendorErrorReason(who, p));
+  if (isErrorEnvelope(p)) return refuse('vendor_error', vendorErrorReason(who, p, system));
   const inner = unwrapData(p);
   // An error wrapped in `data` is an error too.
-  if (inner !== p && isErrorEnvelope(inner)) return refuse('vendor_error', vendorErrorReason(who, inner));
+  if (inner !== p && isErrorEnvelope(inner)) return refuse('vendor_error', vendorErrorReason(who, inner, system));
   return { ok: true, payload: inner };
 }
 
-/** {@link readPayload} for the projectors. */
-export function payloadOf(result: Record<string, unknown>): PayloadRead {
-  return readPayload(result);
+/** {@link readPayload} for the projectors, with the binding's system (whose advice an error may carry). */
+export function payloadOf(result: Record<string, unknown>, system: PmSystem | null = null): PayloadRead {
+  return readPayload(result, 'the tracker', system);
 }
 
 /** A refusal for a payload that parsed, but not as the shape `what` needs: names its outline, never a value. */
@@ -487,7 +491,7 @@ const jiraGetIssue: PmToolBinding = {
     return { ok: true, args: out, tenant: k.tenant, trackers: linked.filter((x) => x.tenant === k.tenant && x.key === k.project) };
   },
   project(result, prepared, opts) {
-    const p = payloadOf(result);
+    const p = payloadOf(result, 'jira');
     if (!p.ok) return p;
     if (!isObj(p.payload) || str(p.payload['key']) === null) return unknownShape('the tracker', 'the issue', p.payload);
     const a = jiraAdmit(p.payload, prepared.tenant, prepared.trackers, tenantProves(opts, prepared.tenant));
@@ -536,7 +540,7 @@ const jiraSearch: PmToolBinding = {
     return { ok: true, args: out, tenant: t.tenant, trackers };
   },
   project(result, prepared, opts) {
-    const p = payloadOf(result);
+    const p = payloadOf(result, 'jira');
     if (!p.ok) return p;
     const list = jiraIssueList(p.payload);
     if (list === null) return unknownShape('the tracker', 'its search', p.payload);
@@ -579,7 +583,7 @@ const jiraComments: PmToolBinding = {
     return { ok: true, args: out, tenant: k.tenant, trackers: linked.filter((x) => x.tenant === k.tenant && x.key === k.project) };
   },
   project(result, prepared, opts) {
-    const p = payloadOf(result);
+    const p = payloadOf(result, 'jira');
     if (!p.ok) return p;
     const list = Array.isArray(p.payload) ? p.payload : isObj(p.payload) && Array.isArray(p.payload['comments']) ? (p.payload['comments'] as unknown[]) : null;
     if (list === null) return unknownShape('the tracker', 'the comments', p.payload);
@@ -641,7 +645,7 @@ const jiraAccount: PmToolBinding = {
     return { ok: true, args: {}, tenant: tenants[0]!, trackers: [...linked] };
   },
   project(result, prepared) {
-    const p = payloadOf(result);
+    const p = payloadOf(result, 'jira');
     if (!p.ok) return p;
     const id = isObj(p.payload) ? str(p.payload['accountId']) ?? str(p.payload['account_id']) : null;
     if (id === null || id.length > 128) return unknownShape('the tracker', 'its account', p.payload);
@@ -734,7 +738,7 @@ const jiraSites: PmToolBinding = {
     return { ok: true, args: {}, tenant: tenants[0]!, trackers: [...linked] };
   },
   project(result, prepared) {
-    const p = payloadOf(result);
+    const p = payloadOf(result, 'jira');
     if (!p.ok) return p;
     const sites = jiraSitesOf(p.payload);
     if (sites === null) return unknownShape('the tracker', 'its sites', p.payload);
@@ -833,7 +837,7 @@ const githubIssueRead: PmToolBinding = {
     return { ok: true, args: out, tenant: GITHUB_TENANT, trackers: [r.tracker] };
   },
   project(result, prepared) {
-    const p = payloadOf(result);
+    const p = payloadOf(result, 'github');
     if (!p.ok) return p;
     const repo = prepared.trackers[0]!.key.toLowerCase();
     const number = prepared.args['issue_number'] as number;
@@ -902,7 +906,7 @@ const githubSearchIssues: PmToolBinding = {
     return { ok: true, args: out, tenant: GITHUB_TENANT, trackers: repos };
   },
   project(result, prepared) {
-    const p = payloadOf(result);
+    const p = payloadOf(result, 'github');
     if (!p.ok) return p;
     if (!isObj(p.payload) || !Array.isArray(p.payload['items'])) return unknownShape('the tracker', 'its search', p.payload);
     const items: PmItem[] = [];
