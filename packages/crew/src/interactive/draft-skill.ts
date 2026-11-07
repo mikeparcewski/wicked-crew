@@ -419,7 +419,9 @@ export function draftFloorVerdict(report: unknown, budget: PageBudget, opts: { n
     );
   }
   const count = typeof pages?.pages === 'number' ? pages.pages : null;
-  const pagesUnverified = pages !== undefined && pages.verified === false;
+  // codex r3: the report's own UNVERIFIED list counts too, and a count with no verified flag is not a measurement.
+  const pagesUnverified =
+    (pages !== undefined && pages.verified === false) || (Array.isArray(rep.unverified) && rep.unverified.includes('pages'));
   const pagesRecord: DraftFloorVerdict['pages'] =
     count !== null ? { count, measured: pages?.verified === true, budget: budget.pages, exact: budget.exact } : null;
   if (budget.pages !== null && count !== null && count > budget.pages) {
@@ -466,7 +468,7 @@ export function draftFloorVerdict(report: unknown, budget: PageBudget, opts: { n
   const missing = [
     ...(checkRecord(checks.leaks) === null ? ['leaks'] : []),
     ...(opts.notes === true && checkRecord(checks.notes) === null ? ['notes'] : []),
-    ...(budget.pages !== null && count === null ? ['pages'] : []),
+    ...(budget.pages !== null && (count === null || typeof pages?.verified !== 'boolean') ? ['pages'] : []),
   ];
   if (missing.length > 0) {
     return {

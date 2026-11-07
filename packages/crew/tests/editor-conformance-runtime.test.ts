@@ -132,6 +132,42 @@ describe('conformanceProvisioner', () => {
     ]);
   });
 
+  it('PLAN G12: a failed Chromium query is asked again after 10 minutes, and never once the path is recorded (codex r3)', async () => {
+    const root = join(dir, 'rt-retry');
+    const venv = join(root, `venv-playwright-${CONFORMANCE_PLAYWRIGHT_VERSION}`);
+    const chromium = join(dir, 'chrome-retry');
+    writeFileSync(chromium, '');
+    let clock = 1_000_000;
+    let answer = '';
+    const queries: number[] = [];
+    const provision = conformanceProvisioner(() => root, {
+      platform: 'linux',
+      env: {},
+      now: () => clock,
+      exec: (async (_bin: string, args: string[]) => {
+        if (args[1] === 'venv') {
+          mkdirSync(join(venv, 'bin'), { recursive: true });
+          writeFileSync(venvPython(venv, 'linux'), '');
+        }
+        if (args[0] === '-c') queries.push(clock);
+        return { stdout: args[0] === '-c' ? answer : '', stderr: '' };
+      }) as never,
+    });
+    await provision(); // made; the query answers nothing
+    expect(queries).toHaveLength(1);
+    clock += 9 * 60_000;
+    await provision();
+    expect(queries).toHaveLength(1);
+    clock += 60_000;
+    answer = `${chromium}\n`;
+    await provision();
+    expect(queries).toHaveLength(2);
+    expect(managedChromium(root, {}, 'linux')).toBe(chromium);
+    clock += 60 * 60_000;
+    await provision();
+    expect(queries).toHaveLength(2);
+  });
+
   it('PLAN G12: records the provisioned Chromium for the draft floor, and starts making it when a document run is launched', async () => {
     const root = join(dir, 'rt-chrome');
     const venv = join(root, `venv-playwright-${CONFORMANCE_PLAYWRIGHT_VERSION}`);

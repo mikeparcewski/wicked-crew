@@ -238,6 +238,8 @@ function message(err: unknown): string {
 
 export interface ProvisionDeps {
   exec?: typeof execCapped;
+  /** The clock of the Chromium-path retry (tests). */
+  now?: () => number;
   env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
 }
@@ -251,6 +253,7 @@ export function conformanceProvisioner(root: () => string, deps: ProvisionDeps =
   const exec = deps.exec ?? execCapped;
   const env = deps.env ?? process.env;
   const platform = deps.platform ?? process.platform;
+  const now = deps.now ?? Date.now;
   let inFlight: Promise<Provisioned> | null = null;
   // (PLAN G12) The Chromium path is asked for until it is recorded: a reused runtime with the path spawns nothing, and
   // a failed query is asked again at most every 10 minutes (codex r1/r2).
@@ -267,8 +270,8 @@ export function conformanceProvisioner(root: () => string, deps: ProvisionDeps =
     // estimates the page count, as before.
     const recordChromium = async (): Promise<void> => {
       const last = askedChromium.get(venv);
-      if (last !== undefined && Date.now() - last < CHROMIUM_RETRY_MS) return;
-      askedChromium.set(venv, Date.now());
+      if (last !== undefined && now() - last < CHROMIUM_RETRY_MS) return;
+      askedChromium.set(venv, now());
       try {
         const out = await exec(python, ['-c', CHROMIUM_PATH_PY], { timeout: VENV_TIMEOUT_MS, windowsHide: true, env: absoluteCacheEnv(env, platform) });
         const path = out.stdout.trim().split('\n').pop()?.trim() ?? '';

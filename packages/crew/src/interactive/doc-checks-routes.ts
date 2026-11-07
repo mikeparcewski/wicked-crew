@@ -17,12 +17,13 @@
  * (`DemoView.review`).
  */
 
-import { lstatSync, readFileSync } from 'node:fs';
+import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import type { DocCheck, DocCheckFinding, DocCheckSource, DocChecksResponse, DocFloorCheck, DocNotes, DocReviewerId } from 'wicked-crew-api-types';
 import { UNFILED_MOUNT } from '../api/chat-context.js';
 import { API_PREFIX } from '../api/api-prefix.js';
+import { BeneathError, readBeneath } from '../api/beneath.js';
 import { ProjectsUnsupportedError, type CoreAdapter } from '../core/adapter.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
 import { readDocReviewVerdicts, type DocReviewLedgerRow } from '../qe/ledger.js';
@@ -115,14 +116,7 @@ export interface LineageEntry {
 export function readLineage(docsRoot: string, doc: string): { head: number; versions: Map<number, LineageEntry> } | null {
   if (!DOC_NAME.test(doc)) return null;
   try {
-    // A plain read (codex r1: `readBeneath` refuses Windows): the name is a validated slug, and the manifest is parsed
-    // as data, never followed anywhere.
-    // codex r2: never through a link, never a FIFO or device (it would block the request), bounded.
-    const dir = join(docsRoot, doc);
-    const path = join(dir, 'versions.json');
-    const st = lstatSync(path);
-    if (lstatSync(dir).isSymbolicLink() || !st.isFile() || st.size > 4 * 1024 * 1024) return null;
-    const m = JSON.parse(readFileSync(path, 'utf8')) as { head?: unknown; versions?: unknown };
+    const m = JSON.parse(readManifest(docsRoot, doc)) as { head?: unknown; versions?: unknown };
     if (typeof m.head !== 'number' || !Number.isInteger(m.head) || m.head < 0) return null;
     const versions = new Map<number, LineageEntry>();
     for (const e of Array.isArray(m.versions) ? (m.versions as Array<Record<string, unknown>>) : []) {
@@ -135,6 +129,26 @@ export function readLineage(docsRoot: string, doc: string): { head: number; vers
   } catch {
     return null;
   }
+}
+
+const MANIFEST_MAX = 4 * 1024 * 1024;
+
+/**
+ * A document's `versions.json`: opened beneath the docs root with no link followed, non-blocking, regular file only,
+ * bounded, all on one descriptor (`readBeneath`). Where the platform cannot open without following links (Windows),
+ * the same checks are made on the path before a plain read (codex r1-r3).
+ */
+export function readManifest(docsRoot: string, doc: string): string {
+  try {
+    return readBeneath(realpathSync(docsRoot), `${doc}/versions.json`, MANIFEST_MAX).data.toString('utf8');
+  } catch (err) {
+    if (!(err instanceof BeneathError) || err.code !== 'ENOTSUP') throw err;
+  }
+  const dir = join(docsRoot, doc);
+  const path = join(dir, 'versions.json');
+  const st = lstatSync(path);
+  if (lstatSync(dir).isSymbolicLink() || !st.isFile() || st.size > MANIFEST_MAX) throw new Error('not a regular manifest');
+  return readFileSync(path, 'utf8');
 }
 
 /**
