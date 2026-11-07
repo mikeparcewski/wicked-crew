@@ -12,6 +12,25 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **Model run cost: the facts route and command (DES-CATALOG-002 CS6, crew half; no api-types change).**
+  `POST /api/v1/insights/facts {token}` is worker-facing: a unit-token route, like `/apps/check`. It answers only the
+  `facts` Tool of a `run-cost` run that runs exactly `wicked-crew insights-facts` (an agent step, another workflow's
+  Tool or another step is refused with 403). It returns the cost facts of the last 90 days (`insights/cost.ts`):
+  - the terminal named runs, grouped by workflow (open, system and unnamed runs, and the asking run, are left out and
+    counted);
+  - wall time from launch to the recorded terminal time (the terminal event, else the engine's `finished_at`), with
+    unmeasured runs counted;
+  - pricing from usage-frame counts (full, partial, unpriced, none, or unknown when the events were unreadable);
+  - spend percentiles over fully priced runs only, and the partly priced sum as a lower bound.
+
+  `wicked-crew insights-facts` prints them as the step's output: window, scope, left out, rules, `G` group lines cited
+  as `G1.wall.p75`, and `R` rows newest first within a 36 KB budget. The review's run walk is extracted as
+  `collectRunFacts` (an explicit window and scope), and `RunFact` gains `pricedFrames`, `unpricedFrames`,
+  `terminalAtMs` and `eventsUnreadable`. The engine half (the `run-cost` preset and its token channel) is
+  wicked-core's.
+  - Also, the run review: a finding whose value and baseline round to the same text gets the decimals that tell them
+    apart (`Spend per run: $0.163 … against $0.161 before`), never `$0.16 … against $0.16`.
+
 - **Chat refines the open document, deck or page, and keeps the person's own edits (DES-CHAT-ARTIFACTS-001 A5;
   plugins-complete G4; api-types 0.197.0).** The refine launcher, its landing guard and the card's protected edits;
   `capabilities.chatArtifacts.refine` turns on (and the launcher is registered) in a follow-up to the proposal-launcher

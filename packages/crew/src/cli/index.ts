@@ -33,6 +33,7 @@ import { probeLegacyOutbox, replayCommand } from '../api/governance-health.js';
 import { crewPackageVersion, runGovernance } from './governance.js';
 import { runMcpServer } from './mcp.js';
 import { runAppsCheck } from './apps-check.js';
+import { runInsightsFacts } from './insights-facts.js';
 import { versionLines } from '../core/versions.js';
 import { DAEMON_PORT_ENV, DEFAULT_DAEMON_PORT, daemonPortSource, resolveDaemonPort } from './port.js';
 import { INTERACTIVE_DEFAULT_RANGE, INTERACTIVE_SPEC_ENV, resolveInteractiveSpec } from '../interactive/bridge-pool.js';
@@ -760,9 +761,12 @@ async function main(): Promise<void> {
   } else if (command === 'apps-check') {
     // (DES-APPS-001 §9.2, K5) The `apps-turn` check step: the engine's Tool command, never a person's.
     process.exitCode = await runAppsCheck(argv, { env: process.env, cwd: process.cwd(), out: (l) => console.log(l), err: (l) => console.error(l) });
+  } else if (command === 'insights-facts') {
+    // (DES-CATALOG-002 CS6) The `run-cost` facts step: the engine's Tool command, never a person's.
+    process.exitCode = await runInsightsFacts({ env: process.env, out: (l) => process.stdout.write(l), err: (l) => console.error(l) });
   } else {
     console.error(`Unknown command: ${command ?? '(none)'}`);
-    console.error('Usage: wicked-crew serve|start|resume|gate|status|mcp|governance|apps-check|version');
+    console.error('Usage: wicked-crew serve|start|resume|gate|status|mcp|governance|apps-check|insights-facts|version');
     console.error(
       '  version | --version | -V   the versions of THIS install (wicked-crew, wicked-core-ts, bundled studio);\n' +
         '                             for the daemon running on a port, GET http://127.0.0.1:<port>/api/v1/diagnostics',

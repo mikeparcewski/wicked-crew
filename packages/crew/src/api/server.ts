@@ -44,7 +44,7 @@ import { PersonaStore } from '../persona/store.js';
 import { registerSetupRoutes } from '../setup/routes.js';
 import { voiceBlock } from '../persona/voice.js';
 import { VoiceInjectInputs } from '../voice/inject-input.js';
-import { registerInsightsRoutes } from '../insights/routes.js';
+import { factsUnitResolver, registerInsightsRoutes } from '../insights/routes.js';
 import { ReviewService } from '../insights/review-service.js';
 import { InsightsStore } from '../insights/store.js';
 import { ANALYZE_CLI, REVIEW_WORKFLOW, defaultReviewsDir, loadReviewWorkflow } from '../insights/workflow.js';
@@ -1620,7 +1620,24 @@ export async function createServer(
     },
     audit,
   });
-  registerInsightsRoutes(app, { store: insightsStore, service: reviewService, audit });
+  registerInsightsRoutes(app, {
+    store: insightsStore,
+    service: reviewService,
+    audit,
+    // (DES-CATALOG-002 CS6) `POST /insights/facts`: the engine resolves the unit's token; crew reads which step it is.
+    ...(CoreAdapter.estateScopeResolver() !== null
+      ? {
+          facts: {
+            unitOf: factsUnitResolver((req) => {
+              const resolve = CoreAdapter.estateScopeResolver();
+              if (resolve === null) return Promise.reject(new Error('no resolver'));
+              return resolve(req);
+            }, () => adapter.sessionsDetail()),
+            collect: (opts, nowMs) => reviewService.collect(opts, nowMs),
+          },
+        }
+      : {}),
+  });
   if (options?.workflowSchedules?.enabled ?? !(process.env['VITEST'] !== undefined || process.env['NODE_ENV'] === 'test')) {
     // Seeded (and so written to the state home) only by a daemon that runs the tick: a headless boot (the
     // endpoint-manifest collector, a test) never plants a schedule file in whatever state home it resolves.
