@@ -2651,10 +2651,11 @@ export function registerRoutes(
 
   /**
    * The seat record per query (`<days> <project>`), F35: one read at a time per query, which every
-   * caller asking meanwhile shares, kept while the views snapshot it was read from is current.
-   * At most {@link SEAT_RECORDS_KEPT} queries are kept.
+   * caller asking meanwhile shares, kept while the views snapshot it was read from is current (held
+   * weakly: a kept answer never keeps an old snapshot alive). At most {@link SEAT_RECORDS_KEPT}
+   * answered queries are kept; a read in flight is never dropped, so it stays shared.
    */
-  const seatRecords = new Map<string, { of: RunViewsSnapshot; read: Promise<SeatRecordResponse | null>; settled: boolean }>();
+  const seatRecords = new Map<string, { of: WeakRef<RunViewsSnapshot>; read: Promise<SeatRecordResponse | null>; settled: boolean }>();
   const SEAT_RECORDS_KEPT = 16;
   const readSeatRecord = async (snapshot: RunViewsSnapshot, days: number, project: string | undefined): Promise<SeatRecordResponse | null> => {
     const detail = structuredClone(snapshot.views) as SessionView[];
@@ -2702,11 +2703,14 @@ export function registerRoutes(
       const snapshot = await adapter.runViewsSnapshot();
       const key = `${days} ${project ?? ''}`;
       let entry = seatRecords.get(key);
-      if (entry === undefined || (entry.settled && entry.of !== snapshot)) {
-        const started = { of: snapshot, read: readSeatRecord(snapshot, days, project), settled: false };
+      if (entry === undefined || (entry.settled && entry.of.deref() !== snapshot)) {
+        const started = { of: new WeakRef(snapshot), read: readSeatRecord(snapshot, days, project), settled: false };
         seatRecords.delete(key);
         seatRecords.set(key, started);
-        if (seatRecords.size > SEAT_RECORDS_KEPT) seatRecords.delete(seatRecords.keys().next().value!);
+        for (const [k, kept] of seatRecords) {
+          if (seatRecords.size <= SEAT_RECORDS_KEPT) break;
+          if (kept.settled) seatRecords.delete(k);
+        }
         started.read.then(
           () => {
             started.settled = true;
@@ -7641,7 +7645,8 @@ export function registerRoutes(
     const { id } = req.params as { id: string };
     // F35: this run's view only, never every run's (studio polls this route for every parked run, from
     // every open tab). Each read is a copy of one run from the shared snapshot, so a read after an
-    // await sees a change that landed during it.
+    // await sees a change the adapter learned of during it (a frame, or a write it made); any other
+    // change is at most the snapshot's age bound old.
     const runOf = (): Promise<SessionView | undefined> => adapter.runView(id);
     // wicked-core#850: the gate answer carries the gated unit's receipt — what assured the work it asks about.
     const unitAt = async (ord: number): Promise<WorkUnit | undefined> => (await runOf())?.units?.find((u) => u.ord === ord);
@@ -7723,9 +7728,9 @@ export function registerRoutes(
     // binding (CI caught it) — an error where the honest, knowable answer was "no gate".
     let run = await runOf();
     // F35: the engine's gate record was read before the view and outranks it. A record showing a gate
-    // open beside a view of a run still moving means the shared snapshot predates the pause (its frame
-    // has not landed yet): read the run from a fold that starts now.
-    if (run !== undefined && run.session.status !== 'awaiting_human' && recorded?.state === 'open') {
+    // open beside no view of the run, or a view of it still moving, means the shared snapshot predates
+    // the pause (its frame has not landed yet): read the run from a fold that starts now.
+    if (recorded?.state === 'open' && run?.session.status !== 'awaiting_human') {
       run = await adapter.runView(id, { fresh: true });
     }
     if (!run) return reply.code(404).send({ error: 'Run not found' });

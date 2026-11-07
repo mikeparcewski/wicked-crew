@@ -215,6 +215,28 @@ describe('F35: run views are read through one shared snapshot', () => {
     expect(res.json()).toMatchObject({ runId: 'run-0', ord: 2 });
   });
 
+  it('a gate the record shows open is served even when the snapshot predates the run', async () => {
+    seed(0);
+    expect(await adapter.runView('run-0')).toBeUndefined(); // the snapshot is read before the run exists
+    seed(150); // the engine launches and parks it; no frame has landed
+    const server = await routes();
+    const res = await server.inject({ method: 'GET', url: '/api/v1/runs/run-0/gate' });
+    expect(res.statusCode, res.body).toBe(200);
+  });
+
+  it('a fold taken while a write is in flight is not served once the write settles', async () => {
+    let commit!: () => void;
+    core()['cancelRun'] = () => new Promise<string>((resolve) => (commit = () => resolve('"cancelled"')));
+    const write = adapter.cancelRun('run-0');
+    expect((await adapter.runView('run-0'))!.session.status).toBe('awaiting_human'); // folded before the commit
+    expect(folds).toBe(1);
+    store = [{ ...(parkedRun('run-0') as object), session: { id: 'run-0', status: 'cancelled', team_plan: { rev: 1 } } }];
+    commit(); // the write commits and settles; no frame is delivered
+    await write;
+    expect((await adapter.runView('run-0'))!.session.status).toBe('cancelled');
+    expect(folds).toBe(2);
+  });
+
   it('a caller never takes a fold that started before a change it saw; at most one fold runs and one is queued', async () => {
     holdFolds = true;
     const first = adapter.runView('run-0');
@@ -260,5 +282,32 @@ describe('F35: run views are read through one shared snapshot', () => {
     frame({ type: 'unitDone', session: 'run-0', ord: 1 });
     await server.inject({ method: 'GET', url: '/api/v1/roster/record?days=7' });
     expect(logReads).toBe(450);
+  });
+
+  it('a /roster/record read in flight stays shared however many other queries come and go', async () => {
+    seed(3);
+    let blocking = false;
+    const blocked: Array<() => void> = [];
+    core()['runEvents'] = () =>
+      new Promise<string>((resolve) => {
+        if (blocking) blocked.push(() => resolve('[]'));
+        else resolve('[]');
+      });
+    const server = await routes();
+    blocking = true;
+    const first = server.inject({ method: 'GET', url: '/api/v1/roster/record?days=1' });
+    await vi.waitFor(() => expect(blocked).toHaveLength(1));
+    blocking = false;
+    for (let days = 2; days <= 20; days++) {
+      expect((await server.inject({ method: 'GET', url: `/api/v1/roster/record?days=${days}` })).statusCode).toBe(200);
+    }
+    blocking = true;
+    const again = server.inject({ method: 'GET', url: '/api/v1/roster/record?days=1' });
+    for (let i = 0; i < 5; i++) await tick();
+    expect(blocked).toHaveLength(1); // joined the read in flight, did not start another
+    blocking = false;
+    while (blocked.length > 0) blocked.shift()!();
+    expect((await first).statusCode).toBe(200);
+    expect((await again).statusCode).toBe(200);
   });
 });
