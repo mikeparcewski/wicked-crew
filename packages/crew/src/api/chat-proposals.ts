@@ -814,8 +814,10 @@ export class ChatProposals {
   }
 
   /** What a seat may be told it can make now (`chat-scope.ts`'s per-message digest). With a chat id, how the chat routes
-   *  new work too (DES-CATALOG-002 §2.3: job cards for a client that renders them, a command line for an older one). */
-  digest(chatId?: string, accepts?: boolean): MakeDigest {
+   *  new work too (DES-CATALOG-002 §2.3: job cards for a client that renders them, a command line for an older one).
+   *  `o.appearance` (A7): whether the message carried the tab's appearance. A client that sends none cannot preview or
+   *  apply a theme, so its seat is not told it can propose one (absent = not known here: the flag alone decides). */
+  digest(chatId?: string, accepts?: boolean, o: { appearance?: boolean } = {}): MakeDigest {
     const f = this.deps.flags();
     const on = f.proposals;
     const entries = on
@@ -831,7 +833,7 @@ export class ChatProposals {
     return {
       create: on && f.create && entries.some((e) => e.kind === 'document'),
       refine: on && f.refine,
-      theme: on && f.theme,
+      theme: on && f.theme && o.appearance !== false,
       demo: on && f.demo && entries.some((e) => e.kind === 'demo'),
       entries,
       ...(jobs !== undefined ? { jobs } : {}),

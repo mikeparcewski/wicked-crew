@@ -205,15 +205,15 @@ describe('chat proposals (server, A2)', () => {
       .toEqual({ context: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps: ['create', 'refine', 'demo'] });
   });
 
-  it('production: the seat is told only about themes (A7), and a document block is cut from the reply but makes no card', async () => {
+  it('production: the seat is told nothing about making, and a block is cut from the reply but makes no card', async () => {
     await turn(prod, prodListeners, 'prod-1', 'Make a 5-slide deck on coverage', { entry: 'presentation', title: 'Coverage', sources: ['chat'] });
     const instructions = (launches.at(-1)!.plan as unknown as { steps: Array<{ instructions: string }> }).steps[0]!.instructions;
-    // A7: a studio theme is the one thing this route set can make (no draft seam, so no `create`).
-    expect(instructions).toContain('"theme":{');
-    expect(instructions).not.toContain('"entry":"<id>"');
-    expect(instructions).toContain('Studio can make: a studio theme.');
+    // A7: `theme` is advertised, but this message carried no appearance (a client that can't preview a theme), so the
+    // seat is not told it can propose one; this route set has no draft seam, so nothing else either.
+    expect(instructions).not.toContain('wicked-make');
+    expect(instructions).not.toContain('What this chat can make now');
     // DES-CATALOG-002 §2.3 (u): job proposals are on and this client declared no `accepts: ['job']`: today's flow, with
-    // the job commands offered beside it (this chat has no repository, so no PLAN+ line).
+    // the job commands offered beside it (this chat has no repository, so no PLAN+ line), and nothing about making.
     expect(instructions).toContain('type `<its command>` to start it');
     expect(instructions).not.toMatch(/^\s*PLAN\+ \{/mu);
     await new Promise((r) => setTimeout(r, 100));
@@ -232,6 +232,9 @@ describe('chat proposals (server, A2)', () => {
     // The seat builds on the tab's appearance: a key it leaves out keeps the person's value.
     expect(instructions).toContain("### Studio's appearance in their tab");
     expect(instructions).toContain('action colour hsl(200, 47%, 25%)');
+    // A client that sent the appearance can preview and apply a theme: the seat is told it can propose one.
+    expect(instructions).toContain('"theme":{');
+    expect(instructions).toContain('Studio can make: a studio theme.');
     const before = launches.length;
     reply(prodListeners, 'prod-theme', make({ theme: { name: 'Still ambient', patch: { ambient: true, ambient_still: true } } }));
     const p = await proposalOf(prod, 'prod-theme');
