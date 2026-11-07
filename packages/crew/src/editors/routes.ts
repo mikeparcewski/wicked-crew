@@ -19,7 +19,8 @@
  *    that build's token (built from crew's own record) into the EDITOR-GRANTS ledger, for every project;
  *    revoke drops every token of that editor and permission. `mcp.session` is the install consent's
  *    alone (409 `install_only`). Under `auth=off` a request carrying a governed unit's token is refused
- *    (403 `seat_token`; under `auth=required` such a token is no identity at all: 401). `project` only
+ *    (403 `seat_token`; 503 when the engine cannot tell; under `auth=required` such a token is no identity
+ *    at all: 401). An install, update or removal drops every grant of the editor. `project` only
  *    scopes the answer: the decided set after the write, so a project deny that dominates shows as deny.
  *  - `GET /editors/:id/:version/entry`: the bundle, with exactly the §8.2 headers. The file path comes
  *    from the registry record — never from the URL — and the bytes are re-hashed on every serve: a
@@ -73,11 +74,10 @@ export function grantToken(id: string, version: string, sha256: string, permissi
 }
 
 /**
- * Rewrite the ledger's tokens for the editors `builds` just installed: every `mcp.session` token of those
- * editors is dropped and `add` (this install's tokens, for the builds that declare it) is written; and
- * every other token of an EARLIER build of those editors goes too (F37: a new build asks again, and the
- * old build's allows do not pile up). The person's allows for the very build installed stay: the same
- * bytes they allowed. One read-modify-write;
+ * Rewrite the ledger's tokens for the editors `builds` just installed: EVERY token of those editors is
+ * dropped (F37: an install or update asks again for what the person allowed, the same build included,
+ * and nothing piles up), and `add` (this install's `mcp.session` consent tokens, for the builds that
+ * declare it) is written. One read-modify-write;
  * nothing is written when the list is unchanged. With nothing to add, an engine with no ledger has
  * no grant to withdraw, so that is no change; with something to add it is an error (it would ask).
  *
@@ -98,8 +98,9 @@ export async function editInstallGrants(
   const rules = await adapter.listConformanceRules();
   const ledger = rules.find((r) => r.id === EDITOR_GRANTS_LEDGER);
   if (ledger === undefined) return unavailable(`the ${EDITOR_GRANTS_LEDGER} ledger is not in the policy store; restart the daemon to seed it`);
-  const owned = (t: string): boolean => builds.some((b) => t.startsWith(`editor:${b.id}@`)
-    && (t.endsWith(`/${INSTALL_GRANTED}`) || !t.startsWith(`editor:${b.id}@${b.version}#${b.sha256}/`)));
+  // Every earlier grant of an installed editor goes (codex r2: a same-build "keep" let a failed cleanup resurrect an
+  // old build's allow on its reinstall); only this install's consent tokens are written back.
+  const owned = (t: string): boolean => builds.some((b) => t.startsWith(`editor:${b.id}@`));
   const before = ledger.excludes ?? [];
   const dedup = [...new Set([...before.filter((t) => !owned(t)), ...add])];
   if (dedup.length === before.length && dedup.every((t, i) => t === before[i])) return;
@@ -251,7 +252,9 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
             const msg = err instanceof Error ? err.message : String(err);
             deps.log?.(`[editors] installed, but the ${INSTALL_GRANTED} grants were not written: ${msg}`);
             // Said either way (codex r2): with nothing to grant, an earlier build's token was not withdrawn.
-            const what = declaring.length > 0 ? `${INSTALL_GRANTED} was not granted (it asks)` : `an earlier build's ${INSTALL_GRANTED} grant was not withdrawn`;
+            const what = declaring.length > 0
+              ? `${INSTALL_GRANTED} was not granted (it asks), and its earlier grants were not withdrawn`
+              : `its earlier grants (any permission you allowed) were not withdrawn`;
             return { ...installed, grantError: `installed, but ${what}: ${msg}` };
           }
         });
@@ -359,8 +362,10 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
     async (req, reply) => {
       if (!humanOnly(req, reply)) return reply;
       // The tripwire (§6.4): a request that carries a governed unit's token is a worker's, whatever the auth mode says.
-      const bearer = bearerOf(req);
-      const verdict = bearer !== null && deps.isUnitToken !== undefined ? await deps.isUnitToken(bearer) : 'not_unit';
+      // Under auth=required the bearer already proved a human operator (a unit token is no identity there: 401), so
+      // only the local actor of auth=off is checked; with no engine to ask, a bearer cannot be cleared (codex r2).
+      const bearer = actorOf(req) === LOCAL_ACTOR ? bearerOf(req) : null;
+      const verdict: UnitTokenVerdict = bearer === null ? 'not_unit' : deps.isUnitToken !== undefined ? await deps.isUnitToken(bearer) : 'unknown';
       if (verdict === 'unit') {
         deps.log?.(`[editors] refused a grant write carrying a governed unit's token (${idOf(req)})`);
         return reply.code(403).send({ code: 'seat_token', error: 'a governed worker cannot allow or revoke an editor permission; only the person can, in studio' });

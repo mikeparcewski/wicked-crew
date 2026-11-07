@@ -671,7 +671,7 @@ describe('the routes', () => {
     const v2 = makePack({ id: 'acme-inspect', name: 'acme-inspect', version: '0.2.0', html: EDITOR_HTML.replace('</body>', '<!-- v2 --></body>') });
     const res = await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: v2 } });
     expect(res.statusCode, res.body).toBe(200);
-    expect((res.json() as InstallEditorResponse).grantError).toMatch(/earlier build's mcp\.session grant was not withdrawn: store busy/);
+    expect((res.json() as InstallEditorResponse).grantError).toMatch(/its earlier grants \(any permission you allowed\) were not withdrawn: store busy/);
   });
 
   it('codex r2: a removal and an install never interleave: the editor and its grant agree afterwards', async () => {
@@ -749,21 +749,30 @@ describe('the routes', () => {
     const agent = await grant(h, { permission: 'artifact.write', allow: true }, AGENT);
     expect(agent.statusCode).toBe(403);
     // auth=off: the caller is the local human, but it SENT a governed unit's token: refused (the §6.4 tripwire).
-    const seat = await grant(h, { permission: 'artifact.write', allow: true }, { ...HUMAN, authorization: 'Bearer unit-tok-1' });
+    // (No x-actor header: the request is the local human of auth=off, the only actor the tripwire checks.)
+    const seat = await grant(h, { permission: 'artifact.write', allow: true }, { authorization: 'Bearer unit-tok-1' });
     expect(seat.statusCode, seat.body).toBe(403);
     expect(seat.json()).toMatchObject({ code: 'seat_token' });
     expect(seen).toEqual(['unit-tok-1']);
     expect(h.logs.some((l) => /governed unit's token/.test(l))).toBe(true);
     // codex r1: when crew cannot tell (the engine faulted), it refuses and changes nothing: the tripwire fails closed.
-    const unsure = await grant(h, { permission: 'artifact.write', allow: true }, { ...HUMAN, authorization: 'Bearer flaky' });
+    const unsure = await grant(h, { permission: 'artifact.write', allow: true }, { authorization: 'Bearer flaky' });
     expect(unsure.statusCode).toBe(503);
     // An observer (below operator) is refused too.
     expect((await grant(h, { permission: 'artifact.write', allow: true }, OBSERVER)).statusCode).toBe(403);
     expect(h.upsertConformanceRule.mock.calls.length).toBe(writes);
     expect(ledger.excludes).toEqual([]);
-    // A person's own bearer (not a unit's) is fine.
+    // A verified human operator (auth=required) is not probed at all; nor is a local request with no bearer.
     expect((await grant(h, { permission: 'artifact.write', allow: true }, { ...HUMAN, authorization: 'Bearer person-tok' })).statusCode).toBe(200);
+    expect(seen).toEqual(['unit-tok-1', 'flaky']);
     expect(ledger.excludes).toHaveLength(1);
+    expect((await grant(h, { permission: 'artifact.write', allow: false }, {})).statusCode).toBe(200);
+    expect(ledger.excludes).toHaveLength(0);
+    // codex r2: an engine with no resolver cannot clear a bearer the local actor sends: 503, nothing written.
+    const blind = await harness({ ledger, ledgerDecides: true });
+    await installed(blind);
+    expect((await grant(blind, { permission: 'artifact.write', allow: true }, { authorization: 'Bearer unit-tok-1' })).statusCode).toBe(503);
+    expect(ledger.excludes).toHaveLength(0);
   });
 
   it('F37: refusals: mcp.session is the install consent\'s (409), an undeclared or unknown permission or a bad body is 400, an unknown editor 404, no binding 501, no ledger 503', async () => {
@@ -835,9 +844,10 @@ describe('the routes', () => {
     expect(ledger.excludes).toEqual(['mcp:unrelated']);
     expect((await grant(h, { permission: 'artifact.write', allow: true })).statusCode).toBe(200);
     expect(ledger.excludes.filter((t) => t.endsWith('/artifact.write'))).toEqual([`editor:acme-check@0.2.0#${sha2}/artifact.write`]);
-    // The same build installed again keeps what the person allowed for exactly those bytes.
+    // The same build installed again asks again too (codex r2: no "same build keeps" path for a failed cleanup to reuse).
     await installed(h, { version: '0.2.0', html: EDITOR_HTML.replace('</body>', '<!-- v2 --></body>') });
-    expect(ledger.excludes).toEqual(['mcp:unrelated', `editor:acme-check@0.2.0#${sha2}/artifact.write`]);
+    expect(ledger.excludes).toEqual(['mcp:unrelated']);
+    expect((await grant(h, { permission: 'artifact.write', allow: true })).statusCode).toBe(200);
     // Removing the editor withdraws all of its grants (not only the install's); other entries stay.
     expect((await h.app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-check', headers: HUMAN })).statusCode).toBe(200);
     expect(ledger.excludes).toEqual(['mcp:unrelated']);

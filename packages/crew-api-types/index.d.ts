@@ -15595,8 +15595,9 @@ export interface SetEditorEnabledBody {
  * the installed build, else 409 `build_changed` and nothing is written. Allow writes that build's token
  * (crew builds it from its own record) into the `EDITOR-GRANTS` ledger, for every project; revoke drops
  * every token of that editor and permission. `mcp.session` is refused (409 `install_only`: its install
- * consent grants it). Under `auth=off`, a request carrying a governed unit's token is refused (403
- * `seat_token`; 503 when crew cannot tell); under `auth=required` such a token is no identity (401).
+ * consent grants it). Under `auth=off`, a request carrying a bearer that is a governed unit's token is refused
+ * (403 `seat_token`; 503 when crew cannot tell); under `auth=required` such a token is no identity (401).
+ * An install, update or removal of the editor withdraws every grant it had: it asks again.
  * Answers the decided set after the write (`EditorGrantsResponse`); `project` scopes only that answer.
  */
 export interface SetEditorGrantBody {
