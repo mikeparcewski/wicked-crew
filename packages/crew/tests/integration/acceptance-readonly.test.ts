@@ -29,6 +29,7 @@ import { BUILTIN_WORKFLOWS } from '../support/builtin-fixtures.js';
 import { createServer } from '../../src/api/server.js';
 import type { RecordedEvent, RepoEntry, SessionView } from '../../src/core/types.js';
 import { removeScratch } from '../setup/scratch.js';
+import { withRunViews } from '../support/run-views.js';
 
 const FIXTURE = fileURLToPath(new URL('../fixtures/qe-ledger-pass', import.meta.url));
 const QE_RUN_ID = '7ec47687-fb15-4592-bf69-5121359f8bab';
@@ -184,7 +185,7 @@ beforeAll(async () => {
   const featureDef = BUILTIN_WORKFLOWS.find((w) => w.id === 'feature')!;
   adapter.listRuntimeWorkflows = () => [featureDef];
 
-  app = await createServer(adapter);
+  app = await createServer(withRunViews(adapter));
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();
   baseUrl = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;

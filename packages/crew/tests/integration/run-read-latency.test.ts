@@ -43,7 +43,7 @@ let adapter: CoreAdapter;
 let app: Awaited<ReturnType<typeof createServer>>;
 let baseUrl: string;
 let runIds: string[];
-/** Callers that have entered `adapter.sessionsDetail()` — proves the reads reached the engine. */
+/** Callers that have entered `adapter.runView()` — proves the reads reached the adapter's run read. */
 let readsEntered = 0;
 const savedEnv: Record<string, string | undefined> = {};
 
@@ -87,10 +87,11 @@ beforeAll(async () => {
   helper('clone', dir, String(RUNS));
 
   adapter = new CoreAdapter({ dbPath: join(dir, 'home', 'core.db'), stub: true });
-  const fold = adapter.sessionsDetail.bind(adapter);
-  adapter.sessionsDetail = () => {
+  // F35: a single-run read is `runView` (one run copied out of the shared views snapshot).
+  const read = adapter.runView.bind(adapter);
+  adapter.runView = (id, opts) => {
     readsEntered += 1;
-    return fold();
+    return read(id, opts);
   };
   app = await createServer(adapter, { stallWatchdog: { enabled: false } });
   await app.listen({ port: 0, host: '127.0.0.1' });

@@ -28,6 +28,7 @@ import { InteractiveBridgePool, type LiveBridge } from '../../src/interactive/br
 import { DocGroundingStore } from '../../src/interactive/doc-grounding.js';
 import type { CoreAdapter } from '../../src/core/adapter.js';
 import type { Project, SessionView } from '../../src/core/types.js';
+import { withRunViews } from '../support/run-views.js';
 
 export const RUN_DONE = 'run-fixture-done';
 export const RUN_GATED = 'run-fixture-gated';
@@ -151,7 +152,7 @@ export function buildGeneratedApiApp(): FastifyInstance {
       done(err as Error);
     }
   });
-  registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), undefined, undefined, {
+  registerRoutes(app, withRunViews(adapter), new GateCache(), new ElicitationCache(), undefined, undefined, {
     interactiveBridges: pool,
     docGrounding: new DocGroundingStore(),
   });

@@ -28,6 +28,7 @@ import { createServer } from '../../src/api/server.js';
 import { tokenHash } from '../../src/api/auth.js';
 import type { AuditEntry, CrewSystemSettings, SessionView } from '../../src/core/types.js';
 import { removeScratch } from '../setup/scratch.js';
+import { withRunViews } from '../support/run-views.js';
 
 const TOKENS = {
   observer: 'obs-token-1',
@@ -89,7 +90,7 @@ beforeAll(async () => {
     });
   adapter.projectMembers = async () => [];
 
-  app = await createServer(adapter, {
+  app = await createServer(withRunViews(adapter), {
     auth: { mode: 'required', tokensPath: join(dir, 'tokens.json') },
     auditPath: join(dir, 'audit.log'),
     projectEvents: { disabled: true },
@@ -99,7 +100,7 @@ beforeAll(async () => {
   base = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
 
   // The LOCAL-MODE control: same adapter, default auth (off), tokenless.
-  localApp = await createServer(adapter, {
+  localApp = await createServer(withRunViews(adapter), {
     auth: { mode: 'off' },
     auditPath: join(dir, 'audit-local.log'),
     projectEvents: { disabled: true },
