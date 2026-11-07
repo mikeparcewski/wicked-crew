@@ -1039,7 +1039,9 @@ export class WorkingDocService {
     if (b.block.sections.length === 0 && (prior?.attempted ?? null) === null) return;
     const timeoutMs = this.d.contextTimeoutMs ?? CONTEXT_SET_TIMEOUT_MS;
     const call = async (ctx: RunContextBlock): Promise<{ version: number; accepted: boolean }> => {
-      this.updateContext(runId, (c) => { c.attempted = Math.max(c.attempted ?? 0, ctx.version); });
+      // The set is owed until the engine's answer is recorded (xreview r3): a restart mid-call leaves it owed, so every
+      // recovery path (the start-up sync, its re-arm, the next version) sends it again.
+      this.updateContext(runId, (c) => { c.attempted = Math.max(c.attempted ?? 0, ctx.version); c.retry = true; });
       const answer = set.call(this.d.engine, runId, ctx);
       // An answer after the timeout is not awaited by anyone: its rejection must not go unhandled.
       answer.catch(() => undefined);
@@ -1074,8 +1076,8 @@ export class WorkingDocService {
       const msg = err instanceof Error ? err.message : String(err);
       let reason = msg.replace(/^bad_request:\s*(run context refused:\s*)?/u, '');
       let cleared = false;
-      if (/^conflict:/u.test(msg)) reason = 'the job has ended';
-      else if (/^not_found:/u.test(msg)) reason = 'the engine does not know this job';
+      if (/^conflict:/u.test(msg)) { reason = 'the job has ended'; this.updateContext(runId, (c) => { c.retry = false; }); }
+      else if (/^not_found:/u.test(msg)) { reason = 'the engine does not know this job'; this.updateContext(runId, (c) => { c.retry = false; }); }
       else if (/^bad_request:/u.test(msg)) {
         // Refused whole: withdraw the block in force, so the agents never keep the words the person has just replaced.
         const hadBlock = (prior?.sections.length ?? 0) > 0;

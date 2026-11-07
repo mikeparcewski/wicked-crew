@@ -69,7 +69,7 @@ class FakeEngine {
 
 const HUMAN: Actor = { id: 'local', kind: 'human', trust: 'admin' };
 
-function setup(o: { engine?: FakeEngine; facts?: Record<string, Partial<RunFacts>>; store?: WorkingDocStore; backend?: FakeBackend; retryMs?: number[] } = {}) {
+function setup(o: { engine?: FakeEngine; facts?: Record<string, Partial<RunFacts>>; store?: WorkingDocStore; backend?: FakeBackend; retryMs?: number[]; timeoutMs?: number } = {}) {
   const backend = o.backend ?? new FakeBackend();
   const engine = o.engine ?? new FakeEngine();
   const store = o.store ?? new WorkingDocStore({ stateHome: home() });
@@ -81,7 +81,7 @@ function setup(o: { engine?: FakeEngine; facts?: Record<string, Partial<RunFacts
     engine,
     run: async (runId) => ({ ...base, ...(o.facts?.[runId] ?? {}) }),
     now: () => (clock += 1),
-    contextTimeoutMs: 20,
+    contextTimeoutMs: o.timeoutMs ?? 20,
     contextRetryMs: o.retryMs ?? [40, 40],
   });
   const head = (runId = 'run-1') => (backend.docs.get(`working-${runId}`)?.length ?? 0) - 1;
@@ -434,13 +434,14 @@ describe('no stale block, no silent loss (xreview r1)', () => {
     t.store.update('run-1', (r) => { r.pending = { expectHead: head, author: { kind: 'human', id: 'local' }, surface: null, values: { next: 'N' }, at: 1, actor: { id: 'local', kind: 'human' } }; });
     t.engine.answer = 'ok';
     const calls = t.engine.calls.length;
-    await wait(50);
+    await wait(45);
     expect(t.store.get('run-1')?.pending, 'still unknown').not.toBeNull();
     expect(t.engine.calls.length, 'nothing sent while a write is unknown').toBe(calls);
-    // It lands: its settling (a Next-only version) sets the block that was owed.
+    // It lands (a Next-only version): the re-armed retry settles it and sets the block that was owed, with no read or
+    // edit from anyone.
     const docs = t.backend.docs.get('working-run-1')!;
     docs.push({ html: docs.at(-1)!.html.replace(/(data-wid="wd-next"[^>]*>)[^<]*/u, '$1N'), author: 'local' });
-    await t.service.view('run-1');
+    await wait(90);
     expect(t.engine.held.get('run-1')?.sections[0]?.text).toBe('G2');
     expect((await t.service.view('run-1')).context).toMatchObject({ error: null });
   });
@@ -467,6 +468,29 @@ describe('no stale block, no silent loss (xreview r1)', () => {
     t.store.update('run-1', (r) => { r.context = { ...r.context!, sig: null, sentVersion: null, sections: [], at: null, error: null }; });
     await t.edit({ constraints: '' });
     expect(t.engine.held.get('run-1')).toMatchObject({ version: 2, sections: [] });
+  });
+
+  it('a restart mid-call, then a start-up read that fails: the owed set is re-armed and lands with no edit', async () => {
+    const h = home();
+    const backend = new FakeBackend();
+    const engine = new FakeEngine();
+    // The first daemon dies mid-call: its set of G2 never answers and nothing after the call runs.
+    const a = setup({ engine, backend, store: new WorkingDocStore({ stateHome: h }), retryMs: [600_000], timeoutMs: 600_000 });
+    await a.service.ensure('run-1');
+    await a.edit({ goal: 'G1' });
+    engine.answer = 'lose';
+    void a.edit({ goal: 'G2' });
+    await wait(10);
+    engine.answer = 'ok';
+    // The call never reached the engine: it still holds G1.
+    engine.held.set('run-1', { version: 1, sections: [{ id: 'goal', text: 'G1', author: { kind: 'human', id: 'the operator' }, version: 1 }], set_by: { kind: 'human', id: 'the operator' } });
+    const b = setup({ engine, backend, store: new WorkingDocStore({ stateHome: h }), retryMs: [30, 30] });
+    const read = backend.read.bind(backend);
+    let fails = 1;
+    backend.read = async (p: string, d: string) => { if (fails-- > 0) throw new Error('interactive is starting'); return read(p, d); };
+    await b.service.catchUp();
+    await wait(90);
+    expect(engine.held.get('run-1')?.sections[0]?.text).toBe('G2');
   });
 
   it('a clear that fails says the earlier context is still in force and is being retried', async () => {
