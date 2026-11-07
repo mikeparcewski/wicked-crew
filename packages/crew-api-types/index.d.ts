@@ -15710,7 +15710,8 @@ export interface ProjectCoverageResponse {
  * Draft epics → features → stories from selected requirements of the project (at most 40). The
  * daemon re-reads each one from its repo's artifact (an unknown or foreign ref is a 400 naming it,
  * nothing launched) and launches a governed run through `POST /runs`: a `produce` draft step, then
- * a `review` evaluator with a human gate; `deliver: "none"`. The draft ends with one fenced JSON
+ * a `critique` evaluator (step id `review`) with an unconditional human gate; `deliver: "none"`. The
+ * run has no repository, so no step carries a validator pin (F34). The draft ends with one fenced JSON
  * plan `{epics:[{title, features:[{title, requirementRefs:[{repoId,key}], stories:[{title,
  * acceptance:[…]}]}]}]}`. `POST /runs`' own refusals are relayed with their status.
  */

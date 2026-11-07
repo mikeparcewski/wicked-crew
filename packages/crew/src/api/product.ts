@@ -3,9 +3,16 @@
  * from a project's selected requirements, as a GOVERNED RUN (design: DES-W4-CR5, posted on the
  * issue). There is no new execution path: the route re-reads every selected requirement on the
  * server (client text is never trusted), composes a two-step plan over the phase catalog —
- * `produce` (creator: the draft) then `review` (evaluator, a human gate before anything leaves) —
+ * `produce` (creator: the draft) then `critique` (evaluator, a human gate before anything leaves) —
  * and launches it through `POST /runs` itself, so the run gets the same roster, project filing,
  * audit and launch policy as any other run. `deliver: "none"`: nothing is published here.
+ *
+ * Why `critique` and not `review` (F34): a compose run has no repository, so it has no worktree.
+ * The catalog's `review` entry carries the evidence floor pin ("the run left a change in its
+ * worktree"), and the engine fails a pin closed when there is no worktree to re-verify it against,
+ * so a `review` step here could never pass. `critique` is the evaluator the engine's own band
+ * floor picks for a plan that writes no code; the step keeps its distinct evaluator (whose own
+ * VERDICT gates it) and the human gate. No step of this plan may carry a validator pin.
  *
  * Publish (the second half of #372) is NOT registered: it is a remote write whose "published" must
  * be re-derived from a deterministic created-issue manifest plus a read-back, which does not exist
@@ -255,7 +262,8 @@ export async function composeLaunch(
           plan: {
             steps: [
               { catalog: 'produce', id: 'draft', instructions: draft },
-              { catalog: 'review', id: 'review', gate: { human_confirm: { unconditional: true } }, instructions: review },
+              // `critique`, never `review`: the review entry's evidence floor needs a worktree diff (F34).
+              { catalog: 'critique', id: 'review', gate: { human_confirm: { unconditional: true } }, instructions: review },
             ],
           },
         },

@@ -185,6 +185,15 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **Draft epics can pass its review (F34).** The Backlog compose (`POST /projects/:id/product/compose`) authored its
+  review as the catalog's `review` entry, which carries the engine's evidence floor ("the run left a change in its
+  worktree"). A compose run has no repository and so no worktree, and the engine fails any validator pin closed
+  without one, so every attempt at the review step (Retry, Send back, Reassign, Redo) was refused and the run never
+  reached its document. The review is now a `critique`: the evaluator the engine's own band floor picks for a plan that
+  writes no code, still a distinct evaluator seat whose own verdict gates the step, behind the same unconditional human
+  gate and instructions. The floor no longer adds a second critique beside it. Runs that change code keep their
+  evidence floor.
+
 - **Jira: an API token Atlassian cannot find sites for now says why (operator report 2026-11-06).** Under API-token
   sign-in, Atlassian's MCP server resolves the sites a token reaches on every site call, and a scoped token without
   `read:account` gets an in-band `401 "Failed to fetch accessible products"` (atlassian-mcp-server#285, Atlassian's

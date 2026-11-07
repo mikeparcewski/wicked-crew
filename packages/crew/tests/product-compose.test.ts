@@ -7,8 +7,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { CoreAdapter } from '../src/core/adapter.js';
 import { COMPOSE_MAX_REQUIREMENTS, ComposeSelectionTooLargeError, composeInstructions, composePreflight, registerProductRoutes, reviewInstructions } from '../src/api/product.js';
-import type { CoreAdapter } from '../src/core/adapter.js';
 
 describe('POST /projects/:id/product/compose (crew#372)', () => {
   let base: string;
@@ -85,7 +85,7 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
     expect(launched).toEqual([]);
   });
 
-  it('re-reads each requirement and launches produce → review (human gate) via POST /runs, filed, no deliver', async () => {
+  it('re-reads each requirement and launches produce → critique (human gate) via POST /runs, filed, no deliver', async () => {
     const res = await compose(
       { requirements: [{ repoId: 'alpha', key: 'billing::r1' }, { repoId: 'alpha', key: 'billing::r2' }], instructions: 'one epic per domain' },
       { authorization: 'Bearer t0k' },
@@ -97,7 +97,8 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
     expect(launched[0]!.auth).toBe('local:compose'); // the caller's run, audited as theirs, judged as a compose
     expect(body).toMatchObject({ projectId: 'p1', deliver: 'none' });
     const steps = (body['plan'] as { steps: Array<Record<string, unknown>> }).steps;
-    expect(steps.map((s) => [s['catalog'], s['id']])).toEqual([['produce', 'draft'], ['review', 'review']]);
+    // F34: the review is a `critique` (no validator pin), never the evidence-floored `review` entry.
+    expect(steps.map((s) => [s['catalog'], s['id']])).toEqual([['produce', 'draft'], ['critique', 'review']]);
     expect(steps[1]!['gate']).toEqual({ human_confirm: { unconditional: true } });
     // The SERVER's text of each requirement reaches the draft, plus the steer and the artifact shape.
     const draft = String(steps[0]!['instructions']);
@@ -163,5 +164,42 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
     for (const r of longKeys) expect(t).toContain(`- ${r.repoId} ${r.key}: `);
     const huge = rows.map((r, i) => ({ ...r, key: `d::${'k'.repeat(190)}-${i}` }));
     expect(() => composeInstructions('p', huge, undefined)).toThrow(ComposeSelectionTooLargeError);
+  });
+
+  // F34 (W22, run f1e3f63d): a compose run has no repository, so no worktree, and the engine fails a validator pin
+  // closed when there is no worktree to re-verify it against. A compose step whose catalog entry carries a pin (the
+  // `review` entry's evidence floor: "the run left a change in its worktree") can never pass, so Draft epics never
+  // reached its document. Read against the ENGINE's own catalog, not a copy of it.
+  it('(F34) no step of a compose plan carries a validator pin in the engine catalog: a repo-less run cannot re-verify one', async () => {
+    const res = await compose({ requirements: [{ repoId: 'alpha', key: 'billing::r1' }] });
+    expect(res.statusCode, res.body).toBe(202);
+    const body = launched[0]!.body;
+    expect(body).not.toHaveProperty('repoRef');
+    const steps = (body['plan'] as { steps: Array<Record<string, unknown>> }).steps;
+    const dir = mkdtempSync(join(tmpdir(), 'product-compose-catalog-'));
+    const engine = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
+    try {
+      const entries = await engine.catalog();
+      for (const step of steps) {
+        expect(step).not.toHaveProperty('validator_pin');
+        const entry = entries.find((e) => e.id === step['catalog']);
+        expect(entry, `catalog entry ${String(step['catalog'])}`).toBeDefined();
+        expect([step['id'], entry!.pinned, entry!.validator_pin]).toEqual([step['id'], false, null]); // the id labels a failure
+      }
+      // The engine's own composition of this plan with no repository (pi review): no phase carries a pin, and the floor
+      // adds no second critique beside the authored one.
+      const preview = await engine.previewPlan({ steps } as never, {});
+      const phases = preview.def.phases.map((ph) => [ph.id, ph.validator_pin]);
+      expect(phases).toEqual(expect.arrayContaining([['draft', null], ['review', null]]));
+      expect(phases.filter(([, pin]) => pin !== null)).toEqual([]);
+      expect(preview.steps.filter((s) => s.catalog === 'critique')).toHaveLength(1);
+      // The review step is still a distinct evaluator behind the human gate.
+      const review = steps.find((s) => s['id'] === 'review')!;
+      expect(entries.find((e) => e.id === review['catalog'])!.role).toBe('evaluator');
+      expect(review['gate']).toEqual({ human_confirm: { unconditional: true } });
+    } finally {
+      engine.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
