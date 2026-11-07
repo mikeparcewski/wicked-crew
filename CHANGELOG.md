@@ -12,6 +12,18 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **The draft's page count is printed once, by the engine, with a browser that can print in its jail (PLAN G12, crew
+  half; no api-types change).** Crew's managed renderer is now Playwright's headless shell
+  (`chromium_headless_shell`), which `playwright install chromium` already installs beside Chrome for Testing: the full
+  browser cannot print inside the engine's no-network render jail on macOS. Its path is recorded in a new
+  `.wicked-headless-shell` file (a full-Chrome path recorded by an earlier crew is never read), and a cache without the
+  shell gets it with `playwright install --only-shell chromium`. Crew exports it as the daemon's own `WICKED_CHROME` at
+  boot and after every provisioning, tracked as crew's value like the engine conformance variables, so the engine's
+  `draft_render` step finds it; an operator's own `WICKED_CHROME` still wins, and crew's own export no longer stops a
+  document launch from provisioning. The draft floor reuses the run's latest `draft_render` record when it measured the
+  same bytes (sha256) with the floor's own print profile, and then runs the self-check without a second render;
+  any other record means the floor prints or estimates as before. Narration names the `measure-pages` step.
+
 - **Model run cost: the facts route and command (DES-CATALOG-002 CS6, crew half; no api-types change).**
   `POST /api/v1/insights/facts {token}` is worker-facing: a unit-token route, like `/apps/check`. It answers only the
   `facts` Tool of a `run-cost` run that runs exactly `wicked-crew insights-facts` (an agent step, another workflow's
