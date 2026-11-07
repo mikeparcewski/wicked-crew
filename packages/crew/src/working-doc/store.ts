@@ -74,8 +74,16 @@ export interface WorkingDocRecord {
   createdAt: number;
   trail: TrailEntry[];
   steers: SteerRecord[];
+  /** (workdoc-all-runs, xreview r5) The Decisions lines crew's last write left there as its own: a line whose source
+   *  has gone (an older note) is still crew's, never taken for a person's. Bounded by the section (4,000 characters). */
+  ownedDecisions?: string[];
   /** An edit whose outcome was not known (no version in time): attributed once the head shows it, never to another. */
-  pending?: { expectHead: number; author: DocAuthor; surface: string | null; values: Partial<Record<SectionId, string>>; at: number; actor: { id: string; kind: string }; input?: 'voice' } | null;
+  pending?: {
+    expectHead: number; author: DocAuthor; surface: string | null; values: Partial<Record<SectionId, string>>; at: number;
+    actor: { id: string; kind: string }; input?: 'voice';
+    /** (xreview r6) Crew's own Decisions lines once THIS write lands: installed when it is confirmed. */
+    ownedDecisions?: string[];
+  } | null;
 }
 
 interface FileShape { version: 1; runs: Record<string, WorkingDocRecord> }

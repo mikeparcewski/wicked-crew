@@ -155,7 +155,8 @@ import type { SearchService } from './search-routes.js';
 import { callEstateTool } from '../core/estate-mcp-client.js';
 import { seatParser } from '../standing-orders/parse.js';
 import { registerGateHistoryRoute, runBand, runPreset, runProject } from '../standing-orders/history.js';
-import { WorkingDocService } from '../working-doc/service.js';
+import { WorkingDocService, workingDocStep } from '../working-doc/service.js';
+import { PersonNotesIndex } from '../working-doc/notes-index.js';
 import { WorkingDocStore } from '../working-doc/store.js';
 import { isWorkingDoc as isWorkingDocAt } from '../interactive/chat-events.js';
 import { DocBindingStore } from '../interactive/doc-binding.js';
@@ -2905,24 +2906,54 @@ export async function createServer(
   // Program DES-POWER-MODE §8.3/§9 (spike 3): the run's working document — a wicked-interactive document of kind
   // `phase-report` — and the steering notes a person's edits of it become. Steering rides the engine's operator
   // inject only; nothing here answers a gate.
+  const workingDocNotes = new PersonNotesIndex();
+  // The working documents read the run views (the engine's whole-store fold) at most once per 2 s between them: the
+  // catch-up and a burst of syncs share one read instead of one each (crew#944: run reads must stay fast).
+  let workingDocViewsRead: { at: number; views: Promise<SessionView[]> } | null = null;
+  const workingDocViews = (): Promise<SessionView[]> => {
+    if (workingDocViewsRead === null || Date.now() - workingDocViewsRead.at > 2_000) {
+      const views = adapter.sessionsDetail();
+      workingDocViewsRead = { at: Date.now(), views };
+      views.catch(() => { if (workingDocViewsRead?.views === views) workingDocViewsRead = null; });
+    }
+    return workingDocViewsRead.views;
+  };
+  /** How long after start the working documents' catch-up begins (`WICKED_WORKING_DOC_CATCHUP_MS`, default 10 s). */
+  const catchUpEnv = Number(process.env['WICKED_WORKING_DOC_CATCHUP_MS']);
+  const WORKING_DOC_CATCH_UP_DELAY_MS = process.env['WICKED_WORKING_DOC_CATCHUP_MS'] !== undefined && Number.isFinite(catchUpEnv) && catchUpEnv >= 0 ? catchUpEnv : 10_000;
+  // The start-up read of the trail for the person's answers; every document sync waits for it (never rejects).
+  const workingDocNotesRead: Promise<string[]> = audit.readAll().then(
+    (entries) => workingDocNotes.hydrate(entries),
+    (err: unknown) => {
+      app.log.warn(`[working-doc] the trail could not be read for the person's answers: ${String(err)}`);
+      return workingDocNotes.hydrate([]);
+    },
+  );
   const workingDocs = new WorkingDocService({
     store: new WorkingDocStore({ log: (m) => app.log.warn(m) }),
     backend: bridgeBackend(interactiveBridges, (projectId) => workingDocRoot(adapter, projectSettings, projectId)),
     engine: { injectWorkerMessage: (runId, message, target) => adapter.injectWorkerMessage(runId, message, target) },
     run: async (runId) => {
-      const v = (await adapter.sessionsDetail()).find((x) => x.session.id === runId);
+      const v = (await workingDocViews()).find((x) => x.session.id === runId);
       if (v === undefined) return null;
       return {
         title: workingDocTitle(v.session.problem),
         problem: v.session.problem ?? '',
         projectId: runProject(v, runId, (id) => membershipIndex.projectOf(id)) ?? WORKING_DOC_DEFAULT_PROJECT,
         terminal: ['completed', 'cancelled', 'failed'].includes(v.session.status),
-        stepOf: (ord) => {
-          const u = v.units.find((x) => x.ord === ord);
-          return u?.phase_ref ?? (typeof u?.description === 'string' ? (u.description.split(/\s+[—-]\s+/u)[0] ?? null) : null);
-        },
+        stepOf: (ord) => workingDocStep(v.units.find((x) => x.ord === ord)),
+        power: v.session.power != null,
+        // The run's current plan (the engine's unit list): what a phased run's Approach says once its plan settles.
+        steps: v.units.map((u) => ({ ord: u.ord, name: workingDocStep(u), seat: u.assigned_cli ?? null })),
       };
     },
+    // A person's answers with their words (crew's own trail: the engine's log does not say who, or why), from memory,
+    // once the start-up read of the trail is in (so a line never lands ahead of an older one).
+    notes: async (runId) => { await workingDocNotesRead; return workingDocNotes.of(runId); },
+    // The launch time is crew's (the run-timing index, from `run.launched`); a run with none sorts oldest.
+    liveRuns: async () => (await workingDocViews())
+      .filter((v) => !['completed', 'cancelled', 'failed'].includes(v.session.status) && v.session.archived_at == null)
+      .map((v) => ({ runId: v.session.id, createdAt: runTimingIndex.createdAtFor(v.session.id) ?? 0 })),
     changed: (runId, head) => broadcast({ type: 'workingDocChanged', session: runId, head } as unknown as Parameters<typeof broadcast>[0]),
     audit: (action, actor, runId, detail) => audit.record(action, actor as Parameters<typeof audit.record>[1], { runId, detail }),
     // The run's own log: crew writes the event-derived lines (Decisions, Open questions, Next) whether or not a tab
@@ -2931,8 +2962,22 @@ export async function createServer(
     log: (m) => app.log.warn(m),
   });
   workingDocTap = (e) => workingDocs.onEvent(e);
-  // After a restart no further event may come for a run: bring every held document's lines up to date once.
-  workingDocs.catchUp();
+  // A person's answer recorded in the trail (a gate note, a skip reason, guidance) brings the run's document up to date:
+  // some come with no engine event at all (guidance), and a gate's is recorded after the engine's answer.
+  audit.onRecord((entry) => { const runId = workingDocNotes.add(entry); if (runId !== null) workingDocs.nudge(runId); });
+  // After a restart no further event may come for a run: once the person's answers are read from the trail, bring every
+  // held document up to date and make the newest live runs' documents (bounded, one at a time; never rejects). Answers
+  // recorded while the trail was read bring their run's document up to date too.
+  // It starts a little after the daemon is up (a boot is busy enough), and never after it has closed.
+  let workingDocCatchUp: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+    workingDocCatchUp = null;
+    void workingDocNotesRead.then(async (touched) => {
+      for (const runId of touched) workingDocs.nudge(runId);
+      await workingDocs.catchUp();
+    });
+  }, WORKING_DOC_CATCH_UP_DELAY_MS);
+  workingDocCatchUp.unref?.();
+  app.addHook('onClose', async () => { if (workingDocCatchUp !== null) clearTimeout(workingDocCatchUp); });
   registerWorkingDocRoutes(app, { service: workingDocs, exists: async (id) => (await adapter.sessions()).includes(id) });
   registerStandingOrderRoutes(app, {
     store: standingOrders,
