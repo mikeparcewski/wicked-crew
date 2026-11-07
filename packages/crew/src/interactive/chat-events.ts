@@ -74,7 +74,9 @@ import type { DocBindingStore } from './doc-binding.js';
 import { guardRefine } from './landing-guard.js';
 import { recordLanding, type LandingRecordStore } from './landing-record.js';
 import { lineageSteps, protectedEdits, type GardenIo } from './protected-edits.js';
-import { rangeFloor, resolveInteractiveSpec } from './bridge-pool.js';
+import semver from 'semver';
+import type { ProtectedEdit } from 'wicked-crew-api-types';
+import { resolveInteractiveSpec } from './bridge-pool.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 import { resolveInteractiveRoot } from './bridge-root.js';
@@ -474,8 +476,13 @@ export function refineCasHolds(docsRoot: string, env: NodeJS.ProcessEnv = proces
     return casCapable(bridge) ? { ok: true } : { ok: false, why: `the document service here (wicked-interactive ${bridge === '' ? 'of unknown version' : bridge}) cannot refuse a change made while it was being revised; restart it on 0.15 or later` };
   }
   const spec = resolveInteractiveSpec(env);
-  const floor = rangeFloor(spec.range);
-  if (floor === null || (floor[0] === 0 && floor[1] < 15)) return { ok: false, why: `this daemon starts wicked-interactive on ${spec.range}, which cannot refuse a change made while it was being revised; use 0.15 or later` };
+  let min: string | null = null;
+  try {
+    min = semver.minVersion(spec.range)?.version ?? null;
+  } catch {
+    min = null;
+  }
+  if (min === null || semver.lt(min, '0.15.0')) return { ok: false, why: `this daemon starts wicked-interactive on ${spec.range}, which cannot refuse a change made while it was being revised; use 0.15 or later` };
   return { ok: true };
 }
 
@@ -1028,9 +1035,11 @@ export async function startInteractiveChatSubscriber(
       ...docScope(documentId, projectId),
       state: 'complete',
       message:
-        guard.kept > 0
+        (guard.kept > 0
           ? `Revision checked: your ${guard.kept} edit${guard.kept === 1 ? ' is' : 's are'} kept. Landing it on the canvas now.`
-          : 'Revision checked. Landing it on the canvas now.',
+          : 'Revision checked. Landing it on the canvas now.') +
+        // An unverified floor lands like a draft's does, said out loud (and recorded so on the checks read).
+        (guard.floor.verdict === 'unverified' ? ` Not everything could be checked: ${guard.floor.summary}.` : ''),
     });
     log(`[interactive-chat] draft.completed emitted for refine ${bound.ref} (run ${runId}, expect_head v${bound.base})`);
   }
@@ -1052,25 +1061,13 @@ export async function startInteractiveChatSubscriber(
     for (const a of opts.bindings?.get(spec.artifactRef)?.attempts ?? []) {
       if (a.runId !== spec.runId) rmSync(join(chatDir, 'landed', a.runId), { recursive: true, force: true });
     }
-    // The person's protected edits on the base, for the writer's own in-run check (crew re-derives its own at landing).
-    const steps = lineageSteps(docsRoot, spec.documentId, spec.base, (id) => opts.bindings?.allowOf(id) ?? []);
-    if (steps === null) throw new Error(`the versions of ${spec.artifactRef} could not be read`);
-    const mapped = await protectedEdits(steps, [], opts.gardenIo ?? {});
-    if (!mapped.ok) throw new Error(`your edits could not be read on this host (${mapped.error}); nothing was started`);
     const runDir = join(chatDir, `refine-${spec.runId}`);
-    mkdirSync(runDir, { recursive: true });
     const currentPath = join(runDir, 'current.html');
     const outPath = join(runDir, 'revised.html');
     const mapPath = join(runDir, 'keep-map.json');
     const notesPath = notesPathOf(outPath);
-    copyFileSync(doc.headHtmlPath, currentPath);
-    writeFileSync(mapPath, JSON.stringify(mapped.map));
-    rmSync(notesPath, { force: true });
-    rmSync(outPath, { force: true });
-    const kept = mapped.entries.filter((e) => !spec.allow.includes(e.id));
-    emitStatus({ ...docScope(spec.documentId, spec.projectId), state: 'processing', message: 'A governed crew picked up your change — revising the document…' });
-    // The flight is registered BEFORE the launch (codex A5 r1): a terminal frame that arrives while the launch call is
-    // still in flight is this run's, never an orphan's.
+    // The document is reserved from HERE, before the first await (codex A5 r2-r3): every seam serializing on this seam's
+    // busy list sees it, and a terminal frame that arrives while the launch call is in flight is this run's.
     const flight: InFlight = {
       key,
       documentId: spec.documentId,
@@ -1085,6 +1082,24 @@ export async function startInteractiveChatSubscriber(
     };
     flight.heartbeat.unref?.();
     inFlight.set(spec.runId, flight);
+    let kept: ProtectedEdit[];
+    try {
+      // The person's protected edits on the base, for the writer's own in-run check (crew re-derives its own at landing).
+      const steps = lineageSteps(docsRoot, spec.documentId, spec.base, (id) => opts.bindings?.allowOf(id) ?? []);
+      if (steps === null) throw new Error(`the versions of ${spec.artifactRef} could not be read`);
+      const mapped = await protectedEdits(steps, [], opts.gardenIo ?? {});
+      if (!mapped.ok) throw new Error(`your edits could not be read on this host (${mapped.error}); nothing was started`);
+      mkdirSync(runDir, { recursive: true });
+      copyFileSync(doc.headHtmlPath, currentPath);
+      writeFileSync(mapPath, JSON.stringify(mapped.map));
+      rmSync(notesPath, { force: true });
+      rmSync(outPath, { force: true });
+      kept = mapped.entries.filter((e) => !spec.allow.includes(e.id));
+    } catch (err) {
+      endFlight(spec.runId);
+      throw err;
+    }
+    emitStatus({ ...docScope(spec.documentId, spec.projectId), state: 'processing', message: 'A governed crew picked up your change — revising the document…' });
     try {
       opts.bindings?.markLaunching(spec.artifactRef, spec.runId);
       // The handoff row exists before any terminal frame of this run can arrive (codex A5 r2).
@@ -1108,9 +1123,15 @@ export async function startInteractiveChatSubscriber(
       endFlight(spec.runId);
       try {
         ledger.recordFailure(key);
-        opts.bindings?.clearLaunching(spec.artifactRef, spec.runId);
       } catch {
-        /* the launch error below is the answer; Go again resumes the same identity */
+        /* the launch error below is the answer */
+      } finally {
+        // Cleared whatever the ledger did (codex A5 r3): Go again must find the document free.
+        try {
+          opts.bindings?.clearLaunching(spec.artifactRef, spec.runId);
+        } catch {
+          /* the boot reconcile clears a marker with no run */
+        }
       }
       emitStatus({ ...docScope(spec.documentId, spec.projectId), state: 'error', message: `Crew could not start the change: ${err instanceof Error ? err.message : String(err)}. Go again on the card resumes it.` });
       throw err;

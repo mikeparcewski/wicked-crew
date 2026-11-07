@@ -343,6 +343,23 @@ describe('A5 r1 folds', () => {
     expect(existsSync(old)).toBe(false);
   });
 
+  it('the document is reserved before the first await: while its edits are being read, it is busy (codex r3)', async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((r) => { release = r; });
+    const { sub, launches } = await seam({ garden: { gardenRoot: () => '/garden', run: async (argv: string[]) => {
+      await held;
+      return argv.includes('map') ? { stdout: JSON.stringify({ ok: true, map: {}, entries: [] }), code: 0 } : { stdout: JSON.stringify({ ok: true, kept: 0, violations: [] }), code: 0 };
+    } } });
+    bindings.begin(init, { pid: 'c1:t1', runId: RUN, base: 1, op: 'refine' });
+    const going = sub.launchBound(spec());
+    await new Promise((r) => setTimeout(r, 20));
+    expect(sub.inFlightDocs()).toEqual(['deck']);
+    expect(launches).toEqual([]);
+    release();
+    await going;
+    expect(launches).toHaveLength(1);
+  });
+
   it('the landing watch settles a refine: landed on version.created for its run, failed on draft.conflict', async () => {
     const { startInteractiveDraftSubscriber } = await import('../src/interactive/draft-events.js');
     const outcomes: Array<{ runId: string; outcome: unknown }> = [];
@@ -378,6 +395,9 @@ describe('A5 r2 folds', () => {
     try {
       expect(refineCasHolds(dir, {}).ok).toBe(true);
       expect(refineCasHolds(dir, { WICKED_INTERACTIVE_SPEC: '^0.14.1' })).toMatchObject({ ok: false, why: expect.stringContaining('0.14.1') });
+      // codex r3: the range's real minimum decides (an exclusive or intersected floor past 0.15 is fine).
+      expect(refineCasHolds(dir, { WICKED_INTERACTIVE_SPEC: '>0.15.0' }).ok).toBe(true);
+      expect(refineCasHolds(dir, { WICKED_INTERACTIVE_SPEC: '>=0.14.0 >=0.15.0 <0.16.0' }).ok).toBe(true);
     } finally {
       removeScratch(dir);
     }
