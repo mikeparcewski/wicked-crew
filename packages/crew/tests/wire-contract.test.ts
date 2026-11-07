@@ -919,7 +919,7 @@ respondsWith<Wire.RequirementsPage, RequirementsPage>();
 respondsWith<Wire.RequirementDetail, RequirementDetail>();
 // The not-generated 404 is typed (0.154.0): `code` is the discriminator, never the sentence.
 respondsWith<Wire.RequirementsNotGenerated, typeof REQUIREMENTS_NOT_GENERATED>();
-// PUT /repos/:id/requirements/minimum (0.196.0): the minimum in force after the change.
+// PUT /repos/:id/requirements/minimum (0.197.0): the minimum in force after the change.
 respondsWith<Wire.RequirementsMinimum, RequirementsMinimum>();
 respondsWith<Wire.RequirementsMinimumResponse, { minimum: RequirementsMinimum | null }>();
 accepts<z.input<typeof ReqMinimumSchema>, Wire.RequirementsMinimumBody>();

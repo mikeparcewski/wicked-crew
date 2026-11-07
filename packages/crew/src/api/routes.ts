@@ -706,7 +706,7 @@ const RULE_STATUSES: ReadonlySet<string> = new Set(['active', 'retired', 'all'])
 // that would allow path traversal (slashes, dots-only segments, control chars).
 const SAFE_REPO_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 
-/** `PUT /repos/:id/requirements/minimum` (api-types 0.196.0 `RequirementsMinimumBody`): `null` clears. */
+/** `PUT /repos/:id/requirements/minimum` (api-types 0.197.0 `RequirementsMinimumBody`): `null` clears. */
 export const ReqMinimumSchema = z.strictObject({ minPct: z.number().int().min(1).max(100).nullable() });
 
 export const RegisterRepoSchema = z.strictObject({
