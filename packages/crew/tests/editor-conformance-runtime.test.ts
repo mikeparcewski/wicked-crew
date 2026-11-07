@@ -176,14 +176,17 @@ describe('conformanceProvisioner', () => {
     mkdirSync(join(pinned, 'bin'), { recursive: true });
     writeFileSync(venvPython(pinned, 'linux'), '');
     const calls: string[][] = [];
+    const chromium = join(root, 'chrome');
     const exec = (async (bin: string, args: string[]) => {
       calls.push([bin, ...args]);
       // A real `venv` would create the interpreter again.
       if (args[1] === 'venv') {
         mkdirSync(join(pinned, 'bin'), { recursive: true });
         writeFileSync(venvPython(pinned, 'linux'), '');
+        writeFileSync(chromium, '');
       }
-      return { stdout: '', stderr: '' };
+      // The Chromium query answers a real path: recorded once, never asked again on reuse.
+      return { stdout: args[0] === '-c' ? `${chromium}\n` : '', stderr: '' };
     }) as never;
     const provision = conformanceProvisioner(() => root, { platform: 'linux', env: { [CONFORMANCE_PLAYWRIGHT_ENV]: '1.65.0' }, exec });
     // No marker (a venv a killed provisioning left): rebuilt from nothing, with the pin override.

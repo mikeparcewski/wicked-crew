@@ -8430,7 +8430,7 @@ export interface DocChecksResponse {
    * never inside it: the notes of the asked version (the head when none was asked) or, for a version a person made by
    * hand, of its nearest ancestor whose run recorded notes (`from_version` says which; show it labelled "from vN").
    * `null` = no run on its lineage recorded notes ("No notes were recorded": a version from before notes were
-   * required). Absent on an older daemon.
+   * required, or one whose run's record expired: crew keeps the newest 500 per document). Absent on an older daemon.
    */
   notes?: DocNotes | null;
   /**

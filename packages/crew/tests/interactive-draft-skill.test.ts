@@ -397,6 +397,13 @@ describe('A6/G12 r1 folds — a check that did not run, or could not evaluate, i
     expect(draftFloorVerdict({ ...r, checks: { ...r.checks, notes: { ok: true } } }, EXACT_2, { notes: true }).verdict).toBe('pass');
   });
 
+  it('a budgeted page count the report does not carry is no measurement (codex r2)', () => {
+    const r = report() as { checks: Record<string, unknown> };
+    const noPages = Object.fromEntries(Object.entries(r.checks).filter(([k]) => k !== 'pages'));
+    expect(draftFloorVerdict({ ...r, checks: noPages }, EXACT_2).verdict).toBe('unavailable');
+    expect(draftFloorVerdict({ ...r, checks: noPages }, NO_BUDGET).verdict).toBe('pass');
+  });
+
   it('an unverified contrast pair with a measured page count is unverified, not pass', () => {
     const r = report() as Record<string, unknown>;
     const v = draftFloorVerdict({ ...r, verdict: 'UNVERIFIED', unverified: ['contrast'] }, EXACT_2);

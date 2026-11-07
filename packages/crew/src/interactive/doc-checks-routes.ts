@@ -17,7 +17,7 @@
  * (`DemoView.review`).
  */
 
-import { readFileSync, statSync } from 'node:fs';
+import { lstatSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import type { DocCheck, DocCheckFinding, DocCheckSource, DocChecksResponse, DocFloorCheck, DocNotes, DocReviewerId } from 'wicked-crew-api-types';
@@ -117,8 +117,11 @@ export function readLineage(docsRoot: string, doc: string): { head: number; vers
   try {
     // A plain read (codex r1: `readBeneath` refuses Windows): the name is a validated slug, and the manifest is parsed
     // as data, never followed anywhere.
-    const path = join(docsRoot, doc, 'versions.json');
-    if (statSync(path).size > 4 * 1024 * 1024) return null;
+    // codex r2: never through a link, never a FIFO or device (it would block the request), bounded.
+    const dir = join(docsRoot, doc);
+    const path = join(dir, 'versions.json');
+    const st = lstatSync(path);
+    if (lstatSync(dir).isSymbolicLink() || !st.isFile() || st.size > 4 * 1024 * 1024) return null;
     const m = JSON.parse(readFileSync(path, 'utf8')) as { head?: unknown; versions?: unknown };
     if (typeof m.head !== 'number' || !Number.isInteger(m.head) || m.head < 0) return null;
     const versions = new Map<number, LineageEntry>();

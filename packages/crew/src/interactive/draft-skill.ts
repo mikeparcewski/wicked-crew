@@ -462,7 +462,12 @@ export function draftFloorVerdict(report: unknown, budget: PageBudget, opts: { n
   }
   // A6 (codex/pi r1): the leak scan always runs, and the notes check whenever the floor named a notes file. A report
   // without them (an older garden) did not run what this floor requires: never a pass.
-  const missing = [...(checkRecord(checks.leaks) === null ? ['leaks'] : []), ...(opts.notes === true && checkRecord(checks.notes) === null ? ['notes'] : [])];
+  // codex r2: and a page count the brief budgets is a requested check too: no count in the report is no measurement.
+  const missing = [
+    ...(checkRecord(checks.leaks) === null ? ['leaks'] : []),
+    ...(opts.notes === true && checkRecord(checks.notes) === null ? ['notes'] : []),
+    ...(budget.pages !== null && count === null ? ['pages'] : []),
+  ];
   if (missing.length > 0) {
     return {
       verdict: 'unavailable',

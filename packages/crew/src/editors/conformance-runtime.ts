@@ -252,9 +252,10 @@ export function conformanceProvisioner(root: () => string, deps: ProvisionDeps =
   const env = deps.env ?? process.env;
   const platform = deps.platform ?? process.platform;
   let inFlight: Promise<Provisioned> | null = null;
-  // (PLAN G12) The Chromium path is asked for once per made venv: a reused runtime spawns nothing after that, and a venv
-  // made again (or a query that failed on a fresh one) asks again (codex r1).
-  const askedChromium = new Set<string>();
+  // (PLAN G12) The Chromium path is asked for until it is recorded: a reused runtime with the path spawns nothing, and
+  // a failed query is asked again at most every 10 minutes (codex r1/r2).
+  const askedChromium = new Map<string, number>();
+  const CHROMIUM_RETRY_MS = 10 * 60_000;
   const pin = (): string => conformancePin(env);
   const run = async (): Promise<Provisioned> => {
     const dir = root();
@@ -265,8 +266,9 @@ export function conformanceProvisioner(root: () => string, deps: ProvisionDeps =
     // (PLAN G12) Where Playwright put its Chromium, for the draft floor's renderer. Best-effort: without it the floor
     // estimates the page count, as before.
     const recordChromium = async (): Promise<void> => {
-      if (askedChromium.has(venv)) return;
-      askedChromium.add(venv);
+      const last = askedChromium.get(venv);
+      if (last !== undefined && Date.now() - last < CHROMIUM_RETRY_MS) return;
+      askedChromium.set(venv, Date.now());
       try {
         const out = await exec(python, ['-c', CHROMIUM_PATH_PY], { timeout: VENV_TIMEOUT_MS, windowsHide: true, env: absoluteCacheEnv(env, platform) });
         const path = out.stdout.trim().split('\n').pop()?.trim() ?? '';

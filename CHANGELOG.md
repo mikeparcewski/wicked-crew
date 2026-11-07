@@ -21,8 +21,9 @@ mentioned only where a daemon release depends on them.
   announces a document crew records, in its own state, the floor verdict, the page count (measured when a renderer
   printed it), the file's sha256 and the writer's notes with the sources it struck. `GET
   /projects/:id/interactive/docs/:doc/checks` gains `notes` (from the nearest ancestor version whose run recorded them,
-  `from_version` says which; `null` = none recorded) and `floor` (`source: 'floor'`, a host measurement of that
-  version's own file; `null` = not measured, e.g. a version made by hand). crew's conformance runtime is now also made
+  `from_version` says which; `null` = none recorded) and `floor` (`source: 'floor'`, a host measurement of the file
+  that version's run announced, before interactive anchored and themed it; `null` = not measured, e.g. a version made
+  by hand). Crew keeps the newest 500 records per document. crew's conformance runtime is now also made
   when a draft or refine is launched, and the floor prints the document with its Chromium (or the operator's
   `WICKED_CHROME`), so the page count is measured instead of estimated. Needs wicked-garden with `leak_scan.py` and
   `self_check.py --notes` (release garden first: an older self-check refuses the new flags and the floor reports
