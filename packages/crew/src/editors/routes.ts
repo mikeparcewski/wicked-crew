@@ -13,12 +13,14 @@
  *  - `GET /editors/:id/grants?project=` (operator+): the engine's decided set
  *    (`evaluate_editor_grants`: EDITOR-GRANTS ledger + EDITOR-BUILTIN posture, deny dominates), with
  *    the token an "allow" would add. The host fetches it before `host.hello` and enforces it.
- *  - `POST /editors/:id/grants {permission, allow, project?}` (HUMAN-only, §6.4; F37): the person's
- *    allow or revoke of one permission the editor declares. Allow writes THIS build's token (crew's own
- *    measurement of version + hash, never the caller's) into the EDITOR-GRANTS ledger; revoke drops
- *    every token of that editor and permission. `mcp.session` is the install consent's alone (409). A
- *    request carrying a governed unit's token is refused (403 `seat_token`). Answers the decided set
- *    after the write, so a deny that dominates the allow shows as deny.
+ *  - `POST /editors/:id/grants {permission, allow, version, sha256, project?}` (HUMAN-only, §6.4; F37):
+ *    the person's allow or revoke of one permission the editor declares, for the build they were shown
+ *    (`version` + `sha256` must still be the installed build, else 409 `build_changed`). Allow writes
+ *    that build's token (built from crew's own record) into the EDITOR-GRANTS ledger, for every project;
+ *    revoke drops every token of that editor and permission. `mcp.session` is the install consent's
+ *    alone (409 `install_only`). Under `auth=off` a request carrying a governed unit's token is refused
+ *    (403 `seat_token`; under `auth=required` such a token is no identity at all: 401). `project` only
+ *    scopes the answer: the decided set after the write, so a project deny that dominates shows as deny.
  *  - `GET /editors/:id/:version/entry`: the bundle, with exactly the §8.2 headers. The file path comes
  *    from the registry record — never from the URL — and the bytes are re-hashed on every serve: a
  *    changed file answers 409 `bundle_hash_mismatch`, never the changed bundle. The pinned bytes are
@@ -71,8 +73,11 @@ export function grantToken(id: string, version: string, sha256: string, permissi
 }
 
 /**
- * Rewrite the ledger's `mcp.session` tokens for `ids`: every token of those editors is dropped, and
- * `add` (this install's tokens, for the builds that declare it) is written. One read-modify-write;
+ * Rewrite the ledger's tokens for the editors `builds` just installed: every `mcp.session` token of those
+ * editors is dropped and `add` (this install's tokens, for the builds that declare it) is written; and
+ * every other token of an EARLIER build of those editors goes too (F37: a new build asks again, and the
+ * old build's allows do not pile up). The person's allows for the very build installed stay: the same
+ * bytes they allowed. One read-modify-write;
  * nothing is written when the list is unchanged. With nothing to add, an engine with no ledger has
  * no grant to withdraw, so that is no change; with something to add it is an error (it would ask).
  *
@@ -81,7 +86,7 @@ export function grantToken(id: string, version: string, sha256: string, permissi
  */
 export async function editInstallGrants(
   adapter: EditorGrantsAdapter,
-  ids: readonly string[],
+  builds: ReadonlyArray<{ id: string; version: string; sha256: string }>,
   add: readonly string[],
 ): Promise<void> {
   const unavailable = (why: string): void => {
@@ -93,7 +98,8 @@ export async function editInstallGrants(
   const rules = await adapter.listConformanceRules();
   const ledger = rules.find((r) => r.id === EDITOR_GRANTS_LEDGER);
   if (ledger === undefined) return unavailable(`the ${EDITOR_GRANTS_LEDGER} ledger is not in the policy store; restart the daemon to seed it`);
-  const owned = (t: string): boolean => ids.some((id) => t.startsWith(`editor:${id}@`) && t.endsWith(`/${INSTALL_GRANTED}`));
+  const owned = (t: string): boolean => builds.some((b) => t.startsWith(`editor:${b.id}@`)
+    && (t.endsWith(`/${INSTALL_GRANTED}`) || !t.startsWith(`editor:${b.id}@${b.version}#${b.sha256}/`)));
   const before = ledger.excludes ?? [];
   const dedup = [...new Set([...before.filter((t) => !owned(t)), ...add])];
   if (dedup.length === before.length && dedup.every((t, i) => t === before[i])) return;
@@ -109,7 +115,9 @@ function tokenOf(id: string, permission?: string): (t: string) => boolean {
  * The person's allow or revoke of one permission (F37). One read-modify-write of the ledger: `add` (the
  * build's token, or null to revoke) replaces every token of `id` + `permission`; or, with `permission`
  * undefined and `add` null, every token of `id` goes (a removal). Throws when the ledger cannot be
- * written for an allow; nothing is written when the list is unchanged.
+ * written for an allow; nothing is written when the list is unchanged. Serialized against the other
+ * editor routes only: a governance rule write landing between the read and the upsert is not covered,
+ * the same stated limit as {@link editInstallGrants} and the MCP approvals ledger.
  */
 export async function editGrant(adapter: EditorGrantsAdapter, id: string, permission: string | undefined, add: string | null): Promise<void> {
   // With nothing to add, an engine with no ledger has no grant to withdraw: that is no change.
@@ -142,14 +150,27 @@ function bearerOf(req: FastifyRequest): string | null {
  * The §6.4 tripwire for the grant write: under `auth=off` every caller is the local human, so a worker
  * that SENDS its token is caught here; one that omits it is the stated honest limit.
  */
-export function unitTokenProbe(resolve: ((requestJson: string) => Promise<string>) | null): ((token: string) => Promise<boolean>) | undefined {
+export type UnitTokenVerdict = 'unit' | 'not_unit' | 'unknown';
+
+/**
+ * The engine's word on a bearer: `unit` (it names the unit), `not_unit` (it refused the token as
+ * `invalid_token:`), or `unknown` (any other failure, or an answer without a unit): the tripwire then
+ * fails CLOSED, so a resolver fault never waves a worker's token through (codex r1).
+ */
+export function unitTokenProbe(resolve: ((requestJson: string) => Promise<string>) | null): ((token: string) => Promise<UnitTokenVerdict>) | undefined {
   if (resolve === null) return undefined;
   return async (token) => {
+    let raw: string;
     try {
-      const unit = (JSON.parse(await resolve(JSON.stringify({ token }))) as { unit?: { runId?: unknown } }).unit;
-      return typeof unit?.runId === 'string';
+      raw = await resolve(JSON.stringify({ token }));
+    } catch (err) {
+      return /^invalid_token\b/u.test(err instanceof Error ? err.message : String(err)) ? 'not_unit' : 'unknown';
+    }
+    try {
+      const unit = (JSON.parse(raw) as { unit?: { runId?: unknown } }).unit;
+      return typeof unit?.runId === 'string' ? 'unit' : 'unknown';
     } catch {
-      return false;
+      return 'unknown';
     }
   };
 }
@@ -161,7 +182,7 @@ export interface EditorRoutesDeps {
   /** The install-time conformance run (garden's runner against this daemon's conformance host page). */
   conformance: ConformanceRunner;
   /** The §6.4 tripwire: is this bearer a governed unit's token? Absent = no engine to ask (nothing refused on it). */
-  isUnitToken?: (token: string) => Promise<boolean>;
+  isUnitToken?: (token: string) => Promise<UnitTokenVerdict>;
   log?: (msg: string) => void;
 }
 
@@ -222,7 +243,7 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
           const declaring = installed.editors.filter((e) => e.permissions.some((p) => p.id === INSTALL_GRANTED));
           const tokens = declaring.map((e) => grantToken(e.id, e.version, e.sha256, INSTALL_GRANTED));
           try {
-            await editInstallGrants(deps.adapter, installed.editors.map((e) => e.id), tokens);
+            await editInstallGrants(deps.adapter, installed.editors, tokens);
             if (declaring.length === 0) return installed;
             deps.log?.(`[editors] install consent granted ${INSTALL_GRANTED} to ${declaring.map((e) => `${e.id}@${e.version}`).join(', ')}`);
             return { ...installed, granted: tokens };
@@ -325,7 +346,13 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
   );
 
   // F37: the person's allow / revoke of one permission (§6.2 ledger, §6.4 human-only).
-  const GrantSchema = z.strictObject({ permission: z.string().min(1), allow: z.boolean(), project: z.string().optional() });
+  const GrantSchema = z.strictObject({
+    permission: z.string().min(1),
+    allow: z.boolean(),
+    version: z.string().min(1),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/u),
+    project: z.string().optional(),
+  });
   app.post(
     `${V}/editors/:id/grants`,
     { config: { manifest: { requestType: 'SetEditorGrantBody', responseType: 'EditorGrantsResponse', statusCodes: [200, 400, 403, 404, 409, 501, 502, 503] } } },
@@ -333,25 +360,33 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
       if (!humanOnly(req, reply)) return reply;
       // The tripwire (§6.4): a request that carries a governed unit's token is a worker's, whatever the auth mode says.
       const bearer = bearerOf(req);
-      if (bearer !== null && deps.isUnitToken !== undefined && (await deps.isUnitToken(bearer))) {
+      const verdict = bearer !== null && deps.isUnitToken !== undefined ? await deps.isUnitToken(bearer) : 'not_unit';
+      if (verdict === 'unit') {
         deps.log?.(`[editors] refused a grant write carrying a governed unit's token (${idOf(req)})`);
         return reply.code(403).send({ code: 'seat_token', error: 'a governed worker cannot allow or revoke an editor permission; only the person can, in studio' });
       }
+      if (verdict === 'unknown') {
+        return reply.code(503).send({ error: 'could not tell whether this request carries a governed worker\'s token, so nothing was changed; try again' });
+      }
       const parsed = GrantSchema.safeParse(req.body);
-      if (!parsed.success) return reply.code(400).send({ error: 'body must be { permission: <permission id>, allow: boolean, project?: <project id> }' });
+      if (!parsed.success) return reply.code(400).send({ error: 'body must be { permission: <permission id>, allow: boolean, version: <the version shown>, sha256: <the hash shown>, project?: <project id> }' });
       const { permission, allow } = parsed.data;
       const id = idOf(req);
       if (!EDITOR_ID.test(id) || registry.get(id) === null) return reply.code(404).send({ error: `no editor '${id}' is installed` });
-      if (permission === INSTALL_GRANTED) {
-        return reply.code(409).send({ code: 'install_only', error: `${INSTALL_GRANTED} is granted only by the editor's install consent; reinstall it to grant it, remove it to withdraw it` });
-      }
       if (!grantsSupported()) return reply.code(501).send({ error: NO_GRANTS });
       return serial(async () => {
         // Read the record INSIDE the chain: a removal or an update queued before this press has landed.
         const record = registry.get(id);
         if (record === null) return reply.code(404).send({ error: `no editor '${id}' is installed` });
+        // The press is for the build the person was shown (codex r1): an update in between asks again.
+        if (record.manifest.version !== parsed.data.version || record.sha256 !== parsed.data.sha256) {
+          return reply.code(409).send({ code: 'build_changed', error: `${id} changed to version ${record.manifest.version} since this was shown; nothing was changed: look again and decide for the new version` });
+        }
         if (!record.manifest.permissions.some((p) => p.id === permission)) {
           return reply.code(400).send({ error: `${id} does not ask for '${permission}'` });
+        }
+        if (permission === INSTALL_GRANTED) {
+          return reply.code(409).send({ code: 'install_only', error: `${INSTALL_GRANTED} is granted only by the editor's install consent; reinstall it to grant it, remove it to withdraw it` });
         }
         // The token is crew's own measurement of this build, never the caller's.
         const token = grantToken(record.manifest.id, record.manifest.version, record.sha256, permission);

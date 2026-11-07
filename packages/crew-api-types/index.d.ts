@@ -15590,15 +15590,22 @@ export interface SetEditorEnabledBody {
 }
 
 /**
- * `POST /editors/:id/grants` body (HUMAN-only; F37): allow or revoke one permission the editor declares.
- * Allow writes this build's token (crew measures the version and hash) into the `EDITOR-GRANTS` ledger;
- * revoke drops every token of that editor and permission. `mcp.session` is refused (409 `install_only`:
- * its install consent grants it). A request carrying a governed unit's token is refused (403 `seat_token`).
- * Answers the decided set after the write (`EditorGrantsResponse`, for `project` when given).
+ * `POST /editors/:id/grants` body (HUMAN-only; F37): allow or revoke one permission the editor declares,
+ * for the build the person was shown: `version` and `sha256` (from `EditorGrantsResponse`) must still be
+ * the installed build, else 409 `build_changed` and nothing is written. Allow writes that build's token
+ * (crew builds it from its own record) into the `EDITOR-GRANTS` ledger, for every project; revoke drops
+ * every token of that editor and permission. `mcp.session` is refused (409 `install_only`: its install
+ * consent grants it). Under `auth=off`, a request carrying a governed unit's token is refused (403
+ * `seat_token`; 503 when crew cannot tell); under `auth=required` such a token is no identity (401).
+ * Answers the decided set after the write (`EditorGrantsResponse`); `project` scopes only that answer.
  */
 export interface SetEditorGrantBody {
   permission: EditorPermission | string;
   allow: boolean;
+  /** The version of the build the person was shown. */
+  version: string;
+  /** The entry hash of the build the person was shown (64 hex). */
+  sha256: string;
   project?: string;
 }
 

@@ -429,7 +429,7 @@ import { ConsiderationService } from '../decisions/consider.js';
 import { gardenConformance, gardenPackCheck, type ConformanceRunner, type PackCheckRunner } from '../editors/pack-install.js';
 import { conformanceProvisioner, conformanceRuntimeReady, conformanceRuntimeRoot, conformanceVenvDir, editorPluginLaunchListener, venvPython } from '../editors/conformance-runtime.js';
 import { EditorRegistry } from '../editors/registry.js';
-import { registerEditorRoutes, unitTokenProbe } from '../editors/routes.js';
+import { registerEditorRoutes, unitTokenProbe, type UnitTokenVerdict } from '../editors/routes.js';
 import type { AppActionStore } from '../apps/actions/store.js';
 import { AppWritePath } from '../apps/actions/write-path.js';
 import { AppExecutor } from '../apps/exec/executor.js';
@@ -1518,7 +1518,7 @@ export interface RuntimeDeps {
   /** (tests) the install-time conformance run `POST /editors` uses; default = garden's runner as a child. */
   editorConformance?: ConformanceRunner;
   /** F37 (tests): is a bearer a governed unit's token (the grant write's tripwire); default = the engine's `resolveEstateScope`. */
-  editorUnitTokenProbe?: (token: string) => Promise<boolean>;
+  editorUnitTokenProbe?: (token: string) => Promise<UnitTokenVerdict>;
   /** EP-C1 (tests): where `daemon-editors.json` lives; default = the crew state home. */
   editorsStateHome?: string;
   /** DES-APPS-001 (K2a): the app store behind `/apps` and `POST /repos {create}`. `createServer` builds it over
