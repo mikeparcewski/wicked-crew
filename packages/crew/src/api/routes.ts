@@ -288,8 +288,9 @@ import {
 } from './chat-context.js';
 import { createDocInProcess, registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { CreateLauncher } from '../interactive/proposal-create.js';
-import { lineageSteps, protectedEdits } from '../interactive/protected-edits.js';
 import { ThemeLauncher } from './proposal-theme.js';
+import { RefineLauncher } from '../interactive/proposal-refine.js';
+import { lineageSteps, protectedEdits } from '../interactive/protected-edits.js';
 import type { DocBindingStore } from '../interactive/doc-binding.js';
 import type { LandingRecordStore } from '../interactive/landing-record.js';
 import type { BoundDraft } from '../interactive/draft-events.js';
@@ -1848,10 +1849,17 @@ export function registerRoutes(
   // for the operations whose slices have not landed.
   const realCreate = runtime.docBindings !== undefined && runtime.launchBoundDraft !== undefined;
   // A7: a theme starts no run (§15.2), so its launcher is always real: studio applies the patch, Go records it.
-  const stubOps: import('../core/types.js').ArtifactProposalKind[] = realCreate ? ['refine', 'demo'] : ['create', 'refine', 'demo'];
+  // A5: a real `refine` exists whenever the chat seam can launch a proposal-bound refine (its launcher is registered
+  // below, beside `create`).
+  const realRefine = runtime.docBindings !== undefined && runtime.launchBoundRefine !== undefined;
+  const stubOps: import('../core/types.js').ArtifactProposalKind[] = [
+    ...(realCreate ? [] : ['create' as const]),
+    ...(realRefine ? [] : ['refine' as const]),
+    'demo',
+  ];
   const chatArtifactFlags: import('../core/types.js').ChatArtifactsCapabilities = chatArtifactsStub
     ? { context: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps }
-    : { context: true, proposals: true, create: realCreate, refine: false, theme: true, demo: false };
+    : { context: true, proposals: true, create: realCreate, refine: realRefine, theme: true, demo: false };
   const proposalLaunchers = new LaunchOnceRegistry();
   proposalLaunchers.register('theme', new ThemeLauncher());
   /** (DES-CATALOG-002 §4.6) Job proposals in a chat: on wherever chat proposals are. */
@@ -11061,6 +11069,25 @@ export function registerRoutes(
     log: (m) => app.log.warn(m),
   });
   // A3: the real `create` launcher (§4.3 steps 2-3): one document and one run per proposal identity.
+  if (realRefine) {
+    // A5 (DES §6): the refine launcher — the attempt on the document's binding, then the chat seam's bound refine with the
+    // derived run id and the card's two helpers; crew's landing guard and the head's CAS decide what lands.
+    proposalLaunchers.register('refine', new RefineLauncher({
+      bindings: runtime.docBindings!,
+      runExists: async (runId) => (await adapter.sessions()).includes(runId),
+      docsRoot: (projectId) => projectDocsRoot(adapter, projectSettings, projectId),
+      launchBound: runtime.launchBoundRefine!,
+      ...(runtime.fenceBoundDraft !== undefined ? { fence: runtime.fenceBoundDraft } : {}),
+      records: (chatId) => chatHistory?.messages(chatId) ?? chatTranscripts?.read(chatId) ?? [],
+      instanceOf: (chatId) => chatHistory?.stateOf(chatId)?.instance ?? null,
+      clisJsonFor: (seats) => {
+        const roster = rosterWithStanding() as Array<{ key?: unknown }>;
+        const picked = seats.map((k) => roster.find((s) => s.key === k));
+        return picked.some((s) => s === undefined) ? null : JSON.stringify(picked);
+      },
+      log: (m) => app.log.warn(m),
+    }));
+  }
   if (realCreate) {
     const bindings = runtime.docBindings!;
     proposalLaunchers.register('create', new CreateLauncher({
