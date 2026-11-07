@@ -838,10 +838,15 @@ export class WorkingDocService {
     // (context-doc-switch) A version that touched the person's context: the engine's block is set from THIS version's
     // own sections and the trail up to it, inside the run's turn (so no later version is sent ahead of it), and BEFORE
     // the version's Next note is queued, so the next step never takes Next under the context it replaced.
-    const block = this.blockMode() && changed.some((x) => CONTEXT_SECTIONS.includes(x)) && after !== undefined
+    const owed = this.d.store.get(runId)?.context?.retry === true;
+    const block = this.blockMode() && (owed || changed.some((x) => CONTEXT_SECTIONS.includes(x))) && after !== undefined
       ? this.contextBlock(runId, version, after, author.kind === 'human' ? { kind: 'human', id: contextAuthorId(author.id) } : { kind: 'system', id: 'crew' })
       : null;
-    if (block !== null) await this.sendContext(runId, block);
+    if (block !== null) {
+      // A new version gets its own retries.
+      this.contextRetries.delete(runId);
+      await this.sendContext(runId, block);
+    }
     const steer = author.kind === 'human' ? await this.steer(runId, version, changed, values, author.id, spoken, after ?? values) : null;
     if (steer !== null) this.d.store.update(runId, (r) => { const t = r.trail.find((x) => x.version === version && x.steerId === null); if (t !== undefined) t.steerId = steer.id; });
     this.d.audit?.('run.steered.doc', actor, runId, {
@@ -1026,7 +1031,10 @@ export class WorkingDocService {
     const v = b.block.version;
     const sig = contextSig(b.block);
     const prior = this.d.store.get(runId)?.context;
-    if ((prior?.sig ?? EMPTY_SIG) === sig && prior?.error == null) return;
+    // An attempt whose answer crew never recorded (a restart mid-call) is unresolved: the block is sent again whatever
+    // its signature says (xreview r2).
+    const unresolved = (prior?.attempted ?? null) !== null && (prior?.sentVersion ?? -1) < (prior?.attempted ?? -1);
+    if (!unresolved && prior?.retry !== true && (prior?.sig ?? EMPTY_SIG) === sig && prior?.error == null) return;
     // Nothing of the person's, and nothing ever tried: there is no block to clear.
     if (b.block.sections.length === 0 && (prior?.attempted ?? null) === null) return;
     const timeoutMs = this.d.contextTimeoutMs ?? CONTEXT_SET_TIMEOUT_MS;
@@ -1059,6 +1067,7 @@ export class WorkingDocService {
       this.updateContext(runId, (c) => {
         holds(c, ack, b.block.sections, b.cut, sig);
         if (c.error !== null && c.error.version <= Math.max(v, ack.version)) c.error = null;
+        c.retry = false;
       });
       this.contextRetries.delete(runId);
     } catch (err) {
@@ -1072,11 +1081,12 @@ export class WorkingDocService {
         const hadBlock = (prior?.sections.length ?? 0) > 0;
         try {
           const ack = await call({ version: v, sections: [], set_by: b.block.set_by });
-          this.updateContext(runId, (c) => { holds(c, ack, [], [], EMPTY_SIG); });
+          this.updateContext(runId, (c) => { holds(c, ack, [], [], EMPTY_SIG); c.retry = false; });
           cleared = hadBlock && ack.version === v;
           this.contextRetries.delete(runId);
         } catch (e2) {
           retry = true;
+          reason = `${reason}; the earlier context could not be taken out yet, trying again`;
           this.d.log?.(`[working-doc] clearing the context block of ${runId} after a refusal failed: ${String(e2)}`);
         }
       } else {
@@ -1086,22 +1096,30 @@ export class WorkingDocService {
       this.updateContext(runId, (c) => { c.error = { version: v, reason: reason.slice(0, 400), at: this.now(), cleared }; });
       this.d.log?.(`[working-doc] the context block v${v} of ${runId} was not set: ${msg}`);
     }
+    if (retry) this.updateContext(runId, (c) => { c.retry = true; });
     this.d.changed?.(runId, null);
     if (retry) this.scheduleContextRetry(runId);
   }
 
   private updateContext(runId: string, f: (c: ContextRecord) => void): void {
     this.d.store.update(runId, (r) => {
-      r.context ??= { inForce: null, attempted: null, sig: null, sentVersion: null, sections: [], cut: [], at: null, error: null, seenVersion: null, seenBy: [] };
+      r.context ??= { inForce: null, attempted: null, sig: null, sentVersion: null, sections: [], cut: [], at: null, error: null, retry: false, seenVersion: null, seenBy: [] };
       f(r.context);
     });
   }
 
-  /** Try the run's block again later (a set with no answer, a clear that failed): a few times, then the next start. */
+  /** Try the run's block again later (a set with no answer, a clear that failed, a retry that could not read the
+   *  document): a few times, then the next start or the run's next version of any section (`record`). */
   private scheduleContextRetry(runId: string): void {
     const delays = this.d.contextRetryMs ?? [15_000, 60_000, 300_000];
     const n = this.contextRetries.get(runId) ?? 0;
-    if (n >= delays.length) return;
+    if (n >= delays.length) {
+      // Out of tries for now: the view stops promising one (pi r2). The next version of any section, or the next start,
+      // sends it again (`retry` stays set).
+      this.updateContext(runId, (c) => { if (c.error !== null) c.error.reason = c.error.reason.replace(/trying again$/u, 'tried again at your next edit or the next start'); });
+      this.d.changed?.(runId, null);
+      return;
+    }
     this.contextRetries.set(runId, n + 1);
     const t = setTimeout(() => {
       void this.resyncContext(runId).catch((err: unknown) => this.d.log?.(`[working-doc] context retry ${runId}: ${String(err)}`));
@@ -1122,14 +1140,17 @@ export class WorkingDocService {
       await this.exclusive(runId, async () => {
         await this.reconcile(runId);
         const now = this.d.store.get(runId);
-        // A write of unknown outcome: its own settling sets the block (record), with its author.
-        if (now === undefined || now.pending != null) return;
+        if (now === undefined) return;
+        // A write of unknown outcome: its settling (`record`) sets the block, or the retry comes back for it.
+        if (now.pending != null) { if (now.context?.retry === true) this.scheduleContextRetry(runId); return; }
         const head = await this.d.backend.read(now.projectId, now.docId);
         if (head === null) return;
         await this.sendContext(runId, this.contextBlock(runId, head.head, sectionsOf(head.html), { kind: 'system', id: 'crew' }));
       });
     } catch (err) {
       this.d.log?.(`[working-doc] context sync ${runId}: ${String(err)}`);
+      // The document or the run could not be read: a retry owed stays owed.
+      if (this.d.store.get(runId)?.context?.retry === true) this.scheduleContextRetry(runId);
     }
   }
 

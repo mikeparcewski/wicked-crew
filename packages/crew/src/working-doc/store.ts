@@ -114,6 +114,8 @@ export interface ContextRecord {
   at: number | null;
   /** The last send that failed: its version, why, and whether a block that was in force was withdrawn because of it. */
   error: { version: number; reason: string; at: number; cleared: boolean } | null;
+  /** A set is owed (no answer, a failed clear): retried, and sent with the run's next version of any section. */
+  retry?: boolean;
   /** The seats the engine handed version `seenVersion` to (newest version only; at most {@link CONTEXT_SEEN_MAX}). */
   seenVersion: number | null;
   seenBy: ContextRecipient[];

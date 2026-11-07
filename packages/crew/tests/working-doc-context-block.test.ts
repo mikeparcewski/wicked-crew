@@ -423,13 +423,70 @@ describe('no stale block, no silent loss (xreview r1)', () => {
     expect(v2.context?.at).not.toBeNull();
   });
 
-  it('a write of unknown outcome is left to settle: the catch-up sends nothing for it', async () => {
+  it('a write of unknown outcome is left to settle; a retry owed comes back for it, and its settling sends the block', async () => {
+    const t = setup({ retryMs: [30, 30, 30] });
+    await t.service.ensure('run-1');
+    await t.edit({ goal: 'G1' });
+    t.engine.answer = 'silent';
+    await t.edit({ goal: 'G2' });
+    // A Next-only write whose outcome is not known: no version after it yet.
+    const head = t.head();
+    t.store.update('run-1', (r) => { r.pending = { expectHead: head, author: { kind: 'human', id: 'local' }, surface: null, values: { next: 'N' }, at: 1, actor: { id: 'local', kind: 'human' } }; });
+    t.engine.answer = 'ok';
+    const calls = t.engine.calls.length;
+    await wait(50);
+    expect(t.store.get('run-1')?.pending, 'still unknown').not.toBeNull();
+    expect(t.engine.calls.length, 'nothing sent while a write is unknown').toBe(calls);
+    // It lands: its settling (a Next-only version) sets the block that was owed.
+    const docs = t.backend.docs.get('working-run-1')!;
+    docs.push({ html: docs.at(-1)!.html.replace(/(data-wid="wd-next"[^>]*>)[^<]*/u, '$1N'), author: 'local' });
+    await t.service.view('run-1');
+    expect(t.engine.held.get('run-1')?.sections[0]?.text).toBe('G2');
+    expect((await t.service.view('run-1')).context).toMatchObject({ error: null });
+  });
+
+  it('a retry that cannot read the document is re-armed', async () => {
+    const t = setup({ retryMs: [30, 30] });
+    await t.service.ensure('run-1');
+    await t.edit({ goal: 'G1' });
+    t.engine.answer = 'silent';
+    await t.edit({ goal: 'G2' });
+    t.engine.answer = 'ok';
+    const read = t.backend.read.bind(t.backend);
+    let fails = 1;
+    t.backend.read = async (p: string, d: string) => { if (fails-- > 0) throw new Error('interactive is restarting'); return read(p, d); };
+    await wait(120);
+    expect(t.engine.held.get('run-1')?.sections[0]?.text).toBe('G2');
+  });
+
+  it('a restart mid-call (an attempt with no recorded answer) is not mistaken for nothing set: emptying clears it', async () => {
     const t = setup();
     await t.service.ensure('run-1');
-    t.store.update('run-1', (r) => { r.pending = { expectHead: 0, author: { kind: 'human', id: 'local' }, surface: null, values: { goal: 'x' }, at: 1, actor: { id: 'local', kind: 'human' } }; });
-    t.backend.docs.get('working-run-1')!.push({ html: t.backend.docs.get('working-run-1')![0]!.html.replace(/(data-wid="wd-goal"[^>]*>)[^<]*/u, '$1y'), author: 'x' });
-    await t.service.catchUp();
-    expect(t.engine.calls).toEqual([]);
+    await t.edit({ constraints: 'C1' });
+    // As a restart before the first answer was recorded leaves it: tried, no answer, no error.
+    t.store.update('run-1', (r) => { r.context = { ...r.context!, sig: null, sentVersion: null, sections: [], at: null, error: null }; });
+    await t.edit({ constraints: '' });
+    expect(t.engine.held.get('run-1')).toMatchObject({ version: 2, sections: [] });
+  });
+
+  it('a clear that fails says the earlier context is still in force and is being retried', async () => {
+    const t = setup({ retryMs: [600_000] });
+    await t.service.ensure('run-1');
+    await t.edit({ goal: 'Short.' });
+    t.engine.refuse = (ctx) => (ctx.sections.length === 0 ? 'internal: busy' : 'bad_request: run context refused: too long');
+    await t.edit({ goal: 'Long.' });
+    expect((await t.service.view('run-1')).context?.error).toMatchObject({ version: 2, reason: 'too long; the earlier context could not be taken out yet, trying again', cleared: false });
+  });
+
+  it('out of retries, the view stops promising one; the next edit sends it again', async () => {
+    const t = setup({ retryMs: [] });
+    await t.service.ensure('run-1');
+    t.engine.answer = 'silent';
+    await t.edit({ goal: 'G1' });
+    expect((await t.service.view('run-1')).context?.error?.reason).toBe('the engine did not answer in time; tried again at your next edit or the next start');
+    t.engine.answer = 'ok';
+    await t.edit({ next: 'N' });
+    expect(t.engine.held.get('run-1')?.sections[0]?.text).toBe('G1');
   });
 
   it('an author id the engine would refuse reads "a person"; the engine not knowing the job is said', async () => {
