@@ -22,6 +22,8 @@
  */
 
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { discoverLivePlugin } from '../skills/plugin-source.js';
@@ -518,6 +520,94 @@ export function gardenPluginRoot(): string | null {
   }
 }
 
+/**
+ * (PLAN G12) What a `measured` page count means, for reuse: the counter, the renderer's print settings and where the
+ * draft is printed from. It is byte for byte the engine's `draft_render::PROFILE` (wicked-core `src/draft_render.rs`; a
+ * drift only turns reuse off, never on: the floor then prints as before), and it is also what this floor's own
+ * `--render` does (`self_check.py` → `page_count.py`'s `render_pdf`, the draft at its own path): a record with this
+ * profile is the count this floor would print.
+ */
+export const DRAFT_RENDER_PROFILE =
+  'page_count.py --render: headless --print-to-pdf, no header/footer, offline host rules, 5 s virtual time; the draft at its own path';
+/** How long the floor waits for the run's record before it prints the draft itself. */
+export const DRAFT_RENDER_READ_TIMEOUT_MS = 10_000;
+/** The catalog id of the engine's page-count step (`WorkUnit.catalog`). */
+export const DRAFT_RENDER_CATALOG = 'draft_render';
+
+/** The engine's `WorkUnit.draft_render` record of the run's LATEST `draft_render` unit (highest ord), or `null`. */
+export function latestDraftRender(units: readonly unknown[] | undefined): Record<string, unknown> | null {
+  let best: { ord: number; rec: Record<string, unknown> | null } | null = null;
+  for (const u of units ?? []) {
+    if (typeof u !== 'object' || u === null) continue;
+    const unit = u as { ord?: unknown; catalog?: unknown; draft_render?: unknown };
+    if (unit.catalog !== DRAFT_RENDER_CATALOG || typeof unit.ord !== 'number') continue;
+    if (best !== null && unit.ord <= best.ord) continue;
+    const rec = unit.draft_render;
+    best = { ord: unit.ord, rec: typeof rec === 'object' && rec !== null && !Array.isArray(rec) ? (rec as Record<string, unknown>) : null };
+  }
+  return best?.rec ?? null;
+}
+
+/**
+ * (PLAN G12) The engine's measured page count when it is this floor's own measurement of these exact bytes: `outcome`
+ * `measured`, an integer count of at least one, the same sha256 (lowercase hex of the raw bytes, the landing record's
+ * key) and the same print profile. Anything else is `null`, and the floor prints (or estimates) as before.
+ */
+export function reusablePageCount(record: Record<string, unknown> | null, sha256: string | null): number | null {
+  if (record === null || sha256 === null) return null;
+  const pages = record['pages'];
+  if (record['outcome'] !== 'measured' || typeof pages !== 'number' || !Number.isInteger(pages) || pages < 1) return null;
+  if (record['sha256'] !== sha256 || record['profile'] !== DRAFT_RENDER_PROFILE) return null;
+  return pages;
+}
+
+/**
+ * The self-check's report with its page check replaced by a count measured elsewhere (the engine's `draft_render`
+ * step), and its `failed` / `unverified` / `verdict` recomputed by `self_check.py`'s own rules (`run`: a check failed
+ * when `ok` is false, or `pages` when it is not within its budget; unverified when `verified` is false). Only the
+ * page entry changes: every other name the report's own `failed` / `unverified` lists carry is kept (a check this floor
+ * cannot read is still the check's refusal or warning), and a FAIL the report gives no reason for stays a FAIL. A
+ * report without a page check is returned as it is.
+ */
+export function withMeasuredPages(report: unknown, count: number, budget: PageBudget): unknown {
+  if (typeof report !== 'object' || report === null) return report;
+  const rep = report as { checks?: unknown };
+  if (typeof rep.checks !== 'object' || rep.checks === null) return report;
+  const checks = rep.checks as Record<string, unknown>;
+  const prior = checks['pages'];
+  if (typeof prior !== 'object' || prior === null) return report;
+  // A budget is always exact (`PageBudget`); `self_check.py`'s own rule is kept for both, as it states it.
+  const limit: number | null = budget.pages;
+  const exact: boolean = budget.exact;
+  const within = limit === null ? null : exact ? count === limit : count <= limit;
+  const pages = {
+    ...(prior as Record<string, unknown>),
+    pages: count,
+    source: 'chrome-render',
+    verified: true,
+    ok: within === null ? true : within,
+    ...(within === null ? {} : { within_budget: within }),
+    measured_by: 'draft_render',
+  };
+  const next: Record<string, unknown> = { ...checks, pages };
+  const rec = (v: unknown): Record<string, unknown> | null => (typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : null);
+  const original = report as { failed?: unknown; unverified?: unknown; verdict?: unknown };
+  /** The report's own list without its `pages` entry (the one this replaces); every other entry, well-formed or not. */
+  const others = (list: unknown): unknown[] => (Array.isArray(list) ? list.filter((n) => n !== 'pages') : []);
+  const union = (a: unknown[], b: unknown[]): unknown[] => [...a, ...b.filter((n) => !a.includes(n))];
+  const failed = union(
+    Object.entries(next)
+      .filter(([name, v]) => rec(v)?.['ok'] === false || (name === 'pages' && rec(v)?.['within_budget'] === false))
+      .map(([name]) => name),
+    others(original.failed),
+  );
+  const unverified = union(Object.entries(next).filter(([, v]) => rec(v)?.['verified'] === false).map(([name]) => name), others(original.unverified));
+  // A refusal the report names no check for is not the page check's: it stays a refusal.
+  const unexplained = original.verdict === 'FAIL' && (!Array.isArray(original.failed) || original.failed.length === 0);
+  const verdict = failed.length > 0 || unexplained ? 'FAIL' : unverified.length > 0 ? 'UNVERIFIED' : 'PASS';
+  return { ...(report as Record<string, unknown>), checks: next, failed, unverified, verdict, ok: verdict === 'PASS' };
+}
+
 /** Injectable IO for {@link runDraftFloor} — tests substitute the spawn and the root. */
 export interface DraftFloorIo {
   gardenRoot?: () => string | null;
@@ -527,6 +617,13 @@ export interface DraftFloorIo {
   /** (PLAN G12) The Chromium crew provisioned for this host (`conformance-runtime.ts`), or `null` when none is made yet:
    *  with one, the floor renders the document and the page count is MEASURED. Default: none. */
   chrome?: () => string | null;
+  /** (PLAN G12) The run's own `draft_render` record (the engine's {@link latestDraftRender} of its units), read when the
+   *  floor runs. A measurement of the same bytes with the same profile is reused ({@link reusablePageCount}). */
+  engineRender?: (runId: string) => Promise<Record<string, unknown> | null>;
+  /** The draft's bytes, for the sha256 a reuse is matched on. Default: `readFileSync`. */
+  readBytes?: (path: string) => Buffer;
+  /** How long {@link engineRender} may take before the floor prints instead. Default {@link DRAFT_RENDER_READ_TIMEOUT_MS}. */
+  engineRenderTimeoutMs?: number;
   timeoutMs?: number;
 }
 
@@ -573,11 +670,34 @@ export async function runDraftFloor(
         `${DRAFT_SELF_CHECK_SCRIPT} could not be run (install wicked-garden, or set WICKED_CREW_SKILLS_SOURCE)`,
     };
   }
+  // (PLAN G12) The run's engine already printed these exact bytes with this floor's profile: that count is reused, and
+  // the self-check runs without its own render. Any doubt (no record, another hash, another profile, not measured, a
+  // read that fails) and the floor prints or estimates as before.
+  let reused: number | null = null;
+  if (budget.pages !== null && opts.runId !== undefined && io.engineRender !== undefined) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      // Bounded: the record is an optimisation, and a read that stalls must not hold the floor (and the document's
+      // landing) — on expiry the floor prints as before.
+      const expiry = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('the run read took too long')), io.engineRenderTimeoutMs ?? DRAFT_RENDER_READ_TIMEOUT_MS);
+      });
+      const record = await Promise.race([io.engineRender(opts.runId), expiry]);
+      const sha = createHash('sha256').update((io.readBytes ?? readFileSync)(outPath)).digest('hex');
+      reused = reusablePageCount(record, sha);
+    } catch {
+      reused = null;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
   let chrome: string | null = null;
-  try {
-    chrome = io.chrome?.() ?? null;
-  } catch {
-    chrome = null;
+  if (reused === null) {
+    try {
+      chrome = io.chrome?.() ?? null;
+    } catch {
+      chrome = null;
+    }
   }
   const argv = draftFloorArgv(root, outPath, budget, snapshotDirs, { ...opts, render: chrome !== null });
   let answer: { stdout: string; code: number | null };
@@ -602,5 +722,9 @@ export async function runDraftFloor(
         `JSON report (is Python 3 installed for the wicked-garden launcher?)`,
     };
   }
-  return draftFloorVerdict(report, budget, { notes: opts.notes !== undefined });
+  if (reused === null) return draftFloorVerdict(report, budget, { notes: opts.notes !== undefined });
+  const verdict = draftFloorVerdict(withMeasuredPages(report, reused, budget), budget, { notes: opts.notes !== undefined });
+  return verdict.verdict === 'unavailable'
+    ? verdict
+    : { ...verdict, summary: `${verdict.summary} (pages: ${reused}, printed by the run's own draft_render step on these exact bytes)` };
 }

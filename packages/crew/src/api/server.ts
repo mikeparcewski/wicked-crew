@@ -10,7 +10,7 @@ import { DecisionLedger } from '../decisions/ledger.js';
 import type { ChatDecisionRecorder } from '../decisions/chat-recorder.js';
 import type { ConsiderationService } from '../decisions/consider.js';
 import { requestOrigin, shellCsp } from '../editors/csp.js';
-import { conformanceRuntimeRoot, exportEngineConformanceEnv, managedChromium } from '../editors/conformance-runtime.js';
+import { conformanceRuntimeRoot, exportEngineConformanceEnv, exportManagedChrome, managedChromium } from '../editors/conformance-runtime.js';
 import { launchRosterNaming, registerRoutes } from './routes.js';
 import { APPS_ACTIONS_STATE_FILENAME, AppActionStore } from '../apps/actions/store.js';
 import { AppsSourceStage } from '../apps/exec/source-stage.js';
@@ -187,6 +187,7 @@ import {
   DEFAULT_WORKER_STALL_MINUTES,
 } from '../core/types.js';
 import { daemonSignalLog } from '../core/daemon-signal-log.js';
+import { latestDraftRender } from '../interactive/draft-skill.js';
 import { refreshProjectGraphsAfterOnboarding } from '../projects/auto-refresh.js';
 
 /** The daemon's own actor on the audit trail (`run.delivered`, `run.ended`, the onboarding `run.launched`). */
@@ -1103,6 +1104,11 @@ export async function createServer(
   const docLandings = new LandingRecordStore(join(crewStateDir, 'chats', 'doc-landings'));
   // G12: the floor prints the document with the operator's own renderer, else crew's provisioned Chromium when made.
   const floorChrome = (): string | null => (process.env['WICKED_CHROME'] ?? '').trim() || managedChromium(conformanceRuntimeRoot());
+  // G12: the run's own engine `draft_render` record (its latest unit of that step, read fresh: the floor runs as the run
+  // ends), which the floor reuses when it measured these exact bytes with the floor's own print profile.
+  const floorEngineRender = async (runId: string): Promise<Record<string, unknown> | null> =>
+    latestDraftRender((await adapter.runView(runId, { fresh: true }))?.units);
+  const draftFloorIo = { chrome: floorChrome, engineRender: floorEngineRender };
   /**
    * A3 (§6.2): a proposal-bound attempt's outcome was recorded. A failure is said on the run (`run.landing_failed`, the
    * DTO's `landing_failed` and a `landingFailed` frame), releases the chat and the document (their busy checks read the
@@ -1732,7 +1738,7 @@ export async function createServer(
       onBoundDocCreated: (ref) => onBoundDocCreated(ref),
       onBoundOutcome,
       landings: docLandings,
-      draftFloorIo: { chrome: floorChrome },
+      draftFloorIo,
       resolveDocsRoot: o.resolveDocsRoot ?? interactiveDocsRoot,
       log: (m) => app.log.warn(m),
       logError: (m) => app.log.error(m),
@@ -1885,7 +1891,7 @@ export async function createServer(
       onBoundOutcome,
       onRunLaunched: (runId, detail) => { recordRunLaunched(audit, runTimingIndex, DAEMON_ACTOR, runId, detail); },
       landings: docLandings,
-      draftFloorIo: { chrome: floorChrome },
+      draftFloorIo,
       log: (m) => app.log.warn(m),
       logError: (m) => app.log.error(m),
     });
@@ -2552,6 +2558,9 @@ export async function createServer(
   // (DES-EDITOR-CONFORMANCE-HOST, e2e F18) The engine runs an editor-plugin run's conformance cases on this host: it
   // reads crew's conformance runtime and this studio dist from the daemon's environment.
   exportEngineConformanceEnv(studioRoot);
+  // (PLAN G12) And the managed headless shell as the daemon's `WICKED_CHROME`, for the engine's `draft_render` step (an
+  // operator's own value wins); the provisioner exports it again whenever it makes or finds the runtime.
+  exportManagedChrome(conformanceRuntimeRoot());
 
   // DES-MCP-TOOLS-001 S2: the registry over `<state home>/mcp` (created on the first save).
   const mcpRegistryStore = new McpRegistryStore();

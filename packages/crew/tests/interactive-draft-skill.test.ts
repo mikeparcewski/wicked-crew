@@ -21,8 +21,12 @@ import {
   draftSkillArmLine,
   pageBudgetFor,
   runDraftFloor,
+  DRAFT_RENDER_PROFILE,
+  latestDraftRender,
+  reusablePageCount,
   type PageBudget,
 } from '../src/interactive/draft-skill.js';
+import { createHash } from 'node:crypto';
 import { SkillsRuntime } from '../src/skills/runtime.js';
 import type { SkillsStore } from '../src/skills/store.js';
 import { removeScratch } from './setup/scratch.js';
@@ -451,6 +455,132 @@ describe('G12 — with a renderer crew provisioned, the floor measures the page 
     expect(argvSeen).not.toContain('--render');
     expect(v.verdict).toBe('unverified');
     expect(v.pages?.measured).toBe(false);
+  });
+});
+
+describe('G12 (crew half) — the floor reuses the run\'s own draft_render count on the same bytes and profile', () => {
+  const BYTES = Buffer.from('<html><body>two pages</body></html>');
+  const SHA = createHash('sha256').update(BYTES).digest('hex');
+  const measured = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    outcome: 'measured', pages: 2, sha256: SHA, profile: DRAFT_RENDER_PROFILE, renderer: '/x/chrome-headless-shell', jail: 'sandbox-exec', attempt: 0, ...over,
+  });
+  /** `self_check.py` without `--render` on an exact budget of 2: the estimate (1) is below it, so its own verdict is FAIL. */
+  const unrendered = (): unknown => {
+    const r = report({ pages: 1, pagesVerified: false }) as { checks: { pages: Record<string, unknown> } } & Record<string, unknown>;
+    r.checks.pages = { ...r.checks.pages, ok: null, within_budget: false };
+    return { ...r, verdict: 'FAIL', failed: ['pages'], unverified: ['pages'] };
+  };
+  async function floor(record: Record<string, unknown> | null | Error, budget: PageBudget = EXACT_2) {
+    const seen: { argv: string[]; chrome: string | undefined; asked: number } = { argv: [], chrome: undefined, asked: 0 };
+    const v = await runDraftFloor('/out/doc.html', budget, [], { runId: 'run-1' }, {
+      gardenRoot: () => '/garden',
+      chrome: () => '/cache/chrome-headless-shell',
+      readBytes: () => BYTES,
+      engineRender: async (runId) => {
+        seen.asked += 1;
+        expect(runId).toBe('run-1');
+        if (record instanceof Error) throw record;
+        return record;
+      },
+      run: async (argv, _t, chrome) => {
+        seen.argv = argv;
+        seen.chrome = chrome;
+        return { stdout: JSON.stringify(argv.includes('--render') ? report({ pages: 2, pagesVerified: true }) : unrendered()), code: 0 };
+      },
+    });
+    return { v, seen };
+  }
+
+  it('a measured record of these exact bytes with the floor\'s profile is the count: no second render, measured, a pass', async () => {
+    const { v, seen } = await floor(measured());
+    expect(seen.argv).not.toContain('--render');
+    expect(seen.chrome).toBeUndefined();
+    expect(v.verdict).toBe('pass');
+    expect(v.pages).toEqual({ count: 2, measured: true, budget: 2, exact: true });
+    expect(v.summary).toContain("printed by the run's own draft_render step");
+  });
+
+  it('a reused count is judged like a rendered one: 3 measured pages against exactly 2 is a breach', async () => {
+    const { v, seen } = await floor(measured({ pages: 3 }));
+    expect(seen.argv).not.toContain('--render');
+    expect(v.verdict).toBe('fail');
+    expect(v.pages).toEqual({ count: 3, measured: true, budget: 2, exact: true });
+  });
+
+  it.each([
+    ['another sha256 (any byte changed)', measured({ sha256: 'f'.repeat(64) })],
+    ['another print profile', measured({ profile: 'page_count.py --render: another printer' })],
+    ['not measured', { ...measured(), outcome: 'not_measured', cause: 'no_renderer', pages: undefined }],
+    ['no count', measured({ pages: undefined })],
+    ['a count that is not a whole page', measured({ pages: 1.5 })],
+    ['no record at all', null],
+    ['a read that failed', new Error('store busy')],
+  ])('%s: the floor prints the draft itself, as before', async (_name, record) => {
+    const { v, seen } = await floor(record as Record<string, unknown> | null | Error);
+    expect(seen.argv).toContain('--render');
+    expect(seen.chrome).toBe('/cache/chrome-headless-shell');
+    expect(v.pages).toEqual({ count: 2, measured: true, budget: 2, exact: true });
+  });
+
+  it('review r1: only the page entry is replaced — another check the report fails or could not evaluate is kept', async () => {
+    const withOthers = (over: Record<string, unknown>) => async () => {
+      const seen = { argv: [] as string[] };
+      const base = unrendered() as Record<string, unknown>;
+      const v = await runDraftFloor('/out/doc.html', EXACT_2, [], { runId: 'run-1' }, {
+        gardenRoot: () => '/garden',
+        chrome: () => null,
+        readBytes: () => BYTES,
+        engineRender: async () => measured(),
+        run: async (argv) => {
+          seen.argv = argv;
+          return { stdout: JSON.stringify({ ...base, ...over }), code: 1 };
+        },
+      });
+      return v;
+    };
+    // A failure the floor has no rule for, named only in the report's own list: still a refusal.
+    expect((await withOthers({ failed: ['pages', 'fonts'] })()).verdict).toBe('fail');
+    // A FAIL with no reason given: still a refusal.
+    expect((await withOthers({ failed: [] })()).verdict).toBe('fail');
+    // A warning named only in the report's own list: still unverified, never a pass.
+    expect((await withOthers({ verdict: 'UNVERIFIED', failed: [], unverified: ['pages', 'contrast'] })()).verdict).toBe('unverified');
+  });
+
+  it('review r1: a run read that stalls does not hold the floor — it prints the draft itself', async () => {
+    let argvSeen: string[] = [];
+    const v = await runDraftFloor('/out/doc.html', EXACT_2, [], { runId: 'run-1' }, {
+      gardenRoot: () => '/garden',
+      chrome: () => '/cache/chrome-headless-shell',
+      readBytes: () => BYTES,
+      engineRender: () => new Promise(() => undefined),
+      engineRenderTimeoutMs: 20,
+      run: async (argv) => {
+        argvSeen = argv;
+        return { stdout: JSON.stringify(report({ pages: 2, pagesVerified: true })), code: 0 };
+      },
+    });
+    expect(argvSeen).toContain('--render');
+    expect(v.verdict).toBe('pass');
+  });
+
+  it('a brief with no page budget does not ask for the record', async () => {
+    const { seen } = await floor(measured(), NO_BUDGET);
+    expect(seen.asked).toBe(0);
+  });
+
+  it('the record is the run\'s latest draft_render unit (highest ord), never another step\'s', () => {
+    const units = [
+      { ord: 2, catalog: 'draft_render', draft_render: measured({ attempt: 0, pages: 5 }) },
+      { ord: 1, catalog: 'produce' },
+      { ord: 4, catalog: 'draft_render', draft_render: measured({ attempt: 1 }) },
+      { ord: 5, catalog: 'critique', draft_render: measured({ pages: 9 }) },
+    ];
+    expect(latestDraftRender(units)?.['attempt']).toBe(1);
+    // The latest render unit with no record yet (re-planned, pending): nothing to reuse, never the older count.
+    expect(latestDraftRender([...units, { ord: 6, catalog: 'draft_render' }])).toBeNull();
+    expect(latestDraftRender(undefined)).toBeNull();
+    expect(reusablePageCount(measured(), SHA)).toBe(2);
+    expect(reusablePageCount(measured(), null)).toBeNull();
   });
 });
 

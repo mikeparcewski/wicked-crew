@@ -19,6 +19,8 @@ import {
   conformanceVenvDir,
   editorPluginLaunchListener,
   exportEngineConformanceEnv,
+  exportManagedChrome,
+  CHROMIUM_PATH_FILE,
   needsBrowserRuntime,
   managedChromium,
   provisionOnDraftLaunch,
@@ -127,8 +129,11 @@ describe('conformanceProvisioner', () => {
       ['python3', '-m', 'venv', venv],
       [venvPython(venv, 'linux'), '-m', 'pip', 'install', '--disable-pip-version-check', '--quiet', `playwright==${CONFORMANCE_PLAYWRIGHT_VERSION}`],
       [venvPython(venv, 'linux'), '-m', 'playwright', 'install', 'chromium'],
-      // PLAN G12: where that Chromium is, for the draft floor's renderer (asked once).
-      [venvPython(venv, 'linux'), '-c', expect.stringContaining('chromium.executable_path')],
+      // PLAN G12: where its headless shell is, for the draft renderer; a cache without one gets the shell alone, and
+      // is asked again.
+      [venvPython(venv, 'linux'), '-c', expect.stringContaining('chromium_headless_shell-')],
+      [venvPython(venv, 'linux'), '-m', 'playwright', 'install', '--only-shell', 'chromium'],
+      [venvPython(venv, 'linux'), '-c', expect.stringContaining('chromium_headless_shell-')],
     ]);
   });
 
@@ -153,19 +158,19 @@ describe('conformanceProvisioner', () => {
         return { stdout: args[0] === '-c' ? answer : '', stderr: '' };
       }) as never,
     });
-    await provision(); // made; the query answers nothing
-    expect(queries).toHaveLength(1);
+    await provision(); // made; the query answers nothing, before and after the shell install
+    expect(queries).toHaveLength(2);
     clock += 9 * 60_000;
     await provision();
-    expect(queries).toHaveLength(1);
+    expect(queries).toHaveLength(2);
     clock += 60_000;
     answer = `${chromium}\n`;
     await provision();
-    expect(queries).toHaveLength(2);
+    expect(queries).toHaveLength(3);
     expect(managedChromium(root, {}, 'linux')).toBe(chromium);
     clock += 60 * 60_000;
     await provision();
-    expect(queries).toHaveLength(2);
+    expect(queries).toHaveLength(3);
   });
 
   it('PLAN G12: records the provisioned Chromium for the draft floor, and starts making it when a document run is launched', async () => {
@@ -231,7 +236,7 @@ describe('conformanceProvisioner', () => {
       ['python3', '-m', 'venv'],
       [venvPython(pinned, 'linux'), '-m', 'pip'],
       [venvPython(pinned, 'linux'), '-m', 'playwright'],
-      // PLAN G12: once, where its Chromium is (for the draft floor's renderer).
+      // PLAN G12: once, where its headless shell is (for the draft renderer).
       [venvPython(pinned, 'linux'), '-c', expect.stringContaining('chromium.executable_path')],
     ]);
     expect(calls[1]).toContain('playwright==1.65.0');
@@ -455,5 +460,110 @@ describe('the engine\'s conformance step inputs', () => {
     listen({ kind: 'run', id: 'ep-run', status: 'handed' });
     await new Promise((r) => setTimeout(r, 0));
     expect(looked).toHaveLength(2);
+  });
+});
+
+describe('PLAN G12 (crew half): the managed headless shell as the daemon\'s WICKED_CHROME', () => {
+  /** A made runtime under `root` whose recorded renderer is `shell` (a real file). */
+  function made(root: string, shell: string | null): void {
+    const venv = conformanceVenvDir(root, {});
+    mkdirSync(join(venv, 'bin'), { recursive: true });
+    writeFileSync(venvPython(venv, 'linux'), '');
+    writeFileSync(join(venv, PROVISIONED_MARKER), 'playwright\n');
+    if (shell !== null) {
+      mkdirSync(join(shell, '..'), { recursive: true });
+      writeFileSync(shell, '');
+      writeFileSync(join(venv, CHROMIUM_PATH_FILE), `${shell}\n`);
+    }
+  }
+
+  it('records the headless shell, never the full Chrome an earlier crew recorded', () => {
+    const root = join(dir, 'g12-file');
+    made(root, null);
+    const venv = conformanceVenvDir(root, {});
+    const full = join(dir, 'chromium-1248', 'chrome-mac-arm64', 'Google Chrome for Testing');
+    mkdirSync(join(full, '..'), { recursive: true });
+    writeFileSync(full, '');
+    // What an earlier crew wrote: the full browser, which cannot print in the engine's no-network jail.
+    writeFileSync(join(venv, '.wicked-chromium'), `${full}\n`);
+    expect(CHROMIUM_PATH_FILE).not.toBe('.wicked-chromium');
+    expect(managedChromium(root, {}, 'linux')).toBeNull();
+  });
+
+  it('exports crew\'s shell, refreshes and withdraws only crew\'s own value, and never touches an operator\'s', () => {
+    const root = join(dir, 'g12-export');
+    const shell = join(dir, 'chromium_headless_shell-1248', 'chrome-headless-shell-linux64', 'chrome-headless-shell');
+    made(root, shell);
+    const env: NodeJS.ProcessEnv = {};
+    expect(exportManagedChrome(root, env, 'linux')).toBe(shell);
+    expect(env['WICKED_CHROME']).toBe(shell);
+    // Its browser is gone: crew's own value is withdrawn.
+    writeFileSync(join(conformanceVenvDir(root, {}), CHROMIUM_PATH_FILE), '/nowhere/chrome-headless-shell\n');
+    expect(exportManagedChrome(root, env, 'linux')).toBeUndefined();
+    expect(env['WICKED_CHROME']).toBeUndefined();
+    // An operator's own renderer stays as it is.
+    const own: NodeJS.ProcessEnv = { WICKED_CHROME: '/opt/my-chrome' };
+    made(root, shell);
+    expect(exportManagedChrome(root, own, 'linux')).toBeUndefined();
+    expect(own['WICKED_CHROME']).toBe('/opt/my-chrome');
+  });
+
+  it('a draft launch still provisions when WICKED_CHROME is crew\'s own export, not the operator\'s', async () => {
+    const root = join(dir, 'g12-launch');
+    const shell = join(dir, 'g12-shell', 'chrome-headless-shell');
+    made(root, shell);
+    const managed = '/rt/venv/bin/python';
+    const env: NodeJS.ProcessEnv = { [ENGINE_CONFORMANCE_PYTHON_ENV]: managed };
+    exportManagedChrome(root, env, 'linux');
+    expect(env['WICKED_CHROME']).toBe(shell);
+    let starts = 0;
+    const counted = async () => {
+      starts += 1;
+      return { ok: true as const, python: '/x' };
+    };
+    expect(provisionOnDraftLaunch({ kind: 'run', status: 'handed', workflow: 'interactive-draft' }, counted, () => {}, env, managed)).toBe(true);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(starts).toBe(1);
+  });
+
+  it('review r1 (pi): a made runtime whose recorded shell is gone asks again, and records the new one', async () => {
+    const root = join(dir, 'g12-stale');
+    made(root, join(dir, 'g12-stale-old', 'chrome-headless-shell'));
+    const venv = conformanceVenvDir(root, {});
+    writeFileSync(join(venv, CHROMIUM_PATH_FILE), `${join(dir, 'pruned', 'chrome-headless-shell')}\n`);
+    const fresh = join(dir, 'g12-stale-new', 'chrome-headless-shell');
+    mkdirSync(join(fresh, '..'), { recursive: true });
+    writeFileSync(fresh, '');
+    const env: NodeJS.ProcessEnv = {};
+    const provision = conformanceProvisioner(() => root, {
+      platform: 'linux',
+      env,
+      exec: (async (_bin: string, args: string[]) => ({ stdout: args[0] === '-c' ? `${fresh}\n` : '', stderr: '' })) as never,
+    });
+    expect((await provision()).ok).toBe(true);
+    expect(managedChromium(root, {}, 'linux')).toBe(fresh);
+    expect(env['WICKED_CHROME']).toBe(fresh);
+  });
+
+  it('the provisioner exports the shell it recorded into the daemon environment it was given', async () => {
+    const root = join(dir, 'g12-prov');
+    const venv = conformanceVenvDir(root, {});
+    const shell = join(dir, 'g12-prov-shell', 'chrome-headless-shell');
+    mkdirSync(join(shell, '..'), { recursive: true });
+    writeFileSync(shell, '');
+    const env: NodeJS.ProcessEnv = {};
+    const provision = conformanceProvisioner(() => root, {
+      platform: 'linux',
+      env,
+      exec: (async (_bin: string, args: string[]) => {
+        if (args[1] === 'venv') {
+          mkdirSync(join(venv, 'bin'), { recursive: true });
+          writeFileSync(venvPython(venv, 'linux'), '');
+        }
+        return { stdout: args[0] === '-c' ? `${shell}\n` : '', stderr: '' };
+      }) as never,
+    });
+    expect((await provision()).ok).toBe(true);
+    expect(env['WICKED_CHROME']).toBe(shell);
   });
 });

@@ -34,15 +34,21 @@ export const CONFORMANCE_PLAYWRIGHT_ENV = 'WICKED_CONFORMANCE_PLAYWRIGHT';
 export const CONFORMANCE_RUNTIME_DIR_ENV = 'WICKED_CONFORMANCE_RUNTIME_DIR';
 /** Written into a venv only once every provisioning step succeeded. */
 export const PROVISIONED_MARKER = '.wicked-provisioned';
-/** (PLAN G12) Beside the marker: the path of the Chromium that venv's Playwright installed, one line. */
-export const CHROMIUM_PATH_FILE = '.wicked-chromium';
+/**
+ * (PLAN G12) Beside the marker: the path of the headless shell (Playwright's `chromium_headless_shell`) that venv's
+ * Playwright installed, one line. Its own file name: the `.wicked-chromium` an earlier crew wrote names the full
+ * "Chrome for Testing", which cannot print inside the engine's no-network render jail on macOS (no profile directory,
+ * then its process-singleton socket is refused), so it is never read again.
+ */
+export const CHROMIUM_PATH_FILE = '.wicked-headless-shell';
 
 /** The workflows whose documents crew's draft floor prints to measure their pages (PLAN G12). */
 export const DRAFT_RENDER_WORKFLOWS: ReadonlySet<string> = new Set(['interactive-draft', 'interactive-chat']);
 
 /**
- * (PLAN G12) The Chromium crew provisioned for this host, as the draft floor's renderer (`WICKED_CHROME`), or `null`
- * when the runtime is not made yet (or its browser is gone). Read from the file the provisioner writes; never spawns.
+ * (PLAN G12) The headless shell crew provisioned for this host, as the draft renderer (`WICKED_CHROME`: the engine's
+ * `draft_render` step and crew's floor), or `null` when the runtime is not made yet (or its browser is gone). Read
+ * from the file the provisioner writes; never spawns.
  */
 export function managedChromium(root: string, env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string | null {
   if (!conformanceRuntimeReady(root, env, platform)) return null;
@@ -54,9 +60,26 @@ export function managedChromium(root: string, env: NodeJS.ProcessEnv = process.e
   }
 }
 
-/** Asks the venv's Playwright where its Chromium is (printed on one line). */
-const CHROMIUM_PATH_PY =
-  'from playwright.sync_api import sync_playwright as s\np = s().start()\nprint(p.chromium.executable_path)\np.stop()';
+/**
+ * Asks the venv's Playwright where its headless shell is, printed on one line (nothing when it is not installed).
+ * Playwright names only the full browser's path (`chromium.executable_path`, in `<browsers>/chromium-<rev>/…`); the
+ * shell of the same revision is its sibling `<browsers>/chromium_headless_shell-<rev>/chrome-headless-shell-<os>/
+ * chrome-headless-shell[.exe]`.
+ */
+export const HEADLESS_SHELL_PATH_PY = [
+  'import glob, os',
+  'from playwright.sync_api import sync_playwright as s',
+  'p = s().start()',
+  'x = p.chromium.executable_path',
+  'p.stop()',
+  'd = x',
+  "while not os.path.basename(d).startswith('chromium-') and os.path.dirname(d) != d:",
+  '    d = os.path.dirname(d)',
+  "rev = os.path.basename(d)[len('chromium-'):]",
+  "names = ('chrome-headless-shell', 'chrome-headless-shell.exe')",
+  "hits = sorted(h for h in glob.glob(os.path.join(os.path.dirname(d), 'chromium_headless_shell-' + rev, '*', '*')) if os.path.basename(h) in names and os.path.isfile(h)) if rev else []",
+  "print(hits[0] if hits else '')",
+].join('\n');
 
 /** The OS cache directory's `wicked-crew/editor-conformance`, or the override. */
 export function conformanceRuntimeRoot(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform, home: string = homedir()): string {
@@ -148,7 +171,36 @@ export function exportEngineConformanceEnv(
 }
 
 /** The values crew exported into each environment object (by identity), so a later boot can tell them from an operator's. */
-const crewExports = new WeakMap<NodeJS.ProcessEnv, { python?: string; studio?: string }>();
+const crewExports = new WeakMap<NodeJS.ProcessEnv, { python?: string; studio?: string; chrome?: string }>();
+
+/** (PLAN G12) Whether `WICKED_CHROME` in `env` is the operator's own: set, and not the value crew exported there. */
+export function operatorChrome(env: NodeJS.ProcessEnv = process.env): boolean {
+  const v = (env['WICKED_CHROME'] ?? '').trim();
+  return v !== '' && v !== crewExports.get(env)?.chrome;
+}
+
+/**
+ * (PLAN G12) Name crew's managed headless shell as the daemon's own `WICKED_CHROME`, so the engine's `draft_render` step
+ * (which reads the daemon's environment at dispatch) prints with it. Called at boot and after every provisioning that
+ * succeeded. Tracked as crew's value, like {@link exportEngineConformanceEnv}'s: an operator's own `WICKED_CHROME` wins
+ * and is never touched; crew's own is refreshed, and withdrawn when its browser is gone. Returns what is exported by crew.
+ */
+export function exportManagedChrome(
+  root: string,
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  if (operatorChrome(env)) return undefined;
+  const mine = crewExports.get(env) ?? {};
+  const shell = managedChromium(root, env, platform) ?? undefined;
+  if (shell !== undefined) env['WICKED_CHROME'] = shell;
+  else if (mine.chrome !== undefined) delete env['WICKED_CHROME'];
+  const next = { ...mine };
+  if (shell !== undefined) next.chrome = shell;
+  else delete next.chrome;
+  crewExports.set(env, next);
+  return shell;
+}
 
 /** Whether crew's managed runtime at `root` is fully made (the provisioner's marker beside its interpreter). */
 export function conformanceRuntimeReady(root: string, env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): boolean {
@@ -188,9 +240,10 @@ export function provisionOnEditorPluginLaunch(
 
 /**
  * (PLAN G12) When a document draft or a refine is launched, make the same runtime in the background, so crew's draft
- * floor can PRINT the document and measure its pages ({@link managedChromium}) instead of estimating them. Nothing is
- * installed when an operator named their own interpreter or their own `WICKED_CHROME`. A failure is logged; the floor
- * then estimates the count and says it is unmeasured, as before.
+ * floor and the engine's `draft_render` step can PRINT the document and measure its pages ({@link managedChromium})
+ * instead of estimating them. Nothing is installed when an operator named their own interpreter or their own
+ * `WICKED_CHROME` (crew's own exported value is not the operator's: {@link operatorChrome}). A failure is logged; the
+ * floor then estimates the count and says it is unmeasured, as before.
  */
 export function provisionOnDraftLaunch(
   notice: { kind: string; status: string; workflow?: string },
@@ -201,7 +254,7 @@ export function provisionOnDraftLaunch(
 ): boolean {
   if (notice.kind !== 'run' || notice.status !== 'handed' || notice.workflow === undefined || !DRAFT_RENDER_WORKFLOWS.has(notice.workflow)) return false;
   if (managed !== undefined && (env[ENGINE_CONFORMANCE_PYTHON_ENV] ?? '') !== managed) return false;
-  if ((env['WICKED_CHROME'] ?? '').trim() !== '') return false;
+  if (operatorChrome(env)) return false;
   void provision().then(
     (r) => {
       if (!r.ok) log(`[interactive] a document run started, but its page count stays unmeasured: ${r.error}`);
@@ -266,23 +319,35 @@ export function conformanceProvisioner(root: () => string, deps: ProvisionDeps =
     const python = venvPython(venv, platform);
     const marker = join(venv, PROVISIONED_MARKER);
     const chromiumFile = join(venv, CHROMIUM_PATH_FILE);
-    // (PLAN G12) Where Playwright put its Chromium, for the draft floor's renderer. Best-effort: without it the floor
-    // estimates the page count, as before.
+    // (PLAN G12) Where Playwright put its headless shell, for the draft renderer. `install chromium` installs the shell
+    // beside the full browser; a cache that lacks it (an older install, a pruned cache) gets the shell alone. Best-effort:
+    // without it the floor estimates the page count, as before.
     const recordChromium = async (): Promise<void> => {
       const last = askedChromium.get(venv);
       if (last !== undefined && now() - last < CHROMIUM_RETRY_MS) return;
       askedChromium.set(venv, now());
-      try {
-        const out = await exec(python, ['-c', CHROMIUM_PATH_PY], { timeout: VENV_TIMEOUT_MS, windowsHide: true, env: absoluteCacheEnv(env, platform) });
+      const opts = { timeout: VENV_TIMEOUT_MS, windowsHide: true, env: absoluteCacheEnv(env, platform) };
+      const ask = async (): Promise<string> => {
+        const out = await exec(python, ['-c', HEADLESS_SHELL_PATH_PY], opts);
         const path = out.stdout.trim().split('\n').pop()?.trim() ?? '';
-        if (path !== '' && existsSync(path)) writeFileSync(chromiumFile, `${path}\n`);
+        return path !== '' && existsSync(path) ? path : '';
+      };
+      try {
+        let path = await ask();
+        if (path === '') {
+          await exec(python, ['-m', 'playwright', 'install', '--only-shell', 'chromium'], { ...opts, timeout: BROWSER_TIMEOUT_MS });
+          path = await ask();
+        }
+        if (path !== '') writeFileSync(chromiumFile, `${path}\n`);
       } catch {
         /* the floor estimates instead */
       }
     };
     // A venv every step finished in is reused as is: no package index, no browser download.
     if (existsSync(marker) && existsSync(python)) {
-      if (!existsSync(chromiumFile)) await recordChromium();
+      // Asked again when nothing is recorded, or when the recorded browser is gone (a pruned cache, a moved revision).
+      if (managedChromium(dir, env, platform) === null) await recordChromium();
+      exportManagedChrome(dir, env, platform);
       return { ok: true, python };
     }
     const fix = `pip install playwright==${pin()} && python -m playwright install chromium`;
@@ -324,6 +389,8 @@ export function conformanceProvisioner(root: () => string, deps: ProvisionDeps =
     mkdirSync(venv, { recursive: true });
     writeFileSync(marker, `playwright==${pin()}\n`);
     await recordChromium();
+    // (PLAN G12) The engine's `draft_render` step reads the daemon's `WICKED_CHROME` at dispatch.
+    exportManagedChrome(dir, env, platform);
     return { ok: true, python };
   };
   return () => {

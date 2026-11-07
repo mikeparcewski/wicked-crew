@@ -69,6 +69,9 @@ describe('RunUnits', () => {
   it('the PA step says what it does', () => {
     expect(describeStep('pa-scope')).toMatch(/rating the ask/);
     expect(describeStep('outline')).toBe('outline');
+    // PLAN G12: the engine's page count in the interactive-draft preset says what it does.
+    expect(describeStep('measure-pages')).toBe('printing the draft to count its pages (measure-pages)');
+    expect(describeStep('toString')).toBe('toString');
   });
 });
 

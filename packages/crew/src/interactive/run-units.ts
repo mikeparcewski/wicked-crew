@@ -47,9 +47,16 @@ export function plannedUnitOf(event: CoreEvent): { ord: number; unit: PlannedUni
   };
 }
 
-/** A step id as a narration line reads it: the PA's rating step says what it does. */
+/** Step ids whose narration line says what they do. */
+const STEP_WORDS: Readonly<Record<string, string>> = {
+  'pa-scope': 'rating the ask before the work starts (pa-scope)',
+  // PLAN G12: the engine's `draft_render` step in the interactive-draft preset.
+  'measure-pages': 'printing the draft to count its pages (measure-pages)',
+};
+
+/** A step id as a narration line reads it: the PA's rating step and the page count say what they do. */
 export function describeStep(id: string): string {
-  return id === 'pa-scope' ? 'rating the ask before the work starts (pa-scope)' : id;
+  return Object.hasOwn(STEP_WORDS, id) ? STEP_WORDS[id]! : id;
 }
 
 /** The run's planned units in ord order (ord n = index n − 1). */
