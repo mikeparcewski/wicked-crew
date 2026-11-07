@@ -68,6 +68,8 @@ interface Rig {
   rejectAnswer: { code: number; body: Record<string, unknown> } | null;
   /** (Lane D) The plan version the last Reject was bound to. */
   rejectExpect?: { ord: number; planRev: number } | null;
+  /** (api-types 0.196.0) Why a power run is refused (`null`: it can run as one). */
+  powerAnswer: string | null;
 }
 
 const CHAT = 'c1';
@@ -85,6 +87,7 @@ function rig(o: { roster?: Array<{ key: string; name: string }>; repos?: Array<{
     rejects: 0,
     rejectAnswer: null,
     preflightAnswer: null,
+    powerAnswer: null,
   };
   const registry = new LaunchOnceRegistry();
   registry.register('job', r.launcher);
@@ -113,6 +116,7 @@ function rig(o: { roster?: Array<{ key: string; name: string }>; repos?: Array<{
     served: async () => r.served,
     qeOff: async () => r.qeOff,
     preflight: async () => r.preflightAnswer,
+    powerRefusal: async () => r.powerAnswer,
     reshapeReject: async (_run, _actor, _pid, expect) => {
       r.rejects += 1;
       r.rejectExpect = expect ?? null;
@@ -684,5 +688,74 @@ describe('codex r6 folds', () => {
     const bug = open(r);
     const res = await swap(r, bug.pid, { card: 'competitive' }, 'to-coming');
     expect(res.body).toMatchObject({ code: 'card_not_available' });
+  });
+});
+
+describe('(api-types 0.196.0) a job Start chooses power', () => {
+  it('absent: the dispatch carries no power; false and true are carried as chosen', async () => {
+    for (const [power, want] of [[undefined, undefined], [false, false], [true, true]] as const) {
+      const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+      await pick(r, 'bug');
+      const out = await r.svc.decide(CHAT, open(r).pid, { decision: 'go', ...(power !== undefined ? { power } : {}) }, ME, 'i1');
+      expect(out.code, JSON.stringify(out.body)).toBe(200);
+      expect(r.launcher.launched).toHaveLength(1);
+      expect('power' in r.launcher.launched[0]!).toBe(power !== undefined);
+      expect(r.launcher.launched[0]!.power).toBe(want);
+    }
+  });
+
+  it('true when it cannot run as one: 409 power_unavailable before anything is recorded or started', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'bug');
+    r.powerAnswer = "this daemon's engine has no power mode; press Start with Review plan on";
+    const before = r.records.length;
+    const out = await r.svc.decide(CHAT, open(r).pid, { decision: 'go', power: true }, ME, 'i1');
+    expect(out).toMatchObject({ code: 409, body: { code: 'power_unavailable', error: expect.stringMatching(/no power mode/) } });
+    expect(r.records.length).toBe(before);
+    expect(r.launcher.launched).toHaveLength(0);
+    // false is not checked against power mode.
+    expect((await r.svc.decide(CHAT, open(r).pid, { decision: 'go', power: false }, ME, 'i1')).code).toBe(200);
+  });
+
+  it('a daemon with no power check refuses true; Not now with a power choice is a 400', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'bug');
+    const pid = open(r).pid;
+    expect(await r.svc.decide(CHAT, pid, { decision: 'not_now', power: false }, ME, 'i1')).toMatchObject({ code: 400, body: { code: 'power_not_applicable' } });
+    (r.svc as unknown as { deps: { powerRefusal?: unknown } }).deps.powerRefusal = undefined;
+    expect(await r.svc.decide(CHAT, pid, { decision: 'go', power: true }, ME, 'i1')).toMatchObject({ code: 409, body: { code: 'power_unavailable' } });
+    expect(r.launcher.launched).toHaveLength(0);
+  });
+
+  it('an interrupted Start resumes with the choice of the press that resumes it', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'bug');
+    const pid = open(r).pid;
+    const launch = r.launcher.launch.bind(r.launcher);
+    r.launcher.launch = async () => { throw new Error('engine away'); };
+    expect((await r.svc.decide(CHAT, pid, { decision: 'go', power: true }, ME, 'i1')).code).toBe(502);
+    r.launcher.launch = launch;
+    r.powerAnswer = 'no power mode now';
+    expect(await r.svc.decide(CHAT, pid, { decision: 'go', power: true }, ME, 'i1')).toMatchObject({ code: 409, body: { code: 'power_unavailable' } });
+    const out = await r.svc.decide(CHAT, pid, { decision: 'go', power: false }, ME, 'i1');
+    expect(out.code, JSON.stringify(out.body)).toBe(200);
+    expect(r.launcher.launched.map((d) => d.power)).toEqual([false]);
+  });
+
+  it('a reshape Started again with a refused power choice never answers the held plan', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'feature');
+    const held = open(r);
+    await r.svc.decide(CHAT, held.pid, { decision: 'go' }, ME, 'i1');
+    const facts = { card: 'bug', option: undefined, depth: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape' } as unknown as Parameters<ChatProposals['reshape']>[1]['facts'];
+    const pid = `${CHAT}:reshape:run1:pw`;
+    r.preflightAnswer = "payments-service's folder is missing";
+    const made = await r.svc.reshape(CHAT, { pid, oldRunId: 'run1', parentPid: held.pid, facts, edits: { card: 'bug' }, reducedAssurance: false, relaunch: { deliver: 'pr' }, request: { id: 'pw', digest: 'dpw' }, confirmLoss: [] }, ME, 'i1');
+    expect(made.body).toMatchObject({ code: 'proposal_blocked' });
+    r.preflightAnswer = null;
+    r.powerAnswer = 'no power mode now';
+    expect(await r.svc.decide(CHAT, pid, { decision: 'go', power: true }, ME, 'i1')).toMatchObject({ code: 409, body: { code: 'power_unavailable' } });
+    expect(r.rejects).toBe(0);
+    expect(r.launcher.launched).toHaveLength(1);
   });
 });

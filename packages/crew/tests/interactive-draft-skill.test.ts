@@ -91,7 +91,7 @@ describe('draftQualityClause', () => {
     expect(clause).toMatch(/UNVERIFIED page count must be disclosed/);
     // artifact-runs-fix (run 2e6059da): a process note is never part of the shared artifact.
     expect(clause).toContain('in your reply');
-    expect(clause).toContain("never in the document's visible text");
+    expect(clause).toContain("never in the document itself: not its visible text");
     expect(clause).not.toMatch(/disclosed in the notes/);
     expect(clause).toContain('"$WICKED_GARDEN_ROOT/scripts/wicked-garden" run scripts/draft/self_check.py');
   });
@@ -100,7 +100,7 @@ describe('draftQualityClause', () => {
     expect(draftQualityClause('/o.html', { pages: null, exact: false, source: 'style-default' }, [], { style: 'ppt' })).toContain('--pages <the slide count the outline fixed> --exact');
     // A repo-less draft cites its estate results in the reply, not in the body.
     const bare = draftQualityClause('/o.html', { pages: null, exact: false, source: 'unknown' }, [], {});
-    expect(bare).toContain('cite the estate tool results in your reply');
+    expect(bare).toContain('cite the estate tool results in notes.json beside the document');
     expect(bare).not.toMatch(/results in the notes/);
     const rev = draftQualityClause('/o.html', { pages: null, exact: false, source: 'unknown' }, [], { revision: true });
     expect(rev).toContain('A revision can re-introduce a defect');
@@ -216,6 +216,8 @@ function report(over: {
         size_failures: 0,
         summary: 'contrast: ok',
       },
+      // A6: the leak scan always runs (a report without it is not this floor's report).
+      leaks: { ok: true, by_kind: {}, findings: [], summary: 'leaks: none' },
       pages: {
         pages: over.pages === undefined ? 2 : over.pages,
         budget: 2,
@@ -233,6 +235,8 @@ describe('draftFloorVerdict — the rule named, and only what a count without a 
       verdict: 'pass',
       breaches: [],
       summary: 'the draft floor met every rule on the saved document',
+      // G12: the count the check reported, and that a renderer measured it.
+      pages: { count: 2, measured: true, budget: 2, exact: true },
     });
   });
 
@@ -352,6 +356,101 @@ describe('draftFloorArgv — the same inputs the worker clause names, minus --re
     expect(argv).toContain('--no-pages');
     expect(argv.join(' ')).toContain('--mode screen --min-font-pt 0');
     expect(argv).not.toContain('--repo');
+  });
+});
+
+describe('A6 — process notes stay out of the document, and notes.json is required', () => {
+  const withChecks = (extra: Record<string, unknown>): unknown => {
+    const r = report() as { verdict: string; failed?: string[]; checks: Record<string, unknown> };
+    return { ...r, verdict: 'FAIL', failed: Object.keys(extra), checks: { ...r.checks, ...extra } };
+  };
+
+  it('a leak in the document is a breach that says where it goes instead', () => {
+    const v = draftFloorVerdict(withChecks({ leaks: { ok: false, by_kind: { 'source-marker': 1, narration: 2 } } }), EXACT_2);
+    expect(v.verdict).toBe('fail');
+    expect(v.breaches[0]).toMatch(/^leaks: 2 narration, 1 source-marker in the document .* notes\.json/);
+  });
+
+  it('missing or invalid notes.json is a breach naming the first problem', () => {
+    const v = draftFloorVerdict(withChecks({ notes: { ok: false, findings: ['notes.json is missing at notes.json'] } }), EXACT_2);
+    expect(v.verdict).toBe('fail');
+    expect(v.breaches[0]).toContain('notes: notes.json is missing');
+  });
+
+  it('the floor and the worker clause both pass the notes path and the run id', () => {
+    const argv = draftFloorArgv('/garden', '/out/doc.html', EXACT_2, [], { notes: '/out/notes.json', runId: 'r-1' });
+    expect(argv.join(' ')).toContain('--notes /out/notes.json --run-id r-1');
+    const clause = draftQualityClause('/out/doc.html', EXACT_2, [], { notes: '/out/notes.json', runId: 'r-1' });
+    expect(clause).toContain('--notes /out/notes.json --run-id r-1');
+    expect(clause).toContain('NOTES (required): write /out/notes.json');
+    // A6 supersedes crew#1266's allowance: speaker notes are a talk track, never where process notes go.
+    expect(clause).not.toContain('may also carry them in its hidden speaker notes');
+  });
+});
+
+describe('A6/G12 r1 folds — a check that did not run, or could not evaluate, is never a pass', () => {
+  it('a report without the leak scan, or without the notes check the floor asked for, is unavailable', () => {
+    const r = report() as { checks: Record<string, unknown> };
+    const noLeaks = Object.fromEntries(Object.entries(r.checks).filter(([k]) => k !== 'leaks'));
+    expect(draftFloorVerdict({ ...r, checks: noLeaks }, EXACT_2).verdict).toBe('unavailable');
+    expect(draftFloorVerdict(r, EXACT_2, { notes: true }).verdict).toBe('unavailable');
+    expect(draftFloorVerdict({ ...r, checks: { ...r.checks, notes: { ok: true } } }, EXACT_2, { notes: true }).verdict).toBe('pass');
+  });
+
+  it('a budgeted page count the report does not carry is no measurement (codex r2)', () => {
+    const r = report() as { checks: Record<string, unknown> };
+    const noPages = Object.fromEntries(Object.entries(r.checks).filter(([k]) => k !== 'pages'));
+    expect(draftFloorVerdict({ ...r, checks: noPages }, EXACT_2).verdict).toBe('unavailable');
+    expect(draftFloorVerdict({ ...r, checks: noPages }, NO_BUDGET).verdict).toBe('pass');
+  });
+
+  it('a page count with no verified flag, or one the report lists as UNVERIFIED, is never a pass (codex r3)', () => {
+    const r = report() as { checks: Record<string, unknown> } & Record<string, unknown>;
+    expect(draftFloorVerdict({ ...r, checks: { ...r.checks, pages: { pages: 2 } } }, EXACT_2).verdict).toBe('unavailable');
+    const listed = draftFloorVerdict({ ...r, verdict: 'UNVERIFIED', unverified: ['pages'] }, EXACT_2);
+    expect(listed.verdict).toBe('unverified');
+    expect(listed.pages?.measured).toBe(false);
+  });
+
+  it('an unverified contrast pair with a measured page count is unverified, not pass', () => {
+    const r = report() as Record<string, unknown>;
+    const v = draftFloorVerdict({ ...r, verdict: 'UNVERIFIED', unverified: ['contrast'] }, EXACT_2);
+    expect(v.verdict).toBe('unverified');
+    expect(v.summary).toContain('contrast could not be fully evaluated');
+  });
+});
+
+describe('G12 — with a renderer crew provisioned, the floor measures the page count', () => {
+  it('passes --render and WICKED_CHROME, and records the count as measured', async () => {
+    let chromeSeen: string | undefined;
+    let argvSeen: string[] = [];
+    const v = await runDraftFloor('/out/doc.html', EXACT_2, [], {}, {
+      gardenRoot: () => '/garden',
+      chrome: () => '/cache/chromium',
+      run: async (argv, _t, chrome) => {
+        argvSeen = argv;
+        chromeSeen = chrome;
+        return { stdout: JSON.stringify(report({ pages: 2, pagesVerified: true })), code: 0 };
+      },
+    });
+    expect(argvSeen).toContain('--render');
+    expect(chromeSeen).toBe('/cache/chromium');
+    expect(v.pages).toEqual({ count: 2, measured: true, budget: 2, exact: true });
+  });
+
+  it('without one, no --render and the count is an unmeasured estimate', async () => {
+    let argvSeen: string[] = [];
+    const v = await runDraftFloor('/out/doc.html', EXACT_2, [], {}, {
+      gardenRoot: () => '/garden',
+      chrome: () => null,
+      run: async (argv) => {
+        argvSeen = argv;
+        return { stdout: JSON.stringify(report({ pages: 2, pagesVerified: false })), code: 3 };
+      },
+    });
+    expect(argvSeen).not.toContain('--render');
+    expect(v.verdict).toBe('unverified');
+    expect(v.pages?.measured).toBe(false);
   });
 });
 

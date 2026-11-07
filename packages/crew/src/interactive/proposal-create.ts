@@ -293,7 +293,8 @@ export async function reconcileBoundAttempts(deps: ReconcileDeps): Promise<void>
       continue;
     }
     deps.ensureLaunchRecord(b, a);
-    const chatNow = deps.chatIdOf(b.chatId, b.chatInstance);
+    // A5: a refine accepted in another chat is settled in that chat.
+    const chatNow = a.chatId !== undefined ? deps.chatIdOf(a.chatId, a.chatInstance ?? null) : deps.chatIdOf(b.chatId, b.chatInstance);
     if (chatNow !== null) await deps.settleAccepting(chatNow, a.pid).catch(() => false);
     if (a.emittedAt !== undefined) {
       const v = deps.docVersions(b.projectId, b.doc);
@@ -352,9 +353,10 @@ export function recoveredChatId(
 export function recoveredLaunchDetail(
   history: { idOfInstance(id: string, instance: string | null): string | null },
   b: Pick<DocBinding, 'chatId' | 'chatInstance' | 'owner' | 'ref'>,
-  a: Pick<DocBindingAttempt, 'pid'>,
+  a: Pick<DocBindingAttempt, 'pid' | 'chatId' | 'chatInstance'>,
 ): Record<string, unknown> {
-  const chatNow = recoveredChatId(history, b);
+  // A5: a refine accepted in another chat is filed under that chat (codex A5 r1).
+  const chatNow = recoveredChatId(history, a.chatId !== undefined ? { chatId: a.chatId, chatInstance: a.chatInstance ?? null } : b);
   return { deliver: 'none', channel: 'studio', actor: b.owner, ...(chatNow !== null ? { chatId: chatNow } : {}), proposalId: a.pid, artifactRef: b.ref, recoveredAtBoot: true };
 }
 

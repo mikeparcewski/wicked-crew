@@ -116,6 +116,9 @@ export function conformanceLoadSeconds(env: NodeJS.ProcessEnv = process.env): nu
   return Number.isFinite(v) && v >= 5 && v <= 1800 ? v : DEFAULT_CONFORMANCE_LOAD_S;
 }
 
+/** One editor's fixed waits in garden's run: the host-contract cases (~30 s) and the behaviour cases 7 and 18 (25 s). */
+export const CONFORMANCE_FIXED_WAITS_S = 30 + 25;
+
 /** One editor's manifest surfaces, as far as the run's length depends on them. */
 function surfaceCounts(entry: Record<string, unknown>): { actions: number; tabs: number; pluginTabs: number } {
   const surfaces = entry['surfaces'];
@@ -134,10 +137,12 @@ function surfaceCounts(entry: Record<string, unknown>): { actions: number; tabs:
  *  - host-page loads, each allowed the whole bound: 2 (the cases, then the hash-pinned reload); for an
  *    editor that speaks protocol 2, 1 more for the card (full screen reuses it) and 1 per plugin-rendered
  *    options tab (at least 1 when it declares options);
- *  - the cases' fixed waits (~30 s) plus each sequential answer the host allows up to 2 s: every card
- *    action, every options tab, and the two full-screen mode changes;
+ *  - the cases' fixed waits (~30 s), plus the behaviour cases' own deadlines (25 s: case 18 reads within 3 s, re-reads
+ *    within 3 s, shows the change within 3 s and settles up to 4 s; case 7's save readies within 2 s, lands within
+ *    5 s and is watched 1.5 s more; with polling margin), plus each sequential answer the host allows up to 2 s:
+ *    every card action, every options tab, and the two full-screen mode changes;
  * plus 60 s for the browser start. One protocol-2 editor with no surfaces, at the default 120 s:
- * 60 + (30 + 2 x 2) + 3 x 120 = 454 s. A fixed 240 s cap killed a correct install at 249 s.
+ * 60 + (55 + 2 x 2) + 3 x 120 = 479 s. A fixed 240 s cap killed a correct install at 249 s.
  */
 export function conformanceCapMs(editors: readonly Record<string, unknown>[], loadS: number): number {
   const list = editors.length > 0 ? editors : [{}];
@@ -147,13 +152,18 @@ export function conformanceCapMs(editors: readonly Record<string, unknown>[], lo
     const c = surfaceCounts(e);
     const loads = 2 + (speaks2 ? 1 + (c.tabs > 0 ? Math.max(1, c.pluginTabs) : 0) : 0);
     const answers = speaks2 ? c.actions + c.tabs + 2 : 0;
-    seconds += 30 + 2 * answers + loads * loadS;
+    seconds += CONFORMANCE_FIXED_WAITS_S + 2 * answers + loads * loadS;
   }
   return Math.round(seconds * 1000);
 }
 
-/** The cases a conformance run must report passing for every editor (garden's runner: 0-6 and 8-12). */
-export const CONFORMANCE_CASES = ['0-manifest', '1-handshake', '2-sizes', '3-no-network', '4-permissions', '5-typing', '6-forwarding', '8-strict-input', '9-liveness', '10-keyboard', '11-theme', '12-hash-pinned'] as const;
+/** The cases a conformance run must report passing for every editor (garden's runner: 0-12 and 18; wicked-core's
+ *  editor_conformance `CASES` is the same list). 7 and 18 are behaviour (G9b): `7-edit`, an editor that asks
+ *  `artifact.write` saves an edit through its own UI (its `data-wicked-save` control lands one version; a viewer
+ *  passes), and `18-shows`, it asks `artifact.read`, shows the content it is handed and reads again when another
+ *  version lands. A garden runner before them reports neither, so every install is refused (fail closed) until
+ *  garden carries them. */
+export const CONFORMANCE_CASES = ['0-manifest', '1-handshake', '2-sizes', '3-no-network', '4-permissions', '5-typing', '6-forwarding', '7-edit', '8-strict-input', '9-liveness', '10-keyboard', '11-theme', '12-hash-pinned', '18-shows'] as const;
 /** The protocol-2 cases an editor whose `protocol` lists 2 must also pass (DES-EDITOR-PLUGIN-CONTRACT-001 §8.3):
  *  its surfaces, card, options and full screen. A garden runner before them reports none, so such an editor is
  *  refused (fail closed). Case 17 (protocol-1 compatibility) restates cases 1-12, so it is not required. */

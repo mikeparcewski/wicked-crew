@@ -24,7 +24,17 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { execFileSync } from 'node:child_process';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+
+// Before any import evaluates: crew's skills/engine-env.ts captures the BOOT value of
+// WICKED_SKILLS_SNAPSHOT at module load and restores it when the suite's plugin source is absent, so
+// an operator's published snapshot would reach this stub rig even if beforeAll unset it (codex on the
+// hermeticity fix). Restored in afterAll through savedEnv.
+const hoistedEnv = vi.hoisted(() => {
+  const saved = process.env['WICKED_SKILLS_SNAPSHOT'];
+  delete process.env['WICKED_SKILLS_SNAPSHOT'];
+  return { WICKED_SKILLS_SNAPSHOT: saved };
+});
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -264,10 +274,21 @@ beforeAll(async () => {
     ].join('\n'),
   );
   chmodSync(join(bin, 'gh'), 0o755);
-  for (const [k, v] of Object.entries({ HOME: home, GH_ACCOUNT: '', WICKED_CREW_AUDIT_LOG: join(dir, 'audit.log') })) {
+  // The engine finds skills through CLAUDE_CONFIG_DIR before HOME (wicked-core skills_snapshot
+  // `resolve_ladder`), so the scratch HOME alone leaves an operator's live wicked-garden plugin cache
+  // in reach: the run then takes the PA-scoped path this stub rig cannot seat, and SHIPPED DEF failed
+  // locally while passing in CI, where no cache exists. The config dir is the scratch one too, and a
+  // published snapshot is never inherited.
+  for (const [k, v] of Object.entries({
+    HOME: home,
+    CLAUDE_CONFIG_DIR: join(home, '.claude'),
+    GH_ACCOUNT: '',
+    WICKED_CREW_AUDIT_LOG: join(dir, 'audit.log'),
+  })) {
     savedEnv[k] = process.env[k];
     process.env[k] = v;
   }
+  savedEnv['WICKED_SKILLS_SNAPSHOT'] = hoistedEnv.WICKED_SKILLS_SNAPSHOT;
 
   // ── The fixture repo: a Playwright-SHAPED harness whose runner is a committed, repo-local shim ──
   origin = join(dir, 'origin.git');
@@ -303,6 +324,11 @@ beforeAll(async () => {
   restoreFloorOptIn = (await optInWhenFloorCannotArm(adapter)).restore;
   app = await createServer(adapter);
   await app.listen({ port: 0, host: '127.0.0.1' });
+  // The premise every case states ("this rig has no skills root"), checked after the daemon booted
+  // (boot may re-apply a snapshot): no published snapshot, and the config dir the engine reads first
+  // is the scratch one.
+  expect(process.env['WICKED_SKILLS_SNAPSHOT']).toBeUndefined();
+  expect(process.env['CLAUDE_CONFIG_DIR']).toBe(join(home, '.claude'));
   const addr = app.server.address();
   baseUrl = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
   const repo = await adapter.registerRepo('qe-author-e2e-ws', clone);

@@ -101,7 +101,7 @@ type Fail = { ok: false; code: string; reason: string };
  * HTTP status, or the outline of a shape crew does not know (block types, field names, array lengths; never a value).
  */
 function read(e: PmEntry, tool: string, result: Record<string, unknown>): { ok: true; payload: unknown } | Fail {
-  return readPayload(result, `${e.name} (${tool})`);
+  return readPayload(result, `${e.name} (${tool})`, e.system);
 }
 
 type Listed = { tenant: string; tenantLabel?: string; key: string; label: string };

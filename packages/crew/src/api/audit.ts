@@ -48,6 +48,8 @@ export class AuditLog {
   private chain: Promise<void> = Promise.resolve();
   private dirReady = false;
   private disabled = false;
+  /** Called with each entry as it is recorded (a listener that throws is logged, never the caller's problem). */
+  private readonly listeners: Array<(entry: AuditEntry) => void> = [];
 
   constructor(
     readonly path: string = defaultAuditPath(),
@@ -84,6 +86,13 @@ export class AuditLog {
       ...(fields?.runId !== undefined ? { runId: fields.runId } : {}),
       ...(fields?.detail !== undefined ? { detail: fields.detail } : {}),
     };
+    for (const l of this.listeners) {
+      try {
+        l(entry);
+      } catch (err) {
+        this.warn(`[audit] a listener failed on ${action}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     this.chain = this.chain.then(async () => {
       if (!this.dirReady) {
         await mkdir(dirname(this.path), { recursive: true });
@@ -99,6 +108,16 @@ export class AuditLog {
       );
     });
     return entry.ts;
+  }
+
+  /** (workdoc-all-runs) Hear each entry as it is recorded (the working document's person-notes index). Returns the
+   *  unsubscribe. A disabled trail records nothing, so its listeners hear nothing. */
+  onRecord(listener: (entry: AuditEntry) => void): () => void {
+    this.listeners.push(listener);
+    return () => {
+      const i = this.listeners.indexOf(listener);
+      if (i !== -1) this.listeners.splice(i, 1);
+    };
   }
 
   /** Await every append issued so far. */

@@ -33,6 +33,7 @@ import type {
   AppReceipt,
   AppReceiptKind,
   AppSpec,
+  AppArchived,
   AppSummary,
   AppTurnRecord,
   AppTurnState,
@@ -96,7 +97,16 @@ interface StoredApp {
   turn: StoredTurn | null;
   /** (K5) The app's turns, oldest first, the last {@link TURN_LOG_MAX}: the chat reads them (no new thread store). */
   turnLog?: AppTurnRecord[];
+  /**
+   * (G16, operator ruling D5) Archived: hidden from the lists, and its version changes (edits, undo, redo, restore, new
+   * turns) are refused until it is restored; never deleted. Reads, queries and actions are not changed. Absent on a
+   * record written before archiving existed, which reads as active.
+   */
+  archived?: AppArchived | null;
 }
+
+/** Which apps a list holds: the active ones (the default), the archived ones, or all of them. */
+export type AppListScope = 'active' | 'archived' | 'all';
 
 /** How many turns an app's record keeps, and how many its detail answers. */
 export const TURN_LOG_MAX = 50;
@@ -271,7 +281,8 @@ export class AppStore {
   private summary(a: StoredApp): AppSummary {
     const h = this.head(a);
     const turn = a.turn === null ? null : { runId: a.turn.runId, startedAt: a.turn.startedAt, base: a.turn.base, actor: a.turn.actor };
-    return { slug: a.slug, name: a.name, projectId: a.projectId, repoId: a.repoId, createdAt: a.createdAt, head: { version: h.version, tree: h.tree, receipt: h.receipt?.kind ?? null }, turn };
+    const archived = a.archived == null ? null : { at: a.archived.at, by: a.archived.by };
+    return { slug: a.slug, name: a.name, projectId: a.projectId, repoId: a.repoId, createdAt: a.createdAt, head: { version: h.version, tree: h.tree, receipt: h.receipt?.kind ?? null }, turn, archived };
   }
 
   /** The project an app belongs to, or `null` when there is no such app (a knowledge query reads only its project's). */
@@ -280,9 +291,11 @@ export class AppStore {
     return a === undefined || typeof a.projectId !== 'string' || a.projectId === '' ? null : a.projectId;
   }
 
-  list(projectId?: string): AppSummary[] {
+  /** The apps of one project (or every project), the active ones unless `scope` says otherwise. */
+  list(projectId?: string, scope: AppListScope = 'active'): AppSummary[] {
     return Object.values(this.state.apps)
       .filter((a) => projectId === undefined || a.projectId === projectId)
+      .filter((a) => scope === 'all' || (scope === 'archived') === (a.archived != null))
       .sort((x, y) => x.createdAt - y.createdAt || x.slug.localeCompare(y.slug))
       .map((a) => this.summary(a));
   }
@@ -397,6 +410,18 @@ export class AppStore {
     return { files: await this.files(a, r.tree), tree: r.tree, commit: r.commit, version: r.version, receipt };
   }
 
+  /**
+   * (G3, G16b) An earlier accepted version as it was: its record (when it is a version of this app) and its files, read
+   * through {@link acceptedFiles} (the same verified objects the executor reads). A version with no accepted receipt
+   * is `409 not_accepted`; one the app does not have is `404 unknown_version`.
+   */
+  async versionRead(slug: string, version: number | string): Promise<{ slug: string; version: AppVersion | null; commit: string; tree: string; receipt: AppReceipt; spec: AppSpec; lock: AppLock; queryText: Record<string, string> }> {
+    const read = await this.acceptedFiles(slug, version);
+    const a = this.app(slug);
+    const record = read.version === null ? null : structuredClone(a.versions[read.version - 1] ?? null);
+    return { slug, version: record, commit: read.commit, tree: read.tree, receipt: structuredClone(read.receipt), spec: read.files.spec, lock: read.files.lock, queryText: { ...read.files.queryText } };
+  }
+
   // ── The turn lock ───────────────────────────────────────────────────────────────────────────────
 
   /**
@@ -497,11 +522,19 @@ export class AppStore {
     });
   }
 
-  /** The guard every change runs first: no turn in flight, the base is the head, `main` mirrors the head. */
+  private archivedError(a: StoredApp, what: string): AppStoreError {
+    return new AppStoreError(409, 'app_archived', `${a.slug} is archived; ${what} waits until it is restored`);
+  }
+
+  /**
+   * The guard every change runs first: no turn in flight, not archived (checked before the base, so an archived app
+   * answers `app_archived` even to a stale base), the base is the head, `main` mirrors the head.
+   */
   private async guard(a: StoredApp, base: number, what: string, opts: { turnRun?: string } = {}): Promise<void> {
     // Landing a turn is that turn settling: asking the engine about it again would settle it twice.
     if (opts.turnRun === undefined) await this.refreshTurn(a, { locked: true });
     if (a.turn !== null && a.turn.runId !== opts.turnRun) throw this.turnInFlight(a, what);
+    if (a.archived != null) throw this.archivedError(a, what);
     const h = this.head(a);
     if (base !== h.version) {
       throw new AppStoreError(409, 'stale_base', `${what} was made on v${base}, but ${a.slug} is at v${h.version}; reload and try again`, { head: h.version });
@@ -977,6 +1010,41 @@ export class AppStore {
         receipt: this.restoredReceipt(from, held, input.actor),
         history: (version) => this.pushHistory(a, version),
       });
+    });
+  }
+
+  // ── Archive (G16, operator ruling D5: archive with Restore, never a hard delete) ────────────────────
+
+  /**
+   * `POST /apps/:app/archive`: hide the app from the lists and close it to every change, under the app's lock (so it
+   * waits for an edit, a move or a restore in flight, and none starts meanwhile). A turn in flight refuses it
+   * (`409 turn_in_flight`): a turn must never land into an app nobody sees. Archiving an archived app changes nothing.
+   * Answers whether it changed.
+   */
+  async archive(slug: string, input: { actor: Actor }): Promise<boolean> {
+    return this.withApp(slug, async () => {
+      const a = this.app(slug);
+      if (a.archived != null) return false;
+      await this.refreshTurn(a, { locked: true });
+      // A settlement may have swapped the record for a clone: read it again.
+      const cur = this.app(slug);
+      if (cur.turn !== null) throw this.turnInFlight(cur, 'archiving it');
+      this.transact(slug, () => {
+        cur.archived = { at: this.now(), by: input.actor.id };
+      });
+      return true;
+    });
+  }
+
+  /** `POST /apps/:app/unarchive`: the app is listed and open to changes again, exactly as it was. Answers whether it changed. */
+  async unarchive(slug: string): Promise<boolean> {
+    return this.withApp(slug, async () => {
+      const a = this.app(slug);
+      if (a.archived == null) return false;
+      this.transact(slug, () => {
+        a.archived = null;
+      });
+      return true;
     });
   }
 }

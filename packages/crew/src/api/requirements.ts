@@ -36,6 +36,8 @@ import { existsSync } from 'node:fs';
 import { readFile, writeFile, rename, mkdir, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
+import { WICKED_CORE_EXE_NAME } from '../core/adapter.js';
+import { execCapped } from '../core/exec.js';
 import { codeGraphDb, requirementsOverrides } from '../core/repoPaths.js';
 import type { RepoEntry } from '../core/types.js';
 
@@ -91,6 +93,17 @@ export interface EstateRequirementsRead {
   graph: EstateRequirementsGraph | null;
   coverage: ArtifactCoverage | null;
   build?: { generation?: unknown; coverage?: ArtifactCoverage | null } | null;
+  /** How old the code behind the listed build is, counted in the REGISTERED checkout (wicked-core 2026-11-06):
+   * `{ built_from: { commit, at, basis }, head, commits_behind }`. ABSENT from an older engine, null when nothing is
+   * built. */
+  code?: {
+    built_from?: { commit?: unknown; at?: unknown; basis?: unknown } | null;
+    head?: unknown;
+    commits_behind?: unknown;
+  } | null;
+  /** The minimum in force and where it comes from: the repository's own target (`repo`, null when unset) and the
+   * daemon-wide one (`daemon`). ABSENT from an older engine. */
+  target?: { repo?: unknown; daemon?: unknown } | null;
   /** The engine's verdict on each listed requirement that recorded its code unit, by domain then requirement id:
    * `{ real, uncounted }` (wicked-core req-reconcile 2026-11-01), decided in the same pass as `coverage`, so the
    * rows with `real` and no `uncounted` number exactly `coverage.real`. ABSENT from an older engine, null when
@@ -149,6 +162,32 @@ export async function readRequirementsGraph(
     if (reads.get(key)?.read === read) reads.delete(key);
   });
   return read;
+}
+
+/** Runs `wicked-core <args>`; injectable for tests. */
+export type CoreCliRunner = (args: string[]) => Promise<unknown>;
+
+/** The engine CLI: the binary the daemon located at boot (`WICKED_CORE_EXE`, set by the adapter), else the one on
+ *  PATH (the same command a job's "Lower the minimum" answer runs). The write needs the CLI, not only the addon. */
+const runCoreCli: CoreCliRunner = (args) =>
+  execCapped(process.env['WICKED_CORE_EXE'] || WICKED_CORE_EXE_NAME, args, { timeout: 30_000 });
+
+/**
+ * Set (`pct`) or clear (`null`) a repository's OWN minimum, kept in its store (operator ruling 2026-11-06, P3: the
+ * requirements page can raise and clear it, not only a job's ask lower it). The engine's own command does the write
+ * (`wicked-core requirements-target`, the one a job's "Lower the minimum" runs); the next read shows it. `false`
+ * when the repository has no store yet (nothing to hold a target).
+ */
+export async function setRepoMinimum(
+  repo: RepoEntry,
+  pct: number | null,
+  run: CoreCliRunner = runCoreCli,
+): Promise<boolean> {
+  const db = codeGraphDb(repo);
+  if (!existsSync(db)) return false;
+  await run(['requirements-target', '--db', db, ...(pct === null ? ['--clear'] : ['--set', String(pct)])]);
+  forgetRequirementsReads(repo);
+  return true;
 }
 
 export interface RequirementOverride {
@@ -353,6 +392,16 @@ export interface EngineRowVerdict {
   /** The engine resolves the unit (a validated requirement, or a business rule at or above 0.75). */
   real: boolean;
   uncounted: RequirementUncounted | null;
+  /** The code does not meet the requirement, and how (operator ruling 2026-11-06); `null` when none was found or
+   *  the engine does not say. A finding beside the row: the row still counts. */
+  codeMismatch: string | null;
+}
+
+/** A finding's text as the wire carries it: trimmed, one line, at most 300 characters; `null` when absent. */
+function mismatchText(v: unknown): string | null {
+  if (typeof v !== 'string') return null;
+  const t = v.replace(/\s+/gu, ' ').trim();
+  return t === '' ? null : t.slice(0, 300);
 }
 
 /** The engine's verdict on one row, or `null` when it sent none (an older engine, a build before `code_symbol`) or
@@ -367,11 +416,12 @@ export function engineRowOf(
   if (reqs === undefined || reqs === null || typeof reqs !== 'object') return null;
   const v = Object.hasOwn(reqs, reqId) ? reqs[reqId] : undefined;
   if (v === undefined || v === null || typeof v !== 'object') return null;
-  const { real, uncounted } = v as { real?: unknown; uncounted?: unknown };
+  const { real, uncounted, code_mismatch } = v as { real?: unknown; uncounted?: unknown; code_mismatch?: unknown };
   if (typeof real !== 'boolean') return null;
-  if (uncounted === null) return { real, uncounted: null };
+  const codeMismatch = mismatchText(code_mismatch);
+  if (uncounted === null) return { real, uncounted: null, codeMismatch };
   return typeof uncounted === 'string' && UNCOUNTED.has(uncounted)
-    ? { real, uncounted: uncounted as RequirementUncounted }
+    ? { real, uncounted: uncounted as RequirementUncounted, codeMismatch }
     : null;
 }
 
@@ -398,6 +448,71 @@ export interface RequirementSummary {
    *  how well a behaviour is supported, and the engine counts no behaviour here (a type has no callers, so "dead
    *  code" would be wrong). */
   uncounted: RequirementUncounted | null;
+  /** The code does not meet this requirement, and how (operator ruling 2026-11-06): a finding shown beside it. The
+   *  requirement still counts as real. `null` when none was found or the engine does not say. */
+  codeMismatch: string | null;
+}
+
+/**
+ * How old the code behind the listed build is (operator ruling 2026-11-06): "Built from code N commits old (date)".
+ * Counted by the engine with git in the REGISTERED checkout. `basis` is `'build'` when the build recorded the commit,
+ * `'index'` for an older build (the store's indexed commit now). `commitsBehind`/`builtAt` are `null` when the
+ * checkout does not hold that commit: unknown, never 0.
+ */
+export interface RequirementsCodeDrift {
+  builtFromCommit: string;
+  builtAt: string | null;
+  basis: 'build' | 'index';
+  commitsBehind: number | null;
+  headCommit: string | null;
+}
+
+/** The minimum in force for this repository and where it comes from: its own target (set at a job's ask or on the
+ *  requirements page) or the daemon-wide setting. */
+export interface RequirementsMinimum {
+  pct: number;
+  source: 'repo' | 'settings';
+  repoPct: number | null;
+  settingsPct: number | null;
+}
+
+/** The engine's `code`, or `null` when absent or malformed. */
+export function codeDriftOf(raw: EstateRequirementsRead['code']): RequirementsCodeDrift | null {
+  if (raw === undefined || raw === null || typeof raw !== 'object') return null;
+  const from = raw.built_from;
+  if (from === undefined || from === null || typeof from !== 'object') return null;
+  const commit = typeof from.commit === 'string' && /^[0-9a-f]{4,64}$/u.test(from.commit) ? from.commit : null;
+  if (commit === null) return null;
+  const basis = from.basis === 'build' || from.basis === 'index' ? from.basis : null;
+  if (basis === null) return null;
+  return {
+    builtFromCommit: commit,
+    builtAt: typeof from.at === 'string' && from.at !== '' ? from.at : null,
+    basis,
+    commitsBehind: count(raw.commits_behind),
+    headCommit: typeof raw.head === 'string' && /^[0-9a-f]{4,64}$/u.test(raw.head) ? raw.head : null,
+  };
+}
+
+const pctOf = (v: unknown): number | null => {
+  const n = count(v);
+  return n !== null && n >= 1 && n <= 100 ? n : null;
+};
+
+/** The engine's `target` with the minimum the label applies (`coverage.minPct`), or `null` when the engine does not
+ *  say (an older engine). */
+export function minimumOf(
+  raw: EstateRequirementsRead['target'],
+  coverage: RequirementsCoverage | null,
+): RequirementsMinimum | null {
+  if (raw === undefined || raw === null || typeof raw !== 'object') return null;
+  const repoPct = pctOf(raw.repo);
+  const settingsPct = pctOf(raw.daemon);
+  // The number in force follows the source it is named after (pi r1): the label's own minimum only when the engine
+  // named neither.
+  const pct = repoPct ?? settingsPct ?? coverage?.minPct ?? null;
+  if (pct === null) return null;
+  return { pct, source: repoPct !== null ? 'repo' : 'settings', repoPct, settingsPct };
 }
 
 export interface RequirementDetail extends RequirementSummary {
@@ -446,6 +561,10 @@ interface RepoIndex {
   /** `null` when the engine does not say which rows it counts. */
   uncounted: RequirementsUncountedRows | null;
   categories: { functional: number; configData: number };
+  codeDrift: RequirementsCodeDrift | null;
+  minimum: RequirementsMinimum | null;
+  /** Rows whose code does not meet them. */
+  mismatches: number;
 }
 
 /** Keys in the overrides sidecar that no corpus row claimed — counted, never dropped silently. */
@@ -498,7 +617,7 @@ async function buildIndex(repo: RepoEntry, reader: RequirementsGraphReader): Pro
 async function buildIndexRead(
   repo: RepoEntry,
   reader: RequirementsGraphReader,
-): Promise<{ index: RepoIndex | null; coverage: RequirementsCoverage | null }> {
+): Promise<{ index: RepoIndex | null; coverage: RequirementsCoverage | null; minimum: RequirementsMinimum | null }> {
   const [read, ovMtime] = await Promise.all([
     readRequirementsGraph(repo, reader),
     mtimeMs(requirementsOverrides(repo)),
@@ -506,17 +625,20 @@ async function buildIndexRead(
   const graph = read.graph;
   if (graph === null || typeof graph !== 'object') {
     cache.delete(repoKey(repo)); // nothing built (any more): no stale index survives
-    return { index: null, coverage: coverageOf(read.coverage ?? undefined) };
+    const coverage = coverageOf(read.coverage ?? undefined);
+    return { index: null, coverage, minimum: minimumOf(read.target, coverage) };
   }
   const token = createHash('sha1')
     .update(JSON.stringify(graph))
     .update(JSON.stringify(read.coverage ?? null))
     .update(JSON.stringify(read.build ?? null))
     .update(JSON.stringify(read.rows ?? null))
+    .update(JSON.stringify(read.code ?? null))
+    .update(JSON.stringify(read.target ?? null))
     .digest('hex');
   const cached = cache.get(repoKey(repo));
   if (cached && cached.sourceToken === token && cached.overridesMtimeMs === ovMtime) {
-    return { index: cached, coverage: cached.coverage };
+    return { index: cached, coverage: cached.coverage, minimum: cached.minimum };
   }
   const overrides = await readOverrides(repo);
 
@@ -560,6 +682,7 @@ async function buildIndexRead(
         corroboration: uncounted === null ? corroborationOf(req.corroboration) : null,
         placeholder: !real,
         uncounted,
+        codeMismatch: verdict?.codeMismatch ?? null,
       };
       // Statements are part of the haystack: searching the requirements means
       // searching the actual rule text, not just titles and ids.
@@ -599,9 +722,12 @@ async function buildIndexRead(
       functional: entries.filter((e) => e.summary.category === 'functional').length,
       configData: entries.filter((e) => e.summary.category === 'config-data').length,
     },
+    codeDrift: codeDriftOf(read.code),
+    minimum: minimumOf(read.target, coverage),
+    mismatches: entries.filter((e) => e.summary.codeMismatch !== null).length,
   };
   cache.set(repoKey(repo), index);
-  return { index, coverage: index.coverage };
+  return { index, coverage: index.coverage, minimum: index.minimum };
 }
 
 export interface RequirementsQuery {
@@ -609,6 +735,8 @@ export interface RequirementsQuery {
   risk?: 'risk' | 'no-risk' | undefined;
   domain?: string | undefined;
   category?: RequirementCategory | undefined;
+  /** `yes`: only rows whose code does not meet them; `no`: only the others. */
+  mismatch?: 'yes' | 'no' | undefined;
   offset: number;
   limit: number;
 }
@@ -658,6 +786,12 @@ export interface RequirementsPage {
   uncounted: RequirementsUncountedRows | null;
   /** How many rows of the whole corpus are in each category, so a client can leave out an empty filter. */
   categories: { functional: number; configData: number };
+  /** How old the code behind the listed build is; `null` when the engine does not say. */
+  codeDrift: RequirementsCodeDrift | null;
+  /** The minimum in force and where it comes from; `null` when the engine does not say. */
+  minimum: RequirementsMinimum | null;
+  /** Rows of the whole corpus whose code does not meet them (findings beside real requirements). */
+  mismatches: number;
 }
 
 /**
@@ -687,10 +821,10 @@ export async function listRequirementsRead(
   repo: RepoEntry,
   query: RequirementsQuery,
   reader: RequirementsGraphReader,
-): Promise<{ page: RequirementsPage | null; coverage: RequirementsCoverage | null }> {
-  const { index, coverage } = await buildIndexRead(repo, reader);
-  if (index === null) return { page: null, coverage };
-  return { page: pageOf(index, query), coverage };
+): Promise<{ page: RequirementsPage | null; coverage: RequirementsCoverage | null; minimum: RequirementsMinimum | null }> {
+  const { index, coverage, minimum } = await buildIndexRead(repo, reader);
+  if (index === null) return { page: null, coverage, minimum };
+  return { page: pageOf(index, query), coverage, minimum };
 }
 
 /**
@@ -740,6 +874,8 @@ function pageOf(index: RepoIndex, query: RequirementsQuery): RequirementsPage {
     if (query.category !== undefined && e.summary.category !== query.category) continue;
     if (query.risk === 'risk' && !e.summary.risk) continue;
     if (query.risk === 'no-risk' && e.summary.risk) continue;
+    if (query.mismatch === 'yes' && e.summary.codeMismatch === null) continue;
+    if (query.mismatch === 'no' && e.summary.codeMismatch !== null) continue;
     if (domainFilter !== undefined && !e.summary.domain.toLowerCase().includes(domainFilter)) continue;
     if (terms.length > 0 && !terms.every((t) => e.haystack.includes(t))) continue;
     matched.push(e);
@@ -760,6 +896,9 @@ function pageOf(index: RepoIndex, query: RequirementsQuery): RequirementsPage {
     corroboration: { validated: index.validated, unconfirmed: index.unconfirmed },
     uncounted: index.uncounted,
     categories: index.categories,
+    codeDrift: index.codeDrift,
+    minimum: index.minimum,
+    mismatches: index.mismatches,
   };
 }
 
