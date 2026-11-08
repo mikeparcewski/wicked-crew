@@ -105,7 +105,83 @@ const EditorManifestFields = z.object({
 export const EditorManifestSchema = EditorManifestFields.superRefine(surfacesMatchProtocol);
 export type EditorManifest = z.infer<typeof EditorManifestFields>;
 
+/**
+ * A run-plugin topic PATTERN (CS7 C2; studio `editors/runEvents.ts` `validPattern`, narrowed to run topics):
+ * at most 120 chars, dot-separated; the first segment `wicked`, the second `run`, at least one segment after
+ * `run`; every segment after `wicked` is `^[a-z][a-z0-9_-]{0,40}$` or `*`, or `**` as the LAST segment only.
+ * So `wicked.run.unit.*`, `wicked.run.usage.reported`, `wicked.run.**` pass; `wicked.**`, `wicked.bus.x`,
+ * `wicked.run`, `Wicked.run.x`, `wicked.run.**.x` do not.
+ */
+const RUN_SEGMENT = /^[a-z][a-z0-9_-]{0,40}$/u;
+export function validRunTopic(pattern: string): boolean {
+  if (typeof pattern !== 'string' || pattern.length > 120) return false;
+  const segs = pattern.split('.');
+  if (segs.length < 3 || segs[0] !== 'wicked' || segs[1] !== 'run') return false;
+  for (let i = 2; i < segs.length; i++) {
+    const s = segs[i]!;
+    if (s === '**') {
+      if (i !== segs.length - 1) return false; // `**` only as the last segment
+      continue;
+    }
+    if (s === '*') continue;
+    if (!RUN_SEGMENT.test(s)) return false;
+  }
+  return true;
+}
+
+/** The run-plugin cases every `plugins[]` entry must pass (CS7 C5; the same list, same order, in garden and core). */
+export const RUN_PLUGIN_CASES = ['r0-manifest', 'r1-handshake', 'r2-no-network', 'r3-topics', 'r4-replay', 'r5-hash-pinned'] as const;
+
+/** One `run.details` section a plugin draws (CS7 C1; studio `board/runPluginPanels.ts` `parsePanels` is the reader). */
+const RunPanelSchema = z.object({
+  slot: z.literal('run.details'),
+  id: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/u),
+  title: z.string().min(1).max(40).regex(/^[^<>\r\n]*$/u).refine((s) => /\S/u.test(s), { error: 'a non-space is required' }),
+  // Optional in the manifest (CS7 C1), filled here so the wire view carries a concrete value.
+  instances: z.enum(['single', 'per-phase']).default('single'),
+  order: z.int().min(1).max(99),
+  defaultOpen: z.enum(['always', 'never', 'current', 'while-live']).default('while-live'),
+  summary: z.enum(['plugin', 'none']).default('none'),
+});
+export type RunPanel = z.infer<typeof RunPanelSchema>;
+
+/**
+ * A run plugin's manifest entry (CS7 C1), STRICT: a `permissions` key (or any other unknown key) is refused —
+ * a run plugin asks for the observe tier only. Topic patterns are checked with {@link validRunTopic}. Plugins
+ * arrive only in packs (the built-in run plugins ship inside studio), so `entry` + `sha256` are required.
+ */
+export const PluginManifestSchema = z.strictObject({
+  id: z.string().max(64).regex(EDITOR_ID),
+  title: z.string().min(1).max(40).regex(/^[^<>\r\n]*$/u).refine((s) => /\S/u.test(s), { error: 'a non-space is required' }),
+  version: z.string().regex(EDITOR_VERSION),
+  protocol: z.array(z.int().min(1)).min(1).refine((p) => p.includes(3), { error: 'protocol must list 3' }),
+  inline: z.literal('run-thread'),
+  entry: z.string().regex(/\.html$/u),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/u),
+  description: z.string().max(160).optional(),
+  observe: z
+    .array(z.object({ topic: z.string().refine(validRunTopic, { error: 'not a run topic pattern (CS7 C2)' }), why: z.string().min(1).max(200).regex(/\S/u) }))
+    .min(1)
+    .max(16)
+    .superRefine((list, ctx) => {
+      const topics = list.map((o) => o.topic);
+      if (new Set(topics).size !== topics.length) ctx.addIssue({ code: 'custom', message: 'topics must be unique' });
+    }),
+  panels: z.array(RunPanelSchema).min(1).max(4).superRefine((list, ctx) => {
+    const ids = list.map((p) => p.id);
+    if (new Set(ids).size !== ids.length) ctx.addIssue({ code: 'custom', message: 'panel ids must be unique' });
+  }),
+  // Accepted (CS7 C1) but not surfaced yet: a pack's images need descriptor-anchored reads (post-mvp, as for
+  // pack editors), and samples/limits do not reach the wire view.
+  visuals: z.object({ color: z.string().regex(/^#[0-9a-fA-F]{6}$/u).optional(), icon: z.string().optional() }).optional(),
+  samples: z.string().optional(),
+  limits: z.object({ bundleBytes: z.int().min(1).max(HOST_BUNDLE_CAP_BYTES) }).optional(),
+});
+export type PluginManifest = z.infer<typeof PluginManifestSchema>;
+
 export interface EditorRecord {
+  /** An artifact editor (CS7 added run plugins as a second kind: {@link PluginRecord}). */
+  kind: 'editor';
   manifest: EditorManifest;
   /** The full 64-hex sha256 of the entry file, pinned when the registry read it. */
   sha256: string;
@@ -122,8 +198,27 @@ export interface EditorRecord {
   visuals?: EditorVisuals;
 }
 
-/** One installed pack editor, as `daemon-editors.json` records it. */
+/** A CS7 run plugin, recorded next to editors in the one id namespace. Always a third-party pack (the built-in
+ *  run plugins ship inside studio); so `firstParty` is false and `source` is `pack`. */
+export interface PluginRecord {
+  kind: 'plugin';
+  manifest: PluginManifest;
+  sha256: string;
+  bytes: number;
+  entryPath: string;
+  firstParty: false;
+  source: 'pack';
+  enabled: boolean;
+  pack: InstalledPack;
+}
+
+/** Either kind of registered artifact surface, by its `kind`. */
+export type RegisteredRecord = EditorRecord | PluginRecord;
+
+/** One installed pack editor or run plugin, as `daemon-editors.json` records it. */
 export interface InstalledPack {
+  /** `plugin`: a CS7 run plugin, read back from the pack's `plugins[]`. Absent / `editor`: an artifact editor. */
+  kind?: 'editor' | 'plugin';
   /** Absolute path of the pack directory (holding `wicked-pack.json`). */
   root: string;
   /** The pack's `name` (the installer's key). */
@@ -279,7 +374,7 @@ export function discoverStudioEditors(
       continue;
     }
     const visuals = resolveVisuals(join(dir, name), manifest.visuals, (m) => log?.(`[editors] ${manifest.id}: visual ${m}; left out`));
-    out.push({ manifest, sha256: sha256Of(buf), bytes: buf.byteLength, entryPath, firstParty: true, source: 'studio-bundle', ...(visuals !== undefined ? { visuals } : {}) });
+    out.push({ kind: 'editor', manifest, sha256: sha256Of(buf), bytes: buf.byteLength, entryPath, firstParty: true, source: 'studio-bundle', ...(visuals !== undefined ? { visuals } : {}) });
   }
   return out;
 }
@@ -348,10 +443,71 @@ export function readPackEditor(pack: InstalledPack, id: string, log?: (msg: stri
   const sha = sha256Of(buf);
   if (sha !== m.sha256 || sha !== pack.sha256) return why('its entry no longer matches the hash it was installed with');
   const manifest: EditorManifest = { id: m.id, title: m.title, version: m.version, protocol: m.protocol, kinds: m.kinds, entry: m.entry, sizes: m.sizes, permissions: m.permissions, ...(m.panels !== undefined ? { panels: m.panels } : {}), ...(m.limits !== undefined ? { limits: m.limits } : {}), ...(m.surfaces !== undefined ? { surfaces: m.surfaces } : {}) };
-  return { manifest, sha256: sha, bytes: buf.byteLength, entryPath, firstParty: false, source: 'pack', pack };
+  return { kind: 'editor', manifest, sha256: sha, bytes: buf.byteLength, entryPath, firstParty: false, source: 'pack', pack };
+}
+
+/**
+ * Read one pack RUN PLUGIN (CS7) at serve-time quality — the same fences {@link readPackEditor} applies: the entry
+ * named in `<root>/wicked-pack.json` `plugins[]`, a real file inside the pack, within its caps, loading nothing from
+ * outside, and hashing to its pin. `null` + a logged reason when any of it fails — a plugin whose pack changed is
+ * skipped until it is installed again, never served half-right.
+ */
+export function readPackPlugin(pack: InstalledPack, id: string, log?: (msg: string) => void): Omit<PluginRecord, 'enabled'> | null {
+  const why = (m: string): null => {
+    log?.(`[editors] ${id} (pack ${pack.name}): ${m}; skipped — install it again`);
+    return null;
+  };
+  const manifestPath = join(pack.root, 'wicked-pack.json');
+  const manifestProblem = notRealEntry(manifestPath, 'file');
+  if (manifestProblem !== null) return why(`wicked-pack.json is ${manifestProblem}`);
+  let entries: unknown;
+  try {
+    const raw = readCapped(manifestPath, PACK_MANIFEST_CAP_BYTES);
+    if (raw === null) return why(`wicked-pack.json is over ${PACK_MANIFEST_CAP_BYTES} bytes`);
+    entries = (JSON.parse(raw.toString('utf8')) as { plugins?: unknown }).plugins;
+  } catch (err) {
+    return why(`wicked-pack.json is unreadable (${err instanceof Error ? err.message : String(err)})`);
+  }
+  const raw = Array.isArray(entries) ? entries.find((e) => typeof e === 'object' && e !== null && (e as { id?: unknown }).id === id) : undefined;
+  const parsed = PluginManifestSchema.safeParse(raw);
+  if (!parsed.success) return why(`its manifest entry is refused (${parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')})`);
+  const m = parsed.data;
+  if (FIRST_PARTY_ID.test(m.id) || m.id === 'wicked') return why('a pack may not declare a wicked-* plugin');
+  if (editorEntryDigest(m) !== pack.manifestSha256) return why('its manifest entry changed since it was installed');
+  if (m.entry !== pack.entry) return why(`its entry moved (${pack.entry} → ${m.entry})`);
+  const entryPath = resolve(pack.root, m.entry);
+  const rel = relative(resolve(pack.root), entryPath);
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return why(`entry ${m.entry} is outside the pack`);
+  let at = resolve(pack.root);
+  for (const part of rel.split(sep).slice(0, -1)) {
+    at = join(at, part);
+    const p = notRealEntry(at, 'dir');
+    if (p !== null) return why(`entry directory ${part} is ${p}`);
+  }
+  const entryProblem = notRealEntry(entryPath, 'file');
+  if (entryProblem !== null) return why(`entry ${m.entry} is ${entryProblem}`);
+  const cap = m.limits?.bundleBytes ?? HOST_BUNDLE_CAP_BYTES;
+  let buf: Buffer | null;
+  try {
+    buf = readCapped(entryPath, cap);
+  } catch (err) {
+    return why(`entry unreadable (${err instanceof Error ? err.message : String(err)})`);
+  }
+  if (buf === null) return why(`entry is over its ${cap}-byte cap`);
+  const outside = externalReferences(buf.toString('utf8'));
+  if (outside.length > 0) return why(`entry loads from outside itself (${outside.slice(0, 3).join(', ')})`);
+  const sha = sha256Of(buf);
+  if (sha !== m.sha256 || sha !== pack.sha256) return why('its entry no longer matches the hash it was installed with');
+  return { kind: 'plugin', manifest: m, sha256: sha, bytes: buf.byteLength, entryPath, firstParty: false, source: 'pack', pack };
+}
+
+/** Read one installed pack artifact back from disk — a run plugin or an artifact editor, by its recorded `kind`. */
+export function readPackArtifact(pack: InstalledPack, id: string, log?: (msg: string) => void): Omit<RegisteredRecord, 'enabled'> | null {
+  return pack.kind === 'plugin' ? readPackPlugin(pack, id, log) : readPackEditor(pack, id, log);
 }
 
 const InstalledPackSchema = z.object({
+  kind: z.enum(['editor', 'plugin']).optional(),
   root: z.string().min(1),
   name: z.string().regex(EDITOR_ID),
   entry: z.string().regex(/\.html$/u),
@@ -374,7 +530,7 @@ interface PersistedState {
 }
 
 export class EditorRegistry {
-  private readonly records = new Map<string, EditorRecord>();
+  private readonly records = new Map<string, RegisteredRecord>();
   private readonly stateFile: string;
   private readonly log: (msg: string) => void;
 
@@ -394,8 +550,8 @@ export class EditorRegistry {
         this.log(`[editors] ${id} (pack ${pack.name}): a first-party editor holds the id; skipped`);
         continue;
       }
-      const r = readPackEditor(pack, id, this.log);
-      if (r !== null) this.records.set(id, { ...r, enabled: flagOf(state.enabled, id) ?? true });
+      const r = readPackArtifact(pack, id, this.log);
+      if (r !== null) this.records.set(id, { ...r, enabled: flagOf(state.enabled, id) ?? true } as RegisteredRecord);
     }
   }
 
@@ -412,8 +568,12 @@ export class EditorRegistry {
       const installed: Record<string, InstalledPack> = {};
       for (const [k, v] of Object.entries(raw.installed ?? {})) {
         const parsed = InstalledPackSchema.safeParse(v);
-        if (EDITOR_ID.test(k) && parsed.success) installed[k] = parsed.data;
-        else this.log(`[editors] ${k}: its install record in ${EDITORS_STATE_FILENAME} is malformed; ignored`);
+        // `kind` is absent in files written before run plugins existed: drop an undefined so the record stays
+        // exactly shaped (exactOptionalPropertyTypes) — an absent kind reads back as an editor.
+        if (EDITOR_ID.test(k) && parsed.success) {
+          const { kind, ...rest } = parsed.data;
+          installed[k] = kind === undefined ? rest : { kind, ...rest };
+        } else this.log(`[editors] ${k}: its install record in ${EDITORS_STATE_FILENAME} is malformed; ignored`);
       }
       return { v: 1, enabled, installed };
     } catch {
@@ -438,19 +598,19 @@ export class EditorRegistry {
     return this.stateFile;
   }
 
-  list(): EditorRecord[] {
+  list(): RegisteredRecord[] {
     return [...this.records.values()].sort((a, b) => Number(b.firstParty) - Number(a.firstParty) || a.manifest.id.localeCompare(b.manifest.id));
   }
 
-  get(id: string): EditorRecord | null {
+  get(id: string): RegisteredRecord | null {
     return this.records.get(id) ?? null;
   }
 
   /** Enable or disable (§6.4: the operator's click). Returns the record, or `null` for an unknown id. */
-  setEnabled(id: string, enabled: boolean): EditorRecord | null {
+  setEnabled(id: string, enabled: boolean): RegisteredRecord | null {
     const r = this.records.get(id);
     if (r === undefined) return null;
-    const next = { ...r, enabled };
+    const next = { ...r, enabled } as RegisteredRecord;
     this.commit(() => this.records.set(id, next));
     return next;
   }
@@ -483,8 +643,8 @@ export class EditorRegistry {
    * holds is refused; the same pack re-installed (an update) replaces its own editors, keeping the
    * operator's on/off choice unless `enabled` says otherwise.
    */
-  installPack(packs: Array<{ id: string; pack: InstalledPack }>, enabled: boolean | undefined): { records: EditorRecord[]; updated: boolean } {
-    const read: Array<Omit<EditorRecord, 'enabled'>> = [];
+  installPack(packs: Array<{ id: string; pack: InstalledPack }>, enabled: boolean | undefined): { records: RegisteredRecord[]; updated: boolean } {
+    const read: Array<Omit<RegisteredRecord, 'enabled'>> = [];
     let updated = false;
     for (const { id, pack } of packs) {
       const existing = this.records.get(id);
@@ -492,15 +652,15 @@ export class EditorRegistry {
       const held = this.installed.get(id);
       if (held !== undefined && held.name !== pack.name) throw new EditorInstallConflict(`${id} is already installed from the pack ${held.name}; remove it first`);
       if (held !== undefined) updated = true;
-      const r = readPackEditor(pack, id, this.log);
+      const r = readPackArtifact(pack, id, this.log);
       if (r === null) throw new EditorInstallConflict(`${id} did not read back from ${pack.root} (see the daemon log)`);
       read.push(r);
     }
-    const out: EditorRecord[] = read.map((r) => {
+    const out: RegisteredRecord[] = read.map((r) => {
       const id = r.manifest.id;
       // An update keeps the operator's switch: the live record's, else the one persisted for a record
       // skipped at boot (codex r1), else on.
-      return { ...r, enabled: enabled ?? this.records.get(id)?.enabled ?? flagOf(this.persistedFlags, id) ?? true };
+      return { ...r, enabled: enabled ?? this.records.get(id)?.enabled ?? flagOf(this.persistedFlags, id) ?? true } as RegisteredRecord;
     });
     this.commit(() => {
       for (const r of out) {
@@ -529,8 +689,32 @@ export class EditorRegistry {
     return this.installed.has(id);
   }
 
-  /** The wire view: no paths, the hashed entry URL instead. */
-  static view(r: EditorRecord): EditorView {
+  /** The wire view: no paths, the hashed entry URL instead. A run plugin ({@link PluginRecord}) renders as an
+   *  `EditorView` row too (CS7 C4): `inline:'run-thread'`, its `observe[]` and `run_panels[]`, and empty
+   *  `kinds`/`sizes`/`permissions`. `granted_topics` is filled by the route (the engine decides it). */
+  static view(r: RegisteredRecord): EditorView {
+    if (r.kind === 'plugin') {
+      const m = r.manifest;
+      return {
+        id: m.id,
+        title: m.title,
+        version: m.version,
+        protocol: [...m.protocol],
+        kinds: [],
+        sizes: [],
+        permissions: [],
+        inline: 'run-thread',
+        observe: m.observe.map((o) => ({ topic: o.topic, why: o.why })),
+        run_panels: m.panels.map((p) => ({ slot: p.slot, id: p.id, title: p.title, instances: p.instances, order: p.order, defaultOpen: p.defaultOpen, summary: p.summary })),
+        sha256: r.sha256,
+        bytes: r.bytes,
+        first_party: false,
+        enabled: r.enabled,
+        source: 'pack',
+        entry_url: `/api/v1/editors/${encodeURIComponent(m.id)}/${encodeURIComponent(m.version)}/entry`,
+        ...(m.description !== undefined ? { description: m.description } : {}),
+      };
+    }
     const m = r.manifest;
     return {
       id: m.id,

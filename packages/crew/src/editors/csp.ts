@@ -22,7 +22,7 @@
  *    `data:`. The origin is written per response because a path cannot follow `'self'`.
  */
 
-import type { EditorRecord } from './registry.js';
+import type { RegisteredRecord } from './registry.js';
 
 export const BUNDLE_CSP_BASE =
   "sandbox allow-scripts; default-src 'none'; script-src {SCRIPTS}; style-src 'unsafe-inline'; " +
@@ -51,10 +51,12 @@ export function thirdPartyScripts(scriptHashes: readonly string[]): string {
  * Exactly the §8.2 header set for one editor's bundle. `scriptHashes` are the served bundle's prefixed inline
  * scripts (`guardBundle`); a third-party bundle runs those and nothing else, so none given means none run.
  */
-export function bundleHeaders(record: Pick<EditorRecord, 'manifest' | 'firstParty'>, scriptHashes: readonly string[] = []): Record<string, string> {
+export function bundleHeaders(record: Pick<RegisteredRecord, 'manifest' | 'firstParty'>, scriptHashes: readonly string[] = []): Record<string, string> {
   // `network.media` widens only for a first-party editor: a third-party pack editor never gets the
-  // network (§6.1 would have it ASK; garden's editor scaffold refuses to declare it at all).
-  const media = record.firstParty && record.manifest.permissions.some((p) => p.id === 'network.media') ? ' https:' : '';
+  // network (§6.1 would have it ASK; garden's editor scaffold refuses to declare it at all). A run
+  // plugin ({@link PluginRecord}) has no `permissions` and is never first-party, so it never widens.
+  const permissions = 'permissions' in record.manifest ? record.manifest.permissions : [];
+  const media = record.firstParty && permissions.some((p) => p.id === 'network.media') ? ' https:' : '';
   const policy = BUNDLE_CSP_BASE.replaceAll('{MEDIA}', media);
   return {
     // One header, a comma-separated policy list (CSP3): the third-party hash policy, then the inline-only one.

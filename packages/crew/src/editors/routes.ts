@@ -1,18 +1,26 @@
 /**
  * `/api/v1/editors` (DES-artifact-editor-plugins §6, §8.2, §9.1; EP-C1).
  *
- *  - `GET /editors` (operator+): the registry, as Settings → Editors renders it.
- *  - `POST /editors {packRoot, enabled?}` (HUMAN-only): install or update a pack's editors — garden's
- *    fail-closed gate, then crew's own conformance run, then the registry (`pack-install.ts`). 200 with
+ *  - `GET /editors` (operator+): the registry, as Settings → Editors renders it. A run plugin (CS7) lists as an
+ *    `EditorView` row too, its `granted_topics` filled from the engine's observe decisions (`[]` when it cannot
+ *    decide them: fail closed).
+ *  - `POST /editors {packRoot, enabled?}` (HUMAN-only): install or update a pack's editors and/or run plugins —
+ *    garden's fail-closed gate, then crew's own conformance run, then the registry (`pack-install.ts`). 200 with
  *    the installed editors; 422 with the verdict or the conformance report; 501 with the approval list
- *    for a pack that also ships skills or blocks; 409 for an id another pack or a first-party editor holds.
- *  - `DELETE /editors/:id` (HUMAN-only): an installed pack editor is removed from the registry (the
- *    installer deletes its files); a first-party editor ships with studio and cannot be removed (409;
- *    disable it instead).
+ *    for a pack that also ships skills or blocks; 409 for an id another pack or a first-party editor holds. The
+ *    install consent writes each installed plugin's `observe:<topic>` tokens (CS7 C3), beside the editors'
+ *    `mcp.session` tokens, in one ledger edit.
+ *  - `DELETE /editors/:id` (HUMAN-only): an installed pack editor or run plugin is removed from the registry (the
+ *    installer deletes its files); every `editor:<id>@` and `plugin:<id>@` grant of it is withdrawn. A first-party
+ *    editor ships with studio and cannot be removed (409; disable it instead).
  *  - `POST /editors/:id/enabled {enabled}` (HUMAN-only): the operator's switch.
  *  - `GET /editors/:id/grants?project=` (operator+): the engine's decided set
  *    (`evaluate_editor_grants`: EDITOR-GRANTS ledger + EDITOR-BUILTIN posture, deny dominates), with
  *    the token an "allow" would add. The host fetches it before `host.hello` and enforces it.
+ *  - `GET /editors/:id/grants` for a run plugin answers the engine's observe decisions (CS7 C3): one grant per
+ *    declared topic, deny dominating.
+ *  - `POST /editors/:id/grants` for a run plugin is 409 `install_only` (CS7 C3): its topics are granted by the
+ *    install consent alone; Remove withdraws them.
  *  - `POST /editors/:id/grants {permission, allow, version, sha256, project?}` (HUMAN-only, §6.4; F37):
  *    the person's allow or revoke of one permission the editor declares, for the build they were shown
  *    (`version` + `sha256` must still be the installed build, else 409 `build_changed`). Allow writes
@@ -39,10 +47,10 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from '../zod.js';
 
 import { LOCAL_ACTOR, trustAtLeast } from '../api/auth.js';
-import type { Actor, ConformanceRule, EditorGrantsResponse, ListEditorsResponse } from '../core/types.js';
+import type { Actor, ConformanceRule, EditorGrantsResponse, EditorView, ListEditorsResponse } from '../core/types.js';
 import { bundleHeaders } from './csp.js';
 import { installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from './pack-install.js';
-import { EDITOR_ID, EDITOR_VERSION, EditorRegistry, HOST_BUNDLE_CAP_BYTES, notRealEntry, readCapped, type EditorRecord } from './registry.js';
+import { EDITOR_ID, EDITOR_VERSION, EditorRegistry, HOST_BUNDLE_CAP_BYTES, notRealEntry, readCapped, type EditorRecord, type PluginRecord, type RegisteredRecord } from './registry.js';
 import { guardBundle, MAX_INLINE_SCRIPTS, type GuardedBundle } from './webrtc-guard.js';
 
 const V = '/api/v1';
@@ -57,6 +65,10 @@ export interface EditorGrantsAdapter {
     permissions: string[];
     project?: string;
     firstParty: boolean;
+    /** CS7: `plugin` evaluates a run plugin's observe topics (C3); absent / `editor` the artifact-editor permissions. */
+    subject?: 'editor' | 'plugin';
+    /** CS7: a run plugin's declared topic patterns, for `subject:'plugin'`. */
+    observe?: string[];
   }): Promise<EditorGrantsResponse>;
   /** The rule store, for the install consent's `mcp.session` grant (DES-MCP-INSPECTOR-001 §6) and the
    *  person's allow / revoke (`POST /editors/:id/grants`). */
@@ -71,6 +83,11 @@ export const INSTALL_GRANTED = 'mcp.session';
 
 export function grantToken(id: string, version: string, sha256: string, permission: string): string {
   return `editor:${id}@${version}#${sha256}/${permission}`;
+}
+
+/** A run plugin's observe-topic grant token (CS7 C3): `plugin:<id>@<version>#<sha256>/observe:<topic>`. */
+export function pluginToken(id: string, version: string, sha256: string, topic: string): string {
+  return `plugin:${id}@${version}#${sha256}/observe:${topic}`;
 }
 
 /**
@@ -98,18 +115,24 @@ export async function editInstallGrants(
   const rules = await adapter.listConformanceRules();
   const ledger = rules.find((r) => r.id === EDITOR_GRANTS_LEDGER);
   if (ledger === undefined) return unavailable(`the ${EDITOR_GRANTS_LEDGER} ledger is not in the policy store; restart the daemon to seed it`);
-  // Every earlier grant of an installed editor goes (codex r2: a same-build "keep" let a failed cleanup resurrect an
-  // old build's allow on its reinstall); only this install's consent tokens are written back.
-  const owned = (t: string): boolean => builds.some((b) => t.startsWith(`editor:${b.id}@`));
+  // Every earlier grant of an installed editor OR run plugin goes (codex r2: a same-build "keep" let a failed
+  // cleanup resurrect an old build's allow on its reinstall); only this install's consent tokens (the editors'
+  // mcp.session and the plugins' observe topics, CS7 C3) are written back.
+  const owned = (t: string): boolean => builds.some((b) => t.startsWith(`editor:${b.id}@`) || t.startsWith(`plugin:${b.id}@`));
   const before = ledger.excludes ?? [];
   const dedup = [...new Set([...before.filter((t) => !owned(t)), ...add])];
   if (dedup.length === before.length && dedup.every((t, i) => t === before[i])) return;
   await adapter.upsertConformanceRule({ ...ledger, excludes: dedup });
 }
 
-/** Every ledger token of editor `id` (any build), optionally only those of one permission. */
+/**
+ * Every ledger token of `id` (any build). With a `permission`, only that editor permission's tokens. Without one
+ * (a removal), both the editor family AND the run-plugin family `plugin:<id>@` (CS7 C3: `DELETE` withdraws a
+ * plugin's topic grants too).
+ */
 function tokenOf(id: string, permission?: string): (t: string) => boolean {
-  return (t) => t.startsWith(`editor:${id}@`) && (permission === undefined || t.endsWith(`/${permission}`));
+  if (permission === undefined) return (t) => t.startsWith(`editor:${id}@`) || t.startsWith(`plugin:${id}@`);
+  return (t) => t.startsWith(`editor:${id}@`) && t.endsWith(`/${permission}`);
 }
 
 /**
@@ -215,12 +238,43 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
   };
   const idOf = (req: FastifyRequest): string => (req.params as { id: string }).id;
 
+  // CS7 C3/C4: a run plugin's granted topics are the ones the engine decides `allow` (deny dominates). The
+  // registry does not know them — the route asks the engine with `subject:'plugin'` and the plugin's declared
+  // topics. Any failure, or an engine with no plugin-grants support, means it hears nothing: `[]`, with a log line.
+  const grantedTopicsFor = async (view: EditorView): Promise<string[]> => {
+    const { adapter } = deps;
+    if (typeof adapter.editorGrantsSupported !== 'function' || !adapter.editorGrantsSupported() || typeof adapter.evaluateEditorGrants !== 'function') {
+      deps.log?.(`[editors] ${view.id}: this engine cannot decide a run plugin's topics; it hears nothing`);
+      return [];
+    }
+    try {
+      const res = await adapter.evaluateEditorGrants({
+        subject: 'plugin',
+        editorId: view.id,
+        version: view.version,
+        sha256: view.sha256,
+        permissions: [],
+        observe: (view.observe ?? []).map((o) => o.topic),
+        firstParty: false,
+      });
+      return res.grants.filter((g) => g.decision === 'allow' && g.permission.startsWith('observe:')).map((g) => g.permission.slice('observe:'.length));
+    } catch (err) {
+      deps.log?.(`[editors] ${view.id}: a run plugin's topics could not be decided (${err instanceof Error ? err.message : String(err)}); it hears nothing`);
+      return [];
+    }
+  };
+
   app.get(
     `${V}/editors`,
     { config: { manifest: { responseType: 'ListEditorsResponse', statusCodes: [200, 403] } } },
     async (req, reply) => {
       if (!operatorOnly(req, reply)) return reply;
-      const body: ListEditorsResponse = { editors: registry.list().map((r) => EditorRegistry.view(r)), installs: 'conformance_required' };
+      const editors = registry.list().map((r) => EditorRegistry.view(r));
+      // Only run plugins carry `granted_topics`; editor rows are left unchanged (CS7 C4).
+      for (const view of editors) {
+        if (view.inline === 'run-thread') view.granted_topics = await grantedTopicsFor(view);
+      }
+      const body: ListEditorsResponse = { editors, installs: 'conformance_required' };
       return body;
     },
   );
@@ -237,23 +291,28 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
         return await serial(async () => {
           const installed = await installPack(parsed.data.packRoot, parsed.data.enabled, { check: deps.packCheck, conformance: deps.conformance, registry });
           deps.log?.(`[editors] installed ${installed.editors.map((e) => `${e.id}@${e.version}`).join(', ')}${installed.updated ? ' (update)' : ''}`);
-          // The install consent IS the mcp.session grant (DES-MCP-INSPECTOR-001 §6): this human-only
-          // call, after the operator approved the install, writes each declaring editor's per-build
-          // token. Every installed editor's earlier tokens are dropped first (codex r1: an update that
-          // no longer declares it keeps none), and an editor that does not declare it gets none.
-          const declaring = installed.editors.filter((e) => e.permissions.some((p) => p.id === INSTALL_GRANTED));
-          const tokens = declaring.map((e) => grantToken(e.id, e.version, e.sha256, INSTALL_GRANTED));
+          // The install consent IS the grant (DES-MCP-INSPECTOR-001 §6; CS7 C3): this human-only call, after
+          // the operator approved the install, writes each declaring editor's per-build `mcp.session` token AND
+          // one `observe:<topic>` token per declared topic of each installed run plugin. Every installed
+          // editor's / plugin's earlier tokens are dropped first (codex r1: an update that no longer declares it
+          // keeps none), in the same read-modify-write as today's mcp.session edit.
+          const declaring = installed.editors.filter((e) => e.inline !== 'run-thread' && e.permissions.some((p) => p.id === INSTALL_GRANTED));
+          const editorTokens = declaring.map((e) => grantToken(e.id, e.version, e.sha256, INSTALL_GRANTED));
+          const plugins = installed.editors.filter((e) => e.inline === 'run-thread');
+          const pluginTokens = plugins.flatMap((p) => (p.observe ?? []).map((o) => pluginToken(p.id, p.version, p.sha256, o.topic)));
+          const tokens = [...editorTokens, ...pluginTokens];
           try {
             await editInstallGrants(deps.adapter, installed.editors, tokens);
-            if (declaring.length === 0) return installed;
-            deps.log?.(`[editors] install consent granted ${INSTALL_GRANTED} to ${declaring.map((e) => `${e.id}@${e.version}`).join(', ')}`);
+            if (tokens.length === 0) return installed;
+            if (declaring.length > 0) deps.log?.(`[editors] install consent granted ${INSTALL_GRANTED} to ${declaring.map((e) => `${e.id}@${e.version}`).join(', ')}`);
+            if (plugins.length > 0) deps.log?.(`[editors] install consent granted ${pluginTokens.length} observe topic(s) to ${plugins.map((e) => `${e.id}@${e.version}`).join(', ')}`);
             return { ...installed, granted: tokens };
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
-            deps.log?.(`[editors] installed, but the ${INSTALL_GRANTED} grants were not written: ${msg}`);
+            deps.log?.(`[editors] installed, but the grants were not written: ${msg}`);
             // Said either way (codex r2): with nothing to grant, an earlier build's token was not withdrawn.
-            const what = declaring.length > 0
-              ? `${INSTALL_GRANTED} was not granted (it asks), and its earlier grants were not withdrawn`
+            const what = tokens.length > 0
+              ? `the install consent's grants were not written (it asks), and its earlier grants were not withdrawn`
               : `its earlier grants (any permission you allowed) were not withdrawn`;
             return { ...installed, grantError: `installed, but ${what}: ${msg}` };
           }
@@ -330,6 +389,24 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
       return reply.code(/bad_request/u.test(msg) ? 400 : 502).send({ error: msg });
     }
   };
+  /** A run plugin's decided observe set (CS7 C3): one grant per declared topic, deny dominating. */
+  const decidePlugin = async (record: PluginRecord, project: string | undefined, reply: FastifyReply): Promise<EditorGrantsResponse | FastifyReply> => {
+    try {
+      return await deps.adapter.evaluateEditorGrants!({
+        subject: 'plugin',
+        editorId: record.manifest.id,
+        version: record.manifest.version,
+        sha256: record.sha256,
+        permissions: [],
+        observe: record.manifest.observe.map((o) => o.topic),
+        ...(project !== undefined ? { project } : {}),
+        firstParty: false,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return reply.code(/bad_request/u.test(msg) ? 400 : 502).send({ error: msg });
+    }
+  };
   const projectOf = (raw: unknown): string | undefined => {
     const v = Array.isArray(raw) ? raw[0] : raw;
     return typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined;
@@ -344,7 +421,9 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
       const record = EDITOR_ID.test(id) ? registry.get(id) : null;
       if (record === null) return reply.code(404).send({ error: `no editor '${id}' is installed` });
       if (!grantsSupported()) return reply.code(501).send({ error: NO_GRANTS });
-      return decide(record, projectOf((req.query as { project?: unknown }).project), reply);
+      const project = projectOf((req.query as { project?: unknown }).project);
+      // CS7 C3/C4: a run plugin answers its observe decisions; an editor its permission decisions.
+      return record.kind === 'plugin' ? decidePlugin(record, project, reply) : decide(record, project, reply);
     },
   );
 
@@ -378,6 +457,10 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
       const { permission, allow } = parsed.data;
       const id = idOf(req);
       if (!EDITOR_ID.test(id) || registry.get(id) === null) return reply.code(404).send({ error: `no editor '${id}' is installed` });
+      // CS7 C3: a run plugin's topics are the install consent's alone, whatever the engine supports (codex r1).
+      if (registry.get(id)?.kind === 'plugin') {
+        return reply.code(409).send({ code: 'install_only', error: `${id} is a run plugin; its topics are granted by its install consent, not here — reinstall it to grant them, remove it to withdraw them` });
+      }
       if (!grantsSupported()) return reply.code(501).send({ error: NO_GRANTS });
       return serial(async () => {
         // Read the record INSIDE the chain: a removal or an update queued before this press has landed.
@@ -386,6 +469,10 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
         // The press is for the build the person was shown (codex r1): an update in between asks again.
         if (record.manifest.version !== parsed.data.version || record.sha256 !== parsed.data.sha256) {
           return reply.code(409).send({ code: 'build_changed', error: `${id} changed to version ${record.manifest.version} since this was shown; nothing was changed: look again and decide for the new version` });
+        }
+        // CS7 C3: a run plugin's topics are granted by the install consent only; Remove withdraws them.
+        if (record.kind === 'plugin') {
+          return reply.code(409).send({ code: 'install_only', error: `${id} is a run plugin; its topics are granted by its install consent, not here — reinstall it to grant them, remove it to withdraw them` });
         }
         if (!record.manifest.permissions.some((p) => p.id === permission)) {
           return reply.code(400).send({ error: `${id} does not ask for '${permission}'` });
@@ -424,7 +511,7 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
 /** The guarded form of each pinned bundle, built once per hash (a few entries: one per installed editor build). */
 const guardedByHash = new Map<string, GuardedBundle>();
 const GUARDED_KEPT = 32;
-function guardedFor(record: EditorRecord, buf: Buffer): GuardedBundle {
+function guardedFor(record: RegisteredRecord, buf: Buffer): GuardedBundle {
   const key = `${record.firstParty ? '1' : '3'}:${record.sha256}`;
   const kept = guardedByHash.get(key);
   if (kept !== undefined) return kept;
@@ -435,7 +522,7 @@ function guardedFor(record: EditorRecord, buf: Buffer): GuardedBundle {
 }
 
 /** Re-hash on every serve: a bundle that changed on disk is refused, never served. */
-export function serveBundle(record: EditorRecord, reply: FastifyReply, log?: (msg: string) => void): FastifyReply {
+export function serveBundle(record: RegisteredRecord, reply: FastifyReply, log?: (msg: string) => void): FastifyReply {
   // The same fence as discovery, re-applied per serve (codex r1): an entry swapped for a link after
   // boot is refused before a byte is read.
   const problem = notRealEntry(record.entryPath, 'file');

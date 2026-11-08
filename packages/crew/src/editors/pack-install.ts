@@ -3,10 +3,11 @@
  * conformance run of EP-C8, operator ruling X3).
  *
  * Install is human-only (§6.4) and fail closed at every step, in this order:
- *  1. garden's `pack check --json` on the pack root (schema, every editor's entry inside the pack, its
- *     hash, its size, nothing loaded from outside);
- *  2. the pack ships editors only: one that also ships skills or blocks is refused with the approval
- *     list (501 `pack_ships_skills_or_blocks`), since their own "Add these" step (§3.2) is not built;
+ *  1. garden's `pack check --json` on the pack root (schema, every editor's and run plugin's entry inside the
+ *     pack, its hash, its size, nothing loaded from outside);
+ *  2. the pack ships editors and/or run plugins only (CS7 C4): one that also ships skills or blocks is refused
+ *     with the approval list (501 `pack_ships_skills_or_blocks`), since their own "Add these" step (§3.2) is
+ *     not built;
  *  3. the **conformance run**, done by crew itself: garden's `scripts/editor/conformance.py --pack
  *     <root> --host-url <this daemon>` drives studio's conformance host page (served by this daemon)
  *     in headless Chromium against each editor. A host with no browser runtime gets crew's own
@@ -23,7 +24,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 
 import type { EditorConformanceSummary, InstallEditorRefusal, InstallEditorResponse, PackCheckResult } from '../core/types.js';
 import { execCapped } from '../core/exec.js';
-import { EditorInstallConflict, EditorRegistry, PackEditorSchema, editorEntryDigest, type InstalledPack } from './registry.js';
+import { EditorInstallConflict, EditorRegistry, PackEditorSchema, PluginManifestSchema, RUN_PLUGIN_CASES, editorEntryDigest, type InstalledPack } from './registry.js';
 import { absoluteCacheEnv, needsBrowserRuntime, type ConformanceProvisioner } from './conformance-runtime.js';
 
 export type PackCheckRunner = (packRoot: string) => Promise<PackCheckResult>;
@@ -95,9 +96,9 @@ export class PackInstallError extends Error {
   }
 }
 
-/** The install-time conformance run: the pack root in, garden's report out; `editors` (the manifest's
- *  entries) sizes the run's overall cap. */
-export type ConformanceRunner = (packRoot: string, editors?: readonly Record<string, unknown>[]) => Promise<EditorConformanceSummary>;
+/** The install-time conformance run: the pack root in, garden's report out; `editors` and `plugins` (the
+ *  manifest's entries) size the run's overall cap. */
+export type ConformanceRunner = (packRoot: string, editors?: readonly Record<string, unknown>[], plugins?: readonly Record<string, unknown>[]) => Promise<EditorConformanceSummary>;
 
 /** garden's bound on each load of the conformance host page (scripts/editor/conformance.py `--timeout`):
  *  this env var, read by garden's runner itself in the daemon's environment, else 120 s. */
@@ -143,9 +144,14 @@ function surfaceCounts(entry: Record<string, unknown>): { actions: number; tabs:
  *    every card action, every options tab, and the two full-screen mode changes;
  * plus 60 s for the browser start. One protocol-2 editor with no surfaces, at the default 120 s:
  * 60 + (55 + 2 x 2) + 3 x 120 = 479 s. A fixed 240 s cap killed a correct install at 249 s.
+ *
+ * A run plugin (CS7 C4) counts as 3 host-page loads (the cases, the replay remount, the hash-pinned reload) plus
+ * 20 s of fixed waits (r1's 3 s handshake, r3/r4's live/replay windows).
  */
-export function conformanceCapMs(editors: readonly Record<string, unknown>[], loadS: number): number {
-  const list = editors.length > 0 ? editors : [{}];
+export const RUN_PLUGIN_FIXED_WAITS_S = 20;
+export const RUN_PLUGIN_LOADS = 3;
+export function conformanceCapMs(editors: readonly Record<string, unknown>[], loadS: number, plugins: readonly Record<string, unknown>[] = []): number {
+  const list = editors.length > 0 || plugins.length > 0 ? editors : [{}];
   let seconds = 60;
   for (const e of list) {
     const speaks2 = requiredCases(e).length > CONFORMANCE_CASES.length;
@@ -154,6 +160,7 @@ export function conformanceCapMs(editors: readonly Record<string, unknown>[], lo
     const answers = speaks2 ? c.actions + c.tabs + 2 : 0;
     seconds += CONFORMANCE_FIXED_WAITS_S + 2 * answers + loads * loadS;
   }
+  seconds += plugins.length * (RUN_PLUGIN_FIXED_WAITS_S + RUN_PLUGIN_LOADS * loadS);
   return Math.round(seconds * 1000);
 }
 
@@ -188,7 +195,7 @@ export function gardenConformance(
 ): ConformanceRunner {
   const failed = (error: string): EditorConformanceSummary => ({ ok: false, at: new Date().toISOString(), editors: [], error });
   const exec = deps.exec ?? execCapped;
-  return async (packRoot, editors = []) => {
+  return async (packRoot, editors = [], plugins = []) => {
     if (gardenRoot === null) return failed('no wicked-garden plugin found to run the editor conformance cases');
     const script = join(gardenRoot, 'scripts', 'editor', 'conformance.py');
     if (!existsSync(script)) return failed('this wicked-garden has no scripts/editor/conformance.py (needs the release with the editor-scaffold skill)');
@@ -204,7 +211,7 @@ export function gardenConformance(
       let stdout = '';
       for (const bin of bins) {
         try {
-          stdout = (await exec(bin, args, { timeout: conformanceCapMs(editors, loadS), windowsHide: true, env: childEnv })).stdout;
+          stdout = (await exec(bin, args, { timeout: conformanceCapMs(editors, loadS, plugins), windowsHide: true, env: childEnv })).stdout;
           break;
         } catch (err) {
           const e = err as NodeJS.ErrnoException & { stdout?: string };
@@ -223,33 +230,41 @@ export function gardenConformance(
     const first = await runWith(['python3', 'python']);
     // B8: no browser runtime on this host. Crew provisions its own (a private venv with Playwright and
     // its Chromium) and runs the cases again under it; a host where it cannot says what to run.
-    if (first.editors.length > 0 || deps.provision === undefined || !needsBrowserRuntime(first.error)) return first;
+    if (first.editors.length > 0 || (first.plugins?.length ?? 0) > 0 || deps.provision === undefined || !needsBrowserRuntime(first.error)) return first;
     const provisioned = await deps.provision();
     if (!provisioned.ok) return failed(`${first.error ?? 'no headless browser'} — ${provisioned.error}`);
     return runWith([provisioned.python]);
   };
 }
 
-/** garden's `--json` report, or `null` when it is not one. */
+/** One `editors[]` / `plugins[]` row of garden's `--json` report. */
+type ConformanceRow = EditorConformanceSummary['editors'][number];
+function parseRows(list: unknown): ConformanceRow[] {
+  return Array.isArray(list)
+    ? list.flatMap((e) => {
+        if (typeof e !== 'object' || e === null) return [];
+        const r = e as { id?: unknown; version?: unknown; sha256?: unknown; ok?: unknown; cases?: unknown; gaps?: unknown };
+        const cases: Record<string, { ok: boolean }> = {};
+        if (typeof r.cases === 'object' && r.cases !== null) {
+          for (const [k, v] of Object.entries(r.cases)) cases[k] = { ok: typeof v === 'object' && v !== null && (v as { ok?: unknown }).ok === true };
+        }
+        const gaps = Array.isArray(r.gaps) ? r.gaps.filter((g): g is string => typeof g === 'string') : [];
+        return [{ id: String(r.id), version: typeof r.version === 'string' ? r.version : '', sha256: typeof r.sha256 === 'string' ? r.sha256 : '', ok: r.ok === true, cases, gaps }];
+      })
+    : [];
+}
+
+/** garden's `--json` report, or `null` when it is not one. Its top-level `plugins` array (CS7 C5) carries the
+ *  run plugins' rows, the same shape as `editors`. */
 function parseConformanceReport(stdout: string): EditorConformanceSummary | null {
   try {
-    const raw = JSON.parse(stdout) as { ok?: unknown; error?: unknown; editors?: unknown };
-    const editors = Array.isArray(raw.editors)
-      ? raw.editors.flatMap((e) => {
-          if (typeof e !== 'object' || e === null) return [];
-          const r = e as { id?: unknown; version?: unknown; sha256?: unknown; ok?: unknown; cases?: unknown; gaps?: unknown };
-          const cases: Record<string, { ok: boolean }> = {};
-          if (typeof r.cases === 'object' && r.cases !== null) {
-            for (const [k, v] of Object.entries(r.cases)) cases[k] = { ok: typeof v === 'object' && v !== null && (v as { ok?: unknown }).ok === true };
-          }
-          const gaps = Array.isArray(r.gaps) ? r.gaps.filter((g): g is string => typeof g === 'string') : [];
-          return [{ id: String(r.id), version: typeof r.version === 'string' ? r.version : '', sha256: typeof r.sha256 === 'string' ? r.sha256 : '', ok: r.ok === true, cases, gaps }];
-        })
-      : [];
+    const raw = JSON.parse(stdout) as { ok?: unknown; error?: unknown; editors?: unknown; plugins?: unknown };
+    const plugins = parseRows(raw.plugins);
     return {
       ok: raw.ok === true,
       at: new Date().toISOString(),
-      editors,
+      editors: parseRows(raw.editors),
+      ...(plugins.length > 0 ? { plugins } : {}),
       ...(typeof raw.error === 'string' ? { error: raw.error } : {}),
     };
   } catch {
@@ -261,6 +276,7 @@ interface ParsedPack {
   root: string;
   manifest: Record<string, unknown>;
   editors: Array<Record<string, unknown>>;
+  plugins: Array<Record<string, unknown>>;
   blocks: Array<Record<string, unknown>>;
   skills: string[];
 }
@@ -291,8 +307,9 @@ async function readCheckedPack(packRootRaw: string, check: PackCheckRunner): Pro
     throw new PackInstallError(400, `wicked-pack.json is not JSON: ${err instanceof Error ? err.message : String(err)}`);
   }
   const editors = Array.isArray(manifest['editors']) ? (manifest['editors'] as Array<Record<string, unknown>>) : [];
-  if (manifest['spec'] !== 2 || editors.length === 0) {
-    throw new PackInstallError(400, 'the pack declares no editors (spec 2 `editors[]`); there is nothing to install here');
+  const plugins = Array.isArray(manifest['plugins']) ? (manifest['plugins'] as Array<Record<string, unknown>>) : [];
+  if (manifest['spec'] !== 2 || (editors.length === 0 && plugins.length === 0)) {
+    throw new PackInstallError(400, 'the pack declares no editors and no run plugins (spec 2 `editors[]` / `plugins[]`); there is nothing to install here');
   }
   const blocks = Array.isArray(manifest['blocks']) ? (manifest['blocks'] as Array<Record<string, unknown>>) : [];
   const skillsDir = typeof manifest['skills_dir'] === 'string' ? manifest['skills_dir'] : 'skills';
@@ -303,7 +320,7 @@ async function readCheckedPack(packRootRaw: string, check: PackCheckRunner): Pro
   } catch {
     skills = [];
   }
-  return { pack: { root: packRoot, manifest, editors, blocks, skills }, verdict };
+  return { pack: { root: packRoot, manifest, editors, plugins, blocks, skills }, verdict };
 }
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
@@ -345,6 +362,13 @@ function digestOf(entry: Record<string, unknown>): string {
   return editorEntryDigest(parsed.data);
 }
 
+/** A run plugin's admitted manifest entry digest (CS7), over the same parse {@link readPackPlugin} reads it with. */
+function digestOfPlugin(entry: Record<string, unknown>): string {
+  const parsed = PluginManifestSchema.safeParse(entry);
+  if (!parsed.success) throw new PackInstallError(400, `plugin ${str(entry['id'])}: manifest entry refused (${parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')})`);
+  return editorEntryDigest(parsed.data);
+}
+
 /** `POST /editors {packRoot, enabled?}`: the gate, the conformance run, then the registry. */
 export async function installPack(
   packRootRaw: string,
@@ -356,22 +380,26 @@ export async function installPack(
     throw new PackInstallError(501, 'the pack ships skills or blocks', verdict, approvalList(pack, verdict) as unknown as Record<string, unknown>);
   }
   const name = str(pack.manifest['name']);
-  const ids = pack.editors.map((e) => str(e['id']));
+  const ids = [...pack.editors, ...pack.plugins].map((e) => str(e['id']));
   for (const id of ids) {
     if (deps.registry.get(id)?.firstParty === true) throw new PackInstallError(409, `${id} is a first-party editor's id`, verdict);
   }
-  const conformance = await deps.conformance(pack.root, pack.editors);
+  const conformance = await deps.conformance(pack.root, pack.editors, pack.plugins);
   // The report counts only for the bytes being installed (codex r1): the run's own version and entry
-  // hash must be the manifest's, which the registry then re-reads at that same hash.
-  const missing = (e: Record<string, unknown>): string[] => {
-    const r = conformance.editors.find((x) => x.id === str(e['id']));
+  // hash must be the manifest's, which the registry then re-reads at that same hash. A run plugin (CS7 C5) is
+  // matched the same way against the report's `plugins[]` array, on the run-plugin cases.
+  const missing = (e: Record<string, unknown>, rows: readonly EditorConformanceSummary['editors'][number][], cases: readonly string[]): string[] => {
+    const r = rows.find((x) => x.id === str(e['id']));
     if (r === undefined) return ['not in the report'];
     if (r.sha256 !== str(e['sha256']) || r.version !== str(e['version'])) return [`ran against ${r.version || '?'}#${(r.sha256 || '?').slice(0, 12)}, not this entry`];
-    return requiredCases(e).filter((c) => r.cases[c]?.ok !== true);
+    return cases.filter((c) => r.cases[c]?.ok !== true);
   };
-  const failures = pack.editors.map((e) => ({ id: str(e['id']), missing: missing(e) })).filter((f) => f.missing.length > 0);
+  const failures = [
+    ...pack.editors.map((e) => ({ id: str(e['id']), missing: missing(e, conformance.editors, requiredCases(e)) })),
+    ...pack.plugins.map((p) => ({ id: str(p['id']), missing: missing(p, conformance.plugins ?? [], RUN_PLUGIN_CASES) })),
+  ].filter((f) => f.missing.length > 0);
   if (!conformance.ok || failures.length > 0) {
-    const unavailable = conformance.editors.length === 0;
+    const unavailable = conformance.editors.length === 0 && (conformance.plugins?.length ?? 0) === 0;
     throw new PackInstallError(
       422,
       unavailable
@@ -382,12 +410,12 @@ export async function installPack(
     );
   }
   const now = new Date().toISOString();
-  const packs = pack.editors.map((e) => {
-    const entry = str(e['entry']);
+  const editorPacks = pack.editors.map((e) => {
     const record: InstalledPack = {
+      kind: 'editor',
       root: pack.root,
       name,
-      entry,
+      entry: str(e['entry']),
       sha256: str(e['sha256']),
       manifestSha256: digestOf(e),
       installedAt: now,
@@ -395,6 +423,20 @@ export async function installPack(
     };
     return { id: str(e['id']), pack: record };
   });
+  const pluginPacks = pack.plugins.map((p) => {
+    const record: InstalledPack = {
+      kind: 'plugin',
+      root: pack.root,
+      name,
+      entry: str(p['entry']),
+      sha256: str(p['sha256']),
+      manifestSha256: digestOfPlugin(p),
+      installedAt: now,
+      conformance: { ok: true, at: conformance.at, cases: [...RUN_PLUGIN_CASES] },
+    };
+    return { id: str(p['id']), pack: record };
+  });
+  const packs = [...editorPacks, ...pluginPacks];
   let installed: ReturnType<EditorRegistry['installPack']>;
   try {
     installed = deps.registry.installPack(packs, enabled);
