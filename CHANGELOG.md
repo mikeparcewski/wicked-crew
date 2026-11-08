@@ -33,6 +33,21 @@ mentioned only where a daemon release depends on them.
   "not observable", never "unused". Chat turns, workflow steps and team member turns are tagged apart. Read-only:
   nothing turns a skill off.
 
+- **A job takes the documents you attached and records the sources you picked (DES-CATALOG-002 CS4; api-types
+  `ProposalInputValue` documents/sources, `ProposalToken` documents/sources, `LaunchRunBody.documents`/`sources`,
+  unreleased).** A job proposal for a card that takes documents fills them from the chat's attachments and the documents
+  you named, says "2 documents", strikes one crew can't use with the reason, and asks for them (no Start) when a required
+  set has none left. A card that reads sources shows the pick ("the web and support-pg"; Research and Competitive start
+  with the web), lists every source of the project with whether it can be picked, and a source whose "Agents can query"
+  switch is off can't be. At Start, crew authorises each document again with the chat's rules and stages it whole
+  (up to 10 MB a file, 50 MB a run), read-only, in the run's own folder outside the state home (a pdf with
+  extractable text also gets it as `<name>.pdf.txt`, and the manifest notes a scan or a cut); a run filed in another
+  project than the chat's is refused. It checks the pick against the project's switches and records it on the run
+  (`<state home>/mcp/run-source-picks.json`; a recorded pick never changes); the units are held to it from CS10. A
+  refused document or source is a 400 naming it, never a smaller set. A retry keeps both: its documents are authorised
+  and staged again from the earlier run's chat, and its pick is checked again. `WICKED_RUN_DOCS_DIR` moves the
+  documents folder (refused inside the state home).
+
 - **A person can allow or revoke what an installed editor asks for (F37; api-types `SetEditorGrantBody`, unreleased).**
   `POST /api/v1/editors/:id/grants {permission, allow, version, sha256, project?}` is the human-only writer of the
   `EDITOR-GRANTS` ledger the engine already reads. The press names the build the person was shown (409

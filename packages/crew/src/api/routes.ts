@@ -305,7 +305,9 @@ const BRIEF_COPY_MAX = 512 * 1024;
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
 import { registerInteractiveDocChecks } from '../interactive/doc-checks-routes.js';
 import { crewStateHome, stateHomeOfDb } from '../projects/state-home.js';
-import { demoShowOf, factsOf, inputLines, jobLaunchCommon, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
+import { demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
+import { DocumentsRefused, documentsClause, RUN_DOCS_TOKENS_MAX, stagedDocumentsOf, stageRunDocuments, type StagedDocuments } from './run-documents.js';
+import { checkSourcePick, projectSources, RUN_SOURCES_MAX, runSourcesDeps, type RunSourcePicks } from './run-sources.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
 import { ChatProposals, LaunchOnceRegistry, proposalRunId, RecordingStubDispatcher, RevisionEditsSchema, runCostFromEvents } from './chat-proposals.js';
 import { CATALOG_SEEDS } from '../workflow-catalog/catalog-data.js';
@@ -943,6 +945,14 @@ export const LaunchSchema = z.strictObject({
   forceQeAcceptance: z.boolean().optional(),
   /** (api-types 0.192.0, DES-CATALOG-002 §4.4) What this launch is the shape of; judged against the current catalog. */
   shape: LaunchShapeSchema.optional(),
+  /** (DES-CATALOG-002 §2.d piece 2, CS4) The documents the run reads: chat source tokens, authorised again against
+   *  `chatId` and staged read-only before the engine is called. `[]` = none (a retry inherits nothing). */
+  documents: z.array(z.string().trim().min(1).max(300)).max(RUN_DOCS_TOKENS_MAX).optional(),
+  /** (DES-CATALOG-002 §2.d piece 4, CS4) The run's source pick (registered source names); `[]` = none. */
+  sources: z.array(z.string().trim().min(1).max(100)).max(RUN_SOURCES_MAX).optional(),
+}).refine((b) => b.documents === undefined || b.documents.length === 0 || b.chatId !== undefined, {
+  path: ['documents'],
+  error: 'documents are chat tokens: send the chatId they were named in',
 }).refine((b) => b.skipQeAcceptance === undefined || b.forceQeAcceptance !== true, {
   path: ['forceQeAcceptance'],
   error: 'skipQeAcceptance and forceQeAcceptance are mutually exclusive — skip it with a reason, or force it',
@@ -1574,6 +1584,12 @@ export interface RuntimeDeps {
   mcpBroker?: McpBroker;
   /** (DES-KNOWLEDGE-DATA-001 §7) The data gate over the same registry; absent → no live source reaches an agent. */
   dataGate?: DataGate;
+  /** (DES-CATALOG-002 CS4) Each run's source pick (`<state home>/mcp/run-source-picks.json`), the record CS10's fence
+   *  reads. Absent (with `dataGate` absent too) = a launch with `sources` is refused (this daemon can't pick). */
+  runSourcePicks?: RunSourcePicks;
+  /** (DES-CATALOG-002 CS4) Where a run's documents are staged, one folder per run, OUTSIDE the state home (core's Read
+   *  fence denies every state-home entry to workers). Absent = a launch with `documents` is refused. */
+  runDocumentsRoot?: string;
   /**
    * (DES-KNOWLEDGE-DATA-001 §9.1) The deps a unit in a project may see (the relay's own set), for an app's knowledge
    * queries and the knowledge summary. Absent (with `dataGate`) = knowledge queries read nothing (refused).
@@ -3303,6 +3319,33 @@ export function registerRoutes(
     presets: (projectId) => adapter.listPresets(projectId),
     entries: () => adapter.catalog(),
   };
+  /** (CS4) A chat's project, as its proposals read it (`null`: Unfiled, or the chat is unknown). */
+  const chatProposalsProjectOf = (chatId: string): string | null => {
+    const p = chatScopes.get(chatId)?.projectId ?? chatHistory?.stateOf(chatId)?.projectId ?? null;
+    return p === null || p === DEFAULT_PROJECT_ID ? null : p;
+  };
+  /**
+   * (CS4) The documents an earlier run was given, to be authorised and staged again for its retry: its tokens and chat
+   * from its staged manifest, hash-checked. `null` = it had none; `'unreadable'` = it had some that can't be read back.
+   */
+  const stagedTokensOf = (runId: string, root: string): { chatId: string; tokens: string[] } | null | 'unreadable' => {
+    const staged = stagedDocumentsOf(runId, root);
+    if (staged === null) {
+      try {
+        readFileSync(join(root, runId, 'records', 'MANIFEST.json'));
+      } catch {
+        return null;
+      }
+      return 'unreadable';
+    }
+    try {
+      const m = JSON.parse(readFileSync(join(staged.records, 'MANIFEST.json'), 'utf8')) as { chat?: unknown };
+      const tokens = [...new Set(staged.files.filter((f) => f.derived === undefined).map((f) => f.token))];
+      return typeof m.chat === 'string' && tokens.length > 0 ? { chatId: m.chat, tokens } : 'unreadable';
+    } catch {
+      return 'unreadable';
+    }
+  };
   const launchRun = async (raw: unknown, ctx: LaunchContext): Promise<LaunchReply> => {
     const reply = new LaunchReply();
     const req = { body: raw, log: ctx.log, actor: ctx.actor };
@@ -3590,6 +3633,30 @@ export function registerRoutes(
         });
       }
     }
+    // (DES-CATALOG-002 §2.d piece 4, CS4) The source pick, checked at launch against the project's sources and their
+    // "Agents can query" switches (the pick narrows the switches, never widens them), before anything is committed. A
+    // retry or reshape that sends none keeps the earlier run's pick; a run without a pick reads what the switches allow.
+    let sourcePick: string[] | null = null;
+    // An inherited pick is checked like a sent one (the switches may have changed since the earlier run).
+    const wantedPick = b.sources ?? (b.retryOf !== undefined ? (runtime.runSourcePicks?.get(b.retryOf) ?? undefined) : undefined);
+    if (wantedPick !== undefined) {
+      if (runtime.runSourcePicks === undefined || runtime.dataGate === undefined) {
+        return reply.code(400).send({ code: 'sources_refused', error: 'this daemon cannot limit a run to picked sources' });
+      }
+      const checked = await checkSourcePick(b.projectId ?? null, wantedPick, runSourcesDeps(runtime.dataGate));
+      if (!checked.ok) {
+        return reply.code(400).send({
+          code: 'sources_refused',
+          error: `can't read ${checked.refused.map((r) => `${r.id} (${r.reason})`).join(', ')}`,
+          refused: checked.refused,
+        });
+      }
+      sourcePick = checked.ids;
+    }
+    // (DES-CATALOG-002 §2.d piece 2, CS4) The documents can be staged only where this daemon keeps them.
+    if (b.documents !== undefined && b.documents.length > 0 && runtime.runDocumentsRoot === undefined) {
+      return reply.code(400).send({ code: 'documents_refused', error: 'this daemon cannot stage documents for a run' });
+    }
     // Ad-hoc campaign attach (wicked-studio#27): `campaignId` must name an EXISTING campaign,
     // checked BEFORE anything launches — an unknown id is a 404 with nothing committed, never a
     // run silently filed onto a surface that does not exist. An engine addon without the
@@ -3716,6 +3783,75 @@ export function registerRoutes(
       } catch (err) {
         return reply.code(409).send({ code: 'catalog_unavailable', error: message(err) });
       }
+    }
+    // (CS4) The pick is recorded before anything is staged and before the engine is called, so no unit of the run ever
+    // runs without it (CS10's fence reads it) and a failed record leaves nothing behind. Fail closed: nothing launches.
+    if (sourcePick !== null) {
+      try {
+        runtime.runSourcePicks!.set(input.sessionId, sourcePick);
+      } catch (err) {
+        return reply.code(409).send({ code: 'sources_unavailable', error: `the source pick could not be recorded: ${message(err)}` });
+      }
+    }
+    // (DES-CATALOG-002 §2.d piece 2, CS4) The documents: every token authorised again with the chat's own rules (this
+    // chat, its project, the document's version now) and staged whole, read-only, in the run's own folder outside the
+    // state home; a retry or reshape that sends none reuses the earlier run's staged folder (hash-checked). The folder
+    // is a READ root only: the run can read its documents and never write there. The brief says where they are.
+    let staged: StagedDocuments | null = null;
+    // What to stage: the documents sent, or (a retry that sends none) the earlier run's tokens under the earlier run's
+    // chat, authorised again now; never the earlier folder mounted as it is. `[]` = none, inherit nothing.
+    let docTokens: { chatId: string; tokens: string[] } | null = null;
+    if (b.documents !== undefined) {
+      if (b.documents.length > 0 && b.chatId !== undefined) docTokens = { chatId: b.chatId, tokens: b.documents };
+    } else if (b.retryOf !== undefined && runtime.runDocumentsRoot !== undefined) {
+      const earlier = stagedTokensOf(b.retryOf, runtime.runDocumentsRoot);
+      if (earlier === 'unreadable') {
+        return reply.code(409).send({ code: 'documents_unavailable', error: `the documents of run ${b.retryOf} can't be read again; start the job again from its chat` });
+      }
+      if (earlier !== null) docTokens = earlier;
+    }
+    if (docTokens !== null && runtime.runDocumentsRoot !== undefined) {
+      // The documents are the chat's: a run filed in another project never reads them.
+      const chatProject = chatProposalsProjectOf(docTokens.chatId);
+      const runProject = b.projectId !== undefined && b.projectId !== DEFAULT_PROJECT_ID ? b.projectId : null;
+      if ((chatProject ?? null) !== runProject) {
+        // A bare retry sends no projectId: it is filed Unfiled, so it is told where its documents belong (fail closed).
+        return reply.code(400).send({
+          code: 'documents_refused',
+          error: chatProject !== null && runProject === null
+            ? `the documents belong to project ${chatProject}: file this run there (send projectId)`
+            : "the documents belong to the chat's project, and this run is filed in another",
+        });
+      }
+      try {
+        staged = await stageRunDocuments(input.sessionId, docTokens.chatId, docTokens.tokens, {
+          authorize: (chatId, tokens) => chatProposals.authorizeDocuments(chatId, tokens),
+          attachment: (chatId, id) => {
+            // An attachment the store no longer has is "no longer attached", not a 500 (resolve throws for an unknown id).
+            try {
+              const hit = chatAttachments.resolve(chatId, [id])[0];
+              return hit === undefined ? null : { name: hit.name, path: hit.path };
+            } catch {
+              return null;
+            }
+          },
+          docsRoot: (projectId) => projectDocsRoot(adapter, projectSettings, projectId),
+          stateRoot: runtime.runDocumentsRoot,
+        });
+      } catch (err) {
+        if (err instanceof DocumentsRefused) {
+          return reply.code(400).send({
+            code: 'documents_refused',
+            error: `can't read ${err.refused.map((r) => `${r.token} (${r.reason})`).join(', ')}`,
+            refused: err.refused,
+          });
+        }
+        return reply.code(409).send({ code: 'documents_unavailable', error: `the documents could not be staged: ${message(err)}` });
+      }
+    }
+    if (staged !== null) {
+      input.extraReadRoots = [...(input.extraReadRoots ?? []), staged.root];
+      input.problem = `${input.problem.trimEnd()}\n\n${documentsClause(staged)}`;
     }
     try {
       const runId = await adapter.launchRun(input);
@@ -4048,6 +4184,8 @@ export function registerRoutes(
             ...(p.repoRefs?.[0] !== undefined ? { repoRef: p.repoRefs[0] } : {}),
             ...(projectId !== null && projectId !== DEFAULT_PROJECT_ID ? { projectId } : {}),
             ...common,
+            // (CS4) The documents and the source pick, as tokens and names (never flattened into the brief's prose).
+            ...jobInputsOfProposal(p),
             // A power run when the person's Start chose one (checked against this daemon just now); otherwise it
             // stops at its first plan, as every chat job did before (operator ruling 2026-11-06).
             // (A power launch overrides the plan hold; launchRun refuses rather than run it phased, `powerRequired`.)
@@ -5282,6 +5420,10 @@ export function registerRoutes(
   };
   const chatProposals = new ChatProposals({
     flags: () => chatArtifactFlags,
+    // (DES-CATALOG-002 §2.d piece 4, CS4) The sources a job's pick lists: the project's sources with their switches.
+    ...(runtime.dataGate !== undefined && runtime.runSourcePicks !== undefined
+      ? { jobSources: (projectId: string | null) => projectSources(projectId, runSourcesDeps(runtime.dataGate!)) }
+      : {}),
     // A5 (DES §6.1-6.2): the person's own edits a refine keeps, from the document's lineage (fail closed: an error
     // blocks the card, since the landing guard could never pass). Only where a real refine can run.
     ...(runtime.docBindings !== undefined && runtime.launchBoundRefine !== undefined ? { protectedEdits: async (artifactRef: string, version: number, touch: readonly string[]) => {

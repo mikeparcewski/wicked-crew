@@ -93,7 +93,8 @@ import { DocRunIndex } from '../interactive/doc-run-index.js';
 import { TestSetIndex, registerTestSetForRun } from '../qe/test-sets.js';
 import { DocGroundingStore } from '../interactive/doc-grounding.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
-import { crewStateHome } from '../projects/state-home.js';
+import { crewStateHome, isDefaultStateHome } from '../projects/state-home.js';
+import { RunSourcePicks } from './run-sources.js';
 import { coreUnitId } from './evidence.js';
 import { homedir } from 'node:os';
 import { discoverMcpServers } from '../mcp/discovery.js';
@@ -2852,6 +2853,10 @@ export async function createServer(
       mcpBroker,
       // DES-KNOWLEDGE-DATA-001 §7: the data gate, its registry store and its read record.
       dataGate,
+      // (DES-CATALOG-002 CS4) Each run's source pick, in the registered `mcp` entry (CS10's fence reads it), and the
+      // folder a run's documents are staged in, outside the state home.
+      runSourcePicks: new RunSourcePicks(join(crewStateHome(), 'mcp', 'run-source-picks.json')),
+      runDocumentsRoot: runDocumentsRootDir(),
       mcpRegistryStore,
       sourceReads,
       trackerProjector,
@@ -3220,4 +3225,16 @@ export async function startServer(
   // engine reads the daemon's own env at every spawn; a daemon that never listened hands none.
   process.env['WICKED_CREW_URL'] = brokerUrlFor(boundHost, boundPort);
   return { app, port: boundPort, host: boundHost, stages: clock.snapshot() };
+}
+
+/**
+ * (DES-CATALOG-002 CS4) Where a run's documents are staged: `WICKED_RUN_DOCS_DIR` when set; for the default state home
+ * `~/.wicked/run-documents`; for any other `<state home>-run-documents`. Never inside the state home: core's Read fence
+ * denies every state-home entry to workers, and an unregistered entry there refuses every launch (the demo-root rule,
+ * `api/recording.ts` `demoRootDir`).
+ */
+export function runDocumentsRootDir(): string {
+  if (process.env.WICKED_RUN_DOCS_DIR) return process.env.WICKED_RUN_DOCS_DIR;
+  if (isDefaultStateHome()) return join(process.env.HOME ?? process.env.USERPROFILE ?? '/tmp', '.wicked', 'run-documents');
+  return `${crewStateHome()}-run-documents`;
 }

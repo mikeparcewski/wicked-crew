@@ -6293,6 +6293,26 @@ export interface LaunchRunBody {
    */
   chatId?: string;
   /**
+   * (DES-CATALOG-002 §2.d piece 2, CS4) The documents the run reads: chat source tokens (`attachment:<id>`,
+   * `doc:<mount>/<doc>`), at most 20. Requires `chatId`: at launch crew authorises each token again with the chat's
+   * rules (a file attached to that chat; a document the person named there or had open, in the chat's project scope, at
+   * its current version) and stages them whole, read-only, in the run's documents folder (`records/`, with a
+   * `MANIFEST.json` of sha256s); a pdf also gets a full-text `<name>.txt` derivative, labelled as extracted text. A
+   * token that fails is a 400 naming it (`code: 'documents_refused'`), never a silently smaller set. A retry or reshape
+   * (`retryOf`) reuses the earlier run's staged documents when it sends none. Check
+   * `GET /workflows/catalog?v=2`'s `inputKinds` includes `documents` before sending: an older daemon's strict launch
+   * schema rejects the key with a 400.
+   */
+  documents?: string[];
+  /**
+   * (DES-CATALOG-002 §2.d piece 4, CS4) The run's source pick: the registered sources (by name; `web` is crew's web
+   * source) its units may read, at every step and re-plan. `[]` = none. ABSENT = no pick (every source the switches
+   * allow, as before). Each name must be a source of the run's project whose "Agents can query" switch is on: otherwise a
+   * 400 naming it (`code: 'sources_refused'`). Persisted on the run; a retry or reshape (`retryOf`) keeps the earlier
+   * pick when it sends none. Check `inputKinds` includes `sources` before sending.
+   */
+  sources?: string[];
+  /**
    * Retry lineage (DES-UX-001 §8.3, CREW-UX-3; api-types 0.8.0): the id of the run this
    * launch retries. Must name an EXISTING run id — an unknown id fails the launch (400 with
    * a named error), never a silently unrecorded lineage. The daemon persists it, echoes it
@@ -9273,7 +9293,21 @@ export interface ChatPlanOffer {
 export type ProposalInputValue =
   | { kind: 'text'; value: string }
   | { kind: 'url'; value: string }
-  | { kind: 'requirements'; refs: { repoId: string; key: string }[] };
+  | { kind: 'requirements'; refs: { repoId: string; key: string }[] }
+  /**
+   * (DES-CATALOG-002 §2.d piece 2, CS4) The documents a job reads: chat source tokens, `attachment:<id>` (a file attached
+   * to this chat) or `doc:<mount>/<doc>` (a document the person named or has open). Filled by crew from the chat's
+   * attachments and the documents the person named; a typed correction replaces the list. Each is authorised by crew
+   * (this chat, its project's scope) when proposed and again at Go; one that fails is struck with its reason
+   * ({@link ProposalToken.documents}). At most 20.
+   */
+  | { kind: 'documents'; tokens: string[] }
+  /**
+   * (DES-CATALOG-002 §2.d piece 4, CS4) The sources a job's units may read: registered source names (`web` is crew's
+   * web source). `[]` = none (the job reads its documents and repository only). Only a source whose "Agents can query"
+   * switch is on in the job's project can be picked: the pick narrows the switches, never widens them. At most 20.
+   */
+  | { kind: 'sources'; ids: string[] };
 
 /** What a proposal is the shape of. A person-made proposal has no `guess`. */
 export interface ProposalShape {
@@ -9340,10 +9374,30 @@ export interface ProposalRevision {
 /** A tappable part of the sentence. `swap` is `null` for `checks` (a tap explains them; they are the card's own). */
 export interface ProposalToken {
   id: string;
-  kind: 'card' | 'option' | 'repo' | 'project' | 'seats' | 'depth' | 'checks' | 'detail';
+  /** (CS4) `documents` and `sources` tokens: a job's documents ("2 documents") and its source pick ("the web and
+   *  support-pg", "no sources"). A client that does not know a kind shows the label as plain text. */
+  kind: 'card' | 'option' | 'repo' | 'project' | 'seats' | 'depth' | 'checks' | 'detail' | 'documents' | 'sources';
   label: string;
   /** At most four choices, each a revision's edits; "Something else…" is the client's own. */
   swap: { choices: { label: string; edit: ProposalRevisionEdits }[] } | null;
+  /** (CS4) A `documents` token: each document as crew authorised it (`struck` with the reason: the job never reads it).
+   *  Removing one is a revision whose `inputs.documents` lists the rest. */
+  documents?: ProposalSource[];
+  /** (CS4) A `sources` token: the swap list, every source of the job's project (the web included when installed), in
+   *  order. `picked`: in the pick. `reason` present: it can't be picked, and why ("agents can't query it: turn on
+   *  'Agents can query' in Settings → Sources"). A change is a revision whose `inputs.sources` names the new pick. */
+  sources?: ProposalSourceChoice[];
+}
+
+/** (CS4) One source a job can read, as its `sources` token lists it. */
+export interface ProposalSourceChoice {
+  /** The registered source name (`web`, `support-pg`): what `inputs.sources.ids` and {@link LaunchRunBody.sources} carry. */
+  id: string;
+  /** "the web", "support-pg". */
+  label: string;
+  picked: boolean;
+  /** Present: the source can't be picked now, and why. */
+  reason?: string;
 }
 
 /**

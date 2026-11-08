@@ -222,6 +222,33 @@ export class DataGate {
     return gateSources(this.deps.store, this.deps.catalogs);
   }
 
+  /**
+   * Launch's source choices, by broker name. A pick can only narrow `agentMay`; it grants no tool or tracker.
+   * Omit entries agents cannot see: these choices reach the chat seat. Crew's services are not sources here.
+   */
+  async pickable(projectId: string | null): Promise<Array<{ id: string; reason?: string; web?: true }>> {
+    const [sql, pm, web] = await Promise.all([this.sources(), this.pm.entries(), this.webGate.entry()]);
+    type Choice = { id: string; reason?: string; web?: true };
+    const choice = (s: { name: string; enabled: boolean; queryable: boolean; access: SourceAgentAccess }): Choice | null => {
+      if (!agentMay(s.access, s, projectId, 'see')) return null;
+      if (!s.access.query) return { id: s.name, reason: "agents can't query it: turn on 'Agents can query' in Settings → Sources" };
+      if (!agentMay(s.access, s, projectId, 'query')) return { id: s.name, reason: "agents can't query this source" };
+      return { id: s.name };
+    };
+    const out = [...sql.map(choice), ...pm.map((s) => choice({ ...s, queryable: true }))].filter((s) => s !== null);
+    if (web !== null) {
+      const picked = choice({ ...web, queryable: true });
+      if (picked !== null && picked.reason === undefined) {
+        // Setup only inspects an installed entry; search starts its container lazily on the first call.
+        const setup = await this.web.setup(true, web.access);
+        if (!setup.installed) picked.reason = 'the web source is not installed';
+        else if (!setup.search.ready) picked.reason = 'the web source is not running';
+      }
+      if (picked !== null) out.push({ ...picked, web: true });
+    }
+    return out;
+  }
+
   /** Whether the broker hands `mcp:<server>/…` to the gate. */
   owns(server: string): Promise<boolean> {
     return isGatedSource(this.deps.store, server);

@@ -25,6 +25,7 @@ import type {
   ProposalRevisionEdits,
   ProposalSeats,
   ProposalSentence,
+  ProposalSource,
   ProposalShape,
   ProposalSketch,
   ProposalSuggestion,
@@ -154,6 +155,10 @@ export interface JobContext {
   revises: string | null;
   lineage: string | null;
   notes: string[];
+  /** Authorised in the chat layer before this pure resolution; absent admits no document. */
+  documents?: ProposalSource[];
+  /** Sources in display order; a reason means the source cannot be picked. Absent = no list. */
+  jobSources?: Array<{ id: string; label: string; reason?: string; web?: true }>;
   answers?: string;
   request?: { id: string; digest: string };
   /** The daemon's QE acceptance setting is off: QE is not shown as a check (the launch would skip it by setting). */
@@ -203,7 +208,14 @@ function seatsOf(facts: JobFacts, ctx: JobContext, r: ResolvedOption): { seats: 
 
 function inputValueLabel(v: ProposalInputValue): string {
   if (v.kind === 'requirements') return `${v.refs.length} requirement${v.refs.length === 1 ? '' : 's'}`;
+  if (v.kind === 'documents') return `${v.tokens.length} document${v.tokens.length === 1 ? '' : 's'}`;
+  if (v.kind === 'sources') return list(v.ids.map((id) => id === 'web' ? 'the web' : id)) || 'no sources';
   return v.value;
+}
+
+function sourcesLabel(ids: readonly string[], sources: JobContext['jobSources']): string {
+  if (sources === undefined) return 'no sources on this daemon';
+  return list(ids.map((id) => sources.find((s) => s.id === id)?.label ?? (id === 'web' ? 'the web' : id))) || 'no sources';
 }
 
 function needsOf(facts: JobFacts, ctx: JobContext, r: ResolvedOption): ProposalNeed[] {
@@ -225,6 +237,15 @@ function needsOf(facts: JobFacts, ctx: JobContext, r: ResolvedOption): ProposalN
       continue;
     }
     const v = facts.inputs[i.id];
+    if (i.kind === 'documents') {
+      const ok = ctx.documents?.filter((s) => s.status === 'ok').length ?? 0;
+      out.push({ id: i.id, label: i.label, kind: i.kind, required: i.required, status: ok > 0 ? 'met' : 'missing', value: `${ok} document${ok === 1 ? '' : 's'}` });
+      continue;
+    }
+    if (i.kind === 'sources') {
+      out.push({ id: i.id, label: i.label, kind: i.kind, required: i.required, status: 'met', value: sourcesLabel(v?.kind === 'sources' ? v.ids : [], ctx.jobSources).slice(0, 200) });
+      continue;
+    }
     out.push({ id: i.id, label: i.label, kind: i.kind, required: i.required, status: v !== undefined ? 'met' : 'missing', ...(v !== undefined ? { value: inputValueLabel(v).slice(0, 200) } : {}) });
   }
   return out;
@@ -289,6 +310,21 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
   const kind = proposalKindOf(r);
   if (kind !== 'job') throw new JobRefusal('not_a_job', `${card.title} makes a document: it is proposed as one`);
   const notes = [...ctx.notes];
+  const takesDocuments = r.resolved.inputs.some((i) => i.id === 'documents');
+  const takesSources = r.resolved.inputs.some((i) => i.id === 'sources');
+  if (takesSources) {
+    const current = facts.inputs['sources'];
+    const defaultWeb = current === undefined && (card.id === 'research' || card.id === 'competitive');
+    // A revision replaces the pick only through the merge's checks. Keep an existing pick for the launch's fresh
+    // check, even if a switch changed since: a refresh must not silently choose different sources for the person.
+    let ids = current?.kind === 'sources' && ctx.jobSources !== undefined ? [...new Set(current.ids)] : [];
+    if (defaultWeb) {
+      const web = ctx.jobSources?.find((s) => s.web === true);
+      if (web !== undefined && web.reason === undefined) ids = [web.id];
+      else notes.push(`the web can't be read: ${web?.reason ?? 'not available on this daemon'}`);
+    }
+    facts = { ...facts, inputs: { ...facts.inputs, sources: { kind: 'sources', ids } } };
+  }
   const repo = repoOf(facts, ctx.chat);
   const { seats, short } = seatsOf(facts, ctx, r);
   const needs = needsOf({ ...facts, repoRef: repo?.id ?? null }, ctx, r);
@@ -331,6 +367,9 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
         text: ctx.chat.repos.length === 0 ? 'Which repository? This chat has none in its scope: start a thread on one.' : 'Which repository?',
         choices: ctx.chat.repos.slice(0, 4).map((x) => ({ label: x.name, edit: { repoRef: x.id } })),
       };
+    } else if (missing.kind === 'documents') {
+      const why = ctx.documents?.find((s) => s.status === 'struck')?.reason;
+      question = { kind: 'missing', text: `Which documents?${why !== undefined ? ` ${why}` : ''}`, choices: [] };
     } else if (missing.kind === 'text' || missing.kind === 'url') {
       question = { kind: 'missing', text: `${missing.label}?`, choices: [], input: { kind: 'text', label: missing.label, edit: `inputs.${missing.id}` } };
       if (missing.id === 'intent') question.input = { kind: 'text', label: missing.label, edit: 'inputs.intent' };
@@ -371,16 +410,30 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     swap: !selfSeated && ctx.roster.length > 1 ? { choices: ctx.roster.filter((s) => s.key !== seats.lead).slice(0, 4).map((s) => ({ label: `${s.name} leads`, edit: { lead: s.key } })) } : null,
   });
   const checksTok = t({ id: 'checks', kind: 'checks', label: checksLabel(gate), swap: null });
+  const reading: string[] = [];
+  if (takesDocuments) {
+    const documents = ctx.documents ?? [];
+    const ok = documents.filter((s) => s.status === 'ok').length;
+    reading.push(t({ id: 'documents', kind: 'documents', label: `${ok} document${ok === 1 ? '' : 's'}`, swap: null, documents }));
+  }
+  if (takesSources) {
+    const value = facts.inputs['sources']!;
+    const picked = value.kind === 'sources' ? value.ids : [];
+    const sources = (ctx.jobSources ?? []).map((s) => ({ ...s, picked: picked.includes(s.id) }));
+    const label = sourcesLabel(picked, ctx.jobSources);
+    reading.push(t({ id: 'sources', kind: 'sources', label, swap: null, sources }));
+  }
+  const readingClause = reading.length > 0 ? `, reading ${list(reading)}` : '';
   if (launch === 'compose') {
     const projectTok = t({ id: 'project', kind: 'project', label: ctx.projectLabel, swap: null });
-    parts.push(`I'll draft ${cardTok} from the requirements you pick in ${projectTok}, checked by ${checksTok}.`);
+    parts.push(`I'll draft ${cardTok} from the requirements you pick in ${projectTok}${readingClause}, checked by ${checksTok}.`);
   } else if (launch === 'demo') {
     const url = facts.inputs['url'];
-    parts.push(`I'll record ${cardTok}${url !== undefined ? ` of ${inputValueLabel(url)}` : ''} with ${seatsTok}, checked by ${checksTok}.`);
+    parts.push(`I'll record ${cardTok}${url !== undefined ? ` of ${inputValueLabel(url)}` : ''}${readingClause} with ${seatsTok}, checked by ${checksTok}.`);
   } else if (delivers === 'report' || delivers === 'answer' || delivers === 'proposals') {
-    parts.push(`I'll do this as ${cardTok}${repoTok !== null ? ` of ${repoTok}` : ''}, read-only, with ${seatsTok}, checked by ${checksTok}.`);
+    parts.push(`I'll do this as ${cardTok}${repoTok !== null ? ` of ${repoTok}` : ''}${readingClause}, read-only, with ${seatsTok}, checked by ${checksTok}.`);
   } else {
-    parts.push(`I'll run this as ${cardTok}${repoTok !== null ? ` of ${repoTok}` : ''}, with ${seatsTok}, checked by ${checksTok}.`);
+    parts.push(`I'll run this as ${cardTok}${repoTok !== null ? ` of ${repoTok}` : ''}${readingClause}, with ${seatsTok}, checked by ${checksTok}.`);
   }
   if (card.depth === true) {
     const d = facts.depth ?? 'standard';
@@ -564,6 +617,8 @@ export function lowersCheck(raw: string): boolean {
 /** What a merge produced: the facts to resolve, the notes, and the checks it would lose. */
 export interface MergeResult {
   facts: JobFacts;
+  /** Input edits that were refused, even when the parent's value happens to equal the requested one. */
+  refusedInputs: string[];
   notes: string[];
   /** The checks the parent had that the result lacks. */
   lost: CatalogGateId[];
@@ -598,9 +653,10 @@ export function seatProtections(r: ResolvedOption | null): SeatProtection[] {
 export function mergeRevision(
   parent: ArtifactProposal,
   edits: ProposalRevisionEdits,
-  ctx: { chat: JobChat; served: ServedState; roster: ReadonlyArray<{ key: string; name: string }> },
+  ctx: { chat: JobChat; served: ServedState; roster: ReadonlyArray<{ key: string; name: string }>; jobSources?: JobContext['jobSources'] },
 ): MergeResult {
   const notes: string[] = [];
+  const refusedInputs: string[] = [];
   // 1. The parent whole; a field the revision does not name keeps its value.
   const facts = factsOf(parent);
   const before = JSON.stringify(facts);
@@ -696,25 +752,43 @@ export function mergeRevision(
       const def = defs5.find((d) => d.id === id);
       const kindOk = def !== undefined && (def.kind === v.kind || (def.kind === 'text' && v.kind === 'text'));
       if (!kindOk) {
+        refusedInputs.push(id);
         notes.push(`Not changed: ${card5.title} takes no ${def === undefined ? '' : `${v.kind} `}${id.slice(0, 40)}`);
         continue;
       }
       if ((v.kind === 'text' || v.kind === 'url') && v.value.trim() === '') {
+        refusedInputs.push(id);
         notes.push(`Not changed: ${def.label} can't be blank`);
         continue;
       }
       // The launch's own limits, checked here so Start never shows for a launch that would refuse (codex r3).
       const LIMIT: Readonly<Record<string, number>> = { audience: 2000, show: 4000, url: 2048 };
       if ((v.kind === 'text' || v.kind === 'url') && LIMIT[id] !== undefined && v.value.length > LIMIT[id]!) {
+        refusedInputs.push(id);
         notes.push(`Not changed: ${def.label} is over ${LIMIT[id]} characters`);
         continue;
       }
       if (v.kind === 'requirements' && v.refs.length > 40) {
+        refusedInputs.push(id);
         notes.push('Not changed: pick at most 40 requirements');
         continue;
       }
+      if (v.kind === 'sources') {
+        const refused = v.ids.filter((id) => {
+          const source = ctx.jobSources?.find((s) => s.id === id);
+          return source === undefined || source.reason !== undefined;
+        });
+        if (refused.length > 0) {
+          refusedInputs.push(id);
+          const current = facts.inputs[id];
+          const label = sourcesLabel(current?.kind === 'sources' ? current.ids : [], ctx.jobSources);
+          for (const id of refused) notes.push(`Not changed: the sources stay ${label}; ${id} can't be picked: ${ctx.jobSources?.find((s) => s.id === id)?.reason ?? 'not available on this daemon'}`);
+          continue;
+        }
+      }
       // Words that would lower a check never reach the brief through an input either (codex r1).
       if (v.kind === 'text' && lowersCheck(v.value)) {
+        refusedInputs.push(id);
         notes.push(`Not changed: ${def.label} would ask the job to drop a check, and its checks are its own`);
         continue;
       }
@@ -723,6 +797,7 @@ export function mergeRevision(
         continue;
       }
       if ((v.kind === 'text' || v.kind === 'url') && (typeof v.value !== 'string' || v.value.length > 4000)) {
+        refusedInputs.push(id);
         notes.push(`Not changed: ${id} is too long`);
         continue;
       }
@@ -731,6 +806,7 @@ export function mergeRevision(
           const u = new URL(v.value);
           if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('scheme');
         } catch {
+          refusedInputs.push(id);
           notes.push(`Not changed: ${v.value.slice(0, 80)} isn't an http(s) address`);
           continue;
         }
@@ -770,7 +846,7 @@ export function mergeRevision(
   const after7 = seatProtections(r);
   const pendingSeats = parent.question?.kind === 'lost_check' ? (parent.question.lostSeats ?? []) : [];
   const lostSeats = [...new Set([...before7, ...pendingSeats])].filter((k) => !after7.includes(k));
-  return { facts, notes, lost, lostSeats, unchanged: JSON.stringify(facts) === before };
+  return { facts, notes, refusedInputs, lost, lostSeats, unchanged: JSON.stringify(facts) === before };
 }
 
 // ── the QE skip, bound to the person's own words (§2.4, §9.2 (ac)) ─────────────────────────────────────────────────
@@ -857,11 +933,22 @@ export function demoShowOf(p: Pick<ArtifactProposal, 'words' | 'inputs' | 'detai
 export function inputLines(p: Pick<ArtifactProposal, 'inputs' | 'needs'>): string[] {
   const out: string[] = [];
   for (const [id, v] of Object.entries(p.inputs ?? {})) {
-    if (id === 'intent') continue;
+    if (id === 'intent' || v.kind === 'documents' || v.kind === 'sources') continue;
     const label = p.needs?.find((n) => n.id === id)?.label ?? id;
     if (v.kind === 'requirements') out.push(`${label}: ${v.refs.map((r) => `${r.repoId} ${r.key}`).join(', ')}`);
     else out.push(`${label}: ${v.value}`);
   }
+  return out;
+}
+
+/** Go always declares the card's documents, including none, so a retry cannot inherit files the card never showed. */
+export function jobInputsOfProposal(p: ArtifactProposal): { documents?: string[]; sources?: string[] } {
+  const out: { documents?: string[]; sources?: string[] } = { documents: [] };
+  if (p.needs?.some((n) => n.id === 'documents' && n.kind === 'documents')) {
+    out.documents = p.sentence?.tokens.find((t) => t.kind === 'documents')?.documents?.filter((s) => s.status === 'ok').map((s) => s.token) ?? [];
+  }
+  const sources = p.inputs?.['sources'];
+  if (p.needs?.some((n) => n.id === 'sources' && n.kind === 'sources')) out.sources = sources?.kind === 'sources' ? [...sources.ids] : [];
   return out;
 }
 
