@@ -2677,7 +2677,20 @@ export async function createServer(
   const unitVisible = (scope: EstateUnitScope): Promise<string[]> => projectVisible(scope.projectId, scope.repoId);
   // DES-KNOWLEDGE-DATA-001 §9.1: an app's knowledge query sees what a unit in the APP'S project sees (the same set).
   const appsKnowledgeVisible = (projectId: string): Promise<string[]> => projectVisible(projectId);
+  // (DES-CATALOG-002 CS4/CS10) Each run's source pick: recorded at launch (POST /runs), read by the broker, the unit's
+  // tool list and the estate relay, so a unit never reaches a registered source its job did not pick.
+  const runSourcePicks = new RunSourcePicks(join(crewStateHome(), 'mcp', 'run-source-picks.json'));
+  /** Every registered source and PM tracker id with its owning source's name: how the relay maps `source:<id>` to a pick. */
+  const sourceOwnerNames = async (): Promise<Array<{ id: string; name: string }>> => {
+    const out = (await dataGate.sources()).map((s) => ({ id: s.id, name: s.name }));
+    for (const e of await dataGate.pm.entries()) {
+      out.push({ id: e.id, name: e.name });
+      for (const t of e.trackers) out.push({ id: t.id, name: e.name });
+    }
+    return out;
+  };
   const mcpBroker = new McpBroker({
+    picks: runSourcePicks,
     registry: mcpRegistry,
     // DES-CATALOG-002 §2.3: a `detect-shape` run reaches nothing (its fence is its identity).
     fence: daemonRunFence((runId) => adapter.launchedWorkflowOfRun(runId)),
@@ -2691,6 +2704,8 @@ export async function createServer(
     estate: new EstateRelay({
       resolver: () => CoreAdapter.estateScopeResolver(),
       visible: unitVisible,
+      picks: runSourcePicks,
+      sourceNames: sourceOwnerNames,
       onProposal: (p) =>
         audit.record('estate.proposal.submitted', { id: `seat:${p.seat}`, kind: 'agent', trust: 'observer' }, {
           runId: p.runId,
@@ -2863,7 +2878,7 @@ export async function createServer(
       dataGate,
       // (DES-CATALOG-002 CS4) Each run's source pick, in the registered `mcp` entry (CS10's fence reads it), and the
       // folder a run's documents are staged in, outside the state home.
-      runSourcePicks: new RunSourcePicks(join(crewStateHome(), 'mcp', 'run-source-picks.json')),
+      runSourcePicks,
       runDocumentsRoot: runDocumentsRootDir(),
       mcpRegistryStore,
       sourceReads,

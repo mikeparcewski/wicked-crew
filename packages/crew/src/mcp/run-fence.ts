@@ -11,6 +11,21 @@
 
 import { randomUUID } from 'node:crypto';
 
+/** The pick store as the fence reads it (RunSourcePicks satisfies it). */
+export interface SourcePicks { get(runId: string): string[] | null }
+
+/** Whether a run may reach a registered source: no pick = the switches alone; a pick = only its names. A store that throws = false. */
+export function pickAllows(picks: SourcePicks | undefined, runId: string, sourceName: string): boolean {
+  try {
+    const ids = picks?.get(runId) ?? null;
+    return ids === null || ids.includes(sourceName);
+  } catch {
+    return false;
+  }
+}
+
+export const PICK_RULE = 'crew:source-pick';
+
 /**
  * A fenced run's id carries its fence (codex r1): every `detect-shape` run id starts with this prefix (a valid UUID head),
  * so the fence holds without any state, across a restart and whatever the engine's log can be read. An ordinary run

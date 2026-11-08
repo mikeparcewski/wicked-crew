@@ -109,11 +109,22 @@ function structureOf(s: GateSource): NonNullable<PackageSource['structure']> {
 /**
  * The package for a project's agents (module doc). `projectId: null` (a chat or run in no project) reaches only
  * sources set to every project, as the gate decides for a unit in no project.
+ *
+ * (CS10, DES-CATALOG-002 §2.d piece 4 ·4) `ctx.pick`, when an array, is the run's source pick: only sources whose
+ * name is in it are disclosed — AND only trackers whose PM source name is in it (otherwise an excluded source's
+ * name, keys, labels and links would still leak through `trackers`). `null` or absent discloses whatever the
+ * switches allow, as before. Today the callers are chats and Apps turns (no run), so none passes a pick yet; the
+ * parameter keeps the rule where the next run caller lands.
  */
-export async function knowledgePackageFor(ctx: { projectId: string | null; repoId?: string | null }, deps: KnowledgePackageDeps): Promise<KnowledgePackage> {
+export async function knowledgePackageFor(
+  ctx: { projectId: string | null; repoId?: string | null; pick?: readonly string[] | null },
+  deps: KnowledgePackageDeps,
+): Promise<KnowledgePackage> {
+  const pick = ctx.pick === undefined || ctx.pick === null ? null : new Set(ctx.pick);
   const sources: PackageSource[] = [];
   for (const s of [...(await deps.sources())].sort((a, b) => a.name.localeCompare(b.name))) {
     if (!agentMay(s.access, s, ctx.projectId, 'see')) continue;
+    if (pick !== null && !pick.has(s.name)) continue;
     const query = agentMay(s.access, s, ctx.projectId, 'query');
     const tools = s.tools
       .filter((t) => (t.disclosure === 'structure' || t.disclosure === 'none' ? true : t.disclosure === 'rows' ? query : false))
@@ -130,8 +141,13 @@ export async function knowledgePackageFor(ctx: { projectId: string | null; repoI
     }
   }
   const set = deps.trackers === undefined ? [] : await deps.trackers({ projectId: ctx.projectId, repoId: ctx.repoId ?? null }).catch(() => []);
+  // (CS10, DES-CATALOG-002 §2.d piece 4 ·4) A pick narrows the trackers too, by their PM source NAME: a tracker
+  // whose source the pick excludes is not disclosed (its source name, key, label and links would otherwise leak
+  // past an empty or partial pick, through `trackers`, even though `sources` was already filtered). `null`/absent
+  // pick discloses them all, as before. Filtered BEFORE the count and byte bounds so bounds apply to the disclosed.
+  const visibleSet = pick === null ? set : set.filter((t) => pick.has(t.source));
   // Bounded so the trackers alone always fit the package: 50 trackers, each with at most 8 ways it is linked.
-  const trackers: PackageTracker[] = set.slice(0, 50).map((t) => ({ source: t.source, system: t.system, key: t.key, label: t.label, via: t.via.slice(0, 8).map((v) => ({ ...v })) }));
+  const trackers: PackageTracker[] = visibleSet.slice(0, 50).map((t) => ({ source: t.source, system: t.system, key: t.key, label: t.label, via: t.via.slice(0, 8).map((v) => ({ ...v })) }));
   // And by their serialized bytes (repo ids can be long): at most 16 KiB, the rest left out from the end.
   while (trackers.length > 0 && Buffer.byteLength(JSON.stringify(trackers), 'utf8') > 16 * 1024) trackers.pop();
   return { package: KNOWLEDGE_PACKAGE, projectId: ctx.projectId, sources, ...(trackers.length > 0 ? { trackers } : {}) };

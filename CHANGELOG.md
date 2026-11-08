@@ -12,6 +12,17 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **A job reaches only the sources you picked (DES-CATALOG-002 CS10; no api-types change).** The pick recorded at
+  launch (CS4) is now enforced for every unit, attempt and re-plan of the run, by one predicate over registered
+  source names (SQL, Toolbox, PM and the web source). The unit's tool list leaves out an unpicked source's tools; a
+  direct call to one is refused before the engine's admission, the budget or any invocation, with rule
+  `crew:source-pick` ("this job did not pick support-pg; it reads only web"), recorded and published with the run's
+  other MCP calls. The estate relay drops recalled items derived from an unpicked source (PM trackers by their
+  owning source; an unmapped source fails closed), and the knowledge package takes an optional pick. A pick store
+  that cannot be read refuses every source. A reshape to a shape that takes no sources keeps the held run's pick.
+  Crew's own services (estate graph, memory, rules) and plain MCP servers are unaffected; a run without a pick
+  reads what the switches allow, as before.
+
 - **Review a change is judged only by seats that wrote none of it (DES-CATALOG-002 CS11; no api-types change).** A
   `review-change` launch reads the PR, branch or commit from its words and joins it to the crew runs that built it:
   the PR's delivered URL, its revisions, the run or pushed branch that is its head, or the branches containing the
