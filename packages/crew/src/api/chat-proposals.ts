@@ -92,6 +92,7 @@ import {
   SEAT_WORDS,
   seatProtections,
   briefOf,
+  inputLines,
   SELF_SEATED,
   type JobChat,
   type JobContext,
@@ -2297,21 +2298,35 @@ export class ChatProposals {
     }
   }
 
+  /** (CJ13) The last authors read per repository and words, for a short while: a revision and its rebuild, and a run
+   *  of swaps, read the change once (a failed read is never kept). */
+  private readonly reviewAuthorsSeen = new Map<string, { at: number; authors: readonly string[] }>();
+
   /**
    * (CJ13) A review of a change is never led or checked by a seat that wrote it: the launch drops the change's authors
    * from its roster, so the proposal's seats are chosen without them (the default lead included) and the passage names
-   * none of them. A read that fails, or that would leave no seat, keeps the roster: the launch then refuses by name
-   * (`no_independent_reviewer`, with its reduced-assurance offer).
+   * none of them. The change is read from the words the launch reads (the brief and its input lines). A read that
+   * fails, or that would leave no seat, keeps the roster: the launch then decides (it refuses an author named as
+   * primary, and a roster of authors only as `no_independent_reviewer`).
    */
-  private async reviewRoster(facts: Pick<JobFacts, 'card' | 'option' | 'words' | 'details' | 'repoRef'>, ctx: JobContext): Promise<JobContext> {
+  private async reviewRoster(facts: Pick<JobFacts, 'card' | 'option' | 'words' | 'details' | 'repoRef' | 'inputs'>, ctx: JobContext): Promise<JobContext> {
     const card = CATALOG_V2_CARDS.find((c) => c.id === facts.card);
     const r = card === undefined ? null : resolveOption(card.id, optionFor(card, facts.option), ctx.served);
     const repo = repoOf(facts, ctx.chat);
     if (r?.workflow !== REVIEW_CHANGE_WORKFLOW || repo === null || this.deps.reviewAuthors === undefined) return ctx;
-    const authors = await this.deps.reviewAuthors(repo.id, briefOf(facts)).catch(() => null);
-    if (authors === null || authors.length === 0) return ctx;
-    const roster = ctx.roster.filter((s) => !authors.includes(s.key));
-    return roster.length === 0 ? ctx : { ...ctx, roster };
+    const words = [briefOf(facts), ...inputLines({ inputs: facts.inputs })].join('\n\n');
+    const key = `${repo.id}\u0000${words}`;
+    const now = Date.now();
+    let authors = this.reviewAuthorsSeen.get(key);
+    if (authors === undefined || now - authors.at > 30_000) {
+      const read = await this.deps.reviewAuthors(repo.id, words).catch(() => null);
+      if (read === null) return ctx;
+      authors = { at: now, authors: read };
+      for (const [k, v] of this.reviewAuthorsSeen) if (now - v.at > 30_000) this.reviewAuthorsSeen.delete(k);
+      this.reviewAuthorsSeen.set(key, authors);
+    }
+    const roster = ctx.roster.filter((s) => !authors.authors.includes(s.key));
+    return roster.length === 0 || roster.length === ctx.roster.length ? ctx : { ...ctx, roster };
   }
 
   /** Resolve the revision's shape first, then load only the choices that its input checks need. */
@@ -2319,10 +2334,11 @@ export class ChatProposals {
     const shape = mergeRevision(parent, {
       ...(edits.card !== undefined ? { card: edits.card } : {}),
       ...(edits.option !== undefined ? { option: edits.option } : {}),
-      ...(edits.repoRef !== undefined ? { repoRef: edits.repoRef } : {}),
     }, ctx).facts;
     await this.loadJobSources(shape, ctx);
-    return mergeRevision(parent, edits, await this.reviewRoster(shape, ctx));
+    // (CJ13) The seats are checked against the authors of the change the revision names (its words, details, inputs
+    // and repository may all move the target), so it is merged once to read them.
+    return mergeRevision(parent, edits, await this.reviewRoster(mergeRevision(parent, edits, ctx).facts, ctx));
   }
 
   /** Job proposals are on: the flag, the catalog read and the operation. */

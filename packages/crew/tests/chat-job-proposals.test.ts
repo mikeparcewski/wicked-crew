@@ -467,10 +467,20 @@ describe('codex/pi r1 folds', () => {
     expect(open(r).seats).toMatchObject({ lead: 'pi', keys: ['pi', 'codex'] });
   });
 
-  it('a review whose every seat wrote the change keeps the roster, so the launch refuses it by name (CJ13)', async () => {
+  it('a review whose every seat wrote the change keeps the roster, so the launch decides (CJ13)', async () => {
     const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async () => ['claude', 'codex', 'pi'] });
     await pick(r, 'review-change', { words: 'review pull request 9' });
     expect(open(r).seats?.lead).toBe('claude');
+  });
+
+  it('a revision that names another change checks its seats against that change\'s authors, read once (CJ13)', async () => {
+    const asked: string[] = [];
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async (_repo, words) => { asked.push(words); return /\b10\b/.test(words) ? ['codex'] : ['claude']; } });
+    await pick(r, 'review-change', { words: 'review pull request 9' });
+    expect(open(r).seats?.lead).toBe('codex');
+    await swap(r, open(r).pid, { detail: { add: ['it is pull request 10'] }, lead: 'claude' } as ProposalRevisionEdits, 'pr10');
+    expect(open(r).seats).toMatchObject({ lead: 'claude', keys: ['claude', 'pi'] });
+    expect(asked.filter((w) => /\b10\b/.test(w))).toHaveLength(1);
   });
 
   it('an unreadable change, or another card, keeps the roster as it is (CJ13)', async () => {

@@ -15,8 +15,9 @@ mentioned only where a daemon release depends on them.
 - **A review of a change starts on a PR a crew run built (CJ13).** The job proposal chose the builder (the chat's lead)
   as its default lead, the launch dropped the change's authors from its roster, and Start failed with a 502 ("primary
   names a seat that is not in this launch's roster"). The proposal now reads the launch's own exclusion and resolves its
-  lead, the helpers it names and its lead swaps without the authors; a failed read, or a roster of authors only, keeps
-  the roster so the launch refuses by name with its reduced-assurance offer.
+  lead, the helpers it names and its lead swaps without the authors, read from the change the revision names (its words,
+  details, inputs and repository). A failed read, or a roster of authors only, keeps the roster, and the launch refuses
+  it as before.
 
 ### Added
 
