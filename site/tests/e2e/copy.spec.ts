@@ -8,34 +8,21 @@ import { bringIntoView } from './utils';
 test.use({ permissions: ['clipboard-read', 'clipboard-write'] });
 
 test.describe('install copy buttons', () => {
-  test('family installer copy button copies the command and shows feedback', async ({ page }) => {
+  test('family installer copy button copies the install and serve commands and shows feedback', async ({ page }) => {
     await page.goto('/');
-    const btn = page.getByRole('button', { name: 'Copy family installer command' });
+    const btn = page.getByRole('button', { name: 'Copy family installer and serve commands' });
     await bringIntoView(btn);
     await btn.click();
 
     await expect(btn).toHaveText('Copied');
     await expect
       .poll(() => page.evaluate(() => navigator.clipboard.readText()))
-      .toBe('npx wicked-installer');
+      .toBe('npx wicked-installer\nwicked-crew serve');
 
     // Feedback resets after ~1.4s.
     await expect(btn).toHaveText('Copy');
   });
 
-  test('direct install copy button copies both commands', async ({ page }) => {
-    await page.goto('/');
-    const btn = page.getByRole('button', { name: 'Copy direct install commands' });
-    await bringIntoView(btn);
-    await btn.click();
-
-    await expect(btn).toHaveText('Copied');
-    await expect
-      .poll(() => page.evaluate(() => navigator.clipboard.readText()))
-      .toBe('npm install -g wicked-crew\nwicked-crew serve');
-
-    await expect(btn).toHaveText('Copy');
-  });
 });
 
 /**
@@ -117,6 +104,12 @@ test.describe('the reviewed messaging', () => {
     expect(await text('#deliver')).toContain('Your data, through one gate. Agents read a database only where you allow it');
     // the garden floor is crew 0.18.0's REQUIRED_GARDEN_VERSION
     expect(await text('#get')).toContain('wicked-garden 12.66.1 or later');
+    // the install flow: the family installer, then wicked-crew serve, then the local URL
+    expect(await text('#get')).toContain('npx wicked-installer # picks crew, garden and the rest wicked-crew serve # then open http://127.0.0.1:7701');
+    expect(await text('#get')).toContain('then serves studio at http://127.0.0.1:7701');
+    // one install path: no crew-only npm install that would skip garden
+    expect(await text('#get')).not.toContain('npm install -g wicked-crew');
+    expect(await page.content()).not.toContain('npx wicked-crew serve');
     // What's new comes after the proofs
     const order = await page.evaluate(() => Array.from(document.querySelectorAll('section[id]')).map((s) => s.id));
     expect(order.indexOf('news')).toBeGreaterThan(order.indexOf('deliver'));
