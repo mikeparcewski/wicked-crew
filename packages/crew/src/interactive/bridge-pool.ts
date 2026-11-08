@@ -180,7 +180,16 @@ const INTERACTIVE_PACKAGE = 'wicked-interactive';
  * adopted (a sidecar that names it, a matching env) keeps serving until it restarts; the previous
  * daemon's shutdown reaps the bridges it spawned, so a normal upgrade starts a 0.15.x one.
  */
-export const INTERACTIVE_DEFAULT_RANGE = '^0.15.0';
+/**
+ * 0.16.0 (wicked-interactive#341): a demo cut keeps its history, `GET /d/:doc/api/demo/cut?version=N`
+ * reads an earlier cut and `POST /d/:doc/api/demo/restore` renders it as a new version; studio's
+ * "Make this the working version" and Undo on a cut call it through crew's proxy, and `POST /api/fork`
+ * refuses a document with a cut. A 0.15.x bridge has no restore route (404) and still forks a cut. The
+ * caret pins the minor, so `^0.15.0` never spawned 0.16.0: the floor follows. As with every floor that adds no env key,
+ * a 0.15.x bridge that is adopted keeps serving until it restarts (crew#1288); the previous daemon's shutdown reaps
+ * the bridges it spawned, so a normal upgrade starts a 0.16.x one.
+ */
+export const INTERACTIVE_DEFAULT_RANGE = '^0.16.0';
 /** The env override of the RANGE (not the package). */
 export const INTERACTIVE_SPEC_ENV = 'WICKED_INTERACTIVE_SPEC';
 /** The default spec — what the daemon spawns with no override. */

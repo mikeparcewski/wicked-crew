@@ -52,7 +52,7 @@
  *  - Gate labels (studio GateVerdict.tsx): "floor only" = a pass where the floor (incl. the repo
  *    checks) ran and no distinct judge reviewed it; "approved by default, not verified" = nothing
  *    gated the phase. The receipt explorer marks only the layers each label speaks about.
- *  - Needs wicked-garden >= 12.64.0 (the governed-worker base skill, and wicked-garden-apps for an app's chat),
+ *  - Needs wicked-garden >= 12.66.1 (the governed-worker base skill, and wicked-garden-apps for an app's chat),
  *    Node >= 22, a container runtime.
  *  - What's new = crew 0.17.0 (bundles studio 0.15.0), from CHANGELOG [Unreleased] and docs/data-sources.md:
  *    Apps (K5: a chat message is one apps-turn job, build -> check -> review on a distinct agent); data sources
@@ -486,7 +486,7 @@ const crewVersion = __WICKED_CREW_VERSION__;
           <ul class="needs" role="list">
             <li>Node 22 or later (24.12, 25.1 or later to upload files as data sources)</li>
             <li>A container runtime: Docker, Podman, Rancher Desktop, Colima or OrbStack</li>
-            <li>wicked-garden 12.64.0 or later, for the skills every agent follows</li>
+            <li>wicked-garden 12.66.1 or later, for the skills every agent follows</li>
           </ul>
           <p class="get-tos">
             <b>Terms of service:</b> crew drives CLIs you installed under your own accounts. Check

@@ -105,7 +105,7 @@ test.describe('the reviewed messaging', () => {
     // the data gate's fact card, in the Deliver beat
     expect(await text('#deliver')).toContain('Your data, through one gate. Agents read a database only where you allow it');
     // the garden floor names the release that ships the Apps skill
-    expect(await text('#get')).toContain('wicked-garden 12.64.0 or later');
+    expect(await text('#get')).toContain('wicked-garden 12.66.1 or later');
     // What's new comes after the proofs
     const order = await page.evaluate(() => Array.from(document.querySelectorAll('section[id]')).map((s) => s.id));
     expect(order.indexOf('news')).toBeGreaterThan(order.indexOf('deliver'));
