@@ -96,15 +96,26 @@ test.describe('the reviewed messaging', () => {
     // each row is exactly "<name> <line>": the space between them is the guard
     const news = (await page.locator('.news-list li').allTextContents()).map((t) => t.replace(/\s+/g, ' ').trim());
     expect(news.length).toBe(6);
-    expect(news[0]).toMatch(/^01 Apps Dashboards and small tools over your data, built by chat\./);
-    expect(news[2]).toMatch(/^03 What agents can read Switches only you set/);
-    expect(news[3]).toMatch(/^04 Trackers GitHub Issues and Jira/);
-    expect(news[5]).toMatch(/^06 Dashboards on Report Switch on “Show on Report”/);
-    // crew 0.17.0's scope: GitLab and Azure DevOps trackers are a later wave, never named as shipped
-    expect(news.join(' ')).not.toMatch(/GitLab|Azure DevOps/);
+    expect(news[0]).toMatch(/^01 Documents in Hand a job your PDFs, text or images\./);
+    expect(news[1]).toMatch(/^02 Reports with sources Research, Competitive, Due diligence/);
+    expect(news[2]).toMatch(/^03 Review a change \/review-change with a pull request/);
+    expect(news[3]).toMatch(/^04 Publish an app Publish builds an app’s container image on your machine/);
+    expect(news[4]).toBe('05 Phase plugins /plugin phase builds a plugin that adds a section to every job’s details, drawn from its events. Installing it asks you to approve each event topic it reads.');
+    // the scope qualifiers stay attached to their claims
+    expect(news[0]).toContain('A PDF with no readable text is set aside, with the reason');
+    expect(news[1]).toContain('A job names the data sources it may query, the public web included, and queries only those.');
+    expect(news[2]).toContain('judged by agents that wrote none of it');
+    expect(news[2]).toContain('Nothing is posted to the pull request.');
+    expect(news[3]).toContain('Signed-in viewers by default; a public app (every query public, no actions) gets an embed snippet.');
+    expect(news[5]).toMatch(/^06 Run cost Ask what 40 bug fixes a month would cost\./);
+    // crew 0.18.0's scope: plugins observe a job's events (no intercept hooks); publishing builds an image and
+    // deploys nothing; no Teams. None of these is ever named as shipped.
+    expect(news.join(' ')).not.toMatch(/intercept|Teams|deploys? (it|your app)|coming soon|adds? an? (step|check|review|gate|approval)/i);
+    // the counter names every card
+    expect(await page.locator('[data-car-count]').textContent()).toBe('1 of 6');
     // the data gate's fact card, in the Deliver beat
     expect(await text('#deliver')).toContain('Your data, through one gate. Agents read a database only where you allow it');
-    // the garden floor names the release that ships the Apps skill
+    // the garden floor is crew 0.18.0's REQUIRED_GARDEN_VERSION
     expect(await text('#get')).toContain('wicked-garden 12.66.1 or later');
     // What's new comes after the proofs
     const order = await page.evaluate(() => Array.from(document.querySelectorAll('section[id]')).map((s) => s.id));

@@ -52,15 +52,20 @@
  *  - Gate labels (studio GateVerdict.tsx): "floor only" = a pass where the floor (incl. the repo
  *    checks) ran and no distinct judge reviewed it; "approved by default, not verified" = nothing
  *    gated the phase. The receipt explorer marks only the layers each label speaks about.
- *  - Needs wicked-garden >= 12.66.1 (the governed-worker base skill, and wicked-garden-apps for an app's chat),
- *    Node >= 22, a container runtime.
- *  - What's new = crew 0.17.0 (bundles studio 0.15.0), from CHANGELOG [Unreleased] and docs/data-sources.md:
- *    Apps (K5: a chat message is one apps-turn job, build -> check -> review on a distinct agent); data sources
- *    (Postgres, MySQL, CSV/XLSX/SQLite uploads, GraphQL, REST, MCP; Test connection; Ask); the data gate (see on,
- *    query off and Postgres only, projects none; read-only, 10 s, 200 rows / 64 KB / 2,000-char cells, untrusted +
- *    cited src:); trackers (PM-1: GitHub Issues + Jira linked to projects and repos, the job's tracker set, start
- *    from an issue); structure projected value-free into estate, shapes approved by a person; studio's Show on
- *    Report (up to 4 apps). Not in it: GitLab/ADO trackers, Report's own figures as a source, more databases.
+ *  - Needs wicked-garden >= 12.66.1 (crew 0.18.0's REQUIRED_GARDEN_VERSION: learn's report mode, the draft kinds,
+ *    the editor cases), Node >= 22, a container runtime.
+ *  - What's new = crew 0.18.0 (bundles studio 0.16.0), from CHANGELOG [0.18.0] and DES-CATALOG-002 rev 8 (CS2-CS12):
+ *    documents as a job input (chat attachments: pdf, text, images; on Respond/Rework a pdf with no usable text is
+ *    struck with its reason and Start waits; Respond = RFP/RFI/questionnaire, Rework = condense/re-audience/
+ *    generalize/convert/refresh, a fidelity check before landing); the sourced-report cards
+ *    (research, competitive, due diligence, analyze documents, critique, estimate) and the web source through the
+ *    data gate, with the per-job source pick (a token in the job's sentence; pickAllows narrows registered sources
+ *    only: the repository graph, rules and mcp:estate stay available);
+ *    review-change (seats that wrote none of the change; nothing posted to the PR); apps publish (a local container
+ *    image after check + QE + consent; signed-in viewers by default; public only with every query public and no
+ *    action; the iframe snippet); phase plugins (the observe tier: a Details section from the run's events, consent
+ *    per topic); run cost (comparable terminal runs, 90-day window, median/p75/p90). Not in it: plugin intercept
+ *    hooks, Teams publishing, a keyed web-search provider.
  * The demo is scripted and says so. Never hardcode a version in prose (build-injected stamp only).
  * The words are the reviewed copy (messaging COPY.md rev 5, crew#1260): moved, split and visualized
  * here, never reworded into new claims.
@@ -171,14 +176,17 @@ const BENEFIT_3 = {
   p: 'Jobs launched as a feature, bug fix, migration, MCP server or editor plugin pass QE acceptance first, unless a labelled waiver or skip says otherwise; a plan you compose yourself, a build continued from a chat, or a saved workflow that does not ask for it, requires none. Every gate says plainly what a pass means: what it checked, and what was waived or skipped.',
 };
 
-// What's new (crew 0.17.0), one line each.
+// What's new (crew 0.18.0), one line each. Each card is one shipped item of the release (DES-CATALOG-002 rev 8:
+// CS4/CS12 documents and the source pick, CS5 respond and rework, CS3/CS9 sourced reports and the web source,
+// CS11 review-change, CS2 apps publish, CS7 phase plugins, CS6 run cost). A card is cut, never softened, if its item
+// did not ship.
 const NEW = [
-  { name: 'Apps', line: 'Dashboards and small tools over your data, built by chat. Each message is one job, and a different agent reviews it before it lands.' },
-  { name: 'Data sources', line: 'Postgres, MySQL, CSV, XLSX and SQLite uploads, GraphQL, REST and MCP in one registry, with Test connection, and “Ask a question of this data” for SQL.' },
-  { name: 'What agents can read', line: 'Switches only you set on each database: the structure, the rows (Postgres) and which projects. Every read is read-only, capped and cited.' },
-  { name: 'Trackers', line: 'GitHub Issues and Jira, linked to your projects and repositories. A job sees only the trackers of its project and repositories, and can start from an issue.' },
-  { name: 'Data as knowledge', line: 'Each database’s structure joins your code in wicked-estate, with no values; a profiled data shape becomes knowledge only when you approve it.' },
-  { name: 'Dashboards on Report', line: 'Switch on “Show on Report” and an app’s live numbers appear on studio’s Report, up to four at a time.' },
+  { name: 'Documents in', line: 'Hand a job your PDFs, text or images. Respond answers an RFP, RFI or questionnaire from them; Rework makes a new document from them. A PDF with no readable text is set aside, with the reason, and a fidelity check runs before either lands.' },
+  { name: 'Reports with sources', line: 'Research, Competitive, Due diligence, Analyze documents, Critique and Estimate cite a source for every claim, re-checked at that source. A job names the data sources it may query, the public web included, and queries only those.' },
+  { name: 'Review a change', line: '/review-change with a pull request returns approve, conditional or reject, with cited findings, judged by agents that wrote none of it. Nothing is posted to the pull request.' },
+  { name: 'Publish an app', line: 'Publish builds an app’s container image on your machine, after its own check and QE. Signed-in viewers by default; a public app (every query public, no actions) gets an embed snippet. You run the image where you choose.' },
+  { name: 'Phase plugins', line: '/plugin phase builds a plugin that adds a section to every job’s details, drawn from its events. Installing it asks you to approve each event topic it reads.' },
+  { name: 'Run cost', line: 'Ask what 40 bug fixes a month would cost. The answer comes from your own comparable runs (median, p75 and p90 spend and time), with every assumption named.' },
 ];
 
 // Injected at build time from packages/crew/package.json via astro.config.mjs (DT-7).
@@ -462,7 +470,7 @@ const crewVersion = __WICKED_CREW_VERSION__;
         <h2 id="news-h">What’s new.</h2>
         <div class="car-ctl" data-car-ctl>
           <button type="button" class="ctl-btn" data-car-prev aria-label="Previous release note">←</button>
-          <span class="car-count mono" data-car-count aria-live="polite">1 of 6</span>
+          <span class="car-count mono" data-car-count aria-live="polite">1 of {NEW.length}</span>
           <button type="button" class="ctl-btn" data-car-next aria-label="Next release note">→</button>
         </div>
       </div>
