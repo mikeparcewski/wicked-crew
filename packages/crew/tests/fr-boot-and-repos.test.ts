@@ -86,11 +86,14 @@ describe('boot (P9)', () => {
 });
 
 describe('the real server scrubs its four diagnostic routes (privacy backstop wired)', () => {
-  it.each(['health', 'diagnostics', 'system', 'roster'])('GET /api/v1/%s carries no home path', async (route) => {
+  it.each(['health', 'diagnostics', 'system'])('GET /api/v1/%s carries no home path', async (route) => {
     const res = await app.inject({ method: 'GET', url: `/api/v1/${route}` });
     expect(res.statusCode).toBeLessThan(500);
     expectNoHomePaths(res.body);
   });
+
+  // GET /roster is deliberately NOT rewritten: its rows go back verbatim as POST /runs `clisJson`, so a seat binary
+  // under the home dir keeps its real path (pinned by tests/integration/seat-bench-next-launch.test.ts on macOS).
 });
 
 describe('readRepoPath (C1)', () => {

@@ -600,7 +600,9 @@ export async function createServer(
   // test); costs one array push per route at boot, nothing per request.
   app.decorate('endpointManifest', installEndpointManifestHook(app));
   // FINDINGS B1/B2/C3a backstop: no home path leaves the read-only diagnostic routes, even one a new row forgets to scrub.
-  registerUiTextScrub(app, [`${API_PREFIX}/health`, `${API_PREFIX}/diagnostics`, `${API_PREFIX}/system`, `${API_PREFIX}/roster`]);
+  // NOT `/roster`: its rows are launch inputs (studio sends them back verbatim as `POST /runs` `clisJson`), so a seat's
+  // binary under the home dir must keep its real path there (macOS CI caught `~/…/node` failing to spawn).
+  registerUiTextScrub(app, [`${API_PREFIX}/health`, `${API_PREFIX}/diagnostics`, `${API_PREFIX}/system`]);
   const gateCache = new GateCache(app.log);
   // Standing orders (behaviour 10): armed once the routes (and so THE gate decision path) exist;
   // the event relays above it read it late-bound.
