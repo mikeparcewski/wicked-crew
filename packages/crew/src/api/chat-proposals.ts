@@ -2345,7 +2345,9 @@ export class ChatProposals {
     // are the person's choice and are never replaced (a choice of authors only is short, and its Start is refused).
     const named = edits.lead !== undefined || edits.addSeats !== undefined || edits.removeSeats !== undefined;
     const left = new Set(reviewCtx.roster.map((s) => s.key));
-    if (reviewCtx !== ctx && !named && merged.facts.seats !== null && !merged.facts.seats.some((k) => left.has(k))) {
+    const authors = new Set(ctx.roster.map((s) => s.key).filter((k) => !left.has(k)));
+    const seats = merged.facts.seats;
+    if (reviewCtx !== ctx && !named && seats !== null && seats.length > 0 && seats.every((k) => authors.has(k))) {
       const lead = merged.facts.lead !== null && left.has(merged.facts.lead) ? merged.facts.lead : null;
       return { ...merged, facts: { ...merged.facts, seats: null, lead } };
     }

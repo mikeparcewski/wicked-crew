@@ -517,6 +517,17 @@ describe('codex/pi r1 folds', () => {
     expect(open(r).seats?.keys).not.toContain('codex');
   });
 
+  it('only carried seats that all wrote the new change are picked again; an empty or unavailable choice stays short (CJ13)', async () => {
+    const roster = [{ key: 'claude', name: 'Claude' }, { key: 'codex', name: 'Codex' }, { key: 'pi', name: 'pi' }];
+    const r = rig({ roster, repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async () => ['claude'] });
+    await pick(r, 'review-change', { words: 'review pull request 9' });
+    expect(open(r).seats?.keys).toEqual(['codex', 'pi']);
+    // codex and pi leave the roster (not authors): a detail-only revision does not swap in the author.
+    r.roster = [{ key: 'claude', name: 'Claude' }];
+    await swap(r, open(r).pid, { detail: { add: ['look closely'] } } as ProposalRevisionEdits, 'gone');
+    expect(open(r).seats).toMatchObject({ lead: null, keys: [] });
+  });
+
   it('an unreadable change, or another card, keeps the roster as it is (CJ13)', async () => {
     const failing = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async () => { throw new Error('gh down'); } });
     await pick(failing, 'review-change', { words: 'review pull request 9' });
