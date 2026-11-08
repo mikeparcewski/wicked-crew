@@ -190,6 +190,7 @@ export class CreateLauncher implements ProposalDispatcher {
       brief: res.brief ?? res.what.title,
       style: this.deps.styleOf(res.what.entry),
       runId: d.identity.runId,
+      ...(res.shape !== undefined ? { shape: res.shape } : {}),
       // Filed under the chat as it is kept now (an archive id after a reuse), never the other chat that took the id.
       chatId: chatNow ?? binding.chatId,
       proposalId: d.pid,

@@ -70,7 +70,8 @@ import {
   type GroundingRepo,
 } from './doc-grounding.js';
 import type { CoreAdapter } from '../core/adapter.js';
-import type { CoreEvent } from '../core/types.js';
+import { draftPresetFor } from '../workflow-catalog/build-v2.js';
+import type { CoreEvent, ProposalShape } from '../core/types.js';
 import { awaitingHumanLine, describeStep, resyncRunUnits, ResyncGate, RunUnits } from './run-units.js';
 import {
   acpFallbackLine,
@@ -511,6 +512,8 @@ export interface BoundDraft {
   runId: string;
   chatId: string;
   proposalId: string;
+  /** Preserve the accepted card so its source-check promise reaches the engine. */
+  shape?: ProposalShape;
   artifactRef: string;
   /** The chat's scope repositories it is grounded on — filed or Unfiled. */
   repos: GroundingRepo[];
@@ -1425,6 +1428,19 @@ export async function startInteractiveDraftSubscriber(
         : {}),
     };
     inFlight.set(runId, flight);
+    const workflow = draftPresetFor(bound?.shape?.card, bound?.shape?.option);
+    // Older engines can default an unknown workflow to plain drafting: refuse before any work or files start.
+    if (workflow === 'interactive-draft-sourced') {
+      try {
+        const presets = await adapter.listPresets(doc.projectId);
+        if (!presets.some((p) => p.name === workflow)) throw new Error('preset missing');
+      } catch {
+        endFlight(runId);
+        const reason = "this engine has no sourced draft yet; update wicked-crew's engine";
+        emitStatus({ ...docScope(doc.documentId, doc.projectId), state: 'error', message: reason });
+        throw new Error(reason);
+      }
+    }
 
     // F-046: WHICH repositories is this document about? The create request's `repo_ref(s)` (the
     // proxy recorded them, keyed by this doc — waited for, bounded, when the create is still
@@ -1691,7 +1707,7 @@ export async function startInteractiveDraftSubscriber(
           packetLine,
         sessionId: runId,
         clisJson: docClisJson ?? opts.clisJson ?? JSON.stringify(rosterOf(adapter, opts.roster)),
-        workflow: INTERACTIVE_DRAFT_WORKFLOW,
+        workflow,
         // A project-bound doc's governed draft is FILED (P7 gate DEFECT-1): the engine attaches
         // the crew.run membership atomically with the launch, so the run shows up in the
         // project's activity feed instead of floating unattributed. An UNFILED doc (DES-UX-001
