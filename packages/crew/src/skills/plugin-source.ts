@@ -55,6 +55,12 @@ export const REQUIRED_GARDEN_VERSION = '12.66.1';
 /** The one install command the README, the findings and the refusals name. */
 export const GARDEN_INSTALL_COMMAND = 'npx wicked-installer install wicked-garden';
 
+/** crew#1447: the npm command that updates a garden installed with npm (discovery's npm-global tier finds it). */
+export const GARDEN_UPDATE_COMMAND = 'npm i -g wicked-garden@latest';
+
+/** crew#1447: the words a `skills.garden` finding uses when a garden that meets the floor is installed but not published (the Nerve Center keys its fix on them). */
+export const GARDEN_NOT_PUBLISHED = 'is installed but was not published';
+
 /** Home-independent spellings keep first-run diagnostics safe to show and share. */
 export const GARDEN_SOURCE_SEARCH_DETAIL = 'looked for WICKED_CREW_SKILLS_SOURCE; Claude marketplace cache (~/.claude/plugins/cache/wicked-garden/wicked-garden/<version>, or $CLAUDE_CONFIG_DIR); Claude installer copy (~/.claude/plugins/wicked-garden, or $CLAUDE_CONFIG_DIR); npm-global wicked-garden (launcher on PATH to ~/.../lib/node_modules/wicked-garden or ~/.../node_modules/wicked-garden, then beside the crew package); Codex plugin cache (~/.codex/plugins/cache/<marketplace>/wicked-garden/<version>, or $CODEX_HOME); none holds a .claude-plugin/plugin.json with a usable version';
 

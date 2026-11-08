@@ -78,7 +78,7 @@ import type { LaunchNotice } from '../core/adapter.js';
 import type { CoreEvent, SkillManifest, SkillPublishResult } from '../core/types.js';
 import { applySkillsSnapshotEnv, BOOT_SKILLS_SNAPSHOT, canonicalCrewStateHome, SKILLS_SNAPSHOT_ENGINE_ENV } from './engine-env.js';
 import { applyBaseSkillEnv, BASE_SKILL_REF_ENGINE_ENV, baseSkillPosture, normalizeBaseSkillRef, type BaseSkillConfig, type BaseSkillPolicy, type BaseSkillPosture } from './base-skill.js';
-import { compareSemver, GARDEN_INSTALL_COMMAND, parseSemver, REQUIRED_GARDEN_VERSION, SKILLS_SOURCE_ENV, type PluginSource } from './plugin-source.js';
+import { compareSemver, GARDEN_INSTALL_COMMAND, GARDEN_NOT_PUBLISHED, GARDEN_UPDATE_COMMAND, gardenMeetsMinimum, parseSemver, REQUIRED_GARDEN_VERSION, SKILLS_SOURCE_ENV, type PluginSource } from './plugin-source.js';
 import type { InstalledPluginState } from './installed.js';
 import { REFUSED_DIRNAME } from './root-names.js';
 import { SkillsSourceUnavailableError, type CurrentSnapshot, type SkillsStore } from './store.js';
@@ -134,6 +134,29 @@ export function gardenTooOldFinding(found: { version: string; path: string }, wh
     kind: 'skills.garden',
     severity: 'error',
     message: `wicked-garden ${found.version} (${what} at ${found.path}) is older than the required ${REQUIRED_GARDEN_VERSION}, so it is not used and every launch and onboarding is refused — install wicked-garden >= ${REQUIRED_GARDEN_VERSION} (\`${GARDEN_INSTALL_COMMAND}\`), then POST /skills/refresh-baseline and POST /skills/publish (or restart the daemon)`,
+  };
+}
+
+/**
+ * crew#1447: the blocking `skills.garden` finding for a PUBLISHED generation built from a garden older
+ * than the floor. A user who upgrades crew alone keeps the generation an older crew published (the
+ * boot ladder only re-verifies a published root), so the scripts this crew calls from the floor's
+ * garden were missing without a word. `installed` is the garden discovery finds now, when it meets
+ * the floor but was not published (`note` says why the boot refresh did not publish it).
+ */
+export function publishedGardenTooOldFinding(
+  published: { gen: number; version: string },
+  floor: string,
+  installed: { version: string; note: string | null } | null,
+): SkillsHealthFinding {
+  const remedy =
+    installed === null
+      ? `update it: \`${GARDEN_UPDATE_COMMAND}\` (or \`${GARDEN_INSTALL_COMMAND}\`), then restart \`wicked-crew serve\``
+      : `wicked-garden ${installed.version} ${GARDEN_NOT_PUBLISHED}${installed.note === null ? '' : ` (${installed.note})`}: POST /skills/refresh-baseline (resolve any conflict it reports) then POST /skills/publish, each with {expectedRevision}`;
+  return {
+    kind: 'skills.garden',
+    severity: 'error',
+    message: `the published skills (generation ${published.gen}) come from wicked-garden ${published.version}, older than the required ${floor}: scripts this crew calls are missing, so launches and onboarding are held — ${remedy}`,
   };
 }
 
@@ -265,6 +288,13 @@ export interface SkillsRuntimeOptions {
   installedTimeoutMs?: number;
   /** Clock for that cache (tests). */
   nowMs?: () => number;
+  /**
+   * crew#1447: the oldest garden a PUBLISHED generation may come from, or `null` to judge none. Default:
+   * {@link REQUIRED_GARDEN_VERSION} when the store discovers its garden automatically and no
+   * `WICKED_CREW_SKILLS_SOURCE` is set — an explicit or injected source is deliberate and is not
+   * judged, the same rule discovery applies (crew#753).
+   */
+  gardenFloor?: string | null;
 }
 
 /** crew#874: the env switch for the boot auto-refresh — ON unless set to `0` / `false` / `off`. */
@@ -316,9 +346,21 @@ export class SkillsRuntime {
   /** crew#1145: the generation the ladder last verified and exported — read for the seams' arm lines without a re-walk. */
   private lastVerified: CurrentSnapshot | null = null;
 
+  /** crew#1447: the floor the published generation is judged against (`null`: not judged). */
+  private readonly gardenFloor: string | null;
+  /** crew#1447: false while `startBoot`'s ladder (apply, then the auto-refresh) runs: the floor is judged only on what it lands. */
+  private ladderLanded = true;
+  /** crew#1447: the published generation is held from the engine (below the garden floor); cleared by the next record of a ladder outcome. */
+  private gardenHold = false;
+
   constructor(opts: SkillsRuntimeOptions) {
     this.store = opts.store;
     this.log = opts.log;
+    // An explicit source is judged first, and a store that cannot say it discovers live (a partial
+    // test double) is not judged.
+    const explicit = (process.env[SKILLS_SOURCE_ENV] ?? '') !== '';
+    const live = !explicit && typeof opts.store.discoversLive === 'function' && opts.store.discoversLive();
+    this.gardenFloor = 'gardenFloor' in opts ? opts.gardenFloor ?? null : live ? REQUIRED_GARDEN_VERSION : null;
     this.bootSnapshot = 'bootSnapshot' in opts ? opts.bootSnapshot : BOOT_SKILLS_SNAPSHOT;
     this.installedTtlMs = opts.installedTtlMs ?? 60_000;
     this.nowMs = opts.nowMs ?? (() => Date.now());
@@ -379,6 +421,51 @@ export class SkillsRuntime {
         });
     }
     return this.installedInFlight;
+  }
+
+  /**
+   * crew#1447: the published generation the engine is handed was built from a garden older than the
+   * floor — the blocking `skills.garden` finding (so the crew#753 gates hold launches and onboarding
+   * with 422 `garden_required`, and `/health` and the Nerve Center say it with the command), or `null`.
+   * Judged on the generation's own `snapshot.json` (cached per path), so a publish from a newer garden
+   * clears it. An unreadable or unparsable version is not judged here (the generation's own
+   * verification owns that).
+   */
+  publishedGardenFinding(): SkillsHealthFinding | null {
+    const floor = this.gardenFloor;
+    const current = this.lastHealth.state === 'published' ? this.lastHealth.current : null;
+    // While the boot ladder runs, an installed garden may be on its way to a publish: say nothing yet.
+    if (floor === null || current === null || !this.ladderLanded) return null;
+    const garden = this.publishedGarden(current.path);
+    if (garden === null || parseSemver(garden.plugin_version) === null || gardenMeetsMinimum(garden.plugin_version, floor)) return null;
+    const installed = this.installed();
+    const usable =
+      installed !== null && installed.baseline !== null && installed.baseline !== garden.baseline && gardenMeetsMinimum(installed.source.plugin_version, floor)
+        ? { version: installed.source.plugin_version, note: this.autoRefreshNote }
+        : null;
+    return publishedGardenTooOldFinding({ gen: current.gen, version: garden.plugin_version }, floor, usable);
+  }
+
+  /**
+   * crew#1447: below the floor, hold EVERY launch where the engine reads its input, not only the routes
+   * that consult the finding (a campaign or a bus launch calls the engine directly): the engine input
+   * becomes the `skills.garden` refusal path, the same one an older garden met at first seed (crew#753).
+   * The generation stays published and reported; the next export of a generation (a publish) re-judges.
+   * Called when the boot ladder lands (also by the daemon's inline boot) and after every later
+   * export. Says it in the log. Answers the finding, or `null` when nothing is held.
+   */
+  holdBelowGardenFloor(): SkillsHealthFinding | null {
+    const finding = this.publishedGardenFinding();
+    if (finding === null) return null;
+    const refusal = refusalPath(this.store.root, 'skills.garden');
+    applySkillsSnapshotEnv(refusal);
+    this.store.live.exported(null);
+    this.lastHealth = { ...this.lastHealth, engineInput: refusal };
+    this.gardenHold = true;
+    // What the engine is handed changed: the base skill is judged against nothing handed (codex r2).
+    this.refreshBaseSkill();
+    this.log(`[skills] skills.garden: ${finding.message}; ${SKILLS_SNAPSHOT_ENGINE_ENV}=${refusal}`);
+    return finding;
   }
 
   /**
@@ -458,12 +545,18 @@ export class SkillsRuntime {
       baseSkill: null,
     };
     const started = performance.now();
+    this.ladderLanded = false;
     this.bootRun = (async () => {
       try {
         await this.apply();
         await this.autoRefreshOnBoot();
+        // crew#1447: an upgrade of crew alone keeps the generation an older crew published; judge
+        // what the ladder landed, hold the engine input and say it once.
+        this.ladderLanded = true;
+        this.holdBelowGardenFloor();
       } catch (err) {
         // Both never throw by contract; a defect here must still leave a state that refuses launches loudly.
+        this.ladderLanded = true;
         this.recordConfigError(err);
       }
       onSettled?.(this.health(), Math.round(performance.now() - started));
@@ -482,7 +575,7 @@ export class SkillsRuntime {
    * the whole generation per seam on the boot path. Launch admission keeps {@link holdsSkill}.
    */
   exportedHolds(name: string): boolean {
-    if (this.lastHealth.state !== 'published' || this.lastVerified === null) return false;
+    if (this.lastHealth.state !== 'published' || this.lastVerified === null || this.gardenHold) return false;
     try {
       return this.store.snapshotSkillsOf(this.lastVerified)?.skills.includes(name) ?? false;
     } catch {
@@ -584,7 +677,7 @@ export class SkillsRuntime {
     const config = this.baseSkillConfig;
     if (config === null) return null;
     let published: { gen: number; skills: string[] } | null = null;
-    if (this.lastHealth.state === 'published') {
+    if (this.lastHealth.state === 'published' && !this.gardenHold) {
       try {
         // The ladder hands the generation it JUST verified (crew#852): re-verifying it here would
         // walk the whole generation again, synchronously, right after the paced export.
@@ -636,7 +729,7 @@ export class SkillsRuntime {
    * blocked, config-error, disabled) and on an unverifiable or unreadable generation — never a guess.
    */
   holdsSkill(name: string): boolean {
-    if (this.lastHealth.state !== 'published') return false;
+    if (this.lastHealth.state !== 'published' || this.gardenHold) return false;
     try {
       const current = this.store.currentSnapshotSkills();
       return current !== null && current.skills.includes(name);
@@ -678,7 +771,9 @@ export class SkillsRuntime {
     }
     const source = sourceFinding(manifest);
     const ahead = this.installedAheadFinding();
-    const extra = [...(source === null ? [] : [source]), ...(ahead === null ? [] : [ahead])];
+    const floor = this.publishedGardenFinding();
+    // The floor finding names an installed garden that meets it; "runs use the published generation" would contradict the hold.
+    const extra = [...(floor === null ? [] : [floor]), ...(source === null ? [] : [source]), ...(ahead === null || floor !== null ? [] : [ahead])];
     return this.withBaseSkill(extra.length === 0 ? base : { ...base, findings: [...base.findings, ...extra] });
   }
 
@@ -867,7 +962,7 @@ export class SkillsRuntime {
     } catch (err) {
       return this.recordConfigError(err);
     }
-    return this.exportCurrent(current);
+    return this.exportedWithinFloor(this.exportCurrent(current));
   }
 
   /**
@@ -882,7 +977,13 @@ export class SkillsRuntime {
     } catch (err) {
       return this.recordConfigError(err);
     }
-    return this.exportCurrent(current);
+    return this.exportedWithinFloor(this.exportCurrent(current));
+  }
+
+  /** crew#1447: a generation exported after the ladder landed is held when it, too, is below the floor. */
+  private exportedWithinFloor(health: SkillsHealth | null): SkillsHealth | null {
+    if (health === null || this.holdBelowGardenFloor() === null) return health;
+    return this.health();
   }
 
   /** The ladder's `config-error` rung: `current` would not verify — the engine input is pointed at the refusal path. */
@@ -955,6 +1056,7 @@ export class SkillsRuntime {
   /** Store the ladder's outcome; answer it as `health()` reports it (the live `skills.source` warning included). */
   private record(health: SkillsHealth, verified?: CurrentSnapshot): SkillsHealth {
     this.lastHealth = health;
+    this.gardenHold = false;
     this.lastVerified = health.state === 'published' ? (verified ?? null) : null;
     // The base skill is judged against THIS outcome (crew#554): a generation just published (or
     // refused) changes what the engine is handed, so the variable follows the ladder every time.

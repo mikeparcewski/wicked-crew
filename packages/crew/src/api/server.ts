@@ -789,6 +789,8 @@ export async function createServer(
     } else {
       await skillsRuntime.apply();
       await skillsRuntime.autoRefreshOnBoot();
+      // crew#1447: a published generation below the garden floor holds launches at the engine input.
+      skillsRuntime.holdBelowGardenFloor();
     }
   }
   if (skillsBoot !== null) {
