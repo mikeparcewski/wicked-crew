@@ -2412,10 +2412,11 @@ export class ChatProposals {
     await this.loadJobSources(facts, ctx);
     const reviewCtx = await this.reviewRoster(facts, ctx);
     if (reviewCtx !== ctx && facts.seats !== null) {
-      // (CJ13) Seats kept from a version that reviewed another change may now be its authors: those choices go, and
-      // the seats are picked again from the reviewers left (the lead stays when it still may lead).
+      // (CJ13) Seats kept from a version that reviewed another change may all be its authors: then the seats are
+      // picked again from the reviewers left (the lead stays when it still may lead). A choice that keeps any reviewer
+      // stands, filtered, and is short rather than replaced.
       const left = new Set(reviewCtx.roster.map((s) => s.key));
-      if (facts.seats.some((k) => !left.has(k))) facts = { ...facts, seats: null, lead: facts.lead !== null && left.has(facts.lead) ? facts.lead : null };
+      if (!facts.seats.some((k) => left.has(k))) facts = { ...facts, seats: null, lead: facts.lead !== null && left.has(facts.lead) ? facts.lead : null };
     }
     ctx = reviewCtx;
     if (r?.resolved.inputs.some((i) => i.id === 'documents')) {
