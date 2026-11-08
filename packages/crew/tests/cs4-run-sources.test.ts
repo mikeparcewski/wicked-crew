@@ -4,7 +4,7 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { checkSourcePick, projectSources, RUN_SOURCES_MAX, RunSourcePicks, runSourcesDeps } from '../src/api/run-sources.js';
+import { checkSourcePick, projectSources, RUN_SOURCES_MAX, RunSourcePicks, runSourcesDeps, webScopeReason } from '../src/api/run-sources.js';
 import { WebSource } from '../src/knowledge/adapters/web/source.js';
 import { DataGate } from '../src/knowledge/gate/gate.js';
 import type { McpRegistryFile, McpServerRecord } from '../src/mcp/registry-store.js';
@@ -117,6 +117,33 @@ describe('CS4 source choices and launch checks', () => {
     expect(await checkSourcePick('proj_a', ['web'], deps)).toEqual({ ok: false, refused: [{ id: 'web', reason: UNKNOWN }] });
     expect(setup).not.toHaveBeenCalled();
     expect(await projectSources(null, deps)).toEqual([]);
+  });
+
+  it('names the projects the web source is set up for when it is out of this project, still unpicked (e2e-1105 CJ3)', async () => {
+    const { file, gate } = fixture();
+    const named = { scopedElsewhere: (p: string | null) => gate.webScopedElsewhere(p), projectName: async (id: string) => (id === 'proj_a' ? 'Mikes' : null) };
+    // In its project, or set up for every project: not the cause, no reason.
+    expect(await gate.webScopedElsewhere('proj_a')).toBeNull();
+    expect(await webScopeReason('proj_a', named)).toBeUndefined();
+    // A no-project chat and another project: scoped elsewhere, named, and still never offered or picked there.
+    for (const project of [null, 'proj_b']) {
+      expect(await webScopeReason(project, named)).toBe('the web source is set up for project Mikes only');
+      expect((await gate.pickable(project)).some((s) => s.web === true)).toBe(false);
+    }
+    const web = file.servers.find((s) => s.kind === 'web')!;
+    web.agents!.projects = ['proj_a', 'proj_c'];
+    expect(await webScopeReason(null, named)).toBe('the web source is set up for projects Mikes and proj_c only');
+    web.agents!.projects = [];
+    expect(await webScopeReason(null, named)).toBe('the web source is not set up for any project: choose its projects in Settings → Sources');
+    web.agents!.everyProject = true;
+    expect(await webScopeReason(null, named)).toBeUndefined();
+    // Hidden from agents or disabled: not a scope question, so the plain fallback stands.
+    web.agents!.everyProject = false;
+    web.agents!.see = false;
+    expect(await gate.webScopedElsewhere(null)).toBeNull();
+    web.agents!.see = true;
+    web.enabled = false;
+    expect(await gate.webScopedElsewhere(null)).toBeNull();
   });
 
   it('labels and orders web by the gate flag when its registered name differs', async () => {

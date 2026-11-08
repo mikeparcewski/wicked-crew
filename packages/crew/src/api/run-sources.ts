@@ -34,6 +34,22 @@ export async function projectSources(projectId: string | null, deps: RunSourcesD
     .map((s) => ({ id: s.id, label: s.web === true ? 'the web' : s.id, ...(s.web === true ? { web: true as const } : {}), ...(s.reason !== undefined ? { reason: s.reason } : {}) }));
 }
 
+/**
+ * (e2e-1105 CJ3) Why the web can't be read in `projectId` when it is installed but set up for other projects only:
+ * "the web source is set up for project X only" (names when known, else ids). `undefined` when that is not the cause.
+ */
+export async function webScopeReason(
+  projectId: string | null,
+  deps: { scopedElsewhere(projectId: string | null): Promise<string[] | null>; projectName?(projectId: string): Promise<string | null> },
+): Promise<string | undefined> {
+  const ids = await deps.scopedElsewhere(projectId);
+  if (ids === null) return undefined;
+  if (ids.length === 0) return 'the web source is not set up for any project: choose its projects in Settings → Sources';
+  const names = await Promise.all(ids.map(async (id) => (await deps.projectName?.(id).catch(() => null)) ?? id));
+  if (names.length === 1) return `the web source is set up for project ${names[0]} only`;
+  return `the web source is set up for projects ${names.slice(0, -1).join(', ')} and ${names[names.length - 1]} only`;
+}
+
 export async function checkSourcePick(
   projectId: string | null,
   ids: readonly string[],

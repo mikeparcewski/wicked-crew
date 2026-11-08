@@ -168,6 +168,8 @@ export interface JobContext {
   documents?: ProposalSource[];
   /** Sources in display order; a reason means the source cannot be picked. Absent = no list. */
   jobSources?: Array<{ id: string; label: string; reason?: string; web?: true }>;
+  /** (e2e-1105 CJ3) Why the web is not in `jobSources` when it is installed for other projects only. */
+  webReason?: string;
   answers?: string;
   request?: { id: string; digest: string };
   /** The daemon's QE acceptance setting is off: QE is not shown as a check (the launch would skip it by setting). */
@@ -330,7 +332,7 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     if (defaultWeb) {
       const web = ctx.jobSources?.find((s) => s.web === true);
       if (web !== undefined && web.reason === undefined) ids = [web.id];
-      else notes.push(`the web can't be read: ${web?.reason ?? 'not available on this daemon'}`);
+      else notes.push(`the web can't be read: ${web?.reason ?? ctx.webReason ?? 'not available on this daemon'}`);
     }
     facts = { ...facts, inputs: { ...facts.inputs, sources: { kind: 'sources', ids } } };
   }

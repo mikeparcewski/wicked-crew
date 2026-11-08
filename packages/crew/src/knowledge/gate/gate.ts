@@ -249,6 +249,17 @@ export class DataGate {
     return out;
   }
 
+  /**
+   * (e2e-1105 CJ3) The project ids the web source is set up for, when it is installed, enabled and seen by agents but
+   * not for `projectId` (scoped to other projects, or to none); otherwise `null`. Only to name why the web can't be
+   * read here: `pickable` still omits it, so it is never offered or picked in this project.
+   */
+  async webScopedElsewhere(projectId: string | null): Promise<string[] | null> {
+    const web = await this.webGate.entry();
+    if (web === null || !web.enabled || !web.access.see || agentMay(web.access, { ...web, queryable: true }, projectId, 'see')) return null;
+    return [...web.access.projects];
+  }
+
   /** Whether the broker hands `mcp:<server>/…` to the gate. */
   owns(server: string): Promise<boolean> {
     return isGatedSource(this.deps.store, server);
