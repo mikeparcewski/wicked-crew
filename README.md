@@ -68,7 +68,7 @@ Start** bundle:
 ```bash
 npx wicked-installer        # pick "Quick Start" (wicked-crew + wicked-bus + wicked-estate,
                             # with wicked-garden + wicked-vault added as crew's requirements)
-wicked-crew serve           # or `npx wicked-crew serve` if the npm global bin dir is not on PATH
+wicked-crew serve           # start the daemon
 # then open http://127.0.0.1:7701
 ```
 
@@ -76,7 +76,9 @@ The installer puts estate's prebuilt binaries (and uv, when astral's installer p
 which is **not** on macOS's default PATH — put the directory on PATH so the daemon and your shell find
 them: macOS (zsh) `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile` then open a new
 terminal; Linux (bash) the same line into `~/.profile`; Windows `%USERPROFILE%\.local\bin` (astral's
-uv installer adds it to the user PATH; otherwise add it via Environment Variables).
+uv installer adds it to the user PATH; otherwise add it via Environment Variables). If your shell
+can't find `wicked-crew` itself, npm's global bin directory is not on PATH: add `$(npm prefix -g)/bin`
+(macOS, Linux) or the directory `npm prefix -g` prints (Windows).
 
 Uploading a file or a SQLite database as a data source needs Node.js 24.12, 25.1 or later. The
 container runtime (Rancher Desktop, Docker, Podman, Colima or OrbStack) must be running:
@@ -91,12 +93,15 @@ defined but its seat is benched by default, and a local model or custom
 binary needs your own image (`WICKED_SEAT_IMAGE_<CLI>`, offline seats only). `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead; there, only
 claude and codex are given governed work.
 
-To install crew on its own, install its requirements first (uv from https://docs.astral.sh/uv/,
-then `npx wicked-installer install wicked-estate wicked-garden`), then:
+To install crew by hand instead (advanced), install its requirements first: uv from
+https://docs.astral.sh/uv/, then wicked-estate and **wicked-garden 12.66.1 or later** (crew refuses
+every launch until it finds one):
 
 ```bash
-npm install -g wicked-crew     # or run it directly: npx wicked-crew serve
+npx wicked-installer install wicked-estate wicked-garden
+npm install -g wicked-crew
 wicked-crew serve
+# then open http://127.0.0.1:7701
 ```
 
 **crew needs wicked-garden ≥ 12.66.1.** Garden ships the skills every governed worker follows,
@@ -167,10 +172,11 @@ operator: <reason>" everywhere. To require it even when the score would waive it
 
 ### Start on login
 
-A daemon started by hand dies with the machine. Register it as a per-user login service instead:
+A daemon started by hand dies with the machine. Register it as a per-user login service instead. The
+service needs a durable install of crew, which the installer's global install (or `npm install -g
+wicked-crew`) is and the npx cache is not:
 
 ```bash
-npm install -g wicked-crew                 # the service needs a durable install, not the npx cache
 wicked-crew serve --install-service        # add the serve options you want, e.g. --port 7702
 wicked-crew status                         # the daemon's runs once it is up
 wicked-crew serve --uninstall-service      # stop and remove it
@@ -499,7 +505,7 @@ which studio consumes as a normal dependency. No source coupling in either direc
 
 Crew still ships a default skin. `packages/crew` declares `wicked-studio` as a devDependency
 whose package carries only its built `dist/`; the release build copies that artifact into the
-daemon's serving tree, so `npx wicked-crew serve` keeps the one-command local UX.
+daemon's serving tree, so `wicked-crew serve` keeps the one-command local UX.
 
 ## A project is a context: one code graph over all its repos *(crew 0.7.0)*
 
