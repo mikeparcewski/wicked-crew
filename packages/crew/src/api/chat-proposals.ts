@@ -61,8 +61,11 @@ import type {
   ProposalRevisionEdits,
   ProposalShape,
   ProposalIdentity,
+  ProposalNeed,
+  ProposalQuestion,
   ProposalResult,
   ProposalSource,
+  ProposalToken,
   ProposalTime,
   SessionView,
 } from '../core/types.js';
@@ -94,6 +97,7 @@ import {
 } from './chat-jobs.js';
 import { artifactExists, artifactHead, chatMount, parseArtifactRef, UNFILED_MOUNT } from './chat-context.js';
 import { ATTACHMENT_MAX_FILE_BYTES } from './chat-attachments.js';
+import { documentPathPlan, type PacketDeps } from '../interactive/source-packet.js';
 import { tornTailPrefix } from './chat-transcripts.js';
 import type { JobTurnContext, MakeDigest } from './chat-scope.js';
 import { catalogDigest, detect, detectable } from '../workflow-catalog/detect.js';
@@ -376,6 +380,8 @@ export interface ProposalDispatch {
 
 /** One operation's launcher (A3 create, A5 refine, A7 theme, A8 demo register theirs). */
 export interface ProposalDispatcher {
+  /** The create path's actual readers, so proposal authorization never guesses from attachment metadata. */
+  documentPacketDeps?(): PacketDeps;
   /** Whether the run this identity names already exists (it is then adopted, never started again). */
   find(identity: ProposalIdentity): Promise<boolean>;
   /** Start it, with `identity.runId` as the launch's `sessionId`. Called only when {@link find} said no, under the
@@ -422,6 +428,11 @@ export class LaunchOnceRegistry {
 
   register(kind: ArtifactProposalKind, dispatcher: ProposalDispatcher): void {
     this.dispatchers.set(kind, dispatcher);
+  }
+
+  /** Share the registered create launcher's readers with its proposal's document plan. */
+  documentPacketDeps(): PacketDeps | null {
+    return this.dispatchers.get('create')?.documentPacketDeps?.() ?? null;
   }
 
   has(kind: ArtifactProposalKind): boolean {
@@ -1218,6 +1229,8 @@ export class ChatProposals {
       personNamed: boolean;
       /** Jobs admit whole attachments up to the upload cap and read only files and documents. */
       jobDocuments?: boolean;
+      /** Draft documents are sized by their shared packet plan after scope authorization. */
+      packetDocuments?: boolean;
     },
   ): Promise<ProposalSource[]> {
     const out: ProposalSource[] = [];
@@ -1272,7 +1285,7 @@ export class ChatProposals {
         const a = this.deps.attachments(ctx.chatId).find((x) => x.id === id);
         if (a === undefined) strike(`attachment:${id}`, `attachment ${id.slice(0, 12)}`, 'not a file attached to this chat');
         // The document packet keeps its 512 KB cap; a job stages whole files up to the upload cap.
-        else if (typeof a.bytes === 'number' && a.bytes > (ctx.jobDocuments === true ? ATTACHMENT_MAX_FILE_BYTES : 512 * 1024)) strike(`attachment:${a.id}`, a.name, ctx.jobDocuments === true ? 'too large for a job document (over 10 MB)' : 'too large for a document\'s sources (over 512 KB)');
+        else if (ctx.packetDocuments !== true && typeof a.bytes === 'number' && a.bytes > (ctx.jobDocuments === true ? ATTACHMENT_MAX_FILE_BYTES : 512 * 1024)) strike(`attachment:${a.id}`, a.name, ctx.jobDocuments === true ? 'too large for a job document (over 10 MB)' : 'too large for a document\'s sources (over 512 KB)');
         else push({ token: `attachment:${a.id}`, label: a.name, status: 'ok' });
         continue;
       }
@@ -1362,11 +1375,19 @@ export class ChatProposals {
     return this.authorizeDocumentsAt(chatId, tokens, this.deps.records(chatId), '\u0000');
   }
 
-  private async authorizeDocumentsAt(chatId: string, tokens: readonly string[], records: readonly ChatTranscriptRecord[], turnId: string): Promise<ProposalSource[]> {
+  private async authorizeDocumentsAt(chatId: string, tokens: readonly string[], records: readonly ChatTranscriptRecord[], turnId: string, packetDocuments = false, cache = false): Promise<ProposalSource[]> {
     tokens = tokens.slice(0, 20);
     const chat = this.deps.chat(chatId);
     if (chat === null) return [...new Set(tokens.map((t) => t.trim()))].map((token) => ({ token, label: token.slice(0, 40), status: 'struck', reason: 'the chat has ended' }));
-    return this.resolveSources(tokens, { chatId, turnId, records, ...bindingOf(records, turnId), chat, words: personWords(records, turnId), personNamed: false, jobDocuments: true });
+    const scoped = await this.resolveSources(tokens, { chatId, turnId, records, ...bindingOf(records, turnId), chat, words: personWords(records, turnId), personNamed: false, jobDocuments: true, packetDocuments });
+    if (!packetDocuments) return scoped;
+    const deps = this.deps.registry.documentPacketDeps();
+    const planned = deps === null ? [] : await documentPathPlan(scoped.filter((s) => s.status === 'ok').map((s) => s.token), chatId, deps, { cache });
+    return scoped.map((s) => {
+      if (s.status !== 'ok') return s;
+      const plan = planned.find((p) => p.token === s.token);
+      return plan?.status === 'ok' ? s : { ...s, status: 'struck', reason: plan?.reason ?? 'document packet readers are unavailable' };
+    });
   }
 
   // ── the answer ───────────────────────────────────────────────────────────────────────────────────────────────────
@@ -1676,7 +1697,7 @@ export class ChatProposals {
   private async firstGone(chatId: string, p: ArtifactProposal): Promise<string | null> {
     let runs: SessionView[] | null = null;
     const documents = p.sentence?.tokens.flatMap((t) => t.kind === 'documents' ? t.documents ?? [] : []) ?? [];
-    const checked = documents.length === 0 ? [] : await this.authorizeDocuments(chatId, documents.filter((s) => s.status === 'ok').map((s) => s.token));
+    const checked = documents.length === 0 ? [] : await this.authorizeDocumentsAt(chatId, documents.filter((s) => s.status === 'ok').map((s) => s.token), this.deps.records(chatId), '\u0000', p.kind === 'create');
     const struck = checked.find((s) => s.status === 'struck');
     if (struck !== undefined) return `${struck.label} cannot be used (${struck.reason})`;
     // A3: a repository the card names must still be registered (never silently dropped from the launch).
@@ -2304,8 +2325,22 @@ export class ChatProposals {
     const shape: ProposalShape = { card: card.id, option: r.option?.id ?? null, depth: null, by: facts.by, source: facts.source, ...(facts.guess !== undefined ? { guess: facts.guess } : {}) };
     const kindTok = { id: 'kind', kind: (card.variant !== undefined ? 'option' : 'card') as 'option' | 'card', label: nounOf(card, shape.option), swap: null };
     const checksTok = { id: 'checks', kind: 'checks' as const, label: checksLabel(r.resolved.gate), swap: null };
+    const documentsInput = r.resolved.inputs.find((i) => i.id === 'documents');
+    const documents = ctx.documents ?? [];
+    const ok = documents.filter((s) => s.status === 'ok');
+    const label = `${ok.length} document${ok.length === 1 ? '' : 's'}`;
+    const needs: ProposalNeed[] = documentsInput === undefined ? [] : [{ ...documentsInput, status: ok.length > 0 ? 'met' : 'missing', value: label }];
+    const why = documents.find((s) => s.status === 'struck')?.reason;
+    const question: ProposalQuestion | null = documentsInput?.required === true && ok.length === 0
+      ? { kind: 'missing', text: `Which documents?${why !== undefined ? ` ${why}` : ''}`, choices: [] }
+      : null;
+    const documentsTok: ProposalToken[] = documentsInput === undefined ? [] : [{ id: 'documents', kind: 'documents', label, swap: null, documents }];
     return {
       ...made,
+      // These tokens passed the document packet's plan, including PDF text and the shared budget. Keep that
+      // decision rather than applying the legacy source count cap or CS4's larger job limits.
+      ...(documentsInput !== undefined ? { sources: [...made.sources, ...ok], inputs: { ...facts.inputs }, needs } : {}),
+      blocked: made.blocked ?? question?.text ?? null,
       pid,
       turnId: ctx.turnId,
       // `what.entry` stays the document entry the create launcher reads its style from (codex r1); the card is in `shape`.
@@ -2317,9 +2352,9 @@ export class ChatProposals {
       gate: [...r.resolved.gate],
       words: facts.words,
       details: [...facts.details],
-      sentence: { text: `I'll make {kind} from this conversation, filed in ${made.filedIn.label}, checked by {checks}.`, tokens: [kindTok, checksTok], notes: [...ctx.notes], ask: made.blocked === null ? 'Start?' : null },
+      sentence: { text: `I'll make {kind} from this conversation${documentsInput !== undefined ? ', reading {documents}' : ''}, filed in ${made.filedIn.label}, checked by {checks}.`, tokens: [kindTok, ...documentsTok, checksTok], notes: [...ctx.notes], ask: question?.text ?? (made.blocked === null ? 'Start?' : null) },
       suggestions: [],
-      question: null,
+      question,
       revises: ctx.revises,
       lineage: ctx.lineage ?? pid,
       ...(ctx.answers !== undefined ? { answers: ctx.answers } : {}),
@@ -2331,8 +2366,6 @@ export class ChatProposals {
   private async proposalOf(chatId: string, pid: string, facts: JobFacts, ctx: JobContext, records: readonly ChatTranscriptRecord[], allowHidden = false, previous?: ArtifactProposal | null): Promise<ArtifactProposal> {
     const card = CATALOG_V2_CARDS.find((c) => c.id === facts.card);
     const r = card === undefined ? null : resolveOption(card.id, optionFor(card, facts.option), ctx.served);
-    // An unsure reading holds no Start wherever the proposal is rebuilt (a Go's edits, a refresh; codex r4).
-    if (r !== null && proposalKindOf(r) === 'create') return withAskOverlay(await this.documentProposal(chatId, pid, facts, ctx, records));
     await this.loadJobSources(facts, ctx);
     if (r?.resolved.inputs.some((i) => i.id === 'documents')) {
       if (facts.inputs['documents'] === undefined) {
@@ -2348,8 +2381,10 @@ export class ChatProposals {
         facts = { ...facts, inputs: { ...facts.inputs, documents: { kind: 'documents', tokens } } };
       }
       const input = facts.inputs['documents'];
-      ctx = { ...ctx, documents: await this.authorizeDocumentsAt(chatId, input?.kind === 'documents' ? input.tokens : [], records, ctx.turnId ?? '\u0000') };
+      ctx = { ...ctx, documents: await this.authorizeDocumentsAt(chatId, input?.kind === 'documents' ? input.tokens : [], records, ctx.turnId ?? '\u0000', r !== null && proposalKindOf(r) === 'create', true) };
     }
+    // An unsure reading holds no Start wherever the proposal is rebuilt (a Go's edits, a refresh; codex r4).
+    if (r !== null && proposalKindOf(r) === 'create') return withAskOverlay(await this.documentProposal(chatId, pid, facts, ctx, records));
     return withAskOverlay(resolveJob(facts, ctx, { allowHidden }));
   }
 

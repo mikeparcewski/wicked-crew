@@ -64,6 +64,11 @@ export interface CreateLauncherDeps {
 export class CreateLauncher implements ProposalDispatcher {
   constructor(private readonly deps: CreateLauncherDeps) {}
 
+  /** Proposal authorization uses these same readers, including a runtime's custom attachment store. */
+  documentPacketDeps(): PacketDeps {
+    return this.deps.packetDeps;
+  }
+
   async find(identity: ProposalIdentity): Promise<boolean> {
     return this.deps.runExists(identity.runId);
   }
@@ -177,6 +182,10 @@ export class CreateLauncher implements ProposalDispatcher {
       },
       this.deps.packetDeps,
     );
+    // Bytes can change after Go's authorization. A promised document lost at staging must hold the draft too.
+    const promised = new Set(res.sentence?.tokens.flatMap((t) => t.kind === 'documents' ? (t.documents ?? []).filter((s) => s.status === 'ok').map((s) => s.token) : []) ?? []);
+    const lost = packet.struck.find((s) => promised.has(s.token));
+    if (lost !== undefined) throw new Error(`${lost.token} cannot be used (${lost.reason})`);
     // Read again after the packet's awaits: a document retired meanwhile is refused here, not drafted (xreview r5).
     refuseUnanswerable();
     this.deps.bindings.addPacket(ref.ref, packet.canonical, packet.tokens);
@@ -190,6 +199,7 @@ export class CreateLauncher implements ProposalDispatcher {
       brief: res.brief ?? res.what.title,
       style: this.deps.styleOf(res.what.entry),
       runId: d.identity.runId,
+      ...(res.shape !== undefined ? { shape: res.shape } : {}),
       // Filed under the chat as it is kept now (an archive id after a reuse), never the other chat that took the id.
       chatId: chatNow ?? binding.chatId,
       proposalId: d.pid,

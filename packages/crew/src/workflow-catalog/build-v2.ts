@@ -195,6 +195,16 @@ export function proposalOnly(steps: readonly ReadStep[], delivers: CatalogResolv
   return steps.slice(lastWrite).some((s) => unconditionalGate(s.gate));
 }
 
+/** Share the source-check decision with the launcher so a document's displayed gates match its run. */
+export function draftPresetFor(
+  card: string | null | undefined,
+  option: string | null | undefined,
+): 'interactive-draft' | 'interactive-draft-sourced' {
+  // Every option of these cards promises fidelity to its sources (the option is part of the contract for when one does not).
+  void option;
+  return card === 'respond' || card === 'rework' ? 'interactive-draft-sourced' : 'interactive-draft';
+}
+
 /** The gates a plan carries (rubrics, consent, the walkthrough pins), its instruments and its launch kind. */
 export function derivedGate(
   launch: WorkflowCatalogLaunch,
@@ -203,6 +213,8 @@ export function derivedGate(
   seeded: readonly CatalogGateId[],
   improve: boolean,
   delivers: CatalogResolved['delivers'],
+  card?: string | null,
+  option?: string | null,
 ): CatalogGateId[] {
   const out = new Set<CatalogGateId>();
   if (requiresQe) out.add('qe-acceptance');
@@ -210,7 +222,10 @@ export function derivedGate(
     if (s.rubric !== null && RUBRICS.has(s.rubric as CatalogGateId)) out.add(s.rubric as CatalogGateId);
     if (s.gate === 'consent_before') out.add('install-consent');
   }
-  if (launch.kind === 'document') out.add('draft-floor');
+  if (launch.kind === 'document') {
+    out.add('draft-floor');
+    if (draftPresetFor(card, option) === 'interactive-draft-sourced') out.add('fidelity-to-source');
+  }
   if (launch.kind === 'compose') out.add('traces-to-requirements');
   if (launch.kind === 'demo') out.add('walkthrough');
   if (improve && proposalOnly(steps, delivers)) out.add('proposal-only');
@@ -372,7 +387,7 @@ export function resolveOption(cardId: string, optionId: string | null, served: S
     }
   }
   const read = readSteps(steps, served.entries);
-  const gate = status === 'coming_soon' ? [...seededGate] : derivedGate(launch, read, requiresQe, seededGate, card.category === 'improve', delivers);
+  const gate = status === 'coming_soon' ? [...seededGate] : derivedGate(launch, read, requiresQe, seededGate, card.category === 'improve', delivers, card.id, option?.id);
   const hint = legacyHint(launch);
   const defaultOption = options.length > 0 ? options.find((o) => o.id === card.variant!.default) ?? null : null;
   const defaultLaunch = defaultOption?.launch ?? card.launch ?? { kind: 'none' };

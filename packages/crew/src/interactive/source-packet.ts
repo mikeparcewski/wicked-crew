@@ -32,7 +32,7 @@ import { realpathSync } from 'node:fs';
 
 import type { ArtifactProposal, ChatTranscriptRecord, SessionView } from '../core/types.js';
 import { ARTIFACT_REF, parseArtifactRef, UNFILED_MOUNT } from '../api/chat-context.js';
-import { extractPdfText } from '../api/chat-attachments.js';
+import { ATTACHMENT_MAX_FILE_BYTES, extractPdfText } from '../api/chat-attachments.js';
 import { fenced, type RunBrief } from '../api/run-brief.js';
 import { readBeneath, statBeneath } from '../api/beneath.js';
 import { PACKET_NAME } from './doc-binding.js';
@@ -74,6 +74,7 @@ export interface PacketFile {
 export interface PacketManifestEntry {
   token: string;
   files: Array<{ file: string; sha256: string; bytes: number }>;
+  note?: string;
 }
 
 export interface SourcePacket {
@@ -247,6 +248,12 @@ export async function readStagedDocument(
  *  `extract` is the text extractor (the real {@link extractPdfText} by default; a test may inject one to prove it is
  *  not called when there is no room). Shared so every caller derives a pdf's text the same way (slice A;
  *  DESIGN §2.d piece 2 "PDFs"). */
+/** The first line of every pdf text derivative: ONE spelling, so a held derivative is recognised by the same words
+ *  that made it (CS5's canonical retry matches on it). */
+export function pdfDerivativeLabel(originalName: string): string {
+  return `Extracted text of ${originalName} (may be lossy or incomplete; quote the original's page when a figure matters).`;
+}
+
 export type PdfDerivative =
   | { kind: 'text'; bytes: Buffer; cut: boolean; chars: number }
   | { kind: 'scan' }
@@ -259,7 +266,7 @@ export function pdfTextDerivative(
   maxChars: number,
   extract: (data: Buffer, maxChars: number) => string = extractPdfText,
 ): PdfDerivative {
-  const label = `Extracted text of ${originalName} (may be lossy or incomplete; quote the original's page when a figure matters).`;
+  const label = pdfDerivativeLabel(originalName);
   const labelBytes = Buffer.byteLength(`${label}\n`, 'utf8');
   // No room for even the label (or no char cap): do not scan — the caller records "no room", never "no extractable text".
   if (maxBytes <= labelBytes || maxChars <= 0) return { kind: 'no-room' };
@@ -283,6 +290,121 @@ export function pdfTextDerivative(
   return { kind: 'text', bytes: full, cut, chars: body.length };
 }
 
+export interface DocumentPathEntry {
+  token: string;
+  status: 'ok' | 'struck';
+  reason?: string;
+  files: PacketFile[];
+  note?: string;
+}
+
+/** Only proposal rebuilds use this LRU. Cache each token before packet accounting, since another document's size or
+ * position can change its admission. Content hashes also invalidate same-size rewrites and document HEAD changes.
+ * Reads remain capped on cache hits; only extraction and file construction are reused. At most 64 MB of file bytes
+ * are retained (two 512 KB files per PDF); large originals are never retained. */
+const documentPlanCache = new Map<string, DocumentPathEntry>();
+const DOCUMENT_PLAN_CACHE_MAX = 64;
+const PDF_TEXT_ONLY_NOTE = 'only its extracted text is staged; the original pdf is over 512 KB';
+
+async function documentPathEntry(token: string, chatId: string, deps: Pick<PacketDeps, 'attachment' | 'docsRoot'>, cache: boolean): Promise<DocumentPathEntry> {
+  let got: { name: string; bytes: Buffer };
+  if (token.startsWith('attachment:')) {
+    const id = token.slice(11);
+    if (!ATTACHMENT_ID.test(id)) throw new Refused('not an attachment id');
+    // Look up the name BEFORE choosing the read cap. readBeneath checks the current descriptor's size before reading
+    // any bytes, so even stale attachment metadata cannot make an oversized text file allocate or read its contents.
+    const att = deps.attachment(chatId, id);
+    const pdf = att !== null && /\.pdf$/i.test(safeName(att.name));
+    try {
+      got = readStagedAttachment(id, () => att, pdf ? ATTACHMENT_MAX_FILE_BYTES : PACKET_FILE_MAX_BYTES);
+    } catch (err) {
+      if (!pdf && err instanceof Refused && err.message === 'it is too large for the packet') {
+        throw new Refused('over 512 KB, the most a document draft reads per file');
+      }
+      throw err;
+    }
+  } else if (token.startsWith('doc:')) {
+    got = await readStagedDocument(token.slice(4), null, deps.docsRoot, PACKET_FILE_MAX_BYTES);
+  } else throw new Refused('a document draft reads files and documents only');
+  const key = JSON.stringify([chatId, token, got.name, sha256(got.bytes)]);
+  const previous = cache ? documentPlanCache.get(key) : undefined;
+  if (previous !== undefined) {
+    documentPlanCache.delete(key);
+    documentPlanCache.set(key, previous);
+    return previous;
+  }
+  let entry: DocumentPathEntry;
+  try {
+    const files: PacketFile[] = [];
+    const add = (name: string, bytes: Buffer): void => { files.push({ name, bytes, sha256: sha256(bytes) }); };
+    let note: string | undefined;
+    if (/\.pdf$/i.test(got.name)) {
+      const text = pdfTextDerivative(got.bytes, got.name, PACKET_FILE_MAX_BYTES, PACKET_FILE_MAX_BYTES);
+      if (text.kind === 'scan') throw new Refused('no extractable text (a scan?)');
+      if (text.kind !== 'text' || text.cut) throw new Refused('its text is over 512 KB');
+      add(`${got.name}.txt`, text.bytes);
+      if (got.bytes.length <= PACKET_FILE_MAX_BYTES) add(got.name, got.bytes);
+      else note = PDF_TEXT_ONLY_NOTE;
+    } else add(got.name, got.bytes);
+    entry = { token, status: 'ok', files, ...(note !== undefined ? { note } : {}) };
+  } catch (err) {
+    if (!(err instanceof Refused)) throw err;
+    entry = { token, status: 'struck', reason: err.message, files: [] };
+  }
+  if (cache) {
+    documentPlanCache.set(key, entry);
+    if (documentPlanCache.size > DOCUMENT_PLAN_CACHE_MAX) documentPlanCache.delete(documentPlanCache.keys().next().value!);
+  }
+  return entry;
+}
+
+/** Plan the documents a draft promises to read with the very same reads, PDF usability and manifest accounting as
+ * staging. Documents book their room before conversation context, so context cannot displace a promised record.
+ * The order is the person's order; a refused source consumes no room and contributes no partial files. Proposal
+ * rebuilds may reuse extraction by content hash; Go and staging read afresh. Held tokens always use canonical bytes
+ * without consulting the live source, so a retry cannot lose or replace the evidence its first attempt received. */
+export async function documentPathPlan(
+  tokens: readonly string[],
+  chatId: string,
+  deps: Pick<PacketDeps, 'attachment' | 'docsRoot'>,
+  options: { cache?: boolean; held?: PacketInput['held'] } = {},
+): Promise<DocumentPathEntry[]> {
+  const out: DocumentPathEntry[] = [];
+  let total = 0;
+  const sourceBudget = PACKET_MAX_BYTES - PACKET_BRIEF_RESERVE - MANIFEST_BASE;
+  for (const token of new Set(tokens)) {
+    try {
+      const held = options.held?.tokens[token];
+      let entry: DocumentPathEntry;
+      if (held !== undefined && held.length > 0) {
+        const files = held.map((name) => {
+          const bytes = options.held!.bytes(name);
+          return { name, bytes, sha256: sha256(bytes) };
+        });
+        // Recover the disclosure from the canonical derivative's label as well as its name: an ordinary attachment
+        // named report.pdf.txt is still just text. No live metadata is needed or consulted on a retry.
+        const textOnly = files.some((f) => {
+          if (!/\.pdf\.txt$/i.test(f.name) || held.includes(f.name.slice(0, -4))) return false;
+          const label = Buffer.from(`${pdfDerivativeLabel(f.name.slice(0, -4))}\n`);
+          return f.bytes.subarray(0, label.length).equals(label);
+        });
+        entry = { token, status: 'ok', files, ...(textOnly ? { note: PDF_TEXT_ONLY_NOTE } : {}) };
+      } else entry = await documentPathEntry(token, chatId, deps, options.cache === true);
+      if (entry.status === 'struck') { out.push(entry); continue; }
+      const more = manifestTokenCost(token) + entry.files.reduce((n, f) => n + f.bytes.length + manifestEntryCost(f.name), 0);
+      if (total + more > sourceBudget) throw new Refused('the documents together pass 1024 KB');
+      total += more;
+      out.push(entry);
+    } catch (err) {
+      if (!(err instanceof Refused)) {
+        // Store lookup errors (for example an attachment deleted during resolution) are ordinary refusals too.
+        out.push({ token, status: 'struck', reason: 'it is not readable', files: [] });
+      } else out.push({ token, status: 'struck', reason: err.message, files: [] });
+    }
+  }
+  return out;
+}
+
 /**
  * Build the packet for one attempt. Throws only for a broken invariant (two contents under one name); a source that
  * cannot be read or does not fit is struck with the reason, with nothing of it in the packet, and the rest goes on.
@@ -297,6 +419,15 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
   // the manifest can never be what makes a packet unlaunchable.
   const sourceBudget = PACKET_MAX_BYTES - PACKET_BRIEF_RESERVE - MANIFEST_BASE;
   const storage = input.storageChatId ?? chatId;
+  const declared = resolution.sentence?.tokens.flatMap((t) => t.kind === 'documents' ? t.documents ?? [] : []) ?? [];
+  // Project/source edits may have struck a source after the sentence was built. Never stage through the old chip.
+  const documents = declared.map((d) => {
+    const selected = resolution.sources.find((s) => s.token === d.token);
+    return d.status === 'ok' && selected?.status !== 'ok'
+      ? { ...d, status: 'struck' as const, reason: selected?.reason ?? 'no longer selected as a source' } : d;
+  });
+  const documentTokens = new Set(documents.map((d) => d.token));
+  const documentNotes = new Map<string, string>();
   let total = 0;
   /** The files' own bytes (`total` also books each manifest entry's estimated cost). */
   let fileBytes = 0;
@@ -393,6 +524,10 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
     let note = '';
     const asked = records.find((r): r is Extract<ChatTranscriptRecord, { kind: 'user' }> => r.kind === 'user' && r.turnId === turn);
     for (const att of asked?.attachments ?? []) {
+      if (documentTokens.has(`attachment:${att.id}`)) {
+        names.push(...(tokens[`attachment:${att.id}`] ?? []));
+        continue;
+      }
       try {
         names.push(attachmentFile(stage, att.id).name);
       } catch (err) {
@@ -435,7 +570,27 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
     return { names, line: `Records this answer was given: ${names.map((n) => `\`${n}\``).join(', ')}${note}${docNote}${attachNote}` };
   };
 
+  for (const d of documents) if (d.status === 'struck') struck.push({ token: d.token, reason: d.reason ?? 'left out' });
+  for (const planned of await documentPathPlan(documents.filter((d) => d.status === 'ok').map((d) => d.token), storage, deps, { held: input.held })) {
+    if (planned.status === 'struck') {
+      struck.push({ token: planned.token, reason: planned.reason! });
+      continue;
+    }
+    const stage = new Stage();
+    try {
+      for (const f of planned.files) stage.add(f.name, f.bytes);
+      stage.commit(planned.token);
+      tokens[planned.token] = [...stage.files.keys()];
+    } catch (err) {
+      if (!(err instanceof Refused)) throw err;
+      struck.push({ token: planned.token, reason: err.message });
+      continue;
+    }
+    if (planned.note !== undefined) documentNotes.set(planned.token, planned.note);
+  }
+
   for (const src of resolution.sources) {
+    if (documentTokens.has(src.token)) continue;
     if (src.status !== 'ok') {
       struck.push({ token: src.token, reason: src.reason ?? 'left out' });
       continue;
@@ -560,6 +715,7 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
     { token: 'brief', files: [{ file: `sources/${briefFile.name}`, sha256: briefFile.sha256, bytes: briefFile.bytes.length }] },
     ...Object.entries(tokens).map(([token, names]) => ({
       token,
+      ...(documentNotes.has(token) ? { note: documentNotes.get(token)! } : {}),
       files: names.map((n) => ({ file: `${packetDirOf(n)}/${n}`, sha256: out.get(n)!.sha256, bytes: out.get(n)!.bytes.length })),
     })),
   ];
