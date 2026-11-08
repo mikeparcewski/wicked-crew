@@ -12,6 +12,16 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **Review a change is judged only by seats that wrote none of it (DES-CATALOG-002 CS11; no api-types change).** A
+  `review-change` launch reads the PR, branch or commit from its words and joins it to the crew runs that built it:
+  the PR's delivered URL, its revisions, the run or pushed branch that is its head, or the branches containing the
+  commit. A run whose recorded delivered commit is provably not in the change drops out. Every seat that authored
+  any of those runs (a reassigned author too) is removed from the run's roster and excluded as its judge. When the
+  lookup fails, the review is labelled "provenance unknown" and every author of a run on that repository in the last
+  90 days is excluded; it is never called "built outside this studio". With no independent seat left, the launch is
+  refused (409 `no_independent_reviewer`) and offers reduced assurance (`retryWith`). The review never delivers and
+  posts nothing. Crew now records each delivery's commit (the exact `refs/heads` tip of the run branch, only when no
+  phase ran after the deliver phase) on the `run.delivered` audit entry.
 - **A pack can install third-party run plugins, which read a run's events on the topics the install consent grants
   (CS7; api-types `EditorView`, `EditorConformanceSummary`, unreleased).** `POST /api/v1/editors` now admits a spec-2
   pack that declares `plugins[]` (with or without `editors[]`); each plugin passes the run-plugin conformance cases

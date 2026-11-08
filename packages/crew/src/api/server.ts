@@ -72,6 +72,8 @@ import {
   gitWorktreeIsClean,
   canDeliverResolver,
   deliverUnitOf,
+  deliveredCommitFor,
+  recordDelivery,
   type VacuityProbes,
 } from './delivery-index.js';
 import { CodebaseArchiveStore, archiveKey, deliverDispatchKey } from './codebase-archive.js';
@@ -1041,11 +1043,16 @@ export async function createServer(
     // The durable record first, then the read-side index — the same write order as
     // `guidance.set`, so the index can only LAG a crash (rehydrated at next boot), never
     // hold a record the trail does not.
-    record: (runId, record) => {
-      audit.record('run.delivered', DAEMON_ACTOR, { runId, detail: record });
-      if ('url' in record) deliveryIndex.set(runId, record.url);
-      else deliveryIndex.setPushed(runId, record.pushed);
-    },
+    // CS11: the trail and the index get the same `commit` ({@link recordDelivery}, tested as is).
+    record: (runId, record) => recordDelivery(audit, deliveryIndex, DAEMON_ACTOR, runId, record),
+    // CS11 (DES-CATALOG-002 rev 8): record the delivered HEAD SHA from now on, over the registered
+    // repo root (the same `listRepos()` resolver this file uses for repo roots) + the engine's
+    // `run_branch` (else `wicked/<id>`). The body lives in `delivery-index.ts` ({@link
+    // deliveredCommitFor}) so tests exercise the production code, not a copy (cs11-b review
+    // P1/P2): it records NO commit when a later phase ran after the deliver unit (the pushed tip
+    // may have moved) and when the SHA cannot be read — the join then keeps the run (fail-closed).
+    deliveredCommit: (view) =>
+      deliveredCommitFor(view, async (repoRef) => (await adapter.listRepos()).find((r) => r.id === repoRef)?.root_path),
     log: (m) => app.log.warn(m),
   });
   const resolveRunDelivery = (runId: string): Promise<void> => deliveryResolver.resolve(runId);
