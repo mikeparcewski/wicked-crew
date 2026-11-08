@@ -12,18 +12,6 @@ import { DocBindingStore } from '../src/interactive/doc-binding.js';
 import { DRAFT_COMPLETED, startInteractiveDraftSubscriber, type InteractiveDraftSubscription } from '../src/interactive/draft-events.js';
 import { removeScratch } from './setup/scratch.js';
 
-// CS8 owns the catalog flip: simulate its future launches without changing the coming-soon seeds.
-vi.mock('../src/workflow-catalog/catalog-data-v2.js', async (original) => {
-  const actual = await original<typeof import('../src/workflow-catalog/catalog-data-v2.js')>();
-  return { ...actual, CATALOG_V2_CARDS: actual.CATALOG_V2_CARDS.map((c) => {
-    if (c.id !== 'respond' && c.id !== 'rework') return c;
-    const card: Record<string, unknown> = { ...c };
-    delete card['status'];
-    delete card['statusNote'];
-    return { ...card, launch: { kind: 'document', style: 'doc' } } as typeof c;
-  }) };
-});
-
 const empty = servedState({ defs: [], presets: [], entries: [] });
 describe('CS5 shared draft selection and gates', () => {
   const options = ['rfp', 'rfi', 'questionnaire', 'condense', 're-audience', 'generalize', 'convert', 'refresh', 'future', null, undefined];

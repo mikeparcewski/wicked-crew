@@ -632,7 +632,7 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
     "release": "1.0",
     "title": "Studio plugin",
     "archetype": "build",
-    "outcome": "A studio editor plugin designed, built, tested and installed after your consent.",
+    "outcome": "A studio plugin designed, built, tested and installed after your consent: an editor, or a section in every job's details.",
     "words": [
       "plugin",
       "studio plugin",
@@ -641,7 +641,8 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
       "file type",
       "extension",
       "phase plugin",
-      "custom step"
+      "job details",
+      "details section"
     ],
     "needs": [
       "repo"
@@ -694,18 +695,22 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
         {
           "id": "phase",
           "title": "Phase",
-          "summary": "A new kind of step workflows can use.",
+          "summary": "A section in every job's details, drawn from its events.",
           "words": [
+            "phase plugin",
             "phase",
-            "step",
-            "custom step"
+            "section",
+            "job details",
+            "each phase",
+            "elapsed time"
           ],
           "launch": {
-            "kind": "none"
+            "kind": "run",
+            "workflow": "editor-plugin"
           },
+          "brief": "Kind: phase plugin.",
           "changesPlan": true,
-          "status": "coming_soon",
-          "statusNote": "Plugging in your own step is not built yet.",
+          "requiresQe": true,
           "command": "/plugin phase"
         }
       ]
@@ -991,6 +996,7 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
     "inputs": [
       "intent",
       "repo?",
+      "sources?",
       "project?",
       "seats",
       "depth"
@@ -1010,20 +1016,13 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
       "card": "bug",
       "option": null
     },
-    "later": [
-      {
-        "release": "1.2",
-        "adds": "sources",
-        "note": "The source picker (ITSM, logs, the web you register) comes in 1.2. Today: paste the error, logs or timeline."
-      }
-    ],
     "command": "/incident",
     "aliases": []
   },
   {
     "id": "competitive",
     "category": "investigate",
-    "release": "1.2",
+    "release": "1.0",
     "title": "Competitive or market analysis",
     "archetype": "explore",
     "outcome": "How others do it, with every claim cited to a source.",
@@ -1038,27 +1037,34 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
     ],
     "depth": true,
     "needs": [
-      "sources"
+      "nothing"
     ],
+    "inputs": [
+      "intent",
+      "sources",
+      "project?",
+      "seats",
+      "depth"
+    ],
+    "delivers": "report",
     "gate": [
-      "cited-findings"
+      "fidelity-to-source"
     ],
+    "seats": {
+      "distinctEvaluator": true
+    },
     "launch": {
-      "kind": "none"
+      "kind": "run",
+      "workflow": "sourced-report"
     },
-    "status": "coming_soon",
-    "statusNote": "Coming in 1.2: it reads the web and other sources you register.",
-    "nearest": {
-      "card": "plan-it",
-      "option": null
-    },
+    "brief": "Lens: competitive.",
     "command": "/competitive",
     "aliases": []
   },
   {
     "id": "due-diligence",
     "category": "investigate",
-    "release": "1.1",
+    "release": "1.0",
     "title": "Due diligence",
     "archetype": "review",
     "outcome": "A cited review of a target's documents: what holds, what is missing, what is a risk.",
@@ -1074,25 +1080,33 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
     "needs": [
       "documents"
     ],
-    "gate": [
-      "cited-findings"
+    "inputs": [
+      "documents",
+      "intent?",
+      "sources?",
+      "project?",
+      "seats",
+      "depth"
     ],
+    "delivers": "report",
+    "gate": [
+      "fidelity-to-source"
+    ],
+    "seats": {
+      "distinctEvaluator": true
+    },
     "launch": {
-      "kind": "none"
+      "kind": "run",
+      "workflow": "sourced-report"
     },
-    "status": "coming_soon",
-    "statusNote": "Coming in 1.1: it reads documents you upload.",
-    "nearest": {
-      "card": "security",
-      "option": null
-    },
+    "brief": "Lens: due-diligence.",
     "command": "/due-diligence",
     "aliases": []
   },
   {
     "id": "research",
     "category": "investigate",
-    "release": "1.2",
+    "release": "1.0",
     "title": "Research a question",
     "archetype": "explore",
     "outcome": "A cited answer from outside sources.",
@@ -1106,20 +1120,27 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
     ],
     "depth": true,
     "needs": [
-      "sources"
+      "nothing"
     ],
+    "inputs": [
+      "intent",
+      "sources",
+      "project?",
+      "seats",
+      "depth"
+    ],
+    "delivers": "report",
     "gate": [
-      "cited-findings"
+      "fidelity-to-source"
     ],
+    "seats": {
+      "distinctEvaluator": true
+    },
     "launch": {
-      "kind": "none"
+      "kind": "run",
+      "workflow": "sourced-report"
     },
-    "status": "coming_soon",
-    "statusNote": "Coming in 1.2: it reads the web and other sources you register.",
-    "nearest": {
-      "card": "decide",
-      "option": null
-    },
+    "brief": "Lens: research.",
     "command": "/find-out",
     "aliases": []
   },
@@ -1344,7 +1365,7 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
   {
     "id": "analyze-documents",
     "category": "analyze",
-    "release": "1.1",
+    "release": "1.0",
     "title": "Analyze documents",
     "archetype": "explore",
     "outcome": "What a set of documents says, compared and cited to the page.",
@@ -1359,19 +1380,24 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
     "needs": [
       "documents"
     ],
+    "inputs": [
+      "documents",
+      "intent?",
+      "sources?",
+      "seats"
+    ],
+    "delivers": "report",
     "gate": [
-      "cited-findings",
       "fidelity-to-source"
     ],
+    "seats": {
+      "distinctEvaluator": true
+    },
     "launch": {
-      "kind": "none"
+      "kind": "run",
+      "workflow": "sourced-report"
     },
-    "status": "coming_soon",
-    "statusNote": "Coming in 1.1: it reads documents you upload.",
-    "nearest": {
-      "card": "document",
-      "option": null
-    },
+    "brief": "Lens: analyze.",
     "command": "/analyze-docs",
     "aliases": []
   },
@@ -1421,7 +1447,7 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
   {
     "id": "critique",
     "category": "judge",
-    "release": "1.1",
+    "release": "1.0",
     "title": "Critique a document, proposal or claim",
     "archetype": "review",
     "outcome": "Where an argument holds and where it does not, cited to the page.",
@@ -1435,21 +1461,26 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
       "feedback on"
     ],
     "needs": [
-      "documents"
+      "nothing"
     ],
+    "inputs": [
+      "intent",
+      "documents?",
+      "sources?",
+      "seats"
+    ],
+    "delivers": "report",
     "gate": [
-      "cited-findings",
       "fidelity-to-source"
     ],
+    "seats": {
+      "distinctEvaluator": true
+    },
     "launch": {
-      "kind": "none"
+      "kind": "run",
+      "workflow": "sourced-report"
     },
-    "status": "coming_soon",
-    "statusNote": "Coming in 1.1: it reads documents you upload.",
-    "nearest": {
-      "card": "review-change",
-      "option": null
-    },
+    "brief": "Lens: critique.",
     "command": "/critique-doc",
     "aliases": []
   },
@@ -1876,17 +1907,15 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
       "data app"
     ],
     "launch": {
-      "kind": "none"
+      "kind": "app"
     },
-    "status": "coming_soon",
-    "statusNote": "Design in progress.",
     "command": null,
     "aliases": []
   },
   {
     "id": "respond",
     "category": "create",
-    "release": "1.1",
+    "release": "1.0",
     "title": "Respond to an ask",
     "outcome": "A response to an RFP, RFI or questionnaire, every answer traced to its source.",
     "words": [
@@ -1901,25 +1930,87 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
     "needs": [
       "documents"
     ],
+    "inputs": [
+      "documents",
+      "intent?",
+      "project?",
+      "seats"
+    ],
+    "delivers": "document",
     "gate": [
       "fidelity-to-source"
     ],
-    "launch": {
-      "kind": "none"
-    },
-    "status": "coming_soon",
-    "statusNote": "Coming in 1.1: it reads documents you upload.",
-    "nearest": {
-      "card": "document",
-      "option": null
+    "seats": {
+      "distinctEvaluator": true
     },
     "command": "/respond",
-    "aliases": []
+    "aliases": [],
+    "variant": {
+      "axis": "kind",
+      "label": "Kind of ask",
+      "default": "rfp",
+      "options": [
+        {
+          "id": "rfp",
+          "title": "RFP",
+          "summary": "A response to a request for proposal.",
+          "words": [
+            "rfp",
+            "request for proposal",
+            "tender",
+            "bid",
+            "proposal response"
+          ],
+          "launch": {
+            "kind": "document",
+            "style": "doc"
+          },
+          "brief": "Kind: respond-rfp.",
+          "changesPlan": false,
+          "command": "/respond rfp"
+        },
+        {
+          "id": "rfi",
+          "title": "RFI",
+          "summary": "Answers to a request for information.",
+          "words": [
+            "rfi",
+            "request for information",
+            "information request"
+          ],
+          "launch": {
+            "kind": "document",
+            "style": "doc"
+          },
+          "brief": "Kind: respond-rfi.",
+          "changesPlan": false,
+          "command": "/respond rfi"
+        },
+        {
+          "id": "questionnaire",
+          "title": "Questionnaire",
+          "summary": "A filled-in questionnaire.",
+          "words": [
+            "questionnaire",
+            "security questionnaire",
+            "vendor questionnaire",
+            "fill in"
+          ],
+          "launch": {
+            "kind": "document",
+            "style": "doc"
+          },
+          "brief": "Kind: respond-questionnaire.",
+          "changesPlan": false,
+          "command": "/respond questionnaire"
+        }
+      ]
+    }
   },
   {
     "id": "rework",
     "category": "create",
-    "release": "1.1",
+    "release": "1.0",
     "title": "Rework an artifact",
     "outcome": "An artifact condensed, re-aimed, generalized, converted or refreshed, faithful to its source.",
     "words": [
@@ -1936,20 +2027,122 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
     "needs": [
       "documents"
     ],
+    "inputs": [
+      "documents",
+      "intent?",
+      "project?",
+      "seats"
+    ],
+    "delivers": "document",
     "gate": [
       "fidelity-to-source"
     ],
-    "launch": {
-      "kind": "none"
-    },
-    "status": "coming_soon",
-    "statusNote": "Coming in 1.1: it reads documents you upload.",
-    "nearest": {
-      "card": "document",
-      "option": null
+    "seats": {
+      "distinctEvaluator": true
     },
     "command": "/rework",
-    "aliases": []
+    "aliases": [],
+    "variant": {
+      "axis": "kind",
+      "label": "Kind of rework",
+      "default": "condense",
+      "options": [
+        {
+          "id": "condense",
+          "title": "Condense",
+          "summary": "Shorter, saying nothing new.",
+          "words": [
+            "condense",
+            "shorten",
+            "summary of",
+            "exec summary",
+            "one-page",
+            "shorter version"
+          ],
+          "launch": {
+            "kind": "document",
+            "style": "doc"
+          },
+          "brief": "Kind: rework-condense.",
+          "changesPlan": false,
+          "command": "/rework condense"
+        },
+        {
+          "id": "re-audience",
+          "title": "Re-audience",
+          "summary": "The same content for another audience.",
+          "words": [
+            "re-audience",
+            "rewrite for",
+            "for engineers",
+            "for executives",
+            "for customers"
+          ],
+          "launch": {
+            "kind": "document",
+            "style": "doc"
+          },
+          "brief": "Kind: rework-re-audience.",
+          "changesPlan": false,
+          "command": "/rework re-audience"
+        },
+        {
+          "id": "generalize",
+          "title": "Generalize",
+          "summary": "Reusable, with the specifics taken out.",
+          "words": [
+            "generalize",
+            "template from",
+            "make it reusable",
+            "anonymize"
+          ],
+          "launch": {
+            "kind": "document",
+            "style": "doc"
+          },
+          "brief": "Kind: rework-generalize.",
+          "changesPlan": false,
+          "command": "/rework generalize"
+        },
+        {
+          "id": "convert",
+          "title": "Convert",
+          "summary": "The same content as slides.",
+          "words": [
+            "convert",
+            "as a deck",
+            "into slides",
+            "slide deck from",
+            "turn this into slides"
+          ],
+          "launch": {
+            "kind": "document",
+            "style": "ppt"
+          },
+          "brief": "Kind: rework-convert.",
+          "changesPlan": false,
+          "command": "/rework convert"
+        },
+        {
+          "id": "refresh",
+          "title": "Refresh",
+          "summary": "Updated from newer sources.",
+          "words": [
+            "refresh",
+            "bring up to date",
+            "latest numbers",
+            "update with"
+          ],
+          "launch": {
+            "kind": "document",
+            "style": "doc"
+          },
+          "brief": "Kind: rework-refresh.",
+          "changesPlan": false,
+          "command": "/rework refresh"
+        }
+      ]
+    }
   },
   {
     "id": "communicate",
@@ -2088,7 +2281,7 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
   {
     "id": "estimate-price",
     "category": "estimate",
-    "release": "1.1",
+    "release": "1.0",
     "title": "Estimate and price",
     "outcome": "Effort and price from a scope document, with the assumptions named.",
     "words": [
@@ -2103,29 +2296,36 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
       "cost of the work"
     ],
     "needs": [
-      "documents"
+      "nothing"
     ],
+    "inputs": [
+      "intent",
+      "documents?",
+      "sources?",
+      "repo?",
+      "seats"
+    ],
+    "delivers": "report",
     "gate": [
       "fidelity-to-source"
     ],
+    "seats": {
+      "distinctEvaluator": true
+    },
     "launch": {
-      "kind": "none"
+      "kind": "run",
+      "workflow": "sourced-report"
     },
-    "status": "coming_soon",
-    "statusNote": "Coming in 1.1: it reads the scope documents you upload.",
-    "nearest": {
-      "card": "plan-it",
-      "option": null
-    },
+    "brief": "Lens: estimate.",
     "command": "/estimate",
     "aliases": []
   },
   {
     "id": "run-cost",
     "category": "estimate",
-    "release": "1.1",
+    "release": "1.0",
     "title": "Model run cost",
-    "outcome": "What a planned body of work will cost to run, from its documents and your run history.",
+    "outcome": "What a volume of work will cost to run, from your own comparable runs, with every assumption named.",
     "words": [
       "run cost",
       "token cost",
@@ -2134,19 +2334,24 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
       "budget for runs"
     ],
     "needs": [
-      "documents"
+      "runs"
     ],
+    "inputs": [
+      "intent",
+      "documents?",
+      "project?",
+      "seats"
+    ],
+    "delivers": "report",
     "gate": [
       "fidelity-to-source"
     ],
-    "launch": {
-      "kind": "none"
+    "seats": {
+      "distinctEvaluator": true
     },
-    "status": "coming_soon",
-    "statusNote": "Coming in 1.1: it reads documents you upload.",
-    "nearest": {
-      "card": "analyze-runs",
-      "option": null
+    "launch": {
+      "kind": "run",
+      "workflow": "run-cost"
     },
     "command": "/run-cost",
     "aliases": []

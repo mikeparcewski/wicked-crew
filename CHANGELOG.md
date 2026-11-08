@@ -12,6 +12,15 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **The catalog flip: every card that said coming is live (DES-CATALOG-002 rev 8, CS8; no api-types change).** Research
+  a question, Competitive or market analysis, Due diligence, Analyze documents, Critique, and Estimate and price run
+  the `sourced-report` preset with a lens line, re-checked at the source by a seat that did not gather. Model run cost
+  runs `run-cost`. Respond to an ask (RFP, RFI, questionnaire) and Rework an artifact (condense, re-audience,
+  generalize, convert, refresh) draft a document on `interactive-draft-sourced`, a kind line per option; on an engine
+  without that preset they are listed unavailable with the reason. Studio plugin · Phase builds a section in every
+  job's Details through `editor-plugin` (QE acceptance and install consent), and v1's coming `phase-plugin` card is
+  removed. Review a change is offered. Incident takes its source pick. These cards need a `wicked-core-ts` with the
+  `sourced-report`, `run-cost` and `interactive-draft-sourced` presets; an older engine lists them unavailable.
 - **A job reaches only the sources you picked (DES-CATALOG-002 CS10; no api-types change).** The pick recorded at
   launch (CS4) is now enforced for every unit, attempt and re-plan of the run, by one predicate over registered
   source names (SQL, Toolbox, PM and the web source). The unit's tool list leaves out an unpicked source's tools; a

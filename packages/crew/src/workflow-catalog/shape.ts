@@ -30,6 +30,13 @@ export const DEPTH_LINES: Readonly<Record<'quick' | 'standard' | 'deep', string>
   deep: 'Depth: deep. Trace every contributing cause and the timeline, each claim cited.',
 };
 
+/** A sourced report's depth (Research, Competitive, Due diligence): neutral lines, since there is no cause to find. */
+export const REPORT_DEPTH_LINES: Readonly<Record<'quick' | 'standard' | 'deep', string>> = {
+  quick: 'Depth: quick. Answer from the strongest sources and stop there, each claim cited.',
+  standard: 'Depth: standard. Cover the main sources and where they disagree, each claim cited.',
+  deep: 'Depth: deep. Read every source in reach and reconcile each conflict, each claim cited.',
+};
+
 /** What the engine serves, read as a launch in `projectId` reads it. */
 export interface ShapeReads {
   defs(): readonly WorkflowDef[];
@@ -58,7 +65,7 @@ export async function servedFor(reads: ShapeReads, projectId: string | undefined
 export function briefLines(r: ResolvedOption, depth: LaunchShape['depth']): string[] {
   const lines: string[] = [];
   if (r.resolved.brief !== null && r.resolved.brief.trim() !== '') lines.push(r.resolved.brief.trim());
-  if (depth !== null && r.card.depth === true) lines.push(DEPTH_LINES[depth]);
+  if (depth !== null && r.card.depth === true) lines.push((r.workflow === 'sourced-report' ? REPORT_DEPTH_LINES : DEPTH_LINES)[depth]);
   return lines;
 }
 

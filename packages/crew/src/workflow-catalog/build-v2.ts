@@ -59,12 +59,9 @@ export const TOP_MAX_V2 = 6;
 
 /**
  * Cards whose crew-side piece is not built yet (DES-CATALOG-002 §3.2 "Truly missing"): listed, not offered, with why.
- * Review a change must never seat the authors of a run that contributed to the change; until crew excludes them, it
- * would launch below its own seat rule.
+ * Empty since CS8: Review a change excludes the authors of every contributing run (CS11, `api/review-change.ts`).
  */
-const CREW_PENDING: Readonly<Record<string, string>> = {
-  'review-change': 'Comes once crew excludes the authors of every run that contributed to the change from its reviewers; today, Risk analysis or Security review read a change on a seat that did not build it.',
-};
+const CREW_PENDING: Readonly<Record<string, string>> = {};
 
 /** Whether a card waits on a crew piece not built yet (listed, never offered). */
 export const crewPending = (cardId: string): boolean => Object.hasOwn(CREW_PENDING, cardId);
@@ -366,6 +363,13 @@ export function resolveOption(cardId: string, optionId: string | null, served: S
     }
   } else if (launch.kind === 'document') {
     style = launch.style;
+    // Respond and Rework draft on the sourced preset (CS5). An engine without it would refuse the draft at Start, so
+    // the option is off here, with why, instead of offering a Start that cannot run.
+    const preset = draftPresetFor(card.id, option?.id ?? null);
+    if (!coming && preset !== 'interactive-draft' && !served.builtins.has(preset)) {
+      status = 'unavailable';
+      statusNote = `This daemon's engine does not serve the \`${preset}\` workflow; update wicked-crew to get it.`;
+    }
   }
   if (!coming && status === 'available' && Object.hasOwn(CREW_PENDING, card.id)) {
     status = 'unavailable';
@@ -490,7 +494,11 @@ export function buildWorkflowCatalogV2(input: CatalogV2Inputs): WorkflowCatalogV
     const byOption: Record<string, number> = {};
     for (const u of used) if (u.option !== null) byOption[u.option] = (byOption[u.option] ?? 0) + 1;
     const defOpt = card.variant?.options.find((o) => o.id === card.variant!.default);
-    const summary = defOpt?.summary ?? (own.workflow !== null ? served.defs.get(own.workflow)?.summary : undefined) ?? card.outcome ?? '';
+    // A card framed by a brief line is described by its outcome: the six sourced reports share one preset (its summary
+    // would make them read alike), and a kind-framed default option (Respond · RFP, Rework · Condense) describes only
+    // that kind, not the card.
+    const framed = card.brief !== undefined || defOpt?.brief !== undefined;
+    const summary = (framed ? card.outcome : undefined) ?? defOpt?.summary ?? (own.workflow !== null ? served.defs.get(own.workflow)?.summary : undefined) ?? card.outcome ?? '';
     cards.push({
       ...own.resolved,
       id: card.id,

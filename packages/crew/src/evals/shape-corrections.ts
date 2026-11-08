@@ -342,7 +342,10 @@ export function judgeCorrection(c: CorrectionCase, parent: CorrectionView, now: 
   const pin = JSON.parse(parent.inputs) as Record<string, unknown>;
   const nin = JSON.parse(now.inputs) as Record<string, unknown>;
   // Across launch kinds the new kind's inputs are its own (§4.6 "Across kinds"); within one, each kept input is the parent's.
-  if (parent.kind === now.kind) for (const [k, v] of Object.entries(nin)) if (JSON.stringify(pin[k]) !== JSON.stringify(v)) why.push(`input ${k} changed`);
+  // The one exception: a new card that reads sources gets crew's default source pick (CS4/CS8: the web for Research and
+  // Competitive, else none), shown to the person as a token. That is the new card's own input, not a changed one.
+  const crewPick = (k: string): boolean => k === 'sources' && !(k in pin) && now.card !== parent.card;
+  if (parent.kind === now.kind) for (const [k, v] of Object.entries(nin)) if (!crewPick(k) && JSON.stringify(pin[k]) !== JSON.stringify(v)) why.push(`input ${k} changed`);
   // Within one card nothing is dropped; a card change keeps what the new card takes (rule 2), which the merge's notes
   // name for each input it leaves out.
   if (now.card === parent.card && parent.kind === now.kind && Object.keys(pin).some((k) => !(k in nin))) why.push('inputs dropped');

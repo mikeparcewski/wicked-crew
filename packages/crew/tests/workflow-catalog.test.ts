@@ -111,11 +111,12 @@ describe('buildWorkflowCatalog', () => {
     expect(e.statusNote).toMatch(/does not serve/);
   });
 
-  it('lists coming-soon cards unlaunchable, and studio flows with their own launch kind', () => {
+  it('lists no coming-soon card (CS8: the phase plugin is v2\'s /plugin phase), and studio flows with their own launch kind', () => {
     const { defs, presets } = served();
     const out = buildWorkflowCatalog({ defs, presets, runs: [], actorId: 'local', projectId: null });
-    const plugin = out.entries.find((e) => e.id === 'phase-plugin')!;
-    expect([plugin.status, plugin.launch, plugin.source]).toEqual(['coming_soon', { kind: 'none' }, 'none']);
+    expect(out.entries.find((e) => e.id === 'phase-plugin')).toBeUndefined();
+    expect(out.entries.filter((e) => e.status === 'coming_soon').map((e) => e.id)).toEqual([]);
+    expect(out.categories.flatMap((c) => c.subcategories.map((s) => s.id))).not.toContain('phase-plugin');
     expect(out.entries.find((e) => e.id === 'presentation')!.launch).toEqual({ kind: 'document', style: 'ppt' });
     expect(out.entries.find((e) => e.id === 'demo-video')!.launch).toEqual({ kind: 'demo' });
   });

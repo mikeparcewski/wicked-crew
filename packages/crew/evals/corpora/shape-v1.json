@@ -1,5 +1,5 @@
 {
- "$comment": "DES-CATALOG-002 §9 detection corpus v1 (synthetic, real-looking; no client content). expect.card[:option] is the shape a person would launch; expect.ask lists the acceptable shapes when the right answer is to ask ONE question; expect.coming names a coming card and expect.nearest the card offered today. kind: clear | variant | combined | ambiguous | coming | depth | context | adversarial. expect.depth is scored apart (depth is a brief line, never a plan change). adversarial cases carry an instruction aimed at the classifier inside the person's words; the expected shape is the real ask. The nearest card for a coming card is catalog data (cards.json `nearest`), not a detection output. planChanging marks a case whose variant selects a different preset (a wrong option there is a wrong plan, not a wrong brief line). Lane D (cat2-crew-detect) adds w1-w15 (every option at least 2 cases) and z5-z8 (adversarial: an option substituted within a card; an instruction inside quoted chat or a pasted document); their seat answers were recorded the same way as spike 2's (prompt2's header, pi, no tools, high thinking, blind). w16-w19 (review round 1): an outcome asked of another job's subject (a plan of an upgrade, a review of a migration, an explanation) and a depth stated in words; recorded the same way. w20 (review round 2): a plan asked of a review, recorded the same way.",
+ "$comment": "DES-CATALOG-002 §9 detection corpus v1 (synthetic, real-looking; no client content). expect.card[:option] is the shape a person would launch; expect.ask lists the acceptable shapes when the right answer is to ask ONE question; expect.coming names a coming card and expect.nearest the card offered today. kind: clear | variant | combined | ambiguous | coming | depth | context | adversarial. expect.depth is scored apart (depth is a brief line, never a plan change). adversarial cases carry an instruction aimed at the classifier inside the person's words; the expected shape is the real ask. The nearest card for a coming card is catalog data (cards.json `nearest`), not a detection output. planChanging marks a case whose variant selects a different preset (a wrong option there is a wrong plan, not a wrong brief line). Lane D (cat2-crew-detect) adds w1-w15 (every option at least 2 cases) and z5-z8 (adversarial: an option substituted within a card; an instruction inside quoted chat or a pasted document); their seat answers were recorded the same way as spike 2's (prompt2's header, pi, no tools, high thinking, blind). w16-w19 (review round 1): an outcome asked of another job's subject (a plan of an upgrade, a review of a migration, an explanation) and a depth stated in words; recorded the same way. w20 (review round 2): a plan asked of a review, recorded the same way. CS8 (DES-CATALOG-002 rev 8, the catalog flip): the coming cases are relabelled to the live cards (i8, i9, i10, a10, j15, c17, c18, c19, e1, e2); sp3 becomes ambiguous, because the phase option is now a Job details section and a custom step that runs a check is post-mvp; x10 names Rework's re-audience option; v12 stays coming (tune is deferred). y1-y31 cover the newly launchable cards and options (>= 3 cases a card, >= 2 an option, an ambiguous case for respond and studio-plugin). Their seat answers, and the relabelled cases', were recorded the same way as spike 2's (prompt2's header with the flipped catalog; pi, no tools, high thinking, blind).",
  "cases": [
   {
    "id": "p1",
@@ -403,11 +403,14 @@
   },
   {
    "id": "sp3",
-   "kind": "coming",
+   "kind": "ambiguous",
    "text": "build a custom step type so workflows can run our license check",
    "expect": {
-    "coming": "studio-plugin:phase",
-    "nearest": "studio-plugin:editor"
+    "ask": [
+     "feature",
+     "start-new:mcp-server",
+     "propose:rules"
+    ]
    }
   },
   {
@@ -560,29 +563,26 @@
   },
   {
    "id": "i8",
-   "kind": "coming",
+   "kind": "clear",
    "text": "what are competitors doing for usage-based pricing?",
    "expect": {
-    "coming": "competitive",
-    "nearest": "plan-it"
+    "card": "competitive"
    }
   },
   {
    "id": "i9",
-   "kind": "coming",
+   "kind": "clear",
    "text": "research the best vector database for 10M embeddings",
    "expect": {
-    "coming": "research",
-    "nearest": "decide"
+    "card": "research"
    }
   },
   {
    "id": "i10",
-   "kind": "coming",
+   "kind": "clear",
    "text": "do due diligence on this vendor's security docs",
    "expect": {
-    "coming": "due-diligence",
-    "nearest": "security:security"
+    "card": "due-diligence"
    }
   },
   {
@@ -671,11 +671,10 @@
   },
   {
    "id": "a10",
-   "kind": "coming",
+   "kind": "clear",
    "text": "summarize and compare these three statements of work",
    "expect": {
-    "coming": "analyze-documents",
-    "nearest": "document:document"
+    "card": "analyze-documents"
    }
   },
   {
@@ -802,11 +801,10 @@
   },
   {
    "id": "j15",
-   "kind": "coming",
+   "kind": "clear",
    "text": "poke holes in this architecture proposal doc",
    "expect": {
-    "coming": "critique",
-    "nearest": "review-change"
+    "card": "critique"
    }
   },
   {
@@ -957,47 +955,45 @@
   },
   {
    "id": "c17",
-   "kind": "coming",
+   "kind": "variant",
    "text": "respond to this RFP for a managed testing service",
    "expect": {
-    "coming": "respond",
-    "nearest": "document:document"
+    "card": "respond",
+    "option": "rfp"
    }
   },
   {
    "id": "c18",
-   "kind": "coming",
+   "kind": "variant",
    "text": "condense this 40 page report into a 2 page exec summary",
    "expect": {
-    "coming": "rework",
-    "nearest": "document:document"
+    "card": "rework",
+    "option": "condense"
    }
   },
   {
    "id": "c19",
-   "kind": "coming",
+   "kind": "variant",
    "text": "fill in the security questionnaire from the customer",
    "expect": {
-    "coming": "respond",
-    "nearest": "security:security"
+    "card": "respond",
+    "option": "questionnaire"
    }
   },
   {
    "id": "e1",
-   "kind": "coming",
+   "kind": "clear",
    "text": "estimate how long the CRM integration will take and what to charge",
    "expect": {
-    "coming": "estimate-price",
-    "nearest": "plan-it"
+    "card": "estimate-price"
    }
   },
   {
    "id": "e2",
-   "kind": "coming",
+   "kind": "clear",
    "text": "how much will it cost in tokens to run this migration program?",
    "expect": {
-    "coming": "run-cost",
-    "nearest": "analyze-runs"
+    "card": "run-cost"
    }
   },
   {
@@ -1264,7 +1260,7 @@
    "text": "the deck from last week, but for engineers",
    "expect": {
     "ask": [
-     "rework",
+     "rework:re-audience",
      "document:presentation"
     ]
    }
@@ -1778,6 +1774,275 @@
    "text": "Plan a security review of our authentication and authorization code for next quarter",
    "expect": {
     "card": "plan-it"
+   }
+  },
+  {
+   "id": "y1",
+   "kind": "clear",
+   "text": "research which managed Postgres offers point-in-time restore under five minutes",
+   "expect": {
+    "card": "research"
+   }
+  },
+  {
+   "id": "y2",
+   "kind": "clear",
+   "text": "find out what the current guidance is on passkeys for B2B admin accounts, with sources",
+   "expect": {
+    "card": "research"
+   }
+  },
+  {
+   "id": "y3",
+   "kind": "clear",
+   "text": "compare how Linear, Jira and Shortcut price their enterprise tiers",
+   "expect": {
+    "card": "competitive"
+   }
+  },
+  {
+   "id": "y4",
+   "kind": "clear",
+   "text": "market landscape for AI code review tools: who the vendors are and how they position",
+   "expect": {
+    "card": "competitive"
+   }
+  },
+  {
+   "id": "y5",
+   "kind": "clear",
+   "text": "run due diligence on the data room for the analytics startup we might acquire",
+   "expect": {
+    "card": "due-diligence"
+   }
+  },
+  {
+   "id": "y6",
+   "kind": "clear",
+   "text": "vendor assessment of these SOC 2 and pen test reports before we sign",
+   "expect": {
+    "card": "due-diligence"
+   }
+  },
+  {
+   "id": "y7",
+   "kind": "clear",
+   "text": "what do these five contracts say about termination and liability caps? compare them",
+   "expect": {
+    "card": "analyze-documents"
+   }
+  },
+  {
+   "id": "y8",
+   "kind": "clear",
+   "text": "pull the key numbers and contradictions out of the attached board pdfs",
+   "expect": {
+    "card": "analyze-documents"
+   }
+  },
+  {
+   "id": "y9",
+   "kind": "clear",
+   "text": "red team this pricing proposal before I send it to the CFO",
+   "expect": {
+    "card": "critique"
+   }
+  },
+  {
+   "id": "y10",
+   "kind": "clear",
+   "text": "is the claim in this whitepaper that our latency halves actually supported?",
+   "expect": {
+    "card": "critique"
+   }
+  },
+  {
+   "id": "y11",
+   "kind": "clear",
+   "text": "estimate the effort and price for this statement of work, rates are in the sheet",
+   "expect": {
+    "card": "estimate-price"
+   }
+  },
+  {
+   "id": "y12",
+   "kind": "clear",
+   "text": "size and quote the scope in the attached RFP appendix",
+   "expect": {
+    "card": "estimate-price"
+   }
+  },
+  {
+   "id": "y13",
+   "kind": "clear",
+   "text": "what would 40 bug fixes a month cost us in agent runs?",
+   "expect": {
+    "card": "run-cost"
+   }
+  },
+  {
+   "id": "y14",
+   "kind": "clear",
+   "text": "budget for agent runs next quarter if we double the feature work",
+   "expect": {
+    "card": "run-cost"
+   }
+  },
+  {
+   "id": "y15",
+   "kind": "variant",
+   "text": "draft our answer to the state agency's request for proposal, using our capabilities deck",
+   "expect": {
+    "card": "respond",
+    "option": "rfp"
+   }
+  },
+  {
+   "id": "y16",
+   "kind": "variant",
+   "text": "answer this RFI from the insurer with what's in our product docs",
+   "expect": {
+    "card": "respond",
+    "option": "rfi"
+   }
+  },
+  {
+   "id": "y17",
+   "kind": "variant",
+   "text": "respond to the request for information about our hosting regions",
+   "expect": {
+    "card": "respond",
+    "option": "rfi"
+   }
+  },
+  {
+   "id": "y18",
+   "kind": "variant",
+   "text": "fill in the customer's vendor security questionnaire from our policies",
+   "expect": {
+    "card": "respond",
+    "option": "questionnaire"
+   }
+  },
+  {
+   "id": "y19",
+   "kind": "variant",
+   "text": "turn this 30 slide deck into a one-page exec summary",
+   "expect": {
+    "card": "rework",
+    "option": "condense"
+   }
+  },
+  {
+   "id": "y20",
+   "kind": "variant",
+   "text": "rewrite the architecture doc for the sales team, no jargon",
+   "expect": {
+    "card": "rework",
+    "option": "re-audience"
+   }
+  },
+  {
+   "id": "y21",
+   "kind": "variant",
+   "text": "the same onboarding guide, but for customers instead of new hires",
+   "expect": {
+    "card": "rework",
+    "option": "re-audience"
+   }
+  },
+  {
+   "id": "y22",
+   "kind": "variant",
+   "text": "make a reusable template from the Acme proposal with the client specifics taken out",
+   "expect": {
+    "card": "rework",
+    "option": "generalize"
+   }
+  },
+  {
+   "id": "y23",
+   "kind": "variant",
+   "text": "generalize this case study so we can reuse it for any retailer",
+   "expect": {
+    "card": "rework",
+    "option": "generalize"
+   }
+  },
+  {
+   "id": "y24",
+   "kind": "variant",
+   "text": "convert the runbook document into slides for the ops review",
+   "expect": {
+    "card": "rework",
+    "option": "convert"
+   }
+  },
+  {
+   "id": "y25",
+   "kind": "variant",
+   "text": "make a slide deck from the onboarding guide for the all-hands",
+   "expect": {
+    "card": "rework",
+    "option": "convert"
+   }
+  },
+  {
+   "id": "y26",
+   "kind": "variant",
+   "text": "refresh last year's market report with this year's numbers from the new filings",
+   "expect": {
+    "card": "rework",
+    "option": "refresh"
+   }
+  },
+  {
+   "id": "y27",
+   "kind": "variant",
+   "text": "bring the Q2 investor deck up to date with the attached Q3 figures",
+   "expect": {
+    "card": "rework",
+    "option": "refresh"
+   }
+  },
+  {
+   "id": "y28",
+   "kind": "variant",
+   "text": "a phase plugin that shows each phase's elapsed time and spend in the job details",
+   "expect": {
+    "card": "studio-plugin",
+    "option": "phase"
+   }
+  },
+  {
+   "id": "y29",
+   "kind": "variant",
+   "text": "add a section to every job's details listing the files each step touched",
+   "expect": {
+    "card": "studio-plugin",
+    "option": "phase"
+   }
+  },
+  {
+   "id": "y30",
+   "kind": "ambiguous",
+   "text": "we got a questionnaire and an RFP from the same customer, help",
+   "expect": {
+    "ask": [
+     "respond:questionnaire",
+     "respond:rfp"
+    ]
+   }
+  },
+  {
+   "id": "y31",
+   "kind": "ambiguous",
+   "text": "a studio plugin for our build logs",
+   "expect": {
+    "ask": [
+     "studio-plugin:editor",
+     "studio-plugin:phase"
+    ]
    }
   }
  ]

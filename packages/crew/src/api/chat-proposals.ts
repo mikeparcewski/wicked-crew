@@ -2319,7 +2319,8 @@ export class ChatProposals {
     if (r === null || seed === undefined) throw new JobRefusal('operation_unavailable', `${card.title} can't be made from a chat on this daemon`, 409);
     if (!this.deps.flags().create) throw new JobRefusal('operation_unavailable', 'studio cannot start a document from a chat on this daemon yet', 409);
     const turnId = ctx.turnId ?? `person:${pid.slice(pid.lastIndexOf(':') + 1)}`;
-    const words = [briefOf(facts), r.resolved.brief ?? ''].filter((x) => x !== '').join('\n\n');
+    // Crew's kind line goes first, as `withBriefLines` puts it on a run: a long request is cut at its end, never the line.
+    const words = [r.resolved.brief ?? '', briefOf(facts)].filter((x) => x !== '').join('\n\n');
     const made = await this.resolve({ chatId, turnId, seat: ctx.seat, block: { op: 'entry', entry: seed.id, brief: words, sources: ['chat'], repos: facts.repoRef !== null ? [facts.repoRef] : [] }, records });
     if (made === null) throw new JobRefusal('operation_unavailable', 'studio cannot start a document from a chat on this daemon yet', 409);
     const shape: ProposalShape = { card: card.id, option: r.option?.id ?? null, depth: null, by: facts.by, source: facts.source, ...(facts.guess !== undefined ? { guess: facts.guess } : {}) };
@@ -2335,12 +2336,15 @@ export class ChatProposals {
       ? { kind: 'missing', text: `Which documents?${why !== undefined ? ` ${why}` : ''}`, choices: [] }
       : null;
     const documentsTok: ProposalToken[] = documentsInput === undefined ? [] : [{ id: 'documents', kind: 'documents', label, swap: null, documents }];
+    // A document option this engine cannot draft (Respond and Rework without `interactive-draft-sourced`) is said, with
+    // why, and offers no Start (CS8).
+    const offline = r.resolved.status !== 'available' ? (r.resolved.statusNote ?? `${card.title} can't start on this daemon`) : null;
     return {
       ...made,
       // These tokens passed the document packet's plan, including PDF text and the shared budget. Keep that
       // decision rather than applying the legacy source count cap or CS4's larger job limits.
       ...(documentsInput !== undefined ? { sources: [...made.sources, ...ok], inputs: { ...facts.inputs }, needs } : {}),
-      blocked: made.blocked ?? question?.text ?? null,
+      blocked: made.blocked ?? offline ?? question?.text ?? null,
       pid,
       turnId: ctx.turnId,
       // `what.entry` stays the document entry the create launcher reads its style from (codex r1); the card is in `shape`.
@@ -2352,7 +2356,7 @@ export class ChatProposals {
       gate: [...r.resolved.gate],
       words: facts.words,
       details: [...facts.details],
-      sentence: { text: `I'll make {kind} from this conversation${documentsInput !== undefined ? ', reading {documents}' : ''}, filed in ${made.filedIn.label}, checked by {checks}.`, tokens: [kindTok, ...documentsTok, checksTok], notes: [...ctx.notes], ask: question?.text ?? (made.blocked === null ? 'Start?' : null) },
+      sentence: { text: `I'll make {kind} from this conversation${documentsInput !== undefined ? ', reading {documents}' : ''}, filed in ${made.filedIn.label}, checked by {checks}.`, tokens: [kindTok, ...documentsTok, checksTok], notes: [...ctx.notes], ask: offline !== null ? null : question?.text ?? (made.blocked === null ? 'Start?' : null) },
       suggestions: [],
       question,
       revises: ctx.revises,

@@ -113,7 +113,8 @@ export function catalogDigest(mode: DigestMode, view: DigestView = {}): string {
     return [
       'Job cards (id [depth: Investigate, takes quick|standard|deep] (options; default)):',
       live.join('; '),
-      `Coming (name one only when it is the right shape): ${coming.join(', ')}.`,
+      // No line when nothing is coming (CS8 shipped every coming card): an empty list is not a card to name.
+      ...(coming.length > 0 ? [`Coming (name one only when it is the right shape): ${coming.join(', ')}.`] : []),
     ].join('\n');
   }
   const lines: string[] = ['CATALOG (card id [category] title: what you get; options are card:option; [depth] = an Investigate card):'];

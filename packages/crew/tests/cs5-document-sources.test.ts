@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import * as attachments from '../src/api/chat-attachments.js';
 import * as beneath from '../src/api/beneath.js';
-import type { Actor, ArtifactProposal, ChatTranscriptRecord } from '../src/core/types.js';
+import type { Actor, ArtifactProposal, ChatTranscriptRecord, Preset } from '../src/core/types.js';
 import { ChatProposals, LaunchOnceRegistry, type ChatProposalDeps } from '../src/api/chat-proposals.js';
 import { CreateLauncher } from '../src/interactive/proposal-create.js';
 import { DocBindingStore } from '../src/interactive/doc-binding.js';
@@ -19,24 +19,14 @@ vi.mock('node:fs', async (original) => {
   return { ...actual, readSync: vi.fn(actual.readSync) };
 });
 
-// CS8 owns the catalog flip; exercise its document inputs with the real create resolver today.
-vi.mock('../src/workflow-catalog/catalog-data-v2.js', async (original) => {
-  const actual = await original<typeof import('../src/workflow-catalog/catalog-data-v2.js')>();
-  return { ...actual, CATALOG_V2_CARDS: actual.CATALOG_V2_CARDS.map((c) => {
-    if (c.id !== 'respond' && c.id !== 'rework') return c;
-    const card: Record<string, unknown> = { ...c };
-    delete card['status'];
-    delete card['statusNote'];
-    return { ...card, inputs: ['intent', 'documents'], launch: { kind: 'document', style: 'doc' } } as typeof c;
-  }) };
-});
-
 const ROOT = mkdtempSync(join(tmpdir(), 'cs5-document-sources-'));
 afterAll(() => rmSync(ROOT, { recursive: true, force: true }));
 const ME: Actor = { id: 'person', kind: 'human', trust: 'operator' };
-const served = { ...servedState({ defs: [], presets: [], entries: [] }), rev: 'cs5' };
+// An engine that serves the sourced draft (CS5 core): without it Respond and Rework offer no Start (CS8, below).
+const SOURCED = { name: 'interactive-draft-sourced', created_by: 'builtin', scope: 'global', steps: [] } as unknown as Preset;
+const served = { ...servedState({ defs: [], presets: [SOURCED], entries: [] }), rev: 'cs5' };
 
-function rig() {
+function rig(opts: { served?: typeof served } = {}) {
   const records: ChatTranscriptRecord[] = [];
   const dir = mkdtempSync(join(ROOT, 'attachments-'));
   writeFileSync(join(dir, 'a1'), 'ask bytes');
@@ -84,7 +74,7 @@ function rig() {
     runs: async () => [], chatOfRun: () => undefined, isAskPath: () => false,
     docsRoot: async (project) => join(ROOT, project), projectName: async (id) => id,
     attachments: () => files, workflowSteps: async () => 1, runCostUsd: async () => null,
-    registry, jobs: () => true, acceptsJobs: () => true, served: async () => served,
+    registry, jobs: () => true, acceptsJobs: () => true, served: async () => opts.served ?? served,
     broadcast: () => undefined, audit: () => undefined,
   };
   const svc = new ChatProposals(deps);
@@ -119,6 +109,26 @@ function doc(name: string, head = 1) {
 
 const sources = (p: ArtifactProposal) => p.sources.map((s) => s.token);
 const documents = (p: ArtifactProposal) => p.sentence!.tokens.find((t) => t.kind === 'documents')!;
+
+describe('CS8: Respond and Rework on an engine without the sourced draft', () => {
+  it.each(['respond', 'rework'])('%s says why and offers no Start; Go creates nothing', async (card) => {
+    const r = rig({ served: { ...servedState({ defs: [], presets: [], entries: [] }), rev: 'cs5' } });
+    let created = 0;
+    r.duringCreate(() => { created += 1; });
+    const p = await r.pick(card);
+    expect(p.blocked).toMatch(/interactive-draft-sourced/u);
+    expect(p.sentence!.ask).toBeNull();
+    expect((await r.svc.decide('chat', p.pid, { decision: 'go' }, ME, 'instance')).code).not.toBe(200);
+    expect(r.launches).toEqual([]);
+    expect(created).toBe(0);
+  });
+
+  it('puts the kind line before the person\'s words, so a long request never cuts it', async () => {
+    const r = rig();
+    const p = await r.pick('respond');
+    expect(p.brief ?? '').toMatch(/^Kind: respond-rfp\.\n\nWrite from these materials/u);
+  });
+});
 
 describe('CS5 document input sources', () => {
   it.each(['respond', 'rework'])('%s fills two attachments, displays their count and launches chat plus both sources', async (card) => {

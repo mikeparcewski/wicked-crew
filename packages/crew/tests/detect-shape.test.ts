@@ -63,14 +63,20 @@ describe('the digest (§2.3 catalogDigest)', () => {
     }
   });
 
-  it('marks the Investigate cards (garden gives depth only on those) and the coming ones', () => {
+  it('marks the Investigate cards (garden gives depth only on those), and names no coming card once none is (CS8)', () => {
     const chat = catalogDigest('chat');
     expect(chat).toMatch(/incident \[depth\]/u);
     expect(chat).toMatch(/reconstruct \[depth\]/u);
     expect(chat).not.toMatch(/feature \[depth\]/u);
-    expect(chat).toMatch(/Coming[^\n]*competitive/u);
+    expect(chat).toMatch(/competitive \[depth\]/u);
+    expect(chat).not.toMatch(/Coming/u);
+    expect(chat).toMatch(/respond \(rfp\|rfi\|questionnaire; default rfp\)/u);
+    expect(chat).toMatch(/studio-plugin \(editor\|phase; default editor\)/u);
     const classify = catalogDigest('classify');
-    expect(classify).toMatch(/- competitive \[Investigate\] \[depth\][^\n]*COMING in 1\.2/u);
+    expect(classify).toMatch(/- competitive \[Investigate\] \[depth\] Competitive or market analysis: [^\n(]*$/mu);
+    expect(classify).not.toMatch(/COMING/u);
+    // A seat-side status still marks what is coming (the mechanism stays for a future card).
+    expect(catalogDigest('chat', { status: (c) => (c === 'critique' ? 'coming_soon' : 'available') })).toMatch(/Coming[^\n]*critique/u);
     expect(classify).toMatch(/migrate:upgrade/u);
   });
 
@@ -188,9 +194,9 @@ describe('validateGuess (§2.3)', () => {
     expect(plainReason(42)).toBe('');
   });
 
-  it('keeps a coming card named, unavailable (its nearest is offered by the proposal)', () => {
+  it('names a flipped card available, and keeps a card this daemon cannot start named, unavailable', () => {
     const d = detect({ text: 'what are competitors doing for usage-based pricing?', seat: { card: 'competitive', confidence: 0.9, reason: 'market analysis' }, source: 'classify', catalogRev: REV });
-    expect(d.guess).toMatchObject({ card: 'competitive', available: false });
+    expect(d.guess).toMatchObject({ card: 'competitive', available: true });
     // Never sure on a job this daemon cannot start, even when the words decide it (pi r2).
     const off = detect({ text: 'modernize the legacy .NET Framework monolith into microservices on Kubernetes', seat: null, source: 'classify', catalogRev: REV, available: () => false });
     expect(off.guess).toMatchObject({ card: 'migrate', available: false, band: 'likely' });
