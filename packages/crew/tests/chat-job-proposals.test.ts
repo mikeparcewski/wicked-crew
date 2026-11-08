@@ -2,6 +2,7 @@
 // engine's catalog. A person-made proposal never launches; Go is idempotent and launches what is on screen, held at its
 // plan; a correction in flight holds Start; a stale parent is refused; a check is never lost by a seat's block (only
 // the person's press on wicked's question gives it up); a QE skip stands only on the person's own unquoted reason.
+import { parseReviewTarget } from '../src/api/review-change.js';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -74,7 +75,7 @@ interface Rig {
 
 const CHAT = 'c1';
 
-function rig(o: { roster?: Array<{ key: string; name: string }>; repos?: Array<{ id: string; name: string }> } = {}): Rig {
+function rig(o: { roster?: Array<{ key: string; name: string }>; repos?: Array<{ id: string; name: string }>; reviewAuthors?: ChatProposalDeps['reviewAuthors']; powerPresets?: ChatProposalDeps['powerPresets'] } = {}): Rig {
   const r: Rig = {
     svc: null as unknown as ChatProposals,
     records: [],
@@ -117,6 +118,8 @@ function rig(o: { roster?: Array<{ key: string; name: string }>; repos?: Array<{
     qeOff: async () => r.qeOff,
     preflight: async () => r.preflightAnswer,
     powerRefusal: async () => r.powerAnswer,
+    ...(o.reviewAuthors !== undefined ? { reviewAuthors: o.reviewAuthors } : {}),
+    ...(o.powerPresets !== undefined ? { powerPresets: o.powerPresets } : {}),
     reshapeReject: async (_run, _actor, _pid, expect) => {
       r.rejects += 1;
       r.rejectExpect = expect ?? null;
@@ -442,6 +445,116 @@ describe('codex/pi r1 folds', () => {
     await say(r, 't1', 'make it a risk analysis');
     await reply(r, 't1', { revises: p.pid, edits: { card: 'risk' } });
     expect(open(r).question).toMatchObject({ kind: 'lost_check', lostSeats: ['excludeChangeAuthors'] });
+  });
+
+  // CJ13 (fold 26): the builder of the PR (claude, the chat's lead) was the proposal's default lead, the launch dropped it
+  // from the roster and refused primary=claude with a 502; the passage also listed it among the helpers.
+  it('a review of a change is led and helped only by seats that did not write it (CJ13)', async () => {
+    const asked: Array<[string, string]> = [];
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async (repoRef, words) => { asked.push([repoRef, words]); return ['claude']; } });
+    await pick(r, 'review-change', { words: 'review pull request 9' });
+    const p = open(r);
+    expect(asked).toEqual([['r-pay', 'review pull request 9']]);
+    expect(p.seats?.lead).toBe('codex');
+    expect(p.seats?.keys).toEqual(['codex', 'pi']);
+    const seats = p.sentence!.tokens.find((t) => t.kind === 'seats')!;
+    expect(seats.label).not.toMatch(/Claude/);
+    expect((seats.swap?.choices ?? []).map((c) => c.label)).toEqual(['pi leads']);
+    expect(r.launcher.launched).toHaveLength(0);
+    // A lead swap to the author is not taken; a swap to another reviewer is (and keeps the author out).
+    await swap(r, p.pid, { lead: 'claude' }, 'lead-claude');
+    expect(open(r).seats?.lead).toBe('codex');
+    await swap(r, open(r).pid, { lead: 'pi' }, 'lead-pi');
+    expect(open(r).seats).toMatchObject({ lead: 'pi', keys: ['pi', 'codex'] });
+  });
+
+  it('a review whose every seat wrote the change keeps the roster, so the launch decides (CJ13)', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async () => ['claude', 'codex', 'pi'] });
+    await pick(r, 'review-change', { words: 'review pull request 9' });
+    expect(open(r).seats?.lead).toBe('claude');
+  });
+
+  it('a revision that names another change checks its seats against that change\'s authors, read once (CJ13)', async () => {
+    // The mock reads the target the way the launch does (the first PR the words name).
+    const asked: string[] = [];
+    const authorsOf: Record<string, string[]> = { none: ['claude'], '10': ['codex'] };
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async (_repo, words) => {
+      asked.push(words);
+      const t = parseReviewTarget(words);
+      return authorsOf[t?.kind === 'pr' ? String(t.number) : 'none'] ?? [];
+    } });
+    await pick(r, 'review-change', { words: 'review the latest change' });
+    expect(open(r).seats).toMatchObject({ lead: 'codex', keys: ['codex', 'pi'] });
+    await swap(r, open(r).pid, { detail: { add: ['it is pull request 10'] }, lead: 'claude' } as ProposalRevisionEdits, 'pr10');
+    // codex wrote PR 10: it leaves the seats it held, and claude, who did not, may lead.
+    expect(open(r).seats).toMatchObject({ lead: 'claude', keys: ['claude', 'pi'] });
+    expect(asked.filter((w) => parseReviewTarget(w)?.kind === 'pr')).toHaveLength(1);
+  });
+
+  it('a retarget whose authors held every chosen seat picks the seats again from the reviewers left (CJ13)', async () => {
+    const authorsOf: Record<string, string[]> = { none: ['claude', 'codex'], '10': ['pi', 'opencode'] };
+    const r = rig({
+      roster: [{ key: 'claude', name: 'Claude' }, { key: 'codex', name: 'Codex' }, { key: 'pi', name: 'pi' }, { key: 'opencode', name: 'OpenCode' }],
+      repos: [{ id: 'r-pay', name: 'payments-service' }],
+      reviewAuthors: async (_repo, words) => { const t = parseReviewTarget(words); return authorsOf[t?.kind === 'pr' ? String(t.number) : 'none'] ?? []; },
+    });
+    await pick(r, 'review-change', { words: 'review the latest change' });
+    expect(open(r).seats?.keys).toEqual(['pi', 'opencode']);
+    await swap(r, open(r).pid, { detail: { add: ['it is pull request 10'] } } as ProposalRevisionEdits, 'pr10');
+    expect(open(r).seats).toMatchObject({ lead: 'claude', keys: ['claude', 'codex'] });
+  });
+
+  it('seats the person names are never replaced, even when they all wrote the change (CJ13)', async () => {
+    const r = rig({
+      roster: [{ key: 'claude', name: 'Claude' }, { key: 'codex', name: 'Codex' }, { key: 'pi', name: 'pi' }, { key: 'opencode', name: 'OpenCode' }],
+      repos: [{ id: 'r-pay', name: 'payments-service' }],
+      reviewAuthors: async () => ['claude', 'codex'],
+    });
+    await pick(r, 'review-change', { words: 'review pull request 9' });
+    expect(open(r).seats?.keys).toEqual(['pi', 'opencode']);
+    await swap(r, open(r).pid, { addSeats: ['claude', 'codex'], removeSeats: ['pi', 'opencode'] } as ProposalRevisionEdits, 'authors');
+    expect(open(r).seats?.keys).not.toContain('claude');
+    expect(open(r).seats?.keys).not.toContain('codex');
+  });
+
+  it('only carried seats that all wrote the new change are picked again; an empty or unavailable choice stays short (CJ13)', async () => {
+    const roster = [{ key: 'claude', name: 'Claude' }, { key: 'codex', name: 'Codex' }, { key: 'pi', name: 'pi' }];
+    const r = rig({ roster, repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async () => ['claude'] });
+    await pick(r, 'review-change', { words: 'review pull request 9' });
+    expect(open(r).seats?.keys).toEqual(['codex', 'pi']);
+    // codex and pi leave the roster (not authors): a detail-only revision does not swap in the author.
+    r.roster = [{ key: 'claude', name: 'Claude' }];
+    await swap(r, open(r).pid, { detail: { add: ['look closely'] } } as ProposalRevisionEdits, 'gone');
+    expect(open(r).seats).toMatchObject({ lead: null, keys: [] });
+  });
+
+  it('an unreadable change, or another card, keeps the roster as it is (CJ13)', async () => {
+    const failing = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async () => { throw new Error('gh down'); } });
+    await pick(failing, 'review-change', { words: 'review pull request 9' });
+    expect(open(failing).seats?.lead).toBe('claude');
+    let calls = 0;
+    const other = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async () => { calls += 1; return ['claude']; } });
+    await pick(other, 'migrate', { option: 'upgrade', words: 'bump to node 22' });
+    expect(calls).toBe(0);
+    expect(open(other).seats?.lead).toBe('claude');
+  });
+
+  // CJ13 (fold 26) reported a seats swap turning plan review off. Crew's half: every token swap keeps the job's power
+  // choice (the Review plan switch itself is the browser's own setting, studio's store).
+  it.each([
+    ['lead', { lead: 'codex' }],
+    ['repository', { repoRef: 'r-bill' }],
+    ['depth', { depth: 'deep' }],
+  ] as const)('a %s swap keeps the Start\'s power choice (CJ13)', async (_name, edits) => {
+    const r = rig({ powerPresets: async () => new Set(['review-change']) });
+    await pick(r, 'review-change', { words: 'review pull request 9 in payments-service', repoRef: 'r-pay' } as never);
+    let p = open(r);
+    if (p.repoRefs === undefined) { await swap(r, p.pid, { repoRef: 'r-pay' }, 'repo'); p = open(r); }
+    expect(p.powerChoice).toBe(true);
+    await swap(r, p.pid, edits as ProposalRevisionEdits, `swap-${_name}`);
+    const v2 = open(r);
+    expect(v2.pid).not.toBe(p.pid);
+    expect(v2.powerChoice).toBe(true);
   });
 
   it.each([
