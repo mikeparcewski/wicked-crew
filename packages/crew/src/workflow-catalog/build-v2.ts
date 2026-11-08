@@ -69,8 +69,8 @@ const CREW_PENDING: Readonly<Record<string, string>> = {
 /** Whether a card waits on a crew piece not built yet (listed, never offered). */
 export const crewPending = (cardId: string): boolean => Object.hasOwn(CREW_PENDING, cardId);
 
-/** The input kinds this daemon's launch routes take (1.1's `documents` and 1.2's `sources` are not yet). */
-export const INPUT_KINDS_V2: readonly CatalogInputKindV2[] = ['text', 'repo', 'project', 'url', 'requirements', 'seats'];
+/** The input kinds this daemon captures for a launch, including its documents and source pick. */
+export const INPUT_KINDS_V2: readonly CatalogInputKindV2[] = ['text', 'repo', 'project', 'url', 'requirements', 'seats', 'documents', 'sources'];
 
 export interface CatalogV2Inputs {
   /** `GET /workflows`'s served defs. */
@@ -108,6 +108,8 @@ const INPUT_LABELS: Readonly<Record<string, { label: string; kind: CatalogInputK
   audience: { label: 'Who it is for', kind: 'text' },
   show: { label: 'What to show', kind: 'text' },
   requirements: { label: 'Requirements', kind: 'requirements' },
+  documents: { label: 'Documents', kind: 'documents' },
+  sources: { label: 'Sources', kind: 'sources' },
 };
 
 /** The seeds' input ids (`repo`, `repo?`) as wire inputs; `depth` is a card field, not an input kind. */

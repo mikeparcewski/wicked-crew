@@ -32,6 +32,7 @@ import { realpathSync } from 'node:fs';
 
 import type { ArtifactProposal, ChatTranscriptRecord, SessionView } from '../core/types.js';
 import { ARTIFACT_REF, parseArtifactRef, UNFILED_MOUNT } from '../api/chat-context.js';
+import { extractPdfText } from '../api/chat-attachments.js';
 import { fenced, type RunBrief } from '../api/run-brief.js';
 import { readBeneath, statBeneath } from '../api/beneath.js';
 import { PACKET_NAME } from './doc-binding.js';
@@ -119,12 +120,27 @@ export interface PacketDeps {
   contextBrief?(chatId: string, relPath: string, sha: string): Buffer | null;
 }
 
-class Refused extends Error {}
+/** A refusal with a plain reason: a source that fails is struck with it, and nothing of it joins the packet. Shared
+ *  with the run-documents staging (slice A), which catches it to refuse one document's token. */
+export class PacketRefused extends Error {}
+const Refused = PacketRefused;
 
-/** An attachment's name, reduced to safe characters (the id leads, so two names never collide). */
+/** Shorten a name to `max` characters, keeping a short trailing extension (a long `x.pdf` stays `.pdf`), with no
+ *  trailing `-`/`.` left after the cut. */
+function shortenName(name: string, max: number): string {
+  if (name.length <= max) return name;
+  const dot = name.lastIndexOf('.');
+  const ext = dot > 0 && name.length - dot <= 11 ? name.slice(dot) : '';
+  const stem = name.slice(0, Math.max(1, max - ext.length)).replace(/[-.]+$/, '') || name.slice(0, 1);
+  return (stem + ext).slice(0, max);
+}
+
+/** An attachment's name, reduced to safe characters (the id leads, so two names never collide), its extension kept
+ *  when the name is shortened. */
 export function safeName(name: string): string {
-  const s = name.normalize('NFKD').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/-+\./g, '.').replace(/^[-.]+|[-.]+$/g, '').slice(0, 80);
-  return s === '' ? 'file' : s;
+  const s = name.normalize('NFKD').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/-+\./g, '.').replace(/^[-.]+|[-.]+$/g, '');
+  const kept = shortenName(s, 80);
+  return kept === '' ? 'file' : kept;
 }
 
 /** Read a regular file beneath the real `root`, following no link at any component; a refusal says why. */
@@ -145,6 +161,126 @@ function runProject(v: SessionView): string | null {
 
 function mdLabel(s: string): string {
   return s.replace(/[\r\n]+/g, ' ').slice(0, 200);
+}
+
+/**
+ * A chat attachment as a named file, read beneath its own stored folder, following no link at the leaf (the folder's
+ * own ancestors are crew's, trusted). `att` is the store's lookup for the id (its name and stored path), or null. At
+ * most `max` bytes. Shared by {@link buildSourcePacket} and the run-documents staging (slice A), so both name and read
+ * an attachment the same way.
+ */
+export function readStagedAttachment(id: string, lookup: () => { name: string; path: string } | null, max: number): { name: string; bytes: Buffer } {
+  // The id is validated against its grammar BEFORE the lookup runs, so an invalid id is refused without the lazy
+  // lookup into the shared reader ever being touched (the lookup may itself throw for a bad id).
+  if (!ATTACHMENT_ID.test(id)) throw new PacketRefused('not an attachment id');
+  const att = lookup();
+  if (att === null) throw new PacketRefused('no longer attached');
+  const slash = att.path.lastIndexOf('/');
+  let dir: string;
+  try {
+    // The parent's real path (its ancestors are crew's), then the leaf read beneath it with no link followed: a
+    // symlinked attachment file is refused, never followed out of its folder.
+    dir = realpathSync(slash <= 0 ? '/' : att.path.slice(0, slash));
+  } catch {
+    throw new PacketRefused('no longer attached');
+  }
+  const base = slash < 0 ? att.path : att.path.slice(slash + 1);
+  return { name: `attachment-${id}-${shortenName(safeName(att.name), Math.max(1, 190 - id.length))}`, bytes: readUnder(dir, base, max) };
+}
+
+/**
+ * A document's version as a named file, read beneath its project's docs root (the HEAD when `version` is null),
+ * following no link at any component. `docsRoot` maps a project id to its docs root (null = no such project). At most
+ * `max` bytes. Shared by {@link buildSourcePacket} and the run-documents staging (slice A).
+ */
+export async function readStagedDocument(
+  refText: string,
+  version: number | null,
+  docsRoot: (projectId: string) => Promise<string | null>,
+  max: number,
+): Promise<{ name: string; bytes: Buffer }> {
+  const ref = parseArtifactRef(refText);
+  if (ref === null || !ARTIFACT_REF.test(ref.ref)) throw new PacketRefused('not a document reference');
+  const root0 = await docsRoot(ref.projectId);
+  if (root0 === null) throw new PacketRefused('its project is gone');
+  // Every read beneath the docs root's real path, following no link at any component (A1's `beneath`).
+  let root: string;
+  try {
+    root = realpathSync(root0);
+  } catch {
+    throw new PacketRefused('its project is gone');
+  }
+  let isDir = false;
+  try {
+    isDir = statBeneath(root, ref.doc)?.isDirectory() === true;
+  } catch {
+    isDir = false;
+  }
+  if (!isDir) throw new PacketRefused('no such document');
+  let versions: { head?: unknown; versions?: unknown };
+  try {
+    versions = JSON.parse(readUnder(root, `${ref.doc}/versions.json`, 1024 * 1024).toString('utf8')) as typeof versions;
+  } catch (err) {
+    throw err instanceof PacketRefused ? err : new PacketRefused('its versions.json is not readable');
+  }
+  // A malformed versions.json (null, a primitive, an array, a non-array `versions`) refuses the token, never throws.
+  if (typeof versions !== 'object' || versions === null || Array.isArray(versions)) throw new PacketRefused('its versions.json is not readable');
+  const head = typeof versions.head === 'number' && Number.isInteger(versions.head) && versions.head >= 0 ? versions.head : null;
+  if (head === null) throw new PacketRefused('it has no readable head');
+  // A present `versions` field that is not an array is malformed and refuses the token; an ABSENT field keeps the
+  // head-only legacy behaviour (an empty list, so the head is read by its default `_v<n>.html` name). Only the two
+  // are allowed — a non-array value is never silently coerced to an empty list.
+  if (versions.versions !== undefined && !Array.isArray(versions.versions)) throw new PacketRefused('its versions.json is not readable');
+  const want = version ?? head;
+  const list = Array.isArray(versions.versions) ? (versions.versions as Array<{ version?: unknown; html_file?: unknown }>) : [];
+  const entry = list.find((v) => v !== null && typeof v === 'object' && (v as { version?: unknown }).version === want);
+  if (version !== null && entry === undefined && version !== head) throw new PacketRefused(`its version ${version} is not on record`);
+  const file = typeof entry?.html_file === 'string' && /^_v\d{1,6}\.html$/.test(entry.html_file) ? entry.html_file : `_v${want}.html`;
+  // Named by the ref's hash and the document's name: bounded whatever the mount's length, never a label.
+  return { name: `doc-${sha256(ref.ref).slice(0, 12)}-${ref.doc}-v${want}.html`, bytes: readUnder(root, `${ref.doc}/${file}`, max) };
+}
+
+/** The text derivative of a pdf, its first line labelling it as the extracted text of `originalName`, budgeted in BYTES
+ *  (the label plus the UTF-8 body fit in `maxBytes`) and in characters (`maxChars`). `scan` = no usable text (nothing
+ *  after a trim); `no-room` = no byte room for even the label, so the pdf is never scanned (bounding a hostile pdf's
+ *  parsing work when the packet is nearly full). `cut` with the final char count when the text did not fit whole.
+ *  `extract` is the text extractor (the real {@link extractPdfText} by default; a test may inject one to prove it is
+ *  not called when there is no room). Shared so every caller derives a pdf's text the same way (slice A;
+ *  DESIGN §2.d piece 2 "PDFs"). */
+export type PdfDerivative =
+  | { kind: 'text'; bytes: Buffer; cut: boolean; chars: number }
+  | { kind: 'scan' }
+  | { kind: 'no-room' };
+
+export function pdfTextDerivative(
+  data: Buffer,
+  originalName: string,
+  maxBytes: number,
+  maxChars: number,
+  extract: (data: Buffer, maxChars: number) => string = extractPdfText,
+): PdfDerivative {
+  const label = `Extracted text of ${originalName} (may be lossy or incomplete; quote the original's page when a figure matters).`;
+  const labelBytes = Buffer.byteLength(`${label}\n`, 'utf8');
+  // No room for even the label (or no char cap): do not scan — the caller records "no room", never "no extractable text".
+  if (maxBytes <= labelBytes || maxChars <= 0) return { kind: 'no-room' };
+  // Extract with a raw cap above the room and treat a result longer than the room as cut. The shared extractor stops on
+  // its raw (pre-whitespace) count and does not say whether it stopped early, so a pdf whose text is mostly whitespace
+  // can still lose later text unnoticed: the label says "may be lossy or incomplete" for that reason (crew#1428).
+  const rawCap = maxChars * 2;
+  const extracted = extract(data, rawCap);
+  if (extracted.trim() === '') return { kind: 'scan' };
+  let cut = extracted.length > maxChars || extracted.length >= rawCap;
+  let body = extracted.length > maxChars ? extracted.slice(0, maxChars) : extracted;
+  let full = Buffer.from(`${label}\n${body}`, 'utf8');
+  if (full.length > maxBytes) {
+    // Trim the body to the byte room left (label included), never splitting a UTF-8 sequence.
+    let buf = Buffer.from(body, 'utf8').subarray(0, maxBytes - labelBytes);
+    while (buf.length > 0 && Buffer.byteLength(buf.toString('utf8'), 'utf8') !== buf.length) buf = buf.subarray(0, buf.length - 1);
+    body = buf.toString('utf8');
+    full = Buffer.from(`${label}\n${body}`, 'utf8');
+    cut = true;
+  }
+  return { kind: 'text', bytes: full, cut, chars: body.length };
 }
 
 /**
@@ -240,54 +376,13 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
   };
   /** A chat attachment as a packet file, read beneath its own folder (crew's state), by id. */
   const attachmentFile = (stage: Stage, id: string): PacketFile => {
-    if (!ATTACHMENT_ID.test(id)) throw new Refused('not an attachment id');
-    const a = deps.attachment(storage, id);
-    if (a === null) throw new Refused('no longer attached');
-    let dir: string;
-    let base: string;
-    try {
-      const real = realpathSync(a.path);
-      dir = real.slice(0, real.lastIndexOf('/'));
-      base = real.slice(real.lastIndexOf('/') + 1);
-    } catch {
-      throw new Refused('no longer attached');
-    }
-    return stage.add(`attachment-${id}-${safeName(a.name).slice(0, Math.max(1, 190 - id.length))}`, readUnder(dir, base, PACKET_FILE_MAX_BYTES));
+    const got = readStagedAttachment(id, () => deps.attachment(storage, id), PACKET_FILE_MAX_BYTES);
+    return stage.add(got.name, got.bytes);
   };
   /** A document version as a packet file, read beneath its docs root (the head when `version` is null). */
   const docFile = async (stage: Stage, refText: string, version: number | null): Promise<PacketFile> => {
-    const ref = parseArtifactRef(refText);
-    if (ref === null || !ARTIFACT_REF.test(ref.ref)) throw new Refused('not a document reference');
-    const docsRoot = await deps.docsRoot(ref.projectId);
-    if (docsRoot === null) throw new Refused('its project is gone');
-    // Every read beneath the docs root's real path, following no link at any component (A1's `beneath`).
-    let root: string;
-    try {
-      root = realpathSync(docsRoot);
-    } catch {
-      throw new Refused('its project is gone');
-    }
-    let isDir = false;
-    try {
-      isDir = statBeneath(root, ref.doc)?.isDirectory() === true;
-    } catch {
-      isDir = false;
-    }
-    if (!isDir) throw new Refused('no such document');
-    let versions: { head?: unknown; versions?: Array<{ version?: unknown; html_file?: unknown }> };
-    try {
-      versions = JSON.parse(readUnder(root, `${ref.doc}/versions.json`, 1024 * 1024).toString('utf8')) as typeof versions;
-    } catch (err) {
-      throw err instanceof Refused ? err : new Refused('its versions.json is not readable');
-    }
-    const head = typeof versions.head === 'number' && Number.isInteger(versions.head) && versions.head >= 0 ? versions.head : null;
-    if (head === null) throw new Refused('it has no readable head');
-    const want = version ?? head;
-    const entry = versions.versions?.find((v) => v.version === want);
-    if (version !== null && entry === undefined && version !== head) throw new Refused(`its version ${version} is not on record`);
-    const file = typeof entry?.html_file === 'string' && /^_v\d{1,6}\.html$/.test(entry.html_file) ? entry.html_file : `_v${want}.html`;
-    // Named by the ref's hash and the document's name: bounded whatever the mount's length, never a label.
-    return stage.add(`doc-${sha256(ref.ref).slice(0, 12)}-${ref.doc}-v${want}.html`, readUnder(root, `${ref.doc}/${file}`, PACKET_FILE_MAX_BYTES));
+    const got = await readStagedDocument(refText, version, deps.docsRoot, PACKET_FILE_MAX_BYTES);
+    return stage.add(got.name, got.bytes);
   };
   /** The records a turn was given, as files: its run briefs (recovered by hash, else crew's current ones, said) and the
    *  version of the document it had open. */

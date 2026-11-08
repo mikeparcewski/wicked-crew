@@ -93,6 +93,7 @@ import {
   type JobFacts,
 } from './chat-jobs.js';
 import { artifactExists, artifactHead, chatMount, parseArtifactRef, UNFILED_MOUNT } from './chat-context.js';
+import { ATTACHMENT_MAX_FILE_BYTES } from './chat-attachments.js';
 import { tornTailPrefix } from './chat-transcripts.js';
 import type { JobTurnContext, MakeDigest } from './chat-scope.js';
 import { catalogDigest, detect, detectable } from '../workflow-catalog/detect.js';
@@ -179,6 +180,8 @@ const InputValueSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('text'), value: z.string().max(8000) }),
   z.strictObject({ kind: z.literal('url'), value: z.string().max(2048) }),
   z.strictObject({ kind: z.literal('requirements'), refs: z.array(z.strictObject({ repoId: z.string().min(1).max(200), key: z.string().min(1).max(200) })).min(1).max(50) }),
+  z.strictObject({ kind: z.literal('documents'), tokens: z.array(z.string().min(1).max(300)).min(1).max(20) }),
+  z.strictObject({ kind: z.literal('sources'), ids: z.array(z.string().min(1).max(100)).max(20) }),
 ]);
 
 /** (DES-CATALOG-002 §4.6) The edits of a {@link ProposalRevision}, as a block or a request carries them. Unknown keys
@@ -645,6 +648,8 @@ export interface ChatProposalDeps {
   registry: LaunchOnceRegistry;
   /** (DES-CATALOG-002 §4.6) Job proposals are on (`capabilities.chatJobProposals`). Absent = off. */
   jobs?(): boolean;
+  /** CS4: the sources a job in this project can read, the web included when installed, in display order. */
+  jobSources?(projectId: string | null): Promise<Array<{ id: string; label: string; reason?: string; web?: true }>>;
   /** (§2.5) Answer a reshape's held plan Reject (`reshaped`), checked eligible and bound to its ord and plan revision
    *  inside the engine's decision. `null` when it was answered; else the refusal. */
   reshapeReject?(heldRunId: string, actor: Actor, pid: string, expect?: { ord: number; planRev: number }): Promise<DecideResult | null>;
@@ -1211,6 +1216,8 @@ export class ChatProposals {
       /** The person's own words (owner-sent messages) up to the turn. */
       words: string;
       personNamed: boolean;
+      /** Jobs admit whole attachments up to the upload cap and read only files and documents. */
+      jobDocuments?: boolean;
     },
   ): Promise<ProposalSource[]> {
     const out: ProposalSource[] = [];
@@ -1228,10 +1235,14 @@ export class ChatProposals {
     const strike = (token: string, label: string, reason: string, projectId?: string | null): void => {
       push({ token, label, status: 'struck', reason, ...(projectId !== undefined ? { projectId } : {}) });
     };
-    for (const raw of tokens.slice(0, PROPOSAL_SOURCES_MAX)) {
+    for (const raw of ctx.jobDocuments === true ? tokens : tokens.slice(0, PROPOSAL_SOURCES_MAX)) {
       const token = raw.trim();
       if (seen.has(token)) continue;
       seen.add(token);
+      if (ctx.jobDocuments === true && !token.startsWith('attachment:') && !token.startsWith('doc:')) {
+        strike(token, token.slice(0, 40), 'a job reads files and documents only');
+        continue;
+      }
       if (token === 'chat') {
         push({ token, label: 'this conversation', status: 'ok' });
         continue;
@@ -1260,8 +1271,8 @@ export class ChatProposals {
       if (kind === 'attachment') {
         const a = this.deps.attachments(ctx.chatId).find((x) => x.id === id);
         if (a === undefined) strike(`attachment:${id}`, `attachment ${id.slice(0, 12)}`, 'not a file attached to this chat');
-        // A3: the packet's per-file cap (512 KB): a file over it could never reach the draft.
-        else if (typeof a.bytes === 'number' && a.bytes > 512 * 1024) strike(`attachment:${a.id}`, a.name, 'too large for a document\'s sources (over 512 KB)');
+        // The document packet keeps its 512 KB cap; a job stages whole files up to the upload cap.
+        else if (typeof a.bytes === 'number' && a.bytes > (ctx.jobDocuments === true ? ATTACHMENT_MAX_FILE_BYTES : 512 * 1024)) strike(`attachment:${a.id}`, a.name, ctx.jobDocuments === true ? 'too large for a job document (over 10 MB)' : 'too large for a document\'s sources (over 512 KB)');
         else push({ token: `attachment:${a.id}`, label: a.name, status: 'ok' });
         continue;
       }
@@ -1343,6 +1354,19 @@ export class ChatProposals {
       strike(token, token.slice(0, 40), 'not a source studio knows');
     }
     return out;
+  }
+
+  /** Authorise the files a job reads against this chat, its named documents and its current project scope. */
+  async authorizeDocuments(chatId: string, tokens: readonly string[]): Promise<ProposalSource[]> {
+    // Launch-time callers use the latest binding; proposal resolution uses its own turn's snapshot below.
+    return this.authorizeDocumentsAt(chatId, tokens, this.deps.records(chatId), '\u0000');
+  }
+
+  private async authorizeDocumentsAt(chatId: string, tokens: readonly string[], records: readonly ChatTranscriptRecord[], turnId: string): Promise<ProposalSource[]> {
+    tokens = tokens.slice(0, 20);
+    const chat = this.deps.chat(chatId);
+    if (chat === null) return [...new Set(tokens.map((t) => t.trim()))].map((token) => ({ token, label: token.slice(0, 40), status: 'struck', reason: 'the chat has ended' }));
+    return this.resolveSources(tokens, { chatId, turnId, records, ...bindingOf(records, turnId), chat, words: personWords(records, turnId), personNamed: false, jobDocuments: true });
   }
 
   // ── the answer ───────────────────────────────────────────────────────────────────────────────────────────────────
@@ -1651,13 +1675,17 @@ export class ChatProposals {
    */
   private async firstGone(chatId: string, p: ArtifactProposal): Promise<string | null> {
     let runs: SessionView[] | null = null;
+    const documents = p.sentence?.tokens.flatMap((t) => t.kind === 'documents' ? t.documents ?? [] : []) ?? [];
+    const checked = documents.length === 0 ? [] : await this.authorizeDocuments(chatId, documents.filter((s) => s.status === 'ok').map((s) => s.token));
+    const struck = checked.find((s) => s.status === 'struck');
+    if (struck !== undefined) return `${struck.label} cannot be used (${struck.reason})`;
     // A3: a repository the card names must still be registered (never silently dropped from the launch).
     if ((p.repoRefs ?? []).length > 0 && this.deps.repoIds !== undefined) {
       const have = await this.deps.repoIds();
       const lost = (p.repoRefs ?? []).findIndex((id) => !have.has(id));
       if (lost !== -1) return `${p.repos[lost] ?? p.repoRefs![lost]} is no longer registered on this daemon; ask again in the chat`;
     }
-    for (const s of p.sources) {
+    for (const s of [...p.sources, ...documents]) {
       if (s.status !== 'ok') continue;
       if (s.token.startsWith('run:')) {
         runs ??= await this.deps.runs();
@@ -2132,14 +2160,14 @@ export class ChatProposals {
     const chat = this.jobChat(chatId);
     if (chat === null) return null;
     const ctx = await this.jobContext(chatId, base.id, null, 'person', chat, { revises: held.pid, lineage: held.lineage ?? held.pid, notes: [] });
-    const merged = mergeRevision(held, edits, { chat, served: ctx.served, roster: ctx.roster });
+    const merged = await this.mergeJobRevision(held, edits, ctx);
     const card = CATALOG_V2_CARDS.find((c) => c.id === merged.facts.card);
     if (card === undefined || (merged.facts.card === held.shape?.card && optionFor(card, merged.facts.option) === held.shape?.option && merged.facts.depth === held.shape?.depth)) return null;
     const option = optionFor(card, merged.facts.option);
     let needs: string[] = [];
     let command: string | null = card.command;
     try {
-      const p = await this.proposalOf(chatId, base.id, { ...merged.facts, by: 'person', source: 'reshape' }, ctx, this.deps.records(chatId));
+      const p = await this.proposalOf(chatId, base.id, { ...merged.facts, by: 'person', source: 'reshape' }, ctx, this.deps.records(chatId), false, held);
       if (p.kind !== 'job') {
         this.log(`[proposals] chat ${chatId}: a change of job to ${card.id} makes a document — no reshape offer (it is a new proposal)`);
         return null;
@@ -2230,6 +2258,29 @@ export class ChatProposals {
     return { chatId, pid, turnId, seat, chat, served, roster: this.deps.rosterEligible(), projectLabel, qeOff, powerPresets, ...extra };
   }
 
+  /** Source availability matters only to a card that shows this input. Keep a failed read a named refusal. */
+  private async loadJobSources(facts: Pick<JobFacts, 'card' | 'option'>, ctx: JobContext): Promise<void> {
+    const card = CATALOG_V2_CARDS.find((c) => c.id === facts.card);
+    const r = card === undefined ? null : resolveOption(card.id, optionFor(card, facts.option), ctx.served);
+    if (!r?.resolved.inputs.some((i) => i.id === 'sources') || ctx.jobSources !== undefined) return;
+    try {
+      const sources = await this.deps.jobSources?.(ctx.chat.projectId);
+      if (sources !== undefined) ctx.jobSources = sources;
+    } catch (err) {
+      throw new JobRefusal('sources_unavailable', err instanceof Error ? err.message : String(err), 409);
+    }
+  }
+
+  /** Resolve the revision's shape first, then load only the choices that its input checks need. */
+  private async mergeJobRevision(parent: ArtifactProposal, edits: ProposalRevisionEdits, ctx: JobContext): Promise<ReturnType<typeof mergeRevision>> {
+    const shape = mergeRevision(parent, {
+      ...(edits.card !== undefined ? { card: edits.card } : {}),
+      ...(edits.option !== undefined ? { option: edits.option } : {}),
+    }, ctx).facts;
+    await this.loadJobSources(shape, ctx);
+    return mergeRevision(parent, edits, ctx);
+  }
+
   /** Job proposals are on: the flag, the catalog read and the operation. */
   private jobsOn(): boolean {
     return this.deps.flags().proposals && this.deps.jobs?.() === true && this.deps.served !== undefined;
@@ -2276,12 +2327,29 @@ export class ChatProposals {
     };
   }
 
-  /** Resolve facts to the proposal of their kind (a job, or a document's create). */
-  private async proposalOf(chatId: string, pid: string, facts: JobFacts, ctx: JobContext, records: readonly ChatTranscriptRecord[], allowHidden = false): Promise<ArtifactProposal> {
+  /** Resolve facts to their proposal. `previous` marks a rebuild; null is a held job without a stored parent. */
+  private async proposalOf(chatId: string, pid: string, facts: JobFacts, ctx: JobContext, records: readonly ChatTranscriptRecord[], allowHidden = false, previous?: ArtifactProposal | null): Promise<ArtifactProposal> {
     const card = CATALOG_V2_CARDS.find((c) => c.id === facts.card);
     const r = card === undefined ? null : resolveOption(card.id, optionFor(card, facts.option), ctx.served);
     // An unsure reading holds no Start wherever the proposal is rebuilt (a Go's edits, a refresh; codex r4).
     if (r !== null && proposalKindOf(r) === 'create') return withAskOverlay(await this.documentProposal(chatId, pid, facts, ctx, records));
+    await this.loadJobSources(facts, ctx);
+    if (r?.resolved.inputs.some((i) => i.id === 'documents')) {
+      if (facts.inputs['documents'] === undefined) {
+        const { binding } = bindingOf(records, ctx.turnId ?? '\u0000');
+        // A rebuild never discovers new files. Only a fresh card, or a switch from a card without documents, fills.
+        const fill = previous === undefined || (previous !== null && previous.shape?.card !== facts.card && !previous.needs?.some((n) => n.id === 'documents'));
+        const tokens = fill ? [...new Set([
+          ...this.deps.attachments(chatId).map((a) => `attachment:${a.id}`),
+          ...(binding?.named.docs ?? []).map((ref) => `doc:${ref}`),
+          ...(binding?.artifact !== undefined ? [`doc:${binding.artifact.ref}`] : []),
+        ])].slice(0, 20) : [];
+        // Persist even an empty fill, so factsOf cannot pick up files the person never saw.
+        facts = { ...facts, inputs: { ...facts.inputs, documents: { kind: 'documents', tokens } } };
+      }
+      const input = facts.inputs['documents'];
+      ctx = { ...ctx, documents: await this.authorizeDocumentsAt(chatId, input?.kind === 'documents' ? input.tokens : [], records, ctx.turnId ?? '\u0000') };
+    }
     return withAskOverlay(resolveJob(facts, ctx, { allowHidden }));
   }
 
@@ -2289,6 +2357,16 @@ export class ChatProposals {
     if (err instanceof JobRefusal) return { code: err.status, body: { code: err.code, error: err.message } };
     if (err instanceof EditRefusal) return { code: 400, body: { code: 'edits_invalid', error: err.message } };
     return null;
+  }
+
+  /** Explicit file edits refuse any struck token; a rebuild refuses a downgrade of a file the person saw as ok. */
+  private refuseStruckDocuments(p: ArtifactProposal, previous?: ArtifactProposal): void {
+    const wasOk = previous?.sentence?.tokens.flatMap((t) => t.kind === 'documents' ? t.documents ?? [] : []).filter((s) => s.status === 'ok').map((s) => s.token) ?? [];
+    const struck = p.sentence?.tokens.flatMap((t) => t.kind === 'documents' ? t.documents ?? [] : []).find((s) => s.status === 'struck' && (previous === undefined || wasOk.includes(s.token)));
+    if (struck === undefined) return;
+    const why = `${struck.label} cannot be used (${struck.reason})`;
+    if (previous !== undefined) throw new JobRefusal('source_gone', why, 409);
+    throw new EditRefusal(why);
   }
 
   /**
@@ -2438,7 +2516,7 @@ export class ChatProposals {
       if (edits.inputs !== undefined) {
         const kept: NonNullable<ProposalRevisionEdits['inputs']> = {};
         for (const [k, v] of Object.entries(edits.inputs)) {
-          if (v.kind === 'requirements' || fromThem(v.value)) kept[k] = v;
+          if (v.kind === 'requirements' || v.kind === 'documents' || v.kind === 'sources' || fromThem(v.value)) kept[k] = v;
           else extraNotes.push(`Not changed: ${k.slice(0, 40)} must be in your own words`);
         }
         edits.inputs = kept;
@@ -2452,7 +2530,7 @@ export class ChatProposals {
       edits.inputs = rest;
       extraNotes.push("Not changed: the job's own words are yours; say them again to change them");
     }
-    const merged = mergeRevision(parent.proposal, edits, { chat, served: ctx0.served, roster: ctx0.roster });
+    const merged = await this.mergeJobRevision(parent.proposal, edits, ctx0);
     merged.notes.push(...extraNotes);
     const ctx: JobContext = { ...ctx0, notes: merged.notes };
     // A hidden card stays reachable while the revision keeps it (it was reached by its alias once).
@@ -2478,7 +2556,7 @@ export class ChatProposals {
       const { guess: _g, ...unguessed } = merged.facts;
       void _g;
       const factsNow: JobFacts = stale ? unguessed : merged.facts;
-      candidate = withAskOverlay(keepReshape(await this.proposalOf(chatId, src.pid, { ...factsNow, by: fromPerson ? 'person' : factsNow.by, source: src.source }, ctx, records, allowHidden), parent.proposal));
+      candidate = withAskOverlay(keepReshape(await this.proposalOf(chatId, src.pid, { ...factsNow, by: fromPerson ? 'person' : factsNow.by, source: src.source }, ctx, records, allowHidden, parent.proposal), parent.proposal));
     } catch (err) {
       candidateErr = err;
     }
@@ -2503,7 +2581,7 @@ export class ChatProposals {
       return { code: 409, body: { code: 'card_not_available', error: candidate.blocked, view: viewOf(parent) } };
     }
     if (qe !== null || (loses && !covered)) {
-      const base = keepReshape(await this.proposalOf(chatId, src.pid, factsOf(parent.proposal), ctx, records, true), parent.proposal);
+      const base = keepReshape(await this.proposalOf(chatId, src.pid, factsOf(parent.proposal), ctx, records, true, parent.proposal), parent.proposal);
       const newCard = CATALOG_V2_CARDS.find((c) => c.id === merged.facts.card)!;
       const oldCard = CATALOG_V2_CARDS.find((c) => c.id === parent.proposal.shape!.card)!;
       const newNoun = nounOf(newCard, optionFor(newCard, merged.facts.option));
@@ -2676,7 +2754,7 @@ export class ChatProposals {
       ...(edits.inputs !== undefined ? { inputs: edits.inputs } : {}),
     };
     const ctx = await this.jobContext(chatId, f.proposal.pid, f.proposal.turnId, f.proposal.seat, chat, { revises: f.proposal.revises ?? null, lineage: f.proposal.lineage ?? f.proposal.pid, notes: [] });
-    const merged = mergeRevision(f.proposal, rev, { chat, served: ctx.served, roster: ctx.roster });
+    const merged = await this.mergeJobRevision(f.proposal, rev, ctx);
     if (edits.seats !== undefined) {
       const sr = f.proposal.shape === undefined ? null : resolveOption(f.proposal.shape.card, f.proposal.shape.option, ctx.served);
       if (sr?.workflow !== null && sr?.workflow !== undefined && SELF_SEATED.has(sr.workflow)) throw new EditRefusal(`${f.proposal.what.title} picks its own seat`);
@@ -2689,7 +2767,12 @@ export class ChatProposals {
     if (merged.lost.length > 0 || merged.lostSeats.length > 0) {
       throw new EditRefusal(`that would drop ${[...merged.lost.map((g) => checksLabel([g])), ...merged.lostSeats.map((k) => SEAT_WORDS[k])].join(', ')}; ask for it in the chat`);
     }
-    const out = keepReshape(await this.proposalOf(chatId, f.proposal.pid, merged.facts, ctx, this.deps.records(chatId), merged.facts.card === f.proposal.shape?.card), f.proposal);
+    if (edits.inputs?.['documents'] === undefined) {
+      const gone = await this.firstGone(chatId, f.proposal);
+      if (gone !== null) throw new JobRefusal('source_gone', gone, 409);
+    }
+    const out = keepReshape(await this.proposalOf(chatId, f.proposal.pid, merged.facts, ctx, this.deps.records(chatId), merged.facts.card === f.proposal.shape?.card, f.proposal), f.proposal);
+    this.refuseStruckDocuments(out, edits.inputs?.['documents'] === undefined ? f.proposal : undefined);
     if (out.kind !== 'job') throw new EditRefusal('that option makes a document: pick it in the chat');
     const dropped = (f.proposal.gate ?? []).filter((g) => !(out.gate ?? []).includes(g));
     if (dropped.length > 0) throw new EditRefusal(`that would drop ${checksLabel(dropped)}; check the job again`);
@@ -2726,6 +2809,7 @@ export class ChatProposals {
     let ctx: JobContext;
     try {
       ctx = await this.jobContext(chatId, pid, p.turnId, p.seat, chat, { revises: p.pid, lineage: p.lineage ?? p.pid, notes: ['The catalog changed since this was proposed: check it again before starting.'] });
+      await this.loadJobSources(factsOf(p), ctx);
     } catch (err) {
       const refused = this.refusalOf(err);
       if (refused !== null) return refused;
@@ -2736,7 +2820,7 @@ export class ChatProposals {
     if (r !== null && ctx.served.rev === p.catalogRev && r.resolved.resolution === p.resolution) return null;
     let fresh: ArtifactProposal;
     try {
-      fresh = keepReshape(await this.proposalOf(chatId, pid, factsOf(p), ctx, this.deps.records(chatId), true), p);
+      fresh = keepReshape(await this.proposalOf(chatId, pid, factsOf(p), ctx, this.deps.records(chatId), true, p), p);
     } catch (err) {
       const refused = this.refusalOf(err);
       if (refused !== null) return { code: 409, body: { code: 'catalog_changed', error: `the catalog changed since this was proposed: ${String(refused.body['error'])}`, view: viewOf(f) } };
@@ -2812,13 +2896,13 @@ export class ChatProposals {
           const heldP = parent?.accepting?.resolution ?? parent?.proposal;
           let facts = x.facts;
           if (heldP?.shape !== undefined) {
-            const merged = mergeRevision(heldP, x.edits as ProposalRevisionEdits, { chat, served: ctx.served, roster: ctx.roster });
+            const merged = await this.mergeJobRevision(heldP, x.edits as ProposalRevisionEdits, ctx);
             // Nothing is answered for a shape, or an input, that is not the one asked for (codex r3, r4).
             const wantCard = CATALOG_V2_CARDS.find((c) => c.id === (x.edits.card ?? merged.facts.card));
             const norm = (o: string | null | undefined): string | null => (wantCard === undefined ? null : o === null || o === undefined ? (wantCard.variant?.default ?? null) : o);
             const optionOk = wantCard !== undefined && (x.edits.option === undefined || norm(merged.facts.option) === norm(x.edits.option));
             const depthOk = x.edits.depth === undefined || x.edits.depth === null || merged.facts.depth === x.edits.depth;
-            const inputsOk = Object.entries(x.edits.inputs ?? {}).every(([k, v]) => (k === 'intent' ? merged.facts.words === (v.kind === 'text' ? v.value.slice(0, 8000) : '') : JSON.stringify(merged.facts.inputs[k]) === JSON.stringify(v)));
+            const inputsOk = merged.refusedInputs.length === 0 && Object.entries(x.edits.inputs ?? {}).every(([k, v]) => (k === 'intent' ? merged.facts.words === (v.kind === 'text' ? v.value.slice(0, 8000) : '') : JSON.stringify(merged.facts.inputs[k]) === JSON.stringify(v)));
             if (wantCard === undefined || merged.facts.card !== wantCard.id || !optionOk || !depthOk || !inputsOk) {
               return { code: 400, body: { code: 'edits_invalid', error: merged.notes[0] ?? `there is no ${String(x.edits.card)}${x.edits.option !== undefined && x.edits.option !== null ? ` · ${String(x.edits.option)}` : ''} to start it again as`, notes: merged.notes } };
             }
@@ -2828,7 +2912,13 @@ export class ChatProposals {
             facts = { ...personFacts, skipQe: null, by: 'person', source: 'reshape' };
             ctx.notes.push(...merged.notes);
           }
-          proposal = await this.proposalOf(chatId, x.pid, facts, ctx, this.deps.records(chatId));
+          if (heldP !== undefined && x.edits.inputs?.['documents'] === undefined) {
+            const gone = await this.firstGone(chatId, heldP);
+            if (gone !== null) throw new JobRefusal('source_gone', gone, 409);
+          }
+          proposal = await this.proposalOf(chatId, x.pid, facts, ctx, this.deps.records(chatId), false, heldP ?? null);
+          if (x.edits.inputs?.['documents'] !== undefined) this.refuseStruckDocuments(proposal);
+          else if (heldP !== undefined) this.refuseStruckDocuments(proposal, heldP);
         } catch (err) {
           const refused = this.refusalOf(err);
           if (refused !== null) return refused;
