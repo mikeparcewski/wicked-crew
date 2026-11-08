@@ -19,6 +19,7 @@ import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import type { SystemInfraRow } from '../core/types.js';
 import { homeless } from './seat-standing.js';
 import { infraRow, PROBE_TIMEOUT_MS, settleWithin } from './system-snapshot.js';
+import { plainRuntimeCause } from './ui-text.js';
 
 /** VM disk used, %, from which the row warns (the kubelet starts deleting unheld images at 85). */
 export const SEAT_DISK_WARN_PCT = 75;
@@ -154,6 +155,12 @@ export async function probeSeatImages(input: SeatImagesProbeInput): Promise<Syst
     return infraRow('seat_images', 'unknown', `the engine's seat image status did not answer within ${Math.round(timeoutMs / 1000)} s`, 'Re-check; a container runtime under load answers late.', started, { rebuild }, timeoutMs);
   }
   if (settled.kind === 'error' || settled.value === null) {
+    // A container runtime that is down reads as a plain cause (`settled.error` is already scrubbed of
+    // any home path by errText; `homeless` is belt-and-suspenders for the daemon's own home).
+    const plain = settled.kind === 'error' ? plainRuntimeCause(settled.full ?? settled.error) : null;
+    if (plain !== null) {
+      return infraRow('seat_images', 'unknown', plain.cause, plain.fix, started, { rebuild }, timeoutMs);
+    }
     const why = settled.kind === 'error' ? homeless(settled.error) : 'the engine gave no status (an engine older than wicked-core#1225 prints none)';
     return infraRow('seat_images', 'unknown', `the seat images could not be read: ${why}`, 'Re-check; if it persists, the engine binary (WICKED_CORE_EXE) may be missing or older.', started, { rebuild }, timeoutMs);
   }

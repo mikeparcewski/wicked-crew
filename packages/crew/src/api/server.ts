@@ -25,6 +25,8 @@ import { registerAuthHooks, resolveAuth, type AuthOptions } from './auth.js';
 import { corsAllowed, refuseRequest } from './origin-guard.js';
 import { guardUpgrades, registerFrameGuard } from './frame-guard.js';
 import { registerServerErrorBody } from './server-error-body.js';
+import { registerUiTextScrub } from './ui-text.js';
+import { API_PREFIX } from './api-prefix.js';
 import { AuditLog } from './audit.js';
 import { defaultEvalStoreRoot, EvalRunStore } from './eval-store.js';
 import { DefaultEvalStore } from '../evals/store.js';
@@ -588,14 +590,19 @@ export async function createServer(
       stream: teeStreamWithErrorRing(errorRing),
     },
     // DES-CHAT-ARTIFACTS-001 A2: a proposal id is `<chat id>:<turn uuid>` and a chat id may be 128 characters, so a
-    // path parameter may be up to 165 (Fastify's default limit is 100). Generous, still bounded.
-    maxParamLength: 256,
+    // path parameter may be up to 165 (Fastify's default limit is 100). Generous, still bounded. Under
+    // `routerOptions`: the top-level key printed Fastify's FSTDEP022 deprecation on every boot (first-run P9).
+    routerOptions: { maxParamLength: 256 },
   });
   // TH-11: accumulate the route table as it registers — the endpoint manifest's one source of
   // truth. Installed FIRST because fastify only fires onRoute for routes added after the hook
   // exists. Read via `app.endpointManifest` (scripts/generate-endpoint-manifest.ts + the drift
   // test); costs one array push per route at boot, nothing per request.
   app.decorate('endpointManifest', installEndpointManifestHook(app));
+  // FINDINGS B1/B2/C3a backstop: no home path leaves the read-only diagnostic routes, even one a new row forgets to scrub.
+  // NOT `/roster`: its rows are launch inputs (studio sends them back verbatim as `POST /runs` `clisJson`), so a seat's
+  // binary under the home dir must keep its real path there (macOS CI caught `~/…/node` failing to spawn).
+  registerUiTextScrub(app, [`${API_PREFIX}/health`, `${API_PREFIX}/diagnostics`, `${API_PREFIX}/system`]);
   const gateCache = new GateCache(app.log);
   // Standing orders (behaviour 10): armed once the routes (and so THE gate decision path) exist;
   // the event relays above it read it late-bound.

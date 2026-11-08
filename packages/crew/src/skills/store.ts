@@ -201,6 +201,7 @@ import { LiveGenerations } from './live-generations.js';
 import {
   discoverLivePluginDetailed,
   GARDEN_INSTALL_COMMAND,
+  GARDEN_SOURCE_SEARCH_DETAIL,
   gitStateOf,
   PluginSourceSymlinkError,
   REQUIRED_GARDEN_VERSION,
@@ -264,7 +265,15 @@ import {
 
 /** The root-level names the store creates live in ONE table (`root-names.ts`, design v3.5 §2) — re-exported for the tests that observe the flip. */
 export { CURRENT_TMP_PREFIX } from './root-names.js';
-import { baselineVenvDir, UV_CACHE_DIRNAME, VENV_READY_MARKER, type VenvProvisioner } from './venv.js';
+import { baselineVenvDir, UV_CACHE_DIRNAME, VENV_READY_MARKER, type VenvFailureReason, type VenvProvisioner } from './venv.js';
+
+/** `ensureVenv`'s answer: the state the manifest records, plus (on `failed`) why it failed, which the
+ *  BLOCKED finding uses to word a fix for the user. The reason is internal — the wire value stays
+ *  {@link SkillVenvState}. */
+interface VenvOutcome {
+  state: SkillVenvState;
+  reason?: VenvFailureReason;
+}
 
 /** The root's name under the daemon state home — a top-level entry `tests/fixtures/state-home-subtrees.json` registers. */
 export const SKILLS_DIRNAME = 'skills';
@@ -339,7 +348,7 @@ export class SkillsSourceUnavailableError extends Error {
     super(
       tooOld !== null
         ? `wicked-garden ${tooOld.version} found at ${tooOld.path} is older than the required ${REQUIRED_GARDEN_VERSION}; it is not used — install wicked-garden >= ${REQUIRED_GARDEN_VERSION} (\`${GARDEN_INSTALL_COMMAND}\`) and restart`
-        : `no wicked-garden plugin source: ${detail} — install wicked-garden >= ${REQUIRED_GARDEN_VERSION} first — \`${GARDEN_INSTALL_COMMAND}\`, or register the plugin with Claude Code`,
+        : `no wicked-garden plugin source: ${detail} — install wicked-garden >= ${REQUIRED_GARDEN_VERSION} first: ${GARDEN_INSTALL_COMMAND} (or npm i -g wicked-garden)`,
     );
     this.name = 'SkillsSourceUnavailableError';
     this.tooOld = tooOld;
@@ -711,7 +720,7 @@ export function generationDirName(gen: number): string {
 const GENERATION_DIR_RE = /^\d{6}$/;
 const CONTENT_HASH_RE = /^[0-9a-f]{64}$/;
 /** The persisted enums `snapshot.json` may carry — validated on read, never trusted as free text (codex round 6). */
-const SOURCE_KINDS: ReadonlySet<string> = new Set<SkillSourceKind>(['claude-plugin-cache', 'installer-copy', 'checkout', 'directory']);
+const SOURCE_KINDS: ReadonlySet<string> = new Set<SkillSourceKind>(['claude-plugin-cache', 'installer-copy', 'npm-global', 'codex-plugin-cache', 'checkout', 'directory']);
 const VENV_STATES: ReadonlySet<string> = new Set<SkillVenvState>(['pending', 'synced', 'failed', 'skipped']);
 /** The persisted enums `manifest.json` may carry — the schema validator refuses anything else (codex round 7). */
 const SKILL_KINDS: ReadonlySet<string> = new Set<SkillKind>(['router', 'fork-worker', 'module']);
@@ -767,7 +776,7 @@ export class SkillsStore {
   private publishInFlight: Promise<SkillPublishResult> | null = null;
   private readonly makePacer: () => Pacer;
   /** One provisioning per baseline hash: a concurrent caller awaits the in-flight one. */
-  private readonly venvInFlight = new Map<string, Promise<SkillVenvState>>();
+  private readonly venvInFlight = new Map<string, Promise<VenvOutcome>>();
   /**
    * Where the environment seconds went since this store was built (crew#741): the ms the
    * provisioner path ran (torn-env removal, `uv sync`, marker, lock, verify) and how many times it
@@ -1599,9 +1608,7 @@ export class SkillsStore {
    */
   seed(): SeedResult {
     if (this.isSeeded()) return { seeded: false, baseline: null, source: null };
-    const source = this.requireSource(
-      'no installed wicked-garden plugin found: neither the marketplace cache (<config dir>/plugins/cache/wicked-garden/wicked-garden/<version>) nor the installer-managed copy (<config dir>/plugins/wicked-garden, ~/.claude/plugins/wicked-garden) holds a .claude-plugin/plugin.json with a version; set WICKED_CREW_SKILLS_SOURCE to use another plugin root deliberately',
-    );
+    const source = this.requireSource(GARDEN_SOURCE_SEARCH_DETAIL);
     const bundle = pluginBundleFiles(source.path);
     const hash = hashFileSet(bundle);
     mkdirSync(this.rootDir, { recursive: true });
@@ -1873,26 +1880,30 @@ export class SkillsStore {
    * removed before `uv sync` runs again — the manifest is never the authority on what exists on
    * disk. AWAITED by publish.
    */
-  private ensureVenv(hash: string): Promise<SkillVenvState> {
+  private ensureVenv(hash: string): Promise<VenvOutcome> {
     // Every path provisioning touches is validated BEFORE the first filesystem operation — the
     // ready check, the torn-env removal, `uv sync`, the marker write and the lock all go through
     // `baseline/<hash>` (codex round 4). Throws `SkillsPublishError`; the publish rejects loudly.
     const { baselineDir, venvDir, cacheDir } = this.venvPaths(hash);
-    if (this.venvReady(venvDir)) return Promise.resolve('synced');
+    if (this.venvReady(venvDir)) return Promise.resolve({ state: 'synced' });
     const inFlight = this.venvInFlight.get(hash);
     if (inFlight !== undefined) return inFlight;
     const tStage = performance.now();
-    const run = (async (): Promise<SkillVenvState> => {
+    const run = (async (): Promise<VenvOutcome> => {
       if (this.entryExists(venvDir)) {
         this.warn(`[skills] ${venvDir} exists without a verified ready marker (a torn earlier sync or an unlockable env) — removed and re-provisioned`);
         removeTreeForce(venvDir);
       }
       this.venvStageTotals.provisions += 1;
-      const state = await this.provisionVenv(baselineDir, { log: this.warn, cacheDir });
-      if (state !== 'synced') return state;
+      const result = await this.provisionVenv(baselineDir, { log: this.warn, cacheDir });
+      // A bare state (a test seam / older provisioner) carries no reason; the finding defaults to the
+      // install-uv wording, so a user still gets a fix.
+      const state: SkillVenvState = typeof result === 'string' ? result : result.state;
+      const reason: VenvFailureReason | undefined = typeof result === 'string' ? undefined : result.reason;
+      if (state !== 'synced') return reason === undefined ? { state } : { state, reason };
       if (!existsSync(venvDir)) {
         this.warn(`[skills] the provisioner answered synced but ${venvDir} does not exist — recorded as failed`);
-        return 'failed';
+        return { state: 'failed', reason: 'sync-failed' };
       }
       try {
         // Marker FIRST (it must land inside the tree before the lock seals it), THEN lock.
@@ -1905,16 +1916,16 @@ export class SkillsStore {
         // rather than trusting a marker whose lock never took (codex round 3).
         this.warn(`[skills] could not lock ${venvDir} read-only: ${err instanceof Error ? err.message : String(err)} — removed and recorded as failed`);
         removeTreeForce(venvDir);
-        return 'failed';
+        return { state: 'failed', reason: 'sync-failed' };
       }
       // The lock must actually be in place before we call the env ready — a partial lock that left
       // the marker or the root writable is a failed provisioning, removed so a retry redoes it.
       if (!this.venvReady(venvDir)) {
         this.warn(`[skills] ${venvDir} did not verify read-only after locking — removed and recorded as failed`);
         removeTreeForce(venvDir);
-        return 'failed';
+        return { state: 'failed', reason: 'sync-failed' };
       }
-      return 'synced';
+      return { state: 'synced' };
     })();
     const tracked = run.finally(() => {
       this.venvInFlight.delete(hash);
@@ -3288,7 +3299,7 @@ export class SkillsStore {
     const m = this.manifest();
     this.refuseDuringPublish();
     this.assertRevision(m, expectedRevision);
-    const source = this.requireSource('no installed wicked-garden plugin found to refresh from (neither the marketplace cache nor the installer-managed copy)');
+    const source = this.requireSource(GARDEN_SOURCE_SEARCH_DETAIL);
     const previous = m.baseline;
     let bundle: FileRecord[];
     try {
@@ -3727,7 +3738,8 @@ export class SkillsStore {
     }
     // Provisioning FIRST (it may take minutes): a snapshot never links an env still being written.
     const tVenv = performance.now();
-    const venv = await this.ensureVenv(pre.baseline);
+    const venvOutcome = await this.ensureVenv(pre.baseline);
+    const venv = venvOutcome.state;
     t.venv = performance.now() - tVenv;
     const venvLabel = ready0 ? 'ready' : venv;
     // The world may have moved while uv ran: the root must be the same directory, the CAS re-checked.
@@ -3738,15 +3750,14 @@ export class SkillsStore {
     const v = await paced(this.validateSteps(m), pacer);
     t.validate += performance.now() - tValidate; // validated twice on a CHANGED publish (accepted; the line shows the cost)
     if (venv === 'failed') {
-      v.findings.push(
-        finding(
-          'venv-failed',
-          'blocking',
-          "the baseline's shared read-only Python environment is REQUIRED (the bundle carries a pyproject.toml; skills `uv run` from the plugin root): a snapshot without it hands every worker a plugin whose scripts cannot start. Install uv, fix the sync error the log names, and publish again",
-          `uv sync did not produce ${baselineVenvDir(this.baselineDir(m.baseline))} (see the daemon log)`,
-          {},
-        ),
-      );
+      // The finding KIND stays `venv-failed` (machine code); the human message says the cause in
+      // plain words with the one fix, and carries NO path (crew#771 / FINDINGS B1: it ships to the
+      // Nerve Center and support tickets). A bare `failed` with no reason defaults to install-uv.
+      const message =
+        (venvOutcome.reason ?? 'uv-missing') === 'uv-missing'
+          ? "uv isn't installed, so the skills' Python tools can't be set up. Install uv: https://docs.astral.sh/uv/getting-started/installation/ then press Publish on the Skills page."
+          : 'The skills\u2019 Python environment could not be built (uv sync failed; the daemon log has the output). Publish again after fixing it.';
+      v.findings.push(finding('venv-failed', 'blocking', message, message, {}));
     }
     if (verdictOf(v.findings) === 'blocked') {
       timing(venvLabel, ' · blocked');

@@ -46,6 +46,7 @@ import type {
   SystemUnresolvedItem,
 } from '../core/types.js';
 import { cliKeyOf, distinctJudgePair, needsLevel } from './needs.js';
+import { plainRuntimeCause, scrubHomePaths } from './ui-text.js';
 import { callEstateToolRaw, estateMcpExe, ESTATE_INSTALL_HINT } from '../core/estate-mcp-client.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { runTouchesWindow } from './seat-record.js';
@@ -68,7 +69,7 @@ const DAY_MS = 86_400_000;
 export type Settled<T> =
   | { kind: 'ok'; value: T; ms: number }
   | { kind: 'timeout'; ms: number }
-  | { kind: 'error'; error: string; ms: number };
+  | { kind: 'error'; error: string; ms: number; /** The whole first line (scrubbed, not cut at 240): what a classifier reads (codex r1). */ full?: string };
 
 /** Run `fn` against `timeoutMs`. A hang settles as `timeout` (the work may continue; nothing waits). */
 export async function settleWithin<T>(fn: () => Promise<T>, timeoutMs: number): Promise<Settled<T>> {
@@ -81,7 +82,7 @@ export async function settleWithin<T>(fn: () => Promise<T>, timeoutMs: number): 
     .then(fn)
     .then(
       (value): Settled<T> => ({ kind: 'ok', value, ms: Date.now() - started }),
-      (err: unknown): Settled<T> => ({ kind: 'error', error: errText(err), ms: Date.now() - started }),
+      (err: unknown): Settled<T> => ({ kind: 'error', error: errText(err), full: errText(err, Infinity), ms: Date.now() - started }),
     );
   try {
     return await Promise.race([work, timeout]);
@@ -97,14 +98,17 @@ export async function settleWithin<T>(fn: () => Promise<T>, timeoutMs: number): 
  * shows) what the runtime said: on a fresh install, docker's "No such container" read as "the
  * container runtime refused" and the Nerve Center said "Start Docker" while Docker was running.
  */
-export function errText(err: unknown): string {
+export function errText(err: unknown, max = 240): string {
   const raw = err instanceof Error ? err.message : String(err);
   const stderr = err !== null && typeof err === 'object' && typeof (err as { stderr?: unknown }).stderr === 'string'
     ? (err as { stderr: string }).stderr
     : '';
   const said = stderr.split('\n').map((l) => l.trim()).find((l) => l !== '') ?? '';
   const line = said !== '' ? said : (raw.split('\n', 1)[0]?.trim() ?? '');
-  return line.length > 240 ? `${line.slice(0, 239)}…` : line;
+  // A probe's reason and the `error` it keeps in `details` both ride this; a home path never does
+  // (crew#771: screen shares and tickets must not carry someone's login name).
+  const clean = scrubHomePaths(line);
+  return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
 }
 
 function secondsWord(ms: number): string {
@@ -308,10 +312,19 @@ export async function probeGateway(input: GatewayProbeInput): Promise<SystemInfr
   if (stderr.includes('enoent')) {
     return infraRow('gateway', 'down', `the container runtime ${input.runtime} could not be run`, 'Install or start Docker (or set WICKED_CONTAINER_RUNTIME), then re-check.', started, details, timeoutMs);
   }
+  // Classify the runtime error into a plain cause the user can act on; `e` is already scrubbed of any
+  // home path (errText), so the raw docker line ("failed to connect to the docker API at unix://…")
+  // never reaches the UI. An error we do not recognise keeps a short, scrubbed line.
+  // Classified on the WHOLE line (codex r1: cut at 240, a permission-denied error read as "not
+  // running"), and the raw line stays in the daemon's log, not in `details` (studio shows details).
+  const plain = plainRuntimeCause(settled.full ?? e, input.runtime);
+  if (plain !== null) {
+    return infraRow('gateway', 'down', plain.cause, plain.fix, started, { ...details, error: plain.cause }, timeoutMs);
+  }
   return infraRow(
     'gateway',
     'down',
-    `the container runtime refused: ${e}`,
+    `the container runtime could not be reached: ${e}`,
     'Start Docker (or your container runtime), then re-check. The engine restarts the gateway before the next seat runs.',
     started,
     { ...details, error: e },
@@ -496,7 +509,7 @@ export async function probeEstate(input: EstateProbeInput): Promise<SystemInfraR
   const exists = input.exists ?? (async (p: string): Promise<boolean> => (await stat(p)).isFile());
   // No binary is the first thing to say: a missing store is only "nothing remembered yet" when estate is there.
   if (!(input.resolvable ?? estateMcpResolvable)()) {
-    return infraRow('estate', 'down', 'wicked-estate-mcp is not installed or not on PATH (estate is optional)', `${ESTATE_INSTALL_HINT} Then re-check.`, started, details);
+    return infraRow('estate', 'down', "wicked-estate isn't installed: repositories need it to build their code map", `${ESTATE_INSTALL_HINT} Then re-check.`, started, details);
   }
   if (input.memoryStore.path !== ':memory:') {
     const present = await settleWithin(() => exists(input.memoryStore.path), timeoutMs);
@@ -516,7 +529,7 @@ export async function probeEstate(input: EstateProbeInput): Promise<SystemInfraR
     return infraRow(
       'estate',
       'down',
-      missing ? 'wicked-estate-mcp is not installed or not on PATH' : `wicked-estate-mcp failed: ${settled.error}`,
+      missing ? "wicked-estate isn't installed: repositories need it to build their code map" : `wicked-estate-mcp failed: ${settled.error}`,
       missing ? `${ESTATE_INSTALL_HINT} Then re-check.` : 'Check the memory store, then re-check.',
       started,
       { ...details, error: settled.error },

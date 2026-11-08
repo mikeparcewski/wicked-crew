@@ -50,6 +50,7 @@ import {
   uninstallService,
 } from './service.js';
 import { homedir } from 'node:os';
+import { configureInstallerToolPath } from '../setup/tool-path.js';
 
 const [, , command, ...argv] = process.argv;
 
@@ -278,6 +279,7 @@ let adapterRef: CoreAdapter | undefined;
  * legacy-outbox probe), `engine`, then the server's own stages (`api/server.ts` BootStageClock).
  */
 async function bootstrap(opts: BootstrapOpts, bootStartedAt: number = performance.now()): Promise<{ adapter: CoreAdapter; port: number; stages: BootStages }> {
+  configureInstallerToolPath();
   // C5: governed seats run in containers (the engine's headless carrier in a hardened seat
   // container; ACP is gone from the seats). Set BEFORE the engine exists, so it and crew's
   // sign-in routes read one value. An operator's WICKED_SEAT_FLOOR=host keeps the interim host floor.
