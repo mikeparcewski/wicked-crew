@@ -137,7 +137,7 @@ import {
 import { SeatHealthTracker } from './seat-health.js';
 import { auditSeatBenchStore, readSeatBenchEntries } from './seat-bench-trail.js';
 import { rosterWithStandingFactory } from './roster-standing.js';
-import { SeatContainerStatus, seatLoginDepsFor } from './seat-container-login.js';
+import { registerLoginCleanup, SeatContainerStatus, seatLoginDepsFor } from './seat-container-login.js';
 import { ChatTurnIndex } from './chat-turns.js';
 import { ChatTranscriptStore } from './chat-transcripts.js';
 import { sweepDeliveredWorktree } from './worktree-sweep.js';
@@ -641,6 +641,7 @@ export async function createServer(
     // the same dir the sign-in routes pass (agy crew-r1).
     containerStatus: new SeatContainerStatus(seatLoginDepsFor((adapter as { dbPath?: unknown }).dbPath)),
   });
+  registerLoginCleanup(app, seatLoginDepsFor((adapter as { dbPath?: unknown }).dbPath));
   // Runtime-guarded, not typed away: the integration suites drive `createServer` over PARTIAL fake
   // adapters (cast to `CoreAdapter`) that never grew this method — the real adapter always has it.
   if (typeof (adapter as { setRosterProvider?: unknown }).setRosterProvider === 'function') {

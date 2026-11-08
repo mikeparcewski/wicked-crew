@@ -19,6 +19,8 @@
 
 import { createRequire } from 'node:module';
 
+import { RuntimeState, type RuntimeStateReader } from './runtime-state.js';
+
 import { CoreAdapter } from '../core/adapter.js';
 import { defaultLaunchRoster, isOptInSeat } from '../core/opt-in-seats.js';
 import type { RosterSeat } from '../core/types.js';
@@ -88,6 +90,7 @@ export function containerLoginReading(broker: BrokerReading, last: SeatLastAnswe
  *  missing or stale login check, so an expired login reads `signed_out` before work is routed. */
 export type RosterWithStanding = (() => RosterSeat[]) & {
   containerStatus?: SeatContainerStatus;
+  close?: () => void;
   ready?: () => Promise<void>;
   /** crew#615: re-run one seat's credential probe now (after a sign-in / sign-out terminal). */
   reprobe?: (seatKey: string) => void;
@@ -106,6 +109,8 @@ export type RecheckOutcome = 'probed' | 'timed_out' | 'not_probed';
 export const ROSTER_REFRESH_WAIT_MS = 20 * 1000;
 
 export interface RosterStandingDeps {
+  /** Cached runtime reachability; null disables background checks for isolated callers. */
+  runtimeState?: RuntimeStateReader | null;
   containerStatus?: SeatContainerStatus;
   /** The daemon's per-seat runtime health + council evidence (councilSeatFailed, auth refusals). */
   seatHealth: SeatHealthTracker;
@@ -179,6 +184,21 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         ? seatVersionPins
         : null;
   const daemon = deps.signedIn === undefined && deps.registry === undefined;
+  const ownedRuntime = deps.runtimeState === undefined && daemon && containerMode() ? new RuntimeState({ env }) : null;
+  const runtimeState = deps.runtimeState ?? ownedRuntime;
+  let runtimeChangedAt = new Date((deps.nowMs ?? Date.now)()).toISOString();
+  const stopRuntime = runtimeState?.onChange((next, previous) => {
+    runtimeChangedAt = new Date((deps.nowMs ?? Date.now)()).toISOString();
+    if (!containerMode() || next === previous) return;
+    // One refresh per container-login seat on each reachability transition, even with no roster requests
+    // (only those read the broker; pi r1).
+    try {
+      for (const key of new Set((registry() as RosterSeat[]).map((seat) => String(seat.key)).filter(isContainerLoginCli))) {
+        containerStatus.invalidate(key);
+        void containerStatus.refresh(key);
+      }
+    } catch { /* A registry not ready at boot will be probed on its first read. */ }
+  });
   const versions = deps.versions !== undefined ? deps.versions : daemon ? seatVersions : null;
   const worktreeBench =
     deps.worktreeBench !== undefined ? deps.worktreeBench : daemon ? (seats: readonly unknown[]) => CoreAdapter.worktreeBenched(seats) : null;
@@ -312,7 +332,9 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
     const vias = new Map<string, NonNullable<SeatProbeReading['via']>>();
     const decorated = seats.map((seat) => {
       const key = String(seat.key);
-      const health = seatHealth.healthFor(key);
+      const runtimeDown = container && runtimeState?.state() === 'down';
+      const reason = "Docker isn't running";
+      const health = runtimeDown ? { status: 'inactive' as const, message: reason, since: runtimeChangedAt } : seatHealth.healthFor(key);
       // crew#630: the seat's own auth-status answer (cached; never awaited here). A probed seat
       // whose probe has not answered yet does not read `signed_in` off its file — a credential
       // file is not a working login (a moved worker home keeps `.claude.json` and loses the
@@ -320,8 +342,8 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       // Only a seat with a container login reads the broker (agy crew-r1: any other seat keeps its
       // own check rather than waiting forever on a broker reading it can never get).
       const containerSeat = container && isContainerLoginCli(key);
-      const broker = containerSeat ? containerStatus.read(key) : undefined;
-      const probed = containerSeat
+      const broker = containerSeat && !runtimeDown ? containerStatus.read(key) : undefined;
+      const probed = runtimeDown ? undefined : containerSeat
         ? broker === undefined
           ? undefined
           : containerLoginReading(broker, seatHealth.lastAnswerFor(key))
@@ -331,10 +353,10 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       if (probed !== undefined && probed.signedIn === true && probed.check === 'live') {
         seatHealth.clearAuthFailureBefore(key, Date.parse(probed.probedAt));
       }
-      const authFailure = seatHealth.authFailureFor(key);
+      const authFailure = runtimeDown ? null : seatHealth.authFailureFor(key);
       // A3: an account bench (signed out, out of quota) the seat's own LIVE sign-in check disproved
       // after it landed is lifted here, as an ok turn would lift it.
-      let recentBench = seatHealth.recentBenchFor(key);
+      let recentBench = runtimeDown ? null : seatHealth.recentBenchFor(key);
       if (recentBench !== null && liveCheckLiftsBench(recentBench, probed)) {
         seatHealth.clearRecentBench(key);
         recentBench = null;
@@ -342,9 +364,9 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         // (J4) …and the quota strikes an already-lifted bench left behind.
         seatHealth.clearQuotaStrikesAfterLiveCheck(key, Date.parse(probed.probedAt));
       }
-      const heuristic = containerSeat ? null : signedIn(key, root);
+      const heuristic = containerSeat || runtimeDown ? null : signedIn(key, root);
       const signed =
-        containerSeat
+        runtimeDown ? null : containerSeat
           ? broker?.signed_in ?? null
           : probed !== undefined && probed.signedIn !== null
             ? probed.signedIn
@@ -367,6 +389,12 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         // in a recent run is benched up front instead of being handed a unit again.
         recentBench,
       );
+      if (runtimeDown) Object.assign(standing, {
+        auth: 'unknown', auth_source: 'probe', auth_evidence: reason,
+        login_check: 'unverified', login_note: reason,
+        council_eligible: false, council_ineligible_reason: reason,
+        work_eligible: false, work_ineligible_reason: reason,
+      });
       // F-W1-005 (wave-1 P6): the chat admission verdict the daemon itself applies when `POST /chats`
       // picks its default seats — the SAME `chatSeatAdmission` call, for both scope modes — so the
       // studio's picker offers exactly the seats an open would seat, from one source of truth (no
@@ -397,6 +425,11 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         scoped: chatSeatAdmission(govSeat, standing.auth, true, 'path'),
         scoped_bound: chatSeatAdmission(govSeat, standing.auth, true, 'path-bound'),
       };
+      if (runtimeDown) {
+        for (const scope of ['unscoped', 'scoped', 'scoped_bound'] as const) {
+          chatAdmission[scope] = { ok: false, reason, source: 'auth' };
+        }
+      }
       // A1: every seat's installed version, beside the pin reading.
       const version = seatVersion(seat as { acp?: { verified_version?: unknown } | null }, versions?.read(key), versionPin);
       const account = seatAccount(standing.auth, probed?.account);
@@ -412,7 +445,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
               seat_eligible_for_work: (seat as { seat_eligible_for_work?: boolean }).seat_eligible_for_work,
               standing,
               recentBench,
-              loginPending: probed === undefined && (containerSeat || probe?.probes(key) === true) && authFailure === null,
+              loginPending: runtimeDown || (probed === undefined && (containerSeat || probe?.probes(key) === true) && authFailure === null),
               chatAdmission,
               worktreeBench: benchedOnBound.get(key) ?? null,
               hostFloorBench: hostFloor,
@@ -472,6 +505,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
     }));
   };
   accessor.containerStatus = containerStatus;
+  accessor.close = () => { stopRuntime?.(); ownedRuntime?.close(); };
   if (probe !== null || containerMode()) {
     accessor.ready = async () => {
       let keys: string[];

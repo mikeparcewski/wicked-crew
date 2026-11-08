@@ -231,12 +231,12 @@ describe('container seat login routes', () => {
   it('reports argv failures and releases the listener on terminal spawn failure', async () => {
     const { app, exec, openTerminal, listeners } = build();
     exec.mockRejectedValueOnce(Object.assign(new Error('failed'), { code: 1, stderr: 'argv unavailable\ndetail' }));
-    expect((await app.inject({ method: 'POST', url: URL })).json()).toEqual({ error: 'argv unavailable' });
+    expect((await app.inject({ method: 'POST', url: URL })).json()).toEqual({ code: 'signin_failed', error: 'argv unavailable' });
     expect(openTerminal).not.toHaveBeenCalled();
     openTerminal.mockRejectedValueOnce(new Error('spawn failed'));
     const res = await app.inject({ method: 'POST', url: URL });
     expect(res.statusCode).toBe(400);
-    expect(res.json()).toEqual({ error: 'spawn failed' });
+    expect(res.json()).toEqual({ code: 'signin_failed', error: 'spawn failed' });
     expect(listeners.size).toBe(0);
   });
 

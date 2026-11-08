@@ -2630,6 +2630,16 @@
       ]
     },
     {
+      "method": "DELETE",
+      "path": "/api/v1/seats/:cli/container-login",
+      "requestType": null,
+      "responseType": "{ closed: boolean }",
+      "statusCodes": [
+        200,
+        404
+      ]
+    },
+    {
       "method": "GET",
       "path": "/api/v1/seats/:cli/container-login",
       "requestType": null,
@@ -2648,6 +2658,8 @@
         201,
         400,
         404,
+        409,
+        500,
         502
       ]
     },

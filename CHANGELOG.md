@@ -263,6 +263,16 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **Sign-in failures say why, and an abandoned sign-in is cleaned up (first-run C3; api-types `SeatSignInFailure`,
+  `SeatSignInFailureCode`, unreleased).** Every refused `POST /seats/:cli/container-login` carries a `code`:
+  `container_runtime_down` ("Docker isn't running …"), `cli_not_installed` (codex, pi and opencode sign in with the
+  host's own CLI), `signin_already_open` (with the open `terminalId`), `signin_superseded` or `signin_failed`. The new
+  `DELETE /seats/:cli/container-login` closes an open sign-in's terminal and removes its login container; a sign-in
+  whose terminal exited, or that has been open 15 minutes, is reclaimed by the next one; boot and shutdown remove this
+  daemon's leftover login containers (exact names only).
+- **Container seats read unavailable while the container runtime is down (e2e-1105 04:16Z).** A background check (every
+  10 s; two misses in a row before `down`) marks container seats "Docker isn't running" instead of a stale "active",
+  and every container-login seat is re-probed when the runtime goes down or comes back.
 - **A user without Claude Code is no longer refused every launch: crew finds the garden the installer installed (first-run B3).**
   Garden discovery has one documented order: `WICKED_CREW_SKILLS_SOURCE`, the Claude marketplace cache, the Claude
   installer copy, the npm-global `wicked-garden` package (its launcher on PATH, else beside crew's own package), then
