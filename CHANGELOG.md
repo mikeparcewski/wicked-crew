@@ -227,6 +227,12 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **A chat job no longer names an opt-in seat a launch would leave out (e2e-1105 F43).** "/analyze domain" in a new chat
+  proposed opencode as a helper, and Start then refused it (409 `helper_unavailable`), while Generate it on the same
+  repository left opencode out. The seats a chat job (and a chat document's helpers) may name, and the ones Start
+  re-checks, are now the seats that can work now under the default launch rule (no opt-in seat unless it is the only
+  one left; `proposalRoster`). The old filter's opt-in clause read a field the standing rows never carry, so it never
+  dropped opencode.
 - **A `/` command picked in a new chat makes its proposal (F36; no api-types change).** `POST /chats {seed}` took
   every first seeded open for a retry: its retry check compared the chat history's `stateOf` (which answers `null`
   for an unknown id) with `undefined`, so it answered 200 `adopted` with no chat opened and no proposal. The check now

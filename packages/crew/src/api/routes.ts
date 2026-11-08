@@ -790,6 +790,20 @@ const ExcludeLinkedIssuesSchema = z
   .optional();
 
 /**
+ * F43: the seats a chat job (or a chat document's helpers) may name, and the ones its Start re-checks, in roster order:
+ * the seats that can work now (enabled for council, work-eligible, not signed out) under the default launch rule
+ * ({@link defaultLaunchRoster}: no opt-in seat unless it is the only one left). Filtered first, so a seat the predicate
+ * drops never hides the fallback. The standing rows carry no `optIn` (only `GET /roster` marks it, `markOptIn`), so the
+ * opt-in rule reads the key.
+ */
+export function proposalRoster(
+  standing: ReadonlyArray<{ key?: unknown; display_name?: string; enabled_for_council?: boolean; seat_eligible_for_work?: boolean; auth?: string }>,
+): Array<{ key: string; name: string }> {
+  const canWork = standing.filter((s) => s.enabled_for_council && s.seat_eligible_for_work !== false && s.auth !== 'signed_out');
+  return defaultLaunchRoster(canWork).map((s) => ({ key: String(s.key), name: s.display_name || String(s.key) }));
+}
+
+/**
  * The default launch roster ({@link defaultLaunchRoster}: no opt-in seats) — plus the opt-in seat a
  * launch NAMES as its lead (`primary`): naming it is the opt-in.
  */
@@ -5265,10 +5279,7 @@ export function registerRoutes(
         analysis: path?.workflow !== undefined,
       };
     },
-    rosterEligible: () =>
-      rosterWithStanding()
-        .filter((s) => s.enabled_for_council && s.seat_eligible_for_work !== false && s.auth !== 'signed_out' && s.optIn !== true)
-        .map((s) => ({ key: String(s.key), name: s.display_name || String(s.key) })),
+    rosterEligible: () => proposalRoster(rosterWithStanding()),
     runs: async () => (await adapter.sessionsDetail()).map((v) => decorateRun(v)),
     chatOfRun: (runId) => runTimingIndex.chatIdFor(runId),
     isAskPath: (runId) => runTimingIndex.isAskPath(runId),
