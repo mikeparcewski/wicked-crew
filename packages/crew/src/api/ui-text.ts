@@ -25,11 +25,17 @@ function escapeRegExp(s: string): string {
 }
 
 /**
- * Where a path may start: not right after a word character, a dot or a dash, and not right after
- * `<word char>/` (a web address's host: `https://example.com/Users/alice` and
- * `https://example.com//home/page` are left alone), while `unix:///Users/…` and `at /Users/…` match.
+ * Where a path may start: not right after a word character, a dot, a dash or a backslash (so a match
+ * never restarts at the `/` inside an escaped `\/`, which would leave `\~`). Web addresses are
+ * protected whole before any of this runs ({@link WEB_URL}).
  */
-const PATH_START = String.raw`(?<![\w.-])(?<![\w.-]\\?\/)`;
+const PATH_START = String.raw`(?<![\w.\\-])`;
+/**
+ * A web address, in plain or JSON-escaped spelling (`https://…`, `https:\/\/…`), any scheme but
+ * `unix:` and `file:` (those name local paths and are scrubbed). Its whole span is set aside before
+ * scrubbing and put back after (codex r2: `https://[::1]/Users/alice` and `https://h///home/x`).
+ */
+const WEB_URL = /\b(?!unix:|file:)[a-z][a-z0-9+.-]*:(?:\\?\/){2}[^\s"'<>]*/gi;
 /** A path separator as it may appear in a decoded string: `/`, `\`, or a JSON-escaped `\/` / `\\`. */
 const SEP = String.raw`(?:\\\\|\\\/|[\\/])`;
 /** The end of a home spelling: the string's end, a separator (escaped or not), whitespace or punctuation. */
@@ -84,11 +90,13 @@ const POSIX_HOME = new RegExp(String.raw`${PATH_START}${SEP}(?:Users|home)${SEP}
  */
 export function scrubHomePaths(text: string, home: string = homedir()): string {
   if (text === '') return text;
-  let out = text;
+  const urls: string[] = [];
+  // A private-use placeholder cannot occur in the text we scrub, and no home pattern matches it.
+  let out = text.replace(WEB_URL, (url) => `\uE000${urls.push(url) - 1}\uE001`);
   for (const re of matchersFor(home)) out = out.replace(re, () => '~');
   out = out.replace(WINDOWS_HOME, () => '~');
   out = out.replace(POSIX_HOME, () => '~');
-  return out;
+  return urls.length === 0 ? out : out.replace(/\uE000(\d+)\uE001/g, (_m, i: string) => urls[Number(i)] as string);
 }
 
 /**

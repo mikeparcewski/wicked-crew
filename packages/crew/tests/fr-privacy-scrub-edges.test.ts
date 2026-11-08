@@ -19,6 +19,13 @@ describe('scrubHomePaths edges (review r1)', () => {
     expect(scrubHomePaths('https://example.com//home/page', HOME)).toBe('https://example.com//home/page');
     expect(scrubHomePaths('unix:///Users/alice/.rd/docker.sock', HOME)).toBe('unix://~/.rd/docker.sock');
     expect(scrubHomePaths('at /Users/alice/x and /home/bob/y', HOME)).toBe('at ~/x and ~/y');
+    // codex r2: an IPv6 host, repeated slashes, and an escaped web address inside a JSON fragment.
+    expect(scrubHomePaths('https://[::1]/Users/alice/docs', HOME)).toBe('https://[::1]/Users/alice/docs');
+    expect(scrubHomePaths('https://example.com///home/page', HOME)).toBe('https://example.com///home/page');
+    const frag = '{"url":"https:\\/\\/example.com\\/Users\\/alice\\/docs","p":"\\/Users\\/alice\\/x"}';
+    const out = scrubHomePaths(frag, HOME);
+    expect(JSON.parse(out)).toEqual({ url: 'https://example.com/Users/alice/docs', p: '~/x' });
+    expect(scrubHomePaths('foo\\/Users\\/alice\\/x', HOME)).not.toContain('\\~');
   });
   it('is case-insensitive for another user and keeps a sibling user name intact for the home pass', () => {
     expect(scrubHomePaths('c:\\users\\dave\\x', '/nowhere')).toBe('~\\x');

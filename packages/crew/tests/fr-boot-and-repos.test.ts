@@ -93,19 +93,21 @@ describe('the real server scrubs its four diagnostic routes (privacy backstop wi
 
 describe('readRepoPath (C1)', () => {
   const home = '/Users/alice';
+  // POSIX fixtures: pinned so the same assertions hold on a Windows CI host (codex r2).
+  const posix = { home, platform: 'linux' as const };
   it('expands ~ and ~/x against the home dir', () => {
-    expect(readRepoPath('~/code/my-app', { home })).toEqual({ ok: true, path: '/Users/alice/code/my-app' });
-    expect(readRepoPath(' ~ ', { home })).toEqual({ ok: true, path: '/Users/alice' });
+    expect(readRepoPath('~/code/my-app', posix)).toEqual({ ok: true, path: '/Users/alice/code/my-app' });
+    expect(readRepoPath(' ~ ', posix)).toEqual({ ok: true, path: '/Users/alice' });
   });
   it('refuses ~other and relative paths with a reason, never as "not a directory"', () => {
-    const other = readRepoPath('~bob/code', { home });
+    const other = readRepoPath('~bob/code', posix);
     expect(other).toMatchObject({ ok: false, code: 'repo_path_relative' });
-    const rel = readRepoPath('code/my-app', { home });
+    const rel = readRepoPath('code/my-app', posix);
     expect(rel).toMatchObject({ ok: false, code: 'repo_path_relative' });
     expect(rel.ok ? '' : rel.error).toContain('full path');
   });
   it('a missing folder names it in ~ form', () => {
-    const r = readRepoPath('~/nope-not-here', { home: scratch, mustExist: true });
+    const r = readRepoPath('~/nope-not-here', { home: scratch, mustExist: true, platform: process.platform });
     expect(r).toMatchObject({ ok: false, code: 'repo_path_missing' });
     expect(r.ok ? '' : r.error).toContain('~/nope-not-here');
     expect(r.ok ? '' : r.error).not.toContain(scratch);
@@ -172,6 +174,7 @@ describe('onboardFailure', () => {
     expect(readRepoPath('/repo', { home: 'C:\\Users\\a', platform: 'win32' })).toMatchObject({ ok: false, code: 'repo_path_relative' });
     expect(readRepoPath('C:\\code\\app', { home: 'C:\\Users\\a', platform: 'win32' })).toEqual({ ok: true, path: 'C:\\code\\app' });
     expect(readRepoPath('\\\\server\\share\\app', { home: 'C:\\Users\\a', platform: 'win32' })).toMatchObject({ ok: true });
+    expect(readRepoPath('//server/share/app', { home: 'C:\\Users\\a', platform: 'win32' })).toMatchObject({ ok: true });
   });
   it('keeps any other engine message, with the home dir as ~', () => {
     expect(onboardFailure('boom at /Users/alice/x', '/Users/alice')).toEqual({ error: 'boom at ~/x' });

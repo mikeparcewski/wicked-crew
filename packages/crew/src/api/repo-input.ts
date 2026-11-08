@@ -43,7 +43,7 @@ export function readRepoPath(raw: string, opts: { home?: string; mustExist?: boo
   }
   // On Windows `\\repo` and `/repo` are "absolute" but take their drive from the daemon (codex r1): a
   // folder needs its drive (`C:\\…`) or a UNC share (`\\\\server\\share`).
-  const absolute = platform === 'win32' ? /^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)/.test(path) && win32.isAbsolute(path) : isAbsolute(path);
+  const absolute = platform === 'win32' ? /^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+)/.test(path) && win32.isAbsolute(path) : isAbsolute(path);
   if (!absolute) {
     return { ok: false, code: 'repo_path_relative', error: `Use a full path, like ~/code/my-app: ${typed} is relative, and the daemon has no current folder of yours to start from.` };
   }
