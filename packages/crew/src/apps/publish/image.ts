@@ -22,7 +22,8 @@ export class ImageBuildError extends Error {
   }
 }
 
-const KEEP_ENV = ['PATH', 'HOME', 'DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG', 'DOCKER_CERT_PATH', 'DOCKER_TLS_VERIFY', 'XDG_RUNTIME_DIR', 'TMPDIR', 'SystemRoot'];
+/** The only variables the engine CLI sees (where it is and which engine); never the daemon's own. */
+export const KEEP_ENV = ['PATH', 'HOME', 'DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG', 'DOCKER_CERT_PATH', 'DOCKER_TLS_VERIFY', 'XDG_RUNTIME_DIR', 'TMPDIR', 'SystemRoot'];
 const BUILD_DEADLINE_MS = 15 * 60 * 1000;
 const LOG_TAIL = 8_000;
 

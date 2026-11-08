@@ -1,4 +1,5 @@
 import { REVIEW_WORKFLOW } from '../insights/workflow.js';
+import { appsRuntimeDir, appsServerArtifact, containerEngineKnown } from '../apps/publish/artifacts.js';
 import type { FastifyBaseLogger, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { busSeamsOffWarning, busUnavailableWarning } from '../core/bus-notice.js';
 import { vaultBinWarning, vaultDiagnostics } from '../core/vault-bin.js';
@@ -2052,6 +2053,15 @@ export function registerRoutes(
     registerAppRoutes(app, {
       store: runtime.apps,
       audit,
+      publish: {
+        engine: adapter,
+        roster: async () => {
+          await rosterWithStanding.ready?.();
+          return JSON.stringify(launchRosterNaming(rosterWithStanding(), undefined));
+        },
+        registry: runtime.mcp ?? null,
+        grantOf: (slug, action) => appsWritePath?.getGrant(slug, action) ?? null,
+      },
       ...(appsExecutor !== undefined ? { executor: appsExecutor } : {}),
       ...(appsWritePath !== undefined ? { writePath: appsWritePath } : {}),
       ...(runtime.appsVerifyUnitToken !== undefined ? { verifyUnitToken: runtime.appsVerifyUnitToken } : {}),
@@ -2455,7 +2465,7 @@ export function registerRoutes(
               query: appsExecutor !== undefined,
               actions: appsWritePath !== undefined,
               turns: runtime.apps.turns !== null,
-              publish: false,
+              publish: appsServerArtifact() !== null && appsRuntimeDir() !== null && containerEngineKnown(),
               uploads: app.hasRoute({ method: 'POST', url: `${V}/apps/uploads` }),
               sourceCheck: runtime.apps.sourceStage !== null,
             } satisfies import('../core/types.js').AppsCapabilities,

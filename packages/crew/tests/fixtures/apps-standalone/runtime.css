@@ -1,0 +1,5 @@
+/* A tiny stand-in for studio's apps-standalone stylesheet (slice C ships the real one). The publish check's
+   render only needs a stylesheet to load under the CSP; its contents do not matter to the test. */
+body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; background: #fff; color: #111; }
+.wk-card { border: 1px solid #ccc; padding: 8px; margin-top: 8px; }
+.wk-page { min-height: 120px; }

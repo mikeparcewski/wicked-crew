@@ -19,7 +19,7 @@ import { AppExecutor } from '../../src/apps/exec/executor.js';
 import type { AppKnowledgeDeps } from '../../src/apps/exec/recall.js';
 import type { Viewer } from '../../src/apps/exec/params.js';
 import { AppsSourceStage } from '../../src/apps/exec/source-stage.js';
-import { registerAppRoutes } from '../../src/apps/routes.js';
+import { registerAppRoutes, type AppRoutesDeps } from '../../src/apps/routes.js';
 import { AppStore, type AppRepoRegistry } from '../../src/apps/store.js';
 import type { Actor, AppDetail, AppSpec, McpPreviewResponse, McpServer } from '../../src/core/types.js';
 import { probeMcpServer } from '../../src/mcp/probe.js';
@@ -65,7 +65,7 @@ export interface Harness {
   close(): Promise<void>;
 }
 
-export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick<Harness, 'registry' | 'store' | 'audit' | 'executor'>) => void | Promise<void>; now?: () => number; crewDeadlineMs?: number; knowledge?: AppKnowledgeDeps } = {}): Promise<Harness> {
+export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick<Harness, 'registry' | 'store' | 'audit' | 'executor'>) => void | Promise<void>; now?: () => number; crewDeadlineMs?: number; knowledge?: AppKnowledgeDeps; routes?: Pick<AppRoutesDeps, 'publish' | 'verifyUnitToken'> } = {}): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), 'apps-k2b-'));
   const env: Record<string, string> = {};
   const secrets: SecretStore = { available: false, get: async () => null, has: async () => false, set: async () => undefined, delete: async () => undefined };
@@ -107,7 +107,7 @@ export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick
   const actorOf = (req: { actor?: Actor | null }): Actor => req.actor ?? LOCAL_ACTOR;
   registerMcpRoutes(app, { registry, audit, actorOf });
   registerSourceRoutes(app, { registry, audit, actorOf, rowWriteGrants: writePath });
-  registerAppRoutes(app, { store, audit, executor, writePath });
+  registerAppRoutes(app, { store, audit, executor, writePath, ...opts.routes });
   await opts.extra?.(app, { registry, store, audit, executor });
   await app.ready();
   const call: Harness['call'] = async (method, url, payload, as = 'priya') => {

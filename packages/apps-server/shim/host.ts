@@ -20,7 +20,7 @@ import * as oauth from 'oauth4webapi';
 import type { AppActionCard, AppActionCardValue, AppActionPrepareResponse, AppActionRunResponse, AppSiteSpecResponse } from 'wicked-crew-api-types';
 
 declare const wickedAppsStandalone: { boot(port: MessagePort, hello: Record<string, unknown>): void };
-/** Tests only (scripts/build.mjs `--test`): a framed page asks its parent for a token. Never in a published page. */
+/** Tests only (`host.test.js`, built only by apps-server's own build; crew's `--outdir` build omits it): a framed page asks its parent for a token. Never in a published page. */
 declare const __WK_TEST_FRAMED_TOKEN__: boolean;
 
 interface Boot {

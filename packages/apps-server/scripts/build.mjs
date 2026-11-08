@@ -13,13 +13,15 @@ import { cpSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
 
 import { build } from 'esbuild';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pkg = resolve(here, '..');
 const crew = resolve(pkg, '..', 'crew');
-const dist = join(pkg, 'dist');
+const { values } = parseArgs({ options: { outdir: { type: 'string' } } });
+const dist = values.outdir === undefined ? join(pkg, 'dist') : resolve(values.outdir);
 const require = createRequire(join(crew, 'package.json'));
 
 rmSync(dist, { recursive: true, force: true });
@@ -39,7 +41,9 @@ await build({
   logLevel: 'warning',
 });
 
-for (const [name, test] of [['host.js', false], ['host.test.js', true]]) {
+// The framed-token seam belongs only to the apps-server test build, never crew's shipped artifact.
+const hosts = values.outdir === undefined ? [['host.js', false], ['host.test.js', true]] : [['host.js', false]];
+for (const [name, test] of hosts) {
   await build({
     entryPoints: [join(pkg, 'shim', 'host.ts')],
     outfile: join(dist, 'server', 'shim', name),

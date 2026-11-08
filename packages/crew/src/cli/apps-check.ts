@@ -19,14 +19,16 @@
  * Exit 0: checked and written. Exit 1: refused (the findings are printed). Exit 2: could not ask.
  */
 
-import { chmodSync, constants, closeSync, fchmodSync, lstatSync, mkdirSync, mkdtempSync, openSync, realpathSync, renameSync, rmSync, writeSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { chmodSync, constants, closeSync, fchmodSync, lstatSync, mkdirSync, mkdtempSync, openSync, realpathSync, readdirSync, renameSync, rmSync, writeSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative } from 'node:path';
 
 /** The paths a checked tree may hold (query ids: `APP_NAMED_ID_RE`; extensions: `QUERY_EXT`). */
 const FILE_RE = /^(?:apps\.json|apps\.lock\.json|queries\/[a-z][a-z0-9_]{0,63}\.(?:sql|graphql|json))$/;
 const TREE_RE = /^[0-9a-f]{40}$/;
 /** How long the check may take (the source stage describes every changed query, each under its deadline). */
 const CHECK_TIMEOUT_MS = 120_000;
+// Two source/manifest checks, the full three-minute render, and response overhead.
+export const PUBLISH_CHECK_TIMEOUT_MS = 2 * CHECK_TIMEOUT_MS + 180_000 + 30_000;
 
 export interface AppsCheckIo {
   env: NodeJS.ProcessEnv;
@@ -107,11 +109,176 @@ export function materialize(root: string, files: readonly CheckedFile[]): void {
   }
 }
 
-export async function runAppsCheck(argv: readonly string[], io: AppsCheckIo): Promise<number> {
-  if (argv.includes('--publish')) {
-    io.err('apps_check: the publish check is not served by this crew yet; nothing was checked');
+/** The names crew may give an evidence file: lower-case, slash-separated, never absolute, never a `..` hop. */
+const EVIDENCE_NAME_RE = /^[a-z0-9._/-]+$/;
+
+/**
+ * The on-disk path an evidence file named `name` is written to, under `dir`, or a throw. crew NAMES the paths;
+ * the CLI is the boundary that makes a write outside `dir` impossible: the name is lower-case `[a-z0-9._/-]`,
+ * never absolute, holds no empty or `..` segment, and the resolved path is still inside `dir` (the last check
+ * catches anything the character rule did not).
+ */
+export function evidenceTarget(dir: string, name: string): string {
+  if (typeof name !== 'string' || name === '' || !EVIDENCE_NAME_RE.test(name)) throw new Error(`crew named an evidence path with characters outside [a-z0-9._/-]: ${JSON.stringify(name)}`);
+  if (name.startsWith('/') || name.includes('\0')) throw new Error(`crew named an evidence path that is absolute or has a null byte: ${JSON.stringify(name)}`);
+  if (name.split('/').some((seg) => seg === '' || seg === '..')) throw new Error(`crew named an evidence path with an empty or '..' segment: ${JSON.stringify(name)}`);
+  const target = join(dir, name);
+  const rel = relative(dir, target);
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) throw new Error(`the evidence path ${JSON.stringify(name)} is outside the evidence directory`);
+  return target;
+}
+
+/**
+ * Write fresh evidence in private sibling staging, then replace the worktree's .wicked ENTRY.
+ * Existing ancestors are moved out, never traversed for writes. Their other entries are preserved by
+ * rename; even a raced link or hard link is only moved, never opened. As with materialize(), the seat
+ * has the worktree, not its parent. A conflicting final rename fails closed.
+ */
+export function materializeEvidence(root: string, digest: string, evidence: Array<{ path?: string; base64?: string }>): void {
+  const seen = new Set<string>();
+  for (const e of evidence) {
+    evidenceTarget(root, e.path ?? '');
+    if (seen.has(e.path!)) throw new Error('crew repeated an evidence path');
+    seen.add(e.path!);
+  }
+  const staging = mkdtempSync(join(dirname(realpathSync(root)), '.wicked-publish-check-'));
+  const target = join(root, '.wicked');
+  let detached = false;
+  const moved: Array<{ from: string; to: string }> = [];
+  const preserve = (from: string, to: string): void => { renameSync(from, to); moved.push({ from, to }); };
+  try {
+    chmodSync(staging, 0o700);
+    const fresh = join(staging, 'fresh');
+    const checks = join(fresh, 'publish-check');
+    const dir = join(checks, digest.slice(0, 12));
+    mkdirSync(dir, { recursive: true });
+    for (const e of evidence) {
+      const path = evidenceTarget(dir, e.path!);
+      mkdirSync(dirname(path), { recursive: true });
+      const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644);
+      try { writeFileBytes(fd, Buffer.from(e.base64 ?? '', 'base64')); } finally { closeSync(fd); }
+    }
+    const old = join(staging, 'old');
+    if (exists(target)) {
+      renameSync(target, old);
+      detached = true;
+      // Inspect only the detached entries. No ancestor here is in the seat's worktree.
+      if (lstatSync(old).isDirectory()) {
+        for (const name of readdirSync(old)) {
+          if (name !== 'publish-check') preserve(join(old, name), join(fresh, name));
+        }
+        const prior = join(old, 'publish-check');
+        if (exists(prior) && lstatSync(prior).isDirectory()) {
+          for (const name of readdirSync(prior)) {
+            if (name !== digest.slice(0, 12)) preserve(join(prior, name), join(checks, name));
+          }
+        }
+      }
+    }
+    renameSync(fresh, target);
+    detached = false;
+  } catch (err) {
+    // Retain the detached directory on an unexpected conflict rather than discard unrelated files.
+    if (detached) {
+      try {
+        for (const { from, to } of moved.reverse()) renameSync(to, from);
+        renameSync(join(staging, 'old'), target);
+        detached = false;
+      } catch {
+        throw new Error(`evidence replacement failed; the previous entries are retained in ${staging}`, { cause: err });
+      }
+    }
+    throw err;
+  } finally {
+    if (!detached) rmSync(staging, { recursive: true, force: true });
+  }
+}
+
+function writeFileBytes(fd: number, bytes: Buffer): void {
+  let off = 0;
+  while (off < bytes.length) off += writeSync(fd, bytes, off, bytes.length - off);
+}
+
+interface PublishAnswer {
+  ok?: boolean;
+  code?: string;
+  tree?: string;
+  digest?: string;
+  card?: string;
+  report?: { rules?: Array<{ rule?: string; ok?: boolean; detail?: string }>; render?: { pages?: unknown[] } };
+  evidence?: Array<{ path?: string; base64?: string }>;
+  findings?: Array<{ code?: string; path?: string; message?: string }>;
+  error?: string;
+}
+
+/** `wicked-crew apps-check --publish`: the publish run's `check` unit. Posts `{token, tree}` as the turn check does. */
+async function runPublishCheck(io: AppsCheckIo): Promise<number> {
+  const token = io.env['WICKED_MCP_TOKEN'] ?? '';
+  const url = (io.env['WICKED_CREW_URL'] ?? '').replace(/\/+$/, '');
+  const tree = (io.env['WICKED_TREE'] ?? '').toLowerCase();
+  if (token === '' || url === '') {
+    io.err('apps_check: no unit token or daemon URL (WICKED_MCP_TOKEN, WICKED_CREW_URL): this runs only as an apps-publish check step; nothing was checked');
     return 2;
   }
+  if (!TREE_RE.test(tree)) {
+    io.err('apps_check: the engine handed no worktree tree (WICKED_TREE); nothing was checked');
+    return 2;
+  }
+  let res: Response;
+  try {
+    res = await (io.fetch ?? fetch)(`${url}/api/v1/apps/check`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token, tree }),
+      signal: AbortSignal.timeout(PUBLISH_CHECK_TIMEOUT_MS),
+    });
+  } catch (e) {
+    io.err(`apps_check: crew did not answer (${e instanceof Error ? e.message : String(e)}); nothing was checked`);
+    return 2;
+  }
+  let body: PublishAnswer;
+  try {
+    body = (await res.json()) as PublishAnswer;
+  } catch {
+    io.err(`apps_check: crew answered ${res.status} with no JSON; nothing was checked`);
+    return 2;
+  }
+  if (!res.ok) {
+    io.err(`apps_check: refused: ${body.code ?? res.status}: ${(body.error ?? '').slice(0, 600)}`);
+    return 1;
+  }
+  if (body.ok !== true) {
+    const findings = Array.isArray(body.findings) ? body.findings : [];
+    io.out(`apps_check: publish check refused: ${body.code ?? 'check_failed'} (${findings.length} finding${findings.length === 1 ? '' : 's'})`);
+    for (const f of findings.slice(0, 20)) io.out(`- ${f.code ?? '?'} ${f.path ?? ''}: ${(f.message ?? '').slice(0, 300)}`);
+    return 1;
+  }
+  const digest = (body.digest ?? '').toLowerCase();
+  if (!/^[0-9a-f]{12,64}$/.test(digest)) {
+    io.err('apps_check: crew answered ok with no manifest digest; nothing was written');
+    return 2;
+  }
+  const dir = join(io.cwd, '.wicked', 'publish-check', digest.slice(0, 12));
+  const evidence = Array.isArray(body.evidence) ? body.evidence : [];
+  try {
+    materializeEvidence(io.cwd, digest, evidence);
+  } catch (e) {
+    io.out(`apps_check: refused: evidence: ${e instanceof Error ? e.message : String(e)}`);
+    return 1;
+  }
+  const rules = body.report?.rules ?? [];
+  const pages = body.report?.render?.pages?.length ?? 0;
+  io.out(`apps_check: publish check ok tree=${body.tree ?? tree} digest=${digest.slice(0, 12)} (${rules.length} rule${rules.length === 1 ? '' : 's'} checked, ${pages} page render${pages === 1 ? '' : 's'})`);
+  io.out(`apps_check: evidence written to ${dir} (${evidence.length} file${evidence.length === 1 ? '' : 's'})`);
+  if (typeof body.card === 'string' && body.card !== '') {
+    io.out('apps_check: consent card:');
+    for (const line of body.card.split('\n')) io.out(`  ${line}`);
+  }
+  return 0;
+}
+
+export async function runAppsCheck(argv: readonly string[], io: AppsCheckIo): Promise<number> {
+  if (argv.includes('--publish')) return runPublishCheck(io);
   const token = io.env['WICKED_MCP_TOKEN'] ?? '';
   const url = (io.env['WICKED_CREW_URL'] ?? '').replace(/\/+$/, '');
   const tree = (io.env['WICKED_TREE'] ?? '').toLowerCase();
