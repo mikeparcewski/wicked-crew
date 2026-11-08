@@ -31,6 +31,7 @@ import {
   DELIVER_PHASE_ID,
   DELIVER_PUSHED_NO_PR_MARKER,
   DELIVER_PUSH_REJECTED_MARKER,
+  isSafeRefName,
   pushedOnlyFrom,
   type PushedOnlyDelivery,
 } from '../core/deliver.js';
@@ -445,8 +446,175 @@ export function prUrlFrom(text: string): string | null {
   return matches === null ? null : (matches[matches.length - 1] ?? null);
 }
 
-/** What an approved deliver unit's transcript puts on the `run.delivered` trail (`detail`). */
-export type DeliveryRecord = { url: string } | { pushed: PushedOnlyDelivery };
+/**
+ * What an approved deliver unit's transcript puts on the `run.delivered` trail (`detail`).
+ *
+ * `commit` (CS11, DES-CATALOG-002 rev 8 — "recorded from now on") is the delivered HEAD SHA of the
+ * run's branch, read SEPARATELY ({@link readDeliveredCommit}) and attached by the resolver: the
+ * transcript names a PR or a push, not the commit, so {@link deliveryRecordFrom} never sets it. It is
+ * what the review-change join (`api/review-change.ts`) asks `git merge-base --is-ancestor` to decide
+ * whether a candidate run actually contributed to the change under review. Optional on both variants:
+ * a run that delivered before this landed, or one whose SHA could not be read, carries no commit and
+ * is treated as a contributor (fail-closed — more authors excluded, never fewer).
+ */
+export type DeliveryRecord =
+  | { url: string; commit?: string }
+  | { pushed: PushedOnlyDelivery; commit?: string };
+
+/**
+ * Write one run's delivery record (crew#321): the durable `run.delivered` audit entry FIRST, then
+ * the read-side index, so the index can only LAG a crash (rehydrated at next boot), never hold a
+ * record the trail does not. CS11: `record.commit` (the delivered head, when it was read) rides
+ * both, so the review-change join and a restarted daemon see the same SHA. The daemon's resolver
+ * wiring (`server.ts`) calls exactly this.
+ */
+export function recordDelivery(
+  audit: Pick<AuditLog, 'record'>,
+  index: DeliveryIndex,
+  actor: Parameters<AuditLog['record']>[1],
+  runId: string,
+  record: DeliveryRecord,
+): void {
+  audit.record('run.delivered', actor, { runId, detail: record });
+  if ('url' in record) index.set(runId, record.url, undefined, record.commit);
+  else index.setPushed(runId, record.pushed, undefined, record.commit);
+}
+
+/** The exec seam {@link readDeliveredCommit} reads `git` through — injectable so tests answer
+ *  without a real checkout. Same shape as {@link GhExec} in `core/deliver.ts`: a non-throwing
+ *  `{ stdout, stderr, code }` where `code` is git's exit status (`null` when it never ran). */
+export type DeliveredCommitExec = (
+  args: string[],
+  opts: { cwd: string; timeoutMs: number },
+) => Promise<{ stdout: string; stderr: string; code: number | null }>;
+
+/** The production `git` seam for {@link readDeliveredCommit}: {@link execCapped}, with git's
+ *  non-zero exit (and every spawn/timeout fault) folded into a `code` rather than a throw, so the
+ *  reader's "any failure ⇒ null" contract is a single code check. Read-only plumbing, argv array,
+ *  no opportunistic index lock (a deliver may be writing this very root). */
+const defaultDeliveredCommitExec: DeliveredCommitExec = async (args, opts) => {
+  try {
+    const { stdout, stderr } = await execCapped('git', args, {
+      cwd: opts.cwd,
+      timeout: opts.timeoutMs,
+      windowsHide: true,
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+    });
+    return { stdout, stderr, code: 0 };
+  } catch (err) {
+    const code = typeof (err as { code?: unknown }).code === 'number' ? (err as { code: number }).code : null;
+    return { stdout: '', stderr: err instanceof Error ? err.message : String(err), code };
+  }
+};
+
+/**
+ * The delivered HEAD commit of a run's branch (CS11, DES-CATALOG-002 rev 8), or `null`.
+ *
+ * `git -C <root> rev-parse --verify -q refs/heads/<branch>^{commit}`. Two separate jobs here:
+ *   - the `refs/heads/` qualification pins the lookup to the LOCAL BRANCH namespace, so a same-named
+ *     TAG (`wicked/<runId>`) can never answer. `^{commit}` alone does not do this: it peels an
+ *     annotated tag to its commit and accepts a lightweight tag that points at a commit, and when a
+ *     branch is absent a same-named tag takes precedence — it establishes the resulting OBJECT TYPE,
+ *     not that the input named a branch (cs11-b review P1/security). An already-qualified
+ *     `refs/heads/...` name is accepted as-is.
+ *   - the exact ref is read with `show-ref --verify` (no revision-name fallback to `refs/tags/<name>`),
+ *     then confirmed to be a commit; an absent branch is a clean non-zero exit, so it is `null`.
+ * Bounded to 5 s. Returns the 40-hex SHA on a clean read, and `null` on ANY failure (git not
+ * answering, a non-zero exit, a non-SHA answer) — the review-change join reads `null` as "could not
+ * be read" and keeps the run a contributor, so a flaky read can never silently DROP an author.
+ *
+ * Refuses a branch that fails {@link isSafeRefName} before it reaches argv: a run-branch name comes
+ * from the engine, but this function is called from the audit/launch path too, and a ref that could
+ * carry `..`, a leading `-`, or `.lock` is never handed to git.
+ */
+export async function readDeliveredCommit(
+  repoRoot: string,
+  branch: string,
+  exec: DeliveredCommitExec = defaultDeliveredCommitExec,
+): Promise<string | null> {
+  if (!isSafeRefName(branch)) return null;
+  // Pin to the local-branch namespace so a same-named tag never answers (cs11-b review P1/security).
+  const ref = branch.startsWith('refs/heads/') ? branch : `refs/heads/${branch}`;
+  try {
+    // `show-ref --verify` reads EXACTLY that ref: unlike a revision name, it never falls back to
+    // `refs/tags/<name>` (a tag literally named `refs/heads/wicked/<id>` cannot answer; codex r2).
+    const exact = await exec(['show-ref', '--verify', '--hash', ref], { cwd: repoRoot, timeoutMs: 5_000 });
+    if (exact.code !== 0) return null;
+    const sha = exact.stdout.trim();
+    if (!/^[0-9a-f]{40}$/.test(sha)) return null;
+    // ...and the object it names must be a commit (a branch never names anything else, but say so).
+    const { stdout, code } = await exec(['rev-parse', '--verify', '-q', `${sha}^{commit}`], {
+      cwd: repoRoot,
+      timeoutMs: 5_000,
+    });
+    if (code !== 0) return null;
+    return stdout.trim() === sha ? sha : null;
+  } catch {
+    // The seam is non-throwing by contract, but a hand-written test double might throw — absence of
+    // an answer is `null`, never a crash on the delivery-record path.
+    return null;
+  }
+}
+
+/**
+ * Was the deliver unit's push still the branch tip when this terminal frame fired (CS11, cs11-b
+ * review P1/correctness)? TRUE only when NO unit after the deliver unit was ever dispatched — every
+ * unit with `ord` greater than the deliver unit's `ord` is still `pending`.
+ *
+ * WHY it gates the terminal-frame commit read: the engine supports a deliver phase that is not the
+ * last phase. If delivery pushes C1 and a LATER phase then commits C2 onto `wicked/<id>` before the
+ * terminal frame, reading the mutable local branch records C2 — but the PR is still at C1, so the
+ * review-change join's `merge-base --is-ancestor C2 C1` returns 1 and drops a run that contributed
+ * (and lets its authors review their own change). When a later unit ran we therefore record NO
+ * commit; the join then reads the absent commit as "could not be read" and keeps the run
+ * (fail-closed — more authors excluded, never fewer). FALSE when there is no deliver unit at all
+ * (nothing to anchor the read to): conservative, so the caller omits the commit.
+ *
+ * RESIDUAL (stated, not chased): a person who hand-commits on the retained `wicked/<id>` branch after a
+ * daemon crash and before this record is written moves the tip too; no crew actor does that.
+ */
+export function noUnitDispatchedAfterDeliver(view: SessionView): boolean {
+  const deliver = deliverUnitOf(view);
+  if (deliver === null) return false;
+  return (view.units ?? []).every((u) => u.ord <= deliver.ord || u.status === 'pending');
+}
+
+/**
+ * The delivered HEAD SHA to attach to a run's terminal-frame delivery record (CS11), or `null`.
+ *
+ * The PRODUCTION body the server's `deliveredCommit` callback wires — exported so tests exercise
+ * THIS code, not a copy of it (cs11-b review P2/tests). Resolves the registered repo root via the
+ * injected `repoRootOf`, derives the run branch (`session.run_branch`, else `wicked/<id>`), and
+ * reads {@link readDeliveredCommit} over `refs/heads/<branch>`. Returns `null` (record the delivery
+ * WITHOUT a commit) when:
+ *   - the run has no repo (nothing to read),
+ *   - the repo root is unresolved,
+ *   - a later unit ran after the deliver unit ({@link noUnitDispatchedAfterDeliver} is false), so the
+ *     local branch may no longer be the pushed tip,
+ *   - the SHA could not be read.
+ * A `null` keeps the run a contributor at join time — reading the commit must never block or distort
+ * the delivery record.
+ */
+export async function deliveredCommitFor(
+  view: SessionView,
+  repoRootOf: (repoRef: string) => Promise<string | undefined>,
+  exec?: DeliveredCommitExec,
+): Promise<string | null> {
+  const repoRef = view.session.repo_ref;
+  if (repoRef == null) return null;
+  // P1/correctness: only record the commit while the deliver push is still the branch tip.
+  if (!noUnitDispatchedAfterDeliver(view)) return null;
+  const root = await repoRootOf(repoRef);
+  if (root == null) return null;
+  const session = view.session as typeof view.session & { run_branch?: string };
+  const branch =
+    typeof session.run_branch === 'string' && session.run_branch !== ''
+      ? session.run_branch
+      : `wicked/${view.session.id}`;
+  return exec !== undefined
+    ? readDeliveredCommit(root, branch, exec)
+    : readDeliveredCommit(root, branch);
+}
 
 /**
  * The delivery an APPROVED deliver unit's transcript records, or `null` (nothing to record).
@@ -501,6 +669,14 @@ export interface DeliveryResolverDeps {
   isDelivered: (runId: string) => boolean;
   /** Write the record: the audit entry FIRST, then the index — the caller owns that order. */
   record: (runId: string, record: DeliveryRecord) => void;
+  /**
+   * The delivered HEAD commit of this run's branch (CS11), attached to the record when present.
+   * Wired to {@link readDeliveredCommit} over the registered repo root + `session.run_branch`
+   * (else `wicked/<id>`). Called AFTER {@link deliveryRecordFrom} decided there is a delivery to
+   * record, so an unapproved/empty transcript never spends a git read. A throw or `null` records
+   * the delivery WITHOUT a commit — reading the SHA must never block the delivery record.
+   */
+  deliveredCommit?: (view: SessionView) => Promise<string | null>;
   log?: (msg: string) => void;
 }
 
@@ -601,7 +777,26 @@ export class DeliveryResolver {
       // A PR URL, or (N1) a push-only delivery to an origin gh cannot resolve to GitHub — a
       // delivery too, so the run reads `delivery: 'pushed'` and never `'stranded'`.
       const record = deliveryRecordFrom(output);
-      if (record !== null) this.deps.record(runId, record);
+      if (record !== null) {
+        // CS11: attach the delivered HEAD SHA (read separately — the transcript names the PR, not
+        // the commit). A throw or `null` records the delivery WITHOUT a commit: the review-change
+        // join treats an absent commit as "could not be read" and keeps the run a contributor, so
+        // a git fault here never blocks the delivery record and never silently drops an author.
+        let commit: string | null = null;
+        if (this.deps.deliveredCommit !== undefined) {
+          try {
+            commit = await this.deps.deliveredCommit(view);
+          } catch (err) {
+            this.deps.log?.(
+              `[runs] delivered-commit read for ${runId} failed (record kept without a commit): ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+            commit = null;
+          }
+        }
+        this.deps.record(runId, commit !== null ? { ...record, commit } : record);
+      }
       // Settled only once the whole read — transcript AND record — landed: a `done` deliver
       // unit's transcript is final, but a record write that threw (codex r1 on #859) must leave
       // the run unsettled so the next caller retries instead of serving a stat label forever.
@@ -663,6 +858,10 @@ export class DeliveryIndex {
   private readonly requested = new Set<string>();
   /** N1: runs whose deliver phase pushed the branch and could open no PR (a non-GitHub origin). */
   private readonly runToPushed = new Map<string, PushedOnlyDelivery>();
+  /** CS11: the delivered HEAD commit of each run's branch (40-hex), from the entry that decides the
+   *  run. The review-change join reads it via {@link commitFor} to ask whether a candidate run is an
+   *  ancestor of the reviewed head. Absent for runs delivered before CS11 landed. */
+  private readonly runToCommit = new Map<string, string>();
   /** (wicked-core#850 EX-04) How a post-hoc delivery was assured — `verified: false` and its trees. */
   private readonly runToAssurance = new Map<string, DeliveryAssurance>();
 
@@ -691,6 +890,14 @@ export class DeliveryIndex {
           decided.add(entry.runId);
           this.runToPushed.delete(entry.runId);
           this.runToUrl.set(entry.runId, url);
+          // CS11: the commit rides the SAME entry that decides the run (cs11-b review P2/contract).
+          // This URL entry is the decider (a URL outranks a push, even an OLDER URL over a newer
+          // push-only entry), so its commit is authoritative: set it when valid, otherwise DELETE
+          // any commit a newer push-only entry left in `runToCommit` for this run — a PR must never
+          // be paired with a push-only entry's SHA. Absent/malformed here means no commit on record.
+          const commit = entry.detail?.['commit'];
+          if (typeof commit === 'string' && /^[0-9a-f]{40}$/.test(commit)) this.runToCommit.set(entry.runId, commit);
+          else this.runToCommit.delete(entry.runId);
           const assurance = entry.detail?.['assurance'];
           if (isDeliveryAssurance(assurance)) this.runToAssurance.set(entry.runId, assurance);
           continue;
@@ -706,6 +913,12 @@ export class DeliveryIndex {
         ) {
           pushedOnly.add(entry.runId);
           this.runToPushed.set(entry.runId, { branch: pushed.branch, remote: pushed.remote });
+          // CS11: same newest-entry-decides rule as the url path. Guarded by `pushedOnly`, so a
+          // push's commit never overwrites one already taken from a newer url entry for this run.
+          if (!this.runToCommit.has(entry.runId)) {
+            const commit = entry.detail?.['commit'];
+            if (typeof commit === 'string' && /^[0-9a-f]{40}$/.test(commit)) this.runToCommit.set(entry.runId, commit);
+          }
           const assurance = entry.detail?.['assurance'];
           if (isDeliveryAssurance(assurance)) this.runToAssurance.set(entry.runId, assurance);
           continue;
@@ -728,10 +941,14 @@ export class DeliveryIndex {
   }
 
   /** Record the run's delivered PR URL (idempotent — the newest write wins) and, for a post-hoc
-   *  delivery, how it was assured (EX-04). */
-  set(runId: string, url: string, assurance?: DeliveryAssurance): void {
+   *  delivery, how it was assured (EX-04). `commit` (CS11) is the delivered HEAD SHA when known. */
+  set(runId: string, url: string, assurance?: DeliveryAssurance, commit?: string): void {
     this.runToPushed.delete(runId);
     this.runToUrl.set(runId, url);
+    // The newest delivery decides the commit too: one recorded without a commit (an unreadable branch) clears an
+    // older SHA, so the review-change join never proves non-membership from a stale head (it keeps the run instead).
+    if (commit !== undefined) this.runToCommit.set(runId, commit);
+    else this.runToCommit.delete(runId);
     if (assurance !== undefined) this.runToAssurance.set(runId, assurance);
     else this.runToAssurance.delete(runId);
   }
@@ -741,10 +958,13 @@ export class DeliveryIndex {
     return this.runToAssurance.get(runId);
   }
 
-  /** Record a PUSH-ONLY delivery (N1). A recorded PR URL is never downgraded by it. */
-  setPushed(runId: string, pushed: PushedOnlyDelivery, assurance?: DeliveryAssurance): void {
+  /** Record a PUSH-ONLY delivery (N1). A recorded PR URL is never downgraded by it. `commit` (CS11)
+   *  is the delivered HEAD SHA when known. */
+  setPushed(runId: string, pushed: PushedOnlyDelivery, assurance?: DeliveryAssurance, commit?: string): void {
     if (this.runToUrl.has(runId)) return;
     this.runToPushed.set(runId, pushed);
+    if (commit !== undefined) this.runToCommit.set(runId, commit);
+    else this.runToCommit.delete(runId);
     if (assurance !== undefined) this.runToAssurance.set(runId, assurance);
   }
 
@@ -775,6 +995,13 @@ export class DeliveryIndex {
    */
   urlFor(runId: string): string | undefined {
     return this.runToUrl.get(runId);
+  }
+
+  /** CS11: the delivered HEAD commit of this run's branch (40-hex), or `undefined` — the fact the
+   *  review-change join (`api/review-change.ts`) feeds `git merge-base --is-ancestor` to decide
+   *  whether a candidate run actually contributed to the change under review. */
+  commitFor(runId: string): string | undefined {
+    return this.runToCommit.get(runId);
   }
 }
 

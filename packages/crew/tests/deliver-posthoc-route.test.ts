@@ -155,16 +155,27 @@ function view(
 interface App {
   app: FastifyInstance;
   execCalls: () => number;
+  /** Records every `audit.record(...)` call (CS11: lets a test read the `run.delivered` detail). */
+  recordSpy: ReturnType<typeof vi.spyOn>;
 }
 
-/** A route set whose deliverExec is the REAL script spawn, aimed at the fixture's HOME. */
-function buildApp(views: SessionView[], env: Record<string, string>): App {
+/** A route set whose deliverExec is the REAL script spawn, aimed at the fixture's HOME. `repoRoot`
+ *  (CS11) wires `listRepos` so the route's `repoRootOf` resolves — the post-hoc delivered-commit
+ *  read needs the registered repo root to find the run branch's `refs/heads/wicked/<id>`. */
+function buildApp(views: SessionView[], env: Record<string, string>, repoRoot?: string): App {
   let calls = 0;
   const mockAdapter = {
     sessionsDetail: vi.fn(async () => views),
     sessions: vi.fn(async () => views.map((v) => v.session.id)),
+    ...(repoRoot !== undefined
+      ? { listRepos: vi.fn(async () => [{ id: 'repo-1', name: 'repo-1', root_path: repoRoot, registered_at: 1 }]) }
+      : {}),
   } as unknown as CoreAdapter;
   const app = Fastify({ logger: false });
+  // CS11: a noop trail (writes nothing) spied so a test can read the `run.delivered` detail the
+  // route recorded — the spy captures the call args even though the underlying record is a no-op.
+  const audit = AuditLog.noop();
+  const recordSpy = vi.spyOn(audit, 'record');
   app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
     if (!body) return done(null, undefined);
     try {
@@ -179,7 +190,7 @@ function buildApp(views: SessionView[], env: Record<string, string>): App {
     new GateCache(),
     new ElicitationCache(),
     { bus: null, index: new MembershipIndex(), log: () => undefined },
-    { audit: AuditLog.noop(), authMode: 'off' },
+    { audit, authMode: 'off' },
     {
       deliveryIndex: new DeliveryIndex(),
       deliverExec: (workdir, intent) => {
@@ -188,7 +199,7 @@ function buildApp(views: SessionView[], env: Record<string, string>): App {
       },
     },
   );
-  return { app, execCalls: () => calls };
+  return { app, execCalls: () => calls, recordSpy };
 }
 
 const apps: FastifyInstance[] = [];
@@ -203,7 +214,7 @@ describe('POST /runs/:id/deliver — post-hoc delivery, driven for real (crew#39
     const fx = fixture();
     // What a completed run left behind: files written, nothing committed, no PR.
     writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
-    const { app } = buildApp([view(RUN_ID, { repo_ref: 'repo-1', workdir: fx.workdir })], fx.env);
+    const { app, recordSpy } = buildApp([view(RUN_ID, { repo_ref: 'repo-1', workdir: fx.workdir })], fx.env, fx.clone);
     apps.push(app);
     await app.ready();
 
@@ -231,6 +242,15 @@ describe('POST /runs/:id/deliver — post-hoc delivery, driven for real (crew#39
     };
     expect(after.run.session['delivery']).toBe('delivered');
     expect(after.run.session['deliverUrl']).toBe('https://github.com/o/r/pull/42');
+
+    // CS11 (cs11-b review P2/tests): the PRODUCTION route — not a test copy — recorded the run
+    // branch's delivered HEAD onto the `run.delivered` detail, read through its own wiring.
+    const headSha = git(fx.origin, 'rev-parse', `wicked/${RUN_ID}`).trim();
+    expect(recordSpy).toHaveBeenCalledWith(
+      'run.delivered',
+      expect.anything(),
+      expect.objectContaining({ runId: RUN_ID, detail: expect.objectContaining({ commit: headSha }) }),
+    );
   }, 60_000);
 
   it('IDEMPOTENT: a second call answers the SAME prUrl without running the script again', async () => {

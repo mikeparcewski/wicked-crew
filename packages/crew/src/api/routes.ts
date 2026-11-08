@@ -261,6 +261,7 @@ import {
 } from '../core/deliver-text.js';
 import {
   deliverIdentityFor,
+  defaultGhExec,
   deliverRepoFor,
   deliverTargetView,
   isGitHubLogin,
@@ -402,6 +403,7 @@ import {
   gitWorktreeIsClean,
   isDeliverConflictStranded,
   deliveryRecordFrom,
+  readDeliveredCommit,
   deliverUnitOf,
   pushedState,
   canDeliverResolver,
@@ -411,6 +413,8 @@ import {
   type VacuityProbes,
   type DeliveryResolver,
 } from './delivery-index.js';
+import { REVIEW_CHANGE_WORKFLOW, reviewChangeExclusion, type ReviewChangeDeps } from './review-change.js';
+import { rosterWithout } from '../interactive/review-events.js';
 import { DeliveryDerivationCache } from './delivery-cache.js';
 import {
   gitReprovisionWorktree,
@@ -1377,6 +1381,8 @@ export interface RuntimeDeps {
   /** DES-L9: how `revisesPr` is resolved to a PR head branch (`gh pr view`, 5 s). Injectable so
    *  route tests answer without gh; production uses `core/deliver.ts::resolvePullRequest`. */
   resolvePullRequest?: (repoRoot: string, number: number) => Promise<PullRequestResolution>;
+  /** Review provenance must be testable without contacting GitHub or mutating a real clone. */
+  reviewChange?: Partial<Pick<ReviewChangeDeps, 'gh' | 'git'>>;
   /** crew#627: how the issues a launch's intent links are read (`gh issue view`, 5 s each).
    *  Injectable so route tests answer without gh; production uses `core/linked-issues.ts`. */
   resolveLinkedIssues?: (
@@ -3593,6 +3599,72 @@ export function registerRoutes(
     if (b.skipQeAcceptance !== undefined) input.skipQeAcceptanceReason = b.skipQeAcceptance.reason;
     else if (settingSkip !== undefined) input.skipQeAcceptanceReason = settingSkip;
     if (b.forceQeAcceptance === true) input.forceQeAcceptance = true;
+    let reviewChange: { target: unknown; provenance: string; runs: string[]; excluded: string[]; headSha: string | null } | undefined;
+    if (b.workflow === REVIEW_CHANGE_WORKFLOW) {
+      if (b.deliver === 'pr' || b.revisesPr !== undefined) {
+        return reply.code(400).send({ error: 'a review posts nothing and never delivers' });
+      }
+      if (b.repoRef === undefined) return reply.code(400).send({ error: 'review-change needs repoRef' });
+      deliver = 'none';
+      delete input.deliver;
+      const root = await repoRootOf(b.repoRef);
+      if (root === undefined) return reply.code(404).send({ error: `repoRef names an unknown repo: ${b.repoRef}` });
+      const ex = await reviewChangeExclusion(envelopeWords, {
+        repoRef: b.repoRef,
+        repoRoot: root,
+        views: () => adapter.sessionsDetail(),
+        deliveredUrl: (id) => deliveryIndex.urlFor(id),
+        pushed: (id) => deliveryIndex.pushedFor(id),
+        deliveredCommit: (id) => deliveryIndex.commitFor(id),
+        revisesPr: (id) => retryIndex.revisesPrFor(id),
+        gh: runtime.reviewChange?.gh ?? defaultGhExec,
+        git: runtime.reviewChange?.git ?? (async (args, cwd) => {
+          try {
+            return { ...(await execCapped('git', args, { cwd, timeout: 5_000 })), code: 0 };
+          } catch (err) {
+            // Only exit 1 proves non-membership; preserve it separately from lookup failures.
+            const code = (err as { code?: unknown }).code;
+            return { code: typeof code === 'number' ? code : null, stdout: '', stderr: message(err) };
+          }
+        }),
+      });
+      if (!ex.ok) return reply.code(409).send({ code: ex.code, error: ex.error });
+      const excluded = b.reducedAssurance === true ? [] : ex.excludeSeats;
+      if (b.reducedAssurance !== true) {
+        let parsed: unknown;
+        try { parsed = JSON.parse(input.clisJson); } catch { parsed = null; }
+        if (!Array.isArray(parsed)) return reply.code(400).send({ error: 'review-change needs clisJson to be a roster array' });
+        const roster = rosterWithout(parsed, excluded);
+        const canWork = roster.some((seat) => {
+          if (typeof seat !== 'object' || seat === null) return false;
+          const s = seat as Record<string, unknown>;
+          const health = (toEngineSeat(s) as { health?: { usable?: unknown } }).health;
+          return typeof s['key'] === 'string' && s['key'].trim() !== '' && s['work_eligible'] !== false &&
+            s['seat_eligible_for_work'] !== false && s['signed_in'] !== false && s['auth'] !== 'signed_out' && health?.usable !== false;
+        });
+        if (!canWork) {
+          return reply.code(409).send({
+            code: 'no_independent_reviewer',
+            error: `Every available seat (${ex.excludeSeats.join(', ')}) wrote part of this change, so none can review it independently. Sign in another seat, or start it again in reduced assurance (the authors review their own change, labelled on the run and every gate).`,
+            excluded: ex.excludeSeats,
+            retryWith: { reducedAssurance: true },
+          });
+        }
+        input.clisJson = JSON.stringify(roster);
+        input.excludeSeats = [...new Set([...(input.excludeSeats ?? []), ...excluded])];
+        if (input.primary !== undefined) {
+          const refusal = primaryRefusal(input.primary, input.clisJson);
+          if (refusal !== null) return reply.code(400).send({ error: refusal });
+        }
+      }
+      const lines = ex.briefLines.map((line) => b.reducedAssurance === true && line === ex.label
+        ? "reduced assurance: the change's authors may review it" : line);
+      // The workflow decoration below rebuilds input.problem from b.problem: retain these lines in both.
+      b.problem = withBriefLines(stripLinkedIssues(b.problem), lines);
+      input.problem = withBriefLines(input.problem, lines);
+      if (ex.baseRef !== undefined) input.baseRef = ex.baseRef;
+      reviewChange = { target: ex.target, provenance: ex.provenance, runs: ex.runs, excluded, headSha: ex.headSha };
+    }
     // DES-L9 / crew#550 — REVISION: `revisesPr` names an OPEN same-repository pull request whose
     // head branch becomes the run's base (`baseRef`, crew-internal → the engine's
     // `LaunchSpec.base_ref`) and the push target of the composed deliver phase — the PR gains
@@ -3906,6 +3978,7 @@ export function registerRoutes(
         // DES-L9: the revised PR (number, head branch, URL) — the retry index (and a restarted
         // daemon's hydrate) reads it back from here so a stranded revision re-pushes to THAT PR.
         ...(revisesPr !== undefined ? { revisesPr, baseRef: revisesPr.headRef } : {}),
+        ...(reviewChange !== undefined ? { reviewChange } : {}),
         // wicked-studio#27: the trail is likewise the durable record of the group attach —
         // the group index (and a restarted daemon's hydrate) reads it back from here.
         ...(b.campaignId !== undefined ? { campaignId: b.campaignId } : {}),
@@ -4667,6 +4740,11 @@ export function registerRoutes(
       let result: DeliverScriptResult | undefined;
       let codebase: CodebaseArchive | undefined;
       let worktreeGone = false;
+      // CS11 (cs11-b review P1): the delivered HEAD of the run branch, captured INSIDE the per-repo
+      // deliver lock below — before the lock is released and `deliverInFlight` cleared — so no
+      // concurrent delivery can move `wicked/<id>` between the push and the read. `undefined` records
+      // the delivery without a commit (the review-change join then keeps the run, fail-closed).
+      let deliveredCommit: string | undefined;
       // DES-L9: a stranded REVISION re-pushes onto its PR's branch (re-checked OPEN via the same
       // resolver), never a new PR; a PR that closed meanwhile is a named 409.
       let revisionRefused: string | undefined;
@@ -4739,6 +4817,17 @@ export function registerRoutes(
                 // Best-effort: the archive store logs its own failures; a lookup that threw leaves none.
               }
             }
+            // CS11 (cs11-b review P1): read the delivered HEAD of the run branch HERE — still under the
+            // per-repo deliver lock, right after the script's verdict, before the lock releases and
+            // `deliverInFlight` is cleared. The branch lives in the repo root (not this possibly-
+            // throwaway worktree), so a `repoRootOf` read is correct even after `cw` is torn down; the
+            // point is the LOCK, which keeps `wicked/<id>` from moving between the push and this read.
+            if (result !== undefined && result.status === 0) {
+              const deliveredRoot = await repoRootOf(repoRef).catch(() => undefined);
+              if (deliveredRoot !== undefined) {
+                deliveredCommit = (await readDeliveredCommit(deliveredRoot, s.run_branch ?? `wicked/${id}`)) ?? undefined;
+              }
+            }
           } finally {
             if (cw !== null) await cw(); // tear the throwaway down whether the lift succeeded or threw
           }
@@ -4782,6 +4871,11 @@ export function registerRoutes(
       const record = deliveryRecordFrom(result.output);
       const url = record !== null && 'url' in record ? record.url : null;
       const pushedOnly = record !== null && 'pushed' in record ? record.pushed : null;
+      // A post-hoc push also needs its delivered head for later reviews' ancestry checks. CS11
+      // (cs11-b review P1): use the SHA captured inside the delivery lock above — not a fresh read
+      // here, after the lock released and `deliverInFlight` was cleared, where a concurrent delivery
+      // could have moved the branch. No delivery to record (`record === null`) attaches no commit.
+      const commit = record === null ? undefined : deliveredCommit;
       // wicked-core#850 EX-04: no engine lift re-verified what this pushed — the run record says so,
       // with the trees the script named (the PR body carries the same label). Built before the
       // outcome branches, so a push-only delivery records it too (codex r1).
@@ -4790,8 +4884,8 @@ export function registerRoutes(
         // N1: the script pushed the branch and gh could resolve no GitHub repository for the
         // origin. That IS a delivery — record it, so the run reads `delivery: 'pushed'` — but there
         // is no PR URL to answer with, so the reply says what happened instead of a 200 `prUrl`.
-        audit.record('run.delivered', actorOf(req), { runId: id, detail: { pushed: pushedOnly, via: 'post-hoc', assurance } });
-        deliveryIndex.setPushed(id, pushedOnly, assurance);
+        audit.record('run.delivered', actorOf(req), { runId: id, detail: { pushed: pushedOnly, via: 'post-hoc', assurance, ...(commit !== undefined ? { commit } : {}) } });
+        deliveryIndex.setPushed(id, pushedOnly, assurance, commit);
         return reply.code(409).send({ error: pushedOnlyRefusal(id, pushedOnly) });
       }
       if (url === null) {
@@ -4803,8 +4897,8 @@ export function registerRoutes(
       }
       // The durable record first, then the read-side index — the same write order as the
       // deliver-phase resolution in server.ts, so the index can only LAG a crash, never lead it.
-      audit.record('run.delivered', actorOf(req), { runId: id, detail: { url, via: 'post-hoc', assurance, ...(codebase !== undefined ? { codebase } : {}) } });
-      deliveryIndex.set(id, url, assurance);
+      audit.record('run.delivered', actorOf(req), { runId: id, detail: { url, via: 'post-hoc', assurance, ...(commit !== undefined ? { commit } : {}), ...(codebase !== undefined ? { codebase } : {}) } });
+      deliveryIndex.set(id, url, assurance, commit);
       return { prUrl: url, assurance, ...(codebase !== undefined ? { codebase } : {}) };
     },
   );
