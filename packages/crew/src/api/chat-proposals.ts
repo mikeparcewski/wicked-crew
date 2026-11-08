@@ -2410,7 +2410,14 @@ export class ChatProposals {
     const card = CATALOG_V2_CARDS.find((c) => c.id === facts.card);
     const r = card === undefined ? null : resolveOption(card.id, optionFor(card, facts.option), ctx.served);
     await this.loadJobSources(facts, ctx);
-    ctx = await this.reviewRoster(facts, ctx);
+    const reviewCtx = await this.reviewRoster(facts, ctx);
+    if (reviewCtx !== ctx && facts.seats !== null) {
+      // (CJ13) Seats kept from a version that reviewed another change may now be its authors: those choices go, and
+      // the seats are picked again from the reviewers left (the lead stays when it still may lead).
+      const left = new Set(reviewCtx.roster.map((s) => s.key));
+      if (facts.seats.some((k) => !left.has(k))) facts = { ...facts, seats: null, lead: facts.lead !== null && left.has(facts.lead) ? facts.lead : null };
+    }
+    ctx = reviewCtx;
     if (r?.resolved.inputs.some((i) => i.id === 'documents')) {
       if (facts.inputs['documents'] === undefined) {
         const { binding } = bindingOf(records, ctx.turnId ?? '\u0000');

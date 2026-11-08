@@ -2,6 +2,7 @@
 // engine's catalog. A person-made proposal never launches; Go is idempotent and launches what is on screen, held at its
 // plan; a correction in flight holds Start; a stale parent is refused; a check is never lost by a seat's block (only
 // the person's press on wicked's question gives it up); a QE skip stands only on the person's own unquoted reason.
+import { parseReviewTarget } from '../src/api/review-change.js';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -474,13 +475,33 @@ describe('codex/pi r1 folds', () => {
   });
 
   it('a revision that names another change checks its seats against that change\'s authors, read once (CJ13)', async () => {
+    // The mock reads the target the way the launch does (the first PR the words name).
     const asked: string[] = [];
-    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async (_repo, words) => { asked.push(words); return /\b10\b/.test(words) ? ['codex'] : ['claude']; } });
-    await pick(r, 'review-change', { words: 'review pull request 9' });
-    expect(open(r).seats?.lead).toBe('codex');
+    const authorsOf: Record<string, string[]> = { none: ['claude'], '10': ['codex'] };
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async (_repo, words) => {
+      asked.push(words);
+      const t = parseReviewTarget(words);
+      return authorsOf[t?.kind === 'pr' ? String(t.number) : 'none'] ?? [];
+    } });
+    await pick(r, 'review-change', { words: 'review the latest change' });
+    expect(open(r).seats).toMatchObject({ lead: 'codex', keys: ['codex', 'pi'] });
     await swap(r, open(r).pid, { detail: { add: ['it is pull request 10'] }, lead: 'claude' } as ProposalRevisionEdits, 'pr10');
+    // codex wrote PR 10: it leaves the seats it held, and claude, who did not, may lead.
     expect(open(r).seats).toMatchObject({ lead: 'claude', keys: ['claude', 'pi'] });
-    expect(asked.filter((w) => /\b10\b/.test(w))).toHaveLength(1);
+    expect(asked.filter((w) => parseReviewTarget(w)?.kind === 'pr')).toHaveLength(1);
+  });
+
+  it('a retarget whose authors held every chosen seat picks the seats again from the reviewers left (CJ13)', async () => {
+    const authorsOf: Record<string, string[]> = { none: ['claude', 'codex'], '10': ['pi', 'opencode'] };
+    const r = rig({
+      roster: [{ key: 'claude', name: 'Claude' }, { key: 'codex', name: 'Codex' }, { key: 'pi', name: 'pi' }, { key: 'opencode', name: 'OpenCode' }],
+      repos: [{ id: 'r-pay', name: 'payments-service' }],
+      reviewAuthors: async (_repo, words) => { const t = parseReviewTarget(words); return authorsOf[t?.kind === 'pr' ? String(t.number) : 'none'] ?? []; },
+    });
+    await pick(r, 'review-change', { words: 'review the latest change' });
+    expect(open(r).seats?.keys).toEqual(['pi', 'opencode']);
+    await swap(r, open(r).pid, { detail: { add: ['it is pull request 10'] } } as ProposalRevisionEdits, 'pr10');
+    expect(open(r).seats).toMatchObject({ lead: 'claude', keys: ['claude', 'codex'] });
   });
 
   it('an unreadable change, or another card, keeps the roster as it is (CJ13)', async () => {
