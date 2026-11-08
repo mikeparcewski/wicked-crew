@@ -1,6 +1,6 @@
 import type { SkillManifest } from '../src/core/types.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { GARDEN_INSTALL_COMMAND, pluginSourceAt, type PluginSource } from '../src/skills/plugin-source.js';
+import { GARDEN_INSTALL_COMMAND, REQUIRED_GARDEN_VERSION, pluginSourceAt, type PluginSource } from '../src/skills/plugin-source.js';
 import { SkillsRuntime } from '../src/skills/runtime.js';
 import { SkillsSourceUnavailableError } from '../src/skills/store.js';
 import { scaffold } from './support/skills-fixture.js';
@@ -18,7 +18,7 @@ function checkMessage(message: string, base: string): void {
     '~/.claude/plugins/wicked-garden', 'npm-global', 'launcher on PATH', 'beside the crew package',
     '~/.codex/plugins/cache/<marketplace>/wicked-garden/<version>', '$CODEX_HOME', '$CLAUDE_CONFIG_DIR',
   ]) expect(message).toContain(place);
-  expect(message).toContain(`install wicked-garden: ${GARDEN_INSTALL_COMMAND} (or npm i -g wicked-garden)`);
+  expect(message).toContain(`install wicked-garden >= ${REQUIRED_GARDEN_VERSION} first: ${GARDEN_INSTALL_COMMAND} (or npm i -g wicked-garden)`);
   expect(message).not.toContain(base);
   expect(message).not.toMatch(/\/Users\/|\/home\/|[A-Z]:\\Users\\|\/private\/|\/tmp\//i);
 }

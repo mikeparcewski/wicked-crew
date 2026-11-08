@@ -25,50 +25,69 @@ function escapeRegExp(s: string): string {
 }
 
 /**
- * Replace one home-dir spelling, used as a WHOLE path prefix, with `~`: `/Users/alice/.rd/x` →
- * `~/.rd/x`, but `/Users/alice2` (another user) is untouched. Covers the forward- and back-slash
- * spellings and the JSON-escaped (doubled-backslash) Windows form. The boundary lookahead keeps the
- * separator that follows, so the rest of the path survives.
+ * Where a path may start: not right after a word character, a dot or a dash, and not right after
+ * `<word char>/` (a web address's host: `https://example.com/Users/alice` and
+ * `https://example.com//home/page` are left alone), while `unix:///Users/…` and `at /Users/…` match.
  */
-function replaceHome(text: string, home: string): string {
-  const trimmed = home.replace(/[\\/]+$/, '');
-  if (trimmed === '') return text;
-  const back = trimmed.replace(/\//g, '\\');
-  const spellings = new Set([trimmed, trimmed.replace(/\\/g, '/'), back, back.replace(/\\/g, '\\\\')]);
-  let out = text;
-  // Longest first, so a parent never eats a child spelling's prefix.
-  for (const h of [...spellings].sort((a, b) => b.length - a.length)) {
-    out = out.replace(new RegExp(`${escapeRegExp(h)}(?=$|[\\\\/\\s"'),;:])`, 'g'), () => '~');
+const PATH_START = String.raw`(?<![\w.-])(?<![\w.-]\\?\/)`;
+/** A path separator as it may appear in a decoded string: `/`, `\`, or a JSON-escaped `\/` / `\\`. */
+const SEP = String.raw`(?:\\\\|\\\/|[\\/])`;
+/** The end of a home spelling: the string's end, a separator (escaped or not), whitespace or punctuation. */
+const HOME_END = String.raw`(?=$|\\|\/|\s|["'),;:])`;
+
+/** The home dir's spellings, matched as a whole path prefix (compiled once per home: the backstop runs per string). */
+function homeMatchers(home: string): RegExp[] {
+  const out: RegExp[] = [];
+  const add = (h: string): void => {
+    const trimmed = h.replace(/[\\/]+$/, '');
+    if (trimmed === '') return;
+    const parts = trimmed.split(/[\\/]+/).filter((part) => part !== "").map(escapeRegExp);
+    // `/Users/alice` in any separator spelling (`/`, `\`, `\/`, `\\`); a drive (`C:`) keeps its own case rules.
+    const body = parts.join(SEP);
+    const lead = /^[\\/]/.test(trimmed) ? SEP : '';
+    out.push(new RegExp(`${PATH_START}${lead}${body}${HOME_END}`, 'gi'));
+  };
+  add(home);
+  try {
+    const real = realpathSync(home);
+    if (real !== home) add(real);
+  } catch {
+    // The home may not exist (tests inject a temp home that is never created); the generic pass still
+    // catches `/Users/<name>` etc.
   }
   return out;
 }
 
+const matcherCache = new Map<string, RegExp[]>();
+function matchersFor(home: string): RegExp[] {
+  let m = matcherCache.get(home);
+  if (m === undefined) {
+    m = homeMatchers(home);
+    if (matcherCache.size > 16) matcherCache.clear();
+    matcherCache.set(home, m);
+  }
+  return m;
+}
+
+/** `C:\Users\<name>` (any drive case, any separator spelling); the lookbehind keeps `unix:` from reading as a drive. */
+const WINDOWS_HOME = new RegExp(String.raw`(?<![A-Za-z])[A-Za-z]:${SEP}Users${SEP}[^\\/\s"'),;:]+`, 'gi');
+/** Any other user's `/Users/<name>` or `/home/<name>`, at a path start (see {@link PATH_START}). */
+const POSIX_HOME = new RegExp(String.raw`${PATH_START}${SEP}(?:Users|home)${SEP}[^\\/\s"'),;:]+`, 'gi');
+
 /**
  * Every home path in `text` becomes `~`. First the daemon's own home (and its realpath, so a
  * symlinked home like macOS's `/var` → `/private/var` is caught), then ANY remaining `/Users/<name>`,
- * `/home/<name>` or `C:\Users\<name>` — `<name>` is one path segment, either slash, any case of the
- * drive letter, and the forms that appear inside `unix:///Users/…` sockets and inside JSON strings
- * (a Windows path's backslashes doubled). Idempotent: the output carries no home path, so a second
- * pass is a no-op.
+ * `/home/<name>` or `C:\Users\<name>`: `<name>` is one path segment, any case, any separator spelling
+ * (`/`, `\`, and the JSON-escaped `\/` and `\\` that a serialized fragment inside a string carries),
+ * including inside `unix:///Users/…` sockets. Web addresses are left alone (see {@link PATH_START}).
+ * Idempotent. The home's spellings are compiled once per home, never per call.
  */
 export function scrubHomePaths(text: string, home: string = homedir()): string {
   if (text === '') return text;
-  let out = replaceHome(text, home);
-  try {
-    const real = realpathSync(home);
-    if (real !== home) out = replaceHome(out, real);
-  } catch {
-    // The home may not exist (tests inject a temp home that is never created); the generic pass below
-    // still catches `/Users/<name>` etc.
-  }
-  // Windows `C:\Users\<name>` FIRST (before the `/Users/` pass can eat the slash form): any
-  // drive-letter case, either slash, backslashes possibly doubled (a path inside a JSON string). The
-  // lookbehind keeps `unix:` (the `x:` there is not a drive) from being read as one.
-  out = out.replace(/(?<![A-Za-z])[A-Za-z]:(?:\\\\|[\\/])Users(?:\\\\|[\\/])[^\\/\s"'),;:]+/gi, () => '~');
-  // Any other user's home: one path segment after `/Users/` or `/home/`, including inside a
-  // `unix:///Users/…` URL. Only at a path's start (not after a word character, a dot or a dash), so
-  // a web address such as `https://example.com/home/page` is left alone.
-  out = out.replace(/(?<![\w.-])\/(?:Users|home)\/[^/\\\s"'),;:]+/gi, () => '~');
+  let out = text;
+  for (const re of matchersFor(home)) out = out.replace(re, () => '~');
+  out = out.replace(WINDOWS_HOME, () => '~');
+  out = out.replace(POSIX_HOME, () => '~');
   return out;
 }
 
@@ -77,14 +96,19 @@ export function scrubHomePaths(text: string, home: string = homedir()): string {
  * recognise it (the caller keeps its own text, scrubbed). Recognises the daemon being unreachable
  * (Docker, Podman or nerdctl) and a permission-denied socket.
  */
-export function plainRuntimeCause(raw: string): { cause: string; fix: string } | null {
+export function plainRuntimeCause(raw: string, runtime: string | null = null): { cause: string; fix: string } | null {
   const t = raw.toLowerCase();
-  const aboutSocket = /\.sock\b/.test(t) || /docker\.sock/.test(t) || /docker api|docker daemon/.test(t);
+  const aboutSocket = /\.sock\b/.test(t) || /docker\.sock/.test(t) || /docker api|docker daemon/.test(t) || /podman|nerdctl|containerd/.test(t);
+  // Name the runtime the user actually has (codex r1: a Podman user was told to start Docker).
+  const rt = (runtime ?? '').toLowerCase();
+  const which = /podman/.test(t) || /podman/.test(rt) ? 'podman' : /nerdctl|containerd/.test(t) || /nerdctl/.test(rt) ? 'nerdctl' : 'docker';
   // Permission denied on the socket is its own cause — starting the daemon will not fix it.
   if (aboutSocket && /permission denied|operation not permitted/.test(t)) {
     return {
       cause: "The container runtime's socket refused this user (permission denied)",
-      fix: 'Add your user to the docker group (or run Docker/Rancher Desktop as this user), then re-check.',
+      fix: which === 'docker'
+        ? 'Add your user to the docker group (or run Docker/Rancher Desktop as this user), then re-check.'
+        : 'Give your user access to the runtime socket, then re-check.',
     };
   }
   const daemonDown =
@@ -95,13 +119,10 @@ export function plainRuntimeCause(raw: string): { cause: string; fix: string } |
     /cannot connect to nerdctl|nerdctl.*cannot connect/.test(t) ||
     (/dial unix/.test(t) && aboutSocket && /no such file|connection refused/.test(t)) ||
     (aboutSocket && /connect: (?:no such file|connection refused)/.test(t));
-  if (daemonDown) {
-    return {
-      cause: "Docker isn't running",
-      fix: 'Start Docker Desktop or Rancher Desktop (or your container runtime), then re-check.',
-    };
-  }
-  return null;
+  if (!daemonDown) return null;
+  if (which === 'podman') return { cause: "Podman isn't running", fix: 'Start it (podman machine start), then re-check.' };
+  if (which === 'nerdctl') return { cause: "The container runtime (nerdctl) isn't running", fix: 'Start it (Rancher Desktop, or containerd), then re-check.' };
+  return { cause: "Docker isn't running", fix: 'Start Docker Desktop or Rancher Desktop (or your container runtime), then re-check.' };
 }
 
 /** Scrub every string in a parsed JSON value in place-by-copy (so the result re-serializes valid). */
@@ -110,7 +131,13 @@ function deepScrub(value: unknown, home: string): unknown {
   if (Array.isArray(value)) return value.map((v) => deepScrub(v, home));
   if (value !== null && typeof value === 'object') {
     const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = deepScrub(v, home);
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      // A path-keyed map (codex r1) scrubs its keys too; two keys that fold to one keep both values.
+      const base = scrubHomePaths(k, home);
+      let key = base;
+      for (let n = 2; Object.hasOwn(out, key); n += 1) key = `${base} (${n})`;
+      out[key] = deepScrub(v, home);
+    }
     return out;
   }
   return value;

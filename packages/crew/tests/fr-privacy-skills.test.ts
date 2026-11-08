@@ -3,7 +3,7 @@
 // uv-sync-failed read differently. The finding KIND stays `venv-failed` (machine code).
 import { describe, expect, it } from 'vitest';
 
-import { scrubHomePaths } from '../src/api/ui-text.js';
+import { SkillsRuntime } from '../src/skills/runtime.js';
 import { removeScratch } from './setup/scratch.js';
 import { scaffold } from './support/skills-fixture.js';
 
@@ -60,9 +60,19 @@ describe('venv-failed finding wording (FINDINGS B1)', () => {
   });
 });
 
-describe('scrubHomePaths used by the blocked-skills line', () => {
-  it('a home path in a finding evidence is folded before it reaches the Nerve Center message', () => {
-    // runtime.ts builds `Skills can't be published: <scrubbed evidence>`; prove the scrub it uses.
-    expect(scrubHomePaths('no /Users/alice/.wicked-crew/skills in effective/')).toMatch(/^no ~\/.wicked-crew\/skills in effective\/$/);
+describe('the Nerve Center line for a blocked first publish (runtime, review r1: drive the runtime itself)', () => {
+  it('reads "Skills can\'t be published: <plain cause>", never "first publish BLOCKED — venv-failed: …"', async () => {
+    const v = scaffold({ provisionVenv: async () => ({ state: 'failed', reason: 'uv-missing' }) });
+    try {
+      const lines: string[] = [];
+      const health = await new SkillsRuntime({ store: v.store, log: (m) => lines.push(m) }).apply();
+      expect(health.state).toBe('blocked');
+      const blocked = health.findings.find((f) => f.kind === 'skills.blocked');
+      expect(blocked?.message).toMatch(/^Skills can't be published: uv isn't installed/);
+      expect(blocked?.message).toContain('Install uv');
+      expect(blocked?.message).not.toMatch(/venv-failed|BLOCKED|uv sync did not produce|\.venv/);
+    } finally {
+      removeScratch(v.base);
+    }
   });
 });

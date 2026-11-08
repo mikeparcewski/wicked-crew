@@ -10,8 +10,6 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
-- Find wicked-garden in npm-global and Codex plugin installs, and add existing installer bin directories to the daemon PATH.
-
 ### Added
 
 - **A pack can install third-party run plugins, which read a run's events on the topics the install consent grants
@@ -250,6 +248,19 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **A user without Claude Code is no longer refused every launch: crew finds the garden the installer installed (first-run B3).**
+  Garden discovery has one documented order: `WICKED_CREW_SKILLS_SOURCE`, the Claude marketplace cache, the Claude
+  installer copy, the npm-global `wicked-garden` package (its launcher on PATH, else beside crew's own package), then
+  the Codex plugin cache. New skills source kinds `npm-global` and `codex-plugin-cache` (api-types `SkillSourceKind`).
+  When nothing is found, the message lists every place looked, in `~/` form.
+- **The installer's tools are found (first-run B1/B2).** `wicked-crew serve` appends `$XDG_BIN_HOME`, `~/.local/bin` and
+  `~/.cargo/bin` (when present, after the user's own PATH) so `uv` and `wicked-estate` installed there are seen. A
+  repository added without wicked-estate says what to install (`onboardErrorCode: tool_missing`, `missingTool`).
+- **A repository folder typed as `~/code/my-app` is expanded (first-run C1)**; a relative or missing folder is refused
+  with a plain reason (`repo_path_relative`, `repo_path_missing`).
+- **No Fastify deprecation warning at boot (first-run P9).**
+- **Run insights no longer title a shift that reads the same at display precision as a rise** ("Runs are costing
+  more" over "About the same as before ($0.16)"): such a shift is no change and is never recommended.
 - **Health and diagnostic text a user reads now gives a plain cause with one fix, and never a home path (FINDINGS B1, B2, C3a).** The Nerve Center gateway row reads "Docker isn't running" (not the raw `failed to connect to the docker API at unix:///Users/<name>/.rd/docker.sock …` line); the estate row says "wicked-estate isn't installed: repositories need it to build their code map" with `npx wicked-installer install wicked-estate` (not "estate is optional"); and a missing `uv` reads "uv isn't installed, so the skills' Python tools can't be set up. Install uv: … then press Publish on the Skills page." (not `venv-failed: uv sync did not produce <path>`). A new `api/ui-text.ts` scrubs home paths (`/Users/<name>`, `/home/<name>`, `C:\Users\<name>`) to `~` at the source and, as a backstop, on every `GET /health`, `/diagnostics`, `/system`, `/roster` body.
 
 - **A chat job no longer names an opt-in seat a launch would leave out (e2e-1105 F43).** "/analyze domain" in a new chat

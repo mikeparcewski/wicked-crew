@@ -4,12 +4,11 @@ import { expect } from 'vitest';
 
 /**
  * Fail if `body` (a serialized JSON string, or any text a user could read) carries a home path:
- * `/Users/<name>`, `/home/<name>`, or `C:\Users\<name>` — either slash, any case of the drive
- * letter, in plain OR JSON-escaped (doubled-backslash) form.
+ * `/Users/<name>`, `/home/<name>`, or `C:\Users\<name>`, in any case, with any separator spelling
+ * (`/`, `\`, and the JSON-escaped `\/` and `\\`).
  */
 export function expectNoHomePaths(body: string): void {
-  expect(body, 'contains a /Users/ path').not.toMatch(/\/Users\//);
-  expect(body, 'contains a /home/ path').not.toMatch(/\/home\//);
-  // Windows drive path, drive letter case-insensitive, one or two backslashes (JSON doubles them).
-  expect(body, 'contains a C:\\Users path').not.toMatch(/[A-Za-z]:(?:\\\\|\\|\/)Users/);
+  const sep = String.raw`(?:\\\\|\\\/|\\|\/)`;
+  expect(body, 'contains a /Users/ or /home/ path').not.toMatch(new RegExp(`${sep}(?:users|home)${sep}`, 'i'));
+  expect(body, 'contains a C:\\Users path').not.toMatch(new RegExp(`[a-z]:${sep}+users`, 'i'));
 }

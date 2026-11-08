@@ -502,7 +502,12 @@ export function discoverLivePluginDetailed(opts: DiscoverOptions = {}): Discover
       if (bin === '') continue;
       const launcher = (platform === 'win32' ? win32 : { join }).join(bin, platform === 'win32' ? 'wicked-garden.cmd' : 'wicked-garden');
       if (!existsSync(launcher)) continue;
-      const realLauncher = platform === 'win32' ? undefined : realpathSync(launcher);
+      let realLauncher: string | undefined;
+      try {
+        realLauncher = platform === 'win32' ? undefined : realpathSync(launcher);
+      } catch {
+        continue; // removed or unreadable since existsSync (pi r1): skip this launcher, never fail the boot
+      }
       candidates.push(...npmLauncherPackageDirs(launcher, platform, realLauncher));
     }
     const crewRoot = opts.crewPackageRoot ?? fileURLToPath(new URL('../../', import.meta.url));

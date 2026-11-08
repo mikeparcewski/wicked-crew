@@ -157,7 +157,7 @@ export async function probeSeatImages(input: SeatImagesProbeInput): Promise<Syst
   if (settled.kind === 'error' || settled.value === null) {
     // A container runtime that is down reads as a plain cause (`settled.error` is already scrubbed of
     // any home path by errText; `homeless` is belt-and-suspenders for the daemon's own home).
-    const plain = settled.kind === 'error' ? plainRuntimeCause(settled.error) : null;
+    const plain = settled.kind === 'error' ? plainRuntimeCause(settled.full ?? settled.error) : null;
     if (plain !== null) {
       return infraRow('seat_images', 'unknown', plain.cause, plain.fix, started, { rebuild }, timeoutMs);
     }

@@ -69,7 +69,7 @@ const DAY_MS = 86_400_000;
 export type Settled<T> =
   | { kind: 'ok'; value: T; ms: number }
   | { kind: 'timeout'; ms: number }
-  | { kind: 'error'; error: string; ms: number };
+  | { kind: 'error'; error: string; ms: number; /** The whole first line (scrubbed, not cut at 240): what a classifier reads (codex r1). */ full?: string };
 
 /** Run `fn` against `timeoutMs`. A hang settles as `timeout` (the work may continue; nothing waits). */
 export async function settleWithin<T>(fn: () => Promise<T>, timeoutMs: number): Promise<Settled<T>> {
@@ -82,7 +82,7 @@ export async function settleWithin<T>(fn: () => Promise<T>, timeoutMs: number): 
     .then(fn)
     .then(
       (value): Settled<T> => ({ kind: 'ok', value, ms: Date.now() - started }),
-      (err: unknown): Settled<T> => ({ kind: 'error', error: errText(err), ms: Date.now() - started }),
+      (err: unknown): Settled<T> => ({ kind: 'error', error: errText(err), full: errText(err, Infinity), ms: Date.now() - started }),
     );
   try {
     return await Promise.race([work, timeout]);
@@ -98,7 +98,7 @@ export async function settleWithin<T>(fn: () => Promise<T>, timeoutMs: number): 
  * shows) what the runtime said: on a fresh install, docker's "No such container" read as "the
  * container runtime refused" and the Nerve Center said "Start Docker" while Docker was running.
  */
-export function errText(err: unknown): string {
+export function errText(err: unknown, max = 240): string {
   const raw = err instanceof Error ? err.message : String(err);
   const stderr = err !== null && typeof err === 'object' && typeof (err as { stderr?: unknown }).stderr === 'string'
     ? (err as { stderr: string }).stderr
@@ -108,7 +108,7 @@ export function errText(err: unknown): string {
   // A probe's reason and the `error` it keeps in `details` both ride this; a home path never does
   // (crew#771: screen shares and tickets must not carry someone's login name).
   const clean = scrubHomePaths(line);
-  return clean.length > 240 ? `${clean.slice(0, 239)}…` : clean;
+  return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
 }
 
 function secondsWord(ms: number): string {
@@ -315,9 +315,11 @@ export async function probeGateway(input: GatewayProbeInput): Promise<SystemInfr
   // Classify the runtime error into a plain cause the user can act on; `e` is already scrubbed of any
   // home path (errText), so the raw docker line ("failed to connect to the docker API at unix://…")
   // never reaches the UI. An error we do not recognise keeps a short, scrubbed line.
-  const plain = plainRuntimeCause(e);
+  // Classified on the WHOLE line (codex r1: cut at 240, a permission-denied error read as "not
+  // running"), and the raw line stays in the daemon's log, not in `details` (studio shows details).
+  const plain = plainRuntimeCause(settled.full ?? e, input.runtime);
   if (plain !== null) {
-    return infraRow('gateway', 'down', plain.cause, plain.fix, started, { ...details, error: e }, timeoutMs);
+    return infraRow('gateway', 'down', plain.cause, plain.fix, started, { ...details, error: plain.cause }, timeoutMs);
   }
   return infraRow(
     'gateway',

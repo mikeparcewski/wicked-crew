@@ -25,6 +25,20 @@ describe('probeGateway (FINDINGS C3a)', () => {
     expect(row.remedy ?? '').toMatch(/Start Docker/);
     // The row (details included) carries no home path, even though the raw error did.
     expectNoHomePaths(JSON.stringify(row));
+    // …and no raw docker line: studio shows `details` under Technical details (codex r1).
+    expect(JSON.stringify(row)).not.toMatch(/docker API|dial unix/);
+  });
+
+  it('a long permission-denied error is classified on the whole line, not the 240-character cut (codex r1)', async () => {
+    const sock = `/Users/alice/Library/Containers/com.docker.docker/Data/${'nested/'.repeat(12)}docker.sock`;
+    const row = await probeGateway({
+      ...base,
+      exec: async () => {
+        throw new Error(`failed to connect to the docker API at unix://${sock}; check if the path is correct and if the daemon is running: dial unix ${sock}: connect: permission denied`);
+      },
+    });
+    expect(row.reason).toMatch(/permission denied/);
+    expect(row.reason).not.toBe("Docker isn't running");
   });
 });
 

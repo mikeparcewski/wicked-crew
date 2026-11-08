@@ -117,7 +117,8 @@ describe('readRepoPath (C1)', () => {
 });
 
 describe('POST /repos', () => {
-  it('registers ~/<dir> as the expanded absolute folder (C1)', async () => {
+  // os.homedir() reads $HOME on POSIX only (Windows reads USERPROFILE), so this route case is POSIX's.
+  it.skipIf(process.platform === 'win32')('registers ~/<dir> as the expanded absolute folder (C1)', async () => {
     // os.homedir() reads $HOME on POSIX: aim it at the scratch dir, never the real home.
     const savedHome = process.env['HOME'];
     process.env['HOME'] = scratch;
@@ -158,6 +159,20 @@ describe('POST /repos', () => {
 });
 
 describe('onboardFailure', () => {
+  it('keeps every other blocker the engine listed, and names every missing tool (codex r1)', () => {
+    const raw = "workflow 'w' cannot start — unresolved tool dependencies: phase 'index' requires tool 'wicked-estate' (not found on PATH or at that path); phase 'x' has an empty tool cmd; phase 'y' requires tool 'frob' (not found on PATH or at that path). Install the missing tool(s) or fix PATH, then relaunch.";
+    const f = onboardFailure(raw, '/h');
+    expect(f).toMatchObject({ code: 'tool_missing', tool: 'wicked-estate', tools: ['wicked-estate', 'frob'] });
+    expect(f.error).toContain('npx wicked-installer install wicked-estate');
+    expect(f.error).toContain('frob');
+    expect(f.error).toContain("phase 'x' has an empty tool cmd");
+  });
+  it('a Windows path needs its drive or a UNC share (codex r1)', () => {
+    expect(readRepoPath('\\repo', { home: 'C:\\Users\\a', platform: 'win32' })).toMatchObject({ ok: false, code: 'repo_path_relative' });
+    expect(readRepoPath('/repo', { home: 'C:\\Users\\a', platform: 'win32' })).toMatchObject({ ok: false, code: 'repo_path_relative' });
+    expect(readRepoPath('C:\\code\\app', { home: 'C:\\Users\\a', platform: 'win32' })).toEqual({ ok: true, path: 'C:\\code\\app' });
+    expect(readRepoPath('\\\\server\\share\\app', { home: 'C:\\Users\\a', platform: 'win32' })).toMatchObject({ ok: true });
+  });
   it('keeps any other engine message, with the home dir as ~', () => {
     expect(onboardFailure('boom at /Users/alice/x', '/Users/alice')).toEqual({ error: 'boom at ~/x' });
   });

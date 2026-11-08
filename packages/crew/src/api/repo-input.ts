@@ -11,7 +11,7 @@
 
 import { existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute, join, win32 } from 'node:path';
 
 /** A folder the person typed: expanded, or refused with a reason they can act on. */
 export type RepoPathReading = { ok: true; path: string } | { ok: false; code: 'repo_path_relative' | 'repo_path_missing'; error: string };
@@ -31,8 +31,9 @@ export function tildePath(path: string, home: string = homedir()): string {
  * paths, which have no single meaning for a daemon (its cwd is not the person's). With `mustExist`,
  * a folder that is not there is refused here, in plain words, before the engine is asked.
  */
-export function readRepoPath(raw: string, opts: { home?: string; mustExist?: boolean } = {}): RepoPathReading {
+export function readRepoPath(raw: string, opts: { home?: string; mustExist?: boolean; platform?: NodeJS.Platform } = {}): RepoPathReading {
   const home = opts.home ?? homedir();
+  const platform = opts.platform ?? process.platform;
   const typed = raw.trim();
   let path = typed;
   if (typed === '~') path = home;
@@ -40,7 +41,10 @@ export function readRepoPath(raw: string, opts: { home?: string; mustExist?: boo
   else if (typed.startsWith('~')) {
     return { ok: false, code: 'repo_path_relative', error: `Use ~/… for your own home folder, or a full path: ${typed} names another user's home.` };
   }
-  if (!isAbsolute(path)) {
+  // On Windows `\\repo` and `/repo` are "absolute" but take their drive from the daemon (codex r1): a
+  // folder needs its drive (`C:\\…`) or a UNC share (`\\\\server\\share`).
+  const absolute = platform === 'win32' ? /^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)/.test(path) && win32.isAbsolute(path) : isAbsolute(path);
+  if (!absolute) {
     return { ok: false, code: 'repo_path_relative', error: `Use a full path, like ~/code/my-app: ${typed} is relative, and the daemon has no current folder of yours to start from.` };
   }
   if (opts.mustExist === true) {
@@ -61,21 +65,32 @@ const TOOL_INSTALL: Record<string, string> = {
 };
 
 /**
- * An onboarding launch the engine refused, in words a person can act on. The engine's planner says
- * "phase 'index' requires tool 'wicked-estate' (not found on PATH …)" when a phase's tool is not
- * installed; that becomes `tool_missing` with the install command. Anything else keeps the
- * engine's message (home paths shown as `~`).
+ * An onboarding launch the engine refused, in words a person can act on. The engine's planner lists
+ * every unresolved dependency in one refusal ("unresolved tool dependencies: phase 'index' requires
+ * tool 'wicked-estate' (not found on PATH or at that path); phase 'x' has an empty tool cmd. Install
+ * …"): each missing tool becomes its install line, and every other item is kept, so a second
+ * blocker is never hidden behind the first (codex r1). Anything else keeps the engine's message
+ * (home paths shown as `~`).
  */
-export function onboardFailure(raw: string, home: string = homedir()): { code?: 'tool_missing'; tool?: string; error: string } {
-  const m = /requires tool '([^']+)' \(not found/.exec(raw);
-  if (m !== null) {
-    const tool = m[1] as string;
+export function onboardFailure(raw: string, home: string = homedir()): { code?: 'tool_missing'; tool?: string; tools?: string[]; error: string } {
+  const list = /unresolved tool dependencies: (.*?)\. Install the missing tool/s.exec(raw)?.[1] ?? (/requires tool '[^']+' \(not found/.test(raw) ? raw : null);
+  if (list === null) return { error: scrubHome(raw, home) };
+  const tools: string[] = [];
+  const others: string[] = [];
+  for (const item of list.split('; ')) {
+    const m = /requires tool '([^']+)' \(not found/.exec(item);
+    if (m !== null) {
+      if (!tools.includes(m[1] as string)) tools.push(m[1] as string);
+    } else if (item.trim() !== '') others.push(scrubHome(item.trim(), home));
+  }
+  if (tools.length === 0) return { error: scrubHome(raw, home) };
+  const lines = tools.map((tool) => {
     const install = TOOL_INSTALL[tool];
     const what = tool === 'wicked-estate' ? 'Building its code map needs wicked-estate' : `Onboarding needs ${tool}`;
-    const fix = install !== undefined ? `Install it: ${install}, then run onboarding again (⋯ → Rebuild the code map).` : `Install ${tool} and put it on PATH, then run onboarding again.`;
-    return { code: 'tool_missing', tool, error: `${what}, which isn't installed. ${fix}` };
-  }
-  return { error: scrubHome(raw, home) };
+    return install !== undefined ? `${what}, which isn't installed. Install it: ${install}.` : `${what}, which isn't installed or isn't on PATH. Install it.`;
+  });
+  const also = others.length > 0 ? ` Also: ${others.join('; ')}.` : '';
+  return { code: 'tool_missing', tool: tools[0] as string, tools, error: `${lines.join(' ')} Then run onboarding again (⋯ → Rebuild the code map).${also}` };
 }
 
 function scrubHome(text: string, home: string): string {

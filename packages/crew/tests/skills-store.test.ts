@@ -213,7 +213,7 @@ describe('seed (design v3 §1/§4/§5)', () => {
   it('names every source and the installer or npm fix when no plugin is installed', () => {
     const none = scaffold({ source: () => null });
     try {
-      expect(() => none.store.seed()).toThrow(/install wicked-garden: npx wicked-installer install wicked-garden \(or npm i -g wicked-garden\)/);
+      expect(() => none.store.seed()).toThrow(/install wicked-garden >= \d+\.\d+\.\d+ first: npx wicked-installer install wicked-garden \(or npm i -g wicked-garden\)/);
       expect(() => none.store.seed()).toThrow(/Claude marketplace cache.*Claude installer copy.*npm-global.*Codex plugin cache/);
     } finally {
       removeScratch(none.base);

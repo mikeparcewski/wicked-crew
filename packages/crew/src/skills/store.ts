@@ -348,7 +348,7 @@ export class SkillsSourceUnavailableError extends Error {
     super(
       tooOld !== null
         ? `wicked-garden ${tooOld.version} found at ${tooOld.path} is older than the required ${REQUIRED_GARDEN_VERSION}; it is not used — install wicked-garden >= ${REQUIRED_GARDEN_VERSION} (\`${GARDEN_INSTALL_COMMAND}\`) and restart`
-        : `no wicked-garden plugin source: ${detail} — install wicked-garden: ${GARDEN_INSTALL_COMMAND} (or npm i -g wicked-garden)`,
+        : `no wicked-garden plugin source: ${detail} — install wicked-garden >= ${REQUIRED_GARDEN_VERSION} first: ${GARDEN_INSTALL_COMMAND} (or npm i -g wicked-garden)`,
     );
     this.name = 'SkillsSourceUnavailableError';
     this.tooOld = tooOld;

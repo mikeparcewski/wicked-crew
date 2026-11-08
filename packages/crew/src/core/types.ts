@@ -20,9 +20,6 @@
 
 export type * from 'wicked-crew-api-types';
 
-/** Installed garden sources, including npm and Codex installations. */
-export type SkillSourceKind = 'claude-plugin-cache' | 'installer-copy' | 'npm-global' | 'codex-plugin-cache' | 'checkout' | 'directory';
-
 /** Bound identity is read before opening, so queued asks produce no events. */
 export interface AskUnit {
   runId: string;

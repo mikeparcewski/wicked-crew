@@ -47,7 +47,7 @@ describe('plainRuntimeCause', () => {
 
   it('classifies the classic docker, podman and dial-unix daemon-down messages', () => {
     expect(plainRuntimeCause('Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?')?.cause).toBe("Docker isn't running");
-    expect(plainRuntimeCause('Cannot connect to Podman. Please verify your connection to the Linux system')?.cause).toBe("Docker isn't running");
+    expect(plainRuntimeCause('Cannot connect to Podman. Please verify your connection to the Linux system')?.cause).toBe("Podman isn't running");
     expect(plainRuntimeCause('dial unix /var/run/docker.sock: connect: no such file or directory')?.cause).toBe("Docker isn't running");
   });
 

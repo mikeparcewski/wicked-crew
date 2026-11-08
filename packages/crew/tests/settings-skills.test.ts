@@ -184,7 +184,7 @@ describe('skills_root is NOT a setting (PUT/GET /settings)', () => {
       expect(health.findings).toEqual([{ kind: 'skills.source', severity: 'warning', message: warning }]);
       expect(seeding.health().findings).toEqual([{ kind: 'skills.source', severity: 'warning', message: warning }]);
       expect(lines.find((l) => l.startsWith('[skills] seeded '))).toBe(
-        `[skills] seeded ${sc.root} from the installer-managed wicked-garden copy (plugins/wicked-garden — the LAST-resort source, design v3.6; not the marketplace cache) at ${FIXTURE_PLUGIN}, plugin version 1.0.0, source kind installer-copy`,
+        `[skills] seeded ${sc.root} from the installer-managed wicked-garden copy (plugins/wicked-garden — used when no usable Claude marketplace cache exists) at ${FIXTURE_PLUGIN}, plugin version 1.0.0, source kind installer-copy`,
       );
       expect(lines.filter((l) => l === `[skills] skills.source: ${warning}`)).toHaveLength(1);
       // A second boot over the seeded root: the warning persists (the baseline is still the copy), said once again.
