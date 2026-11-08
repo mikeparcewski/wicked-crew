@@ -177,6 +177,7 @@ import { builtinPresetSkillRefs, coreSkillRefs, registeredSkillRefs } from '../s
 import type { PluginSource } from '../skills/plugin-source.js';
 import { assertSkillsRootFenced } from '../skills/root-fence.js';
 import { SkillsRuntime, isPublishingPlaceholder } from '../skills/runtime.js';
+import { SkillUsageRecorder } from '../skills/usage.js';
 import { SKILLS_SNAPSHOT_ENGINE_ENV } from '../skills/engine-env.js';
 import { assertWickedRootsOutsideStateHome, StateHomeWatch } from '../projects/state-home-preflight.js';
 import { resolveSkillsRoot, SkillsStore } from '../skills/store.js';
@@ -791,6 +792,21 @@ export async function createServer(
   app.decorate('skillsBootSettled', () => skillsBoot ?? Promise.resolve());
   // Exclusive peers (codex on #846): `venv` is the provisioner path's time, `skills` the rest of
   // the seam (seed, validate, hash, stage, flip) — the stages sum, never double-count.
+  // Skill usage (operator 2026-11-08): the engine's `skillUsed` / `skillsSnapshotHanded` frames rolled up per skill
+  // and CLI beside the catalog (`daemon-skill-usage.json`), read by `GET /skills/usage`. Only with a skills seam:
+  // its snapshots are where a script is credited to the skills whose files name it.
+  const skillUsage =
+    skillsStore !== undefined
+      ? new SkillUsageRecorder({
+          snapshotsDir: () => (skillsStore === undefined ? null : join(skillsStore.root, 'snapshots')),
+          chatOf: (session) => askPaths.chatOf(session),
+        })
+      : undefined;
+  if (skillUsage !== undefined) {
+    app.addHook('onClose', async () => {
+      skillUsage.flush();
+    });
+  }
   const skillsMs = bootClock.lap('skills');
   const venvMs = skillsStore?.venvStage().ms ?? 0;
   bootClock.set('skills', skillsMs - venvMs);
@@ -2174,6 +2190,7 @@ export async function createServer(
     elicitationCache.ingest(event);
     askServer.ingest(event);
     seatHealth.ingest(event);
+    skillUsage?.ingest(event);
     // ASK-C2: a path run's unit + terminal frames become the chat's frames (re-entering this fold
     // as chatDelta / chatReply, which the relay ignores — no recursion).
     if (typeof event.session === 'string') void askRelay.onCoreEvent(event);
@@ -2807,6 +2824,7 @@ export async function createServer(
       // crew#899: a chat's checkouts are brought to their upstream (when clean) before it reads them.
       freshenCheckout: (root: string) => freshenCheckout(root),
       ...(skillsRuntime !== undefined ? { skills: skillsRuntime } : {}),
+      ...(skillUsage !== undefined ? { skillUsage } : {}),
       // DES-MCP-TOOLS-001 S2: the registry over `<state home>/mcp` (created on the first save).
       // Route tests drive `registerMcpRoutes` over their own registry (tests/mcp-registry.test.ts).
       mcp: mcpRegistry,

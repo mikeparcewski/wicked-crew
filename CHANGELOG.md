@@ -21,6 +21,18 @@ mentioned only where a daemon release depends on them.
   grant per declared topic; `DELETE /editors/:id` withdraws them; `POST /editors/:id/grants` for a plugin is 409
   `install_only` (its topics are the install consent's); `GET /editors/:id/grants` answers the observe decisions.
 
+- **Which skills seats use, and which were handed but never used (operator ask; api-types `SkillUsageResponse`,
+  `SkillUsedEvent`, unreleased).** `GET /api/v1/skills/usage[?sinceGen=N]` answers, per skill: the generation it
+  was introduced in, per CLI the 30- and 90-day counts and the last time for each signal (directed, opened, browsed,
+  ran), when it was last used, and whether it was handed since generation N to a CLI whose use can be seen and not
+  used since. "Used" means opened, or a script run credited to the skill. Directed and browsed are counted but are
+  not use. The rollup folds the engine's `skillUsed` and `skillsSnapshotHanded` frames into
+  `<state home>/daemon-skill-usage.json` (90 days of daily counts, the last use kept, a malformed file starts empty).
+  A script run is credited to a skill only through the generation's own files: the skill whose files name it, or the
+  one that attempt opened or was directed to. A shared script stays with the script. Copilot (text only) reads
+  "not observable", never "unused". Chat turns, workflow steps and team member turns are tagged apart. Read-only:
+  nothing turns a skill off.
+
 - **A person can allow or revoke what an installed editor asks for (F37; api-types `SetEditorGrantBody`, unreleased).**
   `POST /api/v1/editors/:id/grants {permission, allow, version, sha256, project?}` is the human-only writer of the
   `EDITOR-GRANTS` ledger the engine already reads. The press names the build the person was shown (409

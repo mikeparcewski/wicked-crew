@@ -5,6 +5,8 @@
  *   GET  /skills                       manifest + revision + the current snapshot + the INSTALLED
  *                                      plugin's identity (wicked-studio#388: whether the root is
  *                                      behind the plugin on disk)
+ *   GET  /skills/usage                 which skills seats use, by CLI, how often and when last; handed
+ *                                      but unused since a generation (read-only; skills/usage.ts)
  *   GET  /skills/:name/files           the skill's OWN files (nested skills are their own)
  *   GET  /skills/:name/files/*path     typed capped read (`?side=baseline` for the shipped copy)
  *   PUT  /skills/:name/files/*path     write one file (guards; CAS)
@@ -41,6 +43,7 @@ import type { Actor, SkillReadResult } from '../core/types.js';
 import { SkillPathError } from '../skills/contain.js';
 import { finding } from '../skills/guards.js';
 import type { SkillsRuntime } from '../skills/runtime.js';
+import type { SkillUsageRecorder } from '../skills/usage.js';
 import { budgetPacer } from '../skills/tree.js';
 import {
   RevisionMismatchError,
@@ -84,10 +87,13 @@ export const PutSkillFileSchema = z.strictObject({
 export const AddSkillSchema = z.strictObject({ name: z.string().min(1), files: filesMap, expectedRevision: revision });
 export const ReplaceSkillSchema = z.strictObject({ files: filesMap, expectedRevision: revision });
 const SideSchema = z.strictObject({ side: z.enum(['effective', 'baseline']).optional() });
+export const SkillUsageQuerySchema = z.strictObject({ sinceGen: z.coerce.number().int().nonnegative().optional() });
 
 export interface SkillsRouteDeps {
   /** Absent = the daemon booted without a skills seam (tests, the manifest collector) → 503. */
   runtime?: SkillsRuntime;
+  /** The skill-usage rollup (`GET /skills/usage`); absent = 503 like an absent runtime. */
+  usage?: Pick<SkillUsageRecorder, 'report' | 'noteGeneration'>;
   audit: AuditLog;
   actorOf: (req: FastifyRequest) => Actor;
 }
@@ -186,6 +192,26 @@ export function registerSkillsRoutes(app: FastifyInstance, deps: SkillsRouteDeps
         const current = await s.currentSnapshotPaced(budgetPacer());
         return { manifest, revision: manifest.revision, root: s.root, current, installed: runtimeOf().installed(), publishing: s.isPublishing() };
       }),
+  );
+
+  app.get(
+    `${V}/skills/usage`,
+    { config: { manifest: { responseType: 'SkillUsageResponse', statusCodes: [200, 400, 503] } } },
+    async (req, reply) => {
+      const parsed = SkillUsageQuerySchema.safeParse(req.query ?? {});
+      if (!parsed.success) return invalidBody(reply, parsed.error);
+      const usage = deps.usage;
+      return guarded(reply, () => {
+        if (usage === undefined) throw new SkillsUnconfiguredError();
+        const s = store();
+        const manifest = s.manifest();
+        // The generation the runtime last verified and exported: a usage read never walks a snapshot.
+        const currentGen = runtimeOf().health().current?.gen ?? null;
+        if (currentGen !== null) usage.noteGeneration(currentGen);
+        const catalog = Object.entries(manifest.skills).map(([name, e]) => ({ name, enabled: e.enabled }));
+        return usage.report({ ...(parsed.data.sinceGen !== undefined ? { sinceGen: parsed.data.sinceGen } : {}), currentGen, catalog });
+      });
+    },
   );
 
   app.get(

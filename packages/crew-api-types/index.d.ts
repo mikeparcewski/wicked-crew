@@ -5331,6 +5331,80 @@ export interface SkillFileEntry {
   record: SkillFileRecord | null;
 }
 
+/** The signals skill usage records (0.198.0). `directed`: the unit's directive named the skill; `opened`: the seat
+ *  loaded it (Claude's Skill tool, opencode's skill tool, a read of a file inside a skill dir it was handed);
+ *  `browsed`: one shell command named files from more than three skills (looked over, NOT use); `ran`: a garden script
+ *  ran (`wicked-garden run scripts/<rel>`). */
+export type SkillUsageSignal = 'directed' | 'opened' | 'browsed' | 'ran';
+
+/** `/ws` frame (0.198.0, wicked-core skill_use): one skill signal of one unit attempt (a workflow step or a chat
+ *  turn), once per (attempt, signal, skill or script); bus `wicked.run.skill.<signal>`. Names only: `skill` is a
+ *  frontmatter name, `script` a snapshot-relative `scripts/<rel>`; never a host path, argument or content. `skill` is
+ *  `null` only on `ran` (crew credits a script to a skill through the generation's own files). The unit's
+ *  `skillsSnapshotHanded` frame now also carries `lever` and `skills` (the names that lever delivered). */
+export type SkillUsedEvent = {
+  type: 'skillUsed';
+  session: string;
+  ord: number;
+  attempt: number;
+  cli: string;
+  signal: SkillUsageSignal;
+  skill: string | null;
+  /** `directed` only: which part of the directive named it. */
+  via: 'phase' | 'base' | 'qe' | null;
+  /** `opened` only. */
+  how: 'skill_tool' | 'read' | 'shell' | null;
+  /** `ran` only. */
+  script: string | null;
+  gen: string | null;
+  source: string;
+};
+
+/** One signal's counts in a {@link SkillUsageRow} cell: attempts in the last 30 / 90 days, and the newest. */
+export interface SkillUsageCell {
+  d30: number;
+  d90: number;
+  /** Epoch ms, `null` = never recorded. */
+  lastAt: number | null;
+  lastGen: number | null;
+}
+
+/** One skill in {@link SkillUsageResponse}. */
+export interface SkillUsageRow {
+  name: string;
+  /** From the manifest; `null` for a skill seen in usage but no longer in the catalog. */
+  enabled: boolean | null;
+  /** The first generation the skill was seen in; `seeded` = it was already in the oldest generation on disk when
+   *  recording began, so it may be older ("≤ gen N"). */
+  introduced: { gen: number; seeded: boolean } | null;
+  /** Per seat key (`claude`, `codex`, …): the newest generation it was handed, and each signal's counts. */
+  byCli: Record<string, { handedLastGen: number | null } & Record<SkillUsageSignal, SkillUsageCell>>;
+  /** The newest use: `opened`, or a `ran` credited to this skill. `null` = no use recorded. */
+  lastUsed: { at: number; gen: number | null; cli: string } | null;
+  /** `all`: handed since `sinceGen` to at least one CLI whose use can be seen, and not used since on any. `byCli`: the
+   *  observable CLIs it was handed to since then and did not use it on. `notObservable`: it was handed only to CLIs whose
+   *  use cannot be seen (copilot), so "unused" cannot be said. */
+  unusedSince: { all: boolean; byCli: string[]; notObservable: boolean };
+}
+
+/** `GET /skills/usage[?sinceGen=N]` 200 body (0.198.0): which skills are used, by which CLI, how often and when last,
+ *  and which were handed but not used since generation N. Read-only: nothing here turns a skill off. "Used" = opened,
+ *  or a ran credited to the skill; directed and browsed are counted and are not use. */
+export interface SkillUsageResponse {
+  currentGen: number | null;
+  /** When this daemon began recording: use before it is unknown, not zero. */
+  recordingSince: { gen: number | null; at: number } | null;
+  /** The generation `unusedSince` is judged from (default `recordingSince.gen`). */
+  sinceGen: number | null;
+  /** The asked `sinceGen` was before recording began and was raised to it. */
+  sinceGenClamped: boolean;
+  /** What each CLI family's stream lets the engine see; `signals: []` = not observable. */
+  observable: Record<string, { signals: SkillUsageSignal[]; note: string | null }>;
+  skills: SkillUsageRow[];
+  /** Script runs not credited to one skill (shared scripts, or more than one possible owner). */
+  scripts: Array<{ script: string; owners: string[]; d30: number; d90: number; lastAt: number | null }>;
+}
+
 /** `GET /skills/:name/files` 200 body — the skill's OWN files (a nested skill's files are its own). */
 export interface SkillFileTree {
   name: string;

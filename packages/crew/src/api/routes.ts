@@ -197,6 +197,7 @@ import { agentMay } from '../knowledge/gate/access.js';
 import { DEMO_PRESETS, demoLaunch, demoLaunchRoots, registerDemoDocumentRoute, registerDemoRoutes, registerWalkthroughRoutes, walkthroughAcceptance, type BridgeCall, type DemoRouteDeps } from './recording.js';
 import { projectDocsRoot } from '../interactive/project-root.js';
 import { registerSkillsRoutes } from './skills.js';
+import type { SkillUsageRecorder } from '../skills/usage.js';
 import { registerSourceRoutes } from '../sources/routes.js';
 import { seatTurn } from '../standing-orders/parse.js';
 import { registerMcpRoutes } from './mcp.js';
@@ -1560,6 +1561,8 @@ export interface RuntimeDeps {
    *  (seeded from the installed plugin, published); a directly-driven route set gets none and
    *  `/skills*` answers 503 unless a test injects one over a fixture root. */
   skills?: SkillsRuntime;
+  /** The skill-usage rollup (`GET /skills/usage`); `createServer` builds one beside the skills seam. */
+  skillUsage?: SkillUsageRecorder;
   /** The MCP tools registry (DES-MCP-TOOLS-001 S2) — `createServer` builds one over
    *  `<state home>/mcp`; a directly-driven route set gets none and `/mcp/*` answers 503 unless a
    *  test injects one over a scratch dir. */
@@ -10527,6 +10530,7 @@ export function registerRoutes(
   // directly-driven route set answers 503 unless a test injects one over a fixture root.
   registerSkillsRoutes(app, {
     ...(runtime.skills !== undefined ? { runtime: runtime.skills } : {}),
+    ...(runtime.skillUsage !== undefined ? { usage: runtime.skillUsage } : {}),
     audit,
     actorOf,
   });

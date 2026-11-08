@@ -2850,6 +2850,17 @@
     },
     {
       "method": "GET",
+      "path": "/api/v1/skills/usage",
+      "requestType": null,
+      "responseType": "SkillUsageResponse",
+      "statusCodes": [
+        200,
+        400,
+        503
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/api/v1/sources/:name/agent-queries",
       "requestType": null,
       "responseType": "SourceAgentQueriesResponse",
