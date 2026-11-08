@@ -155,7 +155,7 @@ test.describe('mobile (390×844)', () => {
       const t = Array.from(range.getClientRects()).find((x) => x.height > 0)!;
       return { h: Math.round(r.height), dy: Math.abs((t.top + t.bottom) / 2 - (r.top + r.bottom) / 2), dx: Math.abs((t.left + t.right) / 2 - (r.left + r.right) / 2) };
     }));
-    expect(off.length).toBe(2);
+    expect(off.length).toBe(1); // one install path: the family installer
     for (const o of off) {
       expect(o.h).toBeGreaterThanOrEqual(44);
       expect(o.dy, `the label is ${o.dy.toFixed(1)}px off the middle`).toBeLessThanOrEqual(1);

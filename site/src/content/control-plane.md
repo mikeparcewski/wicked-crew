@@ -258,7 +258,7 @@ product of it.
 ## Trying it
 
 ```sh
-npm install -g wicked-crew
+npx wicked-installer   # picks crew, garden and the rest
 wicked-crew serve
 # open http://127.0.0.1:7701 — the studio console ships inside
 ```
