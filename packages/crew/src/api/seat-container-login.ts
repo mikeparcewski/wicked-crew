@@ -58,6 +58,13 @@ export function isContainerLoginCli(cli: string): boolean {
   return ['claude', 'codex', 'pi', 'opencode', 'copilot'].includes(cli);
 }
 
+/** Where a container seat's one-time sign-in runs (the engine's `seat_login::host_login`): codex, pi and
+ *  opencode run THIS host's own CLI (their browser logins call back on a host loopback port), so they need
+ *  it installed here; claude and copilot sign in inside a login container and need nothing on the host. */
+export function containerSignInOn(cli: string): 'host' | 'container' {
+  return ['codex', 'pi', 'opencode'].includes(cli) ? 'host' : 'container';
+}
+
 /** The gateway dir spelled as the ENGINE spells it: the canonical state home (its `--db` parent,
  *  canonicalized) + `gateway`. The gateway's name hashes this path, so a symlinked spelling
  *  (macOS `/tmp` vs `/private/tmp`) would address a different gateway and broker. */

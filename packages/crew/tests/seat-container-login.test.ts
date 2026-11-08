@@ -154,6 +154,27 @@ describe('isContainerSeatFloor', () => {
     });
     expect(roster()[0]).toMatchObject({ sign_in: 'container' });
   });
+
+  // fix-notinstalled: studio calls a container helper "not installed" from the host probe only when its
+  // sign-in runs this host's own CLI (the engine's seat_login::host_login: codex, pi, opencode).
+  it('says where each container seat signs in, and the engine never sees it', () => {
+    const exec = vi.fn<ExecLike>(async () => ({ stdout: '{"status":"signed_out"}', stderr: '' }));
+    const keys = ['claude', 'codex', 'pi', 'opencode', 'copilot'];
+    const roster = rosterWithStandingFactory({
+      seatHealth: new SeatHealthTracker(), registry: () => keys.map((key) => ({ key, display_name: key, enabled_for_council: true })),
+      env: { WICKED_SEAT_FLOOR: 'container' }, signedIn: () => false, probe: null,
+      containerStatus: new SeatContainerStatus({ exec, gatewayDir: '/fixture/gateway' }),
+    });
+    const where = Object.fromEntries(roster().map((s) => [s.key, (s as Record<string, unknown>)['sign_in_on']]));
+    expect(where).toEqual({ claude: 'container', codex: 'host', pi: 'host', opencode: 'host', copilot: 'container' });
+    expect(toEngineSeat(roster()[0]!)).not.toHaveProperty('sign_in_on');
+    const host = rosterWithStandingFactory({
+      seatHealth: new SeatHealthTracker(), registry: () => [{ key: 'claude', display_name: 'Claude', enabled_for_council: true }],
+      env: { WICKED_SEAT_FLOOR: 'host' }, signedIn: () => true, probe: null,
+      containerStatus: new SeatContainerStatus({ exec, gatewayDir: '/fixture/gateway' }),
+    });
+    expect(host()[0]).not.toHaveProperty('sign_in_on');
+  });
 });
 
 describe('container roster standing', () => {
