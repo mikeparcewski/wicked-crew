@@ -78,15 +78,18 @@ describe('background runtime reader', () => {
     const exec = vi.fn<ExecLike>(async () => { if (!up) throw new Error('runtime down'); return { stdout: '28.0.0\n', stderr: '' }; });
     const reader = new RuntimeState({ exec, env: { HOME: home }, runtime: () => '/fixture/runtime' }); close.push(() => reader.close());
     const change = vi.fn(); reader.onChange(change); expect(reader.state()).toBe('unknown');
-    await vi.advanceTimersByTimeAsync(1); expect(reader.state()).toBe('down');
-    expect(exec).toHaveBeenCalledWith('/fixture/runtime', ['version', '--format', '{{.Server.Version}}'], { timeout: 5_000, env: { HOME: home } });
+    // A cold daemon reads down only after three misses in a row (e2e-1105 09:02Z), never on the first.
+    await vi.advanceTimersByTimeAsync(1); expect(reader.state()).toBe('unknown');
+    expect(exec).toHaveBeenCalledWith('/fixture/runtime', ['version', '--format', '{{.Server.Version}}'], { timeout: 15_000, env: { HOME: home } });
     for (let i = 0; i < 100; i++) reader.state(); expect(exec).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(10_000); expect(reader.state()).toBe('unknown');
+    await vi.advanceTimersByTimeAsync(10_000); expect(reader.state()).toBe('down');
     up = true; await vi.advanceTimersByTimeAsync(10_000); expect(reader.state()).toBe('up');
     expect(change.mock.calls).toEqual([['down', 'unknown'], ['up', 'down']]);
     await vi.advanceTimersByTimeAsync(10_000); expect(change).toHaveBeenCalledTimes(2);
-    reader.close(); await vi.advanceTimersByTimeAsync(10_000); expect(exec).toHaveBeenCalledTimes(3);
+    reader.close(); await vi.advanceTimersByTimeAsync(10_000); expect(exec).toHaveBeenCalledTimes(5);
   });
-  it('an up runtime reads down only after two misses in a row (one slow check on a busy host is not an outage)', async () => {
+  it('an up runtime reads down only after three misses in a row (slow checks on a busy host are not an outage)', async () => {
     vi.useFakeTimers(); let up = true;
     const exec = vi.fn<ExecLike>(async () => { if (!up) throw new Error('timed out'); return { stdout: '28.0.0\n', stderr: '' }; });
     const reader = new RuntimeState({ exec, runtime: () => '/fixture/runtime' }); close.push(() => reader.close());
@@ -94,7 +97,35 @@ describe('background runtime reader', () => {
     up = false; await vi.advanceTimersByTimeAsync(10_000); expect(reader.state()).toBe('up');
     up = true; await vi.advanceTimersByTimeAsync(10_000); expect(reader.state()).toBe('up');
     up = false; await vi.advanceTimersByTimeAsync(10_000); expect(reader.state()).toBe('up');
+    await vi.advanceTimersByTimeAsync(10_000); expect(reader.state()).toBe('up');
     await vi.advanceTimersByTimeAsync(10_000); expect(reader.state()).toBe('down');
+  });
+  it('a SLOW runtime (each check answers after 12 s) stays up: the bound is patient (e2e-1105 09:02Z)', async () => {
+    vi.useFakeTimers();
+    const exec = vi.fn<ExecLike>(async (_f, _a, opts) => {
+      // A fake that honours its bound like execCapped: answers after 12 s, or fails at the bound.
+      const answerMs = 12_000;
+      await new Promise((r) => setTimeout(r, Math.min(answerMs, opts.timeout)));
+      if (answerMs > opts.timeout) throw new Error('timed out');
+      return { stdout: '28.0.0\n', stderr: '' };
+    });
+    const reader = new RuntimeState({ exec, runtime: () => '/fixture/runtime' }); close.push(() => reader.close());
+    await vi.advanceTimersByTimeAsync(12_001); expect(reader.state()).toBe('up');
+    await vi.advanceTimersByTimeAsync(60_000); expect(reader.state()).toBe('up');
+    // One check at a time: a 12 s check on a 10 s interval never overlaps the next.
+    expect(exec.mock.calls.length).toBeLessThanOrEqual(Math.ceil(72_001 / 12_000));
+  });
+  it('a HUNG runtime (no answer within the bound) reads down after three misses, never before', async () => {
+    vi.useFakeTimers();
+    const exec = vi.fn<ExecLike>(async (_f, _a, opts) => {
+      await new Promise((r) => setTimeout(r, opts.timeout));
+      throw new Error('timed out');
+    });
+    const reader = new RuntimeState({ exec, runtime: () => '/fixture/runtime' }); close.push(() => reader.close());
+    await vi.advanceTimersByTimeAsync(15_001); expect(reader.state()).toBe('unknown');
+    await vi.advanceTimersByTimeAsync(25_000); expect(reader.state()).toBe('unknown');
+    await vi.advanceTimersByTimeAsync(30_000); expect(reader.state()).toBe('down');
+    expect(exec.mock.calls.length).toBeGreaterThanOrEqual(3);
   });
   it('coalesces pending probes and publishes nothing after close', async () => {
     let finish!: (out: { stdout: string; stderr: string }) => void;

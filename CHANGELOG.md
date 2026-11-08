@@ -288,6 +288,10 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **A busy laptop no longer reads as "Docker isn't running" (e2e-1105).** The roster's background runtime check
+  waits up to 15 s per check (was 5 s) and reads the runtime down only after three misses in a row, from any state,
+  so a slow `version` answer under host load never benches the container seats.
+
 - **Sign-in failures say why, and an abandoned sign-in is cleaned up (first-run C3; api-types `SeatSignInFailure`,
   `SeatSignInFailureCode`, unreleased).** Every refused `POST /seats/:cli/container-login` carries a `code`:
   `container_runtime_down` ("Docker isn't running …"), `cli_not_installed` (codex, pi and opencode sign in with the
