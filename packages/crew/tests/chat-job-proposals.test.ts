@@ -504,6 +504,19 @@ describe('codex/pi r1 folds', () => {
     expect(open(r).seats).toMatchObject({ lead: 'claude', keys: ['claude', 'codex'] });
   });
 
+  it('seats the person names are never replaced, even when they all wrote the change (CJ13)', async () => {
+    const r = rig({
+      roster: [{ key: 'claude', name: 'Claude' }, { key: 'codex', name: 'Codex' }, { key: 'pi', name: 'pi' }, { key: 'opencode', name: 'OpenCode' }],
+      repos: [{ id: 'r-pay', name: 'payments-service' }],
+      reviewAuthors: async () => ['claude', 'codex'],
+    });
+    await pick(r, 'review-change', { words: 'review pull request 9' });
+    expect(open(r).seats?.keys).toEqual(['pi', 'opencode']);
+    await swap(r, open(r).pid, { addSeats: ['claude', 'codex'], removeSeats: ['pi', 'opencode'] } as ProposalRevisionEdits, 'authors');
+    expect(open(r).seats?.keys).not.toContain('claude');
+    expect(open(r).seats?.keys).not.toContain('codex');
+  });
+
   it('an unreadable change, or another card, keeps the roster as it is (CJ13)', async () => {
     const failing = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async () => { throw new Error('gh down'); } });
     await pick(failing, 'review-change', { words: 'review pull request 9' });

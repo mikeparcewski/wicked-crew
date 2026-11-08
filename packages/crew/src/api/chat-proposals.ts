@@ -2338,7 +2338,18 @@ export class ChatProposals {
     await this.loadJobSources(shape, ctx);
     // (CJ13) The seats are checked against the authors of the change the revision names (its words, details, inputs
     // and repository may all move the target), so it is merged once to read them.
-    return mergeRevision(parent, edits, await this.reviewRoster(mergeRevision(parent, edits, ctx).facts, ctx));
+    const reviewCtx = await this.reviewRoster(mergeRevision(parent, edits, ctx).facts, ctx);
+    const merged = mergeRevision(parent, edits, reviewCtx);
+    // Seats carried from a version that reviewed another change may all be the new change's authors: then they are
+    // picked again from the reviewers left (the lead stays when it still may lead). Seats this revision names itself
+    // are the person's choice and are never replaced (a choice of authors only is short, and its Start is refused).
+    const named = edits.lead !== undefined || edits.addSeats !== undefined || edits.removeSeats !== undefined;
+    const left = new Set(reviewCtx.roster.map((s) => s.key));
+    if (reviewCtx !== ctx && !named && merged.facts.seats !== null && !merged.facts.seats.some((k) => left.has(k))) {
+      const lead = merged.facts.lead !== null && left.has(merged.facts.lead) ? merged.facts.lead : null;
+      return { ...merged, facts: { ...merged.facts, seats: null, lead } };
+    }
+    return merged;
   }
 
   /** Job proposals are on: the flag, the catalog read and the operation. */
@@ -2410,15 +2421,7 @@ export class ChatProposals {
     const card = CATALOG_V2_CARDS.find((c) => c.id === facts.card);
     const r = card === undefined ? null : resolveOption(card.id, optionFor(card, facts.option), ctx.served);
     await this.loadJobSources(facts, ctx);
-    const reviewCtx = await this.reviewRoster(facts, ctx);
-    if (reviewCtx !== ctx && facts.seats !== null) {
-      // (CJ13) Seats kept from a version that reviewed another change may all be its authors: then the seats are
-      // picked again from the reviewers left (the lead stays when it still may lead). A choice that keeps any reviewer
-      // stands, filtered, and is short rather than replaced.
-      const left = new Set(reviewCtx.roster.map((s) => s.key));
-      if (!facts.seats.some((k) => left.has(k))) facts = { ...facts, seats: null, lead: facts.lead !== null && left.has(facts.lead) ? facts.lead : null };
-    }
-    ctx = reviewCtx;
+    ctx = await this.reviewRoster(facts, ctx);
     if (r?.resolved.inputs.some((i) => i.id === 'documents')) {
       if (facts.inputs['documents'] === undefined) {
         const { binding } = bindingOf(records, ctx.turnId ?? '\u0000');
