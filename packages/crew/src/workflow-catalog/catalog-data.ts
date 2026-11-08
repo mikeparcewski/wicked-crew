@@ -474,6 +474,8 @@ export const CATALOG_EXCLUDED: Readonly<Record<string, string>> = {
 export const CATALOG_EXCLUDED_DEFS: Readonly<Record<string, string>> = {
   'apps-turn': "runs one message of an app's chat, started from that app's chat",
   'apps-publish': "publishes an app, started from that app's Share",
+  // The engine does not mark it a system workflow; a Respond or Rework card starts it, with its documents (CS8).
+  'interactive-draft-sourced': 'drafts a Respond or Rework document from your documents, started from its card',
 };
 
 /** The categories' display order, for sorting. */

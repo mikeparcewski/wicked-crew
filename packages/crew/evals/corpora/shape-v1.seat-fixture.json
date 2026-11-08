@@ -1,5 +1,5 @@
 {
- "$comment": "DES-CATALOG-002 §9.2: the recorded seat-answer fixture for the shape corpus. Spike 2 (§9.3): pi, no tools, high thinking, blind to the labels, the classify digest and anchors with the words as <request> data (design lanes/catalog-v2-design/spike/prompt2.txt); each value is that seat's one-line answer, verbatim. CI runs the corpus through crew's shipped words layer, validator, cross-check and bands with these answers: deterministic and model-free. The live numbers are the integrator's (run-evals with the real chat seat on the rig). Lane D's w1-w15 and z5-z8 were answered the same way (the spike-2 prompt's header with only those requests; pi, no tools, high thinking, blind), recorded verbatim. w16-w19 likewise (review round 1). w20 likewise (review round 2). CS8 (the catalog flip): the relabelled coming cases (i8, i9, i10, a10, j15, c17, c18, c19, e1, e2, sp3) and the new y1-y31 were answered the same way against the flipped catalog (lanes/cs8-flip/work/prompt-cs8.txt: prompt2's header, the live cards with their options, those requests only; pi, no tools, high thinking, blind), recorded verbatim; the earlier answers for those eleven ids are replaced.",
+ "$comment": "DES-CATALOG-002 §9.2: the recorded seat-answer fixture for the shape corpus. Spike 2 (§9.3): pi, no tools, high thinking, blind to the labels, the classify digest and anchors with the words as <request> data (design lanes/catalog-v2-design/spike/prompt2.txt); each value is that seat's one-line answer, verbatim. CI runs the corpus through crew's shipped words layer, validator, cross-check and bands with these answers: deterministic and model-free. The live numbers are the integrator's (run-evals with the real chat seat on the rig). Lane D's w1-w15 and z5-z8 were answered the same way (the spike-2 prompt's header with only those requests; pi, no tools, high thinking, blind), recorded verbatim. w16-w19 likewise (review round 1). w20 likewise (review round 2). CS8 (the catalog flip): the relabelled cases (i8, i9, i10, a10, j15, c17, c18, c19, e1, e2, sp3, x10) and the new y1-y31 were answered the same way against the flipped catalog (prompt2's header, the live cards with their options, those requests only; pi, no tools, high thinking, blind), recorded verbatim; the earlier answers for those twelve ids are replaced.",
  "answers": {
   "p1": {
    "card": "plan-it",
@@ -324,16 +324,15 @@
    "reason": "view/edit files in studio"
   },
   "sp3": {
-   "card": "feature",
-   "option": null,
+   "card": "start-new",
+   "option": "start-new:mcp-server",
    "depth": null,
    "confidence": 0.5,
    "ask": [
-    "feature",
     "start-new:mcp-server",
-    "studio-plugin"
+    "studio-plugin:phase"
    ],
-   "reason": "custom step type ambiguous between shapes"
+   "reason": "custom step tool, unclear form"
   },
   "t1": {
    "card": "plan-tests",
@@ -465,15 +464,15 @@
    "card": "competitive",
    "option": null,
    "depth": "standard",
-   "confidence": 0.92,
+   "confidence": 0.88,
    "ask": null,
-   "reason": "how competitors handle usage-based pricing"
+   "reason": "what competitors do, market analysis"
   },
   "i9": {
    "card": "research",
    "option": null,
    "depth": "standard",
-   "confidence": 0.88,
+   "confidence": 0.85,
    "ask": null,
    "reason": "cited answer on best vector database"
   },
@@ -481,9 +480,9 @@
    "card": "due-diligence",
    "option": null,
    "depth": "standard",
-   "confidence": 0.9,
+   "confidence": 0.88,
    "ask": null,
-   "reason": "cited review of vendor security docs"
+   "reason": "review vendor's security documents"
   },
   "a1": {
    "card": "analyze-codebase",
@@ -552,7 +551,7 @@
    "card": "analyze-documents",
    "option": null,
    "depth": null,
-   "confidence": 0.9,
+   "confidence": 0.85,
    "ask": null,
    "reason": "compare three statements of work"
   },
@@ -658,9 +657,9 @@
    "card": "critique",
    "option": null,
    "depth": null,
-   "confidence": 0.9,
+   "confidence": 0.86,
    "ask": null,
-   "reason": "poke holes in architecture proposal"
+   "reason": "poke holes in proposal doc"
   },
   "c1": {
    "card": "document",
@@ -778,23 +777,23 @@
    "card": "respond",
    "option": "respond:rfp",
    "depth": null,
-   "confidence": 0.93,
+   "confidence": 0.9,
    "ask": null,
-   "reason": "RFP response for testing service"
+   "reason": "respond to an RFP"
   },
   "c18": {
    "card": "rework",
    "option": "rework:condense",
    "depth": null,
-   "confidence": 0.92,
+   "confidence": 0.9,
    "ask": null,
-   "reason": "shorten report to exec summary"
+   "reason": "condense report to exec summary"
   },
   "c19": {
    "card": "respond",
    "option": "respond:questionnaire",
    "depth": null,
-   "confidence": 0.92,
+   "confidence": 0.9,
    "ask": null,
    "reason": "fill in security questionnaire"
   },
@@ -802,7 +801,7 @@
    "card": "estimate-price",
    "option": null,
    "depth": null,
-   "confidence": 0.92,
+   "confidence": 0.88,
    "ask": null,
    "reason": "effort and price for integration"
   },
@@ -810,7 +809,7 @@
    "card": "run-cost",
    "option": null,
    "depth": null,
-   "confidence": 0.9,
+   "confidence": 0.88,
    "ask": null,
    "reason": "token cost to run migration"
   },
@@ -1032,10 +1031,11 @@
   },
   "x10": {
    "card": "rework",
-   "option": null,
+   "option": "rework:re-audience",
    "depth": null,
-   "confidence": 0.78,
-   "reason": "re-aim existing deck"
+   "confidence": 0.85,
+   "ask": null,
+   "reason": "same deck for engineers"
   },
   "x11": {
    "card": null,
@@ -1482,23 +1482,23 @@
    "card": "research",
    "option": null,
    "depth": "standard",
-   "confidence": 0.75,
+   "confidence": 0.85,
    "ask": null,
-   "reason": "find Postgres meeting restore criteria"
+   "reason": "which managed Postgres offers fast restore"
   },
   "y2": {
    "card": "research",
    "option": null,
    "depth": "standard",
-   "confidence": 0.88,
+   "confidence": 0.85,
    "ask": null,
-   "reason": "cited guidance on passkeys"
+   "reason": "current guidance with sources"
   },
   "y3": {
    "card": "competitive",
    "option": null,
    "depth": "standard",
-   "confidence": 0.9,
+   "confidence": 0.88,
    "ask": null,
    "reason": "compare competitor enterprise pricing"
   },
@@ -1506,63 +1506,63 @@
    "card": "competitive",
    "option": null,
    "depth": "standard",
-   "confidence": 0.92,
+   "confidence": 0.88,
    "ask": null,
-   "reason": "market landscape of code review vendors"
+   "reason": "market landscape of vendors"
   },
   "y5": {
    "card": "due-diligence",
    "option": null,
    "depth": "standard",
-   "confidence": 0.92,
+   "confidence": 0.9,
    "ask": null,
-   "reason": "data room diligence for acquisition"
+   "reason": "due diligence on acquisition data room"
   },
   "y6": {
    "card": "due-diligence",
    "option": null,
    "depth": "standard",
-   "confidence": 0.9,
+   "confidence": 0.85,
    "ask": null,
-   "reason": "assess SOC2 and pen test reports"
+   "reason": "assess vendor reports before signing"
   },
   "y7": {
    "card": "analyze-documents",
    "option": null,
    "depth": null,
-   "confidence": 0.9,
+   "confidence": 0.85,
    "ask": null,
-   "reason": "compare contracts on termination clauses"
+   "reason": "compare contracts on clauses"
   },
   "y8": {
    "card": "analyze-documents",
    "option": null,
    "depth": null,
-   "confidence": 0.88,
+   "confidence": 0.83,
    "ask": null,
-   "reason": "pull numbers and contradictions from pdfs"
+   "reason": "numbers and contradictions from pdfs"
   },
   "y9": {
    "card": "critique",
    "option": null,
    "depth": null,
-   "confidence": 0.85,
+   "confidence": 0.78,
    "ask": null,
-   "reason": "red team the pricing proposal"
+   "reason": "red team pricing proposal"
   },
   "y10": {
    "card": "critique",
    "option": null,
    "depth": null,
-   "confidence": 0.85,
+   "confidence": 0.82,
    "ask": null,
-   "reason": "check if whitepaper claim supported"
+   "reason": "is whitepaper claim supported"
   },
   "y11": {
    "card": "estimate-price",
    "option": null,
    "depth": null,
-   "confidence": 0.92,
+   "confidence": 0.9,
    "ask": null,
    "reason": "effort and price from SOW"
   },
@@ -1570,7 +1570,7 @@
    "card": "estimate-price",
    "option": null,
    "depth": null,
-   "confidence": 0.9,
+   "confidence": 0.88,
    "ask": null,
    "reason": "size and quote RFP scope"
   },
@@ -1578,15 +1578,15 @@
    "card": "run-cost",
    "option": null,
    "depth": null,
-   "confidence": 0.9,
+   "confidence": 0.88,
    "ask": null,
-   "reason": "cost of bug fixes in runs"
+   "reason": "cost of monthly bug fixes"
   },
   "y14": {
    "card": "run-cost",
    "option": null,
    "depth": null,
-   "confidence": 0.88,
+   "confidence": 0.85,
    "ask": null,
    "reason": "budget agent runs next quarter"
   },
@@ -1594,7 +1594,7 @@
    "card": "respond",
    "option": "respond:rfp",
    "depth": null,
-   "confidence": 0.92,
+   "confidence": 0.9,
    "ask": null,
    "reason": "draft RFP answer from deck"
   },
@@ -1604,7 +1604,7 @@
    "depth": null,
    "confidence": 0.9,
    "ask": null,
-   "reason": "answer RFI from product docs"
+   "reason": "answer RFI from docs"
   },
   "y17": {
    "card": "respond",
@@ -1612,13 +1612,13 @@
    "depth": null,
    "confidence": 0.88,
    "ask": null,
-   "reason": "respond to information request"
+   "reason": "respond to request for information"
   },
   "y18": {
    "card": "respond",
    "option": "respond:questionnaire",
    "depth": null,
-   "confidence": 0.92,
+   "confidence": 0.9,
    "ask": null,
    "reason": "fill security questionnaire from policies"
   },
@@ -1626,7 +1626,7 @@
    "card": "rework",
    "option": "rework:condense",
    "depth": null,
-   "confidence": 0.9,
+   "confidence": 0.88,
    "ask": null,
    "reason": "deck to one-page summary"
   },
@@ -1634,7 +1634,7 @@
    "card": "rework",
    "option": "rework:re-audience",
    "depth": null,
-   "confidence": 0.9,
+   "confidence": 0.86,
    "ask": null,
    "reason": "rewrite doc for sales audience"
   },
@@ -1642,7 +1642,7 @@
    "card": "rework",
    "option": "rework:re-audience",
    "depth": null,
-   "confidence": 0.9,
+   "confidence": 0.86,
    "ask": null,
    "reason": "same guide for customers"
   },
@@ -1650,7 +1650,7 @@
    "card": "rework",
    "option": "rework:generalize",
    "depth": null,
-   "confidence": 0.92,
+   "confidence": 0.88,
    "ask": null,
    "reason": "reusable template, specifics removed"
   },
@@ -1658,31 +1658,31 @@
    "card": "rework",
    "option": "rework:generalize",
    "depth": null,
-   "confidence": 0.92,
+   "confidence": 0.88,
    "ask": null,
-   "reason": "generalize case study for retailers"
+   "reason": "generalize case study for reuse"
   },
   "y24": {
    "card": "rework",
    "option": "rework:convert",
    "depth": null,
-   "confidence": 0.9,
+   "confidence": 0.86,
    "ask": null,
-   "reason": "convert runbook to slides"
+   "reason": "convert runbook into slides"
   },
   "y25": {
    "card": "rework",
    "option": "rework:convert",
    "depth": null,
-   "confidence": 0.85,
+   "confidence": 0.82,
    "ask": null,
-   "reason": "convert spreadsheet to report"
+   "reason": "guide into slide deck"
   },
   "y26": {
    "card": "rework",
    "option": "rework:refresh",
    "depth": null,
-   "confidence": 0.9,
+   "confidence": 0.88,
    "ask": null,
    "reason": "refresh report with new numbers"
   },
@@ -1690,17 +1690,17 @@
    "card": "rework",
    "option": "rework:refresh",
    "depth": null,
-   "confidence": 0.9,
+   "confidence": 0.86,
    "ask": null,
-   "reason": "update deck with Q3 figures"
+   "reason": "update deck with newer figures"
   },
   "y28": {
    "card": "studio-plugin",
    "option": "studio-plugin:phase",
    "depth": null,
-   "confidence": 0.88,
+   "confidence": 0.85,
    "ask": null,
-   "reason": "phase section showing time and spend"
+   "reason": "section in job details from events"
   },
   "y29": {
    "card": "studio-plugin",
@@ -1708,7 +1708,7 @@
    "depth": null,
    "confidence": 0.85,
    "ask": null,
-   "reason": "job details section of files touched"
+   "reason": "section in every job's details"
   },
   "y30": {
    "card": "respond",
@@ -1719,7 +1719,7 @@
     "respond:rfp",
     "respond:questionnaire"
    ],
-   "reason": "two different respond asks"
+   "reason": "two asks, unclear which first"
   },
   "y31": {
    "card": "studio-plugin",
@@ -1730,7 +1730,7 @@
     "studio-plugin:editor",
     "studio-plugin:phase"
    ],
-   "reason": "build logs plugin shape unclear"
+   "reason": "plugin form unclear for logs"
   }
  }
 }

@@ -250,6 +250,11 @@ describe('the flipped cards (CS8)', () => {
     const cards = build().cards.filter((c) => REPORTS.some(([id]) => id === c.id));
     expect(new Set(cards.map((c) => c.summary)).size).toBe(REPORTS.length);
     for (const c of cards) expect(c.summary, c.id).toBe(CATALOG_V2_CARDS.find((s) => s.id === c.id)!.outcome);
+    // A kind-framed card reads as the card, not as its default kind; an unframed variant card keeps its default's line.
+    const v2 = build();
+    for (const id of ['respond', 'rework', 'communicate']) expect(v2.cards.find((c) => c.id === id)!.summary, id).toBe(CATALOG_V2_CARDS.find((s) => s.id === id)!.outcome);
+    const migrate = CATALOG_V2_CARDS.find((s) => s.id === 'migrate')!;
+    expect(v2.cards.find((c) => c.id === 'migrate')!.summary).toBe(migrate.variant!.options.find((o) => o.id === migrate.variant!.default)!.summary);
   });
 
   it('a sourced report gets a neutral depth line; Incident keeps its cause lines', () => {
@@ -258,6 +263,10 @@ describe('the flipped cards (CS8)', () => {
     expect(briefLines(r, 'deep')).toEqual(['Lens: research.', expect.stringMatching(/^Depth: deep\. /u)]);
     expect(briefLines(r, 'deep').join('\n')).not.toMatch(/cause/u);
     expect(briefLines(resolveOption('incident', null, served)!, 'deep')[0]).toMatch(/cause/u);
+  });
+
+  it('the sourced draft is never a Yours card (only Respond and Rework start it, with their documents)', () => {
+    expect(build().cards.filter((c) => c.category === 'yours').map((c) => c.id)).not.toContain('interactive-draft-sourced');
   });
 
   it('Model run cost runs the run-cost preset; Review a change is offered', () => {
@@ -273,7 +282,9 @@ describe('the flipped cards (CS8)', () => {
       expect(CATALOG_V2_CARDS.find((c) => c.id === card)!.variant!.options.map((o) => o.id)).toEqual(opts);
       for (const o of opts) {
         const r = resolveOption(card, o, served)!;
-        expect(r.resolved, `${card}:${o}`).toMatchObject({ status: 'available', launch: { kind: 'document', style: 'doc' }, brief: `Kind: ${card}-${o}.` });
+        // Convert makes slides; every other kind keeps the source's prose form.
+        const style = card === 'rework' && o === 'convert' ? 'ppt' : 'doc';
+        expect(r.resolved, `${card}:${o}`).toMatchObject({ status: 'available', launch: { kind: 'document', style }, brief: `Kind: ${card}-${o}.` });
         expect(r.resolved.gate, `${card}:${o}`).toEqual(expect.arrayContaining(['fidelity-to-source', 'draft-floor']));
       }
     }

@@ -1989,13 +1989,12 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
         {
           "id": "questionnaire",
           "title": "Questionnaire",
-          "summary": "A filled-in questionnaire, every answer traced.",
+          "summary": "A filled-in questionnaire.",
           "words": [
             "questionnaire",
             "security questionnaire",
             "vendor questionnaire",
-            "fill in",
-            "due diligence questionnaire"
+            "fill in"
           ],
           "launch": {
             "kind": "document",
@@ -2051,7 +2050,7 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
         {
           "id": "condense",
           "title": "Condense",
-          "summary": "Shorter, with nothing the source does not say.",
+          "summary": "Shorter, saying nothing new.",
           "words": [
             "condense",
             "shorten",
@@ -2077,8 +2076,7 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
             "rewrite for",
             "for engineers",
             "for executives",
-            "for customers",
-            "for a different audience"
+            "for customers"
           ],
           "launch": {
             "kind": "document",
@@ -2091,12 +2089,11 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
         {
           "id": "generalize",
           "title": "Generalize",
-          "summary": "A reusable version with the specifics taken out.",
+          "summary": "Reusable, with the specifics taken out.",
           "words": [
             "generalize",
             "template from",
             "make it reusable",
-            "strip the client",
             "anonymize"
           ],
           "launch": {
@@ -2110,17 +2107,17 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
         {
           "id": "convert",
           "title": "Convert",
-          "summary": "The same content in another form.",
+          "summary": "The same content as slides.",
           "words": [
             "convert",
-            "turn this into",
             "as a deck",
-            "as a document",
-            "into slides"
+            "into slides",
+            "slide deck from",
+            "turn this into slides"
           ],
           "launch": {
             "kind": "document",
-            "style": "doc"
+            "style": "ppt"
           },
           "brief": "Kind: rework-convert.",
           "changesPlan": false,
@@ -2129,10 +2126,9 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
         {
           "id": "refresh",
           "title": "Refresh",
-          "summary": "An updated version from newer sources.",
+          "summary": "Updated from newer sources.",
           "words": [
             "refresh",
-            "update this deck",
             "bring up to date",
             "latest numbers",
             "update with"

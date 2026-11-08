@@ -494,10 +494,11 @@ export function buildWorkflowCatalogV2(input: CatalogV2Inputs): WorkflowCatalogV
     const byOption: Record<string, number> = {};
     for (const u of used) if (u.option !== null) byOption[u.option] = (byOption[u.option] ?? 0) + 1;
     const defOpt = card.variant?.options.find((o) => o.id === card.variant!.default);
-    // A card that frames a shared preset with its own brief line (the six sourced reports) is described by its outcome,
-    // not by the shared preset's summary, so six cards never read alike.
-    const framed = card.brief !== undefined;
-    const summary = defOpt?.summary ?? (own.workflow !== null && !framed ? served.defs.get(own.workflow)?.summary : undefined) ?? card.outcome ?? '';
+    // A card framed by a brief line is described by its outcome: the six sourced reports share one preset (its summary
+    // would make them read alike), and a kind-framed default option (Respond · RFP, Rework · Condense) describes only
+    // that kind, not the card.
+    const framed = card.brief !== undefined || defOpt?.brief !== undefined;
+    const summary = (framed ? card.outcome : undefined) ?? defOpt?.summary ?? (own.workflow !== null ? served.defs.get(own.workflow)?.summary : undefined) ?? card.outcome ?? '';
     cards.push({
       ...own.resolved,
       id: card.id,
