@@ -2106,6 +2106,26 @@ export function registerRoutes(
   /** Repo root for a repo ref, from the registry — shared by the reprovision path below. */
   const repoRootOf = async (repoRef: string): Promise<string | undefined> =>
     (await adapter.listRepos()).find((r) => r.id === repoRef)?.root_path;
+  /** The lookups a review-change exclusion reads (the launch and the job proposal read the same ones, CJ13). */
+  const reviewChangeDeps = (repoRef: string, repoRoot: string): ReviewChangeDeps => ({
+    repoRef,
+    repoRoot,
+    views: () => adapter.sessionsDetail(),
+    deliveredUrl: (id) => deliveryIndex.urlFor(id),
+    pushed: (id) => deliveryIndex.pushedFor(id),
+    deliveredCommit: (id) => deliveryIndex.commitFor(id),
+    revisesPr: (id) => retryIndex.revisesPrFor(id),
+    gh: runtime.reviewChange?.gh ?? defaultGhExec,
+    git: runtime.reviewChange?.git ?? (async (args, cwd) => {
+      try {
+        return { ...(await execCapped('git', args, { cwd, timeout: 5_000 })), code: 0 };
+      } catch (err) {
+        // Only exit 1 proves non-membership; preserve it separately from lookup failures.
+        const code = (err as { code?: unknown }).code;
+        return { code: typeof code === 'number' ? code : null, stdout: '', stderr: message(err) };
+      }
+    }),
+  });
   /** DES-L9: PR number → head branch, through `gh pr view` unless the runtime injected an answerer. */
   const resolvePullRequest = runtime.resolvePullRequest ?? resolvePullRequestViaGh;
   /** crew#627: the intent's linked issues, read under the daemon's identity at launch. */
@@ -3608,25 +3628,7 @@ export function registerRoutes(
       delete input.deliver;
       const root = await repoRootOf(b.repoRef);
       if (root === undefined) return reply.code(404).send({ error: `repoRef names an unknown repo: ${b.repoRef}` });
-      const ex = await reviewChangeExclusion(envelopeWords, {
-        repoRef: b.repoRef,
-        repoRoot: root,
-        views: () => adapter.sessionsDetail(),
-        deliveredUrl: (id) => deliveryIndex.urlFor(id),
-        pushed: (id) => deliveryIndex.pushedFor(id),
-        deliveredCommit: (id) => deliveryIndex.commitFor(id),
-        revisesPr: (id) => retryIndex.revisesPrFor(id),
-        gh: runtime.reviewChange?.gh ?? defaultGhExec,
-        git: runtime.reviewChange?.git ?? (async (args, cwd) => {
-          try {
-            return { ...(await execCapped('git', args, { cwd, timeout: 5_000 })), code: 0 };
-          } catch (err) {
-            // Only exit 1 proves non-membership; preserve it separately from lookup failures.
-            const code = (err as { code?: unknown }).code;
-            return { code: typeof code === 'number' ? code : null, stdout: '', stderr: message(err) };
-          }
-        }),
-      });
+      const ex = await reviewChangeExclusion(envelopeWords, reviewChangeDeps(b.repoRef, root));
       if (!ex.ok) return reply.code(409).send({ code: ex.code, error: ex.error });
       const excluded = b.reducedAssurance === true ? [] : ex.excludeSeats;
       if (b.reducedAssurance !== true) {
@@ -5611,6 +5613,12 @@ export function registerRoutes(
     },
     qeOff: async () => addonSupportsQeOverride() && (await qeAcceptanceNow()) === 'off',
     powerRefusal: chatJobPowerRefusal,
+    reviewAuthors: async (repoRef, words) => {
+      const root = await repoRootOf(repoRef);
+      if (root === undefined) return null;
+      const ex = await reviewChangeExclusion(words, reviewChangeDeps(repoRef, root));
+      return ex.ok ? ex.excludeSeats : null;
+    },
     powerPresets: async (projectId) => {
       if (!powerSupported() || ((await adapter.getSettings()).powerModeDefault ?? true) === false || typeof adapter.listPresets !== 'function') return null;
       // The launch's own source (namesPreset): this project's presets, else the global ones.

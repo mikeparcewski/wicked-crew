@@ -74,7 +74,7 @@ interface Rig {
 
 const CHAT = 'c1';
 
-function rig(o: { roster?: Array<{ key: string; name: string }>; repos?: Array<{ id: string; name: string }> } = {}): Rig {
+function rig(o: { roster?: Array<{ key: string; name: string }>; repos?: Array<{ id: string; name: string }>; reviewAuthors?: ChatProposalDeps['reviewAuthors']; powerPresets?: ChatProposalDeps['powerPresets'] } = {}): Rig {
   const r: Rig = {
     svc: null as unknown as ChatProposals,
     records: [],
@@ -117,6 +117,8 @@ function rig(o: { roster?: Array<{ key: string; name: string }>; repos?: Array<{
     qeOff: async () => r.qeOff,
     preflight: async () => r.preflightAnswer,
     powerRefusal: async () => r.powerAnswer,
+    ...(o.reviewAuthors !== undefined ? { reviewAuthors: o.reviewAuthors } : {}),
+    ...(o.powerPresets !== undefined ? { powerPresets: o.powerPresets } : {}),
     reshapeReject: async (_run, _actor, _pid, expect) => {
       r.rejects += 1;
       r.rejectExpect = expect ?? null;
@@ -442,6 +444,62 @@ describe('codex/pi r1 folds', () => {
     await say(r, 't1', 'make it a risk analysis');
     await reply(r, 't1', { revises: p.pid, edits: { card: 'risk' } });
     expect(open(r).question).toMatchObject({ kind: 'lost_check', lostSeats: ['excludeChangeAuthors'] });
+  });
+
+  // CJ13 (fold 26): the builder of the PR (claude, the chat's lead) was the proposal's default lead, the launch dropped it
+  // from the roster and refused primary=claude with a 502; the passage also listed it among the helpers.
+  it('a review of a change is led and helped only by seats that did not write it (CJ13)', async () => {
+    const asked: Array<[string, string]> = [];
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async (repoRef, words) => { asked.push([repoRef, words]); return ['claude']; } });
+    await pick(r, 'review-change', { words: 'review pull request 9' });
+    const p = open(r);
+    expect(asked).toEqual([['r-pay', 'review pull request 9']]);
+    expect(p.seats?.lead).toBe('codex');
+    expect(p.seats?.keys).toEqual(['codex', 'pi']);
+    const seats = p.sentence!.tokens.find((t) => t.kind === 'seats')!;
+    expect(seats.label).not.toMatch(/Claude/);
+    expect((seats.swap?.choices ?? []).map((c) => c.label)).toEqual(['pi leads']);
+    expect(r.launcher.launched).toHaveLength(0);
+    // A lead swap to the author is not taken; a swap to another reviewer is (and keeps the author out).
+    await swap(r, p.pid, { lead: 'claude' }, 'lead-claude');
+    expect(open(r).seats?.lead).toBe('codex');
+    await swap(r, open(r).pid, { lead: 'pi' }, 'lead-pi');
+    expect(open(r).seats).toMatchObject({ lead: 'pi', keys: ['pi', 'codex'] });
+  });
+
+  it('a review whose every seat wrote the change keeps the roster, so the launch refuses it by name (CJ13)', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async () => ['claude', 'codex', 'pi'] });
+    await pick(r, 'review-change', { words: 'review pull request 9' });
+    expect(open(r).seats?.lead).toBe('claude');
+  });
+
+  it('an unreadable change, or another card, keeps the roster as it is (CJ13)', async () => {
+    const failing = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async () => { throw new Error('gh down'); } });
+    await pick(failing, 'review-change', { words: 'review pull request 9' });
+    expect(open(failing).seats?.lead).toBe('claude');
+    let calls = 0;
+    const other = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async () => { calls += 1; return ['claude']; } });
+    await pick(other, 'migrate', { option: 'upgrade', words: 'bump to node 22' });
+    expect(calls).toBe(0);
+    expect(open(other).seats?.lead).toBe('claude');
+  });
+
+  // CJ13 (fold 26) reported a seats swap turning plan review off. Crew's half: every token swap keeps the job's power
+  // choice (the Review plan switch itself is the browser's own setting, studio's store).
+  it.each([
+    ['lead', { lead: 'codex' }],
+    ['repository', { repoRef: 'r-bill' }],
+    ['depth', { depth: 'deep' }],
+  ] as const)('a %s swap keeps the Start\'s power choice (CJ13)', async (_name, edits) => {
+    const r = rig({ powerPresets: async () => new Set(['review-change']) });
+    await pick(r, 'review-change', { words: 'review pull request 9 in payments-service', repoRef: 'r-pay' } as never);
+    let p = open(r);
+    if (p.repoRefs === undefined) { await swap(r, p.pid, { repoRef: 'r-pay' }, 'repo'); p = open(r); }
+    expect(p.powerChoice).toBe(true);
+    await swap(r, p.pid, edits as ProposalRevisionEdits, `swap-${_name}`);
+    const v2 = open(r);
+    expect(v2.pid).not.toBe(p.pid);
+    expect(v2.powerChoice).toBe(true);
   });
 
   it.each([

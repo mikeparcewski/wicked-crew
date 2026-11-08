@@ -73,6 +73,7 @@ import type { CatalogSeed } from '../workflow-catalog/catalog-data.js';
 import type { ServedState } from '../workflow-catalog/build-v2.js';
 import { parseCommand, resolveOption } from '../workflow-catalog/build-v2.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
+import { REVIEW_CHANGE_WORKFLOW } from './review-change.js';
 import {
   checksLabel,
   ownWords,
@@ -86,6 +87,7 @@ import {
   proposalKindOf,
   qeSkipBound,
   requestDigest,
+  repoOf,
   resolveJob,
   SEAT_WORDS,
   seatProtections,
@@ -673,6 +675,9 @@ export interface ChatProposalDeps {
   /** (api-types 0.196.0) Where this daemon has power mode and Power mode for new jobs is on, the presets a power launch
    *  in `projectId` accepts (a job's Start then chooses how it runs); else `null`. Absent = none. */
   powerPresets?(projectId: string | null): Promise<ReadonlySet<string> | null>;
+  /** (CJ13) The seats that wrote the change a review-change job's words name, in `repoRef` (the launch's own
+   *  exclusion); `null` when it cannot be read (the launch then decides). Absent = none excluded. */
+  reviewAuthors?(repoRef: string, words: string): Promise<readonly string[] | null>;
   /** Whether the chat's client renders job proposals (`accepts: ['job']`, its newest declaration). Absent = no. */
   acceptsJobs?(chatId: string): boolean;
   /** What the v2 catalog resolves against now, as a launch filed in `projectId` reads it. */
@@ -2292,14 +2297,32 @@ export class ChatProposals {
     }
   }
 
+  /**
+   * (CJ13) A review of a change is never led or checked by a seat that wrote it: the launch drops the change's authors
+   * from its roster, so the proposal's seats are chosen without them (the default lead included) and the passage names
+   * none of them. A read that fails, or that would leave no seat, keeps the roster: the launch then refuses by name
+   * (`no_independent_reviewer`, with its reduced-assurance offer).
+   */
+  private async reviewRoster(facts: Pick<JobFacts, 'card' | 'option' | 'words' | 'details' | 'repoRef'>, ctx: JobContext): Promise<JobContext> {
+    const card = CATALOG_V2_CARDS.find((c) => c.id === facts.card);
+    const r = card === undefined ? null : resolveOption(card.id, optionFor(card, facts.option), ctx.served);
+    const repo = repoOf(facts, ctx.chat);
+    if (r?.workflow !== REVIEW_CHANGE_WORKFLOW || repo === null || this.deps.reviewAuthors === undefined) return ctx;
+    const authors = await this.deps.reviewAuthors(repo.id, briefOf(facts)).catch(() => null);
+    if (authors === null || authors.length === 0) return ctx;
+    const roster = ctx.roster.filter((s) => !authors.includes(s.key));
+    return roster.length === 0 ? ctx : { ...ctx, roster };
+  }
+
   /** Resolve the revision's shape first, then load only the choices that its input checks need. */
   private async mergeJobRevision(parent: ArtifactProposal, edits: ProposalRevisionEdits, ctx: JobContext): Promise<ReturnType<typeof mergeRevision>> {
     const shape = mergeRevision(parent, {
       ...(edits.card !== undefined ? { card: edits.card } : {}),
       ...(edits.option !== undefined ? { option: edits.option } : {}),
+      ...(edits.repoRef !== undefined ? { repoRef: edits.repoRef } : {}),
     }, ctx).facts;
     await this.loadJobSources(shape, ctx);
-    return mergeRevision(parent, edits, ctx);
+    return mergeRevision(parent, edits, await this.reviewRoster(shape, ctx));
   }
 
   /** Job proposals are on: the flag, the catalog read and the operation. */
@@ -2371,6 +2394,7 @@ export class ChatProposals {
     const card = CATALOG_V2_CARDS.find((c) => c.id === facts.card);
     const r = card === undefined ? null : resolveOption(card.id, optionFor(card, facts.option), ctx.served);
     await this.loadJobSources(facts, ctx);
+    ctx = await this.reviewRoster(facts, ctx);
     if (r?.resolved.inputs.some((i) => i.id === 'documents')) {
       if (facts.inputs['documents'] === undefined) {
         const { binding } = bindingOf(records, ctx.turnId ?? '\u0000');
