@@ -942,13 +942,20 @@ export function inputLines(p: Pick<ArtifactProposal, 'inputs' | 'needs'>): strin
 }
 
 /** Go always declares the card's documents, including none, so a retry cannot inherit files the card never showed. */
-export function jobInputsOfProposal(p: ArtifactProposal): { documents?: string[]; sources?: string[] } {
+export function jobInputsOfProposal(p: ArtifactProposal, heldPick?: (runId: string) => string[] | null): { documents?: string[]; sources?: string[] } {
   const out: { documents?: string[]; sources?: string[] } = { documents: [] };
   if (p.needs?.some((n) => n.id === 'documents' && n.kind === 'documents')) {
     out.documents = p.sentence?.tokens.find((t) => t.kind === 'documents')?.documents?.filter((s) => s.status === 'ok').map((s) => s.token) ?? [];
   }
   const sources = p.inputs?.['sources'];
   if (p.needs?.some((n) => n.id === 'sources' && n.kind === 'sources')) out.sources = sources?.kind === 'sources' ? [...sources.ids] : [];
+  // (CS10) A reshape keeps the held run's pick when its new shape takes no sources: changing the card never widens what
+  // the job reads. (A reshape whose shape takes sources carries the held proposal's pick in its inputs.) The launch
+  // checks it again against the switches, like any sent pick.
+  if (out.sources === undefined && p.reshapes !== undefined && heldPick !== undefined) {
+    const held = heldPick(p.reshapes);
+    if (held !== null) out.sources = [...held];
+  }
   return out;
 }
 

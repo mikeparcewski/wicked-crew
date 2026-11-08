@@ -62,7 +62,7 @@ import {
 import { scrubResult } from './redact.js';
 import { UpstreamCallError } from './upstream-error.js';
 import type { McpRegistry } from './registry.js';
-import { FENCE_REASON, FENCE_REMEDY, FENCE_RULE, type RunFence } from './run-fence.js';
+import { FENCE_REASON, FENCE_REMEDY, FENCE_RULE, pickAllows, PICK_RULE, type RunFence, type SourcePicks } from './run-fence.js';
 import { scrubSecrets } from './secrets.js';
 import {
   ESTATE_PROPOSAL_TOOL,
@@ -153,6 +153,8 @@ export interface McpBrokerDeps {
   /** (DES-CATALOG-002 §2.3) A run fenced off every capability (the `detect-shape` turn): each of its calls is refused
    *  once its unit is known, before anything runs. Absent = no run is fenced. */
   fence?: RunFence;
+  /** A job's pick narrows source calls across every unit of its run. */
+  picks?: SourcePicks;
 }
 
 interface BreakerState {
@@ -505,10 +507,8 @@ export class McpBroker {
   private async callGated(gate: DataGate, span: Span, body: McpCallBody, server: string, tool: string): Promise<McpBrokerAnswer> {
     span.kind = 'sql';
     let scope: Awaited<ReturnType<DataGate['resolve']>>;
-    let admitted: Awaited<ReturnType<DataGate['admitted']>>;
     try {
       scope = await gate.resolve(body.token);
-      admitted = scope === null ? null : await gate.admitted(body.token, [{ server, tool, disclosure: null, args: body.args ?? {} }]);
     } catch (err) {
       const msg = message(err);
       if (err instanceof GateTokenError) {
@@ -518,11 +518,37 @@ export class McpBroker {
       this.deps.log?.(`[mcp] ${body.subject}: the token's unit could not be read: ${msg}`);
       return this.refuse(span, 'guard_error', 'guard_error', 'broker:gate', [], "the token's unit could not be read", 'nothing ran; try again, and report it if it persists', null, null);
     }
-    if (scope === null || admitted === null) {
+    if (scope === null) {
       return this.refuse(span, 'guard_error', 'guard_error', 'broker:gate', [], 'the linked engine cannot bind or judge a data-source call (wicked-core-ts predates resolveEstateScope or listMcpTools)', 'upgrade the engine; no data-source call runs unjudged', null, null);
     }
     span.verdict = { decision: 'allow', subject: body.subject, class: 'read', ruleIds: [], obligations: [], claimId: '', unit: scope.unit };
     if (await this.fenced(scope.unit.runId)) return this.refuse(span, 'denied', 'deny', FENCE_RULE, [FENCE_RULE], FENCE_REASON, FENCE_REMEDY, null, null);
+    // The job's pick is a run boundary, before admission or budget: a later unit cannot widen it.
+    if (!pickAllows(this.deps.picks, scope.unit.runId, server)) {
+      let reason = "this job's source pick could not be read";
+      try {
+        const ids = this.deps.picks?.get(scope.unit.runId);
+        reason = `this job did not pick ${server}; it reads only ${ids !== null && ids !== undefined && ids.length > 0 ? ids.join(', ') : 'no sources'}`;
+      } catch {
+        // Forgetting an unreadable pick would widen access; the refusal still carries the pick rule.
+      }
+      return this.refuse(span, 'denied', 'deny', PICK_RULE, [PICK_RULE], reason, 'work from the sources and documents this job picked', null, null);
+    }
+    let admitted: Awaited<ReturnType<DataGate['admitted']>>;
+    try {
+      admitted = await gate.admitted(body.token, [{ server, tool, disclosure: null, args: body.args ?? {} }]);
+    } catch (err) {
+      const msg = message(err);
+      if (err instanceof GateTokenError) {
+        if (msg.startsWith('bad_request')) return { status: 400, body: { error: msg, code: 'bad_request' } };
+        return { status: 401, body: { error: msg, code: 'invalid_token' } };
+      }
+      this.deps.log?.(`[mcp] ${body.subject}: the call could not be judged: ${msg}`);
+      return this.refuse(span, 'guard_error', 'guard_error', 'broker:gate', [], 'the data-source call could not be judged', 'nothing ran; try again, and report it if it persists', null, null);
+    }
+    if (admitted === null) {
+      return this.refuse(span, 'guard_error', 'guard_error', 'broker:gate', [], 'the linked engine cannot bind or judge a data-source call (wicked-core-ts predates resolveEstateScope or listMcpTools)', 'upgrade the engine; no data-source call runs unjudged', null, null);
+    }
     const judged = admitted.get(body.subject);
     if (judged === undefined) {
       return this.refuse(span, 'denied', 'deny', 'engine:gated-tool', ['engine:gated-tool'], `${body.subject} is refused for this unit by the engine (an operator policy, or an engine that predates DES-KNOWLEDGE-DATA-001 §9.3 and gives an Apps run no source tool)`, 'work from the files and the task as given', null, null);

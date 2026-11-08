@@ -10,7 +10,7 @@ import type { McpToolsResponse, McpVisibleTool } from '../core/types.js';
 import type { DataGate } from '../knowledge/gate/gate.js';
 import { mcpSubject } from './classify.js';
 import type { McpCallableTool } from './registry.js';
-import type { RunFence } from './run-fence.js';
+import { pickAllows, type RunFence, type SourcePicks } from './run-fence.js';
 
 export interface McpToolListDeps {
   registry: { callableTools(): Promise<McpCallableTool[]> };
@@ -24,10 +24,12 @@ export interface McpToolListDeps {
   gate?: Pick<DataGate, 'resolve' | 'reach' | 'sources'>;
   /** (DES-CATALOG-002 §2.3) A fenced run's units are listed no tool at all (the `detect-shape` turn). */
   fence?: RunFence;
+  /** A job's pick narrows source tools across every unit of its run. */
+  picks?: SourcePicks;
 }
 
 /** The gated tools a unit's project reaches, as registry-shaped tools (judged like the rest), and every gated server's name. */
-async function gatedToolsFor(gate: McpToolListDeps['gate'], token: string): Promise<{ tools: McpCallableTool[]; servers: Set<string> }> {
+async function gatedToolsFor(gate: McpToolListDeps['gate'], token: string, picks: SourcePicks | undefined): Promise<{ tools: McpCallableTool[]; servers: Set<string> }> {
   if (gate === undefined) return { tools: [], servers: new Set() };
   const servers = new Set((await gate.sources()).map((s) => s.name));
   try {
@@ -36,7 +38,7 @@ async function gatedToolsFor(gate: McpToolListDeps['gate'], token: string): Prom
     const reach = await gate.reach(scope.projectId, scope.repoId ?? null);
     return {
       servers,
-      tools: reach.map((t): McpCallableTool => ({ server: t.server, id: t.id, tool: t.tool, disclosure: t.disclosure, kind: 'mcp-stdio', annotations: { readOnlyHint: true }, classOverride: 'read', description: t.description, inputSchema: t.inputSchema })),
+      tools: reach.filter((t) => pickAllows(picks, scope.unit.runId, t.server)).map((t): McpCallableTool => ({ server: t.server, id: t.id, tool: t.tool, disclosure: t.disclosure, kind: 'mcp-stdio', annotations: { readOnlyHint: true }, classOverride: 'read', description: t.description, inputSchema: t.inputSchema })),
     };
   } catch {
     // A token the engine does not know is the lister's to answer (401); anything else leaves them out.
@@ -63,7 +65,7 @@ export async function listUnitTools(deps: McpToolListDeps, token: string): Promi
   // The gate's tools, by exact subject: the person's switches are their consent, so no first-use ask.
   const gated = new Set<string>();
   try {
-    const g = await gatedToolsFor(deps.gate, token);
+    const g = await gatedToolsFor(deps.gate, token, deps.picks);
     for (const t of g.tools) gated.add(mcpSubject(t.server, t.tool));
     callable = [...(await deps.registry.callableTools()).filter((t) => !g.servers.has(t.server)), ...g.tools];
   } catch (err) {

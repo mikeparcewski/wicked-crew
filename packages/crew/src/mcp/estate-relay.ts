@@ -53,6 +53,7 @@ import { spawn as nodeSpawn } from 'node:child_process';
 
 import { callEstateToolRaw, estateKnowledgeEnv, estateMcpExe, resolveMemoryDbPath, type EstateMcpIo } from '../core/estate-mcp-client.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
+import type { SourcePicks } from './run-fence.js';
 
 export { ESTATE_SERVER } from './classify.js';
 
@@ -293,6 +294,47 @@ export interface EstateRelayDeps {
    * the registry. Absent = the empty set: only dep-free knowledge reaches a worker. Throws = the call is refused.
    */
   visible?: (scope: EstateUnitScope) => Promise<string[]>;
+  /**
+   * (CS10, DES-CATALOG-002 §2.d) The run's source pick, read per call. Read ONCE per call, before `sourceNames`
+   * (so a no-pick run never acquires `sourceNames` as a new failure dependency): `null` (no pick) leaves the set
+   * alone and never reads the mapping; an EXPLICIT pick narrows the set through {@link narrowVisibleToPick}, so a
+   * recalled item derived from an unpicked source is dropped by {@link releaseVisible}. A pick store that throws
+   * refuses the call (fail closed), like a `visible` that throws. `picks` ABSENT leaves the set unchanged.
+   */
+  picks?: SourcePicks;
+  /**
+   * (CS10) The name of every `source:<id>` the visible set can carry, read per call: every registered SQL source
+   * (the gate's `sources()`, `{id: registryId, name}`) AND every PM tracker id mapped to its owning PM entry name
+   * (PM projections spell a tracker's dep `source:<trackerId>`, not the owner's registry id). Under an EXPLICIT
+   * pick, a `source:<id>` whose id this mapping does not resolve fails closed (it is dropped) — so a tracker whose
+   * owner is not supplied here never slips past the pick. When `picks` yields an explicit pick but this dep is
+   * absent, no `source:` entry can be resolved and every one is dropped (fail closed).
+   */
+  sourceNames?: () => Promise<Array<{ id: string; name: string }>>;
+}
+
+/**
+ * (CS10, DES-CATALOG-002 §2.d piece 4 ·3) Narrow a visible set to an EXPLICIT source pick (`pickedNames`, the names
+ * the run's pick carries). The owner of each `source:<id>` is resolved through `sources` (id -> name), which covers
+ * every registered SQL source AND every PM tracker id mapped to its owning PM entry name; a `source:<id>` is kept
+ * only when its owner is in the pick, so {@link releaseVisible} drops a recalled item derived from an unpicked
+ * source. FAIL CLOSED: a `source:<id>` whose id resolves to no known owner is DROPPED, not preserved — an unmapped
+ * source (a PM tracker whose owner was not supplied, or an entry removed between the visible and mapping snapshots)
+ * must not slip past an explicit pick. `repo:` and every non-source entry is kept untouched. Pure: the caller has
+ * already resolved the pick (the null/absent cases, and a throwing store, are {@link EstateRelay.visibleFor}'s).
+ */
+export function narrowVisibleToPick(
+  visible: readonly string[],
+  pickedNames: readonly string[],
+  sources: ReadonlyArray<{ id: string; name: string }>,
+): string[] {
+  const picked = new Set(pickedNames);
+  const nameOf = new Map(sources.map((s) => [s.id, s.name]));
+  return visible.filter((entry) => {
+    if (!entry.startsWith('source:')) return true;
+    const name = nameOf.get(entry.slice('source:'.length));
+    return name === undefined ? false : picked.has(name); // unmapped owner -> dropped (fail closed)
+  });
 }
 
 /** The relay's resolved dependencies, as the broker drives them. */
@@ -322,9 +364,23 @@ export class EstateRelay {
     };
   }
 
-  /** The unit's visible set (module doc), read now. */
+  /**
+   * The unit's visible set (module doc), read now, then narrowed to the run's source pick (CS10): a source the run
+   * did not pick is dropped before release. The pick is read ONCE, before the mapping: a no-pick run returns its
+   * ordinary visibility immediately and never reads `sourceNames` (so a mapping fault cannot refuse a call that a
+   * null pick does not need). An explicit pick requires the mapping to resolve owners; when `sourceNames` is absent
+   * no owner resolves and every `source:` entry fails closed. A `visible`, `sourceNames` or pick store that throws
+   * propagates, so the broker refuses the call (fail closed).
+   */
   async visibleFor(scope: EstateUnitScope): Promise<string[]> {
-    return this.deps.visible === undefined ? [] : [...(await this.deps.visible(scope))];
+    const visible = this.deps.visible === undefined ? [] : [...(await this.deps.visible(scope))];
+    if (this.deps.picks === undefined) return visible;
+    // Read the pick first (fail closed on a throw); a null/absent pick needs no mapping read.
+    const pickedNames = this.deps.picks.get(scope.unit.runId);
+    if (pickedNames === null) return visible;
+    // An explicit pick: resolve owners to enforce it. No mapping dep -> no owner resolves -> every source: drops.
+    const sources = this.deps.sourceNames === undefined ? [] : await this.deps.sourceNames();
+    return narrowVisibleToPick(visible, pickedNames, sources);
   }
 
   refusal(tool: string, scope: EstateUnitScope): EstateRefusal | null {

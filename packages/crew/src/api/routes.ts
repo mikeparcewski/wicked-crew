@@ -4257,7 +4257,7 @@ export function registerRoutes(
             ...(projectId !== null && projectId !== DEFAULT_PROJECT_ID ? { projectId } : {}),
             ...common,
             // (CS4) The documents and the source pick, as tokens and names (never flattened into the brief's prose).
-            ...jobInputsOfProposal(p),
+            ...jobInputsOfProposal(p, runtime.runSourcePicks !== undefined ? (runId) => runtime.runSourcePicks!.get(runId) : undefined),
             // A power run when the person's Start chose one (checked against this daemon just now); otherwise it
             // stops at its first plan, as every chat job did before (operator ruling 2026-11-06).
             // (A power launch overrides the plan hold; launchRun refuses rather than run it phased, `powerRequired`.)
@@ -10671,6 +10671,8 @@ export function registerRoutes(
     ...(runtime.mcp !== undefined ? { registry: runtime.mcp, toolLister: () => CoreAdapter.mcpToolLister() } : {}),
     // DES-CATALOG-002 §2.3: a `detect-shape` run is listed no tool (its fence is its identity).
     fence: daemonRunFence((runId) => adapter.launchedWorkflowOfRun(runId)),
+    // (DES-CATALOG-002 CS10) A unit is listed no tool of a source its job did not pick (the broker refuses the call too).
+    ...(runtime.runSourcePicks !== undefined ? { picks: runtime.runSourcePicks } : {}),
     ...(runtime.mcpBroker !== undefined ? { broker: runtime.mcpBroker } : {}),
     ...(runtime.dataGate !== undefined ? { gate: runtime.dataGate } : {}),
     ...(mcpPolicies !== undefined ? { policies: mcpPolicies } : {}),

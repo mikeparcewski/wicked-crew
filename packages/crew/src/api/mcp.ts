@@ -86,7 +86,7 @@ import { MCP_PREVIEW_ROLES, MCP_RUN_MODES, McpLedgerEditError } from '../mcp/pol
 import { agentServerView, configOf, isWriteGrant, McpRegistryError, type McpRegistry } from '../mcp/registry.js';
 import { restTarget } from '../mcp/rest.js';
 import { listUnitTools } from '../mcp/tool-list.js';
-import type { RunFence } from '../mcp/run-fence.js';
+import type { RunFence, SourcePicks } from '../mcp/run-fence.js';
 import type { DataGate } from '../knowledge/gate/gate.js';
 import { McpRegistryCorruptError, type McpServerRecord } from '../mcp/registry-store.js';
 import { parseSecretRef, SecretStoreError } from '../mcp/secrets.js';
@@ -303,6 +303,8 @@ export interface McpRouteDeps {
   toolLister?: () => ((requestJson: string) => Promise<string>) | null;
   /** (DES-CATALOG-002 §2.3) A fenced run's units are listed no tool (the `detect-shape` turn). */
   fence?: RunFence;
+  /** (DES-CATALOG-002 CS10) Each run's source pick: a unit is listed no tool of a source its job did not pick. */
+  picks?: SourcePicks;
   /** (DES-KNOWLEDGE-DATA-001 §7) The data gate: live sources' tools, listed for a unit as their switches allow. */
   gate?: DataGate;
   /** The preview and approvals (S6). Absent → those routes answer 503; the S2 routes are unchanged. */
@@ -789,7 +791,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       if (!parsed.success) {
         return reply.code(400).send({ error: `body: ${parsed.error.issues.map((i) => `${i.path.join('.') || 'body'} ${i.code}`).join('; ')}`, code: 'bad_request' });
       }
-      const answer = await listUnitTools({ registry, lister: toolLister, ...(deps.gate !== undefined ? { gate: deps.gate } : {}), ...(deps.fence !== undefined ? { fence: deps.fence } : {}) }, parsed.data.token);
+      const answer = await listUnitTools({ registry, lister: toolLister, ...(deps.gate !== undefined ? { gate: deps.gate } : {}), ...(deps.fence !== undefined ? { fence: deps.fence } : {}), ...(deps.picks !== undefined ? { picks: deps.picks } : {}) }, parsed.data.token);
       return reply.code(answer.status).send(answer.body);
     },
   );
