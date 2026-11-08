@@ -31,7 +31,7 @@ Local-first: loopback only, no accounts, no billing, no model reselling. Crew dr
   sources' structure — never their values. `npx wicked-installer install wicked-estate`
   downloads a sha256-verified prebuilt binary into `~/.local/bin` (about 20 s) on macOS, glibc Linux
   (x64/arm64) and Windows x64; on other platforms it builds with cargo, which needs a Rust toolchain.
-- **wicked-garden ≥ 12.64.0**, the skills every governed worker follows (including the Apps skill an
+- **wicked-garden ≥ 12.66.1**, the skills every governed worker follows (including the Apps skill an
   app's chat builds with). crew does not vendor it, and without it every launch is refused:
   `npx wicked-installer install wicked-garden`, then restart `wicked-crew serve`.
 
@@ -62,7 +62,7 @@ npm install -g wicked-crew
 wicked-crew serve
 ```
 
-Crew uses the first usable garden source in this order (automatic sources need version ≥ 12.64.0):
+Crew uses the first usable garden source in this order (automatic sources need version ≥ 12.66.1):
 
 1. `WICKED_CREW_SKILLS_SOURCE`, an explicit plugin root.
 2. The Claude marketplace cache under `$CLAUDE_CONFIG_DIR` or `~/.claude` (highest valid version).
@@ -95,7 +95,7 @@ engine cannot store dead-letter to
 `WICKED_APPS_EMIT_DEADLETTER` is honoured), are counted on
 `GET /api/v1/diagnostics` → `governance` (a `governance.deadletter` finding), and are drained back
 with `wicked-crew governance replay <outbox>`. The interactive document bridge is spawned on demand
-as `npx wicked-interactive@^0.15.0` (0.15.0 lands a chat-made draft only on the head it started from; 0.14.1
+as `npx wicked-interactive@^0.16.0` (0.16.0 keeps a demo cut's history and restores an earlier cut; 0.15.0 lands a chat-made draft only on the head it started from; 0.14.1
 carries the demo import crew's demo runs use; 0.12.0
 confined export asset reads to the document's own and approved roots); `WICKED_INTERACTIVE_SPEC` overrides the range (semver range
 only, validated; invalid values are named on the boot line and ignored, a floor below crew's need

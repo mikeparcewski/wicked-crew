@@ -10,29 +10,31 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
-### Fixed
+## [0.18.0] — 2026-11-08
 
-- **The roster says where a container helper signs in (api-types 0.199.0).** On the container floor each container seat
-  now carries `sign_in_on`: `host` for codex, pi and opencode (their sign-in runs this computer's own CLI, the engine's
-  host login), `container` for claude and copilot (a login container). Studio used crew's host version probe alone, so
-  with no `claude` on this computer's PATH every helper read "Not installed" and Sign in was gone, although the seat
-  runs from its image and claude signs in through a login container. Crew-only: the engine never sees the field.
-- **Nerve Center no longer shows "()" when Docker is down.** With the container runtime stopped every helper's sign-in
-  reads unknown, so "No helper can take work" said "Every helper is signed out or benched ()". Now every seat unknown
-  reads "No helper’s sign-in can be confirmed right now", and a roster of mixed states names each helper with its
-  own state ("No helper is free to take work (…)") instead of a false "every" (first-run-2 N4).
-- **The README lists every place crew looks for wicked-garden.** It named only Claude Code's two locations; it now
-  gives all five in crew's resolution order: `WICKED_CREW_SKILLS_SOURCE`, Claude Code's plugin cache, the
-  installer's copy, the npm-global package, then Codex's plugin cache (first-run-2 N7).
-- **A review of a change starts on a PR a crew run built (CJ13).** The job proposal chose the builder (the chat's lead)
-  as its default lead, the launch dropped the change's authors from its roster, and Start failed with a 502 ("primary
-  names a seat that is not in this launch's roster"). The proposal now reads the launch's own exclusion and resolves its
-  lead, the helpers it names and its lead swaps without the authors, read from the change the revision names (its words,
-  details, inputs and repository). A failed read, or a roster of authors only, keeps the roster, and the launch refuses
-  it as before.
+Every card that said "coming" is live: research and analysis reports re-checked at their sources, model run cost,
+Respond to an RFP and Rework your documents, Review a change judged by seats that wrote none of it, jobs that take
+your documents and reach only the sources you picked, the web as a source, run plugins from a pack, and publishing
+an app. Also: which skills your helpers use, allow or revoke what an installed editor asks for, refine and theme by
+chat, the working document as every agent's context, and first-run fixes so a fresh install finds its tools and
+says plainly what is missing. Needs wicked-garden 12.66.1, wicked-core-ts 0.15.33 and wicked-interactive 0.16.0;
+bundles wicked-studio 0.16.0.
 
 ### Added
 
+- **Publish an app (DES-CATALOG-002 CS2; no api-types change).** Publish works end to end from crew, to a
+  site or a public embed (Teams is not offered), as one governed `apps-publish` run per publish: a check, then QE
+  (always), then your consent on the manifest, then produce. `POST /apps/:app/publish` (a person only) must name the
+  version the person saw (409 `stale_base`) and needs an accepted receipt and no turn or publish in flight. The check
+  re-checks every query and action on the saved tree without landing anything, rebuilds the manifest with the same
+  digest (a source, grant or table that changed fails it), and renders every page at 1440 and 390 px on sample data,
+  before and after each filter change, in crew's headless browser under a deny-all policy; anything that cannot
+  render fails closed. Seats that built a turn since the last publish never judge it. Every publish is a new run, so
+  another audience on the same tree asks QE and consent again. Nothing is pushed.
+- **Change Studio's look from the chat, with no run (DES-CHAT-ARTIFACTS-001 A7, G5).** A theme proposal is a patch
+  of Studio's own appearance. Its Go starts nothing: studio previews the colours, measures their contrast and saves
+  them, then answers Go with the change it applied, so the transcript and the audit record what changed. `capabilities.chatArtifacts.theme` is advertised,
+  and a theme is never refused because the chat already has a job running.
 - **The catalog flip: every card that said coming is live (DES-CATALOG-002 rev 8, CS8; no api-types change).** Research
   a question, Competitive or market analysis, Due diligence, Analyze documents, Critique, and Estimate and price run
   the `sourced-report` preset with a lens line, re-checked at the source by a seat that did not gather. Model run cost
@@ -64,7 +66,7 @@ mentioned only where a daemon release depends on them.
   posts nothing. Crew now records each delivery's commit (the exact `refs/heads` tip of the run branch, only when no
   phase ran after the deliver phase) on the `run.delivered` audit entry.
 - **A pack can install third-party run plugins, which read a run's events on the topics the install consent grants
-  (CS7; api-types `EditorView`, `EditorConformanceSummary`, unreleased).** `POST /api/v1/editors` now admits a spec-2
+  (CS7; api-types 0.198.0 `EditorView`, `EditorConformanceSummary`).** `POST /api/v1/editors` now admits a spec-2
   pack that declares `plugins[]` (with or without `editors[]`); each plugin passes the run-plugin conformance cases
   (`r0`-`r5`) and is recorded beside editors in the one id namespace. `GET /editors` lists each as an `EditorView`
   row (`inline: 'run-thread'`, its `observe[]` and `run_panels[]`) with `granted_topics` the engine decided `allow`
@@ -73,7 +75,7 @@ mentioned only where a daemon release depends on them.
   `install_only` (its topics are the install consent's); `GET /editors/:id/grants` answers the observe decisions.
 
 - **Which skills seats use, and which were handed but never used (operator ask; api-types `SkillUsageResponse`,
-  `SkillUsedEvent`, unreleased).** `GET /api/v1/skills/usage[?sinceGen=N]` answers, per skill: the generation it
+  `SkillUsedEvent`, api-types 0.198.0).** `GET /api/v1/skills/usage[?sinceGen=N]` answers, per skill: the generation it
   was introduced in, per CLI the 30- and 90-day counts and the last time for each signal (directed, opened, browsed,
   ran), when it was last used, and whether it was handed since generation N to a CLI whose use can be seen and not
   used since. "Used" means opened, or a script run credited to the skill. Directed and browsed are counted but are
@@ -86,7 +88,7 @@ mentioned only where a daemon release depends on them.
 
 - **A job takes the documents you attached and records the sources you picked (DES-CATALOG-002 CS4; api-types
   `ProposalInputValue` documents/sources, `ProposalToken` documents/sources, `LaunchRunBody.documents`/`sources`,
-  unreleased).** A job proposal for a card that takes documents fills them from the chat's attachments and the documents
+  api-types 0.198.0).** A job proposal for a card that takes documents fills them from the chat's attachments and the documents
   you named, says "2 documents", strikes one crew can't use with the reason, and asks for them (no Start) when a required
   set has none left. A card that reads sources shows the pick ("the web and support-pg"; Research and Competitive start
   with the web), lists every source of the project with whether it can be picked, and a source whose "Agents can query"
@@ -99,7 +101,7 @@ mentioned only where a daemon release depends on them.
   and staged again from the earlier run's chat, and its pick is checked again. `WICKED_RUN_DOCS_DIR` moves the
   documents folder (refused inside the state home).
 
-- **A person can allow or revoke what an installed editor asks for (F37; api-types `SetEditorGrantBody`, unreleased).**
+- **A person can allow or revoke what an installed editor asks for (F37; api-types 0.198.0 `SetEditorGrantBody`).**
   `POST /api/v1/editors/:id/grants {permission, allow, version, sha256, project?}` is the human-only writer of the
   `EDITOR-GRANTS` ledger the engine already reads. The press names the build the person was shown (409
   `build_changed` when the editor was updated meanwhile); allow writes that build's token, built from crew's own
@@ -143,8 +145,8 @@ mentioned only where a daemon release depends on them.
 
 - **Chat refines the open document, deck or page, and keeps the person's own edits (DES-CHAT-ARTIFACTS-001 A5;
   plugins-complete G4; api-types 0.197.0).** The refine launcher, its landing guard and the card's protected edits;
-  `capabilities.chatArtifacts.refine` turns on (and the launcher is registered) in a follow-up to the proposal-launcher
-  assembly, so a seat then proposes a `refine` card for a change to the open document instead of a new one. Its
+  `capabilities.chatArtifacts.refine` is on and the launcher is registered wherever the chat seam is armed (#1407), so
+  a seat proposes a `refine` card for a change to the open document instead of a new one. Its
   instructions say a change keeps the document; a new audience or form is new work; either reading gets one question. The card lists
   the person's protected edits (`ArtifactProposal.protected`, recomputed from the document's version lineage: a
   person's writes, deck moves and removals are kept; a run's version releases only what the person let that run
@@ -156,7 +158,7 @@ mentioned only where a daemon release depends on them.
   run lands nothing), and then only on the head it was accepted on (`expect_head`): a hand edit made meanwhile lands
   nothing and offers Try again on the new head. Every failure releases the chat and the document with the reason.
   Edit-seam and chat-seam landings now send `run_id`, so a run's version is never read as a person's edit. Needs
-  wicked-garden with `keep_check.py`.
+  wicked-garden 12.66.1 (`keep_check.py`).
 - **The run's working document is now its context document, and the name is true (operator ruling 2026-11-06; needs
   wicked-core-ts with `Core.supportsRunContext`, core#1325; api-types 0.198.0).** When the engine keeps a per-run context
   block, crew sets it from the person's own Goal, Approach and Constraints (each section whose latest write is a
@@ -184,9 +186,8 @@ mentioned only where a daemon release depends on them.
   that version's run announced, before interactive anchored and themed it; `null` = not measured, e.g. a version made
   by hand). Crew keeps the newest 500 records per document. crew's conformance runtime is now also made
   when a draft or refine is launched, and the floor prints the document with its Chromium (or the operator's
-  `WICKED_CHROME`), so the page count is measured instead of estimated. Needs wicked-garden with `leak_scan.py` and
-  `self_check.py --notes` (release garden first: an older self-check refuses the new flags and the floor reports
-  itself unavailable).
+  `WICKED_CHROME`), so the page count is measured instead of estimated. Needs wicked-garden 12.66.1 (`leak_scan.py` and
+  `self_check.py --notes`; an older self-check refuses the new flags and the floor reports itself unavailable).
 - **Requirements: code mismatches, code age and the minimum in force (operator rulings 2026-11-06; api-types
   0.197.0).** `GET /repos/:id/requirements` items carry `codeMismatch` (the code does not meet the requirement, and
   how; the requirement still counts), the page carries `mismatches` and takes `?mismatch=yes|no`, `codeDrift`
@@ -197,7 +198,7 @@ mentioned only where a daemon release depends on them.
   repository has no code graph yet). Needs a wicked-core with the 2026-11-06 requirements read; an older engine
   reads as before (`null` / 0).
 - **The web source: research reads the public web through crew's data gate (CS9; api-types: a `web` source kind and
-  the web source's setup and install types, unreleased).** Settings → Sources → the web source shows what it installs
+  the web source's setup and install types, 0.198.0).** Settings → Sources → the web source shows what it installs
   before anything does: search is SearXNG (AGPL-3.0, its official image pinned by digest
   `sha256:ffad724a…3cae`, run unmodified in your own container engine, Docker, Rancher Desktop or Podman, published on
   127.0.0.1 only), and reading is `mcp-server-fetch` 2026.11.4 (MIT) from a hash lock that pins every dependency
@@ -280,6 +281,18 @@ mentioned only where a daemon release depends on them.
 
 ### Changed
 
+- **crew 0.18.0 needs the matching family releases.** wicked-garden ≥ 12.66.1 (`REQUIRED_GARDEN_VERSION`: the
+  draft landing floor and refine keep check, editor and run-plugin conformance, learn's report mode and the Respond
+  and Rework kinds ship in 12.66.0, and 12.66.1's run-plugin scaffold reports its first height; an older garden is
+  passed over with a `too-old` finding). wicked-core-ts ^0.15.33 (the `sourced-report`, `run-cost` and
+  `interactive-draft-sourced` presets, run-plugin grants, skill usage and the run context block; 0.15.33 adds a
+  Research job that reads the web only through the web source you picked, and a Review a change whose "reject" is its
+  result). The interactive bridge is `npx wicked-interactive@^0.16.0` (a demo cut's history and restore; an override
+  such as `WICKED_INTERACTIVE_SPEC=^0.15.0` is reported as below the floor; a 0.15.x bridge already running keeps
+  serving until it restarts, crew#1288). The bundled studio is 0.16.0.
+- **The install docs match a fresh install (first-run C8).** The READMEs name uv (without it every launch is
+  refused), say wicked-estate and wicked-garden are required and installed for you by the installer's Quick Start,
+  add the `~/.local/bin` PATH step and give the start URL, `http://127.0.0.1:7701`.
 - **A person's Goal, Approach and Constraints in the working document now reach every later worker step, not only
   the next one (operator ruling 2026-11-06; the bridge until the engine keeps a per-run context block).** The
   person's CURRENT Goal, Approach and Constraints are one standing note, re-sent before every later worker step until
@@ -329,6 +342,18 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **The README lists every place crew looks for wicked-garden.** It named only Claude Code's two locations; it now
+  gives all five in crew's resolution order: `WICKED_CREW_SKILLS_SOURCE`, Claude Code's plugin cache, the
+  installer's copy, the npm-global package, then Codex's plugin cache (first-run-2 N7).
+- **Nerve Center no longer shows "()" when Docker is down.** With the container runtime stopped every helper's sign-in
+  reads unknown, so "No helper can take work" said "Every helper is signed out or benched ()". Now every seat unknown
+  reads "No helper’s sign-in can be confirmed right now", and a roster of mixed states names each helper with its
+  own state ("No helper is free to take work (…)") instead of a false "every" (first-run-2 N4).
+- **The roster says where a container helper signs in (api-types 0.199.0).** On the container floor each container seat
+  now carries `sign_in_on`: `host` for codex, pi and opencode (their sign-in runs this computer's own CLI, the engine's
+  host login), `container` for claude and copilot (a login container). Studio used crew's host version probe alone, so
+  with no `claude` on this computer's PATH every helper read "Not installed" and Sign in was gone, although the seat
+  runs from its image and claude signs in through a login container. Crew-only: the engine never sees the field.
 - **A Research job in a project the web source is not set up for says so (e2e-1105 CJ3; no api-types change).** The
   proposal note read "the web can't be read: not available on this daemon" when the web source was installed and
   healthy but scoped to another project. It now reads "the web can't be read: the web source is set up for project X
@@ -351,12 +376,19 @@ mentioned only where a daemon release depends on them.
   PATH, so every `docker` call (apps publish, the seats, the runtime probe) finds it. On Windows both installers
   normally put their bin folder on PATH already, so nothing is added there.
 
+- **A review of a change starts on a PR a crew run built (CJ13).** The job proposal chose the builder (the chat's lead)
+  as its default lead, the launch dropped the change's authors from its roster, and Start failed with a 502 ("primary
+  names a seat that is not in this launch's roster"). The proposal now reads the launch's own exclusion and resolves its
+  lead, the helpers it names and its lead swaps without the authors, read from the change the revision names (its words,
+  details, inputs and repository). A failed read, or a roster of authors only, keeps the roster, and the launch refuses
+  it as before.
+
 - **A busy laptop no longer reads as "Docker isn't running" (e2e-1105).** The roster's background runtime check
   waits up to 15 s per check (was 5 s) and reads the runtime down only after three misses in a row, from any state,
   so a slow `version` answer under host load never benches the container seats.
 
 - **Sign-in failures say why, and an abandoned sign-in is cleaned up (first-run C3; api-types `SeatSignInFailure`,
-  `SeatSignInFailureCode`, unreleased).** Every refused `POST /seats/:cli/container-login` carries a `code`:
+  `SeatSignInFailureCode`, api-types 0.198.0).** Every refused `POST /seats/:cli/container-login` carries a `code`:
   `container_runtime_down` ("Docker isn't running …"), `cli_not_installed` (codex, pi and opencode sign in with the
   host's own CLI), `signin_already_open` (with the open `terminalId`), `signin_superseded` or `signin_failed`. The new
   `DELETE /seats/:cli/container-login` closes an open sign-in's terminal and removes its login container; a sign-in
@@ -418,7 +450,9 @@ mentioned only where a daemon release depends on them.
   `/evidence`, `/acceptance`, `/inventory`, the unit output, and the rest in the routes) use it, so they cost O(1) in
   the number of runs once the snapshot is read. Concurrent callers share one parse (at most one fold running and one
   queued, as before). `GET /roster/record` runs one read per query at a time, shared, and keeps up to 16 answers
-  while their snapshot is current (held weakly, so a kept answer never keeps an old snapshot alive).
+  while their snapshot is current (held weakly, so a kept answer never keeps an old snapshot alive). At start-up the
+  context sync visits only the documents crew's record says owe the engine a set, reads which runs are live once, and
+  paces itself (it used to read every run's view for every held document, 139 on the rig) (#1414).
 
 - **Draft epics can pass its review (F34).** The Backlog compose (`POST /projects/:id/product/compose`) authored its
   review as the catalog's `review` entry, which carries the engine's evidence floor ("the run left a change in its
@@ -6446,7 +6480,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.17.1...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.13...v0.17.0
 [0.16.13]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.12...v0.16.13

@@ -42,13 +42,15 @@ export const SKILLS_SOURCE_ENV = 'WICKED_CREW_SKILLS_SOURCE';
  * The oldest wicked-garden this daemon uses (crew#753). Automatic discovery passes over an installed
  * plugin older than this with a `too-old` finding, and the daemon reports it as a blocking
  * `skills.garden` error naming found vs required, so an old copy is never used without a word.
- * 12.64.0 is the garden that ships `wicked-garden-apps`, the skill every Apps turn and publish tells
- * its units to follow (apps/turns.ts), with the data skill's shapes pass and the answer path's live
- * read; it carries everything the earlier floor (12.40.0: the walkthrough proof's QE ledger rows with
- * the crew run id, WT-G4, and the demo recorder's sealed take, WT-G1) needed. An explicit
+ * 12.66.1 (crew 0.18.0) is the garden whose scripts this crew calls: the draft skill's `leak_scan.py`,
+ * `notes_check.py` and `keep_check.py` (a draft's landing floor and a refine's keep check, A6/A5),
+ * editor conformance cases 7-edit and 18-shows with `conformance.py --engine` and the run-plugin cases
+ * (editor installs, CS7), the learn skill's report mode (`sourced-report`, CS3) and the draft kinds
+ * Respond and Rework (CS5), plus 12.66.1's run-plugin scaffold that reports its first height (CJ9). It carries everything the earlier floor (12.64.0: `wicked-garden-apps`,
+ * the skill every Apps turn and publish tells its units to follow, apps/turns.ts) needed. An explicit
  * `WICKED_CREW_SKILLS_SOURCE` is deliberate and is not judged.
  */
-export const REQUIRED_GARDEN_VERSION = '12.64.0';
+export const REQUIRED_GARDEN_VERSION = '12.66.1';
 
 /** The one install command the README, the findings and the refusals name. */
 export const GARDEN_INSTALL_COMMAND = 'npx wicked-installer install wicked-garden';

@@ -99,7 +99,7 @@ npm install -g wicked-crew     # or run it directly: npx wicked-crew serve
 wicked-crew serve
 ```
 
-**crew needs wicked-garden ≥ 12.64.0.** Garden ships the skills every governed worker follows,
+**crew needs wicked-garden ≥ 12.66.1.** Garden ships the skills every governed worker follows,
 including the base skill `wicked-garden-governed-worker` and the `wicked-garden-apps` skill an app's
 chat builds with. crew does not vendor it, so install it once:
 
@@ -123,7 +123,7 @@ Without garden, `/health` still answers `"status":"ok"` (the daemon
 serves so studio can load and show the problem) and carries the missing base skill as an
 error-severity finding in its `warnings` list — the same finding object as `baseSkill.finding` and
 `/diagnostics.skills.findings[]`. Every launch and every **Register & onboard** is refused with that
-reason, and nothing is registered. A garden older than 12.64.0 that discovery finds is never used (a
+reason, and nothing is registered. A garden older than 12.66.1 that discovery finds is never used (a
 `WICKED_CREW_SKILLS_SOURCE` you set is not judged). At first boot, that
 `skills.garden` warning names the version found, where it was found, and the version required.
 Launches and onboarding answer `422 garden_required` until a newer garden is installed and the
@@ -210,10 +210,10 @@ state home, not your home directory (an explicit `WICKED_APPS_EMIT_DEADLETTER` i
 `governance.deadletter` finding, and `wicked-crew governance replay <outbox>` puts them back.
 
 The interactive document bridge (Vibe / Demo documents) is spawned on demand as
-`npx wicked-interactive@^0.15.0` (0.15.0 lands a chat-made draft only on the head it started from; 0.14.1 has the
+`npx wicked-interactive@^0.16.0` (0.16.0 keeps a demo cut's history and restores an earlier cut; 0.15.0 lands a chat-made draft only on the head it started from; 0.14.1 has the
 demo import crew's demo runs use and the theme-source upload studio's Learn from a brand uses; 0.12.0 confined export asset reads to the document's own and approved
 roots; earlier floors added the recorder browser preflight and the typed `RecorderError` frames crew relays); `WICKED_INTERACTIVE_SPEC` overrides the
-**range** for an operator or a test rig (a semver range only — `^0.15.0`, `0.15.0`, `>=0.15.0 <1.0.0`; tags, paths and `pkg@range`
+**range** for an operator or a test rig (a semver range only — `^0.16.0`, `0.16.0`, `>=0.16.0 <1.0.0`; tags, paths and `pkg@range`
 spellings are refused and the default is used), reported on the boot line, with a warning when the
 override's floor is below the release crew needs.
 
