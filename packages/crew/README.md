@@ -22,8 +22,9 @@ Local-first: loopback only, no accounts, no billing, no model reselling. Crew dr
   uv every job launch is refused (`venv-failed`). The family installer installs it for you (see below).
 - **git** — crew spawns it for every repository operation.
 - **A container runtime** (Rancher Desktop, Docker, Podman, Colima or OrbStack), running. Governed
-  agents work in a hardened seat container, and you sign each one in from studio's Agents tab in a
-  login container. `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead.
+  agents work in a hardened seat container, and you sign each one in from studio's Agents tab: Claude
+  Code and GitHub Copilot in a login container, Codex, Pi and OpenCode with their host CLIs.
+  `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead.
 - **At least one coding-agent CLI** you can sign in (Claude Code, Codex, GitHub Copilot, OpenCode or Pi).
 - **wicked-estate** — the `wicked-estate` / `wicked-estate-mcp` binaries on PATH. Crew requires it:
   adding a repository in Studio runs onboarding's index phase on the `wicked-estate` tool, and it
@@ -56,6 +57,10 @@ them:
 
 If your shell can't find `wicked-crew` itself, npm's global bin directory is not on PATH: add
 `$(npm prefix -g)/bin` (macOS, Linux) or the directory `npm prefix -g` prints (Windows).
+
+If a garden older than 12.66.1 is already installed, the installer may keep it; crew's `skills.garden`
+warning then names its version and where it was found. Update that copy (for the npm package,
+`npm install -g wicked-garden@latest`) and restart `wicked-crew serve`.
 
 Or install crew by hand (advanced). It needs uv and the requirements above, including
 **wicked-garden 12.66.1 or later** (crew refuses every launch until it finds one):

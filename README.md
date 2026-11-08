@@ -80,6 +80,10 @@ uv installer adds it to the user PATH; otherwise add it via Environment Variable
 can't find `wicked-crew` itself, npm's global bin directory is not on PATH: add `$(npm prefix -g)/bin`
 (macOS, Linux) or the directory `npm prefix -g` prints (Windows).
 
+If a garden older than 12.66.1 is already installed, the installer may keep it; crew's `skills.garden`
+warning then names its version and where it was found. Update that copy (for the npm package,
+`npm install -g wicked-garden@latest`) and restart `wicked-crew serve`.
+
 Uploading a file or a SQLite database as a data source needs Node.js 24.12, 25.1 or later. The
 container runtime (Rancher Desktop, Docker, Podman, Colima or OrbStack) must be running:
 governed agents run each CLI's headless mode in a hardened seat container (crew builds the seat images
