@@ -22,7 +22,7 @@
 
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -117,7 +117,9 @@ describe.runIf(existsSync(CLI))('the engine\'s wicked-vault CLI (crew#1068)', ()
       const diag = await get<DiagnosticsResponse>(d, '/diagnostics');
       expect(diag.vault?.source).toBe('shipped');
       expect(diag.vault?.finding).toBeNull();
-      const bin = diag.vault!.bin!;
+      // GET /diagnostics writes the home dir as `~` (first-run privacy backstop); expand it to use the path.
+      const shown = diag.vault!.bin!;
+      const bin = shown.startsWith('~/') ? join(homedir(), shown.slice(2)) : shown;
       expect(isAbsolute(bin)).toBe(true);
       expect(existsSync(bin)).toBe(true);
       const health = await get<HealthResponse>(d, '/health');

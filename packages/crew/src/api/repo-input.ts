@@ -93,6 +93,18 @@ export function onboardFailure(raw: string, home: string = homedir()): { code?: 
   return { code: 'tool_missing', tool: tools[0] as string, tools, error: `${lines.join(' ')} Then run onboarding again (⋯ → Rebuild the code map).${also}` };
 }
 
+/**
+ * A local registration the engine refused. The engine says "<path> is not a directory" for a folder
+ * that is not there; that reads as the folder named in `~` form, with what to do. Anything else
+ * keeps the engine's words, home paths as `~`.
+ */
+export function registerFailure(raw: string, rootPath: string | undefined, home: string = homedir()): { code?: 'repo_path_missing'; error: string } {
+  if (rootPath !== undefined && / is not a directory\b|no such file or directory/i.test(raw)) {
+    return { code: 'repo_path_missing', error: `There is no folder at ${tildePath(rootPath, home)}. Check the path and try again.` };
+  }
+  return { error: scrubHome(raw, home) };
+}
+
 function scrubHome(text: string, home: string): string {
   return home === '' || home === '/' ? text : text.split(home).join('~');
 }

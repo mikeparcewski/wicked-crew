@@ -443,7 +443,7 @@ import { AppStoreError, type AppStore } from '../apps/store.js';
 import { registerMcpInspectRoutes } from '../mcp-inspect/routes.js';
 import { daemonRunFence, fencedRunId } from '../mcp/run-fence.js';
 import { discoverLivePlugin } from '../skills/plugin-source.js';
-import { onboardFailure, readRepoPath } from './repo-input.js';
+import { onboardFailure, readRepoPath, registerFailure } from './repo-input.js';
 import type { DecisionBusEmit } from '../decisions/events.js';
 import { resolveDecisionsMode, type DecisionsMode } from '../decisions/types.js';
 
@@ -3191,7 +3191,7 @@ export function registerRoutes(
     // First-run C1: `~/code/my-app` (the field's own example) is expanded; a relative or missing folder is refused in plain words.
     let rootPath = parsed.data.rootPath;
     if (rootPath !== undefined && rootPath !== '') {
-      const read = readRepoPath(rootPath, { mustExist: !gitUrl });
+      const read = readRepoPath(rootPath);
       if (!read.ok) return reply.code(400).send({ code: read.code, error: read.error });
       rootPath = read.path;
     }
@@ -3212,7 +3212,7 @@ export function registerRoutes(
         runId = await adapter.launchOnboardingRun(repo.id, name);
       }
     } catch (err) {
-      if (repo === undefined) return reply.code(400).send({ error: message(err) });
+      if (repo === undefined) return reply.code(400).send(registerFailure(message(err), gitUrl ? undefined : rootPath));
       req.log.warn({ repoId: repo.id }, `repo registered but onboarding launch failed: ${message(err)}`);
       // No run exists to record or file, even when projectId was supplied (crew#1019).
       const failure = onboardFailure(message(err));

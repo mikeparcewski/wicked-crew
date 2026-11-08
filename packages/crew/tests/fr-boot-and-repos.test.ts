@@ -3,7 +3,7 @@
 // wicked-estate is missing says what to install (B2). Over the REAL server assembly (the headless-boot recipe
 // of audit-since-route.test.ts: stub adapter, every seam disabled).
 
-import { mkdirSync, mkdtempSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -44,6 +44,8 @@ beforeAll(async () => {
     getOnboardRunId: () => null,
     ping: async () => 'pong',
     registerRepo: async (name: string, root: string) => {
+      // The engine's own refusal for a folder that is not there (core repo.rs).
+      if (!existsSync(root)) throw new Error(`${root} is not a directory`);
       registered.push({ name, root });
       return { id: name, name, root_path: root };
     },
@@ -137,7 +139,7 @@ describe('POST /repos', () => {
     }
   });
 
-  it('refuses a missing ~ folder with a plain 400, before the engine is asked', async () => {
+  it('a missing ~ folder is a plain 400 naming it in ~ form, not "<path> is not a directory"', async () => {
     const before = registered.length;
     const res = await app.inject({ method: 'POST', url: '/api/v1/repos', payload: { name: 'gone', rootPath: '~/definitely-not-a-folder-fr-c1' } });
     expect(res.statusCode).toBe(400);
