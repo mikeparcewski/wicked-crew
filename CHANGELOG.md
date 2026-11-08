@@ -10,6 +10,42 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.18.1] — 2026-11-08
+
+A patch for people who upgrade crew on its own. Crew now says when your skills come from a wicked-garden that is too old,
+and gives the command that fixes it. Bundles wicked-studio 0.16.1. The release smoke runs on wicked-ci main after #64.
+
+### Fixed
+
+- **An old garden is no longer used without a word after a crew-only upgrade (crew#1447).** Upgrading crew kept the
+  skills an older crew had published, for example from garden 12.65.1 when crew 0.18.0 needs 12.66.1. The scripts this
+  crew calls from the newer garden were then missing, and nothing said so. At boot crew now checks which garden the
+  published skills came from against the minimum it needs.
+  - A newer garden that meets the minimum is installed: it is published automatically, as before (crew#874), and the
+    warning clears.
+  - None is installed: `/health`, the Nerve Center and `/diagnostics` show a blocking `skills.garden` finding with the
+    command (`npm i -g wicked-garden@latest`, or `npx wicked-installer install wicked-garden`, then restart
+    `wicked-crew serve`). Launches and onboarding answer 422 `garden_required`, and the engine is handed the
+    `skills.garden` refusal path, the same one an older garden meets at first seed. A campaign or any other launch
+    that reaches the engine directly is held too. The skills stay published and listed.
+  - One is installed but could not be published automatically (you edited the catalog, or the automatic refresh is
+    switched off): launches are held the same way, and the finding and the Nerve Center name the garden, say why,
+    and give the refresh and publish steps.
+  - The check runs once the boot ladder has landed, so a garden the ladder is about to publish is never reported.
+    A later publish is checked again: one from a garden that meets the minimum lifts the hold.
+  - A garden source you set yourself (`WICKED_CREW_SKILLS_SOURCE`) is not checked, the same as at first seed.
+
+### Changed
+
+- Bundles **wicked-studio 0.16.1** (devDependency `^0.16.1`), which a fresh install and an upgrade both get. It
+  carries studio#1065: a missing repository folder says so on the banner, the sidebar marks one current page, and a
+  job that started nothing says so.
+- The release smoke is re-pinned to wicked-ci main after #64. crew 0.18.0's smoke was red on harness reasons, and the
+  published package was sound. Its seat shims did not answer the steering-rule check that core-ts 0.15.32 added, so
+  the bug runs were cancelled at verify. Its skills step read the home-scrubbed `/diagnostics` paths of crew#1439 as
+  missing files. The fixed harness passes against the published 0.18.0 on ubuntu and macOS (wicked-ci smoke-selftest
+  run 42525039460).
+
 ## [0.18.0] — 2026-11-08
 
 Every card that said "coming" is live: research and analysis reports re-checked at their sources, model run cost,
@@ -6480,7 +6516,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.1...HEAD
+[0.18.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.13...v0.17.0

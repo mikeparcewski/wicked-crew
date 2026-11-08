@@ -50,6 +50,7 @@ import { plainRuntimeCause, scrubHomePaths } from './ui-text.js';
 import { callEstateToolRaw, estateMcpExe, ESTATE_INSTALL_HINT } from '../core/estate-mcp-client.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { runTouchesWindow } from './seat-record.js';
+import { GARDEN_INSTALL_COMMAND, GARDEN_NOT_PUBLISHED, GARDEN_UPDATE_COMMAND } from '../skills/plugin-source.js';
 import { repoFolderMissing } from '../core/repoPaths.js';
 
 // ── Bounds ──────────────────────────────────────────────────────────────────
@@ -615,6 +616,12 @@ export async function probeVault(input: VaultProbeInput): Promise<SystemInfraRow
   return infraRow('vault', 'ok', `answers (${settled.value.stdout.split('\n', 1)[0]?.trim() || 'no version text'})`, null, started, { vault: v }, timeoutMs);
 }
 
+/** crew#1447: the Nerve Center's fix for a published generation built from a garden below the floor. */
+export const GARDEN_FLOOR_REMEDY = `Update wicked-garden: \`${GARDEN_UPDATE_COMMAND}\` (or \`${GARDEN_INSTALL_COMMAND}\`), then restart \`wicked-crew serve\`.`;
+
+/** crew#1447: the fix when a garden that meets the floor is installed but was not published (edited catalog, or the boot refresh off). */
+export const GARDEN_PUBLISH_REMEDY = 'Publish the installed wicked-garden: refresh the skills baseline (resolve any conflict it reports), then publish.';
+
 /** `DiagnosticsSkills` → a row. */
 export function skillsRow(skills: { state: string; findings: Array<{ severity?: string; message?: string; kind?: string }> } & Record<string, unknown>): SystemInfraRow {
   const started = Date.now();
@@ -623,7 +630,19 @@ export function skillsRow(skills: { state: string; findings: Array<{ severity?: 
   switch (skills.state) {
     case 'published':
       return errors.length > 0
-        ? infraRow('skills', 'down', first ?? 'a skills finding refuses launches', 'Fix the skills root named in the finding.', started, { skills })
+        ? infraRow(
+            'skills',
+            'down',
+            first ?? 'a skills finding refuses launches',
+            // crew#1447: a published generation from a garden below the floor is fixed by updating garden.
+            errors[0]?.kind !== 'skills.garden'
+              ? 'Fix the skills root named in the finding.'
+              : (errors[0]?.message ?? '').includes(GARDEN_NOT_PUBLISHED)
+                ? GARDEN_PUBLISH_REMEDY
+                : GARDEN_FLOOR_REMEDY,
+            started,
+            { skills },
+          )
         : skills.findings.length > 0
           ? infraRow('skills', 'degraded', first ?? 'a skills warning', 'See the finding.', started, { skills })
           : infraRow('skills', 'ok', 'a published snapshot is current', null, started, { skills });

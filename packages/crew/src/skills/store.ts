@@ -3236,6 +3236,11 @@ export class SkillsStore {
     return installedPluginState(injected === null ? {} : { discover: injected });
   }
 
+  /** crew#1447: whether this store finds its garden by automatic discovery (no injected source): only then is the published generation judged against the garden floor, as discovery itself is (crew#753). */
+  discoversLive(): boolean {
+    return this.injectedSource === null;
+  }
+
   /** crew#1021: runtime probes share the store's source without blocking requests on hash/git. */
   installedStateAsync(): Promise<InstalledPluginState | null> {
     const injected = this.injectedSource;
