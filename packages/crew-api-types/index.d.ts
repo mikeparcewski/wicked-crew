@@ -1805,6 +1805,12 @@ export interface RosterSeat {
   /** Container seats sign in through the daemon's disposable login terminal. */
   sign_in?: 'container';
   /**
+   * Where a container seat's sign-in runs (with `sign_in: 'container'` only): `host` = this computer's
+   * own CLI runs it (codex, pi, opencode), so a CLI missing here blocks the sign-in; `container` = a
+   * login container runs it (claude, copilot), so nothing on this computer is needed.
+   */
+  sign_in_on?: 'host' | 'container';
+  /**
    * The shell invocation that signs this seat OUT of its own configuration root (crew#615;
    * wicked-core#807 `AgenticCli.logout_invocation`, core-ts >= 0.7.43): the CLI's own documented
    * logout (`claude auth logout`, `codex logout`, `opencode auth logout`), prefixed with the seat's

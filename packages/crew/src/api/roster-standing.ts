@@ -38,7 +38,7 @@ import {
 import { SEAT_ANSWER_WINDOW_MS, type SeatHealthTracker, type SeatLastAnswer } from './seat-health.js';
 import { signedInHeuristic } from './seat-signin.js';
 import { SeatProbe, type SeatProbeReading } from './seat-probe.js';
-import { SeatContainerStatus, isContainerLoginCli, isContainerSeatFloor, isHostSeatFloor, type BrokerReading } from './seat-container-login.js';
+import { SeatContainerStatus, containerSignInOn, isContainerLoginCli, isContainerSeatFloor, isHostSeatFloor, type BrokerReading } from './seat-container-login.js';
 import { seatGovernanceModes, type GovernanceScopeKind, type SeatGovernanceMode } from './seat-governance.js';
 import { HOST_FLOOR_UNKNOWN_COPY, recentBenchReason, seatStanding, chatSeatAdmission, type StandingSeat, type SeatStanding } from './seat-standing.js';
 import { seatVersion, seatVersions, type SeatVersionCache } from './seat-version.js';
@@ -455,7 +455,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         ...seat,
         health,
         signed_in: signed,
-        ...(containerSeat ? { sign_in: 'container' as const } : {}),
+        ...(containerSeat ? { sign_in: 'container' as const, sign_in_on: containerSignInOn(key) } : {}),
         ...(hostFloor !== null ? { host_floor_bench: hostFloor } : {}),
         ...(hostFloorUnknown !== null ? { host_floor_unknown: hostFloorUnknown } : {}),
         ...(versionPin !== undefined ? { version_pin: versionPin } : {}),

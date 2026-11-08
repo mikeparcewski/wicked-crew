@@ -12,6 +12,12 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **The roster says where a container helper signs in (api-types 0.199.0).** On the container floor each container seat
+  now carries `sign_in_on`: `host` for codex, pi and opencode (their sign-in runs this computer's own CLI, the engine's
+  host login), `container` for claude and copilot (a login container). Studio used crew's host version probe alone, so
+  with no `claude` on this computer's PATH every helper read "Not installed" and Sign in was gone, although the seat
+  runs from its image and claude signs in through a login container. Crew-only: the engine never sees the field.
+
 - **A review of a change starts on a PR a crew run built (CJ13).** The job proposal chose the builder (the chat's lead)
   as its default lead, the launch dropped the change's authors from its roster, and Start failed with a 502 ("primary
   names a seat that is not in this launch's roster"). The proposal now reads the launch's own exclusion and resolves its
