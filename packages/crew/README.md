@@ -15,37 +15,60 @@ most 200 rows, marked as untrusted data and cited.
 Local-first: loopback only, no accounts, no billing, no model reselling. Crew drives the agents
 *you* already pay for, on *your* auth and *your* plan.
 
-## Install
+## Requirements
 
-Before you start, you need:
-
-- **Node.js ≥ 22** (uploading a file or a SQLite database as a data source needs 24.12, 25.1 or later).
+- **Node.js ≥ 22** / npm (uploading a file or a SQLite database as a data source needs 24.12, 25.1 or later).
+- **uv** — the daemon builds its skills environment with `uv sync` (once per skills baseline); without
+  uv every job launch is refused (`venv-failed`). The family installer installs it for you (see below).
+- **git** — crew spawns it for every repository operation.
 - **A container runtime** (Rancher Desktop, Docker, Podman, Colima or OrbStack), running. Governed
   agents work in a hardened seat container, and you sign each one in from studio's Agents tab in a
   login container. `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead.
 - **At least one coding-agent CLI** you can sign in (Claude Code, Codex, GitHub Copilot, OpenCode or Pi).
+- **wicked-estate** — the `wicked-estate` / `wicked-estate-mcp` binaries on PATH. Crew requires it:
+  adding a repository in Studio runs onboarding's index phase on the `wicked-estate` tool, and it
+  powers code graphs, memory and (from wicked-estate 0.32.0) the knowledge store that holds your data
+  sources' structure — never their values. `npx wicked-installer install wicked-estate`
+  downloads a sha256-verified prebuilt binary into `~/.local/bin` (about 20 s) on macOS, glibc Linux
+  (x64/arm64) and Windows x64; on other platforms it builds with cargo, which needs a Rust toolchain.
 - **wicked-garden ≥ 12.64.0**, the skills every governed worker follows (including the Apps skill an
   app's chat builds with). crew does not vendor it, and without it every launch is refused:
   `npx wicked-installer install wicked-garden`, then restart `wicked-crew serve`.
-- Optional: **wicked-estate** (`wicked-estate-mcp` on PATH) for code graphs and memory, and, from
-  wicked-estate 0.32.0, the knowledge store that holds your data sources' structure (never their
-  values) so agents can recall it. It installs with cargo today, so it needs a Rust toolchain.
+
+The family installer installs estate and garden (and, when uv is missing, uv itself) for you.
+
+## Quick start
+
+```bash
+npx wicked-installer        # pick the "Quick Start" bundle (wicked-crew + wicked-bus + wicked-estate,
+                            # with wicked-garden + wicked-vault added as crew's requirements)
+wicked-crew serve           # start the daemon (use `npx wicked-crew serve` if the npm global
+                            # bin dir is not on PATH)
+# then open http://127.0.0.1:7701 in your browser
+```
+
+The installer puts estate's prebuilt binaries (and uv, when astral's installer places it) in `~/.local/bin`,
+which is **not** on macOS's default PATH. Put the directory on PATH so the daemon and your shell find
+them:
+
+- **macOS (zsh):** `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile`, then open a new terminal.
+- **Linux (bash):** the same line into `~/.profile`.
+- **Windows:** `%USERPROFILE%\.local\bin` — astral's uv installer adds it to the user PATH; otherwise add it via Environment Variables.
+
+Or install crew by itself:
 
 ```bash
 npm install -g wicked-crew
 wicked-crew serve
 ```
 
-Studio's Nerve Center names whichever of these is missing on a fresh install.
+Studio's Nerve Center names whichever requirement is missing on a fresh install.
 
 Or without installing:
 
 ```bash
 npx wicked-crew serve
 ```
-
-Or use the family installer — [`npx wicked-installer`](https://www.npmjs.com/package/wicked-installer)
-installs/updates the whole wicked-\* family, crew included.
 
 `serve` starts the daemon on `http://127.0.0.1:7701` (override with `--port` or `CREW_PORT`) and
 serves the bundled **wicked-studio** browser console same-origin — open the URL and you have the
@@ -66,7 +89,7 @@ confined export asset reads to the document's own and approved roots); `WICKED_I
 only, validated; invalid values are named on the boot line and ignored, a floor below crew's need
 is warned about).
 
-## Quickstart
+## Launch a run
 
 ```bash
 # 1. Start the daemon (leave it running)

@@ -59,7 +59,27 @@ engine underneath is **wicked-core**. (In the API and the code a job is a *run*,
 
 ## Install & quickstart
 
-Requires Node.js ≥ 22 (uploading a file or a SQLite database as a data source needs 24.12, 25.1 or later) and a container runtime (Rancher Desktop, Docker, Podman, Colima or OrbStack):
+**Requirements:** Node.js ≥ 22 / npm · **uv** (the daemon builds its skills environment with
+`uv sync`; without uv every job launch is refused) · **git** · a container runtime · at least one
+coding-agent CLI you can sign in · **wicked-estate** and **wicked-garden** — both installed for you by
+the family installer (and uv too, when it is missing). The fastest path is the installer's **Quick
+Start** bundle:
+
+```bash
+npx wicked-installer        # pick "Quick Start" (wicked-crew + wicked-bus + wicked-estate,
+                            # with wicked-garden + wicked-vault added as crew's requirements)
+wicked-crew serve           # or `npx wicked-crew serve` if the npm global bin dir is not on PATH
+# then open http://127.0.0.1:7701
+```
+
+The installer puts estate's prebuilt binaries (and uv, when astral's installer places it) in `~/.local/bin`,
+which is **not** on macOS's default PATH — put the directory on PATH so the daemon and your shell find
+them: macOS (zsh) `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile` then open a new
+terminal; Linux (bash) the same line into `~/.profile`; Windows `%USERPROFILE%\.local\bin` (astral's
+uv installer adds it to the user PATH; otherwise add it via Environment Variables).
+
+Uploading a file or a SQLite database as a data source needs Node.js 24.12, 25.1 or later. The
+container runtime (Rancher Desktop, Docker, Podman, Colima or OrbStack) must be running:
 governed agents run each CLI's headless mode in a hardened seat container (crew builds the seat images
 on first use), and you sign each agent in once from studio's Agents page. Claude Code and GitHub
 Copilot sign in through a login container; Codex, Pi and OpenCode sign in with their host CLIs and a
@@ -71,13 +91,13 @@ defined but its seat is benched by default, and a local model or custom
 binary needs your own image (`WICKED_SEAT_IMAGE_<CLI>`, offline seats only). `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead; there, only
 claude and codex are given governed work.
 
+To install crew on its own, install its requirements first (uv from https://docs.astral.sh/uv/,
+then `npx wicked-installer install wicked-estate wicked-garden`), then:
+
 ```bash
 npm install -g wicked-crew     # or run it directly: npx wicked-crew serve
 wicked-crew serve
 ```
-
-Or use the family installer — [`npx wicked-installer`](https://www.npmjs.com/package/wicked-installer)
-installs/updates the whole wicked-\* family, crew included.
 
 **crew needs wicked-garden ≥ 12.64.0.** Garden ships the skills every governed worker follows,
 including the base skill `wicked-garden-governed-worker` and the `wicked-garden-apps` skill an app's
@@ -90,11 +110,13 @@ npx wicked-installer install wicked-garden    # or install the wicked-garden plu
 crew finds garden in Claude Code's plugin cache (`<config dir>/plugins/cache/wicked-garden/…`) or in
 the installer's copy (`<config dir>/plugins/wicked-garden`), where `<config dir>` is
 `$CLAUDE_CONFIG_DIR` or `~/.claude`. To use another garden root on purpose, point
-`WICKED_CREW_SKILLS_SOURCE` at it. Without garden, `/health` reports the missing base skill as an
-error. Every launch and every **Register & onboard** is refused with that reason, and nothing is
-registered. A garden older than 12.64.0 that discovery finds is never used (a `WICKED_CREW_SKILLS_SOURCE` you set
-is not judged). At first boot, `/health` carries a
-`skills.garden` error that names the version found, where it was found, and the version required.
+`WICKED_CREW_SKILLS_SOURCE` at it. Without garden, `/health` still answers `"status":"ok"` (the daemon
+serves so studio can load and show the problem) and carries the missing base skill as an
+error-severity finding in its `warnings` list — the same finding object as `baseSkill.finding` and
+`/diagnostics.skills.findings[]`. Every launch and every **Register & onboard** is refused with that
+reason, and nothing is registered. A garden older than 12.64.0 that discovery finds is never used (a
+`WICKED_CREW_SKILLS_SOURCE` you set is not judged). At first boot, that
+`skills.garden` warning names the version found, where it was found, and the version required.
 Launches and onboarding answer `422 garden_required` until a newer garden is installed and the
 daemon restarts. A refresh (`POST /api/v1/skills/refresh-baseline`) from an older garden is refused
 with the same words. Skills a daemon already published are kept as published until the next
