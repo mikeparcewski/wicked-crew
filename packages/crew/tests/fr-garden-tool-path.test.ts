@@ -13,7 +13,8 @@ describe('installer tool PATH', () => {
     const dirs = [join(home, 'bin'), join(home, '.local', 'bin'), join(home, '.cargo', 'bin')];
     dirs.forEach((dir) => mkdirSync(dir, { recursive: true }));
     const env = { PATH: '/usr/bin:/bin', XDG_BIN_HOME: dirs[0] };
-    expect(withInstallerBinDirs(env, home, 'darwin')).toEqual({ path: ['/usr/bin:/bin', ...dirs].join(':'), added: dirs });
+    // Linux: no app-bundle folder, so a host's Docker Desktop never changes the expectation (codex r1).
+    expect(withInstallerBinDirs(env, home, 'linux')).toEqual({ path: ['/usr/bin:/bin', ...dirs].join(':'), added: dirs });
     expect(env.PATH).toBe('/usr/bin:/bin');
   });
 
@@ -45,12 +46,34 @@ describe('installer tool PATH', () => {
     mkdirSync(join(home, '.local', 'bin'), { recursive: true });
     const env: NodeJS.ProcessEnv = { PATH: '/usr/bin' };
     const logs: string[] = [];
-    configureInstallerToolPath(env, home, (message) => logs.push(message));
+    configureInstallerToolPath(env, home, (message) => logs.push(message), 'linux');
     expect(env.PATH).toBe(`/usr/bin:${join(home, '.local', 'bin')}`);
-    expect(logs).toEqual(['[crew] added installer tool directories to PATH: ~/.local/bin']);
-    configureInstallerToolPath(env, home, (message) => logs.push(message));
+    expect(logs).toEqual(['[crew] added tool directories to PATH: ~/.local/bin']);
+    configureInstallerToolPath(env, home, (message) => logs.push(message), 'linux');
     expect(logs).toHaveLength(1);
     expect(logs.join()).not.toContain(home);
   });
 
+  it('appends Rancher Desktop and Docker Desktop bin folders that exist, after the installer ones (e2e-1105 CJ2)', () => {
+    const rd = join(home, '.rd', 'bin');
+    mkdirSync(rd, { recursive: true });
+    const docker = '/Applications/Docker.app/Contents/Resources/bin';
+    const present = (p: string): boolean => p === rd || p === docker;
+    expect(withInstallerBinDirs({ PATH: '/usr/bin' }, home, 'darwin', present)).toEqual({ path: `/usr/bin:${rd}:${docker}`, added: [rd, docker] });
+    // Linux has no Docker Desktop bundle; a folder that does not exist is never added.
+    expect(withInstallerBinDirs({ PATH: '/usr/bin' }, home, 'linux', present).added).toEqual([rd]);
+    expect(withInstallerBinDirs({ PATH: '/usr/bin' }, home, 'darwin', () => false).added).toEqual([]);
+    // Already on PATH: kept where the person put it.
+    expect(withInstallerBinDirs({ PATH: `${rd}:/usr/bin` }, home, 'darwin', present).added).toEqual([docker]);
+    // Windows: Docker Desktop's installer puts its bin on PATH, so nothing container-related is added.
+    expect(withInstallerBinDirs({ PATH: 'C:\\Tools' }, 'C:\\Users\\test', 'win32', (p) => !p.includes('.local') && !p.includes('.cargo')).added).toEqual([]);
+  });
+
+  it('a daemon started without the profile finds a docker that lives only in ~/.rd/bin', () => {
+    const rd = join(home, '.rd', 'bin');
+    mkdirSync(rd, { recursive: true });
+    const env: NodeJS.ProcessEnv = { PATH: '/usr/bin:/bin' };
+    configureInstallerToolPath(env, home, () => undefined, 'linux');
+    expect(env.PATH!.split(':')).toContain(rd);
+  });
 });

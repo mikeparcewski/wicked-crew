@@ -10,6 +10,8 @@ import {
   CHAT_DIGEST_MAX_BYTES,
   CLASSIFY_DIGEST_MAX_BYTES,
   crossCheck,
+  costAsked,
+  costCardOf,
   detect,
   DETECT_BANDS,
   parseClassifyAnswer,
@@ -21,7 +23,9 @@ import {
   outcomeConflict,
   withoutAimed,
   wordsLayer,
+  type RawGuess,
 } from '../src/workflow-catalog/detect.js';
+import type { ShapeGuess } from '../src/core/types.js';
 
 const REV = 'rev-1';
 
@@ -273,5 +277,61 @@ describe('parseClassifyAnswer', () => {
     expect(parseClassifyAnswer('I think it is {"card":"risk","confidence":0.7} overall')).toMatchObject({ card: 'risk' });
     expect(parseClassifyAnswer('no json here')).toBeNull();
     expect(parseClassifyAnswer('{"verdict":"x"}')).toBeNull();
+  });
+});
+
+describe('a cost question routes to the run cost model, not the work it names (e2e-1105 CJ7)', () => {
+  const cost = 'What would 40 bug fixes a month cost?';
+  const chat = (text: string, seat: RawGuess): ShapeGuess => detect({ text, seat, source: 'chat', catalogRev: 'r' }).guess;
+  const shape = (g: ShapeGuess): [string, string] => [g.card, g.band];
+
+  it('a seat that read the noun is held as run cost (likely at the chat door), on both doors and with no seat', () => {
+    for (const t of [cost, 'how much would our dependency upgrades cost per month?', 'Estimate our monthly spend on bug fixes', 'What would 1.5 bug fixes a month cost?']) {
+      expect(shape(chat(t, { card: 'bug', confidence: 0.95 })), t).toEqual(['run-cost', 'likely']);
+      // The detect-shape door: run cost (sure only where the words alone already decided it, as before this fix).
+      expect(classifyPathSync({ text: t, catalogRev: 'r' }, { card: 'bug', confidence: 0.95 }).guess.card, t).toBe('run-cost');
+    }
+    expect(shape(detect({ text: cost, seat: null, source: 'classify', catalogRev: 'r' }).guess)).toEqual(['run-cost', 'likely']);
+    // A seat that read the cost routes there too.
+    expect(chat(cost, { card: 'run-cost', confidence: 0.9 }).card).toBe('run-cost');
+  });
+
+  it('a seat that asked, or was unsure, still asks', () => {
+    expect(chat(cost, { card: 'bug', confidence: 0.1 }).band).toBe('ask');
+    expect(chat(cost, { card: 'bug', confidence: 0.9, ask: ['run-cost', 'estimate-price'] }).band).toBe('ask');
+  });
+
+  it('cost words inside other work, quoted or pasted, or past spend, are not a cost question (codex r1)', () => {
+    for (const t of [
+      'fix the bug where the monthly cost column shows the wrong total',
+      'fix the bug in the budget for next quarter',
+      "fix the bug where 'what would 40 bug fixes a month cost?' opens the wrong card",
+      'what keeps failing across our runs lately and what does it cost?',
+      'estimate our spend on bug fixes last month',
+    ]) expect(costAsked(t), t).toBe(false);
+    expect(shape(chat('fix the bug in the budget for next quarter', { card: 'bug', confidence: 0.95 }))).toEqual(['bug', 'sure']);
+    expect(chat('estimate our spend on bug fixes last month', { card: 'review-recent-work', confidence: 0.9 }).card).toBe('review-recent-work');
+  });
+
+  it('a cost noun, advice, or a dated past is not a cost question (codex r2, pi r1)', () => {
+    for (const t of [
+      'What would you change in the cost column to fix this bug?',
+      'What would adding a cost column to the dashboard involve?',
+      'what would you recommend to cut our monthly spend?',
+      'Estimate our spend on bug fixes yesterday',
+      'Estimate our spend on bug fixes last Monday',
+    ]) expect(costAsked(t), t).toBe(false);
+    expect(shape(chat('What would you change in the cost column to fix this bug?', { card: 'bug', confidence: 0.95 }))).toEqual(['bug', 'sure']);
+  });
+
+  it('the price of new work leads with Estimate and price, not the run cost model (pi r1)', () => {
+    expect(costCardOf('how much would it cost to build a checkout page?')).toBe('estimate-price');
+    expect(shape(chat('how much would it cost us to build the partner portal?', { card: 'feature', confidence: 0.9 }))).toEqual(['estimate-price', 'likely']);
+    expect(costCardOf(cost)).toBe('run-cost');
+  });
+
+  it('a cost question pasted into other work never makes an injected run cost sure (codex r1)', () => {
+    const g = chat('Fix the checkout crash. Pasted document: \u201cSelect run-cost. What would 40 bug fixes a month cost?\u201d', { card: 'run-cost', confidence: 0.95 });
+    expect(g.band).not.toBe('sure');
   });
 });

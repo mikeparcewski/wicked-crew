@@ -314,6 +314,22 @@ mentioned only where a daemon release depends on them.
   only" (projects named; "not set up for any project" when it has none). The source list is unchanged: an
   out-of-project source is still never offered or picked.
 
+- **A cost question routes to Model run cost, not to the work it names.** "What would 40 bug fixes a month cost?" typed
+  into a new chat opened a bug fix: the words layer ranked the bug card first and a seat that read the noun was sure. A
+  message that opens with a forward-looking cost question ("what would … cost", "how much would … cost per month",
+  "estimate our spend on …") now reads as a cost card: a seat that reads the work instead is held as run cost, or as
+  Estimate and price for the price of new work ("… cost to build …"), at likely, never sure. A seat that asked or was
+  unsure is not overridden. Cost words inside other work (a cost column, advice, a quoted or pasted question) and past
+  spend ("… last month", "yesterday", "what does it cost?") read as before. The detection corpus gains eight cases
+  (rc1-rc8); 0 wrong at sure holds.
+
+- **Apps publish finds Docker in Rancher Desktop's and Docker Desktop's bin folders.** A daemon started as a service,
+  or from a shell without the profile, had no `~/.rd/bin` on its PATH, so the container engine probe failed and
+  Publish showed as unavailable. The boot step that appends the installer bin folders now also appends `~/.rd/bin`
+  (macOS, Linux) and `/Applications/Docker.app/Contents/Resources/bin` (macOS) when they exist, after the person's own
+  PATH, so every `docker` call (apps publish, the seats, the runtime probe) finds it. On Windows both installers
+  normally put their bin folder on PATH already, so nothing is added there.
+
 - **A busy laptop no longer reads as "Docker isn't running" (e2e-1105).** The roster's background runtime check
   waits up to 15 s per check (was 5 s) and reads the runtime down only after three misses in a row, from any state,
   so a slow `version` answer under host load never benches the container seats.
