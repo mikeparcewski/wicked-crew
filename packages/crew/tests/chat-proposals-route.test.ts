@@ -198,16 +198,19 @@ describe('chat proposals (server, A2)', () => {
 
   it('advertises proposals, and in the test configuration every operation with the stub', async () => {
     // A route set with no draft seam (no `launchBoundDraft`): `create` has no real launcher, so production keeps it off
-    // and the test configuration stubs it with the rest (A3: `stubOps` names the stubbed kinds).
+    // and the test configuration stubs it with the rest (A3: `stubOps` names the stubbed kinds). A theme starts no run,
+    // so its launcher is real everywhere (A7).
     expect(((await prod.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse).capabilities?.chatArtifacts)
-      .toEqual({ context: true, proposals: true, create: false, refine: false, theme: false, demo: false });
+      .toEqual({ context: true, proposals: true, create: false, refine: false, theme: true, demo: false });
     expect(((await stub.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse).capabilities?.chatArtifacts)
-      .toEqual({ context: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps: ['create', 'refine', 'theme', 'demo'] });
+      .toEqual({ context: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps: ['create', 'refine', 'demo'] });
   });
 
   it('production: the seat is told nothing about making, and a block is cut from the reply but makes no card', async () => {
     await turn(prod, prodListeners, 'prod-1', 'Make a 5-slide deck on coverage', { entry: 'presentation', title: 'Coverage', sources: ['chat'] });
     const instructions = (launches.at(-1)!.plan as unknown as { steps: Array<{ instructions: string }> }).steps[0]!.instructions;
+    // A7: `theme` is advertised, but this message carried no appearance (a client that can't preview a theme), so the
+    // seat is not told it can propose one; this route set has no draft seam, so nothing else either.
     expect(instructions).not.toContain('wicked-make');
     expect(instructions).not.toContain('What this chat can make now');
     // DES-CATALOG-002 §2.3 (u): job proposals are on and this client declared no `accepts: ['job']`: today's flow, with
@@ -219,6 +222,29 @@ describe('chat proposals (server, A2)', () => {
     expect(recs.filter((r) => r.kind === 'proposal')).toEqual([]);
     const seat = recs.find((r) => r.kind === 'seat');
     expect(seat !== undefined && seat.kind === 'seat' ? seat.text : null).toBe('I can make that.');
+  });
+
+  it('production (A7): a theme ask from a project chat gets its card, and Go records the applied delta with no run', async () => {
+    expect((await open(prod, { chatId: 'prod-theme', clis: ['claude'], projectId: 'mikes' })).statusCode).toBe(201);
+    const appearance = { theme: 'wicked-light', accent_h: 200, accent_s: 47, accent_l: 25, ambient: false };
+    const sent = await send(prod, 'prod-theme', { text: 'keep my accent, turn Ambient on but still', context: { appearance } });
+    expect(sent.statusCode, sent.body).toBe(202);
+    const instructions = (launches.at(-1)!.plan as unknown as { steps: Array<{ instructions: string }> }).steps[0]!.instructions;
+    // The seat builds on the tab's appearance: a key it leaves out keeps the person's value.
+    expect(instructions).toContain("### Studio's appearance in their tab");
+    expect(instructions).toContain('action colour hsl(200, 47%, 25%)');
+    // A client that sent the appearance can preview and apply a theme: the seat is told it can propose one.
+    expect(instructions).toContain('"theme":{');
+    expect(instructions).toContain('Studio can make: a studio theme.');
+    const before = launches.length;
+    reply(prodListeners, 'prod-theme', make({ theme: { name: 'Still ambient', patch: { ambient: true, ambient_still: true } } }));
+    const p = await proposalOf(prod, 'prod-theme');
+    expect(p).toMatchObject({ kind: 'theme', blocked: null, helpers: null, theme: { patch: { ambient: true, ambient_still: true }, changes: ['ambient', 'ambient_still'] } });
+    const go = await decide(prod, 'prod-theme', p.pid, { decision: 'go', edits: { name: 'Still ambient', patch: { ambient: true, ambient_still: true } } });
+    expect(go.statusCode, go.body).toBe(200);
+    expect((go.json() as { view: ChatProposalView }).view).toMatchObject({ state: 'decided', decision: 'go', result: { stub: false } });
+    // No run was launched for it.
+    expect(launches.length).toBe(before);
   });
 
   it('(DES-CATALOG-002 Lane D) POST /workflows/catalog/detect: a person\'s route, advertised, failing closed without a catalog', async () => {

@@ -289,6 +289,7 @@ import {
 import { createDocInProcess, registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { CreateLauncher } from '../interactive/proposal-create.js';
 import { lineageSteps, protectedEdits } from '../interactive/protected-edits.js';
+import { ThemeLauncher } from './proposal-theme.js';
 import type { DocBindingStore } from '../interactive/doc-binding.js';
 import type { LandingRecordStore } from '../interactive/landing-record.js';
 import type { BoundDraft } from '../interactive/draft-events.js';
@@ -1838,19 +1839,21 @@ export function registerRoutes(
   const chatTranscripts = runtime.chatTranscripts;
   const chatAttachments = runtime.chatAttachments ?? new ChatAttachmentStore();
   const chatHistory = runtime.chatHistory ?? (chatTranscripts !== undefined ? new ChatHistoryStore(chatTranscripts, chatAttachments) : null);
-  // DES-CHAT-ARTIFACTS-001 §14 (A2): what a chat can do with artifacts. Production: `proposals` on and every operation
-  // off — each later slice turns its own on and registers its launcher. The TEST configuration (§13 A2) turns every
+  // DES-CHAT-ARTIFACTS-001 §14 (A2): what a chat can do with artifacts. Production: `proposals` on, and each operation
+  // on once its slice registers its launcher (A3 create, A7 theme). The TEST configuration (§13 A2) turns every
   // operation's resolution on and registers a recording stub that starts nothing.
   const chatArtifactsStub = runtime.chatArtifactsStub === true;
   // A3: a real `create` exists whenever the draft seam can launch a proposal-bound draft (the launcher is registered
   // below, once the bridge pool exists). Production advertises it; the test configuration keeps the recording stub only
   // for the operations whose slices have not landed.
   const realCreate = runtime.docBindings !== undefined && runtime.launchBoundDraft !== undefined;
-  const stubOps: import('../core/types.js').ArtifactProposalKind[] = realCreate ? ['refine', 'theme', 'demo'] : ['create', 'refine', 'theme', 'demo'];
+  // A7: a theme starts no run (§15.2), so its launcher is always real: studio applies the patch, Go records it.
+  const stubOps: import('../core/types.js').ArtifactProposalKind[] = realCreate ? ['refine', 'demo'] : ['create', 'refine', 'demo'];
   const chatArtifactFlags: import('../core/types.js').ChatArtifactsCapabilities = chatArtifactsStub
     ? { context: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps }
-    : { context: true, proposals: true, create: realCreate, refine: false, theme: false, demo: false };
+    : { context: true, proposals: true, create: realCreate, refine: false, theme: true, demo: false };
   const proposalLaunchers = new LaunchOnceRegistry();
+  proposalLaunchers.register('theme', new ThemeLauncher());
   /** (DES-CATALOG-002 §4.6) Job proposals in a chat: on wherever chat proposals are. */
   const chatJobProposalsOn = chatArtifactFlags.proposals;
   if (chatArtifactsStub) {
@@ -4900,7 +4903,7 @@ export function registerRoutes(
         if (!resolved.ok) return reply.code(resolved.status).send({ error: resolved.error });
         workflow = resolved.workflow;
       }
-      const statementOpts = { analysis: workflow !== undefined, make: chatProposals.digest(chatId, openAccepts) };
+      const statementOpts = { analysis: workflow !== undefined, make: chatProposals.digest(chatId, openAccepts, { appearance: false }) };
       // A chat id this daemon already holds a scope for is LIVE: re-preparing its scratch root and
       // re-opening it would overwrite the statement its seats are reading and (on a changed scope)
       // evict them mid-conversation (Copilot, #518). Close it first, or let the daemon mint the id.
@@ -5564,6 +5567,9 @@ export function registerRoutes(
         });
       }
       const pending = await considerations.pendingPreface(id, { inForce: rules });
+      // A7: a seat is told it can propose a studio theme only when this message carried the tab's appearance (a client
+      // that can preview and apply one sends it).
+      const themeClient = { appearance: msgContext?.appearance !== undefined };
       // DES-CATALOG-002 §2.3, §4.6: the per-message job lines (the chat catalog digest, the open proposal, the held plan),
       // read here, before the last check (no await after it). Never in an analysis.
       // The declaration this message's instructions are written for: its own, else the chat's (applied to the chat only
@@ -5608,7 +5614,7 @@ export function registerRoutes(
       }
       if (storedScope !== undefined && scope !== undefined && engine !== undefined &&
         (JSON.stringify(scope) !== JSON.stringify(storedScope) || JSON.stringify(engine) !== JSON.stringify(chatScopes.engineOf(id)))) {
-        prepareChatScratch(id, scope, rules, { analysis: path.workflow !== undefined, make: chatProposals.digest(id, turnAccepts), ...voiceFor(scope.projectId) });
+        prepareChatScratch(id, scope, rules, { analysis: path.workflow !== undefined, make: chatProposals.digest(id, turnAccepts, themeClient), ...voiceFor(scope.projectId) });
         if (chatScopes.refresh(id, storedScope, scope, engine)) {
           chatTranscripts?.registerRoots(id, scope.repos.map((r) => ({ absRoot: resolve(r.rootPath), name: r.name })));
         }
@@ -5640,7 +5646,7 @@ export function registerRoutes(
         seatText = `${seatText}\n\n${contextBlock}`;
       }
       // A2: the per-message digest of what the chat can make now (advertised operations only; never in an analysis).
-      const makeDigest = path.workflow === undefined ? chatMakeDigest(chatProposals.digest(id, turnAccepts)) : '';
+      const makeDigest = path.workflow === undefined ? chatMakeDigest(chatProposals.digest(id, turnAccepts, themeClient)) : '';
       // DES-CATALOG-002 §2.3: with job cards, the make digest rides INSIDE the job block, under its one 2 KB budget.
       if (jobTurn !== null && jobTurn.mode === 'cards') {
         seatText = `${seatText}\n\n${chatJobTurnLines(jobTurn.mode, { ...jobTurn.context, preface: makeDigest })}`;
@@ -5661,7 +5667,7 @@ export function registerRoutes(
       // A2: the per-message digest of what the chat can make now (advertised operations only).
       // crew#1412: written after the last await and the generation check; a map that cannot be written says so.
       const requirementsMaps = scope !== undefined ? publishRequirementsMaps(scope.cwd, requirementsBuilt) : [];
-      const statementOpts = { analysis: path.workflow !== undefined, make: chatProposals.digest(id, turnAccepts), requirementsMaps, ...voiceFor(scope?.projectId) };
+      const statementOpts = { analysis: path.workflow !== undefined, make: chatProposals.digest(id, turnAccepts, themeClient), requirementsMaps, ...voiceFor(scope?.projectId) };
       const projectId = scope?.projectId;
       if (path.runId === undefined) {
         const stepId = 'answer-1';
