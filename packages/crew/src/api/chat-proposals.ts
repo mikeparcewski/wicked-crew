@@ -619,7 +619,8 @@ export interface ChatProposalDeps {
   projectOf(chatId: string): string | null;
   /** The live chat, or `null` once it has ended. */
   chat(chatId: string): ProposalChat | null;
-  /** Seats that can work now, in roster order (enabled, work-eligible, not signed out, not opt-in). */
+  /** Seats that can work now, in roster order (enabled for council, work-eligible, not signed out), under the default
+   *  launch rule: no opt-in seat unless it is the only one left (`proposalRoster` in routes.ts, F43). */
   rosterEligible(): ReadonlyArray<{ key: string; name: string }>;
   /** Every run, decorated as `GET /runs` serves it (`project_id`, `document_id`, `run_identity`, times). */
   runs(): Promise<SessionView[]>;
