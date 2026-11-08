@@ -14,7 +14,7 @@
  *    query of an accepted version; without one, the receipt and the query are checked, then `501`.
  *  - actions (prepare, run, records, grant, revoke; HUMAN operator): the write path (K2b, `actions/`) when the
  *    daemon has one, else `501` after the human check; `GET …/actions/:id/grant` (observer) reads a grant.
- *    Publish: `501` after the human check.
+ *    Publish (HUMAN operator): a new governed run bound to a persisted manifest.
  *  - `POST /apps/:app/turns` (HUMAN operator, K5): one message launches one `apps-turn` run and holds the app (`501` while this daemon
  *    has no launcher).
  *  - `POST /apps/check {token, app, commit}`: the `apps_check` Tool's route, authenticated by the unit's
@@ -31,7 +31,7 @@ import { record, z } from '../zod.js';
 
 import { LOCAL_ACTOR, trustAtLeast, viewOf } from '../api/auth.js';
 import type { AuditLog } from '../api/audit.js';
-import type { Actor, AppEditOp, AppErrorBody } from '../core/types.js';
+import type { Actor, AppEditOp, AppErrorBody, AppPublishBody } from '../core/types.js';
 import { APP_NAMED_ID_RE, parseSpec } from './spec.js';
 import { APP_SLUG_RE, AppStore, AppStoreError } from './store.js';
 import { QUERY_TEXT_MAX_BYTES } from './check.js';
@@ -39,6 +39,8 @@ import { AppWriteError, type AppWritePath } from './actions/write-path.js';
 import { AppExecError, type AppExecutor } from './exec/executor.js';
 import { AppGitError } from './git.js';
 import { appDetailFor, appRefusalFor, appVersionReadFor, type AppRefusal } from './views.js';
+import { produce, PublishService, type PublishDeps } from './publish/run.js';
+import { publishCheck } from './publish/check.js';
 
 const V = '/api/v1';
 
@@ -62,6 +64,7 @@ export interface AppRoutesDeps {
   executor?: AppExecutor;
   /** (K2b) The write path; absent = the action routes answer 501 after the human check. */
   writePath?: AppWritePath;
+  publish?: PublishDeps;
 }
 
 const actorOf = (req: FastifyRequest): Actor => req.actor ?? LOCAL_ACTOR;
@@ -123,6 +126,22 @@ const version = z.union([z.int().min(1), z.string().regex(/^[0-9a-fA-F]{40}$/)])
 export const AppRestoreSchema = z.strictObject({ base, version });
 export const AppQuerySchema = z.strictObject({ version, query: z.string().regex(APP_NAMED_ID_RE), params: record(z.string(), z.unknown()).optional() });
 export const AppTurnSchema = z.strictObject({ base, message: z.string().min(1).max(8000), about: z.array(z.string().min(1).max(64)).max(20).optional() });
+const audienceValues = z.array(z.string().min(1).max(256)).min(1).max(100);
+export const AppPublishSchema = z.strictObject({
+  base,
+  targets: z.array(z.enum(['studio', 'site', 'embed', 'teams'])).min(1).max(4),
+  site: z.strictObject({ origin: z.string().min(1).max(2048) }),
+  identity: z.strictObject({ profile: z.enum(['oidc', 'entra']), issuer: z.string().min(1).max(2048), clientId: z.string().min(1).max(256), tenantId: z.string().max(128).optional(), scope: z.string().max(2048).optional(), allowRanges: z.array(z.string().max(64)).max(100).optional() }).nullable(),
+  audience: z.discriminatedUnion('kind', [
+    z.strictObject({ kind: z.literal('public') }),
+    z.strictObject({ kind: z.literal('oidc-groups'), groups: audienceValues, claim: z.string().min(1).max(256).optional() }),
+    z.strictObject({ kind: z.literal('oidc-email-domain'), domains: audienceValues }),
+    z.strictObject({ kind: z.literal('entra-roles'), roles: audienceValues }),
+    z.strictObject({ kind: z.literal('entra-groups'), groups: audienceValues }),
+  ]),
+  embedOrigins: z.array(z.string().max(2048)).max(100).optional(),
+});
+export const AppsProduceSchema = z.strictObject({ token: z.string().min(1).max(4096) });
 /** `commit`: the builder's candidate COMMIT in the app repo (crew reads its tree and writes the lock on it). */
 export const AppActionPrepareSchema = z.strictObject({ version, params: record(z.string(), z.unknown()).optional() });
 // `z.guid()`: any 8-4-4-4-12 hex id, as zod 3's `.uuid()` accepted (zod 4's `z.uuid()` also checks the RFC variant).
@@ -136,6 +155,7 @@ export const AppsCheckSchema = z.union([
 
 export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): void {
   const { store } = deps;
+  if (deps.publish !== undefined) store.publisher = new PublishService(deps.publish);
 
   const humanOnly = (req: FastifyRequest, reply: FastifyReply, what: string): boolean => {
     const actor = actorOf(req);
@@ -330,7 +350,7 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
     },
   );
 
-  // The write path (K2b) when this daemon has one; publish is a later slice. The boundary holds either way:
+  // The write path (K2b) when this daemon has one. The boundary holds either way:
   // a human operator only.
   const stub = (method: 'POST' | 'GET' | 'DELETE', path: string, what: string): void => {
     app.route({
@@ -429,7 +449,21 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
       return { grant: g };
     });
   }
-  stub('POST', '/publish', 'publish an app');
+  app.post(`${V}/apps/:app/publish`, { config: { manifest: { requestType: 'AppPublishBody', statusCodes: [202, 400, 403, 404, 409, 422, 503] } } }, async (req, reply) => {
+    if (!humanOnly(req, reply, 'publish an app')) return reply;
+    const slug = slugOf(req, reply);
+    if (slug === null) return reply;
+    const parsed = AppPublishSchema.safeParse(req.body);
+    if (!parsed.success) return badRequest(reply, parsed.error);
+    if (parsed.data.targets.includes('teams')) return reply.code(400).send({ code: 'teams_not_offered', error: 'Teams publishing is not offered in this build' });
+    try {
+      const p = await store.beginPublish(slug, { body: parsed.data as AppPublishBody, actor: actorOf(req) });
+      deps.audit.record('apps.publish.launched', actorOf(req), { runId: p.runId, detail: { app: slug, base: p.base, manifestDigest: p.digest } });
+      return reply.code(202).send({ runId: p.runId, manifestDigest: p.digest });
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
 
   app.post(
     `${V}/apps/:app/turns`,
@@ -472,6 +506,14 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
     if (unit.phase !== 'check') {
       return refuse(reply, 403, { code: 'not_the_check', error: `the ${unit.phase} step of run ${unit.runId} cannot run the Apps check; only its check step can` });
     }
+    const publishSlug = store.publishRunApp(unit.runId);
+    if (store.publishOf(unit.runId) !== null && publishSlug !== null) {
+      try {
+        return await publishCheck(store.publishCheckDeps(publishSlug), { slug: publishSlug, runId: unit.runId });
+      } catch (err) {
+        return fail(reply, err);
+      }
+    }
     const slug = 'tree' in parsed.data ? store.turnApp(unit.runId) : parsed.data.app;
     if (slug === null || !store.has(slug)) return refuse(reply, 404, { code: 'unknown_app', error: 'tree' in parsed.data ? `run ${unit.runId} is no app's turn in flight` : `no app ${slug}` });
     try {
@@ -481,4 +523,23 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
     }
     },
   );
+
+  app.post(`${V}/apps/produce`, { config: { manifest: { statusCodes: [200, 400, 401, 403, 409, 503] } } }, async (req, reply) => {
+    if (deps.verifyUnitToken === undefined) return refuse(reply, 503, { code: 'apps_unavailable', error: "this engine cannot verify a unit's token for apps-produce yet" });
+    const parsed = AppsProduceSchema.safeParse(req.body);
+    if (!parsed.success) return badRequest(reply, parsed.error);
+    const unit = await deps.verifyUnitToken(parsed.data.token);
+    if (unit === null) return refuse(reply, 401, { code: 'invalid_token', error: 'the unit token is not valid' });
+    if (unit.phase !== 'produce' || store.publishOf(unit.runId) === null) {
+      return reply.code(403).send({ code: 'not_the_produce', error: 'only a publish run\'s produce step can produce its image' });
+    }
+    try {
+      const published = await produce({ store }, { runId: unit.runId });
+      // The consequential step of a publish is on the audit trail too (review r1), not only its launch.
+      deps.audit.record('apps.publish.produced', published.actor, { runId: unit.runId, detail: { app: store.publishRunApp(unit.runId), version: published.version, manifestDigest: published.manifestDigest, image: published.image.id } });
+      return { ok: true, published };
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
 }

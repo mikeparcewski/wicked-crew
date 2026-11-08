@@ -37,11 +37,13 @@
     "watch",
     "endpoint-manifest.json",
     "runners",
+    "scripts/apps-render.py",
     "workflows"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "build:with-studio": "tsc -p tsconfig.json && node scripts/bundle-studio.mjs",
+    "build": "tsc -p tsconfig.json && npm run build:apps-server",
+    "build:apps-server": "node ../apps-server/scripts/build.mjs --outdir dist/apps-server",
+    "build:with-studio": "npm run build && node scripts/bundle-studio.mjs",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "lint": "eslint src tests",
     "test": "vitest run",

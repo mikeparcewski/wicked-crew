@@ -757,6 +757,7 @@ const UNIT_TOKEN_ROUTES: ReadonlySet<string> = new Set([
   `DELETE ${API_PREFIX}/mcp/ask`,
   // DES-APPS-001 §9.2: the `apps_check` Tool's route; the body's unit token is its credential (verified there).
   `POST ${API_PREFIX}/apps/check`,
+  `POST ${API_PREFIX}/apps/produce`,
   // DES-CATALOG-002 CS6: the `run-cost` facts Tool's route; the body's unit token is its credential (verified there).
   `POST ${API_PREFIX}/insights/facts`,
 ]);

@@ -30,13 +30,14 @@ import { pgReadOnly } from '../../sources/drivers/postgres.js';
 import { sqlConnectArgs } from '../../sources/kinds.js';
 import { pgTableSafety, type SafetyColumn } from '../../sources/safety/postgres.js';
 import { actionHash } from '../check.js';
+import { buildApiCard, buildRowCard, cardCell, ViewerClaimUnavailable } from './card.js';
 import { graphqlMutationContract, graphqlRootSignatures, rowWriteContract, splitTable, toolActionContract } from '../exec/contract.js';
 import { type AppExecutor, type AppFilesSource, graphqlVariablesProblem } from '../exec/executor.js';
 import { AppLimits, RateLimited } from '../exec/limits.js';
 import { bindParams, ParamError, type Viewer } from '../exec/params.js';
 import { checkRowValues } from '../exec/source-stage.js';
 import { lookupSource, pinOf, type AppSource, type AppSourceRegistry } from '../exec/sources.js';
-import { callMutation, callTool, describeMutation, describeToolRequest, idempotencyArg, mutationField, type ApiOutcome } from './api-action.js';
+import { callMutation, callTool, mutationField, type ApiOutcome } from './api-action.js';
 import { baseTypeSql, pgExactFitIn, type FitItem } from './pg-fit.js';
 import { generateStatement, runRowWrite, type WriteHooks } from './pg-write.js';
 import type { ActionRecord, AppActionStore, ResolvedOperation } from './store.js';
@@ -74,7 +75,6 @@ export interface WritePathDeps {
 }
 
 const sha = (v: unknown): string => createHash('sha256').update(canonicalJson(v)).digest('hex');
-const LABEL: Record<AppActionCardValue['from'], string> = { param: 'you entered it', app: 'fixed by the app', viewer: 'your sign-in', crew: 'filled by studio' };
 
 /** A grant or record check that failed, with the words for the person. */
 const refuse = (status: number, code: string, message: string): AppWriteError => new AppWriteError(status, code, message);
@@ -297,19 +297,19 @@ export class AppWritePath {
       throw err;
     }
     const nowAt = new Date(this.now());
+    // The card's value mapping is the shared pure builder (apps/actions/card.ts), the one the publish check's
+    // fixture evidence uses too, so the card a person consents to and the card QE reviews are made the same way.
     const value = (v: AppValue): { value: unknown; from: AppActionCardValue['from']; label: string } => {
-      if (v.kind === 'param') {
-        const decl = action.params?.properties[v.name];
-        if (decl?.from !== undefined) return { value: bound.byName[v.name], from: 'viewer', label: LABEL.viewer };
-        return { value: bound.byName[v.name], from: 'param', label: LABEL.param };
+      try {
+        return cardCell(v, action.params, {
+          paramValue: (name) => bound.byName[name],
+          viewerClaim: (claim) => (claim === 'email' ? viewer.email : claim === 'name' ? viewer.name : viewer.id),
+          newUuid: () => randomUUID(),
+        });
+      } catch (err) {
+        if (err instanceof ViewerClaimUnavailable) throw refuse(409, 'viewer_unavailable', `the action needs your ${err.claim}, and crew does not know it: set your git user.${err.claim}`);
+        throw err;
       }
-      if (v.kind === 'literal') return { value: v.value, from: 'app', label: LABEL.app };
-      if (v.kind === 'viewer') {
-        const claim = v.claim === 'email' ? viewer.email : v.claim === 'name' ? viewer.name : viewer.id;
-        if (claim === null) throw refuse(409, 'viewer_unavailable', `the action needs your ${v.claim}, and crew does not know it: set your git user.${v.claim}`);
-        return { value: claim, from: 'viewer', label: LABEL.viewer };
-      }
-      return { value: v.value === 'now' ? '' : randomUUID(), from: 'crew', label: `${LABEL.crew}: ${v.value === 'now' ? 'now' : 'new uuid'}` };
     };
     // The record's id is chosen first: an operation that sends it (an idempotency key) shows it on the card.
     const recordId = randomUUID();
@@ -388,22 +388,7 @@ export class AppWritePath {
     if (misfits.length > 0) throw refuse(409, 'value_does_not_fit', misfits.map((m) => `${JSON.stringify(fit.find((f) => f.column === m.column)?.text ?? '')} ${m.why}`).join('; '));
     const values = stmt.slots.map((s) => texts.get(`${s.role}:${s.column}`)!.text);
     const keyValues = Object.fromEntries(key.map((k) => [k, texts.get(`key:${k}`)!.card.value]));
-    const verb = action.op === 'insert' ? 'INSERT' : action.op === 'update' ? 'UPDATE' : 'DELETE';
-    const card: AppActionCard = {
-      kind: 'row-write',
-      app,
-      action: action.id,
-      source: action.source,
-      login: source.config.sql?.user ?? '',
-      verb,
-      table: action.table,
-      columns: set.map((c) => texts.get(`set:${c}`)!.card),
-      key: key.map((k) => texts.get(`key:${k}`)!.card),
-      rows: 'exactly 1 row, verified',
-      checks: 'plain table: no triggers, rules, inheritance or row security; checked just now',
-      statement: stmt.text,
-      ...(action.description !== undefined ? { appSays: action.description } : {}),
-    };
+    const card = buildRowCard(app, action, { login: source.config.sql?.user ?? '', columns: set.map((c) => texts.get(`set:${c}`)!.card), key: key.map((k) => texts.get(`key:${k}`)!.card), statement: stmt.text });
     return { card, operation: { kind: 'row-write', schema, table: name, op: action.op, statement: stmt.text, values, set, key, keyValues } };
   }
 
@@ -416,49 +401,16 @@ export class AppWritePath {
     absent: ReadonlySet<string>,
     recordId: string,
   ): { card: AppActionCard; operation: ResolvedOperation } {
-    const cards: AppActionCardValue[] = [];
-    const args: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(action.args)) {
-      // An absent optional parameter's argument is left out of the call (and off the card), never sent as null.
-      if (v.kind === 'param' && absent.has(v.name)) continue;
-      const r = value(v);
-      const sent = v.kind === 'crew' && v.value === 'now' ? nowAt.toISOString() : r.value;
-      args[k] = sent;
-      cards.push({ name: k, value: sent === undefined ? null : (sent as AppActionCardValue['value']), from: r.from, label: r.label });
-    }
-    const source = resolved.source as Extract<AppSource, { kind: 'rest' | 'mcp-http' | 'mcp-stdio' | 'graphql' }>;
-    let shown: { operation: string; request: string };
-    let operation: ResolvedOperation;
-    if (action.call.kind === 'tool') {
-      const tool = resolved.tool!;
-      // An operation that maps an Idempotency-Key header gets the record id, on the card like any value (codex/pi r1).
-      const idem = idempotencyArg(tool.rest);
-      if (idem !== null && !Object.hasOwn(args, idem)) {
-        args[idem] = recordId;
-        cards.push({ name: idem, value: recordId, from: 'crew', label: `${LABEL.crew}: the record id` });
-      }
-      shown = describeToolRequest(source.config, tool.name, tool.rest, args);
-      operation = { kind: 'tool', tool: tool.name, args };
-    } else {
-      // graphql-js's own coercion of the variables, before any card (Int range, enums, nulls).
-      const introspection = (source as Extract<AppSource, { kind: 'graphql' }>).description?.introspection;
-      const problem = introspection === undefined ? 'the source is not described' : graphqlVariablesProblem(action.call.mutation, introspection, args);
-      if (problem !== null) throw refuse(400, 'bad_params', problem);
-      shown = describeMutation(source.config, action.call.mutation, args, resolved.field ?? 'mutation');
-      operation = { kind: 'mutation', document: action.call.mutation, variables: args };
-    }
-    const card: AppActionCard = {
-      kind: 'api',
-      app,
-      action: action.id,
-      source: action.source,
-      sourceKind: source.kind,
-      operation: shown.operation,
-      args: cards,
-      request: shown.request,
-      ...(action.description !== undefined ? { appSays: action.description } : {}),
-    };
-    return { card, operation };
+    return buildApiCard(app, action, {
+      config: (resolved.source as Extract<AppSource, { kind: 'rest' | 'mcp-http' | 'mcp-stdio' | 'graphql' }>).config,
+      ...(resolved.tool !== undefined ? { tool: resolved.tool } : {}),
+      ...(resolved.field !== undefined ? { field: resolved.field } : {}),
+      validateMutation: (args) => {
+        const introspection = (resolved.source as Extract<AppSource, { kind: 'graphql' }>).description?.introspection;
+        const problem = introspection === undefined ? 'the source is not described' : graphqlVariablesProblem(action.call.kind === 'mutation' ? action.call.mutation : '', introspection, args);
+        if (problem !== null) throw refuse(400, 'bad_params', problem);
+      },
+    }, value, nowAt, absent, recordId);
   }
 
   private rate(app: string, actor: Actor, bucket: 'action' | 'prepare'): void {

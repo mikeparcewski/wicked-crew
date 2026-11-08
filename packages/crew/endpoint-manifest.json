@@ -159,12 +159,16 @@
     {
       "method": "POST",
       "path": "/api/v1/apps/:app/publish",
-      "requestType": null,
+      "requestType": "AppPublishBody",
       "responseType": null,
       "statusCodes": [
+        202,
+        400,
         403,
         404,
-        501
+        409,
+        422,
+        503
       ]
     },
     {
@@ -283,6 +287,20 @@
         401,
         403,
         404,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/apps/produce",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": [
+        200,
+        400,
+        401,
+        403,
         409,
         503
       ]

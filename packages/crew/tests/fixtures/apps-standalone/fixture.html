@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>apps fixture (test fake)</title>
+  <link rel="stylesheet" href="./runtime.css" />
+  <!--
+    A TEST FAKE of studio's standalone fixture page (CONTRACT-CS2 §P4). Slice C ships the real one, which boots
+    the runtime over a MessageChannel. Here the fake fixture.js (same-origin external script, so the published
+    `default-src 'self'` CSP admits it — an inline script would be blocked) sets up window.__wkFixture from
+    fixture.json's {spec, cards}, so packages/crew/scripts/apps-render.py can be tested end-to-end without studio.
+  -->
+  <script src="./runtime.js" defer></script>
+  <script src="./fixture.js" defer></script>
+</head>
+<body>
+  <main id="page" class="wk-page"></main>
+  <div id="card" class="wk-card" hidden></div>
+</body>
+</html>

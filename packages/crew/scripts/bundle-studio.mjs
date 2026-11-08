@@ -9,7 +9,7 @@
 // only shared type surface is `wicked-crew-api-types`, which studio consumes
 // as a published contract).
 //
-// Wiring (unchanged from task #84): crew's default `build` is `tsc` ONLY; this
+// Crew's default `build` carries the apps-server artifact but no studio UI. This
 // script runs via `build:with-studio`, the RELEASE-time build the CI/release
 // workflows use so the published tarball still ships the UI. A crew built
 // without it serves headless API+WS (server.ts degrades gracefully).
