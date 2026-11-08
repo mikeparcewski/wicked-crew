@@ -222,6 +222,22 @@ function seatsOut(v: SessionView | undefined, clis: readonly SystemCli[]): strin
     .map((c) => `${c.cli} ${c.state === 'benched' ? `benched${c.benchedUntil !== undefined ? ` until ${c.benchedUntil.slice(11, 16)} UTC` : ''}` : 'signed out'}`);
 }
 
+/**
+ * Why no helper can take work (first-run-2 N4), true for every roster that reaches it: with Docker down
+ * every seat reads "unknown" (there is no one to name, never "()"); a roster that mixes states names
+ * each seat with its own state, never a false "every".
+ */
+function noneReason(clis: readonly SystemCli[]): string {
+  if (clis.every((c) => c.state === 'unknown')) return 'No helper’s sign-in can be confirmed right now';
+  const out = seatsOut(undefined, clis);
+  if (out.length === clis.length) return `Every helper is signed out or benched (${out.join(', ')})`;
+  const words = clis.map((c) => {
+    if (c.state === 'signed_out' || c.state === 'benched') return seatsOut(undefined, [c])[0]!;
+    return `${c.cli} ${c.state === 'unknown' ? 'sign-in not confirmed' : 'not taking work'}`;
+  });
+  return `No helper is free to take work (${words.join(', ')})`;
+}
+
 /** Why a held run is held, in a person's words (the denial's category, never its raw text). */
 function heldWords(denial: string, dead: boolean, noFailover: boolean): string {
   if (dead) return noFailover ? 'No other helper can take over' : 'Its helper stopped unexpectedly';
@@ -477,7 +493,7 @@ export function buildNeeds(input: NeedsInput): Needs {
         source: 'cli',
         kind: 'prevents',
         title: 'No helper can take work',
-        reason: `Every helper is signed out or benched (${seatsOut(undefined, input.clis).join(', ')})`,
+        reason: noneReason(input.clis),
         remedy: 'Sign a CLI in, or wait for a bench to lift.',
         target: { kind: 'cli', cli: input.clis[0]!.cli },
         action: input.clis.some((c) => c.canSignIn) ? { kind: 'sign_in', label: 'Sign in' } : null,

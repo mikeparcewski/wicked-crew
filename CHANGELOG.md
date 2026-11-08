@@ -17,7 +17,13 @@ mentioned only where a daemon release depends on them.
   host login), `container` for claude and copilot (a login container). Studio used crew's host version probe alone, so
   with no `claude` on this computer's PATH every helper read "Not installed" and Sign in was gone, although the seat
   runs from its image and claude signs in through a login container. Crew-only: the engine never sees the field.
-
+- **Nerve Center no longer shows "()" when Docker is down.** With the container runtime stopped every helper's sign-in
+  reads unknown, so "No helper can take work" said "Every helper is signed out or benched ()". Now every seat unknown
+  reads "No helper’s sign-in can be confirmed right now", and a roster of mixed states names each helper with its
+  own state ("No helper is free to take work (…)") instead of a false "every" (first-run-2 N4).
+- **The README lists every place crew looks for wicked-garden.** It named only Claude Code's two locations; it now
+  gives all five in crew's resolution order: `WICKED_CREW_SKILLS_SOURCE`, Claude Code's plugin cache, the
+  installer's copy, the npm-global package, then Codex's plugin cache (first-run-2 N7).
 - **A review of a change starts on a PR a crew run built (CJ13).** The job proposal chose the builder (the chat's lead)
   as its default lead, the launch dropped the change's authors from its roster, and Start failed with a 502 ("primary
   names a seat that is not in this launch's roster"). The proposal now reads the launch's own exclusion and resolves its

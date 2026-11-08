@@ -107,10 +107,19 @@ chat builds with. crew does not vendor it, so install it once:
 npx wicked-installer install wicked-garden    # or install the wicked-garden plugin in Claude Code
 ```
 
-crew finds garden in Claude Code's plugin cache (`<config dir>/plugins/cache/wicked-garden/…`) or in
-the installer's copy (`<config dir>/plugins/wicked-garden`), where `<config dir>` is
-`$CLAUDE_CONFIG_DIR` or `~/.claude`. To use another garden root on purpose, point
-`WICKED_CREW_SKILLS_SOURCE` at it. Without garden, `/health` still answers `"status":"ok"` (the daemon
+crew uses the first garden it finds, in this order:
+
+1. `WICKED_CREW_SKILLS_SOURCE`, a garden root you point it at on purpose.
+2. Claude Code's plugin cache (`<config dir>/plugins/cache/wicked-garden/wicked-garden/<version>`).
+3. The installer's copy for Claude Code (`<config dir>/plugins/wicked-garden`).
+4. The npm-global package (`npm i -g wicked-garden`): the `wicked-garden` command on PATH, then a
+   `wicked-garden` installed beside crew's own package.
+5. Codex's plugin cache (`<CODEX_HOME or ~/.codex>/plugins/cache/<marketplace>/wicked-garden/…`).
+
+`<config dir>` is each directory in `$CLAUDE_CONFIG_DIR`, in order, then `~/.claude`; every config dir's cache
+is searched before any installer copy.
+
+Without garden, `/health` still answers `"status":"ok"` (the daemon
 serves so studio can load and show the problem) and carries the missing base skill as an
 error-severity finding in its `warnings` list — the same finding object as `baseSkill.finding` and
 `/diagnostics.skills.findings[]`. Every launch and every **Register & onboard** is refused with that
