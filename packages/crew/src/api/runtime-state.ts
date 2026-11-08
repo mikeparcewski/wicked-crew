@@ -6,7 +6,8 @@ import type { ExecLike } from './seat-container-login.js';
  * Consecutive failed checks before the runtime reads `down`, from any state (e2e-1105 09:02Z: under
  * host load 50-80 one `version` check missed its bound while `docker version` answered by hand, and
  * a false `down` benches every container seat). A runtime that is really down fails each check at
- * once, so `down` lands within about three intervals.
+ * once, so `down` lands within about three intervals; a HUNG runtime takes the full bound per check,
+ * so about a minute. Later is accepted: a false outage is worse than an honest wait.
  */
 export const DOWN_AFTER_MISSES = 3;
 /** One check's bound: a loaded laptop's docker CLI can take well over 5 s to answer. */
@@ -64,7 +65,7 @@ export class RuntimeState implements RuntimeStateReader {
           if (out.stdout.trim() !== '') next = 'up';
         }
       } catch { /* A missing CLI, timeout or unreachable server is unavailable. */ }
-      // Down takes two misses in a row (one check on a loaded laptop can time out with Docker up, and
+      // Down takes three misses in a row (a check on a loaded laptop can time out with Docker up, and
       // a false "down" benches every container seat); up takes one answer.
       this.misses = next === 'down' ? this.misses + 1 : 0;
       if (next === 'down' && this.misses < DOWN_AFTER_MISSES) return;

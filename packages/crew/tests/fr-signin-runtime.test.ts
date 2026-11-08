@@ -112,6 +112,20 @@ describe('background runtime reader', () => {
     const reader = new RuntimeState({ exec, runtime: () => '/fixture/runtime' }); close.push(() => reader.close());
     await vi.advanceTimersByTimeAsync(12_001); expect(reader.state()).toBe('up');
     await vi.advanceTimersByTimeAsync(60_000); expect(reader.state()).toBe('up');
+    // One check at a time: a 12 s check on a 10 s interval never overlaps the next.
+    expect(exec.mock.calls.length).toBeLessThanOrEqual(Math.ceil(72_001 / 12_000));
+  });
+  it('a HUNG runtime (no answer within the bound) reads down after three misses, never before', async () => {
+    vi.useFakeTimers();
+    const exec = vi.fn<ExecLike>(async (_f, _a, opts) => {
+      await new Promise((r) => setTimeout(r, opts.timeout));
+      throw new Error('timed out');
+    });
+    const reader = new RuntimeState({ exec, runtime: () => '/fixture/runtime' }); close.push(() => reader.close());
+    await vi.advanceTimersByTimeAsync(15_001); expect(reader.state()).toBe('unknown');
+    await vi.advanceTimersByTimeAsync(25_000); expect(reader.state()).toBe('unknown');
+    await vi.advanceTimersByTimeAsync(30_000); expect(reader.state()).toBe('down');
+    expect(exec.mock.calls.length).toBeGreaterThanOrEqual(3);
   });
   it('coalesces pending probes and publishes nothing after close', async () => {
     let finish!: (out: { stdout: string; stderr: string }) => void;
