@@ -211,6 +211,21 @@ mentioned only where a daemon release depends on them.
     `shape-corrections-v1.json` with recorded seat fixtures; exact scoring, coverage enforcement, the label taxonomy,
     corrected launches as a diagnostic slice, and `GET /testing/default-evals/shape-sample` (the audited, stratified
     sample). CI runs the corpus through the shipped detection and the corrections through the real merge.
+- **Respond to an ask and Rework an artifact draft from your documents, and every statement is re-checked before it
+  lands (DES-CATALOG-002 CS5, crew half; no api-types change).** A Respond or Rework draft runs the engine's
+  `interactive-draft-sourced` preset: the draft, plus a fidelity check on a distinct seat that re-checks every
+  statement against the documents, and holds at a gate when it does not pass. The landing is announced only when the
+  whole run completes, so a held or rejected check lands nothing. The gate shown on the proposal comes from the same
+  rule (`fidelity-to-source` beside `draft-floor`). An engine without the preset refuses the draft by name; it never
+  runs as an unchecked draft. The proposal reads the documents attached in the chat or named in it ("2 documents"),
+  under the document path's rules, decided once for the proposal, at Go and at staging:
+  - a file is read whole up to 512 KB;
+  - a pdf is read through its full extracted text (`records/<name>.pdf.txt`, the citable record), with the original
+    beside it when it is small enough;
+  - a scanned pdf, text over the cap, or documents past the 1 MB packet are struck with the reason before Start.
+
+  A required document missing becomes the proposal's question, and Start waits. Ordinary Document and Communicate
+  drafts are unchanged.
 
 ### Changed
 
