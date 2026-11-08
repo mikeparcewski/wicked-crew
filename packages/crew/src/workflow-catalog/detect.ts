@@ -317,6 +317,33 @@ export function withoutAimed(text: string): string {
 }
 
 /**
+ * A question about what work WILL cost, as the person's own opening ask ("what would 40 bug fixes a month cost?", "how
+ * much would the upgrades cost per month?", "estimate our monthly spend on security reviews"): they ask for a cost, and
+ * the work it names ("bug fixes") is only its subject (e2e-1105 CJ7: New chat opened a bug fix). Only the message's
+ * opening counts, so a cost question quoted inside other work ("fix the bug where 'what would … cost?' opens the wrong
+ * card", a pasted document) is not one. Forward-looking only: past spend ("what does it cost?", "… last month") is
+ * Review recent work's.
+ */
+const COST_ASK = /^\s*(?:(?:hey|hi|so|ok(?:ay)?|quick question)[,:]?\s+)?(?:(?:what|how\s+much)\s+(?:would|will|might|could|should|is\s+it\s+going\s+to)\b(?!\s+you\b)(?:[^.?!;]|\.(?=\d)){0,100}?\b(?:cost|costs|spend|run\s+us|set\s+us\s+back)(?=\s*$|\s*[?.!,;]|\s+(?:us|me|per|in|to|each|a|an|every|if|for|at|on|over|with|monthly|weekly|yearly|annually)\b)|(?:please\s+)?(?:estimate|forecast|project|predict|model)\s+(?:(?:our|the|my|a|monthly|weekly|quarterly|annual|yearly|total|likely|expected)\s+){0,2}(?:spend|spending|costs?|budget|bill)\b|budget\s+for\b)/iu;
+/** Past spend: Review recent work reads what runs DID cost. */
+const PAST_SPEND = /\b(?:last|past|previous)\s+\w+|\b(?:yesterday|ago|so far|to date|spent|has cost|have cost)\b/iu;
+/** The price of new work ("how much would it cost to build the portal", "quote …"): Estimate and price answers it. */
+const PRICE_OF_WORK = /\bcosts?\s+(?:us\s+)?to\s+(?:build|create|develop|implement|make|design|write|ship|deliver)\b|\b(?:price|pricing|quote|charge)\b/iu;
+/** The cards that answer a cost question: the run cost model (the default answer), and the price of new work. */
+export const COST_CARDS: readonly string[] = ['run-cost', 'estimate-price'];
+
+/** Whether the words open with a question about what work will cost (then a card that does not answer a cost is never
+ *  the reading). */
+export function costAsked(text: string): boolean {
+  return COST_ASK.test(text) && !PAST_SPEND.test(text);
+}
+
+/** The cost card a cost question leads with: the price of new work, else the run cost model. */
+export function costCardOf(text: string): string {
+  return PRICE_OF_WORK.test(text) ? COST_CARDS[1]! : COST_CARDS[0]!;
+}
+
+/**
  * What the person asks to GET BACK, when their words say it outright: a plan, a review, an explanation, a write-up, an
  * investigation, an estimate, a decision. The words layer ranks cards by the work's SUBJECT too ("Plan how to upgrade
  * Node" scores the upgrade), so when the words ask for an outcome the top card does not deliver, they do not decide
@@ -329,6 +356,7 @@ const OUTCOME_CUES: ReadonlyArray<{ re: RegExp; cards: readonly string[] }> = [
   { re: /\b(?:document|documentation|write[- ]up|readme|deck|slides|presentation|release notes|changelog|announcement|status update)\b/iu, cards: ['document', 'communicate', 'interactive-page', 'operating-model', 'analyze-codebase'] },
   { re: /\b(?:root cause|investigate|what happened|why (?:is|did|does|do|are))\b/iu, cards: ['incident', 'reconstruct', 'research', 'bug'] },
   { re: /\b(?:estimate|how long will|how much will)\b/iu, cards: ['estimate-price', 'run-cost'] },
+  { re: COST_ASK, cards: COST_CARDS },
   { re: /\b(?:should we|decide|choose between|which is better)\b/iu, cards: ['decide'] },
 ];
 
@@ -618,6 +646,8 @@ export function detect(input: DetectInput): Detection {
     const seed = byId(card);
     return seed !== undefined && !comingCard(seed, seed.variant?.options.find((o) => o.id === option) ?? null);
   };
+  // A question about what work will cost (the person's opening words, past spend aside): a cost card answers it.
+  const costRead = costAsked(withoutAimed(input.text));
   const make = (card: string, option: string | null, depth: ShapeGuess['depth'], confidence: number, banded: Band, reason: string, source: ShapeGuess['source'], ask: ShapeGuess['question']): ShapeGuess => {
     const available = availableOf(card, option);
     // A job this daemon cannot start is never shown as sure (pi r2): at most likely, with its nearest offered.
@@ -650,6 +680,10 @@ export function detect(input: DetectInput): Detection {
     }
   }
   if (seat === null) {
+    if (costRead && (words.card === null || !COST_CARDS.includes(words.card))) {
+      // No seat reading (a timeout, words only): a cost question still reads as the run cost model, never sure.
+      return { guess: make(costCardOf(withoutAimed(input.text)), null, null, 0.6, 'likely', 'the words ask what the work would cost', 'words', null), words, seat };
+    }
     if (words.card !== null && words.top >= WORDS_SURE.minScore) {
       const seed = byId(words.card)!;
       return { guess: make(words.card, words.option, isInvestigate(seed) ? depthFromWords(withoutAimed(input.text)) : null, 0.6, 'likely', 'the words point to this job', 'words', null), words, seat };
@@ -666,6 +700,12 @@ export function detect(input: DetectInput): Detection {
       words,
       seat,
     };
+  }
+  if (costRead && !COST_CARDS.includes(seat.card) && seat.ask.length === 0 && bandOf(seat.confidence, false) !== 'ask') {
+    // The words open with a question about what work will cost and the seat read the work they name instead ("what
+    // would 40 bug fixes a month cost?" read as a bug fix; e2e-1105 CJ7): the run cost model is the reading, never
+    // sure (the seat disagreed). A seat that asked, or was unsure, still asks.
+    return { guess: make(costCardOf(withoutAimed(input.text)), null, null, 0.6, 'likely', 'the words ask what the work would cost', input.source, null), words, seat };
   }
   const banded = bandOf(seat.confidence, seat.ask.length > 0);
   const checked = crossCheck({ card: seat.card, option: seat.option, band: banded, source: input.source }, words);
