@@ -201,10 +201,11 @@ describe('a person-made job proposal', () => {
   });
 
   it('a coming card is a record with no Start; Go is refused', async () => {
+    // CS8 flipped every shown coming card; the record stays for a future one (a deferred card exercises it).
     const r = rig();
-    await pick(r, 'competitive');
+    await pick(r, 'tune');
     const p = open(r);
-    expect(p.coming).toMatchObject({ release: '1.2', nearest: { card: 'plan-it' } });
+    expect(p.coming).toMatchObject({ release: 'deferred', nearest: { card: 'analyze-runs' } });
     expect(p.sentence!.ask).toBeNull();
     expect((await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1')).body).toMatchObject({ code: 'card_not_available' });
     expect(r.launcher.launched).toEqual([]);
@@ -686,7 +687,7 @@ describe('codex r6 folds', () => {
     // A coming card never shows a loss question first.
     await pick(r, 'bug', { requestId: 'b2' } as never);
     const bug = open(r);
-    const res = await swap(r, bug.pid, { card: 'competitive' }, 'to-coming');
+    const res = await swap(r, bug.pid, { card: 'tune' }, 'to-coming');
     expect(res.body).toMatchObject({ code: 'card_not_available' });
   });
 });

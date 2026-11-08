@@ -154,10 +154,10 @@ describe('the chat statement routes new work (§2.3)', () => {
     const st = chatScopeStatement(CHAT, SCOPE, [], { make });
     expect(st).toMatch(/type `<its command>` to start it/u);
     expect(st).not.toMatch(/"entry":"<card id>"/u);
-    // Today's flow stays whole, and a card crew cannot start yet is never offered (codex r8).
+    // Today's flow stays whole (codex r8). CS8: Review a change and the flipped cards are offered.
     expect(st).toMatch(/PLAN\+ \{"steps"/u);
     expect(st).toMatch(/`\/bug`/u);
-    expect(st).not.toMatch(/`\/review-change`/u);
+    expect(st).toMatch(/`\/review-change`/u);
   });
 
   it('an analysis chat is unchanged: it proposes nothing', () => {

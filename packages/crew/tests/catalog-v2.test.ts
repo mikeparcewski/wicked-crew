@@ -57,16 +57,20 @@ describe('the v2 wire', () => {
     expect(v2.categories.slice(0, 10).map((c) => c.id)).toEqual(['plan', 'build', 'test', 'investigate', 'analyze', 'judge', 'create', 'estimate', 'organize', 'improve']);
     expect(build().rev).toBe(v2.rev);
     expect(v2.cards.find((c) => c.id === 'test-analysis')).toMatchObject({ hidden: true, command: null });
-    expect(v2.cards.find((c) => c.id === 'competitive')).toMatchObject({ status: 'coming_soon', release: '1.2' });
+    // CS8: every card the product showed as coming is live; only the deferred cards (never shown) still wait.
+    expect(v2.cards.find((c) => c.id === 'competitive')).toMatchObject({ status: 'available', release: '1.0', launch: { kind: 'run', workflow: 'sourced-report' }, brief: 'Lens: competitive.' });
+    expect(v2.cards.filter((c) => c.status === 'coming_soon').map((c) => [c.id, c.release])).toEqual([['setup-project', 'deferred'], ['tune', 'deferred']]);
+    expect(v2.cards.flatMap((c) => (c.variant?.options ?? []).filter((o) => o.status === 'coming_soon').map((o) => `${c.id}:${o.id}`))).toEqual([]);
   });
 
   it('every 1.0 card and option launches on this engine (its preset is served)', () => {
     const off = build().cards
       .filter((c) => c.release === '1.0')
       .flatMap((c) => (c.variant?.options ?? [c]).map((o) => ({ card: c.id, option: 'id' in o && o !== c ? o.id : null, status: o.status, note: o.statusNote })))
-      .filter((o) => o.status !== 'available' && !(o.card === 'studio-plugin' && o.option === 'phase'));
-    // Review a change waits for crew's contributing-author exclusion (its seat rule): listed, not offered.
-    expect(off).toEqual([{ card: 'review-change', option: null, status: 'unavailable', note: expect.stringMatching(/authors/) }]);
+      .filter((o) => o.status !== 'available');
+    // CS8: Review a change is offered (CS11 excludes the authors of every contributing run); the flipped cards' presets
+    // (sourced-report, run-cost, interactive-draft-sourced, editor-plugin's phase kind) are all served by this engine.
+    expect(off).toEqual([]);
   });
 
   it("a card's gate is what its composed plan carries: every check the design names is on the plan", () => {
@@ -208,9 +212,89 @@ describe('the shape on a launch', () => {
     expect(checkLaunchShape(shape({ by: 'detected', guess: { confidence: 0.3, band: 'ask', source: 'chat', reason: 'unsure', detectionRunId: null } }), { kind: 'run', workflow: 'migration' }, served()))
       .toMatchObject({ ok: false, code: 409, body: { code: 'shape_ask' } });
     expect(checkLaunchShape(shape({ card: 'competitive', option: null }), { kind: 'run', workflow: undefined }, served())).toMatchObject({ ok: false, code: 400 });
-    expect(checkLaunchShape(shape({ card: 'studio-plugin', option: 'phase' }), { kind: 'none' } as never, served())).toMatchObject({ ok: false, code: 409, body: { code: 'card_not_available' } });
+    // A coming card (only the deferred ones remain) still never launches.
+    expect(checkLaunchShape(shape({ card: 'tune', option: null }), { kind: 'none' } as never, served())).toMatchObject({ ok: false, code: 409, body: { code: 'card_not_available' } });
     expect(checkLaunchShape(shape({ card: 'document', option: 'presentation' }), { kind: 'document', style: 'doc' }, served())).toMatchObject({ ok: false, code: 400 });
     expect(checkLaunchShape(shape({ card: 'demo-video', option: null }), { kind: 'demo' }, served())).toMatchObject({ ok: true });
     expect(checkLaunchShape(shape({ card: 'backlog', option: 'tasks' }), { kind: 'compose' }, served())).toMatchObject({ ok: true });
+  });
+});
+
+// CS8 (DES-CATALOG-002 rev 8): the catalog flip. Every card the product showed as coming launches what shipped.
+describe('the flipped cards (CS8)', () => {
+  const REPORTS: ReadonlyArray<[string, string]> = [
+    ['research', 'research'], ['competitive', 'competitive'], ['due-diligence', 'due-diligence'],
+    ['analyze-documents', 'analyze'], ['critique', 'critique'], ['estimate-price', 'estimate'],
+  ];
+
+  it('the six sourced reports run sourced-report with their lens line, judged at the source by a seat that did not gather', () => {
+    const served = servedState({ defs, presets, entries });
+    for (const [card, lens] of REPORTS) {
+      const r = resolveOption(card, null, served)!;
+      expect(r.resolved, card).toMatchObject({ status: 'available', release: '1.0', launch: { kind: 'run', workflow: 'sourced-report' }, brief: `Lens: ${lens}.`, delivers: 'report' });
+      expect(r.resolved.gate, card).toContain('fidelity-to-source');
+      expect(r.resolved.seats.distinctEvaluator, card).toBe(true);
+    }
+    // Documents are required where the design says, optional on the others; Research and Competitive take the pick.
+    const inputs = (card: string): string[] => resolveOption(card, null, served)!.resolved.inputs.map((i) => `${i.id}${i.required ? '' : '?'}`);
+    expect(inputs('due-diligence')).toContain('documents');
+    expect(inputs('analyze-documents')).toContain('documents');
+    expect(inputs('critique')).toContain('documents?');
+    expect(inputs('estimate-price')).toContain('documents?');
+    expect(inputs('run-cost')).toContain('documents?');
+    expect(inputs('research')).toContain('sources');
+    expect(inputs('incident')).toContain('sources?');
+  });
+
+  it('a card framing a shared preset reads as itself: six reports never share one summary', () => {
+    const cards = build().cards.filter((c) => REPORTS.some(([id]) => id === c.id));
+    expect(new Set(cards.map((c) => c.summary)).size).toBe(REPORTS.length);
+    for (const c of cards) expect(c.summary, c.id).toBe(CATALOG_V2_CARDS.find((s) => s.id === c.id)!.outcome);
+  });
+
+  it('a sourced report gets a neutral depth line; Incident keeps its cause lines', () => {
+    const served = { ...servedState({ defs, presets, entries }), rev: build().rev };
+    const r = resolveOption('research', null, served)!;
+    expect(briefLines(r, 'deep')).toEqual(['Lens: research.', expect.stringMatching(/^Depth: deep\. /u)]);
+    expect(briefLines(r, 'deep').join('\n')).not.toMatch(/cause/u);
+    expect(briefLines(resolveOption('incident', null, served)!, 'deep')[0]).toMatch(/cause/u);
+  });
+
+  it('Model run cost runs the run-cost preset; Review a change is offered', () => {
+    const served = servedState({ defs, presets, entries });
+    expect(resolveOption('run-cost', null, served)!.resolved).toMatchObject({ status: 'available', launch: { kind: 'run', workflow: 'run-cost' } });
+    expect(resolveOption('review-change', null, served)!.resolved).toMatchObject({ status: 'available', statusNote: null });
+  });
+
+  it('Respond and Rework options draft a document on the sourced preset with their kind line', () => {
+    const served = servedState({ defs, presets, entries });
+    const kinds: Record<string, string[]> = { respond: ['rfp', 'rfi', 'questionnaire'], rework: ['condense', 're-audience', 'generalize', 'convert', 'refresh'] };
+    for (const [card, opts] of Object.entries(kinds)) {
+      expect(CATALOG_V2_CARDS.find((c) => c.id === card)!.variant!.options.map((o) => o.id)).toEqual(opts);
+      for (const o of opts) {
+        const r = resolveOption(card, o, served)!;
+        expect(r.resolved, `${card}:${o}`).toMatchObject({ status: 'available', launch: { kind: 'document', style: 'doc' }, brief: `Kind: ${card}-${o}.` });
+        expect(r.resolved.gate, `${card}:${o}`).toEqual(expect.arrayContaining(['fidelity-to-source', 'draft-floor']));
+      }
+    }
+  });
+
+  it('on an engine without interactive-draft-sourced, Respond and Rework are off with why (no dead Start); Document is unchanged', () => {
+    const older = servedState({ defs, presets: presets.filter((p) => p.name !== 'interactive-draft-sourced'), entries });
+    for (const [card, opt] of [['respond', 'rfp'], ['rework', 'convert']] as const) {
+      const r = resolveOption(card, opt, older)!;
+      expect(r.resolved.status, card).toBe('unavailable');
+      expect(r.resolved.statusNote, card).toMatch(/interactive-draft-sourced/u);
+    }
+    expect(resolveOption('document', 'document', older)!.resolved.status).toBe('available');
+  });
+
+  it('Studio plugin · Phase builds a Job details section through editor-plugin, with QE acceptance and install consent', () => {
+    const served = servedState({ defs, presets, entries });
+    const r = resolveOption('studio-plugin', 'phase', served)!;
+    expect(r.resolved).toMatchObject({ status: 'available', launch: { kind: 'run', workflow: 'editor-plugin' }, brief: 'Kind: phase plugin.', requiresQe: true });
+    expect(r.resolved.gate).toEqual(expect.arrayContaining(['qe-acceptance', 'install-consent']));
+    expect(r.option!.summary).toMatch(/details/u);
+    expect(parseCommand('/plugin phase a section with each phase\'s elapsed time')).toMatchObject({ card: 'studio-plugin', option: 'phase' });
   });
 });
