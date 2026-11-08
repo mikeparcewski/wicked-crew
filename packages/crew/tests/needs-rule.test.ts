@@ -403,6 +403,25 @@ describe('review fixes (xreview r1 on crew#1159)', () => {
     expect(idle.attention[0]).toMatchObject({ id: 'cli:none', severity: 'red' });
   });
 
+  it('first-run-2 N4: with every seat unknown (Docker down), no empty parentheses', () => {
+    const unknown = clis.map((c) => ({ ...c, state: 'unknown', workEligible: false, councilEligible: false }) as SystemCli);
+    const n = buildNeeds({ now: NOW, views: [], runs: [], infra: calm, clis: unknown, gaps: [], infraHoldsLive: () => false });
+    const none = n.attention.find((a) => a.id === 'cli:none')!;
+    expect(none.reason).not.toMatch(/\(\s*\)/);
+    expect(none.reason).toBe('No helper’s sign-in can be confirmed right now');
+    const out = clis.map((c) => ({ ...c, state: 'signed_out', workEligible: false, councilEligible: false }) as SystemCli);
+    const named = buildNeeds({ now: NOW, views: [], runs: [], infra: calm, clis: out, gaps: [], infraHoldsLive: () => false });
+    expect(named.attention.find((a) => a.id === 'cli:none')!.reason).toMatch(/^Every helper is signed out or benched \(\w+ signed out/);
+    // review r1: a mixed roster never reads "every", and a signed-in seat is never "not confirmed"
+    const mixed = clis.map((c, i) => ({ ...c, state: i === 0 ? 'signed_out' : i === 1 ? 'signed_in' : 'unknown', workEligible: false, councilEligible: false }) as SystemCli);
+    const reason = buildNeeds({ now: NOW, views: [], runs: [], infra: calm, clis: mixed, gaps: [], infraHoldsLive: () => false }).attention.find((a) => a.id === 'cli:none')!.reason;
+    expect(reason).toMatch(/^No helper is free to take work \(/);
+    expect(reason).toContain(`${mixed[0]!.cli} signed out`);
+    expect(reason).toContain(`${mixed[1]!.cli} not taking work`);
+    if (mixed.length > 2) expect(reason).toContain(`${mixed[2]!.cli} sign-in not confirmed`);
+    expect(reason).not.toMatch(/Every|\(\s*\)/);
+  });
+
   it('xreview r1 on crew#1163: the words never say something false about a run', () => {
     const held = (id: string, denial: string) => live(id, { units_total: 2, units_done: 1, rejected_units: [{ ord: 2, cli: 'claude', denial }] }, { ord: 2, kind: 'escalation' });
     const say = (denial: string): string => { const h = held('w', denial); return needsOf([h.view], [h.run]).attention[0]!.reason; };
