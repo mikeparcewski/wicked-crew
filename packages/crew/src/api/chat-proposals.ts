@@ -661,6 +661,8 @@ export interface ChatProposalDeps {
   jobs?(): boolean;
   /** CS4: the sources a job in this project can read, the web included when installed, in display order. */
   jobSources?(projectId: string | null): Promise<Array<{ id: string; label: string; reason?: string; web?: true }>>;
+  /** (e2e-1105 CJ3) Why the web can't be read in this project when it is set up for other projects only. */
+  webReason?(projectId: string | null): Promise<string | undefined>;
   /** (§2.5) Answer a reshape's held plan Reject (`reshaped`), checked eligible and bound to its ord and plan revision
    *  inside the engine's decision. `null` when it was answered; else the refusal. */
   reshapeReject?(heldRunId: string, actor: Actor, pid: string, expect?: { ord: number; planRev: number }): Promise<DecideResult | null>;
@@ -2287,6 +2289,11 @@ export class ChatProposals {
     try {
       const sources = await this.deps.jobSources?.(ctx.chat.projectId);
       if (sources !== undefined) ctx.jobSources = sources;
+      if (sources !== undefined && !sources.some((s) => s.web === true)) {
+        // A reason only: a failed read keeps the plain fallback, never refuses the proposal.
+        const why = await this.deps.webReason?.(ctx.chat.projectId).catch(() => undefined);
+        if (why !== undefined) ctx.webReason = why;
+      }
     } catch (err) {
       throw new JobRefusal('sources_unavailable', err instanceof Error ? err.message : String(err), 409);
     }

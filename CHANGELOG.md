@@ -308,6 +308,12 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **A Research job in a project the web source is not set up for says so (e2e-1105 CJ3; no api-types change).** The
+  proposal note read "the web can't be read: not available on this daemon" when the web source was installed and
+  healthy but scoped to another project. It now reads "the web can't be read: the web source is set up for project X
+  only" (projects named; "not set up for any project" when it has none). The source list is unchanged: an
+  out-of-project source is still never offered or picked.
+
 - **A busy laptop no longer reads as "Docker isn't running" (e2e-1105).** The roster's background runtime check
   waits up to 15 s per check (was 5 s) and reads the runtime down only after three misses in a row, from any state,
   so a slow `version` answer under host load never benches the container seats.

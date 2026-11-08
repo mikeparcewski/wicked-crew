@@ -35,7 +35,7 @@ type Source = NonNullable<JobContext['jobSources']>[number];
 const WEB: Source = { id: 'web', label: 'the web', web: true };
 const SUPPORT: Source = { id: 'support-pg', label: 'support-pg' };
 
-function rig(sources: Source[] | undefined = [WEB, SUPPORT]) {
+function rig(sources: Source[] | undefined = [WEB, SUPPORT], webReason?: string) {
   const records: ChatTranscriptRecord[] = [];
   const files = [{ id: 'first', name: 'first.txt', bytes: 10 }, { id: 'second', name: 'second.pdf', bytes: 10 }];
   let chat: ProposalChat | null = { projectId: 'project-a', repos: [], lead: 'claude', seats: ['claude'], analysis: false };
@@ -53,6 +53,7 @@ function rig(sources: Source[] | undefined = [WEB, SUPPORT]) {
     attachments: (id) => id === 'chat' ? files : [], workflowSteps: async () => 1, runCostUsd: async () => null,
     registry, jobs: () => true, acceptsJobs: () => true, served: async () => served,
     ...(sources !== undefined ? { jobSources: async () => sources } : {}),
+    ...(webReason !== undefined ? { webReason: async () => webReason } : {}),
     reshapeReject: async () => null,
     broadcast: () => undefined, audit: () => undefined,
   };
@@ -475,6 +476,13 @@ describe('CS4 source picks and launch inputs', () => {
     const p = await rig([{ id: 'web', label: 'web' }]).pick(card);
     expect(jobInputsOfProposal(p).sources).toEqual([]);
     expect(p.sentence!.notes).toContain("the web can't be read: not available on this daemon");
+  });
+
+  it('says the web source is set up for another project, not that the daemon lacks it (e2e-1105 CJ3)', async () => {
+    const p = await rig([SUPPORT], 'the web source is set up for project Mikes only').pick('research');
+    expect(jobInputsOfProposal(p).sources).toEqual([]);
+    expect(p.sentence!.notes).toContain("the web can't be read: the web source is set up for project Mikes only");
+    expect(p.sentence!.notes.join(' ')).not.toContain('not available on this daemon');
   });
 
   it('explicitly clears documents when reshaping to a card without documents', async () => {

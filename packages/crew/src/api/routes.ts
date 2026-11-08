@@ -307,7 +307,7 @@ import { registerInteractiveDocChecks } from '../interactive/doc-checks-routes.j
 import { crewStateHome, stateHomeOfDb } from '../projects/state-home.js';
 import { demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
 import { DocumentsRefused, documentsClause, RUN_DOCS_TOKENS_MAX, stagedDocumentsOf, stageRunDocuments, type StagedDocuments } from './run-documents.js';
-import { checkSourcePick, projectSources, RUN_SOURCES_MAX, runSourcesDeps, type RunSourcePicks } from './run-sources.js';
+import { checkSourcePick, projectSources, RUN_SOURCES_MAX, runSourcesDeps, type RunSourcePicks, webScopeReason } from './run-sources.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
 import { ChatProposals, LaunchOnceRegistry, proposalRunId, RecordingStubDispatcher, RevisionEditsSchema, runCostFromEvents } from './chat-proposals.js';
 import { CATALOG_SEEDS } from '../workflow-catalog/catalog-data.js';
@@ -5515,7 +5515,13 @@ export function registerRoutes(
     flags: () => chatArtifactFlags,
     // (DES-CATALOG-002 §2.d piece 4, CS4) The sources a job's pick lists: the project's sources with their switches.
     ...(runtime.dataGate !== undefined && runtime.runSourcePicks !== undefined
-      ? { jobSources: (projectId: string | null) => projectSources(projectId, runSourcesDeps(runtime.dataGate!)) }
+      ? {
+          jobSources: (projectId: string | null) => projectSources(projectId, runSourcesDeps(runtime.dataGate!)),
+          webReason: (projectId: string | null) => webScopeReason(projectId, {
+            scopedElsewhere: (p) => runtime.dataGate!.webScopedElsewhere(p),
+            projectName: async (id) => (await adapter.projectGet(id).catch(() => null))?.name ?? null,
+          }),
+        }
       : {}),
     // A5 (DES §6.1-6.2): the person's own edits a refine keeps, from the document's lineage (fail closed: an error
     // blocks the card, since the landing guard could never pass). Only where a real refine can run.
