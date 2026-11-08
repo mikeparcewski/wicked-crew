@@ -1,72 +1,34 @@
 /**
- * Where the shipped baseline comes from: the installed wicked-garden plugin.
+ * The shipped baseline is the first installed wicked-garden in this resolution order:
+ * 1. WICKED_CREW_SKILLS_SOURCE, an explicit plugin root (no minimum-version check).
+ * 2. Claude marketplace cache: the highest valid SemVer under each Claude config dir,
+ *    in CLAUDE_CONFIG_DIR order with ~/.claude appended once. Any cache beats any copy.
+ * 3. Claude installer copy: plugins/wicked-garden under those same config dirs.
+ * 4. npm-global: a wicked-garden launcher on PATH, then wicked-garden beside crew's package.
+ * 5. Codex plugin cache: the highest valid SemVer across marketplaces under
+ *    <CODEX_HOME or ~/.codex>/plugins/cache/<marketplace>/wicked-garden/<version>.
  *
- * The daemon seeds (and refreshes) its skills root from the plugin Claude Code actually runs —
- * the marketplace cache under `<CLAUDE_CONFIG_DIR|~/.claude>/plugins/cache/wicked-garden/
- * wicked-garden/<version>` (highest version wins). Design v3 §3/§8 (codex review of #480) made that
- * the ONLY automatic source, because the hand-installed `<config dir>/plugins/wicked-garden` copy
- * was the exact stale artifact the operator's `clis.toml` hack pointed workers at (12.28.1 while the
- * live cache was 12.32.0 — design v3 §"Verified mechanics"). Amendment v3.6 (#490) admits that copy
- * as a LAST resort — `npx wicked-installer install wicked-garden` lays it down without registering
- * the marketplace, so an installer-only machine had no source at all — without hiding the difference:
+ * Every candidate must hold .claude-plugin/plugin.json with a version. Automatic tiers
+ * enforce REQUIRED_GARDEN_VERSION. Cache directory names must be SemVer and equal the
+ * manifest version; every entry is judged, with findings for skipped entries. Equal-precedence
+ * versions use cacheDirOrder; equal Codex versions use marketplace name in lexical order.
+ * OpenCode, Pi and Antigravity skills-only copies are not plugin sources. No checkout is
+ * discovered automatically. Amendment v3.6 added the installer-copy fallback; only that kind
+ * retains the persistent skills.source warning about missing marketplace updates.
  *
- * Design amendment v3.6 (verbatim):
- * "Discovery order: (1) `WICKED_CREW_SKILLS_SOURCE` explicit override; (2) the marketplace cache
- * `<config dir>/plugins/cache/wicked-garden/wicked-garden/<highest version>` for each dir in
- * `CLAUDE_CONFIG_DIR` (may list several) else `~/.claude`; (3) LAST resort, the installer-managed
- * copy `<config dir>/plugins/wicked-garden` for each of those dirs AND `~/.claude/plugins/wicked-garden`
- * (garden's `install.mjs` hard-codes homedir), accepted only when its `.claude-plugin/plugin.json`
- * parses with a `version`. A source of kind (3) is recorded in the baseline as `source.kind:
- * 'installer-copy'` and surfaces a persistent WARNING finding `skills.source` in
- * `GET /diagnostics.skills.findings` — 'seeded from the installer copy at <path>; register the plugin
- * with Claude Code (marketplace) to receive marketplace updates' — so the daemon works on
- * installer-only machines without hiding the difference. When BOTH a cache and a copy exist, the
- * cache wins regardless of version; the copy is never preferred. Every source kind passes the same
- * no-follow, closure and validation rules."
- *
- * How the automatic tiers walk (codex on #491, both passes): the config dirs are `CLAUDE_CONFIG_DIR`'s
- * entries in the order listed (platform path delimiter) with the literal `~/.claude` appended once
- * unless already listed — the default when the variable is unset. Each config dir is resolved exactly
- * ONCE, at the top of discovery (`realpath` — the one link the automatic tiers follow: operators
- * symlink `~/.claude`); that canonical root is carried through both tiers, every level below it that
- * discovery touches — `plugins`, `cache`, the marketplace dir, the plugin dir, each version dir, the
- * copy dir — is lstat-walked ON THE CANONICAL PATH, a symlink at any of them skips that candidate with
- * a `symlink` finding (never followed), and a candidate's manifest is read only below that
- * already-validated canonical dir — never through the spelled path, so a link retargeted mid-walk is
- * never read. The recorded `PluginSource.path` is that canonical path. Tier (2) visits every dir in
- * order and the FIRST dir holding a valid cache wins; inside a cache every entry is judged: a name
- * must be a SemVer version by the semver.org grammar (no leading zeros in numeric identifiers, legal
- * pre-release / build identifiers — else ignored with a finding), EVERY such dir's `plugin.json`
- * version must equal its name (else skipped with a finding — every dir is validated, not only the
- * winner; a manifest that does not parse is a `no-manifest` finding, never a crash), and the pick is
- * the highest by SemVer PRECEDENCE (build metadata ignored for ordering,
- * pre-release below release, numeric identifiers before alphanumeric) with a documented tie-break
- * (`cacheDirOrder`). Tier (3) visits the same dirs in the same order; ANY cache beats ANY copy — a
- * `~/.claude` cache beats a `$CLAUDE_CONFIG_DIR/plugins/wicked-garden` copy. What was passed over
- * rides beside the answer as `DiscoveryFinding`s (the daemon logs them). NEVER a repo checkout by
- * default. `WICKED_CREW_SKILLS_SOURCE` is the one explicit override — for tests, and for an operator
- * who deliberately wants a checkout or some other plugin root. A machine with neither a cache nor a
- * copy has no source at all: crew does not vendor garden — the seed says "install garden first"
- * loudly (`SkillsSourceUnavailableError`) and the runtime leaves the engine input unset.
- *
- * # No-follow BELOW the root (codex round 6 on #480)
- *
- * The source ROOT may legitimately be reached through a symlink — operators symlink `~/.claude`,
- * and the marketplace cache may sit behind a linked config dir — so the root is resolved ONCE
- * (`realPluginRoot`, the one place a link is followed) and every designated entry BELOW it is
- * lstat-walked (`noFollowEntry`): the manifest dir, `plugin.json`, each catalog, each root file,
- * each bundle directory and everything inside it. A symlink among them is refused by name
- * (`PluginSourceSymlinkError`) — a seed refuses to start (the runtime's `skills.config`), a
- * refresh answers a `blocked` envelope — and nothing is copied: a linked catalog or a linked skill
- * dir would otherwise copy bytes from outside the declared source into the daemon's root and hand
- * them to every worker.
+ * Config roots and npm package roots may be links: resolve each ONCE, then lstat-walk
+ * every entry below the canonical root. A link in a discovery directory is a symlink finding;
+ * a linked designated file inside the plugin throws PluginSourceSymlinkError. Manifests are
+ * read below the canonical path, never through a spelling that can be retargeted mid-walk.
+ * The same no-follow, closure and validation rules protect all seeded sources.
  */
 
 import { execFile, execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { promisify } from 'node:util';
-import { delimiter, join, resolve, sep } from 'node:path';
+import { delimiter, dirname, join, resolve, sep, win32 } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import type { SkillSourceKind } from '../core/types.js';
 import { PLUGIN_NAME } from './frontmatter.js';
@@ -90,6 +52,9 @@ export const REQUIRED_GARDEN_VERSION = '12.64.0';
 
 /** The one install command the README, the findings and the refusals name. */
 export const GARDEN_INSTALL_COMMAND = 'npx wicked-installer install wicked-garden';
+
+/** Home-independent spellings keep first-run diagnostics safe to show and share. */
+export const GARDEN_SOURCE_SEARCH_DETAIL = 'looked for WICKED_CREW_SKILLS_SOURCE; Claude marketplace cache (~/.claude/plugins/cache/wicked-garden/wicked-garden/<version>, or $CLAUDE_CONFIG_DIR); Claude installer copy (~/.claude/plugins/wicked-garden, or $CLAUDE_CONFIG_DIR); npm-global wicked-garden (launcher on PATH to ~/.../lib/node_modules/wicked-garden or ~/.../node_modules/wicked-garden, then beside the crew package); Codex plugin cache (~/.codex/plugins/cache/<marketplace>/wicked-garden/<version>, or $CODEX_HOME); none holds a .claude-plugin/plugin.json with a usable version';
 
 /** Whether `version` is at least the required garden (SemVer precedence; an unparsable version is not). */
 export function gardenMeetsMinimum(version: string, required: string = REQUIRED_GARDEN_VERSION): boolean {
@@ -187,8 +152,8 @@ export function noFollowEntry(root: string, segments: ReadonlyArray<string>, sou
 /**
  * The plugin manifest's `version` at `dir`, or `null` when `dir` is not a plugin root — the root
  * resolved once (`realPluginRoot`), then `manifestVersionBelow`. For the explicit override and
- * `pluginSourceAt`; the automatic tiers never call this (they resolve the CONFIG dir once and read
- * below the canonical candidate directly).
+ * `pluginSourceAt`; the automatic tiers pass already-canonical roots
+ * directly to manifestVersionBelow.
  */
 export function pluginVersionAt(dir: string): string | null {
   const root = realPluginRoot(dir);
@@ -324,26 +289,51 @@ export function cacheDirOrder(a: string, b: string): number {
   return a < b ? -1 : 1;
 }
 
-/**
- * Classify a plugin root by what it IS: a git checkout when it carries `.git`; the installer-managed
- * copy when it is a `plugins/wicked-garden` directory (garden's `install.mjs` layout — design v3.6,
- * so an explicit override aimed at that copy is recorded, and warned about, as the copy it is); the
- * installed plugin when it sits anywhere else under a `plugins/` directory (the marketplace cache);
- * anything else is an explicit plugin-shaped directory (an unpacked tarball, a test fixture).
- */
-export function classifySource(dir: string): SkillSourceKind {
-  if (existsSync(join(dir, '.git'))) return 'checkout';
+/** Classify explicit overrides by their installed layout, including non-Claude sources. */
+export function classifySource(dir: string, opts: Pick<DiscoverOptions, 'env' | 'home'> = {}): SkillSourceKind {
   const segments = resolve(dir).split(sep);
-  if (!segments.includes('plugins')) return 'directory';
+  const codexRoot = resolve((opts.env ?? process.env)['CODEX_HOME'] || join(opts.home ?? homedir(), '.codex'));
+  const canonicalCodexRoot = opts.env !== undefined || opts.home !== undefined ? realPluginRoot(codexRoot) : null;
+  const codexCaches = [codexRoot, ...(canonicalCodexRoot === null ? [] : [canonicalCodexRoot])]
+    .map((root) => join(root, 'plugins', 'cache') + sep);
+  const codexLayout = segments.some((part, i) => part === '.codex' && segments[i + 1] === 'plugins' && segments[i + 2] === 'cache');
+  if ((codexCaches.some((cache) => resolve(dir).startsWith(cache)) || codexLayout) && segments.at(-2) === PLUGIN_NAME) return 'codex-plugin-cache';
+  if (existsSync(join(dir, '.git')) && !segments.includes('node_modules')) return 'checkout';
   const last = segments.length - 1;
   if (segments[last] === PLUGIN_NAME && segments[last - 1] === 'plugins') return 'installer-copy';
-  return 'claude-plugin-cache';
+  if (segments.includes('plugins')) return 'claude-plugin-cache';
+  if (npmPackageNamedGarden(dir)) return 'npm-global';
+  return 'directory';
 }
 
-/** A `PluginSource` for an explicit plugin root, or `null` when it is not a plugin root. */
-export function pluginSourceAt(dir: string): PluginSource | null {
+/** A source for an explicit plugin root; automatic version floors do not apply. */
+export function pluginSourceAt(dir: string, opts: Pick<DiscoverOptions, 'env' | 'home'> = {}): PluginSource | null {
   const version = pluginVersionAt(dir);
-  return version === null ? null : { path: dir, kind: classifySource(dir), plugin_version: version };
+  return version === null ? null : { path: dir, kind: classifySource(dir, opts), plugin_version: version };
+}
+
+/** Package identity is read without following a package.json link below the package root. */
+function npmPackageNamedGarden(root: string): boolean {
+  const manifest = noFollowEntry(root, ['package.json']);
+  if (manifest === null || !lstatSync(manifest).isFile()) return false;
+  try {
+    const parsed: unknown = JSON.parse(readFileNoFollow(manifest).toString('utf8'));
+    return typeof parsed === 'object' && parsed !== null && (parsed as { name?: unknown }).name === PLUGIN_NAME;
+  } catch (err) {
+    if (err instanceof SyntaxError) return false;
+    throw err;
+  }
+}
+
+/** Launcher-relative npm layouts; exported so Windows paths can be tested on POSIX hosts. */
+export function npmLauncherPackageDirs(launcher: string, platform: NodeJS.Platform = process.platform, resolvedLauncher?: string): string[] {
+  const paths = platform === 'win32' ? win32 : { dirname, resolve, join };
+  const bin = paths.dirname(launcher);
+  return [
+    ...(platform !== 'win32' && resolvedLauncher !== undefined ? [paths.dirname(resolvedLauncher)] : []),
+    ...(platform === 'win32' ? [paths.join(bin, 'node_modules', PLUGIN_NAME)] : []),
+    paths.resolve(bin, '..', 'lib', 'node_modules', PLUGIN_NAME),
+  ];
 }
 
 /** The marketplace cache dir the live plugin versions live under, for a config dir. */
@@ -361,7 +351,7 @@ export type DiscoveryFindingKind = 'symlink' | 'non-semver-name' | 'version-mism
 
 export interface DiscoveryFinding {
   kind: DiscoveryFindingKind;
-  /** The entry judged — the CANONICAL path (below the once-resolved config dir). */
+  /** The entry judged — the CANONICAL path (below the once-resolved config or package root). */
   path: string;
   message: string;
   /** `too-old` only: the plugin version found (crew#753). */
@@ -405,15 +395,15 @@ function noFollowBelow(root: string, segments: ReadonlyArray<string>, findings: 
 }
 
 /**
- * Tier (2) for ONE canonical config dir: the marketplace cache's version dirs, EVERY one judged
+ * Tiers (2)/(5) for ONE canonical config dir: the marketplace cache's version dirs, EVERY one judged
  * (codex on #491): a name must parse as SemVer (else `non-semver-name`, ignored), the entry must be
  * no link (else `symlink`, skipped), and its `plugin.json` — read below the canonical dir, never
  * re-resolved — must exist with a `version` (else `no-manifest`) EQUAL to the name (else
  * `version-mismatch`). The pick is the first agreeing dir in `cacheDirOrder` (highest precedence,
  * documented tie-break); every other dir is still validated so a mismatch anywhere is a finding.
  */
-function cacheCandidate(root: string, findings: DiscoveryFinding[], hooks: DiscoveryHooks): PluginSource | null {
-  const cache = noFollowBelow(root, CACHE_SEGMENTS, findings);
+function cacheCandidate(root: string, findings: DiscoveryFinding[], hooks: DiscoveryHooks, segments: ReadonlyArray<string> = CACHE_SEGMENTS, kind: SkillSourceKind = 'claude-plugin-cache'): PluginSource | null {
+  const cache = noFollowBelow(root, segments, findings);
   if (cache === null || !lstatSync(cache).isDirectory()) return null;
   const names: string[] = [];
   for (const name of readdirSync(cache).sort()) {
@@ -422,7 +412,7 @@ function cacheCandidate(root: string, findings: DiscoveryFinding[], hooks: Disco
       findings.push({ kind: 'non-semver-name', path: dir, message: `${dir}: the cache entry's name is not a valid SemVer version (semver.org); ignored` });
       continue;
     }
-    if (noFollowBelow(root, [...CACHE_SEGMENTS, name], findings) !== null) names.push(name);
+    if (noFollowBelow(root, [...segments, name], findings) !== null) names.push(name);
   }
   names.sort(cacheDirOrder);
   let pick: PluginSource | null = null;
@@ -438,7 +428,7 @@ function cacheCandidate(root: string, findings: DiscoveryFinding[], hooks: Disco
       findings.push({ kind: 'version-mismatch', path: dir, message: `${dir}: plugin.json declares version ${version} but the directory is named ${name}; skipped` });
       continue;
     }
-    if (pick === null) pick = { path: dir, kind: 'claude-plugin-cache', plugin_version: version };
+    if (pick === null) pick = { path: dir, kind, plugin_version: version };
   }
   return pick;
 }
@@ -459,30 +449,23 @@ function copyCandidate(root: string, findings: DiscoveryFinding[], hooks: Discov
 export interface DiscoverOptions {
   env?: NodeJS.ProcessEnv;
   home?: string;
+  platform?: NodeJS.Platform;
+  /** Installed crew package root (src and dist both live one level below it). */
+  crewPackageRoot?: string;
   /** Test seam — see `DiscoveryHooks`. */
   hooks?: DiscoveryHooks;
   /** The minimum garden for the automatic tiers (default {@link REQUIRED_GARDEN_VERSION}). */
   requiredVersion?: string;
 }
 
-/**
- * Discover the installed plugin in the order design amendment v3.6 fixes (module header), with what
- * was passed over: (1) the explicit `WICKED_CREW_SKILLS_SOURCE` override; (2) the FIRST config dir
- * (as listed, `~/.claude` appended) holding a valid marketplace cache — the highest-precedence
- * agreeing version dir inside it; (3) LAST resort, the first of those dirs holding a valid installer
- * copy. ANY cache beats ANY copy. Each config dir is resolved exactly ONCE, here, and only its
- * canonical root is handed to the tiers (two spellings of one dir walk once). `env`/`home` are
- * injectable so tests never read the developer's real config dir. `source` is `null` when nothing is
- * installed — the caller says "install garden first" loudly. A finding is reported once per entry
- * even when both tiers meet it (a linked `plugins/`, say).
- */
+/** Discover the first usable source in the five tiers documented above, retaining skipped findings. */
 export function discoverLivePluginDetailed(opts: DiscoverOptions = {}): Discovery {
   const env = opts.env ?? process.env;
   const home = opts.home ?? homedir();
   const hooks = opts.hooks ?? {};
   const findings: DiscoveryFinding[] = [];
   const override = env[SKILLS_SOURCE_ENV];
-  if (override !== undefined && override !== '') return { source: pluginSourceAt(override), findings };
+  if (override !== undefined && override !== '') return { source: pluginSourceAt(override, { env, home }), findings };
   const roots: string[] = [];
   for (const dir of claudeConfigDirs(env, home)) {
     const root = realPluginRoot(dir); // the ONE realpath of a config dir in all of discovery
@@ -509,6 +492,50 @@ export function discoverLivePluginDetailed(opts: DiscoverOptions = {}): Discover
     for (const root of roots) {
       source = usable(copyCandidate(root, findings, hooks));
       if (source !== null) break;
+    }
+  }
+  if (source === null) {
+    const platform = opts.platform ?? process.platform;
+    const path = env['PATH'] ?? (platform === 'win32' ? env['Path'] : undefined) ?? '';
+    const candidates: string[] = [];
+    for (const bin of path.split(platform === 'win32' ? ';' : ':')) {
+      if (bin === '') continue;
+      const launcher = (platform === 'win32' ? win32 : { join }).join(bin, platform === 'win32' ? 'wicked-garden.cmd' : 'wicked-garden');
+      if (!existsSync(launcher)) continue;
+      const realLauncher = platform === 'win32' ? undefined : realpathSync(launcher);
+      candidates.push(...npmLauncherPackageDirs(launcher, platform, realLauncher));
+    }
+    const crewRoot = opts.crewPackageRoot ?? fileURLToPath(new URL('../../', import.meta.url));
+    candidates.push(resolve(crewRoot, '..', PLUGIN_NAME));
+    const visited = new Set<string>();
+    for (const candidate of candidates) {
+      const root = realPluginRoot(candidate);
+      if (root === null || visited.has(root)) continue;
+      visited.add(root);
+      if (!npmPackageNamedGarden(root)) continue;
+      hooks.beforeManifestRead?.(root);
+      const version = manifestVersionBelow(root);
+      if (version === null) {
+        findings.push({ kind: 'no-manifest', path: root, message: `${root}: no .claude-plugin/plugin.json that parses with a version; skipped` });
+        continue;
+      }
+      source = usable({ path: root, kind: 'npm-global', plugin_version: version });
+      if (source !== null) break;
+    }
+  }
+  if (source === null) {
+    const root = realPluginRoot(env['CODEX_HOME'] || join(home, '.codex'));
+    if (root !== null) {
+      const cache = noFollowBelow(root, ['plugins', 'cache'], findings);
+      const picks: PluginSource[] = [];
+      if (cache !== null && lstatSync(cache).isDirectory()) {
+        for (const marketplace of readdirSync(cache).sort()) {
+          const candidate = usable(cacheCandidate(root, findings, hooks, ['plugins', 'cache', marketplace, PLUGIN_NAME], 'codex-plugin-cache'));
+          if (candidate !== null) picks.push(candidate);
+        }
+      }
+      picks.sort((a, b) => cacheDirOrder(a.plugin_version, b.plugin_version));
+      source = picks[0] ?? null;
     }
   }
   const seen = new Set<string>();

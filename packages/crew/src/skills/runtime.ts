@@ -83,6 +83,7 @@ import type { InstalledPluginState } from './installed.js';
 import { REFUSED_DIRNAME } from './root-names.js';
 import { SkillsSourceUnavailableError, type CurrentSnapshot, type SkillsStore } from './store.js';
 import { budgetPacer, type Pacer } from './tree.js';
+import { scrubHomePaths } from '../api/ui-text.js';
 
 /**
  * The seed source named for the boot log by what it IS (Copilot on #480: the line used to hard-code
@@ -94,11 +95,15 @@ function describeSeedSource(source: PluginSource): string {
   const what =
     source.kind === 'claude-plugin-cache'
       ? 'the installed wicked-garden plugin (Claude plugin cache)'
-      : source.kind === 'installer-copy'
-        ? 'the installer-managed wicked-garden copy (plugins/wicked-garden — the LAST-resort source, design v3.6; not the marketplace cache)'
-        : source.kind === 'checkout'
-          ? `a wicked-garden git checkout (an explicit plugin root — ${SKILLS_SOURCE_ENV} or the configured source)`
-          : `a plugin directory (an explicit plugin root — ${SKILLS_SOURCE_ENV} or the configured source)`;
+      : source.kind === 'npm-global'
+        ? 'the npm-installed wicked-garden package'
+        : source.kind === 'codex-plugin-cache'
+          ? 'the installed wicked-garden plugin (Codex plugin cache)'
+          : source.kind === 'installer-copy'
+            ? 'the installer-managed wicked-garden copy (plugins/wicked-garden — used when no usable Claude marketplace cache exists)'
+            : source.kind === 'checkout'
+              ? `a wicked-garden git checkout (an explicit plugin root — ${SKILLS_SOURCE_ENV} or the configured source)`
+              : `a plugin directory (an explicit plugin root — ${SKILLS_SOURCE_ENV} or the configured source)`;
   return `${what} at ${source.path}, plugin version ${source.plugin_version}, source kind ${source.kind}`;
 }
 
@@ -760,14 +765,17 @@ export class SkillsRuntime {
     }
     if (ready.seeded) this.log(`[skills] seeded ${root} from ${ready.source === null ? 'a source the seed did not record' : describeSeedSource(ready.source)}`);
     if (ready.published !== null && ready.published.verdict === 'blocked') {
+      // The user reads this in the Nerve Center: say WHY in plain words, with no machine kind prefix
+      // (`venv-failed:`) and no path (FINDINGS B1). The store already words each blocking finding's
+      // evidence for a human; scrub any stray home path belt-and-suspenders.
       const named = ready.published.findings
         .filter((f) => f.severity === 'blocking')
-        .map((f) => `${f.kind}: ${f.evidence}`)
+        .map((f) => scrubHomePaths(f.evidence))
         .join('; ');
       const refusal = refusalPath(root, 'skills.blocked');
       applySkillsSnapshotEnv(refusal);
       this.store.live.exported(null);
-      const message = `first publish BLOCKED — no snapshot: ${named}`;
+      const message = `Skills can't be published: ${named}`;
       this.log(`[skills] skills.blocked: ${message}; ${SKILLS_SNAPSHOT_ENGINE_ENV}=${refusal} so every launch fails loudly until the catalog is fixed and published`);
       const blocked = this.record({
         state: 'blocked',

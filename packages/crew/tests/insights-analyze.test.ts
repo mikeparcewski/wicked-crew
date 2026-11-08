@@ -334,18 +334,22 @@ describe('a finding never reads the same number twice (e2e f53e3f27: "$0.16 agai
     expect(formatValue(minutes, 120.002, x)).not.toBe(formatValue(minutes, 120.001, x));
   });
 
-  it('a spend regression whose medians round alike at cents is worded with the digits that differ', () => {
-    // Window: 10 runs at $0.163; baseline: 10 runs at $0.161 (both "$0.16" at cents).
+  it('a spend shift whose medians round alike at cents is no change: never a regression, never recommended (first-run)', () => {
+    // Window: 10 runs at $0.163; baseline: 10 runs at $0.161 (both "$0.16" at cents). Studio words this "About the
+    // same as before ($0.16)", so a "Runs are costing more" card over it contradicted itself (coord, 2026-11-08).
     const runs = [...recent(10, (at) => run(at, { spendUsd: 0.163 })), ...baseline(10, (at) => run(at, { spendUsd: 0.161 }))];
-    const lines = analyze(snapshot(runs)).metrics.filter((m) => m.metric === 'spend' && m.segment === 'all');
-    expect(lines).toHaveLength(1);
     const facts = analyze(snapshot(runs));
-    const all = [...facts.improvements, ...facts.regressions].filter((f) => f.metric === 'spend' && f.segment === 'all');
-    expect(all.map((f) => f.line)).toEqual([expect.stringMatching(/: \$0\.163 .*against \$0\.161 before/u)]);
-    // Whether or not it is flagged, no spend line anywhere reads the same two values.
-    for (const f of [...facts.improvements, ...facts.regressions]) {
-      const m = /: (\$[\d.]+).*against (\$[\d.]+) before/u.exec(f.line);
-      if (m !== null && f.metric === 'spend') expect(m[1]).not.toBe(m[2]);
-    }
+    const lines = facts.metrics.filter((m) => m.metric === 'spend' && m.segment === 'all');
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.verdict).toBe('no-change');
+    expect([...facts.improvements, ...facts.regressions].filter((f) => f.metric === 'spend')).toEqual([]);
+    expect(facts.recommended.filter((id) => id.startsWith('regression-spend'))).toEqual([]);
+  });
+
+  it('a spend shift that reads differently at cents is still flagged', () => {
+    const runs = [...recent(10, (at) => run(at, { spendUsd: 0.19 })), ...baseline(10, (at) => run(at, { spendUsd: 0.161 }))];
+    const facts = analyze(snapshot(runs));
+    expect(cell(facts, 'spend')?.verdict).toBe('regressed');
+    expect(facts.regressions.filter((f) => f.metric === 'spend' && f.segment === 'all').map((f) => f.line)).toEqual([expect.stringMatching(/: \$0\.19 .*against \$0\.16 before/u)]);
   });
 });

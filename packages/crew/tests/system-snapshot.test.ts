@@ -78,7 +78,9 @@ describe('gateway probe', () => {
   it('a runtime that refuses connections → down; a hang → unknown after its timeout', async () => {
     const refused = await probeGateway({ ...base, exec: async () => { throw new Error('Cannot connect to the Docker daemon at unix:///var/run/docker.sock'); } });
     expect(refused.state).toBe('down');
-    expect(refused.reason).toMatch(/refused/);
+    // fr-privacy: a recognised daemon-down error reads a plain cause, not the raw docker line (FINDINGS C3a).
+    expect(refused.reason).toBe("Docker isn't running");
+    expect(refused.reason).not.toMatch(/unix:\/\//);
     const t0 = Date.now();
     const hung = await probeGateway({ ...base, exec: never });
     expect(hung.state).toBe('unknown');
@@ -141,8 +143,10 @@ describe('estate, bus, vault probes', () => {
     for (const present of [false, true]) {
       const row = await probeEstate({ memoryStore: store, resolvable: () => false, exists: async () => present, call });
       expect(row.state).toBe('down');
-      expect(row.reason).toMatch(/not installed or not on PATH/);
-      expect(JSON.stringify(row)).toMatch(/npx wicked-installer/);
+      // fr-privacy/FINDINGS B2: estate is needed to add a repository, so the row says so (not "optional").
+      expect(row.reason).toMatch(/wicked-estate isn't installed/);
+      expect(row.reason).toMatch(/code map/);
+      expect(JSON.stringify(row)).toMatch(/npx wicked-installer install wicked-estate/);
       expect(JSON.stringify(row)).toMatch(/WICKED_ESTATE_MCP_EXE/);
       expect(JSON.stringify(row)).not.toMatch(/Nothing to fix/);
     }

@@ -241,6 +241,18 @@ export function pairPrecision(def: MetricDef, a: number | null, b: number | null
   return extra;
 }
 
+/**
+ * A shift that reads the same at the metric's normal precision is no change (coord, first-run 2026-11-08): a tight
+ * interval made $0.1622 against $0.1584 a "regression", and the card read "Runs are costing more" over "About the
+ * same as before ($0.16)", studio's words for two values that round alike. Such a shift is neither a regression nor
+ * an improvement, so it is never recommended; `too-few` stays `too-few`.
+ */
+export function material(def: MetricDef, value: number | null, baseline: number | null, verdict: Verdict): Verdict {
+  if (verdict !== 'regressed' && verdict !== 'improved') return verdict;
+  if (value === null || baseline === null) return verdict;
+  return formatValue(def, value) === formatValue(def, baseline) ? 'no-change' : verdict;
+}
+
 export function segmentWords(segment: string): string {
   if (segment === 'all') return 'all runs';
   const [k, ...rest] = segment.split(':');
@@ -451,7 +463,7 @@ export function analyze(snapshot: Snapshot): Facts {
         segment: seg.segment,
         window,
         baseline,
-        verdict: compare(window.n, window.interval, baseline.n, baseline.value, def.higherIsBetter),
+        verdict: material(def, window.value, baseline.value, compare(window.n, window.interval, baseline.n, baseline.value, def.higherIsBetter)),
         runs: ws.ids,
       });
     }

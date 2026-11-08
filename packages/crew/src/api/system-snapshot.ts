@@ -46,6 +46,7 @@ import type {
   SystemUnresolvedItem,
 } from '../core/types.js';
 import { cliKeyOf, distinctJudgePair, needsLevel } from './needs.js';
+import { plainRuntimeCause, scrubHomePaths } from './ui-text.js';
 import { callEstateToolRaw, estateMcpExe, ESTATE_INSTALL_HINT } from '../core/estate-mcp-client.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { runTouchesWindow } from './seat-record.js';
@@ -104,7 +105,10 @@ export function errText(err: unknown): string {
     : '';
   const said = stderr.split('\n').map((l) => l.trim()).find((l) => l !== '') ?? '';
   const line = said !== '' ? said : (raw.split('\n', 1)[0]?.trim() ?? '');
-  return line.length > 240 ? `${line.slice(0, 239)}…` : line;
+  // A probe's reason and the `error` it keeps in `details` both ride this; a home path never does
+  // (crew#771: screen shares and tickets must not carry someone's login name).
+  const clean = scrubHomePaths(line);
+  return clean.length > 240 ? `${clean.slice(0, 239)}…` : clean;
 }
 
 function secondsWord(ms: number): string {
@@ -308,10 +312,17 @@ export async function probeGateway(input: GatewayProbeInput): Promise<SystemInfr
   if (stderr.includes('enoent')) {
     return infraRow('gateway', 'down', `the container runtime ${input.runtime} could not be run`, 'Install or start Docker (or set WICKED_CONTAINER_RUNTIME), then re-check.', started, details, timeoutMs);
   }
+  // Classify the runtime error into a plain cause the user can act on; `e` is already scrubbed of any
+  // home path (errText), so the raw docker line ("failed to connect to the docker API at unix://…")
+  // never reaches the UI. An error we do not recognise keeps a short, scrubbed line.
+  const plain = plainRuntimeCause(e);
+  if (plain !== null) {
+    return infraRow('gateway', 'down', plain.cause, plain.fix, started, { ...details, error: e }, timeoutMs);
+  }
   return infraRow(
     'gateway',
     'down',
-    `the container runtime refused: ${e}`,
+    `the container runtime could not be reached: ${e}`,
     'Start Docker (or your container runtime), then re-check. The engine restarts the gateway before the next seat runs.',
     started,
     { ...details, error: e },
@@ -496,7 +507,7 @@ export async function probeEstate(input: EstateProbeInput): Promise<SystemInfraR
   const exists = input.exists ?? (async (p: string): Promise<boolean> => (await stat(p)).isFile());
   // No binary is the first thing to say: a missing store is only "nothing remembered yet" when estate is there.
   if (!(input.resolvable ?? estateMcpResolvable)()) {
-    return infraRow('estate', 'down', 'wicked-estate-mcp is not installed or not on PATH (estate is optional)', `${ESTATE_INSTALL_HINT} Then re-check.`, started, details);
+    return infraRow('estate', 'down', "wicked-estate isn't installed: repositories need it to build their code map", `${ESTATE_INSTALL_HINT} Then re-check.`, started, details);
   }
   if (input.memoryStore.path !== ':memory:') {
     const present = await settleWithin(() => exists(input.memoryStore.path), timeoutMs);
@@ -516,7 +527,7 @@ export async function probeEstate(input: EstateProbeInput): Promise<SystemInfraR
     return infraRow(
       'estate',
       'down',
-      missing ? 'wicked-estate-mcp is not installed or not on PATH' : `wicked-estate-mcp failed: ${settled.error}`,
+      missing ? "wicked-estate isn't installed: repositories need it to build their code map" : `wicked-estate-mcp failed: ${settled.error}`,
       missing ? `${ESTATE_INSTALL_HINT} Then re-check.` : 'Check the memory store, then re-check.',
       started,
       { ...details, error: settled.error },

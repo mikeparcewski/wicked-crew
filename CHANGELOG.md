@@ -10,6 +10,8 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+- Find wicked-garden in npm-global and Codex plugin installs, and add existing installer bin directories to the daemon PATH.
+
 ### Added
 
 - **A pack can install third-party run plugins, which read a run's events on the topics the install consent grants
@@ -247,6 +249,8 @@ mentioned only where a daemon release depends on them.
   fields). An engine without the `demo_record` Tool refuses a demo launch (501).
 
 ### Fixed
+
+- **Health and diagnostic text a user reads now gives a plain cause with one fix, and never a home path (FINDINGS B1, B2, C3a).** The Nerve Center gateway row reads "Docker isn't running" (not the raw `failed to connect to the docker API at unix:///Users/<name>/.rd/docker.sock …` line); the estate row says "wicked-estate isn't installed: repositories need it to build their code map" with `npx wicked-installer install wicked-estate` (not "estate is optional"); and a missing `uv` reads "uv isn't installed, so the skills' Python tools can't be set up. Install uv: … then press Publish on the Skills page." (not `venv-failed: uv sync did not produce <path>`). A new `api/ui-text.ts` scrubs home paths (`/Users/<name>`, `/home/<name>`, `C:\Users\<name>`) to `~` at the source and, as a backstop, on every `GET /health`, `/diagnostics`, `/system`, `/roster` body.
 
 - **A chat job no longer names an opt-in seat a launch would leave out (e2e-1105 F43).** "/analyze domain" in a new chat
   proposed opencode as a helper, and Start then refused it (409 `helper_unavailable`), while Generate it on the same

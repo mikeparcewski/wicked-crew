@@ -443,6 +443,7 @@ import { AppStoreError, type AppStore } from '../apps/store.js';
 import { registerMcpInspectRoutes } from '../mcp-inspect/routes.js';
 import { daemonRunFence, fencedRunId } from '../mcp/run-fence.js';
 import { discoverLivePlugin } from '../skills/plugin-source.js';
+import { onboardFailure, readRepoPath } from './repo-input.js';
 import type { DecisionBusEmit } from '../decisions/events.js';
 import { resolveDecisionsMode, type DecisionsMode } from '../decisions/types.js';
 
@@ -3186,7 +3187,14 @@ export function registerRoutes(
     }
     const refused = await onboardRefusal();
     if (refused !== null) return reply.code(refused.status).send(refused.body);
-    const { name, rootPath, gitUrl, projectId, channel, actor, autoCapture } = parsed.data;
+    const { name, gitUrl, projectId, channel, actor, autoCapture } = parsed.data;
+    // First-run C1: `~/code/my-app` (the field's own example) is expanded; a relative or missing folder is refused in plain words.
+    let rootPath = parsed.data.rootPath;
+    if (rootPath !== undefined && rootPath !== '') {
+      const read = readRepoPath(rootPath, { mustExist: !gitUrl });
+      if (!read.ok) return reply.code(400).send({ code: read.code, error: read.error });
+      rootPath = read.path;
+    }
     // (DES-PM-001 Q-PM2) Re-pointing an existing repo id at another checkout keeps its projects and tracker links.
     const repointed = await reRegisterRefusal(actorOf(req), name, rootPath, Boolean(gitUrl), () => adapter.listRepos());
     if (repointed !== null) return reply.code(repointed.status).send(repointed.body);
@@ -3207,7 +3215,8 @@ export function registerRoutes(
       if (repo === undefined) return reply.code(400).send({ error: message(err) });
       req.log.warn({ repoId: repo.id }, `repo registered but onboarding launch failed: ${message(err)}`);
       // No run exists to record or file, even when projectId was supplied (crew#1019).
-      return reply.code(201).send({ repo, onboardRunId: null, onboardError: message(err) });
+      const failure = onboardFailure(message(err));
+      return reply.code(201).send({ repo, onboardRunId: null, onboardError: failure.error, ...(failure.code !== undefined ? { onboardErrorCode: failure.code, missingTool: failure.tool } : {}) });
     }
     const projectAttachError = await recordOnboardingLaunch(req, runId, repo.id, { projectId, channel, actor, autoCapture });
     return reply.code(201).send({ repo, onboardRunId: runId, ...(projectAttachError !== undefined ? { projectAttachError } : {}) });
@@ -3235,7 +3244,8 @@ export function registerRoutes(
     try {
       runId = await adapter.launchOnboardingRun(repo.id, repo.name);
     } catch (err) {
-      return reply.code(400).send({ error: message(err) });
+      const failure = onboardFailure(message(err));
+      return reply.code(400).send({ error: failure.error, ...(failure.code !== undefined ? { code: failure.code, missingTool: failure.tool } : {}) });
     }
     const projectAttachError = await recordOnboardingLaunch(req, runId, repo.id, body.data);
     return reply.code(201).send({ runId, ...(projectAttachError !== undefined ? { projectAttachError } : {}) });

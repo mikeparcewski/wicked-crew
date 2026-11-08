@@ -38,14 +38,16 @@ describe('a fresh install: no gateway container yet', () => {
     expect(row.remedy ?? '').not.toMatch(/Start Docker/);
   });
 
-  it('a runtime that cannot be reached is still down, and the reason is what the runtime said, not the command line', async () => {
+  it('a runtime that cannot be reached is still down, but the reason is a plain cause, not the raw docker line or the command line (FINDINGS C3a)', async () => {
     const row = await probeGateway({
       ...base,
       exec: runtimeSaying('failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory\n'),
     });
     expect(row.state).toBe('down');
-    expect(row.reason).toMatch(/failed to connect to the docker API/);
+    expect(row.reason).toBe("Docker isn't running");
+    expect(row.reason).not.toMatch(/unix:\/\//);
     expect(row.reason).not.toMatch(/Command failed/);
+    expect(row.remedy ?? '').toMatch(/Start Docker/);
   });
 
   it('an error with no stderr (spawn ENOENT, a plain Error) keeps its message', () => {

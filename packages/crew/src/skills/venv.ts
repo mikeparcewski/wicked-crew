@@ -32,11 +32,26 @@ export interface VenvProvisionOptions {
 }
 
 /**
+ * Why a required env could not be built — carried alongside `failed` so the store can word the BLOCKED
+ * finding for a user: `uv-missing` (install uv) vs `sync-failed` (uv ran but the sync errored). Not a
+ * wire value (the manifest still records only {@link SkillVenvState}); it steers the human message.
+ */
+export type VenvFailureReason = 'uv-missing' | 'sync-failed';
+
+/**
+ * What a provisioner resolves to: a bare {@link SkillVenvState}, or — on failure — the state with the
+ * reason it failed. A bare `'failed'` (a test seam, an older provisioner) is read as `uv-missing` by
+ * the store so the user still gets the install-uv fix.
+ */
+export type VenvProvisionResult = SkillVenvState | { state: 'failed'; reason: VenvFailureReason };
+
+/**
  * Provision `<baselineDir>/.venv`; resolves to the state to record: `synced` (the env is complete),
  * `skipped` (nothing to provision — no `pyproject.toml`), `failed` (the required env could not be
- * built: uv missing, sync error — the store BLOCKS the publish). Injectable (tests never run uv).
+ * built: uv missing, sync error — the store BLOCKS the publish), optionally with the failure reason.
+ * Injectable (tests never run uv).
  */
-export type VenvProvisioner = (baselineDir: string, opts: VenvProvisionOptions) => Promise<SkillVenvState>;
+export type VenvProvisioner = (baselineDir: string, opts: VenvProvisionOptions) => Promise<VenvProvisionResult>;
 
 /** The `.venv` path a baseline's environment lives at. */
 export function baselineVenvDir(baselineDir: string): string {
@@ -85,10 +100,10 @@ export const uvSyncBaseline: VenvProvisioner = async (baselineDir, { log, cacheD
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
       log(`[skills] uv is not installed but ${baselineDir} carries a pyproject.toml — the shared baseline env is REQUIRED; install uv (https://docs.astral.sh/uv/) and publish again`);
-      return 'failed';
+      return { state: 'failed', reason: 'uv-missing' };
     }
     log(`[skills] uv sync failed for ${baselineDir}: ${err instanceof Error ? err.message : String(err)}`);
-    return 'failed';
+    return { state: 'failed', reason: 'sync-failed' };
   }
 };
 

@@ -34,6 +34,7 @@ import { COPILOT_VIEW_SKILLS_REL, resolveSkillsRoot, SKILLS_DIRNAME } from '../s
 import { noVenv } from '../src/skills/venv.js';
 import { removeScratch } from './setup/scratch.js';
 import { FIXTURE_PLUGIN, scaffold, type Scaffold } from './support/skills-fixture.js';
+import { scrubHomePaths } from '../src/api/ui-text.js';
 
 /** The retired override — spelled here only to prove it has no effect. */
 const RETIRED_ROOT_ENV = 'WICKED_CREW_SKILLS_ROOT';
@@ -567,7 +568,9 @@ describe('daemon boot (createServer) — the root is <state home>/skills; the fe
           {
             kind: 'skills.source',
             severity: 'warning',
-            message: `seeded from the installer copy at ${FIXTURE_PLUGIN}; register the plugin with Claude Code (marketplace) to receive marketplace updates`,
+            // fr-privacy: GET /diagnostics is scrubbed of home paths by the backstop, so the fixture
+            // path under the checkout (which lives under the test host's home) reads `~`.
+            message: scrubHomePaths(`seeded from the installer copy at ${FIXTURE_PLUGIN}; register the plugin with Claude Code (marketplace) to receive marketplace updates`),
           },
           // …and the shipped BASE skill default's ERROR (crew#554 / D-8): the fixture does not ship it,
           // so the engine refuses a launch at intake — the variable is exported regardless.
@@ -655,7 +658,9 @@ describe('daemon boot (createServer) — the root is <state home>/skills; the fe
       expect(skills).toMatchObject({ state: 'blocked', root, current: null, engineInput: refusalPath(root, 'skills.blocked') });
       // The ladder's error, then the shipped BASE skill default's warning (crew#554) — nothing published, nothing handed.
       expect(skills.findings.map((f) => f.kind)).toEqual(['skills.blocked', 'skills.base-skill']);
-      expect(skills.findings[0]?.message).toContain('missing-plugin-manifest');
+      // fr-privacy: the blocked message is human now (no `${kind}:` machine prefix) — it names the fact, not the kind.
+      expect(skills.findings[0]?.message).toMatch(/^Skills can't be published: /);
+      expect(skills.findings[0]?.message).toContain('archetypes.json');
     } finally {
       await app.close();
     }

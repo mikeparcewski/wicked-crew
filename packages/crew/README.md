@@ -62,6 +62,18 @@ npm install -g wicked-crew
 wicked-crew serve
 ```
 
+Crew uses the first usable garden source in this order (automatic sources need version ≥ 12.64.0):
+
+1. `WICKED_CREW_SKILLS_SOURCE`, an explicit plugin root.
+2. The Claude marketplace cache under `$CLAUDE_CONFIG_DIR` or `~/.claude` (highest valid version).
+3. The Claude installer copy under those config dirs (`plugins/wicked-garden`).
+4. The npm-global `wicked-garden` package, found through its launcher on PATH, then beside crew.
+5. The Codex plugin cache under `$CODEX_HOME` or `~/.codex` (highest valid version across marketplaces).
+
+At boot, the daemon also appends existing `$XDG_BIN_HOME`, `~/.local/bin` and `~/.cargo/bin` directories to its
+own PATH, so it finds the installer's tools even before your shell does. Commands already on your PATH take
+precedence.
+
 Studio's Nerve Center names whichever requirement is missing on a fresh install.
 
 Or without installing:

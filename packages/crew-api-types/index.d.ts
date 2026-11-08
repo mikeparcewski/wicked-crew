@@ -5091,14 +5091,15 @@ export type SkillKind = 'router' | 'fork-worker' | 'module';
  *  it while the operator's edits were kept). */
 export type SkillProvenance = 'shipped' | 'override' | 'user-added';
 
-/** Where a baseline was captured from. `claude-plugin-cache` is the marketplace cache
- *  (`<config dir>/plugins/cache/wicked-garden/wicked-garden/<version>` — the plugin Claude Code
- *  runs); `installer-copy` is the installer-managed `<config dir>/plugins/wicked-garden` copy
- *  (`npx wicked-installer install wicked-garden`), accepted only as the LAST resort when no cache
- *  exists (design v3.6, api-types 0.29.0) and flagged by the `skills.source` diagnostics finding
- *  while it is the current baseline; `checkout` is a git working tree; `directory` any other
- *  explicit plugin-shaped directory. */
-export type SkillSourceKind = 'claude-plugin-cache' | 'installer-copy' | 'checkout' | 'directory';
+/** Where a baseline was captured from. Automatic order: `claude-plugin-cache` is the
+ *  marketplace cache under each Claude config dir; `installer-copy` is the Claude installer copy
+ *  (`plugins/wicked-garden`), used when no usable Claude cache exists and flagged by `skills.source`;
+ *  `npm-global` is the wicked-garden npm package found through PATH or beside crew;
+ *  `codex-plugin-cache` is the highest valid version across Codex marketplaces under
+ *  `<CODEX_HOME or ~/.codex>/plugins/cache/<marketplace>/wicked-garden/<version>`.
+ *  `checkout` is an explicit git working tree; `directory` any other explicit plugin root.
+ *  Explicit WICKED_CREW_SKILLS_SOURCE overrides automatic discovery. */
+export type SkillSourceKind = 'claude-plugin-cache' | 'installer-copy' | 'npm-global' | 'codex-plugin-cache' | 'checkout' | 'directory';
 
 /** The per-baseline `uv sync` state (`<baseline>/.venv`, provisioned once per content hash — the
  *  publish that needs it AWAITS it — and shared read-only by every snapshot that links it):
