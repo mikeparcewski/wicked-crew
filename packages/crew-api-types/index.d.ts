@@ -6795,6 +6795,16 @@ export interface SeatSessionResponse {
   action: 'login' | 'logout';
 }
 
+export type SeatSignInFailureCode = 'container_runtime_down' | 'cli_not_installed' | 'signin_already_open' | 'signin_superseded' | 'signin_failed';
+
+/** The body of a refused sign-in. */
+export interface SeatSignInFailure {
+  code: SeatSignInFailureCode;
+  error: string;
+  cli?: string;
+  terminalId?: string;
+}
+
 export interface SeatContainerLoginResponse {
   terminalId: string;
   cli: string;
