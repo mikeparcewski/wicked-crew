@@ -10,6 +10,8 @@ import {
   CONFORMANCE_TIMEOUT_ENV,
   DEFAULT_CONFORMANCE_LOAD_S,
   CONFORMANCE_FIXED_WAITS_S,
+  RUN_PLUGIN_FIXED_WAITS_S,
+  RUN_PLUGIN_LOADS,
   conformanceCapMs,
   conformanceLoadSeconds,
   gardenConformance,
@@ -66,6 +68,17 @@ describe('the overall cap', () => {
     expect(conformanceCapMs([V2], 300)).toBe((60 + FIXED + 4 + 3 * 300) * 1000);
     // No entries known: sized for one protocol-1 editor.
     expect(conformanceCapMs([], 120)).toBe((60 + FIXED + 2 * 120) * 1000);
+  });
+
+  it('CS7 C4: each run plugin counts as 3 host-page loads + 20 s of fixed waits', () => {
+    expect(RUN_PLUGIN_LOADS).toBe(3);
+    expect(RUN_PLUGIN_FIXED_WAITS_S).toBe(20);
+    // A plugin-only pack: no editor list stands in for it; the plugin adds its own slice.
+    expect(conformanceCapMs([], 120, [{ id: 'p' }])).toBe((60 + 20 + 3 * 120) * 1000);
+    // Two plugins add up; the bound moves the cap with it.
+    expect(conformanceCapMs([], 300, [{ id: 'p1' }, { id: 'p2' }])).toBe((60 + 2 * (20 + 3 * 300)) * 1000);
+    // An editor and a plugin together: each slice plus one browser start.
+    expect(conformanceCapMs([V1], 120, [{ id: 'p' }])).toBe((60 + CONFORMANCE_FIXED_WAITS_S + 2 * 120 + 20 + 3 * 120) * 1000);
   });
 });
 

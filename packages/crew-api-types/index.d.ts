@@ -15496,6 +15496,15 @@ export interface EditorView {
   description?: string;
   /** Its icon, colour and preview (api-types 0.157.0). Absent when it declares none that read. */
   visuals?: EditorVisuals;
+  /** A run plugin (CS7): `run-thread`. Absent for an artifact editor. */
+  inline?: 'run-thread';
+  /** A run plugin's asked topics, each with its reason (the install consent lists these). */
+  observe?: Array<{ topic: string; why: string }>;
+  /** The topics the engine decided `allow` for this build (deny dominates). Empty = it hears nothing. */
+  granted_topics?: string[];
+  /** A run plugin's sections in a job's Details panel (studio `parsePanels` reads them). */
+  run_panels?: Array<{ slot: 'run.details'; id: string; title: string; instances: 'single' | 'per-phase'; order: number;
+    defaultOpen: 'always' | 'never' | 'current' | 'while-live'; summary: 'plugin' | 'none' }>;
 }
 
 /** `GET /editors` (operator+). */
@@ -15522,10 +15531,13 @@ export interface InstallEditorResponse {
   check: PackCheckResult;
   conformance: EditorConformanceSummary;
   /**
-   * The `mcp.session` grant tokens this install consent wrote into `EDITOR-GRANTS` (one per installed
-   * editor that declares it). Absent when no installed editor declares it. `grantError` = the editor is
-   * installed but the ledger could not be edited: a declaring build's `mcp.session` still asks, or (for
-   * a build that no longer declares it) an earlier build's grant was not withdrawn.
+   * The grant tokens this install consent wrote into `EDITOR-GRANTS`: one `mcp.session` token per installed
+   * editor that declares it, and (CS7) one `plugin:<id>@<version>#<sha256>/observe:<topic>` token per declared
+   * topic of each installed run plugin. Absent when there is none. `grantError` = the pack is installed but the
+   * ledger could not be edited: a declaring editor's `mcp.session` still asks, a run plugin's topics are not
+   * granted (it hears nothing until it is installed again), or an earlier build's grants were not withdrawn
+   * (they name that build only: an update to another version or entry hash gets none of them; a reinstall of the
+   * very same build keeps the grants its earlier install consent gave).
    */
   granted?: string[];
   grantError?: string;
@@ -15537,6 +15549,8 @@ export interface EditorConformanceSummary {
   at: string;
   /** Per editor: the version and entry sha256 the run tested (an install requires both to be the installed ones). */
   editors: Array<{ id: string; version: string; sha256: string; ok: boolean; cases: Record<string, { ok: boolean }>; gaps: string[] }>;
+  /** Per run plugin (CS7), same row shape as `editors`: the run-plugin cases (r0-r5) it was judged on. */
+  plugins?: Array<{ id: string; version: string; sha256: string; ok: boolean; cases: Record<string, { ok: boolean }>; gaps: string[] }>;
   /** Set when the run could not happen (no headless browser, no garden with the runner). */
   error?: string;
 }

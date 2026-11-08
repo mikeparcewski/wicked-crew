@@ -120,7 +120,7 @@ describe('the manifest rule (§8.2)', () => {
   it('a protocol-1 editor\'s view has no surfaces field (the wire stays as it was)', () => {
     const r = EditorManifestSchema.safeParse({ ...entry({ protocol: [1], surfaces: undefined }), entry: 'index.html' });
     expect(r.success).toBe(true);
-    if (r.success) expect('surfaces' in EditorRegistry.view({ manifest: r.data, sha256: 'a'.repeat(64), bytes: 1, entryPath: '/x', firstParty: true, source: 'studio-bundle', enabled: true })).toBe(false);
+    if (r.success) expect('surfaces' in EditorRegistry.view({ kind: 'editor', manifest: r.data, sha256: 'a'.repeat(64), bytes: 1, entryPath: '/x', firstParty: true, source: 'studio-bundle', enabled: true })).toBe(false);
   });
 });
 
@@ -177,7 +177,8 @@ describe('install conformance (§8.3)', () => {
     expect(res.editors[0]?.surfaces?.full).toEqual({ modes: ['simple', 'advanced'], default: 'simple' });
     const state = JSON.parse(readFileSync(join(home, EDITORS_STATE_FILENAME), 'utf8')) as { installed: Record<string, { conformance: { cases: string[] } }> };
     expect(state.installed['acme-notes']!.conformance.cases).toEqual([...CONFORMANCE_CASES, ...CONFORMANCE_CASES_V2]);
-    expect(new EditorRegistry({ stateHome: home }).get('acme-notes')?.manifest.surfaces?.card.aspect).toBe('auto');
+    const rec = new EditorRegistry({ stateHome: home }).get('acme-notes');
+    expect(rec?.kind === 'editor' ? rec.manifest.surfaces?.card.aspect : undefined).toBe('auto');
   });
 
   it('a protocol-1 editor still installs on cases 0-12 and 18 alone', async () => {

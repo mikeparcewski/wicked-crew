@@ -12,6 +12,15 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **A pack can install third-party run plugins, which read a run's events on the topics the install consent grants
+  (CS7; api-types `EditorView`, `EditorConformanceSummary`, unreleased).** `POST /api/v1/editors` now admits a spec-2
+  pack that declares `plugins[]` (with or without `editors[]`); each plugin passes the run-plugin conformance cases
+  (`r0`-`r5`) and is recorded beside editors in the one id namespace. `GET /editors` lists each as an `EditorView`
+  row (`inline: 'run-thread'`, its `observe[]` and `run_panels[]`) with `granted_topics` the engine decided `allow`
+  (`[]`, fail closed, when it cannot). The install consent writes one `plugin:<id>@<version>#<sha256>/observe:<topic>`
+  grant per declared topic; `DELETE /editors/:id` withdraws them; `POST /editors/:id/grants` for a plugin is 409
+  `install_only` (its topics are the install consent's); `GET /editors/:id/grants` answers the observe decisions.
+
 - **A person can allow or revoke what an installed editor asks for (F37; api-types `SetEditorGrantBody`, unreleased).**
   `POST /api/v1/editors/:id/grants {permission, allow, version, sha256, project?}` is the human-only writer of the
   `EDITOR-GRANTS` ledger the engine already reads. The press names the build the person was shown (409

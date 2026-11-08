@@ -3735,6 +3735,11 @@ export class CoreAdapter {
     permissions: string[];
     project?: string;
     firstParty: boolean;
+    /** CS7: `plugin` evaluates a run plugin's observe topics; absent / `editor` the artifact-editor permissions. */
+    subject?: 'editor' | 'plugin';
+    /** CS7: a run plugin's declared topic patterns (for `subject:'plugin'`). JSON in, JSON out — the napi signature
+     *  is unchanged, so the new fields flow straight through to the engine. */
+    observe?: string[];
   }): Promise<EditorGrantsResponse> {
     const evaluate = this.core.evaluateEditorGrants;
     if (typeof evaluate !== 'function') {
