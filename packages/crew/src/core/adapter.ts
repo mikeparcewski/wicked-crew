@@ -78,7 +78,7 @@ import { withFolderFindings } from './repoPaths.js';
 
 
 /** Resolved path under the user's home directory. */
-function wickedDir(...parts: string[]): string {
+export function wickedDir(...parts: string[]): string {
   const home = process.env.HOME ?? process.env.USERPROFILE ?? '/tmp';
   return join(home, '.wicked', ...parts);
 }
@@ -3361,6 +3361,9 @@ export class CoreAdapter {
       try {
         await execCapped('git', ['clone', '--', gitUrl, cloneDir], {
           timeout: 5 * 60 * 1000,
+          // crew-0182: a repository that needs a sign-in fails in seconds with git's own reason, instead of waiting on a
+          // credential prompt no one can answer until the 5-minute timeout.
+          env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
         });
       } catch (err) {
         // Cleanup is best-effort: swallow any cleanup error so the original

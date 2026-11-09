@@ -104,6 +104,7 @@ import { documentPathPlan, type PacketDeps } from '../interactive/source-packet.
 import { tornTailPrefix } from './chat-transcripts.js';
 import type { JobTurnContext, MakeDigest } from './chat-scope.js';
 import { catalogDigest, detect, detectable } from '../workflow-catalog/detect.js';
+import { OnboardBlock, resolveOnboard, type OnboardBlockBody, type OnboardResolveDeps } from './proposal-onboard.js';
 
 // ── the block ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -157,7 +158,8 @@ const ThemeBlock = z.object({
 export type ParsedMake =
   | ({ op: 'entry' } & z.infer<typeof EntryBlock>)
   | ({ op: 'refine' } & z.infer<typeof RefineBlock>)
-  | ({ op: 'theme' } & z.infer<typeof ThemeBlock>);
+  | ({ op: 'theme' } & z.infer<typeof ThemeBlock>)
+  | ({ op: 'onboard' } & OnboardBlockBody);
 
 /** One block body → its operation, or `null` (not JSON, not exactly one of `entry` / `refine` / `theme`, or a bad shape). */
 export function parseMakeBlock(body: string): ParsedMake | null {
@@ -169,7 +171,7 @@ export function parseMakeBlock(body: string): ParsedMake | null {
   }
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const o = raw as Record<string, unknown>;
-  const ops = (['entry', 'refine', 'theme'] as const).filter((k) => o[k] !== undefined && o[k] !== null);
+  const ops = (['entry', 'refine', 'theme', 'onboard'] as const).filter((k) => o[k] !== undefined && o[k] !== null);
   if (ops.length !== 1) return null;
   if (ops[0] === 'entry') {
     const r = EntryBlock.safeParse(o);
@@ -178,6 +180,11 @@ export function parseMakeBlock(body: string): ParsedMake | null {
   if (ops[0] === 'refine') {
     const r = RefineBlock.safeParse(o);
     return r.success ? { op: 'refine', ...r.data } : null;
+  }
+  if (ops[0] === 'onboard') {
+    // crew-0182: add a git repository to a project (resolved by `proposal-onboard.ts`).
+    const r = OnboardBlock.safeParse(o);
+    return r.success ? { op: 'onboard', ...r.data } : null;
   }
   const r = ThemeBlock.safeParse(o);
   return r.success ? { op: 'theme', ...r.data } : null;
@@ -565,20 +572,20 @@ export function runCostFromEvents(view: SessionView, events: ReadonlyArray<Recor
 // ── resolution ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /** The workflow each operation's run is. */
-export const PROPOSAL_WORKFLOWS: Readonly<Record<Exclude<ArtifactProposalKind, 'theme' | 'job'>, string>> = {
+export const PROPOSAL_WORKFLOWS: Readonly<Record<Exclude<ArtifactProposalKind, 'theme' | 'job' | 'onboard'>, string>> = {
   create: 'interactive-draft',
   refine: 'interactive-chat',
   demo: 'demo',
 };
 
-const STOPS: Readonly<Record<Exclude<ArtifactProposalKind, 'theme' | 'job'>, string>> = {
+const STOPS: Readonly<Record<Exclude<ArtifactProposalKind, 'theme' | 'job' | 'onboard'>, string>> = {
   create: 'Stops for you if the check fails. The plan or an escalation may also ask.',
   refine: 'Stops for you if the check fails. The plan or an escalation may also ask.',
   demo: 'Stops for you after the script and after the review.',
 };
 
 const STYLE_LABEL: Readonly<Record<string, string>> = { ppt: 'Slides', web: 'Web page', doc: 'Document', brochure: 'Brochure' };
-const NOUN: Readonly<Record<Exclude<ArtifactProposalKind, 'theme' | 'job'>, [string, string]>> = {
+const NOUN: Readonly<Record<Exclude<ArtifactProposalKind, 'theme' | 'job' | 'onboard'>, [string, string]>> = {
   create: ['document', 'documents'],
   refine: ['revision', 'revisions'],
   demo: ['demo video', 'demo videos'],
@@ -683,6 +690,10 @@ export interface ChatProposalDeps {
   reviewAuthors?(repoRef: string, words: string): Promise<readonly string[] | null>;
   /** Whether the chat's client renders job proposals (`accepts: ['job']`, its newest declaration). Absent = no. */
   acceptsJobs?(chatId: string): boolean;
+  /** (crew-0182) Whether the chat's client draws onboard cards (`accepts: ['onboard']`, its newest declaration). */
+  acceptsOnboard?(chatId: string): boolean;
+  /** (crew-0182) What an onboard block is resolved against. Absent = onboard cards are not made here. */
+  onboard?: OnboardResolveDeps;
   /** What the v2 catalog resolves against now, as a launch filed in `projectId` reads it. */
   served?(projectId: string | null): Promise<ServedState & { rev: string }>;
   /**
@@ -1006,6 +1017,12 @@ export class ChatProposals {
       label: projectId === null ? 'Not in a project · this chat' : ((await this.deps.projectName(projectId)) ?? projectId),
     });
 
+    if (block.op === 'onboard') {
+      // Only for a client that draws the card (its seat was told the block exists only then).
+      if (flags.onboard !== true || this.deps.onboard === undefined || this.deps.acceptsOnboard?.(chatId) !== true) return this.refused(chatId, 'onboard');
+      return resolveOnboard(block, { pid, chatId, turnId, seat, chatProjectId: chat.projectId === null || chat.projectId === 'default' ? null : chat.projectId }, this.deps.onboard);
+    }
+
     if (block.op === 'theme') {
       if (!flags.theme) return this.refused(chatId, 'theme');
       const patch = block.theme.patch as Record<string, string | number | boolean>;
@@ -1171,7 +1188,7 @@ export class ChatProposals {
   }
 
   /** Time and cost: the catalog's band, the workflow's steps, and medians over completed runs here. */
-  private async timeOf(kind: Exclude<ArtifactProposalKind, 'theme' | 'job'>, seed: CatalogSeed | null, projectId: string | null): Promise<ProposalTime> {
+  private async timeOf(kind: Exclude<ArtifactProposalKind, 'theme' | 'job' | 'onboard'>, seed: CatalogSeed | null, projectId: string | null): Promise<ProposalTime> {
     const workflow = PROPOSAL_WORKFLOWS[kind];
     const minutes = seed?.typicalMinutes ?? null;
     const cost = seed?.cost ?? null;
@@ -1584,7 +1601,8 @@ export class ChatProposals {
     const gone = await this.firstGone(chatId, resolution);
     if (gone !== null) return { code: 409, body: { code: 'source_gone', error: gone, view: viewOf(folded) } };
     // A theme is no job (§15.2): applying colours never waits for a run of this chat.
-    const busy = kind === 'theme' ? null : await this.busy(chatId, identity.artifactRef, resolution);
+    // An onboard card starts no job of this chat either (crew-0182): it registers a repository.
+    const busy = kind === 'theme' || kind === 'onboard' ? null : await this.busy(chatId, identity.artifactRef, resolution);
     if (busy !== null) return { code: 409, body: { code: busy.code, error: busy.reason, view: viewOf(folded) } };
     // A refine is on the head it was proposed on; else the card re-resolves (same pid, the new base). Read last, right
     // before the record: the landing itself is checked against this base (`expect_head`, slices I1 and A5).
@@ -1786,6 +1804,8 @@ export class ChatProposals {
       refine: ['ask', 'helpers', 'allow'],
       theme: ['name', 'patch'],
       demo: ['audience', 'show', 'helpers'],
+      // An onboard card is changed by saying so in the chat (a new proposal replaces it); Go takes no edits.
+      onboard: [],
     };
     const kindAllowed = allowed[p.kind];
     for (const k of Object.keys(edits) as Array<keyof ProposalEdits>) {

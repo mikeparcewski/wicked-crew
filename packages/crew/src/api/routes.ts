@@ -22,7 +22,7 @@ import { promises as fsp } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { videoPalette } from '../appearance/video-palette.js';
-import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanGateNoteUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, settingsFilePath, type RunViewsSnapshot } from '../core/adapter.js';
+import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanGateNoteUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, settingsFilePath, wickedDir, type RunViewsSnapshot } from '../core/adapter.js';
 import { codeGraphDb, codeGraphErrorStatus, repoFolderMissing, repoFolderMissingBody } from '../core/repoPaths.js';
 import type {
   ConformanceRule,
@@ -136,6 +136,7 @@ import {
   ChatScopeIndex,
   chatScopeDeps,
   chatScopeStatement,
+  type DaemonGrounding,
   prepareChatScratch,
   removeChatScratch,
   namedKindRefusal,
@@ -291,6 +292,7 @@ import {
 import { createDocInProcess, registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { CreateLauncher } from '../interactive/proposal-create.js';
 import { ThemeLauncher } from './proposal-theme.js';
+import { OnboardLauncher, probeGitUrl } from './proposal-onboard.js';
 import { RefineLauncher } from '../interactive/proposal-refine.js';
 import { lineageSteps, protectedEdits } from '../interactive/protected-edits.js';
 import type { DocBindingStore } from '../interactive/doc-binding.js';
@@ -1679,7 +1681,7 @@ export const ChatOpenSchema = z.strictObject({
   }).optional(),
   requestId: z.string().trim().min(1).max(128).optional(),
   /** (api-types 0.192.0) What the client renders (`['job']`). */
-  accepts: z.array(z.literal('job')).max(4).optional(),
+  accepts: z.array(z.enum(['job', 'onboard'])).max(4).optional(),
 }).refine((b) => b.seed === undefined || (b.requestId !== undefined && b.chatId === undefined), {
   path: ['seed'],
   error: 'seed needs requestId and no chatId: the chat id derives from you and the request',
@@ -1884,10 +1886,18 @@ export function registerRoutes(
     'demo',
   ];
   const chatArtifactFlags: import('../core/types.js').ChatArtifactsCapabilities = chatArtifactsStub
-    ? { context: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps }
-    : { context: true, proposals: true, create: realCreate, refine: realRefine, theme: true, demo: false };
+    ? { context: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps, onboard: true }
+    : { context: true, proposals: true, create: realCreate, refine: realRefine, theme: true, demo: false, onboard: true };
   const proposalLaunchers = new LaunchOnceRegistry();
   proposalLaunchers.register('theme', new ThemeLauncher());
+  // crew-0182: Go on an onboard card is `POST /repos {gitUrl, projectId}`'s own body (`registerAndOnboard`, below).
+  proposalLaunchers.register('onboard', new OnboardLauncher({
+    sessions: () => adapter.sessions(),
+    register: (data, ctx) => registerAndOnboard(data, { actor: ctx.actor, runId: ctx.runId, log: { warn: (o, m) => app.log.warn(o as object, m) } }),
+    attach: async (projectId, repoId, actor) => {
+      await attachRepoToProject(adapter, projects, { projectId, repoId, actor, attachedBy: 'studio' });
+    },
+  }));
   /** (DES-CATALOG-002 §4.6) Job proposals in a chat: on wherever chat proposals are. */
   const chatJobProposalsOn = chatArtifactFlags.proposals;
   if (chatArtifactsStub) {
@@ -4992,6 +5002,26 @@ export function registerRoutes(
 
   /** (DES-CATALOG-002 §4.6) Chats whose client renders job proposals (`accepts: ['job']`), by its newest declaration. */
   const chatAccepts = new Map<string, boolean>();
+  /** (crew-0182) Chats whose client draws onboard cards (`accepts: ['onboard']`), by its newest declaration. */
+  const chatAcceptsOnboard = new Map<string, boolean>();
+  /** (crew-0182) What a chat seat is told exists here: every project with its repositories, every registered repository. */
+  const readDaemonGrounding = async (chatId: string, accepts: ReadonlyArray<'job' | 'onboard'> | undefined): Promise<DaemonGrounding | undefined> => {
+    try {
+      const [projectRows, repoRows] = await Promise.all([adapter.projectList().catch(() => []), adapter.listRepos()]);
+      const nameOf = new Map(repoRows.map((r) => [r.id, r.name] as const));
+      const live = projectRows.filter((p) => p.id !== DEFAULT_PROJECT_ID && p.status !== 'archived').slice(0, 40);
+      const projectsOut = await Promise.all(live.map(async (p) => ({
+        id: p.id,
+        name: p.name,
+        repos: (await adapter.projectMembers(p.id).catch(() => [])).filter((m) => m.member_kind === 'crew.repo').map((m) => nameOf.get(m.member_ref) ?? m.member_ref),
+      })));
+      const onboard = chatArtifactFlags.onboard === true && (accepts !== undefined ? accepts.includes('onboard') : chatAcceptsOnboard.get(chatId) === true);
+      const text = (v: unknown, or: string): string => (typeof v === 'string' && v !== '' ? v : or);
+      return { projects: projectsOut, repos: repoRows.map((r) => ({ id: r.id, name: text(r.name, r.id), ...(typeof r.git_url === 'string' ? { gitUrl: r.git_url } : {}) })), onboard };
+    } catch {
+      return undefined;
+    }
+  };
   /** A seed as the person route's body (one spelling, so its request digest is the same on every retry). */
   const seedBody = (
     seed: { card: string; option?: string | null | undefined; depth?: 'quick' | 'standard' | 'deep' | null | undefined; words?: string | undefined; source: 'pick' | 'command' },
@@ -5211,6 +5241,7 @@ export function registerRoutes(
       // DES-CATALOG-002 §4.6: this open owns the id now: its declaration is the chat's (an omitted one is "no job cards").
       // A refused open (409 above) never touched the live chat's (codex r3).
       chatAccepts.set(chatId, openAccepts);
+      chatAcceptsOnboard.set(chatId, b.accepts?.includes('onboard') === true);
       // DC-S7: the in-force rules the statement lists; recorded as "told" only once the open succeeds.
       let inForceAtOpen: ConformanceRule[] = [];
       // Everything below either ends in `chatScopes.set(chatId, …, token)` or releases the reservation.
@@ -5489,7 +5520,7 @@ export function registerRoutes(
     /** (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §5.1) What studio shows beside the message. */
     context: ChatMessageContextSchema.optional(),
     /** (api-types 0.192.0, DES-CATALOG-002 §4.6) What the client renders (`['job']`): the newest declaration wins. */
-    accepts: z.array(z.literal('job')).max(4).optional(),
+    accepts: z.array(z.enum(['job', 'onboard'])).max(4).optional(),
   });
   // DES-CHAT-ARTIFACTS-001 §5.1 (A1): what a turn's block reads — the docs roots, the decorated runs (project,
   // document and chat ids), unit outputs and the acceptance line. One set of deps, so the block and the run pages
@@ -5656,6 +5687,22 @@ export function registerRoutes(
       return new Set((await adapter.listPresets(projectId !== null && projectId !== DEFAULT_PROJECT_ID ? projectId : undefined)).map((p) => p.name));
     },
     acceptsJobs: (chatId) => chatAccepts.get(chatId) === true,
+    acceptsOnboard: (chatId) => chatAcceptsOnboard.get(chatId) === true,
+    onboard: {
+      projects: async () => (await adapter.projectList()).filter((p) => p.id !== DEFAULT_PROJECT_ID && p.status !== 'archived').map((p) => ({ id: p.id, name: p.name })),
+      repos: () => adapter.listRepos(),
+      projectRepoRefs: async (projectId) => (await adapter.projectMembers(projectId)).filter((m) => m.member_kind === 'crew.repo').map((m) => m.member_ref),
+      originOf: async (rootPath) => {
+        try {
+          const out = await execCapped('git', ['-C', rootPath, 'remote', 'get-url', 'origin'], { timeout: 5_000 });
+          return out.stdout.trim() || null;
+        } catch {
+          return null;
+        }
+      },
+      probe: (url) => probeGitUrl(url),
+      checkoutOf: (name) => homeless(wickedDir('repos', name)),
+    },
     served: (projectId) => servedFor(shapeReads, projectId ?? undefined),
     turnLive: (chatId, turnId) => chatTurns.turnsOf(chatId).some((t) => t.turnId === turnId),
     broadcast: (frame) => runtime.broadcast?.(frame),
@@ -5762,7 +5809,10 @@ export function registerRoutes(
       try {
         // DES-CATALOG-002 §4.6: the client's declaration takes effect with an ACCEPTED message only (a refused one, a
         // second tab's 409, never changes how a turn in flight is read; codex r2 on Lane D).
-        if (parsed.data.accepts !== undefined) chatAccepts.set(id, parsed.data.accepts.includes('job'));
+        if (parsed.data.accepts !== undefined) {
+          chatAccepts.set(id, parsed.data.accepts.includes('job'));
+          chatAcceptsOnboard.set(id, parsed.data.accepts.includes('onboard'));
+        }
         after();
         if (preface !== null) chatTranscripts?.appendSystem(id, turnId, preface);
         chatTranscripts?.appendUser(id, turnId, text, voice, attached.map(attachmentWire), contextAllowed);
@@ -5912,6 +5962,8 @@ export function registerRoutes(
       const requirementsBuilt = scope !== undefined
         ? await buildRequirementsMaps(scope, { listRepos: () => adapter.listRepos(), reader: adapter }).catch(() => [])
         : [];
+      // crew-0182: the daemon's projects and repositories for this message (a failed read names none; never fails the turn).
+      const daemonGrounding = path.workflow === undefined ? await readDaemonGrounding(id, parsed.data.accepts) : undefined;
       // The last await before delivery may also have closed/reopened the chat. From this check
       // through publication and the send there is no await, so no executing turn's files change.
       if (askPaths.get(id)?.generation !== lease || chatScopes.get(id) !== storedScope) {
@@ -5972,7 +6024,7 @@ export function registerRoutes(
       // A2: the per-message digest of what the chat can make now (advertised operations only).
       // crew#1412: written after the last await and the generation check; a map that cannot be written says so.
       const requirementsMaps = scope !== undefined ? publishRequirementsMaps(scope.cwd, requirementsBuilt) : [];
-      const statementOpts = { analysis: path.workflow !== undefined, make: chatProposals.digest(id, turnAccepts, themeClient), requirementsMaps, ...voiceFor(scope?.projectId) };
+      const statementOpts = { analysis: path.workflow !== undefined, make: chatProposals.digest(id, turnAccepts, themeClient), requirementsMaps, ...voiceFor(scope?.projectId), ...(daemonGrounding !== undefined ? { daemon: daemonGrounding } : {}) };
       const projectId = scope?.projectId;
       if (path.runId === undefined) {
         const stepId = 'answer-1';

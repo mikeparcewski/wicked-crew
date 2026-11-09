@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.199.0",
+  "apiTypesVersion": "0.200.0",
   "endpoints": [
     {
       "method": "GET",
@@ -2633,7 +2633,7 @@
       "method": "DELETE",
       "path": "/api/v1/seats/:cli/container-login",
       "requestType": null,
-      "responseType": "{ closed: boolean }",
+      "responseType": "{ closed: boolean; saved?: boolean }",
       "statusCodes": [
         200,
         404

@@ -1,0 +1,354 @@
+// crew-0182: a chat seat proposes adding a git repository to a project; crew resolves the card and the person's Go takes
+// the POST /repos path (register, attach, onboard). Harness: the A7 theme harness (tests/chat-proposals-theme.test.ts).
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, describe, expect, it } from 'vitest';
+
+import type { Actor, ArtifactProposal, ChatTranscriptRecord, CoreEvent, RepoEntry, SessionView } from '../src/core/types.js';
+import { CATALOG_SEEDS } from '../src/workflow-catalog/catalog-data.js';
+import {
+  ChatProposals,
+  LaunchOnceRegistry,
+  parseMakeBlock,
+  type ChatProposalDeps,
+  type ProposalChat,
+  type ProposalDispatch,
+  type ProposalDispatcher,
+} from '../src/api/chat-proposals.js';
+import { ThemeLauncher } from '../src/api/proposal-theme.js';
+import { matchProject, OnboardLauncher, probeVerdict, readGitUrl } from '../src/api/proposal-onboard.js';
+import { chatScopeStatement, daemonGroundingLines } from '../src/api/chat-scope.js';
+
+const ME: Actor = { id: 'maria', kind: 'human', trust: 'operator' };
+const ROOT = mkdtempSync(join(tmpdir(), 'chat-proposals-onboard-'));
+afterAll(() => rmSync(ROOT, { recursive: true, force: true }));
+
+/** A launcher whose runs can stay live, fail, or be slow. */
+class FakeLauncher implements ProposalDispatcher {
+  launched: ProposalDispatch[] = [];
+  live_ = new Set<string>();
+  fail: string | null = null;
+  stayLive = false;
+  async find(identity: { runId: string }): Promise<boolean> { return this.launched.some((d) => d.identity.runId === identity.runId); }
+  async launch(d: ProposalDispatch): Promise<void> {
+    if (this.fail !== null) throw new Error(this.fail);
+    this.launched.push(d);
+    if (this.stayLive) this.live_.add(d.identity.runId);
+  }
+  async live(runId: string): Promise<boolean> { return this.live_.has(runId); }
+}
+
+interface Rig {
+  svc: ChatProposals;
+  records: Map<string, ChatTranscriptRecord[]>;
+  instances: Map<string, string>;
+  chats: Map<string, ProposalChat>;
+  runs: SessionView[];
+  chatOfRun: Map<string, string>;
+  launcher: FakeLauncher;
+  frames: CoreEvent[];
+  audits: string[];
+  docsRootCalls: string[];
+  roster: Array<{ key: string; name: string }>;
+  hold: { runs: Promise<void> | null };
+  attachments: Array<{ id: string; name: string }>;
+  auditDetails: Array<Record<string, unknown>>;
+  onboardOn: boolean;
+  acceptsOnboard: boolean;
+  projects: Array<{ id: string; name: string }>;
+  repos: RepoEntry[];
+  members: Map<string, string[]>;
+  origins: Map<string, string>;
+  probed: string[];
+  probeAnswer: string | null;
+  sessions: string[];
+  registered: Array<{ data: Record<string, unknown>; ctx: { actor: Actor; runId: string } }>;
+  registerAnswer: { status: number; body: Record<string, unknown> };
+  attached: Array<{ projectId: string; repoId: string; actor: string }>;
+}
+
+function rig(): Rig {
+  const r: Rig = {
+    svc: null as unknown as ChatProposals,
+    records: new Map(),
+    instances: new Map(),
+    chats: new Map(),
+    runs: [],
+    chatOfRun: new Map(),
+    launcher: new FakeLauncher(),
+    frames: [],
+    audits: [],
+    docsRootCalls: [],
+    roster: [{ key: 'claude', name: 'Claude Code' }, { key: 'codex', name: 'Codex' }],
+    hold: { runs: null },
+    attachments: [],
+    auditDetails: [],
+    onboardOn: true,
+    acceptsOnboard: true,
+    projects: [{ id: 'proj_labs', name: 'Wicked Labs' }, { id: 'proj_ops', name: 'Ops' }],
+    repos: [],
+    members: new Map(),
+    origins: new Map(),
+    probed: [],
+    probeAnswer: null,
+    sessions: [],
+    registered: [],
+    registerAnswer: { status: 201, body: { onboardRunId: 'x', projectAttached: true } },
+    attached: [],
+  };
+  const registry = new LaunchOnceRegistry();
+  for (const k of ['create', 'refine', 'demo'] as const) registry.register(k, r.launcher);
+  registry.register('theme', new ThemeLauncher());
+  registry.register('onboard', new OnboardLauncher({
+    sessions: async () => r.sessions,
+    register: async (data, ctx) => {
+      r.registered.push({ data, ctx });
+      if (r.registerAnswer.status === 201) r.sessions.push(ctx.runId);
+      return r.registerAnswer;
+    },
+    attach: async (projectId, repoId, actor) => { r.attached.push({ projectId, repoId, actor: actor.id }); },
+  }));
+  const deps: ChatProposalDeps = {
+    flags: () => ({ context: true, proposals: true, create: true, refine: true, theme: true, demo: true, onboard: r.onboardOn }),
+    acceptsOnboard: () => r.acceptsOnboard,
+    onboard: {
+      projects: async () => r.projects,
+      repos: async () => r.repos,
+      projectRepoRefs: async (id) => r.members.get(id) ?? [],
+      originOf: async (root) => r.origins.get(root) ?? null,
+      probe: async (url) => { r.probed.push(url); return r.probeAnswer; },
+      checkoutOf: (name) => `~/.wicked/repos/${name}`,
+    },
+    catalog: CATALOG_SEEDS,
+    records: (c) => [...(r.records.get(c) ?? [])],
+    append: (c, rec) => {
+      const list = r.records.get(c);
+      if (list === undefined) return false;
+      list.push(rec);
+      return true;
+    },
+    instanceOf: (c) => r.instances.get(c) ?? null,
+    projectOf: (c) => r.chats.get(c)?.projectId ?? null,
+    chat: (c) => r.chats.get(c) ?? null,
+    rosterEligible: () => r.roster,
+    runs: async () => {
+      if (r.hold.runs !== null) await r.hold.runs;
+      return r.runs;
+    },
+    chatOfRun: (id) => r.chatOfRun.get(id),
+    isAskPath: () => false,
+    docsRoot: async (projectId) => {
+      r.docsRootCalls.push(projectId);
+      return ['mikes', 'other', 'default'].includes(projectId) ? join(ROOT, projectId === 'default' ? '_unfiled' : projectId) : null;
+    },
+    projectName: async (p) => (p === 'mikes' ? 'Mikes' : null),
+    attachments: () => r.attachments,
+    workflowSteps: async () => 3,
+    runCostUsd: async (v) => (v.session.id.startsWith('costed') ? 0.5 + Number(v.session.id.slice(-1)) / 10 : null),
+    registry,
+    broadcast: (f) => r.frames.push(f),
+    audit: (event) => r.audits.push(event),
+    now: () => 1_000,
+  };
+  r.svc = new ChatProposals({ ...deps, audit: (event, _actor, detail) => { r.audits.push(event); r.auditDetails.push(detail as Record<string, unknown>); } });
+  return r;
+}
+
+/** A chat with one owner turn (and a context record naming runs/docs) — returns the turn id. */
+function chatWith(r: Rig, chatId: string, o: { projectId?: string | null; words?: string; namedRuns?: string[]; namedDocs?: string[]; open?: string; owner?: boolean; analysis?: boolean } = {}): string {
+  const turnId = `t${(r.records.get(chatId)?.length ?? 0) + 1}`;
+  if (!r.records.has(chatId)) r.records.set(chatId, []);
+  if (!r.instances.has(chatId)) r.instances.set(chatId, 'i1');
+  r.chats.set(chatId, { projectId: o.projectId ?? null, repos: [{ id: 'r-crew', name: 'wicked-crew' }], lead: 'claude', seats: ['claude'], analysis: o.analysis === true });
+  const list = r.records.get(chatId)!;
+  list.push({ at: 1, turnId, kind: 'user', text: o.words ?? 'make it', seats: ['claude'], ...(o.owner === false ? {} : { owner: true as const }) });
+  list.push({
+    at: 1, turnId, kind: 'context', runs: [], refused: [], page: false,
+    named: { runs: o.namedRuns ?? [], docs: o.namedDocs ?? [] },
+    ...(o.open !== undefined ? { artifact: { ref: o.open, title: 'Coverage deck', kind: 'slides', viewed: 1, head: 1, projectId: null, copies: [], anchors: [] } } : {}),
+  });
+  list.push({ at: 2, turnId, kind: 'seat', cliKey: 'claude', text: 'answer', ok: true, usage: null });
+  return turnId;
+}
+
+async function propose(r: Rig, chatId: string, turnId: string, block: Record<string, unknown>): Promise<ArtifactProposal | null> {
+  r.svc.onReply({ chat: chatId, cliKey: 'claude', turnId, ok: true, blocks: [JSON.stringify(block)] });
+  await r.svc.settled();
+  const p = [...(r.records.get(chatId) ?? [])].reverse().find((x) => x.kind === 'proposal' && x.proposal.pid === `${chatId}:${turnId}`);
+  return p !== undefined && p.kind === 'proposal' ? p.proposal : null;
+}
+
+const kinds = (r: Rig, chatId: string): string[] => (r.records.get(chatId) ?? []).map((x) => x.kind).filter((k) => k.startsWith('proposal'));
+
+
+const URL = 'https://github.com/mikeparcewski/wicked-studio.git';
+const SENTENCE = 'Want to onboard https://github.com/mikeparcewski/wicked-studio.git into the wicked labs project';
+const repo = (id: string, o: Partial<RepoEntry> = {}): RepoEntry => ({ id, name: id, root_path: `/srv/${id}`, default_branch: 'main', registered_at: 1, ...o });
+
+describe('git addresses', () => {
+  it('reads https, ssh and scp spellings to one key and a name', () => {
+    expect(readGitUrl(URL)).toEqual({ ok: true, url: URL, key: 'github.com/mikeparcewski/wicked-studio', name: 'wicked-studio' });
+    expect(readGitUrl('git@github.com:mikeparcewski/wicked-studio.git')).toMatchObject({ ok: true, key: 'github.com/mikeparcewski/wicked-studio', name: 'wicked-studio' });
+    expect(readGitUrl('ssh://git@GitHub.com/mikeparcewski/Wicked-Studio/')).toMatchObject({ ok: true, key: 'github.com/mikeparcewski/wicked-studio', name: 'Wicked-Studio' });
+  });
+
+  it.each([
+    ['/Users/me/code/app', /not a git address/],
+    ['file:///srv/app', /file address/],
+    ['ext::sh -c touch% /tmp/pwned', /spaces/],
+    ['http://github.com/a/b', /plain http/],
+    ['https://user:tok@github.com/a/b.git', /user name or token/],
+    ['https://github.com/', /no repository path/],
+    ['git@github.com:a/../b', /no repository path/],
+  ])('refuses %s', (raw, why) => {
+    const r = readGitUrl(raw);
+    expect(r.ok).toBe(false);
+    expect(r.ok ? '' : r.reason).toMatch(why);
+  });
+
+  it('says a private or missing repository plainly', () => {
+    expect(probeVerdict("fatal: could not read Username for 'https://github.com': terminal prompts disabled")).toMatch(/private or doesn't exist.*gh auth login/);
+    expect(probeVerdict('ssh: Could not resolve hostname nope: nodename nor servname provided')).toMatch(/can't reach that host/);
+  });
+
+  it('matches a project by id or by name, ignoring case and spacing', () => {
+    const ps = [{ id: 'proj_labs', name: 'Wicked Labs' }, { id: 'p2', name: 'Ops' }];
+    expect(matchProject(ps, 'wicked  labs')).toEqual({ one: ps[0] });
+    expect(matchProject(ps, 'p2')).toEqual({ one: ps[1] });
+    expect(matchProject(ps, 'labs')).toEqual({ none: true });
+    expect(matchProject([...ps, { id: 'p3', name: 'wicked labs' }], 'Wicked Labs')).toMatchObject({ many: [{ id: 'proj_labs' }, { id: 'p3' }] });
+  });
+});
+
+describe('the chat statement names what exists here', () => {
+  const grounding = { projects: [{ id: 'proj_labs', name: 'Wicked Labs', repos: [] }], repos: [], onboard: true };
+
+  it('lists the projects by name and id, and the onboard block for a client that draws the card', () => {
+    const text = daemonGroundingLines(grounding).join('\n');
+    expect(text).toContain('**Wicked Labs** (`proj_labs`): no repositories yet');
+    expect(text).toContain('Registered repositories: none yet.');
+    expect(text).toContain('"wicked labs" is the project named "Wicked Labs"');
+    expect(text).toContain('{"onboard":{"url":');
+    expect(text).toMatch(/do NOT say\s+this chat can't do it/);
+  });
+
+  it('points to studio\'s Add a repository for a client that does not', () => {
+    const text = daemonGroundingLines({ ...grounding, onboard: false }).join('\n');
+    expect(text).not.toContain('{"onboard"');
+    expect(text).toContain('Repositories → Add a repository');
+  });
+
+  it('rides the scope statement (not in an analysis)', () => {
+    const scope = { kind: 'everything', repos: [], dangling: [], cwd: '/tmp/x', graph: { bound: false, reason: 'no repositories' } } as never;
+    expect(chatScopeStatement('c1', scope, undefined, { daemon: grounding })).toContain('## Projects and repositories on this daemon');
+    expect(chatScopeStatement('c1', scope, undefined, { daemon: grounding, analysis: true })).not.toContain('## Adding a repository');
+  });
+});
+
+describe('onboard proposals', () => {
+  const block = { onboard: { url: URL, project: 'wicked labs' }, reason: 'add the studio repo' };
+
+  it('the operator\'s sentence: a card for the repository in Wicked Labs; Go registers, attaches and onboards', async () => {
+    const r = rig();
+    const t = chatWith(r, 'c1', { words: SENTENCE });
+    const p = (await propose(r, 'c1', t, block))!;
+    expect(p).toMatchObject({
+      kind: 'onboard', blocked: null, helpers: null, time: null,
+      what: { label: 'Add a repository · wicked-studio' },
+      filedIn: { projectId: 'proj_labs', label: 'Wicked Labs' },
+      onboard: { url: URL, name: 'wicked-studio', checkout: '~/.wicked/repos/wicked-studio', projectId: 'proj_labs', projectName: 'Wicked Labs', existing: null },
+    });
+    expect(r.probed).toEqual([URL]);
+    const go = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
+    expect(go.code, JSON.stringify(go.body)).toBe(200);
+    expect(r.registered).toHaveLength(1);
+    expect(r.registered[0]!.data).toEqual({ name: 'wicked-studio', gitUrl: URL, projectId: 'proj_labs', channel: 'studio' });
+    // The onboarding run is the proposal's own identity: a Go again adopts it, never registers twice.
+    const runId = r.registered[0]!.ctx.runId;
+    expect(go.body).toMatchObject({ view: { state: 'decided', decision: 'go', result: { runId, adopted: false } } });
+    expect(r.registered[0]!.ctx.actor.id).toBe('maria');
+    expect(kinds(r, 'c1')).toStrictEqual(['proposal', 'proposal_accepting', 'proposal_decided']);
+    expect((await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
+    expect(r.registered).toHaveLength(1);
+  });
+
+  it('Not now registers nothing', async () => {
+    const r = rig();
+    const t = chatWith(r, 'c1', { words: SENTENCE });
+    const p = (await propose(r, 'c1', t, block))!;
+    expect((await r.svc.decide('c1', p.pid, { decision: 'not_now' }, ME, 'i1')).code).toBe(200);
+    expect(r.registered).toHaveLength(0);
+    expect(r.attached).toHaveLength(0);
+    expect(kinds(r, 'c1')).toStrictEqual(['proposal', 'proposal_decided']);
+  });
+
+  it('no project named: the chat\'s own project; a name that matches none or several blocks Go, naming the projects', async () => {
+    const r = rig();
+    const t1 = chatWith(r, 'c1', { projectId: 'proj_ops' });
+    expect(await propose(r, 'c1', t1, { onboard: { url: URL } })).toMatchObject({ blocked: null, onboard: { projectId: 'proj_ops' } });
+    const t2 = chatWith(r, 'c2');
+    expect(await propose(r, 'c2', t2, { onboard: { url: URL, project: 'labs' } })).toMatchObject({
+      blocked: expect.stringMatching(/no project is named “labs” \(projects here: Wicked Labs, Ops\)\. Create it on Projects → New project/),
+    });
+    r.projects.push({ id: 'proj_labs2', name: 'WICKED LABS' });
+    const t3 = chatWith(r, 'c3');
+    expect(await propose(r, 'c3', t3, block)).toMatchObject({ blocked: expect.stringMatching(/more than one project is named/) });
+    const blocked = (await propose(r, 'c3', chatWith(r, 'c3'), block))!;
+    expect((await r.svc.decide('c3', blocked.pid, { decision: 'go' }, ME, 'i1')).code).toBe(409);
+    expect(r.registered).toHaveLength(0);
+  });
+
+  it('a bad address or an unreadable repository blocks Go with the reason; nothing is probed for a bad address', async () => {
+    const r = rig();
+    expect(await propose(r, 'c1', chatWith(r, 'c1'), { onboard: { url: 'file:///srv/x', project: 'Ops' } })).toMatchObject({ blocked: expect.stringMatching(/file address/) });
+    expect(r.probed).toEqual([]);
+    r.probeAnswer = "this computer's git can't read it: the repository is private or doesn't exist.";
+    expect(await propose(r, 'c2', chatWith(r, 'c2'), block)).toMatchObject({ blocked: expect.stringMatching(/private or doesn't exist/) });
+  });
+
+  it('an already-registered repository is added to the project only (no clone, no second onboarding)', async () => {
+    const r = rig();
+    r.repos = [repo('wicked-studio', { git_url: 'git@github.com:mikeparcewski/wicked-studio.git' })];
+    const p = (await propose(r, 'c1', chatWith(r, 'c1'), block))!;
+    expect(p).toMatchObject({ blocked: null, what: { label: 'Add to a project · wicked-studio' }, onboard: { existing: { id: 'wicked-studio', name: 'wicked-studio' }, checkout: null } });
+    expect(r.probed).toEqual([]);
+    expect((await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
+    expect(r.attached).toEqual([{ projectId: 'proj_labs', repoId: 'wicked-studio', actor: 'maria' }]);
+    expect(r.registered).toHaveLength(0);
+    // Already a member: nothing to add.
+    r.members.set('proj_labs', ['wicked-studio']);
+    expect(await propose(r, 'c2', chatWith(r, 'c2'), block)).toMatchObject({ blocked: 'wicked-studio is already in Wicked Labs; nothing to add' });
+  });
+
+  it('a folder registration is the same repository when its origin is the address; a different one blocks', async () => {
+    const r = rig();
+    r.repos = [repo('wicked-studio')];
+    expect(await propose(r, 'c1', chatWith(r, 'c1'), block)).toMatchObject({ blocked: expect.stringMatching(/a different repository is already registered as “wicked-studio”/) });
+    r.origins.set('/srv/wicked-studio', 'https://github.com/mikeparcewski/wicked-studio');
+    expect(await propose(r, 'c2', chatWith(r, 'c2'), block)).toMatchObject({ blocked: null, onboard: { existing: { id: 'wicked-studio' } } });
+  });
+
+  it('only for a client that draws the card, on a daemon that advertises it', async () => {
+    const r = rig();
+    r.acceptsOnboard = false;
+    expect(await propose(r, 'c1', chatWith(r, 'c1'), block)).toBeNull();
+    r.acceptsOnboard = true;
+    r.onboardOn = false;
+    expect(await propose(r, 'c2', chatWith(r, 'c2'), block)).toBeNull();
+    expect(parseMakeBlock(JSON.stringify(block))).toMatchObject({ op: 'onboard', onboard: { url: URL } });
+    expect(parseMakeBlock(JSON.stringify({ ...block, theme: { name: 'x', patch: { theme: 'wicked-dark' } } }))).toBeNull();
+  });
+
+  it('a refused registration or onboarding start fails the Go with the reason (Go again resumes)', async () => {
+    const r = rig();
+    const p = (await propose(r, 'c1', chatWith(r, 'c1'), block))!;
+    r.registerAnswer = { status: 400, body: { error: "fatal: could not read Username for 'https://github.com': terminal prompts disabled" } };
+    const go = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
+    expect(go.code).toBe(502);
+    expect(go.body).toMatchObject({ code: 'launch_failed', error: expect.stringMatching(/wicked-studio was not added: fatal: could not read Username/) });
+    r.registerAnswer = { status: 201, body: { onboardRunId: null, onboardError: 'garden is too old' } };
+    const again = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
+    expect(again.body).toMatchObject({ error: expect.stringMatching(/registered in Wicked Labs, but onboarding could not start: garden is too old/) });
+  });
+});
