@@ -1918,6 +1918,18 @@ export function registerRoutes(
     attach: async (projectId, repoId, actor) => {
       await attachRepoToProject(adapter, projects, { projectId, repoId, actor, attachedBy: 'studio' });
     },
+    // The onboarding run's filing (as recordOnboardingLaunch files it), idempotent: a Go again after a crash files it.
+    fileRun: async (projectId, runId, actor) => {
+      const { member, created } = await adapter.projectMemberAttach(projectId, 'crew.run', runId, { onboarding: true }, actor.id);
+      projects.index.set(runId, projectId);
+      if (created) {
+        projects.bus?.emit(
+          MEMBERSHIP_ATTACHED,
+          { project_id: projectId, member: { kind: 'crew.run', ref: runId }, actor: actor.id },
+          membershipAttachedKey(projectId, 'crew.run', runId, member.attached_at),
+        );
+      }
+    },
   }));
   /** (DES-CATALOG-002 §4.6) Job proposals in a chat: on wherever chat proposals are. */
   const chatJobProposalsOn = chatArtifactFlags.proposals;
@@ -5722,6 +5734,13 @@ export function registerRoutes(
       projects: async () => (await adapter.projectList()).filter((p) => p.id !== DEFAULT_PROJECT_ID && p.status !== 'archived').map((p) => ({ id: p.id, name: p.name })),
       originOf,
       probe: (url) => probeGitUrl(url),
+      // POST /repos's own intake refusal (no garden, an old one, the state home): the card says it before anyone presses.
+      onboardRefusal: async () => {
+        const refused = await onboardRefusal();
+        if (refused === null) return null;
+        const why = (refused.body as { error?: unknown }).error;
+        return `this daemon can't onboard a repository now: ${typeof why === 'string' && why !== '' ? why : `refused (${refused.status})`}`;
+      },
     },
     served: (projectId) => servedFor(shapeReads, projectId ?? undefined),
     turnLive: (chatId, turnId) => chatTurns.turnsOf(chatId).some((t) => t.turnId === turnId),

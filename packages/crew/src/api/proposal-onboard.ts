@@ -42,9 +42,13 @@ export function withoutCredentials(raw: string): string {
   const t = raw.trim();
   try {
     const u = new URL(t);
-    if (u.username === '' && u.password === '') return t;
-    if (u.protocol === 'ssh:' && u.password === '' && u.username === 'git') return t;
-    u.username = '';
+    // A query or fragment can carry a token too (`?access_token=`): never shown.
+    const plain = u.search === '' && u.hash === '';
+    u.search = '';
+    u.hash = '';
+    // An ssh user without a password is part of the address (which account's repository), not a secret.
+    if (u.password === '' && (u.username === '' || u.protocol === 'ssh:')) return plain ? t : u.toString();
+    if (u.protocol !== 'ssh:') u.username = '';
     u.password = '';
     return u.toString();
   } catch {
@@ -98,7 +102,10 @@ export function readGitUrl(raw: string): GitUrlReading {
   }
   const name = segments[segments.length - 1]!;
   const repoPath = segments.join('/');
-  return { ok: true, url, key: `${host}/${CASELESS_HOSTS.has(host) ? repoPath.toLowerCase() : repoPath}`, name };
+  // On GitHub, GitLab and Bitbucket every spelling names one repository (case too). Elsewhere an scp path is relative to
+  // the user's home and an ssh:// one absolute: `host:repo` and `host/repo` are different repositories.
+  if (CASELESS_HOSTS.has(host)) return { ok: true, url, key: `${host}/${repoPath.toLowerCase()}`, name };
+  return { ok: true, url, key: `${host}${scp !== null ? ':' : '/'}${repoPath}`, name };
 }
 
 const norm = (s: string): string => s.trim().replace(/\s+/g, ' ').toLowerCase();
@@ -161,6 +168,8 @@ export interface OnboardResolveDeps {
   /** What already sits where a clone of `name` goes: `null` = nothing; else its `origin` ('' when it has none). A clone
    *  there is skipped and the folder registered as it is, so it must be this repository. */
   occupant(name: string): Promise<string | null>;
+  /** Why this daemon would refuse any onboarding now (`POST /repos`'s own intake refusal), or `null`. */
+  onboardRefusal?(): Promise<string | null>;
 }
 
 export interface OnboardTurn {
@@ -172,18 +181,29 @@ export interface OnboardTurn {
   chatProjectId: string | null;
 }
 
+/** A stored address's identity: its credentials (if any) set aside first, so a registered origin that carries a token
+ *  still matches the same repository asked for without one. */
 const readKey = (url: string): string | null => {
-  const r = readGitUrl(url);
+  const r = readGitUrl(withoutCredentials(url));
   return r.ok ? r.key : null;
 };
+
+/** Text a card repeats from the seat (its `reason`), with any address's credentials and query removed. */
+const scrubbed = (text: string): string => text.replace(/[a-z][a-z0-9+.-]*:\/\/[^\s"'`<>)]+/gi, (m) => withoutCredentials(m));
 
 /** The registered repository with this address (by its recorded URL, else its checkout's origin), or `null`. */
 async function registeredAs(key: string, repos: readonly RepoEntry[], originOf: OnboardResolveDeps['originOf']): Promise<RepoEntry | null> {
   const byUrl = repos.find((r) => typeof r.git_url === 'string' && readKey(r.git_url) === key);
   if (byUrl !== undefined) return byUrl;
-  const origins = await Promise.all(repos.slice(0, 60).map(async (r) => (typeof r.git_url === 'string' ? null : originOf(r.root_path).catch(() => null))));
-  const i = origins.findIndex((o) => o !== null && readKey(o) === key);
-  return i === -1 ? null : repos[i]!;
+  // Every registration (the daemon's own clones record no git_url), eight `git remote` reads at a time.
+  const unknown = repos.filter((r) => typeof r.git_url !== 'string');
+  for (let i = 0; i < unknown.length; i += 8) {
+    const batch = unknown.slice(i, i + 8);
+    const origins = await Promise.all(batch.map((r) => originOf(r.root_path).catch(() => null)));
+    const hit = origins.findIndex((o) => o !== null && readKey(o) === key);
+    if (hit !== -1) return batch[hit]!;
+  }
+  return null;
 }
 
 /** Why a new registration of `name` from `key` can't go ahead (the name's registry id is taken, or its clone folder
@@ -205,7 +225,11 @@ export async function newRegistrationRefusal(name: string, key: string, repos: r
 export async function resolveOnboard(block: OnboardBlockBody, turn: OnboardTurn, deps: OnboardResolveDeps): Promise<ArtifactProposal> {
   const blocked: string[] = [];
   const read = readGitUrl(block.onboard.url);
-  const shown = withoutCredentials(block.onboard.url).slice(0, 2048);
+  // A refused address is never repeated (it may carry a token in any shape): the card names it by where it came from.
+  const shown = 'the address given in the chat (not repeated)';
+  // What would refuse any onboarding on this daemon (no garden, an old one, the state home) blocks the card up front.
+  const daemonRefusal = deps.onboardRefusal !== undefined ? await deps.onboardRefusal() : null;
+  if (daemonRefusal !== null) blocked.push(daemonRefusal);
   const projects = await deps.projects();
   let project: { id: string; name: string } | null = null;
   const words = block.onboard.project?.trim() ?? '';
@@ -262,7 +286,7 @@ export async function resolveOnboard(block: OnboardBlockBody, turn: OnboardTurn,
       ? { entry: null, title: existing.name, label: `Add to a project · ${existing.name}`, outcome: `Adds the registered ${existing.name} to ${project?.name ?? 'a project'}. Nothing is cloned and no onboarding starts.` }
       : { entry: null, title: name || 'repository', label: `Add a repository · ${name || 'repository'}`, outcome: `Cloned to this computer, registered${into}, and onboarded: its code map is built so jobs and chats can read it.` },
     brief: null,
-    reason: block.reason ?? null,
+    reason: block.reason !== undefined ? scrubbed(block.reason) : null,
     sources: [],
     repos: [],
     helpers: null,
@@ -291,6 +315,8 @@ export interface OnboardLauncherDeps {
   ): Promise<{ status: number; body: Record<string, unknown> }>;
   /** The one attach path (`attachRepoToProject`). */
   attach(projectId: string, repoId: string, actor: Actor): Promise<void>;
+  /** File the onboarding run in the project (`crew.run`, idempotent): what `recordOnboardingLaunch` does. */
+  fileRun(projectId: string, runId: string, actor: Actor): Promise<void>;
 }
 
 /**
@@ -329,7 +355,7 @@ export class OnboardLauncher implements ProposalDispatcher {
     if (!read.ok) throw new Error(read.reason);
     // Its run exists (an earlier Go got that far): only the attach is left.
     if ((await this.deps.sessions()).includes(d.identity.runId)) {
-      await this.attachLeft(o, d.actor);
+      await this.attachLeft(o, d.identity.runId, d.actor);
       return;
     }
     // The registry may have moved since the card was drawn: the name and its folder are checked again before anything.
@@ -346,20 +372,28 @@ export class OnboardLauncher implements ProposalDispatcher {
     );
     const error = typeof out.body['error'] === 'string' ? out.body['error'] : `it was refused (${out.status})`;
     if (out.status !== 201) throw new Error(`${o.name} was not added: ${error}`);
+    const attached = o.projectId === null || out.body['projectAttached'] === true;
+    const attachWhy = typeof out.body['projectAttachError'] === 'string' ? out.body['projectAttachError'] : 'it was not attached';
     if (typeof out.body['onboardError'] === 'string') {
-      throw new Error(`${o.name} is registered${o.projectName !== null ? ` in ${o.projectName}` : ''}, but onboarding could not start: ${out.body['onboardError']}`);
+      // Said for what really happened: registered, in the project or not, and onboarding not started.
+      const where = o.projectName === null ? '' : attached ? ` in ${o.projectName}` : ` (not added to ${o.projectName}: ${attachWhy})`;
+      throw new Error(`${o.name} is registered${where}, but onboarding could not start: ${out.body['onboardError']}`);
     }
-    if (o.projectId !== null && out.body['projectAttached'] !== true) {
-      const why = typeof out.body['projectAttachError'] === 'string' ? out.body['projectAttachError'] : 'it was not attached';
-      throw new Error(`${o.name} is registered and onboarding started, but it was not added to ${o.projectName ?? o.projectId}: ${why}. Go again adds it`);
+    if (!attached) {
+      throw new Error(`${o.name} is registered and onboarding started, but it was not added to ${o.projectName ?? o.projectId}: ${attachWhy}. Go again adds it`);
     }
+    // Attached, but its run's filing failed: filed now (the run is this proposal's).
+    if (o.projectId !== null && typeof out.body['projectAttachError'] === 'string') await this.deps.fileRun(o.projectId, d.identity.runId, d.actor);
   }
 
-  private async attachLeft(o: NonNullable<ArtifactProposal['onboard']>, actor: Actor): Promise<void> {
+  /** The run exists: the repository joins the project and the run is filed there (each idempotent; the run by its own
+   *  id, never through a process-local map a restart has lost). */
+  private async attachLeft(o: NonNullable<ArtifactProposal['onboard']>, runId: string, actor: Actor): Promise<void> {
     if (o.projectId === null) return;
     const repo = await this.repoOf(o.name);
     if (repo === undefined) throw new Error(`${o.name} is no longer registered; ask again in the chat`);
     if (!(await this.member(o.projectId, repo))) await this.deps.attach(o.projectId, repo.id, actor);
+    await this.deps.fileRun(o.projectId, runId, actor);
   }
 
   async live(): Promise<boolean> {

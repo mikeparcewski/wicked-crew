@@ -17,8 +17,8 @@ import {
   type ProposalDispatcher,
 } from '../src/api/chat-proposals.js';
 import { ThemeLauncher } from '../src/api/proposal-theme.js';
-import { matchProject, OnboardLauncher, probeVerdict, readGitUrl, withoutCredentials } from '../src/api/proposal-onboard.js';
-import { chatScopeStatement, daemonGroundingLines } from '../src/api/chat-scope.js';
+import { matchProject, OnboardLauncher, probeGitUrl, probeVerdict, readGitUrl, withoutCredentials } from '../src/api/proposal-onboard.js';
+import { chatMakeDigest, chatScopeStatement, daemonGroundingLines } from '../src/api/chat-scope.js';
 
 const ME: Actor = { id: 'maria', kind: 'human', trust: 'operator' };
 const ROOT = mkdtempSync(join(tmpdir(), 'chat-proposals-onboard-'));
@@ -67,6 +67,8 @@ interface Rig {
   registerAnswer: { status: number; body: Record<string, unknown> };
   attached: Array<{ projectId: string; repoId: string; actor: string }>;
   occupants: Map<string, string>;
+  filed: Array<{ projectId: string; runId: string }>;
+  daemonRefusal: string | null;
 }
 
 function rig(): Rig {
@@ -98,6 +100,8 @@ function rig(): Rig {
     registerAnswer: { status: 201, body: { onboardRunId: 'x', projectAttached: true } },
     attached: [],
     occupants: new Map(),
+    filed: [],
+    daemonRefusal: null,
   };
   const registry = new LaunchOnceRegistry();
   for (const k of ['create', 'refine', 'demo'] as const) registry.register(k, r.launcher);
@@ -125,6 +129,7 @@ function rig(): Rig {
       r.attached.push({ projectId, repoId, actor: actor.id });
       r.members.set(projectId, [...(r.members.get(projectId) ?? []), repoId]);
     },
+    fileRun: async (projectId, runId) => { r.filed.push({ projectId, runId }); },
   }));
   const deps: ChatProposalDeps = {
     flags: () => ({ context: true, proposals: true, create: true, refine: true, theme: true, demo: true, onboard: r.onboardOn }),
@@ -137,6 +142,7 @@ function rig(): Rig {
       probe: async (url) => { r.probed.push(url); return r.probeAnswer; },
       checkoutOf: (name) => `~/.wicked/repos/${name}`,
       occupant: async (name) => r.occupants.get(name) ?? null,
+      onboardRefusal: async () => r.daemonRefusal,
     },
     catalog: CATALOG_SEEDS,
     records: (c) => [...(r.records.get(c) ?? [])],
@@ -211,8 +217,10 @@ describe('git addresses', () => {
     expect(readGitUrl('ssh://git@GitHub.com/mikeparcewski/Wicked-Studio/')).toMatchObject({ ok: true, key: 'github.com/mikeparcewski/wicked-studio', name: 'Wicked-Studio' });
     // Elsewhere the path's case and a non-git ssh user name a different repository (review r1).
     expect(readGitUrl('https://git.example.com/Team/Repo.git')).toMatchObject({ ok: true, key: 'git.example.com/Team/Repo' });
-    expect(readGitUrl('alice@host.example:repo.git')).toMatchObject({ ok: true, key: 'alice@host.example/repo' });
-    expect(readGitUrl('bob@host.example:repo.git')).toMatchObject({ ok: true, key: 'bob@host.example/repo' });
+    expect(readGitUrl('alice@host.example:repo.git')).toMatchObject({ ok: true, key: 'alice@host.example:repo' });
+    expect(readGitUrl('bob@host.example:repo.git')).toMatchObject({ ok: true, key: 'bob@host.example:repo' });
+    // An scp path is relative to the user's home, an ssh:// one absolute: two repositories off GitHub (review r2).
+    expect(readGitUrl('ssh://bob@host.example/repo.git')).toMatchObject({ ok: true, key: 'bob@host.example/repo' });
   });
 
   it.each([
@@ -230,6 +238,14 @@ describe('git addresses', () => {
     const r = readGitUrl(raw);
     expect(r.ok).toBe(false);
     expect(r.ok ? '' : r.reason).toMatch(why);
+  });
+
+  it('probes with no prompt and only https or ssh, whatever insteadOf rewrites', async () => {
+    const calls: Array<{ args: string[]; env: NodeJS.ProcessEnv | undefined }> = [];
+    const exec = (async (_f: string, args: string[], opts?: { env?: NodeJS.ProcessEnv }) => { calls.push({ args, env: opts?.env }); return { stdout: '', stderr: '' }; }) as never;
+    expect(await probeGitUrl(URL, exec)).toBeNull();
+    expect(calls[0]!.args).toEqual(['ls-remote', '--exit-code', '--', URL, 'HEAD']);
+    expect(calls[0]!.env).toMatchObject({ GIT_TERMINAL_PROMPT: '0', GIT_ALLOW_PROTOCOL: 'https:ssh' });
   });
 
   it('says a private or missing repository plainly', () => {
@@ -273,6 +289,14 @@ describe('the chat statement names what exists here', () => {
     const text = daemonGroundingLines({ ...grounding, onboard: false }).join('\n');
     expect(text).not.toContain('{"onboard"');
     expect(text).toContain('Repositories → Add a repository');
+  });
+
+  it('the per-message digest allows the onboard block wherever the statement asks for it (review r2)', () => {
+    const cards = chatMakeDigest({ create: false, refine: true, theme: true, demo: false, entries: [], jobs: 'cards', onboard: true });
+    expect(cards).toContain('adding a git repository to a project (the `onboard` block');
+    const prose = chatMakeDigest({ create: false, refine: false, theme: false, demo: false, entries: [], onboard: true });
+    expect(prose).toContain('a git repository added to a project (the `onboard` block');
+    expect(chatMakeDigest({ create: false, refine: true, theme: true, demo: false, entries: [], jobs: 'cards' })).not.toContain('onboard');
   });
 
   it('rides the scope statement (not in an analysis)', () => {
@@ -406,6 +430,31 @@ describe('onboard proposals', () => {
     expect(again.code, JSON.stringify(again.body)).toBe(200);
     expect(r.registered).toHaveLength(1);
     expect(r.attached).toEqual([{ projectId: 'proj_labs', repoId: 'wicked-studio', actor: 'maria' }]);
+    // …and its run is filed by its own id (a restart loses the in-memory run map; review r2).
+    expect(r.filed).toEqual([{ projectId: 'proj_labs', runId: r.registered[0]!.ctx.runId }]);
+  });
+
+  it('attached but the run\'s filing failed: the Go files the run itself', async () => {
+    const r = rig();
+    const p = (await propose(r, 'c1', chatWith(r, 'c1'), block))!;
+    r.registerAnswer = { status: 201, body: { onboardRunId: 'x', projectAttached: true, projectAttachError: 'filing failed' } };
+    expect((await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
+    expect(r.filed).toEqual([{ projectId: 'proj_labs', runId: r.registered[0]!.ctx.runId }]);
+  });
+
+  it('neither onboarded nor attached: the refusal says both', async () => {
+    const r = rig();
+    const p = (await propose(r, 'c1', chatWith(r, 'c1'), block))!;
+    r.registerAnswer = { status: 201, body: { onboardRunId: null, onboardError: 'garden is too old', projectAttachError: 'project archived' } };
+    expect((await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1')).body).toMatchObject({
+      error: expect.stringMatching(/wicked-studio is registered \(not added to Wicked Labs: project archived\), but onboarding could not start: garden is too old/),
+    });
+  });
+
+  it('a daemon that can\'t onboard now says so on the card, before anyone presses', async () => {
+    const r = rig();
+    r.daemonRefusal = "this daemon can't onboard a repository now: wicked-garden 12.66.1 or newer is needed";
+    expect(await propose(r, 'c1', chatWith(r, 'c1'), block)).toMatchObject({ blocked: expect.stringMatching(/can't onboard a repository now/) });
   });
 
   it('a name whose registry id is taken (core slugs it) or whose clone folder holds another checkout blocks, on the card and on Go', async () => {
@@ -426,11 +475,13 @@ describe('onboard proposals', () => {
     expect(r.registered).toHaveLength(0);
   });
 
-  it('a repository registered under another name is found by its checkout\'s origin', async () => {
+  it('a repository registered under another name is found by its checkout\'s origin, past the first 60 and with a token in it', async () => {
     const r = rig();
-    r.repos = [repo('studio-checkout', { root_path: '/srv/studio-checkout' })];
-    r.origins.set('/srv/studio-checkout', 'git@github.com:mikeparcewski/Wicked-Studio.git');
-    expect(await propose(r, 'c1', chatWith(r, 'c1'), block)).toMatchObject({ blocked: null, onboard: { existing: { id: 'studio-checkout' } } });
+    r.repos = [...Array.from({ length: 70 }, (_, i) => repo(`other-${i}`)), repo('studio-checkout', { root_path: '/srv/studio-checkout' })];
+    r.origins.set('/srv/studio-checkout', 'https://me:ghp_secret123@github.com/mikeparcewski/Wicked-Studio.git');
+    const p = (await propose(r, 'c1', chatWith(r, 'c1'), block))!;
+    expect(p).toMatchObject({ blocked: null, onboard: { existing: { id: 'studio-checkout' } } });
+    expect(JSON.stringify(p)).not.toContain('ghp_secret123');
   });
 
   it('an address carrying a token is refused without repeating it', async () => {
@@ -441,6 +492,12 @@ describe('onboard proposals', () => {
     expect(withoutCredentials('https://me:ghp_secret123@github.com/o/r.git')).toBe('https://github.com/o/r.git');
     expect(withoutCredentials('ssh://git@github.com/o/r.git')).toBe('ssh://git@github.com/o/r.git');
     expect(withoutCredentials('git@github.com:o/r.git')).toBe('git@github.com:o/r.git');
+    // A query can carry a token too; an ssh user without a password is part of the address (review r2).
+    expect(withoutCredentials('https://github.com/o/r.git?access_token=ghp_x')).toBe('https://github.com/o/r.git');
+    expect(withoutCredentials('ssh://alice@git.example.com/repo.git')).toBe('ssh://alice@git.example.com/repo.git');
+    // The seat's own words on the card lose any address's token too.
+    const q = (await propose(r, 'c2', chatWith(r, 'c2'), { onboard: { url: 'https://github.com/o/r.git', project: 'Ops' }, reason: 'from https://me:ghp_secret123@github.com/o/r.git' }))!;
+    expect(JSON.stringify(q)).not.toContain('ghp_secret123');
   });
 });
 

@@ -17891,9 +17891,10 @@ export interface RegisterRepoBody {
   rootPath?: string;
   gitUrl?: string;
   create?: true;
-  /** With `projectId` (crew 0.18.2) the repo joins the project (`crew.repo`, as `POST /projects/:id/members`) and its
-   *  onboarding run is filed there; the 201 says `projectAttached: true`, or `projectAttachError` (the repo stays
-   *  registered). */
+  /** The project the onboarding run is filed in. (crew 0.18.2) For a person, the repo also joins it (`crew.repo`, as
+   *  `POST /projects/:id/members`, a person's only): the 201 says `projectAttached: true` when it did, and
+   *  `projectAttachError` names what failed (with `projectAttached: true`, only the run's filing). An agent's
+   *  `projectId` (and `default`) files the run only: neither field. The repo stays registered either way. */
   projectId?: string;
   channel?: 'studio' | 'cli' | 'api';
   actor?: string;

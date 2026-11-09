@@ -886,6 +886,8 @@ export class ChatProposals {
       refine: on && f.refine,
       theme: on && f.theme && o.appearance !== false,
       demo: on && f.demo && entries.some((e) => e.kind === 'demo'),
+      // crew-0182: the onboard block, for a client that draws the card (its seat is told only then).
+      ...(on && f.onboard === true && chatId !== undefined && this.deps.onboard !== undefined && this.deps.acceptsOnboard?.(chatId) === true ? { onboard: true } : {}),
       entries,
       ...(jobs !== undefined ? { jobs } : {}),
     };
