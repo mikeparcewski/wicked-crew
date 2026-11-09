@@ -418,6 +418,8 @@ export class RepoWatcher {
   private busy: Promise<void> | null = null;
   private wakeOwed = false;
   private saving: Promise<void> = Promise.resolve();
+  private readonly booted = new Set<string>();
+  private readonly bootOwed = new Set<string>();
   private saves = 0;
 
   constructor(private readonly deps: RepoWatchDeps) {
@@ -546,6 +548,9 @@ export class RepoWatcher {
       if (cur.capped && !capped) cur.nextPollAt = t; // a slot came free
       cur.capped = capped;
       if (cur.state !== 'indexing') this.restate(cur);
+      // A launch while this daemon was starting (before its listener) or down left no count: every repo is brought back
+      // to its checkout once per start (an incremental index), guarded like any other (codex r4).
+      if (!this.booted.has(r.id)) { this.booted.add(r.id); this.bootOwed.add(r.id); }
     }
   }
 
@@ -565,19 +570,20 @@ export class RepoWatcher {
       return;
     }
     const t = this.now();
-    // An owed project refresh on a repo that is not polled (off, capped, after a one-shot press) still retries (codex r3).
+    let due: RepoState | null = null;
+    for (const r of this.repos.values()) {
+      if (!this.pollable(r) || r.nextPollAt > t) continue;
+      if (due === null || r.nextPollAt < due.nextPollAt) due = r;
+    }
+    if (due !== null) { await this.poll(due); return; }
+    // Only when no poll is due: an owed project refresh on a repo that is not polled (off, capped, after a one-shot press)
+    // retries (codex r3), never ahead of the polls (codex r4: two slow failing debts starved every repo).
     for (const r of this.repos.values()) {
       if (!this.pollable(r) && this.records.get(r.repoId)?.projectsOwed === true && t >= r.projectsRetryAt) {
         await this.refreshProjectsOf(r);
         return;
       }
     }
-    let due: RepoState | null = null;
-    for (const r of this.repos.values()) {
-      if (!this.pollable(r) || r.nextPollAt > t) continue;
-      if (due === null || r.nextPollAt < due.nextPollAt) due = r;
-    }
-    if (due !== null) await this.poll(due);
   }
 
   private async poll(r: RepoState): Promise<void> {
@@ -608,7 +614,7 @@ export class RepoWatcher {
   private async decide(r: RepoState, fp: string, t: number, note: string | null): Promise<void> {
     const rec = this.rec(r.repoId);
     // A launch on the repo since the last index ran its D8: the graph may sit at that run's base now.
-    const moved = (rec.launches ?? 0) > (rec.indexedLaunches ?? 0);
+    const moved = (rec.launches ?? 0) > (rec.indexedLaunches ?? 0) || this.bootOwed.has(r.repoId);
     const wants = r.forced || rec.indexedFp !== fp || moved;
     if (!wants) {
       r.seenFp = fp;
@@ -660,7 +666,11 @@ export class RepoWatcher {
     if (holds.length > 0) { r.state = 'waiting-runs'; r.waitingOn = holds; return; }
     // A press after this index was queued: poll first, so the index records the checkout it reads.
     if (r.forced && r.forcedGen !== r.queuedGen) { r.nextPollAt = this.now(); return; }
-    const fp = r.seenFp;
+    // The checkout as it is NOW, read again after the index: the index is recorded as current only when the two agree,
+    // so a switch between the quiet poll and the index, or during it, is indexed again (codex r4).
+    const fp = await this.sample(r);
+    if (fp === null) return;
+    r.seenFp = fp;
     const gen = r.forcedGen;
     const launchesBefore = this.rec(repoId).launches ?? 0;
     r.state = 'indexing';
@@ -687,9 +697,12 @@ export class RepoWatcher {
       r.error = null;
       r.remedy = r.coarse ? r.remedy : null;
       const rec = this.rec(repoId);
-      if (fp !== null) rec.indexedFp = fp;
+      const after = await this.sample(r);
+      if (after === fp) rec.indexedFp = fp;
+      else { delete rec.indexedFp; r.seenFp = after; r.nextPollAt = this.now(); }
       rec.lastIndexedAt = this.now();
       rec.indexedLaunches = launchesBefore;
+      this.bootOwed.delete(repoId);
       rec.projectsOwed = true;
       await this.save();
       await this.refreshProjectsOf(r);
@@ -726,6 +739,16 @@ export class RepoWatcher {
       r.projectsRetryAt = this.now() + INDEX_BACKOFF_BASE_MS;
     }
     await this.save();
+  }
+
+  /** One fingerprint of the checkout now (the poll's own read), or `null` when git could not read it. */
+  private async sample(r: RepoState): Promise<string | null> {
+    try {
+      const out = await this.git(r.root, POLL_ARGS);
+      return (await fingerprintOf(r.root, parsePorcelainV2(out), this.outside, this.stat, this.read, this.now)).fingerprint;
+    } catch {
+      return null;
+    }
   }
 
   /**

@@ -325,7 +325,7 @@ describe('the watcher', () => {
     expect(h.indexed).toEqual(['r1']);
   });
 
-  it('catches up at boot from its record, and does not re-index an unchanged checkout after a restart', async () => {
+  it('catches up at boot from its record: once per start (a launch during startup left no count; codex r4), then quiet', async () => {
     const a = harness();
     await a.tick(0);
     await a.tick();
@@ -336,7 +336,10 @@ describe('the watcher', () => {
     const b = harness();
     await b.tick(0);
     await b.tick();
-    expect(b.indexed).toEqual([]);
+    expect(b.indexed).toEqual(['r1']); // the once-per-start catch-up
+    await b.tick();
+    await b.tick();
+    expect(b.indexed).toEqual(['r1']);
 
     writeFileSync(join(repo, 'src', 'a.ts'), 'export const a = 9;\n'); // edited while the daemon was down
     const c = harness();
@@ -527,6 +530,38 @@ describe('the watcher', () => {
     expect(h.row()).toMatchObject({ state: 'off', enabled: false });
   });
 
+  it('a switch between the quiet poll and the index is not certified current (codex r4: B queued, C indexed, B back)', async () => {
+    const h = harness();
+    await h.tick(0);
+    await h.tick();
+    expect(h.indexed).toHaveLength(1);
+    writeFileSync(join(repo, 'src', 'a.ts'), 'export const a = 222;\n'); // B
+    h.advance(POLL_MIN_MS);
+    await h.w.step(); // sees B
+    h.advance(POLL_MIN_MS);
+    await h.w.step(); // quiet: B queued
+    writeFileSync(join(repo, 'src', 'a.ts'), 'export const a = 33333;\n'); // C, before the index runs
+    await h.w.step(); // the index reads C right before it runs
+    expect(h.indexed).toHaveLength(2);
+    writeFileSync(join(repo, 'src', 'a.ts'), 'export const a = 222;\n'); // back to B
+    await h.tick();
+    await h.tick();
+    expect(h.indexed).toHaveLength(3); // B is not mistaken for what was indexed (C)
+  });
+
+  it('owed refreshes never starve the polls (codex r4)', async () => {
+    const extra = ['p1', 'p2'].map((id, i) => { const root = join(dir, id); mkdirSync(root); return { id, name: id, root_path: root, default_branch: 'main', registered_at: 10 + i, code_graph_db: graphDb } as RepoEntry; });
+    const h = harness({ extra, gitFn: async (cwd, args) => (cwd === repo ? pollGit(cwd, args) : '# branch.oid 1111111111111111111111111111111111111111\0# branch.head main\0') });
+    await h.tick(0);
+    for (const id of ['p1', 'p2']) await h.w.setEnabled(id, false);
+    h.state.refreshOk = false;
+    for (const id of ['p1', 'p2']) { await h.w.reindexNow(id); for (let i = 0; i < 6; i++) await h.w.step(); }
+    const polledBefore = h.row('r1').lastPolledAt;
+    h.advance(INDEX_BACKOFF_BASE_MS + POLL_MIN_MS);
+    await h.w.step();
+    expect(h.row('r1').lastPolledAt).not.toBe(polledBefore); // the enabled repo's poll came first
+  });
+
   it('an owed project refresh retries on a repo that is not polled (off), and a press after an index was queued polls first (codex r3)', async () => {
     const h = harness();
     await h.tick(0);
@@ -650,15 +685,15 @@ describe('the cadence', () => {
     await w.step(); // boot poll (slow: 9 s): no record yet, so a change — polled again in the quiet window, not 30 s on
     t += QUIET_MS;
     await w.step(); // the quiet poll → queued
-    await w.step(); // the catch-up index
-    expect(polls).toHaveLength(2);
-    const after = t;
+    await w.step(); // the catch-up index (it reads the checkout right before and right after)
+    expect(polls).toHaveLength(4);
+    const after = polls[1]! + pollMs; // the end of the last POLL (the index's own reads are not polls)
     t = after + POLL_MAX_MS - 1;
     await w.step();
-    expect(polls).toHaveLength(2); // idle: not before 30 s (10x 9 s would be 90 s)
+    expect(polls).toHaveLength(4); // idle: not before 30 s (10x 9 s would be 90 s)
     t = after + POLL_MAX_MS;
     await w.step();
-    expect(polls).toHaveLength(3);
+    expect(polls).toHaveLength(5);
     pollMs = 0;
     writeFileSync(join(repo, 'src', 'a.ts'), 'export const a = 7;\n');
     t += POLL_MAX_MS;
@@ -666,7 +701,7 @@ describe('the cadence', () => {
     expect(w.status().repos[0]?.state).toBe('changed');
     t += QUIET_MS;
     await w.step(); // the quiet check, 5 s later
-    expect(polls).toHaveLength(5);
+    expect(polls).toHaveLength(7);
   });
 });
 
