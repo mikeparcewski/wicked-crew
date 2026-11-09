@@ -1622,6 +1622,8 @@ export interface RuntimeDeps {
    *  snapshot derives a state home with an entry the fence cannot classify. A directly-driven route
    *  set (tests) gets none: no survey, no warning, no gate — never a fabricated clean answer. */
   stateHome?: StateHomeWatch;
+  /** The repo watcher (crew-0183): reported on `/diagnostics.repoWatch`; its own routes register beside it. */
+  repoWatch?: { diagnostics(): Record<string, unknown> };
   /** The document ↔ run binding (wave 6, F-4R2-006) read off the interactive seams' handoff ledgers —
    *  `createServer` builds one over the four ledger sources; a directly-driven route set gets an
    *  EMPTY one (`document_id: null` on every run). */
@@ -2664,6 +2666,8 @@ export function registerRoutes(
         vault: adapter.vaultBin != null ? vaultDiagnostics(adapter.vaultBin) : null,
         // crew#1147: the repo-checks floor cache's disk usage (cached 60 s); `null` on an addon without it.
         floorCache,
+        // crew-0183: the repo watcher's standing and loop numbers; null on a route set without it.
+        repoWatch: runtime.repoWatch?.diagnostics() ?? null,
       };
   };
   app.get(

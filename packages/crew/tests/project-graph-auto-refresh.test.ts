@@ -4,7 +4,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { refreshProjectGraphsAfterOnboarding } from '../src/projects/auto-refresh.js';
+import { refreshProjectGraphsForRepo } from '../src/projects/auto-refresh.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { ProjectGraphRefreshResult } from '../src/core/types.js';
 
@@ -20,7 +20,7 @@ function result(rows: { repoId: string; action: 'indexed' | 'skipped-head-unchan
   };
 }
 
-describe('refreshProjectGraphsAfterOnboarding', () => {
+describe('refreshProjectGraphsForRepo', () => {
   it('refreshes every project the repo is a member of, one at a time, and logs each outcome', async () => {
     const order: string[] = [];
     const log = vi.fn();
@@ -28,7 +28,7 @@ describe('refreshProjectGraphsAfterOnboarding', () => {
       order.push(projectId);
       return result([{ repoId: 'r1', action: 'indexed' }]);
     });
-    const out = await refreshProjectGraphsAfterOnboarding(adapter, 'r1', {
+    const out = await refreshProjectGraphsForRepo(adapter, 'r1', {
       memberProjects: async () => ['p1', 'p2'],
       refresh,
       log,
@@ -47,7 +47,7 @@ describe('refreshProjectGraphsAfterOnboarding', () => {
   it('a repo in no project refreshes nothing and says nothing', async () => {
     const refresh = vi.fn();
     const log = vi.fn();
-    const out = await refreshProjectGraphsAfterOnboarding(adapter, 'lonely', { memberProjects: async () => [], refresh, log });
+    const out = await refreshProjectGraphsForRepo(adapter, 'lonely', { memberProjects: async () => [], refresh, log });
     expect(out).toEqual({ repoId: 'lonely', refreshed: [], failed: [] });
     expect(refresh).not.toHaveBeenCalled();
     expect(log).not.toHaveBeenCalled();
@@ -60,14 +60,14 @@ describe('refreshProjectGraphsAfterOnboarding', () => {
       // First answer: the in-flight refresh had no row for r9 (it started before r9 was indexed).
       return calls === 1 ? result([{ repoId: 'r1', action: 'skipped-head-unchanged' }]) : result([{ repoId: 'r9', action: 'indexed' }]);
     });
-    const out = await refreshProjectGraphsAfterOnboarding(adapter, 'r9', { memberProjects: async () => ['p1'], refresh, log: () => undefined });
+    const out = await refreshProjectGraphsForRepo(adapter, 'r9', { memberProjects: async () => ['p1'], refresh, log: () => undefined });
     expect(refresh).toHaveBeenCalledTimes(2);
     expect(out.refreshed).toEqual([{ projectId: 'p1', rounds: 2, indexed: ['r9'], skipped: [], failed: [] }]);
   });
 
   it('a repo the second round STILL cannot index is reported, not retried again', async () => {
     const refresh = vi.fn(async () => result([{ repoId: 'r9', action: 'failed' }]));
-    const out = await refreshProjectGraphsAfterOnboarding(adapter, 'r9', { memberProjects: async () => ['p1'], refresh, log: () => undefined });
+    const out = await refreshProjectGraphsForRepo(adapter, 'r9', { memberProjects: async () => ['p1'], refresh, log: () => undefined });
     expect(refresh).toHaveBeenCalledTimes(2);
     expect(out.refreshed[0]).toMatchObject({ projectId: 'p1', rounds: 2, failed: ['r9'] });
   });
@@ -78,7 +78,7 @@ describe('refreshProjectGraphsAfterOnboarding', () => {
       if (projectId === 'p1') throw new Error('wicked-estate does not support index --repo');
       return result([{ repoId: 'r1', action: 'indexed' }]);
     });
-    const out = await refreshProjectGraphsAfterOnboarding(adapter, 'r1', { memberProjects: async () => ['p1', 'p2'], refresh, log });
+    const out = await refreshProjectGraphsForRepo(adapter, 'r1', { memberProjects: async () => ['p1', 'p2'], refresh, log });
     expect(out.failed).toEqual([{ projectId: 'p1', error: 'wicked-estate does not support index --repo' }]);
     expect(out.refreshed.map((r) => r.projectId)).toEqual(['p2']);
     expect(log.mock.calls.some((c) => /project p1 graph refresh FAILED: wicked-estate does not support/.test(String(c[0])))).toBe(true);
@@ -87,7 +87,7 @@ describe('refreshProjectGraphsAfterOnboarding', () => {
   it('an engine without projects (membership lookup throws) refreshes nothing and says so once', async () => {
     const log = vi.fn();
     const refresh = vi.fn();
-    const out = await refreshProjectGraphsAfterOnboarding(adapter, 'r1', {
+    const out = await refreshProjectGraphsForRepo(adapter, 'r1', {
       memberProjects: async () => {
         throw new Error('Resolving a member’s projects needs wicked-core-ts >= 0.6.0');
       },

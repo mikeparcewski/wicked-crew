@@ -1,5 +1,6 @@
 /**
- * Refresh the project graph(s) a repo belongs to once its ONBOARDING run completes (F-2R2-008).
+ * Refresh the project graph(s) a repo belongs to once its repo graph moved: its ONBOARDING run completed
+ * (F-2R2-008), or the repo watcher re-indexed its checkout (crew-0183, `repo-watch.ts`). One function, two callers.
  *
  * # Why
  *
@@ -31,6 +32,8 @@ import type { ProjectGraphRefreshResult } from '../core/types.js';
 import { refreshProjectGraph } from './graph.js';
 
 export interface AutoRefreshDeps {
+  /** What made the repo's graph move (`onboarding of r1 completed`, `the repo watcher re-indexed r1`), for the log. */
+  cause?: string;
   /** The projects a repo is a `crew.repo` member of. Default: the adapter's `memberProjects`. */
   memberProjects?: (repoId: string) => Promise<string[]>;
   /** The refresh itself. Default: {@link refreshProjectGraph} (plain, never forced). */
@@ -56,7 +59,7 @@ function holdsRepo(result: ProjectGraphRefreshResult, repoId: string): boolean {
   return row !== undefined && (row.action === 'indexed' || row.action === 'skipped-head-unchanged');
 }
 
-export async function refreshProjectGraphsAfterOnboarding(
+export async function refreshProjectGraphsForRepo(
   adapter: CoreAdapter,
   repoId: string,
   deps: AutoRefreshDeps,
@@ -72,13 +75,13 @@ export async function refreshProjectGraphsAfterOnboarding(
     projectIds = await memberProjects(repoId);
   } catch (err) {
     // An engine without projects, or a registry that cannot be read: nothing to refresh, said once.
-    deps.log(`[projects] auto-refresh after onboarding ${repoId}: membership lookup failed (${message(err)}); no project graph refreshed`);
+    deps.log(`[projects] auto-refresh for ${repoId}: membership lookup failed (${message(err)}); no project graph refreshed`);
     return out;
   }
   if (projectIds.length === 0) return out;
 
   for (const projectId of projectIds) {
-    deps.log(`[projects] auto-refresh: onboarding of ${repoId} completed — refreshing project ${projectId}'s code graph`);
+    deps.log(`[projects] auto-refresh: ${deps.cause ?? `onboarding of ${repoId} completed`} — refreshing project ${projectId}'s code graph`);
     try {
       let result = await refresh(projectId);
       let rounds = 1;

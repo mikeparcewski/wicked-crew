@@ -333,6 +333,9 @@ type GovernanceMethods = {
   // #122: node-count-by-kind summary of ONE repo's code graph, over that repo's OWN store. Returns a
   // JSON string (array of {kind,count}); an unknown repo REJECTS.
   getGraphKindsForRepo(repoRef: string): Promise<string>;
+  // crew-0183 (wicked-core#1230, core-ts >= 0.15.35): re-index ONE repo's checkout into its existing code graph under
+  // the launch indexer's lock. JSON `{ outcome: 'indexed' | 'no-graph', ms }`; an unknown repo or a failed index REJECTS.
+  indexRepoGraph(repoRef: string): Promise<string>;
   // crew#42 write seam
   upsertPolicy(policyJson: string): Promise<string>;
   upsertConformanceRule(ruleJson: string): Promise<string>;
@@ -602,6 +605,7 @@ const STORE_READS_OFF_ACTOR: ReadonlySet<string> = new Set([
   'getCoverageReportForRepo',
   'getRequirementsGraphForRepo',
   'getGraphKindsForRepo',
+  'indexRepoGraph',
 ]);
 
 /**
@@ -3568,6 +3572,15 @@ export class CoreAdapter {
       await this.core.getGraphKindsForRepo(repoRef),
       'getGraphKindsForRepo',
     );
+  }
+
+  /**
+   * The repo watcher's write (crew-0183, wicked-core#1230): the registered checkout, as it is on disk now, indexed
+   * into the repo's existing code graph by the onboarding index command, under the lock a launch's D8 base index
+   * takes, so the two are never two writers. `no-graph`: onboarding never built one, nothing written.
+   */
+  async indexRepoGraph(repoRef: string): Promise<{ outcome: 'indexed' | 'no-graph'; ms: number }> {
+    return parseEngineJson<{ outcome: 'indexed' | 'no-graph'; ms: number }>(await this.core.indexRepoGraph(repoRef), 'indexRepoGraph');
   }
 
   // ── Governance writes (crew#42) ────────────────────────────────────────────

@@ -10248,6 +10248,62 @@ export interface ProjectGraphRefreshRepo {
 }
 
 /** `POST /projects/:id/graph/refresh` — an incremental (re)build, repo by repo. */
+/**
+ * (api-types 0.201.0, crew 0.18.3) A run that holds a repo's code map at its base, so the repo watcher waits for it:
+ * `executing` = a run actively working on the repo (its floor reads the map at its base); `domain-mapping` = a
+ * `domain-extraction` run, executing or parked (its pages read the map with no base check, wicked-core#1230).
+ */
+export interface RepoWatchHold {
+  runId: string;
+  reason: 'executing' | 'domain-mapping';
+}
+
+/**
+ * (api-types 0.201.0, crew 0.18.3) One repo's code map as the repo watcher keeps it current (`GET /repo-watch`).
+ * `current` covers symbols, files and references for what is on disk now ({@link RepoWatchStatus.covers}), never
+ * clusters. States: `starting` (not polled yet), `current`, `changed` (a change seen, re-indexing after a quiet
+ * moment), `indexing`, `waiting-runs` ({@link waitingOn} hold the map at their base), `failed` ({@link error} +
+ * {@link remedy}), `off` (turned off for this repo), `capped` (past {@link RepoWatchStatus.cap}).
+ */
+export interface RepoGraphWatch {
+  repoId: string;
+  state: 'starting' | 'current' | 'changed' | 'indexing' | 'waiting-runs' | 'failed' | 'off' | 'capped';
+  /** The per-repo switch (`PUT /repos/:id/watch`). */
+  enabled: boolean;
+  /** When the watcher (or the onboarding run) last indexed this checkout — unix MILLISECONDS, `null` = never. */
+  lastIndexedAt: number | null;
+  /** The last poll — unix ms. */
+  lastPolledAt: number | null;
+  /** When the change being waited on was first seen — unix ms. */
+  changedAt: number | null;
+  waitingOn: RepoWatchHold[];
+  error: string | null;
+  remedy: string | null;
+}
+
+/** (api-types 0.201.0, crew 0.18.3) `GET /repo-watch`. */
+export interface RepoWatchStatus {
+  /** `false` when the daemon was started with `WICKED_CREW_REPO_WATCH=off` (`disabledBy: 'env'`). */
+  enabled: boolean;
+  disabledBy: 'env' | null;
+  /** How many repositories are kept current at most. */
+  cap: number;
+  /** What "current" covers, in words a surface may show as-is. */
+  covers: string;
+  repos: RepoGraphWatch[];
+}
+
+/** (api-types 0.201.0) `PUT /repos/:id/watch`. */
+export interface SetRepoWatchBody {
+  enabled: boolean;
+}
+
+/** (api-types 0.201.0) `POST /repos/:id/graph/reindex`: queued, or not because runs hold the map. */
+export interface RepoReindexResult {
+  queued: boolean;
+  waitingOn: RepoWatchHold[];
+}
+
 export interface ProjectGraphRefreshResult {
   status: ProjectGraphStatus;
   /** Labels re-indexed this run. */
@@ -10747,6 +10803,8 @@ export interface DiagnosticsResponse {
    *  caches this answer for 60 s. `{ error }` when the engine has no worker home; `null` on an addon
    *  without the static; ABSENT on an older daemon. */
   floorCache?: DiagnosticsFloorCache | null;
+  /** (api-types 0.201.0, crew 0.18.3) The repo watcher: {@link RepoWatchStatus} plus its loop's numbers. `null` on a route set without it. */
+  repoWatch?: (RepoWatchStatus & { queue: string[]; watched: number; perRepo: Array<Record<string, unknown>> }) | null;
 }
 
 /** `DiagnosticsResponse.floorCache` (crew#1147). Every `path` is `~/...`. */
