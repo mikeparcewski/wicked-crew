@@ -23,7 +23,7 @@ function routes() {
     }),
     launchOnboardingRun: vi.fn(async (): Promise<string> => { throw new Error(launchError); }),
     cloneAndRegister: vi.fn<CoreAdapter['cloneAndRegister']>(async () => { throw new Error('clone failed'); }),
-    projectMemberAttach: vi.fn(),
+    projectMemberAttach: vi.fn(async () => ({ member: { attached_at: 1 }, created: true })),
   };
   const app = Fastify({ logger: false });
   registerRoutes(app, adapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined });
@@ -32,13 +32,14 @@ function routes() {
 }
 
 describe('POST /api/v1/repos — registration and onboarding outcomes', () => {
+  // crew-0182: the repo still joins the chosen project (crew.repo, the one attach path); no run exists to file.
   it('returns the registered local repo with a null run and launch error, without filing a run', async () => {
     const { app, adapter, repos } = routes();
     const res = await app.inject({ method: 'POST', url: '/api/v1/repos', payload: { name: 'alpha', rootPath: '/srv/alpha', projectId: 'p1' } });
     expect(res.statusCode).toBe(201);
-    expect(res.json()).toEqual({ repo: repos[0], onboardRunId: null, onboardError: launchError });
+    expect(res.json()).toEqual({ repo: repos[0], onboardRunId: null, onboardError: launchError, projectAttached: true });
     expect((await app.inject({ method: 'GET', url: '/api/v1/repos' })).json().repos).toEqual(repos);
-    expect(adapter.projectMemberAttach).not.toHaveBeenCalled();
+    expect(adapter.projectMemberAttach).toHaveBeenCalledExactlyOnceWith('p1', 'crew.repo', 'r-new', undefined, undefined);
   });
 
   it('still returns 400 when local registration fails', async () => {
@@ -56,12 +57,11 @@ describe('POST /api/v1/repos — registration and onboarding outcomes', () => {
     const res = await app.inject({ method: 'POST', url: '/api/v1/repos', payload: { name: 'alpha', gitUrl: 'https://example.invalid/alpha.git', rootPath: '/srv/alpha', projectId: 'p1' } });
     expect(res.statusCode).toBe(201);
     expect(repos).toHaveLength(1);
-    expect(res.json()).toEqual({ repo: repos[0], onboardRunId: null, onboardError: launchError });
+    expect(res.json()).toEqual({ repo: repos[0], onboardRunId: null, onboardError: launchError, projectAttached: true });
     expect(adapter.cloneAndRegister).toHaveBeenCalledExactlyOnceWith('alpha', 'https://example.invalid/alpha.git', '/srv/alpha');
     expect(adapter.launchOnboardingRun).toHaveBeenCalledExactlyOnceWith('r-new', 'alpha');
-    expect(adapter.listRepos).not.toHaveBeenCalled();
     expect((await app.inject({ method: 'GET', url: '/api/v1/repos' })).json().repos).toEqual(repos);
-    expect(adapter.projectMemberAttach).not.toHaveBeenCalled();
+    expect(adapter.projectMemberAttach).toHaveBeenCalledExactlyOnceWith('p1', 'crew.repo', 'r-new', undefined, undefined);
   });
 
   it('returns 400 when cloning fails, without launching onboarding', async () => {

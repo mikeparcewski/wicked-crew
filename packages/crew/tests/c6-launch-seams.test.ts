@@ -214,7 +214,14 @@ describe('crew#496 — onboarding runs are filed and dated', () => {
     // Run mechanics, not grounding: with no published generation a daemon refuses an onboard before it
     // registers anything (crew#753), so these filing cases turn the base skill off (tests/setup/base-skill-off.ts).
     baseSkillOff();
-    a.registerRepo = async (name: string, rootPath: string) => ({ id: `repo-${name}`, name, root_path: rootPath, default_branch: 'main', registered_at: 3 });
+    const registered: RepoEntry[] = [];
+    a.registerRepo = async (name: string, rootPath: string) => {
+      const repo = { id: `repo-${name}`, name, root_path: rootPath, default_branch: 'main', registered_at: 3 };
+      registered.push(repo);
+      return repo;
+    };
+    const listed = a.listRepos.bind(a);
+    a.listRepos = async () => [...(await listed()), ...registered];
     a.launchOnboardingRun = async (repoId: string) => `onboard-${repoId}`;
     a.projectMemberAttach = async (projectId: string, kind: string, ref: string) => {
       attaches.push({ projectId, kind, ref });
@@ -235,7 +242,12 @@ describe('crew#496 — onboarding runs are filed and dated', () => {
     });
     expect(res.statusCode).toBe(201);
     expect(res.json()).toMatchObject({ onboardRunId: 'onboard-repo-gamma' });
-    expect(attaches).toEqual([{ projectId: 'wicked-platform', kind: 'crew.run', ref: 'onboard-repo-gamma' }]);
+    // crew-0182: the repo joins the project too (crew.repo), through the one attach path; its run is filed once.
+    expect(res.json()).toMatchObject({ projectAttached: true });
+    expect(attaches).toEqual([
+      { projectId: 'wicked-platform', kind: 'crew.run', ref: 'onboard-repo-gamma' },
+      { projectId: 'wicked-platform', kind: 'crew.repo', ref: 'repo-gamma' },
+    ]);
     await vi.waitFor(() => {
       const entry = trail(auditPath).find((e) => e.action === 'run.launched' && e.runId === 'onboard-repo-gamma');
       expect(entry?.detail).toMatchObject({ workflow: 'onboarding', repoRef: 'repo-gamma', projectId: 'wicked-platform', channel: 'studio' });

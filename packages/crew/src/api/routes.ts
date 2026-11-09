@@ -165,7 +165,7 @@ import { SearchService, registerSearchRoutes } from './search-routes.js';
 import type { FreshenCheckout } from './chat-freshness.js';
 import { TestSetIndex } from '../qe/test-sets.js';
 import { estateExe, parseEstateTotals, readBlastRadiusPages, resolveProjectGraphBinding } from '../projects/graph.js';
-import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
+import { attachRepoToProject, registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { registerProjectAggregateRoutes } from './project-aggregates.js';
 import { composeLaunch, composePreflight, registerProductRoutes } from './product.js';
 import { buildWorkflowCatalogV2, parseCommand, resolveOption } from '../workflow-catalog/build-v2.js';
@@ -443,7 +443,7 @@ import type { AppActionStore } from '../apps/actions/store.js';
 import { AppWritePath } from '../apps/actions/write-path.js';
 import { AppExecutor } from '../apps/exec/executor.js';
 import { localViewerOf, type Viewer } from '../apps/exec/viewer.js';
-import type { Actor as AppsActor } from '../core/types.js';
+import type { Actor, Actor as AppsActor } from '../core/types.js';
 import { registerAppRoutes } from '../apps/routes.js';
 import { AppStoreError, type AppStore } from '../apps/store.js';
 import { registerMcpInspectRoutes } from '../mcp-inspect/routes.js';
@@ -3156,12 +3156,12 @@ export function registerRoutes(
    *  the run and names who started it) is always written; with a `projectId` the run joins that
    *  project. The run is LIVE by then, so a filing failure is named in the answer, never a 4xx. */
   const recordOnboardingLaunch = async (
-    req: FastifyRequest,
+    req: { actor: Actor; log: { warn: (o: unknown, m?: string) => void } },
     runId: string,
     repoId: string,
     opts: { projectId?: string | undefined; channel?: string | undefined; actor?: string | undefined; autoCapture?: boolean | undefined },
   ): Promise<string | undefined> => {
-    recordRunLaunched(audit, runTimingIndex, actorOf(req), runId, {
+    recordRunLaunched(audit, runTimingIndex, req.actor, runId, {
       workflow: 'onboarding',
       repoRef: repoId,
       ...(opts.autoCapture === false ? { autoCapture: false } : {}),
@@ -3171,11 +3171,11 @@ export function registerRoutes(
     });
     if (opts.projectId === undefined) return undefined;
     try {
-      const { member } = await adapter.projectMemberAttach(opts.projectId, 'crew.run', runId, { onboarding: true }, actorOf(req).id);
+      const { member } = await adapter.projectMemberAttach(opts.projectId, 'crew.run', runId, { onboarding: true }, req.actor.id);
       projects.index.set(runId, opts.projectId);
       projects.bus?.emit(
         MEMBERSHIP_ATTACHED,
-        { project_id: opts.projectId, member: { kind: 'crew.run', ref: runId }, actor: actorOf(req).id },
+        { project_id: opts.projectId, member: { kind: 'crew.run', ref: runId }, actor: req.actor.id },
         membershipAttachedKey(opts.projectId, 'crew.run', runId, member.attached_at),
       );
       return undefined;
@@ -3215,6 +3215,64 @@ export function registerRoutes(
    * (core has no unregister). A registered repo returns 201 with `onboardRunId: null` and
    * `onboardError` on launch failure, so callers can attach it to their project and retry onboarding.
    */
+  /**
+   * Register (cloning a URL first) and launch onboarding, filing its run and (crew-0182) attaching the repo to
+   * `projectId` through the one attach path ({@link attachRepoToProject}). THE body of `POST /repos`, shared with a chat's
+   * onboarding proposal, so both behave identically. `runId` (internal, a proposal's identity) names the onboarding run.
+   */
+  const registerAndOnboard = async (
+    data: { name: string; gitUrl?: string | undefined; rootPath?: string | undefined; projectId?: string | undefined; channel?: 'studio' | 'cli' | 'api' | undefined; actor?: string | undefined; autoCapture?: boolean | undefined },
+    ctx: { actor: Actor; log: { warn: (o: unknown, m?: string) => void }; runId?: string },
+  ): Promise<{ status: number; body: Record<string, unknown> }> => {
+    const refused = await onboardRefusal();
+    if (refused !== null) return { status: refused.status, body: refused.body as Record<string, unknown> };
+    const { name, gitUrl, projectId, channel, actor, autoCapture } = data;
+    // First-run C1: `~/code/my-app` (the field's own example) is expanded; a relative or missing folder is refused in plain words.
+    let rootPath = data.rootPath;
+    if (rootPath !== undefined && rootPath !== '') {
+      const read = readRepoPath(rootPath);
+      if (!read.ok) return { status: 400, body: { code: read.code, error: read.error } };
+      rootPath = read.path;
+    }
+    // (DES-PM-001 Q-PM2) Re-pointing an existing repo id at another checkout keeps its projects and tracker links.
+    const repointed = await reRegisterRefusal(ctx.actor, name, rootPath, Boolean(gitUrl), () => adapter.listRepos());
+    if (repointed !== null) return { status: repointed.status, body: repointed.body as Record<string, unknown> };
+    let repo: RepoEntry | undefined;
+    let runId: string;
+    try {
+      if (gitUrl) {
+        // Remote: clone to rootPath (if provided) or default ~/.wicked/repos/<name>,
+        // register, and launch onboarding run.
+        repo = await adapter.cloneAndRegister(name, gitUrl, rootPath);
+      } else {
+        // Local: register then launch onboarding run.
+        repo = await adapter.registerRepo(name, rootPath!);
+      }
+      runId = ctx.runId !== undefined ? await adapter.launchOnboardingRun(repo.id, name, ctx.runId) : await adapter.launchOnboardingRun(repo.id, name);
+    } catch (err) {
+      if (repo === undefined) return { status: 400, body: registerFailure(message(err), gitUrl ? undefined : rootPath) as Record<string, unknown> };
+      ctx.log.warn({ repoId: repo.id }, `repo registered but onboarding launch failed: ${message(err)}`);
+      // No run exists to record or file (crew#1019); the repo still joins its project.
+      const failure = onboardFailure(message(err));
+      const attach = await attachToProject(repo.id, projectId, ctx.actor, channel);
+      return { status: 201, body: { repo, onboardRunId: null, onboardError: failure.error, ...(failure.code !== undefined ? { onboardErrorCode: failure.code, missingTool: failure.tool } : {}), ...attach } };
+    }
+    const projectAttachError = await recordOnboardingLaunch(ctx, runId, repo.id, { projectId, channel, actor, autoCapture });
+    const attach = await attachToProject(repo.id, projectId, ctx.actor, channel);
+    const errors = [...new Set([projectAttachError, attach.projectAttachError].filter((e): e is string => e !== undefined))];
+    return { status: 201, body: { repo, onboardRunId: runId, ...(attach.projectAttached === true ? { projectAttached: true } : {}), ...(errors.length > 0 ? { projectAttachError: errors.join('; ') } : {}) } };
+  };
+  /** crew-0182: the repo joins `projectId` (`crew.repo`) the one way every surface does; a refusal is named, never thrown. */
+  const attachToProject = async (repoId: string, projectId: string | undefined, actor: Actor, channel: 'studio' | 'cli' | 'api' | undefined): Promise<{ projectAttached?: true; projectAttachError?: string }> => {
+    if (projectId === undefined || projectId === DEFAULT_PROJECT_ID) return {};
+    try {
+      await attachRepoToProject(adapter, projects, { projectId, repoId, actor, ...(channel !== undefined ? { attachedBy: channel } : {}) });
+      return { projectAttached: true };
+    } catch (err) {
+      return { projectAttachError: message(err) };
+    }
+  };
+
   app.post(`${V}/repos`, { config: { manifest: { requestType: 'RegisterRepoBody', statusCodes: [201, 400, 409, 422, 503] } } }, async (req, reply) => {
     const parsed = RegisterRepoSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -3236,41 +3294,8 @@ export function registerRoutes(
         return reply.code(400).send({ error: message(err) });
       }
     }
-    const refused = await onboardRefusal();
-    if (refused !== null) return reply.code(refused.status).send(refused.body);
-    const { name, gitUrl, projectId, channel, actor, autoCapture } = parsed.data;
-    // First-run C1: `~/code/my-app` (the field's own example) is expanded; a relative or missing folder is refused in plain words.
-    let rootPath = parsed.data.rootPath;
-    if (rootPath !== undefined && rootPath !== '') {
-      const read = readRepoPath(rootPath);
-      if (!read.ok) return reply.code(400).send({ code: read.code, error: read.error });
-      rootPath = read.path;
-    }
-    // (DES-PM-001 Q-PM2) Re-pointing an existing repo id at another checkout keeps its projects and tracker links.
-    const repointed = await reRegisterRefusal(actorOf(req), name, rootPath, Boolean(gitUrl), () => adapter.listRepos());
-    if (repointed !== null) return reply.code(repointed.status).send(repointed.body);
-    let repo: RepoEntry | undefined;
-    let runId: string;
-    try {
-      if (gitUrl) {
-        // Remote: clone to rootPath (if provided) or default ~/.wicked/repos/<name>,
-        // register, and launch onboarding run.
-        repo = await adapter.cloneAndRegister(name, gitUrl, rootPath);
-        runId = await adapter.launchOnboardingRun(repo.id, name);
-      } else {
-        // Local: register then launch onboarding run.
-        repo = await adapter.registerRepo(name, rootPath!);
-        runId = await adapter.launchOnboardingRun(repo.id, name);
-      }
-    } catch (err) {
-      if (repo === undefined) return reply.code(400).send(registerFailure(message(err), gitUrl ? undefined : rootPath));
-      req.log.warn({ repoId: repo.id }, `repo registered but onboarding launch failed: ${message(err)}`);
-      // No run exists to record or file, even when projectId was supplied (crew#1019).
-      const failure = onboardFailure(message(err));
-      return reply.code(201).send({ repo, onboardRunId: null, onboardError: failure.error, ...(failure.code !== undefined ? { onboardErrorCode: failure.code, missingTool: failure.tool } : {}) });
-    }
-    const projectAttachError = await recordOnboardingLaunch(req, runId, repo.id, { projectId, channel, actor, autoCapture });
-    return reply.code(201).send({ repo, onboardRunId: runId, ...(projectAttachError !== undefined ? { projectAttachError } : {}) });
+    const out = await registerAndOnboard(parsed.data, { actor: actorOf(req), log: req.log });
+    return reply.code(out.status).send(out.body);
   });
 
   // Return the onboarding run id for a repo (so the UI can navigate to it).
@@ -3298,7 +3323,7 @@ export function registerRoutes(
       const failure = onboardFailure(message(err));
       return reply.code(400).send({ error: failure.error, ...(failure.code !== undefined ? { code: failure.code, missingTool: failure.tool } : {}) });
     }
-    const projectAttachError = await recordOnboardingLaunch(req, runId, repo.id, body.data);
+    const projectAttachError = await recordOnboardingLaunch({ actor: actorOf(req), log: req.log }, runId, repo.id, body.data);
     return reply.code(201).send({ runId, ...(projectAttachError !== undefined ? { projectAttachError } : {}) });
   });
 

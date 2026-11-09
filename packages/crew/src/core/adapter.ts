@@ -3384,12 +3384,13 @@ export class CoreAdapter {
    * The run's `workdir` = the repo root; Tool phases run estate commands there.
    * Returns the run id so the UI can navigate directly to it.
    */
-  async launchOnboardingRun(repoId: string, repoName: string): Promise<string> {
+  async launchOnboardingRun(repoId: string, repoName: string, sessionId?: string): Promise<string> {
     // Join an in-flight launch for THIS repo rather than starting a second one. Concurrency across
     // DIFFERENT repos is the point and is untouched; two launches for the SAME repo are a duplicate.
     const inFlight = this.onboardingInFlight.get(repoId);
     if (inFlight) return inFlight;
-    const runId = randomUUID();
+    // crew-0182: a chat proposal names its run (its identity), so a Go again adopts it instead of launching twice.
+    const runId = sessionId ?? randomUUID();
     // Launches are NOT serialized. They used to be, through an `_onboardingChain` promise, because
     // each rewrote the shared `onboarding` overlay before launching. That chain never worked: its
     // own comment claimed "after launch the def is baked into the run's units", and the def is
