@@ -28,7 +28,7 @@ function app(views: SessionView[] = [], enabled = true) {
   const entry = { id: 'r1', name: 'r1', root_path: repo, default_branch: 'main', registered_at: 1, code_graph_db: db } as RepoEntry;
   const w = new RepoWatcher({
     listRepos: async () => [entry], runViews: async () => views, indexRepoGraph: async () => ({ outcome: 'indexed' }),
-    refreshProjects: async () => undefined, statePath: join(dir, 'repo-watch.json'), stateHome: null, enabled, log: () => undefined,
+    refreshProjects: async () => true, statePath: join(dir, 'repo-watch.json'), stateHome: null, enabled, log: () => undefined,
   });
   const a = Fastify();
   registerRepoWatchRoutes(a, w);

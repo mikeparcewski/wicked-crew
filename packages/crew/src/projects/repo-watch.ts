@@ -48,8 +48,8 @@
 
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { existsSync, realpathSync } from 'node:fs';
+import { lstat, mkdir, open, readFile, readlink, rename, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 import type { RepoGraphWatch, RepoWatchHold, RepoWatchStatus } from 'wicked-crew-api-types';
@@ -95,8 +95,8 @@ export const DOMAIN_MAPPING = 'domain-extraction';
 export interface PorcelainStatus {
   oid: string | null;
   head: string | null;
-  /** `<kind> <XY>` and the repo-relative path, in git's order. */
-  entries: Array<{ code: string; path: string }>;
+  /** `<kind> <XY>` and the repo-relative path, in git's order; a rename/copy also names its origin (`from`). */
+  entries: Array<{ code: string; path: string; from?: string }>;
 }
 
 /** `git status --porcelain=v2 -z --branch` → HEAD, branch, entries (`2` rename entries carry their origin path as the next field). */
@@ -119,21 +119,37 @@ export function parsePorcelainV2(stdout: string): PorcelainStatus {
     const fixed = kind === '1' ? 8 : kind === '2' ? 9 : kind === 'u' ? 10 : -1;
     if (fixed < 0) continue;
     const parts = f.split(' ');
-    out.entries.push({ code: `${kind} ${parts[1] ?? ''}`, path: parts.slice(fixed).join(' ') });
-    if (kind === '2') i++; // the origin path
+    const entry: { code: string; path: string; from?: string } = { code: `${kind} ${parts[1] ?? ''}`, path: parts.slice(fixed).join(' ') };
+    if (kind === '2') { i++; entry.from = fields[i] ?? ''; } // the origin path
+    out.entries.push(entry);
   }
   return out;
 }
 
-/** Whether a change at `path` (repo-relative, `/`-separated) counts. */
-export function countsAsChange(path: string, root: string, stateHome: string | null): boolean {
+/** Whether a change at `path` (repo-relative, `/`-separated) counts. `outside` = directories whose writes never count
+ *  (the state home, the graph roots), compared both as given and as the checkout spells them. */
+export function countsAsChange(path: string, root: string, outside: string | null | readonly string[]): boolean {
   const segs = path.split('/');
   if (segs.some((s) => IGNORED_SEGMENTS.has(s))) return false;
-  if (stateHome !== null) {
-    const rel = relative(stateHome, resolve(root, ...segs));
+  const dirs = outside === null ? [] : typeof outside === 'string' ? [outside] : outside;
+  const at = resolve(root, ...segs);
+  for (const d of dirs) {
+    const rel = relative(d, at);
     if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) return false;
   }
   return true;
+}
+
+/** The directories a checkout's changes never count under, canonical (codex r2: `/tmp` vs `/private/tmp`, and the graph
+ *  roots an operator variable can point inside a checkout). */
+export function outsideDirs(stateHome: string | null, env: NodeJS.ProcessEnv = process.env): string[] {
+  const raw = [stateHome, env['WICKED_ESTATE_REPO_GRAPH_ROOT'], env['WICKED_CREW_PROJECT_GRAPH_ROOT']].filter((d): d is string => typeof d === 'string' && d !== '');
+  const out = new Set<string>();
+  for (const d of raw) {
+    out.add(resolve(d));
+    try { out.add(realpathSync(d)); } catch { /* not there yet */ }
+  }
+  return [...out];
 }
 
 export type StatFn = (path: string) => Promise<{ size: number; mtimeMs: number } | null>;
@@ -149,13 +165,26 @@ const statOf: StatFn = async (p) => {
   }
 };
 
-const readOf: ReadFn = async (p) => {
+/** At most `max` bytes of a REGULAR file (a symlink's own target text; never a FIFO or device; codex r2). */
+async function readBounded(p: string, max: number): Promise<Buffer | null> {
   try {
-    return await readFile(p);
+    const st = await lstat(p);
+    if (st.isSymbolicLink()) return Buffer.from(`link:${await readlink(p)}`);
+    if (!st.isFile()) return null;
+    const fh = await open(p, 'r');
+    try {
+      const buf = Buffer.alloc(max + 1);
+      const { bytesRead } = await fh.read(buf, 0, max + 1, 0);
+      return bytesRead > max ? null : buf.subarray(0, bytesRead);
+    } finally {
+      await fh.close();
+    }
   } catch {
     return null;
   }
-};
+}
+
+const readOf: ReadFn = (p) => readBounded(p, HASH_FILE_MAX);
 
 /** Changed files at most this big are hashed by content (pi r1: a 1 s mtime filesystem hides a same-size edit)… */
 export const HASH_FILE_MAX = 64 * 1024;
@@ -171,30 +200,34 @@ export const HASH_BUDGET = 4 * 1024 * 1024;
 export async function fingerprintOf(
   root: string,
   status: PorcelainStatus,
-  stateHome: string | null,
+  stateHome: string | null | readonly string[],
   stat: StatFn = statOf,
   read: ReadFn = readOf,
   now: () => number = Date.now,
 ): Promise<{ fingerprint: string; coarse: boolean; changed: number }> {
-  const entries = status.entries.filter((e) => countsAsChange(e.path, root, stateHome)).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const entries = status.entries.filter((e) => countsAsChange(e.path, root, stateHome) || (e.from !== undefined && countsAsChange(e.from, root, stateHome))).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   const h = createHash('sha256');
   h.update(`oid ${status.oid ?? '-'}\nhead ${status.head ?? '-'}\n`);
   const coarse = entries.length > STAT_CAP;
   let budget = HASH_BUDGET;
+  // A changed file whose bytes were not hashed (too big, past the budget) leaves a same-size edit within one mtime tick
+  // unseen: such a fingerprint also moves once a minute (codex r2), like a coarse one.
+  let unhashed = false;
   for (const [i, e] of entries.entries()) {
-    h.update(`${e.code} ${e.path}`);
+    h.update(`${e.code} ${e.path}${e.from !== undefined ? ` <- ${e.from}` : ''}`);
     if (i < STAT_CAP) {
       const file = join(root, ...e.path.split('/'));
       const st = await stat(file);
       h.update(st === null ? ' gone' : ` ${st.size} ${st.mtimeMs}`);
-      if (st !== null && st.size <= HASH_FILE_MAX && st.size <= budget && !e.path.endsWith('/')) {
-        const bytes = await read(file);
+      if (st !== null && !e.path.endsWith('/')) {
+        const bytes = st.size <= HASH_FILE_MAX && st.size <= budget ? await read(file) : null;
         if (bytes !== null) { budget -= bytes.length; h.update(` ${createHash('sha1').update(bytes).digest('hex')}`); }
+        else unhashed = true;
       }
     }
     h.update('\n');
   }
-  if (coarse) h.update(`coarse ${Math.floor(now() / CHANGE_MAX_WAIT_MS)}\n`);
+  if (coarse || unhashed) h.update(`tick ${Math.floor(now() / CHANGE_MAX_WAIT_MS)}\n`);
   return { fingerprint: h.digest('hex'), coarse, changed: entries.length };
 }
 
@@ -241,6 +274,8 @@ interface Rec {
   indexedLaunches?: number;
   /** The per-repo switch; absent = on. */
   enabled?: false;
+  /** The repo graph is current but a project refresh after it failed: retried (backed off), never forgotten (codex r2). */
+  projectsOwed?: true;
 }
 
 function readRec(v: unknown): Rec | null {
@@ -251,7 +286,10 @@ function readRec(v: unknown): Rec | null {
   if (typeof o['lastIndexedAt'] === 'number' && Number.isFinite(o['lastIndexedAt'])) out.lastIndexedAt = o['lastIndexedAt'];
   if (Number.isSafeInteger(o['launches']) && (o['launches'] as number) >= 0) out.launches = o['launches'] as number;
   if (Number.isSafeInteger(o['indexedLaunches']) && (o['indexedLaunches'] as number) >= 0) out.indexedLaunches = o['indexedLaunches'] as number;
+  // Counters that disagree (an index after more launches than were counted) prove nothing: index once (codex r2).
+  if ((out.indexedLaunches ?? 0) > (out.launches ?? 0)) { delete out.indexedFp; delete out.indexedLaunches; }
   if (o['enabled'] === false) out.enabled = false;
+  if (o['projectsOwed'] === true) out.projectsOwed = true;
   return out;
 }
 
@@ -281,6 +319,10 @@ interface RepoState {
   /** A person pressed Re-index now: the quiet window and the backoff are skipped once, past the switch and the cap,
    *  and the request is kept while runs hold the map (it runs when they let go). */
   forced: boolean;
+  /** Bumped per press; an index clears `forced` only for the press it serviced (codex r2). */
+  forcedGen: number;
+  /** When a failed project refresh after an index may be retried. */
+  projectsRetryAt: number;
 }
 
 export interface IndexAnswer {
@@ -293,8 +335,9 @@ export interface RepoWatchDeps {
   runViews: () => Promise<readonly SessionView[]>;
   /** The engine's checkout re-index (core-ts `indexRepoGraph`): it re-reads active runs under its lock (`held`). */
   indexRepoGraph: (repoId: string) => Promise<IndexAnswer>;
-  /** Refresh every project the repo is in (`refreshProjectGraphsForRepo`, never served by a refresh that predates this index). */
-  refreshProjects: (repoId: string) => Promise<void>;
+  /** Refresh every project the repo is in (`refreshProjectGraphsForRepo`, never served by a refresh that predates this
+   *  index); `true` when every one of them refreshed. */
+  refreshProjects: (repoId: string) => Promise<boolean>;
   /** `<state home>/repo-watch.json`. */
   statePath: string;
   /** The daemon's state home (changes under it never count). */
@@ -344,9 +387,10 @@ export class RepoWatcher {
   private readonly stat: StatFn;
   private readonly read: ReadFn;
   private readonly exists: (p: string) => boolean;
+  private readonly outside: string[];
   /** Repo id → record. A Map, so no repo id (`__proto__`) can reach an object's prototype (codex r1). */
   private readonly records = new Map<string, Rec>();
-  private loaded = false;
+  private loading: Promise<void> | null = null;
   private readonly repos = new Map<string, RepoState>();
   private reposReadAt = -Infinity;
   private readonly queue: string[] = [];
@@ -365,6 +409,7 @@ export class RepoWatcher {
     this.stat = deps.stat ?? statOf;
     this.read = deps.read ?? readOf;
     this.exists = deps.exists ?? existsSync;
+    this.outside = outsideDirs(deps.stateHome);
   }
 
   /** Start the loop (no-op when off for the daemon). */
@@ -417,9 +462,12 @@ export class RepoWatcher {
     return r.forced || (r.enabled && !r.capped);
   }
 
-  private async load(): Promise<void> {
-    if (this.loaded) return;
-    this.loaded = true;
+  private load(): Promise<void> {
+    this.loading ??= this.readRecords();
+    return this.loading;
+  }
+
+  private async readRecords(): Promise<void> {
     try {
       const raw = JSON.parse(await readFile(this.deps.statePath, 'utf8')) as { version?: unknown; repos?: unknown };
       if (raw?.version !== 1 || raw.repos === null || typeof raw.repos !== 'object' || Array.isArray(raw.repos)) return;
@@ -472,6 +520,7 @@ export class RepoWatcher {
           repoId: r.id, root: r.root_path, enabled, capped, state: 'starting', seenFp: null, changedAt: null,
           nextPollAt: t, lastPolledAt: null, lastPollMs: 0, pollFailures: 0, indexFailures: 0, indexBackoffUntil: 0,
           lastIndexMs: null, coarse: false, waitingOn: [], error: null, remedy: null, polls: 0, indexes: 0, forced: false,
+          forcedGen: 0, projectsRetryAt: 0,
         };
         this.repos.set(r.id, cur);
       }
@@ -512,7 +561,7 @@ export class RepoWatcher {
     let fp: { fingerprint: string; coarse: boolean; changed: number };
     try {
       const out = await this.git(r.root, POLL_ARGS);
-      fp = await fingerprintOf(r.root, parsePorcelainV2(out), this.deps.stateHome, this.stat, this.read, this.now);
+      fp = await fingerprintOf(r.root, parsePorcelainV2(out), this.outside, this.stat, this.read, this.now);
     } catch (err) {
       r.pollFailures++;
       r.lastPolledAt = this.now();
@@ -541,10 +590,12 @@ export class RepoWatcher {
       r.seenFp = fp;
       r.changedAt = null;
       r.waitingOn = [];
+      if (rec.projectsOwed === true && t >= r.projectsRetryAt) await this.refreshProjectsOf(r);
       if (r.indexFailures === 0) { r.state = 'current'; r.error = null; r.remedy = note; }
       return;
     }
     let due = r.forced;
+    if (r.forced) r.seenFp = fp; // the index below records THIS poll's fingerprint (codex r2)
     if (!due) {
       if (r.seenFp !== fp) {
         r.seenFp = fp;
@@ -582,6 +633,7 @@ export class RepoWatcher {
     const holds = holdsOf(await this.deps.runViews(), repoId);
     if (holds.length > 0) { r.state = 'waiting-runs'; r.waitingOn = holds; return; }
     const fp = r.seenFp;
+    const gen = r.forcedGen;
     const launchesBefore = this.rec(repoId).launches ?? 0;
     r.state = 'indexing';
     const started = this.now();
@@ -593,7 +645,7 @@ export class RepoWatcher {
         r.waitingOn = (answer.heldBy ?? []).map((runId) => ({ runId, reason: 'executing' as const }));
         return;
       }
-      r.forced = false;
+      if (r.forcedGen === gen) r.forced = false;
       if (answer.outcome === 'no-graph') {
         r.state = 'failed';
         r.error = 'This repository has no code map yet.';
@@ -609,18 +661,15 @@ export class RepoWatcher {
       if (fp !== null) rec.indexedFp = fp;
       rec.lastIndexedAt = this.now();
       rec.indexedLaunches = launchesBefore;
+      rec.projectsOwed = true;
       await this.save();
-      try {
-        await this.deps.refreshProjects(repoId);
-      } catch (err) {
-        this.deps.log(`[repo-watch] ${repoId}: project graph refresh failed: ${message(err)}`);
-      }
+      await this.refreshProjectsOf(r);
       r.changedAt = null;
       r.state = 'current';
       this.restate(r);
       this.deps.log(`[repo-watch] ${repoId}: code map re-indexed in ${r.lastIndexMs} ms`);
     } catch (err) {
-      r.forced = false;
+      if (r.forcedGen === gen) r.forced = false;
       r.lastIndexMs = this.now() - started;
       r.indexFailures++;
       r.indexBackoffUntil = this.now() + Math.min(INDEX_BACKOFF_MAX_MS, INDEX_BACKOFF_BASE_MS * 2 ** (r.indexFailures - 1));
@@ -631,15 +680,36 @@ export class RepoWatcher {
     }
   }
 
+  /** Refresh the repo's projects; a failure is owed (persisted) and retried, backed off, by the polls (codex r2). */
+  private async refreshProjectsOf(r: RepoState): Promise<void> {
+    const rec = this.rec(r.repoId);
+    let ok = false;
+    try {
+      ok = await this.deps.refreshProjects(r.repoId);
+    } catch (err) {
+      this.deps.log(`[repo-watch] ${r.repoId}: project graph refresh failed: ${message(err)}`);
+    }
+    if (ok) {
+      delete rec.projectsOwed;
+      r.projectsRetryAt = 0;
+    } else {
+      rec.projectsOwed = true;
+      r.projectsRetryAt = this.now() + INDEX_BACKOFF_BASE_MS;
+    }
+    await this.save();
+  }
+
   /**
    * A run on `repoId` resolved its base (`runBaseResolved`): its D8 re-indexes the repo graph at that base, so the
    * graph no longer follows the checkout. Recorded (durably), so once nothing holds the map it is indexed again.
    */
-  noteLaunch(repoId: string): void {
-    if (!this.deps.enabled) return;
+  async noteLaunch(repoId: string): Promise<void> {
+    // Counted with the watcher off too, so turning it back on does not trust a graph a launch moved (codex r2); and only
+    // once the records are loaded, so an early launch never saves over them.
+    await this.load();
     const rec = this.rec(repoId);
     rec.launches = (rec.launches ?? 0) + 1;
-    void this.save();
+    await this.save();
   }
 
   /** Something changed the registry (a repo onboarded): read it at the next step, now. */
@@ -655,6 +725,7 @@ export class RepoWatcher {
     const r = this.repos.get(repoId);
     if (r === undefined) return { queued: false, waitingOn: [], unknown: true };
     r.forced = true;
+    r.forcedGen += 1;
     r.indexBackoffUntil = 0;
     r.nextPollAt = this.now();
     const holds = holdsOf(await this.deps.runViews(), repoId);

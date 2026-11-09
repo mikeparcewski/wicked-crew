@@ -10270,7 +10270,8 @@ export interface RepoGraphWatch {
   state: 'starting' | 'current' | 'changed' | 'indexing' | 'waiting-runs' | 'failed' | 'off' | 'capped';
   /** The per-repo switch (`PUT /repos/:id/watch`). */
   enabled: boolean;
-  /** When the watcher (or the onboarding run) last indexed this checkout — unix MILLISECONDS, `null` = never. */
+  /** When the repo watcher last indexed this checkout — unix MILLISECONDS, `null` = not yet (an onboarding run's own
+   *  index is not counted here). */
   lastIndexedAt: number | null;
   /** The last poll — unix ms. */
   lastPolledAt: number | null;

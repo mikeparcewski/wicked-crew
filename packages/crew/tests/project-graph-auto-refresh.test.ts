@@ -100,3 +100,24 @@ describe('refreshProjectGraphsForRepo', () => {
     expect(String(log.mock.calls[0]![0])).toMatch(/membership lookup failed/);
   });
 });
+
+describe('refreshProjectGraphAfter (crew-0183, codex r2)', () => {
+  it('is never served by a refresh already in flight: it waits for it, then refreshes again', async () => {
+    const { refreshProjectGraph, refreshProjectGraphAfter } = await import('../src/projects/graph.js');
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((r) => { release = r; });
+    let reads = 0;
+    const fake = {
+      projectMembers: async () => { reads++; if (reads === 1) await held; return []; },
+      listRepos: async () => [],
+    } as unknown as CoreAdapter;
+    const first = refreshProjectGraph(fake, 'p-after');
+    await new Promise((r) => setTimeout(r, 20));
+    // A plain caller would join `first` (one read); the after-variant must read again once it settles.
+    const coalesced = refreshProjectGraph(fake, 'p-after');
+    const after = refreshProjectGraphAfter(fake, 'p-after');
+    release();
+    await Promise.all([first, coalesced, after]);
+    expect(reads).toBe(2);
+  });
+});

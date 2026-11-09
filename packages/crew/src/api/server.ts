@@ -2440,10 +2440,18 @@ export async function createServer(
     // crew-0183: a run resolved its base, so its D8 re-indexes its repo's graph at that base; the repo watcher brings
     // the graph back to the checkout once nothing holds it. Any launch, crew's or the engine's own (campaign nodes).
     if (event.type === 'runBaseResolved' && session !== undefined) {
-      void adapter.runView(session).then(
-        (v) => { const repo = v?.session.repo_ref; if (typeof repo === 'string' && repo !== '') repoWatcher.noteLaunch(repo); },
-        () => undefined,
-      );
+      // A lookup that fails or finds no view yet is tried again (codex r2: one miss lost the invalidation for good).
+      const note = (tries: number): void => {
+        void adapter.runView(session, { fresh: tries > 0 }).then(
+          (v) => {
+            const repo = v?.session.repo_ref;
+            if (typeof repo === 'string' && repo !== '') { void repoWatcher.noteLaunch(repo); return; }
+            if (v === undefined && tries < 3) setTimeout(() => note(tries + 1), 2_000).unref?.();
+          },
+          () => { if (tries < 3) setTimeout(() => note(tries + 1), 2_000).unref?.(); },
+        );
+      };
+      note(0);
     }
     unitInspect.onEvent(event as unknown as Record<string, unknown>);
     if (event.type === 'sessionCompleted' && session !== undefined) {
@@ -2503,7 +2511,8 @@ export async function createServer(
     runViews: async () => (await adapter.runViewsSnapshot()).views,
     indexRepoGraph: (repoId) => adapter.indexRepoGraph(repoId),
     refreshProjects: async (repoId) => {
-      await refreshProjectGraphsForRepo(adapter, repoId, { cause: `the repo watcher re-indexed ${repoId}`, fresh: true, log: (m) => app.log.info(m) });
+      const out = await refreshProjectGraphsForRepo(adapter, repoId, { cause: `the repo watcher re-indexed ${repoId}`, fresh: true, log: (m) => app.log.info(m) });
+      return out.failed.length === 0 && out.refreshed.every((p) => p.failed.length === 0);
     },
     statePath: join(crewStateHome(), 'repo-watch.json'),
     stateHome: crewStateHome(),

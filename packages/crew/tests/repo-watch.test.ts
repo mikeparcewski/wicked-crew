@@ -2,7 +2,7 @@
 // REAL temp git repo (the poll is real git) and FAKE engine/registry/run views; a fake clock drives the cadence.
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { RepoEntry, SessionView } from '../src/core/types.js';
 import {
   CHANGE_MAX_WAIT_MS,
+  INDEX_BACKOFF_BASE_MS,
   POLL_ARGS,
   REPO_WATCH_CAP,
   indexRemedy,
@@ -61,7 +62,7 @@ function view(id: string, status: string, name: string | null, repoRef = 'r1'): 
 
 function harness(opts: { views?: SessionView[]; failIndex?: string | null; enabled?: boolean; gitFn?: GitFn; extra?: RepoEntry[] } = {}) {
   let t = 1_000_000;
-  const state = { views: opts.views ?? [], failIndex: opts.failIndex ?? null, heldBy: [] as string[] };
+  const state = { views: opts.views ?? [], failIndex: opts.failIndex ?? null, heldBy: [] as string[], refreshOk: true, gate: null as Promise<void> | null };
   const indexed: string[] = [];
   const refreshed: string[] = [];
   const entry: RepoEntry = { id: 'r1', name: 'r1', root_path: repo, default_branch: 'main', registered_at: 1, code_graph_db: graphDb } as RepoEntry;
@@ -71,10 +72,11 @@ function harness(opts: { views?: SessionView[]; failIndex?: string | null; enabl
     indexRepoGraph: async (id) => {
       if (state.failIndex !== null) throw new Error(state.failIndex);
       if (state.heldBy.length > 0) return { outcome: 'held', heldBy: state.heldBy };
+      if (state.gate !== null) await state.gate;
       indexed.push(id);
       return { outcome: 'indexed' };
     },
-    refreshProjects: async (id) => { refreshed.push(id); },
+    refreshProjects: async (id) => { refreshed.push(id); return state.refreshOk; },
     statePath: join(dir, 'state', 'repo-watch.json'),
     stateHome: join(dir, 'state'),
     enabled: opts.enabled ?? true,
@@ -109,7 +111,7 @@ describe('the poll', () => {
     expect(p.head).toBe('main');
     expect(p.entries).toEqual([
       { code: '1 .M', path: 'src/a b.ts' },
-      { code: '2 R.', path: 'src/new.ts' },
+      { code: '2 R.', path: 'src/new.ts', from: 'src/old.ts' },
       { code: 'u UU', path: 'src/c.ts' },
       { code: '?', path: 'newdir/x.ts' },
     ]);
@@ -144,6 +146,34 @@ describe('the poll', () => {
     mkdirSync(join(repo, 'node_modules', 'p'), { recursive: true });
     writeFileSync(join(repo, 'node_modules', 'p', 'i.js'), 'x');
     expect(await fp()).toBe(before);
+  });
+
+  it('a rename into an ignored directory still counts: the source file is gone (codex r2)', async () => {
+    const rename = parsePorcelainV2(['# branch.oid 1111111111111111111111111111111111111111', '# branch.head main',
+      '2 R. N... 100644 100644 100644 aaa bbb R100 dist/a.ts', 'src/a.ts', ''].join('\0'));
+    expect(rename.entries).toEqual([{ code: '2 R.', path: 'dist/a.ts', from: 'src/a.ts' }]);
+    const clean = parsePorcelainV2('# branch.oid 1111111111111111111111111111111111111111\0# branch.head main\0');
+    expect((await fingerprintOf(repo, rename, null)).fingerprint).not.toBe((await fingerprintOf(repo, clean, null)).fingerprint);
+  });
+
+  it('a changed file too big to hash moves the fingerprint once a minute (codex r2)', async () => {
+    const st = { size: 10 * 1024 * 1024, mtimeMs: 5 };
+    const status = parsePorcelainV2('# branch.oid 1111111111111111111111111111111111111111\0# branch.head main\0? big.bin\0');
+    const a = await fingerprintOf(repo, status, null, async () => st, async () => null, () => 0);
+    const b = await fingerprintOf(repo, status, null, async () => st, async () => null, () => CHANGE_MAX_WAIT_MS);
+    expect(b.fingerprint).not.toBe(a.fingerprint);
+  });
+
+  it.runIf(process.platform !== 'win32')('hashes a symlink by its target text and never reads a FIFO or a big target (codex r2)', async () => {
+    const big = join(dir, 'big.txt');
+    writeFileSync(big, 'x'.repeat(200_000));
+    symlinkSync(big, join(repo, 'src', 'link.ts'));
+    execFileSync('mkfifo', [join(repo, 'src', 'pipe')]);
+    const status = parsePorcelainV2(await pollGit(repo, POLL_ARGS));
+    const started = Date.now();
+    const fp = await fingerprintOf(repo, status, null);
+    expect(Date.now() - started).toBeLessThan(5_000); // the FIFO never blocked it
+    expect(fp.fingerprint).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it('sees a same-size edit inside one mtime tick (small files are hashed) and is coarse but not blind past the stat cap', async () => {
@@ -431,31 +461,113 @@ describe('the watcher', () => {
   it('the loop runs one step at a time: a press during a slow poll waits for it; stop() waits for the step in flight', async () => {
     let inFlight = 0;
     let most = 0;
+    let entered: (() => void) | null = null;
+    const enteredP = new Promise<void>((r) => { entered = r; });
     let release: (() => void) | null = null;
     const gate = new Promise<void>((r) => { release = r; });
-    let first = true;
+    let polls = 0;
     const h = harness({
       gitFn: async (cwd, args) => {
-        inFlight++; most = Math.max(most, inFlight);
-        if (first) { first = false; await gate; }
+        inFlight++; most = Math.max(most, inFlight); polls++;
+        if (polls === 1) { entered!(); await gate; }
         const out = await pollGit(cwd, args);
         inFlight--;
         return out;
       },
     });
     h.w.start();
-    await new Promise((r) => setTimeout(r, 50)); // the boot poll is running, held at the gate
-    const press = h.w.reindexNow('r1');
-    await new Promise((r) => setTimeout(r, 300));
+    await enteredP; // the boot poll is running, held at the gate
+    void h.w.reindexNow('r1'); // a press while it runs: owed, not a second step
+    await new Promise((r) => setTimeout(r, 200));
     expect(most).toBe(1);
+    let stopped = false;
+    const stopping = h.w.stop().then(() => { stopped = true; });
+    await new Promise((r) => setTimeout(r, 200));
+    expect(stopped).toBe(false); // waits for the step in flight
     release!();
-    await press;
-    await new Promise((r) => setTimeout(r, 300));
-    const stopping = h.w.stop();
     await stopping;
+    expect(stopped).toBe(true);
+    const after = polls;
+    await new Promise((r) => setTimeout(r, 600));
+    expect(polls).toBe(after); // nothing runs after stop
     expect(most).toBe(1);
   });
 
+  it('a press records the fingerprint it indexed (codex r2: A, edit to B, press, back to A read as current)', async () => {
+    const h = harness();
+    await h.tick(0);
+    await h.tick();
+    expect(h.indexed).toHaveLength(1);
+    writeFileSync(join(repo, 'src', 'a.ts'), 'export const a = 1234567;\n'); // B
+    await h.w.reindexNow('r1');
+    await h.tick(0);
+    expect(h.indexed).toHaveLength(2);
+    writeFileSync(join(repo, 'src', 'a.ts'), 'export const a = 1;\n'); // back to A (as committed)
+    await h.tick();
+    await h.tick();
+    expect(h.indexed).toHaveLength(3);
+  });
+
+  it('a second press during an index is not consumed by it (codex r2)', async () => {
+    const h = harness();
+    await h.w.setEnabled('r1', false);
+    let open: () => void = () => undefined;
+    h.state.gate = new Promise<void>((r) => { open = r; });
+    await h.w.reindexNow('r1');
+    const stepping = (async () => { for (let i = 0; i < 2; i++) await h.w.step(); })(); // poll, then the gated index
+    await new Promise((r) => setTimeout(r, 300));
+    await h.w.reindexNow('r1'); // pressed again while the first runs
+    open();
+    await stepping;
+    h.state.gate = null;
+    for (let i = 0; i < 4; i++) await h.w.step();
+    expect(h.indexed).toHaveLength(2);
+    expect(h.row()).toMatchObject({ state: 'off', enabled: false });
+  });
+
+  it('a failed project refresh is owed and retried, backed off, without indexing again (codex r2)', async () => {
+    const h = harness();
+    h.state.refreshOk = false;
+    await h.tick(0);
+    await h.tick();
+    expect(h.indexed).toHaveLength(1);
+    expect(h.refreshed).toHaveLength(1);
+    await h.tick();
+    expect(h.refreshed).toHaveLength(1); // backed off
+    h.state.refreshOk = true;
+    h.advance(INDEX_BACKOFF_BASE_MS);
+    await h.tick();
+    expect(h.refreshed).toHaveLength(2);
+    expect(h.indexed).toHaveLength(1);
+    await h.tick();
+    expect(h.refreshed).toHaveLength(2);
+  });
+
+  it('a launch noted before the records load never saves over them (codex r2)', async () => {
+    const a = harness();
+    await a.tick(0);
+    await a.w.setEnabled('r1', false);
+    const b = harness();
+    await b.w.noteLaunch('r1'); // before b's first step loads anything
+    await b.tick(0);
+    expect(b.row()).toMatchObject({ state: 'off', enabled: false });
+    const saved = JSON.parse(readFileSync(join(dir, 'state', 'repo-watch.json'), 'utf8')) as { repos: Record<string, { enabled?: boolean; launches?: number }> };
+    expect(saved.repos['r1']).toMatchObject({ enabled: false, launches: 1 });
+  });
+
+  it('counters that disagree prove nothing: the repo indexes once (codex r2)', async () => {
+    const a = harness();
+    await a.tick(0);
+    await a.tick();
+    const path = join(dir, 'state', 'repo-watch.json');
+    const saved = JSON.parse(readFileSync(path, 'utf8')) as { version: 1; repos: Record<string, Record<string, unknown>> };
+    saved.repos['r1'] = { ...saved.repos['r1'], indexedLaunches: 5 };
+    writeFileSync(path, JSON.stringify(saved));
+    const b = harness();
+    await b.tick(0);
+    await b.tick();
+    expect(b.indexed).toEqual(['r1']);
+  });
   it('a git failure shows a remedy and backs off', async () => {
     const h = harness({ gitFn: async () => { throw new Error('fatal: not a git repository'); } });
     await h.tick(0);
@@ -489,7 +601,7 @@ describe('the cadence', () => {
     const real: GitFn = pollGit;
     const w = new RepoWatcher({
       listRepos: async () => [{ id: 'r1', name: 'r1', root_path: repo, default_branch: 'main', registered_at: 1, code_graph_db: graphDb } as RepoEntry],
-      runViews: async () => [], indexRepoGraph: async () => ({ outcome: 'indexed' }), refreshProjects: async () => undefined,
+      runViews: async () => [], indexRepoGraph: async () => ({ outcome: 'indexed' }), refreshProjects: async () => true,
       statePath: join(dir, 'state', 'w.json'), stateHome: null, enabled: true, log: () => undefined, now: () => t,
       git: async (cwd, args) => { polls.push(t); const out = await real(cwd, args); t += pollMs; return out; },
     });
