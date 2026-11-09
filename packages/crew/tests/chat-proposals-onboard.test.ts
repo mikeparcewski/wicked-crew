@@ -233,7 +233,7 @@ describe('git addresses', () => {
   });
 
   it.each([
-    ['/Users/me/code/app', /not a git address/],
+    ['/srv/code/app', /not a git address/],
     ['file:///srv/app', /file address/],
     ['ext::sh -c touch% /tmp/pwned', /spaces/],
     ['http://github.com/a/b', /plain http/],
