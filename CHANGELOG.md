@@ -10,6 +10,39 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.18.3] — 2026-11-09
+
+A patch: a repository's code map now follows its checkout with no click. Bundles wicked-studio 0.16.3 (a chat page's
+send never opens the Ask window; Understand is the conversation; the rail's Move picker at the scroller's edge; the
+watcher's UI). Needs wicked-core-ts 0.15.35 and wicked-crew-api-types 0.201.0.
+
+### Added
+
+- **A repo watcher keeps each onboarded repository's code map current.** It runs on macOS, Linux and Windows the same
+  way: per repository, one `git status` (fsmonitor off, optional locks off) is fingerprinted by HEAD, the branch and
+  every changed file's size and mtime, plus the content hash of small files. That catches edits, a new file in a new
+  untracked directory, commits, pulls and branch switches. Build output, worktrees and the state home never count.
+  - **Cadence:** one poll at a time daemon-wide, every max(5 s, 10x the last poll) and at most 30 s. A change is
+    re-polled after 5 s and indexed once it has held still, or 60 s into continuous change. At most 24 repositories
+    are watched.
+  - **Indexing:** the engine's `indexRepoGraph` (wicked-core-ts 0.15.35) runs the onboarding index command under the
+    lock a launch's D8 base index takes, then every project the repository is in is refreshed.
+  - **Runs:** never while a run on the repository executes, nor while a domain-extraction run on it has not ended (the
+    engine re-checks this under its lock). A launch since the last index is brought back to the checkout once nothing
+    holds the map.
+  - **Restart:** `<state home>/repo-watch.json` (registered in the state-home registry) lets the watcher catch up at
+    boot, once per start.
+  - **Wire:** `GET /repo-watch`, `PUT /repos/:id/watch` (the per-repository switch), and
+    `POST /repos/:id/graph/reindex` (Re-index now; while jobs hold the map it is kept and runs when they end). A
+    `repoWatch` block on `/diagnostics`. `WICKED_CREW_REPO_WATCH=off` turns it off for the daemon. "Current" covers
+    symbols, files and references; clusters refresh at onboarding.
+
+### Changed
+
+- **Re-indexing a project's graph after a watcher index** is never served by a refresh that started before it, and its
+  git freshness probe now runs one git at a time with `core.fsmonitor=false` and `GIT_OPTIONAL_LOCKS=0`. The onboarding
+  hook and the watcher share one function, `refreshProjectGraphsForRepo`.
+
 ## [0.18.2] — 2026-11-09
 
 A patch for three first-run failures on a clean install of 0.18.1. Bundles wicked-studio 0.16.2 (wicked-studio#1069). Needs
@@ -6550,7 +6583,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.2...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.3...HEAD
+[0.18.3]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.2...v0.18.3
 [0.18.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.1...v0.18.2
 [0.18.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.17.1...v0.18.0

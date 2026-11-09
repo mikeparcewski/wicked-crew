@@ -1,5 +1,6 @@
 /**
- * Refresh the project graph(s) a repo belongs to once its ONBOARDING run completes (F-2R2-008).
+ * Refresh the project graph(s) a repo belongs to once its repo graph moved: its ONBOARDING run completed
+ * (F-2R2-008), or the repo watcher re-indexed its checkout (crew-0183, `repo-watch.ts`). One function, two callers.
  *
  * # Why
  *
@@ -12,8 +13,13 @@
  *
  * # Bounded, asynchronous, logged
  *
- *  - Only an onboarding run THIS daemon launched triggers it (`adapter.onboardedRepoOf`), and only
- *    on `sessionCompleted` — a failed onboarding refreshes nothing.
+ * Two callers, one function:
+ *  - the onboarding hook: only an onboarding run THIS daemon launched (`adapter.onboardedRepoOf`), only on
+ *    `sessionCompleted` (a failed onboarding refreshes nothing), fire-and-forget off the event path;
+ *  - the repo watcher (`repo-watch.ts`), after it re-indexed the repo's checkout: awaited by the watcher's one
+ *    serial loop, with `fresh: true` so the refresh never coalesces onto one that started BEFORE that index
+ *    (it would hold the repo's older rows; codex r1).
+ *
  *  - A PLAIN refresh (never `force`): `refreshProjectGraph` skips every member whose clean checkout
  *    is still at the HEAD the manifest recorded, so the marginal cost after the first build is the
  *    one repo that changed; each index is bounded by the refresh's own per-repo timeout.
@@ -22,15 +28,18 @@
  *    Coalescing has one gap: a completion that joins a refresh already past its repo is served a
  *    manifest without it — so when the repo is still missing afterwards the hook runs ONE more
  *    refresh, which finds only that repo to index. Never a third.
- *  - Off the request path (`void`), and every start / outcome / failure goes to the log; a failure
- *    never touches the run.
+ *  - Every start / outcome / failure goes to the log; a failure never touches the run.
  */
 
 import type { CoreAdapter } from '../core/adapter.js';
 import type { ProjectGraphRefreshResult } from '../core/types.js';
-import { refreshProjectGraph } from './graph.js';
+import { refreshProjectGraph, refreshProjectGraphAfter } from './graph.js';
 
 export interface AutoRefreshDeps {
+  /** What made the repo's graph move (`onboarding of r1 completed`, `the repo watcher re-indexed r1`), for the log. */
+  cause?: string;
+  /** Never served by a refresh already in flight (`refreshProjectGraphAfter`): the repo watcher's path. */
+  fresh?: boolean;
   /** The projects a repo is a `crew.repo` member of. Default: the adapter's `memberProjects`. */
   memberProjects?: (repoId: string) => Promise<string[]>;
   /** The refresh itself. Default: {@link refreshProjectGraph} (plain, never forced). */
@@ -44,6 +53,8 @@ export interface AutoRefreshOutcome {
   refreshed: { projectId: string; rounds: number; indexed: string[]; skipped: string[]; failed: string[] }[];
   /** Projects whose refresh threw — the message, never the run. */
   failed: { projectId: string; error: string }[];
+  /** The membership lookup itself failed, so nothing is known about which projects needed a refresh (codex r3). */
+  lookupFailed?: true;
 }
 
 function message(err: unknown): string {
@@ -56,7 +67,7 @@ function holdsRepo(result: ProjectGraphRefreshResult, repoId: string): boolean {
   return row !== undefined && (row.action === 'indexed' || row.action === 'skipped-head-unchanged');
 }
 
-export async function refreshProjectGraphsAfterOnboarding(
+export async function refreshProjectGraphsForRepo(
   adapter: CoreAdapter,
   repoId: string,
   deps: AutoRefreshDeps,
@@ -65,20 +76,20 @@ export async function refreshProjectGraphsAfterOnboarding(
   const memberProjects =
     deps.memberProjects ?? ((id: string) => adapter.memberProjects('crew.repo', id));
   const refresh =
-    deps.refresh ?? ((projectId: string) => refreshProjectGraph(adapter, projectId, process.env, { log: deps.log }));
+    deps.refresh ?? ((projectId: string) => (deps.fresh === true ? refreshProjectGraphAfter : refreshProjectGraph)(adapter, projectId, process.env, { log: deps.log }));
 
   let projectIds: string[];
   try {
     projectIds = await memberProjects(repoId);
   } catch (err) {
     // An engine without projects, or a registry that cannot be read: nothing to refresh, said once.
-    deps.log(`[projects] auto-refresh after onboarding ${repoId}: membership lookup failed (${message(err)}); no project graph refreshed`);
-    return out;
+    deps.log(`[projects] auto-refresh for ${repoId}: membership lookup failed (${message(err)}); no project graph refreshed`);
+    return { ...out, lookupFailed: true };
   }
   if (projectIds.length === 0) return out;
 
   for (const projectId of projectIds) {
-    deps.log(`[projects] auto-refresh: onboarding of ${repoId} completed — refreshing project ${projectId}'s code graph`);
+    deps.log(`[projects] auto-refresh: ${deps.cause ?? `onboarding of ${repoId} completed`} — refreshing project ${projectId}'s code graph`);
     try {
       let result = await refresh(projectId);
       let rounds = 1;

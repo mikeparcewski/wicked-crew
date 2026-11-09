@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.200.0",
+  "apiTypesVersion": "0.201.0",
   "endpoints": [
     {
       "method": "GET",
@@ -1883,6 +1883,15 @@
     },
     {
       "method": "GET",
+      "path": "/api/v1/repo-watch",
+      "requestType": null,
+      "responseType": "RepoWatchStatus",
+      "statusCodes": [
+        200
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/api/v1/repos",
       "requestType": null,
       "responseType": null,
@@ -1953,6 +1962,17 @@
       "statusCodes": []
     },
     {
+      "method": "POST",
+      "path": "/api/v1/repos/:id/graph/reindex",
+      "requestType": null,
+      "responseType": "RepoReindexResult",
+      "statusCodes": [
+        202,
+        404,
+        409
+      ]
+    },
+    {
       "method": "GET",
       "path": "/api/v1/repos/:id/onboard",
       "requestType": null,
@@ -1999,6 +2019,18 @@
         409,
         500,
         503
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/repos/:id/watch",
+      "requestType": "SetRepoWatchBody",
+      "responseType": "RepoGraphWatch",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409
       ]
     },
     {

@@ -61,6 +61,8 @@ export const STATE_HOME_ENTRY_PREFIXES: ReadonlyArray<string> = [
   'daemon-',
   // DES-TEAMING-002 §4.1: the engine's team outbox (and its transient `.compact` sidecar).
   'team-outbox.ndjson',
+  // crew-0183: the repo watcher's record — `src/projects/repo-watch.ts` (and its transient `.tmp-<pid>`).
+  'repo-watch.json',
 ];
 
 /**

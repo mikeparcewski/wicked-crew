@@ -194,7 +194,9 @@ import {
 } from '../core/types.js';
 import { daemonSignalLog } from '../core/daemon-signal-log.js';
 import { latestDraftRender } from '../interactive/draft-skill.js';
-import { refreshProjectGraphsAfterOnboarding } from '../projects/auto-refresh.js';
+import { refreshProjectGraphsForRepo } from '../projects/auto-refresh.js';
+import { RepoWatcher, repoWatchEnabledByEnv } from '../projects/repo-watch.js';
+import { registerRepoWatchRoutes } from '../projects/repo-watch-routes.js';
 
 /** The daemon's own actor on the audit trail (`run.delivered`, `run.ended`, the onboarding `run.launched`). */
 const DAEMON_ACTOR: Actor = { id: 'daemon', kind: 'system', trust: 'admin' };
@@ -442,6 +444,12 @@ export interface CreateServerOptions {
    * server-level test of a brokered call hands its own gate here.
    */
   mcpEngineGate?: () => McpEngineGate | null;
+  /**
+   * The repo watcher (crew-0183): keeps each onboarded repo's code map current with no click. ON in the daemon
+   * (unless `WICKED_CREW_REPO_WATCH=off`), OFF under a test runner unless a test opts in; its routes and the
+   * `/diagnostics.repoWatch` block are there either way.
+   */
+  repoWatch?: { enabled?: boolean };
   stallWatchdog?: {
     enabled?: boolean;
     /** Sweep cadence, ms (default 30 s; tests shorten it). */
@@ -2429,11 +2437,29 @@ export async function createServer(
     // crew#552: an onboarding completion queues its capture; a chained capture's end frees the slot.
     onboardingCapture.onEvent(event);
     runLearnings.onEvent(event);
+    // crew-0183: a run resolved its base, so its D8 re-indexes its repo's graph at that base; the repo watcher brings
+    // the graph back to the checkout once nothing holds it. Any launch, crew's or the engine's own (campaign nodes).
+    if (event.type === 'runBaseResolved' && session !== undefined) {
+      // A lookup that fails or finds no view yet is tried again (codex r2: one miss lost the invalidation for good).
+      const note = (tries: number): void => {
+        void adapter.runView(session, { fresh: tries > 0 }).then(
+          (v) => {
+            const repo = v?.session.repo_ref;
+            if (typeof repo === 'string' && repo !== '') { void repoWatcher.noteLaunch(repo); return; }
+            if (v === undefined && tries < 3) setTimeout(() => note(tries + 1), 2_000).unref?.();
+          },
+          () => { if (tries < 3) setTimeout(() => note(tries + 1), 2_000).unref?.(); },
+        );
+      };
+      note(0);
+    }
     unitInspect.onEvent(event as unknown as Record<string, unknown>);
     if (event.type === 'sessionCompleted' && session !== undefined) {
       const onboardedRepo = adapter.onboardedRepoOf(session);
       if (onboardedRepo !== undefined) {
-        void refreshProjectGraphsAfterOnboarding(adapter, onboardedRepo, {
+        // crew-0183: a newly onboarded repo is watched from now (its first poll indexes any edit made since the index).
+        repoWatcher.wake();
+        void refreshProjectGraphsForRepo(adapter, onboardedRepo, {
           log: (m) => app.log.info(m),
         }).catch((err: unknown) => {
           app.log.warn(
@@ -2476,6 +2502,24 @@ export async function createServer(
       })();
     }
   };
+  // The repo watcher (crew-0183): onboarded repos' code maps follow their checkouts. The engine writes the repo graph
+  // (`indexRepoGraph`, under the lock a launch's D8 takes); the project graphs refresh through the onboarding hook's
+  // own function. Built always (its routes and diagnostics answer); polling only in the daemon.
+  const repoWatchEnvOn = repoWatchEnabledByEnv();
+  const repoWatcher = new RepoWatcher({
+    listRepos: () => adapter.listRepos(),
+    runViews: async () => (await adapter.runViewsSnapshot()).views,
+    indexRepoGraph: (repoId) => adapter.indexRepoGraph(repoId),
+    refreshProjects: async (repoId) => {
+      const out = await refreshProjectGraphsForRepo(adapter, repoId, { cause: `the repo watcher re-indexed ${repoId}`, fresh: true, log: (m) => app.log.info(m) });
+      return out.lookupFailed !== true && out.failed.length === 0 && out.refreshed.every((p) => p.failed.length === 0);
+    },
+    statePath: join(crewStateHome(), 'repo-watch.json'),
+    stateHome: crewStateHome(),
+    enabled: repoWatchEnvOn,
+    log: (m) => app.log.info(m),
+  });
+  registerRepoWatchRoutes(app, repoWatcher);
   const offEvent = adapter.onEvent(onEngineEvent);
   // Skills keystone (codex round 4): every launch the daemon hands the engine — run, resume, gate
   // answer, campaign — opens a generation pin BEFORE the engine call, released only by the engine's
@@ -2495,6 +2539,13 @@ export async function createServer(
   // Arm the stall watchdog's sweep (crew#287). ON in the daemon, OFF under a test runner
   // unless a test opts in — a suite building servers over stub adapters must not have a
   // background interval calling `sessionsDetail()` on them.
+  if (repoWatchEnvOn && (options?.repoWatch?.enabled ?? !(process.env['VITEST'] !== undefined || process.env['NODE_ENV'] === 'test'))) {
+    repoWatcher.start();
+    app.addHook('onClose', async () => {
+      await repoWatcher.stop();
+    });
+  }
+
   const stallCfg = options?.stallWatchdog;
   if (stallWatchdogArmed) {
     stallWatchdog.start(stallCfg?.sweepIntervalMs);
@@ -2892,6 +2943,7 @@ export async function createServer(
       mcpCalls: mcpCallRecords,
       // wicked-core#411 / crew#497: the live state-home classification the routes report and gate on.
       stateHome: stateHomeWatch,
+      repoWatch: repoWatcher,
       // DES-RUNS-REVIEW-001 §3: a hand launch of the review is prepared like a scheduled one (its coverage = the schedule's).
       reviewLaunch: async (input: LaunchRunInput) => {
         await reviewService.prepareLaunch(input, { trigger: 'manual', scheduleId: null, projectIds: reviewProjects() });
