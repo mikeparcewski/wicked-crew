@@ -40,6 +40,8 @@ const CASELESS_HOSTS: ReadonlySet<string> = new Set(['github.com', 'gitlab.com',
  */
 export function withoutCredentials(raw: string): string {
   const t = raw.trim();
+  // A backslash spelling a URL parser does not read as user information: everything before the authority's `@` goes.
+  if (t.includes('\\')) return t.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/]*@/i, '$1');
   try {
     const u = new URL(t);
     // A query or fragment can carry a token too (`?access_token=`): never shown.
@@ -67,12 +69,14 @@ export function withoutCredentials(raw: string): string {
 export function readGitUrl(raw: string): GitUrlReading {
   const url = raw.trim();
   if (url === '' || /[\s\u0000-\u001f\u007f]/.test(url)) return { ok: false, reason: 'the address has spaces or control characters in it' };
+  // A URL parser reads `\` as a path separator; git does not (it can hide a user and password from the checks below).
+  if (url.includes('\\')) return { ok: false, reason: 'the address has a backslash in it' };
   let host: string;
   let path: string;
   const scp = SCP.exec(url);
   if (scp !== null) {
-    // An scp path is relative to that user's home: a user other than `git` is part of which repository it is.
-    host = `${scp[1] !== 'git' ? `${scp[1]}@` : ''}${scp[2]!.toLowerCase()}`;
+    // An scp path is relative to that user's home: the user is part of which repository it is.
+    host = `${scp[1]}@${scp[2]!.toLowerCase()}`;
     path = scp[3]!;
   } else {
     let u: URL;
@@ -89,20 +93,25 @@ export function readGitUrl(raw: string): GitUrlReading {
       return { ok: false, reason: 'the address carries a user name or token; give it without one (git uses your own sign-in)' };
     }
     if (u.search !== '' || u.hash !== '') return { ok: false, reason: 'the address has a query or fragment; give the plain repository address' };
-    host = `${u.username !== '' && u.username !== 'git' ? `${u.username}@` : ''}${u.hostname.toLowerCase()}${u.port !== '' ? `:${u.port}` : ''}`;
+    // An explicit ssh user (git included) is kept; an omitted one is the operator's own, a different account.
+    host = `${u.username !== '' ? `${u.username}@` : ''}${u.hostname.toLowerCase()}${u.port !== '' ? `:${u.port}` : ''}`;
     try {
       path = decodeURIComponent(u.pathname).replace(/^\/+/, '');
     } catch {
       return { ok: false, reason: 'the address has a broken %-escape in its path' };
     }
   }
-  const caseless = CASELESS_HOSTS.has(host);
-  // `.git` is dropped as the known hosts drop it; elsewhere only its usual lower-case spelling (a server may keep both).
-  const segments = path.replace(/\/+$/, '').replace(caseless ? /\.git$/i : /\.git$/, '').split('/');
+  // On the known hosts the user (always `git`) and `.git` say nothing about which repository; elsewhere both do.
+  const bare = host.replace(/^[^@]*@/, '');
+  const caseless = CASELESS_HOSTS.has(bare);
+  if (caseless) host = bare;
+  const trimmed = path.replace(/\/+$/, '');
+  const segments = (caseless ? trimmed.replace(/\.git$/i, '') : trimmed).split('/');
   if (host === '' || segments.length === 0 || segments.some((s) => s === '' || s === '.' || s === '..')) {
     return { ok: false, reason: 'the address names no repository path' };
   }
-  const name = segments[segments.length - 1]!;
+  // The default name drops `.git` everywhere (it names a folder, not the repository).
+  const name = segments[segments.length - 1]!.replace(/\.git$/i, '');
   const repoPath = segments.join('/');
   // On GitHub, GitLab and Bitbucket every spelling names one repository (case too). Elsewhere an scp path is relative to
   // the user's home and an ssh:// one absolute: `host:repo` and `host/repo` are different repositories.

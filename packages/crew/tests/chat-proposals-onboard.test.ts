@@ -216,14 +216,20 @@ describe('git addresses', () => {
     expect(readGitUrl('git@github.com:mikeparcewski/wicked-studio.git')).toMatchObject({ ok: true, key: 'github.com/mikeparcewski/wicked-studio', name: 'wicked-studio' });
     expect(readGitUrl('ssh://git@GitHub.com/mikeparcewski/Wicked-Studio/')).toMatchObject({ ok: true, key: 'github.com/mikeparcewski/wicked-studio', name: 'Wicked-Studio' });
     // Elsewhere the path's case and a non-git ssh user name a different repository (review r1).
-    expect(readGitUrl('https://git.example.com/Team/Repo.git')).toMatchObject({ ok: true, key: 'https://git.example.com/Team/Repo' });
-    expect(readGitUrl('alice@host.example:repo.git')).toMatchObject({ ok: true, key: 'scp://alice@host.example:repo' });
-    expect(readGitUrl('bob@host.example:repo.git')).toMatchObject({ ok: true, key: 'scp://bob@host.example:repo' });
+    expect(readGitUrl('https://git.example.com/Team/Repo.git')).toMatchObject({ ok: true, key: 'https://git.example.com/Team/Repo.git' });
+    expect(readGitUrl('alice@host.example:repo.git')).toMatchObject({ ok: true, key: 'scp://alice@host.example:repo.git', name: 'repo' });
+    expect(readGitUrl('bob@host.example:repo.git')).toMatchObject({ ok: true, key: 'scp://bob@host.example:repo.git' });
     // An scp path is relative to the user's home, an ssh:// one absolute: two repositories off GitHub (review r2); the
     // transport and a non-lower-case suffix are kept too (review r3).
-    expect(readGitUrl('ssh://bob@host.example/repo.git')).toMatchObject({ ok: true, key: 'ssh://bob@host.example/repo' });
-    expect(readGitUrl('https://host.example/repo.git')).toMatchObject({ ok: true, key: 'https://host.example/repo' });
+    expect(readGitUrl('ssh://bob@host.example/repo.git')).toMatchObject({ ok: true, key: 'ssh://bob@host.example/repo.git' });
+    expect(readGitUrl('https://host.example/repo.git')).toMatchObject({ ok: true, key: 'https://host.example/repo.git', name: 'repo' });
     expect(readGitUrl('https://host.example/app.GIT')).toMatchObject({ ok: true, key: 'https://host.example/app.GIT' });
+    // Off the known hosts `/repo` and `/repo.git`, an explicit `git@` and an omitted user, are different (review r4).
+    expect(readGitUrl('https://host.example/repo').ok && readGitUrl('https://host.example/repo.git').ok).toBe(true);
+    expect((readGitUrl('https://host.example/repo') as { key: string }).key).not.toBe((readGitUrl('https://host.example/repo.git') as { key: string }).key);
+    expect((readGitUrl('ssh://host.example/repo.git') as { key: string }).key).not.toBe((readGitUrl('ssh://git@host.example/repo.git') as { key: string }).key);
+    // On GitHub they are one repository.
+    expect((readGitUrl('ssh://github.com/o/r') as { key: string }).key).toBe((readGitUrl('git@github.com:o/r.git') as { key: string }).key);
   });
 
   it.each([
@@ -237,6 +243,7 @@ describe('git addresses', () => {
     ['https://github.com/a/b%ZZ', /broken %-escape/],
     ['-oProxyCommand=x@host:a/b', /not a git address/],
     ['git@-host:a/b', /not a git address/],
+    ['https://DOMAIN\\alice:fixture-secret@host.example/o/r.git', /backslash/],
   ])('refuses %s', (raw, why) => {
     const r = readGitUrl(raw);
     expect(r.ok).toBe(false);
@@ -524,6 +531,7 @@ describe('onboard proposals', () => {
     // A query can carry a token too; an ssh user without a password is part of the address (review r2).
     expect(withoutCredentials('https://github.com/o/r.git?access_token=ghp_x')).toBe('https://github.com/o/r.git');
     expect(withoutCredentials('ssh://alice@git.example.com/repo.git')).toBe('ssh://alice@git.example.com/repo.git');
+    expect(withoutCredentials('https://DOMAIN\\alice:fixture-secret@host.example/o/r.git')).toBe('https://host.example/o/r.git');
     // The seat's own words on the card lose any address's token too.
     const q = (await propose(r, 'c2', chatWith(r, 'c2'), { onboard: { url: 'https://github.com/o/r.git', project: 'Ops' }, reason: 'from https://me:ghp_secret123@github.com/o/r.git' }))!;
     expect(JSON.stringify(q)).not.toContain('ghp_secret123');
