@@ -2437,12 +2437,20 @@ export async function createServer(
     // crew#552: an onboarding completion queues its capture; a chained capture's end frees the slot.
     onboardingCapture.onEvent(event);
     runLearnings.onEvent(event);
+    // crew-0183: a run resolved its base, so its D8 re-indexes its repo's graph at that base; the repo watcher brings
+    // the graph back to the checkout once nothing holds it. Any launch, crew's or the engine's own (campaign nodes).
+    if (event.type === 'runBaseResolved' && session !== undefined) {
+      void adapter.runView(session).then(
+        (v) => { const repo = v?.session.repo_ref; if (typeof repo === 'string' && repo !== '') repoWatcher.noteLaunch(repo); },
+        () => undefined,
+      );
+    }
     unitInspect.onEvent(event as unknown as Record<string, unknown>);
     if (event.type === 'sessionCompleted' && session !== undefined) {
       const onboardedRepo = adapter.onboardedRepoOf(session);
       if (onboardedRepo !== undefined) {
-        // crew-0183: the onboarded checkout IS the graph now: the watcher records it, so it does not index it again.
-        void repoWatcher.adopt(onboardedRepo);
+        // crew-0183: a newly onboarded repo is watched from now (its first poll indexes any edit made since the index).
+        repoWatcher.wake();
         void refreshProjectGraphsForRepo(adapter, onboardedRepo, {
           log: (m) => app.log.info(m),
         }).catch((err: unknown) => {
@@ -2486,6 +2494,23 @@ export async function createServer(
       })();
     }
   };
+  // The repo watcher (crew-0183): onboarded repos' code maps follow their checkouts. The engine writes the repo graph
+  // (`indexRepoGraph`, under the lock a launch's D8 takes); the project graphs refresh through the onboarding hook's
+  // own function. Built always (its routes and diagnostics answer); polling only in the daemon.
+  const repoWatchEnvOn = repoWatchEnabledByEnv();
+  const repoWatcher = new RepoWatcher({
+    listRepos: () => adapter.listRepos(),
+    runViews: async () => (await adapter.runViewsSnapshot()).views,
+    indexRepoGraph: (repoId) => adapter.indexRepoGraph(repoId),
+    refreshProjects: async (repoId) => {
+      await refreshProjectGraphsForRepo(adapter, repoId, { cause: `the repo watcher re-indexed ${repoId}`, fresh: true, log: (m) => app.log.info(m) });
+    },
+    statePath: join(crewStateHome(), 'repo-watch.json'),
+    stateHome: crewStateHome(),
+    enabled: repoWatchEnvOn,
+    log: (m) => app.log.info(m),
+  });
+  registerRepoWatchRoutes(app, repoWatcher);
   const offEvent = adapter.onEvent(onEngineEvent);
   // Skills keystone (codex round 4): every launch the daemon hands the engine — run, resume, gate
   // answer, campaign — opens a generation pin BEFORE the engine call, released only by the engine's
@@ -2505,23 +2530,6 @@ export async function createServer(
   // Arm the stall watchdog's sweep (crew#287). ON in the daemon, OFF under a test runner
   // unless a test opts in — a suite building servers over stub adapters must not have a
   // background interval calling `sessionsDetail()` on them.
-  // The repo watcher (crew-0183): onboarded repos' code maps follow their checkouts. The engine writes the repo graph
-  // (`indexRepoGraph`, under the lock a launch's D8 takes); the project graphs refresh through the onboarding hook's
-  // own function. Built always (its routes and diagnostics answer); polling only in the daemon.
-  const repoWatchEnvOn = repoWatchEnabledByEnv();
-  const repoWatcher = new RepoWatcher({
-    listRepos: () => adapter.listRepos(),
-    runViews: async () => (await adapter.runViewsSnapshot()).views,
-    indexRepoGraph: (repoId) => adapter.indexRepoGraph(repoId),
-    refreshProjects: async (repoId) => {
-      await refreshProjectGraphsForRepo(adapter, repoId, { cause: `the repo watcher re-indexed ${repoId}`, log: (m) => app.log.info(m) });
-    },
-    statePath: join(crewStateHome(), 'repo-watch.json'),
-    stateHome: crewStateHome(),
-    enabled: repoWatchEnvOn,
-    log: (m) => app.log.info(m),
-  });
-  registerRepoWatchRoutes(app, repoWatcher);
   if (repoWatchEnvOn && (options?.repoWatch?.enabled ?? !(process.env['VITEST'] !== undefined || process.env['NODE_ENV'] === 'test'))) {
     repoWatcher.start();
     app.addHook('onClose', async () => {

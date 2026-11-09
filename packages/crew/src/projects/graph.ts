@@ -277,10 +277,11 @@ export class EstateDroppedRepoLabelError extends Error {
  */
 async function cleanHead(rootPath: string): Promise<string | null> {
   try {
-    const [{ stdout: head }, { stdout: status }] = await Promise.all([
-      execCapped('git', ['rev-parse', 'HEAD'], { timeout: 10_000, cwd: rootPath, windowsHide: true }),
-      execCapped('git', ['status', '--porcelain'], { timeout: 30_000, cwd: rootPath, windowsHide: true }),
-    ]);
+    // One git at a time, no fsmonitor daemon left behind, never `index.lock` (crew-0183: the repo watcher now runs this
+    // after every re-index, beside the person's own git).
+    const safe = { cwd: rootPath, windowsHide: true, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } };
+    const { stdout: head } = await execCapped('git', ['-c', 'core.fsmonitor=false', 'rev-parse', 'HEAD'], { timeout: 10_000, ...safe });
+    const { stdout: status } = await execCapped('git', ['-c', 'core.fsmonitor=false', 'status', '--porcelain'], { timeout: 30_000, ...safe });
     if (status.trim() !== '') return null;
     const sha = head.trim();
     return sha === '' ? null : sha;
@@ -570,6 +571,22 @@ export async function refreshProjectGraph(
   const entry: InFlightRefresh = { force, promise };
   inFlight.set(projectId, entry);
   return promise;
+}
+
+/**
+ * A refresh that is never served by one already in flight (crew-0183): the repo watcher's index happened AFTER any
+ * refresh running now started, so that refresh may hold the repo's older rows. Waits for it, then refreshes (a plain
+ * refresh: unchanged clean members skip). A refresh started after this call coalesces with it, which is fine.
+ */
+export async function refreshProjectGraphAfter(
+  adapter: CoreAdapter,
+  projectId: string,
+  env: NodeJS.ProcessEnv = process.env,
+  opts: RefreshOptions = {},
+): Promise<ProjectGraphRefreshResult> {
+  const running = inFlight.get(projectId);
+  if (running !== undefined) await running.promise.catch(() => undefined);
+  return refreshProjectGraph(adapter, projectId, env, opts);
 }
 
 /** Last `max` bytes of a stderr stream, trimmed — enough to carry estate's migration notice. */

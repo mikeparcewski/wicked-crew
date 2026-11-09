@@ -13,8 +13,13 @@
  *
  * # Bounded, asynchronous, logged
  *
- *  - Only an onboarding run THIS daemon launched triggers it (`adapter.onboardedRepoOf`), and only
- *    on `sessionCompleted` — a failed onboarding refreshes nothing.
+ * Two callers, one function:
+ *  - the onboarding hook: only an onboarding run THIS daemon launched (`adapter.onboardedRepoOf`), only on
+ *    `sessionCompleted` (a failed onboarding refreshes nothing), fire-and-forget off the event path;
+ *  - the repo watcher (`repo-watch.ts`), after it re-indexed the repo's checkout: awaited by the watcher's one
+ *    serial loop, with `fresh: true` so the refresh never coalesces onto one that started BEFORE that index
+ *    (it would hold the repo's older rows; codex r1).
+ *
  *  - A PLAIN refresh (never `force`): `refreshProjectGraph` skips every member whose clean checkout
  *    is still at the HEAD the manifest recorded, so the marginal cost after the first build is the
  *    one repo that changed; each index is bounded by the refresh's own per-repo timeout.
@@ -23,17 +28,18 @@
  *    Coalescing has one gap: a completion that joins a refresh already past its repo is served a
  *    manifest without it — so when the repo is still missing afterwards the hook runs ONE more
  *    refresh, which finds only that repo to index. Never a third.
- *  - Off the request path (`void`), and every start / outcome / failure goes to the log; a failure
- *    never touches the run.
+ *  - Every start / outcome / failure goes to the log; a failure never touches the run.
  */
 
 import type { CoreAdapter } from '../core/adapter.js';
 import type { ProjectGraphRefreshResult } from '../core/types.js';
-import { refreshProjectGraph } from './graph.js';
+import { refreshProjectGraph, refreshProjectGraphAfter } from './graph.js';
 
 export interface AutoRefreshDeps {
   /** What made the repo's graph move (`onboarding of r1 completed`, `the repo watcher re-indexed r1`), for the log. */
   cause?: string;
+  /** Never served by a refresh already in flight (`refreshProjectGraphAfter`): the repo watcher's path. */
+  fresh?: boolean;
   /** The projects a repo is a `crew.repo` member of. Default: the adapter's `memberProjects`. */
   memberProjects?: (repoId: string) => Promise<string[]>;
   /** The refresh itself. Default: {@link refreshProjectGraph} (plain, never forced). */
@@ -68,7 +74,7 @@ export async function refreshProjectGraphsForRepo(
   const memberProjects =
     deps.memberProjects ?? ((id: string) => adapter.memberProjects('crew.repo', id));
   const refresh =
-    deps.refresh ?? ((projectId: string) => refreshProjectGraph(adapter, projectId, process.env, { log: deps.log }));
+    deps.refresh ?? ((projectId: string) => (deps.fresh === true ? refreshProjectGraphAfter : refreshProjectGraph)(adapter, projectId, process.env, { log: deps.log }));
 
   let projectIds: string[];
   try {

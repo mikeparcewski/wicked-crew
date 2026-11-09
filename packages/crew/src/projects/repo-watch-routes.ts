@@ -3,7 +3,8 @@
  *
  *   GET  /repo-watch                every watched repo's code map standing (`RepoWatchStatus`)
  *   PUT  /repos/:id/watch           the per-repo off switch `{ enabled }` (`SetRepoWatchBody`)
- *   POST /repos/:id/graph/reindex   Re-index now: queued past the quiet window, unless a run holds the map (409)
+ *   POST /repos/:id/graph/reindex   Re-index now: queued past the quiet window (202); while runs hold the map, 409
+ *                                   naming them, and the request is kept: it runs when they let go
  *
  * `/repo-watch`, not `/repos/watch`: a repo registered under the id `watch` would be shadowed by a static segment.
  * With the watcher off for the daemon (`WICKED_CREW_REPO_WATCH=off`) the status still answers (`enabled: false`)
@@ -11,7 +12,7 @@
  */
 
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
+import { z } from '../zod.js';
 
 import type { RepoWatcher } from './repo-watch.js';
 
