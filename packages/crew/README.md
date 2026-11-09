@@ -22,8 +22,9 @@ Local-first: loopback only, no accounts, no billing, no model reselling. Crew dr
   uv every job launch is refused (`venv-failed`). The family installer installs it for you (see below).
 - **git** — crew spawns it for every repository operation.
 - **A container runtime** (Rancher Desktop, Docker, Podman, Colima or OrbStack), running. Governed
-  agents work in a hardened seat container, and you sign each one in from studio's Agents tab in a
-  login container. `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead.
+  agents work in a hardened seat container, and you sign each one in from studio's Agents tab: Claude
+  Code and GitHub Copilot in a login container, Codex, Pi and OpenCode with their host CLIs.
+  `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead.
 - **At least one coding-agent CLI** you can sign in (Claude Code, Codex, GitHub Copilot, OpenCode or Pi).
 - **wicked-estate** — the `wicked-estate` / `wicked-estate-mcp` binaries on PATH. Crew requires it:
   adding a repository in Studio runs onboarding's index phase on the `wicked-estate` tool, and it
@@ -42,8 +43,7 @@ The family installer installs estate and garden (and, when uv is missing, uv its
 ```bash
 npx wicked-installer        # pick the "Quick Start" bundle (wicked-crew + wicked-bus + wicked-estate,
                             # with wicked-garden + wicked-vault added as crew's requirements)
-wicked-crew serve           # start the daemon (use `npx wicked-crew serve` if the npm global
-                            # bin dir is not on PATH)
+wicked-crew serve           # start the daemon
 # then open http://127.0.0.1:7701 in your browser
 ```
 
@@ -55,11 +55,21 @@ them:
 - **Linux (bash):** the same line into `~/.profile`.
 - **Windows:** `%USERPROFILE%\.local\bin` — astral's uv installer adds it to the user PATH; otherwise add it via Environment Variables.
 
-Or install crew by itself:
+If your shell can't find `wicked-crew` itself, npm's global bin directory is not on PATH: add
+`$(npm prefix -g)/bin` (macOS, Linux) or the directory `npm prefix -g` prints (Windows).
+
+If a garden older than 12.66.1 is already installed, the installer may keep it; crew's blocking `skills.garden`
+finding then names its version and where it was found. Update that copy (for the npm package,
+`npm install -g wicked-garden@latest`) and restart `wicked-crew serve`.
+
+Or install crew by hand (advanced). It needs uv and the requirements above, including
+**wicked-garden 12.66.1 or later** (crew refuses every launch until it finds one):
 
 ```bash
+npx wicked-installer install wicked-estate wicked-garden
 npm install -g wicked-crew
 wicked-crew serve
+# then open http://127.0.0.1:7701
 ```
 
 Crew uses the first usable garden source in this order (automatic sources need version ≥ 12.66.1):
@@ -75,12 +85,6 @@ own PATH, so it finds the installer's tools even before your shell does. Command
 precedence.
 
 Studio's Nerve Center names whichever requirement is missing on a fresh install.
-
-Or without installing:
-
-```bash
-npx wicked-crew serve
-```
 
 `serve` starts the daemon on `http://127.0.0.1:7701` (override with `--port` or `CREW_PORT`) and
 serves the bundled **wicked-studio** browser console same-origin — open the URL and you have the

@@ -30,7 +30,7 @@ describe('README garden discovery (first-run-2 N7)', () => {
     ];
     expect([...order].sort((a, b) => a - b)).toEqual(order);
     // Within tier 4: the launcher on PATH, then beside crew's package. Config dirs: every one, then ~/.claude.
-    expect(list.indexOf('command on PATH')).toBeLessThan(list.indexOf('beside crew'));
+    expect(at('command on PATH')).toBeLessThan(at('beside crew'));
     expect(readme).toContain('`<config dir>` is each directory in `$CLAUDE_CONFIG_DIR`, in order, then `~/.claude`; every config dir\'s cache\nis searched before any installer copy.');
   });
 });
