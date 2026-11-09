@@ -216,11 +216,14 @@ describe('git addresses', () => {
     expect(readGitUrl('git@github.com:mikeparcewski/wicked-studio.git')).toMatchObject({ ok: true, key: 'github.com/mikeparcewski/wicked-studio', name: 'wicked-studio' });
     expect(readGitUrl('ssh://git@GitHub.com/mikeparcewski/Wicked-Studio/')).toMatchObject({ ok: true, key: 'github.com/mikeparcewski/wicked-studio', name: 'Wicked-Studio' });
     // Elsewhere the path's case and a non-git ssh user name a different repository (review r1).
-    expect(readGitUrl('https://git.example.com/Team/Repo.git')).toMatchObject({ ok: true, key: 'git.example.com/Team/Repo' });
-    expect(readGitUrl('alice@host.example:repo.git')).toMatchObject({ ok: true, key: 'alice@host.example:repo' });
-    expect(readGitUrl('bob@host.example:repo.git')).toMatchObject({ ok: true, key: 'bob@host.example:repo' });
-    // An scp path is relative to the user's home, an ssh:// one absolute: two repositories off GitHub (review r2).
-    expect(readGitUrl('ssh://bob@host.example/repo.git')).toMatchObject({ ok: true, key: 'bob@host.example/repo' });
+    expect(readGitUrl('https://git.example.com/Team/Repo.git')).toMatchObject({ ok: true, key: 'https://git.example.com/Team/Repo' });
+    expect(readGitUrl('alice@host.example:repo.git')).toMatchObject({ ok: true, key: 'scp://alice@host.example:repo' });
+    expect(readGitUrl('bob@host.example:repo.git')).toMatchObject({ ok: true, key: 'scp://bob@host.example:repo' });
+    // An scp path is relative to the user's home, an ssh:// one absolute: two repositories off GitHub (review r2); the
+    // transport and a non-lower-case suffix are kept too (review r3).
+    expect(readGitUrl('ssh://bob@host.example/repo.git')).toMatchObject({ ok: true, key: 'ssh://bob@host.example/repo' });
+    expect(readGitUrl('https://host.example/repo.git')).toMatchObject({ ok: true, key: 'https://host.example/repo' });
+    expect(readGitUrl('https://host.example/app.GIT')).toMatchObject({ ok: true, key: 'https://host.example/app.GIT' });
   });
 
   it.each([
@@ -349,11 +352,11 @@ describe('onboard proposals', () => {
     expect(await propose(r, 'c1', t1, { onboard: { url: URL } })).toMatchObject({ blocked: null, onboard: { projectId: 'proj_ops' } });
     const t2 = chatWith(r, 'c2');
     expect(await propose(r, 'c2', t2, { onboard: { url: URL, project: 'labs' } })).toMatchObject({
-      blocked: expect.stringMatching(/no project is named “labs” \(projects here: Wicked Labs, Ops\)\. Create it on Projects → New project/),
+      blocked: expect.stringMatching(/no project has the name given \(projects here: Wicked Labs, Ops\)\. Create it on Projects → New project/),
     });
     r.projects.push({ id: 'proj_labs2', name: 'WICKED LABS' });
     const t3 = chatWith(r, 'c3');
-    expect(await propose(r, 'c3', t3, block)).toMatchObject({ blocked: expect.stringMatching(/more than one project is named/) });
+    expect(await propose(r, 'c3', t3, block)).toMatchObject({ blocked: expect.stringMatching(/more than one project has the name given/) });
     const blocked = (await propose(r, 'c3', chatWith(r, 'c3'), block))!;
     expect((await r.svc.decide('c3', blocked.pid, { decision: 'go' }, ME, 'i1')).code).toBe(409);
     expect(r.registered).toHaveLength(0);
@@ -387,6 +390,16 @@ describe('onboard proposals', () => {
     expect(await propose(r, 'c1', chatWith(r, 'c1'), block)).toMatchObject({ blocked: expect.stringMatching(/a different repository is already registered as “wicked-studio”/) });
     r.origins.set('/srv/wicked-studio', 'https://github.com/mikeparcewski/wicked-studio');
     expect(await propose(r, 'c2', chatWith(r, 'c2'), block)).toMatchObject({ blocked: null, onboard: { existing: { id: 'wicked-studio' } } });
+  });
+
+  it('the digest follows this message\'s own declaration, not the chat\'s stored one (review r3)', () => {
+    const r = rig();
+    chatWith(r, 'c1');
+    r.acceptsOnboard = true;
+    expect(r.svc.digest('c1', false, { onboard: false }).onboard).toBeUndefined();
+    r.acceptsOnboard = false;
+    expect(r.svc.digest('c1', false, { onboard: true }).onboard).toBe(true);
+    expect(r.svc.digest('c1', false).onboard).toBeUndefined();
   });
 
   it('only for a client that draws the card, on a daemon that advertises it', async () => {
@@ -451,10 +464,26 @@ describe('onboard proposals', () => {
     });
   });
 
-  it('a daemon that can\'t onboard now says so on the card, before anyone presses', async () => {
+  it('a daemon that can\'t onboard now says so on a new repository\'s card; adding a registered one to a project still works', async () => {
     const r = rig();
     r.daemonRefusal = "this daemon can't onboard a repository now: wicked-garden 12.66.1 or newer is needed";
     expect(await propose(r, 'c1', chatWith(r, 'c1'), block)).toMatchObject({ blocked: expect.stringMatching(/can't onboard a repository now/) });
+    r.repos = [repo('wicked-studio', { git_url: URL })];
+    expect(await propose(r, 'c2', chatWith(r, 'c2'), block)).toMatchObject({ blocked: null, onboard: { existing: { id: 'wicked-studio' } } });
+  });
+
+  it('nothing the seat wrote that could carry a credential reaches the card (name, project, reason; review r3)', async () => {
+    const r = rig();
+    const secret = 'https://me:pa)ss_SECRET9@github.com/o/r.git';
+    for (const [i, b] of [
+      { onboard: { url: URL, project: 'Ops', name: secret } },
+      { onboard: { url: URL, project: secret } },
+      { onboard: { url: URL, project: 'Ops' }, reason: `see ${secret}` },
+      { onboard: { url: URL, project: 'Ops' }, reason: 'see https://github.com/o/r.git?access_token=SECRET9' },
+    ].entries()) {
+      const p = (await propose(r, `s${i}`, chatWith(r, `s${i}`), b))!;
+      expect(JSON.stringify(p)).not.toContain('SECRET9');
+    }
   });
 
   it('a name whose registry id is taken (core slugs it) or whose clone folder holds another checkout blocks, on the card and on Go', async () => {

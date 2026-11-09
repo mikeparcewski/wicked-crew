@@ -96,7 +96,9 @@ export function readGitUrl(raw: string): GitUrlReading {
       return { ok: false, reason: 'the address has a broken %-escape in its path' };
     }
   }
-  const segments = path.replace(/\/+$/, '').replace(/\.git$/i, '').split('/');
+  const caseless = CASELESS_HOSTS.has(host);
+  // `.git` is dropped as the known hosts drop it; elsewhere only its usual lower-case spelling (a server may keep both).
+  const segments = path.replace(/\/+$/, '').replace(caseless ? /\.git$/i : /\.git$/, '').split('/');
   if (host === '' || segments.length === 0 || segments.some((s) => s === '' || s === '.' || s === '..')) {
     return { ok: false, reason: 'the address names no repository path' };
   }
@@ -104,8 +106,9 @@ export function readGitUrl(raw: string): GitUrlReading {
   const repoPath = segments.join('/');
   // On GitHub, GitLab and Bitbucket every spelling names one repository (case too). Elsewhere an scp path is relative to
   // the user's home and an ssh:// one absolute: `host:repo` and `host/repo` are different repositories.
-  if (CASELESS_HOSTS.has(host)) return { ok: true, url, key: `${host}/${repoPath.toLowerCase()}`, name };
-  return { ok: true, url, key: `${host}${scp !== null ? ':' : '/'}${repoPath}`, name };
+  if (caseless) return { ok: true, url, key: `${host}/${repoPath.toLowerCase()}`, name };
+  // Elsewhere the transport is part of it too (an https and an ssh path may map to different repositories).
+  return { ok: true, url, key: `${scp !== null ? 'scp' : url.slice(0, url.indexOf(':'))}://${host}${scp !== null ? ':' : '/'}${repoPath}`, name };
 }
 
 const norm = (s: string): string => s.trim().replace(/\s+/g, ' ').toLowerCase();
@@ -227,25 +230,28 @@ export async function resolveOnboard(block: OnboardBlockBody, turn: OnboardTurn,
   const read = readGitUrl(block.onboard.url);
   // A refused address is never repeated (it may carry a token in any shape): the card names it by where it came from.
   const shown = 'the address given in the chat (not repeated)';
-  // What would refuse any onboarding on this daemon (no garden, an old one, the state home) blocks the card up front.
-  const daemonRefusal = deps.onboardRefusal !== undefined ? await deps.onboardRefusal() : null;
-  if (daemonRefusal !== null) blocked.push(daemonRefusal);
+
   const projects = await deps.projects();
   let project: { id: string; name: string } | null = null;
   const words = block.onboard.project?.trim() ?? '';
   if (words !== '') {
     const m = matchProject(projects, words);
     if ('one' in m) project = m.one;
-    else if ('many' in m) blocked.push(`more than one project is named “${words}” (${m.many.map((p) => `${p.name}, ${p.id}`).join('; ')}): say which`);
+    else if ('many' in m) blocked.push(`more than one project has the name given (${m.many.map((p) => `${p.name}, ${p.id}`).join('; ')}): say which`);
     else {
+      // The seat's words are not repeated (they could carry anything); the projects that exist are.
       const names = projects.map((p) => p.name);
-      blocked.push(`no project is named “${words}”${names.length > 0 ? ` (projects here: ${names.join(', ')})` : ' (there are no projects yet)'}. `
+      blocked.push(`no project has the name given${names.length > 0 ? ` (projects here: ${names.join(', ')})` : ' (there are no projects yet)'}. `
         + 'Create it on Projects → New project, or name one of these, then ask again');
     }
   } else if (turn.chatProjectId !== null) {
     project = projects.find((p) => p.id === turn.chatProjectId) ?? null;
   }
-  const name = (block.onboard.name ?? '').trim() || (read.ok ? read.name : '');
+  const asked = (block.onboard.name ?? '').trim() || (read.ok ? read.name : '');
+  // Only a name crew would register is kept on the card: anything else is refused without repeating it.
+  const nameOk = SAFE_REPO_NAME.test(asked) && asked.length <= 128;
+  const name = nameOk ? asked : '';
+  if (asked !== '' && !nameOk) blocked.push("the name given can't be a repository name (letters, digits, dots, hyphens and underscores; starting with a letter or digit)");
   let existing: { id: string; name: string } | null = null;
   // The address as it was given is never repeated when refused (it may carry a token).
   if (!read.ok) blocked.push(`that address can't be added: ${read.reason}`);
@@ -258,8 +264,14 @@ export async function resolveOnboard(block: OnboardBlockBody, turn: OnboardTurn,
       else if ((await deps.projectRepoRefs(project.id)).some((ref) => ref === same.id || ref === same.name)) {
         blocked.push(`${same.name} is already in ${project.name}; nothing to add`);
       }
+    } else if (name === '') {
+      // Refused above (or no name at all): nothing to register.
+      if (asked === '') blocked.push('no repository name could be read from that address; give one');
     } else {
-      const refused = await newRegistrationRefusal(name, read.key, repos, deps.occupant, deps.checkoutOf(name));
+      // What would refuse any onboarding on this daemon (no garden, an old one, the state home) blocks a NEW one up front;
+      // adding a registered repository to a project needs none of it.
+      const refused = (deps.onboardRefusal !== undefined ? await deps.onboardRefusal() : null)
+        ?? await newRegistrationRefusal(name, read.key, repos, deps.occupant, deps.checkoutOf(name));
       if (refused !== null) blocked.push(refused);
       else {
         const unreadable = await deps.probe(read.url);
@@ -286,7 +298,8 @@ export async function resolveOnboard(block: OnboardBlockBody, turn: OnboardTurn,
       ? { entry: null, title: existing.name, label: `Add to a project · ${existing.name}`, outcome: `Adds the registered ${existing.name} to ${project?.name ?? 'a project'}. Nothing is cloned and no onboarding starts.` }
       : { entry: null, title: name || 'repository', label: `Add a repository · ${name || 'repository'}`, outcome: `Cloned to this computer, registered${into}, and onboarded: its code map is built so jobs and chats can read it.` },
     brief: null,
-    reason: block.reason !== undefined ? scrubbed(block.reason) : null,
+    // The seat's one line, unless it holds anything that could be a credential (an address with an `@`, a query).
+    reason: block.reason !== undefined && !/@|[?&][a-z_]*token=/i.test(block.reason) ? scrubbed(block.reason) : null,
     sources: [],
     repos: [],
     helpers: null,

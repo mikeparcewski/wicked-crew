@@ -5963,7 +5963,8 @@ export function registerRoutes(
       const pending = await considerations.pendingPreface(id, { inForce: rules });
       // A7: a seat is told it can propose a studio theme only when this message carried the tab's appearance (a client
       // that can preview and apply one sends it).
-      const themeClient = { appearance: msgContext?.appearance !== undefined };
+      // crew-0182: this message's own onboard declaration (the chat's stored one changes once the message is accepted).
+      const themeClient = { appearance: msgContext?.appearance !== undefined, onboard: parsed.data.accepts !== undefined ? parsed.data.accepts.includes('onboard') : chatAcceptsOnboard.get(id) === true };
       // DES-CATALOG-002 §2.3, §4.6: the per-message job lines (the chat catalog digest, the open proposal, the held plan),
       // read here, before the last check (no await after it). Never in an analysis.
       // The declaration this message's instructions are written for: its own, else the chat's (applied to the chat only
