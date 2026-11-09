@@ -12,7 +12,7 @@ mentioned only where a daemon release depends on them.
 
 ## [0.18.2] — 2026-11-09
 
-A patch for three first-run failures on a clean install of 0.18.1. Bundles wicked-studio 0.16.2. Needs
+A patch for three first-run failures on a clean install of 0.18.1. Bundles wicked-studio 0.16.2 (wicked-studio#1069). Needs
 wicked-crew-api-types 0.200.0.
 
 ### Added
