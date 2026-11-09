@@ -12,7 +12,7 @@ import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, RosterSeat } from '../src/core/types.js';
 
 const ARGV = ['/fixture/docker', 'run', '-it', '--rm', 'login-image', 'codex', 'login'];
-const ROSTER = [{ key: 'codex', display_name: 'Codex' }, { key: 'agy', display_name: 'Antigravity' }] as RosterSeat[];
+const ROSTER = [{ key: 'codex', display_name: 'Codex' }, { key: 'pi', display_name: 'Pi' }, { key: 'claude', display_name: 'Claude Code' }, { key: 'agy', display_name: 'Antigravity' }] as RosterSeat[];
 const apps: FastifyInstance[] = [];
 
 beforeEach(() => {
@@ -38,9 +38,12 @@ function build() {
   const invalidate = vi.spyOn(containerStatus, 'invalidate');
   const reprobe = vi.fn();
   const roster = Object.assign(() => ROSTER, { reprobe, containerStatus }) as RosterWithStanding;
+  // Closing a terminal ends its process: the PTY's exit is emitted, as the real adapter does.
+  const closeTerminal = vi.fn(async (id: string) => { emit(id); });
   const adapter = {
     dbPath: '/fixture/state/core.db',
     openTerminal,
+    closeTerminal,
     onEvent: (listener: (event: CoreEvent) => void) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -51,7 +54,7 @@ function build() {
     seatHealth: new SeatHealthTracker(), signedIn: () => null, rosterWithStanding: roster, seatLoginExec: exec,
   });
   apps.push(app);
-  return { app, openTerminal, exec, emit, listeners, reprobe, invalidate };
+  return { app, openTerminal, closeTerminal, exec, emit, listeners, reprobe, invalidate };
 }
 
 const URL = '/api/v1/seats/codex/container-login';
@@ -275,5 +278,79 @@ describe('container seat login routes', () => {
     // A failed sign-out may still have changed the broker: the next reading is its own (codex crew-r1).
     expect(invalidate).toHaveBeenCalledTimes(2);
     expect(reprobe).toHaveBeenCalledTimes(2);
+  });
+
+  // crew-0182: pi keeps running after /login, so the person closes the window. A finished sign-in survives that.
+  describe('closing the sign-in window', () => {
+    const PI = '/api/v1/seats/pi/container-login';
+    const ingests = (exec: ReturnType<typeof build>['exec']) => exec.mock.calls.filter(([, args]) => args[1] === 'ingest');
+
+    it('closing an open host sign-in ingests what it saved, for that same sign-in', async () => {
+      const { app, exec, closeTerminal, listeners } = build();
+      exec.mockImplementation(async (_file, args) => ({
+        stdout: args[1] === 'argv' ? JSON.stringify(ARGV) : JSON.stringify({ cli: 'pi', files: ['pi.auth.json'], expires_at: 99 }), stderr: '',
+      }));
+      expect((await app.inject({ method: 'POST', url: PI })).statusCode).toBe(201);
+      const res = await app.inject({ method: 'DELETE', url: PI });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ closed: true, saved: true });
+      expect(closeTerminal).toHaveBeenCalledWith('term-1');
+      expect(ingests(exec)).toEqual([[ '/fixture/wicked-core', ['seat-login', 'ingest', 'pi'], expect.anything() ]]);
+      expect(listeners.size).toBe(0);
+      expect((await app.inject({ method: 'GET', url: PI })).json()).toEqual({ cli: 'pi', ok: true, files: ['pi.auth.json'], expires_at: 99, at: expect.any(String) });
+      // The seat is free again: a new sign-in opens.
+      expect((await app.inject({ method: 'POST', url: PI })).statusCode).toBe(201);
+    });
+
+    it('closed before any sign-in finished: nothing is saved, and the outcome says so plainly', async () => {
+      const { app, exec } = build();
+      exec.mockImplementation(async (_file, args) => {
+        if (args[1] === 'argv') return { stdout: JSON.stringify(ARGV), stderr: '' };
+        throw Object.assign(new Error('failed'), { code: 1, stderr: 'pi: signed out; missing a supported sign-in (Anthropic Claude Pro/Max)' });
+      });
+      await app.inject({ method: 'POST', url: PI });
+      const res = await app.inject({ method: 'DELETE', url: PI });
+      expect(res.json()).toEqual({ closed: true, saved: false });
+      expect((await app.inject({ method: 'GET', url: PI })).json()).toEqual({
+        cli: 'pi', ok: false, at: expect.any(String),
+        error: 'Nothing was saved: Pi was closed before its sign-in finished. Sign in again; after /login says you are signed in, quit pi (ctrl+d) or close the window.',
+      });
+    });
+
+    it('a sign-out after the window was opened still wins: closing it later ingests nothing', async () => {
+      const { app, exec } = build();
+      await app.inject({ method: 'POST', url: PI });
+      expect((await app.inject({ method: 'POST', url: '/api/v1/seats/pi/container-logout' })).statusCode).toBe(200);
+      expect((await app.inject({ method: 'DELETE', url: PI })).json()).toEqual({ closed: false });
+      expect(ingests(exec)).toHaveLength(0);
+      expect((await app.inject({ method: 'GET', url: PI })).statusCode).toBe(404);
+    });
+
+    it('a sign-out landing while the close ingests runs after it and owns the outcome', async () => {
+      const { app, exec } = build();
+      let release!: () => void;
+      exec.mockImplementation(async (_file, args) => {
+        if (args[1] === 'ingest') await new Promise<void>((r) => { release = r; });
+        return { stdout: args[1] === 'argv' ? JSON.stringify(ARGV) : JSON.stringify({ cli: 'pi', files: [], expires_at: null }), stderr: '' };
+      });
+      await app.inject({ method: 'POST', url: PI });
+      const close = app.inject({ method: 'DELETE', url: PI });
+      await vi.waitFor(() => expect(ingests(exec)).toHaveLength(1));
+      const logout = app.inject({ method: 'POST', url: '/api/v1/seats/pi/container-logout' });
+      await new Promise((r) => setTimeout(r, 20));
+      release();
+      expect((await close).json()).toEqual({ closed: true });
+      expect((await logout).statusCode).toBe(200);
+      expect((await app.inject({ method: 'GET', url: PI })).statusCode).toBe(404);
+    });
+
+    it('closing a container sign-in (claude) still cancels it: no ingest', async () => {
+      const { app, exec, closeTerminal } = build();
+      await app.inject({ method: 'POST', url: '/api/v1/seats/claude/container-login' });
+      expect((await app.inject({ method: 'DELETE', url: '/api/v1/seats/claude/container-login' })).json()).toEqual({ closed: true });
+      expect(closeTerminal).toHaveBeenCalledWith('term-1');
+      await new Promise((r) => setTimeout(r, 20));
+      expect(ingests(exec)).toHaveLength(0);
+    });
   });
 });
