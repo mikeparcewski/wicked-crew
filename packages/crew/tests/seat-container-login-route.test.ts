@@ -344,6 +344,24 @@ describe('container seat login routes', () => {
       expect((await app.inject({ method: 'GET', url: PI })).statusCode).toBe(404);
     });
 
+    it('a second close while the first is still closing waits for the same ingest (one ingest)', async () => {
+      const { app, exec, closeTerminal } = build();
+      let release!: () => void;
+      closeTerminal.mockImplementationOnce(async () => { await new Promise<void>((r) => { release = r; }); });
+      exec.mockImplementation(async (_file, args) => ({
+        stdout: args[1] === 'argv' ? JSON.stringify(ARGV) : JSON.stringify({ cli: 'pi', files: ['pi.auth.json'], expires_at: null }), stderr: '',
+      }));
+      await app.inject({ method: 'POST', url: PI });
+      const first = app.inject({ method: 'DELETE', url: PI });
+      await vi.waitFor(() => expect(closeTerminal).toHaveBeenCalledTimes(1));
+      const second = app.inject({ method: 'DELETE', url: PI });
+      await new Promise((r) => setTimeout(r, 20));
+      release();
+      expect((await first).json()).toEqual({ closed: true, saved: true });
+      expect((await second).json()).toEqual({ closed: true, saved: true });
+      expect(ingests(exec)).toHaveLength(1);
+    });
+
     it('closing a container sign-in (claude) still cancels it: no ingest', async () => {
       const { app, exec, closeTerminal } = build();
       await app.inject({ method: 'POST', url: '/api/v1/seats/claude/container-login' });

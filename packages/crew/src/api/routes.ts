@@ -292,7 +292,7 @@ import {
 import { createDocInProcess, registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { CreateLauncher } from '../interactive/proposal-create.js';
 import { ThemeLauncher } from './proposal-theme.js';
-import { OnboardLauncher, probeGitUrl } from './proposal-onboard.js';
+import { CHAT_GIT_PROTOCOLS, OnboardLauncher, probeGitUrl, withoutCredentials } from './proposal-onboard.js';
 import { RefineLauncher } from '../interactive/proposal-refine.js';
 import { lineageSteps, protectedEdits } from '../interactive/protected-edits.js';
 import type { DocBindingStore } from '../interactive/doc-binding.js';
@@ -319,7 +319,7 @@ import type { DocLedgerSweep } from '../interactive/doc-ledger-sweep.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
 import { resolveLinkedIssues, stripLinkedIssues, type LinkedIssue, type LinkedIssuesResult } from '../core/linked-issues.js';
-import { reRegisterRefusal } from '../projects/repo-guard.js';
+import { mayAttachRepo, reRegisterRefusal } from '../projects/repo-guard.js';
 import type { PmLinkedIssueReader } from '../core/linked-issues.js';
 import type { RunAddress, TrackerAddresses } from '../knowledge/trackers/addresses.js';
 import { registerTrackerActionRoutes } from '../knowledge/trackers/actions.js';
@@ -1890,10 +1890,31 @@ export function registerRoutes(
     : { context: true, proposals: true, create: realCreate, refine: realRefine, theme: true, demo: false, onboard: true };
   const proposalLaunchers = new LaunchOnceRegistry();
   proposalLaunchers.register('theme', new ThemeLauncher());
-  // crew-0182: Go on an onboard card is `POST /repos {gitUrl, projectId}`'s own body (`registerAndOnboard`, below).
+  // crew-0182: what an onboard card is resolved and its Go is checked against (one set of reads for both).
+  const originOf = async (rootPath: string): Promise<string | null> => {
+    try {
+      const out = await execCapped('git', ['-C', rootPath, 'remote', 'get-url', 'origin'], { timeout: 5_000 });
+      return out.stdout.trim() || null;
+    } catch {
+      return null;
+    }
+  };
+  const onboardReads = {
+    repos: () => adapter.listRepos(),
+    projectRepoRefs: async (projectId: string) => (await adapter.projectMembers(projectId)).filter((m) => m.member_kind === 'crew.repo').map((m) => m.member_ref),
+    checkoutOf: (name: string) => homeless(wickedDir('repos', name)),
+    occupant: async (name: string): Promise<string | null> => {
+      const dir = wickedDir('repos', name);
+      if (!existsSync(join(dir, '.git'))) return existsSync(dir) ? '' : null;
+      return (await originOf(dir)) ?? '';
+    },
+  };
+  // Go on an onboard card is `POST /repos {gitUrl, projectId}`'s own body (`registerAndOnboard`, below), its clone held
+  // to https and ssh whatever git's `insteadOf` rewrites say.
   proposalLaunchers.register('onboard', new OnboardLauncher({
+    ...onboardReads,
     sessions: () => adapter.sessions(),
-    register: (data, ctx) => registerAndOnboard(data, { actor: ctx.actor, runId: ctx.runId, log: { warn: (o, m) => app.log.warn(o as object, m) } }),
+    register: (data, ctx) => registerAndOnboard(data, { actor: ctx.actor, runId: ctx.runId, gitProtocols: CHAT_GIT_PROTOCOLS, log: { warn: (o, m) => app.log.warn(o as object, m) } }),
     attach: async (projectId, repoId, actor) => {
       await attachRepoToProject(adapter, projects, { projectId, repoId, actor, attachedBy: 'studio' });
     },
@@ -3232,7 +3253,7 @@ export function registerRoutes(
    */
   const registerAndOnboard = async (
     data: { name: string; gitUrl?: string | undefined; rootPath?: string | undefined; projectId?: string | undefined; channel?: 'studio' | 'cli' | 'api' | undefined; actor?: string | undefined; autoCapture?: boolean | undefined },
-    ctx: { actor: Actor; log: { warn: (o: unknown, m?: string) => void }; runId?: string },
+    ctx: { actor: Actor; log: { warn: (o: unknown, m?: string) => void }; runId?: string; gitProtocols?: string },
   ): Promise<{ status: number; body: Record<string, unknown> }> => {
     const refused = await onboardRefusal();
     if (refused !== null) return { status: refused.status, body: refused.body as Record<string, unknown> };
@@ -3253,7 +3274,9 @@ export function registerRoutes(
       if (gitUrl) {
         // Remote: clone to rootPath (if provided) or default ~/.wicked/repos/<name>,
         // register, and launch onboarding run.
-        repo = await adapter.cloneAndRegister(name, gitUrl, rootPath);
+        repo = ctx.gitProtocols !== undefined
+          ? await adapter.cloneAndRegister(name, gitUrl, rootPath, { allowProtocols: ctx.gitProtocols })
+          : await adapter.cloneAndRegister(name, gitUrl, rootPath);
       } else {
         // Local: register then launch onboarding run.
         repo = await adapter.registerRepo(name, rootPath!);
@@ -3274,7 +3297,8 @@ export function registerRoutes(
   };
   /** crew-0182: the repo joins `projectId` (`crew.repo`) the one way every surface does; a refusal is named, never thrown. */
   const attachToProject = async (repoId: string, projectId: string | undefined, actor: Actor, channel: 'studio' | 'cli' | 'api' | undefined): Promise<{ projectAttached?: true; projectAttachError?: string }> => {
-    if (projectId === undefined || projectId === DEFAULT_PROJECT_ID) return {};
+    // A repo joins a project only by a person (DES-PM-001 Q-PM2): an agent's projectId files the run, as before.
+    if (projectId === undefined || projectId === DEFAULT_PROJECT_ID || !mayAttachRepo(actor)) return {};
     try {
       await attachRepoToProject(adapter, projects, { projectId, repoId, actor, ...(channel !== undefined ? { attachedBy: channel } : {}) });
       return { projectAttached: true };
@@ -3297,7 +3321,9 @@ export function registerRoutes(
       try {
         const { repo } = await store.createRepo(name);
         audit.record('repo.created', actorOf(req), { detail: { repoId: repo.id, name } });
-        return reply.code(201).send({ repo, onboardRunId: null });
+        // crew-0182: a projectId puts the new repo in the project, as for every other registration (no onboarding).
+        const attach = await attachToProject(repo.id, parsed.data.projectId, actorOf(req), parsed.data.channel);
+        return reply.code(201).send({ repo, onboardRunId: null, ...attach });
       } catch (err) {
         if (err instanceof AppStoreError) return reply.code(err.status).send({ code: err.code, error: err.message, ...err.extra });
         // A registration the engine refused: the repo was removed again, nothing is left.
@@ -5007,17 +5033,20 @@ export function registerRoutes(
   /** (crew-0182) What a chat seat is told exists here: every project with its repositories, every registered repository. */
   const readDaemonGrounding = async (chatId: string, accepts: ReadonlyArray<'job' | 'onboard'> | undefined): Promise<DaemonGrounding | undefined> => {
     try {
-      const [projectRows, repoRows] = await Promise.all([adapter.projectList().catch(() => []), adapter.listRepos()]);
+      // A read that fails names nothing (never "none yet"): the whole section is left out.
+      const [projectRows, repoRows] = await Promise.all([adapter.projectList(), adapter.listRepos()]);
       const nameOf = new Map(repoRows.map((r) => [r.id, r.name] as const));
-      const live = projectRows.filter((p) => p.id !== DEFAULT_PROJECT_ID && p.status !== 'archived').slice(0, 40);
-      const projectsOut = await Promise.all(live.map(async (p) => ({
+      const live = projectRows.filter((p) => p.id !== DEFAULT_PROJECT_ID && p.status !== 'archived');
+      // Members are read for the projects the statement shows (daemonGroundingLines' cap); the rest are counted.
+      const projectsOut = await Promise.all(live.map(async (p, i) => ({
         id: p.id,
         name: p.name,
-        repos: (await adapter.projectMembers(p.id).catch(() => [])).filter((m) => m.member_kind === 'crew.repo').map((m) => nameOf.get(m.member_ref) ?? m.member_ref),
+        repos: i >= 40 ? [] : (await adapter.projectMembers(p.id)).filter((m) => m.member_kind === 'crew.repo').map((m) => nameOf.get(m.member_ref) ?? m.member_ref),
       })));
       const onboard = chatArtifactFlags.onboard === true && (accepts !== undefined ? accepts.includes('onboard') : chatAcceptsOnboard.get(chatId) === true);
       const text = (v: unknown, or: string): string => (typeof v === 'string' && v !== '' ? v : or);
-      return { projects: projectsOut, repos: repoRows.map((r) => ({ id: r.id, name: text(r.name, r.id), ...(typeof r.git_url === 'string' ? { gitUrl: r.git_url } : {}) })), onboard };
+      // A registered origin carrying a token is never handed to a seat (crew-0182 review).
+      return { projects: projectsOut, repos: repoRows.map((r) => ({ id: r.id, name: text(r.name, r.id), ...(typeof r.git_url === 'string' ? { gitUrl: withoutCredentials(r.git_url) } : {}) })), onboard };
     } catch {
       return undefined;
     }
@@ -5689,19 +5718,10 @@ export function registerRoutes(
     acceptsJobs: (chatId) => chatAccepts.get(chatId) === true,
     acceptsOnboard: (chatId) => chatAcceptsOnboard.get(chatId) === true,
     onboard: {
+      ...onboardReads,
       projects: async () => (await adapter.projectList()).filter((p) => p.id !== DEFAULT_PROJECT_ID && p.status !== 'archived').map((p) => ({ id: p.id, name: p.name })),
-      repos: () => adapter.listRepos(),
-      projectRepoRefs: async (projectId) => (await adapter.projectMembers(projectId)).filter((m) => m.member_kind === 'crew.repo').map((m) => m.member_ref),
-      originOf: async (rootPath) => {
-        try {
-          const out = await execCapped('git', ['-C', rootPath, 'remote', 'get-url', 'origin'], { timeout: 5_000 });
-          return out.stdout.trim() || null;
-        } catch {
-          return null;
-        }
-      },
+      originOf,
       probe: (url) => probeGitUrl(url),
-      checkoutOf: (name) => homeless(wickedDir('repos', name)),
     },
     served: (projectId) => servedFor(shapeReads, projectId ?? undefined),
     turnLive: (chatId, turnId) => chatTurns.turnsOf(chatId).some((t) => t.turnId === turnId),

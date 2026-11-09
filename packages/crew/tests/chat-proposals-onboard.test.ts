@@ -17,7 +17,7 @@ import {
   type ProposalDispatcher,
 } from '../src/api/chat-proposals.js';
 import { ThemeLauncher } from '../src/api/proposal-theme.js';
-import { matchProject, OnboardLauncher, probeVerdict, readGitUrl } from '../src/api/proposal-onboard.js';
+import { matchProject, OnboardLauncher, probeVerdict, readGitUrl, withoutCredentials } from '../src/api/proposal-onboard.js';
 import { chatScopeStatement, daemonGroundingLines } from '../src/api/chat-scope.js';
 
 const ME: Actor = { id: 'maria', kind: 'human', trust: 'operator' };
@@ -66,6 +66,7 @@ interface Rig {
   registered: Array<{ data: Record<string, unknown>; ctx: { actor: Actor; runId: string } }>;
   registerAnswer: { status: number; body: Record<string, unknown> };
   attached: Array<{ projectId: string; repoId: string; actor: string }>;
+  occupants: Map<string, string>;
 }
 
 function rig(): Rig {
@@ -96,18 +97,34 @@ function rig(): Rig {
     registered: [],
     registerAnswer: { status: 201, body: { onboardRunId: 'x', projectAttached: true } },
     attached: [],
+    occupants: new Map(),
   };
   const registry = new LaunchOnceRegistry();
   for (const k of ['create', 'refine', 'demo'] as const) registry.register(k, r.launcher);
   registry.register('theme', new ThemeLauncher());
   registry.register('onboard', new OnboardLauncher({
     sessions: async () => r.sessions,
+    repos: async () => r.repos,
+    projectRepoRefs: async (id) => r.members.get(id) ?? [],
+    occupant: async (name) => r.occupants.get(name) ?? null,
+    checkoutOf: (name) => `~/.wicked/repos/${name}`,
     register: async (data, ctx) => {
       r.registered.push({ data, ctx });
-      if (r.registerAnswer.status === 201) r.sessions.push(ctx.runId);
-      return r.registerAnswer;
+      const a = r.registerAnswer;
+      // As POST /repos does: the repo is registered on a 201 (its folder cloned), a run exists only when onboarding
+      // started, and the repo joins the project only when crew says it attached.
+      if (a.status === 201) {
+        if (!r.repos.some((x) => x.name === data.name)) r.repos.push(repo(data.name));
+        r.occupants.set(data.name, data.gitUrl);
+        if (typeof a.body['onboardRunId'] === 'string') r.sessions.push(ctx.runId);
+        if (a.body['projectAttached'] === true && data.projectId !== undefined) r.members.set(data.projectId, [...(r.members.get(data.projectId) ?? []), data.name]);
+      }
+      return a;
     },
-    attach: async (projectId, repoId, actor) => { r.attached.push({ projectId, repoId, actor: actor.id }); },
+    attach: async (projectId, repoId, actor) => {
+      r.attached.push({ projectId, repoId, actor: actor.id });
+      r.members.set(projectId, [...(r.members.get(projectId) ?? []), repoId]);
+    },
   }));
   const deps: ChatProposalDeps = {
     flags: () => ({ context: true, proposals: true, create: true, refine: true, theme: true, demo: true, onboard: r.onboardOn }),
@@ -119,6 +136,7 @@ function rig(): Rig {
       originOf: async (root) => r.origins.get(root) ?? null,
       probe: async (url) => { r.probed.push(url); return r.probeAnswer; },
       checkoutOf: (name) => `~/.wicked/repos/${name}`,
+      occupant: async (name) => r.occupants.get(name) ?? null,
     },
     catalog: CATALOG_SEEDS,
     records: (c) => [...(r.records.get(c) ?? [])],
@@ -191,6 +209,10 @@ describe('git addresses', () => {
     expect(readGitUrl(URL)).toEqual({ ok: true, url: URL, key: 'github.com/mikeparcewski/wicked-studio', name: 'wicked-studio' });
     expect(readGitUrl('git@github.com:mikeparcewski/wicked-studio.git')).toMatchObject({ ok: true, key: 'github.com/mikeparcewski/wicked-studio', name: 'wicked-studio' });
     expect(readGitUrl('ssh://git@GitHub.com/mikeparcewski/Wicked-Studio/')).toMatchObject({ ok: true, key: 'github.com/mikeparcewski/wicked-studio', name: 'Wicked-Studio' });
+    // Elsewhere the path's case and a non-git ssh user name a different repository (review r1).
+    expect(readGitUrl('https://git.example.com/Team/Repo.git')).toMatchObject({ ok: true, key: 'git.example.com/Team/Repo' });
+    expect(readGitUrl('alice@host.example:repo.git')).toMatchObject({ ok: true, key: 'alice@host.example/repo' });
+    expect(readGitUrl('bob@host.example:repo.git')).toMatchObject({ ok: true, key: 'bob@host.example/repo' });
   });
 
   it.each([
@@ -201,6 +223,9 @@ describe('git addresses', () => {
     ['https://user:tok@github.com/a/b.git', /user name or token/],
     ['https://github.com/', /no repository path/],
     ['git@github.com:a/../b', /no repository path/],
+    ['https://github.com/a/b%ZZ', /broken %-escape/],
+    ['-oProxyCommand=x@host:a/b', /not a git address/],
+    ['git@-host:a/b', /not a git address/],
   ])('refuses %s', (raw, why) => {
     const r = readGitUrl(raw);
     expect(r.ok).toBe(false);
@@ -231,6 +256,17 @@ describe('the chat statement names what exists here', () => {
     expect(text).toContain('"wicked labs" is the project named "Wicked Labs"');
     expect(text).toContain('{"onboard":{"url":');
     expect(text).toMatch(/do NOT say\s+this chat can't do it/);
+  });
+
+  it('never hands a seat a token from a registered origin, and says how many projects it left out', () => {
+    const text = daemonGroundingLines({
+      projects: Array.from({ length: 42 }, (_, i) => ({ id: `p${i}`, name: `P${i}`, repos: [] })),
+      repos: [{ id: 'r', name: 'r', gitUrl: 'https://me:ghp_secret123@github.com/o/r.git' }],
+      onboard: true,
+    }).join('\n');
+    expect(text).not.toContain('ghp_secret123');
+    expect(text).toContain('**r** (`r`): https://github.com/o/r.git');
+    expect(text).toContain('- and 2 more projects');
   });
 
   it('points to studio\'s Add a repository for a client that does not', () => {
@@ -340,15 +376,71 @@ describe('onboard proposals', () => {
     expect(parseMakeBlock(JSON.stringify({ ...block, theme: { name: 'x', patch: { theme: 'wicked-dark' } } }))).toBeNull();
   });
 
-  it('a refused registration or onboarding start fails the Go with the reason (Go again resumes)', async () => {
+  it('a refused registration or onboarding start fails the Go with the reason; Go again finishes it once fixed', async () => {
     const r = rig();
     const p = (await propose(r, 'c1', chatWith(r, 'c1'), block))!;
     r.registerAnswer = { status: 400, body: { error: "fatal: could not read Username for 'https://github.com': terminal prompts disabled" } };
     const go = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
     expect(go.code).toBe(502);
     expect(go.body).toMatchObject({ code: 'launch_failed', error: expect.stringMatching(/wicked-studio was not added: fatal: could not read Username/) });
-    r.registerAnswer = { status: 201, body: { onboardRunId: null, onboardError: 'garden is too old' } };
+    // Registered (and attached), but onboarding could not start: said so, and the card stays open to Go again.
+    r.registerAnswer = { status: 201, body: { onboardRunId: null, onboardError: 'garden is too old', projectAttached: true } };
     const again = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
     expect(again.body).toMatchObject({ error: expect.stringMatching(/registered in Wicked Labs, but onboarding could not start: garden is too old/) });
+    expect(r.sessions).toEqual([]);
+    // Fixed: Go again registers the same repository again (its own earlier registration, not a refusal) and starts it.
+    r.registerAnswer = { status: 201, body: { onboardRunId: 'x', projectAttached: true } };
+    const done = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
+    expect(done.code, JSON.stringify(done.body)).toBe(200);
+    expect(r.registered).toHaveLength(3);
+    expect(r.sessions).toEqual([r.registered[2]!.ctx.runId]);
+  });
+
+  it('a Go whose run started but whose attach did not land finishes the attach on Go again, never registering twice', async () => {
+    const r = rig();
+    const p = (await propose(r, 'c1', chatWith(r, 'c1'), block))!;
+    r.registerAnswer = { status: 201, body: { onboardRunId: 'x', projectAttachError: 'project busy' } };
+    const go = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
+    expect(go.body).toMatchObject({ code: 'launch_failed', error: expect.stringMatching(/onboarding started, but it was not added to Wicked Labs: project busy\. Go again adds it/) });
+    const again = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
+    expect(again.code, JSON.stringify(again.body)).toBe(200);
+    expect(r.registered).toHaveLength(1);
+    expect(r.attached).toEqual([{ projectId: 'proj_labs', repoId: 'wicked-studio', actor: 'maria' }]);
+  });
+
+  it('a name whose registry id is taken (core slugs it) or whose clone folder holds another checkout blocks, on the card and on Go', async () => {
+    const r = rig();
+    r.repos = [repo('foo-bar', { name: 'foo-bar', root_path: '/srv/foo-bar' })];
+    expect(await propose(r, 'c1', chatWith(r, 'c1'), { onboard: { url: 'https://github.com/o/foo_bar.git', project: 'Ops' } }))
+      .toMatchObject({ blocked: 'a different repository is already registered as “foo-bar”; give this one another name' });
+    r.repos = [];
+    r.occupants.set('wicked-studio', 'https://github.com/someone-else/other.git');
+    expect(await propose(r, 'c2', chatWith(r, 'c2'), block)).toMatchObject({ blocked: '~/.wicked/repos/wicked-studio already holds another checkout; give this one another name' });
+    // The registry moved after the card was drawn: Go refuses before anything is registered.
+    r.occupants.clear();
+    const p = (await propose(r, 'c3', chatWith(r, 'c3'), block))!;
+    expect(p.blocked).toBeNull();
+    r.repos = [repo('wicked-studio', { root_path: '/srv/elsewhere' })];
+    const go = await r.svc.decide('c3', p.pid, { decision: 'go' }, ME, 'i1');
+    expect(go.body).toMatchObject({ code: 'launch_failed', error: expect.stringMatching(/wicked-studio was not added: a different repository is already registered/) });
+    expect(r.registered).toHaveLength(0);
+  });
+
+  it('a repository registered under another name is found by its checkout\'s origin', async () => {
+    const r = rig();
+    r.repos = [repo('studio-checkout', { root_path: '/srv/studio-checkout' })];
+    r.origins.set('/srv/studio-checkout', 'git@github.com:mikeparcewski/Wicked-Studio.git');
+    expect(await propose(r, 'c1', chatWith(r, 'c1'), block)).toMatchObject({ blocked: null, onboard: { existing: { id: 'studio-checkout' } } });
+  });
+
+  it('an address carrying a token is refused without repeating it', async () => {
+    const r = rig();
+    const p = (await propose(r, 'c1', chatWith(r, 'c1'), { onboard: { url: 'https://me:ghp_secret123@github.com/o/r.git', project: 'Ops' } }))!;
+    expect(JSON.stringify(p)).not.toContain('ghp_secret123');
+    expect(p.blocked).toMatch(/that address can't be added: the address carries a user name or token/);
+    expect(withoutCredentials('https://me:ghp_secret123@github.com/o/r.git')).toBe('https://github.com/o/r.git');
+    expect(withoutCredentials('ssh://git@github.com/o/r.git')).toBe('ssh://git@github.com/o/r.git');
+    expect(withoutCredentials('git@github.com:o/r.git')).toBe('git@github.com:o/r.git');
   });
 });
+

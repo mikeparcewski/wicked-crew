@@ -3310,7 +3310,7 @@ export class CoreAdapter {
    * Clone a remote git URL and return the persisted `RepoEntry` from registration.
    * `checkoutPath` overrides the default clone destination (`~/.wicked/repos/<name>`).
    */
-  async cloneAndRegister(name: string, gitUrl: string, checkoutPath?: string): Promise<RepoEntry> {
+  async cloneAndRegister(name: string, gitUrl: string, checkoutPath?: string, opts: { allowProtocols?: string } = {}): Promise<RepoEntry> {
     const reposRoot = wickedDir('repos');
     let cloneDir: string;
     if (checkoutPath) {
@@ -3363,7 +3363,7 @@ export class CoreAdapter {
           timeout: 5 * 60 * 1000,
           // crew-0182: a repository that needs a sign-in fails in seconds with git's own reason, instead of waiting on a
           // credential prompt no one can answer until the 5-minute timeout.
-          env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+          env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...(opts.allowProtocols !== undefined ? { GIT_ALLOW_PROTOCOL: opts.allowProtocols } : {}) },
         });
       } catch (err) {
         // Cleanup is best-effort: swallow any cleanup error so the original

@@ -56,6 +56,7 @@ import type { ChatScope, ChatScopeRepo, ChatScopeRequestKind, RepoEntry } from '
 import { freshnessClause, type CheckoutFreshness, type FreshenCheckout } from './chat-freshness.js';
 import { estateExe, parseEstateTotals, resolveProjectGraphBinding, type ProjectGraphBindingDecision } from '../projects/graph.js';
 import type { ChatRefusalSource } from './seat-standing.js';
+import { withoutCredentials } from './proposal-onboard.js';
 
 /** The engine's per-seat answer to the pool's `chat_open` (`ChatSeatOutcome` on the wire). */
 export interface ChatSeatOutcomeLike {
@@ -1133,7 +1134,7 @@ export function daemonGroundingLines(g: DaemonGrounding): string[] {
     ...(g.projects.length > projects.length ? [`- and ${g.projects.length - projects.length} more projects`] : []),
     '',
     repos.length === 0 ? 'Registered repositories: none yet.' : 'Registered repositories:',
-    ...repos.map((r) => `- **${clip(r.name, 80)}** (\`${r.id}\`)${r.gitUrl !== undefined ? `: ${clip(r.gitUrl, 200)}` : ''}`),
+    ...repos.map((r) => `- **${clip(r.name, 80)}** (\`${r.id}\`)${r.gitUrl !== undefined ? `: ${clip(withoutCredentials(r.gitUrl), 200)}` : ''}`),
     ...(g.repos.length > repos.length ? [`- and ${g.repos.length - repos.length} more repositories`] : []),
     '',
     '## Adding a repository',

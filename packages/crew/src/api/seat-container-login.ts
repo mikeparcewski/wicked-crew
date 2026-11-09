@@ -509,17 +509,20 @@ export function registerSeatContainerLoginRoutes(app: FastifyInstance, input: Se
       session.terminalId = termId;
       if (containerSignInOn(cli) === 'host') {
         const id = termId;
-        session.finish = async () => {
+        session.finish = () => {
+          // One close-and-ingest per sign-in, memoized before its first await: a second close waits for the same one.
           if (!completed) {
             completed = true;
             closedEarly = true;
             session.exited = true;
             stop();
-            // Closing the terminal ends the CLI; whatever it already saved stays in its throwaway home for the ingest.
-            try { await adapter.closeTerminal(id); } catch { /* already exited */ }
-            ingesting = ingest();
+            ingesting = (async () => {
+              // Closing the terminal ends the CLI; whatever it already saved stays in its throwaway home for the ingest.
+              try { await adapter.closeTerminal(id); } catch { /* already exited */ }
+              await ingest();
+            })();
           }
-          await ingesting;
+          return ingesting ?? Promise.resolve();
         };
       }
       if (loginGeneration.get(cli) !== generation) {
