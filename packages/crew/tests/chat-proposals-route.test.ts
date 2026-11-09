@@ -201,9 +201,9 @@ describe('chat proposals (server, A2)', () => {
     // and the test configuration stubs it with the rest (A3: `stubOps` names the stubbed kinds). A theme starts no run,
     // so its launcher is real everywhere (A7).
     expect(((await prod.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse).capabilities?.chatArtifacts)
-      .toEqual({ context: true, proposals: true, create: false, refine: false, theme: true, demo: false });
+      .toEqual({ context: true, proposals: true, create: false, refine: false, theme: true, demo: false, onboard: true });
     expect(((await stub.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse).capabilities?.chatArtifacts)
-      .toEqual({ context: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps: ['create', 'refine', 'demo'] });
+      .toEqual({ context: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps: ['create', 'refine', 'demo'], onboard: true });
   });
 
   it('production: the seat is told nothing about making, and a block is cut from the reply but makes no card', async () => {

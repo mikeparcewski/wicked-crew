@@ -37,7 +37,7 @@ function routes(withStore = true) {
     }),
     launchOnboardingRun: vi.fn(async () => 'run-onboard'),
     ping: vi.fn(async () => 'ok'),
-    projectMemberAttach: vi.fn(),
+    projectMemberAttach: vi.fn(async () => ({ member: { attached_at: 1 }, created: true })),
   };
   const store = new AppStore({
     stateFile: join(dir, 'daemon-apps.json'),
@@ -71,6 +71,15 @@ describe('POST /api/v1/repos {create: true}', () => {
     const env = { ...process.env, GIT_DIR: join(root, '.git'), GIT_CONFIG_GLOBAL: '/dev/null' };
     const log = execFileSync('git', ['log', '--format=%T', 'refs/heads/main'], { env }).toString().trim().split('\n');
     expect(log).toEqual(['4b825dc642cb6eb9a060e54bf8d69288fbee4904']); // one commit, the empty tree
+  });
+
+  // crew-0182 review: projectId on a create puts the new repo in the project too (no onboarding).
+  it('a projectId puts the new repo in the project', async () => {
+    const { app, adapter } = routes();
+    const res = await app.inject({ method: 'POST', url: '/api/v1/repos', payload: { name: 'demo', create: true, projectId: 'p1' } });
+    expect(res.statusCode).toBe(201);
+    expect(res.json()).toMatchObject({ onboardRunId: null, projectAttached: true });
+    expect(adapter.projectMemberAttach).toHaveBeenCalledExactlyOnceWith('p1', 'crew.repo', 'r-demo', undefined, undefined);
   });
 
   it('refuses a taken name with a suggestion, a reserved one, and create beside a path or URL', async () => {

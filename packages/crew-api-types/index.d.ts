@@ -446,6 +446,12 @@ export interface ChatArtifactsCapabilities {
    * before this field, `stub: true` meant every kind.
    */
   stubOps?: ArtifactProposalKind[];
+  /**
+   * (api-types 0.200.0, crew 0.18.2) A seat may propose adding a git repository to a project (`onboard` proposals). A
+   * client that draws those cards declares `accepts: ['onboard']` on the chat's open and each message; crew tells the
+   * seat about them only then (else it points the person to Repositories → Add a repository). ABSENT on an older daemon.
+   */
+  onboard?: boolean;
 }
 
 // ── A run's working document (program DES-POWER-MODE §8.3, §9; api-types 0.148.0) ──────────────────
@@ -8871,7 +8877,7 @@ export interface ChatOpenBody {
   seed?: ChatSeed;
   requestId?: string;
   /** (api-types 0.192.0) As {@link ChatMessageBody.accepts}. */
-  accepts?: Array<'job'>;
+  accepts?: Array<'job' | 'onboard'>;
 }
 
 /** The scope a `POST /chats` caller may name (api-types 0.39.0, studio#323 R4). */
@@ -9530,7 +9536,26 @@ export interface ChatSeed {
 /** What a proposal makes. `create` and `demo` come from a catalog entry; `refine` changes a document; `theme` is a
  *  studio appearance patch. (api-types 0.192.0) `job`: work from the v2 catalog whose launch is a run, a compose or a
  *  demo (DES-CATALOG-002 §4.6). */
-export type ArtifactProposalKind = 'create' | 'refine' | 'theme' | 'demo' | 'job';
+export type ArtifactProposalKind = 'create' | 'refine' | 'theme' | 'demo' | 'job' | 'onboard';
+
+/**
+ * (api-types 0.200.0, crew 0.18.2) An `onboard` proposal: register a git repository (cloned to `checkout`), add it to a
+ * project and start its onboarding, all on the person's one Go — the same path as `POST /repos {gitUrl, projectId}`.
+ * `existing` names an already-registered repository with this address: Go then only adds it to the project (nothing is
+ * cloned and no onboarding starts). Every field is crew's resolution; the seat only named the address and the project.
+ */
+export interface ProposalOnboard {
+  /** The git address as it will be cloned (`https://…`, `ssh://…` or `git@host:owner/repo`). */
+  url: string;
+  /** The registry name (and default checkout folder name). */
+  name: string;
+  /** Where it is cloned, home-relative (`~/.wicked/repos/<name>`); `null` for an existing registration. */
+  checkout: string | null;
+  /** The project it joins; `null` = none (registered unfiled). */
+  projectId: string | null;
+  projectName: string | null;
+  existing: { id: string; name: string } | null;
+}
 
 /** One "From" chip: a source the block named, as crew resolved and authorized it. */
 export interface ProposalSource {
@@ -9623,6 +9648,8 @@ export interface ArtifactProposal {
   theme?: { name: string; patch: Record<string, string | number | boolean>; changes: string[] };
   /** demo: the app address (from the person's words), the audience and what to show. */
   demo?: { url: string; audience: string | null; show: string | null };
+  /** (api-types 0.200.0) onboard: the repository, where it goes and the project it joins. */
+  onboard?: ProposalOnboard;
   /** Go is refused with this reason ("Needs a second helper to check it"); the card shows it. `null` = Go is open. */
   blocked: string | null;
   // ── (api-types 0.192.0, DES-CATALOG-002 §4.6) a `job`, and a `create` from the v2 catalog ──
@@ -9968,8 +9995,9 @@ export interface ChatMessageBody {
    */
   context?: ChatMessageContext;
   /** (api-types 0.192.0, DES-CATALOG-002 §4.6) What this client renders: `['job']` once it draws job proposals. Crew makes
-   *  job proposals only for a chat whose newest declaration accepts them. Send only where `chatJobProposals` is true. */
-  accepts?: Array<'job'>;
+   *  job proposals only for a chat whose newest declaration accepts them. Send only where `chatJobProposals` is true.
+   *  (api-types 0.200.0) `'onboard'`: it draws onboard proposals; send only where `chatArtifacts.onboard` is true. */
+  accepts?: Array<'job' | 'onboard'>;
 }
 
 /** {@link ChatMessageBody.context} (api-types 0.169.0). */
@@ -17863,6 +17891,10 @@ export interface RegisterRepoBody {
   rootPath?: string;
   gitUrl?: string;
   create?: true;
+  /** The project the onboarding run is filed in. (crew 0.18.2) For a person, the repo also joins it (`crew.repo`, as
+   *  `POST /projects/:id/members`, a person's only): the 201 says `projectAttached: true` when it did, and
+   *  `projectAttachError` names what failed (with `projectAttached: true`, only the run's filing). An agent's
+   *  `projectId` (and `default`) files the run only: neither field. The repo stays registered either way. */
   projectId?: string;
   channel?: 'studio' | 'cli' | 'api';
   actor?: string;

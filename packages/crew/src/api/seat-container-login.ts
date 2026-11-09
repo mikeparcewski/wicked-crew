@@ -113,6 +113,20 @@ export function signInFailure(stderr: string, cli: string): { code: SeatSignInFa
   return { code: 'signin_failed', error: loginDetail(stderr) || 'Sign-in failed. Try again.' };
 }
 
+/** The engine's ingest refusal when the sign-in home holds no credential (`seat_login.rs` `missing`). */
+export function notSignedIn(stderr: string): boolean {
+  return /signed out; missing/i.test(stderr);
+}
+
+/** A host sign-in closed before it finished: nothing was saved, and how to finish next time. */
+export function closedBeforeSignIn(cli: string): string {
+  const name = ({ codex: 'Codex', pi: 'Pi', opencode: 'OpenCode' } as Record<string, string>)[cli] ?? cli;
+  const finish = cli === 'pi'
+    ? 'after /login says you are signed in, quit pi (ctrl+d) or close the window'
+    : `let ${cli} finish: the window closes by itself`;
+  return `Nothing was saved: ${name} was closed before its sign-in finished. Sign in again; ${finish}.`;
+}
+
 /** Fifteen minutes allows browser/device approval but bounds an abandoned dialog's reservation. */
 export const SIGNIN_MAX_AGE_MS = 15 * 60_000;
 export type LoginContainer = { runtime: string; name: string };
@@ -328,6 +342,9 @@ export function registerSeatContainerLoginRoutes(app: FastifyInstance, input: Se
   const openLogins = new Map<string, {
     generation: number; openedAt: number; terminalId: string | null; exited: boolean;
     container: LoginContainer | null; stop?: () => void;
+    /** (crew-0182) A HOST sign-in whose terminal is open: close it and ingest for this same generation. A host CLI
+     *  such as pi keeps running after its sign-in finished, so closing the view is how the person ends it. */
+    finish?: (() => Promise<void>) | undefined;
   }>();
   const release = (cli: string, generation: number): void => {
     if (openLogins.get(cli)?.generation === generation) openLogins.delete(cli);
@@ -355,13 +372,23 @@ export function registerSeatContainerLoginRoutes(app: FastifyInstance, input: Se
     await Promise.all([...openLogins.keys()].map(abandonLogin));
   });
 
+  /** Closing the view: an open host sign-in is finished (what it saved is kept), anything else is cancelled. */
+  const closeLogin = async (cli: string): Promise<{ closed: boolean; saved?: boolean }> => {
+    const session = openLogins.get(cli);
+    if (session?.finish === undefined) return { closed: await abandonLogin(cli) };
+    await session.finish();
+    // The outcome this generation recorded (a newer sign-in or a sign-out may own the seat by now: then nothing).
+    const outcome = containerLoginOutcomes.get(cli);
+    return { closed: true, ...(outcome !== undefined && loginGeneration.get(cli) === session.generation ? { saved: outcome.ok } : {}) };
+  };
+
   app.delete(
     `${V}/seats/:cli/container-login`,
-    { config: { manifest: { responseType: '{ closed: boolean }', statusCodes: [200, 404] } } },
+    { config: { manifest: { responseType: '{ closed: boolean; saved?: boolean }', statusCodes: [200, 404] } } },
     async (req, reply) => {
       const { cli } = req.params as { cli: string };
       if (!containerSeat(cli)) return reply.code(404).send(failureBody(`container login unavailable for seat: ${cli}`, cli));
-      return reply.send({ closed: await abandonLogin(cli) });
+      return reply.send(await closeLogin(cli));
     },
   );
 
@@ -388,7 +415,7 @@ export function registerSeatContainerLoginRoutes(app: FastifyInstance, input: Se
       }
       // Reserved BEFORE the first await: a sign-out that lands meanwhile wins.
       const generation = bump(cli);
-      const session = { generation, openedAt: Date.now(), terminalId: null as string | null, exited: false, container: null as LoginContainer | null, stop: () => {} };
+      const session = { generation, openedAt: Date.now(), terminalId: null as string | null, exited: false, container: null as LoginContainer | null, stop: () => {}, finish: undefined as (() => Promise<void>) | undefined };
       openLogins.set(cli, session);
       containerLoginOutcomes.delete(cli);
       const out = await serial(cli, () => runSeatLogin('argv', cli, seatLoginDeps));
@@ -416,6 +443,9 @@ export function registerSeatContainerLoginRoutes(app: FastifyInstance, input: Se
       let termId: string | null = null;
       let completed = false;
       const exitedEarly = new Set<string>();
+      // The person closed an open host sign-in (its ingest reads what the CLI saved before it was closed).
+      let closedEarly = false;
+      let ingesting: Promise<void> | null = null;
       const ingest = (): Promise<void> => serial(cli, async () => {
         // A newer sign-in or a sign-out superseded this terminal: nothing to ingest or record.
         if (loginGeneration.get(cli) !== generation) return;
@@ -427,7 +457,7 @@ export function registerSeatContainerLoginRoutes(app: FastifyInstance, input: Se
         containerStatus.invalidate(cli);
         rosterWithStanding.reprobe?.(cli);
         const outcome: SeatContainerLoginOutcome = { cli, ok: result.rc === 0, at: new Date().toISOString() };
-        if (result.rc !== 0) outcome.error = loginError(result.stderr);
+        if (result.rc !== 0) outcome.error = closedEarly && notSignedIn(result.stderr) ? closedBeforeSignIn(cli) : loginError(result.stderr);
         else {
           try {
             const value = JSON.parse(result.stdout) as { files?: unknown; expires_at?: unknown } | null;
@@ -459,7 +489,7 @@ export function registerSeatContainerLoginRoutes(app: FastifyInstance, input: Se
         completed = true;
         session.exited = true;
         stop();
-        void ingest();
+        ingesting = ingest();
       };
       // Subscribe before spawn: an immediate exit still needs exactly one ingest.
       const stop = adapter.onEvent((event) => {
@@ -477,6 +507,24 @@ export function registerSeatContainerLoginRoutes(app: FastifyInstance, input: Se
         return reply.code(400).send(failureBody(message(err), cli));
       }
       session.terminalId = termId;
+      if (containerSignInOn(cli) === 'host') {
+        const id = termId;
+        session.finish = () => {
+          // One close-and-ingest per sign-in, memoized before its first await: a second close waits for the same one.
+          if (!completed) {
+            completed = true;
+            closedEarly = true;
+            session.exited = true;
+            stop();
+            ingesting = (async () => {
+              // Closing the terminal ends the CLI; whatever it already saved stays in its throwaway home for the ingest.
+              try { await adapter.closeTerminal(id); } catch { /* already exited */ }
+              await ingest();
+            })();
+          }
+          return ingesting ?? Promise.resolve();
+        };
+      }
       if (loginGeneration.get(cli) !== generation) {
         stop();
         try { await adapter.closeTerminal(termId); } catch { /* already closed */ }

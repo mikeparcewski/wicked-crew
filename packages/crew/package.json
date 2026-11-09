@@ -1,6 +1,6 @@
 {
   "name": "wicked-crew",
-  "version": "0.18.1",
+  "version": "0.18.2",
   "description": "The harness for the coding agents you already use: runs Claude Code, Codex, GitHub Copilot, OpenCode and Pi in sandboxes. By default a different agent reviews the work, and built-in feature, bug-fix, migration, MCP-server and editor-plugin jobs are acceptance-tested before delivery unless a labelled waiver or skip says otherwise. It also connects your databases, files, APIs and issue trackers for apps you build by chat, and agents read a database only through one data gate.",
   "keywords": [
     "coding-agents",
@@ -80,8 +80,8 @@
     "undici": "^6.28.1",
     "vitest": "^5.0.2",
     "wicked-bus": "^2.5.0",
-    "wicked-crew-api-types": "^0.199.0",
-    "wicked-studio": "^0.16.1"
+    "wicked-crew-api-types": "^0.200.0",
+    "wicked-studio": "^0.16.2"
   },
   "engines": {
     "node": ">=22.0.0"

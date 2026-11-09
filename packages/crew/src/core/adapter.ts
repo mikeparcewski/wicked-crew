@@ -78,7 +78,7 @@ import { withFolderFindings } from './repoPaths.js';
 
 
 /** Resolved path under the user's home directory. */
-function wickedDir(...parts: string[]): string {
+export function wickedDir(...parts: string[]): string {
   const home = process.env.HOME ?? process.env.USERPROFILE ?? '/tmp';
   return join(home, '.wicked', ...parts);
 }
@@ -3310,7 +3310,7 @@ export class CoreAdapter {
    * Clone a remote git URL and return the persisted `RepoEntry` from registration.
    * `checkoutPath` overrides the default clone destination (`~/.wicked/repos/<name>`).
    */
-  async cloneAndRegister(name: string, gitUrl: string, checkoutPath?: string): Promise<RepoEntry> {
+  async cloneAndRegister(name: string, gitUrl: string, checkoutPath?: string, opts: { allowProtocols?: string } = {}): Promise<RepoEntry> {
     const reposRoot = wickedDir('repos');
     let cloneDir: string;
     if (checkoutPath) {
@@ -3361,6 +3361,9 @@ export class CoreAdapter {
       try {
         await execCapped('git', ['clone', '--', gitUrl, cloneDir], {
           timeout: 5 * 60 * 1000,
+          // crew-0182: a repository that needs a sign-in fails in seconds with git's own reason, instead of waiting on a
+          // credential prompt no one can answer until the 5-minute timeout.
+          env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...(opts.allowProtocols !== undefined ? { GIT_ALLOW_PROTOCOL: opts.allowProtocols } : {}) },
         });
       } catch (err) {
         // Cleanup is best-effort: swallow any cleanup error so the original
@@ -3384,12 +3387,13 @@ export class CoreAdapter {
    * The run's `workdir` = the repo root; Tool phases run estate commands there.
    * Returns the run id so the UI can navigate directly to it.
    */
-  async launchOnboardingRun(repoId: string, repoName: string): Promise<string> {
+  async launchOnboardingRun(repoId: string, repoName: string, sessionId?: string): Promise<string> {
     // Join an in-flight launch for THIS repo rather than starting a second one. Concurrency across
     // DIFFERENT repos is the point and is untouched; two launches for the SAME repo are a duplicate.
     const inFlight = this.onboardingInFlight.get(repoId);
     if (inFlight) return inFlight;
-    const runId = randomUUID();
+    // crew-0182: a chat proposal names its run (its identity), so a Go again adopts it instead of launching twice.
+    const runId = sessionId ?? randomUUID();
     // Launches are NOT serialized. They used to be, through an `_onboardingChain` promise, because
     // each rewrote the shared `onboarding` overlay before launching. That chain never worked: its
     // own comment claimed "after launch the def is baked into the run's units", and the def is

@@ -22,7 +22,7 @@ import { promises as fsp } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { videoPalette } from '../appearance/video-palette.js';
-import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanGateNoteUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, settingsFilePath, type RunViewsSnapshot } from '../core/adapter.js';
+import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanGateNoteUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, settingsFilePath, wickedDir, type RunViewsSnapshot } from '../core/adapter.js';
 import { codeGraphDb, codeGraphErrorStatus, repoFolderMissing, repoFolderMissingBody } from '../core/repoPaths.js';
 import type {
   ConformanceRule,
@@ -136,6 +136,7 @@ import {
   ChatScopeIndex,
   chatScopeDeps,
   chatScopeStatement,
+  type DaemonGrounding,
   prepareChatScratch,
   removeChatScratch,
   namedKindRefusal,
@@ -165,7 +166,7 @@ import { SearchService, registerSearchRoutes } from './search-routes.js';
 import type { FreshenCheckout } from './chat-freshness.js';
 import { TestSetIndex } from '../qe/test-sets.js';
 import { estateExe, parseEstateTotals, readBlastRadiusPages, resolveProjectGraphBinding } from '../projects/graph.js';
-import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
+import { attachRepoToProject, registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { registerProjectAggregateRoutes } from './project-aggregates.js';
 import { composeLaunch, composePreflight, registerProductRoutes } from './product.js';
 import { buildWorkflowCatalogV2, parseCommand, resolveOption } from '../workflow-catalog/build-v2.js';
@@ -291,6 +292,7 @@ import {
 import { createDocInProcess, registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { CreateLauncher } from '../interactive/proposal-create.js';
 import { ThemeLauncher } from './proposal-theme.js';
+import { CHAT_GIT_PROTOCOLS, OnboardLauncher, probeGitUrl, withoutCredentials } from './proposal-onboard.js';
 import { RefineLauncher } from '../interactive/proposal-refine.js';
 import { lineageSteps, protectedEdits } from '../interactive/protected-edits.js';
 import type { DocBindingStore } from '../interactive/doc-binding.js';
@@ -317,7 +319,7 @@ import type { DocLedgerSweep } from '../interactive/doc-ledger-sweep.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
 import { resolveLinkedIssues, stripLinkedIssues, type LinkedIssue, type LinkedIssuesResult } from '../core/linked-issues.js';
-import { reRegisterRefusal } from '../projects/repo-guard.js';
+import { mayAttachRepo, reRegisterRefusal } from '../projects/repo-guard.js';
 import type { PmLinkedIssueReader } from '../core/linked-issues.js';
 import type { RunAddress, TrackerAddresses } from '../knowledge/trackers/addresses.js';
 import { registerTrackerActionRoutes } from '../knowledge/trackers/actions.js';
@@ -443,7 +445,7 @@ import type { AppActionStore } from '../apps/actions/store.js';
 import { AppWritePath } from '../apps/actions/write-path.js';
 import { AppExecutor } from '../apps/exec/executor.js';
 import { localViewerOf, type Viewer } from '../apps/exec/viewer.js';
-import type { Actor as AppsActor } from '../core/types.js';
+import type { Actor, Actor as AppsActor } from '../core/types.js';
 import { registerAppRoutes } from '../apps/routes.js';
 import { AppStoreError, type AppStore } from '../apps/store.js';
 import { registerMcpInspectRoutes } from '../mcp-inspect/routes.js';
@@ -1679,7 +1681,7 @@ export const ChatOpenSchema = z.strictObject({
   }).optional(),
   requestId: z.string().trim().min(1).max(128).optional(),
   /** (api-types 0.192.0) What the client renders (`['job']`). */
-  accepts: z.array(z.literal('job')).max(4).optional(),
+  accepts: z.array(z.enum(['job', 'onboard'])).max(4).optional(),
 }).refine((b) => b.seed === undefined || (b.requestId !== undefined && b.chatId === undefined), {
   path: ['seed'],
   error: 'seed needs requestId and no chatId: the chat id derives from you and the request',
@@ -1884,10 +1886,51 @@ export function registerRoutes(
     'demo',
   ];
   const chatArtifactFlags: import('../core/types.js').ChatArtifactsCapabilities = chatArtifactsStub
-    ? { context: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps }
-    : { context: true, proposals: true, create: realCreate, refine: realRefine, theme: true, demo: false };
+    ? { context: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps, onboard: true }
+    : { context: true, proposals: true, create: realCreate, refine: realRefine, theme: true, demo: false, onboard: true };
   const proposalLaunchers = new LaunchOnceRegistry();
   proposalLaunchers.register('theme', new ThemeLauncher());
+  // crew-0182: what an onboard card is resolved and its Go is checked against (one set of reads for both).
+  const originOf = async (rootPath: string): Promise<string | null> => {
+    try {
+      const out = await execCapped('git', ['-C', rootPath, 'remote', 'get-url', 'origin'], { timeout: 5_000 });
+      return out.stdout.trim() || null;
+    } catch {
+      return null;
+    }
+  };
+  const onboardReads = {
+    repos: () => adapter.listRepos(),
+    projectRepoRefs: async (projectId: string) => (await adapter.projectMembers(projectId)).filter((m) => m.member_kind === 'crew.repo').map((m) => m.member_ref),
+    checkoutOf: (name: string) => homeless(wickedDir('repos', name)),
+    occupant: async (name: string): Promise<string | null> => {
+      const dir = wickedDir('repos', name);
+      if (!existsSync(join(dir, '.git'))) return existsSync(dir) ? '' : null;
+      return (await originOf(dir)) ?? '';
+    },
+  };
+  // Go on an onboard card is `POST /repos {gitUrl, projectId}`'s own body (`registerAndOnboard`, below), its clone held
+  // to https and ssh whatever git's `insteadOf` rewrites say.
+  proposalLaunchers.register('onboard', new OnboardLauncher({
+    ...onboardReads,
+    sessions: () => adapter.sessions(),
+    register: (data, ctx) => registerAndOnboard(data, { actor: ctx.actor, runId: ctx.runId, gitProtocols: CHAT_GIT_PROTOCOLS, log: { warn: (o, m) => app.log.warn(o as object, m) } }),
+    attach: async (projectId, repoId, actor) => {
+      await attachRepoToProject(adapter, projects, { projectId, repoId, actor, attachedBy: 'studio' });
+    },
+    // The onboarding run's filing (as recordOnboardingLaunch files it), idempotent: a Go again after a crash files it.
+    fileRun: async (projectId, runId, actor) => {
+      const { member, created } = await adapter.projectMemberAttach(projectId, 'crew.run', runId, { onboarding: true }, actor.id);
+      projects.index.set(runId, projectId);
+      if (created) {
+        projects.bus?.emit(
+          MEMBERSHIP_ATTACHED,
+          { project_id: projectId, member: { kind: 'crew.run', ref: runId }, actor: actor.id },
+          membershipAttachedKey(projectId, 'crew.run', runId, member.attached_at),
+        );
+      }
+    },
+  }));
   /** (DES-CATALOG-002 §4.6) Job proposals in a chat: on wherever chat proposals are. */
   const chatJobProposalsOn = chatArtifactFlags.proposals;
   if (chatArtifactsStub) {
@@ -3156,12 +3199,12 @@ export function registerRoutes(
    *  the run and names who started it) is always written; with a `projectId` the run joins that
    *  project. The run is LIVE by then, so a filing failure is named in the answer, never a 4xx. */
   const recordOnboardingLaunch = async (
-    req: FastifyRequest,
+    req: { actor: Actor; log: { warn: (o: unknown, m?: string) => void } },
     runId: string,
     repoId: string,
     opts: { projectId?: string | undefined; channel?: string | undefined; actor?: string | undefined; autoCapture?: boolean | undefined },
   ): Promise<string | undefined> => {
-    recordRunLaunched(audit, runTimingIndex, actorOf(req), runId, {
+    recordRunLaunched(audit, runTimingIndex, req.actor, runId, {
       workflow: 'onboarding',
       repoRef: repoId,
       ...(opts.autoCapture === false ? { autoCapture: false } : {}),
@@ -3171,11 +3214,11 @@ export function registerRoutes(
     });
     if (opts.projectId === undefined) return undefined;
     try {
-      const { member } = await adapter.projectMemberAttach(opts.projectId, 'crew.run', runId, { onboarding: true }, actorOf(req).id);
+      const { member } = await adapter.projectMemberAttach(opts.projectId, 'crew.run', runId, { onboarding: true }, req.actor.id);
       projects.index.set(runId, opts.projectId);
       projects.bus?.emit(
         MEMBERSHIP_ATTACHED,
-        { project_id: opts.projectId, member: { kind: 'crew.run', ref: runId }, actor: actorOf(req).id },
+        { project_id: opts.projectId, member: { kind: 'crew.run', ref: runId }, actor: req.actor.id },
         membershipAttachedKey(opts.projectId, 'crew.run', runId, member.attached_at),
       );
       return undefined;
@@ -3215,6 +3258,67 @@ export function registerRoutes(
    * (core has no unregister). A registered repo returns 201 with `onboardRunId: null` and
    * `onboardError` on launch failure, so callers can attach it to their project and retry onboarding.
    */
+  /**
+   * Register (cloning a URL first) and launch onboarding, filing its run and (crew-0182) attaching the repo to
+   * `projectId` through the one attach path ({@link attachRepoToProject}). THE body of `POST /repos`, shared with a chat's
+   * onboarding proposal, so both behave identically. `runId` (internal, a proposal's identity) names the onboarding run.
+   */
+  const registerAndOnboard = async (
+    data: { name: string; gitUrl?: string | undefined; rootPath?: string | undefined; projectId?: string | undefined; channel?: 'studio' | 'cli' | 'api' | undefined; actor?: string | undefined; autoCapture?: boolean | undefined },
+    ctx: { actor: Actor; log: { warn: (o: unknown, m?: string) => void }; runId?: string; gitProtocols?: string },
+  ): Promise<{ status: number; body: Record<string, unknown> }> => {
+    const refused = await onboardRefusal();
+    if (refused !== null) return { status: refused.status, body: refused.body as Record<string, unknown> };
+    const { name, gitUrl, projectId, channel, actor, autoCapture } = data;
+    // First-run C1: `~/code/my-app` (the field's own example) is expanded; a relative or missing folder is refused in plain words.
+    let rootPath = data.rootPath;
+    if (rootPath !== undefined && rootPath !== '') {
+      const read = readRepoPath(rootPath);
+      if (!read.ok) return { status: 400, body: { code: read.code, error: read.error } };
+      rootPath = read.path;
+    }
+    // (DES-PM-001 Q-PM2) Re-pointing an existing repo id at another checkout keeps its projects and tracker links.
+    const repointed = await reRegisterRefusal(ctx.actor, name, rootPath, Boolean(gitUrl), () => adapter.listRepos());
+    if (repointed !== null) return { status: repointed.status, body: repointed.body as Record<string, unknown> };
+    let repo: RepoEntry | undefined;
+    let runId: string;
+    try {
+      if (gitUrl) {
+        // Remote: clone to rootPath (if provided) or default ~/.wicked/repos/<name>,
+        // register, and launch onboarding run.
+        repo = ctx.gitProtocols !== undefined
+          ? await adapter.cloneAndRegister(name, gitUrl, rootPath, { allowProtocols: ctx.gitProtocols })
+          : await adapter.cloneAndRegister(name, gitUrl, rootPath);
+      } else {
+        // Local: register then launch onboarding run.
+        repo = await adapter.registerRepo(name, rootPath!);
+      }
+      runId = ctx.runId !== undefined ? await adapter.launchOnboardingRun(repo.id, name, ctx.runId) : await adapter.launchOnboardingRun(repo.id, name);
+    } catch (err) {
+      if (repo === undefined) return { status: 400, body: registerFailure(message(err), gitUrl ? undefined : rootPath) as Record<string, unknown> };
+      ctx.log.warn({ repoId: repo.id }, `repo registered but onboarding launch failed: ${message(err)}`);
+      // No run exists to record or file (crew#1019); the repo still joins its project.
+      const failure = onboardFailure(message(err));
+      const attach = await attachToProject(repo.id, projectId, ctx.actor, channel);
+      return { status: 201, body: { repo, onboardRunId: null, onboardError: failure.error, ...(failure.code !== undefined ? { onboardErrorCode: failure.code, missingTool: failure.tool } : {}), ...attach } };
+    }
+    const projectAttachError = await recordOnboardingLaunch(ctx, runId, repo.id, { projectId, channel, actor, autoCapture });
+    const attach = await attachToProject(repo.id, projectId, ctx.actor, channel);
+    const errors = [...new Set([projectAttachError, attach.projectAttachError].filter((e): e is string => e !== undefined))];
+    return { status: 201, body: { repo, onboardRunId: runId, ...(attach.projectAttached === true ? { projectAttached: true } : {}), ...(errors.length > 0 ? { projectAttachError: errors.join('; ') } : {}) } };
+  };
+  /** crew-0182: the repo joins `projectId` (`crew.repo`) the one way every surface does; a refusal is named, never thrown. */
+  const attachToProject = async (repoId: string, projectId: string | undefined, actor: Actor, channel: 'studio' | 'cli' | 'api' | undefined): Promise<{ projectAttached?: true; projectAttachError?: string }> => {
+    // A repo joins a project only by a person (DES-PM-001 Q-PM2): an agent's projectId files the run, as before.
+    if (projectId === undefined || projectId === DEFAULT_PROJECT_ID || !mayAttachRepo(actor)) return {};
+    try {
+      await attachRepoToProject(adapter, projects, { projectId, repoId, actor, ...(channel !== undefined ? { attachedBy: channel } : {}) });
+      return { projectAttached: true };
+    } catch (err) {
+      return { projectAttachError: message(err) };
+    }
+  };
+
   app.post(`${V}/repos`, { config: { manifest: { requestType: 'RegisterRepoBody', statusCodes: [201, 400, 409, 422, 503] } } }, async (req, reply) => {
     const parsed = RegisterRepoSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -3229,48 +3333,17 @@ export function registerRoutes(
       try {
         const { repo } = await store.createRepo(name);
         audit.record('repo.created', actorOf(req), { detail: { repoId: repo.id, name } });
-        return reply.code(201).send({ repo, onboardRunId: null });
+        // crew-0182: a projectId puts the new repo in the project, as for every other registration (no onboarding).
+        const attach = await attachToProject(repo.id, parsed.data.projectId, actorOf(req), parsed.data.channel);
+        return reply.code(201).send({ repo, onboardRunId: null, ...attach });
       } catch (err) {
         if (err instanceof AppStoreError) return reply.code(err.status).send({ code: err.code, error: err.message, ...err.extra });
         // A registration the engine refused: the repo was removed again, nothing is left.
         return reply.code(400).send({ error: message(err) });
       }
     }
-    const refused = await onboardRefusal();
-    if (refused !== null) return reply.code(refused.status).send(refused.body);
-    const { name, gitUrl, projectId, channel, actor, autoCapture } = parsed.data;
-    // First-run C1: `~/code/my-app` (the field's own example) is expanded; a relative or missing folder is refused in plain words.
-    let rootPath = parsed.data.rootPath;
-    if (rootPath !== undefined && rootPath !== '') {
-      const read = readRepoPath(rootPath);
-      if (!read.ok) return reply.code(400).send({ code: read.code, error: read.error });
-      rootPath = read.path;
-    }
-    // (DES-PM-001 Q-PM2) Re-pointing an existing repo id at another checkout keeps its projects and tracker links.
-    const repointed = await reRegisterRefusal(actorOf(req), name, rootPath, Boolean(gitUrl), () => adapter.listRepos());
-    if (repointed !== null) return reply.code(repointed.status).send(repointed.body);
-    let repo: RepoEntry | undefined;
-    let runId: string;
-    try {
-      if (gitUrl) {
-        // Remote: clone to rootPath (if provided) or default ~/.wicked/repos/<name>,
-        // register, and launch onboarding run.
-        repo = await adapter.cloneAndRegister(name, gitUrl, rootPath);
-        runId = await adapter.launchOnboardingRun(repo.id, name);
-      } else {
-        // Local: register then launch onboarding run.
-        repo = await adapter.registerRepo(name, rootPath!);
-        runId = await adapter.launchOnboardingRun(repo.id, name);
-      }
-    } catch (err) {
-      if (repo === undefined) return reply.code(400).send(registerFailure(message(err), gitUrl ? undefined : rootPath));
-      req.log.warn({ repoId: repo.id }, `repo registered but onboarding launch failed: ${message(err)}`);
-      // No run exists to record or file, even when projectId was supplied (crew#1019).
-      const failure = onboardFailure(message(err));
-      return reply.code(201).send({ repo, onboardRunId: null, onboardError: failure.error, ...(failure.code !== undefined ? { onboardErrorCode: failure.code, missingTool: failure.tool } : {}) });
-    }
-    const projectAttachError = await recordOnboardingLaunch(req, runId, repo.id, { projectId, channel, actor, autoCapture });
-    return reply.code(201).send({ repo, onboardRunId: runId, ...(projectAttachError !== undefined ? { projectAttachError } : {}) });
+    const out = await registerAndOnboard(parsed.data, { actor: actorOf(req), log: req.log });
+    return reply.code(out.status).send(out.body);
   });
 
   // Return the onboarding run id for a repo (so the UI can navigate to it).
@@ -3298,7 +3371,7 @@ export function registerRoutes(
       const failure = onboardFailure(message(err));
       return reply.code(400).send({ error: failure.error, ...(failure.code !== undefined ? { code: failure.code, missingTool: failure.tool } : {}) });
     }
-    const projectAttachError = await recordOnboardingLaunch(req, runId, repo.id, body.data);
+    const projectAttachError = await recordOnboardingLaunch({ actor: actorOf(req), log: req.log }, runId, repo.id, body.data);
     return reply.code(201).send({ runId, ...(projectAttachError !== undefined ? { projectAttachError } : {}) });
   });
 
@@ -4967,6 +5040,29 @@ export function registerRoutes(
 
   /** (DES-CATALOG-002 §4.6) Chats whose client renders job proposals (`accepts: ['job']`), by its newest declaration. */
   const chatAccepts = new Map<string, boolean>();
+  /** (crew-0182) Chats whose client draws onboard cards (`accepts: ['onboard']`), by its newest declaration. */
+  const chatAcceptsOnboard = new Map<string, boolean>();
+  /** (crew-0182) What a chat seat is told exists here: every project with its repositories, every registered repository. */
+  const readDaemonGrounding = async (chatId: string, accepts: ReadonlyArray<'job' | 'onboard'> | undefined): Promise<DaemonGrounding | undefined> => {
+    try {
+      // A read that fails names nothing (never "none yet"): the whole section is left out.
+      const [projectRows, repoRows] = await Promise.all([adapter.projectList(), adapter.listRepos()]);
+      const nameOf = new Map(repoRows.map((r) => [r.id, r.name] as const));
+      const live = projectRows.filter((p) => p.id !== DEFAULT_PROJECT_ID && p.status !== 'archived');
+      // Members are read for the projects the statement shows (daemonGroundingLines' cap); the rest are counted.
+      const projectsOut = await Promise.all(live.map(async (p, i) => ({
+        id: p.id,
+        name: p.name,
+        repos: i >= 40 ? [] : (await adapter.projectMembers(p.id)).filter((m) => m.member_kind === 'crew.repo').map((m) => nameOf.get(m.member_ref) ?? m.member_ref),
+      })));
+      const onboard = chatArtifactFlags.onboard === true && (accepts !== undefined ? accepts.includes('onboard') : chatAcceptsOnboard.get(chatId) === true);
+      const text = (v: unknown, or: string): string => (typeof v === 'string' && v !== '' ? v : or);
+      // A registered origin carrying a token is never handed to a seat (crew-0182 review).
+      return { projects: projectsOut, repos: repoRows.map((r) => ({ id: r.id, name: text(r.name, r.id), ...(typeof r.git_url === 'string' ? { gitUrl: withoutCredentials(r.git_url) } : {}) })), onboard };
+    } catch {
+      return undefined;
+    }
+  };
   /** A seed as the person route's body (one spelling, so its request digest is the same on every retry). */
   const seedBody = (
     seed: { card: string; option?: string | null | undefined; depth?: 'quick' | 'standard' | 'deep' | null | undefined; words?: string | undefined; source: 'pick' | 'command' },
@@ -5186,6 +5282,7 @@ export function registerRoutes(
       // DES-CATALOG-002 §4.6: this open owns the id now: its declaration is the chat's (an omitted one is "no job cards").
       // A refused open (409 above) never touched the live chat's (codex r3).
       chatAccepts.set(chatId, openAccepts);
+      chatAcceptsOnboard.set(chatId, b.accepts?.includes('onboard') === true);
       // DC-S7: the in-force rules the statement lists; recorded as "told" only once the open succeeds.
       let inForceAtOpen: ConformanceRule[] = [];
       // Everything below either ends in `chatScopes.set(chatId, …, token)` or releases the reservation.
@@ -5464,7 +5561,7 @@ export function registerRoutes(
     /** (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §5.1) What studio shows beside the message. */
     context: ChatMessageContextSchema.optional(),
     /** (api-types 0.192.0, DES-CATALOG-002 §4.6) What the client renders (`['job']`): the newest declaration wins. */
-    accepts: z.array(z.literal('job')).max(4).optional(),
+    accepts: z.array(z.enum(['job', 'onboard'])).max(4).optional(),
   });
   // DES-CHAT-ARTIFACTS-001 §5.1 (A1): what a turn's block reads — the docs roots, the decorated runs (project,
   // document and chat ids), unit outputs and the acceptance line. One set of deps, so the block and the run pages
@@ -5631,6 +5728,20 @@ export function registerRoutes(
       return new Set((await adapter.listPresets(projectId !== null && projectId !== DEFAULT_PROJECT_ID ? projectId : undefined)).map((p) => p.name));
     },
     acceptsJobs: (chatId) => chatAccepts.get(chatId) === true,
+    acceptsOnboard: (chatId) => chatAcceptsOnboard.get(chatId) === true,
+    onboard: {
+      ...onboardReads,
+      projects: async () => (await adapter.projectList()).filter((p) => p.id !== DEFAULT_PROJECT_ID && p.status !== 'archived').map((p) => ({ id: p.id, name: p.name })),
+      originOf,
+      probe: (url) => probeGitUrl(url),
+      // POST /repos's own intake refusal (no garden, an old one, the state home): the card says it before anyone presses.
+      onboardRefusal: async () => {
+        const refused = await onboardRefusal();
+        if (refused === null) return null;
+        const why = (refused.body as { error?: unknown }).error;
+        return `this daemon can't onboard a repository now: ${typeof why === 'string' && why !== '' ? why : `refused (${refused.status})`}`;
+      },
+    },
     served: (projectId) => servedFor(shapeReads, projectId ?? undefined),
     turnLive: (chatId, turnId) => chatTurns.turnsOf(chatId).some((t) => t.turnId === turnId),
     broadcast: (frame) => runtime.broadcast?.(frame),
@@ -5737,7 +5848,10 @@ export function registerRoutes(
       try {
         // DES-CATALOG-002 §4.6: the client's declaration takes effect with an ACCEPTED message only (a refused one, a
         // second tab's 409, never changes how a turn in flight is read; codex r2 on Lane D).
-        if (parsed.data.accepts !== undefined) chatAccepts.set(id, parsed.data.accepts.includes('job'));
+        if (parsed.data.accepts !== undefined) {
+          chatAccepts.set(id, parsed.data.accepts.includes('job'));
+          chatAcceptsOnboard.set(id, parsed.data.accepts.includes('onboard'));
+        }
         after();
         if (preface !== null) chatTranscripts?.appendSystem(id, turnId, preface);
         chatTranscripts?.appendUser(id, turnId, text, voice, attached.map(attachmentWire), contextAllowed);
@@ -5849,7 +5963,8 @@ export function registerRoutes(
       const pending = await considerations.pendingPreface(id, { inForce: rules });
       // A7: a seat is told it can propose a studio theme only when this message carried the tab's appearance (a client
       // that can preview and apply one sends it).
-      const themeClient = { appearance: msgContext?.appearance !== undefined };
+      // crew-0182: this message's own onboard declaration (the chat's stored one changes once the message is accepted).
+      const themeClient = { appearance: msgContext?.appearance !== undefined, onboard: parsed.data.accepts !== undefined ? parsed.data.accepts.includes('onboard') : chatAcceptsOnboard.get(id) === true };
       // DES-CATALOG-002 §2.3, §4.6: the per-message job lines (the chat catalog digest, the open proposal, the held plan),
       // read here, before the last check (no await after it). Never in an analysis.
       // The declaration this message's instructions are written for: its own, else the chat's (applied to the chat only
@@ -5887,6 +6002,8 @@ export function registerRoutes(
       const requirementsBuilt = scope !== undefined
         ? await buildRequirementsMaps(scope, { listRepos: () => adapter.listRepos(), reader: adapter }).catch(() => [])
         : [];
+      // crew-0182: the daemon's projects and repositories for this message (a failed read names none; never fails the turn).
+      const daemonGrounding = path.workflow === undefined ? await readDaemonGrounding(id, parsed.data.accepts) : undefined;
       // The last await before delivery may also have closed/reopened the chat. From this check
       // through publication and the send there is no await, so no executing turn's files change.
       if (askPaths.get(id)?.generation !== lease || chatScopes.get(id) !== storedScope) {
@@ -5947,7 +6064,7 @@ export function registerRoutes(
       // A2: the per-message digest of what the chat can make now (advertised operations only).
       // crew#1412: written after the last await and the generation check; a map that cannot be written says so.
       const requirementsMaps = scope !== undefined ? publishRequirementsMaps(scope.cwd, requirementsBuilt) : [];
-      const statementOpts = { analysis: path.workflow !== undefined, make: chatProposals.digest(id, turnAccepts, themeClient), requirementsMaps, ...voiceFor(scope?.projectId) };
+      const statementOpts = { analysis: path.workflow !== undefined, make: chatProposals.digest(id, turnAccepts, themeClient), requirementsMaps, ...voiceFor(scope?.projectId), ...(daemonGrounding !== undefined ? { daemon: daemonGrounding } : {}) };
       const projectId = scope?.projectId;
       if (path.runId === undefined) {
         const stepId = 'answer-1';

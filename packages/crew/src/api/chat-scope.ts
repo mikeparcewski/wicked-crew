@@ -56,6 +56,7 @@ import type { ChatScope, ChatScopeRepo, ChatScopeRequestKind, RepoEntry } from '
 import { freshnessClause, type CheckoutFreshness, type FreshenCheckout } from './chat-freshness.js';
 import { estateExe, parseEstateTotals, resolveProjectGraphBinding, type ProjectGraphBindingDecision } from '../projects/graph.js';
 import type { ChatRefusalSource } from './seat-standing.js';
+import { withoutCredentials } from './proposal-onboard.js';
 
 /** The engine's per-seat answer to the pool's `chat_open` (`ChatSeatOutcome` on the wire). */
 export interface ChatSeatOutcomeLike {
@@ -732,6 +733,8 @@ export interface MakeDigest {
    * seat names the job and its command in one line instead. Absent = job proposals are off (today's wording).
    */
   jobs?: 'cards' | 'prose';
+  /** (crew-0182) The chat's client draws onboard cards and crew advertises them: the `onboard` block is allowed. */
+  onboard?: boolean;
 }
 
 /** Whether a digest turns anything on. */
@@ -970,13 +973,13 @@ export function chatMakeLines(make: MakeDigest): string[] {
   if (make.jobs === 'cards') {
     // DES-CATALOG-002 §2.3: the job block, the revision and the plan edit are "Starting work"'s (chatJobLines).
     lines.push(
-      'One block at most per reply. A `refine` or `theme` block only for what it says above; everything to make or do',
+      `One block at most per reply. A \`refine\`${make.onboard === true ? ', `theme` or `onboard`' : ' or `theme`'} block only for what it says; everything to make or do`,
       'is routed as "Starting work" says. A question ABOUT an artifact or a run is answered, with no block.',
     );
     return lines;
   }
   lines.push(
-    'One block at most per reply, with exactly one of `entry`, `refine` and `theme`. No block when:',
+    `One block at most per reply, with exactly one of \`entry\`, \`refine\`${make.onboard === true ? ', `theme` and `onboard`' : ' and `theme`'}. No block when:`,
     '- the message asks ABOUT an artifact or a run (what it says, whether it is right): answer it;',
     '- it is ambiguous ("make this better", "do something with this"): ask ONE question whose three',
     '  choices are Revise it, Make something new, and Just tell me;',
@@ -995,7 +998,7 @@ export function chatMakeLines(make: MakeDigest): string[] {
  */
 export function chatMakeDigest(make: MakeDigest | undefined): string {
   if (make === undefined) return '';
-  const artifacts = make.create || make.refine || make.theme || make.demo;
+  const artifacts = make.create || make.refine || make.theme || make.demo || make.onboard === true;
   if (!artifacts && make.jobs !== 'cards') return '';
   // DES-CATALOG-002 §2.3: with job cards on, the job lines (`chatJobTurnLines`) carry what the chat can start. An older
   // client (`prose`) keeps today's artifact digest.
@@ -1003,6 +1006,7 @@ export function chatMakeDigest(make: MakeDigest | undefined): string {
     const extra: string[] = [];
     if (make.refine) extra.push('a change to a document that is open or named in this chat (the `refine` block: a change keeps that document, never a new one)');
     if (make.theme) extra.push('a studio theme (the `theme` block)');
+    if (make.onboard === true) extra.push('adding a git repository to a project (the `onboard` block, as "Adding a repository" says)');
     return [
       '### What this chat can start now (crew)',
       '',
@@ -1015,6 +1019,7 @@ export function chatMakeDigest(make: MakeDigest | undefined): string {
   if (make.demo && make.entries.some((e) => e.kind === 'demo')) can.push('a demo video of an app on this machine (`demo-video`)');
   if (make.refine) can.push('a change to a document that is open or named in this chat (a `refine` of it, never a new document)');
   if (make.theme) can.push('a studio theme');
+  if (make.onboard === true) can.push('a git repository added to a project (the `onboard` block, as "Adding a repository" says)');
   return [
     '### What this chat can make now (crew)',
     '',
@@ -1098,6 +1103,73 @@ export interface ChatStatementOptions {
   /** (crew#1412) The requirements maps handed to the seats for this message (`chat-requirements.ts`); absent or
    *  empty = none named. */
   requirementsMaps?: ReadonlyArray<RequirementsMapEntry>;
+  /** (crew-0182) The daemon's projects and registered repositories, read for this message, and whether this chat's
+   *  client draws onboard cards. Absent = not read (older callers): the statement names none. */
+  daemon?: DaemonGrounding;
+}
+
+/** (crew-0182) What every chat seat is told exists on this daemon, so it never says it can't tell what a project is. */
+export interface DaemonGrounding {
+  projects: ReadonlyArray<{ id: string; name: string; repos: readonly string[] }>;
+  repos: ReadonlyArray<{ id: string; name: string; gitUrl?: string | undefined }>;
+  /** The client draws onboard cards (`accepts: ['onboard']`) and the daemon advertises them. */
+  onboard: boolean;
+}
+
+const GROUNDING_PROJECTS_MAX = 40;
+const GROUNDING_REPOS_MAX = 60;
+const clip = (t: string, n: number): string => (String(t).length <= n ? String(t) : `${String(t).slice(0, n - 1)}…`);
+
+/**
+ * (crew-0182) The daemon's projects and repositories (names and ids, bounded), and how a repository is added from here:
+ * with a client that draws onboard cards, the `wicked-make` onboard block; else where in studio it is done.
+ */
+export function daemonGroundingLines(g: DaemonGrounding): string[] {
+  const projects = g.projects.slice(0, GROUNDING_PROJECTS_MAX);
+  const repos = g.repos.slice(0, GROUNDING_REPOS_MAX);
+  const lines = [
+    '## Projects and repositories on this daemon',
+    '',
+    'This list is current for this message. Match a project the person names by its name, ignoring case and spacing',
+    '("wicked labs" is the project named "Wicked Labs"); never say you cannot tell what a listed project is.',
+    '',
+    projects.length === 0 ? 'Projects: none yet.' : 'Projects:',
+    ...projects.map((p) => `- **${clip(p.name, 80)}** (\`${p.id}\`): ${p.repos.length === 0 ? 'no repositories yet' : `repositories ${p.repos.slice(0, 12).map((r) => clip(r, 60)).join(', ')}${p.repos.length > 12 ? ` and ${p.repos.length - 12} more` : ''}`}`),
+    ...(g.projects.length > projects.length ? [`- and ${g.projects.length - projects.length} more projects`] : []),
+    '',
+    repos.length === 0 ? 'Registered repositories: none yet.' : 'Registered repositories:',
+    ...repos.map((r) => `- **${clip(r.name, 80)}** (\`${r.id}\`)${r.gitUrl !== undefined ? `: ${clip(withoutCredentials(r.gitUrl), 200)}` : ''}`),
+    ...(g.repos.length > repos.length ? [`- and ${g.repos.length - repos.length} more repositories`] : []),
+    '',
+    '## Adding a repository',
+    '',
+  ];
+  if (g.onboard) {
+    lines.push(
+      'When the person asks to add, register, clone or onboard a git repository (optionally into a project), do NOT say',
+      'this chat can\'t do it. You PROPOSE it and crew draws a card; nothing is cloned, registered or started until the',
+      'person presses Add on it. Answer in at most two sentences (which repository, which project), then end the reply',
+      'with ONE block:',
+      '',
+      '```wicked-make',
+      '{"onboard":{"url":"<the git address they gave>","project":"<the project\'s id from the list, or null>","name":null},"reason":"<one line>"}',
+      '```',
+      '',
+      'Give the address exactly as they wrote it. `project`: the listed project they named (its id); null when they named',
+      'none (the repository joins this chat\'s project, if it has one). When their words match no listed project, or more',
+      'than one, ask ONE question naming the listed projects and send no block (a new project is made on Projects → New',
+      'project). A repository already in the list is not added again: say where it is; only to put it into another project',
+      'send the block with its address. Never say you added, cloned or started it.',
+    );
+  } else {
+    lines.push(
+      'This chat cannot add a repository. When the person asks to, say exactly where: in studio,',
+      'Repositories → Add a repository (choose the project in its Project field), or the project\'s page →',
+      'Add a repository; name the listed project they meant.',
+    );
+  }
+  lines.push('');
+  return lines;
 }
 
 export function chatScopeStatement(
@@ -1240,10 +1312,13 @@ export function chatScopeStatement(
   lines.push(...chatWorkRequestLines(scope, opts), '');
   // DC-S7 (§4.7): the project's in-force rules, as `[rule:<id>]` lines the seat can cite.
   if (rules !== undefined && rules.length > 0) lines.push(...rulesStatementLines(rules), '');
+  // crew-0182: what exists on this daemon, and how a repository is added from here (never in an analysis).
+  if (opts.daemon !== undefined && opts.analysis !== true) lines.push(...daemonGroundingLines(opts.daemon));
   // DC-S4b: every seat, every scope kind — the recorder is chosen from the turn's audience.
   lines.push(...CHAT_DECISIONS_LINES, '');
   if (scope.projectId !== undefined) {
-    lines.push('## Project', '', `This chat is filed into project \`${scope.projectId}\`.`, '');
+    const named = opts.daemon?.projects.find((p) => p.id === scope.projectId)?.name;
+    lines.push('## Project', '', `This chat is filed into project ${named !== undefined ? `**${named}** ` : ''}\`${scope.projectId}\`.`, '');
   }
   // DES-LEARN §3.3: last, so it reads as how to say all of the above, never as a new permission.
   if (opts.voice !== undefined && opts.voice.trim() !== '') lines.push(opts.voice.trimEnd(), '');

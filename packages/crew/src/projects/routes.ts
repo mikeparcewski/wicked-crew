@@ -150,6 +150,61 @@ export interface ProjectRoutesDeps {
   settings?: ProjectSettingsStore;
 }
 
+/** Why a repo attach was refused, as the member route answers it. */
+export class RepoAttachRefusal extends Error {
+  constructor(readonly status: number, readonly body: { error: string; code?: string }) {
+    super(body.error);
+  }
+}
+
+/**
+ * Attach a registered repo to a project (`crew.repo`) — THE one path every surface takes: `POST /projects/:id/members`,
+ * `POST /repos {projectId}` and a chat's onboarding proposal (crew-0182). A person only (it widens what the project's
+ * agents can read); the repo must be registered. A repo joining a project brings its onboarding run along (crew#496):
+ * only a run no project holds yet, and a filing failure is logged, never the attach's answer.
+ */
+export async function attachRepoToProject(
+  adapter: CoreAdapter,
+  deps: Pick<ProjectRoutesDeps, 'bus' | 'index' | 'log'>,
+  input: { projectId: string; repoId: string; actor: Actor; attachedBy?: 'studio' | 'interactive' | 'cli' | 'api'; meta?: Record<string, unknown> },
+): Promise<{ member: ProjectMember; created: boolean }> {
+  const { projectId, repoId, actor, attachedBy } = input;
+  if (projectId === DEFAULT_PROJECT_ID) {
+    throw new RepoAttachRefusal(409, { error: "cannot attach members to the synthesized 'default' project" });
+  }
+  if (!mayAttachRepo(actor)) {
+    throw new RepoAttachRefusal(403, { error: `only a person attaches a repo to a project (it widens what the project's agents can read); you are ${actor.kind}/${actor.trust}`, code: 'repo_attach_human_only' });
+  }
+  if (!(await adapter.listRepos()).some((r) => r.id === repoId)) {
+    throw new RepoAttachRefusal(404, { error: `Repo ${repoId} not found` });
+  }
+  const { member, created } = await adapter.projectMemberAttach(projectId, 'crew.repo', repoId, input.meta, attachedBy);
+  if (created) {
+    deps.bus?.emit(
+      MEMBERSHIP_ATTACHED,
+      { project_id: projectId, member: { kind: 'crew.repo', ref: repoId }, actor: actor.id, surface: attachedBy ?? 'api' },
+      membershipAttachedKey(projectId, 'crew.repo', repoId, member.attached_at),
+    );
+  }
+  const onboardRun = typeof adapter.getOnboardRunId === 'function' ? adapter.getOnboardRunId(repoId) : undefined;
+  if (onboardRun !== undefined && deps.index.projectOf(onboardRun) === undefined) {
+    try {
+      const filed = await adapter.projectMemberAttach(projectId, 'crew.run', onboardRun, { onboarding: true }, attachedBy);
+      deps.index.set(onboardRun, projectId);
+      if (filed.created) {
+        deps.bus?.emit(
+          MEMBERSHIP_ATTACHED,
+          { project_id: projectId, member: { kind: 'crew.run', ref: onboardRun }, actor: actor.id, surface: attachedBy ?? 'api' },
+          membershipAttachedKey(projectId, 'crew.run', onboardRun, filed.member.attached_at),
+        );
+      }
+    } catch (err) {
+      deps.log(`onboarding run ${onboardRun} filing into ${projectId} failed: ${message(err)}`);
+    }
+  }
+  return { member, created };
+}
+
 export function registerProjectRoutes(
   app: FastifyInstance,
   adapter: CoreAdapter,
@@ -382,11 +437,15 @@ export function registerProjectRoutes(
         return reply.code(404).send({ error: `Run ${ref} not found` });
       }
       // (DES-PM-001 Q-PM2) A repo joining a project widens the project's code and its tracker set: a person's only.
-      if (kind === 'crew.repo' && !mayAttachRepo(actorOf(req))) {
-        return reply.code(403).send({ error: `only a person attaches a repo to a project (it widens what the project's agents can read); you are ${actorOf(req).kind}/${actorOf(req).trust}`, code: 'repo_attach_human_only' });
-      }
-      if (kind === 'crew.repo' && !(await adapter.listRepos()).some((r) => r.id === ref)) {
-        return reply.code(404).send({ error: `Repo ${ref} not found` });
+      // One attach path for every surface (crew-0182): this route, POST /repos {projectId}, a chat's onboarding Go.
+      if (kind === 'crew.repo') {
+        try {
+          const attached = await attachRepoToProject(adapter, deps, { projectId: id, repoId: ref, actor: actorOf(req), ...(attachedBy !== undefined ? { attachedBy } : {}), ...(meta !== undefined ? { meta } : {}) });
+          return reply.code(attached.created ? 201 : 200).send(attached);
+        } catch (err) {
+          if (err instanceof RepoAttachRefusal) return reply.code(err.status).send(err.body);
+          throw err;
+        }
       }
       const { member, created } = await adapter.projectMemberAttach(id, kind, ref, meta, attachedBy);
       if (created) {
@@ -400,28 +459,6 @@ export function registerProjectRoutes(
           { project_id: id, member: { kind, ref }, actor: actorOf(req).id, surface: attachedBy ?? 'api' },
           membershipAttachedKey(id, kind, ref, member.attached_at),
         );
-      }
-      // crew#496: a repo joining a project brings its onboarding run along. Studio's register form
-      // registers the repo (which launches onboarding) and THEN attaches it to the selected
-      // project, so without this every onboarding run sat unfiled beside a project that listed
-      // its repo. Only a run no project holds yet; a failure is logged, never the attach's answer.
-      if (kind === 'crew.repo') {
-        const onboardRun = typeof adapter.getOnboardRunId === 'function' ? adapter.getOnboardRunId(ref) : undefined;
-        if (onboardRun !== undefined && index.projectOf(onboardRun) === undefined) {
-          try {
-            const filed = await adapter.projectMemberAttach(id, 'crew.run', onboardRun, { onboarding: true }, attachedBy);
-            index.set(onboardRun, id);
-            if (filed.created) {
-              bus?.emit(
-                MEMBERSHIP_ATTACHED,
-                { project_id: id, member: { kind: 'crew.run', ref: onboardRun }, actor: actorOf(req).id, surface: attachedBy ?? 'api' },
-                membershipAttachedKey(id, 'crew.run', onboardRun, filed.member.attached_at),
-              );
-            }
-          } catch (err) {
-            req.log.warn({ projectId: id, runId: onboardRun }, `onboarding run filing failed: ${message(err)}`);
-          }
-        }
       }
       return reply.code(created ? 201 : 200).send({ member, created });
     } catch (err) {
