@@ -101,6 +101,13 @@ describe('refreshProjectGraphsForRepo', () => {
   });
 });
 
+describe('a failed membership lookup is not a success (crew-0183, codex r3)', () => {
+  it('says so on the outcome', async () => {
+    const out = await refreshProjectGraphsForRepo(adapter, 'r1', { memberProjects: async () => { throw new Error('store busy'); }, refresh: vi.fn(), log: () => undefined });
+    expect(out.lookupFailed).toBe(true);
+  });
+});
+
 describe('refreshProjectGraphAfter (crew-0183, codex r2)', () => {
   it('is never served by a refresh already in flight: it waits for it, then refreshes again', async () => {
     const { refreshProjectGraph, refreshProjectGraphAfter } = await import('../src/projects/graph.js');

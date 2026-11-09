@@ -2,7 +2,7 @@
 // REAL temp git repo (the poll is real git) and FAKE engine/registry/run views; a fake clock drives the cadence.
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -22,6 +22,7 @@ import {
   countsAsChange,
   fingerprintOf,
   holdsOf,
+  outsideDirs,
   parsePorcelainV2,
   pollGit,
   repoWatchEnabledByEnv,
@@ -62,7 +63,7 @@ function view(id: string, status: string, name: string | null, repoRef = 'r1'): 
 
 function harness(opts: { views?: SessionView[]; failIndex?: string | null; enabled?: boolean; gitFn?: GitFn; extra?: RepoEntry[] } = {}) {
   let t = 1_000_000;
-  const state = { views: opts.views ?? [], failIndex: opts.failIndex ?? null, heldBy: [] as string[], refreshOk: true, gate: null as Promise<void> | null };
+  const state = { views: opts.views ?? [], failIndex: opts.failIndex ?? null, heldBy: [] as string[], refreshOk: true, gate: null as Promise<void> | null, entered: null as (() => void) | null };
   const indexed: string[] = [];
   const refreshed: string[] = [];
   const entry: RepoEntry = { id: 'r1', name: 'r1', root_path: repo, default_branch: 'main', registered_at: 1, code_graph_db: graphDb } as RepoEntry;
@@ -72,7 +73,7 @@ function harness(opts: { views?: SessionView[]; failIndex?: string | null; enabl
     indexRepoGraph: async (id) => {
       if (state.failIndex !== null) throw new Error(state.failIndex);
       if (state.heldBy.length > 0) return { outcome: 'held', heldBy: state.heldBy };
-      if (state.gate !== null) await state.gate;
+      if (state.gate !== null) { state.entered?.(); await state.gate; }
       indexed.push(id);
       return { outcome: 'indexed' };
     },
@@ -513,9 +514,10 @@ describe('the watcher', () => {
     await h.w.setEnabled('r1', false);
     let open: () => void = () => undefined;
     h.state.gate = new Promise<void>((r) => { open = r; });
+    const entered = new Promise<void>((r) => { h.state.entered = r; });
     await h.w.reindexNow('r1');
     const stepping = (async () => { for (let i = 0; i < 2; i++) await h.w.step(); })(); // poll, then the gated index
-    await new Promise((r) => setTimeout(r, 300));
+    await entered; // the first index is running, held at the gate (codex r3: no sleep)
     await h.w.reindexNow('r1'); // pressed again while the first runs
     open();
     await stepping;
@@ -523,6 +525,46 @@ describe('the watcher', () => {
     for (let i = 0; i < 4; i++) await h.w.step();
     expect(h.indexed).toHaveLength(2);
     expect(h.row()).toMatchObject({ state: 'off', enabled: false });
+  });
+
+  it('an owed project refresh retries on a repo that is not polled (off), and a press after an index was queued polls first (codex r3)', async () => {
+    const h = harness();
+    await h.tick(0);
+    await h.tick();
+    expect(h.indexed).toHaveLength(1);
+    await h.w.setEnabled('r1', false);
+    h.state.refreshOk = false;
+    await h.w.reindexNow('r1');
+    await h.tick(0);
+    expect(h.indexed).toHaveLength(2);
+    const before = h.refreshed.length;
+    h.state.refreshOk = true;
+    h.advance(INDEX_BACKOFF_BASE_MS);
+    await h.tick();
+    expect(h.refreshed.length).toBe(before + 1);
+    expect(h.indexed).toHaveLength(2);
+  });
+
+  it('a press after an index was queued polls before it indexes (codex r3)', async () => {
+    const h = harness();
+    await h.tick(0);
+    await h.tick();
+    expect(h.indexed).toHaveLength(1);
+    writeFileSync(join(repo, 'src', 'a.ts'), 'export const a = 31;\n');
+    await h.advance(POLL_MIN_MS);
+    await h.w.step(); // sees the change
+    h.advance(POLL_MIN_MS);
+    await h.w.step(); // quiet: queued under generation 0
+    writeFileSync(join(repo, 'src', 'a.ts'), 'export const a = 3131;\n'); // B, after it was queued
+    await h.w.reindexNow('r1');
+    await h.w.step(); // the queued index sees a newer press: it polls first instead
+    expect(h.indexed).toHaveLength(1);
+    for (let i = 0; i < 3; i++) await h.w.step();
+    expect(h.indexed).toHaveLength(2);
+    writeFileSync(join(repo, 'src', 'a.ts'), 'export const a = 31;\n'); // back to A: not current
+    await h.tick();
+    await h.tick();
+    expect(h.indexed).toHaveLength(3);
   });
 
   it('a failed project refresh is owed and retried, backed off, without indexing again (codex r2)', async () => {
@@ -625,6 +667,17 @@ describe('the cadence', () => {
     t += QUIET_MS;
     await w.step(); // the quiet check, 5 s later
     expect(polls).toHaveLength(5);
+  });
+});
+
+describe('outsideDirs', () => {
+  it.runIf(process.platform !== 'win32')('canonicalizes a graph root that does not exist yet through its existing ancestor (codex r3)', () => {
+    const real = join(dir, 'real');
+    mkdirSync(real);
+    const link = join(dir, 'link');
+    symlinkSync(real, link);
+    const out = outsideDirs(null, { WICKED_CREW_PROJECT_GRAPH_ROOT: join(link, 'later', 'graphs') });
+    expect(out).toContain(join(realpathSync(real), 'later', 'graphs'));
   });
 });
 

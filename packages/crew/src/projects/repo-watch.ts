@@ -48,7 +48,7 @@
 
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, realpathSync } from 'node:fs';
+import { constants, existsSync, realpathSync } from 'node:fs';
 import { lstat, mkdir, open, readFile, readlink, rename, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
@@ -146,8 +146,19 @@ export function outsideDirs(stateHome: string | null, env: NodeJS.ProcessEnv = p
   const raw = [stateHome, env['WICKED_ESTATE_REPO_GRAPH_ROOT'], env['WICKED_CREW_PROJECT_GRAPH_ROOT']].filter((d): d is string => typeof d === 'string' && d !== '');
   const out = new Set<string>();
   for (const d of raw) {
-    out.add(resolve(d));
-    try { out.add(realpathSync(d)); } catch { /* not there yet */ }
+    const abs = resolve(d);
+    out.add(abs);
+    // Not created yet: canonicalize the longest existing ancestor and keep the rest (codex r3: `/tmp/x/graphs` made later
+    // is written as `/private/tmp/x/graphs`).
+    let head = abs;
+    const tail: string[] = [];
+    for (;;) {
+      try { out.add(join(realpathSync(head), ...tail)); break; } catch { /* go up */ }
+      const up = dirname(head);
+      if (up === head) break;
+      tail.unshift(head.slice(up.length).replace(/^[\\/]+/, ''));
+      head = up;
+    }
   }
   return [...out];
 }
@@ -171,8 +182,12 @@ async function readBounded(p: string, max: number): Promise<Buffer | null> {
     const st = await lstat(p);
     if (st.isSymbolicLink()) return Buffer.from(`link:${await readlink(p)}`);
     if (!st.isFile()) return null;
-    const fh = await open(p, 'r');
+    // Opened without following a link and without blocking (a FIFO swapped in after the lstat must not stall the one
+    // loop), then checked again on the descriptor itself (codex r3). Windows has neither flag; it has no FIFOs either.
+    const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
+    const fh = await open(p, flags);
     try {
+      if (!(await fh.stat()).isFile()) return null;
       const buf = Buffer.alloc(max + 1);
       const { bytesRead } = await fh.read(buf, 0, max + 1, 0);
       return bytesRead > max ? null : buf.subarray(0, bytesRead);
@@ -323,6 +338,8 @@ interface RepoState {
   forcedGen: number;
   /** When a failed project refresh after an index may be retried. */
   projectsRetryAt: number;
+  /** The press generation the queued index was decided under; a newer press needs a fresh poll first (codex r3). */
+  queuedGen: number;
 }
 
 export interface IndexAnswer {
@@ -520,7 +537,7 @@ export class RepoWatcher {
           repoId: r.id, root: r.root_path, enabled, capped, state: 'starting', seenFp: null, changedAt: null,
           nextPollAt: t, lastPolledAt: null, lastPollMs: 0, pollFailures: 0, indexFailures: 0, indexBackoffUntil: 0,
           lastIndexMs: null, coarse: false, waitingOn: [], error: null, remedy: null, polls: 0, indexes: 0, forced: false,
-          forcedGen: 0, projectsRetryAt: 0,
+          forcedGen: 0, projectsRetryAt: 0, queuedGen: 0,
         };
         this.repos.set(r.id, cur);
       }
@@ -548,6 +565,13 @@ export class RepoWatcher {
       return;
     }
     const t = this.now();
+    // An owed project refresh on a repo that is not polled (off, capped, after a one-shot press) still retries (codex r3).
+    for (const r of this.repos.values()) {
+      if (!this.pollable(r) && this.records.get(r.repoId)?.projectsOwed === true && t >= r.projectsRetryAt) {
+        await this.refreshProjectsOf(r);
+        return;
+      }
+    }
     let due: RepoState | null = null;
     for (const r of this.repos.values()) {
       if (!this.pollable(r) || r.nextPollAt > t) continue;
@@ -621,6 +645,7 @@ export class RepoWatcher {
       return;
     }
     r.waitingOn = [];
+    r.queuedGen = r.forcedGen;
     if (!this.queue.includes(r.repoId)) this.queue.push(r.repoId);
     if (r.state !== 'indexing' && r.state !== 'failed') r.state = 'changed';
   }
@@ -630,8 +655,11 @@ export class RepoWatcher {
     if (r === undefined || (!r.forced && (!r.enabled || r.capped))) return;
     // Crew's own check (a domain mapping parked at a gate holds the map too); the engine re-reads active runs under
     // its lock, so a launch between this read and the index is caught there (`held`).
-    const holds = holdsOf(await this.deps.runViews(), repoId);
+    const views = await this.deps.runViews();
+    const holds = holdsOf(views, repoId);
     if (holds.length > 0) { r.state = 'waiting-runs'; r.waitingOn = holds; return; }
+    // A press after this index was queued: poll first, so the index records the checkout it reads.
+    if (r.forced && r.forcedGen !== r.queuedGen) { r.nextPollAt = this.now(); return; }
     const fp = r.seenFp;
     const gen = r.forcedGen;
     const launchesBefore = this.rec(repoId).launches ?? 0;
@@ -642,7 +670,8 @@ export class RepoWatcher {
       r.lastIndexMs = this.now() - started;
       if (answer.outcome === 'held') {
         r.state = 'waiting-runs';
-        r.waitingOn = (answer.heldBy ?? []).map((runId) => ({ runId, reason: 'executing' as const }));
+        const fresh = holdsOf(await this.deps.runViews(), repoId);
+        r.waitingOn = (answer.heldBy ?? []).map((runId) => fresh.find((x) => x.runId === runId) ?? { runId, reason: 'executing' as const });
         return;
       }
       if (r.forcedGen === gen) r.forced = false;

@@ -53,6 +53,8 @@ export interface AutoRefreshOutcome {
   refreshed: { projectId: string; rounds: number; indexed: string[]; skipped: string[]; failed: string[] }[];
   /** Projects whose refresh threw — the message, never the run. */
   failed: { projectId: string; error: string }[];
+  /** The membership lookup itself failed, so nothing is known about which projects needed a refresh (codex r3). */
+  lookupFailed?: true;
 }
 
 function message(err: unknown): string {
@@ -82,7 +84,7 @@ export async function refreshProjectGraphsForRepo(
   } catch (err) {
     // An engine without projects, or a registry that cannot be read: nothing to refresh, said once.
     deps.log(`[projects] auto-refresh for ${repoId}: membership lookup failed (${message(err)}); no project graph refreshed`);
-    return out;
+    return { ...out, lookupFailed: true };
   }
   if (projectIds.length === 0) return out;
 
