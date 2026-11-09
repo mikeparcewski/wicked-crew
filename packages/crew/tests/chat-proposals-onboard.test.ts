@@ -487,6 +487,7 @@ describe('onboard proposals', () => {
       { onboard: { url: URL, project: secret } },
       { onboard: { url: URL, project: 'Ops' }, reason: `see ${secret}` },
       { onboard: { url: URL, project: 'Ops' }, reason: 'see https://github.com/o/r.git?access_token=SECRET9' },
+      { onboard: { url: URL, project: 'Ops' }, reason: 'see https://host.example/o/r.git#access_token=SECRET9\\' },
     ].entries()) {
       const p = (await propose(r, `s${i}`, chatWith(r, `s${i}`), b))!;
       expect(JSON.stringify(p)).not.toContain('SECRET9');
@@ -532,6 +533,7 @@ describe('onboard proposals', () => {
     expect(withoutCredentials('https://github.com/o/r.git?access_token=ghp_x')).toBe('https://github.com/o/r.git');
     expect(withoutCredentials('ssh://alice@git.example.com/repo.git')).toBe('ssh://alice@git.example.com/repo.git');
     expect(withoutCredentials('https://DOMAIN\\alice:fixture-secret@host.example/o/r.git')).toBe('https://host.example/o/r.git');
+    expect(withoutCredentials('https://host.example/o/r.git?access_token=SECRET9#\\')).toBe('https://host.example/o/r.git');
     // The seat's own words on the card lose any address's token too.
     const q = (await propose(r, 'c2', chatWith(r, 'c2'), { onboard: { url: 'https://github.com/o/r.git', project: 'Ops' }, reason: 'from https://me:ghp_secret123@github.com/o/r.git' }))!;
     expect(JSON.stringify(q)).not.toContain('ghp_secret123');

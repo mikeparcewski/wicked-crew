@@ -41,7 +41,7 @@ const CASELESS_HOSTS: ReadonlySet<string> = new Set(['github.com', 'gitlab.com',
 export function withoutCredentials(raw: string): string {
   const t = raw.trim();
   // A backslash spelling a URL parser does not read as user information: everything before the authority's `@` goes.
-  if (t.includes('\\')) return t.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/]*@/i, '$1');
+  if (t.includes('\\')) return t.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/]*@/i, '$1').replace(/[?#].*$/, '');
   try {
     const u = new URL(t);
     // A query or fragment can carry a token too (`?access_token=`): never shown.
@@ -62,9 +62,10 @@ export function withoutCredentials(raw: string): string {
 /**
  * A git address crew will clone: `https://host/owner/repo(.git)`, `ssh://[user@]host[:port]/path` or
  * `user@host:owner/repo(.git)`. Anything else (a local path, `file://`, `ext::`, plain `http://`, an address carrying a
- * password or token) is refused with its reason. `key` compares two spellings of one repository (host lowercased, a
- * non-`git` ssh user kept, no `.git` or trailing slash; the path case-insensitive only on GitHub, GitLab and Bitbucket);
- * `name` is its last path segment.
+ * password or token, a backslash) is refused with its reason. `key` compares two spellings of one repository: on GitHub,
+ * GitLab and Bitbucket every spelling of a path is one repository (user, `.git` and case dropped); on any other host the
+ * transport, the ssh user (when given, `git` included) and the exact path with its `.git` are kept. `name` is the last
+ * path segment without `.git`.
  */
 export function readGitUrl(raw: string): GitUrlReading {
   const url = raw.trim();
@@ -308,7 +309,7 @@ export async function resolveOnboard(block: OnboardBlockBody, turn: OnboardTurn,
       : { entry: null, title: name || 'repository', label: `Add a repository · ${name || 'repository'}`, outcome: `Cloned to this computer, registered${into}, and onboarded: its code map is built so jobs and chats can read it.` },
     brief: null,
     // The seat's one line, unless it holds anything that could be a credential (an address with an `@`, a query).
-    reason: block.reason !== undefined && !/@|[?&][a-z_]*token=/i.test(block.reason) ? scrubbed(block.reason) : null,
+    reason: block.reason !== undefined && !/@|\\|[?#&][a-z_]*token=/i.test(block.reason) ? scrubbed(block.reason) : null,
     sources: [],
     repos: [],
     helpers: null,
