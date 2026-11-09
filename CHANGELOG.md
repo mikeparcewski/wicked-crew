@@ -10,6 +10,40 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.18.2] — 2026-11-09
+
+A patch for three first-run failures on a clean install of 0.18.1. Bundles wicked-studio 0.16.2. Needs
+wicked-crew-api-types 0.200.0.
+
+### Added
+
+- **A chat can add a git repository to a project, on one consent.** "Want to onboard <address> into the wicked labs
+  project" now gets a card: the seat proposes it with an `onboard` block, and crew resolves every line of the card
+  itself: the address (https, ssh or `git@host:owner/repo` only; a local path, `file://`, `ext::` or an address
+  carrying a token is refused with the reason), the project by id or by name ignoring case and spacing (several or none
+  matching blocks the card and names the projects), a repository already registered (the card only adds it to the
+  project), and whether this computer's git can read it (a private repository with no sign-in is named as such). The
+  person's Add takes the same path as `POST /repos`: clone, register, onboard, the run filed in the project and the
+  repo attached to it. Not now changes nothing. `capabilities.chatArtifacts.onboard`; a client declares
+  `accepts: ['onboard']`.
+- **Chat seats know the daemon's projects and repositories.** Every message's statement lists them (bounded), so a
+  seat never says it can't tell what a listed project is; a client that doesn't draw onboard cards gets "Repositories →
+  Add a repository" with the project named.
+
+### Fixed
+
+- **`POST /repos {projectId}` puts the repository in the project.** It filed only the onboarding run; the repo itself
+  joined the project only through studio's second call. For a person it now attaches it through the one attach path
+  (the member route's, the chat card's) and answers `projectAttached: true` or `projectAttachError`; an agent's
+  `projectId` still files only the run (a repo joins a project by a person). `{create: true, projectId}` attaches too.
+- **A finished pi (or codex, opencode) sign-in survives closing its window.** Pi keeps running after `/login`, so people
+  close the window; closing threw the sign-in away. Closing an open host sign-in now ends the CLI and saves what it
+  already saved, for that same sign-in (a newer sign-in or a sign-out still wins); one that saved nothing says
+  "Nothing was saved: Pi was closed before its sign-in finished…". `DELETE /seats/:cli/container-login` answers
+  `saved` when it saved or found nothing.
+- **A private repository fails fast.** `git clone` runs with no credential prompt, so it fails in seconds with git's
+  reason instead of waiting out the five-minute timeout.
+
 ## [0.18.1] — 2026-11-08
 
 A patch for people who upgrade crew on its own. Crew now says when your skills come from a wicked-garden that is too old,
@@ -6516,7 +6550,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.1...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.2...HEAD
+[0.18.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.1...v0.18.2
 [0.18.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.17.0...v0.17.1
