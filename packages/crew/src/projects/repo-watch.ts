@@ -46,7 +46,6 @@
  * brings the graph back to the checkout once nothing holds it.
  */
 
-import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants, existsSync, realpathSync } from 'node:fs';
 import { lstat, mkdir, open, readFile, readlink, rename, writeFile } from 'node:fs/promises';
@@ -55,6 +54,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { RepoGraphWatch, RepoWatchHold, RepoWatchStatus } from 'wicked-crew-api-types';
 import type { RepoEntry, SessionView } from '../core/types.js';
 import { runNameOf } from '../core/run-identity.js';
+import { execCapped } from '../core/exec.js';
 
 export const REPO_WATCH_CAP = 24;
 export const POLL_MIN_MS = 5_000;
@@ -260,18 +260,18 @@ export async function fingerprintOf(
 
 export type GitFn = (cwd: string, args: readonly string[]) => Promise<string>;
 
-/** The poll's git: optional locks off, hidden on Windows, bounded, output capped. */
-export const pollGit: GitFn = (cwd, args) =>
-  new Promise((ok, fail) => {
-    execFile('git', [...args], {
-      cwd,
-      env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' },
-      timeout: GIT_TIMEOUT_MS,
-      windowsHide: true,
-      maxBuffer: 16 * 1024 * 1024,
-      encoding: 'utf8',
-    }, (err, stdout) => (err ? fail(err) : ok(stdout)));
+/** The poll's git: optional locks off, hidden on Windows, bounded, output capped; its env through `execCapped`'s
+ *  boot-store scrub like every crew child (crew#495). */
+export const pollGit: GitFn = async (cwd, args) => {
+  const { stdout } = await execCapped('git', [...args], {
+    cwd,
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' },
+    timeout: GIT_TIMEOUT_MS,
+    windowsHide: true,
+    maxBuffer: 16 * 1024 * 1024,
   });
+  return stdout;
+};
 
 // ── Who holds a repo's graph ──────────────────────────────────────────────────
 
