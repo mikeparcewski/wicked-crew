@@ -135,7 +135,8 @@ export function countsAsChange(path: string, root: string, outside: string | nul
   const segs = path.split('/');
   if (segs.some((s) => IGNORED_SEGMENTS.has(s))) return false;
   const dirs = outside === null ? [] : typeof outside === 'string' ? [outside] : outside;
-  // Both spellings of the checkout (codex r5: `/tmp/repo` registered, `/private/tmp/repo/state` the state home).
+  // Both spellings of the checkout (codex r5: a checkout registered through a symlinked path, the state home under its
+  // canonical spelling).
   const roots = [resolve(root)];
   try { const real = realpathSync(root); if (real !== roots[0]) roots.push(real); } catch { /* not there */ }
   for (const base of roots) {
@@ -157,7 +158,7 @@ export function outsideDirs(stateHome: string | null, env: NodeJS.ProcessEnv = p
     const abs = resolve(d);
     out.add(abs);
     // Not created yet: canonicalize the longest existing ancestor and keep the rest (codex r3: `/tmp/x/graphs` made later
-    // is written as `/private/tmp/x/graphs`).
+    // is later written under its canonical, symlink-resolved spelling).
     let head = abs;
     const tail: string[] = [];
     for (;;) {
