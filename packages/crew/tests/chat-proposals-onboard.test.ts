@@ -534,6 +534,7 @@ describe('onboard proposals', () => {
     expect(withoutCredentials('ssh://alice@git.example.com/repo.git')).toBe('ssh://alice@git.example.com/repo.git');
     expect(withoutCredentials('https://DOMAIN\\alice:fixture-secret@host.example/o/r.git')).toBe('https://host.example/o/r.git');
     expect(withoutCredentials('https://host.example/o/r.git?access_token=SECRET9#\\')).toBe('https://host.example/o/r.git');
+    expect(withoutCredentials('https://host.example/o/r?session=abc123\\x')).toBe('https://host.example/o/r');
     // The seat's own words on the card lose any address's token too.
     const q = (await propose(r, 'c2', chatWith(r, 'c2'), { onboard: { url: 'https://github.com/o/r.git', project: 'Ops' }, reason: 'from https://me:ghp_secret123@github.com/o/r.git' }))!;
     expect(JSON.stringify(q)).not.toContain('ghp_secret123');
