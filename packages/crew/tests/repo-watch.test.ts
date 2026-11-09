@@ -716,6 +716,27 @@ describe('outsideDirs', () => {
   });
 });
 
+describe('codex r5', () => {
+  it.runIf(process.platform !== 'win32')('the state home under the OTHER spelling of a checkout never counts', () => {
+    const real = join(dir, 'realrepo');
+    mkdirSync(join(real, 'state'), { recursive: true });
+    const link = join(dir, 'linkrepo');
+    symlinkSync(real, link);
+    // Registered as the link; the state home spelled canonically.
+    expect(countsAsChange('state/repo-watch.json', link, [join(realpathSync(real), 'state')])).toBe(false);
+    expect(countsAsChange('src/a.ts', link, [join(realpathSync(real), 'state')])).toBe(true);
+  });
+
+  it('the minute tick moves the fingerprint, never the stable read an index is compared by', async () => {
+    const st = { size: 10 * 1024 * 1024, mtimeMs: 5 };
+    const status = parsePorcelainV2('# branch.oid 1111111111111111111111111111111111111111\0# branch.head main\0? big.bin\0');
+    const a = await fingerprintOf(repo, status, null, async () => st, async () => null, () => 0);
+    const b = await fingerprintOf(repo, status, null, async () => st, async () => null, () => 2 * CHANGE_MAX_WAIT_MS);
+    expect(b.fingerprint).not.toBe(a.fingerprint);
+    expect(b.stable).toBe(a.stable);
+  });
+});
+
 describe('holdsOf', () => {
   it('names executing runs and domain mappings on THIS repo only; chats and terminal runs never hold', () => {
     expect(holdsOf([
