@@ -132,6 +132,79 @@ const MAX_WAIT_MS = 7 * 24 * 3_600_000;
 const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 const str = (v: unknown): string | null => (typeof v === 'string' && v.trim() !== '' ? v : null);
 
+/** The one pricing classification: a `cliUsage.costUsd` is priced when it is a finite number (a reported 0 is priced,
+ *  `null` or absent is not — a CLI that reports tokens only, like codex). Run facts, the seat fold and the run view share it. */
+export const isPricedCost = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+
+/**
+ * Who runs each unit, from the event log: `unitDistributed.cli`, moved by `unitReassigned.newCli`, else the unit row's
+ * `assigned_cli`. Feed events in `ts`-then-`seq` order through {@link UnitOwners.observe}; it answers `true` for a frame
+ * it consumed as an ownership change. Shared by the seat fold and the run-usage projection.
+ */
+export interface UnitOwners {
+  observe(e: Record<string, unknown>): boolean;
+  ownerOf(ord: number): string | undefined;
+}
+
+export function unitOwners(view: SessionView): UnitOwners {
+  const owner = new Map<number, string>();
+  const rows = new Map(view.units.map((u) => [u.ord, u]));
+  const fin = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+  return {
+    observe(e) {
+      const ord = fin(e['ord']);
+      if (ord === undefined) return false;
+      if (e['type'] === 'unitDistributed' && str(e['cli']) !== null) {
+        owner.set(ord, e['cli'] as string);
+        return true;
+      }
+      if (e['type'] === 'unitReassigned') {
+        const next = str(e['newCli']);
+        if (next !== null) owner.set(ord, next);
+        return true;
+      }
+      return false;
+    },
+    ownerOf: (ord) => owner.get(ord) ?? str(rows.get(ord)?.assigned_cli) ?? undefined,
+  };
+}
+
+/** A run's priced spend and the seats whose usage carried no price (the run view's `cost_usd` / `usage_seats_unmetered`). */
+export interface RunUsageCost {
+  /** Σ priced `cliUsage.costUsd`; `null` when usage was recorded and none was priced. */
+  cost_usd: number | null;
+  /** Unique, sorted seats that reported usage without a cost (a `cliUsage` with no price, or a `cliUsageUnreported`). */
+  usage_seats_unmetered: string[];
+}
+
+/** Fold a run's events into {@link RunUsageCost}; `null` when the log has no usage frame at all (nothing to say). */
+export function runUsageCost(view: SessionView, events: readonly LooseEvent[]): RunUsageCost | null {
+  const owners = unitOwners(view);
+  const ordered = [...events].sort((a, b) => (num(a.ts) - num(b.ts)) || (num(a['seq']) - num(b['seq'])));
+  let cost = 0;
+  let priced = 0;
+  let usage = 0;
+  const unmetered = new Set<string>();
+  for (const e of ordered) {
+    if (owners.observe(e)) continue;
+    if (e.type !== 'cliUsage' && e.type !== 'cliUsageUnreported') continue;
+    usage += 1;
+    if (e.type === 'cliUsage' && isPricedCost(e['costUsd'])) {
+      cost += e['costUsd'];
+      priced += 1;
+      continue;
+    }
+    const ord = typeof e['ord'] === 'number' ? e['ord'] : undefined;
+    const seat = (ord === undefined ? undefined : owners.ownerOf(ord)) ?? str(e['cli']) ?? undefined;
+    if (seat !== undefined) unmetered.add(seat);
+  }
+  if (usage === 0) return null;
+  return {
+    cost_usd: priced === 0 ? null : Math.round(cost * 10_000) / 10_000,
+    usage_seats_unmetered: [...unmetered].sort(),
+  };
+}
+
 /** `created_at` is epoch seconds on the wire; a value already in ms is kept. */
 export function epochMs(v: unknown): number {
   const n = num(v);
@@ -204,7 +277,7 @@ export function runFactOf(view: SessionView, events: readonly LooseEvent[], nowM
       escalated.delete(ord);
     }
     if (e.type === 'cliUsage') {
-      if (typeof e['costUsd'] === 'number' && Number.isFinite(e['costUsd'])) {
+      if (isPricedCost(e['costUsd'])) {
         spendUsd += num(e['costUsd']);
         spendReported = true;
         pricedFrames += 1;
