@@ -197,6 +197,7 @@ describe.skipIf(!POSIX)('POST /graph/refresh under an isolated state home (crew#
       projectList: vi.fn(async () => []),
       sessions: vi.fn(async () => []),
       chatList: vi.fn(async () => []),
+      indexBudget: vi.fn(async () => ({ budgetMs: 600_000, trackedFiles: 1, counted: 'git' as const })),
     } as unknown as CoreAdapter;
 
     app = Fastify({ logger: false });

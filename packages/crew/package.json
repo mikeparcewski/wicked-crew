@@ -63,7 +63,7 @@
     "mysql2": "^3.24.6",
     "postgres": "^3.4.9",
     "smol-toml": "^1.9.1",
-    "wicked-core-ts": "^0.15.35",
+    "wicked-core-ts": "^0.15.36",
     "wicked-ledger": "^0.6.1",
     "wicked-vault": "^0.8.0",
     "yaml": "^2.4.2",
@@ -80,7 +80,7 @@
     "undici": "^6.28.1",
     "vitest": "^5.0.2",
     "wicked-bus": "^2.5.0",
-    "wicked-crew-api-types": "^0.202.0",
+    "wicked-crew-api-types": "^0.203.0",
     "wicked-studio": "^0.16.5"
   },
   "engines": {

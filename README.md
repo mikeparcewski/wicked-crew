@@ -556,11 +556,14 @@ run 0df7fb33: repo 'wicked-garden' is not a member of this project, so the proje
               Repositories tab and refresh the graph to widen future runs.
 ```
 
-A refresh is `wicked-estate index` per member, bounded at ten minutes **each**, so it is never
-implicit: a launch that silently indexed N repos would block the response for as long as the
-slowest one takes. A missing or stale graph degrades the run to the per-repo graph and says so.
+A refresh is `wicked-estate index` per member, each bounded by that member's **index budget**:
+`max(120 s, files × 0.30 s) × 1.15`, sized by wicked-core from the files `git ls-files` lists (#1481; the
+refresh's budget is the sum over its members). That can be long, so a refresh is never implicit: a launch that
+silently indexed N repos would block the response for as long as the slowest one takes. A missing or stale graph
+degrades the run to the per-repo graph and says so.
 
-Requires `wicked-estate` ≥ 0.14.6 (the release that added `--repo` co-location) and `wicked-core-ts` ≥ 0.7.1.
+Requires `wicked-estate` ≥ 0.14.6 (the release that added `--repo` co-location) and `wicked-core-ts` ≥ 0.15.36 (the
+index budget).
 Both are capability-probed before anything is indexed: an older estate accepts `--repo`, **ignores
 it**, and exits 0, which would silently produce a database holding only the last repo indexed.
 

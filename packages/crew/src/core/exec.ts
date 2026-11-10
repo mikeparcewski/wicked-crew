@@ -98,6 +98,9 @@ type ExecOpts = {
   /** `number | undefined` on purpose: `exactOptionalPropertyTypes` would otherwise reject the very
    *  shape this module defends against, making the guard below untypeable and untestable. */
   maxBuffer?: number | undefined;
+  /** Abort kills the child with `killSignal` and rejects, whatever it exits with (a deadline longer than a Node timer). */
+  signal?: AbortSignal;
+  killSignal?: NodeJS.Signals;
 };
 
 /** The cap that will actually apply. Exported so the rule can be tested directly: proving it

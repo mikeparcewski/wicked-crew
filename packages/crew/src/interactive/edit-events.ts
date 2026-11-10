@@ -772,7 +772,7 @@ export async function startInteractiveEditSubscriber(
     });
 
     // Resolve the project's graph BEFORE the launch, never indexing (a refresh is
-    // `wicked-estate index` per member, bounded at 600s EACH — doing that inside a launch turns
+    // `wicked-estate index` per member, bounded by its index budget EACH (#1481) — doing that inside a launch turns
     // "answer an edit" into an unannounced multi-repo job). Missing or stale degrades to no
     // binding and the run proceeds exactly as before; the (read-only) estate MCP is a bonus,
     // never a gate. This is CAPABILITY-ONLY — the grounding follow-on to DES-GROUNDING-001: it

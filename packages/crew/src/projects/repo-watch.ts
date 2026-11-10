@@ -51,10 +51,11 @@ import { constants, existsSync, realpathSync } from 'node:fs';
 import { lstat, mkdir, open, readFile, readlink, rename, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
-import type { RepoGraphWatch, RepoWatchHold, RepoWatchStatus } from 'wicked-crew-api-types';
+import type { IndexBudgetInfo, RepoGraphWatch, RepoWatchHold, RepoWatchStatus } from 'wicked-crew-api-types';
 import type { RepoEntry, SessionView } from '../core/types.js';
 import { runNameOf } from '../core/run-identity.js';
 import { execCapped } from '../core/exec.js';
+import { formatBudget } from './graph.js';
 
 export const REPO_WATCH_CAP = 24;
 export const POLL_MIN_MS = 5_000;
@@ -316,7 +317,9 @@ function readRec(v: unknown): Rec | null {
   // Counters that disagree (an index after more launches than were counted) prove nothing: index once (codex r2).
   if ((out.indexedLaunches ?? 0) > (out.launches ?? 0)) { delete out.indexedFp; delete out.indexedLaunches; }
   if (o['enabled'] === false) out.enabled = false;
-  if (o['projectsOwed'] === true) out.projectsOwed = true;
+  // An off repo owes no project refresh (wicked-crew#1481): a record written before the switch dropped it (or by an
+  // older daemon) must not restart its projects' refreshes at boot.
+  if (o['projectsOwed'] === true && out.enabled !== false) out.projectsOwed = true;
   return out;
 }
 
@@ -350,6 +353,12 @@ interface RepoState {
   forcedGen: number;
   /** When a failed project refresh after an index may be retried. */
   projectsRetryAt: number;
+  /** Project refreshes failed in a row since the last one that landed: the retry backs off with it (wicked-crew#1481). */
+  projectsFailures: number;
+  /** Bumped by every switch-off: an index that was running across one does not queue its project refresh. */
+  offGen: number;
+  /** While indexing: when it started and its budget (wicked-crew#1481), for the status. */
+  indexing: { startedAt: number; budget: IndexBudgetInfo | null } | null;
   /** The checkout moved during the last index: one more index is owed (bounded to one, so it cannot loop). */
   repairOwed: boolean;
   /** The press generation the queued index was decided under; a newer press needs a fresh poll first (codex r3). */
@@ -369,6 +378,9 @@ export interface RepoWatchDeps {
   /** Refresh every project the repo is in (`refreshProjectGraphsForRepo`, never served by a refresh that predates this
    *  index); `true` when every one of them refreshed. */
   refreshProjects: (repoId: string) => Promise<boolean>;
+  /** The engine's index budget for a checkout (core-ts `indexBudget`, wicked-crew#1481), shown while it indexes. The
+   *  engine bounds the index by it itself; this read is for the status only, and a failure shows no budget. */
+  indexBudget?: (root: string) => Promise<IndexBudgetInfo>;
   /** `<state home>/repo-watch.json`. */
   statePath: string;
   /** The daemon's state home (changes under it never count). */
@@ -395,11 +407,12 @@ function message(err: unknown): string {
 /** The person-facing remedy for an index failure (the engine's words name the cause). */
 export function indexRemedy(error: string): string {
   if (/could not run the .* indexer/i.test(error)) return 'wicked-estate is not available to the daemon. Install it, then press Re-index now.';
-  const over = /exceeded (\d+)s/i.exec(error);
+  // The engine's words (wicked-crew#1481): `exceeded its budget of 760s for 2203 files`.
+  const over = /exceeded (?:its budget of )?(\d+)s(?: for (\d+) files)?/i.exec(error);
   if (over !== null) {
-    const s = Number(over[1]);
-    const words = s % 60 === 0 ? `${s / 60} minute${s === 60 ? '' : 's'}` : `${s} seconds`;
-    return `The re-index took longer than ${words} and was stopped. Press Re-index now to try again; a very large change may need the repository to be onboarded again.`;
+    const words = formatBudget(Number(over[1]) * 1000);
+    const sized = over[2] === undefined ? '' : `, the budget for its ${over[2]} files`;
+    return `The re-index took longer than ${words}${sized}, and was stopped. Press Re-index now to try again; a very large change may need the repository to be onboarded again.`;
   }
   if (/no registered repo/i.test(error)) return 'The repository is no longer registered. Register it again on Repositories.';
   return 'Press Re-index now to try again. If it keeps failing, onboard the repository again from its page.';
@@ -554,7 +567,7 @@ export class RepoWatcher {
           repoId: r.id, root: r.root_path, enabled, capped, state: 'starting', seenFp: null, changedAt: null,
           nextPollAt: t, lastPolledAt: null, lastPollMs: 0, pollFailures: 0, indexFailures: 0, indexBackoffUntil: 0,
           lastIndexMs: null, coarse: false, waitingOn: [], error: null, remedy: null, polls: 0, indexes: 0, forced: false,
-          forcedGen: 0, projectsRetryAt: 0, queuedGen: 0, repairOwed: false,
+          forcedGen: 0, projectsRetryAt: 0, projectsFailures: 0, offGen: 0, indexing: null, queuedGen: 0, repairOwed: false,
         };
         this.repos.set(r.id, cur);
       }
@@ -592,7 +605,9 @@ export class RepoWatcher {
     }
     // Polls first, but an owed refresh is served at least once every DEBT_EVERY polls (codex r5: under sustained load
     // there is always a poll due).
-    const debt = [...this.repos.values()].find((r) => !this.pollable(r) && this.records.get(r.repoId)?.projectsOwed === true && t >= r.projectsRetryAt);
+    // Only a CAPPED repo's debt (wicked-crew#1481): a repo switched off owes nothing. Its owed refresh, served here,
+    // kept restarting its projects' refreshes after the switch, and after a restart too (the record carried it).
+    const debt = [...this.repos.values()].find((r) => r.enabled && !this.pollable(r) && this.records.get(r.repoId)?.projectsOwed === true && t >= r.projectsRetryAt);
     if (debt !== undefined && (due === null || this.pollsSinceDebt >= DEBT_EVERY)) {
       this.pollsSinceDebt = 0;
       await this.refreshProjectsOf(debt);
@@ -628,6 +643,7 @@ export class RepoWatcher {
 
   private async decide(r: RepoState, fp: string, t: number, note: string | null): Promise<void> {
     const rec = this.rec(r.repoId);
+    const offGen = r.offGen;
     // A launch on the repo since the last index ran its D8: the graph may sit at that run's base now.
     const moved = (rec.launches ?? 0) > (rec.indexedLaunches ?? 0) || this.bootOwed.has(r.repoId);
     const wants = r.forced || rec.indexedFp !== fp || moved;
@@ -660,6 +676,8 @@ export class RepoWatcher {
     // A failing index waits out its backoff whatever changes meanwhile; only a person's press skips it (codex r1).
     if (!r.forced && t < r.indexBackoffUntil) return;
     const holds = holdsOf(await this.deps.runViews(), r.repoId);
+    // Switched off while the runs were read (codex r3 on #1481): the switch emptied the queue; nothing refills it.
+    if (r.offGen !== offGen || !this.pollable(r)) return;
     if (holds.length > 0) {
       r.state = 'waiting-runs';
       r.waitingOn = holds;
@@ -674,6 +692,8 @@ export class RepoWatcher {
   private async index(repoId: string): Promise<void> {
     const r = this.repos.get(repoId);
     if (r === undefined || (!r.forced && (!r.enabled || r.capped))) return;
+    // Taken before the first await, so a switch-off during any of them is seen (codex r1 on #1481).
+    const offGen = r.offGen;
     // Crew's own check (a domain mapping parked at a gate holds the map too); the engine re-reads active runs under
     // its lock, so a launch between this read and the index is caught there (`held`).
     const views = await this.deps.runViews();
@@ -685,12 +705,29 @@ export class RepoWatcher {
     // so a switch between the quiet poll and the index, or during it, is indexed again (codex r4).
     const before = await this.sample(r);
     if (before === null) return;
+    // Switched off (or capped) while this looked: the switch dropped the queued index and the press (codex r1).
+    if (r.offGen !== offGen || (!r.forced && (!r.enabled || r.capped))) return;
     const fp = before.fingerprint;
     r.seenFp = fp;
     const gen = r.forcedGen;
     const launchesBefore = this.rec(repoId).launches ?? 0;
     r.state = 'indexing';
     const started = this.now();
+    r.indexing = { startedAt: started, budget: null };
+    if (this.deps.indexBudget !== undefined) {
+      try {
+        r.indexing.budget = await this.deps.indexBudget(r.root);
+      } catch {
+        // Shown as no budget; the engine still bounds the index by it.
+      }
+      // Switched off while the budget was read (codex r2): nothing starts. A press made since is decided afresh.
+      if (r.offGen !== offGen) {
+        r.indexing = null;
+        r.nextPollAt = this.now();
+        this.restate(r);
+        return;
+      }
+    }
     try {
       const answer = await this.deps.indexRepoGraph(repoId);
       r.lastIndexMs = this.now() - started;
@@ -719,15 +756,24 @@ export class RepoWatcher {
       if (same) rec.indexedFp = fp;
       else { delete rec.indexedFp; r.seenFp = after?.fingerprint ?? null; r.nextPollAt = this.now(); }
       // A press is served only by an index that read a checkout that held still; otherwise it stays owed, once more,
-      // even on an off or capped repo (codex r5).
-      if (pressServed) r.forced = !same && !r.repairOwed;
-      r.repairOwed = !same && !r.repairOwed ? true : false;
+      // even on an off or capped repo (codex r5). Unless the repo was switched off while this ran: the switch dropped
+      // the press and the repair, and a press made after it is its own (codex r1 on #1481).
+      const switchedOff = r.offGen !== offGen;
+      if (switchedOff) {
+        r.repairOwed = false;
+      } else {
+        if (pressServed) r.forced = !same && !r.repairOwed;
+        r.repairOwed = !same && !r.repairOwed ? true : false;
+      }
       rec.lastIndexedAt = this.now();
       rec.indexedLaunches = launchesBefore;
       this.bootOwed.delete(repoId);
-      rec.projectsOwed = true;
+      // Switched off while this index ran (wicked-crew#1481): the switch dropped what the repo had queued, and the
+      // project refresh this index would queue is one of those.
+      if (!switchedOff) rec.projectsOwed = true;
       await this.save();
-      await this.refreshProjectsOf(r);
+      // Read again after the save (codex r2): a switch-off during it drops this refresh too.
+      if (r.offGen === offGen) await this.refreshProjectsOf(r, offGen);
       r.changedAt = null;
       r.state = same ? 'current' : 'changed';
       this.restate(r);
@@ -741,24 +787,33 @@ export class RepoWatcher {
       r.error = message(err).split('\n')[0] ?? 'the re-index failed';
       r.remedy = indexRemedy(r.error);
       this.deps.log(`[repo-watch] ${repoId}: re-index FAILED: ${r.error}`);
+    } finally {
+      r.indexing = null;
     }
   }
 
   /** Refresh the repo's projects; a failure is owed (persisted) and retried, backed off, by the polls (codex r2). */
-  private async refreshProjectsOf(r: RepoState): Promise<void> {
+  private async refreshProjectsOf(r: RepoState, offGen: number = r.offGen): Promise<void> {
     const rec = this.rec(r.repoId);
+    if (r.offGen !== offGen) return;
     let ok = false;
     try {
       ok = await this.deps.refreshProjects(r.repoId);
     } catch (err) {
       this.deps.log(`[repo-watch] ${r.repoId}: project graph refresh failed: ${message(err)}`);
     }
+    // Switched off while it ran: the switch dropped the debt, a failure here does not bring it back (codex r1, #1481).
+    if (r.offGen !== offGen) return;
     if (ok) {
       delete rec.projectsOwed;
       r.projectsRetryAt = 0;
+      r.projectsFailures = 0;
     } else {
       rec.projectsOwed = true;
-      r.projectsRetryAt = this.now() + INDEX_BACKOFF_BASE_MS;
+      // Backed off like a failing index (wicked-crew#1481): a member whose index always runs past its budget made
+      // every retry cost a full budget, once a minute.
+      r.projectsFailures++;
+      r.projectsRetryAt = this.now() + Math.min(INDEX_BACKOFF_MAX_MS, INDEX_BACKOFF_BASE_MS * 2 ** (r.projectsFailures - 1));
     }
     await this.save();
   }
@@ -821,12 +876,23 @@ export class RepoWatcher {
     if (r === undefined) return false;
     const rec = this.rec(repoId);
     if (enabled) delete rec.enabled;
-    else rec.enabled = false;
-    await this.save();
-    if (!enabled) {
+    else {
+      // Off drops everything the repo had queued (wicked-crew#1481): its queued index, a press not yet served, and
+      // the project refresh it owed, which otherwise kept restarting its projects' refreshes after the switch.
+      rec.enabled = false;
+      delete rec.projectsOwed;
+      r.offGen += 1;
+      // Live at once, before the save (codex r3): an index or poll that resumes meanwhile sees the repo off.
+      r.enabled = false;
+      r.forced = false;
+      r.repairOwed = false;
+      r.projectsRetryAt = 0;
+      r.projectsFailures = 0;
       const at = this.queue.indexOf(repoId);
-      if (at >= 0 && !r.forced) this.queue.splice(at, 1);
+      if (at >= 0) this.queue.splice(at, 1);
+      this.restate(r);
     }
+    await this.save();
     await this.syncRepos(true); // re-allocate the cap among enabled repos
     if (enabled && r.state === 'starting') r.nextPollAt = this.now();
     this.kick(0);
@@ -847,6 +913,9 @@ export class RepoWatcher {
       remedy: r.state === 'capped'
         ? `Studio keeps up to ${REPO_WATCH_CAP} repositories current. Turn another repository off to free a slot, or press Re-index now on this one after a change.`
         : r.remedy,
+      ...(r.state === 'indexing' && r.indexing !== null
+        ? { indexing: { startedAt: r.indexing.startedAt, budget: r.indexing.budget === null ? null : { ...r.indexing.budget } } }
+        : {}),
     }));
     return { enabled: this.deps.enabled, disabledBy: this.deps.enabled ? null : 'env', cap: REPO_WATCH_CAP, covers: COVERS, repos };
   }
@@ -861,6 +930,8 @@ export class RepoWatcher {
         repoId: r.repoId, state: r.state, enabled: r.enabled, capped: r.capped, periodMs: pollPeriod(r.lastPollMs), lastPollMs: r.lastPollMs,
         lastIndexMs: r.lastIndexMs, polls: r.polls, indexes: r.indexes, pollFailures: r.pollFailures, indexFailures: r.indexFailures,
         coarse: r.coarse, forced: r.forced, nextPollInMs: Math.max(0, r.nextPollAt - this.now()),
+        projectsOwed: this.records.get(r.repoId)?.projectsOwed === true, projectsFailures: r.projectsFailures,
+        projectsRetryInMs: Math.max(0, r.projectsRetryAt - this.now()),
       })),
     };
   }

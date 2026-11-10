@@ -12,6 +12,18 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **A project graph refresh no longer loops on a large repo (#1481).** Each member repo's index is bounded by its
+  index budget, sized by the engine from the files `git ls-files` lists (`max(120 s, files × 0.30 s) × 1.15`,
+  wicked-core-ts `Core.indexBudget`; crew keeps no copy of the formula), instead of a fixed 10 minutes; the refresh's
+  budget is the sum over its members. A member that runs past its budget fails with `timedOut: true` and the budget it
+  hit, and the repo watcher's refresh after it runs no second round for that member. Switching a repo's watcher off
+  drops what it had queued: its queued index, a press not yet served, and the project refresh it owed (which kept
+  restarting its projects' refreshes after the switch), and an index running across the switch queues none. A project
+  refresh that keeps failing is retried with an exponential backoff instead of once a minute. The refresh state
+  (running, its budget, the member being indexed, the last failure) is on `GET /projects/:id/graph` (`status.refresh`)
+  and `diagnostics.projectGraphRefresh`; the repo watcher's row carries `indexing { startedAt, budget }` while it
+  re-indexes. Needs wicked-crew-api-types 0.203.0 (additive) and wicked-core-ts 0.15.36.
+
 - Two runtime hints no longer tell users to `npm install -g wicked-crew`: the npx-cache refusal of
   `--install-service` and the `vault.unresolvable` remedy now name the installer flow (`npx wicked-installer`, then
   `wicked-crew serve`); the vault remedy keeps its `WICKED_VAULT_BIN` escape. Each sentence is pinned by a test (#1468).

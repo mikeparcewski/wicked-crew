@@ -10244,6 +10244,57 @@ export interface ProjectGraphStatus {
   note: string;
   /** Unix millis of the last refresh; `null` when never refreshed. */
   updatedAt: number | null;
+  /** (api-types 0.203.0, wicked-crew#1481) The refresh as this daemon runs it: running now (with its budget and the
+   *  member being indexed) or idle, and the last failure. ABSENT when no refresh ran since the daemon started. */
+  refresh?: ProjectGraphRefreshState;
+}
+
+/**
+ * (api-types 0.203.0, wicked-crew#1481) One member repo's index budget: how long one `wicked-estate index` of it may
+ * run, sized by the engine from the files `git ls-files` lists (`max(120 s, files × 0.30 s) × 1.15`). A project
+ * refresh's budget is the sum over its member repos.
+ */
+export interface IndexBudgetInfo {
+  /** Milliseconds. */
+  budgetMs: number;
+  /** The files it was sized from; `null` when the engine did not say. */
+  trackedFiles: number | null;
+}
+
+/** (api-types 0.203.0, wicked-crew#1481) Why the last project refresh did not fully land. */
+export interface ProjectGraphRefreshFailure {
+  /** Unix ms. */
+  at: number;
+  /** The member repo that failed; `null` when the refresh itself failed before or around the indexes. */
+  repoId: string | null;
+  label: string | null;
+  error: string;
+  /** The member's index ran past its budget and was stopped. */
+  timedOut: boolean;
+  /** The budget it ran against (ms), when one was sized. */
+  budgetMs: number | null;
+}
+
+/**
+ * (api-types 0.203.0, wicked-crew#1481) A project graph refresh as this daemon runs it, for the project page: a
+ * surface shows `budgetMs` against the time since `startedAt` while `state` is `refreshing`, and the member being
+ * indexed against its own budget (`repoStartedAt` / `repoBudgetMs`).
+ */
+export interface ProjectGraphRefreshState {
+  state: 'idle' | 'refreshing';
+  /** When the running (or last) refresh started — unix ms. */
+  startedAt: number;
+  /** When the last refresh ended — unix ms; `null` while the first one runs. */
+  finishedAt: number | null;
+  /** The refresh's budget (ms): the sum of every member repo's index budget; `null` until it is sized. */
+  budgetMs: number | null;
+  /** The member being indexed now; `null` when none is (idle, or between members). */
+  repoId: string | null;
+  repoStartedAt: number | null;
+  repoBudgetMs: number | null;
+  /** The last refresh's failure (the last member that failed, or the refresh's own error); `null` once a refresh
+   *  lands with no failure. */
+  lastFailure: ProjectGraphRefreshFailure | null;
 }
 
 /**
@@ -10282,6 +10333,10 @@ export interface ProjectGraphRefreshRepo {
   stderrTail?: string;
   /** Present when `action` is `failed` — the same message the `failed` array carries. */
   error?: string;
+  /** (api-types 0.203.0, wicked-crew#1481) The index ran past its budget and was stopped (`action: 'failed'`). */
+  timedOut?: true;
+  /** (api-types 0.203.0) The member's index budget, present whenever an index ran (`indexed` or `failed`). */
+  budget?: IndexBudgetInfo;
 }
 
 /** `POST /projects/:id/graph/refresh` — an incremental (re)build, repo by repo. */
@@ -10317,6 +10372,10 @@ export interface RepoGraphWatch {
   waitingOn: RepoWatchHold[];
   error: string | null;
   remedy: string | null;
+  /** (api-types 0.203.0, wicked-crew#1481) Present while `state` is `indexing`: when the re-index started (unix ms)
+   *  and its budget, so a surface can show the elapsed time against it. `budget` is `null` when it could not be
+   *  sized up front (the engine still bounds the index by it). */
+  indexing?: { startedAt: number; budget: IndexBudgetInfo | null };
 }
 
 /** (api-types 0.201.0, crew 0.18.3) `GET /repo-watch`. */
@@ -10867,6 +10926,9 @@ export interface DiagnosticsResponse {
   floorCache?: DiagnosticsFloorCache | null;
   /** (api-types 0.201.0, crew 0.18.3) The repo watcher: {@link RepoWatchStatus} plus its loop's numbers. `null` on a route set without it. */
   repoWatch?: (RepoWatchStatus & { queue: string[]; watched: number; perRepo: Array<Record<string, unknown>> }) | null;
+  /** (api-types 0.203.0, wicked-crew#1481) Every project graph refresh since the daemon started: running (with its
+   *  budget and the member being indexed) or idle, and its last failure. ABSENT on an older daemon. */
+  projectGraphRefresh?: Array<{ projectId: string } & ProjectGraphRefreshState>;
 }
 
 /** `DiagnosticsResponse.floorCache` (crew#1147). Every `path` is `~/...`. */

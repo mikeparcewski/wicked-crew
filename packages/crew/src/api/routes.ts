@@ -165,7 +165,7 @@ import { listInteractiveDocs } from '../interactive/docs-index.js';
 import { SearchService, registerSearchRoutes } from './search-routes.js';
 import type { FreshenCheckout } from './chat-freshness.js';
 import { TestSetIndex } from '../qe/test-sets.js';
-import { estateExe, parseEstateTotals, readBlastRadiusPages, resolveProjectGraphBinding } from '../projects/graph.js';
+import { estateExe, parseEstateTotals, projectGraphRefreshDiagnostics, readBlastRadiusPages, resolveProjectGraphBinding } from '../projects/graph.js';
 import { attachRepoToProject, registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { registerProjectAggregateRoutes } from './project-aggregates.js';
 import { composeLaunch, composePreflight, registerProductRoutes } from './product.js';
@@ -2668,6 +2668,8 @@ export function registerRoutes(
         floorCache,
         // crew-0183: the repo watcher's standing and loop numbers; null on a route set without it.
         repoWatch: runtime.repoWatch?.diagnostics() ?? null,
+        // wicked-crew#1481: every project graph refresh since boot — running (with its budget) or idle, and its last failure.
+        projectGraphRefresh: projectGraphRefreshDiagnostics(),
       };
   };
   app.get(
