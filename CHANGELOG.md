@@ -10,6 +10,23 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.18.5] — 2026-11-10
+
+A patch that bundles wicked-studio 0.16.5. No daemon or wire change: api-types and core-ts are unchanged.
+
+### Changed
+
+- **Project pages are consistent.** wicked-studio 0.16.5 opens a new project on its homepage, not on a list of sessions
+  filtered to it. The homepage's ⋯ becomes a "More info" link to the project's first tab. A project page's header keeps
+  only Open repository, and the documents stay on the Work tab. A project's Running now, Failed and See all open its own
+  Jobs tab.
+  - A new **Settings** tab, the last one, holds the name and description, a link to the project's personality, and a
+    Danger zone. Archive says what archiving does and asks inline before it archives; Restore needs no confirm. Work not
+    in any project has no Settings tab.
+  - Rename and Archive are gone from the Projects page cards and the Everything > Projects rows: a card or row only
+    opens the project.
+  - An archived project's homepage and Work tab offer no new work. One line links to Restore in Settings.
+
 ## [0.18.4] — 2026-11-09
 
 A patch that bundles wicked-studio 0.16.4. No daemon or wire change: api-types and core-ts are unchanged.
@@ -6597,7 +6614,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.4...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.5...HEAD
+[0.18.5]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.4...v0.18.5
 [0.18.4]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.3...v0.18.4
 [0.18.3]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.2...v0.18.3
 [0.18.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.1...v0.18.2
