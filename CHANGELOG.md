@@ -22,9 +22,10 @@ bundles wicked-studio 0.16.5.
   you restart the daemon. 0.34.1 makes a forced re-extract linear in the store's size instead of quadratic, so a large
   repo's re-index fits its budget. 0.34.0 still works. The first writable open of each store under 0.34.1 rebuilds its
   full-text index once (about 2 minutes per million nodes).
-- **Index budget:** each member repo's index now gets `max(120 s, files × 0.30 s) × 1.15`, where `files` is what
-  `git ls-files` lists, instead of a fixed 10 minutes. A project refresh's budget is the sum over its members. A member
-  that runs past its budget fails with `timedOut: true` and the budget it hit.
+- **Index budget:** each member repo's index now gets `max(120 s, files × 0.30 s) × 1.15` instead of a fixed 10
+  minutes, where `files` is the member's file count as the engine counts it (`git ls-files`, or a file walk). A
+  project refresh's budget is the sum over its members. A member that runs past its budget fails with
+  `timedOut: true` and the budget it hit.
 - **Switching a repo's watch off now cancels what it owed:** its queued index, a press not yet served, and the project
   refresh it owed, including one owed by an off record at boot. An index running across the switch queues none.
 
