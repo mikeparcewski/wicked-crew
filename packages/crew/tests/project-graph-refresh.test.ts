@@ -46,7 +46,8 @@ import { MembershipIndex } from '../src/projects/membership-index.js';
 import { ProjectSettingsStore } from '../src/projects/settings.js';
 import { repoLabel } from '../src/projects/graph-paths.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
-import type { Project, ProjectMember, RepoEntry } from '../src/core/types.js';
+import type { Project, ProjectGraphRefreshState, ProjectMember, RepoEntry } from '../src/core/types.js';
+import { armDeadline, resetProjectGraphRefreshStates } from '../src/projects/graph.js';
 import { removeScratch } from './setup/scratch.js';
 
 const POSIX = process.platform !== 'win32';
@@ -125,6 +126,12 @@ if (cmd === 'index') {
   const label = process.env.STUB_DROPS_REPO === '1' ? undefined : opt('--repo');
   fs.appendFileSync(db + '.calls', JSON.stringify(argv) + '\\n');
   fs.appendFileSync(db + '.events', 'index ' + (opt('--repo') || '') + '\\n');
+  // An indexer that handles SIGTERM and exits 1 (a wrapper): the timeout still reads as a timeout (codex r1, #1481).
+  if (process.env.STUB_TRAP_TERM !== undefined) {
+    process.on('SIGTERM', () => process.exit(Number(process.env.STUB_TRAP_TERM)));
+    setInterval(() => undefined, 1000);
+    return;
+  }
   // The loud-notice seam: estate's id_scheme migration gate speaks on stderr and exits 0.
   if (process.env.STUB_INDEX_STDERR) process.stderr.write(process.env.STUB_INDEX_STDERR + '\\n');
   // A real index takes seconds; a stub returns in a millisecond. STUB_INDEX_DELAY_MS widens the
@@ -208,6 +215,10 @@ interface Fixture {
   members: string[];
   /** Everything the route deps' `log` received — where index stderr must land. */
   logs: string[];
+  /** What the engine's `indexBudget` answers for every member (wicked-crew#1481). */
+  budgetMs: number;
+  /** The trees `indexBudget` was asked about, in order. */
+  budgetAsked: string[];
 }
 let fx: Fixture;
 
@@ -302,6 +313,7 @@ interface StatusBody {
   repos: Array<{ repoId: string; label: string; indexed: boolean; reason?: string }>;
   linkage: string;
   note: string;
+  refresh?: ProjectGraphRefreshState;
 }
 interface RefreshRepoRow {
   repoId: string;
@@ -309,6 +321,8 @@ interface RefreshRepoRow {
   action: 'indexed' | 'skipped-head-unchanged' | 'failed';
   stderrTail?: string;
   error?: string;
+  timedOut?: true;
+  budget?: { budgetMs: number; trackedFiles: number | null };
 }
 interface RefreshBody {
   status: StatusBody;
@@ -377,7 +391,10 @@ beforeEach(() => {
     repos: new Map(),
     members: [],
     logs: [],
+    budgetMs: 600_000,
+    budgetAsked: [],
   };
+  resetProjectGraphRefreshStates();
 
   const adapter = {
     projectGet: vi.fn(async (id: string) => ({ id, name: id, status: 'active' }) as unknown as Project),
@@ -386,6 +403,10 @@ beforeEach(() => {
     projectList: vi.fn(async () => []),
     sessions: vi.fn(async () => []),
     chatList: vi.fn(async () => []),
+    indexBudget: vi.fn(async (tree: string) => {
+      fx.budgetAsked.push(tree);
+      return { budgetMs: fx.budgetMs, trackedFiles: 3, counted: 'git' as const };
+    }),
   } as unknown as CoreAdapter;
 
   fx.app = Fastify({ logger: false });
@@ -1091,6 +1112,100 @@ describe.skipIf(!POSIX)('per-repo refresh outcomes and index stderr', () => {
     expect(row?.action).toBe('failed');
     expect(row?.error).toMatch(/REPO COLLISION/);
     expect(row?.stderrTail).toMatch(/REPO COLLISION/);
+  });
+});
+
+/**
+ * wicked-crew#1481: each member's index is bounded by ITS index budget, sized by the engine (`adapter.indexBudget`, no
+ * copy of the formula in crew), and the refresh's budget is their sum. Fails without the fix: the bound was a fixed
+ * 600 s, so this 3 s index under a 400 ms budget would have indexed.
+ */
+describe.skipIf(!POSIX)('index budgets (wicked-crew#1481)', { timeout: 60_000 }, () => {
+  it('bounds each member by its engine-sized budget, says which budget it hit, and keeps the failure', async () => {
+    for (const n of ['alpha', 'beta']) register(n, makeRepo(n));
+    attach('alpha', 'beta');
+    fx.budgetMs = 400;
+    process.env['STUB_INDEX_DELAY_MS'] = '3000';
+    const out = await refresh();
+    expect(out.code).toBe(200);
+    // Sized up front (the refresh's sum) and again right before each member's own index (codex r1).
+    expect(fx.budgetAsked.sort()).toEqual([fx.repos.get('alpha')!.root_path, fx.repos.get('beta')!.root_path].flatMap((r) => [r, r]).sort());
+    const rows = out.body['repos'] ?? [];
+    expect(rows.map((r) => [r.repoId, r.action, r.timedOut]).sort()).toEqual([
+      ['alpha', 'failed', true],
+      ['beta', 'failed', true],
+    ]);
+    for (const r of rows) {
+      expect(r.budget).toEqual({ budgetMs: 400, trackedFiles: 3 });
+      expect(r.error).toMatch(/ran past its budget \(0 s, sized from 3 files\) and was stopped/);
+    }
+    // The project page's refresh state: idle again, its budget the sum, the last failure a timeout.
+    const refreshState = out.body.status.refresh;
+    expect(refreshState?.state).toBe('idle');
+    expect(refreshState?.budgetMs).toBe(800);
+    expect(refreshState?.lastFailure).toMatchObject({ timedOut: true, budgetMs: 400, repoId: 'beta' });
+    const st = await fx.app.inject({ method: 'GET', url: `/api/v1/projects/${PROJECT_ID}/graph` });
+    expect((st.json() as { status: StatusBody }).status.refresh?.lastFailure?.timedOut).toBe(true);
+
+    // Within budget the same index lands, and the failure is cleared.
+    fx.budgetMs = 600_000;
+    process.env['STUB_INDEX_DELAY_MS'] = '0';
+    const ok = await refresh();
+    expect(ok.body['indexed'].sort()).toEqual(['alpha', 'beta']);
+    expect(ok.body['repos']?.every((r) => r.budget?.budgetMs === 600_000 && r.timedOut === undefined)).toBe(true);
+    expect(ok.body.status.refresh?.lastFailure).toBeNull();
+  });
+
+  it('a timed-out indexer that traps SIGTERM (exiting 1, or 0) is still a timeout, never an index that landed (codex r1/r2)', async () => {
+    register('alpha', makeRepo('alpha'));
+    attach('alpha');
+    await refresh(); // an existing graph: a premature exit 0 would otherwise pass the label check
+    writeFileSync(join(fx.repos.get('alpha')!.root_path, 'src', 'more.ts'), 'export const m = 1;\n');
+    fx.budgetMs = 400;
+    for (const code of ['1', '0']) {
+      process.env['STUB_TRAP_TERM'] = code;
+      try {
+        const out = await refresh();
+        expect(out.body['repos']?.map((r) => [r.repoId, r.action, r.timedOut])).toEqual([['alpha', 'failed', true]]);
+      } finally {
+        delete process.env['STUB_TRAP_TERM'];
+      }
+    }
+  });
+
+  it('a deadline past Node\'s timer cap is chained, never cut short (codex r2)', () => {
+    vi.useFakeTimers();
+    try {
+      let fired = 0;
+      armDeadline(250, () => { fired++; }, 100);
+      vi.advanceTimersByTime(249);
+      expect(fired).toBe(0);
+      vi.advanceTimersByTime(1);
+      expect(fired).toBe(1);
+      const disarm = armDeadline(250, () => { fired++; }, 100);
+      vi.advanceTimersByTime(150);
+      disarm();
+      vi.advanceTimersByTime(500);
+      expect(fired).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a link step that did not publish is the refresh\'s last failure (codex r1)', async () => {
+    for (const n of ['alpha', 'beta']) register(n, makeRepo(n));
+    attach('alpha', 'beta');
+    process.env['STUB_LINK'] = '1';
+    process.env['STUB_LINK_FAIL'] = '1';
+    try {
+      const out = await refresh();
+      expect(out.body['indexed'].sort()).toEqual(['alpha', 'beta']);
+      expect(out.body.status.refresh?.lastFailure).toMatchObject({ repoId: null, timedOut: false });
+      expect(out.body.status.refresh?.lastFailure?.error).toMatch(/link step did not publish/);
+    } finally {
+      delete process.env['STUB_LINK'];
+      delete process.env['STUB_LINK_FAIL'];
+    }
   });
 });
 

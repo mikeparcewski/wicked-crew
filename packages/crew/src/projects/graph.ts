@@ -43,7 +43,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
-import type { CoreAdapter } from '../core/adapter.js';
+import type { CoreAdapter, IndexBudget } from '../core/adapter.js';
 import { ExecOutputTooLarge, execCapped } from '../core/exec.js';
 import { codeGraphDb, CodeGraphRootUnresolvableError } from '../core/repoPaths.js';
 import type {
@@ -52,7 +52,9 @@ import type {
   ProjectGraphCrossing,
   ProjectGraphLinkRun,
   ProjectGraphHit,
+  ProjectGraphRefreshFailure,
   ProjectGraphRefreshResult,
+  ProjectGraphRefreshState,
   ProjectGraphRepo,
   ProjectGraphRepoCount,
   ProjectGraphSearch,
@@ -114,9 +116,101 @@ export function parseEstateTotals(stdout: string): { nodes: number; edges: numbe
   return { nodes: Number(m[1]), edges: Number(m[2]), files: Number(m[3]) };
 }
 
-/** Queries are interactive; a full repo index is not. Both are bounded — neither hangs the daemon. */
+/** Queries are interactive; a full repo index is not. Both are bounded — neither hangs the daemon. A member repo's
+ *  index is bounded by its own index budget, sized by the ENGINE from its file count (`adapter.indexBudget`,
+ *  wicked-crew#1481); this file keeps no copy of the formula. */
 const QUERY_TIMEOUT_MS = 30_000;
-const INDEX_TIMEOUT_MS = 600_000;
+
+/** `760035` → `12 min 40 s`; `6037500` → `1 h 40 min`: a budget in the words a person reads. */
+export function formatBudget(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const sec = total % 60;
+  if (h > 0) return m > 0 ? `${h} h ${m} min` : `${h} h`;
+  if (m > 0) return sec > 0 ? `${m} min ${sec} s` : `${m} min`;
+  return `${sec} s`;
+}
+
+/** Node's timers cap at 2^31 - 1 ms (24.8 days; a larger delay becomes 1 ms, codex r1): a longer deadline is chained. */
+const NODE_TIMER_MAX_MS = 2_147_483_647;
+
+/** Calls `fire` once `ms` have passed, in timer steps Node can hold; the returned function disarms it. */
+export function armDeadline(ms: number, fire: () => void, maxStep: number = NODE_TIMER_MAX_MS): () => void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let left = Math.max(0, ms);
+  const step = (): void => {
+    const now = Math.min(left, maxStep);
+    left -= now;
+    timer = setTimeout(left > 0 ? step : fire, now);
+  };
+  step();
+  return () => clearTimeout(timer);
+}
+
+/** A member's index ran past its budget: it was killed when the deadline fired, whatever it then exited with. */
+class IndexBudgetExceeded extends Error {
+  constructor(readonly label: string, readonly budget: IndexBudget) {
+    super(`wicked-estate index of ${label} ran past its budget (${budgetWords(budget)}) and was stopped`);
+    this.name = 'IndexBudgetExceeded';
+  }
+}
+
+/**
+ * `wicked-estate index`, bounded by the member's index budget (wicked-crew#1481). The deadline is crew's own (chained
+ * past Node's timer cap) and aborts the child with SIGKILL, as the engine's own indexes are killed: a child that traps
+ * SIGTERM and exits 0, or with a code, still reads as over budget (codex r1/r2), never as an index that landed.
+ */
+async function indexWithinBudget(
+  file: string,
+  args: string[],
+  cwd: string,
+  label: string,
+  budget: IndexBudget,
+): Promise<{ stdout: string; stderr: string }> {
+  const ctl = new AbortController();
+  let over = false;
+  const disarm = armDeadline(budget.budgetMs, () => {
+    over = true;
+    ctl.abort();
+  });
+  try {
+    const out = await execCapped(file, args, { cwd, signal: ctl.signal, killSignal: 'SIGKILL' });
+    if (over) throw new IndexBudgetExceeded(label, budget);
+    return out;
+  } catch (err) {
+    if (over) throw new IndexBudgetExceeded(label, budget);
+    throw err;
+  } finally {
+    disarm();
+  }
+}
+
+/** Which budget an index hit, in the words its failure says. */
+function budgetWords(b: IndexBudget): string {
+  return `${formatBudget(b.budgetMs)}${b.trackedFiles === null ? '' : `, sized from ${b.trackedFiles} files`}`;
+}
+
+// ── Refresh state (wicked-crew#1481) ──────────────────────────────────────────
+
+/** Per project, the refresh as this daemon runs it (in memory: a restart forgets it, the manifest does not). */
+const refreshStates = new Map<string, ProjectGraphRefreshState>();
+
+/** The project's refresh state, ABSENT when no refresh ran since the daemon started. */
+export function projectGraphRefreshState(projectId: string): ProjectGraphRefreshState | undefined {
+  const st = refreshStates.get(projectId);
+  return st === undefined ? undefined : { ...st, lastFailure: st.lastFailure === null ? null : { ...st.lastFailure } };
+}
+
+/** `diagnostics.projectGraphRefresh`: every project refreshed since the daemon started. */
+export function projectGraphRefreshDiagnostics(): Array<{ projectId: string } & ProjectGraphRefreshState> {
+  return [...refreshStates.keys()].map((projectId) => ({ projectId, ...projectGraphRefreshState(projectId)! }));
+}
+
+/** Test seam: forget every refresh state. */
+export function resetProjectGraphRefreshStates(): void {
+  refreshStates.clear();
+}
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -382,6 +476,11 @@ interface StatusInput {
   env: NodeJS.ProcessEnv;
 }
 
+function refreshField(projectId: string): { refresh?: ProjectGraphRefreshState } {
+  const refresh = projectGraphRefreshState(projectId);
+  return refresh === undefined ? {} : { refresh };
+}
+
 function buildStatus({ projectId, members, manifest, dbExists, env }: StatusInput): ProjectGraphStatus {
   const dbPath = projectGraphDb(projectId, env);
   const indexedBy = new Map((manifest?.repos ?? []).map((r) => [r.label, r]));
@@ -470,6 +569,7 @@ function buildStatus({ projectId, members, manifest, dbExists, env }: StatusInpu
       manifest === null || !dbExists
         ? null
         : manifest.repos.reduce((max, r) => Math.max(max, r.indexedAt), 0) || null,
+    ...refreshField(projectId),
   };
 
   // Customer copy (F-2R2-008, crew#1036): every `detail` below is shown to a person on the project
@@ -589,6 +689,7 @@ export async function projectGraphStatus(
       linkage: 'co-located',
       note: CO_LOCATION_NOTE,
       updatedAt: null,
+      ...refreshField(projectId),
     };
   }
   const dbPath = projectGraphDb(projectId, env);
@@ -678,11 +779,72 @@ function stderrTail(stderr: string, max = STDERR_TAIL_BYTES): string {
   return trimmed.length <= max ? trimmed : `…${trimmed.slice(trimmed.length - max)}`;
 }
 
+/**
+ * One refresh, with its state kept for the project page and diagnostics (wicked-crew#1481): `refreshing` from the
+ * start, its budget once the members are sized, the member being indexed; `idle` at the end with the last failure
+ * (a member's, or the refresh's own error), cleared by a refresh that lands with none.
+ */
 async function doRefresh(
   adapter: CoreAdapter,
   projectId: string,
   env: NodeJS.ProcessEnv,
   force: boolean,
+  log?: (msg: string) => void,
+): Promise<ProjectGraphRefreshResult> {
+  const prior = refreshStates.get(projectId);
+  const st: ProjectGraphRefreshState = {
+    state: 'refreshing',
+    startedAt: Date.now(),
+    finishedAt: prior?.finishedAt ?? null,
+    budgetMs: null,
+    repoId: null,
+    repoStartedAt: null,
+    repoBudgetMs: null,
+    lastFailure: prior?.lastFailure ?? null,
+  };
+  refreshStates.set(projectId, st);
+  let lastFailure: ProjectGraphRefreshFailure | null = null;
+  let result: ProjectGraphRefreshResult;
+  try {
+    result = await refreshOnce(adapter, projectId, env, force, st, log);
+    const failedRow = [...(result.repos ?? [])].reverse().find((r) => r.action === 'failed');
+    const linkFailed =
+      result.link?.error ?? ((result.link?.incomplete?.length ?? 0) > 0 ? `incomplete: ${result.link!.incomplete!.join(', ')}` : undefined);
+    if (failedRow === undefined && linkFailed !== undefined) {
+      // The indexes landed but the link step did not publish (codex r1): still a failure, owed by the watcher.
+      lastFailure = { at: Date.now(), repoId: null, label: null, error: `the link step did not publish: ${linkFailed}`, timedOut: false, budgetMs: null };
+    }
+    if (failedRow !== undefined) {
+      lastFailure = {
+        at: Date.now(),
+        repoId: failedRow.repoId,
+        label: failedRow.label,
+        error: failedRow.error ?? 'the index failed',
+        timedOut: failedRow.timedOut === true,
+        budgetMs: failedRow.budget?.budgetMs ?? null,
+      };
+    }
+  } catch (err) {
+    lastFailure = { at: Date.now(), repoId: null, label: null, error: message(err), timedOut: false, budgetMs: null };
+    throw err;
+  } finally {
+    st.state = 'idle';
+    st.finishedAt = Date.now();
+    st.repoId = null;
+    st.repoStartedAt = null;
+    st.repoBudgetMs = null;
+    st.lastFailure = lastFailure;
+  }
+  // The status the result carries was read mid-refresh; it reports the refresh as it ended.
+  return { ...result, status: { ...result.status, ...refreshField(projectId) } };
+}
+
+async function refreshOnce(
+  adapter: CoreAdapter,
+  projectId: string,
+  env: NodeJS.ProcessEnv,
+  force: boolean,
+  st: ProjectGraphRefreshState,
   log?: (msg: string) => void,
 ): Promise<ProjectGraphRefreshResult> {
   const members = await resolveMembers(adapter, projectId);
@@ -717,6 +879,13 @@ async function doRefresh(
         `WICKED_ESTATE_EXE at a build that has it.`,
     );
   }
+
+  // Every member's index budget, sized by the engine (wicked-crew#1481): the refresh's budget is their sum. Each
+  // member is sized AGAIN right before its own index (its checkout may have moved while earlier members indexed,
+  // codex r1). An addon that cannot size one refuses the refresh rather than guess a bound.
+  const budgets = new Map<string, IndexBudget>();
+  for (const m of members.repos) budgets.set(m.label, await adapter.indexBudget(m.repo.root_path));
+  st.budgetMs = [...budgets.values()].reduce((sum, b) => sum + b.budgetMs, 0);
 
   await mkdir(dirname(dbPath), { recursive: true });
   const dbExisted = existsSync(dbPath);
@@ -766,8 +935,15 @@ async function doRefresh(
       repoRows.push({ repoId: m.repoId, label: m.label, action: 'skipped-head-unchanged' });
       continue;
     }
+    const sized = budgets.get(m.label)!;
+    const budget = await adapter.indexBudget(m.repo.root_path);
+    st.budgetMs = (st.budgetMs ?? 0) - sized.budgetMs + budget.budgetMs;
+    const budgetInfo = { budgetMs: budget.budgetMs, trackedFiles: budget.trackedFiles };
+    st.repoId = m.repoId;
+    st.repoStartedAt = Date.now();
+    st.repoBudgetMs = budget.budgetMs;
     try {
-      const { stderr } = await execCapped(
+      const { stderr } = await indexWithinBudget(
         estateExe(env),
         [
           'index',
@@ -780,7 +956,9 @@ async function doRefresh(
           // a forced refresh exists to rewrite.
           ...(force ? ['--force'] : []),
         ],
-        { timeout: INDEX_TIMEOUT_MS, cwd: m.repo.root_path },
+        m.repo.root_path,
+        m.label,
+        budget,
       );
       // The index child's stderr used to be discarded here, which swallowed estate's id_scheme
       // migration notice — the ONE signal explaining why a one-second incremental refresh suddenly
@@ -813,6 +991,7 @@ async function doRefresh(
         label: m.label,
         action: 'indexed',
         ...(tail === '' ? {} : { stderrTail: tail }),
+        budget: budgetInfo,
       });
     } catch (err) {
       // A binary that drops `--repo` is a property of the RUN, not of this repo: every remaining
@@ -831,6 +1010,8 @@ async function doRefresh(
         await writeManifest(projectId, { version: 1, projectId, repos: [] }, env);
         throw err;
       }
+      // Only the index itself can run past its budget; the label check's own stats query is not it (codex r2).
+      const timedOut = err instanceof IndexBudgetExceeded;
       const error = err instanceof ExecOutputTooLarge ? err.message : message(err);
       failed.push({ repoId: m.repoId, label: m.label, error });
       // execFile errors carry the child's stderr; the failure tail is worth as much as a success's.
@@ -843,7 +1024,13 @@ async function doRefresh(
         action: 'failed',
         error,
         ...(tail === '' ? {} : { stderrTail: tail }),
+        ...(timedOut ? { timedOut: true as const } : {}),
+        budget: budgetInfo,
       });
+    } finally {
+      st.repoId = null;
+      st.repoStartedAt = null;
+      st.repoBudgetMs = null;
     }
   }
 
@@ -943,7 +1130,7 @@ export interface ResolveBindingOptions {
  *
  * # This never indexes
  *
- * A refresh is `wicked-estate index` per member repo, bounded at ten minutes EACH. Doing that
+ * A refresh is `wicked-estate index` per member repo, bounded by its index budget EACH (#1481). Doing that
  * inside a launch would turn "start a run" into an unannounced multi-repo indexing job that blocks
  * the response, and the first thing an operator would learn about it is a request that appears to
  * hang. So a missing or stale graph DEGRADES the run to the per-repo graph and says so; refreshing

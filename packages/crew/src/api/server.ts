@@ -2510,6 +2510,10 @@ export async function createServer(
     listRepos: () => adapter.listRepos(),
     runViews: async () => (await adapter.runViewsSnapshot()).views,
     indexRepoGraph: (repoId) => adapter.indexRepoGraph(repoId),
+    indexBudget: async (root) => {
+      const b = await adapter.indexBudget(root);
+      return { budgetMs: b.budgetMs, trackedFiles: b.trackedFiles };
+    },
     refreshProjects: async (repoId) => {
       const out = await refreshProjectGraphsForRepo(adapter, repoId, { cause: `the repo watcher re-indexed ${repoId}`, fresh: true, log: (m) => app.log.info(m) });
       // A link step that did not publish (writer lock busy, a member mid-index) is owed too: a quiet

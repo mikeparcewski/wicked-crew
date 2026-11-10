@@ -66,6 +66,15 @@ import {
 } from './run-identity.js';
 
 /** A run in one of these statuses never records another launch frame. */
+/** One tree's index budget (wicked-crew#1481), as the engine sized it (`CoreAdapter.indexBudget`). */
+export interface IndexBudget {
+  budgetMs: number;
+  /** The files it was sized from; `null` when the engine did not say. */
+  trackedFiles: number | null;
+  /** `git` = `git ls-files`; `walk` = git could not list the tree, so it was walked. */
+  counted: 'git' | 'walk' | null;
+}
+
 const TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set(['completed', 'cancelled', 'failed']);
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 import { applyGovernanceStoreEnv, isStoreSpec, type GovernanceStoreLocation } from './governance-store.js';
@@ -337,6 +346,9 @@ type GovernanceMethods = {
   // the launch indexer's lock. JSON `{ outcome: 'indexed' | 'no-graph' | 'held', heldBy, ms }` (`held`: runs on the
   // repo are active, read under the lock; nothing written); an unknown repo or a failed index REJECTS.
   indexRepoGraph(repoRef: string): Promise<string>;
+  // wicked-crew#1481 (core-ts >= 0.15.36): THE index budget for one tree (`max(120 s, files × 0.30 s) × 1.15`, the
+  // engine's formula; crew keeps no copy). JSON `{ trackedFiles, counted: 'git' | 'walk', budgetMs }`. Absent on older addons.
+  indexBudget?(tree: string): Promise<string>;
   // crew#42 write seam
   upsertPolicy(policyJson: string): Promise<string>;
   upsertConformanceRule(ruleJson: string): Promise<string>;
@@ -655,6 +667,7 @@ const VIEW_NEUTRAL_CALLS: ReadonlySet<string> = new Set([
   'runEvents',
   'rejudgeReadiness',
   'listRepos',
+  'indexBudget',
   'listPresets',
   'runTeam',
   'catalog',
@@ -3584,6 +3597,26 @@ export class CoreAdapter {
   async indexRepoGraph(repoRef: string): Promise<{ outcome: 'indexed' | 'no-graph' | 'held'; heldBy: string[]; ms: number }> {
     const out = parseEngineJson<{ outcome: 'indexed' | 'no-graph' | 'held'; heldBy?: string[]; ms: number }>(await this.core.indexRepoGraph(repoRef), 'indexRepoGraph');
     return { ...out, heldBy: Array.isArray(out.heldBy) ? out.heldBy.filter((x): x is string => typeof x === 'string') : [] };
+  }
+
+  /**
+   * How long one `wicked-estate index` of `tree` may run (wicked-crew#1481): the engine's index budget, sized from the
+   * files `git ls-files` lists for it. The formula lives in wicked-core only; an addon without the binding REJECTS
+   * (never a guessed bound: a budget that is too small kills a large repo's index every time).
+   */
+  async indexBudget(tree: string): Promise<IndexBudget> {
+    if (typeof this.core.indexBudget !== 'function') {
+      throw new Error(
+        'the wicked-core addon in use predates the index budget (wicked-crew#1481, wicked-core-ts >= 0.15.36). Reinstall wicked-crew so its pinned addon is used.',
+      );
+    }
+    const out = parseEngineJson<{ trackedFiles?: unknown; counted?: unknown; budgetMs?: unknown }>(await this.core.indexBudget(tree), 'indexBudget');
+    const budgetMs = out.budgetMs;
+    if (typeof budgetMs !== 'number' || !Number.isSafeInteger(budgetMs) || budgetMs <= 0) {
+      throw new Error(`indexBudget answered no usable budget for ${tree}: ${JSON.stringify(out)}`);
+    }
+    const trackedFiles = typeof out.trackedFiles === 'number' && Number.isSafeInteger(out.trackedFiles) && out.trackedFiles >= 0 ? out.trackedFiles : null;
+    return { budgetMs, trackedFiles, counted: out.counted === 'git' || out.counted === 'walk' ? out.counted : null };
   }
 
   // ── Governance writes (crew#42) ────────────────────────────────────────────

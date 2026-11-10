@@ -11,6 +11,7 @@ import type { RepoEntry, SessionView } from '../src/core/types.js';
 import {
   CHANGE_MAX_WAIT_MS,
   INDEX_BACKOFF_BASE_MS,
+  INDEX_BACKOFF_MAX_MS,
   POLL_ARGS,
   REPO_WATCH_CAP,
   indexRemedy,
@@ -63,13 +64,13 @@ function view(id: string, status: string, name: string | null, repoRef = 'r1'): 
 
 function harness(opts: { views?: SessionView[]; failIndex?: string | null; enabled?: boolean; gitFn?: GitFn; extra?: RepoEntry[] } = {}) {
   let t = 1_000_000;
-  const state = { views: opts.views ?? [], failIndex: opts.failIndex ?? null, heldBy: [] as string[], refreshOk: true, gate: null as Promise<void> | null, entered: null as (() => void) | null };
+  const state = { views: opts.views ?? [], failIndex: opts.failIndex ?? null, heldBy: [] as string[], refreshOk: true, gate: null as Promise<void> | null, entered: null as (() => void) | null, viewsGate: null as Promise<void> | null, refreshGate: null as Promise<void> | null, budgetGate: null as Promise<void> | null };
   const indexed: string[] = [];
   const refreshed: string[] = [];
   const entry: RepoEntry = { id: 'r1', name: 'r1', root_path: repo, default_branch: 'main', registered_at: 1, code_graph_db: graphDb } as RepoEntry;
   const w = new RepoWatcher({
     listRepos: async () => [entry, ...(opts.extra ?? [])],
-    runViews: async () => state.views,
+    runViews: async () => { if (state.viewsGate !== null) await state.viewsGate; return state.views; },
     indexRepoGraph: async (id) => {
       if (state.failIndex !== null) throw new Error(state.failIndex);
       if (state.heldBy.length > 0) return { outcome: 'held', heldBy: state.heldBy };
@@ -77,7 +78,8 @@ function harness(opts: { views?: SessionView[]; failIndex?: string | null; enabl
       indexed.push(id);
       return { outcome: 'indexed' };
     },
-    refreshProjects: async (id) => { refreshed.push(id); return state.refreshOk; },
+    refreshProjects: async (id) => { refreshed.push(id); if (state.refreshGate !== null) await state.refreshGate; return state.refreshOk; },
+    indexBudget: async () => { if (state.budgetGate !== null) await state.budgetGate; return { budgetMs: 760_035, trackedFiles: 2203 }; },
     statePath: join(dir, 'state', 'repo-watch.json'),
     stateHome: join(dir, 'state'),
     enabled: opts.enabled ?? true,
@@ -377,8 +379,178 @@ describe('the watcher', () => {
   });
 
   it('names the engine\'s own timeout in its remedy', () => {
-    expect(indexRemedy('the indexer exceeded 120s and was killed')).toMatch(/longer than 2 minutes/);
-    expect(indexRemedy('the indexer exceeded 45s and was killed')).toMatch(/longer than 45 seconds/);
+    expect(indexRemedy('the indexer exceeded 120s and was killed')).toMatch(/longer than 2 min,/);
+    expect(indexRemedy('the indexer exceeded 45s and was killed')).toMatch(/longer than 45 s,/);
+    // wicked-crew#1481: the engine names the budget and what it was sized from.
+    expect(indexRemedy('the indexer exceeded its budget of 760s for 2203 files and was killed')).toMatch(
+      /longer than 12 min 40 s, the budget for its 2203 files, and was stopped/,
+    );
+  });
+
+  it('shows the running index\'s start and budget while it indexes, and drops them after (wicked-crew#1481)', async () => {
+    const h = harness();
+    let open: () => void = () => undefined;
+    h.state.gate = new Promise<void>((r) => { open = r; });
+    const entered = new Promise<void>((r) => { h.state.entered = r; });
+    const stepping = (async () => { await h.tick(0); await h.tick(); })();
+    await entered;
+    expect(h.row()).toMatchObject({ state: 'indexing', indexing: { startedAt: h.now(), budget: { budgetMs: 760_035, trackedFiles: 2203 } } });
+    open();
+    await stepping;
+    expect(h.row().state).toBe('current');
+    expect(h.row().indexing).toBeUndefined();
+  });
+
+  it('switching a repo off drops the project refresh it owed: nothing restarts its projects\' refreshes (wicked-crew#1481)', async () => {
+    const h = harness();
+    h.state.refreshOk = false;
+    await h.tick(0);
+    await h.tick();
+    expect(h.indexed).toHaveLength(1);
+    expect(h.refreshed).toHaveLength(1); // failed: owed
+    await h.w.setEnabled('r1', false);
+    for (let i = 0; i < 5; i++) { h.advance(INDEX_BACKOFF_MAX_MS); await h.tick(); }
+    expect(h.refreshed).toHaveLength(1); // fails without the fix: the owed refresh was served every minute while off
+    expect(h.indexed).toHaveLength(1);
+    expect(h.row().state).toBe('off');
+  });
+
+  it('an index running across a switch-off queues no project refresh (wicked-crew#1481)', async () => {
+    const h = harness();
+    let open: () => void = () => undefined;
+    h.state.gate = new Promise<void>((r) => { open = r; });
+    const entered = new Promise<void>((r) => { h.state.entered = r; });
+    const stepping = (async () => { await h.tick(0); await h.tick(); })();
+    await entered;
+    await h.w.setEnabled('r1', false);
+    open();
+    await stepping;
+    for (let i = 0; i < 3; i++) { h.advance(INDEX_BACKOFF_MAX_MS); await h.tick(); }
+    expect(h.indexed).toHaveLength(1);
+    expect(h.refreshed).toHaveLength(0);
+  });
+
+  it('a switch-off while the index is about to start (crew\'s run read in flight) stops it (codex r1 on #1481)', async () => {
+    const h = harness();
+    await h.tick(0);
+    await h.tick();
+    expect(h.indexed).toHaveLength(1);
+    writeFileSync(join(repo, 'src', 'a.ts'), 'export const a = 4242;\n');
+    h.advance(POLL_MIN_MS);
+    await h.w.step(); // sees the change
+    h.advance(POLL_MIN_MS);
+    await h.w.step(); // quiet: queued
+    let open: () => void = () => undefined;
+    h.state.viewsGate = new Promise<void>((r) => { open = r; });
+    const stepping = h.w.step(); // the queued index, held in its run read
+    await new Promise((r) => setTimeout(r, 20));
+    await h.w.setEnabled('r1', false);
+    h.state.viewsGate = null;
+    open();
+    await stepping;
+    for (let i = 0; i < 3; i++) { h.advance(INDEX_BACKOFF_MAX_MS); await h.tick(); }
+    expect(h.indexed).toEqual(['r1']); // fails without the fix: the queued index ran after the switch
+    expect(h.refreshed).toEqual(['r1']);
+  });
+
+  it('a switch-off while a quiet poll reads the runs queues nothing (codex r3 on #1481)', async () => {
+    const h = harness();
+    await h.tick(0);
+    await h.tick();
+    expect(h.indexed).toHaveLength(1);
+    writeFileSync(join(repo, 'src', 'a.ts'), 'export const a = 4444;\n');
+    h.advance(POLL_MIN_MS);
+    await h.w.step(); // sees the change
+    let open: () => void = () => undefined;
+    h.state.viewsGate = new Promise<void>((r) => { open = r; });
+    h.advance(POLL_MIN_MS);
+    const stepping = h.w.step(); // the quiet poll, held reading the runs before it queues the index
+    await new Promise((r) => setTimeout(r, 20));
+    await h.w.setEnabled('r1', false);
+    h.state.viewsGate = null;
+    open();
+    await stepping;
+    expect(h.w.diagnostics()['queue']).toEqual([]); // fails without the fix: the resumed poll refilled the queue
+    for (let i = 0; i < 3; i++) { h.advance(INDEX_BACKOFF_MAX_MS); await h.tick(); }
+    expect(h.indexed).toEqual(['r1']);
+    expect(h.refreshed).toEqual(['r1']);
+    expect(h.row()).toMatchObject({ state: 'off', enabled: false });
+  });
+
+  it('a switch-off while the index budget is read stops the index before it starts (codex r2 on #1481)', async () => {
+    const h = harness();
+    await h.tick(0);
+    await h.tick();
+    expect(h.indexed).toHaveLength(1);
+    writeFileSync(join(repo, 'src', 'a.ts'), 'export const a = 4343;\n');
+    h.advance(POLL_MIN_MS);
+    await h.w.step();
+    h.advance(POLL_MIN_MS);
+    await h.w.step(); // quiet: queued
+    let open: () => void = () => undefined;
+    h.state.budgetGate = new Promise<void>((r) => { open = r; });
+    const stepping = h.w.step(); // the index, held reading its budget
+    while (h.row().state !== 'indexing') await new Promise((r) => setTimeout(r, 5));
+    await h.w.setEnabled('r1', false);
+    h.state.budgetGate = null;
+    open();
+    await stepping;
+    for (let i = 0; i < 3; i++) { h.advance(INDEX_BACKOFF_MAX_MS); await h.tick(); }
+    expect(h.indexed).toEqual(['r1']); // fails without the fix: the index started after the switch
+    expect(h.row()).toMatchObject({ state: 'off', enabled: false });
+    expect(h.row().indexing).toBeUndefined();
+  });
+
+  it('an index that ran across a switch-off while the checkout moved owes no repair index (codex r1 on #1481)', async () => {
+    const h = harness();
+    let open: () => void = () => undefined;
+    h.state.gate = new Promise<void>((r) => { open = r; });
+    const entered = new Promise<void>((r) => { h.state.entered = r; });
+    const stepping = (async () => { await h.tick(0); await h.tick(); })();
+    await entered;
+    writeFileSync(join(repo, 'src', 'a.ts'), 'export const a = 777;\n'); // the checkout moves during the index
+    await h.w.setEnabled('r1', false);
+    h.state.gate = null;
+    open();
+    await stepping;
+    for (let i = 0; i < 3; i++) { h.advance(INDEX_BACKOFF_MAX_MS); await h.tick(); }
+    expect(h.indexed).toHaveLength(1);
+    expect(h.refreshed).toEqual([]);
+    expect(h.row()).toMatchObject({ state: 'off', enabled: false });
+  });
+
+  it('a project refresh that fails across a switch-off leaves no debt (codex r1 on #1481)', async () => {
+    const h = harness();
+    h.state.refreshOk = false;
+    let open: () => void = () => undefined;
+    h.state.refreshGate = new Promise<void>((r) => { open = r; });
+    const stepping = (async () => { await h.tick(0); await h.tick(); })();
+    while (h.refreshed.length === 0) await new Promise((r) => setTimeout(r, 5));
+    await h.w.setEnabled('r1', false);
+    h.state.refreshGate = null;
+    open();
+    await stepping;
+    await h.w.setEnabled('r1', true); // back on, with nothing changed: no owed refresh is served
+    for (let i = 0; i < 3; i++) { h.advance(INDEX_BACKOFF_MAX_MS); await h.tick(); }
+    expect(h.refreshed).toHaveLength(1);
+  });
+
+  it('a project refresh that keeps failing backs off exponentially, not once a minute (wicked-crew#1481)', async () => {
+    const h = harness();
+    h.state.refreshOk = false;
+    await h.tick(0);
+    await h.tick();
+    expect(h.refreshed).toHaveLength(1);
+    h.advance(INDEX_BACKOFF_BASE_MS);
+    await h.tick(); // the first retry, 1 min later
+    expect(h.refreshed).toHaveLength(2);
+    h.advance(INDEX_BACKOFF_BASE_MS);
+    await h.tick(); // the second waits 2 min
+    expect(h.refreshed).toHaveLength(2);
+    h.advance(INDEX_BACKOFF_BASE_MS);
+    await h.tick();
+    expect(h.refreshed).toHaveLength(3);
+    expect(h.indexed).toHaveLength(1);
   });
 
   it('Re-index now while a run holds the map names it, and is kept: it runs when the run lets go', async () => {
@@ -549,20 +721,32 @@ describe('the watcher', () => {
     expect(h.indexed).toHaveLength(3); // B is not mistaken for what was indexed (C)
   });
 
-  it('owed refreshes never starve the polls (codex r4)', async () => {
-    const extra = ['p1', 'p2'].map((id, i) => { const root = join(dir, id); mkdirSync(root); return { id, name: id, root_path: root, default_branch: 'main', registered_at: 10 + i, code_graph_db: graphDb } as RepoEntry; });
+  it('owed refreshes never starve the polls (codex r4); only a capped repo owes one, never an off one (wicked-crew#1481)', async () => {
+    // r1 + 25 more: the last two are past the cap (enabled, not polled), the repos whose debt the step serves.
+    const extra = Array.from({ length: REPO_WATCH_CAP + 1 }, (_, i) => {
+      const root = join(dir, `x${i}`);
+      mkdirSync(root);
+      return { id: `x${String(i).padStart(2, '0')}`, name: `x${i}`, root_path: root, default_branch: 'main', registered_at: 2 + i, code_graph_db: graphDb } as RepoEntry;
+    });
     const h = harness({ extra, gitFn: async (cwd, args) => (cwd === repo ? pollGit(cwd, args) : '# branch.oid 1111111111111111111111111111111111111111\0# branch.head main\0') });
     await h.tick(0);
-    for (const id of ['p1', 'p2']) await h.w.setEnabled(id, false);
+    const capped = extra.slice(-2).map((e) => e.id);
+    for (const id of capped) expect(h.row(id).state).toBe('capped');
     h.state.refreshOk = false;
-    for (const id of ['p1', 'p2']) { await h.w.reindexNow(id); for (let i = 0; i < 6; i++) await h.w.step(); }
-    const polledBefore = h.row('r1').lastPolledAt;
+    for (const id of capped) { await h.w.reindexNow(id); for (let i = 0; i < 60 && !h.indexed.includes(id); i++) await h.w.step(); }
+    for (const id of capped) expect(h.indexed).toContain(id);
+    const owed = h.refreshed.filter((id) => capped.includes(id)).length;
+    expect(owed).toBe(2); // each failed once: owed
+    const polls = () => h.w.status().repos.map((r) => r.lastPolledAt).join(',');
+    const polledBefore = polls();
     h.advance(INDEX_BACKOFF_BASE_MS + POLL_MIN_MS);
-    await h.w.step();
-    expect(h.row('r1').lastPolledAt).not.toBe(polledBefore); // the enabled repo's poll came first
+    // Both are served within a few steps: the polls are never starved by the debt, nor the debt by the polls.
+    for (let i = 0; i < 2 * 10 + 2; i++) await h.w.step();
+    expect(polls()).not.toBe(polledBefore);
+    expect(h.refreshed.filter((id) => capped.includes(id)).length).toBeGreaterThan(owed); // the debt is still served
   });
 
-  it('an owed project refresh retries on a repo that is not polled (off), and a press after an index was queued polls first (codex r3)', async () => {
+  it('a press on an off repo refreshes its projects once; a failure is not retried while it is off, and is once it is on (wicked-crew#1481)', async () => {
     const h = harness();
     await h.tick(0);
     await h.tick();
@@ -574,10 +758,31 @@ describe('the watcher', () => {
     expect(h.indexed).toHaveLength(2);
     const before = h.refreshed.length;
     h.state.refreshOk = true;
-    h.advance(INDEX_BACKOFF_BASE_MS);
+    for (let i = 0; i < 3; i++) { h.advance(INDEX_BACKOFF_MAX_MS); await h.tick(); }
+    expect(h.refreshed.length).toBe(before); // off: nothing restarts its projects' refreshes
+    await h.w.setEnabled('r1', true);
+    await h.tick(0);
     await h.tick();
-    expect(h.refreshed.length).toBe(before + 1);
+    expect(h.refreshed.length).toBe(before + 1); // on again: the owed refresh is served by its poll
     expect(h.indexed).toHaveLength(2);
+  });
+
+  it('an off repo whose record still owes a project refresh does not refresh it at boot (wicked-crew#1481, seen after a reboot)', async () => {
+    const a = harness();
+    a.state.refreshOk = false;
+    await a.tick(0);
+    await a.tick();
+    expect(a.refreshed).toHaveLength(1); // failed: owed, persisted
+    // A record as an older daemon left it: off, and still owing the refresh.
+    const statePath = join(dir, 'state', 'repo-watch.json');
+    const raw = JSON.parse(readFileSync(statePath, 'utf8')) as { version: 1; repos: Record<string, Record<string, unknown>> };
+    raw.repos['r1'] = { ...raw.repos['r1'], enabled: false, projectsOwed: true };
+    writeFileSync(statePath, JSON.stringify(raw));
+    const b = harness();
+    for (let i = 0; i < 4; i++) { b.advance(INDEX_BACKOFF_MAX_MS); await b.tick(); }
+    expect(b.refreshed).toEqual([]); // fails without the fix: "the repo watcher re-indexed r1 — refreshing project …"
+    expect(b.indexed).toEqual([]);
+    expect(b.row()).toMatchObject({ state: 'off', enabled: false });
   });
 
   it('a press after an index was queued polls before it indexes (codex r3)', async () => {

@@ -27,7 +27,10 @@
  *    onto the in-flight refresh of the same project (`refreshProjectGraph`'s single-writer rule).
  *    Coalescing has one gap: a completion that joins a refresh already past its repo is served a
  *    manifest without it — so when the repo is still missing afterwards the hook runs ONE more
- *    refresh, which finds only that repo to index. Never a third.
+ *    refresh, which finds only that repo to index. Never a third, and never after a member's index
+ *    ran past its budget in the first (wicked-crew#1481): the second round would run that
+ *    over-budget index again (its manifest row did not move), a full index budget per event. The
+ *    repo watcher owes and retries the refresh, backed off, instead.
  *  - Every start / outcome / failure goes to the log; a failure never touches the run.
  */
 
@@ -69,6 +72,11 @@ function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** Some member's index ran past its budget: a second round would repeat it (this repo's, or a sibling's; codex r1). */
+function anyTimedOut(result: ProjectGraphRefreshResult): boolean {
+  return (result.repos ?? []).some((r) => r.action === 'failed' && r.timedOut === true);
+}
+
 /** Whether the refresh's answer shows `repoId` in the graph (indexed now, or skipped as already current). */
 function holdsRepo(result: ProjectGraphRefreshResult, repoId: string): boolean {
   const row = (result.repos ?? []).find((r) => r.repoId === repoId);
@@ -101,7 +109,7 @@ export async function refreshProjectGraphsForRepo(
     try {
       let result = await refresh(projectId);
       let rounds = 1;
-      if (!holdsRepo(result, repoId)) {
+      if (!holdsRepo(result, repoId) && !anyTimedOut(result)) {
         // Coalesced onto a refresh that had already passed this repo: one more, which skips every
         // unchanged member and indexes only what is missing.
         result = await refresh(projectId);

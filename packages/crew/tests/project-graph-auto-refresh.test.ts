@@ -84,6 +84,26 @@ describe('refreshProjectGraphsForRepo', () => {
     expect(out.refreshed[0]).toMatchObject({ projectId: 'p1', rounds: 2, failed: ['r9'] });
   });
 
+  it('a repo whose index ran past its budget gets NO second round: it would repeat the same over-budget index (wicked-crew#1481)', async () => {
+    const refresh = vi.fn(async (): Promise<ProjectGraphRefreshResult> => {
+      const r = result([{ repoId: 'r9', action: 'failed' }]);
+      return { ...r, repos: r.repos!.map((row) => ({ ...row, timedOut: true as const, budget: { budgetMs: 138_000, trackedFiles: 3 } })) };
+    });
+    const out = await refreshProjectGraphsForRepo(adapter, 'r9', { memberProjects: async () => ['p1'], refresh, log: () => undefined });
+    expect(refresh).toHaveBeenCalledTimes(1); // fails without the fix: 2, a second full index budget per event
+    expect(out.refreshed[0]).toMatchObject({ projectId: 'p1', rounds: 1, failed: ['r9'] });
+  });
+
+  it('a SIBLING whose index ran past its budget also stops the second round (codex r1 on #1481)', async () => {
+    const refresh = vi.fn(async (): Promise<ProjectGraphRefreshResult> => {
+      const r = result([{ repoId: 'r9', action: 'failed' }, { repoId: 'big', action: 'failed' }]);
+      return { ...r, repos: r.repos!.map((row) => (row.repoId === 'big' ? { ...row, timedOut: true as const } : row)) };
+    });
+    const out = await refreshProjectGraphsForRepo(adapter, 'r9', { memberProjects: async () => ['p1'], refresh, log: () => undefined });
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(out.refreshed[0]).toMatchObject({ rounds: 1, failed: ['r9', 'big'] });
+  });
+
   it('a refresh that throws is logged as a failure for THAT project; the next project still runs; the run is untouched', async () => {
     const log = vi.fn();
     const refresh = vi.fn(async (projectId: string) => {
