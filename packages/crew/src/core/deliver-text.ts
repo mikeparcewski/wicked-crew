@@ -345,7 +345,7 @@ export function firstSentence(line: string): string {
  * the run id in full.
  */
 export function deliverTitle(intent: string, runId: string, workflowId?: string | null): string {
-  const line = firstSentence(firstLine(intent));
+  const line = firstSentence(stripLeadingIssueRef(firstLine(intent)));
   // The run id is caller-supplied too (`LaunchSchema` only requires it non-empty): a newline in it
   // must not turn the title into two lines and break the framing (Copilot on #525).
   if (line === '') return boundedTitle(oneLine(`wicked-crew run ${oneLine(runId)}`));
@@ -366,7 +366,8 @@ const OPENERS: Record<string, string> = { '(': ')', '[': ']', '{': '}', '"': '"'
  * choosing the LAST boundary at nesting depth 0: never inside a quoted or bracketed phrase (crew#550
  * P-1: `… truncated at '(Failed):' and 'sign a seat…`). A straight apostrophe opens a quote only
  * after a space or at the start (so `daemon's` is a word, not a quote). When no depth-0 boundary
- * exists inside the room, any word boundary is taken; a single 72+ character token is cut hard.
+ * exists inside the room, any word boundary is taken; when not even one whole word fits, the result is
+ * a bare `…` (`fix: …` after a conventional prefix, which is kept whole) — a word is never cut.
  */
 export function boundedTitle(line: string, max: number = DELIVER_TITLE_MAX): string {
   if (line.length <= max) return line;
@@ -395,7 +396,12 @@ export function boundedTitle(line: string, max: number = DELIVER_TITLE_MAX): str
     if (closer !== undefined) stack.push(closer);
   }
   const cut = lastDepth0Cut > 0 ? lastDepth0Cut : lastAnyCut;
-  const kept = (cut > 0 ? head.slice(0, cut) : head.slice(0, room)).replace(/[\s,;:(\-–—]+$/u, '');
+  // A cut that leaves no whole word after a conventional prefix keeps the prefix whole (`fix: …`, never
+  // `fix…`): the prefix is a type marker, not a word to trim. A prefix too long to fit falls through.
+  const prefixLen = HAS_CONVENTIONAL_PREFIX.exec(line)?.[0].length ?? 0;
+  if (prefixLen > 0 && prefixLen + 1 <= max && cut < prefixLen) return `${line.slice(0, prefixLen)}…`;
+  if (cut <= 0) return '…';
+  const kept = head.slice(0, cut).replace(/[\s,;:(\-–—]+$/u, '');
   return `${kept}…`;
 }
 
@@ -412,6 +418,24 @@ export function commitSubject(title: string): string {
 
 /** One `#N` / `repo#N` / `owner/repo#N` inside a closing list. */
 const ONE_REF = String.raw`(?:(?:[\w.-]+\/)?[\w.-]+)?#\d+\b`;
+/**
+ * A leading closing/reference clause — `Fixes #N:`, `Fix #N -`, `Closes owner/repo#N:`, `Refs #N:` (any
+ * case; a `, #M` / `and #M` list too) — with its REQUIRED separator (a bare issue URL is rewritten to
+ * `resolve owner/repo#N` upstream and must stay the headline). The body's `Fixes #N` line is derived from
+ * the whole intent, not the title, so the title drops the clause (crew#1485).
+ */
+const LEADING_ISSUE_REF = new RegExp(
+  String.raw`^\s*(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?|refs?)\s*:?\s*` +
+    ONE_REF +
+    String.raw`(?:\s*(?:,|&|\band\b)\s*` +
+    ONE_REF +
+    String.raw`)*\s*[:\-–—]+\s*`,
+  'i',
+);
+
+function stripLeadingIssueRef(line: string): string {
+  return line.replace(LEADING_ISSUE_REF, '').trim();
+}
 /**
  * `fix issue #214`, `fixes #7`, `fix the bug #3`, `closes wicked-studio#3`, `resolved: #9` — a closing verb + a ref —
  * and a LIST after one verb (crew#635: `fix #618, #619 and #620` closed only #618, so every merge

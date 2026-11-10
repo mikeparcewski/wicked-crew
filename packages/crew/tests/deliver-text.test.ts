@@ -191,15 +191,103 @@ describe('deliverTitle / commitSubject — never cut mid-word (F-3R2-014); the P
     expect(title).toMatch(/[a-z]…$/);
   });
 
-  it('names the run when the intent is blank, and never exceeds the cap even for one huge token', () => {
+  it('names the run when the intent is blank, and never cuts mid-word even for one huge token (crew#1485)', () => {
     expect(deliverTitle('', RUN_ID)).toBe(`wicked-crew run ${RUN_ID}`);
     expect(deliverTitle('   \n\t\n', RUN_ID)).toBe(`wicked-crew run ${RUN_ID}`);
-    const huge = deliverTitle('x'.repeat(300), RUN_ID);
-    expect(huge.length).toBe(DELIVER_TITLE_MAX);
-    expect(huge.endsWith('…')).toBe(true);
-    const subject = commitSubject(huge);
-    expect(subject.length).toBe(COMMIT_SUBJECT_MAX);
-    expect(subject.endsWith('…')).toBe(true);
+    // No whole word fits: a bare ellipsis, never a hard cut of the token.
+    expect(deliverTitle('x'.repeat(300), RUN_ID)).toBe('…');
+    expect(commitSubject(deliverTitle('x'.repeat(300), RUN_ID))).toBe('…');
+    expect(boundedTitle('x'.repeat(DELIVER_TITLE_MAX))).toBe('x'.repeat(DELIVER_TITLE_MAX));
+  });
+
+  describe('a leading issue reference is not part of the title (crew#1485)', () => {
+    const intent1468 =
+      'Fixes #1468: two runtime hints still tell users to `npm install -g wicked-crew` (packages/crew/src/cli/service.ts:276 and packages/crew/src/core/vault-bin.ts:98). Both should name the installer flow.\n\nFixes #1468';
+
+    it('the #1468 intent: one prefix, no reference in the title or subject, `Fixes #1468` still in the body', () => {
+      const text = composeDeliverText(
+        factsFromWorkflow({ runId: RUN_ID, intent: intent1468, workflowId: 'bug', repoRef: 'wicked-crew', phases: [], runUrl: null }),
+      );
+      expect(text.title.startsWith('fix: two runtime hints')).toBe(true);
+      expect(text.title).not.toContain('#1468');
+      expect(text.title.match(/\bfix:/gi)).toHaveLength(1);
+      expect(commitSubject(text.title).match(/\bfix:/gi)).toHaveLength(1);
+      expect(text.title.length).toBeLessThanOrEqual(DELIVER_TITLE_MAX);
+      expect(text.body.split('\n')).toContain('Fixes #1468');
+    });
+
+    it.each([
+      ['Fixes #7: tidy the cache', 'tidy the cache'],
+      ['fix #7 - tidy the cache', 'tidy the cache'],
+      ['Fix #7 – tidy the cache', 'tidy the cache'],
+      ['CLOSES #7: tidy the cache', 'tidy the cache'],
+      ['Closed #7: tidy the cache', 'tidy the cache'],
+      ['Resolves wicked-studio#7: tidy the cache', 'tidy the cache'],
+      ['Refs #7: tidy the cache', 'tidy the cache'],
+      ['ref #7 — tidy the cache', 'tidy the cache'],
+      ['Fixes #7, #8: tidy the cache', 'tidy the cache'],
+    ])('%s', (intent, rest) => {
+      expect(deliverTitle(intent, RUN_ID)).toBe(rest);
+      expect(deliverTitle(intent, RUN_ID, 'bug')).toBe(`fix: ${rest}`);
+    });
+
+    it('a reference-only intent falls back to the run title; non-leading references stay', () => {
+      expect(deliverTitle('Fixes #7:', RUN_ID)).toBe(`wicked-crew run ${RUN_ID}`);
+      expect(deliverTitle('tidy the cache, fixes #7', RUN_ID)).toBe('tidy the cache, fixes #7');
+      expect(deliverTitle('Fixes #7 properly by tidying', RUN_ID)).toBe('Fixes #7 properly by tidying');
+    });
+
+    it('an intent that already carries a conventional prefix is not prefixed twice', () => {
+      expect(deliverTitle('Fixes #1: feat: add a thing', RUN_ID, 'bug')).toBe('feat: add a thing');
+      expect(deliverTitle('Fixes #1: feat(api): add a thing', RUN_ID, 'bug')).toBe('feat(api): add a thing');
+    });
+  });
+
+  describe('cut at a whole word, an ellipsis only when something was cut (crew#1485)', () => {
+    const words = (n: number) => {
+      // words of 9 characters + a space, trimmed to exactly n characters ending on a word.
+      let s = '';
+      while (s.length + 10 <= n) s += 'abcdefghi ';
+      return `${s}${'z'.repeat(n - s.length)}`;
+    };
+    it.each([
+      ['title', DELIVER_TITLE_MAX, (l: string) => boundedTitle(l)],
+      ['subject', COMMIT_SUBJECT_MAX, (l: string) => commitSubject(l)],
+    ])('%s at and over the limit', (_name, max, cut) => {
+      const exact = words(max);
+      expect(exact).toHaveLength(max);
+      expect(cut(exact)).toBe(exact);
+      const over = `${exact} tail`;
+      const result = cut(over);
+      expect(result.length).toBeLessThanOrEqual(max);
+      expect(result.endsWith('…')).toBe(true);
+      const kept = result.slice(0, -1).split(' ');
+      expect(kept.every((w) => /^(?:abcdefghi|z+)$/.test(w))).toBe(true);
+      expect(over.startsWith(kept.join(' '))).toBe(true);
+      // One character over: still cut at a word, never inside one.
+      const one = cut(`${exact}x`);
+      expect(one.endsWith('…')).toBe(true);
+      expect(one.slice(0, -1).split(' ').every((w) => /^(?:abcdefghi|z+x?)$/.test(w) && w !== 'zz')).toBeTruthy();
+    });
+
+    it.each([
+      ['fix', 'fix: '],
+      ['fix(crew)', 'fix(crew): '],
+    ])('oversized content after a %s prefix keeps the prefix whole, in the title and the subject', (type, prefix) => {
+      const body = 'x'.repeat(120);
+      const title = deliverTitle(`Fixes #7: ${body}`, 'review-run', 'bug');
+      expect(deliverTitle(`${type}: ${body}`, 'review-run', 'bug')).toContain(type);
+      expect(boundedTitle(`${prefix}${body}`)).toBe(`${prefix}…`);
+      expect(commitSubject(`${prefix}${body}`)).toBe(`${prefix}…`);
+      expect(title).toBe('fix: …');
+      expect(commitSubject(title)).toBe('fix: …');
+    });
+
+    it('a conventional prefix with a scope longer than the limit still stays within it', () => {
+      const title = boundedTitle(`feat(${'s'.repeat(150)}): add a thing`);
+      expect(title.length).toBeLessThanOrEqual(DELIVER_TITLE_MAX);
+      expect(commitSubject(`feat(${'s'.repeat(150)}): add a thing`).length).toBeLessThanOrEqual(COMMIT_SUBJECT_MAX);
+    });
   });
 
   it('a blank intent with a LONG caller-supplied run id goes through the same bounded cut — never mid-id (Copilot on #525)', () => {
