@@ -77,6 +77,10 @@ const CLOSURE_READY = CLOSURE_BIN !== '' && CLOSURE_BIN_OLD !== '';
  * And one reproduces a binary that has something to SAY:
  *   STUB_INDEX_STDERR=…  — written to stderr by every `index` (exit 0), the shape of estate's
  *                          id_scheme migration notice. crew used to discard it entirely.
+ * And the X1 linker (wicked-estate >= 0.34.0):
+ *   STUB_LINK=1          — `--help` advertises `link --project`; `link` records its argv to
+ *                          `<db>.links` and answers a report; `blast-radius` adds a crossing.
+ *   STUB_LINK_FAIL=1     — `link` exits 1.
  */
 const STUB = `#!/usr/bin/env node
 'use strict';
@@ -90,6 +94,25 @@ if (argv.includes('--help') || cmd === undefined) {
   const repoLine = process.env.STUB_NO_REPO_FLAG === '1' ? '' : ' [--repo <name>]';
   process.stdout.write('stub-estate 9.9.9 — usage:\\n');
   process.stdout.write('  wicked-estate index <path>         [--db <file|:memory:>]' + repoLine + ' [--force]\\n');
+  if (process.env.STUB_LINK === '1') {
+    process.stdout.write('  wicked-estate link --project <id> [--labels a,b] [--json] [--status] [--db <file>]\\n');
+  }
+  process.exit(0);
+}
+
+if (cmd === 'link') {
+  const db0 = opt('--db');
+  fs.appendFileSync(db0 + '.links', JSON.stringify(argv) + '\\n');
+  fs.appendFileSync(db0 + '.events', 'link ' + (opt('--labels') || '') + '\\n');
+  if (process.env.STUB_LINK_FAIL === '1') {
+    process.stderr.write('Error: WRITER-BUSY: another estate writer holds the db\\n');
+    process.exit(1);
+  }
+  process.stdout.write(JSON.stringify({
+    project: opt('--project'), generation: 3, replayed: false, links: 2,
+    links_by_identity: { 'registry-source': 2 }, boundaries_by_reason: { 'dep:undeclared': 1 },
+    possible: [], incomplete: [], members: (opt('--labels') || '').split(','), fingerprint: 'f',
+  }));
   process.exit(0);
 }
 
@@ -101,6 +124,7 @@ if (cmd === 'index') {
   const root = argv[1];
   const label = process.env.STUB_DROPS_REPO === '1' ? undefined : opt('--repo');
   fs.appendFileSync(db + '.calls', JSON.stringify(argv) + '\\n');
+  fs.appendFileSync(db + '.events', 'index ' + (opt('--repo') || '') + '\\n');
   // The loud-notice seam: estate's id_scheme migration gate speaks on stderr and exits 0.
   if (process.env.STUB_INDEX_STDERR) process.stderr.write(process.env.STUB_INDEX_STDERR + '\\n');
   // A real index takes seconds; a stub returns in a millisecond. STUB_INDEX_DELAY_MS widens the
@@ -154,8 +178,20 @@ if (cmd === 'resolve' || cmd === 'blast-radius') {
     const prefix = label === '__unlabelled__' ? '' : label + '/';
     hits.push({ id: 'sym ' + prefix + want, name: want, kind: 'Function', file: prefix + 'src/index.ts', line: 1 });
   }
+  const linked = process.env.STUB_LINK === '1' && hits.length > 0;
+  if (linked) hits[0].via_crossing = 'x0000000000000001';
+  const from = process.env.STUB_CROSS_FROM || 'beta';
+  const crossings = linked
+    ? [{ id: 'x0000000000000001', depth: 1, from: { repo: from, symbol: 'file . ' + from + '/src/index.ts:' },
+         to: { repo: 'alpha', symbol: 'file . alpha/src/index.ts:' }, hops: [{ kind: 'imports', resolved_by: 'wicked-link' }],
+         evidence: { identity: 'registry-source', ranks: ['package-manifest'] } }]
+    : [];
+  const stale = process.env.STUB_LINK_STALE === '1';
   process.stdout.write(
-    cmd === 'resolve' ? JSON.stringify(hits) : JSON.stringify({ target: want, dependents: hits, unresolved: 0 }),
+    cmd === 'resolve'
+      ? JSON.stringify(hits)
+      : JSON.stringify({ target: want, dependents: hits, unresolved: 0, crossings, crossings_total: crossings.length,
+          link: [{ project: 'p', generation: 3, stale, stale_labels: stale ? ['beta'] : [], coverage: [] }] }),
   );
   process.exit(0);
 }
@@ -328,6 +364,10 @@ beforeEach(() => {
   delete process.env['STUB_DROPS_REPO'];
   delete process.env['STUB_INDEX_DELAY_MS'];
   delete process.env['STUB_INDEX_STDERR'];
+  delete process.env['STUB_LINK'];
+  delete process.env['STUB_LINK_FAIL'];
+  delete process.env['STUB_CROSS_FROM'];
+  delete process.env['STUB_LINK_STALE'];
 
   fx = {
     app: undefined as unknown as FastifyInstance,
@@ -365,6 +405,10 @@ afterEach(async () => {
   delete process.env['STUB_DROPS_REPO'];
   delete process.env['STUB_INDEX_DELAY_MS'];
   delete process.env['STUB_INDEX_STDERR'];
+  delete process.env['STUB_LINK'];
+  delete process.env['STUB_LINK_FAIL'];
+  delete process.env['STUB_CROSS_FROM'];
+  delete process.env['STUB_LINK_STALE'];
   removeScratch(fx.work);
 });
 
@@ -1073,5 +1117,102 @@ describe.skipIf(!POSIX)('what the answers promise', () => {
       expect(payload['note']).toMatch(/edges do not resolve across repos/i);
       expect(payload['note']).toMatch(/never a cross-repo trace/i);
     }
+  });
+});
+
+/** Every `link` argv the stub was handed, in order. */
+function linkCalls(): string[][] {
+  if (!existsSync(`${fx.dbPath}.links`)) return [];
+  return readFileSync(`${fx.dbPath}.links`, 'utf8')
+    .split('\n')
+    .filter((l) => l.trim() !== '')
+    .map((l) => JSON.parse(l) as string[]);
+}
+
+describe.skipIf(!POSIX)('POST /projects/:id/graph/refresh — the X1 link step (wicked-estate >= 0.34.0)', () => {
+  it('links LAST, over the current member labels, and reports what the link did', async () => {
+    process.env['STUB_LINK'] = '1';
+    for (const n of ['alpha', 'beta']) register(n, makeRepo(n));
+    attach('alpha', 'beta');
+    const res = await refresh();
+    expect(res.code).toBe(200);
+    const links = linkCalls();
+    expect(links).toHaveLength(1);
+    const argv = links[0]!;
+    expect(argv[argv.indexOf('--project') + 1]).toBe(PROJECT_ID);
+    expect(argv[argv.indexOf('--db') + 1]).toBe(fx.dbPath);
+    expect(argv[argv.indexOf('--labels') + 1]!.split(',').sort()).toEqual(['alpha', 'beta']);
+    expect(argv).toContain('--json');
+    // LAST: one ordered log of the stub's index and link events.
+    const events = readFileSync(`${fx.dbPath}.events`, 'utf8').trim().split('\n');
+    expect(events.map((e) => e.split(' ')[0])).toEqual(['index', 'index', 'link']);
+    const link = (res.body as unknown as { link?: Record<string, unknown> }).link;
+    expect(link).toMatchObject({ generation: 3, links: 2, replayed: false, incomplete: [] });
+    expect(link?.['boundaries_by_reason']).toEqual({ 'dep:undeclared': 1 });
+  });
+
+  it('an estate without `link` keeps the refresh exactly as before: no link step, no field', async () => {
+    for (const n of ['alpha', 'beta']) register(n, makeRepo(n));
+    attach('alpha', 'beta');
+    const res = await refresh();
+    expect(res.code).toBe(200);
+    expect(linkCalls()).toHaveLength(0);
+    expect('link' in (res.body as object)).toBe(false);
+  });
+
+  it('a failed link is reported on the result and never fails the refresh', async () => {
+    process.env['STUB_LINK'] = '1';
+    process.env['STUB_LINK_FAIL'] = '1';
+    for (const n of ['alpha', 'beta']) register(n, makeRepo(n));
+    attach('alpha', 'beta');
+    const res = await refresh();
+    expect(res.code).toBe(200);
+    expect(res.body['indexed']).toHaveLength(2);
+    const link = (res.body as unknown as { link?: { error?: string } }).link;
+    expect(link?.error).toMatch(/WRITER-BUSY|exit|Command failed/);
+  });
+
+  it('an answer that crossed a link says `linked`, lists the crossings and names them on the hit', async () => {
+    process.env['STUB_LINK'] = '1';
+    for (const n of ['alpha', 'beta']) register(n, makeRepo(n));
+    attach('alpha', 'beta');
+    expect((await refresh()).code).toBe(200);
+    const res = await get<Record<string, unknown>>('/graph/blast-radius?name=sharedName');
+    expect(res.code).toBe(200);
+    expect(res.body['linkage']).toBe('linked');
+    expect(String(res.body['note'])).toMatch(/^Linked:/);
+    const crossings = res.body['crossings'] as Array<{ id: string }>;
+    expect(crossings).toHaveLength(1);
+    expect(res.body['crossings_total']).toBe(1);
+    const deps = res.body['dependents'] as Array<{ via_crossing?: string }>;
+    expect(deps.some((d) => d.via_crossing === crossings[0]!.id)).toBe(true);
+  });
+});
+
+describe.skipIf(!POSIX)('linked answers stay honest (X1c review)', () => {
+  it('a stale link generation still answers `linked`, but says so and names the moved members', async () => {
+    process.env['STUB_LINK'] = '1';
+    process.env['STUB_LINK_STALE'] = '1';
+    for (const n of ['alpha', 'beta']) register(n, makeRepo(n));
+    attach('alpha', 'beta');
+    expect((await refresh()).code).toBe(200);
+    const res = await get<Record<string, unknown>>('/graph/blast-radius?name=sharedName');
+    expect(res.body['linkage']).toBe('linked');
+    expect(res.body['link_stale']).toBe(true);
+    expect(res.body['link_stale_labels']).toEqual(['beta']);
+    expect(String(res.body['note'])).toMatch(/earlier refresh/);
+  });
+
+  it('a crossing from a repo that is no longer a member is dropped: the answer is co-located', async () => {
+    process.env['STUB_LINK'] = '1';
+    process.env['STUB_CROSS_FROM'] = 'gone';
+    for (const n of ['alpha', 'beta']) register(n, makeRepo(n));
+    attach('alpha', 'beta');
+    expect((await refresh()).code).toBe(200);
+    const res = await get<Record<string, unknown>>('/graph/blast-radius?name=sharedName');
+    expect(res.body['linkage']).toBe('co-located');
+    expect(res.body['crossings']).toEqual([]);
+    const deps = res.body['dependents'] as Array<{ via_crossing?: string }>;
+    expect(deps.every((d) => d.via_crossing === undefined)).toBe(true);
   });
 });

@@ -10,6 +10,20 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+
+- **A project's code graph links its repos (api-types 0.202.0, wicked-estate >= 0.34.0).**
+  - **Refresh:** after indexing every member repo, the refresh runs `wicked-estate link` over the
+    current members. A removed member's links are retracted. The result reports what the link did:
+    `link.generation`, `links`, `links_by_identity`, `boundaries_by_reason` (the "possible" items),
+    and `incomplete`. A failed link is reported as `link.error` and never fails the refresh.
+  - **Blast radius:** an answer that crossed from one repo into another through a proven package
+    link now says `linkage: 'linked'`, carries `crossings` (with estate's evidence) and
+    `crossings_total`, and names the crossing on each dependent it reached (`via_crossing`). Other
+    answers stay `co-located`.
+  - **Older estate:** a binary without `link`, found by probing `--help`, leaves all of this
+    exactly as before.
+
 ## [0.18.5] — 2026-11-10
 
 A patch that bundles wicked-studio 0.16.5. No daemon or wire change: api-types and core-ts are unchanged.

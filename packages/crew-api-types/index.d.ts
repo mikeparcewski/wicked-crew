@@ -10125,8 +10125,45 @@ export interface ChatPathView {
 // Every response repeats it in `linkage` + `note` so a consumer cannot read a cross-repo answer as
 // a cross-repo TRACE.
 
-/** Co-location, never linkage — a single-valued field so a future linked mode is additive. */
-export type ProjectGraphLinkage = 'co-located';
+/**
+ * `co-located`: per-repo results gathered into one answer, never a cross-repo trace.
+ * `linked` (api-types 0.202.0, wicked-estate >= 0.34.0): THIS answer traversed at least one
+ * cross-repo package link that `wicked-estate link` proved from package identity; every such step is
+ * listed in `crossings`, with its evidence, and each dependent reached through one names it in
+ * `via_crossing`. Hits not reached through a crossing are still per-repo results.
+ */
+export type ProjectGraphLinkage = 'co-located' | 'linked';
+
+/**
+ * (api-types 0.202.0) One step of an answer from one repo into another, through a package link
+ * (wicked-estate `link`, slice X1). `evidence` is estate's, verbatim: `identity` (`path`,
+ * `git-source`, `registry-source`, `registry-source(version-only)`), `package`, `ecosystem`,
+ * `confidence`, `ranks` (`package-manifest`), `skew`, `consumer_version` / `provider_version`.
+ */
+export interface ProjectGraphCrossing {
+  id: string;
+  depth: number;
+  from: { repo: string; symbol: string };
+  to: { repo: string; symbol: string };
+  hops: Array<{ kind: string; resolved_by: string }>;
+  evidence: Record<string, unknown>;
+}
+
+/**
+ * (api-types 0.202.0) What the refresh's final `wicked-estate link` did, ABSENT when the installed
+ * estate cannot link (< 0.34.0). `error` set or `incomplete` non-empty ⇒ nothing new was published:
+ * answers keep the PREVIOUS link generation's links, marked stale (`link_stale` on the answer).
+ */
+export interface ProjectGraphLinkRun {
+  generation?: number;
+  links?: number;
+  replayed?: boolean;
+  links_by_identity?: Record<string, number>;
+  /** "Possible" items by reason (`dep:provider-unverified`, `dep:undeclared`, ...): not links. */
+  boundaries_by_reason?: Record<string, number>;
+  incomplete?: string[];
+  error?: string;
+}
 
 /**
  * Why a project graph cannot answer, or the terms on which it can.
@@ -10315,6 +10352,8 @@ export interface ProjectGraphRefreshResult {
   failed: Array<{ repoId: string; label: string; error: string }>;
   /** Per-repo outcomes with the WHY (and any index stderr) attached — one row per member repo. */
   repos?: ProjectGraphRefreshRepo[];
+  /** (api-types 0.202.0) The cross-repo link step that runs after the member indexes. */
+  link?: ProjectGraphLinkRun;
 }
 
 /** One hit, always attributed: a cross-repo answer that does not say WHERE is not an answer. */
@@ -10335,6 +10374,12 @@ export interface ProjectGraphHit {
   /** REPO-RELATIVE path, label stripped — the same spelling `/repos/:id/graph` returns. */
   file: string;
   line: number;
+  /**
+   * (api-types 0.202.0) The `crossings[].id` this dependent was reached through, when it was. With
+   * `via_crossing_omitted`, that crossing is past the listed cap (not in `crossings`).
+   */
+  via_crossing?: string;
+  via_crossing_omitted?: boolean;
 }
 
 /** Per-repo hit counts, so "which repo does this touch" is answerable without scanning hits. */
@@ -10373,6 +10418,22 @@ export interface ProjectBlastRadius {
   node_cap_reached?: boolean;
   searched_depth?: number;
   truncated_dependents?: number;
+  /**
+   * (api-types 0.202.0, wicked-estate >= 0.34.0) The cross-repo package links this answer traversed,
+   * shallowest first and capped by estate; `crossings_total` counts them all. Empty or absent ⇒
+   * `linkage: 'co-located'`.
+   */
+  crossings?: ProjectGraphCrossing[];
+  crossings_total?: number;
+  /** (api-types 0.202.0) Some crossings this answer traversed are not listed (`crossings_total` counts them). */
+  crossings_truncated?: boolean;
+  /**
+   * (api-types 0.202.0) The project's link generation predates the current indexes (a member was
+   * re-indexed, removed, is mid-index, or the last link failed): the crossings are the previous
+   * generation's. `link_stale_labels` names the members that moved. A refresh relinks.
+   */
+  link_stale?: boolean;
+  link_stale_labels?: string[];
 }
 
 /** `GET /projects/:id/graph/search?name=` — exact-name symbol resolution across member repos. */

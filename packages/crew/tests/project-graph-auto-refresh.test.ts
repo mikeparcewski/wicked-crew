@@ -44,6 +44,18 @@ describe('refreshProjectGraphsForRepo', () => {
     ]);
   });
 
+  it('X1: a link step that did not publish is on the outcome (owed and retried), a published one is not', async () => {
+    const withLink = (link: NonNullable<ProjectGraphRefreshResult['link']>) =>
+      vi.fn(async (): Promise<ProjectGraphRefreshResult> => ({ ...result([{ repoId: 'r1', action: 'indexed' }]), link }));
+    const opts = { memberProjects: async () => ['p1'], log: () => undefined };
+    const busy = await refreshProjectGraphsForRepo(adapter, 'r1', { ...opts, refresh: withLink({ error: 'WRITER-BUSY' }) });
+    expect(busy.refreshed[0]!.linkFailed).toBe('WRITER-BUSY');
+    const mid = await refreshProjectGraphsForRepo(adapter, 'r1', { ...opts, refresh: withLink({ incomplete: ['r2'] }) });
+    expect(mid.refreshed[0]!.linkFailed).toBe('incomplete: r2');
+    const ok = await refreshProjectGraphsForRepo(adapter, 'r1', { ...opts, refresh: withLink({ generation: 2, links: 3, incomplete: [] }) });
+    expect(ok.refreshed[0]!.linkFailed).toBeUndefined();
+  });
+
   it('a repo in no project refreshes nothing and says nothing', async () => {
     const refresh = vi.fn();
     const log = vi.fn();
