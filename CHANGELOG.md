@@ -10,6 +10,20 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.18.4] — 2026-11-09
+
+A patch that bundles wicked-studio 0.16.4. No daemon or wire change: api-types and core-ts are unchanged.
+
+### Changed
+
+- **Undo is inline, in the block where you acted.** wicked-studio 0.16.4 replaces the floating Undo notice. A queued
+  decision shows its countdown, what will happen and Undo inside the card, row or bar it was taken in, and its result
+  lands there too.
+  - When one decision appears in several places on a page, only the block you acted in has the full Undo; the others
+    read "Waiting to send".
+  - A decision is never sent unless its Undo was on screen.
+  - A batch's failures are listed once, in plain words, with Retry and Open.
+
 ## [0.18.3] — 2026-11-09
 
 A patch: a repository's code map now follows its checkout with no click. Bundles wicked-studio 0.16.3 (a chat page's
@@ -6583,7 +6597,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.3...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.4...HEAD
+[0.18.4]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.3...v0.18.4
 [0.18.3]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.2...v0.18.3
 [0.18.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.1...v0.18.2
 [0.18.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.0...v0.18.1
