@@ -95,7 +95,7 @@ export function applyVaultBinEnv(env: NodeJS.ProcessEnv, resolve: VaultBinResolv
 }
 
 const UNRESOLVABLE_REMEDY =
-  'reinstall wicked-crew so its wicked-vault dependency is present (npm i -g wicked-crew), or set WICKED_VAULT_BIN to a wicked-vault CLI, then restart the daemon';
+  'reinstall wicked-crew with `npx wicked-installer` so its wicked-vault dependency is present, or set WICKED_VAULT_BIN to a wicked-vault CLI, then restart the daemon with `wicked-crew serve`';
 const OFF_REMEDY = 'unset WICKED_VAULT_BIN (crew then hands the engine its own wicked-vault) and restart the daemon';
 
 /** The finding a posture carries, or `null` when the engine has a CLI to vault with. */

@@ -205,7 +205,11 @@ describe('installService / uninstallService', () => {
     const home = tmpHome();
     const { deps, lines } = fakeDeps('darwin', home);
     expect(await installService({ ...INPUT(home), cliPath: '/h/.npm/_npx/abc/node_modules/wicked-crew/dist/cli/index.js' }, deps)).toBe(1);
-    expect(lines.join('\n')).toContain('npm install -g wicked-crew');
+    expect(lines).toEqual([
+      'wicked-crew: refusing to install a login service that runs from the npx cache (it is not durable). ' +
+        'Install crew with `npx wicked-installer`, then run `wicked-crew serve --install-service`.',
+    ]);
+    expect(lines.join('\n')).not.toContain('npm install -g');
   });
 
   it('Linux: writes the user unit, reloads, enables and (re)starts it; prints the linger hint', async () => {

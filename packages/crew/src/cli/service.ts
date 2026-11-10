@@ -273,7 +273,7 @@ export async function installService(input: InstallInput, deps: ServiceDeps): Pr
   if (/[\\/]_npx[\\/]/.test(cli)) {
     deps.log(
       'wicked-crew: refusing to install a login service that runs from the npx cache (it is not durable). ' +
-        'Install crew first — `npm install -g wicked-crew` — then run `wicked-crew serve --install-service`.',
+        'Install crew with `npx wicked-installer`, then run `wicked-crew serve --install-service`.',
     );
     return 1;
   }
