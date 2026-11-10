@@ -50,7 +50,15 @@ export interface AutoRefreshDeps {
 export interface AutoRefreshOutcome {
   repoId: string;
   /** Projects refreshed, in order, with how many refresh rounds each took (1, or 2 after a coalescing miss). */
-  refreshed: { projectId: string; rounds: number; indexed: string[]; skipped: string[]; failed: string[] }[];
+  refreshed: {
+    projectId: string;
+    rounds: number;
+    indexed: string[];
+    skipped: string[];
+    failed: string[];
+    /** X1: the link step did not publish (`link.error`, or a member `incomplete`): owed, retried. */
+    linkFailed?: string;
+  }[];
   /** Projects whose refresh threw — the message, never the run. */
   failed: { projectId: string; error: string }[];
   /** The membership lookup itself failed, so nothing is known about which projects needed a refresh (codex r3). */
@@ -100,7 +108,17 @@ export async function refreshProjectGraphsForRepo(
         rounds = 2;
       }
       const failed = result.failed.map((f) => f.label);
-      out.refreshed.push({ projectId, rounds, indexed: result.indexed, skipped: result.skipped, failed });
+      const linkFailed =
+        result.link?.error ??
+        ((result.link?.incomplete?.length ?? 0) > 0 ? `incomplete: ${result.link!.incomplete!.join(', ')}` : undefined);
+      out.refreshed.push({
+        projectId,
+        rounds,
+        indexed: result.indexed,
+        skipped: result.skipped,
+        failed,
+        ...(linkFailed === undefined ? {} : { linkFailed }),
+      });
       deps.log(
         `[projects] auto-refresh: project ${projectId} graph is ${result.status.state} ` +
           `(indexed ${result.indexed.length}, skipped ${result.skipped.length}, failed ${failed.length}` +

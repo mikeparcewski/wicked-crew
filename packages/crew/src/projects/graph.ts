@@ -49,6 +49,8 @@ import { codeGraphDb, CodeGraphRootUnresolvableError } from '../core/repoPaths.j
 import type {
   ProjectBlastRadius,
   ProjectGraphAction,
+  ProjectGraphCrossing,
+  ProjectGraphLinkRun,
   ProjectGraphHit,
   ProjectGraphRefreshResult,
   ProjectGraphRepo,
@@ -63,6 +65,21 @@ import { projectGraphDb, projectGraphManifest, repoLabel } from './graph-paths.j
 export const CO_LOCATION_NOTE =
   'Co-located, not linked: each repo is indexed under its own label and edges do not resolve ' +
   'across repos. Results are per-repo hits gathered into one answer, never a cross-repo trace.';
+
+/**
+ * The sentence an answer carries when it traversed a cross-repo package link (wicked-estate >= 0.34.0,
+ * slice X1): the crossings are proven from package identity and listed, the rest are per-repo hits.
+ */
+export const LINKED_NOTE =
+  'Linked: this answer crossed from one repo into another through package links that ' +
+  'wicked-estate proved from package identity (listed in `crossings`; each dependent reached ' +
+  'through one names it in `via_crossing`). Other hits are per-repo results, and a dependency the ' +
+  'linker could not prove is not followed.';
+
+/** Added to {@link LINKED_NOTE} when the project's link generation predates the current indexes. */
+export const LINK_STALE_NOTE =
+  'The links are from an earlier refresh and some repos changed since (`link_stale_labels`): ' +
+  'refresh the code graph to relink.';
 
 /**
  * The second sentence `/graph/search` carries, and only it.
@@ -228,6 +245,71 @@ export async function estateSupportsMultiRepo(env: NodeJS.ProcessEnv = process.e
     // `--help` exits non-zero on some builds; the banner still went to stdout on the error object.
     const out = (err as { stdout?: unknown }).stdout;
     return typeof out === 'string' && /index <path>[^\n]*--repo <name>/.test(out);
+  }
+}
+
+/**
+ * Does the `wicked-estate` that will run support `link --project` (wicked-estate >= 0.34.0, slice X1)?
+ * Probed from `--help`, like `--repo`: an older binary has no `link`, and the refresh stays
+ * co-located.
+ */
+export async function estateSupportsLink(env: NodeJS.ProcessEnv = process.env): Promise<boolean> {
+  const probe = /^\s*wicked-estate link --project <id>/m;
+  try {
+    const { stdout } = await execCapped(estateExe(env), ['--help'], { timeout: 10_000 });
+    return probe.test(stdout);
+  } catch (err) {
+    const out = (err as { stdout?: unknown }).stdout;
+    return typeof out === 'string' && probe.test(out);
+  }
+}
+
+/** Upper bound on one `wicked-estate link` run (it reads the stored inputs; it does not re-index). */
+const LINK_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * The refresh's last step: link the CURRENT member labels (leaving a removed member out retracts
+ * its links). Never throws: a failed link leaves the co-located graph as it always was, and the
+ * failure is reported on the refresh result.
+ */
+async function linkMembers(
+  projectId: string,
+  dbPath: string,
+  labels: string[],
+  env: NodeJS.ProcessEnv,
+  log?: (msg: string) => void,
+): Promise<ProjectGraphLinkRun | undefined> {
+  if (labels.length === 0 || !(await estateSupportsLink(env))) return undefined;
+  try {
+    const { stdout } = await execCapped(
+      estateExe(env),
+      ['link', '--db', dbPath, '--project', projectId, '--labels', labels.join(','), '--json'],
+      { timeout: LINK_TIMEOUT_MS },
+    );
+    const r = JSON.parse(stdout) as Record<string, unknown>;
+    const num = (k: string): number | undefined => (typeof r[k] === 'number' ? (r[k] as number) : undefined);
+    const counts = (k: string): Record<string, number> | undefined => {
+      const v = r[k];
+      return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, number>) : undefined;
+    };
+    const generation = num('generation');
+    const links = num('links');
+    const byIdentity = counts('links_by_identity');
+    const byReason = counts('boundaries_by_reason');
+    return {
+      ...(generation === undefined ? {} : { generation }),
+      ...(links === undefined ? {} : { links }),
+      ...(typeof r['replayed'] === 'boolean' ? { replayed: r['replayed'] } : {}),
+      ...(byIdentity === undefined ? {} : { links_by_identity: byIdentity }),
+      ...(byReason === undefined ? {} : { boundaries_by_reason: byReason }),
+      incomplete: Array.isArray(r['incomplete'])
+        ? (r['incomplete'] as unknown[]).filter((x): x is string => typeof x === 'string')
+        : [],
+    };
+  } catch (err) {
+    const error = err instanceof ExecOutputTooLarge ? err.message : message(err);
+    log?.(`wicked-estate link (project ${projectId}) failed: ${error}`);
+    return { error };
   }
 }
 
@@ -767,12 +849,21 @@ async function doRefresh(
 
   const manifest: Manifest = { version: 1, projectId, repos: rows };
   await writeManifest(projectId, manifest, env);
+  // X1: link LAST, over the current members, once every index of this refresh has finished.
+  const link = await linkMembers(
+    projectId,
+    dbPath,
+    members.repos.map((m) => m.label),
+    env,
+    log,
+  );
   return {
     status: buildStatus({ projectId, members, manifest, dbExists: existsSync(dbPath), env }),
     indexed,
     skipped,
     failed,
     repos: repoRows,
+    ...(link === undefined ? {} : { link }),
   };
 }
 
@@ -1055,6 +1146,8 @@ interface RawHit {
   kind?: unknown;
   file?: unknown;
   line?: unknown;
+  via_crossing?: unknown;
+  via_crossing_omitted?: unknown;
 }
 
 function toHit(raw: RawHit, labels: Map<string, string>): ProjectGraphHit | null {
@@ -1070,6 +1163,8 @@ function toHit(raw: RawHit, labels: Map<string, string>): ProjectGraphHit | null
     kind: typeof raw.kind === 'string' ? raw.kind : '',
     file: where.file,
     line: typeof raw.line === 'number' ? raw.line : 0,
+    ...(typeof raw.via_crossing === 'string' ? { via_crossing: raw.via_crossing } : {}),
+    ...(raw.via_crossing_omitted === true ? { via_crossing_omitted: true } : {}),
   };
 }
 
@@ -1131,8 +1226,34 @@ export async function projectBlastRadius(
     searched_depth?: unknown;
     depth_horizon_reached?: unknown;
     node_cap_reached?: unknown;
+    crossings?: unknown;
+    crossings_total?: unknown;
+    crossings_truncated?: unknown;
+    link?: unknown;
   };
-  const { hits, byRepo } = attributeHits(raw.dependents, q.labels);
+  const { hits: allHits, byRepo } = attributeHits(raw.dependents, q.labels);
+  // X1: estate lists the same (shallowest, capped) crossings on every page; the last page's list.
+  // Only crossings between CURRENT members count: a removed member's links stay in the database
+  // until the next refresh relinks without it, and must not make an answer read `linked`.
+  const members = new Set(q.labels.keys());
+  const listed = Array.isArray(raw.crossings) ? (raw.crossings as ProjectGraphCrossing[]) : [];
+  const crossings = listed.filter((c) => members.has(c.from?.repo) && members.has(c.to?.repo));
+  const dropped = new Set(listed.filter((c) => !crossings.includes(c)).map((c) => c.id));
+  // A hit reached through a dropped crossing loses its provenance claim along with the crossing.
+  const hits = allHits.map((h) => {
+    if (h.via_crossing === undefined || !dropped.has(h.via_crossing)) return h;
+    const kept: ProjectGraphHit = { ...h };
+    delete kept.via_crossing;
+    delete kept.via_crossing_omitted;
+    return kept;
+  });
+  const linked = crossings.length > 0;
+  // estate's per-project link state: stale when a member moved since the link was validated.
+  const state = (Array.isArray(raw.link) ? raw.link : []) as Array<{ stale?: unknown; stale_labels?: unknown }>;
+  const stale = state.some((s) => s.stale === true);
+  const staleLabels = state
+    .flatMap((s) => (Array.isArray(s.stale_labels) ? s.stale_labels : []))
+    .filter((l): l is string => typeof l === 'string');
   // crew#751: estate's completeness causes (wicked-estate#222), carried through verbatim when the
   // installed estate reports them, and ABSENT when it does not — never a fabricated `false`, which
   // would read as "the walk was complete" on an estate that cannot say.
@@ -1154,8 +1275,14 @@ export async function projectBlastRadius(
     unresolved: typeof raw.unresolved === 'number' ? raw.unresolved : 0,
     reposSearched: [...q.labels.keys()].sort(),
     missingRepos: q.status.missingRepos,
-    linkage: 'co-located',
-    note: CO_LOCATION_NOTE,
+    linkage: linked ? 'linked' : 'co-located',
+    note: linked ? (stale ? `${LINKED_NOTE} ${LINK_STALE_NOTE}` : LINKED_NOTE) : CO_LOCATION_NOTE,
+    ...(Array.isArray(raw.crossings) ? { crossings } : {}),
+    ...(typeof raw.crossings_total === 'number'
+      ? { crossings_total: Math.max(crossings.length, raw.crossings_total - dropped.size) }
+      : {}),
+    ...(raw.crossings_truncated === true ? { crossings_truncated: true } : {}),
+    ...(linked && stale ? { link_stale: true, link_stale_labels: [...new Set(staleLabels)].sort() } : {}),
   };
 }
 

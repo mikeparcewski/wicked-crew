@@ -2512,7 +2512,13 @@ export async function createServer(
     indexRepoGraph: (repoId) => adapter.indexRepoGraph(repoId),
     refreshProjects: async (repoId) => {
       const out = await refreshProjectGraphsForRepo(adapter, repoId, { cause: `the repo watcher re-indexed ${repoId}`, fresh: true, log: (m) => app.log.info(m) });
-      return out.lookupFailed !== true && out.failed.length === 0 && out.refreshed.every((p) => p.failed.length === 0);
+      // A link step that did not publish (writer lock busy, a member mid-index) is owed too: a quiet
+      // repo triggers no other refresh, so without the retry the project would stay unlinked.
+      return (
+        out.lookupFailed !== true &&
+        out.failed.length === 0 &&
+        out.refreshed.every((p) => p.failed.length === 0 && p.linkFailed === undefined)
+      );
     },
     statePath: join(crewStateHome(), 'repo-watch.json'),
     stateHome: crewStateHome(),
