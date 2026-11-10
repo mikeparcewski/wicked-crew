@@ -28,6 +28,11 @@ mentioned only where a daemon release depends on them.
   `--install-service` and the `vault.unresolvable` remedy now name the installer flow (`npx wicked-installer`, then
   `wicked-crew serve`); the vault remedy keeps its `WICKED_VAULT_BIN` escape. Each sentence is pinned by a test (#1468).
 
+- The deliver text's PR title no longer doubles its prefix or cuts mid-word: a leading issue reference in the intent
+  (`Fixes #N:`, `Fix #N -`, `Closes #N:`, `Refs #N:`, any case) is dropped from the title and commit subject (the body
+  keeps `Fixes #N`), so the conventional prefix appears once; a title or subject over 100 / 72 characters is cut at a
+  whole word with an ellipsis, and a single over-long token yields a bare `…` instead of a hard cut (#1485).
+
 ## [0.18.6] — 2026-11-10
 
 A patch: a project's code graph links its repos, so a blast-radius answer can follow a proven package link from one
