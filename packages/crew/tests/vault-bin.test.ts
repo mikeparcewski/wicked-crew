@@ -36,6 +36,10 @@ import {
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import { removeScratch } from './setup/scratch.js';
 
+// The pinned sentence (crew#1468): the installer flow, the WICKED_VAULT_BIN escape, then the serve command.
+const UNRESOLVABLE_REMEDY_TEXT =
+  'reinstall wicked-crew with `npx wicked-installer` so its wicked-vault dependency is present, or set WICKED_VAULT_BIN to a wicked-vault CLI, then restart the daemon with `wicked-crew serve`';
+
 const scratch: string[] = [];
 const apps: FastifyInstance[] = [];
 const adapters: CoreAdapter[] = [];
@@ -160,9 +164,11 @@ describe('applyVaultBinEnv (crew#1068)', () => {
     );
     expect(posture).toEqual({ source: 'unresolvable', bin: null, reason: "Cannot find module 'wicked-vault/package.json'" });
     expect(VAULT_BIN_ENV in env).toBe(false);
-    expect(vaultBinWarning(posture)!.message).toMatch(
-      /^wicked-vault is not resolvable \(Cannot find module 'wicked-vault\/package\.json'\); held boundary findings will not be vaulted — reinstall wicked-crew/,
+    expect(vaultBinWarning(posture)!.message).toBe(
+      "wicked-vault is not resolvable (Cannot find module 'wicked-vault/package.json'); held boundary findings will not be vaulted — " +
+        UNRESOLVABLE_REMEDY_TEXT,
     );
+    expect(vaultDiagnostics(posture).finding?.remedy).toBe(UNRESOLVABLE_REMEDY_TEXT);
   });
 });
 
@@ -212,7 +218,7 @@ describe('the adapter\'s vault-bin decision (crew#1068)', () => {
     expect(diag.vault?.source).toBe('unresolvable');
     expect(diag.vault?.bin).toBeNull();
     expect(diag.vault?.finding?.kind).toBe('vault.unresolvable');
-    expect(diag.vault?.finding?.remedy).toMatch(/reinstall wicked-crew .* or set WICKED_VAULT_BIN/);
+    expect(diag.vault?.finding?.remedy).toBe(UNRESOLVABLE_REMEDY_TEXT);
   });
 
   it('no operator value: the adapter hands the engine crew\'s own bin and says nothing about the vault', async () => {

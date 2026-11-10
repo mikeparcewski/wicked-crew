@@ -10,6 +10,12 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+
+- Two runtime hints no longer tell users to `npm install -g wicked-crew`: the npx-cache refusal of
+  `--install-service` and the `vault.unresolvable` remedy now name the installer flow (`npx wicked-installer`, then
+  `wicked-crew serve`); the vault remedy keeps its `WICKED_VAULT_BIN` escape. Each sentence is pinned by a test (#1468).
+
 ## [0.18.6] — 2026-11-10
 
 A patch: a project's code graph links its repos, so a blast-radius answer can follow a proven package link from one
