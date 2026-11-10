@@ -10,6 +10,16 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.18.6] — 2026-11-10
+
+A patch: a project's code graph links its repos, so a blast-radius answer can follow a proven package link from one
+repo into another. Needs wicked-crew-api-types 0.202.0; the linking needs wicked-estate 0.34.0 or later. Still bundles
+wicked-studio 0.16.5; wicked-core-ts is unchanged (^0.15.35).
+
+**Upgrading:** put wicked-estate 0.34.0 on the daemon's `PATH` (or point `WICKED_ESTATE_EXE` at it) before you restart
+the daemon. Crew checks `wicked-estate --help` for `link`; an older binary leaves graphs co-located, as before. A
+project is linked at its next graph refresh: the repo watcher's re-index or `POST /projects/:id/graph/refresh`.
+
 ### Added
 
 - **A project's code graph links its repos (api-types 0.202.0, wicked-estate >= 0.34.0).**
@@ -23,6 +33,11 @@ mentioned only where a daemon release depends on them.
     answers stay `co-located`.
   - **Older estate:** a binary without `link`, found by probing `--help`, leaves all of this
     exactly as before.
+
+### Security
+
+- The workspace lockfile moves `@hono/node-server` from 1.19.15 to 2.1.6 (GHSA-rmxm-3fg6-px4f). Crew does not import
+  it; the MCP SDK behind the ask endpoint does, and its range allows 2.x (crew#1348).
 
 ## [0.18.5] — 2026-11-10
 
@@ -6628,7 +6643,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.5...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.6...HEAD
+[0.18.6]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.5...v0.18.6
 [0.18.5]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.4...v0.18.5
 [0.18.4]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.3...v0.18.4
 [0.18.3]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.2...v0.18.3
