@@ -10,6 +10,25 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.18.7] — 2026-11-10
+
+A patch: a project graph refresh no longer loops on a large repo, because each member's index is bounded by a budget
+sized from its code. Needs wicked-crew-api-types 0.203.0 (additive) and wicked-core-ts 0.15.36 (`^0.15.36`). Still
+bundles wicked-studio 0.16.5.
+
+**Upgrading:**
+
+- **wicked-estate 0.34.1 or later on the daemon's `PATH` is recommended** (or point `WICKED_ESTATE_EXE` at it) before
+  you restart the daemon. 0.34.1 makes a forced re-extract linear in the store's size instead of quadratic, so a large
+  repo's re-index fits its budget. 0.34.0 still works. The first writable open of each store under 0.34.1 rebuilds its
+  full-text index once (about 2 minutes per million nodes).
+- **Index budget:** each member repo's index now gets `max(120 s, files × 0.30 s) × 1.15` instead of a fixed 10
+  minutes, where `files` is the member's file count as the engine counts it (`git ls-files`, or a file walk). A
+  project refresh's budget is the sum over its members. A member that runs past its budget fails with
+  `timedOut: true` and the budget it hit.
+- **Switching a repo's watch off now cancels what it owed:** its queued index, a press not yet served, and the project
+  refresh it owed, including one owed by an off record at boot. An index running across the switch queues none.
+
 ### Fixed
 
 - **A project graph refresh no longer loops on a large repo (#1481).** Each member repo's index is bounded by its
@@ -6661,7 +6680,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.6...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.7...HEAD
+[0.18.7]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.6...v0.18.7
 [0.18.6]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.5...v0.18.6
 [0.18.5]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.4...v0.18.5
 [0.18.4]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.3...v0.18.4
