@@ -80,7 +80,7 @@ uv installer adds it to the user PATH; otherwise add it via Environment Variable
 can't find `wicked-crew` itself, npm's global bin directory is not on PATH: add `$(npm prefix -g)/bin`
 (macOS, Linux) or the directory `npm prefix -g` prints (Windows).
 
-If a garden older than 12.66.1 is already installed, the installer may keep it; crew's blocking `skills.garden`
+If a garden older than 12.67.0 is already installed, the installer may keep it; crew's blocking `skills.garden`
 finding then names its version and where it was found. Update that copy (for the npm package,
 `npm install -g wicked-garden@latest`) and restart `wicked-crew serve`.
 
@@ -98,7 +98,7 @@ binary needs your own image (`WICKED_SEAT_IMAGE_<CLI>`, offline seats only). `WI
 claude and codex are given governed work.
 
 To install crew by hand instead (advanced), install its requirements first: uv from
-https://docs.astral.sh/uv/, then wicked-estate and **wicked-garden 12.66.1 or later** (crew refuses
+https://docs.astral.sh/uv/, then wicked-estate and **wicked-garden 12.67.0 or later** (crew refuses
 every launch until it finds one):
 
 ```bash
@@ -108,7 +108,7 @@ wicked-crew serve
 # then open http://127.0.0.1:7701
 ```
 
-**crew needs wicked-garden ≥ 12.66.1.** Garden ships the skills every governed worker follows,
+**crew needs wicked-garden ≥ 12.67.0.** Garden ships the skills every governed worker follows,
 including the base skill `wicked-garden-governed-worker` and the `wicked-garden-apps` skill an app's
 chat builds with. crew does not vendor it, so install it once:
 
@@ -132,7 +132,7 @@ Without garden, `/health` still answers `"status":"ok"` (the daemon
 serves so studio can load and show the problem) and carries the missing base skill as an
 error-severity finding in its `warnings` list — the same finding object as `baseSkill.finding` and
 `/diagnostics.skills.findings[]`. Every launch and every **Register & onboard** is refused with that
-reason, and nothing is registered. A garden older than 12.66.1 that discovery finds is never used (a
+reason, and nothing is registered. A garden older than 12.67.0 that discovery finds is never used (a
 `WICKED_CREW_SKILLS_SOURCE` you set is not judged). At first boot, that
 `skills.garden` warning names the version found, where it was found, and the version required.
 Launches and onboarding answer `422 garden_required` until a newer garden is installed and the
