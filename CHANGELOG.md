@@ -10,6 +10,49 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.18.10] — 2026-11-11
+
+A patch: the requirements share counts only real behaviour, requirements carry a business domain, POL-2101 stops
+breaking on a missing record line, a pack's rules apply only where its scope fits, a daemon's boot reaper leaves
+another daemon's worktrees alone, and a GitHub source can use the GitHub CLI's sign-in. Needs wicked-core-ts 0.15.39
+(`^0.15.39`), wicked-garden 12.67.0 or later (the floor moves up from 12.66.1) and wicked-crew-api-types 0.206.0
+(additive: `McpGhCliState`, `McpServersResponse.ghCli`). For the behaviour-only share, the daemon's
+wicked-estate must be 0.35.2 or later. Still bundles wicked-studio 0.16.5.
+
+**Upgrading:**
+
+- **crew needs wicked-garden 12.67.0 or later.** 12.67.0's extractor proposes a repository's business domains and
+  writes each rule's pick as the `business_domain` annotation core-ts 0.15.39 reads, and its governed-worker floor asks
+  for the one `STACK-CHECK:` line POL-2101 now cites. An older garden would still map, with no business domains and no
+  citable stack check, so crew refuses it like any garden below the floor: a blocking `skills.garden` finding, and
+  launch and onboarding answer 422 `garden_required` until it is updated (`npx wicked-installer install
+  wicked-garden`). Update garden with crew.
+- **The requirements share counts only real behaviour (wicked-core#1375, #1235).** The share leaves out units estate
+  records as `stub` or `data` (structural) and `test_support` (not product), and the test-directory rule also matches
+  named kinds of test (`integration_tests/`, `unit-tests/`, `load_test/`), test-helper segments (`test_utils/`) and a
+  `*_e2e/` directory whose files are mostly tests. The first half needs a graph indexed by **wicked-estate 0.35.2 or
+  later**: upgrade estate, then re-index the repository. A graph an older estate indexed carries no behaviour key, so
+  its stubs and data classes still count and the share moves only by the test-directory rule. On the measured AutoGPT
+  slice the share moved from 66% to 71%. No wire change: `behavior_bearing` shrinks and `not_product` grows.
+- **Requirements carry a business domain (reqgraph Fix B, wicked-core#1425).** A map made with garden 12.67.0 gives
+  each requirement in the engine's graph an optional `business_domain` `{id, name, confidence}` and the graph's
+  metadata a `business_domains[]` list; keys, `SatisfiedBy` links, overrides and coverage do not move. Crew's
+  requirements list does not pass the field through yet (wicked-crew#1503).
+- **POL-2101 no longer breaks on a missing record line when the check was made (wicked-core#1381).** A code-writing
+  step is asked for one `STACK-CHECK: looked at <docs or source> :: offers <…>` line, and the record clause is kept
+  when every code step's record or the reviewer's record states the check. The rule is not applicable, by fact, on a
+  change that touches only prose (markdown, reStructuredText, a license, readme or changelog) or images. A duplicated
+  built-in still breaks it.
+- **A pack's rules apply only where its scope fits (wicked-core#1414).** The mcp-server pack's MCPS-1001..1007 are
+  judged only on a run launched from the `mcp-server` preset or a change in a codebase that builds an MCP server;
+  elsewhere they are left out before the check and the rule check's note names them. An unknown fact removes nothing,
+  and an operator-edited pack rule is still judged.
+- **The boot reaper removes only worktrees its own daemon minted (wicked-core#1373).** Two daemons on one host that
+  register the same checkout no longer force-remove each other's live, parked or retained worktrees on restart. Each
+  new worktree carries its daemon's id; one minted before this release is kept and reported, never removed, until a
+  resume marks it or it is removed by hand.
+- **A dispatch reads its worktree off the engine's actor, once (wicked-core#1390, part 2).**
+
 ### Added
 
 - A GitHub project-management source can use the GitHub CLI's sign-in instead of a typed token: `auth.ref` of
@@ -20,7 +63,7 @@ mentioned only where a daemon release depends on them.
   (`gh_not_installed`, `gh_signed_out`, `gh_account_mismatch`, `gh_token_unavailable`) and nothing is sent. Typed-token
   and `env:` sources are unchanged.
 - `GET /api/v1/mcp/servers` (human view) reports `ghCli: {available, accounts, active}` so a client can offer it
-  (api-types: `McpGhCliState`, additive; no version bump here).
+  (api-types 0.206.0: `McpGhCliState`, additive).
 
 ## [0.18.9] — 2026-11-11
 
@@ -6789,7 +6832,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.9...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.10...HEAD
+[0.18.10]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.9...v0.18.10
 [0.18.9]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.8...v0.18.9
 [0.18.8]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.7...v0.18.8
 [0.18.7]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.6...v0.18.7

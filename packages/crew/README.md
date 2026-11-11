@@ -32,7 +32,7 @@ Local-first: loopback only, no accounts, no billing, no model reselling. Crew dr
   sources' structure — never their values. `npx wicked-installer install wicked-estate`
   downloads a sha256-verified prebuilt binary into `~/.local/bin` (about 20 s) on macOS, glibc Linux
   (x64/arm64) and Windows x64; on other platforms it builds with cargo, which needs a Rust toolchain.
-- **wicked-garden ≥ 12.66.1**, the skills every governed worker follows (including the Apps skill an
+- **wicked-garden ≥ 12.67.0**, the skills every governed worker follows (including the Apps skill an
   app's chat builds with). crew does not vendor it, and without it every launch is refused:
   `npx wicked-installer install wicked-garden`, then restart `wicked-crew serve`.
 
@@ -58,12 +58,12 @@ them:
 If your shell can't find `wicked-crew` itself, npm's global bin directory is not on PATH: add
 `$(npm prefix -g)/bin` (macOS, Linux) or the directory `npm prefix -g` prints (Windows).
 
-If a garden older than 12.66.1 is already installed, the installer may keep it; crew's blocking `skills.garden`
+If a garden older than 12.67.0 is already installed, the installer may keep it; crew's blocking `skills.garden`
 finding then names its version and where it was found. Update that copy (for the npm package,
 `npm install -g wicked-garden@latest`) and restart `wicked-crew serve`.
 
 Or install crew by hand (advanced). It needs uv and the requirements above, including
-**wicked-garden 12.66.1 or later** (crew refuses every launch until it finds one):
+**wicked-garden 12.67.0 or later** (crew refuses every launch until it finds one):
 
 ```bash
 npx wicked-installer install wicked-estate wicked-garden
@@ -72,7 +72,7 @@ wicked-crew serve
 # then open http://127.0.0.1:7701
 ```
 
-Crew uses the first usable garden source in this order (automatic sources need version ≥ 12.66.1):
+Crew uses the first usable garden source in this order (automatic sources need version ≥ 12.67.0):
 
 1. `WICKED_CREW_SKILLS_SOURCE`, an explicit plugin root.
 2. The Claude marketplace cache under `$CLAUDE_CONFIG_DIR` or `~/.claude` (highest valid version).

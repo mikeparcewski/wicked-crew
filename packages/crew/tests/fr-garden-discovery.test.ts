@@ -62,14 +62,14 @@ describe('non-Claude installed garden discovery', () => {
 
   it('tier 5: picks the highest valid Codex version across marketplaces and reports invalid entries', () => {
     plugin(codex('a', '12.64.0'), '12.64.0');
-    const winner = plugin(codex('b', '12.66.1'), '12.66.1');
+    const winner = plugin(codex('b', '12.67.0'), '12.67.0');
     plugin(codex('a', '12.65.0'), '12.65.0');
     const invalid = plugin(codex('b', 'latest'));
     const mismatch = plugin(codex('a', '99.0.0'), '12.64.0');
     const missing = codex('b', '98.0.0');
     mkdirSync(missing);
     const d = discover();
-    expect(d.source).toEqual({ path: winner, kind: 'codex-plugin-cache', plugin_version: '12.66.1' });
+    expect(d.source).toEqual({ path: winner, kind: 'codex-plugin-cache', plugin_version: '12.67.0' });
     expect(d.findings).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: 'non-semver-name', path: invalid }),
       expect.objectContaining({ kind: 'version-mismatch', path: mismatch }),
