@@ -1662,6 +1662,11 @@ export interface WorkUnitRepoChecks {
   waived?: string[];
   /** The re-run armed at the gate and not yet consumed. Absent otherwise. */
   requested_rerun?: FloorRerun;
+  /** (api-types 0.205.0, wicked-core#1392) On a floor that did not finish: the source of the test
+   *  command a `targeted` re-run would run (`.wicked/checks.json` `test_targeted`, or the derived
+   *  set's source). Absent when there is none (the engine then refuses `targeted`) and on every
+   *  other floor. */
+  targeted_test?: string;
   [k: string]: unknown;
 }
 
@@ -2493,9 +2498,11 @@ export interface GateDecision {
    * repo-checks floor that did not finish (`gateEscalated.denialSource: 'repo_checks_timeout'`):
    * the engine re-runs the floor on the tree as it stands — the seat does not run again — with
    * every check under 2× its bound, with the repo's declared `test_targeted` in place of the full
-   * test set (no targeted command ⇒ the test set is waived), or with the checks that did not
-   * finish waived; the re-run goes through the ordinary gate and waived checks are named in
-   * `gateEvaluated.floorNote`. `'accept_suggestion'` answers an evaluator's worktree-guard denial
+   * test set, or with the checks that did not finish waived; the re-run goes through the ordinary
+   * gate and waived checks are named in `gateEvaluated.floorNote`. `'targeted'` with no targeted
+   * command (the floor report has no `targeted_test`) is refused, a 409, and the gate stays open
+   * (wicked-core#1392, core-ts ≥ 0.15.38; before, it waived the test set): `'accept_partial'` is
+   * the explicit, labelled waiver. `'accept_suggestion'` answers an evaluator's worktree-guard denial
    * whose edit was restored and pinned (`gateEscalated.suggestionRef`): the engine applies the
    * pinned edit and rewinds to the creator (`unitReworkAmended{scope: 'accept_suggestion'}`).
    * The engine refuses each at any other gate — a 409 — and the gate stays open.
@@ -8979,7 +8986,8 @@ export interface ChatSeatRefusal {
 }
 
 /**
- * `POST /chats/:id/seats` body (before the chat's first message). The named seats REPLACE the
+ * (api-types 0.205.0, wicked-crew#1482) `POST /chats/:id/seats` body (before the chat's first
+ * message). The named seats REPLACE the
  * chat's seats: the eligible roster becomes exactly the named seats that pass admission now, in
  * the order named. There is no merge mode — name the full set wanted.
  */
@@ -8987,7 +8995,7 @@ export interface ChatSeatsBody {
   clis: string[];
 }
 
-/** `POST /chats/:id/seats` → 200. */
+/** (api-types 0.205.0, wicked-crew#1482) `POST /chats/:id/seats` → 200. */
 export interface ChatSeatsResponse {
   chatId: string;
   /** Admission outcome per named seat. */
