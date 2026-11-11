@@ -28,6 +28,8 @@ export const STATE_HOME_ENTRY_NAMES: ReadonlyArray<string> = [
   'repo-graphs',
   // Container seats' agentgateway state (WICKED_SEAT_FLOOR=container) — wicked-core `src/seat_gateway.rs`.
   'gateway',
+  // The engine's own cluster credential (k8s runner) — wicked-core `src/k8s/mod.rs` own_kubeconfig.
+  'k8s',
   'project-settings.json',
   // DES-learn-workflow §5: the learn schedules — `src/learn/schedule-store.ts`.
   'learn-schedules.json',

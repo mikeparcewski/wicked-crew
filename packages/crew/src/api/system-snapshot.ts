@@ -149,6 +149,7 @@ const LABELS: Record<SystemInfraKey, string> = {
   load: 'Host load',
   repos: 'Repositories',
   seat_images: 'Seat images',
+  cluster: 'Kubernetes cluster',
 };
 
 export function infraRow(

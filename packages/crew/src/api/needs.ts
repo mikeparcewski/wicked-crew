@@ -47,13 +47,15 @@ export const FAILED_FRESH_MS = 7 * DAY_MS;
 export const PARKED_AFTER_MS = DAY_MS;
 
 /** The live components whose `down` (or silence) holds every live run. */
-const WORK_PATH: ReadonlySet<SystemInfraKey> = new Set(['daemon', 'gateway', 'broker']);
+const WORK_PATH: ReadonlySet<SystemInfraKey> = new Set(['daemon', 'gateway', 'broker', 'cluster']);
 /** What `down` means in words for the rows where "down" reads oddly. */
 const DOWN_WORD: Partial<Record<SystemInfraKey, string>> = { load: 'saturated', disk: 'nearly full', state_home: 'refusing launches', skills: 'refusing launches', repos: 'folder missing' };
 /** A held run's denial names the component it died on. */
 const CITES: Partial<Record<SystemInfraKey, RegExp>> = {
   gateway: /\b(inference gateway|agw[:\s]|gateway)\b/i,
   broker: /\bbroker\b/i,
+  // The k8s runner's refusal kinds (wicked-core FloorUnarmed): a run held on one is the cluster's.
+  cluster: /\b(?:no_cluster|cluster_unreachable|controller_missing|pids_unlimited|policy_refused|admission_pending|image_unavailable|exec_stream_lost)\b/,
 };
 
 /** A floor denial whose base fails the same check: the red-base evidence. */

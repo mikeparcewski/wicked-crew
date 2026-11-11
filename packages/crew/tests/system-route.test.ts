@@ -12,7 +12,8 @@ import type { DiagnosticsResponse, HealthResponse, SystemSnapshot } from 'wicked
 
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
-import { PROBE_TIMEOUT_MS, SYSTEM_BUDGET_MS } from '../src/api/system-snapshot.js';
+import { SYSTEM_BUDGET_MS } from '../src/api/system-snapshot.js';
+import { CLUSTER_TIMEOUT_MS } from '../src/api/cluster-status.js';
 import { removeScratch } from './setup/scratch.js';
 
 // The disk reading is the real host's by default, so a host under 5% free turns `infra:disk` red and
@@ -86,6 +87,13 @@ beforeAll(async () => {
     [
       '#!/bin/sh',
       `[ "$1 $2" = "seat-image status" ] && exec cat '${seatStatusFile}'`,
+      // `cluster status --json` (k8s runner): the cluster and its gateway answer per the mode file.
+      `if [ "$1 $2" = "cluster status" ]; then read mode < '${modeFile}'; case "$mode" in`,
+      `  running) echo '${JSON.stringify({ configured: true, reachable: true, context: 'rancher-desktop', controller: { ready: true }, gateway: 'serving', controllerVersion: 'v0.1.0', runNamespaces: 0, pendingPods: 0 })}'; exit 0 ;;`,
+      `  refuse) echo '${JSON.stringify({ configured: true, reachable: false, kind: 'cluster_unreachable', context: 'rancher-desktop' })}'; exit 1 ;;`,
+      `  stopped) echo '${JSON.stringify({ configured: true, reachable: true, context: 'rancher-desktop', controller: { ready: true }, gateway: 'stopped', controllerVersion: 'v0.1.0', runNamespaces: 0, pendingPods: 0 })}'; exit 0 ;;`,
+      '  hang) exec sleep 30 ;;',
+      'esac; fi',
       'exit 2',
       '',
     ].join('\n'),
@@ -201,7 +209,7 @@ describe('GET /api/v1/system', () => {
     expect(body.budgetMs).toBe(SYSTEM_BUDGET_MS);
     expect(Array.isArray(body.attention) && Array.isArray(body.clis) && Array.isArray(body.runs)).toBe(true);
     expect(body.infra.map((r) => r.key)).toEqual([
-      'daemon', 'gateway', 'broker', 'interactive', 'estate', 'bus', 'vault', 'skills', 'state_home', 'stores', 'seat_floor', 'seat_images', 'repos', 'disk', 'load',
+      'daemon', 'gateway', 'broker', 'interactive', 'estate', 'bus', 'vault', 'skills', 'state_home', 'stores', 'seat_floor', 'cluster', 'seat_images', 'repos', 'disk', 'load',
     ]);
     const byId = Object.fromEntries(body.runs.map((r) => [r.runId, r]));
     expect(byId['run-gate']).toMatchObject({ liveness: 'waiting_on_you', gate: { interactionId: 'ir_gate1', ord: 1, kind: 'plan_approval' } });
@@ -213,19 +221,26 @@ describe('GET /api/v1/system', () => {
     expect(body.infra.find((r) => r.key === 'estate')!.state).toBe('degraded');
   });
 
-  it.runIf(posix)('gateway: running → ok; refusing connections → down, tops attention, red; started again → ok', async () => {
+  it.runIf(posix)('cluster + gateway (k8s runner): serving → ok; cluster not answering → cluster down, tops attention, red, gateway unobserved; quarantined gateway → down; back → ok', async () => {
     writeFileSync(modeFile, 'running', 'utf8');
     const up = await gatewayUntil('ok');
-    expect(up.infra.find((r) => r.key === 'gateway')).toMatchObject({ state: 'ok' });
-    expect(up.attention.find((a) => a.id === 'infra:gateway')).toBeUndefined();
+    expect(up.infra.find((r) => r.key === 'cluster')).toMatchObject({ state: 'ok' });
+    expect(up.attention.find((a) => a.id === 'infra:gateway' || a.id === 'infra:cluster')).toBeUndefined();
 
     writeFileSync(modeFile, 'refuse', 'utf8');
-    const down = await gatewayUntil('down');
-    const gw = down.infra.find((r) => r.key === 'gateway')!;
-    expect(gw.state).toBe('down');
-    expect(gw.remedy).toMatch(/Start Docker/);
-    expect(down.attention[0]).toMatchObject({ id: 'infra:gateway', severity: 'red', action: { kind: 'recheck' } });
+    const down = (await snapshot()).body;
+    const cluster = down.infra.find((r) => r.key === 'cluster')!;
+    expect(cluster).toMatchObject({ state: 'down', reason: expect.stringContaining("Kubernetes isn't answering") });
+    expect(cluster.remedy).toMatch(/Start Rancher Desktop/);
+    expect(down.infra.find((r) => r.key === 'gateway')!.state).toBe('unknown');
+    expect(down.attention[0]).toMatchObject({ id: 'infra:cluster', severity: 'red', action: { kind: 'recheck' } });
+    // A dead cluster holds every live container run (run-live is working): the item counts it.
+    expect((down.attention[0] as { blocks?: number }).blocks).toBeGreaterThanOrEqual(1);
     expect(down.level).toBe('red');
+
+    writeFileSync(modeFile, 'stopped', 'utf8');
+    const quarantined = await gatewayUntil('down');
+    expect(quarantined.infra.find((r) => r.key === 'gateway')!.reason).toMatch(/quarantine/);
 
     writeFileSync(modeFile, 'running', 'utf8');
     const again = await gatewayUntil('ok');
@@ -237,7 +252,9 @@ describe('GET /api/v1/system', () => {
     const { body, ms } = await snapshot();
     const gw = body.infra.find((r) => r.key === 'gateway')!;
     expect(gw.state).toBe('unknown');
-    expect(gw.timeoutMs).toBe(PROBE_TIMEOUT_MS);
+    // The wait this snapshot gave it: at most the engine's bound, less when the budget had less left.
+    expect(gw.timeoutMs).toBeGreaterThan(0);
+    expect(gw.timeoutMs).toBeLessThanOrEqual(CLUSTER_TIMEOUT_MS + 100);
     expect(gw.reason).toMatch(/did not answer within/);
     expect(ms).toBeLessThan(SYSTEM_BUDGET_MS);
     expect(body.attention.find((a) => a.id === 'infra:gateway')!.severity).toBe('yellow');

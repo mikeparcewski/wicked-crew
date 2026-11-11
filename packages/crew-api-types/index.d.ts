@@ -6845,7 +6845,23 @@ export interface SeatSessionResponse {
   action: 'login' | 'logout';
 }
 
-export type SeatSignInFailureCode = 'container_runtime_down' | 'cli_not_installed' | 'signin_already_open' | 'signin_superseded' | 'signin_failed';
+/** (unreleased, k8s runner) The k8s runner's refusals join: `no_cluster`, `cluster_unreachable`, `controller_missing`,
+ *  `pids_unlimited`, `policy_refused`, `admission_pending`, `image_unavailable`, `exec_stream_lost`
+ *  (wicked-core `FloorUnarmed`). `container_runtime_down` stays until the Docker path is removed. */
+export type SeatSignInFailureCode =
+  | 'container_runtime_down'
+  | 'no_cluster'
+  | 'cluster_unreachable'
+  | 'controller_missing'
+  | 'pids_unlimited'
+  | 'policy_refused'
+  | 'admission_pending'
+  | 'image_unavailable'
+  | 'exec_stream_lost'
+  | 'cli_not_installed'
+  | 'signin_already_open'
+  | 'signin_superseded'
+  | 'signin_failed';
 
 /** The body of a refused sign-in. */
 export interface SeatSignInFailure {
@@ -10955,6 +10971,23 @@ export interface AcpDiagnostics {
  * working across the CLIs. Every field is derived from records the daemon already owns;
  * anything it cannot answer is `null` / empty, never fabricated.
  */
+/** (unreleased, k8s runner) `GET /diagnostics.cluster`. */
+export type DiagnosticsCluster =
+  | {
+      read: 'ok';
+      configured: boolean;
+      reachable: boolean;
+      kind: string | null;
+      context: string | null;
+      controller: { ready: boolean; detail: string | null } | null;
+      controllerVersion: string | null;
+      gateway: 'serving' | 'starting' | 'stopped' | 'absent' | null;
+      runNamespaces: number | null;
+      pendingPods: number | null;
+      detail: string | null;
+    }
+  | { read: 'timeout' | 'error'; detail: string };
+
 export interface DiagnosticsResponse {
   components: DiagnosticsComponents;
   daemon: DiagnosticsDaemon;
@@ -10993,6 +11026,9 @@ export interface DiagnosticsResponse {
   /** (api-types 0.203.0, wicked-crew#1481) Every project graph refresh since the daemon started: running (with its
    *  budget and the member being indexed) or idle, and its last failure. ABSENT on an older daemon. */
   projectGraphRefresh?: Array<{ projectId: string } & ProjectGraphRefreshState>;
+  /** (unreleased, k8s runner) The daemon's Kubernetes cluster as `wicked-core cluster status --json` reads it, or why
+   *  it could not be read (`read: 'timeout' | 'error'`, `detail`). ABSENT before. */
+  cluster?: DiagnosticsCluster;
 }
 
 /** `DiagnosticsResponse.floorCache` (crew#1147). Every `path` is `~/...`. */
@@ -11814,7 +11850,15 @@ export type SystemInfraKey =
    *  `operatorImage`), `disk` (`totalBytes`, `availBytes`, `usedPct`), `missing`, `unheld`,
    *  `imageGcHighPct`, `rebuild` (a running or the last rebuild, its output's last lines live).
    *  `off` on the host floor. ABSENT before. */
-  | 'seat_images';
+  | 'seat_images'
+  /** (unreleased, k8s runner) The daemon's Kubernetes cluster (wicked-core `cluster status --json`, k8s runner):
+   *  `down` when none is configured, it does not answer, or the agent-sandbox controller is not
+   *  ready; `degraded` when it answers but its objects could not be read; `unknown` when the read
+   *  timed out or failed; `off` on the host floor. `details`: `configured`, `reachable`, `kind`,
+   *  `context`, `controllerReady`, `controllerVersion`, `gateway`, `runNamespaces`, `pendingPods`.
+   *  On the container floor the `gateway` row reads the same document (the gateway is a Deployment
+   *  in the daemon's namespace). ABSENT before. */
+  | 'cluster';
 
 export interface SystemInfraRow {
   key: SystemInfraKey;

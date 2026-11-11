@@ -139,7 +139,7 @@ import {
 import { SeatHealthTracker } from './seat-health.js';
 import { auditSeatBenchStore, readSeatBenchEntries } from './seat-bench-trail.js';
 import { rosterWithStandingFactory } from './roster-standing.js';
-import { registerLoginCleanup, SeatContainerStatus, seatLoginDepsFor } from './seat-container-login.js';
+import { registerLoginCleanup, SeatContainerStatus, seatLoginDepsFor, stateHomeOfStore } from './seat-container-login.js';
 import { ChatTurnIndex } from './chat-turns.js';
 import { ChatTranscriptStore } from './chat-transcripts.js';
 import { sweepDeliveredWorktree } from './worktree-sweep.js';
@@ -650,6 +650,8 @@ export async function createServer(
     // The broker status cache reads the gateway the ENGINE arms (beside this adapter's store),
     // the same dir the sign-in routes pass (agy crew-r1).
     containerStatus: new SeatContainerStatus(seatLoginDepsFor((adapter as { dbPath?: unknown }).dbPath)),
+    // The cluster reachability check reads the same state home as `/system` and the sign-in routes.
+    ...((home) => (home !== null ? { stateHome: home } : {}))(stateHomeOfStore((adapter as { dbPath?: unknown }).dbPath)),
   });
   registerLoginCleanup(app, seatLoginDepsFor((adapter as { dbPath?: unknown }).dbPath));
   // Runtime-guarded, not typed away: the integration suites drive `createServer` over PARTIAL fake
