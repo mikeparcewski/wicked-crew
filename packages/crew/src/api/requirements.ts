@@ -72,6 +72,8 @@ interface ArtifactRequirement {
   business_rules?: unknown[];
   validations?: unknown[];
   error_paths?: unknown[];
+  /** wicked-core#1425: `{id, name, confidence}`; absent from a graph built before it, read defensively. */
+  business_domain?: unknown;
 }
 
 interface ArtifactDomain {
@@ -81,7 +83,7 @@ interface ArtifactDomain {
 
 /** The domain-model document the engine reads back from estate (`load_domain_graph`). */
 export interface EstateRequirementsGraph {
-  metadata?: { coverage?: ArtifactCoverage };
+  metadata?: { coverage?: ArtifactCoverage; business_domains?: unknown };
   domains?: Record<string, ArtifactDomain>;
 }
 
@@ -425,9 +427,64 @@ export function engineRowOf(
     : null;
 }
 
+/** A requirement's business domain (wicked-core#1425); `confidence` is `null` when the engine sent none usable. */
+export interface RequirementBusinessDomain {
+  id: string;
+  name: string;
+  confidence: number | null;
+}
+
+/** One entry of the graph's business-domain catalog (`metadata.business_domains`). */
+export interface RequirementBusinessDomainCatalogEntry {
+  id: string;
+  name: string;
+  purpose: string;
+  /** Requirement keys the domain holds. */
+  requirements: string[];
+  directories: string[];
+}
+
+function nonEmptyString(v: unknown): v is string {
+  return typeof v === 'string' && v !== '';
+}
+
+function stringsOf(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+}
+
+/** The row's business domain, or `null` unless it is an object with a non-empty `id` and `name`. A bad
+ * `confidence` becomes `null`; it never costs the row its domain. */
+export function businessDomainOf(raw: unknown): RequirementBusinessDomain | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const { id, name, confidence } = raw as Record<string, unknown>;
+  if (!nonEmptyString(id) || !nonEmptyString(name)) return null;
+  return { id, name, confidence: typeof confidence === 'number' && Number.isFinite(confidence) ? confidence : null };
+}
+
+/** The catalog in wire shape: `null` when the graph carries none (not an array); malformed entries are skipped. */
+export function businessDomainCatalogOf(raw: unknown): RequirementBusinessDomainCatalogEntry[] | null {
+  if (!Array.isArray(raw)) return null;
+  const out: RequirementBusinessDomainCatalogEntry[] = [];
+  for (const e of raw) {
+    if (typeof e !== 'object' || e === null) continue;
+    const { id, name, purpose, requirements, directories } = e as Record<string, unknown>;
+    if (!nonEmptyString(id) || !nonEmptyString(name)) continue;
+    out.push({
+      id,
+      name,
+      purpose: typeof purpose === 'string' ? purpose : '',
+      requirements: stringsOf(requirements),
+      directories: stringsOf(directories),
+    });
+  }
+  return out;
+}
+
 export interface RequirementSummary {
   key: string; // `${domain}::${reqId}`
   domain: string;
+  /** The requirement's business domain when the graph has one; the key is OMITTED (never `null`) otherwise. */
+  businessDomain?: RequirementBusinessDomain;
   reqId: string;
   title: string;
   category: RequirementCategory;
@@ -554,6 +611,8 @@ interface RepoIndex {
   /** Override keys that matched NO row — stale after a re-index/migration (module header). */
   orphanedOverrides: number;
   coverage: RequirementsCoverage | null;
+  /** The business-domain catalog of the whole corpus; `null` when the graph carries none. */
+  businessDomains: RequirementBusinessDomainCatalogEntry[] | null;
   /** Which build the rows are ({@link graphBuildOf}). */
   graphBuild: RequirementsGraphBuild | null;
   validated: number;
@@ -668,9 +727,11 @@ async function buildIndexRead(
         })
         .filter((st) => st !== '');
       const components = (req.legacy_components ?? []).filter((c): c is string => typeof c === 'string');
+      const bd = businessDomainOf(req.business_domain);
       const summary: RequirementSummary = {
         key,
         domain,
+        ...(bd ? { businessDomain: bd } : {}),
         reqId,
         title,
         category: categoryOfComponents(components),
@@ -686,7 +747,7 @@ async function buildIndexRead(
       };
       // Statements are part of the haystack: searching the requirements means
       // searching the actual rule text, not just titles and ids.
-      const haystack = `${reqId} ${domain} ${title} ${req.description ?? ''} ${statements.join(' ')} ${ov?.notes ?? ''}`.toLowerCase();
+      const haystack = `${reqId} ${domain} ${title} ${req.description ?? ''} ${statements.join(' ')} ${ov?.notes ?? ''} ${bd?.name ?? ''}`.toLowerCase();
       const entry: IndexEntry = { summary, haystack, source: req, real, judged: verdict !== null };
       entries.push(entry);
       byKey.set(key, entry);
@@ -709,6 +770,7 @@ async function buildIndexRead(
     total: entries.length,
     orphanedOverrides: countOrphanedOverrides(overrides, byKey),
     coverage,
+    businessDomains: businessDomainCatalogOf(graph.metadata?.business_domains),
     // The live label only: the graph's own fallback label would compare a build with itself.
     graphBuild: graphBuildOf(
       read.build,
@@ -766,6 +828,8 @@ export interface RequirementsPage {
    * absent, an older engine's `mapped_pct` label, or one its counts do not support.
    */
   coverage: RequirementsCoverage | null;
+  /** The business-domain catalog of the whole corpus (not the query's subset); omitted when the graph has none. */
+  businessDomains?: RequirementBusinessDomainCatalogEntry[];
   /**
    * Which build the rows are: the list is the last graph build, `coverage` is the store now. When `behind`, the
    * header's counts are not the list's; a client says so ("N real requirements mapped since the last graph build;
@@ -888,7 +952,12 @@ function pageOf(index: RepoIndex, query: RequirementsQuery): RequirementsPage {
     if (query.risk === 'no-risk' && e.summary.risk) continue;
     if (query.mismatch === 'yes' && e.summary.codeMismatch === null) continue;
     if (query.mismatch === 'no' && e.summary.codeMismatch !== null) continue;
-    if (domainFilter !== undefined && !e.summary.domain.toLowerCase().includes(domainFilter)) continue;
+    if (
+      domainFilter !== undefined &&
+      !e.summary.domain.toLowerCase().includes(domainFilter) &&
+      !e.summary.businessDomain?.name.toLowerCase().includes(domainFilter)
+    )
+      continue;
     if (terms.length > 0 && !terms.every((t) => e.haystack.includes(t))) continue;
     matched.push(e);
   }
@@ -904,6 +973,7 @@ function pageOf(index: RepoIndex, query: RequirementsQuery): RequirementsPage {
     source: 'store',
     orphanedOverrides: index.orphanedOverrides,
     coverage: index.coverage,
+    ...(index.businessDomains ? { businessDomains: index.businessDomains } : {}),
     graphBuild: index.graphBuild,
     corroboration: { validated: index.validated, unconfirmed: index.unconfirmed },
     uncounted: index.uncounted,

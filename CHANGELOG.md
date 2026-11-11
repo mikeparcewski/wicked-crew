@@ -10,6 +10,17 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+
+- The requirements list carries each requirement's business domain. A row has `businessDomain: {id, name, confidence}`
+  and the page has `businessDomains` (the corpus-wide catalog: `id`, `name`, `purpose`, `requirements`, `directories`),
+  both read from the graph (`business_domain`, `metadata.business_domains`; wicked-core#1425) and OMITTED when the graph
+  has none — never `null` — so they light up when a core-ts that emits them ships (the `^0.15.38` pin is unchanged; which
+  published core-ts carries wicked-core 90ee8f6 is not established). A malformed value is dropped, never the whole
+  response. Search and the `domain` filter also match the business domain's name; `domain`, keys and overrides are
+  unchanged. (api-types: `RequirementBusinessDomain`, `RequirementBusinessDomainCatalogEntry`, additive; no version
+  bump here.)
+
 ## [0.18.10] — 2026-11-11
 
 A patch: the requirements share counts only real behaviour, requirements carry a business domain, POL-2101 stops

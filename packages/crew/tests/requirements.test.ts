@@ -1026,3 +1026,170 @@ describe('the list agrees with its header, or says why not (req-reconcile, api-t
     expect(p!.categories).toEqual({ functional: 6, configData: 0 });
   });
 });
+
+describe('requirements list: the business domain of each row (wicked-core#1425)', () => {
+  const req = (title: string, extra: Record<string, unknown> = {}) => ({
+    title,
+    description: `${title} description`,
+    status: 'active',
+    business_rules: [{ id: 'R', statement: `${title} rule`, confidence: 0.5 }],
+    legacy_components: [],
+    ...extra,
+  });
+  const bd = (id: string, name: string, confidence: unknown = 0.9) => ({ id, name, confidence });
+  const catalogEntry = (id: string, name: string) => ({
+    id,
+    name,
+    purpose: `${name} purpose`,
+    requirements: [`dir/a::${id}`],
+    directories: ['dir/a'],
+  });
+  let root: string;
+  beforeEach(async () => {
+    forgetRequirementsReads();
+    root = await mkdtemp(join(tmpdir(), 'req-bd-'));
+    await markIndexed(root);
+  });
+  async function write(domains: Record<string, unknown>, metadata?: Record<string, unknown>): Promise<void> {
+    await writeFile(join(root, ESTATE_STANDIN), JSON.stringify({ metadata, domains }), 'utf8');
+  }
+  const list = (q: Record<string, unknown> = {}) =>
+    listRequirements(repoAt(root), { offset: 0, limit: 50, ...q } as never, estateAt(root));
+  const mixed = () =>
+    write(
+      {
+        'dir/a': {
+          requirements: {
+            'REQ-001': req('Charge cards', { business_domain: bd('bd-pay', 'Payments Processing') }),
+            'REQ-002': req('Plain row'),
+          },
+        },
+        'dir/b': { requirements: { 'REQ-001': req('Ship parcels', { business_domain: bd('bd-ful', 'Fulfilment') }) } },
+      },
+      { business_domains: [catalogEntry('bd-pay', 'Payments Processing'), catalogEntry('bd-ful', 'Fulfilment')] },
+    );
+
+  it('a row carries the graph\'s business domain; an unassigned row omits the key (never null)', async () => {
+    await mixed();
+    const p = await list();
+    const byKey = new Map(p!.items.map((i) => [i.key, i]));
+    const assigned = byKey.get('dir/a::REQ-001')!;
+    expect(assigned.businessDomain).toEqual({ id: 'bd-pay', name: 'Payments Processing', confidence: 0.9 });
+    expect(assigned.domain).toBe('dir/a');
+    expect(assigned.reqId).toBe('REQ-001');
+    const plain = byKey.get('dir/a::REQ-002')!;
+    expect(Object.hasOwn(plain, 'businessDomain')).toBe(false);
+    expect(plain.domain).toBe('dir/a');
+  });
+
+  it('an old-style graph without the field or the catalog changes nothing', async () => {
+    await write({ 'dir/a': { requirements: { 'REQ-001': req('Old row') } } });
+    const p = await list();
+    expect(p!.items.every((i) => !Object.hasOwn(i, 'businessDomain'))).toBe(true);
+    expect(Object.hasOwn(p!, 'businessDomains')).toBe(false);
+  });
+
+  it('a malformed business_domain is dropped beside a valid sibling; a bad confidence becomes null', async () => {
+    await write({
+      'dir/a': {
+        requirements: {
+          'REQ-001': req('Good', { business_domain: bd('bd-1', 'Good Domain') }),
+          'REQ-002': req('No name', { business_domain: { id: 'bd-2', confidence: 1 } }),
+          'REQ-003': req('Not an object', { business_domain: 'payments' }),
+          'REQ-004': req('Bad confidence', { business_domain: bd('bd-4', 'Odd', 'high') }),
+          'REQ-005': req('Empty id', { business_domain: bd('', 'Nameless id') }),
+        },
+      },
+    });
+    const p = await list();
+    const byId = new Map(p!.items.map((i) => [i.reqId, i]));
+    expect(byId.get('REQ-001')!.businessDomain).toEqual({ id: 'bd-1', name: 'Good Domain', confidence: 0.9 });
+    for (const id of ['REQ-002', 'REQ-003', 'REQ-005']) expect(Object.hasOwn(byId.get(id)!, 'businessDomain')).toBe(false);
+    expect(byId.get('REQ-004')!.businessDomain).toEqual({ id: 'bd-4', name: 'Odd', confidence: null });
+  });
+
+  it('the page carries the catalog in order beside coverage; empty stays [], malformed entries are skipped', async () => {
+    await mixed();
+    const p = await list({ q: 'zzz-no-match' });
+    expect(p!.total).toBe(0);
+    expect(p!.businessDomains).toEqual([catalogEntry('bd-pay', 'Payments Processing'), catalogEntry('bd-ful', 'Fulfilment')]);
+
+    forgetRequirementsReads();
+    await write({ 'dir/a': { requirements: { 'REQ-001': req('x') } } }, { business_domains: [] });
+    expect((await list())!.businessDomains).toEqual([]);
+
+    forgetRequirementsReads();
+    await write(
+      { 'dir/a': { requirements: { 'REQ-001': req('x') } } },
+      { business_domains: [catalogEntry('bd-ok', 'Ok'), { id: 'bd-x' }, 'junk', null, { id: 'bd-p', name: 'Partial' }] },
+    );
+    expect((await list())!.businessDomains).toEqual([
+      catalogEntry('bd-ok', 'Ok'),
+      { id: 'bd-p', name: 'Partial', purpose: '', requirements: [], directories: [] },
+    ]);
+  });
+
+  it('search finds a business-domain name absent from titles, descriptions and directories', async () => {
+    await mixed();
+    expect((await list({ q: 'payments' }))!.items.map((i) => i.key)).toEqual(['dir/a::REQ-001']);
+    expect((await list({ q: 'PROCESSING' }))!.items.map((i) => i.key)).toEqual(['dir/a::REQ-001']);
+    expect((await list({ q: 'payments charge' }))!.items.map((i) => i.key)).toEqual(['dir/a::REQ-001']);
+    expect((await list({ q: 'payments parcels' }))!.total).toBe(0);
+    expect((await list({ q: 'warehouse' }))!.total).toBe(0);
+  });
+
+  it('the domain filter matches the business-domain name or the directory, case-insensitively', async () => {
+    await mixed();
+    expect((await list({ domain: 'FULFIL' }))!.items.map((i) => i.key)).toEqual(['dir/b::REQ-001']);
+    expect((await list({ domain: 'dir/a' }))!.items.map((i) => i.key).sort()).toEqual(['dir/a::REQ-001', 'dir/a::REQ-002']);
+    expect((await list({ domain: 'processing' }))!.items.map((i) => i.key)).toEqual(['dir/a::REQ-001']);
+    expect((await list({ domain: 'nothing-like-it' }))!.total).toBe(0);
+  });
+
+  it('filters before paginating, and the catalog stays corpus-wide', async () => {
+    await mixed();
+    const p = await list({ domain: 'dir/a', offset: 1, limit: 1 });
+    expect(p!.total).toBe(2);
+    expect(p!.corpus).toBe(3);
+    expect(p!.items).toHaveLength(1);
+    expect(p!.businessDomains).toHaveLength(2);
+  });
+
+  it('an override patched under domain::reqId applies and the business domain stays', async () => {
+    await mixed();
+    const detail = await patchRequirement(repoAt(root), 'dir/a::REQ-001', { title: 'Edited title' }, estateAt(root));
+    expect(detail!.title).toBe('Edited title');
+    expect(detail!.businessDomain).toEqual({ id: 'bd-pay', name: 'Payments Processing', confidence: 0.9 });
+    const p = await list();
+    const row = p!.items.find((i) => i.key === 'dir/a::REQ-001')!;
+    expect(row.edited).toBe(true);
+    expect(row.businessDomain?.name).toBe('Payments Processing');
+  });
+
+  it('a rebuilt graph that changes only the assignment and catalog refreshes rows and search', async () => {
+    vi.useFakeTimers();
+    try {
+      await mixed();
+      expect((await list({ q: 'payments' }))!.total).toBe(1);
+      await write(
+        {
+          'dir/a': {
+            requirements: {
+              'REQ-001': req('Charge cards', { business_domain: bd('bd-bill', 'Billing Operations') }),
+              'REQ-002': req('Plain row'),
+            },
+          },
+          'dir/b': { requirements: { 'REQ-001': req('Ship parcels', { business_domain: bd('bd-ful', 'Fulfilment') }) } },
+        },
+        { business_domains: [catalogEntry('bd-bill', 'Billing Operations')] },
+      );
+      vi.setSystemTime(Date.now() + REQUIREMENTS_READ_TTL_MS + 1);
+      expect((await list({ q: 'payments' }))!.total).toBe(0);
+      const p = await list({ q: 'billing' });
+      expect(p!.items.map((i) => i.businessDomain?.id)).toEqual(['bd-bill']);
+      expect(p!.businessDomains).toEqual([catalogEntry('bd-bill', 'Billing Operations')]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

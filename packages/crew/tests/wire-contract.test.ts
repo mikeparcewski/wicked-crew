@@ -42,10 +42,13 @@ import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import type { GateCacheEntry } from '../src/api/gate-cache.js';
 import type { ElicitationEntry } from '../src/api/elicitation-cache.js';
 import type {
+  RequirementBusinessDomain,
+  RequirementBusinessDomainCatalogEntry,
   RequirementDetail,
   RequirementsCodeDrift,
   RequirementsMinimum,
   RequirementsPage,
+  RequirementSummary,
 } from '../src/api/requirements.js';
 import { REQUIREMENTS_NOT_GENERATED } from '../src/api/requirements.js';
 import type { ChatOpenSchema, GateSchema, GuidanceSchema, LaunchSchema, OpenPathSchema, OpenTerminalSchema, RepoGraphReply, ReqMinimumSchema, RetireMemorySchema } from '../src/api/routes.js';
@@ -918,6 +921,30 @@ respondsWith<Wire.GovernanceWikiMeta['scoreboard_available'], ReturnType<CoreAda
 // GET/PATCH /repos/:id/requirements — server-side search + overrides.
 respondsWith<Wire.RequirementsPage, RequirementsPage>();
 respondsWith<Wire.RequirementDetail, RequirementDetail>();
+// The business domain (wicked-core#1425): optional on a row (omitted, never null), a catalog on the page.
+respondsWith<Wire.RequirementBusinessDomain, RequirementBusinessDomain>();
+respondsWith<Wire.RequirementBusinessDomainCatalogEntry, RequirementBusinessDomainCatalogEntry>();
+respondsWith<Wire.RequirementSummary['businessDomain'], RequirementSummary['businessDomain']>();
+respondsWith<Wire.RequirementsPage['businessDomains'], RequirementsPage['businessDomains']>();
+{
+  // An older row/page (fields omitted) and a new one both satisfy the published shapes.
+  const base = {
+    key: 'd::R', domain: 'd', reqId: 'R', title: 't', category: 'functional', statement: '', status: 'active',
+    risk: false, riskSource: null, edited: false, corroboration: null, placeholder: false, uncounted: null,
+    codeMismatch: null,
+  } as const;
+  const older: Wire.RequirementSummary = { ...base };
+  const newer: Wire.RequirementSummary = { ...base, businessDomain: { id: 'b', name: 'B', confidence: null } };
+  // @ts-expect-error a business domain's id is a string
+  const badId: Wire.RequirementSummary = { ...base, businessDomain: { id: 1, name: 'B', confidence: 0.5 } };
+  // @ts-expect-error a business domain's name is a string
+  const badName: Wire.RequirementSummary = { ...base, businessDomain: { id: 'b', name: null, confidence: 0.5 } };
+  // @ts-expect-error a business domain's confidence is a number or null
+  const badConfidence: Wire.RequirementSummary = { ...base, businessDomain: { id: 'b', name: 'B', confidence: '0.5' } };
+  // @ts-expect-error a catalog member needs all five fields, typed
+  const badCatalog: Wire.RequirementBusinessDomainCatalogEntry = { id: 'b', name: 'B', purpose: 1, requirements: [], directories: [] };
+  void [older, newer, badId, badName, badConfidence, badCatalog];
+}
 // The not-generated 404 is typed (0.154.0): `code` is the discriminator, never the sentence.
 respondsWith<Wire.RequirementsNotGenerated, typeof REQUIREMENTS_NOT_GENERATED>();
 // PUT /repos/:id/requirements/minimum (0.197.0): the minimum in force after the change.
