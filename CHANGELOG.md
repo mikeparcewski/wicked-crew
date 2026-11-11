@@ -10,11 +10,49 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.18.9] — 2026-11-11
+
+A patch: a floor timeout's "re-run with the targeted tests" can no longer turn into "run no tests", the checks floor
+and seat images carry Python's test toolchain and Node 24.22.2, a repository can ask the floor to build an allowlisted
+native addon, run reads no longer wait behind the engine's actor, and a re-seat before a chat's first message replaces
+its seats. Needs wicked-core-ts 0.15.38 (`^0.15.38`) and wicked-crew-api-types 0.205.0 (additive: `ChatSeatsBody`,
+`ChatSeatsResponse`, `WorkUnitRepoChecks.targeted_test`). Still bundles wicked-studio 0.16.5.
+
+**Upgrading:**
+
+- **A targeted re-run now needs a targeted command (wicked-core#1392).** At a timed-out floor's gate, `action:
+  'targeted'` used to waive the whole test set on a repository with no targeted test command, so the floor passed and
+  the gate allowed the change with no test evidence. Now the floor report names what a targeted re-run would run
+  (`repo_checks.targeted_test`); with none, `targeted` is refused (409, the gate stays open, the alternatives named),
+  and a targeted re-run that still finds none fails closed instead of waiving the tests. `accept_partial` is the
+  explicit waiver: its floor note leads with "tests waived by the operator (`accept_partial`)", and the gate and
+  delivery receipts record `skipped[] {instrument: repo_checks, reason: waived_by_operator}`. Declare `test_targeted`
+  in `.wicked/checks.json` to keep the targeted option.
+- **The checks floor and seat images carry Python/pytest and run Node 24.22.2 (wicked-core#1401, wicked-core#1412).**
+  Both images install `python3-pytest`, `python3-yaml` and `python3-zstandard` from the Debian archive they already
+  use (no PyPI), so a Python suite (`python3 -m pytest`) runs in the floor; and both, with the seat builder's default
+  base, move from Node 22 to the pinned Node 24.22.2, so crew's SQLite upload tests pass in the floor. Image tags are
+  content hashes: each image is rebuilt once on first use after the upgrade.
+- **`native_rebuild` in `.wicked/checks.json` (wicked-core#1393).** The floor installs with scripts off, so a native
+  addon had no binding. A repository may now declare `"native_rebuild": ["better-sqlite3"]` (the engine's allowlist;
+  any other name, a non-npm install or a missing package.json is a detection error). A `native-build` provisioning
+  check then builds it after the install with the floor npm's own node-gyp, offline and with no npm lifecycle script,
+  where the repository's checks run; the shared `node_modules` cache stays unbuilt. Add the key only once the daemon
+  runs this release: an older engine refuses the unknown key, a detection error.
+- **Run reads are served off the engine's actor (wicked-core#1390, part 1).** `GET /runs`, the stall watchdog's
+  executing-run list and the run's team read from a read-only SQLite connection instead of queueing behind a long
+  actor command (on a loaded host a worktree snapshot held the actor for 30 to 45 s). Gates, reassigns, delivery and
+  every deny are still decided on the actor. `WICKED_READ_MODEL=off` restores the old path. The engine logs any actor
+  command at or past `WICKED_ACTOR_SLOW_MS` (default 1000 ms) as `wicked-core: slow actor command <Variant> took <ms>
+  ms`.
+
+### Fixed
+
 - **A re-seat now replaces the chat's seats (#1482).** Before a chat's first message, `POST /chats/:id/seats {clis}`
   sets the eligible roster to exactly the named seats that pass admission, in the order named, so a chat opened with
   four seats and re-seated to `[claude, codex]` reads back and runs on those two. Before, a re-seat only added seats.
   When no named seat passes admission the roster is unchanged and the answer says so (`reseated: false`, `note`). A
-  re-seat after the first message is still refused (409). Adds `ChatSeatsBody` and `ChatSeatsResponse` to api-types.
+  re-seat after the first message is still refused (409). Adds `ChatSeatsBody` and `ChatSeatsResponse` to api-types (0.205.0).
 
 ## [0.18.8] — 2026-11-10
 
@@ -6739,7 +6777,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.8...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.9...HEAD
+[0.18.9]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.8...v0.18.9
 [0.18.8]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.7...v0.18.8
 [0.18.7]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.6...v0.18.7
 [0.18.6]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.5...v0.18.6
