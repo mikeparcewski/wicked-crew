@@ -6326,7 +6326,7 @@ export function registerRoutes(
   app.post(
     `${V}/chats/:id/seats`,
     // Typed like every neighbouring chat route (review HIGH-1): the names bind the 0.39.0 api-types
-    // mirror to this row — `ChatSeatsBody { clis }` in, `ChatSeatsResponse { chatId, seats, refused }`
+    // mirror to this row — `ChatSeatsBody { clis }` in, `ChatSeatsResponse { chatId, seats, refused, reseated?, note? }`
     // out (the 201's own `ChatSeatOutcome` / `ChatSeatRefusal` shapes, which 0.38.0 already ships).
     {
       config: {
@@ -6386,8 +6386,9 @@ export function registerRoutes(
         });
       }
       try {
-        // ASK-C1: a re-seat re-admits the named seats that pass admission NOW (a sign-in fixed)
-        // into the path's eligible roster; nothing is warmed and the engine is not called.
+        // ASK-C1 / #1482: a re-seat REPLACES the path's eligible roster with the named seats that
+        // pass admission NOW, in the order named; none passing leaves the roster as it stands.
+        // Nothing is warmed and the engine is not called.
         const scopeNow = chatScopes.get(id);
         const scopedChat = (scopeNow?.kind ?? 'none') !== 'none' && scopeNow?.kind !== 'system';
         const reseatKind = scopeNow?.kind === 'repos' && scopeNow.repos.length === 1 ? 'path-bound' : 'path';
@@ -6405,8 +6406,12 @@ export function registerRoutes(
           );
           return admission.ok ? { cliKey, ok: true } : { cliKey, ok: false, error: admission.reason };
         });
-        askPaths.admit(id, seats.filter((s) => s.ok).map((s) => s.cliKey));
+        const passing = seats.filter((s) => s.ok).map((s) => s.cliKey);
+        askPaths.admit(id, passing);
         const refused = chatScopes.foldSeats(id, seats);
+        if (passing.length === 0) {
+          return { chatId: id, seats, refused, reseated: false, note: "Nothing was re-seated; the chat's seats are unchanged." };
+        }
         return { chatId: id, seats, refused };
       } catch (err) {
         return reply.code(400).send({ error: message(err) });

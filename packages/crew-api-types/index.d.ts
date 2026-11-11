@@ -8979,6 +8979,28 @@ export interface ChatSeatRefusal {
 }
 
 /**
+ * `POST /chats/:id/seats` body (before the chat's first message). The named seats REPLACE the
+ * chat's seats: the eligible roster becomes exactly the named seats that pass admission now, in
+ * the order named. There is no merge mode — name the full set wanted.
+ */
+export interface ChatSeatsBody {
+  clis: string[];
+}
+
+/** `POST /chats/:id/seats` → 200. */
+export interface ChatSeatsResponse {
+  chatId: string;
+  /** Admission outcome per named seat. */
+  seats: ChatSeatOutcome[];
+  /** The named seats that were refused, with reasons. */
+  refused: ChatSeatRefusal[];
+  /** `false` (with `note`) when no named seat passed admission, so the chat's seats are unchanged.
+   *  Absent when the roster was replaced. */
+  reseated?: false;
+  note?: string;
+}
+
+/**
  * Single-seat degradation disclosure (crew#641/#650): present on `POST /chats` → 201 and on
  * `POST /chats/:id/messages` → 202 whenever exactly ONE seat is warm — refusals or not, since a
  * one-seat chat cannot disagree with itself either way. Named here so callers do not have to reason

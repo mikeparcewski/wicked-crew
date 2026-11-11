@@ -157,11 +157,24 @@ export class AskPathIndex {
   }
 
 
-  /** A re-seat: the named seats are eligible (a sign-in fixed). */
+  /** A re-seat REPLACES the roster (before the first message): the eligible seats become exactly
+   *  `seats`, in the order given. An empty list changes nothing (the caller says so). A chosen
+   *  seat that is no longer eligible is cleared, and the pre-launch `pa`/`selection` follow the
+   *  new roster the way {@link open} derives them. Returns the roster as it now stands. */
   admit(chatId: string, seats: readonly string[]): string[] {
     const p = this.paths.get(chatId);
     if (p === undefined) return [];
-    for (const s of seats) if (!p.eligible.includes(s)) p.eligible.push(s);
+    const next = [...new Set(seats)];
+    if (next.length === 0) return [...p.eligible];
+    p.eligible = next;
+    if (p.primary !== undefined && !next.includes(p.primary)) delete p.primary;
+    if (p.runId === undefined) {
+      p.pa = p.primary ?? (next.length === 1 ? next[0]! : null);
+      p.selection = p.primary !== undefined ? 'chosen' : 'random';
+    }
+    if (p.seats !== undefined) {
+      for (const k of Object.keys(p.seats)) if (!next.includes(k)) delete p.seats[k];
+    }
     return [...p.eligible];
   }
 
