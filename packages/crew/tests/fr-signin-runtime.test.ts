@@ -47,16 +47,16 @@ describe('runtime-aware roster', () => {
     runtime.set('down');
     const seat = roster()[0]!;
     expect(seat).toMatchObject({
-      health: { status: 'inactive', message: "Docker isn't running" },
-      council_eligible: false, council_ineligible_reason: "Docker isn't running",
-      work_eligible: false, work_ineligible_reason: "Docker isn't running",
-      signed_in: null, auth: 'unknown', auth_evidence: "Docker isn't running", login_check: 'unverified', login_note: "Docker isn't running",
-      chat_admission: { unscoped: { ok: false, reason: "Docker isn't running" } },
+      health: { status: 'inactive', message: "Kubernetes isn't running" },
+      council_eligible: false, council_ineligible_reason: "Kubernetes isn't running",
+      work_eligible: false, work_ineligible_reason: "Kubernetes isn't running",
+      signed_in: null, auth: 'unknown', auth_evidence: "Kubernetes isn't running", login_check: 'unverified', login_note: "Kubernetes isn't running",
+      chat_admission: { unscoped: { ok: false, reason: "Kubernetes isn't running" } },
     });
     expect(roster().every((row) => row.health?.status === 'inactive' && row.auth === 'unknown' && row.signed_in === null)).toBe(true);
     for (const row of roster()) {
-      expect(row.work_admission).toMatchObject({ unscoped: { ok: false, reason: "Docker isn't running" }, scoped: { ok: false }, scoped_bound: { ok: false } });
-      expect(row.qe_reviewer).toMatchObject({ ok: false, reason: "Docker isn't running" });
+      expect(row.work_admission).toMatchObject({ unscoped: { ok: false, reason: "Kubernetes isn't running" }, scoped: { ok: false }, scoped_bound: { ok: false } });
+      expect(row.qe_reviewer).toMatchObject({ ok: false, reason: "Kubernetes isn't running" });
     }
     expect(seat.probed_at).toBeUndefined(); expect(JSON.stringify(seat)).not.toContain('last step answered');
   });
@@ -72,15 +72,30 @@ describe('runtime-aware roster', () => {
     expect(refresh).not.toHaveBeenCalled();
   });
 });
+/** `wicked-core cluster status --json` of a ready cluster (k8s runner B-5). */
+const UP = JSON.stringify({ configured: true, reachable: true, context: 'rancher-desktop', controller: { ready: true }, gateway: 'serving', controllerVersion: 'v0.1.0', runNamespaces: 0, pendingPods: 0 });
 describe('background runtime reader', () => {
+  it('reads the cluster through the engine: a status document that says not configured or not answering is down (k8s runner)', async () => {
+    for (const doc of [{ configured: false, reachable: false, kind: 'no_cluster' }, { configured: true, reachable: false, kind: 'cluster_unreachable', context: 'rancher-desktop' }]) {
+      // The engine exits 1 with the document on stdout when the cluster is not usable.
+      const exec = vi.fn<ExecLike>(async () => { throw Object.assign(new Error('Command failed'), { code: 1, stdout: JSON.stringify(doc), stderr: '' }); });
+      const reader = new RuntimeState({ exec, exe: () => '/fixture/core', home: () => '/fixture/home', intervalMs: 60_000 }); close.push(() => reader.close());
+      for (let i = 0; i < 3; i++) await reader.refresh();
+      expect(reader.state()).toBe('down');
+    }
+    const none = vi.fn<ExecLike>();
+    const noExe = new RuntimeState({ exec: none, exe: () => null, home: () => '/fixture/home', intervalMs: 60_000 }); close.push(() => noExe.close());
+    for (let i = 0; i < 3; i++) await noExe.refresh();
+    expect(noExe.state()).toBe('down'); expect(none).not.toHaveBeenCalled();
+  });
   it('caches immediate reads, bounds the check and probes again in the background', async () => {
     vi.useFakeTimers(); let up = false;
-    const exec = vi.fn<ExecLike>(async () => { if (!up) throw new Error('runtime down'); return { stdout: '28.0.0\n', stderr: '' }; });
-    const reader = new RuntimeState({ exec, env: { HOME: home }, runtime: () => '/fixture/runtime' }); close.push(() => reader.close());
+    const exec = vi.fn<ExecLike>(async () => { if (!up) throw new Error('runtime down'); return { stdout: UP, stderr: '' }; });
+    const reader = new RuntimeState({ exec, env: { HOME: home }, exe: () => '/fixture/core', home: () => '/fixture/home' }); close.push(() => reader.close());
     const change = vi.fn(); reader.onChange(change); expect(reader.state()).toBe('unknown');
     // A cold daemon reads down only after three misses in a row (e2e-1105 09:02Z), never on the first.
     await vi.advanceTimersByTimeAsync(1); expect(reader.state()).toBe('unknown');
-    expect(exec).toHaveBeenCalledWith('/fixture/runtime', ['version', '--format', '{{.Server.Version}}'], { timeout: 15_000, env: { HOME: home } });
+    expect(exec).toHaveBeenCalledWith('/fixture/core', ['cluster', 'status', '--json', '--home', '/fixture/home'], { timeout: 15_000, env: { HOME: home } });
     for (let i = 0; i < 100; i++) reader.state(); expect(exec).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(10_000); expect(reader.state()).toBe('unknown');
     await vi.advanceTimersByTimeAsync(10_000); expect(reader.state()).toBe('down');
@@ -91,8 +106,8 @@ describe('background runtime reader', () => {
   });
   it('an up runtime reads down only after three misses in a row (slow checks on a busy host are not an outage)', async () => {
     vi.useFakeTimers(); let up = true;
-    const exec = vi.fn<ExecLike>(async () => { if (!up) throw new Error('timed out'); return { stdout: '28.0.0\n', stderr: '' }; });
-    const reader = new RuntimeState({ exec, runtime: () => '/fixture/runtime' }); close.push(() => reader.close());
+    const exec = vi.fn<ExecLike>(async () => { if (!up) throw new Error('timed out'); return { stdout: UP, stderr: '' }; });
+    const reader = new RuntimeState({ exec, exe: () => '/fixture/core', home: () => '/fixture/home' }); close.push(() => reader.close());
     await vi.advanceTimersByTimeAsync(1); expect(reader.state()).toBe('up');
     up = false; await vi.advanceTimersByTimeAsync(10_000); expect(reader.state()).toBe('up');
     up = true; await vi.advanceTimersByTimeAsync(10_000); expect(reader.state()).toBe('up');
@@ -107,9 +122,9 @@ describe('background runtime reader', () => {
       const answerMs = 12_000;
       await new Promise((r) => setTimeout(r, Math.min(answerMs, opts.timeout)));
       if (answerMs > opts.timeout) throw new Error('timed out');
-      return { stdout: '28.0.0\n', stderr: '' };
+      return { stdout: UP, stderr: '' };
     });
-    const reader = new RuntimeState({ exec, runtime: () => '/fixture/runtime' }); close.push(() => reader.close());
+    const reader = new RuntimeState({ exec, exe: () => '/fixture/core', home: () => '/fixture/home' }); close.push(() => reader.close());
     await vi.advanceTimersByTimeAsync(12_001); expect(reader.state()).toBe('up');
     await vi.advanceTimersByTimeAsync(60_000); expect(reader.state()).toBe('up');
     // One check at a time: a 12 s check on a 10 s interval never overlaps the next.
@@ -121,7 +136,7 @@ describe('background runtime reader', () => {
       await new Promise((r) => setTimeout(r, opts.timeout));
       throw new Error('timed out');
     });
-    const reader = new RuntimeState({ exec, runtime: () => '/fixture/runtime' }); close.push(() => reader.close());
+    const reader = new RuntimeState({ exec, exe: () => '/fixture/core', home: () => '/fixture/home' }); close.push(() => reader.close());
     await vi.advanceTimersByTimeAsync(15_001); expect(reader.state()).toBe('unknown');
     await vi.advanceTimersByTimeAsync(25_000); expect(reader.state()).toBe('unknown');
     await vi.advanceTimersByTimeAsync(30_000); expect(reader.state()).toBe('down');
@@ -130,9 +145,9 @@ describe('background runtime reader', () => {
   it('coalesces pending probes and publishes nothing after close', async () => {
     let finish!: (out: { stdout: string; stderr: string }) => void;
     const exec = vi.fn<ExecLike>(() => new Promise((r) => { finish = r; }));
-    const reader = new RuntimeState({ exec, runtime: () => '/fixture/runtime' }); close.push(() => reader.close());
+    const reader = new RuntimeState({ exec, exe: () => '/fixture/core', home: () => '/fixture/home' }); close.push(() => reader.close());
     const change = vi.fn(); reader.onChange(change); const pending = reader.refresh(); expect(reader.refresh()).toBe(pending);
-    await Promise.resolve(); reader.close(); finish({ stdout: '28.0', stderr: '' }); await pending;
+    await Promise.resolve(); reader.close(); finish({ stdout: UP, stderr: '' }); await pending;
     expect(exec).toHaveBeenCalledTimes(1); expect(change).not.toHaveBeenCalled(); expect(reader.state()).toBe('unknown');
   });
 });

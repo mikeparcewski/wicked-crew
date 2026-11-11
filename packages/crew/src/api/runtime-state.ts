@@ -1,5 +1,6 @@
 import { execCapped } from '../core/exec.js';
-import { resolveContainerRuntime } from './system-snapshot.js';
+import { crewStateHome } from '../projects/state-home.js';
+import { readClusterStatus } from './cluster-status.js';
 import type { ExecLike } from './seat-container-login.js';
 
 /**
@@ -10,7 +11,7 @@ import type { ExecLike } from './seat-container-login.js';
  * so about a minute. Later is accepted: a false outage is worse than an honest wait.
  */
 export const DOWN_AFTER_MISSES = 3;
-/** One check's bound: a loaded laptop's docker CLI can take well over 5 s to answer. */
+/** One check's bound: a loaded laptop's kubectl can take well over 5 s to answer. */
 export const CHECK_TIMEOUT_MS = 15_000;
 
 export type ContainerRuntimeState = 'up' | 'down' | 'unknown';
@@ -22,12 +23,17 @@ export interface RuntimeStateReader {
 export interface RuntimeStateDeps {
   exec?: ExecLike;
   env?: NodeJS.ProcessEnv;
-  runtime?: () => string | null;
+  /** The engine CLI (default `WICKED_CORE_EXE` from `env`). */
+  exe?: () => string | null;
+  /** The daemon's state home (default crew's own): the engine reads its cluster credential there. */
+  home?: () => string | null;
   intervalMs?: number;
 }
 
-/** Runtime reachability is independent of broker credentials. Probe off the request path every
- *  ten seconds, including without roster traffic, so recovery also refreshes seat standing. */
+/** The seats' runtime is the daemon's Kubernetes cluster (k8s runner): `up` while the engine's
+ *  `cluster status` says it is configured and answers. Reachability is independent of broker
+ *  credentials. Probe off the request path every ten seconds, including without roster traffic, so
+ *  recovery also refreshes seat standing. */
 export class RuntimeState implements RuntimeStateReader {
   private current: ContainerRuntimeState = 'unknown';
   private readonly listeners = new Set<(next: ContainerRuntimeState, previous: ContainerRuntimeState) => void>();
@@ -35,7 +41,7 @@ export class RuntimeState implements RuntimeStateReader {
   private readonly initial: NodeJS.Immediate;
   private pending: Promise<void> | undefined;
   private closed = false;
-  /** Consecutive failed checks: a busy host can miss one bounded check while Docker is fine. */
+  /** Consecutive failed checks: a busy host can miss one bounded check while the cluster is fine. */
   private misses = 0;
 
   constructor(private readonly deps: RuntimeStateDeps = {}) {
@@ -59,12 +65,12 @@ export class RuntimeState implements RuntimeStateReader {
       let next: ContainerRuntimeState = 'down';
       try {
         const env = this.deps.env ?? process.env;
-        const runtime = this.deps.runtime !== undefined ? this.deps.runtime() : resolveContainerRuntime(env);
-        if (runtime !== null) {
-          const out = await (this.deps.exec ?? execCapped)(runtime, ['version', '--format', '{{.Server.Version}}'], { timeout: CHECK_TIMEOUT_MS, env });
-          if (out.stdout.trim() !== '') next = 'up';
-        }
-      } catch { /* A missing CLI, timeout or unreachable server is unavailable. */ }
+        const exe = this.deps.exe !== undefined ? this.deps.exe() : (env['WICKED_CORE_EXE'] ?? '').trim() || null;
+        const home = this.deps.home !== undefined ? this.deps.home() : crewStateHome();
+        const exec = this.deps.exec ?? execCapped;
+        const doc = await readClusterStatus({ exe, home, exec: (file, args, opts) => exec(file, args, { ...opts, env }), timeoutMs: CHECK_TIMEOUT_MS });
+        if (doc.configured && doc.reachable) next = 'up';
+      } catch { /* No engine CLI, a timeout or no status document is unavailable. */ }
       // Down takes three misses in a row (a check on a loaded laptop can time out with Docker up, and
       // a false "down" benches every container seat); up takes one answer.
       this.misses = next === 'down' ? this.misses + 1 : 0;

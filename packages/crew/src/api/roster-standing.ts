@@ -333,7 +333,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
     const decorated = seats.map((seat) => {
       const key = String(seat.key);
       const runtimeDown = container && runtimeState?.state() === 'down';
-      const reason = "Docker isn't running";
+      const reason = "Kubernetes isn't running";
       const health = runtimeDown ? { status: 'inactive' as const, message: reason, since: runtimeChangedAt } : seatHealth.healthFor(key);
       // crew#630: the seat's own auth-status answer (cached; never awaited here). A probed seat
       // whose probe has not answered yet does not read `signed_in` off its file — a credential

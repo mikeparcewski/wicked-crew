@@ -97,6 +97,32 @@ export function loginDetail(text: string): string {
   return line.length <= DETAIL_MAX ? line : `${line.slice(0, DETAIL_MAX - 1)}…`;
 }
 
+/** The k8s runner's refusal kinds (wicked-core `FloorUnarmed`): the engine prints
+ *  `wicked-core seat-login: <kind>: <why>` (`k8s::login::described`). */
+const CLUSTER_KINDS = ['no_cluster', 'cluster_unreachable', 'controller_missing', 'pids_unlimited', 'policy_refused', 'admission_pending', 'image_unavailable', 'exec_stream_lost'] as const;
+type ClusterKind = (typeof CLUSTER_KINDS)[number];
+const CLUSTER_KIND_RE = new RegExp(`(?:^|[\\s:])(${CLUSTER_KINDS.join('|')}):\\s*(.*)`);
+const INSTALL_HINT = 'run `wicked-core cluster install --admin-context <your cluster context> --home <this daemon\'s state home>`';
+
+/** A sign-in refused by the cluster, in words the operator can act on; `null` for any other refusal. */
+export function clusterRefusal(stderr: string, cli: string, label: string): { code: ClusterKind; error: string } | null {
+  const m = CLUSTER_KIND_RE.exec(stderr);
+  if (m === null) return null;
+  const code = m[1] as ClusterKind;
+  const said = loginDetail(m[2] ?? '');
+  const error: Record<ClusterKind, string> = {
+    no_cluster: `No Kubernetes cluster is set up for this daemon, so the ${label} sign-in can't start. To set one up, ${INSTALL_HINT}, then try again.`,
+    cluster_unreachable: `Kubernetes isn't answering, so the ${label} sign-in can't start. Start Rancher Desktop (or Docker Desktop) with Kubernetes on, then try again.`,
+    controller_missing: `The cluster answers, but its sandbox controller isn't installed, so the ${label} sign-in can't start. To install it, ${INSTALL_HINT}, then try again.`,
+    pids_unlimited: `The cluster puts no limit on a pod's processes, so sign-ins and seats are refused. Set the kubelet's pod-max-pids to 4096 (Rancher Desktop: a k3s argument), then try again.`,
+    policy_refused: `The cluster refused the ${label} sign-in pod${said !== '' ? `: ${said}` : ''}. Fix what it names, then try again.`,
+    admission_pending: `The ${label} sign-in pod can't start yet: the cluster is full. Try again when other work ends.`,
+    image_unavailable: `The ${label} image isn't in the cluster's image store. Build it (\`wicked-core seat-image build ${loginDetail(cli)}\`), then try again.`,
+    exec_stream_lost: `The connection to the ${label} sign-in pod was lost before it finished. Nothing was saved; try again.`,
+  };
+  return { code, error: error[code] };
+}
+
 /** Stable refusal codes keep runtime repair, missing host CLIs and reattachment distinct. */
 export function signInFailure(stderr: string, cli: string): { code: SeatSignInFailureCode; error: string } {
   const label = ({ claude: 'Claude', codex: 'Codex', pi: 'Pi', opencode: 'OpenCode', copilot: 'Copilot', agy: 'Antigravity' } as Record<string, string>)[cli] ?? loginDetail(cli);
@@ -104,6 +130,8 @@ export function signInFailure(stderr: string, cli: string): { code: SeatSignInFa
     code: 'container_runtime_down',
     error: "Docker isn't running, so the sign-in container can't start. Start Docker Desktop or Rancher Desktop, then try again.",
   };
+  const k8s = clusterRefusal(stderr, cli, label);
+  if (k8s !== null) return k8s;
   if (/is not installed on this host/i.test(stderr)) {
     const command = stderr.match(/\b(?:npm (?:install|i) (?:-g |--global )?[@a-z0-9_./-]+|brew install [a-z0-9_./-]+|uv tool install [a-z0-9_./-]+)/i)?.[0];
     return { code: 'cli_not_installed', error: `${label} isn't installed on this computer. Its sign-in runs your own ${cli}: install it (${command === undefined ? 'see its install guide' : loginDetail(command)}), then try again.` };

@@ -126,7 +126,7 @@ import {
 import { seatWorkDefaultNow } from './seat-work-default.js';
 import { ROSTER_REFRESH_WAIT_MS, rosterWithStandingFactory, type RosterWithStanding } from './roster-standing.js';
 import {
-  SeatContainerStatus, gatewayDirOf, isContainerLoginCli, isContainerSeatFloor, isHostSeatFloor, loginDetail, registerSeatContainerLoginRoutes, seatLoginDepsFor, type ExecLike, type SeatLoginDeps,
+  SeatContainerStatus, isContainerLoginCli, isContainerSeatFloor, isHostSeatFloor, loginDetail, registerSeatContainerLoginRoutes, seatLoginDepsFor, type ExecLike, type SeatLoginDeps,
 } from './seat-container-login.js';
 import { ChatTurnIndex } from './chat-turns.js';
 import type { ChatRepoRoot, ChatTranscriptStore } from './chat-transcripts.js';
@@ -363,12 +363,10 @@ import {
   probeBroker,
   probeBus,
   probeEstate,
-  probeGateway,
   probeInteractive,
   probeVault,
   readBridgeLockAsync,
   readWeek,
-  resolveContainerRuntime,
   runLiveness,
   settleWithin,
   skillsRow,
@@ -382,6 +380,7 @@ import {
   type RosterSeatLike,
   type RunEvidence,
 } from './system-snapshot.js';
+import { ClusterStatusReader, clusterDiagnostics, clusterRows } from './cluster-status.js';
 import { idleClis, parseSeatImageStatus, probeSeatImages, SeatImageRebuilder, type SeatImageStatus } from './seat-images.js';
 import { RunCostCache } from './needs.js';
 import { governanceStoreFix, legacyHomeOutboxPath } from '../core/governance-store.js';
@@ -2604,9 +2603,18 @@ export function registerRoutes(
     CoreAdapter.eventStoreCounter(),
     runtime.governanceLegacyOutboxPath === undefined ? legacyHomeOutboxPath() : runtime.governanceLegacyOutboxPath,
   );
+  // The daemon's Kubernetes cluster (k8s runner): one bounded, single-flight read of the engine's
+  // `cluster status --json`, shared by `/diagnostics.cluster` and the `/system` cluster + gateway rows.
+  const clusterSystemExec: SystemExecLike =
+    runtime.systemExec ?? ((file, args, opts) => execCapped(file, args, { timeout: opts.timeout }));
+  const clusterReader = new ClusterStatusReader(() => {
+    const db = typeof adapter.dbPath === 'string' && adapter.dbPath !== '' && adapter.dbPath !== ':memory:' ? adapter.dbPath : null;
+    return { exe: (process.env['WICKED_CORE_EXE'] ?? '').trim() || null, home: db !== null ? stateHomeOfDb(db) : null, exec: clusterSystemExec };
+  });
   // The diagnostics body, shared by `GET /diagnostics` (the raw dump) and `GET /system` (the
   // Nerve Center snapshot, which carries every block of it on its rows — DES-SYSTEM-VIEW).
-  const diagnosticsNow = async () => {
+  // `/system` reads the cluster itself (its own bound), so only `/diagnostics` waits on it here.
+  const diagnosticsNow = async (opts: { cluster?: boolean } = {}) => {
       // `dbPath` is a readonly field of the real adapter; a stub-driven route set may lack it,
       // and diagnostics over an unknown store honestly reports no stores and no ACP record.
       const dbPath = typeof adapter.dbPath === 'string' && adapter.dbPath !== '' ? adapter.dbPath : null;
@@ -2671,12 +2679,14 @@ export function registerRoutes(
         repoWatch: runtime.repoWatch?.diagnostics() ?? null,
         // wicked-crew#1481: every project graph refresh since boot — running (with its budget) or idle, and its last failure.
         projectGraphRefresh: projectGraphRefreshDiagnostics(),
+        // The daemon's Kubernetes cluster (k8s runner), on the container floor only.
+        ...(opts.cluster === true && isContainerSeatFloor() ? { cluster: clusterDiagnostics(await clusterReader.read()) } : {}),
       };
   };
   app.get(
     `${V}/diagnostics`,
     { config: { manifest: { responseType: 'DiagnosticsResponse', statusCodes: [200] } } },
-    async () => diagnosticsNow(),
+    async () => diagnosticsNow({ cluster: true }),
   );
 
   // Who am I talking to the daemon as? (task #88). In local mode this is
@@ -11061,7 +11071,6 @@ export function registerRoutes(
       }, PROBE_TIMEOUT_MS);
 
       // The infra probes, all at once.
-      const gatewayDir = stateHome !== null ? gatewayDirOf(join(stateHome, 'gateway')) : null;
       const interactiveRoots = [...new Set([defaultInteractiveRoot(stateHome ?? undefined), ...interactiveBridges.keys()])];
       const watch = runtime.watchRegistry?.() ?? null;
       const watchHealth = watch !== null ? (() => { try { return watch.health(); } catch { return null; } })() : null;
@@ -11072,8 +11081,12 @@ export function registerRoutes(
         clis: roster.map((r) => r.key).filter((k) => isContainerLoginCli(k)),
         status: (cli) => containerStatus.refreshFresh(cli),
       });
+      // The cluster and the gateway (a Deployment in the daemon's namespace) from one read.
+      const clusterStarted = Date.now();
+      const clusterP = (containerFloor ? clusterReader.read() : Promise.resolve(null))
+        .then((read) => clusterRows(read, containerFloor, clusterStarted));
       const infraP = Promise.all([
-        probeGateway({ containerFloor, gatewayDir, runtime: containerFloor ? resolveContainerRuntime() : null, exec: systemExec }),
+        clusterP.then((rows) => rows.gateway),
         brokerP,
         probeInteractive({
           roots: interactiveRoots,
@@ -11102,6 +11115,7 @@ export function registerRoutes(
           status: seatImageStatus,
           rebuild: () => seatImageRebuilder.current(),
         }),
+        clusterP.then((rows) => rows.cluster),
       ]);
 
       const [views, settings, openGates, diag, ping, rules, gatesByYou, infraProbed, reposRead] = await Promise.all([
@@ -11249,6 +11263,7 @@ export function registerRoutes(
         stateHomeRow(d === null ? null : (d.stateHome ?? null) as Parameters<typeof stateHomeRow>[0]),
         storesRow,
         seatFloorRow,
+        infraProbed[8] as SystemInfraRow,
         infraProbed[7] as SystemInfraRow,
         reposRow(reposRead),
         infraProbed[6] as SystemInfraRow,

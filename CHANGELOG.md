@@ -55,6 +55,15 @@ wicked-estate must be 0.35.2 or later. Still bundles wicked-studio 0.16.5.
 
 ### Added
 
+- Kubernetes runner (with the wicked-core k8s-swap train, core#1400–#1421): the Nerve Center gains a **Kubernetes
+  cluster** row and `GET /diagnostics` a `cluster` block, both read from `wicked-core cluster status --json --home <state
+  home>` (configured, reachable, context, controller, gateway, run namespaces, pending pods; one bounded, single-flight
+  read). The model gateway row reads the same document (the gateway is a Deployment in the daemon's namespace now), and
+  the roster's reachability check is the cluster's (`Kubernetes isn't running` benches the container seats). Sign-in
+  refusals map the runner's kinds to their own codes and one repair each: `no_cluster`, `cluster_unreachable`,
+  `controller_missing`, `pids_unlimited`, `policy_refused`, `admission_pending`, `image_unavailable`,
+  `exec_stream_lost` (`SeatSignInFailureCode`, `SystemInfraKey` `cluster` and `DiagnosticsCluster` in api-types,
+  unreleased). The state-home registry and its fixture classify the engine's new `k8s` entry (its cluster credential).
 - A GitHub project-management source can use the GitHub CLI's sign-in instead of a typed token: `auth.ref` of
   `gh-cli:<login>` (a GitHub source over `mcp-http` or `mcp-stdio` only). Crew stores the account name alone and reads
   the token with `gh auth token --hostname github.com --user <login>` at the moment of each preview, test and read —
