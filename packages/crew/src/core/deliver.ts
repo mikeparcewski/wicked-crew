@@ -290,6 +290,27 @@ export function parseGhAuthStatusLogins(text: string): string[] {
   return out;
 }
 
+/** The ACTIVE login in `gh auth status` text, per account block: gh ≥ 2.40 prints
+ *  "Logged in to <host> account <login>" then "- Active account: true|false". One login with no marker
+ *  (older gh) is the active one. `null` = it cannot be proven (several logins and no single `true`) —
+ *  a caller must refuse, never guess. Pure, for the tests. */
+export function parseGhActiveLogin(text: string): string | null {
+  const parts = text.split(/(?=Logged in to \S+ (?:account|as) )/u);
+  const blocks: Array<{ login: string; active: boolean | null }> = [];
+  for (const part of parts) {
+    const m = /^Logged in to \S+ (?:account|as) ([A-Za-z0-9-]+)/u.exec(part);
+    if (m === null) continue;
+    const marker = /Active account:\s*(true|false)/u.exec(part);
+    blocks.push({ login: m[1]!, active: marker === null ? null : marker[1] === 'true' });
+  }
+  const distinct = [...new Set(blocks.map((b) => b.login))];
+  if (distinct.length === 0) return null;
+  const active = [...new Set(blocks.filter((b) => b.active === true).map((b) => b.login))];
+  if (active.length === 1) return active[0]!;
+  if (active.length === 0 && distinct.length === 1 && blocks.every((b) => b.active === null)) return distinct[0]!;
+  return null;
+}
+
 /** A GitHub login as GitHub itself allows it — alphanumerics and single hyphens, ≤ 39 chars. The
  *  ONE validator for the deliver identity: the setting's 400 and the script's splice share it, so
  *  a value that passed the route can always be baked into a single-quoted shell literal. */

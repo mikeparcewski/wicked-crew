@@ -61,7 +61,7 @@ import {
 } from './invoke.js';
 import { scrubResult } from './redact.js';
 import { UpstreamCallError } from './upstream-error.js';
-import type { McpRegistry } from './registry.js';
+import { McpRegistryError, type McpRegistry } from './registry.js';
 import { FENCE_REASON, FENCE_REMEDY, FENCE_RULE, pickAllows, PICK_RULE, type RunFence, type SourcePicks } from './run-fence.js';
 import { scrubSecrets } from './secrets.js';
 import {
@@ -312,6 +312,10 @@ export class McpBroker {
       }
       secret = resolved.secret;
     } catch (err) {
+      // A gh credential refused by name (signed out, another active account): the refusal carries that code.
+      if (err instanceof McpRegistryError && err.code.startsWith('gh_')) {
+        return this.refuse(span, 'upstream_error', 'allow', verdict.ruleIds[0] ?? 'policy', verdict.ruleIds, err.message, 'the operator signs gh in as the pinned account', err.code);
+      }
       return this.refuse(span, 'guard_error', 'guard_error', 'broker', verdict.ruleIds, `the upstream's secret could not be read (${message(err)}); nothing ran`, 'try again, and report it if it persists');
     }
     if (breaker.openUntil !== 0) {

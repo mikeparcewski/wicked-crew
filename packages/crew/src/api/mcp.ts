@@ -113,7 +113,7 @@ const secretValue = z
   .refine((v) => !/[\r\n\0]/.test(v), { error: 'a secret is one line' });
 
 const AuthSchema = z.strictObject({
-  ref: z.string().refine((r) => parseSecretRef(r) !== null, { error: 'ref must be keychain:wicked-mcp/<name> or env:<NAME>' }),
+  ref: z.string().refine((r) => parseSecretRef(r) !== null, { error: 'ref must be keychain:wicked-mcp/<name>, env:<NAME> or gh-cli:<github login>' }),
   env: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/).optional(),
   header: z.string().regex(/^[A-Za-z0-9-]{1,64}$/).optional(),
   prefix: z.string().max(32).optional(),
@@ -199,6 +199,7 @@ export const McpServerConfigSchema = z.strictObject({
         return false;
       }
     };
+    if (c.auth != null && c.auth.ref.startsWith('gh-cli:') && c.pm?.system !== 'github') issue('auth', 'a gh-cli credential is for a GitHub project-management source only (pm.system github)');
     if (c.kind !== 'rest' && (c.openapiUrl !== undefined || c.openapi !== undefined || c.operations !== undefined)) {
       issue('openapi', 'openapiUrl, openapi and operations are for a rest server');
     }

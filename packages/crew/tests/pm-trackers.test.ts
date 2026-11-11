@@ -33,7 +33,7 @@ import { McpBroker } from '../src/mcp/broker.js';
 import { McpCallRecordFile } from '../src/mcp/call-records.js';
 import { McpRegistry } from '../src/mcp/registry.js';
 import { McpRegistryStore } from '../src/mcp/registry-store.js';
-import { SECRET_REDACTION, type SecretStore } from '../src/mcp/secrets.js';
+import { type GhRunner, resolveSecret, SECRET_REDACTION, type SecretStore } from '../src/mcp/secrets.js';
 import { SourceCatalogStore } from '../src/sources/store.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -112,6 +112,10 @@ let broker: McpBroker;
 let members: Record<string, string[]> = {};
 let afterRead: (() => Promise<void>) | null = null;
 let gateAudit: AuditLog;
+/** The GitHub server's credential: a typed env reference by default; the gh-cli describe swaps it. */
+let ghAuth: { ref: string; env: string } = { ref: 'env:PM_FAKE', env: 'FAKE_PM_TOKEN' };
+/** The fake gh behind a `gh-cli:` reference (the REAL resolver runs over it). */
+let fakeGhRunner: GhRunner | undefined;
 const gateLog: string[] = [];
 /** token -> the unit's scope as the engine binds it. */
 const SCOPES: Record<string, { projectId: string | null; repoId: string | null }> = {
@@ -129,7 +133,7 @@ function write(w: World): void {
   const servers = [
     { ...common, id: JIRA_ID, name: 'jira', kind: 'mcp-stdio', command: process.execPath, args: [FAKE_JIRA, logs.jira], auth: { ref: 'env:PM_FAKE', env: 'FAKE_PM_TOKEN' }, pm: { system: 'jira' }, agents: w.jiraAgents ?? { see: true, query: true, projects: [P, Q], everyProject: false }, tools: toolsOf('jira'), trackers: w.jira ?? [] },
     { ...common, id: JIRA2_ID, name: 'jira2', kind: 'mcp-stdio', command: process.execPath, args: [FAKE_JIRA, logs.jira2], auth: { ref: 'env:PM_FAKE', env: 'FAKE_PM_TOKEN' }, pm: { system: 'jira' }, agents: { see: true, query: true, projects: [P, Q], everyProject: false }, tools: toolsOf('jira'), trackers: w.jira2 ?? [] },
-    { ...common, id: GH_ID, name: 'gh', kind: 'mcp-stdio', command: process.execPath, args: [FAKE_GITHUB, logs.github], auth: { ref: 'env:PM_FAKE', env: 'FAKE_PM_TOKEN' }, pm: { system: 'github' }, agents: { see: true, query: true, projects: [P, Q], everyProject: false }, tools: toolsOf('github'), trackers: w.github ?? [] },
+    { ...common, id: GH_ID, name: 'gh', kind: 'mcp-stdio', command: process.execPath, args: [FAKE_GITHUB, logs.github], auth: ghAuth, pm: { system: 'github' }, agents: { see: true, query: true, projects: [P, Q], everyProject: false }, tools: toolsOf('github'), trackers: w.github ?? [] },
   ];
   writeFileSync(join(mcpDir, 'registry.json'), JSON.stringify({ version: 1, servers }));
   members = w.members ?? { [P]: ['r'], [Q]: ['r'] };
@@ -168,7 +172,7 @@ beforeAll(() => {
   gate = new DataGate({
     store,
     catalogs: new SourceCatalogStore(join(mcpDir, 'catalogs')),
-    secret: async (ref) => (ref === 'env:PM_FAKE' ? TOKEN : null),
+    secret: async (ref) => (ref === 'env:PM_FAKE' ? TOKEN : ref.startsWith('gh-cli:') ? resolveSecret(ref, new NoSecrets(), {}, fakeGhRunner) : null),
     record: new SourceReadLog(mcpDir, async () => undefined),
     audit: gateAudit,
     resolver,
@@ -784,6 +788,54 @@ describe('§5 governed actions at the deliver gate: a card first, then exactly t
     actor = { id: 'seat:claude', kind: 'agent', trust: 'admin' };
     expect((await post({ issue: 'PROJA-1', comment: 'x' })).json()).toMatchObject({ code: 'tracker_actions_human_only' });
     expect(calls('jira').filter((x) => x.tool === 'addOrEditJiraIssueComment')).toEqual([]);
+  });
+});
+
+describe('a GitHub tracker whose credential is the gh CLI (gh-cli:<login>), read through the real broker and gate', () => {
+  const statusOf = (active: string): string =>
+    `github.com\n  ✓ Logged in to github.com account alice (keyring)\n  - Active account: ${active === 'alice'}\n` +
+    `  ✓ Logged in to github.com account bob (keyring)\n  - Active account: ${active === 'bob'}\n`;
+  let active = 'alice';
+  let token = TOKEN;
+  let ghCalls: string[][] = [];
+
+  beforeEach(() => {
+    active = 'alice';
+    token = TOKEN;
+    ghCalls = [];
+    ghAuth = { ref: 'gh-cli:alice', env: 'FAKE_PM_TOKEN' };
+    fakeGhRunner = async (args) => {
+      ghCalls.push(args);
+      return args[1] === 'status' ? { code: 0, stdout: '', stderr: statusOf(active) } : { code: 0, stdout: `${token}\n`, stderr: '' };
+    };
+    write({ github: [tracker(GH_ID, 'github.com', 'owner/app', [{ kind: 'project', id: P }])] });
+  });
+  afterAll(() => {
+    ghAuth = { ref: 'env:PM_FAKE', env: 'FAKE_PM_TOKEN' };
+    fakeGhRunner = undefined;
+  });
+
+  it('reads with the gh token (the upstream got it and echoed it, redacted) and leaves it in no file or log crew writes', async () => {
+    const r = await call('wmt-p', 'mcp:gh/search_issues', { query: 'is:issue', owner: 'owner', repo: 'app' });
+    expect(r.body.outcome, JSON.stringify(r.body)).toBe('ok');
+    expect(items(r.answer)).toEqual(['owner/app#1', 'owner/app#2']);
+    // The fake puts the credential it was started with into every issue: seeing the redaction proves it was authenticated.
+    expect(JSON.stringify(r.body)).toContain(SECRET_REDACTION);
+    expect(ghCalls.filter((c) => c[1] === 'token')).toEqual([['auth', 'token', '--hostname', 'github.com', '--user', 'alice']]);
+    await gateAudit.flush();
+    const written = [join(mcpDir, 'registry.json'), join(mcpDir, 'source-queries.ndjson'), join(base, 'audit.log')].filter(existsSync).map((f) => readFileSync(f, 'utf8'));
+    written.push(gateLog.join('\n'), JSON.stringify(r.body));
+    expect(readFileSync(join(mcpDir, 'registry.json'), 'utf8')).toContain('gh-cli:alice');
+    for (const form of TOKEN_FORMS) for (const text of written) expect(text).not.toContain(form);
+  });
+
+  it('refuses a different active account by name: no token command, nothing reaches the upstream', async () => {
+    active = 'bob';
+    const r = await call('wmt-p', 'mcp:gh/search_issues', { query: 'is:issue', owner: 'owner', repo: 'app' });
+    expect(JSON.stringify(r.body)).toContain('gh_account_mismatch');
+    expect(r.answer?.['items']).toBeUndefined();
+    expect(ghCalls.filter((c) => c[1] === 'token')).toEqual([]);
+    expect(calls('github')).toEqual([]);
   });
 });
 
