@@ -11,12 +11,20 @@ import type { ExecLike } from './seat-container-login.js';
  * so about a minute. Later is accepted: a false outage is worse than an honest wait.
  */
 export const DOWN_AFTER_MISSES = 3;
-/** One check's bound: a loaded laptop's kubectl can take well over 5 s to answer. */
-export const CHECK_TIMEOUT_MS = 15_000;
+/** One check's bound. `cluster status` is the engine's own reachability probe (bounded at 20 s in
+ *  wicked-core `k8s::PROBE_TIMEOUT`) plus its inventory list calls, so the bound sits above that probe:
+ *  a slow inventory on a loaded laptop is not an outage. A check that overruns even this is a miss. */
+export const CHECK_TIMEOUT_MS = 45_000;
+
+/** The words a bench carries for each reason the seats cannot run. */
+export const RUNTIME_DOWN_REASON = "Kubernetes isn't running";
+export const CONTROLLER_DOWN_REASON = "The cluster's sandbox controller isn't ready";
 
 export type ContainerRuntimeState = 'up' | 'down' | 'unknown';
 export interface RuntimeStateReader {
   state(): ContainerRuntimeState;
+  /** Why it is down, in the words a bench carries (absent: {@link RUNTIME_DOWN_REASON}). */
+  reason?(): string;
   onChange(cb: (next: ContainerRuntimeState, previous: ContainerRuntimeState) => void): () => void;
 }
 
@@ -43,6 +51,7 @@ export class RuntimeState implements RuntimeStateReader {
   private closed = false;
   /** Consecutive failed checks: a busy host can miss one bounded check while the cluster is fine. */
   private misses = 0;
+  private why = RUNTIME_DOWN_REASON;
 
   constructor(private readonly deps: RuntimeStateDeps = {}) {
     this.initial = setImmediate(() => { void this.refresh(); });
@@ -52,6 +61,8 @@ export class RuntimeState implements RuntimeStateReader {
   }
 
   state(): ContainerRuntimeState { return this.current; }
+
+  reason(): string { return this.why; }
 
   onChange(cb: (next: ContainerRuntimeState, previous: ContainerRuntimeState) => void): () => void {
     this.listeners.add(cb);
@@ -63,19 +74,24 @@ export class RuntimeState implements RuntimeStateReader {
     if (this.pending !== undefined) return this.pending;
     this.pending = Promise.resolve().then(async () => {
       let next: ContainerRuntimeState = 'down';
+      let why = RUNTIME_DOWN_REASON;
       try {
         const env = this.deps.env ?? process.env;
         const exe = this.deps.exe !== undefined ? this.deps.exe() : (env['WICKED_CORE_EXE'] ?? '').trim() || null;
         const home = this.deps.home !== undefined ? this.deps.home() : crewStateHome();
         const exec = this.deps.exec ?? execCapped;
         const doc = await readClusterStatus({ exe, home, exec: (file, args, opts) => exec(file, args, { ...opts, env }), timeoutMs: CHECK_TIMEOUT_MS });
-        if (doc.configured && doc.reachable) next = 'up';
+        // A reachable cluster whose controller is known not ready cannot create a seat either.
+        if (doc.configured && doc.reachable && doc.controller?.ready === false) why = CONTROLLER_DOWN_REASON;
+        else if (doc.configured && doc.reachable) next = 'up';
       } catch { /* No engine CLI, a timeout or no status document is unavailable. */ }
       // Down takes three misses in a row (a check on a loaded laptop can time out with Docker up, and
       // a false "down" benches every container seat); up takes one answer.
       this.misses = next === 'down' ? this.misses + 1 : 0;
       if (next === 'down' && this.misses < DOWN_AFTER_MISSES) return;
-      if (this.closed || next === this.current) return;
+      if (this.closed) return;
+      if (next === 'down') this.why = why;
+      if (next === this.current) return;
       const previous = this.current;
       this.current = next;
       for (const cb of this.listeners) cb(next, previous);

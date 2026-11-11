@@ -26,8 +26,16 @@ describe('signInFailure', () => {
     expect(signInFailure(said('image_unavailable'), 'copilot').error).toContain('`wicked-core seat-image build copilot`');
     // The cluster's own words ride a policy refusal, scrubbed like any sign-in diagnostic.
     expect(signInFailure(said('policy_refused', `pods "x" is forbidden: violates PodSecurity at ${home}/k8s\nsecond line`), 'claude').error)
-      .toBe('The cluster refused the Claude sign-in pod: pods "x" is forbidden: violates PodSecurity at ~/k8s. Fix what it names, then try again.');
-    // Only a kind spelled as the engine prints it (`<kind>:`) counts; prose that mentions a word does not.
+      .toBe('The cluster refused the Claude sign-in pod. The cluster said: pods "x" is forbidden: violates PodSecurity at ~/k8s. Fix what it names, then try again.');
+    // What the kind alone cannot say rides along (a rollout still starting is not "missing").
+    expect(signInFailure(said('controller_missing', 'deployment agent-sandbox-controller has 0/1 ready replicas'), 'claude').error)
+      .toContain('The cluster said: deployment agent-sandbox-controller has 0/1 ready replicas.');
+    expect(signInFailure(said('admission_pending', 'timed out waiting for the pod'), 'claude').error).toContain('or it is still starting');
+    // A credential shape in the engine's words is redacted before it crosses the wire.
+    expect(signInFailure(said('policy_refused', 'webhook said Authorization: Bearer abcdefghijklmnop0123456789'), 'claude').error).not.toContain('abcdefghijklmnop0123456789');
+    // Only the engine's refusal line counts: a warning line before it is fine, a kind inside another refusal's words is not.
+    expect(signInFailure(`warning: something\n${said('cluster_unreachable')}`, 'claude').code).toBe('cluster_unreachable');
+    expect(signInFailure('wicked-core seat-login: login failed: the cluster said cluster_unreachable: earlier', 'claude').code).toBe('signin_failed');
     expect(signInFailure('the cluster_unreachable flag was seen', 'claude').code).toBe('signin_failed');
     expect(signInFailure('xno_cluster: nope', 'claude').code).toBe('signin_failed');
   });

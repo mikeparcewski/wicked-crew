@@ -10,6 +10,7 @@
  * studio poll can read `/system` and `/diagnostics` at once), never cached: a Re-check is fresh.
  */
 import type { SystemInfraRow } from '../core/types.js';
+import { redactString } from '../mcp/redact.js';
 import { homeless } from './seat-standing.js';
 import { infraRow, settleWithin, type Settled } from './system-snapshot.js';
 
@@ -38,11 +39,14 @@ export interface ClusterStatus {
 type ClusterExec = (file: string, args: string[], opts: { timeout: number }) => Promise<{ stdout: string; stderr: string }>;
 
 const DETAIL_MAX = 240;
-const words = (v: unknown): string | null => {
+/** One line of engine (or kubectl) words as it may cross the wire: credential shapes redacted and
+ *  home paths spelled `~` BEFORE it is cut, bounded. */
+export function publicLine(v: unknown): string | null {
   if (typeof v !== 'string' || v.trim() === '') return null;
-  const line = homeless(v.split(/[\r\n]/, 1)[0]?.trim() ?? '');
+  const line = homeless(redactString(v.split(/[\r\n]/, 1)[0]?.trim() ?? ''));
   return line.length <= DETAIL_MAX ? line : `${line.slice(0, DETAIL_MAX - 1)}…`;
-};
+}
+const words = publicLine;
 const count = (v: unknown): number | null => (typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : null);
 
 /** Parse the engine's status document; `null` when stdout is not one. */
@@ -97,18 +101,25 @@ export async function readClusterStatus(input: ClusterReadInput): Promise<Cluste
   return doc;
 }
 
-/** Single-flight reader shared by `/system` and `/diagnostics`: concurrent callers share one read. */
+/** Single-flight reader shared by `/system` and `/diagnostics`. The flight is the engine process
+ *  itself, not a caller's wait: a caller that gives up (its own, shorter bound) leaves the one process
+ *  running, and the next caller joins it rather than starting another. The process is bounded by the
+ *  exec's own timeout ({@link CLUSTER_TIMEOUT_MS}), which kills it. */
 export class ClusterStatusReader {
-  private inflight: Promise<Settled<ClusterStatus>> | null = null;
+  private running: Promise<ClusterStatus> | null = null;
 
   constructor(private readonly input: () => ClusterReadInput) {}
 
-  read(): Promise<Settled<ClusterStatus>> {
-    if (this.inflight !== null) return this.inflight;
-    const input = this.input();
-    this.inflight = settleWithin(() => readClusterStatus(input), input.timeoutMs ?? CLUSTER_TIMEOUT_MS)
-      .finally(() => { this.inflight = null; });
-    return this.inflight;
+  /** Settle within `boundMs` (default and maximum: {@link CLUSTER_TIMEOUT_MS}). */
+  read(boundMs: number = CLUSTER_TIMEOUT_MS): Promise<Settled<ClusterStatus>> {
+    if (this.running === null) {
+      const run = readClusterStatus(this.input());
+      this.running = run;
+      // Cleared only when the process has really ended (a timed-out wait does not end it).
+      run.then(() => undefined, () => undefined).finally(() => { if (this.running === run) this.running = null; });
+    }
+    const run = this.running;
+    return settleWithin(() => run, Math.max(0, Math.min(boundMs, CLUSTER_TIMEOUT_MS)));
   }
 }
 
@@ -116,10 +127,11 @@ export class ClusterStatusReader {
 export function clusterDiagnostics(read: Settled<ClusterStatus>): (ClusterStatus & { read: 'ok' }) | { read: 'timeout' | 'error'; detail: string } {
   if (read.kind === 'ok') return { ...read.value, read: 'ok' };
   if (read.kind === 'timeout') return { read: 'timeout', detail: `no answer within ${Math.round(CLUSTER_TIMEOUT_MS / 1000)} s` };
-  return { read: 'error', detail: read.error };
+  return { read: 'error', detail: publicLine(read.error) ?? 'the cluster could not be read' };
 }
 
 const INSTALL = 'Run `wicked-core cluster install --admin-context <your cluster context> --home <this daemon\'s state home>`, then re-check.';
+const BY_HAND = 'Re-check; if it persists, run `wicked-core cluster status --home <this daemon\'s state home>` by hand.';
 const START = 'Start Rancher Desktop (or Docker Desktop) with Kubernetes on, then re-check.';
 
 function detailsOf(s: ClusterStatus): Record<string, unknown> {
@@ -147,46 +159,51 @@ export function clusterRows(read: Settled<ClusterStatus> | null, containerFloor:
     };
   }
   if (read.kind === 'error') {
+    const why = publicLine(read.error) ?? 'no answer';
     return {
-      cluster: infraRow('cluster', 'unknown', `the cluster could not be read: ${read.error}`, 'Re-check; if it persists, run `wicked-core cluster status` by hand.', startedAt, { error: read.error }),
+      cluster: infraRow('cluster', 'unknown', `the cluster could not be read: ${why}`, BY_HAND, startedAt, { error: why }),
       gateway: infraRow('gateway', 'unknown', 'the cluster could not be read, so neither could the gateway', 'Re-check.', startedAt),
     };
   }
   const s = read.value;
   const d = detailsOf(s);
-  const gatewayDown = (why: string, fix: string) => infraRow('gateway', 'down', why, fix, startedAt, d);
   if (!s.configured) {
     return {
       cluster: infraRow('cluster', 'down', 'no Kubernetes cluster is configured for this daemon, so governed seats cannot start', INSTALL, startedAt, d),
-      gateway: gatewayDown('no cluster is configured, so there is no gateway', INSTALL),
+      gateway: infraRow('gateway', 'down', 'no cluster is configured, so there is no gateway', INSTALL, startedAt, d),
     };
   }
   const ctx = s.context !== null ? ` (context ${s.context})` : '';
   if (!s.reachable) {
+    // The API did not answer: pods already running (the gateway among them) may still serve, so the
+    // gateway is unobserved, not stopped.
     return {
-      cluster: infraRow('cluster', 'down', `Kubernetes isn't answering${ctx}, so governed seats cannot start`, START, startedAt, d),
-      gateway: gatewayDown("the cluster isn't answering, so the gateway can't serve", START),
+      cluster: infraRow('cluster', 'down', `Kubernetes isn't answering${ctx}, so no seat can start`, START, startedAt, d),
+      gateway: infraRow('gateway', 'unknown', "the cluster isn't answering, so the gateway could not be read", START, startedAt, d),
     };
   }
-  if (s.controller === null || s.gateway === null) {
-    const why = s.detail ?? 'the engine could not read its objects';
-    return {
-      cluster: infraRow('cluster', 'degraded', `answers${ctx}, but its objects could not be read: ${why}`, 'Re-check; if it persists, run `wicked-core cluster status` by hand.', startedAt, d),
-      gateway: infraRow('gateway', 'unknown', 'the cluster answered, but the gateway could not be read', 'Re-check.', startedAt, d),
-    };
-  }
-  const pending = s.pendingPods ?? 0;
-  const runs = s.runNamespaces ?? 0;
-  const load = `${runs} run namespace${runs === 1 ? '' : 's'}${pending > 0 ? `, ${pending} pod${pending === 1 ? '' : 's'} waiting to start` : ''}`;
-  const cluster = s.controller.ready
-    ? infraRow('cluster', 'ok', `ready${ctx}: ${load}`, null, startedAt, d)
-    : infraRow('cluster', 'down', `the agent-sandbox controller isn't ready${s.controller.detail !== null ? ` (${s.controller.detail})` : ''}, so seats cannot be created`, INSTALL, startedAt, d);
-  const gateway = s.gateway === 'serving'
-    ? infraRow('gateway', 'ok', 'serving (in the cluster)', null, startedAt, d)
-    : s.gateway === 'starting'
-      ? infraRow('gateway', 'degraded', 'starting: its pod is not serving yet', 'Re-check in a minute; a run waits for it.', startedAt, d)
-      : s.gateway === 'stopped'
-        ? gatewayDown('stopped: scaled to no replicas (a quarantine), so seats have no route to their models', 'The engine starts it again before the next seat runs; a run that cannot says why on its gate.')
-        : infraRow('gateway', 'degraded', 'not started yet: the engine starts it before the first seat runs', 'Nothing to do unless a run is waiting on it; a run that cannot start its gateway says why on its gate.', startedAt, d);
+  // Each row from its own evidence: a known controller failure is never hidden by an unread gateway,
+  // nor a serving gateway by an unread controller.
+  const counted = (n: number | null, one: string, many: string): string | null => (n === null ? null : `${n} ${n === 1 ? one : many}`);
+  const load = [
+    counted(s.runNamespaces, 'run namespace', 'run namespaces') ?? 'run namespaces not counted',
+    s.pendingPods === null ? 'pending pods not counted' : s.pendingPods > 0 ? counted(s.pendingPods, 'pod waiting to start', 'pods waiting to start') : null,
+  ].filter((x): x is string => x !== null).join(', ');
+  const cluster = s.controller === null
+    ? infraRow('cluster', 'degraded', `answers${ctx}, but its sandbox controller could not be read${s.detail !== null ? `: ${s.detail}` : ''}`, BY_HAND, startedAt, d)
+    : !s.controller.ready
+      ? infraRow('cluster', 'down', `answers${ctx}, but its sandbox controller isn't ready${s.controller.detail !== null ? ` (${s.controller.detail})` : ''}: missing, still starting or not the pinned version, so no seat can be created`, `If it stays so, ${INSTALL.charAt(0).toLowerCase()}${INSTALL.slice(1)}`, startedAt, d)
+      : s.detail !== null
+        ? infraRow('cluster', 'degraded', `ready${ctx}, but part of it could not be read: ${s.detail}`, BY_HAND, startedAt, d)
+        : infraRow('cluster', 'ok', `ready${ctx}: ${load}`, null, startedAt, d);
+  const gateway = s.gateway === null
+    ? infraRow('gateway', 'unknown', 'the cluster answered, but the gateway could not be read', BY_HAND, startedAt, d)
+    : s.gateway === 'serving'
+      ? infraRow('gateway', 'ok', 'serving (in the cluster)', null, startedAt, d)
+      : s.gateway === 'starting'
+        ? infraRow('gateway', 'degraded', 'starting: its pod is not serving yet', 'Re-check in a minute; a run waits for it.', startedAt, d)
+        : s.gateway === 'stopped'
+          ? infraRow('gateway', 'down', 'stopped: scaled to no replicas (a quarantine), so seats have no route to their models', 'The engine starts it again before the next seat runs; a run that cannot says why on its gate.', startedAt, d)
+          : infraRow('gateway', 'degraded', 'not started yet: the engine starts it before the first seat runs', 'Nothing to do unless a run is waiting on it; a run that cannot start its gateway says why on its gate.', startedAt, d);
   return { cluster, gateway };
 }

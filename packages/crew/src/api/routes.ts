@@ -380,7 +380,7 @@ import {
   type RosterSeatLike,
   type RunEvidence,
 } from './system-snapshot.js';
-import { ClusterStatusReader, clusterDiagnostics, clusterRows } from './cluster-status.js';
+import { CLUSTER_TIMEOUT_MS, ClusterStatusReader, clusterDiagnostics, clusterRows } from './cluster-status.js';
 import { idleClis, parseSeatImageStatus, probeSeatImages, SeatImageRebuilder, type SeatImageStatus } from './seat-images.js';
 import { RunCostCache } from './needs.js';
 import { governanceStoreFix, legacyHomeOutboxPath } from '../core/governance-store.js';
@@ -11083,7 +11083,9 @@ export function registerRoutes(
       });
       // The cluster and the gateway (a Deployment in the daemon's namespace) from one read.
       const clusterStarted = Date.now();
-      const clusterP = (containerFloor ? clusterReader.read() : Promise.resolve(null))
+      // Bounded by what is left of the snapshot's budget too (a slow start must not push it past 8 s):
+      // the assembly after the infra probes keeps about 1.5 s.
+      const clusterP = (containerFloor ? clusterReader.read(Math.min(CLUSTER_TIMEOUT_MS, left() - 1_500)) : Promise.resolve(null))
         .then((read) => clusterRows(read, containerFloor, clusterStarted));
       const infraP = Promise.all([
         clusterP.then((rows) => rows.gateway),
@@ -11293,7 +11295,7 @@ export function registerRoutes(
         infra,
         clis,
         gaps,
-        infraHoldsLive: (key) => (key === 'gateway' || key === 'broker' ? containerFloor : key === 'skills' || key === 'state_home' || key === 'disk' || key === 'daemon'),
+        infraHoldsLive: (key) => (key === 'gateway' || key === 'broker' || key === 'cluster' ? containerFloor : key === 'skills' || key === 'state_home' || key === 'disk' || key === 'daemon'),
         costOf: (id) => runCosts.get(id),
       });
       if (typeof adapter.runEvents === 'function' && first.unresolved.length > 0) {
@@ -11317,7 +11319,7 @@ export function registerRoutes(
         infra,
         clis,
         gaps,
-        infraHoldsLive: (key) => (key === 'gateway' || key === 'broker' ? containerFloor : key === 'skills' || key === 'state_home' || key === 'disk' || key === 'daemon'),
+        infraHoldsLive: (key) => (key === 'gateway' || key === 'broker' || key === 'cluster' ? containerFloor : key === 'skills' || key === 'state_home' || key === 'disk' || key === 'daemon'),
         costOf: (id) => runCosts.get(id),
       });
       const toReview = await toReviewP;

@@ -19,7 +19,7 @@
 
 import { createRequire } from 'node:module';
 
-import { RuntimeState, type RuntimeStateReader } from './runtime-state.js';
+import { RUNTIME_DOWN_REASON, RuntimeState, type RuntimeStateReader } from './runtime-state.js';
 
 import { CoreAdapter } from '../core/adapter.js';
 import { defaultLaunchRoster, isOptInSeat } from '../core/opt-in-seats.js';
@@ -111,6 +111,9 @@ export const ROSTER_REFRESH_WAIT_MS = 20 * 1000;
 export interface RosterStandingDeps {
   /** Cached runtime reachability; null disables background checks for isolated callers. */
   runtimeState?: RuntimeStateReader | null;
+  /** The daemon's state home (its store's parent), where the engine reads its cluster credential;
+   *  the same home `/system` and the sign-in routes read. Default: crew's configured state home. */
+  stateHome?: string;
   containerStatus?: SeatContainerStatus;
   /** The daemon's per-seat runtime health + council evidence (councilSeatFailed, auth refusals). */
   seatHealth: SeatHealthTracker;
@@ -184,7 +187,9 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         ? seatVersionPins
         : null;
   const daemon = deps.signedIn === undefined && deps.registry === undefined;
-  const ownedRuntime = deps.runtimeState === undefined && daemon && containerMode() ? new RuntimeState({ env }) : null;
+  const ownedRuntime = deps.runtimeState === undefined && daemon && containerMode()
+    ? new RuntimeState({ env, ...(deps.stateHome !== undefined ? { home: () => deps.stateHome as string } : {}) })
+    : null;
   const runtimeState = deps.runtimeState ?? ownedRuntime;
   let runtimeChangedAt = new Date((deps.nowMs ?? Date.now)()).toISOString();
   const stopRuntime = runtimeState?.onChange((next, previous) => {
@@ -333,7 +338,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
     const decorated = seats.map((seat) => {
       const key = String(seat.key);
       const runtimeDown = container && runtimeState?.state() === 'down';
-      const reason = "Kubernetes isn't running";
+      const reason = runtimeState?.reason?.() ?? RUNTIME_DOWN_REASON;
       const health = runtimeDown ? { status: 'inactive' as const, message: reason, since: runtimeChangedAt } : seatHealth.healthFor(key);
       // crew#630: the seat's own auth-status answer (cached; never awaited here). A probed seat
       // whose probe has not answered yet does not read `signed_in` off its file — a credential

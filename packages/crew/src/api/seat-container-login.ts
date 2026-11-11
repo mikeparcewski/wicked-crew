@@ -8,6 +8,7 @@ import type { SeatContainerLoginOutcome } from '../core/types.js';
 import type { RosterWithStanding } from './roster-standing.js';
 import type { SeatHealthTracker } from './seat-health.js';
 import { execCapped } from '../core/exec.js';
+import { redactString } from '../mcp/redact.js';
 import { canonicalize } from '../projects/state-home-preflight.js';
 import { crewStateHome, stateHomeOfDb } from '../projects/state-home.js';
 import { gatewayName, resolveContainerRuntime } from './system-snapshot.js';
@@ -78,6 +79,11 @@ export function gatewayDirOf(dir: string): string {
 /** The engine's gateway dir for the daemon whose store is `dbPath` (`<canonical db parent>/gateway`,
  *  as `execute_wrapped` arms it), shared by the roster's status cache and the sign-in routes
  *  (agy crew-r1: two derivations could address two gateways). */
+/** The state home of a daemon store path (its parent), or `null` for no store / an in-memory one. */
+export function stateHomeOfStore(dbPath: unknown): string | null {
+  return typeof dbPath === 'string' && dbPath !== '' && dbPath !== ':memory:' ? stateHomeOfDb(dbPath) : null;
+}
+
 export function seatLoginDepsFor(dbPath: unknown, exec?: ExecLike): SeatLoginDeps {
   return {
     ...(exec !== undefined ? { exec } : {}),
@@ -101,7 +107,9 @@ export function loginDetail(text: string): string {
  *  `wicked-core seat-login: <kind>: <why>` (`k8s::login::described`). */
 const CLUSTER_KINDS = ['no_cluster', 'cluster_unreachable', 'controller_missing', 'pids_unlimited', 'policy_refused', 'admission_pending', 'image_unavailable', 'exec_stream_lost'] as const;
 type ClusterKind = (typeof CLUSTER_KINDS)[number];
-const CLUSTER_KIND_RE = new RegExp(`(?:^|[\\s:])(${CLUSTER_KINDS.join('|')}):\\s*(.*)`);
+/** Anchored to a line the engine prints: `wicked-core seat-login: <kind>: <why>` (or a bare `<kind>: <why>`
+ *  line); a kind word inside another refusal's explanation is not this refusal. */
+const CLUSTER_KIND_RE = new RegExp(`^(?:wicked-core seat-login: )?(${CLUSTER_KINDS.join('|')}): ?(.*)$`, 'm');
 const INSTALL_HINT = 'run `wicked-core cluster install --admin-context <your cluster context> --home <this daemon\'s state home>`';
 
 /** A sign-in refused by the cluster, in words the operator can act on; `null` for any other refusal. */
@@ -109,15 +117,18 @@ export function clusterRefusal(stderr: string, cli: string, label: string): { co
   const m = CLUSTER_KIND_RE.exec(stderr);
   if (m === null) return null;
   const code = m[1] as ClusterKind;
-  const said = loginDetail(m[2] ?? '');
+  // The engine's own why (credential shapes redacted, home paths spelled ~): what the kind alone
+  // cannot say (a rollout still starting vs a missing controller, a refused vs an inconclusive probe).
+  const said = loginDetail(redactString(m[2] ?? ''));
+  const why = said !== '' ? ` The cluster said: ${said.replace(/[.\s]+$/, '')}.` : '';
   const error: Record<ClusterKind, string> = {
     no_cluster: `No Kubernetes cluster is set up for this daemon, so the ${label} sign-in can't start. To set one up, ${INSTALL_HINT}, then try again.`,
     cluster_unreachable: `Kubernetes isn't answering, so the ${label} sign-in can't start. Start Rancher Desktop (or Docker Desktop) with Kubernetes on, then try again.`,
-    controller_missing: `The cluster answers, but its sandbox controller isn't installed, so the ${label} sign-in can't start. To install it, ${INSTALL_HINT}, then try again.`,
-    pids_unlimited: `The cluster puts no limit on a pod's processes, so sign-ins and seats are refused. Set the kubelet's pod-max-pids to 4096 (Rancher Desktop: a k3s argument), then try again.`,
-    policy_refused: `The cluster refused the ${label} sign-in pod${said !== '' ? `: ${said}` : ''}. Fix what it names, then try again.`,
-    admission_pending: `The ${label} sign-in pod can't start yet: the cluster is full. Try again when other work ends.`,
-    image_unavailable: `The ${label} image isn't in the cluster's image store. Build it (\`wicked-core seat-image build ${loginDetail(cli)}\`), then try again.`,
+    controller_missing: `The cluster's sandbox controller isn't ready (missing, still starting, or not the pinned version), so the ${label} sign-in can't start.${why} If it stays so, ${INSTALL_HINT}, then try again.`,
+    pids_unlimited: `The cluster could not show that it limits each pod's processes, so sign-ins and seats are refused.${why} Set the kubelet's pod-max-pids to 4096 (Rancher Desktop: a k3s argument), then try again.`,
+    policy_refused: `The cluster refused the ${label} sign-in pod.${why} Fix what it names, then try again.`,
+    admission_pending: `The ${label} sign-in pod could not start yet: the cluster has no room for it now, or it is still starting.${why} Try again in a minute.`,
+    image_unavailable: `The ${label} image isn't in the cluster's image store.${why} Build it (\`wicked-core seat-image build ${loginDetail(cli)}\`), then try again.`,
     exec_stream_lost: `The connection to the ${label} sign-in pod was lost before it finished. Nothing was saved; try again.`,
   };
   return { code, error: error[code] };

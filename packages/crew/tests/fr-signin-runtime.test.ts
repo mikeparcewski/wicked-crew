@@ -83,6 +83,11 @@ describe('background runtime reader', () => {
       for (let i = 0; i < 3; i++) await reader.refresh();
       expect(reader.state()).toBe('down');
     }
+    // A reachable cluster whose sandbox controller is not ready cannot create a seat: down, with its own reason.
+    const noCtl = vi.fn<ExecLike>(async () => ({ stdout: JSON.stringify({ configured: true, reachable: true, context: 'rd', controller: { ready: false, detail: 'evicted' }, gateway: 'serving' }), stderr: '' }));
+    const ctl = new RuntimeState({ exec: noCtl, exe: () => '/fixture/core', home: () => '/fixture/home', intervalMs: 60_000 }); close.push(() => ctl.close());
+    for (let i = 0; i < 3; i++) await ctl.refresh();
+    expect(ctl.state()).toBe('down'); expect(ctl.reason()).toBe("The cluster's sandbox controller isn't ready");
     const none = vi.fn<ExecLike>();
     const noExe = new RuntimeState({ exec: none, exe: () => null, home: () => '/fixture/home', intervalMs: 60_000 }); close.push(() => noExe.close());
     for (let i = 0; i < 3; i++) await noExe.refresh();
@@ -95,7 +100,7 @@ describe('background runtime reader', () => {
     const change = vi.fn(); reader.onChange(change); expect(reader.state()).toBe('unknown');
     // A cold daemon reads down only after three misses in a row (e2e-1105 09:02Z), never on the first.
     await vi.advanceTimersByTimeAsync(1); expect(reader.state()).toBe('unknown');
-    expect(exec).toHaveBeenCalledWith('/fixture/core', ['cluster', 'status', '--json', '--home', '/fixture/home'], { timeout: 15_000, env: { HOME: home } });
+    expect(exec).toHaveBeenCalledWith('/fixture/core', ['cluster', 'status', '--json', '--home', '/fixture/home'], { timeout: 45_000, env: { HOME: home } });
     for (let i = 0; i < 100; i++) reader.state(); expect(exec).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(10_000); expect(reader.state()).toBe('unknown');
     await vi.advanceTimersByTimeAsync(10_000); expect(reader.state()).toBe('down');
@@ -137,9 +142,11 @@ describe('background runtime reader', () => {
       throw new Error('timed out');
     });
     const reader = new RuntimeState({ exec, exe: () => '/fixture/core', home: () => '/fixture/home' }); close.push(() => reader.close());
-    await vi.advanceTimersByTimeAsync(15_001); expect(reader.state()).toBe('unknown');
-    await vi.advanceTimersByTimeAsync(25_000); expect(reader.state()).toBe('unknown');
-    await vi.advanceTimersByTimeAsync(30_000); expect(reader.state()).toBe('down');
+    // Each hung check takes the whole bound (45 s, above the engine's own 20 s reachability probe).
+    // One check at a time: the next starts on the first 10 s tick after one ends (45, 95, 145 s).
+    await vi.advanceTimersByTimeAsync(45_001); expect(reader.state()).toBe('unknown');
+    await vi.advanceTimersByTimeAsync(50_000); expect(reader.state()).toBe('unknown');
+    await vi.advanceTimersByTimeAsync(50_000); expect(reader.state()).toBe('down');
     expect(exec.mock.calls.length).toBeGreaterThanOrEqual(3);
   });
   it('coalesces pending probes and publishes nothing after close', async () => {

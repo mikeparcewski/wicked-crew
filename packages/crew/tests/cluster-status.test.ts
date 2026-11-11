@@ -48,7 +48,18 @@ describe('ClusterStatusReader', () => {
     const exec = vi.fn(async () => ({ stdout: JSON.stringify(READY), stderr: '' }));
     const reader = new ClusterStatusReader(() => ({ exe: '/core', home: '/h', exec }));
     const [a, b] = await Promise.all([reader.read(), reader.read()]);
-    expect(a).toBe(b); expect(exec).toHaveBeenCalledTimes(1);
+    expect(a).toEqual(b); expect(exec).toHaveBeenCalledTimes(1);
+    await reader.read(); expect(exec).toHaveBeenCalledTimes(2);
+  });
+  it('a caller that gives up leaves the one engine process running, and the next caller joins it', async () => {
+    let finish!: (out: { stdout: string; stderr: string }) => void;
+    const exec = vi.fn(() => new Promise<{ stdout: string; stderr: string }>((r) => { finish = r; }));
+    const reader = new ClusterStatusReader(() => ({ exe: '/core', home: '/h', exec }));
+    expect((await reader.read(10)).kind).toBe('timeout');
+    const second = reader.read();
+    expect(exec).toHaveBeenCalledTimes(1);
+    finish({ stdout: JSON.stringify(READY), stderr: '' });
+    expect((await second).kind).toBe('ok');
     await reader.read(); expect(exec).toHaveBeenCalledTimes(2);
   });
 });
@@ -71,9 +82,34 @@ describe('clusterRows', () => {
     expect(none.cluster).toMatchObject({ state: 'down', remedy: expect.stringContaining('wicked-core cluster install') });
     expect(none.gateway.state).toBe('down');
     const off = clusterRows(ok({ configured: true, reachable: false, kind: 'cluster_unreachable', context: 'rancher-desktop' }), true, at);
-    expect(off.cluster).toMatchObject({ state: 'down', reason: "Kubernetes isn't answering (context rancher-desktop), so governed seats cannot start", remedy: expect.stringContaining('Rancher Desktop') });
+    expect(off.cluster).toMatchObject({ state: 'down', reason: "Kubernetes isn't answering (context rancher-desktop), so no seat can start", remedy: expect.stringContaining('Rancher Desktop') });
+    // The API not answering proves nothing about pods already running: the gateway is unobserved, not down.
+    expect(off.gateway).toMatchObject({ state: 'unknown', reason: expect.stringContaining('could not be read') });
     const noCtl = clusterRows(ok({ ...READY, controller: { ready: false, detail: 'no sandboxes CRD' } }), true, at);
     expect(noCtl.cluster).toMatchObject({ state: 'down', reason: expect.stringContaining('no sandboxes CRD'), remedy: expect.stringContaining('cluster install') });
+  });
+  it('each row from its own evidence: a known failure is never hidden by an unread neighbour', () => {
+    const noGw = clusterRows(ok({ configured: true, reachable: true, context: 'rd', controller: { ready: false, detail: 'rolling out' } }), true, at);
+    expect(noGw.cluster).toMatchObject({ state: 'down', reason: expect.stringContaining('rolling out') });
+    expect(noGw.gateway.state).toBe('unknown');
+    const noCtl = clusterRows(ok({ configured: true, reachable: true, context: 'rd', gateway: 'serving' }), true, at);
+    expect(noCtl.gateway.state).toBe('ok');
+    expect(noCtl.cluster.state).toBe('degraded');
+  });
+  it('a counter the engine did not count is said so, never shown as zero', () => {
+    const rows = clusterRows(ok({ ...READY, runNamespaces: null, pendingPods: 'x' }), true, at);
+    expect(rows.cluster).toMatchObject({ state: 'ok', reason: 'ready (context rancher-desktop): run namespaces not counted, pending pods not counted' });
+  });
+  it('credential shapes in engine or kubectl words never cross the wire (redacted before the cut)', () => {
+    const leak = 'Unauthorized: Authorization: Bearer abcdefghijklmnop0123456789 token=supersecretvalue';
+    const doc = parseClusterStatus(JSON.stringify({ ...READY, controller: { ready: false, detail: leak }, detail: leak }))!;
+    const rows = clusterRows({ kind: 'ok', value: doc, ms: 1 }, true, at);
+    const err = clusterRows({ kind: 'error', error: leak, ms: 1 }, true, at);
+    for (const text of [JSON.stringify(doc), JSON.stringify(rows), JSON.stringify(err), JSON.stringify(clusterDiagnostics({ kind: 'error', error: leak, ms: 1 }))]) {
+      expect(text).not.toContain('abcdefghijklmnop0123456789');
+      expect(text).not.toContain('supersecretvalue');
+    }
+    expect(err.cluster.remedy).toContain('--home <this daemon');
   });
   it('a read that failed part-way, timed out or errored is never ok', () => {
     expect(clusterRows(ok({ configured: true, reachable: true, context: 'rd', detail: 'forbidden' }), true, at).cluster).toMatchObject({ state: 'degraded', reason: expect.stringContaining('forbidden') });

@@ -91,6 +91,7 @@ beforeAll(async () => {
       `if [ "$1 $2" = "cluster status" ]; then read mode < '${modeFile}'; case "$mode" in`,
       `  running) echo '${JSON.stringify({ configured: true, reachable: true, context: 'rancher-desktop', controller: { ready: true }, gateway: 'serving', controllerVersion: 'v0.1.0', runNamespaces: 0, pendingPods: 0 })}'; exit 0 ;;`,
       `  refuse) echo '${JSON.stringify({ configured: true, reachable: false, kind: 'cluster_unreachable', context: 'rancher-desktop' })}'; exit 1 ;;`,
+      `  stopped) echo '${JSON.stringify({ configured: true, reachable: true, context: 'rancher-desktop', controller: { ready: true }, gateway: 'stopped', controllerVersion: 'v0.1.0', runNamespaces: 0, pendingPods: 0 })}'; exit 0 ;;`,
       '  hang) exec sleep 30 ;;',
       'esac; fi',
       'exit 2',
@@ -220,20 +221,26 @@ describe('GET /api/v1/system', () => {
     expect(body.infra.find((r) => r.key === 'estate')!.state).toBe('degraded');
   });
 
-  it.runIf(posix)('gateway: running → ok; refusing connections → down, tops attention, red; started again → ok', async () => {
+  it.runIf(posix)('cluster + gateway (k8s runner): serving → ok; cluster not answering → cluster down, tops attention, red, gateway unobserved; quarantined gateway → down; back → ok', async () => {
     writeFileSync(modeFile, 'running', 'utf8');
     const up = await gatewayUntil('ok');
-    expect(up.infra.find((r) => r.key === 'gateway')).toMatchObject({ state: 'ok' });
-    expect(up.attention.find((a) => a.id === 'infra:gateway')).toBeUndefined();
+    expect(up.infra.find((r) => r.key === 'cluster')).toMatchObject({ state: 'ok' });
+    expect(up.attention.find((a) => a.id === 'infra:gateway' || a.id === 'infra:cluster')).toBeUndefined();
 
     writeFileSync(modeFile, 'refuse', 'utf8');
-    const down = await gatewayUntil('down');
-    const gw = down.infra.find((r) => r.key === 'gateway')!;
-    expect(gw.state).toBe('down');
-    expect(gw.remedy).toMatch(/Start Rancher Desktop/);
-    expect(down.infra.find((r) => r.key === 'cluster')).toMatchObject({ state: 'down', reason: expect.stringContaining("Kubernetes isn't answering") });
-    expect(down.attention[0]).toMatchObject({ id: 'infra:gateway', severity: 'red', action: { kind: 'recheck' } });
+    const down = (await snapshot()).body;
+    const cluster = down.infra.find((r) => r.key === 'cluster')!;
+    expect(cluster).toMatchObject({ state: 'down', reason: expect.stringContaining("Kubernetes isn't answering") });
+    expect(cluster.remedy).toMatch(/Start Rancher Desktop/);
+    expect(down.infra.find((r) => r.key === 'gateway')!.state).toBe('unknown');
+    expect(down.attention[0]).toMatchObject({ id: 'infra:cluster', severity: 'red', action: { kind: 'recheck' } });
+    // A dead cluster holds every live container run (run-live is working): the item counts it.
+    expect((down.attention[0] as { blocks?: number }).blocks).toBeGreaterThanOrEqual(1);
     expect(down.level).toBe('red');
+
+    writeFileSync(modeFile, 'stopped', 'utf8');
+    const quarantined = await gatewayUntil('down');
+    expect(quarantined.infra.find((r) => r.key === 'gateway')!.reason).toMatch(/quarantine/);
 
     writeFileSync(modeFile, 'running', 'utf8');
     const again = await gatewayUntil('ok');
