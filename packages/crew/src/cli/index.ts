@@ -342,14 +342,14 @@ async function bootstrap(opts: BootstrapOpts, bootStartedAt: number = performanc
     `[crew] interactive bridge: npx ${interactive.spec} (${interactive.source === 'env' ? `${INTERACTIVE_SPEC_ENV} override` : 'default range'})` +
       (interactive.rejected === undefined
         ? ''
-        : ` — ${INTERACTIVE_SPEC_ENV}=${JSON.stringify(interactive.rejected)} is not a semver range (^0.16.0, 0.16.0, >=0.16.0 <1.0.0) and was ignored`),
+        : ` — ${INTERACTIVE_SPEC_ENV}=${JSON.stringify(interactive.rejected)} is not a semver range (^0.16.1, 0.16.1, >=0.16.1 <1.0.0) and was ignored`),
   );
   if (interactive.belowFloor === true) {
     console.warn(
       `[crew] ${INTERACTIVE_SPEC_ENV}=${interactive.range} is BELOW crew's need floor ${INTERACTIVE_DEFAULT_RANGE}: the override is ` +
         'honoured, but routes and frames crew relies on may be missing on that release (the demo import arrived in 0.13.0, ' +
-        'the theme-source upload in 0.14.1, the expect_head landing check a chat-made draft relies on in 0.15.0, and a demo ' +
-        'cut\'s history and restore in 0.16.0)',
+        'the theme-source upload in 0.14.1, the expect_head landing check a chat-made draft relies on in 0.15.0, a demo ' +
+        'cut\'s history and restore in 0.16.0, and the loopback-only bind in 0.16.1)',
     );
   }
   // D-L7-1 / BC-49 (0.7.35): the shared default docs root and the recorder browsers both live under
