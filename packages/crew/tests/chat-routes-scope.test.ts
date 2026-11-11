@@ -334,21 +334,51 @@ describe('ASK-C1 — an ask starts a path: the open records eligibility and a ch
     expect((await app.inject({ method: 'GET', url: '/api/v1/chats/pick' })).json()).not.toHaveProperty('path');
   });
 
-  it('POST /chats/:id/seats re-admits a seat into the eligible roster with no engine call; an unknown chat is 404', async () => {
-    expect((await open({ chatId: 'reseat', clis: ['claude'], repoRefs: ['alpha'] })).statusCode).toBe(201);
-    const retry = await app.inject({ method: 'POST', url: '/api/v1/chats/reseat/seats', payload: { clis: ['opencode'] } });
-    expect(retry.statusCode).toBe(200);
-    expect(retry.json()).toEqual({ chatId: 'reseat', seats: [{ cliKey: 'opencode', ok: true }], refused: [] });
-    expect((await app.inject({ method: 'GET', url: '/api/v1/chats/reseat' })).json()).toMatchObject({ seats: ['claude', 'opencode'] });
+  it('POST /chats/:id/seats REPLACES the eligible roster with the named seats, in order, with no engine call; an unknown chat is 404 (#1482)', async () => {
+    expect((await open({ chatId: 'reseat', clis: ['claude', 'codex', 'pi', 'opencode'], repoRefs: ['alpha'] })).statusCode).toBe(201);
+    const narrow = await app.inject({ method: 'POST', url: '/api/v1/chats/reseat/seats', payload: { clis: ['codex', 'claude', 'codex'] } });
+    expect(narrow.statusCode).toBe(200);
+    expect(narrow.json()).toEqual({
+      chatId: 'reseat',
+      seats: [{ cliKey: 'codex', ok: true }, { cliKey: 'claude', ok: true }],
+      refused: [],
+    });
+    expect((await app.inject({ method: 'GET', url: '/api/v1/chats/reseat' })).json()).toMatchObject({ seats: ['codex', 'claude'] });
+    const list = (await app.inject({ method: 'GET', url: '/api/v1/chats' })).json() as { chats?: { chatId: string; seats: string[] }[] } | { chatId: string; seats: string[] }[];
+    const rows = Array.isArray(list) ? list : (list.chats ?? []);
+    expect(rows.find((c) => c.chatId === 'reseat')?.seats).toEqual(['codex', 'claude']);
     expect(chatOpen).not.toHaveBeenCalled();
     expect((await app.inject({ method: 'POST', url: '/api/v1/chats/nope/seats', payload: { clis: ['claude'] } })).statusCode).toBe(404);
-    // codex on #808 (4): a re-seat ADMITS, it does not blindly admit — an unknown key is refused
-    // by name (a wrapped seat like pi IS eligible on a path, ASK-C2); the roster grows by pi only.
-    const bad = await app.inject({ method: 'POST', url: '/api/v1/chats/reseat/seats', payload: { clis: ['pi', 'nobody'] } });
+  });
+
+  it('a re-seat naming one passing and one refused seat keeps only the passing one and lists the refusal (#1482)', async () => {
+    expect((await open({ chatId: 'reseat-mix', clis: ['claude', 'opencode'], repoRefs: ['alpha'] })).statusCode).toBe(201);
+    const bad = await app.inject({ method: 'POST', url: '/api/v1/chats/reseat-mix/seats', payload: { clis: ['pi', 'nobody'] } });
     expect(bad.statusCode).toBe(200);
     expect((bad.json() as { seats: { cliKey: string; ok: boolean }[] }).seats.map((s) => s.ok)).toEqual([true, false]);
-    expect((bad.json() as { refused: { cliKey: string; reason: string }[] }).refused.map((r) => r.cliKey)).toEqual(['nobody']);
-    expect((await app.inject({ method: 'GET', url: '/api/v1/chats/reseat' })).json()).toMatchObject({ seats: ['claude', 'opencode', 'pi'] });
+    expect((bad.json() as { refused: { cliKey: string }[] }).refused.map((r) => r.cliKey)).toEqual(['nobody']);
+    expect(bad.json()).not.toHaveProperty('reseated');
+    expect((await app.inject({ method: 'GET', url: '/api/v1/chats/reseat-mix' })).json()).toMatchObject({ seats: ['pi'] });
+  });
+
+  it('a re-seat whose named seats are all refused leaves the roster unchanged and says nothing was re-seated (#1482)', async () => {
+    expect((await open({ chatId: 'reseat-none', clis: ['claude', 'opencode'], repoRefs: ['alpha'] })).statusCode).toBe(201);
+    const none = await app.inject({ method: 'POST', url: '/api/v1/chats/reseat-none/seats', payload: { clis: ['nobody'] } });
+    expect(none.statusCode).toBe(200);
+    expect(none.json()).toMatchObject({
+      reseated: false,
+      note: "Nothing was re-seated; the chat's seats are unchanged.",
+      refused: [{ cliKey: 'nobody' }],
+    });
+    expect((await app.inject({ method: 'GET', url: '/api/v1/chats/reseat-none' })).json()).toMatchObject({ seats: ['claude', 'opencode'] });
+  });
+
+  it('a re-seat that removes the chosen primary clears the choice (#1482)', async () => {
+    expect((await open({ chatId: 'reseat-pri', clis: ['claude', 'opencode'], repoRefs: ['alpha'], primary: 'opencode' })).statusCode).toBe(201);
+    expect((await app.inject({ method: 'POST', url: '/api/v1/chats/reseat-pri/seats', payload: { clis: ['claude'] } })).statusCode).toBe(200);
+    const detail = (await app.inject({ method: 'GET', url: '/api/v1/chats/reseat-pri' })).json() as { seats: string[]; primary?: string };
+    expect(detail.seats).toEqual(['claude']);
+    expect(detail.primary).not.toBe('opencode');
   });
 
   it('codex on #808 (4) + r2 (5) / ASK-C2: seats NAMED in `clis` go through the SAME admission as the default roster — the seat\'s STANDING; an ask is a team run, so the pool\'s ACP rules do not apply (pi and codex are eligible)', async () => {

@@ -10,6 +10,12 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+- **A re-seat now replaces the chat's seats (#1482).** Before a chat's first message, `POST /chats/:id/seats {clis}`
+  sets the eligible roster to exactly the named seats that pass admission, in the order named, so a chat opened with
+  four seats and re-seated to `[claude, codex]` reads back and runs on those two. Before, a re-seat only added seats.
+  When no named seat passes admission the roster is unchanged and the answer says so (`reseated: false`, `note`). A
+  re-seat after the first message is still refused (409). Adds `ChatSeatsBody` and `ChatSeatsResponse` to api-types.
+
 ## [0.18.8] — 2026-11-10
 
 A patch: Docker seat networks take their subnets from a wicked-owned pool, so a host no longer caps out at about three
