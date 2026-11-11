@@ -260,7 +260,8 @@ jobs:
       - name: Install Chromium for the editor egress probe
         if: runner.os == 'Linux'
         working-directory: wicked-crew/packages/crew
-        run: npx playwright install --with-deps --only-shell chromium
+        # No apt unless the browser cannot launch without it (runner apt mirrors fail DNS: .github/scripts/pw-install.sh).
+        run: bash "$GITHUB_WORKSPACE/wicked-crew/.github/scripts/pw-install.sh" node chromium --only-shell
 
       - name: Test
         working-directory: wicked-crew
@@ -354,7 +355,8 @@ jobs:
       # wicked-studio ships its standalone entry).
       - name: Install Chromium for the app server's page tests
         working-directory: wicked-crew/packages/crew
-        run: npx playwright install --with-deps --only-shell chromium
+        # No apt unless the browser cannot launch without it (runner apt mirrors fail DNS: .github/scripts/pw-install.sh).
+        run: bash "$GITHUB_WORKSPACE/wicked-crew/.github/scripts/pw-install.sh" node chromium --only-shell
 
       - name: App server on real databases
         working-directory: wicked-crew
