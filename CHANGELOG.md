@@ -10,6 +10,18 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+
+- A GitHub project-management source can use the GitHub CLI's sign-in instead of a typed token: `auth.ref` of
+  `gh-cli:<login>` (a GitHub source over `mcp-http` or `mcp-stdio` only). Crew stores the account name alone and reads
+  the token with `gh auth token --hostname github.com --user <login>` at the moment of each preview, test and read —
+  never kept in the keychain, the registry, a log or a response; a seat never receives it. The account is pinned: gh
+  not installed, not signed in as that account, or another account active is refused with a named 409
+  (`gh_not_installed`, `gh_signed_out`, `gh_account_mismatch`, `gh_token_unavailable`) and nothing is sent. Typed-token
+  and `env:` sources are unchanged.
+- `GET /api/v1/mcp/servers` (human view) reports `ghCli: {available, accounts, active}` so a client can offer it
+  (api-types: `McpGhCliState`, additive; no version bump here).
+
 ## [0.18.9] — 2026-11-11
 
 A patch: a floor timeout's "re-run with the targeted tests" can no longer turn into "run no tests", the checks floor

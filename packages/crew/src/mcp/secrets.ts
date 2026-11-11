@@ -12,19 +12,22 @@
  *   secret route answers 501, and `env:` references still work.
  */
 
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 
+import { isGitHubLogin, parseGhActiveLogin, parseGhAuthStatusLogins } from '../core/deliver.js';
+import { ghChildEnv } from '../core/deliver-credentials.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 
 export const KEYCHAIN_SERVICE = 'wicked-mcp';
 const KEYCHAIN_PREFIX = `keychain:${KEYCHAIN_SERVICE}/`;
 const ENV_PREFIX = 'env:';
+const GH_CLI_PREFIX = 'gh-cli:';
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const ACCOUNT_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 /** What replaces a secret value anywhere it would have left the broker. */
 export const SECRET_REDACTION = '[redacted:secret]';
 
-export type SecretRef = { kind: 'keychain'; account: string } | { kind: 'env'; name: string };
+export type SecretRef = { kind: 'keychain'; account: string } | { kind: 'env'; name: string } | { kind: 'gh-cli'; account: string };
 
 export function keychainRef(account: string): string {
   return `${KEYCHAIN_PREFIX}${account}`;
@@ -40,7 +43,62 @@ export function parseSecretRef(ref: string): SecretRef | null {
     const name = ref.slice(ENV_PREFIX.length);
     return ENV_NAME_RE.test(name) ? { kind: 'env', name } : null;
   }
+  if (ref.startsWith(GH_CLI_PREFIX)) {
+    const account = ref.slice(GH_CLI_PREFIX.length);
+    return isGitHubLogin(account) ? { kind: 'gh-cli', account } : null;
+  }
   return null;
+}
+
+// ── The GitHub CLI's sign-in (`gh-cli:<login>`) ──────────────────────────────────────────────
+
+export type GhCliErrorCode = 'gh_not_installed' | 'gh_signed_out' | 'gh_account_mismatch' | 'gh_token_unavailable';
+
+/** A named refusal of the gh credential. The message carries logins only — never a token or gh's own output. */
+export class GhCliError extends Error {
+  constructor(
+    readonly code: GhCliErrorCode,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+export function ghCliErrorOf(err: unknown): GhCliError | null {
+  return err instanceof GhCliError ? err : null;
+}
+
+export interface GhRan {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  /** gh is not installed (spawn ENOENT). */
+  enoent?: boolean;
+}
+
+/** Runs `gh <args>`; a seam so tests never need a real gh. */
+export type GhRunner = (args: string[]) => Promise<GhRan>;
+
+/** Bounded, no shell. An exported GH_TOKEN / GITHUB_TOKEN is dropped so it can never stand in for the pinned CLI identity. */
+export const defaultGhRunner: GhRunner = (args) =>
+  new Promise((resolve) => {
+    execFile('gh', args, { timeout: 4_000, encoding: 'utf8', env: ghChildEnv() }, (err, stdout, stderr) => {
+      const code = (err as { code?: unknown } | null)?.code;
+      if (code === 'ENOENT') return resolve({ code: null, stdout: '', stderr: '', enoent: true });
+      resolve({ code: err === null ? 0 : typeof code === 'number' ? code : null, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') });
+    });
+  });
+
+/** The pinned account is signed in to gh and is the ACTIVE one, or a named refusal; never another account. */
+async function requirePinnedGhAccount(account: string, gh: GhRunner): Promise<void> {
+  const r = await gh(['auth', 'status', '--hostname', 'github.com']);
+  if (r.enoent === true) throw new GhCliError('gh_not_installed', 'the GitHub CLI (gh) is not installed on this machine');
+  const text = `${r.stdout}\n${r.stderr}`;
+  const logins = parseGhAuthStatusLogins(text);
+  if (!logins.includes(account)) throw new GhCliError('gh_signed_out', `gh is not signed in to github.com as ${account}; run gh auth login as ${account}`);
+  const active = parseGhActiveLogin(text);
+  if (active === null) throw new GhCliError('gh_account_mismatch', `gh has several accounts signed in and the active one cannot be told; run gh auth switch --user ${account}`);
+  if (active !== account) throw new GhCliError('gh_account_mismatch', `this source is pinned to ${account} but gh's active account is ${active}; run gh auth switch --user ${account}`);
 }
 
 /** The OS secret store, behind a seam so tests never touch a real keychain. */
@@ -56,9 +114,17 @@ export interface SecretStore {
 export class SecretStoreError extends Error {}
 
 /** Resolve a reference to its value, or `null` when it is unset. Never logs the value. */
-export async function resolveSecret(ref: string, store: SecretStore, env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
+export async function resolveSecret(ref: string, store: SecretStore, env: NodeJS.ProcessEnv = process.env, gh: GhRunner = defaultGhRunner): Promise<string | null> {
   const parsed = parseSecretRef(ref);
   if (parsed === null) return null;
+  if (parsed.kind === 'gh-cli') {
+    await requirePinnedGhAccount(parsed.account, gh);
+    // The token is read for this call only: never memoised, never stored (the same command the deliver step uses).
+    const r = await gh(['auth', 'token', '--hostname', 'github.com', '--user', parsed.account]);
+    const token = r.stdout.trim();
+    if (r.code !== 0 || token === '') throw new GhCliError('gh_token_unavailable', `gh holds no token for ${parsed.account}; run gh auth login as ${parsed.account}`);
+    return token;
+  }
   if (parsed.kind === 'env') {
     const value = env[parsed.name];
     return value === undefined || value === '' ? null : value;
@@ -68,9 +134,18 @@ export async function resolveSecret(ref: string, store: SecretStore, env: NodeJS
 }
 
 /** Whether a reference resolves to a value, without reading the value where the store allows. */
-export async function secretIsSet(ref: string, store: SecretStore, env: NodeJS.ProcessEnv = process.env): Promise<boolean> {
+export async function secretIsSet(ref: string, store: SecretStore, env: NodeJS.ProcessEnv = process.env, gh: GhRunner = defaultGhRunner): Promise<boolean> {
   const parsed = parseSecretRef(ref);
   if (parsed === null) return false;
+  if (parsed.kind === 'gh-cli') {
+    // Signed in AND active, from `gh auth status` alone: the token is never read to answer this.
+    try {
+      await requirePinnedGhAccount(parsed.account, gh);
+      return true;
+    } catch {
+      return false;
+    }
+  }
   if (parsed.kind === 'env') return (env[parsed.name] ?? '') !== '';
   return store.available ? store.has(parsed.account) : false;
 }

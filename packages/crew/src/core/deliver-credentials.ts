@@ -14,7 +14,8 @@
 
 // A function-only import (no module-evaluation use), so the cycle with deliver.ts is inert.
 import { execFile } from 'node:child_process';
-import { originRemoteHost, parseGhAuthStatusLogins } from './deliver.js';
+import type { McpGhCliState } from './types.js';
+import { originRemoteHost, parseGhActiveLogin, parseGhAuthStatusLogins } from './deliver.js';
 import { childEnvWithBootEstateDb } from './governance-store.js';
 
 /** The forge a delivery goes to. `null` from {@link deliverProviderOf} = neither (a local path,
@@ -255,28 +256,52 @@ export async function deliverCredentialsProbe(
 
 /** `gh auth status --hostname github.com` → the logins, `'absent'` when gh is not installed (spawn
  *  ENOENT), `null` when it could not answer. Bounded to 4 s; one answer serves 30 s. */
-let ghMemo: { at: number; value: Promise<string[] | 'absent' | null> } | null = null;
+type GhStatus = { logins: string[]; active: string | null } | 'absent' | null;
+let ghMemo: { at: number; value: Promise<GhStatus> } | null = null;
 /** How long one gh answer serves the launch composer and the gate card (a sign-in is rare). */
 const GH_MEMO_MS = 30_000;
 
-export function ghLoginsOrAbsent(): Promise<string[] | 'absent' | null> {
+/** The environment every gh child of crew's credential reads runs in: an exported GH_TOKEN / GITHUB_TOKEN is dropped, so
+ *  the listing and the resolver see the same signed-in identities (an env-token account is never offered then refused). */
+export function ghChildEnv(): NodeJS.ProcessEnv {
+  const env = childEnvWithBootEstateDb(process.env);
+  delete env['GH_TOKEN'];
+  delete env['GITHUB_TOKEN'];
+  return env;
+}
+
+function ghStatusMemo(): Promise<GhStatus> {
   const now = Date.now();
   if (ghMemo !== null && now - ghMemo.at < GH_MEMO_MS) return ghMemo.value;
-  const value = ghLoginsUncached();
+  const value = ghStatusUncached();
   ghMemo = { at: now, value };
   return value;
 }
 
-function ghLoginsUncached(): Promise<string[] | 'absent' | null> {
+export async function ghLoginsOrAbsent(): Promise<string[] | 'absent' | null> {
+  const st = await ghStatusMemo();
+  return st === null || st === 'absent' ? st : st.logins;
+}
+
+function ghStatusUncached(): Promise<GhStatus> {
   return new Promise((resolve) => {
-    execFile('gh', ['auth', 'status', '--hostname', 'github.com'], { timeout: 4_000, encoding: 'utf8', env: childEnvWithBootEstateDb(process.env) }, (err, stdout, stderr) => {
+    execFile('gh', ['auth', 'status', '--hostname', 'github.com'], { timeout: 4_000, encoding: 'utf8', env: ghChildEnv() }, (err, stdout, stderr) => {
       const code = (err as { code?: unknown } | null)?.code;
       if (code === 'ENOENT') return resolve('absent');
       // A non-numeric code (a timeout kill, another spawn failure) is no answer at all.
       if (err !== null && typeof code !== 'number') return resolve(null);
-      resolve(parseGhAuthStatusLogins(`${String(stdout ?? '')}\n${String(stderr ?? '')}`));
+      const text = `${String(stdout ?? '')}\n${String(stderr ?? '')}`;
+      resolve({ logins: parseGhAuthStatusLogins(text), active: parseGhActiveLogin(text) });
     });
   });
+}
+
+/** gh's availability and accounts from the memoised, bounded status probe; a probe that could not answer reports gh
+ *  unavailable, never a signed-in account. Never reads a token. */
+export async function ghAccountState(): Promise<McpGhCliState> {
+  const st = await ghStatusMemo().catch(() => null);
+  if (st === null || st === 'absent') return { available: false, accounts: [], active: null };
+  return { available: true, accounts: st.logins, active: st.active };
 }
 
 /** The canonical `missing` reading for a provider — what the run record says after the deliver

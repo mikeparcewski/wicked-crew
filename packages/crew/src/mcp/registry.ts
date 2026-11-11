@@ -32,6 +32,7 @@ import type {
   McpAuthConfig,
   McpAuthState,
   McpDiscoveredServer,
+  McpGhCliState,
   McpPreviewResponse,
   McpRestEgress,
   McpRestMapping,
@@ -59,7 +60,8 @@ import { restTarget } from './rest.js';
 import { type AddressPolicy, classifyAddress, exactRangesFor, NO_CONFIRMATION } from '../sources/dialer.js';
 import { CREW_SOURCE, type SourceDescription, sourceDescriptorHash, sqlFromToolboxEntry, toolboxEntryFromSql } from '../sources/kinds.js';
 import { SourceCatalogStore, type StoredDescription } from '../sources/store.js';
-import { KEYCHAIN_SERVICE, keychainRef, parseSecretRef, resolveSecret, secretIsSet, type SecretStore } from './secrets.js';
+import { ghAccountState } from '../core/deliver-credentials.js';
+import { ghCliErrorOf, type GhRunner, KEYCHAIN_SERVICE, keychainRef, parseSecretRef, resolveSecret, secretIsSet, type SecretStore } from './secrets.js';
 
 /** How long a preview can be saved. */
 export const PREVIEW_TTL_MS = 15 * 60 * 1000;
@@ -164,6 +166,10 @@ export interface McpRegistryDeps {
    * Absent = this daemon has no Toolbox runtime: such a preview is a 501 `runtime_unavailable`.
    */
   toolboxProbe?: Prober;
+  /** The gh runner behind a `gh-cli:<login>` reference; default: the real `gh`. */
+  gh?: GhRunner;
+  /** gh's availability and accounts for the human listing; default: a bounded, memoised status probe. */
+  ghState?: () => Promise<McpGhCliState>;
   now?: () => number;
   env?: NodeJS.ProcessEnv;
 }
@@ -202,7 +208,9 @@ export class McpRegistry {
     const file = await this.readFile();
     const servers = await Promise.all(file.servers.map((s) => this.view(s)));
     const discovered = this.deps.discover(new Set(file.servers.map((s) => s.name)));
-    return { servers, discovered };
+    // The listing never reads a token: only whether gh is there and who is signed in.
+    const ghCli = await (this.deps.ghState ?? ghAccountState)().catch((): McpGhCliState => ({ available: false, accounts: [], active: null }));
+    return { servers, discovered, ghCli };
   }
 
   /**
@@ -241,6 +249,9 @@ export class McpRegistry {
     // (DES-KNOWLEDGE-DATA-001 §5.1) A database source is saved as its Toolbox document, checked against the
     // deployment policy here (the preview) and again when the write lands.
     config = this.forSave(config);
+    if (config.auth !== null && parseSecretRef(config.auth.ref)?.kind === 'gh-cli' && !(config.pm?.system === 'github' && (config.kind === 'mcp-http' || config.kind === 'mcp-stdio'))) {
+      throw new McpRegistryError(400, 'gh_cli_not_allowed', 'a gh-cli credential is for a GitHub project-management source (kind mcp-http or mcp-stdio, pm.system github) only');
+    }
     if (stagedSecret !== null) {
       if (!this.deps.secrets.available) {
         throw new McpRegistryError(501, 'secret_store_unavailable', 'this platform has no OS secret store; reference a daemon env variable instead (auth.ref "env:<NAME>")');
@@ -795,7 +806,7 @@ export class McpRegistry {
    */
   async callSecret(config: McpUpstreamConfig): Promise<{ secret: string | null; missing: boolean }> {
     if (config.auth === null) return { secret: null, missing: false };
-    const secret = await resolveSecret(config.auth.ref, this.deps.secrets, this.env);
+    const secret = await this.resolve(config.auth.ref);
     return { secret, missing: secret === null };
   }
 
@@ -1028,10 +1039,24 @@ export class McpRegistry {
     return { restored: plan.generation, generation: current + 1, servers: servers.length, disabled, queryReset: [...plan.queryReset], writesReset: [...plan.writesReset] };
   }
 
+  /**
+   * `resolveSecret` for this registry: a gh refusal (not installed, signed out, another active account) is a named 409,
+   * so every route that reads a source's secret answers its code instead of a 500.
+   */
+  private async resolve(ref: string): Promise<string | null> {
+    try {
+      return await resolveSecret(ref, this.deps.secrets, this.env, this.deps.gh);
+    } catch (err) {
+      const gh = ghCliErrorOf(err);
+      if (gh !== null) throw new McpRegistryError(409, gh.code, gh.message);
+      throw err;
+    }
+  }
+
   /** Whether a secret reference resolves to a non-empty value now; any error reading it counts as no (fail closed). */
   private async secretResolves(auth: McpAuthConfig): Promise<boolean> {
     try {
-      const value = await resolveSecret(auth.ref, this.deps.secrets, this.env);
+      const value = await this.resolve(auth.ref);
       return value !== null && value !== '';
     } catch {
       return false;
@@ -1126,7 +1151,7 @@ export class McpRegistry {
     if (config.auth === null) return prober(config, null);
     // (crew#719) A staged secret is probed with instead of being written first. The caller has
     // already checked it belongs to THIS server's keychain reference.
-    const secret = staged ?? (await resolveSecret(config.auth.ref, this.deps.secrets, this.env));
+    const secret = staged ?? (await this.resolve(config.auth.ref));
     if (secret === null) {
       return { ok: false, error: `auth.ref ${config.auth.ref} resolves to no secret: set it, then try again`, missingSecret: true };
     }
@@ -1136,7 +1161,7 @@ export class McpRegistry {
   private async authState(auth: McpAuthConfig | null): Promise<McpAuthState> {
     if (auth === null) return 'none';
     if (parseSecretRef(auth.ref) === null) return 'missing';
-    return (await secretIsSet(auth.ref, this.deps.secrets, this.env)) ? 'set' : 'missing';
+    return (await secretIsSet(auth.ref, this.deps.secrets, this.env, this.deps.gh)) ? 'set' : 'missing';
   }
 
   /** A PM entry's links as the sheet shows them (read-only there; written only through the tracker-links routes). */
@@ -1522,6 +1547,11 @@ export function recordShapeProblem(raw: unknown): string | null {
   if (s['pm'] !== undefined && (typeof s['pm'] !== 'object' || s['pm'] === null || (s['kind'] !== 'mcp-http' && s['kind'] !== 'mcp-stdio'))) return 'a pm marker on a server that is not an MCP server';
   // A marker this release cannot read would leave the entry ungoverned: refused as a record crew could not have written.
   if (s['pm'] !== undefined && !['github', 'jira'].includes(String((s['pm'] as Record<string, unknown>)['system']))) return 'a pm marker naming a system this release does not govern';
+  const authRef = s['auth'] === null || s['auth'] === undefined ? '' : (s['auth'] as Record<string, unknown>)['ref'];
+  if (typeof authRef === 'string' && authRef.startsWith('gh-cli:')) {
+    const pmSystem = typeof s['pm'] === 'object' && s['pm'] !== null ? (s['pm'] as Record<string, unknown>)['system'] : null;
+    if (pmSystem !== 'github') return 'a gh-cli credential on a server that is not a GitHub project-management source';
+  }
   if (s['trackers'] !== undefined && !Array.isArray(s['trackers'])) return 'trackers is not a list';
   return null;
 }

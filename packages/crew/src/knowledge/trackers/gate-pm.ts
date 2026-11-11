@@ -35,6 +35,7 @@ import type { McpRegistryStore, McpToolRecord } from '../../mcp/registry-store.j
 import { agentMay, neededFor } from '../gate/access.js';
 import type { GateListedTool, GateUnitResult, GateUnitScope } from '../gate/gate.js';
 import type { SourceAgentQueryEntry, SourceReadLog } from '../gate/record.js';
+import { ghCliErrorOf } from '../../mcp/secrets.js';
 import { GateBusyError, type GateSchedulers, DEFAULT_LIMITS } from '../gate/scheduler.js';
 import { effectiveDisclosure } from '../registry/entry.js';
 import { atlassianSiteIdsOf, bindingInForce, type PmItem, type ProjectOpts, readPayload, vendorBindsTenant } from './bindings.js';
@@ -406,8 +407,14 @@ export class PmGate {
       if (config.auth !== null) {
         try {
           secret = await this.deps.secret(config.auth.ref);
-        } catch {
+        } catch (err) {
           secret = null;
+          // A gh credential refused by name keeps its code: the operator must see why nothing was sent.
+          const gh = ghCliErrorOf(err);
+          if (gh !== null) {
+            lease.done({ outcome: 'ok' });
+            return { ok: false, code: gh.code, reason: `${gh.message}; nothing was sent` };
+          }
         }
         if (secret === null || secret === '') {
           lease.done({ outcome: 'ok' });

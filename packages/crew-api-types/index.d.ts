@@ -13832,6 +13832,14 @@ export interface McpToolAnnotations {
  * the value in env variable `env`; an `mcp-http` or `rest` server in header `header`, after `prefix`.
  */
 export interface McpAuthConfig {
+  /**
+   * The secret reference: `keychain:wicked-mcp/<name>`, `env:<NAME>`, or (a GitHub project-management source over
+   * `mcp-http` / `mcp-stdio` only) `gh-cli:<github login>` — the GitHub CLI's sign-in for that account. A `gh-cli`
+   * reference stores the account name only: crew reads the token from gh at the moment of each call and never keeps
+   * it. The account is pinned: when gh's active account is another one, or gh is not installed or not signed in, the
+   * call is refused with a named 409 (`gh_account_mismatch`, `gh_not_installed`, `gh_signed_out`,
+   * `gh_token_unavailable`) and nothing is sent. A `gh-cli` ref on any other source is a 400 `gh_cli_not_allowed`.
+   */
   ref: string;
   env?: string;
   header?: string;
@@ -14107,6 +14115,19 @@ export interface McpDiscoveredServer {
 export interface McpServersResponse {
   servers: McpServer[];
   discovered: McpDiscoveredServer[];
+  /** The GitHub CLI on the daemon's machine, so a client can offer `gh-cli:<login>` for a GitHub source. Human view only. */
+  ghCli?: McpGhCliState;
+}
+
+/**
+ * The GitHub CLI's state as `GET /mcp/servers` reports it. `available: false` = gh is not installed or did not answer;
+ * `accounts: []` with `available: true` = gh is installed and signed out; `active` = the signed-in account gh uses now
+ * (`null` when none, or when it cannot be told). Never carries a token.
+ */
+export interface McpGhCliState {
+  available: boolean;
+  accounts: string[];
+  active: string | null;
 }
 
 /**
