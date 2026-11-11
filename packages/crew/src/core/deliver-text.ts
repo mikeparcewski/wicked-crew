@@ -28,7 +28,8 @@
  * run either way; only the deliver phase's own commit is guaranteed to match it.
  */
 
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
+import { crewStateHome } from '../projects/state-home.js';
 
 import type { GateSpec, PhaseDef, SessionView, WorkUnit } from './types.js';
 import { stripLinkedIssues } from './linked-issues.js';
@@ -39,7 +40,7 @@ import { stripRulesBrief } from '../decisions/rules-brief.js';
 function intentOnly(problem: string): string {
   return stripRulesBrief(stripRunLearnings(stripLinkedIssues(problem)));
 }
-import { rewriteHostPaths, withRootAliases, type ChatRepoRoot } from './host-paths.js';
+import { withRootAliases, type ChatRepoRoot } from './host-paths.js';
 
 /**
  * The PR title cap (crew#860, S17b F15 / S17a F20). GitHub ACCEPTS 256 characters, and under that
@@ -345,7 +346,9 @@ export function firstSentence(line: string): string {
  * the run id in full.
  */
 export function deliverTitle(intent: string, runId: string, workflowId?: string | null): string {
-  const line = firstSentence(stripLeadingIssueRef(firstLine(intent)));
+  // crew#1499: redact first, so the title is cut (and measured) on what leaves the machine — the one
+  // place the composer and this oracle agree on, whatever the host's temp or home path length.
+  const line = firstSentence(stripLeadingIssueRef(firstLine(redactHostPaths(intent))));
   // The run id is caller-supplied too (`LaunchSchema` only requires it non-empty): a newline in it
   // must not turn the title into two lines and break the framing (Copilot on #525).
   if (line === '') return boundedTitle(oneLine(`wicked-crew run ${oneLine(runId)}`));
@@ -1015,8 +1018,7 @@ function withQePass(
 
 /** Every string in the facts through {@link redactHostPaths} (plain data: strings, arrays, objects). */
 function redactFacts<T>(value: T, home: string | null = homePrefix()): T {
-  if (home === null) return value;
-  const aliases = withRootAliases([{ absRoot: home, name: '~' }]);
+  const aliases = hostRoots(home);
   const walk = (v: unknown): unknown => {
     if (typeof v === 'string') return redactWith(v, aliases);
     if (Array.isArray(v)) return v.map(walk);
@@ -1045,20 +1047,58 @@ function homePrefix(): string | null {
  * sibling (`<home>-old/…`) is never touched.
  */
 export function redactHostPaths(text: string, home: string | null = homePrefix()): string {
-  if (home === null || home === '') return text;
-  return redactWith(text, withRootAliases([{ absRoot: home, name: '~' }]));
+  return redactWith(text, hostRoots(home));
 }
 
+/** crew#1499: a directory as a root, or nothing when it is unusable as a prefix (unset, `/`). */
+function usableRoot(dir: string | null, name: string): ChatRepoRoot[] {
+  const abs = dir === null ? '' : dir.replace(/[\\/]+$/, '');
+  return abs === '' ? [] : [{ absRoot: abs, name }];
+}
+
+/**
+ * crew#1499: every host-local root that must not leave the machine — home → `~`, the temp directory
+ * → `<tmp>`, the daemon's state home → `<state-home>` — each with its realpath and `/private` twins.
+ * `rewriteHostPaths` matches the longest root first, so a state home under home (or under the temp
+ * directory) is `<state-home>`, never `~/…`.
+ */
+function hostRoots(home: string | null): ChatRepoRoot[] {
+  let state: string | null = null;
+  try {
+    state = crewStateHome();
+  } catch {
+    state = null;
+  }
+  const roots = [...usableRoot(home, '~'), ...usableRoot(tmpdir(), '<tmp>'), ...usableRoot(state, '<state-home>')];
+  // A Windows root (`C:\\Users\\a`) is also cited with forward slashes (`C:/Users/a`) — as chat paths always were.
+  for (const r of [...roots]) if (r.absRoot.includes('\\')) roots.push({ absRoot: r.absRoot.replace(/\\/g, '/'), name: r.name });
+  return withRootAliases(roots);
+}
+
+/**
+ * macOS per-user temp folders and the shared temp directories, whichever host wrote them (a path
+ * from another machine, or from evidence whose directory is gone, is no root of this daemon):
+ * `[/private]/var/folders[/<xx>[/<hash>[/T|C|0]]]` (the folder itself and anything beneath it) and `[/private]/tmp` → `<tmp>`, at a path boundary —
+ * which a `file://` URL's path also is (`file:///private/var/…`).
+ */
+const TEMP_PATH_PATTERNS: ReadonlyArray<RegExp> = [
+  /(?:(?<![\w./\\-])|(?<=file:\/\/))(?:\/private)?\/var\/folders(?![\w-])(?!\.[\w-])(?:\/[^/\s'"`)\]}>,;:]+){0,2}(?:\/[TC0](?![\w-])(?!\.[\w-]))?/g,
+  /(?:(?<![\w./\\-])|(?<=file:\/\/))(?:\/private)?\/tmp(?![\w-])(?!\.[\w-])/g,
+];
+
 function redactWith(text: string, aliases: ReadonlyArray<ChatRepoRoot>): string {
-  let out = rewriteHostPaths(text, aliases);
-  // What leaves the machine is stricter than a chat citation: a bare home the chat rewrite keeps
-  // (followed by more than closing punctuation — compact JSON `"<home>","next"`, codex on crew#887)
-  // still goes, unless a path character continues it (a longer sibling such as `<home>-old`).
-  for (const { absRoot } of aliases) {
+  // What leaves the machine is stricter than a chat citation (crew#887: compact JSON `"<home>","next"`
+  // is a bare root too): a root goes wherever a path starts, followed by anything but a path
+  // character (a longer sibling such as `<home>-old` stays). Not `rewriteHostPaths`: its prefix swap
+  // has no left boundary, so a `/tmp` root would clip `/srv/tmp/x` (crew#1499). Longest root first,
+  // so a state home under home is `<state-home>`.
+  let out = text;
+  for (const { absRoot, name } of [...aliases].sort((x, y) => y.absRoot.length - x.absRoot.length)) {
     if (!out.includes(absRoot)) continue;
     const escaped = absRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    out = out.replace(new RegExp(`(?<![\\w./\\\\-])${escaped}(?![\\w.-])`, 'g'), '~');
+    out = out.replace(new RegExp(`(?:(?<![\\w./\\\\-])|(?<=file://))${escaped}(?![\\w-])(?!\\.[\\w-])`, 'g'), () => name);
   }
+  for (const pattern of TEMP_PATH_PATTERNS) out = out.replace(pattern, '<tmp>');
   return out;
 }
 

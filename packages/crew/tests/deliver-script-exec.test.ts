@@ -35,7 +35,7 @@ import { triageDeliverFailure, trustedDeliverOutcome, trustedOutcomeIn } from '.
 /** (crew#739) The sentinel nonce every composed script in this file carries. */
 const TEST_NONCE = '0123456789abcdef0123456789abcdef';
 import { deliverExclusionReason } from '../src/core/deliver-exclusions.js';
-import { DELIVER_TITLE_MAX, commitSubject, composeDeliverText, deliverTitle, factsFromWorkflow, framedDeliverText } from '../src/core/deliver-text.js';
+import { DELIVER_TITLE_MAX, commitSubject, composeDeliverText, deliverTitle, factsFromWorkflow, framedDeliverText, redactHostPaths } from '../src/core/deliver-text.js';
 
 const RUN_ID = '1bc72c20-0457-425f-b4cb-215a40e68e1e';
 
@@ -1552,8 +1552,10 @@ describe('deliver script — composed PR text (crew#524)', () => {
     // The title is the first line as plain words, cut at a word boundary (≤ 256, one line, code
     // markers stripped) — nothing in it was expanded. WHERE the cut lands depends on the length of
     // the temp path (short `/tmp/…` on Linux, long `/var/folders/…` on macOS), so the composer is
-    // the oracle, not a literal.
+    // the oracle, not a literal. The oracle redacts host paths itself (crew#1499): the title carries
+    // `<tmp>/…`, never the fixture's temp directory.
     expect(r.pr!.title).toBe(deliverTitle(hostile, RUN_ID));
+    expect(r.pr!.title).not.toContain(fx.root);
     expect(r.pr!.title.startsWith("x'; touch")).toBe(true);
     expect(r.pr!.title.length).toBeLessThanOrEqual(256); // crew#550: GitHub's limit, not git's 72
     expect(r.pr!.title).not.toContain('\n');
@@ -1562,7 +1564,11 @@ describe('deliver script — composed PR text (crew#524)', () => {
     expect(subject).toBe(commitSubject(r.pr!.title));
     expect([...subject].length).toBeLessThanOrEqual(72);
     expect(r.pr!.title).not.toContain('`');
-    expect(r.pr!.body).toContain(`touch ${marker}`); // the intent rides as TEXT, verbatim
+    // The intent rides as TEXT — but a host path in it leaves as its placeholder (crew#1499): the
+    // body, the title and the commit message carry `<tmp>/…`, never the fixture's temp directory.
+    expect(r.pr!.body).toContain(`touch ${redactHostPaths(marker)}`);
+    expect(r.pr!.body).not.toContain(marker);
+    expect(git(fx.origin, 'log', '-1', '--format=%B', `wicked/${RUN_ID}`)).not.toContain(fx.root);
     expect(r.pr!.body).toContain('$(touch'); // unexpanded
     expect(r.pr!.body).toContain('\nWICKED_CREW_DELIVER_TEXT_EOF\n'); // the delimiter line too — it moved, the text did not
     expect(git(fx.origin, 'rev-list', '--count', `main..wicked/${RUN_ID}`).trim()).toBe('1');

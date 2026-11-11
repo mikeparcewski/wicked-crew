@@ -8,7 +8,9 @@
 // composer (`core/deliver-text.ts`) on that exact intent and on a run view shaped like the
 // persisted record of that run, plus the launch-time fallback and the framing both carriers share.
 
-import { describe, expect, it } from 'vitest';
+import { tmpdir } from 'node:os';
+import { afterEach, describe, expect, it } from 'vitest';
+import { setCrewStateHome } from '../src/projects/state-home.js';
 import {
   DELIVER_TITLE_MAX,
   COMMIT_SUBJECT_MAX,
@@ -16,6 +18,7 @@ import {
   commitSubject,
   conventionalPrefix,
   composeDeliverText,
+  redactHostPaths,
   deliverTitle,
   factsFromRun,
   factsFromWorkflow,
@@ -1178,3 +1181,94 @@ describe('the run\'s assurance labels (crew#1186)', () => {
   });
 });
 
+
+describe('crew#1499 — host temp and state-home paths never reach the PR title, body or commit message', () => {
+  const STATE = '/srv/crew-1499-state';
+  const MAC_TMP = '/private/var/folders/ab/synthetic-hash/T';
+  afterEach(() => setCrewStateHome(undefined));
+
+  function compose(intent: string, report: string) {
+    const facts = {
+      ...factsFromWorkflow({ runId: 'run-a', intent, workflowId: null, repoRef: null, phases: [], runUrl: null }),
+      source: 'run' as const,
+      reports: [{ phase: 'security', seat: 'claude', role: 'creator' as const, report }],
+    };
+    const text = composeDeliverText(facts);
+    return { text, framed: framedDeliverText(text) };
+  }
+
+  it('rewrites every temp spelling and the state home; the link label survives', () => {
+    setCrewStateHome(STATE);
+    const paths = [
+      `${MAC_TMP}/checklist.md`,
+      '/var/folders/ab/synthetic-hash/T/checklist.md',
+      '/private/tmp/checklist.md',
+      '/tmp/checklist.md',
+      `${tmpdir()}/crew-1499-checklist.md`,
+      `${STATE}/vault/record.json`,
+    ];
+    const report = paths.map((x, i) => `See [manual checklist ${i}](${x}).`).join('\n');
+    const { text, framed } = compose(`audit the deploy, notes in ${paths[0]} and ${paths[5]}`, report);
+    for (const x of paths) {
+      expect(text.title).not.toContain(x);
+      expect(text.body).not.toContain(x);
+      expect(framed).not.toContain(x);
+    }
+    for (const frag of ['/private/var/folders', '/var/folders', 'synthetic-hash', STATE]) expect(framed).not.toContain(frag);
+    expect(text.body).toContain('[manual checklist 0](<tmp>/checklist.md)');
+    expect(text.body).toContain('[manual checklist 5](<state-home>/vault/record.json)');
+    expect(text.title).toContain('<tmp>/checklist.md');
+  });
+
+  it('a state home under the home directory is <state-home>, not ~/…', () => {
+    const home = '/Users/someone';
+    setCrewStateHome(`${home}/.wicked-crew`);
+    expect(redactHostPaths(`${home}/.wicked-crew/db and ${home}/work`, home)).toBe('<state-home>/db and ~/work');
+  });
+
+  it('bare roots become placeholders; longer siblings are untouched', () => {
+    setCrewStateHome(STATE);
+    expect(redactHostPaths(`state ${STATE}.`, '/Users/someone')).toBe('state <state-home>.');
+    expect(redactHostPaths('/tmp and /private/tmp, "/tmp"', null)).toBe('<tmp> and <tmp>, "<tmp>"');
+    expect(redactHostPaths('/tmpfoo/x /tmp-old/x /private/tmpdir /srv/tmp/x', null)).toBe('/tmpfoo/x /tmp-old/x /private/tmpdir /srv/tmp/x');
+    expect(redactHostPaths(`${STATE}-old/x`, null)).toBe(`${STATE}-old/x`);
+  });
+
+  it('file:// URLs to home, temp and state-home paths are redacted in title, body and commit message', () => {
+    const home = '/Users/someone';
+    setCrewStateHome(STATE);
+    const urls = [`file://${home}/work/a.md`, `file://${MAC_TMP}/check.md`, 'file:///var/folders/ab/synthetic-hash/T/check.md', 'file:///tmp/check.md', `file://${STATE}/vault/r.json`];
+    expect(redactHostPaths(urls.join(' '), home)).toBe('file://~/work/a.md file://<tmp>/check.md file://<tmp>/check.md file://<tmp>/check.md file://<state-home>/vault/r.json');
+    const report = urls.map((u, i) => `[doc ${i}](${u})`).join('\n');
+    const { text, framed } = compose(`Audit ${urls[1]} now`, report);
+    for (const frag of ['synthetic-hash', '/private/var', '/var/folders', '/tmp/check', STATE]) {
+      expect(text.title).not.toContain(frag);
+      expect(text.body).not.toContain(frag);
+      expect(framed).not.toContain(frag);
+    }
+    expect(text.body).toContain('[doc 1](file://<tmp>/check.md)');
+    expect(deliverTitle(`Audit ${urls[1]}`, 'run-a')).not.toContain('synthetic-hash');
+  });
+
+  it('every path at or beneath /var/folders is redacted, however short; /srv/var/folders is not', () => {
+    const paths = ['/private/var/folders', '/private/var/folders/ab', '/var/folders/ab', '/var/folders', 'file:///var/folders/ab/x.md', 'file:///private/var/folders/ab/hash/T/x.md'];
+    const { text, framed } = compose(`Audit ${paths[1]} and ${paths[4]}`, paths.map((x, i) => `[doc ${i}](${x})`).join('\n'));
+    expect(text.title).not.toContain('/var/folders');
+    expect(text.body).not.toContain('/var/folders');
+    expect(framed).not.toContain('/var/folders');
+    expect(text.body).toContain('[doc 4](file://<tmp>');
+    expect(text.body).toContain('[doc 0](<tmp>)');
+    expect(redactHostPaths('/srv/var/folders/x /var/foldersX/y /var/folders.backup/notes.md', null)).toBe('/srv/var/folders/x /var/foldersX/y /var/folders.backup/notes.md');
+  });
+
+  it('a Windows root is redacted in its forward-slash spelling too', () => {
+    expect(redactHostPaths('C:/Users/a/work/x.md and C:\\Users\\a\\y', 'C:\\Users\\a')).toBe('~/work/x.md and ~\\y');
+  });
+
+  it('a temp path cut by the title width leaves no fragment of it', () => {
+    const intent = `${'x'.repeat(230)} ${MAC_TMP}/checklist.md and more words after it to force the cut`;
+    const { text } = compose(intent, 'done');
+    expect(text.title).not.toContain('synthetic-hash');
+    expect(text.body).not.toContain('synthetic-hash');
+  });
+});

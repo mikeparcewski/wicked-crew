@@ -21,6 +21,13 @@ mentioned only where a daemon release depends on them.
   unchanged. (api-types: `RequirementBusinessDomain`, `RequirementBusinessDomainCatalogEntry`, additive; no version
   bump here.)
 
+### Fixed
+
+- Deliver no longer puts host temp or state paths in a PR title, body or commit message (#1499). Beside the home
+  directory (`~`), the sanitizer now rewrites the temp directory and the macOS per-user temp folders
+  (`/private/var/folders/…`, `/var/folders/…`, `/private/tmp`, `/tmp`) to `<tmp>` and the daemon's state home to
+  `<state-home>`; a link keeps its label. A longer sibling path is never touched.
+
 ## [0.18.10] — 2026-11-11
 
 A patch: the requirements share counts only real behaviour, requirements carry a business domain, POL-2101 stops
