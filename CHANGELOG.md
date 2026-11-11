@@ -10,6 +10,14 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+
+- `GET /runs/:id` now fills the run's `cost_usd` (the sum of every priced `cliUsage.costUsd`; `null` when usage was
+  recorded and none was priced) and `usage_seats_unmetered` (the seats that reported usage with no cost, such as codex),
+  so a run no longer reads "cost not in run record" and a total says which seats it leaves out. Both are optional
+  `AgentSession` fields in `wicked-crew-api-types` (additive); the list route is unchanged. Run facts, the seat record
+  and the run view share one pricing classification (#1486).
+
 ## [0.18.7] — 2026-11-10
 
 A patch: a project graph refresh no longer loops on a large repo, because each member's index is bounded by a budget

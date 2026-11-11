@@ -29,6 +29,7 @@ import type {
   SeatRecordResponse,
   SessionView,
 } from '../core/types.js';
+import { isPricedCost, unitOwners } from '../insights/run-facts.js';
 
 export const SEAT_RECORD_DEFAULT_DAYS = 7;
 export const SEAT_RECORD_MAX_DAYS = 90;
@@ -78,8 +79,7 @@ export function foldRunIntoSeats(
     return p;
   };
 
-  const owner = new Map<number, string>();
-  const ownerOf = (ord: number): string | undefined => owner.get(ord) ?? str(unitRow.get(ord)?.assigned_cli) ?? undefined;
+  const owners = unitOwners(view);
   const ranBy = new Map<number, Set<string>>();
   const firstBy = new Map<number, string>();
   const dispatches = new Map<number, number>();
@@ -95,17 +95,9 @@ export function foldRunIntoSeats(
     const inWindow = e.ts >= since;
     if (inWindow) touched = true;
     // Ownership is tracked from the whole log (a unit distributed before the window may run in it).
-    if (e.type === 'unitDistributed' && ord !== undefined && str(e['cli']) !== undefined) {
-      owner.set(ord, e['cli'] as string);
-      continue;
-    }
-    if (e.type === 'unitReassigned' && ord !== undefined) {
-      const next = str(e['newCli']);
-      if (next !== undefined) owner.set(ord, next);
-      continue;
-    }
+    if (owners.observe(e)) continue;
     if (!inWindow || ord === undefined) continue;
-    const cli = ownerOf(ord);
+    const cli = owners.ownerOf(ord);
     switch (e.type) {
       case 'unitDispatched': {
         if (cli === undefined) break;
@@ -150,8 +142,8 @@ export function foldRunIntoSeats(
       case 'cliUsage': {
         if (cli === undefined) break;
         const s = seat(cli);
-        const cost = num(e['costUsd']);
-        if (cost !== undefined) {
+        const cost = e['costUsd'];
+        if (isPricedCost(cost)) {
           s.costUsd = (s.costUsd ?? 0) + cost;
           s.costedUsage += 1;
         }

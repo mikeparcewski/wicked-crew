@@ -293,11 +293,14 @@ describe('RunTimingIndex.backfillEndedFromEvents (crew#985)', () => {
       };
       expect(list.runs.find((r) => r.session['id'] === 'pre-field')!.session['ended_at']).toBe(1_700_000_120);
       expect('ended_at' in list.runs.find((r) => r.session['id'] === 'run-live')!.session).toBe(false);
+      expect(adapter.runEvents).toHaveBeenCalledTimes(1); // the list backfill: once per run per process
       const detail = (await app.inject({ method: 'GET', url: '/api/v1/runs/pre-field' })).json() as {
         run: { session: Record<string, unknown> };
       };
       expect(detail.run.session['ended_at']).toBe(1_700_000_120);
-      expect(adapter.runEvents).toHaveBeenCalledTimes(1); // once per run per process
+      // The detail route adds exactly one read of its own (the run's usage cost, #1486); the ended_at
+      // backfill is not repeated for it.
+      expect(adapter.runEvents).toHaveBeenCalledTimes(2);
     } finally {
       await app.close();
     }

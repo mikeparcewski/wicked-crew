@@ -1,4 +1,5 @@
 import { REVIEW_WORKFLOW } from '../insights/workflow.js';
+import { runUsageCost, type LooseEvent, type RunUsageCost } from '../insights/run-facts.js';
 import { appsRuntimeDir, appsServerArtifact, containerEngineKnown } from '../apps/publish/artifacts.js';
 import type { FastifyBaseLogger, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { busSeamsOffWarning, busUnavailableWarning } from '../core/bus-notice.js';
@@ -4562,7 +4563,18 @@ export function registerRoutes(
     if (!run) return reply.code(404).send({ error: 'Run not found' });
     await settleDeliveries([run]);
     await backfillEndedAt([run]);
-    return { run: decorateRun(run) };
+    const decorated = decorateRun(run);
+    // Cost is derived here and only here: it replays the run's log, which the list route must not do per run.
+    // A log that cannot be read leaves both fields absent (never a fabricated 0).
+    let usage: RunUsageCost | null = null;
+    if (typeof adapter.runEvents === 'function') {
+      try {
+        const events = await adapter.runEvents(id);
+        if (events !== null && events !== undefined) usage = runUsageCost(run, events as unknown as LooseEvent[]);
+      } catch { /* absent, not wrong */ }
+    }
+    if (usage === null) return { run: decorated };
+    return { run: { ...decorated, session: { ...decorated.session, ...usage } } };
   });
 
   // Run learnings: what a run proposed to the approve queue (its end card, "3 learnings proposed · Review").

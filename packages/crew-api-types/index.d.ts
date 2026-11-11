@@ -1047,6 +1047,19 @@ export interface AgentSession {
    * own first-clause cut of `problem`, never an invented title.
    */
   title?: string;
+  /**
+   * (api-types 0.203.0) The run's priced spend, USD: the sum of every `cliUsage.costUsd` that carried a price (a
+   * reported 0 is priced). `null` when usage was recorded but none of it was priced. Derived on `GET /runs/:id` ONLY;
+   * ABSENT on `GET /runs`, on a run whose log has no usage frame, and when the log could not be read. A CLI that
+   * reports tokens but no cost (codex) adds nothing here; see {@link usage_seats_unmetered}.
+   */
+  cost_usd?: number | null;
+  /**
+   * (api-types 0.203.0) The seats that reported usage without a price (a `cliUsage` frame with `costUsd` null, or a
+   * `cliUsageUnreported` attempt), unique and sorted; `[]` when the run is fully priced. Same presence rules as
+   * {@link cost_usd}. A non-empty list means {@link cost_usd} undercounts the run.
+   */
+  usage_seats_unmetered?: string[];
   entity_mode: EntityMode;
   collection_scope: string | null;
   clis: string[];
@@ -1243,13 +1256,11 @@ export interface AgentSession {
    * never saw the launch. Read with `typeof === 'number'`; a bucketed KPI or a 7/30/90-day range
    * must EXCLUDE an undated run, never date it with a fabricated now.
    *
-   * COST (deferred, not faked): a per-run cost/spend figure is deliberately NOT joined onto this
-   * DTO. Cost exists only on the per-unit {@link CliUsageEvent} (`costUsd`), streamed over `/ws`
-   * and never accumulated per run daemon-side — a reliable per-run total would require replaying
-   * the durable event log per run on this hot path (the unbounded cost the GET /runs delivery-cache
-   * architecture forbids) or a new live cliUsage accumulator plus a durable per-run store. A burn
-   * chart should sum `cliUsage.costUsd` from the live `/ws` stream (or `GET /runs/:id/events`) for
-   * now; a joined `AgentSession.cost` is a follow-up once that store exists.
+   * COST: the list (`GET /runs`) deliberately carries NO cost — a per-run total means replaying the
+   * durable event log per run on that hot path (the unbounded cost the GET /runs delivery-cache
+   * architecture forbids). The detail route (`GET /runs/:id`) derives it: see {@link cost_usd} and
+   * {@link usage_seats_unmetered}. A list-wide burn chart should sum `cliUsage.costUsd` from the live
+   * `/ws` stream (or `GET /runs/:id/events`).
    */
   created_at?: number;
   /**
