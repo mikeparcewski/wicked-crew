@@ -88,6 +88,18 @@ describe('background runtime reader', () => {
     const ctl = new RuntimeState({ exec: noCtl, exe: () => '/fixture/core', home: () => '/fixture/home', intervalMs: 60_000 }); close.push(() => ctl.close());
     for (let i = 0; i < 3; i++) await ctl.refresh();
     expect(ctl.state()).toBe('down'); expect(ctl.reason()).toBe("The cluster's sandbox controller isn't ready");
+    // An unread controller (the engine's partial document) never clears a known controller outage.
+    let doc: object = { configured: true, reachable: true, context: 'rd', controller: { ready: false } };
+    const seq = vi.fn<ExecLike>(async () => ({ stdout: JSON.stringify(doc), stderr: '' }));
+    const r = new RuntimeState({ exec: seq, exe: () => '/fixture/core', home: () => '/fixture/home', intervalMs: 60_000 }); close.push(() => r.close());
+    for (let i = 0; i < 3; i++) await r.refresh();
+    expect(r.state()).toBe('down');
+    doc = { configured: true, reachable: true, context: 'rd', detail: 'inventory forbidden' };
+    for (let i = 0; i < 3; i++) await r.refresh();
+    expect(r.state()).toBe('down');
+    doc = { configured: true, reachable: true, context: 'rd', controller: { ready: true }, gateway: 'serving' };
+    await r.refresh();
+    expect(r.state()).toBe('up');
     const none = vi.fn<ExecLike>();
     const noExe = new RuntimeState({ exec: none, exe: () => null, home: () => '/fixture/home', intervalMs: 60_000 }); close.push(() => noExe.close());
     for (let i = 0; i < 3; i++) await noExe.refresh();

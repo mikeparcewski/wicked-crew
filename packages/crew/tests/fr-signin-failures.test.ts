@@ -31,6 +31,9 @@ describe('signInFailure', () => {
     expect(signInFailure(said('controller_missing', 'deployment agent-sandbox-controller has 0/1 ready replicas'), 'claude').error)
       .toContain('The cluster said: deployment agent-sandbox-controller has 0/1 ready replicas.');
     expect(signInFailure(said('admission_pending', 'timed out waiting for the pod'), 'claude').error).toContain('or it is still starting');
+    // A JSON-escaped foreign home path in the engine's words is ~.
+    const escaped = ['C:', 'Users', 'other', '.kube', 'config'].join('\\\\');
+    expect(signInFailure(said('controller_missing', `cannot read ${escaped}`), 'claude').error).not.toContain('other');
     // A credential shape in the engine's words is redacted before it crosses the wire.
     expect(signInFailure(said('policy_refused', 'webhook said Authorization: Bearer abcdefghijklmnop0123456789'), 'claude').error).not.toContain('abcdefghijklmnop0123456789');
     // Only the engine's refusal line counts: a warning line before it is fine, a kind inside another refusal's words is not.

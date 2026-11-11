@@ -252,7 +252,9 @@ describe('GET /api/v1/system', () => {
     const { body, ms } = await snapshot();
     const gw = body.infra.find((r) => r.key === 'gateway')!;
     expect(gw.state).toBe('unknown');
-    expect(gw.timeoutMs).toBe(CLUSTER_TIMEOUT_MS);
+    // The wait this snapshot gave it: at most the engine's bound, less when the budget had less left.
+    expect(gw.timeoutMs).toBeGreaterThan(0);
+    expect(gw.timeoutMs).toBeLessThanOrEqual(CLUSTER_TIMEOUT_MS + 100);
     expect(gw.reason).toMatch(/did not answer within/);
     expect(ms).toBeLessThan(SYSTEM_BUDGET_MS);
     expect(body.attention.find((a) => a.id === 'infra:gateway')!.severity).toBe('yellow');

@@ -81,8 +81,10 @@ export class RuntimeState implements RuntimeStateReader {
         const home = this.deps.home !== undefined ? this.deps.home() : crewStateHome();
         const exec = this.deps.exec ?? execCapped;
         const doc = await readClusterStatus({ exe, home, exec: (file, args, opts) => exec(file, args, { ...opts, env }), timeoutMs: CHECK_TIMEOUT_MS });
-        // A reachable cluster whose controller is known not ready cannot create a seat either.
-        if (doc.configured && doc.reachable && doc.controller?.ready === false) why = CONTROLLER_DOWN_REASON;
+        // A reachable cluster whose controller is known not ready cannot create a seat either; one whose
+        // controller could not be read proves neither (it never clears a known controller outage).
+        if (doc.configured && doc.reachable && doc.controller === null) return;
+        if (doc.configured && doc.reachable && !doc.controller?.ready) why = CONTROLLER_DOWN_REASON;
         else if (doc.configured && doc.reachable) next = 'up';
       } catch { /* No engine CLI, a timeout or no status document is unavailable. */ }
       // Down takes three misses in a row (a check on a loaded laptop can time out with Docker up, and

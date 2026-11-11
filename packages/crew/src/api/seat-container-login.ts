@@ -8,7 +8,7 @@ import type { SeatContainerLoginOutcome } from '../core/types.js';
 import type { RosterWithStanding } from './roster-standing.js';
 import type { SeatHealthTracker } from './seat-health.js';
 import { execCapped } from '../core/exec.js';
-import { redactString } from '../mcp/redact.js';
+import { publicText } from './cluster-status.js';
 import { canonicalize } from '../projects/state-home-preflight.js';
 import { crewStateHome, stateHomeOfDb } from '../projects/state-home.js';
 import { gatewayName, resolveContainerRuntime } from './system-snapshot.js';
@@ -119,7 +119,7 @@ export function clusterRefusal(stderr: string, cli: string, label: string): { co
   const code = m[1] as ClusterKind;
   // The engine's own why (credential shapes redacted, home paths spelled ~): what the kind alone
   // cannot say (a rollout still starting vs a missing controller, a refused vs an inconclusive probe).
-  const said = loginDetail(redactString(m[2] ?? ''));
+  const said = loginDetail(publicText(m[2] ?? ''));
   const why = said !== '' ? ` The cluster said: ${said.replace(/[.\s]+$/, '')}.` : '';
   const error: Record<ClusterKind, string> = {
     no_cluster: `No Kubernetes cluster is set up for this daemon, so the ${label} sign-in can't start. To set one up, ${INSTALL_HINT}, then try again.`,

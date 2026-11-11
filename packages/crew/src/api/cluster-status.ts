@@ -12,6 +12,7 @@
 import type { SystemInfraRow } from '../core/types.js';
 import { redactString } from '../mcp/redact.js';
 import { homeless } from './seat-standing.js';
+import { scrubHomePaths } from './ui-text.js';
 import { infraRow, settleWithin, type Settled } from './system-snapshot.js';
 
 /** One read's bound: `cluster status` is a `kubectl version` plus a few list calls (inside the
@@ -39,11 +40,28 @@ export interface ClusterStatus {
 type ClusterExec = (file: string, args: string[], opts: { timeout: number }) => Promise<{ stdout: string; stderr: string }>;
 
 const DETAIL_MAX = 240;
-/** One line of engine (or kubectl) words as it may cross the wire: credential shapes redacted and
- *  home paths spelled `~` BEFORE it is cut, bounded. */
+/** Credential spellings an upstream diagnostic (kubectl, a webhook, the engine) can carry beyond the
+ *  shapes `redactString` knows: an Authorization header of any scheme, a credential-named field in
+ *  JSON or YAML spelling, and URL userinfo. */
+const CREDENTIAL_SPELLINGS: ReadonlyArray<[RegExp, string]> = [
+  [/\b(authorization|proxy-authorization)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[A-Za-z]+\s+[^\s,;"']+|[^\s,;"']+)/gi, '$1: [REDACTED]'],
+  [/(["']?)\b(token|access[_-]?token|refresh[_-]?token|id[_-]?token|password|passwd|secret|client[_-]?secret|api[_-]?key|private[_-]?key)\1(\s*[:=]\s*)(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,;}\]]+)/gi, '$1$2$1$3[REDACTED]'],
+  [/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi, '$1[REDACTED]@'],
+];
+
+/** Engine (or kubectl) words as they may cross the wire, whole text: credentials redacted and every
+ *  home path (this user's, a foreign or a JSON-escaped one) spelled `~`, before anything is cut. */
+export function publicText(raw: string): string {
+  let out = redactString(raw);
+  for (const [re, to] of CREDENTIAL_SPELLINGS) out = out.replace(re, to);
+  return homeless(scrubHomePaths(out.replace(/\\\\/g, '\\')));
+}
+
+/** One line of {@link publicText}, bounded (sanitized BEFORE the cut, so a cut never exposes a prefix). */
 export function publicLine(v: unknown): string | null {
   if (typeof v !== 'string' || v.trim() === '') return null;
-  const line = homeless(redactString(v.split(/[\r\n]/, 1)[0]?.trim() ?? ''));
+  const line = publicText(v).split(/[\r\n]/, 1)[0]?.trim() ?? '';
+  if (line === '') return null;
   return line.length <= DETAIL_MAX ? line : `${line.slice(0, DETAIL_MAX - 1)}…`;
 }
 const words = publicLine;
@@ -126,8 +144,8 @@ export class ClusterStatusReader {
 /** `/diagnostics.cluster`: the document, or why there is none. */
 export function clusterDiagnostics(read: Settled<ClusterStatus>): (ClusterStatus & { read: 'ok' }) | { read: 'timeout' | 'error'; detail: string } {
   if (read.kind === 'ok') return { ...read.value, read: 'ok' };
-  if (read.kind === 'timeout') return { read: 'timeout', detail: `no answer within ${Math.round(CLUSTER_TIMEOUT_MS / 1000)} s` };
-  return { read: 'error', detail: publicLine(read.error) ?? 'the cluster could not be read' };
+  if (read.kind === 'timeout') return { read: 'timeout', detail: `no answer within ${Math.max(1, Math.round(read.ms / 1000))} s` };
+  return { read: 'error', detail: publicLine(read.full ?? read.error) ?? 'the cluster could not be read' };
 }
 
 const INSTALL = 'Run `wicked-core cluster install --admin-context <your cluster context> --home <this daemon\'s state home>`, then re-check.';
@@ -152,14 +170,16 @@ export function clusterRows(read: Settled<ClusterStatus> | null, containerFloor:
     };
   }
   if (read.kind === 'timeout') {
-    const why = `the cluster did not answer within ${Math.round(CLUSTER_TIMEOUT_MS / 1000)} s`;
+    // The wait this caller gave it (the snapshot's remaining budget can be shorter than the engine's bound).
+    const waited = Math.max(1, Math.round(read.ms / 1000));
+    const why = `the cluster did not answer within ${waited} s`;
     return {
-      cluster: infraRow('cluster', 'unknown', why, 'Re-check; a loaded host can slow kubectl down.', startedAt, {}, CLUSTER_TIMEOUT_MS),
-      gateway: infraRow('gateway', 'unknown', `${why}, so the gateway could not be read`, 'Re-check.', startedAt, {}, CLUSTER_TIMEOUT_MS),
+      cluster: infraRow('cluster', 'unknown', why, 'Re-check; a loaded host can slow kubectl down.', startedAt, {}, read.ms),
+      gateway: infraRow('gateway', 'unknown', `${why}, so the gateway could not be read`, 'Re-check.', startedAt, {}, read.ms),
     };
   }
   if (read.kind === 'error') {
-    const why = publicLine(read.error) ?? 'no answer';
+    const why = publicLine(read.full ?? read.error) ?? 'no answer';
     return {
       cluster: infraRow('cluster', 'unknown', `the cluster could not be read: ${why}`, BY_HAND, startedAt, { error: why }),
       gateway: infraRow('gateway', 'unknown', 'the cluster could not be read, so neither could the gateway', 'Re-check.', startedAt),

@@ -2,6 +2,7 @@ import { homedir } from 'node:os';
 import { describe, expect, it, vi } from 'vitest';
 import {
   ClusterStatusReader,
+  publicText,
   clusterDiagnostics,
   clusterRows,
   parseClusterStatus,
@@ -48,7 +49,7 @@ describe('ClusterStatusReader', () => {
     const exec = vi.fn(async () => ({ stdout: JSON.stringify(READY), stderr: '' }));
     const reader = new ClusterStatusReader(() => ({ exe: '/core', home: '/h', exec }));
     const [a, b] = await Promise.all([reader.read(), reader.read()]);
-    expect(a).toEqual(b); expect(exec).toHaveBeenCalledTimes(1);
+    expect(a.kind === "ok" && b.kind === "ok" && a.value === b.value).toBe(true); expect(exec).toHaveBeenCalledTimes(1);
     await reader.read(); expect(exec).toHaveBeenCalledTimes(2);
   });
   it('a caller that gives up leaves the one engine process running, and the next caller joins it', async () => {
@@ -110,6 +111,24 @@ describe('clusterRows', () => {
       expect(text).not.toContain('supersecretvalue');
     }
     expect(err.cluster.remedy).toContain('--home <this daemon');
+  });
+  it('every credential spelling an upstream diagnostic can carry is redacted, and every home path is ~', () => {
+    const user = ['C:', 'Users', 'other', '.kube', 'config'].join('\\\\');
+    const raw = `webhook {"token":"opaque-cluster-secret","password": "p4ss"} password: opaque-password Authorization: Basic dXNlcjpwYXNz https://bob:hunter2@registry.local/v2 at ${user} and ${homedir()}/.kube`;
+    const out = publicText(raw);
+    for (const leak of ['opaque-cluster-secret', 'p4ss', 'opaque-password', 'dXNlcjpwYXNz', 'hunter2', 'other', homedir()]) expect(out).not.toContain(leak);
+    expect(out).toContain('registry.local/v2');
+  });
+  it('an error is sanitized whole, then cut: a credential across the cut never leaves its prefix', async () => {
+    const long = `${'x'.repeat(225)} ghp_abcdefghijklmnopqrstuvwxyz0123456789`;
+    const reader = new ClusterStatusReader(() => ({ exe: '/core', home: '/h', exec: async () => { throw Object.assign(new Error('Command failed'), { stderr: long }); } }));
+    const read = await reader.read();
+    const rows = clusterRows(read, true, at);
+    expect(JSON.stringify(rows)).not.toContain('ghp_abc');
+    expect(JSON.stringify(clusterDiagnostics(read))).not.toContain('ghp_abc');
+  });
+  it('a timeout says the wait this caller gave it', () => {
+    expect(clusterRows({ kind: 'timeout', ms: 2_400 }, true, at).cluster).toMatchObject({ reason: 'the cluster did not answer within 2 s', timeoutMs: 2_400 });
   });
   it('a read that failed part-way, timed out or errored is never ok', () => {
     expect(clusterRows(ok({ configured: true, reachable: true, context: 'rd', detail: 'forbidden' }), true, at).cluster).toMatchObject({ state: 'degraded', reason: expect.stringContaining('forbidden') });
