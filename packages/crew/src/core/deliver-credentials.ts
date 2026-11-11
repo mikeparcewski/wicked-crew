@@ -262,9 +262,11 @@ let ghMemo: { at: number; value: Promise<GhStatus> } | null = null;
 const GH_MEMO_MS = 30_000;
 
 /** The environment every gh child of crew's credential reads runs in: an exported GH_TOKEN / GITHUB_TOKEN is dropped, so
- *  the listing and the resolver see the same signed-in identities (an env-token account is never offered then refused). */
-export function ghChildEnv(): NodeJS.ProcessEnv {
-  const env = childEnvWithBootEstateDb(process.env);
+ *  the listing and the resolver see the same signed-in identities (an env-token account is never offered then refused).
+ *  `base` is the crew child env the CALL SITE builds with `childEnvWithBootEstateDb(process.env)`, named there so the
+ *  static spawn-site guard (tests/governance-child-env.test.ts, crew#495) sees it at every gh call. Returns a copy. */
+export function ghChildEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...base };
   delete env['GH_TOKEN'];
   delete env['GITHUB_TOKEN'];
   return env;
@@ -285,7 +287,7 @@ export async function ghLoginsOrAbsent(): Promise<string[] | 'absent' | null> {
 
 function ghStatusUncached(): Promise<GhStatus> {
   return new Promise((resolve) => {
-    execFile('gh', ['auth', 'status', '--hostname', 'github.com'], { timeout: 4_000, encoding: 'utf8', env: ghChildEnv() }, (err, stdout, stderr) => {
+    execFile('gh', ['auth', 'status', '--hostname', 'github.com'], { timeout: 4_000, encoding: 'utf8', env: ghChildEnv(childEnvWithBootEstateDb(process.env)) }, (err, stdout, stderr) => {
       const code = (err as { code?: unknown } | null)?.code;
       if (code === 'ENOENT') return resolve('absent');
       // A non-numeric code (a timeout kill, another spawn failure) is no answer at all.

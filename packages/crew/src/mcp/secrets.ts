@@ -82,7 +82,7 @@ export type GhRunner = (args: string[]) => Promise<GhRan>;
 /** Bounded, no shell. An exported GH_TOKEN / GITHUB_TOKEN is dropped so it can never stand in for the pinned CLI identity. */
 export const defaultGhRunner: GhRunner = (args) =>
   new Promise((resolve) => {
-    execFile('gh', args, { timeout: 4_000, encoding: 'utf8', env: ghChildEnv() }, (err, stdout, stderr) => {
+    execFile('gh', args, { timeout: 4_000, encoding: 'utf8', env: ghChildEnv(childEnvWithBootEstateDb(process.env)) }, (err, stdout, stderr) => {
       const code = (err as { code?: unknown } | null)?.code;
       if (code === 'ENOENT') return resolve({ code: null, stdout: '', stderr: '', enoent: true });
       resolve({ code: err === null ? 0 : typeof code === 'number' ? code : null, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') });
