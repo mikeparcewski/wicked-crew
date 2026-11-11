@@ -7291,9 +7291,29 @@ export interface RequirementsGraphBuild {
   behind: boolean;
 }
 
+/** A requirement's business domain (wicked-core#1425). `confidence` is `null` when the engine sent none usable. */
+export interface RequirementBusinessDomain {
+  id: string;
+  name: string;
+  confidence: number | null;
+}
+
+/** One entry of the business-domain catalog (`RequirementsPage.businessDomains`). */
+export interface RequirementBusinessDomainCatalogEntry {
+  id: string;
+  name: string;
+  purpose: string;
+  /** Requirement keys the domain holds. */
+  requirements: string[];
+  directories: string[];
+}
+
 export interface RequirementSummary {
   key: string;
   domain: string;
+  /** The requirement's business domain; the key is OMITTED when the graph has none (never `null`), and ABSENT
+   *  from a daemon whose core predates it. `domain` stays the directory. */
+  businessDomain?: RequirementBusinessDomain;
   reqId: string;
   title: string;
   category: 'functional' | 'config-data';
@@ -7387,6 +7407,9 @@ export interface RequirementsPage {
    *  older engine's `mapped_pct` label, or one its counts do not support; ABSENT from an older
    *  daemon. */
   coverage?: RequirementsCoverage | null;
+  /** The business-domain catalog of the whole corpus (not the query's subset); ABSENT when the graph carries none
+   *  or from an older daemon. */
+  businessDomains?: RequirementBusinessDomainCatalogEntry[];
   /**
    * (0.165.0) Which build the rows are. The list is the last graph BUILD; `coverage` counts the store NOW,
    * which moves on when a run maps more without building (stopped at its repeat ask, or below the minimum,

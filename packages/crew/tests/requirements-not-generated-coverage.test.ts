@@ -94,3 +94,52 @@ describe('GET /repos/:id/requirements — not generated yet, with the share mapp
     });
   });
 });
+
+describe('GET /repos/:id/requirements — business domain on the wire (wicked-core#1425)', () => {
+  let app: FastifyInstance | undefined;
+  let dir: string | undefined;
+  afterEach(async () => {
+    await app?.close();
+    app = undefined;
+    forgetRequirementsReads();
+    if (dir !== undefined) removeScratch(dir);
+    dir = undefined;
+  });
+
+  it('serializes businessDomain on an assigned row, omits it on an unassigned one, and carries the catalog', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'req-bd-http-'));
+    const db = join(dir, 'estate.db');
+    writeFileSync(db, '');
+    const repo: RepoEntry = {
+      id: 'wicked-crew', name: 'wicked-crew', root_path: join(dir, 'repo'),
+      default_branch: 'main', registered_at: 0, code_graph_db: db,
+    };
+    const rule = [{ id: 'R', statement: 'a rule', confidence: 0.5 }];
+    const catalog = [{ id: 'bd-1', name: 'Payments', purpose: 'Money in', requirements: ['dir/a::REQ-001'], directories: ['dir/a'] }];
+    const graph = {
+      metadata: { business_domains: catalog },
+      domains: {
+        'dir/a': {
+          requirements: {
+            'REQ-001': { title: 'Assigned', business_rules: rule, business_domain: { id: 'bd-1', name: 'Payments', confidence: 0.8 } },
+            'REQ-002': { title: 'Unassigned', business_rules: rule },
+          },
+        },
+      },
+    };
+    const adapter = {
+      listRepos: vi.fn().mockResolvedValue([repo]),
+      getRequirementsGraphForRepo: vi.fn().mockResolvedValue({ graph, coverage: null }),
+    } as unknown as CoreAdapter;
+    app = Fastify({ logger: false });
+    registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), undefined, undefined, {});
+    await app.ready();
+    const res = await app.inject({ method: 'GET', url: '/api/v1/repos/wicked-crew/requirements' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    const rows = new Map<string, Record<string, unknown>>(body.items.map((i: { reqId: string }) => [i.reqId, i]));
+    expect(rows.get('REQ-001')!['businessDomain']).toEqual({ id: 'bd-1', name: 'Payments', confidence: 0.8 });
+    expect('businessDomain' in rows.get('REQ-002')!).toBe(false);
+    expect(body.businessDomains).toEqual(catalog);
+  });
+});
