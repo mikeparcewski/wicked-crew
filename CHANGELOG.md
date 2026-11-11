@@ -10,13 +10,58 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.18.8] — 2026-11-10
+
+A patch: Docker seat networks take their subnets from a wicked-owned pool, so a host no longer caps out at about three
+concurrent runs; the engine sweeps the networks it leaks; the interactive bridge listens on loopback only; and a
+disputed rule that no council can take says why. Needs wicked-core-ts 0.15.37 (`^0.15.37`) and wicked-interactive
+0.16.1 (`^0.16.1`). Needs wicked-crew-api-types 0.204.0 (additive: the run's cost fields). Still bundles wicked-studio 0.16.5.
+
+**Upgrading:**
+
+- **Docker seat networks now use a wicked subnet pool (wicked-core#1389).** Each seat network takes a `/26` from
+  `WICKED_SEAT_SUBNET_POOL` (default `10.213.0.0/16`; slot size `WICKED_SEAT_SUBNET_PREFIX`, default `/26`, 24 to 28
+  allowed): 1024 seat networks instead of Docker's ~31 default address pools. A slot that overlaps one of the
+  runtime's networks or a host route (a VPN or corporate route) is skipped, and slots are taken under a host-wide lock
+  so two daemons never share one. If `10.213.0.0/16` is in use on your network, set another pool; set
+  `WICKED_SEAT_SUBNET_POOL=runtime` for the old behaviour (the runtime's own pools). A malformed pool or prefix, or a
+  pool wider than a `/12`, is refused rather than replaced. Gateway external bridges keep the runtime's pools.
+- **The engine sweeps the networks it leaks (wicked-core#1385).** At the first seat arm and then at most hourly, unused
+  seat networks older than 1 hour are pruned (was 24 hours), and a gateway's external bridge is removed only when it
+  is labelled by the engine, dangling with nothing attached, at least an hour old, its gateway directory is gone from
+  this host and its gateway container definitively does not exist. Networks the engine did not create are never
+  touched. A bridge made before this release (no directory label) is never removed.
+- **The interactive bridge listens on loopback only (wicked-interactive#344).** Crew now spawns
+  `npx wicked-interactive@^0.16.1`, which binds `127.0.0.1` (plus `::1` when the host has IPv6) and never every
+  interface, so documents and the bridge API are no longer reachable from the local network; there is no option to
+  widen it. Crew already reaches the bridge on `127.0.0.1`. A 0.16.0 bridge on `PATH` is no longer used (npx instead),
+  `WICKED_INTERACTIVE_SPEC=^0.16.0` is reported as below the floor, and a 0.16.0 bridge already running keeps serving
+  until it restarts (crew#1288).
+
 ### Fixed
 
+- **Docker running out of address pools is named (wicked-core#1377).** A seat network create that failed was always
+  reported as `container_runtime_down`, even while the runtime answered, so a run waited out host load while Docker had
+  run out of address pools. It is now `address_pools_exhausted` (remedy: list the networks and remove the unused ones;
+  with the subnet pool above, it also names a full pool), `container_runtime_down` only when the runtime cannot be
+  reached, and otherwise `seat_network_unavailable` with the runtime's own error. Both new kinds hold the step at a
+  `failure` gate that names the network, its cause and the fix, with no bench, failover or runtime wait.
+- **A disputed rule that no council can take says why (wicked-core#1378, wicked-core#1379).** A skip's judge-only
+  re-run no longer re-judges the four process rules (their evidence key no longer moves with the re-run's attempt
+  number). When POL-2101's record part (the step records) is broken, the hold reads `record_unsettled: …` instead of
+  the false "the rule judge saw only part of the change", and a council short of seats says who could sit and who the
+  parties are (`seats_benched: 1 eligible seat(s) (pi), a rule council needs 3; …`). Who may sit, the council size, the
+  evidence bar and deny-dominates are unchanged: a disputed rule still holds until a council rules or the person skips
+  it with a reason.
+- The deliver text's PR title no longer doubles its prefix or cuts mid-word: a leading issue reference in the intent
+  (`Fixes #N:`, `Fix #N -`, `Closes #N:`, `Refs #N:`, any case) is dropped from the title and commit subject (the body
+  keeps `Fixes #N`), so the conventional prefix appears once; a title or subject over 100 / 72 characters is cut at a
+  whole word with an ellipsis, and a single over-long token yields a bare `…` instead of a hard cut (#1485).
 - `GET /runs/:id` now fills the run's `cost_usd` (the sum of every priced `cliUsage.costUsd`; `null` when usage was
   recorded and none was priced) and `usage_seats_unmetered` (the seats that reported usage with no cost, such as codex),
   so a run no longer reads "cost not in run record" and a total says which seats it leaves out. Both are optional
-  `AgentSession` fields in `wicked-crew-api-types` (additive); the list route is unchanged. Run facts, the seat record
-  and the run view share one pricing classification (#1486).
+  `AgentSession` fields in `wicked-crew-api-types` 0.204.0 (additive); the list route is unchanged. Run facts, the seat
+  record and the run view share one pricing classification (#1486).
 
 ## [0.18.7] — 2026-11-10
 
@@ -54,11 +99,6 @@ bundles wicked-studio 0.16.5.
 - Two runtime hints no longer tell users to `npm install -g wicked-crew`: the npx-cache refusal of
   `--install-service` and the `vault.unresolvable` remedy now name the installer flow (`npx wicked-installer`, then
   `wicked-crew serve`); the vault remedy keeps its `WICKED_VAULT_BIN` escape. Each sentence is pinned by a test (#1468).
-
-- The deliver text's PR title no longer doubles its prefix or cuts mid-word: a leading issue reference in the intent
-  (`Fixes #N:`, `Fix #N -`, `Closes #N:`, `Refs #N:`, any case) is dropped from the title and commit subject (the body
-  keeps `Fixes #N`), so the conventional prefix appears once; a title or subject over 100 / 72 characters is cut at a
-  whole word with an ellipsis, and a single over-long token yields a bare `…` instead of a hard cut (#1485).
 
 ## [0.18.6] — 2026-11-10
 
@@ -6693,7 +6733,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.7...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.8...HEAD
+[0.18.8]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.7...v0.18.8
 [0.18.7]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.6...v0.18.7
 [0.18.6]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.5...v0.18.6
 [0.18.5]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.4...v0.18.5

@@ -189,7 +189,14 @@ const INTERACTIVE_PACKAGE = 'wicked-interactive';
  * a 0.15.x bridge that is adopted keeps serving until it restarts (crew#1288); the previous daemon's shutdown reaps
  * the bridges it spawned, so a normal upgrade starts a 0.16.x one.
  */
-export const INTERACTIVE_DEFAULT_RANGE = '^0.16.0';
+/**
+ * 0.16.1 (wicked-interactive#344): the bridge listens on loopback only (127.0.0.1, plus ::1 when the host has IPv6),
+ * never every interface; 0.16.0 served documents and the bridge API to the local network. Crew reaches the bridge on
+ * 127.0.0.1 (readLock's default host), so nothing else changes. The floor follows so neither the npx spawn nor a
+ * PATH binary resolves to 0.16.0; as before, a 0.16.0 bridge that is adopted keeps serving until it restarts
+ * (crew#1288).
+ */
+export const INTERACTIVE_DEFAULT_RANGE = '^0.16.1';
 /** The env override of the RANGE (not the package). */
 export const INTERACTIVE_SPEC_ENV = 'WICKED_INTERACTIVE_SPEC';
 /** The default spec — what the daemon spawns with no override. */
