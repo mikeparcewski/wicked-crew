@@ -13,19 +13,19 @@ mentioned only where a daemon release depends on them.
 ## [0.18.13] — 2026-11-12
 
 A patch for chat-made work on the Kubernetes seat floor and for chat-made demo videos. A Desk chat scoped to "All
-repos" runs there again, and a Claude seat can read and edit the draft it was given, so chat-made documents, decks and
-pages are no longer refused at their draft and review steps. A demo video started from a chat's /demo takes the app address the person typed, and a typed
-answer fills the job's "The running app?" question. Needs wicked-core-ts 0.15.42 (`^0.15.42`).
-Bundles wicked-studio 0.16.8: the floating chat points to a proposed job (studio#1135), and a job question that asks
-for words gets a field and an Answer button (studio#1134). wicked-crew-api-types is unchanged (0.208.0). The garden
-floor stays 12.68.0.
+repos" no longer passes the copy-in limit because of ignored build output, and a Claude seat can read and edit the
+draft it was given, so chat-made documents, decks and pages are no longer refused at their draft and review steps. A
+demo video started from a chat's /demo takes the app address the person typed, and a typed answer fills the job's "The
+running app?" question. Needs wicked-core-ts 0.15.42 (`^0.15.42`). Bundles wicked-studio 0.16.8: the floating chat
+points to a proposed job (studio#1135), and a job question that asks for words gets a field and an Answer button
+(studio#1134). wicked-crew-api-types is unchanged (0.208.0). The garden floor stays 12.68.0.
 
 **Upgrading:**
 
 - **wicked-core-ts 0.15.42.** A read-only repository root is copied into a Kubernetes seat as git lists it (tracked,
-  plus untracked files that are not ignored), so a chat with every registered repository in scope stays under the
-  copy-in limit. A refused copy-in is reported as `copy_in_refused`, no longer `root_unresolvable`. No image is
-  rebuilt.
+  plus untracked files that are not ignored), so ignored build output and run worktrees no longer push a chat with
+  every registered repository in scope past the copy-in limit. Inputs still larger than the limit are refused, now
+  reported as `copy_in_refused` instead of `root_unresolvable`. No image is rebuilt.
 - **A Claude seat on the Kubernetes floor can read and edit its run's declared draft root (core-ts 0.15.42,
   core#1461).** Its settings file is narrowed before the pod's copy of it is made, and the gate hook judges a
   `cd <draft root> && <write>` against that directory instead of a stale one.
