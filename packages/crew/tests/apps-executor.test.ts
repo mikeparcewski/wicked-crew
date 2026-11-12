@@ -124,6 +124,67 @@ describe('the executor: projection, coercion, paths, cache, limits (units)', () 
     }
   });
 
+  it('crew#1518: late joins cannot exceed 60 times the query count in any trailing minute', () => {
+    let t = 0;
+    const appQueries = 18;
+    const limits = new AppLimits(() => t);
+    const accepted: number[] = [];
+    let mostInMinute = 0;
+    const read = (panel: number): boolean => {
+      try {
+        limits.rateQuery('desk', 'priya', `panel-${panel}:{}`, appQueries);
+      } catch (err) {
+        expect(err).toBeInstanceOf(RateLimited);
+        return false;
+      }
+      accepted.push(t);
+      mostInMinute = Math.max(mostInMinute, accepted.filter((at) => t - at < 60_000).length);
+      return true;
+    };
+    expect(read(0)).toBe(true);
+    t = 9_000;
+    for (let panel = 1; panel < appQueries; panel++) expect(read(panel)).toBe(true);
+
+    let served = 0;
+    for (let view = 0; view < 60; view++) {
+      t = 60_000 + view * 100;
+      for (let panel = 0; panel < appQueries; panel++) if (read(panel)) served++;
+    }
+    // Charging only at opening admitted 1,097 reads here: 17 late joins plus 60 full views.
+    expect(mostInMinute).toBeLessThanOrEqual(60 * appQueries);
+    expect(served).toBe(59 * appQueries);
+    t = 68_999;
+    expect(read(0)).toBe(false);
+    t = 69_000;
+    for (let panel = 0; panel < appQueries; panel++) expect(read(panel)).toBe(true);
+    expect(mostInMinute).toBe(60 * appQueries);
+  });
+
+  it('limits: retained read keys have fixed size and expired units are swept every 10 s even below the map cap', () => {
+    let t = 0;
+    const limits = new AppLimits(() => t);
+    limits.rateQuery('desk', 'priya', JSON.stringify(['short', {}]), 18);
+    limits.rateQuery('desk', 'priya', JSON.stringify(['large', { text: 'x'.repeat(100_000) }]), 18);
+    // Inspect retained storage to check the memory bound, without exposing it in the runtime API.
+    const units = limits['queryUnits'];
+    const keys = [...units.values()].flatMap((unit) => [...unit.reads]);
+    expect(keys).toHaveLength(2);
+    for (const key of keys) expect(key).toMatch(/^[A-Za-z0-9_-]{22}$/);
+
+    t = 5_000;
+    limits.rateQuery('desk', 'sam', 'panel-0:{}', 18);
+    expect(units.size).toBe(2);
+    t = 10_000;
+    limits.rateQuery('desk', 'sam', 'panel-1:{}', 18); // a join also triggers the due sweep
+    expect([...units.keys()]).toEqual(['desk\u0000sam']);
+    t = 15_000;
+    limits.rateQuery('desk', 'olga', 'panel-0:{}', 18);
+    expect(units.size).toBe(2); // no second sweep within 10 s, though sam's unit expired
+    t = 20_000;
+    limits.rateQuery('desk', 'olga', 'panel-1:{}', 18);
+    expect([...units.keys()]).toEqual(['desk\u0000olga']);
+  });
+
   it.each([1, 18])('crew#1518: hundreds of repeated actions on a %i-query app are refused until reset', (appQueries) => {
     let t = 0;
     const limits = new AppLimits(() => t);
@@ -276,43 +337,62 @@ describe('the executor over the K1 test services and the crew source', () => {
 
   const query = (q: string, params?: Record<string, unknown>, as: 'priya' | 'sam' | 'seat' | 'olga' = 'priya') => h.call('POST', '/apps/desk/query', { version: 2, query: q, ...(params !== undefined ? { params } : {}) }, as);
 
-  it('crew#1518: the query route serves ten 18-panel views, then refuses repeated actions with a reset and retry-after', async () => {
-    await h.newApp('case-desk');
-    const queries: AppQuery[] = Array.from({ length: 18 }, (_, i) => ({
-      id: `q${String(i).padStart(2, '0')}`,
-      source: 'crew',
-      kind: 'crew',
-      rowPath: '$.runs[*]',
-      output: [{ name: 'id', type: 'string' }],
-    }));
-    const landed = await h.land('case-desk', specWith(queries), Object.fromEntries(queries.map((q) => [q.id, JSON.stringify({ route: '/runs' })])));
-    expect(landed.status, JSON.stringify(landed.body)).toBe(200);
-    const version = landed.body.app!.head.version;
-    const read = (query: string) => h.app.inject({
-      method: 'POST',
-      url: '/api/v1/apps/case-desk/query',
-      headers: { authorization: 'Bearer priya' },
-      payload: { version, query },
+  it('crew#1518: the query route serves ten 18-panel views, refuses repeated actions, and recovers after reset', async () => {
+    let t = 0;
+    const desk = await appsHarness({
+      now: () => t,
+      extra: (app) => {
+        app.get('/api/v1/runs', async () => ({ runs: [{ id: 'run-1' }] }));
+      },
     });
-    for (let view = 0; view < 10; view++) {
+    try {
+      await desk.newApp('case-desk');
+      const queries: AppQuery[] = Array.from({ length: 18 }, (_, i) => ({
+        id: `q${String(i).padStart(2, '0')}`,
+        source: 'crew',
+        kind: 'crew',
+        rowPath: '$.runs[*]',
+        output: [{ name: 'id', type: 'string' }],
+      }));
+      const landed = await desk.land('case-desk', specWith(queries), Object.fromEntries(queries.map((q) => [q.id, JSON.stringify({ route: '/runs' })])));
+      expect(landed.status, JSON.stringify(landed.body)).toBe(200);
+      const version = landed.body.app!.head.version;
+      const read = (query: string) => desk.app.inject({
+        method: 'POST',
+        url: '/api/v1/apps/case-desk/query',
+        headers: { authorization: 'Bearer priya' },
+        payload: { version, query },
+      });
+      for (let view = 0; view < 10; view++) {
+        for (const q of queries) {
+          const response = await read(q.id);
+          expect(response.statusCode, response.body).toBe(200);
+        }
+        t += 3_000;
+      }
+      // Ten views consumed ten units; fifty repeats consume the rest of this viewer's budget.
+      for (let action = 0; action < 50; action++) {
+        const response = await read('q00');
+        expect(response.statusCode, response.body).toBe(200);
+        t += 100;
+      }
+      const refused = await read('q00');
+      expect(refused.statusCode, refused.body).toBe(429);
+      const body = refused.json<{ code: string; error: string; retryAfterMs: number }>();
+      expect(body.code).toBe('rate_limited');
+      expect(body.error).toContain('60 page views or actions a minute');
+      expect(body.error).toContain('resets in 25 s');
+      expect(body.retryAfterMs).toBe(25_000);
+      expect(refused.headers['retry-after']).toBe('25');
+
+      t += body.retryAfterMs + 1;
       for (const q of queries) {
         const response = await read(q.id);
         expect(response.statusCode, response.body).toBe(200);
       }
+    } finally {
+      await desk.close();
     }
-    // Ten views consumed ten units; fifty repeats consume the rest of this viewer's budget.
-    for (let action = 0; action < 50; action++) {
-      const response = await read('q00');
-      expect(response.statusCode, response.body).toBe(200);
-    }
-    const refused = await read('q00');
-    expect(refused.statusCode, refused.body).toBe(429);
-    const body = refused.json<{ code: string; error: string; retryAfterMs: number }>();
-    expect(body.code).toBe('rate_limited');
-    expect(body.error).toContain('60 page views or actions a minute');
-    expect(body.error).toContain('resets in');
-    expect(body.retryAfterMs).toBeGreaterThan(0);
-    expect(refused.headers['retry-after']).toBe(String(Math.max(1, Math.ceil(body.retryAfterMs / 1_000))));
   });
 
   it('a REST read: the row path, the declared columns only, the more path; the next page says it is the last', async () => {

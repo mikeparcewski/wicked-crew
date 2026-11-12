@@ -2,7 +2,10 @@
  * Concurrency, queue and rate (DES-APPS-001 §7.5): 4 queries per source per app at once, a queue of 16,
  * then `429`; per viewer 60 page views or actions' query batches and 20 action runs a minute per app.
  * A view's distinct reads count once within 10 s, up to the app's declared query count.
+ * Its minute in the rate window runs from its latest accepted read.
  */
+
+import { createHash } from 'node:crypto';
 
 export const QUERY_LIMITS = { concurrent: 4, queue: 16, perMinute: 60, actionsPerMinute: 20 } as const;
 
@@ -29,6 +32,7 @@ export class AppLimits {
   private readonly slots = new Map<string, Slot>();
   private readonly windows = new Map<string, number[]>();
   private readonly queryUnits = new Map<string, QueryUnit>();
+  private lastQuerySweepAt = -Infinity;
 
   constructor(private readonly now: () => number = Date.now) {}
 
@@ -36,16 +40,22 @@ export class AppLimits {
   rateQuery(app: string, who: string, read: string, appQueries: number): void {
     const key = `${app}\u0000${who}`;
     const t = this.now();
+    if (t - this.lastQuerySweepAt >= 10_000) {
+      for (const [k, v] of this.queryUnits) if (t - v.startedAt >= 10_000) this.queryUnits.delete(k);
+      this.lastQuerySweepAt = t;
+    }
+    // Retain fixed-size keys, never the potentially large bound parameter text.
+    const digest = createHash('sha256').update(read).digest('base64url').slice(0, 22);
     const unit = this.queryUnits.get(key);
-    if (unit !== undefined && t - unit.startedAt < 10_000 && !unit.reads.has(read) && unit.reads.size < Math.max(1, appQueries)) {
-      unit.reads.add(read);
+    if (unit !== undefined && t - unit.startedAt < 10_000 && !unit.reads.has(digest) && unit.reads.size < Math.max(1, appQueries)) {
+      unit.reads.add(digest);
+      // The open unit is newest: keep it charged until its last read leaves the trailing minute.
+      const window = this.windows.get(`query\u0000${key}`);
+      if (window !== undefined && window.length > 0) window[window.length - 1] = t;
       return;
     }
     this.rate('query', app, who); // a refusal neither opens a unit nor records a read
-    this.queryUnits.set(key, { startedAt: t, reads: new Set([read]) });
-    if (this.queryUnits.size > 10_000) {
-      for (const [k, v] of this.queryUnits) if (t - v.startedAt >= 10_000) this.queryUnits.delete(k);
-    }
+    this.queryUnits.set(key, { startedAt: t, reads: new Set([digest]) });
   }
 
   /** Count one call by `who` in `bucket` against `perMinute`; throws `RateLimited` past it. */
