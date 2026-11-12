@@ -53,6 +53,7 @@ interface ArtifactCorroboration {
 
 interface ArtifactCoverage {
   real_pct?: unknown;
+  weightedPct?: unknown;
   min_pct?: unknown;
   behavior_bearing?: unknown;
   real?: unknown;
@@ -225,6 +226,8 @@ export interface RequirementCorroboration {
  */
 export interface RequirementsCoverage {
   realPct: number;
+  /** Confidence-weighted share, headline only; optional, absent when the engine did not send a usable one. */
+  weightedPct?: number;
   minPct: number;
   behaviorBearing: number;
   real: number;
@@ -338,6 +341,8 @@ export function coverageOf(raw: ArtifactCoverage | undefined): RequirementsCover
   if (c.real + c.placeholders + c.unmapped !== c.behaviorBearing) return null;
   const share = c.behaviorBearing === 0 ? 100 : Math.floor((c.real * 100) / c.behaviorBearing);
   if (c.realPct !== share) return null;
+  const weightedPct = count(raw.weightedPct);
+  if (weightedPct !== null && weightedPct <= 100) c.weightedPct = weightedPct;
   return c;
 }
 

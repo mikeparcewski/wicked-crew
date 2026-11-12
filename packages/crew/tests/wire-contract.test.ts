@@ -46,6 +46,7 @@ import type {
   RequirementBusinessDomainCatalogEntry,
   RequirementDetail,
   RequirementsCodeDrift,
+  RequirementsCoverage,
   RequirementsMinimum,
   RequirementsPage,
   RequirementSummary,
@@ -920,6 +921,18 @@ respondsWith<Wire.GovernanceWikiMeta['scoreboard_available'], ReturnType<CoreAda
 
 // GET/PATCH /repos/:id/requirements — server-side search + overrides.
 respondsWith<Wire.RequirementsPage, RequirementsPage>();
+respondsWith<Wire.RequirementsCoverage, RequirementsCoverage>();
+{
+  // The confidence-weighted headline (wicked-core#1445) is optional for older engines.
+  const base = { realPct: 70, minPct: 80, behaviorBearing: 100, real: 70, placeholders: 12, unmapped: 18, notProduct: 9 };
+  const older: Wire.RequirementsCoverage = { ...base };
+  const newer: Wire.RequirementsCoverage = { ...base, weightedPct: 62 };
+  // @ts-expect-error the weighted headline is a number when present
+  const badWeightedPct: Wire.RequirementsCoverage = { ...base, weightedPct: '62' };
+  // @ts-expect-error an unavailable weighted headline is omitted, never null
+  const nullWeightedPct: Wire.RequirementsCoverage = { ...base, weightedPct: null };
+  void [older, newer, badWeightedPct, nullWeightedPct];
+}
 respondsWith<Wire.RequirementDetail, RequirementDetail>();
 // The business domain (wicked-core#1425): optional on a row (omitted, never null), a catalog on the page.
 respondsWith<Wire.RequirementBusinessDomain, RequirementBusinessDomain>();

@@ -10,6 +10,12 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+
+- The requirements API carries the confidence-weighted headline `coverage.weightedPct` when the engine sends it
+  (wicked-core#1445); optional, with the stated share and minimum still using `realPct`
+  (api-types `RequirementsCoverage.weightedPct?`).
+
 ### Fixed
 
 - Apps count a page view or user action once against the viewer's 60-a-minute query budget, grouping its

@@ -464,6 +464,27 @@ describe('requirements service — coverage label + corroboration (domain-model 
     expect(coverageOf({ ...ok, real_pct: 0, behavior_bearing: 0, real: 0, placeholders: 0 })).toBeNull();
   });
 
+  describe('confidence-weighted headline (wicked-core#1445)', () => {
+    const raw = { real_pct: 70, min_pct: 80, behavior_bearing: 100, real: 70, placeholders: 12, unmapped: 18, not_product: 9 };
+    const label = { realPct: 70, minPct: 80, behaviorBearing: 100, real: 70, placeholders: 12, unmapped: 18, notProduct: 9 };
+
+    it.each([0, 62, 100])('carries weightedPct %s without changing the stated share', (weightedPct) => {
+      expect(coverageOf({ ...raw, weightedPct })).toEqual({ ...label, weightedPct });
+    });
+
+    it('omits weightedPct when the engine did not send it', () => {
+      const c = coverageOf(raw)!;
+      expect(c).toEqual(label);
+      expect('weightedPct' in c).toBe(false);
+    });
+
+    it.each([101, -1, 3.5, '62', null])('omits malformed weightedPct %s while keeping the label valid', (weightedPct) => {
+      const c = coverageOf({ ...raw, weightedPct })!;
+      expect(c).toEqual(label);
+      expect('weightedPct' in c).toBe(false);
+    });
+  });
+
   it('a graph built before the fields reads null and 0/0, never a guess', async () => {
     const r_ = await fixtureRepo();
     const page = await listRequirements(repoAt(r_), { offset: 0, limit: 50 }, estateAt(r_));
@@ -577,6 +598,15 @@ describe('requirements service — the page says which build it lists (req-list-
   it("a build at the store's counts is not behind, whatever minimum the store holds it to now", async () => {
     const page = await pageWith({ generation: 3, coverage: { ...live, min_pct: 60 } });
     expect(page!.graphBuild).toMatchObject({ generation: 3, behind: false });
+  });
+
+  it('a live weighted headline does not put a build with the same counts behind', () => {
+    const now = coverageOf({ ...live, weightedPct: 62 });
+    expect(graphBuildOf({ generation: 3, coverage: live }, now)).toEqual({
+      generation: 3,
+      coverage: coverageOf(live),
+      behind: false,
+    });
   });
 
   it("the rig's case: a build labelled before real requirements were counted is behind, its label null", async () => {
