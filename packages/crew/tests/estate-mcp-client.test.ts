@@ -30,7 +30,7 @@ import { removeScratch } from './setup/scratch.js';
 const FAKE_SERVER = `
 const fs = require('fs');
 const readline = require('readline');
-const [, , logPath, mode] = process.argv;
+const [, , logPath, mode, result] = process.argv;
 const rl = readline.createInterface({ input: process.stdin });
 function send(obj) { process.stdout.write(JSON.stringify(obj) + '\\n'); }
 rl.on('line', (line) => {
@@ -45,6 +45,10 @@ rl.on('line', (line) => {
     return;
   }
   if (msg.method === 'tools/call') {
+    if (mode === 'result') {
+      send({ jsonrpc: '2.0', id: msg.id, result: JSON.parse(result) });
+      return;
+    }
     if (mode === 'exit') { process.exit(0); return; }
     if (mode === 'rpcerror') {
       send({ jsonrpc: '2.0', id: msg.id, error: { code: -32603, message: 'boom from estate' } });
@@ -80,9 +84,9 @@ function makeFixture(): Fixture {
   return { scriptPath, logPath, dir };
 }
 
-function spawnFake(fx: Fixture, mode: 'ok' | 'rpcerror' | 'exit'): () => ChildProcess {
+function spawnFake(fx: Fixture, mode: 'ok' | 'rpcerror' | 'exit' | 'result', result: unknown = {}): () => ChildProcess {
   return () =>
-    spawn(process.execPath, [fx.scriptPath, fx.logPath, mode], { stdio: ['pipe', 'pipe', 'pipe'] });
+    spawn(process.execPath, [fx.scriptPath, fx.logPath, mode, JSON.stringify(result)], { stdio: ['pipe', 'pipe', 'pipe'] });
 }
 
 function readFrames(logPath: string): Array<Record<string, unknown>> {
@@ -142,6 +146,53 @@ describe('callEstateTool', () => {
     await expect(
       callEstateTool('proposal.approve', { id: 'p1' }, { spawn: spawnFake(fx, 'rpcerror'), timeoutMs: 5000 }),
     ).rejects.toMatchObject({ name: 'EstateMcpError', code: -32603, message: 'boom from estate' });
+  });
+
+  it('unwraps the captured estate 0.35.3 replace_source success envelope (crew#1524)', async () => {
+    const fx = makeFixture();
+    dirs.push(fx.dir);
+    const result = {
+      content: [{
+        type: 'text',
+        text: '{"docs":1,"generation":1,"links":{"cleanup":null,"stale_removed":0,"written":0},"orphaned_edges":{"count":0,"edges":[]},"sections":1,"sourceId":"src-1","tombstoned":{"doc_count":0,"docs":[],"nodes":0}}',
+      }],
+      isError: false,
+    };
+    await expect(callEstateTool('knowledge.replace_source', {}, { spawn: spawnFake(fx, 'result', result) })).resolves.toEqual({
+      docs: 1, generation: 1, links: { cleanup: null, stale_removed: 0, written: 0 },
+      orphaned_edges: { count: 0, edges: [] }, sections: 1, sourceId: 'src-1',
+      tombstoned: { doc_count: 0, docs: [], nodes: 0 },
+    });
+  });
+
+  it.each([
+    "replace_source committed nothing and tombstoned nothing (any link rows it staged stay hidden, and the source's next generation deletes them): invalid argument: generation 1 is older than the stored generation 2 for source src-1",
+    "replace_source committed nothing and tombstoned nothing (any link rows it staged stay hidden, and the source's next generation deletes them): storage error: database is locked",
+  ])('reports the estate 0.35.3 refusal itself: %s', async (firstLine) => {
+    const fx = makeFixture();
+    dirs.push(fx.dir);
+    const result = { content: [{ type: 'text', text: `${firstLine}\nAdditional diagnostic body` }], isError: true };
+    const err = await callEstateTool('knowledge.replace_source', {}, { spawn: spawnFake(fx, 'result', result) }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(EstateMcpError);
+    expect((err as EstateMcpError).message).toBe(firstLine.length > 200 ? `${firstLine.slice(0, 200)}… (${firstLine.length} chars)` : firstLine);
+    expect((err as EstateMcpError).message).not.toContain('not JSON');
+  });
+
+  it('preserves the message from a JSON isError payload', async () => {
+    const fx = makeFixture();
+    dirs.push(fx.dir);
+    const result = { content: [{ type: 'text', text: '{"message":"estate refused this generation"}' }], isError: true };
+    await expect(callEstateTool('knowledge.replace_source', {}, { spawn: spawnFake(fx, 'result', result) }))
+      .rejects.toMatchObject({ name: 'EstateMcpError', message: 'estate refused this generation' });
+  });
+
+  it.each(['Unexpected answer', 'x'.repeat(240)])('reports only the capped first line of non-error text', async (firstLine) => {
+    const fx = makeFixture();
+    dirs.push(fx.dir);
+    const result = { content: [{ type: 'text', text: `${firstLine}\r\nAdditional diagnostic body` }], isError: false };
+    const detail = firstLine.length > 200 ? `${firstLine.slice(0, 200)}… (${firstLine.length} chars)` : firstLine;
+    await expect(callEstateTool('knowledge.replace_source', {}, { spawn: spawnFake(fx, 'result', result) }))
+      .rejects.toMatchObject({ name: 'EstateMcpError', message: `estate-mcp knowledge.replace_source answered text, not JSON: ${detail}` });
   });
 
   it('rejects (EstateMcpError) when the server exits before answering', async () => {

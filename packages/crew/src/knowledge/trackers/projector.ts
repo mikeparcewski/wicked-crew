@@ -24,6 +24,7 @@ import { callEstateTool } from '../../core/estate-mcp-client.js';
 import { canonicalJson } from '../../mcp/classify.js';
 import { entryId, normalizeRegistryFile } from '../../mcp/registry.js';
 import type { McpRegistryStore } from '../../mcp/registry-store.js';
+import { replaceSource } from '../estate-write.js';
 import { pmOf, type StoredTracker, trackersOf } from '../registry/entry.js';
 import type { RunAddress } from './addresses.js';
 import type { TrackerProjectionState } from './view.js';
@@ -48,6 +49,8 @@ export interface TrackerProjectorDeps {
   call?: EstateCall;
   log?: (message: string) => void;
   now?: () => number;
+  /** TESTS ONLY: the wait between SQLite contention retries. */
+  sleep?: (ms: number) => Promise<void>;
   /** TESTS ONLY: how a retry is scheduled (production: a timer). */
   schedule?: (fn: () => void, ms: number) => void;
 }
@@ -79,7 +82,7 @@ function cutBytes(text: string, max: number): string {
   }
   return `${out}…`;
 }
-const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+const message = (err: unknown): string => (err instanceof Error ? err.message : String(err)).split(/\r?\n/, 1)[0]!;
 
 /** The control endpoint of a link target. */
 export function controlId(target: { kind: 'project' | 'repo'; id: string }): string {
@@ -275,7 +278,7 @@ export class TrackerProjector {
         st.state = 'pending';
         this.states.set(j.id, st);
         try {
-          await this.call('knowledge.replace_source', { ...body, generation: this.nextGeneration(j.id) } as unknown as Record<string, unknown>);
+          await replaceSource(this.call, { ...body, generation: this.nextGeneration(j.id) } as unknown as Record<string, unknown>, this.deps);
           st.acked = desired;
           st.state = 'current';
           st.attempts = 0;
@@ -294,7 +297,7 @@ export class TrackerProjector {
     for (const [id, st] of this.states) {
       if (seen.has(id) || st.state === 'retired') continue;
       try {
-        await this.call('knowledge.replace_source', { ...trackerGenerationBody({ name: 'removed source', system: 'unknown' }, id, null, []), generation: this.nextGeneration(id) } as unknown as Record<string, unknown>);
+        await replaceSource(this.call, { ...trackerGenerationBody({ name: 'removed source', system: 'unknown' }, id, null, []), generation: this.nextGeneration(id) } as unknown as Record<string, unknown>, this.deps);
         st.state = 'retired';
       } catch (err) {
         this.deps.log?.(`[knowledge] tracker ${id} of a removed source was not tombstoned in estate: ${message(err)}`);

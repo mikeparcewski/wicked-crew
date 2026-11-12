@@ -319,7 +319,7 @@ function estateErrorFrom(err: Record<string, unknown>): EstateMcpError {
 /** Unwrap the `id:2` response: a JSON-RPC `error` throws; otherwise parse the MCP tool-result
  *  envelope's inner JSON text (`result.content[0].text`) and return it. An `isError:true` envelope
  *  (the R1 convention) is a failure too. */
-function unwrapToolResult(msg: Record<string, unknown>): unknown {
+function unwrapToolResult(msg: Record<string, unknown>, tool: string): unknown {
   if (isRecord(msg['error'])) throw estateErrorFrom(msg['error']);
   const result = msg['result'];
   if (!isRecord(result)) {
@@ -331,21 +331,23 @@ function unwrapToolResult(msg: Record<string, unknown>): unknown {
     throw new EstateMcpError('estate-mcp tool result had no text content');
   }
   const text = first['text'];
-  // Cap any raw tool-result text carried into an error: route code surfaces `err.message` in a 502,
-  let payload: unknown;
-  try {
-    payload = JSON.parse(text);
-  } catch {
-    throw new EstateMcpError(`estate-mcp tool result text was not JSON: ${capText(text)}`);
-  }
+  const firstLine = text.split(/\r?\n/, 1)[0]!;
+  // Estate 0.35.3 returns plain text for refusals, including SQLite writer contention (crew#1524).
   if (result['isError'] === true) {
-    const detail =
-      isRecord(payload) && typeof payload['message'] === 'string'
-        ? capText(payload['message'])
-        : capText(text);
-    throw new EstateMcpError(detail);
+    let detail = firstLine;
+    try {
+      const payload: unknown = JSON.parse(text);
+      detail = isRecord(payload) && typeof payload['message'] === 'string' ? payload['message'] : text;
+    } catch {
+      // A plain-text refusal carries its own cause; only its first line belongs in the error.
+    }
+    throw new EstateMcpError(capText(detail));
   }
-  return payload;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new EstateMcpError(`estate-mcp ${tool} answered text, not JSON: ${capText(firstLine)}`);
+  }
 }
 
 /**
@@ -366,7 +368,7 @@ export async function callEstateTool(
   args: Record<string, unknown>,
   io: EstateMcpIo = {},
 ): Promise<unknown> {
-  return unwrapToolResult(await callEstateToolRaw(tool, args, io));
+  return unwrapToolResult(await callEstateToolRaw(tool, args, io), tool);
 }
 
 /**

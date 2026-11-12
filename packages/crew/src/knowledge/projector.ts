@@ -30,6 +30,7 @@ import type { McpRegistryStore } from '../mcp/registry-store.js';
 import { ASK_ENUM_MAX, ASK_NAME_MAX } from '../sources/ask.js';
 import type { SqlCatalog } from '../sources/catalog/types.js';
 import type { SourceCatalogStore } from '../sources/store.js';
+import { replaceSource } from './estate-write.js';
 import { gateSourceOf, type GateSource } from './gate/sources.js';
 import { projectionKey } from './package.js';
 
@@ -53,8 +54,8 @@ export const GENERATION_MAX_DOCS = 5_000;
 export const GENERATION_MAX_BYTES = 32 * 1024 * 1024;
 /** Estate refuses a key or title over 512 bytes; crew keeps under this. */
 const NAME_MAX_BYTES = 500;
-/** At most this many estate writes run at once (a boot backfill over many sources). */
-export const PROJECTION_CONCURRENCY = 2;
+/** Build one source generation at a time; estate writes also share a single lane with trackers. */
+export const PROJECTION_CONCURRENCY = 1;
 
 /** One relation as the projection holds it: structure only, no row estimate (the field does not exist here). */
 interface Column {
@@ -237,6 +238,8 @@ export interface SourceProjectorDeps {
   log?: (message: string) => void;
   /** TESTS ONLY: the clock generations are taken from. */
   now?: () => number;
+  /** TESTS ONLY: the wait between SQLite contention retries. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /** The one writer of source structure into estate (module doc). */
@@ -313,7 +316,7 @@ export class SourceProjector {
     return this.gate.run(async () => {
       const gen = sourceGeneration(s, this.nextGeneration(s.id));
       if (gen === null) return false;
-      await this.call('knowledge.replace_source', gen as unknown as Record<string, unknown>);
+      await replaceSource(this.call, gen as unknown as Record<string, unknown>, this.deps);
       this.acked.set(s.id, projectionKey(s));
       return true;
     });
@@ -331,5 +334,5 @@ export class SourceProjector {
 }
 
 function message(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  return (err instanceof Error ? err.message : String(err)).split(/\r?\n/, 1)[0]!;
 }

@@ -22,11 +22,15 @@ import type { McpCallResponse } from '../src/core/types.js';
 import { agentAccessOf } from '../src/knowledge/gate/access.js';
 import type { GateSource } from '../src/knowledge/gate/sources.js';
 import { visibleDeps } from '../src/knowledge/package.js';
-import { sourceGeneration } from '../src/knowledge/projector.js';
+import { SourceProjector, sourceGeneration } from '../src/knowledge/projector.js';
 import { McpBroker } from '../src/mcp/broker.js';
 import { McpCallRecordFile } from '../src/mcp/call-records.js';
 import { defaultEstateInvoker, EstateRelay } from '../src/mcp/estate-relay.js';
+import { configOf } from '../src/mcp/registry.js';
+import { McpRegistryStore, type McpServerRecord } from '../src/mcp/registry-store.js';
 import type { CatalogRelation, SqlCatalog } from '../src/sources/catalog/types.js';
+import { sourceDescriptorHash } from '../src/sources/kinds.js';
+import { SourceCatalogStore } from '../src/sources/store.js';
 import { removeScratch } from './setup/scratch.js';
 
 const EXE = process.env['WICKED_ESTATE_MCP_EXE'] ?? '';
@@ -108,6 +112,30 @@ describe.skipIf(EXE === '' || process.platform === 'win32')('the knowledge packa
     }
     return { status: res.statusCode, body, payload };
   };
+
+  it('acks all six described sources during a boot backfill (crew#1524)', async () => {
+    const store = new McpRegistryStore(join(base, 'backfill', 'mcp'));
+    const catalogs = new SourceCatalogStore(join(base, 'backfill', 'catalogs'));
+    const stamp = '2026-11-04T03:00:00Z';
+    const sources: Array<McpServerRecord & { id: string }> = Array.from({ length: 6 }, (_, i) => ({
+      id: `backfill-source-${i}`, name: `backfill-pg-${i}`, kind: 'sql',
+      command: null, args: [], url: null, auth: null, enabled: true, tools: [],
+      health: { state: 'ok', consecutiveFailures: 0, checkedAt: stamp, lastError: null },
+      registeredAt: stamp, updatedAt: stamp,
+      sql: { driver: 'postgres', host: 'db.test', port: 5432, database: 'd', user: 'u', tls: 'disable' },
+    }));
+    await store.mutate((file) => { file.servers = sources; });
+    // 400 relations a source: big enough that two writers at once hit 'database is locked' on estate 0.35.3 (crew
+    // 0.18.11 ran two; 2 of 3 local runs failed with the issue's exact log line before the shared lane).
+    for (const s of sources) {
+      await catalogs.write(s.name, { descriptorHash: sourceDescriptorHash(configOf(s)), catalog: catalogOf(Array.from({ length: 400 }, (_, j) => `t${j}`), stamp) });
+    }
+    const logs: string[] = [];
+    const projector = new SourceProjector({ store, catalogs, call: write, log: (line) => logs.push(line) });
+    await projector.backfill();
+    expect(logs).toEqual([]);
+    for (const s of sources) expect(projector.projectedDescriptor(s.id), s.name).not.toBeNull();
+  }, 120_000);
 
   it('estate takes the generation, and a later one without a relation tombstones it', async () => {
     const first = (await write('knowledge.replace_source', sourceGeneration(source(['tickets', 'customers'], '2026-11-04T03:00:00Z'), 1000)! as never)) as Record<string, unknown>;
