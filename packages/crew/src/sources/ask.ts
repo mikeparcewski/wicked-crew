@@ -279,6 +279,7 @@ export function askPrompt(question: string, catalog: SqlCatalog, viewsAllowed: r
     `- Exactly one SELECT statement${catalog.dialect === 'sqlite' ? ' (no recursion)' : ' (a WITH ... SELECT is fine; no recursion)'}. Nothing that changes data or the schema, no locking clause, no INTO.`,
     '- Only the tables and columns listed below, in `relations`, `others` or `othersByName`. A table in `othersByName` has no columns listed: use it only with columns the question itself names.',
     ...readRules(catalog.dialect).map((r) => `- ${r}`),
+    '- Keep every condition and literal value the person states (a column, a value, an enum literal listed in the structure). When the question names a state without saying how it is stored (open, closed, active, done, deleted, …), prefer a structural predicate the structure supports over inventing a free-text value: IS NULL / IS NOT NULL on a nullable timestamp whose name carries the meaning (closed_at, resolved_at, ended_at, deleted_at, completed_at, archived_at), or a boolean flag such as is_open / is_closed, with the polarity the name implies. Only when nothing structural fits, use a literal the structure does not list, and then the explanation MUST say the literal is assumed.',
     '- No parameters: write any value the question names as a literal.',
     `- The person sees at most ${ASK_ROW_CAP} rows: prefer an aggregate when the question asks how many, and add an ORDER BY with a LIMIT when it asks for a list.`,
     '',
