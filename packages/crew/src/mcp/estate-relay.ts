@@ -276,12 +276,13 @@ export class Semaphore {
   constructor(private readonly max: number) {}
   async run<T>(fn: () => Promise<T>): Promise<T> {
     if (this.active >= this.max) await new Promise<void>((r) => this.waiters.push(r));
-    this.active += 1;
+    else this.active += 1;
     try {
       return await fn();
     } finally {
-      this.active -= 1;
-      this.waiters.shift()?.();
+      const next = this.waiters.shift();
+      if (next !== undefined) next(); // Hand off the occupied slot; a newcomer cannot take it before the waiter resumes.
+      else this.active -= 1;
     }
   }
 }

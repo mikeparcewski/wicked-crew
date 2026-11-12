@@ -16,6 +16,8 @@ mentioned only where a daemon release depends on them.
   distinct panel reads within 10 seconds up to the app's declared query count (crew#1518). Apps with many
   panels no longer exhaust the budget after a few views. A refusal names the limit and how many seconds
   remain; refused reads do not consume or extend the window, so the next view after reset is served.
+- Data source structure is projected into estate again: source and tracker writes share one lane and retry database
+  contention; estate refusals are reported with their own first line (crew#1524).
 
 ## [0.18.11] — 2026-11-12
 
