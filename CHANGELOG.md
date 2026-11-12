@@ -24,6 +24,14 @@ mentioned only where a daemon release depends on them.
   remain; refused reads do not consume or extend the window, so the next view after reset is served.
 - Data source structure is projected into estate again: source and tracker writes share one lane and retry database
   contention; estate refusals are reported with their own first line (crew#1524).
+### Fixed
+
+- **A live but wedged seat now reads as stalled (crew#1501).** The stall watchdog measured time since any event,
+  and core's 15-second working heartbeat (`heartbeat`, and the `working` frame of `toolActivity`) counted, so a seat
+  silent for 150 s against a 60 s `workerStallMinutes` still showed "working · last event just now". The clock now
+  measures time since the seat's last output (a delta, a tool call, unit progress); heartbeats never reset it or
+  re-arm a quiet period. The Nerve Center no longer reads the run's event-log mtime once the watchdog observes the
+  run, because heartbeats touch that file too.
 
 ## [0.18.11] — 2026-11-12
 

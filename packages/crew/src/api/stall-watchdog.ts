@@ -7,7 +7,8 @@
 // single CoreEvent relay, so "time since the last event" is cheap to compute right here:
 //
 // - `ingest` stamps the run's last-observed-event time on EVERY frame carrying a `session`
-//   (any CoreEvent counts, `unitOutputDelta` included) and RE-ARMS the alert for that run.
+//   (any CoreEvent counts, `unitOutputDelta` included) EXCEPT a heartbeat (`isHeartbeatFrame`):
+//   a live but wedged seat heartbeats every 15 s and must still read as stalled (crew#1501) and RE-ARMS the alert for that run.
 // - a periodic sweep lists the runs whose engine status is `executing` (`awaiting_human` is
 //   quiet BY DESIGN and never counts) and, when a run has been silent past the threshold
 //   (`workerStallMinutes` setting, default 15), broadcasts ONE synthetic frame on /ws —
@@ -79,6 +80,19 @@ import {
 // Published contract shapes (api-types 0.18.0 — previously daemon-local here). Re-exported so
 // existing importers of this module keep compiling.
 export type { WorkerStalledFrame, WorkerStallEscalatedFrame };
+
+/**
+ * A frame that proves the seat's process is alive but carries no output: the engine's liveness
+ * `heartbeat` and the 15-second `toolActivity` `working` frame of a quiet seat (core#1207). It keeps
+ * the run listed as live; it never resets the stall clock (crew#1501: a wedged seat that still
+ * heartbeats read "working · last event just now" forever).
+ */
+export function isHeartbeatFrame(event: { type?: unknown; state?: unknown; kind?: unknown }): boolean {
+  return (
+    event.type === 'heartbeat' ||
+    (event.type === 'toolActivity' && (event.state === 'working' || event.kind === 'working'))
+  );
+}
 
 /** Default sweep cadence — frequent enough that `quietForMs` is at most ~30s stale. */
 export const DEFAULT_SWEEP_INTERVAL_MS = 30_000;
@@ -279,6 +293,8 @@ export class WorkerStallWatchdog {
     const session =
       typeof event.session === 'string' && event.session.length > 0 ? event.session : undefined;
     if (session === undefined) return;
+    // A heartbeat is not output: it never stamps the clock, never re-arms a quiet period.
+    if (isHeartbeatFrame(event as { type?: unknown; state?: unknown; kind?: unknown })) return;
     this.lastEventAt.set(session, this.now());
     this.evidenceAt.set(session, { at: this.now(), source: 'relay' });
     if (typeof event.ord === 'number') this.lastOrd.set(session, event.ord);
@@ -329,6 +345,13 @@ export class WorkerStallWatchdog {
    *  `undefined` when it saw none — never the seeded clock of a first observation. */
   evidence(runId: string): { at: number; source: 'relay' | 'process' } | undefined {
     return this.evidenceAt.get(runId);
+  }
+
+  /** When this process started the run's quiet clock without any output seen (first sweep after a
+   *  restart), or the last output time; `undefined` before the first sweep observed the run. A
+   *  fallback for a run with no evidence: the log file's mtime cannot stand in, heartbeats write it. */
+  clockStart(runId: string): number | undefined {
+    return this.lastEventAt.get(runId);
   }
 
   /** One detection pass. Public so tests drive it directly; the armed interval calls it too. */
