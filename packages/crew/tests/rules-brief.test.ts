@@ -198,6 +198,19 @@ describe('the rules block', () => {
     expect(block).not.toContain('did not fit');
   });
 
+  it('(xreview r3) a block whose bare ids fill exactly the cap names every id', async () => {
+    const rules = Array.from({ length: 229 }, (_, i) => ({ id: `R-${String(i).padStart(3, '0')}`, severity: 'warn', statement: 'hello' }) as ConformanceRule);
+    const probe = rulesBriefBlock(rules, await matchRulesForJob(rules, bugJob(), null))!;
+    // Lengthen the first id until the all-bare block is exactly RULES_BLOCK_MAX_BYTES.
+    const bareBytes = Buffer.byteLength(probe) - ': hello'.length * probe.split('(warn): hello').length + ': hello'.length;
+    rules[0]!.id += 'x'.repeat(RULES_BLOCK_MAX_BYTES - bareBytes);
+    const block = rulesBriefBlock(rules, await matchRulesForJob(rules, bugJob(), null))!;
+    expect(Buffer.byteLength(block)).toBe(RULES_BLOCK_MAX_BYTES);
+    expect(ruleLines(block)).toHaveLength(229);
+    expect(block).not.toContain('(warn): hello'); // all bare: the ids alone fill the cap
+    expect(block).not.toContain('did not fit');
+  });
+
   it('(S1) an engine without matchRules, a failure or a short answer: every rule still listed, the rest as may apply', async () => {
     const rules = rigRules();
     expect((await matchRulesForJob(rules, bugJob(), null)).every((m) => m.status === 'may_apply')).toBe(true);
