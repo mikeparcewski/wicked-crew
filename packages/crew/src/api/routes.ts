@@ -3843,10 +3843,11 @@ export function registerRoutes(
     // worker cannot read GitHub. The daemon reads each linked issue now and appends its text to the
     // problem, inside a marked block the deliver text takes back out. Workflow launches only: the
     // free-text planner turns sentences into units, so issue text there would become work units.
-    // E7 (operator ruling 2026-11-05) + DES-RULE-CHECK-001 S1: the project's in-force steering rules ride in the brief,
-    // in a marked block the deliver text takes back out (decisions/rules-brief.ts), so the review and QE seats can judge
-    // the work against them. Every rule is matched against the job and listed as applies / may apply / not applicable
-    // with the fact; none is cut. The steps are not known at launch (a run may be planned into catalog steps whose ids
+    // E7 (operator ruling 2026-11-05) + DES-RULE-CHECK-001 S1: the project's in-force steering rules are indexed in the
+    // brief, in a marked block the deliver text takes back out (decisions/rules-brief.ts), so the review and QE seats can
+    // judge the work against them. Every rule is matched against the job and named as applies / may apply / not
+    // applicable, by id, severity and a one-liner, with the command a seat pulls each whole statement with (the estate
+    // relay answers it from this same in-force set; agents pull, operator 2026-11-11). The steps are not known at launch (a run may be planned into catalog steps whose ids
     // are the planner's), so step scopes decide nothing here; the def's kinds only order the list. Governed launches
     // only (a named workflow or an explicit plan); best-effort: an unreadable store launches without it.
     const briefRules = async (workflow: string | null): Promise<void> => {

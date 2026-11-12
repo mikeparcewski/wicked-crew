@@ -4,10 +4,14 @@
  *
  * A workflow launch's brief gains a marked block that names EVERY rule in force for the run's project, each with its
  * match against the job (the engine's `matchRules`): **applies** (a fact selects it), **may apply** (nothing scopes
- * it either way), or **not applicable** (a recorded fact rules it out, said on its line). Rules to check are listed
- * with their statements whole and no count cap; not-applicable rules are listed by id with their fact, so none is
- * silent. The review and QE seats judge each rule to check (garden's governed-worker E7: KEPT / BROKEN / N/A /
- * DEFERRED, a broken rule fails review); the builder is told it does not mark its own compliance.
+ * it either way), or **not applicable** (a recorded fact rules it out). It is an index, not the rules: each rule to
+ * check is one line of id, severity and the start of its statement ({@link ONE_LINER_MAX} characters, while the block
+ * fits {@link RULES_BLOCK_MAX_BYTES}); a not-applicable rule is its id alone. One line names the exact command a seat
+ * pulls a rule's whole statement with ({@link RULES_PULL_COMMAND}: `rules.recall` through garden's shim, which crew's
+ * estate relay answers from the same in-force set the rule judge reads). Agents start with their prompt and tools and
+ * pull what they need (operator, 2026-11-11): the statements are no longer pushed into every unit's prompt.
+ * The review and QE seats judge each rule to check (garden's governed-worker E7: KEPT / BROKEN / N/A / DEFERRED /
+ * UNASSESSED, a broken rule fails review); the builder is told it does not mark its own compliance.
  *
  * Like the learnings block (`learnings/recall.ts`), the deliver text takes it back out (`core/deliver-text.ts`) and a
  * relaunch from an earlier run's problem replaces it, never stacks it. Nothing here records a verdict: per-rule
@@ -22,16 +26,20 @@ export const RULES_BRIEF_OPEN = '<!-- wicked-crew:rules -->';
 export const RULES_BRIEF_CLOSE = '<!-- /wicked-crew:rules -->';
 
 /**
- * The whole block's size in UTF-8 bytes (headers, ids, statements, facts). The engine puts the task and the earlier
- * steps' output (up to 96 KiB) into one argv argument under the host floor's 128 KiB limit (core
- * `execute_wrapped.rs`), so the block keeps to 24 KiB and leaves room for the intent (xreview r2 on S1). Within it every
- * rule is named first; statements and facts are added while they fit.
+ * The whole block's size in UTF-8 bytes (headers, the pull command, ids, one-liners). The block rides in every unit's
+ * prompt, so it is an index a seat pulls from, not the rules: every rule is named first; one-liners are added while
+ * they fit.
  */
-export const RULES_BLOCK_MAX_BYTES = 24 * 1024;
+export const RULES_BLOCK_MAX_BYTES = 4 * 1024;
+/** A rule's one-liner: the start of its statement, at most this many characters. */
+export const ONE_LINER_MAX = 100;
+/**
+ * The exact command a seat pulls a rule's whole statement with: `rules.recall` through garden's read-only estate shim,
+ * which crew's estate relay answers from the rules in force for the run's project (`mcp/estate-relay.ts`).
+ */
+export const RULES_PULL_COMMAND = `wicked-garden run scripts/_estate_client.py --readonly call '{"tool":"rules.recall","arguments":{"ids":["<id>"]}}'`;
 /** A listable id: one token of at most 120 characters (the `[rule:<id>]` citation's own bound). */
 const LISTABLE_ID = /^[^\s<>"]{1,120}$/u;
-/** A not-applicable line's fact, bounded (the facts name a rule's own `applies_to` tokens). */
-const FACT_MAX = 400;
 
 export type RuleMatchStatus = 'applies' | 'may_apply' | 'not_applicable';
 export interface RuleMatchFact {
@@ -122,80 +130,73 @@ function shownId(id: string): string {
   return JSON.stringify(id).replaceAll('<', '\\u003c').replaceAll('>', '\\u003e');
 }
 
-function factLine(m: RuleMatch): string {
-  const words = inert(m.facts.map((f) => f.detail).join('; ')) || 'ruled out by its own scope';
-  return words.length > FACT_MAX ? `${words.slice(0, FACT_MAX)}…` : words;
+/** The start of a statement, on one line, at most {@link ONE_LINER_MAX} characters (an ellipsis says it was cut). */
+function oneLiner(statement: string): string {
+  const words = inert(statement);
+  const chars = [...words];
+  return chars.length > ONE_LINER_MAX ? `${chars.slice(0, ONE_LINER_MAX - 1).join('').trimEnd()}…` : words;
 }
 
-const LABEL: Record<RuleMatchStatus, string> = { applies: 'applies', may_apply: 'may apply', not_applicable: 'not applicable' };
 const bytes = (s: string): number => Buffer.byteLength(s, 'utf8') + 1; // + the newline
 
 /**
- * The marked block, or `null` when no rule is in force. Every rule in `matches` is named on a line while the ids fit
- * {@link RULES_BLOCK_MAX_BYTES}: first every id (with its label), then, in reading order, the statements of the rules
- * to check and the facts of the rules ruled out, each added only while the block still fits. Should the ids alone
- * not fit (thousands of rules, or ids of thousands of characters), one line says how many were not named and that the
- * review reads every rule from the store, never silently. The brief is the builder's; the review's check (S2) reads
- * the store, not the brief.
+ * The marked block, or `null` when no rule is in force: a count line, who checks what, the pull command, then every
+ * rule in `matches` on a line while the ids fit {@link RULES_BLOCK_MAX_BYTES}: first every id (with its severity),
+ * then, in reading order, each rule-to-check's one-liner while the block still fits. Not-applicable rules are listed
+ * by id. Should the ids alone not fit (hundreds of rules, or ids of thousands of characters), one line says how many
+ * were not named and how to pull them all, never silently.
  */
 export function rulesBriefBlock(rules: ReadonlyArray<BriefRule>, matches: ReadonlyArray<RuleMatch>): string | null {
   if (matches.length === 0) return null;
   const byId = new Map(rules.map((r) => [r.id, r]));
-  const check = matches.filter((m) => m.status !== 'not_applicable');
-  const na = matches.filter((m) => m.status === 'not_applicable');
-  const applies = check.filter((m) => m.status === 'applies').length;
+  const groups: Array<{ head: string; ms: RuleMatch[]; na: boolean }> = [
+    { head: 'Applies to this job:', ms: matches.filter((m) => m.status === 'applies'), na: false },
+    { head: 'May apply:', ms: matches.filter((m) => m.status === 'may_apply'), na: false },
+    { head: "Not applicable to this job (a fact of the rule's own scope rules it out):", ms: matches.filter((m) => m.status === 'not_applicable'), na: true },
+  ].filter((g) => g.ms.length > 0);
+  const na = matches.filter((m) => m.status === 'not_applicable').length;
+  const applies = matches.filter((m) => m.status === 'applies').length;
+  const check = matches.length - na;
   const head = [
     RULES_BRIEF_OPEN,
-    `Steering rules for this job: ${matches.length} in force, ${check.length} to check (${applies} apply, ${check.length - applies} may apply), ${na.length} not applicable.`,
+    `Steering rules for this job: ${matches.length} in force, ${check} to check (${applies} apply, ${check - applies} may apply), ${na} not applicable. Each is listed by id (severity): the start of its statement.`,
     'The review and QE steps check the work against each rule to check (kept, broken or not applicable, with evidence);',
     'a broken rule fails review. The step that builds does not mark its own compliance.',
+    `Pull a rule's whole statement before you judge it (several ids at once; no "ids" lists every rule in force): ${RULES_PULL_COMMAND}`,
   ];
-  const naHead = "Not applicable to this job, each by a fact of the rule's own scope:";
-  // One row per rule: its bare line (label and id), and the full one (with the statement, or the fact).
-  const rows = [
-    ...check.map((m) => {
+  // One row per rule: its bare line (id and severity), and the full one (with its one-liner, rules to check only).
+  const rows = groups.flatMap((g, gi) =>
+    g.ms.map((m) => {
       const r = byId.get(m.rule_id);
-      const bare = `- [${LABEL[m.status]}] ${shownId(m.rule_id)} (${r?.severity ?? 'info'})`;
-      const statement = inert(r?.statement ?? '');
-      const why = m.status === 'applies' ? ` (${factLine(m)})` : '';
-      return { bare, full: `${bare}: ${statement === '' ? '(no statement recorded)' : statement}${why}`, na: false };
+      const bare = g.na ? `- ${shownId(m.rule_id)}` : `- ${shownId(m.rule_id)} (${r?.severity ?? 'info'})`;
+      const line = oneLiner(r?.statement ?? '');
+      return { gi, bare, full: g.na ? bare : `${bare}: ${line === '' ? '(no statement recorded)' : line}` };
     }),
-    ...na.map((m) => ({ bare: `- ${shownId(m.rule_id)}`, full: `- ${shownId(m.rule_id)}: ${factLine(m)}`, na: true })),
-  ];
-  const short = 'A rule listed without its statement or fact did not fit this brief\'s size limit; the review reads it from the rule store.';
+  );
   const pointer = (left: number) =>
-    `- … and ${left} more rule${left === 1 ? '' : 's'} in force whose ids did not fit this brief's size limit; the review reads every rule from the rule store.`;
-  const reserve = bytes(short) + bytes(pointer(rows.length));
-  let used = head.reduce((n, l) => n + bytes(l), 0) + bytes(RULES_BRIEF_CLOSE) + (na.length > 0 ? bytes(naHead) : 0) + reserve;
-  // Pass 1: every rule named while it fits (the pointer and the note reserved).
-  // A row that does not fit is skipped, not the end: a later short id is still named (xreview r2 on S1).
+    `- … and ${left} more rule${left === 1 ? '' : 's'} in force whose ids did not fit this brief's size limit; pull them all with the command above, without "ids".`;
+  let used = head.reduce((n, l) => n + bytes(l), 0) + bytes(RULES_BRIEF_CLOSE) + groups.reduce((n, g) => n + bytes(g.head), 0) + bytes(pointer(rows.length));
+  // Pass 1: every rule named while it fits (the pointer reserved). A row that does not fit is skipped, not the end:
+  // a later short id is still named (xreview r2 on S1).
   const fits = rows.filter((row) => {
     if (used + bytes(row.bare) > RULES_BLOCK_MAX_BYTES) return false;
     used += bytes(row.bare);
     return true;
   });
-  const named = fits.length;
-  // Pass 2: the full line, in reading order, while the block still fits.
-  let anyBare = false;
+  // Pass 2: the one-liner, in reading order, while the block still fits.
   const shown = fits.map((row) => {
     const extra = bytes(row.full) - bytes(row.bare);
-    if (used + extra <= RULES_BLOCK_MAX_BYTES) {
+    if (extra > 0 && used + extra <= RULES_BLOCK_MAX_BYTES) {
       used += extra;
-      return { na: row.na, line: row.full };
+      return { gi: row.gi, line: row.full };
     }
-    anyBare = true;
-    return { na: row.na, line: row.bare };
+    return { gi: row.gi, line: row.bare };
   });
-  const checkLines = shown.filter((x) => !x.na).map((x) => x.line);
-  const naLines = shown.filter((x) => x.na).map((x) => x.line);
-  return [
-    ...head,
-    ...(anyBare ? [short] : []),
-    ...checkLines,
-    ...(naLines.length > 0 ? [naHead, ...naLines] : []),
-    ...(named < rows.length ? [pointer(rows.length - named)] : []),
-    RULES_BRIEF_CLOSE,
-  ].join('\n');
+  const body = groups.flatMap((g, gi) => {
+    const lines = shown.filter((x) => x.gi === gi).map((x) => x.line);
+    return lines.length > 0 ? [g.head, ...lines] : [];
+  });
+  return [...head, ...body, ...(fits.length < rows.length ? [pointer(rows.length - fits.length)] : []), RULES_BRIEF_CLOSE].join('\n');
 }
 
 /** `problem` with every rules block the daemon appended taken back out. */

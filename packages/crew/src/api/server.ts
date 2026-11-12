@@ -2771,6 +2771,11 @@ export async function createServer(
       visible: unitVisible,
       picks: runSourcePicks,
       sourceNames: sourceOwnerNames,
+      // `rules.recall`: the rules in force for the run's project, the set the rule judge reads (never the code graph).
+      rules: async (projectId) => {
+        if (considerations === null) throw new Error('the rule reads are not up yet');
+        return considerations.inForceFor(projectId);
+      },
       onProposal: (p) =>
         audit.record('estate.proposal.submitted', { id: `seat:${p.seat}`, kind: 'agent', trust: 'observer' }, {
           runId: p.runId,
