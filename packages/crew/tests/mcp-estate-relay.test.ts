@@ -413,6 +413,36 @@ describe('(ctx-pull) rules.recall answers the set the rule judge reads', () => {
     expect((await recall({ limit: 1 })).payload).toMatchObject({ returned: 1, total: 3 });
   });
 
+  it('(xreview) releases statements verbatim: a credential-shaped or quoted password= statement is not rewritten or broken', async () => {
+    const tricky = [
+      rule('SEC-BEARER', 'critical', 'proj_abc'),
+      rule('SEC-PW', 'error', 'proj_abc'),
+    ];
+    tricky[0]!.statement = 'Never log a header like Bearer abcdefgh12345678 in a test fixture.';
+    tricky[1]!.statement = 'The regression test must reject "password=admin".';
+    await boot(SCOPED, async () => ({ rules: tricky, setAside: [], source: 'considerRules' }));
+    const r = await recall({ ids: ['SEC-BEARER', 'SEC-PW'] });
+    expect(r.status).toBe(200);
+    expect(r.payload!.rules.map((x) => x.statement)).toEqual([tricky[0]!.statement, tricky[1]!.statement]);
+  });
+
+  it('(xreview) pages a large set with limit and offset, so every rule is reachable under the result bound', async () => {
+    const many = Array.from({ length: 450 }, (_, i) => ({ ...rule(`proposal:${String(i).padStart(4, '0')}`, 'warn'), statement: 's'.repeat(2_000) }));
+    await boot(SCOPED, async () => ({ rules: many, setAside: [], source: 'considerRules' }));
+    const whole = await recall();
+    expect(whole.body.outcome).toBe('withheld');
+    expect(whole.body.remedy).toMatch(/"offset"/);
+    const seen: string[] = [];
+    let offset: number | null = 0;
+    while (offset !== null) {
+      const page = await recall({ limit: 200, offset });
+      expect(page.status).toBe(200);
+      seen.push(...page.payload!.rules.map((x) => x.id));
+      offset = (page.payload as unknown as { next_offset: number | null }).next_offset;
+    }
+    expect(seen).toEqual(many.map((x) => x.id));
+  });
+
   it('an unreadable rule store is a failure with its reason, never an empty set a seat could read as "no rules"', async () => {
     await boot(SCOPED, (p) => readInForce({}, p));
     const r = await recall({ ids: ['POL-2500'] });

@@ -215,10 +215,12 @@ const stringList = (v: unknown): string[] | null =>
 
 /**
  * `rules.recall`, answered from the rules in force for the run's project (module doc: which rules): severity first,
- * narrowed by `ids` (or `id`), `rule_type`, `steering_type` and `severity` when given, then `limit`. An id asked for
- * that is not in force is named in `missing`, so a seat can tell "not in force" from "not answered". The shape is
- * estate's own (`rules`, `returned`, `total`) plus `missing` and `source`. An unreadable store throws: the broker
- * answers it as a failure with its reason, never as an empty set a seat could read as "no rules".
+ * narrowed by `ids` (or `id`), `rule_type`, `steering_type` and `severity` when given, then paged by `offset` and
+ * `limit` (`next_offset` names the next page, `null` on the last). An id asked for that is not in force is named in
+ * `missing`, so a seat can tell "not in force" from "not answered". The shape is estate's own (`rules`, `returned`,
+ * `total`) plus `missing`, `next_offset` and `source`. An unreadable store throws: the broker answers it as a failure
+ * with its reason, never as an empty set a seat could read as "no rules". The statements are released verbatim (the
+ * broker does not scrub this answer): they are the operator's rule text, the same words the judge reads.
  */
 export function rulesRecallAnswer(read: InForceRead, args: Record<string, unknown>): Record<string, unknown> {
   if (read.source === 'unavailable') throw new Error('the steering rules in force could not be read from the engine store');
@@ -228,14 +230,20 @@ export function rulesRecallAnswer(read: InForceRead, args: Record<string, unknow
   const matched = orderBySeverity(read.rules).filter(
     (r) => (want === null || want.has(r.id)) && eq('rule_type', r.rule_type) && eq('steering_type', r.steering_type ?? 'architecture') && eq('severity', r.severity),
   );
-  const limit = typeof args['limit'] === 'number' && Number.isFinite(args['limit']) && args['limit'] >= 0 ? Math.floor(args['limit']) : matched.length;
-  const rules = matched.slice(0, limit);
+  const count = (key: string, fallback: number): number => {
+    const v = args[key];
+    return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : fallback;
+  };
+  const offset = count('offset', 0);
+  const rules = matched.slice(offset, offset + count('limit', matched.length));
+  const next = offset + rules.length;
   const found = new Set(read.rules.map((r) => r.id));
   const payload = {
     rules,
     returned: rules.length,
     total: matched.length,
     missing: ids === null ? [] : [...new Set(ids)].filter((id) => !found.has(id)),
+    next_offset: next < matched.length ? next : null,
     source: read.source,
   };
   return { content: [{ type: 'text', text: JSON.stringify(payload) }], isError: false };

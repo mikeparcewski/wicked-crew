@@ -174,7 +174,7 @@ export function rulesBriefBlock(rules: ReadonlyArray<BriefRule>, matches: Readon
     }),
   );
   const pointer = (left: number) =>
-    `- … and ${left} more rule${left === 1 ? '' : 's'} in force whose ids did not fit this brief's size limit; pull them all with the command above, without "ids".`;
+    `- … and ${left} more rule${left === 1 ? '' : 's'} in force whose ids did not fit this brief's size limit; pull them with the command above, without "ids" (page with "limit" and "offset").`;
   let used = head.reduce((n, l) => n + bytes(l), 0) + bytes(RULES_BRIEF_CLOSE) + groups.reduce((n, g) => n + bytes(g.head), 0) + bytes(pointer(rows.length));
   // Pass 1: every rule named while it fits (the pointer reserved). A row that does not fit is skipped, not the end:
   // a later short id is still named (xreview r2 on S1).
