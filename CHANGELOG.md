@@ -10,6 +10,11 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+
+- A demo video started from a chat's /demo takes the app address the person typed in the same message (exactly one http(s) address), instead of asking 'The running app?' with nothing to answer it.
+- The words a person types for a job's "The running app?" question are taken as that address (the question's input is typed words; the url input refused them), so studio's answer field can fill it (studio#1134).
+
 ## [0.18.12] — 2026-11-12
 
 A patch for the Kubernetes runner and the requirements headline. Seat commits on the Kubernetes runner carry the

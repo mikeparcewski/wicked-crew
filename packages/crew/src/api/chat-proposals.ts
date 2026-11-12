@@ -763,6 +763,31 @@ function personUrls(words: string): Set<string> {
 }
 
 /**
+ * The ONE app address a person's words name, exactly as typed, or `null` = ask the person (review r1/r2 on the seed
+ * fill). When in doubt it asks rather than guess, because the question's own field answers it (studio#1134): not exactly
+ * one complete http(s) address in any letter case; one wrapped in or running into anything but whitespace (a quote,
+ * bracket or code span); one ending in a character a sentence could have added (`.`, `)`, …: trimming it could change
+ * the page); one with a `#`; one that does not parse or is over the launch's 2048 characters.
+ */
+export function onePersonUrl(words: string): string | null {
+  const all = [...words.matchAll(/https?:\/\/[^\s"'<>`]+/giu)];
+  if (all.length !== 1) return null;
+  const m = all[0]!;
+  const url = m[0];
+  const before = m.index === 0 ? '' : words.charAt(m.index - 1);
+  const after = words.charAt(m.index + url.length);
+  if ((before !== '' && !/\s/u.test(before)) || (after !== '' && !/\s/u.test(after))) return null;
+  if (/[.,;:!?)}\]]$/u.test(url) && !/^https?:\/\/\[[^\]]*\]$/iu.test(url)) return null;
+  if (url.includes('#') || url.length > 2048) return null;
+  try {
+    new URL(url);
+  } catch {
+    return null;
+  }
+  return url;
+}
+
+/**
  * The person's own words in this chat, up to and including the turn: only `user` records the message route marked as
  * sent by the chat's owner, a person (`owner: true`). A message from an agent's or another actor's token never counts
  * as the person's (a demo address, a document they named).
@@ -2540,6 +2565,11 @@ export class ChatProposals {
           by: 'person',
           source: body.source,
         };
+        // A declared app address comes only from the person's words; several addresses need their choice.
+        if (CATALOG_V2_CARDS.find((c) => c.id === card)?.inputs?.includes('url') === true) {
+          const url = onePersonUrl(facts.words);
+          if (url !== null) facts.inputs['url'] = { kind: 'url', value: url };
+        }
         const ctx = await this.jobContext(chatId, pid, null, 'person', chat, { revises: null, lineage: null, notes: [], request: { id: body.requestId, digest } });
         const proposal = await this.proposalOf(chatId, pid, facts, ctx, records, allowHidden);
         if (!this.write(chatId, { at: this.now(), turnId: `person:${pid.slice(pid.lastIndexOf(':') + 1)}`, kind: 'proposal', proposal }, instance)) return this.gone(chatId);
@@ -3024,7 +3054,9 @@ export class ChatProposals {
             const norm = (o: string | null | undefined): string | null => (wantCard === undefined ? null : o === null || o === undefined ? (wantCard.variant?.default ?? null) : o);
             const optionOk = wantCard !== undefined && (x.edits.option === undefined || norm(merged.facts.option) === norm(x.edits.option));
             const depthOk = x.edits.depth === undefined || x.edits.depth === null || merged.facts.depth === x.edits.depth;
-            const inputsOk = merged.refusedInputs.length === 0 && Object.entries(x.edits.inputs ?? {}).every(([k, v]) => (k === 'intent' ? merged.facts.words === (v.kind === 'text' ? v.value.slice(0, 8000) : '') : JSON.stringify(merged.facts.inputs[k]) === JSON.stringify(v)));
+            const inputsOk = merged.refusedInputs.length === 0 && Object.entries(x.edits.inputs ?? {}).every(([k, v]) => (k === 'intent' ? merged.facts.words === (v.kind === 'text' ? v.value.slice(0, 8000) : '') : JSON.stringify(merged.facts.inputs[k]) === JSON.stringify(v)
+              // Words typed for an address are that address (chat-jobs applyEdits step 5, studio#1134).
+              || (v.kind === 'text' && merged.facts.inputs[k]?.kind === 'url' && JSON.stringify(merged.facts.inputs[k]) === JSON.stringify({ kind: 'url', value: v.value.trim() }))));
             if (wantCard === undefined || merged.facts.card !== wantCard.id || !optionOk || !depthOk || !inputsOk) {
               return { code: 400, body: { code: 'edits_invalid', error: merged.notes[0] ?? `there is no ${String(x.edits.card)}${x.edits.option !== undefined && x.edits.option !== null ? ` · ${String(x.edits.option)}` : ''} to start it again as`, notes: merged.notes } };
             }

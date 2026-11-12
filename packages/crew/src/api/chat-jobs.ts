@@ -759,8 +759,11 @@ export function mergeRevision(
   if (edits.inputs !== undefined) {
     const card5 = CATALOG_V2_CARDS.find((c) => c.id === facts.card)!;
     const defs5 = resolveOption(facts.card, optionFor(card5, facts.option), ctx.served)?.resolved.inputs ?? [];
-    for (const [id, v] of Object.entries(edits.inputs)) {
+    for (const [id, typed] of Object.entries(edits.inputs)) {
       const def = defs5.find((d) => d.id === id);
+      // A question's input is typed words (`input.kind: 'text'`, api-types): the words a person types for an address the
+      // question asked for are that address (studio#1134); the launch still checks it (a demo: loopback only).
+      const v = def?.kind === 'url' && typed.kind === 'text' ? { kind: 'url' as const, value: typed.value.trim() } : typed;
       const kindOk = def !== undefined && (def.kind === v.kind || (def.kind === 'text' && v.kind === 'text'));
       if (!kindOk) {
         refusedInputs.push(id);
