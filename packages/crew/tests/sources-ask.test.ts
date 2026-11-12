@@ -133,6 +133,16 @@ async function harnessWithout(): Promise<Harness> {
 const post = (h: Harness, url: string, payload?: unknown) => h.app.inject({ method: 'POST', url: `/api/v1${url}`, ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}) });
 
 describe('the ask pieces (no database)', () => {
+  it('the prompt carries the structural-predicate rule (stated literals kept) before the no-parameters rule', () => {
+    const rule = '- Keep every condition and literal value the person states (a column, a value, an enum literal listed in the structure). When the question names a state without saying how it is stored (open, closed, active, done, deleted, …), prefer a structural predicate the structure supports over inventing a free-text value: IS NULL / IS NOT NULL on a nullable timestamp whose name carries the meaning (closed_at, resolved_at, ended_at, deleted_at, completed_at, archived_at), or a boolean flag such as is_open / is_closed, with the polarity the name implies. Only when nothing structural fits, use a literal the structure does not list, and then the explanation MUST say the literal is assumed.';
+    for (const dialect of ['postgres', 'mysql', 'sqlite'] as const) {
+      const prompt = askPrompt('how many tickets are open?', { dialect, database: null, relations: [], describedAt: '' }, []);
+      expect(prompt.split('\n')).toContain(rule);
+      expect(prompt.indexOf(rule)).toBeGreaterThan(prompt.indexOf('Rules for the query:'));
+      expect(prompt.indexOf(rule)).toBeLessThan(prompt.indexOf('- No parameters: write any value the question names as a literal.'));
+    }
+  });
+
   it('SQLite instructions name the CTE restriction and every dialect names the view restriction', () => {
     const cat: SqlCatalog = { dialect: 'sqlite', database: null, relations: [], describedAt: '' };
     expect(readRules('sqlite')).toContain("No WITH clause (CTE) that reads a table: SQLite's read policy refuses any read made through a CTE. Write it as a subquery in FROM instead: SELECT ... FROM (SELECT ... FROM t) AS x.");
