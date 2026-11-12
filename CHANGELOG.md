@@ -40,7 +40,8 @@ wicked-crew-api-types 0.208.0 (additive: `RequirementsCoverage.weightedPct?` and
 ### Fixed
 
 - Asking a data source prefers structural conditions such as `closed_at IS NULL` for open tickets over guessed
-  free-text status values. When no structural condition fits, the explanation must disclose an assumed literal.
+  free-text status values. When no structural condition fits, the explanation must disclose an assumed literal
+  (#1536).
 - The Apps builder can fix crew's check findings inside one turn (crew#1518). It runs crew's check itself
   (`mcp:apps/check`, up to three times a turn; it writes nothing, and the check and review steps still decide what
   lands). Its task lists the read rules for each source's dialect: views only when allowed by name, and on SQLite
