@@ -592,3 +592,15 @@ describe('the wiring', () => {
     });
   });
 });
+
+
+describe('the Apps self-check broker subject', () => {
+  it('refuses when the daemon has no Apps self-check', async () => {
+    await boot();
+    const answer = await mcpCall('mcp:apps/check');
+    expect(answer.status).toBe(500);
+    expect(answer.body).toMatchObject({ outcome: 'guard_error', reason: 'this daemon has no Apps self-check' });
+    expect(gate.calls).toEqual([]);
+    expect(recorded()).toMatchObject([{ decision: { by: 'broker:apps' }, outcome: 'guard_error' }]);
+  });
+});

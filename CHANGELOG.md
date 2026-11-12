@@ -18,6 +18,12 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- The Apps builder can fix crew's check findings inside one turn (crew#1518). It runs crew's check itself
+  (`mcp:apps/check`, up to three times a turn; it writes nothing, and the check and review steps still decide what
+  lands). Its task lists the read rules for each source's dialect: views only when allowed by name, and on SQLite
+  a subquery in FROM instead of a WITH clause that reads a table. Its structure for a large source is ranked by the
+  message and names every table within the package bound, and `list_tables` finds a named table past the cut.
+
 - Apps count a page view or user action once against the viewer's 60-a-minute query budget, grouping its
   distinct panel reads within 10 seconds up to the app's declared query count (crew#1518). Apps with many
   panels no longer exhaust the budget after a few views. A refusal names the limit and how many seconds

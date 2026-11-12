@@ -29,6 +29,12 @@ import type { TrackerSetEntry } from './trackers/set.js';
 /** The whole package's JSON, at most, in UTF-8 bytes (Ask's projection bound, DES-APPS-001 §5.4). */
 export const KNOWLEDGE_PACKAGE_MAX_BYTES = 48 * 1024;
 
+// Each structure adds a key and a comma to the measured envelope.
+const STRUCTURE_KEY_BYTES = 16;
+const PACKAGE_DETAIL_SHARE = 0.55;
+const PACKAGE_OUTLINE_SHARE = 0.25;
+const PACKAGE_NAMES_SHARE = 0.20;
+
 /** The package's wire name. */
 export const KNOWLEDGE_PACKAGE = 'wicked.knowledge/v1';
 
@@ -57,7 +63,12 @@ export interface PackageSource {
   /** The broker subjects a unit may call for it now. */
   tools: string[];
   /** Absent when the source is not described yet (`note` says so). */
-  structure?: { relations: PackageRelation[]; notListed: number };
+  structure?: {
+    relations: PackageRelation[];
+    others?: Array<{ schema: string | null; name: string; table: string; columns: string[] }>;
+    othersByName?: Array<{ schema: string | null; name: string }>;
+    notListed: number;
+  };
   note?: string;
 }
 
@@ -89,8 +100,8 @@ export interface KnowledgePackageDeps {
 }
 
 /** The structure of a described source, as the package carries it: the agent's projection with no row estimate. */
-function structureOf(s: GateSource): NonNullable<PackageSource['structure']> {
-  const st = agentStructure((s.description as NonNullable<GateSource['description']>).catalog as SqlCatalog, s.viewsAllowed);
+function structureOf(s: GateSource, question?: string, budget?: Parameters<typeof agentStructure>[3]): NonNullable<PackageSource['structure']> {
+  const st = agentStructure((s.description as NonNullable<GateSource['description']>).catalog as SqlCatalog, s.viewsAllowed, question, budget);
   return {
     relations: st.relations.map((r) => ({
       table: r.table,
@@ -102,8 +113,30 @@ function structureOf(s: GateSource): NonNullable<PackageSource['structure']> {
       primaryKey: r.primaryKey,
       foreignKeys: r.foreignKeys,
     })),
+    ...(st.others !== undefined ? { others: st.others } : {}),
+    ...(st.othersByName !== undefined ? { othersByName: st.othersByName } : {}),
     notListed: st.notListed,
   };
+}
+
+/** Fit the character budgets to the source's share in UTF-8 bytes too. */
+function boundedStructure(s: GateSource, question: string, share: number): NonNullable<PackageSource['structure']> {
+  let budget = {
+    structureChars: Math.floor(share * PACKAGE_DETAIL_SHARE),
+    outlineChars: Math.floor(share * PACKAGE_OUTLINE_SHARE),
+    namesChars: Math.floor(share * PACKAGE_NAMES_SHARE),
+  };
+  for (;;) {
+    const structure = structureOf(s, question, budget);
+    const bytes = Buffer.byteLength(JSON.stringify(structure), 'utf8');
+    if (bytes <= share || Object.values(budget).every((n) => n === 0)) return structure;
+    const scale = share / bytes * 0.9;
+    budget = {
+      structureChars: Math.floor(budget.structureChars * scale),
+      outlineChars: Math.floor(budget.outlineChars * scale),
+      namesChars: Math.floor(budget.namesChars * scale),
+    };
+  }
 }
 
 /**
@@ -117,29 +150,13 @@ function structureOf(s: GateSource): NonNullable<PackageSource['structure']> {
  * parameter keeps the rule where the next run caller lands.
  */
 export async function knowledgePackageFor(
-  ctx: { projectId: string | null; repoId?: string | null; pick?: readonly string[] | null },
+  ctx: { projectId: string | null; repoId?: string | null; pick?: readonly string[] | null; question?: string },
   deps: KnowledgePackageDeps,
 ): Promise<KnowledgePackage> {
   const pick = ctx.pick === undefined || ctx.pick === null ? null : new Set(ctx.pick);
-  const sources: PackageSource[] = [];
-  for (const s of [...(await deps.sources())].sort((a, b) => a.name.localeCompare(b.name))) {
-    if (!agentMay(s.access, s, ctx.projectId, 'see')) continue;
-    if (pick !== null && !pick.has(s.name)) continue;
-    const query = agentMay(s.access, s, ctx.projectId, 'query');
-    const tools = s.tools
-      .filter((t) => (t.disclosure === 'structure' || t.disclosure === 'none' ? true : t.disclosure === 'rows' ? query : false))
-      .map((t) => `mcp:${s.name}/${t.name}`);
-    const base = { name: s.name, id: s.id, kind: s.dialect, query, tools };
-    if (s.description === null) {
-      sources.push({ ...base, note: 'not described yet: a person tests its connection on the Data sources page first, so it cannot be queried or built on yet' });
-      continue;
-    }
-    try {
-      sources.push({ ...base, structure: structureOf(s) });
-    } catch {
-      sources.push({ ...base, note: 'its structure could not be read' });
-    }
-  }
+  const visible = [...(await deps.sources())]
+    .filter((s) => agentMay(s.access, s, ctx.projectId, 'see') && (pick === null || pick.has(s.name)))
+    .sort((a, b) => a.name.localeCompare(b.name));
   const set = deps.trackers === undefined ? [] : await deps.trackers({ projectId: ctx.projectId, repoId: ctx.repoId ?? null }).catch(() => []);
   // (CS10, DES-CATALOG-002 §2.d piece 4 ·4) A pick narrows the trackers too, by their PM source NAME: a tracker
   // whose source the pick excludes is not disclosed (its source name, key, label and links would otherwise leak
@@ -150,7 +167,34 @@ export async function knowledgePackageFor(
   const trackers: PackageTracker[] = visibleSet.slice(0, 50).map((t) => ({ source: t.source, system: t.system, key: t.key, label: t.label, via: t.via.slice(0, 8).map((v) => ({ ...v })) }));
   // And by their serialized bytes (repo ids can be long): at most 16 KiB, the rest left out from the end.
   while (trackers.length > 0 && Buffer.byteLength(JSON.stringify(trackers), 'utf8') > 16 * 1024) trackers.pop();
-  return { package: KNOWLEDGE_PACKAGE, projectId: ctx.projectId, sources, ...(trackers.length > 0 ? { trackers } : {}) };
+  const sources: PackageSource[] = visible.map((s) => {
+    const query = agentMay(s.access, s, ctx.projectId, 'query');
+    const tools = s.tools
+      .filter((t) => (t.disclosure === 'structure' || t.disclosure === 'none' ? true : t.disclosure === 'rows' ? query : false))
+      .map((t) => `mcp:${s.name}/${t.name}`);
+    return { name: s.name, id: s.id, kind: s.dialect, query, tools,
+      ...(s.description === null ? { note: 'not described yet: a person tests its connection on the Data sources page first, so it cannot be queried or built on yet' } : {}),
+    };
+  });
+  const pkg: KnowledgePackage = { package: KNOWLEDGE_PACKAGE, projectId: ctx.projectId, sources, ...(trackers.length > 0 ? { trackers } : {}) };
+  const envelopeBytes = Buffer.byteLength(renderPackage(pkg, sources), 'utf8');
+  const described = visible.filter((s) => s.description !== null).length;
+  const share = Math.max(0, Math.floor((KNOWLEDGE_PACKAGE_MAX_BYTES - envelopeBytes) / Math.max(1, described)) - STRUCTURE_KEY_BYTES);
+  visible.forEach((s, i) => {
+    if (s.description === null) return;
+    try {
+      sources[i]!.structure = ctx.question === undefined ? structureOf(s) : boundedStructure(s, ctx.question, share);
+    } catch {
+      sources[i]!.note = 'its structure could not be read';
+    }
+  });
+  return pkg;
+}
+
+/** The same envelope for budget measurement and the final package. */
+function renderPackage(pkg: KnowledgePackage, sources: PackageSource[]): string {
+  const trackers = pkg.trackers !== undefined && pkg.trackers.length > 0 ? { trackers: pkg.trackers.slice(0, 50) } : {};
+  return JSON.stringify({ package: pkg.package, projectId: pkg.projectId, ...trackers, sources, sourcesNotListed: pkg.sources.length - sources.length });
 }
 
 /**
@@ -161,10 +205,9 @@ export async function knowledgePackageFor(
 export function packageJson(pkg: KnowledgePackage, maxBytes: number = KNOWLEDGE_PACKAGE_MAX_BYTES): string {
   const listed: PackageSource[] = [];
   // (DES-PM-001) The tracker set rides first: it is small (keys and labels), and it says what the issues tools reach.
-  const trackers = pkg.trackers !== undefined && pkg.trackers.length > 0 ? { trackers: pkg.trackers.slice(0, 50) } : {};
-  const empty = JSON.stringify({ package: pkg.package, projectId: pkg.projectId, ...trackers, sources: [], sourcesNotListed: pkg.sources.length });
+  const empty = renderPackage(pkg, []);
   if (Buffer.byteLength(empty, 'utf8') > maxBytes) throw new Error(`a knowledge package needs at least ${Buffer.byteLength(empty, 'utf8')} bytes (bound ${maxBytes})`);
-  const render = (): string => JSON.stringify({ package: pkg.package, projectId: pkg.projectId, ...trackers, sources: listed, sourcesNotListed: pkg.sources.length - listed.length });
+  const render = (): string => renderPackage(pkg, listed);
   // Each candidate is checked with the count the final rendering would carry if nothing more were listed; listing
   // more only lowers that count, so the final rendering fits whenever the last check did.
   const fits = (): boolean => Buffer.byteLength(render(), 'utf8') <= maxBytes;

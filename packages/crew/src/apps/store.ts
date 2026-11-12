@@ -44,7 +44,7 @@ import type {
   AppsCheckResponse,
   RepoEntry,
 } from '../core/types.js';
-import { EMPTY_LOCK, LOCK_PATH, QUERIES_DIR, QUERY_EXT, SPEC_PATH, lockBytes, ownText, readAppTree, specBytes, stagedCheck, type AppFiles, type AppSourceStage } from './check.js';
+import { EMPTY_LOCK, LOCK_PATH, QUERIES_DIR, QUERY_EXT, SPEC_PATH, lockBytes, ownText, readAppTree, specBytes, stagedCheck, type AppFiles, type CheckOutcome, type AppSourceStage } from './check.js';
 import { AppGit, gitProblem, SHA_RE } from './git.js';
 import type { ImageSources } from './publish/layout.js';
 import type { PublishCheckDeps } from './publish/check.js';
@@ -741,6 +741,16 @@ export class AppStore {
         this.patchTurnRecord(a, runId, { state: outcome.state, endedAt: this.now(), code: outcome.code, reason: outcome.reason.slice(0, 2000) });
       });
       await this.git(a).dropRef(['wicked', 'apps-checked', runId]);
+    });
+  }
+
+  /** Check the builder's files against head without changing the turn or writing any objects. */
+  async selfCheckTurn(slug: string, runId: string, files: Pick<AppFiles, 'spec' | 'queryText'>): Promise<CheckOutcome | { ok: false; code: 'not_a_turn'; findings: AppCheckFinding[] }> {
+    return this.withApp(slug, async () => {
+      const a = this.app(slug);
+      if (a.turn?.runId !== runId) return { ok: false, code: 'not_a_turn', findings: [{ stage: 'files', code: 'not_a_turn', path: '$', message: 'this run is not an app turn in flight' }] };
+      const base = await this.files(a, this.head(a).tree);
+      return stagedCheck({ app: slug, spec: files.spec, queryText: files.queryText, base, level: 'auto', sourceStage: this.sourceStage });
     });
   }
 

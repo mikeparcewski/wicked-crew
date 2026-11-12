@@ -35,6 +35,7 @@ import { pgDescribe, pgReadOnly } from '../../sources/drivers/postgres.js';
 import { SourceQueryError } from '../../sources/drivers/types.js';
 import { checkGraphqlRead } from '../../sources/graphql.js';
 import { sqlConnectArgs } from '../../sources/kinds.js';
+import { sqliteCteHint } from '../../sources/policy/sqlite.js';
 import { checkReadPolicy } from '../../sources/policy/index.js';
 import { pgTableSafety, type SafetyColumn } from '../../sources/safety/postgres.js';
 import { checkSqlQuery, type SqlSourceHandle } from '../../sources/sql.js';
@@ -313,7 +314,8 @@ export class AppsSourceStage implements AppSourceStage {
     const c = await checkSqlQuery(handle, text);
     if (!c.ok) {
       const fromSource = c.code === 'prepare' || c.code === 'authorizer';
-      throw new Refused(c.code, fromSource ? `the source refused the query${c.sqlstate != null ? ` (SQLSTATE ${c.sqlstate})` : ''}` : c.detail, fromSource ? 'source' : 'policy');
+      const hint = driver === 'sqlite' && c.code === 'authorizer' ? sqliteCteHint(text) : null;
+      throw new Refused(c.code, fromSource ? `the source refused the query${hint !== null ? `: ${hint}` : ''}${c.sqlstate != null ? ` (SQLSTATE ${c.sqlstate})` : ''}` : c.detail, fromSource ? 'source' : 'policy');
     }
     const order = paramOrder(q.params);
     if (c.describe.params.length !== order.length) {

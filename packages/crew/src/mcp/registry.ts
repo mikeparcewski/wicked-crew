@@ -53,7 +53,7 @@ import { agentAccessOf, effectiveDisclosure, hasPmMarker, legacyEntryId, pmOf, t
 import { bindingFor, bindingInForce, bindingOnSave } from '../knowledge/trackers/bindings.js';
 import { PROJECTION_UNKNOWN, type TrackerProjectionLookup, trackerLinkViews } from '../knowledge/trackers/view.js';
 import { checkSourceDocument, DeploymentPolicyError, policyVersionOf } from '../knowledge/registry/policy.js';
-import { canonicalJson, deriveToolClass, effectiveToolClass, ESTATE_SERVER, type HashedRestTarget, type HashedToolShape, MCP_SERVER_NAME_RE, mcpSubject, parseMcpSubject, sha256Hex, toolSchemaHash } from './classify.js';
+import { canonicalJson, deriveToolClass, effectiveToolClass, APPS_SERVER, ESTATE_SERVER, type HashedRestTarget, type HashedToolShape, MCP_SERVER_NAME_RE, mcpSubject, parseMcpSubject, sha256Hex, toolSchemaHash } from './classify.js';
 import type { McpUpstreamConfig, ProbedTool, ProbeResult, Prober } from './probe.js';
 import { GENERATIONS_KEPT, type McpRegistryFile, type McpRegistryStore, type McpServerRecord, type McpToolRecord } from './registry-store.js';
 import { restTarget } from './rest.js';
@@ -240,6 +240,9 @@ export class McpRegistry {
    * save commits, so the OS store and the registry row land together or not at all).
    */
   async preview(config: McpUpstreamConfig, stagedSecret: string | null = null): Promise<McpPreviewResponse> {
+    if (config.name === APPS_SERVER) {
+      throw new McpRegistryError(400, 'reserved_name', `"${APPS_SERVER}" is reserved: mcp:apps/<tool> is crew's own Apps self-check; choose another name`);
+    }
     if (config.name === ESTATE_SERVER) {
       throw new McpRegistryError(400, 'reserved_name', `"${ESTATE_SERVER}" is reserved: mcp:${ESTATE_SERVER}/<tool> is the broker's estate relay (the seat's own estate), never a registered server; choose another name`);
     }
@@ -882,6 +885,7 @@ export class McpRegistry {
    * upload IS the person's act, so there is no preview; a name held by any other kind is refused.
    */
   async registerSnapshotSource(name: string, digest: string, description: SourceDescription): Promise<McpServer> {
+    if (name === APPS_SERVER) throw new McpRegistryError(400, 'reserved_name', `"${APPS_SERVER}" is reserved: mcp:apps/<tool> is crew's own Apps self-check; choose another name`);
     if (name === CREW_SOURCE || name === ESTATE_SERVER) throw new McpRegistryError(400, 'reserved_name', `"${name}" is reserved; choose another name`);
     const stamp = new Date(this.now()).toISOString();
     const rec = await this.mutate(async (file) => {

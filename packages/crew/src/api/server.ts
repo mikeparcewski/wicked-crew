@@ -15,6 +15,8 @@ import { launchRosterNaming, registerRoutes } from './routes.js';
 import { APPS_ACTIONS_STATE_FILENAME, AppActionStore } from '../apps/actions/store.js';
 import { AppsSourceStage } from '../apps/exec/source-stage.js';
 import { APPS_STATE_FILENAME, AppStore, defaultAppsRoot } from '../apps/store.js';
+import { agentMay } from '../knowledge/gate/access.js';
+import { AppsSelfCheck } from '../apps/self-check.js';
 import { AppTurnService, PackageKnowledge, appsUnitResolver } from '../apps/turns.js';
 import { freshenCheckout } from './chat-freshness.js';
 import { ErrorRing, teeStreamWithErrorRing } from './diagnostics.js';
@@ -2754,47 +2756,6 @@ export async function createServer(
     }
     return out;
   };
-  const mcpBroker = new McpBroker({
-    picks: runSourcePicks,
-    registry: mcpRegistry,
-    // DES-CATALOG-002 §2.3: a `detect-shape` run reaches nothing (its fence is its identity).
-    fence: daemonRunFence((runId) => adapter.launchedWorkflowOfRun(runId)),
-    engine: options?.mcpEngineGate ?? (() => CoreAdapter.mcpEngineGate()),
-    records: mcpCallRecords,
-    budgetPerUnit: budgetFromEnv(),
-    log: (m) => app.log.warn(m),
-    gate: dataGate,
-    // wicked-core#1018: `mcp:estate/<tool>`, a container seat's way to its run's estate. Each
-    // landed proposal is also written to the audit trail against its run (`estate.proposal.submitted`).
-    estate: new EstateRelay({
-      resolver: () => CoreAdapter.estateScopeResolver(),
-      visible: unitVisible,
-      picks: runSourcePicks,
-      sourceNames: sourceOwnerNames,
-      // `rules.recall`: the rules in force for the run's project, the set the rule judge reads (never the code graph).
-      rules: async (projectId) => {
-        if (considerations === null) throw new Error('the rule reads are not up yet');
-        return considerations.inForceFor(projectId);
-      },
-      onProposal: (p) =>
-        audit.record('estate.proposal.submitted', { id: `seat:${p.seat}`, kind: 'agent', trust: 'observer' }, {
-          runId: p.runId,
-          detail: { unit: p.ord, attempt: p.attempt, seat: p.seat, proposalId: p.proposalId, kindType: p.kindType, callId: p.callId },
-        }),
-    }),
-    publish: async (record) => {
-      broadcast({ type: 'mcpCallCompleted', record } as unknown as CoreEvent);
-      if (engineBusDb === undefined) return;
-      await emitOnBus(engineBusDb, {
-        event_type: MCP_CALL_COMPLETED,
-        domain: 'wicked-crew',
-        subdomain: 'mcp',
-        payload: record,
-        producer_id: 'wicked-crew',
-        idempotency_key: `${MCP_CALL_COMPLETED}:${record.spanId}`,
-      });
-    },
-  });
   // DES-APPS-001 (K2a): an unreadable store file leaves Apps off (said once) rather than failing the boot.
   let appStore: AppStore | null = null;
   let appActions: AppActionStore | null = null;
@@ -2852,6 +2813,57 @@ export async function createServer(
   } catch (err) {
     app.log.error(`[apps] the app store cannot be read, so Apps is off: ${err instanceof Error ? err.message : String(err)}`);
   }
+  const appsVerifyUnitToken = appStore !== null && CoreAdapter.estateScopeResolver() !== null
+    ? appsUnitResolver((req) => {
+        const resolve = CoreAdapter.estateScopeResolver();
+        if (resolve === null) return Promise.reject(new Error('no resolver'));
+        return resolve(req);
+      }, () => adapter.sessionsDetail())
+    : undefined;
+  const mcpBroker = new McpBroker({
+    ...(appStore !== null && appsVerifyUnitToken !== undefined ? { apps: new AppsSelfCheck(appStore, appsVerifyUnitToken, {
+      visibleSources: async (projectId) => new Set((await dataGate.sources()).filter((s) => agentMay(s.access, s, projectId, 'see')).map((s) => s.name)),
+    }) } : {}),
+    picks: runSourcePicks,
+    registry: mcpRegistry,
+    // DES-CATALOG-002 §2.3: a `detect-shape` run reaches nothing (its fence is its identity).
+    fence: daemonRunFence((runId) => adapter.launchedWorkflowOfRun(runId)),
+    engine: options?.mcpEngineGate ?? (() => CoreAdapter.mcpEngineGate()),
+    records: mcpCallRecords,
+    budgetPerUnit: budgetFromEnv(),
+    log: (m) => app.log.warn(m),
+    gate: dataGate,
+    // wicked-core#1018: `mcp:estate/<tool>`, a container seat's way to its run's estate. Each
+    // landed proposal is also written to the audit trail against its run (`estate.proposal.submitted`).
+    estate: new EstateRelay({
+      resolver: () => CoreAdapter.estateScopeResolver(),
+      visible: unitVisible,
+      picks: runSourcePicks,
+      sourceNames: sourceOwnerNames,
+      // `rules.recall`: the rules in force for the run's project, the set the rule judge reads (never the code graph).
+      rules: async (projectId) => {
+        if (considerations === null) throw new Error('the rule reads are not up yet');
+        return considerations.inForceFor(projectId);
+      },
+      onProposal: (p) =>
+        audit.record('estate.proposal.submitted', { id: `seat:${p.seat}`, kind: 'agent', trust: 'observer' }, {
+          runId: p.runId,
+          detail: { unit: p.ord, attempt: p.attempt, seat: p.seat, proposalId: p.proposalId, kindType: p.kindType, callId: p.callId },
+        }),
+    }),
+    publish: async (record) => {
+      broadcast({ type: 'mcpCallCompleted', record } as unknown as CoreEvent);
+      if (engineBusDb === undefined) return;
+      await emitOnBus(engineBusDb, {
+        event_type: MCP_CALL_COMPLETED,
+        domain: 'wicked-crew',
+        subdomain: 'mcp',
+        payload: record,
+        producer_id: 'wicked-crew',
+        idempotency_key: `${MCP_CALL_COMPLETED}:${record.spanId}`,
+      });
+    },
+  });
   const registered = registerRoutes(
     app,
     adapter,
@@ -2932,15 +2944,7 @@ export async function createServer(
       // DES-APPS-001 (K2a): the app store (`daemon-apps.json` in the state home; repos under the apps root).
       ...(appStore !== null ? { apps: appStore } : {}),
       // (DES-APPS-001 K5) `POST /apps/check`: the engine resolves the unit's token; crew reads which step it is.
-      ...(appStore !== null && CoreAdapter.estateScopeResolver() !== null
-        ? {
-            appsVerifyUnitToken: appsUnitResolver((req) => {
-              const resolve = CoreAdapter.estateScopeResolver();
-              if (resolve === null) return Promise.reject(new Error('no resolver'));
-              return resolve(req);
-            }, () => adapter.sessionsDetail()),
-          }
-        : {}),
+      ...(appsVerifyUnitToken !== undefined ? { appsVerifyUnitToken } : {}),
       ...(appStore !== null && appActions !== null ? { appsActions: appActions } : {}),
       // DES-MCP-TOOLS-001 S3: the broker's call path over that registry.
       mcpBroker,

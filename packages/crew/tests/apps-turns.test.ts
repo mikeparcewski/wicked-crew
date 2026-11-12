@@ -3,7 +3,7 @@
 // check by the engine's worktree tree, the CLI that writes the checked tree into the worktree (and refuses links), the
 // settlement read from the engine's record only (lands only a distinct-seat review of exactly the checked tree), the
 // turn log on the app's detail, and the human-only turn route.
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,12 +12,19 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { registerAuthHooks } from '../src/api/auth.js';
-import type { AppSourceStage } from '../src/apps/check.js';
+import { appFilesFromBlobs, readAppTree, QUERY_TEXT_MAX_BYTES, type AppSourceStage } from '../src/apps/check.js';
+import { AppGit } from '../src/apps/git.js';
+import { AppsSelfCheck } from '../src/apps/self-check.js';
+import { APP_SPEC_MAX_BYTES } from '../src/apps/spec.js';
+import { McpBroker, type McpBrokerDeps } from '../src/mcp/broker.js';
+import type { McpCallResponse } from '../src/core/types.js';
 import { registerAppRoutes } from '../src/apps/routes.js';
 import { AppStore, type AppRepoRegistry } from '../src/apps/store.js';
-import { AppTurnService, PackageKnowledge, SPEC_SHAPE_GUIDE, appsUnitResolver, builderLines, changeLine, packageJson, turnProblem, type KnowledgePackage, type TurnEngine } from '../src/apps/turns.js';
+import { APPS_SELF_CHECK_COMMAND, AppTurnService, PackageKnowledge, SPEC_SHAPE_GUIDE, appsUnitResolver, builderLines, changeLine, packageJson, turnProblem, type KnowledgePackage, type TurnEngine } from '../src/apps/turns.js';
+import { readRules } from '../src/sources/policy/rules.js';
+import { builderCatalog } from './fixtures/apps-sources/builder-catalog.js';
 import { chatKnowledgeFor } from '../src/api/chat-mcp.js';
-import { agentAccessOf } from '../src/knowledge/gate/access.js';
+import { agentAccessOf, agentMay } from '../src/knowledge/gate/access.js';
 import type { GateSource } from '../src/knowledge/gate/sources.js';
 import { knowledgePackageFor } from '../src/knowledge/package.js';
 import { parseSpec } from '../src/apps/spec.js';
@@ -237,6 +244,28 @@ describe('apps turns: the builder\'s task', () => {
     expect(blocks[1]).not.toContain('41234');
   });
 
+  it('the launched builder gets relevant structure and the read-rule index only for described dialects', async () => {
+    const cat = builderCatalog();
+    const sources = [
+      { ...gateSource('support-pg', { projects: ['p1'] }), description: { catalog: cat, descriptorHash: 'h' } },
+      { ...gateSource('pending', { projects: ['p1'] }), dialect: 'mysql', description: null },
+      { ...gateSource('snapshot', { projects: ['p1'] }), dialect: 'sqlite', description: { catalog: { ...cat, dialect: 'sqlite' }, descriptorHash: 'h' } },
+    ] as GateSource[];
+    const s = setup({ knowledge: new PackageKnowledge({ sources: async () => sources }) });
+    await startTurn(s, 'show open cases by assignee');
+    const problem = s.launched[0]!.problem;
+    const pkg = JSON.parse(problem.split('```json\n')[2]!.split('\n```')[0]!) as KnowledgePackage;
+    expect(pkg.sources.find((src) => src.name === 'support-pg')?.structure?.relations.map((r) => r.table)).toEqual(expect.arrayContaining(['work.cases', 'work.case_events']));
+    const index = problem.split("Read rules (crew's check refuses a query that breaks one). Per dialect:\n")[1]!.split('The knowledge summary:')[0]!;
+    expect(index).toContain('postgres\n');
+    expect(index).toContain('sqlite\n');
+    expect(index).not.toContain('mysql');
+    for (const dialect of ['postgres', 'sqlite'] as const) for (const rule of readRules(dialect)) expect(index).toContain(`- ${rule}`);
+    expect(index).toContain('Pull detail with mcp:<source>/list_tables {"table_names": "schema.table,..."} (columns, types, keys, enum literals, and these rules).');
+    const overhead = index.length - [...readRules('postgres'), ...readRules('sqlite')].reduce((n, rule) => n + rule.length, 0);
+    expect(overhead).toBeLessThan(700);
+  });
+
   it('the spec shape guide\'s example is a spec crew\'s own schema accepts (the guide cannot drift from the check)', () => {
     const json = SPEC_SHAPE_GUIDE.split('```json\n')[1]!.split('\n```')[0]!;
     const example = JSON.parse(json.replaceAll('<source>', 'support-pg')) as Record<string, unknown>;
@@ -252,7 +281,7 @@ describe('apps turns: the builder\'s task', () => {
     expect(SPEC_SHAPE_GUIDE).toContain('MySQL and SQLite `?`');
   });
 
-  it('NEGATIVE CONTROL (B3b): an apps-turn builder gets the same package a chat in the app\'s project is built from, and nothing the project may not see', async () => {
+  it('NEGATIVE CONTROL (B3b): an apps-turn builder gets the project package ranked for its message, and nothing the project may not see', async () => {
     const sources: GateSource[] = [gateSource('support-pg', {})];
     const gate = { sources: async () => sources };
     // Not ticked for the app's project: the builder's task carries no source (and a chat there sees none either).
@@ -260,11 +289,11 @@ describe('apps turns: the builder\'s task', () => {
     await startTurn(before);
     expect(before.launched[0]!.problem).not.toContain('support-pg');
     expect(await chatKnowledgeFor(gate, 'p1')).toBeNull();
-    // Ticked: the builder's package is byte for byte the chat's.
+    // Ticked: the builder gets the package ranked for the message; chat still sees the source.
     sources[0] = gateSource('support-pg', { projects: ['p1'] });
     const after = setup({ knowledge: new PackageKnowledge(gate) });
     await startTurn(after);
-    const pkg = packageJson(await knowledgePackageFor({ projectId: 'p1' }, gate));
+    const pkg = packageJson(await knowledgePackageFor({ projectId: 'p1', question: 'add a breaches-by-priority chart' }, gate));
     expect(after.launched[0]!.problem).toContain(pkg);
     expect(await chatKnowledgeFor(gate, 'p1')).toContain('support.tickets');
     expect(pkg).toContain('support.tickets');
@@ -514,9 +543,9 @@ describe('apps turns: check, land, refuse', () => {
       if (!(t in tokens)) throw new Error('invalid_token: unknown');
       return JSON.stringify(tokens[t]);
     }, async () => views);
-    expect(await r('c')).toEqual({ runId: 'apps-x-1', phase: 'check' });
-    expect(await r('b')).toEqual({ runId: 'apps-x-1', phase: 'build' });
-    expect(await r('z')).toEqual({ runId: 'apps-x-1', phase: '(unknown)' });
+    expect(await r('c')).toMatchObject({ runId: 'apps-x-1', phase: 'check', ord: 2 });
+    expect(await r('b')).toMatchObject({ runId: 'apps-x-1', phase: 'build', ord: 1 });
+    expect(await r('z')).toMatchObject({ runId: 'apps-x-1', phase: '(unknown)', ord: 9 });
     expect(await r('n')).toBeNull();
     expect(await r('bad')).toBeNull();
     for (const unit of [{ runId: 'apps-escalations-000000000000', phase: '(unknown)' }, { runId: 'apps-escalations-000000000000' }]) {
@@ -762,5 +791,285 @@ describe('wicked-crew apps-check: the worktree gets exactly the checked tree', (
     expect(await runAppsCheck([], io({ ok: true, commit: 'c', tree: 't', summary: { level: 'data', checked: [1] }, files }))).toBe(0);
     expect(readFileSync(join(d, 'queries', 'q1.sql'), 'utf8')).toBe('select 1');
     expect(await runAppsCheck([], { ...io({}), env: {} })).toBe(2);
+  });
+});
+
+
+function selfCheckBroker(s: ReturnType<typeof setup>, runId: string, overrides: Partial<McpBrokerDeps> = {}, deps: Partial<ConstructorParameters<typeof AppsSelfCheck>[2]> = {}) {
+  const verify = appsUnitResolver(async (request) => {
+    const { token } = JSON.parse(request) as { token: string };
+    const ord = { build: 1, check: 2, review: 3, other: 1 }[token];
+    if (ord === undefined) throw new Error('invalid_token: unknown');
+    return JSON.stringify({ unit: { runId: token === 'other' ? 'other-run' : runId, ord, attempt: 0, seat: 'builder' } });
+  }, async () => [...s.views.values(), { session: { id: 'other-run' }, units: [{ id: 'other-run:build', ord: 1 }] } as unknown as SessionView]);
+  const records = { append: vi.fn(async () => undefined) };
+  const publish = vi.fn();
+  const apps = new AppsSelfCheck(s.store, verify, { visibleSources: async () => new Set(['support-pg']), ...deps });
+  const broker = new McpBroker({
+    registry: { resolveCall: vi.fn(), callSecret: vi.fn() }, engine: () => null, records, publish, apps, ...overrides,
+  });
+  const call = async (files: Record<string, unknown>, token = 'build', subject = 'mcp:apps/check') => {
+    const answer = await broker.call({ token, subject, args: { files } });
+    return { status: answer.status, body: answer.body as McpCallResponse & { code?: string }, result: (answer.body as McpCallResponse).result as Record<string, unknown> };
+  };
+  return { apps, call, records, publish };
+}
+
+function diskSnapshot(root: string): Record<string, string> {
+  return Object.fromEntries(readdirSync(root).sort().flatMap((name): Array<[string, string]> => {
+    const path = join(root, name);
+    return statSync(path).isDirectory()
+      ? Object.entries(diskSnapshot(path)).map(([p, text]) => [`${name}/${p}`, text])
+      : [[name, readFileSync(path).toString('base64')]];
+  }));
+}
+
+describe('the builder checks within the same turn', () => {
+  it.each(['hidden', 'other-project', 'disabled', 'nonexistent'])('hides %s from queries and actions before the source stage', async (name) => {
+    const s = setup();
+    const runId = await startTurn(s);
+    const sources = [
+      gateSource('hidden', { see: false, projects: ['p1'] }),
+      gateSource('other-project', { projects: ['p2'] }),
+      { ...gateSource('disabled', { projects: ['p1'] }), enabled: false },
+      gateSource('support-pg', { projects: ['p1'] }),
+    ];
+    const visibleSources = vi.fn(async (projectId: string | null) => new Set(sources.filter((src) => agentMay(src.access, src, projectId, 'see')).map((src) => src.name)));
+    const check = vi.fn(fakeStage().check);
+    s.store.sourceStage = { check };
+    const b = selfCheckBroker(s, runId, {}, { visibleSources });
+    for (const kind of ['queries', 'actions'] as const) {
+      const candidate = spec('Escalations');
+      if (kind === 'queries') candidate.queries[0]!.source = name;
+      else candidate.actions.push({ id: 'send', kind: 'api', source: name, call: { kind: 'tool', tool: 'send' }, args: {} });
+      const result = (await b.call({ 'apps.json': JSON.stringify(candidate), 'queries/open_count.sql': 'select count(*) as open from support.tickets' })).result;
+      expect(result['findings']).toEqual([{
+        stage: 'source', code: 'unknown_source', path: `$.${kind}[0].source`,
+        message: `${name} is no source this app's builder may use: build on a source in the knowledge package`,
+      }]);
+      expect(check).not.toHaveBeenCalled();
+    }
+    expect(visibleSources).toHaveBeenCalledWith('p1');
+    expect((await b.call(builtFiles())).result).toMatchObject({ ok: true });
+    expect(check).toHaveBeenCalledOnce();
+  });
+
+  it('reads visibility again when a source is disabled during a turn', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    const src = gateSource('support-pg', { projects: ['p1'] });
+    const b = selfCheckBroker(s, runId, {}, { visibleSources: async (projectId) => new Set(agentMay(src.access, src, projectId, 'see') ? [src.name] : []) });
+    expect((await b.call(builtFiles())).result).toMatchObject({ ok: true });
+    src.enabled = false;
+    const check = vi.fn(fakeStage().check);
+    s.store.sourceStage = { check };
+    expect((await b.call(builtFiles())).result).toMatchObject({ ok: false, findings: [expect.objectContaining({ code: 'unknown_source' }), expect.objectContaining({ code: 'unknown_source' })] });
+    expect(check).not.toHaveBeenCalled();
+  });
+
+  it('keeps a live turn counter at capacity and frees only ended turns', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    const other = setup();
+    const otherRun = await startTurn(other);
+    const turnApp = s.store.turnApp.bind(s.store);
+    vi.spyOn(s.store, 'turnApp').mockImplementation((id) => id === otherRun ? other.store.turnApp(id) : turnApp(id));
+    const apps = new AppsSelfCheck(s.store, async (token) => ({ runId: token, phase: 'build', ord: 1, attempt: 0, seat: 'builder' }), {
+      visibleSources: async () => new Set(['support-pg']), capacity: 1,
+    });
+    for (const remaining of [2, 1, 0]) expect(await apps.run(runId, { files: builtFiles() })).toMatchObject({ ok: true, remaining });
+    expect(await apps.run(otherRun, { files: builtFiles() })).toMatchObject({ ok: false, code: 'busy', remaining: 3 });
+    expect(await apps.run(runId, { files: builtFiles() })).toMatchObject({ ok: false, code: 'self_check_limit', remaining: 0 });
+    await s.store.endTurn('escalations', runId);
+    // File validation shows the new turn was admitted before it needs the other store's head.
+    expect(await apps.run(otherRun, { files: {} })).toMatchObject({ ok: false, code: 'check_failed', remaining: 2 });
+  });
+
+  it('allows spec plus 100 query files and a candidate lock', async () => {
+    const s = setup();
+    const b = selfCheckBroker(s, await startTurn(s));
+    const candidate = spec('Many queries');
+    candidate.queries = Array.from({ length: 100 }, (_, i) => ({ ...candidate.queries[0]!, id: i === 0 ? 'open_count' : `q${i}` }));
+    const files = { 'apps.json': JSON.stringify(candidate), 'apps.lock.json': 'ignored', ...Object.fromEntries(candidate.queries.map((q) => [`queries/${q.id}.sql`, 'select count(*) as open from support.tickets'])) };
+    expect(Object.keys(files)).toHaveLength(102);
+    expect((await b.call(files)).result).toMatchObject({ ok: true });
+  });
+
+  it.each([
+    ['stray.txt', 'text', 'unexpected_path'],
+    ['queries/nested', null, 'unexpected_path'],
+    ['queries/link.sql', null, 'not_a_file'],
+  ])('refuses the command submission containing %s', async (path, value, code) => {
+    const s = setup();
+    const b = selfCheckBroker(s, await startTurn(s));
+    expect((await b.call({ ...builtFiles(), [path]: value })).result).toMatchObject({ ok: false, findings: expect.arrayContaining([expect.objectContaining({ stage: 'files', code, path })]) });
+  });
+
+  it('returns source findings, accepts a repair, and writes no app state, objects or refs', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    const stage = fakeStage();
+    s.store.sourceStage = { check: async (input) => input.queryText['breaches_by_priority'] === 'refused'
+      ? { findings: [{ stage: 'source', code: 'read_policy', path: 'queries/breaches_by_priority.sql', message: 'the query must read support.tickets' }], sources: {}, queries: {}, actions: {}, uploads: {} }
+      : stage.check(input) };
+    const b = selfCheckBroker(s, runId);
+    const before = diskSnapshot(s.dir);
+    const files = builtFiles();
+    files['queries/breaches_by_priority.sql'] = 'refused';
+    const refused = await b.call(files);
+    expect(refused.status).toBe(200);
+    expect(refused.body.outcome).toBe('ok');
+    expect(refused.result).toMatchObject({ ok: false, remaining: 2, findings: [{ path: 'queries/breaches_by_priority.sql', message: 'the query must read support.tickets' }] });
+    files['queries/breaches_by_priority.sql'] = 'select priority, count(*) as n from support.tickets group by priority';
+    const passed = await b.call(files);
+    expect(passed.status).toBe(200);
+    expect(passed.result).toMatchObject({ ok: true, level: 'data', checked: ['breaches_by_priority'], remaining: 1 });
+    expect(diskSnapshot(s.dir)).toEqual(before);
+    expect(b.records.append).toHaveBeenCalledTimes(2);
+    expect(b.publish).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(b.records.append.mock.calls)).not.toContain('select priority');
+  });
+
+  it('refuses other steps, other runs, invalid tokens, other tools and a fourth check', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    const b = selfCheckBroker(s, runId);
+    for (const phase of ['check', 'review']) {
+      expect((await b.call(builtFiles(), phase)).result).toMatchObject({ ok: false, code: 'not_the_build', remaining: 3 });
+    }
+    expect((await b.call(builtFiles(), 'other')).result).toMatchObject({ ok: false, code: 'not_a_turn', remaining: 3 });
+    const invalid = await b.call(builtFiles(), 'invalid');
+    expect(invalid.status).toBe(401);
+    expect(invalid.body.code).toBe('invalid_token');
+    const tool = await b.call(builtFiles(), 'build', 'mcp:apps/write');
+    expect(tool.status).toBe(403);
+    expect(tool.body.reason).toContain('only one tool: check');
+    for (const remaining of [2, 1, 0]) expect((await b.call(builtFiles())).result).toMatchObject({ ok: true, remaining });
+    for (let i = 0; i < 2; i++) expect((await b.call(builtFiles())).result).toMatchObject({ ok: false, code: 'self_check_limit', remaining: 0 });
+    await s.store.endTurn('escalations', runId);
+    expect((await b.call(builtFiles())).result).toMatchObject({ ok: false, code: 'not_a_turn' });
+  });
+
+  it('allows one check in flight and counts the completed check once', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    let release!: () => void;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const waiting = new Promise<void>((resolve) => { release = resolve; });
+    const stage = fakeStage();
+    s.store.sourceStage = { check: async (input) => { entered(); await waiting; return stage.check(input); } };
+    const b = selfCheckBroker(s, runId);
+    const first = b.call(builtFiles());
+    await started;
+    expect((await b.call(builtFiles())).result).toMatchObject({ ok: false, code: 'busy', remaining: 2 });
+    release();
+    expect((await first).result).toMatchObject({ ok: true, remaining: 2 });
+    expect((await b.call(builtFiles())).result).toMatchObject({ ok: true, remaining: 1 });
+  });
+
+  it('applies the run fence and unit MCP budget before checking files', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    const fenced = selfCheckBroker(s, runId, { fence: async () => true });
+    expect((await fenced.call(builtFiles())).body.outcome).toBe('denied');
+    const b = selfCheckBroker(s, runId, { budgetPerUnit: 1 });
+    expect((await b.call(builtFiles())).result).toMatchObject({ ok: true, remaining: 2 });
+    expect((await b.call(builtFiles())).body.outcome).toBe('budget_exhausted');
+  });
+
+  it.each([
+    ['missing query', (files: Record<string, string>) => { delete files['queries/open_count.sql']; }, 'missing_query_text'],
+    ['undeclared query', (files: Record<string, string>) => { files['queries/extra.sql'] = 'select 1'; }, 'undeclared_query_text'],
+    ['non-JSON query', (files: Record<string, string>) => {
+      const candidate = spec('Escalations', { queries: [{ id: 'open_count', kind: 'rest', source: 'api', output: [{ name: 'open', type: 'integer' }] }] });
+      files['apps.json'] = JSON.stringify(candidate);
+      delete files['queries/open_count.sql'];
+      files['queries/open_count.json'] = 'not JSON';
+    }, 'not_json'],
+  ] as const)('shares tree findings for %s', async (_name, change, code) => {
+    const s = setup();
+    const runId = await startTurn(s);
+    const files: Record<string, string> = { 'apps.json': JSON.stringify(spec('Escalations')), 'queries/open_count.sql': 'select count(*) as open from support.tickets' };
+    change(files);
+    const root = join(s.dir, 'apps', 'escalations');
+    const tree = snapshotTree(root, files);
+    const fromTree = await readAppTree(new AppGit(root), tree);
+    const fromBlobs = appFilesFromBlobs(new Map(Object.entries(files).map(([path, text]) => [path, Buffer.from(text)])));
+    expect(fromTree).toEqual(fromBlobs);
+    expect(fromTree.ok).toBe(false);
+    if (fromTree.ok) throw new Error('the bad files passed');
+    expect(fromTree.findings.some((f) => f.code === code)).toBe(true);
+    expect((await selfCheckBroker(s, runId).call(files)).result['findings']).toEqual(fromTree.findings);
+  });
+
+  it.each([
+    [{ 'apps.json': '{}' , 'other.txt': 'x' }, 'unexpected_path', 'other.txt'],
+    [{ 'apps.json': '{}' , 'queries/bad.txt': 'x' }, 'unexpected_path', 'queries/bad.txt'],
+    [{ 'apps.json': 4 }, 'not_a_file', 'apps.json'],
+    [{ 'apps.json': ' '.repeat(APP_SPEC_MAX_BYTES + 1) }, 'too_large', 'apps.json'],
+    [{ 'apps.json': JSON.stringify(spec('Escalations')), 'queries/open_count.sql': 'x'.repeat(QUERY_TEXT_MAX_BYTES + 1) }, 'too_large', 'queries/open_count.sql'],
+    [{}, 'missing_spec', 'apps.json'],
+  ])('checks file paths, text and byte bounds', async (files, code, path) => {
+    const s = setup();
+    const b = selfCheckBroker(s, await startTurn(s));
+    expect((await b.call(files)).result).toMatchObject({ ok: false, remaining: 2, findings: [expect.objectContaining({ code, path })] });
+  });
+
+  it('requires strict arguments, limits file count, and ignores the candidate lock', async () => {
+    const s = setup();
+    const b = selfCheckBroker(s, await startTurn(s));
+    expect(await b.apps.run('build', { files: {}, extra: true })).toMatchObject({ ok: false, code: 'bad_args', remaining: 2 });
+    expect((await b.call(Object.fromEntries(Array.from({ length: 102 }, (_, n) => [`file${n}`, 'x'])))).result).toMatchObject({ ok: false, code: 'bad_tree', remaining: 1 });
+    expect((await b.call({ ...builtFiles(), 'apps.lock.json': 'invalid lock' })).result).toMatchObject({ ok: true, remaining: 0 });
+  });
+
+  it('returns the staged check finding when its source stage cannot run', async () => {
+    const s = setup();
+    const b = selfCheckBroker(s, await startTurn(s));
+    s.store.sourceStage = null;
+    expect((await b.call(builtFiles())).result).toMatchObject({ ok: false, code: 'source_check_unavailable', findings: [expect.objectContaining({ stage: 'source', code: 'source_check_unavailable', path: '$' })] });
+  });
+});
+
+describe('the builder self-check command', () => {
+  it('is in the task before Using it, with the bound and the result shape', () => {
+    const problem = turnProblem({ slug: 'x', name: 'X', base: 1, message: 'm', about: [], spec: spec('X'), recent: [], knowledge: { package: 'wicked.knowledge/v1', projectId: 'p1', sources: [] } });
+    expect(problem).toContain(['```sh', APPS_SELF_CHECK_COMMAND, '```'].join('\n'));
+    expect(problem).toContain('at most 3 times');
+    expect(problem).toContain('Exit 0 means crew answered');
+    expect(problem).toContain('result.ok (true = nothing to refuse)');
+    expect(problem).toContain('result.findings (path + message each)');
+    expect(problem).toContain('Any other exit, or an answer with reason/remedy and no result');
+    expect(problem).toContain('1 MB the shim sends');
+    expect(problem).toContain('do not retry it; finish the build, and the check step judges your worktree');
+    const section = problem.slice(problem.indexOf('Check your work before you finish:'), problem.indexOf('Using it:'));
+    expect(section.length).toBeLessThan(1600);
+  });
+
+  const python = spawnSync('python3', ['--version']);
+  it.skipIf((python.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT')('reads the worktree as UTF-8 JSON with python3', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'apps-self-command-'));
+    dirs.push(dir);
+    mkdirSync(join(dir, 'queries'));
+    mkdirSync(join(dir, 'queries', 'subdir'));
+    const files = { 'stray.txt': 'stray', 'apps.json': '{"name":"Café"}\n', 'queries/a.sql': 'select 1;\n', 'queries/b.json': '{"key":"value"}\n' };
+    for (const [path, text] of Object.entries(files)) writeFileSync(join(dir, path), text);
+    mkdirSync(join(dir, '.git'));
+    writeFileSync(join(dir, '.git', 'config'), 'excluded');
+    // The engine's scratch (wicked-core worktree_guard excludes `/tmp/` from the snapshot the check step reads).
+    mkdirSync(join(dir, 'tmp'));
+    writeFileSync(join(dir, 'tmp', 'scratch.txt'), 'excluded');
+    symlinkSync('a.sql', join(dir, 'queries', 'link.sql'));
+    symlinkSync('apps.json', join(dir, 'root-link'));
+    writeFileSync(join(dir, 'queries', 'binary.sql'), Buffer.from([0xff]));
+    const script = APPS_SELF_CHECK_COMMAND.split("python3 -c '")[1]!.split("' | ")[0]!;
+    const result = spawnSync('python3', ['-c', script], { cwd: dir, encoding: 'utf8' });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ files: { ...files, 'queries/subdir': null, 'queries/link.sql': null, 'queries/binary.sql': null, 'root-link': null } });
+    rmSync(join(dir, 'queries'), { recursive: true });
+    const withoutQueries = spawnSync('python3', ['-c', script], { cwd: dir, encoding: 'utf8' });
+    expect(withoutQueries.status, withoutQueries.stderr).toBe(0);
+    expect(JSON.parse(withoutQueries.stdout)).toEqual({ files: { 'apps.json': files['apps.json'], 'stray.txt': 'stray', 'root-link': null } });
   });
 });

@@ -14490,6 +14490,7 @@ export interface McpCallBody {
    * `mcp:<server>/<tool>`. The server name `estate` is reserved (wicked-core#1018): `mcp:estate/<tool>`
    * is the estate relay, a container seat's way to its run's estate (the read-only graph, memory,
    * knowledge and rules lookups, and `proposal.submit`), scoped by the daemon to the token's run.
+   * `apps` is also reserved: `mcp:apps/check` is crew's advisory self-check for an app turn's build step.
    */
   subject: string;
   /** The tool's arguments (a JSON object); absent = `{}`. */
