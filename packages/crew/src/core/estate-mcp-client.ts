@@ -77,11 +77,14 @@ export class EstateMcpError extends Error {
   readonly code?: number;
   /** The OS error code (`ENOENT`, `EACCES`, ...) when the server process could not be spawned at all. */
   readonly spawnCode?: string;
-  constructor(message: string, code?: number, spawnCode?: string) {
+  /** The uncapped first line of an isError tool refusal, for internal classification only; display `message`. */
+  readonly refusal?: string;
+  constructor(message: string, code?: number, spawnCode?: string, refusal?: string) {
     super(message);
     this.name = 'EstateMcpError';
     if (code !== undefined) this.code = code;
     if (spawnCode !== undefined) this.spawnCode = spawnCode;
+    if (refusal !== undefined) this.refusal = refusal;
   }
 }
 
@@ -341,7 +344,7 @@ function unwrapToolResult(msg: Record<string, unknown>, tool: string): unknown {
     } catch {
       // A plain-text refusal carries its own cause; only its first line belongs in the error.
     }
-    throw new EstateMcpError(capText(detail));
+    throw new EstateMcpError(capText(detail), undefined, undefined, detail.split(/\r?\n/, 1)[0]!);
   }
   try {
     return JSON.parse(text) as unknown;

@@ -8,6 +8,7 @@ import { EstateMcpError } from '../src/core/estate-mcp-client.js';
 import { SourceProjector, type EstateCall, type SourceProjectorDeps } from '../src/knowledge/projector.js';
 import { trackerIdOf, trackerLinkIdOf } from '../src/knowledge/registry/entry.js';
 import { TrackerProjector } from '../src/knowledge/trackers/projector.js';
+import { Semaphore } from '../src/mcp/estate-relay.js';
 import { configOf } from '../src/mcp/registry.js';
 import { McpRegistryStore, type McpServerRecord } from '../src/mcp/registry-store.js';
 import { sourceDescriptorHash } from '../src/sources/kinds.js';
@@ -17,6 +18,7 @@ import { removeScratch } from './setup/scratch.js';
 const STAMP = '2026-11-04T03:00:12.000Z';
 const LOCKED = "replace_source committed nothing and tombstoned nothing (any link rows it staged stay hidden, and the source's next generation deletes them): storage error: database is locked";
 const OLDER = "replace_source committed nothing and tombstoned nothing (any link rows it staged stay hidden, and the source's next generation deletes them): invalid argument: generation 1 is older than the stored generation 2 for source src-1";
+const refusal = (message: string) => new EstateMcpError(message, undefined, undefined, message.split(/\r?\n/, 1)[0]!);
 const TRACKER_ID = trackerIdOf('jira-id', 'site', 'PROJ');
 const TARGET = { kind: 'project', id: 'project-id' } as const;
 const common = {
@@ -61,8 +63,8 @@ describe('estate projection writer', () => {
 
   it.each([LOCKED, LOCKED.replace('database is locked', 'DATABASE IS BUSY')])('acks the third attempt after contention: %s', async (message) => {
     const call = vi.fn<EstateCall>()
-      .mockRejectedValueOnce(new EstateMcpError(message))
-      .mockRejectedValueOnce(new EstateMcpError(message))
+      .mockRejectedValueOnce(refusal(message))
+      .mockRejectedValueOnce(refusal(message))
       .mockResolvedValue({ docs: 1 });
     const sleep = vi.fn<(ms: number) => Promise<void>>().mockResolvedValue(undefined);
     const log = vi.fn();
@@ -79,7 +81,7 @@ describe('estate projection writer', () => {
   });
 
   it('does not retry another refusal, and logs only its first line', async () => {
-    const call = vi.fn<EstateCall>().mockRejectedValue(new EstateMcpError(`${OLDER}\nExtra diagnostics`));
+    const call = vi.fn<EstateCall>().mockRejectedValue(refusal(`${OLDER}\nExtra diagnostics`));
     const sleep = vi.fn<(ms: number) => Promise<void>>().mockResolvedValue(undefined);
     const log = vi.fn();
     const p = projector({ call, sleep, log });
@@ -93,7 +95,7 @@ describe('estate projection writer', () => {
 
   it('gives up after three retries, logs the lock cause, and releases the lane for the next source', async () => {
     const call = vi.fn<EstateCall>(async (_tool, args) => {
-      if (args['sourceId'] === 'source-a') throw new EstateMcpError(`${LOCKED}\nExtra diagnostics`);
+      if (args['sourceId'] === 'source-a') throw refusal(`${LOCKED}\nExtra diagnostics`);
       return { docs: 1 };
     });
     const sleep = vi.fn<(ms: number) => Promise<void>>().mockResolvedValue(undefined);
@@ -142,8 +144,8 @@ describe('estate projection writer', () => {
 
   it('retries a tracker lock with the same generation before acknowledging it', async () => {
     const call = vi.fn<EstateCall>()
-      .mockRejectedValueOnce(new EstateMcpError(LOCKED))
-      .mockRejectedValueOnce(new EstateMcpError(LOCKED))
+      .mockRejectedValueOnce(refusal(LOCKED))
+      .mockRejectedValueOnce(refusal(LOCKED))
       .mockResolvedValue({ docs: 1 });
     const sleep = vi.fn<(ms: number) => Promise<void>>().mockResolvedValue(undefined);
     const schedule = vi.fn();
@@ -156,5 +158,41 @@ describe('estate projection writer', () => {
     expect(trackers.projection(TRACKER_ID)).toBe('current');
     expect(trackers.acknowledged(TRACKER_ID)).toBe(true);
     expect(schedule).not.toHaveBeenCalled();
+  });
+});
+
+describe('Semaphore hand-off', () => {
+  it('reserves A\'s slot for queued B when C arrives before B resumes', async () => {
+    const lane = new Semaphore(1);
+    const events: string[] = [];
+    let active = 0;
+    let peak = 0;
+    const start = (name: string) => {
+      events.push(`start${name}`);
+      peak = Math.max(peak, ++active);
+    };
+    const end = (name: string) => {
+      events.push(`end${name}`);
+      active--;
+    };
+    let finishA!: () => void;
+    const completedA = new Promise<void>((resolve) => {
+      finishA = () => { end('A'); resolve(); };
+    });
+    const work = async (name: string) => {
+      start(name);
+      await Promise.resolve();
+      end(name);
+    };
+    const a = lane.run(() => { start('A'); return completedA; });
+    const b = lane.run(() => work('B'));
+    // A's release continuation was registered first. C runs after that release but before the waiter it wakes.
+    const c = completedA.then(() => lane.run(() => work('C')));
+    expect(events).toEqual(['startA']);
+    finishA();
+    await Promise.all([a, b, c]);
+    expect(events).toEqual(['startA', 'endA', 'startB', 'endB', 'startC', 'endC']);
+    expect(peak).toBe(1);
+    expect(active).toBe(0);
   });
 });

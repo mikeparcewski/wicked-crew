@@ -10,7 +10,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   callEstateTool,
   EstateMcpError,
@@ -21,6 +21,7 @@ import {
   sameDirectory,
   resolveMemoryDbPath,
 } from '../src/core/estate-mcp-client.js';
+import { replaceSource } from '../src/knowledge/estate-write.js';
 import { defaultStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 import { useUnconfiguredTempHome } from './setup/temp-home.js';
 import { removeScratch } from './setup/scratch.js';
@@ -176,6 +177,7 @@ describe('callEstateTool', () => {
     expect(err).toBeInstanceOf(EstateMcpError);
     expect((err as EstateMcpError).message).toBe(firstLine.length > 200 ? `${firstLine.slice(0, 200)}… (${firstLine.length} chars)` : firstLine);
     expect((err as EstateMcpError).message).not.toContain('not JSON');
+    expect((err as EstateMcpError).refusal).toBe(firstLine);
   });
 
   it('preserves the message from a JSON isError payload', async () => {
@@ -183,7 +185,51 @@ describe('callEstateTool', () => {
     dirs.push(fx.dir);
     const result = { content: [{ type: 'text', text: '{"message":"estate refused this generation"}' }], isError: true };
     await expect(callEstateTool('knowledge.replace_source', {}, { spawn: spawnFake(fx, 'result', result) }))
-      .rejects.toMatchObject({ name: 'EstateMcpError', message: 'estate refused this generation' });
+      .rejects.toMatchObject({ name: 'EstateMcpError', message: 'estate refused this generation', refusal: 'estate refused this generation' });
+  });
+
+  it.each([
+    {
+      name: 'retries the captured estate 0.35.3 lock refusal', isError: true, retry: true,
+      firstLine: "replace_source committed nothing and tombstoned nothing (any link rows it staged stay hidden, and the source's next generation deletes them): storage error: database is locked",
+    },
+    { name: 'does not retry non-error text mentioning a lock', isError: false, retry: false, firstLine: 'database is locked' },
+    { name: 'retries a refusal whose lock cause is past the display cap', isError: true, retry: true, firstLine: `${'long context '.repeat(20)}storage error: database is locked` },
+    { name: 'does not classify a lock mentioned only after the refusal\'s first line', isError: true, retry: false, firstLine: 'invalid argument: generation is older' },
+  ])('$name through the parser and writer', async ({ firstLine, isError, retry }) => {
+    const fx = makeFixture();
+    dirs.push(fx.dir);
+    const errors: EstateMcpError[] = [];
+    let attempts = 0;
+    const call = vi.fn(async (tool: string, args: Record<string, unknown>) => {
+      const result = ++attempts <= 2
+        ? { content: [{ type: 'text', text: `${firstLine}\nAdditional diagnostics: database is locked` }], isError }
+        : { content: [{ type: 'text', text: '{"docs":1}' }], isError: false };
+      try {
+        return await callEstateTool(tool, args, { spawn: spawnFake(fx, 'result', result) });
+      } catch (err) {
+        expect(err).toBeInstanceOf(EstateMcpError);
+        errors.push(err as EstateMcpError);
+        throw err;
+      }
+    });
+    const sleep = vi.fn<(ms: number) => Promise<void>>().mockResolvedValue(undefined);
+    const args = { sourceId: 'src-1', generation: 1, docs: [] };
+    const answer = await replaceSource(call, args, { sleep }).catch((err: unknown) => err);
+    if (retry) expect(answer).toEqual({ docs: 1 });
+    else expect(answer).toBe(errors[0]);
+    expect(call).toHaveBeenCalledTimes(retry ? 3 : 1);
+    expect(sleep.mock.calls).toEqual(retry ? [[250], [1_000]] : []);
+    expect(errors).toHaveLength(retry ? 2 : 1);
+    const detail = firstLine.length > 200 ? `${firstLine.slice(0, 200)}… (${firstLine.length} chars)` : firstLine;
+    for (const err of errors) {
+      expect(err.refusal).toBe(isError ? firstLine : undefined);
+      expect(err.message).toBe(isError ? detail : `estate-mcp knowledge.replace_source answered text, not JSON: ${detail}`);
+    }
+    for (const [tool, sent] of call.mock.calls) {
+      expect(tool).toBe('knowledge.replace_source');
+      expect(sent).toBe(args);
+    }
   });
 
   it.each(['Unexpected answer', 'x'.repeat(240)])('reports only the capped first line of non-error text', async (firstLine) => {
