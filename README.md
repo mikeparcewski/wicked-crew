@@ -85,10 +85,20 @@ finding then names its version and where it was found. Update that copy (for the
 `npm install -g wicked-garden@latest`) and restart `wicked-crew serve`.
 
 Uploading a file or a SQLite database as a data source needs Node.js 24.12, 25.1 or later. The
-container runtime (Rancher Desktop, Docker, Podman, Colima or OrbStack) must be running:
-governed agents run each CLI's headless mode in a hardened seat container (crew builds the seat images
-on first use), and you sign each agent in once from studio's Agents page. Claude Code and GitHub
-Copilot sign in through a login container; Codex, Pi and OpenCode sign in with their host CLIs and a
+daemon needs a local Kubernetes cluster (Rancher Desktop, or Docker Desktop with Kubernetes on), running and
+installed once for crew: `npx wicked-installer` (0.10.0 or later) runs the install when the cluster can hold seats,
+or run crew's own engine binary by hand (`<platform>` is `darwin-arm64`, `darwin-x64`, `linux-x64-gnu`,
+`linux-arm64-gnu` or `win32-x64-msvc`; use `docker-desktop` for Docker Desktop):
+
+```sh
+"$(npm root -g)/wicked-crew/node_modules/wicked-core-ts-<platform>/wicked-core" cluster install \
+  --admin-context rancher-desktop --home ~/.wicked-crew
+```
+
+Governed agents run each CLI's headless mode in a hardened seat pod (crew builds the seat images with
+the container CLI on first use, into the store the cluster shares), and you sign each agent in once from
+studio's Agents page. `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead. Claude Code
+and GitHub Copilot sign in through a login pod; Codex, Pi and OpenCode sign in with their host CLIs and a
 temporary home. Either way the credential goes to the broker and the seat sees a placeholder, except
 a Claude Code seat on a Claude subscription, which receives its sign-in token (a guard fails the step
 or refuses the delivery that contains it).

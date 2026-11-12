@@ -23,8 +23,11 @@ state paths out of a PR, and asking a large database ranks its tables by the que
 
 - **Governed seats need a local Kubernetes cluster (wicked-core-ts 0.15.40, core#1383).** The engine's Docker runner is
   gone: a container seat runs as a pod, so `wicked-crew serve` on the default container floor needs Rancher Desktop or
-  Docker Desktop with Kubernetes on, and a one-time `wicked-core cluster install --admin-context <ctx> --home
-  ~/.wicked-crew` (wicked-installer 0.10.0 runs it after install when the cluster can hold seats). Without one, the
+  Docker Desktop with Kubernetes on, and a one-time cluster install for the daemon's state home. wicked-installer
+  0.10.0 (released with this train) runs it after install when the cluster can hold seats; by hand, run the engine
+  binary crew installs (no `wicked-core` is put on PATH): `"$(npm root -g)/wicked-crew/node_modules/wicked-core-ts-<platform>/wicked-core"
+  cluster install --admin-context rancher-desktop --home ~/.wicked-crew` (`<platform>`: `darwin-arm64`, `darwin-x64`,
+  `linux-x64-gnu`, `linux-arm64-gnu` or `win32-x64-msvc`; `docker-desktop` for Docker Desktop). Without one, the
   Nerve Center's Kubernetes cluster row is down, the container seats are benched with `Kubernetes isn't running`, and a
   sign-in is refused with its own code and repair. `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor. The
   checks floor tries pods on macOS and, by default, falls back to the host floor with the reason when they cannot

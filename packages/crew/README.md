@@ -21,10 +21,13 @@ Local-first: loopback only, no accounts, no billing, no model reselling. Crew dr
 - **uv** — the daemon builds its skills environment with `uv sync` (once per skills baseline); without
   uv every job launch is refused (`venv-failed`). The family installer installs it for you (see below).
 - **git** — crew spawns it for every repository operation.
-- **A container runtime** (Rancher Desktop, Docker, Podman, Colima or OrbStack), running. Governed
-  agents work in a hardened seat container, and you sign each one in from studio's Agents tab: Claude
-  Code and GitHub Copilot in a login container, Codex, Pi and OpenCode with their host CLIs.
-  `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead.
+- **A local Kubernetes cluster** (Rancher Desktop, or Docker Desktop with Kubernetes on), running and
+  installed once for crew: `npx wicked-installer` (0.10.0 or later) runs the install, or by hand
+  `"$(npm root -g)/wicked-crew/node_modules/wicked-core-ts-<platform>/wicked-core" cluster install
+  --admin-context rancher-desktop --home ~/.wicked-crew`. Governed agents work in a hardened seat pod,
+  and you sign each one in from studio's Agents tab: Claude Code and GitHub Copilot in a login pod,
+  Codex, Pi and OpenCode with their host CLIs. `WICKED_SEAT_FLOOR=host` keeps the labelled interim host
+  floor instead.
 - **At least one coding-agent CLI** you can sign in (Claude Code, Codex, GitHub Copilot, OpenCode or Pi).
 - **wicked-estate** — the `wicked-estate` / `wicked-estate-mcp` binaries on PATH. Crew requires it:
   adding a repository in Studio runs onboarding's index phase on the `wicked-estate` tool, and it

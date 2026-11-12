@@ -104,6 +104,9 @@ test.describe('the reviewed messaging', () => {
     expect(await text('#deliver')).toContain('Your data, through one gate. Agents read a database only where you allow it');
     // the garden floor is crew 0.18.0's REQUIRED_GARDEN_VERSION
     expect(await text('#get')).toContain('wicked-garden 12.68.0 or later');
+    // seats run as pods since crew 0.18.11 (core-ts 0.15.40's Kubernetes runner): the prerequisite is a cluster, not a runtime
+    expect(await text('#get')).toContain('A local Kubernetes cluster: Rancher Desktop, or Docker Desktop with Kubernetes on');
+    expect(await text('#get')).not.toContain('Colima');
     // the install flow: the family installer, then wicked-crew serve, then the local URL
     expect(await text('#get')).toContain('npx wicked-installer # picks crew, garden and the rest wicked-crew serve # then open http://127.0.0.1:7701');
     expect(await text('#get')).toContain('then serves studio at http://127.0.0.1:7701');
