@@ -163,6 +163,19 @@ describe('a seeded chat open makes its proposal the first time (F36)', () => {
     expect(p.question).toMatchObject({ kind: 'missing', text: 'The running app?', choices: [], input: { kind: 'text', edit: 'inputs.url' } });
   });
 
+  it('studio#1134: the words a person types for the running-app question are its address', async () => {
+    const body = await demoSeed('Record a short demo video of my app');
+    expect(body.proposal!.proposal.question).toMatchObject({ input: { kind: 'text', edit: 'inputs.url' } });
+    const revised = await app.inject({
+      method: 'POST', url: `/api/v1/chats/${body.chatId}/proposals`,
+      payload: { revises: body.proposal!.proposal.pid, source: 'question', requestId: randomUUID(), edits: { inputs: { url: { kind: 'text', value: ' http://127.0.0.1:4319/ ' } } } },
+    });
+    expect(revised.statusCode, revised.body).toBe(201);
+    const p = (revised.json() as { view: ChatProposalView }).view.proposal;
+    expect(p.inputs?.['url']).toEqual({ kind: 'url', value: 'http://127.0.0.1:4319/' });
+    expect(p.question?.input?.edit).not.toBe('inputs.url');
+  });
+
   it('a demo seed’s external address is still refused by the demo launcher', async () => {
     const body = await demoSeed('Record a demo of https://example.com/app');
     expect(body.proposal!.proposal.inputs?.['url']).toEqual({ kind: 'url', value: 'https://example.com/app' });
@@ -211,9 +224,9 @@ describe('a seeded chat open makes its proposal the first time (F36)', () => {
 describe('onePersonUrl: the one app address in a person\u2019s words, as typed', () => {
   it.each([
     ['Record my app at http://127.0.0.1:4319/ please', 'http://127.0.0.1:4319/'],
-    ['Record my app at http://127.0.0.1:4319/.', 'http://127.0.0.1:4319/'],
-    ['Record it (http://localhost:4319/app)', 'http://localhost:4319/app'],
     ['Record HTTP://localhost:4319/', 'HTTP://localhost:4319/'],
+    ['Use the http:// scheme and record http://localhost:4319/app', 'http://localhost:4319/app'],
+    ['Record http://[::1]', 'http://[::1]'],
   ])('%s -> %s', (words, url) => {
     expect(onePersonUrl(words)).toBe(url);
   });
@@ -223,6 +236,10 @@ describe('onePersonUrl: the one app address in a person\u2019s words, as typed',
     ['two addresses in mixed case', 'Record http://localhost:4319/ or HTTP://localhost:4320/'],
     ['an address that runs into a quote', "Record http://localhost:4319/a'b"],
     ['an address with a fragment', 'Record http://localhost:4319/#!'],
+    ['an address a sentence may have ended', 'Record http://localhost:4319/report.'],
+    ['an address in brackets', 'Record it (http://localhost:4319/app)'],
+    ['a quoted address', 'Record "http://localhost:4319/"'],
+    ['an address that does not parse', 'Record http://['],
   ])('%s -> asked', (_label, words) => {
     expect(onePersonUrl(words)).toBeNull();
   });
