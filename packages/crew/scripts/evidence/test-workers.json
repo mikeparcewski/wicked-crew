@@ -3,7 +3,7 @@
     "id": "mock-worker",
     "command": "node",
     "args": [
-      "/Users/michael.parcewski/Projects/wicked/wicked-crew/packages/crew/tests/fixtures/mock-worker.mjs",
+      "/Users/alex/Projects/wicked/wicked-crew/packages/crew/tests/fixtures/mock-worker.mjs",
       "--verdict",
       "PASS"
     ],
@@ -14,7 +14,7 @@
     "id": "mock-worker-2",
     "command": "node",
     "args": [
-      "/Users/michael.parcewski/Projects/wicked/wicked-crew/packages/crew/tests/fixtures/mock-worker.mjs",
+      "/Users/alex/Projects/wicked/wicked-crew/packages/crew/tests/fixtures/mock-worker.mjs",
       "--verdict",
       "PASS",
       "--council"

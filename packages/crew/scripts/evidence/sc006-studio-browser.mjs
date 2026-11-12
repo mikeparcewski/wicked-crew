@@ -4,13 +4,14 @@
 // script owns a daemon on :7701, drives Chrome, and captures timing +
 // screenshots. Requires Playwright from the npx cache and system Google Chrome.
 import { createRequire } from 'node:module';
+import { homedir } from 'node:os';
 import { writeFileSync, readFileSync, mkdirSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { resolve, join } from 'node:path';
 import { spawnDaemon, apiPost, stopDaemon, tempDbPath, REPO_ROOT, serveStudioDist } from './harness.mjs';
 
 const require = createRequire(import.meta.url);
 function loadPlaywright() {
-  const dirs = ['974995fa9a20f15d', '83676cb6deae0cb5', '9833c18b2d85bc59'].map((d) => `/Users/michael.parcewski/.npm/_npx/${d}/node_modules/playwright`);
+  const dirs = ['974995fa9a20f15d', '83676cb6deae0cb5', '9833c18b2d85bc59'].map((d) => join(homedir(), '.npm', '_npx', d, 'node_modules', 'playwright'));
   for (const d of dirs) { try { return require(d); } catch { /* try next */ } }
   throw new Error('Playwright not found in npx cache');
 }

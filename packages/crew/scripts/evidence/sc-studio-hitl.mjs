@@ -5,6 +5,7 @@
 // Playwright) against a REAL daemon; the built studio SPA is served by a tiny
 // static server so this harness is self-contained.
 import { createRequire } from 'node:module';
+import { homedir } from 'node:os';
 import { createServer } from 'node:http';
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { resolve, extname, join } from 'node:path';
@@ -12,7 +13,7 @@ import { spawnDaemon, apiPost, apiGet, poll, stopDaemon, tempDbPath, REPO_ROOT }
 
 const require = createRequire(import.meta.url);
 function loadPlaywright() {
-  const dirs = ['974995fa9a20f15d', '83676cb6deae0cb5', '9833c18b2d85bc59'].map((d) => `/Users/michael.parcewski/.npm/_npx/${d}/node_modules/playwright`);
+  const dirs = ['974995fa9a20f15d', '83676cb6deae0cb5', '9833c18b2d85bc59'].map((d) => join(homedir(), '.npm', '_npx', d, 'node_modules', 'playwright'));
   for (const d of dirs) { try { return require(d); } catch { /* next */ } }
   throw new Error('Playwright not found');
 }
