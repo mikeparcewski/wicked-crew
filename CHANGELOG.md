@@ -17,7 +17,7 @@ operator's git identity again, and the checks floor gives each side its own `.gi
 pass on the floor again. The requirements API passes through the engine's confidence-weighted headline, a wedged seat
 reads as stalled, apps stop exhausting a viewer's query budget, the Apps builder fixes crew's check findings in one
 turn, and source structure reaches estate again. Needs wicked-core-ts 0.15.41 (`^0.15.41`) and
-wicked-crew-api-types 0.208.0 (additive: `RequirementsCoverage.weightedPct?`). The garden floor stays 12.68.0
+wicked-crew-api-types 0.208.0 (additive: `RequirementsCoverage.weightedPct?` and the reserved `apps` MCP subject, `mcp:apps/check`). The garden floor stays 12.68.0
 (12.68.2 is current). Bundles wicked-studio 0.16.7.
 
 **Upgrading:**
