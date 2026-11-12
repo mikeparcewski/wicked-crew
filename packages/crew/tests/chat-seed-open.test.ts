@@ -36,9 +36,10 @@ describe('a seeded chat open makes its proposal the first time (F36)', () => {
     onLaunch: (): (() => void) => () => undefined,
     onEvent: (): (() => void) => () => undefined,
     listRepos: async () => [{ id: 'r-crew', name: 'wicked-crew', root_path: join(scratch, 'repo-crew'), default_branch: 'main', registered_at: 1 }],
-    projectGet: async () => null,
+    projectGet: async (id: string) => id === 'p-demo' ? { id, name: 'Demo', status: 'active' } : null,
     projectList: async () => [],
     projectMembers: async () => [],
+    projectMemberAttach: async (projectId: string, kind: string, ref: string) => ({ member: { id: randomUUID(), project_id: projectId, kind, ref, attached_at: 1 }, created: true }),
     launchRun: async (input: LaunchRunInput) => {
       launches.push(input);
       return input.sessionId ?? `run-${launches.length}`;
@@ -49,7 +50,7 @@ describe('a seeded chat open makes its proposal the first time (F36)', () => {
     listWorkflows: () => BUILTIN_WORKFLOWS,
     workflowCatalog: async () => ({ workflows: BUILTIN_WORKFLOWS, unavailable: [] }),
     getWorkflow: (id: string) => BUILTIN_WORKFLOWS.find((w) => w.id === id),
-    catalog: async () => [],
+    catalog: async () => [{ id: 'demo_record' }],
     listPresets: async () => [],
     supportsPowerMode: () => false,
     chatClose: async () => undefined,
@@ -127,6 +128,63 @@ describe('a seeded chat open makes its proposal the first time (F36)', () => {
     expect(body.proposal?.proposal.shape?.card, opened.body).toBe('migrate');
     expect(body.proposal?.proposal.shape?.source).toBe('command');
     expect(await proposalPids(body.chatId)).toEqual([body.proposal!.proposal.pid]);
+  });
+
+  // JobProjectChoices opens a new chat in the chosen project with these same seed words.
+  const demoSeed = async (words: string, card = '/demo'): Promise<OpenBody> => {
+    const opened = await app.inject({
+      method: 'POST', url: '/api/v1/chats',
+      payload: { projectId: 'p-demo', seed: { card, words, source: 'command' }, requestId: randomUUID(), accepts: ['job'] },
+    });
+    expect(opened.statusCode, opened.body).toBe(201);
+    const body = opened.json() as OpenBody;
+    expect(body.seedRefused, opened.body).toBeUndefined();
+    expect(body.proposal?.proposal.shape?.card, opened.body).toBe('demo-video');
+    return body;
+  };
+
+  it.each(['/demo', 'demo-video'])('a %s seed takes the one app address from the person’s words', async (card) => {
+    const body = await demoSeed('Record a short demo video of my app running at http://127.0.0.1:4319/ ...', card);
+    const p = body.proposal!.proposal;
+    expect(p.inputs?.['url']).toEqual({ kind: 'url', value: 'http://127.0.0.1:4319/' });
+    expect(p.needs).toContainEqual(expect.objectContaining({ id: 'url', status: 'met' }));
+    expect(p.question?.input?.edit).not.toBe('inputs.url');
+    expect(p.question?.text).not.toBe('The running app?');
+  });
+
+  it.each([
+    ['no address', 'Record a short demo video of my app'],
+    ['two addresses', 'Record a demo of http://127.0.0.1:4319/ or http://localhost:4320/'],
+  ])('a demo seed with %s keeps the running-app question', async (_label, words) => {
+    const body = await demoSeed(words);
+    const p = body.proposal!.proposal;
+    expect(p.inputs?.['url']).toBeUndefined();
+    expect(p.question).toMatchObject({ kind: 'missing', text: 'The running app?', choices: [], input: { kind: 'text', edit: 'inputs.url' } });
+  });
+
+  it('a demo seed’s external address is still refused by the demo launcher', async () => {
+    const body = await demoSeed('Record a demo of https://example.com/app');
+    expect(body.proposal!.proposal.inputs?.['url']).toEqual({ kind: 'url', value: 'https://example.com/app' });
+    // Supply the other required fields so Start reaches the existing demo URL check.
+    const revised = await app.inject({
+      method: 'POST', url: `/api/v1/chats/${body.chatId}/proposals`,
+      payload: { revises: body.proposal!.proposal.pid, source: 'question', requestId: randomUUID(), edits: { inputs: {
+        audience: { kind: 'text', value: 'App users' }, show: { kind: 'text', value: 'Show the home page' },
+      } } },
+    });
+    expect(revised.statusCode, revised.body).toBe(201);
+    const p = (revised.json() as { view: ChatProposalView }).view.proposal;
+    expect(p.question).toBeNull();
+    const started = await app.inject({
+      method: 'POST', url: `/api/v1/chats/${body.chatId}/proposals/${encodeURIComponent(p.pid)}`,
+      payload: { decision: 'go' },
+    });
+    expect(started.statusCode, started.body).toBe(502);
+    expect(started.json()).toMatchObject({
+      code: 'launch_failed',
+      error: 'could not start it: a demo records an app on this machine: use http://127.0.0.1:<port>/…, http://localhost:<port>/… or http://[::1]:<port>/… (the recorder reaches no other host), with no #fragment. Go again resumes the same job.',
+    });
+    expect(launches).toEqual([]);
   });
 
   it('a retry after the chat was closed is adopted from its kept history: nothing reopened, no second proposal', async () => {

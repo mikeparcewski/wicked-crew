@@ -2540,6 +2540,11 @@ export class ChatProposals {
           by: 'person',
           source: body.source,
         };
+        // A declared app address comes only from the person's words; several addresses need their choice.
+        if (CATALOG_V2_CARDS.find((c) => c.id === card)?.inputs?.includes('url') === true) {
+          const urls = [...personUrls(facts.words)];
+          if (urls.length === 1) facts.inputs['url'] = { kind: 'url', value: urls[0]! };
+        }
         const ctx = await this.jobContext(chatId, pid, null, 'person', chat, { revises: null, lineage: null, notes: [], request: { id: body.requestId, digest } });
         const proposal = await this.proposalOf(chatId, pid, facts, ctx, records, allowHidden);
         if (!this.write(chatId, { at: this.now(), turnId: `person:${pid.slice(pid.lastIndexOf(':') + 1)}`, kind: 'proposal', proposal }, instance)) return this.gone(chatId);
