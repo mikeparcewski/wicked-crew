@@ -2872,6 +2872,7 @@ export async function createServer(
       voiceInputs,
       // DES-SYSTEM-VIEW: the watchdog's evidence of life (relay frames, busy children) for `GET /system`.
       runEvidence: (runId) => stallWatchdog.evidence(runId),
+      runClockStart: (runId) => stallWatchdog.clockStart(runId),
       personaVoice: (projectId) => {
         const p = personas.effective(projectId);
         return p === null ? null : voiceBlock(p.persona);

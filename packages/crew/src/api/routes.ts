@@ -1408,6 +1408,8 @@ export interface RuntimeDeps {
   /** DES-SYSTEM-VIEW: the stall watchdog's newest evidence of life for a run (a relay frame or a
    *  busy child process), read by `GET /system`. Absent ⇒ the durable event log alone. */
   runEvidence?: (runId: string) => { at: number; source: 'relay' | 'process' } | undefined;
+  /** The watchdog's quiet-clock start for a run it observes (crew#1501); absent before its first sweep. */
+  runClockStart?: (runId: string) => number | undefined;
   /** DES-SYSTEM-VIEW: the system snapshot's command runner (the gateway inspect, estate stats, the
    *  vault version). Injectable for tests; production uses `execCapped`. */
   systemExec?: (file: string, args: string[], opts: { timeout: number }) => Promise<{ stdout: string; stderr: string }>;
@@ -11159,9 +11161,13 @@ export function registerRoutes(
         let best: RunEvidence | null = null;
         const relay = runtime.runEvidence?.(id);
         if (relay !== undefined) best = { at: relay.at, source: relay.source };
-        if (dbPath !== null) {
+        // crew#1501: the run's log file is touched by heartbeats too, so its mtime proves nothing once
+        // the watchdog has the run on its clock; it stands in only before the first sweep saw the run.
+        const clock = runtime.runClockStart?.(id);
+        if (best === null && clock !== undefined) best = { at: clock, source: 'relay' };
+        if (best === null && dbPath !== null) {
           const st = await settleWithin(() => fsp.stat(join(eventsDirOf(dbPath), `${id}.ndjson`)), EVIDENCE_TIMEOUT_MS);
-          if (st.kind === 'ok' && (best === null || st.value.mtimeMs > best.at)) best = { at: Math.floor(st.value.mtimeMs), source: 'event_log' };
+          if (st.kind === 'ok' && st.value.mtimeMs > 0) best = { at: Math.floor(st.value.mtimeMs), source: 'event_log' };
         }
         return best;
       };
