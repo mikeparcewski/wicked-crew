@@ -763,6 +763,24 @@ function personUrls(words: string): Set<string> {
 }
 
 /**
+ * The ONE app address a person's words name, taken as typed, or `null` (review r1 on the seed fill): any other count
+ * of http(s) addresses in any letter case, an address that runs on into a quote or bracket (it would be shortened), or
+ * one with a `#` (the trailing-punctuation trim could change its fragment) is left for the person to answer. A
+ * surrounding sentence's final punctuation is not part of the address.
+ */
+export function onePersonUrl(words: string): string | null {
+  const any = [...words.matchAll(/https?:\/\//giu)];
+  if (any.length !== 1) return null;
+  const m = /https?:\/\/[^\s"'<>`]+/iu.exec(words);
+  if (m === null) return null;
+  const next = words.charAt(m.index + m[0].length);
+  if (next !== '' && !/\s/u.test(next)) return null;
+  const url = m[0].replace(/[.,;:!?)}]+$/u, '');
+  if (url.includes('#') || url.endsWith(']')) return null;
+  return url;
+}
+
+/**
  * The person's own words in this chat, up to and including the turn: only `user` records the message route marked as
  * sent by the chat's owner, a person (`owner: true`). A message from an agent's or another actor's token never counts
  * as the person's (a demo address, a document they named).
@@ -2542,8 +2560,8 @@ export class ChatProposals {
         };
         // A declared app address comes only from the person's words; several addresses need their choice.
         if (CATALOG_V2_CARDS.find((c) => c.id === card)?.inputs?.includes('url') === true) {
-          const urls = [...personUrls(facts.words)];
-          if (urls.length === 1) facts.inputs['url'] = { kind: 'url', value: urls[0]! };
+          const url = onePersonUrl(facts.words);
+          if (url !== null) facts.inputs['url'] = { kind: 'url', value: url };
         }
         const ctx = await this.jobContext(chatId, pid, null, 'person', chat, { revises: null, lineage: null, notes: [], request: { id: body.requestId, digest } });
         const proposal = await this.proposalOf(chatId, pid, facts, ctx, records, allowHidden);

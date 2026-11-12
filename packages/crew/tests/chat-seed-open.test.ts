@@ -12,6 +12,7 @@ import type { FastifyInstance } from 'fastify';
 import type { ChatMessagesResponse, ChatProposalView } from 'wicked-crew-api-types';
 
 import { createServer } from '../src/api/server.js';
+import { onePersonUrl } from '../src/api/chat-proposals.js';
 import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { LaunchRunInput } from '../src/core/types.js';
@@ -203,5 +204,26 @@ describe('a seeded chat open makes its proposal the first time (F36)', () => {
     expect(adopted.scope).toBeNull();
     expect(adopted.proposal?.proposal.pid).toBe(made.proposal!.proposal.pid);
     expect(await proposalPids(made.chatId)).toEqual([made.proposal!.proposal.pid]);
+  });
+});
+
+// Review r1 on the seed fill: the one address is taken exactly as typed, or the person is asked.
+describe('onePersonUrl: the one app address in a person\u2019s words, as typed', () => {
+  it.each([
+    ['Record my app at http://127.0.0.1:4319/ please', 'http://127.0.0.1:4319/'],
+    ['Record my app at http://127.0.0.1:4319/.', 'http://127.0.0.1:4319/'],
+    ['Record it (http://localhost:4319/app)', 'http://localhost:4319/app'],
+    ['Record HTTP://localhost:4319/', 'HTTP://localhost:4319/'],
+  ])('%s -> %s', (words, url) => {
+    expect(onePersonUrl(words)).toBe(url);
+  });
+  it.each([
+    ['no address', 'Record my app'],
+    ['two addresses', 'Record http://localhost:4319/ or http://localhost:4320/'],
+    ['two addresses in mixed case', 'Record http://localhost:4319/ or HTTP://localhost:4320/'],
+    ['an address that runs into a quote', "Record http://localhost:4319/a'b"],
+    ['an address with a fragment', 'Record http://localhost:4319/#!'],
+  ])('%s -> asked', (_label, words) => {
+    expect(onePersonUrl(words)).toBeNull();
   });
 });
