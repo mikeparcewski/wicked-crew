@@ -189,6 +189,15 @@ describe('the rules block', () => {
     expect(m).toContain('- … and 1 more rule in force whose ids did not fit');
   });
 
+  it('(xreview) when every bare id fits, every id is named: the overflow line is reserved only when ids are left out', async () => {
+    // 229 short ids: every bare id fits in 4 KiB (about 4,083 bytes), but not with the overflow line reserved too.
+    const rules = Array.from({ length: 229 }, (_, i) => ({ id: `R-${String(i).padStart(3, '0')}`, severity: 'warn', statement: 'hello' }) as ConformanceRule);
+    const block = rulesBriefBlock(rules, await matchRulesForJob(rules, bugJob(), null))!;
+    expect(Buffer.byteLength(block)).toBeLessThanOrEqual(RULES_BLOCK_MAX_BYTES);
+    expect(ruleLines(block)).toHaveLength(229);
+    expect(block).not.toContain('did not fit');
+  });
+
   it('(S1) an engine without matchRules, a failure or a short answer: every rule still listed, the rest as may apply', async () => {
     const rules = rigRules();
     expect((await matchRulesForJob(rules, bugJob(), null)).every((m) => m.status === 'may_apply')).toBe(true);
