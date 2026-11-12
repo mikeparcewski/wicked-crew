@@ -2,14 +2,21 @@
 // interacts over REST/WS, and can SIGKILL it. Cross-platform (no shell strings).
 import { spawn } from 'node:child_process';
 import { resolve, join } from 'node:path';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 export const REPO_ROOT = resolve(__dirname, '../../../..');
 export const DAEMON_BIN = resolve(REPO_ROOT, 'packages/crew/dist/cli/index.js');
-export const TEST_WORKERS = resolve(__dirname, 'test-workers.json');
+// test-workers.json is a template: `<repo>` stands for this checkout's root, so the committed file
+// carries no host-specific path. The daemon gets a resolved copy in a temp dir.
+export const TEST_WORKERS = (() => {
+  const template = readFileSync(resolve(__dirname, 'test-workers.json'), 'utf8');
+  const out = join(mkdtempSync(join(tmpdir(), 'crew-workers-')), 'test-workers.json');
+  writeFileSync(out, template.replaceAll('<repo>', () => JSON.stringify(REPO_ROOT).slice(1, -1)));
+  return out;
+})();
 
 export function tempDbPath(tag = 'evi') {
   const dir = mkdtempSync(join(tmpdir(), `crew-${tag}-`));
