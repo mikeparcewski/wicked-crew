@@ -81,7 +81,7 @@
     "vitest": "^5.0.2",
     "wicked-bus": "^2.5.0",
     "wicked-crew-api-types": "^0.207.0",
-    "wicked-studio": "^0.16.5"
+    "wicked-studio": "^0.16.6"
   },
   "engines": {
     "node": ">=22.0.0"
