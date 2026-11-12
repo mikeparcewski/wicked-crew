@@ -21,10 +21,15 @@ Local-first: loopback only, no accounts, no billing, no model reselling. Crew dr
 - **uv** — the daemon builds its skills environment with `uv sync` (once per skills baseline); without
   uv every job launch is refused (`venv-failed`). The family installer installs it for you (see below).
 - **git** — crew spawns it for every repository operation.
-- **A container runtime** (Rancher Desktop, Docker, Podman, Colima or OrbStack), running. Governed
-  agents work in a hardened seat container, and you sign each one in from studio's Agents tab: Claude
-  Code and GitHub Copilot in a login container, Codex, Pi and OpenCode with their host CLIs.
-  `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead.
+- **A local Kubernetes cluster** (Rancher Desktop, or Docker Desktop with Kubernetes on), running and
+  installed once for crew: `npx wicked-installer` (0.10.0 or later) runs the install, or by hand
+  `"$(npm root -g)/wicked-crew/node_modules/wicked-core-ts-<platform>/wicked-core" cluster install
+  --admin-context rancher-desktop --home ~/.wicked-crew`. On Rancher Desktop, choose the dockerd (moby)
+  container engine (Preferences → Container Engine). With containerd, crew's floor images aren't visible to the
+  kubelet and seats won't start (wicked-core#1449). Governed agents work in a hardened seat pod,
+  and you sign each one in from studio's Agents tab: Claude Code and GitHub Copilot in a login pod,
+  Codex, Pi and OpenCode with their host CLIs. `WICKED_SEAT_FLOOR=host` keeps the labelled interim host
+  floor instead.
 - **At least one coding-agent CLI** you can sign in (Claude Code, Codex, GitHub Copilot, OpenCode or Pi).
 - **wicked-estate** — the `wicked-estate` / `wicked-estate-mcp` binaries on PATH. Crew requires it:
   adding a repository in Studio runs onboarding's index phase on the `wicked-estate` tool, and it
@@ -32,7 +37,7 @@ Local-first: loopback only, no accounts, no billing, no model reselling. Crew dr
   sources' structure — never their values. `npx wicked-installer install wicked-estate`
   downloads a sha256-verified prebuilt binary into `~/.local/bin` (about 20 s) on macOS, glibc Linux
   (x64/arm64) and Windows x64; on other platforms it builds with cargo, which needs a Rust toolchain.
-- **wicked-garden ≥ 12.67.0**, the skills every governed worker follows (including the Apps skill an
+- **wicked-garden ≥ 12.68.0**, the skills every governed worker follows (including the Apps skill an
   app's chat builds with). crew does not vendor it, and without it every launch is refused:
   `npx wicked-installer install wicked-garden`, then restart `wicked-crew serve`.
 
@@ -58,12 +63,12 @@ them:
 If your shell can't find `wicked-crew` itself, npm's global bin directory is not on PATH: add
 `$(npm prefix -g)/bin` (macOS, Linux) or the directory `npm prefix -g` prints (Windows).
 
-If a garden older than 12.67.0 is already installed, the installer may keep it; crew's blocking `skills.garden`
+If a garden older than 12.68.0 is already installed, the installer may keep it; crew's blocking `skills.garden`
 finding then names its version and where it was found. Update that copy (for the npm package,
 `npm install -g wicked-garden@latest`) and restart `wicked-crew serve`.
 
 Or install crew by hand (advanced). It needs uv and the requirements above, including
-**wicked-garden 12.67.0 or later** (crew refuses every launch until it finds one):
+**wicked-garden 12.68.0 or later** (crew refuses every launch until it finds one):
 
 ```bash
 npx wicked-installer install wicked-estate wicked-garden
@@ -72,7 +77,7 @@ wicked-crew serve
 # then open http://127.0.0.1:7701
 ```
 
-Crew uses the first usable garden source in this order (automatic sources need version ≥ 12.67.0):
+Crew uses the first usable garden source in this order (automatic sources need version ≥ 12.68.0):
 
 1. `WICKED_CREW_SKILLS_SOURCE`, an explicit plugin root.
 2. The Claude marketplace cache under `$CLAUDE_CONFIG_DIR` or `~/.claude` (highest valid version).

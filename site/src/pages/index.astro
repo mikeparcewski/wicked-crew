@@ -112,7 +112,7 @@ const AGENTS = [
 ];
 
 // Benefit 1, split: its first sentence leads the Build beat; the rest is the broker's hotspot.
-const B1_LEAD = 'By default each runs in a sandbox with no capabilities, a read-only root and one way out: the model gateway (you need a container runtime: Docker, Podman, Rancher Desktop, Colima or OrbStack).';
+const B1_LEAD = 'By default each runs in a sandbox with no capabilities, a read-only root and one way out: the model gateway (you need a local Kubernetes cluster: Rancher Desktop, or Docker Desktop with Kubernetes on).';
 const B1_BROKER = 'Keys stay in a broker and the sandbox sees placeholders. A Claude subscription’s sign-in token is the one exception: a guard checks each step’s changes and the delivery for it, failing the step or refusing the delivery on a match.';
 
 // The sandbox's four hotspots (benefit 1 and the sandbox facts, placed where they happen).
@@ -493,8 +493,8 @@ const crewVersion = __WICKED_CREW_VERSION__;
           <h2>Install it with the family. Studio comes with it.</h2>
           <ul class="needs" role="list">
             <li>Node 22 or later (24.12, 25.1 or later to upload files as data sources)</li>
-            <li>A container runtime: Docker, Podman, Rancher Desktop, Colima or OrbStack</li>
-            <li>wicked-garden 12.67.0 or later, for the skills every agent follows</li>
+            <li>A local Kubernetes cluster: Rancher Desktop, or Docker Desktop with Kubernetes on</li>
+            <li>wicked-garden 12.68.0 or later, for the skills every agent follows</li>
           </ul>
           <p class="get-tos">
             <b>Terms of service:</b> crew drives CLIs you installed under your own accounts. Check

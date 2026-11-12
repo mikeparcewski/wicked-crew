@@ -10,16 +10,59 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.18.11] — 2026-11-12
+
+A patch on the Kubernetes runner: governed seats and the checks floor run as pods on a local Kubernetes cluster,
+and the Nerve Center, diagnostics and sign-in refusals read the cluster. Seats also pull steering rules instead of
+having them pushed, the requirements list carries each requirement's business domain, deliver keeps host temp and
+state paths out of a PR, and asking a large database ranks its tables by the question. Needs wicked-core-ts 0.15.40
+(`^0.15.40`), wicked-garden 12.68.0 or later (the floor moves up from 12.67.0) and wicked-crew-api-types 0.207.0
+(additive: the cluster diagnostics and refusal codes, and the business-domain types). Bundles wicked-studio 0.16.6.
+
+**Upgrading:**
+
+- **Governed seats need a local Kubernetes cluster (wicked-core-ts 0.15.40, core#1383).** The engine's Docker runner is
+  gone: a container seat runs as a pod, so `wicked-crew serve` on the default container floor needs Rancher Desktop or
+  Docker Desktop with Kubernetes on, and a one-time cluster install for the daemon's state home. wicked-installer
+  0.10.0 (released with this train) runs it after install when the cluster can hold seats; by hand, run the engine
+  binary crew installs (no `wicked-core` is put on PATH): `"$(npm root -g)/wicked-crew/node_modules/wicked-core-ts-<platform>/wicked-core"
+  cluster install --admin-context rancher-desktop --home ~/.wicked-crew` (`<platform>`: `darwin-arm64`, `darwin-x64`,
+  `linux-x64-gnu`, `linux-arm64-gnu` or `win32-x64-msvc`; `docker-desktop` for Docker Desktop). On Rancher Desktop,
+  choose the dockerd (moby) container engine (Preferences → Container Engine). With containerd, crew's floor images
+  aren't visible to the kubelet and seats won't start (wicked-core#1449). Without one, the
+  Nerve Center's Kubernetes cluster row is down, the container seats are benched with `Kubernetes isn't running`, and a
+  sign-in is refused with its own code and repair. `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor. The
+  checks floor tries pods on macOS and, by default, falls back to the host floor with the reason when they cannot
+  start; `WICKED_FLOOR_RUNNER=container` refuses instead.
+- **crew needs wicked-garden 12.68.0 or later.** The run brief now carries only each rule's id, severity and a
+  one-liner, and a seat pulls the statement with `rules.recall`. 12.68.0's estate shim sends that call to crew's broker
+  on every governed seat, host seats included, and its governed-worker E7 pulls each rule before judging it. With an
+  older garden a host seat asks the run's code graph, which holds no steering rules, so crew refuses it like any garden
+  below the floor: a blocking `skills.garden` finding, and launch and onboarding answer 422 `garden_required` until it
+  is updated (`npx wicked-installer install wicked-garden`). Update garden with crew.
+- **wicked-estate 0.35.3 is recommended.** It indexes source modules whose names look like secret files
+  (`credentials_store.py`, `id_utils.ts`) again. Its first `index` after the upgrade re-extracts every file, which
+  clears the node semantic fields (`description`, `requirement`, validation) estate holds; see its upgrade note before
+  re-indexing a store with reviewed requirements.
+
 ### Added
 
+- Kubernetes runner (with the wicked-core k8s-swap train, core#1400–#1421): the Nerve Center gains a **Kubernetes
+  cluster** row and `GET /diagnostics` a `cluster` block, both read from `wicked-core cluster status --json --home <state
+  home>` (configured, reachable, context, controller, gateway, run namespaces, pending pods; one bounded, single-flight
+  read). The model gateway row reads the same document (the gateway is a Deployment in the daemon's namespace now), and
+  the roster's reachability check is the cluster's (`Kubernetes isn't running` benches the container seats). Sign-in
+  refusals map the runner's kinds to their own codes and one repair each: `no_cluster`, `cluster_unreachable`,
+  `controller_missing`, `pids_unlimited`, `policy_refused`, `admission_pending`, `image_unavailable`,
+  `exec_stream_lost` (`SeatSignInFailureCode`, `SystemInfraKey` `cluster` and `DiagnosticsCluster` in api-types
+  0.207.0). The state-home registry and its fixture classify the engine's new `k8s` entry (its cluster credential).
 - The requirements list carries each requirement's business domain. A row has `businessDomain: {id, name, confidence}`
   and the page has `businessDomains` (the corpus-wide catalog: `id`, `name`, `purpose`, `requirements`, `directories`),
   both read from the graph (`business_domain`, `metadata.business_domains`; wicked-core#1425) and OMITTED when the graph
-  has none — never `null` — so they light up when a core-ts that emits them ships (the `^0.15.38` pin is unchanged; which
-  published core-ts carries wicked-core 90ee8f6 is not established). A malformed value is dropped, never the whole
+  has none — never `null` — so they light up on a map made with wicked-garden 12.67.0 or later (core-ts 0.15.39 and later
+  read them; wicked-crew#1503). A malformed value is dropped, never the whole
   response. Search and the `domain` filter also match the business domain's name; `domain`, keys and overrides are
-  unchanged. (api-types: `RequirementBusinessDomain`, `RequirementBusinessDomainCatalogEntry`, additive; no version
-  bump here.)
+  unchanged. (api-types 0.207.0: `RequirementBusinessDomain`, `RequirementBusinessDomainCatalogEntry`, additive.)
 
 ### Changed
 
@@ -95,15 +138,6 @@ wicked-estate must be 0.35.2 or later. Still bundles wicked-studio 0.16.5.
 
 ### Added
 
-- Kubernetes runner (with the wicked-core k8s-swap train, core#1400–#1421): the Nerve Center gains a **Kubernetes
-  cluster** row and `GET /diagnostics` a `cluster` block, both read from `wicked-core cluster status --json --home <state
-  home>` (configured, reachable, context, controller, gateway, run namespaces, pending pods; one bounded, single-flight
-  read). The model gateway row reads the same document (the gateway is a Deployment in the daemon's namespace now), and
-  the roster's reachability check is the cluster's (`Kubernetes isn't running` benches the container seats). Sign-in
-  refusals map the runner's kinds to their own codes and one repair each: `no_cluster`, `cluster_unreachable`,
-  `controller_missing`, `pids_unlimited`, `policy_refused`, `admission_pending`, `image_unavailable`,
-  `exec_stream_lost` (`SeatSignInFailureCode`, `SystemInfraKey` `cluster` and `DiagnosticsCluster` in api-types,
-  unreleased). The state-home registry and its fixture classify the engine's new `k8s` entry (its cluster credential).
 - A GitHub project-management source can use the GitHub CLI's sign-in instead of a typed token: `auth.ref` of
   `gh-cli:<login>` (a GitHub source over `mcp-http` or `mcp-stdio` only). Crew stores the account name alone and reads
   the token with `gh auth token --hostname github.com --user <login>` at the moment of each preview, test and read —
@@ -6881,7 +6915,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.10...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.11...HEAD
+[0.18.11]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.10...v0.18.11
 [0.18.10]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.9...v0.18.10
 [0.18.9]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.8...v0.18.9
 [0.18.8]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.7...v0.18.8

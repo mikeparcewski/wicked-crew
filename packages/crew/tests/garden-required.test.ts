@@ -141,17 +141,18 @@ describe('crew#753 — garden is required, and a refused onboard creates no repo
   });
 });
 
-// crew 0.18.10: business domains (the `business_domain` annotation core-ts 0.15.39 reads) and the citable
+// crew 0.18.11: the run brief carries rule ids and one-liners only, and seats pull each statement with rules.recall,
+// which only wicked-garden 12.68.0's shim sends to crew's broker, so 12.67.x is too old. crew 0.18.10: business domains (the `business_domain` annotation core-ts 0.15.39 reads) and the citable
 // STACK-CHECK line first ship in wicked-garden 12.67.0, so 12.66.x is too old. crew 0.18.0: the draft landing floor and refine keep check (leak_scan/notes_check/keep_check), the
 // editor and run-plugin conformance cases, learn's report mode and the Respond/Rework draft kinds first
 // ship together in wicked-garden 12.66.0, and 12.66.1's run-plugin scaffold reports its first height (CJ9), so an
 // older garden is too old.
-describe('the floor is the garden that ships what crew 0.18.10 reads', () => {
-  it('12.67.0 is required: 12.66.x and older are refused, 12.67.0 and later pass', () => {
-    expect(REQUIRED_GARDEN_VERSION).toBe('12.67.0');
-    for (const v of ['12.40.0', '12.65.1', '12.66.0', '12.66.1']) expect(gardenMeetsMinimum(v)).toBe(false);
-    for (const v of ['12.67.0', '12.67.1', '12.68.0', '13.0.0']) expect(gardenMeetsMinimum(v)).toBe(true);
+describe('the floor is the garden that ships what crew 0.18.11 reads', () => {
+  it('12.68.0 is required: 12.67.x and older are refused, 12.68.0 and later pass', () => {
+    expect(REQUIRED_GARDEN_VERSION).toBe('12.68.0');
+    for (const v of ['12.40.0', '12.66.1', '12.67.0', '12.67.1']) expect(gardenMeetsMinimum(v)).toBe(false);
+    for (const v of ['12.68.0', '12.68.1', '12.69.0', '13.0.0']) expect(gardenMeetsMinimum(v)).toBe(true);
     expect(gardenTooOldFinding({ version: '12.65.1', path: '/cfg/plugins/wicked-garden' }, 'the installed plugin').message)
-      .toContain('wicked-garden 12.65.1 (the installed plugin at /cfg/plugins/wicked-garden) is older than the required 12.67.0');
+      .toContain('wicked-garden 12.65.1 (the installed plugin at /cfg/plugins/wicked-garden) is older than the required 12.68.0');
   });
 });

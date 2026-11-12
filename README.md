@@ -80,15 +80,28 @@ uv installer adds it to the user PATH; otherwise add it via Environment Variable
 can't find `wicked-crew` itself, npm's global bin directory is not on PATH: add `$(npm prefix -g)/bin`
 (macOS, Linux) or the directory `npm prefix -g` prints (Windows).
 
-If a garden older than 12.67.0 is already installed, the installer may keep it; crew's blocking `skills.garden`
+If a garden older than 12.68.0 is already installed, the installer may keep it; crew's blocking `skills.garden`
 finding then names its version and where it was found. Update that copy (for the npm package,
 `npm install -g wicked-garden@latest`) and restart `wicked-crew serve`.
 
 Uploading a file or a SQLite database as a data source needs Node.js 24.12, 25.1 or later. The
-container runtime (Rancher Desktop, Docker, Podman, Colima or OrbStack) must be running:
-governed agents run each CLI's headless mode in a hardened seat container (crew builds the seat images
-on first use), and you sign each agent in once from studio's Agents page. Claude Code and GitHub
-Copilot sign in through a login container; Codex, Pi and OpenCode sign in with their host CLIs and a
+daemon needs a local Kubernetes cluster (Rancher Desktop, or Docker Desktop with Kubernetes on), running and
+installed once for crew: `npx wicked-installer` (0.10.0 or later) runs the install when the cluster can hold seats,
+or run crew's own engine binary by hand (`<platform>` is `darwin-arm64`, `darwin-x64`, `linux-x64-gnu`,
+`linux-arm64-gnu` or `win32-x64-msvc`; use `docker-desktop` for Docker Desktop):
+
+```sh
+"$(npm root -g)/wicked-crew/node_modules/wicked-core-ts-<platform>/wicked-core" cluster install \
+  --admin-context rancher-desktop --home ~/.wicked-crew
+```
+
+On Rancher Desktop, choose the dockerd (moby) container engine (Preferences → Container Engine). With containerd,
+crew's floor images aren't visible to the kubelet and seats won't start (wicked-core#1449).
+
+Governed agents run each CLI's headless mode in a hardened seat pod (crew builds the seat images with
+the container CLI on first use, into the store the cluster shares), and you sign each agent in once from
+studio's Agents page. `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead. Claude Code
+and GitHub Copilot sign in through a login pod; Codex, Pi and OpenCode sign in with their host CLIs and a
 temporary home. Either way the credential goes to the broker and the seat sees a placeholder, except
 a Claude Code seat on a Claude subscription, which receives its sign-in token (a guard fails the step
 or refuses the delivery that contains it).
@@ -98,7 +111,7 @@ binary needs your own image (`WICKED_SEAT_IMAGE_<CLI>`, offline seats only). `WI
 claude and codex are given governed work.
 
 To install crew by hand instead (advanced), install its requirements first: uv from
-https://docs.astral.sh/uv/, then wicked-estate and **wicked-garden 12.67.0 or later** (crew refuses
+https://docs.astral.sh/uv/, then wicked-estate and **wicked-garden 12.68.0 or later** (crew refuses
 every launch until it finds one):
 
 ```bash
@@ -108,7 +121,7 @@ wicked-crew serve
 # then open http://127.0.0.1:7701
 ```
 
-**crew needs wicked-garden ≥ 12.67.0.** Garden ships the skills every governed worker follows,
+**crew needs wicked-garden ≥ 12.68.0.** Garden ships the skills every governed worker follows,
 including the base skill `wicked-garden-governed-worker` and the `wicked-garden-apps` skill an app's
 chat builds with. crew does not vendor it, so install it once:
 
@@ -132,7 +145,7 @@ Without garden, `/health` still answers `"status":"ok"` (the daemon
 serves so studio can load and show the problem) and carries the missing base skill as an
 error-severity finding in its `warnings` list — the same finding object as `baseSkill.finding` and
 `/diagnostics.skills.findings[]`. Every launch and every **Register & onboard** is refused with that
-reason, and nothing is registered. A garden older than 12.67.0 that discovery finds is never used (a
+reason, and nothing is registered. A garden older than 12.68.0 that discovery finds is never used (a
 `WICKED_CREW_SKILLS_SOURCE` you set is not judged). At first boot, that
 `skills.garden` warning names the version found, where it was found, and the version required.
 Launches and onboarding answer `422 garden_required` until a newer garden is installed and the
