@@ -63,7 +63,7 @@
     "mysql2": "^3.24.6",
     "postgres": "^3.4.9",
     "smol-toml": "^1.9.1",
-    "wicked-core-ts": "^0.15.41",
+    "wicked-core-ts": "^0.15.42",
     "wicked-ledger": "^0.6.1",
     "wicked-vault": "^0.8.0",
     "yaml": "^2.4.2",
