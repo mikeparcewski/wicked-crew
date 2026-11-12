@@ -12,12 +12,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
-import { forgetRequirementsReads } from '../src/api/requirements.js';
+import { forgetRequirementsReads, type EstateRequirementsGraph } from '../src/api/requirements.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { RepoEntry } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
 
-describe('GET /repos/:id/requirements — not generated yet, with the share mapped so far', () => {
+describe('GET /repos/:id/requirements — coverage from the engine read', () => {
   let app: FastifyInstance | undefined;
   let dir: string | undefined;
   afterEach(async () => {
@@ -28,7 +28,7 @@ describe('GET /repos/:id/requirements — not generated yet, with the share mapp
     dir = undefined;
   });
 
-  async function build(coverage: unknown): Promise<ReturnType<typeof vi.fn>> {
+  async function build(coverage: unknown, graph: EstateRequirementsGraph | null = null): Promise<ReturnType<typeof vi.fn>> {
     dir = mkdtempSync(join(tmpdir(), 'req-not-generated-'));
     const db = join(dir, 'estate.db');
     writeFileSync(db, '');
@@ -36,7 +36,7 @@ describe('GET /repos/:id/requirements — not generated yet, with the share mapp
       id: 'wicked-crew', name: 'wicked-crew', root_path: join(dir, 'repo'),
       default_branch: 'main', registered_at: 0, code_graph_db: db,
     };
-    const read = vi.fn().mockResolvedValue(JSON.parse(JSON.stringify({ graph: null, coverage })));
+    const read = vi.fn().mockResolvedValue(JSON.parse(JSON.stringify({ graph, coverage })));
     const adapter = {
       listRepos: vi.fn().mockResolvedValue([repo]),
       getRequirementsGraphForRepo: read,
@@ -60,6 +60,19 @@ describe('GET /repos/:id/requirements — not generated yet, with the share mapp
       coverage: { realPct: 23, minPct: 80, behaviorBearing: 5786, real: 1362, placeholders: 4397, unmapped: 27, notProduct: 2380 },
     });
     expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([62, undefined])('serializes a requirements page with engine weightedPct %s', async (weightedPct) => {
+    await build({
+      real_pct: 70, min_pct: 80, behavior_bearing: 100, real: 70, placeholders: 12, unmapped: 18, not_product: 9,
+      ...(weightedPct === undefined ? {} : { weightedPct }),
+    }, { domains: {} });
+    const res = await app!.inject({ method: 'GET', url: '/api/v1/repos/wicked-crew/requirements' });
+    expect(res.statusCode).toBe(200);
+    const c = res.json().coverage;
+    expect(c.realPct).toBe(70);
+    if (weightedPct === undefined) expect('weightedPct' in c).toBe(false);
+    else expect(c.weightedPct).toBe(weightedPct);
   });
 
   it('each answer carries the coverage of its own read, never another request\'s (codex r2 on #1250)', async () => {

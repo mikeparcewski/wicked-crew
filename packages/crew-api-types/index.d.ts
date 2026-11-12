@@ -7267,6 +7267,8 @@ export interface RequirementCorroboration {
  *   behaviorBearing)`, floored so it never reads above the minimum it was compared to; 100 when
  *   `behaviorBearing` is 0 (nothing in product code to map). `real + placeholders + unmapped ===
  *   behaviorBearing`; a label that breaks either is not sent.
+ * - `weightedPct`: optional confidence-weighted headline (integer 0..100) when the engine sends a usable one;
+ *   the stated share stays `realPct`, which is still checked against the minimum.
  * - `real`: behaviours resolved to a stated, sourced business rule.
  * - `placeholders`: behaviours carrying only a risk-flagged placeholder (an empty statement, a rule
  *   under the confidence threshold, one written unconfirmed). Shown in the graph as unconfirmed,
@@ -7280,6 +7282,8 @@ export interface RequirementCorroboration {
  */
 export interface RequirementsCoverage {
   realPct: number;
+  /** Since wicked-core#1445: optional confidence-weighted headline; the stated share stays `realPct`. */
+  weightedPct?: number;
   minPct: number;
   behaviorBearing: number;
   real: number;
