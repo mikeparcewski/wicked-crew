@@ -24,7 +24,9 @@ Local-first: loopback only, no accounts, no billing, no model reselling. Crew dr
 - **A local Kubernetes cluster** (Rancher Desktop, or Docker Desktop with Kubernetes on), running and
   installed once for crew: `npx wicked-installer` (0.10.0 or later) runs the install, or by hand
   `"$(npm root -g)/wicked-crew/node_modules/wicked-core-ts-<platform>/wicked-core" cluster install
-  --admin-context rancher-desktop --home ~/.wicked-crew`. Governed agents work in a hardened seat pod,
+  --admin-context rancher-desktop --home ~/.wicked-crew`. On Rancher Desktop, choose the dockerd (moby)
+  container engine (Preferences → Container Engine). With containerd, crew's floor images aren't visible to the
+  kubelet and seats won't start (wicked-core#1449). Governed agents work in a hardened seat pod,
   and you sign each one in from studio's Agents tab: Claude Code and GitHub Copilot in a login pod,
   Codex, Pi and OpenCode with their host CLIs. `WICKED_SEAT_FLOOR=host` keeps the labelled interim host
   floor instead.

@@ -95,6 +95,9 @@ or run crew's own engine binary by hand (`<platform>` is `darwin-arm64`, `darwin
   --admin-context rancher-desktop --home ~/.wicked-crew
 ```
 
+On Rancher Desktop, choose the dockerd (moby) container engine (Preferences → Container Engine). With containerd,
+crew's floor images aren't visible to the kubelet and seats won't start (wicked-core#1449).
+
 Governed agents run each CLI's headless mode in a hardened seat pod (crew builds the seat images with
 the container CLI on first use, into the store the cluster shares), and you sign each agent in once from
 studio's Agents page. `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead. Claude Code

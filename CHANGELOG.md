@@ -27,7 +27,9 @@ state paths out of a PR, and asking a large database ranks its tables by the que
   0.10.0 (released with this train) runs it after install when the cluster can hold seats; by hand, run the engine
   binary crew installs (no `wicked-core` is put on PATH): `"$(npm root -g)/wicked-crew/node_modules/wicked-core-ts-<platform>/wicked-core"
   cluster install --admin-context rancher-desktop --home ~/.wicked-crew` (`<platform>`: `darwin-arm64`, `darwin-x64`,
-  `linux-x64-gnu`, `linux-arm64-gnu` or `win32-x64-msvc`; `docker-desktop` for Docker Desktop). Without one, the
+  `linux-x64-gnu`, `linux-arm64-gnu` or `win32-x64-msvc`; `docker-desktop` for Docker Desktop). On Rancher Desktop,
+  choose the dockerd (moby) container engine (Preferences → Container Engine). With containerd, crew's floor images
+  aren't visible to the kubelet and seats won't start (wicked-core#1449). Without one, the
   Nerve Center's Kubernetes cluster row is down, the container seats are benched with `Kubernetes isn't running`, and a
   sign-in is refused with its own code and repair. `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor. The
   checks floor tries pods on macOS and, by default, falls back to the host floor with the reason when they cannot
