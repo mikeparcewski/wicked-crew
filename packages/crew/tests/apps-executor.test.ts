@@ -97,7 +97,7 @@ describe('the executor: projection, coercion, paths, cache, limits (units)', () 
     expect(cache.size('app')).toBe(0); // the pre-invalidation read was not kept
   });
 
-  it('limits: 4 at once per source per app, 16 waiting, then refused; 60 queries a minute per viewer', async () => {
+  it('limits: 4 at once per source per app, 16 waiting, then refused', async () => {
     const limits = new AppLimits(() => 0);
     const gates: Array<() => void> = [];
     const running = Array.from({ length: 20 }, () => limits.run('app', 'src', () => new Promise<void>((r) => gates.push(r))));
@@ -109,9 +109,96 @@ describe('the executor: projection, coercion, paths, cache, limits (units)', () 
       await new Promise((r) => setTimeout(r, 1));
     }
     await Promise.all(running);
-    for (let i = 0; i < 60; i++) limits.rate('query', 'app', 'priya');
-    expect(() => limits.rate('query', 'app', 'priya')).toThrow(RateLimited);
-    expect(() => limits.rate('query', 'app', 'sam')).not.toThrow();
+  });
+
+  it('crew#1518: an 18-query app serves all panels on ten views within a minute', () => {
+    let t = 0;
+    const limits = new AppLimits(() => t);
+    for (let view = 0; view < 10; view++) {
+      for (let panel = 0; panel < 18; panel++) {
+        const read = JSON.stringify([`panel-${panel}`, { caseId: view }]);
+        expect(() => limits.rateQuery('desk', 'priya', read, 18)).not.toThrow();
+        t += 10;
+      }
+      t += 3_000;
+    }
+  });
+
+  it.each([1, 18])('crew#1518: hundreds of repeated actions on a %i-query app are refused until reset', (appQueries) => {
+    let t = 0;
+    const limits = new AppLimits(() => t);
+    const read = 'case:{"id":1}';
+    for (let action = 0; action < 300; action++) {
+      t = action * 100;
+      if (action < 60) {
+        expect(() => limits.rateQuery('desk', 'priya', read, appQueries)).not.toThrow();
+      } else {
+        let refused: unknown;
+        try {
+          limits.rateQuery('desk', 'priya', read, appQueries);
+        } catch (err) {
+          refused = err;
+        }
+        expect(refused).toBeInstanceOf(RateLimited);
+        expect(refused).toMatchObject({
+          message: `at most 60 page views or actions a minute per viewer in this app (a view's queries count once); the limit resets in ${Math.ceil((60_000 - t) / 1_000)} s`,
+          retryAfterMs: 60_000 - t,
+        });
+        expect((refused as RateLimited).retryAfterMs).toBeGreaterThan(0);
+      }
+    }
+    expect(() => limits.rateQuery('desk', 'sam', read, appQueries)).not.toThrow();
+    expect(() => limits.rateQuery('other-app', 'priya', read, appQueries)).not.toThrow();
+
+    // Refusing distinct reads must not open a unit that subsequent panels could join.
+    t = 59_999;
+    for (const nextRead of ['case:{"id":2}', 'case:{"id":3}']) {
+      expect(() => limits.rateQuery('desk', 'priya', nextRead, appQueries)).toThrow('the limit resets in 1 s');
+    }
+    // The oldest accepted unit expires exactly at 60 s, despite the later refusals.
+    t = 60_000;
+    for (let panel = 0; panel < appQueries; panel++) {
+      expect(() => limits.rateQuery('desk', 'priya', `panel-${panel}:{}`, appQueries)).not.toThrow();
+    }
+    expect(() => limits.rateQuery('desk', 'priya', read, appQueries)).toThrow(RateLimited);
+    t += 60_000;
+    expect(() => limits.rateQuery('desk', 'priya', read, appQueries)).not.toThrow();
+  });
+
+  it.each([0, 1, 18])('limits: rotating params on a %i-query app cannot exceed 60 full view units', (appQueries) => {
+    const limits = new AppLimits(() => 0);
+    for (let view = 0; view < 60; view++) {
+      for (let panel = 0; panel < Math.max(1, appQueries); panel++) {
+        const read = JSON.stringify([`panel-${panel}`, { caseId: view }]);
+        expect(() => limits.rateQuery('desk', 'priya', read, appQueries)).not.toThrow();
+      }
+    }
+    expect(() => limits.rateQuery('desk', 'priya', 'panel-0:{"caseId":60}', appQueries)).toThrow(RateLimited);
+  });
+
+  it('limits: distinct reads join for less than 10 s, measured from when the view started', () => {
+    let t = 0;
+    const limits = new AppLimits(() => t);
+    for (let view = 0; view < 59; view++) limits.rateQuery('desk', 'priya', 'case:{"id":1}', 18);
+    t = 9_999;
+    limits.rateQuery('desk', 'priya', 'case:{"id":2}', 18); // joins unit 59
+    t = 10_000;
+    limits.rateQuery('desk', 'priya', 'case:{"id":3}', 18); // opens unit 60
+    expect(() => limits.rateQuery('desk', 'priya', 'case:{"id":3}', 18)).toThrow(RateLimited);
+  });
+
+  it.each([['action', 20], ['prepare', 60]] as const)('limits: %s still allows %i calls a minute per viewer', (bucket, limit) => {
+    let t = 0;
+    const limits = new AppLimits(() => t);
+    for (let i = 0; i < limit; i++) limits.rate(bucket, 'app', 'priya');
+    expect(() => limits.rate(bucket, 'app', 'priya')).toThrow(RateLimited);
+    expect(() => limits.rate(bucket, 'app', 'sam')).not.toThrow();
+    t = 36_501;
+    expect(() => limits.rate(bucket, 'app', 'priya')).toThrow('; the limit resets in 24 s');
+    t = 59_999;
+    expect(() => limits.rate(bucket, 'app', 'priya')).toThrow('; the limit resets in 1 s');
+    t = 60_000;
+    expect(() => limits.rate(bucket, 'app', 'priya')).not.toThrow();
   });
 });
 
@@ -188,6 +275,45 @@ describe('the executor over the K1 test services and the crew source', () => {
   });
 
   const query = (q: string, params?: Record<string, unknown>, as: 'priya' | 'sam' | 'seat' | 'olga' = 'priya') => h.call('POST', '/apps/desk/query', { version: 2, query: q, ...(params !== undefined ? { params } : {}) }, as);
+
+  it('crew#1518: the query route serves ten 18-panel views, then refuses repeated actions with a reset and retry-after', async () => {
+    await h.newApp('case-desk');
+    const queries: AppQuery[] = Array.from({ length: 18 }, (_, i) => ({
+      id: `q${String(i).padStart(2, '0')}`,
+      source: 'crew',
+      kind: 'crew',
+      rowPath: '$.runs[*]',
+      output: [{ name: 'id', type: 'string' }],
+    }));
+    const landed = await h.land('case-desk', specWith(queries), Object.fromEntries(queries.map((q) => [q.id, JSON.stringify({ route: '/runs' })])));
+    expect(landed.status, JSON.stringify(landed.body)).toBe(200);
+    const version = landed.body.app!.head.version;
+    const read = (query: string) => h.app.inject({
+      method: 'POST',
+      url: '/api/v1/apps/case-desk/query',
+      headers: { authorization: 'Bearer priya' },
+      payload: { version, query },
+    });
+    for (let view = 0; view < 10; view++) {
+      for (const q of queries) {
+        const response = await read(q.id);
+        expect(response.statusCode, response.body).toBe(200);
+      }
+    }
+    // Ten views consumed ten units; fifty repeats consume the rest of this viewer's budget.
+    for (let action = 0; action < 50; action++) {
+      const response = await read('q00');
+      expect(response.statusCode, response.body).toBe(200);
+    }
+    const refused = await read('q00');
+    expect(refused.statusCode, refused.body).toBe(429);
+    const body = refused.json<{ code: string; error: string; retryAfterMs: number }>();
+    expect(body.code).toBe('rate_limited');
+    expect(body.error).toContain('60 page views or actions a minute');
+    expect(body.error).toContain('resets in');
+    expect(body.retryAfterMs).toBeGreaterThan(0);
+    expect(refused.headers['retry-after']).toBe(String(Math.max(1, Math.ceil(body.retryAfterMs / 1_000))));
+  });
 
   it('a REST read: the row path, the declared columns only, the more path; the next page says it is the last', async () => {
     const r = await query('page');

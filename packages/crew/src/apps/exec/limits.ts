@@ -1,6 +1,7 @@
 /**
  * Concurrency, queue and rate (DES-APPS-001 §7.5): 4 queries per source per app at once, a queue of 16,
- * then `429`; per viewer 60 queries and 20 actions a minute per app.
+ * then `429`; per viewer 60 page views or actions' query batches and 20 action runs a minute per app.
+ * A view's distinct reads count once within 10 s, up to the app's declared query count.
  */
 
 export const QUERY_LIMITS = { concurrent: 4, queue: 16, perMinute: 60, actionsPerMinute: 20 } as const;
@@ -19,11 +20,33 @@ interface Slot {
   queue: Array<() => void>;
 }
 
+interface QueryUnit {
+  startedAt: number;
+  reads: Set<string>;
+}
+
 export class AppLimits {
   private readonly slots = new Map<string, Slot>();
   private readonly windows = new Map<string, number[]>();
+  private readonly queryUnits = new Map<string, QueryUnit>();
 
   constructor(private readonly now: () => number = Date.now) {}
+
+  /** Distinct reads join a view for up to 10 s; a repeated read or a full view costs a new unit. */
+  rateQuery(app: string, who: string, read: string, appQueries: number): void {
+    const key = `${app}\u0000${who}`;
+    const t = this.now();
+    const unit = this.queryUnits.get(key);
+    if (unit !== undefined && t - unit.startedAt < 10_000 && !unit.reads.has(read) && unit.reads.size < Math.max(1, appQueries)) {
+      unit.reads.add(read);
+      return;
+    }
+    this.rate('query', app, who); // a refusal neither opens a unit nor records a read
+    this.queryUnits.set(key, { startedAt: t, reads: new Set([read]) });
+    if (this.queryUnits.size > 10_000) {
+      for (const [k, v] of this.queryUnits) if (t - v.startedAt >= 10_000) this.queryUnits.delete(k);
+    }
+  }
 
   /** Count one call by `who` in `bucket` against `perMinute`; throws `RateLimited` past it. */
   rate(bucket: 'query' | 'action' | 'prepare', app: string, who: string): void {
@@ -34,7 +57,11 @@ export class AppLimits {
     const w = (this.windows.get(key) ?? []).filter((x) => t - x < 60_000);
     if (w.length >= limit) {
       this.windows.set(key, w);
-      throw new RateLimited(`at most ${limit} ${bucket === 'query' ? 'queries' : bucket === 'action' ? 'action runs' : 'prepared actions'} a minute per viewer in this app`, 60_000 - (t - w[0]!));
+      const retryAfterMs = 60_000 - (t - w[0]!);
+      const message = bucket === 'query'
+        ? `at most ${limit} page views or actions a minute per viewer in this app (a view's queries count once)`
+        : `at most ${limit} ${bucket === 'action' ? 'action runs' : 'prepared actions'} a minute per viewer in this app`;
+      throw new RateLimited(`${message}; the limit resets in ${Math.max(1, Math.ceil(retryAfterMs / 1_000))} s`, retryAfterMs);
     }
     w.push(t);
     this.windows.set(key, w);
