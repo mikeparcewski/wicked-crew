@@ -10,6 +10,27 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.18.12] — 2026-11-12
+
+A patch for the Kubernetes runner and the requirements headline. Seat commits on the Kubernetes runner carry the
+operator's git identity again, and the checks floor gives each side its own `.git`, so repository tests that call git
+pass on the floor again. The requirements API passes through the engine's confidence-weighted headline, a wedged seat
+reads as stalled, apps stop exhausting a viewer's query budget, the Apps builder fixes crew's check findings in one
+turn, and source structure reaches estate again. Needs wicked-core-ts 0.15.41 (`^0.15.41`) and
+wicked-crew-api-types 0.208.0 (additive: `RequirementsCoverage.weightedPct?`). The garden floor stays 12.68.0
+(12.68.2 is current). Bundles wicked-studio 0.16.7.
+
+**Upgrading:**
+
+- **wicked-core-ts 0.15.41 fixes two regressions from the Docker runner (core#1453, core#1456).** On the Kubernetes
+  checks floor each side gets a private `.git` (HEAD is the side, `origin/<default>` is the run base), so tests that
+  run `git ls-files`, `git merge-base` or `git diff <base>` work again. Seat commits carry the operator's `user.name`
+  and `user.email` instead of `seat@wicked.local`. The checks-floor image tag changes, so the floor image is rebuilt
+  on the first governed run after the upgrade.
+- **Rancher Desktop on containerd (core#1449).** core-ts 0.15.41 builds nerdctl images in the kubelet's `k8s.io`
+  namespace, the cause of seats not starting on that engine. A pod start from a nerdctl-built image has not been run
+  live yet, so the dockerd (moby) engine stays the tested setup and the READMEs keep recommending it.
+
 ### Added
 
 - The requirements API carries the confidence-weighted headline `coverage.weightedPct` when the engine sends it
@@ -25,21 +46,19 @@ mentioned only where a daemon release depends on them.
   lands). Its task lists the read rules for each source's dialect: views only when allowed by name, and on SQLite
   a subquery in FROM instead of a WITH clause that reads a table. Its structure for a large source is ranked by the
   message and names every table within the package bound, and `list_tables` finds a named table past the cut.
-
 - Apps count a page view or user action once against the viewer's 60-a-minute query budget, grouping its
   distinct panel reads within 10 seconds up to the app's declared query count (crew#1518). Apps with many
   panels no longer exhaust the budget after a few views. A refusal names the limit and how many seconds
   remain; refused reads do not consume or extend the window, so the next view after reset is served.
 - Data source structure is projected into estate again: source and tracker writes share one lane and retry database
   contention; estate refusals are reported with their own first line (crew#1524).
-### Fixed
-
 - **A live but wedged seat now reads as stalled (crew#1501).** The stall watchdog measured time since any event,
   and core's 15-second working heartbeat (`heartbeat`, and the `working` frame of `toolActivity`) counted, so a seat
   silent for 150 s against a 60 s `workerStallMinutes` still showed "working · last event just now". The clock now
   measures time since the seat's last output (a delta, a tool call, unit progress); heartbeats never reset it or
   re-arm a quiet period. The Nerve Center no longer reads the run's event-log mtime once the watchdog observes the
   run, because heartbeats touch that file too.
+- Committed host paths in evidence scripts are placeholders (#1525); no product change.
 
 ## [0.18.11] — 2026-11-12
 
@@ -6946,7 +6965,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.11...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.12...HEAD
+[0.18.12]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.11...v0.18.12
 [0.18.11]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.10...v0.18.11
 [0.18.10]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.9...v0.18.10
 [0.18.9]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.8...v0.18.9
