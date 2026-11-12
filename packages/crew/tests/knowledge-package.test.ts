@@ -8,6 +8,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { PackageKnowledge } from '../src/apps/turns.js';
+import { builderCatalog } from './fixtures/apps-sources/builder-catalog.js';
 import { AuditLog } from '../src/api/audit.js';
 import { LOCAL_ACTOR } from '../src/api/auth.js';
 import { chatKnowledgeFor, chatKnowledgeStatement, chatMcpToolsFor } from '../src/api/chat-mcp.js';
@@ -122,6 +124,83 @@ describe('knowledgePackageFor: one predicate, structure only (§8.1, §9.3)', ()
     const out = JSON.parse(text) as { sources: Array<{ name: string; structure?: unknown; note?: string }>; sourcesNotListed: number };
     expect(out.sources.some((s) => s.structure === undefined && /package is full/.test(s.note ?? ''))).toBe(true);
     expect(out.sources.length + out.sourcesNotListed).toBe(6);
+  });
+
+  it.each([1, 2])('the builder keeps relevant detail and all 79 names per source, with %i sources', async (count) => {
+    const cat = builderCatalog();
+    const sources = Array.from({ length: count }, (_, i) => source(`src-${i}`, `id-${i}`, { projects: ['proj_a'] }, { description: { catalog: cat, descriptorHash: 'h' } }));
+    const pkg = await new PackageKnowledge(gateOf(sources)).forApp({ projectId: 'proj_a', message: 'show open cases by assignee' });
+    const text = packageJson(pkg);
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(KNOWLEDGE_PACKAGE_MAX_BYTES);
+    const rendered = JSON.parse(text) as typeof pkg;
+    expect(rendered.sources).toHaveLength(count);
+    for (const src of rendered.sources) {
+      expect(src.structure).toBeDefined();
+      const st = src.structure!;
+      expect(st.relations.map((r) => r.table)).toEqual(expect.arrayContaining(['work.cases', 'work.case_events']));
+      expect(st.relations.find((r) => r.table === 'work.cases')?.columns).toEqual(expect.arrayContaining([{ name: 'status', type: 'text', nullable: false, enum: ['open', 'closed'] }]));
+      expect(st.relations.find((r) => r.table === 'work.case_events')?.foreignKeys).toEqual([{ columns: ['case_id'], references: { schema: 'work', table: 'cases', columns: ['id'] } }]);
+      const names = new Set([...st.relations, ...(st.others ?? []), ...(st.othersByName ?? [])].map((r) => `${r.schema}.${r.name}`));
+      expect([...names].sort()).toEqual(cat.relations.map((r) => `${r.schema}.${r.name}`).sort());
+      expect(st.notListed).toBe(0);
+    }
+  });
+
+  it('measures undescribed sources before giving the builder a structure budget', async () => {
+    const sources = Array.from({ length: 30 }, (_, i) => source(`a-${i}-${'pending'.repeat(8)}`, SUPPORT_ID, { projects: ['proj_a'] }, {
+      description: null,
+      tools: Array.from({ length: 8 }, (_, n) => ({ name: `describe_part_${n}`, disclosure: 'structure' as const, description: 'structure' })),
+    }));
+    sources.push(source('z-described', SUPPORT_ID, { projects: ['proj_a'] }, { description: { catalog: builderCatalog(), descriptorHash: 'h' } }));
+    const pkg = await knowledgePackageFor({ projectId: 'proj_a', question: 'show open cases by assignee' }, gateOf(sources));
+    expect(Buffer.byteLength(JSON.stringify(pkg), 'utf8')).toBeLessThanOrEqual(KNOWLEDGE_PACKAGE_MAX_BYTES);
+    const text = packageJson(pkg);
+    expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(KNOWLEDGE_PACKAGE_MAX_BYTES);
+    const rendered = JSON.parse(text) as typeof pkg;
+    expect(rendered.sources).toHaveLength(31);
+    const structure = rendered.sources.at(-1)!.structure;
+    expect(structure).toBeDefined();
+    expect(structure!.relations.map((r) => r.table)).toContain('work.cases');
+  });
+
+  it('the builder keeps both structures with multibyte names and trackers in the byte budget', async () => {
+    const cat = builderCatalog();
+    for (const r of cat.relations) {
+      r.name += '表'.repeat(20);
+      for (const c of r.columns) c.name += '列'.repeat(20);
+    }
+    const sources = [0, 1].map((i) => source(`src-${i}`, `id-${i}`, { projects: ['proj_a'] }, { description: { catalog: cat, descriptorHash: 'h' } }));
+    const pkg = await knowledgePackageFor({ projectId: 'proj_a', question: 'show open cases by assignee' }, {
+      ...gateOf(sources), trackers: async () => Array.from({ length: 50 }, (_, i) => ({ sourceId: 'id-0', source: 'src-0', system: 'jira', trackerId: `tracker-${i}`, tenant: 'tenant', tenantLabel: null, siteHost: null, key: `KEY-${i}`, label: 'label'.repeat(40), via: [{ kind: 'project' as const }] })),
+    });
+    const text = packageJson(pkg);
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(KNOWLEDGE_PACKAGE_MAX_BYTES);
+    expect((JSON.parse(text) as typeof pkg).sources.map((s) => s.structure)).toEqual([expect.any(Object), expect.any(Object)]);
+  });
+
+  it('a builder package strips the MySQL connection database from detail, outlines and names', async () => {
+    const cat = builderCatalog('mysql');
+    const pkg = await knowledgePackageFor({ projectId: 'proj_a', question: 'show open cases by assignee' }, gateOf([source('src', SUPPORT_ID, { projects: ['proj_a'] }, { dialect: 'mysql', description: { catalog: cat, descriptorHash: 'h' } })]));
+    const st = pkg.sources[0]!.structure!;
+    expect(st.relations.length).toBeGreaterThan(0);
+    expect(st.others!.length).toBeGreaterThan(0);
+    expect(st.othersByName!.length).toBeGreaterThan(0);
+    expect(packageJson(pkg)).not.toContain(cat.database);
+    for (const r of [...st.relations, ...st.others!, ...st.othersByName!]) expect(r.schema).toBeNull();
+  });
+
+  it('the chat fixture without a question keeps exactly the same bytes', async () => {
+    const pkg = await knowledgePackageFor({ projectId: 'proj_a' }, gateOf([source('support-pg', SUPPORT_ID, { projects: ['proj_a'] }, { description: { catalog: catalog([rel('support', 'tickets')]), descriptorHash: 'h' } })]));
+    expect(packageJson(pkg)).toBe(JSON.stringify({
+      package: 'wicked.knowledge/v1', projectId: 'proj_a', sources: [{
+        name: 'support-pg', id: SUPPORT_ID, kind: 'postgres', query: false, tools: ['mcp:support-pg/list_tables'],
+        structure: { relations: [{
+          table: 'support.tickets', schema: 'support', name: 'tickets', kind: 'table',
+          columns: [{ name: 'id', type: 'bigint', nullable: false }, { name: 'status', type: 'support.ticket_status', nullable: false, enum: ['open', 'pending', 'closed'] }, { name: 'region', type: 'text', nullable: true }],
+          primaryKey: ['id'], foreignKeys: [{ columns: ['customer_id'], references: { schema: 'support', table: 'customers', columns: ['id'] } }],
+        }], notListed: 0 },
+      }], sourcesNotListed: 0,
+    }));
   });
 
   it('visibleDeps is the same predicate in estate spelling, for sources described under their current descriptor', () => {

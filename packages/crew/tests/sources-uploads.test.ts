@@ -9,8 +9,13 @@ import { fileURLToPath } from 'node:url';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { AppsSourceStage } from '../src/apps/exec/source-stage.js';
+import type { AppQuery } from '../src/core/types.js';
+import type { McpRegistry } from '../src/mcp/registry.js';
+import type { McpUpstreamConfig } from '../src/mcp/probe.js';
+import { specWith } from './support/apps-harness.js';
 import { observeSqliteRunnerForTests, runnerEnv, sqliteCreate, sqliteRead } from '../src/sources/drivers/sqlite.js';
-import { readSqlQuery, SourcePolicyError } from '../src/sources/sql.js';
+import { checkSqlQuery, readSqlQuery, SourcePolicyError } from '../src/sources/sql.js';
 import { detectHeader, ingestUpload, looksLikeHeader, snapshotPath, UploadError } from '../src/sources/uploads.js';
 import { makeSqlite, makeXlsx, makeZipBomb, zip } from './fixtures/apps-sources/uploads/make.mjs';
 
@@ -81,6 +86,37 @@ describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => 
     expect(ok.catalog.relations.map((r) => r.name)).toEqual(['refunds']);
   });
 
+  it('the snapshot check refuses a table-reading CTE and prepares the same read as a FROM subquery', async () => {
+    const up = await ingestUpload('t.csv', Buffer.from('a\n1\n2\n'), { dir });
+    const h = { driver: 'sqlite' as const, snapshotPath: snapshotPath(up.digest, dir), catalog: up.catalog };
+    expect(await checkSqlQuery(h, 'WITH x AS (SELECT a FROM t) SELECT a FROM x')).toMatchObject({
+      ok: false, code: 'authorizer', detail: expect.stringMatching(/^access to t\.a is prohibited: a WITH clause that reads a table is refused here \(use a subquery in FROM\)$/),
+    });
+    expect(await checkSqlQuery(h, 'SELECT a FROM (SELECT a FROM t) AS x')).toMatchObject({ ok: true, describe: { columns: [{ name: 'a' }] } });
+  });
+
+  it('the Apps source stage carries the CTE hint while hiding the source refusal text', async () => {
+    const up = await ingestUpload('t.csv', Buffer.from('a\n1\n2\n'), { dir });
+    const config: McpUpstreamConfig = { name: 'snapshot', kind: 'sql', command: null, args: [], url: null, auth: null, sql: { driver: 'sqlite', snapshot: up.digest } };
+    const registry = {
+      snapshot: async () => ({ config, enabled: true }),
+      source: async () => ({ config, enabled: true, allowWrites: false, description: { catalog: up.catalog } }),
+    } as unknown as McpRegistry;
+    const stage = new AppsSourceStage({ registry, snapshotDir: dir });
+    const q: AppQuery = { id: 'q', source: 'snapshot', kind: 'sql', output: [{ name: 'a', type: 'integer' }] };
+    const check = (text: string) => stage.check({ app: 'x', spec: specWith([q]), queryText: { q: text }, queries: ['q'], actions: [] });
+    for (const prefix of ['', '-- read\n/* structure */\n']) {
+      expect((await check(`${prefix}WITH x AS (SELECT a FROM t) SELECT a FROM x`)).findings).toEqual([{
+        stage: 'source', code: 'authorizer', path: '$.queries[0]',
+        message: 'query q: the source refused the query: a WITH clause that reads a table is refused here (use a subquery in FROM)',
+      }]);
+    }
+    expect((await check('SELECT a FROM (SELECT a FROM t) AS x')).findings).toEqual([]);
+    expect((await check('SELECT missing_column FROM t')).findings).toEqual([{
+      stage: 'source', code: 'authorizer', path: '$.queries[0]', message: 'query q: the source refused the query',
+    }]);
+  });
+
   it('the read policy on a snapshot: a recursive CTE, ATTACH, PRAGMA, a write and a second statement are refused', async () => {
     const up = await ingestUpload('ok.sqlite', readFileSync(join(work, 'ok.sqlite')), { dir });
     const h = { driver: 'sqlite' as const, snapshotPath: snapshotPath(up.digest, dir), catalog: up.catalog };
@@ -93,7 +129,7 @@ describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => 
       'SELECT * FROM sqlite_schema',
       "SELECT load_extension('x')",
     ]) {
-      await expect(readSqlQuery(h, q, []), q).rejects.toThrow(/not authorized|prohibited|exactly one statement|is not a read/);
+      await expect(readSqlQuery(h, q, []), q).rejects.toThrow(/not authorized|prohibited|exactly one statement|is not a read|a WITH clause that reads a table is refused/);
     }
     // The authorizer holds on its own too (the statement-kind check before it aside).
     for (const q of ["ATTACH DATABASE '/etc/hosts' AS x", 'PRAGMA table_info(refunds)', 'DELETE FROM refunds']) {

@@ -3,8 +3,15 @@
 // byte caps, the Postgres rewrite (statement cut, LIMIT, per-cell projection, the policy again), and the
 // Toolbox document's spawn policy and YAML-escaped secret.
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { parseAllDocuments } from 'yaml';
+
+import { DataGate } from '../src/knowledge/gate/gate.js';
+import type { GateSource } from '../src/knowledge/gate/sources.js';
+import { McpRegistryStore } from '../src/mcp/registry-store.js';
+import { SourceCatalogStore } from '../src/sources/store.js';
+import { readRules } from '../src/sources/policy/rules.js';
+import { builderCatalog } from './fixtures/apps-sources/builder-catalog.js';
 
 import { agentAccessOf, agentMay, AGENT_ACCESS_DEFAULT, neededFor } from '../src/knowledge/gate/access.js';
 import { citeOf, rowsWithin, sqlstateOf, UNIT_CELL_CHARS, unitCell, unitRows } from '../src/knowledge/gate/envelope.js';
@@ -18,6 +25,48 @@ import { platformKey, TOOLBOX_PINS, toolboxPath, toolboxUrl, ToolboxBinary } fro
 import { type PolicyCatalog, relKey } from '../src/sources/policy/types.js';
 
 const LOOPBACK = { allow: ['127.0.0.0/8'], plaintext: false };
+
+describe('list_tables on a large catalog', () => {
+  it('selects named tables before the detail cut and carries the read rules', async () => {
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'gate-structure-'));
+    const catalog = builderCatalog();
+    const src = {
+      id: 'src-1', name: 'support-pg', enabled: true, queryable: true,
+      access: agentAccessOf({ agents: { see: true, query: true, projects: ['proj_a'] } }),
+      description: { catalog, descriptorHash: 'h' }, descriptorHash: 'h', viewsAllowed: [], dialect: 'postgres', runtime: 'native',
+      address: LOOPBACK, config: { name: 'support-pg', kind: 'sql', command: null, args: [], url: null, auth: null },
+      tools: [{ name: 'list_tables', disclosure: 'structure', description: 'structure' }],
+    } satisfies GateSource;
+    const gate = new DataGate({
+      store: new McpRegistryStore(join(dir, 'mcp')), catalogs: new SourceCatalogStore(join(dir, 'catalogs')),
+      secret: async () => null, record: { append: async () => undefined }, audit: { record: () => undefined },
+      resolver: () => null, lister: () => null,
+    });
+    vi.spyOn(gate, 'sources').mockResolvedValue([src]);
+    const scope = { projectId: 'proj_a', unit: { runId: 'r', ord: 1, attempt: 1, phase: 'build', seat: 'codex' } };
+    try {
+      const all = await gate.unitCall(scope, src.name, 'list_tables', {}, 'all');
+      expect(all).toMatchObject({ ok: true, isError: false });
+      if (!all.ok) throw new Error(all.reason);
+      expect(all.answer['notListed']).toBeGreaterThan(0);
+      expect(all.answer['relations']).not.toEqual(expect.arrayContaining([expect.objectContaining({ table: 'work.cases' })]));
+      for (const table_names of ['work.cases', 'cases']) {
+        const selected = await gate.unitCall(scope, src.name, 'list_tables', { table_names }, 'selected');
+        expect(selected).toMatchObject({ ok: true, isError: false, answer: {
+          notListed: 0, rules: readRules('postgres'), relations: [expect.objectContaining({
+            table: 'work.cases', columns: expect.arrayContaining([{ name: 'assignee', type: 'text', nullable: true }]),
+          })],
+        } });
+      }
+    } finally {
+      vi.restoreAllMocks();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('the predicate and the disclosure class (§7.1)', () => {
   const src = { enabled: true, queryable: true };

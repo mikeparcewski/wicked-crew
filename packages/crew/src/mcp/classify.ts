@@ -22,6 +22,8 @@ export const MCP_SERVER_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 /** The reserved server name of the broker's estate relay (wicked-core#1018, `estate-relay.ts`):
  *  `mcp:estate/<tool>` never reaches a registered server, and no server may be saved under it. */
 export const ESTATE_SERVER = 'estate';
+/** crew's own Apps self-check, never a registered server. */
+export const APPS_SERVER = 'apps';
 
 export function mcpSubject(server: string, tool: string): string {
   return `mcp:${server}/${tool}`;

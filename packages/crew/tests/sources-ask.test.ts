@@ -26,6 +26,7 @@ import { McpRegistryStore } from '../src/mcp/registry-store.js';
 import type { SecretStore } from '../src/mcp/secrets.js';
 import { ASK_COLUMNS_MAX, ASK_DEADLINE_MS, ASK_NAMES_CHARS, ASK_NAME_MAX, ASK_OUTLINE_CHARS, ASK_RELATIONS_MAX, ASK_ROW_CAP, ASK_STRUCTURE_CHARS, AskRunTokens, askCell, askPrompt, askStructure, draftFromAnswer, draftHolds, rowsWithin } from '../src/sources/ask.js';
 import type { SqlCatalog } from '../src/sources/catalog/types.js';
+import { readRules } from '../src/sources/policy/rules.js';
 import { registerSourceRoutes } from '../src/sources/routes.js';
 import { sqliteInspect, sqliteRead } from '../src/sources/drivers/sqlite.js';
 import { seatTurn, type SeatTurnInput, type SeatTurnOutcome } from '../src/standing-orders/parse.js';
@@ -132,6 +133,19 @@ async function harnessWithout(): Promise<Harness> {
 const post = (h: Harness, url: string, payload?: unknown) => h.app.inject({ method: 'POST', url: `/api/v1${url}`, ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}) });
 
 describe('the ask pieces (no database)', () => {
+  it('SQLite instructions name the CTE restriction and every dialect names the view restriction', () => {
+    const cat: SqlCatalog = { dialect: 'sqlite', database: null, relations: [], describedAt: '' };
+    expect(readRules('sqlite')).toContain("No WITH clause (CTE) that reads a table: SQLite's read policy refuses any read made through a CTE. Write it as a subquery in FROM instead: SELECT ... FROM (SELECT ... FROM t) AS x.");
+    expect(readRules('sqlite')).toContain('Placeholders are ? only, in declaration order.');
+    for (const dialect of ['postgres', 'mysql', 'sqlite'] as const) {
+      const prompt = askPrompt('show cases', { ...cat, dialect }, []);
+      for (const rule of readRules(dialect)) expect(prompt).toContain(`- ${rule}`);
+      expect(readRules(dialect)).toContain('A view is readable only if a person allowed it by name: read only the relations the structure lists; any other view is refused.');
+      if (dialect === 'sqlite') expect(prompt).not.toContain('a WITH ... SELECT is fine');
+      else expect(prompt).toContain('a WITH ... SELECT is fine');
+    }
+  });
+
   it("the harness's close awaits the audit trail before it removes its scratch directory (crew#1331)", async () => {
     const h = await harnessWithout();
     const flush = h.audit.flush.bind(h.audit);

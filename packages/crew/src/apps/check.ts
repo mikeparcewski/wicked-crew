@@ -173,7 +173,33 @@ export async function readAppTree(
       return fileFinding('unreadable', path, err instanceof Error ? err.message : String(err));
     }
   };
-  const specBlob = await read(SPEC_PATH, specEntry.sha, APP_SPEC_MAX_BYTES);
+  const entries = new Map<string, Buffer | AppCheckFinding>();
+  for (const [path, entry] of blobs) {
+    const cap = path === SPEC_PATH ? APP_SPEC_MAX_BYTES : path === LOCK_PATH ? LOCK_MAX_BYTES : QUERY_TEXT_MAX_BYTES;
+    entries.set(path, await read(path, entry.sha, cap));
+  }
+  return appFilesFromBlobs(entries, opts);
+}
+
+/** The same files check for a repo tree and a builder's self-check. A candidate's lock is ignored. */
+export function appFilesFromBlobs(
+  entries: ReadonlyMap<string, Buffer | AppCheckFinding>,
+  opts: { requireLock?: boolean } = {},
+): { ok: true; files: Omit<AppFiles, 'lock'> & { lock: AppLock | null } } | { ok: false; findings: AppCheckFinding[] } {
+  const findings: AppCheckFinding[] = [];
+  for (const path of entries.keys()) {
+    if (path === SPEC_PATH || path === LOCK_PATH) continue;
+    if (path.startsWith(`${QUERIES_DIR}/`)) {
+      if (!QUERY_FILE_RE.test(path.slice(QUERIES_DIR.length + 1))) findings.push(fileFinding('unexpected_path', path, `${path} is not a query text file`));
+    } else findings.push(fileFinding('unexpected_path', path, `${path} is outside apps.json, apps.lock.json and queries/`));
+  }
+  const read = (path: string, cap: number): Buffer | AppCheckFinding | undefined => {
+    const value = entries.get(path);
+    return Buffer.isBuffer(value) && value.length > cap ? fileFinding('too_large', path, `${path} is over ${cap} bytes`) : value;
+  };
+  const specBlob = read(SPEC_PATH, APP_SPEC_MAX_BYTES);
+  if (specBlob === undefined) findings.push(fileFinding('missing_spec', SPEC_PATH, 'the tree has no apps.json'));
+  if (findings.length > 0 || specBlob === undefined) return { ok: false, findings };
   if (!Buffer.isBuffer(specBlob)) return { ok: false, findings: [specBlob] };
   const parsed = readSpec(specBlob);
   if (parsed.spec === null) return { ok: false, findings: parsed.findings };
@@ -183,12 +209,11 @@ export async function readAppTree(
   for (const q of spec.queries) {
     const path = queryPath(q);
     declared.add(path);
-    const e = blobs.get(path);
-    if (e === undefined) {
+    const bytes = read(path, QUERY_TEXT_MAX_BYTES);
+    if (bytes === undefined) {
       findings.push(...checkQueryText(q, undefined, path));
       continue;
     }
-    const bytes = await read(path, e.sha, QUERY_TEXT_MAX_BYTES);
     if (!Buffer.isBuffer(bytes)) {
       findings.push(bytes);
       continue;
@@ -202,16 +227,15 @@ export async function readAppTree(
     if (f.length > 0) findings.push(...f);
     else queryText[q.id] = text;
   }
-  for (const path of blobs.keys()) {
+  for (const path of entries.keys()) {
     if (path.startsWith(`${QUERIES_DIR}/`) && !declared.has(path)) findings.push(fileFinding('undeclared_query_text', path, `${path} is no declared query's text`));
   }
   // A candidate's lock is crew's to write, so a missing or bad one is ignored. A tree crew LANDED must read
   // back its lock (`requireLock`): a lock that is gone, changed or not a lock is a finding, never an empty
   // lock in its place (codex r3).
   let lock: AppLock | null = null;
-  const lockEntry = blobs.get(LOCK_PATH);
-  if (lockEntry !== undefined) {
-    const bytes = await read(LOCK_PATH, lockEntry.sha, LOCK_MAX_BYTES);
+  const bytes = read(LOCK_PATH, LOCK_MAX_BYTES);
+  if (bytes !== undefined) {
     if (Buffer.isBuffer(bytes)) {
       try {
         const parsed = JSON.parse(bytes.toString('utf8')) as AppLock;

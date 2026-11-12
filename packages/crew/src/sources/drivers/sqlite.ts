@@ -22,7 +22,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { CatalogRelation, SqlCatalog } from '../catalog/types.js';
 import { deniedFunction, SQLITE_FUNCTIONS } from '../policy/allowlists.js';
 import { childEnvWithBootEstateDb, ESTATE_DB_ENGINE_ENV } from '../../core/governance-store.js';
-import { sqliteAuthorize, sqliteParams } from '../policy/sqlite.js';
+import { sqliteAuthorize, sqliteCteHint, sqliteParams } from '../policy/sqlite.js';
 import { type ReadOptions, READ_MAX_ROWS, type SqlDescribe, type SqlReadResult, SourceQueryError, STATEMENT_DEADLINE_MS } from './types.js';
 
 /**
@@ -153,12 +153,18 @@ export async function sqliteInspect(path: string, deadlineMs = 30_000): Promise<
   return { objects: (a['objects'] as SqliteInspection['objects']) ?? [], generated, catalog: { dialect: 'sqlite', database: null, relations, describedAt: new Date().toISOString() } };
 }
 
+/** Keep the driver's detail and append crew's hint when the authorizer refused a WITH read. */
+function refusalDetail(text: string, error: string): string {
+  const hint = sqliteCteHint(text);
+  return hint !== null && /not authorized|prohibited/i.test(error) ? `${error}: ${hint}` : error;
+}
+
 /** Prepare under the authorizer and describe; never execute. */
 export async function sqliteDescribe(path: string, catalog: SqlCatalog, text: string): Promise<SqlDescribe> {
   const p = sqliteParams(text);
   if (!p.ok) throw new SourceQueryError(null, 'refused', p.detail);
   const a = await runChild({ op: 'prepare', uri: snapshotUri(path), sql: text, paramCount: p.count, ...policyContext(catalog) }, STATEMENT_DEADLINE_MS);
-  if (!a.ok) throw new SourceQueryError(null, a.refused === true ? 'refused' : 'source', a.error ?? 'the query could not be prepared');
+  if (!a.ok) throw new SourceQueryError(null, a.refused === true ? 'refused' : 'source', refusalDetail(text, a.error ?? 'the query could not be prepared'));
   return { columns: (a['columns'] as SqlDescribe['columns']) ?? [], params: (a['params'] as string[]) ?? [] };
 }
 
@@ -170,6 +176,6 @@ export async function sqliteRead(path: string, catalog: SqlCatalog, text: string
     opts.deadlineMs ?? STATEMENT_DEADLINE_MS,
     opts.signal,
   );
-  if (!a.ok) throw new SourceQueryError(null, a.refused === true ? 'refused' : 'source', a.error ?? 'the read failed');
+  if (!a.ok) throw new SourceQueryError(null, a.refused === true ? 'refused' : 'source', refusalDetail(text, a.error ?? 'the read failed'));
   return { columns: (a['columns'] as SqlReadResult['columns']) ?? [], rows: (a['rows'] as unknown[][]) ?? [], truncated: a['truncated'] === true, ms: Date.now() - started };
 }

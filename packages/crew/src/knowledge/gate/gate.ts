@@ -25,6 +25,7 @@ import { normalizeAnnotations, type McpUpstreamConfig, type ProbeResult } from '
 import type { McpRegistryStore } from '../../mcp/registry-store.js';
 import { scrubSecrets } from '../../mcp/secrets.js';
 import { askStructure } from '../../sources/ask.js';
+import { readRules } from '../../sources/policy/rules.js';
 import { policyCatalog, type SqlCatalog } from '../../sources/catalog/types.js';
 import { type DialOptions, DialRefusedError, NO_CONFIRMATION } from '../../sources/dialer.js';
 import { type SqlReadResult, SourceQueryError, STATEMENT_DEADLINE_MS } from '../../sources/drivers/types.js';
@@ -156,13 +157,15 @@ export const SQL_TOOL_SCHEMAS: Record<string, Record<string, unknown>> = {
  * connection's database name taken out. On MySQL every relation's "schema" IS the connected database, so
  * tables are named unqualified; Postgres schemas are the source's own structure and stay.
  */
-export function agentStructure(catalog: SqlCatalog, viewsAllowed: readonly string[]): ReturnType<typeof askStructure> {
-  const st = askStructure(catalog, viewsAllowed);
+export function agentStructure(catalog: SqlCatalog, viewsAllowed: readonly string[], question?: string, budget?: Parameters<typeof askStructure>[3]): ReturnType<typeof askStructure> {
+  const st = askStructure(catalog, viewsAllowed, question, budget);
   if (catalog.dialect !== 'mysql') return { ...st, database: null };
   const db = catalog.database;
   return {
     ...st,
     database: null,
+    ...(st.others !== undefined ? { others: st.others.map((r) => ({ ...r, schema: r.schema === db ? null : r.schema, table: r.schema === db || r.schema === null ? r.name : `${r.schema}.${r.name}` })) } : {}),
+    ...(st.othersByName !== undefined ? { othersByName: st.othersByName.map((r) => ({ ...r, schema: r.schema === db ? null : r.schema })) } : {}),
     relations: st.relations.map((r) => ({
       ...r,
       schema: null,
@@ -383,17 +386,17 @@ export class DataGate {
   private structure(s: GateSource, args: Record<string, unknown>, mayQuery: boolean): GateUnitResult {
     if (s.description === null) return refusal('not_described', `${s.name} has not been described yet, so crew has no structure for it`, { remedy: 'a person tests its connection on the source sheet' });
     const catalog = s.description.catalog as SqlCatalog;
-    const st = agentStructure(catalog, s.viewsAllowed);
     const wanted = typeof args['table_names'] === 'string' && args['table_names'].trim() !== '' ? new Set(args['table_names'].split(',').map((x) => x.trim())) : null;
+    // Select before bounding so a named relation past the catalog cut can still be read.
+    const selected = wanted === null ? catalog : { ...catalog, relations: catalog.relations.filter((r) => wanted.has(r.name) || wanted.has(r.schema === null ? r.name : `${r.schema}.${r.name}`)) };
+    const st = agentStructure(selected, s.viewsAllowed);
     // Row estimates only when agents may query the source: with query off, even a small count is row content.
-    const relations = st.relations
-      .filter((r) => wanted === null || wanted.has(r.name) || wanted.has(r.table))
-      .map((r) => {
-        if (mayQuery) return r;
-        const rest: Partial<typeof r> = { ...r };
-        delete rest.rowEstimate;
-        return rest;
-      });
+    const relations = st.relations.map((r) => {
+      if (mayQuery) return r;
+      const rest: Partial<typeof r> = { ...r };
+      delete rest.rowEstimate;
+      return rest;
+    });
     return {
       ok: true,
       isError: false,
@@ -405,8 +408,9 @@ export class DataGate {
         query: mayQuery,
         relations,
         notListed: st.notListed,
+        rules: readRules(catalog.dialect),
         howToQuery: mayQuery
-          ? `mcp:${s.name}/execute_sql {"sql", "params"?}: ONE read-only SELECT over the relations above (${st.dialect === 'postgres' ? 'schema-qualified: schema.table' : 'tables named as listed'}), built-in functions only${s.runtime === 'native' ? '; $1 placeholders bind params' : ''}.`
+          ? `mcp:${s.name}/execute_sql {"sql", "params"?}: ONE read-only SELECT over the relations above (${st.dialect === 'postgres' ? 'schema-qualified: schema.table' : 'tables named as listed'}), built-in functions only${s.runtime === 'native' ? `; ${st.dialect === 'postgres' ? '$1' : '?'} placeholders bind params` : ''}.`
           : 'agents may not query this source: a person turns on "Agents can query this source" on its sheet',
       },
     };

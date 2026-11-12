@@ -102,3 +102,10 @@ export function sqliteParams(text: string): { ok: true; count: number } | { ok: 
   if (first === null) return { ok: false, code: 'not_select', detail: 'an empty statement' };
   return { ok: true, count };
 }
+
+/** A hint in crew's words for a WITH read refused by SQLite's authorizer. */
+export function sqliteCteHint(text: string): string | null {
+  return /^\s*(?:(?:--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)\s*)*WITH\b/i.test(text)
+    ? 'a WITH clause that reads a table is refused here (use a subquery in FROM)'
+    : null;
+}

@@ -598,3 +598,13 @@ async function startHttpUpstream(seen: Array<string | undefined>, expected: stri
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
   return server;
 }
+
+
+describe('crew reserves the Apps self-check server', () => {
+  it('refuses apps at preview and snapshot registration', async () => {
+    const preview = await call('POST', '/mcp/servers/preview', stdioConfig({ name: 'apps' }));
+    expect(preview.statusCode).toBe(400);
+    expect(preview.json()).toMatchObject({ code: 'reserved_name', error: expect.stringContaining("mcp:apps/<tool> is crew's own Apps self-check") });
+    await expect(registry.registerSnapshotSource('apps', 'digest', { catalog: { dialect: 'sqlite', database: 'test', describedAt: '2026-11-12T00:00:00Z', relations: [] } })).rejects.toMatchObject({ code: 'reserved_name', message: expect.stringContaining("mcp:apps/<tool> is crew's own Apps self-check") });
+  });
+});

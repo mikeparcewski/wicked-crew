@@ -15,6 +15,7 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { canonicalJson } from '../mcp/classify.js';
 import type { CatalogRelation, SqlCatalog } from './catalog/types.js';
 import { STATEMENT_DEADLINE_MS } from './drivers/types.js';
+import { readRules } from './policy/rules.js';
 
 /** The draft step's id in its one-step run. */
 export const ASK_STEP_ID = 'draft-1';
@@ -210,6 +211,7 @@ export function askStructure(
   catalog: SqlCatalog,
   viewsAllowed: readonly string[],
   question?: string,
+  budget: { structureChars: number; outlineChars: number; namesChars: number } = { structureChars: ASK_STRUCTURE_CHARS, outlineChars: ASK_OUTLINE_CHARS, namesChars: ASK_NAMES_CHARS },
 ): { dialect: SqlCatalog['dialect']; database: string | null; relations: SeatRelation[]; others?: SeatOutline[]; othersByName?: SeatName[]; notListed: number } {
   const allowed = new Set(viewsAllowed);
   const readable = catalog.relations.filter((r) => fits(r.schema) && fits(r.name) && (r.kind === 'table' || r.kind === 'partitioned' || ((r.kind === 'view' || r.kind === 'matview') && allowed.has(qualified(r.schema, r.name)))));
@@ -222,7 +224,7 @@ export function askStructure(
       if (relations.length >= ASK_RELATIONS_MAX) break;
       const sr = seatRelation(r);
       const n = arrayAdds(JSON.stringify(sr).length, relations.length);
-      if (size + n > ASK_STRUCTURE_CHARS) break;
+      if (size + n > budget.structureChars) break;
       size += n;
       relations.push(sr);
     }
@@ -233,7 +235,7 @@ export function askStructure(
     if (relations.length >= ASK_RELATIONS_MAX) break;
     const sr = seatRelation(r);
     const n = arrayAdds(JSON.stringify(sr).length, relations.length);
-    if (size + n > ASK_STRUCTURE_CHARS) continue; // one oversize relation must not hide smaller ones
+    if (size + n > budget.structureChars) continue; // one oversize relation must not hide smaller ones
     size += n;
     relations.push(sr);
     detailed.add(r);
@@ -249,7 +251,7 @@ export function askStructure(
     if (!outlineFull) {
       const o: SeatOutline = { schema: r.schema, name: r.name, table: qualified(r.schema, r.name), columns: r.columns.filter((c) => fits(c.name)).slice(0, ASK_COLUMNS_MAX).map((c) => c.name) };
       const n = arrayAdds(JSON.stringify(o).length, others.length);
-      if (outlineSize + n <= ASK_OUTLINE_CHARS) {
+      if (outlineSize + n <= budget.outlineChars) {
         outlineSize += n;
         others.push(o);
         continue;
@@ -258,22 +260,13 @@ export function askStructure(
     }
     const nm: SeatName = { schema: r.schema, name: r.name };
     const n = arrayAdds(JSON.stringify(nm).length, othersByName.length);
-    if (namesSize + n <= ASK_NAMES_CHARS) {
+    if (namesSize + n <= budget.namesChars) {
       namesSize += n;
       othersByName.push(nm);
     } else notListed += 1;
   }
   return { dialect: catalog.dialect, database, relations, others, othersByName, notListed };
 }
-
-const DIALECT_RULES: Record<SqlCatalog['dialect'], string[]> = {
-  postgres: [
-    'Name every table with its schema, exactly as listed (schema.table).',
-    "Use built-in functions and operators only. Compare an enum column with a plain string literal (status = 'open'); never cast to a type from the source's own schemas.",
-  ],
-  mysql: ['Name tables as listed (database.table, or the table alone).', 'Use built-in functions only; no stored functions, no variables.'],
-  sqlite: ['Name tables as listed, unqualified.', 'Use built-in functions only.'],
-};
 
 /** The seat's instructions: the question, the structure (fenced as data), the rules, the answer's shape. */
 export function askPrompt(question: string, catalog: SqlCatalog, viewsAllowed: readonly string[]): string {
@@ -283,9 +276,9 @@ export function askPrompt(question: string, catalog: SqlCatalog, viewsAllowed: r
     'You get the source\'s STRUCTURE only (no rows). Do not open, run, search or edit anything: no tool at all; answer from what is below.',
     '',
     'Rules for the query:',
-    '- Exactly one SELECT statement (a WITH ... SELECT is fine; no recursion). Nothing that changes data or the schema, no locking clause, no INTO.',
+    `- Exactly one SELECT statement${catalog.dialect === 'sqlite' ? ' (no recursion)' : ' (a WITH ... SELECT is fine; no recursion)'}. Nothing that changes data or the schema, no locking clause, no INTO.`,
     '- Only the tables and columns listed below, in `relations`, `others` or `othersByName`. A table in `othersByName` has no columns listed: use it only with columns the question itself names.',
-    ...DIALECT_RULES[catalog.dialect].map((r) => `- ${r}`),
+    ...readRules(catalog.dialect).map((r) => `- ${r}`),
     '- No parameters: write any value the question names as a literal.',
     `- The person sees at most ${ASK_ROW_CAP} rows: prefer an aggregate when the question asks how many, and add an ORDER BY with a LIMIT when it asks for a list.`,
     '',

@@ -47,7 +47,7 @@ import type {
   McpUpstreamKind,
 } from '../core/types.js';
 import type { McpEngineGate } from '../core/adapter.js';
-import { ESTATE_SERVER, parseMcpSubject } from './classify.js';
+import { APPS_SERVER, ESTATE_SERVER, parseMcpSubject } from './classify.js';
 import type { McpCallRecordSink } from './call-records.js';
 import {
   classifyUpstreamError,
@@ -75,6 +75,7 @@ import {
   type EstateRelay,
   type VisibleRelease,
 } from './estate-relay.js';
+import type { AppsSelfCheck } from '../apps/self-check.js';
 import { type DataGate, GateTokenError } from '../knowledge/gate/gate.js';
 
 /** The bus event each call record rides. */
@@ -145,6 +146,8 @@ export interface McpBrokerDeps {
   log?: (message: string) => void;
   /** The estate relay behind `mcp:estate/<tool>` (wicked-core#1018); absent = those calls are refused. */
   estate?: EstateRelay;
+  /** The builder's advisory Apps check; absent = those calls are refused. */
+  apps?: AppsSelfCheck;
   /**
    * (DES-KNOWLEDGE-DATA-001 §7) The data gate: a subject whose server is a live source (`mcp:<source>/<tool>`)
    * goes through it, never to the registry's upstream path. Absent = those subjects take the registry path,
@@ -224,6 +227,7 @@ export class McpBroker {
     if (parts === null) return { status: 400, body: { error: `subject must be mcp:<server>/<tool> (got ${JSON.stringify(body.subject)})`, code: 'bad_request' } };
     const span: Span = { start: this.now(), spanId: randomBytes(8).toString('hex'), subject: body.subject, verdict: null, kind: null, retries: 0, bytesOut: 0 };
     if (parts.server === ESTATE_SERVER) return this.callEstate(span, body, parts.tool);
+    if (parts.server === APPS_SERVER) return this.callApps(span, body, parts.tool);
     // ── The gate step (DES-KNOWLEDGE-DATA-001 §7): a live source is never reached as a plain upstream. ──
     if (this.deps.gate !== undefined) {
       let gated: boolean;
@@ -502,6 +506,49 @@ export class McpBroker {
       if (proposalId !== null) relay.landed({ ...scope.unit, proposalId, kindType, callId: span.spanId });
     }
     return { status: 200, body: { outcome: 'ok', subject: body.subject, callId: span.spanId, result: scrubbed, ruleIds: [] } };
+  }
+
+  /** crew's own advisory Apps check, under the unit's fence and MCP budget. */
+  private async callApps(span: Span, body: McpCallBody, tool: string): Promise<McpBrokerAnswer> {
+    const apps = this.deps.apps;
+    if (apps === undefined) return this.refuse(span, 'guard_error', 'guard_error', 'broker:apps', [], 'this daemon has no Apps self-check', 'continue to the check step');
+    let unit: Awaited<ReturnType<AppsSelfCheck['resolve']>>;
+    try {
+      unit = await apps.resolve(body.token);
+    } catch (err) {
+      const msg = message(err);
+      if (msg.startsWith('invalid_token')) return { status: 401, body: { error: msg, code: 'invalid_token' } };
+      return this.refuse(span, 'guard_error', 'guard_error', 'broker:apps', [], "the token's unit could not be read", 'nothing ran; try again');
+    }
+    span.kind = 'mcp-stdio';
+    span.verdict = { decision: 'allow', subject: body.subject, class: 'read', ruleIds: [], obligations: [], claimId: '', unit };
+    if (await this.fenced(unit.runId)) return this.refuse(span, 'denied', 'deny', FENCE_RULE, [FENCE_RULE], FENCE_REASON, FENCE_REMEDY, null, null);
+    if (tool !== 'check') return this.refuse(span, 'denied', 'deny', 'broker:apps', [], 'the Apps self-check has only one tool: check', 'call mcp:apps/check');
+    const unitKey = `${unit.runId}:${unit.ord}:${unit.attempt}`;
+    const used = this.used.get(unitKey) ?? 0;
+    if (used >= this.budget) return this.refuse(span, 'budget_exhausted', 'deny', 'budget', [], `this unit has made its ${this.budget} MCP calls`, 'finish with what you have; the budget is per unit', null, null);
+    this.used.delete(unitKey);
+    this.used.set(unitKey, used + 1);
+    while (this.used.size > BUDGET_UNITS_MAX) this.used.delete(this.used.keys().next().value as string);
+    let result: Record<string, unknown>;
+    try {
+      result = scrubResult(await apps.run(body.token, body.args ?? {}), []);
+    } catch (err) {
+      const msg = message(err);
+      if (msg.startsWith('invalid_token')) return { status: 401, body: { error: msg, code: 'invalid_token' } };
+      this.deps.log?.(`[mcp] ${body.subject} failed: ${msg}`);
+      return this.refuse(span, 'guard_error', 'guard_error', 'broker:apps', [], 'the Apps self-check could not run', 'nothing was written; try again');
+    }
+    span.bytesOut = Buffer.byteLength(JSON.stringify(result), 'utf8');
+    const record = this.record(span, 'ok', 'allow', 'broker:apps', [], null, null);
+    try {
+      await this.deps.records.append(record);
+    } catch (err) {
+      this.deps.log?.(`[mcp] the call record for ${body.subject} could not be written (${message(err)}); its result is withheld`);
+      return { status: OUTCOME_STATUS.guard_error, body: { outcome: 'guard_error', subject: body.subject, callId: null, ruleIds: [], reason: 'the call could not be recorded (D-3); its result is withheld', remedy: 'the call ran; its result is not shown' } };
+    }
+    this.publish(record);
+    return { status: 200, body: { outcome: 'ok', subject: body.subject, callId: span.spanId, result, ruleIds: [] } };
   }
 
   /**
