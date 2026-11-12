@@ -24,7 +24,7 @@ import { probeMcpServer } from '../src/mcp/probe.js';
 import { McpRegistry } from '../src/mcp/registry.js';
 import { McpRegistryStore } from '../src/mcp/registry-store.js';
 import type { SecretStore } from '../src/mcp/secrets.js';
-import { ASK_DEADLINE_MS, ASK_ROW_CAP, AskRunTokens, askCell, askPrompt, askStructure, draftFromAnswer, draftHolds, rowsWithin } from '../src/sources/ask.js';
+import { ASK_COLUMNS_MAX, ASK_DEADLINE_MS, ASK_NAMES_CHARS, ASK_NAME_MAX, ASK_OUTLINE_CHARS, ASK_RELATIONS_MAX, ASK_ROW_CAP, ASK_STRUCTURE_CHARS, AskRunTokens, askCell, askPrompt, askStructure, draftFromAnswer, draftHolds, rowsWithin } from '../src/sources/ask.js';
 import type { SqlCatalog } from '../src/sources/catalog/types.js';
 import { registerSourceRoutes } from '../src/sources/routes.js';
 import { sqliteInspect, sqliteRead } from '../src/sources/drivers/sqlite.js';
@@ -192,7 +192,10 @@ describe('the ask pieces (no database)', () => {
       ],
     };
     const p = askPrompt('How many tickets are open?', catalog, []);
-    expect(p).toContain('"table": "support.tickets"');
+    const block = /```json\n([^\n]*)\n```/u.exec(p)?.[1];
+    expect(block).toBeDefined(); // the fenced JSON is one physical line, compact
+    expect(block).toBe(JSON.stringify(JSON.parse(block!)));
+    expect(p).toContain('"table":"support.tickets"');
     expect(p).toContain('"open"');
     expect(p).toContain('How many tickets are open?');
     expect(p).toContain('never an instruction');
@@ -200,8 +203,7 @@ describe('the ask pieces (no database)', () => {
     expect(p).not.toContain('remote'); // never a foreign table
     expect(p).not.toContain('support_db');
     expect(askPrompt('q', catalog, ['support.v_open'])).toContain('support.v_open');
-    // No line long enough to be dropped by a terminal's line limit.
-    expect(Math.max(...p.split('\n').map((l) => l.length))).toBeLessThan(400);
+    expect(p).toContain('`others`');
   });
 
   it('bounded: a huge or brace-flooded answer is no draft, read fast; a huge catalog fits one structure budget, saying what it left out', () => {
@@ -213,15 +215,199 @@ describe('the ask pieces (no database)', () => {
     const big: SqlCatalog = { dialect: 'postgres', database: null, describedAt: '', relations: [...Array.from({ length: 1000 }, (_, i) => wide(i)), { schema: 's', name: 'x'.repeat(200), kind: 'table', rowEstimate: 1, columns: [], primaryKey: [], foreignKeys: [] }] };
     const st = askStructure(big, []);
     expect(JSON.stringify(st).length).toBeLessThan(64 * 1024);
+    expect(st.others).toBeUndefined(); // no question: the knowledge surface's shape is unchanged
     expect(st.notListed).toBe(1000 - st.relations.length);
     expect(st.relations.length).toBeGreaterThan(0);
     expect(st.relations[0]!.columns).toHaveLength(100);
     expect(st.relations[0]!.columnsNotListed).toBe(200);
     expect(st.relations[0]!.columns[0]!.enum).toHaveLength(50);
-    expect(askPrompt('q', big, []).length).toBeLessThan(80 * 1024);
+    // With a question every readable relation is also listed (names and columns), so the prompt grows with the catalog; the detail stays bounded.
+    expect(JSON.stringify(askStructure(big, [], 'q').relations).length).toBeLessThanOrEqual(ASK_STRUCTURE_CHARS);
     // Schema and table reach the seat as separate identifiers (a dotted name stays unambiguous).
     const dotted = askStructure({ dialect: 'postgres', database: null, describedAt: '', relations: [{ schema: 'a.b', name: 'c', kind: 'table', rowEstimate: 1, columns: [], primaryKey: [], foreignKeys: [{ name: 'f', columns: ['x'], references: { schema: 'a', table: 'b.c', columns: ['y'] } }] }] }, []);
     expect(dotted.relations[0]).toMatchObject({ schema: 'a.b', name: 'c', foreignKeys: [{ references: { schema: 'a', table: 'b.c', columns: ['y'] } }] });
+  });
+
+  describe('a question chooses the detail; every readable table stays listed', () => {
+    type Rel = SqlCatalog['relations'][number];
+    const rel = (schema: string, name: string, cols: string[] = ['id'], extra: Partial<Rel> = {}): Rel => ({ schema, name, kind: 'table', rowEstimate: 1, columns: cols.map((c) => ({ name: c, type: 'text', nullable: true })), primaryKey: ['id'], foreignKeys: [], ...extra });
+    const cat = (relations: Rel[]): SqlCatalog => ({ dialect: 'postgres', database: null, describedAt: '', relations });
+    const filler = (n: number, schema = 'a', cols = 20): Rel[] => Array.from({ length: n }, (_, i) => rel(schema, `filler_${String(i).padStart(3, '0')}`, Array.from({ length: cols }, (_, j) => `column_${j}`)));
+    type St = ReturnType<typeof askStructure>;
+    const detail = (st: St): number => JSON.stringify(st.relations).length;
+    const names = (st: St): string[] => [...st.relations.map((r) => r.table), ...(st.others ?? []).map((o) => o.table), ...(st.othersByName ?? []).map((o) => `${o.schema}.${o.name}`)];
+    const fenced = (p: string): St => JSON.parse(/```json\n([^\n]*)\n```/u.exec(p)![1]!) as St;
+
+    const late = (): SqlCatalog =>
+      cat([
+        ...filler(72),
+        { ...rel('work', 'case_record', ['id', 'status', 'closed_at']), columns: [{ name: 'id', type: 'uuid', nullable: false }, { name: 'status', type: 'work.case_status', nullable: false, enumValues: ['open', 'closed'] }, { name: 'closed_at', type: 'timestamptz', nullable: true }] },
+      ]);
+
+    it('the table the question needs sorts last in a catalog past the budget and still gets full detail', () => {
+      const c = late();
+      expect(c.relations.reduce((n, r) => n + JSON.stringify(r).length, 0)).toBeGreaterThan(ASK_STRUCTURE_CHARS);
+      expect(askStructure(c, []).relations.some((r) => r.table === 'work.case_record')).toBe(false); // catalog order cuts it
+      const q = 'how many tickets are open?';
+      for (const st of [askStructure(c, [], q), fenced(askPrompt(q, c, []))]) {
+        const t = st.relations.find((r) => r.table === 'work.case_record');
+        expect(t).toBeDefined();
+        expect(t!.columns.find((x) => x.name === 'status')).toMatchObject({ type: 'work.case_status', enum: ['open', 'closed'] });
+        expect(t!.primaryKey).toEqual(['id']);
+        expect(detail(st)).toBeLessThanOrEqual(ASK_STRUCTURE_CHARS);
+      }
+    });
+
+    it('relations left out of the detail still appear by name with their columns; nothing is lost or repeated', () => {
+      const c = late();
+      const st = askStructure(c, [], 'how many tickets are open?');
+      expect(st.relations.length).toBeLessThan(c.relations.length);
+      expect(names(st).sort()).toEqual(c.relations.map((r) => `${r.schema}.${r.name}`).sort());
+      expect(new Set(names(st)).size).toBe(names(st).length);
+      expect(st.notListed).toBe(0);
+      const detailed = new Set(st.relations.map((r) => r.table));
+      const outside = c.relations.filter((r) => !detailed.has(`${r.schema}.${r.name}`));
+      expect(st.others).toHaveLength(outside.length);
+      for (const [i, o] of st.others!.entries()) expect(o.columns).toEqual(outside[i]!.columns.map((x) => x.name));
+    });
+
+    it('the 73-table late-sorting catalog keeps columns for every relation outside the detail, notListed 0', () => {
+      const wide = cat([...filler(73, 'a', 20), rel('z', 'last', ['id', 'c'])]);
+      const w = askStructure(wide, [], 'zzz');
+      const detailed = new Set(w.relations.map((r) => r.table));
+      const outside = wide.relations.filter((r) => !detailed.has(`${r.schema}.${r.name}`));
+      expect(outside.length).toBeGreaterThan(0);
+      expect(w.others!.map((o) => o.table)).toEqual(outside.map((r) => `${r.schema}.${r.name}`));
+      for (const [i, o] of w.others!.entries()) expect(o.columns).toEqual(outside[i]!.columns.slice(0, ASK_COLUMNS_MAX).map((x) => x.name));
+      expect(w.othersByName).toEqual([]);
+      expect(w.notListed).toBe(0);
+      const st = askStructure(late(), [], 'how many tickets are open?');
+      expect(st.notListed).toBe(0);
+      expect(st.othersByName).toEqual([]);
+    });
+
+    it('a 3,000-table catalog: the relevant table is detailed, the three tiers stay in their budgets, the remainder is counted', () => {
+      const c = cat([...Array.from({ length: 3000 }, (_, i) => rel('s', `t${String(i).padStart(4, '0')}`, ['id', 'a', 'b'])), { ...rel('work', 'case_record', ['id', 'status']), columns: [{ name: 'id', type: 'uuid', nullable: false }, { name: 'status', type: 'text', nullable: false, enumValues: ['open'] }] }]);
+      const st = askStructure(c, [], 'how many tickets are open?');
+      expect(st.relations.map((r) => r.table)).toContain('work.case_record');
+      expect(detail(st)).toBeLessThanOrEqual(ASK_STRUCTURE_CHARS);
+      expect(JSON.stringify(st.others).length).toBeLessThanOrEqual(ASK_OUTLINE_CHARS);
+      expect(JSON.stringify(st.othersByName).length).toBeLessThanOrEqual(ASK_NAMES_CHARS);
+      expect(st.othersByName!.length).toBeGreaterThan(0);
+      expect(st.notListed).toBeGreaterThan(0);
+      expect(names(st).length + st.notListed).toBe(3001);
+      expect(new Set(names(st)).size).toBe(names(st).length);
+      expect(JSON.stringify(st).length).toBeLessThanOrEqual(ASK_STRUCTURE_CHARS + ASK_OUTLINE_CHARS + ASK_NAMES_CHARS + 1024);
+      // Past ASK_RELATIONS_MAX the detail stops at the cap; everything else is still listed in the tiers.
+      expect(st.relations.length).toBeLessThanOrEqual(ASK_RELATIONS_MAX);
+    });
+
+    it('no tier ever goes over its budget: catalogs landing exactly on each budget emit exactly that many characters', () => {
+      const pad = (i: number): string => String(i).padStart(4, '0');
+      const heads = (n: number): Rel[] => Array.from({ length: n }, (_, i) => rel('s', `h${pad(i)}`, []));
+      const mid = (n: number, cols: number, prefix: string): Rel[] => Array.from({ length: n }, (_, i) => rel('s', `${prefix}${pad(i)}`, Array.from({ length: cols }, (_, j) => `c_${j}`)));
+      // The name counts twice in a relation's JSON (name and table), so a name pad moves the size by 2; an odd pad goes on a column name (or, with no columns, the schema) to reach every size.
+      const last = (k: number, cols: number): Rel => rel(cols === 0 ? `s${'y'.repeat(k % 2)}` : 's', `L${'x'.repeat(Math.floor(k / 2))}`, Array.from({ length: cols }, (_, j) => `c_${j}${j === 0 ? 'y'.repeat(k % 2) : ''}`));
+      const tiers: Array<{ budget: number; build: (m: number, k: number) => Rel[]; emitted: (st: St) => string; count: (st: St) => number }> = [
+        { budget: ASK_STRUCTURE_CHARS, build: (m, k) => [...mid(m, 5, 'd'), last(k, 5)], emitted: (st) => JSON.stringify(st.relations), count: (st) => st.relations.filter((r) => r.name.startsWith('d')).length },
+        { budget: ASK_OUTLINE_CHARS, build: (m, k) => [...heads(ASK_RELATIONS_MAX), ...mid(m, 3, 'o'), last(k, 3)], emitted: (st) => JSON.stringify(st.others), count: (st) => st.others!.filter((o) => o.name.startsWith('o')).length },
+        { budget: ASK_NAMES_CHARS, build: (m, k) => [...heads(ASK_RELATIONS_MAX), ...mid(100, 100, 'w'), ...mid(m, 0, 'n'), last(k, 0)], emitted: (st) => JSON.stringify(st.othersByName), count: (st) => st.othersByName!.filter((o) => o.name.startsWith('n')).length },
+      ];
+      for (const t of tiers) {
+        const probe = askStructure(cat(t.build(1500, 0)), [], 'zzz');
+        expect(t.emitted(probe).length).toBeLessThanOrEqual(t.budget);
+        const m = t.count(probe) - 1;
+        expect(m).toBeGreaterThan(10);
+        let landed = false;
+        for (let k = 0; k < 600 && !landed; k += 1) {
+          const len = t.emitted(askStructure(cat(t.build(m, k)), [], 'zzz')).length;
+          expect(len).toBeLessThanOrEqual(t.budget);
+          landed = len === t.budget;
+          if (landed) expect(t.emitted(askStructure(cat(t.build(m, k + 1)), [], 'zzz')).length).toBeLessThanOrEqual(t.budget); // one character over: left out, never emitted past it
+        }
+        expect({ budget: t.budget, landed }).toEqual({ budget: t.budget, landed: true });
+      }
+    });
+
+    it('a dotted identifier pair stays two distinct entries (schema and name carried separately)', () => {
+      const st = askStructure(cat([...filler(80, 'q', 100), rel('a.b', 'c'), rel('a', 'b.c')]), [], 'zzz');
+      const dots = [...st.relations, ...st.others!, ...st.othersByName!].filter((o) => o.schema === 'a.b' || o.schema === 'a');
+      expect(dots.map((o) => [o.schema, o.name])).toEqual([['a.b', 'c'], ['a', 'b.c']]);
+    });
+
+    it('matches relation names above column names, stems plurals, and knows customer ~ account', () => {
+      const first = (rels: Rel[], q: string) => askStructure(cat(rels), [], q).relations.map((r) => r.table)[0];
+      const byName = askStructure(cat([...filler(3), rel('a', 'zzz_other', ['order_id']), rel('a', 'zzz_orders', ['id'])]), [], 'orders');
+      expect(byName.relations.slice(0, 2).map((r) => r.table)).toEqual(['a.zzz_orders', 'a.zzz_other']);
+      expect(first([rel('a', 'x1'), rel('a', 'payments')], 'payment')).toBe('a.payments');
+      expect(first([rel('a', 'x1'), rel('a', 'accounts')], 'which customers?')).toBe('a.accounts');
+      expect(first([rel('a', 'accounts'), rel('a', 'customers')], 'customers')).toBe('a.customers'); // a direct word outranks a synonym
+    });
+
+    it('brings the foreign-key neighbours of the best match ahead of filler, by schema and table, not bare name', () => {
+      const rels = [
+        ...filler(5),
+        rel('x', 'parent'),
+        rel('y', 'parent'),
+        rel('a', 'child_of_thing', ['id', 'widget_id'], { foreignKeys: [{ name: 'f', columns: ['widget_id'], references: { schema: 'a', table: 'widget', columns: ['id'] } }] }),
+        rel('a', 'widget', ['id', 'parent_id'], { foreignKeys: [{ name: 'f', columns: ['parent_id'], references: { schema: 'y', table: 'parent', columns: ['id'] } }] }),
+      ];
+      const order = askStructure(cat(rels), [], 'widget').relations.map((r) => r.table);
+      expect(order[0]).toBe('a.widget');
+      expect(order.indexOf('a.child_of_thing')).toBe(1); // incoming neighbour
+      expect(order.indexOf('y.parent')).toBe(2); // outgoing neighbour
+      expect(order.indexOf('x.parent')).toBeGreaterThan(order.indexOf('a.filler_004')); // the same bare name in another schema is no neighbour
+    });
+
+    it('an empty, stopword-only or unmatched question keeps catalog order', () => {
+      const c = cat(filler(4));
+      for (const q of ['', 'how many are the', 'zzz qqq']) expect(askStructure(c, [], q).relations.map((r) => r.table)).toEqual(askStructure(c, []).relations.map((r) => r.table));
+    });
+
+    it('only readable relations are listed, even when they match; a long name is left out of both tiers', () => {
+      const c = cat([
+        ...filler(80, 'a', 100),
+        rel('a', 'invoice_t'),
+        rel('a', 'invoice_p', ['id'], { kind: 'partitioned' }),
+        rel('a', 'invoice_v', ['id'], { kind: 'view' }),
+        rel('a', 'invoice_m', ['id'], { kind: 'matview' }),
+        rel('a', 'invoice_f', ['id'], { kind: 'foreign' }),
+        rel('a', 'n'.repeat(ASK_NAME_MAX), ['id']),
+        rel('a', 'n'.repeat(ASK_NAME_MAX + 1), ['id']),
+        rel('a', 'okay', ['c'.repeat(ASK_NAME_MAX), 'd'.repeat(ASK_NAME_MAX + 1)]),
+      ]);
+      const st = askStructure(c, ['a.invoice_m'], 'invoices okay');
+      const all = names(st);
+      for (const t of ['a.invoice_t', 'a.invoice_p', 'a.invoice_m', `a.${'n'.repeat(ASK_NAME_MAX)}`]) expect(all).toContain(t);
+      for (const t of ['a.invoice_v', 'a.invoice_f', `a.${'n'.repeat(ASK_NAME_MAX + 1)}`]) expect(all).not.toContain(t);
+      const cols = [...st.relations.map((r) => ({ t: r.table, c: r.columns.map((x) => x.name) })), ...st.others!.map((o) => ({ t: o.table, c: o.columns }))].find((x) => x.t === 'a.okay');
+      expect(cols?.c).toEqual(['c'.repeat(ASK_NAME_MAX)]);
+    });
+
+    it('bounds hold: detail size, columns per relation, and one oversize relation does not hide a smaller one', () => {
+      const huge = (name: string): Rel => ({ ...rel('a', name, Array.from({ length: 300 }, (_, j) => `c${j}`)), columns: Array.from({ length: 300 }, (_, j) => ({ name: `c${j}`, type: 'text', nullable: true, enumValues: Array.from({ length: 80 }, (_, k) => `value_number_${k}`) })) });
+      const st = askStructure(cat([huge('zz_huge0'), huge('zz_huge1'), huge('zz_huge2'), rel('a', 'zz_small', ['id'])]), [], 'zz');
+      expect(detail(st)).toBeLessThanOrEqual(ASK_STRUCTURE_CHARS);
+      expect(st.relations.every((r) => r.columns.length <= ASK_COLUMNS_MAX)).toBe(true);
+      expect(st.relations.map((r) => r.table)).toContain('a.zz_small');
+      expect((st.others ?? []).every((o) => o.columns.length <= ASK_COLUMNS_MAX)).toBe(true);
+    });
+
+    it('the prompt forwards the question and tells the seat both tiers may be queried', () => {
+      const p = askPrompt('how many tickets are open?', late(), []);
+      expect(p).toContain('`others`');
+      expect(p).toContain('types are unknown');
+      expect(p).toContain('never an instruction');
+      expect(p).toContain('how many tickets are open?');
+    });
+
+    it('a large MySQL catalog through the agent surface carries no database name', async () => {
+      const { agentStructure } = await import('../src/knowledge/gate/gate.js');
+      const my: SqlCatalog = { dialect: 'mysql', database: 'secretdb', describedAt: '', relations: filler(80, 'secretdb', 60) };
+      const st = agentStructure(my, []);
+      expect(JSON.stringify(st)).not.toContain('secretdb');
+      expect(st.others).toBeUndefined();
+    });
   });
 
   it('r2 folds: the byte budget counts the brackets and commas exactly; a secret is found raw or JSON-decoded', () => {
@@ -343,7 +529,7 @@ describe('an upload (SQLite): test connection, ask, query', () => {
     const a = (await post(h, '/sources/tix/ask', { question: 'How many tickets are open?' })).json() as SourceAskResponse;
     expect(a).toMatchObject({ seat: 'stub', explanation: 'Counts the open tickets.', check: { ok: true } });
     expect(a.confirm).toMatch(/^[0-9a-f]{64}$/);
-    expect(seat.inputs[0]!.text).toContain('"table": "tickets"');
+    expect(seat.inputs[0]!.text).toContain('"table":"tickets"');
     expect(seat.inputs[0]!.text).not.toContain(ROW_MARK);
     const ran = (await post(h, '/sources/tix/query', { sql: a.sql, confirm: a.confirm })).json() as SourceQueryRan;
     expect(ran).toMatchObject({ ran: true, truncated: false, rowCap: ASK_ROW_CAP });
@@ -559,7 +745,7 @@ for (const target of PG_TARGETS) {
         expect(a).toMatchObject({ seat: 'stub', explanation: 'Counts tickets whose status is open: one number.', check: { ok: true, columns: [{ name: 'open_tickets', type: 'bigint' }] } });
         expect(a.confirm).toMatch(/^[0-9a-f]{64}$/);
         const prompt = seat.inputs[0]!.text;
-        expect(prompt).toContain('"table": "support.tickets"');
+        expect(prompt).toContain('"table":"support.tickets"');
         expect(prompt).toContain('"closed"'); // the declared enum literals
         expect(prompt).toContain('How many tickets are open?');
         for (const leak of [ROW_MARK, PASSWORD, '127.0.0.1', db.database, String(db.port)]) expect(prompt).not.toContain(leak);
@@ -613,7 +799,7 @@ for (const target of PG_TARGETS) {
         const prompt = (): string => seat.inputs.at(-1)!.text;
         const a = (await post(h, '/sources/support/ask', { question: 'How many tickets are open?' })).json() as SourceAskResponse;
         expect(prompt()).toContain(JSON.stringify(`support.${INJECTED_TABLE}`).slice(1, -1)); // the names reached it, as data (JSON-escaped)
-        expect(prompt()).toContain('"name": "DROP TABLE support.tickets; --"');
+        expect(prompt()).toContain('"name":"DROP TABLE support.tickets; --"');
         expect(a.sql).toBe('DROP TABLE support.tickets');
         expect(a.check).toMatchObject({ ok: false, code: 'not_select' });
         expect(a.confirm).toBeNull();
@@ -852,7 +1038,7 @@ for (const target of MYSQL_TARGETS) {
     it('test connection, then ask: drafted from the structure, checked by the MySQL read policy, run READ ONLY with the cap; human-only', async () => {
       const seat = stubSeat((input) => {
         const text = String(input.instructions);
-        return text.includes('"table": "' + db.database + '.refunds"')
+        return text.includes('"table":"' + db.database + '.refunds"')
           ? `{"sql": "SELECT count(*) AS pending FROM ${db.database}.refunds WHERE status = 'pending'", "explanation": "Counts pending refunds."}`
           : '{"sql": "", "explanation": "no refunds table"}';
       });

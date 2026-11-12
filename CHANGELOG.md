@@ -27,6 +27,13 @@ mentioned only where a daemon release depends on them.
   directory (`~`), the sanitizer now rewrites the temp directory and the macOS per-user temp folders
   (`/private/var/folders/…`, `/var/folders/…`, `/private/tmp`, `/tmp`) to `<tmp>` and the daemon's state home to
   `<state-home>`; a link keeps its label. A longer sibling path is never touched.
+- Ask a question of a large SQL source no longer cuts the tables that sort last (#1513). The full detail (types,
+  keys, enum literals) goes first to the tables the question's words match (plain stemming, a small synonym list
+  such as ticket/case/issue and customer/account) and their foreign-key neighbours, not to the first tables in
+  catalog order. The other readable tables follow in the same order: with their schema, name and column names
+  (`others`, up to 48 KB), then by schema and name only (`othersByName`, up to 24 KB); `notListed` counts what fits
+  neither. A catalog of about 100 tables of about 12 columns is listed whole. The structure in the prompt is compact
+  JSON. The existing `ASK_*` bounds hold; no new setting. The knowledge surface's structure is unchanged.
 
 ## [0.18.10] — 2026-11-11
 
