@@ -9,7 +9,8 @@
  *  4. the source's descriptor hash and the query's contract hash, recomputed NOW from the stored catalog,
  *     the registry or the introspection, equal the lock's; the read policy passes again;
  *  5. the read, through the dialer, the secret resolved now: READ ONLY, the 10 s deadline at the source,
- *     4 per source per app at once (queue 16, then 429), 60 a minute per viewer;
+ *     4 per source per app at once (queue 16, then 429), 60 page views or actions a minute per viewer
+ *     (a view's distinct queries within 10 s count once, up to the app's declared query count);
  *  6. rows projected to the declared columns, coerced and validated, the more path read, secrets scrubbed;
  *     a call record (who, app, version, query, ms, rows, bytes; never the rows).
  *
@@ -163,7 +164,7 @@ export class AppExecutor {
     // rotated are never served under the new one (codex r1); it is never stored.
     const secret = await this.secret(plan);
     try {
-      this.limits.rate('query', input.app, input.actor.id);
+      this.limits.rateQuery(input.app, input.actor.id, canonicalJson([q.id, bound.byName]), files.spec.queries.length);
     } catch (err) {
       if (err instanceof RateLimited) throw new AppExecError(429, 'rate_limited', err.message, { retryAfterMs: err.retryAfterMs });
       throw err;

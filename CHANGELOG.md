@@ -10,6 +10,13 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+
+- Apps count a page view or user action once against the viewer's 60-a-minute query budget, grouping its
+  distinct panel reads within 10 seconds up to the app's declared query count (crew#1518). Apps with many
+  panels no longer exhaust the budget after a few views. A refusal names the limit and how many seconds
+  remain; refused reads do not consume or extend the window, so the next view after reset is served.
+
 ## [0.18.11] — 2026-11-12
 
 A patch on the Kubernetes runner: governed seats and the checks floor run as pods on a local Kubernetes cluster,
