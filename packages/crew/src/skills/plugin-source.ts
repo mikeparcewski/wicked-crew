@@ -42,7 +42,11 @@ export const SKILLS_SOURCE_ENV = 'WICKED_CREW_SKILLS_SOURCE';
  * The oldest wicked-garden this daemon uses (crew#753). Automatic discovery passes over an installed
  * plugin older than this with a `too-old` finding, and the daemon reports it as a blocking
  * `skills.garden` error naming found vs required, so an old copy is never used without a word.
- * 12.67.0 (crew 0.18.10) is the garden whose extractor proposes a repository's business domains and writes each
+ * 12.68.0 (crew 0.18.11) is the garden whose estate shim sends `rules.recall` to crew's broker on every governed
+ * seat, host seats included (crew#1519 answers it from the run's judged rule set), and whose governed-worker E7 pulls
+ * each rule's statement before judging it. With an older garden a host seat asks its pinned store, the run's code
+ * graph, which holds no steering rules, and the run brief now carries only rule ids and one-liners. It carries everything 12.67.0 (crew 0.18.10) needed:
+ * 12.67.0 is the garden whose extractor proposes a repository's business domains and writes each
  * rule's pick as the `business_domain` annotation wicked-core-ts 0.15.39's domain-graph reads into each requirement
  * (reqgraph Fix B), and whose governed-worker floor asks for the one `STACK-CHECK:` line 0.15.39's POL-2101 record
  * clause cites (wicked-core#1381). An older garden still maps, but with no business domains and no citable stack
@@ -55,7 +59,7 @@ export const SKILLS_SOURCE_ENV = 'WICKED_CREW_SKILLS_SOURCE';
  * the skill every Apps turn and publish tells its units to follow, apps/turns.ts) needed. An explicit
  * `WICKED_CREW_SKILLS_SOURCE` is deliberate and is not judged.
  */
-export const REQUIRED_GARDEN_VERSION = '12.67.0';
+export const REQUIRED_GARDEN_VERSION = '12.68.0';
 
 /** The one install command the README, the findings and the refusals name. */
 export const GARDEN_INSTALL_COMMAND = 'npx wicked-installer install wicked-garden';

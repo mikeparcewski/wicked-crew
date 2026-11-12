@@ -6845,7 +6845,7 @@ export interface SeatSessionResponse {
   action: 'login' | 'logout';
 }
 
-/** (unreleased, k8s runner) The k8s runner's refusals join: `no_cluster`, `cluster_unreachable`, `controller_missing`,
+/** (api-types 0.207.0, k8s runner, wicked-crew#1504) The k8s runner's refusals join: `no_cluster`, `cluster_unreachable`, `controller_missing`,
  *  `pids_unlimited`, `policy_refused`, `admission_pending`, `image_unavailable`, `exec_stream_lost`
  *  (wicked-core `FloorUnarmed`). `container_runtime_down` stays until the Docker path is removed. */
 export type SeatSignInFailureCode =
@@ -7307,14 +7307,14 @@ export interface RequirementsGraphBuild {
   behind: boolean;
 }
 
-/** A requirement's business domain (wicked-core#1425). `confidence` is `null` when the engine sent none usable. */
+/** (api-types 0.207.0, wicked-crew#1511) A requirement's business domain (wicked-core#1425). `confidence` is `null` when the engine sent none usable. */
 export interface RequirementBusinessDomain {
   id: string;
   name: string;
   confidence: number | null;
 }
 
-/** One entry of the business-domain catalog (`RequirementsPage.businessDomains`). */
+/** (api-types 0.207.0, wicked-crew#1511) One entry of the business-domain catalog (`RequirementsPage.businessDomains`). */
 export interface RequirementBusinessDomainCatalogEntry {
   id: string;
   name: string;
@@ -7327,7 +7327,7 @@ export interface RequirementBusinessDomainCatalogEntry {
 export interface RequirementSummary {
   key: string;
   domain: string;
-  /** The requirement's business domain; the key is OMITTED when the graph has none (never `null`), and ABSENT
+  /** (api-types 0.207.0, wicked-crew#1511) The requirement's business domain; the key is OMITTED when the graph has none (never `null`), and ABSENT
    *  from a daemon whose core predates it. `domain` stays the directory. */
   businessDomain?: RequirementBusinessDomain;
   reqId: string;
@@ -7423,7 +7423,7 @@ export interface RequirementsPage {
    *  older engine's `mapped_pct` label, or one its counts do not support; ABSENT from an older
    *  daemon. */
   coverage?: RequirementsCoverage | null;
-  /** The business-domain catalog of the whole corpus (not the query's subset); ABSENT when the graph carries none
+  /** (api-types 0.207.0, wicked-crew#1511) The business-domain catalog of the whole corpus (not the query's subset); ABSENT when the graph carries none
    *  or from an older daemon. */
   businessDomains?: RequirementBusinessDomainCatalogEntry[];
   /**
@@ -10971,7 +10971,7 @@ export interface AcpDiagnostics {
  * working across the CLIs. Every field is derived from records the daemon already owns;
  * anything it cannot answer is `null` / empty, never fabricated.
  */
-/** (unreleased, k8s runner) `GET /diagnostics.cluster`. */
+/** (api-types 0.207.0, k8s runner, wicked-crew#1504) `GET /diagnostics.cluster`. */
 export type DiagnosticsCluster =
   | {
       read: 'ok';
@@ -11026,7 +11026,7 @@ export interface DiagnosticsResponse {
   /** (api-types 0.203.0, wicked-crew#1481) Every project graph refresh since the daemon started: running (with its
    *  budget and the member being indexed) or idle, and its last failure. ABSENT on an older daemon. */
   projectGraphRefresh?: Array<{ projectId: string } & ProjectGraphRefreshState>;
-  /** (unreleased, k8s runner) The daemon's Kubernetes cluster as `wicked-core cluster status --json` reads it, or why
+  /** (api-types 0.207.0, k8s runner, wicked-crew#1504) The daemon's Kubernetes cluster as `wicked-core cluster status --json` reads it, or why
    *  it could not be read (`read: 'timeout' | 'error'`, `detail`). ABSENT before. */
   cluster?: DiagnosticsCluster;
 }
@@ -11851,7 +11851,7 @@ export type SystemInfraKey =
    *  `imageGcHighPct`, `rebuild` (a running or the last rebuild, its output's last lines live).
    *  `off` on the host floor. ABSENT before. */
   | 'seat_images'
-  /** (unreleased, k8s runner) The daemon's Kubernetes cluster (wicked-core `cluster status --json`, k8s runner):
+  /** (api-types 0.207.0, k8s runner, wicked-crew#1504) The daemon's Kubernetes cluster (wicked-core `cluster status --json`, k8s runner):
    *  `down` when none is configured, it does not answer, or the agent-sandbox controller is not
    *  ready; `degraded` when it answers but its objects could not be read; `unknown` when the read
    *  timed out or failed; `off` on the host floor. `details`: `configured`, `reachable`, `kind`,
