@@ -10,6 +10,22 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.18.13] — 2026-11-12
+
+A patch for chat-made demo videos and the Kubernetes seat floor. A demo video started from a chat's /demo takes the
+app address the person typed, and a typed answer fills the job's "The running app?" question. Needs wicked-core-ts 0.15.42 (`^0.15.42`): a Desk chat scoped to "All repos" runs on the Kubernetes seat floor again
+(core#1462).
+Bundles wicked-studio 0.16.8: the floating chat points to a proposed job (studio#1135), and a job question that asks
+for words gets a field and an Answer button (studio#1134). wicked-crew-api-types is unchanged (0.208.0). The garden
+floor stays 12.68.0.
+
+**Upgrading:**
+
+- **wicked-core-ts 0.15.42.** A read-only repository root is copied into a Kubernetes seat as git lists it (tracked,
+  plus untracked files that are not ignored), so a chat with every registered repository in scope stays under the
+  copy-in limit. A refused copy-in is reported as `copy_in_refused`, no longer `root_unresolvable`. No image is
+  rebuilt.
+
 ### Fixed
 
 - A demo video started from a chat's /demo takes the app address the person typed in the same message (exactly one http(s) address), instead of asking 'The running app?' with nothing to answer it.
@@ -6971,7 +6987,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.12...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.13...HEAD
+[0.18.13]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.12...v0.18.13
 [0.18.12]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.11...v0.18.12
 [0.18.11]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.10...v0.18.11
 [0.18.10]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.9...v0.18.10
