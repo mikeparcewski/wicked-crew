@@ -1,12 +1,15 @@
 // E7 (operator ruling 2026-11-05) + DES-RULE-CHECK-001 S1: a governed run's brief names EVERY steering rule in force
-// for its project, matched against the job (applies / may apply / not applicable with the fact), none cut. The deliver
-// text, the working doc's Goal and a relaunch take the block back out.
+// for its project, matched against the job (applies / may apply / not applicable). Agents pull (operator 2026-11-11):
+// the block is an index of id, severity and a one-liner within 4 KiB, plus the command that pulls a whole statement.
+// The deliver text, the working doc's Goal and a relaunch take the block back out.
 import { describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
 import {
   RULES_BRIEF_CLOSE,
   RULES_BRIEF_OPEN,
   RULES_BLOCK_MAX_BYTES,
+  RULES_PULL_COMMAND,
+  ONE_LINER_MAX,
   matchRulesForJob,
   rulesBriefBlock,
   stripRulesBrief,
@@ -87,7 +90,7 @@ function answer(statuses: Record<string, RuleMatch['status']>) {
 const ruleLines = (block: string) => block.split('\n').filter((l) => l.startsWith('- '));
 
 describe('the rules block', () => {
-  it('lists every rule with its match: rules to check whole, not-applicable ones with their fact', async () => {
+  it('lists every rule with its match: rules to check by id, severity and one-liner, not-applicable ones by id, and the pull command', async () => {
     const rules = [LEARN, TINY, r('MCPS-1004', 'critical', 'security', MCPS)];
     const matches = await matchRulesForJob(rules, bugJob(), answer({ 'MCPS-1004': 'not_applicable', 'DEV-TINYMATH-2': 'applies' }));
     const block = rulesBriefBlock(rules, matches)!;
@@ -96,13 +99,15 @@ describe('the rules block', () => {
     expect(lines.at(-1)).toBe(RULES_BRIEF_CLOSE);
     expect(block).toContain('3 in force, 2 to check (1 apply, 1 may apply), 1 not applicable');
     expect(block).toContain('does not mark its own compliance');
-    expect(block).toContain(`- [may apply] learn-tests-with-fixes (warn): ${LEARN.statement}`);
-    expect(block).toContain(`- [applies] DEV-TINYMATH-2 (warn): ${TINY.statement}`);
-    expect(block).toContain('- MCPS-1004: selected for install; bug has triage, reproduce, fix, verify');
+    expect(block).toContain(`Applies to this job:\n- DEV-TINYMATH-2 (warn): ${TINY.statement}`);
+    expect(block).toContain(`May apply:\n- learn-tests-with-fixes (warn): ${LEARN.statement}`);
+    expect(lines).toContain('- MCPS-1004');
+    expect(block).not.toContain('selected for install');
+    expect(lines.filter((l) => l.endsWith(RULES_PULL_COMMAND))).toHaveLength(1);
     expect(rulesBriefBlock([], [])).toBeNull();
   });
 
-  it('(S1) the rig bug job: nothing is cut. Store order with 25+ rules ahead still lists learn-tests-with-fixes and DEV-TINYMATH-2, and every not-applicable rule carries its fact', async () => {
+  it('(S1) the rig bug job: nothing is cut. Store order with 25+ rules ahead still lists learn-tests-with-fixes and DEV-TINYMATH-2, and every not-applicable rule is named by id', async () => {
     const rules = rigRules();
     const na = Object.fromEntries(
       ['EDITOR-GRANTS', 'MCP-FIRST-USE', 'MCP-MODE-ASK-WRITE', 'MCP-POSTURE-WRITE', 'EDITOR-BUILTIN', 'EDITOR-BUILTIN-DOC-MEDIA', 'EDITOR-BUILTIN-PAGE-MEDIA', 'EDITOR-BUILTIN-THEME', 'EDITOR-OPEN-DEFAULTS', 'MCP-POSTURE-READ'].map((id) => [id, 'not_applicable' as const]),
@@ -115,20 +120,45 @@ describe('the rules block', () => {
     expect(block).toContain(`DEV-TINYMATH-2 (warn): ${TINY.statement}`);
     expect(block).toContain('20 to check');
     const naSection = block.slice(block.indexOf('Not applicable to this job'));
-    for (const id of Object.keys(na)) expect(naSection).toMatch(new RegExp(`- ${id}: selected for install; bug has triage`));
+    for (const id of Object.keys(na)) expect(naSection.split('\n')).toContain(`- ${id}`);
     expect(block).not.toMatch(/more rules? in force, not listed/);
   });
 
-  it('(S1) a 100-rule store: no rule is dropped; statements past the size limit drop to the id, never the rule', async () => {
+  it('(S1) a 100-rule store: no rule is dropped; a long statement is cut to its one-liner, and one-liners past the size limit drop to the id, never the rule', async () => {
     const rules = Array.from({ length: 100 }, (_, i) => ({ id: `R-${String(i).padStart(3, '0')}`, severity: 'warn', statement: `${'x'.repeat(2_000)} end-${i}` }) as ConformanceRule);
     const matches = await matchRulesForJob(rules, bugJob(), answer({ 'R-007': 'not_applicable' }));
     expect(matches).toHaveLength(100);
     const block = rulesBriefBlock(rules, matches)!;
     expect(ruleLines(block)).toHaveLength(100);
     for (const x of rules) expect(block).toContain(x.id);
-    expect(block).toContain("did not fit this brief's size limit");
+    expect(block).not.toContain("did not fit this brief's size limit");
     expect(Buffer.byteLength(block)).toBeLessThanOrEqual(RULES_BLOCK_MAX_BYTES);
-    for (const l of ruleLines(block).filter((x) => x.includes('end-'))) expect(l).toMatch(/end-\d+$/u);
+    const withLiner = ruleLines(block).filter((x) => x.includes('): '));
+    expect(withLiner.length).toBeGreaterThan(0);
+    expect(withLiner.length).toBeLessThan(99);
+    for (const l of withLiner) {
+      const liner = l.slice(l.indexOf('): ') + 3);
+      expect([...liner].length).toBeLessThanOrEqual(ONE_LINER_MAX);
+      expect(liner.endsWith('…')).toBe(true);
+    }
+  });
+
+  it('(ctx-pull) the 70 rules in force on the rig (48 proposal ids): within 4 KiB, every id named, the pull command once', async () => {
+    const hex = (i: number) => i.toString(16).padStart(4, '0');
+    const long = Array.from({ length: 48 }, (_, i) => `proposal:01a07bbd-${hex(i)}-7110-9edc-7fb627d3${hex(i)}`);
+    const short = ['MCPS-1001', 'MCPS-1002', 'MCPS-1003', 'MCPS-1004', 'MCPS-1005', 'MCPS-1006', 'MCPS-1007', 'POL-2101', 'RVWL-1001', 'RVWL-1002',
+      'RVWL-1003', 'RVWL-1004', 'MCP-FIRST-USE', 'MCP-POSTURE-READ', 'MCP-MODE-ASK-WRITE', 'MCP-POSTURE-WRITE', 'EDITOR-GRANTS', 'EDITOR-BUILTIN',
+      'EDITOR-OPEN-DEFAULTS', 'EDITOR-BUILTIN-THEME', 'EDITOR-BUILTIN-DOC-MEDIA', 'EDITOR-BUILTIN-PAGE-MEDIA'];
+    const rules = [...long, ...short].map((id) => ({ id, severity: 'error', statement: `${id} says: ${'w'.repeat(320)}` }) as ConformanceRule);
+    expect(rules).toHaveLength(70);
+    const na = Object.fromEntries(short.slice(12).map((id) => [id, 'not_applicable' as const]));
+    const block = rulesBriefBlock(rules, await matchRulesForJob(rules, bugJob(), answer(na)))!;
+    expect(Buffer.byteLength(block)).toBeLessThanOrEqual(RULES_BLOCK_MAX_BYTES);
+    expect(ruleLines(block)).toHaveLength(70);
+    for (const x of rules) expect(ruleLines(block).some((l) => l === `- ${x.id}` || l.startsWith(`- ${x.id} (error)`))).toBe(true);
+    expect(block).toContain('70 in force, 60 to check (0 apply, 60 may apply), 10 not applicable');
+    expect(block.split(RULES_PULL_COMMAND)).toHaveLength(2);
+    expect(block).not.toContain('did not fit');
   });
 
   it('(xreview r1 on S1) the WHOLE block is bounded in UTF-8 bytes: CJK statements, hundreds of long not-applicable facts, six hundred rules', async () => {
@@ -142,19 +172,43 @@ describe('the rules block', () => {
     for (const [rules, match] of [[cjk, null], [naMany, longFact], [thousand, null]] as const) {
       const block = rulesBriefBlock(rules, await matchRulesForJob(rules, bugJob(), match))!;
       expect(Buffer.byteLength(block)).toBeLessThanOrEqual(RULES_BLOCK_MAX_BYTES);
-      for (const x of rules) expect(block).toContain(`${x.id}`);
+      // Every id is named, or counted on the one line that says how to pull the rest.
+      const named = rules.filter((x) => ruleLines(block).some((l) => l === `- ${x.id}` || l.startsWith(`- ${x.id} (`))).length;
+      if (named < rules.length) expect(block).toContain(`- … and ${rules.length - named} more rules in force whose ids did not fit`);
     }
     // Ids of thousands of characters cannot all fit: the rest is said in one line, never dropped silently.
     const huge = Array.from({ length: 40 }, (_, i) => ({ id: `H${i}-${'q'.repeat(3_000)}`, severity: 'warn', statement: 's' }) as ConformanceRule);
     const block = rulesBriefBlock(huge, await matchRulesForJob(huge, bugJob(), null))!;
     expect(Buffer.byteLength(block)).toBeLessThanOrEqual(RULES_BLOCK_MAX_BYTES);
-    const named = ruleLines(block).filter((l) => l.startsWith('- [may apply]')).length;
+    const named = ruleLines(block).filter((l) => l.startsWith('- "H')).length;
     expect(block).toContain(`- … and ${40 - named} more rules in force whose ids did not fit`);
     // (xreview r2 on S1) an oversized id is skipped, not the end: the short ids after it are still named.
     const mixed = [{ id: `BIG-${'q'.repeat(30_000)}`, severity: 'critical', statement: 's' }, ...Array.from({ length: 5 }, (_, i) => ({ id: `S-${i}`, severity: 'warn', statement: 'short' }))] as ConformanceRule[];
     const m = rulesBriefBlock(mixed, await matchRulesForJob(mixed, bugJob(), null))!;
-    for (let i = 0; i < 5; i += 1) expect(m).toContain(`- [may apply] S-${i} (warn): short`);
+    for (let i = 0; i < 5; i += 1) expect(m).toContain(`- S-${i} (warn): short`);
     expect(m).toContain('- … and 1 more rule in force whose ids did not fit');
+  });
+
+  it('(xreview) when every bare id fits, every id is named: the overflow line is reserved only when ids are left out', async () => {
+    // 229 short ids: every bare id fits in 4 KiB (about 4,083 bytes), but not with the overflow line reserved too.
+    const rules = Array.from({ length: 229 }, (_, i) => ({ id: `R-${String(i).padStart(3, '0')}`, severity: 'warn', statement: 'hello' }) as ConformanceRule);
+    const block = rulesBriefBlock(rules, await matchRulesForJob(rules, bugJob(), null))!;
+    expect(Buffer.byteLength(block)).toBeLessThanOrEqual(RULES_BLOCK_MAX_BYTES);
+    expect(ruleLines(block)).toHaveLength(229);
+    expect(block).not.toContain('did not fit');
+  });
+
+  it('(xreview r3) a block whose bare ids fill exactly the cap names every id', async () => {
+    const rules = Array.from({ length: 229 }, (_, i) => ({ id: `R-${String(i).padStart(3, '0')}`, severity: 'warn', statement: 'hello' }) as ConformanceRule);
+    const probe = rulesBriefBlock(rules, await matchRulesForJob(rules, bugJob(), null))!;
+    // Lengthen the first id until the all-bare block is exactly RULES_BLOCK_MAX_BYTES.
+    const bareBytes = Buffer.byteLength(probe) - ': hello'.length * probe.split('(warn): hello').length + ': hello'.length;
+    rules[0]!.id += 'x'.repeat(RULES_BLOCK_MAX_BYTES - bareBytes);
+    const block = rulesBriefBlock(rules, await matchRulesForJob(rules, bugJob(), null))!;
+    expect(Buffer.byteLength(block)).toBe(RULES_BLOCK_MAX_BYTES);
+    expect(ruleLines(block)).toHaveLength(229);
+    expect(block).not.toContain('(warn): hello'); // all bare: the ids alone fill the cap
+    expect(block).not.toContain('did not fit');
   });
 
   it('(S1) an engine without matchRules, a failure or a short answer: every rule still listed, the rest as may apply', async () => {
@@ -199,14 +253,14 @@ describe('the rules block', () => {
       { id: 'E', severity: 'warn', statement: '' },
     ] as ConformanceRule[];
     const block = rulesBriefBlock(rules, await matchRulesForJob(rules, bugJob(), null))!;
-    expect(block).toContain('[may apply] "A B" (warn): spaced id');
-    expect(block).toContain('[may apply] "A  B" (warn): double-spaced id');
+    expect(block).toContain('- "A B" (warn): spaced id');
+    expect(block).toContain('- "A  B" (warn): double-spaced id');
     expect(block).toContain(`"${long}A" (warn): long A`);
     expect(block).toContain(`"${long}B" (warn): long B`);
     expect(block).toContain('"evil\\u003c!--x--\\u003e" (warn): marker id');
     expect(JSON.parse('"evil\\u003c!--x--\\u003e"')).toBe('evil<!--x-->');
     expect(block.split('<!--')).toHaveLength(3);
-    expect(block).toContain('- [may apply] E (warn): (no statement recorded)');
+    expect(block).toContain('- E (warn): (no statement recorded)');
   });
 
   it('a relaunch replaces the block, never stacks it; strip gives the intent back', async () => {
@@ -312,8 +366,8 @@ describe("POST /runs: a workflow launch carries the project's rules in force, ma
       expect(res.statusCode, res.body).toBe(201);
       expect(matchArgs[0]).toMatchObject({ job: { workflow: 'bug', project: null, steps: null, kinds: ['recon', 'test', 'build', 'test'] } });
       expect(launched[0]!.problem.startsWith('Fix sum()\n\n')).toBe(true);
-      expect(launched[0]!.problem).toContain(`- [may apply] learn-tests-with-fixes (warn): ${LEARN.statement}`);
-      expect(launched[0]!.problem).toContain('- [applies] DEV-TINYMATH-2 (warn):');
+      expect(launched[0]!.problem).toContain(`May apply:\n- learn-tests-with-fixes (warn): ${LEARN.statement}`);
+      expect(launched[0]!.problem).toContain('Applies to this job:\n- DEV-TINYMATH-2 (warn):');
       broken = true;
       const again = await a.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: launched[0]!.problem, repoRef: 'tiny-math', workflow: 'bug' } });
       expect(again.statusCode, again.body).toBe(201);

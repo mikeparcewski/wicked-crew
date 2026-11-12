@@ -65,7 +65,10 @@ function fixture(picks: SourcePicks | undefined, fence?: RunFence) {
     evaluateOutput: async () => JSON.stringify({ decision: 'allow', ruleIds: [] }),
   };
   const relayed = vi.fn(async () => ({ result: { content: [] } }));
+  // `rules.recall` is answered from the rules in force (ctx-pull), never the estate spawn.
+  const ruled = vi.fn(async () => ({ rules: [], setAside: [], source: 'considerRules' as const }));
   const estate = new EstateRelay({
+    rules: ruled,
     resolver: () => async (json: string) => {
       const { token } = JSON.parse(json) as { token: string };
       return JSON.stringify({ unit: unitOf(token), projectId: 'project', repoId: 'repo', codeGraphDb: '/graph.db' });
@@ -98,7 +101,7 @@ function fixture(picks: SourcePicks | undefined, fence?: RunFence) {
     return answer.body.tools.map((t) => t.subject);
   };
   const call = (subject = 'mcp:support-pg/execute_sql', token = 'first') => broker.call({ token, subject, args: {} });
-  return { gate, registry, records, published, invoked, relayed, lister, list, call };
+  return { gate, registry, records, published, invoked, relayed, ruled, lister, list, call };
 }
 
 describe('pickAllows: the run source-pick contract', () => {
@@ -206,7 +209,7 @@ describe('CS10: picked sources in the broker and unit tool list', () => {
     for (const tool of ['BlastRadius', 'rules.recall', 'memory.recall']) {
       const f = fixture(picks);
       expect(await f.call(`mcp:estate/${tool}`)).toMatchObject({ status: 200, body: { outcome: 'ok' } });
-      expect(f.relayed).toHaveBeenCalledTimes(1);
+      expect(tool === 'rules.recall' ? f.ruled : f.relayed).toHaveBeenCalledTimes(1);
       expect(f.gate.unitCall).not.toHaveBeenCalled();
     }
   });

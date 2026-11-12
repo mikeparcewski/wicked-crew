@@ -21,7 +21,22 @@ mentioned only where a daemon release depends on them.
   unchanged. (api-types: `RequirementBusinessDomain`, `RequirementBusinessDomainCatalogEntry`, additive; no version
   bump here.)
 
+### Changed
+
+- Seats pull the steering rules instead of having them pushed into every prompt. A governed launch's rules block is now
+  an index of at most 4 KiB (was 24 KiB of whole statements, about 72% of each unit's brief on a 70-rule project): each
+  rule to check is one line of id, severity and the first 100 characters of its statement, a not-applicable rule is its
+  id, and one line names the exact command that pulls a rule's whole statement
+  (`wicked-garden run scripts/_estate_client.py --readonly call '{"tool":"rules.recall","arguments":{"ids":[…]}}'`).
+  Every id is still named first; one-liners are added while the block fits.
+
 ### Fixed
+
+- `mcp:estate/rules.recall` answers the steering rules in force for the run's project, the same set the rule judge
+  reads (`considerRules`), instead of the run's code graph, which holds no steering rules. A seat asked to check a rule
+  could not read it, on host, Docker or k8s alike. It takes `ids` (or `id`), `rule_type`, `steering_type`, `severity`
+  and `limit`; an id not in force is named in `missing`; an unreadable store is a failure with its reason, never an
+  empty list. It no longer needs the run to have a code graph.
 
 - Deliver no longer puts host temp or state paths in a PR title, body or commit message (#1499). Beside the home
   directory (`~`), the sanitizer now rewrites the temp directory and the macOS per-user temp folders

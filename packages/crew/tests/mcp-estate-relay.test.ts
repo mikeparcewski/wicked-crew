@@ -13,7 +13,9 @@
 //      spends the unit's budget and is recorded against its run; a landed proposal is audited;
 //   5. the real invocation spawns `wicked-estate-mcp --readonly` with the run's graph (never the
 //      daemon's boot store), this daemon's memory store and the unit's provenance;
-//   6. no registered server may take the reserved name.
+//   6. no registered server may take the reserved name;
+//   7. `rules.recall` is answered from the rules in force for the run's project (the set the rule judge reads),
+//      never from the code graph, by id or whole, and an unreadable set is a failure, never "no rules".
 
 import Fastify, { type FastifyInstance } from 'fastify';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -22,9 +24,10 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { AuditLog } from '../src/api/audit.js';
+import { readInForce, type InForceRead } from '../src/decisions/consider.js';
 import { LOCAL_ACTOR } from '../src/api/auth.js';
 import { registerMcpRoutes } from '../src/api/mcp.js';
-import type { McpCallRecord, McpCallResponse } from '../src/core/types.js';
+import type { ConformanceRule, McpCallRecord, McpCallResponse } from '../src/core/types.js';
 import { McpBroker } from '../src/mcp/broker.js';
 import { McpCallRecordFile } from '../src/mcp/call-records.js';
 import {
@@ -93,8 +96,9 @@ describe('estateRefusal: what the relay never makes', () => {
       expect(estateRefusal(tool, SCOPED, '/m.db', store(true))?.ruleId).toBe('estate:not-relayed');
     }
   });
-  it('refuses a graph lookup for a run with no code graph, and relays memory and knowledge recall', () => {
+  it('refuses a graph lookup for a run with no code graph, and relays memory and knowledge recall and the rules in force', () => {
     expect(estateRefusal('BlastRadius', BARE, '/m.db', store(true))?.ruleId).toBe('estate:no-code-graph');
+    expect(estateRefusal('rules.recall', BARE, '/m.db', store(true))).toBeNull();
     expect(estateRefusal('memory.recall', BARE, '/m.db', store(true))).toBeNull();
     expect(estateRefusal('knowledge.recall', BARE, '/m.db', store(true))).toBeNull();
     expect(estateRefusal('BlastRadius', SCOPED, '/m.db', store(true))).toBeNull();
@@ -130,8 +134,9 @@ describe('the broker relays mcp:estate/<tool>', () => {
   let resolverPresent: boolean;
   let memoryStorePresent: boolean;
 
-  async function boot(budgetPerUnit = 200): Promise<void> {
+  async function boot(budgetPerUnit = 200, rules?: (projectId: string | null) => Promise<InForceRead>): Promise<void> {
     const relay = new EstateRelay({
+      ...(rules !== undefined ? { rules } : {}),
       resolver: () =>
         resolverPresent
           ? async (requestJson: string) => {
@@ -312,6 +317,146 @@ describe('the broker relays mcp:estate/<tool>', () => {
     expect(third.status).toBe(429);
     expect(third.body.outcome).toBe('budget_exhausted');
     expect(invocations).toHaveLength(2);
+  });
+});
+
+describe('(ctx-pull) rules.recall answers the set the rule judge reads', () => {
+  const rule = (id: string, severity: ConformanceRule['severity'], project?: string): ConformanceRule =>
+    ({ id, rule_type: 'policy', severity, statement: `${id}: the whole statement.`, confidence: 1, targets: project === undefined ? {} : { project }, provenance: { source: 'ui', source_kinds: [] }, steering_type: 'testing' }) as ConformanceRule;
+  // The engine's considerRules: the global rules plus the asked project's own (core `rules_in_force`, which the judge calls).
+  const GLOBAL = [rule('POL-2500', 'critical'), rule('learn-tests-with-fixes', 'warn')];
+  const OWN = [rule('proposal:01a07cd5-1111', 'error', 'proj_abc')];
+  const OTHER = [rule('proposal:other-project', 'error', 'proj_other')];
+  const asked: Array<string[] | undefined> = [];
+  const engine = {
+    projectRulesSupported: () => true,
+    considerRules: async (q: { projects?: string[] }) => {
+      asked.push(q.projects);
+      const p = q.projects ?? [];
+      return { in_force: [...GLOBAL, ...(p.includes('proj_abc') ? OWN : []), ...(p.includes('proj_other') ? OTHER : [])], set_aside: [] };
+    },
+  };
+  let base: string;
+  let app: FastifyInstance;
+  let invocations: EstateRelayInvocation[];
+
+  async function boot(scope: EstateUnitScope, rules?: (projectId: string | null) => Promise<InForceRead>): Promise<void> {
+    const relay = new EstateRelay({
+      resolver: () => async () => JSON.stringify(scope),
+      // The code graph's own rule rows (code-extracted fixtures, no steering rules): never what a seat is judged on.
+      invoke: async (call) => {
+        invocations.push(call);
+        return { result: envelope({ rules: [{ id: 'rego:fixture/deny_all' }], returned: 1, total: 1 }) };
+      },
+      memoryDb: () => '/daemon/memory.db',
+      exists: () => true,
+      ...(rules !== undefined ? { rules } : {}),
+    });
+    const broker = new McpBroker({
+      registry: { resolveCall: async () => null, callSecret: async () => ({ secret: null, missing: false }) } as never,
+      engine: () => null,
+      records: new McpCallRecordFile(join(base, 'mcp')),
+      budgetPerUnit: 200,
+      publish: () => undefined,
+      estate: relay,
+    });
+    app = Fastify();
+    registerMcpRoutes(app, { broker, audit: AuditLog.noop(), actorOf: () => LOCAL_ACTOR });
+    await app.ready();
+  }
+
+  async function recall(args: Record<string, unknown> = {}) {
+    const res = await app.inject({ method: 'POST', url: '/api/v1/mcp/call', payload: { token: 'wmt_good', subject: 'mcp:estate/rules.recall', args } });
+    const body = res.json() as McpCallResponse & { reason?: string };
+    const text = ((body.result as { content?: Array<{ text: string }> } | undefined)?.content?.[0]?.text) ?? 'null';
+    return { status: res.statusCode, body, payload: JSON.parse(text) as { rules: ConformanceRule[]; returned: number; total: number; missing: string[]; source: string } | null };
+  }
+
+  beforeEach(() => {
+    base = mkdtempSync(join(tmpdir(), 'crew-estate-rules-'));
+    invocations = [];
+    asked.length = 0;
+  });
+  afterEach(async () => {
+    await app?.close();
+    removeScratch(base);
+  });
+
+  it("(fails before the fix) returns exactly the ids the judge's considerRules({projects:[p]}) holds for the run's project, with no code graph and no estate spawn", async () => {
+    const judged = (await engine.considerRules({ projects: ['proj_abc'] })).in_force.map((r) => r.id).sort();
+    await boot({ ...BARE, projectId: 'proj_abc' }, (p) => readInForce(engine, p));
+    const r = await recall();
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.payload!.rules.map((x) => x.id).sort()).toEqual(judged);
+    expect(r.payload!.rules[0]!.statement).toBe('POL-2500: the whole statement.');
+    expect(r.payload!.source).toBe('considerRules');
+    expect(asked.at(-1)).toEqual(['proj_abc']);
+    expect(invocations).toEqual([]);
+  });
+
+  it("answers from the in-force set even when the run has a code graph, and a worker's own project argument changes nothing", async () => {
+    await boot(SCOPED, (p) => readInForce(engine, p));
+    const r = await recall({ project: 'proj_other', ids: ['proposal:other-project', 'proposal:01a07cd5-1111'] });
+    expect(r.payload!.rules.map((x) => x.id)).toEqual(['proposal:01a07cd5-1111']);
+    expect(r.payload!.missing).toEqual(['proposal:other-project']);
+    expect(invocations).toEqual([]);
+  });
+
+  it('pulls by id (or a single id), names an id not in force as missing, and keeps severity order, filters and limit', async () => {
+    await boot(SCOPED, (p) => readInForce(engine, p));
+    const byIds = await recall({ ids: ['learn-tests-with-fixes', 'POL-2500', 'nope'] });
+    expect(byIds.payload).toMatchObject({ returned: 2, total: 2, missing: ['nope'] });
+    expect(byIds.payload!.rules.map((x) => x.id)).toEqual(['POL-2500', 'learn-tests-with-fixes']);
+    expect((await recall({ id: 'POL-2500' })).payload!.rules.map((x) => x.id)).toEqual(['POL-2500']);
+    expect((await recall({ severity: 'warn' })).payload!.rules.map((x) => x.id)).toEqual(['learn-tests-with-fixes']);
+    expect((await recall({ rule_type: 'pattern' })).payload!.rules).toEqual([]);
+    expect((await recall({ limit: 1 })).payload).toMatchObject({ returned: 1, total: 3 });
+  });
+
+  it('(xreview) releases statements verbatim: a credential-shaped or quoted password= statement is not rewritten or broken', async () => {
+    const tricky = [
+      rule('SEC-BEARER', 'critical', 'proj_abc'),
+      rule('SEC-PW', 'error', 'proj_abc'),
+    ];
+    tricky[0]!.statement = 'Never log a header like Bearer abcdefgh12345678 in a test fixture.';
+    tricky[1]!.statement = 'The regression test must reject "password=admin".';
+    await boot(SCOPED, async () => ({ rules: tricky, setAside: [], source: 'considerRules' }));
+    const r = await recall({ ids: ['SEC-BEARER', 'SEC-PW'] });
+    expect(r.status).toBe(200);
+    expect(r.payload!.rules.map((x) => x.statement)).toEqual([tricky[0]!.statement, tricky[1]!.statement]);
+  });
+
+  it('(xreview) pages a large set with limit and offset, so every rule is reachable under the result bound', async () => {
+    const many = Array.from({ length: 450 }, (_, i) => ({ ...rule(`proposal:${String(i).padStart(4, '0')}`, 'warn'), statement: 's'.repeat(2_000) }));
+    await boot(SCOPED, async () => ({ rules: many, setAside: [], source: 'considerRules' }));
+    const whole = await recall();
+    expect(whole.body.outcome).toBe('withheld');
+    expect(whole.body.remedy).toMatch(/"offset"/);
+    const seen: string[] = [];
+    let offset: number | null = 0;
+    while (offset !== null) {
+      const page = await recall({ limit: 200, offset });
+      expect(page.status).toBe(200);
+      seen.push(...page.payload!.rules.map((x) => x.id));
+      offset = (page.payload as unknown as { next_offset: number | null }).next_offset;
+    }
+    expect(seen).toEqual(many.map((x) => x.id));
+  });
+
+  it('an unreadable rule store is a failure with its reason, never an empty set a seat could read as "no rules"', async () => {
+    await boot(SCOPED, (p) => readInForce({}, p));
+    const r = await recall({ ids: ['POL-2500'] });
+    expect(r.status).toBe(502);
+    expect(r.body.outcome).toBe('upstream_error');
+    expect(r.body.reason).toMatch(/could not be read/);
+    expect(invocations).toEqual([]);
+  });
+
+  it('a relay with no rule read refuses rules.recall rather than answer it from the code graph', async () => {
+    await boot(SCOPED);
+    const r = await recall();
+    expect(r.body.ruleIds).toEqual(['estate:no-rules-source']);
+    expect(invocations).toEqual([]);
   });
 });
 

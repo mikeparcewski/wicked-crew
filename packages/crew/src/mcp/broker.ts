@@ -67,6 +67,7 @@ import { scrubSecrets } from './secrets.js';
 import {
   ESTATE_PROPOSAL_TOOL,
   ESTATE_VISIBLE_TOOLS,
+  RULES_RECALL_TOOL,
   proposalIdOf,
   releaseVisible,
   rpcErrorEnvelope,
@@ -475,11 +476,14 @@ export class McpBroker {
       if (!released.ok) return this.refuse(span, 'withheld', 'deny', 'broker:estate-visible', ['estate:visible'], released.reason, 'work from what this step may see; a person decides which sources a project sees on the source sheet', null, null);
       result = released.result;
     }
-    const scrubbed = scrubResult(result, []);
+    // `rules.recall` is crew's own answer (the operator's rule text the judge reads), not an upstream's output: it is
+    // released verbatim, so a seat reads the words it is judged on. The redactor works on the serialized text and
+    // would change a statement (`Bearer …`) or break its JSON (`"password=…"`), leaving the rule unreadable.
+    const scrubbed = tool === RULES_RECALL_TOOL ? result : scrubResult(result, []);
     const raw = JSON.stringify(scrubbed);
     span.bytesOut = Buffer.byteLength(raw, 'utf8');
     if (span.bytesOut > relay.maxResultBytes) {
-      return this.refuse(span, 'withheld', 'deny', 'broker:estate-bound', ['estate:result-bound'], `mcp:estate/${tool} answered ${span.bytesOut} bytes, over the relay's ${relay.maxResultBytes}-byte bound`, 'narrow the call (a lower limit or depth, a narrower query), or page it with cursor', null, null);
+      return this.refuse(span, 'withheld', 'deny', 'broker:estate-bound', ['estate:result-bound'], `mcp:estate/${tool} answered ${span.bytesOut} bytes, over the relay's ${relay.maxResultBytes}-byte bound`, tool === RULES_RECALL_TOOL ? 'pull fewer rules at once: name them in "ids", or page with "limit" and "offset"' : 'narrow the call (a lower limit or depth, a narrower query), or page it with cursor', null, null);
     }
     const record = this.record(span, 'ok', 'allow', 'broker:estate', [], scrubbed['isError'] === true ? 'tool_error' : null, null);
     try {
