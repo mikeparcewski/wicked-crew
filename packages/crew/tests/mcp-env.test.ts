@@ -61,6 +61,20 @@ describe('validateServerEnv', () => {
     expect(validateServerEnv({ LOG_LEVEL: 'debug', REGION: 'eu', 'x_1': 'y' }, SECRET_VAR)).toBeNull();
     expect(validateServerEnv({ A: '1', a: '2' })?.code).toBe('duplicate');
   });
+
+  // (CX1 review P1) Runtime code-loading / startup options and network-trust overrides a public env
+  // may not set: each is a reserved_name, in any case, with no value in the error.
+  const RESERVED_RUNTIME = [
+    'PERL5OPT', 'PERL5DB', 'PERLLIB', 'RUBYLIB', 'JAVA_TOOL_OPTIONS', '_JAVA_OPTIONS', 'JDK_JAVA_OPTIONS', 'BUN_OPTIONS', 'CLASSPATH',
+    'AWS_CA_BUNDLE', 'GRPC_DEFAULT_SSL_ROOTS_FILE_PATH',
+  ];
+  it.each(RESERVED_RUNTIME.flatMap((n) => [n, n.toLowerCase()]))('refuses %s as reserved_name, named, no value', (name) => {
+    const r = validateServerEnv({ [name]: SENTINEL });
+    expect(r?.code).toBe('reserved_name');
+    expect(r?.name).toBe(name);
+    expect(r?.message).toContain(name);
+    expect(r?.message).not.toContain(SENTINEL);
+  });
 });
 
 describe('McpServerConfigSchema env', () => {
