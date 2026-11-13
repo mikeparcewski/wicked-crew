@@ -246,6 +246,8 @@ export class TtsService {
   /** The last Python probe: kept for a minute, dropped on install and on remove. */
   private picked: { at: number; value: Picked } | null = null;
   private picking: Promise<Picked> | null = null;
+  /** Syntheses in flight: removal cancels them and waits for each to finish its cleanup. */
+  private readonly synths = new Set<{ abort: AbortController; done: Promise<unknown> }>();
 
   constructor(private readonly deps: TtsDeps) {
     this.env = deps.env ?? process.env;
@@ -430,11 +432,11 @@ export class TtsService {
     const tmp = join(this.root(), `engine.tmp-${randomBytes(4).toString('hex')}`);
     try {
       const venv = await this.run(picked.python.path, ['-I', '-m', 'venv', tmp], { env: this.childEnv(), timeoutMs: this.installTimeoutMs, signal });
-      if (venv.code !== 0) throw new Error(`Creating the Python environment failed (${tail(venv.stderr)}). ${pythonHint(this.plat)}`);
+      if (venv.code !== 0) throw new Error(`Creating the Python environment failed. ${pythonHint(this.plat)}`);
       const pip = await this.run(this.enginePython(tmp), [
         '-I', '-m', 'pip', 'install', '--isolated', '--index-url', TTS_ENGINE.index, '--only-binary=:all:', '--require-hashes', '--no-deps', '-r', picked.lock,
       ], { env: this.childEnv({ PIP_CONFIG_FILE: '/dev/null', PIP_DISABLE_PIP_VERSION_CHECK: '1' }), timeoutMs: this.installTimeoutMs, signal });
-      if (pip.code !== 0) throw new Error(`Installing ${TTS_ENGINE.name} ${TTS_ENGINE.version} failed (${tail(pip.stderr)})`);
+      if (pip.code !== 0) throw new Error(`Installing ${TTS_ENGINE.name} ${TTS_ENGINE.version} failed: pip refused the hash-locked install. Check the connection to pypi.org and try again.`);
       if (this.gen !== gen || signal.aborted) throw new Error('The install was cancelled.');
       rmSync(this.enginePath(), { recursive: true, force: true });
       renameSync(tmp, this.enginePath());
@@ -528,9 +530,13 @@ export class TtsService {
   }
 
   /** Remove the engine, the voices and the cached samples. An install in flight is cancelled first. */
-  remove(): { removed: boolean } {
+  async remove(): Promise<{ removed: boolean }> {
     this.gen += 1;
-    this.inflight?.abort.abort();
+    const install = this.inflight;
+    install?.abort.abort();
+    for (const s of this.synths) s.abort.abort();
+    // The files go only after every child has closed: no descendant can write into a directory being removed.
+    await Promise.allSettled([install?.done, ...[...this.synths].map((x) => x.done)]);
     this.inflight = null;
     this.installState = null;
     this.picked = null;
@@ -601,7 +607,15 @@ export class TtsService {
    * Piper writes into a fresh private directory; the output must be a regular file (lstat, so a symlink or a device
    * is refused), before and while its size is watched. The directory goes only after the child has closed.
    */
-  private async synthesize(v: TtsVoice, line: string): Promise<Buffer> {
+  private synthesize(v: TtsVoice, line: string): Promise<Buffer> {
+    const entry = { abort: new AbortController(), done: Promise.resolve<unknown>(undefined) };
+    const run = this.synthesizeIn(v, line, entry.abort.signal);
+    entry.done = run.catch(() => undefined).finally(() => this.synths.delete(entry));
+    this.synths.add(entry);
+    return run;
+  }
+
+  private async synthesizeIn(v: TtsVoice, line: string, signal: AbortSignal): Promise<Buffer> {
     const workDir = join(this.root(), 'work');
     mkdirSync(workDir, { recursive: true });
     const scratch = mkdtempSync(join(workDir, 's-'));
@@ -609,7 +623,7 @@ export class TtsService {
     try {
       const r = await this.run(this.enginePython(), [
         '-I', '-m', 'piper', '-m', join(this.voiceDir(v.id), basename(v.model.path)), '-c', join(this.voiceDir(v.id), basename(v.config.path)), '-f', out,
-      ], { env: this.childEnv(), timeoutMs: this.timeoutMs, stdin: `${line}\n`, watch: { file: out, maxBytes: this.maxWav } });
+      ], { env: this.childEnv(), timeoutMs: this.timeoutMs, stdin: `${line}\n`, signal, cancelled: () => new VoiceError(409, 'voice_tts_missing', 'The speech engine was removed while it was reading.'), watch: { file: out, maxBytes: this.maxWav } });
       // The child's stderr can echo the spoken text: it is never put in an error.
       if (r.code !== 0) throw new VoiceError(500, 'voice_tts_failed', SYNTH_FAILED);
       const st = lstatOrNull(out);
@@ -633,7 +647,7 @@ export class TtsService {
   private run(
     command: string,
     args: readonly string[],
-    o: { env: NodeJS.ProcessEnv; timeoutMs: number; stdin?: string; signal?: AbortSignal; watch?: { file: string; maxBytes: number } },
+    o: { env: NodeJS.ProcessEnv; timeoutMs: number; stdin?: string; signal?: AbortSignal; cancelled?: () => Error; watch?: { file: string; maxBytes: number } },
   ): Promise<RunResult> {
     mkdirSync(this.deps.dir, { recursive: true });
     return new Promise<RunResult>((resolve, reject) => {
@@ -675,7 +689,7 @@ export class TtsService {
         kill();
       };
       const timer = setTimeout(() => stop(new VoiceError(504, 'voice_timeout', `Reading aloud took longer than ${Math.round(o.timeoutMs / 1000)} s and was stopped.`)), o.timeoutMs);
-      const onAbort = (): void => stop(new Error('The install was cancelled.'));
+      const onAbort = (): void => stop(o.cancelled?.() ?? new Error('The install was cancelled.'));
       o.signal?.addEventListener('abort', onAbort, { once: true });
       if (o.signal?.aborted === true) onAbort();
       if (o.watch !== undefined) {
@@ -717,6 +731,3 @@ function lstatOrNull(p: string): Stats | null {
 function decodeCapped(chunks: Buffer[]): string {
   return new StringDecoder('utf8').write(Buffer.concat(chunks));
 }
-
-/** The last two lines of a child's stderr, for a one-line error (pip and venv only: they never carry the spoken text). */
-function tail(s: string): string { return s.trim().split('\n').slice(-2).join(' ').slice(0, 400); }

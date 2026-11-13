@@ -171,7 +171,7 @@ export function registerVoiceRoutes(app: FastifyInstance, deps: VoiceRouteDeps):
         `${V}/voice/tts`,
         { config: { manifest: { responseType: 'VoiceTtsStatus', statusCodes: [200, 403] } } },
         async (req) => {
-          const { removed } = tts.remove();
+          const { removed } = await tts.remove();
           if (removed) deps.audit.record('voice.tts.removed', actorOf(req), { detail: {} });
           return await tts.status();
         },

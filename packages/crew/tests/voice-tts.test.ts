@@ -164,7 +164,8 @@ describe('tts install', () => {
     expect(readdirSync(join(dir, 'tts'))).toEqual([]);
     const st = await s.status();
     expect(st.install).toMatchObject({ state: 'failed', step: 'engine' });
-    expect(st.install!.error).toContain('DO NOT MATCH');
+    expect(st.install!.error).toMatch(/pip refused/);
+    expect(st.install!.error).not.toContain('DO NOT MATCH'); // a child's stderr never reaches an error
     expect(st.engine.found).toBe(false);
   });
 
@@ -275,9 +276,9 @@ describe('tts install', () => {
     const s = service({ spawn: installSpawn().spawn });
     await s.startInstall([VOICE_A.id]);
     await s.installDone();
-    expect(s.remove()).toEqual({ removed: true });
+    expect(await s.remove()).toEqual({ removed: true });
     expect(existsSync(join(dir, 'tts'))).toBe(false);
-    expect(s.remove()).toEqual({ removed: false });
+    expect(await s.remove()).toEqual({ removed: false });
   });
 });
 
@@ -666,6 +667,74 @@ describe('tts revision: isolation, deadlines, cleanup and verification', () => {
     } finally { killSpy.mockRestore(); }
   });
 
+  /** A child that has a pid, ignores everything until `release()`, and records process-group kills. */
+  function stubbornSpawn(onStdinDone?: (args: string[]) => void) {
+    const killed: Array<[number, string | number | undefined]> = [];
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(((pid: number, sig?: string | number) => { killed.push([pid, sig]); return true; }) as typeof process.kill);
+    let release: () => void = () => undefined;
+    let started = 0;
+    const spawn = vi.fn((_c: string, args: string[]) => {
+      started += 1;
+      const child = new EventEmitter() as FakeChild & { pid: number };
+      child.pid = 777; child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => true;
+      child.stdin.resume();
+      child.stdin.on('finish', () => onStdinDone?.(args));
+      release = () => child.emit('close', null);
+      return child;
+    }) as unknown as VoiceSpawn;
+    return { spawn, killed, killSpy, release: () => release(), started: () => started };
+  }
+
+  it('removing while a synthesis runs kills its group and deletes nothing until the child has closed', async () => {
+    const st = stubbornSpawn((args) => writeFileSync(args[args.indexOf('-f') + 1]!, wav()));
+    try {
+      const s = service({ spawn: st.spawn });
+      installed(s);
+      const speaking = s.speak('hello', VOICE_A.id).then(() => null, (e: unknown) => e as VoiceError);
+      await new Promise((r) => setTimeout(r, 60));
+      expect(st.started()).toBe(1);
+      let removed = false;
+      const removal = s.remove().then((r) => { removed = true; return r; });
+      await new Promise((r) => setTimeout(r, 150));
+      expect(st.killed).toContainEqual([-777, 'SIGKILL']);
+      expect(removed).toBe(false); // the child has not closed
+      expect(readdirSync(join(dir, 'tts', 'work'))).toHaveLength(1); // its temp dir is still there
+      st.release();
+      expect(await removal).toEqual({ removed: true });
+      expect(existsSync(join(dir, 'tts'))).toBe(false);
+      const err = await speaking;
+      expect([err?.status, err?.code]).toEqual([409, 'voice_tts_missing']);
+    } finally { st.killSpy.mockRestore(); }
+  });
+
+  it('cancelling an install (remove) kills the child group and waits for its close before removing anything', async () => {
+    const st = stubbornSpawn();
+    try {
+      const s = service({ spawn: st.spawn });
+      await s.startInstall([VOICE_A.id]);
+      await new Promise((r) => setTimeout(r, 60));
+      expect(st.started()).toBe(1); // the venv child, hanging
+      let removed = false;
+      const removal = s.remove().then(() => { removed = true; });
+      await new Promise((r) => setTimeout(r, 100));
+      expect(st.killed).toContainEqual([-777, 'SIGKILL']);
+      expect(removed).toBe(false);
+      st.release();
+      await removal;
+      expect(existsSync(join(dir, 'tts'))).toBe(false);
+    } finally { st.killSpy.mockRestore(); }
+  });
+
+  it('install errors carry no child stderr (the venv failure names only the remedy)', async () => {
+    const { spawn } = fakeSpawn(() => ({ code: 1, stderr: 'SECRET-STDERR-TEXT' }));
+    const s = service({ spawn });
+    await s.startInstall([VOICE_A.id]);
+    await s.installDone();
+    const err = (await s.status()).install!.error!;
+    expect(err).not.toContain('SECRET-STDERR-TEXT');
+    expect(err).toContain('python3-venv');
+  });
+
   it('a failing child that echoes its input leaks it into no log, audit record or response', async () => {
     const lines: string[] = [];
     const stream = { write: (l: string) => { lines.push(l); } };
@@ -704,7 +773,7 @@ describe('tts revision: isolation, deadlines, cleanup and verification', () => {
     const afterTtl = probes;
     await s.status();
     expect(probes).toBe(afterTtl);
-    s.remove();
+    await s.remove();
     await s.status();
     expect(probes).toBeGreaterThan(afterTtl); // DELETE
     const afterRemove = probes;
