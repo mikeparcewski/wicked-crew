@@ -10,6 +10,30 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.18.14] — 2026-11-12
+
+A dependency patch. Needs wicked-core-ts 0.15.43 (`^0.15.43`), bundles wicked-studio 0.16.9, and moves the
+interactive bridge floor to `^0.16.2`. No crew source change beyond the floor; wicked-crew-api-types is unchanged
+(0.208.0) and the garden floor stays 12.68.0.
+
+**Upgrading:**
+
+- **wicked-interactive 0.16.2 (floor `^0.16.2`, wicked-interactive#349).** A demo's recorded video, captions and
+  poster stream again when the documents live under a dot directory, which crew's default docs root
+  (`~/.wicked-crew`) is, so an edited demo cut keeps playing. A `wicked-interactive` 0.16.1 binary on PATH is now
+  below the floor, so crew spawns `npx wicked-interactive@^0.16.2` instead; upgrade the global install
+  (`npm i -g wicked-interactive@0.16.2`) to keep using the PATH binary. A 0.16.1 bridge that is adopted keeps serving
+  until it restarts (crew#1288).
+- **wicked-core-ts 0.15.43.** An unchained `cd <dir>` followed by a line break and a write is refused as advisory
+  with its `&&` remedy, so the seat retries instead of the unit being denied, and `cd <dir> && cat > f <<'EOF'` with
+  a plain-data heredoc passes (core#1465). Corroboration counts the documents wicked-estate 0.35.4 converts (PDF,
+  Word, PowerPoint, Excel, OpenDocument, RTF, EPUB) as docs (core#1467). No image is rebuilt.
+- **wicked-estate 0.35.4** (installed beside crew from its latest GitHub release) indexes and ingests those
+  documents as Markdown. Its first `index` re-reads every file; back up the store first if you rely on node
+  semantic fields (wicked-estate#438).
+- **wicked-studio 0.16.9.** At full size the editor's chat shows the seat's change card, and the header no longer
+  shows a run id or overlaps its controls (studio#1139); MCP is a choice in the Steering type picker (studio#1141).
+
 ## [0.18.13] — 2026-11-12
 
 A patch for chat-made work on the Kubernetes seat floor and for chat-made demo videos. A Desk chat scoped to "All
@@ -6991,7 +7015,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.13...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.14...HEAD
+[0.18.14]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.13...v0.18.14
 [0.18.13]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.12...v0.18.13
 [0.18.12]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.11...v0.18.12
 [0.18.11]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.10...v0.18.11

@@ -94,8 +94,10 @@ describe('the wicked-interactive spec crew resolves', () => {
     expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.15.1' }).belowFloor).toBe(true);
     // …and 0.16.0 now (the bridge listened on every interface — wicked-interactive#344; shipped 0.16.1).
     expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.16.0' }).belowFloor).toBe(true);
-    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.16.1' }).belowFloor).toBeUndefined();
-    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '0.16.1-rc.1' }).belowFloor).toBeUndefined();
+    // …and 0.16.1 now (a recording under a dot directory did not stream — wicked-interactive#349; shipped 0.16.2).
+    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.16.1' }).belowFloor).toBe(true);
+    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.16.2' }).belowFloor).toBeUndefined();
+    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '0.16.2-rc.1' }).belowFloor).toBeUndefined();
     // An upper-bound-only range has no floor to compare — accepted, not flagged.
     expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '<1.0.0' })).toEqual({ spec: 'wicked-interactive@<1.0.0', range: '<1.0.0', source: 'env' });
     // A tag, an x-range, a union, a path, a different package, a whole spec: not a floor within the package.
@@ -147,15 +149,18 @@ describe.skipIf(process.platform === 'win32')('the installed wicked-interactive 
   }
 
   it('a PATH binary within the range is preferred; out of range, unreadable or absent falls back to npx', () => {
-    const inRange = prefix('0.16.1');
+    const inRange = prefix('0.16.2');
     const old = prefix('0.9.4');
     const wildcardBind = prefix('0.16.0');
+    const dotDirRecording = prefix('0.16.1');
     const nameless = prefix(null);
     const empty = mkdtempSync(join(tmpdir(), 'wi-empty-'));
     try {
-      expect(resolveInteractiveBinary({ PATH: [empty, inRange.bin].join(delimiter) })).toEqual({ path: join(inRange.bin, 'wicked-interactive'), version: '0.16.1' });
+      expect(resolveInteractiveBinary({ PATH: [empty, inRange.bin].join(delimiter) })).toEqual({ path: join(inRange.bin, 'wicked-interactive'), version: '0.16.2' });
       // A 0.16.0 binary (it bound every interface, wicked-interactive#344) is below the floor: npx instead.
       expect(resolveInteractiveBinary({ PATH: wildcardBind.bin })).toBeNull();
+      // A 0.16.1 binary (a recording under a dot directory did not stream, wicked-interactive#349) is below it too.
+      expect(resolveInteractiveBinary({ PATH: dotDirRecording.bin })).toBeNull();
       // The FIRST on PATH decides (what a shell would run): an out-of-range one ahead means npx.
       expect(resolveInteractiveBinary({ PATH: [old.bin, inRange.bin].join(delimiter) })).toBeNull();
       expect(resolveInteractiveBinary({ PATH: nameless.bin })).toBeNull();
@@ -164,7 +169,7 @@ describe.skipIf(process.platform === 'win32')('the installed wicked-interactive 
       // The operator's range override is the one checked.
       expect(resolveInteractiveBinary({ PATH: old.bin, [INTERACTIVE_SPEC_ENV]: '^0.9.4' })).toEqual({ path: join(old.bin, 'wicked-interactive'), version: '0.9.4' });
     } finally {
-      for (const d of [inRange.dir, old.dir, wildcardBind.dir, nameless.dir, empty]) rmSync(d, { recursive: true, force: true });
+      for (const d of [inRange.dir, old.dir, wildcardBind.dir, dotDirRecording.dir, nameless.dir, empty]) rmSync(d, { recursive: true, force: true });
     }
   });
 

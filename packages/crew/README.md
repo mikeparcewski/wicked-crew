@@ -104,7 +104,7 @@ engine cannot store dead-letter to
 `WICKED_APPS_EMIT_DEADLETTER` is honoured), are counted on
 `GET /api/v1/diagnostics` → `governance` (a `governance.deadletter` finding), and are drained back
 with `wicked-crew governance replay <outbox>`. The interactive document bridge is spawned on demand
-as `npx wicked-interactive@^0.16.1` (0.16.1 listens on loopback only; 0.16.0 keeps a demo cut's history and restores an earlier cut; 0.15.0 lands a chat-made draft only on the head it started from; 0.14.1
+as `npx wicked-interactive@^0.16.2` (0.16.2 streams a recording from a dot directory; 0.16.1 listens on loopback only; 0.16.0 keeps a demo cut's history and restores an earlier cut; 0.15.0 lands a chat-made draft only on the head it started from; 0.14.1
 carries the demo import crew's demo runs use; 0.12.0
 confined export asset reads to the document's own and approved roots); `WICKED_INTERACTIVE_SPEC` overrides the range (semver range
 only, validated; invalid values are named on the boot line and ignored, a floor below crew's need
