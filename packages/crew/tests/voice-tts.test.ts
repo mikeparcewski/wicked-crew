@@ -327,6 +327,44 @@ describe('tts text and synthesis', () => {
     }
   });
 
+  it('refuses a malformed PCM header and leaves no file', async () => {
+    const bad = (mut: (b: Buffer) => void, trim = 0): Buffer => { const b = wav(); mut(b); return trim > 0 ? b.subarray(0, b.length - trim) : b; };
+    const cases: Array<[string, Buffer]> = [
+      ['bad blockAlign', bad((b) => b.writeUInt16LE(3, 32))],
+      ['bad byteRate', bad((b) => b.writeUInt32LE(12345, 28))],
+      ['zero channels', bad((b) => b.writeUInt16LE(0, 22))],
+      ['zero sample rate', bad((b) => b.writeUInt32LE(0, 24))],
+      ['odd bit depth', bad((b) => b.writeUInt16LE(12, 34))],
+      ['data not whole blocks', bad((b) => b.writeUInt32LE(b.readUInt32LE(40) - 1, 40), 1)],
+    ];
+    for (const [name, out] of cases) {
+      expect(ttsWavProblem(out), name).not.toBeNull();
+      const s = service({ spawn: fakeSpawn(piper(() => out)).spawn });
+      installed(s);
+      const err = await s.speak('hello', VOICE_A.id).then(() => null, (e: unknown) => e as VoiceError);
+      expect([err?.status, err?.code], name).toEqual([500, 'voice_tts_failed']);
+      expect(readdirSync(join(dir, 'tts', 'work')), name).toEqual([]);
+      rmSync(join(dir, 'tts'), { recursive: true, force: true });
+    }
+    expect(ttsWavProblem(wav())).toBeNull();
+  });
+
+  it('caps what piper may print in bytes, not characters', async () => {
+    // a child that writes 30,000 three-byte characters on stderr (90,000 bytes)
+    const spawn = vi.fn(() => {
+      const c = new EventEmitter() as FakeChild;
+      c.stdin = new PassThrough(); c.stdout = new PassThrough(); c.stderr = new PassThrough(); c.kill = () => true;
+      setImmediate(() => { c.stderr.write(Buffer.from('€'.repeat(30_000))); c.stderr.end(); setImmediate(() => c.emit('close', 1)); });
+      return c;
+    });
+    const capped = service({ spawn: spawn as unknown as VoiceSpawn });
+    const r = await (capped as unknown as { run: (c: string, a: string[], o: object) => Promise<{ stderr: string }> }).run('x', [], { env: {}, timeoutMs: 5000 });
+    const bytes = Buffer.byteLength(r.stderr);
+    expect(bytes).toBeLessThanOrEqual(65_536);
+    expect(bytes).toBeGreaterThan(65_536 - 4);
+    expect(r.stderr.length).toBeLessThan(30_000);
+  });
+
   it('caps what piper may print', async () => {
     const big = 'x'.repeat(200_000);
     const s = service({ spawn: fakeSpawn(() => ({ code: 1, stderr: big })).spawn });

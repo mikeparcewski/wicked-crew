@@ -17,11 +17,12 @@ import { spawn as nodeSpawn, spawnSync, type ChildProcess } from 'node:child_pro
 import { createHash, randomBytes } from 'node:crypto';
 import { createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { arch as osArch, platform as osPlatform } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { fileURLToPath } from 'node:url';
+import type { VoiceTtsStatus } from 'wicked-crew-api-types';
 
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { TTS_ENGINE, TTS_VOICES, TTS_VOICES_SOURCE, ttsVoiceUrl, type TtsVoice, type TtsVoiceFile } from './tts-manifest.js';
@@ -76,8 +77,9 @@ export function normalizeSpeakText(text: string): string {
 export function ttsWavProblem(buf: Buffer): string | null {
   if (buf.length < 12 || buf.toString('ascii', 0, 4) !== 'RIFF' || buf.toString('ascii', 8, 12) !== 'WAVE') return 'not a RIFF/WAVE file';
   let at = 12;
-  let byteRate = 0;
+  let fmt: { blockAlign: number } | null = null;
   let data = 0;
+  let dataBeforeFmt = false;
   while (at + 8 <= buf.length) {
     const id = buf.toString('ascii', at, at + 4);
     const size = buf.readUInt32LE(at + 4);
@@ -85,15 +87,29 @@ export function ttsWavProblem(buf: Buffer): string | null {
     if (body + size > buf.length) return `the ${id.trim() || 'unnamed'} chunk runs past the end of the file`;
     if (id === 'fmt ') {
       if (size < 16) return 'the fmt chunk is too short';
+      if (fmt !== null) return 'more than one fmt chunk';
       if (buf.readUInt16LE(body) !== 1) return 'not PCM audio';
-      byteRate = buf.readUInt32LE(body + 8);
+      const channels = buf.readUInt16LE(body + 2);
+      const rate = buf.readUInt32LE(body + 4);
+      const byteRate = buf.readUInt32LE(body + 8);
+      const blockAlign = buf.readUInt16LE(body + 12);
+      const bits = buf.readUInt16LE(body + 14);
+      if (channels < 1) return 'no channels';
+      if (rate <= 0) return 'a zero sample rate';
+      if (![8, 16, 24, 32].includes(bits)) return `${bits}-bit samples are not PCM audio`;
+      if (blockAlign !== (channels * bits) / 8) return 'the block alignment does not match the channels and bit depth';
+      if (byteRate !== rate * blockAlign) return 'the byte rate does not match the sample rate and block alignment';
+      fmt = { blockAlign };
     } else if (id === 'data') {
+      if (fmt === null) dataBeforeFmt = true;
       data += size;
+      if (fmt !== null && size % fmt.blockAlign !== 0) return 'the data chunk is not a whole number of blocks';
     }
     at = body + size + (size % 2);
   }
-  if (byteRate === 0) return 'no usable fmt chunk';
-  if (data === 0 || data / byteRate <= 0) return 'no audio in the data chunk';
+  if (fmt === null) return 'no usable fmt chunk';
+  if (dataBeforeFmt) return 'the data chunk comes before the fmt chunk';
+  if (data === 0) return 'no audio in the data chunk';
   return null;
 }
 
@@ -118,15 +134,9 @@ export function pythonHint(plat: NodeJS.Platform): string {
   return 'Install Python 3 with its venv module: on Debian or Ubuntu, sudo apt install python3 python3-venv.';
 }
 
-export interface TtsInstallState { state: 'running' | 'failed'; step: string; error: string | null }
-
-export interface TtsStatusBody {
-  supported: { ok: boolean; reason: string | null };
-  python: { found: boolean; path: string | null; version: string | null };
-  engine: { found: boolean; version: string | null };
-  voices: Record<string, { installed: boolean; name: string; accent: string; licence: string; bytes: number; source: string }>;
-  install: TtsInstallState | null;
-}
+/** The status body is the public wire type (`GET /voice/tts`). */
+export type TtsStatusBody = VoiceTtsStatus;
+type TtsInstallState = NonNullable<VoiceTtsStatus['install']>;
 
 export interface TtsDeps {
   /** The voice cache dir (the engine and voices live under `tts/` in it). */
@@ -453,8 +463,9 @@ export class TtsService {
         reject(new VoiceError(500, 'voice_tts_failed', `Could not start ${command}: ${e instanceof Error ? e.message : String(e)}`));
         return;
       }
-      let stdout = '';
-      let stderr = '';
+      const out: Buffer[] = [];
+      const err: Buffer[] = [];
+      const held = { out: 0, err: 0 };
       let settled = false;
       let watcher: NodeJS.Timeout | null = null;
       const finish = (f: () => void): void => {
@@ -483,19 +494,38 @@ export class TtsService {
           } catch { /* not written yet */ }
         }, 50);
       }
-      child.stdout?.setEncoding('utf8');
-      child.stderr?.setEncoding('utf8');
-      child.stdout?.on('data', (d: string) => { if (stdout.length < TTS_OUTPUT_CAP_BYTES) stdout = (stdout + d).slice(0, TTS_OUTPUT_CAP_BYTES); });
-      child.stderr?.on('data', (d: string) => { if (stderr.length < TTS_OUTPUT_CAP_BYTES) stderr = (stderr + d).slice(0, TTS_OUTPUT_CAP_BYTES); });
+      // Each stream keeps at most TTS_OUTPUT_CAP_BYTES BYTES; it is decoded only after the cap.
+      const keep = (into: Buffer[], which: 'out' | 'err') => (d: Buffer | string): void => {
+        const chunk = typeof d === 'string' ? Buffer.from(d) : d;
+        const room = TTS_OUTPUT_CAP_BYTES - held[which];
+        if (room <= 0) return;
+        const part = chunk.length > room ? chunk.subarray(0, room) : chunk;
+        into.push(part);
+        held[which] += part.length;
+      };
+      child.stdout?.on('data', keep(out, 'out'));
+      child.stderr?.on('data', keep(err, 'err'));
       child.on('error', (e) => finish(() => reject(new VoiceError(500, 'voice_tts_failed', `Could not start ${command}: ${e.message}`))));
-      child.on('close', (code) => finish(() => resolve({ code, stdout, stderr })));
+      child.on('close', (code) => finish(() => resolve({ code, stdout: decodeCapped(out), stderr: decodeCapped(err) })));
       child.stdin?.on('error', () => undefined);
       child.stdin?.end(o.stdin ?? '');
     });
   }
 }
 
-function basename(p: string): string { return p.slice(p.lastIndexOf('/') + 1); }
+/** Buffers cut at a byte cap, decoded as UTF-8 without a torn character at the cut. */
+function decodeCapped(chunks: Buffer[]): string {
+  const buf = Buffer.concat(chunks);
+  let end = buf.length;
+  if (end > 0 && end >= TTS_OUTPUT_CAP_BYTES) {
+    let i = end - 1;
+    while (i > 0 && (buf[i]! & 0xc0) === 0x80) i -= 1; // back to the lead byte of the last character
+    const lead = buf[i]!;
+    const need = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+    if (end - i < need) end = i;
+  }
+  return buf.subarray(0, end).toString('utf8');
+}
 
 /** The last two lines of a child's stderr, for a one-line error. */
 function tail(s: string): string { return s.trim().split('\n').slice(-2).join(' ').slice(0, 400); }
