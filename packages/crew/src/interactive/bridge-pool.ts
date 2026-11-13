@@ -196,7 +196,13 @@ const INTERACTIVE_PACKAGE = 'wicked-interactive';
  * PATH binary resolves to 0.16.0; as before, a 0.16.0 bridge that is adopted keeps serving until it restarts
  * (crew#1288).
  */
-export const INTERACTIVE_DEFAULT_RANGE = '^0.16.1';
+/**
+ * 0.16.2 (wicked-interactive#349): a demo's recorded video, captions and poster stream when the documents live under a
+ * dot directory, which crew's default docs root (`~/.wicked-crew`) is; 0.16.1 refused the dot segment, so an edited cut
+ * stopped playing. The floor follows so neither the npx spawn nor a PATH binary resolves to 0.16.1; as before, a 0.16.1
+ * bridge that is adopted keeps serving until it restarts (crew#1288).
+ */
+export const INTERACTIVE_DEFAULT_RANGE = '^0.16.2';
 /** The env override of the RANGE (not the package). */
 export const INTERACTIVE_SPEC_ENV = 'WICKED_INTERACTIVE_SPEC';
 /** The default spec — what the daemon spawns with no override. */
