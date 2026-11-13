@@ -122,12 +122,24 @@ function installed(s: TtsService, voice: TtsVoice = VOICE_A): void {
   writeFileSync(join(dir, 'tts', 'voices', voice.id, `${voice.id}.onnx.json`), 'c');
 }
 
+/**
+ * The output path of a piper launch: the argument after `-f`, and only for an argv that is a piper launch
+ * (`-I -m piper ... -f <out>`). Any other argv is a test bug and fails loudly, never a stray file named after an entry.
+ */
+function outputArg(args: readonly string[]): string {
+  const f = args.indexOf('-f');
+  if (args[0] !== '-I' || args[1] !== '-m' || args[2] !== 'piper' || f < 0 || args[f + 1] === undefined || args[f + 1]!.startsWith('-')) {
+    throw new Error(`unexpected argv for a piper stand-in: ${args.join(' ')}`);
+  }
+  return args[f + 1]!;
+}
+
 /** A piper stand-in: writes `out` to the `-f` file. */
 function piper(out: () => Buffer | null, seen: Call[] = []): Behaviour {
   return (call) => {
     seen.push(call);
     const o = out();
-    if (o !== null) writeFileSync(call.args[call.args.indexOf('-f') + 1]!, o);
+    if (o !== null) writeFileSync(outputArg(call.args), o);
   };
 }
 
@@ -313,8 +325,8 @@ describe('tts text and synthesis', () => {
 
   it('a timeout, an oversize file and a corrupt WAV each leave no file and answer an error', async () => {
     const cases: Array<[string, Partial<TtsDeps>, Behaviour, number, string]> = [
-      ['timeout', { timeoutMs: 80 }, (c) => { writeFileSync(c.args[c.args.indexOf('-f') + 1]!, wav()); return { hang: true }; }, 504, 'voice_timeout'],
-      ['oversize while writing', { maxWavBytes: 1000 }, (c) => { writeFileSync(c.args[c.args.indexOf('-f') + 1]!, wav(4000)); return { hang: true }; }, 500, 'voice_tts_failed'],
+      ['timeout', { timeoutMs: 80 }, (c) => { writeFileSync(outputArg(c.args), wav()); return { hang: true }; }, 504, 'voice_timeout'],
+      ['oversize while writing', { maxWavBytes: 1000 }, (c) => { writeFileSync(outputArg(c.args), wav(4000)); return { hang: true }; }, 500, 'voice_tts_failed'],
       ['oversize after exit', { maxWavBytes: 1000 }, piper(() => wav(4000)), 500, 'voice_tts_failed'],
       ['corrupt', {}, piper(() => Buffer.from('RIFF....garbage')), 500, 'voice_tts_failed'],
       ['empty audio', {}, piper(() => wav(0)), 500, 'voice_tts_failed'],
@@ -643,7 +655,7 @@ describe('tts revision: isolation, deadlines, cleanup and verification', () => {
       child.kill = () => true;
       child.stdin.resume();
       child.stdin.on('finish', () => {
-        writeFileSync(args[args.indexOf('-f') + 1]!, wav());
+        writeFileSync(outputArg(args), wav());
         if (starts === 2) setTimeout(() => child.emit('close', 0), 5);
       });
       closeChild = () => child.emit('close', null);
@@ -686,7 +698,7 @@ describe('tts revision: isolation, deadlines, cleanup and verification', () => {
   }
 
   it('removing while a synthesis runs kills its group and deletes nothing until the child has closed', async () => {
-    const st = stubbornSpawn((args) => writeFileSync(args[args.indexOf('-f') + 1]!, wav()));
+    const st = stubbornSpawn((args) => writeFileSync(outputArg(args), wav()));
     try {
       const s = service({ spawn: st.spawn });
       installed(s);
@@ -708,7 +720,7 @@ describe('tts revision: isolation, deadlines, cleanup and verification', () => {
   });
 
   it('a synthesis queued behind the one being cancelled never starts, and none starts while removing', async () => {
-    const st = stubbornSpawn((args) => writeFileSync(args[args.indexOf('-f') + 1]!, wav()));
+    const st = stubbornSpawn((args) => writeFileSync(outputArg(args), wav()));
     try {
       const s = service({ spawn: st.spawn });
       installed(s);
@@ -818,7 +830,7 @@ describe('tts revision: isolation, deadlines, cleanup and verification', () => {
   it('refuses a synthesis output that is not a regular file, and removes it', async () => {
     const secret = join(dir, 'target.txt');
     writeFileSync(secret, 'untouched');
-    const s = service({ spawn: fakeSpawn((c) => { symlinkSync(secret, c.args[c.args.indexOf('-f') + 1]!); }).spawn });
+    const s = service({ spawn: fakeSpawn((c) => { symlinkSync(secret, outputArg(c.args)); }).spawn });
     installed(s);
     const err = await s.speak('hello', VOICE_A.id).then(() => null, (e: unknown) => e as VoiceError);
     expect([err?.status, err?.code]).toEqual([500, 'voice_tts_failed']);
@@ -832,7 +844,7 @@ describe('tts revision: isolation, deadlines, cleanup and verification', () => {
     const s = service({ spawn: fakeSpawn(piper(() => wav(), seen)).spawn });
     installed(s);
     await s.speak('hello', VOICE_A.id);
-    const out = seen[0]!.args[seen[0]!.args.indexOf('-f') + 1]!;
+    const out = outputArg(seen[0]!.args);
     expect(out).toMatch(/\/tts\/work\/s-[^/]+\/out\.wav$/);
   });
 
@@ -885,5 +897,25 @@ describe('tts revision: isolation, deadlines, cleanup and verification', () => {
     expect((await s.sample(VOICE_A.id)).equals(first)).toBe(true);
     expect(seen).toHaveLength(3);
     expect(readFileSync(cached).equals(first)).toBe(true);
+  });
+});
+
+describe('voice suite hygiene', () => {
+  it('outputArg refuses an argv that is not a piper launch', () => {
+    expect(() => outputArg(['-I', '-m', 'pip', 'install'])).toThrow(/unexpected argv/);
+    expect(() => outputArg(['-I', '-m', 'piper', '-m', 'x'])).toThrow(/unexpected argv/);
+    expect(() => outputArg(['-I', '-m', 'piper', '-f'])).toThrow(/unexpected argv/);
+    expect(outputArg(['-I', '-m', 'piper', '-f', '/o.wav'])).toBe('/o.wav');
+  });
+
+  it('a speak, sample and install leave no new file in the package directory', async () => {
+    const before = readdirSync(process.cwd()).sort();
+    const writer = piper(() => wav());
+    const s = service({ spawn: installSpawn((c) => (c.args.includes('piper') ? writer(c) : undefined)).spawn });
+    await s.startInstall([VOICE_A.id]);
+    await s.installDone();
+    await s.speak('hello', VOICE_A.id);
+    await s.sample(VOICE_A.id);
+    expect(readdirSync(process.cwd()).sort()).toEqual(before);
   });
 });
