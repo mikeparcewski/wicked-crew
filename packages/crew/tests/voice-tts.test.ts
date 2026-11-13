@@ -707,6 +707,28 @@ describe('tts revision: isolation, deadlines, cleanup and verification', () => {
     } finally { st.killSpy.mockRestore(); }
   });
 
+  it('a synthesis queued behind the one being cancelled never starts, and none starts while removing', async () => {
+    const st = stubbornSpawn((args) => writeFileSync(args[args.indexOf('-f') + 1]!, wav()));
+    try {
+      const s = service({ spawn: st.spawn });
+      installed(s);
+      const settle = (p: Promise<Buffer>) => p.then(() => null, (e: unknown) => e as VoiceError);
+      const active = settle(s.speak('one', VOICE_A.id));
+      await new Promise((r) => setTimeout(r, 60));
+      const queued = settle(s.speak('two', VOICE_A.id));
+      const removal = s.remove();
+      const during = await settle(s.speak('three', VOICE_A.id)); // while the removal waits for the child
+      expect([during?.status, during?.code]).toEqual([409, 'voice_tts_missing']);
+      await new Promise((r) => setTimeout(r, 100));
+      st.release();
+      await removal;
+      expect(st.started()).toBe(1); // neither the queued nor the late call ever spawned
+      expect((await queued)?.code).toBe('voice_tts_missing');
+      expect((await active)?.code).toBe('voice_tts_missing');
+      expect(existsSync(join(dir, 'tts'))).toBe(false);
+    } finally { st.killSpy.mockRestore(); }
+  });
+
   it('cancelling an install (remove) kills the child group and waits for its close before removing anything', async () => {
     const st = stubbornSpawn();
     try {

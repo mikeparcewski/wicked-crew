@@ -247,6 +247,9 @@ export class TtsService {
   private picked: { at: number; value: Picked } | null = null;
   private picking: Promise<Picked> | null = null;
   /** Syntheses in flight: removal cancels them and waits for each to finish its cleanup. */
+  /** Bumped by every removal: a synthesis that queued before it never starts after it. */
+  private epoch = 0;
+  private removing = 0;
   private readonly synths = new Set<{ abort: AbortController; done: Promise<unknown> }>();
 
   constructor(private readonly deps: TtsDeps) {
@@ -532,17 +535,23 @@ export class TtsService {
   /** Remove the engine, the voices and the cached samples. An install in flight is cancelled first. */
   async remove(): Promise<{ removed: boolean }> {
     this.gen += 1;
-    const install = this.inflight;
-    install?.abort.abort();
-    for (const s of this.synths) s.abort.abort();
-    // The files go only after every child has closed: no descendant can write into a directory being removed.
-    await Promise.allSettled([install?.done, ...[...this.synths].map((x) => x.done)]);
-    this.inflight = null;
-    this.installState = null;
-    this.picked = null;
-    const had = this.exists(this.root());
-    rmSync(this.root(), { recursive: true, force: true });
-    return { removed: had };
+    this.epoch += 1;
+    this.removing += 1;
+    try {
+      const install = this.inflight;
+      install?.abort.abort();
+      for (const s of this.synths) s.abort.abort();
+      // The files go only after every child has closed: no descendant can write into a directory being removed.
+      await Promise.allSettled([install?.done, ...[...this.synths].map((x) => x.done)]);
+      this.inflight = null;
+      this.installState = null;
+      this.picked = null;
+      const had = this.exists(this.root());
+      rmSync(this.root(), { recursive: true, force: true });
+      return { removed: had };
+    } finally {
+      this.removing -= 1;
+    }
   }
 
   /** Speak `text` in `voice`; the WAV bytes. Nothing about the text is kept. */
@@ -551,8 +560,9 @@ export class TtsService {
     this.ready(v);
     const line = normalizeSpeakText(text);
     if (line === '') throw new VoiceError(400, 'voice_text_empty', 'There is nothing to read aloud.');
+    const epoch = this.epoch;
     return this.exclusive(async () => {
-      this.ready(v);
+      this.ready(v, epoch);
       return this.synthesize(v, line);
     });
   }
@@ -561,8 +571,9 @@ export class TtsService {
   async sample(voice: string): Promise<Buffer> {
     const v = this.voiceById(voice);
     this.ready(v);
+    const epoch = this.epoch;
     return this.exclusive(async () => {
-      this.ready(v);
+      this.ready(v, epoch);
       const cached = this.samplePath(v.id);
       const sum = `${cached}.sha256`;
       if (this.exists(cached)) {
@@ -598,7 +609,8 @@ export class TtsService {
   }
 
   /** The engine and the voice, or the 409 that names what is missing (no fallback). */
-  private ready(v: TtsVoice): void {
+  private ready(v: TtsVoice, epoch: number = this.epoch): void {
+    if (this.removing > 0 || epoch !== this.epoch) throw new VoiceError(409, 'voice_tts_missing', 'The speech engine is being removed.');
     if (!this.engineInstalled()) throw new VoiceError(409, 'voice_tts_missing', 'The speech engine is not installed; install it first (it needs your consent).');
     if (!this.voiceInstalled(v)) throw new VoiceError(409, 'voice_tts_missing', `The voice ${v.id} is not installed; install it first.`);
   }
