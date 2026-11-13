@@ -59,6 +59,11 @@ const RESERVED_EXACT: ReadonlySet<string> = new Set([
   'NODE_EXTRA_CA_CERTS', 'REQUESTS_CA_BUNDLE', 'PYTHONHTTPSVERIFY',
   'PERL5OPT', 'PERL5DB', 'PERLLIB', 'RUBYLIB', 'JAVA_TOOL_OPTIONS', '_JAVA_OPTIONS', 'JDK_JAVA_OPTIONS', 'BUN_OPTIONS', 'CLASSPATH',
   'AWS_CA_BUNDLE', 'GRPC_DEFAULT_SSL_ROOTS_FILE_PATH',
+  // The same code-loading / startup-injection class, for the runtimes the first pass did not name: Ruby gem
+  // paths, .NET startup hooks and the CoreCLR profiler, the glibc loader's auxiliary search paths, and the flag
+  // that turns an Electron binary into a Node interpreter.
+  'GEM_HOME', 'GEM_PATH', 'DOTNET_STARTUP_HOOKS', 'CORECLR_PROFILER', 'CORECLR_ENABLE_PROFILING',
+  'GCONV_PATH', 'LOCPATH', 'NLSPATH', 'ELECTRON_RUN_AS_NODE',
 ]);
 const RESERVED_PREFIXES: readonly string[] = ['LD_', 'DYLD_', 'GIT_', 'NPM_CONFIG_', 'CURL_', 'SSL_CERT_', 'NODE_TLS_', 'OPENSSL_'];
 const CREDENTIAL_NAME_PARTS: readonly string[] = ['TOKEN', 'SECRET', 'PASSWORD', 'PASSWD', 'CREDENTIAL', 'AUTH', 'API_KEY', 'ACCESS_KEY', 'PRIVATE_KEY'];

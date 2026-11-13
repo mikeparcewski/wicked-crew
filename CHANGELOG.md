@@ -24,7 +24,9 @@ mentioned only where a daemon release depends on them.
   process starts, loads code or reaches the network (PATH, HOME, NODE_OPTIONS, LD_*, DYLD_*, *_PROXY, GIT_*,
   NPM_CONFIG_*, NODE_TLS_*, OPENSSL_*, and the runtime/startup and network-trust names PERL5OPT, PERL5DB, PERLLIB,
   RUBYLIB, JAVA_TOOL_OPTIONS, _JAVA_OPTIONS, JDK_JAVA_OPTIONS, BUN_OPTIONS, CLASSPATH, AWS_CA_BUNDLE,
-  GRPC_DEFAULT_SSL_ROOTS_FILE_PATH, ...), the server's own secret variable, credential-named variables and
+  GRPC_DEFAULT_SSL_ROOTS_FILE_PATH, and the same class for the runtimes the first pass did not name — GEM_HOME,
+  GEM_PATH, DOTNET_STARTUP_HOOKS, CORECLR_PROFILER, CORECLR_ENABLE_PROFILING, GCONV_PATH, LOCPATH, NLSPATH,
+  ELECTRON_RUN_AS_NODE, ...), the server's own secret variable, credential-named variables and
   credential-shaped values (those belong in `secret`). Any other kind refuses `env` (400). The agent view never
   carries it. The non-secret `env` is now part of the execution descriptor a call binds to: an env-only change changes
   the Apps source descriptor hash (so a stale lock and write grant are withdrawn on recheck) and the PM entry's

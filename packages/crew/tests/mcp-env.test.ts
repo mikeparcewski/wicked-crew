@@ -75,6 +75,21 @@ describe('validateServerEnv', () => {
     expect(r?.message).toContain(name);
     expect(r?.message).not.toContain(SENTINEL);
   });
+
+  // (CX1 review, same class) The code-loading / startup-injection siblings the first pass did not name:
+  // Ruby gem paths, .NET startup hooks + CoreCLR profiler, the glibc loader's auxiliary search paths, and
+  // ELECTRON_RUN_AS_NODE. Each is a reserved_name, in any case, with no value in the error.
+  const RESERVED_RUNTIME_SIBLINGS = [
+    'GEM_HOME', 'GEM_PATH', 'DOTNET_STARTUP_HOOKS', 'CORECLR_PROFILER', 'CORECLR_ENABLE_PROFILING',
+    'GCONV_PATH', 'LOCPATH', 'NLSPATH', 'ELECTRON_RUN_AS_NODE',
+  ];
+  it.each(RESERVED_RUNTIME_SIBLINGS.flatMap((n) => [n, n.toLowerCase()]))('refuses %s as reserved_name, named, no value', (name) => {
+    const r = validateServerEnv({ [name]: SENTINEL });
+    expect(r?.code).toBe('reserved_name');
+    expect(r?.name).toBe(name);
+    expect(r?.message).toContain(name);
+    expect(r?.message).not.toContain(SENTINEL);
+  });
 });
 
 describe('McpServerConfigSchema env', () => {
