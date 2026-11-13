@@ -54,6 +54,7 @@ import { bindingFor, bindingInForce, bindingOnSave } from '../knowledge/trackers
 import { PROJECTION_UNKNOWN, type TrackerProjectionLookup, trackerLinkViews } from '../knowledge/trackers/view.js';
 import { checkSourceDocument, DeploymentPolicyError, policyVersionOf } from '../knowledge/registry/policy.js';
 import { canonicalJson, deriveToolClass, effectiveToolClass, APPS_SERVER, ESTATE_SERVER, type HashedRestTarget, type HashedToolShape, MCP_SERVER_NAME_RE, mcpSubject, parseMcpSubject, sha256Hex, toolSchemaHash } from './classify.js';
+import { envFingerprint } from './env.js';
 import type { McpUpstreamConfig, ProbedTool, ProbeResult, Prober } from './probe.js';
 import { GENERATIONS_KEPT, type McpRegistryFile, type McpRegistryStore, type McpServerRecord, type McpToolRecord } from './registry-store.js';
 import { restTarget } from './rest.js';
@@ -1422,7 +1423,7 @@ export function isGovernedRecord(s: Pick<McpServerRecord, 'kind' | 'pm'>): boole
  * "query" off, as a source's descriptor change does. Never a secret value.
  */
 export function pmDescriptorHash(c: McpUpstreamConfig): string {
-  return sha256Hex(canonicalJson({ v: 1, kind: c.kind, command: c.command, args: c.args, url: c.url, auth: c.auth, address: c.address ?? null, pm: c.pm?.system ?? null }));
+  return sha256Hex(canonicalJson({ v: 1, kind: c.kind, command: c.command, args: c.args, url: c.url, auth: c.auth, address: c.address ?? null, pm: c.pm?.system ?? null, env: envFingerprint(c.env) }));
 }
 
 /** A network Postgres source, in either form (the one kind with row writes in v1). */

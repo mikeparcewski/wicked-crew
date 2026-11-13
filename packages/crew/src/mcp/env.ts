@@ -9,8 +9,11 @@
  * code, never the value.
  */
 
+import { createHash } from 'node:crypto';
+
 import { getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js';
 
+import { canonicalJson } from './classify.js';
 import { VALUE_PATTERNS } from './redact.js';
 
 export const ENV_MAX_NAMES = 16;
@@ -35,6 +38,19 @@ export interface EnvRefusal {
 }
 
 const NAME_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
+
+/**
+ * A canonical fingerprint of a stdio server's non-secret `env` (names and values, sorted, hashed), or
+ * `null` when there is none. Bound into the descriptors that decide where a call goes (the Apps lock and
+ * grant, the PM query switch), so an env-only change is a different execution target (CX1 review).
+ */
+export function envFingerprint(env: Readonly<Record<string, string>> | undefined | null): string | null {
+  if (env == null) return null;
+  const names = Object.keys(env);
+  if (names.length === 0) return null;
+  const pairs = names.sort().map((n) => [n, env[n]] as const);
+  return createHash('sha256').update(canonicalJson(pairs)).digest('hex');
+}
 
 /** What the SDK's safe inherited set holds on any platform, on top of what `getDefaultEnvironment()` reads here. */
 const SDK_DEFAULT_NAMES: readonly string[] = ['HOME', 'LOGNAME', 'PATH', 'SHELL', 'TERM', 'USER', 'APPDATA', 'HOMEDRIVE', 'HOMEPATH', 'LOCALAPPDATA', 'PATHEXT', 'PROCESSOR_ARCHITECTURE', 'SYSTEMDRIVE', 'SYSTEMROOT', 'TEMP', 'USERNAME', 'USERPROFILE', 'PROGRAMFILES'];

@@ -14343,6 +14343,8 @@ export interface McpPreviewResponse {
     toolbox?: ToolboxSourceDocument;
     descriptorVersion?: 1 | 2;
     policyVersion?: string;
+    /** (chat-extend CX1) `mcp-stdio` only: the non-secret env this preview would save; `configView` returns it. */
+    env?: Record<string, string>;
   };
   /**
    * (api-types 0.175.0, DES-APPS-001 §5.1) `sql`/`graphql` only: what the describe found —
