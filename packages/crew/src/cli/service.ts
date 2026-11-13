@@ -158,10 +158,15 @@ function sdPath(what: string, p: string): string {
   return p.replace(/%/g, '%%');
 }
 
-/** An ExecStart= word: double-quoted, `\` and `"` escaped, `%` doubled, `$` doubled (never an env expansion). */
-function sdExecWord(s: string): string {
+/**
+ * An ExecStart= word: double-quoted, `\` and `"` escaped, `%` doubled. In an argument `$` is doubled so
+ * it is never an environment expansion; the executable (first word) is a path systemd takes as written
+ * (no `$` substitution), so a `$$` there would name another file — its `$` stays single.
+ */
+function sdExecWord(s: string, i: number): string {
   sdNoControl('an ExecStart word', s);
-  return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%').replace(/\$/g, '$$$$')}"`;
+  const esc = s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%');
+  return `"${i === 0 ? esc : esc.replace(/\$/g, '$$$$')}"`;
 }
 
 /** An Environment= assignment: one double-quoted `KEY=value` word, `\` and `"` escaped, `%` doubled. */

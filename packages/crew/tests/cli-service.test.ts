@@ -137,15 +137,15 @@ describe('unit rendering', () => {
     expect(logPathFromUnit(text)).toBe(spec.logPath);
   });
 
-  it('systemd: % doubled everywhere, $ doubled in ExecStart, " and \\ escaped in quoted words', () => {
+  it('systemd: % doubled everywhere, $ doubled in ExecStart arguments only (the executable path is taken as written), " and \\ escaped in quoted words', () => {
     const spec: ServiceSpec = {
-      program: ['/opt/a$b/node', '/opt/"q"/100%/x\\y.js'],
+      program: ['/opt/a$b/node', '/opt/"q"/100%/x\\y.js', '--p=$HOME'],
       env: { K: 'a"b\\c$d%e' },
       logPath: '/l/100%/x.log',
       workingDir: '/w/50% "off" $HOME',
     };
     const text = renderSystemdUnit(spec);
-    expect(text).toContain('ExecStart="/opt/a$$b/node" "/opt/\\"q\\"/100%%/x\\\\y.js"');
+    expect(text).toContain('ExecStart="/opt/a$b/node" "/opt/\\"q\\"/100%%/x\\\\y.js" "--p=$$HOME"');
     expect(text).toContain('Environment="K=a\\"b\\\\c$d%%e"');
     expect(text).toContain('WorkingDirectory=/w/50%% "off" $HOME\n');
     expect(logPathFromUnit(text)).toBe(spec.logPath);
