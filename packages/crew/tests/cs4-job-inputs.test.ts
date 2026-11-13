@@ -292,7 +292,7 @@ describe('CS4 job document authorisation and filling', () => {
       rebuilt = (result.body['view'] as { proposal: ArtifactProposal }).proposal;
     }
     expect(jobInputsOfProposal(rebuilt).documents).toEqual([]);
-    expect(token(rebuilt, 'documents').documents).toEqual([]);
+    expect(rebuilt.sentence!.tokens.some((t) => t.kind === 'documents')).toBe(false);
     if (path === 'go' || path === 'reshape') expect(jobInputsOfProposal(r.launches[0]!.resolution).documents).toEqual([]);
   });
 
