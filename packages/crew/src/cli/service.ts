@@ -165,6 +165,14 @@ function sdPath(what: string, p: string): string {
  */
 function sdExecWord(s: string, i: number): string {
   sdNoControl('an ExecStart word', s);
+  if (i === 0) {
+    // systemd checks the unquoted executable path with string_is_safe (load-fragment.c, string-util.c): a quote or backslash is refused however it is escaped.
+    const c = /['"\\]/.exec(s)?.[0];
+    if (c !== undefined) {
+      const name = c === "'" ? 'a single quote' : c === '"' ? 'a double quote' : 'a backslash';
+      throw new Error(`systemd refuses an ExecStart executable path containing ${name} (${c}): "${s}" — install Node under a path without it`);
+    }
+  }
   const esc = s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%');
   return `"${i === 0 ? esc : esc.replace(/\$/g, '$$$$')}"`;
 }

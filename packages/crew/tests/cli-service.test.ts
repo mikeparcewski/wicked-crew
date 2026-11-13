@@ -165,15 +165,37 @@ describe('unit rendering', () => {
     expect(bad({ env: { K: 'a\nb' } })).toThrow(/control/);
   });
 
-  const analyzer = spawnSync('systemd-analyze', ['--version']);
-  it.skipIf(analyzer.error !== undefined || analyzer.status !== 0)('systemd-analyze verify --user accepts the unit for a plain path and a path with spaces', () => {
+  it('systemd (crew#1549): an executable path with \', " or \\ is refused by name; the same characters in an argument still render', () => {
+    const prog = (...program: string[]) => () => renderSystemdUnit({ ...SPEC, program });
+    expect(prog("/opt/o'k/node", 'x.js')).toThrow(/single quote.*without it/);
+    expect(prog('/opt/o"k/node', 'x.js')).toThrow(/double quote.*without it/);
+    expect(prog('/opt/o\\k/node', 'x.js')).toThrow(/backslash.*without it/);
+    const text = renderSystemdUnit({ ...SPEC, program: ['/usr/bin/node', `/o'k/"x\\.js`] });
+    expect(text).toContain(`ExecStart="/usr/bin/node" "/o'k/\\"x\\\\.js"`);
+  });
+
+  // `verify --user` needs a user runtime directory and a manager. Probe it with a known-valid unit first, so an
+  // environment that cannot run it skips with the reason instead of passing without having checked anything.
+  const verify = (unit: string) => spawnSync('systemd-analyze', ['verify', '--user', unit], { encoding: 'utf8' });
+  const probeDir = mkdtempSync(join(tmpdir(), 'crew-sd-probe-'));
+  const probeUnit = join(probeDir, 'probe.service');
+  writeFileSync(probeUnit, '[Service]\nType=simple\nExecStart=/bin/true\n');
+  const probe = verify(probeUnit);
+  rmSync(probeDir, { recursive: true, force: true });
+  const skipReason =
+    probe.error !== undefined
+      ? `systemd-analyze unavailable: ${probe.error.message}`
+      : probe.status !== 0
+        ? `systemd-analyze verify --user cannot run here: ${probe.stderr.trim()}`
+        : null;
+  if (skipReason !== null) console.warn(`skipping the systemd-analyze check: ${skipReason}`);
+  it.skipIf(skipReason !== null)('systemd-analyze verify --user accepts the unit for a plain path and a path with spaces', () => {
     for (const workingDir of ['/tmp', '/tmp/my dir 100%']) {
-      const dir = tmpHome();
-      mkdirSync(join(dir, 'x'), { recursive: true });
-      const unit = join(dir, 'wicked-crew.service');
+      const unit = join(tmpHome(), 'wicked-crew.service');
       writeFileSync(unit, renderSystemdUnit({ ...SPEC, program: ['/bin/true'], workingDir, logPath: '/tmp/crew.log' }));
-      const r = spawnSync('systemd-analyze', ['verify', '--user', unit], { encoding: 'utf8' });
-      expect(r.stderr).not.toMatch(/bad unit file setting|not absolute/);
+      const r = verify(unit);
+      expect(r.error, String(r.error)).toBeUndefined();
+      expect(r.status, r.stderr).toBe(0);
     }
   });
 });
