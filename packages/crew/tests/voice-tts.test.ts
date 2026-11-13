@@ -3,7 +3,8 @@
 
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -11,9 +12,10 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { TTS_ENGINE, TTS_VOICES, ttsVoiceUrl, type TtsVoice } from '../src/voice/tts-manifest.js';
-import { TtsService, lockPath, normalizeSpeakText, ttsWavProblem, type PythonInfo, type TtsDeps } from '../src/voice/tts.js';
+import { TTS_MIN_PLATFORM, TtsService, lockPath, normalizeSpeakText, probePython, ttsWavProblem, type PythonInfo, type TtsDeps } from '../src/voice/tts.js';
 import { VoiceError, type VoiceSpawn } from '../src/voice/service.js';
 import { registerVoiceRoutes } from '../src/voice/routes.js';
+import { registerServerErrorBody } from '../src/api/server-error-body.js';
 import type { AuditLog } from '../src/api/audit.js';
 import type { Actor } from '../src/core/types.js';
 
@@ -30,21 +32,21 @@ function wav(samples = 1600): Buffer {
 }
 
 interface FakeChild extends EventEmitter { stdin: PassThrough; stdout: PassThrough; stderr: PassThrough; kill: (s?: string) => boolean }
-interface Call { command: string; args: string[]; env: NodeJS.ProcessEnv; stdin: string }
+interface Call { command: string; args: string[]; env: NodeJS.ProcessEnv; stdin: string; cwd?: string; detached?: boolean }
 type Behaviour = (call: Call) => { code?: number; stderr?: string; hang?: boolean } | void;
 
 /** A process stand-in: records the call, runs `behave` once its stdin closes. */
 function fakeSpawn(behave: Behaviour) {
   const calls: Call[] = [];
   const live = { now: 0, max: 0 };
-  const spawn = vi.fn((command: string, args: string[], opts: { env?: NodeJS.ProcessEnv }) => {
+  const spawn = vi.fn((command: string, args: string[], opts: { env?: NodeJS.ProcessEnv; cwd?: string; detached?: boolean }) => {
     const child = new EventEmitter() as FakeChild;
     child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
     child.kill = () => { live.now -= 1; setImmediate(() => child.emit('close', null)); return true; };
     const chunks: Buffer[] = [];
     child.stdin.on('data', (c: Buffer) => chunks.push(c));
     child.stdin.on('finish', () => {
-      const call: Call = { command, args: [...args], env: opts.env ?? {}, stdin: Buffer.concat(chunks).toString('utf8') };
+      const call: Call = { command, args: [...args], env: opts.env ?? {}, cwd: opts.cwd, detached: opts.detached, stdin: Buffer.concat(chunks).toString('utf8') };
       calls.push(call);
       live.now += 1; live.max = Math.max(live.max, live.now);
       const r = behave(call) ?? {};
@@ -56,7 +58,7 @@ function fakeSpawn(behave: Behaviour) {
   return { spawn: spawn as unknown as VoiceSpawn, calls, live };
 }
 
-const PY: PythonInfo = { path: '/usr/bin/python3', version: '3.12.1', minor: 12 };
+const PY: PythonInfo = { path: '/usr/bin/python3', version: '3.12.1', minor: 12, machine: 'x86_64' };
 
 let dir: string;
 let locks: string;
@@ -93,8 +95,8 @@ const okFetch = (async (url: string) => {
 /** `venv` creates <dir>/bin/python; `pip` and piper follow `extra`. */
 function installSpawn(extra: Behaviour = () => undefined) {
   return fakeSpawn((call) => {
-    if (call.args[0] === '-m' && call.args[1] === 'venv') {
-      const target = call.args[2]!;
+    if (call.args[0] === '-I' && call.args[1] === '-m' && call.args[2] === 'venv') {
+      const target = call.args[3]!;
       mkdirSync(join(target, 'bin'), { recursive: true });
       writeFileSync(join(target, 'bin', 'python'), '');
       return;
@@ -105,7 +107,7 @@ function installSpawn(extra: Behaviour = () => undefined) {
 
 function service(extra: Partial<TtsDeps> = {}): TtsService {
   return new TtsService({
-    dir, locksDir: locks, platform: 'linux', arch: 'x64', env: { PATH: '/usr/bin', PIP_INDEX_URL: 'https://evil.example', PYTHONPATH: '/x' },
+    dir, locksDir: locks, platform: 'linux', osRelease: () => '23.6.0', glibc: () => '2.35', env: { PATH: '/usr/bin', PIP_INDEX_URL: 'https://evil.example', PYTHONPATH: '/x' },
     probe: (cmd) => (cmd === 'python3' ? PY : null), fetch: okFetch, voices: [VOICE_A, VOICE_B], ...extra,
   });
 }
@@ -133,7 +135,7 @@ describe('tts install', () => {
   it('runs pip hash-locked, isolated, binary-only, from one index, with no config file', async () => {
     const { spawn, calls } = installSpawn();
     const s = service({ spawn });
-    expect(s.startInstall([VOICE_A.id])).toEqual({ started: true });
+    expect(await s.startInstall([VOICE_A.id])).toEqual({ started: true });
     await s.installDone();
     const pip = calls.find((c) => c.args.includes('pip'))!;
     expect(pip.command).toMatch(/\/tts\/engine\.tmp-[0-9a-f]+\/bin\/python$/);
@@ -148,18 +150,19 @@ describe('tts install', () => {
     expect(calls[0]!.command).toBe(PY.path);
     expect(existsSync(join(dir, 'tts', 'engine', 'bin', 'python'))).toBe(true);
     expect(readdirSync(join(dir, 'tts')).filter((n) => n.includes('.tmp-'))).toEqual([]);
-    expect(s.status().install).toBeNull();
-    expect(s.status().voices[VOICE_A.id]!.installed).toBe(true);
-    expect(s.status().voices[VOICE_B.id]!.installed).toBe(false);
+    const st = await s.status();
+    expect(st.install).toBeNull();
+    expect(st.voices[VOICE_A.id]!.installed).toBe(true);
+    expect(st.voices[VOICE_B.id]!.installed).toBe(false);
   });
 
   it('a failed pip leaves no venv and says why', async () => {
     const { spawn } = installSpawn((c) => (c.args.includes('pip') ? { code: 1, stderr: 'ERROR: THESE PACKAGES DO NOT MATCH THE HASHES' } : undefined));
     const s = service({ spawn });
-    s.startInstall([VOICE_A.id]);
+    await s.startInstall([VOICE_A.id]);
     await s.installDone();
     expect(readdirSync(join(dir, 'tts'))).toEqual([]);
-    const st = s.status();
+    const st = await s.status();
     expect(st.install).toMatchObject({ state: 'failed', step: 'engine' });
     expect(st.install!.error).toContain('DO NOT MATCH');
     expect(st.engine.found).toBe(false);
@@ -168,16 +171,17 @@ describe('tts install', () => {
   it('a failed venv leaves nothing and names the remedy', async () => {
     const { spawn } = fakeSpawn(() => ({ code: 1, stderr: 'ensurepip is not available' }));
     const s = service({ spawn });
-    s.startInstall([VOICE_A.id]);
+    await s.startInstall([VOICE_A.id]);
     await s.installDone();
-    expect(s.status().install!.error).toContain('python3-venv');
+    expect((await s.status()).install!.error).toContain('python3-venv');
     expect(existsSync(join(dir, 'tts', 'engine'))).toBe(false);
   });
 
   it('refuses a voice outside the manifest (400) and consent is required at the route', async () => {
     const s = service({ spawn: installSpawn().spawn });
-    expect(() => s.startInstall(['en_US-evil-high'])).toThrow(VoiceError);
-    try { s.startInstall(['../../etc/passwd']); } catch (e) { expect((e as VoiceError).status).toBe(400); expect((e as VoiceError).code).toBe('voice_unknown'); }
+    await expect(s.startInstall(['en_US-evil-high'])).rejects.toBeInstanceOf(VoiceError);
+    const bad = await s.startInstall(['../../etc/passwd']).then(() => null, (e: unknown) => e as VoiceError);
+    expect([bad?.status, bad?.code]).toEqual([400, 'voice_unknown']);
     const { app, audit } = await routes(s);
     const noConsent = await app.inject({ method: 'POST', url: '/api/v1/voice/tts', payload: { voices: [VOICE_A.id] } });
     expect(noConsent.statusCode).toBe(400);
@@ -200,32 +204,33 @@ describe('tts install', () => {
       const served = bad === 'sha' ? Buffer.from(body.toString().replace('model', 'MODEL')) : bad === 'size-short' ? body.subarray(0, 3) : Buffer.concat([body, Buffer.from('x')]);
       const fetchBad = (async (url: string) => (url === ttsVoiceUrl(VOICE_A.model) ? new Response(new Uint8Array(served)) : okFetch(url))) as unknown as typeof fetch;
       const s = service({ spawn: installSpawn().spawn, fetch: fetchBad });
-      s.startInstall([VOICE_A.id]);
+      await s.startInstall([VOICE_A.id]);
       await s.installDone();
-      expect(s.status().install!.state).toBe('failed');
-      expect(s.status().install!.error).toMatch(/nothing was kept/);
+      const failed = (await s.status()).install!;
+      expect(failed.state).toBe('failed');
+      expect(failed.error).toMatch(/nothing was kept/);
       const voices = join(dir, 'tts', 'voices');
       expect(readdirSync(voices)).toEqual([]);
     }
   });
 
-  it('says plainly when the platform, architecture or Python is unsupported', () => {
-    const win = service({ platform: 'win32' }).status();
+  it('says plainly when the platform, architecture or Python is unsupported', async () => {
+    const win = await service({ platform: 'win32' }).status();
     expect(win.supported).toMatchObject({ ok: false });
     expect(win.supported.reason).toMatch(/Windows is not supported/);
-    expect(service({ arch: 'ia32' }).status().supported.ok).toBe(false);
-    const none = service({ probe: () => null }).status();
+    expect((await service({ probe: () => ({ ...PY, machine: 'i686' }) }).status()).supported.ok).toBe(false);
+    const none = await service({ probe: () => null }).status();
     expect(none.python.found).toBe(false);
     expect(none.supported.reason).toMatch(/No Python 3/);
     expect(none.supported.reason).toMatch(/apt install python3 python3-venv/);
-    expect(service({ probe: () => null, platform: 'darwin', arch: 'arm64' }).status().supported.reason).toMatch(/Python 3\.12 from python\.org or (with )?Homebrew/);
-    const py315 = service({ probe: () => ({ path: '/usr/bin/python3', version: '3.15.0', minor: 15 }) }).status();
+    expect((await service({ probe: () => null, platform: 'darwin' }).status()).supported.reason).toMatch(/Python 3\.12 from python\.org or (with )?Homebrew/);
+    const py315 = await service({ probe: () => ({ path: '/usr/bin/python3', version: '3.15.0', minor: 15, machine: 'x86_64' }) }).status();
     expect(py315.supported.ok).toBe(false);
     expect(py315.supported.reason).toMatch(/3\.15.*not supported/);
-    expect(() => service({ platform: 'win32' }).startInstall([VOICE_A.id])).toThrow(/Windows/);
+    await expect(service({ platform: 'win32' }).startInstall([VOICE_A.id])).rejects.toThrow(/Windows/);
   });
 
-  it('picks Python by WICKED_CREW_PYTHON, then python3, python3.14 ... python3.9, skipping a minor without a lock', () => {
+  it('picks Python by WICKED_CREW_PYTHON, then python3, python3.14 ... python3.9, skipping a minor without a lock', async () => {
     const probed: string[] = [];
     const table: Record<string, PythonInfo> = {
       python3: { path: '/p/python3', version: '3.13.0', minor: 13 }, // no cp313 lock in the fixture
@@ -234,27 +239,27 @@ describe('tts install', () => {
       'python3.11': { path: '/p/python3.11', version: '3.11.0', minor: 11 },
       '/x/mine': { path: '/x/mine', version: '3.11.4', minor: 11 },
     };
-    const probe = (c: string) => { probed.push(c); return table[c] ?? null; };
-    expect(service({ probe }).pickPython().python!.path).toBe('/p/python3.12');
+    const probe = (c: string) => { probed.push(c); const t = table[c]; return t === undefined ? null : { ...t, machine: 'x86_64' }; };
+    expect((await service({ probe }).pickPython()).python!.path).toBe('/p/python3.12');
     expect(probed).toEqual(['python3', 'python3.14', 'python3.13', 'python3.12']);
     probed.length = 0;
     const env = { PATH: '/usr/bin', WICKED_CREW_PYTHON: '/x/mine' };
-    expect(service({ probe, env }).pickPython().python!.path).toBe('/x/mine');
+    expect((await service({ probe, env }).pickPython()).python!.path).toBe('/x/mine');
     expect(probed).toEqual(['/x/mine']);
-    const bad = service({ probe, env: { ...env, WICKED_CREW_PYTHON: '/x/none' } }).pickPython();
+    const bad = await service({ probe, env: { ...env, WICKED_CREW_PYTHON: '/x/none' } }).pickPython();
     expect(bad.python).toBeNull();
     expect(bad.problem).toMatch(/WICKED_CREW_PYTHON/);
   });
 
-  it('Intel Mac with Python 3.14 is unsupported and the person is told plainly', () => {
+  it('Intel Mac with Python 3.14 is unsupported and the person is told plainly', async () => {
     expect(lockPath('darwin', 'x64', 14)).toBeNull();
     expect(lockPath('darwin', 'arm64', 14)).not.toBeNull();
-    const probe = () => ({ path: '/usr/local/bin/python3', version: '3.14.0', minor: 14 });
-    const s = service({ platform: 'darwin', arch: 'x64', probe, locksDir: join(__dirname, '..', 'voice-locks') });
-    const st = s.status();
+    const probe = () => ({ path: '/usr/local/bin/python3', version: '3.14.0', minor: 14, machine: 'x86_64' });
+    const s = service({ platform: 'darwin', probe, locksDir: join(__dirname, '..', 'voice-locks') });
+    const st = await s.status();
     expect(st.supported.ok).toBe(false);
     expect(st.supported.reason).toMatch(/3\.14.*not supported.*Intel Mac/);
-    expect(() => s.startInstall([VOICE_A.id])).toThrow(/Intel Mac/);
+    await expect(s.startInstall([VOICE_A.id])).rejects.toThrow(/Intel Mac/);
   });
 
   it('lockPath uses the names Node reports and refuses what has no lock', () => {
@@ -268,7 +273,7 @@ describe('tts install', () => {
 
   it('removes the engine and voices', async () => {
     const s = service({ spawn: installSpawn().spawn });
-    s.startInstall([VOICE_A.id]);
+    await s.startInstall([VOICE_A.id]);
     await s.installDone();
     expect(s.remove()).toEqual({ removed: true });
     expect(existsSync(join(dir, 'tts'))).toBe(false);
@@ -295,9 +300,9 @@ describe('tts text and synthesis', () => {
     const out = await s.speak(text, VOICE_A.id);
     expect(ttsWavProblem(out)).toBeNull();
     const c = seen[0]!;
-    expect(c.args.slice(0, 2)).toEqual(['-m', 'piper']);
+    expect(c.args.slice(0, 3)).toEqual(['-I', '-m', 'piper']);
     expect(c.args.join(' ')).not.toContain('passwd');
-    expect(c.args[c.args.indexOf('-m', 2) + 1]).toMatch(/en_test-a\.onnx$/);
+    expect(c.args[c.args.indexOf('-m', 3) + 1]).toMatch(/en_test-a\.onnx$/);
     expect(c.args[c.args.indexOf('-c') + 1]).toMatch(/en_test-a\.onnx\.json$/);
     expect(c.stdin).toBe('-m /etc/passwd --output_file x second [ [ph] ] line\n');
     expect(c.stdin.trimEnd()).not.toContain('\n');
@@ -516,5 +521,277 @@ describe('voice locks (committed data)', () => {
     const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8')) as { files: string[] };
     expect(pkg.files).toContain('voice-locks');
     expect(lockPath('linux', 'x64', 12)).toBe(join(real, 'linux-x64-cp312.txt'));
+  });
+});
+
+describe('tts revision: isolation, deadlines, cleanup and verification', () => {
+  const HAS_PYTHON = spawnSync('python3', ['-I', '-c', '0']).status === 0;
+
+  it('every Python launch is isolated (-I) and runs with the voice dir as cwd, never the daemon cwd', async () => {
+    const probes: Array<[string, string]> = [];
+    const seen: Call[] = [];
+    const { spawn, calls } = installSpawn(piper(() => wav(), seen));
+    const s = service({ spawn, probe: (cmd, cwd) => { probes.push([cmd, cwd]); return cmd === 'python3' ? PY : null; } });
+    await s.status();
+    await s.startInstall([VOICE_A.id]);
+    await s.installDone();
+    await s.speak('hello', VOICE_A.id);
+    expect(probes.length).toBeGreaterThan(0);
+    for (const [, cwd] of probes) expect(cwd).toBe(dir);
+    expect(calls.length).toBeGreaterThanOrEqual(3); // venv, pip, piper
+    for (const c of calls) {
+      expect(c.args[0], c.args.join(' ')).toBe('-I');
+      expect(c.cwd).toBe(dir);
+      expect(c.cwd).not.toBe(process.cwd());
+    }
+    expect(calls.some((c) => c.args.includes('venv'))).toBe(true);
+    expect(calls.some((c) => c.args.includes('pip'))).toBe(true);
+    expect(calls.some((c) => c.args.includes('piper'))).toBe(true);
+  });
+
+  it.skipIf(!HAS_PYTHON)('the real probe never imports a platform.py planted in its working directory', async () => {
+    const planted = mkdtempSync(join(tmpdir(), 'planted-'));
+    const marker = join(planted, 'EXECUTED');
+    for (const mod of ['platform', 'pip', 'piper']) writeFileSync(join(planted, `${mod}.py`), `open(${JSON.stringify(marker)}, 'w').write('x')\n`);
+    try {
+      const info = await probePython('python3', planted);
+      expect(info).not.toBeNull();
+      expect(info!.machine).toBeTruthy();
+      expect(existsSync(marker)).toBe(false);
+    } finally { rmSync(planted, { recursive: true, force: true }); }
+  });
+
+  it('a download that stalls fails the install, removes the .part and frees the slot', async () => {
+    const stalled = (async (url: string) => {
+      if (url !== ttsVoiceUrl(VOICE_A.model)) return okFetch(url);
+      const body = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new Uint8Array(Buffer.from('mod'))); } }); // never closes
+      return new Response(body, { status: 200 });
+    }) as unknown as typeof fetch;
+    const s = service({ spawn: installSpawn().spawn, fetch: stalled, downloadIdleMs: 60 });
+    await s.startInstall([VOICE_A.id]);
+    await s.installDone();
+    const st = (await s.status()).install!;
+    expect(st.state).toBe('failed');
+    expect(st.error).toMatch(/stalled/);
+    expect(readdirSync(join(dir, 'tts', 'voices'))).toEqual([]);
+    // the slot is free: a second install is accepted, not 409 running
+    await expect(s.startInstall([VOICE_A.id])).resolves.toEqual({ started: true });
+    await s.installDone();
+  });
+
+  it('a download that never answers or never ends is stopped by the overall deadline', async () => {
+    const hang = (async () => new Promise<Response>(() => undefined)) as unknown as typeof fetch;
+    const a = service({ spawn: installSpawn().spawn, fetch: hang, downloadTimeoutMs: 80 });
+    await a.startInstall([VOICE_A.id]);
+    await a.installDone();
+    expect((await a.status()).install!.error).toMatch(/took longer than/);
+    const drip = (async (url: string) => {
+      if (url !== ttsVoiceUrl(VOICE_A.model)) return okFetch(url);
+      const t: { id?: NodeJS.Timeout } = {};
+      const body = new ReadableStream<Uint8Array>({
+        start(c) { t.id = setInterval(() => { try { c.enqueue(new Uint8Array([1])); } catch { /* closed */ } }, 10); },
+        cancel() { clearInterval(t.id); },
+      });
+      return new Response(body, { status: 200 });
+    }) as unknown as typeof fetch;
+    const b = service({ spawn: installSpawn().spawn, fetch: drip, downloadTimeoutMs: 120, downloadIdleMs: 5000 });
+    await b.startInstall([VOICE_A.id]);
+    await b.installDone();
+    expect((await b.status()).install!.error).toMatch(/took longer than/);
+    expect(readdirSync(join(dir, 'tts', 'voices'))).toEqual([]);
+  });
+
+  it('every redirect hop must be https', async () => {
+    const urls: string[] = [];
+    const hop = (to: string) => (async (url: string) => {
+      urls.push(url);
+      if (url === ttsVoiceUrl(VOICE_A.model)) return new Response(null, { status: 302, headers: { location: to } });
+      return okFetch(url);
+    }) as unknown as typeof fetch;
+    const bad = service({ spawn: installSpawn().spawn, fetch: hop('http://cdn.example/model.onnx') });
+    await bad.startInstall([VOICE_A.id]);
+    await bad.installDone();
+    expect((await bad.status()).install!.error).toMatch(/not https/);
+    expect(urls).toEqual([ttsVoiceUrl(VOICE_A.model)]); // the http hop was never requested
+    expect(readdirSync(join(dir, 'tts', 'voices'))).toEqual([]);
+    // an https hop to a body that matches the sha256 and size is accepted
+    const cdn = 'https://cdn.example/m.onnx';
+    const good = (async (url: string) => {
+      if (url === ttsVoiceUrl(VOICE_A.model)) return new Response(null, { status: 302, headers: { location: cdn } });
+      if (url === cdn) return new Response(new Uint8Array(BODIES.get(ttsVoiceUrl(VOICE_A.model))!), { status: 200 });
+      return okFetch(url);
+    }) as unknown as typeof fetch;
+    const ok = service({ spawn: installSpawn().spawn, fetch: good });
+    await ok.startInstall([VOICE_A.id]);
+    await ok.installDone();
+    expect((await ok.status()).voices[VOICE_A.id]!.installed).toBe(true);
+  });
+
+  it('a timeout kills the process group and holds the slot and the temp file until the child has closed', async () => {
+    const killed: Array<[number, string | number | undefined]> = [];
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(((pid: number, sig?: string | number) => { killed.push([pid, sig]); return true; }) as typeof process.kill);
+    const opts: Array<{ detached?: boolean }> = [];
+    let starts = 0;
+    let closeChild: (() => void) | null = null;
+    const spawn = vi.fn((_c: string, args: string[], o: { detached?: boolean }) => {
+      opts.push(o);
+      starts += 1;
+      const child = new EventEmitter() as FakeChild & { pid: number };
+      child.pid = 4242; child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+      child.kill = () => true;
+      child.stdin.resume();
+      child.stdin.on('finish', () => {
+        writeFileSync(args[args.indexOf('-f') + 1]!, wav());
+        if (starts === 2) setTimeout(() => child.emit('close', 0), 5);
+      });
+      closeChild = () => child.emit('close', null);
+      return child;
+    }) as unknown as VoiceSpawn;
+    try {
+      const s = service({ spawn, timeoutMs: 40 });
+      installed(s);
+      const first = s.speak('one', VOICE_A.id).then(() => null, (e: unknown) => e as VoiceError);
+      const second = s.speak('two', VOICE_A.id).then(() => 'ok', (e: unknown) => e);
+      await new Promise((r) => setTimeout(r, 200)); // well past the timeout; the child has not closed
+      expect(killed).toContainEqual([-4242, 'SIGKILL']);
+      expect(opts[0]!.detached).toBe(true);
+      expect(starts).toBe(1); // the waiting synthesis has not been given the slot
+      expect(readdirSync(join(dir, 'tts', 'work'))).toHaveLength(1); // the temp dir is still there
+      closeChild!();
+      const err = await first;
+      expect([err!.status, err!.code]).toEqual([504, 'voice_timeout']);
+      expect(await second).toBe('ok');
+      expect(readdirSync(join(dir, 'tts', 'work'))).toEqual([]);
+    } finally { killSpy.mockRestore(); }
+  });
+
+  it('a failing child that echoes its input leaks it into no log, audit record or response', async () => {
+    const lines: string[] = [];
+    const stream = { write: (l: string) => { lines.push(l); } };
+    const app = Fastify({ logger: { level: 'trace', stream } });
+    registerServerErrorBody(app); // the production error hook: it logs a 500's body
+    const audit = { record: vi.fn() };
+    const s = service({ spawn: fakeSpawn((c) => ({ code: 1, stderr: `Traceback: could not say: ${c.stdin}` })).spawn });
+    installed(s);
+    registerVoiceRoutes(app, { voice: {} as never, tts: s, dashboard: null, audit: audit as unknown as Pick<AuditLog, 'record'> });
+    await app.ready();
+    const res = await app.inject({ method: 'POST', url: '/api/v1/voice/speak', payload: { text: 'PURPLE ELEPHANT SECRET', voice: VOICE_A.id } });
+    expect(res.statusCode).toBe(500);
+    expect(res.body).not.toMatch(/PURPLE|ELEPHANT/);
+    expect(res.json().code).toBe('voice_tts_failed');
+    expect(lines.join('\n')).not.toMatch(/PURPLE|ELEPHANT/);
+    expect(JSON.stringify(audit.record.mock.calls)).not.toMatch(/PURPLE|ELEPHANT/);
+    expect(lines.join('\n')).toContain('voice_tts_failed'); // the hook did log the failure, without the text
+    await app.close();
+  });
+
+  it('status does not block: the probe is asynchronous and cached; install, remove and a minute re-probe', async () => {
+    let probes = 0;
+    let t = 1_000_000;
+    const probe = async (cmd: string) => { probes += 1; await new Promise((r) => setTimeout(r, 5)); return cmd === 'python3' ? PY : null; };
+    const s = service({ spawn: installSpawn().spawn, probe, now: () => t });
+    const pending = s.status();
+    expect(pending).toBeInstanceOf(Promise);
+    await Promise.all([pending, s.status()]); // concurrent calls share one probe round
+    const round = probes;
+    expect(round).toBe(1);
+    await s.status();
+    expect(probes).toBe(round); // cached
+    t += 61_000;
+    await s.status();
+    expect(probes).toBeGreaterThan(round); // a minute on
+    const afterTtl = probes;
+    await s.status();
+    expect(probes).toBe(afterTtl);
+    s.remove();
+    await s.status();
+    expect(probes).toBeGreaterThan(afterTtl); // DELETE
+    const afterRemove = probes;
+    await s.startInstall([VOICE_A.id]);
+    await s.installDone();
+    expect(probes).toBeGreaterThan(afterRemove); // install
+    // and the real probe is a promise, not a blocking spawnSync
+    expect(probePython('python3-that-does-not-exist', dir)).toBeInstanceOf(Promise);
+  });
+
+  it('picks the lock by the architecture Python reports, not Node\'s (Rosetta)', async () => {
+    mkdirSync(locks, { recursive: true });
+    for (const a of ['arm64', 'x64']) writeFileSync(join(locks, `darwin-${a}-cp312.txt`), 'piper-tts==1.8.0 \\\n    --hash=sha256:aa\n');
+    const pick = async (machine: string) => (await service({ platform: 'darwin', probe: () => ({ ...PY, machine }) }).pickPython()).lock;
+    expect(await pick('x86_64')).toBe(join(locks, 'darwin-x64-cp312.txt'));
+    expect(await pick('arm64')).toBe(join(locks, 'darwin-arm64-cp312.txt'));
+    expect(await pick('aarch64')).toBe(join(locks, 'darwin-arm64-cp312.txt'));
+  });
+
+  it('refuses a synthesis output that is not a regular file, and removes it', async () => {
+    const secret = join(dir, 'target.txt');
+    writeFileSync(secret, 'untouched');
+    const s = service({ spawn: fakeSpawn((c) => { symlinkSync(secret, c.args[c.args.indexOf('-f') + 1]!); }).spawn });
+    installed(s);
+    const err = await s.speak('hello', VOICE_A.id).then(() => null, (e: unknown) => e as VoiceError);
+    expect([err?.status, err?.code]).toEqual([500, 'voice_tts_failed']);
+    expect(err!.message).toMatch(/plain file/);
+    expect(readFileSync(secret, 'utf8')).toBe('untouched');
+    expect(readdirSync(join(dir, 'tts', 'work'))).toEqual([]);
+  });
+
+  it('the synthesis output lives in a fresh private directory under work/', async () => {
+    const seen: Call[] = [];
+    const s = service({ spawn: fakeSpawn(piper(() => wav(), seen)).spawn });
+    installed(s);
+    await s.speak('hello', VOICE_A.id);
+    const out = seen[0]!.args[seen[0]!.args.indexOf('-f') + 1]!;
+    expect(out).toMatch(/\/tts\/work\/s-[^/]+\/out\.wav$/);
+  });
+
+  it('checks the RIFF container: the size field must match the file length', () => {
+    expect(ttsWavProblem(wav())).toBeNull();
+    const big = wav(); big.writeUInt32LE(big.readUInt32LE(4) + 100, 4);
+    expect(ttsWavProblem(big)).toMatch(/RIFF size/);
+    const small = wav(); small.writeUInt32LE(4, 4);
+    expect(ttsWavProblem(small)).toMatch(/RIFF size/);
+    const trailing = Buffer.concat([wav(), Buffer.from('junk')]);
+    expect(ttsWavProblem(trailing)).toMatch(/RIFF size/);
+    const noWave = wav(); noWave.write('WAVX', 8, 'ascii');
+    expect(ttsWavProblem(noWave)).toMatch(/RIFF\/WAVE/);
+    const noRiff = wav(); noRiff.write('RIFX', 0, 'ascii');
+    expect(ttsWavProblem(noRiff)).toMatch(/RIFF\/WAVE/);
+  });
+
+  it('refuses a machine older than the baseline the locks were resolved for, and musl', async () => {
+    const generator = readFileSync(join(__dirname, '..', 'scripts', 'generate-voice-locks.mjs'), 'utf8');
+    expect(generator).toContain(`macosx_${TTS_MIN_PLATFORM.darwin.macos}_0_arm64`);
+    expect(generator).toContain(`manylinux_${TTS_MIN_PLATFORM.linux.glibc.join('_')}_x86_64`);
+    const mac = await service({ platform: 'darwin', osRelease: () => '22.6.0' }).status(); // macOS 13
+    expect(mac.supported.ok).toBe(false);
+    expect(mac.supported.reason).toMatch(/macOS 14/);
+    await expect(service({ platform: 'darwin', osRelease: () => '22.6.0' }).startInstall([VOICE_A.id])).rejects.toThrow(/macOS 14/);
+    expect((await service({ platform: 'darwin', osRelease: () => '23.0.0', probe: () => ({ ...PY, machine: 'x86_64' }), locksDir: locks }).status()).supported.reason).not.toMatch(/macOS 14/);
+    const old = await service({ glibc: () => '2.27' }).status();
+    expect(old.supported.ok).toBe(false);
+    expect(old.supported.reason).toMatch(/glibc 2\.27.*2\.28/);
+    const musl = await service({ glibc: () => null }).status();
+    expect(musl.supported.ok).toBe(false);
+    expect(musl.supported.reason).toMatch(/musl/);
+    expect((await service({ glibc: () => '2.28' }).status()).supported.ok).toBe(true);
+    expect((await service({ glibc: () => '2.39' }).status()).supported.ok).toBe(true);
+  });
+
+  it('re-verifies a cached sample on every read: a corrupt or tampered one is removed and regenerated', async () => {
+    const seen: Call[] = [];
+    const s = service({ spawn: fakeSpawn(piper(() => wav(), seen)).spawn });
+    installed(s);
+    const cached = join(dir, 'tts', 'sample', `${VOICE_A.id}-${TTS_ENGINE.version}.wav`);
+    const first = await s.sample(VOICE_A.id);
+    expect(seen).toHaveLength(1);
+    expect((await s.sample(VOICE_A.id)).equals(first)).toBe(true);
+    expect(seen).toHaveLength(1); // a good one is served from the cache
+    writeFileSync(cached, Buffer.from('RIFF....garbage')); // corrupt
+    expect((await s.sample(VOICE_A.id)).equals(first)).toBe(true);
+    expect(seen).toHaveLength(2);
+    writeFileSync(cached, wav(800)); // a valid WAV, but not the recorded one
+    expect((await s.sample(VOICE_A.id)).equals(first)).toBe(true);
+    expect(seen).toHaveLength(3);
+    expect(readFileSync(cached).equals(first)).toBe(true);
   });
 });

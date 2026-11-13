@@ -9,14 +9,17 @@
  *    unsupported, and said so.
  *  - Voices: only the manifest's (tts-manifest.ts); each file is fetched to a `.part`, held to its sha256 and size,
  *    and a mismatch keeps nothing.
- *  - Synthesis: `<venv>/bin/python -m piper -m <onnx> -c <json> -f <temp.wav>`, argv only, the text as ONE line on
+ *  - Synthesis: `<venv>/bin/python -I -m piper -m <onnx> -c <json> -f <temp.wav>`, argv only, the text as ONE line on
  *    stdin (piper parses argv with parse_known_args, so text there could be read as an option).
+ *  - Every Python launch runs isolated (`-I`: no current directory or user site on sys.path, PYTHON* ignored) with the
+ *    voice dir as its cwd, never the daemon's. A child runs in its own process group; a timeout or cancel kills the
+ *    group and the call settles only when the child has closed. A child's stderr never reaches an error body.
  */
 
-import { spawn as nodeSpawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { execFile, spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { arch as osArch, platform as osPlatform } from 'node:os';
+import { type Stats, createWriteStream, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { platform as osPlatform, release as osRelease } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
@@ -43,6 +46,20 @@ export const TTS_MAX_WAV_BYTES = 16 * 1024 * 1024;
 export const TTS_SAMPLE_TEXT = 'Hello, this is how I sound when I read to you.';
 /** The engine install (venv + pip) is given this long. */
 export const TTS_INSTALL_TIMEOUT_MS = 10 * 60_000;
+/** One voice file download is given this long in all, and may go this long without a byte. */
+export const TTS_DOWNLOAD_TIMEOUT_MS = 20 * 60_000;
+export const TTS_DOWNLOAD_IDLE_MS = 30_000;
+/** A voice download follows at most this many redirects, each of them https. */
+export const TTS_MAX_REDIRECTS = 5;
+/** The Python probe result is kept this long. */
+export const TTS_PROBE_TTL_MS = 60_000;
+/** The error text of a failed synthesis: fixed, because the child's stderr can echo the spoken text. */
+const SYNTH_FAILED = 'The speech engine could not read that aloud.';
+/**
+ * The platform baseline the locks were resolved for (`scripts/generate-voice-locks.mjs` TARGETS: macosx_14_0 and the
+ * manylinux_2_28 tag). Older machines are refused in status; Linux on musl has no wheels and is unsupported.
+ */
+export const TTS_MIN_PLATFORM = { darwin: { macos: 14, darwinMajor: 23 }, linux: { glibc: [2, 28] as const } } as const;
 
 const LOCKS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'voice-locks');
 const SUPPORTED_OS = new Set(['darwin', 'linux']);
@@ -77,6 +94,7 @@ export function normalizeSpeakText(text: string): string {
 /** A WAV piper wrote: RIFF/WAVE, a PCM `fmt ` chunk and a `data` chunk of non-zero duration; null when sound. */
 export function ttsWavProblem(buf: Buffer): string | null {
   if (buf.length < 12 || buf.toString('ascii', 0, 4) !== 'RIFF' || buf.toString('ascii', 8, 12) !== 'WAVE') return 'not a RIFF/WAVE file';
+  if (buf.readUInt32LE(4) + 8 !== buf.length) return 'the RIFF size does not match the length of the file';
   let at = 12;
   let fmt: { blockAlign: number } | null = null;
   let data = 0;
@@ -114,16 +132,54 @@ export function ttsWavProblem(buf: Buffer): string | null {
   return null;
 }
 
-export interface PythonInfo { path: string; version: string; minor: number }
+export interface PythonInfo {
+  path: string;
+  version: string;
+  minor: number;
+  /** `platform.machine()` as this Python reports it (an x86_64 Python under Rosetta says x86_64 on an arm64 Mac). */
+  machine?: string;
+}
 
-/** What `<cmd>` is as a CPython 3 interpreter; null when it does not run or is not CPython 3. */
-export function probePython(cmd: string): PythonInfo | null {
+/**
+ * What `<cmd>` is as a CPython 3 interpreter; null when it does not run or is not CPython 3. Run isolated (`-I`) with
+ * `cwd` (the voice dir), so no file of the daemon's working directory is ever imported.
+ */
+export function probePython(cmd: string, cwd: string): Promise<PythonInfo | null> {
+  return new Promise((resolve) => {
+    try {
+      mkdirSync(cwd, { recursive: true });
+      const env: NodeJS.ProcessEnv = {};
+      for (const [k, v] of Object.entries(childEnvWithBootEstateDb(process.env))) if (v !== undefined && !k.startsWith('PYTHON')) env[k] = v;
+      execFile(cmd, ['-I', '-c', 'import sys,platform;print(platform.python_implementation(), sys.version_info[0], sys.version_info[1], sys.version.split()[0], platform.machine(), sys.executable)'],
+        { encoding: 'utf8', timeout: 5000, killSignal: 'SIGKILL', windowsHide: true, cwd, env }, (err, stdout) => {
+          if (err !== null) return resolve(null);
+          const m = /^CPython (\d+) (\d+) (\S+) (\S+) (.+)$/m.exec(stdout);
+          if (m === null || m[1] !== '3') return resolve(null);
+          resolve({ path: m[5]!.trim() === '' ? cmd : m[5]!.trim(), version: m[3]!, minor: Number(m[2]), machine: m[4]! });
+        });
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+/** Node's names (arm64, x64) for what `platform.machine()` reports; null for any other processor. */
+export function archOfMachine(machine: string): string | null {
+  const m = machine.toLowerCase();
+  if (m === 'arm64' || m === 'aarch64') return 'arm64';
+  if (m === 'x86_64' || m === 'amd64') return 'x64';
+  return null;
+}
+
+/** The glibc this Node runs on ("2.35"), null on musl or when it cannot be told. */
+function glibcRuntime(): string | null {
   try {
-    const r = spawnSync(cmd, ['-c', 'import sys,platform;print(platform.python_implementation(), sys.version_info[0], sys.version_info[1], sys.version.split()[0], sys.executable)'], { encoding: 'utf8', timeout: 5000, windowsHide: true, env: childEnvWithBootEstateDb(process.env) });
-    if (r.status !== 0) return null;
-    const m = /^CPython (\d+) (\d+) (\S+) (.+)$/m.exec(r.stdout ?? '');
-    if (m === null || m[1] !== '3') return null;
-    return { path: m[4]!.trim() === '' ? cmd : m[4]!.trim(), version: m[3]!, minor: Number(m[2]) };
+    const rep = process.report as unknown as { excludeNetwork: boolean; getReport(): unknown };
+    const was = rep.excludeNetwork;
+    rep.excludeNetwork = true;
+    const header = (rep.getReport() as { header?: { glibcVersionRuntime?: string } }).header;
+    rep.excludeNetwork = was;
+    return header?.glibcVersionRuntime ?? null;
   } catch {
     return null;
   }
@@ -144,32 +200,42 @@ export interface TtsDeps {
   dir: string;
   env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
-  arch?: string;
   fetch?: typeof fetch;
   spawn?: VoiceSpawn;
   exists?: (p: string) => boolean;
-  /** CPython interpreter facts for a command; tests stand it in. */
-  probe?: (cmd: string) => PythonInfo | null;
+  /** CPython interpreter facts for a command, probed with `cwd` as its working directory; tests stand it in. */
+  probe?: (cmd: string, cwd: string) => PythonInfo | null | Promise<PythonInfo | null>;
+  /** `os.release()` (the Darwin kernel version on a Mac) and the glibc version; tests stand them in. */
+  osRelease?: () => string;
+  glibc?: () => string | null;
+  now?: () => number;
   locksDir?: string;
   timeoutMs?: number;
   installTimeoutMs?: number;
+  downloadTimeoutMs?: number;
+  downloadIdleMs?: number;
   maxWavBytes?: number;
   voices?: readonly TtsVoice[];
 }
 
 interface RunResult { code: number | null; stdout: string; stderr: string }
+interface Picked { python: PythonInfo | null; lock: string | null; problem: string | null }
 
 export class TtsService {
   private readonly env: NodeJS.ProcessEnv;
   private readonly plat: NodeJS.Platform;
-  private readonly arch: string;
   private readonly fetchImpl: typeof fetch;
   private readonly spawnImpl: VoiceSpawn;
   private readonly exists: (p: string) => boolean;
-  private readonly probe: (cmd: string) => PythonInfo | null;
+  private readonly probe: (cmd: string, cwd: string) => PythonInfo | null | Promise<PythonInfo | null>;
+  private readonly release: () => string;
+  private readonly glibc: () => string | null;
+  private readonly now: () => number;
   private readonly locksDir: string;
   private readonly timeoutMs: number;
   private readonly installTimeoutMs: number;
+  private readonly downloadMs: number;
+  private readonly idleMs: number;
   private readonly maxWav: number;
   private readonly voices: readonly TtsVoice[];
   private installState: TtsInstallState | null = null;
@@ -177,18 +243,25 @@ export class TtsService {
   private gen = 0;
   private busy = false;
   private waiting: Array<() => void> = [];
+  /** The last Python probe: kept for a minute, dropped on install and on remove. */
+  private picked: { at: number; value: Picked } | null = null;
+  private picking: Promise<Picked> | null = null;
 
   constructor(private readonly deps: TtsDeps) {
     this.env = deps.env ?? process.env;
     this.plat = deps.platform ?? osPlatform();
-    this.arch = deps.arch ?? osArch();
     this.fetchImpl = deps.fetch ?? fetch;
     this.spawnImpl = deps.spawn ?? (nodeSpawn as VoiceSpawn);
     this.exists = deps.exists ?? existsSync;
     this.probe = deps.probe ?? probePython;
+    this.release = deps.osRelease ?? osRelease;
+    this.glibc = deps.glibc ?? glibcRuntime;
+    this.now = deps.now ?? Date.now;
     this.locksDir = deps.locksDir ?? LOCKS_DIR;
     this.timeoutMs = deps.timeoutMs ?? TTS_TIMEOUT_MS;
     this.installTimeoutMs = deps.installTimeoutMs ?? TTS_INSTALL_TIMEOUT_MS;
+    this.downloadMs = deps.downloadTimeoutMs ?? TTS_DOWNLOAD_TIMEOUT_MS;
+    this.idleMs = deps.downloadIdleMs ?? TTS_DOWNLOAD_IDLE_MS;
     this.maxWav = deps.maxWavBytes ?? TTS_MAX_WAV_BYTES;
     this.voices = deps.voices ?? TTS_VOICES;
   }
@@ -202,36 +275,72 @@ export class TtsService {
   /** Resolves when the install in flight (if any) has finished, whatever its outcome. */
   installDone(): Promise<void> { return this.inflight?.done ?? Promise.resolve(); }
 
-  /** The Python this machine will use: `WICKED_CREW_PYTHON`, else the first of python3, python3.14 ... python3.9 with a lock. */
-  pickPython(): { python: PythonInfo | null; lock: string | null; problem: string | null } {
+  /**
+   * The Python this machine will use: `WICKED_CREW_PYTHON`, else the first of python3, python3.14 ... python3.9 with a
+   * lock. Probed asynchronously and kept for a minute (`fresh` re-probes: install, remove).
+   */
+  async pickPython(fresh = false): Promise<Picked> {
+    if (!fresh && this.picked !== null && this.now() - this.picked.at < TTS_PROBE_TTL_MS) return this.picked.value;
+    if (!fresh && this.picking !== null) return this.picking;
+    const run = this.probeAll().then((value) => {
+      this.picked = { at: this.now(), value };
+      return value;
+    }).finally(() => { if (this.picking === run) this.picking = null; });
+    this.picking = run;
+    return run;
+  }
+
+  private async probeAll(): Promise<Picked> {
     const set = this.env['WICKED_CREW_PYTHON'];
     const wanted = set !== undefined && set.trim() !== '' ? set : null;
     const names = wanted !== null ? [wanted] : ['python3', ...[...TTS_PYTHON_MINORS].reverse().map((n) => `python3.${n}`)];
     let skipped: PythonInfo | null = null;
+    let badArch: string | null = null;
     for (const name of names) {
-      const info = this.probe(name);
+      const info = await this.probe(name, this.deps.dir);
       if (info === null) continue;
-      const lock = lockPath(this.plat, this.arch, info.minor, this.locksDir);
+      // The lock follows the processor the Python itself runs on (Rosetta: an x86_64 Python on an arm64 Mac).
+      const arch = info.machine === undefined ? null : archOfMachine(info.machine);
+      if (info.machine !== undefined && arch === null) { badArch ??= info.machine; continue; }
+      const lock = arch === null ? null : lockPath(this.plat, arch, info.minor, this.locksDir);
       if (lock !== null && this.exists(lock)) return { python: info, lock, problem: null };
       skipped ??= info;
     }
-    if (skipped !== null && lockPath(this.plat, this.arch, skipped.minor, this.locksDir) === null && (TTS_PYTHON_MINORS as readonly number[]).includes(skipped.minor)) {
-      return { python: null, lock: null, problem: `Python ${skipped.version} at ${skipped.path} is not supported on this machine: the speech engine has no build for it on an Intel Mac. Use Python 3.9 to 3.13 (WICKED_CREW_PYTHON names one).` };
+    if (badArch !== null && skipped === null) {
+      return { python: null, lock: null, problem: `The ${badArch} processor is not supported for text to speech (arm64 and x86_64 only).` };
     }
     if (skipped !== null) {
+      const arch = skipped.machine === undefined ? null : archOfMachine(skipped.machine);
+      if (arch !== null && lockPath(this.plat, arch, skipped.minor, this.locksDir) === null && (TTS_PYTHON_MINORS as readonly number[]).includes(skipped.minor)) {
+        return { python: null, lock: null, problem: `Python ${skipped.version} at ${skipped.path} is not supported on this machine: the speech engine has no build for it on an Intel Mac. Use Python 3.9 to 3.13 (WICKED_CREW_PYTHON names one).` };
+      }
       return { python: null, lock: null, problem: `Python ${skipped.version} at ${skipped.path} is not supported: voice needs CPython 3.9 to 3.14. ${pythonHint(this.plat)}` };
     }
     const why = wanted !== null ? `WICKED_CREW_PYTHON (${wanted}) is not a working CPython 3.` : 'No Python 3 was found on this machine.';
     return { python: null, lock: null, problem: `${why} ${pythonHint(this.plat)}` };
   }
 
+  /** The OS is one with a lock, and new enough for the wheels the locks were resolved for. */
   private platformProblem(): string | null {
     if (!SUPPORTED_OS.has(this.plat)) {
       return this.plat === 'win32'
         ? 'Native Windows is not supported for text to speech; use WSL2 (Linux).'
         : `${this.plat} is not supported for text to speech (macOS and Linux only).`;
     }
-    if (!SUPPORTED_ARCH.has(this.arch)) return `The ${this.arch} processor is not supported for text to speech (arm64 and x86_64 only).`;
+    if (this.plat === 'darwin') {
+      const major = Number.parseInt(this.release(), 10);
+      if (Number.isFinite(major) && major < TTS_MIN_PLATFORM.darwin.darwinMajor) {
+        return `This Mac is older than macOS ${TTS_MIN_PLATFORM.darwin.macos}, which the speech engine needs. Update macOS to use text to speech.`;
+      }
+    } else {
+      const glibc = this.glibc();
+      const need = TTS_MIN_PLATFORM.linux.glibc;
+      if (glibc === null) return 'This Linux uses musl, not glibc; the speech engine has no build for it (use a glibc distribution such as Debian or Ubuntu).';
+      const [maj, min] = glibc.split('.').map((n) => Number.parseInt(n, 10));
+      if (Number.isFinite(maj) && Number.isFinite(min) && (maj! < need[0] || (maj === need[0] && min! < need[1]))) {
+        return `This Linux has glibc ${glibc}; the speech engine needs glibc ${need[0]}.${need[1]} or newer (Debian 10, Ubuntu 20.04 or later).`;
+      }
+    }
     return null;
   }
 
@@ -241,9 +350,9 @@ export class TtsService {
     return this.exists(join(this.voiceDir(v.id), basename(v.model.path))) && this.exists(join(this.voiceDir(v.id), basename(v.config.path)));
   }
 
-  status(): TtsStatusBody {
+  async status(): Promise<TtsStatusBody> {
     const platformProblem = this.platformProblem();
-    const picked = platformProblem === null ? this.pickPython() : { python: null, lock: null, problem: null };
+    const picked: Picked = platformProblem === null ? await this.pickPython() : { python: null, lock: null, problem: null };
     const problem = platformProblem ?? picked.problem;
     const engine = this.engineInstalled();
     const voices: TtsStatusBody['voices'] = {};
@@ -266,14 +375,16 @@ export class TtsService {
   }
 
   /**
-   * Install the engine if missing, then the named voices. Returns at once; `status().install` reports it. Only
+   * Install the engine if missing, then the named voices. Resolves at once; `status().install` reports it. Only
    * manifest voices are accepted (400 `voice_unknown`); an unsupported machine is 409 `voice_tts_unsupported`.
    */
-  startInstall(ids: readonly string[]): { started: boolean } {
+  async startInstall(ids: readonly string[]): Promise<{ started: boolean }> {
     const wanted = ids.map((id) => this.voiceById(id));
     if (this.inflight !== null) throw new VoiceError(409, 'voice_install_running', 'The speech install is already running.');
-    const problem = this.platformProblem() ?? this.pickPython().problem;
+    const problem = this.platformProblem() ?? (await this.pickPython(true)).problem;
     if (problem !== null) throw new VoiceError(409, 'voice_tts_unsupported', problem);
+    // The probe awaited: another install may have started meanwhile.
+    if (this.inflight !== null) throw new VoiceError(409, 'voice_install_running', 'The speech install is already running.');
     if (this.engineInstalled() && wanted.every((v) => this.voiceInstalled(v))) return { started: false };
     const gen = ++this.gen;
     const abort = new AbortController();
@@ -314,14 +425,14 @@ export class TtsService {
   }
 
   private async installEngine(gen: number, signal: AbortSignal): Promise<void> {
-    const picked = this.pickPython();
+    const picked = await this.pickPython(true);
     if (picked.python === null || picked.lock === null) throw new Error(picked.problem ?? 'No usable Python.');
     const tmp = join(this.root(), `engine.tmp-${randomBytes(4).toString('hex')}`);
     try {
-      const venv = await this.run(picked.python.path, ['-m', 'venv', tmp], { env: this.childEnv(), timeoutMs: this.installTimeoutMs, signal });
+      const venv = await this.run(picked.python.path, ['-I', '-m', 'venv', tmp], { env: this.childEnv(), timeoutMs: this.installTimeoutMs, signal });
       if (venv.code !== 0) throw new Error(`Creating the Python environment failed (${tail(venv.stderr)}). ${pythonHint(this.plat)}`);
       const pip = await this.run(this.enginePython(tmp), [
-        '-m', 'pip', 'install', '--isolated', '--index-url', TTS_ENGINE.index, '--only-binary=:all:', '--require-hashes', '--no-deps', '-r', picked.lock,
+        '-I', '-m', 'pip', 'install', '--isolated', '--index-url', TTS_ENGINE.index, '--only-binary=:all:', '--require-hashes', '--no-deps', '-r', picked.lock,
       ], { env: this.childEnv({ PIP_CONFIG_FILE: '/dev/null', PIP_DISABLE_PIP_VERSION_CHECK: '1' }), timeoutMs: this.installTimeoutMs, signal });
       if (pip.code !== 0) throw new Error(`Installing ${TTS_ENGINE.name} ${TTS_ENGINE.version} failed (${tail(pip.stderr)})`);
       if (this.gen !== gen || signal.aborted) throw new Error('The install was cancelled.');
@@ -347,25 +458,73 @@ export class TtsService {
     }
   }
 
+  /**
+   * One voice file: an overall deadline and an idle deadline on the body, every redirect hop https, and the bytes held
+   * to the manifest's size and sha256. Any failure leaves no `.part`.
+   */
   private async fetchVoiceFile(file: TtsVoiceFile, dest: string, signal: AbortSignal): Promise<void> {
     const part = `${dest}.part`;
-    const res = await this.fetchImpl(ttsVoiceUrl(file), { redirect: 'follow', signal });
-    if (!res.ok || res.body === null) throw new Error(`The voice download answered ${res.status}.`);
-    const hash = createHash('sha256');
-    let size = 0;
-    const count = new Transform({
-      transform: (chunk: Buffer, _enc, cb) => {
-        size += chunk.length;
-        if (size > file.bytes) return cb(new Error(`The voice file ${basename(file.path)} is larger than its published size (${file.bytes} bytes); nothing was kept.`));
-        hash.update(chunk);
-        cb(null, chunk);
-      },
+    const name = basename(file.path);
+    const stop = new AbortController();
+    let why: string | null = null;
+    const halt = (reason: string): void => { why ??= reason; stop.abort(); };
+    const overall = setTimeout(() => halt(`The voice download of ${name} took longer than ${Math.round(this.downloadMs / 1000)} s and was stopped.`), this.downloadMs);
+    let idle: NodeJS.Timeout | null = null;
+    const touch = (): void => {
+      if (idle !== null) clearTimeout(idle);
+      idle = setTimeout(() => halt(`The voice download of ${name} stalled (no data for ${Math.round(this.idleMs / 1000)} s) and was stopped.`), this.idleMs);
+    };
+    const linked = AbortSignal.any([signal, stop.signal]);
+    const aborted = new Promise<never>((_, reject) => {
+      linked.addEventListener('abort', () => reject(new Error(why ?? 'The install was cancelled.')), { once: true });
     });
-    await pipeline(Readable.fromWeb(res.body as unknown as WebReadableStream<Uint8Array>), count, createWriteStream(part), { signal });
-    const got = hash.digest('hex');
-    if (size !== file.bytes) throw new Error(`The voice file ${basename(file.path)} is ${size} bytes, not its published ${file.bytes}; nothing was kept.`);
-    if (got !== file.sha256) throw new Error(`The voice file ${basename(file.path)} did not match its published checksum (got sha256 ${got}); nothing was kept.`);
-    renameSync(part, dest);
+    aborted.catch(() => undefined);
+    try {
+      touch();
+      let url = ttsVoiceUrl(file);
+      let res: Response | null = null;
+      for (let hop = 0; hop <= TTS_MAX_REDIRECTS; hop++) {
+        if (new URL(url).protocol !== 'https:') throw new Error(`The voice download for ${name} was refused: it is not https.`);
+        const r = await Promise.race([this.fetchImpl(url, { redirect: 'manual', signal: linked }), aborted]);
+        if (r.status >= 300 && r.status < 400) {
+          const loc = r.headers.get('location');
+          void r.body?.cancel().catch(() => undefined);
+          if (loc === null) throw new Error(`The voice download answered ${r.status} with no place to go.`);
+          url = new URL(loc, url).toString();
+          continue;
+        }
+        res = r;
+        break;
+      }
+      if (res === null) throw new Error(`The voice download for ${name} was redirected too many times.`);
+      if (!res.ok || res.body === null) throw new Error(`The voice download answered ${res.status}.`);
+      const hash = createHash('sha256');
+      let size = 0;
+      const count = new Transform({
+        transform: (chunk: Buffer, _enc, cb) => {
+          touch();
+          size += chunk.length;
+          if (size > file.bytes) return cb(new Error(`The voice file ${name} is larger than its published size (${file.bytes} bytes); nothing was kept.`));
+          hash.update(chunk);
+          cb(null, chunk);
+        },
+      });
+      try {
+        await pipeline(Readable.fromWeb(res.body as unknown as WebReadableStream<Uint8Array>), count, createWriteStream(part), { signal: linked });
+      } catch (e) {
+        throw why !== null ? new Error(why) : e;
+      }
+      const got = hash.digest('hex');
+      if (size !== file.bytes) throw new Error(`The voice file ${name} is ${size} bytes, not its published ${file.bytes}; nothing was kept.`);
+      if (got !== file.sha256) throw new Error(`The voice file ${name} did not match its published checksum (got sha256 ${got}); nothing was kept.`);
+      renameSync(part, dest);
+    } catch (e) {
+      rmSync(part, { force: true });
+      throw e;
+    } finally {
+      clearTimeout(overall);
+      if (idle !== null) clearTimeout(idle);
+    }
   }
 
   /** Remove the engine, the voices and the cached samples. An install in flight is cancelled first. */
@@ -374,6 +533,7 @@ export class TtsService {
     this.inflight?.abort.abort();
     this.inflight = null;
     this.installState = null;
+    this.picked = null;
     const had = this.exists(this.root());
     rmSync(this.root(), { recursive: true, force: true });
     return { removed: had };
@@ -391,20 +551,27 @@ export class TtsService {
     });
   }
 
-  /** A fixed sentence in `voice`, cached per (voice, piper version). */
+  /** A fixed sentence in `voice`, cached per (voice, piper version); a cached one is re-verified on every read. */
   async sample(voice: string): Promise<Buffer> {
     const v = this.voiceById(voice);
     this.ready(v);
     return this.exclusive(async () => {
       this.ready(v);
       const cached = this.samplePath(v.id);
+      const sum = `${cached}.sha256`;
       if (this.exists(cached)) {
-        try { return readFileSync(cached); } catch { /* re-made below */ }
+        try {
+          const wav = readFileSync(cached);
+          if (ttsWavProblem(wav) === null && readFileSync(sum, 'utf8').trim() === createHash('sha256').update(wav).digest('hex')) return wav;
+        } catch { /* unreadable or unrecorded: re-made below */ }
+        rmSync(cached, { force: true });
+        rmSync(sum, { force: true });
       }
       const wav = await this.synthesize(v, TTS_SAMPLE_TEXT);
       mkdirSync(dirname(cached), { recursive: true });
       const part = `${cached}.part`;
       writeFileSync(part, wav);
+      writeFileSync(sum, createHash('sha256').update(wav).digest('hex'));
       renameSync(part, cached);
       return wav;
     });
@@ -430,44 +597,58 @@ export class TtsService {
     if (!this.voiceInstalled(v)) throw new VoiceError(409, 'voice_tts_missing', `The voice ${v.id} is not installed; install it first.`);
   }
 
+  /**
+   * Piper writes into a fresh private directory; the output must be a regular file (lstat, so a symlink or a device
+   * is refused), before and while its size is watched. The directory goes only after the child has closed.
+   */
   private async synthesize(v: TtsVoice, line: string): Promise<Buffer> {
     const workDir = join(this.root(), 'work');
     mkdirSync(workDir, { recursive: true });
-    const out = join(workDir, `${randomBytes(6).toString('hex')}.wav`);
+    const scratch = mkdtempSync(join(workDir, 's-'));
+    const out = join(scratch, 'out.wav');
     try {
       const r = await this.run(this.enginePython(), [
-        '-m', 'piper', '-m', join(this.voiceDir(v.id), basename(v.model.path)), '-c', join(this.voiceDir(v.id), basename(v.config.path)), '-f', out,
+        '-I', '-m', 'piper', '-m', join(this.voiceDir(v.id), basename(v.model.path)), '-c', join(this.voiceDir(v.id), basename(v.config.path)), '-f', out,
       ], { env: this.childEnv(), timeoutMs: this.timeoutMs, stdin: `${line}\n`, watch: { file: out, maxBytes: this.maxWav } });
-      if (r.code !== 0) throw new VoiceError(500, 'voice_tts_failed', `piper exited ${r.code}: ${tail(r.stderr) || 'no message'}`);
-      if (!this.exists(out)) throw new VoiceError(500, 'voice_tts_failed', 'piper wrote no audio.');
-      if (statSync(out).size > this.maxWav) throw new VoiceError(500, 'voice_tts_failed', 'The audio is larger than the limit and was dropped.');
+      // The child's stderr can echo the spoken text: it is never put in an error.
+      if (r.code !== 0) throw new VoiceError(500, 'voice_tts_failed', SYNTH_FAILED);
+      const st = lstatOrNull(out);
+      if (st === null) throw new VoiceError(500, 'voice_tts_failed', 'piper wrote no audio.');
+      if (!st.isFile()) throw new VoiceError(500, 'voice_tts_failed', 'piper wrote its output as something other than a plain file; it was refused.');
+      if (st.size > this.maxWav) throw new VoiceError(500, 'voice_tts_failed', 'The audio is larger than the limit and was dropped.');
       const wav = readFileSync(out);
       const problem = ttsWavProblem(wav);
       if (problem !== null) throw new VoiceError(500, 'voice_tts_failed', `piper wrote audio that is not a usable WAV (${problem}).`);
       return wav;
     } finally {
-      rmSync(out, { force: true });
+      rmSync(scratch, { recursive: true, force: true });
     }
   }
 
-  /** Run a child with argv only (never a shell); stdout and stderr each capped; killed at the timeout or when its output file passes a limit. */
+  /**
+   * Run a child with argv only (never a shell), in its own process group, with the voice dir as its cwd; stdout and
+   * stderr each capped. A timeout, a cancel or an output file that passes a limit kills the whole group, and the
+   * promise settles only on the child's `close`, so no descendant can write after the caller cleans up.
+   */
   private run(
     command: string,
     args: readonly string[],
     o: { env: NodeJS.ProcessEnv; timeoutMs: number; stdin?: string; signal?: AbortSignal; watch?: { file: string; maxBytes: number } },
   ): Promise<RunResult> {
+    mkdirSync(this.deps.dir, { recursive: true });
     return new Promise<RunResult>((resolve, reject) => {
       let child: ChildProcess;
       try {
-        child = this.spawnImpl(command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: childEnvWithBootEstateDb(o.env) });
-      } catch (e) {
-        reject(new VoiceError(500, 'voice_tts_failed', `Could not start ${command}: ${e instanceof Error ? e.message : String(e)}`));
+        child = this.spawnImpl(command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: true, cwd: this.deps.dir, env: childEnvWithBootEstateDb(o.env) });
+      } catch {
+        reject(new VoiceError(500, 'voice_tts_failed', 'Could not start the speech engine.'));
         return;
       }
       const out: Buffer[] = [];
       const err: Buffer[] = [];
       const held = { out: 0, err: 0 };
       let settled = false;
+      let pending: Error | null = null;
       let watcher: NodeJS.Timeout | null = null;
       const finish = (f: () => void): void => {
         if (settled) return;
@@ -477,22 +658,33 @@ export class TtsService {
         o.signal?.removeEventListener('abort', onAbort);
         f();
       };
-      const kill = (): void => { try { child.kill('SIGKILL'); } catch { /* already gone */ } };
-      const timer = setTimeout(() => {
+      const kill = (): void => {
+        try {
+          if (child.pid !== undefined && process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL');
+          else child.kill('SIGKILL');
+        } catch {
+          try { child.kill('SIGKILL'); } catch { /* already gone */ }
+        }
+      };
+      /** Record why, kill the group, and wait for `close` to settle. */
+      const stop = (e: Error): void => {
+        if (settled || pending !== null) return;
+        pending = e;
+        clearTimeout(timer);
+        if (watcher !== null) clearInterval(watcher);
         kill();
-        finish(() => reject(new VoiceError(504, 'voice_timeout', `Reading aloud took longer than ${Math.round(o.timeoutMs / 1000)} s and was stopped.`)));
-      }, o.timeoutMs);
-      const onAbort = (): void => { kill(); finish(() => reject(new Error('The install was cancelled.'))); };
+      };
+      const timer = setTimeout(() => stop(new VoiceError(504, 'voice_timeout', `Reading aloud took longer than ${Math.round(o.timeoutMs / 1000)} s and was stopped.`)), o.timeoutMs);
+      const onAbort = (): void => stop(new Error('The install was cancelled.'));
       o.signal?.addEventListener('abort', onAbort, { once: true });
+      if (o.signal?.aborted === true) onAbort();
       if (o.watch !== undefined) {
         const { file, maxBytes } = o.watch;
         watcher = setInterval(() => {
-          try {
-            if (statSync(file).size > maxBytes) {
-              kill();
-              finish(() => reject(new VoiceError(500, 'voice_tts_failed', 'The audio grew past its size limit and was stopped.')));
-            }
-          } catch { /* not written yet */ }
+          const st = lstatOrNull(file);
+          if (st === null) return;
+          if (!st.isFile()) stop(new VoiceError(500, 'voice_tts_failed', 'piper wrote its output as something other than a plain file; it was refused.'));
+          else if (st.size > maxBytes) stop(new VoiceError(500, 'voice_tts_failed', 'The audio grew past its size limit and was stopped.'));
         }, 50);
       }
       // Each stream keeps at most TTS_OUTPUT_CAP_BYTES BYTES; it is decoded only after the cap.
@@ -506,12 +698,19 @@ export class TtsService {
       };
       child.stdout?.on('data', keep(out, 'out'));
       child.stderr?.on('data', keep(err, 'err'));
-      child.on('error', (e) => finish(() => reject(new VoiceError(500, 'voice_tts_failed', `Could not start ${command}: ${e.message}`))));
-      child.on('close', (code) => finish(() => resolve({ code, stdout: decodeCapped(out), stderr: decodeCapped(err) })));
+      child.on('error', () => finish(() => reject(pending ?? new VoiceError(500, 'voice_tts_failed', 'Could not start the speech engine.'))));
+      child.on('close', (code) => finish(() => {
+        if (pending !== null) reject(pending);
+        else resolve({ code, stdout: decodeCapped(out), stderr: decodeCapped(err) });
+      }));
       child.stdin?.on('error', () => undefined);
       child.stdin?.end(o.stdin ?? '');
     });
   }
+}
+
+function lstatOrNull(p: string): Stats | null {
+  try { return lstatSync(p); } catch { return null; }
 }
 
 /** Buffers cut at a byte cap, decoded as UTF-8; StringDecoder without `end()` drops a torn trailing character. */
@@ -519,5 +718,5 @@ function decodeCapped(chunks: Buffer[]): string {
   return new StringDecoder('utf8').write(Buffer.concat(chunks));
 }
 
-/** The last two lines of a child's stderr, for a one-line error. */
+/** The last two lines of a child's stderr, for a one-line error (pip and venv only: they never carry the spoken text). */
 function tail(s: string): string { return s.trim().split('\n').slice(-2).join(' ').slice(0, 400); }

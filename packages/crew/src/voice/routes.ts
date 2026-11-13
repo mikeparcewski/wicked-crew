@@ -146,7 +146,7 @@ export function registerVoiceRoutes(app: FastifyInstance, deps: VoiceRouteDeps):
       scope.get(
         `${V}/voice/tts`,
         { config: { manifest: { responseType: 'VoiceTtsStatus', statusCodes: [200, 403] } } },
-        async () => tts.status(),
+        async () => await tts.status(),
       );
 
       scope.post(
@@ -158,9 +158,9 @@ export function registerVoiceRoutes(app: FastifyInstance, deps: VoiceRouteDeps):
             return reply.code(400).send({ error: 'Installing the speech engine needs your consent: send {"consent": true, "voices": [...]}.', code: 'voice_consent_required' });
           }
           try {
-            const { started } = tts.startInstall(parsed.data.voices);
+            const { started } = await tts.startInstall(parsed.data.voices);
             if (started) deps.audit.record('voice.tts.install_started', actorOf(req), { detail: { voices: parsed.data.voices } });
-            return reply.code(started ? 202 : 200).send(tts.status());
+            return reply.code(started ? 202 : 200).send(await tts.status());
           } catch (e) {
             return fail(reply, e);
           }
@@ -173,7 +173,7 @@ export function registerVoiceRoutes(app: FastifyInstance, deps: VoiceRouteDeps):
         async (req) => {
           const { removed } = tts.remove();
           if (removed) deps.audit.record('voice.tts.removed', actorOf(req), { detail: {} });
-          return tts.status();
+          return await tts.status();
         },
       );
 
