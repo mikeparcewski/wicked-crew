@@ -8,7 +8,7 @@
  *     spawned OUTSIDE any run (its env carries no run markers, so the estate opens writable), one
  *     spawn per sweep. Indexing reads the registered checkout, never an open pull request.
  *  3. LAUNCH — at most ONE due schedule launches the `learn` workflow, and only while no schedule's
- *     run is still open and no run on the daemon is executing (one governed run at a time). The
+ *     run is still open (other runs on the daemon never block it: it runs several at once, crew#1544). The
  *     launch delivers a pull request behind the engine's human deliver gate; nothing auto-merges.
  *     A refused launch backs off exponentially (capped at a day); missed intervals coalesce.
  *
@@ -31,8 +31,6 @@ export const LEARN_SCHEDULE_ACTOR: Actor = { id: 'learn-schedule', kind: 'system
 export const DEFAULT_LEARN_SWEEP_MS = 60_000;
 /** How long a launched run the daemon no longer lists keeps the schedule's slot (48 h). */
 export const STALE_LAUNCH_MS = 48 * HOURS;
-/** A run that holds the host: one governed run at a time (a run parked on a human is not busy). */
-const BUSY: ReadonlySet<SessionStatus> = new Set<SessionStatus>(['planning', 'distributing', 'executing']);
 const TERMINAL: ReadonlySet<SessionStatus> = new Set<SessionStatus>(['completed', 'failed', 'cancelled']);
 /** The env a governed unit carries; the index spawn drops every one so estate opens writable. */
 export const RUN_MARKER_ENV = ['WICKED_RUN_ID', 'WICKED_GATE_SCOPE', 'WICKED_WRITE_ROOTS', 'WICKED_GOVERNED', 'WICKED_ESTATE_READONLY'];
@@ -196,7 +194,6 @@ export class LearnScheduler {
       return r.lastRunAt !== null && now.getTime() - Date.parse(r.lastRunAt) < STALE_LAUNCH_MS;
     });
     if (open) return;
-    if ([...status.values()].some((s) => BUSY.has(s))) return;
     const due = rows
       .filter((r) => r.enabled && Date.parse(r.nextDueAt) <= now.getTime())
       .sort((a, b) => a.nextDueAt.localeCompare(b.nextDueAt))[0];
@@ -204,10 +201,6 @@ export class LearnScheduler {
     let runId: string;
     try {
       const clisJson = JSON.stringify(await this.deps.adapter.seatsForWorkflow(LEARN_WORKFLOW));
-      // Re-read right before the launch (codex r1): the index spawn and the seat read above can take
-      // minutes, and another surface may have started a run meanwhile.
-      const fresh = await this.deps.adapter.sessionsDetail();
-      if (fresh.some((v) => BUSY.has(v.session.status))) return;
       runId = await this.deps.adapter.launchRun({
         problem: refreshProblem(due),
         sessionId: randomUUID(),

@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Insights "Run it now", the weekly review schedule and scheduled learn runs no longer wait for an idle daemon (crew#1544).** The "one governed run at a time" guard (crew#1161) refused whenever any run was planning, distributing or executing; the daemon now runs several at once, so on a busy daemon it meant never. Both schedulers drop it and keep "its last run is still going" and one launch per sweep. A schedule whose last run is parked on a person now says so and names the run ("its last run <id> is waiting on you (awaiting_human)").
+
 ## [0.18.14] — 2026-11-12
 
 A dependency patch. Needs wicked-core-ts 0.15.43 (`^0.15.43`), bundles wicked-studio 0.16.9, and moves the

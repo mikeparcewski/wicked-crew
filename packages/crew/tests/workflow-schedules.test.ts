@@ -131,12 +131,18 @@ describe('the scheduler', () => {
     r.at(24);
     await Promise.all([r.scheduler.sweep(), r.scheduler.sweep(), r.scheduler.sweep()]);
     expect(r.launches).toHaveLength(1);
-    // The run parks on a person (not busy) for two more intervals: still skipped, never a second run.
-    r.runs[r.launches[0]?.runId as string] = 'awaiting_human';
+    // The run parks on a person for two more intervals: still skipped, never a second run, and the note names it.
+    const first = r.launches[0]?.runId as string;
+    r.runs[first] = 'awaiting_human';
     r.at(72);
     await r.scheduler.sweep();
     expect(r.launches).toHaveLength(1);
+    expect(r.store.get('nightly')?.lastNote).toBe(`skipped: its last run ${first} is waiting on you (awaiting_human)`);
+    // Any other open status keeps the plain note.
+    r.runs[first] = 'executing';
+    await r.scheduler.sweep();
     expect(r.store.get('nightly')?.lastNote).toBe('skipped: its last run is still going');
+    r.runs[first] = 'awaiting_human';
     // Its run ends: the next sweep fires it (the due time never moved).
     r.runs[r.launches[0]?.runId as string] = 'cancelled';
     await r.scheduler.sweep();
@@ -177,16 +183,31 @@ describe('the scheduler', () => {
     expect(r.launches).toHaveLength(1);
   });
 
-  it('waits while another run is working, then launches', async () => {
+  it('launches on the next sweep while another unrelated run is executing (crew#1544)', async () => {
     const r = rig();
     r.store.put('nightly', { workflow: 'review-recent-work', everyHours: 24 }, T0);
     r.runs['someone-else'] = 'executing';
     r.at(24);
     await r.scheduler.sweep();
-    expect(r.launches).toHaveLength(0);
-    r.runs['someone-else'] = 'completed';
-    await r.scheduler.sweep();
     expect(r.launches).toHaveLength(1);
+  });
+
+  it('Run it now launches while another unrelated run is executing', async () => {
+    const r = rig();
+    r.store.put('nightly', { workflow: 'review-recent-work', everyHours: 24 }, T0);
+    r.runs['someone-else'] = 'executing';
+    r.at(1);
+    await r.scheduler.runNow('nightly');
+    expect(r.launches).toHaveLength(1);
+  });
+
+  it('a last run parked on a person is named in the 409 text', async () => {
+    const r = rig();
+    r.store.put('nightly', { workflow: 'review-recent-work', everyHours: 24 }, T0);
+    r.at(1);
+    const runId = await r.scheduler.runNow('nightly');
+    r.runs[runId] = 'awaiting_human';
+    await expect(r.scheduler.runNow('nightly')).rejects.toThrow(`not started: its last run ${runId} is waiting on you (awaiting_human)`);
   });
 
   it('a refused launch backs off and says why; a disabled schedule never fires', async () => {

@@ -122,6 +122,15 @@ describe('/learn/schedules', () => {
     expect((await a.inject({ method: 'DELETE', url: '/api/v1/learn/schedules/r1:sqlite-wal' })).statusCode).toBe(404);
   });
 
+  it('run-now then the next sweep launches while another unrelated run is executing (crew#1544)', async () => {
+    const { a, r } = await app();
+    r.runs['other'] = 'executing';
+    await a.inject({ method: 'PUT', url: '/api/v1/learn/schedules/r1:sqlite-wal', payload: body });
+    expect((await a.inject({ method: 'POST', url: '/api/v1/learn/schedules/r1:sqlite-wal/run-now' })).statusCode).toBe(200);
+    await r.scheduler.sweep();
+    expect(r.launches).toHaveLength(1);
+  });
+
   it('refuses an id mismatch, an unknown repo, an interval out of bounds and an unknown field', async () => {
     const { a } = await app();
     const at = (id: string, payload: unknown) => a.inject({ method: 'PUT', url: `/api/v1/learn/schedules/${id}`, payload: payload as object });
@@ -152,13 +161,10 @@ describe('LearnScheduler.sweep', () => {
     expect(r.launches).toHaveLength(1);
   });
 
-  it('skips while any run on the daemon is executing', async () => {
+  it('launches while another unrelated run is executing (crew#1544)', async () => {
     const r = rig({ runs: { other: 'executing' } });
     put(r.store);
     r.advance(25 * H);
-    await r.scheduler.sweep();
-    expect(r.launches).toHaveLength(0);
-    r.runs['other'] = 'completed';
     await r.scheduler.sweep();
     expect(r.launches).toHaveLength(1);
   });
@@ -235,18 +241,6 @@ describe('LearnScheduler.sweep', () => {
 });
 
 describe('LearnScheduler launch race + bookkeeping (codex r1)', () => {
-  it('re-reads the run list right before launching', async () => {
-    const r = rig();
-    put(r.store);
-    r.advance(25 * H);
-    let reads = 0;
-    const adapter = (r.scheduler as unknown as { deps: { adapter: { sessionsDetail: () => Promise<unknown[]> } } }).deps.adapter;
-    adapter.sessionsDetail = async () => (++reads === 1 ? [] : [{ session: { id: 'late', status: 'executing' }, units: [] }]);
-    await r.scheduler.sweep();
-    expect(r.launches).toHaveLength(0);
-    expect(r.store.get('r1:sqlite-wal')!.lastOutcome).toBeNull();
-  });
-
   it('keeps a successful launch recorded when the bookkeeping after it throws', async () => {
     const r = rig();
     put(r.store);

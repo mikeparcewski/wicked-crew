@@ -4,9 +4,9 @@
  *  1. TICK HOOKS: work that folds terminal runs (the run review's ingest) gets the status map first.
  *  2. RECONCILE: a schedule's launched run that reached a terminal status records its outcome.
  *  3. LAUNCH: at most ONE due schedule launches. A schedule whose last run is still open is SKIPPED (it never runs
- *     twice at once; its due time stays, so it fires once that run ends). Nothing launches while any run is
- *     planning, distributing or executing (one governed run at a time; one parked on a person is not busy).
- *     A refused launch backs off 2^n hours, at most a day. Missed intervals coalesce into one run.
+ *     twice at once; its due time stays, so it fires once that run ends); one parked on a person says so and
+ *     names the run. Other runs on the daemon never block a launch: it runs several at once, each under its
+ *     own budget (crew#1544). A refused launch backs off 2^n hours, at most a day. Missed intervals coalesce into one run.
  *
  * The next due time is persisted the moment a launch returns, before any bookkeeping, so a restart can never
  * launch the same interval twice. Sweeps never stack, and Run it now shares their lock.
@@ -21,7 +21,6 @@ export const DEFAULT_SWEEP_MS = 60_000;
 export const STALE_LAUNCH_MS = 48 * HOUR_MS;
 /** A reservation (the run id chosen before the engine was called) the daemon never lists lets go after this. */
 export const RESERVATION_GRACE_MS = 15 * 60_000;
-const BUSY: ReadonlySet<string> = new Set<SessionStatus>(['planning', 'distributing', 'executing']);
 const TERMINAL: ReadonlySet<string> = new Set<SessionStatus>(['completed', 'failed', 'cancelled']);
 
 /** Launch one scheduled run under `runId`; resolves to the engine's run id. Throws when the launch is refused. */
@@ -123,9 +122,8 @@ export class WorkflowScheduler {
       // may never have seen for a few minutes.
       const hold = row.lastOutcome === 'launching' ? RESERVATION_GRACE_MS : STALE_LAUNCH_MS;
       const open = s !== undefined ? !TERMINAL.has(s) : row.lastRunAt !== null && this.now().getTime() - Date.parse(row.lastRunAt) < hold;
-      if (open) return 'its last run is still going';
+      if (open) return s === 'awaiting_human' ? `its last run ${row.lastRunId} is waiting on you (awaiting_human)` : 'its last run is still going';
     }
-    if ([...status.values()].some((s) => BUSY.has(s))) return 'another run is working (one governed run at a time)';
     return null;
   }
 
