@@ -154,7 +154,8 @@ async function resolve(target: z.infer<typeof Target>, registry: InspectRegistry
     if (missing) throw new InspectError(409, 'secret_missing', `${config.auth?.ref ?? 'the secret'} resolves to no secret; set it in MCP tools (the inspector never connects unauthenticated)`);
     const secrets = secret === null ? [] : [secret];
     if (config.kind === 'mcp-stdio') {
-      const env: Record<string, string> = {};
+      // The server's saved non-secret env (CX1) first, then its ONE secret variable.
+      const env: Record<string, string> = { ...config.env };
       if (config.auth?.env !== undefined && secret !== null) env[config.auth.env] = secret;
       return {
         spec: { kind: 'stdio', command: config.command ?? '', args: config.args, env },

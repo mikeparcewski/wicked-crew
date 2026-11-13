@@ -343,6 +343,19 @@ describe('the MCP inspector bridge', () => {
     expect(missing.json()).toMatchObject({ code: 'secret_missing' });
   });
 
+  it('a registered stdio server\'s saved non-secret env is injected with its secret (chat-extend CX1)', async () => {
+    const config: McpUpstreamConfig = { name: 'fixture', kind: 'mcp-stdio', command: process.execPath, args: [SERVER], url: null, auth: { ref: 'env:FIXTURE_TOKEN', env: 'INSPECT_TOKEN' } as McpUpstreamConfig['auth'], env: { LOG_LEVEL: 'debug' } };
+    const registry: InspectRegistry = {
+      inspectTarget: async () => config,
+      callSecret: async () => ({ secret: TOKEN, missing: false }),
+      resolveCall: async () => ({ config, annotations: { readOnlyHint: true }, classOverride: null, registered: false }),
+    };
+    const h = await harness({ registry });
+    const res = await h.start({ server: 'fixture' });
+    expect(res.statusCode, res.body).toBe(201);
+    expect((res.json() as McpInspectStartResponse).session.target).toMatchObject({ kind: 'server', envNames: ['LOG_LEVEL', 'INSPECT_TOKEN'] });
+  });
+
   it('data connectors G1: on a registered server, a write tool no human granted is refused; a read or a granted write is called', async () => {
     const tools: Record<string, { annotations: McpToolAnnotations | null; classOverride: McpToolClass | null; registered: boolean }> = {
       echo: { annotations: { readOnlyHint: false, destructiveHint: false }, classOverride: null, registered: false }, // a write, not granted
