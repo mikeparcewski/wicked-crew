@@ -122,6 +122,15 @@ describe('/learn/schedules', () => {
     expect((await a.inject({ method: 'DELETE', url: '/api/v1/learn/schedules/r1:sqlite-wal' })).statusCode).toBe(404);
   });
 
+  it('run-now then the next sweep launches while another unrelated run is executing (crew#1544)', async () => {
+    const { a, r } = await app();
+    r.runs['other'] = 'executing';
+    await a.inject({ method: 'PUT', url: '/api/v1/learn/schedules/r1:sqlite-wal', payload: body });
+    expect((await a.inject({ method: 'POST', url: '/api/v1/learn/schedules/r1:sqlite-wal/run-now' })).statusCode).toBe(200);
+    await r.scheduler.sweep();
+    expect(r.launches).toHaveLength(1);
+  });
+
   it('refuses an id mismatch, an unknown repo, an interval out of bounds and an unknown field', async () => {
     const { a } = await app();
     const at = (id: string, payload: unknown) => a.inject({ method: 'PUT', url: `/api/v1/learn/schedules/${id}`, payload: payload as object });
