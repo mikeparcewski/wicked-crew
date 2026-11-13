@@ -1423,7 +1423,10 @@ export function isGovernedRecord(s: Pick<McpServerRecord, 'kind' | 'pm'>): boole
  * "query" off, as a source's descriptor change does. Never a secret value.
  */
 export function pmDescriptorHash(c: McpUpstreamConfig): string {
-  return sha256Hex(canonicalJson({ v: 1, kind: c.kind, command: c.command, args: c.args, url: c.url, auth: c.auth, address: c.address ?? null, pm: c.pm?.system ?? null, env: envFingerprint(c.env) }));
+  // (CX1 review) The env key is included ONLY when there is an env, so a PM entry without one keeps exactly its
+  // pre-change execution descriptor hash (it does not read as changed, so agent query stays on, on upgrade).
+  const fp = envFingerprint(c.env);
+  return sha256Hex(canonicalJson({ v: 1, kind: c.kind, command: c.command, args: c.args, url: c.url, auth: c.auth, address: c.address ?? null, pm: c.pm?.system ?? null, ...(fp !== null ? { env: fp } : {}) }));
 }
 
 /** A network Postgres source, in either form (the one kind with row writes in v1). */
