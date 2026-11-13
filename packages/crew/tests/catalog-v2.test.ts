@@ -227,6 +227,14 @@ describe('the flipped cards (CS8)', () => {
     ['analyze-documents', 'analyze'], ['critique', 'critique'], ['estimate-price', 'estimate'],
   ];
 
+  it('feature and repo docs accept optional documents immediately after intent', () => {
+    const served = servedState({ defs, presets, entries });
+    for (const [card, option] of [['feature', null], ['document', 'repo-docs']] as const) {
+      const inputs = resolveOption(card, option, served)!.resolved.inputs;
+      expect(inputs.slice(0, 2).map((i) => [i.id, i.required])).toEqual([['intent', true], ['documents', false]]);
+    }
+  });
+
   it('the six sourced reports run sourced-report with their lens line, judged at the source by a seat that did not gather', () => {
     const served = servedState({ defs, presets, entries });
     for (const [card, lens] of REPORTS) {

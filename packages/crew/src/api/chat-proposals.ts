@@ -2482,8 +2482,10 @@ export class ChatProposals {
     if (r?.resolved.inputs.some((i) => i.id === 'documents')) {
       if (facts.inputs['documents'] === undefined) {
         const { binding } = bindingOf(records, ctx.turnId ?? '\u0000');
-        // A rebuild never discovers new files. Only a fresh card, or a switch from a card without documents, fills.
-        const fill = previous === undefined || (previous !== null && previous.shape?.card !== facts.card && !previous.needs?.some((n) => n.id === 'documents'));
+        // A rebuild never discovers new files. Only a fresh card, or a switch of card or option from a shape that took no
+        // documents, fills (a person's own empty or reduced selection means the parent already took documents).
+        const reshaped = previous?.shape?.card !== facts.card || previous?.shape?.option !== (r.option?.id ?? null);
+        const fill = previous === undefined || (previous !== null && reshaped && !previous.needs?.some((n) => n.id === 'documents'));
         const tokens = fill ? [...new Set([
           ...this.deps.attachments(chatId).map((a) => `attachment:${a.id}`),
           ...(binding?.named.docs ?? []).map((ref) => `doc:${ref}`),
