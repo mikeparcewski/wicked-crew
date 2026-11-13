@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // chat-extend CX1 — a stdio MCP server's non-secret `env`: the one validator, the schema, the spawned
 // process, the preview hash and the Settings / agent views.
 

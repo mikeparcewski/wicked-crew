@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /**
  * The ONE validator of a stdio MCP server's non-secret `env` map (chat-extend CX1). Settings, the
  * preview and every later writer call {@link validateServerEnv}; none re-implements it.
