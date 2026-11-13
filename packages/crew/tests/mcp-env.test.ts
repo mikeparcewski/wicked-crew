@@ -146,6 +146,9 @@ describe('the routes', () => {
     const none = await post('/mcp/servers/preview', config());
     const hashes = [a, b, none].map((r) => (r.json() as McpPreviewResponse).previewHash);
     expect(new Set(hashes).size).toBe(3);
+    // (CX1 review P2) The preview's server view returns the env that configView produced; the contract types it.
+    expect((a.json() as McpPreviewResponse).server.env).toEqual({ LOG_LEVEL: 'debug' });
+    expect((none.json() as McpPreviewResponse).server.env).toBeUndefined();
 
     const saved = await post('/mcp/servers', { previewHash: hashes[0] });
     expect(saved.statusCode, saved.body).toBe(201);

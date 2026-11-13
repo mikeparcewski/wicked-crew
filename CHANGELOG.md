@@ -15,14 +15,21 @@ mentioned only where a daemon release depends on them.
 - **Insights "Run it now", the weekly review schedule and scheduled learn runs no longer wait for an idle daemon (crew#1544).** The "one governed run at a time" guard (crew#1161) refused whenever any run was planning, distributing or executing; the daemon now runs several at once, so on a busy daemon it meant never. Both schedulers drop it and keep "its last run is still going" and one launch per sweep. A schedule whose last run is parked on a person now says so and names the run ("its last run <id> is waiting on you (awaiting_human)").
 ### Added
 
-- **An `mcp-stdio` server can carry a non-secret `env` map (chat-extend CX1).** `POST /mcp/servers/preview` and
-  `POST /mcp/servers` take `env` (at most 16 names, `^[A-Z_][A-Z0-9_]{0,63}$` compared without case, each value at
-  most 1024 characters); it is stored, answered back on the Settings read, part of the preview hash, and injected
-  into the server's process after the SDK safe env and before the secret. One validator (`validateServerEnv`) refuses,
-  naming the variable and a reason code and never the value: names that change how the process starts or reaches the
-  network (PATH, HOME, NODE_OPTIONS, LD_*, DYLD_*, *_PROXY, GIT_*, NPM_CONFIG_*, ...), the server's own secret variable,
-  credential-named variables and credential-shaped values (those belong in `secret`). Any other kind refuses `env`
-  (400). The agent view never carries it. `McpServerConfigBody.env` and `McpServer.env` join crew-api-types.
+- **An `mcp-stdio` server can carry a non-secret `env` map (chat-extend CX1).** `env` goes to
+  `POST /mcp/servers/preview` and is committed by saving the resulting `previewHash` (`POST /mcp/servers` takes
+  `{ previewHash }`, not `env`): at most 16 names, `^[A-Z_][A-Z0-9_]{0,63}$` compared without case, each value at
+  most 1024 characters; it is stored, answered back on the Settings read and the preview's `server` view, part of the
+  preview hash, and injected into the server's process after the SDK safe env and before the secret. One validator
+  (`validateServerEnv`) refuses, naming the variable and a reason code and never the value: names that change how the
+  process starts, loads code or reaches the network (PATH, HOME, NODE_OPTIONS, LD_*, DYLD_*, *_PROXY, GIT_*,
+  NPM_CONFIG_*, NODE_TLS_*, OPENSSL_*, and the runtime/startup and network-trust names PERL5OPT, PERL5DB, PERLLIB,
+  RUBYLIB, JAVA_TOOL_OPTIONS, _JAVA_OPTIONS, JDK_JAVA_OPTIONS, BUN_OPTIONS, CLASSPATH, AWS_CA_BUNDLE,
+  GRPC_DEFAULT_SSL_ROOTS_FILE_PATH, ...), the server's own secret variable, credential-named variables and
+  credential-shaped values (those belong in `secret`). Any other kind refuses `env` (400). The agent view never
+  carries it. The non-secret `env` is now part of the execution descriptor a call binds to: an env-only change changes
+  the Apps source descriptor hash (so a stale lock and write grant are withdrawn on recheck) and the PM entry's
+  execution descriptor (so it turns agent `query` off until a person turns it back on). `McpServerConfigBody.env`,
+  `McpServer.env` and `McpPreviewResponse.server.env` are in crew-api-types.
 
 ## [0.18.14] — 2026-11-12
 
