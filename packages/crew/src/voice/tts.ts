@@ -45,11 +45,14 @@ export const TTS_INSTALL_TIMEOUT_MS = 10 * 60_000;
 const LOCKS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'voice-locks');
 const SUPPORTED_OS = new Set(['darwin', 'linux']);
 const SUPPORTED_ARCH = new Set(['arm64', 'x64']);
+/** Targets inside the table above that still have no lock: onnxruntime ships no wheel for them. */
+const NO_WHEEL = new Set(['darwin-x64-cp314']);
 
 /** The lock file for an (OS, arch, CPython minor) as Node reports them; null for an unsupported combination. */
 export function lockPath(os: string, arch: string, minor: number, locksDir: string = LOCKS_DIR): string | null {
   if (!SUPPORTED_OS.has(os) || !SUPPORTED_ARCH.has(arch)) return null;
   if (!(TTS_PYTHON_MINORS as readonly number[]).includes(minor)) return null;
+  if (NO_WHEEL.has(`${os}-${arch}-cp3${minor}`)) return null;
   return join(locksDir, `${os}-${arch}-cp3${minor}.txt`);
 }
 
@@ -200,6 +203,9 @@ export class TtsService {
       const lock = lockPath(this.plat, this.arch, info.minor, this.locksDir);
       if (lock !== null && this.exists(lock)) return { python: info, lock, problem: null };
       skipped ??= info;
+    }
+    if (skipped !== null && lockPath(this.plat, this.arch, skipped.minor, this.locksDir) === null && (TTS_PYTHON_MINORS as readonly number[]).includes(skipped.minor)) {
+      return { python: null, lock: null, problem: `Python ${skipped.version} at ${skipped.path} is not supported on this machine: the speech engine has no build for it on an Intel Mac. Use Python 3.9 to 3.13 (WICKED_CREW_PYTHON names one).` };
     }
     if (skipped !== null) {
       return { python: null, lock: null, problem: `Python ${skipped.version} at ${skipped.path} is not supported: voice needs CPython 3.9 to 3.14. ${pythonHint(this.plat)}` };

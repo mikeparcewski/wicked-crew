@@ -246,6 +246,17 @@ describe('tts install', () => {
     expect(bad.problem).toMatch(/WICKED_CREW_PYTHON/);
   });
 
+  it('Intel Mac with Python 3.14 is unsupported and the person is told plainly', () => {
+    expect(lockPath('darwin', 'x64', 14)).toBeNull();
+    expect(lockPath('darwin', 'arm64', 14)).not.toBeNull();
+    const probe = () => ({ path: '/usr/local/bin/python3', version: '3.14.0', minor: 14 });
+    const s = service({ platform: 'darwin', arch: 'x64', probe, locksDir: join(__dirname, '..', 'voice-locks') });
+    const st = s.status();
+    expect(st.supported.ok).toBe(false);
+    expect(st.supported.reason).toMatch(/3\.14.*not supported.*Intel Mac/);
+    expect(() => s.startInstall([VOICE_A.id])).toThrow(/Intel Mac/);
+  });
+
   it('lockPath uses the names Node reports and refuses what has no lock', () => {
     expect(lockPath('linux', 'arm64', 12, '/l')).toBe('/l/linux-arm64-cp312.txt');
     expect(lockPath('darwin', 'x64', 9, '/l')).toBe('/l/darwin-x64-cp39.txt');
@@ -444,7 +455,7 @@ describe('tts manifest', () => {
 
 describe('voice locks (committed data)', () => {
   const real = join(__dirname, '..', 'voice-locks');
-  const names = ['darwin-arm64', 'darwin-x64', 'linux-x64', 'linux-arm64'].flatMap((t) => [9, 10, 11, 12, 13, 14].map((m) => `${t}-cp3${m}.txt`));
+  const names = ['darwin-arm64', 'darwin-x64', 'linux-x64', 'linux-arm64'].flatMap((t) => [9, 10, 11, 12, 13, 14].map((m) => `${t}-cp3${m}.txt`)).filter((n) => n !== 'darwin-x64-cp314.txt'); // 23: onnxruntime has no Intel Mac wheel for 3.14
 
   it('has one lock per supported (OS, arch, CPython minor)', () => {
     expect(existsSync(real) ? readdirSync(real).sort() : []).toEqual([...names].sort());

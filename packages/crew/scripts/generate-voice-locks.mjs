@@ -20,13 +20,17 @@ import { fileURLToPath } from 'node:url';
 const ENGINE = 'piper-tts==1.8.0';
 const INDEX = 'https://pypi.org/simple';
 const MINORS = [9, 10, 11, 12, 13, 14];
-// pip expands a manylinux_X_Y / macosx_X_Y tag to every older one, so one tag per target covers the lot.
+// A target takes several --platform tags: pip does not expand one manylinux tag to the older ones for every CPython
+// (with only manylinux_2_28 it answers ResolutionImpossible for cp39 and cp310), so each Linux target names all three.
+// UNSUPPORTED: targets with no wheel for the engine's dependencies (onnxruntime has none for Intel Mac on 3.14); they
+// get no lock, and src/voice/tts.ts says so plainly.
 const TARGETS = [
-  { os: 'darwin', arch: 'arm64', tag: 'macosx_14_0_arm64' },
-  { os: 'darwin', arch: 'x64', tag: 'macosx_14_0_x86_64' },
-  { os: 'linux', arch: 'x64', tag: 'manylinux_2_28_x86_64' },
-  { os: 'linux', arch: 'arm64', tag: 'manylinux_2_28_aarch64' },
+  { os: 'darwin', arch: 'arm64', tags: ['macosx_14_0_arm64'] },
+  { os: 'darwin', arch: 'x64', tags: ['macosx_14_0_x86_64'] },
+  { os: 'linux', arch: 'x64', tags: ['manylinux_2_28_x86_64', 'manylinux_2_17_x86_64', 'manylinux2014_x86_64'] },
+  { os: 'linux', arch: 'arm64', tags: ['manylinux_2_28_aarch64', 'manylinux_2_17_aarch64', 'manylinux2014_aarch64'] },
 ];
+const UNSUPPORTED = new Set(['darwin-x64-cp314']);
 
 const argv = process.argv.slice(2);
 const opt = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
@@ -56,10 +60,11 @@ try {
     for (const minor of MINORS) {
       const id = `${t.os}-${t.arch}-cp3${minor}`;
       if (only !== undefined && only !== id) continue;
+      if (UNSUPPORTED.has(id)) { console.log(`${id}: unsupported, no lock`); continue; }
       const report = join(work, `${id}.json`);
       const r = spawnSync(python, [
         '-m', 'pip', 'install', '--dry-run', '--ignore-installed', '--isolated', '--report', report,
-        '--only-binary=:all:', '--platform', t.tag, '--python-version', `3.${minor}`, '--implementation', 'cp',
+        '--only-binary=:all:', ...t.tags.flatMap((tag) => ['--platform', tag]), '--python-version', `3.${minor}`, '--implementation', 'cp',
         '--index-url', INDEX, '--target', join(work, `${id}-target`), ENGINE,
       ], { encoding: 'utf8', env: { ...process.env, PIP_CONFIG_FILE: '/dev/null' } });
       if (r.status !== 0) { failed += 1; console.error(`${id}: pip failed\n${(r.stderr ?? '').split('\n').slice(-6).join('\n')}`); continue; }
