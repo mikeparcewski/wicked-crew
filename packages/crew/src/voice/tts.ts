@@ -19,6 +19,7 @@ import { createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, rmS
 import { arch as osArch, platform as osPlatform } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { Readable, Transform } from 'node:stream';
+import { StringDecoder } from 'node:string_decoder';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { fileURLToPath } from 'node:url';
@@ -513,18 +514,9 @@ export class TtsService {
   }
 }
 
-/** Buffers cut at a byte cap, decoded as UTF-8 without a torn character at the cut. */
+/** Buffers cut at a byte cap, decoded as UTF-8; StringDecoder without `end()` drops a torn trailing character. */
 function decodeCapped(chunks: Buffer[]): string {
-  const buf = Buffer.concat(chunks);
-  let end = buf.length;
-  if (end > 0 && end >= TTS_OUTPUT_CAP_BYTES) {
-    let i = end - 1;
-    while (i > 0 && (buf[i]! & 0xc0) === 0x80) i -= 1; // back to the lead byte of the last character
-    const lead = buf[i]!;
-    const need = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
-    if (end - i < need) end = i;
-  }
-  return buf.subarray(0, end).toString('utf8');
+  return new StringDecoder('utf8').write(Buffer.concat(chunks));
 }
 
 /** The last two lines of a child's stderr, for a one-line error. */
