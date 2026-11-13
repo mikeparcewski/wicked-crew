@@ -12,7 +12,7 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
-- A job started from a chat reads the chat's attached files in full: /feature and /document repo take them as documents
+- A job started from a chat reads the chat's attached files in full: /feature and /document repo take them as documents. A revision to /document repo keeps the chat's files, whether it switches from /document alone or changes card and option together (a person's own selection of fewer files is kept as chosen)
 
 - **Insights "Run it now", the weekly review schedule and scheduled learn runs no longer wait for an idle daemon (crew#1544).** The "one governed run at a time" guard (crew#1161) refused whenever any run was planning, distributing or executing; the daemon now runs several at once, so on a busy daemon it meant never. Both schedulers drop it and keep "its last run is still going" and one launch per sweep. A schedule whose last run is parked on a person now says so and names the run ("its last run <id> is waiting on you (awaiting_human)").
 

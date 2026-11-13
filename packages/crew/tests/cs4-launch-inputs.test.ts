@@ -18,13 +18,13 @@ import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import { AuditLog } from '../src/api/audit.js';
 import { ChatAttachmentStore } from '../src/api/chat-attachments.js';
-import { ChatProposals, LaunchOnceRegistry } from '../src/api/chat-proposals.js';
+import { ChatProposals, LaunchOnceRegistry, type ProposalDispatch } from '../src/api/chat-proposals.js';
 import { RunSourcePicks } from '../src/api/run-sources.js';
-import { jobInputsOfProposal } from '../src/api/chat-jobs.js';
+import { factsOf, jobInputsOfProposal } from '../src/api/chat-jobs.js';
 import { CATALOG_SEEDS } from '../src/workflow-catalog/catalog-data.js';
 import { servedState } from '../src/workflow-catalog/build-v2.js';
 import { CoreAdapter } from '../src/core/adapter.js';
-import type { ArtifactProposal, ChatTranscriptRecord, LaunchRunInput, ProposalSource } from '../src/core/types.js';
+import type { ArtifactProposal, ChatTranscriptRecord, LaunchRunInput, ProposalRevisionEdits, ProposalSource } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
 
 /** The sources the fake gate answers: web (agents on) and support-pg (agents off). */
@@ -118,8 +118,10 @@ describe('POST /runs: a job’s documents and source pick (CS4)', () => {
     attachments.add(CHAT, [{ filename: name, declaredType: 'text/plain', data: Buffer.from(text, 'utf8') }])[0]!.id;
   const launch = (body: Record<string, unknown>) => app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'Due diligence on these', ...body } });
 
+  const ME = { id: 'operator', kind: 'human', trust: 'operator' } as const;
+  let requests = 0;
   /** Real catalog and proposal fill, with the same attachment store the launch route reads. */
-  async function propose(card: string, option?: string): Promise<ArtifactProposal> {
+  async function rig() {
     const catalog = new CoreAdapter({ dbPath: join(scratch, 'catalog.db'), stub: true });
     let served;
     try {
@@ -129,8 +131,11 @@ describe('POST /runs: a job’s documents and source pick (CS4)', () => {
       catalog.close();
     }
     const records: ChatTranscriptRecord[] = [];
+    const registry = new LaunchOnceRegistry();
+    const launches: ProposalDispatch[] = [];
+    registry.register('job', { find: async () => false, launch: async (d) => { launches.push(d); } });
     const svc = new ChatProposals({
-      flags: () => ({ context: true, proposals: true, create: false, refine: false, theme: false, demo: false }),
+      flags: () => ({ context: true, proposals: true, create: true, refine: false, theme: false, demo: false }),
       catalog: CATALOG_SEEDS, records: () => records,
       append: (_id, record) => { records.push(record); return true; },
       instanceOf: () => 'instance', projectOf: () => null,
@@ -139,14 +144,62 @@ describe('POST /runs: a job’s documents and source pick (CS4)', () => {
       runs: async () => [], chatOfRun: () => undefined, isAskPath: () => false,
       docsRoot: async () => null, projectName: async () => null,
       attachments: (id) => attachments.list(id), workflowSteps: async () => 3, runCostUsd: async () => null,
-      registry: new LaunchOnceRegistry(), jobs: () => true, served: async () => served,
+      registry, jobs: () => true, served: async () => served,
       reshapeReject: async () => null, broadcast: () => undefined, audit: () => undefined,
     });
-    const result = await svc.propose(CHAT, { card, ...(option !== undefined ? { option } : {}), source: 'pick', requestId: 'pick', words: 'Implement the attached specification' },
-      { id: 'operator', kind: 'human', trust: 'operator' }, 'instance');
-    expect(result.code).toBe(201);
-    return (result.body['view'] as { proposal: ArtifactProposal }).proposal;
+    const viewOf = (result: { code: number; body: Record<string, unknown> }): ArtifactProposal => {
+      expect(result.code, JSON.stringify(result.body).slice(0, 300)).toBeLessThan(300);
+      return (result.body['view'] as { proposal: ArtifactProposal }).proposal;
+    };
+    const pick = async (card: string, option?: string) => viewOf(await svc.propose(CHAT, { card, ...(option !== undefined ? { option } : {}), source: 'pick', requestId: `pick-${++requests}`, words: 'Implement the attached specification' }, ME, 'instance'));
+    const revise = async (p: ArtifactProposal, edits: ProposalRevisionEdits) => viewOf(await svc.propose(CHAT, { revises: p.pid, edits, source: 'swap', requestId: `swap-${++requests}` }, ME, 'instance'));
+    const reshape = async (p: ArtifactProposal, edits: ProposalRevisionEdits, confirmLoss: string[] = []) => {
+      const result = await svc.reshape(CHAT, { pid: `${p.pid}:reshape`, oldRunId: 'held-run', parentPid: p.pid, facts: factsOf(p), edits,
+        reducedAssurance: false, relaunch: { deliver: 'pr' as const }, request: { id: 'reshape', digest: 'reshape' }, confirmLoss }, ME, 'instance');
+      expect(result.code, JSON.stringify(result.body).slice(0, 400)).toBe(200);
+      return viewOf(result);
+    };
+    return { pick, revise, reshape, launches };
   }
+  const propose = async (card: string, option?: string) => (await rig()).pick(card, option);
+
+  it('a /document doc proposal revised to repo-docs picks up the chat attachment', async () => {
+    const id = attach('spec.md', '# Spec\n');
+    const r = await rig();
+    const first = await r.pick('document', 'document');
+    expect(jobInputsOfProposal(first).documents ?? []).toEqual([]);
+    const p = await r.revise(first, { option: 'repo-docs', confirmLoss: ['draft-floor'] });
+    expect(p.shape).toMatchObject({ card: 'document', option: 'repo-docs' });
+    expect(p.sentence!.tokens.find((t) => t.kind === 'documents')).toMatchObject({ documents: [{ token: `attachment:${id}`, status: 'ok' }] });
+    expect(jobInputsOfProposal(p).documents).toEqual([`attachment:${id}`]);
+  });
+
+  it.each(['revision', 'reshape'] as const)('a card-and-option %s keeps the person\'s one-file selection', async (path) => {
+    const one = attach('one.md', 'one\n');
+    attach('two.md', 'two\n');
+    const r = await rig();
+    const feature = await r.pick('feature');
+    expect(jobInputsOfProposal(feature).documents).toHaveLength(2);
+    const selected = await r.revise(feature, { inputs: { documents: { kind: 'documents', tokens: [`attachment:${one}`] } } });
+    expect(jobInputsOfProposal(selected).documents).toEqual([`attachment:${one}`]);
+    const edits = { card: 'document', option: 'repo-docs' };
+    // The card change gives up checks, so the person confirms the lost-check question first.
+    const asked = await r.revise(selected, edits);
+    expect(asked.question?.kind).toBe('lost_check');
+    const p = path === 'revision' ? await r.revise(asked, { ...edits, confirmLoss: true }) : await r.reshape(asked, edits, ['qe-acceptance', 'distinctJudge']);
+    expect(p.shape).toMatchObject({ card: 'document', option: 'repo-docs' });
+    expect(jobInputsOfProposal(p).documents).toEqual([`attachment:${one}`]);
+  });
+
+  it('an ordinary rebuild of a feature whose documents the person emptied stays empty', async () => {
+    attach('one.md', 'one\n');
+    const r = await rig();
+    const feature = await r.pick('feature');
+    const emptied = await r.revise(feature, { inputs: { documents: { kind: 'documents', tokens: [] } } });
+    expect(jobInputsOfProposal(emptied).documents).toEqual([]);
+    const rebuilt = await r.revise(emptied, { detail: { add: ['cite each finding'] } });
+    expect(jobInputsOfProposal(rebuilt).documents).toEqual([]);
+  });
 
   it.each([
     { card: 'feature', option: undefined, workflow: 'feature' },
