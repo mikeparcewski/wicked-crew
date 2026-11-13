@@ -80,6 +80,8 @@ export interface McpServerRecord {
   args: string[];
   url: string | null;
   auth: McpAuthConfig | null;
+  /** (chat-extend CX1) `mcp-stdio` only: non-secret env, answered back on the Settings read, never to an agent. */
+  env?: Record<string, string>;
   /** `rest` only (slice S5a): the OpenAPI URL, or the pasted document; the operations picked. */
   openapiUrl?: string | null;
   openapi?: Record<string, unknown> | null;

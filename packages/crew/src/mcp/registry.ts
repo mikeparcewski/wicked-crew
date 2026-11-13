@@ -1211,7 +1211,7 @@ export class McpRegistry {
  */
 export function configOf(s: McpServerRecord): McpUpstreamConfig {
   const pm = pmOf(s);
-  const base: McpUpstreamConfig = { name: s.name, kind: s.kind, command: s.command, args: s.args, url: s.url, auth: s.auth, ...(s.id !== undefined ? { id: s.id } : {}), ...(pm !== null ? { pm } : {}) };
+  const base: McpUpstreamConfig = { name: s.name, kind: s.kind, command: s.command, args: s.args, url: s.url, auth: s.auth, ...(s.id !== undefined ? { id: s.id } : {}), ...(pm !== null ? { pm } : {}), ...(s.env !== undefined ? { env: s.env } : {}) };
   if (s.kind === 'toolbox-source') {
     const entry = entryOf(s);
     const address = s.address ?? { ...NO_CONFIRMATION, allow: [] };
@@ -1256,6 +1256,7 @@ interface ConfigView {
   args: string[];
   url: string | null;
   auth: McpAuthConfig | null;
+  env?: Record<string, string>;
   openapiUrl?: string | null;
   operations?: string[] | null;
   address?: AddressPolicy;
@@ -1272,6 +1273,7 @@ interface ConfigView {
 function configView(c: McpUpstreamConfig): ConfigView {
   const view: ConfigView = { name: c.name, kind: c.kind, command: c.command, args: c.args, url: c.url, auth: c.auth };
   if (c.pm != null) view.pm = { system: c.pm.system };
+  if (c.env !== undefined) view.env = c.env;
   if (c.kind === 'rest') {
     view.openapiUrl = c.openapiUrl ?? null;
     view.operations = c.operations ?? null;

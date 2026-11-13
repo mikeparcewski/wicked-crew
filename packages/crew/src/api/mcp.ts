@@ -83,6 +83,7 @@ import type { McpBroker } from '../mcp/broker.js';
 import type { AskServer } from '../mcp/ask-server.js';
 import type { McpPolicies } from '../mcp/policies.js';
 import { MCP_PREVIEW_ROLES, MCP_RUN_MODES, McpLedgerEditError } from '../mcp/policies.js';
+import { validateServerEnv } from '../mcp/env.js';
 import { agentServerView, configOf, isWriteGrant, McpRegistryError, type McpRegistry } from '../mcp/registry.js';
 import { restTarget } from '../mcp/rest.js';
 import { listUnitTools } from '../mcp/tool-list.js';
@@ -168,6 +169,11 @@ export const McpServerConfigSchema = z.strictObject({
    * program, outside the dialer.
    */
   address: AddressSchema.optional(),
+  /**
+   * (chat-extend CX1) `mcp-stdio` only: non-secret environment variables for the server's process. Judged by
+   * `validateServerEnv` (the one validator) in the refine below; a credential belongs in `secret`.
+   */
+  env: record(z.string(), z.string()).optional(),
   /** (DES-APPS-001 §5.1) `sql` only: a network SQL source's settings (sqlite sources come from uploads). */
   sql: SqlSourceSchema.optional(),
   /** `sql` only: the views a read may name (`schema.view`). */
@@ -202,6 +208,13 @@ export const McpServerConfigSchema = z.strictObject({
     if (c.auth != null && c.auth.ref.startsWith('gh-cli:') && c.pm?.system !== 'github') issue('auth', 'a gh-cli credential is for a GitHub project-management source only (pm.system github)');
     if (c.kind !== 'rest' && (c.openapiUrl !== undefined || c.openapi !== undefined || c.operations !== undefined)) {
       issue('openapi', 'openapiUrl, openapi and operations are for a rest server');
+    }
+    if (c.env !== undefined) {
+      if (c.kind !== 'mcp-stdio') issue('env', 'env is for an mcp-stdio server');
+      else {
+        const refusal = validateServerEnv(c.env, c.auth?.env ?? null);
+        if (refusal !== null) issue('env', refusal.message);
+      }
     }
     if (c.kind !== 'sql' && c.sql !== undefined) issue('sql', 'sql is for a sql source');
     if (c.pm !== undefined && c.kind !== 'mcp-http' && c.kind !== 'mcp-stdio') issue('pm', 'pm marks a project-management system\'s own MCP server: kind mcp-http or mcp-stdio');
@@ -412,6 +425,7 @@ function toConfig(body: z.infer<typeof McpServerConfigSchema>): McpUpstreamConfi
     args: body.args ?? [],
     url: body.url ?? null,
     ...(body.pm !== undefined ? { pm: { system: body.pm.system } } : {}),
+    ...(body.env !== undefined ? { env: { ...body.env } } : {}),
     ...(body.kind === 'rest'
       ? { openapiUrl: body.openapiUrl ?? null, openapi: body.openapi ?? null, operations: body.operations ?? null }
       : {}),
