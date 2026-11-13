@@ -10,7 +10,7 @@
 //     installed but the daemon down, the one line names the service log instead.
 //
 // The CLI half spawns the REAL dist CLI (CI runs `build:with-studio` before `test`) with a fake HOME.
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -124,7 +124,57 @@ describe('unit rendering', () => {
     expect(text).toContain('StandardError=append:/srv/op/100%% crew/daemon-stdout.log');
     expect(text).toContain('Restart=on-failure');
     expect(text).toContain('WantedBy=default.target');
+    expect(text).toContain('WorkingDirectory=/srv/op\n');
     expect(logPathFromUnit(text)).toBe(SPEC.logPath);
+  });
+
+  it('systemd (crew#1549): WorkingDirectory= and append: paths are unquoted; spaces are literal', () => {
+    const spec = { ...SPEC, workingDir: '/home/you/my dir', logPath: '/home/you/my dir/log.log' };
+    const text = renderSystemdUnit(spec);
+    expect(text).toContain('\nWorkingDirectory=/home/you/my dir\n');
+    expect(text).toContain('\nStandardOutput=append:/home/you/my dir/log.log\n');
+    expect(text).not.toMatch(/^WorkingDirectory="/m);
+    expect(logPathFromUnit(text)).toBe(spec.logPath);
+  });
+
+  it('systemd: % doubled everywhere, $ doubled in ExecStart, " and \\ escaped in quoted words', () => {
+    const spec: ServiceSpec = {
+      program: ['/opt/a$b/node', '/opt/"q"/100%/x\\y.js'],
+      env: { K: 'a"b\\c$d%e' },
+      logPath: '/l/100%/x.log',
+      workingDir: '/w/50% "off" $HOME',
+    };
+    const text = renderSystemdUnit(spec);
+    expect(text).toContain('ExecStart="/opt/a$$b/node" "/opt/\\"q\\"/100%%/x\\\\y.js"');
+    expect(text).toContain('Environment="K=a\\"b\\\\c$d%%e"');
+    expect(text).toContain('WorkingDirectory=/w/50%% "off" $HOME\n');
+    expect(logPathFromUnit(text)).toBe(spec.logPath);
+  });
+
+  it('systemd: refuses what a unit cannot represent', () => {
+    const bad = (patch: Partial<ServiceSpec>) => () => renderSystemdUnit({ ...SPEC, ...patch });
+    expect(bad({ workingDir: 'relative/dir' })).toThrow(/absolute/);
+    expect(bad({ workingDir: '/a\nb' })).toThrow(/control/);
+    expect(bad({ workingDir: '/a\tb' })).toThrow(/control/);
+    expect(bad({ workingDir: ' /a' })).toThrow(/absolute|whitespace/);
+    expect(bad({ workingDir: '/a ' })).toThrow(/whitespace/);
+    expect(bad({ workingDir: '/a\\' })).toThrow(/backslash/);
+    expect(bad({ logPath: '/a\\' })).toThrow(/backslash/);
+    expect(bad({ logPath: 'log.txt' })).toThrow(/absolute/);
+    expect(bad({ env: { 'BAD-KEY': 'x' } })).toThrow(/variable name/);
+    expect(bad({ env: { K: 'a\nb' } })).toThrow(/control/);
+  });
+
+  const analyzer = spawnSync('systemd-analyze', ['--version']);
+  it.skipIf(analyzer.error !== undefined || analyzer.status !== 0)('systemd-analyze verify --user accepts the unit for a plain path and a path with spaces', () => {
+    for (const workingDir of ['/tmp', '/tmp/my dir 100%']) {
+      const dir = tmpHome();
+      mkdirSync(join(dir, 'x'), { recursive: true });
+      const unit = join(dir, 'wicked-crew.service');
+      writeFileSync(unit, renderSystemdUnit({ ...SPEC, program: ['/bin/true'], workingDir, logPath: '/tmp/crew.log' }));
+      const r = spawnSync('systemd-analyze', ['verify', '--user', unit], { encoding: 'utf8' });
+      expect(r.stderr).not.toMatch(/bad unit file setting|not absolute/);
+    }
   });
 });
 

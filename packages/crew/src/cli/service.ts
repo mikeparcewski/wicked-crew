@@ -140,9 +140,35 @@ export function renderPlist(spec: ServiceSpec): string {
   ].join('\n');
 }
 
-/** A systemd-quoted word: double quotes, `\` and `"` escaped, `%` doubled (specifier escape). */
-function sdQuote(s: string): string {
-  return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%')}"`;
+/** systemd.syntax: a unit line is one line, so a control character (newline included) cannot be written. */
+function sdNoControl(what: string, s: string): void {
+  if (/[\u0000-\u001f\u007f]/.test(s)) throw new Error(`systemd cannot represent ${what}: it contains a newline or control character`);
+}
+
+/**
+ * A path-valued setting (WorkingDirectory=, `append:` paths): the value as it is — the setting takes
+ * one path and does not unquote, so spaces are literal — with `%` doubled (specifier escape). A path
+ * systemd cannot represent is refused rather than written into a unit it would not load.
+ */
+function sdPath(what: string, p: string): string {
+  if (!p.startsWith('/')) throw new Error(`systemd needs an absolute path for ${what}: "${p}"`);
+  sdNoControl(what, p);
+  if (p !== p.trim()) throw new Error(`systemd cannot represent ${what}: leading or trailing whitespace`);
+  if (p.endsWith('\\')) throw new Error(`systemd cannot represent ${what}: a trailing backslash continues the line`);
+  return p.replace(/%/g, '%%');
+}
+
+/** An ExecStart= word: double-quoted, `\` and `"` escaped, `%` doubled, `$` doubled (never an env expansion). */
+function sdExecWord(s: string): string {
+  sdNoControl('an ExecStart word', s);
+  return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%').replace(/\$/g, '$$$$')}"`;
+}
+
+/** An Environment= assignment: one double-quoted `KEY=value` word, `\` and `"` escaped, `%` doubled. */
+function sdEnv(key: string, value: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error(`systemd cannot represent the environment variable name "${key}"`);
+  sdNoControl(`the value of ${key}`, value);
+  return `"${`${key}=${value}`.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%')}"`;
 }
 
 export function renderSystemdUnit(spec: ServiceSpec): string {
@@ -153,12 +179,12 @@ export function renderSystemdUnit(spec: ServiceSpec): string {
     '',
     '[Service]',
     'Type=simple',
-    `ExecStart=${spec.program.map(sdQuote).join(' ')}`,
-    `WorkingDirectory=${sdQuote(spec.workingDir)}`,
-    ...Object.entries(spec.env).map(([k, v]) => `Environment=${sdQuote(`${k}=${v}`)}`),
-    // `append:` takes the rest of the line as the path (no quoting); `%` is a specifier, so doubled.
-    `StandardOutput=append:${spec.logPath.replace(/%/g, '%%')}`,
-    `StandardError=append:${spec.logPath.replace(/%/g, '%%')}`,
+    `ExecStart=${spec.program.map(sdExecWord).join(' ')}`,
+    `WorkingDirectory=${sdPath('WorkingDirectory=', spec.workingDir)}`,
+    ...Object.entries(spec.env).map(([k, v]) => `Environment=${sdEnv(k, v)}`),
+    // `append:` takes the rest of the line as the path (no quoting).
+    `StandardOutput=append:${sdPath('the log path', spec.logPath)}`,
+    `StandardError=append:${sdPath('the log path', spec.logPath)}`,
     'Restart=on-failure',
     'RestartSec=5',
     '',
