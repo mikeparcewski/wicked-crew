@@ -38,6 +38,7 @@
     "endpoint-manifest.json",
     "runners",
     "scripts/apps-render.py",
+    "voice-locks",
     "workflows"
   ],
   "scripts": {
@@ -80,7 +81,7 @@
     "undici": "^6.28.1",
     "vitest": "^5.0.2",
     "wicked-bus": "^2.5.0",
-    "wicked-crew-api-types": "^0.208.0",
+    "wicked-crew-api-types": "^0.209.0",
     "wicked-studio": "^0.16.9"
   },
   "engines": {

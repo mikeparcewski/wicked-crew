@@ -6,6 +6,11 @@
  *   POST   /voice/model        {consent: true} → start fetching the model (202); audited
  *   DELETE /voice/model        remove the model; audited
  *   POST   /voice/transcribe   audio/wav body → {text, ms, model}; the audio is never stored
+ *   GET    /voice/tts          the piper engine, the two voices and an install in progress
+ *   POST   /voice/tts          {consent: true, voices: [ids]} → install the engine, then the voices (202); audited
+ *   DELETE /voice/tts          remove the engine and voices; audited
+ *   POST   /voice/speak        {text, voice} → audio/wav; the text is never stored, logged or audited
+ *   GET    /voice/tts/sample/:voice  one fixed sentence in a voice → audio/wav
  *   GET    /voice/dashboard    this person's dashboard layout and user widgets
  *   PUT    /voice/dashboard    {layout, widgets} → the same shape
  *
@@ -23,13 +28,19 @@ import { isHumanOperator } from '../api/watch-routes.js';
 import type { Actor } from '../core/types.js';
 import { PutVoiceDashboardSchema, type VoiceDashboardStore } from './dashboard.js';
 import { VOICE_MAX_AUDIO_BYTES, VoiceError, type VoiceService } from './service.js';
+import type { TtsService } from './tts.js';
 
 const V = API_PREFIX;
 
 export const PostVoiceModelSchema = z.strictObject({ consent: z.literal(true) });
 
+export const PostVoiceTtsSchema = z.strictObject({ consent: z.literal(true), voices: z.array(z.string().max(100)).max(20) });
+export const PostVoiceSpeakSchema = z.strictObject({ text: z.string().max(100_000), voice: z.string().max(100) });
+
 export interface VoiceRouteDeps {
   voice: VoiceService;
+  /** Text to speech (piper); absent in a daemon that keeps none, and the tts routes are then not served. */
+  tts?: TtsService;
   dashboard: VoiceDashboardStore | null;
   audit: Pick<AuditLog, 'record'>;
 }
@@ -129,6 +140,72 @@ export function registerVoiceRoutes(app: FastifyInstance, deps: VoiceRouteDeps):
         return deps.voice.status();
       },
     );
+
+    const tts = deps.tts;
+    if (tts !== undefined) {
+      scope.get(
+        `${V}/voice/tts`,
+        { config: { manifest: { responseType: 'VoiceTtsStatus', statusCodes: [200, 403] } } },
+        async () => tts.status(),
+      );
+
+      scope.post(
+        `${V}/voice/tts`,
+        { config: { manifest: { requestType: 'PostVoiceTtsBody', responseType: 'VoiceTtsStatus', statusCodes: [200, 202, 400, 403, 409] } } },
+        async (req, reply) => {
+          const parsed = PostVoiceTtsSchema.safeParse(req.body);
+          if (!parsed.success) {
+            return reply.code(400).send({ error: 'Installing the speech engine needs your consent: send {"consent": true, "voices": [...]}.', code: 'voice_consent_required' });
+          }
+          try {
+            const { started } = tts.startInstall(parsed.data.voices);
+            if (started) deps.audit.record('voice.tts.install_started', actorOf(req), { detail: { voices: parsed.data.voices } });
+            return reply.code(started ? 202 : 200).send(tts.status());
+          } catch (e) {
+            return fail(reply, e);
+          }
+        },
+      );
+
+      scope.delete(
+        `${V}/voice/tts`,
+        { config: { manifest: { responseType: 'VoiceTtsStatus', statusCodes: [200, 403] } } },
+        async (req) => {
+          const { removed } = tts.remove();
+          if (removed) deps.audit.record('voice.tts.removed', actorOf(req), { detail: {} });
+          return tts.status();
+        },
+      );
+
+      scope.post(
+        `${V}/voice/speak`,
+        { config: { manifest: { requestType: 'PostVoiceSpeakBody', responseType: 'audio/wav', statusCodes: [200, 400, 403, 409, 429, 500, 504] } } },
+        async (req, reply) => {
+          const parsed = PostVoiceSpeakSchema.safeParse(req.body);
+          if (!parsed.success) return reply.code(400).send({ error: 'Send {"text": "...", "voice": "<voice id>"}.', code: 'voice_text_invalid' });
+          try {
+            // The text is neither logged nor audited.
+            const wav = await tts.speak(parsed.data.text, parsed.data.voice);
+            return reply.header('content-type', 'audio/wav').send(wav);
+          } catch (e) {
+            return fail(reply, e);
+          }
+        },
+      );
+
+      scope.get(
+        `${V}/voice/tts/sample/:voice`,
+        { config: { manifest: { responseType: 'audio/wav', statusCodes: [200, 400, 403, 409, 429, 500, 504] } } },
+        async (req, reply) => {
+          try {
+            const wav = await tts.sample((req.params as { voice: string }).voice);
+            return reply.header('content-type', 'audio/wav').send(wav);
+          } catch (e) {
+            return fail(reply, e);
+          }
+        },
+      );
+    }
 
     scope.get(
       `${V}/voice/dashboard`,

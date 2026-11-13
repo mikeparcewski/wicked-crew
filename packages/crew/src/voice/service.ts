@@ -57,7 +57,13 @@ export type VoiceErrorCode =
   | 'voice_failed'
   | 'voice_consent_required'
   | 'voice_download_running'
-  | 'voice_download_failed';
+  | 'voice_download_failed'
+  | 'voice_unknown'
+  | 'voice_text_empty'
+  | 'voice_tts_missing'
+  | 'voice_tts_unsupported'
+  | 'voice_tts_failed'
+  | 'voice_install_running';
 
 export class VoiceError extends Error {
   constructor(readonly status: number, readonly code: VoiceErrorCode, message: string) {

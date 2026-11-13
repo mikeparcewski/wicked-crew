@@ -391,6 +391,7 @@ import { SEAT_RECORD_DEFAULT_DAYS, SEAT_RECORD_MAX_DAYS, seatRecord } from './se
 import { jobTitle } from './job-title.js';
 import { DeliveryFreeze, frozenRefusal, isDeliverUnit, registerDeliveryFreezeRoutes } from './delivery-freeze.js';
 import { VoiceService, defaultVoiceDir } from '../voice/service.js';
+import { TtsService } from '../voice/tts.js';
 import { VoiceDashboardStore } from '../voice/dashboard.js';
 import { registerVoiceRoutes } from '../voice/routes.js';
 import { VoiceInjectInputs } from '../voice/inject-input.js';
@@ -1378,7 +1379,7 @@ export interface RuntimeDeps {
   /** Voice mode (DES-VOICE): the local speech-to-text service and the per-person dashboard store. A
    *  directly-driven route set gets a service over the default voice dir and a dashboard store over the state
    *  home (a test runner's own temp one), or none when no state home resolves. */
-  voice?: { service: VoiceService; dashboard: VoiceDashboardStore | null };
+  voice?: { service: VoiceService; dashboard: VoiceDashboardStore | null; tts?: TtsService };
   /** DES-L9: how `revisesPr` is resolved to a PR head branch (`gh pr view`, 5 s). Injectable so
    *  route tests answer without gh; production uses `core/deliver.ts::resolvePullRequest`. */
   resolvePullRequest?: (repoRoot: string, number: number) => Promise<PullRequestResolution>;
@@ -1853,7 +1854,7 @@ export function registerRoutes(
     service: new VoiceService({ dir: defaultVoiceDir() }),
     dashboard: (() => { try { return VoiceDashboardStore.under(crewStateHome()); } catch { return null; } })(),
   };
-  registerVoiceRoutes(app, { voice: voice.service, dashboard: voice.dashboard, audit });
+  registerVoiceRoutes(app, { voice: voice.service, tts: voice.tts ?? new TtsService({ dir: defaultVoiceDir() }), dashboard: voice.dashboard, audit });
   const voiceInputs = runtime.voiceInputs ?? new VoiceInjectInputs();
   const openWithOs = runtime.openWithOs ?? openWithSystemDefault;
   const signedIn = runtime.signedIn ?? signedInHeuristic;
