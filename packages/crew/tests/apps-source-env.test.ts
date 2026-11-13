@@ -9,6 +9,7 @@ import { appSourceDescriptor, pinOf } from '../src/apps/exec/sources.js';
 import { pmDescriptorHash } from '../src/mcp/registry.js';
 import { canonicalJson, sha256Hex } from '../src/mcp/classify.js';
 import type { McpUpstreamConfig } from '../src/mcp/probe.js';
+import type { McpPreviewResponse as WireMcpPreviewResponse } from 'wicked-crew-api-types';
 
 const stdio = (env?: Record<string, string>): McpUpstreamConfig => ({
   name: 'ref',
@@ -61,6 +62,16 @@ describe('appSourceDescriptor binds the non-secret env (CX1 review)', () => {
     // An env-only re-save: the source pin changes, so the recheck withdraws the grant.
     const afterEnvChange = pinOf(stdio({ LOG_LEVEL: 'info' })).descriptorHash;
     expect(afterEnvChange !== grant.descriptorHash).toBe(true);
+  });
+});
+
+describe('the published contract carries the stdio env (CX1 review)', () => {
+  it('McpPreviewResponse.server has env?: Record<string, string> (compile-time, enforced by tsconfig.test.json)', () => {
+    // Reading `.env` off the PUBLISHED wicked-crew-api-types type is a compile error if the field is absent or
+    // mistyped: tsc (which the repo typecheck runs over the tests) proves the contract carries it.
+    const server = {} as WireMcpPreviewResponse['server'];
+    const env: Record<string, string> | undefined = server.env;
+    expect(env).toBeUndefined();
   });
 });
 
