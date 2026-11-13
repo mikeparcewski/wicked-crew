@@ -23,6 +23,7 @@ import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { fileURLToPath } from 'node:url';
 
+import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { TTS_ENGINE, TTS_VOICES, TTS_VOICES_SOURCE, ttsVoiceUrl, type TtsVoice, type TtsVoiceFile } from './tts-manifest.js';
 import { VoiceError, type VoiceSpawn } from './service.js';
 
@@ -98,7 +99,7 @@ export interface PythonInfo { path: string; version: string; minor: number }
 /** What `<cmd>` is as a CPython 3 interpreter; null when it does not run or is not CPython 3. */
 export function probePython(cmd: string): PythonInfo | null {
   try {
-    const r = spawnSync(cmd, ['-c', 'import sys,platform;print(platform.python_implementation(), sys.version_info[0], sys.version_info[1], sys.version.split()[0], sys.executable)'], { encoding: 'utf8', timeout: 5000, windowsHide: true });
+    const r = spawnSync(cmd, ['-c', 'import sys,platform;print(platform.python_implementation(), sys.version_info[0], sys.version_info[1], sys.version.split()[0], sys.executable)'], { encoding: 'utf8', timeout: 5000, windowsHide: true, env: childEnvWithBootEstateDb(process.env) });
     if (r.status !== 0) return null;
     const m = /^CPython (\d+) (\d+) (\S+) (.+)$/m.exec(r.stdout ?? '');
     if (m === null || m[1] !== '3') return null;
@@ -441,7 +442,7 @@ export class TtsService {
     return new Promise<RunResult>((resolve, reject) => {
       let child: ChildProcess;
       try {
-        child = this.spawnImpl(command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: o.env });
+        child = this.spawnImpl(command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: childEnvWithBootEstateDb(o.env) });
       } catch (e) {
         reject(new VoiceError(500, 'voice_tts_failed', `Could not start ${command}: ${e instanceof Error ? e.message : String(e)}`));
         return;
