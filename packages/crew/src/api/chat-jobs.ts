@@ -422,7 +422,8 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
   });
   const checksTok = t({ id: 'checks', kind: 'checks', label: checksLabel(gate), swap: null });
   const reading: string[] = [];
-  if (takesDocuments) {
+  // An empty optional input adds nothing to the sentence; required and struck lists stay visible.
+  if (takesDocuments && (r.resolved.inputs.some((i) => i.id === 'documents' && i.required) || (ctx.documents?.length ?? 0) > 0)) {
     const documents = ctx.documents ?? [];
     const ok = documents.filter((s) => s.status === 'ok').length;
     reading.push(t({ id: 'documents', kind: 'documents', label: `${ok} document${ok === 1 ? '' : 's'}`, swap: null, documents }));

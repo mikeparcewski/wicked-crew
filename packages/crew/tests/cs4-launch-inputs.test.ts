@@ -6,6 +6,7 @@
 // Fastify inject() with a mock adapter: no engine.
 
 import Fastify, { type FastifyInstance } from 'fastify';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,10 +18,13 @@ import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import { AuditLog } from '../src/api/audit.js';
 import { ChatAttachmentStore } from '../src/api/chat-attachments.js';
-import { ChatProposals } from '../src/api/chat-proposals.js';
+import { ChatProposals, LaunchOnceRegistry } from '../src/api/chat-proposals.js';
 import { RunSourcePicks } from '../src/api/run-sources.js';
-import type { CoreAdapter } from '../src/core/adapter.js';
-import type { LaunchRunInput, ProposalSource } from '../src/core/types.js';
+import { jobInputsOfProposal } from '../src/api/chat-jobs.js';
+import { CATALOG_SEEDS } from '../src/workflow-catalog/catalog-data.js';
+import { servedState } from '../src/workflow-catalog/build-v2.js';
+import { CoreAdapter } from '../src/core/adapter.js';
+import type { ArtifactProposal, ChatTranscriptRecord, LaunchRunInput, ProposalSource } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
 
 /** The sources the fake gate answers: web (agents on) and support-pg (agents off). */
@@ -113,6 +117,89 @@ describe('POST /runs: a job’s documents and source pick (CS4)', () => {
   const attach = (name: string, text: string): string =>
     attachments.add(CHAT, [{ filename: name, declaredType: 'text/plain', data: Buffer.from(text, 'utf8') }])[0]!.id;
   const launch = (body: Record<string, unknown>) => app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'Due diligence on these', ...body } });
+
+  /** Real catalog and proposal fill, with the same attachment store the launch route reads. */
+  async function propose(card: string, option?: string): Promise<ArtifactProposal> {
+    const catalog = new CoreAdapter({ dbPath: join(scratch, 'catalog.db'), stub: true });
+    let served;
+    try {
+      await catalog.loadBuiltinCatalog(() => undefined);
+      served = { ...servedState({ defs: catalog.listWorkflows(), presets: await catalog.listPresets(), entries: await catalog.catalog() }), rev: 'test' };
+    } finally {
+      catalog.close();
+    }
+    const records: ChatTranscriptRecord[] = [];
+    const svc = new ChatProposals({
+      flags: () => ({ context: true, proposals: true, create: false, refine: false, theme: false, demo: false }),
+      catalog: CATALOG_SEEDS, records: () => records,
+      append: (_id, record) => { records.push(record); return true; },
+      instanceOf: () => 'instance', projectOf: () => null,
+      chat: () => ({ projectId: null, repos: [{ id: 'repo', name: 'repo' }], lead: 'claude', seats: ['claude'], analysis: false }),
+      rosterEligible: () => ['claude', 'codex', 'pi'].map((key) => ({ key, name: key })),
+      runs: async () => [], chatOfRun: () => undefined, isAskPath: () => false,
+      docsRoot: async () => null, projectName: async () => null,
+      attachments: (id) => attachments.list(id), workflowSteps: async () => 3, runCostUsd: async () => null,
+      registry: new LaunchOnceRegistry(), jobs: () => true, served: async () => served,
+      reshapeReject: async () => null, broadcast: () => undefined, audit: () => undefined,
+    });
+    const result = await svc.propose(CHAT, { card, ...(option !== undefined ? { option } : {}), source: 'pick', requestId: 'pick', words: 'Implement the attached specification' },
+      { id: 'operator', kind: 'human', trust: 'operator' }, 'instance');
+    expect(result.code).toBe(201);
+    return (result.body['view'] as { proposal: ArtifactProposal }).proposal;
+  }
+
+  it.each([
+    { card: 'feature', option: undefined, workflow: 'feature' },
+    { card: 'document', option: 'repo-docs', workflow: 'docs' },
+  ])('$card $option carries a full Unicode Markdown attachment from proposal to launch', async ({ card, option, workflow }) => {
+    const text = Array.from({ length: 1400 }, (_, i) => `## Rule ${i} → café\nImplement this requirement.\n`).join('');
+    const uploaded = Buffer.from(text, 'utf8');
+    expect(text.length).toBeGreaterThan(40_000);
+    const id = attachments.add(CHAT, [{ filename: 'spec.md', declaredType: 'text/markdown', data: uploaded }])[0]!.id;
+    const proposal = await propose(card, option);
+    expect(proposal.needs).toContainEqual(expect.objectContaining({ id: 'documents', required: false, status: 'met' }));
+    expect(proposal.sentence!.tokens.find((t) => t.kind === 'documents')).toMatchObject({
+      label: '1 document', documents: [{ token: `attachment:${id}`, status: 'ok' }],
+    });
+    expect(jobInputsOfProposal(proposal).documents).toEqual([`attachment:${id}`]);
+    expect(proposal.question).toBeNull();
+    const res = await launch({ chatId: CHAT, workflow, ...jobInputsOfProposal(proposal) });
+    expect(res.statusCode).toBe(201);
+    const input = launchRun.mock.calls[0]![0] as LaunchRunInput;
+    const root = join(docsRoot, input.sessionId);
+    const manifest = JSON.parse(readFileSync(join(root, 'records', 'MANIFEST.json'), 'utf8')) as { files: Array<{ token: string; file: string }> };
+    expect(manifest.files).toHaveLength(1);
+    const file = manifest.files[0]!;
+    expect(file.token).toBe(`attachment:${id}`);
+    const path = join(root, 'records', file.file);
+    const hash = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
+    expect(hash(readFileSync(path))).toBe(hash(uploaded));
+    expect(statSync(path).size).toBe(uploaded.length);
+    expect(statSync(path).mode & 0o222).toBe(0);
+    expect(input.extraReadRoots).toContain(root);
+    expect(input.extraWriteRoots ?? []).not.toContain(root);
+    expect(input.problem).toContain('THE DOCUMENTS of this job');
+    expect(input.problem).toContain(join(root, 'records'));
+    expect(input.problem).toContain(file.file);
+  });
+
+  it('a feature without attachments asks no documents question and shows no documents token', async () => {
+    const proposal = await propose('feature');
+    expect(proposal.needs).toContainEqual(expect.objectContaining({ id: 'documents', required: false }));
+    expect(proposal.question).toBeNull();
+    expect(proposal.sentence!.tokens.some((t) => t.kind === 'documents')).toBe(false);
+    expect(proposal.sentence!.text).not.toContain('{documents}');
+    expect(jobInputsOfProposal(proposal).documents).toEqual([]);
+  });
+
+  it('a feature launched outside a chat has its original brief and no document roots', async () => {
+    const res = await launch({ workflow: 'feature', problem: 'Add a setting' });
+    expect(res.statusCode).toBe(201);
+    const input = launchRun.mock.calls[0]![0] as LaunchRunInput;
+    expect(input.problem).toBe('Add a setting');
+    expect(input.extraReadRoots ?? []).toEqual([]);
+    expect(authorize).not.toHaveBeenCalled();
+  });
 
   it('stages two attachments read-only, mounts the folder as a read root only, and names it in the brief', async () => {
     const a = attach('terms.txt', 'Term: 24 months\n');
