@@ -32,7 +32,7 @@ function wav(samples = 1600): Buffer {
 }
 
 interface FakeChild extends EventEmitter { stdin: PassThrough; stdout: PassThrough; stderr: PassThrough; kill: (s?: string) => boolean }
-interface Call { command: string; args: string[]; env: NodeJS.ProcessEnv; stdin: string; cwd?: string; detached?: boolean }
+interface Call { command: string; args: string[]; env: NodeJS.ProcessEnv; stdin: string; cwd?: string | undefined; detached?: boolean | undefined }
 type Behaviour = (call: Call) => { code?: number; stderr?: string; hang?: boolean } | void;
 
 /** A process stand-in: records the call, runs `behave` once its stdin closes. */
@@ -530,7 +530,8 @@ describe('tts revision: isolation, deadlines, cleanup and verification', () => {
   it('every Python launch is isolated (-I) and runs with the voice dir as cwd, never the daemon cwd', async () => {
     const probes: Array<[string, string]> = [];
     const seen: Call[] = [];
-    const { spawn, calls } = installSpawn(piper(() => wav(), seen));
+    const writer = piper(() => wav(), seen);
+    const { spawn, calls } = installSpawn((c) => (c.args.includes('piper') ? writer(c) : undefined));
     const s = service({ spawn, probe: (cmd, cwd) => { probes.push([cmd, cwd]); return cmd === 'python3' ? PY : null; } });
     await s.status();
     await s.startInstall([VOICE_A.id]);
