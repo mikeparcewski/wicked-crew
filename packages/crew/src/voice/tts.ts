@@ -386,9 +386,11 @@ export class TtsService {
   async startInstall(ids: readonly string[]): Promise<{ started: boolean }> {
     const wanted = ids.map((id) => this.voiceById(id));
     if (this.inflight !== null) throw new VoiceError(409, 'voice_install_running', 'The speech install is already running.');
+    const before = this.gen;
     const problem = this.platformProblem() ?? (await this.pickPython(true)).problem;
     if (problem !== null) throw new VoiceError(409, 'voice_tts_unsupported', problem);
-    // The probe awaited: another install may have started meanwhile.
+    // The probe awaited: a removal (it bumps gen) or another install may have come in meanwhile.
+    if (this.gen !== before) throw new VoiceError(409, 'voice_tts_missing', 'The speech engine is being removed.');
     if (this.inflight !== null) throw new VoiceError(409, 'voice_install_running', 'The speech install is already running.');
     if (this.engineInstalled() && wanted.every((v) => this.voiceInstalled(v))) return { started: false };
     const gen = ++this.gen;

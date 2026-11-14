@@ -759,6 +759,21 @@ describe('tts revision: isolation, deadlines, cleanup and verification', () => {
     } finally { st.killSpy.mockRestore(); }
   });
 
+  it('a removal that lands during the install probe cancels that install', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    const probe = async (cmd: string) => { await gate; return cmd === 'python3' ? PY : null; };
+    const inst = installSpawn();
+    const s = service({ spawn: inst.spawn, probe });
+    const starting = s.startInstall([VOICE_A.id]);
+    const caught = starting.catch((e: unknown) => e);
+    await new Promise((r) => setTimeout(r, 20));
+    await s.remove();
+    release();
+    expect(await caught).toMatchObject({ code: 'voice_tts_missing' });
+    expect(existsSync(join(dir, 'tts'))).toBe(false);
+  });
+
   it('install errors carry no child stderr (the venv failure names only the remedy)', async () => {
     const { spawn } = fakeSpawn(() => ({ code: 1, stderr: 'SECRET-STDERR-TEXT' }));
     const s = service({ spawn });
