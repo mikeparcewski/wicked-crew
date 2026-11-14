@@ -17008,6 +17008,44 @@ export interface VoiceTranscribeResponse {
   model: string;
 }
 
+/**
+ * (api-types 0.209.0, studio#1140) `GET /voice/tts` (and the answer of `POST|DELETE /voice/tts`): text to speech on
+ * THIS machine, the piper engine (GPL-3.0-or-later, the person's own pip from PyPI, a separate program) and two
+ * licence-cleared voices. Nothing is sent off the machine. Same fence as every voice route.
+ */
+export interface VoiceTtsStatus {
+  /** This machine can install it: macOS or Linux (WSL2 counts), arm64 or x86_64, CPython 3.9 to 3.14. `reason` is the plain refusal or the one-line remedy (no Python); `null` when ok. */
+  supported: { ok: boolean; reason: string | null };
+  python: { found: boolean; path: string | null; version: string | null };
+  engine: { found: boolean; version: string | null };
+  /** Keyed by voice id (`en_US-joe-medium`, `en_GB-cori-high`). */
+  voices: Record<string, { installed: boolean; name: string; accent: string; licence: string; bytes: number; source: string }>;
+  /** An install in progress (`step` is `engine` or `voice:<id>`), or the last one's failure; `null` when none. */
+  install: { state: 'running' | 'failed'; step: string; error: string | null } | null;
+}
+
+/** `POST /voice/tts`: the person's consent and the voices to install (202 = started, with the engine first when missing;
+ *  400 `voice_consent_required` / `voice_unknown`; 409 `voice_install_running` / `voice_tts_unsupported`). Audited
+ *  `voice.tts.install_started`. `DELETE /voice/tts` removes the engine and voices (audited `voice.tts.removed`). */
+export interface PostVoiceTtsBody {
+  consent: true;
+  voices: string[];
+}
+
+/**
+ * `POST /voice/speak` → `audio/wav`. The text is normalized (control characters and line breaks removed, piper's
+ * `[[ ]]` markup neutralized, at most 2000 characters) and goes to piper on stdin; it is never logged or audited.
+ * `GET /voice/tts/sample/:voice` answers one fixed sentence the same way, cached per voice and piper version.
+ * Errors carry `code`: `voice_tts_missing` (409: the engine or that voice is not installed, no fallback),
+ * `voice_unknown` / `voice_text_empty` / `voice_text_invalid` (400), `voice_busy` (429: one runs and one waits),
+ * `voice_timeout` (504), `voice_tts_failed` (500).
+ */
+export interface PostVoiceSpeakBody {
+  text: string;
+  /** A voice id from {@link VoiceTtsStatus.voices}. */
+  voice: string;
+}
+
 /** A section a widget registers in the `voice-dashboard` panel slot (the `panels[]` shape of a run plugin). */
 export interface VoicePanelDecl {
   slot: 'voice-dashboard';

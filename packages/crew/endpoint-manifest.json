@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.208.0",
+  "apiTypesVersion": "0.209.0",
   "endpoints": [
     {
       "method": "GET",
@@ -3477,6 +3477,21 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/api/v1/voice/speak",
+      "requestType": "PostVoiceSpeakBody",
+      "responseType": "audio/wav",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        409,
+        429,
+        500,
+        504
+      ]
+    },
+    {
       "method": "GET",
       "path": "/api/v1/voice/status",
       "requestType": null,
@@ -3498,6 +3513,54 @@
         409,
         413,
         415,
+        429,
+        500,
+        504
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/voice/tts",
+      "requestType": null,
+      "responseType": "VoiceTtsStatus",
+      "statusCodes": [
+        200,
+        403
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/voice/tts",
+      "requestType": null,
+      "responseType": "VoiceTtsStatus",
+      "statusCodes": [
+        200,
+        403
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/voice/tts",
+      "requestType": "PostVoiceTtsBody",
+      "responseType": "VoiceTtsStatus",
+      "statusCodes": [
+        200,
+        202,
+        400,
+        403,
+        409
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/voice/tts/sample/:voice",
+      "requestType": null,
+      "responseType": "audio/wav",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        409,
         429,
         500,
         504
