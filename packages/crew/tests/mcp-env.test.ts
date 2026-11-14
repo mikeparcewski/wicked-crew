@@ -222,6 +222,19 @@ describe('the routes', () => {
     expect(response.body).not.toContain(value);
   });
 
+  it.each(['PYTHONWARNINGS', 'BROWSER'])('refuses the complete Python startup exploit with %s first', async (first) => {
+    const warnings = ['PYTHONWARNINGS', 'ignore::antigravity.X'];
+    const browser = ['BROWSER', '/bin/sh -c "printf CX1_STARTUP >&2" %s'];
+    const env = Object.fromEntries(first === 'PYTHONWARNINGS' ? [warnings, browser] : [browser, warnings]);
+    expect(validateServerEnv(env)).toMatchObject({ name: first, code: 'reserved_name' });
+    const response = await post('/mcp/servers/preview', config({ command: 'python3', env }));
+    expect(response.statusCode).toBe(400);
+    expect(response.body).toContain(first);
+    expect(response.body).toContain('reserved_name');
+    for (const value of Object.values(env)) expect(response.body).not.toContain(value);
+    expect((await registry.listForAgents()).servers).toEqual([]);
+  });
+
   it('refuses a bad env at the preview, naming the variable and not the value, and env on mcp-http', async () => {
     const bad = await post('/mcp/servers/preview', config({ env: { NODE_OPTIONS: SENTINEL } }));
     expect(bad.statusCode).toBe(400);
