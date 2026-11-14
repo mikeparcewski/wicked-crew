@@ -16,6 +16,28 @@ mentioned only where a daemon release depends on them.
 - A job started from a chat reads the chat's attached files in full: /feature and /document repo take them as documents. A revision to /document repo keeps the chat's files, whether it switches from /document alone or changes card and option together (a person's own selection of fewer files is kept as chosen)
 
 - **Insights "Run it now", the weekly review schedule and scheduled learn runs no longer wait for an idle daemon (crew#1544).** The "one governed run at a time" guard (crew#1161) refused whenever any run was planning, distributing or executing; the daemon now runs several at once, so on a busy daemon it meant never. Both schedulers drop it and keep "its last run is still going" and one launch per sweep. A schedule whose last run is parked on a person now says so and names the run ("its last run <id> is waiting on you (awaiting_human)").
+### Added
+
+- **An `mcp-stdio` server can carry a non-secret `env` map (chat-extend CX1).** `env` goes to
+  `POST /mcp/servers/preview` and is committed by saving the resulting `previewHash` (`POST /mcp/servers` takes
+  `{ previewHash }`, not `env`): at most 16 names, `^[A-Z_][A-Z0-9_]{0,63}$` compared without case, each value at
+  most 1024 characters; it is stored, answered back on the Settings read and the preview's `server` view, part of the
+  preview hash, and injected into the server's process after the SDK safe env and before the secret. One validator
+  (`validateServerEnv`) refuses, naming the variable and a reason code and never the value: names that change how the
+  process starts, loads code or reaches the network (PATH, HOME, LD_*, DYLD_*, *_PROXY, GIT_*, CURL_*,
+  SSL_CERT_*, OPENSSL_*; runtime/launcher families PYTHON*, LUA_INIT*, LUA_PATH*, LUA_CPATH*, PHPRC,
+  PHP_INI_*, DOTNET_*, CORECLR_*, COMPLUS_*, UV_*, PIP_*, JAVA_*, _JAVA_*, JDK_*, PERL5*, PERL_*,
+  GEM_*, BUNDLE_*, BUN_* and DENO_*; NODE_OPTIONS, NODE_PATH, NODE_TLS_*, NODE_EXTRA_CA_CERTS and
+  NPM_CONFIG_*; exact Go controls GOFLAGS, GOPROXY, GOSUMDB, GONOSUMDB, GONOSUMCHECK, GOPRIVATE,
+  GONOPROXY, GOINSECURE, GOTOOLCHAIN, GOENV, GOPATH, GOROOT, GOBIN and GOEXPERIMENT; BROWSER,
+  EDITOR, VISUAL, PAGER, SSLKEYLOGFILE; trust-store overrides *_CA_BUNDLE, *_CA_CERTS, *_CERT_FILE,
+  *_CERT_DIR and GRPC_DEFAULT_SSL_ROOTS_FILE_PATH; PERLLIB, RUBYOPT, RUBYLIB, CLASSPATH, GCONV_PATH,
+  LOCPATH, NLSPATH, ELECTRON_RUN_AS_NODE, ...), the server's own secret variable, credential-named variables and
+  credential-shaped values (those belong in `secret`). Any other kind refuses `env` (400). The agent view never
+  carries it. The non-secret `env` is now part of the execution descriptor a call binds to: an env-only change changes
+  the Apps source descriptor hash (so a stale lock and write grant are withdrawn on recheck) and the PM entry's
+  execution descriptor (so it turns agent `query` off until a person turns it back on). `McpServerConfigBody.env`,
+  `McpServer.env` and `McpPreviewResponse.server.env` are in crew-api-types.
 
 ## [0.18.14] — 2026-11-12
 

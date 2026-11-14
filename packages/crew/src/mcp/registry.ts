@@ -54,6 +54,7 @@ import { bindingFor, bindingInForce, bindingOnSave } from '../knowledge/trackers
 import { PROJECTION_UNKNOWN, type TrackerProjectionLookup, trackerLinkViews } from '../knowledge/trackers/view.js';
 import { checkSourceDocument, DeploymentPolicyError, policyVersionOf } from '../knowledge/registry/policy.js';
 import { canonicalJson, deriveToolClass, effectiveToolClass, APPS_SERVER, ESTATE_SERVER, type HashedRestTarget, type HashedToolShape, MCP_SERVER_NAME_RE, mcpSubject, parseMcpSubject, sha256Hex, toolSchemaHash } from './classify.js';
+import { envFingerprint } from './env.js';
 import type { McpUpstreamConfig, ProbedTool, ProbeResult, Prober } from './probe.js';
 import { GENERATIONS_KEPT, type McpRegistryFile, type McpRegistryStore, type McpServerRecord, type McpToolRecord } from './registry-store.js';
 import { restTarget } from './rest.js';
@@ -1211,7 +1212,7 @@ export class McpRegistry {
  */
 export function configOf(s: McpServerRecord): McpUpstreamConfig {
   const pm = pmOf(s);
-  const base: McpUpstreamConfig = { name: s.name, kind: s.kind, command: s.command, args: s.args, url: s.url, auth: s.auth, ...(s.id !== undefined ? { id: s.id } : {}), ...(pm !== null ? { pm } : {}) };
+  const base: McpUpstreamConfig = { name: s.name, kind: s.kind, command: s.command, args: s.args, url: s.url, auth: s.auth, ...(s.id !== undefined ? { id: s.id } : {}), ...(pm !== null ? { pm } : {}), ...(s.env !== undefined ? { env: s.env } : {}) };
   if (s.kind === 'toolbox-source') {
     const entry = entryOf(s);
     const address = s.address ?? { ...NO_CONFIRMATION, allow: [] };
@@ -1256,6 +1257,7 @@ interface ConfigView {
   args: string[];
   url: string | null;
   auth: McpAuthConfig | null;
+  env?: Record<string, string>;
   openapiUrl?: string | null;
   operations?: string[] | null;
   address?: AddressPolicy;
@@ -1272,6 +1274,7 @@ interface ConfigView {
 function configView(c: McpUpstreamConfig): ConfigView {
   const view: ConfigView = { name: c.name, kind: c.kind, command: c.command, args: c.args, url: c.url, auth: c.auth };
   if (c.pm != null) view.pm = { system: c.pm.system };
+  if (c.env !== undefined) view.env = c.env;
   if (c.kind === 'rest') {
     view.openapiUrl = c.openapiUrl ?? null;
     view.operations = c.operations ?? null;
@@ -1420,7 +1423,10 @@ export function isGovernedRecord(s: Pick<McpServerRecord, 'kind' | 'pm'>): boole
  * "query" off, as a source's descriptor change does. Never a secret value.
  */
 export function pmDescriptorHash(c: McpUpstreamConfig): string {
-  return sha256Hex(canonicalJson({ v: 1, kind: c.kind, command: c.command, args: c.args, url: c.url, auth: c.auth, address: c.address ?? null, pm: c.pm?.system ?? null }));
+  // (CX1 review) The env key is included ONLY when there is an env, so a PM entry without one keeps exactly its
+  // pre-change execution descriptor hash (it does not read as changed, so agent query stays on, on upgrade).
+  const fp = envFingerprint(c.env);
+  return sha256Hex(canonicalJson({ v: 1, kind: c.kind, command: c.command, args: c.args, url: c.url, auth: c.auth, address: c.address ?? null, pm: c.pm?.system ?? null, ...(fp !== null ? { env: fp } : {}) }));
 }
 
 /** A network Postgres source, in either form (the one kind with row writes in v1). */

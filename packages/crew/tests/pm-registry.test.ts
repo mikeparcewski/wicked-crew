@@ -145,6 +145,16 @@ describe('a PM entry under the source safeguards', () => {
     expect((await app.inject({ method: 'POST', url: '/api/v1/mcp/servers/preview', payload: { ...body, kind: 'rest', command: undefined, url: 'https://x.example' } })).statusCode).toBe(400);
     await app.close();
   });
+
+  it('(CX1 review) an env-only re-save turns query off: the env is in the execution descriptor', async () => {
+    // Baseline the descriptor (ignore prior order-dependent state), then turn query on.
+    await save(config(['b']));
+    await setAgentAccess(store, 'jira', { query: true });
+    // Re-save with the identical descriptor: query stays on.
+    expect((await save(config(['b']))).agents).toMatchObject({ query: true });
+    // Change ONLY the non-secret env: the PM execution descriptor changes, so query turns off.
+    expect((await save({ ...config(['b']), env: { LOG_LEVEL: 'debug' } })).agents).toMatchObject({ query: false });
+  });
 });
 
 describe('Q-PM2 at the route: POST /projects/:id/members refuses a non-human crew.repo attach before the engine', () => {

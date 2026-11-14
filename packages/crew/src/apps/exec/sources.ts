@@ -13,6 +13,7 @@ import { createHash } from 'node:crypto';
 
 import type { AppLockSource, AppQueryKind } from '../../core/types.js';
 import { canonicalJson } from '../../mcp/classify.js';
+import { envFingerprint } from '../../mcp/env.js';
 import type { McpUpstreamConfig } from '../../mcp/probe.js';
 import type { McpRegistry } from '../../mcp/registry.js';
 import { ESTATE_SERVER } from '../../mcp/classify.js';
@@ -32,7 +33,12 @@ export type AppSourceRegistry = Pick<McpRegistry, 'snapshot' | 'source' | 'appTo
 export function appSourceDescriptor(config: McpUpstreamConfig): Record<string, unknown> {
   const base = sourceDescriptor(config);
   if (config.kind === 'sql' || config.kind === 'graphql') return base;
-  return { ...base, command: config.command, args: [...config.args], openapiUrl: config.openapiUrl ?? null, openapi: config.openapi == null ? null : sha(config.openapi) };
+  // (CX1 review) The non-secret env of a stdio server decides where the call goes: an env-only change must
+  // change the descriptor hash, so a stale lock and write grant are withdrawn on recheck. The key is added
+  // ONLY when there is an env, so a source without one keeps exactly its old descriptor and hash (no stale
+  // lock or grant on upgrade).
+  const fp = envFingerprint(config.env);
+  return { ...base, command: config.command, args: [...config.args], openapiUrl: config.openapiUrl ?? null, openapi: config.openapi == null ? null : sha(config.openapi), ...(fp !== null ? { env: fp } : {}) };
 }
 
 export const CREW_PIN: AppLockSource = (() => {

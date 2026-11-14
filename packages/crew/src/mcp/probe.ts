@@ -43,6 +43,8 @@ export interface McpUpstreamConfig {
   args: string[];
   url: string | null;
   auth: McpAuthConfig | null;
+  /** (chat-extend CX1) `mcp-stdio` only: non-secret env, validated by `validateServerEnv`; injected after the SDK safe env, before the secret. */
+  env?: Record<string, string>;
   /** `rest` only (slice S5a): where the OpenAPI document is fetched from. */
   openapiUrl?: string | null;
   /** `rest` only: the OpenAPI document as pasted (instead of `openapiUrl`). */
@@ -132,6 +134,7 @@ export function transportFor(config: McpUpstreamConfig, secret: string | null, d
   if (config.kind === 'sql' || config.kind === 'graphql') throw new Error(`a ${config.kind} source is not an MCP server; it has no MCP transport`);
   if (config.kind === 'mcp-stdio') {
     const env: Record<string, string> = { ...getDefaultEnvironment() };
+    Object.assign(env, config.env);
     if (config.auth?.env !== undefined && secret !== null) env[config.auth.env] = secret;
     const transport = new StdioClientTransport({ command: config.command ?? '', args: config.args, env, stderr: 'pipe' });
     let tail = '';
