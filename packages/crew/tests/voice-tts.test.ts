@@ -3,7 +3,7 @@
 
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
@@ -11,7 +11,7 @@ import { PassThrough } from 'node:stream';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { TTS_ENGINE, TTS_VOICES, ttsVoiceUrl, type TtsVoice } from '../src/voice/tts-manifest.js';
+import { TTS_ENGINE, TTS_VOICES, ttsVoiceUrl, type TtsVoice, type TtsVoiceFile } from '../src/voice/tts-manifest.js';
 import { TTS_MAX_WAV_BYTES, TTS_MIN_PLATFORM, TtsService, lockPath, normalizeSpeakText, probePython, ttsWavProblem, type PythonInfo, type TtsDeps } from '../src/voice/tts.js';
 import { VoiceError, type VoiceSpawn } from '../src/voice/service.js';
 import { registerVoiceRoutes } from '../src/voice/routes.js';
@@ -854,6 +854,21 @@ describe('tts revision: isolation, deadlines, cleanup and verification', () => {
     expect(signal?.aborted).toBe(true);
   });
 
+  it('revision 4: a download whose signal is already aborted fails at once and never calls fetch', async () => {
+    let called = false;
+    // A fetch that would never settle if it were ever reached.
+    const hang = (async () => { called = true; return new Promise<Response>(() => undefined); }) as unknown as typeof fetch;
+    const s = service({ spawn: installSpawn().spawn, fetch: hang });
+    const ac = new AbortController();
+    ac.abort(); // aborted BEFORE the download starts
+    const dest = join(dir, 'tts', 'voices', 'already-aborted.onnx');
+    mkdirSync(join(dir, 'tts', 'voices'), { recursive: true });
+    const fetchVoiceFile = (s as unknown as { fetchVoiceFile: (f: TtsVoiceFile, d: string, sig: AbortSignal) => Promise<void> }).fetchVoiceFile.bind(s);
+    // Without the fix the aborted race never rejects and fetch hangs forever; the short timeout makes that a failure.
+    await expect(fetchVoiceFile(VOICE_A.model, dest, ac.signal)).rejects.toThrow(/cancelled/);
+    expect(called).toBe(false);
+  }, 4000);
+
   it('revision 5: a probe timeout kills its group and settles only on close', async () => {
     const st = stubbornSpawn();
     try {
@@ -1074,6 +1089,49 @@ describe('tts revision: isolation, deadlines, cleanup and verification', () => {
       expect((await s.sample(VOICE_A.id)).equals(fresh)).toBe(true);
       expect(seen).toHaveLength(1);
       expect(readFileSync(cached).equals(fresh)).toBe(true);
+      expect(readFileSync(`${cached}.sha256`, 'utf8')).toBe(sha(fresh));
+    } finally {
+      const closed = new Promise<void>((r) => writer.once('close', () => r()));
+      writer.kill('SIGKILL');
+      await closed;
+    }
+  });
+
+  it('revision 4: an oversized checksum sidecar is lstat-refused even when its digest matches, and regenerated', async () => {
+    const fresh = wav();
+    const cachedWav = wav(400); // a valid cached WAV, but not the fresh one
+    const seen: Call[] = [];
+    const s = service({ spawn: fakeSpawn(piper(() => fresh, seen)).spawn });
+    installed(s);
+    const cached = join(dir, 'tts', 'sample', `${VOICE_A.id}-${TTS_ENGINE.version}.wav`);
+    mkdirSync(join(dir, 'tts', 'sample'), { recursive: true });
+    writeFileSync(cached, cachedWav);
+    // The correct digest, padded past the sidecar cap. trim() would still accept it, so only the size guard regenerates:
+    // without the fix the cached WAV is served (seen stays 0) and this test fails.
+    writeFileSync(`${cached}.sha256`, `${sha(cachedWav)}${' '.repeat(1024 * 1024)}`);
+    expect((await s.sample(VOICE_A.id)).equals(fresh)).toBe(true);
+    expect(seen).toHaveLength(1);
+    expect(readFileSync(cached).equals(fresh)).toBe(true);
+    expect(readFileSync(`${cached}.sha256`, 'utf8')).toBe(sha(fresh));
+  });
+
+  it.skipIf(process.platform === 'win32')('revision 4: a FIFO checksum sidecar is lstat-refused before reading and regenerated', async () => {
+    const fresh = wav();
+    const cachedWav = wav(400); // a valid cached WAV, but not the fresh one
+    const seen: Call[] = [];
+    const s = service({ spawn: fakeSpawn(piper(() => fresh, seen)).spawn });
+    installed(s);
+    const cached = join(dir, 'tts', 'sample', `${VOICE_A.id}-${TTS_ENGINE.version}.wav`);
+    mkdirSync(join(dir, 'tts', 'sample'), { recursive: true });
+    writeFileSync(cached, cachedWav);
+    expect(spawnSync('mkfifo', [`${cached}.sha256`]).status).toBe(0);
+    // A bounded writer feeds the CORRECT digest: an unfixed readFileSync drains it and serves the cached WAV (seen 0)
+    // rather than hanging the event loop, so the test fails without the fix instead of timing out.
+    const writer = nodeSpawn(process.execPath, ['-e', "setTimeout(() => require('fs').writeFileSync(process.argv[1], process.argv[2]), 250)", `${cached}.sha256`, sha(cachedWav)], { stdio: 'ignore' });
+    try {
+      expect((await s.sample(VOICE_A.id)).equals(fresh)).toBe(true);
+      expect(seen).toHaveLength(1);
+      expect(lstatSync(`${cached}.sha256`).isFIFO()).toBe(false);
       expect(readFileSync(`${cached}.sha256`, 'utf8')).toBe(sha(fresh));
     } finally {
       const closed = new Promise<void>((r) => writer.once('close', () => r()));

@@ -42,6 +42,8 @@ export const TTS_TIMEOUT_MS = 30_000;
 export const TTS_OUTPUT_CAP_BYTES = 64 * 1024;
 /** The output file is watched while piper writes and the process killed past this. */
 export const TTS_MAX_WAV_BYTES = 16 * 1024 * 1024;
+/** A sample's checksum sidecar holds one sha256 hex line (64-65 bytes); anything larger is a cache miss, never read. */
+export const TTS_SIDECAR_MAX_BYTES = 128;
 /** The one fixed sentence of a voice sample. */
 export const TTS_SAMPLE_TEXT = 'Hello, this is how I sound when I read to you.';
 /** The engine install (venv + pip) is given this long. */
@@ -494,12 +496,16 @@ export class TtsService {
     };
     const linked = AbortSignal.any([signal, stop.signal]);
     const aborted = new Promise<never>((_, reject) => {
-      linked.addEventListener('abort', () => reject(new Error(why ?? 'The install was cancelled.')), { once: true });
+      const fail = (): void => reject(new Error(why ?? 'The install was cancelled.'));
+      // AbortSignal.any() can be born already aborted; an 'abort' listener added afterwards never fires. Reject at once.
+      if (linked.aborted) fail();
+      else linked.addEventListener('abort', fail, { once: true });
     });
     aborted.catch(() => undefined);
     let res: Response | null = null;
     try {
       touch();
+      if (linked.aborted) throw new Error(why ?? 'The install was cancelled.');
       let url = ttsVoiceUrl(file);
       for (let hop = 0; hop <= TTS_MAX_REDIRECTS; hop++) {
         if (new URL(url).protocol !== 'https:') throw new Error(`The voice download for ${name} was refused: it is not https.`);
@@ -599,11 +605,15 @@ export class TtsService {
         try {
           const st = lstatSync(cached);
           if (!st.isFile() || st.size > this.maxWav) throw new Error('Invalid cached sample.');
+          // The sidecar is lstat-checked before it is opened: a FIFO there would block the event loop, and an
+          // oversized file would be read whole. Only a small regular file is read; anything else is a cache miss.
+          const ss = lstatSync(sum);
+          if (!ss.isFile() || ss.size > TTS_SIDECAR_MAX_BYTES) throw new Error('Invalid cached sidecar.');
           const wav = readFileSync(cached);
           if (ttsWavProblem(wav) === null && readFileSync(sum, 'utf8').trim() === createHash('sha256').update(wav).digest('hex')) return wav;
         } catch { /* unreadable or unrecorded: re-made below */ }
         rmSync(cached, { recursive: true, force: true });
-        rmSync(sum, { force: true });
+        rmSync(sum, { recursive: true, force: true });
       }
       const wav = await this.synthesize(v, TTS_SAMPLE_TEXT);
       mkdirSync(dirname(cached), { recursive: true });
