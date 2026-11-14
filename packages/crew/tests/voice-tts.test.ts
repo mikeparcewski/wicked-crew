@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { TTS_ENGINE, TTS_VOICES, ttsVoiceUrl, type TtsVoice } from '../src/voice/tts-manifest.js';
 import { TTS_MIN_PLATFORM, TtsService, lockPath, normalizeSpeakText, probePython, ttsWavProblem, type PythonInfo, type TtsDeps } from '../src/voice/tts.js';
@@ -18,6 +18,14 @@ import { registerVoiceRoutes } from '../src/voice/routes.js';
 import { registerServerErrorBody } from '../src/api/server-error-body.js';
 import type { AuditLog } from '../src/api/audit.js';
 import type { Actor } from '../src/core/types.js';
+
+// Suite-wide: the package directory holds no new entry once every test in this file has run, whichever test leaked.
+let packageDirAtStart: string[] = [];
+beforeAll(() => { packageDirAtStart = readdirSync(process.cwd()).sort(); });
+afterAll(() => {
+  const added = readdirSync(process.cwd()).filter((n) => !packageDirAtStart.includes(n));
+  expect(added, `new entries in the package directory: ${added.join(', ')}`).toEqual([]);
+});
 
 const sha = (b: Buffer | string) => createHash('sha256').update(b).digest('hex');
 
