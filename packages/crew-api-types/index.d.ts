@@ -14012,6 +14012,15 @@ export interface McpServerConfigBody {
    * and `jira`; a re-save of a PM source must name the same system (409 `pm_marker_fixed`).
    */
   pm?: { system: 'github' | 'jira' };
+  /**
+   * `mcp-stdio` only (a 400 on every other kind): non-secret environment variables for the server's process,
+   * at most 16 names (`^[A-Z_][A-Z0-9_]{0,63}$`, compared without case), each value at most 1024 characters.
+   * Refused: names that change how the process starts or reaches the network (PATH, HOME, NODE_OPTIONS, LD_*,
+   * *_PROXY, GIT_*, NPM_CONFIG_* and the like), the server's own secret variable, a name containing TOKEN,
+   * SECRET, PASSWORD, CREDENTIAL, AUTH, API_KEY, ACCESS_KEY or PRIVATE_KEY, and a value shaped like a credential.
+   * A refusal names the variable and a reason, never the value. Part of the preview hash.
+   */
+  env?: Record<string, string>;
 }
 
 /** (api-types 0.187.0, DES-PM-001 §1) The project-management system a registry entry is. PM-1 registers `github` and `jira`. */
@@ -14106,6 +14115,8 @@ export interface McpServer {
   args: string[];
   url: string | null;
   auth: McpAuthConfig | null;
+  /** `mcp-stdio` only: the non-secret env as saved (see `McpServerConfigBody.env`). Absent when none; never in the agent view. */
+  env?: Record<string, string>;
   /** `rest` only (api-types 0.64.0): the OpenAPI URL, `null` when the document was pasted. */
   openapiUrl?: string | null;
   /** `rest` only: the operations that were picked; `null` = all. */
@@ -14332,6 +14343,8 @@ export interface McpPreviewResponse {
     toolbox?: ToolboxSourceDocument;
     descriptorVersion?: 1 | 2;
     policyVersion?: string;
+    /** (chat-extend CX1) `mcp-stdio` only: the non-secret env this preview would save; `configView` returns it. */
+    env?: Record<string, string>;
   };
   /**
    * (api-types 0.175.0, DES-APPS-001 §5.1) `sql`/`graphql` only: what the describe found —

@@ -129,6 +129,7 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
     ],
     "inputs": [
       "intent",
+      "documents?",
       "repo",
       "project?",
       "seats"
@@ -1802,6 +1803,7 @@ export const CATALOG_V2_CARDS: readonly CardSeedV2[] = [
           "changesPlan": true,
           "inputs": [
             "intent",
+            "documents?",
             "repo",
             "project?",
             "seats"

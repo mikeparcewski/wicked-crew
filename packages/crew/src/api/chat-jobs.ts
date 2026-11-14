@@ -422,7 +422,8 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
   });
   const checksTok = t({ id: 'checks', kind: 'checks', label: checksLabel(gate), swap: null });
   const reading: string[] = [];
-  if (takesDocuments) {
+  // An empty optional input adds nothing to the sentence; required and struck lists stay visible.
+  if (takesDocuments && (r.resolved.inputs.some((i) => i.id === 'documents' && i.required) || (ctx.documents?.length ?? 0) > 0)) {
     const documents = ctx.documents ?? [];
     const ok = documents.filter((s) => s.status === 'ok').length;
     reading.push(t({ id: 'documents', kind: 'documents', label: `${ok} document${ok === 1 ? '' : 's'}`, swap: null, documents }));
@@ -672,7 +673,9 @@ export function mergeRevision(
   const facts = factsOf(parent);
   const before = JSON.stringify(facts);
   for (const k of Object.keys(edits)) if (!KNOWN_EDITS.has(k)) notes.push(`Not changed: “${k.slice(0, 40)}” isn't something a job can change`);
-  // 2. A card change: the new card's default option and depth; what the new card takes is kept, the rest dropped.
+  // 2. A card change: the new card's default option and depth. What it takes is pruned after step 3, against the final
+  //    card-and-option pair, so a combined card-and-option revision keeps what the requested option takes.
+  let cardChanged: (typeof CATALOG_V2_CARDS)[number] | null = null;
   if (edits.card !== undefined && edits.card !== facts.card) {
     const target = CATALOG_V2_CARDS.find((c) => c.id === edits.card);
     if (target === undefined || target.hidden === true) {
@@ -683,18 +686,7 @@ export function mergeRevision(
       facts.depth = target.depth === true ? 'standard' : null;
       // A QE skip was given for the old card: the new card's checks are its own, so it asks again (pi r1).
       facts.skipQe = null;
-      const r = resolveOption(target.id, facts.option, ctx.served);
-      const takes = new Set((r?.resolved.inputs ?? []).map((i) => i.id));
-      if (!takes.has('repo') && facts.repoRef !== null) {
-        facts.repoRef = null;
-        notes.push(`${target.title} takes no repository: left out`);
-      }
-      for (const id of Object.keys(facts.inputs)) {
-        if (!takes.has(id)) {
-          delete facts.inputs[id];
-          notes.push(`${target.title} takes no ${id}: left out`);
-        }
-      }
+      cardChanged = target;
     }
   }
   // 3. An option or depth change keeps everything else.
@@ -711,6 +703,20 @@ export function mergeRevision(
     const card = CATALOG_V2_CARDS.find((c) => c.id === facts.card)!;
     if (edits.depth !== null && card.depth !== true) notes.push(`Not changed: ${card.title} takes no depth`);
     else facts.depth = edits.depth;
+  }
+  if (cardChanged !== null) {
+    const r = resolveOption(cardChanged.id, optionFor(cardChanged, facts.option), ctx.served);
+    const takes = new Set((r?.resolved.inputs ?? []).map((i) => i.id));
+    if (!takes.has('repo') && facts.repoRef !== null) {
+      facts.repoRef = null;
+      notes.push(`${cardChanged.title} takes no repository: left out`);
+    }
+    for (const id of Object.keys(facts.inputs)) {
+      if (!takes.has(id)) {
+        delete facts.inputs[id];
+        notes.push(`${cardChanged.title} takes no ${id}: left out`);
+      }
+    }
   }
   if (edits.repoRef !== undefined) {
     const hit = ctx.chat.repos.find((r) => r.id === edits.repoRef || r.name === edits.repoRef);

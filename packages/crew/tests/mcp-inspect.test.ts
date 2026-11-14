@@ -9,7 +9,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { McpInspectLogResponse, McpInspectRpcResponse, McpInspectStartResponse } from '../src/core/types.js';
-import { type ConnectSpec, openTransport, registerMcpInspectRoutes, type InspectRegistry } from '../src/mcp-inspect/routes.js';
+import { type ConnectSpec, openTransport, registerMcpInspectRoutes, type InspectRegistry, type TransportOpener } from '../src/mcp-inspect/routes.js';
 import { commandName, heldTail, InspectSessions, MAX_SESSIONS } from '../src/mcp-inspect/session.js';
 import type { McpToolAnnotations, McpToolClass } from '../src/core/types.js';
 import type { McpUpstreamConfig } from '../src/mcp/probe.js';
@@ -25,7 +25,7 @@ afterEach(async () => {
   for (const a of apps.splice(0)) await a.close();
 });
 
-async function harness(opts: { registry?: InspectRegistry; callTimeoutMs?: number } = {}) {
+async function harness(opts: { registry?: InspectRegistry; callTimeoutMs?: number; open?: TransportOpener } = {}) {
   const app = Fastify({ logger: false });
   app.decorateRequest('actor', null as unknown as never);
   app.addHook('onRequest', async (req) => {
@@ -36,7 +36,7 @@ async function harness(opts: { registry?: InspectRegistry; callTimeoutMs?: numbe
     }
   });
   const sessions = new InspectSessions();
-  registerMcpInspectRoutes(app, { sessions, ...(opts.registry !== undefined ? { registry: opts.registry } : {}), ...(opts.callTimeoutMs !== undefined ? { callTimeoutMs: opts.callTimeoutMs } : {}) });
+  registerMcpInspectRoutes(app, { sessions, ...(opts.registry !== undefined ? { registry: opts.registry } : {}), ...(opts.callTimeoutMs !== undefined ? { callTimeoutMs: opts.callTimeoutMs } : {}), ...(opts.open !== undefined ? { open: opts.open } : {}) });
   await app.ready();
   apps.push(app);
   const start = async (target: unknown, headers = HUMAN) => app.inject({ method: 'POST', url: '/api/v1/mcp-inspect/sessions', headers, payload: { target } });
@@ -341,6 +341,24 @@ describe('the MCP inspector bridge', () => {
     const missing = await h.start({ server: 'fixture' });
     expect(missing.statusCode).toBe(409);
     expect(missing.json()).toMatchObject({ code: 'secret_missing' });
+  });
+
+  it('a registered stdio server\'s saved non-secret env is injected with its secret (chat-extend CX1)', async () => {
+    const config: McpUpstreamConfig = { name: 'fixture', kind: 'mcp-stdio', command: process.execPath, args: [SERVER], url: null, auth: { ref: 'env:FIXTURE_TOKEN', env: 'INSPECT_TOKEN' } as McpUpstreamConfig['auth'], env: { LOG_LEVEL: 'debug' } };
+    const registry: InspectRegistry = {
+      inspectTarget: async () => config,
+      callSecret: async () => ({ secret: TOKEN, missing: false }),
+      resolveCall: async () => ({ config, annotations: { readOnlyHint: true }, classOverride: null, registered: false }),
+    };
+    // (CX1 review P3) Assert the env actually handed to the transport opener, not only the metadata.
+    let captured: ConnectSpec | undefined;
+    const open: TransportOpener = (spec) => { captured = spec; return openTransport(spec); };
+    const h = await harness({ registry, open });
+    const res = await h.start({ server: 'fixture' });
+    expect(res.statusCode, res.body).toBe(201);
+    expect((res.json() as McpInspectStartResponse).session.target).toMatchObject({ kind: 'server', envNames: ['LOG_LEVEL', 'INSPECT_TOKEN'] });
+    // The saved non-secret env AND the secret variable both reach the opener (secret after the public env).
+    expect(captured?.env).toEqual({ LOG_LEVEL: 'debug', INSPECT_TOKEN: TOKEN });
   });
 
   it('data connectors G1: on a registered server, a write tool no human granted is refused; a read or a granted write is called', async () => {

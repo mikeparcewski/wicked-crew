@@ -12,12 +12,36 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **`serve --install-service` writes a systemd unit systemd loads (crew#1549).** On Linux and WSL2 the user unit carried `WorkingDirectory="/home/you"`; that setting takes one path and does not unquote, so systemd refused the unit ("path is not absolute") and the login service never started. Each directive now follows systemd's own rules: path settings (`WorkingDirectory=`, the `append:` log paths) are unquoted with `%` doubled, `ExecStart=` words are quoted with `\`, `"` and `%` escaped (and `$` doubled in arguments, not in the executable path, which systemd takes as written), and `Environment=` assignments are quoted with `\`, `"` and `%` escaped. A path systemd cannot represent (relative, a newline or control character, edge whitespace, a trailing backslash), an executable path containing a single quote, a double quote or a backslash (systemd refuses those however escaped; install Node under a path without them), or an invalid variable name is refused with a clear error. The macOS LaunchAgent is unchanged.
+- A job started from a chat reads the chat's attached files in full: /feature and /document repo take them as documents. A revision to /document repo keeps the chat's files, whether it switches from /document alone or changes card and option together (a person's own selection of fewer files is kept as chosen)
+
 - **Insights "Run it now", the weekly review schedule and scheduled learn runs no longer wait for an idle daemon (crew#1544).** The "one governed run at a time" guard (crew#1161) refused whenever any run was planning, distributing or executing; the daemon now runs several at once, so on a busy daemon it meant never. Both schedulers drop it and keep "its last run is still going" and one launch per sweep. A schedule whose last run is parked on a person now says so and names the run ("its last run <id> is waiting on you (awaiting_human)").
 ### Fixed (text to speech review, crew#1548)
 
 - Text to speech hardening: every Python launch (probe, venv, pip, piper) runs isolated (`-I`) with the voice dir as cwd, so a `platform.py`, `pip.py` or `piper.py` in the daemon's directory is never run; voice downloads have an overall and an idle deadline (a stall fails the install, drops the `.part`, frees the slot) and every redirect hop must be https; a timeout or cancel kills the child's whole process group and the slot and temp dir are held until it has closed; a synthesis failure answers a fixed message (the child's stderr can echo the spoken text and never reaches an error, log or audit); `GET /voice/tts` probes Python asynchronously and caches it (re-probed on install, on DELETE and after a minute); the lock follows the architecture Python reports (Rosetta); the output goes in a fresh private directory and must be a regular file; WAV validation checks the RIFF size; macOS older than 14, glibc older than 2.28 and musl are refused in status (the baseline is in `TTS_MIN_PLATFORM`, kept equal to the lock generator's platform tags by a test; the committed locks are unchanged); a cached sample is re-verified (regular file, at most 16 MB, valid WAV and recorded sha256) before serving. DELETE fences installs even while waiting for child close, cancels and awaits Python probe groups, and invalidates pending probe results; fresh probes cannot be overwritten by older rounds. Failed download responses cancel their bodies and every download exit aborts its request. Relative voice and explicit Python paths resolve against the daemon startup directory. A cached sample's checksum sidecar is now lstat-checked (regular file, at most 128 bytes) before it is opened, so a FIFO there cannot block the daemon's event loop and an oversized file is never read whole — anything else is a cache miss that regenerates; a voice download whose signal is already aborted when it starts fails at once with the cancel error instead of hanging on a fetch that never settles.
 
 ### Added
+
+- **An `mcp-stdio` server can carry a non-secret `env` map (chat-extend CX1).** `env` goes to
+  `POST /mcp/servers/preview` and is committed by saving the resulting `previewHash` (`POST /mcp/servers` takes
+  `{ previewHash }`, not `env`): at most 16 names, `^[A-Z_][A-Z0-9_]{0,63}$` compared without case, each value at
+  most 1024 characters; it is stored, answered back on the Settings read and the preview's `server` view, part of the
+  preview hash, and injected into the server's process after the SDK safe env and before the secret. One validator
+  (`validateServerEnv`) refuses, naming the variable and a reason code and never the value: names that change how the
+  process starts, loads code or reaches the network (PATH, HOME, LD_*, DYLD_*, *_PROXY, GIT_*, CURL_*,
+  SSL_CERT_*, OPENSSL_*; runtime/launcher families PYTHON*, LUA_INIT*, LUA_PATH*, LUA_CPATH*, PHPRC,
+  PHP_INI_*, DOTNET_*, CORECLR_*, COMPLUS_*, UV_*, PIP_*, JAVA_*, _JAVA_*, JDK_*, PERL5*, PERL_*,
+  GEM_*, BUNDLE_*, BUN_* and DENO_*; NODE_OPTIONS, NODE_PATH, NODE_TLS_*, NODE_EXTRA_CA_CERTS and
+  NPM_CONFIG_*; exact Go controls GOFLAGS, GOPROXY, GOSUMDB, GONOSUMDB, GONOSUMCHECK, GOPRIVATE,
+  GONOPROXY, GOINSECURE, GOTOOLCHAIN, GOENV, GOPATH, GOROOT, GOBIN and GOEXPERIMENT; BROWSER,
+  EDITOR, VISUAL, PAGER, SSLKEYLOGFILE; trust-store overrides *_CA_BUNDLE, *_CA_CERTS, *_CERT_FILE,
+  *_CERT_DIR and GRPC_DEFAULT_SSL_ROOTS_FILE_PATH; PERLLIB, RUBYOPT, RUBYLIB, CLASSPATH, GCONV_PATH,
+  LOCPATH, NLSPATH, ELECTRON_RUN_AS_NODE, ...), the server's own secret variable, credential-named variables and
+  credential-shaped values (those belong in `secret`). Any other kind refuses `env` (400). The agent view never
+  carries it. The non-secret `env` is now part of the execution descriptor a call binds to: an env-only change changes
+  the Apps source descriptor hash (so a stale lock and write grant are withdrawn on recheck) and the PM entry's
+  execution descriptor (so it turns agent `query` off until a person turns it back on). `McpServerConfigBody.env`,
+  `McpServer.env` and `McpPreviewResponse.server.env` are in crew-api-types.
 
 - **Text to speech, slice 1 (studio#1140).** The voice service installs the piper engine and two licence-cleared voices
   (`en_US-joe-medium`, CC0; `en_GB-cori-high`, public domain) beside the whisper model, and speaks locally. Routes (all
