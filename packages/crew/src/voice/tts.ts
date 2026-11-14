@@ -16,11 +16,11 @@
  *    group and the call settles only when the child has closed. A child's stderr never reaches an error body.
  */
 
-import { execFile, spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
+import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { type Stats, createWriteStream, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { platform as osPlatform, release as osRelease } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
 import { pipeline } from 'node:stream/promises';
@@ -144,23 +144,19 @@ export interface PythonInfo {
  * What `<cmd>` is as a CPython 3 interpreter; null when it does not run or is not CPython 3. Run isolated (`-I`) with
  * `cwd` (the voice dir), so no file of the daemon's working directory is ever imported.
  */
-export function probePython(cmd: string, cwd: string): Promise<PythonInfo | null> {
-  return new Promise((resolve) => {
-    try {
-      mkdirSync(cwd, { recursive: true });
-      const env: NodeJS.ProcessEnv = {};
-      for (const [k, v] of Object.entries(childEnvWithBootEstateDb(process.env))) if (v !== undefined && !k.startsWith('PYTHON')) env[k] = v;
-      execFile(cmd, ['-I', '-c', 'import sys,platform;print(platform.python_implementation(), sys.version_info[0], sys.version_info[1], sys.version.split()[0], platform.machine(), sys.executable)'],
-        { encoding: 'utf8', timeout: 5000, killSignal: 'SIGKILL', windowsHide: true, cwd, env }, (err, stdout) => {
-          if (err !== null) return resolve(null);
-          const m = /^CPython (\d+) (\d+) (\S+) (\S+) (.+)$/m.exec(stdout);
-          if (m === null || m[1] !== '3') return resolve(null);
-          resolve({ path: m[5]!.trim() === '' ? cmd : m[5]!.trim(), version: m[3]!, minor: Number(m[2]), machine: m[4]! });
-        });
-    } catch {
-      resolve(null);
-    }
-  });
+export async function probePython(cmd: string, cwd: string, options: { signal?: AbortSignal; spawn?: VoiceSpawn; timeoutMs?: number } = {}): Promise<PythonInfo | null> {
+  try {
+    const env: NodeJS.ProcessEnv = {};
+    for (const [k, v] of Object.entries(childEnvWithBootEstateDb(process.env))) if (v !== undefined && !k.startsWith('PYTHON')) env[k] = v;
+    const r = await runChild(cmd, ['-I', '-c', 'import sys,platform;print(platform.python_implementation(), sys.version_info[0], sys.version_info[1], sys.version.split()[0], platform.machine(), sys.executable)'],
+      { env, timeoutMs: options.timeoutMs ?? 5000, ...(options.signal === undefined ? {} : { signal: options.signal }) }, options.spawn ?? (nodeSpawn as VoiceSpawn), cwd);
+    if (r.code !== 0) return null;
+    const m = /^CPython (\d+) (\d+) (\S+) (\S+) (.+)$/m.exec(r.stdout);
+    if (m === null || m[1] !== '3') return null;
+    return { path: m[5]!.trim() === '' ? cmd : m[5]!.trim(), version: m[3]!, minor: Number(m[2]), machine: m[4]! };
+  } catch {
+    return null;
+  }
 }
 
 /** Node's names (arm64, x64) for what `platform.machine()` reports; null for any other processor. */
@@ -204,7 +200,7 @@ export interface TtsDeps {
   spawn?: VoiceSpawn;
   exists?: (p: string) => boolean;
   /** CPython interpreter facts for a command, probed with `cwd` as its working directory; tests stand it in. */
-  probe?: (cmd: string, cwd: string) => PythonInfo | null | Promise<PythonInfo | null>;
+  probe?: (cmd: string, cwd: string, signal?: AbortSignal) => PythonInfo | null | Promise<PythonInfo | null>;
   /** `os.release()` (the Darwin kernel version on a Mac) and the glibc version; tests stand them in. */
   osRelease?: () => string;
   glibc?: () => string | null;
@@ -227,7 +223,7 @@ export class TtsService {
   private readonly fetchImpl: typeof fetch;
   private readonly spawnImpl: VoiceSpawn;
   private readonly exists: (p: string) => boolean;
-  private readonly probe: (cmd: string, cwd: string) => PythonInfo | null | Promise<PythonInfo | null>;
+  private readonly probe: (cmd: string, cwd: string, signal?: AbortSignal) => PythonInfo | null | Promise<PythonInfo | null>;
   private readonly release: () => string;
   private readonly glibc: () => string | null;
   private readonly now: () => number;
@@ -246,19 +242,25 @@ export class TtsService {
   /** The last Python probe: kept for a minute, dropped on install and on remove. */
   private picked: { at: number; value: Picked } | null = null;
   private picking: Promise<Picked> | null = null;
+  private probeRound = 0;
+  private readonly probes = new Set<{ abort: AbortController; done: Promise<unknown> }>();
+  private readonly dir: string;
   /** Syntheses in flight: removal cancels them and waits for each to finish its cleanup. */
   /** Bumped by every removal: a synthesis that queued before it never starts after it. */
   private epoch = 0;
   private removing = 0;
   private readonly synths = new Set<{ abort: AbortController; done: Promise<unknown> }>();
 
-  constructor(private readonly deps: TtsDeps) {
-    this.env = deps.env ?? process.env;
+  constructor(deps: TtsDeps) {
+    this.dir = resolve(deps.dir);
+    this.env = { ...(deps.env ?? process.env) };
+    const python = this.env['WICKED_CREW_PYTHON'];
+    if (python !== undefined && /[\\/]/.test(python)) this.env['WICKED_CREW_PYTHON'] = resolve(python);
     this.plat = deps.platform ?? osPlatform();
     this.fetchImpl = deps.fetch ?? fetch;
     this.spawnImpl = deps.spawn ?? (nodeSpawn as VoiceSpawn);
     this.exists = deps.exists ?? existsSync;
-    this.probe = deps.probe ?? probePython;
+    this.probe = deps.probe ?? ((cmd, cwd, signal) => probePython(cmd, cwd, { ...(signal === undefined ? {} : { signal }), spawn: this.spawnImpl }));
     this.release = deps.osRelease ?? osRelease;
     this.glibc = deps.glibc ?? glibcRuntime;
     this.now = deps.now ?? Date.now;
@@ -271,7 +273,7 @@ export class TtsService {
     this.voices = deps.voices ?? TTS_VOICES;
   }
 
-  private root(): string { return join(this.deps.dir, 'tts'); }
+  private root(): string { return join(this.dir, 'tts'); }
   private enginePath(): string { return join(this.root(), 'engine'); }
   private enginePython(root: string = this.enginePath()): string { return join(root, 'bin', 'python'); }
   private voiceDir(id: string): string { return join(this.root(), 'voices', id); }
@@ -285,24 +287,32 @@ export class TtsService {
    * lock. Probed asynchronously and kept for a minute (`fresh` re-probes: install, remove).
    */
   async pickPython(fresh = false): Promise<Picked> {
+    if (this.removing > 0) return { python: null, lock: null, problem: 'The speech engine is being removed.' };
     if (!fresh && this.picked !== null && this.now() - this.picked.at < TTS_PROBE_TTL_MS) return this.picked.value;
     if (!fresh && this.picking !== null) return this.picking;
-    const run = this.probeAll().then((value) => {
-      this.picked = { at: this.now(), value };
+    const round = ++this.probeRound;
+    this.picked = null;
+    const entry = { abort: new AbortController(), done: Promise.resolve<unknown>(undefined) };
+    const run = this.probeAll(entry.abort.signal).then((value) => {
+      if (round === this.probeRound) this.picked = { at: this.now(), value };
       return value;
-    }).finally(() => { if (this.picking === run) this.picking = null; });
+    }).finally(() => { this.probes.delete(entry); if (this.picking === run) this.picking = null; });
+    entry.done = run;
+    this.probes.add(entry);
     this.picking = run;
     return run;
   }
 
-  private async probeAll(): Promise<Picked> {
+  private async probeAll(signal: AbortSignal): Promise<Picked> {
     const set = this.env['WICKED_CREW_PYTHON'];
     const wanted = set !== undefined && set.trim() !== '' ? set : null;
     const names = wanted !== null ? [wanted] : ['python3', ...[...TTS_PYTHON_MINORS].reverse().map((n) => `python3.${n}`)];
     let skipped: PythonInfo | null = null;
     let badArch: string | null = null;
     for (const name of names) {
-      const info = await this.probe(name, this.deps.dir);
+      if (signal.aborted) break;
+      const info = await this.probe(name, this.dir, signal);
+      if (signal.aborted) break;
       if (info === null) continue;
       // The lock follows the processor the Python itself runs on (Rosetta: an x86_64 Python on an arm64 Mac).
       const arch = info.machine === undefined ? null : archOfMachine(info.machine);
@@ -385,13 +395,14 @@ export class TtsService {
    */
   async startInstall(ids: readonly string[]): Promise<{ started: boolean }> {
     const wanted = ids.map((id) => this.voiceById(id));
+    if (this.removing > 0) throw new VoiceError(409, 'voice_tts_missing', 'The speech engine is being removed.');
     if (this.inflight !== null) throw new VoiceError(409, 'voice_install_running', 'The speech install is already running.');
-    const before = this.gen;
+    const before = this.epoch;
     const problem = this.platformProblem() ?? (await this.pickPython(true)).problem;
-    if (problem !== null) throw new VoiceError(409, 'voice_tts_unsupported', problem);
-    // The probe awaited: a removal (it bumps gen) or another install may have come in meanwhile.
-    if (this.gen !== before) throw new VoiceError(409, 'voice_tts_missing', 'The speech engine is being removed.');
+    // DELETE fences on its own epoch: an install also bumps gen.
+    if (this.removing > 0 || this.epoch !== before) throw new VoiceError(409, 'voice_tts_missing', 'The speech engine is being removed.');
     if (this.inflight !== null) throw new VoiceError(409, 'voice_install_running', 'The speech install is already running.');
+    if (problem !== null) throw new VoiceError(409, 'voice_tts_unsupported', problem);
     if (this.engineInstalled() && wanted.every((v) => this.voiceInstalled(v))) return { started: false };
     const gen = ++this.gen;
     const abort = new AbortController();
@@ -486,10 +497,10 @@ export class TtsService {
       linked.addEventListener('abort', () => reject(new Error(why ?? 'The install was cancelled.')), { once: true });
     });
     aborted.catch(() => undefined);
+    let res: Response | null = null;
     try {
       touch();
       let url = ttsVoiceUrl(file);
-      let res: Response | null = null;
       for (let hop = 0; hop <= TTS_MAX_REDIRECTS; hop++) {
         if (new URL(url).protocol !== 'https:') throw new Error(`The voice download for ${name} was refused: it is not https.`);
         const r = await Promise.race([this.fetchImpl(url, { redirect: 'manual', signal: linked }), aborted]);
@@ -529,6 +540,8 @@ export class TtsService {
       rmSync(part, { force: true });
       throw e;
     } finally {
+      stop.abort();
+      if (res?.body !== null && res?.body !== undefined && !res.body.locked) void res.body.cancel().catch(() => undefined);
       clearTimeout(overall);
       if (idle !== null) clearTimeout(idle);
     }
@@ -539,12 +552,16 @@ export class TtsService {
     this.gen += 1;
     this.epoch += 1;
     this.removing += 1;
+    this.probeRound += 1;
+    this.picking = null;
+    this.picked = null;
     try {
       const install = this.inflight;
       install?.abort.abort();
+      for (const p of this.probes) p.abort.abort();
       for (const s of this.synths) s.abort.abort();
       // The files go only after every child has closed: no descendant can write into a directory being removed.
-      await Promise.allSettled([install?.done, ...[...this.synths].map((x) => x.done)]);
+      await Promise.allSettled([install?.done, ...[...this.probes].map((x) => x.done), ...[...this.synths].map((x) => x.done)]);
       this.inflight = null;
       this.installState = null;
       this.picked = null;
@@ -580,10 +597,12 @@ export class TtsService {
       const sum = `${cached}.sha256`;
       if (this.exists(cached)) {
         try {
+          const st = lstatSync(cached);
+          if (!st.isFile() || st.size > this.maxWav) throw new Error('Invalid cached sample.');
           const wav = readFileSync(cached);
           if (ttsWavProblem(wav) === null && readFileSync(sum, 'utf8').trim() === createHash('sha256').update(wav).digest('hex')) return wav;
         } catch { /* unreadable or unrecorded: re-made below */ }
-        rmSync(cached, { force: true });
+        rmSync(cached, { recursive: true, force: true });
         rmSync(sum, { force: true });
       }
       const wav = await this.synthesize(v, TTS_SAMPLE_TEXT);
@@ -658,83 +677,93 @@ export class TtsService {
    * stderr each capped. A timeout, a cancel or an output file that passes a limit kills the whole group, and the
    * promise settles only on the child's `close`, so no descendant can write after the caller cleans up.
    */
-  private run(
-    command: string,
-    args: readonly string[],
-    o: { env: NodeJS.ProcessEnv; timeoutMs: number; stdin?: string; signal?: AbortSignal; cancelled?: () => Error; watch?: { file: string; maxBytes: number } },
-  ): Promise<RunResult> {
-    mkdirSync(this.deps.dir, { recursive: true });
-    return new Promise<RunResult>((resolve, reject) => {
-      let child: ChildProcess;
-      try {
-        child = this.spawnImpl(command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: true, cwd: this.deps.dir, env: childEnvWithBootEstateDb(o.env) });
-      } catch {
-        reject(new VoiceError(500, 'voice_tts_failed', 'Could not start the speech engine.'));
-        return;
-      }
-      const out: Buffer[] = [];
-      const err: Buffer[] = [];
-      const held = { out: 0, err: 0 };
-      let settled = false;
-      let pending: Error | null = null;
-      let watcher: NodeJS.Timeout | null = null;
-      const finish = (f: () => void): void => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        if (watcher !== null) clearInterval(watcher);
-        o.signal?.removeEventListener('abort', onAbort);
-        f();
-      };
-      const kill = (): void => {
-        try {
-          if (child.pid !== undefined && process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL');
-          else child.kill('SIGKILL');
-        } catch {
-          try { child.kill('SIGKILL'); } catch { /* already gone */ }
-        }
-      };
-      /** Record why, kill the group, and wait for `close` to settle. */
-      const stop = (e: Error): void => {
-        if (settled || pending !== null) return;
-        pending = e;
-        clearTimeout(timer);
-        if (watcher !== null) clearInterval(watcher);
-        kill();
-      };
-      const timer = setTimeout(() => stop(new VoiceError(504, 'voice_timeout', `Reading aloud took longer than ${Math.round(o.timeoutMs / 1000)} s and was stopped.`)), o.timeoutMs);
-      const onAbort = (): void => stop(o.cancelled?.() ?? new Error('The install was cancelled.'));
-      o.signal?.addEventListener('abort', onAbort, { once: true });
-      if (o.signal?.aborted === true) onAbort();
-      if (o.watch !== undefined) {
-        const { file, maxBytes } = o.watch;
-        watcher = setInterval(() => {
-          const st = lstatOrNull(file);
-          if (st === null) return;
-          if (!st.isFile()) stop(new VoiceError(500, 'voice_tts_failed', 'piper wrote its output as something other than a plain file; it was refused.'));
-          else if (st.size > maxBytes) stop(new VoiceError(500, 'voice_tts_failed', 'The audio grew past its size limit and was stopped.'));
-        }, 50);
-      }
-      // Each stream keeps at most TTS_OUTPUT_CAP_BYTES BYTES; it is decoded only after the cap.
-      const keep = (into: Buffer[], which: 'out' | 'err') => (d: Buffer | string): void => {
-        const chunk = typeof d === 'string' ? Buffer.from(d) : d;
-        const room = TTS_OUTPUT_CAP_BYTES - held[which];
-        if (room <= 0) return;
-        const part = chunk.length > room ? chunk.subarray(0, room) : chunk;
-        into.push(part);
-        held[which] += part.length;
-      };
-      child.stdout?.on('data', keep(out, 'out'));
-      child.stderr?.on('data', keep(err, 'err'));
-      child.on('error', () => finish(() => reject(pending ?? new VoiceError(500, 'voice_tts_failed', 'Could not start the speech engine.'))));
-      child.on('close', (code) => finish(() => {
-        if (pending !== null) reject(pending);
-        else resolve({ code, stdout: decodeCapped(out), stderr: decodeCapped(err) });
-      }));
-      child.stdin?.on('error', () => undefined);
-      child.stdin?.end(o.stdin ?? '');
-    });
+  private run(command: string, args: readonly string[], o: RunOptions): Promise<RunResult> {
+    return runChild(command, args, o, this.spawnImpl, this.dir);
   }
+}
+
+interface RunOptions {
+  env: NodeJS.ProcessEnv;
+  timeoutMs: number;
+  stdin?: string;
+  signal?: AbortSignal;
+  cancelled?: () => Error;
+  watch?: { file: string; maxBytes: number };
+}
+
+/** Shared by probes, installers and synthesis: kill the group, then await close. */
+function runChild(command: string, args: readonly string[], o: RunOptions, spawnImpl: VoiceSpawn, cwd: string): Promise<RunResult> {
+  mkdirSync(cwd, { recursive: true });
+  return new Promise<RunResult>((resolve, reject) => {
+    let child: ChildProcess;
+    try {
+      child = spawnImpl(command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: true, cwd, env: childEnvWithBootEstateDb(o.env) });
+    } catch {
+      reject(new VoiceError(500, 'voice_tts_failed', 'Could not start the speech engine.'));
+      return;
+    }
+    const out: Buffer[] = [];
+    const err: Buffer[] = [];
+    const held = { out: 0, err: 0 };
+    let settled = false;
+    let pending: Error | null = null;
+    let watcher: NodeJS.Timeout | null = null;
+    const finish = (f: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (watcher !== null) clearInterval(watcher);
+      o.signal?.removeEventListener('abort', onAbort);
+      f();
+    };
+    const kill = (): void => {
+      try {
+        if (child.pid !== undefined && process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL');
+        else child.kill('SIGKILL');
+      } catch {
+        try { child.kill('SIGKILL'); } catch { /* already gone */ }
+      }
+    };
+    /** Record why, kill the group, and wait for `close` to settle. */
+    const stop = (e: Error): void => {
+      if (settled || pending !== null) return;
+      pending = e;
+      clearTimeout(timer);
+      if (watcher !== null) clearInterval(watcher);
+      kill();
+    };
+    const timer = setTimeout(() => stop(new VoiceError(504, 'voice_timeout', `Reading aloud took longer than ${Math.round(o.timeoutMs / 1000)} s and was stopped.`)), o.timeoutMs);
+    const onAbort = (): void => stop(o.cancelled?.() ?? new Error('The install was cancelled.'));
+    o.signal?.addEventListener('abort', onAbort, { once: true });
+    if (o.signal?.aborted === true) onAbort();
+    if (o.watch !== undefined) {
+      const { file, maxBytes } = o.watch;
+      watcher = setInterval(() => {
+        const st = lstatOrNull(file);
+        if (st === null) return;
+        if (!st.isFile()) stop(new VoiceError(500, 'voice_tts_failed', 'piper wrote its output as something other than a plain file; it was refused.'));
+        else if (st.size > maxBytes) stop(new VoiceError(500, 'voice_tts_failed', 'The audio grew past its size limit and was stopped.'));
+      }, 50);
+    }
+    // Each stream keeps at most TTS_OUTPUT_CAP_BYTES BYTES; it is decoded only after the cap.
+    const keep = (into: Buffer[], which: 'out' | 'err') => (d: Buffer | string): void => {
+      const chunk = typeof d === 'string' ? Buffer.from(d) : d;
+      const room = TTS_OUTPUT_CAP_BYTES - held[which];
+      if (room <= 0) return;
+      const part = chunk.length > room ? chunk.subarray(0, room) : chunk;
+      into.push(part);
+      held[which] += part.length;
+    };
+    child.stdout?.on('data', keep(out, 'out'));
+    child.stderr?.on('data', keep(err, 'err'));
+    child.on('error', () => { pending ??= new VoiceError(500, 'voice_tts_failed', 'Could not start the speech engine.'); });
+    child.on('close', (code) => finish(() => {
+      if (pending !== null) reject(pending);
+      else resolve({ code, stdout: decodeCapped(out), stderr: decodeCapped(err) });
+    }));
+    child.stdin?.on('error', () => undefined);
+    child.stdin?.end(o.stdin ?? '');
+  });
 }
 
 function lstatOrNull(p: string): Stats | null {

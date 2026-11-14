@@ -4,15 +4,15 @@
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { PassThrough } from 'node:stream';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { TTS_ENGINE, TTS_VOICES, ttsVoiceUrl, type TtsVoice } from '../src/voice/tts-manifest.js';
-import { TTS_MIN_PLATFORM, TtsService, lockPath, normalizeSpeakText, probePython, ttsWavProblem, type PythonInfo, type TtsDeps } from '../src/voice/tts.js';
+import { TTS_MAX_WAV_BYTES, TTS_MIN_PLATFORM, TtsService, lockPath, normalizeSpeakText, probePython, ttsWavProblem, type PythonInfo, type TtsDeps } from '../src/voice/tts.js';
 import { VoiceError, type VoiceSpawn } from '../src/voice/service.js';
 import { registerVoiceRoutes } from '../src/voice/routes.js';
 import { registerServerErrorBody } from '../src/api/server-error-body.js';
@@ -776,10 +776,147 @@ describe('tts revision: isolation, deadlines, cleanup and verification', () => {
     const starting = s.startInstall([VOICE_A.id]);
     const caught = starting.catch((e: unknown) => e);
     await new Promise((r) => setTimeout(r, 20));
-    await s.remove();
+    const removal = s.remove();
     release();
+    await removal;
     expect(await caught).toMatchObject({ code: 'voice_tts_missing' });
     expect(existsSync(join(dir, 'tts'))).toBe(false);
+  });
+
+  it('revision 1: refuses install while DELETE awaits a synthesis child', async () => {
+    const st = stubbornSpawn();
+    try {
+      const probe = vi.fn(() => PY);
+      const s = service({ spawn: st.spawn, probe });
+      installed(s);
+      const speaking = s.speak('hello', VOICE_A.id).catch(() => undefined);
+      const removal = s.remove();
+      const result = await s.startInstall([VOICE_B.id]).catch((e: unknown) => e);
+      st.release();
+      await Promise.all([speaking, removal]);
+      expect(result).toMatchObject({ status: 409, code: 'voice_tts_missing' });
+      expect(probe).not.toHaveBeenCalled();
+      expect(st.started()).toBe(1);
+    } finally { st.release(); st.killSpy.mockRestore(); }
+  });
+
+  it('revision 1: competing installs across a probe report install_running', async () => {
+    let release!: (p: PythonInfo) => void;
+    const gate = new Promise<PythonInfo>((r) => { release = r; });
+    const s = service({ spawn: installSpawn().spawn, probe: () => gate });
+    const first = s.startInstall([VOICE_A.id]);
+    const second = s.startInstall([VOICE_A.id]).catch((e: unknown) => e);
+    release(PY);
+    expect(await first).toEqual({ started: true });
+    expect(await second).toMatchObject({ status: 409, code: 'voice_install_running' });
+    await s.installDone();
+  });
+
+  it('revision 2: DELETE invalidates a pending probe and status starts a new round', async () => {
+    let release!: (p: PythonInfo) => void;
+    const gate = new Promise<PythonInfo>((r) => { release = r; });
+    const probe = vi.fn().mockImplementationOnce(() => gate).mockImplementation(() => PY);
+    const s = service({ probe });
+    const pending = s.status();
+    const removal = s.remove();
+    release(PY);
+    await Promise.all([pending, removal]);
+    await s.status();
+    expect(probe).toHaveBeenCalledTimes(2);
+  });
+
+  it('revision 2: an older probe cannot overwrite a newer fresh result', async () => {
+    let release!: (p: PythonInfo) => void;
+    const gate = new Promise<PythonInfo>((r) => { release = r; });
+    const newer = { ...PY, path: '/new/python' };
+    const probe = vi.fn().mockImplementationOnce(() => gate).mockImplementation(() => newer);
+    const s = service({ probe });
+    const pending = s.pickPython();
+    expect((await s.pickPython(true)).python).toEqual(newer);
+    release(PY);
+    await pending;
+    expect((await s.status()).python.path).toBe(newer.path);
+    expect(probe).toHaveBeenCalledTimes(2);
+  });
+
+  it('revision 4: a 503 cancels the unconsumed body and aborts its request', async () => {
+    const cancel = vi.fn();
+    let signal: AbortSignal | null | undefined;
+    const fetch503 = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      signal = init?.signal;
+      return new Response(new ReadableStream({ cancel }), { status: 503 });
+    }) as unknown as typeof fetch;
+    const s = service({ spawn: installSpawn().spawn, fetch: fetch503 });
+    await s.startInstall([VOICE_A.id]);
+    await s.installDone();
+    expect((await s.status()).install).toMatchObject({ state: 'failed', error: expect.stringContaining('503') });
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it('revision 5: a probe timeout kills its group and settles only on close', async () => {
+    const st = stubbornSpawn();
+    try {
+      let settled = false;
+      const pending = probePython('probe-stand-in', dir, { spawn: st.spawn, timeoutMs: 30 }).then((r) => { settled = true; return r; });
+      await new Promise((r) => setTimeout(r, 80));
+      expect(st.killed).toContainEqual([-777, 'SIGKILL']);
+      expect(settled).toBe(false);
+      expect(vi.mocked(st.spawn).mock.calls[0]![2]).toMatchObject({ detached: true, cwd: dir });
+      st.release();
+      expect(await pending).toBeNull();
+    } finally { st.release(); st.killSpy.mockRestore(); }
+  });
+
+  it('revision 5: DELETE cancels a running probe and awaits close', async () => {
+    const st = stubbornSpawn();
+    try {
+      const s = new TtsService({ dir, locksDir: locks, platform: 'linux', glibc: () => '2.35', spawn: st.spawn });
+      const pending = s.status();
+      let removed = false;
+      const removal = s.remove().then(() => { removed = true; });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(st.killed).toContainEqual([-777, 'SIGKILL']);
+      expect(removed).toBe(false);
+      st.release();
+      await Promise.all([pending, removal]);
+      expect(st.started()).toBe(1);
+    } finally { st.release(); st.killSpy.mockRestore(); }
+  });
+
+  it('revision 6: relative paths stay absolute for probe, venv, pip and piper', async () => {
+    const writer = piper(() => wav());
+    const inst = installSpawn((c) => c.args.includes('piper') ? writer(c) : undefined);
+    const calls: Array<{ command: string; args: readonly string[]; cwd: string | undefined }> = [];
+    const spawn: VoiceSpawn = (command, args, opts) => {
+      calls.push({ command, args, cwd: opts.cwd?.toString() });
+      if (args[0] === '-I' && args[1] === '-c') {
+        const child = new EventEmitter() as FakeChild;
+        child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => true;
+        child.stdin.resume();
+        setImmediate(() => { child.stdout.emit('data', `CPython 3 12 3.12.1 x86_64 ${command}\n`); child.emit('close', 0); });
+        return child as unknown as ReturnType<VoiceSpawn>;
+      }
+      return inst.spawn(command, args, opts);
+    };
+    const python = relative(process.cwd(), join(dir, 'launcher', 'python'));
+    const s = new TtsService({ dir: relative(process.cwd(), dir), locksDir: locks, platform: 'linux', glibc: () => '2.35', voices: [VOICE_A], fetch: okFetch, env: { WICKED_CREW_PYTHON: python }, spawn });
+    await s.startInstall([VOICE_A.id]);
+    await s.installDone();
+    expect((await s.status()).install).toBeNull();
+    await s.speak('hello', VOICE_A.id);
+    expect(calls.filter((c) => c.args[1] === '-c')).toHaveLength(2);
+    for (const kind of ['venv', 'pip', 'piper']) expect(calls.some((c) => c.args.includes(kind))).toBe(true);
+    for (const c of calls) {
+      expect(c.cwd).toBe(resolve(dir));
+      expect(isAbsolute(c.command)).toBe(true);
+      if (c.args[1] === '-c' || c.args.includes('venv')) expect(c.command).toBe(resolve(python));
+      else expect(c.command.startsWith(join(dir, 'tts') + '/')).toBe(true);
+      for (const flag of ['-f', '-r']) {
+        const at = c.args.indexOf(flag);
+        if (at >= 0) expect(isAbsolute(c.args[at + 1]!)).toBe(true);
+      }
+    }
   });
 
   it('install errors carry no child stderr (the venv failure names only the remedy)', async () => {
@@ -902,6 +1039,47 @@ describe('tts revision: isolation, deadlines, cleanup and verification', () => {
     expect(musl.supported.reason).toMatch(/musl/);
     expect((await service({ glibc: () => '2.28' }).status()).supported.ok).toBe(true);
     expect((await service({ glibc: () => '2.39' }).status()).supported.ok).toBe(true);
+  });
+
+  it('revision 3: an oversized valid cached WAV with a matching sidecar is regenerated', async () => {
+    const fresh = wav();
+    const seen: Call[] = [];
+    const s = service({ spawn: fakeSpawn(piper(() => fresh, seen)).spawn });
+    installed(s);
+    const cached = join(dir, 'tts', 'sample', `${VOICE_A.id}-${TTS_ENGINE.version}.wav`);
+    mkdirSync(join(dir, 'tts', 'sample'), { recursive: true });
+    const oversized = wav(TTS_MAX_WAV_BYTES / 2);
+    expect(ttsWavProblem(oversized)).toBeNull();
+    writeFileSync(cached, oversized);
+    writeFileSync(`${cached}.sha256`, sha(oversized));
+    expect((await s.sample(VOICE_A.id)).equals(fresh)).toBe(true);
+    expect(seen).toHaveLength(1);
+    expect(readFileSync(cached).equals(fresh)).toBe(true);
+    expect(readFileSync(`${cached}.sha256`, 'utf8')).toBe(sha(fresh));
+  });
+
+  it.skipIf(process.platform === 'win32')('revision 3: a cached FIFO is removed before reading and regenerated', async () => {
+    const fresh = wav();
+    const stale = wav(400);
+    const seen: Call[] = [];
+    const s = service({ spawn: fakeSpawn(piper(() => fresh, seen)).spawn });
+    installed(s);
+    const cached = join(dir, 'tts', 'sample', `${VOICE_A.id}-${TTS_ENGINE.version}.wav`);
+    mkdirSync(join(dir, 'tts', 'sample'), { recursive: true });
+    expect(spawnSync('mkfifo', [cached]).status).toBe(0);
+    writeFileSync(`${cached}.sha256`, sha(stale));
+    // A bounded writer lets the unfixed read finish rather than hanging Vitest.
+    const writer = nodeSpawn(process.execPath, ['-e', "setTimeout(() => require('fs').writeFileSync(process.argv[1], Buffer.from(process.argv[2], 'base64')), 250)", cached, stale.toString('base64')], { stdio: 'ignore' });
+    try {
+      expect((await s.sample(VOICE_A.id)).equals(fresh)).toBe(true);
+      expect(seen).toHaveLength(1);
+      expect(readFileSync(cached).equals(fresh)).toBe(true);
+      expect(readFileSync(`${cached}.sha256`, 'utf8')).toBe(sha(fresh));
+    } finally {
+      const closed = new Promise<void>((r) => writer.once('close', () => r()));
+      writer.kill('SIGKILL');
+      await closed;
+    }
   });
 
   it('re-verifies a cached sample on every read: a corrupt or tampered one is removed and regenerated', async () => {
