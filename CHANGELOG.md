@@ -21,12 +21,15 @@ mentioned only where a daemon release depends on them.
   most 1024 characters; it is stored, answered back on the Settings read and the preview's `server` view, part of the
   preview hash, and injected into the server's process after the SDK safe env and before the secret. One validator
   (`validateServerEnv`) refuses, naming the variable and a reason code and never the value: names that change how the
-  process starts, loads code or reaches the network (PATH, HOME, NODE_OPTIONS, LD_*, DYLD_*, *_PROXY, GIT_*,
-  NPM_CONFIG_*, NODE_TLS_*, OPENSSL_*, and the runtime/startup and network-trust names PERL5OPT, PERL5DB, PERLLIB,
-  RUBYLIB, JAVA_TOOL_OPTIONS, _JAVA_OPTIONS, JDK_JAVA_OPTIONS, BUN_OPTIONS, CLASSPATH, AWS_CA_BUNDLE,
-  GRPC_DEFAULT_SSL_ROOTS_FILE_PATH, and the same class for the runtimes the first pass did not name — GEM_HOME,
-  GEM_PATH, DOTNET_STARTUP_HOOKS, CORECLR_PROFILER, CORECLR_ENABLE_PROFILING, GCONV_PATH, LOCPATH, NLSPATH,
-  ELECTRON_RUN_AS_NODE, ...), the server's own secret variable, credential-named variables and
+  process starts, loads code or reaches the network (PATH, HOME, LD_*, DYLD_*, *_PROXY, GIT_*, CURL_*,
+  SSL_CERT_*, OPENSSL_*; runtime/launcher families PYTHON*, LUA_INIT*, LUA_PATH*, LUA_CPATH*, PHPRC,
+  PHP_INI_*, DOTNET_*, CORECLR_*, COMPLUS_*, UV_*, PIP_*, JAVA_*, _JAVA_*, JDK_*, PERL5*, PERL_*,
+  GEM_*, BUNDLE_*, BUN_* and DENO_*; NODE_OPTIONS, NODE_PATH, NODE_TLS_*, NODE_EXTRA_CA_CERTS and
+  NPM_CONFIG_*; exact Go controls GOFLAGS, GOPROXY, GOSUMDB, GONOSUMDB, GONOSUMCHECK, GOPRIVATE,
+  GONOPROXY, GOINSECURE, GOTOOLCHAIN, GOENV, GOPATH, GOROOT, GOBIN and GOEXPERIMENT; BROWSER,
+  EDITOR, VISUAL, PAGER, SSLKEYLOGFILE; trust-store overrides *_CA_BUNDLE, *_CA_CERTS, *_CERT_FILE,
+  *_CERT_DIR and GRPC_DEFAULT_SSL_ROOTS_FILE_PATH; PERLLIB, RUBYOPT, RUBYLIB, CLASSPATH, GCONV_PATH,
+  LOCPATH, NLSPATH, ELECTRON_RUN_AS_NODE, ...), the server's own secret variable, credential-named variables and
   credential-shaped values (those belong in `secret`). Any other kind refuses `env` (400). The agent view never
   carries it. The non-secret `env` is now part of the execution descriptor a call binds to: an env-only change changes
   the Apps source descriptor hash (so a stale lock and write grant are withdrawn on recheck) and the PM entry's

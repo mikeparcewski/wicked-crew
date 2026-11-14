@@ -55,21 +55,28 @@ export function envFingerprint(env: Readonly<Record<string, string>> | undefined
 /** What the SDK's safe inherited set holds on any platform, on top of what `getDefaultEnvironment()` reads here. */
 const SDK_DEFAULT_NAMES: readonly string[] = ['HOME', 'LOGNAME', 'PATH', 'SHELL', 'TERM', 'USER', 'APPDATA', 'HOMEDRIVE', 'HOMEPATH', 'LOCALAPPDATA', 'PATHEXT', 'PROCESSOR_ARCHITECTURE', 'SYSTEMDRIVE', 'SYSTEMROOT', 'TEMP', 'USERNAME', 'USERPROFILE', 'PROGRAMFILES'];
 const RESERVED_EXACT: ReadonlySet<string> = new Set([
-  'PATH', 'HOME', 'SHELL', 'NODE_OPTIONS', 'NODE_PATH', 'PYTHONPATH', 'PYTHONSTARTUP', 'PYTHONHOME', 'PERL5LIB', 'RUBYOPT', 'BASH_ENV', 'ENV',
-  'NODE_EXTRA_CA_CERTS', 'REQUESTS_CA_BUNDLE', 'PYTHONHTTPSVERIFY',
-  'PERL5OPT', 'PERL5DB', 'PERLLIB', 'RUBYLIB', 'JAVA_TOOL_OPTIONS', '_JAVA_OPTIONS', 'JDK_JAVA_OPTIONS', 'BUN_OPTIONS', 'CLASSPATH',
-  'AWS_CA_BUNDLE', 'GRPC_DEFAULT_SSL_ROOTS_FILE_PATH',
-  // The same code-loading / startup-injection class, for the runtimes the first pass did not name: Ruby gem
-  // paths, .NET startup hooks and the CoreCLR profiler, the glibc loader's auxiliary search paths, and the flag
-  // that turns an Electron binary into a Node interpreter.
-  'GEM_HOME', 'GEM_PATH', 'DOTNET_STARTUP_HOOKS', 'CORECLR_PROFILER', 'CORECLR_ENABLE_PROFILING',
-  'GCONV_PATH', 'LOCPATH', 'NLSPATH', 'ELECTRON_RUN_AS_NODE',
+  'PATH', 'HOME', 'SHELL', 'NODE_OPTIONS', 'NODE_PATH', 'NODE_EXTRA_CA_CERTS',
+  'PERLLIB', 'RUBYOPT', 'RUBYLIB', 'BASH_ENV', 'ENV', 'PHPRC', 'CLASSPATH',
+  'GRPC_DEFAULT_SSL_ROOTS_FILE_PATH', 'GCONV_PATH', 'LOCPATH', 'NLSPATH', 'ELECTRON_RUN_AS_NODE',
+  // Go shares its leading letters with ordinary app config (GOOGLE_*): reserve only controls
+  // read by the go command, never a GO* prefix.
+  'GOFLAGS', 'GOPROXY', 'GOSUMDB', 'GONOSUMDB', 'GONOSUMCHECK', 'GOPRIVATE', 'GONOPROXY',
+  'GOINSECURE', 'GOTOOLCHAIN', 'GOENV', 'GOPATH', 'GOROOT', 'GOBIN', 'GOEXPERIMENT',
+  // Library helpers can invoke commands; TLS key logging can write session secrets.
+  'BROWSER', 'EDITOR', 'VISUAL', 'PAGER', 'SSLKEYLOGFILE',
 ]);
-const RESERVED_PREFIXES: readonly string[] = ['LD_', 'DYLD_', 'GIT_', 'NPM_CONFIG_', 'CURL_', 'SSL_CERT_', 'NODE_TLS_', 'OPENSSL_'];
+// Runtime-owned families cover startup hooks, module/package/interpreter resolution and trust
+// controls, including versioned Lua names. Node deliberately keeps NODE_ENV available to apps.
+const RESERVED_PREFIXES: readonly string[] = [
+  'LD_', 'DYLD_', 'GIT_', 'NPM_CONFIG_', 'CURL_', 'SSL_CERT_', 'NODE_TLS_', 'OPENSSL_',
+  'PYTHON', 'LUA_INIT', 'LUA_PATH', 'LUA_CPATH', 'PHP_INI_', 'DOTNET_', 'CORECLR_', 'COMPLUS_',
+  'UV_', 'PIP_', 'JAVA_', '_JAVA_', 'JDK_', 'PERL5', 'PERL_', 'GEM_', 'BUNDLE_', 'BUN_', 'DENO_',
+];
+const RESERVED_SUFFIXES: readonly string[] = ['_PROXY', '_CA_BUNDLE', '_CA_CERTS', '_CERT_FILE', '_CERT_DIR'];
 const CREDENTIAL_NAME_PARTS: readonly string[] = ['TOKEN', 'SECRET', 'PASSWORD', 'PASSWD', 'CREDENTIAL', 'AUTH', 'API_KEY', 'ACCESS_KEY', 'PRIVATE_KEY'];
 
 function isReservedName(upper: string): boolean {
-  if (RESERVED_EXACT.has(upper) || upper.endsWith('_PROXY')) return true;
+  if (RESERVED_EXACT.has(upper) || RESERVED_SUFFIXES.some((s) => upper.endsWith(s))) return true;
   if (RESERVED_PREFIXES.some((p) => upper.startsWith(p))) return true;
   return SDK_DEFAULT_NAMES.includes(upper) || Object.keys(getDefaultEnvironment()).some((k) => k.toUpperCase() === upper);
 }

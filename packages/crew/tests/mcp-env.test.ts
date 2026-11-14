@@ -50,6 +50,40 @@ describe('validateServerEnv', () => {
     for (const v of Object.values(env)) expect(r?.message).not.toContain(v);
   });
 
+  // Round-2 CX1: runtime-owned families, launcher resolution and library side effects.
+  const EXECUTION_CONTROLS = [
+    'PYTHONWARNINGS', 'PYTHONUSERBASE', 'PYTHONPATH', 'PYTHONSTARTUP', 'PYTHONHOME', 'PYTHONHTTPSVERIFY',
+    'LUA_INIT', 'LUA_PATH', 'LUA_CPATH', 'LUA_INIT_5_4', 'LUA_PATH_5_4', 'LUA_CPATH_5_4',
+    'PHPRC', 'PHP_INI_SCAN_DIR', 'PHP_INI_OTHER',
+    'DOTNET_ADDITIONAL_DEPS', 'DOTNET_SHARED_STORE', 'DOTNET_ENABLE_PROFILING', 'DOTNET_PROFILER',
+    'DOTNET_PROFILER_PATH', 'CORECLR_PROFILER_PATH', 'COMPLUS_ENABLE_PROFILING',
+    'UV_PYTHON', 'UV_CONFIG_FILE', 'UV_INSECURE_HOST', 'PIP_CONFIG_FILE', 'PIP_INDEX_URL',
+    'JAVA_HOME', 'JAVA_TOOL_OPTIONS', '_JAVA_OPTIONS', '_JAVA_OTHER', 'JDK_JAVA_OPTIONS', 'JDK_JAVA_OPTIONS_OTHER',
+    'PERL5LIB', 'PERL5OPT', 'PERL_LOCAL_LIB_ROOT', 'GEM_SPEC_CACHE', 'BUNDLE_GEMFILE',
+    'BUN_INSTALL', 'DENO_DIR',
+    'GOFLAGS', 'GOPROXY', 'GOSUMDB', 'GONOSUMDB', 'GONOSUMCHECK', 'GOPRIVATE', 'GONOPROXY',
+    'GOINSECURE', 'GOTOOLCHAIN', 'GOENV', 'GOPATH', 'GOROOT', 'GOBIN', 'GOEXPERIMENT',
+    'NODE_OPTIONS', 'NODE_PATH', 'NODE_TLS_REJECT_UNAUTHORIZED', 'NODE_EXTRA_CA_CERTS', 'NPM_CONFIG_PREFIX',
+    'BROWSER', 'EDITOR', 'VISUAL', 'PAGER', 'SSLKEYLOGFILE',
+    'CUSTOM_CA_BUNDLE', 'CUSTOM_CA_CERTS', 'CUSTOM_CERT_FILE', 'CUSTOM_CERT_DIR',
+  ];
+  it.each(EXECUTION_CONTROLS.flatMap((name) => [name, name.toLowerCase()]))('refuses execution control %s in the validator and Settings schema', (name) => {
+    const env = { [name]: SENTINEL };
+    expect(validateServerEnv(env)).toMatchObject({ name, code: 'reserved_name' });
+    const result = McpServerConfigSchema.safeParse({ name: 'fx', kind: 'mcp-stdio', command: 'python3', env });
+    expect(result.success).toBe(false);
+    const issues = JSON.stringify(result.error?.issues);
+    expect(issues).toContain(name);
+    expect(issues).toContain('reserved_name');
+    expect(issues).not.toContain(SENTINEL);
+  });
+
+  it('keeps ordinary application config working', () => {
+    const env = { LOG_LEVEL: 'debug', NODE_ENV: 'production', GOOGLE_CLOUD_PROJECT: 'example', DEBUG: '*', PORT: '3000', APP_MODE: 'local' };
+    expect(validateServerEnv(env)).toBeNull();
+    expect(McpServerConfigSchema.safeParse({ name: 'fx', kind: 'mcp-stdio', command: 'node', env }).success).toBe(true);
+  });
+
   it('refuses a 17th name, naming it', () => {
     const env = Object.fromEntries(Array.from({ length: 17 }, (_, i) => [`VAR_${i}`, 'v']));
     const r = validateServerEnv(env);
@@ -174,6 +208,18 @@ describe('the routes', () => {
     const agent = await registry.listForAgents();
     expect(JSON.stringify(agent)).not.toContain('LOG_LEVEL');
     expect(agent.servers[0]).not.toHaveProperty('env');
+  });
+
+  it.each([
+    ['PYTHONWARNINGS', 'ignore::antigravity.X'],
+    ['BROWSER', '/bin/sh -c "printf CX1_STARTUP >&2" %s'],
+  ])('refuses the Python startup exploit variable %s before preview', async (name, value) => {
+    expect(validateServerEnv({ [name]: value })).toMatchObject({ name, code: 'reserved_name' });
+    const response = await post('/mcp/servers/preview', config({ command: 'python3', env: { [name]: value } }));
+    expect(response.statusCode).toBe(400);
+    expect(response.body).toContain(name);
+    expect(response.body).toContain('reserved_name');
+    expect(response.body).not.toContain(value);
   });
 
   it('refuses a bad env at the preview, naming the variable and not the value, and env on mcp-http', async () => {
