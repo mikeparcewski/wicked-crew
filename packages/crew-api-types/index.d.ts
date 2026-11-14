@@ -14013,7 +14013,7 @@ export interface McpServerConfigBody {
    */
   pm?: { system: 'github' | 'jira' };
   /**
-   * `mcp-stdio` only (a 400 on every other kind): non-secret environment variables for the server's process,
+   * (api-types 0.209.0, wicked-crew#1547) `mcp-stdio` only (a 400 on every other kind): non-secret environment variables for the server's process,
    * at most 16 names (`^[A-Z_][A-Z0-9_]{0,63}$`, compared without case), each value at most 1024 characters.
    * Refused: names that change how the process starts or reaches the network (PATH, HOME, NODE_OPTIONS, LD_*,
    * *_PROXY, GIT_*, NPM_CONFIG_* and the like), the server's own secret variable, a name containing TOKEN,
@@ -14115,7 +14115,7 @@ export interface McpServer {
   args: string[];
   url: string | null;
   auth: McpAuthConfig | null;
-  /** `mcp-stdio` only: the non-secret env as saved (see `McpServerConfigBody.env`). Absent when none; never in the agent view. */
+  /** (api-types 0.209.0, wicked-crew#1547) `mcp-stdio` only: the non-secret env as saved (see `McpServerConfigBody.env`). Absent when none; never in the agent view. */
   env?: Record<string, string>;
   /** `rest` only (api-types 0.64.0): the OpenAPI URL, `null` when the document was pasted. */
   openapiUrl?: string | null;
@@ -14343,7 +14343,7 @@ export interface McpPreviewResponse {
     toolbox?: ToolboxSourceDocument;
     descriptorVersion?: 1 | 2;
     policyVersion?: string;
-    /** (chat-extend CX1) `mcp-stdio` only: the non-secret env this preview would save; `configView` returns it. */
+    /** (api-types 0.209.0, wicked-crew#1547, chat-extend CX1) `mcp-stdio` only: the non-secret env this preview would save; `configView` returns it. */
     env?: Record<string, string>;
   };
   /**

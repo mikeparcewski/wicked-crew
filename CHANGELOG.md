@@ -10,15 +10,24 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
-### Fixed
+## [0.18.15] — 2026-11-14
 
-- **`serve --install-service` writes a systemd unit systemd loads (crew#1549).** On Linux and WSL2 the user unit carried `WorkingDirectory="/home/you"`; that setting takes one path and does not unquote, so systemd refused the unit ("path is not absolute") and the login service never started. Each directive now follows systemd's own rules: path settings (`WorkingDirectory=`, the `append:` log paths) are unquoted with `%` doubled, `ExecStart=` words are quoted with `\`, `"` and `%` escaped (and `$` doubled in arguments, not in the executable path, which systemd takes as written), and `Environment=` assignments are quoted with `\`, `"` and `%` escaped. A path systemd cannot represent (relative, a newline or control character, edge whitespace, a trailing backslash), an executable path containing a single quote, a double quote or a backslash (systemd refuses those however escaped; install Node under a path without them), or an invalid variable name is refused with a clear error. The macOS LaunchAgent is unchanged.
-- A job started from a chat reads the chat's attached files in full: /feature and /document repo take them as documents. A revision to /document repo keeps the chat's files, whether it switches from /document alone or changes card and option together (a person's own selection of fewer files is kept as chosen)
+Carries #1545, #1547, #1548, #1550 and #1551. Needs wicked-core-ts 0.15.44 (`^0.15.44`), bundles wicked-studio 0.16.10,
+and ships wicked-crew-api-types 0.209.0 (additive: the text-to-speech types and the `mcp-stdio` `env` fields). The
+interactive floor stays `^0.16.2` and the garden floor stays 12.68.0.
 
-- **Insights "Run it now", the weekly review schedule and scheduled learn runs no longer wait for an idle daemon (crew#1544).** The "one governed run at a time" guard (crew#1161) refused whenever any run was planning, distributing or executing; the daemon now runs several at once, so on a busy daemon it meant never. Both schedulers drop it and keep "its last run is still going" and one launch per sweep. A schedule whose last run is parked on a person now says so and names the run ("its last run <id> is waiting on you (awaiting_human)").
-### Fixed (text to speech review, crew#1548)
+**Upgrading:**
 
-- Text to speech hardening: every Python launch (probe, venv, pip, piper) runs isolated (`-I`) with the voice dir as cwd, so a `platform.py`, `pip.py` or `piper.py` in the daemon's directory is never run; voice downloads have an overall and an idle deadline (a stall fails the install, drops the `.part`, frees the slot) and every redirect hop must be https; a timeout or cancel kills the child's whole process group and the slot and temp dir are held until it has closed; a synthesis failure answers a fixed message (the child's stderr can echo the spoken text and never reaches an error, log or audit); `GET /voice/tts` probes Python asynchronously and caches it (re-probed on install, on DELETE and after a minute); the lock follows the architecture Python reports (Rosetta); the output goes in a fresh private directory and must be a regular file; WAV validation checks the RIFF size; macOS older than 14, glibc older than 2.28 and musl are refused in status (the baseline is in `TTS_MIN_PLATFORM`, kept equal to the lock generator's platform tags by a test; the committed locks are unchanged); a cached sample is re-verified (regular file, at most 16 MB, valid WAV and recorded sha256) before serving. DELETE fences installs even while waiting for child close, cancels and awaits Python probe groups, and invalidates pending probe results; fresh probes cannot be overwritten by older rounds. Failed download responses cancel their bodies and every download exit aborts its request. Relative voice and explicit Python paths resolve against the daemon startup directory. A cached sample's checksum sidecar is now lstat-checked (regular file, at most 128 bytes) before it is opened, so a FIFO there cannot block the daemon's event loop and an oversized file is never read whole — anything else is a cache miss that regenerates; a voice download whose signal is already aborted when it starts fails at once with the cancel error instead of hanging on a fetch that never settles.
+- **wicked-core-ts 0.15.44.** Seats get the Rust toolchain: every seat image includes the checks floor recipe, so a
+  builder or QE seat on a Rust repository has `cargo`, and the checks floor no longer applies a repository
+  `rust-toolchain` file (core#1476 slice A, core#1480). The checks floor and seat images change, so the engine builds
+  them again on the first unit after the upgrade (`wicked-core seat-image build <cli>` builds them ahead). No binding
+  or wire change.
+- **wicked-studio 0.16.10.** After "Land with carried items and a note" on a capped review, the final card offers
+  Approve completion (studio#1143, studio#1144).
+- **Text to speech is opt-in.** Nothing is installed until a person consents through `POST /voice/tts`; the engine
+  (piper-tts, GPL-3.0-or-later) installs into a venv under the voice dir with the person's own pip.
+- **Linux and WSL2 `serve --install-service`:** re-run it once to rewrite a unit systemd refused (crew#1549).
 
 ### Added
 
@@ -55,6 +64,13 @@ mentioned only where a daemon release depends on them.
   is unsupported, as is Python 3.14 on an Intel Mac (onnxruntime has no wheel). Voice files are fetched from rhasspy/piper-voices at a pinned commit and held to a sha256 and size.
   The text goes to piper on stdin (never argv), is normalized and capped at 2000 characters, and is never logged or
   audited. wicked-crew-api-types 0.209.0 (additive: `VoiceTtsStatus`, `PostVoiceTtsBody`, `PostVoiceSpeakBody`).
+
+### Fixed
+
+- **`serve --install-service` writes a systemd unit systemd loads (crew#1549).** On Linux and WSL2 the user unit carried `WorkingDirectory="/home/you"`; that setting takes one path and does not unquote, so systemd refused the unit ("path is not absolute") and the login service never started. Each directive now follows systemd's own rules: path settings (`WorkingDirectory=`, the `append:` log paths) are unquoted with `%` doubled, `ExecStart=` words are quoted with `\`, `"` and `%` escaped (and `$` doubled in arguments, not in the executable path, which systemd takes as written), and `Environment=` assignments are quoted with `\`, `"` and `%` escaped. A path systemd cannot represent (relative, a newline or control character, edge whitespace, a trailing backslash), an executable path containing a single quote, a double quote or a backslash (systemd refuses those however escaped; install Node under a path without them), or an invalid variable name is refused with a clear error. The macOS LaunchAgent is unchanged.
+- A job started from a chat reads the chat's attached files in full: /feature and /document repo take them as documents. A revision to /document repo keeps the chat's files, whether it switches from /document alone or changes card and option together (a person's own selection of fewer files is kept as chosen) (#1551).
+- **Insights "Run it now", the weekly review schedule and scheduled learn runs no longer wait for an idle daemon (crew#1544).** The "one governed run at a time" guard (crew#1161) refused whenever any run was planning, distributing or executing; the daemon now runs several at once, so on a busy daemon it meant never. Both schedulers drop it and keep "its last run is still going" and one launch per sweep. A schedule whose last run is parked on a person now says so and names the run ("its last run <id> is waiting on you (awaiting_human)").
+- Text to speech hardening (crew#1548): every Python launch (probe, venv, pip, piper) runs isolated (`-I`) with the voice dir as cwd, so a `platform.py`, `pip.py` or `piper.py` in the daemon's directory is never run; voice downloads have an overall and an idle deadline (a stall fails the install, drops the `.part`, frees the slot) and every redirect hop must be https; a timeout or cancel kills the child's whole process group and the slot and temp dir are held until it has closed; a synthesis failure answers a fixed message (the child's stderr can echo the spoken text and never reaches an error, log or audit); `GET /voice/tts` probes Python asynchronously and caches it (re-probed on install, on DELETE and after a minute); the lock follows the architecture Python reports (Rosetta); the output goes in a fresh private directory and must be a regular file; WAV validation checks the RIFF size; macOS older than 14, glibc older than 2.28 and musl are refused in status (the baseline is in `TTS_MIN_PLATFORM`, kept equal to the lock generator's platform tags by a test; the committed locks are unchanged); a cached sample is re-verified (regular file, at most 16 MB, valid WAV and recorded sha256) before serving. DELETE fences installs even while waiting for child close, cancels and awaits Python probe groups, and invalidates pending probe results; fresh probes cannot be overwritten by older rounds. Failed download responses cancel their bodies and every download exit aborts its request. Relative voice and explicit Python paths resolve against the daemon startup directory. A cached sample's checksum sidecar is now lstat-checked (regular file, at most 128 bytes) before it is opened, so a FIFO there cannot block the daemon's event loop and an oversized file is never read whole — anything else is a cache miss that regenerates; a voice download whose signal is already aborted when it starts fails at once with the cancel error instead of hanging on a fetch that never settles.
 
 ## [0.18.14] — 2026-11-12
 
@@ -7061,7 +7077,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.14...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.15...HEAD
+[0.18.15]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.14...v0.18.15
 [0.18.14]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.13...v0.18.14
 [0.18.13]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.12...v0.18.13
 [0.18.12]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.11...v0.18.12
