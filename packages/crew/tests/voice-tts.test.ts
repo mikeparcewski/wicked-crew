@@ -900,7 +900,7 @@ describe('tts revision: isolation, deadlines, cleanup and verification', () => {
       return inst.spawn(command, args, opts);
     };
     const python = relative(process.cwd(), join(dir, 'launcher', 'python'));
-    const s = new TtsService({ dir: relative(process.cwd(), dir), locksDir: locks, platform: 'linux', glibc: () => '2.35', voices: [VOICE_A], fetch: okFetch, env: { WICKED_CREW_PYTHON: python }, spawn });
+    const s = new TtsService({ dir: relative(process.cwd(), dir), locksDir: locks, platform: 'linux', glibc: () => '2.35', voices: [VOICE_A], fetch: okFetch, env: { ...process.env, WICKED_CREW_PYTHON: python }, spawn });
     await s.startInstall([VOICE_A.id]);
     await s.installDone();
     expect((await s.status()).install).toBeNull();
