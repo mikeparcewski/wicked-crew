@@ -917,6 +917,44 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
     expect(launched).toHaveLength(1);
   });
 
+  // crew#1569: the plumbing in routes.ts (`isContainerSeatFloor() && repoRef`) puts the floor into the statement.
+  describe('on the container seat floor (crew#1569)', () => {
+    const saved = process.env['WICKED_SEAT_FLOOR'];
+    afterEach(() => {
+      if (saved === undefined) delete process.env['WICKED_SEAT_FLOOR'];
+      else process.env['WICKED_SEAT_FLOOR'] = saved;
+    });
+    const checkoutWords = (text: string, scratch: string): void => {
+      expect(text).toContain('- **alpha** (`r1`): your working directory');
+      expect(text).not.toContain('`/srv/repos/alpha`');
+      expect(text).toContain(`\`${scratch}\``);
+      expect(text).toContain('working directory is read-only');
+      expect(text).not.toContain('This directory is the scratch root');
+    };
+
+    it('the first turn and a continuation both name the working directory, and the scratch path to write under', async () => {
+      process.env['WICKED_SEAT_FLOOR'] = 'container';
+      const opened = await open({ chatId: 'on-floor', clis: ['claude'], repoRefs: ['alpha'] });
+      expect(opened.statusCode).toBe(201);
+      const scratch = realpathSync(opened.json().scope.cwd as string);
+      expect((await send('on-floor')).statusCode).toBe(202);
+      checkoutWords(launched[0]!.plan!.steps[0]!['instructions'] as string, scratch);
+      const propose = park('on-floor');
+      expect((await send('on-floor')).statusCode).toBe(202);
+      checkoutWords(propose.mock.calls[0]?.[1].steps[0]?.instructions as string, scratch);
+    });
+
+    it('the host floor keeps the statement it always had', async () => {
+      process.env['WICKED_SEAT_FLOOR'] = 'host';
+      expect((await open({ chatId: 'on-host', clis: ['claude'], repoRefs: ['alpha'] })).statusCode).toBe(201);
+      expect((await send('on-host')).statusCode).toBe(202);
+      const text = launched[0]!.plan!.steps[0]!['instructions'] as string;
+      expect(text).toContain('`/srv/repos/alpha`');
+      expect(text).not.toContain('your working directory');
+      expect(text).toContain('This directory is the scratch root');
+    });
+  });
+
   it('an everything chat refuses a repository registered after launch, and its empty statement says to start a new chat (crew#1034)', async () => {
     vi.mocked(adapter.listRepos).mockResolvedValueOnce([]);
     const retry = await open({ chatId: 'retry-scope', clis: ['claude'], scopeKind: 'everything' });

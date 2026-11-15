@@ -24,6 +24,7 @@ let savedLogLevel: string | undefined;
 const warnings: string[] = [];
 const registered: Array<{ name: string; root: string }> = [];
 let onboardThrows: string | null = null;
+let cloneThrows: string | null = null;
 
 beforeAll(async () => {
   scratch = mkdtempSync(join(tmpdir(), 'crew-fr-boot-'));
@@ -48,6 +49,10 @@ beforeAll(async () => {
       if (!existsSync(root)) throw new Error(`${root} is not a directory`);
       registered.push({ name, root });
       return { id: name, name, root_path: root };
+    },
+    cloneAndRegister: async (name: string, _gitUrl: string, root?: string) => {
+      if (cloneThrows !== null) throw new Error(cloneThrows);
+      return { id: name, name, root_path: root ?? join(scratch, name) };
     },
     launchOnboardingRun: async () => {
       if (onboardThrows !== null) throw new Error(onboardThrows);
@@ -148,6 +153,44 @@ describe('POST /repos', () => {
     expect(res.statusCode).toBe(400);
     expect(res.json()).toMatchObject({ code: 'repo_path_missing', error: expect.stringContaining('~/definitely-not-a-folder-fr-c1') });
     expect(registered.length).toBe(before);
+  });
+
+  // crew#1535: the plumbing in routes.ts (`Boolean(gitUrl)`) is what lets a refused clone be named.
+  it.each([
+    ["remote: Repository not found.\nfatal: repository 'https://github.com/acme/private.git/' not found"],
+    ['fatal: could not read Username for \'https://github.com\': terminal prompts disabled'],
+  ])('a refused clone answers 400 repo_clone_denied with the sentence and git\'s own words: %s', async (raw) => {
+    cloneThrows = raw;
+    const res = await app.inject({ method: 'POST', url: '/api/v1/repos', payload: { name: 'denied', gitUrl: 'https://github.com/acme/private.git' } });
+    cloneThrows = null;
+    expect(res.statusCode).toBe(400);
+    const body = res.json() as { code: string; error: string };
+    expect(body.code).toBe('repo_clone_denied');
+    expect(body.error).toContain("could not clone that repository");
+    expect(body.error).toContain('Git said:');
+    expect(body.error).toContain(raw.trim());
+  });
+
+  it('git words with the home folder in them are scrubbed to ~ on a refused clone', async () => {
+    cloneThrows = `fatal: could not read Username for 'https://github.com' (askpass ${homedir()}/bin/ask): terminal prompts disabled`;
+    const res = await app.inject({ method: 'POST', url: '/api/v1/repos', payload: { name: 'denied2', gitUrl: 'https://github.com/acme/private.git' } });
+    cloneThrows = null;
+    expect(res.statusCode).toBe(400);
+    const body = res.json() as { code: string; error: string };
+    expect(body.code).toBe('repo_clone_denied');
+    expect(body.error).toContain('terminal prompts disabled');
+    expect(body.error).toContain('~/bin/ask');
+    expect(body.error).not.toContain(homedir() + '/');
+  });
+
+  it('a clone failing for another reason carries no refusal code', async () => {
+    cloneThrows = 'fatal: unable to access: Could not resolve host: github.com';
+    const res = await app.inject({ method: 'POST', url: '/api/v1/repos', payload: { name: 'offline', gitUrl: 'https://github.com/acme/x.git' } });
+    cloneThrows = null;
+    expect(res.statusCode).toBe(400);
+    const body = res.json() as { code?: string; error: string };
+    expect(body.code).toBeUndefined();
+    expect(body.error).toContain('Could not resolve host');
   });
 
   it('a missing wicked-estate reads as what to install (B2)', async () => {

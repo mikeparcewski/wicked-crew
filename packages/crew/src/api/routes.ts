@@ -6096,7 +6096,7 @@ export function registerRoutes(
       // A2: the per-message digest of what the chat can make now (advertised operations only).
       // crew#1412: written after the last await and the generation check; a map that cannot be written says so.
       const requirementsMaps = scope !== undefined ? publishRequirementsMaps(scope.cwd, requirementsBuilt) : [];
-      const statementOpts = { analysis: path.workflow !== undefined, make: chatProposals.digest(id, turnAccepts, themeClient), requirementsMaps, ...voiceFor(scope?.projectId), ...(isContainerSeatFloor() && repoRef !== undefined ? { containerFloor: true, runRepoId: repoRef } : {}), ...(daemonGrounding !== undefined ? { daemon: daemonGrounding } : {}) };
+      const statementOpts = { analysis: path.workflow !== undefined, make: chatProposals.digest(id, turnAccepts, themeClient), requirementsMaps, ...voiceFor(scope?.projectId), ...(isContainerSeatFloor() && repoRef !== undefined ? { containerFloor: true, runRepoId: repoRef, ...(scope !== undefined ? { scratchRoot: seatPathOf(scope.cwd) } : {}) } : {}), ...(daemonGrounding !== undefined ? { daemon: daemonGrounding } : {}) };
       const projectId = scope?.projectId;
       if (path.runId === undefined) {
         const stepId = 'answer-1';

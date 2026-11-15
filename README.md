@@ -88,7 +88,7 @@ Uploading a file or a SQLite database as a data source needs Node.js 24.12, 25.1
 daemon needs a local Kubernetes cluster (Rancher Desktop; Docker Desktop can't set the pod PID limit wicked needs, and the installer reports it as not ready), running and
 installed once for crew: `npx wicked-installer` (0.10.0 or later) runs the install when the cluster can hold seats,
 or run crew's own engine binary by hand (`<platform>` is `darwin-arm64`, `darwin-x64`, `linux-x64-gnu`,
-`linux-arm64-gnu` or `win32-x64-msvc`; use `docker-desktop` for Docker Desktop):
+`linux-arm64-gnu` or `win32-x64-msvc`):
 
 ```sh
 "$(npm root -g)/wicked-crew/node_modules/wicked-core-ts-<platform>/wicked-core" cluster install \

@@ -11712,7 +11712,9 @@ export interface SystemCli {
   cli: string;
   label: string;
   state: SystemCliState;
-  /** Why the state is not `signed_in`, in the operator's words; `null` when it is. */
+  /** Why the state is not `signed_in`, in the operator's words; `null` when it is. A seat the engine gives no work on
+   *  this floor carries that reason instead, whatever its sign-in reads: the host-floor bench (only Claude Code and
+   *  Codex get work on the host floor) or, when that bench could not be read, its own "could not read" sentence. */
   stateReason: string | null;
   /** ISO-8601 of when an active bench lifts; present only with `state: 'benched'`. */
   benchedUntil?: string;
@@ -11720,7 +11722,8 @@ export interface SystemCli {
   canSignIn: boolean;
   /** May be seated as a judge/council member right now (the roster's `council_eligible`). */
   councilEligible: boolean;
-  /** May be seated for work right now (the roster's `work_eligible`; absent there reads true). */
+  /** May be seated for work right now (the roster's `work_eligible`; absent there reads true) AND the engine gives
+   *  it work on this floor: false for a seat the host floor benches, or whose bench could not be read. */
   workEligible: boolean;
   /** The installed version the roster's background probe read; `null` before the first reading. */
   version: string | null;

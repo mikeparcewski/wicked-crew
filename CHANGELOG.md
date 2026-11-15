@@ -17,7 +17,8 @@ mentioned only where a daemon release depends on them.
   statement sent the seat to a path it could not see and forbade the only copy. For the repository the chat run is
   checked out from, the statement now names the seat's working directory (a checkout at the run's base commit) and says
   reading it is allowed; the `wicked-worktrees/` prohibition stays for every other path, and the host floor's
-  statement is unchanged.
+  statement is unchanged. That working directory is read-only, so the statement names the chat's scratch root by its
+  explicit path for scratch writes instead of calling "this directory" the scratch root.
 - **A private repository added by URL says why it failed** (crew#1535, second half). When `git clone` is refused
   ("Repository not found", "could not read Username", "terminal prompts disabled", "Authentication failed",
   "Permission denied (publickey)"), `POST /api/v1/repos` answers 400 with `code: 'repo_clone_denied'` and a plain
@@ -27,7 +28,10 @@ mentioned only where a daemon release depends on them.
 - **Nerve Center and chat agree on which helpers can work** (crew#1564). `/system` counted a signed-in seat that the
   engine gives no work on the host floor (only Claude Code and Codex get work there) as able to work, so it asked for a
   second agent while chat said no helper was signed in. With no seat able to work it now says "No helper can take
-  work" and names that on this computer only Claude Code and Codex get work.
+  work" and names that on this computer only Claude Code and Codex get work. A seat benched on the host floor reads the
+  bench reason (and a bench that could not be read says so in its own sentence) even when its sign-in is unknown or
+  signed out; "Sign in" targets a signed-out seat that could take work here, and a signed-in benched seat no longer
+  counts toward "Sign in a second agent".
 - **README: Docker Desktop is not enough** (crew#1568, DOC2 row only). Requirements now name Rancher Desktop, and say
   Docker Desktop can't set the pod PID limit wicked needs.
 - **The `/analyze` domain proposal no longer promises "About 10 min–30 min"** (crew#1570). A domain extraction on a

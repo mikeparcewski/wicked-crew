@@ -25,7 +25,7 @@ import { lstat, readFile, statfs, stat } from 'node:fs/promises';
 import { cpus, homedir, loadavg } from 'node:os';
 import { delimiter, join } from 'node:path';
 
-import { HOST_FLOOR_BENCH_COPY } from './seat-standing.js';
+import { HOST_FLOOR_BENCH_COPY, HOST_FLOOR_UNKNOWN_COPY } from './seat-standing.js';
 
 import type {
   AcpCliDiagnostics,
@@ -1104,24 +1104,31 @@ export interface RosterSeatLike {
 }
 
 function cliState(seat: RosterSeatLike): { state: SystemCliState; reason: string | null; until?: string } {
+  const hostReason = hostFloorReason(seat);
   const bench = seat.recent_bench;
   if (bench !== undefined && bench !== null) {
     const kind = bench.kind === 'quota_exhausted' ? 'quota (429)' : bench.kind.replace(/_/g, ' ');
     return { state: 'benched', reason: `benched: ${kind} until ${bench.lifts_at.slice(11, 16)} UTC (${bench.reason})`, until: bench.lifts_at };
   }
   if (seat.auth === 'signed_out' || (seat.auth === undefined && seat.signed_in === false)) {
-    return { state: 'signed_out', reason: seat.council_ineligible_reason ?? seat.work_ineligible_reason ?? seat.auth_evidence ?? 'signed out' };
+    return { state: 'signed_out', reason: hostReason ?? seat.council_ineligible_reason ?? seat.work_ineligible_reason ?? seat.auth_evidence ?? 'signed out' };
   }
   if (seat.auth === 'unknown' || (seat.auth === undefined && (seat.signed_in === null || seat.signed_in === undefined))) {
-    return { state: 'unknown', reason: seat.login_note ?? 'the sign-in check has not answered' };
+    return { state: 'unknown', reason: hostReason ?? seat.login_note ?? 'the sign-in check has not answered' };
   }
-  return { state: 'signed_in', reason: hostBenched(seat) ? HOST_FLOOR_BENCH_COPY : null };
+  return { state: 'signed_in', reason: hostReason };
 }
 
 /** crew#1564: the engine gives the seat no work on this floor — the same refusal the chat and a launch apply. */
 function hostBenched(seat: RosterSeatLike): boolean {
-  return (typeof seat.host_floor_bench === 'string' && seat.host_floor_bench !== '') ||
-    (typeof seat.host_floor_unknown === 'string' && seat.host_floor_unknown !== '');
+  return hostFloorReason(seat) !== null;
+}
+
+/** The real reason the engine gives the seat no work on this floor: the bench, or the bench read failing closed. */
+function hostFloorReason(seat: RosterSeatLike): string | null {
+  if (typeof seat.host_floor_bench === 'string' && seat.host_floor_bench !== '') return HOST_FLOOR_BENCH_COPY;
+  if (typeof seat.host_floor_unknown === 'string' && seat.host_floor_unknown !== '') return HOST_FLOOR_UNKNOWN_COPY;
+  return null;
 }
 
 function versionOf(seat: RosterSeatLike): string | null {
