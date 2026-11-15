@@ -532,7 +532,7 @@ export function buildNeeds(input: NeedsInput): Needs {
         kind: 'slows',
         title: SECOND_AGENT_TITLE,
         reason: `${only.length === 1 ? `Only ${only[0]} is signed in` : 'Only one agent is signed in'}, so no different agent can review its work: governed jobs would need reduced assurance`,
-        remedy: 'Sign in another agent on the Agents page.',
+        remedy: signable !== undefined ? 'Sign in another agent on the Agents page.' : 'Set up another agent on the Agents page.',
         target: { kind: 'cli', cli: (signable ?? input.clis[0]!).cli },
         action: signable !== undefined ? { kind: 'sign_in', label: 'Sign in' } : null,
       }),

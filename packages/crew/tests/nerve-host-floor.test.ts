@@ -111,3 +111,28 @@ describe('crew#1564 review r1: the second-agent sign-in never points at a host-b
     expect(a[0]!.action).toBeNull();
   });
 });
+
+const UNKNOWN_BENCH = { host_floor_unknown: HOST_FLOOR_UNKNOWN_COPY };
+
+describe('crew#1564 review r2: the words of the none and one-reviewer items', () => {
+  it('a host-benched seat whose sign-in is unknown reads "not taking work", never "sign-in not confirmed"', () => {
+    const a = attention([signedIn('opencode', BENCH), unanswered('pi', BENCH), out('claude')]);
+    expect(a[0]!.id).toBe('cli:none');
+    expect(a[0]!.reason).toContain('pi not taking work');
+    expect(a[0]!.reason).not.toContain('pi sign-in not confirmed');
+  });
+
+  it('an unread bench on a signed-in seat names the unknown case in the none item, with no host-bench sentence', () => {
+    const a = attention([signedIn('opencode', UNKNOWN_BENCH), out('claude')]);
+    expect(a[0]!.reason).toContain('opencode work eligibility unknown');
+    expect(a[0]!.reason).not.toContain('only Claude Code and Codex');
+  });
+
+  it('with no seat to sign in, the second-agent remedy does not say "Sign in"', () => {
+    const a = attention([signedIn('claude'), out('pi', BENCH)]);
+    expect(a[0]).toMatchObject({ id: 'cli:one-reviewer', action: null });
+    expect(a[0]!.remedy).not.toMatch(/Sign in/);
+    const b = attention([signedIn('claude'), out('codex')]);
+    expect(b[0]!.remedy).toBe('Sign in another agent on the Agents page.');
+  });
+});
