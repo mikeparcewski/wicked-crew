@@ -164,3 +164,22 @@ describe('crew#1564 review r3: host-floor reasons survive the shortcuts; a bench
     expect(a.map((i) => i.id)).toEqual(['cli:one-reviewer']);
   });
 });
+
+describe('crew#1564 review r7: a quota-benched seat still counts toward a second agent', () => {
+  const quota = { kind: 'quota_exhausted', reason: 'usage limit', lifts_at: '2026-11-15T14:00:00Z', last_at: '2026-11-15T11:00:00Z', runs: 1, source: 'engine' };
+
+  // The roster marks a temporarily benched seat work-ineligible; a host-floor bench is the durable kind. council_eligible
+  // is off so the distinct-judge shortcut cannot hide the count.
+  it.each([false, true])('claude signed in, codex quota-benched (work_eligible %s), nothing else: no second-agent item', (workEligible) => {
+    const a = attention([
+      signedIn('claude'),
+      signedIn('codex', { recent_bench: quota, work_eligible: workEligible, council_eligible: false }),
+    ]);
+    expect(a.map((i) => i.id)).not.toContain('cli:one-reviewer');
+  });
+
+  it('the same roster with codex host-benched instead does give the second-agent item', () => {
+    const a = attention([signedIn('claude'), signedIn('codex', { ...BENCH, council_eligible: false })]);
+    expect(a.map((i) => i.id)).toEqual(['cli:one-reviewer']);
+  });
+});
