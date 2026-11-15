@@ -21,7 +21,7 @@ Local-first: loopback only, no accounts, no billing, no model reselling. Crew dr
 - **uv** — the daemon builds its skills environment with `uv sync` (once per skills baseline); without
   uv every job launch is refused (`venv-failed`). The family installer installs it for you (see below).
 - **git** — crew spawns it for every repository operation.
-- **A local Kubernetes cluster** (Rancher Desktop, or Docker Desktop with Kubernetes on), running and
+- **A local Kubernetes cluster** (Rancher Desktop; Docker Desktop can't set the pod PID limit wicked needs, and the installer reports it as not ready), running and
   installed once for crew: `npx wicked-installer` (0.10.0 or later) runs the install, or by hand
   `"$(npm root -g)/wicked-crew/node_modules/wicked-core-ts-<platform>/wicked-core" cluster install
   --admin-context rancher-desktop --home ~/.wicked-crew`. On Rancher Desktop, choose the dockerd (moby)

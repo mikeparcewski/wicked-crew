@@ -290,6 +290,8 @@ const minutesLabel = (m: [number, number] | null): string | null => {
   return `About ${fmt(m[0])}–${fmt(m[1])}`;
 };
 
+const DOMAIN_TIME = "How long it takes depends on the repository's size; the job shows the time left once its first page is done";
+
 const STOPS: Readonly<Record<'run' | 'compose' | 'demo', string>> = {
   run: 'Asks you to approve the plan first.',
   compose: 'Stops for you at the review.',
@@ -457,13 +459,15 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     parts.push(`Carrying: ${ds.join(', ')}.`);
   }
   if (facts.skipQe !== null) parts.push(`Without QE acceptance (you said: “${facts.skipQe.reason}”), labelled on the job.`);
-  const time = minutesLabel(r.resolved.typicalMinutes);
+  // crew#1570: a domain extraction runs many hours on a large repository; the catalog's fixed range would mislead.
+  const sizeBound = card.id === 'analyze-codebase' && r.option?.id === 'domain';
+  const time = sizeBound ? DOMAIN_TIME : minutesLabel(r.resolved.typicalMinutes);
   // The plan promise holds only where the Start can't choose a power run (crew 0.196.0): there, how it runs is the
   // Start's own choice, shown beside it (studio's Review plan), never promised here first (nor in `stops`).
   const startChooses = launch === 'run' && repo !== null && r.workflow !== null && ctx.powerPresets?.has(r.workflow) === true;
   const stops = launch === 'none' || startChooses ? null : STOPS[launch];
   const promise = launch === 'run' ? (startChooses ? '' : "I'll show you the plan before anything changes.") : (stops ?? '');
-  if (coming === undefined) parts.push(time !== null ? (promise !== '' ? `${time}, and ${promise}` : `${time}.`) : promise);
+  if (coming === undefined) parts.push(time !== null ? (promise !== '' ? (sizeBound ? `${time}. ${promise}` : `${time}, and ${promise}`) : `${time}.`) : promise);
   const ask = coming !== undefined ? null : question !== null ? question.text : blockedBy.length > 0 ? null : 'Start?';
   const comingText = coming !== undefined
     ? `${label} comes in ${card.release}.${coming.nearest !== null ? ` Today, the closest is ${nounOf(CATALOG_V2_CARDS.find((c) => c.id === coming!.nearest!.card) ?? card, coming.nearest.option)}.` : ''}`
@@ -497,7 +501,7 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     repos: repo !== null ? [repo.name] : [],
     ...(repo !== null ? { repoRefs: [repo.id] } : {}),
     helpers: null,
-    time: { minutes: r.resolved.typicalMinutes, cost: r.resolved.cost, steps: r.steps.length > 0 ? r.steps.length : null, median: null, label: time ?? '' } satisfies ProposalTime,
+    time: { minutes: sizeBound ? null : r.resolved.typicalMinutes, cost: r.resolved.cost, steps: r.steps.length > 0 ? r.steps.length : null, median: null, label: time ?? '' } satisfies ProposalTime,
     stops,
     ...(startChooses ? { powerChoice: true } : {}),
     filedIn: { projectId: facts.projectId, label: ctx.projectLabel },

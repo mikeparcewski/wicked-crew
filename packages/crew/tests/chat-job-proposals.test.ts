@@ -873,3 +873,21 @@ describe('(api-types 0.196.0) a job Start chooses power', () => {
     expect(r.launcher.launched).toHaveLength(1);
   });
 });
+
+describe('crew#1570: the time a proposal promises', () => {
+  it('an /analyze domain proposal gives no fixed range, and says the time depends on size', async () => {
+    const r = rig();
+    await pick(r, 'analyze-codebase', { option: 'domain', words: 'analyze the domain of payments-service' });
+    const p = open(r);
+    expect(p.sentence!.text).not.toContain('About 10 min–30 min');
+    expect(p.sentence!.text).not.toMatch(/About \d/);
+    expect(p.sentence!.text).toContain("depends on the repository's size; the job shows the time left once its first page is done");
+    expect(p.time!.minutes).toBeNull();
+  });
+
+  it('a /feature proposal keeps its range', async () => {
+    const r = rig();
+    await pick(r, 'feature');
+    expect(open(r).sentence!.text).toMatch(/About \d+(\.\d)? (min|h)–\d/);
+  });
+});
