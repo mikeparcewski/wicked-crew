@@ -521,7 +521,7 @@ export function buildNeeds(input: NeedsInput): Needs {
   const signedKeys = [...new Set(input.clis.filter((c) => (c.state === 'benched' || (c.state === 'signed_in' && c.workEligible))).map((c) => cliKeyOf(c.cli)))];
   if (anyWorker && signedKeys.length < 2 && distinctJudgePair(input.clis) === null && !input.gaps.some((g) => eligible(g.run.runId))) {
     const only = [...new Set(input.clis.filter((c) => c.workEligible && c.state === 'signed_in').map((c) => cliKeyOf(c.cli)))];
-    const signable = input.clis.find((c) => c.canSignIn && c.state === 'signed_out' && !only.includes(cliKeyOf(c.cli)));
+    const signable = input.clis.find((c) => c.canSignIn && c.state === 'signed_out' && !only.includes(cliKeyOf(c.cli)) && c.stateReason !== HOST_FLOOR_BENCH_COPY && c.stateReason !== HOST_FLOOR_UNKNOWN_COPY);
     groups.set('cli:one-reviewer', {
       key: 'cli:one-reviewer',
       members: [],

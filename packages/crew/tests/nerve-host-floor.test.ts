@@ -92,3 +92,22 @@ describe('crew#1564 review: the real reason, the target and the second-agent cou
     expect(a[0]!.target).toMatchObject({ cli: 'codex' });
   });
 });
+
+describe('crew#1564 review r1: the second-agent sign-in never points at a host-benched seat', () => {
+  it('claude signed in, opencode signed in (benched), pi signed out (benched), codex signed out: Sign in targets codex', () => {
+    const a = attention([
+      signedIn('claude'),
+      signedIn('opencode', { ...BENCH, council_eligible: false }),
+      out('pi', BENCH),
+      out('codex'),
+    ]);
+    expect(a.map((i) => i.id)).toEqual(['cli:one-reviewer']);
+    expect(a[0]).toMatchObject({ target: { kind: 'cli', cli: 'codex' }, action: { kind: 'sign_in', label: 'Sign in' } });
+  });
+
+  it('when the only signed-out seats are host-benched, the second-agent item offers no sign-in', () => {
+    const a = attention([signedIn('claude'), out('pi', BENCH), out('opencode', BENCH)]);
+    expect(a.map((i) => i.id)).toEqual(['cli:one-reviewer']);
+    expect(a[0]!.action).toBeNull();
+  });
+});
