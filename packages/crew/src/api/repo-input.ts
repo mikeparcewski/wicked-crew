@@ -12,9 +12,10 @@
 import { existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, win32 } from 'node:path';
+import type { RegisterRepoRefusalCode } from 'wicked-crew-api-types';
 
 /** A folder the person typed: expanded, or refused with a reason they can act on. */
-export type RepoPathReading = { ok: true; path: string } | { ok: false; code: 'repo_path_relative' | 'repo_path_missing'; error: string };
+export type RepoPathReading = { ok: true; path: string } | { ok: false; code: Extract<RegisterRepoRefusalCode, 'repo_path_relative' | 'repo_path_missing'>; error: string };
 
 /** `path` as a person should read it: the home dir as `~` (never an absolute home path in a message). */
 export function tildePath(path: string, home: string = homedir()): string {
@@ -103,7 +104,7 @@ export function registerFailure(
   rootPath: string | undefined,
   home: string = homedir(),
   cloned = false,
-): { code?: 'repo_path_missing' | 'repo_clone_denied'; error: string } {
+): { code?: Extract<RegisterRepoRefusalCode, 'repo_path_missing' | 'repo_clone_denied'>; error: string } {
   if (rootPath !== undefined && / is not a directory\b|no such file or directory/i.test(raw)) {
     return { code: 'repo_path_missing', error: `There is no folder at ${tildePath(rootPath, home)}. Check the path and try again.` };
   }

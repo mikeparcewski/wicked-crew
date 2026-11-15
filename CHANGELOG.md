@@ -22,7 +22,8 @@ mentioned only where a daemon release depends on them.
   ("Repository not found", "could not read Username", "terminal prompts disabled", "Authentication failed",
   "Permission denied (publickey)"), `POST /api/v1/repos` answers 400 with `code: 'repo_clone_denied'` and a plain
   sentence (clone it yourself and add it "On this computer"), with git's own words after it. Other failures are
-  unchanged; the clone's authentication is not.
+  unchanged; the clone's authentication is not. wicked-crew-api-types 0.210.0 (additive, types only) declares
+  `RegisterRepoRefusalCode` (`repo_path_missing`, `repo_path_relative`, `repo_clone_denied`), the `code` of that 400.
 - **Nerve Center and chat agree on which helpers can work** (crew#1564). `/system` counted a signed-in seat that the
   engine gives no work on the host floor (only Claude Code and Codex get work there) as able to work, so it asked for a
   second agent while chat said no helper was signed in. With no seat able to work it now says "No helper can take

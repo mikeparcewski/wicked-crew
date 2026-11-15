@@ -1715,6 +1715,14 @@ export interface SessionView {
   units: WorkUnit[];
 }
 
+/**
+ * The `code` of a 400 from `POST /api/v1/repos` when the repository could not be added (api-types 0.210.0): the
+ * typed folder is not absolute (`repo_path_relative`), there is no folder at it (`repo_path_missing`), or the
+ * daemon's clone was refused access with this computer's sign-in (`repo_clone_denied`; the `error` sentence
+ * carries the clone's own words after it). Any other refusal carries no `code`.
+ */
+export type RegisterRepoRefusalCode = 'repo_path_missing' | 'repo_path_relative' | 'repo_clone_denied';
+
 /** A registered git repository (`RepoEntry`). */
 export interface RepoEntry {
   id: string;
