@@ -1017,3 +1017,42 @@ describe('DC-S4b: the Decisions section of the scope statement', () => {
     expect(sys).toContain(CHAT_DECISIONS_DIRECTIVE);
   });
 });
+
+describe('crew#1569: the statement on the container seat floor', () => {
+  const scopeOf = async (input: Parameters<typeof resolveChatScope>[0]) => {
+    const res = await resolveChatScope(input, deps());
+    if (!('scope' in res)) throw new Error('scope expected');
+    return res.scope;
+  };
+
+  it('tells the seat to read the run repo in its working directory, and does not forbid it', async () => {
+    const scope = await scopeOf({ chatId: 'k1', repoRefs: ['r-alpha'] });
+    const text = chatScopeStatement('k1', scope, undefined, { containerFloor: true, runRepoId: 'r-alpha' });
+    expect(text).toContain('- **alpha** (`r-alpha`): your working directory');
+    expect(text).not.toMatch(/r-alpha`\): `\/srv/);
+    expect(text).toContain('reading your working');
+    expect(text).toContain('directory is allowed');
+    expect(text).toContain('Do NOT read from any other `wicked-worktrees/` subdirectory');
+    expect(text).not.toContain('Do NOT read from any `wicked-worktrees/`');
+  });
+
+  it('keeps today\'s statement exactly on the host floor', async () => {
+    const scope = await scopeOf({ chatId: 'k2', repoRefs: ['r-alpha'] });
+    const host = chatScopeStatement('k2', scope, undefined, { containerFloor: false, runRepoId: 'r-alpha' });
+    expect(host).toBe(chatScopeStatement('k2', scope));
+    expect(host).toContain('`/srv/repos/alpha`');
+    expect(host).toContain('Do NOT read from any `wicked-worktrees/` subdirectory');
+    expect(host).not.toContain('your working directory');
+  });
+
+  it('on a project scope changes only the run repo line', async () => {
+    const scope = await scopeOf({ chatId: 'k3', projectId: 'p1', repoRefs: [] });
+    const plain = chatScopeStatement('k3', scope);
+    const floor = chatScopeStatement('k3', scope, undefined, { containerFloor: true, runRepoId: 'r-alpha' });
+    expect(floor).toContain('- **alpha** (`r-alpha`): your working directory');
+    expect(floor).toContain('- **beta** (`r-beta`): `/srv/repos/beta`');
+    expect(plain).toContain('- **alpha** (`r-alpha`): `/srv/repos/alpha`');
+    // With no run repo named (a project chat has none), nothing changes.
+    expect(chatScopeStatement('k3', scope, undefined, { containerFloor: true })).toBe(plain);
+  });
+});

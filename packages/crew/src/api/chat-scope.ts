@@ -1106,6 +1106,11 @@ export interface ChatStatementOptions {
   /** (crew-0182) The daemon's projects and registered repositories, read for this message, and whether this chat's
    *  client draws onboard cards. Absent = not read (older callers): the statement names none. */
   daemon?: DaemonGrounding;
+  /** (crew#1569) The seat runs on the container seat floor, where the engine leaves a clone out of the seat's read
+   *  roots when the run's own checkout is inside it: the seat reads that repository in its working directory. */
+  containerFloor?: boolean;
+  /** (crew#1569) The repository the chat run is checked out from (the run's `repoRef`); absent = none. */
+  runRepoId?: string;
 }
 
 /** (crew-0182) What every chat seat is told exists on this daemon, so it never says it can't tell what a project is. */
@@ -1178,6 +1183,7 @@ export function chatScopeStatement(
   rules?: ReadonlyArray<ConformanceRule>,
   opts: ChatStatementOptions = {},
 ): string {
+  const inWorkingDir = (repoId: string): boolean => opts.containerFloor === true && opts.runRepoId === repoId;
   const lines: string[] = [
     '# Chat scope',
     '',
@@ -1239,12 +1245,24 @@ export function chatScopeStatement(
     lines.push(
       '## Repositories in scope (READ-ONLY)',
       '',
-      ...scope.repos.map((r) => `- **${r.name}** (\`${r.id}\`): \`${r.rootPath}\`${freshnessClause(r.freshness)}`),
+      ...scope.repos.map((r) =>
+        inWorkingDir(r.id)
+          ? `- **${r.name}** (\`${r.id}\`): your working directory — a checkout of this repository at the run's base commit${freshnessClause(r.freshness)}`
+          : `- **${r.name}** (\`${r.id}\`): \`${r.rootPath}\`${freshnessClause(r.freshness)}`,
+      ),
       '',
-      'Explore and answer questions about these repositories by reading them at the paths above.',
+      ...(scope.repos.some((r) => inWorkingDir(r.id))
+        ? [
+          'Explore and answer questions about these repositories by reading them at the paths above;',
+          'a repository shown as your working directory is read there, and reading your working',
+          'directory is allowed.',
+        ]
+        : ['Explore and answer questions about these repositories by reading them at the paths above.']),
       'Cite files relative to their repository root, prefixed with the repository name',
       '(for example `alpha/src/foo.ts` for a file at `/srv/repos/alpha/src/foo.ts`).',
-      'Do NOT read from any `wicked-worktrees/` subdirectory — those are engine-managed run',
+      ...(scope.repos.some((r) => inWorkingDir(r.id))
+        ? ['Do NOT read from any other `wicked-worktrees/` subdirectory — those are engine-managed run']
+        : ['Do NOT read from any `wicked-worktrees/` subdirectory — those are engine-managed run']),
       'checkouts, not source code. Do NOT modify, create or delete anything inside these',
       'repositories — this chat is read-only exploration; write scratch files only under this',
       'directory. Nothing outside these repositories and this directory is in scope.',
