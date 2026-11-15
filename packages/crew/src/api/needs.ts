@@ -520,7 +520,7 @@ export function buildNeeds(input: NeedsInput): Needs {
   // Fewer than two distinct CLIs signed in (a second seat of one CLI is not a second agent; a benched
   // one is still signed in, and its bench lifts by itself). A job already held for want of a reviewer
   // says it in its own item: one cause, one item.
-  const signedKeys = [...new Set(input.clis.filter((c) => c.workEligible && (c.state === 'signed_in' || c.state === 'benched')).map((c) => cliKeyOf(c.cli)))];
+  const signedKeys = [...new Set(input.clis.filter((c) => (c.state === 'benched' ? c.stateReason !== HOST_FLOOR_BENCH_COPY && c.stateReason !== HOST_FLOOR_UNKNOWN_COPY : c.state === 'signed_in' && c.workEligible)).map((c) => cliKeyOf(c.cli)))];
   if (anyWorker && signedKeys.length < 2 && distinctJudgePair(input.clis) === null && !input.gaps.some((g) => eligible(g.run.runId))) {
     const only = [...new Set(input.clis.filter((c) => c.workEligible && c.state === 'signed_in').map((c) => cliKeyOf(c.cli)))];
     const signable = input.clis.find((c) => c.canSignIn && c.state === 'signed_out' && !only.includes(cliKeyOf(c.cli)) && c.stateReason !== HOST_FLOOR_BENCH_COPY && c.stateReason !== HOST_FLOOR_UNKNOWN_COPY);
