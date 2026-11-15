@@ -39,6 +39,7 @@ import type {
   SystemTarget,
   SystemUnresolvedItem,
 } from '../core/types.js';
+import { HOST_FLOOR_BENCH_COPY } from './seat-standing.js';
 
 const DAY_MS = 86_400_000;
 /** A failed run launched longer ago than this is history to resolve, not a need. */
@@ -237,7 +238,8 @@ function noneReason(clis: readonly SystemCli[]): string {
     if (c.state === 'signed_out' || c.state === 'benched') return seatsOut(undefined, [c])[0]!;
     return `${c.cli} ${c.state === 'unknown' ? 'sign-in not confirmed' : 'not taking work'}`;
   });
-  return `No helper is free to take work (${words.join(', ')})`;
+  const onHost = clis.some((c) => c.stateReason === HOST_FLOOR_BENCH_COPY) ? '; on this computer only Claude Code and Codex get work' : '';
+  return `No helper is free to take work (${words.join(', ')})${onHost}`;
 }
 
 /** Why a held run is held, in a person's words (the denial's category, never its raw text). */

@@ -25,6 +25,8 @@ import { lstat, readFile, statfs, stat } from 'node:fs/promises';
 import { cpus, homedir, loadavg } from 'node:os';
 import { delimiter, join } from 'node:path';
 
+import { HOST_FLOOR_BENCH_COPY } from './seat-standing.js';
+
 import type {
   AcpCliDiagnostics,
   DiagnosticsSeatGovernanceEntry,
@@ -1087,6 +1089,9 @@ export interface RosterSeatLike {
   council_ineligible_reason?: string;
   work_eligible?: boolean;
   work_ineligible_reason?: string;
+  /** wicked-core#976: the engine gives this seat no governed work on the host floor (the sentence), or the bench could not be read. */
+  host_floor_bench?: string | null;
+  host_floor_unknown?: string | null;
   login_note?: string;
   auth_evidence?: string;
   login_invocation?: string;
@@ -1110,7 +1115,13 @@ function cliState(seat: RosterSeatLike): { state: SystemCliState; reason: string
   if (seat.auth === 'unknown' || (seat.auth === undefined && (seat.signed_in === null || seat.signed_in === undefined))) {
     return { state: 'unknown', reason: seat.login_note ?? 'the sign-in check has not answered' };
   }
-  return { state: 'signed_in', reason: null };
+  return { state: 'signed_in', reason: hostBenched(seat) ? HOST_FLOOR_BENCH_COPY : null };
+}
+
+/** crew#1564: the engine gives the seat no work on this floor — the same refusal the chat and a launch apply. */
+function hostBenched(seat: RosterSeatLike): boolean {
+  return (typeof seat.host_floor_bench === 'string' && seat.host_floor_bench !== '') ||
+    (typeof seat.host_floor_unknown === 'string' && seat.host_floor_unknown !== '');
 }
 
 function versionOf(seat: RosterSeatLike): string | null {
@@ -1146,7 +1157,7 @@ export function buildClis(input: {
       ...(until !== undefined ? { benchedUntil: until } : {}),
       canSignIn: seat.sign_in === 'container' || typeof seat.login_invocation === 'string',
       councilEligible: seat.council_eligible === true,
-      workEligible: seat.work_eligible !== false,
+      workEligible: seat.work_eligible !== false && !hostBenched(seat),
       version: versionOf(seat),
       versionPin: seat.version_pin != null ? { pinned: seat.version_pin.pinned, observed: seat.version_pin.observed, matched: seat.version_pin.matched } : null,
       governanceClass: typeof seat.governance_class === 'string' ? seat.governance_class : seat.governance_class != null ? JSON.stringify(seat.governance_class) : null,
