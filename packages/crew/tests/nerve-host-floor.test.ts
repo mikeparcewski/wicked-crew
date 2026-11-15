@@ -136,3 +136,31 @@ describe('crew#1564 review r2: the words of the none and one-reviewer items', ()
     expect(b[0]!.remedy).toBe('Sign in another agent on the Agents page.');
   });
 });
+
+describe('crew#1564 review r3: host-floor reasons survive the shortcuts; a benched seat counts only if it can work', () => {
+  it('a roster whose only seats are host_floor_unknown gives the unknown sentence', () => {
+    const a = attention([unanswered('opencode', UNKNOWN_BENCH), unanswered('pi', UNKNOWN_BENCH)].map((s) => ({ ...s, work_eligible: false })));
+    expect(a[0]!.id).toBe('cli:none');
+    expect(a[0]!.reason).toContain('opencode work eligibility unknown');
+    expect(a[0]!.reason).toContain('could not read which agents get work');
+    expect(a[0]!.reason).not.toContain('sign-in can be confirmed');
+  });
+
+  it('signed-out seats with a host-benched one name the host-floor reason, not "every helper"', () => {
+    const a = attention([out('claude'), out('opencode', BENCH)]);
+    expect(a[0]!.id).toBe('cli:none');
+    expect(a[0]!.reason).toContain('opencode not taking work');
+    expect(a[0]!.reason).toContain('on this computer only Claude Code and Codex get work');
+    expect(a[0]!.reason).not.toMatch(/^Every helper/);
+  });
+
+  it('claude signed in, opencode host-benched AND quota-benched, codex signed out: the second-agent item', () => {
+    const quota = { kind: 'quota_exhausted', reason: 'usage limit', lifts_at: '2026-11-15T14:00:00Z', last_at: '2026-11-15T11:00:00Z', runs: 1, source: 'engine' };
+    const a = attention([
+      signedIn('claude'),
+      signedIn('opencode', { ...BENCH, work_eligible: false, council_eligible: false, recent_bench: quota }),
+      out('codex'),
+    ]);
+    expect(a.map((i) => i.id)).toEqual(['cli:one-reviewer']);
+  });
+});
