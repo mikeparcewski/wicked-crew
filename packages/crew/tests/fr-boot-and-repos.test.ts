@@ -11,7 +11,7 @@ import type { FastifyInstance } from 'fastify';
 
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
-import { onboardFailure, readRepoPath, tildePath } from '../src/api/repo-input.js';
+import { onboardFailure, readRepoPath, registerFailure, tildePath } from '../src/api/repo-input.js';
 import { removeScratch } from './setup/scratch.js';
 import { expectNoHomePaths } from './fr-privacy-helpers.js';
 
@@ -188,5 +188,35 @@ describe('onboardFailure', () => {
     const f = onboardFailure("phase 'x' requires tool 'frob' (not found on PATH …)", '/h');
     expect(f).toMatchObject({ code: 'tool_missing', tool: 'frob' });
     expect(f.error).not.toContain('npx');
+  });
+});
+
+describe('crew#1535: a clone git is refused access to', () => {
+  const home = '/Users/alice';
+  it.each([
+    "fatal: repository 'https://github.com/o/private.git/' not found",
+    'fatal: could not read Username for \'https://github.com\': terminal prompts disabled',
+    'fatal: could not read Password for \'https://x@github.com\'',
+    'remote: Invalid username or password.\nfatal: Authentication failed for \'https://github.com/o/p.git/\'',
+    'git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.',
+  ])('answers repo_clone_denied with the sentence and git\'s words: %s', (raw) => {
+    const r = registerFailure(raw, undefined, home, true);
+    expect(r.code).toBe('repo_clone_denied');
+    expect(r.error).toContain('could not clone that repository');
+    expect(r.error).toContain('"On this computer"');
+    expect(r.error).toContain('Git said:');
+  });
+  it('scrubs the home path from git\'s words', () => {
+    const r = registerFailure("fatal: could not create work tree dir '/Users/alice/x': Authentication failed", undefined, home, true);
+    expect(r.error).not.toContain('/Users/alice');
+  });
+  it('leaves a non-access clone failure unchanged', () => {
+    expect(registerFailure('fatal: unable to access: Could not resolve host: example.invalid', undefined, home, true)).toEqual({
+      error: 'fatal: unable to access: Could not resolve host: example.invalid',
+    });
+  });
+  it('leaves a local registration failure unchanged, repo_path_missing winning', () => {
+    expect(registerFailure('/Users/alice/x is not a directory', '/Users/alice/x', home)).toMatchObject({ code: 'repo_path_missing' });
+    expect(registerFailure('repository not found', '/Users/alice/x', home)).toEqual({ error: 'repository not found' });
   });
 });

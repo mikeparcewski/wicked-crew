@@ -3315,7 +3315,7 @@ export function registerRoutes(
       }
       runId = ctx.runId !== undefined ? await adapter.launchOnboardingRun(repo.id, name, ctx.runId) : await adapter.launchOnboardingRun(repo.id, name);
     } catch (err) {
-      if (repo === undefined) return { status: 400, body: registerFailure(message(err), gitUrl ? undefined : rootPath) as Record<string, unknown> };
+      if (repo === undefined) return { status: 400, body: registerFailure(message(err), gitUrl ? undefined : rootPath, undefined, Boolean(gitUrl)) as Record<string, unknown> };
       ctx.log.warn({ repoId: repo.id }, `repo registered but onboarding launch failed: ${message(err)}`);
       // No run exists to record or file (crew#1019); the repo still joins its project.
       const failure = onboardFailure(message(err));
