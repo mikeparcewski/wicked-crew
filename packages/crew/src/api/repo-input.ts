@@ -114,7 +114,7 @@ export function registerFailure(
 }
 
 /** (crew#1535) git's refusals when it has no credential for a repository, or the repository is not there to it. */
-const CLONE_DENIED = /repository not found|could not read (?:username|password)|terminal prompts disabled|authentication failed|permission denied \(publickey\)/i;
+const CLONE_DENIED = /repository (?:'[^']*' )?not found|could not read (?:username|password)|terminal prompts disabled|authentication failed|permission denied \(publickey\)/i;
 const CLONE_DENIED_SENTENCE =
   'This computer\'s git sign-in could not clone that repository (it is private, or the URL is wrong); a private repository can be cloned yourself and added "On this computer".';
 
