@@ -3315,7 +3315,7 @@ export function registerRoutes(
       }
       runId = ctx.runId !== undefined ? await adapter.launchOnboardingRun(repo.id, name, ctx.runId) : await adapter.launchOnboardingRun(repo.id, name);
     } catch (err) {
-      if (repo === undefined) return { status: 400, body: registerFailure(message(err), gitUrl ? undefined : rootPath) as Record<string, unknown> };
+      if (repo === undefined) return { status: 400, body: registerFailure(message(err), gitUrl ? undefined : rootPath, undefined, Boolean(gitUrl)) as Record<string, unknown> };
       ctx.log.warn({ repoId: repo.id }, `repo registered but onboarding launch failed: ${message(err)}`);
       // No run exists to record or file (crew#1019); the repo still joins its project.
       const failure = onboardFailure(message(err));
@@ -6096,7 +6096,7 @@ export function registerRoutes(
       // A2: the per-message digest of what the chat can make now (advertised operations only).
       // crew#1412: written after the last await and the generation check; a map that cannot be written says so.
       const requirementsMaps = scope !== undefined ? publishRequirementsMaps(scope.cwd, requirementsBuilt) : [];
-      const statementOpts = { analysis: path.workflow !== undefined, make: chatProposals.digest(id, turnAccepts, themeClient), requirementsMaps, ...voiceFor(scope?.projectId), ...(daemonGrounding !== undefined ? { daemon: daemonGrounding } : {}) };
+      const statementOpts = { analysis: path.workflow !== undefined, make: chatProposals.digest(id, turnAccepts, themeClient), requirementsMaps, ...voiceFor(scope?.projectId), ...(isContainerSeatFloor() && repoRef !== undefined ? { containerFloor: true, runRepoId: repoRef, ...(scope !== undefined ? { scratchRoot: seatPathOf(scope.cwd) } : {}) } : {}), ...(daemonGrounding !== undefined ? { daemon: daemonGrounding } : {}) };
       const projectId = scope?.projectId;
       if (path.runId === undefined) {
         const stepId = 'answer-1';

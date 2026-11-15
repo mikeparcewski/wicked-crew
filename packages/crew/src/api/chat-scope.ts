@@ -1031,6 +1031,8 @@ export function chatMakeDigest(make: MakeDigest | undefined): string {
 }
 
 export function chatWorkRequestLines(scope: Pick<ChatScope, 'kind' | 'repos'>, opts: ChatStatementOptions = {}): string[] {
+  // crew#1569: with the working directory a read-only checkout, "this directory" would name the wrong place.
+  const writeRoot = opts.containerFloor === true && scope.repos.some((r) => r.id === opts.runRepoId) ? 'the scratch root' : 'this directory';
   // crew#1157: an ANALYSIS chat (`POST /chats {workflow}`) answers questions and never proposes
   // work: no `PLAN+` line, so nothing in it can open a creator step or a Continue in Build.
   if (opts.analysis === true) {
@@ -1054,7 +1056,7 @@ export function chatWorkRequestLines(scope: Pick<ChatScope, 'kind' | 'repos'>, o
       '',
       '## Requests for work',
       '',
-      'This chat cannot change anything: writes outside this directory are refused. A request for work is never',
+      `This chat cannot change anything: writes outside ${writeRoot} are refused. A request for work is never`,
       'attempted here: it is routed as "Starting work" says.',
     ];
   }
@@ -1064,7 +1066,7 @@ export function chatWorkRequestLines(scope: Pick<ChatScope, 'kind' | 'repos'>, o
     ...(makesAnything(opts.make) ? [...chatMakeLines(opts.make), ''] : []),
     '## Requests for work',
     '',
-    'This chat cannot change anything: writes outside this directory are refused. When the message',
+    `This chat cannot change anything: writes outside ${writeRoot} are refused. When the message`,
     docsByProposal
       ? 'asks for work on code (build, fix, add, change code), do NOT attempt it. Answer with a'
       : 'asks for work (build, fix, add, change, write code or docs), do NOT attempt it. Answer with a',
@@ -1106,6 +1108,14 @@ export interface ChatStatementOptions {
   /** (crew-0182) The daemon's projects and registered repositories, read for this message, and whether this chat's
    *  client draws onboard cards. Absent = not read (older callers): the statement names none. */
   daemon?: DaemonGrounding;
+  /** (crew#1569) The seat runs on the container seat floor, where the engine leaves a clone out of the seat's read
+   *  roots when the run's own checkout is inside it: the seat reads that repository in its working directory. */
+  containerFloor?: boolean;
+  /** (crew#1569) The repository the chat run is checked out from (the run's `repoRef`); absent = none. */
+  runRepoId?: string;
+  /** (crew#1569) The chat scratch root as the seat sees it (an explicit path). On the container floor with a run repo
+   *  the seat's working directory is the read-only checkout, so the statement names this path for scratch writes. */
+  scratchRoot?: string;
 }
 
 /** (crew-0182) What every chat seat is told exists on this daemon, so it never says it can't tell what a project is. */
@@ -1178,10 +1188,18 @@ export function chatScopeStatement(
   rules?: ReadonlyArray<ConformanceRule>,
   opts: ChatStatementOptions = {},
 ): string {
+  const inWorkingDir = (repoId: string): boolean => opts.containerFloor === true && opts.runRepoId === repoId;
+  const checkoutIsCwd = scope.repos.some((r) => inWorkingDir(r.id));
+  const scratch = opts.scratchRoot ?? scope.cwd;
   const lines: string[] = [
     '# Chat scope',
     '',
-    `This directory is the scratch root of wicked-crew chat \`${chatId}\`. It is the ONLY place you may write.`,
+    ...(checkoutIsCwd
+      ? [
+        `The scratch root of wicked-crew chat \`${chatId}\` is \`${scratch}\`. It is the ONLY place you may write.`,
+        'Your working directory is a read-only checkout of a repository, not the scratch root.',
+      ]
+      : [`This directory is the scratch root of wicked-crew chat \`${chatId}\`. It is the ONLY place you may write.`]),
     '',
   ];
   if (scope.kind === 'system') {
@@ -1239,15 +1257,34 @@ export function chatScopeStatement(
     lines.push(
       '## Repositories in scope (READ-ONLY)',
       '',
-      ...scope.repos.map((r) => `- **${r.name}** (\`${r.id}\`): \`${r.rootPath}\`${freshnessClause(r.freshness)}`),
+      ...scope.repos.map((r) =>
+        inWorkingDir(r.id)
+          ? `- **${r.name}** (\`${r.id}\`): your working directory — a checkout of this repository at the run's base commit${freshnessClause(r.freshness)}`
+          : `- **${r.name}** (\`${r.id}\`): \`${r.rootPath}\`${freshnessClause(r.freshness)}`,
+      ),
       '',
-      'Explore and answer questions about these repositories by reading them at the paths above.',
+      ...(scope.repos.some((r) => inWorkingDir(r.id))
+        ? [
+          'Explore and answer questions about these repositories by reading them at the paths above;',
+          'a repository shown as your working directory is read there, and reading your working',
+          'directory is allowed.',
+        ]
+        : ['Explore and answer questions about these repositories by reading them at the paths above.']),
       'Cite files relative to their repository root, prefixed with the repository name',
       '(for example `alpha/src/foo.ts` for a file at `/srv/repos/alpha/src/foo.ts`).',
-      'Do NOT read from any `wicked-worktrees/` subdirectory — those are engine-managed run',
+      ...(scope.repos.some((r) => inWorkingDir(r.id))
+        ? ['Do NOT read from any other `wicked-worktrees/` subdirectory — those are engine-managed run']
+        : ['Do NOT read from any `wicked-worktrees/` subdirectory — those are engine-managed run']),
       'checkouts, not source code. Do NOT modify, create or delete anything inside these',
-      'repositories — this chat is read-only exploration; write scratch files only under this',
-      'directory. Nothing outside these repositories and this directory is in scope.',
+      ...(checkoutIsCwd
+        ? [
+          'repositories — this chat is read-only exploration, and your working directory is read-only;',
+          `write scratch files only under \`${scratch}\`. Nothing outside these repositories and that path is in scope.`,
+        ]
+        : [
+          'repositories — this chat is read-only exploration; write scratch files only under this',
+          'directory. Nothing outside these repositories and this directory is in scope.',
+        ]),
       '',
     );
   }

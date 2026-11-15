@@ -12,9 +12,10 @@
 import { existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, win32 } from 'node:path';
+import type { RegisterRepoRefusalCode } from 'wicked-crew-api-types';
 
 /** A folder the person typed: expanded, or refused with a reason they can act on. */
-export type RepoPathReading = { ok: true; path: string } | { ok: false; code: 'repo_path_relative' | 'repo_path_missing'; error: string };
+export type RepoPathReading = { ok: true; path: string } | { ok: false; code: Extract<RegisterRepoRefusalCode, 'repo_path_relative' | 'repo_path_missing'>; error: string };
 
 /** `path` as a person should read it: the home dir as `~` (never an absolute home path in a message). */
 export function tildePath(path: string, home: string = homedir()): string {
@@ -98,12 +99,25 @@ export function onboardFailure(raw: string, home: string = homedir()): { code?: 
  * that is not there; that reads as the folder named in `~` form, with what to do. Anything else
  * keeps the engine's words, home paths as `~`.
  */
-export function registerFailure(raw: string, rootPath: string | undefined, home: string = homedir()): { code?: 'repo_path_missing'; error: string } {
+export function registerFailure(
+  raw: string,
+  rootPath: string | undefined,
+  home: string = homedir(),
+  cloned = false,
+): { code?: Extract<RegisterRepoRefusalCode, 'repo_path_missing' | 'repo_clone_denied'>; error: string } {
   if (rootPath !== undefined && / is not a directory\b|no such file or directory/i.test(raw)) {
     return { code: 'repo_path_missing', error: `There is no folder at ${tildePath(rootPath, home)}. Check the path and try again.` };
   }
+  if (cloned && CLONE_DENIED.test(raw)) {
+    return { code: 'repo_clone_denied', error: `${CLONE_DENIED_SENTENCE} Git said: ${scrubHome(raw.trim(), home)}` };
+  }
   return { error: scrubHome(raw, home) };
 }
+
+/** (crew#1535) git's refusals when it has no credential for a repository, or the repository is not there to it. */
+const CLONE_DENIED = /repository (?:'[^']*' )?not found|could not read (?:username|password)|terminal prompts disabled|authentication failed|permission denied \(publickey\)/i;
+const CLONE_DENIED_SENTENCE =
+  'This computer\'s git sign-in could not clone that repository (it is private, or the URL is wrong); a private repository can be cloned yourself and added "On this computer".';
 
 function scrubHome(text: string, home: string): string {
   return home === '' || home === '/' ? text : text.split(home).join('~');

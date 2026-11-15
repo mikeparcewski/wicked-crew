@@ -10,6 +10,34 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A chat on the Kubernetes seat floor reads the repository it is scoped to** (crew#1569). On the container seat
+  floor the engine leaves the clone out of the seat's read roots when the run's own checkout is inside it, so the chat
+  statement sent the seat to a path it could not see and forbade the only copy. For the repository the chat run is
+  checked out from, the statement now names the seat's working directory (a checkout at the run's base commit) and says
+  reading it is allowed; the `wicked-worktrees/` prohibition stays for every other path, and the host floor's
+  statement is unchanged. That working directory is read-only, so the statement names the chat's scratch root by its
+  explicit path for scratch writes instead of calling "this directory" the scratch root.
+- **A private repository added by URL says why it failed** (crew#1535, second half). When `git clone` is refused
+  ("Repository not found", "could not read Username", "terminal prompts disabled", "Authentication failed",
+  "Permission denied (publickey)"), `POST /api/v1/repos` answers 400 with `code: 'repo_clone_denied'` and a plain
+  sentence (clone it yourself and add it "On this computer"), with git's own words after it. Other failures are
+  unchanged; the clone's authentication is not. wicked-crew-api-types 0.210.0 (additive, types only) declares
+  `RegisterRepoRefusalCode` (`repo_path_missing`, `repo_path_relative`, `repo_clone_denied`), the `code` of that 400.
+- **Nerve Center and chat agree on which helpers can work** (crew#1564). `/system` counted a signed-in seat that the
+  engine gives no work on the host floor (only Claude Code and Codex get work there) as able to work, so it asked for a
+  second agent while chat said no helper was signed in. With no seat able to work it now says "No helper can take
+  work" and names that on this computer only Claude Code and Codex get work. A seat benched on the host floor reads the
+  bench reason (and a bench that could not be read says so in its own sentence) even when its sign-in is unknown or
+  signed out; "Sign in" targets a signed-out seat that could take work here, and a signed-in benched seat no longer
+  counts toward "Sign in a second agent".
+- **README: Docker Desktop is not enough** (crew#1568, DOC2 row only). Requirements now name Rancher Desktop, and say
+  Docker Desktop can't set the pod PID limit wicked needs.
+- **The `/analyze` domain proposal no longer promises "About 10 min–30 min"** (crew#1570). A domain extraction on a
+  large repository takes many hours, so the proposal says the time depends on the repository's size and that the job
+  shows the time left once its first page is done. Other cards keep their range.
+
 ## [0.18.15] — 2026-11-14
 
 Carries #1545, #1547, #1548, #1550 and #1551. Needs wicked-core-ts 0.15.44 (`^0.15.44`), bundles wicked-studio 0.16.10,

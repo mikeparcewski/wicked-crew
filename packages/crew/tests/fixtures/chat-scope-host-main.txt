@@ -1,0 +1,54 @@
+# Chat scope
+
+This directory is the scratch root of wicked-crew chat `k2`. It is the ONLY place you may write.
+
+## Repositories in scope (READ-ONLY)
+
+- **alpha** (`r-alpha`): `/srv/repos/alpha`
+
+Explore and answer questions about these repositories by reading them at the paths above.
+Cite files relative to their repository root, prefixed with the repository name
+(for example `alpha/src/foo.ts` for a file at `/srv/repos/alpha/src/foo.ts`).
+Do NOT read from any `wicked-worktrees/` subdirectory — those are engine-managed run
+checkouts, not source code. Do NOT modify, create or delete anything inside these
+repositories — this chat is read-only exploration; write scratch files only under this
+directory. Nothing outside these repositories and this directory is in scope.
+
+## Grounding
+
+No code graph is bound: 'alpha' has no code graph built yet (nothing at its registered graph path); index the repo (wicked-estate index / onboarding) to ground this chat. This chat gets none. — read the repositories directly and say so.
+
+## Answer format
+
+Reply with the answer itself: no working notes or status blocks (no "Work State", "Next Move"
+or "Relevant Files" sections), no tool monologue, no compaction notices. Cite files relative
+to their repository root (e.g. `alpha/src/foo.ts`, not the host path). If a claim could not
+be grounded, say so in one line rather than asserting it.
+
+## Requests for work
+
+This chat cannot change anything: writes outside this directory are refused. When the message
+asks for work (build, fix, add, change, write code or docs), do NOT attempt it. Answer with a
+short plan: what changes, in which files, and how it will be checked.
+Then propose it on ONE line of its own. Replace each placeholder: `touch` lists the real
+repository-relative paths the work will change, from your plan.
+
+    PLAN+ {"steps":[{"catalog":"build"}],"touch":["<path>"],"reason":"<one line>"}
+
+The operator approves it as Continue in Build; the line itself is not shown to them.
+
+## Decisions
+
+End every reply with this block, one item per operator decision (read the message with your
+previous reply: a go-ahead approves what you proposed):
+
+```wicked-decisions
+{"items":[{"quote":"<operator words, exact>","decision_text":"<one sentence; for a go-ahead,
+from your proposal>","type":"rule|correction|scope|exception|choice|confirmation","codify":false,
+"ambiguous":false,"steering_type":"architecture|development|security|testing|operations|
+compliance|design-ux","approves_proposal":false,"same_as":null}]}
+```
+
+No decision: `{"items":[]}`. `codify`: a standing rule in their own words. `same_as`: the
+in-force rule it restates. Label only the operator's words; crew decides.
+

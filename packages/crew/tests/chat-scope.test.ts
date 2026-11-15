@@ -1017,3 +1017,61 @@ describe('DC-S4b: the Decisions section of the scope statement', () => {
     expect(sys).toContain(CHAT_DECISIONS_DIRECTIVE);
   });
 });
+
+describe('crew#1569: the statement on the container seat floor', () => {
+  const scopeOf = async (input: Parameters<typeof resolveChatScope>[0]) => {
+    const res = await resolveChatScope(input, deps());
+    if (!('scope' in res)) throw new Error('scope expected');
+    return res.scope;
+  };
+
+  it('tells the seat to read the run repo in its working directory, and does not forbid it', async () => {
+    const scope = await scopeOf({ chatId: 'k1', repoRefs: ['r-alpha'] });
+    const text = chatScopeStatement('k1', scope, undefined, { containerFloor: true, runRepoId: 'r-alpha' });
+    expect(text).toContain('- **alpha** (`r-alpha`): your working directory');
+    expect(text).not.toMatch(/r-alpha`\): `\/srv/);
+    expect(text).toContain('reading your working');
+    expect(text).toContain('directory is allowed');
+    expect(text).toContain('Do NOT read from any other `wicked-worktrees/` subdirectory');
+    expect(text).not.toContain('Do NOT read from any `wicked-worktrees/`');
+  });
+
+  it('names the scratch root by its explicit path, marks the working directory read-only, and never calls it the scratch root', async () => {
+    const scope = await scopeOf({ chatId: 'k4', repoRefs: ['r-alpha'] });
+    const scratch = '/seat/real/scratch/k4';
+    const text = chatScopeStatement('k4', scope, undefined, { containerFloor: true, runRepoId: 'r-alpha', scratchRoot: scratch });
+    expect(text).toContain(`The scratch root of wicked-crew chat \`k4\` is \`${scratch}\`. It is the ONLY place you may write.`);
+    expect(text).toContain('Your working directory is a read-only checkout of a repository, not the scratch root.');
+    expect(text).toContain(`write scratch files only under \`${scratch}\``);
+    expect(text).toContain('your working directory is read-only');
+    expect(text).toContain('writes outside the scratch root are refused');
+    // No affirmative claim that this directory (or the working directory) is the scratch root, and no "under this directory".
+    expect(text).not.toContain('This directory is the scratch root');
+    expect(text).not.toMatch(/working directory (is|as) (the )?scratch root/i);
+    expect(text).not.toContain('only under this');
+    expect(text).not.toContain('outside this directory');
+  });
+
+  it('keeps today\'s statement exactly on the host floor', async () => {
+    const scope = await scopeOf({ chatId: 'k2', repoRefs: ['r-alpha'] });
+    const host = chatScopeStatement('k2', scope, undefined, { containerFloor: false, runRepoId: 'r-alpha' });
+    expect(host).toBe(chatScopeStatement('k2', scope));
+    // And exactly the text main produced before crew#1569 (generated from it, the scratch base as a placeholder).
+    const main = readFileSync(join(__dirname, 'fixtures', 'chat-scope-host-main.txt'), 'utf8');
+    expect(host.split(base).join('<BASE>')).toBe(main);
+    expect(host).toContain('`/srv/repos/alpha`');
+    expect(host).toContain('Do NOT read from any `wicked-worktrees/` subdirectory');
+    expect(host).not.toContain('your working directory');
+  });
+
+  it('on a project scope changes only the run repo line', async () => {
+    const scope = await scopeOf({ chatId: 'k3', projectId: 'p1', repoRefs: [] });
+    const plain = chatScopeStatement('k3', scope);
+    const floor = chatScopeStatement('k3', scope, undefined, { containerFloor: true, runRepoId: 'r-alpha' });
+    expect(floor).toContain('- **alpha** (`r-alpha`): your working directory');
+    expect(floor).toContain('- **beta** (`r-beta`): `/srv/repos/beta`');
+    expect(plain).toContain('- **alpha** (`r-alpha`): `/srv/repos/alpha`');
+    // With no run repo named (a project chat has none), nothing changes.
+    expect(chatScopeStatement('k3', scope, undefined, { containerFloor: true })).toBe(plain);
+  });
+});
