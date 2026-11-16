@@ -10,6 +10,8 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+- docs: both READMEs agree with the install guide (wicked-crew#1568, DOC4, DOC5, DOC6, DOC9): studio's Helpers page, the `install wicked-crew wicked-interactive` command, Node.js 22.12 or newer (`engines.node` is now `>=22.12.0`), and the voice requirement (whisper.cpp).
+
 ## [0.18.16] — 2026-11-15
 
 Fix release. A chat on the Kubernetes seat floor reads the repository it is scoped to (crew#1569); a private repository
