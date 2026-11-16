@@ -2442,6 +2442,9 @@ export interface GateInfo {
    * back to `choices` / `rejudge` / `skipQe` and the prompt, as before.
    */
   actions?: GateAction[];
+  /** (api-types 0.211.0) A `plan_approval` gate's held plan revision, beside {@link GateInfo.actions}: what a plan
+   *  answer's `planRev` names. ABSENT on every other gate, and whenever `actions` is absent. */
+  planRev?: number;
 }
 
 /**
@@ -2451,7 +2454,8 @@ export interface GateInfo {
  * `request_changes` → `{approve: false, action: 'request_changes', ord}`; `reassign` →
  * `POST /runs/:id/reassign {cli, note?}` with `cli` one of {@link GateAction.seats} (it re-seats the gated unit,
  * then approves the gate); every other token → `{approve: true, action: <token>, ord}`. A plan gate's answers
- * (`needsPlanRev`) also send `planRev` (`GateInfo` carries it on the gate's plan); `edit_plan` sends `plan`.
+ * (`needsPlanRev`) also send `planRev`, the held revision ({@link GateInfo.planRev}, the one the person was shown);
+ * `edit_plan` sends `plan`.
  * The note, reason or rationale rides `amend` (a reassign's rides `note`); `skip_rules` sends `skipRules`, one
  * reason per rule id named in {@link GateAction.rules}.
  */
@@ -2476,11 +2480,14 @@ export interface GateAction {
    *  phase's floor gate sends the note to a seat that can write, then re-runs the floor). */
   noteIntent?: string;
   /** `reassign` only: the seats the engine re-seats the gated unit on now (never the work's author under a
-   *  distinct-evaluator contract, a benched or ballot-only seat, or the unit's own seat), roster order. */
+   *  distinct-evaluator contract, a ballot-only seat, or the unit's own seat), roster order. */
   seats?: string[];
+  /** `reassign` only: which of {@link GateAction.seats} this run has benched — taken on purpose (a seat signed back
+   *  in), so a skin says so beside it. */
+  benchedSeats?: string[];
   /** `skip_rules` only: the rule ids a skip may name (unchecked, disputed or waivable rows). */
   rules?: string[];
-  /** A plan gate's answer names the held plan revision it answers (`planRev`). */
+  /** A plan gate's answer names the held plan revision it answers (`planRev`) — every one, reject included. */
   needsPlanRev?: true;
   /** (crew) Only a human operator may take it: any other actor is answered 403 `human_operator_only`. */
   humanOnly?: true;

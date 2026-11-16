@@ -132,7 +132,9 @@ describe('GET /runs/:id/gate — the engine\'s legal actions (crew#1512)', () =>
 
   it('a deliver gate the freeze refuses keeps only the answers that decline it', async () => {
     const freeze = (frozen: boolean) => app.inject({ method: 'PUT', url: '/api/v1/deliveries/freeze', payload: frozen ? { frozen, reason: 'incident 9' } : { frozen } });
-    expect(tokens(await gate('run-deliver'))).toEqual(['approve', 'skip_qe', 'reject']);
+    const open = await gate('run-deliver');
+    expect(tokens(open)).toEqual(['approve', 'skip_qe', 'reject']);
+    expect(open.actions?.find((x) => x.action === 'skip_qe'), 'crew answers a non-human skip 403').toMatchObject({ humanOnly: true });
     expect((await freeze(true)).statusCode).toBe(200);
     try {
       expect(tokens(await gate('run-deliver'))).toEqual(['reject']);
@@ -199,6 +201,23 @@ describe('POST /runs/:id/reassign on a parked run follows the engine\'s list (cr
     const res = await reassign('run-retry', 'claude');
     expect(res.statusCode).toBe(409);
     expect(res.json()).toMatchObject({ code: 'seat_not_offered' });
+    expect(calls).toEqual([]);
+  });
+
+  it('a reassign that names no seat is refused before anything changes (the list names the seats)', async () => {
+    const res = await app.inject({ method: 'POST', url: '/api/v1/runs/run-retry/reassign', payload: {} });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ code: 'seat_not_offered' });
+    expect(calls).toEqual([]);
+  });
+
+  it('a list that cannot be read, or is another gate\'s, changes nothing', async () => {
+    lists.set('run-retry', { ...RETRY, ord: 5 });
+    const res = await reassign('run-retry', 'codex');
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ code: 'gate_unknown' });
+    lists.delete('run-retry');
+    expect((await reassign('run-retry', 'codex')).json()).toMatchObject({ code: 'gate_unknown' });
     expect(calls).toEqual([]);
   });
 

@@ -7980,14 +7980,16 @@ export function registerRoutes(
    * (crew#1512, studio#1170) The engine's list of a gate's answers ({@link GateAction}) less what CREW refuses on
    * the same gate, by the same checks its POST routes run: every `approve: true` answer at a deliver unit that
    * the delivery checks refuse (the freeze; QE acceptance with no attributed PASS) — the in-place `skip_qe` kept
-   * when the checks take it — and a reassign on a steering-author run (its approve lands the proposal). Marks
+   * when the checks take it — every one on an analysis run's held plan change (crew#1157), and a reassign on a
+   * steering-author run (its approve lands the proposal). Marks
    * `humanOnly` where crew answers a non-human actor 403 `human_operator_only`.
    */
-  async function crewGateActions(run: SessionView, gated: WorkUnit | undefined, actions: GateAction[]): Promise<GateAction[]> {
+  async function crewGateActions(run: SessionView, gated: WorkUnit | undefined, gateKind: string, actions: GateAction[]): Promise<GateAction[]> {
     const declines = (a: GateAction): boolean => a.action === 'reject' || a.action === 'request_changes';
-    let approveRefused = false;
-    let skipRefused = false;
-    if (gated !== undefined && isDeliverUnit(gated)) {
+    // crew#1157: an analysis run's held plan change is never approved (`gateForDecision`): only the declines stay.
+    let approveRefused = analysisPlanRefusal(run.session.id, { gateKind }) !== null;
+    let skipRefused = approveRefused;
+    if (!approveRefused && gated !== undefined && isDeliverUnit(gated)) {
       approveRefused = 'refusal' in (await deliverApprovalRefusal(run, gated));
       skipRefused = 'refusal' in (await deliverApprovalRefusal(run, gated, 'skip'));
     }
@@ -8111,6 +8113,30 @@ export function registerRoutes(
     }
     const cursor = resolveCursorUnit(run);
     const ord = cursor?.ord ?? run.session.unit_ix;
+    // (crew#1512) A parked run's reassign APPROVES its gate, so it is the engine's list that says whether this gate
+    // takes one and on which seats — checked before anything is re-seated or approved. An addon without the read keeps
+    // the older rule (`approveAcceptsWork`, below); with the read, a failed or stale one changes nothing.
+    const listsActions = gated && typeof adapter.gateActions === 'function';
+    if (listsActions) {
+      const listed = await adapter.gateActions!(id).catch(() => undefined);
+      if (listed === undefined || listed === null || listed.ord !== ord) {
+        return reply.code(409).send({ error: `run ${id}'s open gate could not be read for its answers — read the gate again. Nothing was changed.`, code: 'gate_unknown' });
+      }
+      const offer = listed.actions.find((a) => a.action === 'reassign');
+      if (offer === undefined) {
+        const approve = listed.actions.find((a) => a.action === 'approve');
+        return reply.code(409).send({
+          error: `run ${id}'s gate takes no reassign${approve !== undefined ? ` (its approve is ${approve.intent.replace(/_/g, ' ')})` : ''} — answer it via POST /runs/${id}/gate. Nothing was changed.`,
+          code: 'action_not_offered',
+        });
+      }
+      if (requestedCli === undefined || !(offer.seats ?? []).includes(requestedCli)) {
+        return reply.code(409).send({
+          error: `run ${id}'s gate re-seats unit ${ord} only on ${(offer.seats ?? []).join(', ') || 'no seat'}${requestedCli === undefined ? ': name one' : `, not '${requestedCli}'`}. Nothing was changed.`,
+          code: 'seat_not_offered',
+        });
+      }
+    }
     let noteRode = false;
     const approve = async (): Promise<void> => {
       if (typeof adapter.confirmGate !== 'function') return; // refused above for a gated run
@@ -8134,27 +8160,7 @@ export function registerRoutes(
       // a `judge_unavailable` / `qe_reviewer_unavailable` denial (the operator judges, the unit
       // counts) or a `review_adjudication` gate (lands with carried items) — must not follow a
       // re-seat: the new seat would be recorded on work it never did, and never run.
-      // (crew#1512) The engine's own list says whether this gate takes a reassign, and on which seats — the
-      // same checks its re-seat runs, and only where the approve re-runs the unit. An addon without the read
-      // keeps the older rule below.
-      const listed = typeof adapter.gateActions === 'function' ? await adapter.gateActions(id).catch(() => null) : null;
-      if (listed !== null && listed.ord === ord) {
-        const offer = listed.actions.find((a) => a.action === 'reassign');
-        if (offer === undefined) {
-          const approve = listed.actions.find((a) => a.action === 'approve');
-          return reply.code(409).send({
-            error: `run ${id}'s gate takes no reassign${approve !== undefined ? ` (its approve is ${approve.intent.replace(/_/g, ' ')})` : ''} — answer it via POST /runs/${id}/gate. Nothing was changed.`,
-            code: 'action_not_offered',
-          });
-        }
-        if (!(offer.seats ?? []).includes(requestedCli)) {
-          return reply.code(409).send({
-            error: `run ${id}'s gate re-seats unit ${ord} only on ${(offer.seats ?? []).join(', ') || 'no seat'}, not '${requestedCli}'. Nothing was changed.`,
-            code: 'seat_not_offered',
-          });
-        }
-      }
-      const accepts = listed !== null && listed.ord === ord ? null : await approveAcceptsWork(run, ord, decided?.gateKind);
+      const accepts = listsActions ? null : await approveAcceptsWork(run, ord, decided?.gateKind);
       if (accepts !== null) {
         return reply.code(409).send({
           error: `run ${id} is parked at a gate whose approve ${accepts}, so a reassign would not run unit ${ord} on '${requestedCli}' — approve, send back or stop it via POST /runs/${id}/gate. Nothing was changed.`,
@@ -8254,14 +8260,17 @@ export function registerRoutes(
     // (crew#1512, studio#1170) EVERY ANSWER THIS GATE TAKES NOW: the engine's own list (each candidate run
     // through its decision path's pre-checks), less what crew refuses itself (`crewGateActions`). Read each
     // time; absent on an addon without the read, or when the engine's open gate is not this one.
-    const actionsAt = async (ord: number, gated: WorkUnit | undefined): Promise<{ actions?: GateAction[] }> => {
+    const actionsAt = async (ord: number, gated: WorkUnit | undefined): Promise<{ actions?: GateAction[]; planRev?: number }> => {
       if (typeof adapter.gateActions !== 'function') return {};
       try {
         const listed = await adapter.gateActions(id);
         if (listed === null || listed.ord !== ord) return {};
         const run = await runOf();
         if (run === undefined) return {};
-        return { actions: await crewGateActions(run, gated, listed.actions) };
+        return {
+          actions: await crewGateActions(run, gated, listed.gateKind, listed.actions),
+          ...(listed.planRev !== undefined ? { planRev: listed.planRev } : {}),
+        };
       } catch {
         // A failed read lists nothing; the skin falls back to the gate's own offers.
         return {};
