@@ -10,6 +10,15 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.18.16] — 2026-11-15
+
+Fix release. A chat on the Kubernetes seat floor reads the repository it is scoped to (crew#1569); a private repository
+added by URL says why the clone was refused (`repo_clone_denied`, crew#1535); Nerve Center and chat agree on which
+helpers can work on the host floor (crew#1564); the READMEs name Rancher Desktop only (crew#1568, DOC2); the
+`/analyze` domain proposal no longer promises a fixed time (crew#1570). Carries #1571. Ships wicked-crew-api-types
+0.210.0 (additive: `RegisterRepoRefusalCode`) and bundles wicked-studio 0.16.11 (the repository page follows live runs,
+studio#1161; the clone-refusal headline; RingGraph fail-first tests, studio#1159). wicked-core-ts stays ^0.15.44.
+
 ### Fixed
 
 - **A chat on the Kubernetes seat floor reads the repository it is scoped to** (crew#1569). On the container seat
@@ -7105,7 +7114,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.15...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.16...HEAD
+[0.18.16]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.15...v0.18.16
 [0.18.15]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.14...v0.18.15
 [0.18.14]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.13...v0.18.14
 [0.18.13]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.12...v0.18.13
