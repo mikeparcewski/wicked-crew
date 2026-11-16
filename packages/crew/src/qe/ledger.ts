@@ -178,6 +178,16 @@ export interface RunLinkage {
    * the run's evidence: a FAIL on a tree a send-back superseded no longer blocks the delivery.
    */
   currentTree?: string | null;
+  /**
+   * (crew#1560) The QE runs the ENGINE bound on the latest attempt of each unit it ran its isolated
+   * QE reviewer for (`units[].qe_review.qe_run_id`), when every such unit has one and judged the
+   * deliverable tree. The earliest of those runs' starts is the cut: an attributed verdict recorded
+   * before it is an earlier attempt's and no longer counts, so an older INCONCLUSIVE cannot outvote
+   * the PASS the latest attempt bound. Structured where the attempt windows are not: it needs no
+   * `assurance.tree` on the QE gate (null when the floor was overridden) and survives a re-plan that
+   * moves the QE unit's ord. Absent ⇒ no such cut.
+   */
+  engineBoundQeRuns?: string[];
 }
 
 /** One dispatch of the run's QE unit: when it ran and which tree its gate judged. */
@@ -326,6 +336,11 @@ export interface QeAcceptanceState {
    * attempt that judged it, and no longer count (absent when none).
    */
   supersededByLatest?: number;
+  /**
+   * (crew#1560) How many of the run's verdicts were recorded before the QE run(s) the engine bound
+   * on the latest QE attempt, and no longer count (absent when none); with the runs' ids.
+   */
+  supersededByEngine?: { count: number; qeRunIds: string[] };
   /** Read-layer failure detail (a record could not be read or parsed). */
   error?: string;
 }
@@ -415,6 +430,8 @@ interface Picked {
   attributedVerdicts: number;
   /** (j4-gates) Verdicts on the current tree recorded before its latest QE attempt (no longer counted). */
   supersededByLatest?: number;
+  /** (crew#1560) Verdicts recorded before the engine-bound QE run(s) of the latest attempt. */
+  supersededByEngine?: { count: number; qeRunIds: string[] };
 }
 
 /** One QE run as the ledger holds it: its newest verdict, its run row, and whether anything of it is stamped. */
@@ -422,6 +439,27 @@ interface QeRunEntry {
   newest: VerdictRecord;
   run: RunRecord | null;
   stamped: boolean;
+}
+
+/**
+ * (crew#1560) The instant the latest QE attempt began, read off the QE runs the engine bound on it
+ * ({@link RunLinkage.engineBoundQeRuns}): the earliest start (`created_at` / `started_at`, whichever
+ * is earlier) of those runs' records. `null` = no cut: no bound runs, or one whose record is absent
+ * or undated (an unplaceable run never narrows what counts).
+ */
+function engineBoundCutoff(root: string, run: RunLinkage): number | null {
+  const ids = run.engineBoundQeRuns;
+  if (ids === undefined || ids.length === 0) return null;
+  let since: number | null = null;
+  for (const id of ids) {
+    const rec = getCanonical<RunRecord>(root, 'runs', id);
+    if (rec === null) return null;
+    const starts = [epoch(rec.created_at), epoch(rec.started_at)].filter((t): t is number => t !== null);
+    if (starts.length === 0) return null;
+    const at = Math.min(...starts);
+    since = since === null ? at : Math.min(since, at);
+  }
+  return since;
 }
 
 /**
@@ -539,6 +577,43 @@ function attribute(root: string, verdicts: VerdictRecord[], subject: ReadSubject
     // every verdict predates the latest attempt no longer counts.
     let current = attributed;
     let supersededByLatest = 0;
+    // (crew#1560) The engine says which QE run its latest QE attempt bound: verdicts of this run's
+    // QE runs recorded before that run began are earlier attempts' and no longer count (a QE run
+    // keeps the attribution its whole record gives it; only what counts is cut). Deny-dominates
+    // still holds over everything recorded since, the bound run's newest verdict included.
+    const engineCut = engineBoundCutoff(root, subject.run);
+    if (engineCut !== null) {
+      const mine = new Set(attributed.map((a) => a.verdict.run_id));
+      const own = verdicts.filter((v) => mine.has(v.run_id));
+      const kept = own.filter((v) => {
+        const at = epoch(v.created_at);
+        return at === null || at >= engineCut;
+      });
+      const qeRunIds = subject.run.engineBoundQeRuns ?? [];
+      current = attributed.flatMap((a) => {
+        const newest = kept.find((v) => v.run_id === a.verdict.run_id);
+        return newest === undefined ? [] : [{ ...a, verdict: newest }];
+      });
+      if (current.length === 0) {
+        return {
+          verdict: null,
+          run: null,
+          attribution: {
+            kind: 'none',
+            reason: `the QE run${qeRunIds.length === 1 ? '' : 's'} the engine bound on the latest QE attempt (${qeRunIds.join(', ')}) hold${qeRunIds.length === 1 ? 's' : ''} no verdict, and every other verdict of this run predates ${qeRunIds.length === 1 ? 'it' : 'them'}`,
+          },
+          attributedVerdicts: 0,
+        };
+      }
+      const denying = current.find((a) => a.verdict.verdict !== 'PASS');
+      const pick = denying ?? current[0]!;
+      const count = own.length - kept.length;
+      return {
+        ...pick,
+        attributedVerdicts: current.length,
+        ...(count > 0 ? { supersededByEngine: { count, qeRunIds } } : {}),
+      };
+    }
     if (scoped !== null) {
       const mine = new Set(attributed.map((a) => a.verdict.run_id));
       const latest = verdictsFromLatestCurrentTreeAttempt(
@@ -655,6 +730,7 @@ export async function readLedgerAcceptanceState(
     state.attribution = picked.attribution;
     state.attributedVerdicts = picked.attributedVerdicts;
     if (picked.supersededByLatest !== undefined) state.supersededByLatest = picked.supersededByLatest;
+    if (picked.supersededByEngine !== undefined) state.supersededByEngine = picked.supersededByEngine;
     if (picked.verdict !== null) {
       state.manifestPath = join(root, 'evidence', picked.verdict.run_id, 'manifest.json');
       state.manifest = await readManifest(state.manifestPath);

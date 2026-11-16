@@ -6933,6 +6933,13 @@ export function registerRoutes(
       qeUnitOrds: (run.units ?? [])
         .filter((u) => (u as { qe_acceptance?: unknown }).qe_acceptance != null)
         .map((u) => u.ord),
+      // crew#1560: the QE runs the engine bound on its latest QE attempt govern what counts.
+      ...(() => {
+        if (opts.treeScoped === false) return {};
+        const t = (run.session as { verified_tree?: unknown }).verified_tree;
+        const ids = engineBoundQeRunsOf(run, typeof t === 'string' && t !== '' ? t : null);
+        return ids === null ? {} : { engineBoundQeRuns: ids };
+      })(),
       requirement,
       ...(opts.qeRunId !== undefined ? { qeRunId: opts.qeRunId } : {}),
       // AW-14 (arch-R13a + R16): the conformance section reads the same wires the standalone
@@ -6991,6 +6998,21 @@ export function registerRoutes(
       };
     }
     return check;
+  }
+
+  /** (crew#1560) The QE run the engine bound on the latest attempt of every unit it ran its isolated
+   *  reviewer for (`units[].qe_review.qe_run_id`), in ord order — or `null` (no cut) when it kept no
+   *  such record, a record bound no run, or one judged a tree other than the deliverable tree. */
+  function engineBoundQeRunsOf(run: SessionView, deliverableTree: string | null): string[] | null {
+    const ids: string[] = [];
+    for (const u of [...(run.units ?? [])].sort((a, b) => a.ord - b.ord)) {
+      const r = (u as { qe_review?: { qe_run_id?: unknown; tree?: unknown } | null }).qe_review;
+      if (r === undefined || r === null) continue;
+      if (typeof r.qe_run_id !== 'string' || r.qe_run_id === '') return null;
+      if (deliverableTree !== null && r.tree !== deliverableTree) return null;
+      ids.push(r.qe_run_id);
+    }
+    return ids.length > 0 ? ids : null;
   }
 
   /** The engine's isolated QE review record on the run's latest QE unit (`units[].qe_review`, the
