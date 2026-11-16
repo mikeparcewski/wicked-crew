@@ -152,6 +152,40 @@ describe('GET /runs/:id/gate — the engine\'s legal actions (crew#1512)', () =>
   });
 });
 
+describe('POST /runs/:id/reassign over an addon without the read keeps the older rule (crew#1512 review r2)', () => {
+  let app: FastifyInstance;
+  const calls: string[] = [];
+  beforeAll(async () => {
+    const mockAdapter = {
+      sessionsDetail: vi.fn().mockResolvedValue([view('run-old', 4, 'review')]),
+      listRepos: vi.fn().mockResolvedValue([]),
+      listWorkflows: () => BUILTIN_WORKFLOWS,
+      interactionRequests: vi.fn(async () => [{ kind: 'gate', ord: 4, prompt: 'the gate', gate_kind: 'escalation', created_at: 1 }]),
+      runEvents: vi.fn(async () => []),
+      // The real adapter always has the method; an addon without the binding answers null and says it has none.
+      gateActions: vi.fn(async () => null),
+      supportsGateActions: () => false,
+      confirmGate: vi.fn(async (id: string, approve: boolean) => { calls.push(`confirmGate:${id}:${approve}`); return 'executing'; }),
+      reassignUnit: vi.fn(async (id: string, ord: number, cli: string | null) => { calls.push(`reassignUnit:${id}:${ord}:${cli}`); }),
+    };
+    app = Fastify({ logger: false });
+    registerRoutes(app, withRunViews(mockAdapter as unknown as CoreAdapter), new GateCache(), new ElicitationCache(), undefined, {
+      audit: { record: vi.fn(() => Date.now()) } as unknown as AuditLog,
+      authMode: 'off',
+    });
+    await app.ready();
+  });
+  afterAll(async () => {
+    await app.close();
+  });
+
+  it('re-seats then approves, as before the list existed', async () => {
+    const res = await app.inject({ method: 'POST', url: '/api/v1/runs/run-old/reassign', payload: { cli: 'codex' } });
+    expect(res.statusCode).toBe(200);
+    expect(calls).toEqual(['reassignUnit:run-old:4:codex', 'confirmGate:run-old:true']);
+  });
+});
+
 describe('POST /runs/:id/reassign on a parked run follows the engine\'s list (crew#1512)', () => {
   let app: FastifyInstance;
   const calls: string[] = [];

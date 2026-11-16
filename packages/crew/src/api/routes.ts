@@ -8116,7 +8116,9 @@ export function registerRoutes(
     // (crew#1512) A parked run's reassign APPROVES its gate, so it is the engine's list that says whether this gate
     // takes one and on which seats — checked before anything is re-seated or approved. An addon without the read keeps
     // the older rule (`approveAcceptsWork`, below); with the read, a failed or stale one changes nothing.
-    const listsActions = gated && typeof adapter.gateActions === 'function';
+    // The adapter always has the method; whether the ADDON carries the read is `supportsGateActions` (a partial adapter
+    // that defines `gateActions` itself carries it).
+    const listsActions = gated && typeof adapter.gateActions === 'function' && (adapter.supportsGateActions?.() ?? true);
     if (listsActions) {
       const listed = await adapter.gateActions!(id).catch(() => undefined);
       if (listed === undefined || listed === null || listed.ord !== ord) {

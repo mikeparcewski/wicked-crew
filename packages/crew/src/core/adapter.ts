@@ -3171,6 +3171,12 @@ export class CoreAdapter {
    * each candidate run through the decision path's own pre-checks. `null` off a gate, and when this
    * addon predates the binding (then the gate read carries no list).
    */
+  /** (crew#1512) Whether this addon carries the `gateActions` read at all — `gateActions` answering `null` is "no
+   *  gate open" only where it does. */
+  supportsGateActions(): boolean {
+    return typeof this.core.gateActions === 'function';
+  }
+
   async gateActions(runId: string): Promise<EngineGateActions | null> {
     if (typeof this.core.gateActions !== 'function') return null;
     return JSON.parse(await this.core.gateActions(runId)) as EngineGateActions | null;
