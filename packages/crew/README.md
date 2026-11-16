@@ -17,7 +17,7 @@ Local-first: loopback only, no accounts, no billing, no model reselling. Crew dr
 
 ## Requirements
 
-- **Node.js ≥ 22** / npm (uploading a file or a SQLite database as a data source needs 24.12, 25.1 or later).
+- **Node.js 22.12 or newer** / npm (uploading a file or a SQLite database as a data source needs 24.12, 25.1 or later).
 - **uv** — the daemon builds its skills environment with `uv sync` (once per skills baseline); without
   uv every job launch is refused (`venv-failed`). The family installer installs it for you (see below).
 - **git** — crew spawns it for every repository operation.
@@ -27,10 +27,14 @@ Local-first: loopback only, no accounts, no billing, no model reselling. Crew dr
   --admin-context rancher-desktop --home ~/.wicked-crew`. On Rancher Desktop, choose the dockerd (moby)
   container engine (Preferences → Container Engine). With containerd, crew's floor images aren't visible to the
   kubelet and seats won't start (wicked-core#1449). Governed agents work in a hardened seat pod,
-  and you sign each one in from studio's Agents tab: Claude Code and GitHub Copilot in a login pod,
-  Codex, Pi and OpenCode with their host CLIs. `WICKED_SEAT_FLOOR=host` keeps the labelled interim host
+  and you sign each one in from studio's Helpers page. Governed work needs Claude Code and Codex signed
+  in (the install guide's path); Pi, GitHub Copilot and OpenCode are optional extra helpers. Claude Code and
+  GitHub Copilot sign in through a login pod, Codex, Pi and OpenCode with their host CLIs. `WICKED_SEAT_FLOOR=host` keeps the labelled interim host
   floor instead.
 - **At least one coding-agent CLI** you can sign in (Claude Code, Codex, GitHub Copilot, OpenCode or Pi).
+- **Voice mode (optional)** — needs whisper.cpp on the daemon's machine: on macOS `brew install whisper-cpp`;
+  on Linux from your package manager or a build, so `whisper-cli` is on PATH (or set `WICKED_CREW_WHISPER_BIN`).
+  Studio asks before it downloads the 142 MiB speech model.
 - **wicked-estate** — the `wicked-estate` / `wicked-estate-mcp` binaries on PATH. Crew requires it:
   adding a repository in Studio runs onboarding's index phase on the `wicked-estate` tool, and it
   powers code graphs, memory and (from wicked-estate 0.32.0) the knowledge store that holds your data
@@ -46,11 +50,13 @@ The family installer installs estate and garden (and, when uv is missing, uv its
 ## Quick start
 
 ```bash
-npx wicked-installer        # pick the "Quick Start" bundle (wicked-crew + wicked-bus + wicked-estate,
-                            # with wicked-garden + wicked-vault added as crew's requirements)
+npx -y wicked-installer@latest install wicked-crew wicked-interactive
 wicked-crew serve           # start the daemon
 # then open http://127.0.0.1:7701 in your browser
 ```
+
+That also installs crew's requirements (wicked-estate, wicked-garden, wicked-vault, and uv when missing).
+The [install guide](https://github.com/mikeparcewski/wicked-installer/blob/main/docs/INSTALL.md) has the full path.
 
 The installer puts estate's prebuilt binaries (and uv, when astral's installer places it) in `~/.local/bin`,
 which is **not** on macOS's default PATH. Put the directory on PATH so the daemon and your shell find

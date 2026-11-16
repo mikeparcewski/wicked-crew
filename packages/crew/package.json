@@ -85,7 +85,7 @@
     "wicked-studio": "^0.16.11"
   },
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.12.0"
   },
   "license": "MIT"
 }

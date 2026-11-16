@@ -59,18 +59,19 @@ engine underneath is **wicked-core**. (In the API and the code a job is a *run*,
 
 ## Install & quickstart
 
-**Requirements:** Node.js ≥ 22 / npm · **uv** (the daemon builds its skills environment with
+**Requirements:** Node.js 22.12 or newer / npm · **uv** (the daemon builds its skills environment with
 `uv sync`; without uv every job launch is refused) · **git** · a container runtime · at least one
 coding-agent CLI you can sign in · **wicked-estate** and **wicked-garden** — both installed for you by
-the family installer (and uv too, when it is missing). The fastest path is the installer's **Quick
-Start** bundle:
+the family installer (and uv too, when it is missing). The fastest path is the installer:
 
 ```bash
-npx wicked-installer        # pick "Quick Start" (wicked-crew + wicked-bus + wicked-estate,
-                            # with wicked-garden + wicked-vault added as crew's requirements)
+npx -y wicked-installer@latest install wicked-crew wicked-interactive
 wicked-crew serve           # start the daemon
 # then open http://127.0.0.1:7701
 ```
+
+That also installs crew's requirements (wicked-estate, wicked-garden, wicked-vault, and uv when missing).
+The [install guide](https://github.com/mikeparcewski/wicked-installer/blob/main/docs/INSTALL.md) has the full path.
 
 The installer puts estate's prebuilt binaries (and uv, when astral's installer places it) in `~/.local/bin`,
 which is **not** on macOS's default PATH — put the directory on PATH so the daemon and your shell find
@@ -100,7 +101,8 @@ crew's floor images aren't visible to the kubelet and seats won't start (wicked-
 
 Governed agents run each CLI's headless mode in a hardened seat pod (crew builds the seat images with
 the container CLI on first use, into the store the cluster shares), and you sign each agent in once from
-studio's Agents page. `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead. Claude Code
+studio's Helpers page. Governed work needs Claude Code and Codex signed in (the install guide's path);
+Pi, GitHub Copilot and OpenCode are optional extra helpers. `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead. Claude Code
 and GitHub Copilot sign in through a login pod; Codex, Pi and OpenCode sign in with their host CLIs and a
 temporary home. Either way the credential goes to the broker and the seat sees a placeholder, except
 a Claude Code seat on a Claude subscription, which receives its sign-in token (a guard fails the step
@@ -331,7 +333,7 @@ run's count; `WICKED_CREW_RUN_LEARNINGS=off|extract|distill` (default `distill`)
 
 **Voice (optional).** Studio's voice mode posts speech to `POST /api/v1/voice/transcribe`, which
 hands it to [whisper.cpp](https://github.com/ggml-org/whisper.cpp) on this machine: `whisper-cli` on
-PATH, or `WICKED_CREW_WHISPER_BIN`. Crew does not install it; `GET /api/v1/voice/status` names the
+PATH, or `WICKED_CREW_WHISPER_BIN` (on macOS, `brew install whisper-cpp`). Crew does not install it; `GET /api/v1/voice/status` names the
 install command for your platform. The model (`ggml-base.en.bin`, 142 MiB) is downloaded only when you
 consent, and the audio is held in memory for that one call: never written to disk, never kept with a
 run.
