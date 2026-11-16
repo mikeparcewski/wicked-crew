@@ -79,6 +79,7 @@ type RecordedOpenGate =
 import { detectRefusal, isOpenGate, offeredChoices, replayOpenGate, type GateCache, type GateRead, type GateResolution } from './gate-cache.js';
 import type { ElicitationCache } from './elicitation-cache.js';
 import { acceptanceRequirementOf, buildAcceptanceView } from '../qe/acceptance.js';
+import type { EngineBoundVerdict } from '../qe/ledger.js';
 import { runIdentityOf, wireIdentity } from '../core/run-identity.js';
 import { buildWorkflowCatalog, type CatalogRun } from '../workflow-catalog/build.js';
 import { buildEvidenceBundle, coreUnitId, evidenceFilename } from './evidence.js';
@@ -6933,12 +6934,12 @@ export function registerRoutes(
       qeUnitOrds: (run.units ?? [])
         .filter((u) => (u as { qe_acceptance?: unknown }).qe_acceptance != null)
         .map((u) => u.ord),
-      // crew#1560: the QE runs the engine bound on its latest QE attempt govern what counts.
+      // crew#1560: the verdicts the engine bound on its latest QE attempt decide what counts.
       ...(() => {
         if (opts.treeScoped === false) return {};
         const t = (run.session as { verified_tree?: unknown }).verified_tree;
-        const ids = engineBoundQeRunsOf(run, typeof t === 'string' && t !== '' ? t : null);
-        return ids === null ? {} : { engineBoundQeRuns: ids };
+        const bound = engineBoundOf(run, typeof t === 'string' && t !== '' ? t : null);
+        return bound === null ? {} : { engineBound: bound };
       })(),
       requirement,
       ...(opts.qeRunId !== undefined ? { qeRunId: opts.qeRunId } : {}),
@@ -7000,19 +7001,26 @@ export function registerRoutes(
     return check;
   }
 
-  /** (crew#1560) The QE run the engine bound on the latest attempt of every unit it ran its isolated
-   *  reviewer for (`units[].qe_review.qe_run_id`), in ord order — or `null` (no cut) when it kept no
-   *  such record, a record bound no run, or one judged a tree other than the deliverable tree. */
-  function engineBoundQeRunsOf(run: SessionView, deliverableTree: string | null): string[] | null {
-    const ids: string[] = [];
+  /** (crew#1560) The verdict the engine bound on the latest attempt of EVERY unit it runs its isolated
+   *  QE reviewer for (the units carrying a QE ledger root): the bound QE run and the session nonce of
+   *  the reviewer turn whose verdict it bound — or `null` (no cut, today's reading) when any such unit
+   *  has no bound record, its record judged a tree other than the deliverable tree, or no unit runs a
+   *  reviewer at all. */
+  function engineBoundOf(run: SessionView, deliverableTree: string | null): EngineBoundVerdict[] | null {
+    const out: EngineBoundVerdict[] = [];
     for (const u of [...(run.units ?? [])].sort((a, b) => a.ord - b.ord)) {
-      const r = (u as { qe_review?: { qe_run_id?: unknown; tree?: unknown } | null }).qe_review;
-      if (r === undefined || r === null) continue;
+      const unit = u as { qe_ledger_root?: unknown; qe_review?: { qe_run_id?: unknown; tree?: unknown; attempts?: unknown } | null };
+      if (typeof unit.qe_ledger_root !== 'string' || unit.qe_ledger_root === '') continue;
+      const r = unit.qe_review;
+      if (r === undefined || r === null) return null;
       if (typeof r.qe_run_id !== 'string' || r.qe_run_id === '') return null;
       if (deliverableTree !== null && r.tree !== deliverableTree) return null;
-      ids.push(r.qe_run_id);
+      const attempts = Array.isArray(r.attempts) ? (r.attempts as Array<{ status?: unknown; session?: unknown }>) : [];
+      const turn = [...attempts].reverse().find((a) => a.status === 'verdict');
+      if (turn === undefined || typeof turn.session !== 'string' || turn.session === '') return null;
+      out.push({ qeRunId: r.qe_run_id, session: turn.session });
     }
-    return ids.length > 0 ? ids : null;
+    return out.length > 0 ? out : null;
   }
 
   /** The engine's isolated QE review record on the run's latest QE unit (`units[].qe_review`, the

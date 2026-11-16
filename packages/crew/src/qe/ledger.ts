@@ -179,15 +179,21 @@ export interface RunLinkage {
    */
   currentTree?: string | null;
   /**
-   * (crew#1560) The QE runs the ENGINE bound on the latest attempt of each unit it ran its isolated
-   * QE reviewer for (`units[].qe_review.qe_run_id`), when every such unit has one and judged the
-   * deliverable tree. The earliest of those runs' starts is the cut: an attributed verdict recorded
-   * before it is an earlier attempt's and no longer counts, so an older INCONCLUSIVE cannot outvote
-   * the PASS the latest attempt bound. Structured where the attempt windows are not: it needs no
-   * `assurance.tree` on the QE gate (null when the floor was overridden) and survives a re-plan that
-   * moves the QE unit's ord. Absent ⇒ no such cut.
+   * (crew#1560) The verdicts the ENGINE bound on the latest attempt of every unit it runs its
+   * isolated QE reviewer for: each unit's bound QE run (`units[].qe_review.qe_run_id`) and the
+   * nonce of the reviewer session whose verdict it bound (`qe_review.attempts[]`, status
+   * `verdict`). Present only when every such unit has one. A verdict is identified by run AND
+   * nonce, never by time: a verdict stamped with an isolated-review session the engine no longer
+   * binds is an earlier attempt's and no longer counts (an older INCONCLUSIVE cannot outvote the
+   * PASS the latest attempt bound); verdicts with no session stamp keep today's reading.
    */
-  engineBoundQeRuns?: string[];
+  engineBound?: EngineBoundVerdict[];
+}
+
+/** (crew#1560) One verdict the engine bound: its QE run and its isolated reviewer's session nonce. */
+export interface EngineBoundVerdict {
+  qeRunId: string;
+  session: string;
 }
 
 /** One dispatch of the run's QE unit: when it ran and which tree its gate judged. */
@@ -441,25 +447,10 @@ interface QeRunEntry {
   stamped: boolean;
 }
 
-/**
- * (crew#1560) The instant the latest QE attempt began, read off the QE runs the engine bound on it
- * ({@link RunLinkage.engineBoundQeRuns}): the earliest start (`created_at` / `started_at`, whichever
- * is earlier) of those runs' records. `null` = no cut: no bound runs, or one whose record is absent
- * or undated (an unplaceable run never narrows what counts).
- */
-function engineBoundCutoff(root: string, run: RunLinkage): number | null {
-  const ids = run.engineBoundQeRuns;
-  if (ids === undefined || ids.length === 0) return null;
-  let since: number | null = null;
-  for (const id of ids) {
-    const rec = getCanonical<RunRecord>(root, 'runs', id);
-    if (rec === null) return null;
-    const starts = [epoch(rec.created_at), epoch(rec.started_at)].filter((t): t is number => t !== null);
-    if (starts.length === 0) return null;
-    const at = Math.min(...starts);
-    since = since === null ? at : Math.min(since, at);
-  }
-  return since;
+/** The isolated-review session a verdict is stamped with (`review_session`), or null. */
+function reviewSessionOf(v: VerdictRecord): string | null {
+  const s = (v as unknown as Record<string, unknown>)['review_session'];
+  return typeof s === 'string' && s !== '' ? s : null;
 }
 
 /**
@@ -577,41 +568,63 @@ function attribute(root: string, verdicts: VerdictRecord[], subject: ReadSubject
     // every verdict predates the latest attempt no longer counts.
     let current = attributed;
     let supersededByLatest = 0;
-    // (crew#1560) The engine says which QE run its latest QE attempt bound: verdicts of this run's
-    // QE runs recorded before that run began are earlier attempts' and no longer count (a QE run
-    // keeps the attribution its whole record gives it; only what counts is cut). Deny-dominates
-    // still holds over everything recorded since, the bound run's newest verdict included.
-    const engineCut = engineBoundCutoff(root, subject.run);
-    if (engineCut !== null) {
+    // (crew#1560) The engine names the verdict its latest QE attempt bound, by QE run and reviewer
+    // session nonce. Decided after attribution (a QE run keeps the attribution its whole record
+    // gives it) and never by time: a verdict stamped with an isolated-review session the engine no
+    // longer binds is an earlier attempt's and is retired; a bound run's other verdicts still deny
+    // when they are newer than its bound one; a run the engine did not bind keeps its newest live
+    // verdict; deny-dominates over all of it.
+    const bound = subject.run.engineBound;
+    if (bound !== undefined && bound.length > 0) {
       const mine = new Set(attributed.map((a) => a.verdict.run_id));
       const own = verdicts.filter((v) => mine.has(v.run_id));
-      const kept = own.filter((v) => {
-        const at = epoch(v.created_at);
-        return at === null || at >= engineCut;
+      const sessions = new Set(bound.map((b) => b.session));
+      const qeRunIds = bound.map((b) => b.qeRunId);
+      const none = (reason: string): Picked => ({
+        verdict: null,
+        run: null,
+        attribution: { kind: 'none', reason },
+        attributedVerdicts: 0,
       });
-      const qeRunIds = subject.run.engineBoundQeRuns ?? [];
-      current = attributed.flatMap((a) => {
-        const newest = kept.find((v) => v.run_id === a.verdict.run_id);
-        return newest === undefined ? [] : [{ ...a, verdict: newest }];
-      });
-      if (current.length === 0) {
-        return {
-          verdict: null,
-          run: null,
-          attribution: {
-            kind: 'none',
-            reason: `the QE run${qeRunIds.length === 1 ? '' : 's'} the engine bound on the latest QE attempt (${qeRunIds.join(', ')}) hold${qeRunIds.length === 1 ? 's' : ''} no verdict, and every other verdict of this run predates ${qeRunIds.length === 1 ? 'it' : 'them'}`,
-          },
-          attributedVerdicts: 0,
-        };
+      const boundVerdicts: VerdictRecord[] = [];
+      for (const b of bound) {
+        const mineBound = own.filter((v) => v.run_id === b.qeRunId && reviewSessionOf(v) === b.session);
+        if (mineBound.length === 0 || mineBound.some((v) => stampedCrewRun(v) !== runId)) {
+          return none(
+            `the verdict the engine bound on QE run ${b.qeRunId} (isolated review session ${b.session}) is not in the ledger stamped with this run`,
+          );
+        }
+        boundVerdicts.push(...mineBound);
       }
-      const denying = current.find((a) => a.verdict.verdict !== 'PASS');
-      const pick = denying ?? current[0]!;
-      const count = own.length - kept.length;
+      const retired = own.filter((v) => {
+        const s = reviewSessionOf(v);
+        return s !== null && !sessions.has(s);
+      });
+      const live = own.filter((v) => !retired.includes(v));
+      const entries: Array<{ verdict: VerdictRecord; run: RunRecord | null; attribution: QeAttribution }> = [];
+      for (const a of attributed) {
+        const runLive = live.filter((v) => v.run_id === a.verdict.run_id);
+        const runBound = boundVerdicts.filter((v) => v.run_id === a.verdict.run_id);
+        if (runBound.length > 0) {
+          for (const v of runBound) entries.push({ ...a, verdict: v });
+          const since = Math.min(...runBound.map((v) => epoch(v.created_at) ?? Number.NEGATIVE_INFINITY));
+          for (const v of runLive) {
+            if (runBound.includes(v) || v.verdict === 'PASS') continue;
+            const at = epoch(v.created_at);
+            if (at === null || at >= since) entries.push({ ...a, verdict: v });
+          }
+        } else if (runLive.length > 0) {
+          entries.push({ ...a, verdict: runLive[0]! });
+        }
+      }
+      const denying = entries.find((e) => e.verdict.verdict !== 'PASS');
+      const pick = denying ?? entries.find((e) => boundVerdicts.includes(e.verdict)) ?? entries[0];
+      if (pick === undefined) return none(`QE run${qeRunIds.length === 1 ? '' : 's'} ${qeRunIds.join(', ')} hold no verdict`);
+      const runsCounted = new Set(entries.map((e) => e.verdict.run_id)).size;
       return {
         ...pick,
-        attributedVerdicts: current.length,
-        ...(count > 0 ? { supersededByEngine: { count, qeRunIds } } : {}),
+        attributedVerdicts: runsCounted,
+        ...(retired.length > 0 ? { supersededByEngine: { count: retired.length, qeRunIds } } : {}),
       };
     }
     if (scoped !== null) {

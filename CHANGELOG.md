@@ -10,12 +10,14 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
-- **A stale QE verdict no longer outvotes the latest PASS at deliver (crew#1560).** When the engine
-  bound a QE run on its QE unit's latest attempt (`units[].qe_review.qe_run_id`), the run's verdicts
-  recorded before that run began no longer count; deny-dominates still holds over everything since.
-  It needs no verified tree and no `assurance.tree` on the QE gates (both null when the floor was
-  overridden, run 4995811f) and survives a re-plan that moves the QE unit's ord. A record that bound
-  no run, a tree mismatch or a post-hoc lift keep today's reading.
+- **A stale QE verdict no longer outvotes the latest PASS at deliver (crew#1560).** The engine names
+  the verdict its latest QE attempt bound (the QE run and the isolated reviewer's session nonce in
+  `units[].qe_review`); verdicts stamped with an isolated-review session it no longer binds are
+  earlier attempts' and no longer count. Never decided by time, it needs no verified tree and no
+  `assurance.tree` on the QE gates (both null when the floor was overridden, run 4995811f) and
+  survives a re-plan that moves the QE unit's ord. Unstamped verdicts keep today's reading, a newer
+  non-PASS on the bound run still denies, and a missing bound verdict or a reviewer unit with no
+  bound record keeps the run refused.
 
 - docs: both READMEs agree with the install guide (wicked-crew#1568, DOC4, DOC5, DOC6, DOC9): studio's Helpers page, the `install wicked-crew wicked-interactive` command, Node.js 22.12 or newer (`engines.node` is now `>=22.12.0`), and the voice requirement (whisper.cpp).
 

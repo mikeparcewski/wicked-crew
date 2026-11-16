@@ -56,6 +56,7 @@ import type {
 import { runIdentityOf, runWorkflowDef } from '../core/run-identity.js';
 import { basename } from 'node:path';
 import type {
+  EngineBoundVerdict,
   QeAcceptanceState,
   QeAttemptWindow,
   QeAttribution,
@@ -357,7 +358,7 @@ export function resolveAcceptanceGate(
       : '') +
     // (crew#1560) …and when the engine named the QE run its latest attempt bound, what predates it.
     (state.supersededByEngine !== undefined
-      ? `; ${state.supersededByEngine.count} earlier verdict${state.supersededByEngine.count === 1 ? '' : 's'}, recorded before the QE run the engine bound on the latest QE attempt (${state.supersededByEngine.qeRunIds.join(', ')}), no longer count${state.supersededByEngine.count === 1 ? 's' : ''}`
+      ? `; ${state.supersededByEngine.count} verdict${state.supersededByEngine.count === 1 ? '' : 's'} of earlier isolated QE reviews no longer count${state.supersededByEngine.count === 1 ? 's' : ''} (the engine bound the latest attempt's on ${state.supersededByEngine.qeRunIds.join(', ')})`
       : '');
   const cite = `verdict ${state.verdict.id} by ${state.verdict.reviewer} (${describeAttribution(state.attribution)}${breadth})`;
   switch (verdict) {
@@ -612,8 +613,8 @@ export async function buildAcceptanceView(opts: {
   deliverableTree?: string | null;
   /** (crew#971) The ords of the run's QE unit(s) — the units carrying a QE decision. */
   qeUnitOrds?: number[];
-  /** (crew#1560) The QE runs the engine bound on its latest QE attempt ({@link RunLinkage.engineBoundQeRuns}). */
-  engineBoundQeRuns?: string[];
+  /** (crew#1560) The verdicts the engine bound on its latest QE attempt ({@link RunLinkage.engineBound}). */
+  engineBound?: EngineBoundVerdict[];
   /** What the run must prove ({@link acceptanceRequirementOf}). */
   requirement: AcceptanceRequirement;
   qeRunId?: string;
@@ -667,7 +668,7 @@ export async function buildAcceptanceView(opts: {
       : {
           run: {
             ...runWindowFromEvents(eventRows, opts.runId, eventsError, opts.deliverableTree ?? null, opts.qeUnitOrds),
-            ...(opts.engineBoundQeRuns !== undefined && opts.engineBoundQeRuns.length > 0 ? { engineBoundQeRuns: opts.engineBoundQeRuns } : {}),
+            ...(opts.engineBound !== undefined && opts.engineBound.length > 0 ? { engineBound: opts.engineBound } : {}),
           },
         };
 
