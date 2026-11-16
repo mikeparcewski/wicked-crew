@@ -21,6 +21,8 @@ mentioned only where a daemon release depends on them.
   survives a re-plan that moves the QE unit's ord. A named bound verdict missing from the ledger
   denies; with no bound record on a reviewer unit the previous rules apply.
 
+- feat(gates): `GET /runs/:id/gate` carries `actions`, every answer the open gate takes now (wicked-core `gate_actions`), less what crew refuses on the same gate; a parked `POST /runs/:id/reassign` re-seats only where, and on the seats, that list says (409 `action_not_offered` / `seat_not_offered` otherwise). wicked-crew-api-types 0.211.0 (additive): `GateInfo.actions`, `GateAction`, `LaunchRunResponse.humanConfirmNotice` (crew#1512, studio#1170).
+- fix(launch): a power launch whose body named a `humanConfirm` other than `none` says it is not kept (`humanConfirmNotice`) instead of dropping it silently (studio#1150).
 - docs: both READMEs agree with the install guide (wicked-crew#1568, DOC4, DOC5, DOC6, DOC9): studio's Helpers page, the `install wicked-crew wicked-interactive` command, Node.js 22.12 or newer (`engines.node` is now `>=22.12.0`), and the voice requirement (whisper.cpp).
 
 ## [0.18.16] — 2026-11-15

@@ -187,7 +187,7 @@ import {
 } from './governance-steering.js';
 import { atProposeGate, draftedSteeringRules, isSteeringAuthorRun, landSteeringProposal, type SteeringProposalSnapshot } from './steering-landing.js';
 import { inventoryComplete, parseInventoryClaims, type InventoryClaim } from '../core/inventory-claim.js';
-import type { RejudgeOffer, RunInventoryResponse, RunLearningsResponse, SeatRecordResponse, SkipQeOffer } from 'wicked-crew-api-types';
+import type { GateAction, RejudgeOffer, RunInventoryResponse, RunLearningsResponse, SeatRecordResponse, SkipQeOffer } from 'wicked-crew-api-types';
 import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, FileProposalSchema, registerCaptureRoutes } from './capture.js';
 import { registerTestingRoutes } from './testing.js';
 import { registerDefaultEvalRoutes, runAndRecord, type DefaultEvalDeps } from '../evals/routes.js';
@@ -3677,6 +3677,7 @@ export function registerRoutes(
     // (any other launch is phased, said in the answer). A power launch has no plan-approval gate:
     // the only human gate is deliver, plus what policy requires (a high-risk plan still holds).
     let powerNotice: string | null = null;
+    let humanConfirmNotice: string | null = null;
     // The caller's word, else the setting (read only when the launch did not say).
     const powerWanted = b.power ?? (b.repoRef !== undefined && (b.workflow !== undefined || b.plan !== undefined)
       ? ((await adapter.getSettings()).powerModeDefault ?? true)
@@ -3699,6 +3700,10 @@ export function registerRoutes(
       }
       if (powerNotice === null) {
         input.power = true;
+        // (studio#1150) A power run asks once, at hand-off: a posture the launch named is not kept — and the answer says so.
+        if (input.humanConfirm !== undefined && input.humanConfirm !== 'none') {
+          humanConfirmNotice = `power mode asks once, at hand-off: humanConfirm ${input.humanConfirm} is not kept (launch with power: false to keep it)`;
+        }
         input.humanConfirm = 'none';
         // DES-LEARN §3.3 / wicked-core#1216: the orchestrator talks to the person in their personality
         // for this project (the project's override, else theirs). The engine hands it to the
@@ -4170,7 +4175,7 @@ export function registerRoutes(
       const notice = launchAssuranceNotice({ runId, reducedAssurance: b.reducedAssurance, engineClisJson: engineRosterJson(input.clisJson) });
       const assuranceNotice = notice === null ? {} : { assuranceNotice: notice };
       // (program DES-POWER-MODE) Whether the run is in power mode, and why not when it was wanted.
-      const power = { ...(input.power === true ? { power: true } : {}), ...(powerNotice !== null ? { powerNotice } : {}) };
+      const power = { ...(input.power === true ? { power: true } : {}), ...(powerNotice !== null ? { powerNotice } : {}), ...(humanConfirmNotice !== null ? { humanConfirmNotice } : {}) };
       return reply.code(201).send({ runId, ...(linkedIssues !== undefined ? { linkedIssues } : {}), ...freeText, ...skillsWarning, ...assuranceNotice, ...power });
     } catch (err) {
       const msg = message(err);
@@ -7972,6 +7977,28 @@ export function registerRoutes(
    */
   const reassignsInFlight = new Set<string>();
   /**
+   * (crew#1512, studio#1170) The engine's list of a gate's answers ({@link GateAction}) less what CREW refuses on
+   * the same gate, by the same checks its POST routes run: every `approve: true` answer at a deliver unit that
+   * the delivery checks refuse (the freeze; QE acceptance with no attributed PASS) — the in-place `skip_qe` kept
+   * when the checks take it — and a reassign on a steering-author run (its approve lands the proposal). Marks
+   * `humanOnly` where crew answers a non-human actor 403 `human_operator_only`.
+   */
+  async function crewGateActions(run: SessionView, gated: WorkUnit | undefined, actions: GateAction[]): Promise<GateAction[]> {
+    const declines = (a: GateAction): boolean => a.action === 'reject' || a.action === 'request_changes';
+    let approveRefused = false;
+    let skipRefused = false;
+    if (gated !== undefined && isDeliverUnit(gated)) {
+      approveRefused = 'refusal' in (await deliverApprovalRefusal(run, gated));
+      skipRefused = 'refusal' in (await deliverApprovalRefusal(run, gated, 'skip'));
+    }
+    const steering = isSteeringAuthorRun(run);
+    return actions
+      .filter((a) => declines(a) || !(a.action === SKIP_QE_ACTION ? skipRefused : approveRefused))
+      .filter((a) => !(steering && a.action === 'reassign'))
+      .map((a) => (a.action === SKIP_QE_ACTION || a.action === SKIP_RULES_ACTION ? { ...a, humanOnly: true as const } : a));
+  }
+
+  /**
    * codex r1 on #1060: whether approving the run's open gate ACCEPTS the parked unit's work rather
    * than re-running it (wicked-core `confirm_gate`: a `judge_unavailable` / `qe_reviewer_unavailable`
    * denial on the cursor unit is judged by the operator; an open `review_adjudication` gate lands
@@ -8107,7 +8134,27 @@ export function registerRoutes(
       // a `judge_unavailable` / `qe_reviewer_unavailable` denial (the operator judges, the unit
       // counts) or a `review_adjudication` gate (lands with carried items) — must not follow a
       // re-seat: the new seat would be recorded on work it never did, and never run.
-      const accepts = await approveAcceptsWork(run, ord, decided?.gateKind);
+      // (crew#1512) The engine's own list says whether this gate takes a reassign, and on which seats — the
+      // same checks its re-seat runs, and only where the approve re-runs the unit. An addon without the read
+      // keeps the older rule below.
+      const listed = typeof adapter.gateActions === 'function' ? await adapter.gateActions(id).catch(() => null) : null;
+      if (listed !== null && listed.ord === ord) {
+        const offer = listed.actions.find((a) => a.action === 'reassign');
+        if (offer === undefined) {
+          const approve = listed.actions.find((a) => a.action === 'approve');
+          return reply.code(409).send({
+            error: `run ${id}'s gate takes no reassign${approve !== undefined ? ` (its approve is ${approve.intent.replace(/_/g, ' ')})` : ''} — answer it via POST /runs/${id}/gate. Nothing was changed.`,
+            code: 'action_not_offered',
+          });
+        }
+        if (!(offer.seats ?? []).includes(requestedCli)) {
+          return reply.code(409).send({
+            error: `run ${id}'s gate re-seats unit ${ord} only on ${(offer.seats ?? []).join(', ') || 'no seat'}, not '${requestedCli}'. Nothing was changed.`,
+            code: 'seat_not_offered',
+          });
+        }
+      }
+      const accepts = listed !== null && listed.ord === ord ? null : await approveAcceptsWork(run, ord, decided?.gateKind);
       if (accepts !== null) {
         return reply.code(409).send({
           error: `run ${id} is parked at a gate whose approve ${accepts}, so a reassign would not run unit ${ord} on '${requestedCli}' — approve, send back or stop it via POST /runs/${id}/gate. Nothing was changed.`,
@@ -8204,6 +8251,22 @@ export function registerRoutes(
         },
       };
     };
+    // (crew#1512, studio#1170) EVERY ANSWER THIS GATE TAKES NOW: the engine's own list (each candidate run
+    // through its decision path's pre-checks), less what crew refuses itself (`crewGateActions`). Read each
+    // time; absent on an addon without the read, or when the engine's open gate is not this one.
+    const actionsAt = async (ord: number, gated: WorkUnit | undefined): Promise<{ actions?: GateAction[] }> => {
+      if (typeof adapter.gateActions !== 'function') return {};
+      try {
+        const listed = await adapter.gateActions(id);
+        if (listed === null || listed.ord !== ord) return {};
+        const run = await runOf();
+        if (run === undefined) return {};
+        return { actions: await crewGateActions(run, gated, listed.actions) };
+      } catch {
+        // A failed read lists nothing; the skin falls back to the gate's own offers.
+        return {};
+      }
+    };
     // The record judges the cache (crew#1083 round 7): rows that disagree on the ord are 409
     // `gate_unknown` whether or not something is cached, and a cached entry is served — for its
     // presentation fields (prompt, choices, recommended) — only when its ord is the record's open
@@ -8228,7 +8291,7 @@ export function registerRoutes(
       if (servable) {
         // One read of the gated unit serves both its receipt and its re-judge offer.
         const gated = await unitAt(cached.ord);
-        return { runId: id, ...cached, assurance: receiptOf(gated), ...(await rejudgeAt(cached.ord, gated)), ...(await skipQeAt(gated)) };
+        return { runId: id, ...cached, assurance: receiptOf(gated), ...(await rejudgeAt(cached.ord, gated)), ...(await skipQeAt(gated)), ...(await actionsAt(cached.ord, gated)) };
       }
       gateCache.forget(id);
     }
@@ -8305,7 +8368,7 @@ export function registerRoutes(
       return reply.code(404).send({ error: 'No open gate for this run' });
     }
     const gatedUnit = run.units?.find((u) => u.ord === open.ord);
-    return { runId: id, ...open, assurance: receiptOf(gatedUnit), ...(await rejudgeAt(open.ord, gatedUnit)), ...(await skipQeAt(gatedUnit)) };
+    return { runId: id, ...open, assurance: receiptOf(gatedUnit), ...(await rejudgeAt(open.ord, gatedUnit)), ...(await skipQeAt(gatedUnit)), ...(await actionsAt(open.ord, gatedUnit)) };
   });
 
   // ── Elicitation (DES-002) ────────────────────────────────────────────────────

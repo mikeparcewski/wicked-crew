@@ -2431,6 +2431,59 @@ export interface GateInfo {
    * other gate, on a run that does not require QE acceptance, and on an older daemon.
    */
   skipQe?: SkipQeOffer;
+  /**
+   * (api-types 0.211.0; crew#1512, studio#1170) EVERY ANSWER THIS GATE TAKES NOW — the engine's own list
+   * (wicked-core `gate_actions`: each candidate answer run through the decision path's own pre-checks),
+   * less what crew itself refuses here (an approve, or a reassign, that the delivery checks refuse; a
+   * reassign on a steering-author run). A skin renders exactly these: no answer the engine refuses, none
+   * it takes left out, each labelled by its {@link GateAction.intent}. Read each time (a rule skipped, a
+   * seat signed in or a QE PASS recorded since the pause changes it). An EMPTY array means nothing is
+   * answerable right now (a team fact still publishing). ABSENT on an engine without the read: then fall
+   * back to `choices` / `rejudge` / `skipQe` and the prompt, as before.
+   */
+  actions?: GateAction[];
+}
+
+/**
+ * (api-types 0.211.0; crew#1512) One answer an open gate takes ({@link GateInfo.actions}).
+ *
+ * How it is sent: `approve` → `POST /runs/:id/gate {approve: true, ord}`; `reject` → `{approve: false, ord}`;
+ * `request_changes` → `{approve: false, action: 'request_changes', ord}`; `reassign` →
+ * `POST /runs/:id/reassign {cli, note?}` with `cli` one of {@link GateAction.seats} (it re-seats the gated unit,
+ * then approves the gate); every other token → `{approve: true, action: <token>, ord}`. A plan gate's answers
+ * (`needsPlanRev`) also send `planRev` (`GateInfo` carries it on the gate's plan); `edit_plan` sends `plan`.
+ * The note, reason or rationale rides `amend` (a reassign's rides `note`); `skip_rules` sends `skipRules`, one
+ * reason per rule id named in {@link GateAction.rules}.
+ */
+export interface GateAction {
+  /**
+   * The token: `approve` | `reject` | `request_changes` | `edit_plan` | `reassign` | a {@link GateDecision.action}
+   * (`retry_qe`, `rejudge`, `retry_rules`, `skip_rules`, `skip_qe`, `operator_judgment`, `extend`, `targeted`,
+   * `accept_partial`, `accept_suggestion`, `amend_intent`, `consent:<id>`, a loop's choice).
+   */
+  action: string;
+  /**
+   * What it does AT THIS GATE — the label comes from here, never from the prompt or the token alone:
+   * `continue` (the step runs on), `retry` (the denied step runs again), `land_with_carried_items` (the capped
+   * review's approve: the step counts over its FAIL, items carried), `operator_judgment` (no judge or QE reviewer
+   * could rule: the person's approve is the judgment), `deliver`, `complete`, `approve_plan`, `send_back`, `stop`,
+   * `reseat_and_retry` (reassign), `consent_choice`, or the action token itself for every named arm.
+   */
+  intent: string;
+  /** The operator's words: `none` (send none; the engine refuses one), `optional`, or `required`. */
+  note: 'none' | 'optional' | 'required';
+  /** PRESENT only when a note changes what the answer does: `floor_fix` (an approve with a note at a read-only
+   *  phase's floor gate sends the note to a seat that can write, then re-runs the floor). */
+  noteIntent?: string;
+  /** `reassign` only: the seats the engine re-seats the gated unit on now (never the work's author under a
+   *  distinct-evaluator contract, a benched or ballot-only seat, or the unit's own seat), roster order. */
+  seats?: string[];
+  /** `skip_rules` only: the rule ids a skip may name (unchecked, disputed or waivable rows). */
+  rules?: string[];
+  /** A plan gate's answer names the held plan revision it answers (`planRev`). */
+  needsPlanRev?: true;
+  /** (crew) Only a human operator may take it: any other actor is answered 403 `human_operator_only`. */
+  humanOnly?: true;
 }
 
 /**
@@ -6518,6 +6571,10 @@ export interface LaunchRunResponse {
   power?: boolean | undefined;
   /** (api-types 0.149.0) Power mode was wanted (the launch or the setting) but the run is phased: why, in one line. */
   powerNotice?: string | undefined;
+  /** (api-types 0.211.0; studio#1150) PRESENT when the launch ran in power mode and its body named a `humanConfirm` other
+   *  than `none`: a power run asks once, at hand-off, so that posture is not kept — this says so, in one line, instead of
+   *  dropping it silently. Send `power: false` to keep a step gate. */
+  humanConfirmNotice?: string | undefined;
 }
 
 /**
