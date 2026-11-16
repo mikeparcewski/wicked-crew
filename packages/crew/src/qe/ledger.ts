@@ -489,10 +489,17 @@ function attribute(root: string, verdicts: VerdictRecord[], subject: ReadSubject
   }
 
   const { runId, startedAt, finishedAt, logUnreadable } = subject.run;
+  // (crew#1560, codex r2) The engine-bound reading below matches the engine's own verdicts against
+  // the WHOLE ledger: a time window never drops a verdict the engine names (or a later one).
+  const unscoped = verdicts;
   // (crew#971) A verdict counts only for the tree it judged: scope to the run's current tree first,
   // so deny-dominates holds WITHIN that tree's verdicts and a FAIL on a superseded tree is history.
   const scoped = verdictsForCurrentTree(verdicts, subject.run);
-  if (scoped !== null) {
+  // (crew#1560) With engine-bound verdicts, attribution reads the whole ledger and the tree scope
+  // applies to the unstamped rows only (below): the engine's own record names its tree.
+  const engineBoundRead = (subject.run.engineBound?.length ?? 0) > 0;
+  const scopedVerdicts = scoped !== null ? scoped.kept : verdicts;
+  if (scoped !== null && !engineBoundRead) {
     verdicts = scoped.kept;
     if (verdicts.length === 0) {
       return {
@@ -569,62 +576,90 @@ function attribute(root: string, verdicts: VerdictRecord[], subject: ReadSubject
     let current = attributed;
     let supersededByLatest = 0;
     // (crew#1560) The engine names the verdict its latest QE attempt bound, by QE run and reviewer
-    // session nonce. Decided after attribution (a QE run keeps the attribution its whole record
-    // gives it) and never by time: a verdict stamped with an isolated-review session the engine no
-    // longer binds is an earlier attempt's and is retired; a bound run's other verdicts still deny
-    // when they are newer than its bound one; a run the engine did not bind keeps its newest live
-    // verdict; deny-dominates over all of it.
+    // session nonce; it is matched against the unscoped ledger (no time window drops it).
+    //  - The bound verdict is the NEWEST row of that (run, session), as the engine binds it: an
+    //    older row of the same session is that reviewer's own superseded answer.
+    //  - A row stamped with another isolated-review session is an earlier attempt's, retired, only
+    //    when it was recorded before every bound verdict; a later one still counts (codex r2: an
+    //    unknown session never hides a later denial).
+    //  - Unstamped rows keep today's reading: the tree scope and the latest-attempt cut, then each
+    //    run's newest; on a bound run only a non-PASS newer than its bound verdict adds to it.
+    //  - Deny-dominates over all of it.
     const bound = subject.run.engineBound;
     if (bound !== undefined && bound.length > 0) {
-      const mine = new Set(attributed.map((a) => a.verdict.run_id));
-      const own = verdicts.filter((v) => mine.has(v.run_id));
-      const sessions = new Set(bound.map((b) => b.session));
+      // The engine's bound runs are this run's whatever a time window kept of them (their bound
+      // verdict must carry this run's stamp, checked below).
+      const mine = new Set([...attributed.map((a) => a.verdict.run_id), ...bound.map((b) => b.qeRunId)]);
+      const own = unscoped.filter((v) => mine.has(v.run_id));
       const qeRunIds = bound.map((b) => b.qeRunId);
+      const runs = [...attributed];
+      for (const id of qeRunIds) {
+        if (!runs.some((a) => a.verdict.run_id === id)) {
+          const row = own.find((v) => v.run_id === id);
+          if (row !== undefined) {
+            runs.push({ verdict: row, run: getCanonical<RunRecord>(root, 'runs', id), attribution: { kind: 'stamped', qeRunId: id } });
+          }
+        }
+      }
+      const pair = (run: string, session: string) => `${run}\u0000${session}`;
+      const boundPairs = new Set(bound.map((b) => pair(b.qeRunId, b.session)));
+      const isBoundPair = (v: VerdictRecord) => {
+        const s = reviewSessionOf(v);
+        return s !== null && boundPairs.has(pair(v.run_id, s));
+      };
       const none = (reason: string): Picked => ({
         verdict: null,
         run: null,
         attribution: { kind: 'none', reason },
         attributedVerdicts: 0,
       });
-      const boundVerdicts: VerdictRecord[] = [];
+      const boundRows: VerdictRecord[] = [];
       for (const b of bound) {
-        const mineBound = own.filter((v) => v.run_id === b.qeRunId && reviewSessionOf(v) === b.session);
-        if (mineBound.length === 0 || mineBound.some((v) => stampedCrewRun(v) !== runId)) {
+        const row = own.find((v) => v.run_id === b.qeRunId && reviewSessionOf(v) === b.session);
+        if (row === undefined || stampedCrewRun(row) !== runId) {
           return none(
             `the verdict the engine bound on QE run ${b.qeRunId} (isolated review session ${b.session}) is not in the ledger stamped with this run`,
           );
         }
-        boundVerdicts.push(...mineBound);
+        boundRows.push(row);
       }
+      const boundAt = boundRows.map((v) => epoch(v.created_at));
+      const since = boundAt.some((t) => t === null) ? Number.NEGATIVE_INFINITY : Math.min(...(boundAt as number[]));
       const retired = own.filter((v) => {
-        const s = reviewSessionOf(v);
-        return s !== null && !sessions.has(s);
+        if (reviewSessionOf(v) === null || isBoundPair(v)) return false;
+        const at = epoch(v.created_at);
+        return at !== null && at < since;
       });
-      const live = own.filter((v) => !retired.includes(v));
+      const laterStamped = own.filter((v) => reviewSessionOf(v) !== null && !isBoundPair(v) && !retired.includes(v));
+      let unstampedPool = scopedVerdicts.filter((v) => mine.has(v.run_id) && reviewSessionOf(v) === null);
+      if (scoped !== null) {
+        const latest = verdictsFromLatestCurrentTreeAttempt(scopedVerdicts.filter((v) => mine.has(v.run_id)), subject.run);
+        if (latest !== null) unstampedPool = latest.kept.filter((v) => reviewSessionOf(v) === null);
+      }
       const entries: Array<{ verdict: VerdictRecord; run: RunRecord | null; attribution: QeAttribution }> = [];
-      for (const a of attributed) {
-        const runLive = live.filter((v) => v.run_id === a.verdict.run_id);
-        const runBound = boundVerdicts.filter((v) => v.run_id === a.verdict.run_id);
-        if (runBound.length > 0) {
-          for (const v of runBound) entries.push({ ...a, verdict: v });
-          const since = Math.min(...runBound.map((v) => epoch(v.created_at) ?? Number.NEGATIVE_INFINITY));
-          for (const v of runLive) {
-            if (runBound.includes(v) || v.verdict === 'PASS') continue;
-            const at = epoch(v.created_at);
-            if (at === null || at >= since) entries.push({ ...a, verdict: v });
-          }
-        } else if (runLive.length > 0) {
-          entries.push({ ...a, verdict: runLive[0]! });
+      for (const a of runs) {
+        const id = a.verdict.run_id;
+        const runBound = boundRows.find((v) => v.run_id === id);
+        if (runBound !== undefined) entries.push({ ...a, verdict: runBound });
+        for (const v of laterStamped.filter((x) => x.run_id === id)) entries.push({ ...a, verdict: v });
+        const newestUnstamped = unstampedPool.find((v) => v.run_id === id);
+        if (newestUnstamped !== undefined) {
+          const at = epoch(newestUnstamped.created_at);
+          const boundAtRun = runBound === undefined ? null : epoch(runBound.created_at);
+          const adds =
+            runBound === undefined ||
+            (newestUnstamped.verdict !== 'PASS' && (at === null || boundAtRun === null || at >= boundAtRun));
+          if (adds) entries.push({ ...a, verdict: newestUnstamped });
         }
       }
       const denying = entries.find((e) => e.verdict.verdict !== 'PASS');
-      const pick = denying ?? entries.find((e) => boundVerdicts.includes(e.verdict)) ?? entries[0];
+      const pick = denying ?? entries.find((e) => boundRows.includes(e.verdict)) ?? entries[0];
       if (pick === undefined) return none(`QE run${qeRunIds.length === 1 ? '' : 's'} ${qeRunIds.join(', ')} hold no verdict`);
-      const runsCounted = new Set(entries.map((e) => e.verdict.run_id)).size;
+      const superseded = retired.length + own.filter((v) => isBoundPair(v) && !boundRows.includes(v)).length;
       return {
         ...pick,
-        attributedVerdicts: runsCounted,
-        ...(retired.length > 0 ? { supersededByEngine: { count: retired.length, qeRunIds } } : {}),
+        attributedVerdicts: new Set(entries.map((e) => e.verdict.run_id)).size,
+        ...(superseded > 0 ? { supersededByEngine: { count: superseded, qeRunIds } } : {}),
       };
     }
     if (scoped !== null) {

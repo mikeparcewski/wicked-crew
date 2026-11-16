@@ -58,7 +58,15 @@ const RUNS = {
   uncovered: 'run-1560-uncovered',
   unboundRecord: 'run-1560-unbound',
   boundOnAnotherTree: 'run-1560-other-tree',
+  // round 2
+  laterUnknownSession: 'run-1560-r2-unknown-session',
+  sameSessionFailThenPass: 'run-1560-r2-fail-then-pass',
+  sameSessionPassThenFail: 'run-1560-r2-pass-then-fail',
+  boundDatedInOldWindow: 'run-1560-r2-skew-window',
+  legacyUnstampedEarlierAttempt: 'run-1560-r2-legacy',
 };
+/** Runs whose log has QE attempt windows that judged trees (A, then B) and a verified tree B. */
+const TREED = new Set<string>([RUNS.boundDatedInOldWindow, RUNS.legacyUnstampedEarlierAttempt]);
 
 const LATEST = 'nonce-latest';
 const review = (qeRun: string | null, tree = TREE_B) => ({
@@ -85,7 +93,15 @@ const evidenceOf = (id: string) => join(dir, 'walkthroughs', id);
 
 /** The 4995811f log shape: the QE unit dispatched at ord 4, then (after a re-plan) at ord 5; every
  *  QE gate judged no tree (`assurance.tree` null); no `qeAcceptanceDecided` before the deliver. */
-const eventsOf = (id: string) => [
+const treedEventsOf = (id: string) => [
+  { type: 'sessionStarted', session: id, ts: T0, seq: 1 },
+  { type: 'qeAcceptanceDecided', session: id, ord: QE_ORD, ts: T0 + 10, seq: 2 },
+  { type: 'unitDispatched', session: id, ord: QE_ORD, attempt: 0, ts: min(30), seq: 3 },
+  { type: 'gateEvaluated', session: id, ord: QE_ORD, assurance: { attempt: 0, tree: id === RUNS.legacyUnstampedEarlierAttempt ? TREE_B : TREE_A }, ts: min(60), seq: 4 },
+  { type: 'unitDispatched', session: id, ord: QE_ORD, attempt: 1, ts: min(120), seq: 5 },
+  { type: 'gateEvaluated', session: id, ord: QE_ORD, assurance: { attempt: 1, tree: TREE_B }, ts: min(140), seq: 6 },
+];
+const eventsOf = (id: string) => TREED.has(id) ? treedEventsOf(id) : [
   { type: 'sessionStarted', session: id, ts: T0, seq: 1 },
   { type: 'unitDispatched', session: id, ord: 4, attempt: 0, ts: min(30), seq: 2 },
   { type: 'gateEvaluated', session: id, ord: 4, assurance: { attempt: 0, tree: null }, ts: min(46), seq: 3 },
@@ -106,7 +122,7 @@ function view(id: string) {
       clis: ['claude', 'codex'], status: 'awaiting_human', human_confirm: 'all', unit_ix: DELIVER_ORD - 1, attempt: 0,
       workdir: join(dir, 'wt', id), repo_ref: 'repo-1', extra_write_roots: [], evidence_root: evidenceOf(id),
       // The floor was overridden: no verified tree (the boundOnAnotherTree run has one).
-      verified_tree: id === RUNS.boundOnAnotherTree ? TREE_B : null,
+      verified_tree: id === RUNS.boundOnAnotherTree || TREED.has(id) ? TREE_B : null,
       archived_at: null, archive_note: null,
       assurance: { mode: 'full', required: ['distinct_evaluator', 'judge', 'qe_acceptance'], qe: REQUIRED },
     },
@@ -170,8 +186,23 @@ beforeAll(async () => {
     deliverExec: async () => ({ status: 0, output: '' }),
   });
   await app.ready();
+  const ROUND2 = new Set<string>([RUNS.laterUnknownSession, RUNS.sameSessionFailThenPass, RUNS.sameSessionPassThenFail, RUNS.boundDatedInOldWindow, RUNS.legacyUnstampedEarlierAttempt]);
+  // Round 2 (codex r2): an unknown session after the bound verdict still denies.
+  qeRun(RUNS.laterUnknownSession, 'qe-3', min(131), [['v-3', 'PASS', min(137), LATEST]]);
+  qeRun(RUNS.laterUnknownSession, 'qe-4', min(138), [['v-4', 'FAIL', min(139), 'nonce-fresh']]);
+  // One reviewer session corrects itself: its newest row is the bound one, either way.
+  qeRun(RUNS.sameSessionFailThenPass, 'qe-3', min(131), [['v-3a', 'FAIL', min(136), LATEST], ['v-3', 'PASS', min(137), LATEST]]);
+  qeRun(RUNS.sameSessionPassThenFail, 'qe-3', min(131), [['v-3', 'PASS', min(136), LATEST], ['v-3b', 'FAIL', min(137), LATEST]]);
+  // Verified tree B; the bound PASS is dated inside attempt 0's window (tree A), and an old-session
+  // FAIL sits there too: the window must not drop the bound verdict.
+  qeRun(RUNS.boundDatedInOldWindow, 'qe-1', min(31), [['v-1', 'FAIL', min(40), 'nonce-1', STALE]]);
+  qeRun(RUNS.boundDatedInOldWindow, 'qe-3', min(119), [['v-3', 'PASS', min(50), LATEST]]);
+  // Both attempts judged tree B: an UNSTAMPED FAIL in attempt 0, the bound PASS in attempt 1. The
+  // latest-attempt cut still retires the unstamped one, as today.
+  qeRun(RUNS.legacyUnstampedEarlierAttempt, 'qe-1', min(31), [['v-1', 'FAIL', min(40), null]]);
+  qeRun(RUNS.legacyUnstampedEarlierAttempt, 'qe-3', min(121), [['v-3', 'PASS', min(130), LATEST]]);
   for (const id of Object.values(RUNS)) {
-    if (id === RUNS.resumed) continue;
+    if (id === RUNS.resumed || ROUND2.has(id)) continue;
     // The 4995811f ledger: an INCONCLUSIVE on QE run 1 and a PASS on QE run 2 (earlier sessions).
     qeRun(id, 'qe-1', min(40), [['v-1', id === RUNS.staleInconclusiveValue ? 'INCONCLUSIVE' : 'FAIL', min(45), 'nonce-1', STALE]]);
     qeRun(id, 'qe-2', min(84), [['v-2', 'PASS', min(88), 'nonce-2']]);
@@ -256,6 +287,31 @@ describe('crew#1560 — the verdict the engine bound on the latest attempt decid
     const acc = await acceptance(RUNS.boundMissing);
     expect(acc.verdict).toBeNull();
     expect(acc.attribution.reason).toContain('the verdict the engine bound on QE run qe-3 (isolated review session nonce-latest) is not in the ledger');
+  });
+
+  it('codex r2: a FAIL under an unknown session recorded after the bound verdict still refuses', async () => {
+    const res = await decide(RUNS.laterUnknownSession);
+    expect(res.statusCode, res.body).toBe(409);
+    expect((await acceptance(RUNS.laterUnknownSession)).verdict.id).toBe('v-4');
+  });
+
+  it('codex r2: one session that corrects itself is read at its newest row, both ways', async () => {
+    expect((await decide(RUNS.sameSessionFailThenPass)).statusCode).toBe(200);
+    expect((await acceptance(RUNS.sameSessionFailThenPass)).verdict.id).toBe('v-3');
+    expect((await decide(RUNS.sameSessionPassThenFail)).statusCode).toBe(409);
+    expect((await acceptance(RUNS.sameSessionPassThenFail)).verdict.id).toBe('v-3b');
+  });
+
+  it('codex r2: a time window never drops the bound verdict', async () => {
+    const res = await decide(RUNS.boundDatedInOldWindow);
+    expect(res.statusCode, res.body).toBe(200);
+    expect((await acceptance(RUNS.boundDatedInOldWindow)).verdict.id).toBe('v-3');
+  });
+
+  it('codex r2: unstamped verdicts keep the latest-attempt cut', async () => {
+    const res = await decide(RUNS.legacyUnstampedEarlierAttempt);
+    expect(res.statusCode, res.body).toBe(200);
+    expect((await acceptance(RUNS.legacyUnstampedEarlierAttempt)).verdict.id).toBe('v-3');
   });
 
   it('a reviewer unit with no bound record makes no cut: the stale verdict still refuses, as before', async () => {
