@@ -352,6 +352,9 @@ export interface HealthCapabilities {
    * and `POST /runs/:id/working-doc/versions` ({@link WorkingDocView}). ABSENT on an older daemon — read as `false`.
    */
   workingDoc?: boolean;
+  /** (api-types 0.211.0, crew#1512) `GET /runs/:id/gate` carries {@link GateInfo.actions} — every answer the open gate
+   *  takes, from the engine. `false` on an engine without the read; ABSENT on an older daemon. */
+  gateActions?: boolean;
   /**
    * (api-types 0.149.0, power mode) The engine runs POWER MODE: `LaunchRunBody.power`, `GET|POST /runs/:id/power`,
    * `POST /runs/:id/rigor`, `POST /runs/:id/power/pause`, `GET /runs/:id/bus` ({@link RunBusPage}),

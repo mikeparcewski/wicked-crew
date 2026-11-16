@@ -79,6 +79,7 @@ describe('GET /runs/:id/gate — the engine\'s legal actions (crew#1512)', () =>
       }),
       runEvents: vi.fn(async () => []),
       gateActions: vi.fn(async (id: string) => (withBinding ? (lists.get(id) ?? null) : null)),
+      ping: vi.fn(async () => 'pong'),
     };
     app = Fastify({ logger: false });
     gateCache.ingest({ type: 'awaitingHuman', session: 'run-cached', ord: 4, prompt: 'the gate', gateKind: 'escalation' } as unknown as CoreEvent);
@@ -114,6 +115,12 @@ describe('GET /runs/:id/gate — the engine\'s legal actions (crew#1512)', () =>
     expect(body.actions?.find((x) => x.action === 'skip_rules')).toMatchObject({ humanOnly: true, rules: ['R1'] });
     expect(body.actions?.find((x) => x.action === 'reassign')).toMatchObject({ seats: ['codex'], intent: 'reseat_and_retry' });
     expect(body.actions?.find((x) => x.action === 'approve')).not.toHaveProperty('humanOnly');
+  });
+
+  it('says so on GET /health (capabilities.gateActions), so a skin reads the list only from a daemon that serves it', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/v1/health' });
+    expect(res.statusCode, res.body.slice(0, 300)).toBe(200);
+    expect((res.json() as { capabilities?: { gateActions?: boolean } }).capabilities?.gateActions).toBe(true);
   });
 
   it('serves it on the cached path too', async () => {

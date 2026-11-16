@@ -2527,6 +2527,8 @@ export function registerRoutes(
       workingDoc: app.hasRoute({ method: 'GET', url: `${V}/runs/:id/working-doc` }),
       // (api-types 0.149.0) Power mode: the routes are served AND the engine runs it.
       powerMode: powerSupported(),
+      // (api-types 0.211.0, crew#1512) `GET /runs/:id/gate` carries `actions`: the engine has the read.
+      gateActions: typeof adapter.gateActions === 'function' && (adapter.supportsGateActions?.() ?? true),
       // (api-types 0.188.0, crew#1139) A plan approval carries the operator's note (`GateDecision.amend` at a
       // plan_approval gate, with or without `plan`): the engine lands it on the plan's first creator step.
       planGateNote: typeof adapter.supportsPlanGateNote === 'function' && adapter.supportsPlanGateNote(),
