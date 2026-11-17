@@ -259,7 +259,7 @@ describe('deliverTitle / commitSubject — never cut mid-word (F-3R2-014); the P
       expect(commitSubject(text.title)).not.toMatch(/Repository/i);
       expect(text.body.split('\n')).toContain('Fixes #1503');
       // The body keeps the intent verbatim: the routing line is skipped for the title only.
-      expect(text.body).toContain('Repository: wicked-crew.');
+      expect(text.body).toContain(intent1511);
     });
 
     it.each([
@@ -271,6 +271,9 @@ describe('deliverTitle / commitSubject — never cut mid-word (F-3R2-014); the P
       ['**Repository:** wicked-crew\nfix the cache', 'fix the cache'],
       ['Repository: wicked-crew. Fix the cache. Then more.', 'Fix the cache'],
       ['\n  Repository: x  \nRepository: y\nhttps://example.com/a\nfix the cache', 'fix the cache'],
+      ['Repository: .github.\n\nfix the cache', 'fix the cache'],
+      ['Repository: owner/.github\nfix the cache', 'fix the cache'],
+      ['Repository: repo..tools. Fix the cache.', 'Fix the cache'],
     ])('%j -> %s', (intent, rest) => {
       expect(deliverTitle(intent, RUN_ID)).toBe(rest);
     });
@@ -286,6 +289,8 @@ describe('deliverTitle / commitSubject — never cut mid-word (F-3R2-014); the P
       );
       expect(deliverTitle('fix the cache\nRepository: x', RUN_ID)).toBe('fix the cache');
       expect(deliverTitle('Repository: wicked-crew.', RUN_ID)).toBe(`wicked-crew run ${RUN_ID}`);
+      expect(deliverTitle('Repository: .github.', RUN_ID)).toBe(`wicked-crew run ${RUN_ID}`);
+      expect(deliverTitle('Repository: .github is missing a template', RUN_ID)).toBe('Repository: .github is missing a template');
       expect(deliverTitle('Repository: wicked-crew.\n\nFixes #7: tidy the cache', RUN_ID, 'bug')).toBe('fix: tidy the cache');
     });
   });

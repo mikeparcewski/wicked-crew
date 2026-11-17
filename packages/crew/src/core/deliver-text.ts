@@ -252,12 +252,12 @@ const GITHUB_ISSUE_URL = /https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/(?:issue
 
 /**
  * A leading `Repository: <repo>` routing line (crew#1516): the key, ONE repository token (`name`,
- * `owner/name`, `name.git`), then a `.`/`;`/`,` before whitespace or the end, or the end itself. It
+ * `owner/name`, `name.git`, `.github`), then a `.`/`;`/`,` before whitespace or the end, or the end itself. It
  * scopes the job to its repository and says nothing about the change, so it never titles the PR
  * (every studio-delivered PR read `feat: Repository: wicked-crew`). A line where more words follow
  * the token without a separator (`Repository: x is broken`) is prose and stays.
  */
-const REPOSITORY_ROUTING = /^repo(?:sitory)?\s*:\s*[\w-]+(?:[./][\w-]+)*\s*(?:[.;,]+(?=\s|$)\s*|$)/i;
+const REPOSITORY_ROUTING = /^repo(?:sitory)?\s*:\s*[\w.-]+(?:\/[\w.-]+)*\s*(?:[.;,]+(?=\s|$)\s*|$)/i;
 
 /**
  * The intent's first non-blank PROSE line as plain words, or `''`. A line that is only a URL is
