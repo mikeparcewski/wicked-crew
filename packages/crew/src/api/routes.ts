@@ -3633,7 +3633,7 @@ export function registerRoutes(
     // decision (`core/launch-posture.ts`), the same one `POST /runs/preview` answers for this body, so a launch form
     // shows what the run keeps. The rules (crew#393 delivery, DES-POWER-MODE, F-E2E-030) are documented there.
     const posture = await launchPosture(b, postureFacts, { powerRequired: ctx.powerRequired });
-    const deliver: 'pr' | 'none' = posture.deliver;
+    let deliver: 'pr' | 'none' = posture.resolvedDeliver;
     const deliverDefaulted = posture.deliverDefaulted;
     if (deliver === 'pr') input.deliver = 'pr';
     if (posture.autoDeliver) input.autoDeliver = true;
@@ -3665,6 +3665,8 @@ export function registerRoutes(
         return reply.code(400).send({ error: 'a review posts nothing and never delivers' });
       }
       if (b.repoRef === undefined) return reply.code(400).send({ error: 'review-change needs repoRef' });
+      deliver = 'none';
+      delete input.deliver;
       const root = await repoRootOf(b.repoRef);
       if (root === undefined) return reply.code(404).send({ error: `repoRef names an unknown repo: ${b.repoRef}` });
       const ex = await reviewChangeExclusion(envelopeWords, reviewChangeDeps(b.repoRef, root));
@@ -3867,14 +3869,16 @@ export function registerRoutes(
       } catch (err) {
         return reply.code(409).send({ error: `the default evals could not be prepared: ${message(err)}` });
       }
+      deliver = 'none';
     }
-    const isReview = b.workflow === REVIEW_WORKFLOW && runtime.reviewLaunch !== undefined;
+    const isReview = b.workflow !== undefined && reviewPrepared(b.workflow);
     if (isReview) {
       try {
         await (runtime.reviewLaunch as NonNullable<RuntimeDeps['reviewLaunch']>)(input);
       } catch (err) {
         return reply.code(409).send({ error: `the review could not be prepared: ${message(err)}` });
       }
+      deliver = 'none';
     }
     // DES-CHAT-ARTIFACTS-001 §4.3 (A3): one live job per chat, work and artifact runs together. A work launch filed under
     // a chat whose proposal's document attempt has no outcome yet is refused, as Go is refused the other way round.
@@ -7811,6 +7815,11 @@ export function registerRoutes(
     return typeof adapter.supportsPowerMode === 'function' && adapter.supportsPowerMode();
   }
 
+  /** A hand launch of the run review is prepared by the daemon (DES-RUNS-REVIEW-001 §3) when it carries the review service. */
+  function reviewPrepared(workflow: string): boolean {
+    return workflow === REVIEW_WORKFLOW && runtime.reviewLaunch !== undefined;
+  }
+
   /** (studio#1150) What `launchPosture` reads of this daemon, for `POST /runs` and `POST /runs/preview` alike. */
   const postureFacts: PostureFacts = {
     powerModeDefault: async () => (await adapter.getSettings()).powerModeDefault ?? true,
@@ -7844,10 +7853,9 @@ export function registerRoutes(
       const codeWork = def !== null && def.phases.some((p) => p.executes_code === true && p.role !== 'evaluator');
       return codeWork && (await adapter.getSettings()).deliverDefault !== 'none' ? 'pr' : 'none';
     },
-    // The daemon's own prepared workflows never deliver: a change review posts nothing, the run review and the default
-    // evals write their reports in the daemon's own directories.
-    neverDelivers: (workflow) =>
-      workflow === REVIEW_CHANGE_WORKFLOW || workflow === RUN_EVALS_WORKFLOW || (workflow === REVIEW_WORKFLOW && runtime.reviewLaunch !== undefined),
+    // The launch route removes a change review's delivery (it posts nothing), and a run review's preparation removes it
+    // (`ReviewService.prepareLaunch`). The default evals' preparation keeps whatever delivery was resolved.
+    preparationDropsDelivery: (workflow) => workflow === REVIEW_CHANGE_WORKFLOW || reviewPrepared(workflow),
   };
 
   // ── Power mode (program DES-POWER-MODE; api-types 0.149.0) ─────────────────────────────────────

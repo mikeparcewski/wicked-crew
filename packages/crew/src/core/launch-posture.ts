@@ -16,8 +16,10 @@
  *   instead of run phased. A power run has no plan-approval gate: its `humanConfirm` is `none`, and a
  *   posture the launch named is reported dropped (`humanConfirmNotice`).
  * - DELIVER (crew#393): explicit `pr`/`none` wins; omitted + repo-scoped + a code-work workflow is the
- *   daemon's `deliverDefault`; otherwise `none`. The daemon's own prepared workflows (run review, the
- *   default evals, a change review) never deliver.
+ *   daemon's `deliverDefault`; otherwise `none` (`resolvedDeliver`). What the engine is handed
+ *   (`deliver`) is that, except where the daemon's own preparation of the launch removes delivery
+ *   afterwards (a change review, a hand-launched run review); the launch route does that removal where
+ *   it always did, after the revision preflight.
  * - Only an explicit `deliverGate: 'auto'` delivers without a person (F-E2E-030).
  */
 
@@ -44,8 +46,9 @@ export interface PostureFacts {
   /** Omitted `deliver` on a repo-scoped workflow launch: `pr` when the def does code work and the
    *  `deliverDefault` setting is not `none`. */
   deliverDefault: (workflow: string) => Promise<'pr' | 'none'>;
-  /** The daemon prepares this workflow itself and it never delivers (run review, evals, change review). */
-  neverDelivers: (workflow: string) => boolean;
+  /** The daemon's preparation of this workflow's launch removes its delivery (a change review; a run review
+   *  prepared by `reviewLaunch`). */
+  preparationDropsDelivery: (workflow: string) => boolean;
 }
 
 export interface LaunchPosture {
@@ -53,8 +56,12 @@ export interface LaunchPosture {
   power: boolean;
   /** The posture the engine is handed (`undefined`: none sent, the engine's default). */
   humanConfirm?: string;
+  /** What the engine is handed (after the daemon's own preparation of the launch). */
   deliver: 'pr' | 'none';
-  /** `deliver` was the daemon's choice, not the launch's. */
+  /** The crew#393 resolution, before that preparation: what the launch route sets, preflights a revision
+   *  against and audits. */
+  resolvedDeliver: 'pr' | 'none';
+  /** `resolvedDeliver` was the daemon's choice, not the launch's. */
   deliverDefaulted: boolean;
   /** Delivery follows verify with no person (`deliverGate: 'auto'`). */
   autoDeliver: boolean;
@@ -83,7 +90,6 @@ export async function launchPosture(
     deliver = 'none';
     deliverDefaulted = true;
   }
-  if (b.workflow !== undefined && facts.neverDelivers(b.workflow)) deliver = 'none';
 
   // POWER
   let power = false;
@@ -122,7 +128,8 @@ export async function launchPosture(
   return {
     power,
     ...(humanConfirm !== undefined ? { humanConfirm } : {}),
-    deliver,
+    deliver: b.workflow !== undefined && facts.preparationDropsDelivery(b.workflow) ? 'none' : deliver,
+    resolvedDeliver: deliver,
     deliverDefaulted,
     autoDeliver: b.deliverGate === 'auto',
     powerNotice,
