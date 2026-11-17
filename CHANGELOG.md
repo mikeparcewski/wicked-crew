@@ -22,7 +22,8 @@ mentioned only where a daemon release depends on them.
 Fix release. `GET /runs/:id/gate` carries `actions`, the answers wicked-core's `gate_actions` says the open gate
 takes, and a parked reassign follows that list (crew#1512, #1581). Studio's gate cards offer those published actions,
 except consent and free-text rows, which keep their own answers (wicked-studio#1177), and a chatless run's plan card,
-which lists `edit_plan` with no editor (wicked-studio#1175); core#1534 below is the engine-side exception. Also: a
+whose engine action list includes `edit_plan`, but which offers no editor (wicked-studio#1175); core#1534 below is
+the engine-side exception. Also: a
 stale QE verdict no longer outvotes the latest PASS at deliver (crew#1560, #1580); the READMEs agree with the install
 guide and `engines.node` is `>=22.12.0` (crew#1568, #1574). Ships wicked-crew-api-types 0.211.0 (additive:
 `GateInfo.actions`, `GateAction`, `LaunchRunResponse.humanConfirmNotice`), bundles wicked-studio 0.16.13 (gate cards
