@@ -2473,14 +2473,17 @@ export interface GateAction {
    * What it does AT THIS GATE — the label comes from here, never from the prompt or the token alone:
    * `continue` (the step runs on), `retry` (the denied step runs again), `land_with_carried_items` (the capped
    * review's approve: the step counts over its FAIL, items carried), `operator_judgment` (no judge or QE reviewer
-   * could rule: the person's approve is the judgment), `deliver`, `complete`, `approve_plan`, `send_back`, `stop`,
+   * could rule: the person's approve is the judgment), `accept_work` (a team dispute's approve: the disputed work counts),
+   * `continue_team` (a team transport pause's approve: the missing team step is published), `deliver`, `complete`,
+   * `approve_plan`, `send_back`, `stop`,
    * `reseat_and_retry` (reassign), `consent_choice`, or the action token itself for every named arm.
    */
   intent: string;
   /** The operator's words: `none` (send none; the engine refuses one), `optional`, or `required`. */
   note: 'none' | 'optional' | 'required';
   /** PRESENT only when a note changes what the answer does: `floor_fix` (an approve with a note at a read-only
-   *  phase's floor gate sends the note to a seat that can write, then re-runs the floor). */
+   *  phase's floor gate sends the note to a seat that can write, then re-runs the floor), `send_back` (a team
+   *  dispute's approve with a note sends the work back). */
   noteIntent?: string;
   /** `reassign` only: the seats the engine re-seats the gated unit on now (never the work's author under a
    *  distinct-evaluator contract, a ballot-only seat, or the unit's own seat), roster order. */
