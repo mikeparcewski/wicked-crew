@@ -5160,25 +5160,32 @@ export interface SetupKnown {
 }
 
 /**
- * api-types 0.212.0 (crew#1527): can a job deliver as configured? Built from the deliver preflight's own rule (an
- * exported `GH_TOKEN`, else a gh login for github.com; with a configured push identity only that account's login) and
- * the global git author. The system page's `delivery` infra row is the same answer.
+ * api-types 0.212.0 (crew#1527): can a GitHub pull request be opened before the first job? Built from what the deliver
+ * step requires on a github.com origin: gh installed; the credential by the launch preflight's rule (an exported
+ * `GH_TOKEN`, else, with a push identity configured, that account's gh login, else gh's own login, with `gh auth status`
+ * succeeding); and a global git author with a name and an email. An exported `GH_TOKEN` with a push identity is matched
+ * to it only at delivery, so `ready` is `null` for it. Checks the daemon-wide push identity only: a repository's own
+ * (`deliverIdentityByRepo`) and an Azure DevOps origin are checked at launch, and a repository-local git identity is not
+ * seen. The system page's `delivery` infra row is the same answer, through the same 4 s-bounded read.
  */
 export interface DeliveryReadiness {
-  /** The daemon's delivery default: `pr` opens a pull request, `none` keeps the work on its branch. */
+  /** The daemon's default for a launch that does not say: `pr` opens a pull request, `none` keeps the work on its
+   *  branch. studio's composer always says, from its own "Open a PR when a build run finishes" preference. */
   deliverDefault: 'pr' | 'none';
-  /** `true` = a job can deliver as configured; `false` = it would stop at its deliver step; `null` = unknown (gh did
-   *  not answer in time). */
+  /** Can a GitHub pull request be opened now? `true` = yes; `false` = a job that asks for one would stop at its deliver
+   *  step; `null` = not known (gh did not answer in time, a read failed, or an exported token's account is checked
+   *  only at delivery). Answered whatever `deliverDefault` says. */
   ready: boolean | null;
-  /** The GitHub credential by the deliver preflight's rule; `null` when delivery is local. */
-  github: DeliverCredentials | null;
-  /** The GitHub account delivery pushes as: the configured identity, else gh's active login; `null` = none known. */
+  /** The GitHub credential by the launch preflight's rule. */
+  github: DeliverCredentials;
+  /** The configured push identity (`deliverIdentityLogin`, else `GH_ACCOUNT`); `null` = none (gh's own login opens
+   *  the pull request). */
   pushAs: string | null;
-  /** The git author commits carry; `null` when neither name nor email is set. */
+  /** The global git author; `null` when neither name nor email is set (or not read in time). */
   gitAuthor: { name: string | null; email: string | null } | null;
-  /** One sentence: what delivery will do now. */
+  /** One sentence: what a pull-request delivery will do now. Never the author's email. */
   reason: string;
-  /** What to do when not ready (commands, and the Settings choice of local delivery); `null` when ready. */
+  /** What to do when not ready (commands, or delivering locally); `null` when ready. */
   fix: string | null;
 }
 
@@ -12012,7 +12019,8 @@ export type SystemInfraKey =
    *  in the daemon's namespace). ABSENT before. */
   | 'cluster'
   /** api-types 0.212.0 (crew#1527): whether delivery can push (the GitHub sign-in a pull request needs and the git
-   *  author), the same answer as `SetupKnown.delivery`. `off` = local delivery. */
+   *  author), the same answer as `SetupKnown.delivery`: `ok` = a pull request can push, `degraded` = it cannot,
+   *  `off` = it cannot but the daemon defaults to local delivery; `details.ready` carries the answer's `ready`. */
   | 'delivery';
 
 export interface SystemInfraRow {

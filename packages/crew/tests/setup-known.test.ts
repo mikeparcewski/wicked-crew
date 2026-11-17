@@ -128,7 +128,7 @@ describe('GET /api/v1/setup/known', () => {
     const who: { actor?: Actor } = {};
     app.addHook('onRequest', async (req) => { if (who.actor !== undefined) (req as { actor?: Actor }).actor = who.actor; });
     const seen: unknown[] = [];
-    const delivery = { deliverDefault: 'none' as const, ready: true, github: null, pushAs: null, gitAuthor: null, reason: 'local', fix: null };
+    const delivery = { deliverDefault: 'none' as const, ready: true, github: { provider: 'github' as const, status: 'configured' as const, source: 'gh_token' as const, missing: [], message: 'x' }, pushAs: null, gitAuthor: null, reason: 'ok', fix: null };
     const settingsSeen: unknown[] = [];
     registerSetupRoutes(app, {
       adapter: {
@@ -137,7 +137,7 @@ describe('GET /api/v1/setup/known', () => {
       },
       known: async (repos) => { seen.push(repos); return { git: null, languages: [], filesCounted: 0, nearby: [] }; },
       // crew#1527: the route asks the readiness of THIS daemon's settings.
-      delivery: async (settings) => { settingsSeen.push(settings); return delivery; },
+      delivery: async (getSettings) => { settingsSeen.push(await getSettings()); return delivery; },
     });
     const ok = await app.inject({ method: 'GET', url: '/api/v1/setup/known' });
     expect(ok.statusCode).toBe(200);

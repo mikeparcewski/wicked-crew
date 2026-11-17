@@ -11254,13 +11254,10 @@ export function registerRoutes(
           rebuild: () => seatImageRebuilder.current(),
         }),
         clusterP.then((rows) => rows.cluster),
-        // crew#1527: whether delivery can push, the same answer the setup steps show.
+        // crew#1527: whether a pull request can be opened — the setup steps' answer, through the same bounded reader.
         (async () => {
           const started = Date.now();
-          const read = await settleWithin(async () => readDeliveryReadiness(await adapter.getSettings()), PROBE_TIMEOUT_MS);
-          return read.kind === 'ok'
-            ? deliveryRow(read.value, started, infraRow)
-            : infraRow('delivery', 'unknown', read.kind === 'timeout' ? `the delivery check did not answer within ${PROBE_TIMEOUT_MS / 1000} s` : `the delivery check failed: ${read.error}`, 'Re-check.', started);
+          return deliveryRow(await readDeliveryReadiness(() => Promise.resolve(adapter.getSettings())), started, infraRow);
         })(),
       ]);
 

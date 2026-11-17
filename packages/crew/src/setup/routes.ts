@@ -28,7 +28,7 @@ export function registerSetupRoutes(
       if (!trustAtLeast(actor, 'operator')) return reply.code(403).send({ error: 'what this computer holds is an operator read' });
       const [facts, ready] = await Promise.all([
         deps.adapter.listRepos().then((repos) => known(repos)),
-        deps.adapter.getSettings().then((settings) => delivery(settings)),
+        delivery(() => deps.adapter.getSettings()),
       ]);
       const body: SetupKnown = { ...facts, delivery: ready };
       return body;

@@ -28,6 +28,17 @@ mentioned only where a daemon release depends on them.
   account's login) and a git author with a name and an email is set; otherwise `degraded`, naming `gh auth login`, the
   `git config --global` commands, or local delivery in Settings. gh not answering in time reads `unknown`, never
   signed out. Known gap: a repository's own push identity (`deliverIdentityByRepo`) is still checked at launch only.
+- **Before the first job, studio can tell whether a GitHub pull request can be opened (crew#1527).** Delivery opens
+  a pull request by default, but nothing checked the GitHub sign-in it needs until a first job reached its deliver
+  step. `GET /api/v1/setup/known` now carries `delivery` (wicked-crew-api-types 0.212.0, additive `DeliveryReadiness`)
+  and `GET /api/v1/system` a `delivery` infra row, the same answer through one 4 s-bounded read. `ready` follows what
+  the deliver step requires: gh installed; the credential by the launch preflight's rule (an exported `GH_TOKEN`, else
+  the configured push identity's gh login, else gh's own login with `gh auth status` succeeding); and a global git
+  author with a name and an email. Otherwise it names `gh auth login`, the `git config --global` commands, or
+  delivering locally. gh not answering, a failed read, or an exported token whose account delivery checks over the
+  network read `unknown`, never ready. The row (an observer read) never names the author's email. Known gaps: a
+  repository's own push identity, an Azure DevOps origin and a repository-local git identity are checked at launch
+  only.
 
 ## [0.18.17] — 2026-11-17
 
