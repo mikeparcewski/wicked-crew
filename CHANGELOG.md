@@ -10,6 +10,13 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+- **A leading `Repository: <repo>` line no longer titles the PR (crew#1516).** The deliver title and commit
+  subject skip the intent's routing line (`Repository: wicked-crew.`, any case, `Repo:`, one repository token, an
+  optional `.`/`;`/`,`) and take the first line that describes the change, so wicked-crew#1511 reads
+  `feat: The requirements list API carries each requirement's business domain`, not `feat: Repository: wicked-crew`.
+  Prose that starts with the word (`Repository: x is missing its CHANGELOG`) keeps its words; the PR body keeps the
+  intent verbatim.
+
 ## [0.18.17] — 2026-11-17
 
 Fix release. `GET /runs/:id/gate` carries `actions`, the answers wicked-core's `gate_actions` says the open gate
