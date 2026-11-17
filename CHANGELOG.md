@@ -12,13 +12,14 @@ mentioned only where a daemon release depends on them.
 
 - **A stale QE verdict no longer outvotes the latest PASS at deliver (crew#1560).** The engine names
   the verdict its latest QE attempt bound (the QE run and the isolated reviewer's session nonce in
-  `units[].qe_review`); verdicts stamped with an isolated-review session it no longer binds are
-  earlier attempts' and no longer count. Never decided by time, it needs no verified tree and no
-  `assurance.tree` on the QE gates (both null when the floor was overridden, run 4995811f) and
-  survives a re-plan that moves the QE unit's ord. A row of another review session is retired only
-  when it predates every bound verdict, unstamped verdicts keep today's reading (tree scope and
-  latest-attempt cut), deny-dominates still holds, and a named bound verdict missing from the ledger
-  denies. When a reviewer unit has no bound record the cut is off and the previous rules apply.
+  `units[].qe_review`). Another verdict is superseded only on positive evidence: it predates the
+  bound verdict of the run the engine re-bound, it was recorded on a QE run before a "redo the QE
+  check" retired that run (`units[].qe_redos`), or the engine's attempt windows place it on a
+  superseded tree or an earlier attempt (as before). Then each QE run counts its newest remaining
+  verdict, every bound verdict counts, and deny-dominates holds: an unknown session's FAIL still
+  denies. It needs no verified tree and no `assurance.tree` on the QE gates (run 4995811f) and
+  survives a re-plan that moves the QE unit's ord. A named bound verdict missing from the ledger
+  denies; with no bound record on a reviewer unit the previous rules apply.
 
 - docs: both READMEs agree with the install guide (wicked-crew#1568, DOC4, DOC5, DOC6, DOC9): studio's Helpers page, the `install wicked-crew wicked-interactive` command, Node.js 22.12 or newer (`engines.node` is now `>=22.12.0`), and the voice requirement (whisper.cpp).
 

@@ -188,6 +188,18 @@ export interface RunLinkage {
    * PASS the latest attempt bound); verdicts with no session stamp keep today's reading.
    */
   engineBound?: EngineBoundVerdict[];
+  /**
+   * (crew#1560, coord codex-check) The QE runs a "redo the QE check" RETIRED on the run's reviewer
+   * units, and when (`units[].qe_redos[]` `qe_run_id`, `at`): verdicts recorded on them before the
+   * redo are superseded; one written after it still counts.
+   */
+  engineRetiredQeRuns?: EngineRetiredQeRun[];
+}
+
+/** (crew#1560) A QE run a "redo the QE check" retired, and when (unix millis). */
+export interface EngineRetiredQeRun {
+  qeRunId: string;
+  at: number;
 }
 
 /** (crew#1560) One verdict the engine bound: its QE run and its isolated reviewer's session nonce. */
@@ -577,14 +589,9 @@ function attribute(root: string, verdicts: VerdictRecord[], subject: ReadSubject
     let supersededByLatest = 0;
     // (crew#1560) The engine names the verdict its latest QE attempt bound, by QE run and reviewer
     // session nonce; it is matched against the unscoped ledger (no time window drops it).
-    //  - The bound verdict is the NEWEST row of that (run, session), as the engine binds it: an
-    //    older row of the same session is that reviewer's own superseded answer.
-    //  - A row stamped with another isolated-review session is an earlier attempt's, retired, only
-    //    when it was recorded before every bound verdict; a later one still counts (codex r2: an
-    //    unknown session never hides a later denial).
-    //  - Unstamped rows keep today's reading: the tree scope and the latest-attempt cut, then each
-    //    run's newest; on a bound run only a non-PASS newer than its bound verdict adds to it.
-    //  - Deny-dominates over all of it.
+    //  - The bound verdict is the NEWEST row of that (run, session), as the engine binds it.
+    //  - Other verdicts are superseded only on positive evidence (below); then each QE run counts
+    //    its newest remaining verdict, every bound verdict counts, and deny-dominates holds.
     const bound = subject.run.engineBound;
     if (bound !== undefined && bound.length > 0) {
       // The engine's bound runs are this run's whatever a time window kept of them (their bound
@@ -601,12 +608,6 @@ function attribute(root: string, verdicts: VerdictRecord[], subject: ReadSubject
           }
         }
       }
-      const pair = (run: string, session: string) => `${run}\u0000${session}`;
-      const boundPairs = new Set(bound.map((b) => pair(b.qeRunId, b.session)));
-      const isBoundPair = (v: VerdictRecord) => {
-        const s = reviewSessionOf(v);
-        return s !== null && boundPairs.has(pair(v.run_id, s));
-      };
       const none = (reason: string): Picked => ({
         verdict: null,
         run: null,
@@ -623,39 +624,53 @@ function attribute(root: string, verdicts: VerdictRecord[], subject: ReadSubject
         }
         boundRows.push(row);
       }
-      const boundAt = boundRows.map((v) => epoch(v.created_at));
-      const since = boundAt.some((t) => t === null) ? Number.NEGATIVE_INFINITY : Math.min(...(boundAt as number[]));
-      const retired = own.filter((v) => {
-        if (reviewSessionOf(v) === null || isBoundPair(v)) return false;
-        const at = epoch(v.created_at);
-        return at !== null && at < since;
-      });
-      const laterStamped = own.filter((v) => reviewSessionOf(v) !== null && !isBoundPair(v) && !retired.includes(v));
-      let unstampedPool = scopedVerdicts.filter((v) => mine.has(v.run_id) && reviewSessionOf(v) === null);
-      if (scoped !== null) {
-        const latest = verdictsFromLatestCurrentTreeAttempt(scopedVerdicts.filter((v) => mine.has(v.run_id)), subject.run);
-        if (latest !== null) unstampedPool = latest.kept.filter((v) => reviewSessionOf(v) === null);
+      // The engine's attempt-window evidence (crew#971, j4-gates), as main reads every verdict: what
+      // the tree scope and the latest same-tree attempt keep.
+      const latest =
+        scoped !== null
+          ? verdictsFromLatestCurrentTreeAttempt(scopedVerdicts.filter((v) => mine.has(v.run_id)), subject.run)
+          : null;
+      const windowKept: VerdictRecord[] | null = latest !== null ? latest.kept : scoped !== null ? scopedVerdicts : null;
+      // (coord codex-check on #1580) A verdict is superseded ONLY on positive evidence, never on its
+      // timestamp against the bound PASS alone:
+      //  - on a QE run the engine re-bound: recorded before that run's bound verdict (the engine bound
+      //    the run's newest verdict); anything newer still counts, whatever a time window says;
+      //  - on a QE run a "redo the QE check" retired: recorded before that redo (`at`); a verdict
+      //    written on the retired run after the redo still counts;
+      //  - on any other run: outside the engine's attempt windows (a superseded tree, or an earlier
+      //    attempt of the delivered tree), as on main.
+      // Then main's reading: each QE run's newest remaining verdict, plus every bound verdict, and
+      // deny-dominates across them. An unknown session's FAIL still denies.
+      const redoneAt = new Map<string, number>();
+      for (const r of subject.run.engineRetiredQeRuns ?? []) {
+        redoneAt.set(r.qeRunId, Math.max(redoneAt.get(r.qeRunId) ?? Number.NEGATIVE_INFINITY, r.at));
       }
+      const retired = own.filter((v) => {
+        if (boundRows.includes(v)) return false;
+        const at = epoch(v.created_at);
+        const boundOnRun = boundRows.find((b) => b.run_id === v.run_id);
+        if (boundOnRun !== undefined) {
+          const boundAt = epoch(boundOnRun.created_at);
+          return at !== null && boundAt !== null && at < boundAt;
+        }
+        // On a redone run the redo is the evidence: only what predates it is superseded; a verdict
+        // written after it counts, whatever a time window says (codex confirmation 5).
+        const redo = redoneAt.get(v.run_id);
+        if (redo !== undefined) return at !== null && at < redo;
+        return windowKept !== null && !windowKept.includes(v);
+      });
       const entries: Array<{ verdict: VerdictRecord; run: RunRecord | null; attribution: QeAttribution }> = [];
       for (const a of runs) {
         const id = a.verdict.run_id;
-        const runBound = boundRows.find((v) => v.run_id === id);
-        if (runBound !== undefined) entries.push({ ...a, verdict: runBound });
-        for (const v of laterStamped.filter((x) => x.run_id === id)) entries.push({ ...a, verdict: v });
-        const newestUnstamped = unstampedPool.find((v) => v.run_id === id);
-        if (newestUnstamped !== undefined) {
-          const at = epoch(newestUnstamped.created_at);
-          const boundAtRun = runBound === undefined ? null : epoch(runBound.created_at);
-          const adds =
-            runBound === undefined ||
-            (newestUnstamped.verdict !== 'PASS' && (at === null || boundAtRun === null || at >= boundAtRun));
-          if (adds) entries.push({ ...a, verdict: newestUnstamped });
-        }
+        for (const b of boundRows.filter((v) => v.run_id === id)) entries.push({ ...a, verdict: b });
+        // `own` is newest first: the run's newest verdict the engine did not supersede.
+        const newest = own.find((v) => v.run_id === id && !retired.includes(v));
+        if (newest !== undefined && !boundRows.includes(newest)) entries.push({ ...a, verdict: newest });
       }
       const denying = entries.find((e) => e.verdict.verdict !== 'PASS');
       const pick = denying ?? entries.find((e) => boundRows.includes(e.verdict)) ?? entries[0];
       if (pick === undefined) return none(`QE run${qeRunIds.length === 1 ? '' : 's'} ${qeRunIds.join(', ')} hold no verdict`);
-      const superseded = retired.length + own.filter((v) => isBoundPair(v) && !boundRows.includes(v)).length;
+      const superseded = retired.length;
       return {
         ...pick,
         attributedVerdicts: new Set(entries.map((e) => e.verdict.run_id)).size,

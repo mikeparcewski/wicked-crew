@@ -64,9 +64,31 @@ const RUNS = {
   sameSessionPassThenFail: 'run-1560-r2-pass-then-fail',
   boundDatedInOldWindow: 'run-1560-r2-skew-window',
   legacyUnstampedEarlierAttempt: 'run-1560-r2-legacy',
+  // coord codex-check on #1580: retirement needs positive supersession evidence.
+  unknownSessionBeforeBoundPass: 'run-1560-cc-unknown-earlier',
+  olderFailNotRedone: 'run-1560-cc-not-redone',
+  // confirmation round: existing engine evidence still retires; each session's newest counts.
+  failOnSupersededTree: 'run-1560-cc-old-tree',
+  unboundSessionFailThenPass: 'run-1560-cc-unbound-fail-pass',
+  unboundSessionPassThenFail: 'run-1560-cc-unbound-pass-fail',
+  newerFailOnBoundRunInOldWindow: 'run-1560-cc2-bound-run-newer-fail',
+  sessionlessFailThenStampedPass: 'run-1560-cc2-mixed',
+  sessionlessNewerFailOnBoundRunInOldWindow: 'run-1560-cc3-sessionless-newer-fail',
+  otherSessionFailThenPassOnBoundRun: 'run-1560-cc3-bound-run-fail-pass',
+  otherSessionPassThenFailOnBoundRun: 'run-1560-cc3-bound-run-pass-fail',
+  freshFailOnRedoneRun: 'run-1560-cc4-fresh-fail-redone-run',
+  boundRunSessionlessFailThenStampedPass: 'run-1560-cc4-bound-mixed-a',
+  boundRunStampedFailThenSessionlessPass: 'run-1560-cc4-bound-mixed-b',
+  postRedoFailInOldWindow: 'run-1560-cc5-post-redo-fail-old-window',
 };
+/** Runs whose reviewer unit's QE run qe-1 was retired by a "redo the QE check" (`qe_redos`). */
+const REDONE = new Set<string>([
+  RUNS.stale, RUNS.staleInconclusiveValue, RUNS.clockSkew, RUNS.boundDatedInOldWindow,
+  RUNS.laterForeignFail, RUNS.boundSessionFails, RUNS.boundMissing, RUNS.uncovered,
+  RUNS.unboundRecord, RUNS.boundOnAnotherTree, RUNS.freshFailOnRedoneRun, RUNS.postRedoFailInOldWindow,
+]);
 /** Runs whose log has QE attempt windows that judged trees (A, then B) and a verified tree B. */
-const TREED = new Set<string>([RUNS.boundDatedInOldWindow, RUNS.legacyUnstampedEarlierAttempt]);
+const TREED = new Set<string>([RUNS.boundDatedInOldWindow, RUNS.legacyUnstampedEarlierAttempt, RUNS.failOnSupersededTree, RUNS.newerFailOnBoundRunInOldWindow, RUNS.sessionlessNewerFailOnBoundRunInOldWindow, RUNS.postRedoFailInOldWindow]);
 
 const LATEST = 'nonce-latest';
 const review = (qeRun: string | null, tree = TREE_B) => ({
@@ -129,7 +151,10 @@ function view(id: string) {
     units: [
       unit(2, 'build', 'done'),
       unit(4, 'review', 'done'),
-      { ...unit(QE_ORD, 'test', 'done'), qe_acceptance: REQUIRED, qe_ledger_root: join(evidenceOf(id), '.wicked-qe'), qe_review: REVIEW[id] },
+      {
+        ...unit(QE_ORD, 'test', 'done'), qe_acceptance: REQUIRED, qe_ledger_root: join(evidenceOf(id), '.wicked-qe'), qe_review: REVIEW[id],
+        ...(REDONE.has(id) ? { qe_redos: [{ tree: TREE_B, from_attempt: 0, outcome: 'inconclusive', qe_run_id: 'qe-1', reason: 'manifest-2.1 shape', by: 'operator', at: min(46) }] } : {}),
+      },
       // A second unit the engine runs a reviewer for, with no bound record yet.
       ...(id === RUNS.uncovered ? [{ ...unit(6, 'test-2', 'done'), qe_acceptance: REQUIRED, qe_ledger_root: join(evidenceOf(id), '.wicked-qe') }] : []),
       unit(DELIVER_ORD, 'deliver', 'pending'),
@@ -186,7 +211,44 @@ beforeAll(async () => {
     deliverExec: async () => ({ status: 0, output: '' }),
   });
   await app.ready();
-  const ROUND2 = new Set<string>([RUNS.laterUnknownSession, RUNS.sameSessionFailThenPass, RUNS.sameSessionPassThenFail, RUNS.boundDatedInOldWindow, RUNS.legacyUnstampedEarlierAttempt]);
+  const ROUND2 = new Set<string>([RUNS.laterUnknownSession, RUNS.sameSessionFailThenPass, RUNS.sameSessionPassThenFail, RUNS.boundDatedInOldWindow, RUNS.legacyUnstampedEarlierAttempt, RUNS.unknownSessionBeforeBoundPass, RUNS.olderFailNotRedone, RUNS.failOnSupersededTree, RUNS.unboundSessionFailThenPass, RUNS.unboundSessionPassThenFail, RUNS.newerFailOnBoundRunInOldWindow, RUNS.sessionlessFailThenStampedPass, RUNS.sessionlessNewerFailOnBoundRunInOldWindow, RUNS.otherSessionFailThenPassOnBoundRun, RUNS.otherSessionPassThenFailOnBoundRun, RUNS.freshFailOnRedoneRun, RUNS.boundRunSessionlessFailThenStampedPass, RUNS.boundRunStampedFailThenSessionlessPass, RUNS.postRedoFailInOldWindow]);
+  // The coord repro: the bound run starts 16:11, an unknown session records FAIL at 16:16 on another
+  // QE run, the bound PASS lands at 16:17. Nothing proves the PASS supersedes that FAIL.
+  qeRun(RUNS.unknownSessionBeforeBoundPass, 'qe-3', min(131), [['v-3', 'PASS', min(137), LATEST]]);
+  qeRun(RUNS.unknownSessionBeforeBoundPass, 'qe-5', min(131), [['v-5', 'FAIL', min(136), 'nonce-unknown']]);
+  // A session-stamped FAIL inside attempt 0's window (tree A), the bound PASS on tree B, no redo:
+  // the engine's tree evidence retires it, as on main.
+  qeRun(RUNS.failOnSupersededTree, 'qe-1', min(31), [['v-1', 'FAIL', min(40), 'nonce-1']]);
+  qeRun(RUNS.failOnSupersededTree, 'qe-3', min(121), [['v-3', 'PASS', min(130), LATEST]]);
+  // An unbound session on QE run X corrects itself; the bound PASS is on run Y.
+  qeRun(RUNS.unboundSessionFailThenPass, 'qe-x', min(100), [['v-x1', 'FAIL', min(135), 'nonce-x'], ['v-x2', 'PASS', min(136), 'nonce-x']]);
+  qeRun(RUNS.unboundSessionFailThenPass, 'qe-3', min(131), [['v-3', 'PASS', min(137), LATEST]]);
+  qeRun(RUNS.unboundSessionPassThenFail, 'qe-x', min(100), [['v-x1', 'PASS', min(135), 'nonce-x'], ['v-x2', 'FAIL', min(136), 'nonce-x']]);
+  qeRun(RUNS.unboundSessionPassThenFail, 'qe-3', min(131), [['v-3', 'PASS', min(137), LATEST]]);
+  // Clock skew puts the bound PASS (minute 50) and a newer FAIL of another session on the SAME bound
+  // run (minute 55) inside attempt 0's tree-A window: the newer FAIL still denies.
+  qeRun(RUNS.newerFailOnBoundRunInOldWindow, 'qe-3', min(119), [['v-3', 'PASS', min(50), LATEST], ['v-3x', 'FAIL', min(55), 'nonce-other']]);
+  // A sessionless FAIL then a session-stamped PASS on unbound run X; the bound PASS on run Y.
+  qeRun(RUNS.sessionlessFailThenStampedPass, 'qe-x', min(100), [['v-x1', 'FAIL', min(135), null], ['v-x2', 'PASS', min(136), 'nonce-x']]);
+  qeRun(RUNS.sessionlessFailThenStampedPass, 'qe-3', min(131), [['v-3', 'PASS', min(137), LATEST]]);
+  qeRun(RUNS.sessionlessNewerFailOnBoundRunInOldWindow, 'qe-3', min(119), [['v-3', 'PASS', min(50), LATEST], ['v-3s', 'FAIL', min(55), null]]);
+  // Another session on the BOUND run corrects itself (FAIL->PASS) or regresses (PASS->FAIL).
+  qeRun(RUNS.otherSessionFailThenPassOnBoundRun, 'qe-3', min(131), [['v-3', 'PASS', min(137), LATEST], ['v-3a', 'FAIL', min(138), 'nonce-o'], ['v-3b', 'PASS', min(139), 'nonce-o']]);
+  qeRun(RUNS.otherSessionPassThenFailOnBoundRun, 'qe-3', min(131), [['v-3', 'PASS', min(137), LATEST], ['v-3a', 'PASS', min(138), 'nonce-o'], ['v-3b', 'FAIL', min(139), 'nonce-o']]);
+  // qe-1 was redone at minute 46; an unknown session writes FAIL on it at minute 139, after the
+  // replacement's bound PASS: written after the redo, it still denies.
+  qeRun(RUNS.freshFailOnRedoneRun, 'qe-1', min(40), [['v-1', 'FAIL', min(45), 'nonce-1'], ['v-1x', 'FAIL', min(139), 'nonce-fresh']]);
+  qeRun(RUNS.freshFailOnRedoneRun, 'qe-3', min(131), [['v-3', 'PASS', min(137), LATEST]]);
+  // qe-1 redone at minute 46; an unknown session writes FAIL on it at minute 55, inside attempt 0's
+  // tree-A window, with verified tree B: written after the redo, it still denies.
+  qeRun(RUNS.postRedoFailInOldWindow, 'qe-1', min(31), [['v-1', 'FAIL', min(40), 'nonce-1'], ['v-1x', 'FAIL', min(55), 'nonce-fresh']]);
+  qeRun(RUNS.postRedoFailInOldWindow, 'qe-3', min(121), [['v-3', 'PASS', min(130), LATEST]]);
+  // Mixed sessionless / stamped rows after the bound PASS on the bound run: its newest decides.
+  qeRun(RUNS.boundRunSessionlessFailThenStampedPass, 'qe-3', min(131), [['v-3', 'PASS', min(137), LATEST], ['v-3a', 'FAIL', min(138), null], ['v-3b', 'PASS', min(139), 'nonce-o']]);
+  qeRun(RUNS.boundRunStampedFailThenSessionlessPass, 'qe-3', min(131), [['v-3', 'PASS', min(137), LATEST], ['v-3a', 'FAIL', min(138), 'nonce-o'], ['v-3b', 'PASS', min(139), null]]);
+  // An older attempt's FAIL on another QE run that no redo retired still denies.
+  qeRun(RUNS.olderFailNotRedone, 'qe-1', min(40), [['v-1', 'FAIL', min(45), 'nonce-1']]);
+  qeRun(RUNS.olderFailNotRedone, 'qe-3', min(131), [['v-3', 'PASS', min(137), LATEST]]);
   // Round 2 (codex r2): an unknown session after the bound verdict still denies.
   qeRun(RUNS.laterUnknownSession, 'qe-3', min(131), [['v-3', 'PASS', min(137), LATEST]]);
   qeRun(RUNS.laterUnknownSession, 'qe-4', min(138), [['v-4', 'FAIL', min(139), 'nonce-fresh']]);
@@ -249,7 +311,7 @@ describe('crew#1560 — the verdict the engine bound on the latest attempt decid
       const check = res.json().delivery.qeAcceptance;
       expect(check).toMatchObject({ status: 'required', satisfied: true, verdictId: 'v-3' });
       expect(check.reason).toMatch(/^PASS/);
-      expect(check.reason).toContain('2 verdicts of earlier isolated QE reviews no longer count (the engine bound the latest attempt\'s on qe-3)');
+      expect(check.reason).toContain('1 verdict the engine superseded (on a redone QE run, before the bound verdict of the run it re-bound, or outside its attempt windows) no longer counts (the engine bound the latest attempt\'s on qe-3)');
       expect(confirmCalls).toHaveLength(1);
       expect((await acceptance(id)).verdict.id).toBe('v-3');
     });
@@ -312,6 +374,70 @@ describe('crew#1560 — the verdict the engine bound on the latest attempt decid
     const res = await decide(RUNS.legacyUnstampedEarlierAttempt);
     expect(res.statusCode, res.body).toBe(200);
     expect((await acceptance(RUNS.legacyUnstampedEarlierAttempt)).verdict.id).toBe('v-3');
+  });
+
+  it('coord codex-check: an unknown session\'s FAIL recorded before the bound PASS still refuses', async () => {
+    const res = await decide(RUNS.unknownSessionBeforeBoundPass);
+    expect(res.statusCode, res.body).toBe(409);
+    const acc = await acceptance(RUNS.unknownSessionBeforeBoundPass);
+    expect(acc.verdict).toMatchObject({ id: 'v-5', verdict: 'FAIL' });
+    expect(confirmCalls).toEqual([]);
+  });
+
+  it('coord codex-check: an older FAIL on a QE run no redo retired still refuses', async () => {
+    const res = await decide(RUNS.olderFailNotRedone);
+    expect(res.statusCode, res.body).toBe(409);
+    expect((await acceptance(RUNS.olderFailNotRedone)).verdict.id).toBe('v-1');
+  });
+
+  it('confirmation: a session-stamped FAIL on a superseded tree no longer blocks (engine window evidence)', async () => {
+    const res = await decide(RUNS.failOnSupersededTree);
+    expect(res.statusCode, res.body).toBe(200);
+    expect((await acceptance(RUNS.failOnSupersededTree)).verdict.id).toBe('v-3');
+  });
+
+  it('confirmation: an unbound session is read at its newest row, both ways', async () => {
+    expect((await decide(RUNS.unboundSessionFailThenPass)).statusCode).toBe(200);
+    expect((await decide(RUNS.unboundSessionPassThenFail)).statusCode).toBe(409);
+    expect((await acceptance(RUNS.unboundSessionPassThenFail)).verdict.id).toBe('v-x2');
+  });
+
+  it('confirmation 2: a newer FAIL on the bound run denies though a skewed window holds it', async () => {
+    const res = await decide(RUNS.newerFailOnBoundRunInOldWindow);
+    expect(res.statusCode, res.body).toBe(409);
+    expect((await acceptance(RUNS.newerFailOnBoundRunInOldWindow)).verdict.id).toBe('v-3x');
+  });
+
+  it('confirmation 2: a sessionless FAIL superseded by a newer stamped PASS on its run no longer blocks', async () => {
+    const res = await decide(RUNS.sessionlessFailThenStampedPass);
+    expect(res.statusCode, res.body).toBe(200);
+  });
+
+  it('confirmation 3: a sessionless FAIL newer than the bound PASS denies though a skewed window holds it', async () => {
+    const res = await decide(RUNS.sessionlessNewerFailOnBoundRunInOldWindow);
+    expect(res.statusCode, res.body).toBe(409);
+  });
+
+  it('confirmation 3: another session on the bound run is read at its newest row, both ways', async () => {
+    expect((await decide(RUNS.otherSessionFailThenPassOnBoundRun)).statusCode).toBe(200);
+    expect((await decide(RUNS.otherSessionPassThenFailOnBoundRun)).statusCode).toBe(409);
+  });
+
+  it('confirmation 4: a FAIL written on a redone run after the redo still denies', async () => {
+    const res = await decide(RUNS.freshFailOnRedoneRun);
+    expect(res.statusCode, res.body).toBe(409);
+    expect((await acceptance(RUNS.freshFailOnRedoneRun)).verdict.id).toBe('v-1x');
+  });
+
+  it('confirmation 5: a FAIL written on a redone run after the redo denies though an old window holds it', async () => {
+    const res = await decide(RUNS.postRedoFailInOldWindow);
+    expect(res.statusCode, res.body).toBe(409);
+    expect((await acceptance(RUNS.postRedoFailInOldWindow)).verdict.id).toBe('v-1x');
+  });
+
+  it('confirmation 4: mixed sessionless and stamped rows on the bound run are read at the newest', async () => {
+    expect((await decide(RUNS.boundRunSessionlessFailThenStampedPass)).statusCode).toBe(200);
+    expect((await decide(RUNS.boundRunStampedFailThenSessionlessPass)).statusCode).toBe(200);
   });
 
   it('a reviewer unit with no bound record makes no cut: the stale verdict still refuses, as before', async () => {

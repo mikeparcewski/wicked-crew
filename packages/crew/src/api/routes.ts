@@ -6939,7 +6939,7 @@ export function registerRoutes(
         if (opts.treeScoped === false) return {};
         const t = (run.session as { verified_tree?: unknown }).verified_tree;
         const bound = engineBoundOf(run, typeof t === 'string' && t !== '' ? t : null);
-        return bound === null ? {} : { engineBound: bound };
+        return bound === null ? {} : { engineBound: bound, engineRetiredQeRuns: engineRetiredQeRunsOf(run) };
       })(),
       requirement,
       ...(opts.qeRunId !== undefined ? { qeRunId: opts.qeRunId } : {}),
@@ -7021,6 +7021,22 @@ export function registerRoutes(
       out.push({ qeRunId: r.qe_run_id, session: turn.session });
     }
     return out.length > 0 ? out : null;
+  }
+
+  /** (crew#1560) The QE runs a "redo the QE check" retired on the run's reviewer units, and when
+   *  (`units[].qe_redos[]` `qe_run_id`, `at`): verdicts recorded on them before the redo are superseded. */
+  function engineRetiredQeRunsOf(run: SessionView): Array<{ qeRunId: string; at: number }> {
+    const out: Array<{ qeRunId: string; at: number }> = [];
+    for (const u of run.units ?? []) {
+      const unit = u as { qe_ledger_root?: unknown; qe_redos?: unknown };
+      if (typeof unit.qe_ledger_root !== 'string' || unit.qe_ledger_root === '') continue;
+      for (const r of Array.isArray(unit.qe_redos) ? (unit.qe_redos as Array<{ qe_run_id?: unknown; at?: unknown }>) : []) {
+        if (typeof r.qe_run_id === 'string' && r.qe_run_id !== '' && typeof r.at === 'number' && Number.isFinite(r.at)) {
+          out.push({ qeRunId: r.qe_run_id, at: r.at });
+        }
+      }
+    }
+    return out;
   }
 
   /** The engine's isolated QE review record on the run's latest QE unit (`units[].qe_review`, the

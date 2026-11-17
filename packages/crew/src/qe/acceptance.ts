@@ -57,6 +57,7 @@ import { runIdentityOf, runWorkflowDef } from '../core/run-identity.js';
 import { basename } from 'node:path';
 import type {
   EngineBoundVerdict,
+  EngineRetiredQeRun,
   QeAcceptanceState,
   QeAttemptWindow,
   QeAttribution,
@@ -358,7 +359,7 @@ export function resolveAcceptanceGate(
       : '') +
     // (crew#1560) …and when the engine named the QE run its latest attempt bound, what predates it.
     (state.supersededByEngine !== undefined
-      ? `; ${state.supersededByEngine.count} verdict${state.supersededByEngine.count === 1 ? '' : 's'} of earlier isolated QE reviews no longer count${state.supersededByEngine.count === 1 ? 's' : ''} (the engine bound the latest attempt's on ${state.supersededByEngine.qeRunIds.join(', ')})`
+      ? `; ${state.supersededByEngine.count} verdict${state.supersededByEngine.count === 1 ? '' : 's'} the engine superseded (on a redone QE run, before the bound verdict of the run it re-bound, or outside its attempt windows) no longer count${state.supersededByEngine.count === 1 ? 's' : ''} (the engine bound the latest attempt's on ${state.supersededByEngine.qeRunIds.join(', ')})`
       : '');
   const cite = `verdict ${state.verdict.id} by ${state.verdict.reviewer} (${describeAttribution(state.attribution)}${breadth})`;
   switch (verdict) {
@@ -615,6 +616,8 @@ export async function buildAcceptanceView(opts: {
   qeUnitOrds?: number[];
   /** (crew#1560) The verdicts the engine bound on its latest QE attempt ({@link RunLinkage.engineBound}). */
   engineBound?: EngineBoundVerdict[];
+  /** (crew#1560) The QE runs a redo retired ({@link RunLinkage.engineRetiredQeRuns}). */
+  engineRetiredQeRuns?: EngineRetiredQeRun[];
   /** What the run must prove ({@link acceptanceRequirementOf}). */
   requirement: AcceptanceRequirement;
   qeRunId?: string;
@@ -669,6 +672,9 @@ export async function buildAcceptanceView(opts: {
           run: {
             ...runWindowFromEvents(eventRows, opts.runId, eventsError, opts.deliverableTree ?? null, opts.qeUnitOrds),
             ...(opts.engineBound !== undefined && opts.engineBound.length > 0 ? { engineBound: opts.engineBound } : {}),
+            ...(opts.engineRetiredQeRuns !== undefined && opts.engineRetiredQeRuns.length > 0
+              ? { engineRetiredQeRuns: opts.engineRetiredQeRuns }
+              : {}),
           },
         };
 
