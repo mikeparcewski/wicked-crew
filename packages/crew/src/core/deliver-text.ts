@@ -251,15 +251,25 @@ const BARE_URL = /^<?https?:\/\/\S+>?$/i;
 const GITHUB_ISSUE_URL = /https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/(?:issues|pull)\/(\d+)/i;
 
 /**
+ * A leading `Repository: <repo>` routing line (crew#1516): the key, ONE repository token (`name`,
+ * `owner/name`, `name.git`, `.github`), then a `.`/`;`/`,` before whitespace or the end, or the end itself. It
+ * scopes the job to its repository and says nothing about the change, so it never titles the PR
+ * (every studio-delivered PR read `feat: Repository: wicked-crew`). A line where more words follow
+ * the token without a separator (`Repository: x is broken`) is prose and stays.
+ */
+const REPOSITORY_ROUTING = /^repo(?:sitory)?\s*:\s*[\w.-]+(?:\/[\w.-]+)*\s*(?:[.;,]+(?=\s|$)\s*|$)/i;
+
+/**
  * The intent's first non-blank PROSE line as plain words, or `''`. A line that is only a URL is
  * never a title (review-benchmark-prs D1: three PRs titled by the bare issue URL): it is skipped,
  * and when the intent has no prose at all the issue it names becomes the headline
- * (`resolve owner/repo#N`).
+ * (`resolve owner/repo#N`). A leading {@link REPOSITORY_ROUTING} line is skipped the same way (and
+ * only its routing sentence when prose follows it on the same line).
  */
 function firstLine(intent: string): string {
   let url: string | null = null;
   for (const raw of intent.split(/\r?\n/)) {
-    const line = plainLine(raw);
+    const line = plainLine(raw).replace(REPOSITORY_ROUTING, '');
     if (line === '') continue;
     if (BARE_URL.test(line)) {
       url ??= line;

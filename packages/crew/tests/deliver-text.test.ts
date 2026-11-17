@@ -246,6 +246,55 @@ describe('deliverTitle / commitSubject — never cut mid-word (F-3R2-014); the P
     });
   });
 
+  describe('a leading `Repository:` routing line never titles the PR (crew#1516)', () => {
+    // The wicked-crew#1511 intent, as studio delivered it (title was `feat: Repository: wicked-crew`).
+    const intent1511 =
+      'Repository: wicked-crew.\n\nFixes #1503: The requirements list API carries each requirement\'s business domain. wicked-core#1425 added an optional business_domain.\n\nFixes #1503';
+
+    it('the #1511 intent: the first line that describes the change, in the title, subject and commit', () => {
+      const text = composeDeliverText(
+        factsFromWorkflow({ runId: RUN_ID, intent: intent1511, workflowId: 'feature', repoRef: 'wicked-crew', phases: [], runUrl: null }),
+      );
+      expect(text.title).toBe("feat: The requirements list API carries each requirement's business domain");
+      expect(commitSubject(text.title)).not.toMatch(/Repository/i);
+      expect(text.body.split('\n')).toContain('Fixes #1503');
+      // The body keeps the intent verbatim: the routing line is skipped for the title only.
+      expect(text.body).toContain(intent1511);
+    });
+
+    it.each([
+      ['Repository: x\nfix the cache', 'fix the cache'],
+      ['Repository: x.\n\nfix the cache', 'fix the cache'],
+      ['repository:x\nfix the cache', 'fix the cache'],
+      ['REPO: owner/x.git;\nfix the cache', 'fix the cache'],
+      ['Repository: `wicked-crew`\nfix the cache', 'fix the cache'],
+      ['**Repository:** wicked-crew\nfix the cache', 'fix the cache'],
+      ['Repository: wicked-crew. Fix the cache. Then more.', 'Fix the cache'],
+      ['\n  Repository: x  \nRepository: y\nhttps://example.com/a\nfix the cache', 'fix the cache'],
+      ['Repository: .github.\n\nfix the cache', 'fix the cache'],
+      ['Repository: owner/.github\nfix the cache', 'fix the cache'],
+      ['Repository: repo..tools. Fix the cache.', 'Fix the cache'],
+    ])('%j -> %s', (intent, rest) => {
+      expect(deliverTitle(intent, RUN_ID)).toBe(rest);
+    });
+
+    it('prose that merely starts with the word stays; a routing-only intent names the run', () => {
+      // The confused user: the repository IS the subject of the sentence.
+      expect(deliverTitle('Repository: wicked-crew is missing its CHANGELOG', RUN_ID)).toBe(
+        'Repository: wicked-crew is missing its CHANGELOG',
+      );
+      expect(deliverTitle('Repository: x y z', RUN_ID)).toBe('Repository: x y z');
+      expect(deliverTitle('Repository settings: rename the default branch', RUN_ID)).toBe(
+        'Repository settings: rename the default branch',
+      );
+      expect(deliverTitle('fix the cache\nRepository: x', RUN_ID)).toBe('fix the cache');
+      expect(deliverTitle('Repository: wicked-crew.', RUN_ID)).toBe(`wicked-crew run ${RUN_ID}`);
+      expect(deliverTitle('Repository: .github.', RUN_ID)).toBe(`wicked-crew run ${RUN_ID}`);
+      expect(deliverTitle('Repository: .github is missing a template', RUN_ID)).toBe('Repository: .github is missing a template');
+      expect(deliverTitle('Repository: wicked-crew.\n\nFixes #7: tidy the cache', RUN_ID, 'bug')).toBe('fix: tidy the cache');
+    });
+  });
+
   describe('cut at a whole word, an ellipsis only when something was cut (crew#1485)', () => {
     const words = (n: number) => {
       // words of 9 characters + a space, trimmed to exactly n characters ending on a word.
