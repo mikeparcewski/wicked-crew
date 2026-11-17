@@ -6591,6 +6591,46 @@ export interface LaunchRunResponse {
 }
 
 /**
+ * (api-types 0.212.0; studio#1150) Body for `POST /runs/preview`: the launch body's fields that decide its human gates,
+ * spelled as on {@link LaunchRunBody}. Nothing is launched.
+ */
+export interface LaunchPreviewBody {
+  power?: boolean;
+  repoRef?: string;
+  workflow?: string;
+  plan?: LaunchPlan;
+  projectId?: string;
+  humanConfirm?: string;
+  deliver?: 'pr' | 'none';
+  deliverGate?: 'human' | 'auto';
+}
+
+/**
+ * (api-types 0.212.0; studio#1150) The human gates a launch of that body keeps — crew's ONE decision, the same one
+ * `POST /runs` hands the engine. A launch form shows this, and sends `power` as shown so the daemon setting cannot change
+ * it in between.
+ */
+export interface LaunchPreviewPosture {
+  /** The run runs in power mode: no plan-approval or step gate, it asks at hand-off (when it delivers with a person). */
+  power: boolean;
+  /** The step posture the engine keeps (`none` under power); absent: none sent, the engine's default. */
+  humanConfirm?: string | undefined;
+  /** Whether the run delivers a PR. */
+  deliver: 'pr' | 'none';
+  /** Delivery follows verify with no person (`deliverGate: 'auto'`). */
+  autoDeliver: boolean;
+  /** Power was wanted and the run runs phased: why. */
+  powerNotice?: string | undefined;
+  /** A power run drops the posture the body named: said so. */
+  humanConfirmNotice?: string | undefined;
+}
+
+/** (api-types 0.212.0) `POST /runs/preview`'s answer. */
+export interface LaunchPreviewResponse {
+  posture: LaunchPreviewPosture;
+}
+
+/**
  * Body for `PUT /runs/:id/guidance` (DES-UX-002 §7.2, CREW-UX-7; api-types 0.9.0) — upsert the
  * run's ONE durable operator guidance note. `text: ''` CLEARS the note (the DTO field returns
  * to absent). Capped at 8192 UTF-8 bytes — beyond it the daemon answers 400 with a named

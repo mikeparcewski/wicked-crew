@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.211.0",
+  "apiTypesVersion": "0.212.0",
   "endpoints": [
     {
       "method": "GET",
@@ -2598,6 +2598,16 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/preview",
+      "requestType": "LaunchPreviewBody",
+      "responseType": "LaunchPreviewResponse",
+      "statusCodes": [
+        200,
+        400
+      ]
     },
     {
       "method": "GET",
