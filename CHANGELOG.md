@@ -10,6 +10,36 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.18.17] — 2026-11-17
+
+Fix release. `GET /runs/:id/gate` carries `actions`, the answers wicked-core's `gate_actions` says the open gate
+takes, and a parked reassign follows that list (crew#1512, #1581). Studio's gate cards offer those published actions,
+except consent and free-text rows, which keep their own answers (wicked-studio#1177), and a chatless run's plan card,
+which lists `edit_plan` with no editor (wicked-studio#1175); core#1534 below is the engine-side exception. Also: a
+stale QE verdict no longer outvotes the latest PASS at deliver (crew#1560, #1580); the READMEs agree with the install
+guide and `engines.node` is `>=22.12.0` (crew#1568, #1574). Ships wicked-crew-api-types 0.211.0 (additive:
+`GateInfo.actions`, `GateAction`, `LaunchRunResponse.humanConfirmNotice`), bundles wicked-studio 0.16.13 (gate cards
+render the listed answers with the exceptions above, studio#1170; revise/retry pre-fill the intent alone, studio#1148;
+a source's Agents box shows crew's latest switches with the warning from the same read, and none when a re-read omits
+the source, studio#1182, #1184) and requires wicked-core-ts ^0.15.45 (judge independence from the provider the seat
+gateway observed, core#1547; two seats complete a bug run and a self-grade never passes, core#1548; notes reach every
+turn and "no change" is the structured `NO-CHANGE: <why>`, core#1521; the two-seat rule-dispute arbiter, core#1526;
+`gateActions`, core#1512).
+
+Known limits: crew#1579 (W6, W6, W4: a failed `gateActions` read serves the gate without `actions`, so studio falls
+back to its own resolver; no QE-refused deliver fixture test; an unknown seat answers 400 before the list check).
+Engine (core-ts 0.15.45): wicked-core#1546 (W10 and below: observation gaps that fail toward "unobserved"),
+wicked-core#1549 (W6: the first judging after a repeat-page reset holds for a person; two W4 cases noted on core#1548
+hold the same way: a PA review leaves a member step's observation pending, and a J6-retracted first attempt reads as a
+pre-record history, so the two-seat relaxation does not apply and a person decides), wicked-core#1534 (W6: an Apps
+publish consent's `gate_actions` checks the QE record's tree, so after the worktree changes it can list an approve the
+submit-time current-tree guard refuses), wicked-core#1522 (W6: reading a `judge_unavailable` gate's roster prepares
+seat directories), wicked-core#1531 (W10 x2, W8: arbiter identity edge cases), wicked-core#1520 (W6, W4, W2: note and
+steer follow-ups); observation covers the container floor only. Studio (0.16.13): wicked-studio#1175 (chatless plan
+editing), #1177 (W8: consent/free-text rows bypass the list), #1180. CI: wicked-ci#76 (W6: the advisory selftest shows
+green over its U04 FAIL). Upgrade note: an operator note asking for "NO CHANGE NEEDED" no longer declares no change;
+ask for `NO-CHANGE: <why>`.
+
 - **A stale QE verdict no longer outvotes the latest PASS at deliver (crew#1560).** The engine names
   the verdict its latest QE attempt bound (the QE run and the isolated reviewer's session nonce in
   `units[].qe_review`). Another verdict is superseded only on positive evidence: it predates the
@@ -7129,7 +7159,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.16...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.17...HEAD
+[0.18.17]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.16...v0.18.17
 [0.18.16]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.15...v0.18.16
 [0.18.15]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.14...v0.18.15
 [0.18.14]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.13...v0.18.14
