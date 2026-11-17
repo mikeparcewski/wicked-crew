@@ -383,7 +383,7 @@ import {
   type RunEvidence,
 } from './system-snapshot.js';
 import { CLUSTER_TIMEOUT_MS, ClusterStatusReader, clusterDiagnostics, clusterRows } from './cluster-status.js';
-import { idleClis, parseSeatImageStatus, probeSeatImages, SeatImageRebuilder, type SeatImageStatus } from './seat-images.js';
+import { idleClis, probeSeatImages, SeatImageRebuilder, seatImageStatusVia, type SeatImageStatus } from './seat-images.js';
 import { RunCostCache } from './needs.js';
 import { governanceStoreFix, legacyHomeOutboxPath } from '../core/governance-store.js';
 import { UsageError, replayOutboxInto } from '../cli/governance.js';
@@ -11078,19 +11078,7 @@ export function registerRoutes(
   // per request, and one background `seat-image build` at a time.
   const coreExe = (): string | null => process.env['WICKED_CORE_EXE'] || null;
   const seatImageRebuilder = runtime.seatImageRebuilder ?? new SeatImageRebuilder(coreExe);
-  const seatImageStatus =
-    runtime.seatImageStatus ??
-    (async (): Promise<SeatImageStatus | null> => {
-      const exe = coreExe();
-      if (exe === null) throw new Error('WICKED_CORE_EXE is not set');
-      try {
-        const out = await execCapped(exe, ['seat-image', 'status', '--json'], { timeout: PROBE_TIMEOUT_MS });
-        return parseSeatImageStatus(out.stdout);
-      } catch (err) {
-        const e = err as { stderr?: unknown; message?: string };
-        throw new Error(loginDetail(typeof e.stderr === 'string' && e.stderr !== '' ? e.stderr : (e.message ?? 'failed')));
-      }
-    });
+  const seatImageStatus = runtime.seatImageStatus ?? seatImageStatusVia(coreExe);
   // The roster's seats (on the container floor every seat runs in an image); `null` when unreadable.
   const rosterSeatsNow = (): RosterSeatLike[] => {
     try {

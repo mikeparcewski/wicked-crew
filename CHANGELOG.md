@@ -17,6 +17,7 @@ mentioned only where a daemon release depends on them.
   Prose that starts with the word (`Repository: x is missing its CHANGELOG`) keeps its words; the PR body keeps the
   intent verbatim.
 - feat(launch): `POST /runs/preview` answers the human gates a launch of the body would keep (power, the posture the engine keeps, delivery and its gate) from the SAME decision `POST /runs` makes (`core/launch-posture.ts`), so a launch form shows what the run keeps instead of modelling crew's rules. The launch's inline power and deliver resolution is replaced by that one function, behaviour unchanged. wicked-crew-api-types 0.212.0 (additive): `LaunchPreviewBody`, `LaunchPreviewPosture`, `LaunchPreviewResponse` (studio#1150).
+- fix(roster): on the container floor, a seat whose image is missing and cannot be built (the operator's base is gone with no recipe, or an operator image is missing) reads unusable on `GET /roster`: work and council ineligible, inactive, chat refused, with the cause and its remedy. The engine is then handed it unusable, so work stays off it and a run refuses at launch instead of parking at a judge gate. One rule (`unbuildableSeatImages`) for the roster and the `seat_images` row, read in the background (crew#1097).
 
 ## [0.18.17] — 2026-11-17
 

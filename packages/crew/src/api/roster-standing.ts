@@ -42,6 +42,7 @@ import { SeatContainerStatus, containerSignInOn, isContainerLoginCli, isContaine
 import { seatGovernanceModes, type GovernanceScopeKind, type SeatGovernanceMode } from './seat-governance.js';
 import { HOST_FLOOR_UNKNOWN_COPY, recentBenchReason, seatStanding, chatSeatAdmission, type StandingSeat, type SeatStanding } from './seat-standing.js';
 import { seatVersion, seatVersions, type SeatVersionCache } from './seat-version.js';
+import { SeatImageReading, seatImageStatusVia, type UnbuildableSeatImage } from './seat-images.js';
 
 // The adapter loads this same addon module. Keep the optional 0.11.1 static local until the
 // adapter's surface catches up; detect it at read time, not when the daemon factory is built.
@@ -163,6 +164,10 @@ export interface RosterStandingDeps {
   hostBoundary?: () => string | null;
   /** (A6) The home directory a command's display writes as `$HOME` (default `os.homedir()`). */
   home?: string;
+  /** (crew#1097) The container floor's seat images that cannot be had, CLI → why (`seat-images.ts`
+   *  `unbuildableSeatImages`, the rule the `seat_images` row reads `down` on), or `null` when not known. Default:
+   *  the daemon's own background reading of `seat-image status` on the container floor; `null` turns it off. */
+  seatImages?: { unbuildable(): ReadonlyMap<string, UnbuildableSeatImage> | null } | null;
 }
 
 /**
@@ -205,6 +210,14 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
     } catch { /* A registry not ready at boot will be probed on its first read. */ }
   });
   const versions = deps.versions !== undefined ? deps.versions : daemon ? seatVersions : null;
+  // (crew#1097) Owned only by the daemon, made on the first container-floor read.
+  let ownedImages: SeatImageReading | null = null;
+  const seatImages = (): { unbuildable(): ReadonlyMap<string, UnbuildableSeatImage> | null } | null => {
+    if (deps.seatImages !== undefined) return deps.seatImages;
+    if (!daemon) return null;
+    ownedImages ??= new SeatImageReading(seatImageStatusVia(() => env['WICKED_CORE_EXE'] || null));
+    return ownedImages;
+  };
   const worktreeBench =
     deps.worktreeBench !== undefined ? deps.worktreeBench : daemon ? (seats: readonly unknown[]) => CoreAdapter.worktreeBenched(seats) : null;
   const hostFloorBench =
@@ -335,11 +348,15 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
     const boundary = hostBoundary();
     // How each container seat's live check was read ({@link containerLoginReading}).
     const vias = new Map<string, NonNullable<SeatProbeReading['via']>>();
+    // (crew#1097) Read once per roster read, never awaited: a stale reading refreshes in the background.
+    const unbuildable = container ? seatImages()?.unbuildable() ?? null : null;
     const decorated = seats.map((seat) => {
       const key = String(seat.key);
       const runtimeDown = container && runtimeState?.state() === 'down';
       const reason = runtimeState?.reason?.() ?? RUNTIME_DOWN_REASON;
-      const health = runtimeDown ? { status: 'inactive' as const, message: reason, since: runtimeChangedAt } : seatHealth.healthFor(key);
+      let health = runtimeDown ? { status: 'inactive' as const, message: reason, since: runtimeChangedAt } : seatHealth.healthFor(key);
+      // (crew#1097) This seat's image is missing and cannot be built: it cannot run anything here.
+      const imageCannot = runtimeDown ? undefined : unbuildable?.get(key.split('#', 1)[0] ?? key);
       // crew#630: the seat's own auth-status answer (cached; never awaited here). A probed seat
       // whose probe has not answered yet does not read `signed_in` off its file — a credential
       // file is not a working login (a moved worker home keeps `.claude.json` and loses the
@@ -400,6 +417,21 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         council_eligible: false, council_ineligible_reason: reason,
         work_eligible: false, work_ineligible_reason: reason,
       });
+      // (crew#1097) Unusable, with the cause and its remedy: the engine is handed `health.usable: false`
+      // (`toEngineSeat`), so distribution, judging and launch coverage keep work off it. A field already
+      // ineligible keeps its own reason (a signed-out seat needs no image until it is signed in).
+      let imageBenched = false;
+      if (imageCannot !== undefined) {
+        if (standing.council_eligible === true) {
+          Object.assign(standing, { council_eligible: false, council_ineligible_reason: imageCannot.reason });
+          imageBenched = true;
+        }
+        if (standing.work_eligible === true) {
+          Object.assign(standing, { work_eligible: false, work_ineligible_reason: imageCannot.reason });
+          imageBenched = true;
+        }
+        if (imageBenched) health = { status: 'inactive' as const, message: imageCannot.reason, since: health.since };
+      }
       // F-W1-005 (wave-1 P6): the chat admission verdict the daemon itself applies when `POST /chats`
       // picks its default seats — the SAME `chatSeatAdmission` call, for both scope modes — so the
       // studio's picker offers exactly the seats an open would seat, from one source of truth (no
@@ -433,6 +465,10 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       if (runtimeDown) {
         for (const scope of ['unscoped', 'scoped', 'scoped_bound'] as const) {
           chatAdmission[scope] = { ok: false, reason, source: 'auth' };
+        }
+      } else if (imageBenched) {
+        for (const scope of ['unscoped', 'scoped', 'scoped_bound'] as const) {
+          chatAdmission[scope] = { ok: false, reason: imageCannot!.reason, source: 'auth' };
         }
       }
       // A1: every seat's installed version, beside the pin reading.
