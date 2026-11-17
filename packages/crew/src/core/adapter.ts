@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import type { Core as CoreHandle, LaunchOptions, Subscription } from 'wicked-core-ts';
-import type { PowerPauseRequest, PowerState, Rigor } from 'wicked-crew-api-types';
+import type { GateAction, PowerPauseRequest, PowerState, Rigor } from 'wicked-crew-api-types';
 import { AskError, AskUnsupportedError, type AskRequest, type AskTicket, type AskUnit } from './types.js';
 import type {
   EditorGrantsResponse,
@@ -435,6 +435,14 @@ export interface RejudgeReadiness {
   reason: string | null;
 }
 
+/** (crew#1512) The engine's list of every answer a run's open gate takes now (`gateActions`). */
+export interface EngineGateActions {
+  ord: number;
+  gateKind: string;
+  planRev?: number;
+  actions: GateAction[];
+}
+
 /** The durable event log's read half (core#139 / FINDING-014). */
 type EventLogMethods = {
   /**
@@ -452,6 +460,12 @@ type EventLogMethods = {
    * binding has none, and then `rejudge` is not offered.
    */
   rejudgeReadiness?(runId: string): Promise<string>;
+  /**
+   * (crew#1512, studio#1170) Every answer a run's open gate takes now, as a JSON `GateActions`
+   * (`{ord, gateKind, planRev?, actions}`) or `null` off a gate. Optional: an addon before the
+   * binding has none, and then the gate read carries no `actions`.
+   */
+  gateActions?(runId: string): Promise<string>;
 };
 
 /**
@@ -666,6 +680,7 @@ const VIEW_NEUTRAL_CALLS: ReadonlySet<string> = new Set([
   'unitTranscript',
   'runEvents',
   'rejudgeReadiness',
+  'gateActions',
   'listRepos',
   'indexBudget',
   'listPresets',
@@ -3149,6 +3164,22 @@ export class CoreAdapter {
   async rejudgeReadiness(runId: string): Promise<RejudgeReadiness | null> {
     if (typeof this.core.rejudgeReadiness !== 'function') return null;
     return JSON.parse(await this.core.rejudgeReadiness(runId)) as RejudgeReadiness;
+  }
+
+  /**
+   * (crew#1512, studio#1170) Every answer `runId`'s open gate takes now — wicked-core `gate_actions`,
+   * each candidate run through the decision path's own pre-checks. `null` off a gate, and when this
+   * addon predates the binding (then the gate read carries no list).
+   */
+  /** (crew#1512) Whether this addon carries the `gateActions` read at all — `gateActions` answering `null` is "no
+   *  gate open" only where it does. */
+  supportsGateActions(): boolean {
+    return typeof this.core.gateActions === 'function';
+  }
+
+  async gateActions(runId: string): Promise<EngineGateActions | null> {
+    if (typeof this.core.gateActions !== 'function') return null;
+    return JSON.parse(await this.core.gateActions(runId)) as EngineGateActions | null;
   }
 
   /**

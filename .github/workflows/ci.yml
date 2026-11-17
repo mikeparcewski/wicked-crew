@@ -274,6 +274,59 @@ jobs:
         working-directory: wicked-crew
         run: npm run -w packages/apps-server build && npm run -w packages/apps-server test
 
+      # studio#1170, GATES AS A CONTRACT. The engine pins every gate shape's legal answers in wicked-core
+      # tests/fixtures/gate-actions.json (each list proven there equal to what it accepts) and crew serves
+      # them on GET /runs/:id/gate; studio's resolver must draw exactly those. This runs studio's contract
+      # test against the fixture of the core ref this job built, so an engine answer studio does not draw,
+      # or a studio answer the engine does not list, fails HERE. It runs studio main; a PR body may name an
+      # open wicked-studio PR's head with one line, `wicked-studio-ref: <branch>` (validated exactly as the
+      # wicked-core marker above; a merged one resolves to main).
+      - name: Studio's gate contract against this engine (studio#1170)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          # Through env, never interpolated into the script: a PR body is attacker-controlled text.
+          PR_BODY: ${{ github.event.pull_request.body }}
+          STUDIO_REPO: mikeparcewski/wicked-studio
+        run: |
+          set -euo pipefail
+          fixture="$GITHUB_WORKSPACE/wicked-core/tests/fixtures/gate-actions.json"
+          if [ ! -f "$fixture" ]; then
+            echo "::error::the wicked-core ref under test has no tests/fixtures/gate-actions.json (the engine's gate-shape lists)"; exit 1
+          fi
+          ref=main
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            marker="$(printf '%s\n' "$PR_BODY" \
+              | sed -E "/^[[:space:]]*(\`\`\`|~~~)/,/^[[:space:]]*(\`\`\`|~~~)/d" \
+              | sed -nE 's/^[[:space:]]*wicked-studio-ref:[[:space:]]*([^[:space:]]+)[[:space:]]*$/\1/p' | head -n 1)"
+            if [ -n "$marker" ]; then
+              case "$marker" in
+                *..*|-*|/*|*/|*.lock) echo "::error::wicked-studio-ref marker '$marker' is not a plausible branch name"; exit 1 ;;
+              esac
+              if ! printf '%s' "$marker" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]*$'; then
+                echo "::error::wicked-studio-ref marker '$marker' is not a plausible branch name"; exit 1
+              fi
+              owner="${STUDIO_REPO%%/*}"
+              prs="$(gh api "repos/${STUDIO_REPO}/pulls?state=all&head=${owner}:${marker}&per_page=30" \
+                --jq "[.[] | select(.head.repo.full_name == \"${STUDIO_REPO}\") | {number, state, merged: (.merged_at != null)}]")"
+              if [ -n "$(jq -r '[.[] | select(.state == "open")][0].number // empty' <<<"$prs")" ]; then
+                ref="$marker"
+              elif [ -z "$(jq -r '[.[] | select(.merged)][0].number // empty' <<<"$prs")" ]; then
+                echo "::error::wicked-studio-ref marker '$marker' is not the head branch of an open ${STUDIO_REPO} pull request"; exit 1
+              fi
+            fi
+          fi
+          echo "::notice title=wicked-studio ref (gate contract)::$ref"
+          git clone -q --depth 1 --branch "$ref" "https://github.com/${STUDIO_REPO}.git" studio-contract
+          cd studio-contract
+          if [ ! -f tests/gateContract.engine.test.ts ]; then
+            echo "::error::wicked-studio@$ref has no tests/gateContract.engine.test.ts"; exit 1
+          fi
+          npm ci --no-audit --no-fund
+          GATE_ACTIONS_FIXTURE="$fixture" npx vitest run tests/gateContract.engine.test.ts
+
   # DES-APPS-001 K1: Apps data sources against REAL databases. Postgres 16, Postgres 17 and MySQL 8 run
   # as service containers (Linux only, hence a job of its own); the source tests seed a fresh database
   # per run from packages/crew/tests/fixtures/apps-sources/ and drop it after. WICKED_SOURCES_DB=required

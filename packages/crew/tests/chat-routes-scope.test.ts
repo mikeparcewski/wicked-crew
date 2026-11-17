@@ -1226,6 +1226,16 @@ describe('POST /chats {workflow: "analyze"} — a read-only, cited analysis chat
     const teamEdit = await app.inject({ method: 'POST', url: '/api/v1/runs/run-p1/plan', payload: { plan: { steps: [{ catalog: 'build', id: 'b' }] } } });
     expect(teamEdit.statusCode).toBe(409);
     expect(teamEdit.json().code).toBe('analysis_read_only');
+    // crew#1512: the gate read lists the same — only the declines — whatever the engine takes.
+    (adapter as unknown as { runEvents: () => Promise<unknown[]> }).runEvents = async () => [];
+    (adapter as unknown as { gateActions: () => Promise<unknown> }).gateActions = async () => ({
+      ord: 2, gateKind: 'plan_approval', planRev: 1,
+      actions: ['approve', 'edit_plan', 'request_changes', 'reject'].map((action) => ({ action, intent: action, note: 'optional', needsPlanRev: true })),
+    });
+    const read = await app.inject({ method: 'GET', url: '/api/v1/runs/run-p1/gate' });
+    expect(read.statusCode, read.body).toBe(200);
+    expect((read.json() as { actions?: Array<{ action: string }> }).actions?.map((a) => a.action)).toEqual(['request_changes', 'reject']);
+    expect(read.json()).toMatchObject({ planRev: 1 });
   });
 
   it('xreview on #1160 (P3): an analysis chat re-seats only its one helper', async () => {

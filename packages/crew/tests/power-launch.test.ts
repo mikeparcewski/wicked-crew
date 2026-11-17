@@ -71,6 +71,17 @@ describe('POST /runs power mode', () => {
     expect(res.json()).toMatchObject({ runId: 'run-1', power: true });
     expect(input?.power).toBe(true);
     expect(input?.humanConfirm).toBe('none');
+    // studio#1150: the dropped posture is said, never silent.
+    expect(res.json().humanConfirmNotice).toMatch(/humanConfirm before:1 is not kept.*power: false/);
+  });
+
+  it('says nothing about a posture when the launch named none, or none (studio#1150)', async () => {
+    const plain = await launch({ supports: true, body: { workflow: 'bug', repoRef: 'repo-1' } });
+    expect(plain.res.json()).not.toHaveProperty('humanConfirmNotice');
+    const none = await launch({ supports: true, body: { workflow: 'bug', repoRef: 'repo-1', humanConfirm: 'none' } });
+    expect(none.res.json()).not.toHaveProperty('humanConfirmNotice');
+    const phased = await launch({ supports: true, body: { workflow: 'bug', repoRef: 'repo-1', power: false, humanConfirm: 'all' } });
+    expect(phased.res.json()).not.toHaveProperty('humanConfirmNotice');
   });
 
   it('honours the Settings default off, and the launch\'s own word over it', async () => {
