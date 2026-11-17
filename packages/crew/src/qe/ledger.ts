@@ -178,6 +178,34 @@ export interface RunLinkage {
    * the run's evidence: a FAIL on a tree a send-back superseded no longer blocks the delivery.
    */
   currentTree?: string | null;
+  /**
+   * (crew#1560) The verdicts the ENGINE bound on the latest attempt of every unit it runs its
+   * isolated QE reviewer for: each unit's bound QE run (`units[].qe_review.qe_run_id`) and the
+   * nonce of the reviewer session whose verdict it bound (`qe_review.attempts[]`, status
+   * `verdict`). Present only when every such unit has one. A verdict is identified by run AND
+   * nonce, never by time: a verdict stamped with an isolated-review session the engine no longer
+   * binds is an earlier attempt's and no longer counts (an older INCONCLUSIVE cannot outvote the
+   * PASS the latest attempt bound); verdicts with no session stamp keep today's reading.
+   */
+  engineBound?: EngineBoundVerdict[];
+  /**
+   * (crew#1560, coord codex-check) The QE runs a "redo the QE check" RETIRED on the run's reviewer
+   * units, and when (`units[].qe_redos[]` `qe_run_id`, `at`): verdicts recorded on them before the
+   * redo are superseded; one written after it still counts.
+   */
+  engineRetiredQeRuns?: EngineRetiredQeRun[];
+}
+
+/** (crew#1560) A QE run a "redo the QE check" retired, and when (unix millis). */
+export interface EngineRetiredQeRun {
+  qeRunId: string;
+  at: number;
+}
+
+/** (crew#1560) One verdict the engine bound: its QE run and its isolated reviewer's session nonce. */
+export interface EngineBoundVerdict {
+  qeRunId: string;
+  session: string;
 }
 
 /** One dispatch of the run's QE unit: when it ran and which tree its gate judged. */
@@ -326,6 +354,11 @@ export interface QeAcceptanceState {
    * attempt that judged it, and no longer count (absent when none).
    */
   supersededByLatest?: number;
+  /**
+   * (crew#1560) How many of the run's verdicts were recorded before the QE run(s) the engine bound
+   * on the latest QE attempt, and no longer count (absent when none); with the runs' ids.
+   */
+  supersededByEngine?: { count: number; qeRunIds: string[] };
   /** Read-layer failure detail (a record could not be read or parsed). */
   error?: string;
 }
@@ -415,6 +448,8 @@ interface Picked {
   attributedVerdicts: number;
   /** (j4-gates) Verdicts on the current tree recorded before its latest QE attempt (no longer counted). */
   supersededByLatest?: number;
+  /** (crew#1560) Verdicts recorded before the engine-bound QE run(s) of the latest attempt. */
+  supersededByEngine?: { count: number; qeRunIds: string[] };
 }
 
 /** One QE run as the ledger holds it: its newest verdict, its run row, and whether anything of it is stamped. */
@@ -422,6 +457,12 @@ interface QeRunEntry {
   newest: VerdictRecord;
   run: RunRecord | null;
   stamped: boolean;
+}
+
+/** The isolated-review session a verdict is stamped with (`review_session`), or null. */
+function reviewSessionOf(v: VerdictRecord): string | null {
+  const s = (v as unknown as Record<string, unknown>)['review_session'];
+  return typeof s === 'string' && s !== '' ? s : null;
 }
 
 /**
@@ -460,10 +501,17 @@ function attribute(root: string, verdicts: VerdictRecord[], subject: ReadSubject
   }
 
   const { runId, startedAt, finishedAt, logUnreadable } = subject.run;
+  // (crew#1560, codex r2) The engine-bound reading below matches the engine's own verdicts against
+  // the WHOLE ledger: a time window never drops a verdict the engine names (or a later one).
+  const unscoped = verdicts;
   // (crew#971) A verdict counts only for the tree it judged: scope to the run's current tree first,
   // so deny-dominates holds WITHIN that tree's verdicts and a FAIL on a superseded tree is history.
   const scoped = verdictsForCurrentTree(verdicts, subject.run);
-  if (scoped !== null) {
+  // (crew#1560) With engine-bound verdicts, attribution reads the whole ledger and the tree scope
+  // applies to the unstamped rows only (below): the engine's own record names its tree.
+  const engineBoundRead = (subject.run.engineBound?.length ?? 0) > 0;
+  const scopedVerdicts = scoped !== null ? scoped.kept : verdicts;
+  if (scoped !== null && !engineBoundRead) {
     verdicts = scoped.kept;
     if (verdicts.length === 0) {
       return {
@@ -539,6 +587,96 @@ function attribute(root: string, verdicts: VerdictRecord[], subject: ReadSubject
     // every verdict predates the latest attempt no longer counts.
     let current = attributed;
     let supersededByLatest = 0;
+    // (crew#1560) The engine names the verdict its latest QE attempt bound, by QE run and reviewer
+    // session nonce; it is matched against the unscoped ledger (no time window drops it).
+    //  - The bound verdict is the NEWEST row of that (run, session), as the engine binds it.
+    //  - Other verdicts are superseded only on positive evidence (below); then each QE run counts
+    //    its newest remaining verdict, every bound verdict counts, and deny-dominates holds.
+    const bound = subject.run.engineBound;
+    if (bound !== undefined && bound.length > 0) {
+      // The engine's bound runs are this run's whatever a time window kept of them (their bound
+      // verdict must carry this run's stamp, checked below).
+      const mine = new Set([...attributed.map((a) => a.verdict.run_id), ...bound.map((b) => b.qeRunId)]);
+      const own = unscoped.filter((v) => mine.has(v.run_id));
+      const qeRunIds = bound.map((b) => b.qeRunId);
+      const runs = [...attributed];
+      for (const id of qeRunIds) {
+        if (!runs.some((a) => a.verdict.run_id === id)) {
+          const row = own.find((v) => v.run_id === id);
+          if (row !== undefined) {
+            runs.push({ verdict: row, run: getCanonical<RunRecord>(root, 'runs', id), attribution: { kind: 'stamped', qeRunId: id } });
+          }
+        }
+      }
+      const none = (reason: string): Picked => ({
+        verdict: null,
+        run: null,
+        attribution: { kind: 'none', reason },
+        attributedVerdicts: 0,
+      });
+      const boundRows: VerdictRecord[] = [];
+      for (const b of bound) {
+        const row = own.find((v) => v.run_id === b.qeRunId && reviewSessionOf(v) === b.session);
+        if (row === undefined || stampedCrewRun(row) !== runId) {
+          return none(
+            `the verdict the engine bound on QE run ${b.qeRunId} (isolated review session ${b.session}) is not in the ledger stamped with this run`,
+          );
+        }
+        boundRows.push(row);
+      }
+      // The engine's attempt-window evidence (crew#971, j4-gates), as main reads every verdict: what
+      // the tree scope and the latest same-tree attempt keep.
+      const latest =
+        scoped !== null
+          ? verdictsFromLatestCurrentTreeAttempt(scopedVerdicts.filter((v) => mine.has(v.run_id)), subject.run)
+          : null;
+      const windowKept: VerdictRecord[] | null = latest !== null ? latest.kept : scoped !== null ? scopedVerdicts : null;
+      // (coord codex-check on #1580) A verdict is superseded ONLY on positive evidence, never on its
+      // timestamp against the bound PASS alone:
+      //  - on a QE run the engine re-bound: recorded before that run's bound verdict (the engine bound
+      //    the run's newest verdict); anything newer still counts, whatever a time window says;
+      //  - on a QE run a "redo the QE check" retired: recorded before that redo (`at`); a verdict
+      //    written on the retired run after the redo still counts;
+      //  - on any other run: outside the engine's attempt windows (a superseded tree, or an earlier
+      //    attempt of the delivered tree), as on main.
+      // Then main's reading: each QE run's newest remaining verdict, plus every bound verdict, and
+      // deny-dominates across them. An unknown session's FAIL still denies.
+      const redoneAt = new Map<string, number>();
+      for (const r of subject.run.engineRetiredQeRuns ?? []) {
+        redoneAt.set(r.qeRunId, Math.max(redoneAt.get(r.qeRunId) ?? Number.NEGATIVE_INFINITY, r.at));
+      }
+      const retired = own.filter((v) => {
+        if (boundRows.includes(v)) return false;
+        const at = epoch(v.created_at);
+        const boundOnRun = boundRows.find((b) => b.run_id === v.run_id);
+        if (boundOnRun !== undefined) {
+          const boundAt = epoch(boundOnRun.created_at);
+          return at !== null && boundAt !== null && at < boundAt;
+        }
+        // On a redone run the redo is the evidence: only what predates it is superseded; a verdict
+        // written after it counts, whatever a time window says (codex confirmation 5).
+        const redo = redoneAt.get(v.run_id);
+        if (redo !== undefined) return at !== null && at < redo;
+        return windowKept !== null && !windowKept.includes(v);
+      });
+      const entries: Array<{ verdict: VerdictRecord; run: RunRecord | null; attribution: QeAttribution }> = [];
+      for (const a of runs) {
+        const id = a.verdict.run_id;
+        for (const b of boundRows.filter((v) => v.run_id === id)) entries.push({ ...a, verdict: b });
+        // `own` is newest first: the run's newest verdict the engine did not supersede.
+        const newest = own.find((v) => v.run_id === id && !retired.includes(v));
+        if (newest !== undefined && !boundRows.includes(newest)) entries.push({ ...a, verdict: newest });
+      }
+      const denying = entries.find((e) => e.verdict.verdict !== 'PASS');
+      const pick = denying ?? entries.find((e) => boundRows.includes(e.verdict)) ?? entries[0];
+      if (pick === undefined) return none(`QE run${qeRunIds.length === 1 ? '' : 's'} ${qeRunIds.join(', ')} hold no verdict`);
+      const superseded = retired.length;
+      return {
+        ...pick,
+        attributedVerdicts: new Set(entries.map((e) => e.verdict.run_id)).size,
+        ...(superseded > 0 ? { supersededByEngine: { count: superseded, qeRunIds } } : {}),
+      };
+    }
     if (scoped !== null) {
       const mine = new Set(attributed.map((a) => a.verdict.run_id));
       const latest = verdictsFromLatestCurrentTreeAttempt(
@@ -655,6 +793,7 @@ export async function readLedgerAcceptanceState(
     state.attribution = picked.attribution;
     state.attributedVerdicts = picked.attributedVerdicts;
     if (picked.supersededByLatest !== undefined) state.supersededByLatest = picked.supersededByLatest;
+    if (picked.supersededByEngine !== undefined) state.supersededByEngine = picked.supersededByEngine;
     if (picked.verdict !== null) {
       state.manifestPath = join(root, 'evidence', picked.verdict.run_id, 'manifest.json');
       state.manifest = await readManifest(state.manifestPath);

@@ -56,6 +56,8 @@ import type {
 import { runIdentityOf, runWorkflowDef } from '../core/run-identity.js';
 import { basename } from 'node:path';
 import type {
+  EngineBoundVerdict,
+  EngineRetiredQeRun,
   QeAcceptanceState,
   QeAttemptWindow,
   QeAttribution,
@@ -354,6 +356,10 @@ export function resolveAcceptanceGate(
     // (j4-gates) The latest QE attempt on the delivered tree governs: say what it superseded.
     (state.supersededByLatest !== undefined && state.supersededByLatest > 0
       ? `; ${state.supersededByLatest} earlier verdict${state.supersededByLatest === 1 ? '' : 's'} on this tree, recorded before its latest QE attempt, no longer count${state.supersededByLatest === 1 ? 's' : ''}`
+      : '') +
+    // (crew#1560) …and when the engine named the QE run its latest attempt bound, what predates it.
+    (state.supersededByEngine !== undefined
+      ? `; ${state.supersededByEngine.count} verdict${state.supersededByEngine.count === 1 ? '' : 's'} the engine superseded (on a redone QE run, before the bound verdict of the run it re-bound, or outside its attempt windows) no longer count${state.supersededByEngine.count === 1 ? 's' : ''} (the engine bound the latest attempt's on ${state.supersededByEngine.qeRunIds.join(', ')})`
       : '');
   const cite = `verdict ${state.verdict.id} by ${state.verdict.reviewer} (${describeAttribution(state.attribution)}${breadth})`;
   switch (verdict) {
@@ -608,6 +614,10 @@ export async function buildAcceptanceView(opts: {
   deliverableTree?: string | null;
   /** (crew#971) The ords of the run's QE unit(s) — the units carrying a QE decision. */
   qeUnitOrds?: number[];
+  /** (crew#1560) The verdicts the engine bound on its latest QE attempt ({@link RunLinkage.engineBound}). */
+  engineBound?: EngineBoundVerdict[];
+  /** (crew#1560) The QE runs a redo retired ({@link RunLinkage.engineRetiredQeRuns}). */
+  engineRetiredQeRuns?: EngineRetiredQeRun[];
   /** What the run must prove ({@link acceptanceRequirementOf}). */
   requirement: AcceptanceRequirement;
   qeRunId?: string;
@@ -658,7 +668,15 @@ export async function buildAcceptanceView(opts: {
   const subject: ReadSubject =
     opts.qeRunId !== undefined
       ? { qeRunId: opts.qeRunId }
-      : { run: runWindowFromEvents(eventRows, opts.runId, eventsError, opts.deliverableTree ?? null, opts.qeUnitOrds) };
+      : {
+          run: {
+            ...runWindowFromEvents(eventRows, opts.runId, eventsError, opts.deliverableTree ?? null, opts.qeUnitOrds),
+            ...(opts.engineBound !== undefined && opts.engineBound.length > 0 ? { engineBound: opts.engineBound } : {}),
+            ...(opts.engineRetiredQeRuns !== undefined && opts.engineRetiredQeRuns.length > 0
+              ? { engineRetiredQeRuns: opts.engineRetiredQeRuns }
+              : {}),
+          },
+        };
 
   // The run's ONE ledger (crew#951): its evidence root's when it has one, else its repo's.
   const ledgerRoot = runQeLedgerRoot({ evidence_root: opts.evidenceRoot ?? null }, opts.repo?.root_path ?? null);
