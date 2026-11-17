@@ -30,6 +30,8 @@ export interface SetupKnown {
   /** Files counted across the registered repositories (source files only). */
   filesCounted: number;
   nearby: NearbyRepo[];
+  /** (crew#1527) Whether delivery can push before the first job; set by the route. */
+  delivery?: import('./delivery-readiness.js').DeliveryReadiness;
 }
 
 /** Source extensions → language; anything else (docs, config, data) is not counted. */

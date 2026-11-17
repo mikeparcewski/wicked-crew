@@ -383,6 +383,7 @@ import {
   type RunEvidence,
 } from './system-snapshot.js';
 import { CLUSTER_TIMEOUT_MS, ClusterStatusReader, clusterDiagnostics, clusterRows } from './cluster-status.js';
+import { deliveryRow, readDeliveryReadiness } from '../setup/delivery-readiness.js';
 import { idleClis, probeSeatImages, SeatImageRebuilder, seatImageStatusVia, type SeatImageStatus } from './seat-images.js';
 import { RunCostCache } from './needs.js';
 import { governanceStoreFix, legacyHomeOutboxPath } from '../core/governance-store.js';
@@ -11253,6 +11254,14 @@ export function registerRoutes(
           rebuild: () => seatImageRebuilder.current(),
         }),
         clusterP.then((rows) => rows.cluster),
+        // crew#1527: whether delivery can push, the same answer the setup steps show.
+        (async () => {
+          const started = Date.now();
+          const read = await settleWithin(async () => readDeliveryReadiness(await adapter.getSettings()), PROBE_TIMEOUT_MS);
+          return read.kind === 'ok'
+            ? deliveryRow(read.value, started, infraRow)
+            : infraRow('delivery', 'unknown', read.kind === 'timeout' ? `the delivery check did not answer within ${PROBE_TIMEOUT_MS / 1000} s` : `the delivery check failed: ${read.error}`, 'Re-check.', started);
+        })(),
       ]);
 
       const [views, settings, openGates, diag, ping, rules, gatesByYou, infraProbed, reposRead] = await Promise.all([
@@ -11407,6 +11416,7 @@ export function registerRoutes(
         infraProbed[8] as SystemInfraRow,
         infraProbed[7] as SystemInfraRow,
         reposRow(reposRead),
+        infraProbed[9] as SystemInfraRow,
         infraProbed[6] as SystemInfraRow,
         loadRow(),
       ];

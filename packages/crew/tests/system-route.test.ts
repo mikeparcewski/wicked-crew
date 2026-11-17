@@ -209,7 +209,7 @@ describe('GET /api/v1/system', () => {
     expect(body.budgetMs).toBe(SYSTEM_BUDGET_MS);
     expect(Array.isArray(body.attention) && Array.isArray(body.clis) && Array.isArray(body.runs)).toBe(true);
     expect(body.infra.map((r) => r.key)).toEqual([
-      'daemon', 'gateway', 'broker', 'interactive', 'estate', 'bus', 'vault', 'skills', 'state_home', 'stores', 'seat_floor', 'cluster', 'seat_images', 'repos', 'disk', 'load',
+      'daemon', 'gateway', 'broker', 'interactive', 'estate', 'bus', 'vault', 'skills', 'state_home', 'stores', 'seat_floor', 'cluster', 'seat_images', 'repos', 'delivery', 'disk', 'load',
     ]);
     const byId = Object.fromEntries(body.runs.map((r) => [r.runId, r]));
     expect(byId['run-gate']).toMatchObject({ liveness: 'waiting_on_you', gate: { interactionId: 'ir_gate1', ord: 1, kind: 'plan_approval' } });

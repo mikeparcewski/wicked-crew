@@ -280,6 +280,12 @@ function ghStatusMemo(): Promise<GhStatus> {
   return value;
 }
 
+/** (crew#1527) gh's github.com logins and active login from the memoised, bounded status probe: `'absent'` = gh is
+ *  not installed, `null` = no answer in time (unknown, never "signed out"). Never reads a token. */
+export async function ghStatusRead(): Promise<{ logins: string[]; active: string | null } | 'absent' | null> {
+  return ghStatusMemo().catch(() => null);
+}
+
 export async function ghLoginsOrAbsent(): Promise<string[] | 'absent' | null> {
   const st = await ghStatusMemo();
   return st === null || st === 'absent' ? st : st.logins;

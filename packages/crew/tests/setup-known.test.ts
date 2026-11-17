@@ -128,13 +128,21 @@ describe('GET /api/v1/setup/known', () => {
     const who: { actor?: Actor } = {};
     app.addHook('onRequest', async (req) => { if (who.actor !== undefined) (req as { actor?: Actor }).actor = who.actor; });
     const seen: unknown[] = [];
+    const delivery = { deliverDefault: 'none' as const, ready: true, github: null, pushAs: null, gitAuthor: null, reason: 'local', fix: null };
+    const settingsSeen: unknown[] = [];
     registerSetupRoutes(app, {
-      adapter: { listRepos: async () => [{ id: 'r1', name: 'web', root_path: '/x/web', default_branch: 'main', registered_at: 0 }] },
+      adapter: {
+        listRepos: async () => [{ id: 'r1', name: 'web', root_path: '/x/web', default_branch: 'main', registered_at: 0 }],
+        getSettings: async () => ({ deliverDefault: 'none' }) as never,
+      },
       known: async (repos) => { seen.push(repos); return { git: null, languages: [], filesCounted: 0, nearby: [] }; },
+      // crew#1527: the route asks the readiness of THIS daemon's settings.
+      delivery: async (settings) => { settingsSeen.push(settings); return delivery; },
     });
     const ok = await app.inject({ method: 'GET', url: '/api/v1/setup/known' });
     expect(ok.statusCode).toBe(200);
-    expect(ok.json()).toEqual({ git: null, languages: [], filesCounted: 0, nearby: [] });
+    expect(ok.json()).toEqual({ git: null, languages: [], filesCounted: 0, nearby: [], delivery });
+    expect(settingsSeen).toEqual([{ deliverDefault: 'none' }]);
     expect(seen).toHaveLength(1);
     who.actor = { id: 'viewer', kind: 'human', trust: 'observer' };
     expect((await app.inject({ method: 'GET', url: '/api/v1/setup/known' })).statusCode).toBe(403);

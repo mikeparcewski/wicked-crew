@@ -5155,6 +5155,31 @@ export interface SetupKnown {
   /** Git checkouts one level under the home's code folders and the registered repositories' folders,
    *  not registered yet (at most 24). `path` is absolute: register with `POST /repos {name, rootPath}`. */
   nearby: Array<{ name: string; path: string }>;
+  /** api-types 0.212.0 (crew#1527): whether delivery can push before the first job. Absent on an older daemon. */
+  delivery?: DeliveryReadiness;
+}
+
+/**
+ * api-types 0.212.0 (crew#1527): can a job deliver as configured? Built from the deliver preflight's own rule (an
+ * exported `GH_TOKEN`, else a gh login for github.com; with a configured push identity only that account's login) and
+ * the global git author. The system page's `delivery` infra row is the same answer.
+ */
+export interface DeliveryReadiness {
+  /** The daemon's delivery default: `pr` opens a pull request, `none` keeps the work on its branch. */
+  deliverDefault: 'pr' | 'none';
+  /** `true` = a job can deliver as configured; `false` = it would stop at its deliver step; `null` = unknown (gh did
+   *  not answer in time). */
+  ready: boolean | null;
+  /** The GitHub credential by the deliver preflight's rule; `null` when delivery is local. */
+  github: DeliverCredentials | null;
+  /** The GitHub account delivery pushes as: the configured identity, else gh's active login; `null` = none known. */
+  pushAs: string | null;
+  /** The git author commits carry; `null` when neither name nor email is set. */
+  gitAuthor: { name: string | null; email: string | null } | null;
+  /** One sentence: what delivery will do now. */
+  reason: string;
+  /** What to do when not ready (commands, and the Settings choice of local delivery); `null` when ready. */
+  fix: string | null;
 }
 
 // ── Skills — the daemon-owned garden plugin root, published as immutable snapshots (api-types 0.28.0) ──
@@ -11985,7 +12010,10 @@ export type SystemInfraKey =
    *  `context`, `controllerReady`, `controllerVersion`, `gateway`, `runNamespaces`, `pendingPods`.
    *  On the container floor the `gateway` row reads the same document (the gateway is a Deployment
    *  in the daemon's namespace). ABSENT before. */
-  | 'cluster';
+  | 'cluster'
+  /** api-types 0.212.0 (crew#1527): whether delivery can push (the GitHub sign-in a pull request needs and the git
+   *  author), the same answer as `SetupKnown.delivery`. `off` = local delivery. */
+  | 'delivery';
 
 export interface SystemInfraRow {
   key: SystemInfraKey;
