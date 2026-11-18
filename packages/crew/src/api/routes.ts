@@ -4303,6 +4303,11 @@ export function registerRoutes(
       if (resolved === null) throw new Error(`${p.what.label} is no longer in the catalog`);
       const selfSeated = resolved.workflow !== null && SELF_SEATED.has(resolved.workflow);
       // The seats the person saw: the lead, and the roster narrowed to the proposal's keys (`jobLaunchRoster`).
+      // crew#645 / crew#1593 (coord merge check): the card says WHICH seats, never that they are usable now. The same
+      // bounded readiness wait a launch with no roster gets runs FIRST, so the standing serialized here (and the lead's
+      // eligibility `launchRun` checks against it) is the seats' own fresh answer: a lead whose login expired is refused
+      // by name, never launched on a stale snapshot. A seat added meanwhile still doesn't join (narrowed to the card).
+      await rosterWithStanding.ready?.();
       const { clisJson } = jobLaunchRoster(launchRosterNaming(rosterWithStanding(), p.seats?.lead ?? undefined), p);
       const common = jobLaunchCommon(p, { runId: d.identity.runId, chatId: d.chatId }, {
         ...(clisJson !== undefined ? { clisJson } : {}),
