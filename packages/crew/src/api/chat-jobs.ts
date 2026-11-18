@@ -1034,8 +1034,10 @@ export function launchShapeOfProposal(p: ArtifactProposal): import('../core/type
 /**
  * The roster a job's Go hands the engine: `current` (the daemon's launch roster, naming the lead) narrowed to the seats
  * the person saw. A reshape inherits the held run's roster configuration; its membership is still the proposal's
- * seats (codex r2), with the current roster's entry for a seat added since (codex r3). `clisJson` is absent when the
- * narrowed roster is the whole launch roster (the engine is handed that roster anyway).
+ * seats (codex r2), with the current roster's entry for a seat added since (codex r3). `clisJson` is ALWAYS the card's
+ * seats when it names any (crew#1593): without it the launch waits for roster readiness and reads the roster again, so
+ * a seat that became ready in between would join a job whose card never named it. Absent only for a card that names no
+ * seat and inherits no roster (the engine is handed the daemon's roster, as for any launch that names none).
  */
 export function jobLaunchRoster<T extends { key?: unknown }>(current: readonly T[], p: Pick<ArtifactProposal, 'seats' | 'relaunch'>): { roster: Array<T | { key?: unknown }>; clisJson?: string } {
   const keys = p.seats?.keys ?? [];
@@ -1052,7 +1054,7 @@ export function jobLaunchRoster<T extends { key?: unknown }>(current: readonly T
   const narrowed = keys.length > 0 ? roster.filter((s) => keys.includes(String(s.key))) : roster;
   const missingSeat = keys.find((k) => !roster.some((s) => String(s.key) === k));
   if (missingSeat !== undefined) throw new Error(`${missingSeat} is not on this daemon's roster; change who works on it`);
-  return (inherited !== null || narrowed.length !== roster.length) && narrowed.length > 0
+  return (inherited !== null || keys.length > 0) && narrowed.length > 0
     ? { roster: narrowed, clisJson: JSON.stringify(narrowed) }
     : { roster };
 }
