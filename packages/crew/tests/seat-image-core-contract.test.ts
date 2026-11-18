@@ -27,9 +27,10 @@ beforeEach(() => {
   chmodSync(runtime, 0o755);
   vi.stubEnv('HOME', dir);
   vi.stubEnv('WICKED_CONTAINER_RUNTIME', runtime);
+  // The operator's own configuration never leaks in: every seat image override and the base are cleared.
   vi.stubEnv('WICKED_SEAT_BASE_IMAGE', '');
   vi.stubEnv('WICKED_SEAT_BASE_DOCKERFILE', '');
-  vi.stubEnv('WICKED_SEAT_IMAGE_CODEX', '');
+  for (const k of new Set([...Object.keys(process.env).filter((x) => x.startsWith('WICKED_SEAT_IMAGE_')), ...['CLAUDE', 'CODEX', 'PI', 'OPENCODE', 'COPILOT', 'AGY'].map((c) => `WICKED_SEAT_IMAGE_${c}`)])) vi.stubEnv(k, '');
 });
 afterEach(() => { vi.unstubAllEnvs(); rmSync(dir, { recursive: true, force: true }); });
 
@@ -72,13 +73,29 @@ describe.runIf(posix)('the seat image status of the engine wicked-core-ts ships'
     expect(reading.unbuildable()?.get('codex')?.kind).toBe('operator');
   });
 
-  it('an operator base that is gone with no recipe makes the engine-built seats unusable', async () => {
+  it('an operator base that is gone with no recipe makes the engine-built seats unusable, through the roster\'s reading', async () => {
     vi.stubEnv('WICKED_SEAT_BASE_IMAGE', 'acme/seat-base:1');
     const st = await read();
     expect(st.base).toMatchObject({ image: 'acme/seat-base:1', present: false });
     expect(st.baseRecipe).toBe(false);
-    const cannot = unbuildableSeatImages(st);
-    for (const s of st.seats.filter((x) => !x.present && !x.operatorImage)) expect(cannot.get(s.cli)?.kind, s.cli).toBe('base');
-    expect(cannot.size).toBeGreaterThan(0);
+    const built = st.seats.filter((x) => !x.present && !x.operatorImage).map((x) => x.cli);
+    expect(built.length).toBeGreaterThan(0);
+    const reading = new SeatImageReading(seatImageStatusVia(() => exe ?? null));
+    await reading.refresh();
+    const cannot = reading.unbuildable();
+    for (const cli of built) expect(cannot?.get(cli)?.kind, cli).toBe('base');
+  });
+
+  it('a gone base WITH a readable recipe is buildable: the engine says baseRecipe and no seat is marked', async () => {
+    const recipe = join(dir, 'Dockerfile.base');
+    writeFileSync(recipe, 'FROM scratch\n');
+    vi.stubEnv('WICKED_SEAT_BASE_IMAGE', 'acme/seat-base:1');
+    vi.stubEnv('WICKED_SEAT_BASE_DOCKERFILE', recipe);
+    const st = await read();
+    expect(st.base).toMatchObject({ image: 'acme/seat-base:1', present: false });
+    expect(st.baseRecipe).toBe(true);
+    const reading = new SeatImageReading(seatImageStatusVia(() => exe ?? null));
+    await reading.refresh();
+    expect(reading.unbuildable()?.size).toBe(0);
   });
 });

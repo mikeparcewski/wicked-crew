@@ -416,7 +416,7 @@ export async function probeSeatImages(input: SeatImagesProbeInput): Promise<Syst
       : baseGone && !st.baseRecipe
         ? `Rebuild ${base!.image} from its Dockerfile (or set WICKED_SEAT_BASE_DOCKERFILE so the engine rebuilds it)${missing.length > 0 ? ', then Rebuild seat images' : ''}.`
         : mustBuild || unheld.length > 0 || baseGone
-          ? 'Rebuild seat images now, or let the next unit build or hold each on first use.'
+          ? `Rebuild seat images now, or let the next unit ${st.holdSupported ? 'build or hold' : 'build'} each on first use.`
           : '';
   // A pressed disk comes first: building onto it makes it worse.
   const remedy = diskPressed ? `${freeDisk}${fix !== '' ? ` Then: ${fix}` : ''}` : fix || 'Re-check.';

@@ -67,6 +67,7 @@ describe('crew#1526: the current engine\'s status (no held, no disk) is read, no
     expect(missing.state).toBe('degraded');
     expect(missing.reason).toMatch(/agy/);
     expect(missing.reason).not.toMatch(/older than|not held|disk/);
+    expect(missing.remedy).toBe('Rebuild seat images now, or let the next unit build each on first use.');
     const all = await probe(parseSeatImageStatus(CURRENT_ENGINE.replace('"present":false', '"present":true')));
     expect(all.state).toBe('ok');
     expect(all.reason).toBe('4 seat image(s) present');
