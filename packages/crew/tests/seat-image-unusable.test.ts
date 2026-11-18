@@ -21,9 +21,11 @@ function status(over: Partial<SeatImageStatus> = {}, seats: Partial<Record<strin
     base: { image: 'wicked-seat-base:rust', present: true, held: true },
     baseRecipe: false,
     holdSupported: true,
+    holdReported: true,
     floor: { image: 'wicked-floor:1', present: true, held: true },
     seats: ['claude', 'codex', 'pi'].map((cli) => ({ cli, image: `wicked-seat-${cli}:1`, present: true, held: true, operatorImage: false, ...(seats[cli] ?? {}) })),
     disk: { totalBytes: 100 * 2 ** 30, availBytes: 60 * 2 ** 30, usedPct: 40 },
+    diskReported: true,
     imageGcHighPct: 85,
     ...over,
   };

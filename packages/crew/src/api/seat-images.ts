@@ -37,6 +37,7 @@ const LINE_MAX = 240;
 export interface SeatImageEntry {
   image: string;
   present: boolean;
+  /** Held against image cleanup; `false` when the engine prints no `held` (a current engine holds nothing). */
   held: boolean;
 }
 
@@ -51,18 +52,26 @@ export interface SeatImageStatus {
   base: SeatImageEntry | null;
   baseRecipe: boolean;
   holdSupported: boolean;
+  /** (crew#1526) The engine says anything about holding (`holdSupported` or a `held`); a current engine does not. */
+  holdReported: boolean;
   floor: SeatImageEntry;
   seats: SeatImageSeat[];
   disk: { totalBytes: number; availBytes: number; usedPct: number } | null;
+  /** (crew#1526) The engine prints a `disk` (read or `null`); a current engine reads no disk. */
+  diskReported: boolean;
   imageGcHighPct: number;
 }
 
-/** Only the fields this row reads, picked one by one (nothing else the engine prints rides along). */
+/** Only the fields this row reads, picked one by one (nothing else the engine prints rides along). `image` and
+ *  `present` are required; `held` is optional (crew#1526: the engine's `ImageState` is `{image, present}` since it
+ *  stopped holding images, wicked-core `container_floor.rs`), and absent reads as not held. */
 function entry(v: unknown): SeatImageEntry | null {
   const o = v as Record<string, unknown> | null;
-  if (o === null || typeof o !== 'object' || typeof o['image'] !== 'string' || typeof o['present'] !== 'boolean' || typeof o['held'] !== 'boolean') return null;
-  return { image: o['image'], present: o['present'], held: o['held'] };
+  if (o === null || typeof o !== 'object' || typeof o['image'] !== 'string' || typeof o['present'] !== 'boolean') return null;
+  return { image: o['image'], present: o['present'], held: o['held'] === true };
 }
+
+const printsHeld = (v: unknown): boolean => typeof (v as Record<string, unknown> | null)?.['held'] === 'boolean';
 
 /** Parse the engine's answer; `null` when it is not the shape (an older engine prints text). */
 export function parseSeatImageStatus(stdout: string): SeatImageStatus | null {
@@ -91,11 +100,14 @@ export function parseSeatImageStatus(stdout: string): SeatImageStatus | null {
     runtime: typeof o['runtime'] === 'string' ? homeless(o['runtime']) : '',
     base: entry(o['base']),
     baseRecipe: o['baseRecipe'] === true,
-    // An engine before the field held on docker only: read as supported where it says nothing.
-    holdSupported: o['holdSupported'] !== false,
+    // An engine that prints `held` but not `holdSupported` held on docker only: supported. One that prints neither
+    // (the current engine) holds nothing, and says nothing about it (crew#1526).
+    holdSupported: typeof o['holdSupported'] === 'boolean' ? o['holdSupported'] : printsHeld(o['floor']),
+    holdReported: typeof o['holdSupported'] === 'boolean' || printsHeld(o['floor']),
     floor,
     seats,
     disk,
+    diskReported: Object.hasOwn(o, 'disk'),
     imageGcHighPct: typeof o['imageGcHighPct'] === 'number' ? o['imageGcHighPct'] : 85,
   };
 }
@@ -373,6 +385,12 @@ export async function probeSeatImages(input: SeatImagesProbeInput): Promise<Syst
     problems.push(`${diskWords}: from ${st.imageGcHighPct}% a kubelet's image cleanup deletes every image no container holds`);
   }
   if (state === 'ok') {
+    // A current engine reads no disk (crew#1526): the images are the reading, and nothing is unknown.
+    if (disk === null && !st.diskReported) {
+      const n = seats.length + 1 + (base !== null ? 1 : 0);
+      const word = !st.holdReported ? 'present' : st.holdSupported ? 'present and held' : 'present (this runtime cannot hold them against image cleanup)';
+      return infraRow('seat_images', 'ok', `${n} seat image(s) ${word}${idleWords}${rebuilding ? rebuildWords : ''}`, null, started, details, timeoutMs);
+    }
     if (disk === null) {
       return infraRow('seat_images', 'unknown', `the seat images are present${st.holdSupported ? ' and held' : ''}, but the runtime VM disk could not be read`, 'Re-check; the disk is read in a throwaway floor container.', started, details, timeoutMs);
     }
