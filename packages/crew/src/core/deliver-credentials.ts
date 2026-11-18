@@ -256,9 +256,7 @@ export async function deliverCredentialsProbe(
 
 /** `gh auth status --hostname github.com` → the logins, `'absent'` when gh is not installed (spawn
  *  ENOENT), `null` when it could not answer. Bounded to 4 s; one answer serves 30 s. */
-/** `ok`: `gh auth status` exited 0 — what an unpinned delivery requires (deliver.ts: `gh auth status … || _credmissing`).
- *  It exits non-zero when not signed in, and when any of its sign-ins fails. */
-type GhStatus = { logins: string[]; active: string | null; ok: boolean } | 'absent' | null;
+type GhStatus = { logins: string[]; active: string | null } | 'absent' | null;
 let ghMemo: { at: number; value: Promise<GhStatus> } | null = null;
 /** How long one gh answer serves the launch composer and the gate card (a sign-in is rare). */
 const GH_MEMO_MS = 30_000;
@@ -282,13 +280,6 @@ function ghStatusMemo(): Promise<GhStatus> {
   return value;
 }
 
-/** (crew#1527) gh's github.com logins, active login and whether `gh auth status` succeeded, from the memoised, bounded
- *  status probe: `'absent'` = gh is not installed, `null` = no answer in time (unknown, never "signed out"). Never reads
- *  a token. */
-export async function ghStatusRead(): Promise<{ logins: string[]; active: string | null; ok: boolean } | 'absent' | null> {
-  return ghStatusMemo().catch(() => null);
-}
-
 export async function ghLoginsOrAbsent(): Promise<string[] | 'absent' | null> {
   const st = await ghStatusMemo();
   return st === null || st === 'absent' ? st : st.logins;
@@ -302,7 +293,7 @@ function ghStatusUncached(): Promise<GhStatus> {
       // A non-numeric code (a timeout kill, another spawn failure) is no answer at all.
       if (err !== null && typeof code !== 'number') return resolve(null);
       const text = `${String(stdout ?? '')}\n${String(stderr ?? '')}`;
-      resolve({ logins: parseGhAuthStatusLogins(text), active: parseGhActiveLogin(text), ok: err === null });
+      resolve({ logins: parseGhAuthStatusLogins(text), active: parseGhActiveLogin(text) });
     });
   });
 }

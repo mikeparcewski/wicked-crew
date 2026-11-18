@@ -587,9 +587,33 @@ function apiOriginLiteral(origin: string | null | undefined): string {
 }
 
 /** A POSIX single-quoted shell word for `s` (an embedded `'` becomes `'\\''`). */
-function shellSingleQuote(s: string): string {
+export function shellSingleQuote(s: string): string {
   return `'${s.replaceAll("'", "'\\''")}'`;
 }
+
+/** (crew#1527) The deliver script's GitHub CREDENTIAL RESOLUTION on a github.com origin (inside its
+ *  `if [ -n "$GHREPO" ]`): an exported `GH_TOKEN` wins (`GHPIN=exported`); else a push identity reads that account's
+ *  token from gh's keyring (`GHPIN=keyring`); else gh's own login, which `gh auth status` must accept. A missing
+ *  credential calls `_credmissing github "<why>"`. ONE text: {@link deliverPrScript} runs it, and delivery readiness
+ *  (setup/delivery-readiness.ts) runs the same lines, in the same shell and environment, before the first job. */
+/** The script's gh call (`_gh`): with a resolved token (`GHT`), gh runs on that token against github.com, one command
+ *  at a time; without one, on gh's own login. Shared with delivery readiness (crew#1527). */
+export const GH_CALL_LINE =
+  '_gh() { if [ -n "$GHT" ]; then GH_TOKEN="$GHT" GH_HOST=github.com GH_REPO="github.com/$GHREPO" gh "$@"; else gh "$@"; fi; }';
+
+export const GITHUB_CREDENTIAL_LINES: readonly string[] = [
+  '  if [ -n "${GH_TOKEN:-}" ]; then GHT="$GH_TOKEN"; GHPIN=exported',
+  '  elif [ -n "${GH_ACCOUNT:-}" ]; then',
+  `    command -v gh >/dev/null 2>&1 || _credmissing github "GitHub credentials not configured: gh is not installed and no GH_TOKEN is exported, so $GH_ACCOUNT's token cannot be read. Install gh and run gh auth login as $GH_ACCOUNT, or export GH_TOKEN in the daemon's environment."`,
+  `    GHT=$(gh auth token --hostname github.com --user "$GH_ACCOUNT" 2>/dev/null || true); [ -n "$GHT" ] || _credmissing github "GitHub credentials not configured: gh holds no token for $GH_ACCOUNT on this machine and no GH_TOKEN is exported. Run gh auth login as $GH_ACCOUNT on this machine (gh 2.40 or newer), or export GH_TOKEN in the daemon's environment."`,
+  '    GHPIN=keyring',
+  '  else',
+  // (crew#720) Unpinned: gh's own login is the credential, so gh absent or signed out is the
+  // same credentials-missing refusal.
+  `    if ! command -v gh >/dev/null 2>&1; then _credmissing github "GitHub credentials not configured: gh is not installed and no GH_TOKEN is exported. Install gh and run gh auth login, or export GH_TOKEN in the daemon's environment."; fi`,
+  `    gh auth status --hostname github.com >/dev/null 2>&1 || _credmissing github "GitHub credentials not configured: gh is not signed in to github.com and no GH_TOKEN is exported. Run gh auth login on this machine, or export GH_TOKEN in the daemon's environment."`,
+  '  fi',
+];
 
 /**
  * The hardened deliver script, run as `bash -lc <script>` (login shell so the operator's PATH —
@@ -742,7 +766,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     "GHGIT=''",
     "NETGIT=''",
     // Pinned, gh talks to github.com whatever GH_HOST / GH_REPO the daemon inherited (codex r2).
-    '_gh() { if [ -n "$GHT" ]; then GH_TOKEN="$GHT" GH_HOST=github.com GH_REPO="github.com/$GHREPO" gh "$@"; else gh "$@"; fi; }',
+    GH_CALL_LINE,
     // Plain `git` outside Azure DevOps mode; in it, the network calls carry the auth header ONE-SHOT
     // in the child's environment, scoped to the exact repository URL (`http.<url>.extraHeader`),
     // after an empty entry resets any ambient extra header; redirects are refused, hooks and
@@ -783,17 +807,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // (crew#720's shape): before anything is staged, recoverable, said on the gate card too. Off
     // github.com (GitHub Enterprise, GitLab, a local path) the github.com identity does not apply.
     'if [ -n "$GHREPO" ]; then',
-    '  if [ -n "${GH_TOKEN:-}" ]; then GHT="$GH_TOKEN"; GHPIN=exported',
-    '  elif [ -n "${GH_ACCOUNT:-}" ]; then',
-    `    command -v gh >/dev/null 2>&1 || _credmissing github "GitHub credentials not configured: gh is not installed and no GH_TOKEN is exported, so $GH_ACCOUNT's token cannot be read. Install gh and run gh auth login as $GH_ACCOUNT, or export GH_TOKEN in the daemon's environment."`,
-    `    GHT=$(gh auth token --hostname github.com --user "$GH_ACCOUNT" 2>/dev/null || true); [ -n "$GHT" ] || _credmissing github "GitHub credentials not configured: gh holds no token for $GH_ACCOUNT on this machine and no GH_TOKEN is exported. Run gh auth login as $GH_ACCOUNT on this machine (gh 2.40 or newer), or export GH_TOKEN in the daemon's environment."`,
-    '    GHPIN=keyring',
-    '  else',
-    // (crew#720) Unpinned: gh's own login is the credential, so gh absent or signed out is the
-    // same credentials-missing refusal.
-    `    if ! command -v gh >/dev/null 2>&1; then _credmissing github "GitHub credentials not configured: gh is not installed and no GH_TOKEN is exported. Install gh and run gh auth login, or export GH_TOKEN in the daemon's environment."; fi`,
-    `    gh auth status --hostname github.com >/dev/null 2>&1 || _credmissing github "GitHub credentials not configured: gh is not signed in to github.com and no GH_TOKEN is exported. Run gh auth login on this machine, or export GH_TOKEN in the daemon's environment."`,
-    '  fi',
+    ...GITHUB_CREDENTIAL_LINES,
     '  if [ -n "$GHT" ]; then GHGIT="https://github.com/$GHREPO.git"; NETGIT="$GHGIT"; fi',
     // A `url.<base>.insteadOf` / `pushInsteadOf` that rewrites the canonical URL would send the
     // fetch or push somewhere the pin does not reach (ssh, or https carrying its own credential):

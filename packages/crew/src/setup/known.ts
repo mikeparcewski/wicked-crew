@@ -79,6 +79,62 @@ export async function gitIdentity(home: string = homedir()): Promise<SetupKnown[
   return name === null && email === null ? null : { name, email };
 }
 
+/** One git identity: what `git var GIT_<ROLE>_IDENT` prints, without its date. */
+export interface GitIdent {
+  name: string;
+  email: string;
+}
+
+/** (crew#1527) The author and committer a commit made here would carry, or `null` when git could not be asked. */
+export type GitCommitIdents = { author: GitIdent | null; committer: GitIdent | null } | null;
+
+/** `git var` output -> the identity (wicked-core `parse_git_ident`): the name before the last `<…>`, the email in it. */
+export function parseGitIdent(line: string): GitIdent | null {
+  const l = line.replace(/[\r\n]+$/u, '');
+  const close = l.lastIndexOf('>');
+  if (close < 0) return null;
+  const open = l.lastIndexOf('<', close);
+  if (open < 0) return null;
+  return { name: l.slice(0, open).replace(/ $/u, ''), email: l.slice(open + 1, close) };
+}
+
+/** An identity a seat's commit can carry (wicked-core `usable_git_ident`): a non-blank name, no control character. */
+export function usableGitIdent(i: GitIdent | null): i is GitIdent {
+  // eslint-disable-next-line no-control-regex
+  const ctl = /[\u0000-\u001f\u007f-\u009f]/u;
+  return i !== null && i.name.trim() !== '' && !ctl.test(i.name) && !ctl.test(i.email);
+}
+
+/** git's own words for "no identity is configured" (read with LC_ALL=C). */
+const IDENT_UNSET = /identity unknown|empty ident|auto-detection is disabled|unable to auto-detect/iu;
+
+/** (crew#1527) The author and the committer a commit from `cwd` would record, ASKED OF GIT exactly as wicked-core does
+ *  before a seat commits (`operator_git_idents`, core#1555): `git -c user.useConfigOnly=true var GIT_AUTHOR_IDENT` and
+ *  `… GIT_COMMITTER_IDENT`. git applies its own precedence (`GIT_AUTHOR_*` in the environment, `author.*` /
+ *  `committer.*`, then `user.*`, across every config file and include). A role git says is not configured is `null`;
+ *  ANY other failure (git not installed, a timeout, an error that is not git's "identity unknown") is `null` for the
+ *  whole read: could not check, never "not configured". */
+export async function gitCommitIdents(opts: { cwd?: string; env?: NodeJS.ProcessEnv; git?: string } = {}): Promise<GitCommitIdents> {
+  const one = async (which: 'GIT_AUTHOR_IDENT' | 'GIT_COMMITTER_IDENT'): Promise<GitIdent | null | 'unreadable'> => {
+    try {
+      const { stdout } = await execCapped(opts.git ?? 'git', ['-c', 'user.useConfigOnly=true', 'var', which], {
+        timeout: GIT_TIMEOUT_MS,
+        windowsHide: true,
+        cwd: opts.cwd ?? homedir(),
+        env: { ...(opts.env ?? process.env), GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' },
+      });
+      return parseGitIdent(stdout) ?? 'unreadable';
+    } catch (err) {
+      const e = err as { code?: unknown; stderr?: unknown; killed?: unknown };
+      if (typeof e.code === 'number' && e.killed !== true && IDENT_UNSET.test(String(e.stderr ?? ''))) return null;
+      return 'unreadable';
+    }
+  };
+  const [author, committer] = await Promise.all([one('GIT_AUTHOR_IDENT'), one('GIT_COMMITTER_IDENT')]);
+  if (author === 'unreadable' || committer === 'unreadable') return null;
+  return { author, committer };
+}
+
 /** Count tracked source files by language in each repository (`git ls-files`, bounded). */
 export async function languagesOf(repos: readonly Pick<RepoEntry, 'root_path'>[]): Promise<{ languages: KnownLanguage[]; files: number }> {
   const counts = new Map<string, number>();

@@ -5160,28 +5160,30 @@ export interface SetupKnown {
 }
 
 /**
- * api-types 0.214.0 (crew#1527): can a GitHub pull request be opened before the first job? Built from what the deliver
- * step requires on a github.com origin: gh installed; the credential by the launch preflight's rule (an exported
- * `GH_TOKEN`, else, with a push identity configured, that account's gh login, else gh's own login, with `gh auth status`
- * succeeding); and a global git author with a name and an email. An exported `GH_TOKEN` with a push identity is matched
- * to it only at delivery, so `ready` is `null` for it. Checks the daemon-wide push identity only: a repository's own
- * (`deliverIdentityByRepo`) and an Azure DevOps origin are checked at launch, and a repository-local git identity is not
- * seen. The system page's `delivery` infra row is the same answer, through the same 4 s-bounded read.
+ * api-types 0.214.0 (crew#1527): can a GitHub pull request be opened before the first job? On a github.com origin the
+ * daemon RUNS the deliver step's own credential lines in its shell and environment (so the token delivery would use,
+ * an exported `GH_TOKEN` or `GITHUB_TOKEN` included, is the one checked), asks GitHub who that token is (`gh api user`,
+ * which refuses an expired or revoked token and an exported token of another account than the push identity), and asks
+ * git for the author and committer as wicked-core does before a seat commits (`git var`). Anything that could not be
+ * checked is `ready: null`. Checks the daemon-wide push identity only: a repository's own (`deliverIdentityByRepo`) and
+ * an Azure DevOps origin are checked at launch, and a repository-local git identity is not seen. The system page's
+ * `delivery` infra row is the same answer, through the same 4 s-bounded read.
  */
 export interface DeliveryReadiness {
   /** The daemon's default for a launch that does not say: `pr` opens a pull request, `none` keeps the work on its
    *  branch. studio's composer always says, from its own "Open a PR when a build run finishes" preference. */
   deliverDefault: 'pr' | 'none';
   /** Can a GitHub pull request be opened now? `true` = yes; `false` = a job that asks for one would stop at its deliver
-   *  step; `null` = not known (gh did not answer in time, a read failed, or an exported token's account is checked
-   *  only at delivery). Answered whatever `deliverDefault` says. */
+   *  step; `null` = could not check (a timeout, GitHub or git not answering, a read that failed). Answered whatever
+   *  `deliverDefault` says. */
   ready: boolean | null;
-  /** The GitHub credential by the launch preflight's rule. */
+  /** The GitHub credential delivery would use, as its own credential lines resolved it. */
   github: DeliverCredentials;
   /** The configured push identity (`deliverIdentityLogin`, else `GH_ACCOUNT`); `null` = none (gh's own login opens
    *  the pull request). */
   pushAs: string | null;
-  /** The global git author; `null` when neither name nor email is set (or not read in time). */
+  /** The git author commits carry, as git resolves it (`GIT_AUTHOR_*`, `author.*`, `user.*`); `null` when none is
+   *  configured or it could not be read. */
   gitAuthor: { name: string | null; email: string | null } | null;
   /** One sentence: what a pull-request delivery will do now. Never the author's email. */
   reason: string;

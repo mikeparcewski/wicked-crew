@@ -22,12 +22,15 @@ mentioned only where a daemon release depends on them.
 - **Before the first job, studio can tell whether a GitHub pull request can be opened (crew#1527).** Delivery opens
   a pull request by default, but nothing checked the GitHub sign-in it needs until a first job reached its deliver
   step. `GET /api/v1/setup/known` now carries `delivery` (wicked-crew-api-types 0.214.0, additive `DeliveryReadiness`)
-  and `GET /api/v1/system` a `delivery` infra row, the same answer through one 4 s-bounded read. `ready` follows what
-  the deliver step requires: gh installed; the credential by the launch preflight's rule (an exported `GH_TOKEN`, else
-  the configured push identity's gh login, else gh's own login with `gh auth status` succeeding); and a global git
-  author with a name and an email. Otherwise it names `gh auth login`, the `git config --global` commands, or
-  delivering locally. gh not answering, a failed read, or an exported token whose account delivery checks over the
-  network read `unknown`, never ready. The row (an observer read) never names the author's email. Known gaps: a
+  and `GET /api/v1/system` a `delivery` infra row, the same answer through one 4 s-bounded read. `ready` is what the
+  deliver step does, run rather than restated. The daemon runs the deliver script's own credential lines (now one
+  shared text) in the same `bash -lc` and environment, so the token delivery would use, an exported `GH_TOKEN` or
+  `GITHUB_TOKEN` included, is the one checked. Then it asks GitHub who that token is (the script's `gh api user`), which
+  refuses an expired token and another account's token for the push identity. It asks git for the author and
+  committer as wicked-core does (`git -c user.useConfigOnly=true var GIT_AUTHOR_IDENT` / `GIT_COMMITTER_IDENT`). Not
+  ready names `gh auth login`, the `git config --global` commands, or delivering locally. Anything that could not be
+  checked (a timeout, GitHub or git not answering, a read that failed) reads `unknown`, never ready and never not
+  ready. The row (an observer read) never names the author's email. Known gaps: a
   repository's own push identity, an Azure DevOps origin and a repository-local git identity are checked at launch
   only.
 
