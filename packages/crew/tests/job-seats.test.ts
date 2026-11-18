@@ -6,7 +6,7 @@
  * PR 1 keeps today's seat count (`seatsNeeded`: the Plan it card needs 2, one builds and one checks); PR 2 replaces
  * it with the engine's coverage rule (core#1558).
  */
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -399,6 +399,7 @@ describe('newWorkSeats read strictly: unset is the default, unreadable or invali
     ['not JSON', () => writeFileSync(file, '{"newWorkSeats": ["claude"')],
     ['not a JSON object', () => writeFileSync(file, '["claude"]')],
     ['a directory where the file should be', () => mkdirSync(file)],
+    ['a settings link whose target is gone', () => symlinkSync(join(home, 'moved-away.json'), file)],
   ])('settings file unreadable (%s): the job is refused as settings_unavailable, never every seat', async (_label, arrange) => {
     arrange();
     // What made it widen: the lenient reader serves the defaults, where no pick reads as every seat.
@@ -413,7 +414,11 @@ describe('newWorkSeats read strictly: unset is the default, unreadable or invali
 
   it('an invalid pick survives an unrelated settings write, so the write cannot quietly widen the pool', async () => {
     writeFileSync(file, '{"newWorkSeats": "claude"}');
-    await adapter.updateSettings({ graphNodeLimit: 200 });
+    // Served settings keep the API's type (no invalid value in GET /settings or a PUT's answer)...
+    expect(await adapter.getSettings()).not.toHaveProperty('newWorkSeats');
+    expect(await adapter.updateSettings({ graphNodeLimit: 200 })).not.toHaveProperty('newWorkSeats');
+    // ...while the file keeps it, so new work still refuses instead of reading "not set".
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toMatchObject({ newWorkSeats: 'claude', graphNodeLimit: 200 });
     const res = await prod().pick();
     expect(res.code).toBe(409);
     expect(res.body).toMatchObject({ code: 'setting_invalid' });

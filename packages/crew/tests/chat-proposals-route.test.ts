@@ -5,7 +5,7 @@
 // production configuration advertises `proposals` with every operation off: seats are told nothing and no card is made.
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -494,5 +494,64 @@ describe('chat proposals (server, A2)', () => {
     expect((await decide(stub, 'bad-1', 'bad-1:nope', { decision: 'go' })).statusCode).toBe(404);
     expect((await decide(stub, 'bad-1', 'bad-1:nope', { decision: 'maybe' })).statusCode).toBe(400);
     expect((await decide(stub, 'no-such-chat', 'x', { decision: 'go' })).statusCode).toBe(404);
+  });
+
+  /**
+   * (F1/F2 round 3) A document's helpers come from `newWorkSeats`, read strictly through the route's production reader
+   * (the hermetic settings file, tests/setup/hermetic-home.ts). Set but invalid or unreadable refuses with its code at
+   * draw, at a helper pick and at Start; a repaired setting lifts the block without a new proposal.
+   */
+  describe('a document and the newWorkSeats setting (fail closed, recoverable)', () => {
+    const settingsFile = (): string => process.env['WICKED_CREW_SYSTEM_SETTINGS']!;
+    let saved: string | null = null;
+    const setRaw = (raw: string): void => writeFileSync(settingsFile(), raw);
+    beforeAll(() => { saved = existsSync(settingsFile()) ? readFileSync(settingsFile(), 'utf8') : null; });
+    afterAll(() => { if (saved !== null) writeFileSync(settingsFile(), saved); else rmSync(settingsFile(), { force: true }); });
+    const restore = (): void => { if (saved !== null) writeFileSync(settingsFile(), saved); else rmSync(settingsFile(), { force: true }); };
+
+    it('drawn while invalid: blocked with the reason; a helper pick and Start refuse 409 setting_invalid; repaired, Start draws helpers and starts', async () => {
+      try {
+        setRaw('{"newWorkSeats": "claude"}');
+        await turn(stub, stubListeners, 'nws-doc-1', 'Make a deck on coverage', { entry: 'presentation', title: 'Coverage', sources: ['chat'] });
+        const p = await proposalOf(stub, 'nws-doc-1');
+        expect(p.helpers).toBeNull();
+        expect(p.blocked).toMatch(/^Can't pick its helpers: .*newWorkSeats/);
+        const go = await decide(stub, 'nws-doc-1', p.pid, { decision: 'go' });
+        expect(go.statusCode).toBe(409);
+        expect(go.json()).toMatchObject({ code: 'setting_invalid' });
+        const pick = await decide(stub, 'nws-doc-1', p.pid, { decision: 'go', edits: { helpers: ['claude', 'codex'] } });
+        expect(pick.statusCode).toBe(409);
+        expect(pick.json()).toMatchObject({ code: 'setting_invalid' });
+        const before = stubRows().length;
+        restore();
+        const fixed = await decide(stub, 'nws-doc-1', p.pid, { decision: 'go' });
+        expect(fixed.statusCode, fixed.body).toBe(200);
+        expect(stubRows().length - before).toBe(1);
+      } finally {
+        restore();
+      }
+    });
+
+    it('drawn while readable, then the file breaks: Start refuses 409 settings_unavailable and starts nothing; repaired, it starts', async () => {
+      try {
+        await turn(stub, stubListeners, 'nws-doc-2', 'Make a deck on coverage', { entry: 'presentation', title: 'Coverage', sources: ['chat'] });
+        const p = await proposalOf(stub, 'nws-doc-2');
+        expect(p.helpers?.seats).toHaveLength(2);
+        const before = stubRows().length;
+        setRaw('{"newWorkSeats": ["claude"');
+        const go = await decide(stub, 'nws-doc-2', p.pid, { decision: 'go' });
+        expect(go.statusCode).toBe(409);
+        expect(go.json()).toMatchObject({ code: 'settings_unavailable' });
+        const pick = await decide(stub, 'nws-doc-2', p.pid, { decision: 'go', edits: { helpers: ['claude', 'codex'] } });
+        expect(pick.statusCode).toBe(409);
+        expect(pick.json()).toMatchObject({ code: 'settings_unavailable' });
+        expect(stubRows().length).toBe(before);
+        restore();
+        expect((await decide(stub, 'nws-doc-2', p.pid, { decision: 'go' })).statusCode).toBe(200);
+        expect(stubRows().length - before).toBe(1);
+      } finally {
+        restore();
+      }
+    });
   });
 });

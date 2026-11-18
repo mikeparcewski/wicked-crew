@@ -857,6 +857,10 @@ class EditRefusal extends Error {}
 
 /** The one block a person can lift from the card (Change something → two helpers); every other block is the record's. */
 const NEEDS_HELPER = 'Needs a second helper to check it';
+/** (F1/F2) The block a document drawn while `newWorkSeats` can't be honored carries: this prefix, then the reason. Start
+ *  re-reads the setting, so a repaired setting lifts it (helpers drawn again), and a person's helper pick lifts it too. */
+const SEATS_SETTING_BLOCK = "Can't pick its helpers: ";
+const isSeatsSettingBlock = (b: string | null | undefined): boolean => typeof b === 'string' && b.startsWith(SEATS_SETTING_BLOCK);
 
 export interface DecideResult {
   code: number;
@@ -1571,6 +1575,17 @@ export class ChatProposals {
       if (err instanceof EditRefusal || err instanceof JobRefusal) return this.refusalOf(err)!;
       throw err;
     }
+    // (F1/F2) A document's helpers come from `newWorkSeats`: Start re-reads it, as a job's Start does (jobContext). Set
+    // but unreadable or invalid refuses with the reason; once it reads again, helpers that couldn't be drawn are drawn.
+    if (effective.kind !== 'job' && (effective.helpers !== null || isSeatsSettingBlock(effective.blocked))) {
+      const { refusal } = await this.seatPool();
+      if (refusal !== undefined) return { code: 409, body: { code: refusal.code, error: refusal.message, view: viewOf(folded) } };
+      if (isSeatsSettingBlock(effective.blocked)) {
+        const chat = this.deps.chat(chatId) ?? { projectId: effective.filedIn.projectId, repos: [], lead: null, seats: [], analysis: false };
+        const drawn = await this.docHelpers(chat);
+        effective = { ...effective, helpers: drawn.helpers, blocked: drawn.block };
+      }
+    }
     if (effective.blocked !== null) {
       return { code: 409, body: { code: 'proposal_blocked', error: effective.blocked, view: viewOf(folded) } };
     }
@@ -1889,11 +1904,11 @@ export class ChatProposals {
     if (edits.helpers !== undefined) {
       const chat = this.deps.chat(chatId) ?? { projectId: p.filedIn.projectId, repos: [], lead: null, seats: [], analysis: false };
       const { pool, refusal } = await this.seatPool();
-      if (refusal !== undefined) throw new EditRefusal(refusal.message);
+      if (refusal !== undefined) throw new JobRefusal(refusal.code, refusal.message, 409);
       const helpers = this.helpers(chat, edits.helpers, pool);
       if (helpers === null) throw new EditRefusal('pick two different helpers that can work now');
-      // Two helpers lift the one block a person can lift.
-      next = { ...next, helpers, blocked: next.blocked === NEEDS_HELPER ? null : next.blocked };
+      // Two helpers lift the block a person can lift: a missing second helper, or none drawn while the setting was bad.
+      next = { ...next, helpers, blocked: next.blocked === NEEDS_HELPER || isSeatsSettingBlock(next.blocked) ? null : next.blocked };
     }
     // A3 (§4.2 Change something, create): the project — only in a chat filed in no project. Every source, repository
     // and turn is re-checked against the target below; what is outside it is struck (a `message:` whole).
@@ -2350,7 +2365,7 @@ export class ChatProposals {
   private async docHelpers(chat: ProposalChat): Promise<{ helpers: ProposalHelpers | null; block: string | null }> {
     const { pool, refusal } = await this.seatPool();
     const helpers = this.helpers(chat, undefined, pool);
-    return { helpers, block: refusal !== undefined ? refusal.message : helpers === null ? NEEDS_HELPER : null };
+    return { helpers, block: refusal !== undefined ? `${SEATS_SETTING_BLOCK}${refusal.message}` : helpers === null ? NEEDS_HELPER : null };
   }
 
   private async jobContext(chatId: string, pid: string, turnId: string | null, seat: string, chat: JobChat, extra: Pick<JobContext, 'revises' | 'lineage' | 'notes'> & Partial<Pick<JobContext, 'answers' | 'request'>>): Promise<JobContext> {
