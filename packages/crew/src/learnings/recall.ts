@@ -9,12 +9,25 @@
  * preference, a pattern a person widened) applies everywhere. The run's own words rank them; at
  * most {@link MAX_RECALLED} are included, so a large store never floods a brief.
  *
+ * Only approved learnings (crew#1546). The store also holds what nobody approved: every session's
+ * captures (a hook's "Session goal (turn N)" rows, `mem store` writes), which can quote another
+ * project's paths and task output. estate marks a memory it wrote on approval with the id
+ * `proposal:<proposal id>` and no memory tool lets a caller choose an id, so that mark, not the
+ * content, admits a row; everything else never reaches a brief.
+ *
  * Best-effort by contract: a store that cannot be read launches the run without the block.
  */
+
+// The one host-path redactor (crew#1499: home, temp and state-home roots, with their realpath and
+// `/private` twins). deliver-text also imports this module; both sides only call each other's
+// functions at run time, so the cycle is inert.
+import { redactHostPaths } from '../core/deliver-text.js';
 
 export const RUN_LEARNINGS_OPEN = '<!-- wicked-crew:learnings -->';
 export const RUN_LEARNINGS_CLOSE = '<!-- /wicked-crew:learnings -->';
 export const MAX_RECALLED = 8;
+/** The id prefix estate gives a memory written by `proposal.approve` (estate proposal.rs `with_id`). */
+export const APPROVED_MEMORY_PREFIX = 'proposal:';
 /** The longest one recalled learning may be in a brief. */
 const MAX_RECALLED_CHARS = 600;
 
@@ -31,6 +44,11 @@ function words(text: string): Set<string> {
   return new Set(text.toLowerCase().match(WORD) ?? []);
 }
 
+/** Whether the store wrote this memory on an operator's approval (its id carries estate's mark). */
+export function isApproved(m: Pick<MemoryRow, 'memory_id'>): boolean {
+  return typeof m.memory_id === 'string' && m.memory_id.startsWith(APPROVED_MEMORY_PREFIX) && m.memory_id.length > APPROVED_MEMORY_PREFIX.length;
+}
+
 /** Whether a memory's repo/project facets allow it in a run on `repo` filed in `project`. */
 export function appliesTo(facets: Record<string, unknown>, repo: string | null, project: string | null): boolean {
   const r = typeof facets['repo'] === 'string' ? facets['repo'] : null;
@@ -40,11 +58,11 @@ export function appliesTo(facets: Record<string, unknown>, repo: string | null, 
   return true;
 }
 
-/** The learnings that apply, best first: scoped to this repo/project before general ones, then by overlap with the problem, then newest. */
+/** The approved learnings that apply, best first: scoped to this repo/project before general ones, then by overlap with the problem, then newest. */
 export function selectLearnings(rows: readonly MemoryRow[], problem: string, repo: string | null, project: string | null, max = MAX_RECALLED): MemoryRow[] {
   const asked = words(problem);
   const scored = rows
-    .filter((m) => typeof m.content === 'string' && m.content.trim() !== '' && appliesTo(m.facets ?? {}, repo, project))
+    .filter((m) => isApproved(m) && typeof m.content === 'string' && m.content.trim() !== '' && appliesTo(m.facets ?? {}, repo, project))
     .map((m) => {
       const scoped = (typeof m.facets['repo'] === 'string' ? 2 : 0) + (typeof m.facets['project'] === 'string' ? 1 : 0);
       let overlap = 0;
@@ -55,9 +73,9 @@ export function selectLearnings(rows: readonly MemoryRow[], problem: string, rep
   return scored.slice(0, max).map((s) => s.m);
 }
 
-/** A learning's text as one brief line: whitespace folded, capped, and never able to open or close the block. */
+/** A learning's text as one brief line: this host's home, state and temp roots redacted, whitespace folded, capped, and never able to open or close the block. */
 function briefLine(content: string): string {
-  const t = content.replaceAll(RUN_LEARNINGS_OPEN, '').replaceAll(RUN_LEARNINGS_CLOSE, '').replace(/\s+/gu, ' ').trim();
+  const t = redactHostPaths(content.replaceAll(RUN_LEARNINGS_OPEN, '').replaceAll(RUN_LEARNINGS_CLOSE, '')).replace(/\s+/gu, ' ').trim();
   return t.length > MAX_RECALLED_CHARS ? `${t.slice(0, MAX_RECALLED_CHARS - 1)}…` : t;
 }
 
