@@ -20,6 +20,7 @@ import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { EstateMcpError } from '../src/core/estate-mcp-client.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
+import { memoryRows, withRunLearnings } from '../src/learnings/recall.js';
 
 type MockAdapter = {
   sessionsDetail: Mock;
@@ -563,6 +564,107 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
     expect(res.statusCode).toBe(502);
     expect((res.json() as { error: string }).error).toMatch(/nothing changed$/);
     expect([...s.keys()]).toEqual(['m1']);
+  });
+
+  // crew#1546: recall admits only estate's approval mark (`proposal:<id>`), so editing an approved
+  // learning must keep it approved, or the edit silently drops it from every brief (HIDE).
+  describe('an approved learning stays approved through an edit (crew#1546)', () => {
+    type Mem = { memory_id: string; scope: string; content: string; tier: string; facets: Record<string, string>; created_at: number };
+    const APPROVED: Mem = { memory_id: 'proposal:p0', scope: '', content: 'old approved words', tier: 'semantic', facets: { repo: 'acme-core' }, created_at: 100 };
+    /** The store plus estate's approval queue: approve writes `proposal:<id>` where estate would place it. */
+    function queue(initial: Mem[], opts: { approve?: 'throw' | 'throw-after-write'; placeAt?: string } = {}) {
+      const s = new Map(initial.map((m) => [m.memory_id, m]));
+      const proposals = new Map<string, { payload: Record<string, unknown>; facets: Record<string, string>; state: string }>();
+      let n = 0;
+      estateTool.mockImplementation(async (tool: string, args: Record<string, unknown>) => {
+        if (tool === 'memory.list') return { items: [...s.values()] };
+        if (tool === 'memory.erase') return { deleted_count: s.delete(String(args['id'])) ? 1 : 0 };
+        if (tool === 'proposal.submit') {
+          const id = `n${++n}`;
+          proposals.set(id, { payload: args['payload'] as Record<string, unknown>, facets: args['facets'] as Record<string, string>, state: 'pending' });
+          return { id };
+        }
+        if (tool === 'proposal.approve') {
+          const p = proposals.get(String(args['id']))!;
+          if (opts.approve === 'throw') throw new EstateMcpError('approve failed');
+          const scope = opts.placeAt ?? (p.payload['reach'] === 'operator' ? `operator:${p.facets['user'] ?? 'local'}` : '');
+          s.set(`proposal:${String(args['id'])}`, { memory_id: `proposal:${String(args['id'])}`, scope, content: String(p.payload['content']), tier: String(p.payload['tier']), facets: p.facets, created_at: 200 });
+          p.state = 'approved';
+          if (opts.approve === 'throw-after-write') throw new EstateMcpError('exited before answering proposal.approve');
+          return { outcome: 'promoted', active_id: `memory:proposal:${String(args['id'])}` };
+        }
+        if (tool === 'proposal.reject') {
+          proposals.get(String(args['id']))!.state = 'rejected';
+          return { ok: true };
+        }
+        throw new Error(`unexpected tool ${tool}`);
+      });
+      return { s, proposals };
+    }
+
+    it('files the new words through approval with the old reach, tier and facets, then retires the old one', async () => {
+      const { s, proposals } = queue([APPROVED]);
+      const res = await edit({ memory_id: 'proposal:p0', content: 'new approved words' });
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json()).toEqual({ memory_id: 'proposal:n1', retired: 'proposal:p0' });
+      expect(estateTool.mock.calls.map((c) => c[0])).not.toContain('memory.capture');
+      expect(proposals.get('n1')).toMatchObject({ state: 'approved', payload: { content: 'new approved words', reach: 'project', tier: 'semantic' }, facets: { repo: 'acme-core' } });
+      expect([...s.keys()]).toEqual(['proposal:n1']);
+      // The edited learning still reaches a brief on its repo.
+      const { problem, recalled } = withRunLearnings('Fix it', memoryRows({ items: [...s.values()] }), 'acme-core', null);
+      expect(recalled).toBe(1);
+      expect(problem).toContain('new approved words');
+    });
+
+    it('an operator learning is filed with operator reach and lands back at its operator scope', async () => {
+      const op = { ...APPROVED, memory_id: 'proposal:p1', scope: 'operator:alice', facets: { user: 'alice' } };
+      const { s, proposals } = queue([op]);
+      const res = await edit({ memory_id: 'proposal:p1', content: 'tables in replies, always' });
+      expect(res.statusCode, res.body).toBe(200);
+      expect(proposals.get('n1')!.payload['reach']).toBe('operator');
+      expect(s.get('proposal:n1')!.scope).toBe('operator:alice');
+    });
+
+    it('a scope approval cannot place is refused before anything is written (409)', async () => {
+      const { s } = queue([{ ...APPROVED, scope: 'org:acme/doc:ops' }]);
+      const res = await edit({ memory_id: 'proposal:p0', content: 'new approved words' });
+      expect(res.statusCode).toBe(409);
+      expect((res.json() as { error: string }).error).toMatch(/nothing changed$/);
+      expect(estateTool.mock.calls.map((c) => c[0])).not.toContain('proposal.submit');
+      expect([...s.keys()]).toEqual(['proposal:p0']);
+    });
+
+    it('an approve that fails without writing rejects the proposal: 502, nothing changed', async () => {
+      const { s, proposals } = queue([APPROVED], { approve: 'throw' });
+      const res = await edit({ memory_id: 'proposal:p0', content: 'new approved words' });
+      expect(res.statusCode).toBe(502);
+      expect((res.json() as { error: string }).error).toMatch(/approve failed.*nothing changed$/);
+      expect(proposals.get('n1')!.state).toBe('rejected');
+      expect([...s.keys()]).toEqual(['proposal:p0']);
+    });
+
+    it('an approve whose answer is lost but which wrote is found by the re-read and the edit completes', async () => {
+      const { s } = queue([APPROVED], { approve: 'throw-after-write' });
+      const res = await edit({ memory_id: 'proposal:p0', content: 'new approved words' });
+      expect(res.statusCode, res.body).toBe(200);
+      expect([...s.keys()]).toEqual(['proposal:n1']);
+    });
+
+    it('a replacement placed at another scope is taken back out: 502, nothing changed (KEY)', async () => {
+      const { s } = queue([APPROVED], { placeAt: 'operator:local' });
+      const res = await edit({ memory_id: 'proposal:p0', content: 'new approved words' });
+      expect(res.statusCode).toBe(502);
+      expect((res.json() as { error: string }).error).toMatch(/landed at scope "operator:local", not ""; they were taken back out, so nothing changed/);
+      expect([...s.keys()]).toEqual(['proposal:p0']);
+    });
+
+    it('a memory that was never approved is still captured, and stays out of briefs', async () => {
+      const s = store([{ ...OLD, scope: '' }]);
+      const res = await edit({ memory_id: 'm1', content: 'new words' });
+      expect(res.statusCode).toBe(200);
+      expect(estateTool.mock.calls.map((c) => c[0])).toContain('memory.capture');
+      expect(withRunLearnings('Fix it', memoryRows({ items: [...s.values()] }), null, null).recalled).toBe(0);
+    });
   });
 
   it('refuses a second edit of the same memory while one is in flight (409)', async () => {

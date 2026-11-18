@@ -106,6 +106,7 @@ import type {
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 import { callEstateTool, EstateMcpError, ESTATE_INSTALL_HINT, memoryStoreInfo } from '../core/estate-mcp-client.js';
 import { NO_LEARNINGS_WORKFLOWS, type RunLearningsService } from '../learnings/service.js';
+import { APPROVED_MEMORY_PREFIX } from '../learnings/recall.js';
 import { matchRulesForJob, stripRulesBrief, withRulesBrief } from '../decisions/rules-brief.js';
 import { SeatHealthTracker } from './seat-health.js';
 import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
@@ -10739,6 +10740,58 @@ export function registerRoutes(
       };
       const deletedCount = (raw: unknown): unknown =>
         (typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)['deleted_count'] : undefined);
+      // An approved memory's replacement, filed and approved through the queue. Placement is estate's:
+      // root scope for `project` reach, `operator:<user>` for `operator`; any other scope cannot be
+      // placed again, so it is refused before anything is written. Whatever the calls answer, the
+      // store decides: the new `proposal:<id>` memory must be there at the old scope, or it is taken
+      // back out (and a proposal that did not land is rejected), and the answer says what remains.
+      const reapproveMemory = async (old: MemoryItem, content: string): Promise<{ id: string } | { status: 409 | 502; error: string }> => {
+        const reach = old.scope === '' ? 'project' : old.scope.startsWith('operator:') ? 'operator' : null;
+        if (reach === null) {
+          return { status: 409, error: `${old.id} is an approved learning at scope ${JSON.stringify(old.scope)}, which approval cannot place again; nothing changed` };
+        }
+        const payload: Record<string, unknown> = { content, reach };
+        if (old.tier !== '') payload['tier'] = old.tier;
+        let pid: string;
+        try {
+          const raw = await estateTool('proposal.submit', { kind_type: 'memory', payload, facets: old.facets });
+          const id = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)['id'] : undefined;
+          if (typeof id !== 'string' || id === '') return { status: 502, error: 'filing the new words for approval returned no proposal id; nothing changed' };
+          pid = id;
+        } catch (err) {
+          return { status: 502, error: `filing the new words for approval failed (${message(err)}); nothing changed` };
+        }
+        const newId = `${APPROVED_MEMORY_PREFIX}${pid}`;
+        let approveErr: unknown = null;
+        try {
+          await estateTool('proposal.approve', { id: pid });
+        } catch (err) {
+          approveErr = err;
+        }
+        let now: MemoryItem[];
+        try {
+          now = await listAll();
+        } catch (err) {
+          return { status: 502, error: `approving the new words could not be checked (${message(err)}); ${newId} may exist beside ${old.id}` };
+        }
+        const landed = now.find((m) => m.id === newId);
+        if (landed === undefined) {
+          await estateTool('proposal.reject', { id: pid }).catch(() => undefined);
+          return { status: 502, error: `approving the new words failed (${approveErr === null ? 'no memory was written' : message(approveErr)}); nothing changed` };
+        }
+        if (landed.scope !== old.scope) {
+          await estateTool('memory.erase', { id: newId }).catch(() => undefined);
+          let gone = false;
+          try {
+            gone = !(await listAll()).some((m) => m.id === newId);
+          } catch {
+            // Reported below as not confirmed gone.
+          }
+          const where = `the approved words landed at scope ${JSON.stringify(landed.scope)}, not ${JSON.stringify(old.scope)}`;
+          return { status: 502, error: gone ? `${where}; they were taken back out, so nothing changed` : `${where}; taking ${newId} back out was not confirmed, so both ${old.id} and ${newId} may remain` };
+        }
+        return { id: newId };
+      };
       try {
         // 1. The memory as it is: its tier, scope and facets ride onto the replacement.
         let before: MemoryItem[];
@@ -10765,43 +10818,52 @@ export function registerRoutes(
           }
           return upstream('checking that the store can erase one memory failed; nothing changed', err);
         }
-        // 3. The new words, as a new memory in the old one's place.
-        const captureArgs: Record<string, unknown> = { content, scope: old.scope, facets: old.facets };
-        if (old.tier !== '') {
-          captureArgs['tier'] = old.tier;
-          const kind = KIND_FOR_TIER[old.tier];
-          if (kind !== undefined) captureArgs['kind'] = kind;
-        }
-        const beforeIds = new Set(before.map((m) => m.id));
+        // 3. The new words, as a new memory in the old one's place. An approved learning (estate's
+        //    `proposal:` id, the only mark run-learnings recall admits: crew#1546) is replaced through
+        //    the approval queue, so the replacement carries the mark too; a capture would mint a bare id
+        //    and the edited learning would silently stop reaching briefs. Anything else is captured.
         let newId: string | null = null;
-        let captureErr: unknown = null;
-        try {
-          const captured = await estateTool('memory.capture', captureArgs);
-          const id = typeof captured === 'object' && captured !== null ? (captured as Record<string, unknown>)['memory_id'] : undefined;
-          if (typeof id === 'string' && id !== '') newId = id;
-          else captureErr = new EstateMcpError('memory.capture returned no memory_id');
-        } catch (err) {
-          captureErr = err;
-        }
-        if (newId === null) {
-          // The capture may still have written (a lost answer): look before saying nothing changed.
-          let now: MemoryItem[];
+        if (memoryId.startsWith(APPROVED_MEMORY_PREFIX)) {
+          const placed = await reapproveMemory(old, content);
+          if ('error' in placed) return reply.code(placed.status).send({ error: placed.error });
+          newId = placed.id;
+        } else {
+          const captureArgs: Record<string, unknown> = { content, scope: old.scope, facets: old.facets };
+          if (old.tier !== '') {
+            captureArgs['tier'] = old.tier;
+            const kind = KIND_FOR_TIER[old.tier];
+            if (kind !== undefined) captureArgs['kind'] = kind;
+          }
+          const beforeIds = new Set(before.map((m) => m.id));
+          let captureErr: unknown = null;
           try {
-            now = await listAll();
+            const captured = await estateTool('memory.capture', captureArgs);
+            const id = typeof captured === 'object' && captured !== null ? (captured as Record<string, unknown>)['memory_id'] : undefined;
+            if (typeof id === 'string' && id !== '') newId = id;
+            else captureErr = new EstateMcpError('memory.capture returned no memory_id');
           } catch (err) {
-            return reply.code(502).send({
-              error: `writing the new words did not answer as expected (${message(captureErr)}) and the store could not be re-read (${message(err)}); a copy of the new words may exist beside ${memoryId}`,
-            });
+            captureErr = err;
           }
-          const copies = now.filter((m) => !beforeIds.has(m.id) && m.content.trim() === content && m.scope === old.scope);
-          if (copies.length !== 1) {
-            return reply.code(502).send({
-              error: copies.length === 0
-                ? `writing the new words failed (${message(captureErr)}); nothing changed`
-                : `writing the new words did not answer as expected (${message(captureErr)}); ${copies.length} copies of them now exist beside ${memoryId}: ${copies.map((m) => m.id).join(', ')}`,
-            });
+          if (newId === null) {
+            // The capture may still have written (a lost answer): look before saying nothing changed.
+            let now: MemoryItem[];
+            try {
+              now = await listAll();
+            } catch (err) {
+              return reply.code(502).send({
+                error: `writing the new words did not answer as expected (${message(captureErr)}) and the store could not be re-read (${message(err)}); a copy of the new words may exist beside ${memoryId}`,
+              });
+            }
+            const copies = now.filter((m) => !beforeIds.has(m.id) && m.content.trim() === content && m.scope === old.scope);
+            if (copies.length !== 1) {
+              return reply.code(502).send({
+                error: copies.length === 0
+                  ? `writing the new words failed (${message(captureErr)}); nothing changed`
+                  : `writing the new words did not answer as expected (${message(captureErr)}); ${copies.length} copies of them now exist beside ${memoryId}: ${copies.map((m) => m.id).join(', ')}`,
+              });
+            }
+            newId = copies[0]!.id;
           }
-          newId = copies[0]!.id;
         }
         // 4. The old memory out.
         let eraseErr: unknown = null;

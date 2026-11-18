@@ -10,6 +10,14 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+- **A run's brief carries only learnings the operator approved, and no host path (crew#1546).** Run-learnings recall
+  labelled every stored memory "approved by the operator". Among them were raw session captures (a hook's
+  "Session goal (turn N)" rows quoting another project's task output and temp paths). Recall now admits only a
+  memory with estate's approval mark: the `proposal:<id>` id that `proposal.approve` writes, which no memory tool
+  lets a caller choose. A recalled line goes through the host-path redactor (crew#1499), so home and temp paths
+  never reach a brief. Editing an approved learning (`POST /memory/edit`) replaces it through the approval queue
+  with the same reach, tier and facets, so it keeps the mark and keeps reaching briefs. If the approval fails or lands
+  at another scope, the edit is undone and says so. Other memories edit as before.
 - fix(chat jobs): picking an opt-in seat (OpenCode) for new work is the opt-in (crew#1590). A pick of `newWorkSeats` that names it puts it on new jobs, and naming it on a job (`addSeats`, a lead) adds it; Start hands the engine every seat on the card, the opt-in one included, not only a primary. With nothing picked, the default pool still leaves opt-in seats out unless one is the only seat that can work (the 2026-10-11 ruling).
 - fix(insights): the run review picks its one seat from the seats new work may use (`newWorkSeats`, crew#1592), with the workflow's own rule inside that pick. A seat turned off for new work no longer interprets a review nobody named it on, whether it was started from a chat, by hand or by its schedule. A pick that leaves no usable seat, or a setting that is set but unreadable or invalid, refuses the review with words naming the setting, before anything is written; it never falls back to the whole roster. The refusal answers 409 "the review could not be prepared: ..." from a hand launch and from a schedule's Run it now (which answered 502 for it); an unattended scheduled review that is refused shows the reason on the schedule only, with no run record (crew#1608). The chosen seat also becomes the launch's `primary`, so a primary named against the whole roster can't point at a seat the review doesn't run on.
 - fix(chat jobs): a chat job's Start always hands the engine the card's seats (crew#1593). Before, when they equalled the roster read at Start, no roster was sent; the launch then waited for roster readiness and read the roster again, so a seat added in between joined a job whose card never named it. Start still waits for roster readiness first and checks the lead against that fresh standing, so a lead whose login expired is refused by name rather than launched on a stale snapshot (a reshape still carries its held run's seat records: crew#1606). A card that names no seat still launches on the daemon's roster, and a self-seated workflow still picks its own.

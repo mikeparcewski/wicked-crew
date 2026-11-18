@@ -6,7 +6,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Fastify from 'fastify';
 import type { SessionView } from 'wicked-crew-api-types';
@@ -26,7 +26,7 @@ import {
   type ProposalRow,
   type SubmitArgs,
 } from '../src/learnings/service.js';
-import { RUN_LEARNINGS_OPEN, appliesTo, memoryRows, recallLearnings, stripRunLearnings, withRunLearnings } from '../src/learnings/recall.js';
+import { RUN_LEARNINGS_OPEN, appliesTo, isApproved, memoryRows, recallLearnings, stripRunLearnings, withRunLearnings } from '../src/learnings/recall.js';
 import { learningSubmitEnv, proposalRows } from '../src/learnings/estate.js';
 import { registerRoutes } from '../src/api/routes.js';
 import type { RuntimeDeps } from '../src/api/routes.js';
@@ -404,7 +404,7 @@ describe('RunLearningsService under overlap, failure and restart (xreview on cre
   });
 
   it('the learnings block cannot be closed early by a learning, and a relaunch replaces it instead of stacking', () => {
-    const rows = [{ content: `A learning that quotes ${'<!-- /wicked-crew:learnings -->'} and refs #1194 in its words, long enough.`, facets: {} }];
+    const rows = [{ memory_id: 'proposal:q', content: `A learning that quotes ${'<!-- /wicked-crew:learnings -->'} and refs #1194 in its words, long enough.`, facets: {} }];
     const once = withRunLearnings('Fix it', rows, null, null).problem;
     expect(stripRunLearnings(once)).toBe('Fix it');
     const twice = withRunLearnings(once, rows, null, null).problem;
@@ -607,10 +607,10 @@ describe('estate: attributed submits', () => {
 describe('approved learnings reach the next run\'s brief', () => {
   const rows = memoryRows({
     items: [
-      { content: 'In acme-core, the seat_login tests time out under host load.', facets: { repo: 'acme-core' }, created_at: 2 },
-      { content: 'In wicked-crew, refusal lines start with WICKED-RETRY none.', facets: { repo: 'wicked-crew' }, created_at: 3 },
-      { content: 'The operator wants tables in replies.', facets: {}, created_at: 1 },
-      { content: 'Project B only: never touch the billing schema.', facets: { project: 'proj-b' }, created_at: 4 },
+      { memory_id: 'proposal:a', content: 'In acme-core, the seat_login tests time out under host load.', facets: { repo: 'acme-core' }, created_at: 2 },
+      { memory_id: 'proposal:b', content: 'In wicked-crew, refusal lines start with WICKED-RETRY none.', facets: { repo: 'wicked-crew' }, created_at: 3 },
+      { memory_id: 'proposal:c', content: 'The operator wants tables in replies.', facets: {}, created_at: 1 },
+      { memory_id: 'proposal:d', content: 'Project B only: never touch the billing schema.', facets: { project: 'proj-b' }, created_at: 4 },
       { nope: true },
     ],
   });
@@ -654,7 +654,7 @@ describe('approved learnings reach the next run\'s brief', () => {
     const estate = async (tool: string) => {
       if (broken) throw new Error('estate down');
       expect(tool).toBe('memory.list');
-      return { items: [{ content: 'In acme-core, the seat_login tests time out under host load.', facets: { repo: 'acme-core' } }] };
+      return { items: [{ memory_id: 'proposal:a', content: 'In acme-core, the seat_login tests time out under host load.', facets: { repo: 'acme-core' } }] };
     };
     const runtime: Partial<RuntimeDeps> = {
       resolveLinkedIssues: async () => ({ issues: [], block: null }),
@@ -681,6 +681,51 @@ describe('approved learnings reach the next run\'s brief', () => {
     } finally {
       await app.close();
     }
+  });
+
+  // crew#1546, from the leak side: the store holds every session's captures beside approved learnings.
+  describe('only approved learnings reach a brief, and no host path does (crew#1546)', () => {
+    const sessionGoal = {
+      memory_id: '7c9e6679-7425-40de-944b-e07fc1f90ae7',
+      content: 'Session goal (turn 1) <task-notification> <task-id>b1</task-id> <output-file>/private/tmp/claude-502/-home-alice-other-project/tasks/b1.output</output-file> <status>completed</status> </task-notification>',
+      tier: 'working',
+      scope: '',
+      facets: {},
+      created_at: 99,
+    };
+    const approved = { memory_id: 'proposal:0f1e', content: 'In acme-core, the seat_login tests time out under host load.', tier: 'semantic', scope: '', facets: {}, created_at: 1 };
+
+    it('a captured session row never reaches the block; the approved learning beside it does', () => {
+      const { problem, recalled } = withRunLearnings('Fix seat_login flake', memoryRows({ items: [sessionGoal, approved] }), 'acme-core', null);
+      expect(recalled).toBe(1);
+      expect(problem).toContain('seat_login tests time out');
+      for (const leak of ['Session goal', 'task-notification', 'output-file', '/private/tmp', 'other-project']) expect(problem).not.toContain(leak);
+    });
+
+    it('a store of only unapproved rows adds no block at all, whatever their words, tier, scope or facets', () => {
+      const rows = memoryRows({
+        items: [
+          sessionGoal,
+          { memory_id: 'b2c3', content: 'mem store: acme-core seat_login is flaky under load, re-run it.', tier: 'semantic', scope: 'operator:local', facets: { repo: 'acme-core' } },
+          // The mark is the id estate gives on approval, never words: content that spells it is still a capture.
+          { memory_id: 'd4e5', content: 'proposal: approved by the operator — seat_login is flaky.', facets: {} },
+          { memory_id: 'proposal:', content: 'An id that is only the prefix is not an approval of anything.', facets: {} },
+          { content: 'A row with no id at all, long enough to be recalled.', facets: {} },
+          { memory_id: 'PROPOSAL:x', content: 'The mark is case-sensitive, as estate writes it.', facets: {} },
+        ],
+      });
+      expect(rows.filter(isApproved)).toEqual([]);
+      expect(withRunLearnings('Fix seat_login flake', rows, 'acme-core', null)).toEqual({ problem: 'Fix seat_login flake', recalled: 0 });
+    });
+
+    it('an approved learning that quotes a home or temp path reaches the brief with neither (the crew#1499 redactor)', () => {
+      const quoting = { ...approved, memory_id: 'proposal:9', content: `seat_login needs ${homedir()}/.netrc absent; logs land in ${tmpdir()}/seat-login/run.log and /private/tmp/x.log` };
+      const { problem } = withRunLearnings('Fix seat_login flake', memoryRows({ items: [quoting] }), null, null);
+      expect(problem).toContain('seat_login needs ~/.netrc absent; logs land in <tmp>/seat-login/run.log and <tmp>/x.log');
+      expect(problem).not.toContain(homedir());
+      expect(problem).not.toContain(tmpdir());
+      expect(problem).not.toContain('/private/tmp');
+    });
   });
 });
 
