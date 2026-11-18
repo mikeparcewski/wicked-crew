@@ -684,7 +684,7 @@ describe('approved learnings reach the next run\'s brief', () => {
   });
 
   // crew#1546, from the leak side: the store holds every session's captures beside approved learnings.
-  describe('only approved learnings reach a brief, and no host path does (crew#1546)', () => {
+  describe('only approved learnings reach a brief, with this daemon\'s home and temp paths redacted (crew#1546)', () => {
     const sessionGoal = {
       memory_id: '7c9e6679-7425-40de-944b-e07fc1f90ae7',
       content: `Session goal (turn 1) <task-notification> <task-id>b1</task-id> <output-file>${tmpdir()}/claude-1000/-home-alice-other-project/tasks/b1.output</output-file> <status>completed</status> </task-notification>`,

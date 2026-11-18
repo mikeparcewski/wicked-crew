@@ -10748,7 +10748,7 @@ export function registerRoutes(
       // proposal left pending could be approved later and bring retired words back beside the
       // current ones. So a success leaves it approved (a re-approve is idempotent in estate: the same
       // `proposal:<id>` memory), and every failure rejects it, or says it may remain.
-      type PendingMemory = { id: string; content: string };
+      type PendingMemory = { id: string; content: string; reach: string | null; facets: Record<string, unknown> };
       const pendingMemoryProposals = async (): Promise<PendingMemory[]> => {
         const raw = await estateTool('proposal.list', { kind_type: 'memory', state: 'pending' });
         const items = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)['proposals'] : undefined;
@@ -10756,7 +10756,10 @@ export function registerRoutes(
         return items.flatMap((i): PendingMemory[] => {
           const r = typeof i === 'object' && i !== null ? (i as Record<string, unknown>) : {};
           const payload = typeof r['payload'] === 'object' && r['payload'] !== null ? (r['payload'] as Record<string, unknown>) : {};
-          return typeof r['id'] === 'string' ? [{ id: r['id'], content: typeof payload['content'] === 'string' ? payload['content'] : '' }] : [];
+          const facets = typeof r['facets'] === 'object' && r['facets'] !== null ? (r['facets'] as Record<string, unknown>) : {};
+          return typeof r['id'] === 'string'
+            ? [{ id: r['id'], content: typeof payload['content'] === 'string' ? payload['content'] : '', reach: typeof payload['reach'] === 'string' ? payload['reach'] : null, facets }]
+            : [];
         });
       };
       /** Reject these proposals; true only when the queue is read back with none of them pending. */
@@ -10770,7 +10773,7 @@ export function registerRoutes(
         }
       };
       const queued = (ids: string[]): string => ` A proposal of the new words (${ids.join(', ')}) may still be pending: reject it on the approve page.`;
-      const reapproveMemory = async (old: MemoryItem, content: string): Promise<{ id: string } | { status: 409 | 502; error: string }> => {
+      const reapproveMemory = async (old: MemoryItem, content: string, beforeIds: ReadonlySet<string>): Promise<{ id: string } | { status: 409 | 502; error: string }> => {
         const reach = old.scope === '' ? 'project' : old.scope.startsWith('operator:') ? 'operator' : null;
         if (reach === null) {
           return { status: 409, error: `${old.id} is an approved learning at scope ${JSON.stringify(old.scope)}, which approval cannot place again; nothing changed` };
@@ -10784,6 +10787,21 @@ export function registerRoutes(
         } catch (err) {
           return { status: 502, error: `reading the approve queue failed (${message(err)}); nothing changed` };
         }
+        // The memory's OWN proposal must be settled first (codex r2 on crew#1546): estate writes `proposal:<id>`
+        // before it records the approval, so a write that failed in between leaves it pending, and approving it after
+        // this edit would bring the retired words back. Approving it again writes the same memory (idempotent).
+        const sourcePid = old.id.slice(APPROVED_MEMORY_PREFIX.length);
+        if (queuedBefore.has(sourcePid)) {
+          await estateTool('proposal.approve', { id: sourcePid }).catch(() => undefined);
+          try {
+            queuedBefore = new Set((await pendingMemoryProposals()).map((q) => q.id));
+          } catch (err) {
+            return { status: 502, error: `settling ${old.id}'s own proposal could not be checked (${message(err)}); nothing changed` };
+          }
+          if (queuedBefore.has(sourcePid)) {
+            return { status: 409, error: `${old.id}'s own proposal ${sourcePid} is still pending and could not be settled; approve or reject it on the approve page first. Nothing changed` };
+          }
+        }
         let pid: string | null = null;
         let submitErr: unknown = null;
         try {
@@ -10796,14 +10814,35 @@ export function registerRoutes(
         }
         if (pid === null) {
           // The submit may still have filed (a lost answer): find what it filed and withdraw it.
+          // Ours = new since the snapshot, with these words, this reach and these facets (codex r2: words alone would
+          // reject another caller's filing for another repository).
+          const ours = (q: PendingMemory): boolean =>
+            !queuedBefore.has(q.id) && q.content === content && (q.reach === null || q.reach === reach) &&
+            Object.entries(old.facets).every(([k, v]) => q.facets[k] === v) && Object.keys(q.facets).every((k) => k in old.facets);
           let strays: string[];
           try {
-            strays = (await pendingMemoryProposals()).filter((q) => !queuedBefore.has(q.id) && q.content === content).map((q) => q.id);
+            strays = (await pendingMemoryProposals()).filter(ours).map((q) => q.id);
           } catch (err) {
             return { status: 502, error: `filing the new words for approval failed (${message(submitErr)}) and the queue could not be re-read (${message(err)}).${queued(['unknown id'])}` };
           }
           const gone = strays.length === 0 || (await withdraw(strays));
-          return { status: 502, error: `filing the new words for approval failed (${message(submitErr)}); nothing changed${gone ? '' : `.${queued(strays)}`}` };
+          // A filing approved meanwhile is no longer pending: the store, not the queue, says whether it landed.
+          let approvedCopies: string[] | null;
+          try {
+            approvedCopies = (await listAll()).filter((m) => m.id.startsWith(APPROVED_MEMORY_PREFIX) && !beforeIds.has(m.id) && m.content.trim() === content).map((m) => m.id);
+          } catch {
+            approvedCopies = null;
+          }
+          const landedNote =
+            approvedCopies === null
+              ? `; the store could not be re-read, so an approved copy of the new words may exist beside ${old.id}`
+              : approvedCopies.length > 0
+                ? `; an approved copy of the new words exists beside ${old.id}: ${approvedCopies.join(', ')}`
+                : '';
+          return {
+            status: 502,
+            error: `filing the new words for approval failed (${message(submitErr)})${landedNote === '' ? '; nothing changed' : landedNote}${gone ? '' : `.${queued(strays)}`}`,
+          };
         }
         const newId = `${APPROVED_MEMORY_PREFIX}${pid}`;
         const approve = (): Promise<unknown> => estateTool('proposal.approve', { id: pid }).then(() => null, (err: unknown) => err);
@@ -10890,7 +10929,7 @@ export function registerRoutes(
         //    and the edited learning would silently stop reaching briefs. Anything else is captured.
         let newId: string | null = null;
         if (memoryId.startsWith(APPROVED_MEMORY_PREFIX)) {
-          const placed = await reapproveMemory(old, content);
+          const placed = await reapproveMemory(old, content, new Set(before.map((m) => m.id)));
           if ('error' in placed) return reply.code(placed.status).send({ error: placed.error });
           newId = placed.id;
         } else {

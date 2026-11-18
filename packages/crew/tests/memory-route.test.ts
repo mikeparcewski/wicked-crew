@@ -574,10 +574,22 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
     /** The store plus estate's approval queue: approve writes `proposal:<id>` where estate would place it. */
     function queue(
       initial: Mem[],
-      opts: { approve?: 'throw' | 'throw-after-write' | 'write-then-fail-state' | 'never-settles'; placeAt?: string; submit?: 'lost-answer'; list?: 'throw' } = {},
+      opts: {
+        approve?: 'throw' | 'throw-after-write' | 'write-then-fail-state' | 'never-settles';
+        placeAt?: string;
+        submit?: 'lost-answer';
+        list?: 'throw';
+        /** The memory's own proposal p0 is still pending (estate wrote the memory, then failed to record Approved). */
+        source?: 'pending' | 'stuck';
+        /** During a lost submit: another caller files the same words for another repository. */
+        rivalFiles?: boolean;
+        /** During a lost submit: an ordinary approval promotes the filing before crew re-reads the queue. */
+        approvedMeanwhile?: boolean;
+      } = {},
     ) {
       const s = new Map(initial.map((m) => [m.memory_id, m]));
       const proposals = new Map<string, { payload: Record<string, unknown>; facets: Record<string, string>; state: string }>();
+      if (opts.source !== undefined) proposals.set('p0', { payload: { content: 'old approved words', reach: 'project', tier: 'semantic' }, facets: { repo: 'acme-core' }, state: 'pending' });
       const approvedOnce = new Set<string>();
       let n = 0;
       estateTool.mockImplementation(async (tool: string, args: Record<string, unknown>) => {
@@ -591,13 +603,20 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
         if (tool === 'proposal.submit') {
           const id = `n${++n}`;
           proposals.set(id, { payload: args['payload'] as Record<string, unknown>, facets: args['facets'] as Record<string, string>, state: 'pending' });
+          if (opts.rivalFiles === true) proposals.set('rival', { payload: { ...(args['payload'] as Record<string, unknown>) }, facets: { repo: 'other-repo' }, state: 'pending' });
+          if (opts.approvedMeanwhile === true) {
+            const p = proposals.get(id)!;
+            s.set(`proposal:${id}`, { memory_id: `proposal:${id}`, scope: '', content: String(p.payload['content']), tier: String(p.payload['tier']), facets: p.facets, created_at: 200 });
+            p.state = 'approved';
+          }
           if (opts.submit === 'lost-answer') throw new EstateMcpError('exited before answering proposal.submit');
           return { id };
         }
         if (tool === 'proposal.approve') {
           const p = proposals.get(String(args['id']))!;
           if (p.state !== 'pending') throw new EstateMcpError(`proposal ${String(args['id'])} is ${p.state}, not pending`);
-          if (opts.approve === 'throw') throw new EstateMcpError('approve failed');
+          if (String(args['id']) === 'p0' && opts.source === 'stuck') throw new EstateMcpError('state write failed');
+          if (opts.approve === 'throw' && String(args['id']) !== 'p0') throw new EstateMcpError('approve failed');
           const scope = opts.placeAt ?? (p.payload['reach'] === 'operator' ? `operator:${p.facets['user'] ?? 'local'}` : '');
           // estate's approve: the memory (a deterministic id, so a re-approve upserts it), THEN the state.
           s.set(`proposal:${String(args['id'])}`, { memory_id: `proposal:${String(args['id'])}`, scope, content: String(p.payload['content']), tier: String(p.payload['tier']), facets: p.facets, created_at: 200 });
@@ -702,6 +721,44 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
       expect((res.json() as { error: string }).error).toMatch(/nothing changed$/);
       expect([...proposals.values()].map((p) => p.state)).toEqual(['rejected']);
       expect([...s.keys()]).toEqual(['proposal:p0']);
+    });
+
+    it('codex r2 #1: the memory\'s own pending proposal is settled first, so approving it later cannot bring the retired words back', async () => {
+      const { s, proposals } = queue([APPROVED], { source: 'pending' });
+      const res = await edit({ memory_id: 'proposal:p0', content: 'new approved words' });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ memory_id: 'proposal:n1', retired: 'proposal:p0' });
+      expect(proposals.get('p0')!.state).toBe('approved');
+      // A later approve of p0 is refused (not pending): the retired words stay retired.
+      await expect(estateTool('proposal.approve', { id: 'p0' })).rejects.toThrow(/not pending/);
+      expect([...s.keys()]).toEqual(['proposal:n1']);
+    });
+
+    it('codex r2 #1: an own proposal that cannot be settled refuses the edit before anything is filed (409)', async () => {
+      const { s, proposals } = queue([APPROVED], { source: 'stuck' });
+      const res = await edit({ memory_id: 'proposal:p0', content: 'new approved words' });
+      expect(res.statusCode).toBe(409);
+      expect((res.json() as { error: string }).error).toMatch(/own proposal p0 is still pending.*Nothing changed$/);
+      expect([...proposals.keys()]).toEqual(['p0']);
+      expect([...s.keys()]).toEqual(['proposal:p0']);
+    });
+
+    it('codex r2 #2: a lost submit rejects only its own filing, never another caller\'s same words for another repository', async () => {
+      const { proposals } = queue([APPROVED], { submit: 'lost-answer', rivalFiles: true });
+      const res = await edit({ memory_id: 'proposal:p0', content: 'new approved words' });
+      expect(res.statusCode).toBe(502);
+      expect(proposals.get('n1')!.state).toBe('rejected');
+      expect(proposals.get('rival')!.state).toBe('pending');
+    });
+
+    it('codex r2 #3: a lost submit whose filing was approved meanwhile names the approved copy, never "nothing changed"', async () => {
+      const { s } = queue([APPROVED], { submit: 'lost-answer', approvedMeanwhile: true });
+      const res = await edit({ memory_id: 'proposal:p0', content: 'new approved words' });
+      expect(res.statusCode).toBe(502);
+      const error = (res.json() as { error: string }).error;
+      expect(error).not.toMatch(/nothing changed/);
+      expect(error).toMatch(/an approved copy of the new words exists beside proposal:p0: proposal:n1/);
+      expect([...s.keys()].sort()).toEqual(['proposal:n1', 'proposal:p0']);
     });
 
     it('an approve queue that cannot be read refuses before anything is filed', async () => {
