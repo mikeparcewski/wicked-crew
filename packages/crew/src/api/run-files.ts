@@ -8,10 +8,11 @@
 // read-only by construction: `fs` reads and `git diff`/`git status` — zero write capability, a
 // strictly smaller threat surface than `/open` handing the path to an OS opener.
 
-import { constants as fsConstants, promises as fsp, lstatSync, readFileSync, statSync } from 'node:fs';
+import { constants as fsConstants, promises as fsp, readFileSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { ExecCwdMissing, execCapped, ExecOutputTooLarge } from '../core/exec.js';
-import { deliverExclusionByName, deliverExclusionReason } from '../core/deliver-exclusions.js';
+import { committedScrubReason, deliverExclusionByName, deliverExclusionReason } from '../core/deliver-exclusions.js';
 
 /** File-content cap (DES-FEEDBACK-002 §3.3): past this, `content` holds the first 512 KB and
  *  `truncated: true` — the studio renders a labeled truncation banner, never a silent amputation. */
@@ -379,36 +380,12 @@ export async function worktreeDiff(
     }
   }
 
-  // F3, and wicked-core#1573: whether a path the push would carry RIDES it — the deliver script's
-  // classifier, name rules first so only a path that survives all of them is stat'd (codex review,
-  // MEDIUM: a worktree carrying 100 000 files under `tmp/` would otherwise cost 100 000 synchronous
-  // stats on the daemon's event loop to reject paths the directory rule rejects without a size).
-  const rides = (file: string): boolean => {
-    if (deliverExclusionByName(file) !== null) return false;
-    let size: number | null = null;
-    try {
-      size = statSync(join(workdir, file)).size;
-    } catch {
-      // Unreadable/raced away: an unknown size is never treated as oversize (the shell's
-      // `wc -c < "$F" 2>/dev/null || echo 0` degrades the same way).
-    }
-    // crew#901: an env template rides only when its text holds no value — read it (small: the
-    // name rules already passed, and the size rule drops anything over 1 MiB first).
-    return (
-      deliverExclusionReason(file, size, () => {
-        try {
-          return readFileSync(join(workdir, file), 'utf8');
-        } catch {
-          return null;
-        }
-      }) === null
-    );
-  };
-
-  // wicked-core#1573: a path the run COMMITTED (or staged) that the base does not hold is scrubbed
-  // from every pushed commit by the deliver script when its classifier excludes it, so the aggregate
-  // tracked diff leaves it out too (each as a literal exclude pathspec). A path the base tracks is
-  // the repository's own and always counts. A narrowed request is exempt, as below.
+  // wicked-core#1573: a path the run COMMITTED (or staged) that the base does not hold is removed from
+  // every pushed commit by the deliver script's history scrub when it is a seat's own temp file or
+  // carries a home-derived name (`committedScrubReason`, the script's `_seatscratch`), so the aggregate
+  // tracked diff leaves it out too, each as a literal exclude pathspec. The rule is name-only, so this
+  // count is the push's for committed files, up to SCRUB_EXCLUDE_BYTES of excludes (past it the rest
+  // are counted: thousands of committed temp files). A narrowed request is exempt, as below.
   let trackedSpec = limit;
   if (relPath === undefined) {
     try {
@@ -417,23 +394,11 @@ export async function worktreeDiff(
         ['diff', '--name-only', '--no-renames', '--diff-filter=A', '-z', baseRev],
         { timeout: GIT_TIMEOUT_MS, cwd: workdir, env },
       );
-      // A committed symlink or submodule is judged on its name alone, as the scrub judges it (its blob
-      // is a link target or nothing, so what it points at is not what ships).
-      const committedRides = (file: string): boolean => {
-        try {
-          const st = lstatSync(join(workdir, file));
-          if (st.isSymbolicLink() || st.isDirectory()) return deliverExclusionByName(file) === null;
-        } catch {
-          // Gone from the worktree: the classifier's own unknown-size rule applies.
-        }
-        return rides(file);
-      };
-      // At most SCRUB_EXCLUDE_BYTES of pathspecs, so the argv stays under the OS limit; past it the
-      // rest are counted (the pre-#1573 over-count), an exotic shape: thousands of committed scratch files.
+      const home = homedir();
       let bytes = 0;
       const excludes: string[] = [];
       for (const file of addedOut.split('\0')) {
-        if (file === '' || committedRides(file)) continue;
+        if (file === '' || committedScrubReason(file, home) === null) continue;
         const spec = `:(top,literal,exclude)${file}`;
         bytes += Buffer.byteLength(spec, 'utf8') + 1;
         if (bytes > SCRUB_EXCLUDE_BYTES) break;
@@ -488,8 +453,30 @@ export async function worktreeDiff(
   // would be a different lie. Only the aggregate — the one the diffstat is computed from — is
   // filtered.
   //
-  // The classifier is `rides` above: name rules first, then size, then an env template's text.
-  const untracked = relPath !== undefined ? candidates : candidates.filter(rides);
+  // Name rules FIRST, and only a path that survives all of them is stat'd (codex review, MEDIUM):
+  // a worktree carrying 100 000 files under `tmp/` would otherwise cost 100 000 synchronous stats
+  // on the daemon's event loop to reject paths the directory rule rejects without a size.
+  const untracked = relPath !== undefined ? candidates : candidates.filter((file) => {
+    if (deliverExclusionByName(file) !== null) return false;
+    let size: number | null = null;
+    try {
+      size = statSync(join(workdir, file)).size;
+    } catch {
+      // Unreadable/raced away: an unknown size is never treated as oversize (the shell's
+      // `wc -c < "$F" 2>/dev/null || echo 0` degrades the same way).
+    }
+    // crew#901: an env template rides only when its text holds no value — read it (small: the
+    // name rules already passed, and the size rule drops anything over 1 MiB first).
+    return (
+      deliverExclusionReason(file, size, () => {
+        try {
+          return readFileSync(join(workdir, file), 'utf8');
+        } catch {
+          return null;
+        }
+      }) === null
+    );
+  });
   for (const file of untracked) {
     // Cap is in BYTES; `out.length` counts UTF-16 code units. `>=`: exactly-at-cap is
     // already done — spawning one more git only to discard its output is waste (Copilot, #305).

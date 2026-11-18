@@ -118,7 +118,7 @@ describe('the deliver gate diffstat is computed over exactly the set that will b
     expect(deliverExclusionByName('docs/.wicked-crew-delivery-stranded')).toBeNull();
   }, 60_000);
 
-  it('wicked-core#1573: a COMMITTED scratch file the push scrubs is not counted; a base-tracked tmp/ file still is', async () => {
+  it('wicked-core#1573: a committed seat temp file the push scrubs is not counted; committed tmp/ source and credentials.ts are', async () => {
     const root = mkdtempSync(join(tmpdir(), 'crew-1573-'));
     roots.push(root);
     write(root, 'README.md', 'base\n');
@@ -131,16 +131,19 @@ describe('the deliver gate diffstat is computed over exactly the set that will b
     write(root, 'src/fix.ts', 'export const fixed = true;\n');
     write(root, 'tmp/keep.rs', 'pub fn keep() { /* edited */ }\n');
     write(root, 'tmp/claude-1000/-home-alice-wt/s/tasks/x.output', 'out\n');
+    // Committed work the untracked ladder would exclude: it ships, so it counts.
+    write(root, 'tmp/parser.rs', 'pub fn parse() {}\n');
+    write(root, 'src/credentials.ts', 'export const load = () => null;\n');
     git(root, 'add', '-A');
     git(root, 'commit', '-m', 'fix');
 
     const { diff } = await worktreeDiff(root, undefined, base);
 
-    expect(filesIn(diff).sort()).toEqual(['src/fix.ts', 'tmp/keep.rs']);
+    expect(filesIn(diff).sort()).toEqual(['src/credentials.ts', 'src/fix.ts', 'tmp/keep.rs', 'tmp/parser.rs']);
     expect(diff).not.toContain('claude-1000');
   });
 
-  it('wicked-core#1573: a committed symlink is counted on its name alone, as the scrub judges it', async () => {
+  it('wicked-core#1573: a committed env-template symlink is counted, as the scrub ships it', async () => {
     const root = mkdtempSync(join(tmpdir(), 'crew-1573-'));
     roots.push(root);
     write(root, 'README.md', 'base\n');

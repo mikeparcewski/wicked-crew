@@ -92,7 +92,7 @@ import { childEnvWithBootEstateDb } from './governance-store.js';
 import type { PhaseDef, WorkflowDef } from './types.js';
 import { ADO_HELPER_JS } from './ado-deliver-helper.js';
 import { ADO_PAT_ENV, ADO_SP_ENV, DELIVER_CREDENTIALS_MISSING_MARKER, adoRepoOf, type AdoRepo, type DeliverCredentials } from './deliver-credentials.js';
-import { DELIVER_NOT_SHIPPED_HEADING, DELIVER_STRANDED_SENTINEL, ENV_TEMPLATE_SAFE_LINE_ERE, SCRATCH_DIRS, TOOL_ARTIFACT_DIRS } from './deliver-exclusions.js';
+import { DELIVER_NOT_SHIPPED_HEADING, DELIVER_STRANDED_SENTINEL, ENV_TEMPLATE_SAFE_LINE_ERE, HOME_SLUG_SEGMENT_ERE, SCRATCH_DIRS, SEAT_TEMP_DIR_ERE, TOOL_ARTIFACT_DIRS } from './deliver-exclusions.js';
 import {
   adoWorkItemIds,
   composeEmbeddedDeliverText,
@@ -1162,15 +1162,8 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     `  case "$SD" in ${SCRATCH_DIRS.join('|')}) DR="scratch-dir";; *) DR="tool-artifact-dir";; esac`,
     '  if [ -d "$SD" ]; then N=$(git ls-files --others --exclude-standard -- "$SD" | wc -l | tr -d " "); if [ "${N:-0}" -gt 0 ]; then echo "deliver: EXCLUDED ($DR): $SD/ ($N files)"; printf "%s %s\\n" "$DR" "$SD/ ($N files)" >> "$TD/excluded"; fi; fi',
     'done',
-    // THE ONE CLASSIFIER (crew#434 ladder) as a function: `_classify <path> [<blob>|-]` sets RN to the
-    // reason the push leaves <path> behind, or to empty when it rides. Without a second argument it
-    // reads the worktree file (the untracked pass below); with a blob id it reads that blob (the
-    // history scrub before the push, wicked-core#1573), and a blob it cannot read ends the script
-    // with nothing pushed; `-` (a committed symlink or submodule, whose blob is a link target or
-    // nothing) runs the name rules alone. Same arms, same order, every way.
-    '_unreadable() { echo "deliver: the history scrub could not read a committed file ($1); nothing was pushed"; exit 1; }',
-    '_classify() {',
-    '  local F=$1 SRC=${2:-} CF=$1 BN LBN ENVT SZ',
+    'while IFS= read -r -d "" F; do',
+    '  [ -n "$F" ] || continue',
     '  BN=${F##*/}; RN=""',
     // The recovery sentinel is removed above, so this arm is the ONE predicate's first rule, kept
     // here so `deliverExclusionByName` and this classifier stay the same ladder (N2).
@@ -1183,7 +1176,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // value. One real value (or an unreadable file) and it is excluded; either way the denylist's
     // `*.env.*` arm is not what decides it. Same rule as `deliverExclusionReason`. An EMPTY file is
     // value-free by definition, and is tested apart: BSD grep's `-q -v` answers 0 on an empty file.
-    `  ENVT=""; case "$LBN" in *.env.example|*.env.sample|*.env.template) ENVT=1; if [ -n "$SRC" ] && [ "$SRC" != "-" ]; then CF="$TD/blob"; git cat-file blob "$SRC" > "$CF" || _unreadable "$F"; fi; if [ "$SRC" = "-" ]; then :; elif [ ! -r "$CF" ] || { [ -s "$CF" ] && grep -q -v -E ${shellSingleQuote(ENV_TEMPLATE_SAFE_LINE_ERE)} -- "$CF"; }; then RN="env-template-with-values"; fi;; esac`,
+    `  ENVT=""; case "$LBN" in *.env.example|*.env.sample|*.env.template) ENVT=1; if [ ! -r "$F" ] || { [ -s "$F" ] && grep -q -v -E ${shellSingleQuote(ENV_TEMPLATE_SAFE_LINE_ERE)} -- "$F"; }; then RN="env-template-with-values"; fi;; esac`,
     '  [ -n "$ENVT" ] || case "$LBN" in',
     '    *.db|*.db-wal|*.db-shm|*.sqlite|*.sqlite2|*.sqlite3|*.sqlite-wal|*.sqlite-shm|*.sock|*.pid|*.env|*.env.*|.envrc|*.gif|*.webm|*.mp4|*.mov|*.pem|*.key|*.p12|*.pfx|id_rsa*|*credentials*) RN="denylisted-name";;',
     '  esac',
@@ -1192,12 +1185,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     `  case "/$F" in ${SCRATCH_DIRS.map((d) => `*/${d}/*`).join('|')}) [ -n "$RN" ] || RN="scratch-dir";; esac`,
     `  case "/$F" in ${TOOL_ARTIFACT_DIRS.map((d) => `*/${d}/*`).join('|')}) [ -n "$RN" ] || RN="tool-artifact-dir";; esac`,
     '  case "$LBN" in *.log) [ -n "$RN" ] || RN="tool-artifact-name";; esac',
-    '  if [ -z "$RN" ] && [ "$SRC" != "-" ]; then if [ -n "$SRC" ]; then SZ=$(git cat-file -s "$SRC") || _unreadable "$F"; else SZ=$(wc -c < "$F" 2>/dev/null || echo 0); fi; [ "${SZ:-0}" -gt 1048576 ] && RN="oversize-1mib"; fi',
-    '  return 0',
-    '}',
-    'while IFS= read -r -d "" F; do',
-    '  [ -n "$F" ] || continue',
-    '  _classify "$F"',
+    '  if [ -z "$RN" ]; then SZ=$(wc -c < "$F" 2>/dev/null || echo 0); [ "${SZ:-0}" -gt 1048576 ] && RN="oversize-1mib"; fi',
     // The record line is ONE line whatever the name holds: a newline / CR / tab in a path is folded to
     // `?` so a crafted file name cannot start a new bullet or heading in the PR body (codex r1).
     // A path under a NESTED scratch or tool-artifact directory is recorded only up to that directory
@@ -1303,60 +1291,61 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '[ "$A" -ge 1 ] || { echo "deliver: nothing to deliver — the run produced no committed change (after rebasing onto $D, $B carries no commit of its own); nothing was pushed"; exit 1; }',
     'fi',
     // (c3b) THE HISTORY SCRUB (wicked-core#1573). The untracked pass above only sees files nobody
-    // committed. A seat that runs `git add -A && git commit` itself (rehearsal C3: a Claude Code seat
-    // committed its own `tmp/claude-<uid>/<home-derived dir>/…/tasks/<id>.output`, and a later commit
-    // deleted it) puts a scratch path into a commit this script would otherwise push as is, and a
-    // path that is gone from the final tree still sits in the branch HISTORY a public PR carries. The
-    // engine's lift can likewise leave classifier-matched files staged.
+    // committed. A Claude Code seat committed its own background-task output
+    // (`tmp/claude-<uid>/<a slug of the worktree's absolute path>/…/tasks/<id>.output`) and a later
+    // commit deleted it; this script pushes the run's own commits, so the home-derived name would sit
+    // in the PR's HISTORY though the final tree no longer holds it.
     //
-    // So before the push: every file state the run's commits introduce ($SB..$B: the default branch
-    // after the rebase above, or the PR head in a revision; each commit against each of its parents,
-    // one `diff-tree --stdin`) is judged ONCE by `_classify` on its own blob. A path the base
-    // ($SB) holds as a file, symlink or submodule at exactly that path is the repository's own (a real
-    // `tmp/` source) and is never removed.
-    // When nothing matches, nothing is rewritten: the same commits are pushed. Otherwise every
-    // matched path is removed from every commit in the range, the commits are re-created with
-    // commit-tree keeping authors, committers, dates and messages (so a retry finds nothing left to
-    // scrub and moves nothing), a commit the scrub emptied is dropped, and `git reset` (mixed) moves
-    // the branch, leaving the worktree as it was, so a scrubbed file it still holds stays behind
-    // untracked like any exclusion. The scrub's git reads land in files or checked assignments, never
-    // a process substitution, so a read that fails ends the script with nothing pushed. The phase output names each scrubbed path; the PR
-    // body counts them by reason and never names one (that name is what the scrub keeps out).
+    // So before the push, every path the pushed commits ($SB..$B: the default branch after the rebase
+    // above, or the PR head in a revision) add or change, against every parent, plus what a merged-in
+    // older ancestor carries, is checked by `_seatscratch`: the ONE narrow class
+    // (`committedScrubReason` in `deliver-exclusions.ts`): a Claude Code per-uid temp dir or a
+    // home-derived path segment. Never the crew#434 ladder: committed `tmp/` source, `credentials.ts`,
+    // `.env` and the like ship as committed. A path the base holds as a file, symlink or submodule at
+    // exactly that spelling is the repository's own and is never removed. When nothing matches,
+    // nothing is rewritten: the same commits are pushed.
+    //
+    // Otherwise every matched path is removed from every commit in the range and the commits are
+    // re-created with commit-tree, keeping authors, committers, dates and messages (a retry finds
+    // nothing left and moves nothing); a commit the scrub emptied is dropped. A commit that was SIGNED
+    // is re-signed with the repository's own signing setup (`-S`: user.signingkey, gpg.format), and a
+    // signature that cannot be made refuses the push: an unsigned copy of a signed commit is never
+    // pushed. An unsigned commit stays unsigned. Before the branch moves, the new tip's tree must be the
+    // old tip's tree with only narrow-class paths deleted, or the push is refused. `git reset` (mixed)
+    // then moves the branch and leaves the worktree as it was. Every read goes to a file or a checked
+    // assignment, never a process substitution, so a failed read pushes nothing. The phase output names
+    // each scrubbed path; the PR body counts them by reason, never by name.
+    `_seatscratch() { RN=""; local re1=${shellSingleQuote(SEAT_TEMP_DIR_ERE)} re2=${shellSingleQuote(HOME_SLUG_SEGMENT_ERE)}; if [[ $1 =~ $re1 ]]; then RN="seat-temp"; return 0; fi; if [[ $1 =~ $re2 ]]; then RN="home-derived"; return 0; fi; case "$HH" in /?*/?*) case "/$1" in *"/$HS"*|*"$HH/"*) RN="home-derived";; esac;; esac; return 0; }`,
+    'HH=${HOME:-}; HH=${HH%/}; HS=${HH//\\//-}',
     'SB=$D; [ -z "$TARGET" ] || SB="origin/$TARGET"',
     'TL=$(git rev-parse --verify -q "$B^{tree}" || true)',
     'NSU=0; HFAIL="deliver: the history scrub could not read the run\'s commits; nothing was pushed"',
     'git rev-list --reverse --topo-order --parents "$SB..$B" > "$TD/hlist" || { echo "$HFAIL"; exit 1; }',
-    'git diff-tree --stdin -r -z --raw --no-renames --no-commit-id -m --root --diff-filter=AMT < "$TD/hlist" > "$TD/hraw" || { echo "$HFAIL"; exit 1; }',
+    'git diff-tree --stdin -r -z --name-only --no-renames --no-commit-id -m --root --diff-filter=AMT < "$TD/hlist" > "$TD/hraw" || { echo "$HFAIL"; exit 1; }',
     // …and what a pushed commit INHERITS from a merged-in ancestor other than the base (a side branch
     // cut from an older commit carries that commit's files without changing them).
     'git rev-list --boundary "$SB..$B" > "$TD/hbnd" || { echo "$HFAIL"; exit 1; }',
     'HSBC=$(git rev-parse "$SB^{commit}")',
-    'while read -r HX; do case "$HX" in -*) HX=${HX#-}; [ "$HX" = "$HSBC" ] || git diff-tree -r -z --raw --no-renames --diff-filter=AMT "$HSBC" "$HX" >> "$TD/hraw" || { echo "$HFAIL"; exit 1; };; esac; done < "$TD/hbnd"',
-    ': > "$TD/hent"; : > "$TD/hstrip"; : > "$TD/hwhy"',
-    'while IFS= read -r -d "" HM && IFS= read -r -d "" HP; do',
-    '  read -r HX0 HNM HX1 HNB HX2 <<< "$HM"',
-    '  printf "%s %s %s\\0" "$HNB" "$HNM" "$HP" >> "$TD/hent"',
-    'done < "$TD/hraw"',
-    'sort -z -u "$TD/hent" > "$TD/hent.u"',
-    'while IFS= read -r -d "" HR; do',
-    '  HNB=${HR%% *}; HR=${HR#* }; HNM=${HR%% *}; HP=${HR#* }',
-    '  case "$HNM" in 120000|160000) _classify "$HP" -;; *) _classify "$HP" "$HNB";; esac',
+    'while read -r HX; do case "$HX" in -*) HX=${HX#-}; [ "$HX" = "$HSBC" ] || git diff-tree -r -z --name-only --no-renames --diff-filter=AMT "$HSBC" "$HX" >> "$TD/hraw" || { echo "$HFAIL"; exit 1; };; esac; done < "$TD/hbnd"',
+    'sort -z -u "$TD/hraw" > "$TD/hent.u"; : > "$TD/hstrip"; : > "$TD/hwhy"',
+    'while IFS= read -r -d "" HP; do',
+    '  _seatscratch "$HP"',
     '  [ -n "$RN" ] || continue',
-    // The base's own file, symlink or submodule at exactly this path is the repository's, never scratch.
+    // The base's own file, symlink or submodule at exactly this path is the repository's.
     '  HBT=$(GIT_LITERAL_PATHSPECS=1 git ls-tree --full-tree "$SB" -- "$HP") || { echo "$HFAIL"; exit 1; }',
     '  HBT=${HBT#* }; HBT=${HBT%% *}; case "$HBT" in blob|commit) continue;; esac',
-    '  printf "%s\\0" "$HP" >> "$TD/hstrip"; printf "%s %s\\0" "$RN" "$HP" >> "$TD/hwhy"',
+    '  printf "%s\\0" "$HP" >> "$TD/hstrip"; printf "%s\\n" "$RN" >> "$TD/hwhy"',
     '  echo "deliver: SCRUBBED ($RN) from the run\'s commits: $(printf "%s" "$HP" | tr "\\n\\r\\t" "???")"',
     'done < "$TD/hent.u"',
     'if [ -s "$TD/hstrip" ]; then',
-    '  sort -z -u "$TD/hstrip" > "$TD/hstrip.u"; mkdir -p "$TD/map"',
+    '  mkdir -p "$TD/map"',
     '  while read -r HC HPS <&3; do',
     // The rewritten parents, each once (two parents the scrub collapsed into one are one parent).
     '    HPL=""; HMV=""',
     '    for HQ in $HPS; do HNP=$HQ; [ ! -f "$TD/map/$HQ" ] || HNP=$(cat "$TD/map/$HQ"); [ "$HNP" = "$HQ" ] || HMV=1; case " $HPL " in *" $HNP "*) ;; *) HPL="${HPL:+$HPL }$HNP";; esac; done',
     '    rm -f "$TD/sidx"',
     '    GIT_INDEX_FILE="$TD/sidx" git read-tree "$HC"',
-    '    GIT_INDEX_FILE="$TD/sidx" git update-index --force-remove -z --stdin < "$TD/hstrip.u"',
+    '    GIT_INDEX_FILE="$TD/sidx" git update-index --force-remove -z --stdin < "$TD/hstrip"',
     '    HT=$(GIT_INDEX_FILE="$TD/sidx" git write-tree)',
     '    HT0=$(git rev-parse "$HC^{tree}")',
     '    if [ "$HT" = "$HT0" ] && [ -z "$HMV" ]; then continue; fi',
@@ -1367,19 +1356,24 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '    if [ -n "$HDROP" ]; then printf "%s" "$HPL" > "$TD/map/$HC"; continue; fi',
     '    git -c log.showSignature=false log -1 --format="%an%n%ae%n%ad%n%cn%n%ce%n%cd" --date=raw "$HC" > "$TD/hmeta"',
     '    { IFS= read -r HAN; IFS= read -r HAE; IFS= read -r HAD; IFS= read -r HCN; IFS= read -r HCE; IFS= read -r HCD; } < "$TD/hmeta"',
-    '    git cat-file commit "$HC" > "$TD/hraw.c"; sed "1,/^$/d" "$TD/hraw.c" > "$TD/msg"',
+    '    git cat-file commit "$HC" > "$TD/hraw.c"; sed "1,/^$/d" "$TD/hraw.c" > "$TD/msg"; sed -n "1,/^$/p" "$TD/hraw.c" > "$TD/hhdr"',
+    '    HSIGN=--no-gpg-sign; if grep -q -E "^gpgsig(-sha256)? " "$TD/hhdr"; then HSIGN=-S; fi',
     '    HPA=""; for HQ in $HPL; do HPA="$HPA -p $HQ"; done',
-    '    HNC=$(GIT_AUTHOR_NAME="$HAN" GIT_AUTHOR_EMAIL="$HAE" GIT_AUTHOR_DATE="$HAD" GIT_COMMITTER_NAME="$HCN" GIT_COMMITTER_EMAIL="$HCE" GIT_COMMITTER_DATE="$HCD" git commit-tree --no-gpg-sign "$HT" $HPA -F "$TD/msg")',
+    `    HNC=$(GIT_AUTHOR_NAME="$HAN" GIT_AUTHOR_EMAIL="$HAE" GIT_AUTHOR_DATE="$HAD" GIT_COMMITTER_NAME="$HCN" GIT_COMMITTER_EMAIL="$HCE" GIT_COMMITTER_DATE="$HCD" git commit-tree "$HSIGN" "$HT" $HPA -F "$TD/msg") || { if [ "$HSIGN" = -S ]; then echo "deliver: refusing to push — commit \${HC:0:12} is signed, and re-signing its scrubbed copy with this repository's signing setup (user.signingkey, gpg.format) failed (above); an unsigned copy is never pushed. Make the signing key available to the daemon, then approve to retry; nothing was pushed"; else echo "$HFAIL"; fi; exit 1; }`,
     '    printf "%s" "$HNC" > "$TD/map/$HC"',
     '  done 3< "$TD/hlist"',
     '  HOT=$(git rev-parse "$B"); HNT=$HOT; [ ! -f "$TD/map/$HOT" ] || HNT=$(cat "$TD/map/$HOT")',
+    // THE INVARIANT: the delivered tree is the run's tree minus seat temp paths, and nothing else.
+    '  git diff-tree -r -z --name-status --no-renames "$HOT^{tree}" "$HNT^{tree}" > "$TD/hinv" || { echo "$HFAIL"; exit 1; }',
+    '  HBAD=""; while IFS= read -r -d "" HS0 && IFS= read -r -d "" HP; do _seatscratch "$HP"; { [ "$HS0" = D ] && [ -n "$RN" ]; } || HBAD=$(printf "%s %s" "$HS0" "$HP" | tr "\\n\\r\\t" "???"); done < "$TD/hinv"',
+    '  [ -z "$HBAD" ] || { echo "deliver: refusing to push — the history scrub would change the delivered tree beyond removing seat temp files ($HBAD); nothing was pushed"; exit 1; }',
     '  git reset -q "$HNT"',
-    '  NSU=$(tr -cd "\\000" < "$TD/hstrip.u" | wc -c | tr -d " ")',
-    '  echo "deliver: scrubbed $NSU path(s) from the run\'s commits before the push; $B is now $HNT (was $HOT)"',
+    '  NSU=$(tr -cd "\\000" < "$TD/hstrip" | wc -c | tr -d " ")',
+    '  echo "deliver: scrubbed $NSU seat temp path(s) from the run\'s commits before the push; $B is now $HNT (was $HOT)"',
     '  A=$(git rev-list --count "$SB..$B")',
-    '  [ "$A" -ge 1 ] || { echo "deliver: nothing to deliver — every commit the run made carried only scrubbed paths; nothing was pushed"; exit 1; }',
-    '  { echo "## Removed from the run\'s commits"; echo; echo "_$NSU path(s) the run committed match the deliver classifier (scratch, tool-artifact or key material; crew#434) and were removed from every commit pushed here (wicked-core#1573). The deliver phase output names them._"; echo;',
-    '    sort -z -u "$TD/hwhy" | tr "\\000\\n" "\\n?" | cut -d" " -f1 | sort | uniq -c | while read -r HN HW; do echo "- $HW: $HN"; done; echo; } > "$TD/scrubsec"',
+    '  [ "$A" -ge 1 ] || { echo "deliver: nothing to deliver — every commit the run made carried only seat temp files; nothing was pushed"; exit 1; }',
+    '  { echo "## Removed from the run\'s commits"; echo; echo "_$NSU path(s) the run committed are a seat\'s own temp files or carry a home-derived name, and were removed from every commit pushed here (wicked-core#1573). The deliver phase output names them._"; echo;',
+    '    sort "$TD/hwhy" | uniq -c | while read -r HN HW; do echo "- $HW: $HN"; done; echo; } > "$TD/scrubsec"',
     '  _splice "$TD/body" "$TD/scrubsec"',
     'fi',
     // (c4) EX-04 (wicked-core#850): a POST-HOC lift has no engine verification behind the tree it is
@@ -1389,7 +1383,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     'if [ -n "${WICKED_DELIVER_POSTHOC:-}" ]; then',
     '  TA=$(git rev-parse --verify -q "$B^{tree}" || true)',
     '  if [ "$TL" = "$TB" ]; then MOVED="the lift did not change it"; else MOVED="the lift changed it: the rebase onto $D moved the work onto newer code"; fi',
-    '  if [ "$NSU" -gt 0 ]; then if [ "$TA" != "$TL" ]; then MOVED="$MOVED; the history scrub removed $NSU path(s) from it"; else MOVED="$MOVED; the history scrub removed $NSU path(s) from earlier commits only"; fi; fi',
+    '  if [ "$NSU" -gt 0 ]; then if [ "$TA" != "$TL" ]; then MOVED="$MOVED; the history scrub removed $NSU seat temp path(s) from it"; else MOVED="$MOVED; the history scrub removed $NSU seat temp path(s) from earlier commits only"; fi; fi',
     '  { echo; echo "---"; echo; echo "**Unverified delivery.** This pull request was delivered post-hoc (\\`POST /runs/$RUNID/deliver\\`), so no engine lift re-verified the tree it pushes. Run tree before the lift: \\`${TB:-unknown}\\`; delivered tree: \\`${TA:-unknown}\\` ($MOVED). Review it as unverified work."; } >> "$TD/body"',
     `  echo "${DELIVER_UNVERIFIED_MARKER} tree-before=\${TB:-unknown} tree-after=\${TA:-unknown}"`,
     'fi',
