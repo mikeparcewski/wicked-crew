@@ -7115,7 +7115,7 @@ export interface SystemSettings {
    */
   powerModeDefault?: boolean | undefined;
   /**
-   * (F1/F2, B7) "Use <seat> for new work": the seats new chats and jobs are drawn from (roster keys). ABSENT or `null`
+   * (api-types 0.214.0; F1/F2, B7) "Use <seat> for new work": the seats new chats and jobs are drawn from (roster keys). ABSENT or `null`
    * = the default rule (every seat that can work, opt-in seats left out). A seat named on a job is still used.
    * Human actors only.
    */
