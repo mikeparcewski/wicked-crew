@@ -127,7 +127,7 @@ import {
 import { seatWorkDefaultNow } from './seat-work-default.js';
 import { ROSTER_REFRESH_WAIT_MS, rosterWithStandingFactory, type RosterWithStanding } from './roster-standing.js';
 import {
-  SeatContainerStatus, isContainerLoginCli, isContainerSeatFloor, isHostSeatFloor, loginDetail, registerSeatContainerLoginRoutes, seatLoginDepsFor, type ExecLike, type SeatLoginDeps,
+  SeatContainerStatus, isContainerLoginCli, isContainerSeatFloor, isHostSeatFloor, registerSeatContainerLoginRoutes, seatLoginDepsFor, type ExecLike, type SeatLoginDeps,
 } from './seat-container-login.js';
 import { ChatTurnIndex } from './chat-turns.js';
 import type { ChatRepoRoot, ChatTranscriptStore } from './chat-transcripts.js';
