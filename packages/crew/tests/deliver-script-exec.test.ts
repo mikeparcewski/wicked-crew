@@ -1984,6 +1984,9 @@ describe('deliver script — no seat temp path in ANY pushed commit (wicked-core
     expect(committedScrubReason('tmp/pi-bash-9f3a1c0b7d2e4a65.log', '/home/runner')).toBe('seat-temp');
     expect(committedScrubReason('tmp/pi-notes.md', '/home/runner')).toBeNull();
     expect(committedScrubReason('tmp/pi-bash-xyz.log', '/home/runner')).toBeNull();
+    // pi writes exactly 16 hex characters; a shorter or longer name is somebody's own file.
+    expect(committedScrubReason('pi-bash-ab12.log', '/home/runner')).toBeNull();
+    expect(committedScrubReason('tmp/pi-bash-9f3a1c0b7d2e4a650.log', '/home/runner')).toBeNull();
   });
 
   it('a committed-then-deleted pi output log is in NO pushed commit; tmp/pi-notes.md and tmp/parser.rs ship (wicked-crew#1616)', async () => {
