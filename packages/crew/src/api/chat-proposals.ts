@@ -93,6 +93,7 @@ import {
   resolveJob,
   SEAT_WORDS,
   seatProtections,
+  seatRemovalNote,
   briefOf,
   inputLines,
   SELF_SEATED,
@@ -1213,8 +1214,9 @@ export class ChatProposals {
       seats = [...new Set(chosen)];
       if (seats.length !== 2 || seats.some((k) => !can.has(k))) return null;
     } else {
-      // The seats named (the chat's lead and seats), then the pool new work is drawn from (F1/F2).
-      const order = [chat.lead, ...chat.seats, ...(pool ?? roster).map((s) => s.key)].filter((k): k is string => k !== null && can.has(k));
+      // The chat's lead and seats that are in the pool new work is drawn from, then the rest of it (F1/F2).
+      const drawn = (pool ?? roster).map((s) => s.key);
+      const order = [...[chat.lead, ...chat.seats].filter((k) => k !== null && drawn.includes(k)), ...drawn].filter((k): k is string => k !== null && can.has(k));
       seats = [...new Set(order)].slice(0, 2);
       if (seats.length < 2) return null;
     }
@@ -2327,11 +2329,15 @@ export class ChatProposals {
     return c === null ? null : { projectId: c.projectId, repos: c.repos, lead: c.lead, seats: c.seats };
   }
 
-  /** (F1/F2) The seats new work may name, and the pool it is drawn from (`core/job-seats.ts`). An unreadable setting
-   *  reads as the default rule. */
-  private async seatPool(): Promise<JobSeatPool> {
-    const pick = this.deps.newWorkSeats === undefined ? null : await this.deps.newWorkSeats().catch(() => null);
-    return jobSeatPool(this.deps.rosterEligible(), pick);
+  /** (F1/F2) The seats new work may name, and the pool it is drawn from (`core/job-seats.ts`). A setting that can't be
+   *  read never widens the pool: `unreadable`, with an empty pool (a job refuses; a document has no default helpers). */
+  private async seatPool(): Promise<JobSeatPool & { unreadable?: true }> {
+    if (this.deps.newWorkSeats === undefined) return jobSeatPool(this.deps.rosterEligible(), null);
+    try {
+      return jobSeatPool(this.deps.rosterEligible(), await this.deps.newWorkSeats());
+    } catch {
+      return { eligible: this.deps.rosterEligible(), pool: [], unreadable: true };
+    }
   }
 
   private async jobContext(chatId: string, pid: string, turnId: string | null, seat: string, chat: JobChat, extra: Pick<JobContext, 'revises' | 'lineage' | 'notes'> & Partial<Pick<JobContext, 'answers' | 'request'>>): Promise<JobContext> {
@@ -2345,7 +2351,8 @@ export class ChatProposals {
     const projectLabel = chat.projectId === null ? 'Not in a project · this chat' : ((await this.deps.projectName(chat.projectId)) ?? chat.projectId);
     const qeOff = (await this.deps.qeOff?.().catch(() => false)) === true;
     const powerPresets = (await this.deps.powerPresets?.(chat.projectId).catch(() => null)) ?? null;
-    const { eligible: roster, pool } = await this.seatPool();
+    const { eligible: roster, pool, unreadable } = await this.seatPool();
+    if (unreadable === true) throw new JobRefusal('settings_unavailable', "crew can't read which seats new work uses (Settings); try again", 409);
     return { chatId, pid, turnId, seat, chat, served, roster, pool, projectLabel, qeOff, powerPresets, ...extra };
   }
 
@@ -2792,7 +2799,9 @@ export class ChatProposals {
     // A seat's revision that changes nothing and says nothing re-proposes nothing ("skip parity": the seat says why).
     if (!fromPerson && merged.unchanged && merged.notes.length === 0 && !stale) return { code: 200, body: { view: viewOf(parent) } };
     if (candidate === null) throw candidateErr;
-    const proposal = candidate;
+    // (F1/F2) What a removal did, from the card as published (never from the merge, which a loss question can hold).
+    const removal = seatRemovalNote(edits.removeSeats, parent.proposal.seats?.keys ?? [], candidate.seats?.keys ?? [], (k) => ctx.roster.find((s) => s.key === k)?.name ?? k);
+    const proposal = removal === null || candidate.sentence === undefined ? candidate : { ...candidate, sentence: { ...candidate.sentence, notes: [...candidate.sentence.notes, removal] } };
     if (!this.write(chatId, { at: this.now(), turnId: src.turnId ?? `person:${src.pid.slice(src.pid.lastIndexOf(':') + 1)}`, kind: 'proposal', proposal }, instance)) return this.gone(chatId);
     const view = foldProposals(this.deps.records(chatId)).get(src.pid);
     return { code: 201, body: { view: view !== undefined ? viewOf(view) : { proposal, state: 'open' } } };

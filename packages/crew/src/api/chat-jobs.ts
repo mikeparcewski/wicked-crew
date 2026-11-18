@@ -201,11 +201,29 @@ export function seatsNeeded(r: ResolvedOption): number {
   return 1 + (r.resolved.seats.distinctEvaluator ? 1 : 0) + (r.resolved.seats.distinctJudge ? 1 : 0);
 }
 
+/**
+ * (F1/F2) The order a job's seats are drawn in: the job's own lead (the person named it), then the chat's lead and
+ * seats that are in the pool new work is drawn from, then the rest of that pool. The chat's seats are its admitted
+ * roster (studio sends every seat it shows), not a choice for this job, so a seat turned off for new work stays off.
+ */
+function drawOrder(lead: string | null, ctx: { chat: JobChat; roster: JobContext['roster']; pool?: JobContext['pool'] | undefined }): string[] {
+  const pool = (ctx.pool ?? ctx.roster).map((s) => s.key);
+  const inPool = new Set(pool);
+  return [...new Set([lead, ...[ctx.chat.lead, ...ctx.chat.seats].filter((k) => k !== null && inPool.has(k)), ...pool].filter((k): k is string => k !== null))];
+}
+
+/** (F1/F2) What a revision's `removeSeats` did, said from the card as published: the seats that left it, and who works. */
+export function seatRemovalNote(asked: readonly string[] | undefined, before: readonly string[], after: readonly string[], nameOf: (k: string) => string): string | null {
+  if (asked === undefined) return null;
+  const off = before.filter((k) => asked.includes(k) && !after.includes(k));
+  if (off.length === 0) return null;
+  return `${list(off.map(nameOf))} ${off.length === 1 ? 'is' : 'are'} off this job; ${after.length === 0 ? 'no seat works on it' : `${list(after.map(nameOf))} ${after.length === 1 ? 'works' : 'work'} on it`}`;
+}
+
 function seatsOf(facts: JobFacts, ctx: JobContext, r: ResolvedOption): { seats: ProposalSeats; short: boolean } {
   const can = new Set(ctx.roster.map((s) => s.key));
   const name = (k: string): string => ctx.roster.find((s) => s.key === k)?.name ?? k;
-  // The seats named (the job's lead, the chat's lead and seats), then the pool new work is drawn from (F1/F2).
-  const ordered = [...new Set([facts.lead, ctx.chat.lead, ...ctx.chat.seats, ...(ctx.pool ?? ctx.roster).map((s) => s.key)].filter((k): k is string => k !== null && can.has(k)))];
+  const ordered = drawOrder(facts.lead, ctx).filter((k) => can.has(k));
   const keys = facts.seats !== null ? facts.seats.filter((k) => can.has(k)) : ordered;
   const lead = facts.lead !== null && keys.includes(facts.lead) ? facts.lead : (keys[0] ?? null);
   const rest = keys.filter((k) => k !== lead);
@@ -759,18 +777,18 @@ export function mergeRevision(
   if (edits.removeSeats !== undefined && edits.removeSeats.length > 0) {
     const r = resolveOption(facts.card, optionFor(CATALOG_V2_CARDS.find((c) => c.id === facts.card)!, facts.option), ctx.served);
     const need = r === null ? 1 : seatsNeeded(r);
-    const current = facts.seats ?? [...new Set([facts.lead, ...ctx.chat.seats, ...(ctx.pool ?? ctx.roster).map((s) => s.key)].filter((k): k is string => k !== null && can.has(k)))];
-    // (F1/F2) The card's words say what was applied, so a model's "I took it off" is never the only record.
+    const current = facts.seats ?? drawOrder(facts.lead, ctx).filter((k) => can.has(k));
+    // (F1/F2) A removal is applied or refused in the card's words; what WAS applied is said from the published card
+    // (`seatRemovalNote`), never from this intermediate merge. The count reads only the seats that can work now.
     const off = current.filter((k) => edits.removeSeats!.includes(k));
     const absent = edits.removeSeats.filter((k) => !current.includes(k));
     const kept = current.filter((k) => !off.includes(k));
     if (absent.length > 0) notes.push(`Not changed: ${list(absent.map(nameOf))} ${absent.length === 1 ? "isn't" : "aren't"} on this job`);
-    if (off.length > 0 && kept.length < need) {
+    if (off.length > 0 && kept.filter((k) => can.has(k)).length < need) {
       notes.push(`Not changed: ${list(off.map(nameOf))} ${off.length === 1 ? 'stays' : 'stay'}; this job needs ${need} seats, so another seat checks the one that builds`);
     } else if (off.length > 0) {
       facts.seats = kept;
       if (facts.lead !== null && !kept.includes(facts.lead)) facts.lead = kept[0] ?? null;
-      notes.push(`${list(off.map(nameOf))} ${off.length === 1 ? 'is' : 'are'} off this job; ${list(kept.map(nameOf))} ${kept.length === 1 ? 'works' : 'work'} on it`);
     }
   }
   // 5. Inputs fill or replace the needs they name, each validated against the card's own input (its kind, non-blank).
@@ -1002,6 +1020,32 @@ export function launchShapeOfProposal(p: ArtifactProposal): import('../core/type
     catalogRev: p.catalogRev!,
     ...(shape.guess !== undefined ? { guess: { confidence: shape.guess.confidence, band: shape.guess.band, source: shape.guess.source, reason: shape.guess.reason, detectionRunId: null } } : {}),
   };
+}
+
+/**
+ * The roster a job's Go hands the engine: `current` (the daemon's launch roster, naming the lead) narrowed to the seats
+ * the person saw. A reshape inherits the held run's roster configuration; its membership is still the proposal's
+ * seats (codex r2), with the current roster's entry for a seat added since (codex r3). `clisJson` is absent when the
+ * narrowed roster is the whole launch roster (the engine is handed that roster anyway).
+ */
+export function jobLaunchRoster<T extends { key?: unknown }>(current: readonly T[], p: Pick<ArtifactProposal, 'seats' | 'relaunch'>): { roster: Array<T | { key?: unknown }>; clisJson?: string } {
+  const keys = p.seats?.keys ?? [];
+  let inherited: Array<{ key?: unknown }> | null = null;
+  if (p.relaunch?.clisJson !== undefined) {
+    try {
+      const parsedRoster = JSON.parse(p.relaunch.clisJson) as unknown;
+      if (Array.isArray(parsedRoster)) inherited = parsedRoster as Array<{ key?: unknown }>;
+    } catch {
+      inherited = null;
+    }
+  }
+  const roster: Array<T | { key?: unknown }> = inherited === null ? [...current] : [...inherited, ...current.filter((s) => !inherited!.some((i) => i.key === s.key))];
+  const narrowed = keys.length > 0 ? roster.filter((s) => keys.includes(String(s.key))) : roster;
+  const missingSeat = keys.find((k) => !roster.some((s) => String(s.key) === k));
+  if (missingSeat !== undefined) throw new Error(`${missingSeat} is not on this daemon's roster; change who works on it`);
+  return (inherited !== null || narrowed.length !== roster.length) && narrowed.length > 0
+    ? { roster: narrowed, clisJson: JSON.stringify(narrowed) }
+    : { roster };
 }
 
 /**

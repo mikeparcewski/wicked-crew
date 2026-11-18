@@ -311,7 +311,7 @@ const BRIEF_COPY_MAX = 512 * 1024;
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
 import { registerInteractiveDocChecks } from '../interactive/doc-checks-routes.js';
 import { crewStateHome, stateHomeOfDb } from '../projects/state-home.js';
-import { demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
+import { demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, jobLaunchRoster, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
 import { DocumentsRefused, documentsClause, RUN_DOCS_TOKENS_MAX, stagedDocumentsOf, stageRunDocuments, type StagedDocuments } from './run-documents.js';
 import { checkSourcePick, projectSources, RUN_SOURCES_MAX, runSourcesDeps, type RunSourcePicks, webScopeReason } from './run-sources.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
@@ -4301,27 +4301,10 @@ export function registerRoutes(
       const resolved = resolveOption(p.shape.card, p.shape.option, served);
       if (resolved === null) throw new Error(`${p.what.label} is no longer in the catalog`);
       const selfSeated = resolved.workflow !== null && SELF_SEATED.has(resolved.workflow);
-      // The seats the person saw: the lead, and the roster narrowed to the proposal's keys.
-      const lead = p.seats?.lead ?? undefined;
-      const keys = p.seats?.keys ?? [];
-      // A reshape inherits the held run's roster configuration; its membership is still the proposal's seats (codex r2).
-      let inherited: Array<{ key?: unknown }> | null = null;
-      if (p.relaunch?.clisJson !== undefined) {
-        try {
-          const parsedRoster = JSON.parse(p.relaunch.clisJson) as unknown;
-          if (Array.isArray(parsedRoster)) inherited = parsedRoster as Array<{ key?: unknown }>;
-        } catch {
-          inherited = null;
-        }
-      }
-      const current = launchRosterNaming(rosterWithStanding(), lead);
-      // Inherited configuration for the seats it names; the current roster's entry for a seat added since (codex r3).
-      const roster = inherited === null ? current : [...inherited, ...current.filter((s) => !inherited!.some((i) => i.key === s.key))];
-      const narrowed = keys.length > 0 ? roster.filter((s) => keys.includes(String(s.key))) : roster;
-      const missingSeat = keys.find((k) => !roster.some((s) => String(s.key) === k));
-      if (missingSeat !== undefined) throw new Error(`${missingSeat} is not on this daemon's roster; change who works on it`);
+      // The seats the person saw: the lead, and the roster narrowed to the proposal's keys (`jobLaunchRoster`).
+      const { clisJson } = jobLaunchRoster(launchRosterNaming(rosterWithStanding(), p.seats?.lead ?? undefined), p);
       const common = jobLaunchCommon(p, { runId: d.identity.runId, chatId: d.chatId }, {
-        ...((inherited !== null || narrowed.length !== roster.length) && narrowed.length > 0 ? { clisJson: JSON.stringify(narrowed) } : {}),
+        ...(clisJson !== undefined ? { clisJson } : {}),
         selfSeated,
       });
       // A power Start was checked before accepting; checked again here, so it never runs phased behind the person's back.
