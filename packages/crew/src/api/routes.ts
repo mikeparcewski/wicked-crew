@@ -10010,7 +10010,9 @@ export function registerRoutes(
     // platform stop telling the operator something, so only a PERSON may do it — the "human"
     // predicate decision capture uses; a worker's bearer gets 403. A bad patch is a 400 naming the
     // key (never a silent drop), and the daemon stamps who changed what and when.
-    let watchNext: import('wicked-crew-api-types').WatchSettings | undefined;
+    let watchNext:
+      | ((current: import('../core/types.js').CrewSystemSettings) => import('wicked-crew-api-types').WatchSettings)
+      | undefined;
     if (Object.hasOwn(patch, 'watch')) {
       const actor = actorOf(req);
       if (!isHumanOperator(actor)) {
@@ -10022,12 +10024,11 @@ export function registerRoutes(
       }
       const problem = registry.validateSettingsPatch((patch as { watch?: unknown }).watch);
       if (problem !== null) return reply.code(400).send({ error: problem });
-      watchNext = registry.mergeSettings(
-        (await adapter.getSettings()).watch,
-        (patch as { watch: import('wicked-crew-api-types').WatchSettings }).watch,
-        actor.id,
-        Date.now(),
-      );
+      // The merge runs INSIDE the settings write (crew#1591), against the stored `watch` it
+      // replaces — merging over an earlier read would let two people's switches revert each other.
+      const watchPatch = (patch as { watch: import('wicked-crew-api-types').WatchSettings }).watch;
+      const at = Date.now();
+      watchNext = (current) => registry.mergeSettings(current.watch, watchPatch, actor.id, at);
     }
     // Only known engine keys and validated `studio.*` keys are persisted. A key that is
     // NEITHER is dropped, not refused: request bodies are forward-additive too (DES-STUDIO-001
@@ -10069,12 +10070,16 @@ export function registerRoutes(
     for (const key of studioKeys) {
       (safe as Record<string, unknown>)[key] = (patch as Record<string, unknown>)[key];
     }
-    if (watchNext !== undefined) safe.watch = watchNext;
     // `Object.hasOwn`, NOT `k in safe`: `in` walks the prototype chain, so a dropped key named
     // `toString` / `valueOf` / `constructor` would test as "kept" and vanish from `ignored` —
     // the exact silent drop this route exists to end.
-    const ignored = Object.keys(patch).filter((k) => !Object.hasOwn(safe, k));
-    const settings = await adapter.updateSettings(safe);
+    // `watch` is merged inside the write (crew#1591), so it is persisted without sitting in `safe`.
+    const changed = watchNext === undefined ? Object.keys(safe) : [...Object.keys(safe), 'watch'];
+    const ignored = Object.keys(patch).filter((k) => !Object.hasOwn(safe, k) && !(k === 'watch' && watchNext !== undefined));
+    const derive = watchNext;
+    const settings = derive === undefined
+      ? await adapter.updateSettings(safe)
+      : await adapter.updateSettings(safe, (current) => ({ watch: derive(current) }));
     if (watchNext !== undefined) runtime.watchRegistry?.()?.applySettings(settings.watch);
     // Re-apply the worker-config root to this process's env (seat sign-in). The engine reads
     // WICKED_WORKER_HOME per worker spawn — never cached — so this alone makes the change live
@@ -10095,7 +10100,7 @@ export function registerRoutes(
     // when there is one) is where a dropped unknown key stops being invisible.
     audit.record('settings.updated', actorOf(req), {
       detail: {
-        changed: Object.keys(safe),
+        changed,
         ...(ignored.length > 0 ? { ignored } : {}),
         // Which watchers were switched or re-thresholded (health reads the stamps; this is the trail).
         ...(watchNext !== undefined ? { watch: (patch as { watch: unknown }).watch } : {}),
