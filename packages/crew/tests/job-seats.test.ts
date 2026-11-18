@@ -393,10 +393,13 @@ describe('newWorkSeats read strictly: unset is the default, unreadable or invali
   ])('set but invalid (%s): the job reads blocked naming the setting and the fix, Start refuses setting_invalid; fixed, the same card starts', async (_label, value) => {
     writeFileSync(file, `{"newWorkSeats": ${value}}`);
     const r = prod();
-    expect((await r.pick()).code).toBe(201);
-    // The block is live, not stored: the transcript keeps the card as drawn, and it is served blocked.
+    const made = await r.pick();
+    expect(made.code).toBe(201);
+    // The block is live, not stored: the transcript keeps the card as drawn, and it is served blocked, in the POST's
+    // answer as on GET.
     expect(r.open().blocked).toBeNull();
     const shown = await r.served();
+    expect((made.body as { view: { proposal: ArtifactProposal } }).view.proposal.blocked).toBe(shown.blocked);
     expect(shown.blocked).toMatch(/newWorkSeats/);
     expect(shown.blocked).toMatch(/PUT \/api\/v1\/settings/);
     const go = await r.go();
@@ -443,13 +446,27 @@ describe('newWorkSeats read strictly: unset is the default, unreadable or invali
     expect((await r.go()).body).toMatchObject({ code: 'setting_invalid' });
   });
 
-  it("a seat's job block under an invalid setting still yields a proposal (served blocked), never nothing", async () => {
+  it("a seat's job block under an invalid setting yields a proposal served blocked; fixed, that same proposal starts", async () => {
     writeFileSync(file, '{"newWorkSeats": [1]}');
     const r = prod();
-    const p = await r.svc.resolveDetected({ chatId: CHAT, turnId: 't1', seat: 'claude', records: [],
+    // The person's own words for that turn agree with the block (else the reading asks first and holds Start).
+    const said = { at: 900, kind: 'user', turnId: 't1', owner: true, text: 'plan the move to node 22', seats: ['claude'] } as const;
+    r.deps.append(CHAT, said as never);
+    const p = await r.svc.resolveDetected({ chatId: CHAT, turnId: 't1', seat: 'claude', records: [said as never],
       block: { op: 'entry', entry: 'plan-it', confidence: 0.95, sources: [], repos: [] } as never });
     expect(p).not.toBeNull();
-    expect(p!.kind).toBe('job');
+    // Published as the reply handler publishes it (a `proposal` record on the transcript).
+    r.deps.append(CHAT, { at: 1_000, turnId: 't1', kind: 'proposal', proposal: p! });
+    expect((await r.served()).blocked).toMatch(/newWorkSeats/);
+    expect(r.open().blocked, JSON.stringify(r.open().question ?? null)).toBeNull();
+    const go = await r.go();
+    expect(go.code).toBe(409);
+    expect(go.body).toMatchObject({ code: 'setting_invalid' });
+    writeFileSync(file, '{"newWorkSeats": null}');
+    expect((await r.served()).blocked).toBeNull();
+    const started = await r.go();
+    expect(started.code, JSON.stringify(started.body)).toBe(200);
+    expect(r.launcher.launched).toHaveLength(1);
   });
 });
 

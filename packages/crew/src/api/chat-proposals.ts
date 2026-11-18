@@ -1471,7 +1471,7 @@ export class ChatProposals {
   decide(chatId: string, pid: string, body: { decision: 'go' | 'not_now'; edits?: ProposalEdits | undefined; power?: boolean | undefined }, actor: Actor, instance: string | null): Promise<DecideResult> {
     // Keyed by the pid alone (it is unique: `<chat>:<turn uuid>`), so the same proposal answered through an ended chat's
     // archived alias still waits for an in-flight answer through its first name.
-    return this.lock.run(`pid\u0000${pid}`, () => this.decideLocked(chatId, pid, body, actor, instance));
+    return this.lock.run(`pid\u0000${pid}`, () => this.decideLocked(chatId, pid, body, actor, instance)).then((r) => this.served(r));
   }
 
   private gone(chatId: string): DecideResult {
@@ -1531,9 +1531,6 @@ export class ChatProposals {
           throw err;
         }
       }
-      // (F1/F2) Go again re-reads `newWorkSeats` too: a bad setting refuses rather than starting it.
-      const seatsRefused = await this.seatsSettingRefusal(again, folded);
-      if (seatsRefused !== null) return seatsRefused;
       return this.go(chatId, folded, again, again === acc.resolution ? acc.edits : { ...(acc.edits ?? {}), ...body.edits }, acc.identity, actor, instance, body.power);
     }
     if (folded.state === 'superseded') {
@@ -1584,8 +1581,8 @@ export class ChatProposals {
       if (err instanceof EditRefusal || err instanceof JobRefusal) return this.refusalOf(err)!;
       throw err;
     }
-    // (F1/F2) A job's seats and a document's helpers come from `newWorkSeats`: Start re-reads it. Set but unreadable or
-    // invalid refuses with its code and reason (the card reads blocked with the same words, `withSeatsSetting`).
+    // (F1/F2) A job's seats and a document's helpers come from `newWorkSeats`: checked here before the card's own block (the
+    // setting is the cause to fix first), and again in `goLocked` for every launch path.
     const seatsRefused = await this.seatsSettingRefusal(effective, folded);
     if (seatsRefused !== null) return seatsRefused;
     if (effective.blocked !== null) {
@@ -1623,6 +1620,10 @@ export class ChatProposals {
     if (!flags.proposals || !(kind === 'job' ? this.jobsOn() : flags[kind]) || !this.deps.registry.has(kind)) {
       return { code: 409, body: { code: 'operation_unavailable', error: `studio cannot start a ${kind === 'create' ? 'document' : kind} from a chat on this daemon yet`, view: viewOf(folded) } };
     }
+    // (F1/F2) Every launch path (a fresh Go, Go again, a reshape) re-reads `newWorkSeats` before anything is answered or
+    // recorded: set but unreadable or invalid refuses with its code, never starting the seats drawn without the pick.
+    const seatsRefused = await this.seatsSettingRefusal(resolution, folded);
+    if (seatsRefused !== null) return seatsRefused;
     // The helpers can still work (one may have signed out since the card was drawn).
     if (resolution.helpers !== null) {
       const can = new Set(this.deps.rosterEligible().map((s) => s.key));
@@ -1905,7 +1906,8 @@ export class ChatProposals {
     }
     if (edits.helpers !== undefined) {
       const chat = this.deps.chat(chatId) ?? { projectId: p.filedIn.projectId, repos: [], lead: null, seats: [], analysis: false };
-      const { pool } = await this.seatPool();
+      const { pool, refusal } = await this.seatPool();
+      if (refusal !== undefined) throw new JobRefusal(refusal.code, refusal.message, 409);
       const helpers = this.helpers(chat, edits.helpers, pool);
       if (helpers === null) throw new EditRefusal('pick two different helpers that can work now');
       // Two helpers lift the block a person can lift: a missing second helper, or none drawn while the setting was bad.
@@ -2377,6 +2379,20 @@ export class ChatProposals {
     return refusal === undefined ? null : { code: 409, body: { code: refusal.code, error: refusal.message, view: viewOf(folded) } };
   }
 
+  /** (F1/F2) A proposal view as it is served: an open job or document reads blocked while `newWorkSeats` can't be
+   *  honored (read now), exactly as `withSeatsSetting` serves its record. */
+  async servedView(v: ChatProposalView): Promise<ChatProposalView> {
+    if (!SEATED_KINDS.has(v.proposal.kind) || !(v.state === 'open' || v.state === 'revising')) return v;
+    const { refusal } = await this.seatPool();
+    return refusal === undefined ? v : { ...v, proposal: { ...v.proposal, blocked: refusal.message } };
+  }
+
+  /** A response as it is served: its `view`, when it has one, through `servedView`. */
+  private async served(r: DecideResult): Promise<DecideResult> {
+    const v = r.body['view'] as ChatProposalView | undefined;
+    return v === undefined || v === null || typeof v !== 'object' || !('proposal' in v) ? r : { ...r, body: { ...r.body, view: await this.servedView(v) } };
+  }
+
   /** A proposal record as it is served: a seated proposal still open reads blocked by `refusal` (the live setting state). */
   private seatsBlocked<R extends ChatTranscriptRecord>(r: R, refusal: SeatsRefusal | null, open: (pid: string) => boolean): R {
     if (refusal === null || r.kind !== 'proposal' || !SEATED_KINDS.has(r.proposal.kind) || !open(r.proposal.pid)) return r;
@@ -2608,6 +2624,10 @@ export class ChatProposals {
    * runs. A repeated `requestId` answers the same proposal; another body under it is refused.
    */
   propose(chatId: string, body: PersonProposalBody | PersonRevisionBody, actor: Actor, instance: string | null): Promise<DecideResult> {
+    return this.proposeLocked(chatId, body, actor, instance).then((r) => this.served(r));
+  }
+
+  private proposeLocked(chatId: string, body: PersonProposalBody | PersonRevisionBody, actor: Actor, instance: string | null): Promise<DecideResult> {
     return this.lock.run(`chat\u0000${instance ?? chatId}`, async () => {
       if (this.deps.instanceOf(chatId) !== instance) return this.gone(chatId);
       if (!this.jobsOn()) return { code: 409, body: { code: 'operation_unavailable', error: 'this daemon does not take job proposals from a chat' } };
@@ -3111,7 +3131,7 @@ export class ChatProposals {
     actor: Actor,
     instance: string | null,
   ): Promise<DecideResult> {
-    return this.lock.run(`pid\u0000${x.pid}`, () => this.lock.run(`chat\u0000${instance ?? chatId}`, async () => {
+    return this.lock.run(`pid\u0000${x.pid}`, () => this.lock.run(`chat\u0000${instance ?? chatId}`, async (): Promise<DecideResult> => {
       if (this.deps.instanceOf(chatId) !== instance) return this.gone(chatId);
       if (!this.jobsOn()) return { code: 409, body: { code: 'operation_unavailable', error: 'this daemon does not start jobs from a chat' } };
       let folded = foldProposals(this.deps.records(chatId)).get(x.pid);
@@ -3215,7 +3235,7 @@ export class ChatProposals {
       const current = folded.state === 'accepting' && folded.accepting !== undefined ? folded.accepting.resolution : folded.proposal;
       const identity = folded.accepting?.identity ?? this.identityOf(current);
       return this.goLocked(chatId, folded, current, null, identity, actor, instance);
-    }));
+    })).then((r) => this.served(r));
   }
 
   /** A proposal of this chat, folded, or `null`. */

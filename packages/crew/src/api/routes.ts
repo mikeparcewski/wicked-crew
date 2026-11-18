@@ -5138,7 +5138,8 @@ export function registerRoutes(
         // proposal, completing the proposal while the chat is open; never open the id again (codex r1).
         const open = askPaths.get(seedChatId) !== undefined || chatScopes.get(seedChatId) !== undefined;
         if (open || chatHistory?.has(seedChatId) === true) {
-          let view = chatProposals.viewOfPid(seedChatId, personPid(seedChatId, seedActor.id, b.requestId!));
+          const stored = chatProposals.viewOfPid(seedChatId, personPid(seedChatId, seedActor.id, b.requestId!));
+          let view = stored === null ? null : await chatProposals.servedView(stored);
           // The same request id with another seed is not a retry (codex r2).
           if (view !== null && view.proposal.request?.digest !== requestDigest(seedBody(b.seed, b.requestId!))) {
             return reply.code(409).send({ code: 'request_reused', error: 'this requestId already started a chat with another job', chatId: seedChatId });
