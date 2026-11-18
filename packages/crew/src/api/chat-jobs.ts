@@ -212,12 +212,19 @@ function drawOrder(lead: string | null, ctx: { chat: JobChat; roster: JobContext
   return [...new Set([lead, ...[ctx.chat.lead, ...ctx.chat.seats].filter((k) => k !== null && inPool.has(k)), ...pool].filter((k): k is string => k !== null))];
 }
 
-/** (F1/F2) What a revision's `removeSeats` did, said from the card as published: the seats that left it, and who works. */
-export function seatRemovalNote(asked: readonly string[] | undefined, before: readonly string[], after: readonly string[], nameOf: (k: string) => string): string | null {
-  if (asked === undefined) return null;
+/**
+ * (F1/F2) What a revision's `removeSeats` did, said from the card as published: the seats that left it, and who works.
+ * `after` is the published card's workers (a job's seats, a document's helpers). `job` false (the revision made it a
+ * document, whose helpers are picked again): an asked seat that is still a helper is said to still work on it.
+ */
+export function seatRemovalNote(asked: readonly string[] | undefined, before: readonly string[], after: readonly string[], nameOf: (k: string) => string, job = true): string[] {
+  if (asked === undefined) return [];
+  const notes: string[] = [];
   const off = before.filter((k) => asked.includes(k) && !after.includes(k));
-  if (off.length === 0) return null;
-  return `${list(off.map(nameOf))} ${off.length === 1 ? 'is' : 'are'} off this job; ${after.length === 0 ? 'no seat works on it' : `${list(after.map(nameOf))} ${after.length === 1 ? 'works' : 'work'} on it`}`;
+  if (off.length > 0) notes.push(`${list(off.map(nameOf))} ${off.length === 1 ? 'is' : 'are'} off this job; ${after.length === 0 ? 'no seat works on it' : `${list(after.map(nameOf))} ${after.length === 1 ? 'works' : 'work'} on it`}`);
+  const still = job ? [] : asked.filter((k) => after.includes(k));
+  if (still.length > 0) notes.push(`Not changed: ${list(still.map(nameOf))} still ${still.length === 1 ? 'works' : 'work'} on it (its helpers are picked again; change them on the card)`);
+  return notes;
 }
 
 function seatsOf(facts: JobFacts, ctx: JobContext, r: ResolvedOption): { seats: ProposalSeats; short: boolean } {
@@ -784,8 +791,10 @@ export function mergeRevision(
     const absent = edits.removeSeats.filter((k) => !current.includes(k));
     const kept = current.filter((k) => !off.includes(k));
     if (absent.length > 0) notes.push(`Not changed: ${list(absent.map(nameOf))} ${absent.length === 1 ? "isn't" : "aren't"} on this job`);
-    if (off.length > 0 && kept.filter((k) => can.has(k)).length < need) {
-      notes.push(`Not changed: ${list(off.map(nameOf))} ${off.length === 1 ? 'stays' : 'stay'}; this job needs ${need} seats, so another seat checks the one that builds`);
+    // A seat that can't work now leaves the card anyway (resolution drops it), so only a working seat can "stay".
+    const offWorking = off.filter((k) => can.has(k));
+    if (offWorking.length > 0 && kept.filter((k) => can.has(k)).length < need) {
+      notes.push(`Not changed: ${list(offWorking.map(nameOf))} ${offWorking.length === 1 ? 'stays' : 'stay'}; this job needs ${need} seats, so another seat checks the one that builds`);
     } else if (off.length > 0) {
       facts.seats = kept;
       if (facts.lead !== null && !kept.includes(facts.lead)) facts.lead = kept[0] ?? null;

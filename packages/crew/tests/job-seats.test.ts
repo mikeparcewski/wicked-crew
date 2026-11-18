@@ -67,7 +67,7 @@ const PICKS: Record<string, readonly string[] | null> = {
 /** `claude`: the person chatting with Claude alone. `admitted`: the chat holds every seat studio showed (its default). */
 type ChatState = 'claude' | 'admitted';
 
-function rig(roster: string, pick: string, chatState: ChatState = 'claude') {
+function rig(roster: string, pick: string, chatState: ChatState = 'claude', create = false) {
   let standing: readonly Standing[] = ROSTERS[roster]!;
   const records: ChatTranscriptRecord[] = [];
   const launcher = new FakeLauncher();
@@ -78,7 +78,7 @@ function rig(roster: string, pick: string, chatState: ChatState = 'claude') {
     seats: chatState === 'claude' ? ['claude'] : ROSTERS[roster]!.map((s) => s.key),
   };
   const deps: ChatProposalDeps = {
-    flags: () => ({ context: true, proposals: true, create: false, refine: false, theme: false, demo: false }),
+    flags: () => ({ context: true, proposals: true, create, refine: false, theme: false, demo: false }),
     catalog: CATALOG_SEEDS,
     records: () => [...records],
     append: (_c, rec) => { records.push(rec); return true; },
@@ -278,6 +278,39 @@ describe('the seats new work uses: one pool for the card, its edits and its Star
     await r.swap({ removeSeats: ['claude'] });
     const p = r.open();
     expect(p.sentence!.notes).toEqual(['Not changed: Claude stays; this job needs 2 seats, so another seat checks the one that builds']);
+  });
+});
+
+describe('removal words after a kind change or a sign-out (codex r2)', () => {
+  it('a job made a document with a seat removed: the helper still on it is said to still work on it, never "off"', async () => {
+    const r = rig('Claude+Codex+Pi', 'null', 'admitted', true);
+    await r.pick();
+    expect((await r.swap({ card: 'document', option: 'presentation', removeSeats: ['claude'] } as ProposalRevisionEdits)).code).toBe(201);
+    let p = r.open();
+    const confirm = p.question?.choices?.[0]?.edit;
+    if (confirm !== undefined) {
+      expect((await r.swap(confirm as ProposalRevisionEdits)).code).toBe(201);
+      p = r.open();
+    }
+    const workers = p.seats?.keys ?? p.helpers?.seats ?? [];
+    const notes = p.sentence?.notes ?? [];
+    expect(confirm, 'the kind change asks before it drops checks').toBeDefined();
+    expect(p.seats).toBeUndefined();
+    expect(workers).toContain('claude');
+    expect(notes.join(' ')).not.toMatch(/off this job/);
+    expect(notes).toContain('Not changed: Claude still works on it (its helpers are picked again; change them on the card)');
+  });
+
+  it('removing a seat that signed out never says it stays: the card drops it and says so', async () => {
+    const r = rig('Claude+Pi', 'null');
+    await r.pick();
+    expect(r.open().seats!.keys).toEqual(['claude', 'pi']);
+    r.setStanding([seat('claude', 'Claude'), seat('pi', 'Pi', 'signed_out')]);
+    await r.swap({ removeSeats: ['pi'] });
+    const p = r.open();
+    expect(p.seats!.keys).toEqual(['claude']);
+    expect(p.sentence!.notes.join(' ')).not.toMatch(/stays/);
+    expect(p.sentence!.notes).toEqual(['pi is off this job; Claude works on it']);
   });
 });
 

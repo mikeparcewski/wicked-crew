@@ -2800,8 +2800,10 @@ export class ChatProposals {
     if (!fromPerson && merged.unchanged && merged.notes.length === 0 && !stale) return { code: 200, body: { view: viewOf(parent) } };
     if (candidate === null) throw candidateErr;
     // (F1/F2) What a removal did, from the card as published (never from the merge, which a loss question can hold).
-    const removal = seatRemovalNote(edits.removeSeats, parent.proposal.seats?.keys ?? [], candidate.seats?.keys ?? [], (k) => ctx.roster.find((s) => s.key === k)?.name ?? k);
-    const proposal = removal === null || candidate.sentence === undefined ? candidate : { ...candidate, sentence: { ...candidate.sentence, notes: [...candidate.sentence.notes, removal] } };
+    // A document's workers are its helpers (a revision can make a job a document; codex r2).
+    const workers = candidate.seats !== undefined ? candidate.seats.keys : (candidate.helpers?.seats ?? []);
+    const removal = seatRemovalNote(edits.removeSeats, parent.proposal.seats?.keys ?? [], workers, (k) => ctx.roster.find((s) => s.key === k)?.name ?? k, candidate.seats !== undefined);
+    const proposal = removal.length === 0 || candidate.sentence === undefined ? candidate : { ...candidate, sentence: { ...candidate.sentence, notes: [...candidate.sentence.notes, ...removal] } };
     if (!this.write(chatId, { at: this.now(), turnId: src.turnId ?? `person:${src.pid.slice(src.pid.lastIndexOf(':') + 1)}`, kind: 'proposal', proposal }, instance)) return this.gone(chatId);
     const view = foldProposals(this.deps.records(chatId)).get(src.pid);
     return { code: 201, body: { view: view !== undefined ? viewOf(view) : { proposal, state: 'open' } } };
