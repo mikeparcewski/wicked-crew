@@ -41,9 +41,39 @@ export interface WorkflowSchedule {
   lastOutcome: ScheduleOutcome | null;
   /** Why the last attempt was skipped or refused, in plain words. */
   lastNote: string | null;
+  /** (crew#1578) Set while the last run waits on a person and due times are skipped; null otherwise. */
+  blocked: ScheduleBlocked | null;
   failures: number;
   createdAt: string;
   updatedAt: string;
+}
+
+/** (crew#1578) A schedule held by its last run waiting on a person: never cancelled for them, said plainly. */
+export interface ScheduleBlocked {
+  reason: 'awaiting_human';
+  runId: string;
+  /** ISO-8601: when the schedule first saw the run waiting (within one sweep of the gate's arrival). */
+  since: string;
+  /** Due times skipped while it waits (0 until one comes due). */
+  missedDue: number;
+  /** The gate to open: the run's page. */
+  target: { kind: 'run'; runId: string };
+  /** "blocked: the last run <id> is waiting for you since <time>; N due times skipped". */
+  detail: string;
+}
+
+/** The row's one sentence for a blocked schedule (derived from the fields, never stored on its own). */
+export function blockedDetail(runId: string, since: string, missedDue: number): string {
+  return `blocked: the last run ${runId} is waiting for you since ${since}; ${missedDue} due time${missedDue === 1 ? '' : 's'} skipped`;
+}
+
+function parseBlocked(v: unknown): ScheduleBlocked | null {
+  if (typeof v !== 'object' || v === null) return null;
+  const b = v as Record<string, unknown>;
+  if (b['reason'] !== 'awaiting_human' || !str(b['runId']) || !str(b['since']) || !Number.isFinite(Date.parse(b['since'])) || !str(b['detail'])) return null;
+  const missed = b['missedDue'];
+  if (typeof missed !== 'number' || !Number.isSafeInteger(missed) || missed < 0) return null;
+  return { reason: 'awaiting_human', runId: b['runId'], since: b['since'], missedDue: missed, target: { kind: 'run', runId: b['runId'] }, detail: blockedDetail(b['runId'], b['since'], missed) };
 }
 
 export interface ScheduleInput {
@@ -82,6 +112,7 @@ function parseRow(id: string, raw: unknown): WorkflowSchedule | null {
     lastRunAt: strOrNull(r['lastRunAt']),
     lastOutcome: str(outcome) && OUTCOMES.has(outcome) ? (outcome as ScheduleOutcome) : null,
     lastNote: strOrNull(r['lastNote']),
+    blocked: parseBlocked(r['blocked']),
     failures: typeof r['failures'] === 'number' && r['failures'] >= 0 ? Math.floor(r['failures']) : 0,
     createdAt: str(r['createdAt']) ? r['createdAt'] : r['nextDueAt'],
     updatedAt: str(r['updatedAt']) ? r['updatedAt'] : r['nextDueAt'],
@@ -151,6 +182,7 @@ export class ScheduleStore {
       lastRunAt: prev?.lastRunAt ?? null,
       lastOutcome: prev?.lastOutcome ?? null,
       lastNote: prev?.lastNote ?? null,
+      blocked: prev?.blocked ?? null,
       failures: prev?.failures ?? 0,
       createdAt: prev?.createdAt ?? iso,
       updatedAt: iso,

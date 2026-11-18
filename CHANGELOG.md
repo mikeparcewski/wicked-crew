@@ -10,6 +10,25 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+- **A stuck scheduled run no longer blocks its schedule forever, and a run waiting on you says so (crew#1578).** The
+  schedule used to skip every due time while its last run was open, so a run stuck planning with no seats held it
+  indefinitely.
+  - **A run that never started work is cancelled.** That is a last run still planning or distributing with a known
+    empty seat list, 6 h after its scheduled launch. Its schedule cancels it at that point, due or not, and the next
+    due time launches. The status and seats are read again right before the cancel, which has a 60 s deadline.
+  - **The cancel is on the run's own record.** It is written as `run.cancelled` by `workflow-schedule` with the
+    reason "cancelled by its schedule: no seats for 6 h". The run's working document shows it as
+    "Its schedule · <time> · stopped the job: ...". This is the one line in a run's notes that is not a person's.
+  - **Other outcomes:** a run that ended on its own first keeps its own end, and no cancel is recorded. A cancel that
+    fails or does not answer launches nothing, and the row says why.
+  - **What is never cancelled:** a run with seats, one executing, or one younger than 6 h.
+  - **A run waiting on a person** (`awaiting_human`) is never cancelled for them. The row carries `blocked` from the
+    first sweep that sees it waiting: since when, the run to open, and how many due times it skipped while waiting.
+    Its note (what studio shows today) is the sentence "blocked: the last run <id> is waiting for you since <time>;
+    N due times skipped". Both clear when the run moves on.
+  - Run it now does the same and writes what it found on the row before refusing.
+
+  wicked-crew-api-types 0.215.0 (additive): `WorkflowSchedule.blocked`, `ScheduleBlocked`.
 - fix(deliver): a seat's own temp files and home-derived paths reach no pushed commit (wicked-core#1573). A seat that committed its temp file (`tmp/claude-<uid>/<a slug of the worktree path>/…/tasks/<id>.output`) and deleted it in a later commit still had it in the branch history, because delivery's exclusions only ran over untracked files. Right before the push, the deliver script now checks every file state the pushed commits introduce or inherit from a merged-in older commit against one narrow class, by name only: a `claude-<digits>` directory segment (`seat-temp`), or a segment that is a home-path slug (`-Users-…`, `-home-…`, `C--Users-…`, one starting with this host's home slug) or this host's home path mirrored as directories (`home-derived`). When any match, it rewrites those commits without them, keeping authors, committers, dates and messages; a commit the scrub empties is dropped. The general exclusion list (credentials, env files, `tmp/` source) is not applied to committed files: a committed `tmp/parser.rs` or `src/credentials.ts` is pushed as committed, and a path the base already holds at that exact name is never touched. If the scrub would rewrite or drop a signed commit, the push is refused with the reason (re-run the step, or remove the file from the history by hand) and nothing is pushed: delivery never signs work with a key of its own. Re-created commits of an unsigned history stay unsigned, whatever the ambient signing config says. Before the branch moves, the script checks that the rewritten final tree differs from the committed one only by removed paths of that class, and refuses the push otherwise; a scrub read that fails also pushes nothing. The phase output names each scrubbed path, and the PR body counts them by reason. A path under a nested scratch or tool-artifact directory is now named in the PR's Not shipped list only up to that directory (`pkg/tmp/…`), whichever rule excluded it, and the run diff the deliver gate counts leaves out committed files of the scrubbed class.
 - **A run's brief carries only learnings the operator approved, with this daemon's home and temp paths redacted (crew#1546).** Run-learnings recall
   labelled every stored memory "approved by the operator". Among them were raw session captures (a hook's

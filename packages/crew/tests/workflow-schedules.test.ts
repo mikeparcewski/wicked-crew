@@ -3,7 +3,7 @@
  * schedule twice at once, skips while the last run is going, waits while another run works, backs off a refusal,
  * and "Run it now" obeys the same guards. The tick is driven directly with a fake clock and adapter.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { AuditLog } from '../src/api/audit.js';
 import type { Actor } from '../src/core/types.js';
 import { registerScheduleRoutes } from '../src/schedules/routes.js';
-import { WorkflowScheduler, type ScheduledLaunch } from '../src/schedules/scheduler.js';
+import { WorkflowScheduler, cancelOnItsRecord, type ScheduledLaunch } from '../src/schedules/scheduler.js';
 import { DEFAULT_EVALS_SCHEDULE_ID, DEFAULT_REVIEW_EVERY_HOURS, DEFAULT_REVIEW_SCHEDULE_ID, ScheduleStore } from '../src/schedules/store.js';
 import { ReviewPreparationRefused } from '../src/insights/review-service.js';
 import { removeScratch } from './setup/scratch.js';
@@ -29,9 +29,14 @@ function scratch(): string {
 const T0 = new Date('2026-10-27T00:00:00Z');
 const H = 3_600_000;
 
-function rig(opts: { path?: string; refuse?: boolean } = {}) {
+const TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled']);
+
+function rig(opts: { path?: string; refuse?: boolean; cancelFails?: boolean; cancelHangs?: boolean; onSessions?: (calls: number) => void; beforeFresh?: () => void; duringCancel?: () => void } = {}) {
   const path = opts.path ?? join(scratch(), 'daemon-schedules.json');
   const runs: Record<string, string> = {};
+  const clis: Record<string, string[]> = {};
+  const cancels: { runId: string; reason: string }[] = [];
+  let sessionReads = 0;
   const launches: { id: string; runId: string; trigger: string }[] = [];
   const clock = { now: T0 };
   const store = new ScheduleStore(path);
@@ -44,14 +49,31 @@ function rig(opts: { path?: string; refuse?: boolean } = {}) {
   const ticks: number[] = [];
   const scheduler = new WorkflowScheduler({
     store,
-    sessionsDetail: async () => Object.entries(runs).map(([id, status]) => ({ session: { id, status }, units: [] }) as never),
+    sessionsDetail: async () => {
+      opts.onSessions?.(++sessionReads);
+      return Object.entries(runs).map(([id, status]) => ({ session: { id, status, clis: clis[id] ?? ['claude'] }, units: [] }) as never);
+    },
     launch,
+    runViewFresh: async (runId) => {
+      opts.beforeFresh?.();
+      return runs[runId] === undefined ? undefined : ({ session: { id: runId, status: runs[runId], clis: clis[runId] ?? ['claude'] }, units: [] } as never);
+    },
+    cancel: async (runId, reason) => {
+      if (opts.cancelFails === true) throw new Error('engine refused the cancel');
+      if (opts.cancelHangs === true) return new Promise<string>(() => undefined);
+      opts.duringCancel?.();
+      cancels.push({ runId, reason });
+      // The engine answers an already-ended run's end; otherwise it cancels.
+      if (TERMINAL_STATES.has(runs[runId] ?? '')) return runs[runId]!;
+      runs[runId] = 'cancelled';
+      return 'cancelled';
+    },
     onTick: [async () => { ticks.push(1); }],
     log: () => undefined,
     now: () => clock.now,
   });
   const at = (h: number): void => { clock.now = new Date(T0.getTime() + h * H); };
-  return { path, store, scheduler, runs, launches, at, ticks };
+  return { path, store, scheduler, runs, clis, cancels, launches, at, ticks, clock };
 }
 
 describe('the schedule store', () => {
@@ -138,7 +160,8 @@ describe('the scheduler', () => {
     r.at(72);
     await r.scheduler.sweep();
     expect(r.launches).toHaveLength(1);
-    expect(r.store.get('nightly')?.lastNote).toBe(`skipped: its last run ${first} is waiting on you (awaiting_human)`);
+    const since = new Date(T0.getTime() + 72 * H).toISOString();
+    expect(r.store.get('nightly')?.lastNote).toBe(`blocked: the last run ${first} is waiting for you since ${since}; 1 due time skipped`);
     // Any other open status keeps the plain note.
     r.runs[first] = 'executing';
     await r.scheduler.sweep();
@@ -148,6 +171,223 @@ describe('the scheduler', () => {
     r.runs[r.launches[0]?.runId as string] = 'cancelled';
     await r.scheduler.sweep();
     expect(r.launches).toHaveLength(2);
+  });
+
+  describe('crew#1578: a stuck last run never blocks its schedule forever', () => {
+    async function launched(r: ReturnType<typeof rig>): Promise<string> {
+      r.store.put('nightly', { workflow: 'run-evals', everyHours: 24 }, T0);
+      r.at(24);
+      await r.scheduler.sweep();
+      expect(r.launches).toHaveLength(1);
+      return r.launches[0]!.runId;
+    }
+
+    it('a run still planning with no seats 6 h after its launch is cancelled by its schedule, which launches the next due time', async () => {
+      const r = rig();
+      const first = await launched(r);
+      r.runs[first] = 'planning';
+      r.clis[first] = [];
+      r.at(29); // 5 h after the launch: not yet
+      await r.scheduler.sweep();
+      expect(r.cancels).toEqual([]);
+      r.at(30); // 6 h after the launch, long before the next due time: cancelled now (codex r1 #10), not launched yet
+      await r.scheduler.sweep();
+      expect(r.cancels).toEqual([{ runId: first, reason: 'cancelled by its schedule: no seats for 6 h' }]);
+      expect(r.store.get('nightly')).toMatchObject({ lastOutcome: 'cancelled', lastNote: `its last run ${first} was cancelled by its schedule: no seats for 6 h` });
+      expect(r.launches).toHaveLength(1);
+      r.at(48); // the next due time launches
+      await r.scheduler.sweep();
+      expect(r.launches).toHaveLength(2);
+      expect(r.store.get('nightly')?.lastRunId).toBe(r.launches[1]!.runId);
+    });
+
+    it('never cancels a run with seats, an executing one, one waiting on a person, or one under 6 h (KEY)', async () => {
+      for (const [status, seats, hours] of [['planning', ['claude'], 48], ['distributing', ['codex'], 48], ['executing', [], 48], ['awaiting_human', [], 48], ['distributing', [], 29]] as const) {
+        const r = rig();
+        const first = await launched(r);
+        r.runs[first] = status;
+        r.clis[first] = [...seats];
+        r.at(hours);
+        await r.scheduler.sweep();
+        expect(r.cancels, `${status} ${seats.join(',')} ${hours}`).toEqual([]);
+        expect(r.launches).toHaveLength(1);
+      }
+    });
+
+    it('a cancel that fails launches nothing and says why', async () => {
+      const r = rig({ cancelFails: true });
+      const first = await launched(r);
+      r.runs[first] = 'planning';
+      r.clis[first] = [];
+      r.at(48);
+      await r.scheduler.sweep();
+      expect(r.launches).toHaveLength(1);
+      expect(r.store.get('nightly')?.lastNote).toBe(`skipped: its last run ${first} has had no seats for 6 h and cancelling it failed (engine refused the cancel)`);
+    });
+
+    it('a run waiting on you blocks plainly: since when, which gate, how many due times; cleared when it ends', async () => {
+      const r = rig();
+      const first = await launched(r);
+      r.runs[first] = 'awaiting_human';
+      r.at(30); // seen waiting before any due time (codex r1 #4/#5): blocked since now, nothing skipped yet
+      await r.scheduler.sweep();
+      const since = new Date(T0.getTime() + 30 * H).toISOString();
+      expect(r.store.get('nightly')?.blocked).toEqual({
+        reason: 'awaiting_human',
+        runId: first,
+        since,
+        missedDue: 0,
+        target: { kind: 'run', runId: first },
+        detail: `blocked: the last run ${first} is waiting for you since ${since}; 0 due times skipped`,
+      });
+      r.at(48); // the first due time while it waits: skipped, and the row's note (what studio shows) says so
+      await r.scheduler.sweep();
+      const one = `blocked: the last run ${first} is waiting for you since ${since}; 1 due time skipped`;
+      expect(r.store.get('nightly')).toMatchObject({ blocked: { since, missedDue: 1, detail: one }, lastNote: one });
+      r.at(96); // two more due times: the count moves, the time it started waiting does not
+      await r.scheduler.sweep();
+      expect(r.store.get('nightly')?.blocked).toMatchObject({ since, missedDue: 3, detail: `blocked: the last run ${first} is waiting for you since ${since}; 3 due times skipped` });
+      expect(r.cancels).toEqual([]);
+      // It survives a restart (the store reads it back).
+      expect(new ScheduleStore(r.path).get('nightly')?.blocked).toMatchObject({ runId: first, missedDue: 3 });
+      r.runs[first] = 'completed';
+      await r.scheduler.sweep();
+      expect(r.store.get('nightly')?.blocked).toBeNull();
+      expect(r.launches).toHaveLength(2);
+    });
+
+    it('a blocked record clears with its note when the run moves on, though the row is disabled (codex r1 #6)', async () => {
+      const r = rig();
+      const first = await launched(r);
+      r.runs[first] = 'awaiting_human';
+      r.at(48);
+      await r.scheduler.sweep();
+      r.store.put('nightly', { workflow: 'run-evals', everyHours: 24, enabled: false }, r.clock.now);
+      r.runs[first] = 'executing';
+      await r.scheduler.sweep();
+      expect(r.store.get('nightly')).toMatchObject({ blocked: null, lastNote: null });
+    });
+
+    it('a run that got seats between the sweep read and the cancel is left alone (codex r1 #1)', async () => {
+      // The sweep's own read saw no seats; the fresh read right before the cancel sees one.
+      const r = rig({ beforeFresh: () => { r.clis[first] = ['claude']; } });
+      const first = await launched(r);
+      r.runs[first] = 'planning';
+      r.clis[first] = [];
+      r.at(31);
+      await r.scheduler.sweep();
+      expect(r.cancels).toEqual([]);
+    });
+
+    it('a cancel that never answers is reported failed and the sweep goes on (codex r1 #7)', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const r = rig({ cancelHangs: true });
+        const first = await launched(r);
+        r.runs[first] = 'planning';
+        r.clis[first] = [];
+        r.at(31);
+        const swept = r.scheduler.sweep();
+        await vi.advanceTimersByTimeAsync(60_000);
+        await swept;
+        expect(r.store.get('nightly')?.lastNote).toBe(`skipped: its last run ${first} has had no seats for 6 h and cancelling it failed (no answer within 60 s)`);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('a schedule replaced while its cancel was in flight gets none of the old run\'s bookkeeping (codex r2 #2)', async () => {
+      const r = rig({
+        duringCancel: () => {
+          r.store.delete('nightly');
+          r.store.put('nightly', { workflow: 'run-evals', everyHours: 24, enabled: false }, new Date(r.clock.now.getTime() + 1));
+        },
+      });
+      const first = await launched(r);
+      r.runs[first] = 'planning';
+      r.clis[first] = [];
+      r.at(31);
+      await r.scheduler.sweep();
+      expect(r.store.get('nightly')).toMatchObject({ lastRunId: null, lastOutcome: null, lastNote: null, enabled: false });
+    });
+
+    it('a blocked run that ends while its row is disabled takes its waiting sentence with it (codex r2 #6)', async () => {
+      const r = rig();
+      const first = await launched(r);
+      r.runs[first] = 'awaiting_human';
+      r.at(48);
+      await r.scheduler.sweep();
+      r.store.put('nightly', { workflow: 'run-evals', everyHours: 24, enabled: false }, r.clock.now);
+      r.runs[first] = 'completed';
+      await r.scheduler.sweep();
+      expect(r.store.get('nightly')).toMatchObject({ lastOutcome: 'completed', blocked: null, lastNote: null });
+    });
+
+    it('a persisted blocked sentence is derived from its fields, never trusted (codex r2 #9)', async () => {
+      const r = rig();
+      const first = await launched(r);
+      r.runs[first] = 'awaiting_human';
+      r.at(48);
+      await r.scheduler.sweep();
+      const raw = JSON.parse(readFileSync(r.path, 'utf8')) as unknown;
+      const doc = JSON.stringify(raw).replace(/blocked: the last run [^"]*skipped/gu, 'WRONG DETAIL');
+      writeFileSync(r.path, doc);
+      expect(new ScheduleStore(r.path).get('nightly')?.blocked?.detail).toMatch(/^blocked: the last run .* 1 due time skipped$/u);
+    });
+
+    it('a run that ended before the cancel landed keeps its own end and records no cancel (codex r1 #8)', async () => {
+      const audit = new AuditLog(join(scratch(), 'audit.log'), () => undefined);
+      const actor = { id: 'workflow-schedule', kind: 'system', trust: 'operator' } as const;
+      const cancel = cancelOnItsRecord(async () => 'completed', (runId, detail) => audit.record('run.cancelled', actor, { runId, detail }));
+      expect(await cancel('r-done', 'x')).toBe('completed');
+      expect(await audit.read({ runId: 'r-done' })).toEqual([]);
+    });
+
+    it('an unreadable launch time or seat list never makes a run stuck (codex r1 #3)', async () => {
+      const r = rig();
+      const first = await launched(r);
+      r.runs[first] = 'planning';
+      r.clis[first] = [];
+      r.store.update('nightly', { lastRunAt: 'not-a-time' }, r.clock.now);
+      r.at(48);
+      await r.scheduler.sweep();
+      expect(r.cancels).toEqual([]);
+    });
+
+    it('Run it now writes what it found on the row before refusing (codex r1 #13)', async () => {
+      const r = rig({ cancelFails: true });
+      const first = await launched(r);
+      r.runs[first] = 'planning';
+      r.clis[first] = [];
+      r.store.put('nightly', { workflow: 'run-evals', everyHours: 24, enabled: false }, r.clock.now);
+      r.at(31);
+      await expect(r.scheduler.runNow('nightly')).rejects.toThrow(/cancelling it failed/);
+      expect(r.store.get('nightly')?.lastNote).toMatch(/cancelling it failed \(engine refused the cancel\)/);
+    });
+
+    it("the cancel is on the run's own record: run.cancelled by the schedule, with the reason (SAYS-VS-DOES)", async () => {
+      const audit = new AuditLog(join(scratch(), 'audit.log'), () => undefined);
+      const actor = { id: 'workflow-schedule', kind: 'system', trust: 'operator' } as const;
+      const cancel = cancelOnItsRecord(async () => 'cancelled', (runId, detail) => audit.record('run.cancelled', actor, { runId, detail }));
+      await cancel('r-stuck', 'cancelled by its schedule: no seats for 6 h');
+      const entries = await audit.read({ runId: 'r-stuck' });
+      expect(entries).toMatchObject([{ action: 'run.cancelled', actor: { id: 'workflow-schedule' }, detail: { status: 'cancelled', reason: 'cancelled by its schedule: no seats for 6 h' } }]);
+      // An engine that refuses the cancel records nothing, and the scheduler hears the failure.
+      const refused = cancelOnItsRecord(async () => { throw new Error('no'); }, (runId, detail) => audit.record('run.cancelled', actor, { runId, detail }));
+      await expect(refused('r-other', 'x')).rejects.toThrow('no');
+      expect(await audit.read({ runId: 'r-other' })).toEqual([]);
+    });
+
+    it('Run it now cancels a stuck last run the same way, and starts', async () => {
+      const r = rig();
+      const first = await launched(r);
+      r.runs[first] = 'planning';
+      r.clis[first] = [];
+      r.at(31);
+      await expect(r.scheduler.runNow('nightly')).resolves.toBeTypeOf('string');
+      expect(r.cancels.map((c) => c.runId)).toEqual([first]);
+      expect(r.launches).toHaveLength(2);
+    });
   });
 
   it('a daemon that dies between the engine accepting a run and recording it never launches that interval again', async () => {
