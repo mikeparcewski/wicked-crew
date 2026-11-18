@@ -105,6 +105,7 @@ export type WorkRefusalSource = 'auth' | 'launcher' | 'scope';
 /** One reason code per refusal (studio's copy table keys on it). */
 export type WorkReasonCode =
   | 'signed_out'
+  | 'seat_image_unavailable'
   | 'not_enabled'
   | 'reviewer_only'
   | 'recent_bench'
@@ -135,6 +136,14 @@ export interface WorkInputs {
   /** wicked-core#976: the engine's host-floor bench reason for THIS seat (any run), `null` or
    *  absent for none. */
   hostFloorBench?: string | null;
+  /** crew#1097: this container seat's image cannot be had (cause and remedy), `null` or absent when it can run. */
+  seatImage?: string | null;
+}
+
+/** crew#1097: the seat's image is missing and cannot be built, so a launch benches it in every scope. */
+function seatImageRefusal(i: WorkInputs): Refusal | null {
+  if (typeof i.seatImage !== 'string' || i.seatImage === '' || i.standing.auth === 'signed_out') return null;
+  return { ok: false, reason_code: 'seat_image_unavailable', source: 'launcher', reason: i.seatImage };
 }
 
 /** The host-floor refusal (wicked-core#976), when the engine benches the seat there. */
@@ -170,7 +179,7 @@ function standingRefusal(i: WorkInputs, opts: { reviewer: boolean }): Refusal | 
 
 /** `RosterSeat.work_admission` (see the module doc). */
 export function workAdmission(i: WorkInputs): Record<GovernanceScopeKind, WorkAdmission> {
-  const base = standingRefusal(i, { reviewer: false }) ?? hostFloorRefusal(i);
+  const base = seatImageRefusal(i) ?? standingRefusal(i, { reviewer: false }) ?? hostFloorRefusal(i);
   const scope = (kind: GovernanceScopeKind): WorkAdmission => {
     if (base !== null) return base;
     if (kind === 'scoped_bound' && i.worktreeBench !== null) {
@@ -186,7 +195,7 @@ export function workAdmission(i: WorkInputs): Record<GovernanceScopeKind, WorkAd
 /** `RosterSeat.qe_reviewer` (see the module doc). `skillAdmitted` is the engine's answer. */
 export function qeReviewer(i: WorkInputs, skillAdmitted: boolean): QeReviewer {
   // The QE reviewer turn is governed (it runs as the run's own work), so the host-floor bench holds.
-  const r = standingRefusal(i, { reviewer: true }) ?? hostFloorRefusal(i);
+  const r = seatImageRefusal(i) ?? standingRefusal(i, { reviewer: true }) ?? hostFloorRefusal(i);
   if (r !== null) return { ok: false, reason_code: r.reason_code as QeReviewerReasonCode, reason: r.reason };
   if (i.worktreeBench !== null) return { ok: false, reason_code: 'worktree_bench', reason: i.worktreeBench };
   if (!skillAdmitted) {

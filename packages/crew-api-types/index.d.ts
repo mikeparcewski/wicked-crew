@@ -2108,6 +2108,8 @@ export interface SeatRecentBench {
  *  unreleased, wicked-core#976: the engine refuses the seat's governed work on the host floor). */
 export type SeatWorkReasonCode =
   | 'signed_out'
+  /** crew#1097: on the container floor this seat's image is missing and cannot be built (the reason names the remedy). */
+  | 'seat_image_unavailable'
   | 'not_enabled'
   | 'reviewer_only'
   | 'recent_bench'

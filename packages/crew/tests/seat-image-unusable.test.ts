@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { rosterWithStandingFactory } from '../src/api/roster-standing.js';
 import { SeatContainerStatus, type ExecLike } from '../src/api/seat-container-login.js';
 import { SeatHealthTracker } from '../src/api/seat-health.js';
+import { chatSeatAdmission, type StandingSeat } from '../src/api/seat-standing.js';
 import { probeSeatImages, SeatImageReading, unbuildableSeatImages, type SeatImageStatus, type UnbuildableSeatImage } from '../src/api/seat-images.js';
 import { toEngineSeat } from '../src/core/engine-roster.js';
 
@@ -66,11 +67,15 @@ describe('unbuildableSeatImages: the one rule', () => {
 
 let home: string;
 const close: Array<() => void> = [];
-beforeEach(() => { home = mkdtempSync(join(tmpdir(), 'seat-image-unusable-')); });
-afterEach(() => { for (const fn of close.splice(0)) fn(); vi.restoreAllMocks(); rmSync(home, { recursive: true, force: true }); });
+beforeEach(() => { home = mkdtempSync(join(tmpdir(), 'seat-image-unusable-')); vi.stubEnv('HOME', home); vi.stubEnv('WICKED_CORE_EXE', '/fixture/core'); });
+afterEach(() => { for (const fn of close.splice(0)) fn(); vi.restoreAllMocks(); vi.unstubAllEnvs(); rmSync(home, { recursive: true, force: true }); });
 
 function rosterFixture(reading: ReadonlyMap<string, UnbuildableSeatImage> | null, floor = 'container') {
-  const exec = vi.fn<ExecLike>(async () => ({ stdout: '{"status":"signed_in","detail":{"expires_at":null}}', stderr: '' }));
+  // The container broker answers per seat: pi is signed out, every other seat signed in.
+  const exec = vi.fn<ExecLike>(async (_file, args) => ({
+    stdout: args.some((a) => a === 'pi' || a.startsWith('pi')) ? '{"status":"signed_out","detail":{}}' : '{"status":"signed_in","detail":{"expires_at":null}}',
+    stderr: '',
+  }));
   const containerStatus = new SeatContainerStatus({ exec, gatewayDir: join(home, 'gateway') });
   const roster = rosterWithStandingFactory({
     registry: () => [{ key: 'claude' }, { key: 'codex' }, { key: 'codex#2' }, { key: 'pi' }],
@@ -83,46 +88,74 @@ function rosterFixture(reading: ReadonlyMap<string, UnbuildableSeatImage> | null
   close.push(() => roster.close?.());
   return { roster, containerStatus };
 }
+async function primed(reading: ReadonlyMap<string, UnbuildableSeatImage> | null, floor = 'container') {
+  const f = rosterFixture(reading, floor);
+  for (const k of ['claude', 'codex', 'codex#2', 'pi']) await f.containerStatus.refresh(k);
+  return f.roster;
+}
+const seatOf = (rows: ReturnType<ReturnType<typeof rosterWithStandingFactory>>, key: string) => rows.find((r) => r.key === key)!;
+const usable = (seat: unknown): unknown => (toEngineSeat(seat) as { health?: unknown }).health;
 
 describe('the roster: a seat whose image cannot be built is unusable, and the engine is handed it unusable', () => {
   const reason = unbuildableSeatImages(status(baseGone, { codex: { present: false } })).get('codex')!.reason;
   const reading = new Map<string, UnbuildableSeatImage>([['codex', { kind: 'base', reason }], ['pi', { kind: 'base', reason }]]);
 
-  it('codex and its instance: not eligible for work or council, inactive, chat refused, with the cause and remedy', async () => {
-    const { roster, containerStatus } = rosterFixture(reading);
-    await containerStatus.refresh('codex');
+  it('codex and its instance: no work, council, chat, work admission or QE review, inactive, engine unusable, with the cause and remedy', async () => {
+    const rows = (await primed(reading))();
     for (const key of ['codex', 'codex#2']) {
-      const seat = roster().find((r) => r.key === key)!;
+      const seat = seatOf(rows, key);
+      expect(seat.auth, key).toBe('signed_in');
       expect(seat, key).toMatchObject({
+        seat_image_unavailable: reason,
         health: { status: 'inactive', message: reason },
         council_eligible: false, council_ineligible_reason: reason,
         work_eligible: false, work_ineligible_reason: reason,
         chat_admission: { unscoped: { ok: false, reason }, scoped: { ok: false }, scoped_bound: { ok: false } },
+        work_admission: { unscoped: { ok: false, reason_code: 'seat_image_unavailable', reason }, scoped: { ok: false }, scoped_bound: { ok: false } },
+        qe_reviewer: { ok: false, reason_code: 'seat_image_unavailable', reason },
       });
-      expect((toEngineSeat(seat) as { health?: unknown }).health).toMatchObject({ usable: false });
+      expect(usable(seat)).toMatchObject({ usable: false });
+      // POST /chats and re-seat call chatSeatAdmission on the decorated seat: it refuses there too.
+      for (const kind of ['path', 'path-bound'] as const) {
+        expect(chatSeatAdmission(seat as StandingSeat, seat.auth ?? 'unknown', kind === 'path' ? false : true, kind)).toMatchObject({ ok: false, reason });
+      }
     }
-    // Claude's image is there: unchanged.
-    const claude = roster().find((r) => r.key === 'claude')!;
-    expect(claude.health).toMatchObject({ status: 'active' });
-    expect(claude.council_ineligible_reason).not.toBe(reason);
+    // Claude's image is there: usable.
+    const claude = seatOf(rows, 'claude');
+    expect(claude).toMatchObject({ health: { status: 'active' }, work_eligible: true, council_eligible: true });
+    expect(claude).not.toHaveProperty('seat_image_unavailable');
+    expect(usable(claude)).toMatchObject({ usable: true });
   });
 
-  it('a signed-out seat keeps its own reason (its image is not needed until it is signed in)', () => {
-    const { roster } = rosterFixture(reading, 'host');
-    const { roster: onContainer } = rosterFixture(reading);
-    const pi = onContainer().find((r) => r.key === 'pi')!;
+  it('a pending login check does not hide the image: the seat still reads unusable', () => {
+    // No broker answer yet (auth unknown, login pending).
+    const seat = seatOf(rosterFixture(reading).roster(), 'codex');
+    expect(seat.auth).not.toBe('signed_in');
+    expect(seat).toMatchObject({ seat_image_unavailable: reason, health: { status: 'inactive', message: reason } });
+    expect(chatSeatAdmission(seat as StandingSeat, seat.auth ?? 'unknown', false, 'path')).toMatchObject({ ok: false });
+  });
+
+  it('a signed-out seat keeps its own reason (its image is not needed until it is signed in)', async () => {
+    const pi = seatOf((await primed(reading))(), 'pi');
+    expect(pi.auth).toBe('signed_out');
+    expect(pi).not.toHaveProperty('seat_image_unavailable');
     expect(pi.work_ineligible_reason).not.toBe(reason);
-    expect(pi.health).toMatchObject({ status: 'active' });
-    expect(roster().find((r) => r.key === 'pi')!.work_ineligible_reason).not.toBe(reason);
+    expect(pi.council_ineligible_reason).not.toBe(reason);
+    expect(pi.work_admission).toMatchObject({ unscoped: { ok: false, reason_code: 'signed_out' } });
   });
 
-  it('no reading (none yet, or it failed) marks nothing; neither does the host floor', () => {
-    const unknown = rosterFixture(null).roster().find((r) => r.key === 'codex')!;
-    expect(unknown.work_ineligible_reason).not.toBe(reason);
-    expect(unknown.health).toMatchObject({ status: 'active' });
-    const host = rosterFixture(reading, 'host').roster().find((r) => r.key === 'codex')!;
-    expect(host.work_ineligible_reason).not.toBe(reason);
-    expect(host.health).toMatchObject({ status: 'active' });
+  it('no reading (none yet, or it failed) marks nothing: a signed-in seat stays usable', async () => {
+    const codex = seatOf((await primed(null))(), 'codex');
+    expect(codex.auth).toBe('signed_in');
+    expect(codex).toMatchObject({ health: { status: 'active' }, work_eligible: true, council_eligible: true, work_admission: { unscoped: { ok: true } } });
+    expect(codex).not.toHaveProperty('seat_image_unavailable');
+    expect(usable(codex)).toMatchObject({ usable: true });
+  });
+
+  it('the host floor reads no image: unchanged', () => {
+    const codex = seatOf(rosterFixture(reading, 'host').roster(), 'codex');
+    expect(codex).not.toHaveProperty('seat_image_unavailable');
+    expect(codex).toMatchObject({ health: { status: 'active' }, work_eligible: true });
   });
 });
 
@@ -150,5 +183,27 @@ describe('SeatImageReading: off the request path', () => {
     const r = new SeatImageReading(async () => { throw new Error('docker down'); });
     await r.refresh();
     expect(r.unbuildable()).toBeNull();
+  });
+
+  it('a read past its deadline publishes unknown and keeps the slot: never two status reads at once', async () => {
+    let now = 0;
+    let active = 0;
+    let most = 0;
+    let finish: (() => void) | undefined;
+    const r = new SeatImageReading(() => {
+      active += 1;
+      most = Math.max(most, active);
+      return new Promise<SeatImageStatus | null>((res) => { finish = () => { active -= 1; res(status()); }; });
+    }, { ttlMs: 10, timeoutMs: 5, nowMs: () => now });
+    r.unbuildable();
+    await new Promise((res) => setTimeout(res, 20));
+    expect(r.unbuildable()).toBeNull();
+    now = 100;
+    r.unbuildable();
+    r.unbuildable();
+    expect(most).toBe(1);
+    finish!();
+    await new Promise((res) => setTimeout(res, 0));
+    expect(most).toBe(1);
   });
 });

@@ -143,6 +143,9 @@ export interface StandingSeat {
   /** wicked-core#976: the engine's host-floor bench reason for this seat (`roster-standing.ts`
    *  stamps it from `CoreAdapter.hostFloorBenched`), absent when the engine does not bench it. */
   host_floor_bench?: string | null;
+  /** crew#1097: this container seat's image is missing and cannot be built (`roster-standing.ts` stamps the cause and
+   *  remedy from `unbuildableSeatImages`); absent when it can run. The seat takes no turn and no work. */
+  seat_image_unavailable?: string | null;
   /** wicked-core#976: present when the engine's host-floor bench could not be read on the host
    *  floor (and no earlier reading stands): the operator's sentence. The seat is not admitted. */
   host_floor_unknown?: string | null;
@@ -387,6 +390,11 @@ export function chatSeatAdmission(
   // wicked-core#976: an ask is a run, and on the host floor the engine refuses governed work on a
   // seat that keeps no per-call check there — in every scope. Decided HERE, before any structural
   // scope rule: no scope remedy ("scope the ask to one repository") can lift it.
+  // crew#1097: a seat whose image cannot be had runs nothing here, in any scope.
+  if (typeof seat.seat_image_unavailable === 'string' && seat.seat_image_unavailable !== '') {
+    reasons.push(seat.seat_image_unavailable);
+    return { ok: false, reason: reasons.join('; '), source: source === 'auth' ? 'auth' : 'engine' };
+  }
   const hostBenched = typeof seat.host_floor_bench === 'string' && seat.host_floor_bench !== '';
   const hostUnknown = typeof seat.host_floor_unknown === 'string' && seat.host_floor_unknown !== '';
   if (hostBenched || hostUnknown) {

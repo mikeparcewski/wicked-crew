@@ -214,8 +214,11 @@ export class SeatImageReading {
   /** Read now (one at a time: a refresh in flight is the one awaited). */
   refresh(): Promise<void> {
     this.pending ??= (async () => {
-      const settled = await settleWithin(this.status, this.opts.timeoutMs ?? PROBE_TIMEOUT_MS);
+      // One status read at a time: a read past its deadline publishes "unknown" then, and keeps the slot until it ends.
+      const op = this.status();
+      const settled = await settleWithin(() => op, this.opts.timeoutMs ?? PROBE_TIMEOUT_MS);
       this.note(settled.kind === 'ok' ? settled.value : null);
+      await op.then(() => undefined, () => undefined);
     })().finally(() => {
       this.pending = undefined;
     });

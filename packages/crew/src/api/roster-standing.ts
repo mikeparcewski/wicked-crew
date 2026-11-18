@@ -418,19 +418,14 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         work_eligible: false, work_ineligible_reason: reason,
       });
       // (crew#1097) Unusable, with the cause and its remedy: the engine is handed `health.usable: false`
-      // (`toEngineSeat`), so distribution, judging and launch coverage keep work off it. A field already
-      // ineligible keeps its own reason (a signed-out seat needs no image until it is signed in).
-      let imageBenched = false;
-      if (imageCannot !== undefined) {
-        if (standing.council_eligible === true) {
-          Object.assign(standing, { council_eligible: false, council_ineligible_reason: imageCannot.reason });
-          imageBenched = true;
-        }
-        if (standing.work_eligible === true) {
-          Object.assign(standing, { work_eligible: false, work_ineligible_reason: imageCannot.reason });
-          imageBenched = true;
-        }
-        if (imageBenched) health = { status: 'inactive' as const, message: imageCannot.reason, since: health.since };
+      // (`toEngineSeat`), so distribution, judging and launch coverage keep work off it; the chat, work and QE
+      // admissions refuse it from `seat_image_unavailable`. A signed-out seat needs no image until it is signed
+      // in (as the `seat_images` row says), and an ineligible field keeps its own reason.
+      const imageReason = imageCannot !== undefined && standing.auth !== 'signed_out' ? imageCannot.reason : null;
+      if (imageReason !== null) {
+        if (standing.council_eligible === true) Object.assign(standing, { council_eligible: false, council_ineligible_reason: imageReason });
+        if (standing.work_eligible === true) Object.assign(standing, { work_eligible: false, work_ineligible_reason: imageReason });
+        health = { status: 'inactive' as const, message: imageReason, since: health.since };
       }
       // F-W1-005 (wave-1 P6): the chat admission verdict the daemon itself applies when `POST /chats`
       // picks its default seats — the SAME `chatSeatAdmission` call, for both scope modes — so the
@@ -442,6 +437,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         ...(seat as unknown as StandingSeat),
         ...(hostFloor !== null ? { host_floor_bench: hostFloor } : {}),
         ...(hostFloorUnknown !== null ? { host_floor_unknown: hostFloorUnknown } : {}),
+        ...(imageReason !== null ? { seat_image_unavailable: imageReason } : {}),
         // crew#1071: an ask does not seat a seat under the engine's active bench.
         ...(recentBench !== null ? { recent_bench: recentBenchWire(recentBench) } : {}),
       };
@@ -466,10 +462,6 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         for (const scope of ['unscoped', 'scoped', 'scoped_bound'] as const) {
           chatAdmission[scope] = { ok: false, reason, source: 'auth' };
         }
-      } else if (imageBenched) {
-        for (const scope of ['unscoped', 'scoped', 'scoped_bound'] as const) {
-          chatAdmission[scope] = { ok: false, reason: imageCannot!.reason, source: 'auth' };
-        }
       }
       // A1: every seat's installed version, beside the pin reading.
       const version = seatVersion(seat as { acp?: { verified_version?: unknown } | null }, versions?.read(key), versionPin);
@@ -490,6 +482,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
               chatAdmission,
               worktreeBench: benchedOnBound.get(key) ?? null,
               hostFloorBench: hostFloor,
+              seatImage: imageReason,
             };
       if (probed?.via !== undefined) vias.set(key, probed.via);
       return {
@@ -499,6 +492,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         ...(containerSeat ? { sign_in: 'container' as const, sign_in_on: containerSignInOn(key) } : {}),
         ...(hostFloor !== null ? { host_floor_bench: hostFloor } : {}),
         ...(hostFloorUnknown !== null ? { host_floor_unknown: hostFloorUnknown } : {}),
+        ...(imageReason !== null ? { seat_image_unavailable: imageReason } : {}),
         ...(versionPin !== undefined ? { version_pin: versionPin } : {}),
         ...standing,
         // ASK-C2: the admission an ASK applies (every chat is a path after ASK-C1): `unscoped` =
