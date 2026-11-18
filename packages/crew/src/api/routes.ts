@@ -6518,7 +6518,9 @@ export function registerRoutes(
           // turn. The file goes with the chat on `chatClosed` UNLESS a run promoted from it is still
           // live (crew#619 retention — dropped when that run terminals), so a reclaimed id answers
           // `[]` only once no promoted run holds the old file.
-          ...(chatTranscripts !== undefined ? { messages: chatTranscripts.read(id) } : {}),
+          // (F1/F2) Served like `GET /chats/:id/messages`: an open job or document reads blocked while `newWorkSeats`
+          // can't be honored.
+          ...(chatTranscripts !== undefined ? { messages: await chatProposals.withSeatsSetting(chatTranscripts.read(id)) } : {}),
         };
       } catch (err) {
         return reply.code(400).send({ error: message(err) });

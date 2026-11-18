@@ -508,6 +508,11 @@ describe('chat proposals (server, A2)', () => {
     const setRaw = (raw: string): void => writeFileSync(settingsFile(), raw);
     beforeAll(() => { saved = existsSync(settingsFile()) ? readFileSync(settingsFile(), 'utf8') : null; });
     afterAll(() => { if (saved !== null) writeFileSync(settingsFile(), saved); else rmSync(settingsFile(), { force: true }); });
+    /** The proposal `pid` as `GET /chats/:id` (the chat's detail) serves it in its transcript. */
+    const detailProposal = async (chatId: string, pid: string): Promise<ArtifactProposal | undefined> => {
+      const body = (await stub.inject({ method: 'GET', url: `/api/v1/chats/${chatId}` })).json() as { messages?: ChatTranscriptRecord[] };
+      return (body.messages ?? []).filter((r): r is Extract<ChatTranscriptRecord, { kind: 'proposal' }> => r.kind === 'proposal' && r.proposal.pid === pid).at(-1)?.proposal;
+    };
     const restore = (): void => { if (saved !== null) writeFileSync(settingsFile(), saved); else rmSync(settingsFile(), { force: true }); };
 
     it('drawn while invalid: read blocked (GET), a helper pick and Start refuse 409 setting_invalid; fixed, the same card reads unblocked and starts', async () => {
@@ -515,8 +520,10 @@ describe('chat proposals (server, A2)', () => {
         setRaw('{"newWorkSeats": "claude"}');
         await turn(stub, stubListeners, 'nws-doc-1', 'Make a deck on coverage', { entry: 'presentation', title: 'Coverage', sources: ['chat'] });
         const p = await proposalOf(stub, 'nws-doc-1');
-        // Served blocked with the reason (the live setting state); drawn as if nothing were picked.
+        // Served blocked with the reason (the live setting state); drawn as if nothing were picked. The chat's detail
+        // serves the same card the same way.
         expect(p.blocked).toMatch(/newWorkSeats/);
+        expect((await detailProposal('nws-doc-1', p.pid))?.blocked).toBe(p.blocked);
         expect(p.helpers?.seats).toHaveLength(2);
         const go = await decide(stub, 'nws-doc-1', p.pid, { decision: 'go' });
         expect(go.statusCode).toBe(409);
@@ -528,6 +535,7 @@ describe('chat proposals (server, A2)', () => {
         restore();
         // Fixed: the same card reads unblocked on the next read (studio's Start enables), with no Start round-trip.
         expect((await proposalOf(stub, 'nws-doc-1')).blocked).toBeNull();
+        expect((await detailProposal('nws-doc-1', p.pid))?.blocked).toBeNull();
         const fixed = await decide(stub, 'nws-doc-1', p.pid, { decision: 'go' });
         expect(fixed.statusCode, fixed.body).toBe(200);
         expect(stubRows().length - before).toBe(1);
