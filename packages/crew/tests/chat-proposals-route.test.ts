@@ -498,8 +498,9 @@ describe('chat proposals (server, A2)', () => {
 
   /**
    * (F1/F2 round 3) A document's helpers come from `newWorkSeats`, read strictly through the route's production reader
-   * (the hermetic settings file, tests/setup/hermetic-home.ts). Set but invalid or unreadable refuses with its code at
-   * draw, at a helper pick and at Start; a repaired setting lifts the block without a new proposal.
+   * (the hermetic settings file, tests/setup/hermetic-home.ts). Set but invalid or unreadable is a LIVE state: the card
+   * reads blocked on GET while it lasts, and a helper pick or Start refuses with its code; fixed, the same card reads
+   * unblocked and starts, with nothing changed on the transcript.
    */
   describe('a document and the newWorkSeats setting (fail closed, recoverable)', () => {
     const settingsFile = (): string => process.env['WICKED_CREW_SYSTEM_SETTINGS']!;
@@ -509,13 +510,14 @@ describe('chat proposals (server, A2)', () => {
     afterAll(() => { if (saved !== null) writeFileSync(settingsFile(), saved); else rmSync(settingsFile(), { force: true }); });
     const restore = (): void => { if (saved !== null) writeFileSync(settingsFile(), saved); else rmSync(settingsFile(), { force: true }); };
 
-    it('drawn while invalid: blocked with the reason; a helper pick and Start refuse 409 setting_invalid; repaired, Start draws helpers and starts', async () => {
+    it('drawn while invalid: read blocked (GET), a helper pick and Start refuse 409 setting_invalid; fixed, the same card reads unblocked and starts', async () => {
       try {
         setRaw('{"newWorkSeats": "claude"}');
         await turn(stub, stubListeners, 'nws-doc-1', 'Make a deck on coverage', { entry: 'presentation', title: 'Coverage', sources: ['chat'] });
         const p = await proposalOf(stub, 'nws-doc-1');
-        expect(p.helpers).toBeNull();
-        expect(p.blocked).toMatch(/^Can't pick its helpers: .*newWorkSeats/);
+        // Served blocked with the reason (the live setting state); drawn as if nothing were picked.
+        expect(p.blocked).toMatch(/newWorkSeats/);
+        expect(p.helpers?.seats).toHaveLength(2);
         const go = await decide(stub, 'nws-doc-1', p.pid, { decision: 'go' });
         expect(go.statusCode).toBe(409);
         expect(go.json()).toMatchObject({ code: 'setting_invalid' });
@@ -524,6 +526,8 @@ describe('chat proposals (server, A2)', () => {
         expect(pick.json()).toMatchObject({ code: 'setting_invalid' });
         const before = stubRows().length;
         restore();
+        // Fixed: the same card reads unblocked on the next read (studio's Start enables), with no Start round-trip.
+        expect((await proposalOf(stub, 'nws-doc-1')).blocked).toBeNull();
         const fixed = await decide(stub, 'nws-doc-1', p.pid, { decision: 'go' });
         expect(fixed.statusCode, fixed.body).toBe(200);
         expect(stubRows().length - before).toBe(1);
@@ -532,13 +536,15 @@ describe('chat proposals (server, A2)', () => {
       }
     });
 
-    it('drawn while readable, then the file breaks: Start refuses 409 settings_unavailable and starts nothing; repaired, it starts', async () => {
+    it('drawn while readable, then the file breaks: read blocked, Start refuses 409 settings_unavailable and starts nothing; repaired, it starts', async () => {
       try {
         await turn(stub, stubListeners, 'nws-doc-2', 'Make a deck on coverage', { entry: 'presentation', title: 'Coverage', sources: ['chat'] });
         const p = await proposalOf(stub, 'nws-doc-2');
+        expect(p.blocked).toBeNull();
         expect(p.helpers?.seats).toHaveLength(2);
         const before = stubRows().length;
         setRaw('{"newWorkSeats": ["claude"');
+        expect((await proposalOf(stub, 'nws-doc-2')).blocked).toMatch(/newWorkSeats/);
         const go = await decide(stub, 'nws-doc-2', p.pid, { decision: 'go' });
         expect(go.statusCode).toBe(409);
         expect(go.json()).toMatchObject({ code: 'settings_unavailable' });
@@ -547,6 +553,7 @@ describe('chat proposals (server, A2)', () => {
         expect(pick.json()).toMatchObject({ code: 'settings_unavailable' });
         expect(stubRows().length).toBe(before);
         restore();
+        expect((await proposalOf(stub, 'nws-doc-2')).blocked).toBeNull();
         expect((await decide(stub, 'nws-doc-2', p.pid, { decision: 'go' })).statusCode).toBe(200);
         expect(stubRows().length - before).toBe(1);
       } finally {

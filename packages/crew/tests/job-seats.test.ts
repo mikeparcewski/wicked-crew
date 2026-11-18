@@ -116,6 +116,9 @@ function rig(roster: string, pick: string, chatState: ChatState = 'claude', crea
     setStanding: (rows: readonly Standing[]) => { standing = rows; },
     /** The keys of the roster a Go of `p` hands the engine (the production narrowing, `jobLaunchRoster`). */
     engineRoster: (p: Pick<ArtifactProposal, 'seats' | 'relaunch'>) => jobLaunchRoster(launchRosterNaming(standing, p.seats?.lead ?? undefined), p).roster.map((x) => String(x.key)),
+    /** The open proposal as it is SERVED (`GET /chats/:id/messages`): the live `newWorkSeats` state over the transcript. */
+    served: async (): Promise<ArtifactProposal> => [...foldProposals(await svc.withSeatsSetting(records)).values()].find((x) => x.state === 'open' || x.state === 'revising')!.proposal,
+    go: () => svc.decide(CHAT, open().pid, { decision: 'go' }, ME, 'i1'),
     pick: (card = 'plan-it') => svc.propose(CHAT, { card, source: 'pick', requestId: `req-${card}`, words: 'plan the move to node 22' } as never, ME, 'i1'),
     swap: (edits: ProposalRevisionEdits) => svc.propose(CHAT, { revises: open().pid, edits, source: 'swap', requestId: `swap-${++n}` } as never, ME, 'i1'),
   };
@@ -251,13 +254,16 @@ describe('the seats new work uses: one pool for the card, its edits and its Star
     expectWords(p, ['claude', 'codex']);
   });
 
-  it('a setting read that fails in an unexpected way never widens the pool: the job is refused, with the reason', async () => {
+  it('a setting read that fails in an unexpected way never widens the pool: the job reads blocked and Start refuses, with the reason', async () => {
     const r = rig('Claude+Codex+Pi', 'Pi off');
     r.deps.newWorkSeats = async () => { throw new Error('settings unreadable'); };
-    const res = await r.pick();
-    expect(res.code).toBe(409);
-    expect(res.body).toMatchObject({ code: 'settings_unavailable' });
-    expect(String((res.body as { error?: unknown }).error ?? JSON.stringify(res.body))).toMatch(/newWorkSeats/);
+    expect((await r.pick()).code).toBe(201);
+    expect((await r.served()).blocked).toMatch(/newWorkSeats/);
+    const go = await r.go();
+    expect(go.code).toBe(409);
+    expect(go.body).toMatchObject({ code: 'settings_unavailable' });
+    expect(String((go.body as { error?: unknown }).error)).toMatch(/newWorkSeats/);
+    expect(r.launcher.launched).toEqual([]);
   });
 
   it('a removal held behind a loss question says nothing was applied (the card published still has Pi)', async () => {
@@ -384,15 +390,24 @@ describe('newWorkSeats read strictly: unset is the default, unreadable or invali
     ['a number list', '[1, 2]'],
     ['a blank key', '[""]'],
     ['an object', '{"claude": true}'],
-  ])('set but invalid (%s): the job is refused as setting_invalid, naming the setting and the fix', async (_label, value) => {
+  ])('set but invalid (%s): the job reads blocked naming the setting and the fix, Start refuses setting_invalid; fixed, the same card starts', async (_label, value) => {
     writeFileSync(file, `{"newWorkSeats": ${value}}`);
     const r = prod();
-    const res = await r.pick();
-    expect(res.code).toBe(409);
-    expect(res.body).toMatchObject({ code: 'setting_invalid' });
-    expect(errorOf(res)).toMatch(/newWorkSeats/);
-    expect(errorOf(res)).toMatch(/PUT \/api\/v1\/settings/);
+    expect((await r.pick()).code).toBe(201);
+    // The block is live, not stored: the transcript keeps the card as drawn, and it is served blocked.
+    expect(r.open().blocked).toBeNull();
+    const shown = await r.served();
+    expect(shown.blocked).toMatch(/newWorkSeats/);
+    expect(shown.blocked).toMatch(/PUT \/api\/v1\/settings/);
+    const go = await r.go();
+    expect(go.code).toBe(409);
+    expect(go.body).toMatchObject({ code: 'setting_invalid' });
     expect(r.launcher.launched).toEqual([]);
+    // Fixed: the same proposal reads unblocked and starts, with no new proposal.
+    writeFileSync(file, '{"newWorkSeats": null}');
+    expect((await r.served()).blocked).toBeNull();
+    expect((await r.go()).code).toBe(200);
+    expect(r.launcher.launched).toHaveLength(1);
   });
 
   it.each([
@@ -400,16 +415,20 @@ describe('newWorkSeats read strictly: unset is the default, unreadable or invali
     ['not a JSON object', () => writeFileSync(file, '["claude"]')],
     ['a directory where the file should be', () => mkdirSync(file)],
     ['a settings link whose target is gone', () => symlinkSync(join(home, 'moved-away.json'), file)],
-  ])('settings file unreadable (%s): the job is refused as settings_unavailable, never every seat', async (_label, arrange) => {
+  ])('settings file unreadable (%s): the job reads blocked and Start refuses settings_unavailable; nothing starts', async (_label, arrange) => {
     arrange();
     // What made it widen: the lenient reader serves the defaults, where no pick reads as every seat.
     expect((await adapter.getSettings()).newWorkSeats ?? null).toBeNull();
     const r = prod();
-    const res = await r.pick();
-    expect(res.code).toBe(409);
-    expect(res.body).toMatchObject({ code: 'settings_unavailable' });
-    expect(errorOf(res)).toMatch(/newWorkSeats/);
-    expect(errorOf(res)).toMatch(/won't start new work on every seat/);
+    expect((await r.pick()).code).toBe(201);
+    const shown = await r.served();
+    expect(shown.blocked).toMatch(/newWorkSeats/);
+    expect(shown.blocked).toMatch(/won't start new work on every seat/);
+    const go = await r.go();
+    expect(go.code).toBe(409);
+    expect(go.body).toMatchObject({ code: 'settings_unavailable' });
+    expect(errorOf(go)).toMatch(/newWorkSeats/);
+    expect(r.launcher.launched).toEqual([]);
   });
 
   it('an invalid pick survives an unrelated settings write, so the write cannot quietly widen the pool', async () => {
@@ -419,26 +438,18 @@ describe('newWorkSeats read strictly: unset is the default, unreadable or invali
     expect(await adapter.updateSettings({ graphNodeLimit: 200 })).not.toHaveProperty('newWorkSeats');
     // ...while the file keeps it, so new work still refuses instead of reading "not set".
     expect(JSON.parse(readFileSync(file, 'utf8'))).toMatchObject({ newWorkSeats: 'claude', graphNodeLimit: 200 });
-    const res = await prod().pick();
-    expect(res.code).toBe(409);
-    expect(res.body).toMatchObject({ code: 'setting_invalid' });
+    const r = prod();
+    expect((await r.pick()).code).toBe(201);
+    expect((await r.go()).body).toMatchObject({ code: 'setting_invalid' });
   });
 
-  it('a document with an invalid pick is blocked with the reason, and no default helpers are drawn', async () => {
-    const r = prod(true);
-    expect((await r.pick()).code).toBe(201);
+  it("a seat's job block under an invalid setting still yields a proposal (served blocked), never nothing", async () => {
     writeFileSync(file, '{"newWorkSeats": [1]}');
-    const res = await r.swap({ card: 'document', option: 'presentation' } as ProposalRevisionEdits);
-    // The revision is refused with the reason; the card stays the job it was.
-    expect(res.code).toBe(409);
-    expect(res.body).toMatchObject({ code: 'setting_invalid' });
-    expect(r.open()).toMatchObject({ kind: 'job', helpers: null });
-    // A document drawn fresh (a make block) is blocked with the same words instead of "needs a second helper".
-    const doc = (r.svc as unknown as { docHelpers(c: ProposalChat): Promise<{ helpers: unknown; block: string | null }> })
-      .docHelpers({ projectId: null, repos: [], lead: 'claude', analysis: false, seats: ['claude', 'codex', 'pi'] });
-    const drawn = await doc;
-    expect(drawn.helpers).toBeNull();
-    expect(drawn.block).toMatch(/newWorkSeats/);
+    const r = prod();
+    const p = await r.svc.resolveDetected({ chatId: CHAT, turnId: 't1', seat: 'claude', records: [],
+      block: { op: 'entry', entry: 'plan-it', confidence: 0.95, sources: [], repos: [] } as never });
+    expect(p).not.toBeNull();
+    expect(p!.kind).toBe('job');
   });
 });
 

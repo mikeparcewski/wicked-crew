@@ -6646,7 +6646,8 @@ export function registerRoutes(
       if (chat !== null) await chatProposals.reopenStale(id).catch(() => false);
       const messages = chat === null ? null : chatHistory.messages(id);
       if (chat === null || messages === null) return reply.code(404).send({ error: `no chat ${id} in this daemon's history` });
-      return { chat, messages, attachments: chatAttachments.list(id) };
+      // (F1/F2) An open job or document reads blocked while `newWorkSeats` can't be honored: a live state, read now.
+      return { chat, messages: await chatProposals.withSeatsSetting(messages), attachments: chatAttachments.list(id) };
     },
   );
 
