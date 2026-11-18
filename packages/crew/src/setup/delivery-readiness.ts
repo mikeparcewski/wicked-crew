@@ -22,7 +22,7 @@
 import type { SystemInfraRow } from 'wicked-crew-api-types';
 import type { DeliverCredentials } from '../core/deliver-credentials.js';
 import { execCapped } from '../core/exec.js';
-import { GH_CALL_LINE, GITHUB_CREDENTIAL_LINES, pushIdentityOf, shellSingleQuote } from '../core/deliver.js';
+import { GH_CALL_LINE, GITHUB_CREDENTIAL_LINES, shellSingleQuote } from '../core/deliver.js';
 import { gitCommitIdents, usableGitIdent, type GitCommitIdents } from './known.js';
 
 /** api-types `DeliveryReadiness` (crew#1527). */
@@ -35,7 +35,9 @@ export interface DeliveryReadiness {
   ready: boolean | null;
   /** The GitHub credential delivery would use, as its own credential lines resolved it. */
   github: DeliverCredentials;
-  /** The configured push identity (`deliverIdentityLogin`, else `GH_ACCOUNT`); `null` = none: gh's own login opens it. */
+  /** The GitHub login a pull request opens as: what `gh api user` answered inside the deliver shell. When delivery would
+   *  refuse, the push identity that shell resolved (`deliverIdentityLogin`, else its `GH_ACCOUNT`), if any; when the
+   *  check could not run, the configured `deliverIdentityLogin`, if any. Never read from the daemon's environment. */
   pushAs: string | null;
   /** The git author commits carry, as git resolves it; `null` when none is configured or it could not be read. */
   gitAuthor: { name: string | null; email: string | null } | null;
@@ -45,21 +47,31 @@ export interface DeliveryReadiness {
   fix: string | null;
 }
 
-/** What the deliver script's credential lines and `gh api user` found; `null` = could not check. */
+/** What the deliver shell itself held after its login profile: the push identity (`GH_ACCOUNT` after the configured
+ *  identity) and whether `GH_TOKEN` / `GITHUB_TOKEN` were set. Readiness reports only this, never the daemon's env. */
+export interface ProbeShell {
+  account: string | null;
+  ghToken: boolean;
+  githubToken: boolean;
+}
+
+/** What the deliver script's credential lines and `gh api user` found, in the shell they ran in; `null` = could not
+ *  check. */
 export type GithubCredentialProbe =
-  | { outcome: 'ok'; pin: 'exported' | 'keyring' | 'gh'; login: string | null }
-  | { outcome: 'missing'; why: string }
-  | { outcome: 'absent' }
-  | { outcome: 'refused'; pin: 'exported' | 'keyring' | 'gh' }
-  | { outcome: 'mismatch'; login: string }
+  | ((
+      | { outcome: 'ok'; pin: 'exported' | 'keyring' | 'gh'; login: string | null }
+      | { outcome: 'missing'; why: string }
+      | { outcome: 'absent' }
+      | { outcome: 'refused'; pin: 'exported' | 'keyring' | 'gh' }
+      | { outcome: 'mismatch'; login: string }
+    ) & { shell: ProbeShell })
   | null;
 
 export interface DeliveryReadinessInput {
   /** `GET /settings` `deliverDefault` (absent = `pr`, the daemon default). */
   deliverDefault: 'pr' | 'none' | undefined;
-  /** `GET /settings` `deliverIdentityLogin` (absent / blank = none). */
+  /** `GET /settings` `deliverIdentityLogin` (absent / blank = none): named only when the probe could not run. */
   identityLogin: string | undefined;
-  env: NodeJS.ProcessEnv;
   credential: GithubCredentialProbe;
   identity: GitCommitIdents;
 }
@@ -68,13 +80,13 @@ const LOCAL_CHOICE =
   'or deliver locally, with no pull request (studio Settings: turn off "Open a PR when a build run finishes"; the daemon setting deliverDefault: none)';
 const AUTHOR_FIX = 'set the git author: git config --global user.name "Your Name" and git config --global user.email you@example.com';
 
-function githubOf(c: GithubCredentialProbe, env: NodeJS.ProcessEnv): DeliverCredentials {
+function githubOf(c: GithubCredentialProbe): DeliverCredentials {
   if (c === null) return { provider: 'github', status: 'unknown', source: null, missing: [], message: 'GitHub credentials: could not be checked.' };
   if (c.outcome === 'ok') {
     // Unpinned, gh itself prefers an exported GITHUB_TOKEN over its stored sign-in.
-    const envVar = c.pin === 'exported' ? 'GH_TOKEN' : c.pin === 'gh' && (env['GITHUB_TOKEN'] ?? '').trim() !== '' ? 'GITHUB_TOKEN' : null;
+    const envVar = c.pin === 'exported' ? 'GH_TOKEN' : c.pin === 'gh' && c.shell.githubToken ? 'GITHUB_TOKEN' : null;
     return envVar !== null
-      ? { provider: 'github', status: 'configured', source: 'gh_token', missing: [], message: `GitHub credentials: ${envVar} in the daemon environment.` }
+      ? { provider: 'github', status: 'configured', source: 'gh_token', missing: [], message: `GitHub credentials: ${envVar} in the deliver shell's environment.` }
       : { provider: 'github', status: 'configured', source: 'gh_login', missing: [], message: "GitHub credentials: gh's sign-in." };
   }
   return { provider: 'github', status: 'missing', source: null, missing: ['gh auth login', 'GH_TOKEN'], message: 'GitHub credentials: delivery would refuse them.' };
@@ -83,12 +95,13 @@ function githubOf(c: GithubCredentialProbe, env: NodeJS.ProcessEnv): DeliverCred
 /** The readiness answer (pure). A definite blocker is `false`; otherwise anything not checked is `null`. */
 export function deliveryReadiness(input: DeliveryReadinessInput): DeliveryReadiness {
   const deliverDefault = input.deliverDefault === 'none' ? 'none' : 'pr';
-  const account = pushIdentityOf(input.identityLogin, input.env);
   const c = input.credential;
+  // The push identity the deliver shell resolved; only when the probe could not run, the configured one.
+  const account = c !== null ? c.shell.account : (input.identityLogin ?? '').trim() || null;
   const id = input.identity;
   const author = id?.author ?? null;
   const gitAuthor = author === null ? null : { name: author.name, email: author.email };
-  const envToken = ['GH_TOKEN', 'GITHUB_TOKEN'].find((k) => (input.env[k] ?? '').trim() !== '');
+  const envToken = c === null ? undefined : c.shell.ghToken ? 'GH_TOKEN' : c.shell.githubToken ? 'GITHUB_TOKEN' : undefined;
   const tokenHint = envToken !== undefined ? ` (the exported ${envToken} is what delivery uses: export a valid one, or unset it so gh's stored sign-in is used)` : '';
   const blockers: string[] = [];
   const fixes: string[] = [];
@@ -119,7 +132,8 @@ export function deliveryReadiness(input: DeliveryReadinessInput): DeliveryReadin
     }
   }
 
-  const base = { deliverDefault, github: githubOf(c, input.env), pushAs: account, gitAuthor } as const;
+  const pushAs = c !== null && c.outcome === 'ok' ? c.login : account;
+  const base = { deliverDefault, github: githubOf(c), pushAs, gitAuthor } as const;
   if (blockers.length > 0) {
     const notChecked = unknowns.length > 0 ? ` Not checked: ${unknowns.join('; ')}.` : '';
     return { ...base, ready: false, reason: `A job that opens a pull request would stop at its deliver step: ${blockers.join('; ')}.${notChecked}`, fix: `To open pull requests, ${fixes.join(', and ')}; ${LOCAL_CHOICE}.` };
@@ -127,7 +141,7 @@ export function deliveryReadiness(input: DeliveryReadinessInput): DeliveryReadin
   if (unknowns.length > 0 || c === null || c.outcome !== 'ok') {
     return { ...base, ready: null, reason: `Whether a pull request can be opened is not known yet: ${unknowns.join('; ')}.`, fix: 'Re-check in a moment.' };
   }
-  const who = c.pin === 'exported' ? `with the exported GH_TOKEN${c.login !== null ? ` (${c.login})` : ''}` : c.pin === 'keyring' ? `as ${account}` : c.login !== null ? `with gh's signed-in account (${c.login})` : "with gh's sign-in";
+  const who = c.pin === 'exported' ? `with the exported GH_TOKEN${c.login !== null ? ` (${c.login})` : ''}` : c.pin === 'keyring' ? `as ${c.login ?? account}` : c.login !== null ? `with gh's signed-in account (${c.login})` : "with gh's sign-in";
   return { ...base, ready: true, reason: `Pull requests open ${who}; commits carry your git author.`, fix: null };
 }
 
@@ -152,12 +166,22 @@ const PROBE = 'WICKED_DELIVERY_READINESS';
 export function credentialProbeScript(identity: string): string {
   const say = (words: string) => `printf '%s\\n' "${PROBE} ${words}"`;
   return [
-    `_credmissing() { ${say('missing')}; printf '%s\\n' "$2"; exit 0; }`,
+    // A refusal from the credential lines is "not signed in" only on gh's own explicit answer (no sign-in, no token for
+    // the account, an invalid token); any other failure (the network, a timeout, words it does not recognise) is
+    // "could not check". The failed command is asked again for its words.
+    '_credmissing() {',
+    '  if [ -z "${GH_TOKEN:-}" ] && [ -n "${GH_ACCOUNT:-}" ]; then ERR=$(gh auth token --hostname github.com --user "$GH_ACCOUNT" 2>&1 >/dev/null); else ERR=$(gh auth status --hostname github.com 2>&1); fi',
+    `  case "$ERR" in *"not logged in"*|*"no oauth token"*|*"is invalid"*|*"HTTP 401"*|*"Bad credentials"*) ${say('missing')}; printf '%s\\n' "$2";; *) ${say('unreachable')};; esac`,
+    '  exit 0',
+    '}',
     "GHREPO='readiness/probe'",
     "GHT=''",
     "GHPIN=''",
     `CFG=${shellSingleQuote(identity)}`,
     'if [ -n "$CFG" ]; then GH_ACCOUNT="$CFG"; fi',
+    // What this shell holds after its login profile: the only push identity and tokens readiness reports.
+    'T1=0; [ -n "${GH_TOKEN:-}" ] && T1=1; T2=0; [ -n "${GITHUB_TOKEN:-}" ] && T2=1',
+    `printf '%s\\n' "${PROBE}_SHELL $T1 $T2 \${GH_ACCOUNT:-}"`,
     // gh opens the pull request, whatever the credential.
     `command -v gh >/dev/null 2>&1 || { ${say('absent')}; exit 0; }`,
     GH_CALL_LINE,
@@ -176,16 +200,23 @@ export function credentialProbeScript(identity: string): string {
 export function parseCredentialProbe(stdout: string): GithubCredentialProbe {
   const lines = stdout.split('\n');
   let at = -1;
-  for (let i = 0; i < lines.length; i++) if (lines[i]!.startsWith(`${PROBE} `)) at = i;
-  if (at < 0) return null;
+  let shellAt = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i]!.startsWith(`${PROBE} `)) at = i;
+    if (lines[i]!.startsWith(`${PROBE}_SHELL `)) shellAt = i;
+  }
+  if (at < 0 || shellAt < 0) return null;
+  const [, t1, t2, ...acct] = lines[shellAt]!.split(' ');
+  const account = acct.join(' ').trim();
+  const shell: ProbeShell = { account: account === '' ? null : account, ghToken: t1 === '1', githubToken: t2 === '1' };
   const [, kind, a, b] = lines[at]!.split(' ');
   const pin = (p: string | undefined) => (p === 'exported' || p === 'keyring' ? p : 'gh');
   switch (kind) {
-    case 'ok': return { outcome: 'ok', pin: pin(a), login: b !== undefined && b !== '' ? b : null };
-    case 'missing': return { outcome: 'missing', why: (lines[at + 1] ?? '').trim() || 'GitHub credentials not configured' };
-    case 'absent': return { outcome: 'absent' };
-    case 'refused': return { outcome: 'refused', pin: pin(a) };
-    case 'mismatch': return { outcome: 'mismatch', login: a ?? '' };
+    case 'ok': return { outcome: 'ok', pin: pin(a), login: b !== undefined && b !== '' ? b : null, shell };
+    case 'missing': return { outcome: 'missing', why: (lines[at + 1] ?? '').trim() || 'GitHub credentials not configured', shell };
+    case 'absent': return { outcome: 'absent', shell };
+    case 'refused': return { outcome: 'refused', pin: pin(a), shell };
+    case 'mismatch': return { outcome: 'mismatch', login: a ?? '', shell };
     default: return null;
   }
 }
@@ -239,12 +270,12 @@ type DeliverySettings = { deliverDefault?: 'pr' | 'none' | undefined; deliverIde
 /** The answer when the reads did not settle within {@link DELIVERY_READ_MS} (or failed): not known, never ready. The
  *  settings, when they were read, still say what they say (the default and the push identity); only when the settings
  *  themselves could not be read are these the daemon's defaults (`pr`, no identity). */
-function notKnownYet(why: string, settings: DeliverySettings | null, env: NodeJS.ProcessEnv): DeliveryReadiness {
+function notKnownYet(why: string, settings: DeliverySettings | null): DeliveryReadiness {
   return {
     deliverDefault: settings?.deliverDefault === 'none' ? 'none' : 'pr',
     ready: null,
     github: { provider: 'github', status: 'unknown', source: null, missing: [], message: why },
-    pushAs: settings === null ? null : pushIdentityOf(settings.deliverIdentityLogin, env),
+    pushAs: (settings?.deliverIdentityLogin ?? '').trim() || null,
     gitAuthor: null,
     reason: why,
     fix: 'Re-check in a moment.',
@@ -256,9 +287,8 @@ function notKnownYet(why: string, settings: DeliverySettings | null, env: NodeJS
  *  The seams are injectable for the tests. */
 export async function readDeliveryReadiness(
   getSettings: () => Promise<DeliverySettings>,
-  deps: { env?: NodeJS.ProcessEnv; credential?: (identity: string) => Promise<GithubCredentialProbe>; identity?: () => Promise<GitCommitIdents>; timeoutMs?: number } = {},
+  deps: { credential?: (identity: string) => Promise<GithubCredentialProbe>; identity?: () => Promise<GitCommitIdents>; timeoutMs?: number } = {},
 ): Promise<DeliveryReadiness> {
-  const env = deps.env ?? process.env;
   // The settings read on its own, so an answer past the bound still carries what they say.
   let settingsRead: DeliverySettings | null = null;
   const settingsP = getSettings().then((s) => {
@@ -272,17 +302,17 @@ export async function readDeliveryReadiness(
       (deps.credential ?? memoCredential)(identityLogin).catch(() => null),
       (deps.identity ?? memoIdents)().catch(() => null),
     ]);
-    return deliveryReadiness({ deliverDefault: settings.deliverDefault, identityLogin: settings.deliverIdentityLogin, env, credential, identity });
+    return deliveryReadiness({ deliverDefault: settings.deliverDefault, identityLogin: settings.deliverIdentityLogin, credential, identity });
   })();
   const ms = deps.timeoutMs ?? DELIVERY_READ_MS;
   let timer: NodeJS.Timeout | undefined;
   const late = new Promise<DeliveryReadiness>((resolve) => {
-    timer = setTimeout(() => resolve(notKnownYet(`the delivery check did not answer within ${ms / 1000} s`, settingsRead, env)), ms);
+    timer = setTimeout(() => resolve(notKnownYet(`the delivery check did not answer within ${ms / 1000} s`, settingsRead)), ms);
     timer.unref?.();
   });
   try {
     return await Promise.race([
-      read.catch((e: unknown) => notKnownYet(`the delivery check could not read its settings: ${e instanceof Error ? e.message : String(e)}`, settingsRead, env)),
+      read.catch((e: unknown) => notKnownYet(`the delivery check could not read its settings: ${e instanceof Error ? e.message : String(e)}`, settingsRead)),
       late,
     ]);
   } finally {

@@ -20,8 +20,10 @@ import { gitCommitIdents, type GitCommitIdents } from '../src/setup/known.js';
 
 const ADA = { name: 'Ada', email: 'ada@example.invalid' };
 const BOTH: GitCommitIdents = { author: ADA, committer: ADA };
-const OK_GH: GithubCredentialProbe = { outcome: 'ok', pin: 'gh', login: 'ada' };
-const base: DeliveryReadinessInput = { deliverDefault: 'pr', identityLogin: undefined, env: {}, credential: OK_GH, identity: BOTH };
+const SHELL = { account: null, ghToken: false, githubToken: false };
+const OK_GH: GithubCredentialProbe = { outcome: 'ok', pin: 'gh', login: 'ada', shell: SHELL };
+const ABSENT: GithubCredentialProbe = { outcome: 'absent', shell: SHELL };
+const base: DeliveryReadinessInput = { deliverDefault: 'pr', identityLogin: undefined, credential: OK_GH, identity: BOTH };
 const r = (over: Partial<DeliveryReadinessInput>) => deliveryReadiness({ ...base, ...over });
 
 const root = mkdtempSync(join(tmpdir(), 'crew1527-'));
@@ -37,10 +39,12 @@ writeFileSync(
   `#!/bin/sh
 tok="\${GH_TOKEN:-\${GITHUB_TOKEN:-}}"
 case "$1 $2" in
-  "auth token") for a; do last=$a; done; case " \${FAKE_KEYRING:-} " in *" $last "*) echo "keyring-$last";; *) exit 1;; esac;;
+  "auth token") for a; do last=$a; done; case " \${FAKE_KEYRING:-} " in *" $last "*) echo "keyring-$last";; *) echo "no oauth token found for github.com account $last" >&2; exit 1;; esac;;
   "auth status")
-    if [ -n "$tok" ]; then case "$tok" in valid-*|keyring-*) exit 0;; *) echo "X Failed to log in to github.com using token" >&2; exit 1;; esac; fi
-    [ -n "\${FAKE_STORED:-}" ] && exit 0; echo "You are not logged into any GitHub hosts" >&2; exit 1;;
+    [ -n "\${FAKE_STATUS_ERR:-}" ] && { echo "$FAKE_STATUS_ERR" >&2; exit 1; }
+    [ -n "\${FAKE_OFFLINE:-}" ] && { echo "X Timeout trying to log in to github.com account ada (keyring)" >&2; exit 1; }
+    if [ -n "$tok" ]; then case "$tok" in valid-*|keyring-*) exit 0;; *) printf '%s\\n' "X Failed to log in to github.com using token (GITHUB_TOKEN)" "  - The token in GITHUB_TOKEN is invalid." >&2; exit 1;; esac; fi
+    [ -n "\${FAKE_STORED:-}" ] && exit 0; echo "You are not logged into any GitHub hosts. To log in, run: gh auth login" >&2; exit 1;;
   "api user")
     [ -n "\${GH_DEBUG:-}" ] && echo "* Request to https://api.github.com/user" >&2
     [ -n "\${FAKE_OFFLINE:-}" ] && { echo "error connecting to api.github.com" >&2; exit 1; }
@@ -58,7 +62,7 @@ const probe = (env: Record<string, string>, identity = '') =>
   probeGithubCredential(identity, { env: { PATH: bin, HOME: root, ...env }, shell: ['/bin/bash', '-c'] });
 /** The whole answer for one environment, credential probed for real. */
 const answer = async (env: Record<string, string>, identity = '') =>
-  deliveryReadiness({ ...base, identityLogin: identity || undefined, env, credential: await probe(env, identity) });
+  deliveryReadiness({ ...base, identityLogin: identity || undefined, credential: await probe(env, identity) });
 
 describe('deliveryReadiness (crew#1527): the deliver script\'s own credential lines, run', () => {
   it('W20 (merge check): an expired exported GITHUB_TOKEN beside a valid stored login is NOT ready, as delivery refuses it', async () => {
@@ -70,7 +74,7 @@ describe('deliveryReadiness (crew#1527): the deliver script\'s own credential li
     expect(a.fix).toContain('the exported GITHUB_TOKEN is what delivery uses');
     // The same stored login with no exported token is ready, naming gh's account.
     const ok = await answer({ FAKE_STORED: 'ada' });
-    expect(ok).toMatchObject({ ready: true, pushAs: null, fix: null });
+    expect(ok).toMatchObject({ ready: true, pushAs: 'ada', fix: null });
     expect(ok.reason).toContain("gh's signed-in account (ada)");
   });
 
@@ -78,7 +82,7 @@ describe('deliveryReadiness (crew#1527): the deliver script\'s own credential li
     const ok = await answer({ GH_TOKEN: 'valid-ada' });
     expect(ok).toMatchObject({ ready: true, github: { source: 'gh_token' } });
     expect(ok.reason).toContain('exported GH_TOKEN (ada)');
-    expect(await probe({ GH_TOKEN: 'expired-2', FAKE_STORED: 'ada' })).toEqual({ outcome: 'refused', pin: 'exported' });
+    expect(await probe({ GH_TOKEN: 'expired-2', FAKE_STORED: 'ada' })).toMatchObject({ outcome: 'refused', pin: 'exported' });
     const bad = await answer({ GH_TOKEN: 'expired-2', FAKE_STORED: 'ada' });
     expect(bad.ready).toBe(false);
     expect(bad.reason).toContain('GitHub refuses the exported GH_TOKEN');
@@ -94,7 +98,7 @@ describe('deliveryReadiness (crew#1527): the deliver script\'s own credential li
   });
 
   it('pinned with an exported GH_TOKEN: another account\'s token is not ready (the script refuses it); the identity\'s own is ready', async () => {
-    expect(await probe({ GH_TOKEN: 'valid-ada' }, 'grace')).toEqual({ outcome: 'mismatch', login: 'ada' });
+    expect(await probe({ GH_TOKEN: 'valid-ada' }, 'grace')).toMatchObject({ outcome: 'mismatch', login: 'ada' });
     const mis = await answer({ GH_TOKEN: 'valid-ada' }, 'grace');
     expect(mis.ready).toBe(false);
     expect(mis.reason).toContain('authenticates as ada, not the push identity grace');
@@ -102,8 +106,8 @@ describe('deliveryReadiness (crew#1527): the deliver script\'s own credential li
   });
 
   it('codex r3 W12: gh diagnostics on stderr (GH_DEBUG) are not the login: the identity\'s own token stays ready', async () => {
-    expect(await probe({ GH_TOKEN: 'valid-grace', GH_DEBUG: 'api' }, 'grace')).toEqual({ outcome: 'ok', pin: 'exported', login: 'grace' });
-    expect(await probe({ GH_TOKEN: 'expired-3', GH_DEBUG: 'api' }, 'grace')).toEqual({ outcome: 'refused', pin: 'exported' });
+    expect(await probe({ GH_TOKEN: 'valid-grace', GH_DEBUG: 'api' }, 'grace')).toMatchObject({ outcome: 'ok', pin: 'exported', login: 'grace' });
+    expect(await probe({ GH_TOKEN: 'expired-3', GH_DEBUG: 'api' }, 'grace')).toMatchObject({ outcome: 'refused', pin: 'exported' });
   });
 
   it('an exported GITHUB_TOKEN gh uses (unpinned) is reported as the environment token, not gh\'s sign-in', async () => {
@@ -112,16 +116,41 @@ describe('deliveryReadiness (crew#1527): the deliver script\'s own credential li
     expect(a.github.message).toContain('GITHUB_TOKEN');
   });
 
+  it('merge check r3 W20: under the production bash -lc, the push identity is the one the login profile leaves, never the daemon\'s', async () => {
+    const home = join(root, 'home-bob');
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, '.bash_profile'), `export PATH='${bin}'\nexport GH_ACCOUNT=bob\n`);
+    const daemon = { PATH: bin, HOME: home, GH_ACCOUNT: 'alice', FAKE_KEYRING: 'alice bob', FAKE_STORED: 'ada' };
+    const c = await probeGithubCredential('', { env: daemon, shell: ['/bin/bash', '-lc'] });
+    expect(c).toMatchObject({ outcome: 'ok', pin: 'keyring', login: 'bob', shell: { account: 'bob' } });
+    const a = deliveryReadiness({ ...base, credential: c });
+    expect(a).toMatchObject({ ready: true, pushAs: 'bob' });
+    expect(a.reason).toContain('as bob');
+    expect(JSON.stringify(a)).not.toContain('alice');
+    // Not ready the same way: the profile's bob holds no token, so the fix names bob, not the daemon's alice.
+    const none = deliveryReadiness({ ...base, credential: await probeGithubCredential('', { env: { ...daemon, FAKE_KEYRING: 'alice' }, shell: ['/bin/bash', '-lc'] }) });
+    expect(none).toMatchObject({ ready: false, pushAs: 'bob' });
+    expect(none.fix).toContain('as bob');
+    expect(JSON.stringify(none)).not.toContain('alice');
+  });
+
   it('gh not installed is not ready, even with an exported GH_TOKEN (gh opens the pull request)', async () => {
     for (const env of [{}, { GH_TOKEN: 'valid-ada' }]) {
       const c = await probeGithubCredential('', { env: { PATH: empty, HOME: root, ...env }, shell: ['/bin/bash', '-c'] });
-      expect(c).toEqual({ outcome: 'absent' });
+      expect(c).toMatchObject({ outcome: 'absent' });
       expect(deliveryReadiness({ ...base, credential: c }).reason).toContain('gh is not installed');
     }
   });
 
-  it('could not check (GitHub unreachable, the shell not running) is unknown, never ready and never not-ready', async () => {
+  it('merge check r3 W12: a failed credential read (the network, unrecognised gh words, the shell not running) is unknown, never not-ready', async () => {
+    // Offline, gh auth status (the credential lines' own check) fails with a timeout: could not check, not "not signed in".
     expect(await probe({ FAKE_STORED: 'ada', FAKE_OFFLINE: '1' })).toBeNull();
+    expect((await answer({ FAKE_STORED: 'ada', FAKE_OFFLINE: '1' })).ready).toBeNull();
+    expect(await probe({ FAKE_STORED: 'ada', FAKE_STATUS_ERR: 'dial tcp: lookup api.github.com: no such host' })).toBeNull();
+    // Only gh's explicit answers are "not signed in": no sign-in at all, no token for the account, an invalid token.
+    expect(await probe({})).toMatchObject({ outcome: 'missing' });
+    expect(await probe({}, 'grace')).toMatchObject({ outcome: 'missing' });
+    expect(await probe({ GITHUB_TOKEN: 'expired-4', FAKE_STORED: 'ada' })).toMatchObject({ outcome: 'missing' });
     expect(await probeGithubCredential('', { env: { PATH: bin }, shell: [join(root, 'no-such-shell'), '-c'] })).toBeNull();
     expect(r({ credential: null }).ready).toBeNull();
     // A definite blocker still says not ready, and names what was not checked.
@@ -142,7 +171,7 @@ describe('deliveryReadiness (crew#1527): the deliver script\'s own credential li
 
   it('a daemon defaulting to local delivery still answers for a pull request (studio always asks for one or not)', () => {
     expect(r({ deliverDefault: 'none' })).toMatchObject({ deliverDefault: 'none', ready: true });
-    expect(r({ deliverDefault: 'none', credential: { outcome: 'absent' } })).toMatchObject({ deliverDefault: 'none', ready: false });
+    expect(r({ deliverDefault: 'none', credential: ABSENT })).toMatchObject({ deliverDefault: 'none', ready: false });
   });
 
   it('the system row is the same answer, and the whole row never carries the author\'s name or email', () => {
@@ -152,9 +181,9 @@ describe('deliveryReadiness (crew#1527): the deliver script\'s own credential li
     };
     const ok = row({});
     expect(ok.row).toMatchObject({ key: 'delivery', state: 'ok', reason: ok.a.reason, remedy: null, details: { ready: true } });
-    const bad = row({ credential: { outcome: 'absent' } });
+    const bad = row({ credential: ABSENT });
     expect(bad.row).toMatchObject({ state: 'degraded', reason: bad.a.reason, remedy: bad.a.fix });
-    const localBad = row({ deliverDefault: 'none', credential: { outcome: 'absent' } });
+    const localBad = row({ deliverDefault: 'none', credential: ABSENT });
     expect(localBad.row.state).toBe('off');
     expect(localBad.row.reason).toContain('defaults to local');
     expect(row({ credential: null }).row.state).toBe('unknown');
@@ -203,7 +232,7 @@ describe('the git identity, asked of git as wicked-core asks it (core#1555)', ()
     expect(await gitCommitIdents({ cwd: empty, env: gitEnv(cfg('x.gitconfig', '')), git: join(root, 'no-such-git') })).toBeNull();
     expect(r({ identity: null }).ready).toBeNull();
     const rejected = await readDeliveryReadiness(async () => ({ deliverDefault: 'pr' as const }), {
-      env: {}, credential: async () => OK_GH, identity: async () => { throw new Error('git broke'); },
+      credential: async () => OK_GH, identity: async () => { throw new Error('git broke'); },
     });
     expect(rejected.ready).toBeNull();
     expect(rejected.reason).toContain('the git author could not be read');
@@ -215,18 +244,18 @@ describe('readDeliveryReadiness: the one bounded reader both routes use', () => 
   it('reads the settings, the credential (for the configured push identity) and the identity through its seams', async () => {
     const asked: string[] = [];
     const a = await readDeliveryReadiness(async () => ({ deliverIdentityLogin: ' grace ' }), {
-      env: {}, credential: async (id) => { asked.push(id); return { outcome: 'ok', pin: 'keyring', login: 'grace' }; }, identity: async () => BOTH,
+      credential: async (id) => { asked.push(id); return { outcome: 'ok', pin: 'keyring', login: 'grace', shell: { ...SHELL, account: 'grace' } }; }, identity: async () => BOTH,
     });
     expect(asked).toEqual(['grace']);
     expect(a).toMatchObject({ ready: true, pushAs: 'grace' });
   });
 
   it('SILENT-OK: a throwing probe, a failed settings read, or a read past the bound is unknown, never ready', async () => {
-    const threw = await readDeliveryReadiness(settings, { env: {}, credential: async () => { throw new Error('boom'); }, identity: async () => BOTH });
+    const threw = await readDeliveryReadiness(settings, { credential: async () => { throw new Error('boom'); }, identity: async () => BOTH });
     expect(threw.ready).toBeNull();
-    const noSettings = await readDeliveryReadiness(async () => { throw new Error('unreadable'); }, { env: {}, credential: async () => OK_GH, identity: async () => BOTH });
+    const noSettings = await readDeliveryReadiness(async () => { throw new Error('unreadable'); }, { credential: async () => OK_GH, identity: async () => BOTH });
     expect(noSettings).toMatchObject({ ready: null, deliverDefault: 'pr', pushAs: null });
-    const slow = await readDeliveryReadiness(settings, { env: {}, credential: async () => OK_GH, identity: () => new Promise(() => undefined), timeoutMs: 20 });
+    const slow = await readDeliveryReadiness(settings, { credential: async () => OK_GH, identity: () => new Promise(() => undefined), timeoutMs: 20 });
     expect(slow.ready).toBeNull();
     expect(slow.reason).toContain('did not answer');
     expect(deliveryRow(slow, Date.now(), infraRow).state).toBe('unknown');
@@ -234,7 +263,7 @@ describe('readDeliveryReadiness: the one bounded reader both routes use', () => 
 
   it('a read past the bound still carries the settings it read (the default and the push identity), never invented ones', async () => {
     const slow = await readDeliveryReadiness(async () => ({ deliverDefault: 'none' as const, deliverIdentityLogin: 'ada' }), {
-      env: {}, credential: () => new Promise(() => undefined), identity: async () => BOTH, timeoutMs: 20,
+      credential: () => new Promise(() => undefined), identity: async () => BOTH, timeoutMs: 20,
     });
     expect(slow).toMatchObject({ ready: null, deliverDefault: 'none', pushAs: 'ada' });
     expect(deliveryRow(slow, Date.now(), infraRow).state).toBe('unknown');

@@ -5179,8 +5179,10 @@ export interface DeliveryReadiness {
   ready: boolean | null;
   /** The GitHub credential delivery would use, as its own credential lines resolved it. */
   github: DeliverCredentials;
-  /** The configured push identity (`deliverIdentityLogin`, else `GH_ACCOUNT`); `null` = none (gh's own login opens
-   *  the pull request). */
+  /** The GitHub login a pull request opens as: what `gh api user` answered inside the deliver shell (after its login
+   *  profile). When delivery would refuse, the push identity that shell resolved (`deliverIdentityLogin`, else its
+   *  `GH_ACCOUNT`), if any; when the check could not run, the configured `deliverIdentityLogin`, if any. Never read
+   *  from the daemon's own environment. */
   pushAs: string | null;
   /** The git author commits carry, as git resolves it (`GIT_AUTHOR_*`, `author.*`, `user.*`); `null` when none is
    *  configured or it could not be read. */

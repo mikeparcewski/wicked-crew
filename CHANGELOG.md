@@ -26,7 +26,9 @@ mentioned only where a daemon release depends on them.
   deliver step does, run rather than restated. The daemon runs the deliver script's own credential lines (now one
   shared text) in the same `bash -lc` and environment, so the token delivery would use, an exported `GH_TOKEN` or
   `GITHUB_TOKEN` included, is the one checked. Then it asks GitHub who that token is (the script's `gh api user`), which
-  refuses an expired token and another account's token for the push identity. It asks git for the author and
+  refuses an expired token and another account's token for the push identity. The account it reports (`pushAs`) is
+  the login that shell observed, never the daemon's own `GH_ACCOUNT`. Only gh's explicit answers (no sign-in, no token
+  for the account, an invalid token) read not signed in; a network failure reads unknown. It asks git for the author and
   committer as wicked-core does (`git -c user.useConfigOnly=true var GIT_AUTHOR_IDENT` / `GIT_COMMITTER_IDENT`). Not
   ready names `gh auth login`, the `git config --global` commands, or delivering locally. Anything that could not be
   checked (a timeout, GitHub or git not answering, a read that failed) reads `unknown`, never ready and never not
