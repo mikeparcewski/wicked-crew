@@ -808,27 +808,27 @@ const ExcludeLinkedIssuesSchema = z
 
 /**
  * F43: the seats a chat job (or a chat document's helpers) may name, and the ones its Start re-checks, in roster order:
- * the seats that can work now (enabled for council, work-eligible, not signed out) under the default launch rule
- * ({@link defaultLaunchRoster}: no opt-in seat unless it is the only one left). Filtered first, so a seat the predicate
- * drops never hides the fallback. The standing rows carry no `optIn` (only `GET /roster` marks it, `markOptIn`), so the
- * opt-in rule reads the key.
+ * the seats that can work now (enabled for council, work-eligible, not signed out), opt-in seats INCLUDED (crew#1590):
+ * naming or picking one is the opt-in. The default launch rule ({@link defaultLaunchRoster}: no opt-in seat unless it
+ * is the only one left) applies where nobody chose, the pool work is drawn from (`jobSeatPool`).
  */
 export function proposalRoster(
   standing: ReadonlyArray<{ key?: unknown; display_name?: string; enabled_for_council?: boolean; seat_eligible_for_work?: boolean; auth?: string }>,
 ): Array<{ key: string; name: string }> {
   const canWork = standing.filter((s) => s.enabled_for_council && s.seat_eligible_for_work !== false && s.auth !== 'signed_out');
-  return defaultLaunchRoster(canWork).map((s) => ({ key: String(s.key), name: s.display_name || String(s.key) }));
+  return canWork.map((s) => ({ key: String(s.key), name: s.display_name || String(s.key) }));
 }
 
 /**
  * The default launch roster ({@link defaultLaunchRoster}: no opt-in seats) — plus the opt-in seat a
- * launch NAMES as its lead (`primary`): naming it is the opt-in.
+ * launch NAMES as its lead (`primary`), and (crew#1590) any other seat it names (`named`: a chat job's card seats):
+ * naming it is the opt-in.
  */
-export function launchRosterNaming<T extends { key?: unknown }>(roster: readonly T[], primary: string | undefined): T[] {
+export function launchRosterNaming<T extends { key?: unknown }>(roster: readonly T[], primary: string | undefined, named: readonly string[] = []): T[] {
   const base = defaultLaunchRoster(roster);
-  if (primary === undefined || base.some((s) => s.key === primary)) return base;
-  const named = roster.find((s) => s.key === primary);
-  return named === undefined ? base : [...base, named];
+  const wanted = [primary, ...named].filter((k): k is string => k !== undefined && !base.some((s) => s.key === k));
+  const extra = wanted.map((k) => roster.find((s) => s.key === k)).filter((s): s is T => s !== undefined);
+  return extra.length === 0 ? base : [...base, ...new Set(extra)];
 }
 
 /**
@@ -4308,7 +4308,8 @@ export function registerRoutes(
       // eligibility `launchRun` checks against it) is the seats' own fresh answer: a lead whose login expired is refused
       // by name, never launched on a stale snapshot. A seat added meanwhile still doesn't join (narrowed to the card).
       await rosterWithStanding.ready?.();
-      const { clisJson } = jobLaunchRoster(launchRosterNaming(rosterWithStanding(), p.seats?.lead ?? undefined), p);
+      // crew#1590: every seat on the card is named, so an opt-in seat the person picked is on the roster too.
+      const { clisJson } = jobLaunchRoster(launchRosterNaming(rosterWithStanding(), p.seats?.lead ?? undefined, p.seats?.keys ?? []), p);
       const common = jobLaunchCommon(p, { runId: d.identity.runId, chatId: d.chatId }, {
         ...(clisJson !== undefined ? { clisJson } : {}),
         selfSeated,

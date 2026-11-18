@@ -4,10 +4,14 @@
  * words the chat shows read this pool, so a seat the person turned off is never put on work they did not name it on.
  *
  * - `eligible`: the seats that can work now and that work may NAME (`proposalRoster`: enabled, work-eligible, not
- *   signed out, opt-in seats left out). Unchanged by the pick: naming a seat on a job is still the person's choice.
+ *   signed out, opt-in seats included). Unchanged by the pick: naming a seat on a job is still the person's choice.
  * - `pool`: the seats work is drawn from when nobody named one. With no pick (`newWorkSeats` absent or `null`) it is
- *   every eligible seat; with a pick, the picked eligible seats, in roster order.
+ *   the default launch rule over the eligible seats (`defaultLaunchRoster`: no opt-in seat unless it is the only one
+ *   that can work); with a pick, the picked eligible seats in roster order, an opt-in seat included (crew#1590:
+ *   picking it is the opt-in).
  */
+import { defaultLaunchRoster } from './opt-in-seats.js';
+
 
 export interface PoolSeat {
   key: string;
@@ -40,10 +44,10 @@ export class NewWorkSeatsRefusal extends Error {
 
 /** How to set the value again, for a refusal's message (the Agents toggle moves onto it in F1/F2 PR 3). */
 export const NEW_WORK_SEATS_FIX =
-  'set it again with PUT /api/v1/settings: newWorkSeats is a list of seat keys, or null for every seat that can work';
+  'set it again with PUT /api/v1/settings: newWorkSeats is a list of seat keys, or null for the default (every seat that can work; an opt-in seat such as OpenCode only when no other can, so name it in the list to use it)';
 
 export function jobSeatPool(eligible: readonly PoolSeat[], newWorkSeats: readonly string[] | null | undefined): JobSeatPool {
-  if (newWorkSeats === null || newWorkSeats === undefined) return { eligible, pool: eligible };
+  if (newWorkSeats === null || newWorkSeats === undefined) return { eligible, pool: defaultLaunchRoster(eligible) };
   const picked = new Set(newWorkSeats);
   return { eligible, pool: eligible.filter((s) => picked.has(s.key)) };
 }

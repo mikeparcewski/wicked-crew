@@ -493,27 +493,27 @@ describe('codex/pi r1 folds', () => {
   });
 
   it('a retarget whose authors held every chosen seat picks the seats again from the reviewers left (CJ13)', async () => {
-    const authorsOf: Record<string, string[]> = { none: ['claude', 'codex'], '10': ['pi', 'opencode'] };
+    const authorsOf: Record<string, string[]> = { none: ['claude', 'codex'], '10': ['pi', 'agy'] };
     const r = rig({
-      roster: [{ key: 'claude', name: 'Claude' }, { key: 'codex', name: 'Codex' }, { key: 'pi', name: 'pi' }, { key: 'opencode', name: 'OpenCode' }],
+      roster: [{ key: 'claude', name: 'Claude' }, { key: 'codex', name: 'Codex' }, { key: 'pi', name: 'pi' }, { key: 'agy', name: 'Antigravity' }],
       repos: [{ id: 'r-pay', name: 'payments-service' }],
       reviewAuthors: async (_repo, words) => { const t = parseReviewTarget(words); return authorsOf[t?.kind === 'pr' ? String(t.number) : 'none'] ?? []; },
     });
     await pick(r, 'review-change', { words: 'review the latest change' });
-    expect(open(r).seats?.keys).toEqual(['pi', 'opencode']);
+    expect(open(r).seats?.keys).toEqual(['pi', 'agy']);
     await swap(r, open(r).pid, { detail: { add: ['it is pull request 10'] } } as ProposalRevisionEdits, 'pr10');
     expect(open(r).seats).toMatchObject({ lead: 'claude', keys: ['claude', 'codex'] });
   });
 
   it('seats the person names are never replaced, even when they all wrote the change (CJ13)', async () => {
     const r = rig({
-      roster: [{ key: 'claude', name: 'Claude' }, { key: 'codex', name: 'Codex' }, { key: 'pi', name: 'pi' }, { key: 'opencode', name: 'OpenCode' }],
+      roster: [{ key: 'claude', name: 'Claude' }, { key: 'codex', name: 'Codex' }, { key: 'pi', name: 'pi' }, { key: 'agy', name: 'Antigravity' }],
       repos: [{ id: 'r-pay', name: 'payments-service' }],
       reviewAuthors: async () => ['claude', 'codex'],
     });
     await pick(r, 'review-change', { words: 'review pull request 9' });
-    expect(open(r).seats?.keys).toEqual(['pi', 'opencode']);
-    await swap(r, open(r).pid, { addSeats: ['claude', 'codex'], removeSeats: ['pi', 'opencode'] } as ProposalRevisionEdits, 'authors');
+    expect(open(r).seats?.keys).toEqual(['pi', 'agy']);
+    await swap(r, open(r).pid, { addSeats: ['claude', 'codex'], removeSeats: ['pi', 'agy'] } as ProposalRevisionEdits, 'authors');
     expect(open(r).seats?.keys).not.toContain('claude');
     expect(open(r).seats?.keys).not.toContain('codex');
   });
