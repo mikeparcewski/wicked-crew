@@ -33,10 +33,12 @@
  * ## Committed paths too (wicked-core#1573)
  *
  * In the script the ladder is ONE shell function, `_classify`, with two callers: the untracked pass
- * (the worktree file) and the history scrub right before the push, which runs it over every commit
- * the push carries (that commit's blob) and rewrites those commits without the paths it matches. A
- * seat that commits its own temp file therefore ships it in no commit, even when a later commit
- * deleted it. A path the base already tracks is the repository's own and is never a candidate.
+ * (the worktree file) and the history scrub right before the push, which runs it over every file
+ * state the pushed commits introduce (its blob) and rewrites those commits without the paths it
+ * matches. A seat that commits its own temp file therefore ships it in no commit, even when a later
+ * commit deleted it. A path the base already tracks is the repository's own and is never a
+ * candidate. `worktreeDiff` (`api/run-files.ts`) leaves such committed paths out of the aggregate
+ * diff the same way, so the gate's count still matches the push.
  */
 
 /**

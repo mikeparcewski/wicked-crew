@@ -118,6 +118,28 @@ describe('the deliver gate diffstat is computed over exactly the set that will b
     expect(deliverExclusionByName('docs/.wicked-crew-delivery-stranded')).toBeNull();
   }, 60_000);
 
+  it('wicked-core#1573: a COMMITTED scratch file the push scrubs is not counted; a base-tracked tmp/ file still is', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'crew-1573-'));
+    roots.push(root);
+    write(root, 'README.md', 'base\n');
+    write(root, 'tmp/keep.rs', 'pub fn keep() {}\n');
+    git(root, 'init', '-b', 'main');
+    git(root, 'add', '-A');
+    git(root, 'commit', '-m', 'base');
+    const base = git(root, 'rev-parse', 'HEAD').trim();
+    // The seat commits its fix, an edit to the repo's own tmp/ source, and its own temp file.
+    write(root, 'src/fix.ts', 'export const fixed = true;\n');
+    write(root, 'tmp/keep.rs', 'pub fn keep() { /* edited */ }\n');
+    write(root, 'tmp/claude-1000/-home-alice-wt/s/tasks/x.output', 'out\n');
+    git(root, 'add', '-A');
+    git(root, 'commit', '-m', 'fix');
+
+    const { diff } = await worktreeDiff(root, undefined, base);
+
+    expect(filesIn(diff).sort()).toEqual(['src/fix.ts', 'tmp/keep.rs']);
+    expect(diff).not.toContain('claude-1000');
+  });
+
   it('a NARROWED request still answers about the one file the caller opened', async () => {
     const root = c7Worktree();
     // `GET /runs/:id/diff?path=tmp/…` is a deliberate ask about a file the caller can see in

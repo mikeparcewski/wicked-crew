@@ -13,7 +13,7 @@
 // prepends the fake bin, which is sourced AFTER path_helper and does win.
 
 import { execFile, execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -675,7 +675,9 @@ describe('deliver script, driven for real (crew#317)', () => {
     const body = r.pr?.body ?? '';
     expect(body).toContain('## Not shipped');
     expect(body).toContain('- `.vitest/ (1 files)` — tool-artifact-dir');
-    expect(body).toContain('- `web/playwright-report/index.html` — tool-artifact-dir');
+    // A nested tool-artifact directory is named up to the directory, not below it (wicked-core#1573).
+    expect(body).toContain('- `web/playwright-report/…` — tool-artifact-dir');
+    expect(body).not.toContain('index.html');
     expect(body).toContain('- `vitest-debug.log` — tool-artifact-name');
     expect(body).toContain('- 1 gitignored entry');
     expect(body).toContain('- `evil?## Injected.log` — tool-artifact-name');
@@ -1876,14 +1878,30 @@ describe('deliver script — no classifier-matched path in ANY pushed commit (wi
     return [...all].sort();
   }
 
-  /** A seat's two commits: the fix plus its own temp file, then a commit that deletes the temp file. */
+  /** A seat's two commits: the fix plus its own temp file, then a commit that deletes the temp file.
+   *  Author, committer and both dates are set apart from the clone's own, so a rewrite that lost
+   *  any of them shows. */
   function seatCommitsScratch(workdir: string): void {
     const seat = ['-c', 'user.name=seat', '-c', 'user.email=seat@test'];
+    process.env.GIT_AUTHOR_DATE = '1700000000 +0130';
+    process.env.GIT_COMMITTER_NAME = 'seat-committer';
+    process.env.GIT_COMMITTER_EMAIL = 'committer@test';
+    process.env.GIT_COMMITTER_DATE = '1700000100 -0500';
+    try {
+      seatCommitsScratchAs(workdir, seat);
+    } finally {
+      delete process.env.GIT_AUTHOR_DATE;
+      delete process.env.GIT_COMMITTER_NAME;
+      delete process.env.GIT_COMMITTER_EMAIL;
+      delete process.env.GIT_COMMITTER_DATE;
+    }
+  }
+  function seatCommitsScratchAs(workdir: string, seat: string[]): void {
     writeFileSync(join(workdir, 'fix.ts'), 'export const fixed = true;\n');
     mkdirSync(join(workdir, SEAT_TMP, '..'), { recursive: true });
     writeFileSync(join(workdir, SEAT_TMP), 'background task output\n');
     git(workdir, 'add', '-A');
-    git(workdir, ...seat, 'commit', '-qm', 'fix: the seat commits its work and its temp file');
+    git(workdir, ...seat, 'commit', '-qm', 'fix: the seat commits its work and its temp file\n\nBody line one.\n  indented, kept as is\n');
     git(workdir, 'rm', '-q', '-r', 'tmp');
     git(workdir, ...seat, 'commit', '-qm', 'chore: drop the stray temp file');
   }
@@ -1910,8 +1928,15 @@ describe('deliver script — no classifier-matched path in ANY pushed commit (wi
     // The seat's commit keeps its subject and author; the commit the scrub emptied is dropped.
     const log = git(fx.origin, 'log', '--reverse', '--format=%s|%an', range).trim().split('\n');
     expect(log).toEqual(['fix: the seat commits its work and its temp file|seat', 'fix the thing|runner']);
+    // …and every other field of it: committer, both dates, the message byte for byte.
+    const meta = '%an|%ae|%ad|%cn|%ce|%cd|%B';
+    const seatCommit = git(fx.origin, 'rev-list', '--reverse', range).trim().split('\n')[0]!;
+    expect(git(fx.origin, 'log', '-1', `--format=${meta}`, '--date=raw', seatCommit)).toBe(
+      'seat|seat@test|1700000000 +0130|seat-committer|committer@test|1700000100 -0500|' +
+        'fix: the seat commits its work and its temp file\n\nBody line one.\n  indented, kept as is\n\n',
+    );
     // Said in the phase output (named) and in the PR body (counted, never named).
-    expect(r.output).toContain(`deliver: SCRUBBED (scratch-dir) from commit `);
+    expect(r.output).toContain(`deliver: SCRUBBED (scratch-dir) from the run's commits: ${SEAT_TMP}`);
     expect(r.output).toContain(SEAT_TMP);
     expect(r.pr?.body).toContain("## Removed from the run's commits");
     expect(r.pr?.body).toContain('- scratch-dir: 1');
@@ -1933,12 +1958,89 @@ describe('deliver script — no classifier-matched path in ANY pushed commit (wi
     expect(r.status, r.output).toBe(0);
     const files = git(fx.origin, 'show', '--name-only', '--format=', `wicked/${RUN_ID}`).trim().split('\n').sort();
     expect(files).toEqual(['fix.ts', 'ok.env.example']);
-    expect(r.output).toContain('(denylisted-name) from commit');
-    expect(r.output).toContain('(env-template-with-values) from commit');
-    expect(r.output).toContain('(oversize-1mib) from commit');
+    expect(r.output).toContain("(denylisted-name) from the run's commits: ");
+    expect(r.output).toContain("(env-template-with-values) from the run's commits: ");
+    expect(r.output).toContain("(oversize-1mib) from the run's commits: ");
     // Left behind in the worktree, untracked, like any exclusion.
     const status = git(fx.workdir, 'status', '--porcelain');
     for (const p of ['deploy.key', 'leaky.env.sample', 'rec.bin']) expect(status).toContain(`?? ${p}`);
+  }, 90_000);
+
+  it('a committed symlink named like an env template is judged on its name alone and rides', async () => {
+    const fx = fixture();
+    mkdirSync(join(fx.workdir, 'templates'));
+    writeFileSync(join(fx.workdir, 'templates', 'default'), 'TOKEN=\n');
+    symlinkSync('templates/default', join(fx.workdir, '.env.example'));
+    git(fx.workdir, 'add', '-A');
+    git(fx.workdir, 'commit', '-qm', 'feat: an env template, linked');
+    const committed = git(fx.workdir, 'rev-parse', 'HEAD').trim();
+
+    const r = await runDeliver(fx, { intent: 'linked template' });
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.output).not.toContain('SCRUBBED');
+    expect(git(fx.origin, 'rev-parse', `wicked/${RUN_ID}`).trim()).toBe(committed);
+  }, 90_000);
+
+  it('REVISION: a merge the scrub empties is dropped with the commits it merged; the product commit alone is pushed', async () => {
+    const fx = fixture({ worktree: false });
+    const prHead = prBranchOnOrigin(fx.root, fx.origin);
+    git(fx.clone, 'fetch', '-q', 'origin');
+    const revised = { ...fx, workdir: join(fx.root, RUN_ID) };
+    git(fx.clone, 'worktree', 'add', '-q', '-b', `wicked/${RUN_ID}`, revised.workdir, `origin/${PR_BRANCH}`);
+    const wt = revised.workdir;
+    // Two side commits that add only scratch, merged; then the real product on top.
+    git(wt, 'checkout', '-q', '-b', 'side', `origin/${PR_BRANCH}`);
+    mkdirSync(join(wt, 'tmp'), { recursive: true });
+    writeFileSync(join(wt, 'tmp', 'b.output'), 'b\n');
+    git(wt, 'add', '-A');
+    git(wt, 'commit', '-qm', 'side: scratch b');
+    git(wt, 'checkout', '-q', `wicked/${RUN_ID}`);
+    mkdirSync(join(wt, 'tmp'), { recursive: true });
+    writeFileSync(join(wt, 'tmp', 'a.output'), 'a\n');
+    git(wt, 'add', '-A');
+    git(wt, 'commit', '-qm', 'main line: scratch a');
+    git(wt, 'merge', '-q', '--no-ff', '--no-edit', 'side');
+    writeFileSync(join(wt, 'fix.ts'), 'export const fixed = true;\n');
+    git(wt, 'add', 'fix.ts');
+    git(wt, 'commit', '-qm', 'fix: the product');
+
+    const r = await runDeliver(revised, { intent: 'Revise PR #273', script: { runId: RUN_ID, revisesPr: PR } });
+
+    expect(r.status, r.output).toBe(0);
+    expect(git(fx.origin, 'log', '--format=%s', `${prHead}..${PR_BRANCH}`).trim()).toBe('fix: the product');
+    expect(pathsInHistory(fx.origin, `${prHead}..${PR_BRANCH}`).filter((p) => p.startsWith('tmp/'))).toEqual([]);
+    expect(r.pr?.body ?? r.comment ?? '').not.toContain('a.output');
+  }, 90_000);
+
+  it('a run whose only commits are scratch delivers nothing and pushes nothing', async () => {
+    const fx = fixture();
+    mkdirSync(join(fx.workdir, 'tmp'), { recursive: true });
+    writeFileSync(join(fx.workdir, 'tmp', 'only.output'), 'x\n');
+    git(fx.workdir, 'add', '-A');
+    git(fx.workdir, 'commit', '-qm', 'chore: only scratch');
+
+    const r = await runDeliver(fx, { intent: 'nothing real' });
+
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain('every commit the run made carried only scrubbed paths; nothing was pushed');
+    expect(originBranches(fx)).toEqual(['main']);
+  }, 90_000);
+
+  it('a scratch path nested below the root is named in the PR only up to its scratch directory', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
+    const nested = `pkg/tmp/claude-1000/${SLUG}/tasks/x.output`;
+    mkdirSync(join(fx.workdir, nested, '..'), { recursive: true });
+    writeFileSync(join(fx.workdir, nested), 'out\n');
+
+    const r = await runDeliver(fx, { intent: 'nested scratch' });
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.pr?.body).toContain('- `pkg/tmp/…` — scratch-dir');
+    expect(r.pr?.body ?? '').not.toContain(SLUG);
+    expect(git(fx.origin, 'log', '-1', '--format=%B', `wicked/${RUN_ID}`)).not.toContain(SLUG);
+    expect(git(fx.origin, 'rev-list', '--objects', '--all')).not.toContain(SLUG);
   }, 90_000);
 
   it("a repository's own tracked tmp/ source is not touched, and a clean history is pushed as committed", async () => {

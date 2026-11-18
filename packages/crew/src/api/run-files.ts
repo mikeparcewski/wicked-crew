@@ -193,6 +193,8 @@ export async function branchDiff(
 }
 
 const GIT_TIMEOUT_MS = 10_000;
+/** The most committed-scratch exclude pathspecs one aggregate diff passes git (wicked-core#1573). */
+const SCRUB_EXCLUDE_MAX = 2000;
 /** How long the untracked-file pass may run before the answer is cut (`truncated: true`, crew#790). */
 export const UNTRACKED_BUDGET_MS = 8_000;
 
@@ -376,12 +378,60 @@ export async function worktreeDiff(
     }
   }
 
+  // F3, and wicked-core#1573: whether a path the push would carry RIDES it — the deliver script's
+  // classifier, name rules first so only a path that survives all of them is stat'd (codex review,
+  // MEDIUM: a worktree carrying 100 000 files under `tmp/` would otherwise cost 100 000 synchronous
+  // stats on the daemon's event loop to reject paths the directory rule rejects without a size).
+  const rides = (file: string): boolean => {
+    if (deliverExclusionByName(file) !== null) return false;
+    let size: number | null = null;
+    try {
+      size = statSync(join(workdir, file)).size;
+    } catch {
+      // Unreadable/raced away: an unknown size is never treated as oversize (the shell's
+      // `wc -c < "$F" 2>/dev/null || echo 0` degrades the same way).
+    }
+    // crew#901: an env template rides only when its text holds no value — read it (small: the
+    // name rules already passed, and the size rule drops anything over 1 MiB first).
+    return (
+      deliverExclusionReason(file, size, () => {
+        try {
+          return readFileSync(join(workdir, file), 'utf8');
+        } catch {
+          return null;
+        }
+      }) === null
+    );
+  };
+
+  // wicked-core#1573: a path the run COMMITTED (or staged) that the base does not hold is scrubbed
+  // from every pushed commit by the deliver script when its classifier excludes it, so the aggregate
+  // tracked diff leaves it out too (each as a literal exclude pathspec). A path the base tracks is
+  // the repository's own and always counts. A narrowed request is exempt, as below.
+  let trackedSpec = limit;
+  if (relPath === undefined) {
+    try {
+      const { stdout: addedOut } = await execCapped(
+        'git',
+        ['diff', '--name-only', '--no-renames', '--diff-filter=A', '-z', baseRev],
+        { timeout: GIT_TIMEOUT_MS, cwd: workdir, env },
+      );
+      // At most SCRUB_EXCLUDE_MAX pathspecs, so the argv stays far under the OS limit; past it the
+      // rest are counted (the pre-#1573 over-count), an exotic shape: thousands of committed scratch files.
+      const scrubbed = addedOut.split('\0').filter((file) => file !== '' && !rides(file)).slice(0, SCRUB_EXCLUDE_MAX);
+      if (scrubbed.length > 0) trackedSpec = ['--', '.', ...scrubbed.map((file) => `:(top,literal,exclude)${file}`)];
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw err; // git missing — the route's 500
+      // Not a repo / no commits yet: the tracked pass below answers that the same way.
+    }
+  }
+
   // Tracked changes (staged + unstaged, plus committed-since-base when a base was resolved):
   // diff the worktree against the baseline.
   try {
     const { stdout } = await execCapped(
       'git',
-      ['diff', '--no-color', '--no-ext-diff', baseRev, ...limit],
+      ['diff', '--no-color', '--no-ext-diff', baseRev, ...trackedSpec],
       { timeout: GIT_TIMEOUT_MS, cwd: workdir, env },
     );
     out = stdout;
@@ -415,30 +465,8 @@ export async function worktreeDiff(
   // would be a different lie. Only the aggregate — the one the diffstat is computed from — is
   // filtered.
   //
-  // Name rules FIRST, and only a path that survives all of them is stat'd (codex review, MEDIUM):
-  // a worktree carrying 100 000 files under `tmp/` would otherwise cost 100 000 synchronous stats
-  // on the daemon's event loop to reject paths the directory rule rejects without a size.
-  const untracked = relPath !== undefined ? candidates : candidates.filter((file) => {
-    if (deliverExclusionByName(file) !== null) return false;
-    let size: number | null = null;
-    try {
-      size = statSync(join(workdir, file)).size;
-    } catch {
-      // Unreadable/raced away: an unknown size is never treated as oversize (the shell's
-      // `wc -c < "$F" 2>/dev/null || echo 0` degrades the same way).
-    }
-    // crew#901: an env template rides only when its text holds no value — read it (small: the
-    // name rules already passed, and the size rule drops anything over 1 MiB first).
-    return (
-      deliverExclusionReason(file, size, () => {
-        try {
-          return readFileSync(join(workdir, file), 'utf8');
-        } catch {
-          return null;
-        }
-      }) === null
-    );
-  });
+  // The classifier is `rides` above: name rules first, then size, then an env template's text.
+  const untracked = relPath !== undefined ? candidates : candidates.filter(rides);
   for (const file of untracked) {
     // Cap is in BYTES; `out.length` counts UTF-16 code units. `>=`: exactly-at-cap is
     // already done — spawning one more git only to discard its output is waste (Copilot, #305).
