@@ -12,7 +12,7 @@ import { rosterWithStandingFactory } from '../src/api/roster-standing.js';
 import { SeatContainerStatus, type ExecLike } from '../src/api/seat-container-login.js';
 import { SeatHealthTracker } from '../src/api/seat-health.js';
 import { chatSeatAdmission, type StandingSeat } from '../src/api/seat-standing.js';
-import { probeSeatImages, SeatImageReading, unbuildableSeatImages, type SeatImageStatus, type UnbuildableSeatImage } from '../src/api/seat-images.js';
+import { probeSeatImages, SEAT_IMAGE_READING_TTL_MS, SeatImageReading, unbuildableSeatImages, type SeatImageStatus, type UnbuildableSeatImage } from '../src/api/seat-images.js';
 import { toEngineSeat } from '../src/core/engine-roster.js';
 
 function status(over: Partial<SeatImageStatus> = {}, seats: Partial<Record<string, Partial<SeatImageStatus['seats'][number]>>> = {}): SeatImageStatus {
@@ -70,7 +70,7 @@ const close: Array<() => void> = [];
 beforeEach(() => { home = mkdtempSync(join(tmpdir(), 'seat-image-unusable-')); vi.stubEnv('HOME', home); vi.stubEnv('WICKED_CORE_EXE', '/fixture/core'); });
 afterEach(() => { for (const fn of close.splice(0)) fn(); vi.restoreAllMocks(); vi.unstubAllEnvs(); rmSync(home, { recursive: true, force: true }); });
 
-function rosterFixture(reading: ReadonlyMap<string, UnbuildableSeatImage> | null, floor = 'container') {
+function rosterFixture(reading: ReadonlyMap<string, UnbuildableSeatImage> | null, floor = 'container', images?: { unbuildable(): ReadonlyMap<string, UnbuildableSeatImage> | null }) {
   // The container broker answers per seat: pi is signed out, every other seat signed in.
   const exec = vi.fn<ExecLike>(async (_file, args) => ({
     stdout: args.some((a) => a === 'pi' || a.startsWith('pi')) ? '{"status":"signed_out","detail":{}}' : '{"status":"signed_in","detail":{"expires_at":null}}',
@@ -83,7 +83,7 @@ function rosterFixture(reading: ReadonlyMap<string, UnbuildableSeatImage> | null
     seatHealth: new SeatHealthTracker(),
     env: { HOME: home, WICKED_SEAT_FLOOR: floor }, home, hostBoundary: () => null, containerStatus,
     worktreeBench: () => new Map(), qeAdmitted: () => true,
-    seatImages: { unbuildable: () => reading },
+    seatImages: images ?? { unbuildable: () => reading },
   });
   close.push(() => roster.close?.());
   return { roster, containerStatus };
@@ -170,12 +170,39 @@ describe('SeatImageReading: off the request path', () => {
     await r.refresh();
     expect(calls).toBe(1);
     expect([...(r.unbuildable() ?? new Map()).keys()]).toEqual(['codex']);
-    // Rebuilt: the next reading after the TTL clears it.
+    // Rebuilt: past the TTL the old verdict is not served, and the fresh reading clears it.
     answer = status();
     now = 1000;
-    r.unbuildable();
+    expect(r.unbuildable()).toBeNull();
     await r.refresh();
     expect(calls).toBe(2);
+    expect(r.unbuildable()?.size).toBe(0);
+  });
+
+  it('codex merge check r3: unavailable at t=0, repaired at t=1, the first request at t=300 s admits the seat', async () => {
+    let now = 0;
+    let answer: SeatImageStatus | null = status(baseGone, { codex: { present: false } });
+    const images = new SeatImageReading(async () => answer, { ttlMs: SEAT_IMAGE_READING_TTL_MS, nowMs: () => now });
+    await images.refresh();
+    const f = rosterFixture(null, 'container', images);
+    for (const k of ['claude', 'codex', 'codex#2', 'pi']) await f.containerStatus.refresh(k);
+    expect(seatOf(f.roster(), 'codex')).toHaveProperty('seat_image_unavailable');
+    answer = status(); // repaired at t=1 s; nobody asks until t=300 s
+    now = 300_000;
+    const first = seatOf(f.roster(), 'codex');
+    expect(first).not.toHaveProperty('seat_image_unavailable');
+    expect(first).toMatchObject({ work_eligible: true, council_eligible: true, health: { status: 'active' } });
+    expect(usable(first)).toMatchObject({ usable: true });
+  });
+
+  it('the daemon reading refreshes on its own every half TTL: a repair is seen with no request in between', async () => {
+    let answer: SeatImageStatus | null = status(baseGone, { codex: { present: false } });
+    const r = new SeatImageReading(async () => answer, { ttlMs: 40 }).start();
+    close.push(() => r.close());
+    await new Promise((res) => setTimeout(res, 5));
+    expect([...(r.unbuildable() ?? new Map()).keys()]).toEqual(['codex']);
+    answer = status();
+    await new Promise((res) => setTimeout(res, 45));
     expect(r.unbuildable()?.size).toBe(0);
   });
 

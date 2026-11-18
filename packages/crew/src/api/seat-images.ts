@@ -187,28 +187,51 @@ export function seatImageStatusVia(coreExe: () => string | null): () => Promise<
   };
 }
 
-/** How old the roster's seat image reading may be before a read starts a fresh one. */
+/** How old the roster's seat image reading may be and still be served. The daemon's reading refreshes at half that. */
 export const SEAT_IMAGE_READING_TTL_MS = 60_000;
 
 /**
- * (crew#1097) The roster's seat image reading: {@link unbuildableSeatImages} of the last status, read in the background
- * (never on a roster read, which only starts a refresh when the reading is older than the TTL; one at a time). No
- * reading yet, or a failed one, is `null`: nothing is marked (an unknown image never benches a seat).
+ * (crew#1097) The roster's seat image reading: {@link unbuildableSeatImages} of the last status, read off the request
+ * path (one read at a time). A reading older than the TTL is never served (codex merge check r3): a stale "cannot be
+ * built" would keep refusing a seat repaired since, so a stale read answers `null` and starts a fresh read. No reading
+ * yet, a failed one, or a stale one is `null`: nothing is marked (an unknown image never benches a seat). The daemon
+ * `start`s it, so the reading refreshes every half TTL and a repair is seen within that, with or without requests.
  */
 export class SeatImageReading {
   private last: Map<string, UnbuildableSeatImage> | null = null;
   private at = Number.NEGATIVE_INFINITY;
   private pending: Promise<void> | undefined;
+  private timer: ReturnType<typeof setInterval> | undefined;
 
   constructor(
     private readonly status: () => Promise<SeatImageStatus | null>,
     private readonly opts: { ttlMs?: number; timeoutMs?: number; nowMs?: () => number } = {},
   ) {}
 
-  /** The last reading; a stale one starts a refresh (its answer is seen by a later read). */
+  /** The last reading while it is fresh; a stale one is not served (`null`) and starts a refresh. */
   unbuildable(): Map<string, UnbuildableSeatImage> | null {
-    if (this.now() - this.at >= (this.opts.ttlMs ?? SEAT_IMAGE_READING_TTL_MS)) void this.refresh();
-    return this.last;
+    if (this.now() - this.at < this.ttl()) return this.last;
+    void this.refresh();
+    return null;
+  }
+
+  /** Refresh now and every half TTL (the daemon's reading), so a served reading is never older than the TTL. */
+  start(): this {
+    if (this.timer === undefined) {
+      void this.refresh();
+      this.timer = setInterval(() => void this.refresh(), Math.max(1, Math.floor(this.ttl() / 2)));
+      this.timer.unref?.();
+    }
+    return this;
+  }
+
+  close(): void {
+    if (this.timer !== undefined) clearInterval(this.timer);
+    this.timer = undefined;
+  }
+
+  private ttl(): number {
+    return this.opts.ttlMs ?? SEAT_IMAGE_READING_TTL_MS;
   }
 
   /** Read now (one at a time: a refresh in flight is the one awaited). */

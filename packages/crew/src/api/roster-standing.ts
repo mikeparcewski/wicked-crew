@@ -215,7 +215,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
   const seatImages = (): { unbuildable(): ReadonlyMap<string, UnbuildableSeatImage> | null } | null => {
     if (deps.seatImages !== undefined) return deps.seatImages;
     if (!daemon) return null;
-    ownedImages ??= new SeatImageReading(seatImageStatusVia(() => env['WICKED_CORE_EXE'] || null));
+    ownedImages ??= new SeatImageReading(seatImageStatusVia(() => env['WICKED_CORE_EXE'] || null)).start();
     return ownedImages;
   };
   const worktreeBench =
@@ -540,7 +540,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
     }));
   };
   accessor.containerStatus = containerStatus;
-  accessor.close = () => { stopRuntime?.(); ownedRuntime?.close(); };
+  accessor.close = () => { stopRuntime?.(); ownedRuntime?.close(); ownedImages?.close(); };
   if (probe !== null || containerMode()) {
     accessor.ready = async () => {
       let keys: string[];
