@@ -166,9 +166,11 @@ describe('seat images: a CLI nobody signed in needs no image yet', () => {
     base: { image: 'wicked-seat-base:rust', present: true, held: true },
     baseRecipe: false,
     holdSupported: true,
+    holdReported: true,
     floor: { image: 'wicked-floor:1', present: true, held: true },
     seats: ['claude', 'codex', 'opencode'].map((c) => ({ cli: c, image: `wicked-seat-${c}:1`, present: !missing.includes(c), held: !missing.includes(c), operatorImage: false })),
     disk: { totalBytes: 100 * 2 ** 30, availBytes: 60 * 2 ** 30, usedPct: 40 },
+    diskReported: true,
     imageGcHighPct: 85,
   });
   const probe = (missing: string[], idle: string[]) =>

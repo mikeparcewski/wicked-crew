@@ -10,6 +10,7 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+- fix(seat images): crew reads the seat image status the current engine prints (`{image, present}` per image, with no `held`, `holdSupported` or `disk`). Before, the parser required `held`, so the `seat_images` row read "an engine older than wicked-core#1225" on every probe, and the crew#1097 roster rule never fired. A missing `held` reads as not held. An engine that says nothing about holding or the disk is no longer nagged about either, and the row reads `ok` when the images are present. A contract test runs the `wicked-core` binary that wicked-core-ts ships against a stand-in container runtime, so a schema drift fails CI (crew#1526).
 - **A leading `Repository: <repo>` line no longer titles the PR (crew#1516).** The deliver title and commit
   subject skip the intent's routing line (`Repository: wicked-crew.`, any case, `Repo:`, one repository token, an
   optional `.`/`;`/`,`) and take the first line that describes the change, so wicked-crew#1511 reads
@@ -17,7 +18,7 @@ mentioned only where a daemon release depends on them.
   Prose that starts with the word (`Repository: x is missing its CHANGELOG`) keeps its words; the PR body keeps the
   intent verbatim.
 - feat(launch): `POST /runs/preview` answers the human gates a launch of the body would keep (power, the posture the engine keeps, delivery and its gate) from the SAME decision `POST /runs` makes (`core/launch-posture.ts`), so a launch form shows what the run keeps instead of modelling crew's rules. The launch's inline power and deliver resolution is replaced by that one function, behaviour unchanged. wicked-crew-api-types 0.212.0 (additive): `LaunchPreviewBody`, `LaunchPreviewPosture`, `LaunchPreviewResponse` (studio#1150).
-- fix(roster): on the container floor, a seat whose image is missing and cannot be built (the operator's base is gone with no recipe, or an operator image is missing) reads unusable on `GET /roster`: work and council ineligible, inactive, chat refused, with the cause and its remedy. The engine is then handed it unusable, so work stays off it and a run refuses at launch instead of parking at a judge gate. One rule (`unbuildableSeatImages`) for the roster and the `seat_images` row, read in the background (crew#1097). `RosterSeat.work_admission` / `qe_reviewer` refuse it with the new reason code `seat_image_unavailable` (wicked-crew-api-types 0.213.0, additive).
+- fix(roster): on the container floor, a seat whose image is missing and cannot be built (the operator's base is gone with no recipe, or an operator image is missing) reads unusable on `GET /roster`: work and council ineligible, inactive, chat refused, with the cause and its remedy. The engine is then handed it unusable, so work stays off it and a run refuses at launch instead of parking at a judge gate. One rule (`unbuildableSeatImages`) for the roster and the `seat_images` row, read in the background (crew#1097). As first merged it was inert on the current engine: the status parser required a `held` field the engine no longer prints, so every reading was unknown and no seat was marked. The fix below makes it effective. `RosterSeat.work_admission` / `qe_reviewer` refuse it with the new reason code `seat_image_unavailable` (wicked-crew-api-types 0.213.0, additive).
 
 ## [0.18.17] — 2026-11-17
 

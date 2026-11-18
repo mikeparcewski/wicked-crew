@@ -29,9 +29,11 @@ function status(over: Partial<SeatImageStatus> = {}, seats: Partial<Record<strin
     base: { image: 'wicked-seat-base:rust', present: true, held: true },
     baseRecipe: false,
     holdSupported: true,
+    holdReported: true,
     floor: { image: 'wicked-floor:1', present: true, held: true },
     seats: ['claude', 'codex', 'agy'].map((cli) => ({ cli, image: `wicked-seat-${cli}:1`, present: true, held: true, operatorImage: false, ...(seats[cli] ?? {}) })),
     disk: { totalBytes: 100 * 2 ** 30, availBytes: 60 * 2 ** 30, usedPct: 40 },
+    diskReported: true,
     imageGcHighPct: 85,
     ...over,
   };
@@ -41,6 +43,36 @@ const diskAt = (usedPct: number) => ({ totalBytes: 100 * 2 ** 30, availBytes: (1
 
 const probe = (st: SeatImageStatus | null, extra: Partial<Parameters<typeof probeSeatImages>[0]> = {}) =>
   probeSeatImages({ containerFloor: true, clis: ['claude', 'codex', 'agy'], status: async () => st, rebuild: () => null, ...extra });
+
+// crew#1526: what the current engine prints (wicked-core `ImageStatus`: no `held`, `holdSupported`, `disk`).
+const CURRENT_ENGINE = JSON.stringify({
+  runtime: '/usr/local/bin/docker', base: null, baseRecipe: false,
+  floor: { image: 'wicked-floor:a35f25fba2b4', present: true },
+  seats: [
+    { cli: 'claude', image: 'wicked-seat-claude:bd084d5889e4', present: true, operatorImage: false },
+    { cli: 'codex', image: 'wicked-seat-codex:cbfcf034565b', present: true, operatorImage: false },
+    { cli: 'agy', image: 'wicked-seat-agy:3d16d860dfb5', present: false, operatorImage: false },
+  ],
+});
+
+describe('crew#1526: the current engine\'s status (no held, no disk) is read, not "an older engine"', () => {
+  it('parses: every seat, nothing held or reported about holding, no disk reported', () => {
+    const st = parseSeatImageStatus(CURRENT_ENGINE)!;
+    expect(st).not.toBeNull();
+    expect(st.seats.map((x) => [x.cli, x.present])).toEqual([['claude', true], ['codex', true], ['agy', false]]);
+    expect(st).toMatchObject({ holdSupported: false, holdReported: false, disk: null, diskReported: false, floor: { present: true, held: false } });
+  });
+  it('the row says what is missing, and reads ok when every image is there', async () => {
+    const missing = await probe(parseSeatImageStatus(CURRENT_ENGINE));
+    expect(missing.state).toBe('degraded');
+    expect(missing.reason).toMatch(/agy/);
+    expect(missing.reason).not.toMatch(/older than|not held|disk/);
+    expect(missing.remedy).toBe('Rebuild seat images now, or let the next unit build each on first use.');
+    const all = await probe(parseSeatImageStatus(CURRENT_ENGINE.replace('"present":false', '"present":true')));
+    expect(all.state).toBe('ok');
+    expect(all.reason).toBe('4 seat image(s) present');
+  });
+});
 
 describe('parseSeatImageStatus', () => {
   it('reads the engine answer, field by field, and refuses anything else', () => {
