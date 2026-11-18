@@ -10,6 +10,21 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+- **The B4 chat measure, `packages/crew/scripts/chat-probe.ts` (crew#1497).** It reports, per question, grounded answers
+  with real `repo/path:line` citations, fabricated citations and internal-text leaks, over project chats it opens and
+  closes itself. It fails closed: a question that errored, timed out, could not be closed, had a failed seat or got no
+  seat list fails the measure, and a link or path it cannot check is a failed citation. A GitHub link is valid only
+  when three things hold: its owner/repo is the member repository's own remote; its ref (a branch, tag or commit)
+  resolves in the local clone; and the cited lines exist in the file at that ref. A link with another owner or an
+  unknown ref counts as fabricated, even when a file of that name is checked out. Reading fails closed: a token
+  shaped like a citation (`name:12`, `name#L12`, a URL ending `#L12`) that the grammar does not read whole counts as
+  fabricated. Citations are read in one pass that claims spans. Links come first, decoded once. A backtick-quoted
+  span is one path, spaces included. Bare paths come last. No step reads inside a span already claimed. That covers
+  a suffix of a longer token, `#L1e999`, a range with junk after it, an extensionless name it
+  does not know, and an upper-case scheme. `passed` needs at least 20 questions; a smaller set reports `barMet` and
+  exits 1, as a smoke run. The final read must still hold every seat the send reached, and it keeps any failure or leak
+  the settling read showed. A file URL into a home or temp folder, a Windows path in any script, and a pretty-printed
+  session row are leaks.
 - fix(deliver): a seat's own temp files and home-derived paths reach no pushed commit (wicked-core#1573). A seat that committed its temp file (`tmp/claude-<uid>/<a slug of the worktree path>/…/tasks/<id>.output`) and deleted it in a later commit still had it in the branch history, because delivery's exclusions only ran over untracked files. Right before the push, the deliver script now checks every file state the pushed commits introduce or inherit from a merged-in older commit against one narrow class, by name only: a `claude-<digits>` directory segment (`seat-temp`), or a segment that is a home-path slug (`-Users-…`, `-home-…`, `C--Users-…`, one starting with this host's home slug) or this host's home path mirrored as directories (`home-derived`). When any match, it rewrites those commits without them, keeping authors, committers, dates and messages; a commit the scrub empties is dropped. The general exclusion list (credentials, env files, `tmp/` source) is not applied to committed files: a committed `tmp/parser.rs` or `src/credentials.ts` is pushed as committed, and a path the base already holds at that exact name is never touched. If the scrub would rewrite or drop a signed commit, the push is refused with the reason (re-run the step, or remove the file from the history by hand) and nothing is pushed: delivery never signs work with a key of its own. Re-created commits of an unsigned history stay unsigned, whatever the ambient signing config says. Before the branch moves, the script checks that the rewritten final tree differs from the committed one only by removed paths of that class, and refuses the push otherwise; a scrub read that fails also pushes nothing. The phase output names each scrubbed path, and the PR body counts them by reason. A path under a nested scratch or tool-artifact directory is now named in the PR's Not shipped list only up to that directory (`pkg/tmp/…`), whichever rule excluded it, and the run diff the deliver gate counts leaves out committed files of the scrubbed class.
 - **A run's brief carries only learnings the operator approved, with this daemon's home and temp paths redacted (crew#1546).** Run-learnings recall
   labelled every stored memory "approved by the operator". Among them were raw session captures (a hook's
