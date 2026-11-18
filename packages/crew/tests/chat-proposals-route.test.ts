@@ -515,6 +515,32 @@ describe('chat proposals (server, A2)', () => {
     };
     const restore = (): void => { if (saved !== null) writeFileSync(settingsFile(), saved); else rmSync(settingsFile(), { force: true }); };
 
+    // (crew#1609, after crew#1590) Nothing picked: an opt-in seat leading the chat is never a DEFAULT helper, but a
+    // person who chooses it as a helper opts it in, and the document starts with it.
+    it('nothing picked: an opt-in seat leading the chat is not a default helper; chosen as a helper, it starts', async () => {
+      try {
+        rmSync(settingsFile(), { force: true });
+        const chatId = 'nws-doc-optin';
+        // OpenCode is the chat's chosen lead (`primary`), and it is the seat that answers.
+        expect((await open(stub, { chatId, clis: ['opencode', 'claude', 'codex'], primary: 'opencode' })).statusCode).toBe(201);
+        expect((await send(stub, chatId, { text: 'Make a deck on coverage' })).statusCode).toBe(202);
+        for (const fn of stubListeners) fn({ type: 'chatReply', chat: chatId, cliKey: 'opencode', text: make({ entry: 'presentation', title: 'Coverage', sources: ['chat'] }), ok: true } as unknown as CoreEvent);
+        const p = await proposalOf(stub, chatId);
+        expect(p.blocked).toBeNull();
+        expect(p.helpers?.seats).toHaveLength(2);
+        expect(p.helpers?.seats).not.toContain('opencode');
+        const before = stubRows().length;
+        const go = await decide(stub, chatId, p.pid, { decision: 'go', edits: { helpers: ['claude', 'opencode'] } });
+        expect(go.statusCode, go.body).toBe(200);
+        expect(stubRows().length - before).toBe(1);
+        // What Start accepted (and handed the launcher): the helpers the person chose.
+        const accepted = (await records(stub, chatId)).filter((r): r is Extract<ChatTranscriptRecord, { kind: 'proposal_accepting' }> => r.kind === 'proposal_accepting').at(-1)?.resolution;
+        expect(accepted?.helpers?.seats).toEqual(['claude', 'opencode']);
+      } finally {
+        restore();
+      }
+    });
+
     it('drawn while invalid: read blocked (GET), a helper pick and Start refuse 409 setting_invalid; fixed, the same card reads unblocked and starts', async () => {
       try {
         setRaw('{"newWorkSeats": "claude"}');
