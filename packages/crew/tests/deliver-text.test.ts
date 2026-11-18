@@ -859,7 +859,7 @@ describe('crew#550 — attribution trailers and the linked-issues block', () => 
     const exec = async () => ({ stdout: issue, stderr: '', code: 0 });
     const linked = await resolveLinkedIssues('fix #541', '/srv/repo', 'wicked-studio', exec);
     // The launch path: the block, then the learnings block, after the person's words.
-    const { problem } = withRunLearnings(`fix #541\n\n${linked.block!}`, [{ content: 'A learning long enough to be recalled here.', facets: {} }], 'wicked-studio', null);
+    const { problem } = withRunLearnings(`fix #541\n\n${linked.block!}`, [{ memory_id: 'proposal:1', content: 'A learning long enough to be recalled here.', facets: {} }], 'wicked-studio', null);
     const v = runView();
     v.session.problem = problem;
     const facts = factsFromRun(v, null);
