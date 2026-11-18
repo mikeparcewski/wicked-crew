@@ -29,7 +29,14 @@
  *
  * It is a GUARD, NOT A SILENT DROP: the script still prints every excluded path with its reason
  * into the phase output (retained and served on the run wire), and this module only changes which
- * files a *preview* of the push counts.
+ * files a *preview* of the push counts. *
+ * ## Committed paths too (wicked-core#1573)
+ *
+ * In the script the ladder is ONE shell function, `_classify`, with two callers: the untracked pass
+ * (the worktree file) and the history scrub right before the push, which runs it over every commit
+ * the push carries (that commit's blob) and rewrites those commits without the paths it matches. A
+ * seat that commits its own temp file therefore ships it in no commit, even when a later commit
+ * deleted it. A path the base already tracks is the repository's own and is never a candidate.
  */
 
 /**
