@@ -2022,44 +2022,92 @@ describe('deliver script — no seat temp path in ANY pushed commit (wicked-core
     expect(git(fx.origin, 'rev-list', '--objects', '--all')).not.toContain('-Users-alice-');
   }, 90_000);
 
-  it('an SSH-SIGNED commit the scrub rewrites is re-signed with the repository signing key, and verifies', async () => {
-    const fx = fixture();
-    const key = join(fx.root, 'signing-key');
-    execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'seat@test', '-f', key]);
-    const allowed = join(fx.root, 'allowed-signers');
-    writeFileSync(allowed, `seat@test ${readFileSync(`${key}.pub`, 'utf8')}`);
+  /** Every commit object in `repo` that carries a signature header, sorted. */
+  const signedCommits = (repo: string): string[] =>
+    git(repo, 'cat-file', '--batch-all-objects', '--batch-check=%(objecttype) %(objectname)')
+      .split('\n')
+      .filter((l) => l.startsWith('commit '))
+      .map((l) => l.slice('commit '.length))
+      .filter((sha) => /^gpgsig(-sha256)? /m.test(git(repo, 'cat-file', 'commit', sha).split('\n\n')[0]!))
+      .sort();
+
+  /** The operator's own signing setup, ambient to delivery: a key, ssh format, commit.gpgsign on. */
+  const operatorSigningSetup = (fx: Fixture): void => {
+    const opKey = join(fx.root, 'operator-key');
+    execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'operator@test', '-f', opKey]);
     git(fx.clone, 'config', 'gpg.format', 'ssh');
-    git(fx.clone, 'config', 'user.signingkey', key);
-    seatCommitsScratchAs(fx.workdir, ['-c', 'user.name=seat', '-c', 'user.email=seat@test'], ['-S']);
+    git(fx.clone, 'config', 'user.signingkey', opKey);
+    git(fx.clone, 'config', 'commit.gpgsign', 'true');
+  };
 
-    const r = await runDeliver(fx, { intent: 'signed' });
+  const SIGNED_REFUSAL = /deliver: refusing to push — commit [0-9a-f]{12} is signed, and removing the seat temp file\(s\) named above from the run's commits would rewrite it; delivery never re-signs or drops a signed commit\. Re-run the step so its commits leave the temp file out, or remove it from the branch history by hand, then approve to retry; nothing was pushed/;
 
-    expect(r.status, r.output).toBe(0);
-    const pushed = git(fx.origin, 'rev-list', `main..wicked/${RUN_ID}`).trim().split('\n');
-    expect(pushed).toHaveLength(1); // the commit that only deleted the temp file was dropped
-    expect(git(fx.origin, 'cat-file', 'commit', pushed[0]!)).toMatch(/^gpgsig /m);
-    // Verifies against the seat's key (git verify-commit exits non-zero otherwise).
-    git(fx.origin, '-c', `gpg.ssh.allowedSignersFile=${allowed}`, 'verify-commit', pushed[0]!);
-    expect(pathsInHistory(fx.origin, `main..wicked/${RUN_ID}`).filter((p) => p.startsWith('tmp/'))).toEqual([]);
-  }, 90_000);
-
-  it('a signed commit that cannot be re-signed REFUSES the push loudly — never an unsigned copy', async () => {
+  it('a RUN-KEY-signed commit the scrub would rewrite REFUSES the push; no new signature is made with any key', async () => {
     const fx = fixture();
-    const key = join(fx.root, 'signing-key');
-    execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'seat@test', '-f', key]);
-    git(fx.clone, 'config', 'gpg.format', 'ssh');
-    git(fx.clone, 'config', 'user.signingkey', key);
-    seatCommitsScratchAs(fx.workdir, ['-c', 'user.name=seat', '-c', 'user.email=seat@test'], ['-S']);
-    // The key is gone by delivery time.
-    rmSync(key);
-    rmSync(`${key}.pub`);
+    const runKey = join(fx.root, 'run-key');
+    execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'seat@test', '-f', runKey]);
+    seatCommitsScratchAs(
+      fx.workdir,
+      ['-c', 'user.name=seat', '-c', 'user.email=seat@test', '-c', 'gpg.format=ssh', '-c', `user.signingkey=${runKey}`],
+      ['-S'],
+    );
+    operatorSigningSetup(fx);
+    const before = signedCommits(fx.workdir);
+    expect(before).toHaveLength(2);
 
-    const r = await runDeliver(fx, { intent: 'signed, no key' });
+    const r = await runDeliver(fx, { intent: 'signed by the run key' });
 
     expect(r.status).not.toBe(0);
-    expect(r.output).toMatch(/deliver: refusing to push — commit [0-9a-f]{12} is signed, and re-signing its scrubbed copy/);
-    expect(r.output).toContain('nothing was pushed');
+    expect(r.output).toContain('deliver: SCRUBBED (seat-temp)');
+    expect(r.output).toMatch(SIGNED_REFUSAL);
     expect(originBranches(fx)).toEqual(['main']);
+    expect(signedCommits(fx.workdir)).toEqual(before);
+    expect(signedCommits(fx.origin)).toEqual([]);
+  }, 90_000);
+
+  it('a commit with an INVALID signature header is refused too — never turned into a valid signature', async () => {
+    const fx = fixture();
+    seatCommitsScratch(fx.workdir);
+    // The fix commit gets a signature header no key made; its child is re-pointed at it.
+    const fixSha = git(fx.workdir, 'rev-parse', 'HEAD~1').trim();
+    const forge = (raw: string, parentFrom: string | null, parentTo: string | null): string => {
+      const [hdr, ...msg] = raw.split('\n\n');
+      let h = hdr!;
+      if (parentFrom !== null && parentTo !== null) h = h.replace(`parent ${parentFrom}`, `parent ${parentTo}`);
+      else h += '\ngpgsig -----BEGIN SSH SIGNATURE-----\n U1NIU0lHbm90LWEtcmVhbC1zaWduYXR1cmU=\n -----END SSH SIGNATURE-----';
+      return execFileSync('git', ['-C', fx.workdir, 'hash-object', '-t', 'commit', '-w', '--stdin'], {
+        input: [h, ...msg].join('\n\n'),
+        encoding: 'utf8',
+      }).trim();
+    };
+    const forgedFix = forge(git(fx.workdir, 'cat-file', 'commit', fixSha), null, null);
+    const child = forge(git(fx.workdir, 'cat-file', 'commit', 'HEAD'), fixSha, forgedFix);
+    git(fx.workdir, 'update-ref', 'HEAD', child);
+    operatorSigningSetup(fx);
+    const before = signedCommits(fx.workdir);
+    expect(before).toEqual([forgedFix]);
+
+    const r = await runDeliver(fx, { intent: 'bogus signature header' });
+
+    expect(r.status).not.toBe(0);
+    expect(r.output).toMatch(SIGNED_REFUSAL);
+    expect(r.output).toContain(forgedFix.slice(0, 12));
+    expect(originBranches(fx)).toEqual(['main']);
+    expect(signedCommits(fx.workdir)).toEqual(before);
+  }, 90_000);
+
+  it('an UNSIGNED history is scrubbed unsigned even when the ambient config signs every commit', async () => {
+    const fx = fixture();
+    seatCommitsScratch(fx.workdir);
+    operatorSigningSetup(fx);
+
+    const r = await runDeliver(fx, { intent: 'unsigned, ambient signing on' });
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.outcome).toBe('pr');
+    expect(pathsInHistory(fx.origin, `main..wicked/${RUN_ID}`).filter((p) => p.startsWith('tmp/'))).toEqual([]);
+    expect(signedCommits(fx.origin)).toEqual([]);
+    expect(signedCommits(fx.workdir)).toEqual([]);
   }, 90_000);
 
   it('the INVARIANT refuses a rewrite that would change the delivered tree beyond seat temp files', async () => {

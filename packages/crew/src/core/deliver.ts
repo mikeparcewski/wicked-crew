@@ -1307,10 +1307,11 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     //
     // Otherwise every matched path is removed from every commit in the range and the commits are
     // re-created with commit-tree, keeping authors, committers, dates and messages (a retry finds
-    // nothing left and moves nothing); a commit the scrub emptied is dropped. A commit that was SIGNED
-    // is re-signed with the repository's own signing setup (`-S`: user.signingkey, gpg.format), and a
-    // signature that cannot be made refuses the push: an unsigned copy of a signed commit is never
-    // pushed. An unsigned commit stays unsigned. Before the branch moves, the new tip's tree must be the
+    // nothing left and moves nothing); a commit the scrub emptied is dropped. A SIGNED commit (a `gpgsig`
+    // or `mergetag` header) the scrub would rewrite or drop refuses the push: delivery never signs
+    // work with a key of its own and never pushes an unsigned copy of a signed commit, so a seat temp
+    // file in a signed history needs a re-run or a cleanup by hand. Re-created commits are unsigned
+    // (`--no-gpg-sign`), whatever the ambient config says. Before the branch moves, the new tip's tree must be the
     // old tip's tree with only narrow-class paths deleted, or the push is refused. `git reset` (mixed)
     // then moves the branch and leaves the worktree as it was. Every read goes to a file or a checked
     // assignment, never a process substitution, so a failed read pushes nothing. The phase output names
@@ -1349,6 +1350,8 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '    HT=$(GIT_INDEX_FILE="$TD/sidx" git write-tree)',
     '    HT0=$(git rev-parse "$HC^{tree}")',
     '    if [ "$HT" = "$HT0" ] && [ -z "$HMV" ]; then continue; fi',
+    '    git cat-file commit "$HC" > "$TD/hraw.c" || { echo "$HFAIL"; exit 1; }; sed -n "1,/^$/p" "$TD/hraw.c" > "$TD/hhdr"',
+    '    if grep -q -E "^(gpgsig|gpgsig-sha256|mergetag) " "$TD/hhdr"; then echo "deliver: refusing to push — commit ${HC:0:12} is signed, and removing the seat temp file(s) named above from the run\'s commits would rewrite it; delivery never re-signs or drops a signed commit. Re-run the step so its commits leave the temp file out, or remove it from the branch history by hand, then approve to retry; nothing was pushed"; exit 1; fi',
     // A commit the scrub EMPTIED (one parent left, its tree, and it was not empty as the run made it)
     // is dropped; a commit that was empty as made is kept.
     '    HDROP=""',
@@ -1356,10 +1359,9 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '    if [ -n "$HDROP" ]; then printf "%s" "$HPL" > "$TD/map/$HC"; continue; fi',
     '    git -c log.showSignature=false log -1 --format="%an%n%ae%n%ad%n%cn%n%ce%n%cd" --date=raw "$HC" > "$TD/hmeta"',
     '    { IFS= read -r HAN; IFS= read -r HAE; IFS= read -r HAD; IFS= read -r HCN; IFS= read -r HCE; IFS= read -r HCD; } < "$TD/hmeta"',
-    '    git cat-file commit "$HC" > "$TD/hraw.c"; sed "1,/^$/d" "$TD/hraw.c" > "$TD/msg"; sed -n "1,/^$/p" "$TD/hraw.c" > "$TD/hhdr"',
-    '    HSIGN=--no-gpg-sign; if grep -q -E "^gpgsig(-sha256)? " "$TD/hhdr"; then HSIGN=-S; fi',
+    '    sed "1,/^$/d" "$TD/hraw.c" > "$TD/msg"',
     '    HPA=""; for HQ in $HPL; do HPA="$HPA -p $HQ"; done',
-    `    HNC=$(GIT_AUTHOR_NAME="$HAN" GIT_AUTHOR_EMAIL="$HAE" GIT_AUTHOR_DATE="$HAD" GIT_COMMITTER_NAME="$HCN" GIT_COMMITTER_EMAIL="$HCE" GIT_COMMITTER_DATE="$HCD" git commit-tree "$HSIGN" "$HT" $HPA -F "$TD/msg") || { if [ "$HSIGN" = -S ]; then echo "deliver: refusing to push — commit \${HC:0:12} is signed, and re-signing its scrubbed copy with this repository's signing setup (user.signingkey, gpg.format) failed (above); an unsigned copy is never pushed. Make the signing key available to the daemon, then approve to retry; nothing was pushed"; else echo "$HFAIL"; fi; exit 1; }`,
+    `    HNC=$(GIT_AUTHOR_NAME="$HAN" GIT_AUTHOR_EMAIL="$HAE" GIT_AUTHOR_DATE="$HAD" GIT_COMMITTER_NAME="$HCN" GIT_COMMITTER_EMAIL="$HCE" GIT_COMMITTER_DATE="$HCD" git commit-tree --no-gpg-sign "$HT" $HPA -F "$TD/msg") || { echo "$HFAIL"; exit 1; }`,
     '    printf "%s" "$HNC" > "$TD/map/$HC"',
     '  done 3< "$TD/hlist"',
     '  HOT=$(git rev-parse "$B"); HNT=$HOT; [ ! -f "$TD/map/$HOT" ] || HNT=$(cat "$TD/map/$HOT")',
