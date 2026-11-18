@@ -55,8 +55,12 @@ beforeAll(async () => {
   adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true, busDbPath: busPath });
   settings = { graphNodeLimit: 150 } as CrewSystemSettings;
   adapter.getSettings = async () => settings;
-  adapter.updateSettings = async (patch: Partial<CrewSystemSettings>) => {
-    settings = { ...settings, ...patch } as CrewSystemSettings;
+  // The adapter's write contract (crew#1591): `derive` runs against the stored value and wins over `patch`.
+  adapter.updateSettings = async (
+    patch: Partial<CrewSystemSettings>,
+    derive?: (current: CrewSystemSettings) => Partial<CrewSystemSettings>,
+  ) => {
+    settings = { ...settings, ...patch, ...(derive ? derive(settings) : {}) } as CrewSystemSettings;
     return settings;
   };
   adapter.sessionsDetail = async () => [];

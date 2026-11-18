@@ -228,6 +228,9 @@ async function seedStateHomeSettings(path: string): Promise<void> {
   await publishSettingsFile(path, body, false);
 }
 
+/** crew#1591: the tail of each settings file's write queue (`CoreAdapter.updateSettings`); never rejects. */
+const settingsWriteQueues = new Map<string, Promise<void>>();
+
 /**
  * Write a settings file WHOLE: the text goes to a sibling temp file, then is published — by
  * `rename` (replacing) or `link` (only when absent). A reader never sees a partial file. The temp
@@ -4402,14 +4405,49 @@ export class CoreAdapter {
     }
   }
 
-  async updateSettings(patch: Partial<CrewSystemSettings>): Promise<CrewSystemSettings> {
+  /**
+   * Write settings: read, merge, publish — as ONE step per write (crew#1591). Writes queue behind
+   * each other, so two concurrent `PUT /settings` (a person's `powerModeDefault`, a worker's
+   * `graphNodeLimit`) can never both read the old file and have the later publish silently revert
+   * the earlier one while both answered 200. `derive` is for a merge that depends on the STORED
+   * value (the route's nested `watch` merge): it runs inside the queue against exactly the value
+   * this write replaces, and its keys win over `patch`. The daemon is the file's only writer (the
+   * state-home fence keeps one daemon per home; the seed only ever links an absent file), so an
+   * in-process queue is the whole lock.
+   */
+  updateSettings(
+    patch: Partial<CrewSystemSettings>,
+    derive?: (current: CrewSystemSettings) => Partial<CrewSystemSettings>,
+  ): Promise<CrewSystemSettings> {
+    // One queue per settings FILE (the path as this write resolves it), so writes through any adapter in this
+    // process to the same file are ordered, and a write to another file never waits on this one.
+    const path = settingsFilePath();
+    const write = (settingsWriteQueues.get(path) ?? Promise.resolve()).then(() => this.writeSettings(path, patch, derive));
+    // The queue only orders writes; a failed write still rejects to ITS caller, never the next one.
+    const tail = write.then(
+      () => undefined,
+      () => undefined,
+    );
+    settingsWriteQueues.set(path, tail);
+    void tail.then(() => {
+      if (settingsWriteQueues.get(path) === tail) settingsWriteQueues.delete(path);
+    });
+    return write;
+  }
+
+  private async writeSettings(
+    path: string,
+    patch: Partial<CrewSystemSettings>,
+    derive?: (current: CrewSystemSettings) => Partial<CrewSystemSettings>,
+  ): Promise<CrewSystemSettings> {
     const { settings: current, kept } = await this.readSettings();
-    const next = { ...current, ...patch };
+    const derived = derive ? derive(current) : {};
+    const next = { ...current, ...patch, ...derived };
     try {
-      // An invalid value the read left out is written back unless this patch replaces it (`kept`, newWorkSeats).
-      await publishSettingsFile(settingsFilePath(), JSON.stringify({ ...current, ...kept, ...patch }, null, 2), true);
+      // An invalid value the read left out is written back unless this write replaces it (`kept`, newWorkSeats).
+      await publishSettingsFile(path, JSON.stringify({ ...current, ...kept, ...patch, ...derived }, null, 2), true);
     } finally {
-      // The file as it now stands (this write, or a later one that already landed).
+      // The file as it now stands (this write; writes are queued, so no later one has landed).
       this.syncEngineQeSetting(true);
     }
     return next;
