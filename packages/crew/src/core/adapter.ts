@@ -83,7 +83,7 @@ import { isRequirementsGraphSettings } from './requirements-graph-setting.js';
 import { QE_OFF_REASON, launchRequiresQe, qeAcceptanceMode, qeSettingSkipReason } from './qe-acceptance-setting.js';
 import { applyVaultBinEnv, BOOT_VAULT_BIN, resolveShippedVaultBin, type VaultBinInputs, type VaultBinPosture } from './vault-bin.js';
 import { withFolderFindings } from './repoPaths.js';
-import { isSeatKeyList } from './job-seats.js';
+import { NEW_WORK_SEATS_FIX, NewWorkSeatsRefusal, isSeatKeyList } from './job-seats.js';
 
 
 
@@ -156,6 +156,51 @@ function diskQeAcceptanceMode(): 'required' | 'off' {
 /** The historical machine-wide settings file — the default state home's, and the one-time seed of any other (crew#756). */
 function sharedSettingsFilePath(): string {
   return join(homedir(), '.config', 'wicked-core', 'settings.json');
+}
+
+/**
+ * (F1/F2) The `newWorkSeats` pick, read STRICTLY for new work: `null` when nothing is set (no settings file, the key
+ * absent, or `null`), the list when it is a list of seat keys. A file that can't be read or parsed, or a value that
+ * isn't a list of seat keys, throws `NewWorkSeatsRefusal`: new work is refused with the reason, never drawn from
+ * every seat (`getSettings` serves defaults on a failed read, which here would widen the pool). A module function, like
+ * `settingsFilePath`: it reads the file itself, whatever adapter the routes were given.
+ */
+export async function readNewWorkSeats(): Promise<readonly string[] | null> {
+  const path = settingsFilePath();
+  let raw: string;
+  try {
+    await seedStateHomeSettings(path);
+    raw = await readFile(path, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    const why = (err as NodeJS.ErrnoException).code ?? (err instanceof Error ? err.message : String(err));
+    throw new NewWorkSeatsRefusal(
+      'settings_unavailable',
+      `crew can't read its settings file (${why}), so it can't tell which seats new work may use (newWorkSeats); it won't start new work on every seat instead. Fix ${path}, or ${NEW_WORK_SEATS_FIX}`,
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = undefined;
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new NewWorkSeatsRefusal(
+      'settings_unavailable',
+      `crew's settings file is not a JSON object, so it can't tell which seats new work may use (newWorkSeats); it won't start new work on every seat instead. Fix ${path}, or ${NEW_WORK_SEATS_FIX}`,
+    );
+  }
+  if (!Object.hasOwn(parsed, 'newWorkSeats')) return null;
+  const v = (parsed as { newWorkSeats: unknown }).newWorkSeats;
+  if (v === null) return null;
+  if (!isSeatKeyList(v)) {
+    throw new NewWorkSeatsRefusal(
+      'setting_invalid',
+      `the newWorkSeats setting (which seats new work may use) is not a list of seat keys, so crew won't guess: ${NEW_WORK_SEATS_FIX} (or fix it in ${path})`,
+    );
+  }
+  return v;
 }
 
 /**
@@ -4291,8 +4336,9 @@ export class CoreAdapter {
       if ('qeAcceptance' in parsed && parsed.qeAcceptance !== 'required' && parsed.qeAcceptance !== 'off') delete parsed.qeAcceptance;
       // powerModeDefault (program DES-POWER-MODE): a boolean only; anything else reads as the shipped default (on).
       if ('powerModeDefault' in parsed && typeof parsed.powerModeDefault !== 'boolean') delete parsed.powerModeDefault;
-      // newWorkSeats (F1/F2): a list of seat keys, or null. Anything else reads as the default rule.
-      if ('newWorkSeats' in parsed && parsed.newWorkSeats !== null && !isSeatKeyList(parsed.newWorkSeats)) delete parsed.newWorkSeats;
+      // newWorkSeats (F1/F2) is deliberately NOT dropped when invalid: new work reads it strictly (`newWorkSeats()`)
+      // and refuses an invalid value, and dropping it here would let the next unrelated settings write erase it and
+      // widen the pool to every seat. GET /settings serves what the file holds.
       // onboardingAutoCapture (crew#552): a boolean only; anything else reads as the shipped default.
       if ('onboardingAutoCapture' in parsed && typeof parsed.onboardingAutoCapture !== 'boolean') delete parsed.onboardingAutoCapture;
       // baseSkillRef / baseSkillPolicy (crew#554): the same shapes PUT /settings admits — a string

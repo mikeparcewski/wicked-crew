@@ -24,6 +24,24 @@ export function isSeatKeyList(v: unknown): v is string[] {
   return Array.isArray(v) && v.length <= 64 && v.every((k) => typeof k === 'string' && k.trim() !== '' && k.length <= 64);
 }
 
+/**
+ * Why the `newWorkSeats` setting can't be honored, so new work is REFUSED rather than drawn from every seat:
+ * `settings_unavailable` = the settings file can't be read or parsed (whether a pick is set can't be known);
+ * `setting_invalid` = it is set, to something that is not a list of seat keys. Not set at all is not a refusal.
+ */
+export class NewWorkSeatsRefusal extends Error {
+  constructor(
+    readonly code: 'settings_unavailable' | 'setting_invalid',
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+/** How to set the value again, for a refusal's message (the Agents toggle moves onto it in F1/F2 PR 3). */
+export const NEW_WORK_SEATS_FIX =
+  'set it again with PUT /api/v1/settings: newWorkSeats is a list of seat keys, or null for every seat that can work';
+
 export function jobSeatPool(eligible: readonly PoolSeat[], newWorkSeats: readonly string[] | null | undefined): JobSeatPool {
   if (newWorkSeats === null || newWorkSeats === undefined) return { eligible, pool: eligible };
   const picked = new Set(newWorkSeats);

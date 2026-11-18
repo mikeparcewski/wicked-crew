@@ -38,7 +38,7 @@ import { createHash } from 'node:crypto';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
-import { jobSeatPool, type JobSeatPool } from '../core/job-seats.js';
+import { NEW_WORK_SEATS_FIX, NewWorkSeatsRefusal, jobSeatPool, type JobSeatPool } from '../core/job-seats.js';
 import { z } from '../zod.js';
 
 import type {
@@ -650,7 +650,7 @@ export interface ChatProposalDeps {
    *  launch rule: no opt-in seat unless it is the only one left (`proposalRoster` in routes.ts, F43). */
   rosterEligible(): ReadonlyArray<{ key: string; name: string }>;
   /** (F1/F2) The `newWorkSeats` setting: the seats new work is drawn from (`core/job-seats.ts`); `null` or absent =
-   *  every eligible seat. */
+   *  every eligible seat. Throws (`NewWorkSeatsRefusal` with the reason) when it is set but can't be read or is invalid. */
   newWorkSeats?(): Promise<readonly string[] | null | undefined>;
   /** Every run, decorated as `GET /runs` serves it (`project_id`, `document_id`, `run_identity`, times). */
   runs(): Promise<SessionView[]>;
@@ -1111,8 +1111,8 @@ export class ChatProposals {
       // card says so instead of showing them as used (codex A5 r1).
       const sources = (await this.resolveSources(block.sources, { chatId, turnId, records, binding, turnHas, chat, words, personNamed: false })).map((src) =>
         src.status === 'ok' ? { ...src, status: 'struck' as const, reason: 'a change works from the document and your words; make a new document to use this source' } : src);
-      const helpers = this.helpers(chat, undefined, (await this.seatPool()).pool);
-      if (helpers === null) blocked.push(NEEDS_HELPER);
+      const { helpers, block: helperBlock } = await this.docHelpers(chat);
+      if (helperBlock !== null) blocked.push(helperBlock);
       const title = target?.title ?? (ref !== null ? humanDoc(ref.doc) : block.refine);
       return {
         pid, chatId, turnId, kind: 'refine', seat,
@@ -1175,8 +1175,8 @@ export class ChatProposals {
       demo = { url, audience: block.audience ?? null, show: block.show ?? null };
     }
     const sources = kind === 'create' ? await this.resolveSources(block.sources, { chatId, turnId, records, binding, turnHas, chat, words, personNamed: false }) : [];
-    const helpers = this.helpers(chat, undefined, (await this.seatPool()).pool);
-    if (helpers === null) blocked.push(NEEDS_HELPER);
+    const { helpers, block: helperBlock } = await this.docHelpers(chat);
+    if (helperBlock !== null) blocked.push(helperBlock);
     return {
       pid, chatId, turnId, kind, seat,
       what: {
@@ -1888,7 +1888,9 @@ export class ChatProposals {
     }
     if (edits.helpers !== undefined) {
       const chat = this.deps.chat(chatId) ?? { projectId: p.filedIn.projectId, repos: [], lead: null, seats: [], analysis: false };
-      const helpers = this.helpers(chat, edits.helpers, (await this.seatPool()).pool);
+      const { pool, refusal } = await this.seatPool();
+      if (refusal !== undefined) throw new EditRefusal(refusal.message);
+      const helpers = this.helpers(chat, edits.helpers, pool);
       if (helpers === null) throw new EditRefusal('pick two different helpers that can work now');
       // Two helpers lift the one block a person can lift.
       next = { ...next, helpers, blocked: next.blocked === NEEDS_HELPER ? null : next.blocked };
@@ -2329,15 +2331,26 @@ export class ChatProposals {
     return c === null ? null : { projectId: c.projectId, repos: c.repos, lead: c.lead, seats: c.seats };
   }
 
-  /** (F1/F2) The seats new work may name, and the pool it is drawn from (`core/job-seats.ts`). A setting that can't be
-   *  read never widens the pool: `unreadable`, with an empty pool (a job refuses; a document has no default helpers). */
-  private async seatPool(): Promise<JobSeatPool & { unreadable?: true }> {
+  /** (F1/F2) The seats new work may name, and the pool it is drawn from (`core/job-seats.ts`). A setting that is set
+   *  but can't be read, or is invalid, never widens the pool: `refusal`, with an empty pool. A job is refused with it;
+   *  a document is blocked with its words. Not set at all is every eligible seat. */
+  private async seatPool(): Promise<JobSeatPool & { refusal?: { code: string; message: string } }> {
     if (this.deps.newWorkSeats === undefined) return jobSeatPool(this.deps.rosterEligible(), null);
     try {
       return jobSeatPool(this.deps.rosterEligible(), await this.deps.newWorkSeats());
-    } catch {
-      return { eligible: this.deps.rosterEligible(), pool: [], unreadable: true };
+    } catch (err) {
+      const refusal = err instanceof NewWorkSeatsRefusal
+        ? { code: err.code, message: err.message }
+        : { code: 'settings_unavailable', message: `crew can't read which seats new work may use (newWorkSeats): ${err instanceof Error ? err.message : String(err)}; it won't start new work on every seat instead. ${NEW_WORK_SEATS_FIX[0]!.toUpperCase()}${NEW_WORK_SEATS_FIX.slice(1)}` };
+      return { eligible: this.deps.rosterEligible(), pool: [], refusal };
     }
+  }
+
+  /** A document's two default helpers from the pool, and the line that blocks it when there are none. */
+  private async docHelpers(chat: ProposalChat): Promise<{ helpers: ProposalHelpers | null; block: string | null }> {
+    const { pool, refusal } = await this.seatPool();
+    const helpers = this.helpers(chat, undefined, pool);
+    return { helpers, block: refusal !== undefined ? refusal.message : helpers === null ? NEEDS_HELPER : null };
   }
 
   private async jobContext(chatId: string, pid: string, turnId: string | null, seat: string, chat: JobChat, extra: Pick<JobContext, 'revises' | 'lineage' | 'notes'> & Partial<Pick<JobContext, 'answers' | 'request'>>): Promise<JobContext> {
@@ -2351,8 +2364,8 @@ export class ChatProposals {
     const projectLabel = chat.projectId === null ? 'Not in a project · this chat' : ((await this.deps.projectName(chat.projectId)) ?? chat.projectId);
     const qeOff = (await this.deps.qeOff?.().catch(() => false)) === true;
     const powerPresets = (await this.deps.powerPresets?.(chat.projectId).catch(() => null)) ?? null;
-    const { eligible: roster, pool, unreadable } = await this.seatPool();
-    if (unreadable === true) throw new JobRefusal('settings_unavailable', "crew can't read which seats new work uses (Settings); try again", 409);
+    const { eligible: roster, pool, refusal } = await this.seatPool();
+    if (refusal !== undefined) throw new JobRefusal(refusal.code, refusal.message, 409);
     return { chatId, pid, turnId, seat, chat, served, roster, pool, projectLabel, qeOff, powerPresets, ...extra };
   }
 

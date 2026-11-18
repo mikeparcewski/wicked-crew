@@ -6,13 +6,13 @@
  * PR 1 keeps today's seat count (`seatsNeeded`: the Plan it card needs 2, one builds and one checks); PR 2 replaces
  * it with the engine's coverage rule (core#1558).
  */
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import type { Actor, ArtifactProposal, ChatTranscriptRecord, ProposalRevisionEdits } from '../src/core/types.js';
-import { CoreAdapter } from '../src/core/adapter.js';
+import { CoreAdapter, readNewWorkSeats } from '../src/core/adapter.js';
 import { CATALOG_SEEDS } from '../src/workflow-catalog/catalog-data.js';
 import { buildWorkflowCatalogV2, servedState, type ServedState } from '../src/workflow-catalog/build-v2.js';
 import { ChatProposals, LaunchOnceRegistry, foldProposals, type ChatProposalDeps, type ProposalChat, type ProposalDispatch, type ProposalDispatcher } from '../src/api/chat-proposals.js';
@@ -251,12 +251,13 @@ describe('the seats new work uses: one pool for the card, its edits and its Star
     expectWords(p, ['claude', 'codex']);
   });
 
-  it('a setting that cannot be read never widens the pool: the job is refused, with the reason', async () => {
+  it('a setting read that fails in an unexpected way never widens the pool: the job is refused, with the reason', async () => {
     const r = rig('Claude+Codex+Pi', 'Pi off');
     r.deps.newWorkSeats = async () => { throw new Error('settings unreadable'); };
     const res = await r.pick();
     expect(res.code).toBe(409);
     expect(res.body).toMatchObject({ code: 'settings_unavailable' });
+    expect(String((res.body as { error?: unknown }).error ?? JSON.stringify(res.body))).toMatch(/newWorkSeats/);
   });
 
   it('a removal held behind a loss question says nothing was applied (the card published still has Pi)', async () => {
@@ -331,3 +332,108 @@ describe('jobSeatPool and the setting value', () => {
     }
   });
 });
+
+/**
+ * (codex merge check on #1596) Fail closed, through the PRODUCTION reader (`readNewWorkSeats`, the dep routes.ts
+ * wires): a pick that is set but can't be read, or is invalid, refuses new work with a reason that names the setting and
+ * the fix; it never widens to every seat. Not set at all keeps today's default (every seat that can work).
+ */
+describe('newWorkSeats read strictly: unset is the default, unreadable or invalid refuses (fail closed)', () => {
+  const armed = process.env['WICKED_CREW_SYSTEM_SETTINGS'];
+  let home: string;
+  let file: string;
+  let adapter: CoreAdapter;
+  beforeEach(() => {
+    home = mkdtempSync(join(dir, 'nws-'));
+    file = join(home, 'settings.json');
+    process.env['WICKED_CREW_SYSTEM_SETTINGS'] = file;
+    adapter = new CoreAdapter({ dbPath: join(home, 'core.db'), stub: true });
+  });
+  afterEach(() => {
+    adapter.close();
+    if (armed === undefined) delete process.env['WICKED_CREW_SYSTEM_SETTINGS'];
+    else process.env['WICKED_CREW_SYSTEM_SETTINGS'] = armed;
+  });
+  const prod = (create = false) => {
+    const r = rig('Claude+Codex+Pi', 'null', 'claude', create);
+    r.deps.newWorkSeats = readNewWorkSeats;
+    return r;
+  };
+  const errorOf = (res: { body: unknown }) => String((res.body as { error?: unknown }).error ?? '');
+
+  it.each([
+    ['no settings file', null],
+    ['the key absent', '{"graphNodeLimit": 150}'],
+    ['the key null', '{"newWorkSeats": null}'],
+  ])('not set (%s): every seat that can work, as today', async (_label, body) => {
+    if (body !== null) writeFileSync(file, body);
+    const r = prod();
+    expect((await r.pick()).code).toBe(201);
+    expect(r.open().seats!.keys).toEqual(['claude', 'codex', 'pi']);
+  });
+
+  it('set to a list of seat keys: the pick is honored', async () => {
+    writeFileSync(file, JSON.stringify({ newWorkSeats: ['claude', 'codex'] }));
+    const r = prod();
+    expect((await r.pick()).code).toBe(201);
+    expect(r.open().seats!.keys).toEqual(['claude', 'codex']);
+  });
+
+  it.each([
+    ['a string', '"claude"'],
+    ['a number list', '[1, 2]'],
+    ['a blank key', '[""]'],
+    ['an object', '{"claude": true}'],
+  ])('set but invalid (%s): the job is refused as setting_invalid, naming the setting and the fix', async (_label, value) => {
+    writeFileSync(file, `{"newWorkSeats": ${value}}`);
+    const r = prod();
+    const res = await r.pick();
+    expect(res.code).toBe(409);
+    expect(res.body).toMatchObject({ code: 'setting_invalid' });
+    expect(errorOf(res)).toMatch(/newWorkSeats/);
+    expect(errorOf(res)).toMatch(/PUT \/api\/v1\/settings/);
+    expect(r.launcher.launched).toEqual([]);
+  });
+
+  it.each([
+    ['not JSON', () => writeFileSync(file, '{"newWorkSeats": ["claude"')],
+    ['not a JSON object', () => writeFileSync(file, '["claude"]')],
+    ['a directory where the file should be', () => mkdirSync(file)],
+  ])('settings file unreadable (%s): the job is refused as settings_unavailable, never every seat', async (_label, arrange) => {
+    arrange();
+    // What made it widen: the lenient reader serves the defaults, where no pick reads as every seat.
+    expect((await adapter.getSettings()).newWorkSeats ?? null).toBeNull();
+    const r = prod();
+    const res = await r.pick();
+    expect(res.code).toBe(409);
+    expect(res.body).toMatchObject({ code: 'settings_unavailable' });
+    expect(errorOf(res)).toMatch(/newWorkSeats/);
+    expect(errorOf(res)).toMatch(/won't start new work on every seat/);
+  });
+
+  it('an invalid pick survives an unrelated settings write, so the write cannot quietly widen the pool', async () => {
+    writeFileSync(file, '{"newWorkSeats": "claude"}');
+    await adapter.updateSettings({ graphNodeLimit: 200 });
+    const res = await prod().pick();
+    expect(res.code).toBe(409);
+    expect(res.body).toMatchObject({ code: 'setting_invalid' });
+  });
+
+  it('a document with an invalid pick is blocked with the reason, and no default helpers are drawn', async () => {
+    const r = prod(true);
+    expect((await r.pick()).code).toBe(201);
+    writeFileSync(file, '{"newWorkSeats": [1]}');
+    const res = await r.swap({ card: 'document', option: 'presentation' } as ProposalRevisionEdits);
+    // The revision is refused with the reason; the card stays the job it was.
+    expect(res.code).toBe(409);
+    expect(res.body).toMatchObject({ code: 'setting_invalid' });
+    expect(r.open()).toMatchObject({ kind: 'job', helpers: null });
+    // A document drawn fresh (a make block) is blocked with the same words instead of "needs a second helper".
+    const doc = (r.svc as unknown as { docHelpers(c: ProposalChat): Promise<{ helpers: unknown; block: string | null }> })
+      .docHelpers({ projectId: null, repos: [], lead: 'claude', analysis: false, seats: ['claude', 'codex', 'pi'] });
+    const drawn = await doc;
+    expect(drawn.helpers).toBeNull();
+    expect(drawn.block).toMatch(/newWorkSeats/);
+  });
+});
+

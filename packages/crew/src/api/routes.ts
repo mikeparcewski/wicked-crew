@@ -23,7 +23,7 @@ import { promises as fsp } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { videoPalette } from '../appearance/video-palette.js';
-import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanGateNoteUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, settingsFilePath, wickedDir, type RunViewsSnapshot } from '../core/adapter.js';
+import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanGateNoteUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, readNewWorkSeats, settingsFilePath, wickedDir, type RunViewsSnapshot } from '../core/adapter.js';
 import { codeGraphDb, codeGraphErrorStatus, repoFolderMissing, repoFolderMissingBody } from '../core/repoPaths.js';
 import type {
   ConformanceRule,
@@ -5657,7 +5657,7 @@ export function registerRoutes(
     },
     rosterEligible: () => proposalRoster(rosterWithStanding()),
     // (F1/F2) Agents › "Use <seat> for new work": the pool every new chat job and document is drawn from.
-    newWorkSeats: async () => (await adapter.getSettings()).newWorkSeats ?? null,
+    newWorkSeats: readNewWorkSeats,
     runs: async () => (await adapter.sessionsDetail()).map((v) => decorateRun(v)),
     chatOfRun: (runId) => runTimingIndex.chatIdFor(runId),
     isAskPath: (runId) => runTimingIndex.isAskPath(runId),
