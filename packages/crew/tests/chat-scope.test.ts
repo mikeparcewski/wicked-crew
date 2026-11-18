@@ -15,6 +15,8 @@ import {
   CHAT_DECISIONS_DIRECTIVE,
   CHAT_GROUNDING_COMMAND,
   chatScopeStatement,
+  chatSearchLines,
+  CHAT_FAILED_SEARCH_LINE,
   chatScratchBase,
   prepareChatScratch,
   reapStaleChatNamespaces,
@@ -1062,6 +1064,28 @@ describe('crew#1569: the statement on the container seat floor', () => {
     expect(host).toContain('`/srv/repos/alpha`');
     expect(host).toContain('Do NOT read from any `wicked-worktrees/` subdirectory');
     expect(host).not.toContain('your working directory');
+  });
+
+  it('crew#1497: names each repository path to search, and says a failed search is not evidence', async () => {
+    const scope = await scopeOf({ chatId: 'k5', projectId: 'p1', repoRefs: [] });
+    const text = chatScopeStatement('k5', scope);
+    // One path per repository, never their parent folder (outside the read roots, so refused).
+    expect(text).toContain("e.g. `grep -rn '<pattern>' /srv/repos/alpha /srv/repos/beta`");
+    expect(text).not.toMatch(/grep -rn '<pattern>' \/srv\/repos[`/ ]*`/);
+    expect(text).toContain(CHAT_FAILED_SEARCH_LINE);
+    // Under the container floor the run repo is the working directory: searched as `.`.
+    const floor = chatScopeStatement('k5', scope, undefined, { containerFloor: true, runRepoId: 'r-alpha' });
+    expect(floor).toContain("e.g. `grep -rn '<pattern>' . /srv/repos/beta`");
+  });
+
+  it('crew#1497: the search example quotes odd paths and caps how many it spells', () => {
+    expect(chatSearchLines([])).toEqual([]);
+    expect(chatSearchLines(["/srv/my repo", "/srv/it's"]).join(' ')).toContain(`'/srv/my repo' '/srv/it'\\''s'`);
+    const many = chatSearchLines(['/a', '/b', '/c', '/d']).join(' ');
+    // SAYS-VS-DOES: the example runs as written; the rest are named in prose, never as a `…` operand grep would open.
+    expect(many).toContain("grep -rn '<pattern>' /a /b /c` (add the other repository paths listed above the same way)");
+    expect(many).not.toContain('…');
+    expect(many).not.toContain('/d');
   });
 
   it('on a project scope changes only the run repo line', async () => {

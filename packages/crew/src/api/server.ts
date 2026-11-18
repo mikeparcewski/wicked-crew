@@ -196,7 +196,7 @@ import {
 } from '../core/types.js';
 import { daemonSignalLog } from '../core/daemon-signal-log.js';
 import { latestDraftRender } from '../interactive/draft-skill.js';
-import { refreshProjectGraphsForRepo } from '../projects/auto-refresh.js';
+import { refreshProjectGraphsForRepo, sweepProjectGraphsForReaders } from '../projects/auto-refresh.js';
 import { RepoWatcher, repoWatchEnabledByEnv } from '../projects/repo-watch.js';
 import { registerRepoWatchRoutes } from '../projects/repo-watch-routes.js';
 
@@ -2527,7 +2527,7 @@ export async function createServer(
       return (
         out.lookupFailed !== true &&
         out.failed.length === 0 &&
-        out.refreshed.every((p) => p.failed.length === 0 && p.linkFailed === undefined)
+        out.refreshed.every((p) => p.failed.length === 0 && p.linkFailed === undefined && p.readersFailed === undefined)
       );
     },
     statePath: join(crewStateHome(), 'repo-watch.json'),
@@ -3173,6 +3173,9 @@ export async function createServer(
   // rows at boot. It also covers any gate that opened before the evaluator existed (the live
   // subscription above reads it late-bound); every later gate arrives as a live frame.
   void standingOrderEvaluator.sweep().catch((err) => app.log.warn(`[standing-orders] boot sweep failed: ${String(err)}`));
+  // crew#1497: seats read project graphs read-only; an upgrade can leave a graph its estate refuses (older schema, or
+  // WAL). Each is migrated and left in DELETE mode BEFORE a run is resumed or a chat can open (codex r2 #3).
+  await sweepProjectGraphsForReaders({ log: (m) => app.log.info(m) });
   // crew#471: a campaign the previous daemon left `running` is crash-resumed by the engine (its
   // node runs froze with that process) — asked once, at boot, never for a paused one.
   void resumeRunningCampaigns(adapter, (m) => app.log.warn(m));

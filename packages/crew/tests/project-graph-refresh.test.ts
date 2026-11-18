@@ -47,7 +47,13 @@ import { ProjectSettingsStore } from '../src/projects/settings.js';
 import { repoLabel } from '../src/projects/graph-paths.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { Project, ProjectGraphRefreshState, ProjectMember, RepoEntry } from '../src/core/types.js';
-import { armDeadline, resetProjectGraphRefreshStates } from '../src/projects/graph.js';
+import { armDeadline, projectGraphRefreshState, resetProjectGraphRefreshStates, resolveProjectGraphBinding } from '../src/projects/graph.js';
+
+// Every refresh here spawns the stub estate (a node process) several times per member. On a loaded host or CI runner
+// a three-refresh case passed the 30 s default, and its refresh, still running, was joined by the NEXT test's first
+// refresh, which then read "skipped-head-unchanged" (coord, crew#1597). So this file's tests get room, and afterEach
+// waits for a refresh a test left running before the next test starts.
+vi.setConfig({ testTimeout: 120_000, hookTimeout: 120_000 });
 import { removeScratch } from './setup/scratch.js';
 
 const POSIX = process.platform !== 'win32';
@@ -166,6 +172,10 @@ if (cmd === 'index') {
 }
 
 if (cmd === 'stats') {
+  if (process.env.STUB_JOURNAL_FAIL && argv.includes('--journal')) {
+    process.stderr.write('could not leave the graph in DELETE journal mode: database is locked\\n');
+    process.exit(1);
+  }
   const s = state();
   const labels = Object.keys(s.repos).filter((l) => l !== '__unlabelled__');
   process.stdout.write('nodes=1 edges=0 files=1\\n');
@@ -219,6 +229,7 @@ interface Fixture {
   budgetMs: number;
   /** The trees `indexBudget` was asked about, in order. */
   budgetAsked: string[];
+  adapter?: CoreAdapter;
 }
 let fx: Fixture;
 
@@ -308,6 +319,7 @@ interface Hit {
 interface StatusBody {
   state: string;
   detail: string;
+  dbPath: string | null;
   missingRepos: string[];
   staleRepos: string[];
   repos: Array<{ repoId: string; label: string; indexed: boolean; reason?: string }>;
@@ -378,6 +390,7 @@ beforeEach(() => {
   delete process.env['STUB_DROPS_REPO'];
   delete process.env['STUB_INDEX_DELAY_MS'];
   delete process.env['STUB_INDEX_STDERR'];
+  delete process.env['STUB_JOURNAL_FAIL'];
   delete process.env['STUB_LINK'];
   delete process.env['STUB_LINK_FAIL'];
   delete process.env['STUB_CROSS_FROM'];
@@ -408,6 +421,7 @@ beforeEach(() => {
       return { budgetMs: fx.budgetMs, trackedFiles: 3, counted: 'git' as const };
     }),
   } as unknown as CoreAdapter;
+  fx.adapter = adapter;
 
   fx.app = Fastify({ logger: false });
   registerProjectRoutes(fx.app, adapter, {
@@ -419,6 +433,9 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  for (const start = Date.now(); projectGraphRefreshState(PROJECT_ID)?.state === 'refreshing' && Date.now() - start < 90_000; ) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
   await fx.app?.close();
   delete process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'];
   delete process.env['WICKED_ESTATE_EXE'];
@@ -426,6 +443,7 @@ afterEach(async () => {
   delete process.env['STUB_DROPS_REPO'];
   delete process.env['STUB_INDEX_DELAY_MS'];
   delete process.env['STUB_INDEX_STDERR'];
+  delete process.env['STUB_JOURNAL_FAIL'];
   delete process.env['STUB_LINK'];
   delete process.env['STUB_LINK_FAIL'];
   delete process.env['STUB_CROSS_FROM'];
@@ -1075,6 +1093,27 @@ describe.skipIf(!POSIX)('per-repo refresh outcomes and index stderr', () => {
     expect(row?.stderrTail).toContain(NOTICE);
     // And through the standard logger, where an operator tailing the daemon will actually see it.
     expect(fx.logs.some((l) => l.includes(NOTICE) && l.includes('alpha'))).toBe(true);
+  });
+
+  it('crew#1497: a graph that could not be prepared for read-only seats is a failed refresh, and is never bound', async () => {
+    register('alpha', makeRepo('alpha'));
+    attach('alpha');
+    process.env['STUB_JOURNAL_FAIL'] = '1';
+    const res = await refresh();
+    expect(res.code).toBe(200);
+    expect(res.body.status.refresh?.lastFailure?.error).toMatch(/not ready for read-only seats: .*database is locked/);
+    const st = await status();
+    expect(st.dbPath).toBeNull();
+    expect(st.detail).toMatch(/could not be prepared for its chats and runs/);
+    // A chat of this project is told the graph is unavailable, and why; it is not bound to it.
+    const chat = await resolveProjectGraphBinding(fx.adapter!, PROJECT_ID, undefined, process.env, { subject: 'chat' });
+    expect(chat.binding).toBeNull();
+    expect(chat.reason).toMatch(/could not be prepared for its chats and runs .*database is locked/);
+    // The next refresh that prepares it clears both.
+    delete process.env['STUB_JOURNAL_FAIL'];
+    const ok = await refresh();
+    expect(ok.body.status.refresh?.lastFailure).toBeNull();
+    expect((await status()).dbPath).not.toBeNull();
   });
 
   it('emits NO stderr tail when the binary said nothing — absence means silence, not truncation', async () => {

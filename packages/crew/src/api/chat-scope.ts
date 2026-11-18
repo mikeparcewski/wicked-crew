@@ -54,7 +54,7 @@ import { execCapped } from '../core/exec.js';
 import { codeGraphDb, REPO_FOLDER_MISSING, repoFolderMissing } from '../core/repoPaths.js';
 import type { ChatScope, ChatScopeRepo, ChatScopeRequestKind, RepoEntry } from '../core/types.js';
 import { freshnessClause, type CheckoutFreshness, type FreshenCheckout } from './chat-freshness.js';
-import { estateExe, parseEstateTotals, resolveProjectGraphBinding, type ProjectGraphBindingDecision } from '../projects/graph.js';
+import { estateExe, parseEstateTotals, readProjectGraph, resolveProjectGraphBinding, type ProjectGraphBindingDecision } from '../projects/graph.js';
 import type { ChatRefusalSource } from './seat-standing.js';
 import { withoutCredentials } from './proposal-onboard.js';
 
@@ -262,7 +262,8 @@ export function chatScopeDeps(adapter: CoreAdapter): ChatScopeDeps {
  */
 export async function estateEntityCount(dbPath: string): Promise<number> {
   try {
-    const { stdout } = await execCapped(estateExe(process.env), ['stats', '--db', dbPath], { timeout: 15_000 });
+    // A project graph is put back in DELETE mode after the CLI's writer open (crew#1497, codex r2 #2).
+    const { stdout } = await readProjectGraph(dbPath, () => execCapped(estateExe(process.env), ['stats', '--db', dbPath], { timeout: 15_000 }));
     return parseEstateTotals(stdout)?.nodes ?? 0;
   } catch {
     return 0;
@@ -676,6 +677,33 @@ async function ownGraph(
  * MCP's `SearchEntity`, whose argument is `name` (a `{"query"}` returned 0 matches in P6). Exported
  * so the statement snapshot test and the byte-budget test pin the exact spelling.
  */
+/** crew#1497: what a failed or empty search means in an answer (every scope with an answer format). */
+export const CHAT_FAILED_SEARCH_LINE =
+  'A search that was refused, failed or found nothing is not evidence: say so, and never state from it where something lives or that it does not exist.';
+
+/** At most this many repository paths are spelled in the search example; the rest are named by the list above it. */
+export const CHAT_SEARCH_EXAMPLE_PATHS = 3;
+
+/** A path as one shell word: bare when it is plain, else single-quoted (a quote inside is closed, escaped and reopened). */
+function shellWord(path: string): string {
+  return /^[A-Za-z0-9_./:@%+=,-]+$/u.test(path) ? path : `'${path.replace(/'/gu, `'\\''`)}'`;
+}
+
+/**
+ * crew#1497: how to search the scope's repositories — by each one's own path, never their parent folder, which is
+ * not a read root (the hook refuses a shell read outside the roots, core#951). Empty when nothing is in scope.
+ */
+export function chatSearchLines(paths: readonly string[]): string[] {
+  if (paths.length === 0) return [];
+  const shown = paths.slice(0, CHAT_SEARCH_EXAMPLE_PATHS).map(shellWord).join(' ');
+  // The example is a command a seat may run as written, so it never carries a placeholder for the rest.
+  const more = paths.length > CHAT_SEARCH_EXAMPLE_PATHS ? ' (add the other repository paths listed above the same way)' : '';
+  return [
+    `To search text, name each repository's own path, e.g. \`grep -rn '<pattern>' ${shown}\`${more}; only`,
+    'these paths are readable, so a search from the folder above them is refused.',
+  ];
+}
+
 export const CHAT_GROUNDING_COMMAND =
   'wicked-garden run scripts/_estate_client.py --readonly call \'{"tool":"SearchEntity","arguments":{"name":"<symbol>"}}\'';
 
@@ -1272,6 +1300,9 @@ export function chatScopeStatement(
           'directory is allowed.',
         ]
         : ['Explore and answer questions about these repositories by reading them at the paths above.']),
+      // crew#1497: a search from the folder ABOVE the repositories is outside the read roots, so the hook refuses
+      // it (a seat read that refusal as "not there"). Hand the form that works: one path per repository.
+      ...chatSearchLines(scope.repos.map((r) => (inWorkingDir(r.id) ? '.' : r.rootPath))),
       'Cite files relative to their repository root, prefixed with the repository name',
       '(for example `alpha/src/foo.ts` for a file at `/srv/repos/alpha/src/foo.ts`).',
       ...(scope.repos.some((r) => inWorkingDir(r.id))
@@ -1344,6 +1375,8 @@ export function chatScopeStatement(
     'or "Relevant Files" sections), no tool monologue, no compaction notices. Cite files relative',
     'to their repository root (e.g. `alpha/src/foo.ts`, not the host path). If a claim could not',
     'be grounded, say so in one line rather than asserting it.',
+    // crew#1497: the four-planes answer said a document "lives outside any git repo" after its only search failed.
+    CHAT_FAILED_SEARCH_LINE,
     '',
   );
   // crew#855 (DES-ASK-TEAM-CHAT-001 §4.7): a message that asks for WORK is never attempted here —
