@@ -42,6 +42,7 @@ case "$1 $2" in
     if [ -n "$tok" ]; then case "$tok" in valid-*|keyring-*) exit 0;; *) echo "X Failed to log in to github.com using token" >&2; exit 1;; esac; fi
     [ -n "\${FAKE_STORED:-}" ] && exit 0; echo "You are not logged into any GitHub hosts" >&2; exit 1;;
   "api user")
+    [ -n "\${GH_DEBUG:-}" ] && echo "* Request to https://api.github.com/user" >&2
     [ -n "\${FAKE_OFFLINE:-}" ] && { echo "error connecting to api.github.com" >&2; exit 1; }
     if [ -n "$tok" ]; then case "$tok" in valid-*) echo "\${tok#valid-}"; exit 0;; keyring-*) echo "\${tok#keyring-}"; exit 0;; *) echo "gh: Bad credentials (HTTP 401)" >&2; exit 1;; esac; fi
     [ -n "\${FAKE_STORED:-}" ] && { echo "$FAKE_STORED"; exit 0; }; echo "gh: Requires authentication (HTTP 401)" >&2; exit 1;;
@@ -98,6 +99,17 @@ describe('deliveryReadiness (crew#1527): the deliver script\'s own credential li
     expect(mis.ready).toBe(false);
     expect(mis.reason).toContain('authenticates as ada, not the push identity grace');
     expect(await answer({ GH_TOKEN: 'valid-grace' }, 'grace')).toMatchObject({ ready: true, pushAs: 'grace' });
+  });
+
+  it('codex r3 W12: gh diagnostics on stderr (GH_DEBUG) are not the login: the identity\'s own token stays ready', async () => {
+    expect(await probe({ GH_TOKEN: 'valid-grace', GH_DEBUG: 'api' }, 'grace')).toEqual({ outcome: 'ok', pin: 'exported', login: 'grace' });
+    expect(await probe({ GH_TOKEN: 'expired-3', GH_DEBUG: 'api' }, 'grace')).toEqual({ outcome: 'refused', pin: 'exported' });
+  });
+
+  it('an exported GITHUB_TOKEN gh uses (unpinned) is reported as the environment token, not gh\'s sign-in', async () => {
+    const a = await answer({ GITHUB_TOKEN: 'valid-ada' });
+    expect(a).toMatchObject({ ready: true, github: { source: 'gh_token' } });
+    expect(a.github.message).toContain('GITHUB_TOKEN');
   });
 
   it('gh not installed is not ready, even with an exported GH_TOKEN (gh opens the pull request)', async () => {

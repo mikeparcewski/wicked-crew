@@ -100,7 +100,6 @@ export function parseGitIdent(line: string): GitIdent | null {
 
 /** An identity a seat's commit can carry (wicked-core `usable_git_ident`): a non-blank name, no control character. */
 export function usableGitIdent(i: GitIdent | null): i is GitIdent {
-  // eslint-disable-next-line no-control-regex
   const ctl = /[\u0000-\u001f\u007f-\u009f]/u;
   return i !== null && i.name.trim() !== '' && !ctl.test(i.name) && !ctl.test(i.email);
 }

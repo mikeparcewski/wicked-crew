@@ -68,11 +68,13 @@ const LOCAL_CHOICE =
   'or deliver locally, with no pull request (studio Settings: turn off "Open a PR when a build run finishes"; the daemon setting deliverDefault: none)';
 const AUTHOR_FIX = 'set the git author: git config --global user.name "Your Name" and git config --global user.email you@example.com';
 
-function githubOf(c: GithubCredentialProbe): DeliverCredentials {
+function githubOf(c: GithubCredentialProbe, env: NodeJS.ProcessEnv): DeliverCredentials {
   if (c === null) return { provider: 'github', status: 'unknown', source: null, missing: [], message: 'GitHub credentials: could not be checked.' };
   if (c.outcome === 'ok') {
-    return c.pin === 'exported'
-      ? { provider: 'github', status: 'configured', source: 'gh_token', missing: [], message: 'GitHub credentials: GH_TOKEN in the daemon environment.' }
+    // Unpinned, gh itself prefers an exported GITHUB_TOKEN over its stored sign-in.
+    const envVar = c.pin === 'exported' ? 'GH_TOKEN' : c.pin === 'gh' && (env['GITHUB_TOKEN'] ?? '').trim() !== '' ? 'GITHUB_TOKEN' : null;
+    return envVar !== null
+      ? { provider: 'github', status: 'configured', source: 'gh_token', missing: [], message: `GitHub credentials: ${envVar} in the daemon environment.` }
       : { provider: 'github', status: 'configured', source: 'gh_login', missing: [], message: "GitHub credentials: gh's sign-in." };
   }
   return { provider: 'github', status: 'missing', source: null, missing: ['gh auth login', 'GH_TOKEN'], message: 'GitHub credentials: delivery would refuse them.' };
@@ -117,7 +119,7 @@ export function deliveryReadiness(input: DeliveryReadinessInput): DeliveryReadin
     }
   }
 
-  const base = { deliverDefault, github: githubOf(c), pushAs: account, gitAuthor } as const;
+  const base = { deliverDefault, github: githubOf(c, input.env), pushAs: account, gitAuthor } as const;
   if (blockers.length > 0) {
     const notChecked = unknowns.length > 0 ? ` Not checked: ${unknowns.join('; ')}.` : '';
     return { ...base, ready: false, reason: `A job that opens a pull request would stop at its deliver step: ${blockers.join('; ')}.${notChecked}`, fix: `To open pull requests, ${fixes.join(', and ')}; ${LOCAL_CHOICE}.` };
@@ -161,8 +163,10 @@ export function credentialProbeScript(identity: string): string {
     GH_CALL_LINE,
     ...GITHUB_CREDENTIAL_LINES,
     '[ -n "$GHPIN" ] || GHPIN=gh',
-    'OUT=$(_gh api user -q .login 2>&1); RC=$?',
-    `if [ "$RC" -ne 0 ]; then case "$OUT" in *"HTTP 401"*|*"Bad credentials"*) ${say('refused $GHPIN')};; *) ${say('unreachable')};; esac; exit 0; fi`,
+    // The login is gh's stdout alone, as the script reads it (`2>/dev/null`): gh's diagnostics (GH_DEBUG) go to stderr.
+    // Only a failed call is asked again for its words, to tell a refused credential from GitHub not answering.
+    'OUT=$(_gh api user -q .login 2>/dev/null); RC=$?',
+    `if [ "$RC" -ne 0 ]; then ERR=$(_gh api user -q .login 2>&1 >/dev/null); case "$ERR" in *"HTTP 401"*|*"Bad credentials"*) ${say('refused $GHPIN')};; *) ${say('unreachable')};; esac; exit 0; fi`,
     `if [ "$GHPIN" = exported ] && [ -n "\${GH_ACCOUNT:-}" ] && [ "$OUT" != "$GH_ACCOUNT" ]; then ${say('mismatch $OUT')}; exit 0; fi`,
     say('ok $GHPIN $OUT'),
   ].join('\n');
