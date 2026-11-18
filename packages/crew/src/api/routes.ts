@@ -107,6 +107,7 @@ import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 import { callEstateTool, EstateMcpError, ESTATE_INSTALL_HINT, memoryStoreInfo } from '../core/estate-mcp-client.js';
 import { NO_LEARNINGS_WORKFLOWS, type RunLearningsService } from '../learnings/service.js';
 import { APPROVED_MEMORY_PREFIX } from '../learnings/recall.js';
+import { REPLACES_KEY, refuseStaleReplacement, replacesOf } from '../learnings/replacement-lineage.js';
 import { matchRulesForJob, stripRulesBrief, withRulesBrief } from '../decisions/rules-brief.js';
 import { SeatHealthTracker } from './seat-health.js';
 import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
@@ -10312,6 +10313,14 @@ export function registerRoutes(
     } catch (err) {
       return estateUpstreamError(reply, err);
     }
+    // crew#1546: an edited learning's replacement whose learning is gone is stale: refused and rejected, never approved,
+    // so no crash window can bring retired words back (accept-with-edit checks the same in `approveEdited`).
+    try {
+      const stale = row?.kind_type === 'memory' ? await refuseStaleReplacement(estateTool, id, row.payload) : null;
+      if (stale !== null) return reply.code(409).send({ error: stale, code: 'stale_replacement' });
+    } catch (err) {
+      return reply.code(502).send({ error: `checking whether proposal ${id} is a stale replacement failed (${message(err)}); nothing was approved` });
+    }
     // DC-S4a: a proposal THIS ledger filed for a decision lands through `remember()` — the one
     // landing path, with the human check inside it (§4.5). A payload naming an id the ledger does
     // not know is an ordinary policy proposal (no ORIGIN claim) and takes the path below.
@@ -10748,7 +10757,7 @@ export function registerRoutes(
       // proposal left pending could be approved later and bring retired words back beside the
       // current ones. So a success leaves it approved (a re-approve is idempotent in estate: the same
       // `proposal:<id>` memory), and every failure rejects it, or says it may remain.
-      type PendingMemory = { id: string; content: string; reach: string | null; facets: Record<string, unknown> };
+      type PendingMemory = { id: string; content: string; reach: string | null; facets: Record<string, unknown>; replaces: string | null };
       const pendingMemoryProposals = async (): Promise<PendingMemory[]> => {
         const raw = await estateTool('proposal.list', { kind_type: 'memory', state: 'pending' });
         const items = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)['proposals'] : undefined;
@@ -10758,7 +10767,7 @@ export function registerRoutes(
           const payload = typeof r['payload'] === 'object' && r['payload'] !== null ? (r['payload'] as Record<string, unknown>) : {};
           const facets = typeof r['facets'] === 'object' && r['facets'] !== null ? (r['facets'] as Record<string, unknown>) : {};
           return typeof r['id'] === 'string'
-            ? [{ id: r['id'], content: typeof payload['content'] === 'string' ? payload['content'] : '', reach: typeof payload['reach'] === 'string' ? payload['reach'] : null, facets }]
+            ? [{ id: r['id'], content: typeof payload['content'] === 'string' ? payload['content'] : '', reach: typeof payload['reach'] === 'string' ? payload['reach'] : null, facets, replaces: replacesOf(payload) }]
             : [];
         });
       };
@@ -10778,7 +10787,8 @@ export function registerRoutes(
         if (reach === null) {
           return { status: 409, error: `${old.id} is an approved learning at scope ${JSON.stringify(old.scope)}, which approval cannot place again; nothing changed` };
         }
-        const payload: Record<string, unknown> = { content, reach };
+        // The replacement names what it replaces, so approval can refuse it once that memory is gone.
+        const payload: Record<string, unknown> = { content, reach, [REPLACES_KEY]: old.id };
         if (old.tier !== '') payload['tier'] = old.tier;
         // What was already queued, so a submit whose answer is lost can find the one it filed.
         let queuedBefore: Set<string>;
@@ -10802,6 +10812,17 @@ export function registerRoutes(
             return { status: 409, error: `${old.id}'s own proposal ${sourcePid} is still pending and could not be settled; approve or reject it on the approve page first. Nothing changed` };
           }
         }
+        // Superseded replacements are settled too (coord merge check): one of this memory left pending by an edit that
+        // never finished, or of a memory that is already gone, is rejected before the new one is filed.
+        let superseded: string[];
+        try {
+          superseded = (await pendingMemoryProposals()).filter((q) => q.replaces !== null && (q.replaces === old.id || !beforeIds.has(q.replaces))).map((q) => q.id);
+        } catch (err) {
+          return { status: 502, error: `reading the approve queue failed (${message(err)}); nothing changed` };
+        }
+        if (superseded.length > 0 && !(await withdraw(superseded))) {
+          return { status: 502, error: `an earlier replacement of ${old.id} (${superseded.join(', ')}) is still pending and could not be rejected; reject it on the approve page first. Nothing changed` };
+        }
         let pid: string | null = null;
         let submitErr: unknown = null;
         try {
@@ -10817,7 +10838,7 @@ export function registerRoutes(
           // Ours = new since the snapshot, with these words, this reach and these facets (codex r2: words alone would
           // reject another caller's filing for another repository).
           const ours = (q: PendingMemory): boolean =>
-            !queuedBefore.has(q.id) && q.content === content && (q.reach === null || q.reach === reach) &&
+            !queuedBefore.has(q.id) && q.content === content && (q.reach === null || q.reach === reach) && q.replaces === old.id &&
             Object.entries(old.facets).every(([k, v]) => q.facets[k] === v) && Object.keys(q.facets).every((k) => k in old.facets);
           let strays: string[];
           try {

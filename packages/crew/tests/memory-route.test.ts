@@ -585,10 +585,13 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
         rivalFiles?: boolean;
         /** During a lost submit: an ordinary approval promotes the filing before crew re-reads the queue. */
         approvedMeanwhile?: boolean;
+        /** A replacement of p0 an edit filed before the daemon died, never approved (coord merge check on #1613). */
+        orphan?: boolean;
       } = {},
     ) {
       const s = new Map(initial.map((m) => [m.memory_id, m]));
       const proposals = new Map<string, { payload: Record<string, unknown>; facets: Record<string, string>; state: string }>();
+      if (opts.orphan === true) proposals.set('o1', { payload: { content: 'orphan words', reach: 'project', tier: 'semantic', replaces: 'proposal:p0' }, facets: { repo: 'acme-core' }, state: 'pending' });
       if (opts.source !== undefined) proposals.set('p0', { payload: { content: 'old approved words', reach: 'project', tier: 'semantic' }, facets: { repo: 'acme-core' }, state: 'pending' });
       const approvedOnce = new Set<string>();
       let n = 0;
@@ -759,6 +762,46 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
       expect(error).not.toMatch(/nothing changed/);
       expect(error).toMatch(/an approved copy of the new words exists beside proposal:p0: proposal:n1/);
       expect([...s.keys()].sort()).toEqual(['proposal:n1', 'proposal:p0']);
+    });
+
+    it('coord merge check: an edit files its replacement naming the memory it replaces', async () => {
+      const { proposals } = queue([APPROVED]);
+      expect((await edit({ memory_id: 'proposal:p0', content: 'new approved words' })).statusCode).toBe(200);
+      expect(proposals.get('n1')!.payload['replaces']).toBe('proposal:p0');
+    });
+
+    it('coord merge check: a crash-left replacement, two edits, then its approve: refused, rejected, only the current words remain', async () => {
+      const { s, proposals } = queue([APPROVED], { orphan: true });
+      expect((await edit({ memory_id: 'proposal:p0', content: 'second words' })).statusCode).toBe(200);
+      // The edit of p0 settled p0's earlier replacement: rejected as superseded.
+      expect(proposals.get('o1')!.state).toBe('rejected');
+      expect((await edit({ memory_id: 'proposal:n1', content: 'current words' })).statusCode).toBe(200);
+      const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/o1/approve' });
+      expect(res.statusCode).not.toBe(200);
+      expect([...s.values()].map((m) => m.content)).toEqual(['current words']);
+    });
+
+    it('coord merge check: the approve side alone refuses a replacement whose memory is gone, and rejects it as stale (409)', async () => {
+      const { s, proposals } = queue([], { orphan: true });
+      const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/o1/approve' });
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({ code: 'stale_replacement' });
+      expect((res.json() as { error: string }).error).toMatch(/replaces the learning proposal:p0, which has since been edited or retired.*rejected as stale/);
+      expect(proposals.get('o1')!.state).toBe('rejected');
+      expect(s.size).toBe(0);
+      // Accept-with-edit takes the same check.
+      proposals.get('o1')!.state = 'pending';
+      const edited = await app.inject({ method: 'POST', url: '/api/v1/proposals/o1/approve', payload: { content: 'edited orphan words' } });
+      expect(edited.statusCode).toBe(409);
+      expect(proposals.get('o1')!.state).toBe('rejected');
+      expect(s.size).toBe(0);
+    });
+
+    it('coord merge check: a replacement whose memory is still there approves as usual', async () => {
+      const { s } = queue([APPROVED], { orphan: true });
+      const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/o1/approve' });
+      expect(res.statusCode).toBe(200);
+      expect(s.has('proposal:o1')).toBe(true);
     });
 
     it('an approve queue that cannot be read refuses before anything is filed', async () => {
