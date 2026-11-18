@@ -172,3 +172,46 @@ export function deliverExclusionReason(
   if (sizeBytes !== null && sizeBytes > OVERSIZE_BYTES) return 'oversize-1mib';
   return null;
 }
+
+/**
+ * WHAT THE PUSH REMOVES FROM COMMITTED WORK (wicked-core#1573) — one narrow class, never the ladder above.
+ *
+ * A Claude Code seat committed its own background-task output,
+ * `tmp/claude-<uid>/<a slug of the worktree's absolute path>/<session>/tasks/<id>.output`, and a later
+ * commit deleted it. The ladder above runs over UNTRACKED files only, and the deliver script pushes
+ * the run's own commits, so the slug (a home-derived name) would have sat in the public PR's history.
+ *
+ * The crew#434 ladder is the wrong rule for committed work: a run that deliberately commits
+ * `tmp/parser.rs` or `src/credentials.ts` must ship them (secrets are GitGuardian's and the gate's).
+ * So the deliver script's history scrub (block c3b) removes, from every commit it pushes, only a path
+ * this predicate names:
+ *  - `seat-temp`: under a Claude Code per-uid temp directory (a `claude-<digits>` directory segment);
+ *  - `home-derived`: a segment that is a slug of an absolute host path (`-Users-…`, `-home-…`,
+ *    `-root-…`, `-private-…`, `-var-…`, `-tmp-…`, `C--Users-…`), or one that starts with the slug of
+ *    THIS host's home, or this host's home path mirrored as directories (`…/home/alice/…`).
+ * It is name-only (no content, no size), and a path the base already holds as a file, symlink or
+ * submodule at exactly that spelling is never removed. The script's `_seatscratch` is generated
+ * from the same two expressions, and `worktreeDiff` (`api/run-files.ts`) leaves the same committed
+ * paths out of the aggregate diff, so for committed files the gate's count is the push's (up to that
+ * diff's exclude-pathspec byte cap).
+ *
+ * `home` is the home directory of the process that runs the push (the script reads `$HOME`).
+ */
+export const SEAT_TEMP_DIR_ERE = '(^|/)claude-[0-9]+/';
+/** A path segment that is a slug of an absolute host path (POSIX ERE, shared with the deliver script). */
+export const HOME_SLUG_SEGMENT_ERE = '(^|/)(-(Users|home|root|private|var|tmp)-[^/]|[A-Za-z]--Users-[^/])';
+const SEAT_TEMP_DIR = new RegExp(SEAT_TEMP_DIR_ERE);
+const HOME_SLUG_SEGMENT = new RegExp(HOME_SLUG_SEGMENT_ERE);
+
+/** Why the deliver push removes this COMMITTED path from the run's commits, or `null` when it ships. */
+export function committedScrubReason(relPath: string, home: string): 'seat-temp' | 'home-derived' | null {
+  if (SEAT_TEMP_DIR.test(relPath)) return 'seat-temp';
+  if (HOME_SLUG_SEGMENT.test(relPath)) return 'home-derived';
+  // This host's own home, when it has at least two segments (a bare `/root` would match `src/root/`).
+  const h = home.replace(/\\/g, '/').replace(/\/+$/, '');
+  if (/^\/[^/]+\/./.test(h)) {
+    const p = `/${relPath}`;
+    if (p.includes(`/${h.replaceAll('/', '-')}`) || p.includes(`${h}/`)) return 'home-derived';
+  }
+  return null;
+}
