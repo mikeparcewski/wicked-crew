@@ -43,11 +43,12 @@ case "$1 $2" in
   "auth status")
     [ -n "\${FAKE_STATUS_ERR:-}" ] && { echo "$FAKE_STATUS_ERR" >&2; exit 1; }
     [ -n "\${FAKE_OFFLINE:-}" ] && { echo "X Timeout trying to log in to github.com account ada (keyring)" >&2; exit 1; }
+    [ -n "\${FAKE_PROXY_DOWN:-}" ] && { printf '%s\\n' "X Failed to log in to github.com using token (GITHUB_TOKEN)" "  - The token in GITHUB_TOKEN is invalid." >&2; exit 1; }
     if [ -n "$tok" ]; then case "$tok" in valid-*|keyring-*) exit 0;; *) printf '%s\\n' "X Failed to log in to github.com using token (GITHUB_TOKEN)" "  - The token in GITHUB_TOKEN is invalid." >&2; exit 1;; esac; fi
     [ -n "\${FAKE_STORED:-}" ] && exit 0; echo "You are not logged into any GitHub hosts. To log in, run: gh auth login" >&2; exit 1;;
   "api user")
     [ -n "\${GH_DEBUG:-}" ] && echo "* Request to https://api.github.com/user" >&2
-    [ -n "\${FAKE_OFFLINE:-}" ] && { echo "error connecting to api.github.com" >&2; exit 1; }
+    [ -n "\${FAKE_OFFLINE:-}\${FAKE_PROXY_DOWN:-}" ] && { echo "error connecting to api.github.com" >&2; exit 1; }
     if [ -n "$tok" ]; then case "$tok" in valid-*) echo "\${tok#valid-}"; exit 0;; keyring-*) echo "\${tok#keyring-}"; exit 0;; *) echo "gh: Bad credentials (HTTP 401)" >&2; exit 1;; esac; fi
     [ -n "\${FAKE_STORED:-}" ] && { echo "$FAKE_STORED"; exit 0; }; echo "gh: Requires authentication (HTTP 401)" >&2; exit 1;;
 esac
@@ -147,6 +148,9 @@ describe('deliveryReadiness (crew#1527): the deliver script\'s own credential li
     expect(await probe({ FAKE_STORED: 'ada', FAKE_OFFLINE: '1' })).toBeNull();
     expect((await answer({ FAKE_STORED: 'ada', FAKE_OFFLINE: '1' })).ready).toBeNull();
     expect(await probe({ FAKE_STORED: 'ada', FAKE_STATUS_ERR: 'dial tcp: lookup api.github.com: no such host' })).toBeNull();
+    // codex r4 W12: gh auth status prints "the token … is invalid" for a connection error too; GitHub not answering
+    // the token is still could-not-check.
+    expect(await probe({ GITHUB_TOKEN: 'valid-ada', FAKE_PROXY_DOWN: '1' })).toBeNull();
     // Only gh's explicit answers are "not signed in": no sign-in at all, no token for the account, an invalid token.
     expect(await probe({})).toMatchObject({ outcome: 'missing' });
     expect(await probe({}, 'grace')).toMatchObject({ outcome: 'missing' });

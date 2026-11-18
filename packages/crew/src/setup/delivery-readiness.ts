@@ -167,11 +167,15 @@ export function credentialProbeScript(identity: string): string {
   const say = (words: string) => `printf '%s\\n' "${PROBE} ${words}"`;
   return [
     // A refusal from the credential lines is "not signed in" only on gh's own explicit answer (no sign-in, no token for
-    // the account, an invalid token); any other failure (the network, a timeout, words it does not recognise) is
+    // the account, GitHub refusing the token with HTTP 401); any other failure (the network, a timeout, words it does not recognise) is
     // "could not check". The failed command is asked again for its words.
     '_credmissing() {',
-    '  if [ -z "${GH_TOKEN:-}" ] && [ -n "${GH_ACCOUNT:-}" ]; then ERR=$(gh auth token --hostname github.com --user "$GH_ACCOUNT" 2>&1 >/dev/null); else ERR=$(gh auth status --hostname github.com 2>&1); fi',
-    `  case "$ERR" in *"not logged in"*|*"no oauth token"*|*"is invalid"*|*"HTTP 401"*|*"Bad credentials"*) ${say('missing')}; printf '%s\\n' "$2";; *) ${say('unreachable')};; esac`,
+    '  if [ -z "${GH_TOKEN:-}" ] && [ -n "${GH_ACCOUNT:-}" ]; then ERR=$(gh auth token --hostname github.com --user "$GH_ACCOUNT" 2>&1 >/dev/null)',
+    // gh auth status prints "the token … is invalid" for a connection error too, so past "not logged in" GitHub itself
+    // is asked (`gh api user`, the same precedence): only its HTTP 401 is a refused token; anything else, an answer
+    // included, is a status failure readiness cannot explain, so could not check.
+    '  else ERR=$(gh auth status --hostname github.com 2>&1); case "$ERR" in *"not logged in"*) ;; *) ERR=$(gh api user -q .login 2>&1 >/dev/null);; esac; fi',
+    `  case "$ERR" in *"not logged in"*|*"no oauth token"*|*"HTTP 401"*|*"Bad credentials"*) ${say('missing')}; printf '%s\\n' "$2";; *) ${say('unreachable')};; esac`,
     '  exit 0',
     '}',
     "GHREPO='readiness/probe'",
