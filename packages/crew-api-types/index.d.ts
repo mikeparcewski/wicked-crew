@@ -5155,12 +5155,12 @@ export interface SetupKnown {
   /** Git checkouts one level under the home's code folders and the registered repositories' folders,
    *  not registered yet (at most 24). `path` is absolute: register with `POST /repos {name, rootPath}`. */
   nearby: Array<{ name: string; path: string }>;
-  /** api-types 0.212.0 (crew#1527): whether delivery can push before the first job. Absent on an older daemon. */
+  /** api-types 0.214.0 (crew#1527): whether delivery can push before the first job. Absent on an older daemon. */
   delivery?: DeliveryReadiness;
 }
 
 /**
- * api-types 0.212.0 (crew#1527): can a GitHub pull request be opened before the first job? Built from what the deliver
+ * api-types 0.214.0 (crew#1527): can a GitHub pull request be opened before the first job? Built from what the deliver
  * step requires on a github.com origin: gh installed; the credential by the launch preflight's rule (an exported
  * `GH_TOKEN`, else, with a push identity configured, that account's gh login, else gh's own login, with `gh auth status`
  * succeeding); and a global git author with a name and an email. An exported `GH_TOKEN` with a push identity is matched
@@ -12018,7 +12018,7 @@ export type SystemInfraKey =
    *  On the container floor the `gateway` row reads the same document (the gateway is a Deployment
    *  in the daemon's namespace). ABSENT before. */
   | 'cluster'
-  /** api-types 0.212.0 (crew#1527): whether delivery can push (the GitHub sign-in a pull request needs and the git
+  /** api-types 0.214.0 (crew#1527): whether delivery can push (the GitHub sign-in a pull request needs and the git
    *  author), the same answer as `SetupKnown.delivery`: `ok` = a pull request can push, `degraded` = it cannot,
    *  `off` = it cannot but the daemon defaults to local delivery; `details.ready` carries the answer's `ready`. */
   | 'delivery';

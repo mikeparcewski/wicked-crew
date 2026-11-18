@@ -19,18 +19,9 @@ mentioned only where a daemon release depends on them.
   intent verbatim.
 - feat(launch): `POST /runs/preview` answers the human gates a launch of the body would keep (power, the posture the engine keeps, delivery and its gate) from the SAME decision `POST /runs` makes (`core/launch-posture.ts`), so a launch form shows what the run keeps instead of modelling crew's rules. The launch's inline power and deliver resolution is replaced by that one function, behaviour unchanged. wicked-crew-api-types 0.212.0 (additive): `LaunchPreviewBody`, `LaunchPreviewPosture`, `LaunchPreviewResponse` (studio#1150).
 - fix(roster): on the container floor, a seat whose image is missing and cannot be built (the operator's base is gone with no recipe, or an operator image is missing) reads unusable on `GET /roster`: work and council ineligible, inactive, chat refused, with the cause and its remedy. The engine is then handed it unusable, so work stays off it and a run refuses at launch instead of parking at a judge gate. One rule (`unbuildableSeatImages`) for the roster and the `seat_images` row, read in the background (crew#1097). As first merged it was inert on the current engine: the status parser required a `held` field the engine no longer prints, so every reading was unknown and no seat was marked. The fix below makes it effective. `RosterSeat.work_admission` / `qe_reviewer` refuse it with the new reason code `seat_image_unavailable` (wicked-crew-api-types 0.213.0, additive).
-- **Before the first job, studio can tell whether delivery can push (crew#1527).** A daemon delivers to a pull
-  request by default, but nothing checked the GitHub sign-in that needs until a first job reached its deliver step.
-  `GET /api/v1/setup/known` now carries `delivery` (wicked-crew-api-types 0.212.0, additive `DeliveryReadiness`) and
-  `GET /api/v1/system` a `delivery` infra row from the same answer: local delivery (`deliverDefault: "none"`) needs no
-  sign-in (`off`); a pull-request delivery is ready (`ok`) only when the deliver preflight's own rule says the GitHub
-  credential is configured (an exported `GH_TOKEN`, else a gh login, and with a configured push identity that
-  account's login) and a git author with a name and an email is set; otherwise `degraded`, naming `gh auth login`, the
-  `git config --global` commands, or local delivery in Settings. gh not answering in time reads `unknown`, never
-  signed out. Known gap: a repository's own push identity (`deliverIdentityByRepo`) is still checked at launch only.
 - **Before the first job, studio can tell whether a GitHub pull request can be opened (crew#1527).** Delivery opens
   a pull request by default, but nothing checked the GitHub sign-in it needs until a first job reached its deliver
-  step. `GET /api/v1/setup/known` now carries `delivery` (wicked-crew-api-types 0.212.0, additive `DeliveryReadiness`)
+  step. `GET /api/v1/setup/known` now carries `delivery` (wicked-crew-api-types 0.214.0, additive `DeliveryReadiness`)
   and `GET /api/v1/system` a `delivery` infra row, the same answer through one 4 s-bounded read. `ready` follows what
   the deliver step requires: gh installed; the credential by the launch preflight's rule (an exported `GH_TOKEN`, else
   the configured push identity's gh login, else gh's own login with `gh auth status` succeeding); and a global git
