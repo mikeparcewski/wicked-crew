@@ -129,7 +129,7 @@ import { AskRelay } from './ask-relay.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { writeRunEvidencePointer } from '../projects/charter.js';
 import {
-  engineBenchesUnclassifiedSeats, CoreAdapter, type McpEngineGate } from '../core/adapter.js';
+  engineBenchesUnclassifiedSeats, CoreAdapter, readNewWorkSeats, type McpEngineGate } from '../core/adapter.js';
 import type { Actor, CoreEvent, LaunchRunInput, SessionView } from '../core/types.js';
 import { resolveCursorUnit } from '../core/cursor.js';
 import {
@@ -1490,6 +1490,8 @@ export async function createServer(
       listRepos: () => adapter.listRepos(),
     },
     reviewsDir: defaultReviewsDir(),
+    // crew#1592: the review's seat comes from the seats new work may use (the strict reader: a bad setting refuses).
+    newWorkSeats: readNewWorkSeats,
     estateTool: callEstateTool,
     log: (m) => app.log.warn(m),
   });

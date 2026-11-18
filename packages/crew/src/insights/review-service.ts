@@ -47,6 +47,12 @@ export interface ReviewServiceDeps {
     listRepos?(): Promise<Array<{ id: string; git_url?: string }>>;
   };
   reviewsDir: string;
+  /**
+   * (crew#1592, F1/F2) The `newWorkSeats` pick (`readNewWorkSeats`): the review's one seat is chosen WITHIN it. `null` =
+   * nothing picked (the whole roster); a throw (set but unreadable or invalid) refuses the review with its words.
+   * Absent = the whole roster.
+   */
+  newWorkSeats?: () => Promise<readonly string[] | null>;
   /** The approve queue (estate `proposal.*`), the same seam `/proposals` uses. */
   estateTool: (tool: string, args: Record<string, unknown>) => Promise<unknown>;
   log: (msg: string) => void;
@@ -67,6 +73,10 @@ export type AcceptTarget =
   | { kind: 'issue'; repoRef: string | null; title: string; body: string; url: string | null }
   | { kind: 'runs'; runIds: string[] }
   | { kind: 'none' };
+
+/** (crew#1592) A review that can't be prepared for a reason the person fixes (its seat: the `newWorkSeats` setting, or
+ *  no usable seat). Nothing was written; every launch path answers it as a refusal (409), never an engine failure. */
+export class ReviewPreparationRefused extends Error {}
 
 export class RecommendationError extends Error {
   constructor(readonly status: 400 | 404 | 409 | 502, message: string) {
@@ -129,8 +139,22 @@ export class ReviewService {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(runId) || runId.includes('..')) throw new Error(`a review run id must be one plain path segment: ${runId}`);
     // One review per run id: a repeated id never touches the review already recorded under it.
     if (this.deps.store.get(runId) !== undefined) throw new Error(`a review is already recorded for run ${runId}`);
-    const seat = pickSeat(await this.deps.adapter.seatsForWorkflow(REVIEW_WORKFLOW));
-    if (seat === null) throw new Error('no signed-in, eligible agent seat to interpret the review: sign one in (Agents) and run it again');
+    // (crew#1592) The workflow's own seat rule, within the seats new work may use: a seat turned off for new work never
+    // interprets a review nobody named it on, and a setting that can't be honored refuses (its words) before anything
+    // is written, never falling back to the whole roster.
+    let picked: readonly string[] | null;
+    try {
+      picked = this.deps.newWorkSeats === undefined ? null : await this.deps.newWorkSeats();
+    } catch (err) {
+      throw new ReviewPreparationRefused(err instanceof Error ? err.message : String(err));
+    }
+    const roster = await this.deps.adapter.seatsForWorkflow(REVIEW_WORKFLOW);
+    const seat = pickSeat(picked === null ? roster : roster.filter((s) => picked.includes(String((s as { key?: unknown } | null)?.key))));
+    if (seat === null) {
+      throw new ReviewPreparationRefused(picked === null
+        ? 'no signed-in, eligible agent seat to interpret the review: sign one in (Agents) and run it again'
+        : `none of the seats new work may use (newWorkSeats: ${picked.length === 0 ? 'none' : picked.join(', ')}) can interpret the review now: add a signed-in seat to it, or sign one of them in, and run it again`);
+    }
     const projectIds = [...(opts.projectIds ?? [])];
     const snap = await this.snapshot(projectIds, now.getTime());
     const dir = this.runDir(runId);
@@ -157,6 +181,10 @@ export class ReviewService {
       (asked !== '' && asked !== REVIEW_WORKFLOW ? `\n\nThe person also asked: ${asked.slice(0, 2000)}` : '');
     input.workflow = REVIEW_WORKFLOW;
     input.clisJson = JSON.stringify([seat]);
+    // The one seat leads: a caller's `primary` validated against the whole roster would name a seat that isn't on it.
+    const seatKey = (seat as { key?: unknown }).key;
+    if (typeof seatKey === 'string') input.primary = seatKey;
+    else delete input.primary;
     // The seat reads the review directory and writes ONLY `out/`: the snapshot and facts.json are not its to change.
     input.extraWriteRoots = [out];
     input.requireDeliverables = [reportPath];

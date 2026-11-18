@@ -13,6 +13,7 @@ import type { Actor } from '../src/core/types.js';
 import { registerScheduleRoutes } from '../src/schedules/routes.js';
 import { WorkflowScheduler, type ScheduledLaunch } from '../src/schedules/scheduler.js';
 import { DEFAULT_EVALS_SCHEDULE_ID, DEFAULT_REVIEW_EVERY_HOURS, DEFAULT_REVIEW_SCHEDULE_ID, ScheduleStore } from '../src/schedules/store.js';
+import { ReviewPreparationRefused } from '../src/insights/review-service.js';
 import { removeScratch } from './setup/scratch.js';
 
 const dirs: string[] = [];
@@ -242,6 +243,24 @@ describe('the scheduler', () => {
 });
 
 describe('the schedule routes', () => {
+  it("(crew#1592) Run it now: a review that can't be prepared (its seat, newWorkSeats) answers 409 with the hand launch's words, not 502", async () => {
+    const path = join(scratch(), 'schedules.json');
+    const store = new ScheduleStore(path);
+    store.seedDefault(T0);
+    const scheduler = new WorkflowScheduler({
+      store,
+      sessionsDetail: async () => [],
+      launch: async () => { throw new ReviewPreparationRefused('the newWorkSeats setting (which seats new work may use) is not a list of seat keys'); },
+      log: () => undefined,
+      now: () => T0,
+    });
+    const app = Fastify();
+    registerScheduleRoutes(app, { store, scheduler, knowsWorkflow: () => true, lastReview: () => null, audit: AuditLog.noop(), now: () => T0 });
+    const run = await app.inject({ method: 'POST', url: `/api/v1/schedules/${DEFAULT_REVIEW_SCHEDULE_ID}/run` });
+    expect(run.statusCode).toBe(409);
+    expect(run.json().error).toMatch(/^the review could not be prepared: .*newWorkSeats/);
+  });
+
   it('lists, saves, runs now and deletes; only a person may write', async () => {
     const r = rig();
     r.store.seedDefault(T0);

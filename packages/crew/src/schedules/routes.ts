@@ -10,6 +10,7 @@ import { API_PREFIX } from '../api/api-prefix.js';
 import { LOCAL_ACTOR } from '../api/auth.js';
 import type { AuditLog } from '../api/audit.js';
 import { isHumanOperator } from '../api/watch-routes.js';
+import { ReviewPreparationRefused } from '../insights/review-service.js';
 import { ScheduleBusyError, type WorkflowScheduler } from './scheduler.js';
 import { MAX_EVERY_HOURS, MIN_EVERY_HOURS, SCHEDULE_ID, type ScheduleStore, type WorkflowSchedule } from './store.js';
 
@@ -93,6 +94,9 @@ export function registerScheduleRoutes(app: FastifyInstance, deps: ScheduleRoute
         return { runId, schedule: view(deps.store.get(id) as WorkflowSchedule) };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        // A review that can't be prepared (crew#1592: its seat, the `newWorkSeats` setting) is the person's to fix: 409 with
+        // the same words as a hand launch, never a 502.
+        if (err instanceof ReviewPreparationRefused) return reply.code(409).send({ error: `the review could not be prepared: ${message}` });
         return reply.code(err instanceof ScheduleBusyError ? 409 : 502).send({ error: message });
       }
     },
