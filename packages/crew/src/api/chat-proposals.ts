@@ -860,6 +860,8 @@ const NEEDS_HELPER = 'Needs a second helper to check it';
 /** (F1/F2) The block a document drawn while `newWorkSeats` can't be honored carries: this prefix, then the reason. Start
  *  re-reads the setting, so a repaired setting lifts it (helpers drawn again), and a person's helper pick lifts it too. */
 const SEATS_SETTING_BLOCK = "Can't pick its helpers: ";
+/** The proposal kinds whose two helpers are drawn from the pool (a theme starts no run; a job carries its own seats). */
+const DOCUMENT_KINDS: ReadonlySet<string> = new Set(['create', 'refine', 'demo']);
 const isSeatsSettingBlock = (b: string | null | undefined): boolean => typeof b === 'string' && b.startsWith(SEATS_SETTING_BLOCK);
 
 export interface DecideResult {
@@ -1525,6 +1527,9 @@ export class ChatProposals {
           throw err;
         }
       }
+      // (F1/F2) Go again on a document re-reads `newWorkSeats` too: a bad setting refuses rather than starting it.
+      const seatsRefused = await this.documentSeatsRefusal(again, folded);
+      if (seatsRefused !== null) return seatsRefused;
       return this.go(chatId, folded, again, again === acc.resolution ? acc.edits : { ...(acc.edits ?? {}), ...body.edits }, acc.identity, actor, instance, body.power);
     }
     if (folded.state === 'superseded') {
@@ -1577,14 +1582,12 @@ export class ChatProposals {
     }
     // (F1/F2) A document's helpers come from `newWorkSeats`: Start re-reads it, as a job's Start does (jobContext). Set
     // but unreadable or invalid refuses with the reason; once it reads again, helpers that couldn't be drawn are drawn.
-    if (effective.kind !== 'job' && (effective.helpers !== null || isSeatsSettingBlock(effective.blocked))) {
-      const { refusal } = await this.seatPool();
-      if (refusal !== undefined) return { code: 409, body: { code: refusal.code, error: refusal.message, view: viewOf(folded) } };
-      if (isSeatsSettingBlock(effective.blocked)) {
-        const chat = this.deps.chat(chatId) ?? { projectId: effective.filedIn.projectId, repos: [], lead: null, seats: [], analysis: false };
-        const drawn = await this.docHelpers(chat);
-        effective = { ...effective, helpers: drawn.helpers, blocked: drawn.block };
-      }
+    const seatsRefused = await this.documentSeatsRefusal(effective, folded);
+    if (seatsRefused !== null) return seatsRefused;
+    if (isSeatsSettingBlock(effective.blocked)) {
+      const chat = this.deps.chat(chatId) ?? { projectId: effective.filedIn.projectId, repos: [], lead: null, seats: [], analysis: false };
+      const drawn = await this.docHelpers(chat);
+      effective = { ...effective, helpers: drawn.helpers, blocked: drawn.block };
     }
     if (effective.blocked !== null) {
       return { code: 409, body: { code: 'proposal_blocked', error: effective.blocked, view: viewOf(folded) } };
@@ -2359,6 +2362,14 @@ export class ChatProposals {
         : { code: 'settings_unavailable', message: `crew can't read which seats new work may use (newWorkSeats): ${err instanceof Error ? err.message : String(err)}; it won't start new work on every seat instead. ${NEW_WORK_SEATS_FIX[0]!.toUpperCase()}${NEW_WORK_SEATS_FIX.slice(1)}` };
       return { eligible: this.deps.rosterEligible(), pool: [], refusal };
     }
+  }
+
+  /** (F1/F2) A document (its helpers come from `newWorkSeats`) refused at Start, fresh or again, while the setting is set
+   *  but unreadable or invalid; `null` when it isn't a document or the setting reads. */
+  private async documentSeatsRefusal(p: ArtifactProposal, folded: FoldedProposal): Promise<DecideResult | null> {
+    if (!DOCUMENT_KINDS.has(p.kind)) return null;
+    const { refusal } = await this.seatPool();
+    return refusal === undefined ? null : { code: 409, body: { code: refusal.code, error: refusal.message, view: viewOf(folded) } };
   }
 
   /** A document's two default helpers from the pool, and the line that blocks it when there are none. */

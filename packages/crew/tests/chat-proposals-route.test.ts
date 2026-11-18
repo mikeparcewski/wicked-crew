@@ -553,5 +553,42 @@ describe('chat proposals (server, A2)', () => {
         restore();
       }
     });
+
+    it('an interrupted Go (accepting, no run) re-reads the setting on Go again: refused with its code, nothing starts; repaired, it starts once', async () => {
+      try {
+        await turn(stub, stubListeners, 'nws-acc', 'Make a deck', { entry: 'presentation', title: 'Acc', sources: ['chat'] });
+        const p = await proposalOf(stub, 'nws-acc');
+        const identity = { artifactRef: '_unfiled/nws-acc', runId: proposalRunId(p.pid) };
+        appendFileSync(join(home, 'chats', 'nws-acc.jsonl'), `${JSON.stringify({ at: Date.now(), turnId: p.turnId, kind: 'proposal_accepting', pid: p.pid, actor: 'local', edits: null, resolution: p, identity })}\n`);
+        const before = stubRows().length;
+        for (const [raw, code] of [['{"newWorkSeats": [1]}', 'setting_invalid'], ['not json', 'settings_unavailable']] as const) {
+          setRaw(raw);
+          const again = await decide(stub, 'nws-acc', p.pid, { decision: 'go' });
+          expect(again.statusCode).toBe(409);
+          expect(again.json()).toMatchObject({ code });
+        }
+        expect(stubRows().length).toBe(before);
+        restore();
+        expect((await decide(stub, 'nws-acc', p.pid, { decision: 'go' })).statusCode).toBe(200);
+        expect(stubRows().length - before).toBe(1);
+      } finally {
+        restore();
+      }
+    });
+
+    it('a document short of a second helper is refused with the setting, not "needs a second helper", once the setting breaks', async () => {
+      try {
+        setRaw('{"newWorkSeats": ["claude"]}');
+        await turn(stub, stubListeners, 'nws-one', 'Make a deck', { entry: 'presentation', title: 'One', sources: ['chat'] });
+        const p = await proposalOf(stub, 'nws-one');
+        expect(p.helpers).toBeNull();
+        setRaw('{"newWorkSeats": "claude"}');
+        const go = await decide(stub, 'nws-one', p.pid, { decision: 'go' });
+        expect(go.statusCode).toBe(409);
+        expect(go.json()).toMatchObject({ code: 'setting_invalid' });
+      } finally {
+        restore();
+      }
+    });
   });
 });
