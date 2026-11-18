@@ -8,7 +8,7 @@
 // read-only by construction: `fs` reads and `git diff`/`git status` — zero write capability, a
 // strictly smaller threat surface than `/open` handing the path to an OS opener.
 
-import { constants as fsConstants, promises as fsp, readFileSync, statSync } from 'node:fs';
+import { constants as fsConstants, promises as fsp, lstatSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { ExecCwdMissing, execCapped, ExecOutputTooLarge } from '../core/exec.js';
 import { deliverExclusionByName, deliverExclusionReason } from '../core/deliver-exclusions.js';
@@ -193,8 +193,9 @@ export async function branchDiff(
 }
 
 const GIT_TIMEOUT_MS = 10_000;
-/** The most committed-scratch exclude pathspecs one aggregate diff passes git (wicked-core#1573). */
-const SCRUB_EXCLUDE_MAX = 2000;
+/** The most bytes of committed-scratch exclude pathspecs one aggregate diff passes git (wicked-core#1573):
+ *  a quarter of macOS's 1 MiB ARG_MAX, which the environment shares. */
+const SCRUB_EXCLUDE_BYTES = 256 * 1024;
 /** How long the untracked-file pass may run before the answer is cut (`truncated: true`, crew#790). */
 export const UNTRACKED_BUDGET_MS = 8_000;
 
@@ -416,13 +417,35 @@ export async function worktreeDiff(
         ['diff', '--name-only', '--no-renames', '--diff-filter=A', '-z', baseRev],
         { timeout: GIT_TIMEOUT_MS, cwd: workdir, env },
       );
-      // At most SCRUB_EXCLUDE_MAX pathspecs, so the argv stays far under the OS limit; past it the
+      // A committed symlink or submodule is judged on its name alone, as the scrub judges it (its blob
+      // is a link target or nothing, so what it points at is not what ships).
+      const committedRides = (file: string): boolean => {
+        try {
+          const st = lstatSync(join(workdir, file));
+          if (st.isSymbolicLink() || st.isDirectory()) return deliverExclusionByName(file) === null;
+        } catch {
+          // Gone from the worktree: the classifier's own unknown-size rule applies.
+        }
+        return rides(file);
+      };
+      // At most SCRUB_EXCLUDE_BYTES of pathspecs, so the argv stays under the OS limit; past it the
       // rest are counted (the pre-#1573 over-count), an exotic shape: thousands of committed scratch files.
-      const scrubbed = addedOut.split('\0').filter((file) => file !== '' && !rides(file)).slice(0, SCRUB_EXCLUDE_MAX);
-      if (scrubbed.length > 0) trackedSpec = ['--', '.', ...scrubbed.map((file) => `:(top,literal,exclude)${file}`)];
+      let bytes = 0;
+      const excludes: string[] = [];
+      for (const file of addedOut.split('\0')) {
+        if (file === '' || committedRides(file)) continue;
+        const spec = `:(top,literal,exclude)${file}`;
+        bytes += Buffer.byteLength(spec, 'utf8') + 1;
+        if (bytes > SCRUB_EXCLUDE_BYTES) break;
+        excludes.push(spec);
+      }
+      if (excludes.length > 0) trackedSpec = ['--', '.', ...excludes];
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw err; // git missing — the route's 500
-      // Not a repo / no commits yet: the tracked pass below answers that the same way.
+      const msg = err instanceof Error ? err.message : String(err);
+      // Not a repo / no commits yet: the tracked pass below answers that the same way. Anything
+      // else (a timeout, a killed git) is the route's error, never a silent over-count.
+      if (!isEmptyDiffAnswer(msg)) throw err;
     }
   }
 

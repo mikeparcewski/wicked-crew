@@ -1867,12 +1867,13 @@ describe('deliver script — no classifier-matched path in ANY pushed commit (wi
   const SLUG = '-home-alice-src-repo-wicked-worktrees-run-1';
   const SEAT_TMP = `tmp/claude-1000/${SLUG}/3a27fd18-b5d8-46a2-b151-2783d331d54a/tasks/bz1oumaxc.output`;
 
-  /** Every path any commit in `range` (on the bare origin) touches or holds. */
-  function pathsInHistory(origin: string, range: string): string[] {
+  /** Every path any commit in `range` (on the bare origin) touches or holds (`treesOnly`: holds). */
+  function pathsInHistory(origin: string, range: string, treesOnly = false): string[] {
     const commits = git(origin, 'rev-list', range).split('\n').filter(Boolean);
     const all = new Set<string>();
     for (const c of commits) {
       for (const p of git(origin, 'ls-tree', '-r', '--name-only', c).split('\n').filter(Boolean)) all.add(p);
+      if (treesOnly) continue;
       for (const p of git(origin, 'show', '--name-only', '--format=', c).split('\n').filter(Boolean)) all.add(p);
     }
     return [...all].sort();
@@ -1940,7 +1941,8 @@ describe('deliver script — no classifier-matched path in ANY pushed commit (wi
     expect(r.output).toContain(SEAT_TMP);
     expect(r.pr?.body).toContain("## Removed from the run's commits");
     expect(r.pr?.body).toContain('- scratch-dir: 1');
-    expect(r.pr!.body.indexOf("## Removed from the run's commits")).toBeLessThan(r.pr!.body.lastIndexOf('\n---\n'));
+    const body = r.pr?.body ?? '';
+    expect(body.indexOf("## Removed from the run's commits")).toBeLessThan(body.lastIndexOf('\n---\n'));
   }, 90_000);
 
   it('judges each committed file on its own blob: key material, an env template with a value and an oversize file are scrubbed; a value-free template rides', async () => {
@@ -2033,14 +2035,99 @@ describe('deliver script — no classifier-matched path in ANY pushed commit (wi
     const nested = `pkg/tmp/claude-1000/${SLUG}/tasks/x.output`;
     mkdirSync(join(fx.workdir, nested, '..'), { recursive: true });
     writeFileSync(join(fx.workdir, nested), 'out\n');
+    // An earlier rule (the key denylist) names the reason; the record is still cut at the scratch dir.
+    writeFileSync(join(fx.workdir, nested, '..', 'session.key'), 'k\n');
 
     const r = await runDeliver(fx, { intent: 'nested scratch' });
 
     expect(r.status, r.output).toBe(0);
     expect(r.pr?.body).toContain('- `pkg/tmp/…` — scratch-dir');
+    expect(r.pr?.body).toContain('- `pkg/tmp/…` — denylisted-name');
     expect(r.pr?.body ?? '').not.toContain(SLUG);
     expect(git(fx.origin, 'log', '-1', '--format=%B', `wicked/${RUN_ID}`)).not.toContain(SLUG);
     expect(git(fx.origin, 'rev-list', '--objects', '--all')).not.toContain(SLUG);
+  }, 90_000);
+
+  it("a submodule the base tracks keeps its update, though its name matches the denylist", async () => {
+    const fx = fixture({ worktree: false });
+    const gitlink = (cwd: string, sha: string): void => {
+      git(cwd, 'update-index', '--add', '--cacheinfo', `160000,${sha},vendor/credentials-helper`);
+    };
+    gitlink(fx.clone, '1'.repeat(40));
+    git(fx.clone, 'commit', '-qm', 'base: a submodule');
+    git(fx.clone, 'push', '-q', 'origin', 'main');
+    const wt = { ...fx, workdir: join(fx.root, RUN_ID) };
+    git(fx.clone, 'worktree', 'add', '-q', '-b', `wicked/${RUN_ID}`, wt.workdir, 'main');
+    gitlink(wt.workdir, '2'.repeat(40));
+    git(wt.workdir, 'commit', '-qm', 'chore: bump the submodule');
+    const committed = git(wt.workdir, 'rev-parse', 'HEAD').trim();
+
+    const r = await runDeliver(wt, { intent: 'bump' });
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.output).not.toContain('SCRUBBED');
+    expect(git(fx.origin, 'rev-parse', `wicked/${RUN_ID}`).trim()).toBe(committed);
+  }, 90_000);
+
+  it('a file that replaces a base DIRECTORY of the same name is judged as the new file it is', async () => {
+    const fx = fixture({ worktree: false });
+    mkdirSync(join(fx.clone, 'credentials'));
+    writeFileSync(join(fx.clone, 'credentials', 'README.md'), 'where the keys go\n');
+    git(fx.clone, 'add', '-A');
+    git(fx.clone, 'commit', '-qm', 'base: a credentials dir');
+    git(fx.clone, 'push', '-q', 'origin', 'main');
+    const wt = { ...fx, workdir: join(fx.root, RUN_ID) };
+    git(fx.clone, 'worktree', 'add', '-q', '-b', `wicked/${RUN_ID}`, wt.workdir, 'main');
+    git(wt.workdir, 'rm', '-q', '-r', 'credentials');
+    writeFileSync(join(wt.workdir, 'credentials'), 'KEY MATERIAL\n');
+    writeFileSync(join(wt.workdir, 'fix.ts'), 'export const fixed = true;\n');
+    git(wt.workdir, 'add', '-A');
+    git(wt.workdir, 'commit', '-qm', 'fix: and a key file');
+
+    const r = await runDeliver(wt, { intent: 'replace' });
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.output).toContain("deliver: SCRUBBED (denylisted-name) from the run's commits: credentials");
+    expect(git(fx.origin, 'ls-tree', '-r', '--name-only', `wicked/${RUN_ID}`).trim().split('\n').sort()).toEqual(['README.md', 'fix.ts']);
+  }, 90_000);
+
+  it('REVISION: a merged side branch cut from an OLDER commit does not carry that commit\'s scratch into the push', async () => {
+    const fx = fixture({ worktree: false });
+    // The PR branch: one commit that adds scratch (A), then one that deletes it (the PR head).
+    const other = join(fx.root, 'other');
+    execFileSync('git', ['clone', '-q', fx.origin, other]);
+    git(other, 'config', 'user.email', 'prior@test');
+    git(other, 'config', 'user.name', 'prior');
+    git(other, 'checkout', '-q', '-b', PR_BRANCH);
+    mkdirSync(join(other, 'tmp'), { recursive: true });
+    writeFileSync(join(other, 'tmp', 'old.output'), 'old scratch\n');
+    git(other, 'add', '-A');
+    git(other, 'commit', '-qm', 'prior: with scratch');
+    const olderA = git(other, 'rev-parse', 'HEAD').trim();
+    git(other, 'rm', '-q', '-r', 'tmp');
+    git(other, 'commit', '-qm', 'prior: scratch removed');
+    git(other, 'push', '-q', 'origin', PR_BRANCH);
+    const prHead = git(other, 'rev-parse', 'HEAD').trim();
+    git(fx.clone, 'fetch', '-q', 'origin');
+    const revised = { ...fx, workdir: join(fx.root, RUN_ID) };
+    git(fx.clone, 'worktree', 'add', '-q', '-b', `wicked/${RUN_ID}`, revised.workdir, `origin/${PR_BRANCH}`);
+    const wt = revised.workdir;
+    // A side commit cut from A (so it inherits A's scratch) that changes only product, merged in.
+    git(wt, 'checkout', '-q', '-b', 'side', olderA);
+    writeFileSync(join(wt, 'fix.ts'), 'export const fixed = true;\n');
+    git(wt, 'add', 'fix.ts');
+    git(wt, 'commit', '-qm', 'side: the product');
+    git(wt, 'checkout', '-q', `wicked/${RUN_ID}`);
+    git(wt, 'merge', '-q', '--no-ff', '--no-edit', 'side');
+
+    const r = await runDeliver(revised, { intent: 'Revise PR #273', script: { runId: RUN_ID, revisesPr: PR } });
+
+    expect(r.status, r.output).toBe(0);
+    // No pushed commit HOLDS it. (The side commit's diff against A names its removal: A, an ancestor
+    // of the PR head, is already on the remote with it.)
+    const paths = pathsInHistory(fx.origin, `${prHead}..${PR_BRANCH}`, true);
+    expect(paths.filter((p) => p.startsWith('tmp/')), r.output).toEqual([]);
+    expect(paths).toContain('fix.ts');
   }, 90_000);
 
   it("a repository's own tracked tmp/ source is not touched, and a clean history is pushed as committed", async () => {

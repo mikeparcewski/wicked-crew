@@ -18,7 +18,7 @@
 //     daemon, one runs as generated bash in the run worktree).
 
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -138,6 +138,24 @@ describe('the deliver gate diffstat is computed over exactly the set that will b
 
     expect(filesIn(diff).sort()).toEqual(['src/fix.ts', 'tmp/keep.rs']);
     expect(diff).not.toContain('claude-1000');
+  });
+
+  it('wicked-core#1573: a committed symlink is counted on its name alone, as the scrub judges it', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'crew-1573-'));
+    roots.push(root);
+    write(root, 'README.md', 'base\n');
+    git(root, 'init', '-b', 'main');
+    git(root, 'add', '-A');
+    git(root, 'commit', '-m', 'base');
+    const base = git(root, 'rev-parse', 'HEAD').trim();
+    write(root, 'templates/with-values', 'TOKEN=abc\n');
+    symlinkSync('templates/with-values', join(root, '.env.example'));
+    git(root, 'add', '-A');
+    git(root, 'commit', '-m', 'a linked template');
+
+    const { diff } = await worktreeDiff(root, undefined, base);
+
+    expect(filesIn(diff).sort()).toEqual(['.env.example', 'templates/with-values']);
   });
 
   it('a NARROWED request still answers about the one file the caller opened', async () => {

@@ -1201,11 +1201,12 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // The record line is ONE line whatever the name holds: a newline / CR / tab in a path is folded to
     // `?` so a crafted file name cannot start a new bullet or heading in the PR body (codex r1).
     // A path under a NESTED scratch or tool-artifact directory is recorded only up to that directory
-    // (`pkg/tmp/…`, once), as the top-level ones are counted at enumeration: what lies below it is a
-    // tool's own naming (a Claude temp dir is a slug of the worktree's absolute path), and this record
-    // is spliced into the PR body and the commit message (wicked-core#1573). The phase output keeps
-    // the full name.
-    `  if [ -n "$RN" ]; then echo "deliver: EXCLUDED ($RN): $F"; HD=$F; case "$RN" in scratch-dir|tool-artifact-dir) HD=$(printf "%s" "$F" | sed -E ${shellSingleQuote(`s#(^|/)(${[...SCRATCH_DIRS, ...TOOL_ARTIFACT_DIRS].map((d) => d.replace(/\./g, '\\.')).join('|')})/.*$#\\1\\2/…#`)});; esac; HL="$RN $(printf "%s" "$HD" | tr "\\n\\r\\t" "???")"; grep -qxF -- "$HL" "$TD/excluded" 2>/dev/null || printf "%s\\n" "$HL" >> "$TD/excluded"; else git add -- "$F"; fi`,
+    // (`pkg/tmp/…`, once), whichever rule excluded it, as the top-level ones are counted at
+    // enumeration: what lies below it is a tool's own naming (a Claude temp dir is a slug of the
+    // worktree's absolute path), and this record is spliced into the PR body and the commit message
+    // (wicked-core#1573). It is cut after the fold, so a newline cannot split it. The phase output
+    // keeps the full name.
+    `  if [ -n "$RN" ]; then echo "deliver: EXCLUDED ($RN): $F"; HL="$RN $(printf "%s" "$F" | tr "\\n\\r\\t" "???" | sed -E ${shellSingleQuote(`s#(^|/)(${[...SCRATCH_DIRS, ...TOOL_ARTIFACT_DIRS].map((d) => d.replace(/\./g, '\\.')).join('|')})/.*$#\\1\\2/…#`)})"; grep -qxF -- "$HL" "$TD/excluded" 2>/dev/null || printf "%s\\n" "$HL" >> "$TD/excluded"; else git add -- "$F"; fi`,
     `done < <(git ls-files --others --exclude-standard -z -- . ${[...SCRATCH_DIRS, ...TOOL_ARTIFACT_DIRS].map((d) => `':(exclude)${d}'`).join(' ')})`,
     // (c1c) WHAT THE REPOSITORY'S OWN IGNORE RULES SKIPPED (crew#861) — never staged (the pass above
     // honours them), but SAID: one entry per ignored directory (`--directory`), so an installed
@@ -1311,20 +1312,26 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // So before the push: every file state the run's commits introduce ($SB..$B: the default branch
     // after the rebase above, or the PR head in a revision; each commit against each of its parents,
     // one `diff-tree --stdin`) is judged ONCE by `_classify` on its own blob. A path the base
-    // ($SB) already tracks is the repository's own (a real `tmp/` source) and is never a candidate.
+    // ($SB) holds as a file, symlink or submodule at exactly that path is the repository's own (a real
+    // `tmp/` source) and is never removed.
     // When nothing matches, nothing is rewritten: the same commits are pushed. Otherwise every
     // matched path is removed from every commit in the range, the commits are re-created with
     // commit-tree keeping authors, committers, dates and messages (so a retry finds nothing left to
     // scrub and moves nothing), a commit the scrub emptied is dropped, and `git reset` (mixed) moves
     // the branch, leaving the worktree as it was, so a scrubbed file it still holds stays behind
-    // untracked like any exclusion. Every git read lands in a file first and is checked: a read that
-    // fails ends the script with nothing pushed. The phase output names each scrubbed path; the PR
+    // untracked like any exclusion. The scrub's git reads land in files or checked assignments, never
+    // a process substitution, so a read that fails ends the script with nothing pushed. The phase output names each scrubbed path; the PR
     // body counts them by reason and never names one (that name is what the scrub keeps out).
     'SB=$D; [ -z "$TARGET" ] || SB="origin/$TARGET"',
     'TL=$(git rev-parse --verify -q "$B^{tree}" || true)',
     'NSU=0; HFAIL="deliver: the history scrub could not read the run\'s commits; nothing was pushed"',
     'git rev-list --reverse --topo-order --parents "$SB..$B" > "$TD/hlist" || { echo "$HFAIL"; exit 1; }',
     'git diff-tree --stdin -r -z --raw --no-renames --no-commit-id -m --root --diff-filter=AMT < "$TD/hlist" > "$TD/hraw" || { echo "$HFAIL"; exit 1; }',
+    // …and what a pushed commit INHERITS from a merged-in ancestor other than the base (a side branch
+    // cut from an older commit carries that commit's files without changing them).
+    'git rev-list --boundary "$SB..$B" > "$TD/hbnd" || { echo "$HFAIL"; exit 1; }',
+    'HSBC=$(git rev-parse "$SB^{commit}")',
+    'while read -r HX; do case "$HX" in -*) HX=${HX#-}; [ "$HX" = "$HSBC" ] || git diff-tree -r -z --raw --no-renames --diff-filter=AMT "$HSBC" "$HX" >> "$TD/hraw" || { echo "$HFAIL"; exit 1; };; esac; done < "$TD/hbnd"',
     ': > "$TD/hent"; : > "$TD/hstrip"; : > "$TD/hwhy"',
     'while IFS= read -r -d "" HM && IFS= read -r -d "" HP; do',
     '  read -r HX0 HNM HX1 HNB HX2 <<< "$HM"',
@@ -1333,9 +1340,11 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     'sort -z -u "$TD/hent" > "$TD/hent.u"',
     'while IFS= read -r -d "" HR; do',
     '  HNB=${HR%% *}; HR=${HR#* }; HNM=${HR%% *}; HP=${HR#* }',
-    '  ! git cat-file -e "$SB:$HP" 2>/dev/null || continue',
     '  case "$HNM" in 120000|160000) _classify "$HP" -;; *) _classify "$HP" "$HNB";; esac',
     '  [ -n "$RN" ] || continue',
+    // The base's own file, symlink or submodule at exactly this path is the repository's, never scratch.
+    '  HBT=$(GIT_LITERAL_PATHSPECS=1 git ls-tree --full-tree "$SB" -- "$HP") || { echo "$HFAIL"; exit 1; }',
+    '  HBT=${HBT#* }; HBT=${HBT%% *}; case "$HBT" in blob|commit) continue;; esac',
     '  printf "%s\\0" "$HP" >> "$TD/hstrip"; printf "%s %s\\0" "$RN" "$HP" >> "$TD/hwhy"',
     '  echo "deliver: SCRUBBED ($RN) from the run\'s commits: $(printf "%s" "$HP" | tr "\\n\\r\\t" "???")"',
     'done < "$TD/hent.u"',
@@ -1353,7 +1362,9 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '    if [ "$HT" = "$HT0" ] && [ -z "$HMV" ]; then continue; fi',
     // A commit the scrub EMPTIED (one parent left, its tree, and it was not empty as the run made it)
     // is dropped; a commit that was empty as made is kept.
-    '    if [ -n "$HPL" ] && [ "$HPL" = "${HPL%% *}" ] && [ "$HT" = "$(git rev-parse "$HPL^{tree}")" ] && [ "$HT0" != "$(git rev-parse "${HPS%% *}^{tree}")" ]; then printf "%s" "$HPL" > "$TD/map/$HC"; continue; fi',
+    '    HDROP=""',
+    '    if [ -n "$HPL" ] && [ "$HPL" = "${HPL%% *}" ]; then HPT=$(git rev-parse "$HPL^{tree}"); HOPT=$(git rev-parse "${HPS%% *}^{tree}"); [ "$HT" != "$HPT" ] || [ "$HT0" = "$HOPT" ] || HDROP=1; fi',
+    '    if [ -n "$HDROP" ]; then printf "%s" "$HPL" > "$TD/map/$HC"; continue; fi',
     '    git -c log.showSignature=false log -1 --format="%an%n%ae%n%ad%n%cn%n%ce%n%cd" --date=raw "$HC" > "$TD/hmeta"',
     '    { IFS= read -r HAN; IFS= read -r HAE; IFS= read -r HAD; IFS= read -r HCN; IFS= read -r HCE; IFS= read -r HCD; } < "$TD/hmeta"',
     '    git cat-file commit "$HC" > "$TD/hraw.c"; sed "1,/^$/d" "$TD/hraw.c" > "$TD/msg"',
