@@ -73,7 +73,7 @@ export function selectLearnings(rows: readonly MemoryRow[], problem: string, rep
   return scored.slice(0, max).map((s) => s.m);
 }
 
-/** A learning's text as one brief line: no host paths, whitespace folded, capped, and never able to open or close the block. */
+/** A learning's text as one brief line: this host's home, state and temp roots redacted, whitespace folded, capped, and never able to open or close the block. */
 function briefLine(content: string): string {
   const t = redactHostPaths(content.replaceAll(RUN_LEARNINGS_OPEN, '').replaceAll(RUN_LEARNINGS_CLOSE, '')).replace(/\s+/gu, ' ').trim();
   return t.length > MAX_RECALLED_CHARS ? `${t.slice(0, MAX_RECALLED_CHARS - 1)}…` : t;

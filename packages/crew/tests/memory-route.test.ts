@@ -572,29 +572,48 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
     type Mem = { memory_id: string; scope: string; content: string; tier: string; facets: Record<string, string>; created_at: number };
     const APPROVED: Mem = { memory_id: 'proposal:p0', scope: '', content: 'old approved words', tier: 'semantic', facets: { repo: 'acme-core' }, created_at: 100 };
     /** The store plus estate's approval queue: approve writes `proposal:<id>` where estate would place it. */
-    function queue(initial: Mem[], opts: { approve?: 'throw' | 'throw-after-write'; placeAt?: string } = {}) {
+    function queue(
+      initial: Mem[],
+      opts: { approve?: 'throw' | 'throw-after-write' | 'write-then-fail-state' | 'never-settles'; placeAt?: string; submit?: 'lost-answer'; list?: 'throw' } = {},
+    ) {
       const s = new Map(initial.map((m) => [m.memory_id, m]));
       const proposals = new Map<string, { payload: Record<string, unknown>; facets: Record<string, string>; state: string }>();
+      const approvedOnce = new Set<string>();
       let n = 0;
       estateTool.mockImplementation(async (tool: string, args: Record<string, unknown>) => {
         if (tool === 'memory.list') return { items: [...s.values()] };
         if (tool === 'memory.erase') return { deleted_count: s.delete(String(args['id'])) ? 1 : 0 };
+        if (tool === 'proposal.list') {
+          if (opts.list === 'throw') throw new EstateMcpError('proposal.list failed');
+          const want = args['state'];
+          return { proposals: [...proposals].filter(([, p]) => want === undefined || p.state === want).map(([id, p]) => ({ id, kind_type: 'memory', payload: p.payload, facets: p.facets, state: p.state })) };
+        }
         if (tool === 'proposal.submit') {
           const id = `n${++n}`;
           proposals.set(id, { payload: args['payload'] as Record<string, unknown>, facets: args['facets'] as Record<string, string>, state: 'pending' });
+          if (opts.submit === 'lost-answer') throw new EstateMcpError('exited before answering proposal.submit');
           return { id };
         }
         if (tool === 'proposal.approve') {
           const p = proposals.get(String(args['id']))!;
+          if (p.state !== 'pending') throw new EstateMcpError(`proposal ${String(args['id'])} is ${p.state}, not pending`);
           if (opts.approve === 'throw') throw new EstateMcpError('approve failed');
           const scope = opts.placeAt ?? (p.payload['reach'] === 'operator' ? `operator:${p.facets['user'] ?? 'local'}` : '');
+          // estate's approve: the memory (a deterministic id, so a re-approve upserts it), THEN the state.
           s.set(`proposal:${String(args['id'])}`, { memory_id: `proposal:${String(args['id'])}`, scope, content: String(p.payload['content']), tier: String(p.payload['tier']), facets: p.facets, created_at: 200 });
+          if (opts.approve === 'never-settles') throw new EstateMcpError('state write failed');
+          if (opts.approve === 'write-then-fail-state' && !approvedOnce.has(String(args['id']))) {
+            approvedOnce.add(String(args['id']));
+            throw new EstateMcpError('state write failed');
+          }
           p.state = 'approved';
           if (opts.approve === 'throw-after-write') throw new EstateMcpError('exited before answering proposal.approve');
           return { outcome: 'promoted', active_id: `memory:proposal:${String(args['id'])}` };
         }
         if (tool === 'proposal.reject') {
-          proposals.get(String(args['id']))!.state = 'rejected';
+          const p = proposals.get(String(args['id']))!;
+          if (p.state !== 'pending') throw new EstateMcpError(`proposal ${String(args['id'])} is ${p.state}, not pending`);
+          p.state = 'rejected';
           return { ok: true };
         }
         throw new Error(`unexpected tool ${tool}`);
@@ -655,6 +674,42 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
       const res = await edit({ memory_id: 'proposal:p0', content: 'new approved words' });
       expect(res.statusCode).toBe(502);
       expect((res.json() as { error: string }).error).toMatch(/landed at scope "operator:local", not ""; they were taken back out, so nothing changed/);
+      expect([...s.keys()]).toEqual(['proposal:p0']);
+    });
+
+    it('codex #1: an approve that wrote the memory but left its proposal pending is approved again, never left pending', async () => {
+      const { s, proposals } = queue([APPROVED], { approve: 'write-then-fail-state' });
+      const res = await edit({ memory_id: 'proposal:p0', content: 'new approved words' });
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json()).toEqual({ memory_id: 'proposal:n1', retired: 'proposal:p0' });
+      expect(proposals.get('n1')!.state).toBe('approved');
+      expect([...s.keys()]).toEqual(['proposal:n1']);
+    });
+
+    it('codex #1: a proposal that stays pending undoes the edit: 502, its memory erased, it rejected, the old one kept', async () => {
+      const { s, proposals } = queue([APPROVED], { approve: 'never-settles' });
+      const res = await edit({ memory_id: 'proposal:p0', content: 'new approved words' });
+      expect(res.statusCode).toBe(502);
+      expect((res.json() as { error: string }).error).toMatch(/stayed pending; they were taken back out, so nothing changed$/);
+      expect(proposals.get('n1')!.state).toBe('rejected');
+      expect([...s.keys()]).toEqual(['proposal:p0']);
+    });
+
+    it('codex #2: a submit whose answer is lost but which filed is found in the queue and rejected: 502, nothing pending', async () => {
+      const { s, proposals } = queue([APPROVED], { submit: 'lost-answer' });
+      const res = await edit({ memory_id: 'proposal:p0', content: 'new approved words' });
+      expect(res.statusCode).toBe(502);
+      expect((res.json() as { error: string }).error).toMatch(/nothing changed$/);
+      expect([...proposals.values()].map((p) => p.state)).toEqual(['rejected']);
+      expect([...s.keys()]).toEqual(['proposal:p0']);
+    });
+
+    it('an approve queue that cannot be read refuses before anything is filed', async () => {
+      const { s, proposals } = queue([APPROVED], { list: 'throw' });
+      const res = await edit({ memory_id: 'proposal:p0', content: 'new approved words' });
+      expect(res.statusCode).toBe(502);
+      expect((res.json() as { error: string }).error).toMatch(/reading the approve queue failed .*nothing changed$/);
+      expect(proposals.size).toBe(0);
       expect([...s.keys()]).toEqual(['proposal:p0']);
     });
 

@@ -687,7 +687,7 @@ describe('approved learnings reach the next run\'s brief', () => {
   describe('only approved learnings reach a brief, and no host path does (crew#1546)', () => {
     const sessionGoal = {
       memory_id: '7c9e6679-7425-40de-944b-e07fc1f90ae7',
-      content: 'Session goal (turn 1) <task-notification> <task-id>b1</task-id> <output-file>/private/tmp/claude-502/-home-alice-other-project/tasks/b1.output</output-file> <status>completed</status> </task-notification>',
+      content: `Session goal (turn 1) <task-notification> <task-id>b1</task-id> <output-file>${tmpdir()}/claude-1000/-home-alice-other-project/tasks/b1.output</output-file> <status>completed</status> </task-notification>`,
       tier: 'working',
       scope: '',
       facets: {},
@@ -699,7 +699,7 @@ describe('approved learnings reach the next run\'s brief', () => {
       const { problem, recalled } = withRunLearnings('Fix seat_login flake', memoryRows({ items: [sessionGoal, approved] }), 'acme-core', null);
       expect(recalled).toBe(1);
       expect(problem).toContain('seat_login tests time out');
-      for (const leak of ['Session goal', 'task-notification', 'output-file', '/private/tmp', 'other-project']) expect(problem).not.toContain(leak);
+      for (const leak of ['Session goal', 'task-notification', 'output-file', tmpdir(), 'other-project']) expect(problem).not.toContain(leak);
     });
 
     it('a store of only unapproved rows adds no block at all, whatever their words, tier, scope or facets', () => {
@@ -719,12 +719,12 @@ describe('approved learnings reach the next run\'s brief', () => {
     });
 
     it('an approved learning that quotes a home or temp path reaches the brief with neither (the crew#1499 redactor)', () => {
-      const quoting = { ...approved, memory_id: 'proposal:9', content: `seat_login needs ${homedir()}/.netrc absent; logs land in ${tmpdir()}/seat-login/run.log and /private/tmp/x.log` };
+      const quoting = { ...approved, memory_id: 'proposal:9', content: `seat_login needs ${homedir()}/.netrc absent; logs land in ${tmpdir()}/seat-login/run.log and /tmp/x.log` };
       const { problem } = withRunLearnings('Fix seat_login flake', memoryRows({ items: [quoting] }), null, null);
       expect(problem).toContain('seat_login needs ~/.netrc absent; logs land in <tmp>/seat-login/run.log and <tmp>/x.log');
       expect(problem).not.toContain(homedir());
       expect(problem).not.toContain(tmpdir());
-      expect(problem).not.toContain('/private/tmp');
+      expect(problem).not.toContain('/tmp/x.log');
     });
   });
 });
