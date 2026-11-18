@@ -143,4 +143,36 @@ describe("a chat job's Start hands the engine the card's seats, even when they e
     expect(launched.clisJson, 'the launch carries the card\'s roster').toBeDefined();
     expect((JSON.parse(launched.clisJson!) as Array<{ key: string }>).map((s) => s.key)).toEqual(['claude', 'codex', 'pi']);
   });
+
+  // (coord merge check on 684bb5c, codex repro) The card's seats say WHICH seats, never that they are usable now: the
+  // launch still waits for roster readiness and checks the lead against the fresh standing before the engine is called.
+  it("a lead whose login expired during launch readiness is refused by name; the engine is never called", async () => {
+    const chatId = 'launch-roster-expired-lead';
+    const opened = await app.inject({ method: 'POST', url: '/api/v1/chats', payload: { chatId, clis: ['claude', 'codex', 'pi'], repoRefs: ['r-crew'], accepts: ['job'] } });
+    expect(opened.statusCode, opened.body).toBe(201);
+    const sent = await app.inject({ method: 'POST', url: `/api/v1/chats/${chatId}/messages`, payload: { text: 'the login page 500s' } });
+    expect(sent.statusCode, sent.body).toBe(202);
+    for (const fn of listeners) fn({ type: 'chatReply', chat: chatId, cliKey: 'claude', text: 'Looks like a bug.', ok: true } as unknown as CoreEvent);
+    await new Promise((r) => setTimeout(r, 50));
+    const made = await app.inject({ method: 'POST', url: `/api/v1/chats/${chatId}/proposals`, payload: { card: 'bug', source: 'pick', requestId: 'r1', words: 'the login page 500s' } });
+    expect(made.statusCode, made.body).toBe(201);
+    const p = (made.json() as { view: ChatProposalView }).view.proposal;
+    expect(p.seats?.keys).toEqual(['claude', 'codex', 'pi']);
+    expect(p.blocked, JSON.stringify(p)).toBeNull();
+
+    const beforeStart = launches.length;
+    // The lead's login check, run by the readiness wait, now reads signed out.
+    duringReadiness = () => {
+      signedIn.delete('claude');
+    };
+    try {
+      const go = await app.inject({ method: 'POST', url: `/api/v1/chats/${chatId}/proposals/${encodeURIComponent(p.pid)}`, payload: { decision: 'go' } });
+      expect(go.statusCode, go.body).toBe(502);
+      expect(go.body).toMatch(/claude/);
+    } finally {
+      duringReadiness = null;
+      signedIn.add('claude');
+    }
+    expect(launches).toHaveLength(beforeStart);
+  });
 });
