@@ -795,6 +795,8 @@ export function chatJobLines(mode: 'cards' | 'prose'): string[] {
     '',
     '`edits` may hold: `card`, `option`, `depth`, `repoRef` (a repository of this chat), `lead` (who builds),',
     '`addSeats`, `removeSeats`, `inputs`, `detail.add` / `detail.remove` (facts from their words the job should carry).',
+    'A seat change is a request: say you asked for it ("I asked to take Pi off"), never that it is done. The card says',
+    'what crew applied (a seat the job needs to check its work stays), and its words are the record.',
     '"Just Claude" names who builds (`{"lead":"claude"}`): the job\'s reviewer and judge stay. A job\'s checks are its own:',
     'when they ask to skip a check or a review, or to tag or publish, say in one sentence that the job keeps it and why,',
     'and send no block (and never carry such words in `detail`). Only QE acceptance has a skip, with their reason in',

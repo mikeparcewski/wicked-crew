@@ -23,6 +23,7 @@ import {
   type ProposalDispatcher,
 } from '../src/api/chat-proposals.js';
 import { jobLaunchCommon, ownWords, personAskedSkip, qeSkipBound } from '../src/api/chat-jobs.js';
+import { NewWorkSeatsRefusal } from '../src/core/job-seats.js';
 import { removeScratch } from './setup/scratch.js';
 
 const ME: Actor = { id: 'maria', kind: 'human', trust: 'operator' };
@@ -628,6 +629,61 @@ describe('reshape (§2.5)', () => {
     const again = await r.svc.reshape(CHAT, { ...base, pid: `${CHAT}:reshape:run1:b`, request: { id: 'b', digest: 'd2' }, confirmLoss: ['parity'] }, ME, 'i1');
     expect(again.code).toBe(200);
     expect(r.launcher.launched.filter((d) => d.resolution.reshapes === 'run1')).toHaveLength(1);
+  });
+});
+
+describe('reshape and a bad newWorkSeats (F1/F2 round 4)', () => {
+  const facts = (card: string): Parameters<ChatProposals['reshape']>[1]['facts'] => ({
+    card, option: undefined, depth: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape',
+  });
+  /** Set what the `newWorkSeats` read answers (the production reader throws `NewWorkSeatsRefusal`). */
+  const setting = (r: Rig, read: NonNullable<ChatProposalDeps['newWorkSeats']>): void => {
+    (r.svc as unknown as { deps: ChatProposalDeps }).deps.newWorkSeats = read;
+  };
+  const invalid = async (): Promise<never> => {
+    throw new NewWorkSeatsRefusal('setting_invalid', 'the newWorkSeats setting is not a list of seat keys');
+  };
+  const held = async (r: Rig) => {
+    await pick(r, 'migrate', { option: 'in-place' });
+    const p = open(r);
+    await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1');
+    return { pid: `${CHAT}:reshape:run1:a`, oldRunId: 'run1', parentPid: p.pid, facts: facts('feature'), edits: { card: 'feature' }, reducedAssurance: false, relaunch: { deliver: 'pr' as const }, request: { id: 'a', digest: 'd1' }, confirmLoss: ['parity'] };
+  };
+
+  it('a fresh reshape is refused with the setting code before the held plan is answered; fixed, it rejects and launches once', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    const base = await held(r);
+    const before = r.launcher.launched.length;
+    setting(r, invalid);
+    const refused = await r.svc.reshape(CHAT, base, ME, 'i1');
+    expect(refused.code).toBe(409);
+    expect(refused.body).toMatchObject({ code: 'setting_invalid' });
+    expect(r.rejects).toBe(0);
+    expect(r.launcher.launched).toHaveLength(before);
+    setting(r, async () => null);
+    expect((await r.svc.reshape(CHAT, base, ME, 'i1')).code).toBe(200);
+    expect(r.rejects).toBe(1);
+    expect(r.launcher.launched).toHaveLength(before + 1);
+  });
+
+  it('an interrupted reshape (held plan answered, launch failed) retried under a bad setting is refused and launches nothing', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    const base = await held(r);
+    const before = r.launcher.launched.length;
+    const launch = r.launcher.launch.bind(r.launcher);
+    r.launcher.launch = async () => { throw new Error('engine unreachable'); };
+    await r.svc.reshape(CHAT, base, ME, 'i1');
+    expect(r.rejects).toBe(1);
+    r.launcher.launch = launch;
+    setting(r, invalid);
+    const retried = await r.svc.reshape(CHAT, base, ME, 'i1');
+    expect(retried.code).toBe(409);
+    expect(retried.body).toMatchObject({ code: 'setting_invalid' });
+    expect(r.launcher.launched).toHaveLength(before);
+    setting(r, async () => null);
+    expect((await r.svc.reshape(CHAT, base, ME, 'i1')).code).toBe(200);
+    expect(r.rejects).toBe(1);
+    expect(r.launcher.launched).toHaveLength(before + 1);
   });
 });
 

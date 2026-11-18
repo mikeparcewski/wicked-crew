@@ -23,7 +23,7 @@ import { promises as fsp } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { videoPalette } from '../appearance/video-palette.js';
-import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanGateNoteUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, settingsFilePath, wickedDir, type RunViewsSnapshot } from '../core/adapter.js';
+import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanGateNoteUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, readNewWorkSeats, settingsFilePath, wickedDir, type RunViewsSnapshot } from '../core/adapter.js';
 import { codeGraphDb, codeGraphErrorStatus, repoFolderMissing, repoFolderMissingBody } from '../core/repoPaths.js';
 import type {
   ConformanceRule,
@@ -229,6 +229,7 @@ import {
 import { BASE_SKILL_POLICIES, BASE_SKILL_REF_SHAPE, baseSkillRemedy } from '../skills/base-skill.js';
 import { REQUIRED_GARDEN_VERSION } from '../skills/plugin-source.js';
 import type { EvalRunStore } from './eval-store.js';
+import { isSeatKeyList } from '../core/job-seats.js';
 import { engineRosterJson, noEligibleSeatBody, parseNoEligibleSeat, toEngineSeat } from '../core/engine-roster.js';
 import { launchAssuranceNotice } from '../core/assurance.js';
 import { launchPosture, type PostureFacts } from '../core/launch-posture.js';
@@ -310,7 +311,7 @@ const BRIEF_COPY_MAX = 512 * 1024;
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
 import { registerInteractiveDocChecks } from '../interactive/doc-checks-routes.js';
 import { crewStateHome, stateHomeOfDb } from '../projects/state-home.js';
-import { demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
+import { demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, jobLaunchRoster, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
 import { DocumentsRefused, documentsClause, RUN_DOCS_TOKENS_MAX, stagedDocumentsOf, stageRunDocuments, type StagedDocuments } from './run-documents.js';
 import { checkSourcePick, projectSources, RUN_SOURCES_MAX, runSourcesDeps, type RunSourcePicks, webScopeReason } from './run-sources.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
@@ -4300,27 +4301,10 @@ export function registerRoutes(
       const resolved = resolveOption(p.shape.card, p.shape.option, served);
       if (resolved === null) throw new Error(`${p.what.label} is no longer in the catalog`);
       const selfSeated = resolved.workflow !== null && SELF_SEATED.has(resolved.workflow);
-      // The seats the person saw: the lead, and the roster narrowed to the proposal's keys.
-      const lead = p.seats?.lead ?? undefined;
-      const keys = p.seats?.keys ?? [];
-      // A reshape inherits the held run's roster configuration; its membership is still the proposal's seats (codex r2).
-      let inherited: Array<{ key?: unknown }> | null = null;
-      if (p.relaunch?.clisJson !== undefined) {
-        try {
-          const parsedRoster = JSON.parse(p.relaunch.clisJson) as unknown;
-          if (Array.isArray(parsedRoster)) inherited = parsedRoster as Array<{ key?: unknown }>;
-        } catch {
-          inherited = null;
-        }
-      }
-      const current = launchRosterNaming(rosterWithStanding(), lead);
-      // Inherited configuration for the seats it names; the current roster's entry for a seat added since (codex r3).
-      const roster = inherited === null ? current : [...inherited, ...current.filter((s) => !inherited!.some((i) => i.key === s.key))];
-      const narrowed = keys.length > 0 ? roster.filter((s) => keys.includes(String(s.key))) : roster;
-      const missingSeat = keys.find((k) => !roster.some((s) => String(s.key) === k));
-      if (missingSeat !== undefined) throw new Error(`${missingSeat} is not on this daemon's roster; change who works on it`);
+      // The seats the person saw: the lead, and the roster narrowed to the proposal's keys (`jobLaunchRoster`).
+      const { clisJson } = jobLaunchRoster(launchRosterNaming(rosterWithStanding(), p.seats?.lead ?? undefined), p);
       const common = jobLaunchCommon(p, { runId: d.identity.runId, chatId: d.chatId }, {
-        ...((inherited !== null || narrowed.length !== roster.length) && narrowed.length > 0 ? { clisJson: JSON.stringify(narrowed) } : {}),
+        ...(clisJson !== undefined ? { clisJson } : {}),
         selfSeated,
       });
       // A power Start was checked before accepting; checked again here, so it never runs phased behind the person's back.
@@ -5154,7 +5138,8 @@ export function registerRoutes(
         // proposal, completing the proposal while the chat is open; never open the id again (codex r1).
         const open = askPaths.get(seedChatId) !== undefined || chatScopes.get(seedChatId) !== undefined;
         if (open || chatHistory?.has(seedChatId) === true) {
-          let view = chatProposals.viewOfPid(seedChatId, personPid(seedChatId, seedActor.id, b.requestId!));
+          const stored = chatProposals.viewOfPid(seedChatId, personPid(seedChatId, seedActor.id, b.requestId!));
+          let view = stored === null ? null : await chatProposals.servedView(stored);
           // The same request id with another seed is not a retry (codex r2).
           if (view !== null && view.proposal.request?.digest !== requestDigest(seedBody(b.seed, b.requestId!))) {
             return reply.code(409).send({ code: 'request_reused', error: 'this requestId already started a chat with another job', chatId: seedChatId });
@@ -5672,6 +5657,8 @@ export function registerRoutes(
       };
     },
     rosterEligible: () => proposalRoster(rosterWithStanding()),
+    // (F1/F2) Agents › "Use <seat> for new work": the pool every new chat job and document is drawn from.
+    newWorkSeats: readNewWorkSeats,
     runs: async () => (await adapter.sessionsDetail()).map((v) => decorateRun(v)),
     chatOfRun: (runId) => runTimingIndex.chatIdFor(runId),
     isAskPath: (runId) => runTimingIndex.isAskPath(runId),
@@ -6531,7 +6518,9 @@ export function registerRoutes(
           // turn. The file goes with the chat on `chatClosed` UNLESS a run promoted from it is still
           // live (crew#619 retention — dropped when that run terminals), so a reclaimed id answers
           // `[]` only once no promoted run holds the old file.
-          ...(chatTranscripts !== undefined ? { messages: chatTranscripts.read(id) } : {}),
+          // (F1/F2) Served like `GET /chats/:id/messages`: an open job or document reads blocked while `newWorkSeats`
+          // can't be honored.
+          ...(chatTranscripts !== undefined ? { messages: await chatProposals.withSeatsSetting(chatTranscripts.read(id)) } : {}),
         };
       } catch (err) {
         return reply.code(400).send({ error: message(err) });
@@ -6660,7 +6649,8 @@ export function registerRoutes(
       if (chat !== null) await chatProposals.reopenStale(id).catch(() => false);
       const messages = chat === null ? null : chatHistory.messages(id);
       if (chat === null || messages === null) return reply.code(404).send({ error: `no chat ${id} in this daemon's history` });
-      return { chat, messages, attachments: chatAttachments.list(id) };
+      // (F1/F2) An open job or document reads blocked while `newWorkSeats` can't be honored: a live state, read now.
+      return { chat, messages: await chatProposals.withSeatsSetting(messages), attachments: chatAttachments.list(id) };
     },
   );
 
@@ -9942,6 +9932,16 @@ export function registerRoutes(
         return reply.code(403).send({ error: 'Only a person can change the power mode default (powerModeDefault)' });
       }
     }
+    // newWorkSeats (F1/F2): which seats new chats and jobs are drawn from (`core/job-seats.ts`). A list of seat keys,
+    // or null for the default rule; a person's choice only (a worker's bearer gets 403).
+    if (Object.hasOwn(patch, 'newWorkSeats')) {
+      if (patch.newWorkSeats !== null && !isSeatKeyList(patch.newWorkSeats)) {
+        return reply.code(400).send({ error: 'newWorkSeats must be a list of seat keys (at most 64), or null' });
+      }
+      if (!isHumanOperator(actorOf(req))) {
+        return reply.code(403).send({ error: 'Only a person can change which seats new work uses (newWorkSeats)' });
+      }
+    }
     // qeAcceptance (api-types 0.120.0): 'required' | 'off' only. 'off' skips QE acceptance on every
     // launch that requires it (labelled with the setting), so a typo must be a 400, never a dropped key.
     // Turning it off waives an assurance instrument on every launch after it, so only a PERSON may
@@ -10045,6 +10045,7 @@ export function registerRoutes(
       'deliverDefault',
       'qeAcceptance',
       'powerModeDefault',
+      'newWorkSeats',
       'onboardingAutoCapture',
       'deliverIdentityLogin',
       'deliverIdentityByRepo',

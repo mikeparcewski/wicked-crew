@@ -2,7 +2,7 @@ import { builtinDefs as deriveBuiltinDefs, engineDefOf } from './builtin-catalog
 import { createRequire } from 'node:module';
 import type { BusUnavailable } from './engine-bus.js';
 import { attachEngineBus, detachEngineBus, type EngineBus } from './bus.js';
-import { mkdir, access, readFile, writeFile, chmod, rm, link, rename, realpath, stat } from 'node:fs/promises';
+import { mkdir, access, readFile, writeFile, chmod, rm, link, rename, realpath, stat, lstat } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, dirname, resolve, isAbsolute, relative, sep } from 'node:path';
 import { isPlainRunId, WALKTHROUGH_AUTHOR_SUBDIR, walkthroughRootDir } from './walkthrough-root.js';
@@ -83,6 +83,7 @@ import { isRequirementsGraphSettings } from './requirements-graph-setting.js';
 import { QE_OFF_REASON, launchRequiresQe, qeAcceptanceMode, qeSettingSkipReason } from './qe-acceptance-setting.js';
 import { applyVaultBinEnv, BOOT_VAULT_BIN, resolveShippedVaultBin, type VaultBinInputs, type VaultBinPosture } from './vault-bin.js';
 import { withFolderFindings } from './repoPaths.js';
+import { NEW_WORK_SEATS_FIX, NewWorkSeatsRefusal, isSeatKeyList } from './job-seats.js';
 
 
 
@@ -155,6 +156,52 @@ function diskQeAcceptanceMode(): 'required' | 'off' {
 /** The historical machine-wide settings file — the default state home's, and the one-time seed of any other (crew#756). */
 function sharedSettingsFilePath(): string {
   return join(homedir(), '.config', 'wicked-core', 'settings.json');
+}
+
+/**
+ * (F1/F2) The `newWorkSeats` pick, read STRICTLY for new work: `null` when nothing is set (no settings file, the key
+ * absent, or `null`), the list when it is a list of seat keys. A file that can't be read or parsed, or a value that
+ * isn't a list of seat keys, throws `NewWorkSeatsRefusal`: new work is refused with the reason, never drawn from
+ * every seat (`getSettings` serves defaults on a failed read, which here would widen the pool). A module function, like
+ * `settingsFilePath`: it reads the file itself, whatever adapter the routes were given.
+ */
+export async function readNewWorkSeats(): Promise<readonly string[] | null> {
+  const path = settingsFilePath();
+  let raw: string;
+  try {
+    await seedStateHomeSettings(path);
+    raw = await readFile(path, 'utf8');
+  } catch (err) {
+    // Absent only when no entry is there at all: a settings link whose target is gone is a file that can't be read.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT' && !(await lstat(path).then(() => true, () => false))) return null;
+    const why = (err as NodeJS.ErrnoException).code ?? (err instanceof Error ? err.message : String(err));
+    throw new NewWorkSeatsRefusal(
+      'settings_unavailable',
+      `crew can't read its settings file (${why}), so it can't tell which seats new work may use (newWorkSeats); it won't start new work on every seat instead. Fix ${path}, or ${NEW_WORK_SEATS_FIX}`,
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = undefined;
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new NewWorkSeatsRefusal(
+      'settings_unavailable',
+      `crew's settings file is not a JSON object, so it can't tell which seats new work may use (newWorkSeats); it won't start new work on every seat instead. Fix ${path}, or ${NEW_WORK_SEATS_FIX}`,
+    );
+  }
+  if (!Object.hasOwn(parsed, 'newWorkSeats')) return null;
+  const v = (parsed as { newWorkSeats: unknown }).newWorkSeats;
+  if (v === null) return null;
+  if (!isSeatKeyList(v)) {
+    throw new NewWorkSeatsRefusal(
+      'setting_invalid',
+      `the newWorkSeats setting (which seats new work may use) is not a list of seat keys, so crew won't guess: ${NEW_WORK_SEATS_FIX} (or fix it in ${path})`,
+    );
+  }
+  return v;
 }
 
 /**
@@ -4174,7 +4221,7 @@ export class CoreAdapter {
 
   /** The settings as read, and whether the read succeeded: a file that could not be read, parsed or
    *  validated serves the defaults (`ok: false`), which the engine's QE mirror reads as a failure. */
-  private async readSettings(): Promise<{ settings: CrewSystemSettings; ok: boolean }> {
+  private async readSettings(): Promise<{ settings: CrewSystemSettings; ok: boolean; kept?: Partial<CrewSystemSettings> }> {
     await seedStateHomeSettings(settingsFilePath());
     try {
       const raw = await readFile(settingsFilePath(), 'utf8');
@@ -4290,6 +4337,14 @@ export class CoreAdapter {
       if ('qeAcceptance' in parsed && parsed.qeAcceptance !== 'required' && parsed.qeAcceptance !== 'off') delete parsed.qeAcceptance;
       // powerModeDefault (program DES-POWER-MODE): a boolean only; anything else reads as the shipped default (on).
       if ('powerModeDefault' in parsed && typeof parsed.powerModeDefault !== 'boolean') delete parsed.powerModeDefault;
+      // newWorkSeats (F1/F2): a list of seat keys, or null. An invalid value is left out of the settings served (they
+      // keep the API's type) but KEPT for the next write (`kept`): new work reads it strictly (`readNewWorkSeats`) and
+      // refuses it, and an unrelated write that erased it would quietly widen the pool to every seat.
+      let kept: Partial<CrewSystemSettings> | undefined;
+      if ('newWorkSeats' in parsed && parsed.newWorkSeats !== null && !isSeatKeyList(parsed.newWorkSeats)) {
+        kept = { newWorkSeats: parsed.newWorkSeats };
+        delete parsed.newWorkSeats;
+      }
       // onboardingAutoCapture (crew#552): a boolean only; anything else reads as the shipped default.
       if ('onboardingAutoCapture' in parsed && typeof parsed.onboardingAutoCapture !== 'boolean') delete parsed.onboardingAutoCapture;
       // baseSkillRef / baseSkillPolicy (crew#554): the same shapes PUT /settings admits — a string
@@ -4341,17 +4396,18 @@ export class CoreAdapter {
           );
         }
       }
-      return { settings: { ...DEFAULT_SETTINGS, ...parsed }, ok: true };
+      return { settings: { ...DEFAULT_SETTINGS, ...parsed }, ok: true, ...(kept !== undefined ? { kept } : {}) };
     } catch {
       return { settings: { ...DEFAULT_SETTINGS }, ok: false };
     }
   }
 
   async updateSettings(patch: Partial<CrewSystemSettings>): Promise<CrewSystemSettings> {
-    const current = await this.getSettings();
+    const { settings: current, kept } = await this.readSettings();
     const next = { ...current, ...patch };
     try {
-      await publishSettingsFile(settingsFilePath(), JSON.stringify(next, null, 2), true);
+      // An invalid value the read left out is written back unless this patch replaces it (`kept`, newWorkSeats).
+      await publishSettingsFile(settingsFilePath(), JSON.stringify({ ...current, ...kept, ...patch }, null, 2), true);
     } finally {
       // The file as it now stands (this write, or a later one that already landed).
       this.syncEngineQeSetting(true);

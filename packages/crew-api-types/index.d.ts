@@ -7115,6 +7115,12 @@ export interface SystemSettings {
    */
   powerModeDefault?: boolean | undefined;
   /**
+   * (api-types 0.214.0; F1/F2, B7) "Use <seat> for new work": the seats new chats and jobs are drawn from (roster keys). ABSENT or `null`
+   * = the default rule (every seat that can work, opt-in seats left out). A seat named on a job is still used.
+   * Human actors only.
+   */
+  newWorkSeats?: string[] | null | undefined;
+  /**
    * The watch registry's operator settings (TR-W5a, api-types 0.73.0): only `enabled` and
    * `threshold` of a shipped entry, and the LLM lane switch. A `watch` patch needs a human actor
    * (a worker's bearer is refused 403); the daemon stamps who changed what and when.
