@@ -187,7 +187,7 @@ import {
 } from './governance-steering.js';
 import { atProposeGate, draftedSteeringRules, isSteeringAuthorRun, landSteeringProposal, type SteeringProposalSnapshot } from './steering-landing.js';
 import { inventoryComplete, parseInventoryClaims, type InventoryClaim } from '../core/inventory-claim.js';
-import type { GateAction, RejudgeOffer, RunInventoryResponse, RunLearningsResponse, SeatRecordResponse, SkipQeOffer } from 'wicked-crew-api-types';
+import type { GateAction, LaunchPreviewPosture, LaunchPreviewResponse, RejudgeOffer, RunInventoryResponse, RunLearningsResponse, SeatRecordResponse, SkipQeOffer } from 'wicked-crew-api-types';
 import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, FileProposalSchema, registerCaptureRoutes } from './capture.js';
 import { registerTestingRoutes } from './testing.js';
 import { registerDefaultEvalRoutes, runAndRecord, type DefaultEvalDeps } from '../evals/routes.js';
@@ -231,6 +231,7 @@ import { REQUIRED_GARDEN_VERSION } from '../skills/plugin-source.js';
 import type { EvalRunStore } from './eval-store.js';
 import { engineRosterJson, noEligibleSeatBody, parseNoEligibleSeat, toEngineSeat } from '../core/engine-roster.js';
 import { launchAssuranceNotice } from '../core/assurance.js';
+import { launchPosture, type PostureFacts } from '../core/launch-posture.js';
 import { launchRequiresQe, mayRequireQe, qeAcceptanceMode, qeSettingSkipReason } from '../core/qe-acceptance-setting.js';
 import {
   aggregateReceipt,
@@ -3575,7 +3576,6 @@ export function registerRoutes(
       input.demoRoot = demo.root;
     }
     if (b.entityMode !== undefined) input.entityMode = b.entityMode;
-    if (b.humanConfirm !== undefined) input.humanConfirm = b.humanConfirm;
     // F-E2E-030: only the explicit `'auto'` opts out of the engine's deliver gate. `'human'` and
     // an omitted field both leave `autoDeliver` off the input — the gate is the engine's default,
     // so the wire never has to say "gate me" to be gated.
@@ -3606,7 +3606,6 @@ export function registerRoutes(
             '(unless the launch explicitly skips QE acceptance with a reason: skipQeAcceptance)',
         });
       }
-      input.autoDeliver = true;
     }
     if (b.repoRef !== undefined) input.repoRef = b.repoRef;
     if (b.workflow !== undefined) input.workflow = b.workflow;
@@ -3630,89 +3629,30 @@ export function registerRoutes(
         `run ${input.sessionId}: ${decision.reason}`,
       );
     }
-    // The delivery contract (crew#393): a completed code run must end with a reviewable
-    // deliverable, or an explicit, recorded decision not to. So the deliver option is resolved
-    // HERE, at the boundary, for every launch:
-    //   - explicit 'pr' / 'none' wins (the operator decided);
-    //   - omitted + repo-scoped + a CODE-WORK workflow (the def carries at least one
-    //     `executes_code` phase that is NOT an evaluator — feature/bug/migration and a Tool
-    //     phase that writes, not chat/onboarding/recon, and not domain-extraction, whose only
-    //     code phase is the `coverage` EVALUATOR, which executes code solely to write its own
-    //     report into the tree for its validator — nothing to deliver) ⇒ the
-    //     daemon's `deliverDefault` setting ('pr' unless the operator flipped it) — the default
-    //     that keeps run 83052f0b's work from stranding invisibly again. The code-work guard is
-    //     the issue's own scope ("default deliver:'pr' for CODE-WORK launches"): a read-only
-    //     workflow leaves a clean worktree, and the deliver script FAILS a clean worktree loudly
-    //     ("nothing to deliver", crew#317) — defaulting it on would flip every repo-scoped chat
-    //     from completed to failed;
-    //   - omitted otherwise ⇒ 'none': a repo-less run has no worktree to lift, and a free-text
-    //     run has no def to append the deliver phase to (the adapter REFUSES deliver:'pr'
-    //     without a workflow rather than silently dropping it, so defaulting it on would turn
-    //     a legal launch into a 400).
-    // The adapter input spells 'none' as an omitted field; the audit entry below records the
-    // RESOLVED value either way, plus whether it was defaulted.
-    let deliver: 'pr' | 'none';
-    let deliverDefaulted = false;
-    if (b.deliver !== undefined) {
-      deliver = b.deliver;
-    } else if (b.repoRef !== undefined && b.workflow !== undefined) {
-      // Unknown def ⇒ no default (the launch fails at workflow resolution with its own error —
-      // defaulting 'pr' onto it would swap that for a misleading deliver-flavored one).
-      const def = adapter.getWorkflow(b.workflow);
-      const codeWork =
-        def !== null &&
-        def.phases.some((p) => p.executes_code === true && p.role !== 'evaluator');
-      deliver =
-        codeWork && (await adapter.getSettings()).deliverDefault !== 'none' ? 'pr' : 'none';
-      deliverDefaulted = true;
-    } else {
-      deliver = 'none';
-      deliverDefaulted = true;
-    }
+    // (studio#1150) The launch's human gates — power, the posture the engine keeps, delivery and its gate — are ONE
+    // decision (`core/launch-posture.ts`), the same one `POST /runs/preview` answers for this body, so a launch form
+    // shows what the run keeps. The rules (crew#393 delivery, DES-POWER-MODE, F-E2E-030) are documented there.
+    const posture = await launchPosture(b, postureFacts, { powerRequired: ctx.powerRequired });
+    let deliver: 'pr' | 'none' = posture.resolvedDeliver;
+    const deliverDefaulted = posture.deliverDefaulted;
     if (deliver === 'pr') input.deliver = 'pr';
+    if (posture.autoDeliver) input.autoDeliver = true;
     // wicked-core#850 EX-01/EX-02: forwarded only when the caller sent it — crew never waives
     // assurance on anyone's behalf (a one-CLI launch that did not is TOLD so in its answer, below).
     if (b.reducedAssurance === true) input.reducedAssurance = true;
-    // (program DES-POWER-MODE, operator ruling 2026-10-29) POWER MODE is the default way a job runs:
-    // the launch's own word, else the `powerModeDefault` setting (on when unset). Only a repo-scoped
-    // plan or preset launch can run as one orchestrator session, and only on an engine that carries it
-    // (any other launch is phased, said in the answer). A power launch has no plan-approval gate:
-    // the only human gate is deliver, plus what policy requires (a high-risk plan still holds).
-    let powerNotice: string | null = null;
-    let humanConfirmNotice: string | null = null;
-    // The caller's word, else the setting (read only when the launch did not say).
-    const powerWanted = b.power ?? (b.repoRef !== undefined && (b.workflow !== undefined || b.plan !== undefined)
-      ? ((await adapter.getSettings()).powerModeDefault ?? true)
-      : false);
-    if (powerWanted) {
-      // A plan, or a workflow the engine resolves to a PRESET (a registered def is planned the legacy way
-      // and has no orchestrator build): only those run in power mode, so only those lose run-level gates.
-      const isPreset = b.plan !== undefined || (b.workflow !== undefined && await namesPreset(b.workflow, b.projectId));
-      if (b.repoRef === undefined || !isPreset) {
-        powerNotice = 'power mode runs a repo-scoped plan or preset launch; this launch runs phased';
-      } else if (!powerSupported()) {
-        powerNotice = 'this engine has no power mode; the launch runs phased';
-      } else if (ctx.powerRequired === true && ((await adapter.getSettings()).powerModeDefault ?? true) === false) {
-        // A chat job's power Start follows the setting up to the engine call (it may have been turned off meanwhile).
-        powerNotice = 'Power mode for new jobs is off on this daemon; the launch runs phased';
-      }
-      // A chat job's power Start is never run phased in its place (the person chose no plan review for a power run).
-      if (powerNotice !== null && ctx.powerRequired === true) {
-        return reply.code(409).send({ code: 'power_unavailable', error: `${powerNotice.replace(/; this launch runs phased|; the launch runs phased/u, '')}; press Start with Review plan on` });
-      }
-      if (powerNotice === null) {
-        input.power = true;
-        // (studio#1150) A power run asks once, at hand-off: a posture the launch named is not kept — and the answer says so.
-        if (input.humanConfirm !== undefined && input.humanConfirm !== 'none') {
-          humanConfirmNotice = `power mode asks once, at hand-off: humanConfirm ${input.humanConfirm} is not kept (launch with power: false to keep it)`;
-        }
-        input.humanConfirm = 'none';
-        // DES-LEARN §3.3 / wicked-core#1216: the orchestrator talks to the person in their personality
-        // for this project (the project's override, else theirs). The engine hands it to the
-        // orchestrator only; reviewers, judges and QE never hear it.
-        const { voice } = voiceFor(b.projectId);
-        if (voice !== undefined) input.voice = voice;
-      }
+    const { powerNotice, humanConfirmNotice } = posture;
+    // A chat job's power Start is never run phased in its place (the person chose no plan review for a power run).
+    if (posture.powerRefusal !== null) {
+      return reply.code(409).send({ code: 'power_unavailable', error: posture.powerRefusal });
+    }
+    if (posture.humanConfirm !== undefined) input.humanConfirm = posture.humanConfirm;
+    if (posture.power) {
+      input.power = true;
+      // DES-LEARN §3.3 / wicked-core#1216: the orchestrator talks to the person in their personality
+      // for this project (the project's override, else theirs). The engine hands it to the
+      // orchestrator only; reviewers, judges and QE never hear it.
+      const { voice } = voiceFor(b.projectId);
+      if (voice !== undefined) input.voice = voice;
     }
     // QE-IN-APP-WORKFLOWS: the operator's explicit skip (with its reason) or force — forwarded only
     // when sent, never inferred.
@@ -3931,7 +3871,7 @@ export function registerRoutes(
       }
       deliver = 'none';
     }
-    const isReview = b.workflow === REVIEW_WORKFLOW && runtime.reviewLaunch !== undefined;
+    const isReview = b.workflow !== undefined && reviewPrepared(b.workflow);
     if (isReview) {
       try {
         await (runtime.reviewLaunch as NonNullable<RuntimeDeps['reviewLaunch']>)(input);
@@ -4263,6 +4203,44 @@ export function registerRoutes(
     async (req, reply) => {
       const out = await launchRun(req.body, { actor: actorOf(req), log: req.log });
       return reply.code(out.statusCode).send(out.payload);
+    },
+  );
+
+  // (studio#1150) What a launch of this body would keep of its human gates — the SAME `launchPosture` decision
+  // `POST /runs` hands the engine — with nothing launched, recorded or read beyond what that decision reads. A launch
+  // form renders it (and sends the `power` it shows) instead of modelling crew's rules.
+  const LaunchPreviewSchema = z.strictObject({
+    power: z.boolean().optional(),
+    repoRef: z.string().min(1).optional(),
+    workflow: z.string().min(1).optional(),
+    plan: PlanSchema.optional(),
+    projectId: z.string().min(1).optional(),
+    humanConfirm: z.string().min(1).optional(),
+    deliver: z.enum(['pr', 'none']).optional(),
+    deliverGate: z.enum(['human', 'auto']).optional(),
+  }).refine((b) => b.plan === undefined || b.workflow === undefined, {
+    path: ['plan'],
+    error: 'plan and workflow are mutually exclusive',
+  }).refine((b) => b.deliverGate === undefined || b.deliver !== 'none', {
+    path: ['deliverGate'],
+    error: 'deliverGate has no meaning with deliver: "none" — there is no deliver phase to gate',
+  });
+  app.post(
+    `${V}/runs/preview`,
+    { config: { manifest: { requestType: 'LaunchPreviewBody', responseType: 'LaunchPreviewResponse', statusCodes: [200, 400] } } },
+    async (req, reply) => {
+      const parsed = LaunchPreviewSchema.safeParse(req.body ?? {});
+      if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
+      const p = await launchPosture(parsed.data, postureFacts);
+      const posture: LaunchPreviewPosture = {
+        power: p.power,
+        ...(p.humanConfirm !== undefined ? { humanConfirm: p.humanConfirm } : {}),
+        deliver: p.deliver,
+        autoDeliver: p.autoDeliver,
+        ...(p.powerNotice !== null ? { powerNotice: p.powerNotice } : {}),
+        ...(p.humanConfirmNotice !== null ? { humanConfirmNotice: p.humanConfirmNotice } : {}),
+      };
+      return { posture } satisfies LaunchPreviewResponse;
     },
   );
 
@@ -7836,6 +7814,49 @@ export function registerRoutes(
   function powerSupported(): boolean {
     return typeof adapter.supportsPowerMode === 'function' && adapter.supportsPowerMode();
   }
+
+  /** A hand launch of the run review is prepared by the daemon (DES-RUNS-REVIEW-001 §3) when it carries the review service. */
+  function reviewPrepared(workflow: string): boolean {
+    return workflow === REVIEW_WORKFLOW && runtime.reviewLaunch !== undefined;
+  }
+
+  /** (studio#1150) What `launchPosture` reads of this daemon, for `POST /runs` and `POST /runs/preview` alike. */
+  const postureFacts: PostureFacts = {
+    powerModeDefault: async () => (await adapter.getSettings()).powerModeDefault ?? true,
+    namesPreset,
+    powerSupported,
+      // The delivery contract (crew#393): a completed code run must end with a reviewable
+      // deliverable, or an explicit, recorded decision not to. So the deliver option is resolved
+      // HERE, at the boundary, for every launch:
+      //   - explicit 'pr' / 'none' wins (the operator decided);
+      //   - omitted + repo-scoped + a CODE-WORK workflow (the def carries at least one
+      //     `executes_code` phase that is NOT an evaluator — feature/bug/migration and a Tool
+      //     phase that writes, not chat/onboarding/recon, and not domain-extraction, whose only
+      //     code phase is the `coverage` EVALUATOR, which executes code solely to write its own
+      //     report into the tree for its validator — nothing to deliver) ⇒ the
+      //     daemon's `deliverDefault` setting ('pr' unless the operator flipped it) — the default
+      //     that keeps run 83052f0b's work from stranding invisibly again. The code-work guard is
+      //     the issue's own scope ("default deliver:'pr' for CODE-WORK launches"): a read-only
+      //     workflow leaves a clean worktree, and the deliver script FAILS a clean worktree loudly
+      //     ("nothing to deliver", crew#317) — defaulting it on would flip every repo-scoped chat
+      //     from completed to failed;
+      //   - omitted otherwise ⇒ 'none': a repo-less run has no worktree to lift, and a free-text
+      //     run has no def to append the deliver phase to (the adapter REFUSES deliver:'pr'
+      //     without a workflow rather than silently dropping it, so defaulting it on would turn
+      //     a legal launch into a 400).
+      // The adapter input spells 'none' as an omitted field; the audit entry below records the
+      // RESOLVED value either way, plus whether it was defaulted.
+    deliverDefault: async (workflow) => {
+      // Unknown def ⇒ no default (the launch fails at workflow resolution with its own error —
+      // defaulting 'pr' onto it would swap that for a misleading deliver-flavored one).
+      const def = adapter.getWorkflow(workflow);
+      const codeWork = def !== null && def.phases.some((p) => p.executes_code === true && p.role !== 'evaluator');
+      return codeWork && (await adapter.getSettings()).deliverDefault !== 'none' ? 'pr' : 'none';
+    },
+    // The launch route removes a change review's delivery (it posts nothing), and a run review's preparation removes it
+    // (`ReviewService.prepareLaunch`). The default evals' preparation keeps whatever delivery was resolved.
+    preparationDropsDelivery: (workflow) => workflow === REVIEW_CHANGE_WORKFLOW || reviewPrepared(workflow),
+  };
 
   // ── Power mode (program DES-POWER-MODE; api-types 0.149.0) ─────────────────────────────────────
   // The engine computes every rigor value; these routes only carry a person's switch, raise or pause

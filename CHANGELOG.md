@@ -16,6 +16,7 @@ mentioned only where a daemon release depends on them.
   `feat: The requirements list API carries each requirement's business domain`, not `feat: Repository: wicked-crew`.
   Prose that starts with the word (`Repository: x is missing its CHANGELOG`) keeps its words; the PR body keeps the
   intent verbatim.
+- feat(launch): `POST /runs/preview` answers the human gates a launch of the body would keep (power, the posture the engine keeps, delivery and its gate) from the SAME decision `POST /runs` makes (`core/launch-posture.ts`), so a launch form shows what the run keeps instead of modelling crew's rules. The launch's inline power and deliver resolution is replaced by that one function, behaviour unchanged. wicked-crew-api-types 0.212.0 (additive): `LaunchPreviewBody`, `LaunchPreviewPosture`, `LaunchPreviewResponse` (studio#1150).
 
 ## [0.18.17] — 2026-11-17
 
