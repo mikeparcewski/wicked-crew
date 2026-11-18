@@ -3,7 +3,7 @@
 // is what the launch does — and both are what the launch route did before the decision was lifted out of it
 // (`mainSays`, the rules restated here independently of the code under test).
 
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -13,7 +13,9 @@ import { afterAll, describe, expect, it, vi, type Mock } from 'vitest';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { registerRoutes } from '../src/api/routes.js';
-import type { CoreAdapter } from '../src/core/adapter.js';
+import { readNewWorkSeats, type CoreAdapter } from '../src/core/adapter.js';
+import { ReviewService } from '../src/insights/review-service.js';
+import { InsightsStore } from '../src/insights/store.js';
 import type { LaunchRunInput } from '../src/core/types.js';
 
 // The default evals run in-process at launch; here they answer at once (the preparation itself is the real one).
@@ -226,6 +228,40 @@ describe('POST /runs/preview == POST /runs (studio#1150)', () => {
       expect(launched.statusCode, JSON.stringify(body)).toBe(201);
       expect(input?.deliver).toBeUndefined();
       expect(preview.json().posture.deliver).toBe('none');
+    }
+  });
+
+  it('(crew#1592) a hand launch of the run review takes its seat from newWorkSeats through the real preparer and reader; a bad setting is a 409 that launches nothing', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'posture-review-seat-'));
+    const file = join(root, 'settings.json');
+    const armed = process.env['WICKED_CREW_SYSTEM_SETTINGS'];
+    process.env['WICKED_CREW_SYSTEM_SETTINGS'] = file;
+    try {
+      const prepared = (runId: string) => {
+        const service = new ReviewService({
+          store: new InsightsStore(join(root, `insights-${runId}.json`)),
+          adapter: { sessionsDetail: async () => [], runEvents: async () => [], seatsForWorkflow: async () => [{ key: 'claude' }, { key: 'codex' }] },
+          reviewsDir: join(root, `reviews-${runId}`),
+          newWorkSeats: readNewWorkSeats,
+          estateTool: async () => ({}),
+          log: () => undefined,
+        });
+        return async (input: LaunchRunInput) => { await service.prepareLaunch(input, { trigger: 'manual' }); };
+      };
+      writeFileSync(file, JSON.stringify({ newWorkSeats: ['codex'] }));
+      const ok = await both({ workflow: 'review-recent-work' }, { reviewLaunch: prepared('a') });
+      expect(ok.launched.statusCode).toBe(201);
+      expect((JSON.parse(ok.input!.clisJson) as Array<{ key: string }>).map((x) => x.key)).toEqual(['codex']);
+      expect(ok.input!.primary).toBe('codex');
+      writeFileSync(file, JSON.stringify({ newWorkSeats: 'codex' }));
+      const { app, adapter } = await daemon(d, { reviewLaunch: prepared('b') });
+      const refused = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'x', clisJson: '[]', workflow: 'review-recent-work' } });
+      expect(refused.statusCode).toBe(409);
+      expect(refused.json().error).toMatch(/^the review could not be prepared: .*newWorkSeats/);
+      expect(adapter.launchRun!).not.toHaveBeenCalled();
+    } finally {
+      if (armed === undefined) delete process.env['WICKED_CREW_SYSTEM_SETTINGS'];
+      else process.env['WICKED_CREW_SYSTEM_SETTINGS'] = armed;
     }
   });
 

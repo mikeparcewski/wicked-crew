@@ -4,16 +4,17 @@
  * delivers nothing. Ingest keeps crew's ranked recommendations (the seat only words them), files the proposals, and
  * Accept / Dismiss update state.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import Fastify from 'fastify';
-import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AuditLog } from '../src/api/audit.js';
+import { readNewWorkSeats } from '../src/core/adapter.js';
 import type { Actor, LaunchRunInput } from '../src/core/types.js';
 import { isSystemWorkflow } from '../src/core/run-identity.js';
 import { FACTS_FILE, REPORT_FILE, runAnalyze } from '../src/insights/analyze-cli.js';
-import { OUT_DIR, ReviewService, githubNewIssueUrl, pickSeat } from '../src/insights/review-service.js';
+import { OUT_DIR, ReviewPreparationRefused, ReviewService, githubNewIssueUrl, pickSeat } from '../src/insights/review-service.js';
 import { registerInsightsRoutes } from '../src/insights/routes.js';
 import { InsightsStore } from '../src/insights/store.js';
 import { REVIEW_WORKFLOW, loadReviewWorkflow } from '../src/insights/workflow.js';
@@ -56,7 +57,7 @@ function eventsOf(id: string) {
   ];
 }
 
-function rig(opts: { views?: () => unknown[]; seats?: unknown[] } = {}) {
+function rig(opts: { views?: () => unknown[]; seats?: unknown[]; newWorkSeats?: () => Promise<readonly string[] | null> } = {}) {
   const root = scratch();
   const store = new InsightsStore(join(root, 'daemon-insights.json'));
   const calls: { tool: string; args: Record<string, unknown> }[] = [];
@@ -69,6 +70,7 @@ function rig(opts: { views?: () => unknown[]; seats?: unknown[] } = {}) {
       listRepos: async () => [{ id: 'core', git_url: 'git@github.com:acme/core.git' }],
     },
     reviewsDir: join(root, 'reviews'),
+    ...(opts.newWorkSeats !== undefined ? { newWorkSeats: opts.newWorkSeats } : {}),
     estateTool: async (tool, args) => {
       calls.push({ tool, args });
       return tool === 'proposal.submit' ? { id: `prop-${calls.length}` } : { ok: true };
@@ -105,6 +107,68 @@ describe('the review-recent-work workflow def (data)', () => {
     expect((def as { required_instruments?: unknown }).required_instruments).toEqual([]);
     expect('$comment' in def).toBe(false);
     expect(isSystemWorkflow(def.id)).toBe(false); // offered as /workflow-review-recent-work
+  });
+});
+
+describe('the review seat and the seats new work may use (crew#1592, F1/F2)', () => {
+  // The production reader over a real settings file (`WICKED_CREW_SYSTEM_SETTINGS`), as server.ts wires it.
+  const armed = process.env['WICKED_CREW_SYSTEM_SETTINGS'];
+  let file: string;
+  beforeEach(() => {
+    file = join(scratch(), 'settings.json');
+    process.env['WICKED_CREW_SYSTEM_SETTINGS'] = file;
+  });
+  afterEach(() => {
+    if (armed === undefined) delete process.env['WICKED_CREW_SYSTEM_SETTINGS'];
+    else process.env['WICKED_CREW_SYSTEM_SETTINGS'] = armed;
+  });
+  const seatOf = (input: LaunchRunInput) => (JSON.parse(input.clisJson) as Array<{ key: string }>).map((s) => s.key);
+
+  it('nothing picked: the first eligible seat of the whole roster, as before', async () => {
+    const r = rig({ newWorkSeats: readNewWorkSeats });
+    expect(seatOf(await r.service.prepareLaunch(launchInput(), { trigger: 'manual' }))).toEqual(['claude']);
+  });
+
+  it('Claude turned off for new work: the review is interpreted by the next eligible picked seat, never Claude', async () => {
+    writeFileSync(file, JSON.stringify({ newWorkSeats: ['pi', 'codex'] }));
+    const r = rig({ newWorkSeats: readNewWorkSeats });
+    // pi is picked but benched (council_eligible false): the workflow's own rule still applies within the pool.
+    expect(seatOf(await r.service.prepareLaunch(launchInput(), { trigger: 'manual' }))).toEqual(['codex']);
+  });
+
+  it('the workflow rule keeps ROSTER order within the pick (not the order of the setting), and the chosen seat leads', async () => {
+    writeFileSync(file, JSON.stringify({ newWorkSeats: ['codex', 'claude'] }));
+    const r = rig({ newWorkSeats: readNewWorkSeats });
+    // A caller's primary validated against the whole roster is replaced by the one seat the review runs on.
+    const input = await r.service.prepareLaunch({ ...launchInput(), primary: 'pi' }, { trigger: 'manual' });
+    expect(seatOf(input)).toEqual(['claude']);
+    expect(input.primary).toBe('claude');
+    writeFileSync(file, JSON.stringify({ newWorkSeats: ['codex'] }));
+    const r2 = rig({ newWorkSeats: readNewWorkSeats });
+    const only = await r2.service.prepareLaunch({ ...launchInput(), primary: 'claude' }, { trigger: 'manual' });
+    expect(seatOf(only)).toEqual(['codex']);
+    expect(only.primary).toBe('codex');
+  });
+
+  it('a pick that leaves no usable seat refuses, naming the setting; nothing is written or recorded', async () => {
+    writeFileSync(file, JSON.stringify({ newWorkSeats: ['pi'] }));
+    const r = rig({ newWorkSeats: readNewWorkSeats });
+    await expect(r.service.prepareLaunch(launchInput(), { trigger: 'manual' })).rejects.toThrow(/newWorkSeats: pi/);
+    await expect(r.service.prepareLaunch(launchInput(), { trigger: 'manual' })).rejects.toBeInstanceOf(ReviewPreparationRefused);
+    expect(r.store.get('rev-1')).toBeUndefined();
+    expect(existsSync(join(r.root, 'reviews', 'rev-1'))).toBe(false);
+  });
+
+  it.each([
+    ['invalid', '{"newWorkSeats": "claude"}', /not a list of seat keys/],
+    ['unreadable', '{"newWorkSeats": ["claude"', /can't tell which seats new work may use/],
+  ])('a setting that is set but %s refuses with its words, never the whole roster; nothing is written', async (_label, raw, words) => {
+    writeFileSync(file, raw);
+    const r = rig({ newWorkSeats: readNewWorkSeats });
+    await expect(r.service.prepareLaunch(launchInput(), { trigger: 'manual' })).rejects.toThrow(words);
+    await expect(r.service.prepareLaunch(launchInput(), { trigger: 'manual' })).rejects.toBeInstanceOf(ReviewPreparationRefused);
+    expect(r.store.get('rev-1')).toBeUndefined();
+    expect(existsSync(join(r.root, 'reviews', 'rev-1'))).toBe(false);
   });
 });
 
