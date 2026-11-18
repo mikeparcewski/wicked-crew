@@ -15,8 +15,10 @@
 import { spawn } from 'node:child_process';
 import { basename } from 'node:path';
 
+import { execCapped } from '../core/exec.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import type { SystemInfraRow } from '../core/types.js';
+import { loginDetail } from './seat-container-login.js';
 import { homeless } from './seat-standing.js';
 import { infraRow, PROBE_TIMEOUT_MS, settleWithin } from './system-snapshot.js';
 import { plainRuntimeCause } from './ui-text.js';
@@ -136,6 +138,127 @@ export function idleClis(roster: ReadonlyArray<{ key: string; auth?: string; sig
   return clis.filter((c) => roster.filter((r) => cliOf(r.key) === c).every(out));
 }
 
+/** Why a seat's image cannot be had: `operator` (the operator names it and the engine never builds it), `base`
+ *  (the engine builds it on the operator's base, which is gone with no recipe to rebuild it). */
+export interface UnbuildableSeatImage {
+  kind: 'operator' | 'base';
+  /** The cause and its remedy, in the words the roster and the row carry. */
+  reason: string;
+}
+
+/**
+ * (crew#1097) The ONE rule for a seat image that is missing and cannot be built: the `seat_images` row reads `down`
+ * for these, and the roster marks their seats unusable so the engine keeps work off them. CLI → why; a seat whose
+ * image is present, or that the next unit builds, is absent.
+ */
+export function unbuildableSeatImages(st: SeatImageStatus): Map<string, UnbuildableSeatImage> {
+  const out = new Map<string, UnbuildableSeatImage>();
+  const baseUnbuildable = st.base !== null && !st.base.present && !st.baseRecipe;
+  for (const s of st.seats) {
+    if (s.present) continue;
+    if (s.operatorImage) {
+      out.set(s.cli, {
+        kind: 'operator',
+        reason: `seat image cannot be had: the operator's own image ${s.image} is missing (WICKED_SEAT_IMAGE_${s.cli.toUpperCase()}; the engine never builds it); pull or build it`,
+      });
+    } else if (baseUnbuildable) {
+      out.set(s.cli, {
+        kind: 'base',
+        reason: `seat image cannot be built: the seat base ${st.base!.image} is missing and nothing can rebuild it; rebuild it or unset WICKED_SEAT_BASE_IMAGE`,
+      });
+    }
+  }
+  return out;
+}
+
+/** `wicked-core seat-image status --json`, through the engine CLI `coreExe` names (the row, the rebuild and the
+ *  roster's reading all read it this way). */
+export function seatImageStatusVia(coreExe: () => string | null): () => Promise<SeatImageStatus | null> {
+  return async () => {
+    const exe = coreExe();
+    if (exe === null) throw new Error('WICKED_CORE_EXE is not set');
+    try {
+      const out = await execCapped(exe, ['seat-image', 'status', '--json'], { timeout: PROBE_TIMEOUT_MS });
+      return parseSeatImageStatus(out.stdout);
+    } catch (err) {
+      const e = err as { stderr?: unknown; message?: string };
+      throw new Error(loginDetail(typeof e.stderr === 'string' && e.stderr !== '' ? e.stderr : (e.message ?? 'failed')));
+    }
+  };
+}
+
+/** How old the roster's seat image reading may be and still be served. The daemon's reading refreshes at half that. */
+export const SEAT_IMAGE_READING_TTL_MS = 60_000;
+
+/**
+ * (crew#1097) The roster's seat image reading: {@link unbuildableSeatImages} of the last status, read off the request
+ * path (one read at a time). A reading older than the TTL is never served (codex merge check r3): a stale "cannot be
+ * built" would keep refusing a seat repaired since, so a stale read answers `null` and starts a fresh read. No reading
+ * yet, a failed one, or a stale one is `null`: nothing is marked (an unknown image never benches a seat). The daemon
+ * `start`s it, so the reading refreshes every half TTL and a repair is seen within that, with or without requests.
+ */
+export class SeatImageReading {
+  private last: Map<string, UnbuildableSeatImage> | null = null;
+  private at = Number.NEGATIVE_INFINITY;
+  private pending: Promise<void> | undefined;
+  private timer: ReturnType<typeof setInterval> | undefined;
+
+  constructor(
+    private readonly status: () => Promise<SeatImageStatus | null>,
+    private readonly opts: { ttlMs?: number; timeoutMs?: number; nowMs?: () => number } = {},
+  ) {}
+
+  /** The last reading while it is fresh; a stale one is not served (`null`) and starts a refresh. */
+  unbuildable(): Map<string, UnbuildableSeatImage> | null {
+    if (this.now() - this.at < this.ttl()) return this.last;
+    void this.refresh();
+    return null;
+  }
+
+  /** Refresh now and every half TTL (the daemon's reading), so a served reading is never older than the TTL. */
+  start(): this {
+    if (this.timer === undefined) {
+      void this.refresh();
+      this.timer = setInterval(() => void this.refresh(), Math.max(1, Math.floor(this.ttl() / 2)));
+      this.timer.unref?.();
+    }
+    return this;
+  }
+
+  close(): void {
+    if (this.timer !== undefined) clearInterval(this.timer);
+    this.timer = undefined;
+  }
+
+  private ttl(): number {
+    return this.opts.ttlMs ?? SEAT_IMAGE_READING_TTL_MS;
+  }
+
+  /** Read now (one at a time: a refresh in flight is the one awaited). */
+  refresh(): Promise<void> {
+    this.pending ??= (async () => {
+      // One status read at a time: a read past its deadline publishes "unknown" then, and keeps the slot until it ends.
+      const op = this.status();
+      const settled = await settleWithin(() => op, this.opts.timeoutMs ?? PROBE_TIMEOUT_MS);
+      this.note(settled.kind === 'ok' ? settled.value : null);
+      await op.then(() => undefined, () => undefined);
+    })().finally(() => {
+      this.pending = undefined;
+    });
+    return this.pending;
+  }
+
+  /** A status read elsewhere (the row, a rebuild's end) is the reading too; `null` = unknown. */
+  note(st: SeatImageStatus | null): void {
+    this.last = st === null ? null : unbuildableSeatImages(st);
+    this.at = this.now();
+  }
+
+  private now(): number {
+    return (this.opts.nowMs ?? Date.now)();
+  }
+}
+
 const gib = (n: number): string => `${Math.round((n / 2 ** 30) * 10) / 10} GiB`;
 
 /**
@@ -176,7 +299,8 @@ export async function probeSeatImages(input: SeatImagesProbeInput): Promise<Syst
   const idleMissing = st.seats.filter((s) => idleSet.has(s.cli) && !s.present).map((s) => s.cli);
   const idleWords = idleMissing.length > 0 ? `; not needed until signed in: ${idleMissing.join(', ')}` : '';
   const missing = seats.filter((s) => !s.present && !s.operatorImage).map((s) => s.cli);
-  const operatorMissing = seats.filter((s) => !s.present && s.operatorImage).map((s) => s.cli);
+  const cannot = unbuildableSeatImages(st);
+  const operatorMissing = seats.filter((s) => cannot.get(s.cli)?.kind === 'operator').map((s) => s.cli);
   // The operator base matters only to a seat the engine builds (an operator image does not build
   // on it).
   const base = seats.some((s) => !s.operatorImage) ? st.base : null;
@@ -225,7 +349,7 @@ export async function probeSeatImages(input: SeatImagesProbeInput): Promise<Syst
     }
   }
   if (missing.length > 0) {
-    const unbuildable = baseGone && !st.baseRecipe;
+    const unbuildable = missing.some((c) => cannot.get(c)?.kind === 'base');
     worse(unbuildable ? 'down' : 'degraded');
     problems.push(`seat images missing: ${missing.join(', ')}${unbuildable ? '' : ' (the next unit on each builds it first, minutes)'}`);
   }
