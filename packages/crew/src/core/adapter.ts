@@ -83,6 +83,7 @@ import { isRequirementsGraphSettings } from './requirements-graph-setting.js';
 import { QE_OFF_REASON, launchRequiresQe, qeAcceptanceMode, qeSettingSkipReason } from './qe-acceptance-setting.js';
 import { applyVaultBinEnv, BOOT_VAULT_BIN, resolveShippedVaultBin, type VaultBinInputs, type VaultBinPosture } from './vault-bin.js';
 import { withFolderFindings } from './repoPaths.js';
+import { isSeatKeyList } from './job-seats.js';
 
 
 
@@ -4290,6 +4291,8 @@ export class CoreAdapter {
       if ('qeAcceptance' in parsed && parsed.qeAcceptance !== 'required' && parsed.qeAcceptance !== 'off') delete parsed.qeAcceptance;
       // powerModeDefault (program DES-POWER-MODE): a boolean only; anything else reads as the shipped default (on).
       if ('powerModeDefault' in parsed && typeof parsed.powerModeDefault !== 'boolean') delete parsed.powerModeDefault;
+      // newWorkSeats (F1/F2): a list of seat keys, or null. Anything else reads as the default rule.
+      if ('newWorkSeats' in parsed && parsed.newWorkSeats !== null && !isSeatKeyList(parsed.newWorkSeats)) delete parsed.newWorkSeats;
       // onboardingAutoCapture (crew#552): a boolean only; anything else reads as the shipped default.
       if ('onboardingAutoCapture' in parsed && typeof parsed.onboardingAutoCapture !== 'boolean') delete parsed.onboardingAutoCapture;
       // baseSkillRef / baseSkillPolicy (crew#554): the same shapes PUT /settings admits — a string

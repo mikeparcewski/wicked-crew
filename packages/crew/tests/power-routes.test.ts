@@ -194,6 +194,17 @@ describe('power mode routes', () => {
     expect((await h.app.inject({ method: 'PUT', url: '/api/v1/settings', headers: AGENT, payload: { powerModeDefault: true } })).statusCode).toBe(403);
   });
 
+  it('(F1/F2) takes the seats for new work (newWorkSeats) from a person only, as a list of seat keys or null', async () => {
+    const h = await harness();
+    const put = (headers: typeof HUMAN, payload: unknown) => h.app.inject({ method: 'PUT', url: '/api/v1/settings', headers, payload: payload as Record<string, unknown> });
+    expect((await put(HUMAN, { newWorkSeats: ['claude', 'codex'] })).statusCode).toBe(200);
+    expect(h.adapter.updateSettings).toHaveBeenCalledWith(expect.objectContaining({ newWorkSeats: ['claude', 'codex'] }));
+    expect((await put(HUMAN, { newWorkSeats: null })).statusCode).toBe(200);
+    expect(h.adapter.updateSettings).toHaveBeenLastCalledWith(expect.objectContaining({ newWorkSeats: null }));
+    for (const bad of ['claude', [''], [1], { claude: true }]) expect((await put(HUMAN, { newWorkSeats: bad })).statusCode).toBe(400);
+    expect((await put(AGENT, { newWorkSeats: ['claude'] })).statusCode).toBe(403);
+  });
+
   it('records a pause answer\'s note as a decision host and not an empty one', async () => {
     const h = await harness();
     const r = await h.app.inject({ method: 'POST', url: '/api/v1/runs/p1/power/pause', headers: HUMAN, payload: { decision: 'continue', note: 'keep v1 working' } });

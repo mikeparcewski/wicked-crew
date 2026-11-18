@@ -37,6 +37,8 @@
 import { createHash } from 'node:crypto';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+
+import { jobSeatPool, type JobSeatPool } from '../core/job-seats.js';
 import { z } from '../zod.js';
 
 import type {
@@ -646,6 +648,9 @@ export interface ChatProposalDeps {
   /** Seats that can work now, in roster order (enabled for council, work-eligible, not signed out), under the default
    *  launch rule: no opt-in seat unless it is the only one left (`proposalRoster` in routes.ts, F43). */
   rosterEligible(): ReadonlyArray<{ key: string; name: string }>;
+  /** (F1/F2) The `newWorkSeats` setting: the seats new work is drawn from (`core/job-seats.ts`); `null` or absent =
+   *  every eligible seat. */
+  newWorkSeats?(): Promise<readonly string[] | null | undefined>;
   /** Every run, decorated as `GET /runs` serves it (`project_id`, `document_id`, `run_identity`, times). */
   runs(): Promise<SessionView[]>;
   /** The chat a run was filed under, and whether it is a chat's own ask path. */
@@ -1105,7 +1110,7 @@ export class ChatProposals {
       // card says so instead of showing them as used (codex A5 r1).
       const sources = (await this.resolveSources(block.sources, { chatId, turnId, records, binding, turnHas, chat, words, personNamed: false })).map((src) =>
         src.status === 'ok' ? { ...src, status: 'struck' as const, reason: 'a change works from the document and your words; make a new document to use this source' } : src);
-      const helpers = this.helpers(chat);
+      const helpers = this.helpers(chat, undefined, (await this.seatPool()).pool);
       if (helpers === null) blocked.push(NEEDS_HELPER);
       const title = target?.title ?? (ref !== null ? humanDoc(ref.doc) : block.refine);
       return {
@@ -1169,7 +1174,7 @@ export class ChatProposals {
       demo = { url, audience: block.audience ?? null, show: block.show ?? null };
     }
     const sources = kind === 'create' ? await this.resolveSources(block.sources, { chatId, turnId, records, binding, turnHas, chat, words, personNamed: false }) : [];
-    const helpers = this.helpers(chat);
+    const helpers = this.helpers(chat, undefined, (await this.seatPool()).pool);
     if (helpers === null) blocked.push(NEEDS_HELPER);
     return {
       pid, chatId, turnId, kind, seat,
@@ -1199,7 +1204,7 @@ export class ChatProposals {
   }
 
   /** The two helpers (DES §4.2): the lead seat, then another of the chat's seats, else the roster's next. */
-  helpers(chat: ProposalChat, chosen?: readonly string[]): ProposalHelpers | null {
+  helpers(chat: ProposalChat, chosen?: readonly string[], pool?: readonly { key: string }[]): ProposalHelpers | null {
     const roster = this.deps.rosterEligible();
     const can = new Set(roster.map((s) => s.key));
     const name = (k: string): string => roster.find((s) => s.key === k)?.name ?? k;
@@ -1208,7 +1213,8 @@ export class ChatProposals {
       seats = [...new Set(chosen)];
       if (seats.length !== 2 || seats.some((k) => !can.has(k))) return null;
     } else {
-      const order = [chat.lead, ...chat.seats, ...roster.map((s) => s.key)].filter((k): k is string => k !== null && can.has(k));
+      // The seats named (the chat's lead and seats), then the pool new work is drawn from (F1/F2).
+      const order = [chat.lead, ...chat.seats, ...(pool ?? roster).map((s) => s.key)].filter((k): k is string => k !== null && can.has(k));
       seats = [...new Set(order)].slice(0, 2);
       if (seats.length < 2) return null;
     }
@@ -1880,7 +1886,7 @@ export class ChatProposals {
     }
     if (edits.helpers !== undefined) {
       const chat = this.deps.chat(chatId) ?? { projectId: p.filedIn.projectId, repos: [], lead: null, seats: [], analysis: false };
-      const helpers = this.helpers(chat, edits.helpers);
+      const helpers = this.helpers(chat, edits.helpers, (await this.seatPool()).pool);
       if (helpers === null) throw new EditRefusal('pick two different helpers that can work now');
       // Two helpers lift the one block a person can lift.
       next = { ...next, helpers, blocked: next.blocked === NEEDS_HELPER ? null : next.blocked };
@@ -2321,6 +2327,13 @@ export class ChatProposals {
     return c === null ? null : { projectId: c.projectId, repos: c.repos, lead: c.lead, seats: c.seats };
   }
 
+  /** (F1/F2) The seats new work may name, and the pool it is drawn from (`core/job-seats.ts`). An unreadable setting
+   *  reads as the default rule. */
+  private async seatPool(): Promise<JobSeatPool> {
+    const pick = this.deps.newWorkSeats === undefined ? null : await this.deps.newWorkSeats().catch(() => null);
+    return jobSeatPool(this.deps.rosterEligible(), pick);
+  }
+
   private async jobContext(chatId: string, pid: string, turnId: string | null, seat: string, chat: JobChat, extra: Pick<JobContext, 'revises' | 'lineage' | 'notes'> & Partial<Pick<JobContext, 'answers' | 'request'>>): Promise<JobContext> {
     if (this.deps.served === undefined) throw new JobRefusal('operation_unavailable', 'this daemon cannot read its catalog for a job', 409);
     let served: ServedState & { rev: string };
@@ -2332,7 +2345,8 @@ export class ChatProposals {
     const projectLabel = chat.projectId === null ? 'Not in a project · this chat' : ((await this.deps.projectName(chat.projectId)) ?? chat.projectId);
     const qeOff = (await this.deps.qeOff?.().catch(() => false)) === true;
     const powerPresets = (await this.deps.powerPresets?.(chat.projectId).catch(() => null)) ?? null;
-    return { chatId, pid, turnId, seat, chat, served, roster: this.deps.rosterEligible(), projectLabel, qeOff, powerPresets, ...extra };
+    const { eligible: roster, pool } = await this.seatPool();
+    return { chatId, pid, turnId, seat, chat, served, roster, pool, projectLabel, qeOff, powerPresets, ...extra };
   }
 
   /** Source availability matters only to a card that shows this input. Keep a failed read a named refusal. */
@@ -2381,7 +2395,8 @@ export class ChatProposals {
       this.reviewAuthorsSeen.set(key, authors);
     }
     const roster = ctx.roster.filter((s) => !authors.authors.includes(s.key));
-    return roster.length === 0 || roster.length === ctx.roster.length ? ctx : { ...ctx, roster };
+    if (roster.length === 0 || roster.length === ctx.roster.length) return ctx;
+    return { ...ctx, roster, ...(ctx.pool !== undefined ? { pool: ctx.pool.filter((s) => !authors.authors.includes(s.key)) } : {}) };
   }
 
   /** Resolve the revision's shape first, then load only the choices that its input checks need. */

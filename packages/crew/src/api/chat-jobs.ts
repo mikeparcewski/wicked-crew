@@ -160,6 +160,8 @@ export interface JobContext {
   chat: JobChat;
   served: ServedState & { rev: string };
   roster: ReadonlyArray<{ key: string; name: string }>;
+  /** (F1/F2) The seats a job is drawn from when nobody named one (`core/job-seats.ts`); absent = the whole roster. */
+  pool?: ReadonlyArray<{ key: string; name: string }>;
   projectLabel: string;
   revises: string | null;
   lineage: string | null;
@@ -202,7 +204,8 @@ export function seatsNeeded(r: ResolvedOption): number {
 function seatsOf(facts: JobFacts, ctx: JobContext, r: ResolvedOption): { seats: ProposalSeats; short: boolean } {
   const can = new Set(ctx.roster.map((s) => s.key));
   const name = (k: string): string => ctx.roster.find((s) => s.key === k)?.name ?? k;
-  const ordered = [...new Set([facts.lead, ctx.chat.lead, ...ctx.chat.seats, ...ctx.roster.map((s) => s.key)].filter((k): k is string => k !== null && can.has(k)))];
+  // The seats named (the job's lead, the chat's lead and seats), then the pool new work is drawn from (F1/F2).
+  const ordered = [...new Set([facts.lead, ctx.chat.lead, ...ctx.chat.seats, ...(ctx.pool ?? ctx.roster).map((s) => s.key)].filter((k): k is string => k !== null && can.has(k)))];
   const keys = facts.seats !== null ? facts.seats.filter((k) => can.has(k)) : ordered;
   const lead = facts.lead !== null && keys.includes(facts.lead) ? facts.lead : (keys[0] ?? null);
   const rest = keys.filter((k) => k !== lead);
@@ -420,7 +423,7 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     id: 'seats',
     kind: 'seats',
     label: selfSeated ? (r.workflow === 'run-evals' ? 'no seat (the evals compute every number)' : 'a seat the review picks itself') : seats.label,
-    swap: !selfSeated && ctx.roster.length > 1 ? { choices: ctx.roster.filter((s) => s.key !== seats.lead).slice(0, 4).map((s) => ({ label: `${s.name} leads`, edit: { lead: s.key } })) } : null,
+    swap: !selfSeated && ctx.roster.length > 1 ? { choices: (ctx.pool ?? ctx.roster).filter((s) => s.key !== seats.lead).slice(0, 4).map((s) => ({ label: `${s.name} leads`, edit: { lead: s.key } })) } : null,
   });
   const checksTok = t({ id: 'checks', kind: 'checks', label: checksLabel(gate), swap: null });
   const reading: string[] = [];
@@ -669,7 +672,7 @@ export function seatProtections(r: ResolvedOption | null): SeatProtection[] {
 export function mergeRevision(
   parent: ArtifactProposal,
   edits: ProposalRevisionEdits,
-  ctx: { chat: JobChat; served: ServedState; roster: ReadonlyArray<{ key: string; name: string }>; jobSources?: JobContext['jobSources'] },
+  ctx: { chat: JobChat; served: ServedState; roster: ReadonlyArray<{ key: string; name: string }>; pool?: JobContext['pool']; jobSources?: JobContext['jobSources'] },
 ): MergeResult {
   const notes: string[] = [];
   const refusedInputs: string[] = [];
@@ -756,13 +759,18 @@ export function mergeRevision(
   if (edits.removeSeats !== undefined && edits.removeSeats.length > 0) {
     const r = resolveOption(facts.card, optionFor(CATALOG_V2_CARDS.find((c) => c.id === facts.card)!, facts.option), ctx.served);
     const need = r === null ? 1 : seatsNeeded(r);
-    const current = facts.seats ?? [...new Set([facts.lead, ...ctx.chat.seats, ...ctx.roster.map((s) => s.key)].filter((k): k is string => k !== null && can.has(k)))];
-    const kept = current.filter((k) => !edits.removeSeats!.includes(k));
-    if (kept.length < need) {
-      notes.push(`Not changed: ${list(edits.removeSeats.map(nameOf))} ${edits.removeSeats.length === 1 ? 'stays' : 'stay'}; this job needs ${need} seats, so another seat checks the one that builds`);
-    } else {
+    const current = facts.seats ?? [...new Set([facts.lead, ...ctx.chat.seats, ...(ctx.pool ?? ctx.roster).map((s) => s.key)].filter((k): k is string => k !== null && can.has(k)))];
+    // (F1/F2) The card's words say what was applied, so a model's "I took it off" is never the only record.
+    const off = current.filter((k) => edits.removeSeats!.includes(k));
+    const absent = edits.removeSeats.filter((k) => !current.includes(k));
+    const kept = current.filter((k) => !off.includes(k));
+    if (absent.length > 0) notes.push(`Not changed: ${list(absent.map(nameOf))} ${absent.length === 1 ? "isn't" : "aren't"} on this job`);
+    if (off.length > 0 && kept.length < need) {
+      notes.push(`Not changed: ${list(off.map(nameOf))} ${off.length === 1 ? 'stays' : 'stay'}; this job needs ${need} seats, so another seat checks the one that builds`);
+    } else if (off.length > 0) {
       facts.seats = kept;
       if (facts.lead !== null && !kept.includes(facts.lead)) facts.lead = kept[0] ?? null;
+      notes.push(`${list(off.map(nameOf))} ${off.length === 1 ? 'is' : 'are'} off this job; ${list(kept.map(nameOf))} ${kept.length === 1 ? 'works' : 'work'} on it`);
     }
   }
   // 5. Inputs fill or replace the needs they name, each validated against the card's own input (its kind, non-blank).

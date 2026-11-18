@@ -229,6 +229,7 @@ import {
 import { BASE_SKILL_POLICIES, BASE_SKILL_REF_SHAPE, baseSkillRemedy } from '../skills/base-skill.js';
 import { REQUIRED_GARDEN_VERSION } from '../skills/plugin-source.js';
 import type { EvalRunStore } from './eval-store.js';
+import { isSeatKeyList } from '../core/job-seats.js';
 import { engineRosterJson, noEligibleSeatBody, parseNoEligibleSeat, toEngineSeat } from '../core/engine-roster.js';
 import { launchAssuranceNotice } from '../core/assurance.js';
 import { launchPosture, type PostureFacts } from '../core/launch-posture.js';
@@ -5672,6 +5673,8 @@ export function registerRoutes(
       };
     },
     rosterEligible: () => proposalRoster(rosterWithStanding()),
+    // (F1/F2) Agents › "Use <seat> for new work": the pool every new chat job and document is drawn from.
+    newWorkSeats: async () => (await adapter.getSettings()).newWorkSeats ?? null,
     runs: async () => (await adapter.sessionsDetail()).map((v) => decorateRun(v)),
     chatOfRun: (runId) => runTimingIndex.chatIdFor(runId),
     isAskPath: (runId) => runTimingIndex.isAskPath(runId),
@@ -9942,6 +9945,16 @@ export function registerRoutes(
         return reply.code(403).send({ error: 'Only a person can change the power mode default (powerModeDefault)' });
       }
     }
+    // newWorkSeats (F1/F2): which seats new chats and jobs are drawn from (`core/job-seats.ts`). A list of seat keys,
+    // or null for the default rule; a person's choice only (a worker's bearer gets 403).
+    if (Object.hasOwn(patch, 'newWorkSeats')) {
+      if (patch.newWorkSeats !== null && !isSeatKeyList(patch.newWorkSeats)) {
+        return reply.code(400).send({ error: 'newWorkSeats must be a list of seat keys (at most 64), or null' });
+      }
+      if (!isHumanOperator(actorOf(req))) {
+        return reply.code(403).send({ error: 'Only a person can change which seats new work uses (newWorkSeats)' });
+      }
+    }
     // qeAcceptance (api-types 0.120.0): 'required' | 'off' only. 'off' skips QE acceptance on every
     // launch that requires it (labelled with the setting), so a typo must be a 400, never a dropped key.
     // Turning it off waives an assurance instrument on every launch after it, so only a PERSON may
@@ -10045,6 +10058,7 @@ export function registerRoutes(
       'deliverDefault',
       'qeAcceptance',
       'powerModeDefault',
+      'newWorkSeats',
       'onboardingAutoCapture',
       'deliverIdentityLogin',
       'deliverIdentityByRepo',
