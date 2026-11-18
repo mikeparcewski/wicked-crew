@@ -23,9 +23,11 @@ mentioned only where a daemon release depends on them.
     fails or does not answer launches nothing, and the row says why.
   - **What is never cancelled:** a run with seats, one executing, or one younger than 6 h.
   - **A run waiting on a person** (`awaiting_human`) is never cancelled for them. The row carries `blocked` from the
-    first sweep that sees it waiting: since when, the run to open, and how many due times it skipped while waiting.
-    Its note (what studio shows today) is the sentence "blocked: the last run <id> is waiting for you since <time>;
-    N due times skipped". Both clear when the run moves on.
+    first sweep that sees it waiting: since when, the run to open (`target`), how many due times it skipped while
+    waiting, and the sentence "blocked: the last run <id> is waiting for you since <time>; N due times skipped". It
+    clears when the run moves on. `lastNote` keeps exactly the words it had before this change ("skipped: its last
+    run <id> is waiting on you (awaiting_human)"), so a studio that predates `blocked` still shows its warning. A
+    studio that renders `blocked` shows the sentence and the link (wicked-studio#1195).
   - Run it now does the same and writes what it found on the row before refusing.
 
   wicked-crew-api-types 0.215.0 (additive): `WorkflowSchedule.blocked`, `ScheduleBlocked`.

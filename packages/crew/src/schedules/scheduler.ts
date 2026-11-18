@@ -207,17 +207,19 @@ export class WorkflowScheduler {
     return null;
   }
 
-  /** (crew#1578) Bring every row's waiting-on-you record up to date: set when its last run waits on a person (the
-   *  row's note says so, in the one sentence), cleared, with that note, when it no longer does. */
+  /** (crew#1578) Bring every row's waiting-on-you record up to date: set when its last run waits on a person,
+   *  cleared when it no longer does. Only the structured `blocked` field: `lastNote` keeps the words every shipped
+   *  studio renders (`skipped: …`, written when a due time is skipped), so an older studio still shows the warning
+   *  (coord merge check on #1617). */
   private noteBlocked(status: ReadonlyMap<string, string>): void {
     for (const r of this.deps.store.list()) {
       const b = this.blockedOnYou(r, status);
       if (b !== null) {
-        if (r.blocked?.since !== b.since || r.blocked.missedDue !== b.missedDue || r.blocked.runId !== b.runId || r.blocked.detail !== b.detail || r.lastNote !== b.detail) {
-          this.deps.store.update(r.id, { blocked: b, lastNote: b.detail }, this.now());
+        if (r.blocked?.since !== b.since || r.blocked.missedDue !== b.missedDue || r.blocked.runId !== b.runId || r.blocked.detail !== b.detail) {
+          this.deps.store.update(r.id, { blocked: b }, this.now());
         }
       } else if (r.blocked != null) {
-        this.deps.store.update(r.id, { blocked: null, lastNote: r.lastNote === r.blocked.detail ? null : r.lastNote }, this.now());
+        this.deps.store.update(r.id, { blocked: null }, this.now());
       }
     }
   }
@@ -248,11 +250,7 @@ export class WorkflowScheduler {
     for (const row of this.deps.store.list()) {
       if (row.lastRunId === null || (row.lastOutcome !== 'launched' && row.lastOutcome !== 'launching')) continue;
       const s = status.get(row.lastRunId);
-      // Its waiting sentence goes with the block (codex r2 #6).
-      if (s !== undefined && TERMINAL.has(s)) {
-        const note = row.blocked != null && row.lastNote === row.blocked.detail ? null : row.lastNote;
-        this.deps.store.update(row.id, { lastOutcome: s as 'completed' | 'failed' | 'cancelled', blocked: null, lastNote: note }, this.now());
-      }
+      if (s !== undefined && TERMINAL.has(s)) this.deps.store.update(row.id, { lastOutcome: s as 'completed' | 'failed' | 'cancelled', blocked: null }, this.now());
       // A reservation the engine took (the daemon stopped before recording it): it is a launched run.
       else if (s !== undefined && row.lastOutcome === 'launching') this.deps.store.update(row.id, { lastOutcome: 'launched' }, this.now());
     }
@@ -294,9 +292,9 @@ export class WorkflowScheduler {
         await this.launchOne(current, 'schedule').catch(() => undefined);
         return; // at most one launch per sweep
       }
-      // Skipped, not moved: it fires on the first sweep after the blocker clears. Said once, not every minute; a row
-      // waiting on you already says so in its blocked sentence.
-      if (current.blocked == null && current.lastNote !== `skipped: ${why}`) this.deps.store.update(row.id, { lastNote: `skipped: ${why}` }, this.now());
+      // Skipped, not moved: it fires on the first sweep after the blocker clears. Said once, not every minute, in the
+      // words main writes (a shipped studio renders a `skipped` note; the structured `blocked` field is the new detail).
+      if (current.lastNote !== `skipped: ${why}`) this.deps.store.update(row.id, { lastNote: `skipped: ${why}` }, this.now());
     }
   }
 

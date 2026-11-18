@@ -160,8 +160,10 @@ describe('the scheduler', () => {
     r.at(72);
     await r.scheduler.sweep();
     expect(r.launches).toHaveLength(1);
+    // Byte-identical to main's note (every shipped studio renders a `skipped` note); the new detail is structured.
+    expect(r.store.get('nightly')?.lastNote).toBe(`skipped: its last run ${first} is waiting on you (awaiting_human)`);
     const since = new Date(T0.getTime() + 72 * H).toISOString();
-    expect(r.store.get('nightly')?.lastNote).toBe(`blocked: the last run ${first} is waiting for you since ${since}; 1 due time skipped`);
+    expect(r.store.get('nightly')?.blocked).toMatchObject({ since, missedDue: 1, target: { kind: 'run', runId: first } });
     // Any other open status keeps the plain note.
     r.runs[first] = 'executing';
     await r.scheduler.sweep();
@@ -243,7 +245,8 @@ describe('the scheduler', () => {
       r.at(48); // the first due time while it waits: skipped, and the row's note (what studio shows) says so
       await r.scheduler.sweep();
       const one = `blocked: the last run ${first} is waiting for you since ${since}; 1 due time skipped`;
-      expect(r.store.get('nightly')).toMatchObject({ blocked: { since, missedDue: 1, detail: one }, lastNote: one });
+      // lastNote keeps main's words (what a shipped studio shows); the sentence and the gate are in `blocked`.
+      expect(r.store.get('nightly')).toMatchObject({ blocked: { since, missedDue: 1, detail: one, target: { kind: 'run', runId: first } }, lastNote: `skipped: its last run ${first} is waiting on you (awaiting_human)` });
       r.at(96); // two more due times: the count moves, the time it started waiting does not
       await r.scheduler.sweep();
       expect(r.store.get('nightly')?.blocked).toMatchObject({ since, missedDue: 3, detail: `blocked: the last run ${first} is waiting for you since ${since}; 3 due times skipped` });
@@ -256,7 +259,7 @@ describe('the scheduler', () => {
       expect(r.launches).toHaveLength(2);
     });
 
-    it('a blocked record clears with its note when the run moves on, though the row is disabled (codex r1 #6)', async () => {
+    it('a blocked record clears when the run moves on, though the row is disabled (codex r1 #6)', async () => {
       const r = rig();
       const first = await launched(r);
       r.runs[first] = 'awaiting_human';
@@ -265,7 +268,7 @@ describe('the scheduler', () => {
       r.store.put('nightly', { workflow: 'run-evals', everyHours: 24, enabled: false }, r.clock.now);
       r.runs[first] = 'executing';
       await r.scheduler.sweep();
-      expect(r.store.get('nightly')).toMatchObject({ blocked: null, lastNote: null });
+      expect(r.store.get('nightly')?.blocked).toBeNull();
     });
 
     it('a run that got seats between the sweep read and the cancel is left alone (codex r1 #1)', async () => {
@@ -311,7 +314,7 @@ describe('the scheduler', () => {
       expect(r.store.get('nightly')).toMatchObject({ lastRunId: null, lastOutcome: null, lastNote: null, enabled: false });
     });
 
-    it('a blocked run that ends while its row is disabled takes its waiting sentence with it (codex r2 #6)', async () => {
+    it('a blocked run that ends while its row is disabled clears its blocked record (codex r2 #6)', async () => {
       const r = rig();
       const first = await launched(r);
       r.runs[first] = 'awaiting_human';
@@ -320,7 +323,7 @@ describe('the scheduler', () => {
       r.store.put('nightly', { workflow: 'run-evals', everyHours: 24, enabled: false }, r.clock.now);
       r.runs[first] = 'completed';
       await r.scheduler.sweep();
-      expect(r.store.get('nightly')).toMatchObject({ lastOutcome: 'completed', blocked: null, lastNote: null });
+      expect(r.store.get('nightly')).toMatchObject({ lastOutcome: 'completed', blocked: null });
     });
 
     it('a persisted blocked sentence is derived from its fields, never trusted (codex r2 #9)', async () => {
