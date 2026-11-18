@@ -444,11 +444,13 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     swap: ctx.chat.repos.length > 1 ? { choices: ctx.chat.repos.filter((x) => x.id !== repo.id).slice(0, 4).map((x) => ({ label: x.name, edit: { repoRef: x.id } })) } : null,
   });
   const selfSeated = r.workflow !== null && SELF_SEATED.has(r.workflow);
+  // Lead swaps come from the pool work is drawn from; the row shows only when it offers a choice (crew#1590).
+  const swapChoices = (ctx.pool ?? ctx.roster).filter((x) => x.key !== seats.lead).slice(0, 4).map((x) => ({ label: `${x.name} leads`, edit: { lead: x.key } }));
   const seatsTok = t({
     id: 'seats',
     kind: 'seats',
     label: selfSeated ? (r.workflow === 'run-evals' ? 'no seat (the evals compute every number)' : 'a seat the review picks itself') : seats.label,
-    swap: !selfSeated && ctx.roster.length > 1 ? { choices: (ctx.pool ?? ctx.roster).filter((s) => s.key !== seats.lead).slice(0, 4).map((s) => ({ label: `${s.name} leads`, edit: { lead: s.key } })) } : null,
+    swap: !selfSeated && swapChoices.length > 0 ? { choices: swapChoices } : null,
   });
   const checksTok = t({ id: 'checks', kind: 'checks', label: checksLabel(gate), swap: null });
   const reading: string[] = [];

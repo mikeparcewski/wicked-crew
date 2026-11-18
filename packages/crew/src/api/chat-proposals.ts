@@ -646,11 +646,12 @@ export interface ChatProposalDeps {
   projectOf(chatId: string): string | null;
   /** The live chat, or `null` once it has ended. */
   chat(chatId: string): ProposalChat | null;
-  /** Seats that can work now, in roster order (enabled for council, work-eligible, not signed out), under the default
-   *  launch rule: no opt-in seat unless it is the only one left (`proposalRoster` in routes.ts, F43). */
+  /** Seats that can work now and that work may NAME, in roster order (enabled for council, work-eligible, not signed
+   *  out), opt-in seats included (`proposalRoster` in routes.ts, F43, crew#1590): the default launch rule applies to the
+   *  pool drawn from when nobody chose (`jobSeatPool`). */
   rosterEligible(): ReadonlyArray<{ key: string; name: string }>;
   /** (F1/F2) The `newWorkSeats` setting: the seats new work is drawn from (`core/job-seats.ts`); `null` or absent =
-   *  every eligible seat. Throws (`NewWorkSeatsRefusal` with the reason) when it is set but can't be read or is invalid. */
+   *  the default launch rule over the eligible seats (no opt-in seat unless it is the only one). Throws (`NewWorkSeatsRefusal` with the reason) when it is set but can't be read or is invalid. */
   newWorkSeats?(): Promise<readonly string[] | null | undefined>;
   /** Every run, decorated as `GET /runs` serves it (`project_id`, `document_id`, `run_identity`, times). */
   runs(): Promise<SessionView[]>;
@@ -2350,11 +2351,13 @@ export class ChatProposals {
   }
 
   /**
-   * (F1/F2) The seats new work may name, and the pool it is drawn from (`core/job-seats.ts`). Not set at all is every
-   * eligible seat. A setting that is set but can't be read, or is invalid, is a LIVE state, never a stored one:
-   * `refusal`, and the card is drawn as if nothing were picked, but it reads blocked with the reason wherever it is
-   * served (`withSeatsSetting`) and Start refuses it (`seatsSettingRefusal`) until the setting reads again. Fixing the
-   * setting lifts the block everywhere at once; nothing on the transcript has to change.
+   * (F1/F2) The seats new work may name, and the pool it is drawn from (`core/job-seats.ts`). Not set at all is the
+   * default launch rule over the eligible seats (`defaultLaunchRoster`): every eligible seat but the opt-in ones
+   * (OpenCode), which are kept only when no other seat can work (crew#1590). A setting that is set but can't be read,
+   * or is invalid, is a LIVE state, never a stored one: `refusal`, and the card is drawn as if nothing were picked,
+   * but it reads blocked with the reason wherever it is served (`withSeatsSetting`) and Start refuses it
+   * (`seatsSettingRefusal`) until the setting reads again. Fixing the setting lifts the block everywhere at once;
+   * nothing on the transcript has to change.
    */
   private async seatPool(): Promise<JobSeatPool & { refusal?: SeatsRefusal }> {
     if (this.deps.newWorkSeats === undefined) return jobSeatPool(this.deps.rosterEligible(), null);

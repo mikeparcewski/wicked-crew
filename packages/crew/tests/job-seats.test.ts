@@ -115,7 +115,7 @@ function rig(roster: string, pick: string, chatState: ChatState = 'claude', crea
     /** The roster changes under the card (a seat signs out). */
     setStanding: (rows: readonly Standing[]) => { standing = rows; },
     /** The keys of the roster a Go of `p` hands the engine (the production narrowing, `jobLaunchRoster`). */
-    engineRoster: (p: Pick<ArtifactProposal, 'seats' | 'relaunch'>) => jobLaunchRoster(launchRosterNaming(standing, p.seats?.lead ?? undefined), p).roster.map((x) => String(x.key)),
+    engineRoster: (p: Pick<ArtifactProposal, 'seats' | 'relaunch'>) => jobLaunchRoster(launchRosterNaming(standing, p.seats?.lead ?? undefined, p.seats?.keys ?? []), p).roster.map((x) => String(x.key)),
     /** The open proposal as it is SERVED (`GET /chats/:id/messages`): the live `newWorkSeats` state over the transcript. */
     served: async (): Promise<ArtifactProposal> => [...foldProposals(await svc.withSeatsSetting(records)).values()].find((x) => x.state === 'open' || x.state === 'revising')!.proposal,
     go: () => svc.decide(CHAT, open().pid, { decision: 'go' }, ME, 'i1'),
