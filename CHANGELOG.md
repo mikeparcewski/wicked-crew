@@ -20,6 +20,22 @@ mentioned only where a daemon release depends on them.
   intent verbatim.
 - feat(launch): `POST /runs/preview` answers the human gates a launch of the body would keep (power, the posture the engine keeps, delivery and its gate) from the SAME decision `POST /runs` makes (`core/launch-posture.ts`), so a launch form shows what the run keeps instead of modelling crew's rules. The launch's inline power and deliver resolution is replaced by that one function, behaviour unchanged. wicked-crew-api-types 0.212.0 (additive): `LaunchPreviewBody`, `LaunchPreviewPosture`, `LaunchPreviewResponse` (studio#1150).
 - fix(roster): on the container floor, a seat whose image is missing and cannot be built (the operator's base is gone with no recipe, or an operator image is missing) reads unusable on `GET /roster`: work and council ineligible, inactive, chat refused, with the cause and its remedy. The engine is then handed it unusable, so work stays off it and a run refuses at launch instead of parking at a judge gate. One rule (`unbuildableSeatImages`) for the roster and the `seat_images` row, read in the background (crew#1097). As first merged it was inert on the current engine: the status parser required a `held` field the engine no longer prints, so every reading was unknown and no seat was marked. The fix below makes it effective. `RosterSeat.work_admission` / `qe_reviewer` refuse it with the new reason code `seat_image_unavailable` (wicked-crew-api-types 0.213.0, additive).
+- **Before the first job, studio can tell whether a GitHub pull request can be opened (crew#1527).** Delivery opens
+  a pull request by default, but nothing checked the GitHub sign-in it needs until a first job reached its deliver
+  step. `GET /api/v1/setup/known` now carries `delivery` (wicked-crew-api-types 0.214.0, additive `DeliveryReadiness`)
+  and `GET /api/v1/system` a `delivery` infra row, the same answer through one 4 s-bounded read. `ready` is what the
+  deliver step does, run rather than restated. The daemon runs the deliver script's own credential lines (now one
+  shared text) in the same `bash -lc` and environment, so the token delivery would use, an exported `GH_TOKEN` or
+  `GITHUB_TOKEN` included, is the one checked. Then it asks GitHub who that token is (the script's `gh api user`), which
+  refuses an expired token and another account's token for the push identity. The account it reports (`pushAs`) is
+  the login that shell observed, never the daemon's own `GH_ACCOUNT`. Only gh's explicit answers (no sign-in, no token
+  for the account, an invalid token) read not signed in; a network failure reads unknown. It asks git for the author and
+  committer as wicked-core does (`git -c user.useConfigOnly=true var GIT_AUTHOR_IDENT` / `GIT_COMMITTER_IDENT`). Not
+  ready names `gh auth login`, the `git config --global` commands, or delivering locally. Anything that could not be
+  checked (a timeout, GitHub or git not answering, a read that failed) reads `unknown`, never ready and never not
+  ready. The row (an observer read) never names the author's email. Known gaps: a
+  repository's own push identity, an Azure DevOps origin and a repository-local git identity are checked at launch
+  only.
 
 ## [0.18.17] — 2026-11-17
 

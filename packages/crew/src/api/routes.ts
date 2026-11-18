@@ -384,6 +384,7 @@ import {
   type RunEvidence,
 } from './system-snapshot.js';
 import { CLUSTER_TIMEOUT_MS, ClusterStatusReader, clusterDiagnostics, clusterRows } from './cluster-status.js';
+import { deliveryRow, readDeliveryReadiness } from '../setup/delivery-readiness.js';
 import { idleClis, probeSeatImages, SeatImageRebuilder, seatImageStatusVia, type SeatImageStatus } from './seat-images.js';
 import { RunCostCache } from './needs.js';
 import { governanceStoreFix, legacyHomeOutboxPath } from '../core/governance-store.js';
@@ -11254,6 +11255,11 @@ export function registerRoutes(
           rebuild: () => seatImageRebuilder.current(),
         }),
         clusterP.then((rows) => rows.cluster),
+        // crew#1527: whether a pull request can be opened — the setup steps' answer, through the same bounded reader.
+        (async () => {
+          const started = Date.now();
+          return deliveryRow(await readDeliveryReadiness(() => Promise.resolve(adapter.getSettings())), started, infraRow);
+        })(),
       ]);
 
       const [views, settings, openGates, diag, ping, rules, gatesByYou, infraProbed, reposRead] = await Promise.all([
@@ -11408,6 +11414,7 @@ export function registerRoutes(
         infraProbed[8] as SystemInfraRow,
         infraProbed[7] as SystemInfraRow,
         reposRow(reposRead),
+        infraProbed[9] as SystemInfraRow,
         infraProbed[6] as SystemInfraRow,
         loadRow(),
       ];

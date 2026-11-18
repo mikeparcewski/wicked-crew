@@ -152,6 +152,7 @@ const LABELS: Record<SystemInfraKey, string> = {
   repos: 'Repositories',
   seat_images: 'Seat images',
   cluster: 'Kubernetes cluster',
+  delivery: 'Delivery (GitHub sign-in)',
 };
 
 export function infraRow(

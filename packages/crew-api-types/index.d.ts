@@ -5155,6 +5155,42 @@ export interface SetupKnown {
   /** Git checkouts one level under the home's code folders and the registered repositories' folders,
    *  not registered yet (at most 24). `path` is absolute: register with `POST /repos {name, rootPath}`. */
   nearby: Array<{ name: string; path: string }>;
+  /** api-types 0.214.0 (crew#1527): whether delivery can push before the first job. Absent on an older daemon. */
+  delivery?: DeliveryReadiness;
+}
+
+/**
+ * api-types 0.214.0 (crew#1527): can a GitHub pull request be opened before the first job? On a github.com origin the
+ * daemon RUNS the deliver step's own credential lines in its shell and environment (so the token delivery would use,
+ * an exported `GH_TOKEN` or `GITHUB_TOKEN` included, is the one checked), asks GitHub who that token is (`gh api user`,
+ * which refuses an expired or revoked token and an exported token of another account than the push identity), and asks
+ * git for the author and committer as wicked-core does before a seat commits (`git var`). Anything that could not be
+ * checked is `ready: null`. Checks the daemon-wide push identity only: a repository's own (`deliverIdentityByRepo`) and
+ * an Azure DevOps origin are checked at launch, and a repository-local git identity is not seen. The system page's
+ * `delivery` infra row is the same answer, through the same 4 s-bounded read.
+ */
+export interface DeliveryReadiness {
+  /** The daemon's default for a launch that does not say: `pr` opens a pull request, `none` keeps the work on its
+   *  branch. studio's composer always says, from its own "Open a PR when a build run finishes" preference. */
+  deliverDefault: 'pr' | 'none';
+  /** Can a GitHub pull request be opened now? `true` = yes; `false` = a job that asks for one would stop at its deliver
+   *  step; `null` = could not check (a timeout, GitHub or git not answering, a read that failed). Answered whatever
+   *  `deliverDefault` says. */
+  ready: boolean | null;
+  /** The GitHub credential delivery would use, as its own credential lines resolved it. */
+  github: DeliverCredentials;
+  /** The GitHub login a pull request opens as: what `gh api user` answered inside the deliver shell (after its login
+   *  profile). When delivery would refuse, the push identity that shell resolved (`deliverIdentityLogin`, else its
+   *  `GH_ACCOUNT`), if any; when the check could not run, the configured `deliverIdentityLogin`, if any. Never read
+   *  from the daemon's own environment. */
+  pushAs: string | null;
+  /** The git author commits carry, as git resolves it (`GIT_AUTHOR_*`, `author.*`, `user.*`); `null` when none is
+   *  configured or it could not be read. */
+  gitAuthor: { name: string | null; email: string | null } | null;
+  /** One sentence: what a pull-request delivery will do now. Never the author's email. */
+  reason: string;
+  /** What to do when not ready (commands, or delivering locally); `null` when ready. */
+  fix: string | null;
 }
 
 // ── Skills — the daemon-owned garden plugin root, published as immutable snapshots (api-types 0.28.0) ──
@@ -11991,7 +12027,11 @@ export type SystemInfraKey =
    *  `context`, `controllerReady`, `controllerVersion`, `gateway`, `runNamespaces`, `pendingPods`.
    *  On the container floor the `gateway` row reads the same document (the gateway is a Deployment
    *  in the daemon's namespace). ABSENT before. */
-  | 'cluster';
+  | 'cluster'
+  /** api-types 0.214.0 (crew#1527): whether delivery can push (the GitHub sign-in a pull request needs and the git
+   *  author), the same answer as `SetupKnown.delivery`: `ok` = a pull request can push, `degraded` = it cannot,
+   *  `off` = it cannot but the daemon defaults to local delivery; `details.ready` carries the answer's `ready`. */
+  | 'delivery';
 
 export interface SystemInfraRow {
   key: SystemInfraKey;
