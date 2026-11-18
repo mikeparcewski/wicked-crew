@@ -126,5 +126,15 @@ describe('deliveryReadiness (crew#1527)', () => {
       expect(slow.reason).toContain('did not answer');
       expect(deliveryRow(slow, Date.now(), infraRow).state).toBe('unknown');
     });
+
+    it('a read past the bound still carries the settings it read (the default and the push identity), never invented ones', async () => {
+      const slow = await readDeliveryReadiness(async () => ({ deliverDefault: 'none' as const, deliverIdentityLogin: 'ada' }), {
+        env: {}, gh: () => new Promise(() => undefined), gitAuthor: async () => AUTHOR, timeoutMs: 20,
+      });
+      expect(slow).toMatchObject({ ready: null, deliverDefault: 'none', pushAs: 'ada' });
+      expect(deliveryRow(slow, Date.now(), infraRow).state).toBe('unknown');
+      const noSettings = await readDeliveryReadiness(async () => { throw new Error('unreadable'); }, { env: {}, gh: async () => SIGNED_IN, gitAuthor: async () => AUTHOR });
+      expect(noSettings).toMatchObject({ ready: null, deliverDefault: 'pr', pushAs: null });
+    });
   });
 });

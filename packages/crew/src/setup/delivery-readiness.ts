@@ -133,13 +133,17 @@ function memoAuthor(): Promise<DeliveryReadiness['gitAuthor']> {
 /** Tests only. */
 export function resetDeliveryReadinessMemo(): void { authorMemo = null; }
 
-/** The answer when the reads did not settle within {@link DELIVERY_READ_MS} (or failed): not known, never ready. */
-function notKnownYet(why: string): DeliveryReadiness {
+type DeliverySettings = { deliverDefault?: 'pr' | 'none' | undefined; deliverIdentityLogin?: string | undefined };
+
+/** The answer when the reads did not settle within {@link DELIVERY_READ_MS} (or failed): not known, never ready. The
+ *  settings, when they were read, still say what they say (the default and the push identity); only when the settings
+ *  themselves could not be read are these the daemon's defaults (`pr`, no identity). */
+function notKnownYet(why: string, settings: DeliverySettings | null, env: NodeJS.ProcessEnv): DeliveryReadiness {
   return {
-    deliverDefault: 'pr',
+    deliverDefault: settings?.deliverDefault === 'none' ? 'none' : 'pr',
     ready: null,
     github: { provider: 'github', status: 'unknown', source: null, missing: [], message: why },
-    pushAs: null,
+    pushAs: settings === null ? null : pushIdentityOf(settings.deliverIdentityLogin, env),
     gitAuthor: null,
     reason: why,
     fix: 'Re-check in a moment.',
@@ -150,19 +154,26 @@ function notKnownYet(why: string): DeliveryReadiness {
  *  author (memoised 30 s), within {@link DELIVERY_READ_MS}; a read that does not settle in time, or fails, is not known
  *  (`ready: null`). The seams are injectable for the tests. */
 export async function readDeliveryReadiness(
-  getSettings: () => Promise<{ deliverDefault?: 'pr' | 'none' | undefined; deliverIdentityLogin?: string | undefined }>,
+  getSettings: () => Promise<DeliverySettings>,
   deps: { env?: NodeJS.ProcessEnv; gh?: typeof ghStatusRead; gitAuthor?: () => Promise<DeliveryReadiness['gitAuthor']>; timeoutMs?: number } = {},
 ): Promise<DeliveryReadiness> {
+  const env = deps.env ?? process.env;
+  // The settings read on its own, so an answer past the bound still carries what they say.
+  let settingsRead: DeliverySettings | null = null;
+  const settingsP = getSettings().then((s) => {
+    settingsRead = s;
+    return s;
+  });
   const read = (async () => {
     const [settings, gh, gitAuthor] = await Promise.all([
-      getSettings(),
+      settingsP,
       (deps.gh ?? ghStatusRead)().catch(() => null),
       (deps.gitAuthor ?? memoAuthor)().catch(() => null),
     ]);
     return deliveryReadiness({
       deliverDefault: settings.deliverDefault,
       identityLogin: settings.deliverIdentityLogin,
-      env: deps.env ?? process.env,
+      env,
       gh,
       gitAuthor,
     });
@@ -170,11 +181,14 @@ export async function readDeliveryReadiness(
   const ms = deps.timeoutMs ?? DELIVERY_READ_MS;
   let timer: NodeJS.Timeout | undefined;
   const late = new Promise<DeliveryReadiness>((resolve) => {
-    timer = setTimeout(() => resolve(notKnownYet(`the delivery check did not answer within ${ms / 1000} s`)), ms);
+    timer = setTimeout(() => resolve(notKnownYet(`the delivery check did not answer within ${ms / 1000} s`, settingsRead, env)), ms);
     timer.unref?.();
   });
   try {
-    return await Promise.race([read.catch((e: unknown) => notKnownYet(`the delivery check could not read its settings: ${e instanceof Error ? e.message : String(e)}`)), late]);
+    return await Promise.race([
+      read.catch((e: unknown) => notKnownYet(`the delivery check could not read its settings: ${e instanceof Error ? e.message : String(e)}`, settingsRead, env)),
+      late,
+    ]);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
