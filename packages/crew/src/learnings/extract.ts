@@ -205,7 +205,7 @@ function fromOperatorRulings(view: SessionView): LearningCandidate[] {
   return out;
 }
 
-/** The QE reviewer could not run its checks: what it said it lacked is a sandbox fact worth keeping. */
+/** The QE reviewer could not run its checks: what it said it lacked is a sandbox fact, handed to the distil seat as evidence (which drops sandbox limits as seat-image facts). */
 function fromQeReview(view: SessionView): LearningCandidate[] {
   const out: LearningCandidate[] = [];
   for (const unit of unitsOf(view)) {

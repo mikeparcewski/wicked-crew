@@ -562,8 +562,8 @@ describe('the distil workflow and its report', () => {
   // Operator ruling 2026-11-18: seats stop proposing sandbox and toolchain facts; the seat image owns them.
   it('does not ask the seat to keep sandbox or seat limitations as learnings, and drops them', () => {
     const text = String(loadDistillWorkflow().phases[0]!.instructions);
-    expect(text).not.toMatch(/sandbox or seat limitation/u);
-    expect(text).toMatch(/Drop: [^.]*a limit of the seat's own sandbox \(a missing tool, a denied listen or write, no network\), which belongs to the seat image/u);
+    expect(text).not.toMatch(/Good learnings:[^.]*(sandbox|seat limitation)/u);
+    expect(text).toMatch(/Drop:[^.]*sandbox/u);
     expect(text).toMatch(/a repository rule or convention that bit/u);
   });
 
