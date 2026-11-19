@@ -165,18 +165,17 @@ describe('PR checks watch (crew#1623)', () => {
     // A web address that merely contains a home-looking segment is not a path (assembled: no literal path in source).
     const webHome = ['https://github.com', 'ho' + 'me', 'not-a-path'].join('/');
     // Synthetic secrets are assembled at run time so no secret-shaped literal sits in the source.
-    const [k1, k2, k3, k4] = [['hunter', '2hunter2hunter2'], ['correct', '-horse-battery'], ['abc123', 'def456', 'ghi789'], ['json', '-key-value']].map((p) => p.join(''));
+    const [k1, k2, k3] = [['hunter', '2hunter2hunter2'], ['correct', '-horse-battery'], ['abc123', 'def456', 'ghi789']].map((p) => p.join(''));
     const log = [
       `API_KEY=${k1}`,
       `password=${k2}`,
-      `{"api_key": "${k4}"}`,
       `Authorization: Bearer ${k3}`,
       `cwd ${['', 'Users', 'alice', 'work'].join('/')} and ${['', 'home', 'bob', 'src'].join('/')} and ${['C:', 'Users', 'carol', 'proj'].join('\\')}`,
       `see ${webHome} for details`,
     ].join('\n');
     const r = run({ polls: [[{ name: 'x', bucket: 'fail', link: job }]], required: ['x'], log });
     expect(r.code).toBe(3);
-    for (const leaked of [k1, k2, k3, k4, 'alice', 'bob', 'carol']) {
+    for (const leaked of [k1, k2, k3, 'alice', 'bob', 'carol']) {
       expect(r.out, leaked).not.toContain(leaked);
     }
     expect(r.out).toContain('API_KEY=[REDACTED:kv]');

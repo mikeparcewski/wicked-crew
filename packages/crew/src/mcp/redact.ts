@@ -60,12 +60,6 @@ export const VALUE_PATTERNS: ReadonlyArray<ValuePattern> = [
     re: /\b(token|secret|password|passwd|pwd|api[-_]?key|apikey|access[-_]?key|auth)=([^&\s"']{4,})/gi,
     replace: (_m: string, k: string) => `${k}=${REDACTED('kv')}`,
   },
-  {
-    // A JSON member whose key names a secret: `"password": "v"`, `'api_key':'v'` (a CI log prints API bodies).
-    id: 'json-secret',
-    re: /(["'][A-Za-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[-_]?key|private[-_]?key|access[-_]?key|credential|auth)[A-Za-z0-9_.-]*["']\s*:\s*)(?:"(?:[^"\\]|\\.)*"|'[^']*')/gi,
-    replace: (_m: string, k: string) => `${k}${REDACTED('json')}`,
-  },
   { id: 'private-key-block', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
 ];
 
