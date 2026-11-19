@@ -103,9 +103,11 @@ function fixture(): Fixture {
     [
       '#!/bin/sh',
       'case "$1" in',
-      '  api) echo "tester";;',
+      '  api) case "$2" in repos/*/rules/branches/*) printf "%s" "${GH_STUB_RULES:-[]}";; repos/*/branches/*) echo "{}";; *) echo "tester";; esac;;',
       '  auth) echo "gh: switched account";;',
+      '  run) printf "%s\\n" "${GH_STUB_LOG:-}";;',
       '  pr)',
+      '    case "$2" in checks) printf "%s" "${GH_STUB_CHECKS:-[]}"; exit 0;; view) echo main; exit 0;; esac',
       '    if [ -n "${GH_STUB_FAIL:-}" ]; then echo "$GH_STUB_FAIL" >&2; exit 1; fi',
       '    echo "${GH_STUB_OUT:-https://github.com/o/r/pull/42}";;',
       '  *) echo "gh: unexpected $*" >&2; exit 2;;',
@@ -273,6 +275,34 @@ describe('POST /runs/:id/deliver — post-hoc delivery, driven for real (crew#39
     expect((second.json() as { prUrl: string }).prUrl).toBe(url);
     // The script did NOT run again — no second push, no chance of a second PR.
     expect(execCalls()).toBe(1);
+  }, 60_000);
+
+  it('crew#1623: a red required check on a post-hoc lift is a 409 naming the check and its link, with NO log text, secret or home path', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
+    // Synthetic values, assembled at run time.
+    const secret = ['wJalr', 'XUtn1-post-hoc'].join('');
+    const home = ['', 'Users', 'alice', 'work'].join('/');
+    const job = 'https://github.com/o/r/actions/runs/1/job/22';
+    const env = {
+      ...fx.env,
+      GH_STUB_RULES: JSON.stringify([{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'semver' }] } }]),
+      GH_STUB_CHECKS: JSON.stringify([{ name: 'semver', bucket: 'fail', link: job, workflow: 'CI' }]),
+      GH_STUB_LOG: `aws_secret_access_key = ${secret}\ncwd ${home}`,
+    };
+    const { app } = buildApp([view(RUN_ID, { repo_ref: 'repo-1', workdir: fx.workdir })], env);
+    apps.push(app);
+    await app.ready();
+
+    const res = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUN_ID}/deliver` });
+    expect(res.statusCode).toBe(409);
+    const body = (res.json() as { error: string }).error;
+    expect(body).toContain('PR CHECKS FAILING');
+    expect(body).toContain('CI / semver');
+    expect(body).toContain(job);
+    expect(body).not.toContain(secret);
+    expect(body).not.toContain('alice');
+    expect(body).not.toContain('aws_secret_access_key');
   }, 60_000);
 
   it('N1: a NON-GITHUB origin — the branch is pushed, the run reads pushed (never stranded), and a second call pushes nothing', async () => {
@@ -507,8 +537,8 @@ describe('POST /runs/:id/deliver — a stranded REVISION re-pushes onto the PR b
       [
         '#!/bin/sh',
         'case "$1" in',
-        '  api) echo "tester";;',
-        '  pr) case "$2" in view) echo "OPEN";; comment) echo "commented";; *) echo "gh: unexpected $*" >&2; exit 2;; esac;;',
+        '  api) case "$2" in repos/*/rules/branches/*) echo "[]";; repos/*/branches/*) echo "{}";; *) echo "tester";; esac;;',
+        '  pr) case "$2" in checks) echo "[]";; view) case " $* " in *" baseRefName "*) echo main;; *) echo "OPEN";; esac;; comment) echo "commented";; *) echo "gh: unexpected $*" >&2; exit 2;; esac;;',
         '  *) echo "gh: unexpected $*" >&2; exit 2;;',
         'esac',
         'exit 0',

@@ -16538,6 +16538,23 @@ export interface WorkflowSchedule {
   updatedAt: string;
   /** The `review-recent-work` schedule only: the latest review's date and outcome. */
   lastReview?: { runId: string; launchedAt: string; endedAt: string | null; status: InsightsReviewStatus } | null;
+  /** (api-types 0.215.0, crew#1578) Set while the last run waits on a person and due times are being skipped: the
+   *  schedule never cancels it, and says so. `null` (or absent, before 0.215.0) when nothing blocks it. */
+  blocked?: ScheduleBlocked | null;
+}
+
+/** (api-types 0.215.0, crew#1578) A schedule held by its last run waiting on a person. */
+export interface ScheduleBlocked {
+  reason: 'awaiting_human';
+  runId: string;
+  /** ISO-8601: when the schedule first saw the run waiting (within one sweep of the gate's arrival). */
+  since: string;
+  /** Due times skipped while it waits (0 until one comes due). */
+  missedDue: number;
+  /** The gate to open. */
+  target: { kind: 'run'; runId: string };
+  /** One sentence for the row: "blocked: the last run <id> is waiting for you since <time>; N due times skipped". */
+  detail: string;
 }
 
 export interface SchedulesResponse {
