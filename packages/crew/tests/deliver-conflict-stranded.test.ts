@@ -332,9 +332,9 @@ function fixture(): Fixture {
     [
       '#!/bin/sh',
       'case "$1" in',
-      '  api) echo "tester";;',
+      '  api) case "$2" in repos/*/rules/branches/*) echo "[]";; repos/*/branches/*) echo "{}";; *) echo "tester";; esac;;',
       '  auth) echo "gh: switched account";;',
-      '  pr) echo "https://github.com/o/r/pull/71";;',
+      '  pr) case "$2" in checks) echo "[]";; view) echo main;; *) echo "https://github.com/o/r/pull/71";; esac;;',
       '  *) echo "gh: unexpected $*" >&2; exit 2;;',
       'esac',
       'exit 0',

@@ -91,6 +91,7 @@ import { randomBytes } from 'node:crypto';
 import { childEnvWithBootEstateDb } from './governance-store.js';
 import type { PhaseDef, WorkflowDef } from './types.js';
 import { ADO_HELPER_JS } from './ado-deliver-helper.js';
+import { prChecksJs } from './pr-checks-helper.js';
 import { ADO_PAT_ENV, ADO_SP_ENV, DELIVER_CREDENTIALS_MISSING_MARKER, adoRepoOf, type AdoRepo, type DeliverCredentials } from './deliver-credentials.js';
 import { DELIVER_NOT_SHIPPED_HEADING, DELIVER_STRANDED_SENTINEL, ENV_TEMPLATE_SAFE_LINE_ERE, HOME_SLUG_SEGMENT_ERE, SCRATCH_DIRS, SEAT_TEMP_DIR_ERE, TOOL_ARTIFACT_DIRS } from './deliver-exclusions.js';
 import {
@@ -154,6 +155,29 @@ export const DELIVER_LIFT_CONFLICT_MARKER = 'deliver: LIFT-CONFLICT';
 export const DELIVER_PUSH_REJECTED_MARKER = 'deliver: PUSH-REJECTED';
 
 /**
+ * crew#1623: the PR is open and pushed, but a REQUIRED check on it is red (verdict `checks_failed`)
+ * or has no conclusion (`checks_unknown`: still pending at the timeout, or unreadable). Both END the
+ * script's output as the last line and exit non-zero, so the run parks at the deliver-refusal gate
+ * (not done); a power run's red verdict is also sent back to Build (wicked-core). The DETAIL marker
+ * heads the findings block (failing job names and log tails) that the send-back carries.
+ */
+export const DELIVER_PR_CHECKS_FAILING_MARKER = 'deliver: PR CHECKS FAILING';
+export const DELIVER_PR_CHECKS_UNKNOWN_MARKER = 'deliver: PR CHECKS UNKNOWN';
+export const DELIVER_PR_CHECKS_DETAIL_MARKER = 'deliver: PR CHECKS DETAIL';
+/** How long the deliver phase waits for pending required checks, seconds (env, read by the script). */
+export const DELIVER_CHECKS_TIMEOUT_ENV = 'WICKED_DELIVER_CHECKS_TIMEOUT_SECS';
+/** Default wait: 45 minutes. */
+export const DELIVER_CHECKS_TIMEOUT_DEFAULT_SECS = 2700;
+/** The checks wait in seconds under `env`: the ONE setting the script's helper and the post-hoc lift's process bound both read. */
+export function deliverChecksTimeoutSecs(env: Readonly<Record<string, string | undefined>> = process.env): number {
+  const raw = env[DELIVER_CHECKS_TIMEOUT_ENV];
+  const n = raw === undefined || raw.trim() === '' ? NaN : Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : DELIVER_CHECKS_TIMEOUT_DEFAULT_SECS;
+}
+/** How often the checks are re-read, seconds (env). */
+export const DELIVER_CHECKS_POLL_ENV = 'WICKED_DELIVER_CHECKS_POLL_SECS';
+
+/**
  * The machine line the deliver script prints LAST on a successful PUSH-ONLY delivery (N1, the half
  * of F2 that did not hold): the branch is on the remote, and no pull request was opened because gh
  * could not resolve the origin to a GitHub repository. `deliver: PUSHED-NO-PR <branch> <remote>` —
@@ -176,7 +200,7 @@ export const DELIVER_OUTCOME_MARKER = 'deliver: OUTCOME';
 /** The script variable carrying the nonce ({@link DELIVER_OUTCOME_MARKER}). */
 export const DELIVER_NONCE_VAR = 'DELIVER_NONCE';
 /** The verdicts the sentinel carries. `stranded` is the post-hoc-liftable LIFT-CONFLICT class. */
-export type DeliverOutcome = 'pr' | 'pushed' | 'rejected' | 'stranded' | 'failed';
+export type DeliverOutcome = 'pr' | 'pushed' | 'rejected' | 'stranded' | 'failed' | 'checks_failed' | 'checks_unknown';
 /** A fresh 16-byte hex nonce for one script composition. */
 export function mintDeliverNonce(): string {
   return randomBytes(16).toString('hex');
@@ -1538,6 +1562,27 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '    fi',
     '  fi',
     '  fi',
+    'fi',
+    // (crew#1623) A PR a required check keeps from merging is not a delivery. On a GitHub PR the phase
+    // now waits for the required checks' conclusion (the base branch's rulesets / protection, through
+    // the same token the push used): red -> `checks_failed` (a power run sends it back to Build),
+    // pending past the timeout or unreadable -> `checks_unknown`; both exit 1 with the PR's URL in the
+    // last line, so the run parks at the deliver-refusal gate and only all-green is done. Azure DevOps
+    // has no gh to read with and is not watched.
+    'if [ -z "$ADOGIT" ]; then',
+    '  CHKNODE=$(command -v node || true); [ -n "$CHKNODE" ] || CHKNODE=' + shellSingleQuote(process.execPath),
+    '  [ -x "$CHKNODE" ] || { VERDICT=checks_unknown; echo "deliver: no node binary to read the pull request\'s checks"; echo "' + DELIVER_PR_CHECKS_UNKNOWN_MARKER + ' — $URL: the checks could not be read; approve to re-check"; exit 1; }',
+    "  cat > \"$TD/checks.cjs\" <<'WICKED_CREW_CHECKS_HELPER_EOF'",
+    ...prChecksJs().split('\n'),
+    'WICKED_CREW_CHECKS_HELPER_EOF',
+    '  echo "deliver: watching the required checks of $URL (up to ${' + DELIVER_CHECKS_TIMEOUT_ENV + ':-' + DELIVER_CHECKS_TIMEOUT_DEFAULT_SECS + '}s)"',
+    '  CHKRC=0; CHKOUT=$(if [ -n "${GHT:-}" ]; then GH_TOKEN="$GHT" GH_HOST=github.com "$CHKNODE" "$TD/checks.cjs" "$URL" "${' + DELIVER_CHECKS_TIMEOUT_ENV + ':-' + DELIVER_CHECKS_TIMEOUT_DEFAULT_SECS + '}" "${' + DELIVER_CHECKS_POLL_ENV + ':-20}"; else "$CHKNODE" "$TD/checks.cjs" "$URL" "${' + DELIVER_CHECKS_TIMEOUT_ENV + ':-' + DELIVER_CHECKS_TIMEOUT_DEFAULT_SECS + '}" "${' + DELIVER_CHECKS_POLL_ENV + ':-20}"; fi) || CHKRC=$?',
+    '  echo "$CHKOUT"',
+    '  case "$CHKRC" in',
+    '    0) ;;',
+    '    3) VERDICT=checks_failed; echo "' + DELIVER_PR_CHECKS_FAILING_MARKER + ' — $URL: $(printf \'%s\\n\' "$CHKOUT" | grep \'^deliver: failing required check\' | tail -1 | sed \'s/^deliver: //\' | head -c 240); fix them on the run branch, or approve to re-check"; exit 1;;',
+    '    *) VERDICT=checks_unknown; echo "' + DELIVER_PR_CHECKS_UNKNOWN_MARKER + ' — $URL: $(printf \'%s\\n\' "$CHKOUT" | tail -1 | sed \'s/^deliver: //\' | head -c 240); the PR is open and its checks have no conclusion; approve to re-check"; exit 1;;',
+    '  esac',
     'fi',
     'VERDICT=pr',
     'echo "$URL"',

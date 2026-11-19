@@ -24,6 +24,8 @@ import { join } from 'node:path';
 import {
   DELIVER_POSTHOC_ENV,
   DELIVER_VERIFIED_BASE_ENV,
+  DELIVER_PR_CHECKS_DETAIL_MARKER,
+  deliverChecksTimeoutSecs,
   deliverPrScript,
   type DeliverScriptOptions,
 } from '../core/deliver.js';
@@ -124,6 +126,35 @@ const OUTPUT_CAP_BYTES = 8 * 1024 * 1024;
 /** A post-hoc lift talks to a real remote; 5 minutes is generous, hanging forever is not. */
 export const DELIVER_SCRIPT_TIMEOUT_MS = 5 * 60_000;
 
+/** The most a post-hoc lift's script may run under `env`: its own work plus the checks wait (crew#1623), so
+ *  a lift that waits for the PR's required checks is not killed after the push. */
+export function deliverScriptTimeoutMs(env: Readonly<Record<string, string | undefined>> = process.env): number {
+  return DELIVER_SCRIPT_TIMEOUT_MS + deliverChecksTimeoutSecs(env) * 1000;
+}
+
+/**
+ * (crew#1623) What a post-hoc lift may return and log of a failed PR-checks watch: the verdict lines, and for each
+ * failing check its name, bucket and link, but NOT the failed job's log. The post-hoc path never reaches the
+ * engine's redaction, so the excerpt is deleted rather than cut. Everything else in the output is kept as it was.
+ */
+export function withoutCheckLogs(output: string): string {
+  const lines = output.split('\n');
+  const out: string[] = [];
+  let inDetail = false;
+  for (const line of lines) {
+    if (line.startsWith(DELIVER_PR_CHECKS_DETAIL_MARKER)) {
+      inDetail = true;
+      out.push(line);
+    } else if (inDetail && line.startsWith('deliver: failing required check')) {
+      inDetail = false;
+      out.push(line);
+    } else if (!inDetail || line.startsWith('--- ')) {
+      out.push(line);
+    }
+  }
+  return out.join('\n');
+}
+
 /**
  * The production {@link DeliverExec}: `bash -lc <script>` in the run's worktree — the exact
  * invocation core's `run_tool_cmd` uses for the deliver phase (login shell, so the operator's
@@ -157,12 +188,12 @@ export function runDeliverScript(
         cwd: workdir,
         env: shellEnv,
         maxBuffer: OUTPUT_CAP_BYTES,
-        timeout: DELIVER_SCRIPT_TIMEOUT_MS,
+        timeout: deliverScriptTimeoutMs(shellEnv),
       },
       (err, stdout, stderr) => {
         // The script folds stderr into stdout (`exec 2>&1`), but bash itself (a spawn failure,
         // a timeout kill) can still write stderr — append it so the route's error names it.
-        const output = `${stdout ?? ''}${stderr ?? ''}`;
+        const output = withoutCheckLogs(`${stdout ?? ''}${stderr ?? ''}`);
         if (err === null) {
           resolve({ status: 0, output });
           return;

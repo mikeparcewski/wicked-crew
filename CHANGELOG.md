@@ -31,6 +31,43 @@ mentioned only where a daemon release depends on them.
   - Run it now does the same and writes what it found on the row before refusing.
 
   wicked-crew-api-types 0.215.0 (additive): `WorkflowSchedule.blocked`, `ScheduleBlocked`.
+
+## [0.18.18] — 2026-11-19
+
+Feature release. A launch form can ask what a run will keep before it starts: `POST /runs/preview` answers the human gates
+(power or phased, delivery, gate) from the same decision `POST /runs` makes (studio#1150; wicked-crew-api-types 0.212.0). Before
+the first job, setup says whether a pull request can be opened: GitHub sign-in and git identity are checked the way delivery
+uses them, and the answer is "unknown" rather than a guess when it cannot be checked (crew#1527; api-types 0.214.0). One rule
+picks the seats new work may use (the `newWorkSeats` setting): a seat turned off is no longer put on a job nobody named it on,
+naming an opt-in seat is the opt-in (crew#1590), a removal says what was applied, a chat job's Start always hands the engine the
+card's seats (crew#1593), and the run review picks its seat from the seats new work may use and refuses in words when none is
+usable (crew#1592). A seat whose container image is missing and cannot be built reads unusable on `GET /roster` and a run
+refuses at launch instead of parking at a judge gate (crew#1097; api-types 0.213.0); crew reads the seat-image status the current
+engine prints (crew#1526). **A delivered pull request whose required check is red is not done (crew#1623, #1624):** after
+delivery the run waits for the PR's required checks; a red check goes back to Build in a power run (within its hand-off rounds,
+wicked-core#1591), and a run out of rounds, or whose checks are unknown, parks at the deliver-refusal gate saying "PR CHECKS
+FAILING" or "PR CHECKS UNKNOWN". No seat temp file or home-derived path reaches a pushed commit: delivery rewrites such commits
+first (wicked-core#1573, #1612). A run's brief carries only learnings the operator approved, with this machine's home and temp
+paths redacted (crew#1546, #1613). Concurrent `PUT /settings` writes no longer revert each other (crew#1591). A leading
+`Repository: <repo>` line no longer titles the pull request (crew#1516). Ships wicked-crew-api-types 0.214.0 (types only,
+additive), bundles wicked-studio 0.16.14 (the New job posture preview, studio#1150, #1192) and requires wicked-core-ts ^0.15.46
+(a delivered PR's red check back to Build, core#1591; a seat on the work's provider is no judge for the monitor exclusion, so a
+fix retry no longer parks with no eligible judge, core#1595; a held power pause survives a daemon restart, core#1581; a change
+across several crates of one repository no longer pauses a run, core#1572; `checkRunTree` and `judgeCoverage`, core#1559,
+core#1558).
+
+Known limits: crew#1618 and the items it names. Not in this release: crew#1619 (fix for crew#1616: a seat's committed bash-output
+log can still reach pushed history; it is open and merges after), crew#1597, #1615 and #1617. Upgrade: install wicked-estate
+0.35.7 beside it (project graphs for read-only seats need it); the first `index` after the upgrade re-extracts TSX, JS and JSX
+files.
+
+- **A delivered PR whose required check is red is not "done" (crew#1623).** After the deliver phase opens or updates the PR it watches the
+  base branch's required checks (the rulesets' and branch protection's required contexts, read on the push identity; a required check that
+  has not reported yet counts as pending) to a conclusion. All green delivers. A red check ends the phase `checks_failed` with the failing
+  job's name and the tail of its log (a power run sends it back to Build in wicked-core, within its hand-off rounds); a check still pending
+  at the timeout, or checks that cannot be read, end it `checks_unknown`. Both park the run at the deliver-refusal gate ("PR CHECKS FAILING"
+  / "PR CHECKS UNKNOWN"), never done; Approve re-checks. `WICKED_DELIVER_CHECKS_TIMEOUT_SECS` (default 2700, 45 minutes) and
+  `WICKED_DELIVER_CHECKS_POLL_SECS` (default 20) configure the wait. Azure DevOps deliveries are not watched.
 - fix(deliver): a seat's own temp files and home-derived paths reach no pushed commit (wicked-core#1573). A seat that committed its temp file (`tmp/claude-<uid>/<a slug of the worktree path>/…/tasks/<id>.output`) and deleted it in a later commit still had it in the branch history, because delivery's exclusions only ran over untracked files. Right before the push, the deliver script now checks every file state the pushed commits introduce or inherit from a merged-in older commit against one narrow class, by name only: a `claude-<digits>` directory segment (`seat-temp`), or a segment that is a home-path slug (`-Users-…`, `-home-…`, `C--Users-…`, one starting with this host's home slug) or this host's home path mirrored as directories (`home-derived`). When any match, it rewrites those commits without them, keeping authors, committers, dates and messages; a commit the scrub empties is dropped. The general exclusion list (credentials, env files, `tmp/` source) is not applied to committed files: a committed `tmp/parser.rs` or `src/credentials.ts` is pushed as committed, and a path the base already holds at that exact name is never touched. If the scrub would rewrite or drop a signed commit, the push is refused with the reason (re-run the step, or remove the file from the history by hand) and nothing is pushed: delivery never signs work with a key of its own. Re-created commits of an unsigned history stay unsigned, whatever the ambient signing config says. Before the branch moves, the script checks that the rewritten final tree differs from the committed one only by removed paths of that class, and refuses the push otherwise; a scrub read that fails also pushes nothing. The phase output names each scrubbed path, and the PR body counts them by reason. A path under a nested scratch or tool-artifact directory is now named in the PR's Not shipped list only up to that directory (`pkg/tmp/…`), whichever rule excluded it, and the run diff the deliver gate counts leaves out committed files of the scrubbed class.
 - **A run's brief carries only learnings the operator approved, with this daemon's home and temp paths redacted (crew#1546).** Run-learnings recall
   labelled every stored memory "approved by the operator". Among them were raw session captures (a hook's
@@ -7230,7 +7267,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.17...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.18...HEAD
+[0.18.18]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.17...v0.18.18
 [0.18.17]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.16...v0.18.17
 [0.18.16]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.15...v0.18.16
 [0.18.15]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.14...v0.18.15
