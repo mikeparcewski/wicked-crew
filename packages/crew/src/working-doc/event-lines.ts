@@ -212,6 +212,14 @@ export const NOTE_WORDS_MAX = 280;
 /** An audit entry, as far as these lines read it (`api/audit.ts` `AuditEntry`). */
 export interface AuditLike { ts: number; action: string; runId?: string; actor?: { id?: unknown; kind?: unknown } | null; detail?: Record<string, unknown> | null }
 
+/** (crew#1578) The schedule's actor id: its cancel of a stuck run is the one non-person line, named as the schedule. */
+export const SCHEDULE_ACTOR_ID = 'workflow-schedule';
+
+/** Whose lines a run's notes carry: a person's, and its schedule's cancel (never as a person). */
+export function notedActor(e: AuditLike): boolean {
+  return e.actor?.kind === 'human' || (e.actor?.kind === 'system' && e.actor.id === SCHEDULE_ACTOR_ID && e.action === 'run.cancelled');
+}
+
 /** The audit actions a person's words may come from ({@link personNotes}). */
 export const NOTE_ACTIONS: ReadonlySet<string> = new Set(['gate.decided', 'gate.rules_skipped', 'gate.qe_skipped', 'run.cancelled', 'guidance.set']);
 
@@ -250,9 +258,9 @@ function gateVerb(d: Record<string, unknown>): NoteVerb {
 export function personNotes(entries: readonly AuditLike[]): PersonNote[] {
   const out: PersonNote[] = [];
   for (const e of entries) {
-    if (e.actor?.kind !== 'human' || typeof e.ts !== 'number') continue;
+    if (e.actor == null || !notedActor(e) || typeof e.ts !== 'number') continue;
     const d = obj(e.detail);
-    const who = whoOf(e.actor.id);
+    const who = e.actor.kind === 'human' ? whoOf(e.actor.id) : 'Its schedule';
     const push = (verb: NoteVerb, words: unknown, subject: string | null = null): void => {
       const w = oneLine(words);
       if (w !== '') out.push({ at: e.ts, who, verb, subject, words: w });

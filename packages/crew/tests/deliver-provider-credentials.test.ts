@@ -119,6 +119,11 @@ function stubGh(fx: Fx): void {
       '  "auth token") U=""; P=""; for a in "$@"; do [ "$P" = --user ] && U="$a"; P="$a"; done; if [ -n "$U" ] && [ "$U" = "${GH_STUB_TOKEN_FOR:-}" ]; then echo "tok-$U"; exit 0; fi; exit 1;;',
       '  "api user") if [ -n "${GH_TOKEN:-}" ] && [ "$GH_TOKEN" = "tok-${GH_STUB_TOKEN_FOR:-}" ]; then echo "$GH_STUB_TOKEN_LOGIN"; exit 0; fi; echo "${GH_STUB_LOGIN:-tester}";;',
       '  "pr create") echo "https://github.com/o/r/pull/9";;',
+      // (crew#1623) the PR-checks watch: nothing required, so the delivery stands.
+      '  "pr checks") echo "[]";;',
+      '  "pr view") echo main;;',
+      '  "api repos/o/r/rules/branches/main") echo "[]";;',
+      '  "api repos/o/r/branches/main") echo "{}";;',
       '  *) echo "gh: unexpected $*" >&2; exit 2;;',
       'esac',
     ].join('\n'),

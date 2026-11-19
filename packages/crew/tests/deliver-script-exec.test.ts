@@ -22,6 +22,9 @@ import {
   DELIVER_LIFT_CONFLICT_MARKER,
   DELIVER_OUTCOME_MARKER,
   DELIVER_PUSHED_NO_PR_MARKER,
+  DELIVER_PR_CHECKS_DETAIL_MARKER,
+  DELIVER_PR_CHECKS_FAILING_MARKER,
+  DELIVER_PR_CHECKS_UNKNOWN_MARKER,
   DELIVER_PUSH_REJECTED_MARKER,
   DELIVER_UNVERIFIED_MARKER,
   deliverPrScript,
@@ -152,6 +155,10 @@ interface GhStub {
   viewText?: string;
   /** (e2e-1105 F4c) Make `gh pr view --json title,body` fail. */
   viewFails?: boolean;
+  /** (crew#1623) The JSON `gh pr checks --required --json …` answers (default `[]`). */
+  checks?: string;
+  /** (crew#1623) The base branch's `rules/branches/<base>` JSON (default `[]`: nothing required). */
+  rules?: string;
   /** (crew#737) `gh auth token --user <tokenFor>` prints a token; any other account fails. */
   tokenFor?: string;
   /** (crew#737) The login `gh api user` answers while that token is exported as GH_TOKEN. */
@@ -203,7 +210,9 @@ async function runDeliver(
       // Every call is logged — the identity tests assert the script never runs `gh auth switch`.
       'printf "%s\\n" "$*" >> "$GH_STUB_RECORD.calls"',
       'case "$1" in',
-      '  api) if [ -n "${GH_TOKEN:-}" ] && [ "$GH_TOKEN" = "tok-${GH_STUB_TOKEN_FOR:-}" ]; then echo "$GH_STUB_TOKEN_LOGIN"; exit 0; fi; if [ -n "${GH_STUB_API_FAIL:-}" ]; then echo "gh: not logged in" >&2; exit 1; fi; echo "${GH_STUB_LOGIN:-tester}";;',
+      // (crew#1623) The PR-checks watch: the base branch's ruleset contexts (none by default) and the required
+      // checks' rows (`gh pr checks --required --json`, none by default), which the watch reads after a delivery.
+      '  api) case "$2" in repos/*/rules/branches/*) printf "%s" "${GH_STUB_RULES:-[]}"; exit 0;; repos/*/branches/*) echo "{}"; exit 0;; esac; if [ -n "${GH_TOKEN:-}" ] && [ "$GH_TOKEN" = "tok-${GH_STUB_TOKEN_FOR:-}" ]; then echo "$GH_STUB_TOKEN_LOGIN"; exit 0; fi; if [ -n "${GH_STUB_API_FAIL:-}" ]; then echo "gh: not logged in" >&2; exit 1; fi; echo "${GH_STUB_LOGIN:-tester}";;',
       // (crew#737) `gh auth token [--help] --user <a>`: a token only for the stubbed account; the
       // help text lists --user only on a stubbed newer gh. Any other auth verb is still recorded.
       '  auth)',
@@ -219,7 +228,8 @@ async function runDeliver(
       // DES-L9 revision mode: `gh pr view N --json state -q .state` and `gh pr comment N --body-file`.
       // (e2e-1105 F4c) `gh pr view <url> --json title,body`: the PR's text as GitHub holds it — the edit this stub
       // recorded, else GH_STUB_PR_TEXT; GH_STUB_VIEW_FAIL makes the read fail.
-      '      view) case " $* " in *" title,body "*) if [ -n "${GH_STUB_VIEW_FAIL:-}" ]; then echo "gh: HTTP 502" >&2; exit 1; fi; if [ -n "${GH_STUB_VIEW_TEXT:-}" ]; then printf "%s\\n" "$GH_STUB_VIEW_TEXT"; elif [ -f "$GH_STUB_RECORD.edit" ]; then cat "$GH_STUB_RECORD.edit"; else printf "%s\\n" "$GH_STUB_PR_TEXT"; fi;; *) echo "${GH_STUB_PR_STATE:-OPEN}";; esac;;',
+      '      checks) printf "%s" "${GH_STUB_CHECKS:-[]}"; exit 0;;',
+      '      view) case " $* " in *" baseRefName "*) echo main;; *" title,body "*) if [ -n "${GH_STUB_VIEW_FAIL:-}" ]; then echo "gh: HTTP 502" >&2; exit 1; fi; if [ -n "${GH_STUB_VIEW_TEXT:-}" ]; then printf "%s\\n" "$GH_STUB_VIEW_TEXT"; elif [ -f "$GH_STUB_RECORD.edit" ]; then cat "$GH_STUB_RECORD.edit"; else printf "%s\\n" "$GH_STUB_PR_TEXT"; fi;; *) echo "${GH_STUB_PR_STATE:-OPEN}";; esac;;',
       // (e2e-1105 F4c) `gh pr edit <url> --title T --body-file F`: recorded as the PR's new text (title, blank, body).
       '      edit) T=""; BF=""; while [ $# -gt 0 ]; do case "$1" in --title) T="$2"; shift;; --body-file) BF="$2"; shift;; esac; shift; done; if [ -n "${GH_STUB_EDIT_FAIL:-}" ]; then echo "$GH_STUB_EDIT_FAIL" >&2; exit 1; fi; { printf "%s\\n\\n" "$T"; cat "$BF"; } > "$GH_STUB_RECORD.edit";;',
       '      comment) BF=""; while [ $# -gt 0 ]; do case "$1" in --body-file) BF="$2"; shift;; esac; shift; done; if [ -n "$BF" ]; then cp "$BF" "$GH_STUB_RECORD.comment"; fi; if [ -n "${GH_STUB_COMMENT_FAIL:-}" ]; then echo "$GH_STUB_COMMENT_FAIL" >&2; exit 1; fi; echo "https://github.com/o/r/pull/273#issuecomment-1";;',
@@ -230,6 +240,7 @@ async function runDeliver(
       '        if [ -n "${GH_STUB_FAIL:-}" ]; then echo "$GH_STUB_FAIL" >&2; exit 1; fi',
       '        echo "${GH_STUB_OUT:-https://github.com/o/r/pull/7}";;',
       '    esac;;',
+      '  run) echo "error: the failed job says so";;',
       '  *) echo "gh: unexpected $*" >&2; exit 2;;',
       'esac',
       'exit 0',
@@ -314,6 +325,8 @@ async function runDeliver(
           GH_STUB_PR_TEXT: opts.gh?.prText ?? '',
           GH_STUB_VIEW_FAIL: opts.gh?.viewFails === true ? '1' : '',
           GH_STUB_VIEW_TEXT: opts.gh?.viewText ?? '',
+          GH_STUB_CHECKS: opts.gh?.checks ?? '',
+          GH_STUB_RULES: opts.gh?.rules ?? '',
           GH_STUB_TOKEN_FOR: opts.gh?.tokenFor ?? '',
           GH_STUB_TOKEN_LOGIN: opts.gh?.tokenLogin ?? '',
           GH_STUB_TOKEN_USER_FLAG: opts.gh?.tokenUserFlag === true ? '1' : '',
@@ -2312,4 +2325,59 @@ describe('deliver script — no seat temp path in ANY pushed commit (wicked-core
     expect(git(fx.origin, 'rev-list', '--objects', '--all')).not.toContain(SLUG);
     expect(git(fx.origin, 'rev-list', '--count', `${prHead}..${PR_BRANCH}`).trim()).toBe('1');
   }, 90_000);
+});
+
+
+describe('deliver script — the PR\'s required checks (crew#1623)', () => {
+  const ruleFor = (...names: string[]): string =>
+    JSON.stringify([{ type: 'required_status_checks', parameters: { required_status_checks: names.map((context) => ({ context })) } }]);
+  const row = (name: string, bucket: string): { name: string; bucket: string; link: string; workflow: string } => ({
+    name, bucket, link: 'https://github.com/o/r/actions/runs/1/job/9', workflow: 'CI',
+  });
+
+  it('all required checks green: the PR URL is the last line and the verdict is pr', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.txt'), 'the run\'s change\n');
+    const r = await runDeliver(fx, { gh: { rules: ruleFor('semver'), checks: JSON.stringify([row('semver', 'pass')]) } });
+    expect(r.status, r.output).toBe(0);
+    expect(r.outcome).toBe('pr');
+    expect(r.lastLine).toBe('https://github.com/o/r/pull/7');
+    expect(r.output).toContain('1 required check(s) green');
+  });
+
+  it('a red required check: exit 1, verdict checks_failed, the failing job and its log in the output, FAILING last', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.txt'), 'the run\'s change\n');
+    const r = await runDeliver(fx, { gh: { rules: ruleFor('semver'), checks: JSON.stringify([row('semver', 'fail')]) } });
+    expect(r.status, r.output).toBe(1);
+    expect(r.outcome).toBe('checks_failed');
+    expect(r.output).toContain(DELIVER_PR_CHECKS_DETAIL_MARKER);
+    expect(r.output).toContain('error: the failed job says so');
+    expect(r.lastLine.startsWith(DELIVER_PR_CHECKS_FAILING_MARKER)).toBe(true);
+    expect(r.lastLine).toContain('https://github.com/o/r/pull/7');
+    expect(r.lastLine).toContain('CI / semver');
+    // The refusal reads as a script refusal (never a seat fault), parked at the gate.
+    expect(triageDeliverFailure(r.output, undefined)?.kind).toBe('script_refusal');
+  });
+
+  it('a required check that never reports: checks_unknown after the timeout, not a delivery', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.txt'), 'the run\'s change\n');
+    const r = await runDeliver(fx, {
+      gh: { rules: ruleFor('late'), checks: '[]' },
+      env: { WICKED_DELIVER_CHECKS_TIMEOUT_SECS: '1', WICKED_DELIVER_CHECKS_POLL_SECS: '0.3' },
+    });
+    expect(r.status, r.output).toBe(1);
+    expect(r.outcome).toBe('checks_unknown');
+    expect(r.lastLine.startsWith(DELIVER_PR_CHECKS_UNKNOWN_MARKER)).toBe(true);
+    expect(r.output).toContain('late (not reported yet)');
+  });
+
+  it('checks that cannot be read: checks_unknown', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.txt'), 'the run\'s change\n');
+    const r = await runDeliver(fx, { gh: { rules: 'not json', checks: '[]' }, env: { WICKED_DELIVER_CHECKS_POLL_SECS: '0' } });
+    expect(r.status, r.output).toBe(1);
+    expect(r.outcome).toBe('checks_unknown');
+  });
 });
