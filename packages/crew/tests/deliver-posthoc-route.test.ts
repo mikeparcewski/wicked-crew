@@ -103,9 +103,10 @@ function fixture(): Fixture {
     [
       '#!/bin/sh',
       'case "$1" in',
-      '  api) echo "tester";;',
+      '  api) case "$2" in repos/*/rules/branches/*) echo "[]";; repos/*/branches/*) echo "{}";; *) echo "tester";; esac;;',
       '  auth) echo "gh: switched account";;',
       '  pr)',
+      '    case "$2" in checks) echo "[]"; exit 0;; view) echo main; exit 0;; esac',
       '    if [ -n "${GH_STUB_FAIL:-}" ]; then echo "$GH_STUB_FAIL" >&2; exit 1; fi',
       '    echo "${GH_STUB_OUT:-https://github.com/o/r/pull/42}";;',
       '  *) echo "gh: unexpected $*" >&2; exit 2;;',
@@ -507,8 +508,8 @@ describe('POST /runs/:id/deliver — a stranded REVISION re-pushes onto the PR b
       [
         '#!/bin/sh',
         'case "$1" in',
-        '  api) echo "tester";;',
-        '  pr) case "$2" in view) echo "OPEN";; comment) echo "commented";; *) echo "gh: unexpected $*" >&2; exit 2;; esac;;',
+        '  api) case "$2" in repos/*/rules/branches/*) echo "[]";; repos/*/branches/*) echo "{}";; *) echo "tester";; esac;;',
+        '  pr) case "$2" in checks) echo "[]";; view) case " $* " in *" baseRefName "*) echo main;; *) echo "OPEN";; esac;; comment) echo "commented";; *) echo "gh: unexpected $*" >&2; exit 2;; esac;;',
         '  *) echo "gh: unexpected $*" >&2; exit 2;;',
         'esac',
         'exit 0',

@@ -265,9 +265,10 @@ beforeAll(async () => {
     [
       '#!/bin/sh',
       'case "$1" in',
-      '  api) echo "tester";;',
+      // (crew#1623) the PR-checks watch: the base branch's rules and the PR's checks, none required.
+      '  api) case "$2" in repos/*/rules/branches/*) echo "[]";; repos/*/branches/*) echo "{}";; *) echo "tester";; esac;;',
       '  auth) echo "gh: switched account";;',
-      '  pr) echo "${GH_STUB_OUT:-https://github.com/o/r/pull/7}";;',
+      '  pr) case "$2" in checks) echo "[]";; view) echo main;; *) echo "${GH_STUB_OUT:-https://github.com/o/r/pull/7}";; esac;;',
       '  *) echo "gh: unexpected $*" >&2; exit 2;;',
       'esac',
       'exit 0',

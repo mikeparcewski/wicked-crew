@@ -24,6 +24,7 @@ import { join } from 'node:path';
 import {
   DELIVER_POSTHOC_ENV,
   DELIVER_VERIFIED_BASE_ENV,
+  deliverChecksTimeoutSecs,
   deliverPrScript,
   type DeliverScriptOptions,
 } from '../core/deliver.js';
@@ -124,6 +125,12 @@ const OUTPUT_CAP_BYTES = 8 * 1024 * 1024;
 /** A post-hoc lift talks to a real remote; 5 minutes is generous, hanging forever is not. */
 export const DELIVER_SCRIPT_TIMEOUT_MS = 5 * 60_000;
 
+/** The most a post-hoc lift's script may run under `env`: its own work plus the checks wait (crew#1623), so
+ *  a lift that waits for the PR's required checks is not killed after the push. */
+export function deliverScriptTimeoutMs(env: Readonly<Record<string, string | undefined>> = process.env): number {
+  return DELIVER_SCRIPT_TIMEOUT_MS + deliverChecksTimeoutSecs(env) * 1000;
+}
+
 /**
  * The production {@link DeliverExec}: `bash -lc <script>` in the run's worktree — the exact
  * invocation core's `run_tool_cmd` uses for the deliver phase (login shell, so the operator's
@@ -157,7 +164,7 @@ export function runDeliverScript(
         cwd: workdir,
         env: shellEnv,
         maxBuffer: OUTPUT_CAP_BYTES,
-        timeout: DELIVER_SCRIPT_TIMEOUT_MS,
+        timeout: deliverScriptTimeoutMs(shellEnv),
       },
       (err, stdout, stderr) => {
         // The script folds stderr into stdout (`exec 2>&1`), but bash itself (a spawn failure,

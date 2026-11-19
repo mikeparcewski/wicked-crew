@@ -168,10 +168,11 @@ beforeAll(async () => {
     [
       '#!/bin/sh',
       'case "$1" in',
-      '  api) echo "${GH_STUB_LOGIN:-release-bot}";;',
+      '  api) case "$2" in repos/*/rules/branches/*) echo "[]";; repos/*/branches/*) echo "{}";; *) echo "${GH_STUB_LOGIN:-release-bot}";; esac;;',
       '  pr)',
       '    case "$2" in',
-      `      view) printf '{"headRefName":"${PR_BRANCH}","state":"OPEN","isCrossRepository":false,"url":"${PR_URL}"}\\n';;`,
+      '      checks) echo "[]";;',
+      `      view) case " $* " in *" baseRefName "*) echo main;; *) printf '{"headRefName":"${PR_BRANCH}","state":"OPEN","isCrossRepository":false,"url":"${PR_URL}"}\\n';; esac;;`,
       '      comment) echo "https://github.com/o/r/pull/273#issuecomment-1";;',
       '      *) echo "gh: unexpected pr $*" >&2; exit 2;;',
       '    esac;;',
