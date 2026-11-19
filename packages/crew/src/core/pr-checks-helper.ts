@@ -38,9 +38,24 @@ import { HOME_PATH_PATTERNS } from '../api/ui-text.js';
  * ride into the helper's text as data; `tests/pr-checks-helper.test.ts` pins the helper's output equal to
  * those modules' own on the same samples. A pattern with a replacer keeps the key it matched (its tail is probed from the replacer, not copied).
  */
+/**
+ * Secret shapes a CI LOG prints that `mcp/redact.ts` does not cut, kept here (the deliver module), not in the
+ * shared MCP patterns, which also redact tool results and so must not touch fields like pagination cursors:
+ * a secret-named key followed by `=` (spaced or not) and a plain or quoted value, e.g.
+ * `aws_secret_access_key = v`, `password="v"`. A name ending in `page` + `token` (`nextPageToken`,
+ * `next_page_token`) is a cursor, not a secret, and is left alone.
+ */
+export const LOG_SECRET_PATTERNS: ReadonlyArray<{ id: string; re: RegExp; replace: (match: string, key: string) => string }> = [
+  {
+    id: 'log-secret',
+    re: /\b([A-Za-z0-9_.-]*(?:(?<!page[-_]?)token|secret|passw(?:or)?d|api[-_]?key|private[-_]?key|access[-_]?key|credential)[A-Za-z0-9_.-]*["']?[ \t]*=[ \t]*)(?!\[REDACTED)(?:"[^"\n]*"|'[^'\n]*'|[^\s"']+)/gi,
+    replace: (_m: string, k: string) => `${k}[REDACTED:log]`,
+  },
+];
+
 /** Built on first use, not at import: `mcp/redact` reaches this module through `mcp/secrets` -> `core/deliver`, so a module-level read of its exports would see them undefined. */
 const redactRules = (): string => JSON.stringify([
-  ...VALUE_PATTERNS.map((p) => ({ id: p.id, source: p.re.source, flags: p.re.flags, keepTail: p.replace === undefined ? undefined : p.replace('', '\u0001', '').slice(1) })),
+  ...[...VALUE_PATTERNS, ...LOG_SECRET_PATTERNS].map((p) => ({ id: p.id, source: p.re.source, flags: p.re.flags, keepTail: p.replace === undefined ? undefined : p.replace('', '\u0001', '').slice(1) })),
   ...HOME_PATH_PATTERNS.map((re) => ({ id: 'home', source: re.source, flags: re.flags, home: true })),
 ]);
 

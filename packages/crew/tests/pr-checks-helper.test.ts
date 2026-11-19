@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { prChecksJs } from '../src/core/pr-checks-helper.js';
 import { redactString } from '../src/mcp/redact.js';
 import { scrubHomePaths } from '../src/api/ui-text.js';
-import { deliverScriptTimeoutMs, DELIVER_SCRIPT_TIMEOUT_MS } from '../src/api/post-hoc-deliver.js';
+import { deliverScriptTimeoutMs, DELIVER_SCRIPT_TIMEOUT_MS, withoutCheckLogs } from '../src/api/post-hoc-deliver.js';
 import { deliverChecksTimeoutSecs, DELIVER_CHECKS_TIMEOUT_DEFAULT_SECS, DELIVER_CHECKS_TIMEOUT_ENV } from '../src/core/deliver.js';
 
 const URL = 'https://ghe.example.test/o/r/pull/7';
@@ -187,9 +187,52 @@ describe('PR checks watch (crew#1623)', () => {
     expect(body).toBe(scrubHomePaths(redactString(log), '/nonexistent-home').trim());
   });
 
+  it('log-line secrets the MCP patterns miss are cut; pagination cursors survive', () => {
+    const [v1, v2, v3, v4] = [['wJalr', 'XUtn1'], ['pw0', 'rd-two'], ['sing', 'le-three'], ['spa', 'ced-four']].map((p) => p.join(''));
+    const log = [
+      `aws_secret_access_key = ${v1}`,
+      `password="${v2}"`,
+      `password='${v3}'`,
+      `API_KEY = ${v4}`,
+      'nextPageToken=cursor-abc123',
+      'next_page_token = cursor-def456',
+      'pageToken = cursor-ghi789',
+      'cursor = cursor-jkl012',
+    ].join('\n');
+    const r = run({ polls: [[{ name: 'x', bucket: 'fail', link: job }]], required: ['x'], log });
+    expect(r.code).toBe(3);
+    for (const leaked of [v1, v2, v3, v4]) expect(r.out, leaked).not.toContain(leaked);
+    for (const kept of ['nextPageToken=cursor-abc123', 'next_page_token = cursor-def456', 'pageToken = cursor-ghi789', 'cursor = cursor-jkl012']) {
+      expect(r.out, kept).toContain(kept);
+    }
+  });
+
   it('rules that cannot be read -> 5, never a pass', () => {
     const r = run({ polls: [[ok('a')]], required: ['a'], rulesFail: true });
     expect(r.code).toBe(5);
+  });
+});
+
+describe('post-hoc delivery returns no CI log (crew#1623)', () => {
+  it('keeps the verdict lines and each failing check\'s name and link, and deletes the log between', () => {
+    const secret = ['aws_secret_access_key = wJalr', 'XUtn1'].join('');
+    const home = ['', 'Users', 'alice', 'w'].join('/');
+    const out = [
+      'deliver: pushed b to origin',
+      'deliver: PR CHECKS DETAIL',
+      '--- CI / semver (fail) https://github.com/o/r/actions/runs/1/job/2',
+      secret,
+      `cwd ${home}`,
+      'deliver: failing required check(s): CI / semver',
+      'deliver: PR CHECKS FAILING - https://github.com/o/r/pull/7: CI / semver',
+    ].join('\n');
+    const kept = withoutCheckLogs(out);
+    expect(kept).not.toContain('wJalr');
+    expect(kept).not.toContain('alice');
+    expect(kept).toContain('--- CI / semver (fail) https://github.com/o/r/actions/runs/1/job/2');
+    expect(kept).toContain('deliver: failing required check(s): CI / semver');
+    expect(kept).toContain('deliver: PR CHECKS FAILING');
+    expect(withoutCheckLogs('plain output\nno detail')).toBe('plain output\nno detail');
   });
 });
 

@@ -24,6 +24,7 @@ import { join } from 'node:path';
 import {
   DELIVER_POSTHOC_ENV,
   DELIVER_VERIFIED_BASE_ENV,
+  DELIVER_PR_CHECKS_DETAIL_MARKER,
   deliverChecksTimeoutSecs,
   deliverPrScript,
   type DeliverScriptOptions,
@@ -132,6 +133,29 @@ export function deliverScriptTimeoutMs(env: Readonly<Record<string, string | und
 }
 
 /**
+ * (crew#1623) What a post-hoc lift may return and log of a failed PR-checks watch: the verdict lines, and for each
+ * failing check its name, bucket and link, but NOT the failed job's log. The post-hoc path never reaches the
+ * engine's redaction, so the excerpt is deleted rather than cut. Everything else in the output is kept as it was.
+ */
+export function withoutCheckLogs(output: string): string {
+  const lines = output.split('\n');
+  const out: string[] = [];
+  let inDetail = false;
+  for (const line of lines) {
+    if (line.startsWith(DELIVER_PR_CHECKS_DETAIL_MARKER)) {
+      inDetail = true;
+      out.push(line);
+    } else if (inDetail && line.startsWith('deliver: failing required check')) {
+      inDetail = false;
+      out.push(line);
+    } else if (!inDetail || line.startsWith('--- ')) {
+      out.push(line);
+    }
+  }
+  return out.join('\n');
+}
+
+/**
  * The production {@link DeliverExec}: `bash -lc <script>` in the run's worktree — the exact
  * invocation core's `run_tool_cmd` uses for the deliver phase (login shell, so the operator's
  * PATH — where `gh` lives — is loaded). `opts` is the PR/commit text context (crew#524). `env`
@@ -169,7 +193,7 @@ export function runDeliverScript(
       (err, stdout, stderr) => {
         // The script folds stderr into stdout (`exec 2>&1`), but bash itself (a spawn failure,
         // a timeout kill) can still write stderr — append it so the route's error names it.
-        const output = `${stdout ?? ''}${stderr ?? ''}`;
+        const output = withoutCheckLogs(`${stdout ?? ''}${stderr ?? ''}`);
         if (err === null) {
           resolve({ status: 0, output });
           return;
