@@ -54,7 +54,7 @@ import { InsightsStore } from '../insights/store.js';
 import { ANALYZE_CLI, REVIEW_WORKFLOW, defaultReviewsDir, loadReviewWorkflow } from '../insights/workflow.js';
 import { RUN_EVALS_CLI, RUN_EVALS_WORKFLOW, defaultEvalRunsDir, loadRunEvalsWorkflow } from '../evals/workflow.js';
 import { registerScheduleRoutes } from '../schedules/routes.js';
-import { WorkflowScheduler, type ScheduledLaunch } from '../schedules/scheduler.js';
+import { WorkflowScheduler, cancelOnItsRecord, type ScheduledLaunch } from '../schedules/scheduler.js';
 import { DEFAULT_REVIEW_SCHEDULE_ID, ScheduleStore } from '../schedules/store.js';
 import { LearnScheduler } from '../learn/scheduler.js';
 import { LearnScheduleStore } from '../learn/schedule-store.js';
@@ -1557,7 +1557,7 @@ export async function createServer(
     try {
       await adapter.registerWorkflow(loadDistillWorkflow());
     } catch (err) {
-      app.log.warn(`[learnings] could not register the '${DISTILL_WORKFLOW}' workflow — run learnings are filed undistilled: ${err instanceof Error ? err.message : String(err)}`);
+      app.log.warn(`[learnings] could not register the '${DISTILL_WORKFLOW}' workflow — the end-of-run distil cannot launch, so only checkpoint learnings are filed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   // A run whose end was interrupted by a restart (its handoff written, its distil run finished while the daemon was
@@ -1661,6 +1661,12 @@ export async function createServer(
     store: workflowSchedules,
     sessionsDetail: () => adapter.sessionsDetail(),
     launch: launchScheduled,
+    // crew#1578: a scheduled run that never got seats is its schedule's to end, on the run's own record.
+    runViewFresh: (runId) => adapter.runView(runId, { fresh: true }),
+    cancel: cancelOnItsRecord(
+      (runId) => adapter.cancelRun(runId),
+      (runId, detail) => audit.record('run.cancelled', SCHEDULE_ACTOR, { runId, detail }),
+    ),
     onTick: [(status) => reviewService.reconcile(status)],
     log: (m) => app.log.info(m),
   });

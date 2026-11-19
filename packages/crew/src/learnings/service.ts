@@ -7,12 +7,13 @@
  *  - At the run's END the rest of the evidence (rulings, steers, decisions, review findings, base-red
  *    checks) goes to ONE cheap seat that did not build the run: a `distill-learnings` run, one seat,
  *    one turn, no repository. Crew files what it writes. When no such seat can run (none signed in,
- *    the launch refused, it wrote nothing usable), the evidence is filed raw, trimmed and capped.
+ *    the launch refused, it wrote nothing usable), nothing is filed from the evidence: a run's rulings, floor results
+ *    and review text are its record, not learnings (approve-queue triage 2026-11-18: every raw item was noise).
  *  - The distil run is never a person's to answer (wicked-crew#1251 follow-up: a codex distil that
  *    rightly found nothing replied in under 200 characters, failed the engine's substance floor and
  *    sat in the operator's queue as "Waiting on you"). Its outcome is its report file, read here, so
  *    whatever gate it stops at (a short reply, a crashed seat), crew stops the run and files from
- *    the report: an empty one is recorded as "none found", a missing one files the evidence raw.
+ *    the report: an empty one is recorded as "none found", a missing one files nothing.
  *
  * Everything filed is a PROPOSAL of kind `memory` in estate's queue, attributed to the SOURCE run
  * (`provenance.run_id`), faceted by repo, project and seat. Nothing is written without a person's
@@ -40,9 +41,9 @@ export const REPORT_FILE = 'report.json';
 export const FILED_FILE = 'filed.json';
 /** The distil run launched for a source run (its id and seat). */
 export const DISTILL_FILE = 'distill.json';
-/** The agent named on a learning crew worded itself (a template, or raw evidence). */
+/** The agent named on a learning crew worded itself (a template). */
 export const CREW_AGENT = 'crew';
-/** The most learnings one run proposes from its end (the distil seat's, or the raw fallback). */
+/** The most learnings one run proposes from its end (the distil seat's). */
 export const MAX_END_LEARNINGS = 5;
 /** The shortest learning worth a person's time (estate refuses shorter bodies too). */
 export const MIN_LEARNING_CHARS = 40;
@@ -142,8 +143,6 @@ export interface RunLearningsDeps {
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const KINDS: ReadonlySet<string> = new Set(['gotcha', 'decision', 'pattern', 'steering']);
-/** Raw fallback order: the operator's own words first, then what bit, then the rest. */
-const FALLBACK_ORDER: Record<string, number> = { operator_ruling: 0, steer: 1, qe_review: 2, working_notes: 3, review: 4, repo_checks: 5 };
 
 function tierOf(kind: LearningKind): string {
   return kind === 'pattern' ? 'procedural' : 'semantic';
@@ -277,7 +276,7 @@ export class RunLearningsService {
   /**
    * After a restart: finish every run whose end was interrupted. A handoff with no distil run (the daemon stopped
    * before the launch) is ended again; a distil run that ended while the daemon was down is reconciled; one the
-   * daemon no longer knows is filed raw. Never throws.
+   * daemon no longer knows is reconciled from its report (nothing is filed when it is missing). Never throws.
    */
   recover(): Promise<void> {
     if (this.deps.mode === 'off') return Promise.resolve();
@@ -337,8 +336,10 @@ export class RunLearningsService {
       if (failed === 0) this.markFiled(runId, { distilled: false, filed: 0 });
       return;
     }
-    const launched = this.deps.mode === 'distill' ? await this.launchDistill(view, material, known) : null;
-    if (launched === null) await this.fileRaw(view, material, failed);
+    // No distil seat (none signed in, launch refused, extract mode): nothing is filed from the raw evidence. A run
+    // evidence log is not a learning; the run's record keeps it, and the next recovery tries the distil again.
+    if (this.deps.mode === 'distill') await this.launchDistill(view, material, known);
+    else if (failed === 0) this.markFiled(runId, { distilled: false, filed: 0 });
   }
 
   /** The distil run recorded for a source run, if one was launched. */
@@ -381,24 +382,6 @@ export class RunLearningsService {
     }
   }
 
-  /** No distil seat: the evidence as it is, trimmed and capped, for a person to edit or reject. */
-  /** `failedBefore`: submits of this end that already failed. The run is marked filed only when none did, so a
-   *  failed submit is retried on the next recovery (the dedupe keeps what landed from landing twice). */
-  private async fileRaw(view: SessionView, material: readonly LearningCandidate[], failedBefore = 0, note: Record<string, unknown> = {}): Promise<void> {
-    const ordered = material
-      .filter((c) => c.content.length >= MIN_LEARNING_CHARS)
-      .sort((a, b) => (FALLBACK_ORDER[a.source] ?? 9) - (FALLBACK_ORDER[b.source] ?? 9))
-      .slice(0, MAX_END_LEARNINGS);
-    let filed = 0;
-    let failed = failedBefore;
-    for (const c of ordered) {
-      if ((await this.file(view, CREW_AGENT, c.kind, c.content, c.cli)) !== null) filed += 1;
-      else failed += 1;
-    }
-    if (failed === 0) this.markFiled(view.session.id, { distilled: false, filed, ...note });
-    else this.deps.log(`[learnings] ${view.session.id}: ${failed} learning(s) could not be proposed; retried at the next recovery`);
-  }
-
   private markFiled(sourceRunId: string, what: Record<string, unknown>): void {
     try {
       mkdirSync(this.dirOf(sourceRunId), { recursive: true });
@@ -424,7 +407,7 @@ export class RunLearningsService {
     return null;
   }
 
-  /** Launch the distil run. `null` when it could not be launched (the caller files the evidence raw). */
+  /** Launch the distil run. `null` when it could not be launched (nothing is filed from the raw evidence). */
   private async launchDistill(view: SessionView, material: readonly LearningCandidate[], known: ReadonlySet<string>): Promise<string | null> {
     const sourceRunId = view.session.id;
     const dir = this.dirOf(sourceRunId);
@@ -436,7 +419,7 @@ export class RunLearningsService {
       seat = null;
     }
     if (seat === null) {
-      this.deps.log(`[learnings] ${sourceRunId}: no signed-in seat other than the builder's to distil its learnings; filing the evidence as it is`);
+      this.deps.log(`[learnings] ${sourceRunId}: no signed-in seat other than the builder's to distil its learnings; nothing is filed from the raw evidence`);
       return null;
     }
     const out = join(dir, OUT_DIR);
@@ -487,7 +470,7 @@ export class RunLearningsService {
     } catch (err) {
       this.distills.delete(distillRunId);
       writeJsonAtomic(join(dir, DISTILL_FILE), { ...record, distillRunId: null, refused: err instanceof Error ? err.message : String(err) });
-      this.deps.log(`[learnings] distill launch for ${sourceRunId} refused (${err instanceof Error ? err.message : String(err)}); filing the evidence as it is`);
+      this.deps.log(`[learnings] distill launch for ${sourceRunId} refused (${err instanceof Error ? err.message : String(err)}); nothing is filed from the raw evidence`);
       return null;
     }
   }
@@ -530,7 +513,7 @@ export class RunLearningsService {
 
   /**
    * A distil run stopped at a gate. It is never a person's to answer: crew stops it and files from its report (the
-   * seat's judgment, even when it is "none found"), or files the evidence raw when the seat wrote nothing usable.
+   * seat's judgment, even when it is "none found"), or files nothing when the seat wrote nothing usable.
    * Only a live frame does this; a distil already parked when the daemon starts is left as it is.
    */
   private async stopParkedDistill(distillRunId: string, sourceRunId: string, event: Record<string, unknown>): Promise<void> {
@@ -555,7 +538,7 @@ export class RunLearningsService {
     await this.reconcileDistill(distillRunId, sourceRunId);
   }
 
-  /** A distil run ended: file what it wrote under the source run, or the raw evidence when it wrote nothing usable. */
+  /** A distil run ended: file what it wrote under the source run, or nothing when it wrote nothing usable. */
   async reconcileDistill(distillRunId: string, sourceRunId: string): Promise<void> {
     const dir = this.dirOf(sourceRunId);
     if (existsSync(join(dir, FILED_FILE))) return;
@@ -568,10 +551,9 @@ export class RunLearningsService {
       const report = parseDistillReport(raw);
       const stopped = isRecord(rec) && typeof rec['stopped'] === 'string' ? { stopped: rec['stopped'] } : {};
       if (report === null) {
-        this.deps.log(`[learnings] distill-learnings ${distillRunId} wrote no usable report for ${sourceRunId}; filing the evidence as it is`);
-        const events = (await this.deps.adapter.runEvents(sourceRunId)) ?? [];
-        const known = await this.knownTexts();
-        await this.fileRaw(view, extractLearnings(view, events).filter((c) => c.form === 'material' && !known.has(normalizeLearning(c.content))), 0, stopped);
+        // Nothing is filed from the raw evidence; the outcome is recorded so a restart does not read the same report again.
+        this.deps.log(`[learnings] distill-learnings ${distillRunId} wrote no usable report for ${sourceRunId}; nothing is filed`);
+        this.markFiled(sourceRunId, { distilled: true, distillRunId, seat, filed: 0, noUsableReport: true, ...stopped });
         return;
       }
       const known = await this.knownTexts();

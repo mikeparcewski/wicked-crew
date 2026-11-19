@@ -326,7 +326,7 @@ graph yet answers a typed 404 (`code: "notGenerated"`) that names the workflow t
 its identical retry, or a check its sandbox could not start, is proposed at once, worded from the
 record. The rest (your rulings with their reasons, standing steers, a reviewer's findings) goes at
 the end to one seat that neither led nor built the run, which keeps at most five; with no such seat,
-the evidence is filed as it is, capped at five. Each learning is a `memory` proposal attributed to the run (and faceted by repo, project and,
+nothing is filed from the evidence (the run's record keeps it). Each learning is a `memory` proposal attributed to the run (and faceted by repo, project and,
 when it is about one, seat); nothing is stored until a person approves it. A distil that finds
 nothing records "none found" instead of waiting on you. `GET /api/v1/runs/:id/learnings` answers a
 run's count; `WICKED_CREW_RUN_LEARNINGS=off|extract|distill` (default `distill`) turns it down.
