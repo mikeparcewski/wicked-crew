@@ -10,6 +10,22 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+- **The B4 chat measure, `packages/crew/scripts/chat-probe.ts` (crew#1497).** It reports, per question, grounded answers
+  with real `repo/path:line` citations, fabricated citations and internal-text leaks, over project chats it opens and
+  closes itself. It fails closed: a question that errored, timed out, could not be closed, had a failed seat or got no
+  seat list fails the measure, and a link or path it cannot check is a failed citation. A GitHub link is valid only
+  when three things hold: its owner/repo is the member repository's own remote; its ref (a branch, tag or commit)
+  resolves in the local clone; and the cited lines exist in the file at that ref. A link with another owner or an
+  unknown ref counts as fabricated, even when a file of that name is checked out. Reading fails closed: a token
+  shaped like a citation (`name:12`, `name#L12`, a URL ending `#L12`) that the grammar does not read whole counts as
+  fabricated. Citations are read in one pass that claims spans. Links come first, decoded once. A backtick-quoted
+  span is one path, spaces included. Bare paths come last. No step reads inside a span already claimed. That covers
+  a suffix of a longer token, `#L1e999`, a range with junk after it, an extensionless name it
+  does not know, and an upper-case scheme. `passed` needs at least 20 questions; a smaller set reports `barMet` and
+  exits 1, as a smoke run. The final read must still hold every seat the send reached, and it keeps any failure or leak
+  the settling read showed. A file URL into a home or temp folder, a Windows path in any script, and a pretty-printed
+  session row are leaks.
+
 - **A stuck scheduled run no longer blocks its schedule forever, and a run waiting on you says so (crew#1578).** The
   schedule used to skip every due time while its last run was open, so a run stuck planning with no seats held it
   indefinitely.
