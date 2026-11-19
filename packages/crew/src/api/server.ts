@@ -1557,7 +1557,7 @@ export async function createServer(
     try {
       await adapter.registerWorkflow(loadDistillWorkflow());
     } catch (err) {
-      app.log.warn(`[learnings] could not register the '${DISTILL_WORKFLOW}' workflow — run learnings are filed undistilled: ${err instanceof Error ? err.message : String(err)}`);
+      app.log.warn(`[learnings] could not register the '${DISTILL_WORKFLOW}' workflow — the end-of-run distil cannot launch, so only checkpoint learnings are filed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   // A run whose end was interrupted by a restart (its handoff written, its distil run finished while the daemon was

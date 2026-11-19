@@ -276,7 +276,7 @@ export class RunLearningsService {
   /**
    * After a restart: finish every run whose end was interrupted. A handoff with no distil run (the daemon stopped
    * before the launch) is ended again; a distil run that ended while the daemon was down is reconciled; one the
-   * daemon no longer knows is left unfiled. Never throws.
+   * daemon no longer knows is reconciled from its report (nothing is filed when it is missing). Never throws.
    */
   recover(): Promise<void> {
     if (this.deps.mode === 'off') return Promise.resolve();
