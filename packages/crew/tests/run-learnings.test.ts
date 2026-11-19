@@ -559,6 +559,14 @@ describe('the distil workflow and its report', () => {
     expect(def as unknown as Record<string, unknown>).not.toHaveProperty('$comment');
   });
 
+  // Operator ruling 2026-11-18: seats stop proposing sandbox and toolchain facts; the seat image owns them.
+  it('does not ask the seat to keep sandbox or seat limitations as learnings, and drops them', () => {
+    const text = String(loadDistillWorkflow().phases[0]!.instructions);
+    expect(text).not.toMatch(/sandbox or seat limitation/u);
+    expect(text).toMatch(/Drop: [^.]*a limit of the seat's own sandbox \(a missing tool, a denied listen or write, no network\), which belongs to the seat image/u);
+    expect(text).toMatch(/a repository rule or convention that bit/u);
+  });
+
   it('asks for a reviewable record: every evidence item checked, and the reply says what was kept and dropped', () => {
     const text = String(loadDistillWorkflow().phases[0]!.instructions);
     expect(text).toMatch(/one checked entry for EVERY evidence item/u);
