@@ -10,6 +10,28 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+- **A stuck scheduled run no longer blocks its schedule forever, and a run waiting on you says so (crew#1578).** The
+  schedule used to skip every due time while its last run was open, so a run stuck planning with no seats held it
+  indefinitely.
+  - **A run that never started work is cancelled.** That is a last run still planning or distributing with a known
+    empty seat list, 6 h after its scheduled launch. Its schedule cancels it at that point, due or not, and the next
+    due time launches. The status and seats are read again right before the cancel, which has a 60 s deadline.
+  - **The cancel is on the run's own record.** It is written as `run.cancelled` by `workflow-schedule` with the
+    reason "cancelled by its schedule: no seats for 6 h". The run's working document shows it as
+    "Its schedule · <time> · stopped the job: ...". This is the one line in a run's notes that is not a person's.
+  - **Other outcomes:** a run that ended on its own first keeps its own end, and no cancel is recorded. A cancel that
+    fails or does not answer launches nothing, and the row says why.
+  - **What is never cancelled:** a run with seats, one executing, or one younger than 6 h.
+  - **A run waiting on a person** (`awaiting_human`) is never cancelled for them. The row carries `blocked` from the
+    first sweep that sees it waiting: since when, the run to open (`target`), how many due times it skipped while
+    waiting, and the sentence "blocked: the last run <id> is waiting for you since <time>; N due times skipped". It
+    clears when the run moves on. `lastNote` keeps exactly the words it had before this change ("skipped: its last
+    run <id> is waiting on you (awaiting_human)"), so a studio that predates `blocked` still shows its warning. A
+    studio that renders `blocked` shows the sentence and the link (wicked-studio#1195).
+  - Run it now does the same and writes what it found on the row before refusing.
+
+  wicked-crew-api-types 0.215.0 (additive): `WorkflowSchedule.blocked`, `ScheduleBlocked`.
+
 ## [0.18.18] — 2026-11-19
 
 Feature release. A launch form can ask what a run will keep before it starts: `POST /runs/preview` answers the human gates
