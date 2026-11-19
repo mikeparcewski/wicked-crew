@@ -80,6 +80,9 @@ const WINDOWS_HOME = new RegExp(String.raw`(?<![A-Za-z])[A-Za-z]:${SEP}Users${SE
 /** Any other user's `/Users/<name>` or `/home/<name>`, at a path start (see {@link PATH_START}). */
 const POSIX_HOME = new RegExp(String.raw`${PATH_START}${SEP}(?:Users|home)${SEP}[^\\/\s"'),;:]+`, 'gi');
 
+/** The generic other-user home patterns, for programs that run outside the daemon (the deliver script's PR-checks helper). */
+export const HOME_PATH_PATTERNS: readonly RegExp[] = [WINDOWS_HOME, POSIX_HOME];
+
 /**
  * Every home path in `text` becomes `~`. First the daemon's own home (and its realpath, so a
  * symlinked home like macOS's `/var` → `/private/var` is caught), then ANY remaining `/Users/<name>`,
