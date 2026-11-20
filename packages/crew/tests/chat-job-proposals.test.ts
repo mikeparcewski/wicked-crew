@@ -80,7 +80,7 @@ interface Rig {
 
 const CHAT = 'c1';
 
-function rig(o: { roster?: Array<{ key: string; name: string }>; repos?: Array<{ id: string; name: string }>; reviewAuthors?: ChatProposalDeps['reviewAuthors']; powerPresets?: ChatProposalDeps['powerPresets'] } = {}): Rig {
+function rig(o: { pickFirstRepo?: ChatProposalDeps['pickFirstRepo']; roster?: Array<{ key: string; name: string }>; repos?: Array<{ id: string; name: string }>; reviewAuthors?: ChatProposalDeps['reviewAuthors']; powerPresets?: ChatProposalDeps['powerPresets'] } = {}): Rig {
   const r: Rig = {
     svc: null as unknown as ChatProposals,
     records: [],
@@ -108,6 +108,7 @@ function rig(o: { roster?: Array<{ key: string; name: string }>; repos?: Array<{
     instanceOf: () => 'i1',
     projectOf: () => null,
     chat: () => r.chat,
+    ...(o.pickFirstRepo !== undefined ? { pickFirstRepo: o.pickFirstRepo } : {}),
     rosterEligible: () => r.roster,
     runs: async () => [],
     chatOfRun: () => undefined,
@@ -252,6 +253,20 @@ describe('revisions', () => {
     expect(pressed.code).toBe(201);
     expect(open(r)).toMatchObject({ shape: { card: 'feature' }, question: null });
     expect(open(r).gate).not.toContain('parity');
+  });
+
+  it('studio#1094: a seat revision naming a repo never widens a repo-less chat', async () => {
+    let picks = 0;
+    const r = rig({ repos: [], pickFirstRepo: async () => { picks += 1; return { ok: true, name: 'billing-api' }; } });
+    await pick(r, 'migrate', { option: 'upgrade' });
+    const parent = open(r);
+    expect(parent.needs).toContainEqual(expect.objectContaining({ id: 'repo', status: 'missing' }));
+    await say(r, 'first-repo', 'use billing-api');
+    await reply(r, 'first-repo', { revises: parent.pid, edits: { repoRef: 'billing-api' } });
+    expect(picks).toBe(0);
+    expect(r.chat.repos).toEqual([]);
+    expect(open(r).repoRefs ?? []).toEqual([]);
+    expect(open(r).sentence?.notes).toContain("Not changed: billing-api isn't in this chat's scope (start a thread on it)");
   });
 
   it('(ad) the seat\'s prose cannot outrank the sentence: a block that keeps the checks keeps them', async () => {

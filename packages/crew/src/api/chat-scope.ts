@@ -1682,6 +1682,16 @@ export class ChatScopeIndex {
     return slot?.state === 'live' ? slot.scope : undefined;
   }
 
+  /** studio#1094: the person's pick gives the same live, repo-less chat its first repository. */
+  pickFirstRepo(chatId: string, previous: ChatScope, scope: ChatScope, engine: EngineChatScope, request: ChatScopeRequest): boolean {
+    const slot = this.slots.get(chatId);
+    if (slot?.state !== 'live' || slot.scope !== previous || previous.repos.length > 0) return false;
+    slot.scope = scope;
+    slot.engine = { ...engine, readRoots: [...engine.readRoots] };
+    slot.request = { ...request, repoRefs: [...request.repoRefs] };
+    return true;
+  }
+
   /** crew#1020: the original request, copied so a refresh cannot mutate the open's intent. */
   requestOf(chatId: string): ChatScopeRequest | undefined {
     const slot = this.slots.get(chatId);

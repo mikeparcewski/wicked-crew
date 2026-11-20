@@ -5692,6 +5692,44 @@ export function registerRoutes(
         analysis: path?.workflow !== undefined,
       };
     },
+    // studio#1094: the person route owns admission; the open's resolver validates their first repo pick.
+    pickFirstRepo: async (chatId, repoRef, actor, pid) => {
+      const previous = chatScopes.get(chatId);
+      if (previous === undefined) return { ok: false, status: 409, error: `chat ${chatId} has ended; start a new one` };
+      if (previous.repos.length > 0) return { ok: false, status: 409, error: `chat ${chatId} already has a repository in scope` };
+      if (previous.kind === 'everything') return { ok: false, status: 409, error: `chat ${chatId} already reads every registered repository` };
+      const request: ChatScopeRequest = {
+        chatId,
+        ...(previous.projectId !== undefined ? { projectId: previous.projectId } : {}),
+        repoRefs: [repoRef],
+      };
+      const resolution = await resolveChatScope(request, {
+        ...chatScopeDeps(adapter),
+        scratchBase: chatScopes.base,
+        log: (m) => app.log.warn(m),
+        ...(runtime.entityCount !== undefined ? { entityCount: runtime.entityCount } : {}),
+        ...(runtime.freshenCheckout !== undefined ? { freshen: runtime.freshenCheckout } : {}),
+      });
+      if (!resolution.ok) return { ok: false, status: resolution.status, error: resolution.error };
+      const { scope, engine } = resolution;
+      const rules = (await considerations.inForceFor(scope.projectId ?? null)).rules;
+      // No await from the stale-slot check through the recorded pick.
+      if (chatScopes.get(chatId) !== previous) return { ok: false, status: 409, error: `chat ${chatId}'s scope changed while the repository was being picked; try again` };
+      try {
+        prepareChatScratch(chatId, scope, rules, {
+          analysis: askPaths.get(chatId)?.workflow !== undefined,
+          make: chatProposals.digest(chatId, chatAccepts.get(chatId) === true, { appearance: false }),
+          ...voiceFor(scope.projectId),
+        });
+      } catch (err) {
+        return { ok: false, status: 500, error: `cannot prepare the chat's scratch root ${scope.cwd}: ${message(err)}` };
+      }
+      if (!chatScopes.pickFirstRepo(chatId, previous, scope, engine, request)) return { ok: false, status: 409, error: `chat ${chatId}'s scope changed while the repository was being picked; try again` };
+      chatTranscripts?.registerRoots(chatId, scope.repos.map((r) => ({ absRoot: resolve(r.rootPath), name: r.name })));
+      askPaths.rescope(chatId, 'scoped_bound');
+      audit.record('chat.scope.repo_picked', actor, { detail: { chatId, pid, repoRef: scope.repos[0]!.id, from: previous.kind } });
+      return { ok: true, name: scope.repos[0]!.name };
+    },
     rosterEligible: () => proposalRoster(rosterWithStanding()),
     // (F1/F2) Agents › "Use <seat> for new work": the pool every new chat job and document is drawn from.
     newWorkSeats: readNewWorkSeats,
@@ -6001,13 +6039,14 @@ export function registerRoutes(
       // boundary then), so a repository attached or registered since is refused here, at once, with
       // the sentence — never accepted into a run whose boundary refuses every read of it.
       const graphChanged = scope?.kind === 'project' && codeGraphDb !== path.launchGraphBinding;
-      const rootsChanged = (scope?.kind === 'project' || scope?.kind === 'everything') &&
-        path.launchReadRoots !== undefined && JSON.stringify(readRoots) !== JSON.stringify(path.launchReadRoots);
+      const rootsChanged = path.launchReadRoots !== undefined && JSON.stringify(readRoots) !== JSON.stringify(path.launchReadRoots);
       if (path.runId !== undefined && (graphChanged || rootsChanged)) {
         askPaths.release(id, lease);
         return reply.code(409).send({
           code: 'chat_scope_changed',
-          error: `This chat's repositories or their code graph changed since it started (${scope?.repos.length ?? 0} now in scope). Start a new chat to read them — this one keeps its original scope.`,
+          error: scope?.kind === 'repos'
+            ? `This chat's repository was picked for its job after the conversation started, so its answers can't read it. Start a new chat on ${scope.repos[0]!.name} to ask about it; the job stays in this chat.`
+            : `This chat's repositories or their code graph changed since it started (${scope?.repos.length ?? 0} now in scope). Start a new chat to read them — this one keeps its original scope.`,
         });
       }
       const pending = await considerations.pendingPreface(id, { inForce: rules });
