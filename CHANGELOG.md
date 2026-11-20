@@ -10,7 +10,7 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
-- **A gate with no open row no longer answers 503 forever (crew#1634).** When the engine's gate-actions ord differs from the cached or logged one and there is no open gate row (or the run is unknown) on a re-read, GET `/runs/:id/gate` serves the gate without `actions` instead of `gate_actions_unavailable`; a thrown read and a mismatch against an open row stay 503, which now carries `Retry-After: 1` and is documented in `GateInfo`.
+- **A gate with no open row no longer answers 503 forever (crew#1634).** When the engine's gate-actions ord differs from the cached or logged one and there is no open gate row on a durable re-read, GET `/runs/:id/gate` serves the gate without `actions` instead of `gate_actions_unavailable`; a thrown read and a mismatch against an open row stay 503, which now carries `Retry-After: 1` and is documented in `GateInfo`.
 
 - **Gate offer reads overlap and report unavailable actions (crew#1629, crew#1579).** GET `/runs/:id/gate` reuses one run view for its receipt and concurrent offers on cache and record paths. A failed or moved engine action read is retried once, then returns retryable 503 `gate_actions_unavailable`; engines without the read still omit actions. Regression coverage also checks QE-refused deliver gates on both paths.
 

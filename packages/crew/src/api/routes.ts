@@ -8307,11 +8307,10 @@ export function registerRoutes(
           ...(listed.planRev !== undefined ? { planRev: listed.planRev } : {}),
         };
       }
-      // Persistent only if it still holds NOW: a gate that opened or advanced during the read shows as a row (or a
-      // known run) on this re-read, and that is a race, so 503.
+      // Persistent only if it still holds NOW: a gate that opened or advanced during the read shows as an open row on
+      // this durable re-read, and that is a race, so 503 whatever the run snapshot says (it may predate the run).
       if (threw) return null;
-      const now = await recordedOpenGate(id);
-      return now?.state !== 'open' || (await runOf()) === undefined ? {} : null;
+      return (await recordedOpenGate(id))?.state === 'open' ? null : {};
     };
     const actionsUnavailable = {
       error: 'Gate actions unavailable: the engine\'s answers for this gate could not be read consistently — retry.',
