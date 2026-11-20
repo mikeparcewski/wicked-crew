@@ -30,7 +30,7 @@
  * citation grammar does not read whole counts as a fabricated citation, so a suffix of a longer token, a malformed
  * range or a name the grammar does not know never passes as a real file.
  *
- * Known limits: a quoted `path:line:col` grades fabricated (crew#1618); an unquoted path with a space in it is read from
+ * Known limits: an unquoted path with a space in it is read from
  * its last word (quote it in backticks to cite it whole); the containment check and the read are two
  * steps, so a host process that swaps a checked file's parent directory for a link between them could redirect the
  * read (the probe runs on the operator's host; no seat writes the member repositories).
@@ -250,9 +250,9 @@ function decoded(s: string): string {
 
 /** A backtick-quoted span: its whole content is one candidate (a path may hold spaces). */
 const QUOTED = /`([^`\n]+)`/gu;
-/** A quoted citation read whole: the path (spaces allowed), then `:12`, `:12-30` or `#L12-L30`. A quoted `:12:5` (a column)
- *  is NOT read as a column: the path takes `:12`, so it grades fabricated (crew#1618). */
-const QUOTED_CITATION = /^(\S(?:.*\S)?)(?::(\d+)(?:[-–](\d+))?(?::\d+)?|#L(\d+)(?:-L?(\d+))?)$/u;
+/** A quoted citation read whole: the path (spaces allowed), then `:12`, `:12-30` or `#L12-L30`.
+ *  The lazy path leaves an optional column after a colon-style line or range out of the path (crew#1618). */
+const QUOTED_CITATION = /^(\S(?:.*?\S)?)(?::(\d+)(?:[-–](\d+))?(?::\d+)?|#L(\d+)(?:-L?(\d+))?)$/u;
 
 /**
  * Every citation in a reply, in ONE pass that claims spans (coord merge check on crew#1615): links first (decoded
