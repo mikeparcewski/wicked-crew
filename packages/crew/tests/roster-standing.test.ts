@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { rosterWithStandingFactory } from '../src/api/roster-standing.js';
 import { chatSeatAdmission } from '../src/api/seat-standing.js';
 import { SeatHealthTracker } from '../src/api/seat-health.js';
-import { engineRosterJson } from '../src/core/engine-roster.js';
+import { engineRosterJson, SEAT_STANDING_FIELDS } from '../src/core/engine-roster.js';
 import { CoreAdapter } from '../src/core/adapter.js';
 
 const REGISTRY = [
@@ -18,6 +18,28 @@ const REGISTRY = [
 ];
 
 describe('rosterWithStandingFactory', () => {
+  it('includes every reading added over the registry in SEAT_STANDING_FIELDS (crew#1606)', () => {
+    const tracker = new SeatHealthTracker();
+    tracker.hydrateBenches([{
+      kind: 'benched', cli: 'codex', rec: { at: Date.now(), reason: 'quota_exhausted', source: 'worker', runs: 1 },
+    }]);
+    const roster = rosterWithStandingFactory({
+      seatHealth: tracker,
+      registry: () => REGISTRY.map((s) => ({ ...s })),
+      signedIn: (key) => key !== 'codex',
+      env: {},
+    });
+    for (const seats of [roster(), roster({ launch: true })]) {
+      expect(seats.find((s) => s.key === 'codex')!.recent_bench).toBeDefined();
+      for (const seat of seats) {
+        const registry = REGISTRY.find((s) => s.key === seat.key)!;
+        for (const key of Object.keys(seat).filter((key) => !Object.hasOwn(registry, key))) {
+          expect(SEAT_STANDING_FIELDS?.has(key), `${String(seat.key)}.${key} must refresh on reshape`).toBe(true);
+        }
+      }
+    }
+  });
+
   it('decorates every registry seat with health + signed_in + standing, read at CALL time', () => {
     const tracker = new SeatHealthTracker();
     let codexSignedIn: boolean | null = false;

@@ -66,6 +66,20 @@ export const CREW_ONLY_SEAT_FIELDS: ReadonlySet<string> = new Set([
   'issues',
 ]);
 
+/** Every reading rosterWithStanding adds over a registry record; a reshape takes these from the current roster. */
+export const SEAT_STANDING_FIELDS: ReadonlySet<string> = new Set([
+  ...CREW_ONLY_SEAT_FIELDS,
+  'auth_source',
+  'auth_evidence',
+  'probed_at',
+  'login_check',
+  'login_note',
+  'seat_image_unavailable',
+  'version_pin',
+  'benchedUntil',
+  'benchReason',
+]);
+
 /** The engine's `AgenticCli.health` (wicked-core `SeatHealth`, wave 6). */
 export interface EngineSeatHealth {
   usable: boolean;
