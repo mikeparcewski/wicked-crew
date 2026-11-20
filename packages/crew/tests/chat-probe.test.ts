@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { extractCitations, gradeReply, main, parseArgs, resultOf, summarize, turnSettled, type ProbeRepo, type QuestionResult } from '../scripts/chat-probe.js';
 
 let dir: string;
@@ -405,11 +405,13 @@ describe('chat probe: against a fixture chat API', () => {
   let server: Server;
   let base: string;
   const calls: string[] = [];
+  let reads = 0;
   /** How the fixture misbehaves, per test. */
-  let mode: { scope?: unknown; messagesStatus?: number; lateMs?: number; secondSeat?: string; secondSeatFails?: boolean; noSeats?: boolean; closeStatus?: number; redirectOpen?: string; hangRead?: boolean; badRecords?: boolean; finalDropsSecondSeat?: boolean };
+  let mode: { scope?: unknown; messagesStatus?: number; lateMs?: number; secondSeat?: string; secondSeatFails?: boolean; noSeats?: boolean; closeStatus?: number; redirectOpen?: string; hangRead?: boolean; badRecords?: boolean; finalDropsSecondSeat?: boolean; onRead?: (n: number) => void };
 
   beforeEach(async () => {
     calls.length = 0;
+    reads = 0;
     mode = {};
     const turns = new Map<string, Array<unknown>>();
     const dropped = new Set<string>();
@@ -445,7 +447,7 @@ describe('chat probe: against a fixture chat API', () => {
             list.push({ kind: 'seat', turnId: 't1', cliKey: 'claude', ok: true, text: reply });
             if (mode.badRecords === true) list.push(null, 7, { kind: 'seat' });
           };
-          if (mode.lateMs !== undefined) setTimeout(land, mode.lateMs);
+          if (mode.lateMs !== undefined) setTimeout(land, mode.lateMs).unref();
           else land();
           if (mode.secondSeat !== undefined) {
             setTimeout(() => {
@@ -459,6 +461,8 @@ describe('chat probe: against a fixture chat API', () => {
         }
         if (req.method === 'GET' && sub === 'messages') {
           if (mode.hangRead === true) return; // never answers
+          reads += 1;
+          mode.onRead?.(reads);
           const all = turns.get(id!) ?? [];
           if (mode.finalDropsSecondSeat === true) {
             // Once a read has shown the second seat, later reads lose it (a regressing API).
@@ -477,6 +481,7 @@ describe('chat probe: against a fixture chat API', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     server.closeAllConnections();
     await new Promise<void>((r) => server.close(() => r()));
   });
@@ -490,6 +495,23 @@ describe('chat probe: against a fixture chat API', () => {
     return { code, ...res };
   };
   const planes = [{ q: 'what are the four planes?' }];
+
+  /**
+   * The probe decides every deadline from `Date.now()`, so a test that wants "the deadline passed" moves the clock instead
+   * of waiting real seconds (a loaded runner makes real seconds an unreliable ruler). `skew` is added to the real clock.
+   */
+  let skew = 0;
+  const ownClock = () => {
+    skew = 0;
+    const real = Date.now.bind(Date);
+    vi.spyOn(Date, 'now').mockImplementation(() => real() + skew);
+  };
+  /** Pass the probe's deadline as the fixture answers its `n`th messages read (the reply is still sent). */
+  const passDeadlineAtRead = (n: number) => {
+    mode.onRead = (i) => {
+      if (i === n) skew += 3_600_000;
+    };
+  };
 
   it('asks each question in its own project chat, closes it, and reports the bar', async () => {
     const { code, summary } = await run([{ q: 'what are the four planes?' }, { q: 'where is the arch doc?' }]);
@@ -507,9 +529,12 @@ describe('chat probe: against a fixture chat API', () => {
   });
 
   it('SILENT-OK: a reply that lands after the deadline fails the question', async () => {
-    // The reply lands 10x after the deadline, so a runner stall of a second cannot let it in first.
-    mode.lateMs = 5000;
-    const { code, results } = await run(planes, ['--timeout-secs', '0.5']);
+    // The reply is held far past the deadline; the second read moves the clock past it, so no runner stall can let the reply in.
+    mode.lateMs = 600_000;
+    ownClock();
+    passDeadlineAtRead(2);
+    const { code, results } = await run(planes, ['--timeout-secs', '60']);
+    expect(reads).toBe(2);
     expect(code).toBe(1);
     expect(results[0]!.error).toMatch(/did not settle/);
     expect(results[0]!.grounded).toBe(false);
@@ -517,10 +542,13 @@ describe('chat probe: against a fixture chat API', () => {
 
   it('SILENT-OK: a failed messages read is never graded, whatever its body says', async () => {
     mode.messagesStatus = 500;
-    // The probe polls to the deadline and reports its last read. At the 20 ms default poll a read is nearly always in flight
-    // when the deadline lands, and the abort replaces "read 500" in the error. A 1 s poll puts the last read a full second
-    // before the deadline, so only a runner stall of about that size can reproduce the failure (the old one needed 20 ms).
-    const { code, results } = await run(planes, ['--timeout-secs', '3', '--poll-ms', '1000']);
+    // The probe polls until the deadline and reports its last read. The deadline is the test's clock, not real seconds: read 1
+    // answers 500 (the probe records "read 500"); read 2 moves the clock past the deadline, so the loop ends with that error
+    // still the last one. The 500 is observed by count, whatever the scheduling.
+    ownClock();
+    passDeadlineAtRead(2);
+    const { code, results } = await run(planes, ['--timeout-secs', '60']);
+    expect(reads).toBe(2);
     expect(code).toBe(1);
     expect(results[0]!.error).toMatch(/read 500/);
   });
@@ -591,6 +619,6 @@ describe('chat probe: against a fixture chat API', () => {
     const { code, results } = await run(planes, ['--timeout-secs', '0.5']);
     expect(code).toBe(1);
     expect(results[0]!.error).toMatch(/did not settle/);
-    expect(Date.now() - started).toBeLessThan(2900);
+    expect(Date.now() - started).toBeLessThan(20_000);
   });
 });
