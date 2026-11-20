@@ -12,7 +12,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSy
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CoreAdapter } from '../src/core/adapter.js';
 import { Readable } from 'node:stream';
@@ -28,6 +28,7 @@ import {
   replayOutbox,
   replayTarget,
   restoreOutbox,
+  runGovernance,
   untimestampedNote,
   UsageError,
 } from '../src/cli/governance.js';
@@ -68,6 +69,48 @@ function fixture(): { outbox: string; coreDb: string } {
   writeFileSync(outbox, `${RECORD_A}\n${RECORD_B}\n${TORN}\n`, 'utf8');
   return { outbox, coreDb: join(scratch, 'state', 'core.db') };
 }
+
+describe('runGovernance (in-process)', () => {
+  beforeEach(() => {
+    vi.spyOn(process, 'exit').mockImplementation(() => { throw new Error('process.exit called'); });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('--dry-run returns 0 and prints the JSON fold', async () => {
+    const { outbox, coreDb } = fixture();
+    await expect(runGovernance(['replay', outbox, '--db', coreDb, '--dry-run'])).resolves.toBe(0);
+    expect(console.log).toHaveBeenCalledTimes(1);
+    const outcome = JSON.parse(vi.mocked(console.log).mock.calls[0]![0] as string);
+    expect(outcome.read).toBe(3);
+    expect(outcome.dryRun).toBe(true);
+    expect(outcome.fold.count).toBe(3);
+    expect(process.exit).not.toHaveBeenCalled();
+  });
+
+  it('no subcommand returns 2 and prints usage', async () => {
+    await expect(runGovernance([])).resolves.toBe(2);
+    expect(console.error).toHaveBeenCalledWith(GOVERNANCE_USAGE);
+    expect(process.exit).not.toHaveBeenCalled();
+  });
+
+  it('replay --help returns 0 and prints usage', async () => {
+    await expect(runGovernance(['replay', '--help'])).resolves.toBe(0);
+    expect(console.error).toHaveBeenCalledWith(GOVERNANCE_USAGE);
+    expect(process.exit).not.toHaveBeenCalled();
+  });
+
+  it('a missing outbox returns 2 and prints the error', async () => {
+    const { coreDb } = fixture();
+    await expect(runGovernance(['replay', join(scratch as string, 'missing.ndjson'), '--db', coreDb])).resolves.toBe(2);
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('outbox not found'));
+    expect(process.exit).not.toHaveBeenCalled();
+  });
+});
 
 describe('replayTarget — the target store follows serve\'s rule', () => {
   it('--governance-db › WICKED_CREW_GOVERNANCE_DB › WICKED_ESTATE_DB › the sidecar of --db', () => {
