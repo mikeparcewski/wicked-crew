@@ -763,7 +763,7 @@ async function main(): Promise<void> {
     }
     await runMcpServer(port);
   } else if (command === 'governance') {
-    await runGovernance(argv);
+    process.exitCode = await runGovernance(argv);
   } else if (command === 'apps-check') {
     // (DES-APPS-001 §9.2, K5) The `apps-turn` check step: the engine's Tool command, never a person's.
     process.exitCode = await runAppsCheck(argv, { env: process.env, cwd: process.cwd(), out: (l) => console.log(l), err: (l) => console.error(l) });

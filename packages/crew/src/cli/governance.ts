@@ -405,12 +405,15 @@ export async function replayOutboxInto(
   };
 }
 
-/** The `wicked-crew governance …` entry: prints a JSON outcome and exits with the documented code. */
-export async function runGovernance(argv: string[]): Promise<void> {
+/**
+ * The `wicked-crew governance …` entry: prints a JSON outcome and returns the documented exit code.
+ * Return to the caller for a natural exit; process.exit can deadlock V8 teardown (crew#1660).
+ */
+export async function runGovernance(argv: string[]): Promise<number> {
   const [sub, ...rest] = argv;
   if (sub !== 'replay' || rest.includes('--help') || rest.includes('-h')) {
     console.error(GOVERNANCE_USAGE);
-    process.exit(sub === 'replay' ? 0 : 2);
+    return sub === 'replay' ? 0 : 2;
   }
   try {
     const { outcome, exitCode } = await replayOutbox(rest);
@@ -419,18 +422,18 @@ export async function runGovernance(argv: string[]): Promise<void> {
     if (!outcome.dryRun && outcome.failed > 0) {
       console.error(`[governance] ${outcome.failed} entr${outcome.failed === 1 ? 'y' : 'ies'} did not land and were appended back onto ${outcome.outbox}`);
     }
-    process.exit(exitCode);
+    return exitCode;
   } catch (err) {
     if (err instanceof UsageError || err instanceof GovernanceStoreError || err instanceof CrewBusError) {
       console.error(`[governance] ${err.message}\n\n${GOVERNANCE_USAGE}`);
-      process.exit(2);
+      return 2;
     }
     if (err instanceof GovernanceReplayUnsupportedError) {
       console.error(
         `[governance] ${err.message}\n` +
           'Nothing was moved. Inspect the outbox with --dry-run; replay once the engine is upgraded.',
       );
-      process.exit(2);
+      return 2;
     }
     throw err;
   }
