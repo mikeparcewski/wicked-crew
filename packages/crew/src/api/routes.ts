@@ -452,6 +452,7 @@ import { gardenConformance, gardenPackCheck, type ConformanceRunner, type PackCh
 import { conformanceProvisioner, conformanceRuntimeReady, conformanceRuntimeRoot, conformanceVenvDir, editorPluginLaunchListener, venvPython } from '../editors/conformance-runtime.js';
 import { EditorRegistry } from '../editors/registry.js';
 import { registerEditorRoutes, unitTokenProbe, type UnitTokenVerdict } from '../editors/routes.js';
+import { broadcast } from '../events/bus.js';
 import type { AppActionStore } from '../apps/actions/store.js';
 import { AppWritePath } from '../apps/actions/write-path.js';
 import { AppExecutor } from '../apps/exec/executor.js';
@@ -2086,6 +2087,7 @@ export function registerRoutes(
   registerEditorRoutes(app, {
     registry: editorRegistry,
     adapter,
+    broadcast,
     packCheck: runtime.packCheck ?? gardenPackCheck(discoverLivePlugin()?.path ?? null),
     conformance: runtime.editorConformance ?? gardenConformance(discoverLivePlugin()?.path ?? null, () => process.env['WICKED_CREW_URL'] ?? null, { provision: editorConformanceRuntime }),
     // F37: the grant write's §6.4 tripwire asks the engine whether a bearer is a governed unit's token.

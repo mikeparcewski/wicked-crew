@@ -641,11 +641,17 @@ export class EditorRegistry {
    * each is read back from disk exactly as boot reads it, and only then recorded. All or nothing — a
    * pack editor that does not read back leaves the registry as it was. An editor id another pack
    * holds is refused; the same pack re-installed (an update) replaces its own editors, keeping the
-   * operator's on/off choice unless `enabled` says otherwise.
+   * operator's on/off choice unless `enabled` says otherwise. Entries that this pack no longer
+   * declares go in the same commit: leaving one registered would keep serving its old bytes under
+   * an earlier consent, especially when the new pack came from a different directory. Use the
+   * installed map so an entry skipped at boot is removed too, including its persisted switch.
    */
-  installPack(packs: Array<{ id: string; pack: InstalledPack }>, enabled: boolean | undefined): { records: RegisteredRecord[]; updated: boolean } {
+  installPack(packs: Array<{ id: string; pack: InstalledPack }>, enabled: boolean | undefined): { records: RegisteredRecord[]; updated: boolean; removed: string[] } {
     const read: Array<Omit<RegisteredRecord, 'enabled'>> = [];
-    let updated = false;
+    const name = packs[0]?.pack.name;
+    const incoming = new Set(packs.map(({ id }) => id));
+    const dropped = [...this.installed].filter(([id, pack]) => pack.name === name && !incoming.has(id)).map(([id]) => id).sort();
+    let updated = dropped.length > 0;
     for (const { id, pack } of packs) {
       const existing = this.records.get(id);
       if (existing?.firstParty === true) throw new EditorInstallConflict(`${id} is a first-party editor's id`);
@@ -663,12 +669,18 @@ export class EditorRegistry {
       return { ...r, enabled: enabled ?? this.records.get(id)?.enabled ?? flagOf(this.persistedFlags, id) ?? true } as RegisteredRecord;
     });
     this.commit(() => {
+      for (const id of dropped) {
+        this.installed.delete(id);
+        delete this.persistedFlags[id];
+        const r = this.records.get(id);
+        if (r !== undefined && !r.firstParty) this.records.delete(id);
+      }
       for (const r of out) {
         this.records.set(r.manifest.id, r);
         this.installed.set(r.manifest.id, r.pack!);
       }
     });
-    return { records: out, updated };
+    return { records: out, updated, removed: dropped };
   }
 
   /** Remove an installed pack editor (the pack's files are the installer's to delete). `false` when it is not one. */
