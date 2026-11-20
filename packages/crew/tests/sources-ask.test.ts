@@ -326,6 +326,20 @@ describe('the ask pieces (no database)', () => {
       expect(st.relations.length).toBeLessThanOrEqual(ASK_RELATIONS_MAX);
     });
 
+    it('a 2,000-table catalog keeps all eight matches first in score order across detail, outline and names', () => {
+      const terms = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf'];
+      const matches = Array.from({ length: 8 }, (_, i) => rel('z', `widget_${i}`, ['id', ...terms.slice(0, i)]));
+      const c = cat([...filler(1992, 'a', 1), ...matches]);
+      const question = `widget ${terms.join(' ')}`;
+      const expected = [...matches].reverse().map((r) => ({ schema: r.schema, name: r.name }));
+      const st = askStructure(c, [], question);
+      const outline = askStructure(c, [], question, { structureChars: 2, outlineChars: ASK_OUTLINE_CHARS, namesChars: ASK_NAMES_CHARS });
+      const byName = askStructure(c, [], question, { structureChars: 2, outlineChars: 2, namesChars: ASK_NAMES_CHARS });
+      for (const entries of [st.relations, outline.others!, byName.othersByName!]) {
+        expect(entries.slice(0, 8).map((r) => ({ schema: r.schema, name: r.name }))).toEqual(expected);
+      }
+    });
+
     it('no tier ever goes over its budget: catalogs landing exactly on each budget emit exactly that many characters', () => {
       const pad = (i: number): string => String(i).padStart(4, '0');
       const heads = (n: number): Rel[] => Array.from({ length: n }, (_, i) => rel('s', `h${pad(i)}`, []));
@@ -381,6 +395,23 @@ describe('the ask pieces (no database)', () => {
       expect(order.indexOf('a.child_of_thing')).toBe(1); // incoming neighbour
       expect(order.indexOf('y.parent')).toBe(2); // outgoing neighbour
       expect(order.indexOf('x.parent')).toBeGreaterThan(order.indexOf('a.filler_004')); // the same bare name in another schema is no neighbour
+    });
+
+    it('an outgoing FK promotes only the correct dotted-identifier neighbour', () => {
+      const padding = filler(5);
+      const decoy = rel('a', 'b.c');
+      const target = rel('a.b', 'c');
+      const seed = rel('z', 'widget', ['id', 'parent_id'], { foreignKeys: [{ name: 'f', columns: ['parent_id'], references: { schema: 'a.b', table: 'c', columns: ['id'] } }] });
+      const st = askStructure(cat([...padding, decoy, target, seed]), [], 'widget');
+      expect(st.relations.map((r) => [r.schema, r.name])).toEqual([seed, target, ...padding, decoy].map((r) => [r.schema, r.name]));
+    });
+
+    it('an incoming FK to a dotted-identifier decoy does not promote its referencing table', () => {
+      const padding = filler(5);
+      const decoy = rel('z', 'decoy', ['id', 'parent_id'], { foreignKeys: [{ name: 'f', columns: ['parent_id'], references: { schema: 'a.b', table: 'widget', columns: ['id'] } }] });
+      const seed = rel('a', 'b.widget');
+      const st = askStructure(cat([...padding, decoy, seed]), [], 'widget');
+      expect(st.relations.map((r) => [r.schema, r.name])).toEqual([seed, ...padding, decoy].map((r) => [r.schema, r.name]));
     });
 
     it('an empty, stopword-only or unmatched question keeps catalog order', () => {
