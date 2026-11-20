@@ -9846,6 +9846,8 @@ export interface ArtifactProposal {
   /** The turn whose reply carried the block; `null` for a crew-made proposal (`sourceRunId`). */
   turnId: string | null;
   sourceRunId?: string;
+  /** Drawn while newWorkSeats could not be read; Start must redraw the seats after repair. */
+  seatsUnread?: boolean;
   kind: ArtifactProposalKind;
   /** The seat that wrote the block. */
   seat: string;

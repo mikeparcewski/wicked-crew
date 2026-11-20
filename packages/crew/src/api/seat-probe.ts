@@ -267,16 +267,16 @@ export class SeatProbe {
   }
 
   /**
-   * Before a launch routes: probe every probed seat whose answer is missing or stale and wait for
-   * the answers, at most `waitMs` (a probe that is slower keeps running in the background, and the
-   * seat reads as it would have without the wait).
+   * Before a launch routes: refresh missing, stale or inconclusive answers, waiting at most
+   * `waitMs`. A slower probe keeps running. Kept definite answers are for display only: any
+   * inconclusive reading still held after the wait becomes the launch reading.
    */
   async ensureFresh(seatKeys: string[], workerRoot: string | undefined, waitMs: number = LAUNCH_PROBE_WAIT_MS): Promise<void> {
     const jobs = seatKeys
       .filter((k) => this.probes(k))
       .filter((k) => {
         const hit = this.cache.get(cacheKey(k, workerRoot));
-        return hit === undefined || this.stale(hit);
+        return hit === undefined || hit.inconclusive !== undefined || this.stale(hit);
       })
       .map((k) => this.refresh(k, workerRoot));
     if (jobs.length === 0) return;
@@ -287,6 +287,11 @@ export class SeatProbe {
     });
     await Promise.race([Promise.all(jobs).then(() => undefined), deadline]);
     clearTimeout(timer);
+    for (const seatKey of seatKeys) {
+      const key = cacheKey(seatKey, workerRoot);
+      const reading = this.cache.get(key)?.inconclusive;
+      if (reading !== undefined) this.cache.set(key, { ...reading, atMs: Date.parse(reading.probedAt) });
+    }
   }
 
   /** Probe now (deduplicated per seat and worker home); resolves to the fresh answer. */
