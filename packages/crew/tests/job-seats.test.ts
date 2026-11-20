@@ -288,6 +288,56 @@ describe('the seats new work uses: one pool for the card, its edits and its Star
   });
 });
 
+describe('two-seat jobs disclose the validator author as judge (crew#1587/#1588)', () => {
+  const disclosure = 'With these seats the judge is the author of the validator; a third seat would add an independent judge';
+
+  it.each([false, true])('a Pi-off bug card starts exactly Claude and Codex, with Go seat edits=%s', async (withEdits) => {
+    const r = rig('Claude+Codex+Pi', 'Pi off', 'admitted');
+    expect((await r.pick('bug')).code).toBe(201);
+    const p = r.open();
+    expect(p.seats!.keys).toEqual(['claude', 'codex']);
+    expect(p.blocked).toBeNull();
+    expect(p.sentence!.notes).toEqual([disclosure]);
+    const go = await r.svc.decide(CHAT, p.pid, {
+      decision: 'go',
+      ...(withEdits ? { edits: { seats: ['claude', 'codex'] } } : {}),
+    }, ME, 'i1');
+    expect(go.code).toBe(200);
+    expect(r.launcher.launched).toHaveLength(1);
+    const launched = r.launcher.launched[0]!.resolution;
+    expect(launched.seats!.keys).toEqual(['claude', 'codex']);
+    expect(r.engineRoster({ seats: launched.seats! })).toEqual(['claude', 'codex']);
+  });
+
+  it('removing Pi from a three-seat bug leaves two seats and discloses the judge', async () => {
+    const r = rig('Claude+Codex+Pi', 'all', 'admitted');
+    expect((await r.pick('bug')).code).toBe(201);
+    expect((await r.swap({ removeSeats: ['pi'] })).code).toBe(201);
+    const p = r.open();
+    expect(p.seats!.keys).toEqual(['claude', 'codex']);
+    expect(p.blocked).toBeNull();
+    expect(p.sentence!.notes).toEqual([disclosure, OFF('Claude and Codex')]);
+  });
+
+  it('a three-seat bug card needs no judge disclosure', async () => {
+    const r = rig('Claude+Codex+Pi', 'all', 'admitted');
+    expect((await r.pick('bug')).code).toBe(201);
+    const p = r.open();
+    expect(p.seats!.keys).toEqual(['claude', 'codex', 'pi']);
+    expect(p.blocked).toBeNull();
+    expect(p.sentence!.notes).toEqual([]);
+  });
+
+  it('Claude alone is still blocked because a bug needs two seats', async () => {
+    const r = rig('Claude alone', 'null');
+    expect((await r.pick('bug')).code).toBe(201);
+    const p = r.open();
+    expect(p.seats!.keys).toEqual(['claude']);
+    expect(p.blocked).toBe(NEEDS_TWO);
+    expect(p.sentence!.notes).toEqual([]);
+  });
+});
+
 describe('removal words after a kind change or a sign-out (codex r2)', () => {
   it('a job made a document with a seat removed: the helper still on it is said to still work on it, never "off"', async () => {
     const r = rig('Claude+Codex+Pi', 'null', 'admitted', true);

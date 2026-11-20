@@ -270,7 +270,7 @@ describe('revisions', () => {
     const parent = open(r);
     await swap(r, parent.pid, { removeSeats: ['codex', 'pi'] }, 'rm');
     const p = open(r);
-    expect(p.sentence!.notes.join(' ')).toMatch(/needs 3 seats/);
+    expect(p.sentence!.notes.join(' ')).toMatch(/needs 2 seats/);
     expect(p.seats!.keys).toEqual(['claude', 'codex', 'pi']);
     await swap(r, p.pid, { lead: 'claude' }, 'lead');
     expect(open(r).seats).toMatchObject({ lead: 'claude', keys: ['claude', 'codex', 'pi'] });

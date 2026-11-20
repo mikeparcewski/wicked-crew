@@ -198,9 +198,16 @@ export function proposalKindOf(r: ResolvedOption): 'job' | 'create' | 'none' {
   return r.resolved.status === 'coming_soon' ? 'job' : 'none';
 }
 
-/** The seats a card needs to check its own work (Q31: words name who builds; the reviewer and judge stay). */
+/** The seats a card needs: a builder and, when required, a distinct evaluator. */
 export function seatsNeeded(r: ResolvedOption): number {
-  return 1 + (r.resolved.seats.distinctEvaluator ? 1 : 0) + (r.resolved.seats.distinctJudge ? 1 : 0);
+  return 1 + (r.resolved.seats.distinctEvaluator ? 1 : 0);
+}
+
+/** At the minimum seat count, disclose that the judge is the validator's author. */
+export function judgeDisclosure(r: ResolvedOption, seatCount: number): string | null {
+  return r.resolved.seats.distinctJudge && seatCount === seatsNeeded(r)
+    ? 'With these seats the judge is the author of the validator; a third seat would add an independent judge'
+    : null;
 }
 
 /**
@@ -446,6 +453,8 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     swap: ctx.chat.repos.length > 1 ? { choices: ctx.chat.repos.filter((x) => x.id !== repo.id).slice(0, 4).map((x) => ({ label: x.name, edit: { repoRef: x.id } })) } : null,
   });
   const selfSeated = r.workflow !== null && SELF_SEATED.has(r.workflow);
+  const disclosure = !short && !selfSeated ? judgeDisclosure(r, seats.keys.length) : null;
+  if (disclosure !== null) notes.push(disclosure);
   // Lead swaps come from the pool work is drawn from; the row shows only when it offers a choice (crew#1590).
   const swapChoices = (ctx.pool ?? ctx.roster).filter((x) => x.key !== seats.lead).slice(0, 4).map((x) => ({ label: `${x.name} leads`, edit: { lead: x.key } }));
   const seatsTok = t({
@@ -760,7 +769,7 @@ export function mergeRevision(
     else facts.repoRef = hit.id;
   }
   if (edits.project !== undefined && edits.project !== facts.projectId) notes.push("Not changed: the project is the chat's own");
-  // 4. Seats: the lead, added seats; removing the card's only distinct reviewer or judge is refused. A self-seated
+  // 4. Seats: the lead, added seats; removing the card's only distinct evaluator is refused. A self-seated
   //    workflow picks its own seat: a seat edit there changes nothing (codex r2).
   const card4 = CATALOG_V2_CARDS.find((c) => c.id === facts.card)!;
   const r4 = resolveOption(card4.id, optionFor(card4, facts.option), ctx.served);
