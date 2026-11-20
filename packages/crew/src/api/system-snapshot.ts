@@ -1221,6 +1221,16 @@ function powerPauseOf(s: unknown): { checkpoint: number | null; why: string | nu
   return { checkpoint: typeof p.checkpoint === 'number' ? p.checkpoint : null, why: reasons[0] ?? null };
 }
 
+/** A Power checkpoint's request for a person, shared by the run DTOs and `/system`. */
+export function powerWaitOf(session: unknown): { liveness: 'waiting_on_you'; reason: string } | null {
+  const p = powerPauseOf(session);
+  if (p === null) return null;
+  return {
+    liveness: 'waiting_on_you',
+    reason: `waiting on you: this grew past its plan${p.checkpoint !== null ? ` (checkpoint ${p.checkpoint})` : ''}${p.why !== null ? `: ${p.why}` : ''}`,
+  };
+}
+
 /**
  * The step a run is on, in words a person reads (artifact-runs-fix: the voice dashboard showed
  * `wf-<run>:unit-1`). `phase_ref` is the engine's composed id, synthetic for every preset and ask
@@ -1261,6 +1271,7 @@ export function runLiveness(input: {
   const phase = cursor === undefined ? null : stepWordsOf(cursor, s.id);
   const quietForMs = evidence === null ? null : Math.max(0, now - evidence.at);
   const createdMs = num(s.created_at) !== undefined ? (s.created_at as number) * 1000 : null;
+  const powerWait = powerWaitOf(s);
   let liveness: SystemRunLiveness;
   let reason: string;
   if (s.status === 'awaiting_human') {
@@ -1274,12 +1285,11 @@ export function runLiveness(input: {
       liveness = 'waiting_on_you';
       reason = `waiting on you: ${(gate.kind ?? 'a decision').replace(/_/g, ' ')}${gate.ord !== null ? ` (unit ${gate.ord})` : ''}`;
     }
-  } else if (powerPauseOf(s) !== null) {
+  } else if (powerWait !== null) {
     // (program DES-POWER-MODE, crew#1206) A power run paused at a checkpoint waits on a person while it
     // stays `executing` (the pause is not an engine gate): it is waiting on you, never quiet or stalled.
-    const p = powerPauseOf(s)!;
-    liveness = 'waiting_on_you';
-    reason = `waiting on you: this grew past its plan${p.checkpoint !== null ? ` (checkpoint ${p.checkpoint})` : ''}${p.why !== null ? `: ${p.why}` : ''}`;
+    liveness = powerWait.liveness;
+    reason = powerWait.reason;
   } else if (evidence === null) {
     const age = createdMs !== null ? now - createdMs : null;
     if (age !== null && age < input.stallAfterMs) {

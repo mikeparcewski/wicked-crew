@@ -24,6 +24,7 @@ import {
   probeGateway,
   probeInteractive,
   probeVault,
+  powerWaitOf,
   readWeek,
   runLiveness,
   settleWithin,
@@ -335,6 +336,33 @@ describe('liveness (each verdict)', () => {
   });
   it('a busy child process counts as evidence', () => {
     expect(runLiveness({ view: exec, now: NOW, evidence: { at: NOW - 1000, source: 'process' }, gate: null, quietAfterMs, stallAfterMs }).reason).toMatch(/processes are busy/);
+  });
+  it.each([
+    { checkpoint: 3, reasons: ['scope grew', 'another reason'], suffix: ' (checkpoint 3): scope grew' },
+    { checkpoint: 0, reasons: ['scope grew'], suffix: ' (checkpoint 0): scope grew' },
+    { reasons: [], suffix: '' },
+  ])('shares the Power checkpoint wait without changing the /system run ($suffix)', ({ suffix, ...pause }) => {
+    const paused = view('r-power', 'executing', [], { power: { pause } });
+    const run = runLiveness({ view: paused, now: NOW, evidence: null, gate: null, quietAfterMs, stallAfterMs });
+    const reason = `waiting on you: this grew past its plan${suffix}`;
+    expect(run).toEqual({
+      runId: 'r-power', title: 'problem r-power', status: 'executing',
+      liveness: 'waiting_on_you', reason, phase: null, unitOrd: null, seat: null,
+      lastEventAt: null, evidence: null, quietForMs: null, quietAfterMs, stallAfterMs,
+      createdAt: new Date(NOW - 2 * DAY).toISOString(),
+    });
+    expect(powerWaitOf(paused.session)).toEqual({ liveness: 'waiting_on_you', reason: run.reason });
+  });
+  it.each([undefined, null, { pause: null }, {}])('has no Power wait for an executing run with power=%j', (power) => {
+    const unpaused = view('r-power', 'executing', [], { power });
+    const run = runLiveness({ view: unpaused, now: NOW, evidence: { at: NOW, source: 'event_log' }, gate: null, quietAfterMs, stallAfterMs });
+    expect(run).toEqual({
+      runId: 'r-power', title: 'problem r-power', status: 'executing',
+      liveness: 'working', reason: 'working: last event 1 s ago', phase: null, unitOrd: null, seat: null,
+      lastEventAt: new Date(NOW).toISOString(), evidence: 'event_log', quietForMs: 0, quietAfterMs, stallAfterMs,
+      createdAt: new Date(NOW - 2 * DAY).toISOString(),
+    });
+    expect(powerWaitOf(unpaused.session)).toBeNull();
   });
   it('at a gate: waiting_on_you with the gate id; an escalation or no gate on record: held', () => {
     const paused = view('r-gate', 'awaiting_human', [{ ord: 4, status: 'pending', phase_ref: 'review', assigned_cli: 'codex' }]);
