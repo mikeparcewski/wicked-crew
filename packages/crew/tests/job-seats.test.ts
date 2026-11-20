@@ -409,6 +409,9 @@ describe('newWorkSeats read strictly: unset is the default, unreadable or invali
     // Fixed: the same proposal reads unblocked and starts, with no new proposal.
     writeFileSync(file, '{"newWorkSeats": null}');
     expect((await r.served()).blocked).toBeNull();
+    // A card drawn while the setting was bad is redrawn on the first Start (crew#1603); the second launches it.
+    expect((await r.go()).body).toMatchObject({ code: 'seats_redrawn' });
+    expect(r.launcher.launched).toEqual([]);
     expect((await r.go()).code).toBe(200);
     expect(r.launcher.launched).toHaveLength(1);
   });
@@ -464,6 +467,7 @@ describe('newWorkSeats read strictly: unset is the default, unreadable or invali
     expect(go.body).toMatchObject({ code: 'setting_invalid' });
     writeFileSync(file, '{"newWorkSeats": null}');
     expect((await r.served()).blocked).toBeNull();
+    expect((await r.go()).body).toMatchObject({ code: 'seats_redrawn' });
     const started = await r.go();
     expect(started.code, JSON.stringify(started.body)).toBe(200);
     expect(r.launcher.launched).toHaveLength(1);
