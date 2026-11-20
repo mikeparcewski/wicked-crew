@@ -42,7 +42,7 @@ describe('plainRuntimeCause', () => {
     const got = plainRuntimeCause(RANCHER);
     expect(got).not.toBeNull();
     expect(got!.cause).toBe("Docker isn't running");
-    expect(got!.fix).toMatch(/^Start Docker Desktop or Rancher Desktop/);
+    expect(got!.fix).toBe('Start Rancher Desktop (or your container runtime), then re-check.');
   });
 
   it('classifies the classic docker, podman and dial-unix daemon-down messages', () => {
@@ -55,6 +55,7 @@ describe('plainRuntimeCause', () => {
     const got = plainRuntimeCause('dial unix /var/run/docker.sock: connect: permission denied');
     expect(got?.cause).toMatch(/permission denied/);
     expect(got?.cause).not.toBe("Docker isn't running");
+    expect(got?.fix).toBe('Add your user to the docker group (or run Rancher Desktop as this user), then re-check.');
   });
 
   it('returns null for anything it does not recognise, so the caller keeps its own (scrubbed) text', () => {

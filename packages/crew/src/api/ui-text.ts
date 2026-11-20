@@ -118,7 +118,7 @@ export function plainRuntimeCause(raw: string, runtime: string | null = null): {
     return {
       cause: "The container runtime's socket refused this user (permission denied)",
       fix: which === 'docker'
-        ? 'Add your user to the docker group (or run Docker/Rancher Desktop as this user), then re-check.'
+        ? 'Add your user to the docker group (or run Rancher Desktop as this user), then re-check.'
         : 'Give your user access to the runtime socket, then re-check.',
     };
   }
@@ -133,7 +133,7 @@ export function plainRuntimeCause(raw: string, runtime: string | null = null): {
   if (!daemonDown) return null;
   if (which === 'podman') return { cause: "Podman isn't running", fix: 'Start it (podman machine start), then re-check.' };
   if (which === 'nerdctl') return { cause: "The container runtime (nerdctl) isn't running", fix: 'Start it (Rancher Desktop, or containerd), then re-check.' };
-  return { cause: "Docker isn't running", fix: 'Start Docker Desktop or Rancher Desktop (or your container runtime), then re-check.' };
+  return { cause: "Docker isn't running", fix: 'Start Rancher Desktop (or your container runtime), then re-check.' };
 }
 
 /** Scrub every string in a parsed JSON value in place-by-copy (so the result re-serializes valid). */

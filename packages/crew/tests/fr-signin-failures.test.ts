@@ -12,14 +12,18 @@ describe('signInFailure', () => {
   it('replaces the runtime diagnostic with the one runtime repair', () => {
     expect(signInFailure('seat-login: container_runtime_down: /Users/x/.rd/docker failed\ntrace', 'claude')).toEqual({
       code: 'container_runtime_down',
-      error: "Docker isn't running, so the sign-in container can't start. Start Docker Desktop or Rancher Desktop, then try again.",
+      error: "Docker isn't running, so the sign-in container can't start. Start Rancher Desktop, then try again.",
     });
+    expect(signInFailure('seat-login: container_runtime_down: runtime unavailable', 'claude').error).not.toMatch(/Docker Desktop/);
   });
   it('maps every k8s runner refusal kind to its own code and one repair (wicked-core FloorUnarmed)', () => {
     const said = (kind: string, why = 'the reason') => `wicked-core seat-login: ${kind}: ${why}`;
     const kinds = ['no_cluster', 'cluster_unreachable', 'controller_missing', 'pids_unlimited', 'policy_refused', 'admission_pending', 'image_unavailable', 'exec_stream_lost'];
-    for (const kind of kinds) expect(signInFailure(said(kind), 'claude').code).toBe(kind);
-    expect(signInFailure(said('cluster_unreachable'), 'claude').error).toBe("Kubernetes isn't answering, so the Claude sign-in can't start. Start Rancher Desktop (or Docker Desktop) with Kubernetes on, then try again.");
+    for (const kind of kinds) {
+      expect(signInFailure(said(kind), 'claude').code).toBe(kind);
+      expect(signInFailure(said(kind), 'claude').error).not.toMatch(/Docker Desktop/);
+    }
+    expect(signInFailure(said('cluster_unreachable'), 'claude').error).toBe("Kubernetes isn't answering, so the Claude sign-in can't start. Start Rancher Desktop with Kubernetes on, then try again.");
     expect(signInFailure(said('no_cluster'), 'copilot').error).toContain('wicked-core cluster install --admin-context');
     expect(signInFailure(said('controller_missing'), 'copilot').error).toContain('wicked-core cluster install --admin-context');
     expect(signInFailure(said('pids_unlimited'), 'claude').error).toContain('pod-max-pids to 4096');

@@ -123,7 +123,7 @@ export function clusterRefusal(stderr: string, cli: string, label: string): { co
   const why = said !== '' ? ` The cluster said: ${said.replace(/[.\s]+$/, '')}.` : '';
   const error: Record<ClusterKind, string> = {
     no_cluster: `No Kubernetes cluster is set up for this daemon, so the ${label} sign-in can't start. To set one up, ${INSTALL_HINT}, then try again.`,
-    cluster_unreachable: `Kubernetes isn't answering, so the ${label} sign-in can't start. Start Rancher Desktop (or Docker Desktop) with Kubernetes on, then try again.`,
+    cluster_unreachable: `Kubernetes isn't answering, so the ${label} sign-in can't start. Start Rancher Desktop with Kubernetes on, then try again.`,
     controller_missing: `The cluster's sandbox controller isn't ready (missing, still starting, or not the pinned version), so the ${label} sign-in can't start.${why} If it stays so, ${INSTALL_HINT}, then try again.`,
     pids_unlimited: `The cluster could not show that it limits each pod's processes, so sign-ins and seats are refused.${why} Set the kubelet's pod-max-pids to 4096 (Rancher Desktop: a k3s argument), then try again.`,
     policy_refused: `The cluster refused the ${label} sign-in pod.${why} Fix what it names, then try again.`,
@@ -139,7 +139,7 @@ export function signInFailure(stderr: string, cli: string): { code: SeatSignInFa
   const label = ({ claude: 'Claude', codex: 'Codex', pi: 'Pi', opencode: 'OpenCode', copilot: 'Copilot', agy: 'Antigravity' } as Record<string, string>)[cli] ?? loginDetail(cli);
   if (stderr.includes('container_runtime_down')) return {
     code: 'container_runtime_down',
-    error: "Docker isn't running, so the sign-in container can't start. Start Docker Desktop or Rancher Desktop, then try again.",
+    error: "Docker isn't running, so the sign-in container can't start. Start Rancher Desktop, then try again.",
   };
   const k8s = clusterRefusal(stderr, cli, label);
   if (k8s !== null) return k8s;

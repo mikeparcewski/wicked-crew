@@ -150,7 +150,7 @@ export function clusterDiagnostics(read: Settled<ClusterStatus>): (ClusterStatus
 
 const INSTALL = 'Run `wicked-core cluster install --admin-context <your cluster context> --home <this daemon\'s state home>`, then re-check.';
 const BY_HAND = 'Re-check; if it persists, run `wicked-core cluster status --home <this daemon\'s state home>` by hand.';
-const START = 'Start Rancher Desktop (or Docker Desktop) with Kubernetes on, then re-check.';
+const START = 'Start Rancher Desktop with Kubernetes on, then re-check.';
 
 function detailsOf(s: ClusterStatus): Record<string, unknown> {
   return {
