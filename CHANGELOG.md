@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.18.19] — 2026-11-20
+
+Patch release on main a84a095c, carrying 27 PRs since 0.18.18: #1597, #1615, #1617, #1619, #1621, #1627, #1630, #1631, #1632, #1633, #1635, #1636, #1638, #1639, #1640, #1641, #1642, #1643, #1644, #1645, #1646, #1647, #1648, #1649, #1650, #1651, #1652. wicked-crew-api-types 0.216.0 carries the RunPullRequest and RedeliverRunResult types of `GET /runs/:id/pr` and `POST /runs/:id/redeliver` (#1650). Requires wicked-core-ts 0.15.47 and bundles wicked-studio 0.16.15.
+
 - fix(seats): a launch freshness check retries an inconclusive probe; the launch snapshot reads unknown when the check cannot tell or its wait expires, while ordinary roster reads keep the answer for their bounded display window (crew#1607). This corrects the fresh-standing-at-Start claim from crew#1601 for probe timeouts: a kept display answer is not fresh sign-in evidence. Completed unknown probes retain their existing admission behavior.
 - fix(seats): launch freshness checks preserve the shared probe cache's kept signed-in answer for ordinary roster reads. Strict launch snapshots read unknown after an inconclusive check or when a stale check outlasts the launch wait (crew#1637).
 - fix(chat proposals): proposal broadcasts read `newWorkSeats` live and publish in append order, so a retry after a settings repair no longer broadcasts a cached block reason (crew#1603). Cards drawn while the setting was unreadable or invalid carry an optional `seatsUnread` marker (`wicked-crew-api-types`, additive). After repair, Start redraws their seats or document helpers under the same proposal id and answers 409 `seats_redrawn` with the new card; a second Start launches that card. This replaces the F1/F2 caveat that a card drawn during a refusal starts with its old displayed seats even when the repaired pick excludes them.
@@ -78,6 +82,41 @@ mentioned only where a daemon release depends on them.
 - **Daemon libuv pool starvation (crew#1495).** Set the pool size before other CLI imports to at least 16 threads,
   scaling with available CPU parallelism up to 1024, so engine work leaves more capacity for filesystem reads.
   Valid operator `UV_THREADPOOL_SIZE` overrides from 1 through 1024 are preserved; invalid values use the default.
+
+### Merged since the last release (from each pull request's changelog entry)
+
+- fix(tests): the mock Azure DevOps CGI server ignores only stdin EPIPE when git http-backend exits early, and teardown waits for CGI children to close before removing temp directories with bounded retries (crew#1490).
+
+- Fixed: the daemon's shutdown now stops the whole interactive bridge started through npx, including a server that sits below a shell, so no bridge is left running after a daemon stop (#1502).
+
+- Fixed: the B4 chat probe no longer grades a backtick-quoted `path:line:col` citation as fabricated (#1618).
+
+- Fixed: the machine load row now reads busy (degraded) once load reaches the core count, so voice mode and the Machine widget no longer say "calm" with every core busy (#1567).
+
+- **Tests: the chat-probe deadline cases no longer race the wall clock (crew#1628).** The "failed messages read" and "reply lands after the deadline" cases move the probe's `Date.now()` past a 60 s deadline on a counted read (the second) instead of waiting real seconds, so `read 500` is observed by count on any runner. The probe itself is unchanged.
+
+- `serve --install-service` without systemd now says systemd is not running (with the `/etc/wsl.conf` hint on WSL) instead of a raw `spawnSync systemctl ENOENT` (#1565).
+
+- A job whose base could not be refreshed from origin (for example a private repo registered from a folder) now records a `run.base_unfetched` notice on the run saying the base may be behind the remote (#1566).
+
+- **A gate with no open row no longer answers 503 forever (crew#1634).** When the engine's gate-actions ord differs from the cached or logged one and there is no open gate row on a durable re-read, GET `/runs/:id/gate` serves the gate without `actions` instead of `gate_actions_unavailable`; a thrown read and a mismatch against an open row stay 503, which now carries `Retry-After: 1` and is documented in `GateInfo`.
+
+- Gate decisions now audit the client's user agent and the choice taken, so a browser click and a scripted client can be told apart (#1553).
+
+- ### Fixed
+  - Deliver now resolves a CHANGELOG-only rebase conflict after a release cut on main, placing the run's new `[Unreleased]` entries under main's heading, so the run keeps its PR instead of stranding with LIFT-CONFLICT (wicked-studio#1157).
+
+- Run learnings no longer propose "a test is flaky" or "a check could not be started in the sandbox" at checkpoints: seats stop proposing sandbox and toolchain facts (crew#1622).
+
+- Test: a document launched with an opt-in helper (OpenCode) hands the engine that seat in its roster, and without it does not (crew#1611).
+
+- Added `GET /runs/:id/pr` and `POST /runs/:id/redeliver`: a finished run's delivered PR that conflicts with its base can be rebased (CHANGELOG collisions kept both ways), re-checked with the repository's own checks, and pushed with a lease against the delivered head; other conflicts or failing checks stop with the files or checks named and nothing pushed (crew#1493, part 2 of 3).
+
+- MCP stdio `env`: names must be ASCII (non-ASCII look-alikes are refused), and an empty `env` is omitted from reads and previews, with the stored object cloned on read (crew#1561).
+
+- Seat text points to "the Helpers page", matching studio's name for it (studio#1164).
+
+- **The learnings step no longer files a run's raw evidence as memory proposals (crew#1620, #1621).** The `fileRaw` fallback is deleted: with no usable distil seat nothing is filed and the run is not marked filed (the next recovery tries again); a distil seat that wrote no usable report is recorded (`noUsableReport`) instead of re-read. The distil step no longer tells the seat to keep sandbox or seat limits as learnings; repository rules and traps stay.
 
 ## [0.18.18] — 2026-11-19
 
@@ -7314,7 +7353,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.18...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.19...HEAD
+[0.18.19]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.18...v0.18.19
 [0.18.18]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.17...v0.18.18
 [0.18.17]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.16...v0.18.17
 [0.18.16]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.15...v0.18.16
