@@ -1632,7 +1632,14 @@ export async function createServer(
       if (runEvalsPrepare === null) throw new Error('the default evals are not ready yet');
       await runEvalsPrepare(input);
     } else if (review) {
-      await reviewService.prepareLaunch(input, { trigger, scheduleId: row.id, projectIds: row.projectIds });
+      const opts = { trigger, scheduleId: row.id, projectIds: row.projectIds };
+      try {
+        await reviewService.prepareLaunch(input, opts);
+      } catch (err) {
+        // (crew#1608) The attempt leaves a review record; the schedule's own back-off is unchanged.
+        reviewService.prepareRefused(runId, opts, err instanceof Error ? err.message : String(err));
+        throw err;
+      }
     } else {
       input.clisJson = JSON.stringify(await adapter.seatsForWorkflow(row.workflow));
       if (row.repoRef !== null) input.repoRef = row.repoRef;

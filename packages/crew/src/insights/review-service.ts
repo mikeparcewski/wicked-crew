@@ -218,6 +218,33 @@ export class ReviewService {
     return input;
   }
 
+  /** A scheduled review that could not be prepared (#1608). */
+  prepareRefused(runId: string, opts: PrepareOptions, reason: string): void {
+    if (this.deps.store.get(runId) !== undefined) return;
+    const now = this.now();
+    const { window, baselineWindows } = this.windowFor(now.getTime(), opts.projectIds ?? []);
+    this.deps.store.add({
+      runId,
+      trigger: opts.trigger,
+      scheduleId: opts.scheduleId ?? null,
+      launchedAt: now.toISOString(),
+      endedAt: now.toISOString(),
+      status: 'failed',
+      window,
+      baselineWindows,
+      projectIds: [...(opts.projectIds ?? [])],
+      summary: null,
+      interpreted: false,
+      totals: null,
+      series: [],
+      improvements: [],
+      regressions: [],
+      recommendations: [],
+      watching: [],
+      error: `the review could not be prepared: ${reason.slice(0, 500)}`,
+    });
+  }
+
   /** A launch the engine refused: the review never ran. */
   launchRefused(runId: string, reason: string): void {
     this.deps.store.update(runId, { status: 'failed', endedAt: this.now().toISOString(), error: `the launch was refused: ${reason.slice(0, 500)}` });
