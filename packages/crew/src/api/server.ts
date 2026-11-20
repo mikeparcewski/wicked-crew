@@ -1074,20 +1074,26 @@ export async function createServer(
   // crew#720 (operator ruling 2026-10-10): every delivery leaves a zip of the run's final codebase,
   // whatever the outcome. Taken when the deliver unit's output lands (delivered, push refused,
   // credentials missing, wrong account) and again at the run's terminal frame (a lift conflict, a
-  // run that failed after building, a cancel) — BEFORE the delivered-worktree sweep. An unchanged
-  // tree rewrites nothing. Best-effort: never awaited by the frame, never a run failure.
+  // run that failed after building, a cancel) — BEFORE the delivered-worktree sweep. A cancelled
+  // run archives from the reap's outcome: the run branch until worktreeRetained names the kept tree.
+  // An unchanged tree rewrites nothing. Best-effort: never awaited by the frame, never a run failure.
   const codebaseArchives = new CodebaseArchiveStore(options?.codebaseArchiveRoot, (m) => app.log.info(m));
+  const retainedTrees = new Map<string, string>();
+  const cancelledRuns = new Set<string>();
   /** `<run>\0<ord>` of deliver-script units dispatched and not yet captured (crew#720). */
   const deliverDispatches = new Set<string>();
   /** Runs this daemon has seen a dispatch frame for (crew#720; the boot-redrive fallback). */
   const observedRuns = new Set<string>();
-  const archiveRunCodebase = async (runId: string, trigger: 'deliver' | 'run_end', view?: SessionView): Promise<void> => {
+  const archiveRunCodebase = async (runId: string, trigger: 'deliver' | 'run_end', view?: SessionView, cancelled = false): Promise<void> => {
     try {
       const v = view ?? (await adapter.sessionsDetail()).find((x) => x.session.id === runId);
       if (v === undefined || v.session.repo_ref == null) return;
       const repoRoot = (await adapter.listRepos()).find((r) => r.id === v.session.repo_ref)?.root_path ?? null;
       const before = codebaseArchives.get(runId);
-      const rec = await codebaseArchives.archive(runId, { workdir: v.session.workdir, repoRoot }, trigger);
+      // Read the retained mark in the same tick as enqueueing: a pending cancel chain must never
+      // enqueue a branch archive after the retained-worktree refresh (crew#1508).
+      const workdir = cancelled ? retainedTrees.get(runId) ?? null : v.session.workdir;
+      const rec = await codebaseArchives.archive(runId, { workdir, repoRoot }, trigger);
       if (rec !== null && rec !== before) audit.record('run.codebase_archived', DAEMON_ACTOR, { runId, detail: { ...rec } });
     } catch (err) {
       app.log.warn(`[runs] codebase archive for ${runId} failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -2321,6 +2327,16 @@ export async function createServer(
     void standingOrderEvaluator?.onEvent(event);
     // The watch registry (TR-W5a, G3): synchronous, O(1), never awaited, never throws.
     watchRegistry?.offer(event);
+    // crew#1508: the reap may retain a dirty tree before or after runCancelled. The archive path
+    // never deletes a mark (a pending chain must still read it); a re-dispatch clears the run's
+    // marks below (a failed run resumed: its earlier terminal reap outcome is stale), and the
+    // bounded history evicts the oldest. A cancelled run is never resumed (the resume route
+    // refuses it; a campaign same-id relaunch waits for the reap, core#1433).
+    if (event.type === 'worktreeRetained' && session !== undefined && typeof event.path === 'string') {
+      retainedTrees.set(session, event.path);
+      if (retainedTrees.size > 1000) retainedTrees.delete(retainedTrees.keys().next().value!);
+      if (cancelledRuns.has(session)) void archiveRunCodebase(session, 'run_end', undefined, true);
+    }
     // DC-S7: a unit attempt's output landed — what its rules were, and which it cited (one fact per
     // (run, ord, attempt); the read itself answers GET …/considered). Off the hot path.
     if (event.type === 'unitOutputCaptured' && session !== undefined) {
@@ -2348,6 +2364,8 @@ export async function createServer(
       }
     }
     if ((event.type === 'unitDispatched' || event.type === 'toolExecutorDispatched') && session !== undefined) {
+      retainedTrees.delete(session);
+      cancelledRuns.delete(session);
       if (observedRuns.size > 5000) observedRuns.clear();
       observedRuns.add(session);
     }
@@ -2367,6 +2385,11 @@ export async function createServer(
       (event.type === 'sessionCompleted' || event.type === 'sessionFailed' || event.type === 'runCancelled') &&
       session !== undefined
     ) {
+      const cancelled = event.type === 'runCancelled';
+      if (cancelled) {
+        cancelledRuns.add(session);
+        if (cancelledRuns.size > 1000) cancelledRuns.delete(cancelledRuns.values().next().value!);
+      }
       // crew#619: when a run that was linked to a chat terminates, release the retention hold and
       // drop the transcript if the chat was already reclaimed (not in chatScopes).
       const linkedChat = runToChat.get(session);
@@ -2398,7 +2421,7 @@ export async function createServer(
       }
       void resolveRunDelivery(session)
         // crew#720: the final-codebase zip, before the sweep below can remove the worktree.
-        .then(() => archiveRunCodebase(session, 'run_end'))
+        .then(() => archiveRunCodebase(session, 'run_end', undefined, cancelled))
         // crew#620 Acceptance 3: sweep the delivered run's worktree once the PR is open.
         // Best-effort — a sweep error must never fail the terminal frame.
         .then(async () => {
