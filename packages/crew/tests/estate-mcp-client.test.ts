@@ -16,13 +16,12 @@ import {
   EstateMcpError,
   estateMcpExe,
   memoryStoreIsolationNotice,
-  estateKnowledgeEnv,
+  estateStoresEnv,
   resolveMemoryDb,
-  sameDirectory,
   resolveMemoryDbPath,
 } from '../src/core/estate-mcp-client.js';
 import { replaceSource } from '../src/knowledge/estate-write.js';
-import { defaultStateHome, setCrewStateHome } from '../src/projects/state-home.js';
+import { crewStateHome, defaultStateHome, isDefaultStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 import { useUnconfiguredTempHome } from './setup/temp-home.js';
 import { removeScratch } from './setup/scratch.js';
 
@@ -347,15 +346,23 @@ describe('resolveMemoryDbPath', () => {
   // daemon must never reach the operator's global one; the default daemon keeps estate's default (garden's CLI).
   it('the knowledge store takes the same ladder: an isolated home its own, the default home and an explicit pin estate\'s', async () => {
     const { estateRelayEnv } = await import('../src/mcp/estate-relay.js');
-    expect(estateKnowledgeEnv({})).toEqual({});
-    // An EMPTY value would name a temporary database: the default home pins estate's own default instead (codex r3).
-    expect(estateKnowledgeEnv({ WICKED_KNOWLEDGE_DB: '', WICKED_HOME: '/opt/wk' })).toEqual({ WICKED_KNOWLEDGE_DB: join('/opt/wk', 'knowledge.db') });
+    const memory = { WICKED_MEMORY_DB: resolveMemoryDbPath({}) };
+    expect(estateStoresEnv({})).toEqual(memory);
+    for (const [key, file] of [['WICKED_KNOWLEDGE_DB', 'knowledge.db'], ['WICKED_XEDGE_DB', 'xedge.db']] as const) {
+      expect(estateStoresEnv({ [key]: '', WICKED_HOME: '/opt/wk' })[key]).toBe(join('/opt/wk', file));
+      expect(estateStoresEnv({ [key]: '' })[key]).toBe(join(homedir(), '.wicked', file));
+    }
     setCrewStateHome('/scratch/rig-a');
-    expect(estateKnowledgeEnv({ WICKED_KNOWLEDGE_DB: '' })).toEqual({ WICKED_KNOWLEDGE_DB: join('/scratch/rig-a', 'mcp', 'knowledge.db') });
-    expect(estateKnowledgeEnv({})).toEqual({ WICKED_KNOWLEDGE_DB: join('/scratch/rig-a', 'mcp', 'knowledge.db') });
-    expect(estateKnowledgeEnv({ WICKED_KNOWLEDGE_DB: '/custom/k.db' })).toEqual({});
-    const scope = { unit: { runId: 'r', ord: 1, attempt: 1, phase: 'unit-1', seat: 'pi' }, projectId: null, repoId: null, codeGraphDb: null };
-    expect(estateRelayEnv(scope, {})['WICKED_KNOWLEDGE_DB']).toBe(join('/scratch/rig-a', 'mcp', 'knowledge.db'));
+    for (const [key, file] of [['WICKED_KNOWLEDGE_DB', 'knowledge.db'], ['WICKED_XEDGE_DB', 'xedge.db']] as const) {
+      expect(estateStoresEnv({ [key]: '' })[key]).toBe(join('/scratch/rig-a', 'mcp', file));
+      expect(estateStoresEnv({})[key]).toBe(join('/scratch/rig-a', 'mcp', file));
+      expect(estateStoresEnv({ [key]: '/custom/k.db' })[key]).toBeUndefined();
+      const scope = { unit: { runId: 'r', ord: 1, attempt: 1, phase: 'unit-1', seat: 'pi' }, projectId: null, repoId: null, codeGraphDb: null };
+      expect(estateRelayEnv(scope, {})[key]).toBe(join('/scratch/rig-a', 'mcp', file));
+      expect(estateRelayEnv(scope, { [key]: '/custom/k.db' })[key]).toBe('/custom/k.db');
+    }
+    expect(estateStoresEnv({})['WICKED_MEMORY_DB']).toBe(join('/scratch/rig-a', 'mcp', 'memory.db'));
+    expect(estateStoresEnv({ WICKED_MEMORY_DB: '/custom/m.db' })['WICKED_MEMORY_DB']).toBe('/custom/m.db');
   });
 
   // codex review of this PR, MEDIUM: an operator who has always run ONE daemon on a CUSTOM --db
@@ -397,25 +404,40 @@ describe('resolveMemoryDbPath', () => {
     expect(memoryStoreIsolationNotice({ WICKED_HOME: globalHome })).toBeNull();
   });
 
-  // "is this the default daemon" is decided by `sameDirectory`. A lexical compare called a
-  // symlinked home, a differently-cased spelling on a case-insensitive filesystem and a Windows
-  // junction ISOLATED, and handed the daemon an empty store (codex review, MEDIUM). Tested on
-  // scratch directories rather than on the real `~/.wicked-crew`: a test must not write into HOME.
-  it('sameDirectory follows a symlink and a spelling — the default-daemon test that decides it', () => {
+  it('isDefaultStateHome recognizes symlinks, alias spellings and a default home that does not exist yet', () => {
     const root = mkdtempSync(join(tmpdir(), 'crew-f5-'));
     scratch.push(root);
-    const real = join(root, 'real-state-home');
-    mkdirSync(real, { recursive: true });
-    const link = join(root, 'alias');
-    symlinkSync(real, link, 'dir');
-
-    expect(sameDirectory(link, real)).toBe(true);
-    expect(sameDirectory(join(root, 'alias', '.', ''), real)).toBe(true);
-    expect(sameDirectory(join(real, '..', 'real-state-home'), real)).toBe(true);
-    expect(sameDirectory(join(root, 'other'), real)).toBe(false);
-    // Neither side exists: a lexical answer, and still the right one.
-    expect(sameDirectory(join(root, 'ghost', '.'), join(root, 'ghost'))).toBe(true);
-    expect(sameDirectory(join(root, 'ghost'), join(root, 'phantom'))).toBe(false);
+    const home = process.env['HOME'];
+    const profile = process.env['USERPROFILE'];
+    const armed = crewStateHome();
+    const fake = join(root, 'fake-home');
+    const defaultHome = join(fake, '.wicked-crew');
+    mkdirSync(defaultHome, { recursive: true });
+    try {
+      process.env['HOME'] = fake;
+      process.env['USERPROFILE'] = fake;
+      const link = join(root, 'alias');
+      symlinkSync(defaultHome, link, 'dir');
+      setCrewStateHome(link);
+      expect(isDefaultStateHome()).toBe(true);
+      setCrewStateHome(join(fake, '.', '.wicked-crew', ''));
+      expect(isDefaultStateHome()).toBe(true);
+      rmSync(defaultHome, { recursive: true });
+      // Not created yet, reached through a linked parent: the deepest existing ancestor is resolved.
+      const homeLink = join(root, 'home-link');
+      symlinkSync(fake, homeLink, 'dir');
+      setCrewStateHome(join(homeLink, '.wicked-crew'));
+      expect(isDefaultStateHome()).toBe(true);
+      const other = mkdtempSync(join(root, 'other-'));
+      setCrewStateHome(other);
+      expect(isDefaultStateHome()).toBe(false);
+    } finally {
+      if (home === undefined) delete process.env['HOME'];
+      else process.env['HOME'] = home;
+      if (profile === undefined) delete process.env['USERPROFILE'];
+      else process.env['USERPROFILE'] = profile;
+      setCrewStateHome(armed);
+    }
   });
 
   it('the DEFAULT state home keeps the operator global store — a single-state-home user loses nothing', () => {

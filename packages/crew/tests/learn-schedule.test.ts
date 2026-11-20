@@ -14,6 +14,7 @@ import type { CoreEvent } from '../src/core/types.js';
 import { registerLearnRoutes } from '../src/learn/routes.js';
 import { LearnScheduleStore } from '../src/learn/schedule-store.js';
 import { LearnScheduler, RUN_MARKER_ENV, type Exec } from '../src/learn/scheduler.js';
+import { crewStateHome } from '../src/projects/state-home.js';
 import { removeScratch } from './setup/scratch.js';
 
 const dirs: string[] = [];
@@ -208,6 +209,9 @@ describe('LearnScheduler.sweep', () => {
     for (const k of RUN_MARKER_ENV) expect(spawns[0]!.env?.[k]).toBeUndefined();
     expect(spawns[0]!.env?.['CLAUDE_PLUGIN_ROOT']).toBeUndefined();
     expect(spawns[0]!.env?.['WICKED_GARDEN_ROOT']).toBe('/garden');
+    for (const name of ['memory', 'knowledge', 'xedge']) {
+      expect(spawns[0]!.env?.[`WICKED_${name.toUpperCase()}_DB`]).toBe(join(crewStateHome(), 'mcp', `${name}.db`));
+    }
     expect(r.store.get('r1:sqlite-wal')!.indexedTree).toBe('abc123');
     await r.scheduler.sweep();
     expect(r.execs.filter((e) => e.cmd !== 'git')).toHaveLength(1); // unchanged tree: no spawn

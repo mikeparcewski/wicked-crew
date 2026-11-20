@@ -176,7 +176,7 @@ export interface OnboardResolveDeps {
   originOf(rootPath: string): Promise<string | null>;
   /** {@link probeGitUrl}. */
   probe(url: string): Promise<string | null>;
-  /** Where a clone of `name` goes, home-relative (`~/.wicked/repos/<name>`). */
+  /** Where a clone of `name` goes under wickedWorkRoot('repos'), shown home-relative when under HOME. */
   checkoutOf(name: string): string;
   /** What already sits where a clone of `name` goes: `null` = nothing; else its `origin` ('' when it has none). A clone
    *  there is skipped and the folder registered as it is, so it must be this repository. */

@@ -35,13 +35,13 @@
  */
 
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { mcpStateDir } from '../mcp/registry-store.js';
-import { crewStateHome, defaultStateHome } from '../projects/state-home.js';
+import { isDefaultStateHome } from '../projects/state-home.js';
 import { childEnvWithBootEstateDb } from './governance-store.js';
 
 /** The MCP protocol version crew declares in the handshake (the version the estate server speaks). */
@@ -174,61 +174,57 @@ export const ESTATE_SPAWN_FAILED_PREFIX = 'failed to spawn wicked-estate-mcp:';
 /** Where {@link resolveMemoryDb} got its answer — `explicit` is the operator's own instruction. */
 export type MemoryDbSource = 'explicit' | 'state-home' | 'global';
 
-/** A directory path as the filesystem spells it, or its lexical normalisation when it does not
- *  exist yet (a state home is created lazily). */
-function canonical(dir: string): string {
-  try {
-    return realpathSync(resolve(dir));
-  } catch {
-    return resolve(dir);
-  }
-}
-
-/**
- * Do these two paths name the SAME directory? By realpath where they exist, lexically where they
- * do not. Exported because it is the load-bearing half of "is this the default daemon": a lexical
- * compare called a symlinked home, a differently-cased spelling on a case-insensitive filesystem
- * and a Windows junction ISOLATED, and handed the daemon an empty store (codex review, MEDIUM).
- */
-export function sameDirectory(a: string, b: string): boolean {
-  return canonical(a) === canonical(b);
-}
-
-/** Whether this daemon runs in the DEFAULT state home — the one whose memory store is the
- *  operator's global one. */
-function inDefaultStateHome(): boolean {
-  return sameDirectory(crewStateHome(), defaultStateHome(homedir()));
-}
-
 /** {@link resolveMemoryDbPath} with the reason, for the callers that need to know which arm won. */
 export function resolveMemoryDb(env: NodeJS.ProcessEnv = process.env): { path: string; source: MemoryDbSource } {
   const explicit = env['WICKED_MEMORY_DB'];
   if (explicit !== undefined && explicit !== '') return { path: explicit, source: 'explicit' };
-  if (!inDefaultStateHome()) return { path: join(mcpStateDir(), 'memory.db'), source: 'state-home' };
+  if (!isDefaultStateHome()) return { path: join(mcpStateDir(), 'memory.db'), source: 'state-home' };
   const home = env['WICKED_HOME'];
   const base = home !== undefined && home !== '' ? home : join(homedir(), '.wicked');
   return { path: join(base, 'memory.db'), source: 'global' };
 }
 
 /**
- * (DES-KNOWLEDGE-DATA-001 §4.1) The knowledge store this daemon's estate reads and writes, by the memory store's
- * ladder: an explicit `WICKED_KNOWLEDGE_DB` wins (it is passed through as it is); an ISOLATED state home gets its
- * own (`<state home>/mcp/knowledge.db`), so a rig, a test daemon or a second port never writes a source's structure
- * into the operator's global store; the default state home keeps estate's own default (the operator's global
- * store, which garden's CLI reads). Every crew spawn of estate (this client, the relay, the describe projector)
- * takes the same answer. The cross-edge store stays estate's default: memory's edges already live there.
+ * Always pins WICKED_MEMORY_DB through resolveMemoryDb. Knowledge and xedge inherit explicit
+ * non-empty values; otherwise isolated homes use <state home>/mcp/<file>, and the default home
+ * keeps estate's default. Empty values on the default home are pinned to ${WICKED_HOME:-~/.wicked}/<file>
+ * because estate reads empty as a temporary db. Every crew estate spawn uses this ladder:
+ * client, relay, learnings submit and learn scheduler index.
  */
-export function estateKnowledgeEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
-  const explicit = env['WICKED_KNOWLEDGE_DB'];
-  if (explicit !== undefined && explicit !== '') return {};
-  if (!inDefaultStateHome()) return { WICKED_KNOWLEDGE_DB: join(mcpStateDir(), 'knowledge.db') };
-  // The default home keeps estate's own default; an EMPTY value would name a temporary database instead, so it is
-  // pinned to that default rather than passed through.
-  if (explicit === '') {
-    const home = env['WICKED_HOME'];
-    return { WICKED_KNOWLEDGE_DB: join(home !== undefined && home !== '' ? home : join(homedir(), '.wicked'), 'knowledge.db') };
+export function estateStoresEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const stores: Record<string, string> = { WICKED_MEMORY_DB: resolveMemoryDbPath(env) };
+  for (const [key, file] of [['WICKED_KNOWLEDGE_DB', 'knowledge.db'], ['WICKED_XEDGE_DB', 'xedge.db']] as const) {
+    const explicit = env[key];
+    if (explicit !== undefined && explicit !== '') continue;
+    if (!isDefaultStateHome()) {
+      stores[key] = join(mcpStateDir(), file);
+    } else if (explicit === '') {
+      // Empty values name temporary databases in estate; pin its historical default instead.
+      const home = env['WICKED_HOME'];
+      stores[key] = join(home !== undefined && home !== '' ? home : join(homedir(), '.wicked'), file);
+    }
   }
-  return {};
+  return stores;
+}
+
+/**
+ * {@link estateStoresEnv}, with the parent directory of every path crew DERIVED created first: the server opens the
+ * file, and nothing guarantees `<state home>/mcp` exists on a state home that has never held one. An operator-named
+ * `WICKED_MEMORY_DB` is not created here (codex review, LOW). A parent that cannot be created is the server's error
+ * to report. Every crew estate spawn calls this right before it spawns.
+ */
+export function ensureEstateStoreDirs(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const stores = estateStoresEnv(env);
+  const memoryExplicit = resolveMemoryDb(env).source === 'explicit';
+  for (const [key, path] of Object.entries(stores)) {
+    if (key === 'WICKED_MEMORY_DB' && memoryExplicit) continue;
+    try {
+      mkdirSync(dirname(path), { recursive: true });
+    } catch {
+      // Left to the server to report with its own message.
+    }
+  }
+  return stores;
 }
 
 /**
@@ -275,28 +271,15 @@ let isolationNoticePrinted = false;
  *  (`childEnvWithBootEstateDb`): the daemon's sidecar is the engine's business, and a newer estate
  *  binary must never migrate that file's schema past what the engine's vendored store opens. */
 function defaultSpawn(env: NodeJS.ProcessEnv): ChildProcess {
-  const { path: memoryDb, source } = resolveMemoryDb(env);
   if (!isolationNoticePrinted) {
     const notice = memoryStoreIsolationNotice(env);
     if (notice !== null) process.stderr.write(`${notice}\n`);
     isolationNoticePrinted = true;
   }
-  // The server opens the file; nothing guarantees its PARENT exists on a state home that has never
-  // held one. Only for a path WE derived: creating a hierarchy under an operator-named
-  // `WICKED_MEMORY_DB` with daemon privileges is not this function's business (codex review, LOW).
-  // A parent that cannot be created is the server's error to report, and it does: the client caps
-  // and surfaces the child's stderr on `EstateMcpError`.
-  const knowledge = estateKnowledgeEnv(env);
-  for (const path of [...(source !== 'explicit' ? [memoryDb] : []), ...Object.values(knowledge)]) {
-    try {
-      mkdirSync(dirname(path), { recursive: true });
-    } catch {
-      // Left to the server to report with its own message.
-    }
-  }
+  const stores = ensureEstateStoreDirs(env);
   return nodeSpawn(estateMcpExe(env), [], {
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...childEnvWithBootEstateDb(env), WICKED_MEMORY_DB: memoryDb, ...knowledge },
+    env: { ...childEnvWithBootEstateDb(env), ...stores },
     windowsHide: true,
   });
 }

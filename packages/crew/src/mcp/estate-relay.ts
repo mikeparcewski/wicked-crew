@@ -55,7 +55,7 @@
 import { existsSync } from 'node:fs';
 import { spawn as nodeSpawn } from 'node:child_process';
 
-import { callEstateToolRaw, estateKnowledgeEnv, estateMcpExe, resolveMemoryDbPath, type EstateMcpIo } from '../core/estate-mcp-client.js';
+import { callEstateToolRaw, estateStoresEnv, estateMcpExe, resolveMemoryDbPath, type EstateMcpIo } from '../core/estate-mcp-client.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import type { InForceRead } from '../decisions/consider.js';
 import { orderBySeverity } from '../decisions/rules-text.js';
@@ -258,9 +258,7 @@ export function estateRelayEnv(scope: EstateUnitScope, base: NodeJS.ProcessEnv =
   for (const k of Object.keys(env)) if (k.startsWith('WICKED_RUN_')) delete env[k];
   return {
     ...env,
-    WICKED_MEMORY_DB: resolveMemoryDbPath(base),
-    // The knowledge store the describe projector writes (an isolated state home's own; DES-KNOWLEDGE-DATA-001 §4.1).
-    ...estateKnowledgeEnv(base),
+    ...estateStoresEnv(base),
     // Never the daemon's boot store (its governance store): the run's graph, or nothing.
     WICKED_ESTATE_DB: scope.codeGraphDb ?? ':memory:',
     WICKED_RUN_ID: scope.unit.runId,

@@ -6,7 +6,8 @@ import { mkdir, access, readFile, writeFile, chmod, rm, link, rename, realpath, 
 import { existsSync, readFileSync } from 'node:fs';
 import { join, dirname, resolve, isAbsolute, relative, sep } from 'node:path';
 import { isPlainRunId, WALKTHROUGH_AUTHOR_SUBDIR, walkthroughRootDir } from './walkthrough-root.js';
-import { crewStateHome, isDefaultStateHome } from '../projects/state-home.js';
+import { mcpStateDir } from '../mcp/registry-store.js';
+import { crewStateHome, isDefaultStateHome, wickedWorkRoot } from '../projects/state-home.js';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -84,14 +85,6 @@ import { QE_OFF_REASON, launchRequiresQe, qeAcceptanceMode, qeSettingSkipReason 
 import { applyVaultBinEnv, BOOT_VAULT_BIN, resolveShippedVaultBin, type VaultBinInputs, type VaultBinPosture } from './vault-bin.js';
 import { withFolderFindings } from './repoPaths.js';
 import { NEW_WORK_SEATS_FIX, NewWorkSeatsRefusal, isSeatKeyList } from './job-seats.js';
-
-
-
-/** Resolved path under the user's home directory. */
-export function wickedDir(...parts: string[]): string {
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? '/tmp';
-  return join(home, '.wicked', ...parts);
-}
 
 /**
  * Parse a JSON string a napi binding returned. The bindings type their return loosely (`unknown`
@@ -3407,10 +3400,10 @@ export class CoreAdapter {
 
   /**
    * Clone a remote git URL and return the persisted `RepoEntry` from registration.
-   * `checkoutPath` overrides the default clone destination (`~/.wicked/repos/<name>`).
+   * `checkoutPath` overrides the state-home-derived repos destination.
    */
   async cloneAndRegister(name: string, gitUrl: string, checkoutPath?: string, opts: { allowProtocols?: string } = {}): Promise<RepoEntry> {
-    const reposRoot = wickedDir('repos');
+    const reposRoot = wickedWorkRoot('repos');
     let cloneDir: string;
     if (checkoutPath) {
       // Expand leading ~/ so callers can use home-relative paths.
@@ -3928,19 +3921,15 @@ export class CoreAdapter {
   }
 
   /**
-   * `WICKED_CREW_KNOWLEDGE_DB` overrides the estate knowledge db the evals seams hand the
-   * engine — the same escape hatch `WICKED_CREW_SYSTEM_SETTINGS` gives {@link settingsFilePath}.
-   * Unset/empty (production) omits `knowledgeDb` from the args so the engine resolves its own
-   * default — which is `~/.wicked-estate/knowledge.db` (evals.rs `default_knowledge_db()`, HOME-
-   * derived), NOT a dbPath-derived sidecar. That home default is exactly why the test harness
-   * arms this seam (tests/setup/hermetic-home.ts): an un-armed corpus-import test writes
-   * `evals:` junk into the OPERATOR's real estate knowledge store — the store the mem/search
-   * domains answer from (crew#396). Read at call time, not construction time, so a test may
-   * re-aim it per fixture.
+   * Explicit WICKED_CREW_KNOWLEDGE_DB wins; isolated homes use <state home>/mcp/evals-knowledge.db,
+   * a file of its own because the engine's vendored store must not share the estate binary's knowledge.db.
+   * The default home omits it so the engine keeps its HOME-derived ~/.wicked-estate/knowledge.db
+   * (evals.rs default_knowledge_db); this is why tests/setup/hermetic-home.ts arms the env seam (crew#396).
    */
-  private static knowledgeDbOverride(): string | undefined {
+  private static governanceKnowledgeDb(): string | undefined {
     const override = process.env['WICKED_CREW_KNOWLEDGE_DB'];
-    return override !== undefined && override !== '' ? override : undefined;
+    if (override !== undefined && override !== '') return override;
+    return isDefaultStateHome() ? undefined : join(mcpStateDir(), 'evals-knowledge.db');
   }
 
   /**
@@ -3952,8 +3941,8 @@ export class CoreAdapter {
    *
    * `dbPath` rides the args because the eval run opens its own read-only connection to the
    * steering store — the SAME store this adapter's actor writes (`this.dbPath`, the one spelling
-   * of where it lives). `knowledgeDb` is normally omitted so the engine resolves its own default
-   * (`~/.wicked-estate/knowledge.db`) — {@link knowledgeDbOverride} is the env escape hatch.
+   * of where it lives). {@link governanceKnowledgeDb} pins isolated homes; the default home keeps
+   * the engine default (`~/.wicked-estate/knowledge.db`) unless explicitly overridden.
    *
    * Presence-gated (the campaigns doctrine): throws {@link GovernanceEvalsUnsupportedError} on
    * an addon that predates the binding, which the route maps to 501 ("upgrade the engine").
@@ -3963,7 +3952,7 @@ export class CoreAdapter {
     if (typeof fn !== 'function') {
       throw new GovernanceEvalsUnsupportedError('Running governance evals');
     }
-    const knowledgeDb = CoreAdapter.knowledgeDbOverride();
+    const knowledgeDb = CoreAdapter.governanceKnowledgeDb();
     const payload = {
       ...(args.type !== undefined ? { type: args.type } : {}),
       ...(args.corpus !== undefined ? { corpus: args.corpus } : {}),
@@ -3979,8 +3968,7 @@ export class CoreAdapter {
   /**
    * Import a named eval corpus into the knowledge store under the `evals:<name>` scope (the
    * string a later {@link runGovernanceEvals} names as `corpus`). `knowledgeDb` resolves the
-   * same way as in {@link runGovernanceEvals} — normally omitted (engine default:
-   * `~/.wicked-estate/knowledge.db`), {@link knowledgeDbOverride} wins when set.
+   * same way as in {@link runGovernanceEvals}, through {@link governanceKnowledgeDb}.
    *
    * Gated on the `governanceEvals` sentinel as well as the binding itself: the two ship
    * together, and importing a corpus no engine on this host can ever run would be a trap, not
@@ -3994,7 +3982,7 @@ export class CoreAdapter {
     if (typeof this.core.governanceEvals !== 'function' || typeof importFn !== 'function') {
       throw new GovernanceEvalsUnsupportedError('Importing an eval corpus');
     }
-    const knowledgeDb = CoreAdapter.knowledgeDbOverride();
+    const knowledgeDb = CoreAdapter.governanceKnowledgeDb();
     return parseEngineJson<ImportEvalCorpusResponse>(
       await importFn.call(
         this.core,
@@ -4125,12 +4113,12 @@ export class CoreAdapter {
   }
 
   /**
-   * Save an inline script to `~/.wicked/scripts/<name>.<ext>`, make it executable,
+   * Save an inline script under the state-home-derived scripts root, make it executable,
    * and return the absolute path. Tool-executor phases use this path as their command.
    */
   async saveScript(name: string, content: string, lang: 'bash' | 'python' | 'sh'): Promise<string> {
     const ext = lang === 'python' ? 'py' : 'sh';
-    const dir = wickedDir('scripts');
+    const dir = wickedWorkRoot('scripts');
     await mkdir(dir, { recursive: true });
     const filename = `${name.replace(/[^a-z0-9_-]/gi, '_')}.${ext}`;
     const path = join(dir, filename);
