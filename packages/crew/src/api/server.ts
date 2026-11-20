@@ -35,6 +35,7 @@ import { DefaultEvalStore } from '../evals/store.js';
 import { RetryIndex } from './retry-index.js';
 import { GroupIndex } from './group-index.js';
 import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
+import { recordBaseUnfetched } from './run-base-notice.js';
 import { OnboardingCaptureChain } from './onboarding-capture.js';
 import { INSPECT_WORKFLOW, InspectService, defaultInspectionsDir, loadInspectWorkflow } from '../inspect/service.js';
 import { DETECT_WORKFLOW, loadDetectWorkflow } from '../workflow-catalog/detect-service.js';
@@ -2449,6 +2450,7 @@ export async function createServer(
     // crew#552: an onboarding completion queues its capture; a chained capture's end frees the slot.
     onboardingCapture.onEvent(event);
     runLearnings.onEvent(event);
+    recordBaseUnfetched(event, audit, DAEMON_ACTOR, (message) => app.log.warn(message));
     // crew-0183: a run resolved its base, so its D8 re-indexes its repo's graph at that base; the repo watcher brings
     // the graph back to the checkout once nothing holds it. Any launch, crew's or the engine's own (campaign nodes).
     if (event.type === 'runBaseResolved' && session !== undefined) {
