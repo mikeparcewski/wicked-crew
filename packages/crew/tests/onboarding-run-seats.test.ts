@@ -53,6 +53,24 @@ afterEach(() => {
 });
 
 describe('seatsForWorkflow', () => {
+  it('reads a strict launch snapshot after readiness while interactive roster reads keep the display answer (crew#1637)', async () => {
+    let ready = false;
+    const display = [{ ...ROSTER[0]!, auth: 'signed_in' }];
+    const launch = [{ ...ROSTER[0]!, auth: 'unknown' }];
+    adapter.setRosterProvider(Object.assign((opts?: { launch: true }) => {
+      if (opts?.launch === true) {
+        expect(ready).toBe(true);
+        return launch;
+      }
+      return display;
+    }, { ready: async () => { ready = true; } }));
+
+    expect(adapter.launchRoster()).toEqual(display);
+    expect(await adapter.readyLaunchRoster()).toEqual(launch);
+    expect(adapter.launchRoster()).toEqual(display);
+    expect(await adapter.seatsForWorkflow('feature')).toEqual(launch);
+  });
+
   it('a workflow whose every phase is a tool executor (onboarding) gets NO seats', async () => {
     // `onboarding` is the engine's built-in PRESET (DES-TEAMING-002 M4): no def here, its steps are
     // what a launch naming it runs. Every step is a Tool (`run`), and none is an evaluator, so

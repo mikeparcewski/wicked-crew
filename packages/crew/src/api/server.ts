@@ -2791,7 +2791,7 @@ export async function createServer(
       engine: adapter,
       roster: async () => {
         await rosterWithStanding.ready?.();
-        return JSON.stringify(launchRosterNaming(rosterWithStanding(), undefined));
+        return JSON.stringify(launchRosterNaming(rosterWithStanding({ launch: true }), undefined));
       },
       // DES-KNOWLEDGE-DATA-001 §9.3: the builder gets the app's project's knowledge package, as a chat there does.
       knowledge: new PackageKnowledge(dataGate, (m) => app.log.warn(m), {
