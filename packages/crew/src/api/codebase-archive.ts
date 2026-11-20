@@ -9,9 +9,10 @@
  * files never. It is snapshotted through a SCRATCH index (the worktree's own index is never
  * touched) and written with `git archive --format=zip <tree>`: tracked content only, no `.git`.
  * Tracked files ship as tracked, exactly as delivery treats them, and `git archive` honours the
- * repository's `export-ignore` / `export-subst` attributes. When the run's worktree is gone (the
- * engine reaps a cancelled run's, and a committed run's clean one) the `wicked/<run>` branch in
- * the registered repository is archived instead.
+ * repository's `export-ignore` / `export-subst` attributes. When the run's worktree is gone, the
+ * `wicked/<run>` branch in the registered repository is archived instead. A cancelled run archives
+ * from the reap's outcome: that branch until `worktreeRetained` names the kept tree, then a refresh
+ * from that worktree (the clean-tree reap may still be removing files at `runCancelled`).
  *
  * WHERE: `<state home>/artifacts/runs/<sha256(run id)[0:32]>/codebase.zip` + `codebase.json` (the
  * record, the run id included). The record is durable on its own — {@link CodebaseArchiveStore.get}
