@@ -78,6 +78,8 @@ beforeEach(() => {
   core()['interactionRequests'] = async (sessionId: string) =>
     JSON.stringify([{ id: `g-${sessionId}`, session_id: sessionId, kind: 'gate', ord: 2, prompt: 'Approve step 2?', status: 'open', created_at: 1_785_614_004_730 }]);
   core()['runEvents'] = async () => '[]';
+  // The engine does not know these faked runs: its gate-actions read says there is none (an unreadable one is a 503, crew#1579).
+  core()['gateActions'] = async () => 'null';
   const parse = JSON.parse.bind(JSON);
   vi.spyOn(JSON, 'parse').mockImplementation((text: string, reviver?: (this: unknown, key: string, value: unknown) => unknown) => {
     if (foldStrings.has(text)) fullParses++;

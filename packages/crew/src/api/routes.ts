@@ -8241,12 +8241,11 @@ export function registerRoutes(
     // await sees a change the adapter learned of during it (a frame, or a write it made); any other
     // change is at most the snapshot's age bound old.
     const runOf = (): Promise<SessionView | undefined> => adapter.runView(id);
-    // wicked-core#850: the gate answer carries the gated unit's receipt — what assured the work it asks about.
-    const unitAt = async (ord: number): Promise<WorkUnit | undefined> => (await runOf())?.units?.find((u) => u.ord === ord);
     // (rejudge, api-types 0.134.0) A gate whose unit no judge could rule on says whether its judge
     // can be re-run now, and from which seats — the engine's own selection, read each time (a seat
     // signed in since the pause counts). Absent on every other gate and on an addon without the read.
-    const rejudgeAt = async (ord: number, gated: WorkUnit | undefined): Promise<{ rejudge?: RejudgeOffer }> => {
+    const rejudgeAt = async (ord: number, run: SessionView | undefined): Promise<{ rejudge?: RejudgeOffer }> => {
+      const gated = run?.units?.find((u) => u.ord === ord);
       const denial = (gated as { denial?: { source?: unknown } | null } | undefined)?.denial;
       if (gated?.status !== 'rejected' || denial?.source !== 'judge_unavailable') return {};
       if (typeof adapter.rejudgeReadiness !== 'function') return {};
@@ -8263,9 +8262,9 @@ export function registerRoutes(
     // PLACE: `{approve: true, action: 'skip_qe', amend: <reason>, ord}` on this gate, labelled on
     // the run, every later gate and the delivery — never a relaunch. Read each time (a PASS
     // recorded since the pause withdraws it). Absent on every other gate.
-    const skipQeAt = async (gated: WorkUnit | undefined): Promise<{ skipQe?: SkipQeOffer }> => {
+    const skipQeAt = async (ord: number, run: SessionView | undefined): Promise<{ skipQe?: SkipQeOffer }> => {
+      const gated = run?.units?.find((u) => u.ord === ord);
       if (gated === undefined || !isDeliverUnit(gated)) return {};
-      const run = await runOf();
       if (run === undefined) return {};
       const decision = qeDecisionOf(run);
       if (decision === null || qeDecisionBypasses(decision)) return {};
@@ -8283,22 +8282,40 @@ export function registerRoutes(
     };
     // (crew#1512, studio#1170) EVERY ANSWER THIS GATE TAKES NOW: the engine's own list (each candidate run
     // through its decision path's pre-checks), less what crew refuses itself (`crewGateActions`). Read each
-    // time; absent on an addon without the read, or when the engine's open gate is not this one.
-    const actionsAt = async (ord: number, gated: WorkUnit | undefined): Promise<{ actions?: GateAction[]; planRev?: number }> => {
+    // time; absent only on an addon without the read. A failed or moved read gets one retry, then
+    // a retryable 503 (crew#1579), so a skin cannot mistake an unavailable list for no capability.
+    const actionsAt = async (ord: number, run: SessionView | undefined): Promise<{ actions?: GateAction[]; planRev?: number } | null> => {
       if (typeof adapter.gateActions !== 'function') return {};
-      try {
-        const listed = await adapter.gateActions(id);
-        if (listed === null || listed.ord !== ord) return {};
-        const run = await runOf();
+      for (let attempt = 0; attempt < 2; attempt++) {
+        let listed: Awaited<ReturnType<CoreAdapter['gateActions']>>;
+        try {
+          listed = await adapter.gateActions(id);
+        } catch {
+          continue;
+        }
+        if (listed === null) return {};
+        if (listed.ord !== ord) continue;
         if (run === undefined) return {};
+        const gated = run.units?.find((u) => u.ord === ord);
         return {
           actions: await crewGateActions(run, gated, listed.gateKind, listed.actions),
           ...(listed.planRev !== undefined ? { planRev: listed.planRev } : {}),
         };
-      } catch {
-        // A failed read lists nothing; the skin falls back to the gate's own offers.
-        return {};
       }
+      return null;
+    };
+    const actionsUnavailable = {
+      error: 'Gate actions unavailable: the engine\'s answers for this gate could not be read consistently — retry.',
+      code: 'gate_actions_unavailable',
+    };
+    // crew#1629: start the engine's action read immediately, alongside the other offers. Every
+    // offer and the receipt use the run already in hand; the record/cache overlap reads stay separate.
+    const offersAt = async (ord: number, run: SessionView | undefined) => {
+      const gated = run?.units?.find((u) => u.ord === ord);
+      const actions = actionsAt(ord, run);
+      const [rejudge, skipQe, listed] = await Promise.all([rejudgeAt(ord, run), skipQeAt(ord, run), actions]);
+      if (listed === null) return null;
+      return { assurance: receiptOf(gated), ...rejudge, ...skipQe, ...listed };
     };
     // The record judges the cache (crew#1083 round 7): rows that disagree on the ord are 409
     // `gate_unknown` whether or not something is cached, and a cached entry is served — for its
@@ -8322,9 +8339,9 @@ export function registerRoutes(
         || (recorded.state === 'open' && cached.ord === recorded.ord)
         || (recorded.state === 'none' && (await runOf())?.session.status === 'awaiting_human');
       if (servable) {
-        // One read of the gated unit serves both its receipt and its re-judge offer.
-        const gated = await unitAt(cached.ord);
-        return { runId: id, ...cached, assurance: receiptOf(gated), ...(await rejudgeAt(cached.ord, gated)), ...(await skipQeAt(gated)), ...(await actionsAt(cached.ord, gated)) };
+        const offers = await offersAt(cached.ord, await runOf());
+        if (offers === null) return reply.code(503).send(actionsUnavailable);
+        return { runId: id, ...cached, ...offers };
       }
       gateCache.forget(id);
     }
@@ -8400,8 +8417,9 @@ export function registerRoutes(
       // genuinely lost), as does a gate whose `awaitingHuman` predates the log's retention.
       return reply.code(404).send({ error: 'No open gate for this run' });
     }
-    const gatedUnit = run.units?.find((u) => u.ord === open.ord);
-    return { runId: id, ...open, assurance: receiptOf(gatedUnit), ...(await rejudgeAt(open.ord, gatedUnit)), ...(await skipQeAt(gatedUnit)), ...(await actionsAt(open.ord, gatedUnit)) };
+    const offers = await offersAt(open.ord, run);
+    if (offers === null) return reply.code(503).send(actionsUnavailable);
+    return { runId: id, ...open, ...offers };
   });
 
   // ── Elicitation (DES-002) ────────────────────────────────────────────────────
