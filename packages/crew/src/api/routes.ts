@@ -372,6 +372,7 @@ import {
   probeEstate,
   probeInteractive,
   probeVault,
+  powerWaitOf,
   readBridgeLockAsync,
   readWeek,
   runLiveness,
@@ -2286,6 +2287,9 @@ export function registerRoutes(
   };
   const decorateRun = (view: SessionView): SessionView => {
     const conflictStrand = normalizeStranded(view);
+    const powerWait = powerWaitOf(view.session);
+    if (powerWait !== null) view.session.person_needed = powerWait;
+    else delete view.session.person_needed;
     // Seam X2: what the run IS — the adapter attaches it from the engine's record; a view from a
     // directly-driven adapter gets it resolved from its record here, so it is always served.
     view.session.run_identity = wireIdentity(runIdentityOf(view));

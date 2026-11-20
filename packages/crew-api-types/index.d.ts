@@ -1039,6 +1039,12 @@ export interface AgentSession {
    */
   power?: PowerState | null | undefined;
   /**
+   * A Power checkpoint needs a person's decision. Derived on `GET /runs` and `GET /runs/:id`,
+   * with the same reason as `/system`; the run's status stays unchanged. ABSENT when no Power
+   * checkpoint is paused, and on older daemons; never `null`.
+   */
+  person_needed?: { liveness: 'waiting_on_you'; reason: string };
+  /**
    * (api-types 0.113.0; operator ruling 2026-10-12) The run's SHORT JOB TITLE, derived by the daemon
    * at DTO assembly on `GET /runs` and `GET /runs/:id` from {@link problem} — deterministic, at most
    * 60 characters (an ellipsis included), so every skin shows the same headline: the operator's words

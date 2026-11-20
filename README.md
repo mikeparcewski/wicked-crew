@@ -286,6 +286,8 @@ its own deliver gate unless the launch asked for `deliverGate: "auto"` (refused 
 requires QE acceptance unless the launch or the daemon's setting skips it). Any other launch, or an
 engine without power mode, runs **phased**, and the launch answer says so.
 
+`GET /api/v1/runs` and `GET /api/v1/runs/:id` include `session.person_needed: { liveness: 'waiting_on_you', reason }` at a paused Power checkpoint, matching `/system`; the field is absent otherwise and the run's status stays unchanged.
+
 Phased, one run token moves through the workflow's phases with a gate between every one — e.g. for
 `feature`:
 

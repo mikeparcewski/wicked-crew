@@ -99,6 +99,31 @@ const HUMAN = { 'x-actor': 'human:operator' };
 const AGENT = { 'x-actor': 'agent:operator' };
 
 describe('power mode routes', () => {
+  it.each([true, false])('GET /runs and /runs/:id disclose a Power wait only while paused (paused=%s)', async (paused) => {
+    const h = await harness();
+    const pause = paused ? { checkpoint: 3, reasons: ['scope grew'] } : null;
+    h.adapter['sessionsDetail']!.mockResolvedValue([runView('p1', { ...POWER, pause }), runView('phased', undefined)]);
+    const expected = {
+      liveness: 'waiting_on_you',
+      reason: 'waiting on you: this grew past its plan (checkpoint 3): scope grew',
+    };
+
+    const list = await h.app.inject({ method: 'GET', url: '/api/v1/runs', headers: HUMAN });
+    expect(list.statusCode).toBe(200);
+    const runs = (list.json() as { runs: Array<{ session: Record<string, unknown> }> }).runs;
+    expect(runs.map((run) => run.session['id']).sort()).toEqual(['p1', 'phased']);
+    for (const { session } of runs) {
+      const detail = await h.app.inject({ method: 'GET', url: `/api/v1/runs/${session['id'] as string}`, headers: HUMAN });
+      expect(detail.statusCode).toBe(200);
+      const detailed = (detail.json() as { run: { session: Record<string, unknown> } }).run.session;
+      for (const served of [session, detailed]) {
+        expect(served['status']).toBe('executing');
+        if (paused && served['id'] === 'p1') expect(served['person_needed']).toEqual(expected);
+        else expect(served).not.toHaveProperty('person_needed');
+      }
+    }
+  });
+
   it('reads a power run, and a phased run as off and unavailable', async () => {
     const h = await harness();
     const p = await h.app.inject({ method: 'GET', url: '/api/v1/runs/p1/power', headers: HUMAN });
