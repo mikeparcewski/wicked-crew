@@ -95,6 +95,7 @@ import {
   seatProtections,
   seatRemovalNote,
   seatsNeeded,
+  seatsShortLine,
   briefOf,
   inputLines,
   SELF_SEATED,
@@ -3035,6 +3036,43 @@ export class ChatProposals {
         released = this.write(chatId, { at: this.now(), turnId: f.hold, kind: 'proposal_released', pid: f.proposal.pid, note: "Your change wasn't applied: say it again." }, instance) || released;
       }
       return released;
+    });
+  }
+
+  /** A read redraws a seat-held job from the current pool, without an answer turn (crew#1484). */
+  async recheckHeldSeats(chatId: string, instance: string | null = this.deps.instanceOf(chatId)): Promise<boolean> {
+    const held = (f: FoldedProposal): boolean => f.state === 'open' && f.proposal.kind === 'job'
+      && f.proposal.shape !== undefined && !f.proposal.seatsUnread && f.proposal.blocked?.startsWith('Needs ') === true;
+    if (![...foldProposals(this.deps.records(chatId)).values()].some(held)) return false;
+    return this.lock.run(`chat\u0000${instance ?? chatId}`, async () => {
+      let changed = false;
+      for (const f of foldProposals(this.deps.records(chatId)).values()) {
+        if (!held(f)) continue;
+        const p = f.proposal;
+        // An ended chat's open card is redrawn using its recorded scope and seat order.
+        const chat: JobChat = this.jobChat(chatId) ?? {
+          projectId: p.filedIn.projectId,
+          repos: (p.repoRefs ?? []).map((id, i) => ({ id, name: p.repos[i] ?? id })),
+          lead: p.seats?.lead ?? null,
+          seats: p.seats?.keys ?? [],
+        };
+        const ctx = await this.jobContext(chatId, p.pid, p.turnId, p.seat, chat, {
+          revises: p.revises ?? null, lineage: p.lineage ?? p.pid, notes: [],
+          ...(p.request !== undefined ? { request: p.request } : {}),
+          ...(p.answers !== undefined ? { answers: p.answers } : {}),
+        });
+        if (ctx.seatsUnread) continue;
+        const r = resolveOption(p.shape!.card, p.shape!.option, ctx.served);
+        if (r === null || ctx.served.rev !== p.catalogRev || r.resolved.resolution !== p.resolution || p.blocked !== seatsShortLine(r)) continue;
+        if ((ctx.pool ?? ctx.roster).length < seatsNeeded(r)) continue;
+        const facts = { ...factsOf(p), lead: null, seats: null };
+        const fresh = keepReshape(await this.proposalOf(chatId, p.pid, facts, ctx, this.deps.records(chatId), true, p), p);
+        if (fresh.seats === undefined || fresh.seats.keys.length < seatsNeeded(r)) continue;
+        const current = foldProposals(this.deps.records(chatId)).get(p.pid);
+        if (current === undefined || !held(current) || current.proposal.blocked !== p.blocked) continue;
+        changed = this.write(chatId, { at: this.now(), turnId: current.turnId, kind: 'proposal', proposal: fresh }, instance) || changed;
+      }
+      return changed;
     });
   }
 

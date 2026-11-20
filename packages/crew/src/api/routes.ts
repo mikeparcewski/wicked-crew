@@ -6534,6 +6534,7 @@ export function registerRoutes(
     async (req, reply) => {
       const { id } = req.params as { id: string };
       try {
+        await chatProposals.recheckHeldSeats(id).catch(() => false);
         // The scope recorded at open (crew#502) — `null` for a chat this daemon did not open — and
         // the seats refused at open (F-A45-011), so the studio's admission copy survives a reload.
         return {
@@ -6677,6 +6678,7 @@ export function registerRoutes(
       // DES-CATALOG-002 §4.6: a read that finds a job proposal held by a turn that is gone (failed, expired, or forgotten
       // by a restart) releases it with its note first, so the proposal reads startable again.
       if (chat !== null) await chatProposals.reopenStale(id).catch(() => false);
+      if (chat !== null) await chatProposals.recheckHeldSeats(id).catch(() => false);
       const messages = chat === null ? null : chatHistory.messages(id);
       if (chat === null || messages === null) return reply.code(404).send({ error: `no chat ${id} in this daemon's history` });
       // (F1/F2) An open job or document reads blocked while `newWorkSeats` can't be honored: a live state, read now.
