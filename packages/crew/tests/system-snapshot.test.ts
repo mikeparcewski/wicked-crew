@@ -284,8 +284,10 @@ describe('derived rows', () => {
 
   it('load rows', () => {
     expect(loadRow(() => ({ load1: 2, cores: 8 }), 'darwin').state).toBe('ok');
+    expect(loadRow(() => ({ load1: 13.9, cores: 14 }), 'darwin').state).toBe('ok');
+    expect(loadRow(() => ({ load1: 14, cores: 14 }), 'darwin').state).toBe('degraded');
     expect(loadRow(() => ({ load1: 16, cores: 8 }), 'darwin').state).toBe('degraded');
-    expect(loadRow(() => ({ load1: 90, cores: 14 }), 'darwin').state).toBe('down');
+    expect(loadRow(() => ({ load1: 70, cores: 14 }), 'darwin').state).toBe('down');
     expect(loadRow(() => ({ load1: 0, cores: 8 }), 'win32').state).toBe('unknown');
   });
 });
