@@ -360,10 +360,12 @@ describe('chat sees artifacts and runs (server, A1)', () => {
     const ctx = { artifact: { ref: 'mikes/coverage-deck', version: 2 } };
     const before = launches.length;
     const other = await send(authed, 'own-1', { text: 'what is this?', context: ctx }, 'other-token');
-    expect(other.statusCode).toBe(403);
-    expect(other.json()).toMatchObject({ code: 'chat_context_refused' });
-    const agent = await send(authed, 'own-1', { text: 'what is this?', context: ctx }, 'agent-token');
+    expect(other.statusCode).toBe(404);
+    expect(other.json()).toEqual({ error: 'no chat own-1 on this daemon' });
+    expect((await open(authed, { chatId: 'agent-own-1', clis: ['claude'] }, 'agent-token')).statusCode).toBe(201);
+    const agent = await send(authed, 'agent-own-1', { text: 'what is this?', context: ctx }, 'agent-token');
     expect(agent.statusCode).toBe(403);
+    expect(agent.json()).toMatchObject({ code: 'chat_context_refused' });
     expect(launches.length).toBe(before);
     const owner = await send(authed, 'own-1', { text: 'what is this?', context: ctx }, 'owner-token');
     expect(owner.statusCode).toBe(202);
