@@ -173,6 +173,43 @@ describe('the review seat and the seats new work may use (crew#1592, F1/F2)', ()
 });
 
 describe('a review launch', () => {
+  it('records a preparation refusal with its reason and window, without overwriting an already-recorded review', () => {
+    const r = rig();
+    const projectIds = ['p1'];
+    const reason = `no signed-in, eligible agent seat: ${'x'.repeat(600)}`;
+    r.service.prepareRefused('refused-1', { trigger: 'schedule', scheduleId: REVIEW_WORKFLOW, projectIds }, reason);
+    expect(r.store.list()).toHaveLength(1);
+    expect(r.store.get('refused-1')).toEqual({
+      runId: 'refused-1',
+      trigger: 'schedule',
+      scheduleId: REVIEW_WORKFLOW,
+      launchedAt: NOW.toISOString(),
+      endedAt: NOW.toISOString(),
+      status: 'failed',
+      window: { startMs: NOW.getTime() - 48 * H, endMs: NOW.getTime() },
+      baselineWindows: [
+        { startMs: NOW.getTime() - 96 * H, endMs: NOW.getTime() - 48 * H },
+        { startMs: NOW.getTime() - 144 * H, endMs: NOW.getTime() - 96 * H },
+        { startMs: NOW.getTime() - 192 * H, endMs: NOW.getTime() - 144 * H },
+        { startMs: NOW.getTime() - 240 * H, endMs: NOW.getTime() - 192 * H },
+      ],
+      projectIds: ['p1'],
+      summary: null,
+      interpreted: false,
+      totals: null,
+      series: [],
+      improvements: [],
+      regressions: [],
+      recommendations: [],
+      watching: [],
+      error: `the review could not be prepared: ${reason.slice(0, 500)}`,
+    });
+    const before = JSON.stringify(r.store.list());
+    projectIds.push('p2');
+    r.service.prepareRefused('refused-1', { trigger: 'manual' }, 'another reason');
+    expect(JSON.stringify(r.store.list())).toBe(before);
+  });
+
   it('is repo-less, delivers nothing, runs on one seat and can write only its review directory', async () => {
     const r = rig();
     const input = await r.service.prepareLaunch(launchInput(), { trigger: 'manual', projectIds: ['p1'] });
