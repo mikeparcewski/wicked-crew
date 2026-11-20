@@ -25,6 +25,7 @@ import { promises as fsp } from 'node:fs';
 import { basename, extname, join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { z } from '../zod.js';
+import { refuseStaleReplacement } from '../learnings/replacement-lineage.js';
 import { API_PREFIX } from './api-prefix.js';
 
 const V = API_PREFIX;
@@ -316,6 +317,9 @@ async function acceptEdited(
       body: { error: `only a memory proposal can be accepted with an edit (this is ${row.kind_type}); accept or reject it as filed` },
     };
   }
+  // crew#1546: a stale replacement of an edited learning is refused and rejected here too (see the plain approve).
+  const stale = await refuseStaleReplacement(estateTool, id, row.payload);
+  if (stale !== null) return { status: 409, body: { error: stale, code: 'stale_replacement' } };
   const payload = { ...(typeof row.payload === 'object' && row.payload !== null ? row.payload : {}) } as Record<string, unknown>;
   const capture = payload['capture'];
   if (edit.reach === 'pattern' && capture !== 'memory') {

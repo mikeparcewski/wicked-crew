@@ -16,8 +16,8 @@
  *    document, the orchestrator's recorded decisions and their reasons, a QE reviewer that could
  *    not run its checks, a reviewer that asked for changes, a check that was red on the base too
  *    or ran out of time. They are long and run-specific, so at the end of the run ONE distinct,
- *    cheap seat distils them into durable learnings (the builder never grades itself). Only when no
- *    such seat can run are they filed raw, trimmed, for the person to edit or reject.
+ *    cheap seat distils them into durable learnings (the builder never grades itself). When no
+ *    such seat can run they are not filed: raw evidence is the run's record, not a learning.
  */
 
 import { createHash } from 'node:crypto';
@@ -205,7 +205,7 @@ function fromOperatorRulings(view: SessionView): LearningCandidate[] {
   return out;
 }
 
-/** The QE reviewer could not run its checks: what it said it lacked is a sandbox fact worth keeping. */
+/** The QE reviewer could not run its checks: what it said it lacked is a sandbox fact, handed to the distil seat as evidence (which drops sandbox limits as seat-image facts). */
 function fromQeReview(view: SessionView): LearningCandidate[] {
   const out: LearningCandidate[] = [];
   for (const unit of unitsOf(view)) {

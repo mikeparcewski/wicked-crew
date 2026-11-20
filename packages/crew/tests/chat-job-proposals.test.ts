@@ -22,7 +22,8 @@ import {
   type ProposalDispatch,
   type ProposalDispatcher,
 } from '../src/api/chat-proposals.js';
-import { jobLaunchCommon, ownWords, personAskedSkip, qeSkipBound } from '../src/api/chat-jobs.js';
+import { jobLaunchCommon, jobLaunchRoster, ownWords, personAskedSkip, qeSkipBound } from '../src/api/chat-jobs.js';
+import { launchRosterNaming } from '../src/api/routes.js';
 import { NewWorkSeatsRefusal } from '../src/core/job-seats.js';
 import { removeScratch } from './setup/scratch.js';
 
@@ -945,5 +946,119 @@ describe('crew#1570: the time a proposal promises', () => {
     const r = rig();
     await pick(r, 'feature');
     expect(open(r).sentence!.text).toMatch(/About \d+(\.\d)? (min|h)–\d/);
+  });
+});
+
+/**
+ * (crew#1609, after crew#1590) An opt-in seat (OpenCode) picked for new work, or named on the job, is carried through
+ * every launch path: Go again after an interrupted launch, an `addSeats` revision, a reshape (and a reshape's inherited
+ * roster). Un-picked, it stays out of each. The engine's roster is the production narrowing the job launcher runs
+ * (`launchRosterNaming` with the card's keys, then `jobLaunchRoster`).
+ */
+describe('opt-in seats through the job lifecycle (crew#1609)', () => {
+  // The seats work may name (`proposalRoster` keeps opt-in seats), and the standing the launcher narrows.
+  const ROSTER = [{ key: 'claude', name: 'Claude' }, { key: 'codex', name: 'Codex' }, { key: 'pi', name: 'pi' }, { key: 'opencode', name: 'OpenCode' }];
+  const STANDING = ROSTER.map((s) => ({ key: s.key, display_name: s.name }));
+  const PICKED = ['claude', 'codex', 'opencode'];
+  const make = (pick: readonly string[] | null): Rig => {
+    const r = rig({ roster: ROSTER, repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    (r.svc as unknown as { deps: ChatProposalDeps }).deps.newWorkSeats = async () => pick;
+    return r;
+  };
+  const sorted = (keys: readonly string[] | undefined): string[] => [...(keys ?? [])].sort();
+  const last = (r: Rig): ArtifactProposal => r.launcher.launched.at(-1)!.resolution as ArtifactProposal;
+  const engine = (p: Pick<ArtifactProposal, 'seats' | 'relaunch'>, standing: ReadonlyArray<{ key?: unknown }> = STANDING): string[] =>
+    jobLaunchRoster(launchRosterNaming(standing, p.seats?.lead ?? undefined, p.seats?.keys ?? []), p).roster.map((x) => String(x.key)).sort();
+  const facts = (card: string): Parameters<ChatProposals['reshape']>[1]['facts'] => ({
+    card, option: undefined, depth: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape',
+  });
+  const reshapeOf = async (r: Rig) => {
+    await pick(r, 'migrate', { option: 'in-place' });
+    const p = open(r);
+    expect((await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
+    return { pid: `${CHAT}:reshape:run1:a`, oldRunId: 'run1', parentPid: p.pid, facts: facts('feature'), edits: { card: 'feature' }, reducedAssurance: false, relaunch: { deliver: 'pr' as const }, request: { id: 'a', digest: 'd1' }, confirmLoss: ['parity'] };
+  };
+
+  it.each([
+    ['picked: it is launched', PICKED, true],
+    ['not picked: it stays out', null, false],
+  ] as const)('Go again after an interrupted launch: an opt-in seat %s', async (_label, pickKeys, carried) => {
+    const r = make(pickKeys);
+    await pick(r, 'feature');
+    const p = open(r);
+    expect(sorted(p.seats?.keys).includes('opencode')).toBe(carried);
+    const launch = r.launcher.launch.bind(r.launcher);
+    r.launcher.launch = async () => { throw new Error('engine unreachable'); };
+    expect((await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1')).code).not.toBe(200);
+    expect(r.launcher.launched).toHaveLength(0);
+    r.launcher.launch = launch;
+    const again = await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1');
+    expect(again.code, JSON.stringify(again.body)).toBe(200);
+    expect(r.launcher.launched).toHaveLength(1);
+    expect(sorted(last(r).seats?.keys)).toEqual(sorted(p.seats?.keys));
+    expect(engine(last(r))).toEqual(sorted(p.seats?.keys));
+    expect(engine(last(r)).includes('opencode')).toBe(carried);
+  });
+
+  it.each([
+    ['picked: it stays on the card and is launched', PICKED, ['claude', 'codex', 'opencode', 'pi']],
+    ['not picked: it stays out', null, ['claude', 'codex', 'pi']],
+  ] as const)('an addSeats revision naming another seat: an opt-in seat %s', async (_label, pickKeys, expected) => {
+    const r = make(pickKeys);
+    await pick(r, 'feature');
+    expect((await swap(r, open(r).pid, { addSeats: ['pi'] }, 'add-pi')).code).toBe(201);
+    const p = open(r);
+    expect(sorted(p.seats?.keys)).toEqual(expected);
+    expect((await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
+    expect(sorted(last(r).seats?.keys)).toEqual(expected);
+    expect(engine(last(r))).toEqual(expected);
+  });
+
+  it('nothing picked: an addSeats revision naming the opt-in seat is the opt-in, and Start hands the engine it', async () => {
+    const r = make(null);
+    await pick(r, 'feature');
+    const before = open(r);
+    expect(before.seats?.keys).not.toContain('opencode');
+    expect((await swap(r, before.pid, { addSeats: ['opencode'] }, 'add-opencode')).code).toBe(201);
+    const p = open(r);
+    expect(p.seats?.keys).toContain('opencode');
+    expect((await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
+    expect(last(r).seats?.keys).toContain('opencode');
+    expect(engine(last(r))).toContain('opencode');
+  });
+
+  it.each([
+    ['picked: it is launched', PICKED, true],
+    ['not picked: it stays out', null, false],
+  ] as const)('a reshape: an opt-in seat %s', async (_label, pickKeys, carried) => {
+    const r = make(pickKeys);
+    const base = await reshapeOf(r);
+    const out = await r.svc.reshape(CHAT, base, ME, 'i1');
+    expect(out.code, JSON.stringify(out.body)).toBe(200);
+    expect((last(r).seats?.keys ?? []).includes('opencode')).toBe(carried);
+    expect(engine(last(r)).includes('opencode')).toBe(carried);
+  });
+
+  it("a reshape carries the held run's opt-in seat (named in its facts) after the pick no longer holds it, with that seat's own inherited configuration", async () => {
+    const r = make(PICKED);
+    const base = await reshapeOf(r);
+    // The pick changes: opencode is no longer drawn by default, but the held run named it.
+    (r.svc as unknown as { deps: ChatProposalDeps }).deps.newWorkSeats = async () => null;
+    const inherited = JSON.stringify([{ key: 'claude', model: 'held' }, { key: 'codex', model: 'held' }, { key: 'opencode', model: 'held-oc' }]);
+    const out = await r.svc.reshape(CHAT, { ...base, facts: { ...base.facts, seats: ['claude', 'codex', 'opencode'] }, relaunch: { deliver: 'pr' as const, clisJson: inherited } }, ME, 'i1');
+    expect(out.code, JSON.stringify(out.body)).toBe(200);
+    const sent = last(r);
+    expect(sorted(sent.seats?.keys)).toEqual(['claude', 'codex', 'opencode']);
+    expect(sent.relaunch?.clisJson).toBe(inherited);
+    const narrowed = jobLaunchRoster(launchRosterNaming(STANDING, sent.seats?.lead ?? undefined, sent.seats?.keys ?? []), sent);
+    expect(JSON.parse(narrowed.clisJson!)).toEqual([{ key: 'claude', model: 'held' }, { key: 'codex', model: 'held' }, { key: 'opencode', model: 'held-oc' }]);
+  });
+
+  it("a reshape's inherited roster keeps the opt-in seat's own configuration; the card still decides membership", () => {
+    const inherited = JSON.stringify([{ key: 'claude', model: 'held' }, { key: 'opencode', model: 'held-oc' }, { key: 'codex', model: 'held' }]);
+    const p = { seats: { lead: 'claude', keys: ['claude', 'opencode'], label: '' }, relaunch: { deliver: 'pr' as const, clisJson: inherited } } as unknown as Pick<ArtifactProposal, 'seats' | 'relaunch'>;
+    const out = jobLaunchRoster(launchRosterNaming(STANDING, 'claude', ['claude', 'opencode']), p);
+    expect(out.roster).toEqual([{ key: 'claude', model: 'held' }, { key: 'opencode', model: 'held-oc' }]);
+    expect(JSON.parse(out.clisJson!)).toEqual(out.roster);
   });
 });

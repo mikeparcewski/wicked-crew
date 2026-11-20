@@ -173,8 +173,9 @@ function runDeliver(
     [
       '#!/bin/sh',
       'case "$1" in',
-      '  api) echo tester;;',
-      '  pr) echo "https://github.com/o/r/pull/426";;',
+      // (crew#1623) the PR-checks watch reads the base branch's rules and the PR's checks: none required.
+      '  api) case "$2" in repos/*/rules/branches/*) echo "[]";; repos/*/branches/*) echo "{}";; *) echo tester;; esac;;',
+      '  pr) case "$2" in checks) echo "[]";; view) echo main;; *) echo "https://github.com/o/r/pull/426";; esac;;',
       '  *) echo "gh: unexpected $*" >&2; exit 2;;',
       'esac',
       'exit 0',

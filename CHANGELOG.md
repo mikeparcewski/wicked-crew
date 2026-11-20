@@ -10,6 +10,98 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+- **The B4 chat measure, `packages/crew/scripts/chat-probe.ts` (crew#1497).** It reports, per question, grounded answers
+  with real `repo/path:line` citations, fabricated citations and internal-text leaks, over project chats it opens and
+  closes itself. It fails closed: a question that errored, timed out, could not be closed, had a failed seat or got no
+  seat list fails the measure, and a link or path it cannot check is a failed citation. A GitHub link is valid only
+  when three things hold: its owner/repo is the member repository's own remote; its ref (a branch, tag or commit)
+  resolves in the local clone; and the cited lines exist in the file at that ref. A link with another owner or an
+  unknown ref counts as fabricated, even when a file of that name is checked out. Reading fails closed: a token
+  shaped like a citation (`name:12`, `name#L12`, a URL ending `#L12`) that the grammar does not read whole counts as
+  fabricated. Citations are read in one pass that claims spans. Links come first, decoded once. A backtick-quoted
+  span is one path, spaces included. Bare paths come last. No step reads inside a span already claimed. That covers
+  a suffix of a longer token, `#L1e999`, a range with junk after it, an extensionless name it
+  does not know, and an upper-case scheme. `passed` needs at least 20 questions; a smaller set reports `barMet` and
+  exits 1, as a smoke run. The final read must still hold every seat the send reached, and it keeps any failure or leak
+  the settling read showed. A file URL into a home or temp folder, a Windows path in any script, and a pretty-printed
+  session row are leaks.
+
+- **A stuck scheduled run no longer blocks its schedule forever, and a run waiting on you says so (crew#1578).** The
+  schedule used to skip every due time while its last run was open, so a run stuck planning with no seats held it
+  indefinitely.
+  - **A run that never started work is cancelled.** That is a last run still planning or distributing with a known
+    empty seat list, 6 h after its scheduled launch. Its schedule cancels it at that point, due or not, and the next
+    due time launches. The status and seats are read again right before the cancel, which has a 60 s deadline.
+  - **The cancel is on the run's own record.** It is written as `run.cancelled` by `workflow-schedule` with the
+    reason "cancelled by its schedule: no seats for 6 h". The run's working document shows it as
+    "Its schedule · <time> · stopped the job: ...". This is the one line in a run's notes that is not a person's.
+  - **Other outcomes:** a run that ended on its own first keeps its own end, and no cancel is recorded. A cancel that
+    fails or does not answer launches nothing, and the row says why.
+  - **What is never cancelled:** a run with seats, one executing, or one younger than 6 h.
+  - **A run waiting on a person** (`awaiting_human`) is never cancelled for them. The row carries `blocked` from the
+    first sweep that sees it waiting: since when, the run to open (`target`), how many due times it skipped while
+    waiting, and the sentence "blocked: the last run <id> is waiting for you since <time>; N due times skipped". It
+    clears when the run moves on. `lastNote` keeps exactly the words it had before this change ("skipped: its last
+    run <id> is waiting on you (awaiting_human)"), so a studio that predates `blocked` still shows its warning. A
+    studio that renders `blocked` shows the sentence and the link (wicked-studio#1195).
+  - Run it now does the same and writes what it found on the row before refusing.
+
+  wicked-crew-api-types 0.215.0 (additive): `WorkflowSchedule.blocked`, `ScheduleBlocked`.
+
+## [0.18.18] — 2026-11-19
+
+Feature release. A launch form can ask what a run will keep before it starts: `POST /runs/preview` answers the human gates
+(power or phased, delivery, gate) from the same decision `POST /runs` makes (studio#1150; wicked-crew-api-types 0.212.0). Before
+the first job, setup says whether a pull request can be opened: GitHub sign-in and git identity are checked the way delivery
+uses them, and the answer is "unknown" rather than a guess when it cannot be checked (crew#1527; api-types 0.214.0). One rule
+picks the seats new work may use (the `newWorkSeats` setting): a seat turned off is no longer put on a job nobody named it on,
+naming an opt-in seat is the opt-in (crew#1590), a removal says what was applied, a chat job's Start always hands the engine the
+card's seats (crew#1593), and the run review picks its seat from the seats new work may use and refuses in words when none is
+usable (crew#1592). A seat whose container image is missing and cannot be built reads unusable on `GET /roster` and a run
+refuses at launch instead of parking at a judge gate (crew#1097; api-types 0.213.0); crew reads the seat-image status the current
+engine prints (crew#1526). **A delivered pull request whose required check is red is not done (crew#1623, #1624):** after
+delivery the run waits for the PR's required checks; a red check goes back to Build in a power run (within its hand-off rounds,
+wicked-core#1591), and a run out of rounds, or whose checks are unknown, parks at the deliver-refusal gate saying "PR CHECKS
+FAILING" or "PR CHECKS UNKNOWN". No seat temp file or home-derived path reaches a pushed commit: delivery rewrites such commits
+first (wicked-core#1573, #1612). A run's brief carries only learnings the operator approved, with this machine's home and temp
+paths redacted (crew#1546, #1613). Concurrent `PUT /settings` writes no longer revert each other (crew#1591). A leading
+`Repository: <repo>` line no longer titles the pull request (crew#1516). Ships wicked-crew-api-types 0.214.0 (types only,
+additive), bundles wicked-studio 0.16.14 (the New job posture preview, studio#1150, #1192) and requires wicked-core-ts ^0.15.46
+(a delivered PR's red check back to Build, core#1591; a seat on the work's provider is no judge for the monitor exclusion, so a
+fix retry no longer parks with no eligible judge, core#1595; a held power pause survives a daemon restart, core#1581; a change
+across several crates of one repository no longer pauses a run, core#1572; `checkRunTree` and `judgeCoverage`, core#1559,
+core#1558).
+
+Known limits: crew#1618 and the items it names. Not in this release: crew#1619 (fix for crew#1616: a seat's committed bash-output
+log can still reach pushed history; it is open and merges after), crew#1597, #1615 and #1617. Upgrade: install wicked-estate
+0.35.7 beside it (project graphs for read-only seats need it); the first `index` after the upgrade re-extracts TSX, JS and JSX
+files.
+
+- **A delivered PR whose required check is red is not "done" (crew#1623).** After the deliver phase opens or updates the PR it watches the
+  base branch's required checks (the rulesets' and branch protection's required contexts, read on the push identity; a required check that
+  has not reported yet counts as pending) to a conclusion. All green delivers. A red check ends the phase `checks_failed` with the failing
+  job's name and the tail of its log (a power run sends it back to Build in wicked-core, within its hand-off rounds); a check still pending
+  at the timeout, or checks that cannot be read, end it `checks_unknown`. Both park the run at the deliver-refusal gate ("PR CHECKS FAILING"
+  / "PR CHECKS UNKNOWN"), never done; Approve re-checks. `WICKED_DELIVER_CHECKS_TIMEOUT_SECS` (default 2700, 45 minutes) and
+  `WICKED_DELIVER_CHECKS_POLL_SECS` (default 20) configure the wait. Azure DevOps deliveries are not watched.
+- fix(deliver): a seat's own temp files and home-derived paths reach no pushed commit (wicked-core#1573). A seat that committed its temp file (`tmp/claude-<uid>/<a slug of the worktree path>/…/tasks/<id>.output`) and deleted it in a later commit still had it in the branch history, because delivery's exclusions only ran over untracked files. Right before the push, the deliver script now checks every file state the pushed commits introduce or inherit from a merged-in older commit against one narrow class, by name only: a `claude-<digits>` directory segment (`seat-temp`), or a segment that is a home-path slug (`-Users-…`, `-home-…`, `C--Users-…`, one starting with this host's home slug) or this host's home path mirrored as directories (`home-derived`). When any match, it rewrites those commits without them, keeping authors, committers, dates and messages; a commit the scrub empties is dropped. The general exclusion list (credentials, env files, `tmp/` source) is not applied to committed files: a committed `tmp/parser.rs` or `src/credentials.ts` is pushed as committed, and a path the base already holds at that exact name is never touched. If the scrub would rewrite or drop a signed commit, the push is refused with the reason (re-run the step, or remove the file from the history by hand) and nothing is pushed: delivery never signs work with a key of its own. Re-created commits of an unsigned history stay unsigned, whatever the ambient signing config says. Before the branch moves, the script checks that the rewritten final tree differs from the committed one only by removed paths of that class, and refuses the push otherwise; a scrub read that fails also pushes nothing. The phase output names each scrubbed path, and the PR body counts them by reason. A path under a nested scratch or tool-artifact directory is now named in the PR's Not shipped list only up to that directory (`pkg/tmp/…`), whichever rule excluded it, and the run diff the deliver gate counts leaves out committed files of the scrubbed class.
+- **A run's brief carries only learnings the operator approved, with this daemon's home and temp paths redacted (crew#1546).** Run-learnings recall
+  labelled every stored memory "approved by the operator". Among them were raw session captures (a hook's
+  "Session goal (turn N)" rows quoting another project's task output and temp paths). Recall now admits only a
+  memory with estate's approval mark: the `proposal:<id>` id that `proposal.approve` writes, which no memory tool
+  lets a caller choose. A recalled line goes through the host-path redactor (crew#1499), so this daemon's home, state-home and
+  temp paths reach a brief as `~` and `<tmp>`. Other absolute paths an approved learning quotes (another user's home,
+  `/srv/...`) are not rewritten. Editing an approved learning (`POST /memory/edit`) replaces it through the approval queue
+  with the same reach, tier and facets, so it keeps the mark and keeps reaching briefs. Its proposal is left approved,
+  never pending, so it cannot later bring retired words back. If the approval fails, stays pending or lands at another
+  scope, the edit is undone (the proposal rejected, the memory erased) and says so. A filing whose answer was lost is
+  found in the queue (by its words, reach and facets) and rejected; one approved meanwhile is named in the error. The
+  memory's own proposal is settled before anything is filed: a learning whose proposal still reads pending (estate
+  wrote it, then failed to record the approval) is approved again first, or the edit is refused (409). A replacement
+  names the memory it replaces (`payload.replaces`). Approving one whose memory is gone (edited again or retired),
+  plain or with an edit, is refused with 409 `stale_replacement`, and the proposal is rejected, so a replacement a
+  crash left pending can never bring retired words back. Every edit also rejects the pending replacements of its own
+  memory and of memories that are gone. Other memories edit as before.
 - fix(chat jobs): picking an opt-in seat (OpenCode) for new work is the opt-in (crew#1590). A pick of `newWorkSeats` that names it puts it on new jobs, and naming it on a job (`addSeats`, a lead) adds it; Start hands the engine every seat on the card, the opt-in one included, not only a primary. With nothing picked, the default pool still leaves opt-in seats out unless one is the only seat that can work (the 2026-10-11 ruling).
 - fix(insights): the run review picks its one seat from the seats new work may use (`newWorkSeats`, crew#1592), with the workflow's own rule inside that pick. A seat turned off for new work no longer interprets a review nobody named it on, whether it was started from a chat, by hand or by its schedule. A pick that leaves no usable seat, or a setting that is set but unreadable or invalid, refuses the review with words naming the setting, before anything is written; it never falls back to the whole roster. The refusal answers 409 "the review could not be prepared: ..." from a hand launch and from a schedule's Run it now (which answered 502 for it); an unattended scheduled review that is refused shows the reason on the schedule only, with no run record (crew#1608). The chosen seat also becomes the launch's `primary`, so a primary named against the whole roster can't point at a seat the review doesn't run on.
 - fix(chat jobs): a chat job's Start always hands the engine the card's seats (crew#1593). Before, when they equalled the roster read at Start, no roster was sent; the launch then waited for roster readiness and read the roster again, so a seat added in between joined a job whose card never named it. Start still waits for roster readiness first and checks the lead against that fresh standing, so a lead whose login expired is refused by name rather than launched on a stale snapshot (a reshape still carries its held run's seat records: crew#1606). A card that names no seat still launches on the daemon's roster, and a self-seated workflow still picks its own.
@@ -7209,7 +7301,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.17...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.18...HEAD
+[0.18.18]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.17...v0.18.18
 [0.18.17]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.16...v0.18.17
 [0.18.16]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.15...v0.18.16
 [0.18.15]: https://github.com/mikeparcewski/wicked-crew/compare/v0.18.14...v0.18.15

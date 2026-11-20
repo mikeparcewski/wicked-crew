@@ -15,12 +15,12 @@
  *    a global eviction and read-back was tried and dropped in xreview r4 (it lost live answers and thrashed the trail).
  */
 
-import { NOTE_ACTIONS, personNotes, type AuditLike, type PersonNote } from './event-lines.js';
+import { NOTE_ACTIONS, notedActor, personNotes, type AuditLike, type PersonNote } from './event-lines.js';
 
 export const NOTES_PER_RUN = 160;
 
 const relevant = (e: AuditLike): e is AuditLike & { runId: string } =>
-  typeof e.runId === 'string' && e.runId !== '' && e.actor?.kind === 'human' && NOTE_ACTIONS.has(e.action) && typeof e.ts === 'number';
+  typeof e.runId === 'string' && e.runId !== '' && notedActor(e) && NOTE_ACTIONS.has(e.action) && typeof e.ts === 'number';
 
 /** One record's identity while the start-up read and live entries are merged (never kept after). */
 const keyOf = (e: AuditLike): string =>

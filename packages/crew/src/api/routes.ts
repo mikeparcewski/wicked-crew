@@ -106,6 +106,8 @@ import type {
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 import { callEstateTool, EstateMcpError, ESTATE_INSTALL_HINT, memoryStoreInfo } from '../core/estate-mcp-client.js';
 import { NO_LEARNINGS_WORKFLOWS, type RunLearningsService } from '../learnings/service.js';
+import { APPROVED_MEMORY_PREFIX } from '../learnings/recall.js';
+import { REPLACES_KEY, refuseStaleReplacement, replacesOf } from '../learnings/replacement-lineage.js';
 import { matchRulesForJob, stripRulesBrief, withRulesBrief } from '../decisions/rules-brief.js';
 import { SeatHealthTracker } from './seat-health.js';
 import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
@@ -10311,6 +10313,14 @@ export function registerRoutes(
     } catch (err) {
       return estateUpstreamError(reply, err);
     }
+    // crew#1546: an edited learning's replacement whose learning is gone is stale: refused and rejected, never approved,
+    // so no crash window can bring retired words back (accept-with-edit checks the same in `approveEdited`).
+    try {
+      const stale = row?.kind_type === 'memory' ? await refuseStaleReplacement(estateTool, id, row.payload) : null;
+      if (stale !== null) return reply.code(409).send({ error: stale, code: 'stale_replacement' });
+    } catch (err) {
+      return reply.code(502).send({ error: `checking whether proposal ${id} is a stale replacement failed (${message(err)}); nothing was approved` });
+    }
     // DC-S4a: a proposal THIS ledger filed for a decision lands through `remember()` — the one
     // landing path, with the human check inside it (§4.5). A payload naming an id the ledger does
     // not know is an ordinary policy proposal (no ORIGIN claim) and takes the path below.
@@ -10739,6 +10749,175 @@ export function registerRoutes(
       };
       const deletedCount = (raw: unknown): unknown =>
         (typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)['deleted_count'] : undefined);
+      // An approved memory's replacement, filed and approved through the queue. Placement is estate's:
+      // root scope for `project` reach, `operator:<user>` for `operator`; any other scope cannot be
+      // placed again, so it is refused before anything is written. Whatever the calls answer, the
+      // store decides: the new `proposal:<id>` memory must be there at the old scope, or it is taken
+      // back out. And the queue is SETTLED in every outcome (codex on crew#1546): a replacement
+      // proposal left pending could be approved later and bring retired words back beside the
+      // current ones. So a success leaves it approved (a re-approve is idempotent in estate: the same
+      // `proposal:<id>` memory), and every failure rejects it, or says it may remain.
+      type PendingMemory = { id: string; content: string; reach: string | null; facets: Record<string, unknown>; replaces: string | null };
+      const pendingMemoryProposals = async (): Promise<PendingMemory[]> => {
+        const raw = await estateTool('proposal.list', { kind_type: 'memory', state: 'pending' });
+        const items = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)['proposals'] : undefined;
+        if (!Array.isArray(items)) throw new EstateMcpError('proposal.list returned an unexpected shape');
+        return items.flatMap((i): PendingMemory[] => {
+          const r = typeof i === 'object' && i !== null ? (i as Record<string, unknown>) : {};
+          const payload = typeof r['payload'] === 'object' && r['payload'] !== null ? (r['payload'] as Record<string, unknown>) : {};
+          const facets = typeof r['facets'] === 'object' && r['facets'] !== null ? (r['facets'] as Record<string, unknown>) : {};
+          return typeof r['id'] === 'string'
+            ? [{ id: r['id'], content: typeof payload['content'] === 'string' ? payload['content'] : '', reach: typeof payload['reach'] === 'string' ? payload['reach'] : null, facets, replaces: replacesOf(payload) }]
+            : [];
+        });
+      };
+      /** Reject these proposals; true only when the queue is read back with none of them pending. */
+      const withdraw = async (ids: string[]): Promise<boolean> => {
+        for (const id of ids) await estateTool('proposal.reject', { id }).catch(() => undefined);
+        try {
+          const still = new Set((await pendingMemoryProposals()).map((q) => q.id));
+          return ids.every((id) => !still.has(id));
+        } catch {
+          return false;
+        }
+      };
+      const queued = (ids: string[]): string => ` A proposal of the new words (${ids.join(', ')}) may still be pending: reject it on the approve page.`;
+      const reapproveMemory = async (old: MemoryItem, content: string, beforeIds: ReadonlySet<string>): Promise<{ id: string } | { status: 409 | 502; error: string }> => {
+        const reach = old.scope === '' ? 'project' : old.scope.startsWith('operator:') ? 'operator' : null;
+        if (reach === null) {
+          return { status: 409, error: `${old.id} is an approved learning at scope ${JSON.stringify(old.scope)}, which approval cannot place again; nothing changed` };
+        }
+        // The replacement names what it replaces, so approval can refuse it once that memory is gone.
+        const payload: Record<string, unknown> = { content, reach, [REPLACES_KEY]: old.id };
+        if (old.tier !== '') payload['tier'] = old.tier;
+        // What was already queued, so a submit whose answer is lost can find the one it filed.
+        let queuedBefore: Set<string>;
+        try {
+          queuedBefore = new Set((await pendingMemoryProposals()).map((q) => q.id));
+        } catch (err) {
+          return { status: 502, error: `reading the approve queue failed (${message(err)}); nothing changed` };
+        }
+        // The memory's OWN proposal must be settled first (codex r2 on crew#1546): estate writes `proposal:<id>`
+        // before it records the approval, so a write that failed in between leaves it pending, and approving it after
+        // this edit would bring the retired words back. Approving it again writes the same memory (idempotent).
+        const sourcePid = old.id.slice(APPROVED_MEMORY_PREFIX.length);
+        if (queuedBefore.has(sourcePid)) {
+          await estateTool('proposal.approve', { id: sourcePid }).catch(() => undefined);
+          try {
+            queuedBefore = new Set((await pendingMemoryProposals()).map((q) => q.id));
+          } catch (err) {
+            return { status: 502, error: `settling ${old.id}'s own proposal could not be checked (${message(err)}); nothing changed` };
+          }
+          if (queuedBefore.has(sourcePid)) {
+            return { status: 409, error: `${old.id}'s own proposal ${sourcePid} is still pending and could not be settled; approve or reject it on the approve page first. Nothing changed` };
+          }
+        }
+        // Superseded replacements are settled too (coord merge check): one of this memory left pending by an edit that
+        // never finished, or of a memory that is already gone, is rejected before the new one is filed.
+        let superseded: string[];
+        try {
+          superseded = (await pendingMemoryProposals()).filter((q) => q.replaces !== null && (q.replaces === old.id || !beforeIds.has(q.replaces))).map((q) => q.id);
+        } catch (err) {
+          return { status: 502, error: `reading the approve queue failed (${message(err)}); nothing changed` };
+        }
+        if (superseded.length > 0 && !(await withdraw(superseded))) {
+          return { status: 502, error: `an earlier replacement of ${old.id} (${superseded.join(', ')}) is still pending and could not be rejected; reject it on the approve page first. Nothing changed` };
+        }
+        let pid: string | null = null;
+        let submitErr: unknown = null;
+        try {
+          const raw = await estateTool('proposal.submit', { kind_type: 'memory', payload, facets: old.facets });
+          const id = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)['id'] : undefined;
+          if (typeof id === 'string' && id !== '') pid = id;
+          else submitErr = new EstateMcpError('proposal.submit returned no proposal id');
+        } catch (err) {
+          submitErr = err;
+        }
+        if (pid === null) {
+          // The submit may still have filed (a lost answer): find what it filed and withdraw it.
+          // Ours = new since the snapshot, with these words, this reach and these facets (codex r2: words alone would
+          // reject another caller's filing for another repository).
+          const ours = (q: PendingMemory): boolean =>
+            !queuedBefore.has(q.id) && q.content === content && (q.reach === null || q.reach === reach) && q.replaces === old.id &&
+            Object.entries(old.facets).every(([k, v]) => q.facets[k] === v) && Object.keys(q.facets).every((k) => k in old.facets);
+          let strays: string[];
+          try {
+            strays = (await pendingMemoryProposals()).filter(ours).map((q) => q.id);
+          } catch (err) {
+            return { status: 502, error: `filing the new words for approval failed (${message(submitErr)}) and the queue could not be re-read (${message(err)}).${queued(['unknown id'])}` };
+          }
+          const gone = strays.length === 0 || (await withdraw(strays));
+          // A filing approved meanwhile is no longer pending: the store, not the queue, says whether it landed.
+          let approvedCopies: string[] | null;
+          try {
+            approvedCopies = (await listAll()).filter((m) => m.id.startsWith(APPROVED_MEMORY_PREFIX) && !beforeIds.has(m.id) && m.content.trim() === content).map((m) => m.id);
+          } catch {
+            approvedCopies = null;
+          }
+          const landedNote =
+            approvedCopies === null
+              ? `; the store could not be re-read, so an approved copy of the new words may exist beside ${old.id}`
+              : approvedCopies.length > 0
+                ? `; an approved copy of the new words exists beside ${old.id}: ${approvedCopies.join(', ')}`
+                : '';
+          return {
+            status: 502,
+            error: `filing the new words for approval failed (${message(submitErr)})${landedNote === '' ? '; nothing changed' : landedNote}${gone ? '' : `.${queued(strays)}`}`,
+          };
+        }
+        const newId = `${APPROVED_MEMORY_PREFIX}${pid}`;
+        const approve = (): Promise<unknown> => estateTool('proposal.approve', { id: pid }).then(() => null, (err: unknown) => err);
+        const approveErr = await approve();
+        let landed: MemoryItem | undefined;
+        try {
+          landed = (await listAll()).find((m) => m.id === newId);
+        } catch (err) {
+          return { status: 502, error: `approving the new words could not be checked (${message(err)}); ${newId} may exist beside ${old.id}.${queued([pid])}` };
+        }
+        if (landed === undefined) {
+          const gone = await withdraw([pid]);
+          return { status: 502, error: `approving the new words failed (${approveErr === null ? 'no memory was written' : message(approveErr)}); nothing changed${gone ? '' : `.${queued([pid])}`}` };
+        }
+        // Taking a written replacement back out: its memory erased and its proposal never left pending.
+        const undo = async (why: string): Promise<{ status: 502; error: string }> => {
+          await estateTool('memory.erase', { id: newId }).catch(() => undefined);
+          let erased = false;
+          try {
+            erased = !(await listAll()).some((m) => m.id === newId);
+          } catch {
+            // Reported below as not confirmed gone.
+          }
+          let settled = false;
+          try {
+            settled = !(await pendingMemoryProposals()).some((q) => q.id === pid) || (await withdraw([pid]));
+          } catch {
+            settled = await withdraw([pid]);
+          }
+          return {
+            status: 502,
+            error: erased
+              ? `${why}; they were taken back out, so nothing changed${settled ? '' : `.${queued([pid])}`}`
+              : `${why}; taking ${newId} back out was not confirmed, so both ${old.id} and ${newId} may remain${settled ? '' : `.${queued([pid])}`}`,
+          };
+        };
+        if (landed.scope !== old.scope) {
+          return undo(`the approved words landed at scope ${JSON.stringify(landed.scope)}, not ${JSON.stringify(old.scope)}`);
+        }
+        // The memory landed; its proposal must read approved. A write that landed before estate recorded the
+        // approval leaves it pending: approve it again (the same memory), and undo the edit if that does not settle it.
+        let pending: boolean;
+        try {
+          pending = (await pendingMemoryProposals()).some((q) => q.id === pid);
+          if (pending) {
+            await approve();
+            pending = (await pendingMemoryProposals()).some((q) => q.id === pid);
+          }
+        } catch (err) {
+          return undo(`the approval of the new words could not be confirmed (${message(err)})`);
+        }
+        if (pending) return undo('the approval of the new words stayed pending');
+        return { id: newId };
+      };
       try {
         // 1. The memory as it is: its tier, scope and facets ride onto the replacement.
         let before: MemoryItem[];
@@ -10765,43 +10944,52 @@ export function registerRoutes(
           }
           return upstream('checking that the store can erase one memory failed; nothing changed', err);
         }
-        // 3. The new words, as a new memory in the old one's place.
-        const captureArgs: Record<string, unknown> = { content, scope: old.scope, facets: old.facets };
-        if (old.tier !== '') {
-          captureArgs['tier'] = old.tier;
-          const kind = KIND_FOR_TIER[old.tier];
-          if (kind !== undefined) captureArgs['kind'] = kind;
-        }
-        const beforeIds = new Set(before.map((m) => m.id));
+        // 3. The new words, as a new memory in the old one's place. An approved learning (estate's
+        //    `proposal:` id, the only mark run-learnings recall admits: crew#1546) is replaced through
+        //    the approval queue, so the replacement carries the mark too; a capture would mint a bare id
+        //    and the edited learning would silently stop reaching briefs. Anything else is captured.
         let newId: string | null = null;
-        let captureErr: unknown = null;
-        try {
-          const captured = await estateTool('memory.capture', captureArgs);
-          const id = typeof captured === 'object' && captured !== null ? (captured as Record<string, unknown>)['memory_id'] : undefined;
-          if (typeof id === 'string' && id !== '') newId = id;
-          else captureErr = new EstateMcpError('memory.capture returned no memory_id');
-        } catch (err) {
-          captureErr = err;
-        }
-        if (newId === null) {
-          // The capture may still have written (a lost answer): look before saying nothing changed.
-          let now: MemoryItem[];
+        if (memoryId.startsWith(APPROVED_MEMORY_PREFIX)) {
+          const placed = await reapproveMemory(old, content, new Set(before.map((m) => m.id)));
+          if ('error' in placed) return reply.code(placed.status).send({ error: placed.error });
+          newId = placed.id;
+        } else {
+          const captureArgs: Record<string, unknown> = { content, scope: old.scope, facets: old.facets };
+          if (old.tier !== '') {
+            captureArgs['tier'] = old.tier;
+            const kind = KIND_FOR_TIER[old.tier];
+            if (kind !== undefined) captureArgs['kind'] = kind;
+          }
+          const beforeIds = new Set(before.map((m) => m.id));
+          let captureErr: unknown = null;
           try {
-            now = await listAll();
+            const captured = await estateTool('memory.capture', captureArgs);
+            const id = typeof captured === 'object' && captured !== null ? (captured as Record<string, unknown>)['memory_id'] : undefined;
+            if (typeof id === 'string' && id !== '') newId = id;
+            else captureErr = new EstateMcpError('memory.capture returned no memory_id');
           } catch (err) {
-            return reply.code(502).send({
-              error: `writing the new words did not answer as expected (${message(captureErr)}) and the store could not be re-read (${message(err)}); a copy of the new words may exist beside ${memoryId}`,
-            });
+            captureErr = err;
           }
-          const copies = now.filter((m) => !beforeIds.has(m.id) && m.content.trim() === content && m.scope === old.scope);
-          if (copies.length !== 1) {
-            return reply.code(502).send({
-              error: copies.length === 0
-                ? `writing the new words failed (${message(captureErr)}); nothing changed`
-                : `writing the new words did not answer as expected (${message(captureErr)}); ${copies.length} copies of them now exist beside ${memoryId}: ${copies.map((m) => m.id).join(', ')}`,
-            });
+          if (newId === null) {
+            // The capture may still have written (a lost answer): look before saying nothing changed.
+            let now: MemoryItem[];
+            try {
+              now = await listAll();
+            } catch (err) {
+              return reply.code(502).send({
+                error: `writing the new words did not answer as expected (${message(captureErr)}) and the store could not be re-read (${message(err)}); a copy of the new words may exist beside ${memoryId}`,
+              });
+            }
+            const copies = now.filter((m) => !beforeIds.has(m.id) && m.content.trim() === content && m.scope === old.scope);
+            if (copies.length !== 1) {
+              return reply.code(502).send({
+                error: copies.length === 0
+                  ? `writing the new words failed (${message(captureErr)}); nothing changed`
+                  : `writing the new words did not answer as expected (${message(captureErr)}); ${copies.length} copies of them now exist beside ${memoryId}: ${copies.map((m) => m.id).join(', ')}`,
+              });
+            }
+            newId = copies[0]!.id;
           }
-          newId = copies[0]!.id;
         }
         // 4. The old memory out.
         let eraseErr: unknown = null;

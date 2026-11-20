@@ -9,9 +9,10 @@
 // strictly smaller threat surface than `/open` handing the path to an OS opener.
 
 import { constants as fsConstants, promises as fsp, readFileSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { ExecCwdMissing, execCapped, ExecOutputTooLarge } from '../core/exec.js';
-import { deliverExclusionByName, deliverExclusionReason } from '../core/deliver-exclusions.js';
+import { committedScrubReason, deliverExclusionByName, deliverExclusionReason } from '../core/deliver-exclusions.js';
 
 /** File-content cap (DES-FEEDBACK-002 §3.3): past this, `content` holds the first 512 KB and
  *  `truncated: true` — the studio renders a labeled truncation banner, never a silent amputation. */
@@ -193,6 +194,9 @@ export async function branchDiff(
 }
 
 const GIT_TIMEOUT_MS = 10_000;
+/** The most bytes of committed-scratch exclude pathspecs one aggregate diff passes git (wicked-core#1573):
+ *  a quarter of macOS's 1 MiB ARG_MAX, which the environment shares. */
+const SCRUB_EXCLUDE_BYTES = 256 * 1024;
 /** How long the untracked-file pass may run before the answer is cut (`truncated: true`, crew#790). */
 export const UNTRACKED_BUDGET_MS = 8_000;
 
@@ -376,12 +380,46 @@ export async function worktreeDiff(
     }
   }
 
+  // wicked-core#1573: a path the run COMMITTED (or staged) that the base does not hold is removed from
+  // every pushed commit by the deliver script's history scrub when it is a seat's own temp file or
+  // carries a home-derived name (`committedScrubReason`, the script's `_seatscratch`), so the aggregate
+  // tracked diff leaves it out too, each as a literal exclude pathspec. The rule is name-only, so this
+  // count is the push's for committed files, up to SCRUB_EXCLUDE_BYTES of excludes (past it the rest
+  // are counted: thousands of committed temp files). A narrowed request is exempt, as below.
+  let trackedSpec = limit;
+  if (relPath === undefined) {
+    try {
+      const { stdout: addedOut } = await execCapped(
+        'git',
+        ['diff', '--name-only', '--no-renames', '--diff-filter=A', '-z', baseRev],
+        { timeout: GIT_TIMEOUT_MS, cwd: workdir, env },
+      );
+      const home = homedir();
+      let bytes = 0;
+      const excludes: string[] = [];
+      for (const file of addedOut.split('\0')) {
+        if (file === '' || committedScrubReason(file, home) === null) continue;
+        const spec = `:(top,literal,exclude)${file}`;
+        bytes += Buffer.byteLength(spec, 'utf8') + 1;
+        if (bytes > SCRUB_EXCLUDE_BYTES) break;
+        excludes.push(spec);
+      }
+      if (excludes.length > 0) trackedSpec = ['--', '.', ...excludes];
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw err; // git missing — the route's 500
+      const msg = err instanceof Error ? err.message : String(err);
+      // Not a repo / no commits yet: the tracked pass below answers that the same way. Anything
+      // else (a timeout, a killed git) is the route's error, never a silent over-count.
+      if (!isEmptyDiffAnswer(msg)) throw err;
+    }
+  }
+
   // Tracked changes (staged + unstaged, plus committed-since-base when a base was resolved):
   // diff the worktree against the baseline.
   try {
     const { stdout } = await execCapped(
       'git',
-      ['diff', '--no-color', '--no-ext-diff', baseRev, ...limit],
+      ['diff', '--no-color', '--no-ext-diff', baseRev, ...trackedSpec],
       { timeout: GIT_TIMEOUT_MS, cwd: workdir, env },
     );
     out = stdout;

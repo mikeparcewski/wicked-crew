@@ -13,7 +13,7 @@
 // prepends the fake bin, which is sourced AFTER path_helper and does win.
 
 import { execFile, execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,6 +22,9 @@ import {
   DELIVER_LIFT_CONFLICT_MARKER,
   DELIVER_OUTCOME_MARKER,
   DELIVER_PUSHED_NO_PR_MARKER,
+  DELIVER_PR_CHECKS_DETAIL_MARKER,
+  DELIVER_PR_CHECKS_FAILING_MARKER,
+  DELIVER_PR_CHECKS_UNKNOWN_MARKER,
   DELIVER_PUSH_REJECTED_MARKER,
   DELIVER_UNVERIFIED_MARKER,
   deliverPrScript,
@@ -34,7 +37,7 @@ import { triageDeliverFailure, trustedDeliverOutcome, trustedOutcomeIn } from '.
 
 /** (crew#739) The sentinel nonce every composed script in this file carries. */
 const TEST_NONCE = '0123456789abcdef0123456789abcdef';
-import { deliverExclusionReason } from '../src/core/deliver-exclusions.js';
+import { committedScrubReason, deliverExclusionReason } from '../src/core/deliver-exclusions.js';
 import { DELIVER_TITLE_MAX, commitSubject, composeDeliverText, deliverTitle, factsFromWorkflow, framedDeliverText, redactHostPaths } from '../src/core/deliver-text.js';
 
 const RUN_ID = '1bc72c20-0457-425f-b4cb-215a40e68e1e';
@@ -152,6 +155,10 @@ interface GhStub {
   viewText?: string;
   /** (e2e-1105 F4c) Make `gh pr view --json title,body` fail. */
   viewFails?: boolean;
+  /** (crew#1623) The JSON `gh pr checks --required --json …` answers (default `[]`). */
+  checks?: string;
+  /** (crew#1623) The base branch's `rules/branches/<base>` JSON (default `[]`: nothing required). */
+  rules?: string;
   /** (crew#737) `gh auth token --user <tokenFor>` prints a token; any other account fails. */
   tokenFor?: string;
   /** (crew#737) The login `gh api user` answers while that token is exported as GH_TOKEN. */
@@ -183,6 +190,9 @@ async function runDeliver(
      *  with the SAME `-c` options the script passed, which password its credential helpers would
      *  present for github.com (recorded as `gitCreds`, "<subcommand> <password> allow=<GIT_ALLOW_PROTOCOL>"). */
     githubOrigin?: boolean;
+    /** A `git` shim (its full text, given the real git's path) for a test that must make one git
+     *  call misbehave; every other call reaches the real git. */
+    gitShim?: (realGit: string) => string;
   } = {},
 ): Promise<{ status: number; output: string; lastLine: string; outcome: string | null; pr: PrCreateCall | null; comment: string | null; ghCalls: string[]; gitCreds: string[]; prToken: string | null }> {
   const nonce = opts.script?.nonce ?? TEST_NONCE;
@@ -200,7 +210,9 @@ async function runDeliver(
       // Every call is logged — the identity tests assert the script never runs `gh auth switch`.
       'printf "%s\\n" "$*" >> "$GH_STUB_RECORD.calls"',
       'case "$1" in',
-      '  api) if [ -n "${GH_TOKEN:-}" ] && [ "$GH_TOKEN" = "tok-${GH_STUB_TOKEN_FOR:-}" ]; then echo "$GH_STUB_TOKEN_LOGIN"; exit 0; fi; if [ -n "${GH_STUB_API_FAIL:-}" ]; then echo "gh: not logged in" >&2; exit 1; fi; echo "${GH_STUB_LOGIN:-tester}";;',
+      // (crew#1623) The PR-checks watch: the base branch's ruleset contexts (none by default) and the required
+      // checks' rows (`gh pr checks --required --json`, none by default), which the watch reads after a delivery.
+      '  api) case "$2" in repos/*/rules/branches/*) printf "%s" "${GH_STUB_RULES:-[]}"; exit 0;; repos/*/branches/*) echo "{}"; exit 0;; esac; if [ -n "${GH_TOKEN:-}" ] && [ "$GH_TOKEN" = "tok-${GH_STUB_TOKEN_FOR:-}" ]; then echo "$GH_STUB_TOKEN_LOGIN"; exit 0; fi; if [ -n "${GH_STUB_API_FAIL:-}" ]; then echo "gh: not logged in" >&2; exit 1; fi; echo "${GH_STUB_LOGIN:-tester}";;',
       // (crew#737) `gh auth token [--help] --user <a>`: a token only for the stubbed account; the
       // help text lists --user only on a stubbed newer gh. Any other auth verb is still recorded.
       '  auth)',
@@ -216,7 +228,8 @@ async function runDeliver(
       // DES-L9 revision mode: `gh pr view N --json state -q .state` and `gh pr comment N --body-file`.
       // (e2e-1105 F4c) `gh pr view <url> --json title,body`: the PR's text as GitHub holds it — the edit this stub
       // recorded, else GH_STUB_PR_TEXT; GH_STUB_VIEW_FAIL makes the read fail.
-      '      view) case " $* " in *" title,body "*) if [ -n "${GH_STUB_VIEW_FAIL:-}" ]; then echo "gh: HTTP 502" >&2; exit 1; fi; if [ -n "${GH_STUB_VIEW_TEXT:-}" ]; then printf "%s\\n" "$GH_STUB_VIEW_TEXT"; elif [ -f "$GH_STUB_RECORD.edit" ]; then cat "$GH_STUB_RECORD.edit"; else printf "%s\\n" "$GH_STUB_PR_TEXT"; fi;; *) echo "${GH_STUB_PR_STATE:-OPEN}";; esac;;',
+      '      checks) printf "%s" "${GH_STUB_CHECKS:-[]}"; exit 0;;',
+      '      view) case " $* " in *" baseRefName "*) echo main;; *" title,body "*) if [ -n "${GH_STUB_VIEW_FAIL:-}" ]; then echo "gh: HTTP 502" >&2; exit 1; fi; if [ -n "${GH_STUB_VIEW_TEXT:-}" ]; then printf "%s\\n" "$GH_STUB_VIEW_TEXT"; elif [ -f "$GH_STUB_RECORD.edit" ]; then cat "$GH_STUB_RECORD.edit"; else printf "%s\\n" "$GH_STUB_PR_TEXT"; fi;; *) echo "${GH_STUB_PR_STATE:-OPEN}";; esac;;',
       // (e2e-1105 F4c) `gh pr edit <url> --title T --body-file F`: recorded as the PR's new text (title, blank, body).
       '      edit) T=""; BF=""; while [ $# -gt 0 ]; do case "$1" in --title) T="$2"; shift;; --body-file) BF="$2"; shift;; esac; shift; done; if [ -n "${GH_STUB_EDIT_FAIL:-}" ]; then echo "$GH_STUB_EDIT_FAIL" >&2; exit 1; fi; { printf "%s\\n\\n" "$T"; cat "$BF"; } > "$GH_STUB_RECORD.edit";;',
       '      comment) BF=""; while [ $# -gt 0 ]; do case "$1" in --body-file) BF="$2"; shift;; esac; shift; done; if [ -n "$BF" ]; then cp "$BF" "$GH_STUB_RECORD.comment"; fi; if [ -n "${GH_STUB_COMMENT_FAIL:-}" ]; then echo "$GH_STUB_COMMENT_FAIL" >&2; exit 1; fi; echo "https://github.com/o/r/pull/273#issuecomment-1";;',
@@ -227,6 +240,7 @@ async function runDeliver(
       '        if [ -n "${GH_STUB_FAIL:-}" ]; then echo "$GH_STUB_FAIL" >&2; exit 1; fi',
       '        echo "${GH_STUB_OUT:-https://github.com/o/r/pull/7}";;',
       '    esac;;',
+      '  run) echo "error: the failed job says so";;',
       '  *) echo "gh: unexpected $*" >&2; exit 2;;',
       'esac',
       'exit 0',
@@ -277,6 +291,10 @@ async function runDeliver(
       ].join('\n'),
     );
     chmodSync(join(bin, 'git'), 0o755);
+  } else if (opts.gitShim !== undefined) {
+    const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+    writeFileSync(join(bin, 'git'), opts.gitShim(realGit));
+    chmodSync(join(bin, 'git'), 0o755);
   } else if (existsSync(join(bin, 'git'))) {
     rmSync(join(bin, 'git'));
   }
@@ -307,6 +325,8 @@ async function runDeliver(
           GH_STUB_PR_TEXT: opts.gh?.prText ?? '',
           GH_STUB_VIEW_FAIL: opts.gh?.viewFails === true ? '1' : '',
           GH_STUB_VIEW_TEXT: opts.gh?.viewText ?? '',
+          GH_STUB_CHECKS: opts.gh?.checks ?? '',
+          GH_STUB_RULES: opts.gh?.rules ?? '',
           GH_STUB_TOKEN_FOR: opts.gh?.tokenFor ?? '',
           GH_STUB_TOKEN_LOGIN: opts.gh?.tokenLogin ?? '',
           GH_STUB_TOKEN_USER_FLAG: opts.gh?.tokenUserFlag === true ? '1' : '',
@@ -675,7 +695,9 @@ describe('deliver script, driven for real (crew#317)', () => {
     const body = r.pr?.body ?? '';
     expect(body).toContain('## Not shipped');
     expect(body).toContain('- `.vitest/ (1 files)` — tool-artifact-dir');
-    expect(body).toContain('- `web/playwright-report/index.html` — tool-artifact-dir');
+    // A nested tool-artifact directory is named up to the directory, not below it (wicked-core#1573).
+    expect(body).toContain('- `web/playwright-report/…` — tool-artifact-dir');
+    expect(body).not.toContain('index.html');
     expect(body).toContain('- `vitest-debug.log` — tool-artifact-name');
     expect(body).toContain('- 1 gitignored entry');
     expect(body).toContain('- `evil?## Injected.log` — tool-artifact-name');
@@ -1854,4 +1876,543 @@ describe('deliver script — a post-hoc lift is labelled unverified (EX-04)', ()
     expect(unverifiedTreesFrom(r.output)).toBeNull();
     expect(r.pr?.body ?? '').not.toContain('Unverified delivery');
   }, 90_000);
+});
+
+// wicked-core#1573: a seat COMMITTED its own temp file (`tmp/claude-<uid>/<slug of the worktree's
+// absolute path>/<session>/tasks/<id>.output`) and a later commit deleted it. The untracked pass never
+// sees a committed path, and the deliver script pushes the run's own commits, so the slug would have
+// reached the public PR's history. The scrub removes the ONE narrow class (`committedScrubReason`: a
+// seat temp dir or a home-derived segment) from every commit the push carries, and nothing else.
+// The slugs below are synthetic.
+describe('deliver script — no seat temp path in ANY pushed commit (wicked-core#1573)', () => {
+  const SLUG = '-home-alice-src-repo-wicked-worktrees-run-1';
+  const SEAT_TMP = `tmp/claude-1000/${SLUG}/3a27fd18-b5d8-46a2-b151-2783d331d54a/tasks/bz1oumaxc.output`;
+
+  /** Every path any commit in `range` (on the bare origin) touches or holds (`treesOnly`: holds). */
+  function pathsInHistory(origin: string, range: string, treesOnly = false): string[] {
+    const commits = git(origin, 'rev-list', range).split('\n').filter(Boolean);
+    const all = new Set<string>();
+    for (const c of commits) {
+      for (const p of git(origin, 'ls-tree', '-r', '--name-only', c).split('\n').filter(Boolean)) all.add(p);
+      if (treesOnly) continue;
+      for (const p of git(origin, 'show', '--name-only', '--format=', c).split('\n').filter(Boolean)) all.add(p);
+    }
+    return [...all].sort();
+  }
+
+  /** A seat's two commits: the fix plus its own temp file, then a commit that deletes the temp file.
+   *  Author, committer and both dates are set apart from the clone's own, so a rewrite that lost
+   *  any of them shows. */
+  function seatCommitsScratch(workdir: string): void {
+    const seat = ['-c', 'user.name=seat', '-c', 'user.email=seat@test'];
+    process.env.GIT_AUTHOR_DATE = '1700000000 +0130';
+    process.env.GIT_COMMITTER_NAME = 'seat-committer';
+    process.env.GIT_COMMITTER_EMAIL = 'committer@test';
+    process.env.GIT_COMMITTER_DATE = '1700000100 -0500';
+    try {
+      seatCommitsScratchAs(workdir, seat);
+    } finally {
+      delete process.env.GIT_AUTHOR_DATE;
+      delete process.env.GIT_COMMITTER_NAME;
+      delete process.env.GIT_COMMITTER_EMAIL;
+      delete process.env.GIT_COMMITTER_DATE;
+    }
+  }
+  function seatCommitsScratchAs(workdir: string, seat: string[], sign: string[] = []): void {
+    writeFileSync(join(workdir, 'fix.ts'), 'export const fixed = true;\n');
+    mkdirSync(join(workdir, SEAT_TMP, '..'), { recursive: true });
+    writeFileSync(join(workdir, SEAT_TMP), 'background task output\n');
+    git(workdir, 'add', '-A');
+    git(workdir, ...seat, 'commit', ...sign, '-qm', 'fix: the seat commits its work and its temp file\n\nBody line one.\n  indented, kept as is\n');
+    git(workdir, 'rm', '-q', '-r', 'tmp');
+    git(workdir, ...seat, 'commit', ...sign, '-qm', 'chore: drop the stray temp file');
+  }
+
+  it('a scratch file one commit adds and a later commit deletes is in NO pushed commit; the work still delivers unattended', async () => {
+    const fx = fixture();
+    seatCommitsScratch(fx.workdir);
+    // Uncommitted work the deliver phase commits itself, on top of the seat's commits.
+    writeFileSync(join(fx.workdir, 'README.md'), 'base\nchanged\n');
+
+    const r = await runDeliver(fx, { intent: 'fix the thing' });
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.outcome).toBe('pr');
+    expect(r.lastLine).toBe('https://github.com/o/r/pull/7');
+    const range = `main..wicked/${RUN_ID}`;
+    const paths = pathsInHistory(fx.origin, range);
+    expect(paths.filter((p) => p.startsWith('tmp/'))).toEqual([]);
+    expect(paths).toEqual(expect.arrayContaining(['README.md', 'fix.ts']));
+    // Nothing on the remote names the slug: no path, no tree entry, no PR text.
+    expect(git(fx.origin, 'log', '--all', '--format=%B', '--name-only')).not.toContain(SLUG);
+    expect(git(fx.origin, 'rev-list', '--objects', '--all')).not.toContain(SLUG);
+    expect(r.pr?.body ?? '').not.toContain(SLUG);
+    // The seat's commit keeps its subject and author; the commit the scrub emptied is dropped.
+    const log = git(fx.origin, 'log', '--reverse', '--format=%s|%an', range).trim().split('\n');
+    expect(log).toEqual(['fix: the seat commits its work and its temp file|seat', 'fix the thing|runner']);
+    // …and every other field of it: committer, both dates, the message byte for byte.
+    const meta = '%an|%ae|%ad|%cn|%ce|%cd|%B';
+    const seatCommit = git(fx.origin, 'rev-list', '--reverse', range).trim().split('\n')[0]!;
+    expect(git(fx.origin, 'log', '-1', `--format=${meta}`, '--date=raw', seatCommit)).toBe(
+      'seat|seat@test|1700000000 +0130|seat-committer|committer@test|1700000100 -0500|' +
+        'fix: the seat commits its work and its temp file\n\nBody line one.\n  indented, kept as is\n\n',
+    );
+    // Said in the phase output (named) and in the PR body (counted, never named).
+    expect(r.output).toContain(`deliver: SCRUBBED (seat-temp) from the run's commits: ${SEAT_TMP}`);
+    expect(r.output).toContain(SEAT_TMP);
+    expect(r.pr?.body).toContain("## Removed from the run's commits");
+    expect(r.pr?.body).toContain('- seat-temp: 1');
+    const body = r.pr?.body ?? '';
+    expect(body.indexOf("## Removed from the run's commits")).toBeLessThan(body.lastIndexOf('\n---\n'));
+  }, 90_000);
+
+  it("the script's _seatscratch and committedScrubReason agree, path by path and home by home", () => {
+    const lines = deliverPrScript('x').split('\n');
+    const fn = lines.find((l) => l.startsWith('_seatscratch() {'));
+    const hh = lines.find((l) => l.startsWith('HH=${HOME'));
+    expect(fn).toBeDefined();
+    expect(hh).toBeDefined();
+    const cases = [
+      SEAT_TMP, 'tmp/parser.rs', 'src/credentials.ts', 'x/claude-12/y', 'claude-12', 'notes/claude-code.md',
+      '.agent/-home-alice-r/log', 'a/-tmp-x', 'C--Users-bob-p/x', 'src/-home', 'x/-opt-people-bob-proj/y',
+      'cache/opt/people/bob/z', 'src/root/x', 'docs/home/alice/x', 'w/home/runner/x', 'a b/-Users-c d/e',
+      'tmp/pi-bash-9f3a1c0b7d2e4a65.log', 'pi-bash-ab12.log', 'tmp/pi-notes.md', 'tmp/pi-bash-xyz.log', 'tmp/pi-bash-ab12.log.md',
+      'tmp/pi-bash-.log', 'src/pi-bash-ab12.txt',
+    ];
+    for (const home of ['/home/runner', '/opt/people/bob', '/root']) {
+      const out = execFileSync('bash', ['-c', `${fn}\n${hh}\nwhile IFS= read -r p; do _seatscratch "$p"; printf '%s\\n' "\${RN:--}"; done`], {
+        input: `${cases.join('\n')}\n`,
+        env: { ...process.env, HOME: home },
+        encoding: 'utf8',
+      });
+      expect(out.trim().split('\n'), home).toEqual(cases.map((c) => committedScrubReason(c, home) ?? '-'));
+    }
+    // The classes themselves, under a CI-like home.
+    expect(committedScrubReason(SEAT_TMP, '/home/runner')).toBe('seat-temp');
+    expect(committedScrubReason('tmp/parser.rs', '/home/runner')).toBeNull();
+    expect(committedScrubReason('src/credentials.ts', '/home/runner')).toBeNull();
+    expect(committedScrubReason('x/-opt-people-bob-proj/y', '/opt/people/bob')).toBe('home-derived');
+    expect(committedScrubReason('src/root/x', '/root')).toBeNull();
+    // wicked-crew#1616: pi's bash-output file, and only that shape.
+    expect(committedScrubReason('tmp/pi-bash-9f3a1c0b7d2e4a65.log', '/home/runner')).toBe('seat-temp');
+    expect(committedScrubReason('tmp/pi-notes.md', '/home/runner')).toBeNull();
+    expect(committedScrubReason('tmp/pi-bash-xyz.log', '/home/runner')).toBeNull();
+    // pi writes exactly 16 hex characters; a shorter or longer name is somebody's own file.
+    expect(committedScrubReason('pi-bash-ab12.log', '/home/runner')).toBeNull();
+    expect(committedScrubReason('tmp/pi-bash-9f3a1c0b7d2e4a650.log', '/home/runner')).toBeNull();
+  });
+
+  it('a committed-then-deleted pi output log is in NO pushed commit; tmp/pi-notes.md and tmp/parser.rs ship (wicked-crew#1616)', async () => {
+    const fx = fixture();
+    const seat = ['-c', 'user.name=seat', '-c', 'user.email=seat@test'];
+    const PI_LOG = 'tmp/pi-bash-9f3a1c0b7d2e4a65.log';
+    mkdirSync(join(fx.workdir, 'tmp'), { recursive: true });
+    writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
+    writeFileSync(join(fx.workdir, PI_LOG), 'host output with a private path\n');
+    writeFileSync(join(fx.workdir, 'tmp', 'pi-notes.md'), 'ordinary notes\n');
+    writeFileSync(join(fx.workdir, 'tmp', 'parser.rs'), 'pub fn parse() {}\n');
+    git(fx.workdir, 'add', '-A');
+    git(fx.workdir, ...seat, 'commit', '-qm', 'fix: work plus pi output');
+    git(fx.workdir, 'rm', '-q', PI_LOG);
+    git(fx.workdir, ...seat, 'commit', '-qm', 'chore: drop the pi log');
+
+    const r = await runDeliver(fx, { intent: 'fix the thing' });
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.outcome).toBe('pr');
+    const range = `main..wicked/${RUN_ID}`;
+    const paths = pathsInHistory(fx.origin, range);
+    expect(paths.filter((p) => p.includes('pi-bash-'))).toEqual([]);
+    expect(git(fx.origin, 'rev-list', '--objects', '--all')).not.toContain('pi-bash-');
+    expect(paths).toEqual(expect.arrayContaining(['fix.ts', 'tmp/pi-notes.md', 'tmp/parser.rs']));
+    expect(r.output).toContain(`deliver: SCRUBBED (seat-temp) from the run's commits: ${PI_LOG}`);
+  }, 90_000);
+
+  it('committed work that only the crew#434 untracked ladder would exclude ships as committed: same commit, same tree', async () => {
+    const fx = fixture();
+    // The coord's repro: a newly committed tmp/ source file and a credentials module, plus the other
+    // ladder classes. None is a seat temp file or a home-derived name.
+    mkdirSync(join(fx.workdir, 'tmp'), { recursive: true });
+    writeFileSync(join(fx.workdir, 'tmp', 'parser.rs'), 'pub fn parse() {}\n');
+    mkdirSync(join(fx.workdir, 'src'), { recursive: true });
+    writeFileSync(join(fx.workdir, 'src', 'credentials.ts'), 'export const load = () => null;\n');
+    writeFileSync(join(fx.workdir, 'deploy.key'), 'fixture key\n');
+    writeFileSync(join(fx.workdir, 'leaky.env.sample'), 'TOKEN=abc123\n');
+    writeFileSync(join(fx.workdir, 'rec.bin'), Buffer.alloc(1_600_000, 7));
+    writeFileSync(join(fx.workdir, 'notes-claude-code.md'), 'not a temp dir\n');
+    git(fx.workdir, 'add', '-A');
+    git(fx.workdir, 'commit', '-qm', 'feat: the parser and its loader');
+    const committed = git(fx.workdir, 'rev-parse', 'HEAD').trim();
+
+    const r = await runDeliver(fx, { intent: 'parser' });
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.output).not.toContain('SCRUBBED');
+    expect(git(fx.origin, 'rev-parse', `wicked/${RUN_ID}`).trim()).toBe(committed);
+    expect(git(fx.origin, 'ls-tree', '-r', '--name-only', `wicked/${RUN_ID}`)).toContain('tmp/parser.rs');
+    expect(git(fx.origin, 'ls-tree', '-r', '--name-only', `wicked/${RUN_ID}`)).toContain('src/credentials.ts');
+  }, 90_000);
+
+  it('a committed path with a home-derived segment is scrubbed though no temp dir names it', async () => {
+    const fx = fixture();
+    const session = '.agent/sessions/-Users-alice-src-repo/log.jsonl';
+    mkdirSync(join(fx.workdir, session, '..'), { recursive: true });
+    writeFileSync(join(fx.workdir, session), '{}\n');
+    writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
+    git(fx.workdir, 'add', '-A');
+    git(fx.workdir, 'commit', '-qm', 'fix: with a session log');
+
+    const r = await runDeliver(fx, { intent: 'home slug' });
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.output).toContain(`deliver: SCRUBBED (home-derived) from the run's commits: ${session}`);
+    expect(git(fx.origin, 'ls-tree', '-r', '--name-only', `wicked/${RUN_ID}`).trim().split('\n').sort()).toEqual(['README.md', 'fix.ts']);
+    expect(git(fx.origin, 'rev-list', '--objects', '--all')).not.toContain('-Users-alice-');
+  }, 90_000);
+
+  /** Every commit object in `repo` that carries a signature header, sorted. */
+  const signedCommits = (repo: string): string[] =>
+    git(repo, 'cat-file', '--batch-all-objects', '--batch-check=%(objecttype) %(objectname)')
+      .split('\n')
+      .filter((l) => l.startsWith('commit '))
+      .map((l) => l.slice('commit '.length))
+      .filter((sha) => /^gpgsig(-sha256)? /m.test(git(repo, 'cat-file', 'commit', sha).split('\n\n')[0]!))
+      .sort();
+
+  /** The operator's own signing setup, ambient to delivery: a key, ssh format, commit.gpgsign on. */
+  const operatorSigningSetup = (fx: Fixture): void => {
+    const opKey = join(fx.root, 'operator-key');
+    execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'operator@test', '-f', opKey]);
+    git(fx.clone, 'config', 'gpg.format', 'ssh');
+    git(fx.clone, 'config', 'user.signingkey', opKey);
+    git(fx.clone, 'config', 'commit.gpgsign', 'true');
+  };
+
+  const SIGNED_REFUSAL = /deliver: refusing to push — commit [0-9a-f]{12} is signed, and removing the seat temp file\(s\) named above from the run's commits would rewrite it; delivery never re-signs or drops a signed commit\. Re-run the step so its commits leave the temp file out, or remove it from the branch history by hand, then approve to retry; nothing was pushed/;
+
+  it('a RUN-KEY-signed commit the scrub would rewrite REFUSES the push; no new signature is made with any key', async () => {
+    const fx = fixture();
+    const runKey = join(fx.root, 'run-key');
+    execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'seat@test', '-f', runKey]);
+    seatCommitsScratchAs(
+      fx.workdir,
+      ['-c', 'user.name=seat', '-c', 'user.email=seat@test', '-c', 'gpg.format=ssh', '-c', `user.signingkey=${runKey}`],
+      ['-S'],
+    );
+    operatorSigningSetup(fx);
+    const before = signedCommits(fx.workdir);
+    expect(before).toHaveLength(2);
+
+    const r = await runDeliver(fx, { intent: 'signed by the run key' });
+
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain('deliver: SCRUBBED (seat-temp)');
+    expect(r.output).toMatch(SIGNED_REFUSAL);
+    expect(originBranches(fx)).toEqual(['main']);
+    expect(signedCommits(fx.workdir)).toEqual(before);
+    expect(signedCommits(fx.origin)).toEqual([]);
+  }, 90_000);
+
+  it('a commit with an INVALID signature header is refused too — never turned into a valid signature', async () => {
+    const fx = fixture();
+    seatCommitsScratch(fx.workdir);
+    // The fix commit gets a signature header no key made; its child is re-pointed at it.
+    const fixSha = git(fx.workdir, 'rev-parse', 'HEAD~1').trim();
+    const forge = (raw: string, parentFrom: string | null, parentTo: string | null): string => {
+      const [hdr, ...msg] = raw.split('\n\n');
+      let h = hdr!;
+      if (parentFrom !== null && parentTo !== null) h = h.replace(`parent ${parentFrom}`, `parent ${parentTo}`);
+      else h += '\ngpgsig -----BEGIN SSH SIGNATURE-----\n U1NIU0lHbm90LWEtcmVhbC1zaWduYXR1cmU=\n -----END SSH SIGNATURE-----';
+      return execFileSync('git', ['-C', fx.workdir, 'hash-object', '-t', 'commit', '-w', '--stdin'], {
+        input: [h, ...msg].join('\n\n'),
+        encoding: 'utf8',
+      }).trim();
+    };
+    const forgedFix = forge(git(fx.workdir, 'cat-file', 'commit', fixSha), null, null);
+    const child = forge(git(fx.workdir, 'cat-file', 'commit', 'HEAD'), fixSha, forgedFix);
+    git(fx.workdir, 'update-ref', 'HEAD', child);
+    operatorSigningSetup(fx);
+    const before = signedCommits(fx.workdir);
+    expect(before).toEqual([forgedFix]);
+
+    const r = await runDeliver(fx, { intent: 'bogus signature header' });
+
+    expect(r.status).not.toBe(0);
+    expect(r.output).toMatch(SIGNED_REFUSAL);
+    expect(r.output).toContain(forgedFix.slice(0, 12));
+    expect(originBranches(fx)).toEqual(['main']);
+    expect(signedCommits(fx.workdir)).toEqual(before);
+  }, 90_000);
+
+  it('an UNSIGNED history is scrubbed unsigned even when the ambient config signs every commit', async () => {
+    const fx = fixture();
+    seatCommitsScratch(fx.workdir);
+    operatorSigningSetup(fx);
+
+    const r = await runDeliver(fx, { intent: 'unsigned, ambient signing on' });
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.outcome).toBe('pr');
+    expect(pathsInHistory(fx.origin, `main..wicked/${RUN_ID}`).filter((p) => p.startsWith('tmp/'))).toEqual([]);
+    expect(signedCommits(fx.origin)).toEqual([]);
+    expect(signedCommits(fx.workdir)).toEqual([]);
+  }, 90_000);
+
+  it('the INVARIANT refuses a rewrite that would change the delivered tree beyond seat temp files', async () => {
+    const fx = fixture();
+    seatCommitsScratch(fx.workdir);
+    // A git that, asked to drop the scrubbed paths, also drops the run's real fix: the rewrite is
+    // wrong, and the check before the branch moves must catch it.
+    const r = await runDeliver(fx, {
+      intent: 'bad rewrite',
+      gitShim: (realGit) =>
+        `#!/bin/sh\nif [ "$1" = update-index ]; then { cat; printf 'fix.ts\\0'; } | '${realGit}' "$@"; else exec '${realGit}' "$@"; fi\n`,
+    });
+
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain('deliver: refusing to push — the history scrub would change the delivered tree beyond removing seat temp files (D fix.ts); nothing was pushed');
+    expect(originBranches(fx)).toEqual(['main']);
+  }, 90_000);
+
+  it('a committed symlink named like an env template ships as committed', async () => {
+    const fx = fixture();
+    mkdirSync(join(fx.workdir, 'templates'));
+    writeFileSync(join(fx.workdir, 'templates', 'default'), 'TOKEN=\n');
+    symlinkSync('templates/default', join(fx.workdir, '.env.example'));
+    git(fx.workdir, 'add', '-A');
+    git(fx.workdir, 'commit', '-qm', 'feat: an env template, linked');
+    const committed = git(fx.workdir, 'rev-parse', 'HEAD').trim();
+
+    const r = await runDeliver(fx, { intent: 'linked template' });
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.output).not.toContain('SCRUBBED');
+    expect(git(fx.origin, 'rev-parse', `wicked/${RUN_ID}`).trim()).toBe(committed);
+  }, 90_000);
+
+  it('REVISION: a merge the scrub empties is dropped with the commits it merged; the product commit alone is pushed', async () => {
+    const fx = fixture({ worktree: false });
+    const prHead = prBranchOnOrigin(fx.root, fx.origin);
+    git(fx.clone, 'fetch', '-q', 'origin');
+    const revised = { ...fx, workdir: join(fx.root, RUN_ID) };
+    git(fx.clone, 'worktree', 'add', '-q', '-b', `wicked/${RUN_ID}`, revised.workdir, `origin/${PR_BRANCH}`);
+    const wt = revised.workdir;
+    // Two side commits that add only seat temp files, merged; then the real product on top.
+    git(wt, 'checkout', '-q', '-b', 'side', `origin/${PR_BRANCH}`);
+    mkdirSync(join(wt, 'tmp', 'claude-1000'), { recursive: true });
+    writeFileSync(join(wt, 'tmp', 'claude-1000', 'b.output'), 'b\n');
+    git(wt, 'add', '-A');
+    git(wt, 'commit', '-qm', 'side: temp b');
+    git(wt, 'checkout', '-q', `wicked/${RUN_ID}`);
+    mkdirSync(join(wt, 'tmp', 'claude-1000'), { recursive: true });
+    writeFileSync(join(wt, 'tmp', 'claude-1000', 'a.output'), 'a\n');
+    git(wt, 'add', '-A');
+    git(wt, 'commit', '-qm', 'main line: temp a');
+    git(wt, 'merge', '-q', '--no-ff', '--no-edit', 'side');
+    writeFileSync(join(wt, 'fix.ts'), 'export const fixed = true;\n');
+    git(wt, 'add', 'fix.ts');
+    git(wt, 'commit', '-qm', 'fix: the product');
+
+    const r = await runDeliver(revised, { intent: 'Revise PR #273', script: { runId: RUN_ID, revisesPr: PR } });
+
+    expect(r.status, r.output).toBe(0);
+    expect(git(fx.origin, 'log', '--format=%s', `${prHead}..${PR_BRANCH}`).trim()).toBe('fix: the product');
+    expect(pathsInHistory(fx.origin, `${prHead}..${PR_BRANCH}`).filter((p) => p.startsWith('tmp/'))).toEqual([]);
+    expect(r.comment ?? '').not.toContain('a.output');
+  }, 90_000);
+
+  it('a run whose only commits are seat temp files delivers nothing and pushes nothing', async () => {
+    const fx = fixture();
+    mkdirSync(join(fx.workdir, 'tmp', 'claude-1000'), { recursive: true });
+    writeFileSync(join(fx.workdir, 'tmp', 'claude-1000', 'only.output'), 'x\n');
+    git(fx.workdir, 'add', '-A');
+    git(fx.workdir, 'commit', '-qm', 'chore: only temp');
+
+    const r = await runDeliver(fx, { intent: 'nothing real' });
+
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain('every commit the run made carried only seat temp files; nothing was pushed');
+    expect(originBranches(fx)).toEqual(['main']);
+  }, 90_000);
+
+  it('an UNTRACKED scratch path nested below the root is named in the PR only up to its scratch directory', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
+    const nested = `pkg/tmp/claude-1000/${SLUG}/tasks/x.output`;
+    mkdirSync(join(fx.workdir, nested, '..'), { recursive: true });
+    writeFileSync(join(fx.workdir, nested), 'out\n');
+    // An earlier rule (the key denylist) names the reason; the record is still cut at the scratch dir.
+    writeFileSync(join(fx.workdir, nested, '..', 'session.key'), 'k\n');
+
+    const r = await runDeliver(fx, { intent: 'nested scratch' });
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.pr?.body).toContain('- `pkg/tmp/…` — scratch-dir');
+    expect(r.pr?.body).toContain('- `pkg/tmp/…` — denylisted-name');
+    expect(r.pr?.body ?? '').not.toContain(SLUG);
+    expect(git(fx.origin, 'log', '-1', '--format=%B', `wicked/${RUN_ID}`)).not.toContain(SLUG);
+    expect(git(fx.origin, 'rev-list', '--objects', '--all')).not.toContain(SLUG);
+  }, 90_000);
+
+  it('a file the base holds under a seat temp dir is kept; the seat temp file beside it is scrubbed', async () => {
+    const fx = fixture({ worktree: false });
+    mkdirSync(join(fx.clone, 'fixtures', 'claude-1000'), { recursive: true });
+    writeFileSync(join(fx.clone, 'fixtures', 'claude-1000', 'README.md'), 'a fixture the repo keeps\n');
+    git(fx.clone, 'add', '-A');
+    git(fx.clone, 'commit', '-qm', 'base: a fixture dir');
+    git(fx.clone, 'push', '-q', 'origin', 'main');
+    const wt = { ...fx, workdir: join(fx.root, RUN_ID) };
+    git(fx.clone, 'worktree', 'add', '-q', '-b', `wicked/${RUN_ID}`, wt.workdir, 'main');
+    writeFileSync(join(wt.workdir, 'fixtures', 'claude-1000', 'README.md'), 'a fixture the repo keeps, edited\n');
+    writeFileSync(join(wt.workdir, 'fixtures', 'claude-1000', 'x.output'), 'seat temp\n');
+    git(wt.workdir, 'add', '-A');
+    git(wt.workdir, 'commit', '-qm', 'fix: edit the fixture');
+
+    const r = await runDeliver(wt, { intent: 'fixture' });
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.output).toContain("deliver: SCRUBBED (seat-temp) from the run's commits: fixtures/claude-1000/x.output");
+    expect(r.output).not.toContain('SCRUBBED (seat-temp) from the run\'s commits: fixtures/claude-1000/README.md');
+    expect(git(fx.origin, 'show', `wicked/${RUN_ID}:fixtures/claude-1000/README.md`)).toBe('a fixture the repo keeps, edited\n');
+    expect(git(fx.origin, 'ls-tree', '-r', '--name-only', `wicked/${RUN_ID}`)).not.toContain('x.output');
+  }, 90_000);
+
+  it('REVISION: a merged side branch cut from an OLDER commit does not carry that commit\'s temp file into the push', async () => {
+    const fx = fixture({ worktree: false });
+    // The PR branch: one commit that adds a seat temp file (A), then one that deletes it (the PR head).
+    const other = join(fx.root, 'other');
+    execFileSync('git', ['clone', '-q', fx.origin, other]);
+    git(other, 'config', 'user.email', 'prior@test');
+    git(other, 'config', 'user.name', 'prior');
+    git(other, 'checkout', '-q', '-b', PR_BRANCH);
+    mkdirSync(join(other, 'tmp', 'claude-1000'), { recursive: true });
+    writeFileSync(join(other, 'tmp', 'claude-1000', 'old.output'), 'old temp\n');
+    git(other, 'add', '-A');
+    git(other, 'commit', '-qm', 'prior: with a temp file');
+    const olderA = git(other, 'rev-parse', 'HEAD').trim();
+    git(other, 'rm', '-q', '-r', 'tmp');
+    git(other, 'commit', '-qm', 'prior: temp file removed');
+    git(other, 'push', '-q', 'origin', PR_BRANCH);
+    const prHead = git(other, 'rev-parse', 'HEAD').trim();
+    git(fx.clone, 'fetch', '-q', 'origin');
+    const revised = { ...fx, workdir: join(fx.root, RUN_ID) };
+    git(fx.clone, 'worktree', 'add', '-q', '-b', `wicked/${RUN_ID}`, revised.workdir, `origin/${PR_BRANCH}`);
+    const wt = revised.workdir;
+    // A side commit cut from A (so it inherits A's temp file) that changes only product, merged in.
+    git(wt, 'checkout', '-q', '-b', 'side', olderA);
+    writeFileSync(join(wt, 'fix.ts'), 'export const fixed = true;\n');
+    git(wt, 'add', 'fix.ts');
+    git(wt, 'commit', '-qm', 'side: the product');
+    git(wt, 'checkout', '-q', `wicked/${RUN_ID}`);
+    git(wt, 'merge', '-q', '--no-ff', '--no-edit', 'side');
+
+    const r = await runDeliver(revised, { intent: 'Revise PR #273', script: { runId: RUN_ID, revisesPr: PR } });
+
+    expect(r.status, r.output).toBe(0);
+    // No pushed commit HOLDS it. (The side commit's diff against A names its removal: A, an ancestor
+    // of the PR head, is already on the remote with it.)
+    const paths = pathsInHistory(fx.origin, `${prHead}..${PR_BRANCH}`, true);
+    expect(paths.filter((p) => p.startsWith('tmp/')), r.output).toEqual([]);
+    expect(paths).toContain('fix.ts');
+  }, 90_000);
+
+  it("a repository's own tracked tmp/ source is not touched, and a clean history is pushed as committed", async () => {
+    const fx = fixture({ worktree: false });
+    // The base really holds source under a tmp-named directory.
+    mkdirSync(join(fx.clone, 'tmp'), { recursive: true });
+    writeFileSync(join(fx.clone, 'tmp', 'keep.rs'), 'pub fn keep() {}\n');
+    git(fx.clone, 'add', '-A');
+    git(fx.clone, 'commit', '-qm', 'base: tracked tmp source');
+    git(fx.clone, 'push', '-q', 'origin', 'main');
+    const wt = { ...fx, workdir: join(fx.root, RUN_ID) };
+    git(fx.clone, 'worktree', 'add', '-q', '-b', `wicked/${RUN_ID}`, wt.workdir, 'main');
+    // The seat edits that tracked file and commits.
+    writeFileSync(join(wt.workdir, 'tmp', 'keep.rs'), 'pub fn keep() { /* edited */ }\n');
+    git(wt.workdir, 'commit', '-qam', 'fix: edit the tracked tmp source');
+    const seatCommit = git(wt.workdir, 'rev-parse', 'HEAD').trim();
+
+    const r = await runDeliver(wt, { intent: 'edit tmp source' });
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.outcome).toBe('pr');
+    expect(r.output).not.toContain('SCRUBBED');
+    expect(r.pr?.body ?? '').not.toContain("## Removed from the run's commits");
+    // Pushed exactly as committed: same commit id, the tracked tmp/ file with its edit.
+    expect(git(fx.origin, 'rev-parse', `wicked/${RUN_ID}`).trim()).toBe(seatCommit);
+    expect(git(fx.origin, 'show', `wicked/${RUN_ID}:tmp/keep.rs`)).toBe('pub fn keep() { /* edited */ }\n');
+  }, 90_000);
+
+  it('REVISION: the commits pushed onto the PR branch carry no scratch path either', async () => {
+    const fx = fixture({ worktree: false });
+    const prHead = prBranchOnOrigin(fx.root, fx.origin);
+    git(fx.clone, 'fetch', '-q', 'origin');
+    const revised = { ...fx, workdir: join(fx.root, RUN_ID) };
+    git(fx.clone, 'worktree', 'add', '-q', '-b', `wicked/${RUN_ID}`, revised.workdir, `origin/${PR_BRANCH}`);
+    seatCommitsScratch(revised.workdir);
+
+    const r = await runDeliver(revised, { intent: 'Revise PR #273', script: { runId: RUN_ID, revisesPr: PR } });
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.lastLine).toBe(PR.url);
+    const paths = pathsInHistory(fx.origin, `${prHead}..${PR_BRANCH}`);
+    expect(paths.filter((p) => p.startsWith('tmp/'))).toEqual([]);
+    expect(paths).toContain('fix.ts');
+    expect(git(fx.origin, 'rev-list', '--objects', '--all')).not.toContain(SLUG);
+    expect(git(fx.origin, 'rev-list', '--count', `${prHead}..${PR_BRANCH}`).trim()).toBe('1');
+  }, 90_000);
+});
+
+
+describe('deliver script — the PR\'s required checks (crew#1623)', () => {
+  const ruleFor = (...names: string[]): string =>
+    JSON.stringify([{ type: 'required_status_checks', parameters: { required_status_checks: names.map((context) => ({ context })) } }]);
+  const row = (name: string, bucket: string): { name: string; bucket: string; link: string; workflow: string } => ({
+    name, bucket, link: 'https://github.com/o/r/actions/runs/1/job/9', workflow: 'CI',
+  });
+
+  it('all required checks green: the PR URL is the last line and the verdict is pr', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.txt'), 'the run\'s change\n');
+    const r = await runDeliver(fx, { gh: { rules: ruleFor('semver'), checks: JSON.stringify([row('semver', 'pass')]) } });
+    expect(r.status, r.output).toBe(0);
+    expect(r.outcome).toBe('pr');
+    expect(r.lastLine).toBe('https://github.com/o/r/pull/7');
+    expect(r.output).toContain('1 required check(s) green');
+  });
+
+  it('a red required check: exit 1, verdict checks_failed, the failing job and its log in the output, FAILING last', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.txt'), 'the run\'s change\n');
+    const r = await runDeliver(fx, { gh: { rules: ruleFor('semver'), checks: JSON.stringify([row('semver', 'fail')]) } });
+    expect(r.status, r.output).toBe(1);
+    expect(r.outcome).toBe('checks_failed');
+    expect(r.output).toContain(DELIVER_PR_CHECKS_DETAIL_MARKER);
+    expect(r.output).toContain('error: the failed job says so');
+    expect(r.lastLine.startsWith(DELIVER_PR_CHECKS_FAILING_MARKER)).toBe(true);
+    expect(r.lastLine).toContain('https://github.com/o/r/pull/7');
+    expect(r.lastLine).toContain('CI / semver');
+    // The refusal reads as a script refusal (never a seat fault), parked at the gate.
+    expect(triageDeliverFailure(r.output, undefined)?.kind).toBe('script_refusal');
+  });
+
+  it('a required check that never reports: checks_unknown after the timeout, not a delivery', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.txt'), 'the run\'s change\n');
+    const r = await runDeliver(fx, {
+      gh: { rules: ruleFor('late'), checks: '[]' },
+      env: { WICKED_DELIVER_CHECKS_TIMEOUT_SECS: '1', WICKED_DELIVER_CHECKS_POLL_SECS: '0.3' },
+    });
+    expect(r.status, r.output).toBe(1);
+    expect(r.outcome).toBe('checks_unknown');
+    expect(r.lastLine.startsWith(DELIVER_PR_CHECKS_UNKNOWN_MARKER)).toBe(true);
+    expect(r.output).toContain('late (not reported yet)');
+  });
+
+  it('checks that cannot be read: checks_unknown', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.txt'), 'the run\'s change\n');
+    const r = await runDeliver(fx, { gh: { rules: 'not json', checks: '[]' }, env: { WICKED_DELIVER_CHECKS_POLL_SECS: '0' } });
+    expect(r.status, r.output).toBe(1);
+    expect(r.outcome).toBe('checks_unknown');
+  });
 });

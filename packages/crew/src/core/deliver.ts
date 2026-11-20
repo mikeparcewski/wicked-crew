@@ -91,8 +91,9 @@ import { randomBytes } from 'node:crypto';
 import { childEnvWithBootEstateDb } from './governance-store.js';
 import type { PhaseDef, WorkflowDef } from './types.js';
 import { ADO_HELPER_JS } from './ado-deliver-helper.js';
+import { prChecksJs } from './pr-checks-helper.js';
 import { ADO_PAT_ENV, ADO_SP_ENV, DELIVER_CREDENTIALS_MISSING_MARKER, adoRepoOf, type AdoRepo, type DeliverCredentials } from './deliver-credentials.js';
-import { DELIVER_NOT_SHIPPED_HEADING, DELIVER_STRANDED_SENTINEL, ENV_TEMPLATE_SAFE_LINE_ERE, SCRATCH_DIRS, TOOL_ARTIFACT_DIRS } from './deliver-exclusions.js';
+import { DELIVER_NOT_SHIPPED_HEADING, DELIVER_STRANDED_SENTINEL, ENV_TEMPLATE_SAFE_LINE_ERE, HOME_SLUG_SEGMENT_ERE, SCRATCH_DIRS, SEAT_TEMP_DIR_ERE, TOOL_ARTIFACT_DIRS } from './deliver-exclusions.js';
 import {
   adoWorkItemIds,
   composeEmbeddedDeliverText,
@@ -154,6 +155,29 @@ export const DELIVER_LIFT_CONFLICT_MARKER = 'deliver: LIFT-CONFLICT';
 export const DELIVER_PUSH_REJECTED_MARKER = 'deliver: PUSH-REJECTED';
 
 /**
+ * crew#1623: the PR is open and pushed, but a REQUIRED check on it is red (verdict `checks_failed`)
+ * or has no conclusion (`checks_unknown`: still pending at the timeout, or unreadable). Both END the
+ * script's output as the last line and exit non-zero, so the run parks at the deliver-refusal gate
+ * (not done); a power run's red verdict is also sent back to Build (wicked-core). The DETAIL marker
+ * heads the findings block (failing job names and log tails) that the send-back carries.
+ */
+export const DELIVER_PR_CHECKS_FAILING_MARKER = 'deliver: PR CHECKS FAILING';
+export const DELIVER_PR_CHECKS_UNKNOWN_MARKER = 'deliver: PR CHECKS UNKNOWN';
+export const DELIVER_PR_CHECKS_DETAIL_MARKER = 'deliver: PR CHECKS DETAIL';
+/** How long the deliver phase waits for pending required checks, seconds (env, read by the script). */
+export const DELIVER_CHECKS_TIMEOUT_ENV = 'WICKED_DELIVER_CHECKS_TIMEOUT_SECS';
+/** Default wait: 45 minutes. */
+export const DELIVER_CHECKS_TIMEOUT_DEFAULT_SECS = 2700;
+/** The checks wait in seconds under `env`: the ONE setting the script's helper and the post-hoc lift's process bound both read. */
+export function deliverChecksTimeoutSecs(env: Readonly<Record<string, string | undefined>> = process.env): number {
+  const raw = env[DELIVER_CHECKS_TIMEOUT_ENV];
+  const n = raw === undefined || raw.trim() === '' ? NaN : Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : DELIVER_CHECKS_TIMEOUT_DEFAULT_SECS;
+}
+/** How often the checks are re-read, seconds (env). */
+export const DELIVER_CHECKS_POLL_ENV = 'WICKED_DELIVER_CHECKS_POLL_SECS';
+
+/**
  * The machine line the deliver script prints LAST on a successful PUSH-ONLY delivery (N1, the half
  * of F2 that did not hold): the branch is on the remote, and no pull request was opened because gh
  * could not resolve the origin to a GitHub repository. `deliver: PUSHED-NO-PR <branch> <remote>` —
@@ -176,7 +200,7 @@ export const DELIVER_OUTCOME_MARKER = 'deliver: OUTCOME';
 /** The script variable carrying the nonce ({@link DELIVER_OUTCOME_MARKER}). */
 export const DELIVER_NONCE_VAR = 'DELIVER_NONCE';
 /** The verdicts the sentinel carries. `stranded` is the post-hoc-liftable LIFT-CONFLICT class. */
-export type DeliverOutcome = 'pr' | 'pushed' | 'rejected' | 'stranded' | 'failed';
+export type DeliverOutcome = 'pr' | 'pushed' | 'rejected' | 'stranded' | 'failed' | 'checks_failed' | 'checks_unknown';
 /** A fresh 16-byte hex nonce for one script composition. */
 export function mintDeliverNonce(): string {
   return randomBytes(16).toString('hex');
@@ -1188,7 +1212,13 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '  if [ -z "$RN" ]; then SZ=$(wc -c < "$F" 2>/dev/null || echo 0); [ "${SZ:-0}" -gt 1048576 ] && RN="oversize-1mib"; fi',
     // The record line is ONE line whatever the name holds: a newline / CR / tab in a path is folded to
     // `?` so a crafted file name cannot start a new bullet or heading in the PR body (codex r1).
-    '  if [ -n "$RN" ]; then echo "deliver: EXCLUDED ($RN): $F"; printf "%s %s\\n" "$RN" "$(printf "%s" "$F" | tr "\\n\\r\\t" "???")" >> "$TD/excluded"; else git add -- "$F"; fi',
+    // A path under a NESTED scratch or tool-artifact directory is recorded only up to that directory
+    // (`pkg/tmp/…`, once), whichever rule excluded it, as the top-level ones are counted at
+    // enumeration: what lies below it is a tool's own naming (a Claude temp dir is a slug of the
+    // worktree's absolute path), and this record is spliced into the PR body and the commit message
+    // (wicked-core#1573). It is cut after the fold, so a newline cannot split it. The phase output
+    // keeps the full name.
+    `  if [ -n "$RN" ]; then echo "deliver: EXCLUDED ($RN): $F"; HL="$RN $(printf "%s" "$F" | tr "\\n\\r\\t" "???" | sed -E ${shellSingleQuote(`s#(^|/)(${[...SCRATCH_DIRS, ...TOOL_ARTIFACT_DIRS].map((d) => d.replace(/\./g, '\\.')).join('|')})/.*$#\\1\\2/…#`)})"; grep -qxF -- "$HL" "$TD/excluded" 2>/dev/null || printf "%s\\n" "$HL" >> "$TD/excluded"; else git add -- "$F"; fi`,
     `done < <(git ls-files --others --exclude-standard -z -- . ${[...SCRATCH_DIRS, ...TOOL_ARTIFACT_DIRS].map((d) => `':(exclude)${d}'`).join(' ')})`,
     // (c1c) WHAT THE REPOSITORY'S OWN IGNORE RULES SKIPPED (crew#861) — never staged (the pass above
     // honours them), but SAID: one entry per ignored directory (`--directory`), so an installed
@@ -1204,12 +1234,12 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // (the LAST such line: the composer's footer; a `---` inside the intent is never the last). The
     // `Delivered-By:` trailer stays the final paragraph. Backticks are dropped from a path so the
     // code span cannot be broken. Nothing to report ⇒ no section (the common case reads as before).
+    "_splice() { awk -v sec=\"$2\" 'BEGIN { while ((getline l < sec) > 0) s = s l \"\\n\" } { a[NR] = $0; if ($0 == \"---\") last = NR } END { for (i = 1; i <= NR; i++) { if (i == last) printf \"%s\", s; print a[i] } if (!last) printf \"%s\", s }' \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"; }",
     'if [ -s "$TD/excluded" ] || [ "$NI" -gt 0 ]; then',
     `  { echo '${DELIVER_NOT_SHIPPED_HEADING}'; echo; echo "_Untracked paths the deliver phase found in the worktree and did NOT commit — they match the repository's ignore rules or the scratch / tool-artifact / key-material classifier (crew#434, crew#861). They are still in the worktree; the phase output names every one._"; echo;`,
     '    if [ -s "$TD/excluded" ]; then head -n 40 "$TD/excluded" | while read -r RN P; do echo "- \\\`$(printf "%s" "$P" | tr -d "\\\`")\\\` — $RN"; done; NE=$(wc -l < "$TD/excluded" | tr -d " "); [ "$NE" -gt 40 ] && echo "- … and $((NE - 40)) more excluded paths (see the deliver phase output)"; fi',
     '    [ "$NI" -gt 0 ] && echo "- $NI gitignored entr$([ "$NI" -eq 1 ] && echo y || echo ies) (\\\`git ls-files --others --ignored --directory\\\`) — never staged"',
     '    echo; } > "$TD/notshipped"',
-    "  _splice() { awk -v sec=\"$2\" 'BEGIN { while ((getline l < sec) > 0) s = s l \"\\n\" } { a[NR] = $0; if ($0 == \"---\") last = NR } END { for (i = 1; i <= NR; i++) { if (i == last) printf \"%s\", s; print a[i] } if (!last) printf \"%s\", s }' \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"; }",
     '  _splice "$TD/body" "$TD/notshipped"; _splice "$TD/commit" "$TD/notshipped"',
     'fi',
     // Only commit when something is staged — a run that committed incrementally (core#280's
@@ -1284,13 +1314,102 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     'A=$(git rev-list --count "$D..$B")',
     '[ "$A" -ge 1 ] || { echo "deliver: nothing to deliver — the run produced no committed change (after rebasing onto $D, $B carries no commit of its own); nothing was pushed"; exit 1; }',
     'fi',
+    // (c3b) THE HISTORY SCRUB (wicked-core#1573). The untracked pass above only sees files nobody
+    // committed. A Claude Code seat committed its own background-task output
+    // (`tmp/claude-<uid>/<a slug of the worktree's absolute path>/…/tasks/<id>.output`) and a later
+    // commit deleted it; this script pushes the run's own commits, so the home-derived name would sit
+    // in the PR's HISTORY though the final tree no longer holds it.
+    //
+    // So before the push, every path the pushed commits ($SB..$B: the default branch after the rebase
+    // above, or the PR head in a revision) add or change, against every parent, plus what a merged-in
+    // older ancestor carries, is checked by `_seatscratch`: the ONE narrow class
+    // (`committedScrubReason` in `deliver-exclusions.ts`): a Claude Code per-uid temp dir or a
+    // home-derived path segment. Never the crew#434 ladder: committed `tmp/` source, `credentials.ts`,
+    // `.env` and the like ship as committed. A path the base holds as a file, symlink or submodule at
+    // exactly that spelling is the repository's own and is never removed. When nothing matches,
+    // nothing is rewritten: the same commits are pushed.
+    //
+    // Otherwise every matched path is removed from every commit in the range and the commits are
+    // re-created with commit-tree, keeping authors, committers, dates and messages (a retry finds
+    // nothing left and moves nothing); a commit the scrub emptied is dropped. A SIGNED commit (a `gpgsig`
+    // or `mergetag` header) the scrub would rewrite or drop refuses the push: delivery never signs
+    // work with a key of its own and never pushes an unsigned copy of a signed commit, so a seat temp
+    // file in a signed history needs a re-run or a cleanup by hand. Re-created commits are unsigned
+    // (`--no-gpg-sign`), whatever the ambient config says. Before the branch moves, the new tip's tree must be the
+    // old tip's tree with only narrow-class paths deleted, or the push is refused. `git reset` (mixed)
+    // then moves the branch and leaves the worktree as it was. Every read goes to a file or a checked
+    // assignment, never a process substitution, so a failed read pushes nothing. The phase output names
+    // each scrubbed path; the PR body counts them by reason, never by name.
+    `_seatscratch() { RN=""; local re1=${shellSingleQuote(SEAT_TEMP_DIR_ERE)} re2=${shellSingleQuote(HOME_SLUG_SEGMENT_ERE)}; if [[ $1 =~ $re1 ]]; then RN="seat-temp"; return 0; fi; if [[ $1 =~ $re2 ]]; then RN="home-derived"; return 0; fi; case "$HH" in /?*/?*) case "/$1" in *"/$HS"*|*"$HH/"*) RN="home-derived";; esac;; esac; return 0; }`,
+    'HH=${HOME:-}; HH=${HH%/}; HS=${HH//\\//-}',
+    'SB=$D; [ -z "$TARGET" ] || SB="origin/$TARGET"',
+    'TL=$(git rev-parse --verify -q "$B^{tree}" || true)',
+    'NSU=0; HFAIL="deliver: the history scrub could not read the run\'s commits; nothing was pushed"',
+    'git rev-list --reverse --topo-order --parents "$SB..$B" > "$TD/hlist" || { echo "$HFAIL"; exit 1; }',
+    'git diff-tree --stdin -r -z --name-only --no-renames --no-commit-id -m --root --diff-filter=AMT < "$TD/hlist" > "$TD/hraw" || { echo "$HFAIL"; exit 1; }',
+    // …and what a pushed commit INHERITS from a merged-in ancestor other than the base (a side branch
+    // cut from an older commit carries that commit's files without changing them).
+    'git rev-list --boundary "$SB..$B" > "$TD/hbnd" || { echo "$HFAIL"; exit 1; }',
+    'HSBC=$(git rev-parse "$SB^{commit}")',
+    'while read -r HX; do case "$HX" in -*) HX=${HX#-}; [ "$HX" = "$HSBC" ] || git diff-tree -r -z --name-only --no-renames --diff-filter=AMT "$HSBC" "$HX" >> "$TD/hraw" || { echo "$HFAIL"; exit 1; };; esac; done < "$TD/hbnd"',
+    'sort -z -u "$TD/hraw" > "$TD/hent.u"; : > "$TD/hstrip"; : > "$TD/hwhy"',
+    'while IFS= read -r -d "" HP; do',
+    '  _seatscratch "$HP"',
+    '  [ -n "$RN" ] || continue',
+    // The base's own file, symlink or submodule at exactly this path is the repository's.
+    '  HBT=$(GIT_LITERAL_PATHSPECS=1 git ls-tree --full-tree "$SB" -- "$HP") || { echo "$HFAIL"; exit 1; }',
+    '  HBT=${HBT#* }; HBT=${HBT%% *}; case "$HBT" in blob|commit) continue;; esac',
+    '  printf "%s\\0" "$HP" >> "$TD/hstrip"; printf "%s\\n" "$RN" >> "$TD/hwhy"',
+    '  echo "deliver: SCRUBBED ($RN) from the run\'s commits: $(printf "%s" "$HP" | tr "\\n\\r\\t" "???")"',
+    'done < "$TD/hent.u"',
+    'if [ -s "$TD/hstrip" ]; then',
+    '  mkdir -p "$TD/map"',
+    '  while read -r HC HPS <&3; do',
+    // The rewritten parents, each once (two parents the scrub collapsed into one are one parent).
+    '    HPL=""; HMV=""',
+    '    for HQ in $HPS; do HNP=$HQ; [ ! -f "$TD/map/$HQ" ] || HNP=$(cat "$TD/map/$HQ"); [ "$HNP" = "$HQ" ] || HMV=1; case " $HPL " in *" $HNP "*) ;; *) HPL="${HPL:+$HPL }$HNP";; esac; done',
+    '    rm -f "$TD/sidx"',
+    '    GIT_INDEX_FILE="$TD/sidx" git read-tree "$HC"',
+    '    GIT_INDEX_FILE="$TD/sidx" git update-index --force-remove -z --stdin < "$TD/hstrip"',
+    '    HT=$(GIT_INDEX_FILE="$TD/sidx" git write-tree)',
+    '    HT0=$(git rev-parse "$HC^{tree}")',
+    '    if [ "$HT" = "$HT0" ] && [ -z "$HMV" ]; then continue; fi',
+    '    git cat-file commit "$HC" > "$TD/hraw.c" || { echo "$HFAIL"; exit 1; }; sed -n "1,/^$/p" "$TD/hraw.c" > "$TD/hhdr"',
+    '    if grep -q -E "^(gpgsig|gpgsig-sha256|mergetag) " "$TD/hhdr"; then echo "deliver: refusing to push — commit ${HC:0:12} is signed, and removing the seat temp file(s) named above from the run\'s commits would rewrite it; delivery never re-signs or drops a signed commit. Re-run the step so its commits leave the temp file out, or remove it from the branch history by hand, then approve to retry; nothing was pushed"; exit 1; fi',
+    // A commit the scrub EMPTIED (one parent left, its tree, and it was not empty as the run made it)
+    // is dropped; a commit that was empty as made is kept.
+    '    HDROP=""',
+    '    if [ -n "$HPL" ] && [ "$HPL" = "${HPL%% *}" ]; then HPT=$(git rev-parse "$HPL^{tree}"); HOPT=$(git rev-parse "${HPS%% *}^{tree}"); [ "$HT" != "$HPT" ] || [ "$HT0" = "$HOPT" ] || HDROP=1; fi',
+    '    if [ -n "$HDROP" ]; then printf "%s" "$HPL" > "$TD/map/$HC"; continue; fi',
+    '    git -c log.showSignature=false log -1 --format="%an%n%ae%n%ad%n%cn%n%ce%n%cd" --date=raw "$HC" > "$TD/hmeta"',
+    '    { IFS= read -r HAN; IFS= read -r HAE; IFS= read -r HAD; IFS= read -r HCN; IFS= read -r HCE; IFS= read -r HCD; } < "$TD/hmeta"',
+    '    sed "1,/^$/d" "$TD/hraw.c" > "$TD/msg"',
+    '    HPA=""; for HQ in $HPL; do HPA="$HPA -p $HQ"; done',
+    `    HNC=$(GIT_AUTHOR_NAME="$HAN" GIT_AUTHOR_EMAIL="$HAE" GIT_AUTHOR_DATE="$HAD" GIT_COMMITTER_NAME="$HCN" GIT_COMMITTER_EMAIL="$HCE" GIT_COMMITTER_DATE="$HCD" git commit-tree --no-gpg-sign "$HT" $HPA -F "$TD/msg") || { echo "$HFAIL"; exit 1; }`,
+    '    printf "%s" "$HNC" > "$TD/map/$HC"',
+    '  done 3< "$TD/hlist"',
+    '  HOT=$(git rev-parse "$B"); HNT=$HOT; [ ! -f "$TD/map/$HOT" ] || HNT=$(cat "$TD/map/$HOT")',
+    // THE INVARIANT: the delivered tree is the run's tree minus seat temp paths, and nothing else.
+    '  git diff-tree -r -z --name-status --no-renames "$HOT^{tree}" "$HNT^{tree}" > "$TD/hinv" || { echo "$HFAIL"; exit 1; }',
+    '  HBAD=""; while IFS= read -r -d "" HS0 && IFS= read -r -d "" HP; do _seatscratch "$HP"; { [ "$HS0" = D ] && [ -n "$RN" ]; } || HBAD=$(printf "%s %s" "$HS0" "$HP" | tr "\\n\\r\\t" "???"); done < "$TD/hinv"',
+    '  [ -z "$HBAD" ] || { echo "deliver: refusing to push — the history scrub would change the delivered tree beyond removing seat temp files ($HBAD); nothing was pushed"; exit 1; }',
+    '  git reset -q "$HNT"',
+    '  NSU=$(tr -cd "\\000" < "$TD/hstrip" | wc -c | tr -d " ")',
+    '  echo "deliver: scrubbed $NSU seat temp path(s) from the run\'s commits before the push; $B is now $HNT (was $HOT)"',
+    '  A=$(git rev-list --count "$SB..$B")',
+    '  [ "$A" -ge 1 ] || { echo "deliver: nothing to deliver — every commit the run made carried only seat temp files; nothing was pushed"; exit 1; }',
+    '  { echo "## Removed from the run\'s commits"; echo; echo "_$NSU path(s) the run committed are a seat\'s own temp files or carry a home-derived name, and were removed from every commit pushed here (wicked-core#1573). The deliver phase output names them._"; echo;',
+    '    sort "$TD/hwhy" | uniq -c | while read -r HN HW; do echo "- $HW: $HN"; done; echo; } > "$TD/scrubsec"',
+    '  _splice "$TD/body" "$TD/scrubsec"',
+    'fi',
     // (c4) EX-04 (wicked-core#850): a POST-HOC lift has no engine verification behind the tree it is
     // about to push — label the PR body (and the comment a revision posts) UNVERIFIED with both trees,
     // and print the machine line the daemon records the run's delivery from. The engine-driven deliver
     // unit never takes this branch: the engine's own lift re-verified its tree.
     'if [ -n "${WICKED_DELIVER_POSTHOC:-}" ]; then',
     '  TA=$(git rev-parse --verify -q "$B^{tree}" || true)',
-    '  if [ "$TA" = "$TB" ]; then MOVED="the lift did not change it"; else MOVED="the lift changed it: the rebase onto $D moved the work onto newer code"; fi',
+    '  if [ "$TL" = "$TB" ]; then MOVED="the lift did not change it"; else MOVED="the lift changed it: the rebase onto $D moved the work onto newer code"; fi',
+    '  if [ "$NSU" -gt 0 ]; then if [ "$TA" != "$TL" ]; then MOVED="$MOVED; the history scrub removed $NSU seat temp path(s) from it"; else MOVED="$MOVED; the history scrub removed $NSU seat temp path(s) from earlier commits only"; fi; fi',
     '  { echo; echo "---"; echo; echo "**Unverified delivery.** This pull request was delivered post-hoc (\\`POST /runs/$RUNID/deliver\\`), so no engine lift re-verified the tree it pushes. Run tree before the lift: \\`${TB:-unknown}\\`; delivered tree: \\`${TA:-unknown}\\` ($MOVED). Review it as unverified work."; } >> "$TD/body"',
     `  echo "${DELIVER_UNVERIFIED_MARKER} tree-before=\${TB:-unknown} tree-after=\${TA:-unknown}"`,
     'fi',
@@ -1443,6 +1562,27 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '    fi',
     '  fi',
     '  fi',
+    'fi',
+    // (crew#1623) A PR a required check keeps from merging is not a delivery. On a GitHub PR the phase
+    // now waits for the required checks' conclusion (the base branch's rulesets / protection, through
+    // the same token the push used): red -> `checks_failed` (a power run sends it back to Build),
+    // pending past the timeout or unreadable -> `checks_unknown`; both exit 1 with the PR's URL in the
+    // last line, so the run parks at the deliver-refusal gate and only all-green is done. Azure DevOps
+    // has no gh to read with and is not watched.
+    'if [ -z "$ADOGIT" ]; then',
+    '  CHKNODE=$(command -v node || true); [ -n "$CHKNODE" ] || CHKNODE=' + shellSingleQuote(process.execPath),
+    '  [ -x "$CHKNODE" ] || { VERDICT=checks_unknown; echo "deliver: no node binary to read the pull request\'s checks"; echo "' + DELIVER_PR_CHECKS_UNKNOWN_MARKER + ' — $URL: the checks could not be read; approve to re-check"; exit 1; }',
+    "  cat > \"$TD/checks.cjs\" <<'WICKED_CREW_CHECKS_HELPER_EOF'",
+    ...prChecksJs().split('\n'),
+    'WICKED_CREW_CHECKS_HELPER_EOF',
+    '  echo "deliver: watching the required checks of $URL (up to ${' + DELIVER_CHECKS_TIMEOUT_ENV + ':-' + DELIVER_CHECKS_TIMEOUT_DEFAULT_SECS + '}s)"',
+    '  CHKRC=0; CHKOUT=$(if [ -n "${GHT:-}" ]; then GH_TOKEN="$GHT" GH_HOST=github.com "$CHKNODE" "$TD/checks.cjs" "$URL" "${' + DELIVER_CHECKS_TIMEOUT_ENV + ':-' + DELIVER_CHECKS_TIMEOUT_DEFAULT_SECS + '}" "${' + DELIVER_CHECKS_POLL_ENV + ':-20}"; else "$CHKNODE" "$TD/checks.cjs" "$URL" "${' + DELIVER_CHECKS_TIMEOUT_ENV + ':-' + DELIVER_CHECKS_TIMEOUT_DEFAULT_SECS + '}" "${' + DELIVER_CHECKS_POLL_ENV + ':-20}"; fi) || CHKRC=$?',
+    '  echo "$CHKOUT"',
+    '  case "$CHKRC" in',
+    '    0) ;;',
+    '    3) VERDICT=checks_failed; echo "' + DELIVER_PR_CHECKS_FAILING_MARKER + ' — $URL: $(printf \'%s\\n\' "$CHKOUT" | grep \'^deliver: failing required check\' | tail -1 | sed \'s/^deliver: //\' | head -c 240); fix them on the run branch, or approve to re-check"; exit 1;;',
+    '    *) VERDICT=checks_unknown; echo "' + DELIVER_PR_CHECKS_UNKNOWN_MARKER + ' — $URL: $(printf \'%s\\n\' "$CHKOUT" | tail -1 | sed \'s/^deliver: //\' | head -c 240); the PR is open and its checks have no conclusion; approve to re-check"; exit 1;;',
+    '  esac',
     'fi',
     'VERDICT=pr',
     'echo "$URL"',

@@ -4411,9 +4411,10 @@ export class CoreAdapter {
    * `graphNodeLimit`) can never both read the old file and have the later publish silently revert
    * the earlier one while both answered 200. `derive` is for a merge that depends on the STORED
    * value (the route's nested `watch` merge): it runs inside the queue against exactly the value
-   * this write replaces, and its keys win over `patch`. The daemon is the file's only writer (the
-   * state-home fence keeps one daemon per home; the seed only ever links an absent file), so an
-   * in-process queue is the whole lock.
+   * this write replaces, and its keys win over `patch`. The queue orders writes in THIS process only:
+   * a second process writing the same file (another daemon on a shared settings file, a hand edit) is
+   * not covered, since the state-home fence does not guarantee one daemon per home. The queue admits
+   * every write (it is not capped); each waits for the writes before it.
    */
   updateSettings(
     patch: Partial<CrewSystemSettings>,
