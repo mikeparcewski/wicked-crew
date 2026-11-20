@@ -88,6 +88,7 @@
 
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import type { GitIdent } from '../setup/known.js';
 import { childEnvWithBootEstateDb } from './governance-store.js';
 import type { PhaseDef, WorkflowDef } from './types.js';
 import { ADO_HELPER_JS } from './ado-deliver-helper.js';
@@ -279,6 +280,11 @@ export interface DeliverScriptOptions {
   adoTarget?: AdoRepo | null;
   /** (crew#720) The provider credential preflight read at compose time, for the gate card. */
   credentials?: DeliverCredentials | null;
+  /** (crew#1667) The author and committer git resolves in the registered repository, read once
+   *  at compose (the run worktree shares its config and does not exist yet). The c1 commit is made
+   *  with exactly them and the card names the author. `null` = none could be resolved (the card
+   *  says so; git decides at commit time); absent = not read (no sentence, e.g. a post-hoc delivery). */
+  commitIdents?: { author: GitIdent; committer: GitIdent } | null;
 }
 
 /**
@@ -1122,10 +1128,10 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     'rm -f -- "$S"',
     // (c1) COMMIT THE RUN'S WORK (crew#317). Agents write files; they do not commit — which is
     // the premise of core#291 and the reason `d1bc72c2` pushed a branch identical to origin/main.
-    // Author identity is deliberately NOT set here: the run worktree belongs to the operator's
-    // own clone, so `git commit` uses the repo/user config that already exists (and fails loudly,
-    // pushing nothing, if that config is missing). Staging is two passes (see below): tracked
-    // changes always ride; untracked paths ride UNLESS a scratch/key-material classifier excludes
+    // The run worktree belongs to the operator's clone. crew#1667: pin the identities read at
+    // compose when they resolved; otherwise git's own config decides and refuses without one.
+    // The card names the author. Staging is two passes:
+    // tracked changes always ride; untracked paths ride UNLESS a scratch/key-material classifier excludes
     // them — and every exclusion is reported loudly (crew#434).
     //
     // (c1-text) THE PR TITLE + BODY AND THE COMMIT MESSAGE (crew#524 / F-3R2-014). `--fill` gave
@@ -1355,7 +1361,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // `--cleanup=whitespace`, NOT git's default for `-F`: an operator/repo `commit.cleanup=strip`
     // would otherwise treat every `## Intent` / `## Run` / `## Phases` heading as a `#` comment and
     // strip it from the commit body (review W3-K1).
-    'git diff --cached --quiet || git commit -q --cleanup=whitespace -F "$TD/commit"',
+    `git diff --cached --quiet || ${opts.commitIdents == null ? '' : `GIT_AUTHOR_NAME=${shellSingleQuote(opts.commitIdents.author.name)} GIT_AUTHOR_EMAIL=${shellSingleQuote(opts.commitIdents.author.email)} GIT_COMMITTER_NAME=${shellSingleQuote(opts.commitIdents.committer.name)} GIT_COMMITTER_EMAIL=${shellSingleQuote(opts.commitIdents.committer.email)} `}git commit -q --cleanup=whitespace -F "$TD/commit"`,
     // (EX-04) The run's work as it stands, before any lift moves it — the post-hoc label's old tree.
     'TB=$(git rev-parse --verify -q "$B^{tree}" || true)',
     // (c2) NOTHING TO DELIVER — no staged work AND no commits of its own. Fail LOUDLY before the
@@ -1939,7 +1945,19 @@ export function deliverRepoFor<R extends { id: string; name: string; root_path: 
   );
 }
 
+const NO_DELIVER_AUTHOR = 'Commits carry: no git author could be resolved for this repository when this job was set up (git config user.name and user.email); the deliver commit is left to git, which refuses it without one.';
+
+/** (crew#1667) The structured copy of the author sentence on a deliver card; absent on older cards. */
+export function deliverAuthorOf(text: string): GitIdent | null | undefined {
+  const match = /Commits carry: ([^<>\r\n]+) <([^<>\r\n]*)> \(the git author this repository resolves; the deliver commit is made with exactly it\)\./u.exec(text);
+  if (match !== null) return { name: match[1]!, email: match[2]! };
+  return text.includes(NO_DELIVER_AUTHOR) ? null : undefined;
+}
+
 export function deliverGateInstructions(opts: DeliverScriptOptions): string {
+  const commits = opts.commitIdents === undefined ? '' : opts.commitIdents === null
+    ? ` ${NO_DELIVER_AUTHOR}`
+    : ` Commits carry: ${opts.commitIdents.author.name} <${opts.commitIdents.author.email}> (the git author this repository resolves; the deliver commit is made with exactly it).`;
   const pr = opts.revisesPr ?? null;
   const target =
     pr !== null
@@ -1981,12 +1999,12 @@ export function deliverGateInstructions(opts: DeliverScriptOptions): string {
         : cred === null
           ? `Credential: the service principal (${ADO_SP_ENV.join(' / ')}) or ${ADO_PAT_ENV} from the daemon environment; the phase refuses before staging anything without one. `
           : '';
-    return `${target} ${credSentence}${how}It refuses if origin no longer points at that repository.`.replace(/\s+$/, '');
+    return `${target} ${credSentence}${how}It refuses if origin no longer points at that repository.${commits}`.replace(/\s+$/, '');
   }
   // Pinned, git pushes with the same token; otherwise the phase asks git which credential IT would
   // use for the remote's host and refuses when the two logins disagree (F-RC1-010).
   const git = pinned ? 'git pushes with the same token, not its own configured credential.' : "It refuses if gh's login and git's credential for the remote disagree.";
-  return `${target} ${credSentence}${who} ${git}`;
+  return `${target} ${credSentence}${who} ${git}${commits}`;
 }
 
 /**
@@ -2023,6 +2041,11 @@ export interface DeliverLaunchContext {
   deliverIdentitySource?: 'repo' | 'setting';
   /** (crew#720) The provider credential preflight for the gate card (`null`/absent = none read). */
   credentials?: DeliverCredentials | null;
+  /** (crew#1667) The author and committer git resolves in the registered repository, read once
+   *  at compose (the run worktree shares its config and does not exist yet). The c1 commit is made
+   *  with exactly them and the card names the author. `null` = none could be resolved (the card
+   *  says so; git decides at commit time); absent = not read (no sentence, e.g. a post-hoc delivery). */
+  commitIdents?: { author: GitIdent; committer: GitIdent } | null;
 }
 
 /**
@@ -2065,6 +2088,7 @@ export function deliverPresetStep(
     deliverIdentity: launch.deliverIdentity ?? null,
     ...(launch.deliverIdentitySource !== undefined ? { deliverIdentitySource: launch.deliverIdentitySource } : {}),
     credentials: launch.credentials ?? null,
+    ...(launch.commitIdents !== undefined ? { commitIdents: launch.commitIdents } : {}),
   });
   return {
     catalog: 'deliver',
@@ -2118,6 +2142,7 @@ export function composeDeliverWorkflow(
     deliverIdentity: launch.deliverIdentity ?? null,
     ...(launch.deliverIdentitySource !== undefined ? { deliverIdentitySource: launch.deliverIdentitySource } : {}),
     credentials: launch.credentials ?? null,
+    ...(launch.commitIdents !== undefined ? { commitIdents: launch.commitIdents } : {}),
   });
   return {
     // No `is_system` on purpose: core's overlay/register schema rejects unknown fields, and the

@@ -52,6 +52,7 @@ import { DEFAULT_SETTINGS } from './types.js';
 import type { EstateRequirementsRead } from '../api/requirements.js';
 import { BASE_SKILL_REF_SHAPE } from '../skills/base-skill.js';
 import { execCapped } from './exec.js';
+import { gitCommitIdents, usableGitIdent, type GitIdent } from '../setup/known.js';
 import { composeDeliverWorkflow, DELIVER_PHASE_ID, deliverPresetStep, deliverIdentityFor, deliverRepoFor, isGitHubLogin, pushIdentityOf, readDeliverOriginUrl } from './deliver.js';
 import { engineCampaignDef, engineRosterJson } from './engine-roster.js';
 import { composeDeliverableFloor } from './deliverable-floor.js';
@@ -2023,6 +2024,22 @@ export class CoreAdapter {
     }
   }
 
+  /** (crew#1667) Read once at compose from the registered root, as for the F2 origin read.
+   *  The future run worktree shares this config. No repo means no author sentence. */
+  private async resolveDeliverCommitIdents(repoRef: string | null | undefined): Promise<{ author: GitIdent; committer: GitIdent } | null | undefined> {
+    if (repoRef === null || repoRef === undefined || repoRef === '') return undefined;
+    try {
+      const hit = deliverRepoFor(await this.listRepos(), repoRef);
+      if (hit === undefined || hit.root_path === '') return undefined;
+      const idents = await gitCommitIdents({ cwd: hit.root_path });
+      return idents !== null && usableGitIdent(idents.author) && usableGitIdent(idents.committer)
+        ? { author: idents.author, committer: idents.committer }
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
   /** The launcher's `deliver` step for a plan (`name` null) or a preset launch (DES-TEAMING-002
    *  §8.5): the engine appends it to the plan and puts it in the floor. */
   private deliverStep(
@@ -2035,6 +2052,7 @@ export class CoreAdapter {
     identity: { login: string; source: 'repo' | 'setting' },
     /** (crew#720) The provider credential preflight this launch read. */
     credentials: DeliverCredentials | null,
+    commitIdents: { author: GitIdent; committer: GitIdent } | null | undefined,
   ): ReturnType<typeof deliverPresetStep> {
     return deliverPresetStep(name, phases, input.sessionId, input.problem, {
       repoRef: input.repoRef ?? null,
@@ -2046,6 +2064,7 @@ export class CoreAdapter {
       deliverIdentity: identity.login,
       deliverIdentitySource: identity.source,
       credentials,
+      ...(commitIdents !== undefined ? { commitIdents } : {}),
     });
   }
 
@@ -2057,6 +2076,7 @@ export class CoreAdapter {
     // (F2) And the origin the push would go to — read once, for the gate card's target sentence.
     // Only a delivering launch composes a deliver phase, so only a delivering launch pays for it.
     const deliverOriginUrl = input.deliver === 'pr' ? await this.resolveDeliverOrigin(input.repoRef) : null;
+    const deliverCommitIdents = input.deliver === 'pr' ? await this.resolveDeliverCommitIdents(input.repoRef) : undefined;
     // (crew#720) And whether the provider credential is there — presence only, read once.
     const deliverCredentials = input.deliver === 'pr' ? await deliverCredentialsProbe(deliverOriginUrl, process.env, undefined, pushIdentityOf(deliverIdentity.login)) : null;
     const opts: LaunchOptions = {
@@ -2246,7 +2266,7 @@ export class CoreAdapter {
       // T8: a delivering plan hands the engine its deliver step, exactly as a preset launch does.
       if (input.deliver === 'pr') {
         (opts as LaunchOptions & { deliverStepJson?: string }).deliverStepJson = JSON.stringify(
-          this.deliverStep(null, [], input, deliverOriginUrl, deliverIdentity, deliverCredentials),
+          this.deliverStep(null, [], input, deliverOriginUrl, deliverIdentity, deliverCredentials, deliverCommitIdents),
         );
       }
     }
@@ -2268,7 +2288,7 @@ export class CoreAdapter {
       // Only a DELIVERING preset gets the deliver step: a preset launched for its deliverables alone
       // pushes nothing (codex r1 on #930).
       if (input.deliver === 'pr') {
-        const step = this.deliverStep(input.workflow, this.getWorkflow(input.workflow)?.phases ?? [], input, deliverOriginUrl, deliverIdentity, deliverCredentials);
+        const step = this.deliverStep(input.workflow, this.getWorkflow(input.workflow)?.phases ?? [], input, deliverOriginUrl, deliverIdentity, deliverCredentials, deliverCommitIdents);
         (opts as LaunchOptions & { deliverStepJson?: string }).deliverStepJson = JSON.stringify(step);
       }
       opts.workflow = input.workflow;
@@ -2343,6 +2363,7 @@ export class CoreAdapter {
             // F2 — the origin the push will actually go to, so the gate card cannot promise a
             // pull request on a remote that can never carry one.
             originUrl: deliverOriginUrl,
+            ...(deliverCommitIdents !== undefined ? { commitIdents: deliverCommitIdents } : {}),
             // crew#549 — the configured deliver identity, baked into the script so the refusal
             // holds on a daemon started without GH_ACCOUNT exported; crew#737 — the repository's
             // own pin wins, and the card says when it is not signed in here.
@@ -3083,6 +3104,7 @@ export class CoreAdapter {
     // (F2) The preview shows the deliver step's gate-card text, so it reads the same origin the
     // launch would. Local to this call, like the launch's.
     const previewOriginUrl = opts.deliver === true ? await this.resolveDeliverOrigin(opts.repoRef) : null;
+    const previewCommitIdents = opts.deliver === true ? await this.resolveDeliverCommitIdents(opts.repoRef) : undefined;
     const previewIdentity = await this.resolveDeliverIdentity(opts.repoRef);
     const previewCredentials = opts.deliver === true ? await deliverCredentialsProbe(previewOriginUrl, process.env, undefined, pushIdentityOf(previewIdentity.login)) : null;
     const deliverStep =
@@ -3102,6 +3124,7 @@ export class CoreAdapter {
               previewOriginUrl,
               previewIdentity,
               previewCredentials,
+              previewCommitIdents,
             ),
           )
         : null;

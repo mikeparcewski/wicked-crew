@@ -1221,6 +1221,15 @@ export interface AgentSession {
    * idempotent against the existing branch) and `'none'` after it is cleaned up.
    */
   deliverUrl?: string;
+  /**
+   * (crew#1667) The git author the run's deliver commit is made with: read once from the registered
+   * repository when the job was set up (as git resolves it there, the same read wicked-core makes before
+   * a seat commits), pinned on the deliver commit, and named on the deliver card ("Commits carry: …").
+   * `null` = no git author could be resolved then (the card says so; git decides at commit time and
+   * refuses without one). ABSENT when the run has no deliver step or its card predates the sentence.
+   * A structured copy of the card's sentence, so a skin need not parse it (studio: api-types > 0.216.0).
+   */
+  deliverAuthor?: { name: string; email: string } | null;
   /** The pushed run branch (api-types 0.69.0, N1) — present exactly when `delivery === 'pushed'`. */
   deliverBranch?: string;
   /**

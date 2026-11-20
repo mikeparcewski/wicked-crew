@@ -268,6 +268,7 @@ import {
   runUrlFor,
 } from '../core/deliver-text.js';
 import {
+  deliverAuthorOf,
   deliverIdentityFor,
   defaultGhExec,
   deliverRepoFor,
@@ -2331,6 +2332,11 @@ export function registerRoutes(
     if (launchActor !== undefined) view.session.launch_actor = launchActor;
     const state = resolveDelivery(view, conflictStrand);
     view.session.delivery = state.delivery;
+    // crew#1667: read only the authored card (core#686); descriptions include operator intent.
+    const authorUnit = view.units.find(isDeliverUnit);
+    const deliverAuthor = authorUnit?.instructions === undefined ? undefined : deliverAuthorOf(authorUnit.instructions);
+    if (deliverAuthor !== undefined) view.session.deliverAuthor = deliverAuthor;
+    else delete view.session.deliverAuthor;
     // wicked-core#850 EX-04: a post-hoc delivery reads unverified, with its trees. ABSENT otherwise.
     const deliveryAssurance = deliveryIndex.assuranceFor(view.session.id);
     if (deliveryAssurance !== undefined) view.session.delivery_assurance = deliveryAssurance;
