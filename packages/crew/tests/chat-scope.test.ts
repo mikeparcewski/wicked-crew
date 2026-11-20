@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   ChatScopeIndex,
+  estateEntityCount,
   CHAT_DECISIONS_DIRECTIVE,
   CHAT_GROUNDING_COMMAND,
   chatScopeStatement,
@@ -52,7 +53,7 @@ function repo(id: string, name: string, root: string, graph = join(base, `graph-
 /** Three registered repos; `gamma`'s graph FILE exists (a built graph), the others' do not. */
 function REPOS(): RepoEntry[] {
   const gamma = repo('r-gamma', 'gamma', '/srv/repos/gamma');
-  writeFileSync(gamma.code_graph_db as string, '');
+  writeFileSync(gamma.code_graph_db as string, 'graph fixture');
   return [repo('r-alpha', 'alpha', '/srv/repos/alpha'), repo('r-beta', 'beta', '/srv/repos/beta'), gamma];
 }
 
@@ -746,6 +747,63 @@ describe('the scratch root and its statement', () => {
   });
 });
 
+// crew#1356: a failed count is uncertainty, not evidence that an existing graph is empty.
+describe('repo graph probe uncertainty (crew#1356)', () => {
+  const stubEstate = (body: string) => {
+    const stub = join(base, 'estate-probe.mjs');
+    writeFileSync(stub, `#!/usr/bin/env node\n${body}\n`);
+    chmodSync(stub, 0o755);
+    process.env['WICKED_ESTATE_EXE'] = stub;
+  };
+
+  it('binds a non-empty graph when entityCount returns null, disclosing the uncertainty', async () => {
+    const res = await resolveChatScope({ chatId: 'unknown-count', repoRefs: ['r-gamma'] }, deps({ entityCount: async () => null }));
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.scope.graph.bound).toBe(true);
+    expect(res.engine.codeGraphDb).toBe(join(base, 'graph-r-gamma.db'));
+    expect(res.scope.graph.reason).toContain('its size could not be read just now');
+    expect(res.scope.graph.reason).toContain('if a graph search fails, say so');
+    expect(res.scope.graph.reason).not.toMatch(/no entities|not indexed/);
+  });
+
+  it('binds an existing graph when the default estate probe exits 1', async () => {
+    if (process.platform === 'win32') return;
+    stubEstate('process.exit(1);');
+    const d = deps();
+    delete d.entityCount;
+    const res = await resolveChatScope({ chatId: 'failed-probe', repoRefs: ['r-gamma'] }, d);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.scope.graph.bound).toBe(true);
+    expect(res.engine.codeGraphDb).toBe(join(base, 'graph-r-gamma.db'));
+    expect(res.scope.graph.reason).not.toMatch(/no entities|not indexed/);
+  });
+
+  it('leaves a zero-byte graph unbound with the no-entities reason', async () => {
+    const empty = repo('empty', 'empty', '/srv/repos/empty');
+    writeFileSync(empty.code_graph_db!, '');
+    const res = await resolveChatScope({ chatId: 'empty-graph', repoRefs: ['empty'] }, deps({ listRepos: async () => [empty], entityCount: async () => 0 }));
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.scope.graph.bound).toBe(false);
+    expect(res.engine.codeGraphDb).toBeNull();
+    expect(res.scope.graph.reason).toContain('holds no entities');
+  });
+
+  it.each([
+    ['exits 1', 'process.exit(1);', null],
+    ['unparseable output', "console.log('busy');", null],
+    ['populated graph', "console.log('nodes=41 edges=3 files=2');", 41],
+  ])('estateEntityCount returns the count or null when estate %s', async (_name, body, count) => {
+    if (process.platform === 'win32') return;
+    stubEstate(body);
+    const db = join(base, 'probe.db');
+    writeFileSync(db, 'graph fixture');
+    expect(await estateEntityCount(db)).toBe(count);
+  });
+});
+
 // crew#642 — ownGraph liveness: a graph file that holds zero entities is NOT grounded.
 describe('resolveChatScope — crew#642 entityCount liveness gate', () => {
   // Review of #651, finding 1: the dep is OPTIONAL and its contract promises a default that probes
@@ -807,7 +865,7 @@ describe('resolveChatScope — crew#642 entityCount liveness gate', () => {
   });
 
   it('a single repo whose graph file exists but holds ZERO entities reports ungrounded with the indexing remedy — FAILS on main (returns bound:true)', async () => {
-    // gamma's code_graph_db is written as an empty file in REPOS() (line ~50).
+    // The count, rather than the file size, proves this graph is empty.
     const res = await resolveChatScope(
       { chatId: 'ec1', repoRefs: ['r-gamma'] },
       deps({ entityCount: async () => 0 }),

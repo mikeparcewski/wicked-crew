@@ -132,7 +132,7 @@ function rig(): Rig {
     fileRun: async (projectId, runId) => { r.filed.push({ projectId, runId }); },
   }));
   const deps: ChatProposalDeps = {
-    flags: () => ({ context: true, proposals: true, create: true, refine: true, theme: true, demo: true, onboard: r.onboardOn }),
+    flags: () => ({ context: true, instructions: true, proposals: true, create: true, refine: true, theme: true, demo: true, onboard: r.onboardOn }),
     acceptsOnboard: () => r.acceptsOnboard,
     onboard: {
       projects: async () => r.projects,
