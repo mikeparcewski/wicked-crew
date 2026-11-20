@@ -60,6 +60,8 @@ describe('GET /runs/:id/gate — the engine\'s legal actions (crew#1512)', () =>
   const lists = new Map<string, EngineGateActions | null>();
   const gateCache = new GateCache();
   let withBinding = true;
+  let raceReads = 0;
+  let ghostReads = 0;
   const readActions = vi.fn<(id: string) => Promise<EngineGateActions | null>>();
 
   beforeAll(async () => {
@@ -70,10 +72,17 @@ describe('GET /runs/:id/gate — the engine\'s legal actions (crew#1512)', () =>
         view('run-deliver', 5, 'deliver'),
         view('run-steering', 4, 'review', 'steering-author'),
         view('run-cached', 4, 'review'),
+        view('run-rowless', 4, 'review'),
+        view('run-race', 4, 'review'),
       ]),
       listRepos: vi.fn().mockResolvedValue([]),
       listWorkflows: () => BUILTIN_WORKFLOWS,
       interactionRequests: vi.fn(async (id: string) => {
+        if (id === 'run-rowless') return []; // parked before the gate-row table (crew#1634)
+        // A gate that opens at ord 5 after the first read found no row (the race, crew#1634 review).
+        if (id === 'run-race') return raceReads++ === 0 ? [] : [{ kind: 'gate', ord: 5, prompt: 'the gate', gate_kind: 'escalation', created_at: 1_785_614_004_730 }];
+        // A cached gate with an open row, for a run the engine's view does not know.
+        if (id === 'run-ghost') return [{ kind: 'gate', ord: ghostReads++ === 0 ? 4 : 5, prompt: 'the gate', gate_kind: 'escalation', created_at: 1_785_614_004_730 }];
         // The engine's open row: the deliver run's at ord 5, every other at ord 4 (whatever its list says).
         const deliver = id === 'run-deliver';
         return [{ kind: 'gate', ord: deliver ? 5 : 4, prompt: 'the gate', gate_kind: deliver ? 'deliver' : (lists.get(id)?.gateKind ?? 'escalation'), created_at: 1_785_614_004_730 }];
@@ -99,6 +108,11 @@ describe('GET /runs/:id/gate — the engine\'s legal actions (crew#1512)', () =>
     lists.set('run-deliver', DELIVER);
     lists.set('run-steering', RETRY);
     lists.set('run-cached', RETRY);
+    lists.set('run-rowless', { ...RETRY, ord: 0 });
+    lists.set('run-race', { ...RETRY, ord: 5 });
+    lists.set('run-ghost', { ...RETRY, ord: 5 });
+    raceReads = 0;
+    ghostReads = 0;
   });
   afterAll(async () => {
     await app.close();
@@ -161,7 +175,46 @@ describe('GET /runs/:id/gate — the engine\'s legal actions (crew#1512)', () =>
     const res = await app.inject({ method: 'GET', url: '/api/v1/runs/run-retry/gate' });
     expect(res.statusCode).toBe(503);
     expect(res.json()).toEqual({ error: expect.any(String), code: 'gate_actions_unavailable' });
+    expect(res.headers['retry-after']).toBe('1');
     expect(readActions).toHaveBeenCalledTimes(2);
+  });
+
+  describe('a gate with no open row (crew#1634)', () => {
+    beforeEach(() => {
+      gateCache.forget('run-rowless');
+      gateCache.adopt('run-rowless', { ord: 4, prompt: 'the gate', lifecycle: 'open', receivedAt: '2026-10-10T10:00:00Z' });
+    });
+    it('is served without actions when the engine names another ord, instead of a permanent 503', async () => {
+      const body = await gate('run-rowless');
+      expect(body).toMatchObject({ runId: 'run-rowless', ord: 4 });
+      expect(body).not.toHaveProperty('actions');
+    });
+    it('answers 503 when a gate opened during the read (the row shows on the re-read)', async () => {
+      gateCache.forget('run-race');
+      gateCache.adopt('run-race', { ord: 4, prompt: 'the gate', lifecycle: 'open', receivedAt: '2026-10-10T10:00:00Z' });
+      const res = await app.inject({ method: 'GET', url: '/api/v1/runs/run-race/gate' });
+      expect(res.statusCode).toBe(503);
+      expect(res.json()).toMatchObject({ code: 'gate_actions_unavailable' });
+    });
+    it('answers 503 when the row advanced during the read and the run snapshot is undefined', async () => {
+      gateCache.forget('run-ghost');
+      gateCache.adopt('run-ghost', { ord: 4, prompt: 'the gate', lifecycle: 'open', receivedAt: '2026-10-10T10:00:00Z' });
+      const res = await app.inject({ method: 'GET', url: '/api/v1/runs/run-ghost/gate' });
+      expect(res.statusCode).toBe(503);
+      expect(res.json()).toMatchObject({ code: 'gate_actions_unavailable' });
+    });
+    it('answers 503 for a thrown read of a cached open-row gate whose run view is unknown', async () => {
+      gateCache.forget('run-ghost');
+      gateCache.adopt('run-ghost', { ord: 4, prompt: 'the gate', lifecycle: 'open', receivedAt: '2026-10-10T10:00:00Z' });
+      readActions.mockRejectedValue(new Error('engine read failed'));
+      const res = await app.inject({ method: 'GET', url: '/api/v1/runs/run-ghost/gate' });
+      expect(res.statusCode).toBe(503);
+    });
+    it('still answers 503 when the read throws', async () => {
+      readActions.mockRejectedValue(new Error('engine read failed'));
+      const res = await app.inject({ method: 'GET', url: '/api/v1/runs/run-rowless/gate' });
+      expect(res.statusCode).toBe(503);
+    });
   });
 
   describe.each(['record', 'cache'])('action read failures on the %s path (crew#1579)', (path) => {
