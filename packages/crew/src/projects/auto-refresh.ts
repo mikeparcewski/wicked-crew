@@ -36,7 +36,10 @@
 
 import type { CoreAdapter } from '../core/adapter.js';
 import type { ProjectGraphRefreshResult } from '../core/types.js';
-import { refreshProjectGraph, refreshProjectGraphAfter } from './graph.js';
+import { lstatSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { graphReadersError, prepareProjectGraphForReaders, refreshProjectGraph, refreshProjectGraphAfter } from './graph.js';
+import { isValidRepoLabel, projectGraphDb, projectGraphRoot } from './graph-paths.js';
 
 export interface AutoRefreshDeps {
   /** What made the repo's graph move (`onboarding of r1 completed`, `the repo watcher re-indexed r1`), for the log. */
@@ -61,6 +64,8 @@ export interface AutoRefreshOutcome {
     failed: string[];
     /** X1: the link step did not publish (`link.error`, or a member `incomplete`): owed, retried. */
     linkFailed?: string;
+    /** crew#1497: the graph is not ready for read-only seats (its preparation failed): owed, retried. */
+    readersFailed?: string;
   }[];
   /** Projects whose refresh threw — the message, never the run. */
   failed: { projectId: string; error: string }[];
@@ -119,6 +124,7 @@ export async function refreshProjectGraphsForRepo(
       const linkFailed =
         result.link?.error ??
         ((result.link?.incomplete?.length ?? 0) > 0 ? `incomplete: ${result.link!.incomplete!.join(', ')}` : undefined);
+      const readersFailed = graphReadersError(projectGraphDb(projectId));
       out.refreshed.push({
         projectId,
         rounds,
@@ -126,6 +132,7 @@ export async function refreshProjectGraphsForRepo(
         skipped: result.skipped,
         failed,
         ...(linkFailed === undefined ? {} : { linkFailed }),
+        ...(readersFailed === null ? {} : { readersFailed }),
       });
       deps.log(
         `[projects] auto-refresh: project ${projectId} graph is ${result.status.state} ` +
@@ -138,4 +145,54 @@ export async function refreshProjectGraphsForRepo(
     }
   }
   return out;
+}
+
+/**
+ * crew#1497: at boot, before the daemon serves a chat or resumes a run, prepare every project graph on disk for
+ * read-only seats: a seat's estate refuses a graph whose schema predates its build or that is in WAL mode, and an
+ * upgrade leaves both behind. Preparation only (`prepareProjectGraphForReaders`: estate's `stats --journal delete`, in
+ * the project's refresh slot; a failure is the project's visible refresh failure); no index, no engine. A directory counts only when it is a real
+ * directory with a valid id holding a regular `code-graph.db` and the crew `manifest.json` beside it. Awaited by the
+ * caller; never throws.
+ */
+export async function sweepProjectGraphsForReaders(deps: {
+  log: (msg: string) => void;
+  prepare?: (projectId: string) => Promise<string | null>;
+  root?: string;
+}): Promise<{ prepared: string[]; failed: { projectId: string; error: string }[] }> {
+  const root = deps.root ?? projectGraphRoot();
+  const prepare = deps.prepare ?? ((id: string) => prepareProjectGraphForReaders(id));
+  const out = { prepared: [] as string[], failed: [] as { projectId: string; error: string }[] };
+  let ids: string[];
+  try {
+    ids = readdirSync(root, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && isValidRepoLabel(d.name) && isRegularFile(join(root, d.name, 'code-graph.db')) && isRegularFile(join(root, d.name, 'manifest.json')))
+      .map((d) => d.name)
+      .sort();
+  } catch {
+    return out; // No project graphs yet.
+  }
+  for (const id of ids) {
+    let why: string | null;
+    try {
+      why = await prepare(id);
+    } catch (err) {
+      why = message(err);
+    }
+    if (why === null) out.prepared.push(id);
+    else {
+      out.failed.push({ projectId: id, error: why });
+      deps.log(`project graph ${id}: not ready for read-only seats at boot (${why}); seats' estate refuses it with this cause until its next refresh`);
+    }
+  }
+  if (ids.length > 0) deps.log(`project graphs prepared for read-only seats at boot: ${out.prepared.length} of ${ids.length}`);
+  return out;
+}
+
+function isRegularFile(path: string): boolean {
+  try {
+    return lstatSync(path).isFile();
+  } catch {
+    return false;
+  }
 }

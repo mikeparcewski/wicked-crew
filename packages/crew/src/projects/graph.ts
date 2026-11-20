@@ -39,9 +39,10 @@
  * estate's own R3 rule exists to prevent, and it is the failure FINDING-069 actually shipped.
  */
 
-import { existsSync } from 'node:fs';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { constants as fsConstants, existsSync, lstatSync } from 'node:fs';
+import { mkdir, open, rename, unlink } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { basename, dirname, resolve as resolvePath } from 'node:path';
 
 import type { CoreAdapter, IndexBudget } from '../core/adapter.js';
 import { ExecOutputTooLarge, execCapped } from '../core/exec.js';
@@ -61,7 +62,7 @@ import type {
   ProjectGraphStatus,
   RepoEntry,
 } from '../core/types.js';
-import { projectGraphDb, projectGraphManifest, repoLabel } from './graph-paths.js';
+import { projectGraphDb, projectGraphManifest, projectGraphRoot, repoLabel } from './graph-paths.js';
 
 /** The sentence every project-graph response carries. Stated on the wire, not just in this file. */
 export const CO_LOCATION_NOTE =
@@ -218,7 +219,7 @@ function message(err: unknown): string {
 
 // ── The manifest ──────────────────────────────────────────────────────────────
 
-interface ManifestRepo {
+export interface ManifestRepo {
   repoId: string;
   label: string;
   rootPath: string;
@@ -227,15 +228,26 @@ interface ManifestRepo {
   indexedAt: number;
 }
 
-interface Manifest {
+export interface Manifest {
   version: 1;
   projectId: string;
   repos: ManifestRepo[];
 }
 
-async function readManifest(projectId: string, env: NodeJS.ProcessEnv): Promise<Manifest | null> {
+/** Open flags that never follow a link at the last step (`O_NOFOLLOW` is 0 where the platform has none). */
+const NOFOLLOW = fsConstants.O_NOFOLLOW ?? 0;
+
+export async function readManifest(projectId: string, env: NodeJS.ProcessEnv): Promise<Manifest | null> {
   try {
-    const raw = JSON.parse(await readFile(projectGraphManifest(projectId, env), 'utf8')) as Manifest;
+    // A link in place of the manifest is not crew's manifest: it reads as missing (re-index everything).
+    const fh = await open(projectGraphManifest(projectId, env), fsConstants.O_RDONLY | NOFOLLOW);
+    let text: string;
+    try {
+      text = await fh.readFile('utf8');
+    } finally {
+      await fh.close();
+    }
+    const raw = JSON.parse(text) as Manifest;
     if (raw?.version !== 1 || !Array.isArray(raw.repos)) return null;
     return raw;
   } catch {
@@ -247,12 +259,109 @@ async function readManifest(projectId: string, env: NodeJS.ProcessEnv): Promise<
   }
 }
 
-async function writeManifest(projectId: string, manifest: Manifest, env: NodeJS.ProcessEnv): Promise<void> {
+export async function writeManifest(projectId: string, manifest: Manifest, env: NodeJS.ProcessEnv): Promise<void> {
   const path = projectGraphManifest(projectId, env);
   await mkdir(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}`;
-  await writeFile(tmp, JSON.stringify(manifest, null, 2), 'utf8');
+  // crew#1497: a fresh, unguessable temp name created exclusively (`O_EXCL` never follows or reuses whatever is at
+  // the name, a link included), then renamed over the manifest (a rename replaces a link; it never writes through one).
+  const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
+  const fh = await open(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | NOFOLLOW, 0o644);
+  try {
+    await fh.writeFile(JSON.stringify(manifest, null, 2), 'utf8');
+  } catch (err) {
+    await fh.close().catch(() => undefined);
+    await unlink(tmp).catch(() => undefined);
+    throw err;
+  }
+  await fh.close();
   await rename(tmp, path);
+}
+
+/** Upper bound on estate's writer open plus its journal switch (it waits up to 15 s for other connections). */
+const GRAPH_PREPARE_TIMEOUT_MS = 120_000;
+
+/**
+ * crew#1497: make the project graph readable by a seat that may only read it. A seat's read-only estate refuses a
+ * graph whose schema is older than its own build, and cannot open a WAL graph from a directory it cannot write. So the
+ * owner does both after its writes, with estate's own binary (only estate's SQLite ever opens estate's graph):
+ * `wicked-estate stats --db <graph> --journal delete` is a writer open (estate migrates on every one, even when the
+ * refresh indexed nothing) that then leaves the graph in DELETE journal mode (wicked-estate#491, 0.35.7). Returns null
+ * when that landed, else why not; the caller records it as a failed refresh, and the project's chat gets no graph.
+ */
+export async function prepareGraphForReaders(dbPath: string, env: NodeJS.ProcessEnv = process.env, run: typeof execCapped = execCapped): Promise<string | null> {
+  const why = await prepareOnce(dbPath, env, run);
+  noteReaders(dbPath, why);
+  return why;
+}
+
+async function prepareOnce(dbPath: string, env: NodeJS.ProcessEnv, run: typeof execCapped): Promise<string | null> {
+  // Never through a link: the migration and the journal switch would land on whatever it names (codex r2 #18).
+  try {
+    if (!lstatSync(dbPath).isFile()) return 'the graph is not a regular file';
+  } catch (err) {
+    return message(err);
+  }
+  try {
+    await run(estateExe(env), ['stats', '--db', dbPath, '--journal', 'delete'], { timeout: GRAPH_PREPARE_TIMEOUT_MS });
+    return null;
+  } catch (err) {
+    // The message carries estate's stderr (a locked graph, an older estate without `--journal`): one line for a status.
+    return `wicked-estate stats --journal delete failed (${stderrTail(message(err).replace(/\s+/gu, ' '), 400)}); it needs wicked-estate 0.35.7 or later`;
+  }
+}
+
+/** Why each project graph is not ready for read-only seats, by db path; absent when it is (codex r2 #1). */
+const readersNotReady = new Map<string, string>();
+
+function noteReaders(dbPath: string, why: string | null): void {
+  if (why === null) readersNotReady.delete(resolvePath(dbPath));
+  else readersNotReady.set(resolvePath(dbPath), why);
+}
+
+/** Why the graph at `dbPath` is not ready for read-only seats (its last preparation failed), or null. */
+export function graphReadersError(dbPath: string): string | null {
+  return readersNotReady.get(resolvePath(dbPath)) ?? null;
+}
+
+/** Whether `dbPath` is a project graph this daemon owns (`<project-graph root>/<id>/code-graph.db`). */
+function isProjectGraphDb(dbPath: string, env: NodeJS.ProcessEnv): boolean {
+  const abs = resolvePath(dbPath);
+  return basename(abs) === PROJECT_GRAPH_DB_NAME && dirname(dirname(abs)) === resolvePath(projectGraphRoot(env));
+}
+const PROJECT_GRAPH_DB_NAME = 'code-graph.db';
+
+/**
+ * crew#1497 (codex r2 #2): estate's CLI opens a graph as a writer for every verb, reads included, and a writer open
+ * switches it to WAL. A read-only seat cannot read a WAL graph from a directory it cannot write. So each of crew's own
+ * CLI reads of a project graph puts it back in DELETE mode afterwards (a failure is recorded like a failed
+ * preparation). Any other graph is read as before.
+ */
+export async function readProjectGraph<T>(dbPath: string, read: () => Promise<T>, env: NodeJS.ProcessEnv = process.env, run: typeof execCapped = execCapped): Promise<T> {
+  try {
+    return await read();
+  } finally {
+    if (isProjectGraphDb(dbPath, env) && existsSync(dbPath)) noteReaders(dbPath, await prepareOnce(dbPath, env, run));
+  }
+}
+
+/**
+ * Prepare one project's graph for read-only seats in that project's refresh slot: after any refresh in flight, so the
+ * migration and journal switch never interleave with its index. Returns null when ready, else why not.
+ */
+export async function prepareProjectGraphForReaders(projectId: string, env: NodeJS.ProcessEnv = process.env, run: typeof execCapped = execCapped): Promise<string | null> {
+  const running = inFlight.get(projectId);
+  if (running !== undefined) await running.promise.catch(() => undefined);
+  const why = await prepareGraphForReaders(projectGraphDb(projectId, env), env, run);
+  // Said where a person sees a refresh fail (the project's refresh status), not only in the log (coord, crew#1597).
+  if (why !== null) {
+    const at = Date.now();
+    const prior = refreshStates.get(projectId);
+    refreshStates.set(projectId, {
+      ...(prior ?? { state: 'idle', startedAt: at, finishedAt: at, budgetMs: null, repoId: null, repoStartedAt: null, repoBudgetMs: null }),
+      lastFailure: { at, repoId: null, label: null, error: `the graph is not ready for read-only seats: ${why}`, timedOut: false, budgetMs: null },
+    });
+  }
+  return why;
 }
 
 // ── Membership → labelled repos ───────────────────────────────────────────────
@@ -613,6 +722,20 @@ function buildStatus({ projectId, members, manifest, dbExists, env }: StatusInpu
       action: 'projects.graph.refresh',
     };
   }
+  // crew#1497: a graph its seats cannot read (its preparation failed) is never bound to a chat or a run. The state
+  // stays what the graph holds; dbPath is withheld, and the detail says why and what fixes it.
+  const readers = graphReadersError(dbPath);
+  if (readers !== null) {
+    return {
+      ...base,
+      dbPath: null,
+      state: indexedCount === 1 ? 'ready-single-repo' : 'ready',
+      detail:
+        `This project's code graph could not be prepared for its chats and runs (${readers}), so they get no ` +
+        `project graph until a refresh succeeds. Refresh it from the project page.`,
+      action: 'projects.graph.refresh',
+    };
+  }
   if (indexedCount === 1) {
     return {
       ...base,
@@ -813,6 +936,11 @@ async function doRefresh(
     if (failedRow === undefined && linkFailed !== undefined) {
       // The indexes landed but the link step did not publish (codex r1): still a failure, owed by the watcher.
       lastFailure = { at: Date.now(), repoId: null, label: null, error: `the link step did not publish: ${linkFailed}`, timedOut: false, budgetMs: null };
+    }
+    // crew#1497 (codex r2 #1): a graph read-only seats cannot read is a failed refresh, said in its status and owed.
+    const readers = graphReadersError(projectGraphDb(projectId, env));
+    if (failedRow === undefined && linkFailed === undefined && readers !== null) {
+      lastFailure = { at: Date.now(), repoId: null, label: null, error: `the graph is not ready for read-only seats: ${readers}`, timedOut: false, budgetMs: null };
     }
     if (failedRow !== undefined) {
       lastFailure = {
@@ -1044,6 +1172,11 @@ async function refreshOnce(
     env,
     log,
   );
+  // crew#1497: the last write of a refresh. Seats read the graph from a directory they cannot write.
+  if (existsSync(dbPath)) {
+    const why = await prepareGraphForReaders(dbPath, env);
+    if (why !== null) log?.(`project graph ${projectId}: ${dbPath} is not ready for read-only seats (${why}); their estate refuses it, with this cause, until the next refresh`);
+  }
   return {
     status: buildStatus({ projectId, members, manifest, dbExists: existsSync(dbPath), env }),
     indexed,
@@ -1405,7 +1538,7 @@ export async function projectBlastRadius(
   name: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<ProjectBlastRadius> {
-  const raw = (await readBlastRadiusPages(estateExe(env), name, q.dbPath, { timeout: QUERY_TIMEOUT_MS })) as {
+  const raw = (await readProjectGraph(q.dbPath, () => readBlastRadiusPages(estateExe(env), name, q.dbPath, { timeout: QUERY_TIMEOUT_MS }), env)) as {
     dependents?: RawHit[];
     unresolved?: number;
     target?: string;
@@ -1487,9 +1620,11 @@ export async function projectSymbolSearch(
   name: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<ProjectGraphSearch> {
-  const { stdout } = await execCapped(estateExe(env), ['resolve', name, '--db', q.dbPath, '--json'], {
-    timeout: QUERY_TIMEOUT_MS,
-  });
+  const { stdout } = await readProjectGraph(
+    q.dbPath,
+    () => execCapped(estateExe(env), ['resolve', name, '--db', q.dbPath, '--json'], { timeout: QUERY_TIMEOUT_MS }),
+    env,
+  );
   const { hits, byRepo } = attributeHits(JSON.parse(stdout), q.labels);
   return {
     projectId: q.status.projectId,

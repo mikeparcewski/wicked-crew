@@ -47,6 +47,23 @@ mentioned only where a daemon release depends on them.
   - Run it now does the same and writes what it found on the row before refusing.
 
   wicked-crew-api-types 0.215.0 (additive): `WorkflowSchedule.blocked`, `ScheduleBlocked`.
+- **A project chat searches each repository by its path, a failed search is not evidence, and the project graph is
+  readable by seats that may only read it (crew#1497).**
+  - **The scope statement:** hands the search form that works (one path per repository; the folder above them is
+    outside the read roots and was refused). It says a refused, failed or empty search is never read as "it does
+    not exist". The example command runs as written.
+  - **The project graph:** seats now get the graph directory read-only (wicked-core's grant, core-ts 0.15.46), and
+    their estate opens it read-only (wicked-estate 0.35.7). So every refresh now ends with one estate writer open,
+    `wicked-estate stats --db <graph> --journal delete` (needs wicked-estate 0.35.7): it migrates the graph and leaves
+    it in DELETE journal mode with estate's own SQLite. Nothing else opens the graph, and the daemon still loads no
+    SQLite library. At boot, every project graph is prepared the same way (no index) before a run is resumed or a
+    chat can open: that covers the graphs an upgrade left behind. crew's own CLI reads of a project graph (search,
+    blast radius, the chat's entity count) prepare it again afterwards, since estate's CLI opens every graph as a
+    writer. A graph that could not be prepared, at a refresh or at boot, is a failed refresh: the project's refresh
+    status says why, the graph is bound to no chat or run (the project page and the chat's scope say it is
+    unavailable and why), and it is retried like a failed link step. A graph that is a link is never prepared.
+  - **The manifest:** written through an exclusive, unguessable temp file renamed into place, and read without
+    following a link.
 
 ## [0.18.18] — 2026-11-19
 
