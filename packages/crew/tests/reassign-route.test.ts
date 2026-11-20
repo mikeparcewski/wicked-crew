@@ -191,6 +191,9 @@ describe('POST /runs/:id/reassign — the operator note (crew#1153)', () => {
       sessionsDetail: async (): Promise<SessionView[]> => views,
       listRepos: async () => [],
       listWorkflows: () => [],
+      supportsPlanSendBack: () => true,
+      // The expectation comes from an open gate record, never the cursor in gatedView.
+      interactionRequests: async () => [{ kind: 'gate', ord: 0, prompt: 'Continue?', created_at: 1 }],
       confirmGate: async (...args: unknown[]): Promise<string> => {
         calls.push(['confirmGate', ...args]);
         if (approveFails) throw new Error('approve exploded');
@@ -224,7 +227,7 @@ describe('POST /runs/:id/reassign — the operator note (crew#1153)', () => {
     expect(res.statusCode).toBe(200);
     expect(calls).toEqual([
       ['reassignUnit', 'r-gated', 0, 'codex'],
-      ['confirmGate', 'r-gated', true, 'host runtime blip, not the seat'],
+      ['confirmGate', 'r-gated', true, 'host runtime blip, not the seat', undefined, undefined, undefined, { ord: 0 }],
     ]);
     expect(reassigned()).toMatchObject({ approved: true, note: true });
     expect(JSON.stringify(events)).not.toContain('runtime blip');
@@ -234,19 +237,19 @@ describe('POST /runs/:id/reassign — the operator note (crew#1153)', () => {
     const res = await post('r-gated', { note: 'retry, the seat was fine' });
     expect(res.statusCode).toBe(200);
     expect(calls).toEqual([
-      ['confirmGate', 'r-gated', true, 'retry, the seat was fine'],
+      ['confirmGate', 'r-gated', true, 'retry, the seat was fine', undefined, undefined, undefined, { ord: 0 }],
       ['reassignUnit', 'r-gated', 0, null],
     ]);
     expect(reassigned()).toMatchObject({ note: true });
   });
 
-  it('without a note, or with a whitespace note, confirmGate gets exactly two arguments and the audit has no note', async () => {
+  it('without a note, or with a whitespace note, confirmGate carries the ord and the audit has no note', async () => {
     for (const body of [{ cli: 'codex' }, { cli: 'codex', note: '   \n\t ' }, { note: '' }]) {
       calls.length = 0;
       events.length = 0;
       const res = await post('r-gated', body);
       expect(res.statusCode).toBe(200);
-      expect(calls.find((c) => c[0] === 'confirmGate')).toEqual(['confirmGate', 'r-gated', true]);
+      expect(calls.find((c) => c[0] === 'confirmGate')).toEqual(['confirmGate', 'r-gated', true, undefined, undefined, undefined, undefined, { ord: 0 }]);
       expect(reassigned()).not.toHaveProperty('note');
     }
   });
@@ -289,7 +292,7 @@ describe('POST /runs/:id/reassign — the operator note (crew#1153)', () => {
     const blank = ' '.repeat(9000);
     const gated = await post('r-gated', { cli: 'codex', note: blank });
     expect(gated.statusCode).toBe(200);
-    expect(calls.find((c) => c[0] === 'confirmGate')).toEqual(['confirmGate', 'r-gated', true]);
+    expect(calls.find((c) => c[0] === 'confirmGate')).toEqual(['confirmGate', 'r-gated', true, undefined, undefined, undefined, undefined, { ord: 0 }]);
     expect(reassigned()).not.toHaveProperty('note');
     calls.length = 0;
     const exec = await post('r-exec', { note: blank });

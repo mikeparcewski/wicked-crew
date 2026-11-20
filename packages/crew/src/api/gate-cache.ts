@@ -195,6 +195,7 @@ const RESOLVE_ATTEMPTS = 3;
  */
 export class GateCache {
   private readonly entries = new Map<string, GateCacheEntry>();
+  private readonly hydrated = new Set<string>();
   /**
    * Per-run count of the LIVE gate-opening and gate-closing events `ingest` has folded. `resolve`
    * compares it across an async read of the record: a read some event overlapped is run again,
@@ -208,6 +209,13 @@ export class GateCache {
   ingest(event: CoreEvent): void {
     if (typeof event.session === 'string' && GATE_EVENTS.has(event.type)) {
       this.revisions.set(event.session, this.revision(event.session) + 1);
+      if (event.type === 'awaitingHuman' && this.hydrated.has(event.session)) {
+        const entry = this.entries.get(event.session);
+        // Live frames cannot be ordered against the durable read.
+        if (entry?.ord !== event.ord || entry?.prompt !== event.prompt) this.forget(event.session);
+        return;
+      }
+      this.hydrated.delete(event.session);
     }
     fold(this.entries, event);
   }
@@ -269,19 +277,21 @@ export class GateCache {
       try {
         found = await read();
       } catch (err) {
-        this.entries.delete(runId);
+        this.forget(runId);
         throw err;
       }
       if (this.revision(runId) !== seen) {
         // Whatever a live frame folded during this read is unverified until the re-read settles.
-        this.entries.delete(runId);
+        this.forget(runId);
         continue;
       }
-      if (isOpenGate(found)) this.entries.set(runId, found);
-      else this.entries.delete(runId);
+      if (isOpenGate(found)) {
+        this.entries.set(runId, found);
+        this.hydrated.add(runId);
+      } else this.forget(runId);
       return found;
     }
-    this.entries.delete(runId);
+    this.forget(runId);
     this.log.warn(
       `gate cache: live gate events for run ${runId} overlapped ${RESOLVE_ATTEMPTS} reads of its open gate; nothing verified, serving no gate`,
     );
@@ -303,6 +313,7 @@ export class GateCache {
    */
   forget(runId: string): void {
     this.entries.delete(runId);
+    this.hydrated.delete(runId);
   }
 
   /**
@@ -310,6 +321,7 @@ export class GateCache {
    * set, so it needs no guard; a read that awaited anything goes through `resolve`.
    */
   adopt(runId: string, entry: GateCacheEntry): void {
+    this.hydrated.delete(runId);
     this.entries.set(runId, entry);
   }
 
@@ -319,7 +331,7 @@ export class GateCache {
       views.filter((v) => v.session.status === 'awaiting_human').map((v) => v.session.id),
     );
     for (const id of [...this.entries.keys()]) {
-      if (!awaiting.has(id)) this.entries.delete(id);
+      if (!awaiting.has(id)) this.forget(id);
     }
   }
 }

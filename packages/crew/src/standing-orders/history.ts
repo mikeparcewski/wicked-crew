@@ -29,7 +29,8 @@ export interface DecidedGateRow {
   runId: string;
   ord: number | null;
   decidedAt: number;
-  decision: 'approve' | 'request_changes' | 'reject' | 'edit_plan';
+  decision: 'approve' | 'request_changes' | 'reject' | 'edit_plan' | 'recheck';
+  action?: string;
   actor: string;
   byOrder: boolean;
   gateKind: string | null;
@@ -83,15 +84,18 @@ function creatorBefore(units: SessionView['units'], ord: number): SessionView['u
   );
 }
 
+export const RECHECK_ACTIONS = new Set(['rejudge', 'retry_rules', 'retry_qe']);
+
 /**
- * The decision a `gate.decided` line records. A token outside the four named arms reads by the
- * line's `approve` flag (approve, else reject) — `floor_fix`
+ * The decision a `gate.decided` line records. Re-check arms stay distinct; other tokens outside
+ * the four named arms read by the line's `approve` flag (approve, else reject) — `floor_fix`
  * (crew#891, wicked-core#782: an approve with a note at a read-only phase's floor gate) IS an
  * approve, and the escalation arms (`extend`, `targeted`, `accept_partial`, `accept_suggestion`,
  * `amend_intent`) are all approve-shaped.
  */
 export function decisionOf(detail: Record<string, unknown>): DecidedGateRow['decision'] {
   const action = detail['action'];
+  if (typeof action === 'string' && RECHECK_ACTIONS.has(action)) return 'recheck';
   if (action === 'request_changes' || action === 'reject' || action === 'edit_plan' || action === 'approve') return action;
   return detail['approve'] === true ? 'approve' : 'reject';
 }
@@ -136,6 +140,7 @@ export async function decidedGates(deps: GateHistoryDeps, since: number | undefi
         ord,
         decidedAt: e.ts,
         decision,
+        ...(typeof detail['action'] === 'string' ? { action: detail['action'] } : {}),
         actor: actorId,
         byOrder: actorId.startsWith('standing-order:'),
         ...(detail['input'] === 'voice' ? { input: 'voice' as const } : {}),

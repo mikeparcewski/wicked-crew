@@ -2054,7 +2054,14 @@ export async function createServer(
       // when one is available, else the current seat recycled in place); null lets the engine
       // re-run the council.
       reassign: async (runId, ord, cli) => {
-        await adapter.reassignUnit(runId, ord, cli ?? null);
+        await registered.exclusive(runId, async () => {
+          const run = await adapter.runView(runId);
+          const cursor = run === undefined ? undefined : resolveCursorUnit(run);
+          if (run?.session.status !== 'executing' || cursor?.ord !== ord) {
+            throw new Error(`Run ${runId} moved on (status ${run?.session.status ?? 'gone'}, cursor ord ${cursor?.ord ?? 'none'}); nothing was reassigned.`);
+          }
+          await adapter.reassignUnit(runId, ord, cli ?? null);
+        });
       },
       // An automated actor touching a run is a privileged action exactly like an operator
       // doing it — one audit line per escalation, needs-you or not (task #88 posture).
@@ -2590,21 +2597,10 @@ export async function createServer(
   // (The seat-health `--version` recovery probe that armed here is retired — perf recon
   // fix #3; see seat-health.ts. Recovery = the seat's next real `ok` output.)
 
-  // Arm the stall watchdog's sweep (crew#287). ON in the daemon, OFF under a test runner
-  // unless a test opts in — a suite building servers over stub adapters must not have a
-  // background interval calling `sessionsDetail()` on them.
   if (repoWatchEnvOn && (options?.repoWatch?.enabled ?? !(process.env['VITEST'] !== undefined || process.env['NODE_ENV'] === 'test'))) {
     repoWatcher.start();
     app.addHook('onClose', async () => {
       await repoWatcher.stop();
-    });
-  }
-
-  const stallCfg = options?.stallWatchdog;
-  if (stallWatchdogArmed) {
-    stallWatchdog.start(stallCfg?.sweepIntervalMs);
-    app.addHook('onClose', async () => {
-      stallWatchdog.stop();
     });
   }
 
@@ -3056,6 +3052,15 @@ export async function createServer(
       decisionsEmit: projectBus !== null ? (type, payload, key) => projectBus.emit(type, payload, key) : null,
     },
   );
+  // Arm after registration: the websocket-plugin await above can yield to a sweep, whose reassign needs registered.
+  // ON in the daemon, OFF under a test runner unless a test opts in (crew#287).
+  if (stallWatchdogArmed) {
+    stallWatchdog.start(options?.stallWatchdog?.sweepIntervalMs);
+    app.addHook('onClose', async () => {
+      stallWatchdog.stop();
+    });
+  }
+
   // DC-S4a §6: records whose landing a restart interrupted are re-driven, idempotently (the review
   // proposal is keyed by the decision id). Off the boot path; a failure is a logged outcome.
   chatDecisionRecorder = registered.chatRecorder;
