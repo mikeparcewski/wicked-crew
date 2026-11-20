@@ -518,7 +518,7 @@ describe('the ask pieces (no database)', () => {
         const refused = await post(none, '/sources/tix/ask', { question: 'How many?' });
         expect(refused.statusCode).toBe(409);
         expect(refused.json()).toMatchObject({ code: 'no_seat' });
-        expect(String(refused.json().error)).toContain('write the SQL yourself');
+        expect(String(refused.json().error)).toContain('sign a seat in from the Helpers page, or write the SQL yourself');
       } finally {
         await none.close();
       }

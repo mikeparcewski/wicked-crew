@@ -144,7 +144,7 @@ export function acpFallbackLine(event: CoreEvent): string {
   const who = str(event, 'cliKey', 'cli') ?? 'the worker';
   const kind = str(event, 'fallbackKind', 'fallback_kind');
   if (kind !== null && AUTH_FALLBACK_KINDS.has(kind)) {
-    return `${who} is not signed in (${kind.replace(/_/g, ' ')}) — benched for this run; sign it in from the Agents page…`;
+    return `${who} is not signed in (${kind.replace(/_/g, ' ')}) — benched for this run; sign it in from the Helpers page…`;
   }
   // wicked-crew#998 / wicked-core#925: a governed unit whose admitted seat could not carry it on
   // ACP is REFUSED — nothing continues single-shot, and the run moves the work to another seat.

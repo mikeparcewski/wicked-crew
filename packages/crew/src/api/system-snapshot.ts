@@ -403,7 +403,7 @@ export async function probeBroker(input: BrokerProbeInput): Promise<SystemInfraR
     return infraRow('broker', 'degraded', `credential refresh failing: ${failing.join(', ')}; the credential is served until it expires`, 'Sign the CLI in again before its credential expires.', started, details, timeoutMs);
   }
   if (signedIn.length === 0) {
-    return infraRow('broker', 'degraded', `no CLI is signed in to the broker (${answered.join(', ')} answered signed out)`, 'Sign a CLI in on the Agents page.', started, details, timeoutMs);
+    return infraRow('broker', 'degraded', `no CLI is signed in to the broker (${answered.join(', ')} answered signed out)`, 'Sign a CLI in on the Helpers page.', started, details, timeoutMs);
   }
   return infraRow('broker', 'ok', `signed in: ${signedIn.join(', ')}${silent.length > 0 ? `; no answer from ${silent.join(', ')}` : ''}`, null, started, details, timeoutMs);
 }

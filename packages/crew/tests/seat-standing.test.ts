@@ -61,7 +61,7 @@ describe('seatStanding — what a council would do with the seat, as far as the 
     expect(s.council_eligible).toBe(false);
     expect(s.council_ineligible_reason).toMatch(/signed out/);
     expect(s.council_ineligible_reason).toMatch(/bench/);
-    expect(s.council_ineligible_reason).toMatch(/Agents page/);
+    expect(s.council_ineligible_reason).toMatch(/Helpers page/);
   });
 
   it('a free-tier seat with no credential IS eligible, and names its tier and its source', () => {
@@ -193,7 +193,7 @@ describe('chatSeatAdmission — the default seats of a chat, and WHY a seat is n
     expect(refused.ok).toBe(false);
     if (refused.ok) return;
     expect(refused.reason).toMatch(/signed out/);
-    expect(refused.reason).toMatch(/Agents page/);
+    expect(refused.reason).toMatch(/Helpers page/);
   });
 
   it('a SCOPED chat restates the engine rule: governed or sandboxed seats pass; an ungoverned adapter or no adapter is refused by name (F-2R2-007)', () => {

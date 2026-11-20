@@ -252,7 +252,7 @@ export function seatParser(deps: SeatParserDeps): (text: string) => Promise<Pars
     const out = await turn({
       problem: "Read a standing order: turn the person's words into one rule.",
       stepId: PARSE_STEP_ID,
-      noSeat: 'no seat can take a turn to read the order — sign a seat in from the Agents page',
+      noSeat: 'no seat can take a turn to read the order — sign a seat in from the Helpers page',
       instructions: async () => {
         const projects = adapter.projectsSupported()
           ? (await adapter.projectList()).map((p) => ({ id: p.id, name: p.name }))

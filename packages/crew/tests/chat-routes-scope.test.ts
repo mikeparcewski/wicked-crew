@@ -302,7 +302,7 @@ describe('POST /chats — scope lifecycle over a fake engine', () => {
       signedIn = () => false;
       const none = await open({ chatId: 'auth-none' });
       expect(none.statusCode).toBe(409);
-      expect((none.json() as { error: string }).error).toMatch(/every seat is signed out/);
+      expect((none.json() as { error: string }).error).toMatch(/every seat is signed out.*in from the Helpers page/);
       expect(chatOpen).not.toHaveBeenCalledWith('auth-none', expect.anything(), expect.anything(), expect.anything());
     } finally {
       spy.mockRestore();

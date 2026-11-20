@@ -304,10 +304,10 @@ function standingGate(
 ): string | null {
   if (!authUsable(read.auth)) {
     return authFailure !== null
-      ? `signed out — the seat itself reported no credential (${noCredentialCause(authFailure)}); sign it in from the Agents page`
+      ? `signed out — the seat itself reported no credential (${noCredentialCause(authFailure)}); sign it in from the Helpers page`
       : read.auth_source === 'probe'
-        ? `signed out — the seat's own auth check says ${probeWords(read.auth_evidence)}; sign it in from the Agents page`
-        : 'signed out — a council would bench this seat on its first ballot; sign it in from the Agents page';
+        ? `signed out — the seat's own auth check says ${probeWords(read.auth_evidence)}; sign it in from the Helpers page`
+        : 'signed out — a council would bench this seat on its first ballot; sign it in from the Helpers page';
   }
   // A seat the ENGINE benched in a recent run on its own refusal (`seatBenched`: out of quota, not
   // installed, signed out at work time) stays out until the window lifts or it does work again
@@ -364,7 +364,7 @@ export function chatSeatAdmission(
   const reasons: string[] = [];
   let source: ChatRefusalSource = 'scope';
   if (!authUsable(auth)) {
-    reasons.push('signed out — it cannot take a turn until it is signed in from the Agents page');
+    reasons.push('signed out — it cannot take a turn until it is signed in from the Helpers page');
     source = 'auth';
   }
   // crew#916 (wicked-core#572): an ask is a run, so it seats a seat for WORK. `enabled_for_council`
