@@ -10,6 +10,8 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+- **CI: the selftest pin moves to wicked-ci 3bd45ae (the advisory verdict now concludes, wicked-ci#76/#81).** The selftest job grants `checks: write` so the called workflow can publish its verdict check run; the advisory job still never blocks a merge.
+
 - **The B4 chat measure, `packages/crew/scripts/chat-probe.ts` (crew#1497).** It reports, per question, grounded answers
   with real `repo/path:line` citations, fabricated citations and internal-text leaks, over project chats it opens and
   closes itself. It fails closed: a question that errored, timed out, could not be closed, had a failed seat or got no
