@@ -2374,8 +2374,10 @@ export interface RunDiff {
  * events kept landing while the daemon read the run's record and nothing could be verified — retry
  * — and **409** `{ error, code: 'gate_unknown' }` when the engine's open gate rows disagree on the
  * ord. It also answers **503** `{ error, code: 'gate_actions_unavailable' }` with `Retry-After` when the
- * engine's action list for an open gate row could not be read (a thrown read, or another ord, after one
- * retry); a gate with no open row, or an unknown run, is served without `actions` instead. It serves the newest of the agreeing rows: the one a decision is judged by.
+ * engine's action list could not be read: a thrown read (after one retry), or another ord than the gate's while
+ * a gate row is open. Only when a re-read still shows no open row (or the run unknown) is the gate served
+ * without `actions`. A run with no cached gate and no open gate is 404. It serves the newest of the agreeing
+ * rows: the one a decision is judged by.
  * A decision is never authorized from this record: see {@link GateDecision.ord}.
  */
 export interface GateInfo {
