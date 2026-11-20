@@ -174,26 +174,25 @@ function relevance(r: CatalogRelation, terms: { direct: Set<string>; synonym: Se
   return score;
 }
 
-/** Seeds taken from the best matches; their foreign-key neighbours come next. */
-const ASK_SEEDS = 5;
-
-/** The readable relations in the order detail is offered: the best matches, their foreign-key neighbours, then catalog order. */
+/** The readable relations in the order detail is offered: all matches, their foreign-key neighbours, then catalog order. */
 function rankedByQuestion(readable: CatalogRelation[], question: string): CatalogRelation[] {
   const terms = questionTerms(question);
   if (terms.direct.size === 0) return readable;
   const scored = readable.map((r, i) => ({ r, i, s: relevance(r, terms) })).filter((x) => x.s > 0);
   scored.sort((a, b) => b.s - a.s || a.i - b.i);
-  const seeds = scored.slice(0, ASK_SEEDS).map((x) => x.r);
-  if (seeds.length === 0) return readable;
-  const seedKeys = new Set(seeds.map((r) => qualified(r.schema, r.name)));
+  const matches = scored.map((x) => x.r);
+  if (matches.length === 0) return readable;
+  const relationKey = (schema: string | null, name: string): string => JSON.stringify([schema, name]);
+  const matchKeys = new Set(matches.map((r) => relationKey(r.schema, r.name)));
+  const referencedKeys = new Set(matches.flatMap((r) => r.foreignKeys.map((f) => relationKey(f.references.schema, f.references.table))));
   const neighbours = readable.filter((r) => {
-    const key = qualified(r.schema, r.name);
-    if (seedKeys.has(key)) return false;
-    // Outgoing (a seed references it) or incoming (it references a seed): by the full schema + table, never the bare name.
-    return r.foreignKeys.some((f) => seedKeys.has(qualified(f.references.schema, f.references.table))) || seeds.some((sd) => sd.foreignKeys.some((f) => qualified(f.references.schema, f.references.table) === key));
+    const key = relationKey(r.schema, r.name);
+    if (matchKeys.has(key)) return false;
+    // Outgoing (a match references it) or incoming (it references a match): by the (schema, name) pair.
+    return referencedKeys.has(key) || r.foreignKeys.some((f) => matchKeys.has(relationKey(f.references.schema, f.references.table)));
   });
-  const first = new Set([...seeds, ...neighbours]);
-  return [...seeds, ...neighbours, ...readable.filter((r) => !first.has(r))];
+  const first = new Set([...matches, ...neighbours]);
+  return [...matches, ...neighbours, ...readable.filter((r) => !first.has(r))];
 }
 
 /**
