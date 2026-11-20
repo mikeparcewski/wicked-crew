@@ -745,6 +745,18 @@ describe('interactive bridge trees (F-W1-103)', () => {
     expect(parseBridgeChildren([DAEMON, acp, LIVE_WRAPPER, LIVE_SERVER].join('\n'), 6556)).toEqual([700, 84428, 84710]);
   });
 
+  it.each([true, false])('parseBridgeChildren reaches the leaf through a mid process (serve: %s), excluding plain helpers', (midServes) => {
+    const mid = midServes ? `sh -c ${INTERACTIVE_BIN} serve --root ${STATE}` : 'sh /some/helper.sh';
+    const listing = [
+      LIVE_WRAPPER,
+      ` 84710 84428 ${mid}`,
+      ` 84712 84710 node /opt/bin/${INTERACTIVE_BIN} serve --root ${STATE}`,
+      ' 84713 84710 node /some/helper.js',
+      OPERATOR_SERVE,
+    ].join('\n');
+    expect(parseBridgeChildren(listing, 6556)).toEqual(midServes ? [84428, 84710, 84712] : [84428, 84712]);
+  });
+
   it('parseOrphanedInteractiveBridges: every ppid-1 tree with an absolute --root, wrapper first then its serve children; parented trees and lookalikes excluded', () => {
     expect(parseOrphanedInteractiveBridges(ALL)).toEqual([
       { root: PROJ, pids: [96633, 98034] },
@@ -965,6 +977,74 @@ describe('interactive bridge trees (F-W1-103)', () => {
             /* gone */
           }
         }
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'shutdown reaps a real wrapper → mid → leaf tree spawned like the pool does, leaf included',
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'wi-reap-three-'));
+      const fixture = join(root, `${INTERACTIVE_BIN}.js`);
+      writeFileSync(fixture, `
+        const { spawn } = require('node:child_process');
+        const role = process.argv.at(-1);
+        if (role === 'leaf') {
+          process.stdout.write(JSON.stringify([process.ppid, process.pid]) + '\\n');
+        } else {
+          const next = role === 'wrapper' ? 'mid' : 'leaf';
+          const c = spawn(process.execPath, [__filename, ...process.argv.slice(2, -1), next], {
+            stdio: ['ignore', 'pipe', 'inherit'],
+          });
+          c.stdout.pipe(process.stdout);
+        }
+        setInterval(() => {}, 1000);
+      `);
+      const wrapper = spawn(process.execPath, [fixture, 'serve', '--root', root, 'wrapper'], {
+        detached: true,
+        stdio: ['ignore', 'pipe', 'inherit'],
+      });
+      const wrapperPid = pidOf(wrapper);
+      const wrapperExited = once(wrapper, 'exit');
+      const ownedPids = [wrapperPid];
+      try {
+        const [midPid, leafPid] = JSON.parse(await new Promise<string>((resolve, reject) => {
+          let output = '';
+          wrapper.once('error', reject);
+          wrapper.stdout?.on('data', (d: Buffer) => {
+            output += String(d);
+            if (output.includes('\n')) resolve(output.trim());
+          });
+        })) as [number, number];
+        ownedPids.push(midPid, leafPid);
+        expect(ownedPids.every((pid) => Number.isInteger(pid) && pid > 0)).toBe(true);
+        expect(parentPidOf(midPid)).toBe(wrapperPid);
+        expect(parentPidOf(leafPid)).toBe(midPid);
+        expect(pidAlive(leafPid)).toBe(true);
+
+        // Real discovery and signals, fenced to the pids this fixture spawned.
+        await new BridgeReaper({
+          graceMs: 2_000,
+          kill: (pid, signal) => {
+            expect(ownedPids).toContain(pid);
+            process.kill(pid, signal);
+          },
+        }).shutdown();
+
+        const [, signal] = (await wrapperExited) as [number | null, NodeJS.Signals | null];
+        expect(signal).toBe('SIGTERM');
+        await waitUntil(() => !pidAlive(leafPid), 5_000);
+        expect(ownedPids.map((pid) => pidAlive(pid))).toEqual([false, false, false]);
+      } finally {
+        for (const pid of ownedPids.reverse()) {
+          try {
+            process.kill(pid, 'SIGKILL');
+          } catch {
+            /* gone */
+          }
+        }
+        rmSync(root, { recursive: true, force: true });
       }
     },
     20_000,

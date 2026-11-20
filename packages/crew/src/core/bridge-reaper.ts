@@ -244,9 +244,10 @@ function parseListing(listing: string): ProcessRow[] {
 
 /**
  * A `pid ppid command` process listing → the pids of the DIRECT children of `parentPid` whose
- * command line names a bridge binary or an interactive `serve`, plus the `serve` children of those
- * interactive wrappers (this daemon's grandchildren, F-W1-103). Pure, so the parsing is testable
- * without a real process table.
+ * command line names a bridge binary or an interactive `serve`, plus every `serve` descendant of
+ * those interactive wrappers, traversing through any intermediate process (crew#1502). The walk
+ * is cycle-safe; non-serve descendants are traversed but never returned. Pure, so the parsing is
+ * testable without a real process table.
  */
 export function parseBridgeChildren(listing: string, parentPid: number): number[] {
   const rows = parseListing(listing);
@@ -263,10 +264,22 @@ export function parseBridgeChildren(listing: string, parentPid: number): number[
       wrappers.push(pid);
     }
   }
-  // The interactive server is the npm wrapper's child — this daemon's GRANDCHILD — and a SIGTERM
-  // to the wrapper alone orphans it (F-W1-103). The pair is one tree; reap both.
-  for (const { pid, ppid, command } of rows) {
-    if (wrappers.includes(ppid) && pid !== parentPid && !pids.includes(pid) && isInteractiveServe(command)) pids.push(pid);
+  // npx can insert a shell between its wrapper and the server; follow the whole tree.
+  const children = new Map<number, ProcessRow[]>();
+  for (const row of rows) {
+    const siblings = children.get(row.ppid);
+    if (siblings === undefined) children.set(row.ppid, [row]);
+    else siblings.push(row);
+  }
+  const pending = [...wrappers];
+  const visited = new Set([parentPid, ...pids]);
+  for (const ancestor of pending) {
+    for (const { pid, command } of children.get(ancestor) ?? []) {
+      if (visited.has(pid)) continue;
+      visited.add(pid);
+      pending.push(pid);
+      if (isInteractiveServe(command)) pids.push(pid);
+    }
   }
   return pids;
 }
