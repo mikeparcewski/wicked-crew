@@ -297,6 +297,40 @@ describe('installService / uninstallService', () => {
     expect(lines.join('\n')).toContain('loginctl enable-linger');
   });
 
+  describe.each([false, true])('systemd unavailable (WSL: %s)', (wsl) => {
+    it.each([
+      [127, 'spawnSync systemctl ENOENT'],
+      [1, 'System has not been booted with systemd as init system (PID 1). Can\'t operate.'],
+      [1, 'Failed to connect to bus: No medium found'],
+    ])('reports exit %s / %s plainly and stops installation', async (status, stderr) => {
+      const home = tmpHome();
+      const { deps, calls, lines } = fakeDeps('linux', home);
+      deps.run = (cmd, args) => {
+        calls.push([cmd, ...args].join(' '));
+        return { status, stdout: '', stderr };
+      };
+      expect(await installService(INPUT(home), { ...deps, wsl })).toBe(1);
+      expect(calls).toEqual(['systemctl --user daemon-reload']);
+      expect(lines).toEqual([
+        'wicked-crew: systemd is not running.' +
+          (wsl ? ' Set `[boot] systemd=true` in /etc/wsl.conf, then run `wsl --shutdown`.' : ''),
+      ]);
+      expect(lines.join('\n')).not.toContain('spawnSync');
+      expect(lines.join('\n')).not.toMatch(/^\s+at /m);
+    });
+  });
+
+  it('systemd: unrelated failures keep the stderr and unit-file path', async () => {
+    const home = tmpHome();
+    const { deps, lines } = fakeDeps('linux', home);
+    deps.run = () => ({ status: 1, stdout: '', stderr: 'Access denied' });
+    expect(await installService(INPUT(home), deps)).toBe(1);
+    expect(lines).toEqual([
+      'wicked-crew: `systemctl --user daemon-reload` failed (exit 1): Access denied',
+      `The unit file is at ${serviceUnitPath('linux', home)}; remove it with \`wicked-crew serve --uninstall-service\`.`,
+    ]);
+  });
+
   it('a failed service-manager call exits 1 with its stderr', async () => {
     const home = tmpHome();
     const { deps, lines } = fakeDeps('darwin', home);

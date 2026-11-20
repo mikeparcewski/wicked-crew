@@ -257,6 +257,8 @@ export const runCommand: CommandRunner = (cmd, args) => {
 
 export interface ServiceDeps {
   platform: ServicePlatform;
+  /** Whether this is WSL (defaults to checking /proc/version for Microsoft). */
+  wsl?: boolean;
   home: string;
   uid: number;
   run: CommandRunner;
@@ -298,6 +300,14 @@ export function stableNodePath(execPath: string, path: string | undefined): stri
     }
   }
   return execPath;
+}
+
+function isWsl(): boolean {
+  try {
+    return /microsoft/i.test(readFileSync('/proc/version', 'utf8'));
+  } catch {
+    return false;
+  }
 }
 
 /** `0` on success, `1` on a refusal or a failed service-manager call (the reason is logged). */
@@ -366,6 +376,14 @@ export async function installService(input: InstallInput, deps: ServiceDeps): Pr
   for (const [cmd, args, required] of steps) {
     const r = deps.run(cmd, args);
     if (required && r.status !== 0) {
+      if (deps.platform === 'linux' && /ENOENT|System has not been booted with systemd|Failed to connect to bus/i.test(r.stderr)) {
+        const wsl = deps.wsl ?? isWsl();
+        deps.log(
+          'wicked-crew: systemd is not running.' +
+            (wsl ? ' Set `[boot] systemd=true` in /etc/wsl.conf, then run `wsl --shutdown`.' : ''),
+        );
+        return 1;
+      }
       deps.log(`wicked-crew: \`${cmd} ${args.join(' ')}\` failed (exit ${r.status ?? 'signal'}): ${(r.stderr || r.stdout).trim()}`);
       deps.log(`The unit file is at ${unitPath}; remove it with \`wicked-crew serve --uninstall-service\`.`);
       return 1;
