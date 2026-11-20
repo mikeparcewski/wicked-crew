@@ -49,6 +49,8 @@ beforeAll(() => {
     view(PARKED, 'awaiting_human'),
     view(FINISHED, 'completed'),
   ];
+  // The stub engine does not know these faked runs; an unreadable actions list is a 503 now (crew#1579).
+  adapter.gateActions = async () => null;
   adapter.runEvents = async () => {
     eventReads += 1;
     return events;
