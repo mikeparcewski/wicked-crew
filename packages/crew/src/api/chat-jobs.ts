@@ -152,6 +152,8 @@ export interface JobFacts {
 }
 
 export interface JobContext {
+  /** The seat pool was drawn without a readable newWorkSeats setting. */
+  seatsUnread?: boolean;
   chatId: string;
   pid: string;
   turnId: string | null;

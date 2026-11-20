@@ -41,10 +41,13 @@ const JWT = [b64u({ alg: 'none' }), b64u({ sub: 'crew-test' }), b64u('dummy')].j
 const SP_SECRET = 'sp-SECRET-client-value-42';
 
 const roots: string[] = [];
-const servers: Server[] = [];
+const servers: Array<{ server: Server; childrenClosed: Promise<void>[] }> = [];
 afterEach(async () => {
-  for (const s of servers.splice(0)) await new Promise((r) => s.close(() => r(undefined)));
-  for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
+  for (const { server, childrenClosed } of servers.splice(0)) {
+    await new Promise<void>((r) => server.close(() => r()));
+    await Promise.all(childrenClosed);
+  }
+  for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 function git(cwd: string, ...args: string[]): string {
@@ -208,6 +211,7 @@ interface Ado {
 
 async function mockAdo(fx: Fx, o: { auth: string; existingPr?: number; refusePush?: boolean; mint?: string; prHead?: string; prStatus?: string }): Promise<Ado> {
   const state: Omit<Ado, 'url' | 'target'> = { prBodies: [], patches: [], threads: [], tokenForms: [], authSeen: [] };
+  const childrenClosed: Promise<void>[] = [];
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const u = new URL(req.url ?? '/', 'http://x');
     const chunks: Buffer[] = [];
@@ -292,6 +296,10 @@ async function mockAdo(fx: Fx, o: { auth: string; existingPr?: number; refusePus
             REMOTE_ADDR: '127.0.0.1',
           },
         });
+        childrenClosed.push(new Promise<void>((resolve) => cgi.once('close', () => resolve())));
+        cgi.stdin.on('error', (error: NodeJS.ErrnoException) => {
+          if (error.code !== 'EPIPE') throw error;
+        });
         const out: Buffer[] = [];
         cgi.stdout.on('data', (c: Buffer) => out.push(c));
         cgi.on('close', () => {
@@ -318,7 +326,7 @@ async function mockAdo(fx: Fx, o: { auth: string; existingPr?: number; refusePus
       res.end('not found');
     });
   });
-  servers.push(server);
+  servers.push({ server, childrenClosed });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
   const port = (server.address() as { port: number }).port;
   const url = `http://127.0.0.1:${port}`;
@@ -340,6 +348,25 @@ function bareBranches(fx: Fx): string[] {
 function expectNoSecret(text: string): void {
   for (const s of [PAT, Buffer.from(`:${PAT}`).toString('base64'), JWT, SP_SECRET]) expect(text).not.toContain(s);
 }
+
+describe('crew#1490 mock Azure DevOps CGI lifecycle', () => {
+  it('handles repeated large POSTs when git http-backend exits without reading stdin', async () => {
+    const fx = fixture();
+    const auth = `Basic ${Buffer.from(`:${PAT}`).toString('base64')}`;
+    const ado = await mockAdo(fx, { auth });
+    const body = 'x'.repeat(4 * 1024 * 1024);
+
+    for (let i = 0; i < 20; i++) {
+      const response = await fetch(`${ado.url}/org/proj/_git/repo/not-found`, {
+        method: 'POST',
+        headers: { authorization: auth },
+        body,
+      });
+      await response.text();
+      expect(response.status).toBe(404);
+    }
+  });
+});
 
 // ── pure: parsing, preflight, card, parsers ──────────────────────────────────────────────────────
 

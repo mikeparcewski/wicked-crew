@@ -1479,23 +1479,23 @@ export class CoreAdapter {
    * `council_eligible` to bench on and signed-out seats were convened. Resolved LAZILY, like the
    * origin above: the adapter exists before the tracker that knows the seats' standing does.
    */
-  private rosterProvider: ((() => unknown[]) & { ready?: () => Promise<void> }) | null = null;
+  private rosterProvider: (((opts?: { launch: true }) => unknown[]) & { ready?: () => Promise<void> }) | null = null;
 
   /** Hand the adapter the daemon's standing roster accessor (see `launchRoster`). */
-  setRosterProvider(get: (() => unknown[]) & { ready?: () => Promise<void> }): void {
+  setRosterProvider(get: ((opts?: { launch: true }) => unknown[]) & { ready?: () => Promise<void> }): void {
     this.rosterProvider = get;
   }
 
   /** The seat pool a launch from this adapter carries: standing-decorated when wired, else raw. */
-  launchRoster(): unknown[] {
-    return this.rosterProvider !== null ? this.rosterProvider() : CoreAdapter.roster();
+  launchRoster(opts?: { launch: true }): unknown[] {
+    return this.rosterProvider !== null ? this.rosterProvider(opts) : CoreAdapter.roster();
   }
 
   /** {@link launchRoster} after the seats' login checks answered (bounded, crew#645): an expired
    *  login reads signed out before the launch routes work to it. */
   async readyLaunchRoster(): Promise<unknown[]> {
     await this.rosterProvider?.ready?.();
-    return this.launchRoster();
+    return this.launchRoster({ launch: true });
   }
 
   constructor(opts: CoreAdapterOptions) {

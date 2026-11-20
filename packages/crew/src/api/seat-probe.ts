@@ -248,15 +248,19 @@ export class SeatProbe {
   /**
    * The cached answer for `seatKey` under `workerRoot` (`undefined` before the first probe
    * finishes, or for a seat with no probe). Never waits: a missing or stale answer starts one
-   * background refresh.
+   * background refresh. Strict launch reads use an inconclusive answer when held, or unknown
+   * while a stale check has not finished; ordinary reads keep the bounded display answer.
    */
-  read(seatKey: string, workerRoot: string | undefined): SeatProbeReading | undefined {
+  read(seatKey: string, workerRoot: string | undefined, strict = false): SeatProbeReading | undefined {
     if (!this.probes(seatKey)) return undefined;
     const hit = this.cache.get(cacheKey(seatKey, workerRoot));
     if (hit === undefined || this.stale(hit)) void this.refresh(seatKey, workerRoot);
     if (hit === undefined) return undefined;
+    if (strict && hit.inconclusive === undefined && this.stale(hit)) {
+      return { signedIn: null, check: hit.check, probedAt: hit.probedAt, detail: 'the login check did not finish' };
+    }
     // A kept answer past its window is not served, whether or not a refresh has landed since.
-    const served = hit.inconclusive !== undefined && this.now() - hit.atMs >= PROBE_KEEP_ANSWER_MS ? hit.inconclusive : hit;
+    const served = hit.inconclusive !== undefined && (strict || this.now() - hit.atMs >= PROBE_KEEP_ANSWER_MS) ? hit.inconclusive : hit;
     return {
       signedIn: served.signedIn,
       check: served.check,
@@ -267,16 +271,16 @@ export class SeatProbe {
   }
 
   /**
-   * Before a launch routes: probe every probed seat whose answer is missing or stale and wait for
-   * the answers, at most `waitMs` (a probe that is slower keeps running in the background, and the
-   * seat reads as it would have without the wait).
+   * Before a launch routes: refresh missing, stale or inconclusive answers, waiting at most
+   * `waitMs`. A slower probe keeps running. Kept definite answers are for display only: any
+   * inconclusive reading still held after the wait is served by strict launch reads.
    */
   async ensureFresh(seatKeys: string[], workerRoot: string | undefined, waitMs: number = LAUNCH_PROBE_WAIT_MS): Promise<void> {
     const jobs = seatKeys
       .filter((k) => this.probes(k))
       .filter((k) => {
         const hit = this.cache.get(cacheKey(k, workerRoot));
-        return hit === undefined || this.stale(hit);
+        return hit === undefined || hit.inconclusive !== undefined || this.stale(hit);
       })
       .map((k) => this.refresh(k, workerRoot));
     if (jobs.length === 0) return;

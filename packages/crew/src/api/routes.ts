@@ -2133,7 +2133,7 @@ export function registerRoutes(
         engine: adapter,
         roster: async () => {
           await rosterWithStanding.ready?.();
-          return JSON.stringify(launchRosterNaming(rosterWithStanding(), undefined));
+          return JSON.stringify(launchRosterNaming(rosterWithStanding({ launch: true }), undefined));
         },
         registry: runtime.mcp ?? null,
         grantOf: (slug, action) => appsWritePath?.getGrant(slug, action) ?? null,
@@ -3556,7 +3556,7 @@ export function registerRoutes(
       // (`core/engine-roster.ts`), so a signed-out seat is never convened, never a judge.
       // (operator ruling 2026-10-11) …minus the opt-in seats (opencode): a launch gets one only
       // when it names it.
-      clisJson: b.clisJson ?? JSON.stringify(launchRosterNaming(rosterWithStanding(), b.primary)),
+      clisJson: b.clisJson ?? JSON.stringify(launchRosterNaming(rosterWithStanding({ launch: true }), b.primary)),
     };
     // A capture launch (api/capture.ts) reads its materials from a per-run inbox outside every
     // sandbox: the capture route registered it under the run id it minted.
@@ -4311,7 +4311,7 @@ export function registerRoutes(
       // by name, never launched on a stale snapshot. A seat added meanwhile still doesn't join (narrowed to the card).
       await rosterWithStanding.ready?.();
       // crew#1590: every seat on the card is named, so an opt-in seat the person picked is on the roster too.
-      const { clisJson } = jobLaunchRoster(launchRosterNaming(rosterWithStanding(), p.seats?.lead ?? undefined, p.seats?.keys ?? []), p);
+      const { clisJson } = jobLaunchRoster(launchRosterNaming(rosterWithStanding({ launch: true }), p.seats?.lead ?? undefined, p.seats?.keys ?? []), p);
       const common = jobLaunchCommon(p, { runId: d.identity.runId, chatId: d.chatId }, {
         ...(clisJson !== undefined ? { clisJson } : {}),
         selfSeated,
