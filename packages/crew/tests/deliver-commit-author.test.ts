@@ -48,7 +48,7 @@ afterEach(async () => {
 });
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], { cwd, encoding: 'utf8', env: process.env }).trim();
+  return execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], { cwd, encoding: 'utf8', env: { ...process.env } }).trim();
 }
 
 function fixture() {
