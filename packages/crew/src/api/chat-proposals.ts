@@ -94,6 +94,7 @@ import {
   SEAT_WORDS,
   seatProtections,
   seatRemovalNote,
+  seatsNeeded,
   briefOf,
   inputLines,
   SELF_SEATED,
@@ -3075,7 +3076,7 @@ export class ChatProposals {
     if (dropped.length > 0) throw new EditRefusal(`that would drop ${checksLabel(dropped)}; check the job again`);
     if (out.seats !== undefined && out.shape !== undefined) {
       const r = resolveOption(out.shape.card, out.shape.option, ctx.served);
-      if (r !== null && !(r.workflow !== null && SELF_SEATED.has(r.workflow)) && out.seats.keys.length < 1 + (r.resolved.seats.distinctEvaluator ? 1 : 0) + (r.resolved.seats.distinctJudge ? 1 : 0)) {
+      if (r !== null && !(r.workflow !== null && SELF_SEATED.has(r.workflow)) && out.seats.keys.length < seatsNeeded(r)) {
         throw new EditRefusal('this job needs another seat to check the one that builds');
       }
     }
