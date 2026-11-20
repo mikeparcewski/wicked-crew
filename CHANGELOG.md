@@ -10,6 +10,7 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+- fix(tests): the mock Azure DevOps CGI server ignores only stdin EPIPE when git http-backend exits early, and teardown waits for CGI children to close before removing temp directories with bounded retries (crew#1490).
 - fix(seats): a launch freshness check retries an inconclusive probe and discards any kept signed-in answer when the check finishes or its wait expires (crew#1607). This corrects the fresh-standing-at-Start claim from crew#1601 for probe timeouts: the roster reports unknown instead of treating a kept display answer as fresh sign-in evidence. Completed unknown probes retain their existing admission behavior. Ordinary roster reads retain their bounded display behavior.
 - fix(chat proposals): proposal broadcasts read `newWorkSeats` live and publish in append order, so a retry after a settings repair no longer broadcasts a cached block reason (crew#1603). Cards drawn while the setting was unreadable or invalid carry an optional `seatsUnread` marker (`wicked-crew-api-types`, additive). After repair, Start redraws their seats or document helpers under the same proposal id and answers 409 `seats_redrawn` with the new card; a second Start launches that card. This replaces the F1/F2 caveat that a card drawn during a refusal starts with its old displayed seats even when the repaired pick excludes them.
 
