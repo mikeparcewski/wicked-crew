@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Must be first: size libuv's pool before other imports can initialize it (crew#1495).
+import '../core/threadpool.js';
 import { performance } from 'node:perf_hooks';
 import { join, dirname } from 'node:path';
 import { closeSync, mkdirSync, openSync } from 'node:fs';
