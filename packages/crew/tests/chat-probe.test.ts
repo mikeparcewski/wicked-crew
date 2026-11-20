@@ -507,7 +507,8 @@ describe('chat probe: against a fixture chat API', () => {
   });
 
   it('SILENT-OK: a reply that lands after the deadline fails the question', async () => {
-    mode.lateMs = 1500;
+    // The reply lands 10x after the deadline, so a runner stall of a second cannot let it in first.
+    mode.lateMs = 5000;
     const { code, results } = await run(planes, ['--timeout-secs', '0.5']);
     expect(code).toBe(1);
     expect(results[0]!.error).toMatch(/did not settle/);
@@ -516,7 +517,10 @@ describe('chat probe: against a fixture chat API', () => {
 
   it('SILENT-OK: a failed messages read is never graded, whatever its body says', async () => {
     mode.messagesStatus = 500;
-    const { code, results } = await run(planes, ['--timeout-secs', '0.5']);
+    // The probe polls to the deadline and reports its last read. At the 20 ms default poll a read is nearly always in flight
+    // when the deadline lands, and the abort replaces "read 500" in the error. A 1 s poll puts the last read a full second
+    // before the deadline, so only a runner stall of about that size can reproduce the failure (the old one needed 20 ms).
+    const { code, results } = await run(planes, ['--timeout-secs', '3', '--poll-ms', '1000']);
     expect(code).toBe(1);
     expect(results[0]!.error).toMatch(/read 500/);
   });
