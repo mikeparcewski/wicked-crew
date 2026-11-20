@@ -927,6 +927,18 @@ export class DeliveryIndex {
         // older one (the #312 rule).
         decided.add(entry.runId);
       }
+      // Redelivery advances the lease without changing the original assurance. Replay the
+      // exact old→new chain oldest first; a malformed or unrelated audit row cannot move it.
+      for (const entry of (await audit.readAll({ action: 'run.redelivered' })).reverse()) {
+        if (typeof entry.runId !== 'string') continue;
+        const detail = entry.detail;
+        const next = detail?.['new'];
+        if (detail?.['url'] === this.urlFor(entry.runId)
+          && detail?.['old'] === this.commitFor(entry.runId)
+          && typeof next === 'string' && /^[0-9a-f]{40}$/.test(next)) {
+          this.runToCommit.set(entry.runId, next);
+        }
+      }
       // crew#762: every post-hoc attempt on record (one more ~20 ms filtered scan, same try).
       for (const entry of await audit.readAll({ action: DELIVER_REQUESTED_ACTION })) {
         if (typeof entry.runId === 'string') this.requested.add(entry.runId);

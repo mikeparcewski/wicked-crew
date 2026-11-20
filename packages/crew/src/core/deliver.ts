@@ -639,6 +639,114 @@ export const GITHUB_CREDENTIAL_LINES: readonly string[] = [
   '  fi',
 ];
 
+/** The `_rebasing` shell helper the shared resolver loop below calls. */
+export const REBASING_LINE =
+    '_rebasing() { [ -d "$(git rev-parse --git-path rebase-merge 2>/dev/null)" ] || [ -d "$(git rev-parse --git-path rebase-apply 2>/dev/null)" ]; }';
+
+/** The shared additive CHANGELOG-only rebase resolver loop (needs `_rebasing`, `$F`-style staged stages). */
+export const CHANGELOG_REBASE_LINES: readonly string[] = [
+    '  while _rebasing; do',
+    '    CF=$(git diff --name-only --diff-filter=U || true)',
+    '    [ -n "$CF" ] || break',
+    // Any conflicted path that is not a CHANGELOG.md → a real collision; stop resolving and strand.
+    '    if printf "%s\\n" "$CF" | grep -qvE "(^|/)CHANGELOG\\.md$"; then break; fi',
+    // studio#1157 — main may have cut a release since the run branched. Compare BASE vs RUN
+    // outside Unreleased, not main vs run: keep main's released sections and link refs intact.
+    // Require all three stages, both destination/run headings, and strictly additive body hunks.
+    // Place each new nonblank line at the end of its subsection in main (new subsections at the
+    // end, unsectioned lines at the top), skipping verbatim duplicates anywhere in main's body.
+    // Every scratch file uses TMPDIR; the per-file subshell cleans up on every refusal as well.
+    '    if ! printf "%s\\n" "$CF" | while IFS= read -r F; do',
+    '          [ -n "$F" ] || continue;',
+    '          (',
+    '            TB= TO= TT= BB= BT= DF= RF=',
+    '            trap \'rm -f "$TB" "$TO" "$TT" "$BB" "$BT" "$DF" "$RF"\' 0',
+    '            TB=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX") || exit 1',
+    '            TO=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX") || exit 1',
+    '            TT=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX") || exit 1',
+    '            BB=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX") || exit 1',
+    '            BT=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX") || exit 1',
+    '            DF=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX") || exit 1',
+    '            RF=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX") || exit 1',
+    '            git show ":1:$F" >"$TB" 2>/dev/null || exit 1',
+    '            git show ":2:$F" >"$TO" 2>/dev/null || exit 1',
+    '            git show ":3:$F" >"$TT" 2>/dev/null || exit 1',
+    `            awk -v bb="$BB" -v bt="$BT" '${String.raw`
+              FNR == 1 { body = 0 }
+              /^## \[Unreleased\]/ { body = 1; found[FILENAME]++; next }
+              body && /^## / { body = 0 }
+              body {
+                if (FILENAME == ARGV[1]) print > bb
+                if (FILENAME == ARGV[3]) print > bt
+                next
+              }
+              # Prefix lines so numeric-looking text (01 vs 1) compares verbatim.
+              FILENAME == ARGV[1] { outside[++nb] = "x" $0 }
+              FILENAME == ARGV[3] { if (("x" $0) != outside[++nt] || nt > nb) bad = 1 }
+              END { if (!found[ARGV[2]] || !found[ARGV[3]] || nb != nt || bad) exit 1 }
+            `}' "$TB" "$TO" "$TT" || exit 1`,
+    '            DC=0; diff "$BB" "$BT" >"$DF" || DC=$?',
+    '            [ "$DC" -le 1 ] || exit 1',
+    `            awk '${String.raw`
+              FILENAME == ARGV[1] {
+                if ($0 ~ /^[0-9,]+[cd]/) bad = 1
+                if ($0 ~ /^[0-9,]+a/) {
+                  sub(/^[0-9,]+a/, ""); n = split($0, range, ",")
+                  for (i = range[1]; i <= range[n]; i++) added[i] = 1
+                }
+                next
+              }
+              FILENAME == ARGV[2] {
+                if (/^### /) section = $0
+                if ((FNR in added) && /[^[:space:]]/) {
+                  line[++nl] = $0; subsection[nl] = section
+                }
+                next
+              }
+              {
+                ours[FNR] = $0; total = FNR
+                if (/^## \[Unreleased\]/) { start = FNR; body = 1; section = ""; next }
+                if (body && /^## /) { stop = FNR; body = 0 }
+                if (body) {
+                  seen[$0] = 1
+                  if (/^### /) { section = $0; present[section] = 1 }
+                  if (/[^[:space:]]/) last[section] = FNR
+                }
+              }
+              END {
+                if (bad) exit 1
+                if (!stop) stop = total + 1
+                for (i = 1; i <= nl; i++) {
+                  if (line[i] in seen) continue
+                  seen[line[i]] = 1; s = subsection[i]
+                  if (!(s in wanted)) { order[++ns] = s; wanted[s] = 1 }
+                  if (line[i] !~ /^### /) extra[s] = extra[s] line[i] "\n"
+                }
+                for (s in present) at[last[s]] = s
+                for (i = 1; i <= total + 1; i++) {
+                  if (i == stop) {
+                    for (j = 1; j <= ns; j++) {
+                      s = order[j]
+                      if (s == "" || (s in present)) continue
+                      if (appended || i == start + 1 || ours[i - 1] ~ /[^[:space:]]/) print ""
+                      print s; printf "%s", extra[s]; appended = 1
+                    }
+                    if (appended && i <= total) print ""
+                  }
+                  if (i > total) break
+                  print ours[i]
+                  if (i == start && ("" in wanted)) { print ""; printf "%s", extra[""] }
+                  if (i in at) printf "%s", extra[at[i]]
+                }
+              }
+            `}' "$DF" "$BT" "$TO" >"$RF" || exit 1`,
+    '            cat "$RF" >"$F" && git add -- "$F" || exit 1',
+    '          ) || exit 1',
+    '        done; then break; fi',
+    '    GIT_EDITOR=true git -c core.editor=true rebase --continue >/dev/null 2>&1 || break;',
+    '  done',
+];
+
 /**
  * The hardened deliver script, run as `bash -lc <script>` (login shell so the operator's PATH —
  * where `gh` lives — is loaded, same as the field overlay).
@@ -1272,113 +1380,14 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // pre-rebase branch tip, not mid-rebase) and exit carrying DELIVER_LIFT_CONFLICT_MARKER. The
     // run's committed work is safe on its branch, so crew reinterprets THIS refusal as `completed`
     // + `delivery: 'stranded'` (recoverable via POST /runs/:id/deliver) rather than a run failure.
-    '_rebasing() { [ -d "$(git rev-parse --git-path rebase-merge 2>/dev/null)" ] || [ -d "$(git rev-parse --git-path rebase-apply 2>/dev/null)" ]; }',
+    REBASING_LINE,
     'if [ -z "$TARGET" ]; then',
     'if ! git rebase "$D" "$B"; then',
     // A rebase that failed WITHOUT leaving in-progress state never started — a preflight error
     // (bad ref, unexpected worktree state), not a conflict. Fail LOUD rather than fall through to
     // the push as if the rebase had succeeded; nothing was pushed.
     '  if ! _rebasing; then echo "deliver: git rebase of $B onto $D failed before it started (preflight error); nothing was pushed"; exit 1; fi',
-    '  while _rebasing; do',
-    '    CF=$(git diff --name-only --diff-filter=U || true)',
-    '    [ -n "$CF" ] || break',
-    // Any conflicted path that is not a CHANGELOG.md → a real collision; stop resolving and strand.
-    '    if printf "%s\\n" "$CF" | grep -qvE "(^|/)CHANGELOG\\.md$"; then break; fi',
-    // studio#1157 — main may have cut a release since the run branched. Compare BASE vs RUN
-    // outside Unreleased, not main vs run: keep main's released sections and link refs intact.
-    // Require all three stages, both destination/run headings, and strictly additive body hunks.
-    // Place each new nonblank line at the end of its subsection in main (new subsections at the
-    // end, unsectioned lines at the top), skipping verbatim duplicates anywhere in main's body.
-    // Every scratch file uses TMPDIR; the per-file subshell cleans up on every refusal as well.
-    '    if ! printf "%s\\n" "$CF" | while IFS= read -r F; do',
-    '          [ -n "$F" ] || continue;',
-    '          (',
-    '            TB= TO= TT= BB= BT= DF= RF=',
-    '            trap \'rm -f "$TB" "$TO" "$TT" "$BB" "$BT" "$DF" "$RF"\' 0',
-    '            TB=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX") || exit 1',
-    '            TO=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX") || exit 1',
-    '            TT=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX") || exit 1',
-    '            BB=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX") || exit 1',
-    '            BT=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX") || exit 1',
-    '            DF=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX") || exit 1',
-    '            RF=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX") || exit 1',
-    '            git show ":1:$F" >"$TB" 2>/dev/null || exit 1',
-    '            git show ":2:$F" >"$TO" 2>/dev/null || exit 1',
-    '            git show ":3:$F" >"$TT" 2>/dev/null || exit 1',
-    `            awk -v bb="$BB" -v bt="$BT" '${String.raw`
-              FNR == 1 { body = 0 }
-              /^## \[Unreleased\]/ { body = 1; found[FILENAME]++; next }
-              body && /^## / { body = 0 }
-              body {
-                if (FILENAME == ARGV[1]) print > bb
-                if (FILENAME == ARGV[3]) print > bt
-                next
-              }
-              # Prefix lines so numeric-looking text (01 vs 1) compares verbatim.
-              FILENAME == ARGV[1] { outside[++nb] = "x" $0 }
-              FILENAME == ARGV[3] { if (("x" $0) != outside[++nt] || nt > nb) bad = 1 }
-              END { if (!found[ARGV[2]] || !found[ARGV[3]] || nb != nt || bad) exit 1 }
-            `}' "$TB" "$TO" "$TT" || exit 1`,
-    '            DC=0; diff "$BB" "$BT" >"$DF" || DC=$?',
-    '            [ "$DC" -le 1 ] || exit 1',
-    `            awk '${String.raw`
-              FILENAME == ARGV[1] {
-                if ($0 ~ /^[0-9,]+[cd]/) bad = 1
-                if ($0 ~ /^[0-9,]+a/) {
-                  sub(/^[0-9,]+a/, ""); n = split($0, range, ",")
-                  for (i = range[1]; i <= range[n]; i++) added[i] = 1
-                }
-                next
-              }
-              FILENAME == ARGV[2] {
-                if (/^### /) section = $0
-                if ((FNR in added) && /[^[:space:]]/) {
-                  line[++nl] = $0; subsection[nl] = section
-                }
-                next
-              }
-              {
-                ours[FNR] = $0; total = FNR
-                if (/^## \[Unreleased\]/) { start = FNR; body = 1; section = ""; next }
-                if (body && /^## /) { stop = FNR; body = 0 }
-                if (body) {
-                  seen[$0] = 1
-                  if (/^### /) { section = $0; present[section] = 1 }
-                  if (/[^[:space:]]/) last[section] = FNR
-                }
-              }
-              END {
-                if (bad) exit 1
-                if (!stop) stop = total + 1
-                for (i = 1; i <= nl; i++) {
-                  if (line[i] in seen) continue
-                  seen[line[i]] = 1; s = subsection[i]
-                  if (!(s in wanted)) { order[++ns] = s; wanted[s] = 1 }
-                  if (line[i] !~ /^### /) extra[s] = extra[s] line[i] "\n"
-                }
-                for (s in present) at[last[s]] = s
-                for (i = 1; i <= total + 1; i++) {
-                  if (i == stop) {
-                    for (j = 1; j <= ns; j++) {
-                      s = order[j]
-                      if (s == "" || (s in present)) continue
-                      if (appended || i == start + 1 || ours[i - 1] ~ /[^[:space:]]/) print ""
-                      print s; printf "%s", extra[s]; appended = 1
-                    }
-                    if (appended && i <= total) print ""
-                  }
-                  if (i > total) break
-                  print ours[i]
-                  if (i == start && ("" in wanted)) { print ""; printf "%s", extra[""] }
-                  if (i in at) printf "%s", extra[at[i]]
-                }
-              }
-            `}' "$DF" "$BT" "$TO" >"$RF" || exit 1`,
-    '            cat "$RF" >"$F" && git add -- "$F" || exit 1',
-    '          ) || exit 1',
-    '        done; then break; fi',
-    '    GIT_EDITOR=true git -c core.editor=true rebase --continue >/dev/null 2>&1 || break;',
-    '  done',
+    ...CHANGELOG_REBASE_LINES,
     `  if _rebasing; then git rebase --abort >/dev/null 2>&1 || true; VERDICT=stranded; echo "${DELIVER_LIFT_CONFLICT_MARKER} — rebase of $B onto $D hit conflicts outside the changelog; resolve on the branch and re-run; nothing was pushed"; exit 1; fi`,
     'fi',
     // Re-derive after the rebase: it drops commits already upstream (patch-id equal), so a branch
