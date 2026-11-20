@@ -58,9 +58,9 @@ describe('deliverPrScript (the hardened field script)', () => {
     // origin/HEAD resolution with the origin/main fallback the task names.
     expect(script).toContain('refs/remotes/origin/HEAD');
     expect(script).toContain('origin/main');
-    // A conflict the changelog union merge cannot clear aborts the rebase and exits non-zero
+    // A conflict the changelog resolver cannot clear aborts the rebase and exits non-zero
     // carrying the LIFT-CONFLICT marker + "nothing was pushed" — the loud refusal, before any
-    // push runs. (The union merge that PRECEDES this abort is asserted in the crew#418 block.)
+    // push runs. (The resolver that PRECEDES this abort is asserted in the crew#418 block.)
     expect(script).toMatch(/git rebase --abort[^\n]*LIFT-CONFLICT[^\n]*nothing was pushed[^\n]*exit 1/);
     const rebaseAt = script.indexOf('git rebase');
     const pushAt = script.indexOf('git push -u origin');
@@ -69,18 +69,20 @@ describe('deliverPrScript (the hardened field script)', () => {
   });
 
   // crew#418 B — the CHANGELOG collision magnet: a rebase conflict whose conflicted paths are all
-  // CHANGELOG.md is union-merged (keep BOTH sides' additive lines) and the rebase continues; ONLY
-  // a conflict outside the changelog aborts loudly and strands. Pinned as script properties; the
+  // CHANGELOG.md keeps BOTH sides' additive lines and the rebase continues; unsafe changes
+  // still abort loudly and strand. Pinned as script properties; the
   // behaviour is driven for real against temp git repos in deliver-script-exec.test.ts.
-  it('union-merges a CHANGELOG-only rebase conflict, aborting loudly only outside the changelog', () => {
+  it('resolves additive CHANGELOG-only conflicts by placement, aborting loudly on unsafe changes', () => {
     // The scope gate: any conflicted path that is NOT a CHANGELOG.md stops the auto-resolve.
     expect(script).toContain('git diff --name-only --diff-filter=U');
     expect(script).toContain('grep -qvE "(^|/)CHANGELOG\\.md$"');
-    // The union merge keeps both sides; the rebase then continues.
-    expect(script).toContain('git merge-file -q --union');
+    // Compare the run with its base, then place its additions into main's Unreleased body.
+    expect(script).toContain('git show ":1:$F"');
+    expect(script).toContain('diff "$BB" "$BT"');
+    expect(script).not.toContain('git merge-file');
     expect(script).toContain('git -c core.editor=true rebase --continue');
-    // The union step precedes the loud abort — a real (non-changelog) conflict still strands.
-    expect(script.indexOf('git merge-file')).toBeLessThan(script.indexOf('git rebase --abort'));
+    // Resolution precedes the loud abort — a real (non-changelog) conflict still strands.
+    expect(script.indexOf('diff "$BB" "$BT"')).toBeLessThan(script.indexOf('git rebase --abort'));
     expect(script).toContain(`${LIFT_CONFLICT_MARKER} — rebase`);
   });
 

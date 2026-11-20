@@ -1262,12 +1262,12 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // crew#418 B — the CHANGELOG collision magnet: two runs that both append to CHANGELOG's
     // `[Unreleased]` section conflict on the rebase BY CONSTRUCTION, though their added bullet
     // lines never truly disagree. A conflict whose conflicted paths are ALL `CHANGELOG.md`
-    // (matched by basename) is resolved automatically with a UNION merge — `git merge-file
-    // --union` keeps BOTH sides' lines, no markers — and the rebase continues. This is scoped to
+    // (matched by basename) is resolved by placing the run's additive Unreleased lines after
+    // main's entries in their matching subsections, and the rebase continues. This is scoped to
     // the changelog and touches NOTHING else: a conflict in any other file is left exactly as
     // loud as before (the "never weaken rebase loudness for non-changelog files" rule).
     //
-    // crew#418 A — a conflict that is NOT changelog-only (or a changelog union that fails) is a
+    // crew#418 A — a conflict that is NOT changelog-only (or cannot be resolved safely) is a
     // real LIFT collision: abort the rebase (nothing pushed; the abort leaves the worktree on the
     // pre-rebase branch tip, not mid-rebase) and exit carrying DELIVER_LIFT_CONFLICT_MARKER. The
     // run's committed work is safe on its branch, so crew reinterprets THIS refusal as `completed`
@@ -1284,26 +1284,98 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '    [ -n "$CF" ] || break',
     // Any conflicted path that is not a CHANGELOG.md → a real collision; stop resolving and strand.
     '    if printf "%s\\n" "$CF" | grep -qvE "(^|/)CHANGELOG\\.md$"; then break; fi',
-    // Union-merge every conflicted changelog — but ONLY when the two sides differ SOLELY within
-    // the `## [Unreleased]` section. A union keeps both sides of every conflict hunk, so a
-    // whole-file union of two edits to the SAME released-version line would silently combine
-    // them; we refuse that. Guard: strip the [Unreleased] block (from `## [Unreleased]` up to the
-    // next `## [` heading) from both stage-2 (ours) and stage-3 (theirs); if the remainder is not
-    // byte-identical, the divergence is outside [Unreleased] → a real conflict → break (strand).
-    // When they ARE identical outside it, the only conflicting hunks are within [Unreleased], so
-    // the whole-file --union affects nothing else. A missing base stage (add/add) unions against
-    // an empty base; any git failure breaks out to the loud abort below.
+    // studio#1157 — main may have cut a release since the run branched. Compare BASE vs RUN
+    // outside Unreleased, not main vs run: keep main's released sections and link refs intact.
+    // Require all three stages, both destination/run headings, and strictly additive body hunks.
+    // Place each new nonblank line at the end of its subsection in main (new subsections at the
+    // end, unsectioned lines at the top), skipping verbatim duplicates anywhere in main's body.
+    // Every scratch file uses TMPDIR; the per-file subshell cleans up on every refusal as well.
     '    if ! printf "%s\\n" "$CF" | while IFS= read -r F; do',
     '          [ -n "$F" ] || continue;',
-    '          TB=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX"); TO=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX"); TT=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX");',
-    '          git show ":1:$F" >"$TB" 2>/dev/null || : >"$TB";',
-    '          git show ":2:$F" >"$TO" 2>/dev/null || { rm -f "$TB" "$TO" "$TT"; exit 1; };',
-    '          git show ":3:$F" >"$TT" 2>/dev/null || { rm -f "$TB" "$TO" "$TT"; exit 1; };',
-    "          _strip='/^## \\[Unreleased\\]/{s=1;next} s&&/^## \\[/{s=0} !s{print}';",
-    '          SO=$(awk "$_strip" "$TO"); ST=$(awk "$_strip" "$TT");',
-    '          if [ "$SO" != "$ST" ]; then rm -f "$TB" "$TO" "$TT"; exit 1; fi;',
-    '          git merge-file -q --union "$TO" "$TB" "$TT" || { rm -f "$TB" "$TO" "$TT"; exit 1; };',
-    '          cat "$TO" >"$F"; git add -- "$F"; rm -f "$TB" "$TO" "$TT";',
+    '          (',
+    '            TB= TO= TT= BB= BT= DF= RF=',
+    '            trap \'rm -f "$TB" "$TO" "$TT" "$BB" "$BT" "$DF" "$RF"\' 0',
+    '            TB=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX") || exit 1',
+    '            TO=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX") || exit 1',
+    '            TT=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX") || exit 1',
+    '            BB=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX") || exit 1',
+    '            BT=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX") || exit 1',
+    '            DF=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX") || exit 1',
+    '            RF=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX") || exit 1',
+    '            git show ":1:$F" >"$TB" 2>/dev/null || exit 1',
+    '            git show ":2:$F" >"$TO" 2>/dev/null || exit 1',
+    '            git show ":3:$F" >"$TT" 2>/dev/null || exit 1',
+    `            awk -v bb="$BB" -v bt="$BT" '${String.raw`
+              FNR == 1 { body = 0 }
+              /^## \[Unreleased\]/ { body = 1; found[FILENAME]++; next }
+              body && /^## / { body = 0 }
+              body {
+                if (FILENAME == ARGV[1]) print > bb
+                if (FILENAME == ARGV[3]) print > bt
+                next
+              }
+              # Prefix lines so numeric-looking text (01 vs 1) compares verbatim.
+              FILENAME == ARGV[1] { outside[++nb] = "x" $0 }
+              FILENAME == ARGV[3] { if (("x" $0) != outside[++nt] || nt > nb) bad = 1 }
+              END { if (!found[ARGV[2]] || !found[ARGV[3]] || nb != nt || bad) exit 1 }
+            `}' "$TB" "$TO" "$TT" || exit 1`,
+    '            DC=0; diff "$BB" "$BT" >"$DF" || DC=$?',
+    '            [ "$DC" -le 1 ] || exit 1',
+    `            awk '${String.raw`
+              FILENAME == ARGV[1] {
+                if ($0 ~ /^[0-9,]+[cd]/) bad = 1
+                if ($0 ~ /^[0-9,]+a/) {
+                  sub(/^[0-9,]+a/, ""); n = split($0, range, ",")
+                  for (i = range[1]; i <= range[n]; i++) added[i] = 1
+                }
+                next
+              }
+              FILENAME == ARGV[2] {
+                if (/^### /) section = $0
+                if ((FNR in added) && /[^[:space:]]/) {
+                  line[++nl] = $0; subsection[nl] = section
+                }
+                next
+              }
+              {
+                ours[FNR] = $0; total = FNR
+                if (/^## \[Unreleased\]/) { start = FNR; body = 1; section = ""; next }
+                if (body && /^## /) { stop = FNR; body = 0 }
+                if (body) {
+                  seen[$0] = 1
+                  if (/^### /) { section = $0; present[section] = 1 }
+                  if (/[^[:space:]]/) last[section] = FNR
+                }
+              }
+              END {
+                if (bad) exit 1
+                if (!stop) stop = total + 1
+                for (i = 1; i <= nl; i++) {
+                  if (line[i] in seen) continue
+                  seen[line[i]] = 1; s = subsection[i]
+                  if (!(s in wanted)) { order[++ns] = s; wanted[s] = 1 }
+                  if (line[i] !~ /^### /) extra[s] = extra[s] line[i] "\n"
+                }
+                for (s in present) at[last[s]] = s
+                for (i = 1; i <= total + 1; i++) {
+                  if (i == stop) {
+                    for (j = 1; j <= ns; j++) {
+                      s = order[j]
+                      if (s == "" || (s in present)) continue
+                      if (appended || i == start + 1 || ours[i - 1] ~ /[^[:space:]]/) print ""
+                      print s; printf "%s", extra[s]; appended = 1
+                    }
+                    if (appended && i <= total) print ""
+                  }
+                  if (i > total) break
+                  print ours[i]
+                  if (i == start && ("" in wanted)) { print ""; printf "%s", extra[""] }
+                  if (i in at) printf "%s", extra[at[i]]
+                }
+              }
+            `}' "$DF" "$BT" "$TO" >"$RF" || exit 1`,
+    '            cat "$RF" >"$F" && git add -- "$F" || exit 1',
+    '          ) || exit 1',
     '        done; then break; fi',
     '    GIT_EDITOR=true git -c core.editor=true rebase --continue >/dev/null 2>&1 || break;',
     '  done',
