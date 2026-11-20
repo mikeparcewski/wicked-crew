@@ -21,20 +21,20 @@ Local-first: loopback only, no accounts, no billing, no model reselling. Crew dr
 - **uv** — the daemon builds its skills environment with `uv sync` (once per skills baseline); without
   uv every job launch is refused (`venv-failed`). The family installer installs it for you (see below).
 - **git** — crew spawns it for every repository operation.
-- **A local Kubernetes cluster** (Rancher Desktop; Docker Desktop can't set the pod PID limit wicked needs, and the installer reports it as not ready), running and
+- **A local Kubernetes cluster** (Rancher Desktop with the kubelet's pod process limit (`pod-max-pids`) set to
+  4096 or less; the install guide shows how. Docker Desktop can't set the pod PID limit wicked needs, and the
+  installer reports it as not ready), running and
   installed once for crew: `npx wicked-installer` (0.10.0 or later) runs the install, or by hand
   `"$(npm root -g)/wicked-crew/node_modules/wicked-core-ts-<platform>/wicked-core" cluster install
   --admin-context rancher-desktop --home ~/.wicked-crew`. On Rancher Desktop, choose the dockerd (moby)
   container engine (Preferences → Container Engine). With containerd, crew's floor images aren't visible to the
   kubelet and seats won't start (wicked-core#1449). Governed agents work in a hardened seat pod,
-  and you sign each one in from studio's Helpers page. Governed work needs two agents signed in, so one
-  reviews the other's work; the install guide signs in Claude Code and Codex. One agent alone waits at review
-  unless you launch the job as "reduced assurance". Pi, GitHub Copilot and OpenCode are optional extra
-  helpers. Claude Code and
-  GitHub Copilot sign in through a login pod, Codex, Pi and OpenCode with their host CLIs. `WICKED_SEAT_FLOOR=host` keeps the labelled interim host
-  floor instead.
+  and you sign each one in from studio's Helpers page. Claude Code and GitHub Copilot sign in through a login
+  pod, Codex, Pi and OpenCode with their host CLIs. `WICKED_SEAT_FLOOR=host` keeps the labelled interim host
+  floor instead; there, only Claude Code and Codex get governed work.
 - **Two coding-agent CLIs** you can sign in (Claude Code, Codex, GitHub Copilot, OpenCode or Pi), so a
-  different one reviews the work; the install guide uses Claude Code and Codex.
+  different one reviews the work; the install guide uses Claude Code and Codex. With one, a job that changes or
+  reviews code waits at a gate unless you launch it as "reduced assurance".
 - **Voice mode (optional)** — needs whisper.cpp on the daemon's machine: on macOS `brew install whisper-cpp`;
   on Linux from your package manager or a build, so `whisper-cli` is on PATH (or set `WICKED_CREW_WHISPER_BIN`).
   Studio asks before it downloads the 142 MiB speech model.

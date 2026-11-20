@@ -1,9 +1,11 @@
 /**
  * The v2 catalog seeds (DES-CATALOG-002 §3, §4.2, §4.6): ten verbs, one card per distinct needs, delivers or gate
  * shape, variants as options, every card and option with its slash command. This file is hand-maintained and is the
- * catalog's source of truth: no seed file or generator exists (DES-CATALOG-002 is the rationale). To change a card or
- * option, edit this file (its types are in `seeds-v2.ts`), then run `packages/crew/tests/catalog-v2.test.ts`, which
- * checks every card's gate against the plan the engine serves and the command rules.
+ * catalog's source of truth: no separate seed file (the old `design/catalog-v2/cards.json`) or generator exists
+ * (DES-CATALOG-002 is the rationale). To change a card or option, edit this file (its types are in `seeds-v2.ts`),
+ * then run `packages/crew/tests/catalog-v2.test.ts` (each card's gate against the plan the engine serves, and the
+ * command rules) and `packages/crew/tests/shape-corpus.test.ts` (the detection corpus `evals/corpora/shape-v1.json`
+ * names cards and options and needs cases for each).
  *
  * Data, not policy: `gate` here is what the design SAYS each card is checked by. What a card SHOWS is derived
  * from the preset the engine serves (`build-v2.ts`), and a test pins that the two agree for every built-in.
