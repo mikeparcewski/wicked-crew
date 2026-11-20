@@ -15,6 +15,7 @@
  */
 import { createHash } from 'node:crypto';
 
+import { SEAT_STANDING_FIELDS } from '../core/engine-roster.js';
 import type {
   ArtifactProposal,
   CatalogGateId,
@@ -1046,8 +1047,9 @@ export function launchShapeOfProposal(p: ArtifactProposal): import('../core/type
 
 /**
  * The roster a job's Go hands the engine: `current` (the daemon's launch roster, naming the lead) narrowed to the seats
- * the person saw. A reshape inherits the held run's roster configuration; its membership is still the proposal's
- * seats (codex r2), with the current roster's entry for a seat added since (codex r3). `clisJson` is ALWAYS the card's
+ * the person saw. A reshape inherits the held run's roster configuration, with standing always from the current
+ * roster; its membership is still the proposal's seats (codex r2), with the current roster's entry for a seat added
+ * since (codex r3). An inherited seat no longer on the current roster is not carried. `clisJson` is ALWAYS the card's
  * seats when it names any (crew#1593): without it the launch waits for roster readiness and reads the roster again, so
  * a seat that became ready in between would join a job whose card never named it. Absent only for a card that names no
  * seat and inherits no roster (the engine is handed the daemon's roster, as for any launch that names none).
@@ -1063,7 +1065,15 @@ export function jobLaunchRoster<T extends { key?: unknown }>(current: readonly T
       inherited = null;
     }
   }
-  const roster: Array<T | { key?: unknown }> = inherited === null ? [...current] : [...inherited, ...current.filter((s) => !inherited!.some((i) => i.key === s.key))];
+  const refreshStanding = (seat: { key?: unknown }): Array<{ key?: unknown }> => {
+    const now = current.find((s) => s.key === seat.key);
+    if (now === undefined) return [];
+    return [{
+      ...Object.fromEntries(Object.entries(seat).filter(([key]) => !SEAT_STANDING_FIELDS.has(key))),
+      ...Object.fromEntries(Object.entries(now).filter(([key]) => SEAT_STANDING_FIELDS.has(key))),
+    }];
+  };
+  const roster: Array<T | { key?: unknown }> = inherited === null ? [...current] : [...inherited.flatMap(refreshStanding), ...current.filter((s) => !inherited!.some((i) => i.key === s.key))];
   const narrowed = keys.length > 0 ? roster.filter((s) => keys.includes(String(s.key))) : roster;
   const missingSeat = keys.find((k) => !roster.some((s) => String(s.key) === k));
   if (missingSeat !== undefined) throw new Error(`${missingSeat} is not on this daemon's roster; change who works on it`);

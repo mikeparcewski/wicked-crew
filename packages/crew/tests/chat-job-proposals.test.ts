@@ -23,7 +23,10 @@ import {
   type ProposalDispatcher,
 } from '../src/api/chat-proposals.js';
 import { jobLaunchCommon, jobLaunchRoster, ownWords, personAskedSkip, qeSkipBound } from '../src/api/chat-jobs.js';
-import { launchRosterNaming } from '../src/api/routes.js';
+import { launchRosterNaming, primaryRefusal } from '../src/api/routes.js';
+import { rosterWithStandingFactory } from '../src/api/roster-standing.js';
+import { SeatHealthTracker } from '../src/api/seat-health.js';
+import { engineRosterJson } from '../src/core/engine-roster.js';
 import { NewWorkSeatsRefusal } from '../src/core/job-seats.js';
 import { removeScratch } from './setup/scratch.js';
 
@@ -1122,5 +1125,116 @@ describe('opt-in seats through the job lifecycle (crew#1609)', () => {
     const out = jobLaunchRoster(launchRosterNaming(STANDING, 'claude', ['claude', 'opencode']), p);
     expect(out.roster).toEqual([{ key: 'claude', model: 'held' }, { key: 'opencode', model: 'held-oc' }]);
     expect(JSON.parse(out.clisJson!)).toEqual(out.roster);
+  });
+});
+
+describe('reshape launch standing after readiness (crew#1606)', () => {
+  const signedIn = {
+    auth: 'signed_in', signed_in: true, council_eligible: true, work_eligible: true,
+    health: { status: 'active', since: '2026-11-01T00:00:00Z' },
+  };
+  const signedOut = {
+    auth: 'signed_out', signed_in: false, council_eligible: false, work_eligible: false,
+    council_ineligible_reason: 'signed out — sign in to take a turn',
+    work_ineligible_reason: 'signed out — sign in to take work',
+    health: { status: 'active', since: '2026-11-20T00:00:00Z' },
+  };
+  const held = [
+    { key: 'claude', model: 'held', ...signedIn },
+    { key: 'codex', model: 'held', ...signedIn },
+  ];
+  // The launcher reads current AFTER ready(), then runs this composition. These fixtures represent
+  // that post-readiness read, when a login may have changed since the held launch.
+  const launch = (current: Array<Record<string, unknown>>, inherited = held, lead = 'claude', keys = ['claude', 'codex']) => {
+    const p = {
+      seats: { lead, keys, label: '' },
+      relaunch: { deliver: 'pr', clisJson: JSON.stringify(inherited) },
+    } as Pick<ArtifactProposal, 'seats' | 'relaunch'>;
+    return jobLaunchRoster(launchRosterNaming(current, lead, keys), p);
+  };
+
+  it('refuses an inherited lead that signed out during readiness, keeping its held configuration', () => {
+    const out = launch([
+      { key: 'claude', model: 'current', ...signedIn },
+      { key: 'codex', model: 'current', ...signedOut },
+    ], held, 'codex');
+    expect(out.roster.find((s) => s.key === 'codex')).toMatchObject({ model: 'held' });
+    expect(primaryRefusal('codex', out.clisJson!)).toEqual(expect.stringContaining('cannot take work: codex'));
+  });
+
+  it('benches an inherited non-lead that signed out during readiness, keeping its held configuration', () => {
+    const out = launch([
+      { key: 'claude', model: 'current', ...signedIn },
+      { key: 'codex', model: 'current', ...signedOut },
+    ]);
+    const engine = JSON.parse(engineRosterJson(out.clisJson!)) as Array<Record<string, unknown>>;
+    expect(engine.find((s) => s['key'] === 'codex')).toMatchObject({ model: 'held', health: { usable: false, reason: 'signed out' } });
+    expect(engine.find((s) => s['key'] === 'claude')).toMatchObject({ health: { usable: true } });
+  });
+
+  it('removes optional standing that is absent from the current roster', () => {
+    const inherited = held.map((s) => ({
+      ...s, recent_bench: { reason: 'quota_exhausted' }, host_floor_bench: 'old host bench',
+      auth_source: 'probe', auth_evidence: 'old evidence', probed_at: '2026-11-01T00:00:00Z',
+      login_check: 'status', login_note: 'old login note', seat_image_unavailable: 'old image',
+      version_pin: { ok: false }, benchedUntil: '2026-11-01T01:00:00Z', benchReason: 'old bench',
+    }));
+    const out = launch(held.map((s) => ({ ...s, model: 'current', login_check: 'live' })), inherited);
+    expect(JSON.parse(out.clisJson!)).toEqual(held.map((s) => ({ ...s, login_check: 'live' })));
+  });
+
+  it('makes an inherited seat usable when it signed in since the held launch', () => {
+    const inherited = held.map((s) => ({ ...s, ...signedOut }));
+    const out = launch(held.map((s) => ({ ...s, model: 'current' })), inherited, 'codex');
+    const engine = JSON.parse(engineRosterJson(out.clisJson!)) as Array<Record<string, unknown>>;
+    expect(engine.find((s) => s['key'] === 'codex')).toMatchObject({ model: 'held', health: { usable: true } });
+    expect(primaryRefusal('codex', out.clisJson!)).toBeNull();
+  });
+
+  it('refuses an inherited card seat no longer on the current roster', () => {
+    expect(() => launch([held[0]!])).toThrow("codex is not on this daemon's roster; change who works on it");
+  });
+});
+
+describe('reshape launch with the real roster accessor after readiness (crew#1606)', () => {
+  const REGISTRY = [
+    { key: 'claude', display_name: 'Claude Code', binary: 'claude', enabled_for_council: true, headless_invocation: 'claude -p {PROMPT}', login_invocation: 'claude login' },
+    { key: 'codex', display_name: 'Codex', binary: 'codex', enabled_for_council: true, headless_invocation: 'codex exec {PROMPT}', login_invocation: 'codex login' },
+  ];
+
+  function launchAfterSignOut(lead: string): string {
+    const keys = ['claude', 'codex'];
+    const signed = new Set(['claude', 'codex']);
+    const roster = rosterWithStandingFactory({
+      seatHealth: new SeatHealthTracker(),
+      registry: () => REGISTRY.map((s) => ({ ...s })),
+      signedIn: (key) => signed.has(key),
+      env: {},
+    });
+    const fresh = jobLaunchRoster(launchRosterNaming(roster({ launch: true }), lead, keys), {
+      seats: { lead, keys, label: '' },
+    }).clisJson!;
+    const held = JSON.stringify((JSON.parse(fresh) as Array<Record<string, unknown>>).map((s) => ({ ...s, model: 'held' })));
+
+    // The readiness login check changes after the held Go; the next accessor read must see it.
+    signed.delete('codex');
+    return jobLaunchRoster(launchRosterNaming(roster({ launch: true }), lead, keys), {
+      seats: { lead, keys, label: '' },
+      relaunch: { deliver: 'pr', clisJson: held },
+    }).clisJson!;
+  }
+
+  it('refuses an inherited lead codex that signed out during readiness, preserving held configuration', () => {
+    const clisJson = launchAfterSignOut('codex');
+    const seats = JSON.parse(clisJson) as Array<Record<string, unknown>>;
+    expect(seats.find((s) => s['key'] === 'codex')).toMatchObject({ model: 'held' });
+    expect(primaryRefusal('codex', clisJson)).toEqual(expect.stringContaining('cannot take work: codex'));
+  });
+
+  it('benches inherited non-lead codex after sign-out while claude stays usable, preserving both configurations', () => {
+    const clisJson = launchAfterSignOut('claude');
+    const engine = JSON.parse(engineRosterJson(clisJson)) as Array<Record<string, unknown>>;
+    expect(engine.find((s) => s['key'] === 'codex')).toMatchObject({ model: 'held', health: { usable: false } });
+    expect(engine.find((s) => s['key'] === 'claude')).toMatchObject({ model: 'held', health: { usable: true } });
   });
 });
