@@ -406,12 +406,15 @@ describe('chat probe: against a fixture chat API', () => {
   let base: string;
   const calls: string[] = [];
   let reads = 0;
+  /** Lands the held reply (see `lateMs`) when called; the test decides when, by a read count, not by a timer. */
+  let landHeld: (() => void) | null = null;
   /** How the fixture misbehaves, per test. */
-  let mode: { scope?: unknown; messagesStatus?: number; lateMs?: number; secondSeat?: string; secondSeatFails?: boolean; noSeats?: boolean; closeStatus?: number; redirectOpen?: string; hangRead?: boolean; badRecords?: boolean; finalDropsSecondSeat?: boolean; onRead?: (n: number) => void };
+  let mode: { scope?: unknown; messagesStatus?: number; lateMs?: number; secondSeat?: string; secondSeatFails?: boolean; noSeats?: boolean; closeStatus?: number; redirectOpen?: string; hangRead?: boolean; badRecords?: boolean; finalDropsSecondSeat?: boolean; onRead?: (n: number) => void; holdReply?: boolean };
 
   beforeEach(async () => {
     calls.length = 0;
     reads = 0;
+    landHeld = null;
     mode = {};
     const turns = new Map<string, Array<unknown>>();
     const dropped = new Set<string>();
@@ -447,7 +450,8 @@ describe('chat probe: against a fixture chat API', () => {
             list.push({ kind: 'seat', turnId: 't1', cliKey: 'claude', ok: true, text: reply });
             if (mode.badRecords === true) list.push(null, 7, { kind: 'seat' });
           };
-          if (mode.lateMs !== undefined) setTimeout(land, mode.lateMs).unref();
+          if (mode.holdReply === true) landHeld = land;
+          else if (mode.lateMs !== undefined) setTimeout(land, mode.lateMs);
           else land();
           if (mode.secondSeat !== undefined) {
             setTimeout(() => {
@@ -498,18 +502,21 @@ describe('chat probe: against a fixture chat API', () => {
 
   /**
    * The probe decides every deadline from `Date.now()`, so a test that wants "the deadline passed" moves the clock instead
-   * of waiting real seconds (a loaded runner makes real seconds an unreliable ruler). `skew` is added to the real clock.
+   * of waiting real seconds (a loaded runner makes real seconds an unreliable ruler). The clock is frozen at the start and
+   * moves only by `skew`, so nothing but the test can bring the deadline closer.
    */
   let skew = 0;
   const ownClock = () => {
     skew = 0;
-    const real = Date.now.bind(Date);
-    vi.spyOn(Date, 'now').mockImplementation(() => real() + skew);
+    const base = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => base + skew);
   };
-  /** Pass the probe's deadline as the fixture answers its `n`th messages read (the reply is still sent). */
+  /** The `n`th messages read passes the 60 s deadline (and, when a reply is held, delivers it in that same response). */
   const passDeadlineAtRead = (n: number) => {
     mode.onRead = (i) => {
-      if (i === n) skew += 3_600_000;
+      if (i !== n) return;
+      skew += 61_000;
+      landHeld?.();
     };
   };
 
@@ -529,8 +536,8 @@ describe('chat probe: against a fixture chat API', () => {
   });
 
   it('SILENT-OK: a reply that lands after the deadline fails the question', async () => {
-    // The reply is held far past the deadline; the second read moves the clock past it, so no runner stall can let the reply in.
-    mode.lateMs = 600_000;
+    // The second read both passes the deadline and carries the reply, a reply that would settle the turn if it were graded.
+    mode.holdReply = true;
     ownClock();
     passDeadlineAtRead(2);
     const { code, results } = await run(planes, ['--timeout-secs', '60']);
@@ -538,6 +545,8 @@ describe('chat probe: against a fixture chat API', () => {
     expect(code).toBe(1);
     expect(results[0]!.error).toMatch(/did not settle/);
     expect(results[0]!.grounded).toBe(false);
+    expect(results[0]!.answered).toBe(false);
+    expect(results[0]!.replies).toEqual([]);
   });
 
   it('SILENT-OK: a failed messages read is never graded, whatever its body says', async () => {
