@@ -8284,13 +8284,18 @@ export function registerRoutes(
     // through its decision path's pre-checks), less what crew refuses itself (`crewGateActions`). Read each
     // time; absent only on an addon without the read. A failed or moved read gets one retry, then
     // a retryable 503 (crew#1579), so a skin cannot mistake an unavailable list for no capability.
-    const actionsAt = async (ord: number, run: SessionView | undefined): Promise<{ actions?: GateAction[]; planRev?: number } | null> => {
+    // crew#1634: a mismatch that cannot heal is not retryable: with no open gate row the ord comes from the
+    // cache or the log while the engine names its cursor's (or 0), and an unknown run has no engine list at
+    // all. Those answer the gate without `actions` (the old fallback); a thrown read stays a 503.
+    const actionsAt = async (ord: number, run: SessionView | undefined, rowless: boolean): Promise<{ actions?: GateAction[]; planRev?: number } | null> => {
       if (typeof adapter.gateActions !== 'function') return {};
+      let threw = false;
       for (let attempt = 0; attempt < 2; attempt++) {
         let listed: Awaited<ReturnType<CoreAdapter['gateActions']>>;
         try {
           listed = await adapter.gateActions(id);
         } catch {
+          threw = true;
           continue;
         }
         if (listed === null) return {};
@@ -8302,17 +8307,18 @@ export function registerRoutes(
           ...(listed.planRev !== undefined ? { planRev: listed.planRev } : {}),
         };
       }
-      return null;
+      return run === undefined || (rowless && !threw) ? {} : null;
     };
     const actionsUnavailable = {
       error: 'Gate actions unavailable: the engine\'s answers for this gate could not be read consistently — retry.',
       code: 'gate_actions_unavailable',
     };
+    const unavailable503 = () => reply.header('Retry-After', '1').code(503).send(actionsUnavailable);
     // crew#1629: start the engine's action read immediately, alongside the other offers. Every
     // offer and the receipt use the run already in hand; the record/cache overlap reads stay separate.
-    const offersAt = async (ord: number, run: SessionView | undefined) => {
+    const offersAt = async (ord: number, run: SessionView | undefined, rowless: boolean) => {
       const gated = run?.units?.find((u) => u.ord === ord);
-      const actions = actionsAt(ord, run);
+      const actions = actionsAt(ord, run, rowless);
       const [rejudge, skipQe, listed] = await Promise.all([rejudgeAt(ord, run), skipQeAt(ord, run), actions]);
       if (listed === null) return null;
       return { assurance: receiptOf(gated), ...rejudge, ...skipQe, ...listed };
@@ -8339,8 +8345,8 @@ export function registerRoutes(
         || (recorded.state === 'open' && cached.ord === recorded.ord)
         || (recorded.state === 'none' && (await runOf())?.session.status === 'awaiting_human');
       if (servable) {
-        const offers = await offersAt(cached.ord, await runOf());
-        if (offers === null) return reply.code(503).send(actionsUnavailable);
+        const offers = await offersAt(cached.ord, await runOf(), recorded?.state !== 'open');
+        if (offers === null) return unavailable503();
         return { runId: id, ...cached, ...offers };
       }
       gateCache.forget(id);
@@ -8417,8 +8423,8 @@ export function registerRoutes(
       // genuinely lost), as does a gate whose `awaitingHuman` predates the log's retention.
       return reply.code(404).send({ error: 'No open gate for this run' });
     }
-    const offers = await offersAt(open.ord, run);
-    if (offers === null) return reply.code(503).send(actionsUnavailable);
+    const offers = await offersAt(open.ord, run, recorded?.state !== 'open');
+    if (offers === null) return unavailable503();
     return { runId: id, ...open, ...offers };
   });
 

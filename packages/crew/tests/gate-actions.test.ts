@@ -70,10 +70,12 @@ describe('GET /runs/:id/gate — the engine\'s legal actions (crew#1512)', () =>
         view('run-deliver', 5, 'deliver'),
         view('run-steering', 4, 'review', 'steering-author'),
         view('run-cached', 4, 'review'),
+        view('run-rowless', 4, 'review'),
       ]),
       listRepos: vi.fn().mockResolvedValue([]),
       listWorkflows: () => BUILTIN_WORKFLOWS,
       interactionRequests: vi.fn(async (id: string) => {
+        if (id === 'run-rowless') return []; // parked before the gate-row table (crew#1634)
         // The engine's open row: the deliver run's at ord 5, every other at ord 4 (whatever its list says).
         const deliver = id === 'run-deliver';
         return [{ kind: 'gate', ord: deliver ? 5 : 4, prompt: 'the gate', gate_kind: deliver ? 'deliver' : (lists.get(id)?.gateKind ?? 'escalation'), created_at: 1_785_614_004_730 }];
@@ -99,6 +101,7 @@ describe('GET /runs/:id/gate — the engine\'s legal actions (crew#1512)', () =>
     lists.set('run-deliver', DELIVER);
     lists.set('run-steering', RETRY);
     lists.set('run-cached', RETRY);
+    lists.set('run-rowless', { ...RETRY, ord: 0 });
   });
   afterAll(async () => {
     await app.close();
@@ -161,7 +164,25 @@ describe('GET /runs/:id/gate — the engine\'s legal actions (crew#1512)', () =>
     const res = await app.inject({ method: 'GET', url: '/api/v1/runs/run-retry/gate' });
     expect(res.statusCode).toBe(503);
     expect(res.json()).toEqual({ error: expect.any(String), code: 'gate_actions_unavailable' });
+    expect(res.headers['retry-after']).toBe('1');
     expect(readActions).toHaveBeenCalledTimes(2);
+  });
+
+  describe('a gate with no open row (crew#1634)', () => {
+    beforeEach(() => {
+      gateCache.forget('run-rowless');
+      gateCache.adopt('run-rowless', { ord: 4, prompt: 'the gate', lifecycle: 'open', receivedAt: '2026-10-10T10:00:00Z' });
+    });
+    it('is served without actions when the engine names another ord, instead of a permanent 503', async () => {
+      const body = await gate('run-rowless');
+      expect(body).toMatchObject({ runId: 'run-rowless', ord: 4 });
+      expect(body).not.toHaveProperty('actions');
+    });
+    it('still answers 503 when the read throws', async () => {
+      readActions.mockRejectedValue(new Error('engine read failed'));
+      const res = await app.inject({ method: 'GET', url: '/api/v1/runs/run-rowless/gate' });
+      expect(res.statusCode).toBe(503);
+    });
   });
 
   describe.each(['record', 'cache'])('action read failures on the %s path (crew#1579)', (path) => {
