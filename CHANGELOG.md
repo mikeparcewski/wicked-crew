@@ -10,6 +10,8 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+- **Gate offer reads overlap and report unavailable actions (crew#1629, crew#1579).** GET `/runs/:id/gate` reuses one run view for its receipt and concurrent offers on cache and record paths. A failed or moved engine action read is retried once, then returns retryable 503 `gate_actions_unavailable`; engines without the read still omit actions. Regression coverage also checks QE-refused deliver gates on both paths.
+
 - **CI: the selftest pin moves to wicked-ci 3bd45ae (the advisory verdict now concludes, wicked-ci#76/#81).** The selftest job grants `checks: write` so the called workflow can publish its verdict check run; the advisory job still never blocks a merge.
 
 - **The B4 chat measure, `packages/crew/scripts/chat-probe.ts` (crew#1497).** It reports, per question, grounded answers

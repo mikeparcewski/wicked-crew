@@ -60,6 +60,7 @@ describe('GET /runs/:id/gate — the engine\'s legal actions (crew#1512)', () =>
   const lists = new Map<string, EngineGateActions | null>();
   const gateCache = new GateCache();
   let withBinding = true;
+  const readActions = vi.fn<(id: string) => Promise<EngineGateActions | null>>();
 
   beforeAll(async () => {
     const mockAdapter = {
@@ -78,7 +79,7 @@ describe('GET /runs/:id/gate — the engine\'s legal actions (crew#1512)', () =>
         return [{ kind: 'gate', ord: deliver ? 5 : 4, prompt: 'the gate', gate_kind: deliver ? 'deliver' : (lists.get(id)?.gateKind ?? 'escalation'), created_at: 1_785_614_004_730 }];
       }),
       runEvents: vi.fn(async () => []),
-      gateActions: vi.fn(async (id: string) => (withBinding ? (lists.get(id) ?? null) : null)),
+      gateActions: readActions,
       ping: vi.fn(async () => 'pong'),
     };
     app = Fastify({ logger: false });
@@ -91,6 +92,7 @@ describe('GET /runs/:id/gate — the engine\'s legal actions (crew#1512)', () =>
   });
   beforeEach(() => {
     withBinding = true;
+    readActions.mockReset().mockImplementation(async (id) => withBinding ? (lists.get(id) ?? null) : null);
     lists.clear();
     lists.set('run-retry', RETRY);
     lists.set('run-adj', ADJUDICATION);
@@ -150,12 +152,40 @@ describe('GET /runs/:id/gate — the engine\'s legal actions (crew#1512)', () =>
     }
   });
 
-  it('absent on an addon without the read, and when the engine\'s open gate is another one', async () => {
+  it('absent on an addon without the read, but 503 when the engine\'s open gate is another one', async () => {
     withBinding = false;
     expect(await gate('run-retry')).not.toHaveProperty('actions');
     withBinding = true;
     lists.set('run-retry', { ...RETRY, ord: 5 });
-    expect(await gate('run-retry')).not.toHaveProperty('actions');
+    readActions.mockClear();
+    const res = await app.inject({ method: 'GET', url: '/api/v1/runs/run-retry/gate' });
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toEqual({ error: expect.any(String), code: 'gate_actions_unavailable' });
+    expect(readActions).toHaveBeenCalledTimes(2);
+  });
+
+  describe.each(['record', 'cache'])('action read failures on the %s path (crew#1579)', (path) => {
+    beforeEach(() => {
+      gateCache.forget('run-retry');
+      if (path === 'cache') {
+        gateCache.adopt('run-retry', { ord: 4, prompt: 'the gate', lifecycle: 'open', receivedAt: '2026-10-10T10:00:00Z' });
+      }
+    });
+
+    it('retries a thrown read once, then answers 503 instead of omitting actions', async () => {
+      readActions.mockRejectedValue(new Error('engine read failed'));
+      const res = await app.inject({ method: 'GET', url: '/api/v1/runs/run-retry/gate' });
+      expect(res.statusCode).toBe(503);
+      expect(res.json()).toEqual({ error: expect.any(String), code: 'gate_actions_unavailable' });
+      expect(readActions).toHaveBeenCalledTimes(2);
+    });
+
+    it.each(['throw', 'moved gate'])('serves the actions after one %s and one successful re-read', async (failure) => {
+      if (failure === 'throw') readActions.mockRejectedValueOnce(new Error('engine read failed'));
+      else readActions.mockResolvedValueOnce({ ...RETRY, ord: 5 });
+      expect(tokens(await gate('run-retry'))).toEqual(['approve', 'skip_rules', 'request_changes', 'reassign', 'reject']);
+      expect(readActions).toHaveBeenCalledTimes(2);
+    });
   });
 });
 

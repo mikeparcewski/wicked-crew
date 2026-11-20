@@ -11,6 +11,9 @@
 // the real council roster.
 
 import Fastify from 'fastify';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
@@ -18,6 +21,8 @@ import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { LaunchRunInput, WorkflowDef } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
+import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
+import { removeScratch } from './setup/scratch.js';
 
 /** A minimal code-work def: one `executes_code` build phase — what makes the default engage. */
 const CODE_WORK_DEF = {
@@ -391,5 +396,69 @@ describe('GET /health capabilities (F-E2E-030)', () => {
     // ASK-C1: `askPath` is the core-ts floor (0.7.38) — unknown engine, no capability.
     expect(res.json().capabilities).toEqual({ deliverGate: false, revisesPr: false, chatIdOnLaunch: false, seatChipOnCreate: false, runChatId: true, linkedIssuesExclude: true, trackerLinks: true, walkthroughRoots: false, askPath: false, reducedAssurance: false, qeAcceptanceOverride: false, qeAcceptance: 'required', launchPrimary: true, system: true, attentionRanked: true, chatList: false, chatAttachments: true, chatWorkflows: [], defaultEvals: true, insights: false, schedules: false, workingDoc: false, powerMode: false, gateActions: false, planGateNote: false, voice: true, workflowCatalog: true, workflowCatalogV2: true, launchShape: true, detectShape: true, chatJobProposals: true, chatJobPower: true, reshapeRun: true, chatArtifacts: { context: true, proposals: true, create: false, refine: false, theme: true, demo: false, onboard: true } });
     await app.close();
+  });
+});
+
+describe.each(['cache', 'record'])('GET deliver gate with refused QE acceptance on the %s path (crew#1579)', (path) => {
+  let app: FastifyInstance;
+  let repoRoot: string;
+
+  beforeEach(async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'crew-deliver-gate-qe-'));
+    // The real QE store, with no attributed PASS (as in delivery-assurance.test.ts).
+    const { createDomainStore } = await import('wicked-ledger');
+    createDomainStore({ root: join(repoRoot, '.wicked-qe') }).rebuildIndex();
+  });
+
+  afterEach(async () => {
+    await app?.close();
+    removeScratch(repoRoot);
+  });
+
+  it.each([false, true])('drops approve, serves skipQe, and respects the engine skip action (offered: %s)', async (offersSkip) => {
+    const id = 'run-qe-gated';
+    const cache = new GateCache();
+    if (path === 'cache') {
+      cache.adopt(id, { ord: 3, prompt: 'Approve deliver?', lifecycle: 'open', receivedAt: '2026-10-10T10:00:00Z', gateKind: 'deliver' });
+    }
+    const actions = [
+      { action: 'approve', intent: 'deliver', note: 'optional' },
+      ...(offersSkip ? [{ action: 'skip_qe', intent: 'skip_qe', note: 'required' }] : []),
+      { action: 'reject', intent: 'stop', note: 'optional' },
+    ];
+    const adapter = {
+      runView: vi.fn(async () => ({
+        session: {
+          id, workflow_id: 'bug', status: 'awaiting_human', repo_ref: 'repo-1', workdir: null,
+          assurance: { mode: 'full', required: ['qe_acceptance'] },
+        },
+        units: [{ id: `${id}:deliver`, session_id: id, ord: 3, phase_ref: 'deliver', status: 'pending' }],
+      })),
+      listRepos: vi.fn(async () => [{ id: 'repo-1', name: 'repo', root_path: repoRoot }]),
+      listWorkflows: () => BUILTIN_WORKFLOWS,
+      interactionRequests: vi.fn(async () => [{ kind: 'gate', ord: 3, prompt: 'Approve deliver?', gate_kind: 'deliver', created_at: 1 }]),
+      runEvents: vi.fn(async () => []),
+      listConformanceClaims: vi.fn(async () => []),
+      gateActions: vi.fn(async () => ({ ord: 3, gateKind: 'deliver', actions })),
+    };
+    app = Fastify({ logger: false });
+    registerRoutes(app, adapter as unknown as CoreAdapter, cache, new ElicitationCache());
+    await app.ready();
+
+    const res = await app.inject({ method: 'GET', url: `/api/v1/runs/${id}/gate` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.actions).toEqual([
+      ...(offersSkip ? [{ action: 'skip_qe', intent: 'skip_qe', note: 'required', humanOnly: true }] : []),
+      { action: 'reject', intent: 'stop', note: 'optional' },
+    ]);
+    expect(body.skipQe).toEqual({
+      action: 'skip_qe', reasonRequired: true, actor: 'human_operator', label: 'QE acceptance skipped by operator',
+      qeAcceptance: {
+        status: 'required', satisfied: false, verdictId: null, reviewer: null,
+        reason: expect.stringContaining('records no verdict'),
+      },
+    });
+    expect(adapter.interactionRequests).toHaveBeenCalledTimes(path === 'cache' ? 1 : 2);
   });
 });
