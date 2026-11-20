@@ -1976,6 +1976,8 @@ describe('deliver script — no seat temp path in ANY pushed commit (wicked-core
       SEAT_TMP, 'tmp/parser.rs', 'src/credentials.ts', 'x/claude-12/y', 'claude-12', 'notes/claude-code.md',
       '.agent/-home-alice-r/log', 'a/-tmp-x', 'C--Users-bob-p/x', 'src/-home', 'x/-opt-people-bob-proj/y',
       'cache/opt/people/bob/z', 'src/root/x', 'docs/home/alice/x', 'w/home/runner/x', 'a b/-Users-c d/e',
+      'tmp/pi-bash-9f3a1c0b7d2e4a65.log', 'pi-bash-ab12.log', 'tmp/pi-notes.md', 'tmp/pi-bash-xyz.log', 'tmp/pi-bash-ab12.log.md',
+      'tmp/pi-bash-.log', 'src/pi-bash-ab12.txt',
     ];
     for (const home of ['/home/runner', '/opt/people/bob', '/root']) {
       const out = execFileSync('bash', ['-c', `${fn}\n${hh}\nwhile IFS= read -r p; do _seatscratch "$p"; printf '%s\\n' "\${RN:--}"; done`], {
@@ -1991,7 +1993,40 @@ describe('deliver script — no seat temp path in ANY pushed commit (wicked-core
     expect(committedScrubReason('src/credentials.ts', '/home/runner')).toBeNull();
     expect(committedScrubReason('x/-opt-people-bob-proj/y', '/opt/people/bob')).toBe('home-derived');
     expect(committedScrubReason('src/root/x', '/root')).toBeNull();
+    // wicked-crew#1616: pi's bash-output file, and only that shape.
+    expect(committedScrubReason('tmp/pi-bash-9f3a1c0b7d2e4a65.log', '/home/runner')).toBe('seat-temp');
+    expect(committedScrubReason('tmp/pi-notes.md', '/home/runner')).toBeNull();
+    expect(committedScrubReason('tmp/pi-bash-xyz.log', '/home/runner')).toBeNull();
+    // pi writes exactly 16 hex characters; a shorter or longer name is somebody's own file.
+    expect(committedScrubReason('pi-bash-ab12.log', '/home/runner')).toBeNull();
+    expect(committedScrubReason('tmp/pi-bash-9f3a1c0b7d2e4a650.log', '/home/runner')).toBeNull();
   });
+
+  it('a committed-then-deleted pi output log is in NO pushed commit; tmp/pi-notes.md and tmp/parser.rs ship (wicked-crew#1616)', async () => {
+    const fx = fixture();
+    const seat = ['-c', 'user.name=seat', '-c', 'user.email=seat@test'];
+    const PI_LOG = 'tmp/pi-bash-9f3a1c0b7d2e4a65.log';
+    mkdirSync(join(fx.workdir, 'tmp'), { recursive: true });
+    writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
+    writeFileSync(join(fx.workdir, PI_LOG), 'host output with a private path\n');
+    writeFileSync(join(fx.workdir, 'tmp', 'pi-notes.md'), 'ordinary notes\n');
+    writeFileSync(join(fx.workdir, 'tmp', 'parser.rs'), 'pub fn parse() {}\n');
+    git(fx.workdir, 'add', '-A');
+    git(fx.workdir, ...seat, 'commit', '-qm', 'fix: work plus pi output');
+    git(fx.workdir, 'rm', '-q', PI_LOG);
+    git(fx.workdir, ...seat, 'commit', '-qm', 'chore: drop the pi log');
+
+    const r = await runDeliver(fx, { intent: 'fix the thing' });
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.outcome).toBe('pr');
+    const range = `main..wicked/${RUN_ID}`;
+    const paths = pathsInHistory(fx.origin, range);
+    expect(paths.filter((p) => p.includes('pi-bash-'))).toEqual([]);
+    expect(git(fx.origin, 'rev-list', '--objects', '--all')).not.toContain('pi-bash-');
+    expect(paths).toEqual(expect.arrayContaining(['fix.ts', 'tmp/pi-notes.md', 'tmp/parser.rs']));
+    expect(r.output).toContain(`deliver: SCRUBBED (seat-temp) from the run's commits: ${PI_LOG}`);
+  }, 90_000);
 
   it('committed work that only the crew#434 untracked ladder would exclude ships as committed: same commit, same tree', async () => {
     const fx = fixture();

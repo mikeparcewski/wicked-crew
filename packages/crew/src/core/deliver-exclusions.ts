@@ -185,7 +185,10 @@ export function deliverExclusionReason(
  * `tmp/parser.rs` or `src/credentials.ts` must ship them (secrets are GitGuardian's and the gate's).
  * So the deliver script's history scrub (block c3b) removes, from every commit it pushes, only a path
  * this predicate names:
- *  - `seat-temp`: under a Claude Code per-uid temp directory (a `claude-<digits>` directory segment);
+ *  - `seat-temp`: under a Claude Code per-uid temp directory (a `claude-<digits>` directory segment),
+ *    or pi's bash-output file (wicked-crew#1616: a basename of exactly `pi-bash-<16 hex>.log`, which pi
+ *    writes into the seat's temp directory when that is inside the worktree; `pi-notes.md` or any
+ *    other `tmp/` file is not it);
  *  - `home-derived`: a segment that is a slug of an absolute host path (`-Users-…`, `-home-…`,
  *    `-root-…`, `-private-…`, `-var-…`, `-tmp-…`, `C--Users-…`), or one that starts with the slug of
  *    THIS host's home, or this host's home path mirrored as directories (`…/home/alice/…`).
@@ -197,7 +200,7 @@ export function deliverExclusionReason(
  *
  * `home` is the home directory of the process that runs the push (the script reads `$HOME`).
  */
-export const SEAT_TEMP_DIR_ERE = '(^|/)claude-[0-9]+/';
+export const SEAT_TEMP_DIR_ERE = '(^|/)claude-[0-9]+/|(^|/)pi-bash-[0-9a-f]{16}\\.log$';
 /** A path segment that is a slug of an absolute host path (POSIX ERE, shared with the deliver script). */
 export const HOME_SLUG_SEGMENT_ERE = '(^|/)(-(Users|home|root|private|var|tmp)-[^/]|[A-Za-z]--Users-[^/])';
 const SEAT_TEMP_DIR = new RegExp(SEAT_TEMP_DIR_ERE);
