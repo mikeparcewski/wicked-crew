@@ -89,7 +89,7 @@ export function containerLoginReading(broker: BrokerReading, last: SeatLastAnswe
 /** The accessor: the registry roster WITH crew's standing, freshly read on every call. `ready`
  *  (crew#645), awaited by a launch before it reads the roster, waits — bounded — for every seat's
  *  missing or stale login check, so an expired login reads `signed_out` before work is routed. */
-export type RosterWithStanding = (() => RosterSeat[]) & {
+export type RosterWithStanding = ((opts?: { launch: true }) => RosterSeat[]) & {
   containerStatus?: SeatContainerStatus;
   close?: () => void;
   ready?: () => Promise<void>;
@@ -312,7 +312,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
     const workerRoot = env['WICKED_WORKER_HOME'];
     return workerRoot === '' ? undefined : workerRoot;
   };
-  const accessor: RosterWithStanding = (): RosterSeat[] => {
+  const accessor: RosterWithStanding = (opts): RosterSeat[] => {
     const root = liveRoot();
     const container = containerMode();
     const seats = registry() as RosterSeat[];
@@ -369,7 +369,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         ? broker === undefined
           ? undefined
           : containerLoginReading(broker, seatHealth.lastAnswerFor(key))
-        : probe?.read(key, root);
+        : probe?.read(key, root, opts?.launch === true);
       // A seat's own "no credential" report that its LIVE sign-in check answered AFTER is stale: the
       // operator signed in since (codex r1 on #996 — it otherwise outranked the fresh probe for 30 min).
       if (probed !== undefined && probed.signedIn === true && probed.check === 'live') {

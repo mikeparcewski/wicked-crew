@@ -154,7 +154,7 @@ describe('SeatProbe cache', () => {
     expect(probe.read('claude', '/w')).toMatchObject({ signedIn: null });
   });
 
-  it.each(['stale', 'kept', 'deadline'] as const)('launch freshness discards a kept signed-in answer (%s, crew#1607)', async (mode) => {
+  it.each(['stale', 'kept', 'deadline', 'stale-deadline'] as const)('launch freshness reads unknown while ordinary reads keep the signed-in answer (%s, crew#1607, crew#1637)', async (mode) => {
     let now = 1_000_000;
     let answer = LOGGED_IN_CLAUDE;
     let finish: ((out: ProbeOutput) => void) | undefined;
@@ -168,22 +168,33 @@ describe('SeatProbe cache', () => {
       },
     });
     await probe.refresh('claude', '/w');
+    const first = probe.read('claude', '/w');
     answer = { code: null, stdout: '', stderr: '', error: 'timed out' };
     now += PROBE_TTL_SIGNED_IN_MS;
-    if (mode !== 'stale') {
+    if (mode === 'kept' || mode === 'deadline') {
       await probe.refresh('claude', '/w');
-      expect(probe.read('claude', '/w')?.signedIn).toBe(true); // display keeps the answer
+      expect(probe.read('claude', '/w')).toEqual(first); // display keeps the answer
+      // Strict reads use even a newly held inconclusive answer, within its retry TTL.
+      expect(probe.read('claude', '/w', true)).toMatchObject({ signedIn: null, check: 'status' });
     }
     const before = calls;
-    slow = mode === 'deadline';
+    slow = mode === 'deadline' || mode === 'stale-deadline';
     await probe.ensureFresh(['claude'], '/w', 5);
-    expect(probe.read('claude', '/w')?.signedIn).toBeNull();
+    expect(probe.read('claude', '/w')).toEqual(first);
+    expect(probe.read('claude', '/w', true)).toMatchObject({
+      signedIn: null,
+      check: mode === 'stale-deadline' ? first!.check : 'status',
+    });
+    if (mode === 'stale-deadline') {
+      expect(probe.read('claude', '/w', true)?.detail).toContain('check did not finish');
+    }
+    expect(probe.read('claude', '/w')).toEqual(first); // strict reads do not change display evidence
     expect(calls).toBeGreaterThan(before); // an inconclusive entry retries even within its TTL
     finish?.(answer);
     await probe.refresh('claude', '/w');
   });
 
-  it('roster readiness drops cached signed-in standing when its next status probe times out (crew#1607)', async () => {
+  it('roster readiness gives launches unknown standing while ordinary reads keep signed in after a timeout (crew#1607, crew#1637)', async () => {
     let now = 1_000_000;
     let answer = LOGGED_IN_CLAUDE;
     const { run } = fakeRunner(() => answer);
@@ -194,10 +205,13 @@ describe('SeatProbe cache', () => {
     });
     await roster.ready!();
     expect(roster()[0]).toMatchObject({ auth: 'signed_in', council_eligible: true });
+    expect(roster({ launch: true })[0]).toMatchObject({ auth: 'signed_in', council_eligible: true });
     answer = { code: null, stdout: '', stderr: '', error: 'timed out' };
     now += PROBE_TTL_SIGNED_IN_MS;
     await roster.ready!();
-    expect(roster()[0]).toMatchObject({ auth: 'unknown', signed_in: null, login_check: 'unverified' });
+    expect(roster()[0]).toMatchObject({ auth: 'signed_in', signed_in: true, council_eligible: true });
+    expect(roster({ launch: true })[0]).toMatchObject({ auth: 'unknown', signed_in: null, login_check: 'unverified' });
+    expect(roster()[0]).toMatchObject({ auth: 'signed_in', signed_in: true, council_eligible: true });
   });
 
   it('during the keep window a definite answer replaces the kept one at once, and the normal TTL is back', async () => {
