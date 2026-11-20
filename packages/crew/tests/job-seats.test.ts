@@ -112,8 +112,9 @@ function rig(roster: string, pick: string, chatState: ChatState = 'claude', crea
   let n = 0;
   return {
     svc, deps, launcher, open,
-    /** The roster changes under the card (a seat signs out). */
+    /** The roster changes under the card (a seat signs in or out). */
     setStanding: (rows: readonly Standing[]) => { standing = rows; },
+    setPick: (value: string) => { pick = value; },
     /** The keys of the roster a Go of `p` hands the engine (the production narrowing, `jobLaunchRoster`). */
     engineRoster: (p: Pick<ArtifactProposal, 'seats' | 'relaunch'>) => jobLaunchRoster(launchRosterNaming(standing, p.seats?.lead ?? undefined, p.seats?.keys ?? []), p).roster.map((x) => String(x.key)),
     /** The open proposal as it is SERVED (`GET /chats/:id/messages`): the live `newWorkSeats` state over the transcript. */
@@ -130,6 +131,121 @@ const OFF = (rest: string) => `Pi is off this job; ${rest} work on it`;
 const NOT_ON = "Not changed: Pi isn't on this job";
 const NOT_ON_PLAIN = "Not changed: pi isn't on this job";
 const CANT = "Not changed: pi can't work now";
+
+describe('held job seats rechecked on read (crew#1484)', () => {
+  const proposals = (r: ReturnType<typeof rig>) => r.deps.records(CHAT).filter((rec) => rec.kind === 'proposal');
+
+  it.each(['plan-it', 'bug'])('%s: signing in a seat redraws the same card once, without launching, then Start launches it', async (card) => {
+    const r = rig('Claude alone', 'null');
+    expect((await r.pick(card)).code).toBe(201);
+    const p = r.open();
+    expect(p.blocked).toBe(NEEDS_TWO);
+    const before = proposals(r);
+    r.setStanding(ROSTERS['Claude+Codex']!);
+
+    expect(await r.svc.recheckHeldSeats(CHAT)).toBe(true);
+    expect(r.open()).toMatchObject({ pid: p.pid, blocked: null, seats: { keys: ['claude', 'codex'], lead: 'claude' } });
+    expect(r.open().seats?.label).toBe('Claude and Codex');
+    expect(proposals(r)).toHaveLength(before.length + 1);
+    expect(proposals(r).at(-1)?.turnId).toBe(before.at(-1)?.turnId);
+    expect(r.launcher.launched).toEqual([]);
+    expect(await r.svc.recheckHeldSeats(CHAT)).toBe(false);
+    expect(proposals(r)).toHaveLength(before.length + 1);
+
+    expect((await r.go()).code).toBe(200);
+    expect(r.launcher.launched).toHaveLength(1);
+    expect(r.launcher.launched[0]!.resolution.seats?.keys).toEqual(['claude', 'codex']);
+  });
+
+  it('an ended chat\'s open card is redrawn from its own facts', async () => {
+    const r = rig('Claude alone', 'null');
+    expect((await r.pick('bug')).code).toBe(201);
+    const p = r.open();
+    expect(p.blocked).toBe(NEEDS_TWO);
+    r.deps.chat = () => null;
+    r.setStanding(ROSTERS['Claude+Codex']!);
+    expect(await r.svc.recheckHeldSeats(CHAT)).toBe(true);
+    expect(r.open()).toMatchObject({ pid: p.pid, blocked: null, repos: ['payments-service'], seats: { keys: ['claude', 'codex'], lead: 'claude' } });
+    expect(r.launcher.launched).toEqual([]);
+  });
+
+  it('a drawn lead turned off for new work is replaced in pool order', async () => {
+    const r = rig('Claude alone', 'null');
+    await r.pick();
+    r.setPick('Claude off');
+    r.setStanding(ROSTERS['Claude+Codex+Pi']!);
+
+    await r.svc.recheckHeldSeats(CHAT);
+    expect(r.open()).toMatchObject({ blocked: null, seats: { keys: ['codex', 'pi'] } });
+  });
+
+  it('an unreadable newWorkSeats setting at recheck writes nothing', async () => {
+    const r = rig('Claude alone', 'null');
+    await r.pick();
+    const before = r.deps.records(CHAT);
+    r.setStanding(ROSTERS['Claude+Codex']!);
+    r.deps.newWorkSeats = async () => { throw new Error('settings unreadable'); };
+
+    expect.soft(await r.svc.recheckHeldSeats(CHAT)).toBe(false);
+    expect.soft(r.deps.records(CHAT)).toEqual(before);
+  });
+
+  it('a roster still short writes nothing', async () => {
+    const r = rig('Claude alone', 'null');
+    await r.pick();
+    const before = r.deps.records(CHAT);
+    expect(await r.svc.recheckHeldSeats(CHAT)).toBe(false);
+    expect(r.open().blocked).toBe(NEEDS_TWO);
+    expect(r.deps.records(CHAT)).toEqual(before);
+  });
+
+  it('a missing-repo question stays untouched without reading the catalog', async () => {
+    const r = rig('Claude+Codex', 'null');
+    r.deps.chat = () => ({ projectId: null, repos: [], lead: 'claude', seats: ['claude'], analysis: false });
+    await r.pick('bug');
+    expect(r.open().blocked).toBe('Which repository? This chat has none in its scope: start a thread on one.');
+    const before = r.deps.records(CHAT);
+    let reads = 0;
+    r.deps.served = async () => { reads += 1; return served; };
+    expect(await r.svc.recheckHeldSeats(CHAT)).toBe(false);
+    expect(reads).toBe(0);
+    expect(r.deps.records(CHAT)).toEqual(before);
+  });
+
+  it('a decided card stays untouched without reading the catalog', async () => {
+    const r = rig('Claude alone', 'null');
+    await r.pick();
+    expect((await r.svc.decide(CHAT, r.open().pid, { decision: 'not_now' }, ME, 'i1')).code).toBe(200);
+    const before = r.deps.records(CHAT);
+    r.setStanding(ROSTERS['Claude+Codex']!);
+    let reads = 0;
+    r.deps.served = async () => { reads += 1; return served; };
+    expect(await r.svc.recheckHeldSeats(CHAT)).toBe(false);
+    expect(reads).toBe(0);
+    expect(r.deps.records(CHAT)).toEqual(before);
+  });
+
+  it.each(['revision', 'resolution'])('a changed catalog %s leaves the card for Start to refresh', async (change) => {
+    const r = rig('Claude alone', 'null');
+    await r.pick();
+    const p = r.open();
+    if (change === 'revision') r.deps.served = async () => ({ ...served, rev: 'changed' });
+    else r.deps.append(CHAT, { at: 1_001, turnId: proposals(r).at(-1)!.turnId, kind: 'proposal', proposal: { ...p, resolution: 'changed' } });
+    const before = r.deps.records(CHAT);
+    r.setStanding(ROSTERS['Claude+Codex']!);
+    expect(await r.svc.recheckHeldSeats(CHAT)).toBe(false);
+    expect(r.deps.records(CHAT)).toEqual(before);
+  });
+
+  it('concurrent reads add exactly one redraw', async () => {
+    const r = rig('Claude alone', 'null');
+    await r.pick();
+    const before = proposals(r).length;
+    r.setStanding(ROSTERS['Claude+Codex']!);
+    expect((await Promise.all([r.svc.recheckHeldSeats(CHAT), r.svc.recheckHeldSeats(CHAT)])).sort()).toEqual([false, true]);
+    expect(proposals(r)).toHaveLength(before + 1);
+  });
+});
 
 /** [roster, pick, seats with no edit, after removeSeats [pi] (seats, note), after addSeats [pi] (seats, note)]. */
 type Row = [string, string, string[], [string[], string | null], [string[], string | null]];

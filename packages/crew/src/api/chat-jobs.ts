@@ -204,6 +204,10 @@ export function seatsNeeded(r: ResolvedOption): number {
   return 1 + (r.resolved.seats.distinctEvaluator ? 1 : 0);
 }
 
+export function seatsShortLine(r: ResolvedOption): string {
+  return `Needs ${seatsNeeded(r)} seats that can work now (one builds, the others check it); sign another seat in`;
+}
+
 /** At the minimum seat count, disclose that the judge is the validator's author. */
 export function judgeDisclosure(r: ResolvedOption, seatCount: number): string | null {
   return r.resolved.seats.distinctJudge && seatCount === seatsNeeded(r)
@@ -407,7 +411,7 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     blockedBy.push('What to show is over 4000 characters with your corrections: say it shorter');
   }
   // A self-seated workflow picks its own seat at launch: the roster's count is not its requirement (codex r3).
-  if (short && coming === undefined && !(r.workflow !== null && SELF_SEATED.has(r.workflow))) blockedBy.push(`Needs ${seatsNeeded(r)} seats that can work now (one builds, the others check it); sign another seat in`);
+  if (short && coming === undefined && !(r.workflow !== null && SELF_SEATED.has(r.workflow))) blockedBy.push(seatsShortLine(r));
   // The one question: the first required need that is missing.
   let question: ProposalQuestion | null = null;
   const missing = needs.find((n) => n.required && n.status === 'missing');
