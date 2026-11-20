@@ -99,6 +99,18 @@ export function isDefaultStateHome(): boolean {
   return realSpelling(crewStateHome()) === realSpelling(defaultStateHome(homedir()));
 }
 
+/**
+ * The default home keeps $HOME/.wicked/<name> unchanged; any other home uses the sibling
+ * <state home>-<name>, never a directory inside the state home. Core's Read fence denies
+ * state-home entries to workers, and an unregistered top-level entry refuses launches.
+ * This is the same rule as demoRootDir and runDocumentsRootDir.
+ */
+export function wickedWorkRoot(name: string): string {
+  return isDefaultStateHome()
+    ? join(process.env.HOME ?? process.env.USERPROFILE ?? '/tmp', '.wicked', name)
+    : `${crewStateHome()}-${name}`;
+}
+
 function realSpelling(p: string): string {
   const abs = resolve(p);
   const rest: string[] = [];

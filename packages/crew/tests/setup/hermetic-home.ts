@@ -35,7 +35,7 @@
 //   WICKED_CREW_PROJECT_GRAPH_ROOT projects/graph-paths.ts `projectGraphRoot()` (createServer-based
 //                                 tests never call `setProjectGraphStateHome`, so they'd fall
 //                                 through to `~/.wicked-crew/project-graphs`)
-//   WICKED_CREW_KNOWLEDGE_DB      core/adapter.ts `knowledgeDbOverride()` — the estate knowledge
+//   WICKED_CREW_KNOWLEDGE_DB      core/adapter.ts `governanceKnowledgeDb()` — the estate knowledge
 //                                 db the evals seams hand the engine. Un-armed, the engine
 //                                 resolves `~/.wicked-estate/knowledge.db` (evals.rs
 //                                 `default_knowledge_db()` is HOME-derived, NOT a dbPath

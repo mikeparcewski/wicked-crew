@@ -25,7 +25,7 @@ import { promises as fsp } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { videoPalette } from '../appearance/video-palette.js';
-import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanGateNoteUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, readNewWorkSeats, settingsFilePath, wickedDir, type RunViewsSnapshot } from '../core/adapter.js';
+import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanGateNoteUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, readNewWorkSeats, settingsFilePath, type RunViewsSnapshot } from '../core/adapter.js';
 import { codeGraphDb, codeGraphErrorStatus, repoFolderMissing, repoFolderMissingBody } from '../core/repoPaths.js';
 import type {
   ConformanceRule,
@@ -314,7 +314,7 @@ import { readBeneath } from './beneath.js';
 const BRIEF_COPY_MAX = 512 * 1024;
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
 import { registerInteractiveDocChecks } from '../interactive/doc-checks-routes.js';
-import { crewStateHome, stateHomeOfDb } from '../projects/state-home.js';
+import { crewStateHome, stateHomeOfDb, wickedWorkRoot } from '../projects/state-home.js';
 import { demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, jobLaunchRoster, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
 import { DocumentsRefused, documentsClause, RUN_DOCS_TOKENS_MAX, stagedDocumentsOf, stageRunDocuments, type StagedDocuments } from './run-documents.js';
 import { checkSourcePick, projectSources, RUN_SOURCES_MAX, runSourcesDeps, type RunSourcePicks, webScopeReason } from './run-sources.js';
@@ -738,7 +738,7 @@ const RULE_SEVERITIES: ReadonlySet<string> = new Set(['info', 'warn', 'error', '
 const RULE_TYPES: ReadonlySet<string> = new Set(['pattern', 'policy']);
 const RULE_STATUSES: ReadonlySet<string> = new Set(['active', 'retired', 'all']);
 
-// Repo names become directory components under ~/.wicked/repos/ — reject anything
+// Repo names become directory components under the state-home-derived repos root — reject anything
 // that would allow path traversal (slashes, dots-only segments, control chars).
 const SAFE_REPO_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 
@@ -753,7 +753,7 @@ export const RegisterRepoSchema = z.strictObject({
     .regex(SAFE_REPO_NAME, 'Repository name must start with a letter/digit and contain only letters, digits, dots, hyphens, and underscores'),
   // For local registration: path to an existing git repo on disk.
   // For remote clone: optional clone destination (absolute path); if omitted,
-  // defaults to ~/.wicked/repos/<name>.
+  // defaults to the state-home-derived repos root plus <name>.
   rootPath: z.string().optional(),
   gitUrl: z.string().optional(),
   /** crew#496: the project the register form had selected — the onboarding run is filed there
@@ -1922,9 +1922,9 @@ export function registerRoutes(
   const onboardReads = {
     repos: () => adapter.listRepos(),
     projectRepoRefs: async (projectId: string) => (await adapter.projectMembers(projectId)).filter((m) => m.member_kind === 'crew.repo').map((m) => m.member_ref),
-    checkoutOf: (name: string) => homeless(wickedDir('repos', name)),
+    checkoutOf: (name: string) => homeless(join(wickedWorkRoot('repos'), name)),
     occupant: async (name: string): Promise<string | null> => {
-      const dir = wickedDir('repos', name);
+      const dir = join(wickedWorkRoot('repos'), name);
       if (!existsSync(join(dir, '.git'))) return existsSync(dir) ? '' : null;
       return (await originOf(dir)) ?? '';
     },
@@ -3328,7 +3328,7 @@ export function registerRoutes(
     let runId: string;
     try {
       if (gitUrl) {
-        // Remote: clone to rootPath (if provided) or default ~/.wicked/repos/<name>,
+        // Remote: clone to rootPath (if provided) or the state-home-derived repos root,
         // register, and launch onboarding run.
         repo = ctx.gitProtocols !== undefined
           ? await adapter.cloneAndRegister(name, gitUrl, rootPath, { allowProtocols: ctx.gitProtocols })
@@ -9276,7 +9276,7 @@ export function registerRoutes(
     });
   });
 
-  // Save an inline script to ~/.wicked/scripts/ and return its path.
+  // Save an inline script under the state-home-derived scripts root and return its path.
   // Tool-executor phases use the returned path as their command.
   app.post(`${V}/scripts`, async (req, reply) => {
     const body = req.body as { name?: unknown; content?: unknown; lang?: unknown };

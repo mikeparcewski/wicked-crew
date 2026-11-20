@@ -19,6 +19,7 @@ import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import type { SessionStatus } from 'wicked-crew-api-types';
 import type { CoreAdapter } from '../core/adapter.js';
+import { ensureEstateStoreDirs } from '../core/estate-mcp-client.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { gardenPluginRoot } from '../interactive/draft-skill.js';
 import type { Actor, CoreEvent } from '../core/types.js';
@@ -171,7 +172,7 @@ export class LearnScheduler {
       const res = await exec(
         gardenLauncher(root),
         ['run', 'scripts/learn/index.py', '--repo', repo.root_path, '--ref', ref, '--name', repo.name, '--slug', row.slug],
-        { cwd: repo.root_path, env: unmarkedEnv(env, root), timeoutMs: 120_000 },
+        { cwd: repo.root_path, env: { ...unmarkedEnv(env, root), ...ensureEstateStoreDirs(env) }, timeoutMs: 120_000 },
       );
       if (res.code === 0) {
         this.deps.store.update(row.id, { indexedTree: sha }, this.now());

@@ -7,9 +7,7 @@
  */
 
 import { spawn as nodeSpawn } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { callEstateTool, estateMcpExe, resolveMemoryDb } from '../core/estate-mcp-client.js';
+import { callEstateTool, ensureEstateStoreDirs, estateMcpExe, estateStoresEnv } from '../core/estate-mcp-client.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import type { ProposalRow, SubmitArgs } from './service.js';
 
@@ -19,7 +17,7 @@ export function learningSubmitEnv(runId: string, agent: string, base: NodeJS.Pro
   for (const k of Object.keys(env)) if (k.startsWith('WICKED_RUN_')) delete env[k];
   return {
     ...env,
-    WICKED_MEMORY_DB: resolveMemoryDb(base).path,
+    ...estateStoresEnv(base),
     WICKED_RUN_ID: runId,
     // Not a unit's work: the run as a whole.
     WICKED_RUN_UNIT: '0',
@@ -28,15 +26,7 @@ export function learningSubmitEnv(runId: string, agent: string, base: NodeJS.Pro
 }
 
 export async function submitLearning(runId: string, agent: string, args: SubmitArgs): Promise<string | null> {
-  const env = learningSubmitEnv(runId, agent, childEnvWithBootEstateDb(process.env));
-  const db = env['WICKED_MEMORY_DB'];
-  if (resolveMemoryDb(process.env).source !== 'explicit' && typeof db === 'string') {
-    try {
-      mkdirSync(dirname(db), { recursive: true });
-    } catch {
-      // The server reports a parent it cannot open.
-    }
-  }
+  ensureEstateStoreDirs(childEnvWithBootEstateDb(process.env));
   const res = (await callEstateTool('proposal.submit', args as unknown as Record<string, unknown>, {
     spawn: () =>
       nodeSpawn(estateMcpExe(), [], {
